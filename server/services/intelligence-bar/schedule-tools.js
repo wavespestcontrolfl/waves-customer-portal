@@ -1077,6 +1077,40 @@ async function assignTechnician(input, actionContext = {}) {
 const TERMINAL_MOVE_STATUSES = new Set(require('./proposal-pins').TERMINAL_APPOINTMENT_STATUSES);
 const LIVE_MOVE_STATUSES = new Set(['en_route', 'on_site']);
 
+// The refusal for a batch move where every selected stop was skipped as grouped,
+// frozen or unreadable. A grouped visit and a frozen single visit are different
+// reasons, so each entry keeps its kind; a mixed set names both. A stop whose
+// state could not be READ is an outage: no refusal code, so it counts as a fault
+// and files no gap (Codex #6371 r4 audit).
+function batchMoveGroupRefusal(skipped) {
+  if (skipped.some((g) => g.unreadable)) {
+    return {
+      error: 'The grouped-visit state of a selected stop could not be read just now, so nothing was proposed. Try again in a moment.',
+      code: null,
+    };
+  }
+  const frozen = skipped.filter((g) => g.kind === 'frozen');
+  const grouped = skipped.length - frozen.length;
+  const reasons = [...new Set(frozen.map((g) => g.reason).filter(Boolean))].join(', ');
+  const frozenText = `has an issued link, records or a payment in progress${reasons ? ` (${reasons})` : ''}`;
+  if (frozen.length && !grouped) {
+    return {
+      error: `Every selected stop is a visit that ${frozenText}, and the bar can't move it from here`,
+      code: 'frozen_visit_move_unsupported',
+    };
+  }
+  if (frozen.length) {
+    return {
+      error: `Every selected stop is either part of a grouped visit, which moves as a whole, or a visit that ${frozenText}, and the bar can't move either from here yet`,
+      code: 'grouped_visit_move_unsupported',
+    };
+  }
+  return {
+    error: 'Every selected stop is part of a grouped visit, which moves as a whole, and the bar can\'t move grouped visits from here yet',
+    code: 'grouped_visit_move_unsupported',
+  };
+}
+
 async function moveStopsToDay(input, actionContext = {}) {
   const { service_ids: serviceIds, new_date: newDate, reason, confirmed } = input;
   const notifyCustomers = input.notify_customers === true;
@@ -1158,31 +1192,27 @@ async function moveStopsToDay(input, actionContext = {}) {
       const { openMembers, frozenVisitVerdict } = require('../visit-groups');
       const members = await openMembers(db, s.visit_id);
       if (members.length >= 2) {
-        skippedGrouped.push({ id: s.id, status: `${s.status} (grouped visit, which moves as a whole; the bar can't move it from here yet)` });
+        skippedGrouped.push({ id: s.id, kind: 'grouped', status: `${s.status} (grouped visit, which moves as a whole; the bar can't move it from here yet)` });
         continue;
       }
       const verdict = await frozenVisitVerdict(db, s.visit_id);
       if (verdict.frozen) {
-        skippedGrouped.push({ id: s.id, status: `${s.status} (${verdict.reason === 'unreadable' ? 'group state unverifiable' : 'frozen grouped visit'})`, ...(verdict.reason === 'unreadable' ? { unreadable: true } : {}) });
+        skippedGrouped.push(verdict.reason === 'unreadable'
+          ? { id: s.id, kind: 'unreadable', status: `${s.status} (group state unverifiable)`, unreadable: true }
+          : { id: s.id, kind: 'frozen', reason: verdict.reason, status: `${s.status} (frozen visit: ${verdict.reason})` });
         continue;
       }
       movable.push(s);
     } catch (err) {
       logger.warn(`[intelligence-bar:schedule] group-state preview check failed for ${s.id}: ${err.message}`);
-      skippedGrouped.push({ id: s.id, status: `${s.status} (group state unverifiable)`, unreadable: true });
+      skippedGrouped.push({ id: s.id, kind: 'unreadable', status: `${s.status} (group state unverifiable)`, unreadable: true });
     }
   }
   if (!movable.length) {
     let error = 'Every movable stop\'s window has already passed today — pick a later window or a future date';
     let errorCode = null;
     if (skippedGrouped.length && !skippedCollective.length && !skippedUnchanged.length && !skippedElapsed.length) {
-      // A stop whose group state could not be READ is an outage: no refusal
-      // code, so it counts as a fault and files no gap (Codex #6371 r4 audit).
-      const unreadable = skippedGrouped.some(g => g.unreadable);
-      error = unreadable
-        ? 'The grouped-visit state of a selected stop could not be read just now, so nothing was proposed. Try again in a moment.'
-        : 'Every selected stop is part of a grouped (or frozen) visit, which moves as a whole, and the bar can\'t move grouped visits from here yet';
-      errorCode = unreadable ? null : 'grouped_visit_move_unsupported';
+      ({ error, code: errorCode } = batchMoveGroupRefusal(skippedGrouped));
     } else if (skippedCollective.length && !skippedUnchanged.length && !skippedElapsed.length) {
       error = 'Every selected stop is a recurring-plan visit; with collective moves on, its later visits move with it, and the bar can\'t move a series from here yet';
       errorCode = 'collective_move_unsupported';
@@ -2170,4 +2200,4 @@ async function cancelAndRescheduleFarOut(input) {
 }
 
 
-module.exports = { SCHEDULE_TOOLS, executeScheduleTool };
+module.exports = { SCHEDULE_TOOLS, executeScheduleTool, _private: { batchMoveGroupRefusal } };

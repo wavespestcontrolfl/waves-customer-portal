@@ -183,7 +183,8 @@ describe('refusal wording: rewritten refusals carry a stable snake_case code', (
     ['routes/admin-intelligence-bar.js', "code: 'collective_move_unsupported'", 1],
     ['tools.js', 'booking.code', 4],
     ['tools.js', "code: 'addon_by_name_unsupported'", 1],
-    ['routes/admin-intelligence-bar.js', "code: 'cancel_with_effects_unsupported'", 3],
+    ['routes/admin-intelligence-bar.js', "code: 'cancel_with_effects_unsupported'", 1],
+    ['routes/admin-intelligence-bar.js', "'cancel_gate_off'", 2],
     ['reprice-visits-tools.js', "code: 'free_visit_unsupported'", 1],
     ['customer-link-tools.js', "code: 'by_owner_rule'", 2],
     ['customer-lifecycle-tools.js', "code: 'by_owner_rule'", 1],
@@ -242,7 +243,56 @@ describe('proposal-time frozen check (Codex #6371 r4)', () => {
 describe('batch move unreadable checks stay faults (Codex #6371 r4 audit)', () => {
   test('the batch preview and commit keep unreadable group checks uncoded', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/intelligence-bar/schedule-tools.js'), 'utf8');
-    expect(src).toContain("errorCode = unreadable ? null : 'grouped_visit_move_unsupported'");
+    expect(src).toContain("code: null,");
+    expect(src).toContain("if (skipped.some((g) => g.unreadable))");
     expect(src).toContain("err.reason === 'unreadable') throw err");
+  });
+});
+
+describe('Codex #6371 r5 audit findings', () => {
+  const { _private: { UNRECORDED_DECLINE_CODES } } = gapReports;
+
+  test('a successful link plan\'s send_how text is information, not a decline', () => {
+    const { CUSTOMER_LINK_KINDS: KINDS } = require('../services/intelligence-bar/customer-link-tools');
+    expect(Object.keys(KINDS).length).toBeGreaterThan(5);
+    for (const spec of Object.values(KINDS)) {
+      expect(BAR_DECLINE_RE.test(spec.sendHow)).toBe(false);
+      expect(gapReports._private.DECLINE_RE.test(spec.sendHow)).toBe(false);
+      expect(recordableRefusalCode({ error: spec.sendHow, code: 'x_y' })).toBeNull();
+    }
+  });
+
+  test('cancel with the gate off is an unrecorded code; the real effects case still records', () => {
+    expect(UNRECORDED_DECLINE_CODES.has('cancel_gate_off')).toBe(true);
+    const gateOff = { error: "Cancelling a visit can charge a fee, so the bar can't cancel this visit from here yet.", code: 'cancel_gate_off' };
+    expect(require('../services/intelligence-bar/outcomes').isPolicyRefusal(gateOff)).toBe(true);
+    expect(recordableRefusalCode(gateOff)).toBeNull();
+    const effects = { error: "The bar can't cancel a visit that carries an invoice from here yet.", code: 'cancel_with_effects_unsupported' };
+    expect(recordableRefusalCode(effects)).toBe('cancel_with_effects_unsupported');
+    const src = fs.readFileSync(fullPath('routes/admin-intelligence-bar.js'), 'utf8');
+    const at = src.indexOf("if (!ibCancelAppointmentLive()) {");
+    expect(at).toBeGreaterThan(0);
+    expect(src.slice(at, at + 400)).toContain("code: 'cancel_gate_off'");
+  });
+
+  test('a batch move keeps grouped and frozen skips apart', () => {
+    const { _private: { batchMoveGroupRefusal } } = require('../services/intelligence-bar/schedule-tools');
+    const grouped = { id: 'a', kind: 'grouped' };
+    const frozen = { id: 'b', kind: 'frozen', reason: 'has_records' };
+    const onlyFrozen = batchMoveGroupRefusal([frozen]);
+    expect(onlyFrozen.code).toBe('frozen_visit_move_unsupported');
+    expect(onlyFrozen.error).toContain('has_records');
+    expect(onlyFrozen.error).not.toMatch(/grouped/);
+    expect(batchMoveGroupRefusal([grouped]).code).toBe('grouped_visit_move_unsupported');
+    const mixed = batchMoveGroupRefusal([grouped, frozen]);
+    expect(mixed.error).toMatch(/grouped/);
+    expect(mixed.error).toMatch(/issued link, records or a payment in progress/);
+    for (const r of [onlyFrozen, mixed, batchMoveGroupRefusal([grouped])]) {
+      expect(recordableRefusalCode({ error: r.error, code: r.code })).toBe(r.code);
+    }
+    // An unreadable check stays a fault, even beside frozen and grouped skips.
+    const fault = batchMoveGroupRefusal([grouped, frozen, { id: 'c', kind: 'unreadable', unreadable: true }]);
+    expect(fault.code).toBeNull();
+    expect(recordableRefusalCode({ error: fault.error })).toBeNull();
   });
 });

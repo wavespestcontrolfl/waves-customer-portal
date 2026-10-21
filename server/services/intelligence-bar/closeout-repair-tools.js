@@ -809,10 +809,14 @@ async function repairCloseout(input, actionContext = {}) {
     // An empty plan is a tool answer, not a card: a card that can only
     // no-op would consume a pending action for nothing.
     if (!plan.steps.length) {
+      // The manual fixes ride the top-level text too: the gap collector reads
+      // only `error`, so a capability decline that lives only under manual[]
+      // ("the bar can't bill this visit from here") would never reach the gap list.
+      const manualFixes = [...new Set(plan.manual.map((m) => m.fix).filter(Boolean))];
       return {
         error: status.summary?.closedOut
           ? 'This visit is fully closed out — nothing to repair.'
-          : 'Nothing here is repairable by this command — see manual for where each open item gets fixed.',
+          : `Nothing here is repairable by this command — see manual for where each open item gets fixed.${manualFixes.length ? ` ${manualFixes.join(' ')}` : ''}`,
         code: 'nothing_repairable',
         service_id: serviceId,
         manual: plan.manual,

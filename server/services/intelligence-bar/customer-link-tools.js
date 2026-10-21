@@ -57,7 +57,9 @@ const { maskPhone } = require('./closeout-repair-tools');
 // "f•••@example.com": enough for the operator to recognise the address.
 const maskAddress = (address) => String(address || '').replace(/^(.)[^@]*/, '$1•••');
 
-const COMPOSER_ONLY = 'The bar can\'t send this link from here: its send_sms refuses a text carrying it. The Communications composer\'s Insert Link sends it today (verified and recorded there).';
+// Plain information on a plan that built fine, so it must not read as a decline
+// (agent-gap-reports DECLINE_RE / BAR_DECLINE_RE would queue it as a gap).
+const COMPOSER_ONLY = 'Send this one from the Communications composer\'s Insert Link (verified and recorded there); send_sms refuses a text carrying it. The bar builds the link only.';
 const ANY_SENDER = 'Text it with send_sms, or draft it with draft_sms and let the operator send; the recipient must be this customer\'s own number.';
 
 // The Insert Link kinds, in the composer's own vocabulary. `route`: which

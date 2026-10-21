@@ -1812,7 +1812,9 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     }
     if (toolUse.name === 'cancel_appointment') {
       if (!ibCancelAppointmentLive()) {
-        return { failed: true, modelResult: { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE, code: 'cancel_with_effects_unsupported' } };
+        // Gate off is a switch, not a missing capability: an unrecorded code
+        // (agent-gap-reports UNRECORDED_DECLINE_CODES), so no gap row.
+        return { failed: true, modelResult: { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE, code: 'cancel_gate_off' } };
       }
       // Gate on: compute the SAME deterministic pre-commit impact the
       // commit path (tools.js cancelAppointment) recomputes and compares
@@ -4542,7 +4544,7 @@ async function commitPendingAction(req, { id, contractHash }) {
     // pin against a fresh impact read and refuses on drift.
     if (action.tool_name === 'cancel_appointment'
       && (!ibCancelAppointmentLive() || !action.params?._frozen_cancellation_impact)) {
-      const result = { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE, code: 'cancel_with_effects_unsupported' };
+      const result = { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE, code: ibCancelAppointmentLive() ? 'cancel_with_effects_unsupported' : 'cancel_gate_off' };
       await PendingActions.recordResult(action.id, result);
       return reply(409, result);
     }

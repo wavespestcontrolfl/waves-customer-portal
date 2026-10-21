@@ -178,6 +178,23 @@ test('completion not done: nothing planned, completion is the only manual item',
   expect(res.manual.map((m) => m.fact)).toEqual(['completion']);
 });
 
+test('a manual-only refusal that names a capability gap reaches the gap list through its top-level error (Codex #6371 r5)', async () => {
+  const { _private: { recordableRefusalCode } } = require('../services/agent-gap-reports');
+  getCloseoutStatus.mockResolvedValue(status({ facts: {
+    comms: { state: 'pending', reason: 'completion_text_missing' },
+  } }));
+  db.mockImplementation(fakeDb({ service_records: [RECORD] }));
+  const res = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+  expect(res.code).toBe('nothing_repairable');
+  expect(res.manual.map((m) => m.fact)).toEqual(['comms']);
+  expect(recordableRefusalCode(res)).toBe('nothing_repairable');
+  // Field-evidence-only manual items are not a capability gap.
+  getCloseoutStatus.mockResolvedValue(status({ facts: { photos: { state: 'pending', reason: 'photo_count_short' } } }));
+  const field = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+  expect(field.code).toBe('nothing_repairable');
+  expect(recordableRefusalCode(field)).toBeNull();
+});
+
 test('field evidence, payer billing and unknown facts are listed manual, never planned', async () => {
   getCloseoutStatus.mockResolvedValue(status({ facts: {
     photos: { state: 'pending', reason: 'photo_count_short' },
