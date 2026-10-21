@@ -1820,8 +1820,53 @@ async function repointPinSuggestions(trx, _table, _column, winnerId, loserId) {
   return trx('customer_pin_suggestions').where({ customer_id: loserId }).update({ customer_id: winnerId });
 }
 
+// service_contact_notification_prefs: PK (customer_id, phone_key) — an
+// on-location contact's OWN notification choices (contact login,
+// GATE_CONTACT_LOGIN). Both duplicate profiles holding a row for the SAME
+// phone is one person's choices recorded twice, so they fold MOST
+// RESTRICTIVELY — the table's posture everywhere (a choice only narrows;
+// notification_prefs folds with 'and' for the same reason): a purpose or
+// master switch off on either side stays off, a single-channel delivery
+// choice beats 'both' / unset (two different single channels keep the
+// winner's), and an attestation on either side stands (the same number
+// agreed). Phones the winner has no row for move across whole. The undo
+// refuses after a fold, as after every collision handler (codex #6363 r12 P1).
+function foldContactPrefRows(winnerRow, loserRow) {
+  const { CONTACT_PREF_TOGGLES, CHANNEL_COLUMN_FOR } = require('./contact-notification-prefs');
+  const patch = {};
+  for (const col of [...CONTACT_PREF_TOGGLES, 'sms_enabled', 'email_enabled']) {
+    patch[col] = (winnerRow[col] === false || loserRow[col] === false) ? false : (winnerRow[col] ?? loserRow[col] ?? null);
+  }
+  for (const col of Object.values(CHANNEL_COLUMN_FOR)) {
+    const kept = winnerRow[col] || null;
+    patch[col] = (kept && kept !== 'both') ? kept : (loserRow[col] || kept);
+  }
+  patch.consent_attested_at = winnerRow.consent_attested_at || loserRow.consent_attested_at || null;
+  return patch;
+}
+
+async function foldContactNotificationPrefs(trx, table, column, winnerId, loserId) {
+  const loserRows = await trx(table).where(column, loserId).select('*');
+  let moved = 0;
+  let folded = 0;
+  for (const row of loserRows) {
+    const existing = await trx(table).where({ [column]: winnerId, phone_key: row.phone_key }).first();
+    if (!existing) {
+      await trx(table).where({ [column]: loserId, phone_key: row.phone_key }).update({ [column]: winnerId });
+      moved += 1;
+      continue;
+    }
+    await trx(table).where({ [column]: winnerId, phone_key: row.phone_key })
+      .update({ ...foldContactPrefRows(existing, row), updated_at: trx.fn.now() });
+    await trx(table).where({ [column]: loserId, phone_key: row.phone_key }).del();
+    folded += 1;
+  }
+  return `moved ${moved}, folded ${folded} row(s) most-restrictively into the winner's`;
+}
+
 const UNIQUE_COLLISION_HANDLERS = {
   customer_pin_suggestions: repointPinSuggestions,
+  service_contact_notification_prefs: foldContactNotificationPrefs,
   notification_prefs: mergeSingletonPrefRow,
   property_preferences: mergeSingletonPrefRow,
   customer_properties: repointCustomerProperties,
@@ -4397,7 +4442,15 @@ const REVERT_FINANCIAL_TABLES = new Set([
 // declined contact would start receiving texts after the split). Count-only
 // journal records for these tables REFUSE the undo exactly like the
 // financial set. Add future composite-PK consent tables here.
-const CONSENT_CRITICAL_TABLES = new Set(['recipient_optin']);
+// service_contact_notification_prefs (contact login, GATE_CONTACT_LOGIN) is the
+// same shape: PK (customer_id, phone_key), and a missing row means "whatever
+// the account sends" — a contact's declined purpose would resume after a
+// split that skipped the row (codex #6363 r12 P1).
+const CONSENT_CRITICAL_TABLES = new Set(['recipient_optin', 'service_contact_notification_prefs']);
+const CONSENT_TABLE_NOUNS = {
+  recipient_optin: 'recipient opt-in record(s)',
+  service_contact_notification_prefs: "on-location contact notification choice(s)",
+};
 
 // Non-financial tables whose JOURNALED rows are still activity-checked,
 // because completing/accepting/signing one MINTS winner-owned children the
@@ -4663,6 +4716,8 @@ const TABLE_TIMESTAMP_COLUMNS = {
   referral_promoters: ['updated_at'],
   // timestamps(true, true) — 20260723000004.
   recipient_optin: ['created_at', 'updated_at'],
+  // explicit created_at/updated_at (20261020120000) — a contact's own choices.
+  service_contact_notification_prefs: ['created_at', 'updated_at'],
   // explicit created_at/updated_at (20260730000030) — the first-touch hold
   // ledger; its updated_at doubles as the release-claim fence stamp.
   first_touch_holds: ['created_at', 'updated_at'],
@@ -5700,22 +5755,26 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     // resume without its confirmation. Probe BOTH customers for rows
     // created or updated since the merge (the winner's own pre-merge rows
     // are legitimately its own and stay put) and refuse.
-    {
-      let optinRows = [];
+    // The same probe covers every composite-PK consent table
+    // (CONSENT_CRITICAL_TABLES): an on-location contact's choices row
+    // (service_contact_notification_prefs) skipped by the split would
+    // resume a purpose the contact declined (codex #6363 r12 P1).
+    for (const table of CONSENT_CRITICAL_TABLES) {
+      let consentRows = [];
       try {
-        optinRows = await trx('recipient_optin')
+        consentRows = await trx(table)
           .whereIn('customer_id', [winnerId, loserId])
-          .select(['customer_id', ...activityColumnsFor('recipient_optin')]);
+          .select(['customer_id', ...activityColumnsFor(table)]);
       } catch (e) {
-        refuse(`Cannot verify recipient_optin (comms consent) since the merge (${e.message}) — refusing to revert`);
+        refuse(`Cannot verify ${table} (comms consent) since the merge (${e.message}) — refusing to revert`);
       }
       // Composite PK (customer_id, phone_key) — no id column, so these can
       // never be journaled per-row; time is the only usable signal.
-      const newOptins = countActivityRows(optinRows, {
-        keyColumn: 'customer_id', journaledIds: new Set(), mergeAt, sinceOnly: true, table: 'recipient_optin',
+      const fresh = countActivityRows(consentRows, {
+        keyColumn: 'customer_id', journaledIds: new Set(), mergeAt, sinceOnly: true, table,
       });
-      if (newOptins) {
-        refuse(`${newOptins} recipient opt-in record(s) were created or updated since the merge — splitting the accounts would leave the restored customer with no consent row, which reads as "allowed to text"; reconcile consent by hand`);
+      if (fresh) {
+        refuse(`${fresh} ${CONSENT_TABLE_NOUNS[table]} were created or updated since the merge — splitting the accounts would leave the restored customer with no consent row, which reads as "allowed to text"; reconcile consent by hand`);
       }
     }
 
@@ -7288,6 +7347,7 @@ module.exports = {
     mergeSingletonPrefRow,
     repointRowwiseDropCollisions,
     repointWeekPlansKeepAvailable,
+    foldContactNotificationPrefs,
   repointFlagsReleaseCollisions,
     mergeConversationRows,
     UNIQUE_COLLISION_HANDLERS,

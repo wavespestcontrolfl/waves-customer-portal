@@ -934,9 +934,9 @@ describe('revertMerge', () => {
         return (tables.scheduled_services
           && (tables.scheduled_services.billingRows || tables.scheduled_services.contactVisits)) || [];
       }
-      // recipient_optin activity probe (whereIn on customer_id).
-      if (table === 'recipient_optin' && q.called('select')) {
-        return (tables.recipient_optin && tables.recipient_optin.rows) || [];
+      // Consent-table activity probes (whereIn on customer_id).
+      if (['recipient_optin', 'service_contact_notification_prefs'].includes(table) && q.called('select')) {
+        return (tables[table] && tables[table].rows) || [];
       }
       // Consent rows tied to returned cards (whereIn is on
       // payment_method_id, not id — still a probe).
@@ -2669,6 +2669,24 @@ describe('revertMerge', () => {
     expect(state.journalUpdate).toBe(null);
   });
 
+  it("refuses when an on-location contact's notification choices row appeared since the merge (a missing row reads as \"whatever the account sends\") — codex #6363 r12", async () => {
+    const { trx, state } = buildRevertTrx({
+      journal: baseJournal(),
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        service_contact_notification_prefs: { rows: [{ customer_id: WINNER, created_at: '2026-07-30T09:00:00Z' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/contact notification choice\(s\) were created or updated since the merge/) });
+    expect(state.repointedBack).toHaveLength(0);
+    expect(state.journalUpdate).toBe(null);
+  });
+
   it("the winner's own PRE-MERGE opt-in rows do not block the undo", async () => {
     const { trx, state } = buildRevertTrx({
       journal: baseJournal(),
@@ -3353,6 +3371,22 @@ describe('revertMerge', () => {
     expect(result.stripeMovedBack).toBe(false);
     expect(state.winnerPatch?.stripe_customer_id).toBeUndefined();
     expect(state.loserRestore.stripe_customer_id).toBe('cus_shared');
+  });
+
+  it("refuses (409, zero writes) when service_contact_notification_prefs rows were journaled count-only — a contact's missing choices row means \"whatever the account sends\" (codex #6363 r12)", async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.tables['service_contact_notification_prefs.customer_id'] = { count: 1 };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/service_contact_notification_prefs.*comms consent/) });
+    expect(state.repointedBack).toHaveLength(0);
+    expect(state.journalUpdate).toBe(null);
   });
 
   it('refuses (409, zero writes) when recipient_optin rows were journaled count-only — a missing consent row means "allowed to text"', async () => {

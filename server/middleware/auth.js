@@ -273,6 +273,20 @@ async function insertRefreshRecord(
 // The holder rewrote this row's contact slots: every contact refresh family
 // on the row whose phone no longer occupies a slot ends now. Inside the
 // save's transaction. Phones are keyed as the session claim keys them.
+// The account is being deactivated (cancellation-processor.js
+// disarmCustomerBillingFields): every CONTACT family on the row ends now,
+// so a device that never refreshes while the account is inactive cannot
+// rotate its kept token once the account is reactivated (codex #6363 r12
+// P2). The holder's own families are untouched, as before.
+async function revokeContactRefreshFamilies(dbh, customerId, reason = 'account_inactive') {
+  const now = new Date();
+  return dbh(REFRESH_TABLE)
+    .where({ customer_id: customerId })
+    .whereNotNull('contact_key')
+    .whereNull('revoked_at')
+    .update({ revoked_at: now, revoke_reason: reason, updated_at: now });
+}
+
 async function revokeRemovedContactRefreshSessions(trx, customerId, keepPhones = []) {
   const { phoneKeyOf } = require('../services/customer-contact');
   const keep = [...new Set(keepPhones.map(phoneKeyOf).filter(Boolean))];
@@ -357,7 +371,7 @@ async function createContactRefreshSession(customerId, accountId, contactKey) {
 async function contactRotationRefusal(trx, customer, decoded, options) {
   const refused = { ok: false, code: 'INVALID_REFRESH_TOKEN' };
   if (!contactLoginLive()) return refused;
-  if (customer.active !== true || !contactSessionFor(customer, decoded.contactKey)) {
+  if (!customer || customer.active !== true || !contactSessionFor(customer, decoded.contactKey)) {
     if (decoded.familyId) {
       const now = new Date();
       await trx(REFRESH_TABLE)
@@ -408,6 +422,14 @@ async function rotateRefreshSession(refreshToken, options = {}) {
     // read-only allowance (sessionCustomerAdmitted); every other inactive
     // row is rejected exactly as before.
     const customer = await rotationCustomerRead(trx, decoded);
+    // Contact session (GATE_CONTACT_LOGIN): may this contact family rotate?
+    // Decided BEFORE the generic admission below, so an inactive row ends
+    // the contact family (revoked here) instead of merely refusing this
+    // exchange — a token kept through a deactivation must not rotate again
+    // once the account is reactivated (codex #6363 r12 P2).
+    const contactKey = decoded.contactKey || null;
+    const contactRefusal = contactKey ? await contactRotationRefusal(trx, customer, decoded, options) : null;
+    if (contactRefusal) return contactRefusal;
     if (!sessionCustomerAdmitted(customer)) return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
 
     const accountId = decoded.accountId || accountIdForCustomer(customer);
@@ -417,11 +439,6 @@ async function rotateRefreshSession(refreshToken, options = {}) {
     if (options.expectedAccountId && String(accountId) !== String(options.expectedAccountId)) {
       return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
     }
-
-    // Contact session (GATE_CONTACT_LOGIN): may this contact family rotate?
-    const contactKey = decoded.contactKey || null;
-    const contactRefusal = contactKey ? await contactRotationRefusal(trx, customer, decoded, options) : null;
-    if (contactRefusal) return contactRefusal;
 
     let nextCustomer = customer;
     if (options.targetCustomerId && String(options.targetCustomerId) !== String(customer.id)) {
@@ -874,6 +891,7 @@ module.exports = {
   reissueRefreshSessionForProperty,
   revokeCustomerRefreshSessions,
   revokeRemovedContactRefreshSessions,
+  revokeContactRefreshFamilies,
   revokeRefreshSession,
   rotateRefreshSession,
   verifyRefreshCredential,

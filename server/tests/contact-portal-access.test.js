@@ -449,6 +449,32 @@ describe('contact session — lifecycle', () => {
     expect((await call('GET', '/api/auth/me', bearerOf((await login(CONTACT_PHONE)).body.token))).status).toBe(200);
   });
 
+  test('the account going inactive ends the contact family on its next refresh (revoked, not just refused); the holder\'s refusal leaves their rows alone (codex r12)', async () => {
+    const contact = await login(CONTACT_PHONE);
+    const holder = await login(HOLDER_PHONE);
+    tables.customers[0].active = false;
+    expect((await call('POST', '/api/auth/refresh', {}, { refreshToken: contact.body.refreshToken })).status).toBe(401);
+    expect((await call('POST', '/api/auth/refresh', {}, { refreshToken: holder.body.refreshToken })).status).toBe(401);
+    const byKey = (key) => tables.customer_refresh_tokens.filter((r) => r.contact_key === key);
+    expect(byKey('9415550202').every((r) => r.revoked_at && r.revoke_reason === 'contact_removed')).toBe(true);
+    expect(byKey(null).every((r) => !r.revoked_at)).toBe(true);
+    // Reactivated: the contact's kept token is dead; the holder's still rotates.
+    tables.customers[0].active = true;
+    expect((await call('POST', '/api/auth/refresh', {}, { refreshToken: contact.body.refreshToken })).status).toBe(401);
+    expect((await call('POST', '/api/auth/refresh', {}, { refreshToken: holder.body.refreshToken })).status).toBe(200);
+  });
+
+  test('deactivating the account (revokeContactRefreshFamilies) ends every contact family on the row and no holder family', async () => {
+    await login(CONTACT_PHONE);
+    await login(TENANT_PHONE);
+    await login(HOLDER_PHONE);
+    const count = await auth.revokeContactRefreshFamilies((table) => builder(table), 'cust-holder');
+    expect(count).toBe(2);
+    expect(tables.customer_refresh_tokens.map((r) => [r.contact_key, r.revoke_reason || null])).toEqual([
+      ['9415550202', 'account_inactive'], ['9415550303', 'account_inactive'], [null, null],
+    ]);
+  });
+
   test('the contact moving to another slot keeps the session (the claim is the phone, not the slot)', async () => {
     const first = await login(CONTACT_PHONE);
     Object.assign(tables.customers[0], {

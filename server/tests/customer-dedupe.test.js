@@ -1254,6 +1254,50 @@ describe('executeMerge', () => {
     expect(UNIQUE_COLLISION_HANDLERS.customer_alerts).toBe(repointRowwiseDropCollisions);
   });
 
+  describe("service_contact_notification_prefs (contact login): a shared contact's choices fold most-restrictively, never abort (codex #6363 r12)", () => {
+    const { UNIQUE_COLLISION_HANDLERS, foldContactNotificationPrefs } = dedupe._test;
+    // In-memory table keyed on (customer_id, phone_key).
+    const fakeTrx = (seed) => {
+      const rows = seed.map((r) => ({ ...r }));
+      const matches = (row, where) => Object.entries(where).every(([k, v]) => row[k] === v);
+      const qb = () => {
+        let where = {};
+        const api = {
+          where(a, b) { where = typeof a === 'object' ? { ...where, ...a } : { ...where, [a]: b }; return api; },
+          select() { return Promise.resolve(rows.filter((r) => matches(r, where)).map((r) => ({ ...r }))); },
+          first() { const r = rows.find((x) => matches(x, where)); return Promise.resolve(r ? { ...r } : undefined); },
+          update(patch) { const hit = rows.filter((r) => matches(r, where)); hit.forEach((r) => Object.assign(r, patch)); return Promise.resolve(hit.length); },
+          del() { const before = rows.length; for (let i = rows.length - 1; i >= 0; i -= 1) if (matches(rows[i], where)) rows.splice(i, 1); return Promise.resolve(before - rows.length); },
+        };
+        return api;
+      };
+      const trx = () => qb();
+      trx.fn = { now: () => 'NOW()' };
+      trx.rows = rows;
+      return trx;
+    };
+
+    it('is registered as the table\'s collision handler', () => {
+      expect(UNIQUE_COLLISION_HANDLERS.service_contact_notification_prefs).toBe(foldContactNotificationPrefs);
+    });
+
+    it('moves phones the winner lacks whole; folds a shared phone: off on either side stays off, a single channel beats both, an attestation on either side stands', async () => {
+      const trx = fakeTrx([
+        { customer_id: WINNER, phone_key: '9415550202', tech_en_route: true, service_completed: null, sms_enabled: true, en_route_channel: 'both', tech_arrived_channel: 'sms', service_complete_channel: null, consent_attested_at: null },
+        { customer_id: LOSER, phone_key: '9415550202', tech_en_route: false, service_completed: true, sms_enabled: false, en_route_channel: 'email', tech_arrived_channel: 'email', service_complete_channel: 'email', consent_attested_at: '2026-10-01T00:00:00Z' },
+        { customer_id: LOSER, phone_key: '9415550303', tech_en_route: false },
+      ]);
+      const summary = await foldContactNotificationPrefs(trx, 'service_contact_notification_prefs', 'customer_id', WINNER, LOSER);
+      expect(summary).toBe("moved 1, folded 1 row(s) most-restrictively into the winner's");
+      expect(trx.rows.map((r) => [r.customer_id, r.phone_key])).toEqual([[WINNER, '9415550202'], [WINNER, '9415550303']]);
+      expect(trx.rows[0]).toMatchObject({
+        tech_en_route: false, service_completed: true, sms_enabled: false, email_enabled: null,
+        en_route_channel: 'email', tech_arrived_channel: 'sms', service_complete_channel: 'email',
+        consent_attested_at: '2026-10-01T00:00:00Z', updated_at: 'NOW()',
+      });
+    });
+  });
+
   it('registers irrigation_week_plans with the keep-available handler (same-week snapshots fold, never abort — codex #3565 gh-r14)', () => {
     const { UNIQUE_COLLISION_HANDLERS, repointWeekPlansKeepAvailable } = dedupe._test;
     expect(UNIQUE_COLLISION_HANDLERS.irrigation_week_plans).toBe(repointWeekPlansKeepAvailable);
