@@ -368,6 +368,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   // the way, so Ask waits for them instead of sending what was typed so far.
   const dictationPending = useDictationPending();
   const dictationPendingRef = useRef(false);
+  const dictationUsedRef = useRef(false); // a dictated chunk is in the message being composed
   dictationPendingRef.current = dictationPending;
   // GATE_IB_TOOL_ACTIVITY: operator-facing lines for what this exchange ran.
   const [toolActivity, setToolActivity] = useState([]);
@@ -706,6 +707,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     ...(attachments.length
       ? { images: attachments.map(({ mediaType, data: d }) => ({ mediaType, data: d })) }
       : {}),
+    ...(dictationUsedRef.current ? { dictation_used: true } : {}),
   }), [conversationHistory, context, threadId, ibPageData, location.pathname, location.search, attachments]);
 
   // Applies a server reply to the conversation: the answer, its cards (added to
@@ -791,6 +793,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         // A failed request keeps its prompt and attachments so a retry is the
         // same request; only an answered one clears the composer.
         if (answered) {
+          dictationUsedRef.current = false;
           setPrompt("");
           resetAttachments();
         }
@@ -923,14 +926,18 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     setLoading(false);
     startNewConversation();
     setResponse(null);
+    dictationUsedRef.current = false;
     setPrompt("");
     setShowThreads(false);
     resetAttachments();
   };
 
   // Merge each dictation transcript chunk into the input, space-separated.
+  // The server reads the whole question for dictated amounts (GATE_DICTATION_MONEY_NORMALIZE) when
+  // any dictation went into it; the flag is all it needs.
   const appendTranscript = useCallback((text) => {
     if (!text) return;
+    dictationUsedRef.current = true;
     setPrompt((prev) => (prev ? `${prev.trimEnd()} ${text}` : text));
   }, []);
 
