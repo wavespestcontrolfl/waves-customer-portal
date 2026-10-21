@@ -125,6 +125,9 @@ async function moneyRefusal(invoice) {
   if (MONEY_STATUSES.has(status)) {
     return ownerRule(`Invoice ${invoice.invoice_number} is ${status}, so money has been received or is moving. A void would hide it.`, `status_${status}`, at);
   }
+  if (status === 'prepaid') {
+    return ownerRule(`Invoice ${invoice.invoice_number} is prepaid (covered by credit or a payment). The Invoices page hides Void for it, so reverse the prepayment there.`, 'status_prepaid', at);
+  }
   if (invoice.payment_recorded_at) return ownerRule(`A payment is already recorded on invoice ${invoice.invoice_number}.`, 'payment_recorded', at);
   if (invoice.stripe_charge_id) return ownerRule(`Invoice ${invoice.invoice_number} has a card charge on file.`, 'charge_on_file', at);
   if (invoice.paid_at && status !== 'prepaid') return ownerRule(`Invoice ${invoice.invoice_number} carries a paid date.`, 'paid_date', at);

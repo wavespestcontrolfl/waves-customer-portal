@@ -703,6 +703,19 @@ function assertVoidExpected(row, expected) {
 }
 // The bar's pin, read again right before the one external effect (cancelling the pay-page PaymentIntent), so the
 // window between the first read and that cancel is a single query, not the Stripe round trip. No-op without `expected`.
+// The bar's void only: a saved-card charge attempt or orphan charge that exists by the time the void holds the invoice's
+// row lock refuses the void (the same durable fence the charge paths use), read-only, inside the void transaction.
+async function assertVoidChargeFence(trx, id, expected) {
+  if (!expected) return;
+  try {
+    await require("./stripe").assertNoInvoiceChargeReconciliationPending(id, trx, { readOnly: true });
+  } catch (err) {
+    if (err?.reconciliationRequired || /^STRIPE_/.test(String(err?.code || ""))) {
+      throw new Error("A saved-card charge is in progress or unresolved on this invoice while voiding — reconcile it instead of voiding");
+    }
+    throw err;
+  }
+}
 async function recheckVoidExpected(id, expected) {
   if (!expected) return;
   const row = await db("invoices").where({ id }).first();
@@ -11070,6 +11083,9 @@ const InvoiceService = {
         throw new Error("Invoice status changed while voiding — re-check and retry");
       }
       assertDuesOwnerUnmoved(lockedDues, updated);
+      // Bar only (`expected`): the durable saved-card charge fence, re-read now that this transaction holds the invoice
+      // row (the UPDATE above); a charge that started after the card refuses and rolls the void back.
+      await assertVoidChargeFence(trx, id, expected);
       // A voided standard invoice that billed the rodent bait-station setup
       // puts the obligation back on the living series (codex #3591 r44 P1).
       await this.restoreRodentSetupObligationForReversedInvoice(trx, updated);

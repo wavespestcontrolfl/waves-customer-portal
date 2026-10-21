@@ -14,7 +14,8 @@ jest.mock('../services/annual-prepay-renewals', () => ({
 jest.mock('../services/estimate-deposits', () => ({ restoreDepositCreditForVoidedInvoice: jest.fn(async () => 0) }));
 const mockRetrievePi = jest.fn();
 const mockCancelPi = jest.fn();
-jest.mock('../services/stripe', () => ({ retrievePaymentIntent: (...a) => mockRetrievePi(...a), cancelPaymentIntent: (...a) => mockCancelPi(...a) }));
+const mockFence = jest.fn(async () => undefined);
+jest.mock('../services/stripe', () => ({ retrievePaymentIntent: (...a) => mockRetrievePi(...a), cancelPaymentIntent: (...a) => mockCancelPi(...a), assertNoInvoiceChargeReconciliationPending: (...a) => mockFence(...a) }));
 
 const db = require('../models/db');
 const InvoiceService = require('../services/invoice');
@@ -124,4 +125,37 @@ test('without `expected` the PaymentIntent cancel makes no extra invoice read (t
   await InvoiceService.voidInvoice('inv-1').catch(() => null);
   expect(mockCancelPi).toHaveBeenCalledTimes(1);
   expect(update.update).toHaveBeenCalledTimes(1);
+});
+
+describe('the saved-card charge fence inside the void transaction (bar only)', () => {
+  test('with `expected` the fence is read inside the transaction after the invoice row is updated, read-only', async () => {
+    queueVoid();
+    await InvoiceService.voidInvoice('inv-1', { expected: EXPECTED });
+    expect(mockFence).toHaveBeenCalledTimes(1);
+    expect(mockFence).toHaveBeenCalledWith('inv-1', db, { readOnly: true });
+  });
+
+  test.each([
+    ['an ambiguous attempt', Object.assign(new Error('ambiguous'), { code: 'STRIPE_AMBIGUOUS_OUTCOME', reconciliationRequired: true })],
+    ['a charge in progress', Object.assign(new Error('busy'), { code: 'STRIPE_CHARGE_IN_PROGRESS' })],
+    ['an orphan charge', Object.assign(new Error('orphan'), { code: 'STRIPE_CHARGED_DB_FAILED', reconciliationRequired: true })],
+  ])('%s that started after the card refuses the void with the page’s 409 wording, and no credit is restored', async (_name, err) => {
+    queueVoid();
+    mockFence.mockRejectedValueOnce(err);
+    await expect(InvoiceService.voidInvoice('inv-1', { expected: EXPECTED })).rejects.toThrow(/saved-card charge.*while voiding/);
+    expect(require('../services/estimate-deposits').restoreDepositCreditForVoidedInvoice).not.toHaveBeenCalled();
+    expect(require('../services/invoice-followups').stopSequence).not.toHaveBeenCalled();
+  });
+
+  test('an unexpected read failure propagates (fail closed)', async () => {
+    queueVoid();
+    mockFence.mockRejectedValueOnce(new Error('database down'));
+    await expect(InvoiceService.voidInvoice('inv-1', { expected: EXPECTED })).rejects.toThrow('database down');
+  });
+
+  test('the page path (no `expected`) never reads the fence', async () => {
+    queueVoid();
+    await InvoiceService.voidInvoice('inv-1');
+    expect(mockFence).not.toHaveBeenCalled();
+  });
 });

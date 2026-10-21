@@ -225,6 +225,7 @@ describe('money received or in flight is refused as by_owner_rule (preview and C
     ['processing', (s) => { s.invoices[0].status = 'processing'; }],
     ['refunded', (s) => { s.invoices[0].status = 'refunded'; }],
     ['partially refunded', (s) => { s.invoices[0].status = 'partially_refunded'; }],
+    ['prepaid (credit-covered; the page hides Void)', (s) => { s.invoices[0].status = 'prepaid'; s.invoices[0].credit_applied = '129.00'; }],
     ['a payment recorded', (s) => { s.invoices[0].payment_recorded_at = new Date(); }],
     ['a card charge on file', (s) => { s.invoices[0].stripe_charge_id = 'ch_test_1'; }],
     ['a paid date on an unpaid status', (s) => { s.invoices[0].paid_at = new Date(); }],
