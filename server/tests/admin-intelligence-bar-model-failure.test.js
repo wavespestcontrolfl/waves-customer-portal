@@ -611,4 +611,29 @@ describe('round 4 Codex fixes (#6368)', () => {
     }
   });
 
+  test('the failure stamp only moves forward, and a failure whose bell was closed mid-ring rings again (r5)', async () => {
+    const db = require('../models/db');
+    const ModelFailure = require('../services/intelligence-bar/model-failure');
+    const compose = require('../services/admin-alert-compose');
+    const raise = jest.spyOn(compose, 'raiseAdminAlert').mockImplementation(async () => ({ id: 1 }));
+    const updates = [];
+    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), whereRaw: jest.fn(() => chain), modify: jest.fn((fn) => { fn(chain); return chain; }), forUpdate: jest.fn(() => chain), select: jest.fn(async () => []) };
+    let stampResults = [1, 0];
+    chain.update = jest.fn(async (u) => { updates.push(u); return stampResults.shift(); });
+    db.mockImplementation(() => chain);
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    db.transaction = async (fn) => fn(laneTrx(chain));
+    try {
+      await ModelFailure.ringUnlessRecovered({ code: 'anthropic_400', gap: null, lane: 'admin', failedAt: Date.parse('2026-10-21T02:00:00Z') });
+      expect(updates[0].metadata.sql).toMatch(/GREATEST\(/);
+      expect(raise).toHaveBeenCalledTimes(2); // the post-ring stamp found no open bell
+      raise.mockClear();
+      stampResults = [1, 1];
+      await ModelFailure.ringUnlessRecovered({ code: 'anthropic_400', gap: null, lane: 'admin', failedAt: Date.parse('2026-10-21T02:01:00Z') });
+      expect(raise).toHaveBeenCalledTimes(1);
+    } finally {
+      raise.mockRestore();
+      db.mockImplementation(() => ({ insert: jest.fn(async () => undefined) }));
+    }
+  });
 });

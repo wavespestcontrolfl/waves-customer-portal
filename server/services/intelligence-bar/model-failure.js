@@ -186,14 +186,20 @@ async function noteRecovery(trx, lane, answeredSince) {
 // Every failure stamps the open lane bell with its time (a deduped failure
 // does not touch the row otherwise), so a recovery that started before this
 // failure cannot close it (Codex #6368 r4).
+// Monotonic: the stamp only moves forward, so an older failure that lands
+// later never replaces a newer time (Codex #6368 r5). Returns rows stamped (null on error).
 async function stampLastFailure(lane, now = new Date()) {
   try {
     const db = require('../../models/db');
-    await db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
+    return await db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
       .whereRaw("metadata->>'dedupeKey' = ?", [laneKey(lane)])
-      .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('lastFailureAt', ?::text)", [now.toISOString()]) });
+      .update({ metadata: db.raw(
+        "COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('lastFailureAt', GREATEST(COALESCE((metadata->>'lastFailureAt')::timestamptz, ?::timestamptz), ?::timestamptz)::text)",
+        [now.toISOString(), now.toISOString()],
+      ) });
   } catch (err) {
     logger.warn(`[intelligence-bar] model failure time not stamped (code=${err?.code || err?.name || 'error'})`);
+    return null;
   }
 }
 
@@ -243,6 +249,11 @@ async function ringFailureBell({ code, gap, lane, failedAt = Date.now() }) {
 async function ringUnlessRecovered({ code, gap, lane, failedAt }) {
   await stampLastFailure(lane, new Date(failedAt));
   await ringFailureBell({ code, gap, lane, failedAt });
+  // Stamp again after the ring: when another failure's insert won the dedupe,
+  // this failure's newer time still reaches the open bell. If no open bell is
+  // left (a recovery closed it in between), this failure rings once more.
+  // Only a definite zero re-rings; an unreadable stamp (null) does not.
+  if (await stampLastFailure(lane, new Date(failedAt)) === 0) await ringFailureBell({ code, gap, lane, failedAt });
   try {
     const db = require('../../models/db');
     return await db.transaction(async (trx) => {
