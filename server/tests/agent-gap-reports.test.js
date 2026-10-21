@@ -703,14 +703,25 @@ describe('agent-gap-reports', () => {
 
     describe('a final by-design refusal drops the earlier capability search (Codex #6371 r14)', () => {
       const MISS = { status: 'capability_unimplemented' };
+      const FOUND = { status: 'capabilities_found', capabilities: [{ id: 'cancel_appointment', domain: 'scheduling' }] };
       const refusal = (code) => ({ success: false, code, error: "The bar can't do this from here yet." });
 
       test.each(['cancel_gate_off', 'invoice_send_queued', 'verifier_reject'])('%s ends the request with no missing_capability row', async (code) => {
         const collector = collectorFor();
-        collector.discovery({ query: 'cancel a visit with charges' }, MISS);
+        collector.discovery({ query: 'cancel a visit with charges' }, FOUND);
         collector.toolResult('cancel_appointment', refusal(code), true, { round: 1 });
         await collector.flush({ reply: "The bar can't cancel this from here yet." });
         expect(insertedRows).toHaveLength(0);
+      });
+
+      test('a search about something else keeps its row when another tool declines by design', async () => {
+        const collector = collectorFor();
+        collector.discovery({ query: 'export payroll hours' }, MISS);
+        collector.discovery({ query: 'send the invoice' }, { status: 'capabilities_found', capabilities: [{ id: 'send_invoice', domain: 'billing' }] });
+        collector.toolResult('send_invoice', refusal('invoice_send_queued'), true, { round: 1 });
+        await collector.flush({ reply: "The bar can't export payroll hours from here yet, and the invoice text is already queued." });
+        expect(insertedRows).toHaveLength(1);
+        expect(insertedRows[0]).toMatchObject({ kind: 'missing_capability', summary: 'export payroll hours' });
       });
 
       test('a refusal that IS a gap keeps the search row beside its blocked row', async () => {

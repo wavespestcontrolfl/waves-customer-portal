@@ -578,16 +578,20 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
   }
 
   // The request's last tool round ended on a coded refusal that is NOT a gap
-  // (by design, switched off, unrecorded, unlisted): a capability search made
-  // earlier in the request must not turn that answer into a missing-capability
-  // row (Codex #6371 r14).
-  let terminal = { round: null, nonGap: false };
+  // (by design, switched off, unrecorded, unlisted): a capability search tied
+  // to that refusing tool must not turn its answer into a missing-capability
+  // row. Searches about anything else in the request stay (Codex #6371 r14).
+  let terminal = { round: null, nonGap: false, tools: new Set() };
   function trackTerminal(name, result, failed, meta = {}) {
-    if (meta.round !== terminal.round) terminal = { round: meta.round, nonGap: false };
+    if (meta.round !== terminal.round) terminal = { round: meta.round, nonGap: false, tools: new Set() };
     if (!failed || name === DISCOVERY_TOOL_NAME) return;
     const code = typeof result?.code === 'string' ? result.code.trim() : '';
-    terminal.nonGap = isPolicyRefusal(result) && CODE_RE.test(code) && recordableRefusalCode(result) === null;
+    if (isPolicyRefusal(result) && CODE_RE.test(code) && recordableRefusalCode(result) === null) {
+      terminal.nonGap = true;
+      terminal.tools.add(name);
+    }
   }
+  const tiedToTerminalRefusal = (search) => [...terminal.tools].some((tool) => search.surfaced.has(tool) || search.closestTool === tool);
 
   function toolResult(name, result, failed, meta) {
     trackTerminal(name, result, failed, meta);
@@ -633,8 +637,8 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
     // the same request is about the same thing (the prompt sends the model on to
     // discover after an empty tool search). An unrelated tool-search miss stays.
     const discovered = searches.filter((search) => !search.fromToolSearch);
-    const kept = terminal.nonGap ? [] : searches.filter((search) => !search.fromToolSearch
-      || !discovered.some((other) => sameAsk(other.query, search.query)));
+    const kept = searches.filter((search) => !tiedToTerminalRefusal(search)
+      && (!search.fromToolSearch || !discovered.some((other) => sameAsk(other.query, search.query))));
     const signals = kept.map((search) => ({
       source, kind: 'missing_capability', summary: search.query, domain: search.domain,
       closestTool: search.closestTool, attempted: searchAttempt(search),
