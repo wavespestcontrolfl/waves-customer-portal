@@ -1211,7 +1211,12 @@ async function moveStopsToDay(input, actionContext = {}) {
   if (!movable.length) {
     let error = 'Every movable stop\'s window has already passed today — pick a later window or a future date';
     let errorCode = null;
-    if (skippedGrouped.length && !skippedCollective.length && !skippedUnchanged.length && !skippedElapsed.length) {
+    // An unreadable group check anywhere keeps the whole refusal an uncoded
+    // fault (Tool Health), never a capability gap (Codex #6371 r7).
+    const anyUnreadable = skippedGrouped.some(entry => entry.unreadable);
+    if (anyUnreadable) {
+      error = 'The bar could not check whether some selected stops belong to a grouped or frozen visit, so nothing was moved. Try again.';
+    } else if (skippedGrouped.length && !skippedCollective.length && !skippedUnchanged.length && !skippedElapsed.length) {
       ({ error, code: errorCode } = batchMoveGroupRefusal(skippedGrouped));
     } else if (skippedCollective.length && !skippedUnchanged.length && !skippedElapsed.length) {
       error = 'Every selected stop is a recurring-plan visit; with collective moves on, its later visits move with it, and the bar can\'t move a series from here yet';

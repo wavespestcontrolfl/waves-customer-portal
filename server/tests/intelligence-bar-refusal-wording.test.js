@@ -305,3 +305,13 @@ describe('a switched-off gate is not a gap (Codex #6371 r6)', () => {
     expect(recordableRefusalCode({ success: false, code: 'cancel_with_effects_unsupported', error: "The bar can't cancel a visit with an invoice from here yet." })).toBe('cancel_with_effects_unsupported');
   });
 });
+
+describe('mixed batch refusals with an unreadable check stay faults (Codex #6371 r7)', () => {
+  test('the unreadable check runs before the collective and grouped codes', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/intelligence-bar/schedule-tools.js'), 'utf8');
+    const block = src.slice(src.indexOf('const anyUnreadable = skippedGrouped.some(entry => entry.unreadable);'));
+    expect(block.indexOf('if (anyUnreadable) {')).toBeGreaterThan(-1);
+    expect(block.indexOf('if (anyUnreadable) {')).toBeLessThan(block.indexOf("errorCode = 'collective_move_unsupported'"));
+    expect(block.slice(0, block.indexOf('} else if')).includes('errorCode =')).toBe(false);
+  });
+});
