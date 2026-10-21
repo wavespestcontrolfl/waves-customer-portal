@@ -695,6 +695,23 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
       expect(await mockPg('audit_log').where({ resource_id: f.serviceId, action: 'visit.completion_on_invoice_issued_refused' }).first()).toMatchObject({ metadata: expect.objectContaining({ code: 'approved_visit_changed' }) });
     });
 
+    test('commit-then-fail: this closeout\'s own committed attempt resumes under the pin even though the visit no longer reads as the card showed it (Codex r9b)', async () => {
+      await fixture({ serviceType: 'Fixture Quarterly Pest Control Service' });
+      const carded = await factsOfVisit();
+      // The completion committed (status) and still owes side effects; the edit time moved with it.
+      await mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'completed', updated_at: new Date(Date.now() + 1000) });
+      await mockPg('service_completion_attempts').insert({ id: randomUUID(), service_id: f.serviceId, idempotency_key: `invoice-issued:${f.invoiceId}`, status: 'side_effects_pending', request_hash: 'x' });
+      const out = await close(carded);
+      expect(out).toMatchObject({ visitId: f.serviceId, resumed: true });
+      expect(out.reason).not.toBe('approved_visit_changed');
+      // It reached the canonical completion's own resume (whatever that decides for a hand-built attempt row), never the pin's refusal.
+      const audits = await mockPg('audit_log').where({ resource_id: f.serviceId, action: 'visit.completion_on_invoice_issued_refused' });
+      expect(audits.map((a) => a.metadata.code)).not.toContain('approved_visit_changed');
+      // Target ownership still holds on a resume: a pin naming another visit resumes nothing.
+      expect(await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'sent', actorTechnicianId: f.techId, conn: mockPg, approvedTarget: randomUUID(), approvedVisit: carded }))
+        .toMatchObject({ closed: false, reason: 'approved_target_mismatch' });
+    });
+
     test('an edit that landed before the closeout\'s read is caught by the early comparison, before any completion attempt', async () => {
       await fixture({ serviceType: 'Fixture Quarterly Pest Control Service' });
       const carded = await factsOfVisit();

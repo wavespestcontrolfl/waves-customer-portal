@@ -384,6 +384,31 @@ describe('the carded visit\'s facts travel with the approved target (record_paym
     expect(src).toMatch(/err\.code === 'approved_visit_changed'\) \{\s*await CompletionAttempts\.markCompletionAttemptFailed\(completionAttempt, err, db\);\s*return \(\{ status: 409, body: \{[^}]*code: 'approved_visit_changed'/);
   });
 
+  test('a proven resume of this invoice\'s own COMMITTED attempt is exempt from the facts comparison: the post-commit work finishes, with no expected facts handed on (Codex r9b)', async () => {
+    const CompletionAttempts = require('../services/completion-attempts');
+    const resumable = jest.spyOn(CompletionAttempts, 'completionStatusForService').mockResolvedValue({ state: 'resumable' });
+    const savedVisit = rows.scheduled_services;
+    const savedAttempt = rows.service_completion_attempts;
+    // The completion committed: the visit now reads completed with a newer edit time than the card showed.
+    rows.scheduled_services = { ...savedVisit, status: 'completed', updated_at: '2099-01-01T12:00:00Z' };
+    rows.service_completion_attempts = { id: 'attempt-1', status: 'side_effects_pending' };
+    try {
+      const out = await run({ approvedTarget: 'visit-live', approvedVisit: CARDED });
+      expect(out.reason).not.toBe('approved_visit_changed');
+      expect(out).toMatchObject({ visitId: 'visit-live', resumed: true });
+      expect(completeScheduledService).toHaveBeenCalledTimes(1);
+      expect(completeScheduledService.mock.calls[0][0].issuedInvoiceCloseout).toEqual({ invoiceId: 'inv-1', trigger: 'paid' });
+      // The target-id check still holds on a resume: another visit's id is never resumed under this approval.
+      completeScheduledService.mockClear();
+      await expect(run({ approvedTarget: 'visit-other', approvedVisit: CARDED })).resolves.toMatchObject({ closed: false, reason: 'approved_target_mismatch' });
+      expect(completeScheduledService).not.toHaveBeenCalled();
+    } finally {
+      rows.scheduled_services = savedVisit;
+      if (savedAttempt === undefined) delete rows.service_completion_attempts; else rows.service_completion_attempts = savedAttempt;
+      resumable.mockRestore();
+    }
+  });
+
   test('the payment pin keeps the facts beside the target, and the sweep honors both', async () => {
     const { recordApprovedPaidCloseoutTarget } = require('../services/invoice-issued-closeout');
     const trx = () => ({ where: () => ({ first: async () => ({ paid_at: PAID_AT }) }) });

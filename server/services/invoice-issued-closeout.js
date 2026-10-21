@@ -822,7 +822,10 @@ function approvedVisitChanged(svc, approved) {
   return ['serviceType', 'date', 'status', 'updatedAtMs'].some((key) => (approved[key] === undefined ? false : (approved[key] ?? null) !== live[key]));
 }
 async function refuseUnapprovedTarget(run) {
-  if (run.approvedVisit && run.svc.id === run.approvedTarget && approvedVisitChanged(run.svc, run.approvedVisit)) {
+  // Not for a proven resume of THIS invoice's own committed attempt: the completion already ran, so the visit no longer reads as the card
+  // showed it (completed, newer edit time) and the post-commit work (invoice back-link, tracker, snapshot) must be allowed to finish. The
+  // target-id check below still holds.
+  if (run.approvedVisit && !run.resuming && run.svc.id === run.approvedTarget && approvedVisitChanged(run.svc, run.approvedVisit)) {
     logger.warn(`[invoice-issued-closeout] ${run.label} → approved_visit_changed: visit ${run.svc.id} changed since the card; left open`);
     const audited = await auditCloseoutOutcome(run, { closed: false, visitId: run.svc.id, code: 'approved_visit_changed' });
     return { closed: false, reason: 'approved_visit_changed', visitId: run.svc.id, audited };
@@ -860,7 +863,7 @@ async function runQuietCloseout(run) {
     },
     actor: { techRole: 'admin', technicianId: run.actorTechnicianId || null, technician: null },
     idempotencyKey: run.idempotencyKey,
-    issuedInvoiceCloseout: { invoiceId: run.invoice.id, trigger: run.trigger, ...(run.approvedVisit ? { expectedVisit: run.approvedVisit } : {}) },
+    issuedInvoiceCloseout: { invoiceId: run.invoice.id, trigger: run.trigger, ...(run.approvedVisit && !run.resuming ? { expectedVisit: run.approvedVisit } : {}) },
   });
   const outcome = completionOutcome(result);
   const line = `[invoice-issued-closeout] ${run.label} → visit ${run.svc.id} ${outcome.closed ? `completed${run.resuming ? ' (resumed)' : ''}` : `NOT completed (${outcome.status} ${outcome.code || outcome.error || ''})`}`;
