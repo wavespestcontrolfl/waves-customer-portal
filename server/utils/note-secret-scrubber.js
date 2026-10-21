@@ -86,7 +86,9 @@ const ENV_SECRET_RE = /\b((?:[A-Z][A-Z0-9_]*)?(?:PASSWORD|PASSWD|PASS|SECRET|TOK
 const AUTH_HEADER_RE = /(\bauthorization[ \t]*[:=][ \t]*)([A-Za-z][A-Za-z0-9_-]*)[ \t]+([^\n]+)/gi;
 // The key may sit in paired quotes, as in serialized JSON or YAML:
 // {"password":"hunter22"} (Codex #6375 r9).
-const KEY_ASSIGN_RE = /(?<![A-Za-z0-9_.-])(["']?)((?:api[ \t]+)?[A-Za-z][A-Za-z0-9_.-]*)\1([ \t]*[=:][ \t]*)("[^"\n]*"|'[^'\n]*'|\S{4,})/gi;
+// An unquoted value stops at a field delimiter, so a harmless field before it
+// ("id":1,"password":"x") cannot swallow the next one (pre-push audit, r9).
+const KEY_ASSIGN_RE = /(?<![A-Za-z0-9_.-])(["']?)((?:api[ \t]+)?[A-Za-z][A-Za-z0-9_.-]*)\1([ \t]*[=:][ \t]*)("[^"\n]*"|'[^'\n]*'|[^\s,;}\]"']{4,})/gi;
 const ASSIGN_KEY_WORDS = new Set(['password', 'passwd', 'secret', 'token', 'apikey', 'credential', 'credentials', 'auth', 'authorization']);
 function isAssignmentSecretKey(key) {
   const words = nameWords(key);
@@ -94,7 +96,9 @@ function isAssignmentSecretKey(key) {
   if (ASSIGN_KEY_WORDS.has(last)) return true;
   return last === 'key' && words[words.length - 2] === 'api';
 }
-const isAlreadyRemoved = value => value.startsWith(REMOVED) || value.startsWith(`"${REMOVED}`) || value.startsWith(`'${REMOVED}`);
+// Matched by the marker's opening (an unquoted value now stops before ']').
+const REMOVED_OPEN = REMOVED.replace(/\]$/, '');
+const isAlreadyRemoved = value => value.replace(/^["']/, '').startsWith(REMOVED_OPEN);
 
 const JWT_RE = /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*/g;
 const URL_RE = /https?:\/\/[^\s"'<>\\]+/gi;

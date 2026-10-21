@@ -249,6 +249,10 @@ describe('Codex #6375 r7: spaced and punctuated credential assignments, any Auth
     const json = scrubNote('{"password":"hunter22","api_key":"abc123xyz","gate":"open"}');
     expect(json.text).toBe('{"password":"[removed]","api_key":"[removed]","gate":"open"}');
     expect(scrubNote("{'db.password': 'hunter22'}").text).toBe("{'db.password': '[removed]'}");
+    // A harmless field first does not hide the credential after it (pre-push audit).
+    expect(scrubNote('{"id":1,"password":"hunter22"}').text).toBe('{"id":1,"password":"[removed]"}');
+    expect(scrubNote('{"enabled":true,"api_key":"abc123xyz"}').text).toBe('{"enabled":true,"api_key":"[removed]"}');
+    expect(scrubNote('retries=3; db.password=hunter22, mode=fast').text).toBe('retries=3; db.password=[removed], mode=fast');
   });
   test('ordinary prose and labels without a credential word stay as written', () => {
     const note = 'the password is in the lockbox. gate code: 1234, PIN: 8842, key under the mat, password: ab';
