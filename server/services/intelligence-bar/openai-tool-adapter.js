@@ -232,14 +232,22 @@ function pairCalls(items) {
 
 // ── reply ────────────────────────────────────────────────────────────────
 
+// Unparseable or non-object arguments fail the round (no tool runs), as in the
+// voice relay adapter: an empty input would let an optional-input read run
+// unfiltered. A fixed, content-free message: the raw text may hold PII.
 function parseArguments(raw) {
-  if (raw && typeof raw === 'object') return raw;
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw;
+  if (raw === undefined || raw === null || raw === '') return {};
+  let parsed;
   try {
-    const parsed = JSON.parse(raw || '{}');
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    parsed = JSON.parse(raw);
   } catch {
-    return {}; // the registry's input validation then refuses the call and the model sees why
+    parsed = null;
   }
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+  const err = new Error('OpenAI backup function_call returned invalid JSON arguments');
+  err.code = 'function_arguments_invalid';
+  throw err;
 }
 
 function outputBlocks(item, response) {

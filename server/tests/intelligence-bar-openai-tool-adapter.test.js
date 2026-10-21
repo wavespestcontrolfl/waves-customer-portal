@@ -160,8 +160,13 @@ describe('fromOpenAIResponse', () => {
     expect(Adapter.fromOpenAIResponse({ status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'done' }] }] }).stop_reason).toBe('end_turn');
     expect(Adapter.fromOpenAIResponse({ status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [] }).stop_reason).toBe('max_tokens');
     expect(Adapter.fromOpenAIResponse({ output: [{ type: 'message', content: [{ type: 'refusal', refusal: 'no' }] }] }).stop_reason).toBe('refusal');
-    const broken = Adapter.fromOpenAIResponse({ output: [{ type: 'function_call', call_id: 'c', name: 'q', arguments: '{"a":' }] });
-    expect(broken.content[0].input).toEqual({});
+    // Unparseable or non-object arguments fail the round: no tool runs on an empty input (Codex r3).
+    for (const bad of ['{"a":', '[1,2]', '"text"', 'null', '7']) {
+      expect(() => Adapter.fromOpenAIResponse({ output: [{ type: 'function_call', call_id: 'c', name: 'q', arguments: bad }] }))
+        .toThrow(expect.objectContaining({ code: 'function_arguments_invalid' }));
+    }
+    expect(Adapter.fromOpenAIResponse({ output: [{ type: 'function_call', call_id: 'c', name: 'q', arguments: '' }] }).content[0].input).toEqual({});
+    expect(Adapter.fromOpenAIResponse({ output: [{ type: 'function_call', call_id: 'c', name: 'q', arguments: '{}' }] }).content[0].input).toEqual({});
     expect(Adapter.fromOpenAIResponse({}).content).toEqual([]);
   });
 });
