@@ -29,7 +29,7 @@ jest.mock('../services/notification-service', () => ({ supersedeMissedCallAdmin:
 
 const { isEnabled } = require('../config/feature-gates');
 const { triggerNotification } = require('../services/notification-triggers');
-const { ringMissedCallIfUnanswered, isRobodialerWave } = require('../services/missed-call-bell');
+const { ringMissedCallIfUnanswered, isRobodialerWave, isRobodialerBurst } = require('../services/missed-call-bell');
 
 jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('missed-call bell: robodialer wave on PostgreSQL', () => {
@@ -87,12 +87,12 @@ jest.setTimeout(30000);
     expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(false);
     expect(triggerNotification).not.toHaveBeenCalled();
     const { metadata } = await stored(row);
-    expect(metadata.missed_call_spam_wave).toBe(true);
+    expect(metadata.missed_call_spam_wave).toBe('block');
     expect(metadata.missed_call_settled_at).toEqual(expect.any(String));
   });
 
   test('gate off: the wave call still rings, stamped for the shadow read', async () => {
-    isEnabled.mockImplementation((name) => name !== 'missedCallSpamWave');
+    isEnabled.mockImplementation((name) => name !== 'missedCallSpamWave' && name !== 'missedCallSpamBurst');
     await earlierWave();
     const row = call('+19415550303', 10);
     await database('call_log').insert(row);
@@ -230,5 +230,154 @@ jest.setTimeout(30000);
     expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
     expect(triggerNotification).toHaveBeenCalledTimes(1);
     expect((await stored(row)).metadata.missed_call_spam_wave_shadow).toBeUndefined();
+  });
+  // Burst: rotating prefixes, so no 6-digit block repeats. Three different
+  // first-time unknown numbers on one line inside 24 h, 15 s or more, within 1 s.
+  describe('robodialer burst (GATE_MISSED_CALL_SPAM_BURST)', () => {
+    const burstCall = (fromPhone, minutesAgo, extra = {}) => call(fromPhone, minutesAgo, { to_phone: OFFICE_LINE, duration_seconds: 53, ...extra });
+    // Two earlier members from different blocks, then the call judged.
+    async function twoMembers(extra = {}) {
+      await database('call_log').insert([burstCall('+19415550101', 120, extra), burstCall('+17275550202', 90, extra)]);
+    }
+    const burstRow = (extra = {}) => burstCall('+13525550303', 10, extra);
+    const onlyBurst = (name) => name === 'missedCallSpamBurst' || name === 'missedCallUnknownCallers';
+
+    test('gate on: the third first-time number on a line, 53 s each, settles with no bell', async () => {
+      await twoMembers();
+      const row = burstRow();
+      await database('call_log').insert(row);
+      expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(false);
+      expect(triggerNotification).not.toHaveBeenCalled();
+      const { metadata } = await stored(row);
+      expect(metadata.missed_call_spam_wave).toBe('burst');
+      expect(metadata.missed_call_settled_at).toEqual(expect.any(String));
+    });
+
+    test('gate off: the burst call still rings, stamped missed_call_spam_burst_shadow only', async () => {
+      isEnabled.mockImplementation((name) => name !== 'missedCallSpamBurst');
+      await twoMembers();
+      const row = burstRow();
+      await database('call_log').insert(row);
+      expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
+      const { metadata } = await stored(row);
+      expect(metadata.missed_call_spam_burst_shadow).toBe(true);
+      expect(metadata.missed_call_spam_wave_shadow).toBeUndefined();
+      expect(metadata.missed_call_spam_wave).toBeUndefined();
+    });
+
+    test('the burst gate alone silences a call that is also a block wave; the block shadow is stamped', async () => {
+      isEnabled.mockImplementation(onlyBurst);
+      const gbp = { to_phone: GBP_LINE, duration_seconds: 24 };
+      await database('call_log').insert([burstCall('+19415550101', 120, gbp), burstCall('+19415550202', 90, gbp)]);
+      const row = burstCall('+19415550303', 10, gbp);
+      await database('call_log').insert(row);
+      expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(false);
+      const { metadata } = await stored(row);
+      expect(metadata.missed_call_spam_wave).toBe('burst');
+      expect(metadata.missed_call_spam_wave_shadow).toBe(true);
+    });
+
+    test('only the call itself and earlier members count: two members is no burst, the third makes one', async () => {
+      const row = burstRow();
+      await database('call_log').insert([row, burstCall('+19415550101', 120)]);
+      expect(await isRobodialerBurst(row)).toBe(false);
+      await database('call_log').insert(burstCall('+17275550202', 90));
+      expect(await isRobodialerBurst(row)).toBe(true);
+    });
+
+    test('durations must be within 1 s of this call and at least 15 s', async () => {
+      const row = burstRow();
+      await database('call_log').insert([row, burstCall('+19415550101', 120, { duration_seconds: 54 }), burstCall('+17275550202', 90, { duration_seconds: 52 })]);
+      expect(await isRobodialerBurst(row)).toBe(true);
+      await database('call_log').where({ from_phone: '+17275550202' }).update({ duration_seconds: 51 });
+      expect(await isRobodialerBurst(row)).toBe(false);
+      // Short calls never form a burst, even all alike.
+      const short = burstCall('+13525550404', 5, { duration_seconds: 14 });
+      await database('call_log').insert([short, burstCall('+19415550606', 60, { duration_seconds: 14 }), burstCall('+19415550707', 60, { duration_seconds: 14 })]);
+      expect(await isRobodialerBurst(short)).toBe(false);
+    });
+
+    test('same line only: members on another line do not count', async () => {
+      const row = burstRow();
+      await database('call_log').insert([row, burstCall('+19415550101', 120), burstCall('+17275550202', 90, { to_phone: GBP_LINE })]);
+      expect(await isRobodialerBurst(row)).toBe(false);
+    });
+
+    test('24 h window: a member older than a day does not count', async () => {
+      const row = burstRow();
+      await database('call_log').insert([row, burstCall('+19415550101', 120), burstCall('+17275550202', 60 * 25)]);
+      expect(await isRobodialerBurst(row)).toBe(false);
+    });
+
+    test('first call ever only: a member, or this caller, that called before is no burst member', async () => {
+      const row = burstRow();
+      await database('call_log').insert([row, burstCall('+19415550101', 120), burstCall('+17275550202', 90)]);
+      expect(await isRobodialerBurst(row)).toBe(true);
+      // An earlier member had called days ago: it is a repeat caller, not a member.
+      await database('call_log').insert(burstCall('+17275550202', 60 * 24 * 5, { duration_seconds: 3 }));
+      expect(await isRobodialerBurst(row)).toBe(false);
+      // The judged call itself has a history: no burst.
+      await database('call_log').where({ from_phone: '+17275550202' }).del();
+      await database('call_log').insert([burstCall('+17275550202', 90), burstCall('+13525550303', 60 * 24 * 3, { duration_seconds: 3 })]);
+      expect(await isRobodialerBurst(row)).toBe(false);
+    });
+
+    test('a member whose caller later got through is excluded', async () => {
+      const row = burstRow();
+      await database('call_log').insert([row, burstCall('+19415550101', 120), burstCall('+17275550202', 90),
+        burstCall('+17275550202', 60, { answered_by: 'human', duration_seconds: 140 })]);
+      // The later answered call also voids the first-call rule for that number's second row.
+      expect(await isRobodialerBurst(row)).toBe(false);
+    });
+
+    test('a member with a voicemail, AI handling or no outcome is excluded', async () => {
+      const row = burstRow();
+      await database('call_log').insert([row, burstCall('+19415550101', 120), burstCall('+17275550202', 90, { recording_sid: 'RE_sample' })]);
+      expect(await isRobodialerBurst(row)).toBe(false);
+      await database('call_log').where({ from_phone: '+17275550202' }).update({ recording_sid: null, call_outcome: 'ai_handled' });
+      expect(await isRobodialerBurst(row)).toBe(false);
+    });
+
+    test('a number on a customer slot is no member; neither is a linked call', async () => {
+      const row = burstRow();
+      await database('call_log').insert([row, burstCall('+19415550101', 120), burstCall('+17275550202', 90)]);
+      expect(await isRobodialerBurst(row)).toBe(true);
+      await database('customers').insert({ id: randomUUID(), first_name: 'Sample', last_name: 'Person', phone: '+19415559999', secondary_phone: '(727) 555-0202' });
+      expect(await isRobodialerBurst(row)).toBe(false);
+      // The judged call's own number on a slot: never a burst.
+      await database('customers').where({ phone: '+19415559999' }).del();
+      await database('customers').insert({ id: randomUUID(), first_name: 'Sample', last_name: 'Other', phone: '+13525550303' });
+      expect(await isRobodialerBurst(row)).toBe(false);
+      expect(await isRobodialerBurst({ ...row, customer_id: randomUUID() })).toBe(false);
+    });
+
+    test('a non-North-American caller never forms a burst', async () => {
+      const row = burstCall('+4922123456', 10);
+      await database('call_log').insert([row, burstCall('+4922123457', 60), burstCall('+4922123458', 60)]);
+      expect(await isRobodialerBurst(row)).toBe(false);
+    });
+
+    test('a burst check that errors rings the bell as usual', async () => {
+      await twoMembers();
+      const row = burstRow();
+      await database('call_log').insert(row);
+      const original = mockConn;
+      // Fail only the burst query: it is the one that selects bool_or.
+      mockConn = Object.assign((...args) => original(...args), {
+        raw: (sql, ...rest) => {
+          if (String(sql).includes('bool_or')) throw new Error('db down');
+          return original.raw(sql, ...rest);
+        },
+        transaction: (...args) => original.transaction(...args),
+      });
+      try {
+        expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
+        expect(triggerNotification).toHaveBeenCalledTimes(1);
+        expect((await stored(row)).metadata.missed_call_spam_wave).toBeUndefined();
+      } finally {
+        mockConn = original;
+      }
+    });
   });
 });

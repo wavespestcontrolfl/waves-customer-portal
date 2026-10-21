@@ -28,7 +28,8 @@ jest.mock('../config/twilio-numbers', () => ({
   isInternalNumber: (n) => n === '+19415550999',
   isTechLine: (n) => n === '+19413529161',
   tollFree: { number: '+18559260203' },
-  findByNumber: jest.fn((n) => (n === '+19412975749' ? { id: 'main' } : null)),
+  findByNumber: jest.fn((n) => (n === '+19412975749' ? { id: 'main' } : n === '+19413840224' ? { id: 'gbp', type: 'gbp_tracking' } : null)),
+  gbpTracking: { parrish: { number: '+19413840224' } },
   getOutboundNumber: () => '+19412975749',
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
@@ -1159,6 +1160,90 @@ jest.setTimeout(30000);
       expect((await stored(known)).metadata.missed_call_text_outcome).toBe('skipped:existing_customer');
       expect((await stored(alerted)).metadata).toEqual({});
       expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+  // Robodialer wave / burst (the bell's classifiers, GATE_MISSED_CALL_SPAM_WAVE and
+  // GATE_MISSED_CALL_SPAM_BURST): the pattern gets no text; a gate that is off
+  // sends as today and stamps missed_call_text_spam_shadow.
+  describe('robodialer wave and burst', () => {
+    const GBP = '+19413840224';
+    const gatesOff = (...off) => isEnabled.mockImplementation((gate) => !off.includes(gate));
+    // Two earlier first-time numbers on the same line, 53 s each, different blocks: a burst.
+    async function burstOf(extra = {}) {
+      await database('call_log').insert([
+        call(40, { from_phone: '+17275550201', duration_seconds: 53, ...extra }),
+        call(30, { from_phone: '+13525550202', duration_seconds: 53, ...extra }),
+      ]);
+      return call(READY_MINUTES_AGO, { duration_seconds: 53, ...extra });
+    }
+    // Two earlier numbers from one 941-555 block on a GBP line, lengths too far apart for a burst.
+    async function blockWaveOf() {
+      await database('call_log').insert([
+        call(40, { from_phone: '+19415550201', to_phone: GBP, duration_seconds: 18 }),
+        call(30, { from_phone: '+19415550202', to_phone: GBP, duration_seconds: 22 }),
+      ]);
+      return call(READY_MINUTES_AGO, { from_phone: '+19415550203', to_phone: GBP, duration_seconds: 28 });
+    }
+
+    test('burst, gate on: skipped:SPAM_WAVE, nothing sent, no claim taken', async () => {
+      const row = await burstOf();
+      await database('call_log').insert(row);
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'SPAM_WAVE' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect((await stored(row)).metadata.missed_call_text_outcome).toBe('skipped:SPAM_WAVE');
+      expect(await claimRow()).toBeUndefined();
+    });
+
+    test('block wave, gate on: skipped:SPAM_WAVE, nothing sent', async () => {
+      const row = await blockWaveOf();
+      await database('call_log').insert(row);
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'SPAM_WAVE' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('burst, burst gate off: the text goes as today, stamped missed_call_text_spam_shadow burst (the wave gate does not apply to a burst)', async () => {
+      gatesOff('missedCallSpamBurst');
+      const row = await burstOf();
+      await database('call_log').insert(row);
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      const { metadata } = await stored(row);
+      expect(metadata.missed_call_text_spam_shadow).toBe('burst');
+      expect(metadata.missed_call_text_outcome).toBe('sent');
+    });
+
+    test('block wave, wave gate off: the text goes as today, stamped block (the burst gate does not apply to a block wave)', async () => {
+      gatesOff('missedCallSpamWave');
+      const row = await blockWaveOf();
+      await database('call_log').insert(row);
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
+      expect((await stored(row)).metadata.missed_call_text_spam_shadow).toBe('block');
+    });
+
+    test('an ordinary missed call is texted with no stamp, even with both gates on', async () => {
+      const row = call(READY_MINUTES_AGO);
+      await database('call_log').insert(row);
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
+      expect((await stored(row)).metadata.missed_call_text_spam_shadow).toBeUndefined();
+    });
+
+    test('a classifier that errors texts as today (fail open), with no stamp', async () => {
+      const row = await burstOf();
+      await database('call_log').insert(row);
+      const original = mockConn;
+      mockConn = Object.assign((...args) => original(...args), {
+        raw: (sql, ...rest) => {
+          if (String(sql).includes('bool_or')) throw new Error('db down');
+          return original.raw(sql, ...rest);
+        },
+        transaction: (...args) => original.transaction(...args),
+      });
+      try {
+        expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
+        expect((await stored(row)).metadata.missed_call_text_spam_shadow).toBeUndefined();
+      } finally {
+        mockConn = original;
+      }
     });
   });
 });

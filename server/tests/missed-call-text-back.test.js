@@ -20,14 +20,21 @@ jest.mock('../config/twilio-numbers', () => ({
   findByNumber: jest.fn((n) => (['+19412975749', '+19412972817', '+18559260203', '+19413529161'].includes(n) ? { id: 'known' } : null)),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The two robodialer classifiers are stubbed here (their SQL is pinned in
+// missed-call-spam-wave-postgres.test.js); everything else in the bell is real.
+jest.mock('../services/missed-call-bell', () => ({
+  ...jest.requireActual('../services/missed-call-bell'),
+  classifySpamWave: jest.fn(),
+  spamWaveSilencedBy: jest.fn(),
+}));
 
 const {
   GATE, MESSAGE_TYPE, CLAIM, MAX_CALL_AGE_MS, SEND_SLOT_MS, VOICEMAIL_GRACE_MS,
-  _private: { textBackCoreEligible, emptyVoicemailOn, EMPTY_VOICEMAIL_LANDING_MS, callEndedAt, sendSlotDeadline, tooOldToText, callbackClause, fromNumberForDialed, normalizePhoneE164 },
+  _private: { spamWaveSkip, textBackCoreEligible, emptyVoicemailOn, EMPTY_VOICEMAIL_LANDING_MS, callEndedAt, sendSlotDeadline, tooOldToText, callbackClause, fromNumberForDialed, normalizePhoneE164 },
 } = require('../services/missed-call-text-back');
 const { isEnabled } = require('../config/feature-gates');
 const {
-  missedCallShapeEligible, missedCallEligible, isEmptyVoicemailRecording,
+  missedCallShapeEligible, missedCallEligible, isEmptyVoicemailRecording, classifySpamWave, spamWaveSilencedBy,
 } = require('../services/missed-call-bell');
 
 // 2026-09-08T15:00Z = 11:00 ET (EDT) — inside the 8am–8pm send window.
@@ -425,5 +432,41 @@ describe('missed-call bell lane is unchanged by the empty-voicemail widening', (
     expect(isEmptyVoicemailRecording(call({ transcription_status: 'rejected', transcription: REJECTED_SENTINEL }))).toBe(false); // no recording
     expect(isEmptyVoicemailRecording(emptyVoicemailCall({ transcription_status: 'pending', transcription: null }))).toBe(false);
     expect(isEmptyVoicemailRecording(null)).toBe(false);
+  });
+});
+
+describe('robodialer wave / burst skip (spamWaveSkip)', () => {
+  const settleFenced = jest.fn(async () => {});
+  const stampShadow = jest.fn(async () => {});
+  beforeEach(() => {
+    jest.clearAllMocks();
+    classifySpamWave.mockResolvedValue({ block: false, burst: false });
+    spamWaveSilencedBy.mockReturnValue(null);
+  });
+
+  test('a call whose gate is on settles skipped:SPAM_WAVE and is not texted', async () => {
+    classifySpamWave.mockResolvedValue({ block: false, burst: true });
+    spamWaveSilencedBy.mockReturnValue('burst');
+    expect(await spamWaveSkip(call(), settleFenced, stampShadow)).toEqual({ outcome: 'skipped', reason: 'SPAM_WAVE' });
+    expect(settleFenced).toHaveBeenCalledWith('skipped:SPAM_WAVE');
+    expect(stampShadow).not.toHaveBeenCalled();
+  });
+
+  test('a flagged call whose gate is off carries on and stamps the kind: block first, then burst', async () => {
+    classifySpamWave.mockResolvedValue({ block: true, burst: true });
+    expect(await spamWaveSkip(call(), settleFenced, stampShadow)).toBeNull();
+    expect(stampShadow).toHaveBeenLastCalledWith('block');
+    classifySpamWave.mockResolvedValue({ block: false, burst: true });
+    expect(await spamWaveSkip(call(), settleFenced, stampShadow)).toBeNull();
+    expect(stampShadow).toHaveBeenLastCalledWith('burst');
+    expect(settleFenced).not.toHaveBeenCalled();
+  });
+
+  test('an ordinary call carries on with no stamp, and a classifier error fails open (texts as today)', async () => {
+    expect(await spamWaveSkip(call(), settleFenced, stampShadow)).toBeNull();
+    expect(stampShadow).not.toHaveBeenCalled();
+    classifySpamWave.mockRejectedValue(new Error('db down'));
+    expect(await spamWaveSkip(call(), settleFenced, stampShadow)).toBeNull();
+    expect(settleFenced).not.toHaveBeenCalled();
   });
 });
