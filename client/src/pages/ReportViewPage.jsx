@@ -10466,6 +10466,12 @@ function SimpleWebReport({ data, token }) {
   // the scene; this only drops the white sheet and dresses the cards.
   const glass = data.glassWeb === true;
   const pdfUrl = data.pdfUrl ? `${API_BASE}${data.pdfUrl.replace(/^\/api/, '')}` : null;
+  // GATE_REPORT_WEB_PEOPLE: when the top map's snapshot fails to load, the document gets its own map (and its schematic fallback) back.
+  const [peopleMapFailed, setPeopleMapFailed] = useState(false);
+  const documentData = useMemo(
+    () => (peopleMapFailed && data.webPeople ? { ...data, webPeople: { ...data.webPeople, treatedMap: false } } : data),
+    [data, peopleMapFailed],
+  );
   useEffect(() => {
     trackReportEvent(token, 'service_report_viewed', { layout: 'simple' });
   }, [token]);
@@ -10509,8 +10515,8 @@ function SimpleWebReport({ data, token }) {
           <RecapVideoCard recap={data.recap} token={token} />
         </div>
       ) : null}
-      <WebPeopleTop data={data} glass={glass} />
-      <ServiceReportDocument data={data} token={token} web glass={glass} />
+      <WebPeopleTop data={data} glass={glass} mapFailed={peopleMapFailed} onMapFailed={() => setPeopleMapFailed(true)} />
+      <ServiceReportDocument data={documentData} token={token} web glass={glass} />
       <WebPeopleBottom data={data} token={token} glass={glass} />
     </div>
   );

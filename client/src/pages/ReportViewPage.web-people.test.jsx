@@ -79,6 +79,15 @@ describe('web report people cards', () => {
     expect(screen.queryByAltText('Technician-traced treatment map')).toBeNull();
   });
 
+  it('the top map snapshot fails to load: the card goes away and the document shows its own map', async () => {
+    const { container } = renderReport(payload({ treatedMap: true }, { treatmentMap: { traced: TRACED } }));
+    await screen.findByText(/This report is provided for your records/);
+    expect(screen.queryByAltText('Technician-traced treatment map')).toBeNull();
+    fireEvent.error(container.querySelector('.web-people-map img.traced-zone-image'));
+    expect(container.querySelector('.web-people-map')).toBeNull();
+    expect(screen.getByAltText('Technician-traced treatment map')).toBeInTheDocument();
+  });
+
   it('no webPeople map flag: the document keeps its own traced map', async () => {
     const { container } = renderReport(payload({ tech: { firstName: 'Alex', photoUrl: null, fdacsId: null, visitsAtHome: null } }, { treatmentMap: { traced: TRACED } }));
     await screen.findByText(/This report is provided for your records/);

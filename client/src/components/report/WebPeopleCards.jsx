@@ -2,6 +2,7 @@
 // The server sends `data.webPeople` only while the gate is live; every sentence below is fixed copy, with a name or a
 // date filled in. Nothing here writes: "Works" only confirms on the page, "Move it" opens the signed-in portal schedule, and the review card links to Google.
 import { useState } from 'react';
+import { FS } from '../../theme-doc';
 import TracedTreatmentZoneMap from './TracedTreatmentZoneMap';
 import {
   formatNextAppointmentLabel, trackReportEvent, tracedVariantFallback,
@@ -16,12 +17,12 @@ const MAP_CSS = `
   .web-people-map .service-coverage-map { position: relative; overflow: hidden; border: 1px solid rgba(4,57,94,.16); border-radius: 12px; background: #eef2f1; }
   .web-people-map .service-coverage-map.traced-zone-map { aspect-ratio: 4 / 3; }
   .web-people-map .traced-zone-image { display: block; width: 100%; height: 100%; object-fit: cover; }
-  .web-people-map .traced-zone-caption { margin: 8px 0 0; color: ${MUTED}; font-size: 14px; line-height: 1.4; }
+  .web-people-map .traced-zone-caption { margin: 8px 0 0; color: ${MUTED}; font-size: ${FS.body}px; line-height: 1.4; }
 `;
 
 const buttonStyle = (filled) => ({
   display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minHeight: 44, padding: '0 18px',
-  borderRadius: 10, fontSize: 16, fontWeight: 600, textDecoration: 'none', cursor: 'pointer',
+  borderRadius: 10, fontSize: FS.bodyLg, fontWeight: 600, textDecoration: 'none', cursor: 'pointer',
   background: filled ? NAVY : 'transparent', color: filled ? '#fff' : NAVY, border: `1.5px solid ${NAVY}`,
 });
 
@@ -32,12 +33,12 @@ function PeopleCard({ glass, label, children, className }) {
       className={className}
       style={{
         margin: '12px 0', padding: '14px 16px', borderRadius: 12, boxSizing: 'border-box', minWidth: 0,
-        color: INK, fontSize: 16, lineHeight: 1.45,
+        color: INK, fontSize: FS.bodyLg, lineHeight: 1.45,
         ...(glass ? {} : { background: '#fff', border: '1px solid rgba(4,57,94,0.12)' }),
       }}
     >
       {/* A role, not an h2: the glass theme forces every h2 to its own size. */}
-      {label ? <div role="heading" aria-level={2} style={{ margin: '0 0 8px', fontSize: 18, fontWeight: 700, color: NAVY }}>{label}</div> : null}
+      {label ? <div role="heading" aria-level={2} style={{ margin: '0 0 8px', fontSize: FS.sub, fontWeight: 700, color: NAVY }}>{label}</div> : null}
       {children}
     </section>
   );
@@ -64,7 +65,7 @@ function TechStrip({ tech, glass }) {
         )}
         <div style={{ minWidth: 0 }}>
           {lines.map((line, i) => (
-            <div key={line} style={i === 0 ? { fontWeight: 700 } : { color: MUTED, fontSize: 15 }}>{line}</div>
+            <div key={line} style={i === 0 ? { fontWeight: 700 } : { color: MUTED, fontSize: FS.body }}>{line}</div>
           ))}
         </div>
       </div>
@@ -72,27 +73,28 @@ function TechStrip({ tech, glass }) {
   );
 }
 
-function TreatedMap({ data, glass }) {
+function TreatedMap({ data, glass, onFailed }) {
   const traced = data.treatmentMap?.traced;
   if (!traced?.snapshotUrl) return null;
   return (
     <PeopleCard glass={glass} label={data.serviceLine === 'lawn' ? 'Where we treated your lawn' : 'Where we treated'} className="web-people-map">
       <style>{MAP_CSS}</style>
-      <TracedTreatmentZoneMap traced={traced} live variant={tracedVariantFallback(traced, data.serviceLine)} />
+      <TracedTreatmentZoneMap traced={traced} live variant={tracedVariantFallback(traced, data.serviceLine)} onImageError={onFailed} />
     </PeopleCard>
   );
 }
 
 // Tech strip and the traced map: the top of the report. The document leaves out its own flat map while this shows.
-export function WebPeopleTop({ data, glass }) {
+// mapFailed: the snapshot did not load; the card goes away (onMapFailed told the page, which hands the document its own map back).
+export function WebPeopleTop({ data, glass, mapFailed = false, onMapFailed }) {
   const people = data.webPeople;
   if (!people) return null;
-  const showMap = people.treatedMap === true && Boolean(data.treatmentMap?.traced?.snapshotUrl);
+  const showMap = !mapFailed && people.treatedMap === true && Boolean(data.treatmentMap?.traced?.snapshotUrl);
   if (!people.tech && !showMap) return null;
   return (
     <Shell>
       {people.tech ? <TechStrip tech={people.tech} glass={glass} /> : null}
-      {showMap ? <TreatedMap data={data} glass={glass} /> : null}
+      {showMap ? <TreatedMap data={data} glass={glass} onFailed={onMapFailed} /> : null}
     </Shell>
   );
 }
@@ -125,7 +127,7 @@ function ReviewAsk({ data, review, token, glass }) {
   const name = String(data.customerFirstName || '').trim();
   return (
     <PeopleCard glass={glass} className="web-people-review">
-      <h3 style={{ margin: '0 0 10px', fontSize: 18, fontWeight: 700, color: NAVY }}>{`How did ${tech} do today${name ? `, ${name}` : ''}?`}</h3>
+      <h3 style={{ margin: '0 0 10px', fontSize: FS.sub, fontWeight: 700, color: NAVY }}>{`How did ${tech} do today${name ? `, ${name}` : ''}?`}</h3>
       <a
         href={review.url}
         target="_blank"
