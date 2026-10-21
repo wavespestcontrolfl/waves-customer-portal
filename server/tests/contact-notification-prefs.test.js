@@ -184,6 +184,13 @@ describe('filterReportEmailRecipientsByContactPrefs (service-report email)', () 
     const kept = await ContactPrefs.filterReportEmailRecipientsByContactPrefs(reportRecipients, CUSTOMER);
     expect(kept.map((r) => r.role)).toEqual(['primary']);
   });
+
+  test('deny wins across duplicate addresses: the resolver deduped slot 3 (Sam\'s address again) away, and slot 3\'s decline still holds Sam\'s mailbox (codex r16 security)', async () => {
+    const customer = { ...CUSTOMER, service_contact3_name: 'Sam', service_contact3_phone: '+19415550404', service_contact3_email: 'SAM@example.com' };
+    rows = [{ customer_id: 'cust-1', phone_key: '9415550404', email_enabled: false }];
+    const kept = await ContactPrefs.filterReportEmailRecipientsByContactPrefs(reportRecipients, customer);
+    expect(kept.map((r) => r.role)).toEqual(['service_contact_2', 'primary']);
+  });
 });
 
 describe('declinedEmailSlotRoles (appointment email)', () => {
@@ -194,6 +201,13 @@ describe('declinedEmailSlotRoles (appointment email)', () => {
     ];
     const declined = await ContactPrefs.declinedEmailSlotRoles({ ...CUSTOMER, service_contact_email: '' }, 'appointment.confirmation');
     expect([...declined]).toEqual(['service_contact_2']);
+  });
+
+  test('deny wins across duplicate addresses: a slot sharing a declining slot\'s email is declined too, even with no row of its own (codex r16 security)', async () => {
+    const customer = { ...CUSTOMER, service_contact3_name: 'Terry', service_contact3_phone: '+19415550404', service_contact3_email: 'Terry@Example.com' };
+    rows = [{ customer_id: 'cust-1', phone_key: '9415550404', email_enabled: false }];
+    const declined = await ContactPrefs.declinedEmailSlotRoles(customer, 'appointment.confirmation');
+    expect([...declined].sort()).toEqual(['service_contact_2', 'service_contact_3']);
   });
 });
 

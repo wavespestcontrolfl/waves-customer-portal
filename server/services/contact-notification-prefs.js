@@ -223,23 +223,42 @@ async function filterContactsByOwnPrefs(contacts = [], customerId = null, column
   });
 }
 
+// Deny wins across duplicate addresses (codex #6363 r16 security P2): the
+// contact editor allows the same email on two slots, and the senders dedupe
+// recipients by address before these filters run, so a declining slot's
+// address is declined wherever it appears — a holder cannot route around a
+// contact's email switch through a second slot carrying the same mailbox.
+// The addresses whose slot (by its phone's row) declines `column` by email.
+const emailKey = (value) => String(value || '').trim().toLowerCase();
+function declinedEmailsOf(slots, rows, column) {
+  const declined = new Set();
+  for (const slot of slots) {
+    if (!slot.email || !slot.phone) continue;
+    const row = rows.get(phoneKey(slot.phone));
+    if (row && !contactAllows(row, column, 'email')) declined.add(emailKey(slot.email));
+  }
+  return declined;
+}
+
 // The slot roles (service_contact, service_contact_2, …) whose phone declined
-// an appointment EMAIL event (appointment-email.js resolveRecipients). Empty
-// with the gate off; throws on an unreadable table (the caller holds).
+// an appointment EMAIL event (appointment-email.js resolveRecipients), plus
+// every slot sharing a declining slot's address. Empty with the gate off;
+// throws on an unreadable table (the caller holds).
 async function declinedEmailSlotRoles(customer, eventType, { dbh = db } = {}) {
   const declined = new Set();
   if (!contactPrefsLive() || !customer) return declined;
   const { getServiceContactSlots } = require('./customer-contact');
   const column = columnForEmailEvent(eventType);
   const rows = await loadContactPrefRows(customer.id, { dbh });
-  for (const slot of getServiceContactSlots(customer)) {
+  const slots = getServiceContactSlots(customer);
+  const declinedEmails = declinedEmailsOf(slots, rows, column);
+  for (const slot of slots) {
     // A slot with no email of its own is emailed at the HOLDER's address
     // (appointment-email.js resolveRecipients): the contact's email switch
     // governs the contact's own inbox, never the holder's fallback
     // (codex #6363 r8 P2).
     if (!slot.email) continue;
-    const row = slot.phone ? rows.get(phoneKey(slot.phone)) : null;
-    if (row && !contactAllows(row, column, 'email')) declined.add(slot.role);
+    if (declinedEmails.has(emailKey(slot.email))) declined.add(slot.role);
   }
   return declined;
 }
@@ -276,9 +295,14 @@ async function filterReportEmailRecipientsByContactPrefs(recipients = [], custom
     return recipients.filter((r) => !isServiceContactRole(r.role));
   }
   if (!rows.size) return recipients;
-  const phoneByRole = new Map(getServiceContactSlots(customer).map((s) => [s.role, s.phone]));
+  const slots = getServiceContactSlots(customer);
+  const phoneByRole = new Map(slots.map((s) => [s.role, s.phone]));
+  // The resolver deduped the slots by address before this filter: an address
+  // a declining slot carries is declined whichever slot survived (deny wins).
+  const declinedEmails = declinedEmailsOf(slots, rows, 'service_completed');
   return recipients.filter((r) => {
     if (!isServiceContactRole(r.role)) return true;
+    if (r.email && declinedEmails.has(emailKey(r.email))) return false;
     const key = phoneKey(phoneByRole.get(r.role));
     return contactAllows(key ? rows.get(key) || null : null, 'service_completed', 'email');
   });
