@@ -250,7 +250,9 @@ describe('the first screen of the simple web report', () => {
     const card = screen.getByTestId('web-top');
     expect(card.textContent).toMatch(/Lawn score\s*72\s*out of 100/);
     expect(card.textContent).toMatch(/Up 11 points since your last visit\./);
-    expect(card.textContent).toMatch(/Your last 3 visits/);
+    expect(card.textContent).toMatch(/Your recent lawn scores/);
+    expect(card.textContent).not.toMatch(/last 3 visits|Your last/);
+    expect(within(card).getByRole('img', { name: /^Your recent lawn scores: Aug 1 61, Sep 1 66, Oct 1 72\.$/ })).toBeInTheDocument();
     // the first customer-owned recommendation (a Waves-owned "We will..." line is skipped)
     expect(card.textContent).toMatch(/Do this\s*Water the lawn lightly this week\./);
     // the document's first re-entry bullet, and the document prints the same bullet
@@ -269,6 +271,21 @@ describe('the first screen of the simple web report', () => {
     expect(rain.textContent).toMatch(/Visit/);
     expect(within(rain).getByRole('img').getAttribute('aria-label')).toMatch(/Sat 0.2 inch, day of your visit.*Mon no reading/);
     expect(rain.textContent).not.toMatch(/after your visit:/);
+  });
+
+  it('the rain heading says "after your visit" only when a post-visit day was measured; otherwise the neutral heading', async () => {
+    const t = webTop();
+    // the only later day has no reading yet
+    t.rain = { days: [{ date: '2026-10-09', inches: 0, isVisit: false }, { date: '2026-10-10', inches: 0.2, isVisit: true }, { date: '2026-10-11', inches: null, isVisit: false }], sinceVisitInches: null, sinceVisitDays: 0 };
+    renderReport(payload({ simpleWebReport: true, webTop: t }));
+    await screen.findByText(/This report is provided for your records/);
+    expect(screen.getByLabelText('Rain at your home').textContent).toMatch(/Rain around your visit/);
+    expect(screen.getByLabelText('Rain at your home').textContent).not.toMatch(/Rain after your visit/);
+    cleanup();
+    t.rain.days[2].inches = 0.4;
+    renderReport(payload({ simpleWebReport: true, webTop: t }));
+    await screen.findByText(/This report is provided for your records/);
+    expect(screen.getByLabelText('Rain at your home').textContent).toMatch(/Rain after your visit/);
   });
 
   it('the total names the real number of days it covers; none, no sentence', async () => {
@@ -308,7 +325,7 @@ describe('the first screen of the simple web report', () => {
     const card = screen.getByTestId('web-top');
     expect(card.textContent).toMatch(/Lawn score\s*70\s*out of 100/);
     expect(card.textContent).not.toMatch(/starting score|since your last visit|Same as your last visit/);
-    expect(card.textContent).not.toMatch(/Your last/);
+    expect(card.textContent).not.toMatch(/recent lawn scores/);
   });
 
   it('a first visit has no strip; with no recommendation and no re-entry the card says nothing is needed and shows no hold', async () => {
@@ -316,7 +333,7 @@ describe('the first screen of the simple web report', () => {
     await screen.findByText(/This report is provided for your records/);
     const card = screen.getByTestId('web-top');
     expect(card.textContent).toMatch(/This is your starting score\./);
-    expect(card.textContent).not.toMatch(/Your last/);
+    expect(card.textContent).not.toMatch(/recent lawn scores/);
     expect(card.textContent).toMatch(/Do this\s*Nothing needed from you today\./);
     expect(card.textContent).not.toMatch(/Re-entry/);
     cleanup();

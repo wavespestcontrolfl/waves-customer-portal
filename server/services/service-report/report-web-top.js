@@ -5,7 +5,7 @@
  *
  * One `webTop` object, built from data the payload already carries, plus one measured-rain read:
  *   - score   lawn only: this visit's score and the score at the assessment before it (an arrow on the page);
- *   - trend   lawn only: the last 6 scores, oldest first (a strip on the page);
+ *   - trend   lawn only: the last 6 scores, oldest first (a strip on the page, "Your recent lawn scores");
  *   - rain    measured rain (radar, gauge corrected) at the home for the days around the visit.
  *
  * "Do this" and "Hold off" are NOT built here: the page picks them from the very lists ServiceReportDocument prints
@@ -27,10 +27,6 @@ const DAY_MS = 86400000;
 const finiteScore = (value) => {
   const n = value == null || value === '' ? NaN : Number(value);
   return Number.isFinite(n) && n >= 0 && n <= 100 ? Math.round(n) : null;
-};
-const sentence = (value, max = 160) => {
-  const text = typeof value === 'string' ? value.trim() : '';
-  return text && text.length <= max ? text : null;
 };
 
 // The lawn's score history, resolved through the property-scoped resolver exactly as the program promise does
@@ -79,11 +75,7 @@ function lawnScore(data, history) {
   if (!history) return { score: { value } };
   const out = { score: { value, previous: previousFrom(history.rows, history.current) } };
   const trend = strip(history.rows);
-  if (trend.length >= 2) {
-    out.trend = trend;
-    const note = sentence(data.reportV2?.trends?.seasonalNote, 240);
-    if (note) out.trendNote = note;
-  }
+  if (trend.length >= 2) out.trend = trend;
   return out;
 }
 

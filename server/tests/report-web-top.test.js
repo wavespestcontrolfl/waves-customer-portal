@@ -51,12 +51,11 @@ describe('buildWebTop', () => {
     expect('trendNote' in out).toBe(false);
   });
 
-  test('the seasonal note rides with a strip only', () => {
+  test('webTop never carries a seasonal note (trendNote is gone)', () => {
     const data = lawn();
     data.reportV2.trends.seasonalNote = 'Winter scores run lower.';
     const rows = [row('a0', '2026-09-01', 60), row('a1', '2026-10-20', 72)];
-    expect(buildWebTop(data, null, historyOf(rows)).trendNote).toBe('Winter scores run lower.');
-    expect('trendNote' in buildWebTop(data, null, historyOf([rows[1]]))).toBe(false);
+    expect('trendNote' in buildWebTop(data, null, historyOf(rows))).toBe(false);
   });
 
   test('two assessments on one day: the previous score is the one just before, the strip keeps the later point', () => {

@@ -190,39 +190,50 @@ function followUpAction(data) {
 
 // The V2 customer actions with every watering-banner sentence stripped, the plan's own next step (wavesNext is what
 // WAVES will do next: a commitment, so it belongs in the permanent record), the insight plans and the mowing line.
-function v2Lines(data, treated) {
+// Each entry says who owns it: `waves` entries are provider commitments, never a customer task.
+function v2Entries(data, treated) {
   const v2 = data.reportV2 || null;
   const banner = bannerSentencesFor(v2, treated);
   const strip = (text) => (banner.length ? banner.reduce((acc, line) => acc.split(line).join(' '), String(text || '')).replace(/\s+/g, ' ') : text);
   const insights = Array.isArray(v2?.insights) ? v2.insights : [];
+  const mine = (text) => ({ text });
   return [
-    strip(v2?.snapshot?.customerAction),
-    strip(followUpAction(data)),
-    v2?.snapshot?.wavesNext || insights.map((i) => i?.nextVisitPlan).find(Boolean),
-    ...insights.map((insight) => strip(insight?.customerAction)),
-    v2?.mowing?.recommendation,
+    mine(strip(v2?.snapshot?.customerAction)),
+    mine(strip(followUpAction(data))),
+    { text: v2?.snapshot?.wavesNext || insights.map((i) => i?.nextVisitPlan).find(Boolean), waves: true },
+    ...insights.map((insight) => mine(strip(insight?.customerAction))),
+    mine(v2?.mowing?.recommendation),
   ];
 }
 
-/**
- * "What we recommend", in the order the document prints it: the typed next step and its chips, the form
- * recommendations, legacy assessment recommendations, the lawn aftercare watering line (never when nothing was applied:
- * buildAftercare([]) still says "No special watering is needed..."), the pest/mosquito and termite primary moves, then
- * the V2 lines. Trimmed, empty lines dropped, repeats dropped.
- */
-export function buildRecommendations(data) {
+// "What we recommend" in the order the document prints it, each line tagged with its owner: the typed next step and its
+// chips, the form recommendations, legacy assessment recommendations, the lawn aftercare watering line (never when
+// nothing was applied: buildAftercare([]) still says "No special watering is needed..."), the pest/mosquito and termite
+// primary moves, then the V2 entries.
+function recommendationEntries(data) {
   const termite = termiteContext(data);
   const treated = hasActualTreatmentFor(data);
-  const lines = [
-    ...typedLines(data, termite),
-    ...formRecommendations(data),
-    ...legacyAssessmentRecs(data),
-    treated ? data.reportV2?.aftercare?.watering : null,
-    moveText(data.pestReportV2?.primaryMove || data.mosquitoReportV2?.primaryMove || null),
-    moveText(termite.dashboard?.primaryMove),
-    ...v2Lines(data, treated),
-  ].map((line) => String(line || '').trim());
-  return lines.filter((line, i) => line && lines.indexOf(line) === i);
+  const mine = (text) => ({ text });
+  return [
+    ...typedLines(data, termite).map(mine),
+    ...formRecommendations(data).map(mine),
+    ...legacyAssessmentRecs(data).map(mine),
+    mine(treated ? data.reportV2?.aftercare?.watering : null),
+    mine(moveText(data.pestReportV2?.primaryMove || data.mosquitoReportV2?.primaryMove || null)),
+    mine(moveText(termite.dashboard?.primaryMove)),
+    ...v2Entries(data, treated),
+  ];
+}
+
+// Trimmed, empty lines dropped, repeats dropped.
+const unique = (lines) => {
+  const trimmed = lines.map((line) => String(line || '').trim());
+  return trimmed.filter((line, i) => line && trimmed.indexOf(line) === i);
+};
+
+/** "What we recommend", every line the document prints there, Waves commitments included. */
+export function buildRecommendations(data) {
+  return unique(recommendationEntries(data).map((entry) => entry.text));
 }
 
 /**
@@ -274,22 +285,23 @@ const WAVES_OWNED = /^(we will|we['\u2019]ll|waves will)\b/i;
 const NO_ACTION = /^no (further )?action\b/i;
 
 /**
- * "Do this": the first customer-owned line of "What we recommend". Lines Waves owns ("We will re-check the stations")
- * are skipped, and so is a "no action" line; "Nothing needed" when none is left. When rain has already watered the
- * treatment in, the watering lines (which then only report the rain) give way to the kept sprinkler hold, if the
- * report kept one. A finding's recommendation (printed under "What we found") counts after the list.
+ * "Do this": the first customer-owned line, from an explicit list of customer-owned sources only, in the document's
+ * order: the typed customer step, the form and assessment recommendations, the aftercare watering line, the pest,
+ * mosquito and termite primary moves, the V2 customerAction lines (plan, follow-up, insights), the mowing line, then a
+ * finding's own recommendation (printed under "What we found"). What Waves will do (snapshot.wavesNext, an insight's
+ * nextVisitPlan) is never a source, and a line that still opens "We will" or "Waves will" is skipped. A "no action" line
+ * is skipped; "Nothing needed" when none is left. When rain has already watered the treatment in, the watering lines
+ * (which then only report the rain) give way to the kept sprinkler hold, if the report kept one.
  */
-export function doThisLine(data, recommendations = buildRecommendations(data)) {
-  let lines = recommendations;
+export function doThisLine(data) {
+  let lines = unique(recommendationEntries(data).filter((entry) => !entry.waves).map((entry) => entry.text));
   if (data.reportV2?.banner?.state === 'water_in_by_rain') {
     const aftercare = data.reportV2.aftercare || {};
-    lines = [aftercare.holdTask, ...recommendations.filter((line) => line !== aftercare.watering)];
+    lines = [aftercare.holdTask, ...lines.filter((line) => line !== String(aftercare.watering || '').trim())];
   }
-  // A finding's own recommendation prints inside its "What we found" bullet, not in "What we recommend", but it is still
-  // something the document asks of the customer: it follows the list, in the document's order.
   const found = buildRecordFindings(data).map((finding) => finding.recommendation);
-  const mine = [...lines, ...found].filter((line) => typeof line === 'string' && line.trim() && !WAVES_OWNED.test(line.trim()));
-  return mine.map((line) => line.trim()).find((line) => !NO_ACTION.test(line)) || NOTHING_NEEDED;
+  const mine = unique([...lines, ...found]).filter((line) => !WAVES_OWNED.test(line));
+  return mine.find((line) => !NO_ACTION.test(line)) || NOTHING_NEEDED;
 }
 
 /** "Hold off": the first bullet of the document's re-entry section, or null when the document shows none. */

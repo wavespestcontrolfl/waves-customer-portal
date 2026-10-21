@@ -74,6 +74,31 @@ describe('doThisLine: the first customer-owned recommendation', () => {
   });
 });
 
+describe('doThisLine: only customer-owned sources', () => {
+  it('snapshot.wavesNext (what Waves will do) is never "Do this", though the document lists it under What we recommend', () => {
+    const data = { serviceLine: 'tree_shrub', reportV2: { snapshot: { wavesNext: 'Recheck the affected foliage next visit.' } } };
+    expect(buildRecommendations(data)).toEqual(['Recheck the affected foliage next visit.']);
+    expect(doThisLine(data)).toBe(NOTHING_NEEDED);
+  });
+
+  it('an insight\u2019s nextVisitPlan is Waves-owned too; the customerAction beside it is the task', () => {
+    const data = {
+      serviceLine: 'tree_shrub',
+      reportV2: { insights: [{ nextVisitPlan: 'Recheck the affected foliage next visit.', customerAction: 'Water the new shrubs twice a week.' }] },
+    };
+    expect(buildRecommendations(data)).toContain('Recheck the affected foliage next visit.');
+    expect(doThisLine(data)).toBe('Water the new shrubs twice a week.');
+  });
+
+  it('the customer-owned sources win in the document\u2019s order even when a Waves line is listed first', () => {
+    const data = {
+      serviceLine: 'tree_shrub',
+      reportV2: { snapshot: { customerAction: 'Mulch the beds.', wavesNext: 'Recheck the affected foliage next visit.' }, mowing: { recommendation: 'Mow at 3.5 inches.' } },
+    };
+    expect(doThisLine(data)).toBe('Mulch the beds.');
+  });
+});
+
 describe('doThisLine: a finding\u2019s own recommendation is a customer task the document asks for', () => {
   const finding = (over = {}) => ({ id: 'f1', title: 'Shrubs against the wall', detail: 'Branches touch the siding.', recommendation: 'Trim shrubs away from the house.', ...over });
 

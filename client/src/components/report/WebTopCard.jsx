@@ -51,11 +51,11 @@ function scoreChange(score) {
 // One column of a bar chart: the value above, the bar, then whatever sits under it.
 const column = { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', height: '100%' };
 
-function ScoreStrip({ trend, note }) {
-  const label6 = `Lawn score at your last ${trend.length} visits: ${trend.map((p) => `${p.label} ${p.value}`).join(', ')}.`;
+function ScoreStrip({ trend }) {
+  const label6 = `Your recent lawn scores: ${trend.map((p) => `${p.label} ${p.value}`).join(', ')}.`;
   return (
     <div style={{ marginTop: SP.md }}>
-      <p style={{ ...fine, fontWeight: FW.semibold, color: DOC.ink, margin: 0 }}>{`Your last ${trend.length} visits`}</p>
+      <p style={{ ...fine, fontWeight: FW.semibold, color: DOC.ink, margin: 0 }}>Your recent lawn scores</p>
       <div role="img" aria-label={label6} style={{ display: 'flex', alignItems: 'flex-end', gap: SP.xs, height: 96, marginTop: SP.xs }}>
         {trend.map((p, i) => {
           const current = i === trend.length - 1;
@@ -71,7 +71,6 @@ function ScoreStrip({ trend, note }) {
         <span>{trend[0].label}</span>
         <span>{trend[trend.length - 1].label}</span>
       </div>
-      {note ? <p style={{ ...fine, margin: `${SP.xs}px 0 0` }}>{note}</p> : null}
     </div>
   );
 }
@@ -86,7 +85,8 @@ function RainBar({ rain, glass }) {
   const sinceDays = Number(rain.sinceVisitDays) || 0;
   const span = sinceDays === 1 ? 'the day' : `the ${sinceDays} days`;
   const visitDate = days.find((d) => d.isVisit)?.date;
-  const afterVisit = Boolean(visitDate) && days.some((d) => d.date > visitDate);
+  // "after your visit" only when a closed day after it was actually measured
+  const afterVisit = Boolean(visitDate) && days.some((d) => d.date > visitDate && d.inches != null);
   const summary = days.map((d) => `${dayName(d.date)} ${d.inches == null ? 'no reading' : `${inches(d.inches)} inch`}${d.isVisit ? ', day of your visit' : ''}`).join('; ');
   return (
     <Card glass={glass} aria-label="Rain at your home">
@@ -110,7 +110,7 @@ function RainBar({ rain, glass }) {
 
 // The first card: the score and how it moved, the strip, the one action, the one hold.
 function GlanceCard({ webTop, data, glass }) {
-  const { score, trend, trendNote } = webTop;
+  const { score, trend } = webTop;
   const action = doThisLine(data);
   const hold = holdOffLine(data);
   const change = score ? scoreChange(score) : null;
@@ -129,7 +129,7 @@ function GlanceCard({ webTop, data, glass }) {
           {change.arrow ? <span aria-hidden="true">{change.arrow} </span> : null}{change.text}
         </p>
       ) : null}
-      {strip ? <ScoreStrip trend={strip} note={trendNote} /> : null}
+      {strip ? <ScoreStrip trend={strip} /> : null}
       {action ? (
         <div style={{ marginTop: score ? SP.md : 0 }}>
           <p data-gt="eyebrow" style={label}>Do this</p>
