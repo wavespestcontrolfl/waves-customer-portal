@@ -378,7 +378,7 @@ async function callBackup({ system, tools, messages, finalRound = false, tech = 
   // The raw billed response is ledgered first (usage, served model, provider
   // id); a reply the parser then rejects flips that row to its own code instead
   // of a costless generic error (Codex #6373 r6).
-  const data = await ledgerCall('openai', model, () => postResponses(body), { laneId: 'ib_admin_backup' });
+  const data = await ledgerCall('openai', model, () => postResponses(body), { laneId: tech ? 'ib_tech_backup' : 'ib_admin_backup' });
   let reply;
   try {
     reply = fromOpenAIResponse(data);

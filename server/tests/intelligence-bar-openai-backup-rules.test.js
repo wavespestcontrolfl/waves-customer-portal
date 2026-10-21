@@ -110,6 +110,21 @@ describe('saved task provider', () => {
     expect(src).toMatch(/\.map\(\(\{ resumableFailure, had_images, model_provider, \.\.\.task \}\) => task\)/);
   });
 
+  test('markModelProvider throws when the runner lost its lease (Codex r7)', async () => {
+    mockUpdate.mockResolvedValueOnce(0);
+    await expect(IbTasks.markModelProvider('t1', 'actor-1', 'stale-runner', Backup.BACKUP_PROVIDER)).rejects.toThrow('Task execution was superseded');
+    mockUpdate.mockClear(); mockWhere.mockClear(); mockRaw.mockClear();
+  });
+
+  test('a technician request is ledgered on its own backup lane; a backup task resumes without Claude credentials (Codex r7)', () => {
+    const fs = require('fs'); const path = require('path');
+    const adapter = fs.readFileSync(path.join(__dirname, '../services/intelligence-bar/openai-tool-adapter.js'), 'utf8');
+    expect(adapter).toMatch(/laneId: tech \? 'ib_tech_backup' : 'ib_admin_backup'/);
+    expect(require('../services/agent-control/lane-policies').LANE_POLICIES?.ib_tech_backup || fs.readFileSync(path.join(__dirname, '../services/agent-control/lane-policies.js'), 'utf8')).toBeTruthy();
+    const route = fs.readFileSync(path.join(__dirname, '../routes/admin-intelligence-bar.js'), 'utf8');
+    expect(route).toMatch(/if \(!Anthropic \|\| \(!process\.env\.ANTHROPIC_API_KEY && !resumesOnBackup\)\)/);
+  });
+
   test('markModelProvider merges the mark into the task request under the runner token', async () => {
     await IbTasks.markModelProvider('t1', 'actor-1', 'runner-1', Backup.BACKUP_PROVIDER);
     expect(mockWhere).toHaveBeenCalledWith({ id: 't1', actor_id: 'actor-1', runner_token: 'runner-1' });

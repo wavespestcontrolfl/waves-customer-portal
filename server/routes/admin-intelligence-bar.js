@@ -25,7 +25,7 @@ const IbThreads = require('../services/intelligence-bar/threads');
 const PriceReadBack = require('../services/intelligence-bar/price-read-back');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
-const { gateEnvValue, ibCancelAppointmentLive, ibAcceptEstimateLive } = require('../config/feature-gates');
+const { gateEnvValue, ibCancelAppointmentLive, ibAcceptEstimateLive, ibOpenaiBackupLive } = require('../config/feature-gates');
 const IbOpenaiBackup = require('../services/intelligence-bar/ib-openai-backup');
 const HISTORY_TOOL_NAMES = new Set(HISTORY_TOOLS.map(t => t.name));
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
@@ -3521,7 +3521,11 @@ async function runQuery(req, res, next) {
       await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, target: taskContext });
     }
 
-    if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
+    // A saved task already on the OpenAI backup resumes without Claude
+    // credentials (every round goes to the backup) while that gate is on (Codex r7).
+    const resumesOnBackup = Boolean(activeTask) && activeTask.request?.model_provider === 'openai_backup'
+      && ibOpenaiBackupLive() && Boolean(process.env.OPENAI_API_KEY);
+    if (!Anthropic || (!process.env.ANTHROPIC_API_KEY && !resumesOnBackup)) {
       // A resumed task keeps its delivered reply (history, thread cursor) so
       // a later continuation still builds on it; only the answer text changes.
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, state: 'failed',
@@ -3532,7 +3536,7 @@ async function runQuery(req, res, next) {
       });
     }
 
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || 'unset-backup-task' });
 
     // Build context-aware system prompt
     let systemPrompt = SYSTEM_PROMPT;

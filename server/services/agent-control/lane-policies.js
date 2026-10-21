@@ -398,6 +398,8 @@ const LANE_RUNTIME = {
   ib_admin: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'sql_tool', expected_duration_ms: 120_000 },
   // The OpenAI backup of the /query loop (GATE_IB_OPENAI_BACKUP): the same tools and writes as ib_admin, run on a Claude provider error.
   ib_admin_backup: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'sql_tool', expected_duration_ms: 120_000 },
+  // The technician bar's OpenAI backup (same gate): tech tools only, ledgered apart from the admin backup.
+  ib_tech_backup: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'sql_tool' },
   // internal_write: every tech IB request logs an intelligence_bar_queries row and tool use a tool_health_events row — Codex r10.
   ib_tech: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'sql_tool' },
   // M2 (Codex r21): the email tool returns a marked draft and procurement research inserts pending price-approval rows — nothing acts without the later approval.

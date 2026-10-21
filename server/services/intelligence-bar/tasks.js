@@ -67,12 +67,15 @@ async function checkpoint(id, actorId, { messages, target, state = 'running', re
 // switches to the OpenAI backup (ib-openai-backup.js); a task never mixes providers.
 // The switch also renews the lease (a full backup call fits in it).
 async function markModelProvider(id, actorId, runnerToken, provider) {
-  await db('ib_tasks').where({ id, actor_id: String(actorId), runner_token: runnerToken })
+  // A runner that lost its lease (another resume took the task) stops here,
+  // as checkpoint() does, so two runners never both run the tool loop (Codex r7).
+  const marked = await db('ib_tasks').where({ id, actor_id: String(actorId), runner_token: runnerToken })
     .update({
       request: db.raw('request || ?::jsonb', [JSON.stringify({ model_provider: provider })]),
       lease_expires_at: leaseExpiry(),
       updated_at: db.fn.now(),
     });
+  if (!marked) throw new Error('Task execution was superseded');
 }
 
 async function claimResume(id, actorId, sessionId, { selectedTarget } = {}) {
