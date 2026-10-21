@@ -283,25 +283,55 @@ describe('recordManualPayment — refusal contract', () => {
       expect(db.transaction).not.toHaveBeenCalled();
     });
 
-    test('a status or edit-time change on the LOCKED row refuses with drift and writes nothing', async () => {
-      db.mockImplementation(() => recorder({ first: openInvoice({ updated_at: SEEN }) }));
-      let paymentsInsert = null;
-      let update = null;
+    // A trx stand-in over a mutable invoice row: the combined-session release can bump updated_at (as clearPaymentIntentStamps does).
+    function trxOver(row, { onRelease } = {}) {
+      const calls = { update: null, paymentsInsert: null };
+      require('../services/pay-combined').releaseCombinedSessionBeforeCollection.mockReset().mockImplementation(async () => { if (onRelease) onRelease(row); });
       db.transaction.mockImplementation(async (fn) => {
         const trx = jest.fn((table) => {
-          if (table === 'invoices') { const r = recorder({ first: openInvoice({ updated_at: new Date('2099-01-01T12:00:09Z') }) }); update = r.update; return r; }
-          if (table === 'payments') { const r = recorder(); paymentsInsert = r.insert; return r; }
+          if (table === 'invoices') {
+            const r = recorder({ first: row, returning: [{ ...row, status: 'paid' }] });
+            r.first = jest.fn(async () => ({ ...row }));
+            calls.update = r.update;
+            return r;
+          }
+          if (table === 'payments') { const r = recorder(); calls.paymentsInsert = r.insert; return r; }
+          if (table === 'activity_log') return recorder();
           throw new Error(`unexpected trx table ${table}`);
         });
         trx.fn = { now: () => 'NOW()' };
         return fn(trx);
       });
+      return calls;
+    }
+
+    test('an edit that landed before the transaction started refuses with drift and writes nothing', async () => {
+      db.mockImplementation(() => recorder({ first: openInvoice({ updated_at: SEEN }) }));
+      const calls = trxOver(openInvoice({ updated_at: new Date('2099-01-01T12:00:09Z') }));
       const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', expectedInvoiceVersion: version }));
       expect(err.statusCode).toBe(409);
       expect(err.drift).toBe(true);
-      expect(update).not.toHaveBeenCalled();
-      expect(paymentsInsert).toBeNull();
+      expect(calls.update).not.toHaveBeenCalled();
+      expect(calls.paymentsInsert).toBeNull();
       expect(sendReceiptEmail).not.toHaveBeenCalled();
+    });
+
+    test('a status change on the LOCKED row refuses with drift and writes nothing', async () => {
+      db.mockImplementation(() => recorder({ first: openInvoice({ updated_at: SEEN }) }));
+      const calls = trxOver(openInvoice({ updated_at: SEEN }), { onRelease: (row) => { row.status = 'viewed'; } });
+      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', expectedInvoiceVersion: version }));
+      expect(err.drift).toBe(true);
+      expect(calls.update).not.toHaveBeenCalled();
+      expect(calls.paymentsInsert).toBeNull();
+    });
+
+    test('the combined-session release rewriting the invoice edit time is NOT drift: the approved payment still records (Codex pre-push P1)', async () => {
+      db.mockImplementation(() => recorder({ first: openInvoice({ updated_at: SEEN }) }));
+      const calls = trxOver(openInvoice({ updated_at: SEEN }), { onRelease: (row) => { row.updated_at = new Date('2099-01-01T12:00:30Z'); } });
+      const out = await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, expectedInvoiceVersion: version });
+      expect(out.invoice).toBeDefined();
+      expect(calls.update).toHaveBeenCalled();
+      expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
     });
 
     test('without the option nothing changes: an invoice with any edit time settles as before', async () => {

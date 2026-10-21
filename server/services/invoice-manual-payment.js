@@ -20,9 +20,13 @@
  * record a different sum than the money that arrived.
  *
  * expectedInvoiceVersion (optional, the Intelligence Bar record_payment card only): { status,
- * updatedAtMs } — the invoice's status and edit time the card showed. Checked on the pre-lock read
- * (before any Stripe session is retired) and again under the invoice row lock right before the paid
- * flip; a difference writes nothing and a 409 says so. The Invoices page never sets it.
+ * updatedAtMs } — the invoice's status and edit time the card showed. The edit time is checked on the
+ * pre-lock read (before any Stripe session is retired) and again at the start of the settlement
+ * transaction, BEFORE the combined-session release (which rewrites the invoice's edit time itself when
+ * it clears a stamp, so the locked row's edit time cannot be compared). The status is re-checked on the
+ * LOCKED row right before the paid flip, beside the amount due (expectedAmountCents) and self-pay
+ * (requireSelfPay), which are the money facts an edit could move. A difference writes nothing and a 409
+ * says so. The Invoices page never sets it.
  *
  * requireSelfPay (optional, both Zelle notice paths): the caller matched the
  * invoice as an OPEN SELF-PAY invoice (no payer, no statement, live payer
@@ -104,9 +108,9 @@ async function retireOpenPaymentIntentBeforeSettlement(invoice, { action }) {
 
 const INVOICE_VERSION_DRIFT_TEXT = 'The invoice changed after the confirmation card was shown — nothing was recorded';
 // status and edit time (ms) as the card read them.
-function invoiceMatchesVersion(row, { status, updatedAtMs }) {
+function invoiceMatchesVersion(row, { status, updatedAtMs }, { editTime = true } = {}) {
   const at = row.updated_at ? new Date(row.updated_at).getTime() : null;
-  return String(row.status || '').toLowerCase() === String(status || '').toLowerCase() && at === (updatedAtMs ?? null);
+  return String(row.status || '').toLowerCase() === String(status || '').toLowerCase() && (!editTime || at === (updatedAtMs ?? null));
 }
 
 async function recordManualPayment(id, {
@@ -230,6 +234,12 @@ async function recordManualPayment(id, {
     // commit, so /setup cannot stamp a confirmable combined PI between
     // the check and the paid flip. Throws are 409-shaped; the caller
     // surfaces them.
+    // The card's edit-time pin, read in this transaction BEFORE the release below (which rewrites updated_at when it clears
+    // a combined stamp, so the locked row's edit time can no longer be compared).
+    if (expectedInvoiceVersion) {
+      const seen = await trx('invoices').where({ id }).first('status', 'updated_at');
+      if (!seen || !invoiceMatchesVersion(seen, expectedInvoiceVersion)) return { versionDrift: true };
+    }
     await require('./pay-combined').releaseCombinedSessionBeforeCollection(trx, invoice, { context: 'recording a manual payment' });
     // Seam re-check under the row lock (codex #3610 r2 P1, mirrors
     // apply-credit): /setup could have minted a NEW standalone PI between
@@ -241,8 +251,8 @@ async function recordManualPayment(id, {
     if (!locked) return null;
     const lockedPiId = locked.stripe_payment_intent_id || null;
     if (lockedPiId && lockedPiId !== triagedPiId) return { racedNewPaymentIntent: lockedPiId };
-    // The card's pin, on the LOCKED row, in the same transaction as the paid flip.
-    if (expectedInvoiceVersion && !invoiceMatchesVersion(locked, expectedInvoiceVersion)) return { versionDrift: true };
+    // The card's status pin, on the LOCKED row, in the same transaction as the paid flip (the edit time was compared above).
+    if (expectedInvoiceVersion && !invoiceMatchesVersion(locked, expectedInvoiceVersion, { editTime: false })) return { versionDrift: true };
     // The collectibility gate re-run UNDER THE LOCK (audit P0): the unlocked
     // read at the top of this function can be overtaken by a Bill-To
     // assignment that stamps the withdrawal, and only `status` is re-checked
