@@ -23,7 +23,7 @@ function fakeKnex(book) {
 
 const book = [
   { id: 'a', first_name: 'Orlan', last_name: 'Stompf' },
-  { id: 'b', first_name: 'Orlan', last_name: 'Stumpf' },
+  { id: 'b', first_name: 'Orlan', last_name: 'Stimpf' },
   { id: 'c', first_name: 'Zxqvel', last_name: 'Brantmoor' },
 ];
 

@@ -69,7 +69,7 @@ jest.setTimeout(120000);
 
     await db('customers').insert([
       customer('stompf', 'Orlan', 'Stompf', { waveguard_tier: 'Gold' }),
-      customer('stumpf', 'Orlan', 'Stumpf'),
+      customer('stimpf', 'Orlan', 'Stimpf'),
       customer('brantmoor', 'Zxqvel', 'Brantmoor'),
       customer('exactA', 'Quillon', 'Fenwrick'),
       customer('exactB', 'Quillon', 'Fenwrock'),
@@ -81,7 +81,7 @@ jest.setTimeout(120000);
     await db('technicians').insert([{ id: techId, name: `Tech ${tag}` }, { id: otherTechId, name: `Other ${tag}` }]);
     await db('scheduled_services').insert([
       { customer_id: ids.stompf, technician_id: otherTechId, scheduled_date: futureDate(3), service_type: 'Pest Control', status: 'confirmed' },
-      { customer_id: ids.stumpf, technician_id: techId, scheduled_date: futureDate(2), service_type: 'Pest Control', status: 'confirmed' },
+      { customer_id: ids.stimpf, technician_id: techId, scheduled_date: futureDate(2), service_type: 'Pest Control', status: 'confirmed' },
     ]);
   });
 
@@ -129,7 +129,7 @@ jest.setTimeout(120000);
 
     test('a misspelled search returns approximate rows after nothing, best first', async () => {
       const { body } = await get('/admin/customers?search=Orlan%20damp');
-      expect(names(body.customers)).toEqual(expect.arrayContaining(['Orlan Stompf', 'Orlan Stumpf']));
+      expect(names(body.customers)).toEqual(expect.arrayContaining(['Orlan Stompf', 'Orlan Stimpf']));
       expect(body.customers.every((row) => row.approximate === true)).toBe(true);
       expect(body.customers.every((row) => Array.isArray(row.matchReasons))).toBe(true);
       expect(body.approximateCount).toBe(body.customers.length);
@@ -151,7 +151,7 @@ jest.setTimeout(120000);
       expect(exactOn).toEqual(off.body.customers);
       expect(on.body.customers.slice(0, exactOn.length)).toEqual(exactOn);
       expect(on.body.customers.length).toBeGreaterThan(exactOn.length);
-      expect(names(on.body.customers.slice(exactOn.length))).toContain('Orlan Stumpf');
+      expect(names(on.body.customers.slice(exactOn.length))).toContain('Orlan Stimpf');
       expect(on.body.total).toBe(off.body.total);
       expect(on.body.totalPages).toBe(off.body.totalPages);
       expect(on.body.page).toBe(off.body.page);
@@ -186,11 +186,11 @@ jest.setTimeout(120000);
 
     test('a technician only gets approximate customers with their own current visit', async () => {
       const tech = await get('/admin/customers?search=Orlan%20damp', { 'x-test-role': 'technician', 'x-test-tech': techId });
-      expect(names(tech.body.customers)).toEqual(['Orlan Stumpf']);
+      expect(names(tech.body.customers)).toEqual(['Orlan Stimpf']);
       expect(tech.body.customers[0].approximate).toBe(true);
       expect(tech.body.total).toBe(0);
       const admin = await get('/admin/customers?search=Orlan%20damp');
-      expect(names(admin.body.customers)).toEqual(expect.arrayContaining(['Orlan Stompf', 'Orlan Stumpf']));
+      expect(names(admin.body.customers)).toEqual(expect.arrayContaining(['Orlan Stompf', 'Orlan Stimpf']));
     });
 
     test('a technician with no visits gets nothing', async () => {
@@ -209,7 +209,7 @@ jest.setTimeout(120000);
       expect(body.services.length).toBe(2);
       expect(body.services.every((row) => row.approximate === true)).toBe(true);
       expect(body.approximateCount).toBe(2);
-      expect(body.services.map((row) => row.customerName).sort()).toEqual(['Orlan Stompf', 'Orlan Stumpf']);
+      expect(body.services.map((row) => row.customerName).sort()).toEqual(['Orlan Stompf', 'Orlan Stimpf']);
     });
 
     test('exact rows come first and are unchanged', async () => {
@@ -219,13 +219,13 @@ jest.setTimeout(120000);
       const on = await get(`/admin/schedule/list?search=Stompf&from=${futureDate(0)}`);
       expect(off.body.services.map((row) => row.customerName)).toEqual(['Orlan Stompf']);
       expect(on.body.services.slice(0, off.body.services.length)).toEqual(off.body.services);
-      expect(on.body.services.slice(off.body.services.length).map((row) => row.customerName)).toEqual(['Orlan Stumpf']);
+      expect(on.body.services.slice(off.body.services.length).map((row) => row.customerName)).toEqual(['Orlan Stimpf']);
       expect(on.body.total).toBe(off.body.total);
     });
 
     test('a technician only gets their own assigned appointments', async () => {
       const { body } = await get(`/admin/schedule/list?search=Orlan%20damp&from=${futureDate(0)}`, { 'x-test-role': 'technician', 'x-test-tech': techId });
-      expect(body.services.map((row) => row.customerName)).toEqual(['Orlan Stumpf']);
+      expect(body.services.map((row) => row.customerName)).toEqual(['Orlan Stimpf']);
       expect(body.services[0].approximate).toBe(true);
     });
 

@@ -29,7 +29,7 @@ afterEach(() => {
 });
 
 const exact = { id: 'e1', firstName: 'Orlan', lastName: 'Stompf', phone: '+19415550001', address: '1 Sample Way' };
-const sound = { id: 's1', firstName: 'Orlan', lastName: 'Stumpf', phone: '+19415550002', address: '2 Sample Way', approximate: true, matchReasons: [] };
+const sound = { id: 's1', firstName: 'Orlan', lastName: 'Stimpf', phone: '+19415550002', address: '2 Sample Way', approximate: true, matchReasons: [] };
 
 describe('splitApproximate', () => {
   it('keeps the exact rows first and finds the first approximate row', () => {
@@ -59,7 +59,7 @@ describe('CustomerDirectoryTable (Customers page)', () => {
     const rows = screen.getAllByRole('row').map((row) => row.textContent);
     const at = rows.findIndex((text) => text.includes('Did you mean'));
     expect(rows[at - 1]).toContain('Orlan Stompf');
-    expect(rows[at + 1]).toContain('Orlan Stumpf');
+    expect(rows[at + 1]).toContain('Orlan Stimpf');
   });
 
   it('shows no divider when every row is exact', () => {
@@ -75,7 +75,7 @@ describe('ScheduleClientSearch', () => {
 
   it('shows sound-alike customers under a "Did you mean" divider after the exact ones', async () => {
     vi.mocked(adminFetch).mockResolvedValue({
-      services: [svc('a1', 'c1', 'Orlan Stompf'), svc('b1', 'c2', 'Orlan Stumpf', { approximate: true, matchReasons: [] })],
+      services: [svc('a1', 'c1', 'Orlan Stompf'), svc('b1', 'c2', 'Orlan Stimpf', { approximate: true, matchReasons: [] })],
       approximateCount: 1,
     });
     render(<ScheduleClientSearch onSelect={() => {}} />);
@@ -85,7 +85,7 @@ describe('ScheduleClientSearch', () => {
     await waitFor(() => expect(screen.getByTestId('did-you-mean')).toBeInTheDocument(), { timeout: 2000 });
     const text = document.body.textContent;
     expect(text.indexOf('Orlan Stompf')).toBeLessThan(text.indexOf('Did you mean'));
-    expect(text.indexOf('Did you mean')).toBeLessThan(text.indexOf('Orlan Stumpf'));
+    expect(text.indexOf('Did you mean')).toBeLessThan(text.indexOf('Orlan Stimpf'));
     expect(screen.getAllByTestId('did-you-mean')).toHaveLength(1);
   });
 
@@ -108,10 +108,10 @@ describe('CreateAppointmentModal customer picker', () => {
       : reply({}))));
     render(<MemoryRouter><CreateAppointmentModal onClose={() => {}} onCreated={() => {}} onChange={() => {}} /></MemoryRouter>);
     fireEvent.change(screen.getByPlaceholderText('Search by name or phone...'), { target: { value: 'Orlan Stompf' } });
-    await screen.findByText(/Stumpf/);
+    await screen.findByText(/Stimpf/);
     expect(screen.getAllByTestId('did-you-mean')).toHaveLength(1);
     const text = document.body.textContent;
     expect(text.indexOf('Orlan Stompf')).toBeLessThan(text.indexOf('Did you mean'));
-    expect(text.indexOf('Did you mean')).toBeLessThan(text.indexOf('Orlan Stumpf'));
+    expect(text.indexOf('Did you mean')).toBeLessThan(text.indexOf('Orlan Stimpf'));
   });
 });
