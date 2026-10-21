@@ -479,6 +479,8 @@ async function buildServiceReportV1ResponseData(service, token, {
   lawnWaterInRain = false,
   // GATE_REPORT_WEB_PEOPLE: the simple web view asks the build for the next visit and its reschedule link.
   webPeopleNext = false,
+  // OPT-IN on the same terms (GATE_REPORT_WEB_SLIDER): only the live simple-web /data render shows the then-and-now slider.
+  lawnSlider = false,
 } = {}) {
   // staffViewer gates internal_only companion sections (combined-service
   // completions): report-data omits them from customer payloads entirely.
@@ -502,6 +504,7 @@ async function buildServiceReportV1ResponseData(service, token, {
     lawnRainfastWatch,
     lawnWaterInRain,
     webPeopleNext,
+    lawnSlider,
   });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
@@ -2603,6 +2606,8 @@ router.get('/:token/data', async (req, res, next) => {
         lawnRainfastWatch: true,
         lawnWaterInRain: true,
         webPeopleNext: simpleWeb && webPeopleLive(simpleWeb, reportGates),
+        // GATE_REPORT_WEB_SLIDER: asked for only on a live simple-web view.
+        lawnSlider: simpleWeb && typeof reportGates.reportWebSliderLive === 'function' && reportGates.reportWebSliderLive(),
       });
       // The next-visit rows are for webPeople only; the key never leaves the server.
       const webPeopleVisits = v1Data.webPeopleNext;

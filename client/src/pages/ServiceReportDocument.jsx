@@ -9,6 +9,7 @@ import {
 } from '../components/report/markedPhotoCopy';
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
 import ReportText, { reportSectionsForText } from '../components/report/ReportSections';
+import LawnBeforeAfterSlider from '../components/report/LawnBeforeAfterSlider';
 import { isTroubleSpotPhoto, rateWithBasis, sameSentence, techTextBeyondSummary } from './serviceReportCleanup';
 
 // Work-order style service report document (owner direction 2026-08-03,
@@ -1791,6 +1792,11 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
             </p>
           </div>
         ))}
+
+        {/* GATE_REPORT_WEB_SLIDER: last visit's photo against this visit's, web view only (the key rides live simple-web payloads). */}
+        {web && data.lawnSlider && (
+          <LawnBeforeAfterSlider slider={data.lawnSlider} cardProps={gc} header={<SectionHeader>Then and now</SectionHeader>} />
+        )}
 
         {/* Service photos — embedded (owner 2026-08-03, supersedes the
             portal-link-only call earlier the same day). */}
