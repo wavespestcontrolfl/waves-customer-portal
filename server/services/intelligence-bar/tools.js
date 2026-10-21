@@ -20,9 +20,11 @@ const { isAlwaysFreeServiceType } = require('../no-cost-visit-types');
 const { isReService } = require('../re-service');
 const {
   MAX_RESULTS: MAX_NAME_MATCHES, MAX_RESULTS_V2: MAX_NAME_MATCHES_V2, isNameLikeSearch, rankNameMatches,
-  buildNameIndex, prefilterNameIndex, cachedNameIndex, MAX_SURVIVORS: MAX_NAME_SURVIVORS,
+  buildNameIndex, prefilterNameIndex, cachedNameIndex, resetNameIndexCache, MAX_SURVIVORS: MAX_NAME_SURVIVORS,
 } = require('./name-match');
 const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
+const { whereCompletedCall } = require('../missed-call-text-back');
+const { whereNotSandboxCall } = require('../voice-agent/relay-protocol');
 const { resolveCloseCatalogService } = require('./booking-service-match');
 const { resolveBillingLane } = require('../billing-lane');
 const { stampPrimaryLineDiscount, stampPricingRegimeMarker, capsSnapshotFromPricing } = require('../booking/visit-financial-stamps');
@@ -413,6 +415,13 @@ const DUPLICATE_QUEUE_LIMIT = 50;
 // even with the group count capped (codex #4348 r14 P2).
 const DUPLICATE_CANDIDATE_LIMIT = 10;
 
+// A customer written here may have a new or changed name: drop the cached name
+// index so the next search sees it. (Customers created or renamed elsewhere,
+// such as a booking or the admin screens, show up when the index expires.)
+async function nameIndexStale(write) {
+  try { return await write; } finally { resetNameIndexCache(); }
+}
+
 async function executeTool(toolName, input, actionContext = {}) {
   try {
     switch (toolName) {
@@ -424,13 +433,13 @@ async function executeTool(toolName, input, actionContext = {}) {
       case 'query_revenue': return await queryRevenue(input);
       case 'compare_technicians': return await compareTechnicians(input);
       case 'find_duplicates': return await findDuplicates(input);
-      case 'create_customer': return await createCustomer(input);
-      case 'update_customer': return await updateCustomer(input.customer_id, input.updates, input._ib_customer_version,
+      case 'create_customer': return await nameIndexStale(createCustomer(input));
+      case 'update_customer': return await nameIndexStale(updateCustomer(input.customer_id, input.updates, input._ib_customer_version,
         Object.prototype.hasOwnProperty.call(input, '_ib_notes_before') ? { value: input._ib_notes_before } : null,
         input._rate_family ? { family: input._rate_family, ledgerPin: input._rate_ledger_pin } : null,
         input._tier_upgrade_email ? { pin: input._tier_upgrade_email, operationId: actionContext.operationId } : null,
-        input._ib_billing_pin);
-      case 'bulk_update_customers': return await bulkUpdateCustomers(input.customer_ids, input.updates);
+        input._ib_billing_pin));
+      case 'bulk_update_customers': return await nameIndexStale(bulkUpdateCustomers(input.customer_ids, input.updates));
       case 'update_property_access': return await updatePropertyAccess(input);
       case 'cancel_plan': return await cancelPlan(input, actionContext);
       case 'create_appointment': return await createAppointment(input, actionContext);
@@ -510,6 +519,8 @@ async function queryCustomers(input, readCustomerIds = [], pageCustomerId = null
   if (exactCount === 0) return await withApproximateCustomers(result, unsearched, { search, limit, offset, pageCustomerId, scoped: readCustomerIds.length > 0 });
   // Name matcher v2: one exact hit can still be the wrong person.
   if (exactCount === 1 && nameMatchV2Live()) return await withAlternativeCustomers(result, unsearched, { search, limit, offset, pageCustomerId, scoped: readCustomerIds.length > 0 });
+  // Several exact hits: same rows, ordered by name fit and context.
+  if (exactCount > 1 && nameMatchV2Live()) return await withContextOrder(result, { search, offset, pageCustomerId, keepSort: !!sort_by });
   return result;
 }
 
@@ -608,11 +619,12 @@ const APPROXIMATE_CANDIDATE_CAP = 20000;
 async function withApproximateCustomers(result, unsearched, { search, limit, offset, pageCustomerId = null, scoped = false }) {
   if (offset > 0 || !search || !isNameLikeSearch(search)) return result;
   const v2 = nameMatchV2Live();
-  const ranked = v2
+  const found = v2
     ? await rankScopedCustomerNames(unsearched, search, Math.min(limit, MAX_NAME_MATCHES_V2), pageCustomerId, scoped)
-    : rankNameMatches(search, await nameCandidates(unsearched), { limit: Math.min(limit, MAX_NAME_MATCHES) });
-  if (!ranked.length) return result;
-  const customers = await rankedCustomerRows(unsearched, ranked, v2);
+    : { ranked: rankNameMatches(search, await nameCandidates(unsearched), { limit: Math.min(limit, MAX_NAME_MATCHES) }), context: null };
+  if (!found.ranked.length) return result;
+  const customers = await rankedCustomerRows(unsearched, found.ranked, v2 ? { search, context: found.context } : null);
+  if (!customers.length) return result;
   return {
     ...result,
     approximate: true,
@@ -635,16 +647,19 @@ function nameCandidates(unsearched, cap = APPROXIMATE_CANDIDATE_CAP) {
 // filtered search can reach any customer; scoring stays capped per request.
 const NAME_INDEX_BOOK_CAP = 200000;
 
-// Customer rows (main query columns) in ranked order. v2 rows carry `match`.
-async function rankedCustomerRows(unsearched, ranked, v2) {
+// Customer rows (main query columns) in ranked order. With `rescore` (v2) the
+// rows' CURRENT names are scored again, because the cached index can be up to
+// five minutes old: a customer renamed since drops out unless the new name
+// still qualifies, and the score shown is the current one. v2 rows carry `match`.
+async function rankedCustomerRows(unsearched, ranked, rescore = null) {
   const rows = await unsearched.clone().whereIn('customers.id', ranked.map(r => r.id));
+  if (rescore) {
+    const byId = new Map(rows.map(row => [row.id, row]));
+    return rankNameMatches(rescore.search, rows, { v2: true, limit: rows.length, context: rescore.context })
+      .map(entry => ({ ...customerListRow(byId.get(entry.id)), match: { score: entry.score, reasons: entry.reasons || [] } }));
+  }
   const rank = new Map(ranked.map((r, i) => [r.id, i]));
-  return rows.sort((a, b) => rank.get(a.id) - rank.get(b.id)).map((row) => {
-    const listed = customerListRow(row);
-    if (!v2) return listed;
-    const entry = ranked[rank.get(row.id)];
-    return { ...listed, match: { score: entry.score, reasons: entry.reasons || [] } };
-  });
+  return rows.sort((a, b) => rank.get(a.id) - rank.get(b.id)).map(customerListRow);
 }
 
 const APPROXIMATE_CUSTOMER_NOTE_V2 = `${APPROXIMATE_CUSTOMER_NOTE} Each row's match.reasons says if that person is on the operator's screen, has a visit today or tomorrow, or was texted or called in the last 7 days.`;
@@ -675,7 +690,11 @@ async function nameMatchContext(pageCustomerId, candidateIds) {
       // (scheduled, failed, canceled and held rows do not count; Codex #6367 r4).
       excludeUnresolvedSendReservations(db('sms_log').distinct('customer_id').whereIn('customer_id', candidateIds).where('created_at', '>=', since)
         .where(function () { this.where('direction', 'inbound').orWhereIn('status', ['sent', 'delivered', 'read']); })),
-      db('call_log').distinct('customer_id').whereIn('customer_id', candidateIds).where('created_at', '>=', since),
+      // Only a call that reached someone (the missed-call text-back rule): a
+      // bridged outbound call or a handled inbound one, never a ring-out,
+      // failed or unbridged call, and never a Sandy bake-off call.
+      whereCompletedCall(db('call_log').distinct('customer_id').whereIn('customer_id', candidateIds).where('created_at', '>=', since)
+        .modify(q => whereNotSandboxCall(q))),
     ]);
     for (const row of visits) context.visitTodayIds.add(row.customer_id);
     for (const row of [...texts, ...calls]) context.recentContactIds.add(row.customer_id);
@@ -727,16 +746,18 @@ async function allowedSurvivors(unsearched, search, index, include) {
 
 // v2 ranking: look up the few candidates that share a sound key with the
 // search (at most 500), keep the ones the query allows, read the context only
-// for them, then score only them.
-async function rankScopedCustomerNames(unsearched, search, limit, pageCustomerId, scoped) {
+// for them (and for `alsoIds`, such as the exact hit), then score only them.
+// Returns the ranking and the context it used, so the caller can score the
+// final rows again against their current names.
+async function rankScopedCustomerNames(unsearched, search, limit, pageCustomerId, scoped, alsoIds = []) {
   const index = await scopedNameIndex(unsearched, scoped);
   const include = pageCustomerId ? [pageCustomerId] : [];
   const survivors = scoped
     ? prefilterNameIndex(search, index, { include })
     : await allowedSurvivors(unsearched, search, index, include);
-  if (!survivors.length) return [];
-  const context = await nameMatchContext(pageCustomerId, survivors.map(entry => entry.id));
-  return rankNameMatches(search, survivors, { v2: true, limit, context, prefiltered: true });
+  if (!survivors.length) return { ranked: [], context: null };
+  const context = await nameMatchContext(pageCustomerId, [...survivors.map(entry => entry.id), ...alsoIds]);
+  return { ranked: rankNameMatches(search, survivors, { v2: true, limit, context, prefiltered: true }), context };
 }
 
 // v2: the exact search found one customer. Rank the whole scoped book anyway
@@ -744,20 +765,42 @@ async function rankScopedCustomerNames(unsearched, search, limit, pageCustomerId
 // nothing else is close.
 async function withAlternativeCustomers(result, unsearched, { search, limit, offset, pageCustomerId, scoped = false }) {
   if (offset > 0 || !search || !isNameLikeSearch(search)) return result;
-  const exactId = result.customers[0] && result.customers[0].id;
+  const exact = result.customers[0];
   // One extra slot: the exact hit may rank among them.
-  const ranked = await rankScopedCustomerNames(unsearched, search, MAX_NAME_MATCHES_V2 + 1, pageCustomerId, scoped);
-  const exactAt = ranked.findIndex(r => r.id === exactId);
-  const others = ranked.filter(r => r.id !== exactId).slice(0, Math.min(limit, MAX_NAME_MATCHES_V2));
+  const { ranked, context } = await rankScopedCustomerNames(unsearched, search, MAX_NAME_MATCHES_V2 + 1, pageCustomerId, scoped, [exact.id]);
+  const others = ranked.filter(r => r.id !== exact.id).slice(0, Math.min(limit, MAX_NAME_MATCHES_V2));
   if (!others.length) return result;
+  const alternatives = await rankedCustomerRows(unsearched, others, { search, context });
+  if (!alternatives.length) return result;
+  // The exact hit is scored by its current name, like the alternatives.
+  const [now] = rankNameMatches(search, [exact], { v2: true, context });
   return {
     ...result,
-    alternatives: await rankedCustomerRows(unsearched, others, true),
-    exact_hit_match: exactAt < 0 ? null : { rank: exactAt + 1, score: ranked[exactAt].score, reasons: ranked[exactAt].reasons || [] },
+    alternatives,
+    exact_hit_match: now ? { rank: 1 + alternatives.filter(a => a.match.score > now.score).length, score: now.score, reasons: now.reasons || [] } : null,
     note: ALTERNATIVE_CUSTOMER_NOTE,
   };
 }
 
+const EXACT_ORDER_NOTE = 'Several customers matched the search exactly. They are the same exact matches, ordered by how well the name fits and by context (match.score and match.reasons: on_screen, visit_soon, recent_contact). When the top two scores are close, show them with offer_choices and get a confirmed pick before any write or send.';
+
+// v2: several exact hits. The set is unchanged; each row that fits the dictated
+// name gets `match`, and without an explicit sort_by the best fits come first.
+async function withContextOrder(result, { search, offset, pageCustomerId, keepSort }) {
+  if (offset > 0 || !search || !isNameLikeSearch(search)) return result;
+  const rows = result.customers;
+  const context = await nameMatchContext(pageCustomerId, rows.map(row => row.id));
+  const ranked = rankNameMatches(search, rows, { v2: true, limit: rows.length, context });
+  if (!ranked.length) return result;
+  const entries = new Map(ranked.map(entry => [entry.id, entry]));
+  const withMatch = rows.map(row => (entries.has(row.id)
+    ? { ...row, match: { score: entries.get(row.id).score, reasons: entries.get(row.id).reasons || [] } } : row));
+  const order = keepSort ? withMatch : [
+    ...ranked.map(entry => withMatch.find(row => row.id === entry.id)),
+    ...withMatch.filter(row => !entries.has(row.id)),
+  ];
+  return { ...result, customers: order, note: EXACT_ORDER_NOTE };
+}
 
 async function findOverdueCustomers(input) {
   const { service_category, overdue_days = 0, limit: rawLimit } = input;
