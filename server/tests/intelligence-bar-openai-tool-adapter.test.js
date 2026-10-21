@@ -193,11 +193,41 @@ describe('reasoning replay', () => {
     expect(plain[0].id).toBeUndefined();
   });
 
-  test('a history copied from elsewhere (no side table) converts without reasoning', () => {
+  test('the saved round survives a checkpoint (JSON) round trip and is replayed on a resume', () => {
     const reply = Adapter.fromOpenAIResponse({ output: [reasoning('rs_1'), fc('fc_1', 'c1')] });
-    const copy = [...reply.content];
-    expect(Adapter.toInputItems([{ role: 'assistant', content: copy }, { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'c1', content: 'x' }] }]).map(i => i.type))
+    const saved = JSON.parse(JSON.stringify([{ role: 'assistant', content: reply.content }, { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'c1', content: 'x' }] }]));
+    expect(Adapter.toInputItems(saved).map(i => i.id || `out:${i.call_id}`)).toEqual(['rs_1', 'fc_1', 'out:c1']);
+  });
+
+  test('a saved round that no longer matches its blocks, or has lost the private field, converts without reasoning', () => {
+    const reply = Adapter.fromOpenAIResponse({ output: [reasoning('rs_1'), fc('fc_1', 'c1')] });
+    const results = [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'c1', content: 'x' }] }];
+    const stripped = reply.content.map(({ _openai, ...block }) => block);
+    expect(Adapter.toInputItems([{ role: 'assistant', content: stripped }, ...results]).map(i => i.type)).toEqual(['function_call', 'function_call_output']);
+    const mismatched = reply.content.map(block => ({ ...block, id: 'other' }));
+    expect(Adapter.toInputItems([{ role: 'assistant', content: mismatched }, { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'other', content: 'x' }] }]).map(i => i.type))
       .toEqual(['function_call', 'function_call_output']);
+  });
+
+  test('reasoning that cannot be replayed on a round with calls is flagged; a round with no reasoning is not', () => {
+    const flagged = Adapter.fromOpenAIResponse({ output: [reasoning('rs_1', null), fc('fc_1', 'c1')] });
+    expect(flagged.content[0]._openai).toEqual({ unreplayable: true });
+    expect(Adapter.fromOpenAIResponse({ output: [fc('fc_1', 'c1')] }).content[0]._openai).toBeUndefined();
+  });
+});
+
+describe('only completed function calls run', () => {
+  test.each([
+    ['an in_progress call', { output: [{ type: 'function_call', call_id: 'c', name: 'q', arguments: '{}', status: 'in_progress' }] }],
+    ['an incomplete call', { status: 'incomplete', output: [{ type: 'function_call', call_id: 'c', name: 'q', arguments: '{"a"', status: 'incomplete' }] }],
+    ['a call with no status in an incomplete response', { status: 'incomplete', output: [{ type: 'function_call', call_id: 'c', name: 'q', arguments: '{}' }] }],
+  ])('%s fails the round (no tool_use)', (_label, data) => {
+    expect(() => Adapter.fromOpenAIResponse(data)).toThrow(expect.objectContaining({ code: 'openai_incomplete' }));
+  });
+
+  test('completed calls, and a call with no status in a completed response, become tool_use', () => {
+    expect(Adapter.fromOpenAIResponse({ status: 'completed', output: [{ type: 'function_call', call_id: 'c', name: 'q', arguments: '{}', status: 'completed' }] }).stop_reason).toBe('tool_use');
+    expect(Adapter.fromOpenAIResponse({ status: 'completed', output: [{ type: 'function_call', call_id: 'c', name: 'q', arguments: '{}' }] }).stop_reason).toBe('tool_use');
   });
 });
 

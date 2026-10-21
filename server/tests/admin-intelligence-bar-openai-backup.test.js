@@ -333,6 +333,20 @@ describe('GATE_IB_OPENAI_BACKUP on /query', () => {
     expect(openaiRequests[2].input.find(item => item.id === 'rs_2')).toMatchObject({ type: 'reasoning', encrypted_content: 'enc_rs_2' });
   });
 
+  test('an unfinished function call never runs: the original Anthropic error is rethrown', async () => {
+    process.env.GATE_IB_OPENAI_BACKUP = 'true';
+    mockMessagesCreate.mockRejectedValue(LIMIT_ERROR);
+    openaiScript = [{ body: { id: 'r', status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [
+      { type: 'function_call', call_id: 'call_x', name: 'query_customers', arguments: '{"search":', status: 'incomplete' }] } }];
+    await withServer(async (baseUrl) => {
+      const { status, body } = await postQuery(baseUrl, { prompt: 'find Jeff', context: 'customers' });
+      expect(status).toBe(400);
+      expect(body.error).toBe(LIMIT_ERROR.message);
+    });
+    expect(mockExecuteTool).not.toHaveBeenCalled();
+    expect(mockCreatePendingAction).not.toHaveBeenCalled();
+  });
+
   test('the last round tells the backup it may not call a tool', async () => {
     process.env.GATE_IB_OPENAI_BACKUP = 'true';
     mockMessagesCreate.mockRejectedValue(LIMIT_ERROR);

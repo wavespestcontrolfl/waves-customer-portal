@@ -24,11 +24,18 @@
  * Reasoning: a reasoning model's reply carries `reasoning` items that the
  * Responses API wants back, next to the item that followed them, on the next
  * round (store:false keeps nothing server-side, so the request asks for
- * `reasoning.encrypted_content`). The loop's history is Anthropic-shaped, so each
- * reply's raw items ride in a side table keyed by that reply's `content` array
- * (the loop appends that very array to the history); toInputItems replays them in
- * their original order for the rounds of THIS request. A history rebuilt from a
- * checkpoint has no side table and is converted without reasoning.
+ * `reasoning.encrypted_content`). The loop's history is Anthropic-shaped, so the
+ * reply's replayable items (ids, order, encrypted reasoning) ride on its first
+ * content block as a private `_openai` field. It is saved with the task
+ * checkpoint, so a resume replays them too; only a backup task ever reads it
+ * (a marked task never goes back to Anthropic, which would refuse the field).
+ * A round whose function calls had reasoning that cannot be replayed is flagged
+ * `_openai.unreplayable`; ib-openai-backup.js drops such rounds on a resume
+ * (the model starts those steps over, from the recorded receipts) rather than
+ * send a function_call without its reasoning.
+ *
+ * A function_call that did not complete (status other than 'completed') never
+ * becomes a tool_use: the round fails, as in voice-agent/relay-openai-client.js.
  *
  * The request carries `store: false`: Intelligence Bar prompts carry customer
  * detail, the same rule llm/call.js applies to every OpenAI request.
@@ -128,13 +135,11 @@ const argumentsText = input => {
 const blocksOf = message => (typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : (Array.isArray(message.content) ? message.content : []));
 const isText = block => block.type === 'text' && typeof block.text === 'string';
 
-// reply.content (the array itself) -> the round's raw output items, replayable.
-const rawRounds = new WeakMap();
-
 // The round's output items in their original order, as far as they can be passed
 // back statelessly: every item with an id, every reasoning item with encrypted
 // content, and no reasoning run at the end (nothing follows it to pair with).
-// Null when the round has no reasoning to keep or an item lacks what a replay needs.
+// { items } when replayable; { unreplayable: true } when function calls had
+// reasoning that cannot be replayed; null when there was no reasoning to keep.
 function replayableRound(output) {
   const items = (Array.isArray(output) ? output : []).filter(item => item && ['reasoning', 'message', 'function_call'].includes(item.type));
   let end = items.length;
@@ -144,7 +149,8 @@ function replayableRound(output) {
   const usable = kept.every(item => typeof item.id === 'string' && item.id
     && (item.type !== 'reasoning' || (typeof item.encrypted_content === 'string' && item.encrypted_content))
     && (item.type !== 'function_call' || (typeof item.call_id === 'string' && item.call_id)));
-  return usable ? kept.map(replayItem) : null;
+  if (usable) return { items: kept.map(replayItem) };
+  return kept.some(item => item.type === 'function_call') ? { unreplayable: true } : null;
 }
 
 function replayItem(item) {
@@ -154,6 +160,16 @@ function replayItem(item) {
     type: 'message', id: item.id, role: 'assistant', status: item.status || 'completed',
     content: (Array.isArray(item.content) ? item.content : []).map(part => (part?.type === 'output_text' ? { type: 'output_text', text: part.text || '', annotations: [] } : part)),
   };
+}
+
+// The saved round for an assistant message, when it still matches its blocks:
+// every call it replays is a tool_use here and every tool_use here is replayed.
+function savedRound(content) {
+  const items = Array.isArray(content) ? content.find(block => block?._openai)?._openai?.items : null;
+  if (!Array.isArray(items)) return null;
+  const replayed = items.filter(item => item.type === 'function_call').map(item => item.call_id).sort();
+  const present = content.filter(block => block?.type === 'tool_use').map(block => block.id).sort();
+  return JSON.stringify(replayed) === JSON.stringify(present) ? items : null;
 }
 
 function assistantItems(blocks) {
@@ -190,7 +206,7 @@ function userItems(blocks) {
 function toInputItems(messages) {
   const items = [];
   for (const message of Array.isArray(messages) ? messages : []) {
-    const replay = message.role === 'assistant' ? rawRounds.get(message.content) : null;
+    const replay = message.role === 'assistant' ? savedRound(message.content) : null;
     items.push(...(replay || (message.role === 'assistant' ? assistantItems(blocksOf(message)) : userItems(blocksOf(message)))));
   }
   return pairCalls(items);
@@ -226,8 +242,15 @@ function parseArguments(raw) {
   }
 }
 
-function outputBlocks(item) {
+function outputBlocks(item, response) {
   if (item?.type === 'function_call' && item.name) {
+    // Only a completed call may run (an owner-direct write commits at once).
+    const unfinished = (item.status && item.status !== 'completed') || (response?.status === 'incomplete' && !item.status);
+    if (unfinished) {
+      const err = new Error('OpenAI backup function_call did not complete');
+      err.code = 'openai_incomplete';
+      throw err;
+    }
     return [{ type: 'tool_use', id: item.call_id || item.id, name: item.name, input: parseArguments(item.arguments) }];
   }
   if (item?.type !== 'message') return []; // reasoning items stay behind
@@ -256,11 +279,11 @@ function ledgerFailure(data, blocks) {
 }
 
 function fromOpenAIResponse(data) {
-  const raw = (Array.isArray(data?.output) ? data.output : []).flatMap(outputBlocks);
+  const raw = (Array.isArray(data?.output) ? data.output : []).flatMap(item => outputBlocks(item, data));
   const stop_reason = stopReasonOf(data, raw);
   const content = raw.map(({ refusal, ...block }) => block);
   const replay = replayableRound(data?.output);
-  if (replay) rawRounds.set(content, replay);
+  if (replay && content.length) content[0] = { ...content[0], _openai: replay };
   const reply = {
     id: data?.id,
     model: data?.model,

@@ -68,6 +68,23 @@ function loadedToolNames(messages) {
 
 const usesToolSearch = tools => (tools || []).some(tool => tool?.defer_loading === true || (tool?.type && tool.type !== 'custom'));
 
+// A saved backup round whose function calls had reasoning that cannot be sent
+// back (openai-tool-adapter.js flags it `_openai.unreplayable`) is dropped with
+// its results: sending the call without its reasoning would fail the first request.
+// Nothing is repeated blindly: the resume prompt carries the saved receipts.
+function withoutUnreplayableRounds(messages) {
+  const flagged = (Array.isArray(messages) ? messages : []).filter(m => m.role === 'assistant' && Array.isArray(m.content) && m.content.some(b => b?._openai?.unreplayable));
+  if (!flagged.length) return messages;
+  const dropped = new Set(flagged.flatMap(m => m.content.filter(b => b?.type === 'tool_use').map(b => b.id)));
+  return messages.map(message => {
+    if (!Array.isArray(message.content)) return message;
+    const content = flagged.includes(message)
+      ? message.content.filter(b => b?.type === 'text').map(({ _openai, ...block }) => block)
+      : message.content.filter(b => !(b?.type === 'tool_result' && dropped.has(b.tool_use_id)));
+    return content === message.content ? message : { ...message, content };
+  }).filter(message => !Array.isArray(message.content) || message.content.length);
+}
+
 /**
  * What the request runs on after the switch: { tools, messages, toolSearch }.
  * Tool search off: a request on the search path gets the ordinary page list
@@ -83,7 +100,7 @@ function backupRequestState({ tools, messages, context, actionScope }) {
     const ordinary = ActionRegistry.initialTools(context, { ...actionScope, toolSearch: false }).map(apiToolDefinition);
     nextTools = [...new Map([...ordinary, ...loaded].map(tool => [tool.name, tool])).values()];
   }
-  return { tools: nextTools, messages: ToolSearch.stripServerSearchBlocks(messages), toolSearch: false };
+  return { tools: nextTools, messages: withoutUnreplayableRounds(ToolSearch.stripServerSearchBlocks(messages)), toolSearch: false };
 }
 
 // The same prompt, with the two sentences that name the Anthropic tool search

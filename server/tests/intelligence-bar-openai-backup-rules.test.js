@@ -12,6 +12,7 @@ const Backup = require('../services/intelligence-bar/ib-openai-backup');
 const ActionRegistry = require('../services/intelligence-bar/action-registry');
 const ToolSearch = require('../services/intelligence-bar/tool-search');
 const IbTasks = require('../services/intelligence-bar/tasks');
+const Adapter = require('../services/intelligence-bar/openai-tool-adapter');
 
 describe('isProviderError', () => {
   const err = (status, message = '', extra = {}) => Object.assign(new Error(message), { status }, extra);
@@ -107,5 +108,51 @@ describe('saved task provider', () => {
     expect(mockWhere).toHaveBeenCalledWith({ id: 't1', actor_id: 'actor-1', runner_token: 'runner-1' });
     expect(mockRaw).toHaveBeenCalledWith('request || ?::jsonb', [JSON.stringify({ model_provider: 'openai_backup' })]);
     expect(mockUpdate).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('resume of a backup task after a tool round', () => {
+  const actionScope = { role: 'admin', context: 'customers', fullAccess: false };
+  const reasoning = (id, enc = `enc_${id}`) => ({ type: 'reasoning', id, summary: [], ...(enc ? { encrypted_content: enc } : {}) });
+  const call = (id, call_id) => ({ type: 'function_call', id, call_id, name: 'query_customers', arguments: '{}', status: 'completed' });
+  const history = round => [
+    { role: 'user', content: [{ type: 'text', text: 'find' }] },
+    { role: 'assistant', content: round.content },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'c1', content: '{"ok":1}' }] },
+  ];
+  const resumed = (messages, extra = {}) => {
+    const live = { tools: [], messages: JSON.parse(JSON.stringify(messages)), systemPrompt: 'SYS' };
+    const applied = [];
+    const caller = Backup.createModelCaller({
+      context: 'customers', actionScope, task: { request: { model_provider: 'openai_backup' } }, finalMessages: m => m,
+      read: () => live, apply: next => { Object.assign(live, next); applied.push(next); }, markTask: async () => {}, ...extra,
+    });
+    return { caller, live };
+  };
+
+  afterEach(() => { delete process.env.GATE_IB_OPENAI_BACKUP; });
+
+  test('the checkpointed round still carries its reasoning: the resumed request replays it', async () => {
+    process.env.GATE_IB_OPENAI_BACKUP = 'true';
+    const { caller, live } = resumed(history(Adapter.fromOpenAIResponse({ output: [reasoning('rs_1'), call('fc_1', 'c1')] })));
+    await caller.startFromTask();
+    expect(Adapter.toInputItems(live.messages).map(i => i.id || i.role || `out:${i.call_id}`)).toEqual(['user', 'rs_1', 'fc_1', 'out:c1']);
+    expect(caller.answerSuffix()).toMatch(/answered by the backup model/);
+  });
+
+  test('a round whose reasoning cannot be replayed is dropped with its result: no function_call goes out without its reasoning', async () => {
+    process.env.GATE_IB_OPENAI_BACKUP = 'true';
+    const { caller, live } = resumed(history(Adapter.fromOpenAIResponse({ output: [reasoning('rs_1', null), call('fc_1', 'c1')] })));
+    await caller.startFromTask();
+    const items = Adapter.toInputItems(live.messages);
+    expect(items.map(i => i.type || i.role)).toEqual(['user']);
+    expect(JSON.stringify(live.messages)).not.toMatch(/_openai|"c1"/);
+  });
+
+  test('with the gate off nothing is switched', async () => {
+    const { caller, live } = resumed(history(Adapter.fromOpenAIResponse({ output: [reasoning('rs_1'), call('fc_1', 'c1')] })));
+    await caller.startFromTask();
+    expect(caller.answerSuffix()).toBe('');
+    expect(JSON.stringify(live.messages)).toMatch(/_openai/);
   });
 });
