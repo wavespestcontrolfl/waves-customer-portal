@@ -24,6 +24,9 @@
  * for a visit that was just reassigned, and the answer never says whether a
  * customer or visit exists. Admins are unrestricted.
  *
+ * GATE_DICTATION_CUSTOMER_NAMES adds customer names to the word list and their surnames to the
+ * transcriber's keyword hints (services/dictation-word-list.js buildDictationHints); off = as above.
+ *
  * Nothing is stored: no row, no S3 object. The audit line carries sizes and
  * counts only, never the audio or the words (audio has no ledger: lane-policies
  * marks the transcription lane `unrecordable`).
@@ -85,15 +88,30 @@ router.post('/', (req, res, next) => (gateOn() ? next() : res.status(404).json(N
 
       // Ids only, already fenced. The prompt is built here from our own records;
       // nothing the client sends other than an id ever reaches the transcriber.
-      const { buildDictationPrompt } = require('../services/dictation-word-list');
+      const { buildDictationPrompt, buildDictationHints } = require('../services/dictation-word-list');
       const { customerId, serviceId } = req.dictationContext;
-      const prompt = await buildDictationPrompt({ customerId, serviceId });
+      // GATE_DICTATION_CUSTOMER_NAMES: the customer-name section and surname keyword hints. A
+      // technician login's names come from its OWN stops only (the word list reads req's scope
+      // from the login, never from the client). Off = the call below is exactly as it was.
+      const namesOn = featureGates.dictationCustomerNamesLive() === true;
+      let prompt;
+      let keywords = null;
+      if (namesOn) {
+        ({ prompt, keywords } = await buildDictationHints({
+          customerId,
+          serviceId,
+          scope: isTechnicianRequest(req) ? { technicianId: req.technicianId } : {},
+        }));
+      } else {
+        prompt = await buildDictationPrompt({ customerId, serviceId });
+      }
 
       const { transcribeWithOpenAI, isImplausibleTranscript } = require('../services/call-recording-processor');
       const voiceFill = require('../services/fast-complete-voice-fill');
       const result = await transcribeWithOpenAI(req.file.buffer, {
         model: process.env.OPENAI_VOICE_FILL_TRANSCRIBE_MODEL || voiceFill.VOICE_FILL_TRANSCRIBE_MODEL,
         prompt,
+        ...(keywords ? { keywords } : {}),
         mimeType: baseType,
         filename,
         // silence is an answer ({ text: '' }), not a provider failure

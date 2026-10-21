@@ -12,6 +12,7 @@
  *   GATE_SMS_SHARED_PHONE_LINK=true (owner 2026-10-10, "link text": when two or more customer rows share the sender's phone, an inbound text attaches to ONE account instead of being filed as an unknown sender. Only when staff marked exactly one of them customers.sms_primary_for_shared_phone (admin PUT smsPrimaryForSharedPhone); no mark or two marks = left unlinked, no guessing (a guessed link would let one person on a shared phone reply for the other account). Strict opt-in via gateEnvValue, read at call time by server/routes/twilio-webhook.js findSingleCustomerByPhone(); SMS only (the voice webhook is unchanged); dark by default; off = a shared phone is not auto-linked, as before. Links a text to an account; sends nothing.)
  *   GATE_DUPLICATES_SAME_ADDRESS=true (the admin Duplicates page and /api/admin/customer-duplicates also list customers at the same address with different phones, for the office to merge or mark as separate; review-only, never auto-merged, the auto-merge cron cannot see them; read at request time via duplicatesSameAddressLive(), strict === 'true', dark by default; off = the page and API are byte-identical to before; sends nothing to a customer)
  *   GATE_DUPLICATES_SAME_NAME=true (the admin Duplicates page and /api/admin/customer-duplicates also list customers with the same first and last name but a different phone and address, for the office to merge, merge while keeping the other address as a second property, or mark as separate; review-only, never auto-merged, the auto-merge cron cannot see them; pairs the shared-phone and same-address lists already show are left out; read at request time via duplicatesSameNameLive(), strict === 'true', dark by default; off = the page and API are byte-identical to before; sends nothing to a customer)
+ *   GATE_IB_MULTI_CARD=true (owner request 2026-10-20: the Intelligence Bar may show up to five separate confirm cards in one answer when each is for a different record and none needs another card's result. Only open edits qualify (contact, address, status, schedule, text and booking cards); a refund, card charge, price, setting, delete or bulk card never joins a set. Each card confirms or cancels on its own and keeps its own pins. Needs GATE_IB_PLATFORM. Read at call time via ibMultiCardLive(), strict 'true', dark by default; off = one card per request, exactly as before.)
  *   GATE_IB_BILLING_MODE_EDIT=true (the Intelligence Bar's update_customer may change one customer's billing type (billing_mode) and per-application fee on its own confirm card, owner ruling D5 2026-10-06; the same billing-type rules as the customer page (services/billing-mode-rules.js), annual prepay and clearing the type refused, never owner-direct, no customer message; read at call time via ibBillingModeEditLive(), strict === 'true', dark by default; off = both fields are refused exactly as before)
  *   GATE_IB_TIER_UPGRADE_EMAIL=true (an Intelligence Bar update_customer card that raises a customer's WaveGuard tier AND changes the monthly rate they are billed emails that customer the membership.tier_upgraded notice after the card is confirmed and the update is saved; the card names the email before Confirm. Never on a bulk card, a first tier, a downgrade, a tier change with no price change, a rate the customer is not billed monthly, an auto-derived tier label, or an inactive or churned customer. Read at call time via ibTierUpgradeEmailLive(), strict 'true', dark by default; off = no pin, no card line and no email, exactly as before.)
  *   GATE_IB_REPRICE_VISITS=true (the Intelligence Bar's reprice_future_visits write tool, owner ruling 2026-10-07: one confirm card changes the per-visit price of one customer's future visits for one service, listing each visit's old -> new price; each visit is saved through the Schedule screen's own visit edit (updateVisitDetails over PUT /admin/schedule/:id/update-details), so the re-price block, validation and CAS are the screen's. Never a completed, in-progress, invoiced, prepaid, annual-prepay-covered or otherwise money-committed visit; a monthly-membership customer is refused (their price is the monthly rate). No customer message is sent. Read at call time via ibRepriceVisitsLive(), strict 'true', dark by default; off = the tool is not offered and refuses every call, changing nothing.)
@@ -279,6 +280,7 @@
  *   GATE_SERVER_DICTATION=true (every staff voice-to-text mic goes through our own transcriber: the mic records a clip and POSTs it to /api/tech/dictation, which hears it with `gpt-transcribe` primed with a server-built word list (the named customer, active technicians, catalog products, service names, pest and lawn terms) instead of the browser's speech recognition, which on iPhone is Apple dictation and mishears names, products and pests. Words appear after the mic stops, not live. Strict opt-in: exactly 'true' in every environment, read at call time via serverDictationLive(). Ships DARK; off = the endpoint answers 404 / {available:false} and every mic keeps today's browser behavior.)
  *   GATE_REPORT_PLAN_RESCHEDULE=true (service report, owner ruling 2026-10-06: "Your plan" and "Your upcoming visits" become one section, and each upcoming visit gets a Reschedule button that opens the customer's self-serve /reschedule link. The server adds rescheduleUrl to each visit and `merged: true` to upcomingVisitsCard; a link is reused, never minted again on each view, and is null when the visit is too close to move or the link cannot be built. Needs GATE_REPORT_UPCOMING_VISITS, which supplies the visits. Strict opt-in: exactly 'true' in every environment, read at call time via reportPlanRescheduleLive(). Ships DARK; off = the report payload and page are byte-identical to before and the two sections stay separate. Sends nothing to a customer.)
  *   GATE_LAWN_REPORT_CLARITY=true (lawn service report, owner ruling 2026-10-08, one gated change left: "Your plan" on a LAWN report lists only the next upcoming lawn visit at the report's property (needs GATE_REPORT_UPCOMING_VISITS; merged or standalone); other service lines are unchanged. The ruling's other half is permanent and ungated since 2026-10-09: a water-in instruction frozen at completion for a customer with NO sprinkler head type or measured rate on file states the AMOUNT and no minutes ("Water in today's treatment with about ½ inch by Fri 8 PM"), and the LIVE banner adds one line inviting the customer to add their sprinkler setup (banner.setupLine, stripped from the PDF, static and text renders). Strict opt-in: exactly 'true' in every environment, read at call time via lawnReportClarityLive(). Ships DARK; off = byte-identical plan card. Sends nothing to a customer.)
+ *   GATE_DICTATION_CUSTOMER_NAMES=true (owner 2026-10-20, after a dictated surname was heard as a common word: staff dictation word list (needs GATE_SERVER_DICTATION) adds a "Customers who may be named" section, full names: the customer on screen first, then customers with a visit today or tomorrow (a technician login: only their own stops), customers who texted or called in the last 48 hours and recently updated active customers (admin logins only), and passes their surnames as extra transcriber keyword hints. Products shrink to make room; the prompt stays at 1800 characters. The list is cached 5 minutes per login scope and day. Strict opt-in: exactly 'true' in every environment, read at call time via dictationCustomerNamesLive(). Ships DARK; off = the word list and keyword hints are exactly as before. Sends nothing to a customer.)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -4963,6 +4965,14 @@ function ibRepriceVisitsLive() {
   return process.env.GATE_IB_REPRICE_VISITS === 'true';
 }
 
+// GATE_IB_MULTI_CARD read at CALL time — strict `=== 'true'`, dark, and it needs
+// GATE_IB_PLATFORM (the write frontier it relaxes exists only on the platform
+// path). The Intelligence Bar may then mint up to five independent confirm
+// cards in one request (services/intelligence-bar/multi-card.js). Kill: unset.
+function ibMultiCardLive() {
+  return process.env.GATE_IB_MULTI_CARD === 'true' && gateEnvValue('GATE_IB_PLATFORM');
+}
+
 // GATE_IB_GENERAL_READ read at CALL time — strict `=== 'true'`, dark, and it
 // needs GATE_IB_PLATFORM. The Intelligence Bar's find_admin_reads /
 // read_admin_data tools (services/intelligence-bar/admin-read-tools.js):
@@ -6742,6 +6752,8 @@ module.exports.reportPlanRescheduleLive = reportPlanRescheduleLive;
 module.exports.ibInvoiceActionsLive = ibInvoiceActionsLive;
 // GATE_IB_REPRICE_VISITS reader, on its own line so gate PRs never conflict.
 module.exports.ibRepriceVisitsLive = ibRepriceVisitsLive;
+// GATE_IB_MULTI_CARD reader, on its own line so gate PRs never conflict.
+module.exports.ibMultiCardLive = ibMultiCardLive;
 // GATE_IB_GENERAL_READ reader, on its own line so gate PRs never conflict.
 module.exports.ibGeneralReadLive = ibGeneralReadLive;
 // GATE_IB_GENERAL_EDIT reader, on its own line so gate PRs never conflict.
@@ -6860,3 +6872,12 @@ function reportCleanup1020Live() {
 }
 // GATE_REPORT_CLEANUP_1020 reader, on its own line so gate PRs never conflict.
 module.exports.reportCleanup1020Live = reportCleanup1020Live;
+
+// GATE_DICTATION_CUSTOMER_NAMES read at CALL time, strict `=== 'true'`, dark in every environment. The one reader
+// for the customer-name section of the staff dictation word list (services/dictation-word-list.js) and the
+// surname keyword hints (routes/tech-dictation.js). Off = today's word list byte for byte.
+function dictationCustomerNamesLive() {
+  return process.env.GATE_DICTATION_CUSTOMER_NAMES === 'true';
+}
+// GATE_DICTATION_CUSTOMER_NAMES reader, on its own line so gate PRs never conflict.
+module.exports.dictationCustomerNamesLive = dictationCustomerNamesLive;
