@@ -10,6 +10,9 @@ import {
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
 import ReportText, { reportSectionsForText } from '../components/report/ReportSections';
 import { FooterIdentity, PrintOnly, webCutView } from '../components/report/WebCutParts';
+import {
+  buildRecommendations, buildReentryBullets, fmtTime, sanitizeReentryCopy, termiteContext,
+} from './serviceReportLines';
 import LawnBeforeAfterSlider from '../components/report/LawnBeforeAfterSlider';
 import { isTroubleSpotPhoto, rateWithBasis, sameSentence, techTextBeyondSummary } from './serviceReportCleanup';
 
@@ -48,7 +51,6 @@ const INK = '#04395E'; // sheet ink (theme-doc DOC.ink)
 const MUTED = '#3F4A65'; // DOC.muted
 const LINE = '#D8D0C0'; // DOC.borderStrong
 const HAIR = '#E7E2D7'; // DOC.border
-const TZ = 'America/New_York';
 // Link precedence for the permanent document:
 //   1. data.publicOrigin — the server's canonical PUBLIC portal origin. The
 //      headless renderer opens the page through CLIENT_URL /
@@ -125,12 +127,6 @@ function fmtServiceDate(value, opts = {}) {
   });
 }
 
-function fmtTime(value) {
-  if (!value) return '';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '';
-  return date.toLocaleTimeString('en-US', { timeZone: TZ, hour: 'numeric', minute: '2-digit' });
-}
 
 // "10.000" -> "10", "0.49" -> "0.49"; units come through as snake_case
 // ("fl_oz") from the application record.
@@ -173,12 +169,6 @@ function coverageReasonText(item, serviceType) {
   return reason;
 }
 
-function fmtDayLabel(value) {
-  if (!value) return '';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '';
-  return date.toLocaleDateString('en-US', { timeZone: TZ, weekday: 'long' });
-}
 
 function fmtPhone(phone) {
   const raw = String(phone || '').replace(/\D/g, '');
@@ -218,93 +208,7 @@ function interactionLabel(value) {
   return words ? words.charAt(0).toUpperCase() + words.slice(1) : null;
 }
 
-// ONE compliance sanitizer for EVERY channel that can carry re-entry copy:
-// the dynamic context, the V2 aftercare, and the product catalog's
-// label-derived precaution/re-entry text (unconstrained free text — the repo
-// has fixtures like "...about 1 hour"). This rule has now needed four
-// channels closed, so it is enforced at the render site rather than per
-// field: any string asserting a clock time or a duration is replaced with
-// the approved once-dry idiom instead of being printed.
-// What the rule bans is a fixed figure attached to a RE-ENTRY or DRYING
-// claim — not every number and not every duration. "Irrigate within 14 days"
-// and "water in with 0.25 inches" are label-required agronomic directions
-// that must survive, and they carry time units too. So the test is BOTH: a
-// time figure AND a re-entry/drying claim in the same sentence.
-const REENTRY_NUMBER_WORDS = 'a|an|one|two|three|four|five|six|seven|eight|nine|ten'
-  + '|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen'
-  + '|twenty|thirty|forty|fourty|fifty|sixty|seventy|eighty|ninety|hundred|half|several';
-// a clock time (7 PM / 7:03 PM) or a quantity attached to a time unit
-const REENTRY_TIME_RX = new RegExp(
-  '\\b\\d{1,2}(:\\d{2})?\\s*(a\\.?m\\.?|p\\.?m\\.?)\\b'
-  + `|\\b(\\d+(\\.\\d+)?|(${REENTRY_NUMBER_WORDS})([\\s-](${REENTRY_NUMBER_WORDS}))?)`
-  + '[\\s-]*(second|sec|minute|min|hour|hr|day|week)s?\\b',
-  'i',
-);
-// ...and the sentence must actually make a re-entry / drying claim. This
-// vocabulary is exhaustive on purpose: two earlier attempts failed at the
-// extremes (a phrasing blocklist kept missing wordings; an any-quantity
-// allowlist erased agronomic instructions).
-const REENTRY_CLAIM_RX = new RegExp(
-  '\\b(re-?enter|re-?entry|reentry|entry|ready|dry|dries|dried|drying|safe'
-  + '|keep\\s+(\\w+\\s+){0,3}(off|out|away|clear)'
-  + '|stay\\s+(off|out|away)'
-  // "avoid the treated area for five hours" is a re-entry claim too
-  // (codex P1 #3176 r18) — scoped to the treated-surface nouns so "avoid
-  // watering for 24 hours" stays agronomic.
-  + '|avoid\\w*\\s+(the\\s+)?(treated|lawn|grass|yard|area)'
-  // "Return after 7 PM" is the clock-time phrasing of the same claim
-  // (codex P1 #3176 r20). Mirrors the server context regex's two return
-  // forms — person-subject or sentence-leading — NOT a bare "return",
-  // which would erase agronomic prose like "results return within two
-  // weeks".
-  + '|(you|your\\s+family|residents?|occupants?|everyone)\\s+(\\w+\\s+){0,3}return\\w*'
-  + '|^\\s*return(ing)?\\b'
-  + '|off\\s+(the\\s+)?treated)\\b',
-  'i',
-);
-const REENTRY_SAFE_COPY = 'Ready once dry — your technician confirms timing.';
 
-// DEFENCE IN DEPTH ONLY. Compliance is now enforced server-side at the
-// payload boundary (reports-public.js) with stripFixedReentryTiming — the
-// same clause-level rule and regression matrix validateContent uses for
-// social copy. Five rounds of tuning a second, weaker rule here is what made
-// that consolidation necessary; this local pass stays as a backstop for any
-// path that reaches the document without going through that boundary, and
-// must never become the primary enforcement point again.
-export function sanitizeReentryCopy(value) {
-  const text = String(value || '').trim();
-  if (!text) return '';
-  const sentences = text.split(/(?<=[.!?])\s+/).filter(Boolean);
-  let replaced = false;
-  const kept = sentences.filter((sentence) => {
-    if (REENTRY_TIME_RX.test(sentence) && REENTRY_CLAIM_RX.test(sentence)) {
-      replaced = true;
-      return false;
-    }
-    return true;
-  });
-  if (!replaced) return text;
-  return [REENTRY_SAFE_COPY, ...kept].join(' ').trim();
-}
-
-// COMPLIANCE (AGENTS.md): never publish a fixed re-entry/drying figure on a
-// customer surface — not as a duration ("keep clear for 2 hours") and not as
-// the clock time computed from it ("ready after 7:03 PM"), which asserts the
-// same thing. The approved idiom is once-dry with the technician confirming
-// timing. This document is a NEW surface, so printing readyAt here would ADD
-// such copy (AGENTS.md flags diffs that add or extend it) even though the
-// live report still renders ready-at chips — that's a remediation item for
-// the interactive report, not a licence to repeat it in the record.
-function reentryTargetLine(target) {
-  return `${target.label}: ready once dry — your technician confirms timing`;
-}
-
-// The aftercare card's re-entry line for the printed record: only when something was applied, sanitized, and not
-// the very sentence the summary above already printed (a frozen lawn condition is both).
-function aftercareReentryLine(data, hasActualTreatment, reentrySummary) {
-  const line = hasActualTreatment ? sanitizeReentryCopy(data.reportV2?.aftercare?.reentry) : '';
-  return line && line !== reentrySummary ? line : '';
-}
 
 function zoneNames(app, zones, serviceLine = 'pest') {
   // A spot product's frozen "where it was used" (GATE_LAWN_REPORT_FACTS); other rows read the zones below.
@@ -540,7 +444,6 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
     // work / prep — the document prints them as its own bullets below.
     .filter((f) => !data.cockroachReportV2 || !COCKROACH_V2_DASHBOARD_FIELD_KEYS.has(f.fieldKey));
   const activity = data.activity || null;
-  const reentry = data.dynamicContext?.reentry || null;
   // Older records store the aliases the web report's conditionRows accepts
   // (temp / humidity / wind / cloudCover) — normalize before deciding the
   // visit recorded nothing.
@@ -697,24 +600,8 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
   // zoneIds.length — a legacy/manual row carrying only applicationArea is
   // dropped from the SVG, so requiring only the method still labelled an
   // unmarked base schematic "Where we treated" (codex P1 r3).
-  // TWO DIFFERENT QUESTIONS, two predicates. "Did treatment happen?" governs
-  // aftercare and precautions and must NOT require zone IDs — a legacy/manual
-  // application can carry only applicationArea and is still a real treatment.
-  // "Can the schematic draw it?" additionally needs zone IDs, because that is
-  // what treatment-map.js filters on. Reusing the map predicate for aftercare
-  // silently stripped watering and re-entry instructions from those visits.
-  // The server's applicationMade verdict also counts a structured protocol
-  // action marked treatmentApplied with no product row (a nest treatment, a
-  // productless specialty application), and treatmentPerformed covers
-  // non-chemical treatment (heat, steam) — the live report honors both, so
-  // the permanent PDF must keep the same re-entry and aftercare content. The
-  // products list and the schematic stay tied to actual application rows.
-  // null verdicts mean the product load failed: fail closed on precautions.
-  // The server verdicts are authoritative; row inference only backs up
-  // payloads that carry no verdict at all.
-  const hasActualTreatment = data.treatmentPerformed === true || data.applicationMade === true
-    || data.applicationMade === null
-    || (data.applicationMade === undefined && applications.some(isProductApplication));
+  // "Did treatment happen?" (hasActualTreatmentFor, serviceReportLines.js) governs aftercare and precautions and never
+  // requires zone IDs; "can the schematic draw it?" additionally does, because treatment-map.js filters on them.
 
   // …and the schematic additionally requires a REAL product application: a
   // bait cartridge placed under bait_placement with zone IDs is a monitoring
@@ -747,10 +634,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
   // "Treatment N of M complete") — a permanent PDF cannot say no
   // application was made and then claim a treatment completed
   // (codex GH-r4 P1). 'incomplete' keeps them (partial work is real work).
-  const reserviceEarly = data.reserviceReport && typeof data.reserviceReport === 'object' ? data.reserviceReport : null;
-  const suppressProgramDashboards = Boolean(reserviceEarly && ['inspection_only', 'customer_declined'].includes(reserviceEarly.outcome));
-  const termiteV2Primary = !suppressProgramDashboards && Boolean(data.termiteReportV2) && data.termiteReportV2.source !== 'companion';
-  const termiteV2Companion = !suppressProgramDashboards && Boolean(data.termiteReportV2) && data.termiteReportV2.source === 'companion';
+  const { suppress: suppressProgramDashboards, primary: termiteV2Primary, companion: termiteV2Companion } = termiteContext(data);
   const termiteV2Summary = termiteV2Primary && data.termiteReportV2?.status?.label ? data.termiteReportV2 : null;
   // Cockroach treatment-program dashboard (cockroach-report-v2.js): the
   // headline + body + reviewed narrative are the document's summary, and
@@ -872,9 +756,6 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
   const techParagraph = reportCleanup && techParagraphFrozen
     ? (techTextBeyondSummary(techParagraphFrozen, summaryParagraphs) || null)
     : techParagraphFrozen;
-  // The lawn V2 payload's reconciled watering lines are the only watering
-  // instruction the report prints (see the Re-entry block below).
-  const lawnV2Watering = data.serviceLine === 'lawn' && Boolean(v2);
 
   const v2StatusLine = (() => {
     if (pestV2?.status?.label) return { label: 'Protection status', value: pestV2.status.label, detail: pestV2.statusSummary };
@@ -918,15 +799,6 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
   // PEST_REPORT_V2 puts the approved concern card here; non-V2 pest reports
   // use the top-level customerConcernCard. Both must survive into the PDF.
   const v2Concern = pestV2?.customerConcern || mosquitoV2?.customerConcern || null;
-  // buildPrimaryMove returns { title, why, impact, dueLabel } in BOTH builders
-  // (pest-report-v2.js / mosquito-report-v2.js) — an earlier customerText/text
-  // lookup here silently always resolved to null (codex P1 r2).
-  const primaryMove = pestV2?.primaryMove || mosquitoV2?.primaryMove || null;
-  const moveText = (move) => (move?.title
-    ? [move.title, move.why, move.impact].filter(Boolean).join(' ')
-      + (move.dueLabel ? ` (${move.dueLabel})` : '')
-    : null);
-  const v2NextMove = moveText(primaryMove);
   // Termite V2 rows render INDEPENDENTLY of the pest/mosquito/lawn chain —
   // a combined pest + termite visit carries BOTH pestReportV2 and a
   // companion termiteReportV2, and the permanent PDF must print both
@@ -944,87 +816,10 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
   // map — print it so the documented servicing survives (codex P2 #3600 r18).
   const termiteServicedMetric = (Array.isArray(termiteV2?.metrics) ? termiteV2.metrics : [])
     .find((m) => m && m.label === 'Stations serviced' && m.value && m.value !== '0') || null;
-  const termiteNextMove = moveText(termiteV2?.primaryMove);
 
 
-  const recommendations = [];
-  const pushRec = (text) => {
-    const t = String(text || '').trim();
-    if (t && !recommendations.includes(t)) recommendations.push(t);
-  };
-  // A primary termite dashboard owns the next-step commitment: the builder
-  // reconciles a frozen "No action needed" against escalating station pins
-  // (codex P2 #3600 r24) — the raw typed step never prints beside it.
-  // (falls back to the typed step only when the payload carries none — an
-  // escalated visit always carries the builder's replacement)
-  pushRec(termiteV2Primary ? (termiteV2?.nextStep || result?.nextStep) : result?.nextStep);
-  (typed?.nextStepChips || []).forEach((chip) => {
-    // chips restate nextStep in shorthand — only add ones that say something new
-    if (!recommendations.some((r) => r.toLowerCase().includes(String(chip).toLowerCase()))) pushRec(chip);
-  });
-  // data.recommendations is provenance-safe since 2026-08-27: report-data
-  // builds it ONLY from structured_notes.formRecommendations (the completion
-  // form's field, never [next]-tagged technician_notes lines) plus findings
-  // recommendations, screened with customerCopyViolations at the payload
-  // boundary — so the PDF renders it exactly like the web report's "What we
-  // recommend" section (codex inline on #3516). ⛔ data.protocol.recommendations
-  // stays unrendered: it still folds raw note lines in.
-  // Finding-derived entries already print inside their "What we found"
-  // bullet — skip them here so a customer never reads the same instruction
-  // twice in one document (codex inline r10).
-  const findingRecommendationSet = new Set(
-    (data.findings || []).map((f) => String(f?.recommendation || '').trim()).filter(Boolean),
-  );
-  (data.recommendations || [])
-    .filter((rec) => !findingRecommendationSet.has(String(rec || '').trim()))
-    .forEach(pushRec);
-  // Lawn visits carry their guidance in the assessment + V2 aftercare
-  // instead of typedReport — same section, same voice.
-  // Legacy assessment recommendations are the LawnAssessmentCard's content,
-  // which the live report renders INSTEAD of (never alongside) LawnReportV2Section.
-  // Flattening both into one list produced duplicate mowing guidance and three
-  // overlapping watering instructions in the same section — same suppression
-  // rule already applied to lawnAssessment.observations.
-  const assessRecs = data.reportV2 ? null : data.lawnAssessment?.recommendations?.recommendations;
-  (Array.isArray(assessRecs) ? [...assessRecs].sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99)) : [])
-    .forEach((rec) => pushRec(rec?.action || rec?.text || rec));
-  // buildAftercare([]) still returns "No special watering is needed because of
-  // today's treatment" when there were NO applications — printing it on an
-  // inspection-only lawn visit claims a treatment that didn't happen (5th
-  // variant of this class: defaults read as evidence).
-  if (hasActualTreatment) pushRec(data.reportV2?.aftercare?.watering);
-  // A visit with a server watering instruction (banner: hold / water-in) prints
-  // it ONCE, through aftercare.watering above. The hero task, follow-up and
-  // insight actions restate banner lines verbatim (a hold-then-water-in hero
-  // carries both steps, and the water-in step alone once the hold ends), so
-  // every banner line is stripped from them (any other advice stays).
-  // Stripped sentence by sentence: the banner composes a plan sentence onto a
-  // frozen line (partial credit), so the frozen sentence alone must go too.
-  const bannerSentences = hasActualTreatment
-    && ['hold', 'water_in', 'hold_then_water_in', 'water_in_by_rain'].includes(data.reportV2?.banner?.state)
-    ? (data.reportV2.banner.lines || [])
-      .filter((line) => typeof line === 'string' && line)
-      .flatMap((line) => [line, ...line.split(/(?<=[.!?])\s+/)])
-      .sort((a, b) => b.length - a.length) : [];
-  const pushAction = (text) => {
-    if (!bannerSentences.length) { pushRec(text); return; }
-    pushRec(bannerSentences.reduce((acc, line) => acc.split(line).join(' '), String(text || '')).replace(/\s+/g, ' '));
-  };
-  pushRec(v2NextMove);
-  pushRec(termiteNextMove);
-  // "Your next step" — the homeowner task a V2 top issue assigns. Lives on
-  // snapshot.customerAction and per-insight customerAction; omitting it drops
-  // required actions (e.g. correcting irrigation) from the artifact.
-  pushAction(v2?.snapshot?.customerAction);
-  // Lead mode: the follow-up card's stock "No action is needed…" line is a
-  // placeholder, not a task, so it is not added to the list.
-  if (!(v2Lead && /^\s*no action is needed\b/i.test(String(v2?.followUp?.customerAction || '')))) pushAction(v2?.followUp?.customerAction);
-  // wavesNext is what WAVES will do next (future tense, never the past-tense
-  // wavesAction) — a commitment, so it belongs in the permanent record.
-  pushRec(v2?.snapshot?.wavesNext
-    || (Array.isArray(v2?.insights) ? v2.insights : []).map((i) => i?.nextVisitPlan).find(Boolean));
-  (Array.isArray(v2?.insights) ? v2.insights : []).forEach((insight) => pushAction(insight?.customerAction));
-  pushRec(v2?.mowing?.recommendation);
+  const recommendations = buildRecommendations(data);
+  const reentryBullets = buildReentryBullets(data);
 
   // "(3 of 5 — baseline recorded today)" / "(3 of 5)" / " — baseline
   // recorded today" / "" depending on what the visit actually recorded.
@@ -1058,8 +853,6 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
 
   // COMPLIANCE: never let a computed ready-at clock time through, whatever
   // field carries it (see reentryTargetLine).
-  const rawReentrySummary = String(reentry?.customerSummary || '').trim();
-  const reentrySummary = sanitizeReentryCopy(rawReentrySummary);
 
   const concern = data.customerConcernCard || v2Concern || null;
   const isWaveGuard = Boolean(data.waveGuardTier || data.waveguardTier || data.plan?.isWaveGuard);
@@ -1553,35 +1346,13 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
             a false treatment claim (codex P1 r6) — the default advisory only
             renders when something was actually applied. A real re-entry
             context is itself evidence of treatment and always renders. */}
-        {(reentry || (data.advisory?.pet_advisory && hasActualTreatment)) && (
+        {reentryBullets && (
           <div className="doc-keep" {...gc}>
             <SectionHeader>Re-entry &amp; precautions</SectionHeader>
-            {/* buildReentrySummary emits "<area> ready at 7:03 PM" while the
-                window is still open (reentry.js:39-44) — the same fixed
-                re-entry claim the target rows were just sanitized of, through
-                a different field. Print the summary only when it asserts no
-                clock time; otherwise use the approved idiom. */}
-            {reentrySummary && <Bullet>{reentrySummary}</Bullet>}
-            {(reentry?.targets || []).map((target) => (
-              <Bullet key={target.key || target.label}>{reentryTargetLine(target)}</Bullet>
-            ))}
-            {/* petAdvisory is persisted free text copied straight through by
-                buildReentryContextFromRecord, so it can carry "keep pets off
-                treated turf for 2 hours" and needs the same guard. */}
-            {sanitizeReentryCopy(reentry?.petAdvisory || (hasActualTreatment ? data.advisory?.pet_advisory : null)) && (
-              <Bullet>{sanitizeReentryCopy(reentry?.petAdvisory || data.advisory?.pet_advisory)}</Bullet>
-            )}
-            {/* A lawn report with the V2 payload gets its watering from the reconciled
-                banner / aftercare / lead (the web report prints no hold line from
-                this raw product-advisory timer), so it is withheld here too. */}
-            {reentry?.irrigationReadyAt && !lawnV2Watering && (
-              <Bullet>Hold irrigation until {fmtTime(reentry.irrigationReadyAt)} on {fmtDayLabel(reentry.irrigationReadyAt)}.</Bullet>
-            )}
-            {/* A frozen lawn re-entry condition (GATE_LAWN_REPORT_FACTS) is the summary above AND the aftercare line:
-                one sentence, printed once. */}
-            {aftercareReentryLine(data, hasActualTreatment, reentrySummary) && (
-              <Bullet>{aftercareReentryLine(data, hasActualTreatment, reentrySummary)}</Bullet>
-            )}
+            {/* The bullets (summary, targets, pet advisory, irrigation timer, aftercare line) come from
+                serviceReportLines.js, the same list the web top card picks its "Hold off" line from. A fixed
+                re-entry figure never prints. */}
+            {reentryBullets.map((line) => <Bullet key={line}>{line}</Bullet>)}
           </div>
         )}
 

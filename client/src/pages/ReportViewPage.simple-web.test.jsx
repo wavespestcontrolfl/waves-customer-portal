@@ -219,8 +219,6 @@ describe('the first screen of the simple web report', () => {
   const webTop = () => ({
     score: { value: 72, previous: 61 },
     trend: [{ label: 'Aug 1', value: 61 }, { label: 'Sep 1', value: 66 }, { label: 'Oct 1', value: 72 }],
-    action: 'Water in today’s treatment by Sat 9 AM.',
-    hold: 'Keep pets off the lawn until it is dry.',
     rain: {
       days: [
         { date: '2026-10-09', inches: 0, isVisit: false }, { date: '2026-10-10', inches: 0.2, isVisit: true },
@@ -240,15 +238,25 @@ describe('the first screen of the simple web report', () => {
     expect(container.textContent).toMatch(/Family-owned pest control and lawn care in Southwest Florida/);
   });
 
-  it('with webTop: the card shows before the document with the fixed sentences', async () => {
-    const { container } = renderReport(payload({ simpleWebReport: true, webTop: webTop() }));
+  it('with webTop: the card shows before the document; Do this and Hold off come from the document\u2019s own lists', async () => {
+    const { container } = renderReport(payload({
+      simpleWebReport: true,
+      webTop: webTop(),
+      applicationMade: true,
+      recommendations: ['We will re-check the lawn next visit.', 'Water the lawn lightly this week.'],
+      dynamicContext: { reentry: { customerSummary: 'Ready to walk on once the application has dried.', targets: [] } },
+    }));
     await screen.findByText(/This report is provided for your records/);
     const card = screen.getByTestId('web-top');
     expect(card.textContent).toMatch(/Lawn score\s*72\s*out of 100/);
     expect(card.textContent).toMatch(/Up 11 points since your last visit\./);
     expect(card.textContent).toMatch(/Your last 3 visits/);
-    expect(card.textContent).toMatch(/Do this\s*Water in today.s treatment by Sat 9 AM\./);
-    expect(card.textContent).toMatch(/Hold off\s*Keep pets off the lawn until it is dry\./);
+    // the first customer-owned recommendation (a Waves-owned "We will..." line is skipped)
+    expect(card.textContent).toMatch(/Do this\s*Water the lawn lightly this week\./);
+    // the document's first re-entry bullet, and the document prints the same bullet
+    expect(card.textContent).toMatch(/Hold off\s*Ready to walk on once the application has dried\./);
+    expect(container.querySelector('.service-report-document').textContent).toMatch(/Re-entry & precautions[•\s]*Ready to walk on once the application has dried\./);
+    expect(container.querySelector('.service-report-document').textContent).toMatch(/What we recommend.*Water the lawn lightly this week\./);
     expect(card.compareDocumentPosition(container.querySelector('.service-report-document')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
@@ -283,14 +291,16 @@ describe('the first screen of the simple web report', () => {
     expect(screen.getByLabelText('Rain at your home').textContent).not.toMatch(/after your visit:/);
   });
 
-  it('a first visit has no strip; a pest card has no score', async () => {
-    renderReport(payload({ simpleWebReport: true, webTop: { score: { value: 70, previous: null }, hold: 'Keep pets off treated areas until they are dry.' } }));
+  it('a first visit has no strip; with no recommendation and no re-entry the card says nothing is needed and shows no hold', async () => {
+    renderReport(payload({ simpleWebReport: true, webTop: { score: { value: 70, previous: null } } }));
     await screen.findByText(/This report is provided for your records/);
     const card = screen.getByTestId('web-top');
     expect(card.textContent).toMatch(/This is your starting score\./);
     expect(card.textContent).not.toMatch(/Your last/);
+    expect(card.textContent).toMatch(/Do this\s*Nothing needed from you today\./);
+    expect(card.textContent).not.toMatch(/Hold off/);
     cleanup();
-    renderReport(payload({ simpleWebReport: true, webTop: { action: 'Nothing needed from you today.' } }));
+    renderReport(payload({ simpleWebReport: true, webTop: {} }));
     await screen.findByText(/This report is provided for your records/);
     expect(screen.getByTestId('web-top').textContent).not.toMatch(/Lawn score/);
   });
@@ -338,11 +348,11 @@ describe('the first screen of the simple web report', () => {
     expect(container.textContent).toMatch(/Conditions: 82 °F · 60% humidity · 5 mph wind · Rain this week [\d.]+ in · Sunny/);
   });
 
-  it('an empty webTop still trims the page and shows no card', async () => {
+  it('an empty webTop still trims the page (the card has no score or rain, only the document\u2019s lines)', async () => {
     const { container } = renderReport(payload({ simpleWebReport: true, webTop: {} }));
     await screen.findByText(/This report is provided for your records/);
-    expect(screen.queryByTestId('web-top')).toBeNull();
     expect(container.querySelector('.service-report-document').classList.contains('is-cut')).toBe(true);
+    expect(screen.getByTestId('web-top').textContent).not.toMatch(/Rain/);
   });
 
   it('pdf mode never takes the trims, even with the key', async () => {

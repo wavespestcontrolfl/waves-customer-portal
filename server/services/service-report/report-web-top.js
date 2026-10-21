@@ -4,18 +4,17 @@
  * GATE_REPORT_WEB_TOP (owner 2026-10-20, "OK BUILD THEM ALL"): the first screen of the simple web service report.
  *
  * One `webTop` object, built from data the payload already carries, plus one measured-rain read:
- *   - score   lawn only: this visit's score and the score at the visit before (an arrow on the page);
+ *   - score   lawn only: this visit's score and the score at the assessment before it (an arrow on the page);
  *   - trend   lawn only: the last 6 scores, oldest first (a strip on the page);
- *   - action  the ONE thing the customer does, a sentence the report already prints;
- *   - hold    the ONE thing to keep off, a fixed sentence (the approved "once dry" idiom, no hours);
  *   - rain    measured rain (radar, gauge corrected) at the home for the days around the visit.
  *
- * Every sentence is fixed or already on the report: no model prose, no price, no product name. Pure apart from the
- * injected MRMS reader. The route calls this only for a live simple-web view while GATE_REPORT_WEB_TOP is live.
+ * "Do this" and "Hold off" are NOT built here: the page picks them from the very lists ServiceReportDocument prints
+ * ("What we recommend", "Re-entry & precautions"; client/src/pages/serviceReportLines.js), so there is one copy of that
+ * logic. No price, no product name, no model prose. Pure apart from the injected MRMS reader. The route calls this only
+ * for a live simple-web view while GATE_REPORT_WEB_TOP is live.
  */
 
 const { dateOnlyString, etDateString, addETDays } = require('../../utils/datetime-et');
-const { reentryCondition, TECHNICIAN_CONFIRMS } = require('./lawn-report-facts');
 const logger = require('../logger');
 
 const TREND_POINTS = 6;
@@ -24,8 +23,6 @@ const RAIN_FETCH_TIMEOUT_MS = 3000;
 const RAIN_CACHE_MS = 30 * 60 * 1000;
 const RAIN_CACHE_MAX = 200;
 const DAY_MS = 86400000;
-const WATER_STATES = ['hold', 'water_in', 'hold_then_water_in'];
-const NO_ACTION = 'Nothing needed from you today.';
 
 const finiteScore = (value) => {
   const n = value == null || value === '' ? NaN : Number(value);
@@ -35,12 +32,6 @@ const sentence = (value, max = 160) => {
   const text = typeof value === 'string' ? value.trim() : '';
   return text && text.length <= max ? text : null;
 };
-
-// Something was applied, or the evidence is unknown (applicationMade null): fail closed like the document's
-// hasActualTreatment, so a hold is never dropped on a visit that may have treated.
-function treated(data) {
-  return data.applicationMade === true || data.treatmentPerformed === true || data.applicationMade === null;
-}
 
 // The score at the assessment just before this one. lawnAssessment.trend has one row per assessment, in order, current
 // last, from the same (property-scoped) history the report builds; the V2 strip collapses assessments that share a date,
@@ -66,103 +57,9 @@ function lawnScore(data) {
   return out;
 }
 
-// A lawn watering line: aftercare.watering (what "What we recommend" prints), else the banner's first line.
-function lawnWatering(v2) {
-  const aftercare = v2?.aftercare?.neutral === true ? null : sentence(v2?.aftercare?.watering, 240);
-  if (aftercare) return aftercare;
-  const banner = v2?.banner;
-  if (!banner || !WATER_STATES.includes(banner.state)) return null;
-  return sentence((Array.isArray(banner.lines) ? banner.lines : []).find((line) => sentence(line)));
-}
-
-// Rain that watered the treatment in completes the watering task only: a hold on the sprinklers the visit set stays
-// (the banner keeps that line), and the report may still hold another customer task.
-const KEPT_HOLD_LINE = /^Skip your turf watering until /;
-function remainingTask(v2) {
-  const lines = Array.isArray(v2?.banner?.lines) ? v2.banner.lines : [];
-  return sentence(lines.find((line) => typeof line === 'string' && KEPT_HOLD_LINE.test(line)))
-    || sentence(v2?.snapshot?.customerAction, 240);
-}
-
-// The lawn action. Covered by rain: what is left to do, else "Nothing needed". A report that says nothing is needed
-// reads the same. Otherwise the watering line the page recommends.
-function lawnAction(data) {
-  const v2 = data.reportV2;
-  if (v2?.banner?.state === 'water_in_by_rain') return remainingTask(v2) || NO_ACTION;
-  if (v2?.snapshot?.noActionNeeded === true) return NO_ACTION;
-  return treated(data) ? lawnWatering(v2) : null;
-}
-
-// The non-lawn next step, read in the order ServiceReportDocument builds "What we recommend" (that selector runs inline
-// on the client, so the order is mirrored here): the typed step (a PRIMARY termite dashboard owns it unless a
-// re-service visit applied nothing), the report's own recommendations, a pest or mosquito primary move, then the V2
-// snapshot's customer action (tree & shrub). The first real action wins; if every candidate says "no action", so does
-// the card.
-const NO_ACTION_RX = /^no (further )?action\b/i;
-const moveText = (move) => sentence(move?.title ? [move.title, move.why, move.impact].filter(Boolean).join(' ') + (move.dueLabel ? ` (${move.dueLabel})` : '') : null, 240)
-  || sentence(move?.title);
-
-function nextStepCandidates(data) {
-  const termite = data.termiteReportV2;
-  const outcome = data.reserviceReport?.outcome;
-  const suppressed = ['inspection_only', 'customer_declined'].includes(outcome);
-  const primary = Boolean(termite) && termite.source !== 'companion' && !suppressed;
-  const typed = data.typedReport?.todaysResult?.nextStep;
-  const ownFindings = new Set((data.findings || []).map((f) => String(f?.recommendation || '').trim()).filter(Boolean));
-  return [
-    primary ? (termite.nextStep || typed) : typed,
-    ...(Array.isArray(data.recommendations) ? data.recommendations : []).filter((r) => !ownFindings.has(String(r || '').trim())),
-    moveText(data.pestReportV2?.primaryMove),
-    moveText(data.mosquitoReportV2?.primaryMove),
-    // the document reads a termite dashboard's primary move for a companion too, unless the re-service applied nothing
-    termite && !suppressed ? moveText(termite.primaryMove) : null,
-    data.reportV2?.snapshot?.customerAction,
-  ].map((text) => sentence(text, 240)).filter(Boolean);
-}
-
-/**
- * The one action. Lawn: the watering line the page already recommends, so it is worded one way (a neutral "no special
- * watering" line is not an action). Other lines: the report's own next step.
- */
-function actionLine(data) {
-  if (data.serviceLine === 'lawn') return lawnAction(data);
-  const steps = nextStepCandidates(data);
-  const real = steps.find((step) => !NO_ACTION_RX.test(step));
-  return real || (steps.length ? NO_ACTION : null);
-}
-
-// The keep-off sentences, with the approved clause every re-entry line carries ("your technician confirms timing",
-// lawn-report-facts). "dry" is once dry; a granular "watered_in_and_dry" needs the watering in AND the grass dry again.
-// No hours.
-const holdWith = (text) => `${text} \u2014 ${TECHNICIAN_CONFIRMS}.`;
-const LAWN_HOLD = Object.freeze({
-  dry: holdWith('Keep pets off the lawn until it is dry'),
-  watered_in_and_dry: holdWith('Keep pets off the lawn until the treatment has dried, you have watered it in, and the grass is dry again'),
-});
-const OTHER_HOLD = holdWith('Keep pets off treated areas until they are dry');
-
-// A clock-based re-entry whose every target had already passed its ready time when the report was built has nothing
-// left to hold. A condition-based (frozen lawn) re-entry has no targets and always holds.
-function clockElapsed(reentry) {
-  const targets = Array.isArray(reentry?.targets) ? reentry.targets : [];
-  return !reentry?.condition && targets.length > 0 && targets.every((t) => t?.statusAtGeneratedAt === 'ready');
-}
-
-/** The one hold: a fixed sentence, only when something was applied and the report carries a re-entry context. */
-function holdLine(data) {
-  const reentry = data.dynamicContext?.reentry;
-  if (!treated(data) || !(reentry || data.advisory?.pet_advisory) || clockElapsed(reentry)) return null;
-  if (data.serviceLine !== 'lawn') return OTHER_HOLD;
-  return LAWN_HOLD[reentryCondition(reentry?.condition)?.rule] || LAWN_HOLD.dry;
-}
-
 function buildWebTop(data, rain = null) {
   if (!data || typeof data !== 'object') return null;
   const out = { ...(lawnScore(data) || {}) };
-  const action = actionLine(data);
-  const hold = holdLine(data);
-  if (action) out.action = action;
-  if (hold) out.hold = hold;
   if (rain) out.rain = rain;
   return Object.keys(out).length ? out : null;
 }
@@ -250,4 +147,4 @@ async function attachWebTop(v1Data, service, { simpleWeb, gates } = {}) {
   return v1Data;
 }
 
-module.exports = { buildWebTop, buildWebTopRain, attachWebTop, NO_ACTION, _test: { rainCache } };
+module.exports = { buildWebTop, buildWebTopRain, attachWebTop, _test: { rainCache } };

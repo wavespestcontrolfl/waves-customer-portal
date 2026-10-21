@@ -3,10 +3,12 @@ import {
   DOC, DOC_EYEBROW, DOC_FONT, FS, FW, LH, RADIUS, SP, docCard,
 } from '../../theme-doc';
 import { COLORS } from '../../theme-brand';
+import { doThisLine, holdOffLine } from '../../pages/serviceReportLines';
 
 // GATE_REPORT_WEB_TOP (owner 2026-10-20): the first screen of the simple web service report. The server sends one
-// `webTop` object while the gate is live (server/services/service-report/report-web-top.js); every sentence here is
-// fixed or already on the report. No price, no product name. Text is 14px or larger.
+// `webTop` object while the gate is live (the lawn score, its strip and the measured rain). "Do this" and "Hold off"
+// are picked here from the same lists ServiceReportDocument prints (pages/serviceReportLines.js), so the card can never
+// say anything the document does not. No price, no product name. Text is 14px or larger.
 
 const TRACK_H = 64; // tallest rain bar, px of chart height (a data height, not a type size)
 
@@ -105,8 +107,10 @@ function RainBar({ rain, glass }) {
 }
 
 // The first card: the score and how it moved, the strip, the one action, the one hold.
-function GlanceCard({ webTop, glass }) {
-  const { score, trend, trendNote, action, hold } = webTop;
+function GlanceCard({ webTop, data, glass }) {
+  const { score, trend, trendNote } = webTop;
+  const action = doThisLine(data);
+  const hold = holdOffLine(data);
   const change = score ? scoreChange(score) : null;
   const strip = Array.isArray(trend) && trend.length >= 2 ? trend : null;
   return (
@@ -141,14 +145,13 @@ function GlanceCard({ webTop, glass }) {
 }
 
 // "web-top-card": the page's print rule hides it, so a browser Print of the page is the full document.
-export default function WebTopCard({ webTop, glass = false }) {
-  if (!webTop || typeof webTop !== 'object') return null;
-  const { score, action, hold, rain } = webTop;
+export default function WebTopCard({ webTop, data, glass = false }) {
+  if (!webTop || typeof webTop !== 'object' || !data) return null;
+  const { rain } = webTop;
   const showRain = Array.isArray(rain?.days) && rain.days.some((d) => d.inches != null);
-  if (!score && !action && !hold && !showRain) return null;
   return (
     <div data-testid="web-top" className="sr-shell web-top-card" style={{ maxWidth: 760, margin: '0 auto', padding: `0 ${SP.md}px`, boxSizing: 'border-box' }}>
-      {score || action || hold ? <GlanceCard webTop={webTop} glass={glass} /> : null}
+      <GlanceCard webTop={webTop} data={data} glass={glass} />
       {showRain ? <RainBar rain={rain} glass={glass} /> : null}
     </div>
   );

@@ -1,10 +1,11 @@
 /**
  * GATE_REPORT_WEB_TOP (owner 2026-10-20): the first screen of the simple web service report. Pure builders: the
- * lawn score and its history, the one action, the one hold (a fixed sentence), and the measured-rain window.
+ * lawn score and its history, and the measured-rain window. ("Do this" and "Hold off" are picked on the page from the
+ * document's own lists; see client/src/pages/serviceReportLines.test.js.)
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/mrms-qpe', () => ({ fetchMrmsDailyRain: jest.fn() }));
-const { buildWebTop, buildWebTopRain, attachWebTop, NO_ACTION, _test } = require('../services/service-report/report-web-top');
+const { buildWebTop, buildWebTopRain, attachWebTop, _test } = require('../services/service-report/report-web-top');
 
 const lawn = (over = {}) => ({
   serviceLine: 'lawn',
@@ -19,13 +20,14 @@ const lawn = (over = {}) => ({
 });
 
 describe('buildWebTop', () => {
-  test('lawn: score with the visit before, the last 6 scores, the watering line, the fixed hold', () => {
+  test('lawn: score with the assessment before, and the last 6 scores', () => {
     const out = buildWebTop(lawn());
     expect(out.score).toEqual({ value: 72, previous: 72 });
     expect(out.trend).toHaveLength(6);
     expect(out.trend[5]).toEqual({ label: 'Oct 20', value: 72 });
-    expect(out.action).toBe('Water in today’s treatment by Sat 9 AM.');
-    expect(out.hold).toBe('Keep pets off the lawn until it is dry \u2014 your technician confirms timing.');
+    // the page picks "Do this" and "Hold off" from the document's own lists: the payload carries neither
+    expect('action' in out).toBe(false);
+    expect('hold' in out).toBe(false);
   });
 
   test('lawn: a first visit has a score and no previous score and no strip', () => {
@@ -44,141 +46,10 @@ describe('buildWebTop', () => {
     expect('trendNote' in buildWebTop(data)).toBe(false);
   });
 
-  test('lawn: the action is the aftercare watering line the page recommends, not the banner line', () => {
-    const data = lawn();
-    data.reportV2.aftercare = { watering: 'Water in about \u00bd inch within 24 hours.', neutral: false };
-    expect(buildWebTop(data).action).toBe('Water in about \u00bd inch within 24 hours.');
-    data.reportV2.aftercare = { watering: 'No special watering is needed.', neutral: true };
-    expect(buildWebTop(data).action).toBe('Water in today\u2019s treatment by Sat 9 AM.');
-    data.reportV2.aftercare = { watering: '', neutral: false };
-    expect(buildWebTop(data).action).toBe('Water in today\u2019s treatment by Sat 9 AM.');
-    expect('action' in buildWebTop({ ...data, applicationMade: false })).toBe(false);
-  });
-
-  describe('lawn: rain that watered the treatment in completes the watering task only', () => {
-    const rained = (lines, customerAction) => {
-      const data = lawn();
-      data.reportV2.banner = { state: 'water_in_by_rain', lines };
-      data.reportV2.aftercare = { watering: 'Water in about \u00bd inch within 24 hours.', neutral: false };
-      data.reportV2.snapshot.customerAction = customerAction;
-      return data;
-    };
-    const RAIN = ['Rain since your visit has watered today\u2019s treatment in.', 'No extra sprinkler run is needed for it.'];
-    const HOLD = 'Skip your turf watering until Sat 9 AM.';
-
-    test('a kept hold on the sprinklers is the task (never the rain line, never the old water-in)', () => {
-      const out = buildWebTop(rained([HOLD, ...RAIN], null));
-      expect(out.action).toBe(HOLD);
-      expect(out.hold).toBe('Keep pets off the lawn until it is dry \u2014 your technician confirms timing.');
-    });
-
-    test('another customer task from the report is the task', () => {
-      expect(buildWebTop(rained(RAIN, 'Mow no lower than 3.5 inches.')).action).toBe('Mow no lower than 3.5 inches.');
-    });
-
-    test('a kept hold wins over a long report task', () => {
-      expect(buildWebTop(rained([HOLD, ...RAIN], 'Mow no lower than 3.5 inches.')).action).toBe(HOLD);
-    });
-
-    test('nothing left: nothing needed, and the hold row still shows its hold', () => {
-      const out = buildWebTop(rained(RAIN, null));
-      expect(out.action).toBe(NO_ACTION);
-      expect(out.hold).toBe('Keep pets off the lawn until it is dry \u2014 your technician confirms timing.');
-    });
-
-    test('noActionNeeded (no rain state) reads as nothing needed, never the aftercare water-in', () => {
-      const quiet = lawn();
-      quiet.reportV2.snapshot.noActionNeeded = true;
-      quiet.reportV2.aftercare = { watering: 'Water in about \u00bd inch within 24 hours.', neutral: false };
-      expect(buildWebTop(quiet).action).toBe(NO_ACTION);
-    });
-  });
-
-
-  test('lawn: no watering banner and nothing needed says so; otherwise no action', () => {
-    const data = lawn();
-    data.reportV2.banner = { state: 'none', lines: ['No watering change from today’s treatment.'] };
-    expect('action' in buildWebTop(data)).toBe(false);
-    data.reportV2.snapshot.noActionNeeded = true;
-    expect(buildWebTop(data).action).toBe(NO_ACTION);
-  });
-
-  test('lawn: a banner line is not an action on a visit that applied nothing, and there is no hold', () => {
-    const out = buildWebTop(lawn({ applicationMade: false }));
-    expect('action' in out).toBe(false);
-    expect('hold' in out).toBe(false);
-  });
-
   test('lawn: a score outside 0 to 100 is not shown', () => {
     const data = lawn();
     data.reportV2.snapshot.overallScore = 140;
-    expect('score' in buildWebTop(data)).toBe(false);
-  });
-
-  test('pest: no score; the report’s own next step is the action, the hold names treated areas', () => {
-    const out = buildWebTop({
-      serviceLine: 'pest', applicationMade: true,
-      typedReport: { todaysResult: { nextStep: 'Trim the shrubs back from the wall.' } },
-      dynamicContext: { reentry: { condition: { rule: 'dry' } } },
-    });
-    expect(out).toEqual({ action: 'Trim the shrubs back from the wall.', hold: 'Keep pets off treated areas until they are dry \u2014 your technician confirms timing.' });
-  });
-
-  test('pest: "no action" next steps read as the fixed nothing-needed sentence; a long step is dropped', () => {
-    expect(buildWebTop({ serviceLine: 'pest', typedReport: { todaysResult: { nextStep: 'No action needed.' } } })).toEqual({ action: NO_ACTION });
-    expect(buildWebTop({ serviceLine: 'pest', typedReport: { todaysResult: { nextStep: 'x'.repeat(300) } } })).toBeNull();
-  });
-
-  test('termite: a primary dashboard\u2019s next step wins over a frozen "No action needed" (station evidence escalated)', () => {
-    const typedReport = { todaysResult: { nextStep: 'No action needed.' } };
-    const termiteReportV2 = { source: 'primary', nextStep: 'We will recheck the stations next month.' };
-    expect(buildWebTop({ serviceLine: 'termite', typedReport, termiteReportV2 }).action).toBe('We will recheck the stations next month.');
-    // a primary dashboard with no next step of its own falls back to the typed step
-    expect(buildWebTop({ serviceLine: 'termite', typedReport, termiteReportV2: { source: 'primary' } }).action).toBe(NO_ACTION);
-  });
-
-  test('termite: a companion dashboard or a re-service visit that applied nothing keeps the typed step', () => {
-    const typedReport = { todaysResult: { nextStep: 'No action needed.' } };
-    const nextStep = 'We will recheck the stations next month.';
-    expect(buildWebTop({ serviceLine: 'pest', typedReport, termiteReportV2: { source: 'companion', nextStep } }).action).toBe(NO_ACTION);
-    expect(buildWebTop({ serviceLine: 'termite', typedReport, termiteReportV2: { source: 'primary', nextStep }, reserviceReport: { outcome: 'inspection_only' } }).action).toBe(NO_ACTION);
-    expect(buildWebTop({ serviceLine: 'termite', typedReport, termiteReportV2: { source: 'primary', nextStep }, reserviceReport: { outcome: 'incomplete' } }).action).toBe(nextStep);
-  });
-
-  test('every hold keeps the approved technician-confirms clause (no bare "until dry")', () => {
-    const { TECHNICIAN_CONFIRMS } = require('../services/service-report/lawn-report-facts');
-    const holds = [
-      buildWebTop(lawn({ dynamicContext: { reentry: { condition: { rule: 'dry' } } } })).hold,
-      buildWebTop(lawn({ dynamicContext: { reentry: { condition: { rule: 'watered_in_and_dry' } } } })).hold,
-      buildWebTop({ serviceLine: 'pest', applicationMade: true, dynamicContext: { reentry: { targets: [{ statusAtGeneratedAt: 'pending' }] } } }).hold,
-    ];
-    holds.forEach((hold) => expect(hold).toContain(TECHNICIAN_CONFIRMS));
-  });
-
-  test('a clock-based hold is dropped once every target is ready; a pending target or a lawn condition keeps it', () => {
-    const pest = (targets) => buildWebTop({ serviceLine: 'pest', applicationMade: true, dynamicContext: { reentry: { targets } } });
-    expect(pest([{ statusAtGeneratedAt: 'ready' }, { statusAtGeneratedAt: 'ready' }])).toBeNull();
-    expect(pest([{ statusAtGeneratedAt: 'ready' }, { statusAtGeneratedAt: 'pending' }]).hold).toMatch(/^Keep pets off treated areas/);
-    expect(pest([]).hold).toMatch(/^Keep pets off treated areas/);
-    // a frozen lawn condition has no targets and always holds, even beside a ready target
-    expect(buildWebTop(lawn({ dynamicContext: { reentry: { condition: { rule: 'dry' }, targets: [{ statusAtGeneratedAt: 'ready' }] } } })).hold).toMatch(/^Keep pets off the lawn/);
-  });
-
-  test('unknown application evidence (applicationMade null) counts as applied: the hold stays, the banner water-in is the action', () => {
-    expect(buildWebTop({ serviceLine: 'pest', applicationMade: null, dynamicContext: { reentry: { targets: [] } } }).hold).toMatch(/^Keep pets off treated areas/);
-    expect(buildWebTop(lawn({ applicationMade: null })).action).toBe('Water in today\u2019s treatment by Sat 9 AM.');
-    // undefined verdict and explicit false still read as nothing applied
-    expect('hold' in (buildWebTop({ serviceLine: 'pest', dynamicContext: { reentry: { targets: [] } }, typedReport: { todaysResult: { nextStep: 'Trim.' } } }))).toBe(false);
-    expect('hold' in (buildWebTop({ serviceLine: 'pest', applicationMade: false, dynamicContext: { reentry: { targets: [] } }, typedReport: { todaysResult: { nextStep: 'Trim.' } } }))).toBe(false);
-  });
-
-  test('termite: the dashboard\u2019s primary move shows when the typed step is absent or says no action; a suppressed re-service skips it', () => {
-    const move = { title: 'Recheck the bait stations.', dueLabel: 'next month' };
-    const termiteReportV2 = { source: 'primary', primaryMove: move };
-    expect(buildWebTop({ serviceLine: 'termite', termiteReportV2 }).action).toBe('Recheck the bait stations. (next month)');
-    expect(buildWebTop({ serviceLine: 'termite', termiteReportV2, typedReport: { todaysResult: { nextStep: 'No action needed.' } } }).action).toBe('Recheck the bait stations. (next month)');
-    expect(buildWebTop({ serviceLine: 'pest', termiteReportV2: { source: 'companion', primaryMove: move } }).action).toBe('Recheck the bait stations. (next month)');
-    expect(buildWebTop({ serviceLine: 'termite', termiteReportV2, reserviceReport: { outcome: 'customer_declined' } })).toBeNull();
+    expect(buildWebTop(data)).toBeNull();
   });
 
   test('lawn score: the previous score is the assessment just before this one, even when two share a date', () => {
@@ -203,50 +74,9 @@ describe('buildWebTop', () => {
     expect(buildWebTop(data).score.previous).toBe(72);
   });
 
-  describe('non-lawn action reads every V2 source the document reads, in its order', () => {
-    test('tree & shrub: the V2 snapshot customerAction', () => {
-      expect(buildWebTop({ serviceLine: 'tree_shrub', reportV2: { snapshot: { customerAction: 'Water the new shrubs twice a week.' } } }).action).toBe('Water the new shrubs twice a week.');
-    });
-    test('pest and mosquito: the primary move (title, why, impact, due)', () => {
-      const move = { title: 'Clear the gutters.', why: 'Standing water breeds mosquitoes.', dueLabel: 'by Friday' };
-      expect(buildWebTop({ serviceLine: 'pest', pestReportV2: { primaryMove: move } }).action).toBe('Clear the gutters. Standing water breeds mosquitoes. (by Friday)');
-      expect(buildWebTop({ serviceLine: 'mosquito', mosquitoReportV2: { primaryMove: { title: 'Empty the bird bath.' } } }).action).toBe('Empty the bird bath.');
-    });
-    test('the report\u2019s own recommendations come before a primary move; a finding\u2019s own recommendation is skipped', () => {
-      const out = buildWebTop({
-        serviceLine: 'pest',
-        findings: [{ recommendation: 'Seal the door sweep.' }],
-        recommendations: ['Seal the door sweep.', 'Keep the garage door closed at night.'],
-        pestReportV2: { primaryMove: { title: 'Clear the gutters.' } },
-      });
-      expect(out.action).toBe('Keep the garage door closed at night.');
-    });
-    test('a typed step comes first; a "no action" typed step gives way to a real later action, else reads nothing needed', () => {
-      expect(buildWebTop({ serviceLine: 'pest', typedReport: { todaysResult: { nextStep: 'Trim the shrubs.' } }, pestReportV2: { primaryMove: { title: 'Clear the gutters.' } } }).action).toBe('Trim the shrubs.');
-      expect(buildWebTop({ serviceLine: 'pest', typedReport: { todaysResult: { nextStep: 'No action needed.' } }, pestReportV2: { primaryMove: { title: 'Clear the gutters.' } } }).action).toBe('Clear the gutters.');
-      expect(buildWebTop({ serviceLine: 'pest', typedReport: { todaysResult: { nextStep: 'No action needed.' } } }).action).toBe(NO_ACTION);
-    });
-  });
-
-  test('nothing to say is null', () => {
+  test('a non-lawn report has no score: nothing to say is null', () => {
     expect(buildWebTop({ serviceLine: 'pest' })).toBeNull();
     expect(buildWebTop(null)).toBeNull();
-  });
-
-  test('lawn hold follows the frozen re-entry rule: dry, or watered in and dry again (granular)', () => {
-    const rule = (r) => lawn({ dynamicContext: { reentry: { condition: { rule: r } } } });
-    expect(buildWebTop(rule('dry')).hold).toBe('Keep pets off the lawn until it is dry \u2014 your technician confirms timing.');
-    const granular = buildWebTop(rule('watered_in_and_dry')).hold;
-    expect(granular).toBe('Keep pets off the lawn until the treatment has dried, you have watered it in, and the grass is dry again \u2014 your technician confirms timing.');
-    expect(granular).not.toMatch(/\d/);
-    // an unknown rule or no condition (a clock-path record) reads as the plain "dry" idiom
-    expect(buildWebTop(rule('somethingelse')).hold).toBe('Keep pets off the lawn until it is dry \u2014 your technician confirms timing.');
-    expect(buildWebTop(lawn({ dynamicContext: { reentry: { targets: [] } } })).hold).toBe('Keep pets off the lawn until it is dry \u2014 your technician confirms timing.');
-  });
-
-  test('the hold is a fixed sentence: no hours, no product, whatever the re-entry text says', () => {
-    const out = buildWebTop(lawn({ dynamicContext: { reentry: { petAdvisory: 'Keep pets off for 2 hours (Product X).' } } }));
-    expect(out.hold).toBe('Keep pets off the lawn until it is dry \u2014 your technician confirms timing.');
   });
 });
 
@@ -350,12 +180,12 @@ describe('buildWebTopRain', () => {
 
 describe('attachWebTop (the /data route\u2019s one call)', () => {
   const on = { reportWebTopLive: () => true };
-  const data = () => ({ serviceLine: 'pest', typedReport: { todaysResult: { nextStep: 'Trim the shrubs.' } } });
+  const data = () => lawn();
   const { fetchMrmsDailyRain } = require('../services/mrms-qpe');
   beforeEach(() => { fetchMrmsDailyRain.mockReset(); fetchMrmsDailyRain.mockResolvedValue(null); });
 
   test('gate on beside simple web: webTop is set, an empty object when nothing to say', async () => {
-    expect((await attachWebTop(data(), {}, { simpleWeb: true, gates: on })).webTop).toEqual({ action: 'Trim the shrubs.' });
+    expect((await attachWebTop(data(), {}, { simpleWeb: true, gates: on })).webTop.score).toEqual({ value: 72, previous: 72 });
     expect((await attachWebTop({ serviceLine: 'pest' }, {}, { simpleWeb: true, gates: on })).webTop).toEqual({});
   });
 

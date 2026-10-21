@@ -60,7 +60,8 @@ import {
   docTransition,
 } from '../theme-doc';
 import { CustomerColumn, PublicStateCard } from '../components/brand';
-import ServiceReportDocument, { sanitizeReentryCopy } from './ServiceReportDocument';
+import ServiceReportDocument from './ServiceReportDocument';
+import { sanitizeReentryCopy } from './serviceReportLines';
 import WebTopCard from '../components/report/WebTopCard';
 import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
@@ -10507,7 +10508,7 @@ function SimpleWebReport({ data, token }) {
         </div>
       ) : null}
       {/* GATE_REPORT_WEB_TOP (owner 2026-10-20): top card, score strip and rain bar; the shell footer keeps its social row and drops its app badges (the header holds the store links). */}
-      {data.webTop ? <><style>{WEB_TOP_SHELL_CSS}</style><WebTopCard webTop={data.webTop} glass={glass} /></> : null}
+      {data.webTop ? <><style>{WEB_TOP_SHELL_CSS}</style><WebTopCard webTop={data.webTop} data={data} glass={glass} /></> : null}
       {/* GATE_REPORT_WEB_LIVE_CHIP / GATE_REPORT_WEB_PROGRAM: each shows only when the server sent its key. */}
       <WebPromiseCards data={data} glass={glass} />
       {/* The recap texts link to #visit-recap, so the clip stays on this page. */}
