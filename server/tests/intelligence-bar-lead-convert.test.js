@@ -421,3 +421,26 @@ describe('phone identity keeps the country code', () => {
     expect((await preview()).matched_on).toMatch(/phone/);
   });
 });
+
+describe('a quote-wizard repeat lead stays on the Leads page', () => {
+  test('refused with a capability code, nothing offered; a lone marker or a lone type is not a repeat', async () => {
+    state.leads[0].lead_type = 'quote_wizard';
+    state.leads[0].extracted_data = { duplicate_of_lead_id: '00000000-0000-4000-8000-0000000000b0' };
+    const res = await preview();
+    expect(res).toMatchObject({ code: 'repeat_lead_unsupported', lead_id: LEAD });
+    expect(res.error).toMatch(/Convert it from the Leads page/);
+    expect(res.preview).toBeUndefined();
+    state.leads[0].extracted_data = {};
+    expect((await preview()).preview).toBe(true);
+    state.leads[0].lead_type = 'phone';
+    state.leads[0].extracted_data = { duplicate_of_lead_id: '00000000-0000-4000-8000-0000000000b0' };
+    expect((await preview()).preview).toBe(true);
+  });
+  test('a card shown before the lead became a repeat refuses at Confirm', async () => {
+    const card = await preview();
+    state.leads[0].lead_type = 'quote_wizard';
+    state.leads[0].extracted_data = { duplicate_of_lead_id: '00000000-0000-4000-8000-0000000000b0' };
+    expect(await confirm(card)).toMatchObject({ code: 'repeat_lead_unsupported', preview_changed: true });
+    expect(Leads.convertLeadFromBar).not.toHaveBeenCalled();
+  });
+});

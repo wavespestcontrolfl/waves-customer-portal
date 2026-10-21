@@ -2939,16 +2939,27 @@ describe('linkLeadEstimatesToCustomer', () => {
     const update = ops.find((o) => o.patch);
     expect(update.wheres).toContainEqual(['whereIn', 'id', ['est-a']]);
     expect(update.wheres).toContainEqual(['whereNull', 'customer_id']);
+    // The lead tag rides in the UPDATE itself (an estimate retagged between the read and the write is not attached).
+    expect(update.wheres).toContainEqual(['whereRaw', 'estimate_data::text LIKE ?', ['%lead-6%']]);
     // Nothing approved still tagged: no write.
     const none = makeBackfillDb({ taggedRows: [taggedRows[1]] });
     expect(await linkLeadEstimatesToCustomer({ database: none.database, lead: { id: 'lead-6', estimate_id: null }, customerId: 'cust-6', approvedEstimateIds: ['est-q'] })).toBe(0);
     expect(none.ops.some((o) => o.patch)).toBe(false);
   });
 
+  test('isRepeatQuoteWizardLead needs both the duplicate marker and the quote_wizard type (the settlement\u2019s own test)', () => {
+    const { isRepeatQuoteWizardLead } = require('../services/lead-estimate-link');
+    expect(isRepeatQuoteWizardLead({ lead_type: 'quote_wizard', extracted_data: { duplicate_of_lead_id: 'root-1' } })).toBe(true);
+    expect(isRepeatQuoteWizardLead({ lead_type: 'quote_wizard', extracted_data: JSON.stringify({ duplicate_of_lead_id: 'root-1' }) })).toBe(true);
+    expect(isRepeatQuoteWizardLead({ lead_type: 'quote_wizard', extracted_data: {} })).toBe(false);
+    expect(isRepeatQuoteWizardLead({ lead_type: 'phone', extracted_data: { duplicate_of_lead_id: 'root-1' } })).toBe(false);
+  });
+
   test('with a linked estimate only that estimate can be attached, and an empty approved set attaches nothing', async () => {
     const linked = makeBackfillDb({ rowsUpdated: 1 });
     expect(await linkLeadEstimatesToCustomer({ database: linked.database, lead: { id: 'lead-6', estimate_id: 'est-fk' }, customerId: 'cust-6', approvedEstimateIds: ['est-fk', 'est-x'] })).toBe(1);
     expect(linked.ops.find((o) => o.patch).wheres).toContainEqual(['whereIn', 'id', ['est-fk']]);
+    expect(linked.ops.find((o) => o.patch).wheres.some((w) => w[0] === 'whereRaw')).toBe(false);
     const empty = makeBackfillDb({ rowsUpdated: 1 });
     expect(await linkLeadEstimatesToCustomer({ database: empty.database, lead: { id: 'lead-6', estimate_id: 'est-fk' }, customerId: 'cust-6', approvedEstimateIds: [] })).toBe(0);
     expect(await linkLeadEstimatesToCustomer({ database: empty.database, lead: { id: 'lead-6', estimate_id: 'est-fk' }, customerId: 'cust-6', approvedEstimateIds: ['other'] })).toBe(0);

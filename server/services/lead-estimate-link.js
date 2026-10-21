@@ -57,6 +57,9 @@ function duplicateMarkerOf(lead) {
   return (data && data.duplicate_of_lead_id) || null;
 }
 
+// A quote-wizard repeat: the row settleRepeatFunnelRow settles against its root's funnel row when it is won.
+const isRepeatQuoteWizardLead = (lead) => Boolean(duplicateMarkerOf(lead)) && lead.lead_type === 'quote_wizard';
+
 // The estimate a conversion closed, as markConverted persisted it on the
 // won row — the settlement scope a replayed conversion without an estimate
 // of its own must keep (codex #3834 r37 P1).
@@ -120,7 +123,7 @@ const sameContactIdentity = (read, current) => ['customer_id', 'phone', 'email']
 // B (pre-push P1 on 1ea5d47).
 async function settleRepeatFunnelRow(database, leadId, { customerId: suppliedCustomerId = null, estimateId = null } = {}) {
   const repeat = await database('leads').where('id', leadId).first();
-  if (!duplicateMarkerOf(repeat) || repeat.lead_type !== 'quote_wizard') return null;
+  if (!isRepeatQuoteWizardLead(repeat)) return null;
   // The customer is the repeat's OWN, as read (and locked below) — the
   // conversion wrote it; a caller's argument is only the fallback for an
   // unlinked row. A stale argument (staff re-assigned the repeat after the
@@ -1303,10 +1306,12 @@ async function linkLeadEstimatesToCustomer({ database = db, lead, customerId, ap
         ids = rows.filter((e) => parseEstimateData(e.estimate_data)?.lead_id === lead.id).map((e) => e.id);
       }
       if (!ids.length) return 0;
-      return await database('estimates')
-        .whereIn('id', ids)
-        .whereNull('customer_id')
-        .update({ customer_id: customerId, updated_at: new Date() });
+      // The lead tag rides in the UPDATE itself (prefilter by the id substring, as the selector above): an
+      // estimate retagged to another lead between the read and this write is not attached. A linked
+      // estimate is attached by its id alone.
+      const attach = database('estimates').whereIn('id', ids).whereNull('customer_id');
+      if (!lead.estimate_id) attach.whereRaw('estimate_data::text LIKE ?', [`%${lead.id}%`]);
+      return await attach.update({ customer_id: customerId, updated_at: new Date() });
     }
     // Primary: the lead's FK-linked estimate — deterministic, zero ambiguity.
     if (lead.estimate_id) {
@@ -2282,6 +2287,7 @@ async function resolveLinkedLeadWon({ estimateId, customerId, database = db }) {
 }
 
 module.exports = {
+  isRepeatQuoteWizardLead,
   taggedUnownedEstimates,
   invoiceSentConversionTargets,
   resolveConversionLeads,

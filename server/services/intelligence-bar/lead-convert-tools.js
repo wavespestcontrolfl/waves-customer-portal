@@ -189,6 +189,11 @@ async function resolveTargets(input) {
   if (lead.converted_at || lead.status === 'won') {
     return refusal(`${leadName} is already converted${lead.customer_id ? ' and linked to a customer' : ''}. Nothing was changed.`, 'already_converted', { lead_id: lead.id });
   }
+  // A quote-wizard repeat settles against its root lead's funnel row (settleRepeatFunnelRow), an effect the card
+  // does not list or pin: it stays on the Leads page.
+  if (require('../lead-estimate-link').isRepeatQuoteWizardLead(lead)) {
+    return refusal(`${leadName} is a repeat quote-wizard lead: converting it also settles the original lead's funnel row, which the bar cannot show. Convert it from the Leads page.`, 'repeat_lead_unsupported', { lead_id: lead.id });
+  }
   const badValue = [['monthly_value', 100000], ['initial_service_value', 1000000]]
     .find(([key, max]) => input[key] !== undefined && !(Number.isFinite(input[key]) && input[key] >= 0 && input[key] <= max));
   if (badValue) return refusal(`${badValue[0]} must be a dollar amount from 0 to ${badValue[1]}`, 'invalid_value');
