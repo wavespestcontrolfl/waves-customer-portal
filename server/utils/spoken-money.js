@@ -54,7 +54,7 @@ const MONEY_WORD = new RegExp(
 
 // A number that names a record, not an amount.
 const IDENTIFIER_BEFORE = /(?:\b(?:invoice|inv|ticket|order|account|acct|confirmation|job|number|no|unit|apt|apartment|suite|ste|lot|room|route|zip|code|pin|passcode|combo|combination|gate|lockbox|keypad|door|point)\b\.?|#)\s*(?:number|no\.?|#)?\s*(?:is|was|of)?\s*#?\s*$/i;
-const UNIT_AFTER = /^\s*(?:%|(?:cents?|oz|ounces?|fl|gal|gals|gallons?|lbs?|pounds?|sq\.?\s*ft|square\s+(?:feet|foot)|sf|feet|foot|ft|inch(?:es)?|acres?|minutes?|mins?|hours?|hrs?|seconds?|days?|weeks?|years?|months?\s+(?:ago|old)|percent|x\b|bags?|units?|stops?|ml|liters?|litres?|pints?|quarts?|miles?|mi\b|mph|degrees?|psi|ppm|bait\s+stations?|stations?|traps?|points?|pieces?|people|customers?|houses?|homes?|doors?|windows?|rooms?)\b)/i;
+const UNIT_AFTER = /^\s*(?:%|(?:(?:more|extra|additional|linear|square|cubic|fluid|total|of|about|another)\s+){0,2}(?:cents?|oz|ounces?|fl|gal|gals|gallons?|lbs?|pounds?|sq\.?\s*ft|square\s+(?:feet|foot)|sf|feet|foot|ft|inch(?:es)?|acres?|minutes?|mins?|hours?|hrs?|seconds?|days?|weeks?|years?|months?\s+(?:ago|old)|percent|x\b|bags?|units?|stops?|ml|liters?|litres?|pints?|quarts?|miles?|mi\b|mph|degrees?|psi|ppm|bait\s+stations?|stations?|traps?|points?|pieces?|people|customers?|houses?|homes?|doors?|windows?|rooms?)\b)/i;
 const STREET_AFTER = /^\s+(?:[A-Za-z'.]+\s+){0,2}(?:st|street|ave|avenue|rd|road|dr|drive|ln|lane|blvd|boulevard|ct|court|way|pl|place|cir|circle|ter|terrace|pkwy|parkway|hwy|highway|trl|trail|loop|run|pt|point)\b/i;
 const CLOCK_AFTER = /^\s*(?:a\.?\s?m\b|p\.?\s?m\b|o'?clock|in\s+the\s+(?:morning|afternoon|evening)|tomorrow|today|tonight)/i;
 const CLOCK_BEFORE = /\b(?:at|by|around|before|after|until|till|from|between)\s+$/i;
@@ -152,7 +152,7 @@ function normalizeSpokenMoney(input) {
   ), (m, s, e) => {
     const d = wordsToNumber(m[1]);
     const c = wordsToNumber(m[2]);
-    if (d == null || c == null || c < 10 || c > 99) return null;
+    if (d == null || c == null || d < 10 || c < 10 || c > 99) return null; // "one fifty" is $1.50 or $150: left as heard
     if ((d === 19 || d === 20) && !m[3]) return null; // "twenty twenty-six" is a year
     if (!moneyHere(text, s, e, { clock: [d, c], consumedMoney: Boolean(m[3]) })) return null;
     return { to: fmtDollarsCents(d, c), kind: 'words-pair' };
@@ -177,7 +177,7 @@ function normalizeSpokenMoney(input) {
   apply(/(?<![\w$.,:/#-])(?<!\d\s)(\d{1,3})[ ]+(\d{2})(?!\w)(?![.,:/-]\d)(?!\s+\d)(\s+dollars?\b)?/i, (m, s, e) => {
     const d = Number(m[1]);
     const c = Number(m[2]);
-    if (d < 1 || ((d === 19 || d === 20) && !m[3])) return null; // "20 26" is a year
+    if (d < 10 || ((d === 19 || d === 20) && !m[3])) return null; // "20 26" is a year
     if (!moneyHere(text, s, e, { clock: [d, c], consumedMoney: Boolean(m[3]) })) return null;
     return { to: fmtDollarsCents(d, c), kind: 'digits-pair' };
   });

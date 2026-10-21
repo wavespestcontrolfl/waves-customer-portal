@@ -67,6 +67,14 @@ const REWRITES = [
   ['discount one hundred%', SAME],
   ['discount a hundred % off the price', SAME],
   ['price 6133%', SAME],
+  // "one fifty" is $1.50 or $150: left as heard
+  ['quote them one fifty for the initial treatment', SAME],
+  ['charge two fifty', SAME],
+  ['charge 5 50 a month', SAME],
+  // compound units and modifiers before a unit
+  ['charge for two hundred linear feet', SAME],
+  ['charge for two hundred more square feet', SAME],
+  ['price for a hundred and five extra gallons', SAME],
   // cents are not dollars
   ['charge one hundred fifty five cents', SAME],
   ['charge 61 33 cents', SAME],
