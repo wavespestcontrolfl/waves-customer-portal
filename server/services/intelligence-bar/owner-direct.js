@@ -409,7 +409,9 @@ function messageDirectPlan(toolUses, isValid = () => true, taint = null, groundi
   // A message with more than the limit of these calls is refused as a set
   // (one bulk card), decided before any of them commits (Codex #6369 r2):
   // the prompt promises "more than 5 edits" never half-applies.
-  for (const [toolName, n] of previewCalls) if (n > DIRECT_EDITS_V2) plan.set(toolName, n);
+  // Counted with the request's earlier direct commits by cappedTools, so four
+  // committed plus a two-call batch is refused as a set too (pre-push audit).
+  for (const [toolName, n] of previewCalls) plan.set(toolName, n);
   return plan;
 }
 

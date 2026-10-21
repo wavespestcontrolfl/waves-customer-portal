@@ -140,14 +140,24 @@ describe('rule 3: five direct edits per tool', () => {
     expect(OwnerDirect.BULK_LIMIT_RESULT.error).toMatch(/^Three or more/);
   });
 
-  test('gate on: the 4th and 5th run direct, the 6th goes to the bulk card', () => {
+  test('gate on: grounded customer edits: the 4th and 5th run direct, the 6th goes to the bulk card; lead edits keep the old cap', () => {
     process.env[ON] = 'true';
-    expect(capped(3, [lead(id(1))])).toBe(false); // the 4th
-    expect(capped(4, [lead(id(1))])).toBe(false); // the 5th
-    expect(capped(5, [lead(id(1))])).toBe(true); // the 6th
-    // One model message planning 5 / 6 calls from zero.
-    expect(capped(0, [1, 2, 3, 4, 5].map(n => lead(id(n))))).toBe(false);
-    expect(capped(0, [1, 2, 3, 4, 5, 6].map(n => lead(id(n))))).toBe(true);
+    const CUSTOMER = id(1);
+    const grounding = OwnerDirect.targetGrounding({ targets: [], typedCustomerIds: [CUSTOMER], page: { ids: {} } });
+    const edit = n => ({ type: 'tool_use', name: 'update_customer', input: { customer_id: CUSTOMER, updates: { phone: `941-555-01${String(n).padStart(2, '0')}` } } });
+    const cappedCustomer = (done, calls) => {
+      const committed = new Map();
+      for (let i = 0; i < done; i++) OwnerDirect.recordDirectCommit(committed, 'update_customer');
+      return OwnerDirect.cappedTools(committed, OwnerDirect.messageDirectPlan(calls, () => true, null, grounding)).has('update_customer');
+    };
+    expect(cappedCustomer(3, [edit(1)])).toBe(false); // the 4th
+    expect(cappedCustomer(4, [edit(1)])).toBe(false); // the 5th
+    expect(cappedCustomer(5, [edit(1)])).toBe(true); // the 6th
+    expect(cappedCustomer(0, [1, 2, 3, 4, 5].map(edit))).toBe(false);
+    expect(cappedCustomer(0, [1, 2, 3, 4, 5, 6].map(edit))).toBe(true);
+    // Lead edits: the 3rd is refused, as with the gate off.
+    expect(capped(1, [lead(id(1))])).toBe(false);
+    expect(capped(2, [lead(id(1))])).toBe(true);
     // A failed seed read still counts as the cap reached.
     expect(OwnerDirect.cappedTools(new Map([[Symbol.for('x'), true]]), new Map()).size).toBe(0);
   });
@@ -442,7 +452,10 @@ describe('Codex r1 P2: the direct cap counts calls that actually run direct; the
     // Gate on: the prompt and the appended rules block agree on 5.
     process.env[ON] = 'true';
     const full = OwnerDirect.ownerDirectPrompt() + OwnerDirect.OWNER_DIRECT_TARGET_RULES_PROMPT;
-    expect(limits(full)).toEqual({ old: false, v2: true, anyThree: false });
+    expect(limits(full)).toMatchObject({ old: false, v2: true });
+    // The only "three or more" left is the lead-edit exception.
+    expect(full.match(/three or more/gi)).toEqual(['three or more']);
+    expect(full).toMatch(/Lead edits \(update_lead_contact, update_lead_status\) keep the stricter limit/);
     expect(full).toMatch(/Up to 5 edits with the same tool/);
     expect(full).toMatch(/for more than 5 records use the bulk tool/);
   });
@@ -463,6 +476,21 @@ describe('lead edits keep the old cap (Codex #6369 security P2)', () => {
       const plan = OwnerDirect.messageDirectPlan([lead(1), lead(2), lead(3)]);
       expect([...OwnerDirect.cappedTools(new Map(), plan)]).toContain('update_lead_status');
       expect(OwnerDirect.cappedTools(new Map(), OwnerDirect.messageDirectPlan([lead(1), lead(2)])).size).toBe(0);
+    } finally {
+      delete process.env.GATE_IB_TARGET_RULES_V2;
+    }
+  });
+});
+
+describe('preview-dependent batch counts earlier commits (pre-push audit)', () => {
+  test('four committed reschedules plus a two-call batch is refused as a set', () => {
+    process.env.GATE_IB_TARGET_RULES_V2 = 'true';
+    try {
+      const call = n => ({ type: 'tool_use', name: 'reschedule_appointment', input: { appointment_id: `10000000-0000-4000-8000-00000000080${n}`, new_date: '2026-11-03' } });
+      const committed = new Map([['reschedule_appointment', 4]]);
+      expect([...OwnerDirect.cappedTools(committed, OwnerDirect.messageDirectPlan([call(1), call(2)]))]).toEqual(['reschedule_appointment']);
+      const three = new Map([['reschedule_appointment', 3]]);
+      expect(OwnerDirect.cappedTools(three, OwnerDirect.messageDirectPlan([call(1), call(2)])).size).toBe(0);
     } finally {
       delete process.env.GATE_IB_TARGET_RULES_V2;
     }
