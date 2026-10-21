@@ -52,7 +52,7 @@ const looksLikeBearerToken = (header, token) => Boolean(header) || token.length 
 // "Basic <base64>" in any casing (HTTP schemes are case-insensitive), removed
 // only when the token decodes to "user:password", so prose such as "Basic
 // perimeter treatment" stays (Codex #6375 r3, pre-push audit r4).
-const BASIC_RE = /\b(basic)\s+([A-Za-z0-9+\/]{8,}={0,2})/gi;
+const BASIC_RE = /\b(basic)\s+([A-Za-z0-9+\/]{4,}={0,2})/gi;
 function looksLikeBasicCredential(scheme, token) {
   try {
     return /^[\x20-\x7e]+:[\x20-\x7e]*$/.test(Buffer.from(token, 'base64').toString('latin1'));
