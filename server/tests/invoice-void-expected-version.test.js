@@ -48,9 +48,9 @@ function queueVoid({ current = row(), returning = [row({ status: 'void' })], pla
     .mockReturnValueOnce(chain({ first: undefined })); // payments guard
   // Bar only: the invoice row taken FOR NO KEY UPDATE inside the transaction (version re-asserted on it).
   if (bar) db.mockReturnValueOnce(chain({ first: locked || current }));
-  db.mockReturnValueOnce(update); // the void UPDATE
-  // Bar only: the payment-plan fence read right after the UPDATE (the charge fence is mocked at the Stripe module).
+  // Bar only: the payment-plan fence read right after the lock (the charge fence is mocked at the Stripe module).
   if (bar) db.mockReturnValueOnce(chain({ first: plan }));
+  db.mockReturnValueOnce(update); // the void UPDATE
   db
     .mockReturnValueOnce(chain({ first: undefined })) // payments guard under the lock
     .mockReturnValueOnce(chain()); // payment_plans cancel
@@ -159,7 +159,7 @@ test('without `expected` the page triages before its transaction, with no extra 
 });
 
 describe('the saved-card charge fence inside the void transaction (bar only)', () => {
-  test('with `expected` the fence is read inside the transaction after the invoice row is updated, read-only', async () => {
+  test('with `expected` the fence is read inside the transaction once the invoice row is locked, read-only', async () => {
     queueVoid();
     await InvoiceService.voidInvoice('inv-1', { expected: EXPECTED });
     expect(mockFence).toHaveBeenCalledTimes(1);
@@ -208,5 +208,35 @@ describe('the payment-plan fence inside the void transaction (bar only)', () => 
     queueVoid({ bar: false });
     await InvoiceService.voidInvoice('inv-1');
     expect(db).toHaveBeenCalledTimes(5);
+  });
+});
+
+describe('the fences run before the Stripe cancel (a cancel cannot roll back)', () => {
+  const withPi = row({ stripe_payment_intent_id: 'pi_test_1' });
+  const expected = { ...EXPECTED, paymentIntentId: 'pi_test_1', paymentIntentStatus: 'requires_payment_method' };
+  beforeEach(() => {
+    mockRetrievePi.mockResolvedValue({ id: 'pi_test_1', status: 'requires_payment_method' });
+    mockCancelPi.mockResolvedValue({});
+  });
+
+  test('a saved-card claim that started after the card refuses the void with no Stripe retrieve or cancel', async () => {
+    queueVoid({ current: withPi });
+    mockFence.mockRejectedValueOnce(Object.assign(new Error('busy'), { code: 'STRIPE_CHARGE_IN_PROGRESS' }));
+    await expect(InvoiceService.voidInvoice('inv-1', { expected })).rejects.toThrow(/saved-card charge.*while voiding/);
+    expect(mockRetrievePi).not.toHaveBeenCalled();
+    expect(mockCancelPi).not.toHaveBeenCalled();
+  });
+
+  test('a payment plan created after the card refuses the void with no Stripe retrieve or cancel', async () => {
+    queueVoid({ current: withPi, plan: { id: 'plan-1' } });
+    await expect(InvoiceService.voidInvoice('inv-1', { expected })).rejects.toThrow(/payment plan exists.*while voiding/);
+    expect(mockRetrievePi).not.toHaveBeenCalled();
+    expect(mockCancelPi).not.toHaveBeenCalled();
+  });
+
+  test('with both clear the session is cancelled', async () => {
+    queueVoid({ current: withPi, returning: [row({ status: 'void', stripe_payment_intent_id: 'pi_test_1' })] });
+    await InvoiceService.voidInvoice('inv-1', { expected });
+    expect(mockCancelPi).toHaveBeenCalledTimes(1);
   });
 });

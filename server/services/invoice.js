@@ -766,6 +766,11 @@ async function voidLockAndTriage(trx, { id, piId, expected }) {
   const locked = await trx("invoices").where({ id }).forNoKeyUpdate().first();
   if (!locked) throw new Error("Invoice not found");
   assertVoidExpected(locked, expected);
+  // The durable saved-card charge fence and the payment-plan fence, now that this transaction holds the row and BEFORE
+  // the one effect that cannot roll back (the Stripe cancel): a claim or plan that started after the card refuses the
+  // void with the session untouched.
+  await assertVoidChargeFence(trx, id, expected);
+  await assertVoidNoPaymentPlan(trx, id, expected);
   await triageVoidPaymentIntent({ id, piId, expected, conn: trx });
 }
 function applyVoidExpected(q, expected) {
@@ -11105,10 +11110,6 @@ const InvoiceService = {
         throw new Error("Invoice status changed while voiding — re-check and retry");
       }
       assertDuesOwnerUnmoved(lockedDues, updated);
-      // Bar only (`expected`): the durable saved-card charge fence, re-read now that this transaction holds the invoice
-      // row (the UPDATE above); a charge that started after the card refuses and rolls the void back.
-      await assertVoidChargeFence(trx, id, expected);
-      await assertVoidNoPaymentPlan(trx, id, expected);
       // A voided standard invoice that billed the rodent bait-station setup
       // puts the obligation back on the living series (codex #3591 r44 P1).
       await this.restoreRodentSetupObligationForReversedInvoice(trx, updated);
