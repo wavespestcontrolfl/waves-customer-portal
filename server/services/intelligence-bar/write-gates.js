@@ -94,6 +94,9 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   // send_invoice (owner ruling 2026-10-07): an existing invoice only,
   // through the Invoices page's own send handler.
   'send_invoice',
+  // record_payment (owner ruling 2026-10-12): the Invoices page's Record payment handler, run in process behind a
+  // card; records money already received, never charges a card.
+  'record_payment',
   'update_lead_contact',
   ...OUTSIDE_WRITE_TOOL_NAMES,
   'cancel_queued_message',

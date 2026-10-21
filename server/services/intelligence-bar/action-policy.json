@@ -487,6 +487,14 @@
     "approval": "ui_confirm",
     "scope": "record"
   },
+  "record_payment": {
+    "module": "record-payment-tools.js",
+    "domain": "customers",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "send_invoice": {
     "module": "invoice-action-tools.js",
     "domain": "customers",

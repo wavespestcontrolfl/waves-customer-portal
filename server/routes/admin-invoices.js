@@ -2641,7 +2641,15 @@ function parseDateOnly(value, field) {
   return String(value).slice(0, 10);
 }
 
-router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
+// req.ibApprovedPayment is set only by recordPaymentFromBar (the Intelligence Bar card): the amount due and the invoice
+// status / edit time the card showed, enforced inside the settlement on the locked row, and that the invoice is still the
+// customer's own (re-proved under the row lock, like the Zelle paths). The Invoices page never sets it, so its call is unchanged.
+const cardPinsOf = (req) => (req.ibApprovedPayment
+  ? { expectedAmountCents: req.ibApprovedPayment.expectedAmountCents, expectedInvoiceVersion: req.ibApprovedPayment.expectedInvoiceVersion, requireSelfPay: true }
+  : {});
+
+// Named so the Intelligence Bar's record_payment card (recordPaymentFromBar, below) runs this very handler.
+const recordPaymentHandler = async (req, res, next) => {
   try {
     const { id } = req.params;
     const {
@@ -2666,7 +2674,10 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
     // effects and the receipt all live in services/invoice-manual-payment.js
     // — the one manual-settlement path (shared with the Zelle notice
     // reconciler). Refusals arrive as statusCode-shaped errors.
-    const { invoice, receipt } = await recordManualPayment(id, { method, reference, note, recordedBy, sendReceipt, via, recordedByTechnicianId: req.technicianId || null });
+    const { invoice, receipt } = await recordManualPayment(id, {
+      method, reference, note, recordedBy, sendReceipt, via, recordedByTechnicianId: req.technicianId || null,
+      ...cardPinsOf(req),
+    });
     res.json({ ok: true, invoice, receipt });
   } catch (err) {
     // 400 / 404 refusals and the 409-shaped conflicts (combined-session
@@ -2676,12 +2687,15 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
       return res.status(err.statusCode).json({
         error: err.message,
         ...(err.currentStatus !== undefined ? { current_status: err.currentStatus } : {}),
+        // Only a card's pin (amount due / invoice version) can produce these; the page never sets one.
+        ...(err.drift || err.amountMismatch ? { code: 'PREVIEW_CHANGED' } : {}),
       });
     }
     logger.error(`[admin-invoices] record-payment failed: ${err.message}`);
     next(err);
   }
-});
+};
+router.post('/:id/record-payment', requireAdmin, recordPaymentHandler);
 
 
 // GET /:id/credit-context — available account credit + this invoice's
@@ -3775,6 +3789,17 @@ function sendInvoiceFromBar({ invoiceId, body, actor, approvedSend }) {
   return runInvoiceHandler(invoiceSendHandler, barRequest(invoiceId, body, actor, { ibApprovedSend: approvedSend }));
 }
 
+// The Intelligence Bar's record_payment runs the SAME handler as POST /:id/record-payment. `body` is exactly what the
+// Invoices page sends (method, reference, note, sendReceipt, via); `recordedBy` is the staff member's name as the page
+// path would read it from the login; approvedPayment: { expectedAmountCents, expectedInvoiceVersion: { status, updatedAtMs } }.
+function recordPaymentFromBar({ invoiceId, body, actor, approvedPayment }) {
+  return runInvoiceHandler(recordPaymentHandler, barRequest(invoiceId, body, actor, {
+    technician: actor?.name || actor?.email ? { name: actor.name || null, email: actor.email || null } : undefined,
+    ibApprovedPayment: approvedPayment,
+  }));
+}
+
 module.exports = router;
 module.exports.sendInvoiceFromBar = sendInvoiceFromBar;
+module.exports.recordPaymentFromBar = recordPaymentFromBar;
 module.exports.getInvoiceDeliveryRecipients = getInvoiceDeliveryRecipients;

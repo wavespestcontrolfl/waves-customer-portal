@@ -12,7 +12,7 @@ const {
 } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
 const { mergeCustomersEnabled, deleteDuplicateCustomerEnabled } = require('./customer-lifecycle-tools');
-const { ibAcceptEstimateLive } = require('../../config/feature-gates');
+const { ibAcceptEstimateLive, ibRecordPaymentLive } = require('../../config/feature-gates');
 const { invoiceActionsLive } = require('./invoice-action-tools');
 const { repriceVisitsLive } = require('./reprice-visits-tools');
 const { adminReadLive } = require('./admin-read-tools');
@@ -71,6 +71,7 @@ const MODULES = [
   ['billing-write-tools', 'BILLING_WRITE_TOOLS', 'executeBillingWriteTool'],
   ['estimate-accept-tools', 'ESTIMATE_ACCEPT_TOOLS', 'executeEstimateAcceptTool'],
   ['invoice-action-tools', 'INVOICE_ACTION_TOOLS', 'executeInvoiceActionTool'],
+  ['record-payment-tools', 'RECORD_PAYMENT_TOOLS', 'executeRecordPaymentTool'],
   ['choice-tools', 'CHOICE_TOOLS', 'executeChoiceTool'],
   ['admin-read-tools', 'ADMIN_READ_TOOLS', 'executeAdminReadTool'],
   ['address-tools', 'ADDRESS_TOOLS', 'executeAddressTool'],
@@ -134,6 +135,7 @@ const GATED_ACTIONS = {
   delete_duplicate_customer: () => deleteDuplicateCustomerEnabled(),
   send_invoice: () => invoiceActionsLive(),
   accept_estimate: () => ibAcceptEstimateLive(),
+  record_payment: () => ibRecordPaymentLive(),
   find_admin_reads: () => adminReadLive(),
   read_admin_data: () => adminReadLive(),
 };
@@ -253,7 +255,7 @@ function pageTools(context, scope) {
   const domain = { estimates: 'estimate', agent_estimate: 'estimate', inventory: 'procurement', dispatch: 'schedule', reviews: 'review', blog: 'seo' }[context] || context;
   const common = new Set(['query_customers', 'get_customer_detail', 'get_schedule_view', 'query_leads', 'list_gap_reports', 'needs_me', ...EVERY_PAGE_TOOL_NAMES, ...(PAGE_EXTRA_TOOL_NAMES[context] || [])]);
   // send_invoice (domain customers) also rides the Invoices / Revenue page and dashboard (owner 2026-10-07).
-  if (context === 'revenue' || context === 'dashboard') common.add('send_invoice');
+  if (context === 'revenue' || context === 'dashboard') { common.add('send_invoice'); common.add('record_payment'); }
   // reprice_future_visits (domain schedule) also rides the Customers page and dashboard (owner 2026-10-07).
   if (context === 'customers' || context === 'dashboard') common.add('reprice_future_visits');
   return [...actions.values()]

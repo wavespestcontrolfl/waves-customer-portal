@@ -270,6 +270,49 @@ describe('recordManualPayment — refusal contract', () => {
     expect(sendReceiptEmail).not.toHaveBeenCalled();
   });
 
+  describe('expectedInvoiceVersion (the Intelligence Bar card pin)', () => {
+    const SEEN = new Date('2099-01-01T12:00:00.123Z');
+    const version = { status: 'sent', updatedAtMs: SEEN.getTime() };
+
+    test('a pre-lock difference refuses with 409 + drift before the Stripe session is retired or a transaction opens', async () => {
+      db.mockImplementation(() => recorder({ first: openInvoice({ updated_at: new Date('2099-01-01T12:00:05Z'), stripe_payment_intent_id: 'pi_live' }) }));
+      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', expectedInvoiceVersion: version }));
+      expect(err.statusCode).toBe(409);
+      expect(err.drift).toBe(true);
+      expect(StripeService.retrievePaymentIntent).not.toHaveBeenCalled();
+      expect(db.transaction).not.toHaveBeenCalled();
+    });
+
+    test('a status or edit-time change on the LOCKED row refuses with drift and writes nothing', async () => {
+      db.mockImplementation(() => recorder({ first: openInvoice({ updated_at: SEEN }) }));
+      let paymentsInsert = null;
+      let update = null;
+      db.transaction.mockImplementation(async (fn) => {
+        const trx = jest.fn((table) => {
+          if (table === 'invoices') { const r = recorder({ first: openInvoice({ updated_at: new Date('2099-01-01T12:00:09Z') }) }); update = r.update; return r; }
+          if (table === 'payments') { const r = recorder(); paymentsInsert = r.insert; return r; }
+          throw new Error(`unexpected trx table ${table}`);
+        });
+        trx.fn = { now: () => 'NOW()' };
+        return fn(trx);
+      });
+      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', expectedInvoiceVersion: version }));
+      expect(err.statusCode).toBe(409);
+      expect(err.drift).toBe(true);
+      expect(update).not.toHaveBeenCalled();
+      expect(paymentsInsert).toBeNull();
+      expect(sendReceiptEmail).not.toHaveBeenCalled();
+    });
+
+    test('without the option nothing changes: an invoice with any edit time settles as before', async () => {
+      db.mockImplementation(() => recorder({ first: openInvoice({ updated_at: new Date() }) }));
+      db.transaction.mockImplementation(async () => null);
+      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check' }));
+      expect(err.message).toBe('Invoice status changed before payment could be recorded');
+      expect(err.drift).toBeUndefined();
+    });
+  });
+
   test.each([
     ['a payer assigned on the locked row', { payer_id: 'payer-1' }, true],
     ['a statement assigned on the locked row', { payer_statement_id: 'stmt-1' }, true],

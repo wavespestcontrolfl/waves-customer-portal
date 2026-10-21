@@ -19,6 +19,11 @@
  * credit), nothing is written and a 409 says so, so the ledger can never
  * record a different sum than the money that arrived.
  *
+ * expectedInvoiceVersion (optional, the Intelligence Bar record_payment card only): { status,
+ * updatedAtMs } — the invoice's status and edit time the card showed. Checked on the pre-lock read
+ * (before any Stripe session is retired) and again under the invoice row lock right before the paid
+ * flip; a difference writes nothing and a 409 says so. The Invoices page never sets it.
+ *
  * requireSelfPay (optional, both Zelle notice paths): the caller matched the
  * invoice as an OPEN SELF-PAY invoice (no payer, no statement, live payer
  * resolution empty) before calling. Re-run those predicates on the LOCKED row
@@ -97,6 +102,13 @@ async function retireOpenPaymentIntentBeforeSettlement(invoice, { action }) {
   return { status: 409, error: `Open payment session ${openPiId} could not be verified (${verdict.detail || 'payment service unavailable'}); resolve it before ${action}` };
 }
 
+const INVOICE_VERSION_DRIFT_TEXT = 'The invoice changed after the confirmation card was shown — nothing was recorded';
+// status and edit time (ms) as the card read them.
+function invoiceMatchesVersion(row, { status, updatedAtMs }) {
+  const at = row.updated_at ? new Date(row.updated_at).getTime() : null;
+  return String(row.status || '').toLowerCase() === String(status || '').toLowerCase() && at === (updatedAtMs ?? null);
+}
+
 async function recordManualPayment(id, {
   method,
   reference,
@@ -105,6 +117,7 @@ async function recordManualPayment(id, {
   sendReceipt = true,
   via = 'both',
   expectedAmountCents = null,
+  expectedInvoiceVersion = null,
   requireSelfPay = false,
   automated = false,
   settlementFence = null,
@@ -126,6 +139,10 @@ async function recordManualPayment(id, {
 
   const invoice = await db('invoices').where({ id }).first();
   if (!invoice) throw refusal(404, 'Invoice not found');
+  // The Intelligence Bar card's pin, first: a stale card refuses before anything else is looked at or retired.
+  if (expectedInvoiceVersion && !invoiceMatchesVersion(invoice, expectedInvoiceVersion)) {
+    throw refusal(409, INVOICE_VERSION_DRIFT_TEXT, { drift: true });
+  }
   // Phase 2: an accrued invoice is collected ONLY via its consolidated
   // statement — never mark an individual accrued invoice paid here (it would
   // settle once manually and again when the statement settles).
@@ -174,7 +191,7 @@ async function recordManualPayment(id, {
   if (requireSelfPay) {
     const { rowIsSelfPayDue } = require('./open-balance');
     if (invoice.payer_id || invoice.payer_statement_id || !(await rowIsSelfPayDue(invoice.customer_id, invoice))) {
-      throw refusal(409, 'Invoice is no longer an open self-pay invoice (a payer or statement was assigned) — nothing was recorded');
+      throw refusal(409, 'Invoice is no longer an open self-pay invoice (a payer or statement was assigned) — nothing was recorded', { drift: true });
     }
   }
   if (settlementFence && !(await settlementFence(db))) {
@@ -224,6 +241,8 @@ async function recordManualPayment(id, {
     if (!locked) return null;
     const lockedPiId = locked.stripe_payment_intent_id || null;
     if (lockedPiId && lockedPiId !== triagedPiId) return { racedNewPaymentIntent: lockedPiId };
+    // The card's pin, on the LOCKED row, in the same transaction as the paid flip.
+    if (expectedInvoiceVersion && !invoiceMatchesVersion(locked, expectedInvoiceVersion)) return { versionDrift: true };
     // The collectibility gate re-run UNDER THE LOCK (audit P0): the unlocked
     // read at the top of this function can be overtaken by a Bill-To
     // assignment that stamps the withdrawal, and only `status` is re-checked
@@ -373,6 +392,9 @@ async function recordManualPayment(id, {
   if (updatedInvoice?.racedNewPaymentIntent) {
     throw refusal(409, 'A new payment session started for this invoice — retry recording the payment');
   }
+  if (updatedInvoice?.versionDrift) {
+    throw refusal(409, INVOICE_VERSION_DRIFT_TEXT, { drift: true });
+  }
   if (updatedInvoice?.amountMismatch) {
     const { expectedCents, actualCents } = updatedInvoice.amountMismatch;
     throw refusal(409, `Invoice amount due is $${(actualCents / 100).toFixed(2)}, not the $${(expectedCents / 100).toFixed(2)} being recorded — nothing was recorded`, { amountMismatch: updatedInvoice.amountMismatch });
@@ -390,7 +412,7 @@ async function recordManualPayment(id, {
     throw refusal(409, `${updatedInvoice.chargeReconciliationPending} — resolve it before recording another payment`);
   }
   if (updatedInvoice?.notSelfPay) {
-    throw refusal(409, 'Invoice is no longer an open self-pay invoice (a payer or statement was assigned) — nothing was recorded');
+    throw refusal(409, 'Invoice is no longer an open self-pay invoice (a payer or statement was assigned) — nothing was recorded', { drift: true });
   }
   if (!updatedInvoice) {
     // Lost the race to a concurrent caller (or another path marked it

@@ -933,6 +933,10 @@ const PINNED_DISPLAY_BUILDERS = {
   send_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'send_invoice'
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount_due: preview.amount_due, send_by: preview.channels, sent_before: preview.send_note }
     : null),
+  // record_payment: the card names the invoice, the customer, the money and whether a receipt goes out; the lines ride the contract.
+  record_payment: (params, preview) => (preview?.preview === true && preview.tool === 'record_payment'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name, amount: preview.amount, method: preview.method, receipt: preview.receipt }
+    : null),
   // Feature switches (Codex r1 on #5489): the card must show the live facts
   // the preview read — current → new, what it means, the target and the
   // restart — not just the raw gate name / value the model sent.
@@ -972,6 +976,8 @@ const VERIFIED_VERSION_PARAMS = {
   // send_invoice binds the invoice state, the recipients and the total the card
   // showed (invoice-action-tools.js _version).
   send_invoice: '_verified_invoice_send_version',
+  // record_payment binds the invoice state, the amount due, the method and the receipt reach the card showed.
+  record_payment: '_verified_record_payment_version',
   cancel_queued_message: '_verified_message_version',
   // resend_receipt binds the invoice, channels, recipients, amount, memo and the receipt
   // state the card showed — a receipt sent in between is refused, never doubled.
@@ -2102,7 +2108,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   }
   // send_invoice: the stored approval names the invoice the preview resolved,
   // never the number the model sent.
-  if (toolUse.name === 'send_invoice' && preview?.preview === true && preview.invoice_id) {
+  if (['send_invoice', 'record_payment'].includes(toolUse.name) && preview?.preview === true && preview.invoice_id) {
     params.invoice_id = String(preview.invoice_id);
     delete params.invoice_number;
   }
