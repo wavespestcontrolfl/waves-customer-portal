@@ -14,6 +14,7 @@ import { alsoSteps, lawnLayoutStatusData, lawnTodaysResult, reentryIsTimed, reen
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
 import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
 import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap';
+import { WebPeopleBottom, WebPeopleTop } from '../components/report/WebPeopleCards';
 import WebPromiseCards from '../components/report/WebPromiseCards';
 import MosquitoReportV2Section from '../components/report/mosquitoV2/MosquitoReportV2Section';
 import TermiteReportV2Section from '../components/report/termiteV2/TermiteReportV2Section';
@@ -488,7 +489,7 @@ function nextServiceName(serviceType) {
   return String(serviceType || '').trim() || null;
 }
 
-function formatNextAppointmentLabel(nextAppointment) {
+export function formatNextAppointmentLabel(nextAppointment) {
   if (!nextAppointment?.scheduledDate) return null;
   // calendarDateFromDateOnlyValue instead of string-concatenating T12:00:00Z:
   // if scheduledDate ever arrives as a full timestamp, the concat produced an
@@ -621,7 +622,7 @@ async function submitReportEvent(token, eventName, metadata = {}) {
   }
 }
 
-function trackReportEvent(token, eventName, metadata = {}) {
+export function trackReportEvent(token, eventName, metadata = {}) {
   if (!token || !eventName) return;
   // Staff reads (data payload flagged staffViewer — the /data fetch carried
   // the portal JWT) post NO interaction events: this endpoint is
@@ -5431,7 +5432,7 @@ function ServiceCoverageList({ coverage, activeItemId, onActivate, applications 
 // pre-existing serviceLine switch, so legacy mosquito building-perimeter
 // traces keep their spray replay and every lawn/pest report renders
 // exactly as before.
-function tracedVariantFallback(traced, serviceLine) {
+export function tracedVariantFallback(traced, serviceLine) {
   if (traced?.variant) return traced.variant;
   if (traced?.captureMode === 'yard') return 'outline';
   return serviceLine === 'lawn' ? 'outline' : 'spray';
@@ -10467,6 +10468,12 @@ function SimpleWebReport({ data, token }) {
   // the scene; this only drops the white sheet and dresses the cards.
   const glass = data.glassWeb === true;
   const pdfUrl = data.pdfUrl ? `${API_BASE}${data.pdfUrl.replace(/^\/api/, '')}` : null;
+  // GATE_REPORT_WEB_PEOPLE: when the top map's snapshot fails to load, the document gets its own map (and its schematic fallback) back.
+  const [peopleMapFailed, setPeopleMapFailed] = useState(false);
+  const documentData = useMemo(
+    () => (peopleMapFailed && data.webPeople ? { ...data, webPeople: { ...data.webPeople, treatedMap: false } } : data),
+    [data, peopleMapFailed],
+  );
   useEffect(() => {
     trackReportEvent(token, 'service_report_viewed', { layout: 'simple' });
   }, [token]);
@@ -10512,7 +10519,8 @@ function SimpleWebReport({ data, token }) {
           <RecapVideoCard recap={data.recap} token={token} />
         </div>
       ) : null}
-      <ServiceReportDocument data={data} token={token} web glass={glass} />
+      <WebPeopleTop data={data} glass={glass} mapFailed={peopleMapFailed} onMapFailed={() => setPeopleMapFailed(true)} />
+      <ServiceReportDocument data={documentData} token={token} web glass={glass} />
       {/* GATE_REPORT_WEB_SHARE: the server sends webShare only for a lawn score of 85+ (see ShareLawnCard). */}
       {data.webShare?.score >= 85 ? (
         <ShareLawnCard
@@ -10525,6 +10533,7 @@ function SimpleWebReport({ data, token }) {
           onTap={() => trackReportEvent(token, 'referral_cta_clicked', { source: 'lawn_card' })}
         />
       ) : null}
+      <WebPeopleBottom data={data} token={token} glass={glass} />
     </div>
   );
 }
