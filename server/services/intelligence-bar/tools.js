@@ -20,8 +20,9 @@ const { isAlwaysFreeServiceType } = require('../no-cost-visit-types');
 const { isReService } = require('../re-service');
 const {
   MAX_RESULTS: MAX_NAME_MATCHES, MAX_RESULTS_V2: MAX_NAME_MATCHES_V2, isNameLikeSearch, rankNameMatches,
-  buildNameIndex, prefilterNameIndex, cachedNameIndex,
+  buildNameIndex, prefilterNameIndex, cachedNameIndex, MAX_SURVIVORS: MAX_NAME_SURVIVORS,
 } = require('./name-match');
+const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
 const { resolveCloseCatalogService } = require('./booking-service-match');
 const { resolveBillingLane } = require('../billing-lane');
 const { stampPrimaryLineDiscount, stampPricingRegimeMarker, capsSnapshotFromPricing } = require('../booking/visit-financial-stamps');
@@ -625,11 +626,14 @@ async function withApproximateCustomers(result, unsearched, { search, limit, off
 }
 
 // Name columns of every customer the main query's filters and scope allow.
-function nameCandidates(unsearched) {
+function nameCandidates(unsearched, cap = APPROXIMATE_CANDIDATE_CAP) {
   return unsearched.clone().clearSelect().clearOrder()
     .select('customers.id', 'customers.first_name', 'customers.last_name', 'customers.company_name')
-    .orderBy('customers.id').limit(APPROXIMATE_CANDIDATE_CAP);
+    .orderBy('customers.id').limit(cap);
 }
+// The shared index holds the whole live book (four short columns a row), so a
+// filtered search can reach any customer; scoring stays capped per request.
+const NAME_INDEX_BOOK_CAP = 200000;
 
 // Customer rows (main query columns) in ranked order. v2 rows carry `match`.
 async function rankedCustomerRows(unsearched, ranked, v2) {
@@ -657,8 +661,9 @@ const NAME_MATCH_CONTEXT_DAYS = 7;
 const NAME_MATCH_LIVE_VISIT_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
 async function nameMatchContext(pageCustomerId, candidateIds) {
   const context = { onScreenCustomerId: pageCustomerId || null, visitTodayIds: new Set(), recentContactIds: new Set() };
-  // Fewer than two candidates have nothing to rank against: skip the reads.
-  if (candidateIds.length < 2) return context;
+  // Context also lowers the floor (0.75 -> 0.65), so even a sole survivor
+  // needs it; only an empty list skips the reads.
+  if (!candidateIds.length) return context;
   try {
     const now = new Date();
     const since = new Date(now.getTime() - NAME_MATCH_CONTEXT_DAYS * 86400000);
@@ -666,7 +671,10 @@ async function nameMatchContext(pageCustomerId, candidateIds) {
       db('scheduled_services').distinct('customer_id').whereIn('customer_id', candidateIds)
         .whereBetween('scheduled_date', [etDateString(now), etDateString(addETDays(now, 1))])
         .whereIn('status', NAME_MATCH_LIVE_VISIT_STATUSES),
-      db('sms_log').distinct('customer_id').whereIn('customer_id', candidateIds).where('created_at', '>=', since),
+      // Only real contact: an inbound text, or one Waves sent that went out
+      // (scheduled, failed, canceled and held rows do not count; Codex #6367 r4).
+      excludeUnresolvedSendReservations(db('sms_log').distinct('customer_id').whereIn('customer_id', candidateIds).where('created_at', '>=', since)
+        .where(function () { this.where('direction', 'inbound').orWhereIn('status', ['sent', 'delivered', 'read']); })),
       db('call_log').distinct('customer_id').whereIn('customer_id', candidateIds).where('created_at', '>=', since),
     ]);
     for (const row of visits) context.visitTodayIds.add(row.customer_id);
@@ -687,7 +695,7 @@ async function nameMatchContext(pageCustomerId, candidateIds) {
 function scopedNameIndex(unsearched, scoped) {
   if (scoped) return Promise.resolve(nameCandidates(unsearched)).then(buildNameIndex);
   const book = db('customers').whereNull('customers.deleted_at');
-  return cachedNameIndex('customers:live', () => nameCandidates(book));
+  return cachedNameIndex('customers:live', () => nameCandidates(book, NAME_INDEX_BOOK_CAP));
 }
 
 // Keep only the survivors the main query (its filters and customer scope)
@@ -700,13 +708,32 @@ async function allowedByQuery(unsearched, survivors) {
   return survivors.filter(entry => allowed.has(entry.id));
 }
 
+// The global index is ranked before the query's filters (city, tag, active)
+// apply, so filtered-out customers must not use up the survivor slots (Codex
+// #6367 r4): walk the ranked list in MAX_SURVIVORS chunks (at most ten id-only
+// reads) until MAX_SURVIVORS allowed customers are found. The on-screen
+// customer is checked in the first chunk.
+const ALLOWED_SCAN_CHUNKS = 10;
+async function allowedSurvivors(unsearched, search, index, include) {
+  const ranked = prefilterNameIndex(search, index, { include, cap: MAX_NAME_SURVIVORS * ALLOWED_SCAN_CHUNKS });
+  const pinned = ranked.filter(entry => include.includes(entry.id));
+  const ordered = [...pinned, ...ranked.filter(entry => !include.includes(entry.id))];
+  const allowed = [];
+  for (let at = 0; at < ordered.length && allowed.length < MAX_NAME_SURVIVORS; at += MAX_NAME_SURVIVORS) {
+    allowed.push(...await allowedByQuery(unsearched, ordered.slice(at, at + MAX_NAME_SURVIVORS)));
+  }
+  return allowed.slice(0, MAX_NAME_SURVIVORS + pinned.length);
+}
+
 // v2 ranking: look up the few candidates that share a sound key with the
 // search (at most 500), keep the ones the query allows, read the context only
 // for them, then score only them.
 async function rankScopedCustomerNames(unsearched, search, limit, pageCustomerId, scoped) {
   const index = await scopedNameIndex(unsearched, scoped);
-  const found = prefilterNameIndex(search, index, { include: pageCustomerId ? [pageCustomerId] : [] });
-  const survivors = scoped ? found : await allowedByQuery(unsearched, found);
+  const include = pageCustomerId ? [pageCustomerId] : [];
+  const survivors = scoped
+    ? prefilterNameIndex(search, index, { include })
+    : await allowedSurvivors(unsearched, search, index, include);
   if (!survivors.length) return [];
   const context = await nameMatchContext(pageCustomerId, survivors.map(entry => entry.id));
   return rankNameMatches(search, survivors, { v2: true, limit, context, prefiltered: true });
