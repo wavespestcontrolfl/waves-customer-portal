@@ -1464,8 +1464,9 @@ function webTileWriteOptions(service, token, metadata) {
   if (metadata.source !== require('../services/service-report/web-actions').WEB_TILE_SOURCE) return {};
   return {
     revalidate: async (trx) => {
-      await trx('service_records').where({ id: service.id }).forUpdate().first('id');
-      // Gates are re-read live at the commit boundary: a flip after the preflight refuses the write too.
+      // Gates and the finding are re-read at the commit boundary: a flip or a changed report after the preflight refuses
+      // the write. No service-record lock is taken here: the rebuild runs on the pool and may write that row itself
+      // (frozen weather snapshots), so holding its lock in this transaction would deadlock the tap.
       const webActions = require('../services/service-report/web-actions');
       if (!webActions.webTileTapAllowed(metadata, require('../config/feature-gates'))
         || (await webTileStillStands(token, metadata)) !== true) {

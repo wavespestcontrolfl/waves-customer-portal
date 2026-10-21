@@ -747,7 +747,7 @@ describe('the finding tile tap rechecks its gates', () => {
     });
     expect(builds).toBe(2); // preflight + the recheck under the lock
     expect(txTouched).toContain('customers'); // it did reach the write transaction
-    expect(txTouched).toContain('service_records'); // ...and locked the service row
+    expect(txTouched).not.toContain('service_records'); // no self-held lock the rebuild could wait on
     expect(txWrites).toEqual([]); // no service request, no event, no estimate
     expect(txTouched).not.toContain('service_requests');
     expect(txTouched).not.toContain('estimates');
