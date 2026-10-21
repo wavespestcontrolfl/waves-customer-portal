@@ -129,8 +129,11 @@ function moneyHere(text, start, end, { clock = null, consumedMoney = false } = {
   return true;
 }
 
+// Only the first MAX_SCAN_CHARS are read: a dictated clip is far shorter, and an
+// unbounded scan of a huge typed prompt would block the event loop (Codex security).
+const MAX_SCAN_CHARS = 4000;
 function normalizeSpokenMoney(input) {
-  const original = typeof input === 'string' ? input : '';
+  const original = typeof input === 'string' ? input.slice(0, MAX_SCAN_CHARS) : '';
   const changes = [];
   const ambiguous = [];
   let text = original;

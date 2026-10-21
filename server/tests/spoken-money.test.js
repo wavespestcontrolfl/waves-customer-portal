@@ -312,3 +312,15 @@ describe('dollars and a number without cents (pre-push audit r3)', () => {
     expect(normalizeSpokenMoney('charge one hundred dollars and the rest later').changes).toEqual([expect.objectContaining({ to: '$100' })]);
   });
 });
+
+describe('scan cap (Codex security)', () => {
+  const { normalizeSpokenMoney, ambiguousAmountNote } = require('../utils/spoken-money');
+  test('a huge prompt is scanned only to the cap and returns fast', () => {
+    const big = `charge sixty-one thirty-three a month. ${'the dog stays in the yard. '.repeat(800000)}`;
+    const t0 = Date.now();
+    const out = normalizeSpokenMoney(big);
+    expect(Date.now() - t0).toBeLessThan(2000);
+    expect(out.text.length).toBeLessThanOrEqual(4000);
+    expect(ambiguousAmountNote([{ heard: 'sixty-one thirty-three' }], big)).toContain('may mean $61.33');
+  });
+});
