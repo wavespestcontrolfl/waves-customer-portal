@@ -208,6 +208,9 @@ describe('Basic credentials and env-style secrets (Codex #6375 r2)', () => {
     ['DB_PASSWORD=hunter22', 'hunter22'],
     ['STRIPE_SECRET_KEY="abc def"', 'abc def'],
     ['API_TOKEN=xyz123', 'xyz123'],
+    ['PASSWORD=hunter22', 'hunter22'],
+    ['API_KEY=abc123', 'abc123'],
+    ['TOKEN=xyz789', 'xyz789'],
   ])('%s is removed', (note, secret) => {
     expect(scrubNote(note).text).not.toContain(secret);
   });
