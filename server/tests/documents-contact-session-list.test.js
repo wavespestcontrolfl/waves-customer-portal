@@ -21,14 +21,18 @@ jest.mock('../middleware/auth', () => ({
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/photos', () => ({ CUSTOMER_DWELL_TTL_SECONDS: 86400, getViewUrl: jest.fn(async () => 'https://cdn/p'), getDownloadUrl: jest.fn() }));
+const PRIMARY_SCOPE = { customerId: 'cust-1', enabled: true, multi: true, scoped: true, closed: false, property: { id: 'prop-1', is_primary: true } };
 jest.mock('../services/contact-session-projection', () => ({
   ...jest.requireActual('../services/contact-session-projection'),
   contactSessionReportsWithheld: jest.fn(async () => false),
+  contactRecordScope: jest.fn(async (req) => (req.contactSession ? PRIMARY_SCOPE : null)),
+  scopeContactRecords: jest.fn((q) => q),
 }));
 jest.mock('../models/db', () => jest.fn());
 
 const express = require('express');
 const db = require('../models/db');
+const { scopeContactRecords } = require('../services/contact-session-projection');
 const documentsRouter = require('../routes/documents');
 
 const SERVICES = [
@@ -89,4 +93,12 @@ test('a contact lists every visit report through the authenticated PDF only — 
   }
   expect(JSON.stringify(body)).not.toMatch(/tok-1|tok-2|ptok|\/report\//);
   expect(body.total).toBe(2);
+  // Both the listed reports AND the total are scoped to the contact's primary property (codex r16 P1, r18 P2).
+  expect(scopeContactRecords).toHaveBeenCalledTimes(2);
+  for (const call of scopeContactRecords.mock.calls) expect(call[1]).toEqual(PRIMARY_SCOPE);
+});
+
+test('the holder\'s list and total are never run through the contact scope', async () => {
+  await list();
+  expect(scopeContactRecords).not.toHaveBeenCalled();
 });

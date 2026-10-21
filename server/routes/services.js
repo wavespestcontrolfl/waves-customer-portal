@@ -214,9 +214,14 @@ router.get('/stats/summary', async (req, res, next) => {
     // Celsius applications in the cap's window (cap tracking): the last 365 days under the v13 program, the calendar year before it
     // (application-limits windowForName, the one window the cap itself counts). Per lawn like the cap: the selected property's
     // when the session is scoped to one, else the busiest lawn's.
-    const celsiusCount = await celsiusApplicationsThisYear(req.customerId, celsiusWindow.start, {
-      propertyId: scope && scope.scoped && scope.property ? scope.property.id : null,
-    });
+    // A contact whose scope is CLOSED (every saved property retired) counts
+    // nothing (codex #6363 r18 P2): the helper's null propertyId means "the
+    // busiest lawn", a property this contact cannot see.
+    const celsiusCount = req.contactSession && scope?.closed
+      ? 0
+      : await celsiusApplicationsThisYear(req.customerId, celsiusWindow.start, {
+        propertyId: scope && scope.scoped && scope.property ? scope.property.id : null,
+      });
 
     res.json({
       servicesYTD: parseInt(servicesYTD.count),

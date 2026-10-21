@@ -44,6 +44,7 @@ const express = require('express');
 const db = require('../models/db');
 const { listPortalServiceHistory, scopeRecordsToProperty } = require('../services/portal-service-history');
 const { resolveSessionScope, applyPropertyPredicate } = require('../services/account-properties');
+const { celsiusApplicationsThisYear } = require('../services/celsius-application-count');
 const projection = require('../services/contact-session-projection');
 
 // A multi-property profile's saved-property rows, and the PRIMARY scope a
@@ -332,6 +333,19 @@ describe('GET /services for a contact session', () => {
       const stats = await get('/services/stats/summary');
       expect(stats.status).toBe(200);
       expect(scopeRecordsToProperty).toHaveBeenCalledTimes(3);
+      expect(celsiusApplicationsThisYear).toHaveBeenCalledWith('cust-1', expect.anything(), { propertyId: 'prop-1' });
+    });
+    // Every saved property retired (a CLOSED contact scope): the records match nothing and the Celsius count is 0 —
+    // never the helper's "busiest lawn" fallback for a null propertyId (codex r18 P2).
+    celsiusApplicationsThisYear.mockClear();
+    const retired = chain([]);
+    retired.first = jest.fn(async () => ({ id: 'retired' }));
+    db.mockImplementation((table) => (table === 'customer_properties' ? retired : chain(table === 'service_records' ? [{ count: '0' }] : [])));
+    await withServer(async (get) => {
+      const stats = await get('/services/stats/summary');
+      expect(stats.status).toBe(200);
+      expect(stats.body.celsiusApplicationsThisYear).toBe(0);
+      expect(celsiusApplicationsThisYear).not.toHaveBeenCalled();
     });
     delete mockSession.contact;
     listPortalServiceHistory.mockClear();

@@ -862,14 +862,23 @@ router.get('/', authenticate, async (req, res, next) => {
       .where({ customer_id: req.customerId })
       .count('id as count');
     let serviceCountQuery = db('service_records')
-      .where({ customer_id: req.customerId, status: 'completed' });
+      .where({ 'service_records.customer_id': req.customerId, 'service_records.status': 'completed' });
+    // The contact's total counts the primary property's reports only, like
+    // the list above (codex #6363 r18 P2): the holder's other homes' reports
+    // are neither listed nor counted.
+    if (contactOnly) {
+      serviceCountQuery = scopeContactRecords(
+        serviceCountQuery.leftJoin('scheduled_services', 'service_records.scheduled_service_id', 'scheduled_services.id'),
+        await contactRecordScope(req),
+      );
+    }
     if (serviceRecordCols.completion_source) {
       serviceCountQuery = serviceCountQuery.where(function visibleServiceReports() {
-        this.whereNull('completion_source')
-          .orWhereNot('completion_source', 'project_completion');
+        this.whereNull('service_records.completion_source')
+          .orWhereNot('service_records.completion_source', 'project_completion');
       });
     }
-    const [{ count: serviceReportCount }] = await serviceCountQuery.count('id as count');
+    const [{ count: serviceReportCount }] = await serviceCountQuery.count('service_records.id as count');
 
     // A contact session: visit reports only, through the authenticated PDF
     // route (above). No stored documents, and no project reports either —
