@@ -183,7 +183,7 @@ function claimOf(row) {
           list.push(() => (tables.funnel || []).filter((r) => first.includes(`${r.id}|${r.funnel_stage || ''}|${r.customer_id || ''}`)).length === count);
         } else if (/^\(SELECT COUNT/.test(sql)) {
           calls.push(['whereRaw', 'estimates']);
-          list.push(() => (tables.estimates || []).filter((e) => e.customer_id == null && first.includes(e.id)).length === count);
+          list.push(() => (tables.estimates || []).filter((e) => e.customer_id == null && first.includes(`${e.id}|${e.status || ''}`)).length === count);
         } else if (/^COALESCE\((\w+)::text/.test(sql)) {
           const column = /^COALESCE\((\w+)::text/.exec(sql)[1];
           calls.push(['whereRaw', `lead.${column}`]);
@@ -204,7 +204,7 @@ const EXPECTED = {
   leadId: LEAD, status: 'contacted', updatedAt: new Date(SEEN).getTime(), customerId: null,
   customer: Object.fromEntries(Object.entries(CUSTOMER_FIELDS).filter(([k]) => k !== 'deleted_at')),
   lead: { first_name: 'Robin', last_name: 'Sample', phone: '+19415550142', email: 'robin@example.test', address: '12 Sample Way', city: 'Venice', zip: '34285' },
-  estimateIds: [], estimateLinked: true, estimateLinkId: null, funnelKeys: [],
+  estimateIds: [], estimateKeys: [], estimateLinked: true, estimateLinkId: null, funnelKeys: [],
 };
 const FULL_LEAD = () => ({
   id: LEAD, status: 'contacted', updated_at: new Date(SEEN), deleted_at: null, converted_at: null, customer_id: null,
@@ -311,8 +311,8 @@ test.each([
 });
 
 test('the bar passes the approved estimate ids to the backfill; the page passes none', async () => {
-  const withIds = { ...EXPECTED, estimateIds: ['est-a'] };
-  tables.estimates = [{ id: 'est-a', customer_id: null, estimate_data: '{}' }];
+  const withIds = { ...EXPECTED, estimateIds: ['est-a'], estimateKeys: ['est-a|sent'] };
+  tables.estimates = [{ id: 'est-a', status: 'sent', customer_id: null, estimate_data: '{}' }];
   leadAttribution.markConverted.mockImplementation(convertsRow(FULL_LEAD()));
   await run(withIds);
   expect(leadAttribution.markConverted.mock.calls[0][1].approvedEstimateIds).toEqual(['est-a']);
@@ -322,8 +322,8 @@ test('the bar passes the approved estimate ids to the backfill; the page passes 
 });
 
 describe('estimates tagged with the lead (no linked estimate)', () => {
-  const TAGGED = { ...EXPECTED, estimateLinked: false, estimateIds: ['est-a'] };
-  const tagged = (extra = {}) => ({ id: 'est-a', customer_id: null, estimate_data: JSON.stringify({ lead_id: LEAD }), ...extra });
+  const TAGGED = { ...EXPECTED, estimateLinked: false, estimateIds: ['est-a'], estimateKeys: ['est-a|sent'] };
+  const tagged = (extra = {}) => ({ id: 'est-a', status: 'sent', customer_id: null, estimate_data: JSON.stringify({ lead_id: LEAD }), ...extra });
   beforeEach(() => { tables.estimates = [tagged()]; winsOnRow(); });
 
   test('the card\u2019s set converts; the claim also rejects any other unowned tagged estimate', async () => {
@@ -344,6 +344,17 @@ describe('estimates tagged with the lead (no linked estimate)', () => {
     expect((await run(TAGGED)).status).toBe(409);
     tables.estimates = [];
     expect((await run(TAGGED)).status).toBe(409);
+  });
+
+  test('an approved estimate whose status changed after the card answers 409; the page still converts', async () => {
+    tables.estimates = [tagged({ status: 'accepted' })];
+    expect((await run(TAGGED)).status).toBe(409);
+    tables.estimates = [tagged({ status: null })];
+    expect((await run(TAGGED)).status).toBe(409);
+    tables.estimates = [tagged()];
+    expect((await run(TAGGED)).status).toBe(200);
+    tables.estimates = [tagged({ status: 'accepted' })];
+    expect((await viaPage(BODY)).status).toBe(200);
   });
 
   test('the page path has no estimate predicate and never passes an id set', async () => {

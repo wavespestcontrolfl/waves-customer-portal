@@ -1329,7 +1329,9 @@ function withExpectedLead(identity, expected, customerId) {
     // The approved estimates are all still unowned, and (lead with no linked estimate) no other unowned
     // estimate is tagged with this lead.
     const ids = expected.estimateIds || [];
-    q.whereRaw("(SELECT COUNT(*) FROM estimates WHERE customer_id IS NULL AND id::text = ANY (?::text[])) = ?", [ids, ids.length]);
+    // ...each in the status the card showed.
+    const keys = expected.estimateKeys || [];
+    q.whereRaw("(SELECT COUNT(*) FROM estimates WHERE customer_id IS NULL AND id::text || '|' || COALESCE(status, '') = ANY (?::text[])) = ?", [keys, keys.length]);
     if (!expected.estimateLinked) {
       q.whereNotExists(db('estimates').select(db.raw('1')).whereNull('customer_id')
         .whereRaw('estimate_data::text LIKE ?', [`%${expected.leadId}%`]).whereRaw('id::text <> ALL (?::text[])', [ids]));

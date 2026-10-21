@@ -249,7 +249,7 @@ describe('the confirmed run', () => {
         leadId: LEAD, status: 'contacted', updatedAt: new Date('2099-01-01T12:00:00.123Z').getTime(), customerId: null,
         lead: { first_name: 'Robin', last_name: 'Sample', phone: '+19415550142', email: 'robin@example.test', address: '12 Sample Way', city: 'Venice', zip: '34285' },
         customer: { first_name: 'Robin', last_name: 'Sample', company_name: null, phone: '(941) 555-0142', email: 'ROBIN@example.test', address_line1: '12 Sample Way', city: 'Venice', zip: '34285' },
-        estimateIds: [EST], estimateLinked: true, estimateLinkId: EST, funnelKeys: ['asa-1|contacted|'],
+        estimateIds: [EST], estimateKeys: [`${EST}|sent`], estimateLinked: true, estimateLinkId: EST, funnelKeys: ['asa-1|contacted|'],
       },
     });
     expect(res).toMatchObject({ success: true, status: 'won', sent_to_customer: false, lead_id: LEAD, customer_id: CUST });
@@ -594,6 +594,15 @@ describe('the card pins what it displayed', () => {
     const card = await preview();
     await confirm(card);
     expect(Leads.convertLeadFromBar.mock.calls[0][0].expected).toMatchObject({ estimateLinkId: EST, funnelKeys: ['asa-1|contacted|'] });
+  });
+  test('the approved estimates\u2019 id|status keys are handed to the claim, and a status change is drift', async () => {
+    const card = await preview();
+    await confirm(card);
+    expect(Leads.convertLeadFromBar.mock.calls[0][0].expected.estimateKeys).toEqual([`${EST}|sent`]);
+    Leads.convertLeadFromBar.mockClear();
+    state.estimates[0].status = 'accepted';
+    expect(await confirm(card)).toMatchObject({ preview_changed: true });
+    expect(Leads.convertLeadFromBar).not.toHaveBeenCalled();
   });
   test('a funnel row replaced by another with the same stage and owner is drift', async () => {
     const card = await preview();

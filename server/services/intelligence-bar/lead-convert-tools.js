@@ -130,13 +130,13 @@ const MAX_LISTED_FUNNEL_ROWS = 5;
 async function estimateEffect(lead, customerId) {
   if (lead.estimate_id) {
     const estimate = await db('estimates').where({ id: lead.estimate_id }).first('id', 'status', 'customer_id');
-    if (!estimate) return { ids: [], linked: true, state: { estimate_id: lead.estimate_id, missing: true }, lines: ['The lead\u2019s linked estimate could not be found; none is attached.'] };
+    if (!estimate) return { ids: [], keys: [], linked: true, state: { estimate_id: lead.estimate_id, missing: true }, lines: ['The lead\u2019s linked estimate could not be found; none is attached.'] };
     const state = { estimate_id: estimate.id, customer_id: estimate.customer_id || null, status: estimate.status || null };
     let line;
     if (!estimate.customer_id) line = `The lead\u2019s estimate (${estimate.status || 'no status'}, ${estimate.id}) has no customer yet: it is attached to this customer. It is not accepted or sent.`;
     else if (estimate.customer_id === customerId) line = 'The lead\u2019s estimate is already on this customer.';
     else line = 'The lead\u2019s estimate belongs to a different customer: it stays there.';
-    return { ids: estimate.customer_id ? [] : [estimate.id], linked: true, state, lines: [line] };
+    return { ids: estimate.customer_id ? [] : [estimate.id], keys: estimate.customer_id ? [] : [`${estimate.id}|${estimate.status || ''}`], linked: true, state, lines: [line] };
   }
   const { loose, exact } = await require('../lead-estimate-link').taggedUnownedEstimates(db, lead.id);
   if (loose !== exact.length) {
@@ -148,6 +148,7 @@ async function estimateEffect(lead, customerId) {
   const sorted = [...exact].sort((a, b) => String(a.id).localeCompare(String(b.id)));
   return {
     ids: sorted.map((e) => String(e.id)),
+    keys: sorted.map((e) => `${e.id}|${e.status || ''}`),
     linked: false,
     state: { tagged: sorted.map((e) => ({ id: String(e.id), status: e.status || null })) },
     lines: sorted.length
@@ -338,6 +339,8 @@ async function buildPlan(input) {
       customer: Object.fromEntries(['first_name', 'last_name', 'company_name', 'phone', 'email', 'address_line1', 'city', 'zip'].map((c) => [c, customer[c] ?? null])),
       // The estimates the card listed: the only ones the backfill may attach.
       estimateIds: estimate.ids,
+      // Each approved estimate as the card showed it (id|status): the claim re-reads status too.
+      estimateKeys: estimate.keys,
       estimateLinked: estimate.linked,
     },
     note: 'PREVIEW ONLY \u2014 nothing was changed. Confirm converts exactly this; if anything changed it refuses.',
