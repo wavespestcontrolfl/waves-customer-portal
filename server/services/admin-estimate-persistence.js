@@ -2430,6 +2430,17 @@ async function createOrReuseAdminEstimate({
     if (linkedLeadId) {
       const lead = await firstForUpdate(trx('leads').where({ id: linkedLeadId }).whereNull('deleted_at'));
       if (!lead) throw errorWithStatus('Lead not found', 404);
+      // The lead's customer was read before pricing, unlocked. Re-assert it on
+      // the locked lead and the live customer row: a lead unlinked or a
+      // customer deleted during pricing must not commit the stale customer
+      // (codex #6394 r1). The customer row is read, not locked — taking a
+      // customer lock after the lead lock would invert the order other
+      // customer writers use.
+      if (leadCustomerId) {
+        const customerStillLive = String(lead.customer_id || '') === leadCustomerId
+          && await trx('customers').where({ id: leadCustomerId }).whereNull('deleted_at').first('id');
+        if (!customerStillLive) throw errorWithStatus('This lead changed while saving; refresh and try again.', 409);
+      }
 
       if (lead.estimate_id) {
         const existingEstimate = await firstForUpdate(trx('estimates').where({ id: lead.estimate_id }));
@@ -2533,6 +2544,11 @@ async function createOrReuseAdminEstimate({
           // maximal edit, not a sent-unedited (same contract as
           // reviseAdminEstimate — see estimate-learning.js).
           await recordPreSendRevision({ priorEstimate: existingEstimate, trx });
+          // A reused lead draft supersedes the webhook draft the same way a
+          // new estimate does (codex #6394 r1).
+          if (updated.customer_id) {
+            await retireSupersededLeadWebhookDrafts(trx, { customerId: updated.customer_id, keepId: updated.id });
+          }
           clearEstimatePricingCache(existingEstimate.id);
           return {
             estimate: updated,

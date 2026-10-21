@@ -1545,3 +1545,30 @@ describe('createOrReuseAdminEstimate — a lead that already has a customer', ()
     expect(retireUpdates(gone)).toHaveLength(0);
   });
 });
+
+describe('createOrReuseAdminEstimate — the inherited customer is re-checked under the lead lock (codex #6394 r1)', () => {
+  const recompute = async () => ({ recomputed: false, reason: 'NO_INPUTS' });
+  test('a lead unlinked from its customer during pricing refuses the save for a retry', async () => {
+    const lead = { id: 'lead-1', status: 'new', phone: '(941) 555-0101', email: 'van@example.com', customer_id: 'cust-1' };
+    const fixture = makeDatabase({ lead, customer: { id: 'cust-1' } });
+    // Pricing runs after the unlocked read; the lead loses its customer then.
+    const slowRecompute = async () => { lead.customer_id = null; return recompute(); };
+    await expect(createOrReuseAdminEstimate({
+      database: fixture.database, body: { ...baseBody }, technicianId: 'tech-1', recompute: slowRecompute,
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(fixture.inserts.filter((e) => e.table === 'estimates')).toHaveLength(0);
+  });
+
+  test('a reused lead draft also retires the webhook draft', async () => {
+    const lead = { id: 'lead-1', status: 'new', phone: '(941) 555-0101', email: 'van@example.com', customer_id: 'cust-1', estimate_id: 'est-draft' };
+    const estimate = { id: 'est-draft', status: 'draft', customer_phone: '(941) 555-0101', customer_email: 'van@example.com', estimate_data: '{}' };
+    const fixture = makeDatabase({ lead, estimate, customer: { id: 'cust-1' } });
+    const { reused } = await createOrReuseAdminEstimate({
+      database: fixture.database, body: { ...baseBody }, technicianId: 'tech-1', recompute,
+    });
+    expect(reused).toBe(true);
+    const retired = fixture.updates.filter((u) => u.table === 'estimates' && u.clause?.source === 'lead_webhook' && u.patch?.archived_at);
+    expect(retired).toHaveLength(1);
+    expect(retired[0].clause).toMatchObject({ customer_id: 'cust-1' });
+  });
+});
