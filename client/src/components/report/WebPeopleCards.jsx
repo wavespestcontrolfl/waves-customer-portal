@@ -2,7 +2,8 @@
 // The server sends `data.webPeople` only while the gate is live; every sentence below is fixed copy, with a name or a
 // date filled in. Nothing here writes: "Works" only confirms on the page, "Move it" opens the signed-in portal schedule, and the review card links to Google.
 import { useState } from 'react';
-import { FS } from '../../theme-doc';
+import { WAVES_SUPPORT_PHONE_DISPLAY } from '../../constants/business';
+import { FS, docButton } from '../../theme-doc';
 import TracedTreatmentZoneMap from './TracedTreatmentZoneMap';
 import {
   formatNextAppointmentLabel, trackReportEvent, tracedVariantFallback,
@@ -20,11 +21,12 @@ const MAP_CSS = `
   .web-people-map .traced-zone-caption { margin: 8px 0 0; color: ${MUTED}; font-size: ${FS.body}px; line-height: 1.4; }
 `;
 
-const buttonStyle = (filled) => ({
+// The "Works" chip: a small on-page confirm, 44px. The review button and Move it use the document button (48px).
+const worksStyle = {
   display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minHeight: 44, padding: '0 18px',
-  borderRadius: 10, fontSize: FS.bodyLg, fontWeight: 600, textDecoration: 'none', cursor: 'pointer',
-  background: filled ? NAVY : 'transparent', color: filled ? '#fff' : NAVY, border: `1.5px solid ${NAVY}`,
-});
+  borderRadius: 10, fontSize: FS.bodyLg, fontWeight: 600, cursor: 'pointer',
+  background: NAVY, color: '#fff', border: `1.5px solid ${NAVY}`,
+};
 
 function PeopleCard({ glass, label, children, className }) {
   return (
@@ -82,6 +84,8 @@ function TreatedMap({ data, glass, onFailed }) {
     <PeopleCard glass={glass} label={data.serviceLine === 'lawn' ? 'Where we treated your lawn' : 'Where we treated'} className="web-people-map">
       <style>{MAP_CSS}</style>
       <TracedTreatmentZoneMap traced={traced} live variant={tracedVariantFallback(traced, data.serviceLine)} onImageError={onFailed} />
+      {/* The same "not survey boundaries" line the document prints under its map. */}
+      {data.treatmentMap?.footer ? <p style={{ margin: '4px 0 0', color: MUTED, fontSize: FS.body, lineHeight: 1.4 }}>{data.treatmentMap.footer}</p> : null}
     </PeopleCard>
   );
 }
@@ -114,9 +118,12 @@ function NextVisit({ visit, glass }) {
         <>
           <p style={{ margin: '8px 0 12px', color: MUTED }}>Does this time work for you?</p>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
-            <button type="button" style={buttonStyle(true)} onClick={() => setWorks(true)}>Works</button>
-            {/* The signed-in portal schedule, never a token link: a forwarded report must not carry the visit's reschedule capability. */}
-            <a href="/?tab=schedule" style={buttonStyle(false)}>Move it</a>
+            <button type="button" style={worksStyle} onClick={() => setWorks(true)}>Works</button>
+            {/* The signed-in portal schedule, never a token link: a forwarded report must not carry the visit's reschedule capability.
+                The portal has no property deep link, so the server sends canMove only for a single-home account. */}
+            {visit.canMove === true
+              ? <a href="/?tab=schedule" style={docButton('chip')}>Move it</a>
+              : <span style={{ color: MUTED, fontSize: FS.body, alignSelf: 'center' }}>Call {WAVES_SUPPORT_PHONE_DISPLAY} to move it.</span>}
           </div>
         </>
       )}
@@ -135,7 +142,7 @@ function ReviewAsk({ data, review, token, glass }) {
         href={review.url}
         target="_blank"
         rel="noreferrer"
-        style={buttonStyle(true)}
+        style={docButton('primary')}
         onClick={() => trackReportEvent(token, 'review_request_clicked', { location: review.locationId, placement: 'web_people' })}
       >
         Rate today&rsquo;s visit

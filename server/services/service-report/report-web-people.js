@@ -17,7 +17,8 @@
 const { isPerformedVisitOutcome } = require('../pest-pressure/first-visit');
 const { serviceRecordSuppressesCustomerArtifacts } = require('../pest-pressure/history-filter');
 const { isGenericTechnicianLabel } = require('../../utils/technician-name');
-const { resolveVisitPropertyScope, sameResolvedProperty } = require('./visit-property-scope');
+const linkage = require('../estimate-property-linkage');
+const { resolveVisitPropertyScope, sameResolvedProperty, customerHasOnlyPrimaryPremises } = require('./visit-property-scope');
 
 const REVIEW_MIN_LAWN_SCORE = 85;
 const QUIET_DAYS = 30;
@@ -25,6 +26,8 @@ const QUIET_DAYS = 30;
 const LOW_RATING_MAX = 6;
 const NEGATIVE_CALL_SENTIMENTS = ['negative', 'frustrated'];
 const MIN_VISITS_TO_SAY = 2;
+// The record read is capped; a capped read cannot give an exact count, so it gives none.
+const RECORD_READ_CAP = 500;
 
 function parseJsonObject(value) {
   if (value && typeof value === 'object') return value;
@@ -120,7 +123,8 @@ async function visitsAtHome(knex, service) {
     .where('sr.status', 'completed')
     .where('sr.service_date', '<=', service.service_date)
     .select('sr.id', 'sr.scheduled_service_id', 'sr.structured_notes', 'ss.visit_id', ...SCOPE_COLUMNS.map((c) => `ss.${c}`))
-    .limit(500);
+    .limit(RECORD_READ_CAP);
+  if (rows.length >= RECORD_READ_CAP) return 0;
   const stops = new Set();
   for (const row of rows) {
     if (serviceRecordSuppressesCustomerArtifacts(row)
@@ -130,6 +134,19 @@ async function visitsAtHome(knex, service) {
     stops.add(row.visit_id ? `visit:${row.visit_id}` : `booking:${row.scheduled_service_id || row.id}`);
   }
   return stops.size;
+}
+
+// "Move it" opens the portal schedule, which has no property deep link: it lands on the customer's own default home. So
+// the button shows only on a proven single-premises account; otherwise the card says to call.
+async function canMoveInPortal(knex, service) {
+  try {
+    const mirrorKey = linkage.normalizedStampedStreet(service.address_line1, service.address_line2, service.city, service.zip) || null;
+    if (!mirrorKey) return false;
+    const customerRow = await knex('customers').where({ id: service.customer_id }).first('has_multi_home');
+    return (await customerHasOnlyPrimaryPremises(knex, service.customer_id, customerRow, mirrorKey, { unresolvedFails: true })) === true;
+  } catch {
+    return false;
+  }
 }
 
 async function techFor(data, service, knex) {
@@ -151,7 +168,7 @@ async function techFor(data, service, knex) {
   };
 }
 
-function nextVisitFor(visits) {
+function nextVisitFor(visits, canMove) {
   const next = Array.isArray(visits) ? visits[0] : null;
   if (!next || !next.scheduledDate) return null;
   return {
@@ -159,6 +176,7 @@ function nextVisitFor(visits) {
     scheduledDate: next.scheduledDate,
     // No reschedule link: it is a bearer credential. "Move it" goes to the signed-in portal schedule.
     windowStart: next.windowStart || null,
+    canMove,
   };
 }
 
@@ -177,7 +195,7 @@ async function buildWebPeople({ data, service, knex, nextVisits, readsOk = false
     techFor(data, service, knex),
     reviewLinkFor(data, service, knex, now, { readsOk, coverageEvidence }),
   ]);
-  const nextVisit = nextVisitFor(nextVisits);
+  const nextVisit = nextVisitFor(nextVisits, (Array.isArray(nextVisits) && nextVisits[0]) ? await canMoveInPortal(knex, service) : false);
   const out = {
     ...(tech ? { tech } : {}),
     ...(data.treatmentMap?.traced?.snapshotUrl ? { treatedMap: true } : {}),

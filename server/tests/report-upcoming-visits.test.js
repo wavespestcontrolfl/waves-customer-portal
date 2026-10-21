@@ -1379,4 +1379,19 @@ describe('webPeopleNext (GATE_REPORT_WEB_PEOPLE): the simple web view builds in 
       expect(data).not.toHaveProperty('webPeopleCoverage');
     });
   });
+
+  test('webPeopleNext skips a visit already under way (en_route / on_site): the next scheduled visit is used', async () => {
+    const f = {
+      ...BASE_FIXTURES,
+      scheduled_services: [
+        { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Quarterly Pest Control Service' },
+        { id: 'v-live', customer_id: 'customer-1', scheduled_date: todayPlus(0), status: 'en_route', service_type: 'Mosquito Service', window_start: '08:00:00' },
+        { id: 'v-site', customer_id: 'customer-1', scheduled_date: todayPlus(1), status: 'on_site', service_type: 'Mosquito Service', window_start: '08:00:00' },
+        { id: 'v-next', customer_id: 'customer-1', scheduled_date: todayPlus(9), status: 'confirmed', service_type: 'Lawn Care Treatment', window_start: '09:00:00' },
+        { id: 'v-pending', customer_id: 'customer-1', scheduled_date: todayPlus(12), status: 'pending', service_type: 'Lawn Care Treatment', window_start: '09:00:00' },
+      ],
+    };
+    const data = await buildReportV1Data(BASE_SERVICE, 'token-under-way', makeKnex(f), { mode: 'pdf', webPeopleNext: true });
+    expect(data.webPeopleNext.map((v) => v.scheduledDate)).toEqual([todayPlus(9), todayPlus(12)]);
+  });
 });

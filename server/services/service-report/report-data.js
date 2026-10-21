@@ -6980,6 +6980,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           for (const row of candidates) {
             if (matched.length >= visitCap) break;
             if (lawnOnly && !isSameLineVisit(row, { serviceLine: 'lawn' })) continue;
+            // The people card names the next SCHEDULED visit: a visit already under way (en_route / on_site) is skipped.
+            if (webPeopleNext && !['pending', 'confirmed'].includes(String(row.status || '').toLowerCase())) continue;
             // Bounded (PAGE_SIZE rows/page, MAX_PAGES pages), and the
             // property_id/source_estimate_id lookups below are cache hits
             // after the batched reads above.

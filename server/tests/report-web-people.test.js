@@ -3,10 +3,16 @@
  * The review link needs a good visit (lawn score 85 or more, or a clean pest visit) and a quiet customer
  * (no complaint, low rating or negative call in 30 days); a failed read shows no link.
  */
+jest.mock('../services/service-report/visit-property-scope', () => ({
+  ...jest.requireActual('../services/service-report/visit-property-scope'),
+  customerHasOnlyPrimaryPremises: jest.fn(),
+}));
+const { customerHasOnlyPrimaryPremises } = require('../services/service-report/visit-property-scope');
 const { buildWebPeople, isCleanPestVisit } = require('../services/service-report/report-web-people');
 
 const NOW = new Date('2026-10-20T15:00:00Z');
 const SERVICE = {
+  address_line1: '100 Palm Ave', city: 'Parrish', zip: '34219',
   id: 'rec-1', customer_id: 'cust-1', technician_id: 'tech-1', service_date: '2026-10-20', scheduled_service_id: 'ss-1',
 };
 
@@ -37,6 +43,8 @@ function lawnData(score, extra = {}) {
 }
 
 const QUIET = { customer_interactions: [], satisfaction_responses: [], call_log: [] };
+
+beforeEach(() => { customerHasOnlyPrimaryPremises.mockReset(); customerHasOnlyPrimaryPremises.mockResolvedValue(true); });
 
 describe('webPeople review link', () => {
   test('lawn score 85 and a quiet month: link is sent', async () => {
@@ -192,6 +200,15 @@ describe('webPeople tech, map and next visit', () => {
     expect(out.tech.visitsAtHome).toBe(2);
   });
 
+  test('a capped record read (500 rows) gives no count, never a wrong exact one', async () => {
+    const many = Array.from({ length: 500 }, (_, i) => performed(`r${i}`));
+    const knex = fakeKnex({ ...QUIET, scheduled_services: HOME, service_records: many });
+    const out = await buildWebPeople({ data: lawnData(70), service: SERVICE, knex, nextVisits: [], readsOk: true, now: NOW });
+    expect(out.tech.visitsAtHome).toBeNull();
+    const under = fakeKnex({ ...QUIET, scheduled_services: HOME, service_records: many.slice(0, 499) });
+    expect((await buildWebPeople({ data: lawnData(70), service: SERVICE, knex: under, nextVisits: [], readsOk: true, now: NOW })).tech.visitsAtHome).toBe(499);
+  });
+
   test('a failed count read still shows the strip', async () => {
     const knex = fakeKnex({ ...QUIET, scheduled_services: () => { throw new Error('x'); } });
     const out = await buildWebPeople({ data: lawnData(70), service: SERVICE, knex, nextVisits: [], readsOk: true, now: NOW });
@@ -229,8 +246,33 @@ describe('webPeople tech, map and next visit', () => {
       { serviceType: 'Pest Control', scheduledDate: '2026-12-01', windowStart: null },
     ];
     const out = await buildWebPeople({ data: lawnData(70), service: SERVICE, knex: fakeKnex(QUIET), nextVisits: visits, readsOk: true, now: NOW });
-    expect(out.nextVisit).toEqual({ serviceType: 'Lawn Care', scheduledDate: '2026-11-18', windowStart: '09:00:00' });
+    expect(out.nextVisit).toEqual({ serviceType: 'Lawn Care', scheduledDate: '2026-11-18', windowStart: '09:00:00', canMove: true });
     expect(JSON.stringify(out)).not.toMatch(/reschedule|tok/i);
+  });
+
+  describe('Move it (canMove): only a proven single-home account', () => {
+    const visits = [{ serviceType: 'Lawn Care', scheduledDate: '2026-11-18', windowStart: null }];
+    const run = async (service = SERVICE) => (await buildWebPeople({ data: lawnData(70), service, knex: fakeKnex({ ...QUIET, customers: { has_multi_home: false } }), nextVisits: visits, readsOk: true, now: NOW })).nextVisit;
+
+    test('single premises proven: canMove true', async () => {
+      expect((await run()).canMove).toBe(true);
+      expect(customerHasOnlyPrimaryPremises.mock.calls[0][4]).toEqual({ unresolvedFails: true });
+    });
+
+    test('more than one home: canMove false', async () => {
+      customerHasOnlyPrimaryPremises.mockResolvedValue(false);
+      expect((await run()).canMove).toBe(false);
+    });
+
+    test('the proof throws: canMove false', async () => {
+      customerHasOnlyPrimaryPremises.mockRejectedValue(new Error('boom'));
+      expect((await run()).canMove).toBe(false);
+    });
+
+    test('no service address to prove from: canMove false, and the proof is never asked', async () => {
+      expect((await run({ ...SERVICE, address_line1: null })).canMove).toBe(false);
+      expect(customerHasOnlyPrimaryPremises).not.toHaveBeenCalled();
+    });
   });
 
   test('nothing to show returns null', async () => {

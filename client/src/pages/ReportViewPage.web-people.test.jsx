@@ -104,18 +104,38 @@ describe('web report people cards', () => {
   });
 
   it('next visit: Works confirms on the page and writes nothing; Move it opens the signed-in portal schedule, never a token link', async () => {
-    const { container, fetchMock } = renderReport(payload({ nextVisit: { serviceType: 'Lawn Care', scheduledDate: '2026-11-18', windowStart: '09:00:00' } }));
+    const { container, fetchMock } = renderReport(payload({ nextVisit: { serviceType: 'Lawn Care', scheduledDate: '2026-11-18', windowStart: '09:00:00', canMove: true } }));
     await screen.findByText(/This report is provided for your records/);
     expect(screen.getByText('Your next visit')).toBeInTheDocument();
     expect(screen.getByText(/Lawn Care · Wed, Nov 18 · 9:00 AM/)).toBeInTheDocument();
     expect(screen.getByText('Does this time work for you?')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Move it' })).toHaveAttribute('href', '/?tab=schedule');
+    expect(screen.getByRole('link', { name: 'Move it' })).toHaveStyle({ minHeight: '48px' });
+    expect(screen.getByRole('button', { name: 'Works' })).toHaveStyle({ minHeight: '44px' });
     expect(container.innerHTML).not.toMatch(/\/reschedule/);
     const callsBefore = fetchMock.mock.calls.length;
     fireEvent.click(screen.getByRole('button', { name: 'Works' }));
     expect(screen.getByText('Great. We will see you then.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Works' })).toBeNull();
     expect(fetchMock.mock.calls.length).toBe(callsBefore);
+  });
+
+  it.each([
+    ['canMove false (more than one home)', { canMove: false }],
+    ['canMove missing', {}],
+  ])('next visit, %s: no Move it link, the phone line instead', async (_label, extra) => {
+    renderReport(payload({ nextVisit: { serviceType: 'Lawn Care', scheduledDate: '2026-11-18', windowStart: null, ...extra } }));
+    await screen.findByText(/This report is provided for your records/);
+    expect(screen.queryByRole('link', { name: 'Move it' })).toBeNull();
+    expect(screen.getByText(/Call \(941\) 297-5749 to move it\./)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Works' })).toBeInTheDocument();
+  });
+
+  it('the traced map card prints the same "not survey boundaries" line the document does', async () => {
+    const footer = 'Treatment areas are technician-reported service zones, not survey boundaries.';
+    const { container } = renderReport(payload({ treatedMap: true }, { treatmentMap: { traced: TRACED, footer } }));
+    await screen.findByText(/This report is provided for your records/);
+    expect(container.querySelector('.web-people-map')).toHaveTextContent(footer);
   });
 
   it('review card with no validated technician asks about "we", never the placeholder label', async () => {
@@ -131,6 +151,7 @@ describe('web report people cards', () => {
     expect(screen.getByRole('heading', { name: 'How did Alex do today, Casey?' })).toBeInTheDocument();
     const link = screen.getByRole('link', { name: /Rate today.s visit/ });
     expect(link).toHaveAttribute('href', 'https://g.page/r/example/review');
+    expect(link).toHaveStyle({ minHeight: '48px' });
     fireEvent.click(link);
     const eventCall = fetchMock.mock.calls.find(([url, init]) => String(url).endsWith('/reports/test-web-people/events')
       && JSON.parse(init.body).eventName === 'review_request_clicked');
