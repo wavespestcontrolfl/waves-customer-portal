@@ -686,6 +686,9 @@ describe('name match v2: review round 5', () => {
     const sorted = await executeTool('query_customers', { search: 'richard dump', sort_by: 'name' });
     expect(sorted.customers.map((c) => c.id)).toEqual(['dumas', 'stompf']);
     expect(sorted.customers[1].match.reasons).toEqual(['visit_soon']);
+    expect(sorted.note).toMatch(/kept in the requested order/);
+    expect(sorted.note).not.toMatch(/ordered by how well/);
+    expect(ordered.note).toMatch(/ordered by how well/);
     // Gate off: the old result, untouched.
     delete process.env.GATE_NAME_MATCH_V2;
     const off = await executeTool('query_customers', { search: 'richard dump' });
@@ -740,5 +743,34 @@ describe('name match v2: review round 5', () => {
     await executeTool('create_customer', { first_name: 'Pat' });
     await executeTool('query_customers', { search: 'richard dump' });
     expect(reads()).toBe(3);
+  });
+
+  test('a place search (a city or street match) is not reranked and gets no alternatives', async () => {
+    const inCity = (id, first, last) => ({ ...row(id, first, last), city: 'Bradenton' });
+    const reads = () => db.__queries.filter((q) => /from "(scheduled_services|sms_log|call_log)"/.test(q.sql) || (q.sql.includes('"customers"."company_name"') && !q.sql.includes('"customers"."email"')));
+    // Two exact rows that matched on the city.
+    db.__rows = (q) => (q.sql.includes('count(*)') ? [{ count: '2' }] : [inCity('b', 'Zed', 'Quill'), inCity('a', 'Pat', 'Brandon')]);
+    const many = await executeTool('query_customers', { search: 'Bradenton' });
+    expect(many.customers.map((c) => c.id)).toEqual(['b', 'a']);
+    expect(many.customers[0].match).toBeUndefined();
+    expect(many.note).toBeUndefined();
+    // One exact row on the city: no alternatives, no index read.
+    db.__queries = [];
+    db.__rows = (q) => (q.sql.includes('count(*)') ? [{ count: '1' }] : [inCity('b', 'Zed', 'Quill')]);
+    const one = await executeTool('query_customers', { search: 'Bradenton' });
+    expect(one.alternatives).toBeUndefined();
+    expect(reads()).toHaveLength(0);
+    // An address word alone rules it out, whatever matched.
+    db.__rows = (q) => (q.sql.includes('count(*)') ? [{ count: '1' }] : [row('b', 'Zed', 'Quill')]);
+    expect((await executeTool('query_customers', { search: 'Oak Street' })).alternatives).toBeUndefined();
+    expect(reads()).toHaveLength(0);
+    // A name that merely sits in a different column still ranks.
+    db.__rows = (q) => {
+      if (/from "(scheduled_services|sms_log|call_log)"/.test(q.sql)) return [];
+      if (q.sql.includes('count(*)')) return [{ count: '2' }];
+      return [{ ...row('a', 'Richard', 'Dumas'), city: 'Palmetto' }, { ...row('s', 'Richard', 'Stompf'), city: 'Palmetto' }];
+    };
+    const named = await executeTool('query_customers', { search: 'richard dump' });
+    expect(named.customers[0].match).toBeDefined();
   });
 });
