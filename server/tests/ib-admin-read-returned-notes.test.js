@@ -286,7 +286,7 @@ describe('Codex #6375 r3: Basic casing, cut marker, secret-shaped keys', () => {
   });
 
   test('prose after "basic" stays (no user:password inside)', () => {
-    const note = 'basic perimeter treatment, basic quarterly service';
+    const note = 'basic perimeter treatment, Basic quarterly service, BASIC perimeter';
     expect(scrubNote(note)).toEqual({ text: note, removed: 0 });
   });
 

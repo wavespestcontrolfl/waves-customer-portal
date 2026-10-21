@@ -49,12 +49,11 @@ const PREFIXED_RES = [
 const BEARER_RE = /(\bauthorization\s*:\s*)?\bBearer\s+([A-Za-z0-9._~+/=-]+)/gi;
 const looksLikeBearerToken = (header, token) => Boolean(header) || token.length >= 16 || /[0-9._~+/=-]/.test(token);
 // HTTP Basic credentials ("Authorization: Basic dXNlcjpwYXNz", or bare "Basic <base64>").
-// The scheme is case-insensitive in HTTP ("basic dXNl..."). Capital "Basic" is
-// always removed, as before; another casing only when the token decodes to
-// "user:password", so prose like "basic perimeter" stays (Codex #6375 r3).
+// "Basic <base64>" in any casing (HTTP schemes are case-insensitive), removed
+// only when the token decodes to "user:password", so prose such as "Basic
+// perimeter treatment" stays (Codex #6375 r3, pre-push audit r4).
 const BASIC_RE = /\b(basic)\s+([A-Za-z0-9+\/]{8,}={0,2})/gi;
 function looksLikeBasicCredential(scheme, token) {
-  if (scheme === 'Basic') return true;
   try {
     return /^[\x20-\x7e]+:[\x20-\x7e]*$/.test(Buffer.from(token, 'base64').toString('latin1'));
   } catch {
