@@ -614,6 +614,21 @@ async function contactResolvedCustomer(typedIds) {
   return typedIds?.length === 1 && !typedIds.identityConflict ? customerById(typedIds[0]) : null;
 }
 
+// Owner-direct scope only: same-name rows carry a button label and a last visit.
+// Outside the scope the candidates are returned as they are.
+async function labelledCandidates(scope, candidates, named) {
+  if (!scope || candidates.length < 2) return candidates;
+  const labels = await choiceLabels(named);
+  return (await withLastVisit(candidates)).map((candidate, index) => ({ ...candidate, choice_label: labels[index] }));
+}
+
+// Owner-direct scope only: the customers this message names. typedIds is null
+// outside the scope and `typed` is then empty.
+async function typedTarget(scope, prompt, namedResult) {
+  const typedIds = scope ? await typedCustomerIds(prompt, namedResult) : null;
+  return { typedIds, typed: scope ? { typedCustomerIds: [...typedIds], ...(typedIds.identityConflict ? { identityConflict: true } : {}) } : {} };
+}
+
 async function resolve({ prompt, pageData, selectedTarget, ownerDirectScope = false }) {
   // Object(null) is {} — an absent or null selection reads as no customer id.
   // Candidate ids come from PostgreSQL in lowercase; a selection may not.
@@ -626,16 +641,12 @@ async function resolve({ prompt, pageData, selectedTarget, ownerDirectScope = fa
   if (page.error && PAGE_REFERENCE_RE.test(targetClause(prompt)) && !named.length) return page;
   let candidates = named.map(c => customerTarget(c, 'current_request_lookup'));
   const v2 = targetRulesV2Scope(ownerDirectScope);
-  if (v2 && candidates.length > 1) {
-    const labels = await choiceLabels(named);
-    candidates = (await withLastVisit(candidates)).map((candidate, index) => ({ ...candidate, choice_label: labels[index] }));
-  }
+  candidates = await labelledCandidates(v2, candidates, named);
   // Whom this message names (GATE_IB_TARGET_RULES_V2): carried on the context so
   // an owner-direct edit can tell a named customer from one the model found.
   // identityConflict: the typed name and a typed phone or email point at
   // different customers; owner-direct then trusts no name-resolved target.
-  const typedIds = v2 ? await typedCustomerIds(prompt, namedResult) : null;
-  const typed = v2 ? { typedCustomerIds: [...typedIds], ...(typedIds.identityConflict ? { identityConflict: true } : {}) } : {};
+  const { typedIds, typed } = await typedTarget(v2, prompt, namedResult);
   // A set quantifier, partly resolved name evidence, or two distinct stated
   // recipients never yields a target, and no selection resolves it.
   const cohort = setQuantified(prompt) || namedResult.multiple;
@@ -662,11 +673,12 @@ async function resolve({ prompt, pageData, selectedTarget, ownerDirectScope = fa
   // buttons that all conflict.
   // A capped name plus a phone or email that names exactly one of them is resolved
   // (Codex #6369 r10): use that customer, never ask again for a phone or email.
-  const contactPick = !namedResult.complete && !cohort && !selectedId ? await contactResolvedCustomer(typedIds) : null;
+  const capped = !namedResult.complete && !cohort && !selectedId;
+  const contactPick = capped ? await contactResolvedCustomer(typedIds) : null;
   if (contactPick) {
     const target = customerTarget(contactPick, 'current_request_lookup');
     selection = { target, targets: [target], ambiguous: false };
-  } else if (!namedResult.complete && !cohort && !selectedId) {
+  } else if (capped) {
     return { page, candidates: [], target: null, targets: [], ambiguous: false,
       error: 'More customers share this name than one lookup can list, so none can be selected here. Identify the customer by phone or email, or start the request from their customer page.',
       code: 'target_clarification_required', requestPhrase: normalizeName(targetClause(prompt)), namesRequested: nameHint, ...typed };
