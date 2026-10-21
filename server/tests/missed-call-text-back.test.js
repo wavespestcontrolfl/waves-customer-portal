@@ -25,7 +25,6 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/missed-call-bell', () => ({
   ...jest.requireActual('../services/missed-call-bell'),
   classifySpamWave: jest.fn(),
-  spamWaveSilencedBy: jest.fn(),
 }));
 
 const {
@@ -34,7 +33,7 @@ const {
 } = require('../services/missed-call-text-back');
 const { isEnabled } = require('../config/feature-gates');
 const {
-  missedCallShapeEligible, missedCallEligible, isEmptyVoicemailRecording, classifySpamWave, spamWaveSilencedBy,
+  missedCallShapeEligible, missedCallEligible, isEmptyVoicemailRecording, classifySpamWave,
 } = require('../services/missed-call-bell');
 
 // 2026-09-08T15:00Z = 11:00 ET (EDT) — inside the 8am–8pm send window.
@@ -435,30 +434,37 @@ describe('missed-call bell lane is unchanged by the empty-voicemail widening', (
   });
 });
 
-describe('robodialer wave / burst skip (spamWaveSkip)', () => {
+describe('robodialer block wave skip (spamWaveSkip)', () => {
   const settleFenced = jest.fn(async () => {});
   const stampShadow = jest.fn(async () => {});
   beforeEach(() => {
     jest.clearAllMocks();
+    isEnabled.mockImplementation(() => true);
     classifySpamWave.mockResolvedValue({ block: false, burst: false });
-    spamWaveSilencedBy.mockReturnValue(null);
   });
 
-  test('a call whose gate is on settles skipped:SPAM_WAVE and is not texted', async () => {
-    classifySpamWave.mockResolvedValue({ block: false, burst: true });
-    spamWaveSilencedBy.mockReturnValue('burst');
+  test('a block wave with its gate on settles skipped:SPAM_WAVE and is not texted', async () => {
+    classifySpamWave.mockResolvedValue({ block: true, burst: false });
     expect(await spamWaveSkip(call(), settleFenced, stampShadow)).toEqual({ outcome: 'skipped', reason: 'SPAM_WAVE' });
     expect(settleFenced).toHaveBeenCalledWith('skipped:SPAM_WAVE');
     expect(stampShadow).not.toHaveBeenCalled();
   });
 
-  test('a flagged call whose gate is off carries on and stamps the kind: block first, then burst', async () => {
+  test('a block wave with its gate off carries on, stamped block', async () => {
+    isEnabled.mockImplementation((gate) => gate !== 'missedCallSpamWave');
     classifySpamWave.mockResolvedValue({ block: true, burst: true });
     expect(await spamWaveSkip(call(), settleFenced, stampShadow)).toBeNull();
     expect(stampShadow).toHaveBeenLastCalledWith('block');
+    expect(settleFenced).not.toHaveBeenCalled();
+  });
+
+  test('a burst is never skipped, gate on or off: it carries on, stamped burst', async () => {
     classifySpamWave.mockResolvedValue({ block: false, burst: true });
-    expect(await spamWaveSkip(call(), settleFenced, stampShadow)).toBeNull();
-    expect(stampShadow).toHaveBeenLastCalledWith('burst');
+    for (const burstGate of [true, false]) {
+      isEnabled.mockImplementation((gate) => (gate === 'missedCallSpamBurst' ? burstGate : true));
+      expect(await spamWaveSkip(call(), settleFenced, stampShadow)).toBeNull();
+      expect(stampShadow).toHaveBeenLastCalledWith('burst');
+    }
     expect(settleFenced).not.toHaveBeenCalled();
   });
 

@@ -1987,12 +1987,12 @@ const gates = {
   // and 3+ unknown numbers from the same 6-digit block in 14 days. Off = shadow:
   // the call still rings and is stamped missed_call_spam_wave_shadow. Bell only.
   missedCallSpamWave: process.env.GATE_MISSED_CALL_SPAM_WAVE === 'true',
-  // Silence the missed-call bell AND the text-back for a robodialer burst (owner
-  // 2026-10-20 "ALL"): 3+ different first-time unknown numbers on one line inside
-  // 24 h, each 15 s or more, within 1 s of each other, none got through. Any line
-  // type. Off = shadow: bell stamps missed_call_spam_burst_shadow, text-back
-  // stamps missed_call_text_spam_shadow. GATE_MISSED_CALL_SPAM_WAVE now also
-  // skips the text-back for a block wave. Never adds a customer message.
+  // Quiet the push (not the bell row) for a robodialer burst (owner 2026-10-20
+  // "ALL", narrowed after Codex #6392 r1): 3+ different first-time unknown
+  // numbers on one line inside 24 h, each 15 s or more, within 1 s of each
+  // other, none got through. Any line type. On = bell row written, no push,
+  // stamped burst_quiet. Off = shadow: missed_call_spam_burst_shadow. The
+  // text-back still sends, stamped missed_call_text_spam_shadow 'burst'.
   missedCallSpamBurst: process.env.GATE_MISSED_CALL_SPAM_BURST === 'true',
   // Admin bell when one number places 3+ inbound calls inside 3 hours
   // (repeat-caller-bell.js). Bell only — no customer comms. Ships dark.

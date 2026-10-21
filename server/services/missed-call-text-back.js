@@ -86,7 +86,7 @@ const { isEnabled } = require('../config/feature-gates');
 const { whereNotBlockedCall } = require('../middleware/spam-block');
 const {
   missedCallShapeEligible, isEmptyVoicemailRecording, UNKNOWN_CALLER_MIN_SECONDS,
-  classifySpamWave, spamWaveSilencedBy,
+  classifySpamWave,
   UNANSWERED, UNANSWERED_STATUSES, TERMINAL_STATUSES, VOICEMAIL_GRACE_MS,
 } = require('./missed-call-bell');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
@@ -804,15 +804,17 @@ async function classifySendOutcome(result, phone, attempt, row, { releaseLease, 
   return { outcome: 'error', reason: result.sent ? 'send_suppressed' : (result.code || 'provider_failed') };
 }
 
-// A robodialer wave or burst gets no text (owner 2026-10-20 "ALL"): the bell's
-// own classifiers, behind their own gates. Gate on = settle 'skipped:SPAM_WAVE'.
-// Gate off = send as today, stamped missed_call_text_spam_shadow 'block' | 'burst'.
+// A robodialer BLOCK wave gets no text (owner 2026-10-20 "ALL"): the bell's own
+// classifier, behind GATE_MISSED_CALL_SPAM_WAVE. Gate on = settle 'skipped:SPAM_WAVE'.
+// A burst still gets its text (Codex #6392 r1: a burst can catch a real prospect),
+// stamped missed_call_text_spam_shadow 'burst' whatever the burst gate says so the
+// pattern stays measurable; a block wave whose gate is off is stamped 'block'.
 // The classifiers fail open inside (an error means "not spam"): the text goes as today.
 // Returns the skip result, or null to carry on.
 async function spamWaveSkip(row, settleFenced, stampShadow) {
   try {
     const flags = await classifySpamWave(row);
-    if (spamWaveSilencedBy(flags)) {
+    if (flags.block && isEnabled('missedCallSpamWave')) {
       await settleFenced('skipped:SPAM_WAVE');
       return { outcome: 'skipped', reason: 'SPAM_WAVE' };
     }
