@@ -51,6 +51,8 @@ const SHAPES = {
   'URL signature param': ['https://files.example.test/a.pdf?X-Amz-Signature=' + 'deadbeef01', 'deadbeef01'],
   'URL percent-encoded token name': ['https://portal.example.test/file?%74oken=' + 'abc123xyz', 'abc123xyz'],
   'URL malformed-encoding name': ['https://portal.example.test/file?%zz=' + 'abc123xyz', 'abc123xyz'],
+  'scheme-less link with token param': ['//example.test/file?token=' + 'abc123xyz', 'abc123xyz'],
+  'private application link': ['https://example.test/pay/' + 'AbCdEf0123456789xyz', 'AbCdEf0123456789'],
   'URL key param': ['https://api.example.test/v1?key=' + 'hunter22', 'hunter22'],
   'URL user:password': ['https://admin:' + 'hunter22@host.example.test/x', 'hunter22'],
 };
@@ -72,8 +74,8 @@ describe('GATE_IB_READ_NOTES on, owner login', () => {
   test.each(Object.entries(SHAPES))('%s is removed inside a note and the words around it stay', async (label, [secret, piece]) => {
     const result = await read(ENTRY, { id: 1, notes: `Dog in yard. ${secret} Call first.` });
     expect(result.data.notes).toContain('Dog in yard.');
-    // pan-scrub masks a card to its last four; every other shape becomes [removed]
-    expect(result.data.notes).toMatch(/\[removed\]|\[card ending 4242\]/);
+    // pan-scrub masks a card to its last four; every other shape becomes [removed] or a link marker
+    expect(result.data.notes).toMatch(/\[removed\]|\[card ending 4242\]|\[signed link removed\]|\[private link removed\]/);
     expect(result.data.notes).toContain('Call first.');
     expect(JSON.stringify(result)).not.toContain(piece);
     expect(result.notes_returned).toBe(1);

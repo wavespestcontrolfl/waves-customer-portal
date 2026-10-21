@@ -37,7 +37,7 @@
  */
 const { isCredentialField, isCredentialName, nameWords } = require('./credential-fields');
 const { scrubSecretText } = require('./secret-text-scrubber');
-const { scrubNote } = require('./note-secret-scrubber');
+const { scrubNote, SCAN_LIMIT } = require('./note-secret-scrubber');
 
 const REDACTED_LINK = '[signed link removed]';
 const REDACTED_PRIVATE_LINK = '[private link removed]';
@@ -341,12 +341,13 @@ function scrubFreeText(text, state) {
 // RETURNED NOTES (GATE_IB_READ_NOTES, owner ruling 2026-10-13). A value the
 // withholding rule above would hide comes back instead: every string in it goes
 // through the ONE fixed-format scrubber (note-secret-scrubber.js) and is cut at
-// 1,000 characters. No other rule runs on it, so gate codes and lockbox
-// instructions come back as written. A credential-named key inside it is still
+// 1,000 characters. The only other rule is the structural link redaction every
+// string already gets (a signed or private link becomes a marker). No prose
+// rule runs on it, so gate codes and lockbox instructions come back as written. A credential-named key inside it is still
 // removed.
 function returnNote(item, state, depth = 0) {
   if (typeof item === 'string') {
-    const { text, removed } = scrubNote(item);
+    const { text, removed } = scrubNote(redactString(item.slice(0, SCAN_LIMIT), state));
     state.noteSecrets += removed;
     return text;
   }

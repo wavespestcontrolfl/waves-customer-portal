@@ -99,4 +99,4 @@ function scrubNote(input) {
   return { text: cut ? `${text.slice(0, NOTE_CAP)}${CUT}` : text, removed };
 }
 
-module.exports = { scrubNote, scrubNoteText, NOTE_CAP, CUT, REMOVED };
+module.exports = { scrubNote, scrubNoteText, NOTE_CAP, SCAN_LIMIT, CUT, REMOVED };
