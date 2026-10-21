@@ -351,6 +351,14 @@ function returnNote(item, state, depth = 0) {
     state.noteSecrets += removed;
     return text;
   }
+  // A number can be a card number too ({ card_number: 4242424242424242 }):
+  // a numeric leaf the scrubber would change comes back as the scrubbed text.
+  if (typeof item === 'number' || typeof item === 'bigint') {
+    const { text, removed } = scrubNote(String(item));
+    if (!removed) return item;
+    state.noteSecrets += removed;
+    return text;
+  }
   if (!item || typeof item !== 'object') return item;
   if (depth > MAX_DEPTH) { state.noteSecrets += 1; return '[too deeply nested]'; }
   if (Array.isArray(item)) return item.map(entry => returnNote(entry, state, depth + 1));

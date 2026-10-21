@@ -235,6 +235,13 @@ describe('Codex #6375 r3: Basic casing, cut marker, secret-shaped keys', () => {
     expect(Object.values(result.data.notes)).toContain('old integration');
   });
 
+  test('a card number stored as a number inside a structured note is masked; ordinary numbers stay', async () => {
+    const result = await read(ENTRY, { id: 1, notes: { details: { card_number: 4242424242424242, dogs: 2, gate: 1234 } } });
+    expect(JSON.stringify(result)).not.toContain('4242424242424242');
+    expect(result.data.notes.details.dogs).toBe(2);
+    expect(result.data.notes.details.gate).toBe(1234);
+  });
+
   test('a private link used as a key is replaced too (pre-push audit)', async () => {
     const key = 'https://portal.wavespestcontrol.com/l/abc234def5';
     const result = await read(ENTRY, { id: 1, notes: { [key]: 'reference' } });
