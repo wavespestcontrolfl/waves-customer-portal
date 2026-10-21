@@ -683,7 +683,7 @@ async function accountSummary(InvoiceService, customer, today, database) {
       count: fencedProcessing ? processing.rows.filter((invoice) => fencedProcessing.get(String(invoice.id)).state !== 'unavailable').length : null,
       bank_payment_in_flight: bankInFlight,
       needs_reconciliation: fencedProcessing ? processing.rows.filter((invoice) => fencedProcessing.get(String(invoice.id)).needs_reconciliation).length : null,
-      note: 'Processing invoices are not counted in total_due and their amounts are not stated here. bank_payment_in_flight (any invoice, processing or not) are waiting on a bank transfer; needs_reconciliation are not: a charge state is unresolved, so the bar can\'t settle them from here.',
+      note: 'Processing invoices are not counted in total_due and their amounts are not stated here. bank_payment_in_flight (any invoice, processing or not) are waiting on a bank transfer; needs_reconciliation are not: a charge state is unresolved and must be reconciled before any collection.',
     },
     ...credit,
     dispute_hold: hold,

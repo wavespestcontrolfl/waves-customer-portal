@@ -14,7 +14,7 @@ const acorn = require('acorn');
 
 const gapReports = require('../services/agent-gap-reports');
 
-const { BAR_DECLINE_RE, BY_DESIGN_REFUSAL_CODES, recordableRefusalCode } = gapReports._private;
+const { BAR_DECLINE_RE, DECLINE_RE, BY_DESIGN_REFUSAL_CODES, recordableRefusalCode } = gapReports._private;
 
 const DIR = path.join(__dirname, '..', 'services', 'intelligence-bar');
 const FILES = [
@@ -324,6 +324,11 @@ describe('successful results and switched-off steps stay out of the gap list (Co
     const line = src.split('\n').find((l) => l.includes('need reconciliation and are NOT in total_due'));
     expect(line).toBeTruthy();
     expect(BAR_DECLINE_RE.test(line)).toBe(false);
+    // The processing note on a successful invoice read is a fact too (pre-push audit).
+    const note = src.split('\n').find((l) => l.includes('needs_reconciliation are not'));
+    expect(note).toBeTruthy();
+    expect(BAR_DECLINE_RE.test(note.replace(/\\'/g, "'"))).toBe(false);
+    expect(DECLINE_RE.test(note.replace(/\\'/g, "'"))).toBe(false);
   });
   test('closeout: a skipped step (blocked right now) is never promoted into the gap text', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/intelligence-bar/closeout-repair-tools.js'), 'utf8');
