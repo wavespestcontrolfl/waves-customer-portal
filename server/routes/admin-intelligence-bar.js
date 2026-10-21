@@ -25,8 +25,9 @@ const IbThreads = require('../services/intelligence-bar/threads');
 const PriceReadBack = require('../services/intelligence-bar/price-read-back');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
-const { gateEnvValue, ibCancelAppointmentLive, ibAcceptEstimateLive, ibMultiCardLive, ibModelFailureNoticeLive, nameMatchV2Live } = require('../config/feature-gates');
+const { gateEnvValue, ibCancelAppointmentLive, ibAcceptEstimateLive, ibMultiCardLive, ibModelFailureNoticeLive, nameMatchV2Live, dictationMoneyNormalizeLive } = require('../config/feature-gates');
 const ModelFailure = require('../services/intelligence-bar/model-failure');
+const { dictatedAmountsNote } = require('../utils/spoken-money');
 const HISTORY_TOOL_NAMES = new Set(HISTORY_TOOLS.map(t => t.name));
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
@@ -934,6 +935,10 @@ const PINNED_DISPLAY_BUILDERS = {
   send_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'send_invoice'
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount_due: preview.amount_due, send_by: preview.channels, sent_before: preview.send_note }
     : null),
+  // convert_lead: the card names the lead, the customer and the figures; the lines ride the contract.
+  convert_lead: (params, preview) => (preview?.preview === true && preview.tool === 'convert_lead'
+    ? { lead: preview.lead_name, customer: preview.customer_name, phone_email_match: preview.matched_on, sends_to_customer: 'nothing' }
+    : null),
   // void_invoice: the card names the invoice, the customer and the amount; the lines ride the contract.
   void_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'void_invoice'
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount: preview.amount, status: preview.status, sends_to_customer: 'nothing' }
@@ -977,6 +982,8 @@ const VERIFIED_VERSION_PARAMS = {
   // send_invoice binds the invoice state, the recipients and the total the card
   // showed (invoice-action-tools.js _version).
   send_invoice: '_verified_invoice_send_version',
+  // convert_lead binds the lead, the customer and the request body the card showed.
+  convert_lead: '_verified_lead_convert_version',
   // void_invoice binds the invoice state, credit, pay-page session and links the card showed.
   void_invoice: '_verified_invoice_void_version',
   cancel_queued_message: '_verified_message_version',
@@ -3496,7 +3503,9 @@ async function runQuery(req, res, next) {
       const taskRequest = { prompt, context, pageData: pageData || {}, selectedTarget: req.body.selected_target || null, images,
         conversationHistory: conversationHistory.slice(-10),
         thread_id: UUID_RE.test(String(req.body.thread_id || '')) ? req.body.thread_id : null,
-        thread_seq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null };
+        thread_seq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null,
+        // kept with the saved task so a customer pick or a resume still asks about the dictated amount
+        ...(dictationMoneyNormalizeLive() && req.body.dictation_used === true ? { dictation_used: true } : {}) };
       const started = req.ibResumedTask ? { task: req.ibResumedTask, created: true } : await IbTasks.begin({ actorId: getAdminActorId(req), sessionId: req.body.session_id,
         requestKey: req.body.request_key,
         ...taskRequestsFor(req, taskRequest),
@@ -3612,6 +3621,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // stay card-aware (Codex r2 P1 on #5563).
     if (ownerDirectCommits) systemPrompt += OwnerDirect.OWNER_DIRECT_PROMPT;
     else if (ownerDirect) systemPrompt += OwnerDirect.OWNER_DIRECT_CARDED_PROMPT;
+    // GATE_DICTATION_MONEY_NORMALIZE: a dictated message's amounts are read back (clear) or asked ($61.33 or $6,133).
+    if (dictationMoneyNormalizeLive() && req.body.dictation_used === true) systemPrompt += dictatedAmountsNote(prompt);
     // Live page data (current date, schedule stats, etc.) is injected on the
     // current user turn by buildUserMessageContent, NOT here — appending it to
     // the system prompt made the prefix unique per request and defeated
