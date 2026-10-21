@@ -701,6 +701,36 @@ describe('agent-gap-reports', () => {
       expect(insertedRows[0].summary).toContain(code);
     });
 
+    describe('a final by-design refusal drops the earlier capability search (Codex #6371 r14)', () => {
+      const MISS = { status: 'capability_unimplemented' };
+      const refusal = (code) => ({ success: false, code, error: "The bar can't do this from here yet." });
+
+      test.each(['cancel_gate_off', 'invoice_send_queued', 'verifier_reject'])('%s ends the request with no missing_capability row', async (code) => {
+        const collector = collectorFor();
+        collector.discovery({ query: 'cancel a visit with charges' }, MISS);
+        collector.toolResult('cancel_appointment', refusal(code), true, { round: 1 });
+        await collector.flush({ reply: "The bar can't cancel this from here yet." });
+        expect(insertedRows).toHaveLength(0);
+      });
+
+      test('a refusal that IS a gap keeps the search row beside its blocked row', async () => {
+        const collector = collectorFor();
+        collector.discovery({ query: 'cancel a visit with charges' }, MISS);
+        collector.toolResult('cancel_appointment', refusal('cancel_with_effects_unsupported'), true, { round: 1 });
+        await collector.flush({ reply: "The bar can't cancel this from here yet." });
+        expect(insertedRows.map((row) => row.kind).sort()).toEqual(['blocked', 'missing_capability']);
+      });
+
+      test('a by-design refusal in an earlier round, recovered by a later success, does not hide the search', async () => {
+        const collector = collectorFor();
+        collector.discovery({ query: 'cancel a visit with charges' }, MISS);
+        collector.toolResult('cancel_appointment', refusal('invoice_send_queued'), true, { round: 1 });
+        collector.toolResult('lookup_visit', { ok: true }, false, { round: 2 });
+        await collector.flush({ reply: "The bar can't cancel this from here yet." });
+        expect(insertedRows.map((row) => row.kind)).toEqual(['missing_capability']);
+      });
+    });
+
     describe('capability_gaps on a successful result (Codex #6371 r12)', () => {
       const SUCCESS = { proposal: true, stops: [], capability_gaps: [{ code: 'grouped_visit_move_unsupported' }] };
 

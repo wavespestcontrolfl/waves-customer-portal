@@ -51,6 +51,8 @@ const RECORDED_REFUSAL_CODES = new Set([
 const BY_DESIGN_REFUSAL_CODES = new Set([
   'permission_denied', 'approval_required', 'invalid_input', 'owner_direct_bulk_limit',
   'write_access_required', 'execution_interrupted', 'verify_failed', 'by_owner_rule',
+  // An email reply never carries an owned portal link: a recipient-identity safety rule (Codex #6371 r14).
+  'email_link_identity_refused',
 ]);
 // Coded refusals whose text says the bar cannot do something, but that were
 // never gap rows (a switch that is off, a provider-side limit, a gate flip that
@@ -575,7 +577,20 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
     for (const code of codes.filter(Boolean)) tail.refusals.set(`${name}|${code}`, { tool: name, code, nested });
   }
 
+  // The request's last tool round ended on a coded refusal that is NOT a gap
+  // (by design, switched off, unrecorded, unlisted): a capability search made
+  // earlier in the request must not turn that answer into a missing-capability
+  // row (Codex #6371 r14).
+  let terminal = { round: null, nonGap: false };
+  function trackTerminal(name, result, failed, meta = {}) {
+    if (meta.round !== terminal.round) terminal = { round: meta.round, nonGap: false };
+    if (!failed || name === DISCOVERY_TOOL_NAME) return;
+    const code = typeof result?.code === 'string' ? result.code.trim() : '';
+    terminal.nonGap = isPolicyRefusal(result) && CODE_RE.test(code) && recordableRefusalCode(result) === null;
+  }
+
   function toolResult(name, result, failed, meta) {
+    trackTerminal(name, result, failed, meta);
     // A capability search is a tool round too: the model moving on to it
     // after a refusal means the refusal was not where the request ended.
     if (recordBlocked) trackTail(name, result, failed, meta);
@@ -618,7 +633,7 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
     // the same request is about the same thing (the prompt sends the model on to
     // discover after an empty tool search). An unrelated tool-search miss stays.
     const discovered = searches.filter((search) => !search.fromToolSearch);
-    const kept = searches.filter((search) => !search.fromToolSearch
+    const kept = terminal.nonGap ? [] : searches.filter((search) => !search.fromToolSearch
       || !discovered.some((other) => sameAsk(other.query, search.query)));
     const signals = kept.map((search) => ({
       source, kind: 'missing_capability', summary: search.query, domain: search.domain,
@@ -659,7 +674,7 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
     if (signals.length) return signals;
     // A decline after a tool broke is an outage talking, not a missing
     // feature — the failure is already in tool_health_events.
-    if (toolBroke || !BAR_DECLINE_RE.test(String(reply || ''))) return [];
+    if (toolBroke || terminal.nonGap || !BAR_DECLINE_RE.test(String(reply || ''))) return [];
     const asked = cleanText(ask);
     return asked ? [{ source, kind: 'missing_capability', summary: asked,
       attempted: 'The bar declined; no capability search ran' }] : [];

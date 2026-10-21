@@ -519,7 +519,7 @@ describe('customerLinkSendRefusal (comms-tools)', () => {
       const { renderedTextForLinkCheck } = require('../services/intelligence-bar/email-tools');
       expect(renderedTextForLinkCheck(body).split(/\s+/)).toContain(`portal.wavespestcontrol.com/pay/${TOKEN}`);
       links.composerOnlyLinkPresence.mockResolvedValue({ present: true, kinds: ['portal_link'] });
-      expect(await customerLinkSendRefusal(renderedTextForLinkCheck(body), '', null, { phase: 'email' })).toMatchObject({ blocked: true, code: 'customer_link_composer_only' });
+      expect(await customerLinkSendRefusal(renderedTextForLinkCheck(body), '', null, { phase: 'email' })).toMatchObject({ blocked: true, code: 'email_link_identity_refused' });
     });
 
     test('a raw tab or newline left in an HTML reply body is dropped like the URL parser does, so the email path still surfaces the link', () => {
@@ -749,7 +749,7 @@ describe('send_email_reply carries the same guard', () => {
     links.autopayLinkSendCheck.mockResolvedValue({ present: false });
     links.composerOnlyLinkPresence.mockResolvedValue({ present: true, kinds: ['appointment'] });
     const refused = await executeEmailTool('send_email_reply', { email_id: 'em-1', body: 'Your visit: portal.wavespestcontrol.com/appointment/abc' });
-    expect(refused).toMatchObject({ blocked: true, code: 'customer_link_composer_only' });
+    expect(refused).toMatchObject({ blocked: true, code: 'email_link_identity_refused' });
     expect(refused.error).toMatch(/email reply cannot carry a portal link/);
     expect(links.composerOnlyLinkPresence).toHaveBeenCalledWith(expect.stringContaining('portal.wavespestcontrol.com/appointment/abc'), { includeVerifyOnly: true });
     expect(links.bearerLinkSendCheck).not.toHaveBeenCalled();
@@ -807,7 +807,7 @@ describe('send_email_reply carries the same guard', () => {
     links.composerOnlyLinkPresence.mockClear();
     links.composerOnlyLinkPresence.mockResolvedValue({ present: true, kinds: ['receipt'] });
     const refused = await sendEmailReplyProposalRefusal({ email_id: 'em-1', body: `Receipt: https://evil.example/?next=https%3A%2F%2Fportal.wavespestcontrol.com%2Freceipt%2F${TOKEN}` });
-    expect(refused).toMatchObject({ blocked: true, code: 'customer_link_composer_only' });
+    expect(refused).toMatchObject({ blocked: true, code: 'email_link_identity_refused' });
     expect(links.composerOnlyLinkPresence).toHaveBeenCalledWith(expect.stringContaining(NESTED), { includeVerifyOnly: true });
     expect(links.bearerLinkSendCheck).not.toHaveBeenCalled();
 
@@ -933,7 +933,7 @@ describe('send_email_reply carries the same guard', () => {
     links.composerOnlyLinkPresence.mockClear();
     links.composerOnlyLinkPresence.mockResolvedValue({ present: true, kinds: ['receipt'] });
     const refused = await executeEmailTool('send_email_reply', { email_id: 'em-2', body: `Receipt: https://evil.example/?next=https%3A%2F%2Fportal.wavespestcontrol.com%2Freceipt%2F${TOKEN}` });
-    expect(refused).toMatchObject({ blocked: true, code: 'customer_link_composer_only' });
+    expect(refused).toMatchObject({ blocked: true, code: 'email_link_identity_refused' });
     expect(links.composerOnlyLinkPresence).toHaveBeenCalledWith(expect.stringMatching(new RegExp(` ${NESTED}(?: |$)`)), { includeVerifyOnly: true });
     expect(gmail.sendMessage).not.toHaveBeenCalled();
 

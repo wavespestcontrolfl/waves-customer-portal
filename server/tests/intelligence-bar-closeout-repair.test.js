@@ -195,6 +195,26 @@ test('a manual-only refusal that names a capability gap reaches the gap list thr
   expect(recordableRefusalCode(field)).toBeNull();
 });
 
+test('a partial plan carries one closeout_<fact>_unsupported gap per capability manual item, never field evidence or an outage (Codex #6371 r14)', async () => {
+  const { _private: { recordableRefusalCode } } = require('../services/agent-gap-reports');
+  getCloseoutStatus.mockResolvedValue(status({ facts: {
+    ...MISSING_REPORT,
+    comms: { state: 'pending', reason: 'completion_text_missing' },
+    photos: { state: 'pending', reason: 'photo_count_short' },
+    license: { state: 'unknown', reason: 'technicians_lookup_failed' },
+  } }));
+  db.mockImplementation(fakeDb({ service_records: [RECORD] }));
+  const preview = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+  expect(preview.preview).toBe(true);
+  expect(preview.steps.length).toBeGreaterThan(0);
+  expect(preview.capability_gaps).toEqual([{ code: 'closeout_comms_unsupported' }]);
+  // Each code passes the gap collector's own rule.
+  expect(recordableRefusalCode({ code: preview.capability_gaps[0].code, error: "The bar can't do this from here yet." })).toBe('closeout_comms_unsupported');
+  // A plan whose manual items are field evidence only carries none.
+  getCloseoutStatus.mockResolvedValue(status({ facts: { ...MISSING_REPORT, photos: { state: 'pending', reason: 'photo_count_short' } } }));
+  expect(await executeCloseoutRepairTool('repair_closeout', { service_id: SVC })).not.toHaveProperty('capability_gaps');
+});
+
 test('a lookup outage stays out of the gap text (Codex #6371 r8)', () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '../services/intelligence-bar/closeout-repair-tools.js'), 'utf8');
   expect(src).toMatch(/plan\.manual\.filter\(\(m\) => !m\.blockedNow\)\.map\(\(m\) => m\.fix\)/);

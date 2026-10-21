@@ -282,22 +282,24 @@ function exclusionReason(row, { invoice, hasAddons }) {
   return null;
 }
 
-// When exclusions took every matching visit and at least one is a missing
-// capability (a recurring template, a $0 visit, add-on lines), the refusal is
-// a coded gap naming those reasons, not the generic nothing_to_reprice; the
-// per-visit list stays in left_alone (Codex #6371 r12). Null otherwise.
+// The capability reasons among the exclusions, worded for a sentence (Codex #6371 r14).
 function capabilityExclusions(excluded) {
   return [...new Set(excluded.map(({ reason }) => reason).filter((reason) => reason.endsWith(CANNOT_REPRICE)))]
     .map((reason) => reason.replace(new RegExp(`,? which ${CANNOT_REPRICE}$`), ''));
 }
 
-function allExcludedRefusal({ label, customerName, newPrice, excluded, unchanged, excludedOut }) {
+// When exclusions took every visit that would change (a visit already at the
+// price does not count) and at least one is a missing capability (a recurring template, a $0 visit, add-on lines), the refusal is
+// a coded gap naming those reasons, not the generic nothing_to_reprice; the
+// per-visit list stays in left_alone (Codex #6371 r12). Null otherwise.
+function allExcludedRefusal({ label, customerName, newPrice, excluded, excludedOut, unchangedOut }) {
   const gaps = capabilityExclusions(excluded);
-  if (!gaps.length || unchanged.length) return null;
+  if (!gaps.length) return null;
   return {
     error: `The bar can't change any upcoming ${label} visit for ${customerName} to ${money(newPrice)} from here yet: ${gaps.join('; ')}. Nothing was changed.`,
     code: 'reprice_excluded_unsupported',
     left_alone: excludedOut,
+    already_at_price: unchangedOut,
   };
 }
 
@@ -354,7 +356,7 @@ async function buildPlan(input) {
   const excludedOut = excluded.map(({ row, reason }) => ({ ...line(row), reason }));
   const unchangedOut = unchanged.map((row) => ({ ...line(row), price: money(newPrice) }));
   if (!candidates.length) {
-    const declined = allExcludedRefusal({ label: family.label, customerName, newPrice, excluded, unchanged, excludedOut });
+    const declined = allExcludedRefusal({ label: family.label, customerName, newPrice, excluded, excludedOut, unchangedOut });
     if (declined) return declined;
     return {
       error: `No upcoming ${family.label} visit for ${customerName} can change to ${money(newPrice)}. Nothing was changed.`,

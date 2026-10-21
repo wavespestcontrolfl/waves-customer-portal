@@ -524,6 +524,18 @@ function manualItems(facts, steps, skipped) {
   return manual;
 }
 
+// The open items a plan leaves for a person that the bar could be built to do:
+// not field evidence or technician data, and not blocked right now. A plan that
+// still has steps to run is a success, so the gap collector reads these from
+// `capability_gaps`, one `closeout_<fact>_unsupported` code per fact
+// (Codex #6371 r14).
+const FIELD_ONLY_FACTS = new Set(['application', 'photos', 'license']);
+function manualCapabilityGaps(manual) {
+  const facts = manual.filter((m) => !m.blockedNow && !FIELD_ONLY_FACTS.has(m.fact)).map((m) => m.fact);
+  const codes = [...new Set(facts)].map((fact) => `closeout_${fact.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`)}_unsupported`);
+  return codes.length ? { capability_gaps: codes.map((code) => ({ code })) } : {};
+}
+
 async function planCloseoutRepair(status, { knex = db } = {}) {
   const facts = status.facts || {};
   if (facts.completion?.state !== 'done') {
@@ -790,6 +802,7 @@ function previewFromPlan(serviceId, status, plan) {
       effect: stepEffect(s),
     })),
     manual: plan.manual,
+    ...manualCapabilityGaps(plan.manual),
     notifies_customer: plan.steps.some((s) => STEP_EFFECTS[s.step].kind === 'comms'),
     note_to_operator: 'PLAN ONLY — nothing was changed. Confirm runs exactly these steps; the open items under manual are not touched.',
   };
@@ -854,6 +867,7 @@ async function repairCloseout(input, actionContext = {}) {
     service_id: serviceId,
     receipt,
     manual: plan.manual,
+    ...manualCapabilityGaps(plan.manual),
     note: allDone
       ? 'Every planned step completed. Items under manual still need a person.'
       : 'Some steps did not complete — this is NOT re-run automatically. Check the receipt, then ask again for a fresh plan.',

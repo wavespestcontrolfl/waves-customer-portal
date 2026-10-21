@@ -173,6 +173,20 @@ describe('the card', () => {
     expect(await preview()).not.toHaveProperty('capability_gaps');
   });
 
+  test('a visit already at the price does not hide a capability exclusion behind nothing_to_reprice (Codex #6371 r14)', async () => {
+    tables.scheduled_services = [
+      visit('v-tpl', '2099-03-05', { is_recurring: true, recurring_parent_id: null }),
+      visit('v-same', '2099-09-10', { estimated_price: '49.00' }),
+    ];
+    const result = await preview();
+    expect(result.code).toBe('reprice_excluded_unsupported');
+    expect(result.left_alone.map((v) => v.id)).toEqual(['v-tpl']);
+    expect(result.already_at_price.map((v) => v.id)).toEqual(['v-same']);
+    // Only waits plus an already-priced visit stays the plain answer.
+    tables.scheduled_services = [visit('v-pre', '2099-05-10', { prepaid_amount: '55.00', prepaid_at: '2099-02-01' }), visit('v-same', '2099-09-10', { estimated_price: '49.00' })];
+    expect((await preview()).code).toBe('nothing_to_reprice');
+  });
+
   test('exclusions that are only waits (prepaid, completed) keep the plain nothing_to_reprice', async () => {
     tables.scheduled_services = [
       visit('v-pre', '2099-05-10', { prepaid_amount: '55.00', prepaid_at: '2099-02-01' }),

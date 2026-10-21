@@ -29,6 +29,7 @@ const FILES = [
   'billing-mode-change.js',
   'customer-lifecycle-tools.js',
   'review-tools.js',
+  'void-invoice-tools.js',
   'billing-reader-tools.js',
   'ops-tools.js',
   'outcomes.js',
@@ -374,6 +375,24 @@ describe('a coded refusal is classified by its code, not its wording (Codex #637
   test('nothing_repairable still needs decline wording', () => {
     expect(recordableRefusalCode({ success: false, code: 'nothing_repairable', error: 'Nothing here is repairable by this command.' })).toBeNull();
     expect(recordableRefusalCode({ success: false, code: 'nothing_repairable', error: "The bar can't repair this from here yet." })).toBe('nothing_repairable');
+  });
+});
+
+describe('r14: the email link refusal is a safety rule; the lookup faults state the fault', () => {
+  const decline = (code) => ({ success: false, code, error: "The bar can't send this from here yet." });
+  test('an email reply with an owned portal link is not a gap; the SMS composer-only refusal is', () => {
+    expect(recordableRefusalCode(decline('email_link_identity_refused'))).toBeNull();
+    expect(recordableRefusalCode(decline('customer_link_composer_only'))).toBe('customer_link_composer_only');
+    const src = fs.readFileSync(fullPath('comms-tools.js'), 'utf8');
+    expect(src).toMatch(/email \? 'email_link_identity_refused' : 'customer_link_composer_only'/);
+  });
+  test('the void tool: a capability refusal says the bar cannot; a lookup failure states the fault and records nothing', () => {
+    const src = fs.readFileSync(fullPath('void-invoice-tools.js'), 'utf8');
+    expect(src).not.toMatch(/Void it from the Invoices page/);
+    expect(recordableRefusalCode({ success: false, code: 'needs_invoices_page', error: "Invoice X has a setup-fee claim. The bar can't void this invoice from here yet. Nothing was changed." })).toBe('needs_invoices_page');
+    const lookup = { error: 'The bar could not check for a card charge in progress, so nothing was offered. Nothing was changed. Try again in a moment.', code: 'unverified' };
+    expect(BAR_DECLINE_RE.test(lookup.error)).toBe(false);
+    expect(recordableRefusalCode(lookup)).toBeNull();
   });
 });
 
