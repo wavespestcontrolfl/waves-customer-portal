@@ -332,6 +332,27 @@ function moneySummary(est = {}) {
   return "";
 }
 
+// GATE_ESTIMATE_FOLLOWUP_MONTHLY_AVERAGE (owner 2026-10-21): the follow-up emails that
+// render the price row (unviewed, viewed, final, expiring notice) show the same
+// average copy as the delivery email. `estimate_average_note` is the context sentence
+// (a paragraph block the templates carry, dropped when blank). Built from a row read
+// now by emailAverageParts, the delivery email's own resolver and eligibility
+// (commercial, quote-required, closed, prepay/monthly-billed, one-time-only all
+// withheld). Returns the payload UNCHANGED (same object) with the gate off or when no
+// average applies, so those emails stay byte-identical.
+async function withMonthlyAverage(payload, est) {
+  if (!isEnabled("estimateFollowupMonthlyAverage")) return payload;
+  try {
+    const fresh = (await db("estimates").where({ id: est.id }).first()) || est;
+    const parts = await require("./estimate-monthly-average").emailAverageParts(fresh);
+    if (!parts) return payload;
+    return { ...payload, price_summary: parts.priceLine, estimate_average_note: parts.note };
+  } catch (err) {
+    logger.warn(`[est-followup] monthly average skipped for estimate ${est?.id}: ${err.message}`);
+    return payload;
+  }
+}
+
 function estimateEmailPayload(est, firstName, estimateUrl, extra = {}) {
   const serviceSummary = inferEstimateServiceInterest({
     ...est,
@@ -1278,7 +1299,7 @@ const EstimateFollowUp = {
             email: delivery.unviewed.emailEnabled ? {
               templateKey: "estimate.unviewed_followup",
               stage: "unviewed",
-              payload: estimateEmailPayload(est, firstName, emailUrl),
+              payload: await withMonthlyAverage(estimateEmailPayload(est, firstName, emailUrl), est),
             } : null,
           });
           if (ok) {
@@ -1363,7 +1384,7 @@ const EstimateFollowUp = {
             email: delivery.viewed.emailEnabled ? {
               templateKey: "estimate.viewed_followup",
               stage: "viewed",
-              payload: estimateEmailPayload(est, firstName, emailUrl),
+              payload: await withMonthlyAverage(estimateEmailPayload(est, firstName, emailUrl), est),
             } : null,
           });
           if (ok) {
@@ -1449,7 +1470,7 @@ const EstimateFollowUp = {
             email: delivery.final.emailEnabled ? {
               templateKey: "estimate.followup_final",
               stage: "final",
-              payload: estimateEmailPayload(est, firstName, emailUrl),
+              payload: await withMonthlyAverage(estimateEmailPayload(est, firstName, emailUrl), est),
             } : null,
           });
           if (ok) {
@@ -1566,10 +1587,10 @@ const EstimateFollowUp = {
             email: delivery.expiring.emailEnabled ? {
               templateKey: "estimate.expiring_notice",
               stage: "expiring",
-              payload: {
+              payload: await withMonthlyAverage({
                 ...estimateEmailPayload(est, firstName, emailUrl),
                 expires_at: expDate,
-              },
+              }, est),
             } : null,
           });
           if (ok) {
@@ -1626,6 +1647,7 @@ module.exports.deferredFollowupStillEligible = deferredFollowupStillEligible;
 module.exports._private = {
   sendDualChannel,
   estimateEmailPayload,
+  withMonthlyAverage,
   renderTemplate,
   deferredFollowupStillEligible,
   checkDepositAbandoned,

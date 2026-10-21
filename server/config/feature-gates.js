@@ -3028,6 +3028,17 @@ const gates = {
   // Kill switch: unset GATE_ESTIMATE_MONTHLY_AVERAGE (read at boot; the Railway restart applies it).
   estimateMonthlyAverage: isProd ? process.env.GATE_ESTIMATE_MONTHLY_AVERAGE === 'true' : true,
 
+  // Monthly average in the estimate FOLLOW-UP emails (owner 2026-10-21, "follow-ups
+  // too"): the unviewed, viewed, final and expiring-notice emails carry the same
+  // price row and context sentence the delivery email does ("$94.00 per
+  // application · $31.33 a month", or "Priced per application · plan averages
+  // $72.30 a month", plus "Averaged over the year. You pay after each
+  // application."), built by the same shared builder and eligibility rules
+  // (emailAverageParts). Needs GATE_ESTIMATE_MONTHLY_AVERAGE ON too. Off or unset in
+  // prod: every follow-up payload is byte-identical to today.
+  // Kill switch: unset GATE_ESTIMATE_FOLLOWUP_MONTHLY_AVERAGE (read at boot; the Railway restart applies it).
+  estimateFollowupMonthlyAverage: isProd ? process.env.GATE_ESTIMATE_FOLLOWUP_MONTHLY_AVERAGE === 'true' : true,
+
   // Estimate acceptance terms (owner ruling 2026-08-28): the public estimate
   // renders a one-line authorization + inline "View terms" drawer directly
   // above Accept (same steps, no extra page) and the accept route records
