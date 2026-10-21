@@ -1046,6 +1046,21 @@ jest.setTimeout(30000);
       expect(await claimRow()).toMatchObject({ outcome: CLAIM.SENT, call_log_id: row.id });
     });
 
+    test('gate on: an empty-voicemail caller in a qualifying GBP block is texted, never a SPAM_WAVE (the call itself is no wave member)', async () => {
+      gates(true);
+      const GBP = '+19413840224';
+      await database('call_log').insert([
+        call(60, { from_phone: '+19415550201', to_phone: GBP, duration_seconds: 24 }),
+        call(55, { from_phone: '+19415550202', to_phone: GBP, duration_seconds: 24 }),
+        call(50, { from_phone: '+19415550204', to_phone: GBP, duration_seconds: 24 }),
+      ]);
+      const row = rejected(READY_MINUTES_AGO + 4, 1, { from_phone: '+19415550203', to_phone: GBP, duration_seconds: 24 });
+      await database('call_log').insert(row);
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect((await stored(row)).metadata.missed_call_text_spam_shadow).toBeUndefined();
+    });
+
     test('gate on: a marker-only completed transcript is texted too', async () => {
       gates(true);
       const row = rejected(READY_MINUTES_AGO + 4, 1, { transcription_status: 'completed', transcription: '[VOICEMAIL]' });

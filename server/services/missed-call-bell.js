@@ -125,9 +125,12 @@ async function isRobodialerWave(row) {
     // the bell's own answered-proof called-back check, per historical row.
     .whereRaw(calledBackSql({ retire: true }))
     .whereRaw(NOT_ON_CUSTOMER_SLOT_SQL)
-    .countDistinct({ n: db.raw(LAST10_SQL('from_phone')) })
+    .select(db.raw(`COUNT(DISTINCT ${LAST10_SQL('from_phone')}) AS n`), db.raw('COALESCE(bool_or(call_log.id = ?), false) AS self', [row.id]))
     .first();
-  if (Number(found?.n || 0) < WAVE_MIN_NUMBERS) return false;
+  // The call must itself be a member (no recording, unanswered, not AI-handled,
+  // not called back), not merely sit beside three members: an empty-voicemail
+  // caller in a qualifying block is not a wave call.
+  if (!found?.self || Number(found?.n || 0) < WAVE_MIN_NUMBERS) return false;
   // Live customers only, as findKnownCallerCustomer reads them (Codex #6379 r2).
   const customer = await db('customers')
     .whereNull('deleted_at')

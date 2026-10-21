@@ -215,6 +215,21 @@ jest.setTimeout(30000);
     expect(await isRobodialerWave(row)).toBe(false);
   });
 
+  test('the judged call must itself be a wave member: an empty-voicemail caller beside three block numbers is no wave, and rings', async () => {
+    await database('call_log').insert([call('+19415550101', 60), call('+19415550202', 60), call('+19415550404', 60)]);
+    const row = call('+19415550303', 10, { recording_sid: 'RE_sample', recording_url: 'https://example.invalid/r', transcription_status: 'rejected', transcription: '[NO SPEECH]' });
+    await database('call_log').insert(row);
+    expect(await isRobodialerWave(row)).toBe(false);
+    // The same call with no recording is the fourth block number: a wave.
+    await database('call_log').where({ id: row.id }).update({ recording_sid: null, recording_url: null });
+    expect(await isRobodialerWave(row)).toBe(true);
+    // Handled by the AI agent, or answered by a person: not a member either.
+    await database('call_log').where({ id: row.id }).update({ call_outcome: 'ai_handled' });
+    expect(await isRobodialerWave(row)).toBe(false);
+    await database('call_log').where({ id: row.id }).update({ call_outcome: null, answered_by: 'human' });
+    expect(await isRobodialerWave(row)).toBe(false);
+  });
+
   test('block calls older than 14 days do not count', async () => {
     const row = call('+19415550303', 10);
     await database('call_log').insert([row, call('+19415550101', 60 * 24 * 15), call('+19415550202', 60 * 24 * 16)]);
