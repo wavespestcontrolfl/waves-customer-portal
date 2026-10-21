@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import { WAVES_SUPPORT_PHONE_DISPLAY } from '../../constants/business';
+import { FS, FW, LH, RADIUS, SP } from '../../theme-doc';
 
 // GATE_REPORT_WEB_ACTIONS (owner 2026-10-20): two customer-started actions at
 // the foot of the simple web service report. The server sets
@@ -17,19 +18,26 @@ import { WAVES_SUPPORT_PHONE_DISPLAY } from '../../constants/business';
 //     email and books nothing.
 
 const MAX_SIDE = 1600;
+// The server refuses a photo over 750 KB decoded; stay under it with room for the data URL prefix.
 const TARGET_BYTES = 650 * 1024;
+const SERVER_LIMIT_BYTES = 750 * 1024;
+const QUALITIES = [0.85, 0.7, 0.55, 0.4];
+const MIN_SIDE = 320;
+const HEIC_TYPES = { 'image/heic': 'image/heic', 'image/heif': 'image/heif' };
 
+// Prose is 16px (owner D1: body prose is 16 on customer surfaces); fine print is 14px and its selector is
+// specific enough to win over the prose rule. Sizes come from theme-doc.
 export const REPORT_WEB_ACTIONS_CSS = `
-  .web-actions { display: grid; gap: 12px; margin: 16px 0 0; }
-  .web-action-card { padding: 20px; border-radius: 12px; background: var(--paper, #fff); border: 1px solid var(--line, rgba(4, 57, 94, 0.12)); }
-  .web-action-card h2 { margin: 0 0 8px; font-size: 18px; line-height: 1.3; }
-  .web-action-card p { margin: 0 0 12px; font-size: 15px; line-height: 1.5; }
-  .web-action-card p:last-child { margin-bottom: 0; }
-  .web-action-btn { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; min-height: 44px; max-width: 100%; padding: 0 18px; border-radius: 10px; border: 0; font-size: 15px; font-weight: 600; text-decoration: none; cursor: pointer; background: #04395E; color: #fff; }
-  .web-action-btn[disabled] { opacity: 0.6; cursor: default; }
-  .web-action-answer { font-weight: 600; }
-  .web-action-fine { font-size: 14px; }
-  .web-action-file { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; pointer-events: none; }
+  .web-actions { display: grid; gap: ${SP.sm}px; margin: ${SP.md}px 0 0; }
+  .web-actions .web-action-card { padding: ${SP.lg}px; border-radius: ${RADIUS.card}px; background: var(--paper, #fff); border: 1px solid var(--line, rgba(4, 57, 94, 0.12)); }
+  .web-actions .web-action-card h2 { margin: 0 0 ${SP.xs}px; font-size: ${FS.sub}px; line-height: ${LH.heading}; font-weight: ${FW.bold}; }
+  .web-actions .web-action-card p { margin: 0 0 ${SP.sm}px; font-size: ${FS.bodyLg}px; line-height: ${LH.body}; }
+  .web-actions .web-action-card p:last-child { margin-bottom: 0; }
+  .web-actions .web-action-card p.web-action-answer { font-weight: ${FW.semibold}; }
+  .web-actions .web-action-card p.web-action-fine { font-size: ${FS.body}px; line-height: ${LH.snug}; }
+  .web-actions .web-action-btn { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; min-height: 48px; max-width: 100%; padding: 0 18px; border-radius: ${RADIUS.button}px; border: 0; font-size: ${FS.body}px; line-height: ${LH.solid}; font-weight: ${FW.bold}; text-decoration: none; cursor: pointer; background: #04395E; color: #fff; }
+  .web-actions .web-action-btn[disabled] { opacity: 0.6; cursor: default; }
+  .web-actions .web-action-file { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; pointer-events: none; }
 `;
 
 // Same-origin only, against the browser's actual origin: a legitimate estimate
@@ -74,8 +82,10 @@ function FindingTile({ finding, token, submitEvent, readOnly }) {
   );
 }
 
-// Shrinks the picked photo to a JPEG data URL small enough for the report API's
-// JSON limit. Resolves null when the browser cannot read the file.
+// Shrinks the picked photo to a JPEG data URL the server will take (750 KB or less). It lowers the quality,
+// then keeps reducing the dimensions, until the result fits, and never returns an oversized image: when
+// nothing fits it says so ({ reason: 'too_large' }). A photo the browser cannot decode (HEIC on a browser
+// without HEIC support) resolves { reason: 'unreadable' } so the caller can send the original if it is small.
 function shrinkPhoto(file) {
   return new Promise((resolve) => {
     const url = URL.createObjectURL(file);
@@ -83,22 +93,41 @@ function shrinkPhoto(file) {
     img.onload = () => {
       URL.revokeObjectURL(url);
       try {
-        const scale = Math.min(1, MAX_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
         const canvas = document.createElement('canvas');
-        canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
-        canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
-        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
-        let quality = 0.85;
-        let dataUrl = canvas.toDataURL('image/jpeg', quality);
-        while (dataUrl.length * 0.75 > TARGET_BYTES && quality > 0.4) {
-          quality -= 0.15;
-          dataUrl = canvas.toDataURL('image/jpeg', quality);
+        let scale = Math.min(1, MAX_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
+        for (;;) {
+          canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+          canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+          canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+          for (const quality of QUALITIES) {
+            const dataUrl = canvas.toDataURL('image/jpeg', quality);
+            if (dataUrl.length * 0.75 <= TARGET_BYTES) { resolve({ dataUrl }); return; }
+          }
+          if (Math.max(canvas.width, canvas.height) <= MIN_SIDE) { resolve({ reason: 'too_large' }); return; }
+          scale *= 0.8;
         }
-        resolve(dataUrl);
-      } catch { resolve(null); }
+      } catch { resolve({ reason: 'unreadable' }); }
     };
-    img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve({ reason: 'unreadable' }); };
     img.src = url;
+  });
+}
+
+// The original file as a data URL, for a HEIC/HEIF photo the browser cannot decode: the server converts it,
+// as the portal photo flow does. Only when it is within the byte limit; null otherwise.
+function readOriginal(file) {
+  const name = String(file.name || '').toLowerCase();
+  const type = HEIC_TYPES[String(file.type || '').toLowerCase()] || (/\.hei[cf]$/.test(name) ? (name.endsWith('f') ? 'image/heif' : 'image/heic') : null);
+  if (!type || file.size > SERVER_LIMIT_BYTES) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || '');
+      const comma = result.indexOf(',');
+      resolve(comma < 0 ? null : `data:${type};base64,${result.slice(comma + 1)}`);
+    };
+    reader.onerror = () => resolve(null);
+    reader.readAsDataURL(file);
   });
 }
 
@@ -117,8 +146,14 @@ function PhotoCheck({ token, apiBase, readOnly }) {
     event.target.value = '';
     if (!file || readOnly) return;
     setState('checking');
-    const dataUrl = await shrinkPhoto(file);
-    if (!dataUrl) { fail('We could not read that photo. Try another one.'); return; }
+    const shrunk = await shrinkPhoto(file);
+    const dataUrl = shrunk.dataUrl || (shrunk.reason === 'unreadable' ? await readOriginal(file) : null);
+    if (!dataUrl) {
+      fail(shrunk.reason === 'too_large'
+        ? `That photo is too large. Try another one or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`
+        : `We could not read that photo. Try another one or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`);
+      return;
+    }
     try {
       const response = await fetch(`${apiBase}/reports/${token}/photo-check`, {
         method: 'POST',

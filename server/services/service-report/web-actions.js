@@ -31,6 +31,9 @@ const FINDING_KINDS = [
   { kind: 'pests', family: 'pest_control', sentence: 'We saw pest activity on this visit.', re: /\b(ants?|roach(es)?|cockroaches?|spiders?|silverfish|earwigs?)\b/i, veto: SPECIALTY_PEST_RE },
 ];
 
+// Metadata key the tile's tap carries so the events route can recheck the tile's own gates.
+const WEB_TILE_SOURCE = 'web_actions_finding_tile';
+
 // "No ants seen" is not a finding. Titles that deny the pest never classify.
 const NEGATED_RE = /\b(no|not|none|without|free of|clear of|negative)\b/i;
 
@@ -79,6 +82,8 @@ async function buildFindingTile(data, { buildCrossSell }) {
     // recomputes the offer on the tap and rejects any drift; the page never
     // shows these fields.
     tap: {
+      // Names the web report tile, so the server rechecks its gates when it is tapped.
+      source: WEB_TILE_SOURCE,
       serviceKey: offer.serviceKey,
       serviceLabel: offer.label,
       optionId: offer.option?.id || null,
@@ -117,10 +122,19 @@ async function visitIsAtPrimaryHome(row, knex) {
   }
 }
 
+// The tile's tap is the existing cross_sell_requested event. When the event names the tile, the tile's own
+// gates must still be live (the page may have loaded before a gate went dark); otherwise the caller answers
+// the same 409 a stale offer gets. Taps that do not name the tile are the old card's and are unaffected.
+function webTileTapAllowed(metadata, gates) {
+  if (!metadata || metadata.source !== WEB_TILE_SOURCE) return true;
+  return webActionsLive(gates) === true && gates.isEnabled('reportClickToEstimate') === true;
+}
+
 // Photo ID handler type for the report's service line.
 function photoTypeForLine(serviceLine) {
   if (serviceLine === 'lawn') return 'lawn';
-  if (serviceLine === 'tree_shrub') return 'tree_shrub';
+  // Palm has no handler of its own: the plant handler reads it with the tree & shrub engine.
+  if (serviceLine === 'tree_shrub' || serviceLine === 'palm') return 'tree_shrub';
   return 'pest';
 }
 
@@ -212,6 +226,8 @@ async function attachWebActions(service, data, { db, gates, simpleWeb }) {
 module.exports = {
   attachWebActions,
   webActionsLive,
+  webTileTapAllowed,
+  WEB_TILE_SOURCE,
   buildFindingTile,
   findingKinds,
   photoTypeForLine,

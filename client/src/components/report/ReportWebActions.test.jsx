@@ -3,7 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import ReportWebActions from './ReportWebActions';
+import ReportWebActions, { REPORT_WEB_ACTIONS_CSS } from './ReportWebActions';
 
 // GATE_REPORT_WEB_ACTIONS (owner 2026-10-20): the finding offer tile and the
 // "Seen something since?" photo button. The server sends fixed sentences; the
@@ -82,10 +82,15 @@ describe('the finding tile', () => {
 
 describe('the photo button', () => {
   let fetchMock;
+  let decodeFails;
   beforeEach(() => {
+    decodeFails = false;
     // jsdom cannot decode images: stand in for the Image and canvas the page uses to shrink a photo.
     vi.stubGlobal('Image', class {
-      set src(_v) { this.naturalWidth = 4000; this.naturalHeight = 3000; setTimeout(() => this.onload && this.onload(), 0); }
+      set src(_v) {
+        this.naturalWidth = 4000; this.naturalHeight = 3000;
+        setTimeout(() => (decodeFails ? this.onerror && this.onerror() : this.onload && this.onload()), 0);
+      }
     });
     URL.createObjectURL = vi.fn(() => 'blob:x');
     URL.revokeObjectURL = vi.fn();
@@ -165,5 +170,73 @@ describe('the photo button', () => {
   it('a staff preview cannot add a photo', () => {
     renderPhoto({ readOnly: true });
     expect(screen.getByRole('button', { name: 'Staff preview' })).toBeDisabled();
+  });
+
+  const pickFile = (file) => fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [file] } });
+  const decodedBytes = (dataUrl) => (dataUrl.length - dataUrl.indexOf(',') - 1) * 0.75;
+
+  it('keeps reducing the dimensions after the quality floor until the photo fits, and sends only a fitting one', async () => {
+    const widths = [];
+    // fits only once the canvas is 1000px wide or less, whatever the quality
+    HTMLCanvasElement.prototype.toDataURL.mockImplementation(function toDataURL() {
+      widths.push(this.width);
+      return `data:image/jpeg;base64,${'A'.repeat(this.width > 1000 ? 2_000_000 : 1000)}`;
+    });
+    renderPhoto();
+    pickFile(new File(['x'], 'p.jpg', { type: 'image/jpeg' }));
+    await screen.findByText('Likely a ghost ant');
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(decodedBytes(body.photos[0])).toBeLessThan(750 * 1024);
+    expect(Math.min(...widths)).toBeLessThanOrEqual(1000);
+    expect(new Set(widths).size).toBeGreaterThan(1); // it stepped the dimensions down
+  });
+
+  it('a photo that never fits is refused locally: nothing is sent', async () => {
+    HTMLCanvasElement.prototype.toDataURL.mockImplementation(() => `data:image/jpeg;base64,${'A'.repeat(2_000_000)}`);
+    renderPhoto();
+    pickFile(new File(['x'], 'p.jpg', { type: 'image/jpeg' }));
+    await screen.findByText(new RegExp(`too large.*${PHONE.replace(/[()]/g, '\\$&')}`));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('a HEIC the browser cannot decode is sent as the original when it is within the limit', async () => {
+    decodeFails = true;
+    renderPhoto();
+    pickFile(new File([new Uint8Array(2000).fill(7)], 'IMG_1.HEIC', { type: 'image/heic' }));
+    await screen.findByText('Likely a ghost ant');
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.photos[0]).toMatch(/^data:image\/heic;base64,/);
+    expect(Math.round(decodedBytes(body.photos[0]))).toBeGreaterThanOrEqual(2000);
+    expect(Math.round(decodedBytes(body.photos[0]))).toBeLessThanOrEqual(2002);
+  });
+
+  it('an undecodable HEIC with no mime type is named by its extension; an oversized one or a non-HEIC is not sent', async () => {
+    decodeFails = true;
+    renderPhoto();
+    pickFile(new File([new Uint8Array(500)], 'IMG_2.heif', { type: '' }));
+    await screen.findByText('Likely a ghost ant');
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).photos[0]).toMatch(/^data:image\/heif;base64,/);
+    fetchMock.mockClear();
+    pickFile(new File([new Uint8Array(800 * 1024)], 'IMG_3.heic', { type: 'image/heic' }));
+    await screen.findByText(/could not read that photo/);
+    pickFile(new File([new Uint8Array(500)], 'notes.txt', { type: 'text/plain' }));
+    await waitFor(() => expect(screen.getByRole('status').textContent).toMatch(/could not read that photo/));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('type sizes', () => {
+  it('prose is 16px and fine print is 14px (the fine-print rule wins over the prose rule), from the theme tokens', () => {
+    render(<ReportWebActions actions={{ photo: { type: 'pest' }, finding: FINDING }} token="tok" apiBase="/api" submitEvent={vi.fn()} readOnly />);
+    const prose = document.querySelector('.web-action-card p');
+    expect(getComputedStyle(prose).fontSize).toBe('16px');
+    // an answer with no phone shows the 14px call line
+    expect(REPORT_WEB_ACTIONS_CSS).toContain('font-size: 16px');
+    expect(REPORT_WEB_ACTIONS_CSS).toMatch(/\.web-actions \.web-action-card p\.web-action-fine \{ font-size: 14px/);
+    const fine = document.createElement('p');
+    fine.className = 'web-action-fine';
+    document.querySelector('.web-action-card').appendChild(fine);
+    expect(getComputedStyle(fine).fontSize).toBe('14px');
+    expect(getComputedStyle(document.querySelector('.web-action-btn')).fontSize).toBe('14px');
   });
 });

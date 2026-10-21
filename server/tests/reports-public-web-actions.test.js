@@ -123,6 +123,7 @@ describe('web-actions: finding tile', () => {
     expect(tile.body).toBe('Lawn Care can take care of this. Tap below to see your estimate. Nothing is booked or charged.');
     expect(`${tile.sentence} ${tile.body} ${tile.button}`).not.toMatch(/\$|per visit|per month/i);
     expect(tile.tap).toEqual({
+      source: 'web_actions_finding_tile',
       serviceKey: 'lawn_care', serviceLabel: 'Lawn Care', optionId: 'lawn-enhanced', perApplication: 61.5, offerMode: 'priced', fingerprint: 'fp-1',
     });
   });
@@ -236,6 +237,7 @@ describe('web-actions: photo answers', () => {
   test('photo handler type follows the report line', () => {
     expect(webActions.photoTypeForLine('lawn')).toBe('lawn');
     expect(webActions.photoTypeForLine('tree_shrub')).toBe('tree_shrub');
+    expect(webActions.photoTypeForLine('palm')).toBe('tree_shrub'); // palm reads with the plant handler
     expect(webActions.photoTypeForLine('pest')).toBe('pest');
     expect(webActions.photoTypeForLine('mosquito')).toBe('pest');
   });
@@ -555,5 +557,65 @@ describe('POST /reports/:token/photo-check quota and storage', () => {
       expect((await res.json()).error).toContain(PHONE);
     });
     expect(photoId.runCustomerPhotoId).not.toHaveBeenCalled();
+  });
+});
+
+describe('the finding tile tap rechecks its gates', () => {
+  const TILE_META = { source: 'web_actions_finding_tile', serviceKey: 'lawn_care', serviceLabel: 'Lawn Care', optionId: 'x', perApplication: 61.5, offerMode: 'priced', fingerprint: 'fp' };
+  const tap = (baseUrl, metadata) => fetch(`${baseUrl}/reports/${VALID_TOKEN}/events`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ eventName: 'cross_sell_requested', channel: 'public_report', metadata }),
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    setGates();
+    mockDb();
+  });
+
+  test('the offer made for the tile carries the tile source in its tap metadata', async () => {
+    const tile = await webActions.buildFindingTile({ findings: [WEED_FINDING] }, { buildCrossSell: async () => offer() });
+    expect(tile.tap.source).toBe(webActions.WEB_TILE_SOURCE);
+  });
+
+  test.each([
+    ['web actions off', { actions: false }],
+    ['click-to-estimate off', { click: false }],
+    ['simple web off', { simple: false }],
+  ])('%s: a tile tap answers 409 before any lookup or write', async (_name, flags) => {
+    setGates({ crossSell: true, ...flags });
+    await withServer(async (baseUrl) => {
+      const res = await tap(baseUrl, TILE_META);
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/no longer available/);
+    });
+    expect(db).not.toHaveBeenCalled();
+    expect(buildReportCrossSell).not.toHaveBeenCalled();
+  });
+
+  test('both gates live: the tap goes on to the normal path (here it stops at the record lookup, not at a 409)', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await tap(baseUrl, TILE_META);
+      expect(res.status).not.toBe(409);
+    });
+    expect(db).toHaveBeenCalled();
+  });
+
+  test('the old report card\'s tap (no tile source) is not affected by the tile gates', async () => {
+    setGates({ actions: false, click: false });
+    await withServer(async (baseUrl) => {
+      const { source: _tile, ...oldCard } = TILE_META;
+      const res = await tap(baseUrl, oldCard);
+      expect(res.status).not.toBe(409);
+    });
+  });
+
+  test('webTileTapAllowed reads the gates strictly', () => {
+    const gatesOn = { reportSimpleWebLive: () => true, reportWebActionsLive: () => true, isEnabled: () => true };
+    expect(webActions.webTileTapAllowed({ source: webActions.WEB_TILE_SOURCE }, gatesOn)).toBe(true);
+    expect(webActions.webTileTapAllowed({ source: webActions.WEB_TILE_SOURCE }, { ...gatesOn, isEnabled: () => false })).toBe(false);
+    expect(webActions.webTileTapAllowed({ source: webActions.WEB_TILE_SOURCE }, { ...gatesOn, reportWebActionsLive: () => false })).toBe(false);
+    expect(webActions.webTileTapAllowed({ source: webActions.WEB_TILE_SOURCE }, {})).toBe(false);
+    expect(webActions.webTileTapAllowed({}, {})).toBe(true);
+    expect(webActions.webTileTapAllowed(null, {})).toBe(true);
   });
 });

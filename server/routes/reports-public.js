@@ -226,11 +226,12 @@ function isReportLimiterExempt(req) {
 // A dark photo-check answers the generic 404 BEFORE any limiter, so a probe never sees a
 // revealing 429. Mounted app-level in server/index.js ahead of the global /api limiter
 // (production mounts that before this router) and first in this router, ahead of
-// reportLimiter. Only POST /:token/photo-check (any token segment, optional trailing slash)
-// is touched; everything else is next().
+// reportLimiter. Only POST and OPTIONS /:token/photo-check (any token segment, optional trailing slash)
+// are touched; everything else is next().
 const PHOTO_CHECK_PATH_RE = /^\/[^/]+\/photo-check\/?$/i;
 function reportPhotoCheckPreGuard(req, res, next) {
-  if (req.method !== 'POST' || !PHOTO_CHECK_PATH_RE.test(req.path || '')) return next();
+  // OPTIONS too: while dark, a CORS preflight must not answer 204 from the global cors() either.
+  if ((req.method !== 'POST' && req.method !== 'OPTIONS') || !PHOTO_CHECK_PATH_RE.test(req.path || '')) return next();
   // Dark, or live with a malformed token (not 32 hex): the same generic 404, before any limiter or database read.
   if (!webPhotoCheckLive() || !FULL_TOKEN_RE.test(req.path.split('/')[1] || '')) {
     return res.status(404).json({ error: 'Report not found' });
@@ -1315,7 +1316,18 @@ router.get('/project/:token/fdacs-pdf', async (req, res, next) => {
 });
 
 // POST /api/reports/:token/events — token-scoped report interaction events.
-router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async (req, res, next) => {
+// The web report tile's tap is a cross_sell_requested event that names the tile; while either of the tile's
+// gates is dark the tap answers the same 409 as a stale offer, before any recompute or write.
+function webTileTapGate(req, res, next) {
+  const metadata = req.body?.metadata;
+  const named = normalizedEventName(req) === 'cross_sell_requested' && metadata && typeof metadata === 'object' && !Array.isArray(metadata);
+  if (named && !require('../services/service-report/web-actions').webTileTapAllowed(metadata, require('../config/feature-gates'))) {
+    return res.status(409).json({ error: 'This offer is no longer available — please refresh the report' });
+  }
+  return next();
+}
+
+router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, webTileTapGate, async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '')) {
     return res.status(404).json({ error: 'Report not found' });
   }

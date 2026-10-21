@@ -139,7 +139,9 @@ jest.mock('sharp', () => jest.fn(() => ({
   rotate: jest.fn().mockReturnThis(),
   jpeg: jest.fn().mockReturnThis(),
   toBuffer: jest.fn().mockResolvedValue(MOCK_TRANSCODED_JPEG),
+  metadata: (...args) => mockSharpMetadata(...args),
 })));
+const mockSharpMetadata = jest.fn(async () => ({ width: 4000, height: 3000 }));
 // express-rate-limit's default store is in-memory and lives for the life of
 // the router module — which this whole test file shares — so every test
 // that doesn't care about quota gets a FRESH default customer id per test
@@ -474,6 +476,7 @@ beforeEach(() => {
   mockGateState.photoIdV2 = false;
   mockDropIssueOnTransactionStart = false;
   mockReserviceAccess.mockResolvedValue(null);
+  mockSharpMetadata.mockResolvedValue({ width: 4000, height: 3000 });
   mockResolveSessionScope.mockResolvedValue({
     enabled: false, multi: false, scoped: false, closed: false, property: null,
   });
@@ -2567,5 +2570,37 @@ describe('runCustomerPhotoId (report-token entry)', () => {
     const reply = await runCustomerPhotoId({ type: 'pest', customerId: CUSTOMER_ID, dataUrls: [PHOTO_DATA_URL] });
     expect(reply.status).toBe(503);
     expect(reply.body.error).toContain('(941) 297-5749');
+  });
+
+  test('a tiny file that claims a huge image (pixel bomb) is refused before any decode, with the office phone', async () => {
+    mockSharpMetadata.mockResolvedValue({ width: 60000, height: 60000 });
+    const sharp = require('sharp');
+    const jpgBomb = PHOTO_DATA_URL.replace('data:image/jpeg', 'data:image/jpg'); // the transcoded shape
+    const reply = await runCustomerPhotoId({ type: 'pest', customerId: CUSTOMER_ID, dataUrls: [jpgBomb] });
+    expect(reply.status).toBe(413);
+    expect(reply.body.error).toContain('too large');
+    expect(reply.body.error).toContain('(941) 297-5749');
+    expect(mockIdentifyPest).not.toHaveBeenCalled();
+    // metadata (header only) ran; the decoder never did
+    expect(sharp.mock.results.every((r) => r.value.toBuffer.mock.calls.length === 0)).toBe(true);
+    // the same photo with a plain image/jpeg mime is checked too (no transcode, but no vision call either)
+    const plain = await runCustomerPhotoId({ type: 'pest', customerId: CUSTOMER_ID, dataUrls: [PHOTO_DATA_URL] });
+    expect(plain.status).toBe(413);
+    expect(mockIdentifyPest).not.toHaveBeenCalled();
+  });
+
+  test('the portal route refuses a pixel bomb too, before the vision call', async () => {
+    mockSharpMetadata.mockResolvedValue({ width: 60000, height: 60000 });
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/pest', photoBody());
+      expect(res.status).toBe(400);
+    });
+    expect(mockIdentifyPest).not.toHaveBeenCalled();
+  });
+
+  test('an ordinary phone photo passes the pixel check', async () => {
+    mockSharpMetadata.mockResolvedValue({ width: 8000, height: 6000 });
+    const reply = await runCustomerPhotoId({ type: 'pest', customerId: CUSTOMER_ID, dataUrls: [PHOTO_DATA_URL] });
+    expect(reply.status).toBe(200);
   });
 });

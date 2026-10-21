@@ -30,14 +30,21 @@ jest.mock('../routes/photo-id', () => ({
 // express-rate-limit is deliberately NOT mocked.
 
 const express = require('express');
+const cors = require('cors');
 const db = require('../models/db');
 const gates = require('../config/feature-gates');
 
 const TOKEN = '0123456789abcdef0123456789abcdef';
 
+// The first require of the router pulls its whole module graph (slow on a cold CI runner), so it is loaded ONCE,
+// outside any timed test, and every test gets an explicit timeout. The report limiter is reset between tests.
+jest.setTimeout(30000);
+let router;
+beforeAll(() => { router = require('../routes/reports-public'); }, 120000);
+const resetReportLimiter = () => ['127.0.0.1', '::ffff:127.0.0.1', '::1'].forEach((key) => router.reportLimiter.resetKey(key));
+beforeEach(() => resetReportLimiter());
+
 async function withFreshServer(fn) {
-  let router;
-  jest.isolateModules(() => { router = require('../routes/reports-public'); });
   const app = express();
   app.use(express.json());
   app.use('/reports', router);
@@ -62,8 +69,7 @@ describe('photo-check against the real report limiter', () => {
 
   test('dark: 30 requests in a row all answer 404, never 429, with no database read', async () => {
     await withFreshServer(async (base) => {
-      const statuses = [];
-      for (let i = 0; i < 30; i += 1) statuses.push((await post(base)).status);
+      const statuses = (await Promise.all(Array.from({ length: 30 }, () => post(base)))).map((res) => res.status);
       expect(new Set(statuses)).toEqual(new Set([404]));
     });
     expect(db).not.toHaveBeenCalled();
@@ -82,8 +88,7 @@ describe('photo-check against the real report limiter', () => {
 
   test('dark: the trailing-slash path is guarded too (Express matches it)', async () => {
     await withFreshServer(async (base) => {
-      const statuses = [];
-      for (let i = 0; i < 30; i += 1) statuses.push((await post(base, '/')).status);
+      const statuses = (await Promise.all(Array.from({ length: 30 }, () => post(base, '/')))).map((res) => res.status);
       expect(new Set(statuses)).toEqual(new Set([404]));
     });
     expect(db).not.toHaveBeenCalled();
@@ -100,10 +105,9 @@ describe('photo-check against the real report limiter', () => {
     });
     db.mockImplementation(() => chain());
     await withFreshServer(async (base) => {
-      const statuses = [];
-      for (let i = 0; i < 22; i += 1) statuses.push((await post(base)).status);
-      expect(statuses.slice(0, 20).every((status) => status === 400)).toBe(true); // reached the handler: no photo
-      expect(statuses.slice(20)).toEqual([429, 429]);
+      const statuses = (await Promise.all(Array.from({ length: 22 }, () => post(base)))).map((res) => res.status);
+      expect(statuses.filter((status) => status === 400)).toHaveLength(20); // reached the handler: no photo
+      expect(statuses.filter((status) => status === 429)).toHaveLength(2);
     });
   });
 });
@@ -116,13 +120,13 @@ describe('photo-check pre-guard ahead of a real global /api limiter', () => {
   const path = require('path');
 
   async function withApp(fn) {
-    let router;
-    jest.isolateModules(() => { router = require('../routes/reports-public'); });
     const app = express();
+    // Same order as server/index.js: privacy headers, the pre-guard, THEN cors(), the global limiter, the JSON parser.
     app.use('/api/reports', router.reportsAskPrivacyHeaders);
     app.use('/api/reports', router.reportPhotoCheckPreGuard);
+    app.use(cors({ origin: 'https://portal.example', credentials: true }));
     app.use('/api/', rateLimit({ windowMs: 60 * 1000, max: 1, standardHeaders: true, legacyHeaders: false, message: { error: 'global limit' } }));
-    app.use(express.json());
+    app.use(express.json({ limit: '1mb' }));
     app.use('/api/reports', router);
     app.use((err, _req, res, _next) => res.status(500).json({ error: err.message }));
     const server = app.listen(0);
@@ -155,6 +159,25 @@ describe('photo-check pre-guard ahead of a real global /api limiter', () => {
     expect(db).not.toHaveBeenCalled();
   });
 
+  test('dark: OPTIONS preflight, an oversized body and an exhausted limiter all answer 404 (before cors, the limiter and the 1 MB parser)', async () => {
+    await withApp(async (base) => {
+      // spend the global limiter on another route first
+      await call(base, `${TOKEN}/recap`, 'GET');
+      expect((await call(base, `${TOKEN}/recap`, 'GET')).status).toBe(429);
+      const preflight = await fetch(`${base}/api/reports/${TOKEN}/photo-check`, {
+        method: 'OPTIONS', headers: { Origin: 'https://portal.example', 'Access-Control-Request-Method': 'POST' },
+      });
+      expect(preflight.status).toBe(404);
+      expect(preflight.headers.get('access-control-allow-origin')).toBeNull();
+      const big = await fetch(`${base}/api/reports/${TOKEN}/photo-check`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ photos: ['x'.repeat(2 * 1024 * 1024)] }),
+      });
+      expect(big.status).toBe(404);
+      const chunked = await fetch(`${base}/api/reports/${TOKEN}/photo-check/`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{not json' });
+      expect(chunked.status).toBe(404);
+    });
+  });
+
   test('live: a malformed token is the same generic 404 before the limiter and the database', async () => {
     gates.reportSimpleWebLive.mockReturnValue(true);
     gates.reportWebActionsLive.mockReturnValue(true);
@@ -185,5 +208,10 @@ describe('photo-check pre-guard ahead of a real global /api limiter', () => {
     const limiterMount = index.indexOf("app.use('/api/', limiter)");
     expect(guard).toBeGreaterThan(-1);
     expect(limiterMount).toBeGreaterThan(guard);
+    // ...and ahead of the global cors() and every JSON body parser (a dark OPTIONS or oversized POST must 404 first)
+    expect(index.indexOf('app.use(cors({')).toBeGreaterThan(guard);
+    const parsers = [...index.matchAll(/express\.json\(/g)].map((m) => m.index);
+    expect(parsers.length).toBeGreaterThan(0);
+    expect(parsers.every((at) => at > guard)).toBe(true);
   });
 });

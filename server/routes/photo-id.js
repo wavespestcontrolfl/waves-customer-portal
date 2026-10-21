@@ -62,6 +62,9 @@ const {
   formatAssessmentScores,
 } = require('../services/tree-shrub-assessment');
 const { storeFunnelPhotos, storeTreeShrubCustomerPhotos } = require('../utils/funnel-photos');
+const {
+  MAX_PHOTO_PIXELS, PhotoTooLargeError, assertPhotoWithinPixels, withTranscodeSlot,
+} = require('../utils/photo-pixel-guard');
 const { reserviceStreamlineAccess } = require('../services/reservice-link');
 const { resolveSessionScope, applyPropertyPredicate, isSecondarySelection } = require('../services/account-properties');
 const { etDateString } = require('../utils/datetime-et');
@@ -144,10 +147,16 @@ const PHOTO_ID_JPEG_QUALITY = 88;
 const NEEDS_TRANSCODE_MIME = new Set(['image/heic', 'image/heif', 'image/jpg']);
 
 async function normalizePhotoInput(photo) {
-  if (!NEEDS_TRANSCODE_MIME.has(String(photo.mimeType || '').toLowerCase())) return photo;
   const raw = Buffer.from(photo.data, 'base64');
-  const jpegBuffer = await sharp(raw).rotate().jpeg({ quality: PHOTO_ID_JPEG_QUALITY }).toBuffer();
-  return { mimeType: 'image/jpeg', data: jpegBuffer.toString('base64') };
+  const transcode = NEEDS_TRANSCODE_MIME.has(String(photo.mimeType || '').toLowerCase());
+  // The pixel size comes from the header BEFORE any decode (a tiny file can claim a huge image), and
+  // only a couple of photos are checked or transcoded at once.
+  return withTranscodeSlot(async () => {
+    await assertPhotoWithinPixels(raw);
+    if (!transcode) return photo;
+    const jpegBuffer = await sharp(raw, { limitInputPixels: MAX_PHOTO_PIXELS }).rotate().jpeg({ quality: PHOTO_ID_JPEG_QUALITY }).toBuffer();
+    return { mimeType: 'image/jpeg', data: jpegBuffer.toString('base64') };
+  });
 }
 
 // ── Dark until Adam flips the gate — authenticate first (every handler needs
@@ -1539,6 +1548,9 @@ async function runCustomerPhotoId({ type, customerId, dataUrls, isSecondary = fa
   try {
     photoInputs = await Promise.all(rawPhotoInputs.map(normalizePhotoInput));
   } catch (err) {
+    if (err instanceof PhotoTooLargeError) {
+      return { status: 413, body: { error: `That photo is too large. Try another one or call ${OFFICE_PHONE}.` } };
+    }
     logger.warn(`[photo-id] report photo transcode failed: ${err.message}`);
     return { status: 400, body: { error: 'One of your photos could not be processed. Try a different photo.' } };
   }
