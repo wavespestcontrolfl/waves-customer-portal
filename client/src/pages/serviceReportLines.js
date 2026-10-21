@@ -226,6 +226,26 @@ export function buildRecommendations(data) {
 }
 
 /**
+ * The findings the document prints under "What we found": only those from the findings pipeline (a bare title came from
+ * raw technician notes and never prints), and a clean-visit "No ... observed" row is dropped on a lawn or tree & shrub
+ * visit that recorded any finding, watch item or stress pattern. Each carries its detail and its recommendation.
+ */
+export function buildRecordFindings(data) {
+  const v2 = data.reportV2 || null;
+  const clear = ['healthy', 'strong', 'stable', 'good', 'tracking', 'unknown', ''];
+  const issueStatus = (status) => !clear.includes(String(status || '').toLowerCase());
+  const findings = Array.isArray(data.findings) ? data.findings : [];
+  const wholeVisitLine = data.serviceLine === 'lawn' || data.serviceLine === 'tree_shrub';
+  const issueRecorded = wholeVisitLine && (findings.some((f) => f && f.category !== 'no_activity' && String(f.title || '').trim())
+    || (Array.isArray(v2?.insights) ? v2.insights : []).some((i) => i && issueStatus(i.status))
+    || issueStatus(v2?.snapshot?.status));
+  return findings
+    .filter((finding) => finding && String(finding.title || '').trim())
+    .filter((finding) => !(issueRecorded && finding.category === 'no_activity'))
+    .filter((finding) => String(finding.detail || '').trim() || String(finding.recommendation || '').trim());
+}
+
+/**
  * The bullets of "Re-entry & precautions", or null when the document shows no such section. data.advisory carries
  * service-line defaults, so the default pet advisory counts only when something was applied; a real re-entry context is
  * itself evidence of treatment. A fixed re-entry figure never prints (sanitizeReentryCopy); a lawn V2 report takes its
@@ -257,7 +277,7 @@ const NO_ACTION = /^no (further )?action\b/i;
  * "Do this": the first customer-owned line of "What we recommend". Lines Waves owns ("We will re-check the stations")
  * are skipped, and so is a "no action" line; "Nothing needed" when none is left. When rain has already watered the
  * treatment in, the watering lines (which then only report the rain) give way to the kept sprinkler hold, if the
- * report kept one.
+ * report kept one. A finding's recommendation (printed under "What we found") counts after the list.
  */
 export function doThisLine(data, recommendations = buildRecommendations(data)) {
   let lines = recommendations;
@@ -265,8 +285,11 @@ export function doThisLine(data, recommendations = buildRecommendations(data)) {
     const aftercare = data.reportV2.aftercare || {};
     lines = [aftercare.holdTask, ...recommendations.filter((line) => line !== aftercare.watering)];
   }
-  const mine = lines.filter((line) => typeof line === 'string' && line.trim() && !WAVES_OWNED.test(line.trim()));
-  return mine.find((line) => !NO_ACTION.test(line.trim())) || NOTHING_NEEDED;
+  // A finding's own recommendation prints inside its "What we found" bullet, not in "What we recommend", but it is still
+  // something the document asks of the customer: it follows the list, in the document's order.
+  const found = buildRecordFindings(data).map((finding) => finding.recommendation);
+  const mine = [...lines, ...found].filter((line) => typeof line === 'string' && line.trim() && !WAVES_OWNED.test(line.trim()));
+  return mine.map((line) => line.trim()).find((line) => !NO_ACTION.test(line)) || NOTHING_NEEDED;
 }
 
 /** "Hold off": the first bullet of the document's re-entry section, or null when the document shows none. */

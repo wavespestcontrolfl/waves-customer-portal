@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  NOTHING_NEEDED, buildRecommendations, buildReentryBullets, doThisLine, hasActualTreatmentFor, holdOffLine, sanitizeReentryCopy, termiteContext,
+  NOTHING_NEEDED, buildRecommendations, buildRecordFindings, buildReentryBullets, doThisLine, hasActualTreatmentFor, holdOffLine, sanitizeReentryCopy, termiteContext,
 } from './serviceReportLines';
 
 // The lines the document prints under "What we recommend" and "Re-entry & precautions", and the two the web top card
@@ -71,6 +71,34 @@ describe('doThisLine: the first customer-owned recommendation', () => {
     expect(doThisLine({ serviceLine: 'pest', pestReportV2: { primaryMove: { title: 'Clear the gutters.', why: 'Standing water breeds mosquitoes.' } } })).toBe('Clear the gutters. Standing water breeds mosquitoes.');
     expect(doThisLine({ serviceLine: 'mosquito', mosquitoReportV2: { primaryMove: { title: 'Empty the bird bath.' } } })).toBe('Empty the bird bath.');
     expect(doThisLine({ serviceLine: 'tree_shrub', reportV2: { snapshot: { customerAction: 'Water the new shrubs twice a week.' } } })).toBe('Water the new shrubs twice a week.');
+  });
+});
+
+describe('doThisLine: a finding\u2019s own recommendation is a customer task the document asks for', () => {
+  const finding = (over = {}) => ({ id: 'f1', title: 'Shrubs against the wall', detail: 'Branches touch the siding.', recommendation: 'Trim shrubs away from the house.', ...over });
+
+  it('finding-only: the recommendation prints under "What we found", not in "What we recommend", and still is the task', () => {
+    const data = { serviceLine: 'pest', findings: [finding()] };
+    expect(buildRecommendations(data)).toEqual([]);
+    expect(buildRecordFindings(data)).toHaveLength(1);
+    expect(doThisLine(data)).toBe('Trim shrubs away from the house.');
+  });
+
+  it('the "What we recommend" list comes first; a Waves-owned or "no action" finding recommendation is skipped', () => {
+    expect(doThisLine({ serviceLine: 'pest', recommendations: ['Keep the garage door closed.'], findings: [finding()] })).toBe('Keep the garage door closed.');
+    expect(doThisLine({ serviceLine: 'pest', findings: [finding({ recommendation: 'We will treat the nest next visit.' }), finding({ id: 'f2', title: 'Gutters', recommendation: 'Clear the gutters.' })] })).toBe('Clear the gutters.');
+    expect(doThisLine({ serviceLine: 'pest', findings: [finding({ recommendation: 'No action needed.' })] })).toBe(NOTHING_NEEDED);
+  });
+
+  it('only findings the document prints count: a bare title (raw-note provenance) and a dropped clean-visit row do not', () => {
+    expect(doThisLine({ serviceLine: 'pest', findings: [{ id: 'f3', title: 'Gate code 1234' }] })).toBe(NOTHING_NEEDED);
+    const lawnVisit = { serviceLine: 'lawn', findings: [finding({ id: 'n', category: 'no_activity', recommendation: 'Nothing to do here.' }), finding({ id: 'w', title: 'Weeds', recommendation: 'Mow high this week.' })] };
+    expect(buildRecordFindings(lawnVisit).map((f) => f.id)).toEqual(['w']);
+    expect(doThisLine(lawnVisit)).toBe('Mow high this week.');
+  });
+
+  it('nothing in the list and no finding task: Nothing needed', () => {
+    expect(doThisLine({ serviceLine: 'pest', findings: [finding({ recommendation: '' })] })).toBe(NOTHING_NEEDED);
   });
 });
 

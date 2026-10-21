@@ -11,7 +11,7 @@ import PoisonControlCopy, { applicatorIdLine } from '../components/report/Poison
 import ReportText, { reportSectionsForText } from '../components/report/ReportSections';
 import { FooterIdentity, PrintOnly, webCutView } from '../components/report/WebCutParts';
 import {
-  buildRecommendations, buildReentryBullets, fmtTime, sanitizeReentryCopy, termiteContext,
+  buildRecommendations, buildRecordFindings, buildReentryBullets, fmtTime, sanitizeReentryCopy, termiteContext,
 } from './serviceReportLines';
 import LawnBeforeAfterSlider from '../components/report/LawnBeforeAfterSlider';
 import { isTroubleSpotPhoto, rateWithBasis, sameSentence, techTextBeyondSummary } from './serviceReportCleanup';
@@ -886,16 +886,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
   // Only lawn and tree & shrub: their no_activity row speaks for the whole visit.
   // A pest report's no_activity rows are per zone ("no entry points in the
   // garage") and stand beside activity elsewhere.
-  const V2_CLEAR_STATUSES = ['healthy', 'strong', 'stable', 'good', 'tracking', 'unknown', ''];
-  const v2IssueStatus = (status) => !V2_CLEAR_STATUSES.includes(String(status || '').toLowerCase());
-  const wholeVisitLine = data.serviceLine === 'lawn' || data.serviceLine === 'tree_shrub';
-  const issueRecorded = wholeVisitLine && ((Array.isArray(data.findings) ? data.findings : []).some((f) => f && f.category !== 'no_activity' && String(f.title || '').trim())
-    || (Array.isArray(v2?.insights) ? v2.insights : []).some((i) => i && v2IssueStatus(i.status))
-    || v2IssueStatus(v2?.snapshot?.status));
-  const recordFindings = (Array.isArray(data.findings) ? data.findings : [])
-    .filter((finding) => finding && String(finding.title || '').trim())
-    .filter((finding) => !(issueRecorded && finding.category === 'no_activity'))
-    .filter((finding) => String(finding.detail || '').trim() || String(finding.recommendation || '').trim());
+  const recordFindings = buildRecordFindings(data);
   // Combined-service visits carry companion sections. internalOnly ones are
   // STAFF-ONLY and must never print — the same rule the web report's print
   // stylesheet enforces via .companion-internal.

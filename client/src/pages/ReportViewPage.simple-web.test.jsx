@@ -291,6 +291,17 @@ describe('the first screen of the simple web report', () => {
     expect(screen.getByLabelText('Rain at your home').textContent).not.toMatch(/after your visit:/);
   });
 
+  it('a finding-only task is "Do this" (the document asks for it under What we found)', async () => {
+    const { container } = renderReport(payload({
+      simpleWebReport: true,
+      webTop: {},
+      findings: [{ id: 'f1', title: 'Shrubs against the wall', detail: 'Branches touch the siding.', recommendation: 'Trim shrubs away from the house.' }],
+    }));
+    await screen.findByText(/This report is provided for your records/);
+    expect(screen.getByTestId('web-top').textContent).toMatch(/Do this\s*Trim shrubs away from the house\./);
+    expect(container.querySelector('.service-report-document').textContent).toMatch(/Shrubs against the wall:.*Trim shrubs away from the house\./);
+  });
+
   it('property scope not proven (no previous key): the score shows with no change line and no "starting score" claim', async () => {
     renderReport(payload({ simpleWebReport: true, webTop: { score: { value: 70 } } }));
     await screen.findByText(/This report is provided for your records/);
