@@ -6,6 +6,11 @@
  * the very same object the sender built before.
  */
 const mockGates = { followup: true, base: true };
+const NOTE_BLOCKS = [
+  { type: 'details', rows: [{ label: 'Estimate', value: '{{price_summary}}' }] },
+  { type: 'paragraph', content: '{{estimate_average_note}}' },
+];
+const mockTemplate = { activeVersion: { blocks: NOTE_BLOCKS, text_body: null } };
 jest.mock('../models/db', () => {
   const mockDb = jest.fn();
   mockDb.raw = jest.fn((expr) => expr);
@@ -19,7 +24,7 @@ jest.mock('../config/feature-gates', () => ({
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true })) }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(async () => ({ sent: true })),
-  loadTemplateByKey: jest.fn(async () => null),
+  loadTemplateByKey: jest.fn(async () => ({ template: { status: 'active' }, activeVersion: mockTemplate.activeVersion })),
 }));
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (url, opts = {}) => `https://short.test/${opts.channel}`) }));
 jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn(async () => 'SMS body'), isTemplateActive: jest.fn(async () => true) }));
@@ -113,6 +118,7 @@ beforeEach(() => {
   mockGates.followup = true;
   mockGates.base = true;
   mockBilling.ctx = { billsPerApplication: true, livePricing: null };
+  mockTemplate.activeVersion = { blocks: NOTE_BLOCKS, text_body: null };
   candidate = row();
   freshOverride = undefined;
   stageWanted = 'unviewed';
@@ -168,7 +174,7 @@ describe('withMonthlyAverage: plans the delivery email leaves alone are left alo
   const unchanged = async (est) => {
     const payload = _private.estimateEmailPayload(est, 'Taylor', 'https://x.test');
     freshOverride = est;
-    const out = await _private.withMonthlyAverage(payload, est);
+    const out = await _private.withMonthlyAverage(payload, est, 'estimate.unviewed_followup');
     expect(out).toBe(payload); // the very same object: byte-identical
   };
 
@@ -191,12 +197,65 @@ describe('withMonthlyAverage: plans the delivery email leaves alone are left alo
   test('a failure resolving the average never blocks the follow-up: the payload is returned as built', async () => {
     const payload = _private.estimateEmailPayload(row(), 'Taylor', 'https://x.test');
     db.mockImplementationOnce(() => { throw new Error('db down'); });
-    expect(await _private.withMonthlyAverage(payload, row())).toBe(payload);
+    expect(await _private.withMonthlyAverage(payload, row(), 'estimate.unviewed_followup')).toBe(payload);
   });
 
   test('it reads the row now, not the candidate it was handed (a price edit since the stage query)', async () => {
     const payload = _private.estimateEmailPayload(row(), 'Taylor', 'https://x.test');
     freshOverride = row({ monthly_total: '40.00' }); // no longer matches the lines
-    expect(await _private.withMonthlyAverage(payload, row())).toBe(payload);
+    expect(await _private.withMonthlyAverage(payload, row(), 'estimate.unviewed_followup')).toBe(payload);
+  });
+});
+
+describe('withMonthlyAverage: only a template whose active version can show the note gets the average', () => {
+  const KEY = 'estimate.unviewed_followup';
+  const apply = async () => {
+    const payload = _private.estimateEmailPayload(row(), 'Taylor', 'https://x.test');
+    freshOverride = row();
+    return { payload, out: await _private.withMonthlyAverage(payload, row(), KEY) };
+  };
+
+  test('a template the migration skipped (no note block) keeps the original payload', async () => {
+    mockTemplate.activeVersion = { blocks: [NOTE_BLOCKS[0]], text_body: null };
+    const { payload, out } = await apply();
+    expect(out).toBe(payload);
+    expect(out.price_summary).toBe('Priced per application — full breakdown inside');
+  });
+
+  test('a custom plain-text body that lacks the variable keeps the original payload', async () => {
+    mockTemplate.activeVersion = { blocks: NOTE_BLOCKS, text_body: 'Custom text. {{price_summary}}' };
+    const { payload, out } = await apply();
+    expect(out).toBe(payload);
+  });
+
+  test('a custom plain-text body that also carries the variable gets the average', async () => {
+    mockTemplate.activeVersion = { blocks: NOTE_BLOCKS, text_body: 'Custom text. {{price_summary}} {{estimate_average_note}}' };
+    const { out } = await apply();
+    expect(out.estimate_average_note).toBe('Averaged over the year. You pay after each application.');
+  });
+
+  test('a blank text body and blocks stored as a JSON string still count as supported', async () => {
+    mockTemplate.activeVersion = { blocks: JSON.stringify(NOTE_BLOCKS), text_body: '  ' };
+    const { out } = await apply();
+    expect(out.price_summary).toBe('$94.00 per application · $31.33 a month');
+  });
+
+  test('no active version, a missing template or a loader failure keeps the original payload', async () => {
+    const EmailTemplatesMock = require('../services/email-template-library');
+    const payload = _private.estimateEmailPayload(row(), 'Taylor', 'https://x.test');
+    freshOverride = row();
+    mockTemplate.activeVersion = null;
+    expect(await _private.withMonthlyAverage(payload, row(), KEY)).toBe(payload);
+    EmailTemplatesMock.loadTemplateByKey.mockResolvedValueOnce(null);
+    expect(await _private.withMonthlyAverage(payload, row(), KEY)).toBe(payload);
+    EmailTemplatesMock.loadTemplateByKey.mockRejectedValueOnce(new Error('library down'));
+    expect(await _private.withMonthlyAverage(payload, row(), KEY)).toBe(payload);
+  });
+
+  test('through checkAll: a skipped expiring template sends the original price row', async () => {
+    mockTemplate.activeVersion = { blocks: [NOTE_BLOCKS[0]], text_body: null };
+    const sent = await runStage('expiring', (r) => r);
+    expect(sent.payload.price_summary).toBe('Priced per application — full breakdown inside');
+    expect(sent.payload).not.toHaveProperty('estimate_average_note');
   });
 });

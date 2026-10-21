@@ -338,11 +338,26 @@ function moneySummary(est = {}) {
 // (a paragraph block the templates carry, dropped when blank). Built from a row read
 // now by emailAverageParts, the delivery email's own resolver and eligibility
 // (commercial, quote-required, closed, prepay/monthly-billed, one-time-only all
-// withheld). Returns the payload UNCHANGED (same object) with the gate off or when no
-// average applies, so those emails stay byte-identical.
-async function withMonthlyAverage(payload, est) {
+// withheld). Returns the payload UNCHANGED (same object) with the gate off, when no
+// average applies, or when the template's ACTIVE version cannot show the context
+// sentence, so those emails stay byte-identical. A template the migration skipped
+// (custom plain-text body, price block removed, publish race) would otherwise print
+// the average price row without its note.
+async function templateShowsAverageNote(templateKey) {
+  const loaded = await EmailTemplateLibrary.loadTemplateByKey(templateKey);
+  const version = loaded?.activeVersion;
+  if (!version) return false;
+  const token = "{{estimate_average_note}}";
+  const blocks = typeof version.blocks === "string" ? version.blocks : JSON.stringify(version.blocks || []);
+  if (!blocks.includes(token)) return false;
+  const text = version.text_body;
+  return text == null || !String(text).trim() || String(text).includes(token);
+}
+
+async function withMonthlyAverage(payload, est, templateKey) {
   if (!isEnabled("estimateFollowupMonthlyAverage")) return payload;
   try {
+    if (!(await templateShowsAverageNote(templateKey))) return payload;
     const fresh = (await db("estimates").where({ id: est.id }).first()) || est;
     const parts = await require("./estimate-monthly-average").emailAverageParts(fresh);
     if (!parts) return payload;
@@ -1299,7 +1314,7 @@ const EstimateFollowUp = {
             email: delivery.unviewed.emailEnabled ? {
               templateKey: "estimate.unviewed_followup",
               stage: "unviewed",
-              payload: await withMonthlyAverage(estimateEmailPayload(est, firstName, emailUrl), est),
+              payload: await withMonthlyAverage(estimateEmailPayload(est, firstName, emailUrl), est, "estimate.unviewed_followup"),
             } : null,
           });
           if (ok) {
@@ -1384,7 +1399,7 @@ const EstimateFollowUp = {
             email: delivery.viewed.emailEnabled ? {
               templateKey: "estimate.viewed_followup",
               stage: "viewed",
-              payload: await withMonthlyAverage(estimateEmailPayload(est, firstName, emailUrl), est),
+              payload: await withMonthlyAverage(estimateEmailPayload(est, firstName, emailUrl), est, "estimate.viewed_followup"),
             } : null,
           });
           if (ok) {
@@ -1470,7 +1485,7 @@ const EstimateFollowUp = {
             email: delivery.final.emailEnabled ? {
               templateKey: "estimate.followup_final",
               stage: "final",
-              payload: await withMonthlyAverage(estimateEmailPayload(est, firstName, emailUrl), est),
+              payload: await withMonthlyAverage(estimateEmailPayload(est, firstName, emailUrl), est, "estimate.followup_final"),
             } : null,
           });
           if (ok) {
@@ -1590,7 +1605,7 @@ const EstimateFollowUp = {
               payload: await withMonthlyAverage({
                 ...estimateEmailPayload(est, firstName, emailUrl),
                 expires_at: expDate,
-              }, est),
+              }, est, "estimate.expiring_notice"),
             } : null,
           });
           if (ok) {
