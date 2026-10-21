@@ -23,7 +23,20 @@ const mockRecordResult = jest.fn(async () => true);
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
   messages: { create: (...args) => mockMessagesCreate(...args) },
 })));
-jest.mock('../models/db', () => jest.fn(() => ({ insert: (...args) => mockInsert(...args) })));
+// A small table stand-in: `insert` records the query rows, `where().first()` reads the seeded world (the record snapshots).
+const mockWorld = { sms_templates: [] };
+jest.mock('../models/db', () => jest.fn((table) => {
+  const conds = [];
+  const builder = {
+    insert: (...args) => mockInsert(...args),
+    where(cond) { conds.push(cond); return builder; },
+    async first() {
+      const found = (mockWorld[table] || []).find(row => conds.every(cond => Object.entries(cond).every(([k, v]) => String(row[k]) === String(v))));
+      return found ? { ...found } : undefined;
+    },
+  };
+  return builder;
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/intelligence-bar/circuit-breaker', () => ({
   getBreaker: jest.fn(() => ({
@@ -123,12 +136,17 @@ let loopbackResponder;
 beforeEach(() => {
   jest.clearAllMocks();
   loopbackCalls = [];
-  loopbackResponder = () => ({ status: 200, body: { success: true, template: { api_key: 'sk_live_NOT_FOR_THE_MODEL' } } });
+  mockWorld.sms_templates = [{ id: ID, name: 'Old name', template_key: 'reminder_24h', body: 'Old body', updated_at: '2026-10-10T12:00:00.000Z' }];
+  // The screen's save, simulated: the template row takes the carded fields.
+  loopbackResponder = (call) => {
+    Object.assign(mockWorld.sms_templates[0], JSON.parse(call.body));
+    return { status: 200, body: { success: true, template: { api_key: 'sk_live_NOT_FOR_THE_MODEL' } } };
+  };
   mockCreatePending.mockImplementation(async ({ summary }) => ({ id: PENDING_ID, summary, status: 'pending', expires_at: new Date(Date.now() + 600000).toISOString() }));
   global.fetch = jest.fn(async (url, options) => {
     if (String(url).startsWith(LOOPBACK)) {
       loopbackCalls.push({ url: String(url), method: options.method, body: options.body, headers: { ...options.headers } });
-      const { status, body } = loopbackResponder();
+      const { status, body } = loopbackResponder(loopbackCalls[loopbackCalls.length - 1]);
       return { status, headers: { get: key => ({ 'content-type': 'application/json' }[String(key).toLowerCase()] ?? null) }, text: async () => JSON.stringify(body) };
     }
     return realFetch(url, options);
@@ -170,7 +188,9 @@ describe('the /query proposal', () => {
     // The card: the edit, both fields, what it does not do, and the same-endpoint line.
     const labels = stored.contract.effects.map(effect => effect.label).join('\n');
     expect(labels).toContain('Edit: Text message template: name and wording');
-    expect(labels).toContain('name: (current value not shown) → Reminder 24h');
+    expect(labels).toContain('Record: Text message template "Old name" (reminder_24h)');
+    expect(labels).toContain('name: Old name → Reminder 24h');
+    expect(labels).toContain('body: Old body → Hi {first_name}, see you tomorrow.');
     expect(labels).toMatch(/No text is sent or queued now/);
     expect(stored.contract).toMatchObject({ tool: 'propose_admin_edit', tier: 'yellow', action_label: 'Edit an admin record', notifies_customer: false });
     // The model is told to wait for the operator, and sees the pin-free preview.
@@ -282,6 +302,25 @@ describe('the /confirm-action commit', () => {
     expect([400, 409]).toContain(status);
     expect(JSON.stringify(body)).toMatch(/not allowed|changed after the card/);
     expect(loopbackCalls).toHaveLength(0);
+  });
+
+  test('a value changed on the screen after the card was shown sends nothing', async () => {
+    await storedCard();
+    mockWorld.sms_templates[0].body = 'Edited by someone else';
+    const { status, body } = await confirm();
+    expect(status).toBe(409);
+    expect(body.preview_changed).toBe(true);
+    expect(loopbackCalls).toHaveLength(0);
+  });
+
+  test('a 200 that changed no row is reported as an unknown outcome, never as saved', async () => {
+    await storedCard();
+    loopbackResponder = () => ({ status: 200, body: { success: true } });
+    const { body } = await confirm();
+    expect(body.success).toBe(false);
+    expect(body.outcome).toBe('outcome_unknown');
+    expect(body.result).toMatchObject({ outcome_unknown: true, code: 'edit_not_verified' });
+    expect(loopbackCalls).toHaveLength(1);
   });
 
   test('a stored pin from another card, or none, sends nothing', async () => {

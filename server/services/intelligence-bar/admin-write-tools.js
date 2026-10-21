@@ -50,8 +50,9 @@ const logger = require('../logger');
 const readRules = require('../../utils/admin-read-rules');
 const writeRules = require('../../utils/admin-write-rules');
 const { ADMIN_READ_HEADER, adminReadMarkerValue } = require('../../utils/redact-request-url');
-const { newState, redactString } = require('../../utils/signed-link-redaction');
-const { readCatalogEndpoint, wordsOf, stem, STOPWORDS } = require('./admin-read-tools');
+const { newState, redactString, redactSecrets } = require('../../utils/signed-link-redaction');
+const { wordsOf, stem, STOPWORDS } = require('./admin-read-tools');
+const Snapshots = require('./admin-write-snapshots');
 const catalog = require('./admin-write-catalog.json');
 
 const LOOPBACK_HOST = '127.0.0.1';
@@ -230,34 +231,34 @@ async function bindCustomer(row, input, pathParams) {
     : { refusal: refusal('customer_id is not the customer of that visit.', 'target_relationship_mismatch') };
 }
 
-function pickPath(value, pick) {
-  return String(pick || '').split('.').filter(Boolean).reduce((node, part) => (node && typeof node === 'object' ? node[part] : undefined), value);
-}
-
-// The current values for the card, from the row's reviewed read. A row with no
-// reviewed read shows "not shown"; a read that fails refuses the card (fail
-// closed: an edit is never carded over a value that could not be read).
-async function currentValues(row, pathParams, body, authorization) {
-  if (!row.beforeRead) return { before: null };
-  const readParams = Object.fromEntries(Object.entries(row.beforeRead.params).map(([readName, writeName]) => [readName, pathParams[writeName]]));
-  const answer = await readCatalogEndpoint(row.beforeRead.endpoint, readParams, authorization);
-  const record = answer && !answer.error ? pickPath(answer.data, row.beforeRead.pick) : undefined;
-  if (!record || typeof record !== 'object') {
-    return { refusal: refusal('Could not read the current values for this card just now, so nothing was proposed. Try again in a moment.', 'before_read_failed') };
-  }
-  const before = {};
-  for (const key of Object.keys(body)) before[key] = Object.hasOwn(record, key) ? record[key] : undefined;
-  return { before };
-}
-
 const showValue = (value) => {
-  if (value === undefined) return '(current value not shown)';
-  if (value === null || value === '') return '(empty)';
+  if (value === undefined || value === null || value === '') return '(empty)';
   const text = typeof value === 'string' ? value : JSON.stringify(value);
   return text.length > CARD_VALUE_CHARS ? `${text.slice(0, CARD_VALUE_CHARS)}… [${text.length - CARD_VALUE_CHARS} more characters]` : text;
 };
 
-async function buildPlan(input, actionContext) {
+// The record the card is about: its label, the current value of every carded
+// field, its version and its state, from the snapshot queries
+// (admin-write-snapshots.js). Fail closed: a record that cannot be read, or does
+// not exist, or is in a state the row does not allow, gets no card.
+async function recordSnapshot(row, pathParams, bodyKeys) {
+  let snapshot;
+  try {
+    snapshot = await Snapshots.loadSnapshot(`${row.method} ${row.endpoint}`, pathParams, bodyKeys);
+  } catch {
+    return { refusal: refusal('Could not read that record just now, so nothing was proposed. Try again in a moment.', 'record_lookup_failed') };
+  }
+  if (snapshot?.unsupported) return { refusal: refusal('That edit has no record snapshot, so it cannot be carded.', 'edit_not_on_list', { hint: 'find_admin_edits' }) };
+  if (!snapshot) return { refusal: refusal('That record was not found.', 'record_unavailable') };
+  for (const [field, wanted] of Object.entries(row.requireState || {})) {
+    if (snapshot.state[field] !== wanted) {
+      return { refusal: refusal(`This edit is only allowed while the record's ${field} is "${wanted}" (it is "${snapshot.state[field]}"). Nothing was proposed.`, 'record_state_not_allowed') };
+    }
+  }
+  return { snapshot };
+}
+
+async function buildPlan(input) {
   const found = rowFor(input);
   if (found.refusal) return found;
   const { row } = found;
@@ -265,22 +266,30 @@ async function buildPlan(input, actionContext) {
   if (built.refusal) return built;
   const checked = writeRules.validateBody(row, input.body);
   if (checked.error) return { refusal: refusal(checked.error, 'invalid_input', checked.allowed ? { allowed_fields: checked.allowed } : {}) };
+  const key = `${row.method} ${row.endpoint}`;
+  let body;
+  try {
+    body = Snapshots.normalizeBody(key, checked.body);
+  } catch {
+    return { refusal: refusal('That body could not be read as the screen would read it. Nothing was proposed.', 'invalid_input') };
+  }
   const pathParams = Object.fromEntries(readRules.patternParams(row.endpoint).map(name => [name, String(input.params[name])]));
   const bound = await bindCustomer(row, input, pathParams);
   if (bound.refusal) return bound;
-  const current = await currentValues(row, pathParams, checked.body, actionContext.staffAuthorization);
-  if (current.refusal) return current;
-  const addressFields = Object.keys(checked.body).filter(writeRules.bodyKeyLooksLikeAddress);
-  const changes = Object.keys(checked.body).sort().map(field => ({
-    field,
-    before: current.before ? current.before[field] ?? null : null,
-    before_known: Boolean(current.before) && current.before[field] !== undefined,
-    after: checked.body[field],
-  }));
-  const version = digestOf({ m: row.method, e: row.endpoint, p: pathParams, b: checked.body, c: bound.customerId, d: row.digest, x: changes.map(c => (c.before_known ? c.before : '\u0000')) });
+  const record = await recordSnapshot(row, pathParams, Object.keys(body));
+  if (record.refusal) return record;
+  const { snapshot } = record;
+  const addressFields = Object.keys(body).filter(writeRules.bodyKeyLooksLikeAddress);
+  // The card shows the current text with credentials scrubbed (the model sees it too); the pin covers the raw value.
+  const shown = redactSecrets(snapshot.current, newState());
+  const changes = Object.keys(body).sort().map(field => ({ field, before: shown[field], after: body[field] }));
+  const version = digestOf({
+    m: row.method, e: row.endpoint, p: pathParams, b: body, c: bound.customerId, d: row.digest,
+    l: snapshot.label, cur: snapshot.current, v: snapshot.version,
+  });
   return {
-    row, path: built.path, paramIndexes: built.paramIndexes, body: checked.body, pathParams, customerId: bound.customerId,
-    changes, addressFields, version,
+    row, path: built.path, paramIndexes: built.paramIndexes, body, pathParams, customerId: bound.customerId,
+    changes, addressFields, version, label: snapshot.label, recordVersion: snapshot.version,
   };
 }
 
@@ -293,6 +302,7 @@ function previewOf(plan) {
     method: row.method,
     endpoint: row.endpoint,
     record: plan.pathParams,
+    record_label: plan.label,
     ...(plan.customerId ? { customer_id: plan.customerId } : {}),
     changes: plan.changes,
     address_change: plan.addressFields.length > 0,
@@ -319,9 +329,10 @@ function cardLines(preview) {
     lines.push({ kind: 'customer', text: `ADDRESS CHANGE: this edit changes address text (${(preview.address_fields || []).map(humanField).join(', ')}). Check every character before you confirm.` });
   }
   lines.push({ kind: 'operational', text: `Edit: ${preview.edit}` });
+  lines.push({ kind: 'operational', text: `Record: ${preview.record_label}` });
   for (const change of preview.changes || []) {
     const after = fullText(change.after);
-    lines.push({ kind: 'operational', text: `${humanField(change.field)}: ${change.before_known ? showValue(change.before) : '(current value not shown)'} → ${showValue(change.after)}` });
+    lines.push({ kind: 'operational', text: `${humanField(change.field)}: ${showValue(change.before)} → ${showValue(change.after)}` });
     if (after.length > CARD_VALUE_CHARS) lines.push({ kind: 'operational', text: `Full new ${humanField(change.field)}: ${after}`, more: true });
   }
   lines.push({ kind: 'operational', text: preview.does_not });
@@ -332,10 +343,10 @@ function cardLines(preview) {
 // The card's parameter rows (route PINNED_DISPLAY_BUILDERS).
 function displayParams(preview) {
   if (!preview || preview.preview !== true) return null;
-  const shown = { edit: preview.edit, record: Object.values(preview.record || {}).join(' / ') };
+  const shown = { edit: preview.edit, record: preview.record_label };
   if (preview.address_change) shown.address_change = `YES: ${(preview.address_fields || []).join(', ')}`;
   for (const change of preview.changes || []) {
-    shown[change.field] = `${change.before_known ? showValue(change.before) : '(current value not shown)'} → ${showValue(change.after)}`;
+    shown[change.field] = `${showValue(change.before)} → ${showValue(change.after)}`;
   }
   return shown;
 }
@@ -355,6 +366,24 @@ function errorText(parsed, status, authorization) {
 }
 
 const interrupted = () => ({ outcome_unknown: true, code: 'execution_interrupted', error: 'The edit was sent but its outcome could not be established. Check the record before taking further action.' });
+
+// Reads the record after the save. null when every carded field now holds its new value; otherwise
+// an unknown outcome (the save may or may not have happened) that names the fields.
+async function verifySaved(plan) {
+  const unverified = (fields) => ({
+    outcome_unknown: true, code: 'edit_not_verified',
+    error: `The screen answered that it saved, but the record was read again and ${fields} did not hold the new value. Check the record before taking further action.`,
+  });
+  let after;
+  try {
+    after = await Snapshots.loadSnapshot(`${plan.row.method} ${plan.row.endpoint}`, plan.pathParams, Object.keys(plan.body));
+  } catch {
+    return unverified('could not be read, so the fields');
+  }
+  if (!after || after.unsupported) return unverified('the record was not found, so the fields');
+  const wrong = Object.keys(plan.body).filter(field => !Snapshots.sameValue(plan.body[field], after.current[field]));
+  return wrong.length ? unverified(wrong.join(', ')) : null;
+}
 
 async function replay(plan, authorization) {
   const origin = loopbackOrigin();
@@ -382,11 +411,15 @@ async function replay(plan, authorization) {
   try { parsed = JSON.parse(await response.text()); } catch { parsed = undefined; }
   if (status >= 200 && status < 300) {
     if (parsed === undefined) return interrupted();
+    // A 200 is not proof (a handler can answer 200 for zero rows): read the record again and require the new values.
+    const verified = await verifySaved(plan);
+    if (verified) return verified;
     logger.info(`[admin-edit] ${row.method} ${row.endpoint} saved (fields: ${Object.keys(plan.body).sort().join(', ')})`);
     return {
       success: true, status, edited: row.label, method: row.method, endpoint: row.endpoint,
       record: plan.pathParams, fields_changed: Object.keys(plan.body).sort(),
-      note: 'Saved exactly as the card showed, through the screen\'s own endpoint. Nothing was sent to a customer.',
+      record_label: plan.label,
+      note: 'Saved exactly as the card showed, through the screen\'s own endpoint, and read back to confirm. Nothing was sent to a customer.',
     };
   }
   if (status >= 400 && status < 500 && status !== 408 && status !== 429) {
@@ -405,7 +438,7 @@ async function proposeAdminEdit(input, actionContext) {
   if (typeof authorization !== 'string' || !BEARER_RE.test(authorization)) {
     return refusal('This edit needs the logged-in owner session, which is missing', 'permission_denied');
   }
-  const built = await buildPlan(input || {}, actionContext);
+  const built = await buildPlan(input || {});
   if (built.refusal) return built.refusal;
   if (input.confirmed !== true) return previewOf(built);
   // The approved pin comes from the card's own preview (the route stores it on

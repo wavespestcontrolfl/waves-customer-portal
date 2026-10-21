@@ -106,7 +106,7 @@ afterAll(() => {
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'invoice-action-effects.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'billing-mode-change.js', 'tier-upgrade-email.js', 'name-match.js', 'booking-service-match.js', 'tool-search.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'invoice-action-effects.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'billing-mode-change.js', 'tier-upgrade-email.js', 'name-match.js', 'booking-service-match.js', 'tool-search.js', 'admin-write-snapshots.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -748,6 +748,8 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     // covered by ib-admin-write-tools.test.js. It runs for the owner login with a bearer on the context.
     ['admin-write-tools', 'executeAdminWriteTool', 'propose_admin_edit', {
       method: 'PUT', endpoint: '/admin/sms-templates/:id', params: { id: '00000000-0000-0000-0000-00000000f201' }, body: { name: 'Synthetic template name' },
+    }, {
+      sms_templates: [{ id: '00000000-0000-0000-0000-00000000f201', name: 'Synthetic old name', template_key: 'synthetic_key', body: 'Synthetic body', updated_at: '2026-10-10T12:00:00Z' }],
     }],
     // Outside-service writes (IB scope expansion item 1) build their preview
     // from a live third-party API call, never the DB — OUTSIDE_WRITE_FIXTURES

@@ -7,6 +7,9 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+// The screen's canonical block shape, as EmailTemplates.normalizeBlocks gives it (every block has a type and text).
+const mockNormalizeBlocks = jest.fn(blocks => (blocks || []).map(block => ({ type: String(block?.type || 'paragraph').trim(), content: String(block?.content || '') })));
+jest.mock('../services/email-template-library', () => ({ normalizeBlocks: (...args) => mockNormalizeBlocks(...args) }));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
@@ -37,7 +40,7 @@ const FIXTURES = {
   'PUT /admin/automations/steps/:id': { params: { id: ID }, body: { subject: 'Welcome', previewText: 'Hello', htmlBody: '<p>Hello</p>', textBody: 'Hello' } },
   'PUT /admin/timetracking/entries/:id': { params: { id: ID }, body: { clock_in: '2026-10-12T08:00:00-04:00', clock_out: '2026-10-12T16:30:00-04:00', entry_type: 'shift', notes: 'Forgot to clock out', edit_reason: 'Corrected after the tech called in' } },
   'PUT /admin/customers/:id/notification-prefs': { params: { id: CUSTOMER }, customer_id: CUSTOMER, body: { appointmentNotifyPrimary: false, serviceReportNotifyBilling: true } },
-  'PATCH /admin/dispatch/:serviceId/note': { params: { serviceId: ID }, customer_id: CUSTOMER, body: { notes: 'Gate code is on the lockbox' }, visitCustomer: CUSTOMER },
+  'PATCH /admin/dispatch/:serviceId/note': { params: { serviceId: ID }, customer_id: CUSTOMER, body: { notes: 'Gate code is on the lockbox' } },
   'PUT /admin/inventory/service-usage/:id': { params: { id: ID }, body: { notes: 'Use the backpack sprayer' } },
 };
 const keyOf = entry => `${entry.method} ${entry.endpoint}`;
@@ -45,6 +48,84 @@ const ENTRY = catalog.entries.find(entry => keyOf(entry) === 'PUT /admin/sms-tem
 const CUSTOMER_ENTRY = catalog.entries.find(entry => entry.scope === 'customer');
 const VISIT_ENTRY = catalog.entries.find(entry => entry.scope === 'visit');
 const ownerContext = (extra = {}) => ({ fullAccess: true, isAdmin: true, staffAuthorization: AUTH, ...extra });
+
+const T1 = '50000000-0000-4000-8000-0000000000e1';
+const TECH = '60000000-0000-4000-8000-0000000000f1';
+const PRODUCT = '70000000-0000-4000-8000-0000000000a1';
+const STAMP = '2026-10-10T12:00:00.000Z';
+const seedWorld = () => ({
+  sms_templates: [{ id: ID, name: 'Old name', template_key: 'reminder_24h', body: 'Old body', updated_at: STAMP }],
+  email_templates: [{ id: T1, template_key: 'estimate.expiring_notice', name: 'Estimate expiring', description: 'Old description', updated_at: STAMP }],
+  email_template_versions: [{ id: ID, template_id: T1, status: 'draft', version_number: 2, subject: 'Old subject', preview_text: 'Old preview', text_body: 'Old text', blocks: [{ type: 'paragraph', content: 'Old' }], updated_at: STAMP }],
+  email_template_fixtures: [{ id: ID, template_id: T1, name: 'Old fixture', payload: { first_name: 'Old' }, updated_at: STAMP }],
+  automation_steps: [{ id: ID, template_key: 'welcome_series', step_order: 1, subject: 'Old', preview_text: 'Old', html_body: '<p>Old</p>', text_body: 'Old', updated_at: STAMP }],
+  time_entries: [{ id: ID, technician_id: TECH, clock_in: '2026-10-12T12:00:00.000Z', clock_out: '2026-10-12T20:00:00.000Z', entry_type: 'job', notes: 'Old note', edit_reason: null, status: 'completed', approval_status: 'pending', updated_at: STAMP }],
+  technicians: [{ id: TECH, name: 'Adam Tech' }],
+  customers: [{ id: CUSTOMER, first_name: 'Pat', last_name: 'Tester' }],
+  notification_prefs: [{ customer_id: CUSTOMER, auto_flip_en_route: true, payment_confirmation_sms: true, appointment_notify_primary: true, service_report_notify_primary: true, service_report_notify_billing: false, updated_at: STAMP }],
+  scheduled_services: [{ id: ID, customer_id: CUSTOMER, scheduled_date: '2026-10-14', service_type: 'Pest Control', notes: 'Old visit note', updated_at: STAMP }],
+  service_product_usage: [{ id: ID, product_id: PRODUCT, service_type: 'General Pest Control', notes: 'Old use note', updated_at: STAMP }],
+  products_catalog: [{ id: PRODUCT, name: 'Talstar P' }],
+});
+// What the screen's save does to the world, per catalog row: [table, which row, body key -> column].
+const SAVES = {
+  'PUT /admin/sms-templates/:id': ['sms_templates', p => ({ id: p.id }), { body: 'body', name: 'name' }],
+  'PUT /admin/email-templates/:key': ['email_templates', p => ({ template_key: p.key }), { name: 'name', description: 'description' }],
+  'PUT /admin/email-templates/versions/:id': ['email_template_versions', p => ({ id: p.id }), { subject: 'subject', previewText: 'preview_text', textBody: 'text_body', blocks: 'blocks' }],
+  'PUT /admin/email-templates/fixtures/:id': ['email_template_fixtures', p => ({ id: p.id }), { name: 'name', payload: 'payload' }],
+  'PUT /admin/automations/steps/:id': ['automation_steps', p => ({ id: p.id }), { subject: 'subject', previewText: 'preview_text', htmlBody: 'html_body', textBody: 'text_body' }],
+  'PUT /admin/timetracking/entries/:id': ['time_entries', p => ({ id: p.id }), { clock_in: 'clock_in', clock_out: 'clock_out', entry_type: 'entry_type', notes: 'notes', edit_reason: 'edit_reason' }],
+  'PUT /admin/customers/:id/notification-prefs': ['notification_prefs', p => ({ customer_id: p.id }), {
+    autoFlipEnRoute: 'auto_flip_en_route', paymentConfirmationSms: 'payment_confirmation_sms', appointmentNotifyPrimary: 'appointment_notify_primary',
+    serviceReportNotifyPrimary: 'service_report_notify_primary', serviceReportNotifyBilling: 'service_report_notify_billing',
+  }],
+  'PATCH /admin/dispatch/:serviceId/note': ['scheduled_services', p => ({ id: p.serviceId }), { notes: 'notes' }],
+  'PUT /admin/inventory/service-usage/:id': ['service_product_usage', p => ({ id: p.id }), { notes: 'notes' }],
+};
+const LABELS = {
+  'PUT /admin/sms-templates/:id': 'Text message template "Old name" (reminder_24h)',
+  'PUT /admin/email-templates/:key': 'Email template "Estimate expiring" (estimate.expiring_notice)',
+  'PUT /admin/email-templates/versions/:id': 'Email template "Estimate expiring" (estimate.expiring_notice), version 2 (draft), subject "Old subject"',
+  'PUT /admin/email-templates/fixtures/:id': 'Preview data "Old fixture" for email template "Estimate expiring" (estimate.expiring_notice)',
+  'PUT /admin/automations/steps/:id': 'Email automation "welcome_series", step 1, subject "Old"',
+  'PUT /admin/timetracking/entries/:id': 'Adam Tech: job entry on Mon, Oct 12, 2026, Oct 12, 8:00 AM to Oct 12, 4:00 PM ET (completed, pending)',
+  'PUT /admin/customers/:id/notification-prefs': 'Pat Tester: text and report preferences',
+  'PATCH /admin/dispatch/:serviceId/note': 'Pat Tester: Pest Control on 2026-10-14',
+  'PUT /admin/inventory/service-usage/:id': 'Product use: Talstar P for General Pest Control',
+};
+let world;
+function makeDb() {
+  return (table) => {
+    const conds = [];
+    const builder = {
+      where(cond) { conds.push(cond); return builder; },
+      async first() {
+        const found = (world[table] || []).find(row => conds.every(cond => Object.entries(cond).every(([k, v]) => String(row[k]) === String(v))));
+        return found ? { ...found } : undefined;
+      },
+    };
+    return builder;
+  };
+}
+// The screen's save, simulated: applies a 2xx PUT or PATCH to the world the way the handler would.
+function applySave(url, options) {
+  const pathname = new URL(url).pathname;
+  for (const [key, fixture] of Object.entries(FIXTURES)) {
+    const entry = catalog.entries.find(e => keyOf(e) === key);
+    const filled = entry.endpoint.replace(/:([A-Za-z0-9_]+)/g, (_m, name) => encodeURIComponent(fixture.params[name]));
+    if (options.method !== entry.method || pathname !== `/api${filled}`) continue;
+    const [table, where, columns] = SAVES[key];
+    const cond = where(fixture.params);
+    const row = world[table].find(r => Object.entries(cond).every(([k, v]) => String(r[k]) === String(v)));
+    for (const [field, value] of Object.entries(JSON.parse(options.body))) row[columns[field]] = value;
+    row.updated_at = '2026-10-20T12:00:00.000Z';
+  }
+}
+const savingFetch = (response = () => jsonResponse(200, { success: true }), { save = true } = {}) => jest.fn(async (url, options) => {
+  const answer = response(url, options);
+  if (save && answer.status >= 200 && answer.status < 300) applySave(url, options);
+  return answer;
+});
 
 function jsonResponse(status, body, headers = { 'content-type': 'application/json; charset=utf-8' }) {
   return {
@@ -55,16 +136,15 @@ function jsonResponse(status, body, headers = { 'content-type': 'application/jso
 
 let gateBefore;
 let platformBefore;
-let visitRow;
 beforeEach(() => {
   gateBefore = process.env.GATE_IB_GENERAL_EDIT;
   platformBefore = process.env.GATE_IB_PLATFORM;
   process.env.GATE_IB_GENERAL_EDIT = 'true';
   process.env.GATE_IB_PLATFORM = 'true'; // the general edit needs the platform gate
   jest.clearAllMocks();
-  global.fetch = jest.fn(async () => jsonResponse(200, { success: true }));
-  visitRow = { customer_id: CUSTOMER };
-  db.mockImplementation(() => ({ where: () => ({ first: async () => visitRow }) }));
+  world = seedWorld();
+  global.fetch = savingFetch();
+  db.mockImplementation(makeDb());
 });
 afterEach(() => {
   if (gateBefore === undefined) delete process.env.GATE_IB_GENERAL_EDIT;
@@ -89,13 +169,18 @@ describe('the fixtures', () => {
   test.each(Object.keys(FIXTURES))('%s: the preview changes nothing, and the confirm replays exactly the carded body', async (key) => {
     const entry = catalog.entries.find(e => keyOf(e) === key);
     const fixture = FIXTURES[key];
-    if (fixture.visitCustomer) visitRow = { customer_id: fixture.visitCustomer };
     const preview = await propose(inputFor(entry));
     expect(preview).toMatchObject({ preview: true, tool: PROPOSE, method: entry.method, endpoint: entry.endpoint, address_change: false });
     expect(preview.error).toBeUndefined();
     expect(callsOf()).toHaveLength(0);
     expect(preview.changes.map(change => change.field).sort()).toEqual(Object.keys(fixture.body).sort());
     expect(cardLines(preview).length).toBeGreaterThan(2);
+    // The card names the record in words, shows the current value of every field, and never just a UUID.
+    expect(preview.record_label).toBe(LABELS[key]);
+    expect(preview.record_label).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-/);
+    expect(cardLines(preview).map(line => line.text)).toContain(`Record: ${LABELS[key]}`);
+    expect(displayParams(preview).record).toBe(LABELS[key]);
+    for (const change of preview.changes) expect(change.before).not.toBeUndefined();
     const confirmed = await propose({ ...inputFor(entry), confirmed: true, _approved_edit_pin: preview._version });
     expect(confirmed).toMatchObject({ success: true, method: entry.method, endpoint: entry.endpoint });
     expect(callsOf()).toHaveLength(1);
@@ -286,10 +371,14 @@ describe('the body allow-list', () => {
     }
     const timesheet = catalog.entries.find(e => e.endpoint === '/admin/timetracking/entries/:id');
     const base = FIXTURES[keyOf(timesheet)].body;
-    for (const change of [{ clock_in: '2026-10-12 08:00' }, { clock_in: '2026-13-45T08:00:00Z' }, { clock_out: 'yesterday' }, { entry_type: 'overtime' }, { pay_rate: 99 }, { approval_status: 'approved' }]) {
+    for (const change of [{ clock_in: '2026-10-12 08:00' }, { clock_in: '2026-13-45T08:00:00Z' }, { clock_in: '2026-02-30T08:00:00-04:00' }, { clock_in: '2026-02-29T08:00:00-05:00' }, { clock_in: '2026-04-31T08:00:00Z' }, { clock_out: '2026-10-12T24:00:00Z' }, { clock_out: '2026-10-12T25:00:00Z' }, { clock_out: '2026-10-12T08:60:00Z' }, { clock_out: '2026-10-12T08:00:60Z' }, { clock_out: '2026-10-12T08:00:00+25:00' }, { clock_out: '2026-10-12T08:00:00+05:75' }, { clock_out: 'yesterday' }, { entry_type: 'overtime' }, { pay_rate: 99 }, { approval_status: 'approved' }]) {
       expect(await propose({ ...inputFor(timesheet), body: { ...base, ...change } })).toMatchObject({ code: 'invalid_input' });
     }
     expect(callsOf()).toHaveLength(0);
+    // Real calendar moments pass, leap day and end-of-month included.
+    for (const clock_in of ['2024-02-29T08:00:00-05:00', '2026-04-30T23:59:59Z', '2026-12-31T23:59:00.500+05:30']) {
+      expect(await propose({ ...inputFor(timesheet), body: { ...base, clock_in } })).toMatchObject({ preview: true });
+    }
   });
 
   test('nothing money, message or status related is on any row', () => {
@@ -370,6 +459,7 @@ describe('the blocked routes', () => {
     expect(await outcome).toMatchObject({ code: 'invalid_input', error: expect.stringMatching(/outside the reviewed admin edit list/) });
     expect(callsOf()).toHaveLength(0);
     // The same value on a catalog with no such route is an ordinary template key.
+    world.email_templates[0].template_key = 'locked-list';
     expect(await propose({ ...inputFor(template), params: { key: 'locked-list' } })).toMatchObject({ preview: true });
   });
 });
@@ -386,11 +476,11 @@ describe('the customer binding', () => {
   test('a visit scoped edit binds the visit to its real customer: a made-up customer_id is refused', async () => {
     const input = inputFor(VISIT_ENTRY);
     expect(await propose({ ...input, customer_id: undefined })).toMatchObject({ code: 'customer_scope_required' });
-    visitRow = { customer_id: OTHER_CUSTOMER };
+    world.scheduled_services[0].customer_id = OTHER_CUSTOMER;
     expect(await propose(input)).toMatchObject({ code: 'target_relationship_mismatch' });
-    visitRow = undefined;
+    world.scheduled_services = [];
     expect(await propose(input)).toMatchObject({ code: 'record_unavailable' });
-    visitRow = { customer_id: CUSTOMER };
+    world = seedWorld();
     expect(await propose(input)).toMatchObject({ preview: true, customer_id: CUSTOMER });
     db.mockImplementation(() => { throw new Error('connection refused'); });
     expect(await propose(input)).toMatchObject({ code: 'record_lookup_failed' });
@@ -425,7 +515,6 @@ describe('the confirm replays exactly the carded plan', () => {
   test('the preview is stable (same input, same pin) and the pin binds the customer', async () => {
     const input = inputFor(CUSTOMER_ENTRY);
     expect((await propose(input))._version).toBe((await propose(input))._version);
-    visitRow = { customer_id: CUSTOMER };
     expect((await propose(inputFor(VISIT_ENTRY)))._version).toMatch(/^[0-9a-f]{32}$/);
   });
 
@@ -433,20 +522,19 @@ describe('the confirm replays exactly the carded plan', () => {
     const input = inputFor(ENTRY);
     const preview = await propose(input);
     // The same endpoint, regenerated after a handler change: the chain hash, and so the digest, differ.
+    let outcome;
     jest.isolateModules(() => {
       jest.doMock('../services/intelligence-bar/admin-write-catalog.json', () => ({
         ...catalog,
         entries: catalog.entries.map(entry => (keyOf(entry) === keyOf(ENTRY) ? { ...entry, chain: '0'.repeat(32), digest: '1'.repeat(32) } : entry)),
       }));
-      const changed = require('../services/intelligence-bar/admin-write-tools');
-      return changed.executeAdminWriteTool(PROPOSE, { ...input, confirmed: true, _approved_edit_pin: preview._version }, ownerContext())
-        .then((result) => {
-          expect(result).toMatchObject({ code: 'preview_changed', preview_changed: true });
-          expect(callsOf()).toHaveLength(0);
-        });
+      require('../models/db').mockImplementation(makeDb()); // the isolated copy of the database stand-in
+      outcome = require('../services/intelligence-bar/admin-write-tools')
+        .executeAdminWriteTool(PROPOSE, { ...input, confirmed: true, _approved_edit_pin: preview._version }, ownerContext());
     });
-    await new Promise(resolve => setImmediate(resolve));
     jest.dontMock('../services/intelligence-bar/admin-write-catalog.json');
+    expect(await outcome).toMatchObject({ code: 'preview_changed', preview_changed: true });
+    expect(callsOf()).toHaveLength(0);
   });
 
   test('a row dropped from the catalog after the card was shown is refused at confirm', async () => {
@@ -466,7 +554,7 @@ describe('the confirm replays exactly the carded plan', () => {
   test('the result is a receipt: the edit endpoint\'s response body (and any secret in it) is never returned', async () => {
     const input = inputFor(ENTRY);
     const preview = await propose(input);
-    global.fetch = jest.fn(async () => jsonResponse(200, { success: true, template: { body: 'echo', api_key: 'sk_live_SECRET_VALUE', gate_code: '4821' } }));
+    global.fetch = savingFetch(() => jsonResponse(200, { success: true, template: { body: 'echo', api_key: 'sk_live_SECRET_VALUE', gate_code: '4821' } }));
     const result = await propose({ ...input, confirmed: true, _approved_edit_pin: preview._version });
     expect(result).toMatchObject({ success: true, fields_changed: ['body', 'name'], record: { id: ID } });
     const text = JSON.stringify(result);
@@ -480,7 +568,7 @@ describe('the confirm replays exactly the carded plan', () => {
   async function confirmedWith(response) {
     const input = inputFor(ENTRY);
     const preview = await propose(input);
-    global.fetch = jest.fn(typeof response === 'function' ? response : async () => response);
+    global.fetch = savingFetch(typeof response === 'function' ? response : () => response);
     return propose({ ...input, confirmed: true, _approved_edit_pin: preview._version });
   }
 
@@ -512,7 +600,7 @@ describe('the confirm replays exactly the carded plan', () => {
   });
 });
 
-describe('address text and the current values', () => {
+describe('address text and long values (a stand-in catalog and snapshot)', () => {
   const fixtureCatalog = (extra = {}) => ({
     ...catalog,
     entries: [{
@@ -522,40 +610,43 @@ describe('address text and the current values', () => {
     }],
     blockedRoutes: [],
   });
+  const snapshotOf = (current = {}, extra = {}) => ({ label: 'Test record for Pat Tester', current, state: {}, version: STAMP, ...extra });
 
-  function withCatalog(fixture, readImpl, run) {
+  function withCatalog(fixture, snapshot, run) {
     let result;
     jest.isolateModules(() => {
       jest.doMock('../services/intelligence-bar/admin-write-catalog.json', () => fixture);
-      jest.doMock('../services/intelligence-bar/admin-read-tools', () => ({
-        ...jest.requireActual('../services/intelligence-bar/admin-read-tools'), readCatalogEndpoint: readImpl,
+      jest.doMock('../services/intelligence-bar/admin-write-snapshots', () => ({
+        ...jest.requireActual('../services/intelligence-bar/admin-write-snapshots'),
+        loadSnapshot: async () => snapshot, normalizeBody: (key, body) => body, hasSnapshot: () => true,
       }));
       result = run(require('../services/intelligence-bar/admin-write-tools'));
     });
     jest.dontMock('../services/intelligence-bar/admin-write-catalog.json');
-    jest.dontMock('../services/intelligence-bar/admin-read-tools');
+    jest.dontMock('../services/intelligence-bar/admin-write-snapshots');
     return result;
   }
   const baseInput = { method: 'PUT', endpoint: '/admin/test/record/:id', params: { id: ID } };
+  const proposeOn = (body, snapshot = snapshotOf({ notes: 'old', address_line1: '2 Oak Ave', city: 'Parrish' })) => withCatalog(fixtureCatalog(), snapshot,
+    tools => tools.executeAdminWriteTool(PROPOSE, { ...baseInput, body }, ownerContext()));
 
   test('a field that looks like address text always shows an ADDRESS CHANGE card line', async () => {
-    const preview = await withCatalog(fixtureCatalog(), async () => ({}), tools => tools.executeAdminWriteTool(PROPOSE, { ...baseInput, body: { address_line1: '1 Main St', city: 'Venice' } }, ownerContext()));
+    const preview = await proposeOn({ address_line1: '1 Main St', city: 'Venice' });
     expect(preview).toMatchObject({ preview: true, address_change: true, address_fields: ['address_line1', 'city'] });
-    const lines = withCatalog(fixtureCatalog(), async () => ({}), tools => tools.cardLines(preview));
-    expect(lines[0]).toMatchObject({ kind: 'customer', text: expect.stringMatching(/^ADDRESS CHANGE:/) });
-    const shown = withCatalog(fixtureCatalog(), async () => ({}), tools => tools.displayParams(preview));
-    expect(shown.address_change).toMatch(/^YES/);
-    // A body with no address-looking field has no such line.
-    const plain = await withCatalog(fixtureCatalog(), async () => ({}), tools => tools.executeAdminWriteTool(PROPOSE, { ...baseInput, body: { notes: 'hello' } }, ownerContext()));
+    expect(cardLines(preview)[0]).toMatchObject({ kind: 'customer', text: expect.stringMatching(/^ADDRESS CHANGE:/) });
+    expect(displayParams(preview).address_change).toMatch(/^YES/);
+    expect(cardLines(preview).map(line => line.text)).toContain('address line1: 2 Oak Ave → 1 Main St');
+    const plain = await proposeOn({ notes: 'hello' });
     expect(plain.address_change).toBe(false);
     expect(cardLines(plain).some(line => /ADDRESS CHANGE/.test(line.text))).toBe(false);
   });
 
-  test('the card and the contract carry the address wording and the full new value', async () => {
-    const preview = await withCatalog(fixtureCatalog(), async () => ({}), tools => tools.executeAdminWriteTool(PROPOSE, { ...baseInput, body: { address_line1: '1 Main St' } }, ownerContext()));
-    const display = displayParams(preview);
-    const contract = Contract.buildContract({ toolName: PROPOSE, params: { ...baseInput, body: { address_line1: '1 Main St' } }, displayParams: display, preview, summary: 'x' });
-    expect(contract.effects.map(effect => effect.label).join('\n')).toMatch(/ADDRESS CHANGE/);
+  test('the card and the contract carry the address wording and the record label', async () => {
+    const preview = await proposeOn({ address_line1: '1 Main St' });
+    const contract = Contract.buildContract({ toolName: PROPOSE, params: { ...baseInput, body: { address_line1: '1 Main St' } }, displayParams: displayParams(preview), preview, summary: 'x' });
+    const labels = contract.effects.map(effect => effect.label).join('\n');
+    expect(labels).toMatch(/ADDRESS CHANGE/);
+    expect(labels).toContain('Record: Test record for Pat Tester');
     expect(contract.action_label).toBe('Edit an admin record');
     expect(contract.irreversible).toBe(false);
     expect(contract.notifies_customer).toBe(false);
@@ -563,39 +654,195 @@ describe('address text and the current values', () => {
 
   test('a long new value shows its first characters on the card and the whole text under Show more', async () => {
     const long = `${'a'.repeat(310)}END`;
-    const preview = await withCatalog(fixtureCatalog(), async () => ({}), tools => tools.executeAdminWriteTool(PROPOSE, { ...baseInput, body: { notes: long } }, ownerContext()));
+    const preview = await proposeOn({ notes: long });
     const lines = cardLines(preview);
     expect(lines.find(line => /^notes:/.test(line.text)).text).toMatch(/more characters\]$/);
     expect(lines.find(line => line.more).text).toContain(long);
     const contract = Contract.buildContract({ toolName: PROPOSE, params: baseInput, displayParams: displayParams(preview), preview, summary: 'x' });
     expect(JSON.stringify(contract.more_effects)).toContain('END');
-    // The contract hash covers the complete preview, so two long notes with the same first 300 characters differ.
-    const other = await withCatalog(fixtureCatalog(), async () => ({}), tools => tools.executeAdminWriteTool(PROPOSE, { ...baseInput, body: { notes: `${'a'.repeat(310)}DIFFERENT` } }, ownerContext()));
+    const other = await proposeOn({ notes: `${'a'.repeat(310)}DIFFERENT` });
     expect(Contract.previewFingerprint(other)).not.toBe(Contract.previewFingerprint(preview));
   });
 
-  test('a row with a reviewed read shows the current value; a failed read refuses the card; a changed value is a new card', async () => {
-    const withRead = fixtureCatalog({ beforeRead: { endpoint: '/admin/pricing-config/discount-rules', params: { id: 'id' }, pick: 'record' } });
-    const reads = [];
-    const read = async (endpoint, params, authorization) => { reads.push({ endpoint, params, authorization }); return { status: 200, data: { record: { notes: 'old note' } } }; };
-    const first = await withCatalog(withRead, read, tools => tools.executeAdminWriteTool(PROPOSE, { ...baseInput, body: { notes: 'new note' } }, ownerContext()));
-    expect(first.changes).toEqual([{ field: 'notes', before: 'old note', before_known: true, after: 'new note' }]);
-    expect(reads).toEqual([{ endpoint: '/admin/pricing-config/discount-rules', params: { id: ID }, authorization: AUTH }]);
-    expect(cardLines(first).some(line => line.text === 'notes: old note → new note')).toBe(true);
-    // The value changed on the screen before Confirm: a different pin.
-    const changed = await withCatalog(withRead, async () => ({ status: 200, data: { record: { notes: 'someone edited this' } } }), tools => tools.executeAdminWriteTool(PROPOSE, { ...baseInput, body: { notes: 'new note' } }, ownerContext()));
-    expect(changed._version).not.toBe(first._version);
-    expect(await withCatalog(withRead, async () => ({ error: 'nope', code: 'read_timeout' }), tools => tools.executeAdminWriteTool(PROPOSE, { ...baseInput, body: { notes: 'new note' } }, ownerContext())))
-      .toMatchObject({ code: 'before_read_failed' });
-    expect(await withCatalog(withRead, async () => ({ status: 200, data: { other: 1 } }), tools => tools.executeAdminWriteTool(PROPOSE, { ...baseInput, body: { notes: 'new note' } }, ownerContext())))
-      .toMatchObject({ code: 'before_read_failed' });
+  test('a record the snapshot cannot find, or reads wrongly, gets no card', async () => {
+    expect(await proposeOn({ notes: 'x' }, null)).toMatchObject({ code: 'record_unavailable' });
+    expect(await proposeOn({ notes: 'x' }, { unsupported: true })).toMatchObject({ code: 'edit_not_on_list' });
+  });
+});
+
+describe('the record snapshot: label, current values, version', () => {
+  test('every catalog row has a snapshot, and the snapshot keys are exactly the catalog rows', () => {
+    const Snapshots = require('../services/intelligence-bar/admin-write-snapshots');
+    expect([...Snapshots.SNAPSHOT_KEYS].sort()).toEqual(catalog.entries.map(keyOf).sort());
+    for (const entry of catalog.entries) expect(Snapshots.hasSnapshot(keyOf(entry))).toBe(true);
   });
 
-  test('a row with no reviewed read says the current value is not shown', async () => {
+  test.each(Object.keys(FIXTURES))('%s: the card shows the real current value of every carded field', async (key) => {
+    const entry = catalog.entries.find(e => keyOf(e) === key);
+    const preview = await propose(inputFor(entry));
+    const [table, where, columns] = SAVES[key];
+    const row = world[table].find(r => Object.entries(where(FIXTURES[key].params)).every(([k, v]) => String(r[k]) === String(v)));
+    for (const change of preview.changes) {
+      const stored = row[columns[change.field]];
+      expect(change.before).toEqual(stored === undefined ? null : stored);
+    }
+  });
+
+  test('a customer with no saved preference row shows "none saved yet" and every flag as not set', async () => {
+    world.notification_prefs = [];
+    const preview = await propose(inputFor(CUSTOMER_ENTRY));
+    expect(preview.record_label).toBe('Pat Tester: text and report preferences (none saved yet)');
+    expect(preview.changes.every(change => change.before === null)).toBe(true);
+  });
+
+  test('a value changed on the screen between the card and Confirm is a new card, and nothing is sent', async () => {
+    for (const [key, change] of [
+      ['PUT /admin/sms-templates/:id', () => { world.sms_templates[0].body = 'Someone else edited this'; }],
+      ['PUT /admin/sms-templates/:id', () => { world.sms_templates[0].name = 'Renamed meanwhile'; }],
+      ['PUT /admin/sms-templates/:id', () => { world.sms_templates[0].updated_at = '2026-10-20T01:00:00.000Z'; }],
+      ['PUT /admin/timetracking/entries/:id', () => { world.time_entries[0].clock_out = '2026-10-12T21:00:00.000Z'; }],
+      ['PUT /admin/customers/:id/notification-prefs', () => { world.notification_prefs[0].appointment_notify_primary = false; }],
+      ['PUT /admin/customers/:id/notification-prefs', () => { world.notification_prefs = []; }],
+      ['PATCH /admin/dispatch/:serviceId/note', () => { world.scheduled_services[0].notes = 'Tech added a note'; }],
+      ['PUT /admin/inventory/service-usage/:id', () => { world.service_product_usage[0].notes = 'Changed'; }],
+      ['PUT /admin/email-templates/fixtures/:id', () => { world.email_template_fixtures[0].payload = { first_name: 'Other' }; }],
+      ['PUT /admin/automations/steps/:id', () => { world.automation_steps[0].html_body = '<p>Edited</p>'; }],
+      ['PUT /admin/email-templates/:key', () => { world.email_templates[0].description = 'Edited'; }],
+      ['PUT /admin/email-templates/versions/:id', () => { world.email_template_versions[0].subject = 'Edited'; }],
+    ]) {
+      world = seedWorld();
+      const entry = catalog.entries.find(e => keyOf(e) === key);
+      const preview = await propose(inputFor(entry));
+      change();
+      expect(await propose({ ...inputFor(entry), confirmed: true, _approved_edit_pin: preview._version })).toMatchObject({ code: 'preview_changed', preview_changed: true });
+    }
+    expect(callsOf()).toHaveLength(0);
+  });
+
+  test('a record deleted after the card was shown gets no edit', async () => {
     const preview = await propose(inputFor(ENTRY));
-    expect(preview.changes.every(change => change.before_known === false)).toBe(true);
-    expect(cardLines(preview).some(line => line.text.includes('(current value not shown)'))).toBe(true);
-    expect(displayParams(preview).name).toMatch(/^\(current value not shown\) → /);
+    world.sms_templates = [];
+    expect(await propose({ ...inputFor(ENTRY), confirmed: true, _approved_edit_pin: preview._version })).toMatchObject({ code: 'record_unavailable' });
+    expect(callsOf()).toHaveLength(0);
+  });
+
+  test('credentials in the current text are scrubbed on the card, yet the pin covers the real text', async () => {
+    const entry = catalog.entries.find(e => e.endpoint === '/admin/dispatch/:serviceId/note');
+    world.scheduled_services[0].notes = 'Alarm password: hunter2hunter2 and see https://example.s3.amazonaws.com/f?X-Amz-Signature=abcdef0123456789';
+    const first = await propose(inputFor(entry));
+    expect(JSON.stringify(first)).not.toContain('hunter2hunter2');
+    expect(JSON.stringify(first)).not.toContain('X-Amz-Signature');
+    world.scheduled_services[0].notes = 'Alarm password: different9different9 and see https://example.s3.amazonaws.com/f?X-Amz-Signature=abcdef0123456789';
+    const second = await propose(inputFor(entry));
+    expect(second._version).not.toBe(first._version);
+  });
+});
+
+describe('a draft-only row', () => {
+  const VERSION_ENTRY = catalog.entries.find(e => e.endpoint === '/admin/email-templates/versions/:id');
+
+  test('the catalog row requires a draft', () => {
+    expect(VERSION_ENTRY.requireState).toEqual({ status: 'draft' });
+  });
+
+  test.each(['active', 'archived', 'paused', 'published', ''])('a %s version gets no card', async (status) => {
+    world.email_template_versions[0].status = status;
+    const result = await propose(inputFor(VERSION_ENTRY));
+    expect(result).toMatchObject({ code: 'record_state_not_allowed' });
+    expect(result.error).toMatch(/only allowed while the record's status is "draft"/);
+    expect(callsOf()).toHaveLength(0);
+  });
+
+  test('a draft that is archived (or published) after the card was shown gets no edit at Confirm', async () => {
+    for (const status of ['archived', 'active', 'paused']) {
+      world = seedWorld();
+      const preview = await propose(inputFor(VERSION_ENTRY));
+      expect(preview.preview).toBe(true);
+      world.email_template_versions[0].status = status;
+      const result = await propose({ ...inputFor(VERSION_ENTRY), confirmed: true, _approved_edit_pin: preview._version });
+      expect(result).toMatchObject({ code: 'record_state_not_allowed' });
+    }
+    expect(callsOf()).toHaveLength(0);
+  });
+
+  test('a row that does not require a state ignores the record state', async () => {
+    world.sms_templates[0].status = 'archived';
+    expect(await propose(inputFor(ENTRY))).toMatchObject({ preview: true });
+  });
+});
+
+describe('email blocks are shown and sent in the screen\'s canonical form', () => {
+  const VERSION_ENTRY = catalog.entries.find(e => e.endpoint === '/admin/email-templates/versions/:id');
+  const rough = [{ content: 'Hello {{first_name}}' }, { type: ' cta ', label: 5 }];
+  const canonical = [{ type: 'paragraph', content: 'Hello {{first_name}}' }, { type: 'cta', content: '' }];
+
+  test('the card shows the canonical blocks, the pin covers them, and the confirmed body carries them', async () => {
+    const input = inputFor(VERSION_ENTRY, { body: { blocks: rough } });
+    const preview = await propose(input);
+    expect(preview.changes).toEqual([{ field: 'blocks', before: [{ type: 'paragraph', content: 'Old' }], after: canonical }]);
+    // The same blocks typed already canonical are the same card.
+    const again = await propose(inputFor(VERSION_ENTRY, { body: { blocks: canonical } }));
+    expect(again._version).toBe(preview._version);
+    const done = await propose({ ...input, confirmed: true, _approved_edit_pin: preview._version });
+    expect(done.success).toBe(true);
+    expect(JSON.parse(callsOf()[0][1].body)).toEqual({ blocks: canonical });
+  });
+
+  test('blocks the screen cannot read get no card', async () => {
+    mockNormalizeBlocks.mockImplementationOnce(() => { throw new Error('bad block'); });
+    expect(await propose(inputFor(VERSION_ENTRY, { body: { blocks: rough } }))).toMatchObject({ code: 'invalid_input' });
+    expect(callsOf()).toHaveLength(0);
+  });
+});
+
+describe('the save is read back', () => {
+  async function confirmWith(fetchImpl, input = inputFor(ENTRY)) {
+    const preview = await propose(input);
+    global.fetch = fetchImpl;
+    return propose({ ...input, confirmed: true, _approved_edit_pin: preview._version });
+  }
+
+  test('a 200 that changed no row is NOT reported as saved', async () => {
+    const result = await confirmWith(savingFetch(undefined, { save: false }));
+    expect(result).toMatchObject({ outcome_unknown: true, code: 'edit_not_verified' });
+    expect(result.error).toMatch(/body, name|name, body/);
+    expect(result.success).toBeUndefined();
+    expect(require('../services/intelligence-bar/outcomes').executionOutcome(result)).toBe('outcome_unknown');
+  });
+
+  test('a 200 that saved only some of the fields names the ones that did not hold', async () => {
+    const input = inputFor(ENTRY);
+    const result = await confirmWith(jest.fn(async (url, options) => {
+      world.sms_templates[0].name = JSON.parse(options.body).name; // body never lands
+      return jsonResponse(200, { success: true });
+    }), input);
+    expect(result).toMatchObject({ outcome_unknown: true, code: 'edit_not_verified' });
+    expect(result.error).toContain('body did not hold');
+    expect(result.error).not.toContain('name, ');
+  });
+
+  test('a record deleted by the save, or a read-back that fails, is an unknown outcome', async () => {
+    expect(await confirmWith(jest.fn(async () => { world.sms_templates = []; return jsonResponse(200, { success: true }); })))
+      .toMatchObject({ outcome_unknown: true, code: 'edit_not_verified' });
+    world = seedWorld();
+    expect(await confirmWith(jest.fn(async () => { db.mockImplementation(() => { throw new Error('connection reset'); }); return jsonResponse(200, { success: true }); })))
+      .toMatchObject({ outcome_unknown: true, code: 'edit_not_verified' });
+  });
+
+  test('a save that lands is read back and reported with the record label', async () => {
+    const result = await confirmWith(savingFetch());
+    expect(result).toMatchObject({ success: true, record_label: LABELS['PUT /admin/sms-templates/:id'] });
+    expect(world.sms_templates[0].name).toBe(FIXTURES['PUT /admin/sms-templates/:id'].body.name);
+  });
+
+  test('text is compared as the screen stores it (trimmed), and a date-time by instant', async () => {
+    const timesheet = catalog.entries.find(e => e.endpoint === '/admin/timetracking/entries/:id');
+    const result = await confirmWith(savingFetch((url, options) => {
+      const body = JSON.parse(options.body);
+      return jsonResponse(200, { saved: Object.keys(body) });
+    }), inputFor(timesheet));
+    expect(result.success).toBe(true);
+    expect(world.time_entries[0].clock_in).toBe('2026-10-12T08:00:00-04:00');
   });
 });
 

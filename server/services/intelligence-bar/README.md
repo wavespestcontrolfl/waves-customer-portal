@@ -37,18 +37,30 @@ delete, and a credential field, need a waiver with a reason in the row). To add 
 edit: read the handler chain end to end, run `npm run ib:write-catalog --
 --fingerprint PUT /admin/...`, write the row (body allow-list, scope, `writes`,
 `noSend` line, `reason`) and regenerate; list a candidate you read and kept out in
-`rejected`. The card is the contract: it shows every field (the current value too
-when the row names a reviewed read in `beforeRead`), an ADDRESS CHANGE line when a
-field looks like address text, and pins the row's digest, the filled path, the
-exact body and the customer binding (`_version`, stored as `_approved_edit_pin`). On
+`rejected`. The card is the contract: a small read-only snapshot per edit
+(`admin-write-snapshots.js`, one entry per catalog row; a row without one cannot
+be edited) supplies the record's human label (who or what it is about, never just
+an id), the current value of every carded field, the row's `updated_at` and its
+state. The card shows the label, each field's current value (credentials
+scrubbed) and the new value, an ADDRESS CHANGE line when a field looks like
+address text, and a row's `requireState` (for example an email version must be a
+`draft`) is checked at the card and again at Confirm. The pin (`_version`, stored
+as `_approved_edit_pin`) covers the reviewed row's digest, the filled path, the
+exact normalized body (email blocks are shown and sent in the screen's canonical
+form), the customer binding, the label, the raw current values and the version. On
 Confirm the route re-runs the preview (it must equal the card), the executor
-rebuilds the plan and refuses with `preview_changed` unless it still equals the
-pin, then sends exactly the carded body as a loopback PUT or PATCH with the
+re-reads the record, rebuilds the plan and refuses with `preview_changed` unless it
+still equals the pin (a value changed on the screen since the card is a new card),
+then sends exactly the carded body as a loopback PUT or PATCH with the
 confirming request's own bearer token and the `X-IB-Admin-Read` log-redaction
 marker, so every middleware and the handler's own checks apply as on the screen. The
 token is carried only on the action context. The handler's response body is never
 returned (a receipt of endpoint, record ids and field names): a 4xx answer is a
-refusal, a 5xx, timeout or transport error is `outcome_unknown`.
+refusal, a 5xx, timeout or transport error is `outcome_unknown`. A 2xx is not
+trusted alone: the record is read again and every carded field must hold its new
+value, else the result is `outcome_unknown` (`edit_not_verified`). The handlers take no
+expected version, so the one remaining window is the milliseconds between the
+Confirm's re-read and the handler's own write.
 
 Reads have one exception (owner ruling 2026-10-12: "The Intelligence Bar may read
 what any admin screen reads, on the owner login, behind a gate"). `find_admin_reads`

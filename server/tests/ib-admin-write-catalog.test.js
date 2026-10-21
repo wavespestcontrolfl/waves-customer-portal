@@ -86,6 +86,14 @@ test('the committed catalog holds no counts, and each reviewed row carries a rea
   for (const item of reviewedFile.rejected) expect(admitted.has(`${item.method} ${item.endpoint}`)).toBe(false);
 });
 
+test('every entry has a record snapshot (label, current values, version), and the email version row requires a draft', () => {
+  const Snapshots = require('../services/intelligence-bar/admin-write-snapshots');
+  for (const entry of committed.entries) {
+    expect({ entry: `${entry.method} ${entry.endpoint}`, snapshot: Snapshots.hasSnapshot(`${entry.method} ${entry.endpoint}`) }).toEqual({ entry: `${entry.method} ${entry.endpoint}`, snapshot: true });
+  }
+  expect(committed.entries.find(entry => entry.endpoint === '/admin/email-templates/versions/:id').requireState).toEqual({ status: 'draft' });
+});
+
 test('the runtime reads the committed catalog only: a stale row cannot throw there', () => {
   const code = fs.readFileSync(require.resolve('../services/intelligence-bar/admin-write-tools.js'), 'utf8')
     .split('\n').filter(line => !/^\s*(\/\/|\*|\/\*)/.test(line)).join('\n');
@@ -222,6 +230,8 @@ describe('the row validator', () => {
     ['an undeclared path parameter', { params: {} }, /is missing: declare every path parameter/],
     ['a waiver without a reason', { waive: { 'effect_call:x': 'no' } }, /waive maps a signal to a reason/],
     ['a denied path', { endpoint: '/admin/invoices/:id' }, /not editable from the bar/],
+    ['a state requirement that is not a value', { requireState: { status: 5 } }, /requireState maps a record state field/],
+    ['an empty state requirement', { requireState: {} }, /requireState maps a record state field/],
   ])('refuses %s', (_label, change, message) => {
     expect(() => validateReviewedRow({ ...base, ...change })).toThrow(message);
   });

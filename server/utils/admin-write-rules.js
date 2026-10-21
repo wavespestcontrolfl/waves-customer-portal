@@ -152,10 +152,18 @@ function checkNumber(spec, value, fail) {
   return { value };
 }
 
-const DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
+const DATETIME_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(?:Z|([+-])(\d{2}):(\d{2}))$/;
+// A date-time that is a real calendar moment. Date.parse alone accepts 2026-02-30 and
+// moves it to March 2, so the calendar parts are rebuilt and compared with what was typed.
 function checkDatetime(spec, value, fail) {
-  if (typeof value !== 'string' || !DATETIME_RE.test(value)) return fail('must be an ISO date-time with a zone, like 2026-10-12T14:30:00-04:00');
-  return Number.isNaN(Date.parse(value)) ? fail('is not a real date-time') : { value };
+  const m = typeof value === 'string' ? DATETIME_RE.exec(value) : null;
+  if (!m) return fail('must be an ISO date-time with a zone, like 2026-10-12T14:30:00-04:00');
+  const [year, month, day, hour, minute] = [m[1], m[2], m[3], m[4], m[5]].map(Number);
+  const second = m[6] === undefined ? 0 : Number(m[6]);
+  const rebuilt = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  const real = rebuilt.getUTCFullYear() === year && rebuilt.getUTCMonth() === month - 1 && rebuilt.getUTCDate() === day
+    && hour < 24 && minute < 60 && second < 60 && (m[8] === undefined || (Number(m[8]) < 24 && Number(m[9]) < 60));
+  return real && !Number.isNaN(Date.parse(value)) ? { value } : fail('is not a real date and time');
 }
 
 function checkContainer(spec, value, fail) {

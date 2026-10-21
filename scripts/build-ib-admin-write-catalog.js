@@ -106,11 +106,12 @@ function waiveProblem(row) {
   return null;
 }
 
-function beforeReadProblem(row) {
-  const b = row.beforeRead;
-  if (b === undefined) return null;
-  if (!b || typeof b.endpoint !== 'string' || !b.params || typeof b.params !== 'object') return 'beforeRead needs an endpoint and a params map (read param -> edit param)';
-  return b.pick !== undefined && !/^[A-Za-z0-9_.]{1,80}$/.test(b.pick) ? 'beforeRead.pick must be a dotted path' : null;
+function stateProblem(row) {
+  const state = row.requireState;
+  if (state === undefined) return null;
+  const ok = state && typeof state === 'object' && !Array.isArray(state) && Object.keys(state).length > 0
+    && Object.entries(state).every(([key, value]) => /^[a-z_]{1,40}$/.test(key) && typeof value === 'string' && value.length > 0);
+  return ok ? null : 'requireState maps a record state field to the one value it must hold (like { "status": "draft" })';
 }
 
 function addressProblem(row) {
@@ -120,7 +121,7 @@ function addressProblem(row) {
 
 function validateReviewedRow(row) {
   const problem = pathProblem(row) || scopeProblem(row) || paramKindProblem(row) || writeRules.bodySpecProblem(row)
-    || textProblem(row) || writesProblem(row) || waiveProblem(row) || beforeReadProblem(row) || addressProblem(row);
+    || textProblem(row) || writesProblem(row) || waiveProblem(row) || stateProblem(row) || addressProblem(row);
   if (problem) throw new Error(`admin-write-reviewed.json ${methodOf(row)} ${row.endpoint}: ${problem}`);
 }
 
@@ -254,7 +255,7 @@ function buildCatalog({ census, reviewed = loadReviewed(), routes } = {}) {
       writes,
       reason: row.reason,
       noSend: row.noSend,
-      ...(row.beforeRead ? { beforeRead: row.beforeRead } : {}),
+      ...(row.requireState ? { requireState: row.requireState } : {}),
     };
     // One digest over everything the card relies on, the handler chain
     // included, so a changed row, body list or handler changes the digest.

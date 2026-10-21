@@ -1,5 +1,5 @@
 {
-  "_note": "Hand-reviewed admission list for the Intelligence Bar general admin edit (owner ruling 2026-10-12: a general EDIT tool is allowed for a reviewed allow-list of small internal edits only; owner login only; always a confirm card; its own gate). A PUT or PATCH endpoint is in the catalog ONLY when it has a row here. A row says what a person read: the handler and every function the scan followed, end to end. It carries the scan fingerprint it was reviewed against (signals, unresolved callees, the tables written, and a hash of the handler text and of every followed function body and same-file constant), so any edit to that chain drops the endpoint from the regenerated catalog until it is reviewed again. body is the allow-list of fields an edit may carry (type, size, enum); the tool refuses any other field and never drops one. required lists fields that must be present. waive maps one scan signal (an effect_call or credential_field that the deny rules would stop) to the reason a person read it and found it harmless; the hard signals (outside calls, messaging or payment modules, signed or customer links, file responses, deletes, DDL, raw SQL writes, bulk inserts) can never be waived. writes must equal the tables the code writes, and none may be a money, message or queue table. scope: customer (scopeParam is the customer id), visit (scopeParam is a visit id; the tool binds the visit to its customer) or broad. noSend is the line the card shows about what the edit does NOT do. beforeRead (optional) names a reviewed READ endpoint that supplies the current values for the card. rejected lists candidates a person read and kept out, with the reason; it changes nothing at run time.",
+  "_note": "Hand-reviewed admission list for the Intelligence Bar general admin edit (owner ruling 2026-10-12: a general EDIT tool is allowed for a reviewed allow-list of small internal edits only; owner login only; always a confirm card; its own gate). A PUT or PATCH endpoint is in the catalog ONLY when it has a row here. A row says what a person read: the handler and every function the scan followed, end to end. It carries the scan fingerprint it was reviewed against (signals, unresolved callees, the tables written, and a hash of the handler text and of every followed function body and same-file constant), so any edit to that chain drops the endpoint from the regenerated catalog until it is reviewed again. body is the allow-list of fields an edit may carry (type, size, enum); the tool refuses any other field and never drops one. required lists fields that must be present. waive maps one scan signal (an effect_call or credential_field that the deny rules would stop) to the reason a person read it and found it harmless; the hard signals (outside calls, messaging or payment modules, signed or customer links, file responses, deletes, DDL, raw SQL writes, bulk inserts) can never be waived. writes must equal the tables the code writes, and none may be a money, message or queue table. scope: customer (scopeParam is the customer id), visit (scopeParam is a visit id; the tool binds the visit to its customer) or broad. noSend is the line the card shows about what the edit does NOT do. requireState (optional) names a record state the edit requires (the card and the Confirm both refuse any other). The card's record label, the current value of every carded field and the row version come from admin-write-snapshots.js, pinned in the card and re-read at Confirm and after the save. rejected lists candidates a person read and kept out, with the reason; it changes nothing at run time.",
   "reviewed": [
     {
       "method": "PUT",
@@ -16,7 +16,8 @@
         },
         "name": {
           "type": "string",
-          "maxLength": 200
+          "maxLength": 200,
+          "minLength": 1
         }
       },
       "required": [],
@@ -45,7 +46,8 @@
       "body": {
         "name": {
           "type": "string",
-          "maxLength": 180
+          "maxLength": 180,
+          "minLength": 1
         },
         "description": {
           "type": "string",
@@ -98,7 +100,10 @@
         }
       },
       "required": [],
-      "reviewed": "Handler read end to end (admin-email-templates.js PUT /versions/:id) with EmailTemplates.loadVersion, normalizeBlocks and validationFor: refuses an ACTIVE version (400 'Create a draft before editing an active version'), so only a draft version is edited; one UPDATE of email_template_versions (subject, preview_text, blocks, text_body, updated_at); then renders a validation report with no send.",
+      "requireState": {
+        "status": "draft"
+      },
+      "reviewed": "Handler read end to end (admin-email-templates.js PUT /versions/:id) with EmailTemplates.loadVersion, normalizeBlocks and validationFor: refuses an ACTIVE version (400 'Create a draft before editing an active version'); the row additionally requires status draft at the card and again at Confirm (requireState), so an archived or paused version is refused too; one UPDATE of email_template_versions (subject, preview_text, blocks, text_body, updated_at); then renders a validation report with no send.",
       "reason": "Edits the wording of a draft email template version. An active (live) version is refused by the handler; publishing a draft is a different endpoint that is not on the list. The only write is one UPDATE of email_template_versions.",
       "noSend": "Edits a DRAFT version only (the handler refuses an active one). No email is sent or queued, and nothing is published.",
       "writes": [
@@ -123,7 +128,8 @@
       "body": {
         "name": {
           "type": "string",
-          "maxLength": 200
+          "maxLength": 200,
+          "minLength": 1
         },
         "payload": {
           "type": "object",
