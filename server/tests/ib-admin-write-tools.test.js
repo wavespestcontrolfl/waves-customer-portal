@@ -59,11 +59,11 @@ const seedWorld = () => ({
   email_template_versions: [{ id: ID, template_id: T1, status: 'draft', version_number: 2, subject: 'Old subject', preview_text: 'Old preview', text_body: 'Old text', blocks: [{ type: 'paragraph', content: 'Old' }], updated_at: STAMP }],
   email_template_fixtures: [{ id: ID, template_id: T1, name: 'Old fixture', payload: { first_name: 'Old' }, updated_at: STAMP }],
   automation_steps: [{ id: ID, template_key: 'welcome_series', step_order: 1, subject: 'Old', preview_text: 'Old', html_body: '<p>Old</p>', text_body: 'Old', updated_at: STAMP }],
-  time_entries: [{ id: ID, technician_id: TECH, clock_in: '2026-10-12T12:00:00.000Z', clock_out: '2026-10-12T20:00:00.000Z', entry_type: 'job', notes: 'Old note', edit_reason: null, status: 'completed', approval_status: 'pending', updated_at: STAMP }],
+  time_entries: [{ id: ID, technician_id: TECH, clock_in: new Date('2026-10-12T12:00:00.000Z'), clock_out: new Date('2026-10-12T20:00:00.000Z'), entry_type: 'job', notes: 'Old note', edit_reason: null, status: 'completed', approval_status: 'pending', updated_at: new Date(STAMP) }],
   technicians: [{ id: TECH, name: 'Adam Tech' }],
   customers: [{ id: CUSTOMER, first_name: 'Pat', last_name: 'Tester' }],
   notification_prefs: [{ customer_id: CUSTOMER, auto_flip_en_route: true, payment_confirmation_sms: true, appointment_notify_primary: true, service_report_notify_primary: true, service_report_notify_billing: false, updated_at: STAMP }],
-  scheduled_services: [{ id: ID, customer_id: CUSTOMER, scheduled_date: '2026-10-14', service_type: 'Pest Control', notes: 'Old visit note', updated_at: STAMP }],
+  scheduled_services: [{ id: ID, customer_id: CUSTOMER, scheduled_date: new Date('2026-10-14T00:00:00.000Z'), service_type: 'Pest Control', notes: 'Old visit note', updated_at: new Date(STAMP) }],
   service_product_usage: [{ id: ID, product_id: PRODUCT, service_type: 'General Pest Control', notes: 'Old use note', updated_at: STAMP }],
   products_catalog: [{ id: PRODUCT, name: 'Talstar P' }],
 });
@@ -684,8 +684,35 @@ describe('the record snapshot: label, current values, version', () => {
     const row = world[table].find(r => Object.entries(where(FIXTURES[key].params)).every(([k, v]) => String(r[k]) === String(v)));
     for (const change of preview.changes) {
       const stored = row[columns[change.field]];
-      expect(change.before).toEqual(stored === undefined ? null : stored);
+      // A database timestamp reaches the card as its ISO string, everything else as stored.
+      expect(change.before).toEqual(stored instanceof Date ? stored.toISOString() : (stored === undefined ? null : stored));
     }
+  });
+
+  test('text that looks like JSON stays text, and a database timestamp is shown and compared as an ISO string', async () => {
+    const note = catalog.entries.find(e => e.endpoint === '/admin/dispatch/:serviceId/note');
+    for (const stored of ['"quoted note"', '123', 'true', 'null', '{"a":1}', '[1,2]']) {
+      world = seedWorld();
+      world.scheduled_services[0].notes = stored;
+      const preview = await propose(inputFor(note));
+      expect(preview.changes[0].before).toBe(stored);
+    }
+    // The save lands and is read back even when the NEW text is itself JSON-looking.
+    for (const text of ['"quoted note"', '42', '{"a":1}']) {
+      world = seedWorld();
+      const input = inputFor(note, { body: { notes: text } });
+      const preview = await propose(input);
+      const done = await propose({ ...input, confirmed: true, _approved_edit_pin: preview._version });
+      expect(done).toMatchObject({ success: true });
+      expect(world.scheduled_services[0].notes).toBe(text);
+    }
+    // Timestamps are plain strings in the preview (not `{}` after the scrubber) and the pin is stable for the same Date.
+    world = seedWorld();
+    const entry = catalog.entries.find(e => e.endpoint === '/admin/timetracking/entries/:id');
+    const timesheet = await propose(inputFor(entry));
+    const clockIn = timesheet.changes.find(change => change.field === 'clock_in');
+    expect(clockIn.before).toBe('2026-10-12T12:00:00.000Z');
+    expect((await propose(inputFor(entry)))._version).toBe(timesheet._version);
   });
 
   test('a customer with no saved preference row shows "none saved yet" and every flag as not set', async () => {

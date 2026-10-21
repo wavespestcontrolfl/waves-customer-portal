@@ -19,10 +19,13 @@ const db = (...args) => require('../../models/db')(...args);
 
 const ET = 'America/New_York';
 const text = value => (value === null || value === undefined ? '' : String(value));
+// Only a column that holds JSON is decoded; text stays verbatim (a note that reads `"quoted"` or `123` is text).
 const json = value => {
   if (typeof value !== 'string') return value;
   try { return JSON.parse(value); } catch { return value; }
 };
+// A database value as plain JSON: a timestamp becomes its ISO string, so the card, the scrubber, the pin and the read-back all see one form.
+const plain = value => (value instanceof Date ? value.toISOString() : value);
 const dateOnly = value => (value instanceof Date ? value.toISOString().slice(0, 10) : text(value).slice(0, 10));
 const etTime = value => (value ? new Date(value).toLocaleString('en-US', { timeZone: ET, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'no end time');
 const fullName = c => [c?.first_name, c?.last_name].filter(Boolean).join(' ') || c?.company_name || 'a customer';
@@ -50,6 +53,7 @@ const SNAPSHOTS = {
   },
   'PUT /admin/email-templates/versions/:id': {
     fields: { subject: 'subject', previewText: 'preview_text', textBody: 'text_body', blocks: 'blocks' },
+    jsonFields: ['blocks'],
     async load(p) {
       const row = await db('email_template_versions').where({ id: p.id }).first();
       if (!row) return null;
@@ -69,6 +73,7 @@ const SNAPSHOTS = {
   },
   'PUT /admin/email-templates/fixtures/:id': {
     fields: { name: 'name', payload: 'payload' },
+    jsonFields: ['payload'],
     async load(p) {
       const row = await db('email_template_fixtures').where({ id: p.id }).first();
       if (!row) return null;
@@ -138,8 +143,8 @@ async function loadSnapshot(key, pathParams, bodyKeys) {
   if (!found) return null;
   const current = {};
   for (const bodyKey of bodyKeys) {
-    const column = spec.fields[bodyKey];
-    current[bodyKey] = found.row.__missing ? null : json(found.row[column]);
+    const value = found.row.__missing ? null : plain(found.row[spec.fields[bodyKey]]);
+    current[bodyKey] = (spec.jsonFields || []).includes(bodyKey) ? json(value) : value;
     if (current[bodyKey] === undefined) current[bodyKey] = null;
   }
   const stamp = found.row.updated_at;
@@ -172,7 +177,7 @@ function sameValue(expected, actual) {
     return new Date(expected).getTime() === new Date(actual).getTime();
   }
   if (typeof expected === 'string' || expected === null) return text(expected).trim() === text(actual).trim();
-  if (typeof expected === 'object') return stable(expected) === stable(json(actual));
+  if (typeof expected === 'object') return stable(expected) === stable(typeof actual === 'string' ? json(actual) : actual);
   return expected === actual;
 }
 
