@@ -713,6 +713,14 @@ describe('agent-gap-reports', () => {
         expect(insertedRows[0].summary).toContain('grouped_visit_move_unsupported');
       });
 
+      test('a nested gap is kept when the same call proposed a write (the route sends wrote:true)', async () => {
+        const collector = collectorFor();
+        collector.toolResult('move_stops_to_day', SUCCESS, false, { round: 0, wrote: true });
+        collector.toolResult('update_customer', { success: false, error: "The bar can't do this from here yet.", code: 'address_conflict' }, true, { round: 0, wrote: true });
+        await collector.flush({ reply: 'Moved the others; one stayed.' });
+        expect(insertedRows.map((row) => row.closest_tool)).toEqual(['move_stops_to_day']);
+      });
+
       test('each nested code passes the same rule, and duplicates collapse', async () => {
         const collector = collectorFor();
         const nested = { ok: true, capability_gaps: [

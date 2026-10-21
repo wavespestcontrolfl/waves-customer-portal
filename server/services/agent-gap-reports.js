@@ -561,8 +561,11 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
     lastTool = cleanTool(name) || lastTool;
     if (meta.round !== tail.round) tail = { round: meta.round, refusals: new Map(), wroteTools: new Set() };
     if (meta.wrote === true) tail.wroteTools.add(name);
+    // A nested gap is a partial success: the same call also proposed or wrote
+    // (wrote:true), so it is kept apart from a refusal the tool recovered from.
     const codes = failed ? [recordableRefusalCode(result)] : nestedGapCodes(result);
-    for (const code of codes.filter(Boolean)) tail.refusals.set(`${name}|${code}`, { tool: name, code });
+    const nested = !failed;
+    for (const code of codes.filter(Boolean)) tail.refusals.set(`${name}|${code}`, { tool: name, code, nested });
   }
 
   function toolResult(name, result, failed, meta) {
@@ -632,8 +635,8 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
     if (!recordBlocked) return [];
     if (stepLimitReached === true && noReply === true) return [blockedSignal({ source, code: LOOP_EXHAUSTED_CODE, lastTool })];
     const signals = [];
-    for (const { tool, code } of tail.refusals.values()) {
-      if (tail.wroteTools.has(tool)) continue;
+    for (const { tool, code, nested } of tail.refusals.values()) {
+      if (!nested && tail.wroteTools.has(tool)) continue;
       signals.push(code === 'capability_unimplemented' ? capabilitySignal(tool) : blockedSignal({ source, tool, code }));
     }
     return signals;
