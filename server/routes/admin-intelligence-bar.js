@@ -935,6 +935,10 @@ const PINNED_DISPLAY_BUILDERS = {
   send_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'send_invoice'
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount_due: preview.amount_due, send_by: preview.channels, sent_before: preview.send_note }
     : null),
+  // convert_lead: the card names the lead, the customer and the figures; the lines ride the contract.
+  convert_lead: (params, preview) => (preview?.preview === true && preview.tool === 'convert_lead'
+    ? { lead: preview.lead_name, customer: preview.customer_name, phone_email_match: preview.matched_on, sends_to_customer: 'nothing' }
+    : null),
   // void_invoice: the card names the invoice, the customer and the amount; the lines ride the contract.
   void_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'void_invoice'
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount: preview.amount, status: preview.status, sends_to_customer: 'nothing' }
@@ -978,6 +982,8 @@ const VERIFIED_VERSION_PARAMS = {
   // send_invoice binds the invoice state, the recipients and the total the card
   // showed (invoice-action-tools.js _version).
   send_invoice: '_verified_invoice_send_version',
+  // convert_lead binds the lead, the customer and the request body the card showed.
+  convert_lead: '_verified_lead_convert_version',
   // void_invoice binds the invoice state, credit, pay-page session and links the card showed.
   void_invoice: '_verified_invoice_void_version',
   cancel_queued_message: '_verified_message_version',
