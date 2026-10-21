@@ -339,6 +339,16 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(100), updates: { phone: '941-555-0100' } }, null, null, onScreen)).toBe(true);
   });
 
+  test('gate on: a city that picks one customer and a phone that belongs to the other is a conflict (pre-push audit)', async () => {
+    process.env[ON] = 'true';
+    customers = sameName(2); // id(100) Venice, id(101) Sarasota
+    const resolved = await ask(`update Pat Example in Venice ${customers[1].phone.replace(/(\d{3})(\d{3})(\d{4})/, '$1-$2-$3')} notes`);
+    expect(resolved.typedCustomerIds).toEqual([]);
+    expect(resolved.identityConflict).toBe(true);
+    // City and phone agreeing still name that one.
+    expect((await ask(`update Pat Example in Venice ${customers[0].phone.replace(/(\d{3})(\d{3})(\d{4})/, '$1-$2-$3')} notes`)).typedCustomerIds).toEqual([customers[0].id]);
+  });
+
   test('gate on: a long "Full Name, City" button becomes "First L., City", unique, under 40 characters, and the reply resolves back (Codex r1 P2)', async () => {
     process.env[ON] = 'true';
     const { validateChoices } = require('../services/intelligence-bar/choice-tools');

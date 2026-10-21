@@ -480,6 +480,9 @@ async function typedCustomerIds(prompt, namedResult) {
   const agreesWithName = (id) => nameMatched.has(id)
     || (namedResult.complete === false && namesTargetCustomer(normalizeName(withoutContacts(targetClause(prompt))), contactOwners.get(id) || {}));
   if (nameMatched.size && [...contactIds].some(id => !agreesWithName(id))) return Object.assign([], { identityConflict: true });
+  // A name narrowed by city (or a unique name) and a typed phone or email must
+  // name the same customer; two different customers is a conflict too.
+  if (ids.size && contactIds.size && [...contactIds].some(id => !ids.has(id))) return Object.assign([], { identityConflict: true });
   for (const id of contactIds) ids.add(id);
   for (const id of await initialFormIds(prompt)) ids.add(id);
   return [...ids];
