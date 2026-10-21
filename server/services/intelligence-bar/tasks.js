@@ -61,9 +61,16 @@ async function checkpoint(id, actorId, { messages, target, state = 'running', re
 
 // Which provider's reply history this task holds. Written when a request
 // switches to the OpenAI backup (ib-openai-backup.js); a task never mixes providers.
+// The switch also renews the lease to cover a full backup call (up to 150 s plus
+// margin), so the task is not resumable while that call still runs (Codex r5).
+const BACKUP_LEASE_MS = 180 * 1000;
 async function markModelProvider(id, actorId, runnerToken, provider) {
   await db('ib_tasks').where({ id, actor_id: String(actorId), runner_token: runnerToken })
-    .update({ request: db.raw('request || ?::jsonb', [JSON.stringify({ model_provider: provider })]) });
+    .update({
+      request: db.raw('request || ?::jsonb', [JSON.stringify({ model_provider: provider })]),
+      lease_expires_at: new Date(Date.now() + BACKUP_LEASE_MS),
+      updated_at: db.fn.now(),
+    });
 }
 
 async function claimResume(id, actorId, sessionId, { selectedTarget } = {}) {

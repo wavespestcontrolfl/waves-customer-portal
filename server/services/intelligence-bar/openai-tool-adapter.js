@@ -287,6 +287,13 @@ function ledgerFailure(data, blocks) {
 }
 
 function fromOpenAIResponse(data) {
+  // An incomplete answer for any reason but the token limit (content_filter and
+  // the like) is never shown as final: the round fails, as in the voice adapter (Codex r5).
+  if (data?.status === 'incomplete' && data?.incomplete_details?.reason !== 'max_output_tokens') {
+    const err = new Error('OpenAI backup answer was cut off');
+    err.code = 'openai_incomplete';
+    throw err;
+  }
   const raw = (Array.isArray(data?.output) ? data.output : []).flatMap(item => outputBlocks(item, data));
   const stop_reason = stopReasonOf(data, raw);
   const content = raw.map(({ refusal, ...block }) => block);

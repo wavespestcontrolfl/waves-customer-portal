@@ -115,6 +115,9 @@ describe('saved task provider', () => {
     expect(mockWhere).toHaveBeenCalledWith({ id: 't1', actor_id: 'actor-1', runner_token: 'runner-1' });
     expect(mockRaw).toHaveBeenCalledWith('request || ?::jsonb', [JSON.stringify({ model_provider: 'openai_backup' })]);
     expect(mockUpdate).toHaveBeenCalledTimes(1);
+    // The switch renews the lease past a full backup call (Codex r5).
+    const lease = mockUpdate.mock.calls[0][0].lease_expires_at;
+    expect(lease.getTime() - Date.now()).toBeGreaterThan(150 * 1000);
   });
 });
 

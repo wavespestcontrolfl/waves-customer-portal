@@ -280,12 +280,13 @@ describe('callBackup', () => {
     const cut = await reply({ status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [] });
     expect(cut.stop_reason).toBe('max_tokens');
     expect(mockLedgerRejected).toHaveBeenLastCalledWith(cut, 'openai_incomplete');
-    const filtered = await reply({ status: 'incomplete', incomplete_details: { reason: 'content_filter' }, output: [] });
-    expect(mockLedgerRejected).toHaveBeenLastCalledWith(filtered, 'openai_incomplete');
+    // Cut off for any other reason: the round fails, so no partial text is shown as final (Codex r5).
+    await expect(reply({ status: 'incomplete', incomplete_details: { reason: 'content_filter' }, output: [{ type: 'message', content: [{ type: 'output_text', text: 'partial' }] }] }))
+      .rejects.toMatchObject({ code: 'openai_incomplete' });
     const refused = await reply({ status: 'completed', output: [{ type: 'message', content: [{ type: 'refusal', refusal: 'no' }] }] });
     expect(refused.stop_reason).toBe('refusal');
     expect(mockLedgerRejected).toHaveBeenLastCalledWith(refused, 'openai_refusal');
-    expect(mockLedgerRejected).toHaveBeenCalledTimes(3);
+    expect(mockLedgerRejected).toHaveBeenCalledTimes(2);
   });
 
   test('an HTTP error rejects with its status (the ledger files it as openai_<status>) and no body text', async () => {
