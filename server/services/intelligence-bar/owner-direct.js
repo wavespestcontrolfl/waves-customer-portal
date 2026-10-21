@@ -226,8 +226,9 @@ function directEditAllowedBase(toolName, input = {}, preview = null) {
 // exactly like a non-owner admin's. The flag lives in one `requestTaint`
 // object the route creates once per request (seeded from the saved history, so
 // a resumed task keeps it) and passes to the three decision functions. Scope:
-// this covers the general read only, because its catalog is broad and grows by
-// review; other read tools are unchanged by this rule.
+// this covers the general read, because its catalog is broad and grows by
+// review, and (GATE_IB_TARGET_RULES_V2) the lead text reads below; other read
+// tools are unchanged by this rule.
 const GENERAL_READ_TOOL = 'read_admin_data';
 
 // A general-read result that carries data: a 2xx answer with a `data` field.
@@ -237,22 +238,36 @@ function isDataAnswer(result) {
     && Number.isInteger(result.status) && result.status >= 200 && result.status < 300 && result.data !== undefined;
 }
 
+// GATE_IB_TARGET_RULES_V2 (Codex #6369 r7): lead reads return text a public form
+// visitor typed (name, address, message, lost reason). With the gate on they taint
+// the request exactly as the general read does, so every later write in it keeps
+// its card. Gate off, only the general read taints (today's behavior).
+const LEAD_TEXT_READ_TOOLS = new Set(['query_leads', 'get_stale_leads', 'get_lost_analysis']);
+
+// A lead read that returned rows: an object without an error or a refusal code.
+const isLeadAnswer = result => Boolean(result) && typeof result === 'object' && !result.error && !result.code;
+
 function noteUntrustedRead(taint, toolName, result) {
-  if (taint && toolName === GENERAL_READ_TOOL && isDataAnswer(result)) taint.untrustedRead = true;
+  if (!taint) return;
+  if (toolName === GENERAL_READ_TOOL && isDataAnswer(result)) taint.untrustedRead = true;
+  else if (LEAD_TEXT_READ_TOOLS.has(toolName) && ibTargetRulesV2Live() && isLeadAnswer(result)) taint.untrustedRead = true;
 }
 
 // Pure: does a saved message history hold a general read that returned data?
 // A read with no saved result (the runner stopped between the call and its
-// result) counts as returned, so a resume fails closed.
+// result) counts as returned, so a resume fails closed. With the gate on, a lead
+// text read counts the same way.
 function untrustedReadInHistory(messages) {
   const blocks = (Array.isArray(messages) ? messages : []).flatMap(message => (Array.isArray(message?.content) ? message.content : []));
-  const readIds = blocks.filter(block => block?.type === 'tool_use' && block.name === GENERAL_READ_TOOL).map(block => block.id);
-  if (!readIds.length) return false;
+  const leadReads = ibTargetRulesV2Live();
+  const isRead = block => block?.type === 'tool_use' && (block.name === GENERAL_READ_TOOL || (leadReads && LEAD_TEXT_READ_TOOLS.has(block.name)));
+  const reads = blocks.filter(isRead);
+  if (!reads.length) return false;
   const answers = new Map(blocks.filter(block => block?.type === 'tool_result').map(block => [block.tool_use_id, block]));
-  return readIds.some((id) => {
-    const answer = answers.get(id);
+  return reads.some((read) => {
+    const answer = answers.get(read.id);
     if (!answer) return true;
-    try { return isDataAnswer(JSON.parse(answer.content)); } catch { return true; }
+    try { return (read.name === GENERAL_READ_TOOL ? isDataAnswer : isLeadAnswer)(JSON.parse(answer.content)); } catch { return true; }
   });
 }
 

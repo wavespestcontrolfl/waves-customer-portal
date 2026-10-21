@@ -506,6 +506,21 @@ async function initialFormRows(first, initial, city) {
     .limit(2).select('id');
 }
 
+// The same predicate as initialFormRows for many (first name, last initial, city)
+// triples in ONE query: per triple, how many customers fit and (for a count of one)
+// which. Used by choiceLabels to vet up to 25 short labels at once.
+async function initialFormMatches(triples) {
+  const result = await db.raw(
+    `SELECT t.first, t.initial, t.city, count(*)::int AS n, min(c.id::text) AS id
+     FROM unnest(?::text[], ?::text[], ?::text[]) AS t(first, initial, city)
+     JOIN customers c ON c.deleted_at IS NULL AND ? = t.first AND ? LIKE t.initial || '%' AND ? = t.city
+     GROUP BY t.first, t.initial, t.city`,
+    [triples.map(t => t[0]), triples.map(t => t[1]), triples.map(t => t[2]),
+      normalizedStoredName('c.first_name'), normalizedStoredName('c.last_name'), normalizedStoredName('c.city')],
+  );
+  return result?.rows || [];
+}
+
 async function initialFormIds(prompt) {
   const match = String(prompt || '').match(INITIAL_FORM_RE);
   if (!match) return [];
@@ -525,20 +540,27 @@ async function choiceLabels(customers) {
   const short = customer => `${customer.first_name} ${String(customer.last_name || '').trim().charAt(0)}., ${customer.city}`;
   // A short label is offered only when initialFormIds, on the whole customer table,
   // resolves it back to this customer alone (Codex #6369 r3: another customer with
-  // the same first name, last initial and city outside this name's rows).
-  const shortResolvesAlone = async (customer) => {
-    const [first, initial, city] = [customer.first_name, String(customer.last_name || '').trim().charAt(0), customer.city].map(part => normalizeName(part));
-    if (!first || !initial || !city) return false;
-    const rows = await initialFormRows(first, initial, city);
-    return rows.length === 1 && String(rows[0].id) === String(customer.id);
-  };
-  const labels = await Promise.all(customers.map(async (customer) => {
+  // the same first name, last initial and city outside this name's rows). One query
+  // checks every candidate triple at once (Codex #6369 r7), never one scan per row.
+  const tripleOf = customer => [customer.first_name, String(customer.last_name || '').trim().charAt(0), customer.city].map(part => normalizeName(part));
+  const wantsShort = customer => customer.city && customer.last_name && !/\s/.test(String(customer.first_name || '').trim())
+    && full(customer).length > MAX_LABEL_CHARS && short(customer).length <= MAX_LABEL_CHARS && INITIAL_FORM_RE.test(short(customer))
+    && tripleOf(customer).every(Boolean);
+  const tripleKey = triple => triple.join('\u0000');
+  const triples = [...new Map(customers.filter(wantsShort).map(customer => [tripleKey(tripleOf(customer)), tripleOf(customer)])).values()];
+  const owners = new Map();
+  if (triples.length) {
+    const found = await initialFormMatches(triples);
+    for (const row of found) owners.set(tripleKey([row.first, row.initial, row.city]), row);
+  }
+  const labels = customers.map((customer) => {
     if (!customer.city) return null;
     const whole = full(customer);
     if (whole.length <= MAX_LABEL_CHARS) return whole;
-    if (!customer.last_name || /\s/.test(String(customer.first_name || '').trim()) || short(customer).length > MAX_LABEL_CHARS || !INITIAL_FORM_RE.test(short(customer))) return null;
-    return await shortResolvesAlone(customer) ? short(customer) : null;
-  }));
+    if (!wantsShort(customer)) return null;
+    const owner = owners.get(tripleKey(tripleOf(customer)));
+    return owner && Number(owner.n) === 1 && String(owner.id) === String(customer.id) ? short(customer) : null;
+  });
   // A label that two customers share (same city and name, or the same first name,
   // last initial and city) cannot pick one of them.
   const key = label => normalizeName(label);
