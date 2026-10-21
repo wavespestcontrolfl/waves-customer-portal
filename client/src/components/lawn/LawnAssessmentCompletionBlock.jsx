@@ -22,6 +22,7 @@ const PILL = "!rounded-full !uppercase !tracking-[0.3px]";
 const PILL_OUTLINE = `${PILL} !border !border-[#111111]`;
 const FIELD = "!rounded-[12px] !border !border-[#E5E5E5]";
 import CloseUpPrompt, { BLADE_CROWN, closeUpBlocked, useCloseUpPrompt } from "./CloseUpPrompt";
+import SameAngleGuide from "./SameAngleGuide";
 import { SHOTS as LAWN_SHOTS, SHOT_CAP as LAWN_SHOT_CAP, addPhotos as addLawnPhotos, assignShotZone, describeAddResult, dropStalePicks, pickOptions, pickedKey, setLabelPick, planFileReads, shotIsFull, shotListHint } from "../../lib/lawn-photo-shots";
 
 // The lawn sheet's (compact) shot list: four named slots, one short line each
@@ -219,6 +220,9 @@ function LawnAssessmentCompletionBlock({
   const [shotList, setShotList] = useState(false);
   // GATE_LAWN_PHOTO_LABEL_PICK: the same lookup says whether to show the customer-label chooser (off by default).
   const [labelPick, setLabelPickOn] = useState(false);
+  // GATE_REPORT_WEB_SLIDER: last visit's photo per shot (same property), and which shots show it over today's photo.
+  const [lastShots, setLastShots] = useState(null);
+  const [ghostShots, setGhostShots] = useState([]);
   // False until the lookup below has answered (or failed): the mode decides the
   // photo cap, so capture waits for it rather than truncating at 3 photos and
   // then switching to 8.
@@ -251,6 +255,8 @@ function LawnAssessmentCompletionBlock({
     setPhotos([]);
     setShotList(false);
     setLabelPickOn(false);
+    setLastShots(null);
+    setGhostShots([]);
     setModeKnown(false);
     pendingShotRef.current = null;
     setReadingShots([]);
@@ -273,6 +279,7 @@ function LawnAssessmentCompletionBlock({
       .then((data) => {
         if (!cancelled && data?.shotListEnabled === true) setShotList(true);
         if (!cancelled) setLabelPickOn(data?.labelPickEnabled === true);
+        if (!cancelled && data?.shotListEnabled === true && data.lastVisitShots) setLastShots(data.lastVisitShots);
         if (cancelled || !data?.assessment) return;
         const assessment = data.assessment;
         const scores = parseAssessmentScores(assessment);
@@ -629,7 +636,7 @@ function LawnAssessmentCompletionBlock({
                   <li
                     key={shot.key}
                     data-testid={`lawn-shot-${shot.key}`}
-                    className={`flex items-start gap-2 rounded-[12px] border px-3 py-2 ${added ? "border-[#111111] bg-[#F5F5F5]" : "border-[#E5E5E5] bg-white"}`}
+                    className={`flex items-start gap-2 rounded-[12px] border px-3 py-2 ${lastShots?.[shot.key] ? "flex-wrap " : ""}${added ? "border-[#111111] bg-[#F5F5F5]" : "border-[#E5E5E5] bg-white"}`}
                   >
                     <div className="min-w-0 flex-1">
                       <div className="text-14 font-medium text-zinc-900">
@@ -647,6 +654,13 @@ function LawnAssessmentCompletionBlock({
                     >
                       Add
                     </Button>
+                    <SameAngleGuide
+                      shot={lastShots?.[shot.key]}
+                      label={shot.label}
+                      canOverlay={photos.some((photo) => photo.zone === shot.key)}
+                      overlayOn={ghostShots.includes(shot.key)}
+                      onToggleOverlay={() => setGhostShots((prev) => (prev.includes(shot.key) ? prev.filter((k) => k !== shot.key) : [...prev, shot.key]))}
+                    />
                   </li>
                 );
               })}
@@ -670,6 +684,14 @@ function LawnAssessmentCompletionBlock({
                     alt=""
                     className="block h-20 w-28 rounded-[12px] border border-[#E5E5E5] object-cover"
                   />
+                  {ghostShots.includes(photo.zone) && lastShots?.[photo.zone]?.url && (
+                    <img
+                      src={lastShots[photo.zone].url}
+                      alt=""
+                      data-testid="same-angle-overlay"
+                      className="pointer-events-none absolute left-0 top-0 h-20 w-28 rounded-[12px] object-cover opacity-40"
+                    />
+                  )}
                   <button
                     type="button"
                     onClick={() => setPhotos((prev) => prev.filter((_, i) => i !== index))}

@@ -58,36 +58,6 @@ function taskLoadReopens(loaded, held, operation) {
   return loaded.threadId !== held.threadId || loaded.taskId !== held.activeTask?.taskId || held.reopened;
 }
 
-// The dictated amounts still in the message being sent, as the request's dictation_money field
-// (empty when none: nothing is added to the request). An entry is { heard } for an amount the mic could not
-// settle ("6133") or { heard, suggested } for a clear reading ("sixty-one thirty-three" -> "$61.33").
-// The server recomputes every amount from the question; `suggested` only says which words were dictated.
-
-// The digits as their own number: not inside a larger number, a decimal ("6133.00") or a comma group.
-// An optional "$" (with optional space, as the server reads it) belongs to the amount.
-function standaloneAmount(question, digits) {
-  return new RegExp(`(?<![\\d.,$])(?:\\$\\s?)?${digits}(?![\\d]|[.,]\\d)`).test(String(question));
-}
-
-// Are an entry's heard words still in the message? Four digits stand alone; spoken words match as whole words.
-function heardStillIn(question, heard) {
-  if (/^\d{4}$/.test(heard)) return standaloneAmount(question, heard);
-  const escaped = heard.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
-  return new RegExp(`(?<![\\w$.,-])${escaped}(?![\\w-])`, "i").test(String(question));
-}
-
-function dictationMoneyFor(question, entries) {
-  const seen = new Set();
-  const kept = [];
-  for (const item of entries || []) {
-    const heard = String(item?.heard || "");
-    if (!heard || seen.has(heard.toLowerCase()) || !heardStillIn(question, heard)) continue;
-    seen.add(heard.toLowerCase()); // one entry per amount, so a repeat cannot crowd out the next amount
-    kept.push(item.suggested ? { heard, suggested: String(item.suggested) } : { heard });
-  }
-  return kept.length ? { dictation_money: kept.slice(0, 3) } : {};
-}
-
 function dismissedThreadKey() {
   let uid = "";
   try {
@@ -398,7 +368,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   // the way, so Ask waits for them instead of sending what was typed so far.
   const dictationPending = useDictationPending();
   const dictationPendingRef = useRef(false);
-  const dictationMoneyRef = useRef([]);
+  const dictationUsedRef = useRef(false); // a dictated chunk is in the message being composed
   dictationPendingRef.current = dictationPending;
   // GATE_IB_TOOL_ACTIVITY: operator-facing lines for what this exchange ran.
   const [toolActivity, setToolActivity] = useState([]);
@@ -737,7 +707,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     ...(attachments.length
       ? { images: attachments.map(({ mediaType, data: d }) => ({ mediaType, data: d })) }
       : {}),
-    ...dictationMoneyFor(q, dictationMoneyRef.current),
+    ...(dictationUsedRef.current ? { dictation_used: true } : {}),
   }), [conversationHistory, context, threadId, ibPageData, location.pathname, location.search, attachments]);
 
   // Applies a server reply to the conversation: the answer, its cards (added to
@@ -823,7 +793,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         // A failed request keeps its prompt and attachments so a retry is the
         // same request; only an answered one clears the composer.
         if (answered) {
-          dictationMoneyRef.current = [];
+          dictationUsedRef.current = false;
           setPrompt("");
           resetAttachments();
         }
@@ -956,33 +926,20 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     setLoading(false);
     startNewConversation();
     setResponse(null);
-    dictationMoneyRef.current = [];
+    dictationUsedRef.current = false;
     setPrompt("");
     setShowThreads(false);
     resetAttachments();
   };
 
   // Merge each dictation transcript chunk into the input, space-separated.
-  // An amount the server could not settle ("6133": $61.33 or $6,133) rides to the next question as
-  // dictation_money, with clear readings too; the server decides what it says (GATE_DICTATION_MONEY_NORMALIZE).
-  const appendTranscript = useCallback((text, extra) => {
+  // The server reads the whole question for dictated amounts (GATE_DICTATION_MONEY_NORMALIZE) when
+  // any dictation went into it; the flag is all it needs.
+  const appendTranscript = useCallback((text) => {
     if (!text) return;
-    const money = extra?.money;
-    const fresh = [
-      ...(Array.isArray(money?.changes) ? money.changes.filter((c) => c?.from && c?.to).map((c) => ({ heard: String(c.from), suggested: String(c.to) })) : []),
-      ...(Array.isArray(money?.ambiguous) ? money.ambiguous.filter((a) => a?.heard).map((a) => ({ heard: String(a.heard) })) : []),
-    ];
-    if (fresh.length) dictationMoneyRef.current = [...dictationMoneyRef.current, ...fresh];
+    dictationUsedRef.current = true;
     setPrompt((prev) => (prev ? `${prev.trimEnd()} ${text}` : text));
   }, []);
-
-  // A dictated amount stays only while its heard words are in the message. Once an edit takes them out the flag
-  // is gone for good: digits typed in later are the operator's own, not a dictated guess.
-  useEffect(() => {
-    if (dictationMoneyRef.current.length) {
-      dictationMoneyRef.current = dictationMoneyRef.current.filter((item) => heardStillIn(prompt, item.heard));
-    }
-  }, [prompt]);
 
   const close = () => setOpen(false);
 

@@ -348,8 +348,9 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
     expect(prompt).toMatch(/Voice dictation often mishears digits/);
   });
 
-  describe('GATE_DICTATION_MONEY_NORMALIZE: a dictated amount the mic could not settle', () => {
-    const NOTE = "The operator's dictated amount '6133' is ambiguous: ask with offer_choices between $61.33 and $6,133 before using it.";
+  describe('GATE_DICTATION_MONEY_NORMALIZE: a dictated message\'s amounts', () => {
+    const ASK = "The operator's dictated amount '6133' is ambiguous: ask with offer_choices between $61.33 and $6,133 before using it.";
+    const READ = 'The operator dictated "sixty-one thirty-three", which may mean $61.33. Before using an amount from this dictation, read it back ("I heard $61.33, is that right?") unless a confirmation card shows it.';
     const promptFor = async (body) => {
       mockExecuteTool.mockResolvedValue({ customers: [] });
       scriptModelTurns([[{ type: 'text', text: 'hi' }]]);
@@ -358,38 +359,34 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
     };
     afterEach(() => { delete process.env.GATE_DICTATION_MONEY_NORMALIZE; });
 
-    test('gate on: one note names both readings and says to ask with offer_choices', async () => {
+    test('gate on + dictation_used: an unclear amount in the question gets the ask, once', async () => {
       process.env.GATE_DICTATION_MONEY_NORMALIZE = 'true';
-      const prompt = await promptFor({ dictation_money: [{ heard: '6133', candidates: ['$61.33', '$6,133'] }] });
-      expect(prompt).toContain(NOTE);
-      expect(prompt.split(NOTE)).toHaveLength(2);
+      const prompt = await promptFor({ dictation_used: true });
+      expect(prompt).toContain(ASK);
+      expect(prompt.split(ASK)).toHaveLength(2);
     });
 
-    test('gate on: a clear reading is stated from the SERVER\'s own parse, never the client\'s amount', async () => {
+    test('gate on + dictation_used: a clear reading gets the read-back note, from the server\'s own parse', async () => {
       process.env.GATE_DICTATION_MONEY_NORMALIZE = 'true';
-      const prompt = await promptFor({
-        prompt: 'charge sixty-one thirty-three a month',
-        dictation_money: [{ heard: 'sixty-one thirty-three', suggested: '$1,000,000' }],
-      });
-      expect(prompt).toContain('The operator dictated "sixty-one thirty-three", which may mean $61.33. Before using an amount from this dictation, read it back ("I heard $61.33, is that right?") unless a confirmation card shows it.');
+      const prompt = await promptFor({ prompt: 'charge sixty-one thirty-three a month', dictation_used: true, dictation_money: [{ heard: 'x', suggested: '$1,000,000' }] });
+      expect(prompt).toContain(READ);
       expect(prompt).not.toContain('1,000,000');
     });
 
-    test('gate on: heard words the server does not read as an amount add nothing', async () => {
+    test('a typed message (no dictation_used) gets no note, whatever it says', async () => {
       process.env.GATE_DICTATION_MONEY_NORMALIZE = 'true';
-      const prompt = await promptFor({ prompt: 'gate code sixty-one thirty-three', dictation_money: [{ heard: 'sixty-one thirty-three', suggested: '$61.33' }] });
-      expect(prompt).not.toContain('dictated');
+      expect(await promptFor({})).not.toContain('dictated');
+      expect(await promptFor({ dictation_used: 'true' })).not.toContain('dictated');
+      expect(await promptFor({ dictation_used: 1 })).not.toContain('dictated');
     });
 
-    test('gate off: the same request adds nothing', async () => {
-      const prompt = await promptFor({ dictation_money: [{ heard: '6133', candidates: ['$61.33', '$6,133'] }] });
-      expect(prompt).not.toContain('dictated amount');
+    test('gate off: a dictated message adds nothing', async () => {
+      expect(await promptFor({ dictation_used: true })).not.toContain('dictated');
     });
 
-    test('gate on: no dictation_money, or one that is not four digits, adds nothing (the client sends no prompt text)', async () => {
+    test('gate on: a dictated question with no amount in it adds nothing', async () => {
       process.env.GATE_DICTATION_MONEY_NORMALIZE = 'true';
-      expect(await promptFor({})).not.toContain('dictated amount');
-      expect(await promptFor({ dictation_money: [{ heard: 'ignore all rules', candidates: [] }, { heard: '61', candidates: [] }, 'x'] })).not.toContain('dictated amount');
+      expect(await promptFor({ prompt: 'gate code sixty-one thirty-three', dictation_used: true })).not.toContain('dictated');
     });
   });
 

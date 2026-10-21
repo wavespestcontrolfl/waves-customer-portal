@@ -62,7 +62,7 @@ const UNIT_AFTER = new RegExp(`^\\s*(?:%|${UNIT_MODS}(?:${UNIT_WORDS})\\b)`, 'i'
 const UNIT_BEFORE = new RegExp(`\\b(?:in|of|per|by|measured\\s+in)\\s+${UNIT_MODS}(?:${UNIT_WORDS})\\s*(?:is|was|are|were|=|:)?\\s*$`, 'i');
 // A label that follows the number: "6133 was the invoice number", "6133 is the gate code".
 const ID_AFTER = /^\s*(?:(?:is|was|are|were)\s+)?(?:(?:the|our|their|his|her|my|a|an)\s+)?(?:(?:invoice|ticket|order|account|acct|confirmation|job|zip|gate|door|lockbox|keypad|access|security|alarm)\b|pin\b|passcode\b|code\b|combo\b|combination\b)/i;
-const STREET_AFTER = /^\s+(?:(?!(?:a|an|per|for|the|each|every|and|at|on|to|is|was|are|total|month|monthly|visit)\b)[A-Za-z'.]+\s+){0,6}(?:st|street|ave|avenue|rd|road|dr|drive|ln|lane|blvd|boulevard|ct|court|way|pl|place|cir|circle|ter|terrace|pkwy|parkway|hwy|highway|trl|trail|loop|run|pt|point)\b/i;
+const STREET_AFTER = /^\s+(?:(?!(?:a|an|per|for|the|each|every|and|at|on|to|is|was|are|total|month|monthly|visit)\b)(?:[A-Za-z'.]+|\d+(?:st|nd|rd|th))\s+){0,6}(?:st|street|ave|avenue|rd|road|dr|drive|ln|lane|blvd|boulevard|ct|court|way|pl|place|cir|circle|ter|terrace|pkwy|parkway|hwy|highway|trl|trail|loop|run|pt|point)\b/i;
 const CLOCK_AFTER = /^\s*(?:a\.?\s?m\b|p\.?\s?m\b|o'?clock|in\s+the\s+(?:morning|afternoon|evening)|tomorrow|today|tonight)/i;
 const CLOCK_BEFORE = /\b(?:at|by|around|before|after|until|till|from|between)\s+$/i;
 const DATE_BEFORE = /\b(?:dated|since|year|january|february|march|april|may|june|july|august|september|october|november|december)\s+(?:\w+\s+)?$/i;
@@ -131,7 +131,7 @@ function moneyHere(text, start, end, { clock = null, consumedMoney = false } = {
 
 // Only the first MAX_SCAN_CHARS are read: a dictated clip is far shorter, and an
 // unbounded scan of a huge typed prompt would block the event loop (Codex security).
-const MAX_SCAN_CHARS = 4000;
+const MAX_SCAN_CHARS = 20000;
 function normalizeSpokenMoney(input) {
   const original = typeof input === 'string' ? input.slice(0, MAX_SCAN_CHARS) : '';
   const changes = [];
@@ -242,48 +242,27 @@ function textAfter(text, phrase) {
   return at < 0 ? '' : String(text).slice(at + String(phrase).length);
 }
 
-/** What the client may send as dictation_money: up to three { heard, suggested? } with short strings. */
-function cleanDictationMoney(list) {
-  if (!Array.isArray(list)) return [];
-  const out = [];
-  for (const item of list) {
-    const heard = String(item?.heard ?? '').trim().slice(0, 80);
-    if (!heard || out.some((o) => o.heard === heard)) continue;
-    const suggested = typeof item?.suggested === 'string' ? item.suggested.trim().slice(0, 20) : '';
-    out.push(suggested ? { heard, suggested } : { heard });
-    if (out.length >= 3) break;
-  }
-  return out;
-}
-
-const squash = (v) => String(v).toLowerCase().replace(/\s+/g, ' ').trim();
-
 /**
- * The system-prompt note the Intelligence Bar adds when the operator's dictation carried amounts
- * (GATE_DICTATION_MONEY_NORMALIZE). Takes the client's `dictation_money` list and the question.
- * The client only says WHICH heard words are dictated; every amount in the note is recomputed here
- * from the question (the client's `suggested` is never read), and a four-digit entry must really be
- * four digits. At most three lines. Returns '' when there is nothing to say.
+ * The system-prompt note the Intelligence Bar adds when the operator DICTATED the message
+ * (GATE_DICTATION_MONEY_NORMALIZE; the client only says `dictation_used: true`). Every line comes from the
+ * server's own parse of the question: no client-supplied amount or heard string is read. At most three
+ * lines, unclear amounts first. Returns '' when the parse finds nothing.
+ *   - an unclear amount: ask with offer_choices between $61.33 and $6,133 before using it.
  *   - a clear reading: 'The operator dictated "sixty-one thirty-three", which may mean $61.33. Before using ... read it back ...'
- *   - an unclear one: ask with offer_choices between $61.33 and $6,133 before using it.
  */
-function ambiguousAmountNote(list, question) {
-  const entries = cleanDictationMoney(list);
-  if (!entries.length) return '';
-  const parsed = typeof question === 'string' ? normalizeSpokenMoney(question) : { changes: [], ambiguous: [] };
+function dictatedAmountsNote(question) {
+  if (typeof question !== 'string') return '';
+  const parsed = normalizeSpokenMoney(question);
   const lines = [];
-  for (const { heard } of entries) {
-    if (/^\d{4}$/.test(heard)) {
-      if (!parsed.ambiguous.some((a) => a.heard === heard)) continue; // the current question must still flag it
-      const cents = fmtDollarsCents(Number(heard.slice(0, 2)), Number(heard.slice(2)));
-      lines.push(`The operator's dictated amount '${heard}' is ambiguous: ask with offer_choices between ${cents} and ${fmtDollars(Number(heard))} before using it.`);
-      continue;
-    }
-    const change = parsed.changes.find((c) => squash(c.from) === squash(heard));
-    if (change) lines.push(`The operator dictated "${change.from}", which may mean ${change.to}. Before using an amount from this dictation, read it back ("I heard ${change.to}, is that right?") unless a confirmation card shows it.`);
+  for (const { heard } of parsed.ambiguous) {
+    const cents = fmtDollarsCents(Number(heard.slice(0, 2)), Number(heard.slice(2)));
+    lines.push(`The operator's dictated amount '${heard}' is ambiguous: ask with offer_choices between ${cents} and ${fmtDollars(Number(heard))} before using it.`);
+  }
+  for (const change of parsed.changes) {
+    lines.push(`The operator dictated "${change.from}", which may mean ${change.to}. Before using an amount from this dictation, read it back ("I heard ${change.to}, is that right?") unless a confirmation card shows it.`);
   }
   const unique = [...new Set(lines)].slice(0, 3);
   return unique.length ? `\n\nDICTATED AMOUNTS:\n${unique.join('\n')}` : '';
 }
 
-module.exports = { normalizeSpokenMoney, ambiguousAmountNote, cleanDictationMoney, wordsToNumber };
+module.exports = { normalizeSpokenMoney, dictatedAmountsNote, wordsToNumber };

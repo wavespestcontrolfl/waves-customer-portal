@@ -460,29 +460,30 @@ describe('the taint follows the conversation (thread record)', () => {
   });
 });
 
-describe('GATE_DICTATION_MONEY_NORMALIZE keeps the dictated amount with the saved task', () => {
+describe('GATE_DICTATION_MONEY_NORMALIZE keeps the dictation flag with the saved task', () => {
   const Tasks = require('../services/intelligence-bar/tasks');
-  const DICTATED = [{ heard: '6133' }, { heard: 'sixty-one thirty-three', suggested: '$61.33' }];
   const savedRequest = () => Tasks.begin.mock.calls.at(-1)[0].request;
   afterEach(() => { delete process.env.GATE_DICTATION_MONEY_NORMALIZE; });
+  const ask = (extra) => withServer(baseUrl => postQuery(baseUrl, 'Bearer owner-token-abcdef', { prompt: 'charge 6133 a month', context: 'customers', ...extra }));
 
-  test('gate on: a customer pick or a resume rebuilds the request with it', async () => {
+  test('gate on: a customer pick or a resume rebuilds the request with the flag, and only the flag', async () => {
     process.env.GATE_DICTATION_MONEY_NORMALIZE = 'true';
     scriptModel([]);
-    await withServer(baseUrl => postQuery(baseUrl, 'Bearer owner-token-abcdef', { prompt: 'charge 6133 a month', context: 'customers', dictation_money: DICTATED }));
-    expect(savedRequest().dictation_money).toEqual(DICTATED);
+    await ask({ dictation_used: true, dictation_money: [{ heard: '6133', suggested: '$1' }] });
+    expect(savedRequest().dictation_used).toBe(true);
+    expect(savedRequest()).not.toHaveProperty('dictation_money');
   });
 
-  test('gate on: the saved request holds only short { heard, suggested } strings', async () => {
+  test('gate on: only a real true is kept', async () => {
     process.env.GATE_DICTATION_MONEY_NORMALIZE = 'true';
     scriptModel([]);
-    await withServer(baseUrl => postQuery(baseUrl, 'Bearer owner-token-abcdef', { prompt: 'x', context: 'customers', dictation_money: [{ heard: 'a'.repeat(200), suggested: 'b'.repeat(200), extra: 'drop me' }, 7, null] }));
-    expect(savedRequest().dictation_money).toEqual([{ heard: 'a'.repeat(80), suggested: 'b'.repeat(20) }]);
+    await ask({ dictation_used: 'yes' });
+    expect(savedRequest()).not.toHaveProperty('dictation_used');
   });
 
   test('gate off: the saved request is exactly as before', async () => {
     scriptModel([]);
-    await withServer(baseUrl => postQuery(baseUrl, 'Bearer owner-token-abcdef', { prompt: 'charge 6133 a month', context: 'customers', dictation_money: DICTATED }));
-    expect(savedRequest()).not.toHaveProperty('dictation_money');
+    await ask({ dictation_used: true });
+    expect(savedRequest()).not.toHaveProperty('dictation_used');
   });
 });
