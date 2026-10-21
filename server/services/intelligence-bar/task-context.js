@@ -98,7 +98,11 @@ const CUSTOMER_LOOKUP_LIMIT = 10;
 // rows. The fetch asks for one more than it lists, so exactly 25 rows are
 // complete and a 26th marks the lookup as capped. Read at call time; off = 10.
 const CUSTOMER_LOOKUP_LISTED_V2 = 25;
-const customerLookupLimit = () => (ibTargetRulesV2Live() ? CUSTOMER_LOOKUP_LISTED_V2 + 1 : CUSTOMER_LOOKUP_LIMIT);
+// The 25-row lookup, choice labels and last-visit reads apply to the owner-direct
+// scope only (owner login + GATE_IB_OWNER_DIRECT + the v2 gate); the route passes
+// `ownerDirectScope` to resolve(). Every other admin keeps 10 rows (Codex #6369 r10).
+const targetRulesV2Scope = scope => scope === true && ibTargetRulesV2Live();
+const customerLookupLimit = (scope = true) => (targetRulesV2Scope(scope) ? CUSTOMER_LOOKUP_LISTED_V2 + 1 : CUSTOMER_LOOKUP_LIMIT);
 
 // GATE_IB_TARGET_RULES_V2 (Codex #6369 r9): every typed-target parse (names, cities,
 // phones, emails, the "First L., City" reply) reads only the first characters of the
@@ -236,8 +240,8 @@ function namesTargetCustomer(clause, customer) {
   return new RegExp(`\\b(?:${PERSON_SELECTOR_SOURCE}|(?:${READ_SELECTOR_SOURCE})(?:\\s+me)?(?:\\s+(?:${READ_OBJECT_WORDS}))*(?:\\s+(?:with|from|of|to|between))?)$`).test(before);
 }
 
-async function namedCustomers(prompt) {
-  const lookupLimit = customerLookupLimit();
+async function namedCustomers(prompt, ownerDirectScope = false) {
+  const lookupLimit = customerLookupLimit(ownerDirectScope);
   const normalized = normalizeName(withoutContacts(targetClause(prompt)));
   const words = normalized.split(' ').slice(0, 300);
   const phrases = [];
@@ -430,15 +434,21 @@ async function withLastVisit(candidates) {
 // none of them, unless a city or phone/email in the message narrows it to one.
 const MAX_CONTACT_LITERALS = 5;
 
-// Is this customer's city typed in the message, apart from the name? The words of
-// the matched name are taken out first (one occurrence: the longest of the full name,
-// the first name, the last name), so "Brandon Smith" never reads "Brandon" as a city
-// (Codex #6369 r8). "Brandon Smith in Brandon" still names the Brandon customer.
-function cityIsTyped(customer, normalized) {
+// A city disambiguates only in explicit syntax right after the typed name:
+// "<name> in <City>", "<name> of <City>" or "<name>, <City>". Any other mention of a
+// city word (a technician or a zone later in the message) grounds nobody, and neither
+// does a word that is part of the name itself (Codex #6369 r8, r10). `marked` is the
+// normalized clause with each comma turned into COMMA_TOKEN, so the comma syntax survives
+// normalization.
+const COMMA_TOKEN = 'qqcomma';
+function cityIsTyped(customer, marked) {
   const first = normalizeName(customer.first_name), last = normalizeName(customer.last_name);
-  const phrase = [`${first} ${last}`.trim(), first, last].find(name => name && ` ${normalized} `.includes(` ${name} `));
-  const rest = phrase ? ` ${normalized} `.replace(` ${phrase} `, ' ') : ` ${normalized} `;
-  return Boolean(customer.city) && rest.includes(` ${normalizeName(customer.city)} `);
+  const hay = ` ${marked} `;
+  const phrase = [`${first} ${last}`.trim(), first, last].find(name => name && hay.includes(` ${name} `));
+  const city = normalizeName(customer.city);
+  if (!phrase || !city) return false;
+  const tail = hay.slice(hay.indexOf(` ${phrase} `) + phrase.length + 2);
+  return ['in', 'of', COMMA_TOKEN].some(lead => tail.startsWith(`${lead} ${city} `));
 }
 
 // The distinct phones and emails a clause types, as lookup literals. Collection stops
@@ -458,6 +468,7 @@ function contactLiteralsOf(clause) {
 async function typedCustomerIds(prompt, namedResult) {
   const clause = targetClause(prompt);
   const normalized = normalizeName(withoutContacts(clause));
+  const marked = normalizeName(withoutContacts(clause).replace(/,/g, ` ${COMMA_TOKEN} `));
   const ids = new Set();
   const matches = namedResult.matches || [];
   const contactIds = new Set();
@@ -474,7 +485,7 @@ async function typedCustomerIds(prompt, namedResult) {
       groups.set(key, [...(groups.get(key) || []), customer]);
     }
     for (const group of groups.values()) {
-      const inCity = group.filter(customer => cityIsTyped(customer, normalized));
+      const inCity = group.filter(customer => cityIsTyped(customer, marked));
       const only = group.length === 1 ? group : inCity;
       if (only.length === 1) ids.add(String(only[0].id));
     }
@@ -597,18 +608,24 @@ async function choiceLabels(customers) {
   return labels.map(label => (label && labels.filter(other => other && key(other) === key(label)).length === 1 ? label : null));
 }
 
-async function resolve({ prompt, pageData, selectedTarget }) {
+// The one customer a capped name's typed phone or email resolved to, or null.
+// typedIds is null outside the v2 scope.
+async function contactResolvedCustomer(typedIds) {
+  return typedIds?.length === 1 && !typedIds.identityConflict ? customerById(typedIds[0]) : null;
+}
+
+async function resolve({ prompt, pageData, selectedTarget, ownerDirectScope = false }) {
   // Object(null) is {} — an absent or null selection reads as no customer id.
   // Candidate ids come from PostgreSQL in lowercase; a selection may not.
   const selectedId = String(Object(selectedTarget).customer_id || '').toLowerCase() || null;
-  const [page, namedResult, filterWords] = await Promise.all([loadPage(pageData, prompt), namedCustomers(prompt), verifiedFilterWords(prompt)]);
+  const [page, namedResult, filterWords] = await Promise.all([loadPage(pageData, prompt), namedCustomers(prompt, ownerDirectScope), verifiedFilterWords(prompt)]);
   const named = namedResult.matches;
   const nameHint = namesRequested(prompt, filterWords);
   // A stale page hint cannot block an unrelated task or an explicitly named
   // customer. A request relying on the unavailable viewed record still stops.
   if (page.error && PAGE_REFERENCE_RE.test(targetClause(prompt)) && !named.length) return page;
   let candidates = named.map(c => customerTarget(c, 'current_request_lookup'));
-  const v2 = ibTargetRulesV2Live();
+  const v2 = targetRulesV2Scope(ownerDirectScope);
   if (v2 && candidates.length > 1) {
     const labels = await choiceLabels(named);
     candidates = (await withLastVisit(candidates)).map((candidate, index) => ({ ...candidate, choice_label: labels[index] }));
@@ -643,7 +660,13 @@ async function resolve({ prompt, pageData, selectedTarget }) {
   // the rows are never presented as choices. The request is answered and
   // closed with the way to identify the customer instead of parked behind
   // buttons that all conflict.
-  if (!namedResult.complete && !cohort && !selectedId) {
+  // A capped name plus a phone or email that names exactly one of them is resolved
+  // (Codex #6369 r10): use that customer, never ask again for a phone or email.
+  const contactPick = !namedResult.complete && !cohort && !selectedId ? await contactResolvedCustomer(typedIds) : null;
+  if (contactPick) {
+    const target = customerTarget(contactPick, 'current_request_lookup');
+    selection = { target, targets: [target], ambiguous: false };
+  } else if (!namedResult.complete && !cohort && !selectedId) {
     return { page, candidates: [], target: null, targets: [], ambiguous: false,
       error: 'More customers share this name than one lookup can list, so none can be selected here. Identify the customer by phone or email, or start the request from their customer page.',
       code: 'target_clarification_required', requestPhrase: normalizeName(targetClause(prompt)), namesRequested: nameHint, ...typed };
@@ -1062,7 +1085,7 @@ async function bindReadAddress(scope, params, input, context, toolName) {
 async function resolveCustomerSelector(params, input, context, schema) {
   const digits = value => String(value || '').replace(/\D/g, '').slice(-10);
   const permitted = new Set(context.targets.map(target => target.customer_id));
-  const named = params.customer_name ? await namedCustomers(`for ${params.customer_name}`) : null;
+  const named = params.customer_name ? await namedCustomers(`for ${params.customer_name}`, context.ownerDirect === true) : null;
   // A capped name lookup beside another selector cannot be reconciled with
   // it, so it is refused as a conflict the owner-direct fallback never
   // forwards (Codex r6 P2); alone it stays a scope question.
@@ -1197,7 +1220,7 @@ function ownerDirectContext(context = {}) {
   return { ...rest, page: rest.page || { ids: {}, records: {} }, candidates: rest.candidates || [],
     target: rest.target || null, targets, requestedRecords: rest.requestedRecords || {},
     ambiguous: false, ownerDirect: true,
-    ...(ibTargetRulesV2Live() ? sameNameNote(context) : {}) };
+    ...(ibTargetRulesV2Live() && context.typedCustomerIds ? sameNameNote(context) : {}) };
 }
 
 // GATE_IB_TARGET_RULES_V2: what the model is told about customers that share

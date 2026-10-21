@@ -245,25 +245,21 @@ function isDataAnswer(result) {
 // A write tool's result is not a read, so it never taints (known write kinds only;
 // a tool the policy does not know taints). Gate off: only `read_admin_data` taints.
 //
-// TRUSTED_READS lists tools whose results are structured office data (counts, money,
-// schedule slots, pricing config, invoice lines with free text already stripped) or
-// control replies. When unsure a tool stays OUT. Left OUT on purpose: get_customer_detail,
-// get_stop_details, get_service_history, get_schedule_view and get_estimate_detail
-// (notes fields), get_today_briefing (new leads), the lead aggregates (lead source text),
-// get_expenses and banking reads (bank feed descriptions), vendor and product reads
-// (scraped names), and every comms, email, review, call and SEO read.
+// TRUSTED_READS lists only tools whose results carry NO customer-entered string:
+// pure numbers and aggregates by service line or period, the pricing config the team
+// wrote, and control replies. Any read whose result carries a customer or lead name,
+// a city, an address, a payer, a note or other customer-entered text stays OUT (Codex
+// #6369 r10), so these are left out on purpose: get_day_summary and every schedule read
+// (customer names), the invoice readers (payer and customer names), get_revenue_breakdown
+// (groups by customer or city), compare_technicians (cities), get_customer_detail, the
+// notes readers, the lead reads, get_today_briefing, the expense and banking reads, the
+// vendor and product reads, and every comms, email, review, call and SEO read.
 const TRUSTED_READS = new Set([
-  // schedule
-  'get_day_summary', 'find_available_slots', 'find_schedule_gaps', 'get_zone_density',
-  // invoices (the readers strip free text)
-  'get_customer_invoices', 'get_invoice_detail',
-  // pricing config
-  'get_waveguard_tiers', 'read_pricing_config',
-  // dashboard and revenue aggregates
-  'get_kpi_snapshot', 'get_mrr_trend', 'compare_periods', 'get_revenue_breakdown', 'get_service_mix',
+  // dashboard and revenue aggregates (numbers by period, tier or service line)
+  'get_kpi_snapshot', 'get_mrr_trend', 'compare_periods', 'get_service_mix',
   'get_revenue_overview', 'compare_revenue_periods', 'get_service_line_pnl', 'get_tech_revenue_performance',
-  // technician roster stats
-  'compare_technicians',
+  // pricing config the team wrote
+  'get_waveguard_tiers', 'read_pricing_config',
   // control replies
   'offer_choices', 'find_admin_reads',
 ]);

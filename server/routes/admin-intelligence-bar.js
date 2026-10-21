@@ -3483,7 +3483,7 @@ async function runQuery(req, res, next) {
       activeTask = started.task;
       if (!started.created) return res.status(activeTask.state === 'running' ? 202 : 200)
         .json(await IbTasks.snapshot(activeTask, getAdminActorId(req)));
-      taskContext = await TaskContext.resolve({ prompt, pageData, selectedTarget: req.body.selected_target });
+      taskContext = await TaskContext.resolve({ prompt, pageData, selectedTarget: req.body.selected_target, ownerDirectScope: ownerDirect });
       // A task that already wrote may have changed its own target's identity
       // (a confirmed update_customer renaming the customer), so the original
       // prompt no longer resolves to the saved customer. Post-receipt, the
@@ -4348,7 +4348,9 @@ router.post('/tasks/:id/select-target', async (req, res, next) => {
     const customerId = req.body.customer_id;
     if (!UUID_RE.test(String(customerId || ''))) return res.status(400).json({ error: 'A valid customer is required' });
     const selectedTarget = { customer_id: customerId };
-    const resolved = await TaskContext.resolve({ prompt: task.request.prompt, pageData: task.request.pageData, selectedTarget });
+    const taskContextKind = task.request.context;
+    const resolved = await TaskContext.resolve({ prompt: task.request.prompt, pageData: task.request.pageData, selectedTarget,
+      ownerDirectScope: OwnerDirect.ownerDirectLive(req) && taskContextKind !== 'tech' && taskContextKind !== 'agent_estimate' });
     if (resolved.error) return res.status(409).json(resolved);
     const claimed = await IbTasks.claimResume(task.id, getAdminActorId(req), task.session_id, { selectedTarget });
     if (claimed.error) return res.status(409).json(claimed);

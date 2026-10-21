@@ -198,7 +198,7 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
       const digits = value => String(value || '').replace(/\D/g, '').slice(-10);
       const q = { whereNull: () => q, whereIn: () => q, groupBy: () => q, select: () => q,
         // A contact lookup narrows the rows the way the SQL would; every other query sees all rows.
-        where: (fn) => { if (typeof fn === 'function') fn.call(q); return q; },
+        where: (fn) => { if (typeof fn === 'function') fn.call(q); else if (fn?.id) filters.push(row => row.id === fn.id); return q; },
         whereRaw: (sql, bindings) => {
           if (/regexp_replace\(coalesce\(phone/.test(sql)) filters.push(row => digits(row.phone) === bindings[0]);
           if (/lower\(coalesce\(email/.test(sql)) filters.push(row => String(row.email || '').toLowerCase() === bindings[0]);
@@ -212,7 +212,7 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
         },
         orWhereRaw: () => q,
         limit: (n) => { limit = n; limitSeen.push(n); return q; },
-        first: async () => undefined,
+        first: async () => (table === 'customers' && filters.length ? customers.filter(row => filters.every(f => f(row)))[0] : undefined),
         then: resolve => Promise.resolve(table === 'customers' ? customers.filter(row => (!row.hiddenFromName || filters.length) && filters.every(f => f(row))).slice(0, limit) : table === 'service_records' ? serviceRecords : []).then(resolve) };
       return q;
     });
@@ -231,7 +231,7 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     };
   });
 
-  const ask = prompt => Context.resolve({ prompt, pageData: {}, selectedTarget: null });
+  const ask = (prompt, ownerDirectScope = true) => Context.resolve({ prompt, pageData: {}, selectedTarget: null, ownerDirectScope });
 
   test('gate off: 10 rows is the cap, nothing is listed, the answer asks for a phone or email', async () => {
     const resolved = await ask('update Pat Example notes');
@@ -478,6 +478,58 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(Context.targetClause(`${'a'.repeat(5000)} tail`)).toContain('tail');
   });
 
+  test('gate on: a city disambiguates only in explicit syntax right after the name (Codex #6369 r10)', async () => {
+    process.env[ON] = 'true';
+    customers = sameName(3); // Venice, Sarasota, Osprey
+    const named = { matches: customers, complete: true };
+    const grounded = async prompt => [...await Context.typedCustomerIds(prompt, named)];
+    expect(await grounded('update Pat Example in Sarasota notes')).toEqual([id(101)]);
+    expect(await grounded('update Pat Example of Sarasota notes')).toEqual([id(101)]);
+    expect(await grounded('update Pat Example, Sarasota notes')).toEqual([id(101)]);
+    // Any other mention of the city word names nobody.
+    expect(await grounded('update Pat Example and assign technician Sarasota')).toEqual([]);
+    expect(await grounded('assign Sarasota to Pat Example')).toEqual([]);
+    expect(await grounded('update Pat Example then move the Sarasota route')).toEqual([]);
+    expect(await grounded('update Pat Example near Sarasota')).toEqual([]);
+  });
+
+  test('gate on: a capped name plus a phone that names one customer resolves that customer, no "ask for a phone" code (Codex #6369 r10)', async () => {
+    process.env[ON] = 'true';
+    customers = sameName(30);
+    const beyond = customers[29];
+    const digits = beyond.phone.replace(/\D/g, '');
+    const pretty = `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`;
+    const resolved = await ask(`update Pat Example ${pretty} notes`);
+    expect(resolved.code).toBeUndefined();
+    expect(resolved.error).toBeUndefined();
+    expect(resolved.target.customer_id).toBe(beyond.id);
+    expect(resolved.typedCustomerIds).toEqual([beyond.id]);
+    // No contact: still asked for one. A phone nobody carries: still asked.
+    expect((await ask('update Pat Example notes')).code).toBe('target_clarification_required');
+    expect((await ask('update Pat Example 941-555-9999 notes')).code).toBe('target_clarification_required');
+  });
+
+  test('other admins keep today: 10 rows, no choice labels, no last visits, no typed ids (Codex #6369 r10)', async () => {
+    process.env[ON] = 'true';
+    expect(Context.customerLookupLimit(false)).toBe(10);
+    expect(Context.customerLookupLimit(true)).toBe(26);
+    customers = sameName(15);
+    const other = await ask('update Pat Example notes', false);
+    expect(other).toMatchObject({ code: 'target_clarification_required', candidates: [] });
+    expect(other.typedCustomerIds).toBeUndefined();
+    expect(limitSeen).toContain(10);
+    expect(limitSeen).not.toContain(26);
+    // Five same-name rows: listed as candidates, but with no choice_label or last_visit fields.
+    customers = sameName(5);
+    const five = await ask('update Pat Example notes', false);
+    expect(five.candidates).toHaveLength(5);
+    expect(five.candidates.every(c => c.choice_label === undefined && c.last_visit === undefined)).toBe(true);
+    expect(Context.ownerDirectContext(five).sameNameNote).toBeUndefined();
+    // The default (no scope passed) is the same as another admin.
+    customers = sameName(15);
+    expect(await Context.resolve({ prompt: 'update Pat Example notes', pageData: {}, selectedTarget: null })).toMatchObject({ code: 'target_clarification_required' });
+  });
+
   test('gate on: 25 long-name rows vet their short labels in ONE query, not one scan per row (Codex #6369 r7)', async () => {
     process.env[ON] = 'true';
     customers = Array.from({ length: 25 }, (_, i) => ({ ...sameName(1)[0], id: id(700 + i), first_name: 'Bartholomew', last_name: 'Featherstonehaugh', city: `Fort Myers Beach ${String.fromCharCode(65 + i)}`, phone: `94155504${String(i).padStart(2, '0')}` }));
@@ -669,6 +721,18 @@ describe('lead reads taint the request (Codex #6369 r7)', () => {
     expect(OwnerDirect.TRUSTED_READS.has('search_messages')).toBe(false);
     expect(OwnerDirect.TRUSTED_READS.has('get_unanswered_threads')).toBe(false);
     expect(OwnerDirect.TRUSTED_READS.has('query_leads')).toBe(false);
+  });
+
+  test('gate on: reads that list customers by name or carry customer text taint; TRUSTED_READS is only pure aggregates, config and control replies (Codex #6369 r10)', () => {
+    process.env[ON] = 'true';
+    for (const tool of ['get_day_summary', 'find_available_slots', 'find_schedule_gaps', 'get_zone_density', 'get_customer_invoices', 'get_invoice_detail',
+      'get_revenue_breakdown', 'compare_technicians', 'get_schedule_view', 'get_estimate_detail', 'get_outstanding_balances', 'get_top_revenue_customers']) {
+      const taint = OwnerDirect.newRequestTaint([]);
+      OwnerDirect.noteUntrustedRead(taint, tool, leadRows);
+      expect([tool, taint.untrustedRead]).toEqual([tool, true]);
+    }
+    expect([...OwnerDirect.TRUSTED_READS].sort()).toEqual(['compare_periods', 'compare_revenue_periods', 'find_admin_reads', 'get_kpi_snapshot', 'get_mrr_trend',
+      'get_revenue_overview', 'get_service_line_pnl', 'get_service_mix', 'get_tech_revenue_performance', 'get_waveguard_tiers', 'offer_choices', 'read_pricing_config']);
   });
 
   test('every TRUSTED_READS tool is a known read in the action policy', () => {
