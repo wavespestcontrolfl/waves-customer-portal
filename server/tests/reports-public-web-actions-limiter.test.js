@@ -70,6 +70,17 @@ describe('photo-check against the real report limiter', () => {
     expect(db).not.toHaveBeenCalled();
   });
 
+  test('dark: every photo-check answer carries no-store and noindex', async () => {
+    await withFreshServer(async (base) => {
+      for (const suffix of ['', '/']) {
+        const res = await post(base, suffix);
+        expect(res.status).toBe(404);
+        expect(res.headers.get('cache-control')).toBe('no-store');
+        expect(res.headers.get('x-robots-tag')).toBe('noindex, nofollow');
+      }
+    });
+  });
+
   test('dark: the trailing-slash path is guarded too (Express matches it)', async () => {
     await withFreshServer(async (base) => {
       const statuses = [];

@@ -288,7 +288,8 @@ async function reportAskBudgetFor(service, req, deps = {}) {
 // route path: a `:token` path would fire router.param('token') (the
 // suppression DB read) ahead of both this and the limiter, and a param-gate
 // 404 would then go out without these headers.
-const REPORT_ASK_PATH_RE = /^\/(?:project\/)?[^/]+\/ask\/?$/i;
+// /ask and the web report's /photo-check (GATE_REPORT_WEB_ACTIONS): no-store + noindex on every outcome, 404 and 429 included.
+const REPORT_ASK_PATH_RE = /^\/(?:project\/)?[^/]+\/ask\/?$|^\/[^/]+\/photo-check\/?$/i;
 function reportsAskPrivacyHeaders(req, res, next) {
   if (REPORT_ASK_PATH_RE.test(req.path || '')) {
     res.setHeader('Cache-Control', 'no-store');
