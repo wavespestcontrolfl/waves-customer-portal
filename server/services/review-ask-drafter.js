@@ -1431,10 +1431,15 @@ class HeldTouch extends Error {
 // label) and booking talk, which read as lame.
 // Names are GSM-folded ("María" -> "Maria") so one letter never turns the
 // text into UCS-2 and past the two-segment limit (#6423 r3).
+// A name longer than FIXED_DAY0_NAME_MAX is dropped for the plain greeting,
+// never cut mid-word: the name fields are uncapped, and a long one pushed the
+// line past two segments, where the sender swaps in the old template (#6423 r4).
+const FIXED_DAY0_NAME_MAX = 20;
 function fixedDay0Line({ firstName, techName, stepKind }) {
   const { gsmSafeName } = require("./messaging/gsm-normalize");
-  const name = firstName ? gsmSafeName(firstName, "") : "";
-  const tech = gsmSafeName(personFirstName(techName), "");
+  const fit = (n) => (n.length <= FIXED_DAY0_NAME_MAX ? n : "");
+  const name = firstName ? fit(gsmSafeName(firstName, "")) : "";
+  const tech = fit(gsmSafeName(personFirstName(techName), ""));
   const hello = name ? `Hi ${name}, ` : "Hi, ";
   const who = tech ? `it's ${tech} from Waves.` : "it's Waves Pest Control.";
   const thanks = stepKind === "day_after" ? "Thanks for having us out." : "Thanks for having us out today.";

@@ -319,6 +319,17 @@ describe('GATE_REVIEW_ASK_FIXED_DAY0 — the same-day text is one fixed line', (
     expect(countSegments(body.replace('{review_url}', 'portal.wavespestcontrol.com/l/abcdefghij'))).toMatchObject({ encoding: 'GSM_7' });
   });
 
+  test('a name past the cap is dropped, so the line stays within two segments', () => {
+    const { countSegments } = require('../services/messaging/segment-counter');
+    const long = 'A'.repeat(180);
+    const body = Drafter.__private.fixedDay0Line({ firstName: long, techName: long, stepKind: 'day0' });
+    expect(body).toBe("Hi, it's Waves Pest Control. Thanks for having us out today. A Google review would really help: {review_url}");
+    expect(Drafter.isFixedDay0Line(body)).toBe(true);
+    const atCap = Drafter.__private.fixedDay0Line({ firstName: 'B'.repeat(20), techName: 'C'.repeat(20), stepKind: 'day0' });
+    expect(atCap.startsWith(`Hi ${'B'.repeat(20)}, it's ${'C'.repeat(20)} from Waves.`)).toBe(true);
+    expect(countSegments(atCap.replace('{review_url}', 'portal.wavespestcontrol.com/l/abcdefghij')).segmentCount).toBeLessThanOrEqual(2);
+  });
+
   test('gate off: day 0 still goes to the writer', async () => {
     mockGates.reviewAskFixedDay0 = false;
     mockDispatch.mockResolvedValueOnce(reply(GOOD));
