@@ -2855,10 +2855,20 @@ async function sendCancellationNotice({ record, scheduledServiceId, options, not
     });
     // A recipient the provider ACCEPTED already has the text (a later contact failed to render, e.g. one the card did
     // not approve, which is still refused). Report that as a PARTIAL delivery, never as "not sent": an operator told
-    // the text did not go out would send it again by hand and double-text the accepted recipient.
-    if (sendOutcome.providerAccepted === true) {
-      logger.error(`[appt-remind] cancellation notice for ${scheduledServiceId} reached some recipients; a later one failed: ${sendErr.message}`);
-      reportOutcome(true, `The text went to the recipient(s) already reached, but another recipient was NOT texted (${sendErr.message}). Do not resend to those already reached.`, true);
+    // the text did not go out would send it again by hand and double-text the accepted recipient. Likewise a
+    // dispatch-uncertain throw (the provider may have accepted, the audit never persisted) is reported UNCERTAIN, never
+    // as a plain failure; the claim is already finalized 'sent', so nothing retries it either.
+    const partial = sendOutcome.providerAccepted === true;
+    const uncertain = sendOutcome.dispatchUncertain === true;
+    if (partial || uncertain) {
+      logger.error(`[appt-remind] cancellation notice for ${scheduledServiceId} is ${uncertain ? 'delivery-uncertain' : 'partial'}: ${sendErr.message}`);
+      reportOutcome(
+        partial && !uncertain,
+        uncertain
+          ? `The text may have gone out (${sendErr.message}). Check the customer's message history before sending it again.`
+          : `The text went to the recipient(s) already reached, but another recipient was NOT texted (${sendErr.message}). Do not resend to those already reached.`,
+        { partial, uncertain },
+      );
       return;
     }
     throw sendErr;
@@ -4966,11 +4976,14 @@ const AppointmentReminders = {
     const outcome = (options.outcome && typeof options.outcome === 'object') ? options.outcome : null;
     // `partial`: some recipient was texted and another was not. notificationSent stays true (somebody HAS the text, so
     // an operator must not send it again), notificationPartial says not everyone did, notificationError says why.
-    const reportOutcome = (sent, error, partial = false) => {
+    // `uncertain`: the provider may have accepted a text whose audit row never persisted. notificationSent stays false
+    // (delivery is unproven) but notificationUncertain tells callers NOT to advise a resend.
+    const reportOutcome = (sent, error, { partial = false, uncertain = false } = {}) => {
       if (!outcome) return;
       outcome.notificationSent = sent;
       outcome.notificationError = error;
       if (partial) outcome.notificationPartial = true;
+      if (uncertain) outcome.notificationUncertain = true;
     };
     try {
       const sendNotification = options.sendNotification !== false;

@@ -4654,11 +4654,14 @@ async function cancelReceiptName(appt, frozen, appointment_id) {
 // What the Dispatch handler did NOT finish, in the operator's words (the receipt shows result.warning only).
 function cancelReplayWarnings(json, sendText) {
   const warnings = [];
-  if (sendText && json.notificationSent === false) {
+  // Delivery unproven (the provider may have accepted it): never advise a resend, whatever else is true.
+  if (sendText && json.notificationUncertain === true) {
+    warnings.push(`The visit is cancelled, but the customer text may have gone out (${json.notificationError || 'delivery could not be confirmed'}). Check the customer's message history before sending it again.`);
+  } else if (sendText && json.notificationSent === false) {
     warnings.push(`The visit is cancelled, but the customer text did not go out (${json.notificationError || 'no reason given'}) and will not be retried automatically — send it by hand.`);
   }
   // Some recipients got the text and another did not: say so, and say NOT to resend to those already reached.
-  if (sendText && json.notificationSent === true && json.notificationPartial === true) {
+  if (sendText && json.notificationUncertain !== true && json.notificationSent === true && json.notificationPartial === true) {
     warnings.push(`The visit is cancelled and the customer text went to some recipients, but not all (${json.notificationError || 'no reason given'}). Do not send it again to those already reached.`);
   }
   // A money effect that changed since the card (an invoice, a payment attempt, a credit) was NOT acted on.
@@ -4695,6 +4698,7 @@ async function cancelReplayResult({ status, json = {} }, { appointment_id, appt,
     ran_dispatch_cancel: true,
     customer_text_sent: sendText && json.notificationSent === true,
     ...(sendText && json.notificationPartial === true ? { customer_text_partial: true } : {}),
+    ...(sendText && json.notificationUncertain === true ? { customer_text_uncertain: true } : {}),
     ...(skipped.length ? { linked_visits_skipped: skipped } : {}),
     ...(moneySkipped.length ? { money_skipped: moneySkipped } : {}),
     ...(warnings.length ? { warning: warnings.join(' ') } : {}),

@@ -2959,6 +2959,7 @@ async function serviceStatusHandler(req, res, next) {
               notificationSent: cancelNoticeOutcome.notificationSent,
               notificationError: cancelNoticeOutcome.notificationError || null,
               ...(cancelNoticeOutcome.notificationPartial ? { notificationPartial: true } : {}),
+              ...(cancelNoticeOutcome.notificationUncertain ? { notificationUncertain: true } : {}),
             }
           : {}),
       });
@@ -3485,6 +3486,7 @@ async function serviceStatusHandler(req, res, next) {
             notificationSent: cancelNoticeOutcome.notificationSent,
             notificationError: cancelNoticeOutcome.notificationError || null,
             ...(cancelNoticeOutcome.notificationPartial ? { notificationPartial: true } : {}),
+            ...(cancelNoticeOutcome.notificationUncertain ? { notificationUncertain: true } : {}),
           }
         : {}),
       ...(req.ibLinkedChildReport ? { linkedVisitsSkipped: req.ibLinkedChildReport.skipped } : {}),

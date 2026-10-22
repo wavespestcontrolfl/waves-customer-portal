@@ -282,6 +282,25 @@ describe('cancel_appointment confirm WITH effects replays the Dispatch cancel', 
     expect(result.warning).toMatch(/customer text did not go out/);
   });
 
+  test('delivery uncertain (the provider may have accepted it) says check the history, never "send it by hand"', async () => {
+    mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, notificationSent: false, notificationUncertain: true, notificationError: 'The text may have gone out (audit insert failed). Check the customer\'s message history before sending it again.' } });
+    const result = await executeTool('cancel_appointment', input(), ADMIN);
+    expect(result.success).toBe(true);
+    expect(result.customer_text_sent).toBe(false);
+    expect(result.customer_text_uncertain).toBe(true);
+    expect(result.warning).toMatch(/may have gone out/);
+    expect(result.warning).toMatch(/Check the customer's message history before sending it again/);
+    expect(result.warning).not.toMatch(/send it by hand/);
+    expect(result.warning).not.toMatch(/did not go out/);
+  });
+
+  test('a known not-sent text still says to send it by hand', async () => {
+    mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, notificationSent: false, notificationError: 'customer opted out' } });
+    const result = await executeTool('cancel_appointment', input(), ADMIN);
+    expect(result.customer_text_uncertain).toBeUndefined();
+    expect(result.warning).toMatch(/send it by hand/);
+  });
+
   test('a text that reached some recipients but not all is reported as partial with a do-not-resend warning', async () => {
     mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, notificationSent: true, notificationPartial: true, notificationError: 'another recipient was NOT texted' } });
     const result = await executeTool('cancel_appointment', input(), ADMIN);

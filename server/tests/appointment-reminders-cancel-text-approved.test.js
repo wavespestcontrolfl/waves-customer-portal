@@ -146,6 +146,38 @@ describe('handleCancellation sends the approved text', () => {
     expect(states[states.length - 1]).toBe('suppressed');
   });
 
+  test('provider handoff began and then the send threw (acceptance without an audit row) is reported UNCERTAIN, never as a plain failure', async () => {
+    const preview = await AppointmentReminders.previewCancellationText('svc-1');
+    // The canonical sender runs the pre-dispatch fence (dispatchStarted), then its audit write fails after the handoff.
+    mockSendCustomerMessage.mockImplementation(async (args) => {
+      await args.preDispatchCheck();
+      throw new Error('audit insert failed');
+    });
+    const outcome = {};
+    await AppointmentReminders.handleCancellation('svc-1', {
+      outcome, approvedNotice: preview.recipients.map(({ recipient_key, body }) => ({ recipient_key, body })),
+    });
+    expect(outcome.notificationSent).toBe(false);
+    expect(outcome.notificationUncertain).toBe(true);
+    expect(outcome.notificationError).toMatch(/may have gone out/);
+    expect(outcome.notificationError).toMatch(/Check the customer's message history/);
+    // Finalized as sent (the claim is never retried, so nothing re-texts the recipient).
+    const states = mockState.updates.filter((p) => typeof p.cancellation_notice_state === 'string').map((p) => p.cancellation_notice_state);
+    expect(states[states.length - 1]).toBe('sent');
+  });
+
+  test('a known not-sent failure (nothing reached the provider) still reports plain not-sent', async () => {
+    const preview = await AppointmentReminders.previewCancellationText('svc-1');
+    mockSendCustomerMessage.mockRejectedValue(new Error('provider timeout'));
+    const outcome = {};
+    await AppointmentReminders.handleCancellation('svc-1', {
+      outcome, approvedNotice: preview.recipients.map(({ recipient_key, body }) => ({ recipient_key, body })),
+    });
+    expect(outcome.notificationSent).toBe(false);
+    expect(outcome.notificationUncertain).toBeUndefined();
+    expect(outcome.notificationPartial).toBeUndefined();
+  });
+
   test('a recipient reached before a later recipient failed is reported as a PARTIAL delivery, never as not-sent', async () => {
     const preview = await AppointmentReminders.previewCancellationText('svc-1');
     // The service contact was added after the card: the primary is approved and sends, the new contact is refused.
