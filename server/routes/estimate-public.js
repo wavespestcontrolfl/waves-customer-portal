@@ -1054,6 +1054,120 @@ function confirmationServiceLabel(oneTimeList, estimate, fallbackLabel) {
   return String(specific).replace(/\s+/g, ' ').trim() || String(fallbackLabel || '').trim();
 }
 
+// Did the accept leave the card protection it promised? A fresh capture or a
+// saved method must have enrolled Auto Pay; a failed or refused enrollment
+// raises an office exception (the visits would invoice unprotected), so the
+// notification must stay actionable. Exempt, because no enrollment is owed:
+// an already-active Auto Pay method (autopay_already_active), a paused or
+// opted-out customer (the hold is intentional), and a fresh capture whose
+// enrollment was deliberately skipped (autopay_opt_out_kept).
+function cardEnrollmentSettled({ policy, enrollmentResult } = {}) {
+  if (!policy) return false;
+  if (policy.exemptReason === 'autopay_already_active') return true;
+  if (policy.autopayPaused === true || policy.autopayDisabled === true) return true;
+  if (enrollmentResult?.enrolled === true) return true;
+  return enrollmentResult?.reason === 'autopay_opt_out_kept';
+}
+
+// "Billed after the first visit" is true only when (1) the customer the accept
+// landed on is billed per visit / per application and (2) there is evidence
+// something collectible will be billed. The accept's recurring-card lane is
+// broader than that: a pinned legacy rodent-only plan enters it while the
+// converter stamps billing_mode 'monthly_membership' (the monthly cron collects
+// dues), and a current monthly member adding a service keeps their mode. The
+// lane comes from the billing lane the accept left on the customer row
+// (billing-lane resolveBillingLane), read after the conversion commits. A
+// per_application customer with no fee on file, no priced first visit and no
+// attached first-application invoice bills NOTHING at completion (the converter
+// raises a manual-billing alert), so that keeps the generic copy, which still
+// asks a person to follow up. Fails closed: no customer, a read error or any
+// other lane keeps the generic copy.
+async function resolveCardLaneAfterVisit({
+  recurringCardLaneActive, treatAsOneTime, customerId, attachedInvoiceTotal = 0, firstVisitPriced = false,
+  enrollmentSettled = false,
+}, database = db) {
+  if (recurringCardLaneActive !== true || treatAsOneTime || !customerId || enrollmentSettled !== true) return false;
+  try {
+    const row = await database('customers').where({ id: customerId }).first('billing_mode', 'waveguard_tier', 'monthly_rate', 'per_application_fee');
+    if (!row) return false;
+    const { resolveBillingLane } = require('../services/billing-lane');
+    if (!['per_application', 'per_visit'].includes(resolveBillingLane(row).mode)) return false;
+    return Number(attachedInvoiceTotal) > 0
+      || firstVisitPriced === true
+      || (row.per_application_fee != null && Number(row.per_application_fee) > 0);
+  } catch (err) {
+    logger.warn(`[estimate-accept] billing lane read for accept copy failed (customer ${customerId}): ${err.message}`);
+    return false;
+  }
+}
+
+// The first visit this accept leaves on the books: the earliest committed or
+// adopted appointment, else the earliest visit the converter auto-scheduled.
+// The converter's firstScheduledServiceId is the first INSERTED unit, not the
+// earliest (a seasonal unit inserted first can roll to February), so its
+// earliestScheduledUnitDate wins when exposed; the id row is the fallback and
+// also reports whether that visit is priced. Returns
+// { firstVisitDate: 'YYYY-MM-DD'|null, firstVisitBooked, firstVisitPriced }.
+// A converter visit whose row cannot be read still counts as booked (no date).
+async function resolveAcceptedFirstVisit({ acceptedAppointments, conversionVisitId, conversionEarliestDate = null }, database = db) {
+  const isDay = (day) => /^\d{4}-\d{2}-\d{2}$/.test(day);
+  const appts = Array.isArray(acceptedAppointments) ? acceptedAppointments : [];
+  const apptPriced = appts.some((appt) => appt?.estimated_price != null && Number(appt.estimated_price) > 0);
+  const days = appts.map((appt) => dateOnly(appt?.scheduled_date)).filter(isDay).sort();
+  if (days[0]) return { firstVisitDate: days[0], firstVisitBooked: true, firstVisitPriced: apptPriced };
+  const earliest = dateOnly(conversionEarliestDate);
+  if (!conversionVisitId) {
+    return isDay(earliest)
+      ? { firstVisitDate: earliest, firstVisitBooked: true, firstVisitPriced: false }
+      : { firstVisitDate: null, firstVisitBooked: false, firstVisitPriced: false };
+  }
+  try {
+    const row = await database('scheduled_services')
+      .where({ id: conversionVisitId })
+      .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
+      .first('scheduled_date', 'estimated_price');
+    if (!row) {
+      return isDay(earliest)
+        ? { firstVisitDate: earliest, firstVisitBooked: true, firstVisitPriced: false }
+        : { firstVisitDate: null, firstVisitBooked: false, firstVisitPriced: false };
+    }
+    const rowDay = dateOnly(row.scheduled_date);
+    return {
+      firstVisitDate: isDay(earliest) ? earliest : (isDay(rowDay) ? rowDay : null),
+      firstVisitBooked: true,
+      firstVisitPriced: row.estimated_price != null && Number(row.estimated_price) > 0,
+    };
+  } catch (err) {
+    logger.warn(`[estimate-accept] converter visit read for accept copy failed (${conversionVisitId}): ${err.message}`);
+    return { firstVisitDate: isDay(earliest) ? earliest : null, firstVisitBooked: true, firstVisitPriced: false };
+  }
+}
+
+// The date of the visit collection waits for. With a first-application invoice
+// attached (billingVisitId = the visit it hangs on) that is THAT visit, which in
+// a mixed auto-scheduled plan can be a later seasonal unit rather than the
+// earliest; with no attached invoice (the per-application fee is billed at each
+// visit) it is the earliest visit (fallbackDate). An attached visit whose date
+// cannot be read is unknown (null), never the earlier unit's date.
+async function resolveBillingVisitDate({ billingVisitId = null, acceptedAppointments = [], fallbackDate = null }, database = db) {
+  const isDay = (day) => /^\d{4}-\d{2}-\d{2}$/.test(day);
+  if (!billingVisitId) return isDay(dateOnly(fallbackDate)) ? dateOnly(fallbackDate) : null;
+  const known = (Array.isArray(acceptedAppointments) ? acceptedAppointments : [])
+    .find((appt) => appt?.id != null && String(appt.id) === String(billingVisitId));
+  if (known && isDay(dateOnly(known.scheduled_date))) return dateOnly(known.scheduled_date);
+  try {
+    const row = await database('scheduled_services')
+      .where({ id: billingVisitId })
+      .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
+      .first('scheduled_date');
+    const day = dateOnly(row?.scheduled_date);
+    return isDay(day) ? day : null;
+  } catch (err) {
+    logger.warn(`[estimate-accept] billing visit read for accept copy failed (${billingVisitId}): ${err.message}`);
+    return null;
+  }
+}
+
 function dateOnly(value) {
   if (!value) return '';
   if (value instanceof Date) return value.toISOString().split('T')[0];
@@ -16328,6 +16442,32 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           acceptTierLabel = 'Commercial';
         }
       } catch { /* fall back to the estimate tier */ }
+      const acceptedFirstVisit = await resolveAcceptedFirstVisit({
+        acceptedAppointments: acceptedAppointmentsToRegister,
+        conversionVisitId: txResult.standardConversion?.firstScheduledServiceId || null,
+        conversionEarliestDate: txResult.standardConversion?.earliestScheduledUnitDate || null,
+      });
+      acceptedFirstVisit.billingVisitDate = await resolveBillingVisitDate({
+        billingVisitId: txResult.standardInvoiceAttached === true
+          ? (txResult.standardConversion?.firstScheduledServiceId || null)
+          : null,
+        acceptedAppointments: acceptedAppointmentsToRegister,
+        fallbackDate: acceptedFirstVisit.firstVisitDate,
+      });
+      acceptedFirstVisit.cardLaneAfterVisit = await resolveCardLaneAfterVisit({
+        recurringCardLaneActive,
+        treatAsOneTime,
+        customerId,
+        // A collectible amount, judged below next to the billing lane: the
+        // attached first-application invoice (not paid at accept) or a priced
+        // first visit. The customer's per-application fee is read there.
+        attachedInvoiceTotal: txResult.standardInvoiceAttached === true ? Number(txResult.invoiceAmount) || 0 : 0,
+        firstVisitPriced: acceptedFirstVisit.firstVisitPriced,
+        enrollmentSettled: cardEnrollmentSettled({
+          policy: recurringCardPolicy,
+          enrollmentResult: recurringCardPayerFallback ? null : recurringCardEnrollmentResult,
+        }),
+      });
       const notificationPayload = buildAcceptNotificationPayload({
         customerName: estimate.customer_name,
         waveguardTier: acceptTierLabel,
@@ -16369,6 +16509,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         afterVisitPaused: recurringCardPolicy.autopayPaused === true,
         afterVisitDisabled: recurringCardPolicy.autopayDisabled === true,
         setupFeeDeferred: txResult.setupFeeDeferredToFirstVisit === true,
+        // Card-on-file lane accept with nothing collected at accept (the
+        // payable-invoice, payer, credit, prepay and one-time branches all sit
+        // ahead of this flag in the builder): bills after the first visit.
+        cardLaneAfterVisit: acceptedFirstVisit.cardLaneAfterVisit,
+        firstVisitDate: acceptedFirstVisit.firstVisitDate,
+        firstVisitBooked: acceptedFirstVisit.firstVisitBooked,
+        billingVisitDate: acceptedFirstVisit.billingVisitDate,
       });
       // bell: true \u2014 accepted estimates must ring the admin bell even under
       // GATE_ADMIN_BELL_POLICY (category 'estimate' is otherwise silenced).
@@ -22271,6 +22418,15 @@ function buildAcceptNotificationPayload(args = {}) {
   return { ...copy, adminAction, adminWhy };
 }
 
+// 'YYYY-MM-DD' -> 'Oct 24' (calendar day, no timezone shift). '' when absent or malformed.
+function firstVisitDateLabel(value) {
+  const day = dateOnly(value);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return '';
+  const d = new Date(`${day}T12:00:00Z`);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+
 function buildAcceptNotificationCopy({
   customerName = '',
   waveguardTier = 'Bronze',
@@ -22329,6 +22485,21 @@ function buildAcceptNotificationCopy({
   // GATE_PAF_TERMITE: the agreement being issued charges after the station
   // installation, not at signature.
   annualChargeAfterInstallation = false,
+  // New-customer pay-after-first-visit: the accept rode the card-on-file lane
+  // (a card was captured, or one is already enrolled), the standard
+  // setup / first-application invoice was attached to the first visit with no
+  // pay link (or none was minted yet), and completion charges it. Nothing is
+  // owed until the first visit is performed. Unlike afterVisitBilling this is
+  // not limited to existing customers. Omitted/false = today's copy.
+  cardLaneAfterVisit = false,
+  // 'YYYY-MM-DD' of the first booked visit when this accept booked one.
+  firstVisitDate = null,
+  // A first visit exists (committed, adopted or converter-scheduled) even if its date is unknown.
+  firstVisitBooked = false,
+  // 'YYYY-MM-DD' of the visit collection waits for: the visit the first-
+  // application invoice is attached to, else (fee billed at each visit) the
+  // earliest visit. Null = unknown, and the copy says "the first visit".
+  billingVisitDate = null,
 } = {}) {
   // Sign-before-pay (codex round-3 P2 on #4819): the durable notifications
   // must send the customer to the signature, never read as "approved,
@@ -22668,6 +22839,25 @@ function buildAcceptNotificationCopy({
       adminNext: 'Billed after the first visit; nothing to do now',
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${waveguardTier} WaveGuard plan is confirmed. Nothing is charged today — your saved payment method is billed after your first visit.`,
+      customerLink: '/?tab=billing',
+    };
+  }
+
+  // A new customer on the card rail: the first-application invoice is a draft
+  // attached to the first visit (or not minted yet) and bills after that visit,
+  // so "invoice follow-up needed" below would send staff to bill something that
+  // is collected by the visit's completion. Only an unbooked first visit is work.
+  if (cardLaneAfterVisit) {
+    const visitDay = firstVisitDateLabel(firstVisitDate);
+    const booked = !!(reservationCommitted || firstVisitBooked || visitDay);
+    const billingDay = firstVisitDateLabel(billingVisitDate);
+    return {
+      adminTitle: `Estimate accepted: ${customerName}`,
+      adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Billed after the ${billingDay ? `${billingDay} visit` : 'first visit'}; nothing is charged today.${booked ? '' : ' No first visit is booked yet.'}`,
+      adminNext: booked ? 'Billed after the first visit; nothing to do' : 'Next: book the first visit',
+      adminDoneWhen: booked ? null : 'visit_booked',
+      customerTitle: 'Estimate accepted',
+      customerBody: `Your ${waveguardTier} WaveGuard plan is confirmed. Nothing is charged today — you pay after your ${billingDay ? `${billingDay} visit` : 'first visit'}.`,
       customerLink: '/?tab=billing',
     };
   }
@@ -31620,6 +31810,10 @@ module.exports.resolveProspectiveOwnerId = resolveProspectiveOwnerId;
 module.exports.collectServiceCategories = collectServiceCategories;
 module.exports.hasOnlyLawnCareServiceMix = hasOnlyLawnCareServiceMix;
 module.exports.isLawnCareOneTimeItem = isLawnCareOneTimeItem;
+module.exports.resolveCardLaneAfterVisit = resolveCardLaneAfterVisit;
+module.exports.cardEnrollmentSettled = cardEnrollmentSettled;
+module.exports.resolveBillingVisitDate = resolveBillingVisitDate;
+module.exports.resolveAcceptedFirstVisit = resolveAcceptedFirstVisit;
 module.exports.oneTimeItemsForRender = oneTimeItemsForRender;
 module.exports.oneTimeItemFamilyKeys = oneTimeItemFamilyKeys;
 module.exports.preservedOneTimeAddOnRowsFromBreakdown = preservedOneTimeAddOnRowsFromBreakdown;
