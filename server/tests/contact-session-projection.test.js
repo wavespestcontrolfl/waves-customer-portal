@@ -49,8 +49,8 @@ const projection = require('../services/contact-session-projection');
 
 // A multi-property profile's saved-property rows, and the PRIMARY scope a
 // contact's reads resolve from them — whatever GATE_APP_PROPERTY_SCOPE says.
-const PROPERTY_ROWS = [{ id: 'prop-1', is_primary: true }, { id: 'prop-2', is_primary: false }];
-const PRIMARY_SCOPE = { customerId: 'cust-1', enabled: true, multi: true, scoped: true, closed: false, property: { id: 'prop-1', is_primary: true } };
+const PROPERTY_ROWS = [{ id: 'prop-1', customer_id: 'cust-1', active: true, is_primary: true }, { id: 'prop-2', customer_id: 'cust-1', active: true, is_primary: false }];
+const PRIMARY_SCOPE = { customerId: 'cust-1', enabled: true, multi: true, scoped: true, closed: false, property: PROPERTY_ROWS[0] };
 // Table-aware db: the saved-property rows, else the given rows by table, else nothing.
 function wireTables(byTable, properties = PROPERTY_ROWS) {
   db.mockImplementation((table) => chain(table === 'customer_properties' ? properties : (byTable[table] || [])));
@@ -125,10 +125,16 @@ describe('pure projections', () => {
     // No active row: a profile that never had one keeps its customer-wide reads; one whose rows were all retired is closed.
     wireTables({}, []);
     expect(await projection.contactRecordScope(req)).toMatchObject({ enabled: true, scoped: false, closed: false, property: null });
-    const retired = chain([]);
-    retired.first = jest.fn(async () => ({ id: 'retired' }));
-    db.mockImplementation((table) => (table === 'customer_properties' ? retired : chain([])));
+    wireTables({}, [{ id: 'retired', customer_id: 'cust-1', active: false, is_primary: true }]);
     expect(await projection.contactRecordScope(req)).toMatchObject({ enabled: true, scoped: true, closed: true, property: null });
+    // Several rows at once (the contact's property list): ONE customer_properties read for all of them (codex #6364 r2 P2).
+    wireTables({}, [...PROPERTY_ROWS, { id: 'retired-2', customer_id: 'cust-2', active: false, is_primary: true }]);
+    db.mockClear();
+    const scopes = await projection.contactRecordScopes(['cust-1', 'cust-2', 'cust-3']);
+    expect(db.mock.calls.filter(([table]) => table === 'customer_properties')).toHaveLength(1);
+    expect(scopes.get('cust-1')).toEqual(PRIMARY_SCOPE);
+    expect(scopes.get('cust-2')).toMatchObject({ customerId: 'cust-2', scoped: true, closed: true, property: null });
+    expect(scopes.get('cust-3')).toMatchObject({ customerId: 'cust-3', scoped: false, closed: false, property: null });
     expect(await projection.contactRecordScope({ customerId: 'cust-1', customer: { id: 'cust-1' } })).toBeNull();
     const q = { marker: true };
     expect(projection.scopeContactRecords(q, PRIMARY_SCOPE)).toBe(q);
@@ -375,8 +381,7 @@ describe('GET /services for a contact session', () => {
     // Every saved property retired (a CLOSED contact scope): the records match nothing and the Celsius count is 0 —
     // never the helper's "busiest lawn" fallback for a null propertyId (codex r18 P2).
     celsiusApplicationsThisYear.mockClear();
-    const retired = chain([]);
-    retired.first = jest.fn(async () => ({ id: 'retired' }));
+    const retired = chain([{ id: 'retired', customer_id: 'cust-1', active: false, is_primary: true }]);
     db.mockImplementation((table) => (table === 'customer_properties' ? retired : chain(table === 'service_records' ? [{ count: '0' }] : [])));
     await withServer(async (get) => {
       const stats = await get('/services/stats/summary');

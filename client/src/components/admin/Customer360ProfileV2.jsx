@@ -9223,6 +9223,148 @@ function CustomerPayerEditor({ c, isAdmin, payer }) {
     </div>
   );
 }
+// On-location contacts' OWN notification choices (contact login,
+// GATE_CONTACT_LOGIN): what each contact chose in the app, overlaid on the
+// account's settings (a purpose the holder turned off reads "Off at account
+// level" and cannot be changed here — choices only narrow). Staff may turn
+// a contact's notice off or pick its delivery; turning texts ON is the
+// contact's alone until they have agreed in the app (the server refuses it).
+const CONTACT_CHOICE_ROWS = [
+  { key: "appointmentConfirmation", channelKey: "appointmentConfirmationChannel", label: "Appointment updates" },
+  { key: "serviceReminder72h", channelKey: "serviceReminder72hChannel", label: "3-day reminder" },
+  { key: "serviceReminder24h", channelKey: "serviceReminder24hChannel", label: "Day-before reminder" },
+  { key: "techEnRoute", channelKey: "enRouteChannel", label: "On the way" },
+  { key: "techArrived", channelKey: "techArrivedChannel", label: "Technician arrival" },
+  { key: "serviceCompleted", channelKey: "serviceCompleteChannel", label: "Service reports" },
+];
+const CONTACT_CHOICE_CHANNELS = [
+  { value: "both", label: "Text & Email" },
+  { value: "sms", label: "Text" },
+  { value: "email", label: "Email" },
+];
+function CustomerContactNotificationChoices({ customerId, isAdmin }) {
+  const [state, setState] = useState({ loading: true, error: "", data: null });
+  const [openSlot, setOpenSlot] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [saveErr, setSaveErr] = useState("");
+  const seqRef = useRef(0);
+  useEffect(() => {
+    const seq = ++seqRef.current;
+    setState({ loading: true, error: "", data: null });
+    setOpenSlot(null);
+    setSaveErr("");
+    // A save still in flight for the previous customer skips its own reset
+    // (stale sequence), so the latch is released here (codex #6364 r1 P2).
+    setSaving(false);
+    adminFetch(`/admin/customers/${customerId}/contact-notification-prefs`)
+      .then((data) => { if (seqRef.current === seq) setState({ loading: false, error: "", data }); })
+      .catch((err) => { if (seqRef.current === seq) setState({ loading: false, error: err.message || "Could not load contact notification choices", data: null }); });
+  }, [customerId]);
+  const contacts = state.data?.contacts || [];
+  if (!state.loading && !state.error && !contacts.length) return null;
+  const save = async (slot, patch) => {
+    if (!isAdmin || saving) return;
+    const seq = seqRef.current;
+    setSaving(true);
+    setSaveErr("");
+    try {
+      const response = await adminFetch(`/admin/customers/${customerId}/contact-notification-prefs/${slot}`, {
+        method: "PUT",
+        body: JSON.stringify(patch),
+      });
+      if (seqRef.current === seq && response?.contacts) setState({ loading: false, error: "", data: response });
+    } catch (err) {
+      if (seqRef.current === seq) setSaveErr(err.message || "Could not save this contact's notification choices");
+    } finally {
+      if (seqRef.current === seq) setSaving(false);
+    }
+  };
+  const summaryFor = (contact) => {
+    const on = CONTACT_CHOICE_ROWS.filter((r) => contact.preferences?.[r.key] !== false).length;
+    const parts = [
+      contact.preferences?.smsEnabled === false ? "Texts off" : "Texts on",
+      `${on} of ${CONTACT_CHOICE_ROWS.length} alerts`,
+      contact.hasOwnChoices ? "Own choices" : "Account defaults",
+    ];
+    if (contact.consentAttestedAt) parts.push("Agreed to texts in the app");
+    else if (contact.smsOptin === "pending") parts.push("Opt-in text pending");
+    else if (contact.smsOptin === "declined") parts.push("Replied STOP");
+    return parts.join(" · ");
+  };
+  return (
+    <div className="mt-3" data-testid="contact-notification-choices">
+      <div className="text-ui-caption ui-label text-ink-tertiary mb-1.5">On-location contacts&apos; own notification choices</div>
+      {state.loading && <div className="text-ui-label text-ink-secondary">Loading…</div>}
+      {state.error && <div className="text-ui-label text-alert-fg">{state.error}</div>}
+      {state.data && state.data.live === false && (
+        <div className="text-ui-label text-ink-secondary mb-1.5">Contact login is off, so these choices are stored but not applied to sends.</div>
+      )}
+      {contacts.map((contact) => {
+        const open = openSlot === contact.slot;
+        return (
+          <div key={contact.slot} className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-ui-label font-medium text-zinc-900">
+                  {contact.name || "Contact"} <Badge tone="neutral" className="ml-1">Contact {contact.slot}</Badge>
+                </div>
+                <div className="text-ui-label text-ink-secondary break-all">{[contact.phone, contact.email].filter(Boolean).join(" · ")}</div>
+                <div className="text-ui-label text-ink-secondary">{summaryFor(contact)}</div>
+                {contact.reportsWithheld && (
+                  <div className="text-ui-label text-ink-secondary">Service reports are withheld from this contact (tenant or managed-account rule).</div>
+                )}
+                {!contact.phone && (
+                  <div className="text-ui-label text-ink-secondary">Email-only contact: choices are kept by phone number, so there is nothing to set here.</div>
+                )}
+              </div>
+              {isAdmin && contact.phone && (
+                <Button variant="ghost" onClick={() => { setSaveErr(""); setOpenSlot(open ? null : contact.slot); }} aria-label={`${open ? "Close" : "Edit"} notification choices for ${contact.name || `contact ${contact.slot}`}`}>
+                  {open ? "Close" : "Edit"}
+                </Button>
+              )}
+            </div>
+            {open && (
+              <div className="mt-2 border-t border-hairline border-zinc-200 pt-2">
+                <div className="flex items-center justify-between py-1">
+                  <span className="ui-label text-ink-secondary">Text messages</span>
+                  <Switch aria-label={`Text messages for ${contact.name || `contact ${contact.slot}`}`} checked={contact.preferences?.smsEnabled !== false} disabled={saving}
+                    onChange={(next) => save(contact.slot, { smsEnabled: !!next })} />
+                </div>
+                {CONTACT_CHOICE_ROWS.filter((row) => row.key !== "serviceCompleted" || !contact.reportsWithheld).map((row) => {
+                  const holderOff = contact.accountOff?.[row.key] === true;
+                  const on = !holderOff && contact.preferences?.[row.key] !== false;
+                  const channels = contact.emailAvailable ? CONTACT_CHOICE_CHANNELS : CONTACT_CHOICE_CHANNELS.filter((o) => o.value !== "email");
+                  return (
+                    <div key={row.key} className="flex items-center justify-between gap-2 py-1">
+                      <span className="ui-label text-ink-secondary min-w-0">
+                        {row.label}
+                        {holderOff && <span className="block text-ui-caption text-ink-tertiary">Off at account level</span>}
+                      </span>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <Select size="sm" className="!w-auto" aria-label={`Delivery for ${row.label} (${contact.name || `contact ${contact.slot}`})`}
+                          value={contact.preferences?.[row.channelKey] || "both"} disabled={saving || holderOff || !on}
+                          onChange={(e) => save(contact.slot, { [row.channelKey]: e.target.value })}>
+                          {channels.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                        </Select>
+                        <Switch aria-label={`${row.label} for ${contact.name || `contact ${contact.slot}`}`} checked={on} disabled={saving || holderOff}
+                          onChange={(next) => save(contact.slot, { [row.key]: !!next })} />
+                      </div>
+                    </div>
+                  );
+                })}
+                {saveErr && <div className="mt-1 text-ui-label text-alert-fg">{saveErr}</div>}
+                {!contact.consentAttestedAt && (
+                  <div className="mt-1 text-ui-label text-ink-secondary">This contact has not agreed to texts in the app yet: you can turn alerts off here, but only they can turn one on.</div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function CustomerRecipientDetails({
   c,
   payer,
@@ -9298,6 +9440,7 @@ function CustomerRecipientDetails({
             </div>
           ))}
         </div>
+        <CustomerContactNotificationChoices customerId={c.id} isAdmin={isAdmin} />
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">
           <label className="block">
             <span className="ui-label text-ink-tertiary block mb-1">
