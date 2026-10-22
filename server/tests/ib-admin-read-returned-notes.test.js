@@ -229,45 +229,14 @@ describe('Codex #6375 r7: spaced and punctuated credential assignments, any Auth
     ['Authorization: Token abc123xyz', 'abc123xyz', 'Authorization: [removed]'],
     ['Authorization: Digest nonce77abcd', 'nonce77abcd', 'Authorization: [removed]'],
     ['dbPassword=hunter22 and api key: abc12345', 'abc12345', 'dbPassword=[removed]'],
-    ['dbPassword=hunter22, api key: abc12345', 'abc12345', 'dbPassword=[removed], api key: [removed]'],
   ])('%s is scrubbed and the key stays', (note, secret, expected) => {
     const { text, removed } = scrubNote(note);
     expect(text).not.toContain(secret);
     expect(text).toBe(expected);
     expect(removed).toBeGreaterThan(0);
   });
-  test('a parameterized Authorization header loses its whole value to the end of the line (Codex #6375 r8)', () => {
-    const digest = scrubNote('Authorization: Digest username="admin", realm="api", nonce="n0nce99", response="deadbeef"\nNext line stays.');
-    expect(digest.text).toBe('Authorization: [removed]\nNext line stays.');
-    const aws = scrubNote('Authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20261021/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abcdef0123456789');
-    expect(aws.text).toBe('Authorization: [removed]');
-    expect(aws.text).not.toMatch(/Signature|AKIDEXAMPLE/);
-  });
   test('a short credential after any Authorization scheme goes too (Codex #6375 r9)', () => {
     expect(scrubNote('Authorization: Token abc').text).toBe('Authorization: [removed]');
-  });
-  test('quoted credential keys in serialized notes lose their values (Codex #6375 r9)', () => {
-    const json = scrubNote('{"password":"hunter22","api_key":"abc123xyz","gate":"open"}');
-    expect(json.text).toBe('{"password":"[removed]","api_key":"[removed]","gate":"open"}');
-    expect(scrubNote("{'db.password': 'hunter22'}").text).toBe("{'db.password': '[removed]'}");
-    // A harmless field first does not hide the credential after it (pre-push audit).
-    expect(scrubNote('{"id":1,"password":"hunter22"}').text).toBe('{"id":1,"password":"[removed]"}');
-    expect(scrubNote('{"enabled":true,"api_key":"abc123xyz"}').text).toBe('{"enabled":true,"api_key":"[removed]"}');
-    expect(scrubNote('retries=3; db.password=hunter22, mode=fast').text).toBe('retries=3; db.password=[removed], mode=fast');
-    // Escaped quotes inside a quoted value do not end it (pre-push audit).
-    const escaped = scrubNote(JSON.stringify({ password: 'abc"hunter22' }));
-    expect(escaped.text).toBe('{"password":"[removed]"}');
-    expect(scrubNote('DB_PASSWORD="abc\\"hunter22" next').text).toBe('DB_PASSWORD=[removed] next');
-  });
-  test('the wider credential vocabulary is scrubbed in fixed formats; access words stay (Codex #6375 r17)', () => {
-    expect(scrubNote('{"private_key":"hunter22"}').text).toBe('{"private_key":"[removed]"}');
-    expect(scrubNote('password_hash: abc123').text).toBe('password_hash: [removed]');
-    expect(scrubNote('Cookie: sessionid=abc123').text).not.toContain('abc123');
-    expect(scrubNote('session_id=abcd1234ef').text).toBe('session_id=[removed]');
-    // Access instructions and ordinary note words are returned (owner ruling 2026-10-13).
-    for (const note of ['PIN: 8842', 'lockbox passcode: 4321', 'session: Tuesday mornings', 'signature: required on delivery', 'gate code: 1234']) {
-      expect(scrubNote(note).text).toBe(note);
-    }
   });
   test('ordinary prose and labels without a credential word stay as written', () => {
     const note = 'the password is in the lockbox. gate code: 1234, PIN: 8842, key under the mat, lockbox passcode: 4321';
@@ -458,16 +427,6 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     expect(JSON.stringify(result.data.notes).length).toBeLessThanOrEqual(NOTE_CAP + JSON.stringify({ [CUT]: true }).length + 1);
   });
 
-  test('a double-serialized blob with escaped quotes loses its password and keeps its shape (r11)', () => {
-    const blob = JSON.stringify(JSON.stringify({ id: 1, password: 'hunter22', ok: 'fine' }));
-    const { text, removed } = scrubNote(blob);
-    expect(text).not.toContain('hunter22');
-    expect(text).toContain('\\"password\\":\\"[removed]\\"');
-    expect(text).toContain('\\"ok\\":\\"fine\\"');
-    expect(removed).toBeGreaterThan(0);
-    expect(scrubNote('DB_PASSWORD=\\"hunter 22\\" next').text).not.toContain('hunter');
-  });
-
   test('readable text with letters and digits stays: e-mail, door-code words, file names (r11)', () => {
     const note = 'mail customer2026@example.com, door-code-is-1234-west-side, invoice_2026_10_service_report.pdf, WPC-2026-0001-final-notes-v2';
     expect(scrubNote(note)).toEqual({ text: note, removed: 0 });
@@ -520,19 +479,6 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
   });
 
   test.each([
-    ['DB_PASSWORD=hunter 22', 'DB_PASSWORD=[removed]'],
-    ['API_TOKEN=abc def # note', 'API_TOKEN=[removed] # note'],
-    ['SECRET=one two three', 'SECRET=[removed]'],
-    ['DB_PASSWORD = a secret passphrase', 'DB_PASSWORD = [removed]'],
-    ['API_TOKEN =abc def # note', 'API_TOKEN =[removed] # note'],
-    ['DB_PASSWORD="two words" tail', 'DB_PASSWORD=[removed] tail'],
-    ['DB_PASSWORD=\'it is\' tail', 'DB_PASSWORD=[removed] tail'],
-    ['DB_PASSWORD=[removed] tail text', 'DB_PASSWORD=[removed] tail text'],
-  ])('dotenv-style value: %s', (note, expected) => {
-    expect(scrubNote(note).text).toBe(expected);
-  });
-
-  test.each([
     ['api_token=abc def', 'api_token=[removed]'],
     ['db_password=hunter 22', 'db_password=[removed]'],
     ['Db_Pass=x y', 'Db_Pass=[removed]'],
@@ -569,43 +515,9 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     expect(scrubNote(note).text).toBe(expected);
   });
 
-  test.each([
-    ['PASSWORD=[removed]hunter22', 'PASSWORD=[removed]'],
-    ['db.password: [removed]hunter22', 'db.password: [removed]'],
-    ['{"password":"[removed]hunter22"}', '{"password":"[removed]"}'],
-    ['{\\"password\\":\\"[removed]hunter22\\"}', '{\\"password\\":\\"[removed]\\"}'],
-  ])('a marker with a secret glued to it is not "already removed": %s (r15)', (note, expected) => {
-    const { text } = scrubNote(note);
-    expect(text).toBe(expected);
-    expect(scrubNote(text).text).toBe(text);
-  });
-
   test('a second pass over clean output changes nothing (r15)', () => {
     const once = scrubNote('DB_PASSWORD=hunter 22; api key: abc12345; {"token":"abcd1234"} https://h.example/x?sig=zz99 PASSWORD=[removed] tail').text;
     expect(scrubNote(once).text).toBe(once);
-  });
-
-  test('a long unquoted env passphrase is removed to the end of the line, comment or next assignment (r15 follow-up)', () => {
-    const words = Array.from({ length: 30 }, (_, i) => `word${i % 7}`).join(' ');
-    expect(scrubNote(`DB_PASSWORD=${words}`).text).toBe('DB_PASSWORD=[removed]');
-    expect(scrubNote(`DB_PASSWORD=${words} # note: kept`).text).toBe('DB_PASSWORD=[removed] # note: kept');
-    expect(scrubNote(`DB_PASSWORD=${words}, mode=fast`).text).toBe('DB_PASSWORD=[removed], mode=fast');
-    expect(scrubNote(`DB_PASSWORD=${words}; other: 1 tail`).text).toBe('DB_PASSWORD=[removed]; other: 1 tail');
-    expect(scrubNote(`DB_PASSWORD=${words}\nnext line ok`).text).toBe('DB_PASSWORD=[removed]\nnext line ok');
-    expect(scrubNote('DB_PASSWORD=hunter 22, mode=fast').text).toBe('DB_PASSWORD=[removed], mode=fast');
-  });
-
-  test('a structural credential value with several words is removed through the line (r16)', () => {
-    expect(scrubNote('db.password: correct horse battery staple').text).toBe('db.password: [removed]');
-    expect(scrubNote('db.password: correct horse # keep: this').text).toBe('db.password: [removed] # keep: this');
-    expect(scrubNote('api key: abcd efgh, mode: fast').text).toBe('api key: [removed], mode: fast');
-    expect(scrubNote('retries=3; db.secret=hunter22 x, mode=fast').text).toBe('retries=3; db.secret=[removed], mode=fast');
-    // quoted and serialized forms end where they did before
-    expect(scrubNote('{"password": "a b c", "x": 1}').text).toBe('{"password": "[removed]", "x": 1}');
-    expect(scrubNote('{password: hunter22, x: 1}').text).toBe('{password: [removed], x: 1}');
-    expect(scrubNote('{"password":"hunter22","note":"gate code is 1234"}').text).toBe('{"password":"[removed]","note":"gate code is 1234"}');
-    // prose is not a credential label
-    expect(scrubNote('the password is in the lockbox, gate code: 1234 west side').text).toBe('the password is in the lockbox, gate code: 1234 west side');
   });
 
   test('a tracker wrapping a relative, protocol-relative or scheme-less customer link is removed (r16)', async () => {
@@ -635,66 +547,9 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     expect(scrubNote(note).text).toBe(expected);
   });
 
-  test.each([
-    ['password: abc', 'password: [removed]'],
-    ['db.password: pw', 'db.password: [removed]'],
-    ['X-API-Key: x', 'X-API-Key: [removed]'],
-    ['Token: ab, mode: fast', 'Token: [removed], mode: fast'],
-    // the owner-ruled choice: a credential word with a separator is removed, even when the value reads as prose
-    ['password: on weekdays', 'password: [removed]'],
-  ])('a short unquoted value after an explicit credential key and separator is removed: %s (r18)', (note, expected) => {
-    expect(scrubNote(note).text).toBe(expected);
-  });
-
-  test.each([
-    ['{"password":["hunter22"]}', '{"password":[removed]}'],
-    ['{"api_key":{"value":"abc123xyz"}}', '{"api_key":[removed]}'],
-    ['{"password":["a]b","c"],"x":1}', '{"password":[removed],"x":1}'],
-    ['{"token":{"a":{"b":[1,2,"}"]}},"keep":"yes"}', '{"token":[removed],"keep":"yes"}'],
-    ['{\\"password\\":[\\"a]b\\",\\"c\\"],\\"x\\":1}', '{\\"password\\":[removed],\\"x\\":1}'],
-    ['password: ["unterminated", "more', 'password: [removed]'],
-    ["password: ['first]hunter22', 'secret2']", 'password: [removed]'],
-    ["token: {'a':'b}c'} tail", 'token: [removed] tail'],
-    ["secret: {a: don't, b: 2} rest", 'secret: [removed] rest'],
-    ['{\\"password\\":[\\\'a]b\\\',\\\'c\\\'],\\"x\\":1}', '{\\"password\\":[removed],\\"x\\":1}'],
-  ])('a serialized list or object under a credential key is removed whole: %s (r18 audit)', (note, expected) => {
-    const { text } = scrubNote(note);
-    expect(text).toBe(expected);
-    expect(scrubNote(text).text).toBe(text);
-  });
-
-  test.each([
-    ['password: "hunter22', 'password: "[removed]"'],
-    ['password: "first\nsecond" after', 'password: "[removed]" after'],
-    ["token: 'a b\nc' end", "token: '[removed]' end"],
-    ['DB_PASSWORD="hunter 22', 'DB_PASSWORD=[removed]'],
-    ['DB_PASSWORD="first\nsecond" tail', 'DB_PASSWORD=[removed] tail'],
-    ['x: "not a credential\nline"', 'x: "not a credential\nline"'],
-  ])('an unterminated or multi-line quoted credential value fails closed: %j (r18 audit P0)', async (note, expected) => {
-    expect(scrubNote(note).text).toBe(expected);
-    const result = await read(ENTRY, { id: 1, notes: note });
-    expect(result.data.notes).toBe(expected);
-  });
-
-  test.each([
-    ['password: |\n  correct horse battery staple\nnext: line', 'password: [removed]\nnext: line'],
-    ['db:\n  password: >-\n    folded text\n    more words\n\n    after blank\n  host: x', 'db:\n  password: [removed]\n  host: x'],
-    ['password: |  # note\n  hidden\nafter: 1', 'password: [removed]\nafter: 1'],
-  ])('a YAML block under a credential key is removed with its indented lines: %j (r18 audit P0)', async (note, expected) => {
-    expect(scrubNote(note).text).toBe(expected);
-    const result = await read(ENTRY, { id: 1, notes: note });
-    expect(result.data.notes).toBe(expected);
-  });
-
   test('owner-ruled prose and access words stay (r18)', () => {
     const note = 'the password is in the lockbox. PIN: 8842. lockbox passcode: 4321. gate code: 1234.';
     expect(scrubNote(note)).toEqual({ text: note, removed: 0 });
-  });
-
-  test('a single-quoted list under a credential key is removed through the returned-note path (r18 audit P0)', async () => {
-    const result = await read(ENTRY, { id: 1, notes: "password: ['first]hunter22', 'secret2'] then gate side" });
-    expect(result.data.notes).toBe('password: [removed] then gate side');
-    expect(JSON.stringify(result)).not.toMatch(/hunter22|secret2/);
   });
 
   test('a tracker wrapping an encoded bare credential query is removed (r18)', async () => {
@@ -702,12 +557,6 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     expect(result.data.notes).toBe('go [signed link removed] now');
     const kept = await read(ENTRY, { id: 1, notes: 'go https://track.example.test/c?u=%3Fpage%3D2 now' });
     expect(kept.data.notes).toBe('go https://track.example.test/c?u=%3Fpage%3D2 now');
-  });
-
-  test('an unquoted env value with an equals sign or colon inside runs through the line (audit P0)', () => {
-    expect(scrubNote('DB_PASSWORD=correct horse battery staple q=1').text).toBe('DB_PASSWORD=[removed]');
-    expect(scrubNote('DB_PASSWORD=correct horse: battery staple # keep this').text).toBe('DB_PASSWORD=[removed] # keep this');
-    expect(scrubNote('API_TOKEN=one two, MODE=fast').text).toBe('API_TOKEN=[removed], MODE=fast');
   });
 
   test('repeated markers and long word runs after an env-style name finish fast (r15 audit P1)', () => {
@@ -728,6 +577,85 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
       `DB_PASSWORD="${'a '.repeat(9000)}`,
     ];
     for (const input of inputs) {
+      const started = Date.now();
+      scrubNote(input);
+      redactSecrets({ notes: input }, newState(), 0, { freeText: {} });
+      expect(Date.now() - started).toBeLessThan(500);
+    }
+  });
+
+  // THE RULE (Codex #6375 r19): a credential key + its separator removes everything after it to the end of the
+  // note string. These cases replace the per-format scanners (quotes, brackets, YAML blocks, several words,
+  // line breaks, unclosed quotes, CRLF) with one structural test.
+  test.each([
+    ['db.password: hunter22', 'db.password: [removed]'],
+    ['DB_PASSWORD = hunter22', 'DB_PASSWORD = [removed]'],
+    ['password: abc', 'password: [removed]'],
+    ['db.password: pw', 'db.password: [removed]'],
+    ['X-API-Key: x', 'X-API-Key: [removed]'],
+    ['Token: ab, mode: fast', 'Token: [removed]'],
+    ['password: on weekdays', 'password: [removed]'],
+    ['text before the key: DB_PASSWORD=hunter 22 then more words', 'text before the key: DB_PASSWORD=[removed]'],
+    ['api_token=abc def # note', 'api_token=[removed]'],
+    ['dbPassword=hunter22 and api key: abc12345', 'dbPassword=[removed]'],
+    ['retries=3; db.password=hunter22, mode=fast', 'retries=3; db.password=[removed]'],
+    ['{"id":1,"password":"hunter22","x":1}', '{"id":1,"password":[removed]'],
+    ['{"password":["a]b","c"],"x":1}', '{"password":[removed]'],
+    ['{"api_key":{"value":"abc123xyz"}} tail', '{"api_key":[removed]'],
+    ['{\\"password\\":\\"x\\",\\"y\\":1}', '{\\"password\\":[removed]'],
+    ['{"password":\n"hunter22"}', '{"password":[removed]'],
+    ['password:\n  hunter22', 'password:[removed]'],
+    ['password: |\r\n  correct horse\r\n  staple\r\nnext: 1', 'password: [removed]'],
+    ['db:\n  password: >-\n    folded text\n\n    after blank\n  host: x', 'db:\n  password: [removed]'],
+    ['password: "hunter22', 'password: [removed]'],
+    ['password: "first\nsecond" after', 'password: [removed]'],
+    ["password: ['first]hunter22', 'secret2'] then gate side", 'password: [removed]'],
+    ['Authorization: Digest username="admin", nonce="n0nce99"\nNext line.', 'Authorization: [removed]'],
+    ['Authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20261021/s3/aws4_request, Signature=abcdef0123456789', 'Authorization: [removed]'],
+    ['PASSWORD=[removed]hunter22', 'PASSWORD=[removed]'],
+    ['{"password":"[removed]hunter22"}', '{"password":[removed]'],
+    ['{"private_key":"hunter22"}', '{"private_key":[removed]'],
+    ['password_hash: abc123 tail', 'password_hash: [removed]'],
+    ['session_id=abcd1234ef tail', 'session_id=[removed]'],
+  ])('credential key + separator removes everything after it: %j', async (note, expected) => {
+    const first = scrubNote(note);
+    expect(first.text).toBe(expected);
+    expect(first.removed).toBeGreaterThan(0);
+    expect(scrubNote(first.text).text).toBe(first.text);
+    const result = await read(ENTRY, { id: 1, notes: note });
+    expect(result.data.notes).toBe(expected);
+  });
+
+  test('a structured note applies the rule inside each string leaf; the other leaves are untouched', async () => {
+    const result = await read(ENTRY, { id: 1, notes: { first: 'door code is on the box. password: hunter22 and more', second: 'Dog in the yard' } });
+    expect(result.data.notes).toEqual({ first: 'door code is on the box. password: [removed]', second: 'Dog in the yard' });
+  });
+
+  test('a key inside a link is left to the link rules, and the text after the link stays', () => {
+    expect(scrubNote('see https://h.example/x?token=abc and more notes').text).toBe('see https://h.example/x?token=[removed] and more notes');
+  });
+
+  test('owner-ruled prose and access words stay (r19)', () => {
+    for (const note of [
+      'the password is in the lockbox', 'PIN: 8842', 'lockbox passcode: 4321', 'gate code: 1234', 'session: Tuesday mornings',
+      'signature: required on delivery', 'compass=north SECRETARY_NAME=Alice TOKENIZER_MODEL=bert base', 'Wi-Fi password is hunter2. PIN: 8842',
+    ]) {
+      expect(scrubNote(note)).toEqual({ text: note, removed: 0 });
+    }
+  });
+
+  test('20,000-character notes finish fast whatever follows a credential key', () => {
+    const { redactSecrets, newState } = require('../utils/signed-link-redaction');
+    const inputs = [
+      `password: ${'a'.repeat(19990)}`,
+      `${'x '.repeat(9990)}password=y`,
+      'password: '.repeat(2000),
+      `${'name: value\n'.repeat(1000)}token:\n${'  word\n'.repeat(500)}`,
+      'a.b-c_'.repeat(3300).slice(0, 19800),
+      `{"password":[${'"a]",'.repeat(3990)}`,
+    ];
+    for (const input of inputs) {
+      expect(input.length).toBeLessThanOrEqual(20000);
       const started = Date.now();
       scrubNote(input);
       redactSecrets({ notes: input }, newState(), 0, { freeText: {} });

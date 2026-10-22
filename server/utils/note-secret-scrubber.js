@@ -21,10 +21,11 @@
  *    (token, signature, sig, key, apikey, X-Amz-*, ...) and user:password@ in a URL
  *  - card numbers (Luhn, utils/pan-scrub.js)
  *  - SSN pattern ddd-dd-dddd
- *  - the value of a structural credential assignment: a key whose last word is
- *    password, passwd, secret, token, api key, credential, auth or authorization,
- *    then '=' or ':' and 4+ characters ("db.password: x", "X-API-Key: x"); and an
- *    "Authorization:" header with any scheme word ("Token x", "Digest x")
+ *  - EVERYTHING after a credential key and its separator, to the end of the note string
+ *    ("db.password: x", "DB_PASSWORD=x y z", "X-API-Key: x", "Authorization: Token x",
+ *    {"password": ...): the key and separator stay, one marker replaces the rest. See
+ *    CREDENTIAL_ASSIGN_RE: no value grammar is parsed, so quotes, brackets, YAML blocks, line breaks
+ *    and an unclosed quote cannot hide the rest of a secret. Text before the key stays.
  *  - any other run of 32 or more base64/hex characters
  *  - a Luhn-valid card number inside a digit run longer than 120 digits
  *  - backstop: any other 20+ character token that mixes letters and digits and
@@ -84,35 +85,27 @@ function looksLikeBasicCredential(header, token) {
     return false;
   }
 }
-// An environment-style assignment whose NAME says it is a secret (DB_PASSWORD=x,
-// STRIPE_SECRET_KEY=x, API_TOKEN=x). A fixed config format, not a prose label:
-// name in any case (api_token=x), '=' (spaces around it allowed); a stem (PASS, SECRET, TOKEN, PASSWORD, ...)
-// counts only as a whole name segment, so compass=, bypass=, SECRETARY_NAME= and TOKENIZER_MODEL= are
-// ordinary words (Codex #6375 r14, r15). The regex reads the name, the separator and the first word of
-// an unquoted value; scrubEnvAssignments then extends an unquoted value by a linear scan (no regex
-// backtracking) to the end of the line or an inline " #" comment, as dotenv reads it
-// (DB_PASSWORD=correct horse battery staple q=1), stopping early only at ", " or "; " followed by
-// another name= / name: assignment.
-const ENV_SECRET_RE = /\b((?:[A-Z][A-Z0-9_]*)?(?<![A-Z0-9])(?:PASSWORD|PASSWD|PASS|SECRET|TOKEN|API_?KEY|PRIVATE_KEY|CREDENTIALS?)(?![A-Z0-9])[A-Z0-9_]*)([ \t]*=[ \t]*)(\\"(?:[^\\\n]|\\(?!"))*\\"|\\'(?:[^\\\n]|\\(?!'))*\\'|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[removed\](?![^\s,;}\]])|\S*[^\s,;}\]])/gi;
-// Structural credential assignments in a config or header format (Codex #6375 r7):
-// "db.password: hunter22", "DB_PASSWORD = hunter22", "X-API-Key: abc123xyz",
-// "Authorization: Token abc123xyz". The KEY must end in a credential word (names
-// split on . _ - and camelCase), then optional spaces, '=' or ':', optional
-// spaces, and a value of 4+ characters. The key stays, the value is replaced.
-// Still no prose rules: "the password is in the lockbox" has no '=' or ':' and
-// "gate code: 1234" has no credential word, so both come back as written.
-// The header's whole value goes, to the end of the line: a parameterized scheme
-// (Digest username=..., nonce=..., response=...; AWS4-HMAC-SHA256 ... Signature=...)
-// carries secrets after its first token (Codex #6375 r8).
-// Any length: the header itself says the rest is credential material (Codex #6375 r9).
-const AUTH_HEADER_RE = /(\bauthorization[ \t]*[:=][ \t]*)([A-Za-z][A-Za-z0-9_-]*)[ \t]+([^\n]+)/gi;
-// The key may sit in paired quotes, as in serialized JSON or YAML:
-// {"password":"hunter22"} (Codex #6375 r9).
-// A quoted value honors backslash escapes (\" inside JSON); an unquoted value stops at a field delimiter, so a harmless field before it
-// ("id":1,"password":"x") cannot swallow the next one (pre-push audit, r9).
-// A double-serialized blob keeps its quotes escaped ({\"password\":\"hunter22\"}); the key and
-// value quotes may be a backslash plus a quote, and the output keeps that shape (Codex #6375 r11).
-const KEY_ASSIGN_RE = /(?<![A-Za-z0-9_.-])(\\?["']?)((?:api[ \t]+)?[A-Za-z][A-Za-z0-9_.-]*)\1([ \t]*[=:][ \t]*)(\\"(?:[^\\\n]|\\(?!"))*\\"|\\'(?:[^\\\n]|\\(?!'))*\\'|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|\\?["']|(?:\[removed\]|[^\s,;}\]"'])+)/gi;
+// CREDENTIAL ASSIGNMENTS (one structural rule; Codex #6375 r19). A credential KEY followed by its
+// separator ("=" or ":") removes EVERYTHING after the separator to the END OF THE NOTE STRING and puts
+// one "[removed]" in its place; the text before the key, the key and the separator stay. No value
+// grammar is parsed (quotes, brackets, YAML blocks, several words, line breaks and an unclosed quote
+// all end the same way), so a format cannot be mis-read. A key is credential when
+//  - isAssignmentSecretKey(key): its last word is password, passwd, secret, token, api key, credential,
+//    auth, authorization, cookie, nonce, jwt, bearer, otp ... (names split on . _ - and camelCase), with
+//    "=" or ":"; or
+//  - isEnvSecretName(key): an environment-style name (api_token, DB_PASSWORD_FILE) with a whole
+//    name segment that is PASS, PASSWORD, SECRET, TOKEN, API_KEY, PRIVATE_KEY, CREDENTIAL(S), with "=".
+// The key may sit in plain or backslash-escaped quotes ({"password": ..., {\"password\": ...). A key
+// inside a link is left to the link rules. Prose has no separator: "the password is in the lockbox",
+// "PIN: 8842", "gate code: 1234" come back as written. An already removed value (exactly the marker)
+// is left alone, so a second pass changes nothing.
+const CREDENTIAL_ASSIGN_RE = /(?<![A-Za-z0-9_.-])(\\?["']?)((?:api[ \t]+)?[A-Za-z][A-Za-z0-9_.-]*)\1(\s*[=:][ \t]*)/gi;
+const ENV_STEM_WORDS = new Set(['password', 'passwd', 'pass', 'secret', 'token', 'apikey', 'credential', 'credentials']);
+const ENV_STEM_PAIRS = [['api', 'key'], ['private', 'key']];
+function isEnvSecretName(key) {
+  const parts = key.toLowerCase().split(/[_.-]/).filter(Boolean);
+  return parts.some((part, i) => ENV_STEM_WORDS.has(part) || ENV_STEM_PAIRS.some(([first, second]) => part === first && parts[i + 1] === second));
+}
 // The credential vocabulary of a fixed-format key (Codex #6375 r17). It is the
 // shared classifier's list less the words that name an ACCESS instruction the
 // owner wants returned (ruling 2026-10-13: pin, passcode) or that are ordinary
@@ -248,155 +241,23 @@ function scrubRandomTokens(text) {
   return { text: out, count };
 }
 
-// Where an unquoted env-style value ends: the end of its line or an inline " #" comment, or a ", " / "; "
-// followed by another name= / name: assignment, whichever comes first (Codex #6375 r15).
-const ENV_NEXT_ASSIGNMENT_RE = /[,;][ \t]+[A-Za-z_][\w.-]*[ \t]*[=:]/;
-function envValueEnd(text, from) {
-  const newline = text.indexOf('\n', from);
-  const lineEnd = newline < 0 ? text.length : newline;
-  let end = lineEnd;
-  const line = text.slice(from, lineEnd);
-  const comment = line.search(/[ \t]#/);
-  const limited = comment < 0 ? line : line.slice(0, comment);
-  const next = limited.search(ENV_NEXT_ASSIGNMENT_RE);
-  if (next >= 0) end = from + next;
-  else if (comment >= 0) end = from + comment;
-  while (end > from && (text[end - 1] === ' ' || text[end - 1] === '\t')) end -= 1;
-  return end;
-}
-function scrubEnvAssignments(text) {
-  let count = 0;
-  let out = '';
-  let last = 0;
-  const pattern = new RegExp(ENV_SECRET_RE.source, ENV_SECRET_RE.flags);
+// Applies the credential-assignment rule above to one string. The first credential key with something
+// after its separator wins: everything after the separator goes.
+function scrubCredentialAssignments(text) {
+  const pattern = new RegExp(CREDENTIAL_ASSIGN_RE.source, CREDENTIAL_ASSIGN_RE.flags);
+  let links = null;
   let match;
   while ((match = pattern.exec(text)) !== null) {
-    const [whole, name, sep, value] = match;
-    if (whole === '') { pattern.lastIndex += 1; continue; }
-    if (isAlreadyRemoved(value)) continue;
-    let end = match.index + whole.length;
-    if (isDanglingQuote(value)) end = quotedValueEnd(text, end - value.length, openerOf(value));
-    else if (!/^["'\\]/.test(value)) end = envValueEnd(text, end);
-    count += 1;
-    out += `${text.slice(last, match.index)}${name}${sep}${REMOVED}`;
-    last = end;
-    pattern.lastIndex = end;
+    const [whole, , key, sep] = match;
+    if (!(isAssignmentSecretKey(key) || (sep.includes('=') && isEnvSecretName(key)))) continue;
+    if (!links) links = [...text.matchAll(URL_RE)].map(link => [link.index, link.index + link[0].length]);
+    if (links.some(([from, to]) => match.index >= from && match.index < to)) continue;
+    const sepEnd = match.index + whole.length;
+    const rest = text.slice(sepEnd).trim();
+    if (rest === '' || isAlreadyRemoved(rest)) break;
+    return { text: `${text.slice(0, sepEnd)}${REMOVED}`, count: 1 };
   }
-  return { text: out + text.slice(last), count };
-}
-
-// The end of a serialized list or object value that starts at `start` ("[" or "{"): a linear scan that
-// counts brackets and skips quoted strings (plain or backslash-escaped quotes), so {"password":["a]b"]}
-// is removed whole. An unbalanced value fails closed to the end of the text (Codex #6375 r18 audit).
-// Inside a string that ends at `closer`: the index of the last character the string used (the closing
-// quote or an escaped pair), and whether it ended there.
-function stringStep(text, i, closer) {
-  const c = text[i];
-  if (c === '\\') return { at: i + 1, ended: closer.length === 2 && text[i + 1] === closer[1] };
-  return { at: i, ended: closer.length === 1 && c === closer };
-}
-
-// The quote that opens a string at `i`, or null. A single quote opens one only where a value can
-// start, so an apostrophe inside a word is not one.
-function stringOpener(text, i, previous) {
-  const escaped = text[i] === '\\' && (text[i + 1] === '"' || text[i + 1] === "'");
-  const quote = escaped ? text[i + 1] : text[i];
-  if (quote !== '"' && !(quote === "'" && (previous === '' || '[{,:'.includes(previous)))) return null;
-  return escaped ? `\\${quote}` : quote;
-}
-
-function structuredValueEnd(text, start) {
-  let depth = 0;
-  let closer = null;
-  let previous = '';
-  for (let i = start; i < text.length; i += 1) {
-    const c = text[i];
-    if (closer) {
-      const step = stringStep(text, i, closer);
-      i = step.at;
-      if (step.ended) closer = null;
-      continue;
-    }
-    if (c === ' ' || c === '\t' || c === '\n') continue;
-    const opener = stringOpener(text, i, previous);
-    if (opener) {
-      closer = opener;
-      if (opener.length === 2) i += 1;
-    } else if (c === '[' || c === '{') depth += 1;
-    else if ((c === ']' || c === '}') && (depth -= 1) === 0) return i + 1;
-    previous = c;
-  }
-  return text.length;
-}
-
-// A quoted value that is not closed on its own line ("hunter22 with no end quote, or one that runs over
-// several lines) is read across newlines up to its closing quote, or to the end of the text when there
-// is none: an explicitly labelled credential fails closed (Codex #6375 r18 audit).
-const COMPLETE_QUOTED_RE = /^(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\\"(?:[^\\]|\\(?!"))*\\"|\\'(?:[^\\]|\\(?!'))*\\')$/;
-function quotedValueEnd(text, valueStart, opener) {
-  const quote = opener.slice(-1);
-  const escaped = opener.length === 2;
-  for (let i = valueStart + opener.length; i < text.length; i += 1) {
-    if (text[i] === '\\') {
-      if (escaped && text[i + 1] === quote) return i + 2;
-      i += 1;
-    } else if (!escaped && text[i] === quote) return i + 1;
-  }
-  return text.length;
-}
-const openerOf = value => (value.match(/^\\?["']/) || [''])[0];
-const isDanglingQuote = value => Boolean(openerOf(value)) && !COMPLETE_QUOTED_RE.test(value);
-
-// A YAML literal or folded block under a credential key ("password: |" then indented lines) is the
-// value: the indented lines that follow (and blank lines between them) are removed with it
-// (Codex #6375 r18 audit). `keyIndent` is the indentation of the line that holds the key.
-const YAML_BLOCK_INDICATOR_RE = /^[|>][+-]?\d?[+-]?$/;
-function yamlBlockEnd(text, from, keyIndent) {
-  let lineStart = text.indexOf('\n', from);
-  if (lineStart < 0 || !/^[ \t]*(?:#.*)?$/.test(text.slice(from, lineStart))) return null;
-  let end = from;
-  while (lineStart >= 0 && lineStart < text.length) {
-    const start = lineStart + 1;
-    const next = text.indexOf('\n', start);
-    const line = text.slice(start, next < 0 ? text.length : next);
-    const indent = line.length - line.trimStart().length;
-    if (line.trim() !== '' && indent <= keyIndent) break;
-    if (line.trim() !== '') end = next < 0 ? text.length : next;
-    lineStart = next;
-  }
-  return end;
-}
-
-// A structural credential assignment (db.password: x, X-API-Key: x). A quoted value ends at its
-// closing quote. An unquoted value that is followed by a space is a passphrase: it is extended by the
-// same linear scan as the env-style values, to the end of the line or an inline " #" comment, stopping
-// early only at ", " / "; " followed by another name= / name: assignment (Codex #6375 r16). A value
-// followed by a delimiter (, ; } ]) ends there, as in serialized objects.
-function scrubKeyAssignments(text) {
-  let count = 0;
-  let out = '';
-  let last = 0;
-  const pattern = new RegExp(KEY_ASSIGN_RE.source, KEY_ASSIGN_RE.flags);
-  let match;
-  while ((match = pattern.exec(text)) !== null) {
-    const [whole, quote, key, sep, value] = match;
-    if (whole === '') { pattern.lastIndex += 1; continue; }
-    if (isAlreadyRemoved(value) || !isAssignmentSecretKey(key)) continue;
-    const valueQuote = (value.match(/^\\?["']/) || [''])[0];
-    let end = match.index + whole.length;
-    const lineStart = text.lastIndexOf('\n', match.index) + 1;
-    const keyIndent = text.slice(lineStart).match(/^[ \t]*/)[0].length;
-    const block = YAML_BLOCK_INDICATOR_RE.test(value) ? yamlBlockEnd(text, end, keyIndent) : null;
-    if (block !== null) end = block;
-    else if (isDanglingQuote(value)) end = quotedValueEnd(text, end - value.length, valueQuote);
-    else if (!valueQuote && /^[[{]/.test(value) && !value.startsWith(REMOVED)) end = structuredValueEnd(text, end - value.length);
-    else if (!valueQuote && /[ \t]/.test(text[end] || '')) end = envValueEnd(text, end);
-    count += 1;
-    out += `${text.slice(last, match.index)}${quote}${key}${quote}${sep}${valueQuote}${REMOVED}${valueQuote}`;
-    last = end;
-    pattern.lastIndex = end;
-  }
-  return { text: out + text.slice(last), count };
+  return { text, count: 0 };
 }
 
 // Returns { text, removed }. `removed` counts the replacements.
@@ -414,11 +275,7 @@ function scrubNoteText(input) {
   text = text.replace(JWT_RE, swap)
     .replace(BEARER_RE, (match, header, token) => (looksLikeBearerToken(header, token) ? `${header || ''}${swap()}` : match))
     .replace(BASIC_RE, (match, header, scheme, token) => (looksLikeBasicCredential(header, token) ? `${header || ''}${swap()}` : match));
-  const env = scrubEnvAssignments(text);
-  removed += env.count;
-  text = env.text;
-  text = text.replace(AUTH_HEADER_RE, (match, head, scheme, value) => (isAlreadyRemoved(scheme) || isAlreadyRemoved(value) ? match : `${head}${swap()}`));
-  const assigned = scrubKeyAssignments(text);
+  const assigned = scrubCredentialAssignments(text);
   removed += assigned.count;
   text = assigned.text;
   for (const pattern of PREFIXED_RES) text = text.replace(pattern, swap);
