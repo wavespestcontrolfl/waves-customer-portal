@@ -672,6 +672,11 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
       "update Pat Example's notes to gate code 5 and then move Sam Sample's visit",
       'update Pat Example phone then reschedule the visit',
       'fix the notes on 941-555-0100 and mark it done',
+      "update Pat Example's phone to 941-555-0100; rename Sam Sample to Sam Other",
+      "update Pat Example's phone to 941-555-0100; relabel Sam Sample's property",
+      "update Pat Example's phone to 941-555-0100 and then text Sam Sample",
+      "update Pat Example's notes also email Sam Sample",
+      "update Pat Example's phone, merge Sam Sample into Pat Example",
     ]) {
       expect([prompt, await grounded(prompt)]).toEqual([prompt, []]);
     }
@@ -681,6 +686,10 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(await grounded("set Pat Example's notes to please update gate code")).toEqual([id(100)]);
     expect(await grounded('update Pat Example\'s notes: please change the gate code')).toEqual([id(100)]);
     expect(await grounded('update Pat Example\'s notes to "update the gate code"')).toEqual([id(100)]);
+    // Words that are usually nouns (contact, schedule, email) are verbs only when they start an operation.
+    expect(await grounded("update the contact for Pat Example")).toEqual([id(100)]);
+    expect(await grounded("change Pat Example's schedule")).toEqual([id(100)]);
+    expect(await grounded("send a text to Pat Example")).toEqual([id(100)]);
     // A name that is also a verb is not counted.
     customers = [{ id: id(102), first_name: 'Mark', last_name: 'Sample', city: 'Osprey', phone: '9415550102', email: 'mark@example.test', updated_at: new Date('2026-01-01'), version: '2026-01-01' }];
     expect(await grounded("update Mark Sample's phone")).toEqual([id(102)]);

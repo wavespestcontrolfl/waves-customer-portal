@@ -599,7 +599,15 @@ const RECORD_ID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 // Verbs inside a replacement value or a note body are data and are not counted: the value after
 // "<field> to", a quoted text, or the text after a colon runs up to the next separator that is
 // followed by an action verb ("... notes to gate code 5 and change Sam's phone").
-const ACTION_VERBS = new Set(['update', 'change', 'set', 'edit', 'fix', 'add', 'remove', 'move', 'reschedule', 'assign', 'cancel', 'book', 'mark', 'put', 'replace', 'swap', 'switch', 'delete', 'clear']);
+// The supported action vocabulary (PERSON_ACTIONS and the add / remove / assign family). Words that are
+// just as often nouns (email, text, call, contact, schedule, invoice...) count as verbs only when they
+// start an operation: at the start of the message or right after a separator, "and", "then", "also",
+// "please" or "to" ("update the contact" has no second operation; "also text Sam" has).
+const STRONG_VERBS = ['update', 'change', 'set', 'edit', 'fix', 'add', 'remove', 'move', 'reschedule', 'assign', 'cancel', 'book', 'mark', 'put', 'replace', 'swap', 'switch', 'delete', 'clear',
+  'rename', 'relabel', 'merge', 'archive', 'restore', 'reactivate', 'pause', 'refund', 'notify', 'remind', 'forward', 'resend', 'reply', 'respond', 'send', 'make', 'revise', 'save', 'draft', 'write', 'post', 'submit'];
+const NOUNISH_VERBS = ['email', 'text', 'sms', 'message', 'reminder', 'contact', 'quote', 'schedule', 'call', 'charge', 'invoice', 'credit'];
+const ACTION_VERBS = new Set([...STRONG_VERBS, ...NOUNISH_VERBS]);
+const OPERATION_STARTS = new Set(['qqsep', 'and', 'then', 'also', 'please', 'to']);
 const VALUE_START_RE = /\b(?:name|address|email(?:\s+address)?|phone(?:\s+number)?|mobile(?:\s+(?:phone|number))?|cell(?:\s+(?:phone|number))?|number|label|notes?|instructions|message|contact)\s+(?:to|as|is|=)\s+|:/i;
 const VALUE_END_RE = new RegExp(`(?:[;\\n,]|\\b(?:and|then|also)\\b)\\s*(?:(?:please|also|then)\\s+)*(?=(?:${[...ACTION_VERBS].join('|')})\\b)`, 'i');
 
@@ -619,13 +627,14 @@ function withoutValues(text) {
 
 // Each typed customer's own name is stripped first ("Mark Smith" is not the verb "mark").
 function isCompound(bounded, customers = []) {
-  let text = ` ${normalizeName(withoutValues(bounded))} `;
+  let text = ` ${normalizeName(withoutValues(bounded).replace(/[;,\n]/g, ' qqsep '))} `;
   for (const customer of customers) {
     for (const name of [fullNameKey(customer), normalizeName(customer.first_name), normalizeName(customer.last_name)]) {
       if (name) text = text.split(` ${name} `).join(' qqname ');
     }
   }
-  return text.trim().split(' ').filter(word => ACTION_VERBS.has(word)).length > 1;
+  const words = ['qqsep', ...text.trim().split(' ')];
+  return words.filter((word, i) => STRONG_VERBS.includes(word) || (NOUNISH_VERBS.includes(word) && OPERATION_STARTS.has(words[i - 1]))).length > 1;
 }
 
 // DIRECT (no-card) authority from typed evidence, in two simple cases only (Codex #6369 r23,
