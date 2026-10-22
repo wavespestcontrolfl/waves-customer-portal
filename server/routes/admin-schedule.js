@@ -24,6 +24,7 @@ const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/d
 const { chooseWindowSafeOrder, inProgressStartMin, loadTechDayOrigins, assertTechDayOriginsFresh, driveableStop,
   resolveWindowSafeOrderByTechDay, windowSafeFigures,
   ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, routeWriteGuardSignature } = require('../services/route-reorder');
+const { loadTechStartPoints, homeFromMap, assertStartPointUnchanged } = require('../services/scheduling/tech-start-point');
 const {
   assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning, ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
   parseHHMM, minutesToHHMM,
@@ -22944,7 +22945,7 @@ router.put('/:id/status', async (req, res, next) => {
  * A no-op for any other date (nothing about a future day goes stale as the
  * clock moves) and when the original decision was not clock-dependent.
  */
-function assertStillFeasibleNow({ dateStr, RouteOptimizer, result, services, startMin, techDayOrigins, expected }) {
+function assertStillFeasibleNow({ dateStr, RouteOptimizer, result, services, startMin, techDayOrigins, expected, techHomes = null }) {
   if (startMin == null) return;
   const recheckStart = inProgressStartMin(dateStr, new Date());
   if (recheckStart == null || recheckStart === startMin) return;
@@ -22954,7 +22955,7 @@ function assertStillFeasibleNow({ dateStr, RouteOptimizer, result, services, sta
     // The clock moves; the cutoff that decided which promises were already
     // elapsed does not, or a promise lost while waiting for locks would
     // simply become unconstrained and pass (codex round 5 P1).
-    elapsedCutoffMin: startMin, techDayOrigins,
+    elapsedCutoffMin: startMin, techDayOrigins, techHomes,
   });
   if (again.refusal) {
     throw Object.assign(new Error('schedule changed while optimizing'), { code: 'STALE_OPTIMIZE' });
@@ -22969,6 +22970,9 @@ function assertStillFeasibleNow({ dateStr, RouteOptimizer, result, services, sta
     throw Object.assign(new Error('schedule changed while optimizing'), { code: 'STALE_OPTIMIZE' });
   }
 }
+
+// The 409 every post-lock staleness fence on the optimize buttons raises.
+const staleOptimize = () => Object.assign(new Error('schedule changed while optimizing'), { code: 'STALE_OPTIMIZE' });
 
 /** Operator-facing copy for each refusal the shared decision can return. */
 function optimizeRefusalMessage(reason) {
@@ -23065,10 +23069,16 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
       }
     }
 
-    // Run optimization
+    // Run optimization. One technician on the call starts and ends at that
+    // tech's start point (GATE_TECH_START_POINTS; the office when unset, when
+    // the gate is off, or for a bad coordinate). The whole-board call mixes
+    // every truck into one flat Google route, which has no single start, so
+    // it stays at the office. Staff-only: the coordinates are never returned.
+    const techHomes = technicianId ? await loadTechStartPoints(db, [technicianId]) : null;
+    const startPoint = homeFromMap(techHomes, technicianId);
     const result = await RouteOptimizer.optimizeRoute(services, {
-      startLat: RouteOptimizer.HQ.lat,
-      startLng: RouteOptimizer.HQ.lng,
+      startLat: startPoint.lat,
+      startLng: startPoint.lng,
       endAtStart: true,
       techId: technicianId || null,
     });
@@ -23081,7 +23091,7 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
     const techDayOrigins = await loadTechDayOrigins(db, dateStr, { technicianId: technicianId || null, now });
     const guarded = resolveWindowSafeOrderByTechDay({
       RouteOptimizer, orderedStops: result.orderedStops, sourceStops: services,
-      googleSource: result.source, legs: result.legs, startMin, techDayOrigins,
+      googleSource: result.source, legs: result.legs, startMin, techDayOrigins, techHomes,
     });
     const rejection = guarded.refusal;
     const resolvedByTech = guarded.resolvedByTech || new Map();
@@ -23113,6 +23123,8 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
       await db.transaction(async (trx) => {
         await lockTechDays(trx, services.map((s) => ({ techId: s.technician_id, date: dateStr })));
         await assertGuardInputsFresh(trx, dateStr, technicianId || null, guardSnapshot);
+        // The start point the route was certified against (one tech only).
+        await assertStartPointUnchanged(trx, technicianId || null, startPoint, staleOptimize);
         // The completed rows the origin came from are outside that fence.
         const freshOrigins = await assertTechDayOriginsFresh(trx, dateStr, techDayOrigins, { technicianId: technicianId || null, now });
         // And TIME has passed: the Routes API call and a contended tech-day
@@ -23122,7 +23134,7 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
         // minute and refuse if it no longer produces this order.
         assertStillFeasibleNow({
           dateStr, RouteOptimizer, result, services, startMin,
-          techDayOrigins: freshOrigins, expected: guarded.orderedIds,
+          techDayOrigins: freshOrigins, expected: guarded.orderedIds, techHomes,
         });
         // Stale-snapshot guard (uncapped audit r21 P1): the optimizer ran
         // BEFORE this fence was acquired — a reassignment/date move that
@@ -23264,9 +23276,13 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
       }
     }
 
+    // This tech's start point (GATE_TECH_START_POINTS; the office when unset
+    // or the gate is off). Staff-only, never returned in the response.
+    const techHomes = await loadTechStartPoints(db, [technicianId]);
+    const startPoint = homeFromMap(techHomes, technicianId);
     const result = await RouteOptimizer.optimizeRoute(services, {
-      startLat: RouteOptimizer.HQ.lat,
-      startLng: RouteOptimizer.HQ.lng,
+      startLat: startPoint.lat,
+      startLng: startPoint.lng,
       endAtStart: true,
       techId: technicianId,
     });
@@ -23289,6 +23305,7 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
     const outcome = chooseWindowSafeOrder({
       RouteOptimizer, googleOrder: result.orderedStops, sourceStops: services, googleSource: result.source, legs: result.legs, startMin,
       origin: techDayOrigins.origins.get(techKey) || null,
+      home: homeFromMap(techHomes, techKey),
       // This button WRITES; it may not certify a promise on the uncalibrated
       // model when Google's legs were discarded.
       requireCalibratedModel: true,
@@ -23316,6 +23333,8 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
         // 5 P2).
         await lockTechDays(trx, [{ techId: techKey, date: dateStr }]);
         await assertGuardInputsFresh(trx, dateStr, technicianId || null, guardSnapshot);
+        // The start point the route was certified against.
+        await assertStartPointUnchanged(trx, technicianId, startPoint, staleOptimize);
         // The completed rows the origin came from are outside that fence.
         const freshOrigins = await assertTechDayOriginsFresh(trx, dateStr, techDayOrigins, { technicianId: technicianId || null, now });
         // And TIME has passed: the Routes API call and a contended tech-day
@@ -23325,7 +23344,7 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
         // minute and refuse if it no longer produces this order.
         assertStillFeasibleNow({
           dateStr, RouteOptimizer, result, services, startMin,
-          techDayOrigins: freshOrigins, expected: finalOrdered.map((st) => st.id),
+          techDayOrigins: freshOrigins, expected: finalOrdered.map((st) => st.id), techHomes,
         });
         // Stale-snapshot guard — same contract as /optimize above: the stop
         // must still be on THIS tech-day or the whole rewrite aborts.

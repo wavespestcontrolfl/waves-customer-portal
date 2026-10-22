@@ -37,6 +37,7 @@
  */
 const { isCredentialField, isCredentialName, nameWords } = require('./credential-fields');
 const { scrubSecretText } = require('./secret-text-scrubber');
+const { scrubNote, scrubNoteText, maskCardNumbers, trimToScanLimit, SCAN_LIMIT, NOTE_CAP, CUT } = require('./note-secret-scrubber');
 
 const REDACTED_LINK = '[signed link removed]';
 const REDACTED_PRIVATE_LINK = '[private link removed]';
@@ -84,13 +85,18 @@ function hostOf(raw) {
   try { return new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(text) ? text : `https://${text}`).hostname.toLowerCase(); } catch { return null; }
 }
 
-// Read when a string is judged, so a changed environment value is seen at once.
+// Read when a string is judged, so a changed environment value is seen at once. The set is rebuilt only
+// when one of the environment values changed, so a note with many links does not parse them all again.
+let ownHostsCache = { key: null, hosts: null };
 function ownHosts() {
+  const key = OWN_HOST_ENV_NAMES.map(name => process.env[name] || '').join('\u0000');
+  if (ownHostsCache.key === key) return ownHostsCache.hosts;
   const hosts = new Set([OWN_DOMAIN]);
   for (const name of OWN_HOST_ENV_NAMES) {
     const host = hostOf(process.env[name]);
     if (host) hosts.add(host.replace(/^www\./, ''));
   }
+  ownHostsCache = { key, hosts };
   return hosts;
 }
 
@@ -222,12 +228,91 @@ function isOwnPrivateLink(url) {
   return !(PUBLIC_CONTENT_SEGMENTS.has(segments[0].toLowerCase()) && !url.search);
 }
 
+// WRAPPED LINKS. A tracker or redirect URL can carry a live customer link as a
+// query value, a fragment or a path part, percent-encoded once or twice
+// (https://track.example.test/c?u=https%3A%2F%2Fportal.../l/abc234def5). Only the
+// outer URL was judged, and a 10-character short code is under the random-run
+// heuristic. Every value is decoded (up to two levels) and each link inside is judged by the
+// same rules, including our own hosts at any token length (Codex #6375 r15).
+const MAX_WRAP_DEPTH = 2;
+function decodeOnce(text) {
+  try { return decodeURIComponent(text); } catch { return text; }
+}
+// A decoded wrapper part is judged by the same four link shapes the top level uses:
+// absolute, protocol-relative ("//host/l/code"), scheme-less host ("host/l/code") and
+// relative ("/l/code"), each with the same verdict function (Codex #6375 r16).
+function hostedTextVerdict(text, depth) {
+  for (const match of text.match(HOST_LINK_RE) || []) {
+    const { link } = splitTail(match);
+    if (!/[/?#]/.test(link) && !/^www\./i.test(link)) continue;
+    let candidate;
+    try { candidate = new URL(`https://${link}`); } catch { continue; }
+    const verdict = absoluteLinkVerdict(candidate.href, depth);
+    if (verdict) return verdict;
+  }
+  return null;
+}
+
+function relativeTextVerdict(text) {
+  for (const match of text.match(RELATIVE_LINK_RE) || []) {
+    const { link } = splitTail(match);
+    const verdict = link.length > 1 ? relativeLinkVerdict(link) : null;
+    if (verdict) return verdict;
+  }
+  // The fifth top-level rule: a bare query string that carries a credential ("?token=...").
+  for (const match of text.match(BARE_QUERY_RE) || []) {
+    const { link } = splitTail(match);
+    if (carriesCredential(link.slice(1)) && /=[^&]/.test(link)) return REDACTED_LINK;
+  }
+  return null;
+}
+
+function linkInTextVerdict(text, depth) {
+  for (const match of text.match(URL_IN_TEXT_RE) || []) {
+    const verdict = absoluteLinkVerdict(splitTail(match).link, depth);
+    if (verdict) return verdict;
+  }
+  for (const match of text.match(PROTOCOL_RELATIVE_RE) || []) {
+    const verdict = absoluteLinkVerdict(`https:${splitTail(match).link}`, depth);
+    if (verdict) return verdict;
+  }
+  return hostedTextVerdict(text, depth) || relativeTextVerdict(text);
+}
+
+function wrappedLinkVerdict(url, depth) {
+  if (depth >= MAX_WRAP_DEPTH) return null;
+  // The outer path itself is never judged here (/pay/info, /review/us stay): only a path that EMBEDS an
+  // encoded or absolute target (%2F, %3A, http, //) is read (Codex #6375 r24).
+  const embeddedPath = /%2f|%3a|https?|\/\//i.test(url.pathname) ? [decodeOnce(url.pathname)] : [];
+  const parts = [...url.searchParams.values(), url.hash.replace(/^#/, ''), ...embeddedPath];
+  for (const part of parts) {
+    for (const text of decodedForms(part)) {
+      const verdict = linkInTextVerdict(text, depth + 1);
+      if (verdict) return verdict;
+    }
+  }
+  return null;
+}
+
+// A part as written and each percent-decoded form until it stops changing,
+// at most 3 decodes (a fragment carries no implicit decode) (Codex #6375 r22).
+function decodedForms(part) {
+  const forms = [part];
+  for (let i = 0; i < 3; i += 1) {
+    const next = decodeOnce(forms[forms.length - 1]);
+    if (next === forms[forms.length - 1]) break;
+    forms.push(next);
+  }
+  return forms;
+}
+
 // The verdict for an absolute link (href with a scheme), or null to leave it.
-function absoluteLinkVerdict(href) {
+function absoluteLinkVerdict(href, depth = 0) {
   if (isSignedLink(href)) return REDACTED_LINK;
   let url;
   try { url = new URL(href); } catch { return REDACTED_LINK; }
-  return isOwnPrivateLink(url) || isPrivateLink(href) ? REDACTED_PRIVATE_LINK : null;
+  if (isOwnPrivateLink(url) || isPrivateLink(href)) return REDACTED_PRIVATE_LINK;
+  return wrappedLinkVerdict(url, depth);
 }
 
 function redactString(text, state) {
@@ -265,7 +350,7 @@ function redactString(text, state) {
 }
 
 function newState() {
-  return { links: 0, privateLinks: 0, fields: 0, notes: 0 };
+  return { links: 0, privateLinks: 0, fields: 0, notes: 0, notesReturned: 0, noteSecrets: 0 };
 }
 
 // OPERATOR NOTES. A free-text field typed by staff or customers about a record
@@ -307,7 +392,10 @@ function withheldMarker(length) {
 // (the JSON `details` case). Numbers, booleans, null and empty text are not.
 function hasFreeText(item) {
   if (typeof item === 'string') return item.trim() !== '';
-  return item !== null && typeof item === 'object' && Object.keys(item).length > 0;
+  if (Array.isArray(item)) return item.length > 0;
+  if (item === null || typeof item !== 'object') return false;
+  for (const key in item) if (Object.hasOwn(item, key)) return true;
+  return false;
 }
 
 function shouldWithhold(key, item, freeText) {
@@ -337,18 +425,260 @@ function scrubFreeText(text, state) {
   return clean;
 }
 
+// RETURNED NOTES (GATE_IB_READ_NOTES, owner ruling 2026-10-13). A value the
+// withholding rule above would hide comes back instead: every string in it goes
+// through the ONE fixed-format scrubber (note-secret-scrubber.js) and is cut at
+// 1,000 characters. The only other rule is the structural link redaction every
+// string already gets (a signed or private link becomes a marker). No prose
+// rule runs on it, so gate codes and lockbox instructions come back as written. A credential-named key inside it is still
+// removed.
+// A 13-19 digit integer with a card prefix (2-6) is treated as a card number
+// even when JSON parsing rounded it so it fails the Luhn check (Codex #6375 r4).
+const CARD_LIKE_NUMBER_RE = /^[2-6]\d{12,18}$/;
+function returnNumber(item, state) {
+  const digits = String(item);
+  if (CARD_LIKE_NUMBER_RE.test(digits) && (typeof item === 'bigint' || !Number.isSafeInteger(item) || scrubNote(digits).removed)) {
+    state.noteSecrets += 1;
+    return '[card number removed]';
+  }
+  const { text, removed } = scrubNote(digits);
+  if (!removed) return item;
+  state.noteSecrets += removed;
+  return text;
+}
+
+// One NOTE_CAP budget for a whole structured note, counted in serialized
+// characters: string leaves, keys (quotes, colon, comma), scalars (boolean,
+// number, null, empty string), brackets and commas all draw from it. Once it is
+// spent no entry is added and one "[cut]" marker closes the object or array
+// (Codex #6375 r4, r7).
+const noteFits = (state, cost) => state.noteBudget === undefined || cost <= state.noteBudget;
+const chargeNote = (state, cost) => { if (state.noteBudget !== undefined) state.noteBudget -= cost; };
+// A string is charged as JSON writes it: quotes, backslashes and control
+// characters expand when escaped (Codex #6375 r9).
+const serialLength = value => (typeof value === 'string' ? JSON.stringify(value).length : String(value).length);
+// The longest start of `text` whose escaped form fits in `room` characters.
+function cutToSerial(text, room) {
+  let used = 0;
+  let end = 0;
+  for (const ch of text) {
+    const cost = JSON.stringify(ch).length - 2;
+    if (used + cost > room) break;
+    used += cost;
+    end += ch.length;
+  }
+  return text.slice(0, end);
+}
+// A cut marker is paid for before it is needed: ,"[cut]":true in an object and
+// ,"[cut]" in a list (Codex #6375 r11). A container holds that room back while it
+// is filled, so a marker is never added without a charge.
+const OBJECT_MARKER_COST = JSON.stringify({ [CUT]: true }).length + 1;
+const LIST_MARKER_COST = JSON.stringify(CUT).length + 1;
+const markerCost = container => (Array.isArray(container) ? LIST_MARKER_COST : OBJECT_MARKER_COST);
+// What an entry needs at least: its own text for a scalar; brackets and its own
+// marker room for a container; the quotes for a string (then cut to what is left).
+const leastLeafCost = entry => {
+  if (typeof entry === 'string') return 2;
+  if (entry && typeof entry === 'object') return 2 + markerCost(entry);
+  return serialLength(entry);
+};
+
+// A JSON-escaped link (https:\/\/host\/l\/token) is a link to every link rule. It is
+// judged on an unescaped copy, but only a span that is really redacted is replaced:
+// text that is not a redacted link keeps its backslashes, so a regex or an escaped
+// path (foo\/bar) comes back as written (Codex #6375 r10 audit P0, r13).
+// A token (a run of non-space, non-quote characters starting where the previous one ended) that holds a
+// JSON-escaped slash: https:\/\/host\/l\/code, \/l\/code, \/\/host\/l\/code, host\/l\/code. It is judged on an
+// unescaped copy by the same rules as any link, and only a token that is really redacted is replaced, so a
+// regex or an escaped path (foo\/bar) keeps its backslashes (Codex #6375 r13, r24). Anchored at a token start,
+// so a long run is scanned once.
+const ESCAPED_SLASH_TOKEN_RE = /(?<![^\s"'<>])[^\s"'<>]*\\\/[^\s"'<>]*/g;
+const unescapeSlashes = text => text.replace(/\\\//g, '/');
+function redactNoteLinks(text, state) {
+  const spans = text.replace(ESCAPED_SLASH_TOKEN_RE, (token) => {
+    const plain = unescapeSlashes(token);
+    const clean = redactString(plain, state);
+    return clean === plain ? token : clean;
+  });
+  return redactString(spans, state);
+}
+
+function returnNoteString(item, state) {
+  const scrubbed = scrubNote(redactNoteLinks(trimToScanLimit(item), state), { truncated: item.length > SCAN_LIMIT });
+  state.noteSecrets += scrubbed.removed;
+  const { text } = scrubbed;
+  if (state.noteBudget === undefined) return text;
+  const room = Math.max(state.noteBudget - 2, 0);
+  const kept = serialLength(text) - 2 > room ? `${cutToSerial(text, room)}${CUT}` : text;
+  chargeNote(state, serialLength(kept));
+  return kept;
+}
+
+// A scalar that is not a string, charged at its serialized length.
+function returnNoteScalar(item, state) {
+  const result = typeof item === 'number' || typeof item === 'bigint' ? returnNumber(item, state) : item;
+  chargeNote(state, serialLength(result));
+  return result;
+}
+
+function returnNoteEntries(item, state, depth) {
+  const room = markerCost(item);
+  chargeNote(state, 2 + room);
+  let cut = false;
+  let out;
+  if (Array.isArray(item)) {
+    out = [];
+    for (const entry of item) {
+      if (!noteFits(state, 1 + leastLeafCost(entry))) { out.push(CUT); cut = true; break; }
+      chargeNote(state, 1);
+      out.push(returnNote(entry, state, depth + 1));
+    }
+  } else {
+    out = {};
+    let hiddenKeys = 0;
+    for (const [rawKey, entry] of Object.entries(item)) {
+      // A key is text the model reads too: a secret-shaped key is replaced (Codex #6375 r3).
+      const scrubbedKey = scrubNote(redactNoteLinks(rawKey, state)).text;
+      const key = scrubbedKey === rawKey ? rawKey : `[removed key ${hiddenKeys += 1}]`;
+      const keyCost = serialLength(key) + 2;
+      if (!noteFits(state, keyCost + leastLeafCost(entry))) { out[CUT] = true; cut = true; break; }
+      if (key !== rawKey) state.noteSecrets += 1;
+      chargeNote(state, keyCost);
+      if (entry !== null && entry !== undefined && isCredentialField(rawKey, entry)) {
+        state.noteSecrets += 1;
+        out[key] = REDACTED_FIELD;
+        chargeNote(state, serialLength(REDACTED_FIELD));
+      } else out[key] = returnNote(entry, state, depth + 1);
+    }
+  }
+  // The marker room was held back; give it back when no marker was needed.
+  if (!cut) chargeNote(state, -room);
+  return out;
+}
+
+// A structured note is serialized and goes through the SAME string pipeline as a text note (link
+// redaction, then the note scrubber), so a card number split across array items or a credential key
+// is judged on the text the model would read. The result is parsed back; when it no longer parses
+// (the credential rule removed the tail, or the text was cut) the scrubbed string is the note. The
+// parsed structure is then walked again for the budget and the [cut] markers (Codex #6375 r24).
+// The scalar values of a structured note in document order, as text (keys are not included).
+function noteLeaves(value, out = [], depth = 0) {
+  if (depth > MAX_DEPTH || out.length > 5000) return out;
+  if (Array.isArray(value)) value.forEach(entry => noteLeaves(entry, out, depth + 1));
+  else if (value && typeof value === 'object') Object.values(value).forEach(entry => noteLeaves(entry, out, depth + 1));
+  else if (value !== null && value !== undefined) out.push(String(value));
+  return out;
+}
+
+// A note that was read only in part always carries the [cut] marker, even when what was read, after
+// redaction, fits the budget (Codex #6375 r26 audit).
+function markNoteCut(result, cut) {
+  if (!cut) return result;
+  if (typeof result === 'string') return result.endsWith(CUT) ? result : `${result}${CUT}`;
+  if (Array.isArray(result)) return result.includes(CUT) ? result : [...result, CUT];
+  if (result && typeof result === 'object') return Object.hasOwn(result, CUT) ? result : { ...result, [CUT]: true };
+  return result;
+}
+
+// The part of a structured note that is read at all: nodes (keys, leaves, containers) are copied in document
+// order until the copied text passes SCAN_LIMIT characters or MAX_NOTE_NODES nodes, and the rest is skipped,
+// so a huge array or object costs the same as a small one (Codex #6375 r26). `cut` says something was left out.
+const MAX_NOTE_NODES = 2000;
+function boundedNoteCopy(value) {
+  const seen = { chars: 0, nodes: 0, cut: false };
+  const visit = (node, depth) => {
+    if (seen.chars > SCAN_LIMIT || seen.nodes >= MAX_NOTE_NODES || depth > MAX_DEPTH) { seen.cut = true; return undefined; }
+    seen.nodes += 1;
+    if (typeof node === 'string') {
+      const room = Math.max(SCAN_LIMIT - seen.chars, 0);
+      if (node.length <= room) { seen.chars += node.length; return node; }
+      // A leaf cut at the limit loses its last partial token, so half a secret never reaches the scrubber.
+      seen.cut = true;
+      const kept = trimToScanLimit(node.slice(0, room + 1), room);
+      seen.chars += kept.length;
+      return kept;
+    }
+    if (!node || typeof node !== 'object') { seen.chars += String(node).length; return node; }
+    if (Array.isArray(node)) {
+      const list = [];
+      for (let i = 0; i < node.length; i += 1) {
+        const copy = visit(node[i], depth + 1);
+        if (copy === undefined && seen.cut) break;
+        list.push(copy === undefined ? null : copy);
+      }
+      return list;
+    }
+    const out = {};
+    for (const key in node) {
+      if (!Object.hasOwn(node, key)) continue;
+      if (seen.chars > SCAN_LIMIT || seen.nodes >= MAX_NOTE_NODES) { seen.cut = true; break; }
+      seen.chars += key.length;
+      const copy = visit(node[key], depth + 1);
+      if (copy === undefined && seen.cut) break;
+      out[key] = copy === undefined ? null : copy;
+    }
+    return out;
+  };
+  const copy = visit(value, 0);
+  return { copy, cut: seen.cut };
+}
+
+function returnStructuredNote(item, state) {
+  // Only a bounded part of the note is read (see boundedNoteCopy). First every key and string leaf of it is
+  // scrubbed on its own (credential-named keys, a "Bearer\nabc" the serialized text hides), with no budget
+  // yet; the whole-note checks then read the scrubbed copy.
+  const bounded = boundedNoteCopy(item);
+  const prescrubbed = returnNote(bounded.copy, state, 1);
+  let serialized;
+  try { serialized = JSON.stringify(prescrubbed); } catch { serialized = String(prescrubbed); }
+  // A note that was cut short is always longer than the 1,000-character budget (the caps are 20,000 characters
+  // and 2,000 nodes), so the budget walk below puts the [cut] marker in it.
+  const cutAtScan = serialized.length > SCAN_LIMIT;
+  const { text, removed } = scrubNoteText(redactNoteLinks(trimToScanLimit(serialized), state));
+  state.noteSecrets += removed;
+  let parsed;
+  try { parsed = cutAtScan ? undefined : JSON.parse(text); } catch { parsed = undefined; }
+  // A card number can be split over the items of a note ([4242, 4242, 4242, 4242], {"a": "4242 4242", "b": ...}):
+  // the items are joined in order and checked as one text. When one is found the masked text is the note.
+  const joined = parsed && typeof parsed === 'object' ? noteLeaves(parsed).join(' ') : text.replace(/["{}[\]:]/g, ' ');
+  const masked = maskCardNumbers(joined);
+  if (masked !== null) {
+    state.noteSecrets += 1;
+    return markNoteCut(masked.length > NOTE_CAP ? `${masked.slice(0, NOTE_CAP)}${CUT}` : masked, bounded.cut);
+  }
+  if (parsed === undefined || parsed === null || typeof parsed !== 'object') {
+    return markNoteCut(cutAtScan || text.length > NOTE_CAP ? `${text.slice(0, NOTE_CAP)}${CUT}` : text, bounded.cut);
+  }
+  state.noteBudget = NOTE_CAP;
+  try { return markNoteCut(returnNote(parsed, state, 1), bounded.cut); } finally { delete state.noteBudget; }
+}
+
+function returnNote(item, state, depth = 0) {
+  if (typeof item === 'string') return returnNoteString(item, state);
+  // A number can be a card number too ({ card_number: 4242424242424242 }).
+  if (!item || typeof item !== 'object') return returnNoteScalar(item, state);
+  if (depth === 0) return returnStructuredNote(item, state);
+  if (depth > MAX_DEPTH) { state.noteSecrets += 1; chargeNote(state, serialLength('[too deeply nested]')); return '[too deeply nested]'; }
+  return returnNoteEntries(item, state, depth);
+}
+
 // A copy of `value` with credentials removed. `state` counts what was removed.
-function redactSecrets(value, state, depth = 0) {
+// `notes` ({ freeText }) turns on RETURNED NOTES: a value that would be
+// withheld is returned scrubbed instead. Without it nothing changes.
+function redactSecrets(value, state, depth = 0, notes = null) {
   if (typeof value === 'string') return scrubFreeText(redactString(value, state), state);
   if (!value || typeof value !== 'object') return value;
   if (depth > MAX_DEPTH) { state.fields += 1; return '[too deeply nested]'; }
-  if (Array.isArray(value)) return value.map(item => redactSecrets(item, state, depth + 1));
+  if (Array.isArray(value)) return value.map(item => redactSecrets(item, state, depth + 1, notes));
   const out = {};
   for (const [key, item] of Object.entries(value)) {
     if (item !== null && item !== undefined && isCredentialField(key, item)) {
       state.fields += 1;
       out[key] = REDACTED_FIELD;
-    } else out[key] = redactSecrets(item, state, depth + 1);
+    } else if (notes && shouldWithhold(key, item, notes.freeText)) {
+      state.notesReturned += 1;
+      out[key] = returnNote(item, state);
+    } else out[key] = redactSecrets(item, state, depth + 1, notes);
   }
   return out;
 }

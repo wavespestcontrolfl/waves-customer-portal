@@ -266,6 +266,20 @@ function paymentPlanFollowupStopReason(paymentPlanId) {
   return `payment_plan_created:${paymentPlanId || 'unknown'}`;
 }
 
+// The bar's plan, on the LOCKED invoice row: the debt must still verifiably be the customer's (the live Bill-To resolver; the
+// snapshot payer_id is NULL when a payer was assigned later), and no reminder worker may own the reminder row (its send would go
+// out after the plan stopped the row). The reminder row is locked here, so a worker's claim either committed first (seen) or
+// waits for this transaction. Either answer is the card's PREVIEW_CHANGED: re-asking re-derives the card, which refuses.
+async function assertBarPlanOwnershipAndReminder(trx, lockedInvoice) {
+  const refuse = (message) => { const e = new Error(message); e.statusCode = 409; e.previewChanged = true; return e; };
+  if (lockedInvoice.payer_id || require('../services/invoice-helpers').invoiceWithdrawnFromCustomer(lockedInvoice)
+    || await require('../services/invoice-payer-ownership').invoicePayerOwnership(lockedInvoice, trx) !== null) {
+    throw refuse('The invoice is billed to a payer (or who owes it could not be verified), so no payment plan was created.');
+  }
+  const seq = await trx('invoice_followup_sequences').where({ invoice_id: lockedInvoice.id }).forUpdate().first('touch_claimed_at');
+  if (seq?.touch_claimed_at) throw refuse('A reminder for this invoice is being sent right now, so no payment plan was created.');
+}
+
 async function stopInvoiceFollowupsForPaymentPlan(invoiceId, {
   paymentPlanId = null,
   adminId = null,
@@ -1886,8 +1900,22 @@ async function invoiceSendHandler(req, res, next) {
   }
 }
 
+// The bar's schedule-send, on the locked invoice row: runs `update` only while the debt verifiably is still the customer's
+// (null verdict). A payer, or an answer that cannot be verified, schedules nothing ([] = the handler's PREVIEW_CHANGED).
+// An invoice parked under the stale-claim review hold (delivery unverified, shown as "Needs review") schedules nothing either
+// (null): a schedule would clear the hold's evidence, so only the Invoices page's own Resend is the way off it.
+async function scheduleIfCustomerOwned(invoiceId, update) {
+  return db.transaction(async (trx) => {
+    const locked = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+    if (isStaleClaimReviewHold(locked)) return null;
+    if (!locked || await require('../services/invoice-payer-ownership').invoicePayerOwnership(locked, trx) !== null) return [];
+    return update(trx);
+  });
+}
+
 // POST /:id/schedule-send — send invoice later via the scheduler.
-router.post('/:id/schedule-send', requireAdmin, async (req, res, next) => {
+// Named so the Intelligence Bar's schedule_invoice_send card (scheduleSendFromBar, below) runs this very handler.
+const invoiceScheduleSendHandler = async (req, res, next) => {
   try {
     const { scheduledFor, requestReview } = req.body || {};
     if (!scheduledFor) return res.status(400).json({ error: 'scheduledFor required' });
@@ -1917,11 +1945,16 @@ router.post('/:id/schedule-send', requireAdmin, async (req, res, next) => {
       });
     }
 
-    const [invoice] = await db('invoices')
+    const scheduleUpdate = (dbh) => dbh('invoices')
       .where({ id: req.params.id })
       .whereIn('status', ['draft', 'scheduled'])
       .whereNull('payer_statement_id')
       .whereRaw("(scheduled_send_error IS NULL OR scheduled_send_error NOT LIKE 'payer_billed:%')")
+      // req.ibApprovedSchedule is set only by scheduleSendFromBar (never an HTTP field): the invoice edit time the card
+      // showed, as one more predicate on this UPDATE. The page's call is unchanged.
+      .modify((q) => {
+        if (req.ibApprovedSchedule) q.whereRaw("date_trunc('milliseconds', updated_at) = ?::timestamptz", [new Date(req.ibApprovedSchedule.updatedAtMs).toISOString()]);
+      })
       .update({
         status: 'scheduled',
         scheduled_send_at: when,
@@ -1934,10 +1967,21 @@ router.post('/:id/schedule-send', requireAdmin, async (req, res, next) => {
         updated_at: new Date(),
       })
       .returning('*');
-    if (!invoice) return res.status(404).json({ error: 'Not found' });
+    // The bar's schedule also re-asks, on the LOCKED invoice row, who owes the invoice right now (the live Bill-To resolver: a
+    // payer assigned through the customer default or the scheduled service leaves every invoice column below untouched).
+    const updated = req.ibApprovedSchedule ? await scheduleIfCustomerOwned(req.params.id, scheduleUpdate) : await scheduleUpdate(db);
+    if (updated === null) {
+      return res.status(409).json({ error: 'This invoice is parked for review (its earlier send could not be verified), so nothing was scheduled. Review it on the Invoices page.', code: 'PREVIEW_CHANGED' });
+    }
+    const [invoice] = updated;
+    if (!invoice) {
+      if (req.ibApprovedSchedule) return res.status(409).json({ error: 'The invoice changed after the card was shown, so nothing was scheduled.', code: 'PREVIEW_CHANGED' });
+      return res.status(404).json({ error: 'Not found' });
+    }
     res.json({ ok: true, invoice });
   } catch (err) { next(err); }
-});
+};
+router.post('/:id/schedule-send', requireAdmin, invoiceScheduleSendHandler);
 
 // POST /:id/charge-card-quote — exact saved-card amount, including the
 // funding-aware card fee and projected account credit. No money moves here.
@@ -3440,7 +3484,8 @@ router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
 // POST /:id/payment-plan — create a customer payment plan for this invoice
 // and fire the lifecycle confirmation email. The notification helper already
 // dedupes on payment_plan_id, so repeated sends won't spam the customer.
-router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
+// Named so the Intelligence Bar's create_payment_plan card (createPaymentPlanFromBar, below) runs this very handler.
+const paymentPlanCreateHandler = async (req, res, next) => {
   try {
     const { id } = req.params;
     const body = req.body || {};
@@ -3513,6 +3558,16 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
           const e = new Error('Invoice no longer exists');
           e.statusCode = 409; throw e;
         }
+        // req.ibApprovedPlan is set only by createPaymentPlanFromBar (never an HTTP field): the invoice edit time the
+        // card showed, checked on this locked row. The page's call is unchanged.
+        if (req.ibApprovedPlan) {
+          const liveMs = lockedInvoice.updated_at ? new Date(lockedInvoice.updated_at).getTime() : null;
+          if (liveMs !== req.ibApprovedPlan.updatedAtMs) {
+            const e = new Error('The invoice changed after the card was shown, so no payment plan was created.');
+            e.statusCode = 409; e.previewChanged = true; throw e;
+          }
+          await assertBarPlanOwnershipAndReminder(trx, lockedInvoice);
+        }
         // Re-assert collectibility on the LOCKED row: a record-payment /
         // apply-credit / webhook settlement can commit while this request
         // waits on the lock, and inserting a fresh 'active' plan on a
@@ -3571,7 +3626,7 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
       // Under-lock re-clamp validations (balance covered by credit / installment too
       // large after credit) surface as client errors, not 500s.
       if (err?.statusCode === 400 || err?.statusCode === 409) {
-        return res.status(err.statusCode).json({ error: err.message });
+        return res.status(err.statusCode).json({ error: err.message, ...(err.previewChanged ? { code: 'PREVIEW_CHANGED' } : {}) });
       }
       throw err;
     }
@@ -3604,6 +3659,9 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
         paymentPlanId: paymentPlan.id,
         paymentMethodId,
         plan: paymentPlan,
+        invoiceId: invoice.id,
+        // The bar's card: the recipient it showed (or none). A different live recipient is sent nothing. The page passes none.
+        ...(req.ibApprovedPlan ? { expectedRecipientDigest: req.ibApprovedPlan.emailRecipientDigest } : {}),
         idempotencyKey: `payment.plan_confirmed:${paymentPlan.id}:${planCustomerId}`,
       }).catch((err) => ({ ok: false, error: err.message }))
       : { ok: false, skipped: true, error: 'Plan is no longer active — confirmation email suppressed' };
@@ -3635,12 +3693,14 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
     logger.error(`[admin-invoices] payment-plan failed: ${err.message}`);
     next(err);
   }
-});
+};
+router.post('/:id/payment-plan', requireAdmin, paymentPlanCreateHandler);
 
 // POST /:id/payment-plan/cancel — cancel the invoice's active payment plan.
 // Plans are record-only (no collector yet), but an `active` row blocks invoice
 // edits, credit reversal and auto-credit — this is the only admin exit.
-router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => {
+// Named so the Intelligence Bar's cancel_payment_plan card (cancelPaymentPlanFromBar, below) runs this very handler.
+const paymentPlanCancelHandler = async (req, res, next) => {
   try {
     const { id } = req.params;
     const body = req.body || {};
@@ -3676,6 +3736,13 @@ router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => 
             .where({ invoice_id: id, status: 'cancelled', id: expectedPlanId })
             .orderBy('cancelled_at', 'desc')
             .first();
+          // req.ibApprovedPlanCancel is set only by cancelPaymentPlanFromBar (never an HTTP field): the card approved cancelling
+          // THIS active plan, so a plan another admin already cancelled is not this approval's work. No retry path for the
+          // bar: PREVIEW_CHANGED, and nothing is reported as done by it.
+          if (req.ibApprovedPlanCancel) {
+            const e = new Error('The payment plan changed after the card was shown (it is no longer active), so nothing was cancelled.');
+            e.statusCode = 409; e.previewChanged = true; throw e;
+          }
           if (lastCancelled) return { invoice, plan: lastCancelled, alreadyCancelled: true, rearm: await rearmFollowupsForCancelledPlan(trx, id, lastCancelled.id) };
           const e = new Error('Invoice has no active payment plan'); e.statusCode = 409; throw e;
         }
@@ -3722,7 +3789,7 @@ router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => 
       });
     } catch (err) {
       if (err?.statusCode === 404 || err?.statusCode === 409) {
-        return res.status(err.statusCode).json({ error: err.message });
+        return res.status(err.statusCode).json({ error: err.message, ...(err.previewChanged ? { code: 'PREVIEW_CHANGED' } : {}) });
       }
       throw err;
     }
@@ -3804,7 +3871,8 @@ router.post('/:id/payment-plan/cancel', requireAdmin, async (req, res, next) => 
     logger.error(`[admin-invoices] payment-plan cancel failed: ${err.message}`);
     next(err);
   }
-});
+};
+router.post('/:id/payment-plan/cancel', requireAdmin, paymentPlanCancelHandler);
 
 // ─────────────────────────────────────────────────────────────
 // Per-invoice follow-up sequence (Day 0/3/7/14/30 reminder chain)
@@ -3843,7 +3911,10 @@ router.get('/:id/followup', async (req, res, next) => {
 });
 
 // POST /:id/followup/pause
-router.post('/:id/followup/pause', requireAdmin, async (req, res, next) => {
+// The four follow-up control handlers are named so the Intelligence Bar's reminder cards (followupControlFromBar,
+// sendReminderNowFromBar, below) run these very handlers.
+const REMINDER_CHANGED_ANSWER = { error: 'The invoice reminders changed after the card was shown, so nothing was changed.', code: 'PREVIEW_CHANGED' };
+const invoiceFollowupPauseHandler = async (req, res, next) => {
   try {
     const { reason, until } = req.body || {};
     // adminAuthenticate populates req.technicianId (never req.user) — the
@@ -3851,38 +3922,51 @@ router.post('/:id/followup/pause', requireAdmin, async (req, res, next) => {
     // blank-reason pause with no durable admin fingerprint for the
     // void-stop re-arm to preserve (Codex #3493 r7; same bug the stop
     // route had).
-    await FollowUps.pauseSequence(req.params.id, {
+    // req.ibApprovedControl is set only by followupControlFromBar (never an HTTP field): the reminder id, status and step
+    // the card showed, enforced by the service under the reminder row (409 PREVIEW_CHANGED). The page passes none.
+    const changed = await FollowUps.pauseSequence(req.params.id, {
       reason, until, adminId: req.technicianId || null,
+      ...(req.ibApprovedControl ? { approved: req.ibApprovedControl } : {}),
     });
+    if (changed?.previewChanged) return res.status(409).json(REMINDER_CHANGED_ANSWER);
     res.json({ ok: true });
   } catch (err) { next(err); }
-});
+};
+router.post('/:id/followup/pause', requireAdmin, invoiceFollowupPauseHandler);
 
 // POST /:id/followup/resume
-router.post('/:id/followup/resume', requireAdmin, async (req, res, next) => {
+const invoiceFollowupResumeHandler = async (req, res, next) => {
   try {
-    await FollowUps.resumeSequence(req.params.id);
+    const changed = req.ibApprovedControl
+      ? await FollowUps.resumeSequence(req.params.id, undefined, { approved: req.ibApprovedControl })
+      : await FollowUps.resumeSequence(req.params.id);
+    if (changed?.previewChanged) return res.status(409).json(REMINDER_CHANGED_ANSWER);
     res.json({ ok: true });
   } catch (err) { next(err); }
-});
+};
+router.post('/:id/followup/resume', requireAdmin, invoiceFollowupResumeHandler);
 
 // POST /:id/followup/stop
-router.post('/:id/followup/stop', requireAdmin, async (req, res, next) => {
+const invoiceFollowupStopHandler = async (req, res, next) => {
   try {
     const { reason } = req.body || {};
     // adminAuthenticate populates req.technicianId (never req.user) — the
     // old req.user?.id recorded every admin stop with a NULL admin id,
     // erasing the attribution the void-stop preservation keys on
     // (Codex #3493 r5).
-    await FollowUps.stopSequence(req.params.id, {
+    const changed = await FollowUps.stopSequence(req.params.id, {
       reason, adminId: req.technicianId || null,
+      ...(req.ibApprovedControl ? { approved: req.ibApprovedControl } : {}),
     });
+    if (changed?.previewChanged) return res.status(409).json(REMINDER_CHANGED_ANSWER);
+    if (changed?.needsInvoicesPage) return res.status(409).json({ error: 'This invoice is part of another invoice’s combined card payment that is still unpaid. Stopping it cancels that payment session, which the bar does not do.', code: 'NEEDS_INVOICES_PAGE' });
     res.json({ ok: true });
   } catch (err) { next(err); }
-});
+};
+router.post('/:id/followup/stop', requireAdmin, invoiceFollowupStopHandler);
 
 // POST /:id/followup/send-now — fires the next touch immediately
-router.post('/:id/followup/send-now', requireAdmin, async (req, res, next) => {
+const invoiceFollowupSendNowHandler = async (req, res, next) => {
   try {
     // Authenticated operator click — "now" means now: the SMS leg is exempt
     // from the 8AM-8PM send window (validators/send-window.js). The 10:16 ET
@@ -3896,7 +3980,15 @@ router.post('/:id/followup/send-now', requireAdmin, async (req, res, next) => {
     const combined = body.combined === true
       ? { scheduleId: typeof body.scheduleId === 'string' ? body.scheduleId : null, stepIndex: Number.isInteger(body.stepIndex) ? body.stepIndex : null }
       : null;
-    const routed = await FollowUps.sendNextTouchNow(req.params.id, { operatorInitiated: true, combined });
+    // req.ibApprovedReminder is set only by sendReminderNowFromBar (never an HTTP field): the invoice edit time and the
+    // reminder id, step and status the card showed. The service judges it under the invoice and reminder row locks, before
+    // it re-arms or claims anything, and returns what each channel did (`reminder`). A difference sends nothing (409
+    // PREVIEW_CHANGED). The page's call and answer are unchanged.
+    const approved = req.ibApprovedReminder || null;
+    const routed = await FollowUps.sendNextTouchNow(req.params.id, approved
+      ? { operatorInitiated: true, combined, approved, report: true }
+      : { operatorInitiated: true, combined });
+    if (routed?.reason === 'preview_changed') return res.status(409).json({ error: routed.message, code: 'PREVIEW_CHANGED' });
     // Nothing to send (no sequence, a finished one, a paid or void invoice): never a 200 the panel
     // would read as "Done".
     if (routed?.reason === 'nothing_to_send') return res.status(409).json({ error: routed.message, code: 'NOT_SENT' });
@@ -3919,9 +4011,10 @@ router.post('/:id/followup/send-now', requireAdmin, async (req, res, next) => {
       }
       return res.status(result.status).json(result.body);
     }
-    res.json({ ok: true });
+    res.json(routed?.report ? { ok: true, reminder: routed.report } : { ok: true });
   } catch (err) { next(err); }
-});
+};
+router.post('/:id/followup/send-now', requireAdmin, invoiceFollowupSendNowHandler);
 
 router._private = {
   invoiceRecipientOverrideError,
@@ -3995,6 +4088,49 @@ function unarchiveInvoiceFromBar({ invoiceId, expected }) {
 function unvoidInvoiceFromBar({ invoiceId, expected }) {
   return runInvoiceHandler(invoiceUnvoidHandler, { params: { id: invoiceId }, body: {}, ibExpectedUnvoid: expected });
 }
+
+// The Intelligence Bar's reminder cards (GATE_IB_INVOICE_REMINDERS) run the SAME handlers as the Invoices page's
+// follow-up panel and Schedule send, without an HTTP request. Pause, resume and stop send nothing. `body` is exactly what
+// the panel posts ({ reason } for pause and stop).
+const FOLLOWUP_CONTROL_HANDLERS = {
+  pause: invoiceFollowupPauseHandler,
+  resume: invoiceFollowupResumeHandler,
+  stop: invoiceFollowupStopHandler,
+};
+// approved: { sequenceId, status, stepIndex } — the reminder state the card showed; the service enforces it on the reminder row.
+function followupControlFromBar({ invoiceId, control, body, actor, approved }) {
+  const handler = FOLLOWUP_CONTROL_HANDLERS[control];
+  if (!handler) return Promise.reject(new Error(`Unknown follow-up control: ${control}`));
+  return runInvoiceHandler(handler, barRequest(invoiceId, body, actor, { ibApprovedControl: approved }));
+}
+// approvedReminder: { invoiceUpdatedAtMs, sequenceId, status, stepIndex } — what the send-now card showed. The body is the
+// panel's own (no combined confirmation: the bar never sends a combined step).
+function sendReminderNowFromBar({ invoiceId, actor, approvedReminder }) {
+  return runInvoiceHandler(invoiceFollowupSendNowHandler, barRequest(invoiceId, undefined, actor, { ibApprovedReminder: approvedReminder }));
+}
+// approvedSchedule: { updatedAtMs } — the invoice edit time the schedule card showed. body: { scheduledFor } (an Eastern
+// wall-clock string, as the page posts); the bar never asks for a review request.
+function scheduleSendFromBar({ invoiceId, body, actor, approvedSchedule }) {
+  return runInvoiceHandler(invoiceScheduleSendHandler, barRequest(invoiceId, body, actor, { ibApprovedSchedule: approvedSchedule }));
+}
+
+// The Intelligence Bar's payment-plan cards (GATE_IB_PAYMENT_PLAN) run the SAME handlers as the Invoices page's Payment plan
+// dialog and Cancel plan. The creator is the staff member's name as the page path reads it from the login.
+// approvedPlan: { updatedAtMs } — the invoice edit time the create card showed, re-asserted on the locked invoice row.
+function createPaymentPlanFromBar({ invoiceId, body, actor, approvedPlan }) {
+  return runInvoiceHandler(paymentPlanCreateHandler, barRequest(invoiceId, body, actor, {
+    technician: actor?.name || actor?.email ? { name: actor.name || null, email: actor.email || null } : undefined,
+    ibApprovedPlan: approvedPlan,
+  }));
+}
+// approvedCancel: { planId } — the active plan the cancel card showed; a plan no longer active under the lock is PREVIEW_CHANGED.
+function cancelPaymentPlanFromBar({ invoiceId, body, actor, approvedCancel }) {
+  return runInvoiceHandler(paymentPlanCancelHandler, barRequest(invoiceId, body, actor, {
+    ibApprovedPlanCancel: approvedCancel,
+    technician: actor?.name || actor?.email ? { name: actor.name || null, email: actor.email || null } : undefined,
+  }));
+}
+
 // The Intelligence Bar's create_invoice runs the SAME handlers as POST / (manual create) and POST /from-service (a completed
 // visit's own convenience route). `body` is exactly the carded body; `approved` is the scope the card showed (total, customer,
 // visit link, invoices on the visit), re-checked in the same transaction as the create. A DRAFT only: neither handler sends.
@@ -4014,6 +4150,11 @@ module.exports.unvoidInvoiceFromBar = unvoidInvoiceFromBar;
 module.exports.sendInvoiceFromBar = sendInvoiceFromBar;
 module.exports.recordPaymentFromBar = recordPaymentFromBar;
 module.exports.voidInvoiceFromBar = voidInvoiceFromBar;
+module.exports.followupControlFromBar = followupControlFromBar;
+module.exports.sendReminderNowFromBar = sendReminderNowFromBar;
+module.exports.scheduleSendFromBar = scheduleSendFromBar;
+module.exports.createPaymentPlanFromBar = createPaymentPlanFromBar;
+module.exports.cancelPaymentPlanFromBar = cancelPaymentPlanFromBar;
 module.exports.createInvoiceFromBar = createInvoiceFromBar;
 module.exports.createInvoiceFromServiceFromBar = createInvoiceFromServiceFromBar;
 module.exports.getInvoiceDeliveryRecipients = getInvoiceDeliveryRecipients;

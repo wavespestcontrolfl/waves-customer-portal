@@ -12,7 +12,7 @@ const {
 } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
 const { mergeCustomersEnabled, deleteDuplicateCustomerEnabled } = require('./customer-lifecycle-tools');
-const { ibAcceptEstimateLive, ibCreateInvoiceLive, ibLeadConvertLive, ibRecordPaymentLive, ibVoidInvoiceLive, ibInvoiceEditsLive } = require('../../config/feature-gates');
+const { ibAcceptEstimateLive, ibCreateInvoiceLive, ibLeadConvertLive, ibRecordPaymentLive, ibVoidInvoiceLive, ibInvoiceEditsLive, ibInvoiceRemindersLive, ibPaymentPlanLive } = require('../../config/feature-gates');
 const { invoiceActionsLive } = require('./invoice-action-tools');
 const { repriceVisitsLive } = require('./reprice-visits-tools');
 const { adminReadLive } = require('./admin-read-tools');
@@ -76,6 +76,8 @@ const MODULES = [
   ['lead-convert-tools', 'LEAD_CONVERT_TOOLS', 'executeLeadConvertTool'],
   ['void-invoice-tools', 'VOID_INVOICE_TOOLS', 'executeVoidInvoiceTool'],
   ['invoice-edit-tools', 'INVOICE_EDIT_TOOLS', 'executeInvoiceEditTool'],
+  ['invoice-reminder-tools', 'INVOICE_REMINDER_TOOLS', 'executeInvoiceReminderTool'],
+  ['payment-plan-tools', 'PAYMENT_PLAN_TOOLS', 'executePaymentPlanTool'],
   ['create-invoice-tools', 'CREATE_INVOICE_TOOLS', 'executeCreateInvoiceTool'],
   ['choice-tools', 'CHOICE_TOOLS', 'executeChoiceTool'],
   ['admin-read-tools', 'ADMIN_READ_TOOLS', 'executeAdminReadTool'],
@@ -149,6 +151,13 @@ const GATED_ACTIONS = {
   archive_invoice: () => ibInvoiceEditsLive(),
   unarchive_invoice: () => ibInvoiceEditsLive(),
   unvoid_invoice: () => ibInvoiceEditsLive(),
+  pause_invoice_reminders: () => ibInvoiceRemindersLive(),
+  resume_invoice_reminders: () => ibInvoiceRemindersLive(),
+  stop_invoice_reminders: () => ibInvoiceRemindersLive(),
+  send_invoice_reminder_now: () => ibInvoiceRemindersLive(),
+  schedule_invoice_send: () => ibInvoiceRemindersLive(),
+  create_payment_plan: () => ibPaymentPlanLive(),
+  cancel_payment_plan: () => ibPaymentPlanLive(),
   create_invoice: () => ibCreateInvoiceLive(),
   find_admin_reads: () => adminReadLive(),
   read_admin_data: () => adminReadLive(),

@@ -511,40 +511,56 @@
     "approval": "ui_confirm",
     "scope": "record"
   },
-  "edit_invoice": {
-    "module": "invoice-edit-tools.js",
+  "pause_invoice_reminders": {
+    "module": "invoice-reminder-tools.js",
     "domain": "customers",
     "kind": "internal_write",
     "role": "admin",
     "approval": "ui_confirm",
     "scope": "record"
   },
-  "apply_invoice_credit": {
-    "module": "invoice-edit-tools.js",
+  "resume_invoice_reminders": {
+    "module": "invoice-reminder-tools.js",
     "domain": "customers",
     "kind": "internal_write",
     "role": "admin",
     "approval": "ui_confirm",
     "scope": "record"
   },
-  "archive_invoice": {
-    "module": "invoice-edit-tools.js",
+  "stop_invoice_reminders": {
+    "module": "invoice-reminder-tools.js",
     "domain": "customers",
     "kind": "internal_write",
     "role": "admin",
     "approval": "ui_confirm",
     "scope": "record"
   },
-  "unarchive_invoice": {
-    "module": "invoice-edit-tools.js",
+  "send_invoice_reminder_now": {
+    "module": "invoice-reminder-tools.js",
     "domain": "customers",
-    "kind": "internal_write",
+    "kind": "external_action",
     "role": "admin",
     "approval": "ui_confirm",
     "scope": "record"
   },
-  "unvoid_invoice": {
-    "module": "invoice-edit-tools.js",
+  "schedule_invoice_send": {
+    "module": "invoice-reminder-tools.js",
+    "domain": "customers",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "create_payment_plan": {
+    "module": "payment-plan-tools.js",
+    "domain": "customers",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "cancel_payment_plan": {
+    "module": "payment-plan-tools.js",
     "domain": "customers",
     "kind": "internal_write",
     "role": "admin",
@@ -2106,6 +2122,46 @@
   "propose_admin_edit": {
     "module": "admin-write-tools.js",
     "domain": "ops",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "edit_invoice": {
+    "module": "invoice-edit-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "apply_invoice_credit": {
+    "module": "invoice-edit-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "archive_invoice": {
+    "module": "invoice-edit-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "unarchive_invoice": {
+    "module": "invoice-edit-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "unvoid_invoice": {
+    "module": "invoice-edit-tools.js",
+    "domain": "customers",
     "kind": "internal_write",
     "role": "admin",
     "approval": "ui_confirm",

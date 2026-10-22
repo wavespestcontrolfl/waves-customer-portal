@@ -33,6 +33,10 @@ const { calendarIcsAvailable, arrivalWindowEndsAt, UPCOMING_STATUSES, groupedIcs
 // (codex r3 P1).
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, isUnreviewedDispatchOwned, UNREVIEWED_VOICE_MOVED_SQL } = require('../services/call-booking-source-actions');
 const { hasCancellableWork } = require('../services/cancellation-eligibility');
+// Contact session (GATE_CONTACT_LOGIN): a contact is view-only, so its
+// schedule payloads carry no action bearer (reschedule / calendar tokens,
+// the re-service page, the overlay handoff).
+const { contactSchedulePayload, contactNextPayload, sessionRecordScope } = require('../services/contact-session-projection');
 const {
   accountPropertyIds,
   accountSavedProperties,
@@ -126,7 +130,12 @@ router.get('/', async (req, res, next) => {
   try {
     const { value, error } = listQuerySchema.validate(req.query, { stripUnknown: true });
     if (error) return res.status(400).json({ error: error.details[0].message });
-    const { days, allProperties } = value;
+    const { days } = value;
+    // A CONTACT session (GATE_CONTACT_LOGIN) never takes the allProperties
+    // escape hatch: that plan-coverage payload returns before the contact
+    // projection below and carries the holder's plan and cancellable-work
+    // facts (codex #6363 r14 P2). The flag reads as unset for a contact.
+    const allProperties = value.allProperties && !req.contactSession;
     // ET calendar day, matching the etDateString() lower bound below — a UTC
     // cutoff rolls the window an ET-evening early (scheduled_date is a DATE).
     const cutoffDate = etDateString(addETDays(new Date(), days));
@@ -134,8 +143,10 @@ router.get('/', async (req, res, next) => {
     // Saved-property scope (GATE_APP_PROPERTY_SCOPE): the session's selected
     // property, or the primary. No predicate at all for gate-off and
     // single-home customers (services/account-properties.js) — nor for a
-    // plan-coverage read (allProperties), which must see every house.
-    const scope = allProperties ? null : await resolveSessionScope(req);
+    // plan-coverage read (allProperties), which must see every house. A
+    // contact's scope is the holder's primary property whatever the gate
+    // (codex #6363 r16 security P1).
+    const scope = allProperties ? null : await sessionRecordScope(req);
     const upcomingQuery = db('scheduled_services')
       .where({ 'scheduled_services.customer_id': req.customerId });
     applyPropertyPredicate(upcomingQuery, scope);
@@ -277,7 +288,7 @@ router.get('/', async (req, res, next) => {
     }
 
 
-    res.json({
+    const payload = {
       // The selection this read was actually scoped to (GATE_APP_PROPERTY_SCOPE):
       // the client compares it with what it shows and re-reads the property
       // list on a mismatch (a house retired mid-session, a gate flip) instead
@@ -369,7 +380,8 @@ router.get('/', async (req, res, next) => {
           ? (groupedCalendarUrl(s, calendarVerdictById.get(String(s.id))) ? calendarVerdictById.get(String(s.id)).endsAt.toISOString() : null)
           : calendarExpiresAtFor(s),
       })),
-    });
+    };
+    res.json(req.contactSession ? contactSchedulePayload(payload) : payload);
   } catch (err) {
     next(err);
   }
@@ -823,8 +835,9 @@ async function appPrepPhotosField(svc, customerActive) {
 router.get('/next', async (req, res, next) => {
   try {
     // Same allProperties escape hatch as GET / (plan-coverage evidence).
-    const allProperties = ['1', 'true'].includes(String(req.query?.allProperties || '').toLowerCase());
-    const scope = allProperties ? null : await resolveSessionScope(req);
+    // Never for a contact session — see GET / (codex #6363 r14 P2).
+    const allProperties = !req.contactSession && ['1', 'true'].includes(String(req.query?.allProperties || '').toLowerCase());
+    const scope = allProperties ? null : await sessionRecordScope(req);
     const nextQuery = db('scheduled_services')
       .where({ 'scheduled_services.customer_id': req.customerId });
     applyPropertyPredicate(nextQuery, scope);
@@ -845,7 +858,11 @@ router.get('/next', async (req, res, next) => {
       .first();
 
     if (!nextService) {
-      return res.json({ propertyScope: allProperties ? undefined : resolvedScopePayload(scope), next: null });
+      // The contact projection applies to the empty answer too (codex #6363
+      // r22 P2): the resolved scope would otherwise name the primary
+      // property's id (or its closed state) to a client whose scope is off.
+      const empty = { propertyScope: allProperties ? undefined : resolvedScopePayload(scope), next: null };
+      return res.json(req.contactSession ? contactNextPayload(empty) : empty);
     }
     if (allProperties) {
       // Coverage projection only — no reschedule/calendar bearer links.
@@ -869,7 +886,7 @@ router.get('/next', async (req, res, next) => {
     const nextCalVerdict = nextGroupedVerdict === 'unknown' ? { blocked: true, endsAt: null }
       : nextGroupedVerdict === true ? await groupedCalendarVerdict(nextService.visit_id) : null;
 
-    res.json({
+    const payload = {
       propertyScope: resolvedScopePayload(scope),
       next: {
         id: nextService.id,
@@ -895,7 +912,8 @@ router.get('/next', async (req, res, next) => {
         // absent, payload byte-identical to before this lane.
         ...(await appPrepPhotosField(nextService, req.customer?.active === true)),
       },
-    });
+    };
+    res.json(req.contactSession ? contactNextPayload(payload) : payload);
   } catch (err) {
     next(err);
   }

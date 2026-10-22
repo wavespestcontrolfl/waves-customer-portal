@@ -4,6 +4,16 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(async () => ({ sent: true, message: { provider_message_id: 'sg-1', sent_at: '2026-06-16T00:00:00.000Z' } })),
 }));
+// The contact's OWN email declines (contact login, GATE_CONTACT_LOGIN): empty
+// unless a test says otherwise.
+const mockDeclinedRoles = new Set();
+// …and the addresses re-read at the dispatch boundary (codex r21 / r27): an
+// address in this set is declined (or removed) as of the handoff.
+const mockDeclinedEmails = new Set();
+jest.mock('../services/contact-notification-prefs', () => ({
+  declinedEmailSlotRoles: jest.fn(async () => mockDeclinedRoles),
+  contactAddressStillAllowed: jest.fn(async (_customer, email) => !mockDeclinedEmails.has(String(email).toLowerCase())),
+}));
 
 const db = require('../models/db');
 const EmailTemplates = require('../services/email-template-library');
@@ -106,6 +116,96 @@ describe('appointment email recipient resolution (fan-out to appointment contact
       customerId: 'c1', scheduledServiceId: 'ss1', appointmentTime: '2026-06-22T14:00:00.000Z', serviceLabel: 'Quarterly Pest Control',
     });
     expect(EmailTemplates.sendTemplate.mock.calls.map(([c]) => c.to)).toEqual(['sue@service.com']);
+  });
+
+  test('a contact\'s own decline never reroutes the notice to a holder who turned appointment notices off (codex #6363 r2)', async () => {
+    mockDeclinedRoles.add('service_contact');
+    try {
+      mockDb({
+        customer: {
+          id: 'c1', first_name: 'Pat', email: 'primary@example.com', phone: '+19415551234',
+          service_contact_name: 'Sue', service_contact_phone: '+19415557777', service_contact_email: 'sue@service.com',
+        },
+        prefs: { appointment_notify_primary: false },
+      });
+      const res = await AppointmentEmail.sendAppointmentConfirmationEmail({
+        customerId: 'c1', scheduledServiceId: 'ss1', appointmentTime: '2026-06-22T14:00:00.000Z', serviceLabel: 'Quarterly Pest Control',
+      });
+      expect(res.ok).toBe(false);
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    } finally {
+      mockDeclinedRoles.clear();
+    }
+  });
+
+  test('a contact decline that lands during the library\'s awaits aborts THAT recipient at the dispatch boundary; the holder\'s notice still goes; an unreadable table holds (codex #6363 r21)', async () => {
+    const ContactPrefs = require('../services/contact-notification-prefs');
+    mockDb({
+      customer: {
+        id: 'c1', first_name: 'Pat', email: 'primary@example.com', phone: '+19415551234',
+        service_contact_name: 'Sue', service_contact_phone: '+19415557777', service_contact_email: 'sue@service.com',
+      },
+      prefs: { appointment_notify_primary: true },
+    });
+    // The library resolves template / idempotency / suppression, then asks
+    // onQueued; false aborts before the provider.
+    EmailTemplates.sendTemplate.mockImplementation(async (opts) => {
+      if (opts.onQueued && (await opts.onQueued()) === false) return { aborted: true };
+      return { sent: true, message: { provider_message_id: 'sg-1', sent_at: '2026-06-16T00:00:00.000Z' } };
+    });
+    // The resolution saw no decline; by the handoff Sue has turned email off.
+    mockDeclinedEmails.add('sue@service.com');
+    try {
+      const res = await AppointmentEmail.sendAppointmentConfirmationEmail({
+        customerId: 'c1', scheduledServiceId: 'ss1', appointmentTime: '2026-06-22T14:00:00.000Z', serviceLabel: 'Quarterly Pest Control',
+      });
+      expect(res.ok).toBe(true);
+      expect(EmailTemplates.sendTemplate.mock.calls.map(([c]) => c.to).sort()).toEqual(['primary@example.com', 'sue@service.com']);
+      // Re-read against the customer row as of the handoff, for the contact's address and this event.
+      expect(ContactPrefs.contactAddressStillAllowed).toHaveBeenCalledWith(expect.objectContaining({ id: 'c1' }), 'sue@service.com', 'appointment.confirmation');
+    } finally {
+      mockDeclinedEmails.clear();
+    }
+    // The holder's OWN mailbox is never subject to a contact's decline
+    // (codex r23 security P2): a contact whose address equals the holder's
+    // turning email off must not silence the holder's notice — the shared
+    // address resolves as the holder's and the handoff lets it through, and
+    // the contact declines are not even read for it.
+    EmailTemplates.sendTemplate.mockClear();
+    ContactPrefs.contactAddressStillAllowed.mockClear();
+    mockDb({
+      customer: {
+        id: 'c1', first_name: 'Pat', email: 'shared@example.com', phone: '+19415551234',
+        service_contact_name: 'Sue', service_contact_phone: '+19415557777', service_contact_email: 'shared@example.com',
+      },
+      prefs: { appointment_notify_primary: true },
+    });
+    mockDeclinedEmails.add('shared@example.com');
+    try {
+      const shared = await AppointmentEmail.sendAppointmentConfirmationEmail({
+        customerId: 'c1', scheduledServiceId: 'ss1', appointmentTime: '2026-06-22T14:00:00.000Z', serviceLabel: 'Quarterly Pest Control',
+      });
+      expect(shared.ok).toBe(true);
+      expect(EmailTemplates.sendTemplate.mock.calls.map(([c]) => c.to)).toEqual(['shared@example.com']);
+      expect(ContactPrefs.contactAddressStillAllowed).not.toHaveBeenCalled();
+    } finally {
+      mockDeclinedEmails.clear();
+    }
+    // Unreadable at the handoff for a CONTACT's mailbox: the notice is held, not sent.
+    EmailTemplates.sendTemplate.mockClear();
+    mockDb({
+      customer: {
+        id: 'c1', first_name: 'Pat', email: 'primary@example.com', phone: '+19415551234',
+        service_contact_name: 'Sue', service_contact_phone: '+19415557777', service_contact_email: 'sue@service.com',
+      },
+      prefs: { appointment_notify_primary: false },
+    });
+    ContactPrefs.contactAddressStillAllowed.mockRejectedValueOnce(new Error('timeout'));
+    const held = await AppointmentEmail.sendAppointmentConfirmationEmail({
+      customerId: 'c1', scheduledServiceId: 'ss1', appointmentTime: '2026-06-22T14:00:00.000Z', serviceLabel: 'Quarterly Pest Control',
+    });
+    expect(held).toEqual({ ok: false, held: true, reason: 'preferences_unavailable' });
+    EmailTemplates.sendTemplate.mockImplementation(async () => ({ sent: true, message: { provider_message_id: 'sg-1', sent_at: '2026-06-16T00:00:00.000Z' } }));
   });
 
   test('falls back to the primary email when the service contact has no email', async () => {

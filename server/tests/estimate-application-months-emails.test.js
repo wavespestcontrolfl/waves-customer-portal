@@ -49,10 +49,10 @@ jest.mock('../routes/estimate-public', () => ({
   bookingServiceFor: jest.fn(),
 }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn() }));
-const mockGate = { on: true, months: true };
+const mockGate = { on: true };
 jest.mock('../config/feature-gates', () => {
   const actual = jest.requireActual('../config/feature-gates');
-  return { ...actual, isEnabled: jest.fn((gate) => (gate === 'estimateMonthlyAverage' ? mockGate.on : gate === 'estimateApplicationMonths' ? mockGate.months : actual.isEnabled(gate))) };
+  return { ...actual, isEnabled: jest.fn((gate) => (gate === 'estimateMonthlyAverage' ? mockGate.on : actual.isEnabled(gate))) };
 });
 const mockBilling = { ctx: { billsPerApplication: true, livePricing: null } };
 jest.mock('../services/estimate-proposal-billing', () => ({
@@ -192,10 +192,9 @@ describe('service names from the proposal lines', () => {
   });
 });
 
-describe('delivery email: application months (GATE_ESTIMATE_APPLICATION_MONTHS)', () => {
+describe('delivery email: application months', () => {
   beforeEach(() => {
     mockGate.on = true;
-    mockGate.months = true;
     mockBilling.ctx = { billsPerApplication: true, livePricing: null };
   });
 
@@ -217,36 +216,24 @@ describe('delivery email: application months (GATE_ESTIMATE_APPLICATION_MONTHS)'
       planMonthly: 113.1,
       bundleDiscountPct: 0.1,
     });
-    expect(shared.emailParts(model, { amount: 99, setup: true }, { applicationMonths: true }).note)
+    expect(shared.emailParts(model, { amount: 99, setup: true }).note)
       .toBe(`${BREAKDOWN} Averaged over the year, bundle savings included. You pay after each application. One-time setup $99.00, not in the average.`);
   });
 
-  test('plans the breakdown does not cover read exactly as before', async () => {
+  test('plans the breakdown does not cover carry no month sentences', async () => {
     for (const estimate of [pestEstimate, bundleEstimate]) {
-      mockGate.months = false;
-      const before = await emailAverageParts(estimate);
-      mockGate.months = true;
-      expect(await emailAverageParts(estimate)).toEqual(before);
+      const average = await emailAverageParts(estimate);
+      expect(average.note).not.toContain('Months with');
+      expect(average.note).not.toContain('Other months');
     }
   });
 
-  test('gate off: byte-identical to the monthly-average copy; the base gate off still gives nothing', async () => {
-    mockGate.months = false;
-    expect(await emailAverageParts(pestMosquito)).toEqual({
-      priceLine: 'Priced per application · plan averages $113.10 a month',
-      note: 'Averaged over the year, bundle savings included. You pay after each application.',
-    });
-    mockGate.months = true;
+  test('the monthly-average gate off still gives nothing', async () => {
     mockGate.on = false;
     expect(await emailAverageParts(pestMosquito)).toBeNull();
   });
 
-  test('the reviewed-copy text includes the breakdown, so a review made before the gate flips goes stale', async () => {
-    const withMonths = averageText(await emailAverageParts(pestMosquito));
-    mockGate.months = false;
-    const without = averageText(await emailAverageParts(pestMosquito));
-    expect(withMonths).toContain(BREAKDOWN);
-    expect(without).not.toContain('Months with');
-    expect(withMonths).not.toBe(without);
+  test('the reviewed-copy text includes the breakdown', async () => {
+    expect(averageText(await emailAverageParts(pestMosquito))).toContain(BREAKDOWN);
   });
 });

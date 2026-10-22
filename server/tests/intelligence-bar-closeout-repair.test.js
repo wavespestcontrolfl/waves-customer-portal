@@ -178,6 +178,63 @@ test('completion not done: nothing planned, completion is the only manual item',
   expect(res.manual.map((m) => m.fact)).toEqual(['completion']);
 });
 
+test('a manual-only refusal that names a capability gap reaches the gap list through its top-level error (Codex #6371 r5)', async () => {
+  const { _private: { recordableRefusalCode } } = require('../services/agent-gap-reports');
+  getCloseoutStatus.mockResolvedValue(status({ facts: {
+    comms: { state: 'pending', reason: 'completion_text_missing' },
+  } }));
+  db.mockImplementation(fakeDb({ service_records: [RECORD] }));
+  const res = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+  expect(res.code).toBe('nothing_repairable');
+  expect(res.manual.map((m) => m.fact)).toEqual(['comms']);
+  expect(recordableRefusalCode(res)).toBe('nothing_repairable');
+  // Field-evidence-only manual items are not a capability gap.
+  getCloseoutStatus.mockResolvedValue(status({ facts: { photos: { state: 'pending', reason: 'photo_count_short' } } }));
+  const field = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+  expect(field.code).toBe('nothing_repairable');
+  expect(recordableRefusalCode(field)).toBeNull();
+});
+
+test('a partial plan carries one closeout_<fact>_unsupported gap per capability manual item, never field evidence or an outage (Codex #6371 r14)', async () => {
+  const { _private: { recordableRefusalCode } } = require('../services/agent-gap-reports');
+  getCloseoutStatus.mockResolvedValue(status({ facts: {
+    ...MISSING_REPORT,
+    comms: { state: 'pending', reason: 'completion_text_missing' },
+    photos: { state: 'pending', reason: 'photo_count_short' },
+    license: { state: 'unknown', reason: 'technicians_lookup_failed' },
+  } }));
+  db.mockImplementation(fakeDb({ service_records: [RECORD] }));
+  const preview = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+  expect(preview.preview).toBe(true);
+  expect(preview.steps.length).toBeGreaterThan(0);
+  expect(preview.capability_gaps).toEqual([{ code: 'closeout_comms_unsupported' }]);
+  // Each code passes the gap collector's own rule.
+  expect(recordableRefusalCode({ code: preview.capability_gaps[0].code, error: "The bar can't do this from here yet." })).toBe('closeout_comms_unsupported');
+  // A plan whose manual items are field evidence only carries none.
+  getCloseoutStatus.mockResolvedValue(status({ facts: { ...MISSING_REPORT, photos: { state: 'pending', reason: 'photo_count_short' } } }));
+  expect(await executeCloseoutRepairTool('repair_closeout', { service_id: SVC })).not.toHaveProperty('capability_gaps');
+});
+
+test.each(['service_records_lookup_failed', 'completion_attempts_lookup_failed'])('an unreadable completion (%s) is an outage: blockedNow, outage wording, no gap (Codex #6371 r14)', async (reason) => {
+  const { _private: { recordableRefusalCode } } = require('../services/agent-gap-reports');
+  getCloseoutStatus.mockResolvedValue(status({ facts: { completion: { state: 'unknown', reason }, ...MISSING_REPORT } }));
+  db.mockImplementation(fakeDb({ service_records: [RECORD] }));
+  const res = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+  expect(res.code).toBe('nothing_repairable');
+  expect(res.manual).toEqual([expect.objectContaining({ fact: 'completion', blockedNow: true, fix: expect.stringMatching(/Lookup outage/) })]);
+  expect(res.error).not.toMatch(/can't/);
+  expect(recordableRefusalCode(res)).toBeNull();
+});
+
+test('a lookup outage stays out of the gap text (Codex #6371 r8)', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../services/intelligence-bar/closeout-repair-tools.js'), 'utf8');
+  expect(src).toMatch(/plan\.manual\.filter\(\(m\) => !m\.blockedNow\)\.map\(\(m\) => m\.fix\)/);
+  expect(src).toMatch(/fix: `The bar can\\'t repair this from here: \$\{s\.why\}\.`, blockedNow: true/);
+  const { _private: { recordableRefusalCode } } = require('../services/agent-gap-reports');
+  const outageOnly = { success: false, code: 'nothing_repairable', error: 'Nothing here is repairable by this command — see manual for where each open item gets fixed.', manual: [{ fact: 'invoice', fix: "The bar can't repair this from here: the customer's contact settings could not be read, so the bar can't send it from here" }] };
+  expect(recordableRefusalCode(outageOnly)).toBeNull();
+});
+
 test('field evidence, payer billing and unknown facts are listed manual, never planned', async () => {
   getCloseoutStatus.mockResolvedValue(status({ facts: {
     photos: { state: 'pending', reason: 'photo_count_short' },

@@ -6,6 +6,7 @@
  */
 const db = require('../../models/db');
 const RouteOptimizer = require('../route-optimizer');
+const { loadTechStartPoint } = require('./tech-start-point');
 const { gateEnvValue } = require('../../config/feature-gates');
 const { etDateString, etParts } = require('../../utils/datetime-et');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
@@ -145,6 +146,9 @@ async function resolveSeparatedTarget(conn, target, serviceId) {
 async function loadArrivalRouteContext({
   conn = db, serviceId, prospective, date, technicianId, excludeServiceIds = [], excludeEstimateId,
   changes = {}, now = new Date(), travel, preserveCapacity = false, unit = false, alone = false,
+  // Staff callers only: start the day at the tech's start point
+  // (GATE_TECH_START_POINTS). Public and commit-time callers keep the office.
+  startPoints = false,
 }) {
   const stored = prospective ? { id: '__candidate__', route_order: null, created_at: now.toISOString(), ...prospective }
     : await conn('scheduled_services')
@@ -223,7 +227,9 @@ async function loadArrivalRouteContext({
   date, now, grouped, activeTarget, prospective: !!prospective,
   insertTarget: dateOnly(stored.scheduled_date) !== date || stored.technician_id !== techId
     || (changes.window_start && String(changes.window_start).slice(0, 5) !== String(stored.window_start).slice(0, 5)),
-  travel, preserveCapacity, blocks };
+  travel, preserveCapacity, blocks,
+  // Where this tech's day starts and ends (GATE_TECH_START_POINTS; off = HQ).
+  home: startPoints ? await loadTechStartPoint(conn, techId) : RouteOptimizer.HQ };
 }
 
 // A visit consumes the sum of its members' work, with one journey to the
@@ -299,10 +305,10 @@ function clockOrder(rows) {
   return promisedWindowOrder(rows);
 }
 
-function routeDriveMinutes(stops, origin) {
+function routeDriveMinutes(stops, origin, end = RouteOptimizer.HQ) {
   let prev = origin;
   let total = 0;
-  for (const stop of [...stops, RouteOptimizer.HQ]) {
+  for (const stop of [...stops, end]) {
     total += RouteOptimizer.fallbackLegMetrics(RouteOptimizer.haversine(prev.lat, prev.lng, stop.lat, stop.lng)).minutes;
     prev = stop;
   }
@@ -354,7 +360,8 @@ function targetUnroutable(capacity, target, windowStart, windowEnd, grouped) {
 function resolvePlacementOrigin(context, capacity, departureMin, target, own) {
   let startMin = capacity ? Math.max(SHIFT.startMinutes, departureMin ?? SHIFT.startMinutes)
     : departureMin ?? Math.min(8 * 60, ...[target, ...own].map(row => effectiveWindowRange(row)?.startMin ?? Infinity));
-  let origin = RouteOptimizer.HQ;
+  // The tech's start point (GATE_TECH_START_POINTS), else the office.
+  let origin = context.home || RouteOptimizer.HQ;
   if (context.date === etDateString(context.now)) {
     if (context.activeTarget || own.some(row => ['en_route', 'on_site'].includes(row.status))) return null;
     const parts = etParts(context.now);
@@ -446,7 +453,7 @@ function dayIsOvercommitted(sequencers, groupedPending, simulate) {
 
 /** Shape the certified winner into evaluateArrivalPlacement's public
  *  feasible result. */
-function buildFeasibleResult({ target, capacity, startMin, own, windowStart, winner, origin }) {
+function buildFeasibleResult({ target, capacity, startMin, own, windowStart, winner, origin, home = RouteOptimizer.HQ }) {
   const { simulation, order, usedLegs, baselineDrive } = winner;
   // Fixed blockers remain immovable; selected-technician holds are included
   // in the capacity route alongside that technician's appointments.
@@ -467,7 +474,7 @@ function buildFeasibleResult({ target, capacity, startMin, own, windowStart, win
       travelReasons: [...new Set(usedLegs.map(leg => leg.reason).filter(Boolean))],
       // Where the van starts this route (home base, or today's last
       // completed stop), so a picker can say where the first drive starts.
-      origin: origin ? { isHome: origin === RouteOptimizer.HQ } : null,
+      origin: origin ? { isHome: origin === home } : null,
     } : {}),
     arrivalDelayMinutes: arrival.arrivalMin + (target.arrivalOffsetMinutes || 0) - minuteOfDay(windowStart),
     arrivals: simulation.arrivals.map(row => ({ id: row.id, arrival: hhmm(row.arrivalMin), departure: hhmm(row.departureMin), drive: row.driveMin })),
@@ -523,7 +530,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
         raw_estimate_minutes: row.memberIds ? row.estimated_duration_minutes
           : ('raw_estimate_minutes' in row ? row.raw_estimate_minutes : row.estimated_duration_minutes),
         estimated_duration_minutes: row.memberIds ? row.estimated_duration_minutes : workDuration(row) })), {
-        origin, startMin, dayEndMin, includeReturnInFinish: capacity, bufferMinutes,
+        origin, startMin, dayEndMin, includeReturnInFinish: capacity, bufferMinutes, end: context.home || RouteOptimizer.HQ,
         blockedIntervals: (context.blocks || []).map(block => ({ startMin: minuteOfDay(block.start_time), endMin: minuteOfDay(block.end_time) })),
         ...(travel ? { legMinutes: (from, to, departureMin) => {
           const leg = { date, from, to, departureMin };
@@ -547,7 +554,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
     const legs = [];
     const baselineSimulation = simulate(baseline, legs);
     if (collectLegs) collectLegs.push(...legs);
-    return baselineSimulation ? baselineSimulation.travelMin : routeDriveMinutes(baseline, origin);
+    return baselineSimulation ? baselineSimulation.travelMin : routeDriveMinutes(baseline, origin, context.home || RouteOptimizer.HQ);
   };
   const orders = buildCandidateOrders(context, capacity, groupedPending, target, allowInsertion, sequencers, baselineDriveMinutes);
   const { winner, returnTooLate } = selectWinningOrder(orders,
@@ -566,7 +573,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
       warning: `The route on ${date} already cannot keep every promised arrival window before this visit is added.` };
   }
   if (!winner) return fail;
-  return buildFeasibleResult({ target, capacity, startMin, own, windowStart, winner, origin });
+  return buildFeasibleResult({ target, capacity, startMin, own, windowStart, winner, origin, home: context.home || RouteOptimizer.HQ });
 }
 
 /** One on-the-hour enumeration for the staff finder and read-only gap
