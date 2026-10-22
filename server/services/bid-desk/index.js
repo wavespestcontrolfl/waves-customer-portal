@@ -18,6 +18,15 @@ const { bidDeskLive } = require('../../config/feature-gates');
 const { detectBidEmail, parseBidEmail, classifyKind } = require('./detector');
 const { attachPatch, reminderDue, OPEN_STATUSES } = require('./rules');
 const alerts = require('./alerts');
+const { hasAlignedAuth } = require('../email/inbox-hygiene');
+const { domainFromAddress } = require('../email/spam-blocker');
+
+// The email with `provider_verified` set: aligned SPF or DKIM for its own From domain in the stored
+// Authentication-Results (the same check the receipts sweep and spam rescue use). The detector trusts a provider
+// template only when this is true.
+function withProviderCheck(email) {
+  return { ...email, provider_verified: hasAlignedAuth(email.authentication_results, domainFromAddress(email.from_address)) };
+}
 
 const LOG = '[bid-desk]';
 const WATERMARK_KEY = 'bid_desk.watermark';
@@ -30,7 +39,7 @@ const REMINDER_LIMIT = 100;
 const RECHECK_WINDOW_MS = 30 * 60 * 1000;
 // Pages of `limit` rows the late pass may read per tick (bounds one tick; 30 minutes of mail is far below it).
 const LATE_MAX_PAGES = 10;
-const EMAIL_COLUMNS = ['id', 'gmail_thread_id', 'from_address', 'from_name', 'subject', 'body_text', 'body_html', 'received_at', 'classification', 'label_ids'];
+const EMAIL_COLUMNS = ['id', 'gmail_thread_id', 'from_address', 'from_name', 'subject', 'body_text', 'body_html', 'received_at', 'classification', 'label_ids', 'authentication_results'];
 
 // Mail the sync stored as spam (a blocked sender, Gmail's SPAM label) never becomes a bid or a bell.
 const NOT_SPAM_SQL = "COALESCE(classification, '') <> 'spam' AND NOT jsonb_exists(COALESCE(label_ids, '[]'::jsonb), 'SPAM')";
@@ -87,7 +96,8 @@ async function detectWithThread(email) {
   return inThread ? { bid: true, source: inThread.source, kind: classifyKind(email), reason: 'thread' } : detected;
 }
 
-async function ingestEmail(email, { historical = false, manual = false } = {}) {
+async function ingestEmail(rawEmail, { historical = false, manual = false } = {}) {
+  const email = withProviderCheck(rawEmail);
   // A person marking an email by hand is already looking at it, and the backfill files history: no bell for either.
   const quiet = manual || historical;
   if (!manual && isSpam(email)) return { skipped: 'spam' };
@@ -382,7 +392,7 @@ async function runBackfill({ days = BACKFILL_DAYS, dryRun = true, now = new Date
     for (const email of rows) {
       result.read += 1;
       cursor = { at: new Date(email.received_at).toISOString(), id: email.id };
-      if (!(await detectWithThread(email)).bid) continue;
+      if (!(await detectWithThread(withProviderCheck(email))).bid) continue;
       result.matched += 1;
       if (dryRun) continue;
       try {

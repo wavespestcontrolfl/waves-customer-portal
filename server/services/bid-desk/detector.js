@@ -112,10 +112,14 @@ const domainOf = (address) => {
 };
 const inDomain = (domain, root) => domain === root || domain.endsWith(`.${root}`);
 
+// A provider template is trusted only when the caller has verified the mail really came from the provider
+// (`provider_verified`: aligned SPF/DKIM in Gmail's stored Authentication-Results, checked by the intake). A forged
+// "BuildingConnected" message is then read like any plain email: no template fields, no cross-thread grouping.
 function senderKind(email) {
   const domain = domainOf(email.from_address);
-  if (inDomain(domain, BC_DOMAIN)) return 'buildingconnected';
-  if (inDomain(domain, PROCORE_DOMAIN)) return 'procore';
+  const verified = email.provider_verified === true;
+  if (inDomain(domain, BC_DOMAIN)) return verified ? 'buildingconnected' : null;
+  if (inDomain(domain, PROCORE_DOMAIN)) return verified ? 'procore' : null;
   if (PORTAL_DOMAINS.some((root) => inDomain(domain, root)) || GOV_SUFFIXES.some((suffix) => domain.endsWith(suffix))) {
     return 'gov_email';
   }

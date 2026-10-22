@@ -89,6 +89,9 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       subject: 'Fixture Build Co has invited you to bid on Sample Ridge Residences', body_text: BC_BODY(), received_at: new Date(NOW.getTime() - 60000), ...over,
       // The job's cursor is the INSERT time. Unless a test says otherwise, a row is stored when it was received.
       created_at: over.created_at || over.received_at || new Date(NOW.getTime() - 60000),
+      // Gmail's stored Authentication-Results: aligned DKIM for the sender's own domain unless a test says otherwise.
+      authentication_results: over.authentication_results !== undefined ? over.authentication_results
+        : `mx.google.com; dkim=pass header.i=@${String(over.from_address || 'invites@buildingconnected.com').split('@')[1]}`,
     });
     return mockPg('emails').where({ id }).first();
   }
@@ -470,6 +473,14 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect((await bidRow(bidId)).group_key).toBe('fixture build co|sample ridge residences#pest control');
       // A later template invite in another thread now joins the same bid.
       expect(await service.ingestEmail(await storeEmail({ received_at: new Date(NOW.getTime() - 20000) }))).toMatchObject({ bidId, created: false });
+    });
+
+    test('a forged BuildingConnected email (no aligned SPF/DKIM) is not read as a template and joins nothing', async () => {
+      const { bidId } = await service.ingestEmail(await storeEmail());
+      const forged = await service.ingestEmail(await storeEmail({ authentication_results: 'mx.google.com; dkim=fail header.i=@buildingconnected.com; spf=softfail smtp.mailfrom=x@elsewhere.example', subject: 'Addendum 1', received_at: new Date(NOW.getTime() - 30000) }));
+      expect(forged.bidId).not.toBe(bidId);
+      expect(await bidRow(bidId)).toMatchObject({ needs_date_confirmation: false });
+      expect(await bidRow(forged.bidId)).toMatchObject({ source: 'email_subject', gc_or_agency: null, due_at: null, group_key: null });
     });
 
     test('reminded bids do not fill the candidate list', async () => {

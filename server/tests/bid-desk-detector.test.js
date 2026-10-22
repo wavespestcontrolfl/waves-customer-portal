@@ -2,9 +2,11 @@
 // invented; the bodies copy the SHAPE of the BuildingConnected and Procore templates, not any real message.
 const { detectBidEmail, parseBidEmail, parseDateET, htmlToText } = require('../services/bid-desk/detector');
 
+// provider_verified is what the intake sets after checking aligned SPF/DKIM; fixtures are verified unless a test
+// says otherwise (see "a forged provider email").
 const email = (over = {}) => ({
   id: 'e-1', gmail_thread_id: 't-1', from_address: 'someone@example.test', from_name: 'Someone', subject: 'Hello',
-  body_text: '', body_html: null, received_at: new Date('2026-08-20T14:00:00Z'), ...over,
+  body_text: '', body_html: null, received_at: new Date('2026-08-20T14:00:00Z'), provider_verified: true, ...over,
 });
 
 const BC_BODY = [
@@ -295,3 +297,14 @@ describe('grouping keys stay bounded and distinct', () => {
     expect(one.group_key.length).toBeLessThan(400);
   });
 });
+
+describe('a forged provider email', () => {
+  test('without verified sender authentication a BuildingConnected email is read like a plain email', () => {
+    const forged = bcInvite({ provider_verified: false });
+    expect(parseBidEmail(forged)).toMatchObject({ template: null, gc_or_agency: null, project_title: null, due_at: null, group_key: null });
+    // With no bid word in its subject it is not filed at all; with one ("Addendum 1") it files as a plain email.
+    expect(detectBidEmail(forged).bid).toBe(false);
+    expect(detectBidEmail(bcInvite({ provider_verified: false, subject: 'Addendum 1' }))).toMatchObject({ bid: true, source: 'email_subject' });
+  });
+});
+
