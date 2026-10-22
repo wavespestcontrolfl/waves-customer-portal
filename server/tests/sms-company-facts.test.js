@@ -503,6 +503,19 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
       ]) expect(retiredCompanyFactBlock({ decision: old(v, body), outgoingBody: body })).toMatch(/company fact retired/);
     }
   });
+  test('the provider-boundary checks refuse an unedited pre-15 draft too', async () => {
+    const sc = require('../services/agent-decision-send-checks');
+    const body = RETIRED_COMPANY_FACT_LINES[10];
+    const row = { input_snapshot: '{}', prompt_version: 'house_voice_v12_real_answers14_n', suggested_message: body };
+    const dbi = () => ({ where: () => ({ first: async () => row }) });
+    const verdict = await sc.labelFactsProviderPreSendCheck({ decisionId: 'd1', getBody: () => body })({ dbi });
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reason).toMatch(/company fact retired/);
+    const snap = await sc.labelFactsSnapshotProviderPreSendCheck({ promptVersion: 'house_voice_v12_real_answers14_n', getBody: () => body })({});
+    expect(snap.ok).toBe(false);
+    const fresh = await sc.labelFactsSnapshotProviderPreSendCheck({ promptVersion: 'house_voice_v12_real_answers15_n', getBody: () => 'See you Tuesday!' })({});
+    expect(fresh.ok).toBe(true);
+  });
   test('a staff rewrite of an old draft goes out; the unedited old draft does not', () => {
     const decision = { prompt_version: 'house_voice_v12_real_answers13_n', suggested_message: RETIRED_COMPANY_FACT_LINES[10] };
     expect(retiredCompanyFactBlock({ decision, outgoingBody: 'The technician can take cash at the visit.' })).toBeNull();

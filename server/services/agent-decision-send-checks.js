@@ -371,9 +371,12 @@ function labelFactsProviderPreSendCheck({ decisionId, getBody }) {
     let reason;
     try {
       const conn = dbi || require('../models/db');
-      const decision = await conn('agent_decisions').where({ id: decisionId }).first('input_snapshot', 'prompt_version');
+      const decision = await conn('agent_decisions').where({ id: decisionId }).first('input_snapshot', 'prompt_version', 'suggested_message');
       // a decision row that cannot be read never means "no snapshot, so send"
-      reason = decision ? await labelFactsBlockReason({ decision, outgoingBody, dbh: dbi }) : 'label_facts_decision_not_found';
+      // (the retired-company-fact check rides here too, so a scheduler read that failed earlier cannot skip it - pre-push P1)
+      reason = decision
+        ? (retiredCompanyFactBlock({ decision, outgoingBody }) || await labelFactsBlockReason({ decision, outgoingBody, dbh: dbi }))
+        : 'label_facts_decision_not_found';
     } catch (err) {
       require('./logger').warn(`[agent-decision-send-checks] LABEL FACTS boundary recheck failed for decision ${decisionId}: ${err.message}; blocking send`);
       reason = 'label_facts_recheck_failed';
@@ -390,7 +393,9 @@ function labelFactsSnapshotProviderPreSendCheck({ labelFactsSnapshot = null, inb
     const outgoingBody = typeof getBody === 'function' ? getBody() : getBody;
     let reason;
     try {
-      reason = await require('./sms-label-facts').labelFactsSendBlockReason({ snapshot: labelFactsSnapshot, body: outgoingBody, inbound: inboundMessage, ...(dbi ? { conn: dbi } : {}) });
+      // an auto-send body is the AI draft itself, so a pre-answer-book prompt is refused outright
+      reason = draftedBeforeAnswerBook({ prompt_version: promptVersion }) ? 'company fact retired (an unedited draft from before the 2026-10-22 company facts)'
+        : await require('./sms-label-facts').labelFactsSendBlockReason({ snapshot: labelFactsSnapshot, body: outgoingBody, inbound: inboundMessage, ...(dbi ? { conn: dbi } : {}) });
     } catch (err) {
       require('./logger').warn(`[agent-decision-send-checks] LABEL FACTS boundary recheck failed: ${err.message}; blocking send`);
       reason = 'label_facts_recheck_failed';
@@ -638,12 +643,13 @@ async function scheduledOpenLoopsBlockReason({ agentDecisionId, dbh }) {
 async function agentDecisionSendBlockReason({ decision, outgoingBody }) {
   return (await openTimesBlock({ decision, outgoingBody }))
     || followupBlock({ decision, outgoingBody })
-    || retiredCompanyFactBlock({ decision, outgoingBody })
     || (await labelFactsBlock({ decision, outgoingBody }))
     || (await amountsBlock({ decision, outgoingBody }))
     || (await reserviceBlock({ decision, outgoingBody }))
     || (await openLoopsBlock({ decision }))
-    || (await etaBlock({ decision, outgoingBody }));
+    || (await etaBlock({ decision, outgoingBody }))
+    // last: a more specific reason above names what is wrong with the body itself
+    || retiredCompanyFactBlock({ decision, outgoingBody });
 }
 
 /**
