@@ -903,17 +903,10 @@ async function lockAndPinStampedSessionsForCustomer(database, customerId, { expe
   return rows;
 }
 
-async function releaseUnconfirmedCombinedSessionsForCustomer(database, customerId, { expectedPaymentIntentIds = null, invalidatedSingleInvoice = false, invalidateLinked = false, invalidateInvoiceIds = null, pending = null, deferApply = false } = {}) {
+async function releaseUnconfirmedCombinedSessionsForCustomer(database, customerId, { expectedPaymentIntentIds = null, invalidatedSingleInvoice = false, invalidateLinked = false, pending = null, deferApply = false } = {}) {
   if (!customerId) return { released: 0, inFlight: 0 };
   const rows = await lockAndPinStampedSessionsForCustomer(database, customerId, { expectedPaymentIntentIds });
   if (invalidateLinked) await markLinkedSingleInvoiceSessions(database, rows, { customerId: String(customerId) }, pending);
-  // Invoices the caller already knows this change moves to a payer (the Intelligence Bar card's moving list,
-  // combined-visit invoices included, which markLinkedSingleInvoiceSessions does not see): their own
-  // single-invoice checkout is invalidated too, so a pre-issued client secret cannot charge the homeowner.
-  if (Array.isArray(invalidateInvoiceIds) && invalidateInvoiceIds.length) {
-    const extra = new Set(invalidateInvoiceIds.map(String));
-    for (const row of rows) if (extra.has(String(row.id))) row.invalidatesSingleInvoice = true;
-  }
   // Whole-or-nothing, like every multi-intent release: a Stripe cancel cannot be rolled back with the
   // refused payer edit, so nothing is cancelled while any intent of the set has money in flight.
   const plan = await planStampedSessionRelease(database, rows, { invalidatedSingleInvoice });

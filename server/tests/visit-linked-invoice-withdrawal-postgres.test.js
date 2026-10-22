@@ -213,26 +213,6 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     expect(await invoiceRow(first.invoiceId)).toMatchObject({ stripe_payment_intent_id: 'pi_mixed_open' });
   });
 
-  test('invalidateInvoiceIds cancels the single checkout of an invoice the caller names as moving (a combined-visit invoice)', async () => {
-    const PayCombined = require('../services/pay-combined');
-    const payerId = await payer();
-    const base = await fixture({ link: 'record' });
-    // An invoice the visit-linked answer does not see (no visit link, like a combined-visit invoice) with its own checkout.
-    const packetLike = randomUUID();
-    await mockPg('invoices').insert({ id: packetLike, customer_id: base.customerId, invoice_number: `FIX-${packetLike.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''), status: 'sent', total: 80, stripe_payment_intent_id: 'pi_packet_single' });
-    const cancel = jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({});
-    jest.spyOn(StripeService, 'retrievePaymentIntent').mockImplementation(async (id) => ({ id, status: 'requires_payment_method', metadata: {} }));
-    const pending = { customerPatch: { customerId: base.customerId, payer_id: payerId } };
-    // Without the caller's list it is kept: the linked answer alone never names it.
-    await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(mockPg, base.customerId, { invalidateLinked: true, pending });
-    expect(cancel).not.toHaveBeenCalledWith('pi_packet_single');
-    expect(await invoiceRow(packetLike)).toMatchObject({ stripe_payment_intent_id: 'pi_packet_single' });
-    // Named as moving: cancelled in Stripe and its stamp cleared.
-    await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(mockPg, base.customerId, { invalidateLinked: true, pending, invalidateInvoiceIds: [packetLike] });
-    expect(cancel).toHaveBeenCalledWith('pi_packet_single');
-    expect(await invoiceRow(packetLike)).toMatchObject({ stripe_payment_intent_id: null });
-  });
-
   test('the customer-default and payer-activation releases cancel single checkouts only where the owner would move', async () => {
     const PayCombined = require('../services/pay-combined');
     const payerId = await payer(false);

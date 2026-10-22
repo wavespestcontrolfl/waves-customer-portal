@@ -99,9 +99,6 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   'send_invoice',
   // A recorded payment closes the invoice and stops its reminders; only a refund or void (closed to the bar) undoes it.
   'record_payment',
-  // A Bill-To set cancels the customer's open pay-page sessions in Stripe (a cancelled PaymentIntent cannot be
-  // restored) and kills the moved invoices' pay links; removing the payer later does not bring either back.
-  'set_customer_bill_to',
 ]);
 
 // Tools whose card lines are curated below from their own preview, not the

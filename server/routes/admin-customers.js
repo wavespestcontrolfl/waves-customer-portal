@@ -4398,12 +4398,7 @@ const customerUpdateHandler = async (req, res, next) => {
           // — an unreleasable session aborts this transaction.
           if (updates.payer_id !== undefined && updates.payer_id) {
             const payerRelease = await require('../services/pay-combined')
-              .releaseUnconfirmedCombinedSessionsForCustomer(trx, req.params.id, {
-                invalidateLinked: true, pending: customerPayerPending, deferApply: true,
-                // The bar card's moving invoices (combined-visit ones included): their single-invoice checkouts are
-                // cancelled too. The after-withdrawal check below refuses unless exactly these moved.
-                invalidateInvoiceIds: req.ibExpectedInvoices ? req.ibExpectedInvoices.filter((e) => e.to_payer_id).map((e) => e.id) : null,
-              });
+              .releaseUnconfirmedCombinedSessionsForCustomer(trx, req.params.id, { invalidateLinked: true, pending: customerPayerPending, deferApply: true });
             // In-flight combined money DEFERS the payer edit (codex r30
             // P1, same contract as the merge fence): the eventual combined
             // settlement never re-resolves ownership, so committing now
@@ -4438,27 +4433,12 @@ const customerUpdateHandler = async (req, res, next) => {
             // self-pay combined-visit invoice this customer now owes to AP,
             // including one the homeowner already holds a pay link for.
             if (updates.payer_id) {
-              // req.ibExpectedInvoices is set only by setCustomerBillToFromBar: the invoices the bar card said
-              // move, with the status, total and credit it showed. Checked inside this transaction, after the
-              // customer row lock and before any Stripe cancel (they run last): any other set, or a changed
-              // row, rolls the whole edit back. The rows are locked FOR UPDATE (id order) before the compare and
-              // stay locked through the withdrawal. Every other Bill-To writer for this customer already waits on
-              // the customer row; a money path that holds an invoice first can deadlock with this, which
-              // PostgreSQL aborts and the operator retries (lock order there is out of scope, owner 2026-10-03).
-              // The invoices the bar card listed (req.ibExpectedInvoices, set only by setCustomerBillToFromBar; the
-              // card itself was re-derived above): the withdrawal must move exactly its moving ones, each stamped
-              // for the payer the card named for it.
-              const expected = req.ibExpectedInvoices;
-              const drift = (message) => Object.assign(new Error(message), { statusCode: 409, isOperational: true, code: 'preview_changed' });
               const withdrawn = await Packets.withdrawPacketInvoicesForOwner(trx, { customerId: req.params.id });
-              if (expected) {
-                const moving = expected.filter((e) => e.to_payer_id);
-                const moved = [...new Set(withdrawn.map(String))].sort();
-                if (JSON.stringify(moved) !== JSON.stringify(moving.map((e) => e.id).sort())) throw drift('Different invoices would move than the card showed.');
-                const stamps = moving.length ? await trx('invoices').whereIn('id', moving.map((e) => e.id)).select('id', 'scheduled_send_error') : [];
-                const toNamed = moving.every((e) => stamps.some((r) => String(r.id) === e.id
-                  && new RegExp(`^payer_billed:${String(e.to_payer_id).replace(/[^0-9A-Za-z-]/g, '')}(:|$)`).test(String(r.scheduled_send_error || ''))));
-                if (!toNamed) throw drift('An invoice would move to a different payer than the card showed.');
+              // req.ibExpectNoMove is set only by setCustomerBillToFromBar: the bar card is offered only when no
+              // invoice moves. Any withdrawal here means the customer's invoices changed after the card, so the
+              // whole edit rolls back (before any Stripe cancel: they run last).
+              if (req.ibExpectNoMove && withdrawn.length) {
+                throw Object.assign(new Error('An invoice would move to the payer, which the card did not show.'), { statusCode: 409, isOperational: true, code: 'preview_changed' });
               }
             }
           }
@@ -6791,10 +6771,9 @@ module.exports = router;
 // what the customer page's Bill-To select sends — without an HTTP request (the admin-invoices.js adapter
 // pattern): the handler gets the request fields it reads and a capture response, and the promise resolves the
 // reply it would send, { status, json }. An error passed to next() rejects. expectedPayerId: the Bill-To the
-// card showed (null = the customer pays); verifyPlan(trx): re-derives the whole card inside the transaction and
-// throws preview_changed on any difference; expectedInvoices: every invoice the card listed ({ id, status, total,
-// credit_applied, to_payer_id }; to_payer_id null = stays), checked against what the withdrawal moved.
-function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, expectedInvoices, verifyPlan, actor }) {
+// card showed (null = the customer pays); verifyPlan(trx): re-checks the card inside the transaction and throws
+// preview_changed on any difference; the change refuses too if any invoice would move (the card promises none).
+function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, verifyPlan, actor }) {
   return new Promise((resolve, reject) => {
     const res = {
       statusCode: 200,
@@ -6809,7 +6788,7 @@ function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, expect
       get: () => null,
       ibExpectedPayerId: expectedPayerId == null ? null : String(expectedPayerId),
       ibVerifyPlan: typeof verifyPlan === 'function' ? verifyPlan : null,
-      ibExpectedInvoices: (expectedInvoices || []).map((e) => ({ id: String(e.id), status: e.status, total: e.total, credit_applied: e.credit_applied, to_payer_id: e.to_payer_id == null ? null : String(e.to_payer_id) })),
+      ibExpectNoMove: true,
     };
     Promise.resolve(customerUpdateHandler(req, res, reject)).catch(reject);
   });
