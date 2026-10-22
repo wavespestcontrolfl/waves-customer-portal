@@ -145,6 +145,21 @@ jest.setTimeout(30000);
     expect((await call('POST', `/scheduled/${body.scheduled.id}/cancel`)).body.draft).toMatchObject({ draftText: 'Hi\nthere' });
   });
 
+  test('each run tries each due email once; a refusal does not hold up the others', async () => {
+    const refused = await queue({ to: 'refused@example.invalid' });
+    const good = await queue({ to: 'good@example.invalid' });
+    await makeDue(refused.body.scheduled.id, { send_at: database.raw("now() - interval '2 minutes'") });
+    await makeDue(good.body.scheduled.id);
+    gmail.sendMessage.mockImplementation(async (to) => {
+      if (to === 'refused@example.invalid') throw new Error('Pre-send failure');
+      return { id: 'gmail-good' };
+    });
+    expect((await sendDueScheduledEmails()).results).toEqual(['retry', 'sent']);
+    expect(gmail.sendMessage).toHaveBeenCalledTimes(2);
+    expect(await row(refused.body.scheduled.id)).toMatchObject({ status: 'scheduled', attempts: 1 });
+    expect(await row(good.body.scheduled.id)).toMatchObject({ status: 'sent' });
+  });
+
   test('a claim left by a dead process becomes outcome_unknown, never a second send', async () => {
     const { body } = await queue();
     await makeDue(body.scheduled.id, { status: 'sending', claimed_at: database.raw("now() - interval '11 minutes'"), attempts: 1 });

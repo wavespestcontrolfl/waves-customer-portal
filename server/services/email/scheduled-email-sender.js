@@ -59,15 +59,18 @@ async function settleStaleClaims(conn = db) {
   return rows.length;
 }
 
-async function claimDue(conn = db) {
+// Claims ONE due row, just before it is sent, so an error on one email never
+// leaves others claimed but unsent (those would settle as outcome_unknown).
+// `tried` holds this run's rows: a refused email waits for the next minute.
+async function claimNext(conn = db, tried = []) {
   const { rows } = await conn.raw(`
     UPDATE scheduled_emails SET status = 'sending', claimed_at = now(), attempts = attempts + 1, updated_at = now()
-    WHERE id IN (
-      SELECT id FROM scheduled_emails WHERE status = 'scheduled' AND send_at <= now()
-      ORDER BY send_at LIMIT ${BATCH} FOR UPDATE SKIP LOCKED
+    WHERE id = (
+      SELECT id FROM scheduled_emails WHERE status = 'scheduled' AND send_at <= now() AND NOT (id = ANY(?::uuid[]))
+      ORDER BY send_at LIMIT 1 FOR UPDATE SKIP LOCKED
     )
-    RETURNING id, to_address, subject, body_html, thread_id, send_at, attempts`);
-  return rows;
+    RETURNING id, to_address, subject, body_html, thread_id, send_at, attempts`, [`{${tried.join(',')}}`]);
+  return rows[0] || null;
 }
 
 async function sendOne(row, { conn = db, gmail = require('./gmail-client') } = {}) {
@@ -112,10 +115,22 @@ async function settleUnknown(row, conn) {
 async function sendDueScheduledEmails({ conn = db, gmail } = {}) {
   if (!emailSendLaterLive()) return { enabled: false, settled: 0, results: [] };
   const settled = await settleStaleClaims(conn);
-  const rows = await claimDue(conn);
   const results = [];
-  for (const row of rows) results.push(await sendOne(row, { conn, ...(gmail ? { gmail } : {}) }));
+  const tried = [];
+  for (let i = 0; i < BATCH; i += 1) {
+    const row = await claimNext(conn, tried);
+    if (!row) break;
+    tried.push(row.id);
+    try {
+      results.push(await sendOne(row, { conn, ...(gmail ? { gmail } : {}) }));
+    } catch (err) {
+      // The claim stays 'sending'; settleStaleClaims turns it into
+      // outcome_unknown with an alert. The other emails still go out.
+      logger.error(`[scheduled-email] ${row.id} errored (${err.code || 'error'})`);
+      results.push('error');
+    }
+  }
   return { enabled: true, settled, results };
 }
 
-module.exports = { sendDueScheduledEmails, settleStaleClaims, claimDue, sendOne, MAX_ATTEMPTS, STALE_MINUTES };
+module.exports = { sendDueScheduledEmails, settleStaleClaims, claimNext, sendOne, MAX_ATTEMPTS, STALE_MINUTES };

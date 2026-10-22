@@ -24,7 +24,12 @@ export default function ScheduledEmails({ scheduled, editor, mailbox }) {
     }
     const { draft, error, retryable } = await scheduled.cancel(row.id);
     if (!draft) { setFeedback({ error: true, message: error, retry: retryable ? row : null }); return; }
-    editor.restoreScheduledDraft(draft);
+    // A draft started while the cancel was in flight takes the slot: keep a
+    // way back (the server repeats the cancel and returns the same draft).
+    if (!editor.restoreScheduledDraft(draft)) {
+      setFeedback({ error: true, retry: row, message: "Cancelled, but another draft is open. Send or discard it, then tap Try again to get this email back." });
+      return;
+    }
     if (draft.replyEmailId) mailbox.showEmailById(draft.replyEmailId);
     setFeedback({ message: draft.replyEmailId ? "Cancelled. The reply is back in its conversation as a draft." : "Cancelled. The email is open as a draft." });
   };
