@@ -24,6 +24,8 @@ const TERRY = { phone: '+19415550303', email: 'terry@example.com', name: 'Terry'
 let rows;
 let devices = [];
 let failWith = null;
+// Only the push_subscriptions statements fail (a pre-migration column).
+let devicesFailWith = null;
 function builder(table) {
   const conds = [];
   const b = {};
@@ -33,16 +35,26 @@ function builder(table) {
   b.whereNotIn = (col, vals) => { conds.push((r) => !vals.map(String).includes(String(r[col]))); return b; };
   b.whereIn = (col, vals) => { conds.push((r) => vals.map(String).includes(String(r[col]))); return b; };
   b.whereNotNull = (col) => { conds.push((r) => r[col] != null); return b; };
-  b.update = async (patch) => { if (failWith) throw failWith; const hit = matching(); hit.forEach((r) => Object.assign(r, patch)); return hit.length; };
+  b.update = async (patch) => { if (failWith) throw failWith; if (table === 'push_subscriptions' && devicesFailWith) throw devicesFailWith; const hit = matching(); hit.forEach((r) => Object.assign(r, patch)); return hit.length; };
   b.select = async () => { if (failWith) throw failWith; return matching(); };
   b.first = async () => { if (failWith) throw failWith; return matching()[0] || null; };
   b.delete = async () => { if (failWith) throw failWith; const hit = matching(); rows = rows.filter((r) => !hit.includes(r)); return hit.length; };
   return b;
 }
 
+// The holder's save transaction: the prune runs its schema-tolerant statements in savepoints of it.
+let savepoints = 0;
+function fakeTrx() {
+  const trx = (table) => builder(table);
+  trx.transaction = async (fn) => { savepoints += 1; return fn(fakeTrx()); };
+  return trx;
+}
+
 beforeEach(() => {
   rows = [];
   failWith = null;
+  devicesFailWith = null;
+  savepoints = 0;
   devices = [];
   db.mockImplementation((table) => builder(table));
   process.env.GATE_CONTACT_LOGIN = 'true';
@@ -593,7 +605,7 @@ describe('pruneContactNotificationPrefs (holder contact save)', () => {
       { customer_id: 'cust-1', active: true, contact_phone_key: null },
       { customer_id: 'cust-2', active: true, contact_phone_key: '9415550202' },
     ];
-    await ContactPrefs.pruneContactNotificationPrefs((table) => builder(table), 'cust-1', ['(941) 555-0303']);
+    await ContactPrefs.pruneContactNotificationPrefs(fakeTrx(), 'cust-1', ['(941) 555-0303']);
     expect(rows).toEqual([
       { customer_id: 'cust-1', phone_key: '9415550303' },
       { customer_id: 'cust-2', phone_key: '9415550303' },
@@ -609,7 +621,7 @@ describe('pruneContactNotificationPrefs (holder contact save)', () => {
       { customer_id: 'cust-1', phone_key: '9415550303', en_route_channel: 'email' },
       { customer_id: 'cust-2', phone_key: '9415550202', en_route_channel: 'email' },
     ];
-    await ContactPrefs.pruneContactNotificationPrefs(() => builder(), 'cust-1', [
+    await ContactPrefs.pruneContactNotificationPrefs(fakeTrx(), 'cust-1', [
       { phone: '+19415550202', email: '' },
       { phone: '+19415550303', email: 'terry@example.com' },
     ]);
@@ -623,7 +635,7 @@ describe('pruneContactNotificationPrefs (holder contact save)', () => {
       { customer_id: 'cust-1', phone_key: '9415550202', email_enabled: false },
       { customer_id: 'cust-1', phone_key: '9415550303', email_enabled: false },
     ];
-    await ContactPrefs.pruneContactNotificationPrefs(() => builder(), 'cust-1', [
+    await ContactPrefs.pruneContactNotificationPrefs(fakeTrx(), 'cust-1', [
       { phone: '+19415550202', email: '' },
       { phone: '+19415550303', email: 'terry@example.com' },
     ]);
@@ -633,21 +645,35 @@ describe('pruneContactNotificationPrefs (holder contact save)', () => {
 
   test('a phone stored in two slots keeps its email choices when EITHER slot carries an address (codex r16)', async () => {
     rows = [{ customer_id: 'cust-1', phone_key: '9415550202', email_enabled: false, en_route_channel: 'email' }];
-    await ContactPrefs.pruneContactNotificationPrefs(() => builder(), 'cust-1', [
+    await ContactPrefs.pruneContactNotificationPrefs(fakeTrx(), 'cust-1', [
       { phone: '+19415550202', email: '' },
       { phone: '(941) 555-0202', email: 'sam@example.com' },
     ]);
     expect(rows[0]).toEqual(expect.objectContaining({ email_enabled: false, en_route_channel: 'email' }));
-    await ContactPrefs.pruneContactNotificationPrefs(() => builder(), 'cust-1', [
+    await ContactPrefs.pruneContactNotificationPrefs(fakeTrx(), 'cust-1', [
       { phone: '+19415550202', email: '' },
       { phone: '(941) 555-0202', email: '' },
     ]);
     expect(rows[0]).toEqual(expect.objectContaining({ email_enabled: null, en_route_channel: null }));
   });
 
+  test('a pre-migration push_subscriptions column (42703) is the absent state, in a SAVEPOINT: the choices prune stands and the save transaction is not aborted (codex #6364 r2 P2)', async () => {
+    rows = [{ customer_id: 'cust-1', phone_key: '9415550202' }, { customer_id: 'cust-1', phone_key: '9415550303' }];
+    devices = [{ customer_id: 'cust-1', active: true, contact_phone_key: '9415550202' }];
+    devicesFailWith = Object.assign(new Error('column "contact_phone_key" does not exist'), { code: '42703' });
+    await expect(ContactPrefs.pruneContactNotificationPrefs(fakeTrx(), 'cust-1', ['(941) 555-0303'])).resolves.toBeUndefined();
+    expect(rows).toEqual([{ customer_id: 'cust-1', phone_key: '9415550303' }]);
+    expect(devices[0].active).toBe(true);
+    // Each schema-tolerant statement group ran in its own savepoint.
+    expect(savepoints).toBe(2);
+    // Any other failure still surfaces.
+    devicesFailWith = Object.assign(new Error('boom'), { code: '57014' });
+    await expect(ContactPrefs.pruneContactNotificationPrefs(fakeTrx(), 'cust-1', ['(941) 555-0303'])).rejects.toThrow('boom');
+  });
+
   test('an empty slot list clears every row of that customer only', async () => {
     rows = [{ customer_id: 'cust-1', phone_key: '9415550202' }, { customer_id: 'cust-2', phone_key: '9415550202' }];
-    await ContactPrefs.pruneContactNotificationPrefs((table) => builder(table), 'cust-1', []);
+    await ContactPrefs.pruneContactNotificationPrefs(fakeTrx(), 'cust-1', []);
     expect(rows).toEqual([{ customer_id: 'cust-2', phone_key: '9415550202' }]);
   });
 });

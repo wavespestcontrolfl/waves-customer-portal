@@ -164,8 +164,11 @@ async function contactPropertiesForSession(req) {
   const matches = await contactCustomersByPhone(req.contactSession.phone);
   const mine = matches.some((m) => String(m.customer.id) === String(req.customer.id));
   const rows = mine ? matches.map((m) => m.customer) : [req.customer, ...matches.map((m) => m.customer)];
-  // Each entry names the house that row's contact reads are scoped to.
-  return Promise.all(rows.map((row) => contactPropertyPayload(row, req.contactSession)));
+  // Each entry names the house that row's contact reads are scoped to — one
+  // customer_properties read for every row, not one per row (codex #6364 r2
+  // P2: a number on many rows would hold a pool connection per row at once).
+  const scopes = await require('../services/contact-session-projection').contactRecordScopes(rows.map((row) => row.id));
+  return rows.map((row) => contactPropertyPayload(row, scopes.get(String(row.id))));
 }
 
 // Who a phone number signs in as: { customer, contact } — contact null for
@@ -223,10 +226,10 @@ function accountIdForCustomer(customer) {
 // house the contact's reads are scoped to (contact-session-projection
 // contactAddress) — no holder name, no rate, no plan tier (the switcher
 // labels by profileLabel / address).
-async function contactPropertyPayload(customer, contact) {
-  const { contactRecordScope, contactAddress } = require('../services/contact-session-projection');
+function contactPropertyPayload(customer, scope) {
+  const { contactAddress } = require('../services/contact-session-projection');
   const { firstName, lastName, monthlyRate, tier, ...entry } = propertyPayload(customer);
-  return { ...entry, address: contactAddress(customer, await contactRecordScope({ contactSession: contact, customerId: customer.id })) };
+  return { ...entry, address: contactAddress(customer, scope) };
 }
 
 function propertyPayload(customer) {

@@ -664,28 +664,37 @@ async function pruneContactNotificationPrefs(trx, customerId, contacts = []) {
   }
   const keep = [...emailByKey.keys()];
   const emailLess = keep.filter((key) => !emailByKey.get(key));
-  try {
-    const q = trx(TABLE).where({ customer_id: customerId });
+  await tolerateSchemaSkew(trx, async (sp) => {
+    const q = sp(TABLE).where({ customer_id: customerId });
     if (keep.length) q.whereNotIn('phone_key', keep);
     await q.delete();
     for (const col of Object.values(CHANNEL_COLUMN_FOR)) {
       if (!emailLess.length) break;
-      await trx(TABLE).where({ customer_id: customerId, [col]: 'email' }).whereIn('phone_key', emailLess).update({ [col]: null, updated_at: new Date() });
+      await sp(TABLE).where({ customer_id: customerId, [col]: 'email' }).whereIn('phone_key', emailLess).update({ [col]: null, updated_at: new Date() });
     }
     // The email master switch too: with no address of their own, "email off"
     // would only ever suppress the holder's fallback address (codex r8 P2).
     if (emailLess.length) {
-      await trx(TABLE).where({ customer_id: customerId, email_enabled: false }).whereIn('phone_key', emailLess).update({ email_enabled: null, updated_at: new Date() });
+      await sp(TABLE).where({ customer_id: customerId, email_enabled: false }).whereIn('phone_key', emailLess).update({ email_enabled: null, updated_at: new Date() });
     }
-  } catch (err) {
-    if (err && err.code !== '42P01') throw err;
-  }
-  try {
-    const devices = trx('push_subscriptions').where({ customer_id: customerId, active: true }).whereNotNull('contact_phone_key');
+  });
+  await tolerateSchemaSkew(trx, async (sp) => {
+    const devices = sp('push_subscriptions').where({ customer_id: customerId, active: true }).whereNotNull('contact_phone_key');
     if (keep.length) devices.whereNotIn('contact_phone_key', keep);
     await devices.update({ active: false, updated_at: new Date() });
+  });
+}
+
+// Runs `fn` in a SAVEPOINT of the caller's transaction and swallows a missing
+// table (42P01) or pre-migration column (42703): the absent state. Inside a
+// Postgres transaction the failed statement has already aborted it, so a
+// plain catch would leave the holder's save failing at its next statement
+// with "current transaction is aborted" (codex #6364 r2 P2); the savepoint
+// rolls back only this statement.
+async function tolerateSchemaSkew(trx, fn) {
+  try {
+    await trx.transaction(fn);
   } catch (err) {
-    // 42P01 = no table, 42703 = pre-migration column.
     if (err && !['42P01', '42703'].includes(err.code)) throw err;
   }
 }

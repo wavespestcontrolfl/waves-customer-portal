@@ -574,8 +574,13 @@ describe('contact session — lifecycle', () => {
     const first = await login(CONTACT_PHONE);
     expect(first.body.customer.id).toBe('cust-holder');
     expect(first.body.properties.map((p) => p.id)).toEqual(['cust-holder', OTHER_ID]);
+    // The whole list is one customer_properties read, not one per row (codex r2 P2).
+    const reads = [];
+    db.mockImplementation((table) => { reads.push(table); return builder(table); });
     const listed = await call('GET', '/api/auth/properties', bearerOf(first.body.token));
+    installDb();
     expect(listed.body.properties.map((p) => p.id)).toEqual(['cust-holder', OTHER_ID]);
+    expect(reads.filter((t) => t === 'customer_properties')).toHaveLength(1);
 
     const switched = await call('POST', '/api/auth/select-property', bearerOf(first.body.token), { customerId: OTHER_ID, refreshToken: first.body.refreshToken });
     expect(switched.status).toBe(200);

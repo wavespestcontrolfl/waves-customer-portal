@@ -4869,6 +4869,13 @@ router.put('/:id/contact-notification-prefs/:slot', requireAdmin, async (req, re
     if (error) return res.status(400).json({ error: error.message });
     const patch = ContactPrefs.contactPrefPatchFromBody(updates);
     const asksEmailOnly = Object.values(patch).includes('email');
+    // Text-only report delivery exists only while the contact report text
+    // (GATE_CONTACT_REPORT_TEXT) does — the same refusal as the contact's own
+    // PUT (codex #6364 r2 P2): stored anyway, the choice would read as the
+    // default today and go live unseen at a later gate flip.
+    if (patch.service_complete_channel === 'sms' && !require('../config/feature-gates').contactReportTextLive()) {
+      return res.status(400).json({ error: 'Service reports are delivered by email for this property.', code: 'REPORT_TEXT_UNAVAILABLE' });
+    }
     // Every input the save depends on is read under the comms lock, as the
     // contact's own PUT reads it (codex #6364 r1 P2): the slot (a holder
     // replacing it meanwhile must not have the pruned row recreated), the

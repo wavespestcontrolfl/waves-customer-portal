@@ -600,7 +600,13 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       appNotification = await require('../notification-service').notifyCustomer(customerId, category, title, body, {
         link, dedupeKey: notificationEventKey, awaitPush: true, appointmentId,
         ...(appointmentId ? { metadata: { proof_scope: proofScope } } : {}),
-        pushOptions: { shouldContinue: windowGuardFrom(preSendCheck), minUpdatedAt: heartbeatCutoff(), nativeOnly: true },
+        // The routed message type rides along for the contact-device rule
+        // (contact login): this explicit-App bell carries no preference key,
+        // so without it an appointment or report notice the holder chose App
+        // delivery for would never reach a contact's device (codex #6364 r2
+        // P2). Holder devices are unaffected; billing types stay refused by
+        // contactPushPurpose's allow-list.
+        pushOptions: { shouldContinue: windowGuardFrom(preSendCheck), minUpdatedAt: heartbeatCutoff(), nativeOnly: true, messageType },
       });
       bell = bellReachedThisAttempt(appNotification) ? { bellPersisted: true } : {};
       // The event's original copy is already visible even if its commit
