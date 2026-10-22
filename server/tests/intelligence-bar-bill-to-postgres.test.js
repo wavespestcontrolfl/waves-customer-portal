@@ -99,6 +99,15 @@ const ADMIN = { isAdmin: true, technicianId: null };
     expect(await db('invoices').where({ id: linkedId }).first()).toMatchObject({ scheduled_send_error: null });
   });
 
+  test('a payer deactivated after the card refuses inside the transaction', async () => {
+    const payerId = await payer();
+    const { customerId } = await selfPayCustomer();
+    await db('payers').where({ id: payerId }).update({ active: false });
+    await expect(setCustomerBillToFromBar({ customerId, payerId, expectedPayerId: null, expectedInvoices: [], actor: {} }))
+      .rejects.toMatchObject({ code: 'preview_changed' });
+    expect(await db('customers').where({ id: customerId }).first('payer_id')).toMatchObject({ payer_id: null });
+  });
+
   test('a Bill-To that changed after the card refuses on the locked row and writes nothing', async () => {
     const payerId = await payer();
     const other = await payer();

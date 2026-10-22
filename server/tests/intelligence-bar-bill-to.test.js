@@ -237,6 +237,15 @@ describe('the confirmed run', () => {
     const card = await preview();
     mockTransitions.mockResolvedValue([]);
     expect(await confirm(card)).toMatchObject({ code: 'preview_changed', preview_changed: true });
+    // A staying invoice's amount or the payer's terms changed after the card.
+    mockTransitions.mockResolvedValue([{ invoiceId: LINKED, moved: true, beforeOwner: null, afterOwner: '7' }]);
+    const card3 = await preview();
+    state.invoices[MANUAL] = { ...state.invoices[MANUAL], total: '45.00' };
+    expect(await confirm(card3)).toMatchObject({ code: 'preview_changed' });
+    const card4 = await preview();
+    mockGetPayer.mockImplementation(async (id) => (String(id) === '7' ? { ...PAYER, payment_terms: 'net_15' } : null));
+    expect(await confirm(card4)).toMatchObject({ code: 'preview_changed' });
+    mockGetPayer.mockImplementation(async (id) => (String(id) === '7' ? PAYER : null));
     const card2 = await preview();
     state.customer.payer_id = 9;
     mockGetPayer.mockImplementation(async (id) => (String(id) === '7' ? PAYER : { id: 9, display_name: 'Other Payer Co', active: true }));

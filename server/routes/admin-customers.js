@@ -4410,6 +4410,15 @@ const customerUpdateHandler = async (req, res, next) => {
             // Planned and refused here; the Stripe cancels run as the LAST step of this transaction.
             applySessionRelease = payerRelease.apply || null;
           }
+          // The bar card (req.ibExpectedPayerId set only by setCustomerBillToFromBar) names an ACTIVE payer: the
+          // payer row is held FOR SHARE so a deactivation waits for this edit, and an inactive or missing payer
+          // refuses, rolling everything back before any Stripe cancel.
+          if (req.ibExpectedPayerId !== undefined && updates.payer_id) {
+            const target = await trx('payers').where({ id: updates.payer_id }).forShare().first('active');
+            if (!target || target.active === false) {
+              throw Object.assign(new Error('The payer is no longer active.'), { statusCode: 409, isOperational: true, code: 'preview_changed' });
+            }
+          }
           await trx('customers').where({ id: req.params.id }).update(updates);
           // An edited property type also lands on the primary property row,
           // in this transaction, so property-scoped readers agree with the
