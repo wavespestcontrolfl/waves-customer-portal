@@ -2,9 +2,12 @@ const { correctEmailDomain, meetsConfidence } = require('../utils/email-typo-cor
 const { toE164, isLikelyE164, isImpossibleNanpPhone } = require('../utils/phone');
 const { looksGarbledTranscriptEmail } = require('../utils/intake-normalize');
 const { sameGmailInbox } = require('../utils/email-equivalence');
+const { isPuntaGordaLocality, isPuntaGordaZip } = require('./excluded-localities');
 const { parseRawAddress, splitStreetLineUnit, splitUnitFirstLine, normalizeStreetLine, normalizeState, normalizeUnitLine, unitLineValueKey, unitAnywhereOnLine, STREET_SUFFIX_ALIASES } = require('../utils/address-normalizer');
 
-// Owner ruling 2026-09-30: DeSoto County (Arcadia) is NOT served. The three
+// Owner ruling 2026-09-30: DeSoto County (Arcadia) is NOT served; owner ruling
+// 2026-10-22: the city of Punta Gorda (inside Charlotte County) is NOT served
+// (services/excluded-localities.js). The three
 // served counties plus the south-Hillsborough towns (config/locations.js
 // SOUTH_HILLSBOROUGH_CITIES, city-keyed, not county-keyed) are the footprint.
 const SERVICE_AREA_COUNTIES = new Set(['Manatee', 'Sarasota', 'Charlotte']);
@@ -579,6 +582,10 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
       flags.push('low_confidence_address');
     }
     if (addr.county && !isInServiceAreaCounty(addr.county)) {
+      flags.push('out_of_service_area');
+    } else if (isPuntaGordaLocality(addr.city) || isPuntaGordaZip(addr.postal_code)) {
+      // Punta Gorda is inside served Charlotte County but is not served
+      // (owner ruling 2026-10-22), so the county check alone passes it.
       flags.push('out_of_service_area');
     }
     // Validation was attempted with a real address but the API was unreachable.

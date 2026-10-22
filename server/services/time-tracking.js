@@ -9,9 +9,6 @@ const {
   validateWorkDate,
 } = require('../utils/staff-time-work-date');
 const {
-  hasVehicleAgreement, isAutoClockInJobEligible, isFreshEvent, isLiveVisit, liveVisitsAtCustomer,
-} = require('./geofence-auto-clock-in');
-const {
   ACTIVE_WRITE_GENERATION,
   WEEKLY_OT_THRESHOLD_MINUTES,
 } = require('../constants/staff-time');
@@ -151,7 +148,7 @@ function appendEntryNote(existing, note) {
 
 /**
  * Close a shift and every active child while holding the shift row lock.
- * startJob/startBreak/reopenStoppedEntry take the same lock before creating an
+ * startJob/startBreak take the same lock before creating an
  * active child, so no child can commit after this transaction closes them.
  */
 async function closeActiveShiftAtomically(technicianId, options = {}) {
@@ -230,102 +227,24 @@ async function clockOut(technicianId, { lat, lng, notes } = {}) {
   return closed.entry;
 }
 
-// Geofence auto clock-in, inside startJob's transaction (GATE_GEOFENCE_AUTO_CLOCK_IN).
-// When the handler asked for an auto clock-in it claimed "this is the tech's own
-// live visit for today". That claim is re-checked HERE, once, on the visit row
-// locked FOR UPDATE (assigned to this tech, today ET, live), whether or not a
-// shift already exists: a shift that appeared concurrently must not let a timer
-// start for a visit reassigned or moved since the handler read it. Refusal throws
-// before any write and the transaction rolls back (no shift, no timer, no
-// arrival transition).
-async function assertAutoClockInVisit(trx, technicianId, jobId) {
-  const job = jobId
-    ? await trx('scheduled_services').where('scheduled_services.id', jobId).forUpdate().first()
-    : null;
-  // Also exactly one live visit at this customer today: with two, which one the
-  // tech arrived for is a guess, so nothing is auto-started (counted under the
-  // same transaction, after the visit lock above).
-  const now = new Date();
-  const eligible = isAutoClockInJobEligible(job, technicianId, now)
-    && (await liveVisitsAtCustomer(trx, technicianId, job.customer_id, now)).length === 1;
-  if (!eligible) {
-    throw Object.assign(new Error('This visit is not yours to start today.'), { code: 'auto_clock_in_ineligible' });
-  }
-}
-
-// Opens the auto-clock-in shift (the visit was already re-checked). Refused when
-// the tech has any shift today (auto clock-in is for the first stop only) and when
-// the ENTER is no longer fresh: the handler's freshness check ran BEFORE this
-// transaction waited on the technician/shift/visit locks, and the shift is stamped
-// with the time of the insert, so it is checked again here, last, with the same
-// isFreshEvent.
-async function openAutoClockInShift(trx, technicianId, { autoClockIn, lat, lng }) {
-  // Only here, where a shift would actually be opened: a tech already clocked in still starts timers.
-  if (!(await hasVehicleAgreement(trx, technicianId))) {
-    throw Object.assign(new Error('Sign the vehicle use and commuting agreement before auto clock-in.'), { code: 'auto_clock_in_no_agreement' });
-  }
-  const worked = await trx('time_entries')
-    .where({ technician_id: technicianId, entry_type: 'shift' })
-    .where('status', '!=', 'voided')
-    .whereRaw(`${STAFF_WORK_DATE_SQL} = ?::date`, [staffWorkDate(new Date())])
-    .first('id');
-  if (worked || !isFreshEvent(autoClockIn.eventTime)) {
-    throw Object.assign(new Error('Must be clocked in to start a job.'), { code: 'auto_clock_in_ineligible' });
-  }
-  return insertShift(trx, technicianId, { lat, lng, ...autoClockIn });
-}
-
-// Returns the shift to run the job under; `created` is true only when THIS call
-// opened it. With an auto clock-in request the technician row is locked (the same
-// lock clockIn takes) when there is no shift, so two simultaneous arrivals queue
-// there and the second finds the first one's shift; the visit check then runs
-// either way. Never a shift without the job timer on this path.
-async function lockShiftForStart(trx, technicianId, jobId, { autoClockIn, lat, lng }) {
-  let shift = await lockActiveShift(trx, technicianId);
-  if (!autoClockIn) return { shift, created: false };
-  if (!shift) {
-    await lockActiveTechnician(trx, technicianId);
-    shift = await lockActiveShift(trx, technicianId);
-  }
-  await assertAutoClockInVisit(trx, technicianId, jobId);
-  if (shift) return { shift, created: false };
-  return { shift: await openAutoClockInShift(trx, technicianId, { autoClockIn, lat, lng }), created: true };
-}
-
 /**
  * Start a job entry (tech must be clocked in).
  */
 // scopeReq: the HTTP request when a technician starts the timer themselves.
 // The locked job read then applies the current-live-assignment predicate, so
 // a technician cannot start a timer (and the arrival transition/SMS) on a
-// visit that is not theirs (codex #5568 r7 P1). The geofence path passes
-// none: the server matched the job, and an admin request is unscoped.
-//
-// Geofence options (GATE_GEOFENCE_AUTO_CLOCK_IN, only ever passed by the geofence
-// handler with the gate on): `geofenceArrival` makes starting the job that is
-// ALREADY running a no-op (returns that entry with `reused: true`; a different
-// job still replaces it) and refuses a visit that is not live; `autoClockIn`
-// ({ source, notes }) lets a tech with no shift today be clocked in by this same
-// transaction (the returned entry then carries `clocked_in_shift_id`).
-async function startJob(technicianId, jobId, {
-  lat, lng, scopeReq = null, geofenceArrival = false, autoClockIn = null,
-} = {}) {
-  const guardArrival = geofenceArrival || !!autoClockIn;
-  let autoShift = null;
-  let reused = null;
+// visit that is not theirs (codex #5568 r7 P1). An admin request is unscoped.
+async function startJob(technicianId, jobId, { lat, lng, scopeReq = null } = {}) {
   // Keep replacement atomic across writer-generation cutovers. If this app
   // generation is stale, its insert is rejected by the active-write CHECK;
   // the transaction then rolls back the preceding close instead of leaving
   // the technician without an active job timer.
   const entry = await db.transaction(async (trx) => {
-    const { shift: activeShift, created: openedShift } = await lockShiftForStart(
-      trx, technicianId, jobId, { autoClockIn, lat, lng },
-    );
+    const activeShift = await lockActiveShift(trx, technicianId);
 
     if (!activeShift) {
       throw new Error('Must be clocked in to start a job.');
     }
-    if (openedShift) autoShift = activeShift;
 
     // Job lookup FIRST, and LOCKED (codex P2 #3152 round 25): the
     // time-on-site correction's linked-timer sync holds this visit's
@@ -347,21 +266,13 @@ async function startJob(technicianId, jobId, {
       if (!job && scopeReq && require('./technician-visit-scope').isTechnicianRequest(scopeReq)) {
         throw Object.assign(new Error('Job not found'), { status: 404, code: 'job_not_assigned' });
       }
-      // A repeat or concurrent geofence ENTER for the job that is ALREADY
-      // running returns that timer untouched. Read only after the visit row
-      // lock above, so every path still locks scheduled_services before it
-      // touches time_entries.
-      if (guardArrival) {
-        reused = await findActiveEntryForJob(trx, technicianId, jobId);
-        if (reused) return reused;
-      }
       if (job) {
         customerId = job.customer_id;
         serviceType = job.service_type;
         // A completed visit takes no new job timer (GitHub r2 P1 #5886).
         // The office can complete a visit its technician arrived at (the
         // invoice-issued closeout, which refuses a visit whose timer is
-        // RUNNING); an automatic geofence arrival that picked the visit just
+        // RUNNING); a timer start that picked the visit just
         // before that commit would otherwise start a timer on it afterwards
         // and count until auto clock-out. Decided on the row lock just
         // taken — the same lock the completion holds while it checks for a
@@ -369,9 +280,6 @@ async function startJob(technicianId, jobId, {
         // time_entries write, so the technician's current timer is untouched.
         if (job.status === 'completed') {
           throw Object.assign(new Error('This visit is already completed.'), { status: 409, code: 'job_already_completed' });
-        }
-        if (guardArrival && !isLiveVisit(job)) {
-          throw Object.assign(new Error('This visit is no longer live.'), { status: 409, code: 'job_not_live' });
         }
         // A live street-level address hold cannot be worked yet: refuse before any timer is created
         // (the same 409 the status routes give). Re-read under the row lock just taken.
@@ -416,19 +324,17 @@ async function startJob(technicianId, jobId, {
     return created;
   });
 
-  if (reused) return { ...reused, reused: true };
-
   logger.info(`[time-tracking] Tech ${technicianId} started job`, { entryId: entry.id, jobId });
   if (jobId) {
     try {
       const trackTransitions = require('./track-transitions');
       // technicianId is the tech who actually started the job (the logged-in
-      // tech, or the IMEI tech in the geofence-auto path) — pass it so the
+      // tech) — pass it so the
       // arrival SMS names the acting tech, not the job's stale assignment.
       const result = await trackTransitions.markOnProperty(jobId, {
         actingTechId: technicianId,
         // A technician's own start stays bound to their assignment through
-        // the arrival transition (codex #5568 r9); the geofence path is not.
+        // the arrival transition (codex #5568 r9).
         ...(scopeReq && require('./technician-visit-scope').isTechnicianRequest(scopeReq) ? { expectTechnicianId: technicianId } : {}),
       });
       // A grouped stop that did not fully sync is NOT success (codex #3603
@@ -440,19 +346,7 @@ async function startJob(technicianId, jobId, {
       logger.error(`[time-tracking] markOnProperty failed for job ${jobId}: ${err.message}`);
     }
   }
-  return autoShift ? { ...entry, clocked_in_shift_id: autoShift.id } : entry;
-}
-
-// The active job entry when it is already for THIS job (a duplicate or
-// concurrent geofence ENTER): the caller returns it instead of closing and
-// replacing it. Taken under the shift lock the caller holds.
-async function findActiveEntryForJob(trx, technicianId, jobId) {
-  if (!jobId) return null;
-  const current = await trx('time_entries')
-    .where({ technician_id: technicianId, entry_type: 'job', status: 'active' })
-    .forUpdate()
-    .first();
-  return current && String(current.job_id) === String(jobId) ? current : null;
+  return entry;
 }
 
 /**
@@ -561,119 +455,6 @@ function isCompletedEntryIntervalValid(entry) {
   ) return false;
   const expectedMinutes = (clockOutMs - clockInMs) / 60000;
   return Math.abs(durationMinutes - expectedMinutes) <= 0.02;
-}
-
-/**
- * Reopen a child timer stopped by the geofence workflow. The active-shift
- * lock serializes this with every child start and every shift close.
- */
-async function reopenStoppedEntryInTransaction(trx, technicianId, entryId) {
-  const activeShift = await lockActiveShift(trx, technicianId);
-  if (!activeShift) {
-    throw staffTimeHttpError(409, 'Must be clocked in to restore a stopped timer.');
-  }
-
-  const stopped = await trx('time_entries')
-    .where({ id: entryId, technician_id: technicianId })
-    .forUpdate()
-    .first();
-  if (!stopped) throw staffTimeHttpError(404, 'Stopped time entry not found.');
-  if (!['job', 'break', 'drive', 'admin_time'].includes(stopped.entry_type)) {
-    throw staffTimeHttpError(409, 'Only a stopped child timer can be restored.');
-  }
-  if (!['active', 'completed'].includes(stopped.status)) {
-    throw staffTimeHttpError(409, 'Only a completed child timer can be restored.');
-  }
-
-  const shiftStartedAt = new Date(activeShift.clock_in).getTime();
-  const childStartedAt = new Date(stopped.clock_in).getTime();
-  if (
-    !Number.isFinite(shiftStartedAt)
-    || !Number.isFinite(childStartedAt)
-    || childStartedAt < shiftStartedAt
-  ) {
-    throw staffTimeHttpError(409, 'Stopped timer belongs to an earlier shift.');
-  }
-  if (stopped.status === 'active') return stopped;
-
-  const stoppedAt = new Date(stopped.clock_out).getTime();
-  if (
-    !Number.isFinite(stoppedAt)
-    || Date.now() - stoppedAt > UNDO_STOP_WINDOW_MINUTES * 60 * 1000
-    || stoppedAt > Date.now() + 60 * 1000
-  ) {
-    throw staffTimeHttpError(409, 'Stopped timer is too old to restore safely.');
-  }
-
-  const laterChild = await trx('time_entries')
-    .where({ technician_id: technicianId, entry_type: stopped.entry_type })
-    .whereNot({ id: entryId })
-    .where('status', '!=', 'voided')
-    .where('clock_in', '>=', stopped.clock_out)
-    .first('id');
-  if (laterChild) {
-    throw staffTimeHttpError(409, 'A later timer exists; this stopped timer cannot be restored.');
-  }
-
-  const conflicting = await trx('time_entries')
-    .where({
-      technician_id: technicianId,
-      entry_type: stopped.entry_type,
-      status: 'active',
-    })
-    .whereNot({ id: entryId })
-    .first('id');
-  if (conflicting) {
-    throw staffTimeHttpError(409, `Another ${stopped.entry_type} timer is already active.`);
-  }
-
-  // A completed visit takes no job timer back either (GitHub r2 P1 #5886,
-  // the restore side of startJob's guard): after a geofence stop the office
-  // can complete the visit (the invoice-issued closeout, which only refuses
-  // a RUNNING timer), and Undo would then restart a timer on it. The visit
-  // row is locked here, so this and the completion — which checks for a
-  // running timer while holding the same row lock — cannot both win.
-  // Lock order: this takes the visit row AFTER a time_entries row; startJob
-  // and the time-on-site correction's timer sync take them the other way
-  // round. So the visit lock is NOWAIT: this path never waits while holding
-  // an entry lock, which is what a deadlock needs. A visit row that is busy
-  // (a completion, a correction) answers 409 and the technician taps again.
-  if (stopped.entry_type === 'job' && stopped.job_id) {
-    let visit;
-    try {
-      visit = await trx('scheduled_services').where({ id: stopped.job_id }).forUpdate().noWait().first('id', 'status');
-    } catch (err) {
-      if (err && err.code === '55P03') {
-        throw staffTimeHttpError(409, 'This visit is being updated; retry in a moment.');
-      }
-      throw err;
-    }
-    if (visit && visit.status === 'completed') {
-      throw staffTimeHttpError(409, 'This visit is already completed; its timer cannot be restored.');
-    }
-  }
-
-  const [reopened] = await trx('time_entries')
-    .where({ id: entryId, technician_id: technicianId, status: 'completed' })
-    .update({
-      status: 'active',
-      staff_write_generation: ACTIVE_WRITE_GENERATION,
-      clock_out: null,
-      clock_out_lat: null,
-      clock_out_lng: null,
-      duration_minutes: null,
-      notes: trx.raw("COALESCE(notes, '') || ' [undo-stop]'"),
-      updated_at: new Date(),
-    })
-    .returning('*');
-  if (!reopened) throw staffTimeHttpError(409, 'Stopped timer is no longer restorable.');
-  return reopened;
-}
-
-async function reopenStoppedEntry(technicianId, entryId) {
-  return db.transaction((trx) => (
-    reopenStoppedEntryInTransaction(trx, technicianId, entryId)
-  ));
 }
 
 /**
@@ -1353,8 +1134,6 @@ module.exports = {
   endJob,
   startBreak,
   endBreak,
-  reopenStoppedEntry,
-  reopenStoppedEntryInTransaction,
   closeActiveShiftAtomically,
   getStatus,
   adminEditEntry,

@@ -44,8 +44,9 @@ maintenance window.
    - Staff HTTP routes return 503 with code `STAFF_MAINTENANCE`, `Retry-After`,
      and `Cache-Control: no-store`; a Staff Socket.io handshake is rejected.
    - A public/customer smoke request still succeeds.
-   - An authenticated Bouncie geozone webhook still returns 200 and reports
-     `staffMaintenanceSuppressed: true`, without starting or stopping a timer.
+   - An authenticated Bouncie geozone webhook still returns 200 and is logged as
+     ignored (the geofence timer automation was removed in #6408; no geozone event
+     can start or stop a timer, so there is no `staffMaintenanceSuppressed` marker).
 4. Run the Phase A release's Staff audit once more and require zero blockers,
    zero incomplete checks, and zero active timers. Then merge/deploy the
    reviewed B1 Phase B PR while the gate remains `true`. The production
