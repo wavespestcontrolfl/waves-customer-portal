@@ -1002,6 +1002,11 @@ describe('same-name choice marker on the thread (Codex #6369 r16)', () => {
     // Buttons suppressed by a card or a direct action (the route passes null) do not mark.
     expect(marks(asked, null)).toBe(false);
     expect(marks(asked, [])).toBe(false);
+    // The route passes the count of cards and direct actions in the same reply: any suppresses the buttons.
+    const suppressed = (count) => { const t = OwnerDirect.newRequestTaint([]); OwnerDirect.markSameNameChoices(t, asked, ['Pat Example, Venice', 'Pat Example, Osprey'], count); return OwnerDirect.sameNameMarkerNeeded(t); };
+    expect(suppressed(0)).toBe(true);
+    expect(suppressed(1)).toBe(false);
+    expect(suppressed(2)).toBe(false);
   });
 
   test('the pending check is cursor-free: ANY assistant turn with the marker in the last 30 minutes counts (Codex #6369 r17)', async () => {

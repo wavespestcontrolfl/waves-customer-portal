@@ -443,7 +443,9 @@ function noteSameNameContext(taint, taskContext) {
 // options are the choice labels built from this request's same-name candidates? An
 // ordinary amount, date or product choice never marks (Codex #6369 r17). The tap sends
 // the label text back as the next message, so the thread then cards the next writes.
-function markSameNameChoices(taint, taskContext, shownChoices) {
+function markSameNameChoices(taint, taskContext, offeredChoices, suppressingActions = 0) {
+  // A card or a direct action in the same reply suppresses the buttons.
+  const shownChoices = suppressingActions > 0 ? null : offeredChoices;
   const labels = new Set((taskContext?.candidates || []).map(candidate => candidate?.choice_label).filter(Boolean));
   if (taint && ibTargetRulesV2Live() && Array.isArray(shownChoices) && shownChoices.some(choice => labels.has(choice))) taint.sameNameEmitted = true;
 }

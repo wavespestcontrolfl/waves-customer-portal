@@ -4167,7 +4167,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       PII_TAINT_MARKER,
     );
     // Same-name buttons count only when they are really in the reply (no card or direct action suppressed them).
-    OwnerDirect.markSameNameChoices(requestTaint, taskContext, offeredChoices && !pendingProposals.length && !directActionIds.length ? offeredChoices : null);
+    OwnerDirect.markSameNameChoices(requestTaint, taskContext, offeredChoices, pendingProposals.length + directActionIds.length);
     const persistedAssistantTurn = appendTaintMarker(appendTaintMarker(
       appendTaintMarker(appendTaintMarker(finalResponse, imageTainted, IMAGE_TAINT_MARKER), piiTainted, PII_TAINT_MARKER),
       requestTaint.untrustedRead,
