@@ -87,7 +87,7 @@ async function viaPage(body = {}) {
   }
 }
 
-let trx; let trxInvoices; let trxPlans; let trxCustomers; let preInvoices; let trxProjects; let trxVisits;
+let trx; let trxInvoices; let trxPlans; let trxCustomers; let preInvoices; let trxProjects; let trxVisits; let trxRecords;
 beforeEach(() => {
   jest.clearAllMocks();
   mockGetBalance.mockResolvedValue(500);
@@ -102,9 +102,11 @@ beforeEach(() => {
   trxCustomers = makeRecorder({ first: jest.fn(async () => ({ id: INVOICE.customer_id })) });
   trxProjects = makeRecorder();
   trxVisits = makeRecorder();
+  trxRecords = makeRecorder();
   trx = jest.fn((table) => {
     if (table === 'projects') return trxProjects;
     if (table === 'scheduled_services') return trxVisits;
+    if (table === 'service_records') return trxRecords;
     if (table === 'invoices') return trxInvoices;
     if (table === 'payment_plans') return trxPlans;
     if (table === 'customers') return trxCustomers;
@@ -236,6 +238,26 @@ describe('apply-credit — the page and the bar', () => {
       const ok = await router.applyCreditFromBar({ invoiceId: 'inv-1', body: { waiveSetupFee: false }, actor: ACTOR, expected: EXPECTED });
       expect(ok.status).toBe(200);
       expect(mockPostMovement).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('an invoice linked to its visit only through its service record is fenced under the lock too: a cancelled visit refuses the page and the bar, no credit moves', async () => {
+    const Linked = require('../services/visit-linked-invoice-withdrawal');
+    const spy = jest.spyOn(Linked, 'liveVisitPayerOf').mockResolvedValue(null);
+    try {
+      trxInvoices.first.mockImplementation(async () => ({ ...INVOICE, scheduled_service_id: null, service_record_id: 'rec-1' }));
+      trxRecords.first.mockImplementation(async () => ({ scheduled_service_id: 'visit-1' }));
+      trxVisits.first.mockImplementation(async () => ({ id: 'visit-1', status: 'cancelled' }));
+      const page = await viaPage({});
+      expect(page.status).toBe(409);
+      expect(page.json).toMatchObject({ error: expect.stringMatching(/visit is cancelled — no credit was applied/) });
+      const bar = await router.applyCreditFromBar({ invoiceId: 'inv-1', body: { waiveSetupFee: false }, actor: ACTOR, expected: EXPECTED });
+      expect(bar).toMatchObject({ status: 409, json: { error: expect.stringMatching(/visit is cancelled — no credit was applied/) } });
+      expect(trxRecords.where).toHaveBeenCalledWith({ id: 'rec-1' });
+      expect(trxVisits.where).toHaveBeenCalledWith({ id: 'visit-1' });
+      expect(mockPostMovement).not.toHaveBeenCalled();
     } finally {
       spy.mockRestore();
     }

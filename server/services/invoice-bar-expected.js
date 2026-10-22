@@ -25,14 +25,26 @@ function invoiceVersionChanged(row, expected) {
   return false;
 }
 
+function previewChangedError(message) {
+  const err = new Error(message);
+  err.statusCode = 409;
+  err.status = 409;
+  err.isOperational = true;
+  err.code = 'PREVIEW_CHANGED';
+  return err;
+}
+
 function assertInvoiceVersion(row, expected, doing) {
-  if (invoiceVersionChanged(row, expected)) {
-    const err = new Error(`Invoice changed while ${doing} — re-check and retry`);
-    err.statusCode = 409;
-    err.status = 409;
-    err.isOperational = true;
-    err.code = 'PREVIEW_CHANGED';
-    throw err;
+  if (invoiceVersionChanged(row, expected)) throw previewChangedError(`Invoice changed while ${doing} — re-check and retry`);
+}
+
+// The edit card also showed the new total: a retotal that now computes to another figure (a discount rule or a customer type
+// changed since) is refused rather than saved under an approval for a different number. `total` is the edit's computed total
+// (undefined when the edit does not retotal).
+function assertExpectedNewTotal(expected, total) {
+  if (!expected || expected.newTotal === undefined || total === undefined) return;
+  if (cents(total) !== cents(expected.newTotal)) {
+    throw previewChangedError('Invoice changed while editing — the new total is no longer what the card showed; re-check and retry');
   }
 }
 
@@ -57,4 +69,4 @@ function applyInvoiceVersion(query, expected) {
   return query;
 }
 
-module.exports = { invoiceVersionChanged, assertInvoiceVersion, applyInvoiceVersion };
+module.exports = { invoiceVersionChanged, assertInvoiceVersion, assertExpectedNewTotal, applyInvoiceVersion };

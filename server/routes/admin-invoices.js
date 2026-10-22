@@ -3069,7 +3069,8 @@ const invoiceApplyCreditHandler = async (req, res, next) => {
         // ahead of the invoice lock for the Codex P2 fix), so this fence
         // still runs strictly after it.
         {
-          const neverRan = await visitRefusesSettlement(trx, locked.scheduled_service_id);
+          // An invoice linked to its visit only through its service record (no scheduled_service_id of its own) is fenced too.
+          const neverRan = await visitRefusesSettlement(trx, await InvoiceService.linkedScheduledServiceId(locked, trx));
           if (neverRan) {
             const err = new Error(`This invoice's visit is ${neverRan.replace('_', '-')} — no credit was applied. Void or reissue the invoice first.`);
             err.statusCode = 409; err.isOperational = true; err.code = 'visit_never_ran'; throw err;

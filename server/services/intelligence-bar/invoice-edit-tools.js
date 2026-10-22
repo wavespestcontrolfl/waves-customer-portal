@@ -640,7 +640,7 @@ function totalChanges(invoice, financials, changes) {
 }
 
 // What the card pins (_version) and what the page's handler is handed (_expected).
-function editPins({ invoice, stored, body, newTotal, financials }) {
+function editPins({ invoice, stored, body, newTotal, financials, setupFeeTied }) {
   return {
     _version: {
       invoice_id: invoice.id,
@@ -653,6 +653,8 @@ function editPins({ invoice, stored, body, newTotal, financials }) {
       lines: digest(stored),
       body: digest(body),
       new_total: cents(newTotal),
+      // Shown in the effects, so pinned: an estimate link that appears after the card refuses at Confirm.
+      setup_fee_tied: Boolean(setupFeeTied),
     },
     _expected: {
       status: invoice.status,
@@ -694,6 +696,7 @@ async function buildEditPlan(input) {
   if (!changes.length) return refusal('The invoice already reads that way. Nothing was changed.', 'no_change', { invoice_id: invoice.id, lines: numbered(stored) });
   const { oldTotal, newTotal, totalChanged } = totalChanges(invoice, financials, changes);
   const statement = await statementOf(invoice);
+  const setupFeeTied = await setupFeeAlertTied(invoice, body.notes);
   return {
     preview: true,
     tool: 'edit_invoice',
@@ -706,10 +709,9 @@ async function buildEditPlan(input) {
     new_total: money(newTotal),
     changes,
     lines_after: numbered(nextLines).slice(0, 30),
-    effects: editEffects({ invoice, status: String(invoice.status || '').toLowerCase(), dueChanged, totalChanged, oldTotal, newTotal, statement,
-      setupFeeTied: await setupFeeAlertTied(invoice, body.notes) }),
+    effects: editEffects({ invoice, status: String(invoice.status || '').toLowerCase(), dueChanged, totalChanged, oldTotal, newTotal, statement, setupFeeTied }),
     sends_to_customer: false,
-    ...editPins({ invoice, stored, body, newTotal, financials }),
+    ...editPins({ invoice, stored, body, newTotal, financials, setupFeeTied }),
     _body: body,
     note: 'PREVIEW ONLY — nothing was changed. Confirm saves exactly these changes; if the invoice changed it refuses.',
   };
@@ -825,8 +827,10 @@ async function creditProjectRefusal(invoice) {
 }
 
 async function creditVisitRefusal(invoice) {
-  if (!invoice.scheduled_service_id) return null;
-  const visit = await db('scheduled_services').where({ id: invoice.scheduled_service_id }).first('status');
+  // The visit the invoice reaches through its own link or its service record's, as the page's settlement fence resolves it.
+  const visitId = await require('../invoice').linkedScheduledServiceId(invoice, db);
+  if (!visitId) return null;
+  const visit = await db('scheduled_services').where({ id: visitId }).first('status');
   const terminal = require('../invoice-helpers').neverRanVisitStatus(visit?.status);
   if (!terminal) return null;
   return refusal(`This invoice's visit is ${terminal.replace('_', '-')}; no credit can be applied. Void or reissue the invoice from the Invoices page.`, 'visit_terminal', { invoice_id: invoice.id });
@@ -1154,6 +1158,7 @@ async function buildUnvoidPlan(input) {
   if (refused) return refused;
   const visit = await linkedVisit(invoice);
   const customer = await customerOf(invoice.customer_id);
+  const setupFeeTied = await setupFeeAlertTied(invoice);
   return {
     preview: true,
     tool: 'unvoid_invoice',
@@ -1165,7 +1170,7 @@ async function buildUnvoidPlan(input) {
     amount: money(invoice.total),
     becomes: 'draft (editable, collectible again)',
     reminders_restart: false,
-    effects: unvoidEffects({ invoice, visit, setupFeeTied: await setupFeeAlertTied(invoice) }),
+    effects: unvoidEffects({ invoice, visit, setupFeeTied }),
     sends_to_customer: false,
     _version: {
       invoice_id: invoice.id,
@@ -1178,6 +1183,7 @@ async function buildUnvoidPlan(input) {
       archived: Boolean(invoice.archived_at),
       visit: visit ? `${visit.id}:${visit.status}:${visit.date}:${visit.window}` : null,
       lines: digest(parseLines(invoice.line_items)),
+      setup_fee_tied: setupFeeTied,
     },
     _expected: { status: invoice.status, updatedAt: msOf(invoice.updated_at) },
     note: 'PREVIEW ONLY — nothing was changed. Confirm restores exactly this invoice to a draft; if it changed it refuses.',

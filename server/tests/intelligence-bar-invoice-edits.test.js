@@ -559,6 +559,19 @@ describe('edit_invoice confirm', () => {
     });
   });
 
+  test('an estimate link that appears after the card (it changes the setup-fee disclosure) refuses at Confirm as changed', async () => {
+    const card = await run('edit_invoice', input);
+    expect(card._version.setup_fee_tied).toBe(false);
+    state.scheduled_services[0].source_estimate_id = 'est-1';
+    const refused = await confirm('edit_invoice', card, input);
+    expect(refused).toMatchObject({ code: 'preview_changed', preview_changed: true });
+    expect(Invoices.editInvoiceFromBar).not.toHaveBeenCalled();
+    // The same card, re-asked with the link in place, pins the tie and confirms.
+    const tied = await run('edit_invoice', input);
+    expect(tied._version.setup_fee_tied).toBe(true);
+    expect(await confirm('edit_invoice', tied, input)).toMatchObject({ success: true });
+  });
+
   test.each([
     ['status', { status: 'viewed' }], ['edit time', { updated_at: new Date('2099-01-02T00:00:00Z') }], ['total', { total: '130.00' }],
     ['credit', { credit_applied: '5.00' }], ['a line', { line_items: [{ client_id: 'li_a', description: 'Quarterly Pest Control', quantity: 1, unit_price: 99, amount: 99 }, { client_id: 'li_b', description: 'Interior add-on', quantity: 1, unit_price: 31, amount: 31 }] }],
@@ -720,6 +733,17 @@ describe('apply_invoice_credit card', () => {
     state.projects = [];
     state.scheduled_services[0].status = 'cancelled';
     expect(await run('apply_invoice_credit')).toMatchObject({ code: 'visit_terminal' });
+  });
+
+  test('an invoice linked to its visit only through its service record gets the same cancelled-visit refusal', async () => {
+    setInvoice({ scheduled_service_id: null, service_record_id: 'rec-1' });
+    state.scheduled_services[0].status = 'cancelled';
+    expect(await run('apply_invoice_credit')).toMatchObject({ code: 'visit_terminal' });
+    // The visit comes from the shared resolver (the page's settlement fence uses the same one), given the invoice row.
+    expect(mockLinkedVisit).toHaveBeenCalledWith(expect.objectContaining({ id: INV, scheduled_service_id: null, service_record_id: 'rec-1' }), db);
+    // No visit behind either link: nothing to refuse.
+    mockLinkedVisit.mockResolvedValue(null);
+    expect(await run('apply_invoice_credit')).toMatchObject({ preview: true });
   });
 
   test('a saved-card charge in progress is refused as money; an unreadable check fails closed', async () => {
@@ -887,6 +911,17 @@ describe('unvoid_invoice', () => {
     const stamped = (await run('unvoid_invoice'));
     const { acceptedEstimateIdFromNotes } = require('../services/setup-fee-alert-reconcile');
     expect(JSON.stringify(stamped.effects).includes('re-checks the staff alert')).toBe(Boolean(acceptedEstimateIdFromNotes('Accepted estimate #est-2')));
+  });
+
+  test('an estimate link that appears after the card (it changes the setup-fee disclosure) refuses at Confirm as changed', async () => {
+    const card = await run('unvoid_invoice');
+    expect(card._version.setup_fee_tied).toBe(false);
+    state.scheduled_services[0].source_estimate_id = 'est-1';
+    expect(await confirm('unvoid_invoice', card)).toMatchObject({ code: 'preview_changed', preview_changed: true });
+    expect(Invoices.unvoidInvoiceFromBar).not.toHaveBeenCalled();
+    const tied = await run('unvoid_invoice');
+    expect(tied._version.setup_fee_tied).toBe(true);
+    expect(await confirm('unvoid_invoice', tied)).toMatchObject({ success: true });
   });
 
   test('a linked visit the unvoid itself refuses (cancelled, free re-service, $0, prepaid) is refused at preview, never carded', async () => {
