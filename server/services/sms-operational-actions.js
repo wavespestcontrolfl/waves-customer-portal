@@ -1196,14 +1196,25 @@ async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceId
 }
 
 // One alert speaks for every promise from the text, so its state is read from
-// all of them, not from whichever row the scan reached first: any promise whose
-// check could not tell makes the alert "can't tell" (uncertain wins over open).
-// `scannedId` is the row being scanned now; its current verdict is `verdict`,
-// the others are read from their stored checks. A kept-late ring stays late.
+// all of them, not from whichever row the scan reached first. Precedence:
+// uncertain > kept late > open. "Can't tell if it was done" is the strongest
+// claim to make the office look (a person must check), so it wins; a promise
+// that was kept but late (overdueBellCopy's 'late' wording) outranks plain open
+// so a late-but-done promise never reads as "nothing on record shows it done".
+// `scannedId` is the row being scanned now; its state is `verdict`, the others
+// are read from their stored checks. Order-independent: it is a max over states.
+const STATE_RANK = { open: 0, late: 1, uncertain: 2 };
+function promiseState(item) {
+  const check = item.sms_context?.fulfillment_check;
+  if (check?.verdict === 'uncertain') return 'uncertain';
+  return check && keptLate(item, check) ? 'late' : 'open';
+}
 function sourceAlertVerdict(verdict, promises, scannedId = null) {
-  if (verdict.late || verdict.verdict === 'uncertain') return verdict;
-  const uncertain = promises.some((item) => item.id !== scannedId && item.sms_context?.fulfillment_check?.verdict === 'uncertain');
-  return uncertain ? { ...verdict, verdict: 'uncertain' } : verdict;
+  const own = verdict.late ? 'late' : (verdict.verdict === 'uncertain' ? 'uncertain' : 'open');
+  const states = [own, ...promises.filter((item) => item.id !== scannedId).map(promiseState)];
+  const top = states.reduce((best, state) => (STATE_RANK[state] > STATE_RANK[best] ? state : best), 'open');
+  if (top === 'uncertain') return { ...verdict, verdict: 'uncertain', late: false };
+  return top === 'late' ? { ...verdict, late: true } : verdict;
 }
 
 // The overdue alert for a text commitment: one open alert per source text,
@@ -1495,4 +1506,4 @@ async function replaySmsProfile({ smsLogId, execute = false, previewHash, conn =
   }, { recordHealth: false });
 }
 
-module.exports = { smsCommitmentsEnabled, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, closeSmsCommitmentAlerts, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline, ringOverdueBell, keptLate };
+module.exports = { smsCommitmentsEnabled, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, closeSmsCommitmentAlerts, sourceAlertVerdict, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline, ringOverdueBell, keptLate };

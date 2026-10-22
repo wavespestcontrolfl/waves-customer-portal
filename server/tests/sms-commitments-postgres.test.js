@@ -3754,6 +3754,22 @@ postgres('SMS commitments on PostgreSQL', () => {
       expect(refreshed.metadata.commitment_ids).toEqual([b.id]);
     });
 
+    test('settling one sibling keeps the late wording when the remaining promise was kept late', async () => {
+      const ctx = { basis: 'promise', property_id: null, property_ambiguous: true, customer_id: message.customer_id, source_at: message.created_at };
+      const settling = await addCommitment({ kind: 'other', description: 'will be out there', sms_context: ctx });
+      // Kept, but after its deadline: the records show it done, the row has not closed yet.
+      const late = await addCommitment({ kind: 'other', description: 'will call you', due_at: at(3600000),
+        sms_context: { ...ctx, fulfillment_check: { verdict: 'fulfilled', matched_at: at(2 * 3600000).toISOString(), record_type: 'sms' } } });
+      await staleAlert(`sms-commitment-source:${message.id}`);
+      NotificationService.notifyAdmin.mockClear();
+      await applySmsCommitmentUpdate(mockPg, settling.id, { customerId: message.customer_id, action: 'fulfill', reviewedBy: randomUUID() });
+      const [, , body, refreshed] = NotificationService.notifyAdmin.mock.calls[0];
+      expect(refreshed.metadata.verification).toBe('kept_late');
+      expect(refreshed.metadata.commitment_ids).toEqual([late.id]);
+      expect(body).toContain('done only after the promised time');
+      expect(body).not.toContain('nothing on record');
+    });
+
     test('a non-settling staff update marks the shared source alert read, not done', async () => {
       const a = await addCommitment();
       await addCommitment({ commitment_key: randomUUID() });

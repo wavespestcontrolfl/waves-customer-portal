@@ -6,7 +6,7 @@ jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
 
 const { groundThreadVerdict, threadFingerprint, BASIS } = require('../services/sms-commitment-thread-close');
-const { keptLate } = require('../services/sms-operational-actions');
+const { keptLate, sourceAlertVerdict } = require('../services/sms-operational-actions');
 const { fulfillmentFingerprint } = require('../services/sms-commitment-fulfillment');
 
 const customerText = { ref: 'sms:in-1', id: 'in-1', who: 'customer', created_at: '2026-10-21T13:00:00Z', text: 'Got the report! Thanks for your help!' };
@@ -66,5 +66,35 @@ describe('thread close bookkeeping', () => {
     const late = { verdict: 'fulfilled', matched_at: '2026-10-21T13:00:00Z' };
     expect(keptLate(commitment, late)).toBe(true);
     expect(keptLate(commitment, { ...late, basis: BASIS })).toBe(false);
+  });
+});
+
+describe('sourceAlertVerdict: one state for the whole source text (uncertain > kept late > open)', () => {
+  const due = '2026-10-20T12:00:00Z';
+  const promise = (id, check) => ({ id, due_at: due, sms_context: { basis: 'promise', ...(check ? { fulfillment_check: check } : {}) } });
+  const rows = {
+    uncertain: promise('u', { verdict: 'uncertain' }),
+    late: promise('l', { verdict: 'fulfilled', matched_at: '2026-10-20T15:00:00Z' }),
+    open: promise('o', { verdict: 'open' }),
+  };
+  const current = { uncertain: { verdict: 'uncertain' }, late: { verdict: 'fulfilled', late: true }, open: { verdict: 'open' } };
+  const stateOf = (v) => (v.late ? 'late' : v.verdict);
+  const rank = { open: 0, late: 1, uncertain: 2 };
+
+  test.each(['uncertain', 'late', 'open'].flatMap((a) => ['uncertain', 'late', 'open'].map((b) => [a, b])))(
+    'scanning a %s row beside a stored %s row gives the stronger state, whichever is scanned',
+    (scanned, other) => {
+      const expected = rank[scanned] >= rank[other] ? scanned : other;
+      const promises = [{ ...rows[scanned], id: 'scanned' }, { ...rows[other], id: 'other' }];
+      expect(stateOf(sourceAlertVerdict(current[scanned], promises, 'scanned'))).toBe(expected);
+      // Swapped scan order: same answer.
+      const swapped = [{ ...rows[other], id: 'scanned' }, { ...rows[scanned], id: 'other' }];
+      expect(stateOf(sourceAlertVerdict(current[other], swapped, 'scanned'))).toBe(expected);
+    });
+
+  test('the refresh path (no scanned row) reads only the stored states', () => {
+    expect(stateOf(sourceAlertVerdict({ verdict: 'open' }, [rows.late]))).toBe('late');
+    expect(stateOf(sourceAlertVerdict({ verdict: 'open' }, [rows.late, rows.uncertain]))).toBe('uncertain');
+    expect(stateOf(sourceAlertVerdict({ verdict: 'open' }, [rows.open]))).toBe('open');
   });
 });
