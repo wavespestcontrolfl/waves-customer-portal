@@ -3427,13 +3427,14 @@ export function reportAskPrompts(data = {}, serviceLine = 'pest') {
   if (hasInaccessible) add('What should I do about the inaccessible area?');
   // Exactly three questions on every report (owner 2026-10-22). Visit-specific
   // questions lead; this per-line set fills any gap so each line always has 3.
-  // Each fill question gets its own answer from the report's question router
-  // (report-assistant.js): mosquito reports never use the AI answer, so their
-  // fill holds only questions the fixed rules answer as asked.
+  // Each fill question gets its own answer from the report's fixed-rule router
+  // (report-assistant.js) with no AI and no extra report data: that answer is
+  // what a mosquito report always gives, and what the others give when the AI
+  // is off or misses.
   const FILL_BY_LINE = {
-    lawn: ['How is my lawn trending?', 'Am I watering the right amount?', 'When is my next service?'],
+    lawn: ['How is my lawn trending?', 'What should I watch for next?', 'When is my next service?'],
     mosquito: ['What can I do to cut down mosquitoes?', 'What did you find today?', 'When is my next service?'],
-    tree_shrub: ['How are my trees and shrubs doing?', 'What should I watch for next?', 'When is my next service?'],
+    tree_shrub: ['What did you find today?', 'What should I watch for next?', 'When is my next service?'],
   };
   (FILL_BY_LINE[serviceLine] || ['What should I watch for next?', 'What did you find today?', 'When is my next service?']).forEach(add);
   return prompts.slice(0, 3);

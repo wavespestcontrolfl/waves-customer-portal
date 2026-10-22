@@ -541,7 +541,10 @@ export function perimeterFeetOf(zone) {
 }
 
 // `optional` (the visit step, owner 2026-10-22): says "Optional" until a trace is saved; a trace never holds the send.
-export function TraceSection({ trace, locked, onTrace, optional = false }) {
+// `tracer`: the inline tracer, open under the button. `busy` (a report being written): the button waits, so the
+// tracer never opens just before the sheet moves to the report step. No trace offered: nothing renders.
+export function TraceSection({ trace, locked, busy = false, onTrace, optional = false, tracer = null }) {
+  if (!trace) return null;
   const feet = perimeterFeetOf(trace.zone);
   return (
     <section className="tech-visit-choice-section">
@@ -552,9 +555,10 @@ export function TraceSection({ trace, locked, onTrace, optional = false }) {
           : optional && <span className="tech-visit-muted">Optional</span>}
       </div>
       <p className="tech-visit-muted">Drag along where you sprayed on the satellite photo of the home. The line shows on the customer’s report.</p>
-      <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={locked} onClick={onTrace}>
+      <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={locked || busy} onClick={onTrace}>
         {trace.zone ? 'Trace again' : 'Trace where we sprayed'}
       </Button>
+      {tracer}
     </section>
   );
 }

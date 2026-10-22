@@ -190,7 +190,7 @@ function SupportingMetric({ metric }) {
           spaced "1.4 / 5" rendered weird). */}
       <span style={{ fontFamily: FONTS.body, fontWeight: 700, fontSize: 16, color: TEXT, whiteSpace: 'nowrap' }}>
         {value}
-        {showOutOf ? <span style={{ fontSize: 13, fontWeight: 600, color: MUTED }}>/{metric.max}</span> : null}
+        {showOutOf ? <span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}>/{metric.max}</span> : null}
       </span>
       {metric.label && metric.score != null ? <span style={{ fontSize: 14, color: MUTED }}>· {metric.label}</span> : null}
       <TrendArrow trend={metric.trend} />

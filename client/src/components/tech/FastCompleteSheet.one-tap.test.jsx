@@ -338,8 +338,28 @@ describe('one-tap: the trace is optional', () => {
     await openReport();
     expect(screen.queryByLabelText('Feet sprayed')).toBeNull();
     expect(screen.queryByText('Type the feet you sprayed, or trace it.')).toBeNull();
-    // the untraced-perimeter hold is gone; the saved outline is read, and the send follows the saved-trace rules
-    expect(screen.queryByText('Trace where you sprayed: Taurus SC is a perimeter spray.')).toBeNull();
+    // An outline beside a perimeter spray would show on the report as the area sprayed (Codex #6452): it holds.
+    expect(await screen.findByText('Your saved trace is an outline, not the perimeter you sprayed. Remove the trace, or trace the perimeter.')).toBeTruthy();
+    expect(completeButton().disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'Remove the trace' })).toBeTruthy();
+  });
+
+  // Typed feet are optional, but a typed mistake is corrected, never dropped (Codex #6452).
+  test('typed feet that are not a whole number above 0 hold the send; an empty box does not', async () => {
+    const request = makeRequest({ facts: PERIMETER });
+    await openSheet(request);
+    writeNote();
+    tapRating();
+    await openReport();
+    const feet = screen.getByLabelText('Feet sprayed');
+    for (const bad of ['0', '-4', '12.5']) {
+      fireEvent.change(feet, { target: { value: bad } });
+      expect(screen.getByText('Type the feet as a whole number above 0, or leave the box empty.')).toBeTruthy();
+      expect(completeButton().disabled).toBe(true);
+    }
+    fireEvent.change(feet, { target: { value: '' } });
+    expect(screen.queryByText('Type the feet as a whole number above 0, or leave the box empty.')).toBeNull();
+    expect(completeButton().disabled).toBe(false);
   });
 
   test('a visit that cannot be traced still takes typed feet, with no Full form hold and no hold at all', async () => {

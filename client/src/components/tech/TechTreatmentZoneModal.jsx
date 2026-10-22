@@ -103,10 +103,6 @@ export default function TechTreatmentZoneModal({
   // page scroll lock.
   // Its close and Done buttons call onClose, which folds it away.
   inline = false,
-  // `onSavingChange(saving)`: true when a save starts, false when it settles.
-  // With no cover over the page, the host holds its own send, Back and close
-  // while a save is in flight, as guardedClose does for the tracer itself.
-  onSavingChange,
 }) {
   const T = LIGHT;
   // The M-theme pills (44px, rounded-full, UPPERCASE 500).
@@ -391,7 +387,6 @@ export default function TechTreatmentZoneModal({
 
   const save = useCallback(async () => {
     setSaveState('saving');
-    onSavingChange?.(true);
     try {
       const { center, zoom, url, image, angle = 0 } = mapState;
       // Align the SAVED frame with the home (owner 2026-07-29; lawn included
@@ -510,10 +505,8 @@ export default function TechTreatmentZoneModal({
       onSaved?.(data.treatmentZone || null);
     } catch (err) {
       setSaveState(err.message || 'Save failed');
-    } finally {
-      onSavingChange?.(false);
     }
-  }, [mapState, points, closed, totalFeet, address, serviceId, onSaved, onSavingChange, lawnMode, yardMode, interior, expectedPropertyId, openVisitOnly]);
+  }, [mapState, points, closed, totalFeet, address, serviceId, onSaved, lawnMode, yardMode, interior, expectedPropertyId, openVisitOnly]);
 
   useEffect(() => {
     // Back to trace = the trace may change; the next Play must save fresh.

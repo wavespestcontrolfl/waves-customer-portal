@@ -227,11 +227,18 @@ function phoneLabel(phone) {
 }
 
 // `contact` (owner 2026-10-22): the customer's phone and email under the address, each a link
-// (call, email). Absent or empty = no line.
+// (call, email). Absent or empty = no link; neither = no line.
+const CONTACT_LINKS = [
+  { key: 'phone', href: (value) => `tel:${value.replace(/[^\d+]/g, '')}`, label: phoneLabel },
+  { key: 'email', href: (value) => `mailto:${value}`, label: (value) => value },
+];
+const contactLinksOf = (contact) => CONTACT_LINKS
+  .map((link) => ({ ...link, value: String(contact?.[link.key] ?? '').trim() }))
+  .filter((link) => link.value);
+
 export function SheetHeader({ titleId, title, service, visit, contact, done, locked, dictationPending, submitting, onFullForm, onViewDetails, onClose, fullFormOffered = true }) {
   const address = liveAddressLine(visit?.address);
-  const phone = String(contact?.phone || '').trim();
-  const email = String(contact?.email || '').trim();
+  const contactLinks = contactLinksOf(contact);
   return (
     <header className="tech-visit-header">
       <div className="tech-visit-header-text">
@@ -240,10 +247,9 @@ export function SheetHeader({ titleId, title, service, visit, contact, done, loc
         <p className="tech-visit-muted">{customerNameOf(visit, service) || 'Customer'}</p>
         {service?.serviceType && <p className="tech-visit-muted">{service.serviceType}</p>}
         {address && <p className="tech-visit-muted">{address}</p>}
-        {(phone || email) && (
+        {contactLinks.length > 0 && (
           <p className="tech-visit-muted tech-visit-contact">
-            {phone && <a href={`tel:${phone.replace(/[^\d+]/g, '')}`}>{phoneLabel(phone)}</a>}
-            {email && <a href={`mailto:${email}`}>{email}</a>}
+            {contactLinks.map((link) => <a key={link.key} href={link.href(link.value)}>{link.label(link.value)}</a>)}
           </p>
         )}
       </div>

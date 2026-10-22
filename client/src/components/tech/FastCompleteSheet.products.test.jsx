@@ -566,6 +566,21 @@ describe('FastCompleteSheet added product method', () => {
     expect(productIn(body, 'gentrol')).toMatchObject({ applicationMethod: 'perimeter_spray', areaValue: null, areaUnit: 'linear_ft' });
   });
 
+  // An empty box is fine, but a typed 0 is a mistake to correct, never sent as no length (Codex #6452).
+  test('a typed Linear ft of 0 holds the completion until it is fixed or cleared', async () => {
+    await openSheet();
+    const editor = addProduct('Gentrol IGR');
+    enterAmount(editor, 1);
+    fillVisit();
+    fireEvent.click(howChoice(editor, 'Perimeter spray'));
+    fireEvent.change(screen.getByLabelText('Linear ft sprayed'), { target: { value: '0' } });
+    expect(screen.getByText('Enter the linear feet above 0, or leave the box empty.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete re-service' }).disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText('Linear ft sprayed'), { target: { value: '' } });
+    expect(screen.queryByText('Enter the linear feet above 0, or leave the box empty.')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Complete re-service' }).disabled).toBe(false);
+  });
+
   test('a bait block or granule with no catalog method goes down by its form, not the visit\'s spray', async () => {
     const granule = { id: 'granule', name: 'Talstar XTRA Granular', category: 'insecticide' };
     const request = await openSheet(makeRequest({ products: [...CATALOG, granule] }));
