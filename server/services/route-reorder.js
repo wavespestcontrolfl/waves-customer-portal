@@ -1471,13 +1471,16 @@ async function runRouteReorder(opts = {}, conn = db) {
     failed: [],
   };
   const techIds = new Set();
-  let startPointsFailed = false;
-  let techHomes = null; // start points, loaded once per run (see the per-date loop)
   const qualityEnabled = gateEnvValue('GATE_SCHEDULE_QUALITY_MEASUREMENTS');
   if (qualityEnabled) summary.measurements = [];
   let status = 'completed';
 
   try {
+    // Each technician's start point: ONE query per run (none with the gate
+    // off), never logged. A tech missing from the map starts and ends at the
+    // office. A failed read is not "no points": it fails the run below, so
+    // nothing is written from the office by mistake.
+    const techHomes = await loadTechStartPoints(conn);
     for (const dateStr of dates) {
       let stops;
       try {
@@ -1572,25 +1575,6 @@ async function runRouteReorder(opts = {}, conn = db) {
         summary.skipped.push({ date: dateStr, reason: 'UNASSIGNED_STOPS_LEFT_IN_PLACE', stops: unassigned });
       }
 
-      // Each technician's start point for this run: ONE query (none with the
-      // gate off), read lazily, never logged. A tech missing from the map
-      // starts and ends at the office.
-      // A failed read is not "no points": with the gate on, writing now would
-      // route every tech from the office, so the whole run writes nothing.
-      // (A point that was read and is missing or invalid is the office.)
-      if (techHomes == null && !startPointsFailed) {
-        try {
-          techHomes = await loadTechStartPoints(conn);
-        } catch (homeErr) {
-          startPointsFailed = true;
-          logger.error(`[route-reorder] technician start points unavailable, run writes nothing: ${homeErr.message}`);
-        }
-      }
-      if (startPointsFailed) {
-        summary.skipped.push({ date: dateStr, reason: 'START_POINTS_UNAVAILABLE', stops: stops.length });
-        status = 'completed_with_errors';
-        continue;
-      }
       for (const [techId, techStops] of byTech) {
         techIds.add(techId);
         const home = homeFromMap(techHomes, techId);

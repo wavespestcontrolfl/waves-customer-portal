@@ -386,7 +386,7 @@ describe('nightly pass starts and ends each tech at their start point', () => {
     expect(technicianQueries).toBe(0);
   });
 
-  test('gate on but the start-point read fails: the run writes nothing, records START_POINTS_UNAVAILABLE, and logs only the error text', async () => {
+  test('gate on but the start-point read fails: the run fails, writes nothing, and logs only the error text', async () => {
     process.env.GATE_TECH_START_POINTS = 'true';
     db.mockImplementation((table) => {
       if (table === 'technicians') throw new Error('boom');
@@ -400,11 +400,11 @@ describe('nightly pass starts and ends each tech at their start point', () => {
     const res = await runRouteReorder({ now: NOW });
     expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
     expect(db.transaction).not.toHaveBeenCalled();
+    expect(res.status).toBe('failed');
     expect(res.applied).toBe(0);
-    expect(ledger().skips).toContainEqual(expect.objectContaining({ date: DAY, reason: 'START_POINTS_UNAVAILABLE' }));
     const logger = require('../services/logger');
     expect(logger.error.mock.calls.map(([m]) => m)).toEqual([
-      '[route-reorder] technician start points unavailable, run writes nothing: boom',
+      '[route-reorder] run fatal: boom',
     ]);
   });
 });
