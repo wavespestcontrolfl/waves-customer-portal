@@ -83,6 +83,17 @@ describe('the Automatic hint while the ask goes out after the report text', () =
     expect(text).toMatch(/waits for the invoice to be paid, then goes out about 10 minutes after payment/);
   });
 
+  test.each([
+    ['the completion text is off', { effectiveSendSms: false }],
+    ['the customer has no phone', { effectiveSendSms: true, customerPhone: '' }],
+  ])('no report text to follow (%s): the hint keeps the smart window', (_label, opts) => {
+    const now = completionReviewHint({ willReview: true, reviewTiming: 'auto', preview: afterReport, ...opts });
+    expect(now.text).toMatch(/smart send window, because no report text goes out/);
+    expect(now.text).not.toMatch(/after the report text/);
+    const paid = completionReviewHint({ willReview: true, reviewTiming: 'auto', preview: afterReport, reviewAwaitsPayment: true, ...opts });
+    expect(paid.text).toMatch(/waits for the invoice to be paid, then goes out at the smart send window, because no report text goes out/);
+  });
+
   test('gate off: the smart-window wording is unchanged', () => {
     const off = { ...afterReport, afterReport: false, afterReportMinutes: null, cadenceTickMinutesOfHour: [14, 44], earliestAt: '2026-10-20T20:00:00.000Z', latestAt: '2026-10-20T20:30:00.000Z', at: '2026-10-20T20:15:00.000Z' };
     expect(timedReviewHint({ reviewTiming: 'auto', preview: off })).not.toMatch(/after the report text/);

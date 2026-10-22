@@ -14149,6 +14149,7 @@ export function CompletionPanel({
     reviewCustomAt,
     preview: reviewSendPreview,
     reviewAwaitsPayment,
+    customerPhone: service?.customerPhone,
   });
   const smsPreview = [
     smsRecapPreview(customerRecap),

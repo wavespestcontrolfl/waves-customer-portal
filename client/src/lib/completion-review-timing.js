@@ -34,7 +34,7 @@ export function reviewTimingHint(options) {
   }
   return hint;
 }
-function reviewTimingHintDetails({ reviewTiming, reviewCustomAt, preview, bundled, awaitsPayment = false }) {
+function reviewTimingHintDetails({ reviewTiming, reviewCustomAt, preview, bundled, awaitsPayment = false, reportTextExpected = true }) {
   // An unpaid completion invoice holds the ask until payment lands (the
   // server's invoiceBlocksReview; enrollForPaidInvoice then enrolls). A
   // relative timing is re-derived from the payment time; an absolute one is
@@ -54,6 +54,7 @@ function reviewTimingHintDetails({ reviewTiming, reviewCustomAt, preview, bundle
   // the legacy path substitutes its 120-minute default (codex #4140 r19 P2).
   // Customer requested stores a zero delay, so it goes at the next tick.
   if (awaitsPayment && reviewTiming === "auto") {
+    if (preview?.afterReport === true && reportTextExpected === false) return NO_REPORT_TEXT_AWAITS_PAYMENT_HINT;
     if (preview?.afterReport === true) {
       return `Review text waits for the invoice to be paid, then goes out about ${afterReportMinutes(preview)} minutes after payment${preview.smsSendWindowEnabled ? ", inside the 8 AM–8 PM window" : ""}.`;
     }
@@ -62,13 +63,18 @@ function reviewTimingHintDetails({ reviewTiming, reviewCustomAt, preview, bundle
       : `Review text waits for the invoice to be paid, then goes out about 2 hours after payment, at the next scheduler tick${preview?.smsSendWindowEnabled ? " the 8 AM–8 PM window allows" : ""}.`;
   }
   if (awaitsPayment && reviewTiming === "customer_requested") return "The request is recorded on this visit. New review enrollment waits for invoice payment and visit eligibility. An existing cadence keeps its schedule.";
-  const timed = timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled });
+  const timed = timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled, reportTextExpected });
   return awaitsPayment && timed ? `Only once the invoice is paid: ${timed} A payment after that time sends at the next tick after payment.` : timed;
 }
-export function timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
+// GATE_REVIEW_ASK_AFTER_REPORT: with no completion text to follow (texting off,
+// no phone, email only) the server passes no anchor and keeps the smart window.
+const NO_REPORT_TEXT_HINT = "Review text goes out separately at the smart send window, because no report text goes out to follow.";
+const NO_REPORT_TEXT_AWAITS_PAYMENT_HINT = "Review text waits for the invoice to be paid, then goes out at the smart send window, because no report text goes out to follow.";
+export function timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled, reportTextExpected = true }) {
   if (reviewTiming === "auto") {
     // GATE_REVIEW_ASK_AFTER_REPORT: the server names the rule; the panel
     // words it, never a client-side approximation of either rule.
+    if (preview?.afterReport === true && reportTextExpected === false) return NO_REPORT_TEXT_HINT;
     if (preview?.afterReport === true) {
       return `Review text goes out separately, about ${afterReportMinutes(preview)} minutes after the report text${preview.smsSendWindowEnabled ? ", inside the 8 AM–8 PM window" : ""}.`;
     }
@@ -365,7 +371,9 @@ export function reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, failure
 // An unpaid invoice holds the customer-requested ask server-side (invoiceBlocksReview), so the
 // preview must not promise the link the timing hint says waits for payment (codex #4140 r22 P2).
 // The one-time recap path is exempt server-side (recapReviewOnly) and stays exempt here.
-export function completionReviewHint({ willReview, oneTimeRecapOnly = false, effectiveSendSms, reviewTiming, reviewCustomAt, preview, reviewAwaitsPayment }) {
+// `customerPhone` (the schedule payload's) tells whether a report text can go at all;
+// unknown (undefined) reads as yes, as before.
+export function completionReviewHint({ willReview, oneTimeRecapOnly = false, effectiveSendSms, reviewTiming, reviewCustomAt, preview, reviewAwaitsPayment, customerPhone }) {
   const bundled = willReview
     && effectiveSendSms
     && (oneTimeRecapOnly
@@ -373,7 +381,7 @@ export function completionReviewHint({ willReview, oneTimeRecapOnly = false, eff
         && preview?.bundlesImmediateAsk === true
         && !reviewAwaitsPayment));
   const text = willReview && !oneTimeRecapOnly
-    ? reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled, awaitsPayment: reviewAwaitsPayment })
+    ? reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled, awaitsPayment: reviewAwaitsPayment, reportTextExpected: !!effectiveSendSms && customerPhone !== "" && customerPhone !== null })
     : "";
   return { text, bundled };
 }

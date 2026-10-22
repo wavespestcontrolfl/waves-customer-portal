@@ -82,7 +82,7 @@ export function useWrapUp({ gate, submission, sharedNote, service, request, base
   const stepper = useReentrySteppers({ enabled: enabled && !noReentry, serviceId: service?.id, base, requestRef, applicationsRecorded });
   const nextVisit = useNextVisit({ enabled, customerId: service?.customerId || service?.routedCustomerId, requestRef });
   const review = useReviewPreview({ enabled, willReview, serviceId: (reviewService || service)?.id, serviceType: (reviewService || service)?.serviceType, requestRef });
-  const hint = completionReviewHint({ willReview, effectiveSendSms: choice.sendSms, reviewTiming: choice.reviewTiming, reviewCustomAt: choice.reviewCustomAt, preview: review.preview, reviewAwaitsPayment: billing.reviewAwaitsPayment }).text;
+  const hint = completionReviewHint({ willReview, effectiveSendSms: choice.sendSms, reviewTiming: choice.reviewTiming, reviewCustomAt: choice.reviewCustomAt, preview: review.preview, reviewAwaitsPayment: billing.reviewAwaitsPayment, customerPhone: service?.customerPhone }).text;
 
   const state = { ...choice, omitAutoTiming, noPayLink, reviewMarker, adjusted: isAdmin ? choice.adjusted : '', nextVisitNote: hideNextVisitNote ? '' : choice.nextVisitNote, nextVisit, isAdmin, willReview, willInvoice: billing.willInvoice, ext: stepper.ext, int: stepper.int, seeds: stepper.seeds };
   const latest = useRef(state);

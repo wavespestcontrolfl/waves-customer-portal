@@ -86,6 +86,21 @@ function afterReportDueAt(anchor, nowMs = Date.now()) {
   }
   return null;
 }
+// The report-text anchor read from a service record's structured_notes. A text
+// the send window still holds anchors to its release; a delivered text anchors
+// to its delivery (or to the payment, on the paid-invoice path, which runs long
+// after). A failed, blocked, skipped or missing text gives null.
+function reportTextAnchorFromNotes(notes, { atPayment = false } = {}) {
+  const n = notes && typeof notes === "object" ? notes : {};
+  if (n.completionSmsStatus === "deferred" && !n.completionSmsDeferredDeliveredAt) {
+    return n.completionSmsDeferredTo ? { status: "deferred", at: n.completionSmsDeferredTo } : null;
+  }
+  const delivered = n.completionSmsStatus === "sent"
+    || (n.completionSmsStatus === "deferred" && !!n.completionSmsDeferredDeliveredAt);
+  if (!delivered) return null;
+  if (atPayment) return { status: "paid", at: new Date().toISOString() };
+  return { status: "sent", at: n.completionSmsDeferredDeliveredAt || n.sentSmsAt || new Date().toISOString() };
+}
 // The gate reader, wrapped so a test double of feature-gates that predates it
 // reads as off.
 function reviewAskAfterReportOn() {
@@ -1967,6 +1982,24 @@ const ReviewService = {
    * a report that is still queued; an explicit timing stored on the record
    * keeps its own time.
    */
+  // GATE_REVIEW_ASK_AFTER_REPORT anchor for the completion enrollment: what
+  // became of the record's report text. Null when the gate is off, on a failed
+  // lookup, or when no confirmable text left (the smart window then applies).
+  async reportTextAnchorForRecord(serviceRecordId) {
+    if (!serviceRecordId || !reviewAskAfterReportOn()) return null;
+    try {
+      const row = await db("service_records").where({ id: serviceRecordId }).first("structured_notes");
+      let notes = row?.structured_notes || {};
+      if (typeof notes === "string") {
+        try { notes = JSON.parse(notes); } catch { notes = {}; }
+      }
+      return reportTextAnchorFromNotes(notes);
+    } catch (err) {
+      logger.warn(`[review] report anchor lookup failed (serviceRecordId=${serviceRecordId}): ${err.message}`);
+      return null;
+    }
+  },
+
   async _reportPendingHold(seq) {
     try {
       if (!seq?.service_record_id || seq.started_by !== "post_service" || seq.customer_requested) return null;
@@ -2043,14 +2076,10 @@ const ReviewService = {
       const delayMinutes = this.completionReviewDelay(notes);
       // GATE_REVIEW_ASK_AFTER_REPORT: the report went out at completion, long
       // before this payment — unless the send window still holds it, in which
-      // case the ask waits for its release (afterReportDueAt). Only a
-      // confirmed delivery earns the paid anchor: a failed, blocked, skipped
-      // or missing report text passes none and keeps the smart window.
-      const reportDelivered = notes.completionSmsStatus === "sent"
-        || (notes.completionSmsStatus === "deferred" && !!notes.completionSmsDeferredDeliveredAt);
-      const reportTextAnchor = notes.completionSmsStatus === "deferred" && !notes.completionSmsDeferredDeliveredAt && notes.completionSmsDeferredTo
-        ? { status: "deferred", at: notes.completionSmsDeferredTo }
-        : (reportDelivered ? { status: "paid", at: new Date() } : null);
+      // case the ask waits for its release. Only a confirmed delivery earns the
+      // paid anchor; a failed, blocked, skipped or missing text keeps the
+      // smart window.
+      const reportTextAnchor = reportTextAnchorFromNotes(notes, { atPayment: true });
       // Legacy create() dedupes by service_record_id; the cadence path
       // dedupes per service record too (startReviewSequence) on top of the
       // active-sequence + cap/cooldown guards — safe under webhook retries
@@ -8231,6 +8260,7 @@ ReviewService.__private = {
   nextCadenceTickAt,
   REVIEW_CADENCE_TICK_MINUTES,
   REVIEW_AFTER_REPORT_TICK_MINUTES,
+  reportTextAnchorFromNotes,
   cadenceTickMinutes,
   LEGACY_REVIEW_TICK_MINUTES,
   sequenceDecision,

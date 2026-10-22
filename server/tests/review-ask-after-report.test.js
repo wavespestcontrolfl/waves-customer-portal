@@ -156,16 +156,31 @@ describe('the */5 review-sequences registration in scheduler.js', () => {
   });
 });
 
-describe('the completion enrollment site hands over the report text anchor', () => {
+describe('the report text anchor (completion enrollment + paid invoice share one reader)', () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
-  const site = src.slice(src.indexOf('// GATE_REVIEW_ASK_AFTER_REPORT: tell enrollment what became of the'), src.indexOf('legacyDelayMinutes: ReviewService.LEGACY_REVIEW_DELAY_MINUTES'));
+  const { reportTextAnchorFromNotes } = require('../services/review-request').__private;
 
-  test('reads the persisted record notes, anchors only a sent or deferred text, and adds the key only when there is one', () => {
-    expect(site).toContain("db('service_records').where({ id: record.id }).first('structured_notes')");
-    expect(site).toContain("anchorNotes.completionSmsStatus === 'sent'");
-    expect(site).toContain("anchorNotes.completionSmsStatus === 'deferred' && anchorNotes.completionSmsDeferredTo");
-    expect(site).toContain('...(reportTextAnchor ? { reportTextAnchor } : {})');
-    // failed / blocked / skipped / no phone / not requested set no anchor
-    expect(site).not.toMatch(/status: '(failed|blocked|skipped)/);
+  test('the completion enrollment passes the record anchor through the shared reader', () => {
+    expect(src).toContain('reportTextAnchor: await ReviewService.reportTextAnchorForRecord(record.id),');
+  });
+
+  test('a sent text anchors to its send time; a delivered held text to its delivery', () => {
+    expect(reportTextAnchorFromNotes({ completionSmsStatus: 'sent', sentSmsAt: '2026-10-20T14:00:00.000Z' })).toEqual({ status: 'sent', at: '2026-10-20T14:00:00.000Z' });
+    expect(reportTextAnchorFromNotes({ completionSmsStatus: 'deferred', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z', completionSmsDeferredDeliveredAt: '2026-10-20T12:03:00.000Z' })).toEqual({ status: 'sent', at: '2026-10-20T12:03:00.000Z' });
+  });
+
+  test('a text the send window still holds anchors to its release', () => {
+    expect(reportTextAnchorFromNotes({ completionSmsStatus: 'deferred', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z' })).toEqual({ status: 'deferred', at: '2026-10-20T12:00:00.000Z' });
+    expect(reportTextAnchorFromNotes({ completionSmsStatus: 'deferred' })).toBeNull();
+  });
+
+  test.each([['failed'], ['blocked'], ['skipped_recap_sms_already_sent'], ['no_phone'], [undefined]])('a %s text gives no anchor', (status) => {
+    expect(reportTextAnchorFromNotes(status ? { completionSmsStatus: status } : {})).toBeNull();
+    expect(reportTextAnchorFromNotes(status ? { completionSmsStatus: status } : {}, { atPayment: true })).toBeNull();
+  });
+
+  test('at payment, only a delivered text earns the paid anchor', () => {
+    expect(reportTextAnchorFromNotes({ completionSmsStatus: 'sent' }, { atPayment: true })).toMatchObject({ status: 'paid' });
+    expect(reportTextAnchorFromNotes({ completionSmsStatus: 'deferred', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z' }, { atPayment: true })).toEqual({ status: 'deferred', at: '2026-10-20T12:00:00.000Z' });
   });
 });
