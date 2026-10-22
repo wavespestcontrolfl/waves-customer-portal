@@ -581,6 +581,8 @@ describe('four-section report: the reach-out date asks the customer to get in to
     ["WHAT'S NEXT\nYour window is Wednesday, October 14, so call us if anything changes."],
     ["WHAT'S NEXT\nYour window falls on Wednesday, October 14, so call us if anything changes."],
     ["WHAT'S NEXT\nYour office window is Wednesday, October 14; call us if anything changes."],
+    ["WHAT'S NEXT\nYour office window should be Wednesday, October 14, so call us if anything changes."],
+    ["WHAT'S NEXT\nThe kitchen window, as always, is Wednesday, October 14; call us with questions."],
     ["WHAT'S NEXT\nIf the kitchen window is open when we come back on Wednesday, October 14, call us."],
     ["WHAT'S NEXT\nYour next few treatments begin Wednesday, October 14; call us if anything changes."],
     ["WHAT'S NEXT\nText or call us to book a visit for Wednesday, October 14."],
