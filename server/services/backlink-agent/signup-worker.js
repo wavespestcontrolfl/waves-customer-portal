@@ -159,6 +159,9 @@ const USER_AGENTS = [
 // other host (redirects, sub-resources, popups), service workers are blocked
 // and WebSockets are closed. The model's signup_url must be one of the pinned
 // hosts. Gate off = navigation exactly as before.
+// Discard port on loopback: nothing listens, so a proxied request fails.
+const DEAD_PROXY = 'http://127.0.0.1:9';
+
 function signupUrlGuardOn() {
   const { backlinkSignupUrlGuardLive } = require('../../config/feature-gates');
   return backlinkSignupUrlGuardLive();
@@ -194,6 +197,19 @@ async function buildSignupPins(rawUrl, { resolveHostIps } = {}) {
   return { pinned, rules: rules.join(',') };
 }
 
+// Redirect hops are followed inside Chromium without reaching context.route,
+// so the network layer is locked too: DNS for the pinned hosts is pinned, and
+// every other destination (literal IPs and loopback included, hence
+// <-loopback>, which removes Chromium's implicit loopback bypass) is sent to
+// a dead local proxy and fails to connect.
+function guardedLaunchArgs(pins) {
+  return [
+    `--host-resolver-rules=${pins.rules}`,
+    `--proxy-server=${DEAD_PROXY}`,
+    `--proxy-bypass-list=<-loopback>;${[...pins.pinned].join(';')}`,
+  ];
+}
+
 function signupRequestAllowed(rawUrl, pinned) {
   const { _internals: filler } = require('../seo/browser-form-filler');
   return filler.requestAllowed({ url: rawUrl, allowedHosts: pinned });
@@ -214,7 +230,7 @@ async function processSignup(queueItem) {
     headless: true,
     args: [
       '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
-      ...(pins ? [`--host-resolver-rules=${pins.rules}`] : []),
+      ...(pins ? guardedLaunchArgs(pins) : []),
     ],
   });
 
@@ -242,6 +258,11 @@ async function processSignup(queueItem) {
 
     // Step 1: Navigate to the site
     await page.goto(queueItem.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    if (pins && !pins.pinned.has(httpHostOf(page.url()))) {
+      await db('backlink_agent_queue').where({ id: queueItem.id }).update({ status: 'failed', error_message: 'Site redirected off the allowed host', updated_at: new Date() });
+      await browser.close();
+      return { success: false, reason: 'redirected_off_host' };
+    }
     await page.waitForTimeout(2000);
 
     // Step 2: Screenshot and ask Claude to find signup
@@ -456,4 +477,4 @@ async function processQueue(limit = 5) {
 }
 
 module.exports = { processSignup, processQueue, PROFILE };
-module.exports._internals = { buildSignupPins, signupRequestAllowed, httpHostOf };
+module.exports._internals = { buildSignupPins, signupRequestAllowed, httpHostOf, guardedLaunchArgs };

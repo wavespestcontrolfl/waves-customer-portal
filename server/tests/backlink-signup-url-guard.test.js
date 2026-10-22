@@ -75,9 +75,10 @@ test('httpHostOf returns a host only for http(s)', () => {
 });
 
 function fakeBrowser() {
-  const calls = { contextOpts: null, route: null, ws: null, gotos: [] };
+  const calls = { contextOpts: null, route: null, ws: null, gotos: [], current: null };
   const page = {
-    goto: jest.fn(async (url) => { calls.gotos.push(url); }),
+    goto: jest.fn(async (url) => { calls.gotos.push(url); calls.current = url; }),
+    url: () => calls.current || 'about:blank',
     waitForTimeout: jest.fn(async () => {}),
     screenshot: jest.fn(async () => Buffer.from('png')),
   };
@@ -108,6 +109,8 @@ describe('processSignup with the gate on', () => {
     const r = await processSignup({ id: 'q2', url: 'https://directory.example/listing' });
     const launchArgs = mockLaunch.mock.calls[0][0].args;
     expect(launchArgs.some((a) => a.startsWith('--host-resolver-rules=MAP directory.example 93.184.216.34'))).toBe(true);
+    expect(launchArgs).toContain('--proxy-server=http://127.0.0.1:9');
+    expect(launchArgs.find((a) => a.startsWith('--proxy-bypass-list='))).toMatch(/^--proxy-bypass-list=<-loopback>;/);
     expect(calls.contextOpts.serviceWorkers).toBe('block');
     expect(calls.contextOpts.proxy).toBeUndefined();
     expect(typeof calls.route).toBe('function');
