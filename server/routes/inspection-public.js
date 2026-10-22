@@ -194,7 +194,7 @@ const { leadInspectionLinkLive } = require('../config/feature-gates');
 const { verifyLeadConsultationToken, smsChannelFor, mintWaitlistTicket, verifyWaitlistTicket } = require('../utils/lead-consultation-token');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { geocodeAddressWithStatus } = require('../services/geocoder');
-const { reverseGeocodeCounty } = require('../services/address-validation');
+const { reverseGeocodeCounty, reverseGeocodeLocality } = require('../services/address-validation');
 const { isInServiceAreaCounty } = require('../services/call-triage-flags');
 const { isInServiceAreaBox, isInServiceAreaCoarseBox, servedSouthHillsborough, isExcludedLocality, isExcludedZip } = require('../services/service-area');
 const { isAssessmentBooking, scopeToAssessmentBookings, ASSESSMENT_SERVICE_KEY } = require('../services/assessment-booking');
@@ -701,7 +701,23 @@ async function checkServiceArea(location, address = null) {
     logger.warn(`[inspection-public] county reverse-geocode failed: ${err.message}`);
   }
   if (!county) return { ok: false, county: null, unavailable: true };
-  if (isInServiceAreaCounty(county)) return { ok: true, county };
+  if (isInServiceAreaCounty(county)) {
+    // Punta Gorda sits inside served Charlotte County, and the submitted
+    // city/ZIP can be blank or wrong (Codex #6424 r1 security P2), so the
+    // locality and ZIP Google places on the coordinate decide too. An
+    // unknowable answer is unavailable (recoverable 503), never "served".
+    if (/^charlotte(\s+county)?$/i.test(String(county).trim())) {
+      let place = null;
+      try {
+        place = await reverseGeocodeLocality({ latitude: location.lat, longitude: location.lng }, key);
+      } catch (err) {
+        logger.warn(`[inspection-public] locality reverse-geocode failed: ${err.message}`);
+      }
+      if (!place) return { ok: false, county: null, unavailable: true };
+      if (isExcludedLocality(place.city) || isExcludedZip(place.zip)) return { ok: false, county: null };
+    }
+    return { ok: true, county };
+  }
   // South Hillsborough is served by the Parrish office (config/locations.js
   // SOUTH_HILLSBOROUGH_CITIES — Codex #4737 r16 P1): a Hillsborough address
   // in one of those localities (by city, or by its ZIP's city) is in area.

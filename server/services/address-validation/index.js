@@ -85,6 +85,37 @@ async function reverseGeocodeCounty(location, key, signal = null) {
   }
 }
 
+// The locality and ZIP Google places on a coordinate, for the excluded-locality
+// check inside a served county (Punta Gorda, owner ruling 2026-10-22): the
+// submitted city/ZIP can be missing or wrong, so the verdict must not rest on
+// them alone. Returns { city, zip } (either may be null when Google names
+// none) or null when the lookup itself failed, which callers treat as
+// unknown and fail closed on.
+async function reverseGeocodeLocality(location, key, signal = null) {
+  if (!location || typeof location.latitude !== 'number') return null;
+  try {
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${location.latitude},${location.longitude}`
+      + `&result_type=street_address|premise|subpremise|route|postal_code|locality&key=${key}`;
+    const res = await fetch(url, { signal: withTimeout(signal) });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.status && data.status !== 'OK' && data.status !== 'ZERO_RESULTS') return null;
+    let city = null;
+    let zip = null;
+    for (const r of data.results || []) {
+      for (const c of r.address_components || []) {
+        const types = c.types || [];
+        if (!city && types.includes('locality')) city = c.long_name || c.short_name || null;
+        if (!zip && types.includes('postal_code')) zip = c.long_name || c.short_name || null;
+      }
+      if (city && zip) break;
+    }
+    return { city, zip };
+  } catch {
+    return null;
+  }
+}
+
 // Pure status derivation — testable without the network. `county` is supplied
 // by the caller (reverse-geocoded). The cardinal safety rule: VALIDATED_ACCEPT
 // requires inServiceArea === true. Unknown county (null) is NOT good enough —
@@ -269,4 +300,4 @@ function buildAddressLines(serviceAddress) {
   return [line1, line2].filter(Boolean);
 }
 
-module.exports = { validateAddress, deriveStatus, buildAddressLines, STATUSES, VERSION, SERVICE_STATE, reverseGeocodeCounty };
+module.exports = { validateAddress, deriveStatus, buildAddressLines, STATUSES, VERSION, SERVICE_STATE, reverseGeocodeCounty, reverseGeocodeLocality };
