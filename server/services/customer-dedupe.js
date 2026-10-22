@@ -187,6 +187,9 @@ const ADDRESS_CONFLICTS = new Set(['conflict', 'unit_conflict', 'zip_conflict', 
 // Row counts in any of these tables mean the loser has real business history.
 // Green (auto) refuses ALL of them; manual merges repoint them (that is the
 // point of a merge) but still refuse the both-have-Stripe case below.
+// The retire write's sentinel phone (merge-retired.js) marks a merged-away row.
+const { MERGE_RETIRED_PHONE_PREFIX } = require('./merge-retired');
+
 const AUTO_BLOCKER_TABLES = [
   'payment_methods', 'invoices', 'payments', 'scheduled_services',
   'service_records', 'customer_contracts', 'annual_prepay_terms',
@@ -1890,8 +1893,8 @@ const REFERRAL_FOLD_COUNTERS = ['referral_balance_cents', 'total_earned_cents',
 //   - no lifecycle evidence: no churned_at, churn_episode_id or member_since,
 //     no total_services, and no real history: no scheduled_services row in any
 //     status other than a Waves Assessment (an open lead, not a conversion; the
-//     shared assessment-booking predicate decides), no service_records row, no
-//     invoice, no credit ledger row
+//     shared assessment-booking predicate decides), and no row in any other
+//     AUTO_BLOCKER_TABLES table (payments, invoices, service records, ...)
 //   - no archive/restore evidence: the customer.archive / customer.restore
 //     audit_log rows the admin archive and restore routes write
 //   - never billed: no designated autopay card, no payment_methods row, no
@@ -1903,7 +1906,10 @@ const INTAKE_LEAD_STAGES = new Set(ALL_PIPELINE_STAGES.filter((stage) => (
   !CUSTOMER_STAGES.includes(stage) && !FORMER_CUSTOMER_STAGES.includes(stage) && stage !== 'lost'
 )));
 const ARCHIVE_RESTORE_AUDIT_ACTIONS = ['customer.archive', 'customer.restore'];
-const INTAKE_LEAD_HISTORY_TABLES = ['service_records', 'invoices', 'customer_credit_ledger'];
+// Real history = every table the auto-merge already treats as business history (AUTO_BLOCKER_TABLES:
+// payments, invoices, contracts, deposits, saved cards, credits and the rest), one list so the two can
+// never drift. scheduled_services is read separately so an assessment-only booking stays a lead.
+const INTAKE_LEAD_HISTORY_TABLES = AUTO_BLOCKER_TABLES.filter((table) => table !== 'scheduled_services');
 
 async function loserIsIntakeLead(database, loser) {
   if (require('../config/feature-gates').mergeLeadDefaultsLive?.() !== true) return false;
@@ -1916,7 +1922,8 @@ async function loserIsIntakeLead(database, loser) {
     // total_services has no production writer and booked customers can sit at
     // new_lead (customer-stages.js), so real history decides: a visit in ANY
     // status (cancelled counts, strict reading) other than a Waves Assessment,
-    // a service record or an invoice means this was a customer. An assessment
+    // or any row in INTAKE_LEAD_HISTORY_TABLES (a payment, invoice, service
+    // record, contract, deposit, credit...) means this was a customer. An assessment
     // booking is an open lead, not a conversion (assessment-booking.js, owner
     // ruling 2026-09-08), judged by that module's own predicate.
     const { isAssessmentBooking } = require('./assessment-booking');
@@ -1925,7 +1932,7 @@ async function loserIsIntakeLead(database, loser) {
       if (!(await isAssessmentBooking(visit, database))) return false;
     }
     for (const historyTable of INTAKE_LEAD_HISTORY_TABLES) {
-      if (await database(historyTable).where({ customer_id: loser.id }).first('id')) return false;
+      if (await database(historyTable).where({ customer_id: loser.id }).first('customer_id')) return false;
     }
     if (await database('audit_log')
       .where({ resource_type: 'customer', resource_id: loser.id })
@@ -3920,7 +3927,7 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // NOT NULL, so it gets an unmatchable sentinel; the journal snapshot keeps
     // the real values.
     await trx('customers').where({ id: loserId }).update({
-      phone: `merged-${String(loserId).slice(0, 8)}`,
+      phone: `${MERGE_RETIRED_PHONE_PREFIX}${String(loserId).slice(0, 8)}`,
       email: null,
       stripe_customer_id: null,
       payer_id: null,

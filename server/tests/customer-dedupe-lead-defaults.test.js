@@ -150,6 +150,10 @@ describe('loserIsIntakeLead', () => {
       ['a visit whose catalog row is not the assessment', { scheduled_services: [{ id: 'v1', service_type: 'Visit', service_id: 's1' }], services: { id: 's1', service_key: 'pest_quarterly', name: 'Quarterly Pest' } }],
       ['a service record', { service_records: { id: 'sr1' } }],
       ['an invoice', { invoices: { id: 'inv1' } }],
+      // Codex #6421 r9: every AUTO_BLOCKER_TABLES table is history, not a hand-picked few.
+      ['a standalone payment with no invoice', { payments: { customer_id: 'lead-1' } }],
+      ['a contract', { customer_contracts: { customer_id: 'lead-1' } }],
+      ['an estimate deposit', { estimate_deposits: { customer_id: 'lead-1' } }],
       ['a credit ledger row', { customer_credit_ledger: { id: 'cl1' } }],
     ])('%s: not an intake lead', async (_label, over) => {
       expect(await dedupe.loserIsIntakeLead(fakeDb({ ...plainLead, ...over }), lead)).toBe(false);

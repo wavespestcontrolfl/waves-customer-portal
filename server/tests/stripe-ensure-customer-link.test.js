@@ -19,11 +19,15 @@ describe('StripeService.ensureStripeCustomer link-back', () => {
       const q = { _where: {}, _nulls: [] };
       q.where = jest.fn((cond) => { Object.assign(q._where, cond); return q; });
       q.whereNull = jest.fn((col) => { q._nulls.push(col); return q; });
+      // the merge-retired guard: NOT (deleted_at IS NOT NULL AND phone LIKE 'merged-%')
+      q.whereRaw = jest.fn(() => { q._notMerged = true; return q; });
       q.first = jest.fn(async () => (state.row.id === q._where.id ? { ...state.row } : null));
       q.update = jest.fn(async (patch) => {
         if (beforeLink) { const fn = beforeLink; beforeLink = null; fn(state); }
-        updates.push({ nulls: [...q._nulls], patch });
-        const matches = state.row.id === q._where.id && q._nulls.every((col) => state.row[col] === null || state.row[col] === undefined);
+        updates.push({ nulls: [...q._nulls], notMerged: Boolean(q._notMerged), patch });
+        const merged = Boolean(state.row.deleted_at) && String(state.row.phone).startsWith('merged-');
+        const matches = state.row.id === q._where.id && !(q._notMerged && merged)
+          && q._nulls.every((col) => state.row[col] === null || state.row[col] === undefined);
         if (matches) Object.assign(state.row, patch);
         return matches ? 1 : 0;
       });
@@ -45,7 +49,7 @@ describe('StripeService.ensureStripeCustomer link-back', () => {
     const { StripeService, database, state, updates } = load({ row: {} });
     await expect(StripeService.ensureStripeCustomer('cust-1', { database })).resolves.toBe('cus_new');
     expect(state.row.stripe_customer_id).toBe('cus_new');
-    expect(updates).toEqual([{ nulls: ['deleted_at', 'stripe_customer_id'], patch: { stripe_customer_id: 'cus_new' } }]);
+    expect(updates).toEqual([{ nulls: ['stripe_customer_id'], notMerged: true, patch: { stripe_customer_id: 'cus_new' } }]);
   });
 
   test('already linked: returns it with no Stripe call and no write (fast path unchanged)', async () => {
@@ -72,7 +76,7 @@ describe('StripeService.ensureStripeCustomer link-back', () => {
   test('retired meanwhile (merged): throws CUSTOMER_RETIRED and writes nothing onto the archived row', async () => {
     const { StripeService, database, state } = load({
       row: {},
-      beforeLink: (s) => { s.row.deleted_at = new Date(); },
+      beforeLink: (s) => { s.row.deleted_at = new Date(); s.row.phone = 'merged-cust1abc'; },
     });
     await expect(StripeService.ensureStripeCustomer('cust-1', { database })).rejects.toMatchObject({
       code: 'CUSTOMER_RETIRED',
@@ -81,12 +85,27 @@ describe('StripeService.ensureStripeCustomer link-back', () => {
     expect(state.row.stripe_customer_id).toBeNull();
   });
 
-  test('already retired at the first read: throws before Stripe is ever called, nothing written', async () => {
-    const { StripeService, database, state, updates } = load({ row: { deleted_at: new Date() } });
+  test('already merged away at the first read: throws before Stripe is ever called, nothing written', async () => {
+    const { StripeService, database, state, updates } = load({ row: { deleted_at: new Date(), phone: 'merged-cust1abc' } });
     await expect(StripeService.ensureStripeCustomer('cust-1', { database })).rejects.toMatchObject({ code: 'CUSTOMER_RETIRED' });
     expect(stripeClient.customers.create).not.toHaveBeenCalled();
     expect(updates).toEqual([]);
     expect(state.row.stripe_customer_id).toBeNull();
+  });
+
+  // Codex #6421 r9: an admin archive sets deleted_at too, but an archived customer may still pay an open
+  // invoice and save the card. Only a merged-away row (the merge's sentinel phone) is refused.
+  test('archived, not merged (deleted_at, real phone): links as before', async () => {
+    const { StripeService, database, state } = load({ row: { deleted_at: new Date() } });
+    await expect(StripeService.ensureStripeCustomer('cust-1', { database })).resolves.toBe('cus_new');
+    expect(stripeClient.customers.create).toHaveBeenCalledTimes(1);
+    expect(state.row.stripe_customer_id).toBe('cus_new');
+  });
+
+  test('archived while the Stripe call ran (not a merge): still links', async () => {
+    const { StripeService, database, state } = load({ row: {}, beforeLink: (s) => { s.row.deleted_at = new Date(); } });
+    await expect(StripeService.ensureStripeCustomer('cust-1', { database })).resolves.toBe('cus_new');
+    expect(state.row.stripe_customer_id).toBe('cus_new');
   });
 
   test('a Stripe failure still surfaces the generic error', async () => {
