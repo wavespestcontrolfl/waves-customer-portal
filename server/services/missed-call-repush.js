@@ -103,11 +103,14 @@ async function repushOne(row, { triggers, trigger, to, PushService, hours, clock
   // after this tick's retire never buzzes again (Codex #6383 r3).
   const callStillMissed = async () => {
     if (!payload.callLogId) return true;
-    const { calledBackSql } = require('./missed-call-bell');
+    const { calledBackSql, visitUnderwaySql } = require('./missed-call-bell');
     const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
+    // GATE_MISSED_CALL_VISIT_UNDERWAY: the customer's visit moved after the call, so no re-push.
+    // Gate off: visitUnderwaySql() is null and the select is exactly as before.
+    const underway = visitUnderwaySql();
     const call = await db('call_log').where('id', payload.callLogId)
       .modify((qb) => whereNotSandboxCall(qb))
-      .first('id', db.raw(`(${calledBackSql({ retire: true })}) AS still_missed`), db.raw("metadata->>'missed_call_spam_wave' AS spam_wave"));
+      .first('id', db.raw(`(${calledBackSql({ retire: true })}${underway ? ` AND NOT ${underway}` : ''}) AS still_missed`), db.raw("metadata->>'missed_call_spam_wave' AS spam_wave"));
     // A call whose push the bell deliberately quieted (a robodialer wave or burst) is never buzzed later.
     if (QUIET_SPAM_WAVE.includes(call?.spam_wave)) return false;
     // No call row proves nothing either way: the bell stays eligible.

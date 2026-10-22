@@ -381,6 +381,33 @@ function calledBackSql({ retire = false } = {}) {
   return retire ? CALLED_BACK_ANSWERED_SQL : CALLED_BACK_DEFER_SQL;
 }
 
+// GATE_MISSED_CALL_VISIT_UNDERWAY (owner 2026-10-21): a customer on file called
+// at 1:05 PM and nobody answered; the tech went en route 1:46, arrived 1:59 and
+// the invoice was paid 2:32. That bell should not have rung. The call's customer
+// has a visit that moved (en route, arrived or completed) or an invoice that was
+// paid AFTER the call, on the same ET day. True = the visit is underway, so the
+// bell is retired / never rings / is never re-pushed. Written against the
+// unaliased `call_log` row, like calledBackSql. No literal question mark here
+// (knex reads one as a binding). "Paid" is the codebase's own: invoices.paid_at.
+const ET_DAY = (col) => `(${col} AT TIME ZONE 'America/New_York')::date`;
+const VISIT_UNDERWAY_SQL = '(call_log.customer_id IS NOT NULL AND ('
+  + 'EXISTS (SELECT 1 FROM scheduled_services vss WHERE vss.customer_id = call_log.customer_id'
+  + ` AND ((vss.en_route_at > call_log.created_at AND ${ET_DAY('vss.en_route_at')} = ${ET_DAY('call_log.created_at')})`
+  + ` OR (vss.arrived_at > call_log.created_at AND ${ET_DAY('vss.arrived_at')} = ${ET_DAY('call_log.created_at')})`
+  + ` OR (vss.completed_at > call_log.created_at AND ${ET_DAY('vss.completed_at')} = ${ET_DAY('call_log.created_at')})))`
+  + ' OR EXISTS (SELECT 1 FROM invoices vinv WHERE vinv.customer_id = call_log.customer_id'
+  + ` AND vinv.paid_at > call_log.created_at AND ${ET_DAY('vinv.paid_at')} = ${ET_DAY('call_log.created_at')})))`;
+const visitUnderwayOn = () => require('../config/feature-gates').isEnabled('missedCallVisitUnderway');
+// Gate off = null: callers add nothing, so the SQL is byte-identical to before.
+function visitUnderwaySql() {
+  return visitUnderwayOn() ? VISIT_UNDERWAY_SQL : null;
+}
+// knex .modify() helper: keep only calls whose customer's visit has not moved.
+function whereNoVisitUnderway(qb) {
+  const sql = visitUnderwaySql();
+  if (sql) qb.whereRaw(`NOT ${sql}`);
+}
+
 function parseMeta(meta) {
   if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
   return meta && typeof meta === 'object' ? meta : {};
@@ -571,6 +598,7 @@ async function ringMissedCallIfUnanswered(callSid) {
       .whereRaw("COALESCE(call_outcome,'') NOT IN ('ai_handled', 'ai_transferred')")
       .whereRaw(...unansweredClause(gaps))
       .whereRaw(calledBack)
+      .modify(whereNoVisitUnderway)
       // RETURNING: the push-retry state below is read from the row this very
       // claim won, never from the snapshot read before it (a concurrent pass
       // may have released its lease with a retry recorded in between).
@@ -609,6 +637,7 @@ async function ringMissedCallIfUnanswered(callSid) {
     const stillMissedWith = (calledBackClause) => async () => Boolean(await db('call_log').where({ id: row.id }).modify(whereNotBlockedCall)
       .modify(recording).whereNull('voicemail_callback_alerted_at')
       .whereRaw(calledBackClause)
+      .modify(whereNoVisitUnderway)
       .first('id'));
     const stillMissed = stillMissedWith(calledBack);
     // The post-check below retires the bell for good, so it needs proof of an
@@ -701,6 +730,7 @@ async function sweepMissedCalls({ limit = 50 } = {}) {
       .whereRaw(...unansweredClause(gaps))
       .whereRaw("COALESCE(metadata->>'missed_call_settled_at','') = ''")
       .whereRaw(calledBack)
+      .modify(whereNoVisitUnderway)
       // Unclaimed, or a lease that went stale (crash mid-delivery) — hook P1.
       .whereRaw("(COALESCE(metadata->>'missed_call_notified_at','') = '' OR (metadata->>'missed_call_notified_at')::timestamptz < ?)", [new Date(Date.now() - LEASE_MS)])
       .where('created_at', '>', new Date(now - 24 * 60 * 60 * 1000))
@@ -740,13 +770,30 @@ const RETIRE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
  * selected again). Never re-opens: a retired bell stays done.
  */
 async function retireCalledBackMissedCalls({ limit = 100 } = {}) {
+  const retired = await retireOpenMissedCalls({
+    clause: `NOT ${calledBackSql({ retire: true })}`,
+    resolution: 'The caller got through on a later call',
+    limit,
+  });
+  // Visit underway (GATE_MISSED_CALL_VISIT_UNDERWAY): a separate reason, so the
+  // office can see why the bell closed. Off: this block does nothing.
+  const underway = visitUnderwaySql();
+  if (!underway) return retired;
+  return retired + await retireOpenMissedCalls({
+    clause: underway,
+    resolution: "The customer's visit went ahead after the call",
+    limit,
+  });
+}
+
+async function retireOpenMissedCalls({ clause, resolution, limit }) {
   const rows = await db('notifications')
     .join('call_log', db.raw("call_log.id::text = notifications.metadata->'payload'->>'callLogId'"))
     .where({ 'notifications.recipient_type': 'admin', 'notifications.category': 'missed_call' })
     .whereRaw("notifications.metadata->>'triggerKey' = 'customer_missed_call'")
     .whereNull('notifications.done_at')
     .where('notifications.created_at', '>', new Date(Date.now() - RETIRE_WINDOW_MS))
-    .whereRaw(`NOT ${calledBackSql({ retire: true })}`)
+    .whereRaw(clause)
     .distinct('call_log.id')
     .limit(limit);
   if (!rows.length) return 0;
@@ -755,7 +802,7 @@ async function retireCalledBackMissedCalls({ limit = 100 } = {}) {
   for (const { id } of rows) {
     retired += Number(await NotificationService.supersedeMissedCallAdmin({
       callLogId: id,
-      resolution: 'The caller got through on a later call',
+      resolution,
     })) || 0;
   }
   return retired;
@@ -773,6 +820,7 @@ module.exports = {
   sweepMissedCalls,
   outcomeUnanswered,
   calledBackSql,
+  visitUnderwaySql,
   CALLED_BACK_SQL,
   UNKNOWN_CALLER_MIN_SECONDS,
   // Exported so missed-call-text-back.js shares the exact same "what counts
