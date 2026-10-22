@@ -5462,6 +5462,41 @@ send runs only when the number matches an active customer), so a timing
 observer can still distinguish known numbers — do not widen the claim
 beyond the body, and do not add a second observable difference. `/me`, `/properties`, `/select-property`
 require the customer JWT.
+Contact login on the same routes (`GATE_CONTACT_LOGIN`, dark; strict
+`=== 'true'`, read at call time — `contactLoginLive()`): when live, send-code
+and verify-code also serve an ON-LOCATION CONTACT — a number stored in a
+customer's `service_contact*_phone` slot whose holder attestation
+(`service_contacts_consent_at`) covers it (`contactSlotMayLogIn`; the
+`DISABLE_CONTACT_CONSENT_GATE` SMS rollback switch never opens the login) —
+resolved ONLY when no active account-holder row carries the number
+(`resolveLoginIdentity`: the holder first; a contact on several rows lands
+on the primary profile, then the oldest). send-code then sends that contact
+the OTP under the same uniform body; verify-code mints a session whose
+access AND refresh tokens carry `contactKey` (the last-10 phone key, also
+`customer_refresh_tokens.contact_key`) and returns `actor { kind:
+'contact', slot, name, phone, email }` — a holder's response carries `actor
+{ kind: 'holder' }` — with the contact's own name, phone and email in
+`customer`, never the holder's identity, referral code, credits, prepay,
+rate or tier (the `/me` payload is projected the same way, its `address`
+the house the contact's reads are scoped to and `notificationPrefs: null`).
+The App Store reviewer bypass (`REVIEW_LOGIN_PHONE` + `REVIEW_LOGIN_CODE`)
+resolves the demo HOLDER row only — never a contact — and send-code skips
+Twilio only while the review number resolves to it. refresh rotates a
+contact family only while the gate is on, the row is `active` (the
+cancelled read-only allowance does not apply to contacts) and the number
+still occupies a slot; otherwise it answers the same 401
+`INVALID_REFRESH_TOKEN` and REVOKES the family (`contact_removed`), a
+profile switch is refused, and the holder's contact save revokes the
+families of the phones it removed — re-adding a number never revives a
+removed device's session. A contact bearer reaches only
+`CONTACT_SESSION_ROUTES` (`server/middleware/auth.js`: `/auth/me`,
+`/auth/properties`, schedule and visit-history reads, tracking, documents
+reads, activity beacons, GET/PUT `/notifications/contact-preferences`, the
+token-scoped push release); every other authenticated route answers 403
+`ACCOUNT_HOLDER_ONLY` (never a 401 the client would read as a dead session).
+Gate off: a contact number is unknown at send-code (uniform body, no OTP),
+refused at verify-code, and an existing contact bearer or refresh family is
+refused (401) — byte-identical to before.
 Staff authentication (`server/routes/admin-auth.js`, mounted at
 `/api/admin/auth`): `POST /login` sits behind the same `authLimiter` (10 per
 15 min) and answers every failure with a generic 401 `Invalid credentials`;
