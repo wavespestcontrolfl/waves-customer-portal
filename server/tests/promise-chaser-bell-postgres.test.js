@@ -157,6 +157,98 @@ const OUR_NUMBER = '+19415550100';
     expect(triggerNotification).toHaveBeenCalledTimes(1);
   });
 
+  describe('caller name on the headline (owner 2026-10-21)', () => {
+    async function ringedPayload() {
+      const earlier = callRow(240);
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitmentRow(earlier.id, { kind: 'send_estimate', description: 'Send the caller an estimate' }));
+      expect(await sweepPromiseChasers()).toBe(1);
+      return triggerNotification.mock.calls[0][1];
+    }
+
+    test('an unlinked caller is named from the newest customer record on the number, skipping a placeholder name', async () => {
+      await mockConn('customers').insert([
+        { id: randomUUID(), first_name: 'Martin', last_name: 'Fixtureson', phone: '(941) 555-0199', created_at: new Date(now - 30 * 86400000) },
+        { id: randomUUID(), first_name: 'Martin', last_name: 'Fixtureson', phone: PHONE, created_at: new Date(now - 10 * 86400000) },
+        { id: randomUUID(), first_name: 'Unknown', last_name: null, phone: PHONE, created_at: new Date(now - 86400000) },
+      ]);
+      const payload = await ringedPayload();
+      expect(payload.name).toBe('Martin Fixtureson');
+      expect(payload.what).toBe('quote');
+    });
+
+    test('with no customer record, the newest estimate on the number names the caller', async () => {
+      await mockConn('estimates').insert({
+        id: randomUUID(), customer_id: null, customer_name: 'Estella Samplewood', customer_phone: '+1 (941) 555-0199', status: 'draft',
+        estimate_data: JSON.stringify({}), created_at: new Date(now - 5 * 86400000), updated_at: new Date(now - 5 * 86400000),
+      });
+      expect((await ringedPayload()).name).toBe('Estella Samplewood');
+    });
+
+    test('a number nobody has a name for stays unnamed (the headline then shows the number)', async () => {
+      await mockConn('customers').insert({ id: randomUUID(), first_name: 'Other', last_name: 'Person', phone: '+19415550142' });
+      expect((await ringedPayload()).name).toBeNull();
+    });
+  });
+
+  describe('a quote promise closes on an estimate sent to the caller\'s number, whoever owns it (owner 2026-10-21)', () => {
+    async function seedQuotePromise() {
+      const earlier = callRow(240);
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitmentRow(earlier.id, { kind: 'send_estimate', description: 'Send the caller an estimate' }));
+    }
+    const delivered = (minsAgo) => {
+      const at = new Date(now - minsAgo * 60000).toISOString();
+      return JSON.stringify({ deliveryState: { firstDeliveredAt: at, lastDeliveredAt: at } });
+    };
+
+    test('an estimate sent after the call to a duplicate customer record on the same number: no ring', async () => {
+      await seedQuotePromise();
+      const dupe = randomUUID();
+      await mockConn('customers').insert([
+        { id: randomUUID(), first_name: 'Martin', last_name: 'Fixtureson', phone: PHONE },
+        { id: dupe, first_name: 'Martin', last_name: 'Fixtureson', phone: PHONE },
+      ]);
+      await mockConn('estimates').insert({
+        id: randomUUID(), customer_id: dupe, customer_name: 'Martin Fixtureson', customer_phone: PHONE, status: 'viewed',
+        sent_at: new Date(now - 200 * 60000), estimate_data: delivered(200), created_at: new Date(now - 210 * 60000), updated_at: new Date(now - 200 * 60000),
+      });
+
+      expect(await sweepPromiseChasers()).toBe(0);
+      expect(triggerNotification).not.toHaveBeenCalled();
+    });
+
+    test('...also when the estimate row carries no phone and only its owning customer record has the number', async () => {
+      await seedQuotePromise();
+      const owner = randomUUID();
+      await mockConn('customers').insert({ id: owner, first_name: 'Martin', last_name: 'Fixtureson', phone: PHONE });
+      await mockConn('estimates').insert({
+        id: randomUUID(), customer_id: owner, customer_phone: null, status: 'sent',
+        sent_at: new Date(now - 200 * 60000), estimate_data: delivered(200), created_at: new Date(now - 210 * 60000), updated_at: new Date(now - 200 * 60000),
+      });
+
+      expect(await sweepPromiseChasers()).toBe(0);
+      expect(triggerNotification).not.toHaveBeenCalled();
+    });
+
+    test('an estimate to another number, or one handed off BEFORE the promise call, does not close it: still rings', async () => {
+      await seedQuotePromise();
+      const other = randomUUID();
+      await mockConn('customers').insert({ id: other, first_name: 'Other', last_name: 'Person', phone: '+19415550142' });
+      await mockConn('estimates').insert([
+        { id: randomUUID(), customer_id: other, customer_phone: '+19415550142', status: 'sent', sent_at: new Date(now - 200 * 60000),
+          estimate_data: delivered(200), created_at: new Date(now - 210 * 60000), updated_at: new Date(now - 200 * 60000) },
+        { id: randomUUID(), customer_id: null, customer_phone: PHONE, status: 'sent', sent_at: new Date(now - 300 * 60000),
+          estimate_data: delivered(300), created_at: new Date(now - 310 * 60000), updated_at: new Date(now - 300 * 60000) },
+      ]);
+
+      expect(await sweepPromiseChasers()).toBe(1);
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
+    });
+  });
+
   test('a second, genuinely separate open promise still rings once the first is closed out', async () => {
     const earlierA = callRow(240); // waited longest — selected first
     const commitmentA = commitmentRow(earlierA.id);

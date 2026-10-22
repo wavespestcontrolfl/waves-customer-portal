@@ -160,19 +160,14 @@ async function loadUnkeptPromises() {
                )
             OR (c.customer_id IS NOT NULL AND e.customer_id = c.customer_id)
             OR (e.customer_phone IS NOT NULL
-                -- Unlinked (or same-customer) estimates only (codex r12):
-                -- a shared household number must not let customer B's
-                -- estimate clear customer A's promise.
-                -- An UNLINKED call (shared number) is cleared only by an
-                -- UNLINKED estimate (codex r26): customer B's linked
-                -- estimate must not clear caller A's promise.
-                -- Linked call -> same-customer estimate only; unlinked
-                -- call -> unlinked estimate only (codex r26/r31):
-                -- commercial proposals store phone with customer_id NULL,
-                -- and caller B's proposal must not clear linked caller
-                -- A's promise. Exact engine/lead provenance legs above
-                -- are unaffected.
-                AND ((c.customer_id IS NULL AND e.customer_id IS NULL)
+                -- Linked call -> same-customer estimate only (codex r12/r26/r31):
+                -- caller B's proposal must not clear linked caller A's
+                -- promise. Exact engine/lead provenance legs above are
+                -- unaffected.
+                -- Owner 2026-10-21: an UNLINKED call is cleared by any
+                -- estimate that went to the caller's number, whoever owns
+                -- it (two customer records on one number are common).
+                AND (c.customer_id IS NULL
                   OR e.customer_id = c.customer_id)
                 AND RIGHT(REGEXP_REPLACE(e.customer_phone, '\\D', '', 'g'), 10)
                   = RIGHT(REGEXP_REPLACE(CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END, '\\D', '', 'g'), 10))

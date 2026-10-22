@@ -1894,7 +1894,8 @@ async function completedVisit(conn, { after, until, customerId }) {
 
 // send_estimate's association lookup, shared with kind 'other': an estimate
 // handed off to the same customer after the call (or, for an unlinked call,
-// an unlinked estimate on the caller's phone).
+// any estimate on the caller's phone: its customer_phone, or the phone of the
+// customer record that owns it).
 //
 // `accept(row)` (optional) vets a candidate for the promise being judged: the
 // first accepted estimate in handoff order wins, so a rejected one does not hide
@@ -1910,7 +1911,15 @@ async function estimateSentTo(conn, { after, until, phone, customerId }, accept 
     // Exclude NULL FK values so NOT IN does not reject unrelated rows.
     whereEstimateCustomerOwnership(estQ, customerId);
   } else if (phone) {
-    estQ.whereNull("customer_id").modify((b) => phoneWhere(b, "customer_phone", phone));
+    // An unlinked call is matched by its NUMBER alone (owner 2026-10-21): an
+    // estimate whose customer_phone is the caller's, or one owned by any
+    // customer record carrying that number. Duplicate customer records on one
+    // number are common; the estimate that went to the caller's phone still
+    // kept the promise whichever record it landed on.
+    estQ.where((b) => {
+      phoneWhere(b, "customer_phone", phone);
+      b.orWhereIn("customer_id", conn("customers").modify((c) => phoneWhere(c, "phone", phone)).select("id"));
+    });
   } else {
     return null;
   }

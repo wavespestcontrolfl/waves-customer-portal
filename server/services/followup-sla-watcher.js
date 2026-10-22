@@ -413,8 +413,8 @@ async function quoteAsks(conn, scoped) {
 // fence (whereEstimateCustomerOwnership: the customer's own rows plus live
 // lead-owned ones, never one another lead claims or a deleted lead's), so an
 // estimate parked on a lead and sent by email only still counts; an unlinked
-// caller matches only an UNOWNED estimate on the caller's phone, as
-// estimateSentTo does. The canonical delivery witness (handedOffWithin /
+// caller matches an estimate on the caller's phone (its customer_phone, or
+// the phone of the customer record owning it), as estimateSentTo does. The canonical delivery witness (handedOffWithin /
 // witnessAt: a real handoff or an acceptance, never a suppressed send's bare
 // sent_at) after the evidence boundary `since`.
 async function quoteEstimateIds(conn, scoped, asks = new Map()) {
@@ -437,11 +437,19 @@ async function quoteEstimateIds(conn, scoped, asks = new Map()) {
   const unlinked = quotes.filter((x) => x.phone);
   if (!unlinked.length) return done;
   const lowest = new Date(Math.min(...unlinked.map((x) => x.since.getTime())));
-  const sent = await commitments.handedOffWithin(conn('estimates'), lowest).whereNull('customer_id')
-    .modify((b) => commitments.phoneWhereAny(b, 'customer_phone', [...new Set(unlinked.map((x) => x.phone))]))
-    .select(...commitments.HANDOFF_COLS(conn), 'customer_phone', 'service_interest', 'estimate_data');
+  // The number alone matches (owner 2026-10-21): the estimate's own
+  // customer_phone, or the phone of the customer record that owns it (a
+  // duplicate record on the caller's number still got the quote).
+  const phones = [...new Set(unlinked.map((x) => x.phone))];
+  const sent = await commitments.handedOffWithin(conn('estimates'), lowest)
+    .where((b) => {
+      commitments.phoneWhereAny(b, 'customer_phone', phones);
+      b.orWhereIn('customer_id', commitments.phoneWhereAny(conn('customers'), 'phone', phones).select('id'));
+    })
+    .select(...commitments.HANDOFF_COLS(conn), 'customer_phone', 'service_interest', 'estimate_data',
+      conn.raw('(SELECT cu.phone FROM customers cu WHERE cu.id = estimates.customer_id) AS owner_phone'));
   for (const x of unlinked) {
-    if (sent.some((e) => phoneKey(e.customer_phone) === x.phone && commitments.witnessAt(e, x.since) && fits(x, e))) done.add(x.r.id);
+    if (sent.some((e) => (phoneKey(e.customer_phone) === x.phone || phoneKey(e.owner_phone) === x.phone) && commitments.witnessAt(e, x.since) && fits(x, e))) done.add(x.r.id);
   }
   return done;
 }

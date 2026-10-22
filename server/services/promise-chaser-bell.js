@@ -323,6 +323,45 @@ async function findPromiseToRing(call, now) {
   return { promise, renewedAt: promise.__renewedAt, ...describePromise(promise) };
 }
 
+// Placeholder first names intake writes when it has no real name.
+const PLACEHOLDER_NAME = /^(unknown|caller|lead|customer|new|no name|anonymous)$/i;
+const fullName = (row, first = 'first_name', last = 'last_name') => {
+  const name = [row?.[first], row?.[last]].filter(Boolean).join(' ').trim();
+  return name && !PLACEHOLDER_NAME.test(name) ? name : null;
+};
+
+// Who is calling back, for the headline (owner 2026-10-21: "the headline
+// should have the customer name"). The call's own customer first; for a call
+// with no customer link, the NUMBER: a customer record carrying it (several
+// may — duplicates are common — so the newest one with a real name), else
+// the newest estimate, then the newest lead, on that number. Null when
+// nothing on the number has a name; the copy then falls back to the number.
+// A failed lookup never blocks the bell.
+async function resolveCallerName(call) {
+  try {
+    if (call.customer_id) {
+      const linked = await db('customers').where('id', call.customer_id).first('first_name', 'last_name');
+      const name = fullName(linked);
+      if (name) return name;
+    }
+    const key = commitments.phoneDigits(call.from_phone);
+    if (!key || key.length < 10) return null;
+    const phones = [call.from_phone];
+    const customers = await commitments.phoneWhereAny(db('customers'), 'phone', phones)
+      .whereNull('deleted_at').orderBy('created_at', 'desc').limit(10).select('first_name', 'last_name');
+    for (const c of customers) { const name = fullName(c); if (name) return name; }
+    const estimates = await commitments.phoneWhereAny(db('estimates'), 'customer_phone', phones)
+      .whereRaw("COALESCE(customer_name, '') <> ''").orderBy('created_at', 'desc').limit(10).select('customer_name');
+    for (const e of estimates) { const name = fullName(e, 'customer_name', null); if (name) return name; }
+    const leads = await commitments.phoneWhereAny(db('leads'), 'phone', phones)
+      .whereNull('deleted_at').orderBy('created_at', 'desc').limit(10).select('first_name', 'last_name');
+    for (const l of leads) { const name = fullName(l); if (name) return name; }
+  } catch (err) {
+    logger.warn(`[promise-chaser-bell] caller name lookup failed for call ${call.id}: ${err.message}`);
+  }
+  return null;
+}
+
 // Dispatches the alert for one eligible call, if any open Waves promise
 // still applies and hasn't already rung today. This file owns no claim,
 // lease, or tracking state of its own — the bell row itself (checked by
@@ -397,9 +436,7 @@ async function ringForCall(call, now = new Date()) {
   const alreadyDelivered = await db('promise_chaser_deliveries').where({ dedupe_key: dedupeKey }).first('dedupe_key');
   if (alreadyDelivered) return false;
 
-  const customer = call.customer_id
-    ? await db('customers').where('id', call.customer_id).first('first_name', 'last_name')
-    : null;
+  const callerName = await resolveCallerName(call);
 
   // Re-checked immediately before dispatch: staff may dismiss, fulfill, or
   // close the commitment — or a manual text, a qualifying outbound call, or
@@ -523,7 +560,7 @@ async function ringForCall(call, now = new Date()) {
   const { triggerNotification } = require('./notification-triggers');
   const stats = await triggerNotification('promise_chaser', {
     customerId: call.customer_id || null,
-    name: [customer?.first_name, customer?.last_name].filter(Boolean).join(' ') || null,
+    name: callerName,
     phone: call.from_phone,
     callLogId: call.id,
     commitmentId: promise.id,
