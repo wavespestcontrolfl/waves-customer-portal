@@ -130,11 +130,14 @@ async function invoicePlan(customerId, payerId) {
     ? await db('invoices').whereIn('id', [...movingIds, ...packetIds]).orderBy('invoice_number')
       .select('id', 'invoice_number', 'total', 'status', 'credit_applied', 'visit_completion_packet_id')
     : [];
-  // Unpaid self-pay invoices with no visit link at all: nothing resolves a payer for them, so they stay.
-  const staying = await db('invoices').where({ customer_id: customerId }).whereNotIn('status', SETTLED)
-    .whereNull('payer_id').whereNull('payer_statement_id').whereNull('visit_completion_packet_id')
-    .whereNull('scheduled_service_id').whereNull('service_record_id')
-    .orderBy('invoice_number').select('id', 'invoice_number', 'total', 'status');
+  // Every other unpaid self-pay invoice stays with the customer: one with no visit link (nothing resolves a payer
+  // for it), or one whose visit keeps its own Bill-To (pinned to the customer).
+  const movingSet = new Set(moving.map((inv) => String(inv.id)));
+  const staying = (await db('invoices').where({ customer_id: customerId }).whereNotIn('status', SETTLED)
+    .whereNull('payer_id').whereNull('payer_statement_id')
+    .where((q) => q.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%'))
+    .orderBy('invoice_number').select('id', 'invoice_number', 'total', 'status'))
+    .filter((inv) => !movingSet.has(String(inv.id)));
   return { moving, staying };
 }
 
@@ -182,12 +185,12 @@ async function buildPlan(input) {
       : null,
     moving.length
       ? { kind: 'billing', text: `${moving.length === 1 ? '1 unpaid invoice moves' : `${moving.length} unpaid invoices move`} to ${payerName} now. The customer's pay link for ${moving.length === 1 ? 'it' : 'them'} stops working and reminders pause.` }
-      : { kind: 'billing', text: 'No unpaid invoice moves: none is tied to a visit.' },
+      : { kind: 'billing', text: 'No unpaid invoice moves to the payer.' },
     // Every moving invoice is listed: Confirm moves all of them.
     ...moving.map((inv) => ({ kind: 'billing', text: `Moves: ${invoiceLine(inv)}` })),
     credit > 0.004 ? { kind: 'billing', text: `${money(credit)} of account credit applied to those invoices goes back to the customer's balance.` } : null,
     staying.length
-      ? { kind: 'billing', text: `${staying.length} unpaid invoice${staying.length === 1 ? '' : 's'} with no visit stay${staying.length === 1 ? 's' : ''} billed to the customer: ${staying.map(invoiceLine).join(', ')}.` }
+      ? { kind: 'billing', text: `${staying.length} unpaid invoice${staying.length === 1 ? '' : 's'} stay${staying.length === 1 ? 's' : ''} billed to the customer (no visit, or a visit pinned to the customer): ${staying.map(invoiceLine).join(', ')}.` }
       : null,
     { kind: 'billing', text: 'Any open pay-page session on the customer\'s invoices is cancelled. Nothing is charged or refunded.' },
     { kind: 'comms', text: 'Nothing is sent: no text, email or call goes to the customer or the payer.' },

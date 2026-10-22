@@ -87,6 +87,17 @@ const ADMIN = { isAdmin: true, technicianId: null };
     expect(await db('invoices').where({ id: manualId }).first()).toMatchObject({ payer_id: null, scheduled_send_error: null });
   });
 
+  test('an invoice whose visit is pinned to the customer is listed as staying, not moving', async () => {
+    const payerId = await payer();
+    const { customerId, linkedId, manualId } = await selfPayCustomer();
+    await db('scheduled_services').where({ customer_id: customerId }).update({ self_pay_override: true });
+    const linked = await db('invoices').where({ id: linkedId }).first('invoice_number');
+    const manual = await db('invoices').where({ id: manualId }).first('invoice_number');
+    const preview = await executeBillToTool('set_customer_bill_to', { customer_id: customerId, payer_id: String(payerId) }, ADMIN);
+    expect(preview.invoices_moving).toEqual([]);
+    expect(preview.invoices_staying.sort()).toEqual([linked.invoice_number, manual.invoice_number].sort());
+  });
+
   test('an invoice that would move but was not on the card rolls the whole edit back', async () => {
     const payerId = await payer();
     const { customerId, linkedId } = await selfPayCustomer();

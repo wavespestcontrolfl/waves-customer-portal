@@ -157,7 +157,7 @@ describe('the preview', () => {
     expect(text).toMatch(/1 unpaid invoice moves to Synthetic Property Co now/);
     expect(text).toMatch(/Moves: WPC-2099-0001 \$90\.00 \(sent\)/);
     expect(text).toMatch(/\$10\.00 of account credit applied to those invoices goes back/);
-    expect(text).toMatch(/1 unpaid invoice with no visit stays billed to the customer: WPC-2099-0002/);
+    expect(text).toMatch(/1 unpaid invoice stays billed to the customer \(no visit, or a visit pinned to the customer\): WPC-2099-0002/);
     expect(text).toMatch(/Nothing is sent/);
     // The withdrawal module's own owner answer, with the pending customer write laid over it.
     expect(mockTransitions).toHaveBeenCalledWith(expect.anything(), { customerId: CUST },
@@ -175,7 +175,7 @@ describe('the preview', () => {
     const card = await preview();
     const text = card.effects.map((e) => e.text).join('\n');
     expect(text).toMatch(/2 upcoming visits keep their own Bill-To/);
-    expect(text).toMatch(/No unpaid invoice moves/);
+    expect(text).toMatch(/No unpaid invoice moves to the payer/);
     expect(card.invoices_moving).toEqual([]);
   });
 
