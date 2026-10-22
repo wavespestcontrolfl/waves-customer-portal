@@ -585,18 +585,23 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
     });
   }
 
+  const persistentGaps = new Map(); // `${tool}|${code}` -> { tool, code }: gaps a partial success worked around
   function trackTail(name, result, failed, meta = {}) {
     lastTool = cleanTool(name) || lastTool;
     if (meta.round !== tail.round) tail = { round: meta.round, refusals: new Map(), wroteTools: new Set() };
     if (meta.wrote === true) tail.wroteTools.add(name);
-    // A nested gap is a partial success: the same call also proposed or wrote
-    // (wrote:true), so it is kept apart from a refusal the tool recovered from.
-    // Nested gaps ride a failed result too (an all-skipped batch lists every kind
-    // it skipped); a code shared with the top-level one is stored once.
-    if (failed) {
-      const top = recordableRefusalCode(result);
-      if (top) tail.refusals.set(`${name}|${top}`, { tool: name, code: top, nested: false });
+    // A nested gap on a SUCCESSFUL result is a partial success (the same call
+    // also proposed or wrote): it stands whatever the model does next, so it
+    // goes to the per-request list, not the per-round tail (Codex #6371 r22).
+    if (!failed) {
+      for (const code of nestedGapCodes(result)) persistentGaps.set(`${name}|${code}`, { tool: name, code });
+      return;
     }
+    // A FAILED result's top-level refusal keeps the tail logic. Its nested list
+    // (an all-skipped batch lists every kind it skipped) rides with it; a code
+    // shared with the top-level one is stored once.
+    const top = recordableRefusalCode(result);
+    if (top) tail.refusals.set(`${name}|${top}`, { tool: name, code: top, nested: false });
     for (const code of nestedGapCodes(result)) tail.refusals.set(`${name}|${code}`, { tool: name, code, nested: true });
   }
 
@@ -697,6 +702,10 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
     for (const { tool, code, nested } of tail.refusals.values()) {
       if (!nested && tail.wroteTools.has(tool)) continue;
       signals.push(code === 'capability_unimplemented' ? capabilitySignal(tool) : blockedSignal({ source, tool, code }));
+    }
+    // Gaps a successful call worked around, once each per request (tool + code).
+    for (const [key, { tool, code }] of persistentGaps) {
+      if (!tail.refusals.has(key)) signals.push(blockedSignal({ source, tool, code }));
     }
     return signals;
   }

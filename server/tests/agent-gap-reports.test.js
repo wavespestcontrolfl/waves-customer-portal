@@ -814,6 +814,24 @@ describe('agent-gap-reports', () => {
         expect(insertedRows.map((row) => row.summary.match(/\((\w+)\)/)[1]).sort()).toEqual(['address_conflict', 'grouped_visit_move_unsupported']);
       });
 
+      test('a gap a partial success worked around survives later rounds: move, then another tool, then the answer (Codex #6371 r22)', async () => {
+        const collector = collectorFor();
+        collector.toolResult('move_stops_to_day', SUCCESS, false, { round: 0, wrote: true });
+        collector.toolResult('get_customer_detail', { customer: { id: 'c1' } }, false, { round: 1 });
+        await collector.flush({ reply: 'Moved the others; one grouped stop stayed.' });
+        expect(insertedRows).toHaveLength(1);
+        expect(insertedRows[0]).toMatchObject({ kind: 'blocked', closest_tool: 'move_stops_to_day' });
+        expect(insertedRows[0].summary).toContain('grouped_visit_move_unsupported');
+      });
+
+      test('the same gap in two rounds is one row', async () => {
+        const collector = collectorFor();
+        collector.toolResult('move_stops_to_day', SUCCESS, false, { round: 0, wrote: true });
+        collector.toolResult('move_stops_to_day', SUCCESS, false, { round: 2, wrote: true });
+        await collector.flush({ reply: 'Done.' });
+        expect(insertedRows).toHaveLength(1);
+      });
+
       test('a FAILED result lists every skipped kind; the top-level code and the nested one are stored once (Codex #6371 r15)', async () => {
         const collector = collectorFor();
         const failedBatch = { error: "The bar can't move these from here yet.", code: 'grouped_visit_move_unsupported',
