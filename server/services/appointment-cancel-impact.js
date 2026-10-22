@@ -239,23 +239,10 @@ function computeRowFingerprint(row) {
   return crypto.createHash('sha256').update(stableStringify(picked)).digest('hex');
 }
 
-async function loadAppointmentFacts(scheduledServiceId) {
-  // The WHOLE row (Codex round-2 through round-4 P1s — see
-  // computeRowFingerprint above), read EXACTLY as tools.js's cancelAppointment
-  // re-reads it under its FOR UPDATE lock — trx('scheduled_services')
-  // .where('id').first() — so the two fingerprints hash the same column set.
-  // Customer columns come from a SEPARATE read: joined into this query they
-  // would ride into the proposal-side hash but never the locked one, and
-  // every confirm would refuse as drifted.
-  const serviceRow = await db('scheduled_services').where('id', scheduledServiceId).first();
-  if (!serviceRow) return null;
-  const customer = serviceRow.customer_id
-    ? await db('customers').where('id', serviceRow.customer_id)
-      .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip')
-    : null;
-  // Fallback address source ONLY (effectiveAddress above) — a legacy row with
-  // no stamped service_address_* uses the customer's current primary address.
-  const row = {
+// Fallback address source ONLY (effectiveAddress above) - a legacy row with no stamped service_address_* uses the
+// customer's current primary address. The customer's name and address ride alongside the whole service row.
+function rowWithCustomerColumns(serviceRow, customer) {
+  return {
     ...serviceRow,
     first_name: customer?.first_name ?? null,
     last_name: customer?.last_name ?? null,
@@ -265,30 +252,52 @@ async function loadAppointmentFacts(scheduledServiceId) {
     customer_state: customer?.state ?? null,
     customer_zip: customer?.zip ?? null,
   };
+}
+
+// The human-readable facts the card shows and cancelImpactsMatch compares.
+function appointmentFactsFromRow(row) {
   const customerName = [row.first_name, row.last_name].filter(Boolean).join(' ').trim() || null;
   return {
-    facts: {
-      id: row.id,
-      status: row.status || null,
-      scheduled_date: row.scheduled_date ? dateOnlyString(row.scheduled_date) : null,
-      service_type: row.service_type || null,
-      customer_name: customerName,
-      // Human-readable arrival window (Codex round-3/round-4 P1) — see
-      // formatAppointmentWindow above. Pinned automatically: part of the
-      // impact object cancelImpactsMatch already compares.
-      window: formatAppointmentWindow(row),
-      // The visit's effective service address (Codex round-4 P1) — see
-      // effectiveAddress above. Also pinned automatically: a
-      // switch_appointment_property mid-pending changes property_id (and
-      // the stamped columns), which changes this AND the row fingerprint.
-      address: effectiveAddress(row),
-    },
+    id: row.id,
+    status: row.status || null,
+    scheduled_date: row.scheduled_date ? dateOnlyString(row.scheduled_date) : null,
+    service_type: row.service_type || null,
+    customer_name: customerName,
+    // Human-readable arrival window (Codex round-3/round-4 P1) - see
+    // formatAppointmentWindow above. Pinned automatically: part of the
+    // impact object cancelImpactsMatch already compares.
+    window: formatAppointmentWindow(row),
+    // The visit's effective service address (Codex round-4 P1) - see
+    // effectiveAddress above. Also pinned automatically: a
+    // switch_appointment_property mid-pending changes property_id (and
+    // the stamped columns), which changes this AND the row fingerprint.
+    address: effectiveAddress(row),
+  };
+}
+
+async function loadAppointmentFacts(scheduledServiceId) {
+  // The WHOLE row (Codex round-2 through round-4 P1s - see
+  // computeRowFingerprint above), read EXACTLY as tools.js's cancelAppointment
+  // re-reads it under its FOR UPDATE lock - trx('scheduled_services')
+  // .where('id').first() - so the two fingerprints hash the same column set.
+  // Customer columns come from a SEPARATE read: joined into this query they
+  // would ride into the proposal-side hash but never the locked one, and
+  // every confirm would refuse as drifted.
+  const serviceRow = await db('scheduled_services').where('id', scheduledServiceId).first();
+  if (!serviceRow) return null;
+  const customer = serviceRow.customer_id
+    ? await db('customers').where('id', serviceRow.customer_id)
+      .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip')
+    : null;
+  const row = rowWithCustomerColumns(serviceRow, customer);
+  return {
+    facts: appointmentFactsFromRow(row),
     // A hash, not the raw row: keeps the impact object's own shape small
     // (the fingerprint is what the drift check needs, not a second copy of
     // every column's current value) while still covering the whole row.
     identityFingerprint: computeRowFingerprint(serviceRow),
     // Only for a legacy/unstamped row (see legacyAddressFingerprint's own
-    // header) — null when the row carries its own stamped service address,
+    // header) - null when the row carries its own stamped service address,
     // since that case is already fully covered by identityFingerprint.
     addressFingerprint: row.service_address_line1 ? null : legacyAddressFingerprint({
       line1: row.customer_address_line1, line2: row.customer_address_line2,
