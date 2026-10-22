@@ -12,7 +12,7 @@ const {
 } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
 const { mergeCustomersEnabled, deleteDuplicateCustomerEnabled } = require('./customer-lifecycle-tools');
-const { ibAcceptEstimateLive, ibCreateInvoiceLive, ibLeadConvertLive, ibRecordPaymentLive, ibVoidInvoiceLive, ibInvoiceRemindersLive, ibPaymentPlanLive, ibSetBillToLive } = require('../../config/feature-gates');
+const { ibAcceptEstimateLive, ibCreateInvoiceLive, ibLeadConvertLive, ibRecordPaymentLive, ibVoidInvoiceLive, ibInvoiceEditsLive, ibInvoiceRemindersLive, ibPaymentPlanLive, ibSetBillToLive } = require('../../config/feature-gates');
 const { invoiceActionsLive } = require('./invoice-action-tools');
 const { repriceVisitsLive } = require('./reprice-visits-tools');
 const { adminReadLive } = require('./admin-read-tools');
@@ -75,6 +75,7 @@ const MODULES = [
   ['record-payment-tools', 'RECORD_PAYMENT_TOOLS', 'executeRecordPaymentTool'],
   ['lead-convert-tools', 'LEAD_CONVERT_TOOLS', 'executeLeadConvertTool'],
   ['void-invoice-tools', 'VOID_INVOICE_TOOLS', 'executeVoidInvoiceTool'],
+  ['invoice-edit-tools', 'INVOICE_EDIT_TOOLS', 'executeInvoiceEditTool'],
   ['invoice-reminder-tools', 'INVOICE_REMINDER_TOOLS', 'executeInvoiceReminderTool'],
   ['payment-plan-tools', 'PAYMENT_PLAN_TOOLS', 'executePaymentPlanTool'],
   ['create-invoice-tools', 'CREATE_INVOICE_TOOLS', 'executeCreateInvoiceTool'],
@@ -146,6 +147,10 @@ const GATED_ACTIONS = {
   record_payment: () => ibRecordPaymentLive(),
   convert_lead: () => ibLeadConvertLive(),
   void_invoice: () => ibVoidInvoiceLive(),
+  edit_invoice: () => ibInvoiceEditsLive(),
+  archive_invoice: () => ibInvoiceEditsLive(),
+  unarchive_invoice: () => ibInvoiceEditsLive(),
+  unvoid_invoice: () => ibInvoiceEditsLive(),
   pause_invoice_reminders: () => ibInvoiceRemindersLive(),
   resume_invoice_reminders: () => ibInvoiceRemindersLive(),
   stop_invoice_reminders: () => ibInvoiceRemindersLive(),
@@ -277,6 +282,8 @@ function pageTools(context, scope) {
   const common = new Set(['query_customers', 'get_customer_detail', 'get_schedule_view', 'query_leads', 'list_gap_reports', 'needs_me', ...EVERY_PAGE_TOOL_NAMES, ...(PAGE_EXTRA_TOOL_NAMES[context] || [])]);
   // send_invoice (domain customers) also rides the Invoices / Revenue page and dashboard (owner 2026-10-07).
   if (context === 'revenue' || context === 'dashboard') { common.add('send_invoice'); common.add('record_payment'); common.add('create_invoice'); }
+  // The Invoices page's edit-type actions (GATE_IB_INVOICE_EDITS) ride the Invoices / Revenue page and dashboard too.
+  if (context === 'revenue' || context === 'dashboard') for (const name of ['edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice']) common.add(name);
   // reprice_future_visits (domain schedule) also rides the Customers page and dashboard (owner 2026-10-07).
   if (context === 'customers' || context === 'dashboard') common.add('reprice_future_visits');
   return [...actions.values()]

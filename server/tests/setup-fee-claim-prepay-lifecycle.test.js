@@ -1413,7 +1413,7 @@ describe('r47 wiring — commercial bait, anchor-less revival sweep, unvoid reti
 
   test('unvoid retires the restored setup state UNCONDITIONALLY — never gated on the editable line text (codex #3591 r74 P1)', () => {
     const invoiceSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'invoice.js'), 'utf8');
-    const unvoidAt = invoiceSrc.indexOf('async unvoidInvoice(id) {');
+    const unvoidAt = invoiceSrc.indexOf('async unvoidInvoice(id, { expected } = {}) {');
     const callAt = invoiceSrc.indexOf('retireRodentSetupObligationForReinstatedInvoice(trx, id, { strict: true })', unvoidAt);
     expect(unvoidAt).toBeGreaterThan(-1);
     expect(callAt).toBeGreaterThan(unvoidAt);
