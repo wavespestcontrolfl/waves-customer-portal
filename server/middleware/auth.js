@@ -375,6 +375,7 @@ async function createContactRefreshSession(customerId, accountId, contactKey) {
 // not revive it (codex #6363 r6 P2); a gate flip only refuses, so sessions
 // survive it. Returns the refusal, or null when the rotation may proceed.
 async function contactRotationRefusal(trx, customer, decoded, options) {
+  if (!decoded.contactKey) return null;
   const refused = { ok: false, code: 'INVALID_REFRESH_TOKEN' };
   if (!contactLoginLive()) return refused;
   if (!customer || customer.active !== true || !contactSessionFor(customer, decoded.contactKey)) {
@@ -400,6 +401,70 @@ async function contactRotationRefusal(trx, customer, decoded, options) {
 function rotationCustomerRead(trx, decoded) {
   const query = trx('customers').where({ id: decoded.customerId }).whereNull('deleted_at');
   return (decoded.contactKey ? query.forUpdate() : query).first();
+}
+
+// The customers row the NEXT token is minted for: the current one, or the
+// requested profile when it is an active sibling on the same account. Null =
+// the switch is refused.
+async function rotationTargetCustomer(trx, customer, accountId, options) {
+  if (!options.targetCustomerId || String(options.targetCustomerId) === String(customer.id)) return customer;
+  const target = await trx('customers')
+    .where({ id: options.targetCustomerId, active: true })
+    .whereNull('deleted_at')
+    .first();
+  return target && String(accountIdForCustomer(target)) === String(accountId) ? target : null;
+}
+
+// The refresh row this exchange consumes, locked. A legacy signed token (no
+// jti/family) gets one compatible exchange: its SHA-256 hash becomes the
+// durable row, so a second exchange reads that row back consumed and is
+// detected as replay instead of starting a new family.
+async function lockRotationRow(trx, decoded, suppliedHash, accountId) {
+  if (decoded.jti && decoded.familyId) {
+    return trx(REFRESH_TABLE).where({ jti: decoded.jti, family_id: decoded.familyId }).forUpdate().first();
+  }
+  const [inserted] = await trx(REFRESH_TABLE).insert({
+    jti: suppliedHash,
+    family_id: crypto.randomUUID(),
+    customer_id: decoded.customerId,
+    account_id: accountId,
+    token_hash: suppliedHash,
+    expires_at: new Date(decoded.exp * 1000),
+  }).onConflict('token_hash').ignore().returning('*');
+  return inserted || trx(REFRESH_TABLE).where({ token_hash: suppliedHash }).forUpdate().first();
+}
+
+// A row the supplied token may not consume: missing, a hash that does not
+// match it, or one minted for another customer or account.
+function rotationRowMismatch(row, suppliedHash, decoded, accountId) {
+  return !row || !tokenHashMatches(row.token_hash, suppliedHash)
+    || String(row.customer_id) !== String(decoded.customerId)
+    || (row.account_id && String(row.account_id) !== String(accountId));
+}
+
+// Verdict on an ALREADY-CONSUMED row. Two same-origin tabs can submit the same
+// token before the first tab publishes its replacement to shared storage: the
+// second caller gets no credential, but a brief signal to adopt the pair the
+// winner published. Any later reuse is theft-like and revokes the whole
+// family — rows may already carry revoked_at from a prior replay or property
+// switch, and replay must still revoke the descendants.
+async function consumedRowVerdict(trx, row, now) {
+  const consumedAgoMs = now.getTime() - new Date(row.consumed_at).getTime();
+  if (consumedAgoMs >= 0 && consumedAgoMs <= CONCURRENT_ROTATION_GRACE_MS && row.replaced_by_jti) {
+    const liveReplacement = await trx(REFRESH_TABLE)
+      .where({ jti: row.replaced_by_jti, family_id: row.family_id })
+      .whereNull('consumed_at')
+      .whereNull('revoked_at')
+      .first();
+    if (liveReplacement && new Date(liveReplacement.expires_at) > now) {
+      return { ok: false, code: 'REFRESH_TOKEN_ALREADY_ROTATED', familyId: row.family_id };
+    }
+  }
+  await trx(REFRESH_TABLE)
+    .where({ family_id: row.family_id })
+    .whereNull('revoked_at')
+    .update({ revoked_at: now, revoke_reason: 'replay_detected', updated_at: now });
+  return { ok: false, code: 'REFRESH_TOKEN_REUSED', familyId: row.family_id };
 }
 
 /**
@@ -434,7 +499,7 @@ async function rotateRefreshSession(refreshToken, options = {}) {
     // exchange — a token kept through a deactivation must not rotate again
     // once the account is reactivated (codex #6363 r12 P2).
     const contactKey = decoded.contactKey || null;
-    const contactRefusal = contactKey ? await contactRotationRefusal(trx, customer, decoded, options) : null;
+    const contactRefusal = await contactRotationRefusal(trx, customer, decoded, options);
     if (contactRefusal) return contactRefusal;
     if (!sessionCustomerAdmitted(customer)) return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
 
@@ -446,16 +511,8 @@ async function rotateRefreshSession(refreshToken, options = {}) {
       return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
     }
 
-    let nextCustomer = customer;
-    if (options.targetCustomerId && String(options.targetCustomerId) !== String(customer.id)) {
-      nextCustomer = await trx('customers')
-        .where({ id: options.targetCustomerId, active: true })
-        .whereNull('deleted_at')
-        .first();
-      if (!nextCustomer || String(accountIdForCustomer(nextCustomer)) !== String(accountId)) {
-        return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
-      }
-    }
+    const nextCustomer = await rotationTargetCustomer(trx, customer, accountId, options);
+    if (!nextCustomer) return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
     // Selected saved property (GATE_APP_PROPERTY_SCOPE). A same-profile
     // rotation forwards the claim the family was minted with; a profile
     // switch drops it unless the switch names a target property. Never
@@ -466,68 +523,15 @@ async function rotateRefreshSession(refreshToken, options = {}) {
       ? (options.targetPropertyId || null)
       : (String(nextCustomer.id) === String(customer.id) ? (decoded.propertyId || null) : null);
 
-    let row;
-    if (decoded.jti && decoded.familyId) {
-      row = await trx(REFRESH_TABLE)
-        .where({ jti: decoded.jti, family_id: decoded.familyId })
-        .forUpdate()
-        .first();
-    } else {
-      const legacyFamilyId = crypto.randomUUID();
-      const [inserted] = await trx(REFRESH_TABLE).insert({
-        jti: suppliedHash,
-        family_id: legacyFamilyId,
-        customer_id: decoded.customerId,
-        account_id: accountId,
-        token_hash: suppliedHash,
-        expires_at: new Date(decoded.exp * 1000),
-      }).onConflict('token_hash').ignore().returning('*');
-      row = inserted || await trx(REFRESH_TABLE)
-        .where({ token_hash: suppliedHash })
-        .forUpdate()
-        .first();
-    }
-
-    if (!row || !tokenHashMatches(row.token_hash, suppliedHash)) {
-      return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
-    }
-    if (String(row.customer_id) !== String(decoded.customerId)
-      || (row.account_id && String(row.account_id) !== String(accountId))) {
+    const row = await lockRotationRow(trx, decoded, suppliedHash, accountId);
+    if (rotationRowMismatch(row, suppliedHash, decoded, accountId)) {
       return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
     }
 
     const now = new Date();
-    // Check consumption first: rows may already carry revoked_at from a prior
-    // replay or property switch, but replay must still revoke descendants.
-    if (row.consumed_at) {
-      // Two same-origin tabs can submit the same token before the first tab
-      // publishes its replacement to shared storage. Do not hand the second
-      // caller any credential, but give it a brief signal to adopt the pair
-      // published by the winner. A later reuse remains theft-like and revokes
-      // the entire family below.
-      const consumedAgoMs = now.getTime() - new Date(row.consumed_at).getTime();
-      if (consumedAgoMs >= 0
-        && consumedAgoMs <= CONCURRENT_ROTATION_GRACE_MS
-        && row.replaced_by_jti) {
-        const liveReplacement = await trx(REFRESH_TABLE)
-          .where({ jti: row.replaced_by_jti, family_id: row.family_id })
-          .whereNull('consumed_at')
-          .whereNull('revoked_at')
-          .first();
-        if (liveReplacement && new Date(liveReplacement.expires_at) > now) {
-          return {
-            ok: false,
-            code: 'REFRESH_TOKEN_ALREADY_ROTATED',
-            familyId: row.family_id,
-          };
-        }
-      }
-      await trx(REFRESH_TABLE)
-        .where({ family_id: row.family_id })
-        .whereNull('revoked_at')
-        .update({ revoked_at: now, revoke_reason: 'replay_detected', updated_at: now });
-      return { ok: false, code: 'REFRESH_TOKEN_REUSED', familyId: row.family_id };
-    }
+    // Consumption is checked before revocation: replay must still revoke the
+    // descendants of a row a prior replay or property switch already revoked.
+    if (row.consumed_at) return consumedRowVerdict(trx, row, now);
     if (row.revoked_at || new Date(row.expires_at) <= now) {
       return { ok: false, code: 'REFRESH_SESSION_REVOKED' };
     }

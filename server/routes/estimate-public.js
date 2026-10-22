@@ -15817,7 +15817,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                 purpose: 'estimate_followup',
                 customerId: customerId || undefined,
                 estimateId: estimate.id,
-                identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
+                // A slot contact's number is classified as such (codex
+                // #6363 r35 P2) so the sender re-reads their master switch
+                // at the provider handoff, as the confirmation leg does.
+                identityTrustLevel: customerId
+                  ? await require('../services/contact-notification-prefs').contactPhoneSmsTrust(customerId, acceptSmsPhone)
+                  : 'estimate_token_verified',
                 consentBasis: customerId ? undefined : {
                   status: 'transactional_allowed',
                   source: 'estimate_token_acceptance',

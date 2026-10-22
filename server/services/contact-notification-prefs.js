@@ -423,6 +423,27 @@ async function contactPhoneDeclinesText(customerId, phone, column = null, { dbh 
   return (await filterContactsByOwnPrefs([{ phone: slot.phone, role: slot.role }], customerId, column, { channel: 'sms', dbh })).length === 0;
 }
 
+// Identity trust for a single-number text addressed to the estimate's own
+// phone (estimate-public.js accept flow; codex #6363 r35 P2): a slot
+// contact's number is 'service_contact_authorized', so the sender's provider
+// boundary re-reads that contact's choices at the handoff; the holder's own
+// number, a number in no slot, or the gate off is 'phone_matches_customer'.
+// An unreadable row classifies as a contact — the boundary then re-asks (and
+// holds if that read fails too) instead of skipping the re-check.
+async function contactPhoneSmsTrust(customerId, phone, { dbh = db } = {}) {
+  const key = phoneKey(phone);
+  if (!contactPrefsLive() || !customerId || !key) return 'phone_matches_customer';
+  let customer;
+  try {
+    customer = await dbh('customers').where({ id: customerId }).first();
+  } catch (err) {
+    logger.warn(`[contact-prefs] customer read failed (${err.message}) — treating ${key.slice(-4)} as a contact number`);
+    return 'service_contact_authorized';
+  }
+  return require('./customer-contact').findServiceContactSlotByPhoneKey(customer, key)
+    ? 'service_contact_authorized' : 'phone_matches_customer';
+}
+
 // Service-report EMAIL recipient as of the provider handoff (codex #6363 r24 +
 // r25 P2): the recipient list was resolved before the report data, credit read
 // and PDF render, so the slots are re-read NOW — a service-contact recipient
@@ -655,6 +676,7 @@ module.exports = {
   contactDeclinesChannel,
   contactAddressStillAllowed,
   contactPhoneDeclinesText,
+  contactPhoneSmsTrust,
   reportEmailRecipientStillAllowed,
   contactEmailDeclines,
   contactEmailOffPhoneKeys,

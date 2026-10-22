@@ -1452,6 +1452,15 @@ function phoneLast10(phone) {
   return digits.length >= 10 ? digits.slice(-10) : '';
 }
 
+// The contact families on a row are re-judged after a save that rewrites a
+// slot field OR the holder's own number (codex #6363 r35 P2): a number the
+// holder now owns is no contact's — contactSessionFor refuses it — so the
+// family minted for it ends with this edit, not on some later slot save.
+function contactIdentityEdited(updates, before) {
+  return SERVICE_CONTACT_SLOT_FIELDS.flat().some((field) => Object.prototype.hasOwnProperty.call(updates, field))
+    || (updates.phone !== undefined && phoneLast10(updates.phone) !== phoneLast10(before.phone));
+}
+
 function cleanText(value) {
   if (value === undefined || value === null) return '';
   return String(value).trim();
@@ -4358,8 +4367,9 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // mutation as the portal's contact save (codex #6363 r7 P2): a
           // removed phone's own notification choices and portal sessions go
           // with it, a kept phone that lost its email loses its email-only
-          // choices. Contact login, GATE_CONTACT_LOGIN.
-          if (SERVICE_CONTACT_SLOT_FIELDS.flat().some((field) => Object.prototype.hasOwnProperty.call(updates, field))) {
+          // choices; a holder-phone change ends the family of a number the
+          // holder now owns. Contact login, GATE_CONTACT_LOGIN.
+          if (contactIdentityEdited(updates, lockedBefore)) {
             const slotsAfter = require('../services/customer-contact').getServiceContactSlots(lockedAfter)
               .filter((slot) => slot.phone || slot.email).map((slot) => ({ phone: slot.phone, email: slot.email }));
             await require('../services/contact-notification-prefs').pruneContactNotificationPrefs(trx, req.params.id, slotsAfter);

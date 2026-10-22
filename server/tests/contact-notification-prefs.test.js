@@ -417,6 +417,26 @@ describe('contactPhoneDeclinesText (single-number texts addressed to the estimat
     delete process.env.GATE_CONTACT_LOGIN;
     expect(await ContactPrefs.contactPhoneDeclinesText('cust-1', '+19415559999', 'tech_en_route', opts)).toBe(false);
   });
+
+  // The accept flow's booking-link text labels its trust from the same read
+  // (codex r35): a slot contact's number is service_contact_authorized, so the
+  // sender's provider boundary re-reads that contact's switch at the handoff.
+  test('contactPhoneSmsTrust: a slot number is service_contact_authorized; the holder\'s, an unknown number, no customer and the gate off are phone_matches_customer; an unreadable row classifies as a contact', async () => {
+    expect(await ContactPrefs.contactPhoneSmsTrust('cust-1', '+19415550202')).toBe('service_contact_authorized');
+    expect(await ContactPrefs.contactPhoneSmsTrust('cust-1', '(941) 555-0303')).toBe('service_contact_authorized');
+    expect(await ContactPrefs.contactPhoneSmsTrust('cust-1', '+19415550101')).toBe('phone_matches_customer');
+    expect(await ContactPrefs.contactPhoneSmsTrust('cust-1', '+19415559999')).toBe('phone_matches_customer');
+    expect(await ContactPrefs.contactPhoneSmsTrust(null, '+19415550202')).toBe('phone_matches_customer');
+    expect(await ContactPrefs.contactPhoneSmsTrust('cust-1', '')).toBe('phone_matches_customer');
+    customer = null;
+    expect(await ContactPrefs.contactPhoneSmsTrust('cust-1', '+19415550202')).toBe('phone_matches_customer');
+    customer = { ...CUSTOMER };
+    failWith = new Error('timeout');
+    expect(await ContactPrefs.contactPhoneSmsTrust('cust-1', '+19415550202')).toBe('service_contact_authorized');
+    failWith = null;
+    delete process.env.GATE_CONTACT_LOGIN;
+    expect(await ContactPrefs.contactPhoneSmsTrust('cust-1', '+19415550202')).toBe('phone_matches_customer');
+  });
 });
 
 describe('reportEmailRecipientStillAllowed (service-report email, as of the provider handoff)', () => {
