@@ -35,7 +35,7 @@
  * email. reschedule_appointment and assign_technician post tech-facing
  * notices only.
  */
-const { gateEnvValue } = require('../../config/feature-gates');
+const { gateEnvValue, ibOwnerDirectTaintAllReadsLive } = require('../../config/feature-gates');
 const { changesAddress } = require('./address-tools');
 const { ibFullAccess } = require('./ib-access');
 const { executionOutcome } = require('./outcomes');
@@ -151,6 +151,9 @@ function directEditAllowed(toolName, input = {}, preview = null) {
     if (!updates || typeof updates !== 'object' || Array.isArray(updates)) return false;
     const keys = Object.keys(updates);
     if (!keys.length || !keys.every(key => DIRECT_CUSTOMER_FIELDS.has(key))) return false;
+    // customers.phone is the customer's portal login key: with the taint gate
+    // on, a phone change always shows its card (see ALL-READ TAINT below).
+    if (keys.includes('phone') && ibOwnerDirectTaintAllReadsLive()) return false;
     // `notes` replaces crm_notes: direct only over empty notes, read by the
     // proposal (preview.notes_replaced); without that read, the card.
     if (keys.includes('notes') && (!preview?.notes_replaced || preview.notes_replaced.before)) return false;
@@ -179,8 +182,82 @@ function isDataAnswer(result) {
     && Number.isInteger(result.status) && result.status >= 200 && result.status < 300 && result.data !== undefined;
 }
 
+// ALL-READ TAINT (GATE_IB_OWNER_DIRECT_TAINT_ALL_READS, security audit run 2).
+// The rule above covers read_admin_data only, but other read tools return text
+// a lower-trust sender wrote: an inbound text or email body, a caller's words
+// in a call transcript or call summary, a public review, a lead's own notes.
+// A prompt-injected message read through one of them could drive a cardless
+// write (a phone-only update_customer changes the portal login key). With the
+// gate on, every tool in this one list sets the same per-request flag.
+// Every OTHER read tool (action-policy.json kind 'read') taints only when its
+// answer holds a free-text field (NOTE_FIELD below): the call processor
+// writes caller-derived text into crm_notes and booking notes are
+// customer-typed, and several readers return them (get_customer_detail,
+// get_schedule_view, check_customer_status, get_stop_details, ...). Scanning
+// the answer for the field, not naming each reader, keeps a reader added later
+// covered (Codex r1/r2 on this fix). A record with no note stays card-free, so
+// a plain "fix this customer's name" lookup keeps working.
+// A new read tool that returns sender-authored text is added here.
+const SENDER_TEXT_READ_TOOLS = new Set([
+  // SMS and calls (comms-tools.js)
+  'get_conversation_thread', 'get_unanswered_threads', 'search_messages', 'draft_sms_reply',
+  'get_call_log', 'get_open_commitments', 'get_csr_overview', 'list_call_partners', 'get_partner_call_history',
+  // Email (email-tools.js)
+  'search_emails', 'get_email_thread', 'get_inbox_summary', 'draft_email_reply', 'get_vendor_invoices',
+  // Call-transcript research quotes (call-research-tools.js)
+  'search_call_research',
+  // Lead notes and public review text (leads-tools.js, review-tools.js)
+  'query_leads', 'get_unresponded_reviews', 'search_reviews', 'draft_review_reply',
+  // Saved bar turns can hold a pasted message (history-tools.js)
+  'search_ib_history',
+]);
+
+const POLICY = require('./action-policy.json');
+// Free-text field names: notes, special_instructions, pet_details,
+// pets_secured_plan (snake or camel case), side_gate_access, message bodies, and
+// the customer-entered access codes get_stop_details returns (neighborhood_gate_code,
+// property_gate_code, garage_code, lockbox_code). Only those named code fields:
+// zip_code and other *_code fields stay untainted.
+const NOTE_FIELD = /(?:^|_)(?:notes?|instructions?|details?|comments?|messages?|body|text|transcript|summary|access|plan|gate_code|garage_code|lockbox_code|access_code)$|(?:Notes?|Instructions?|Details?|Comments?|Messages?|Body|Text|Transcript|Summary|Access|Plan|[Gg]ateCode|[Gg]arageCode|[Ll]ockboxCode|[Aa]ccessCode)$/;
+// Any string this long in an answer is prose, whatever its field is called.
+const PROSE_LENGTH = 80;
+const SCAN_NODE_LIMIT = 20000;
+
+// Does the answer hold a non-empty note string anywhere? Past the node limit
+// the scan gives up and says yes (fail closed).
+function holdsNoteText(result) {
+  let nodes = 0;
+  const walk = (value, depth) => {
+    if (++nodes > SCAN_NODE_LIMIT || depth > 8) return true;
+    if (Array.isArray(value)) return value.some(item => walk(item, depth + 1));
+    if (!value || typeof value !== 'object') return false;
+    return Object.entries(value).some(([key, item]) => (typeof item === 'string' ? (NOTE_FIELD.test(key) && Boolean(item.trim())) || item.length >= PROSE_LENGTH : walk(item, depth + 1)));
+  };
+  return walk(result, 0);
+}
+
+const isReadTool = toolName => Object.hasOwn(POLICY, toolName) && POLICY[toolName].kind === 'read';
+
+// Does this tool's answer carry text a lower-trust sender could have written?
+// Only with the gate on. Unparseable or missing answers are decided by callers.
+function answerCarriesSenderText(toolName, result) {
+  if (!ibOwnerDirectTaintAllReadsLive()) return false;
+  if (SENDER_TEXT_READ_TOOLS.has(toolName)) return carriesSenderText(result);
+  return isReadTool(toolName) && holdsNoteText(result);
+}
+
+// A refusal that carries only a message holds no sender text; any other answer
+// (rows, a list of matches, a draft) may, so it taints.
+function carriesSenderText(result) {
+  if (!result || typeof result !== 'object') return Boolean(result);
+  if (!result.error && !result.code) return true;
+  return Object.keys(result).some(key => !['error', 'code', 'note', 'status'].includes(key));
+}
+
 function noteUntrustedRead(taint, toolName, result) {
-  if (taint && toolName === GENERAL_READ_TOOL && isDataAnswer(result)) taint.untrustedRead = true;
+  if (!taint) return;
+  if (toolName === GENERAL_READ_TOOL && isDataAnswer(result)) taint.untrustedRead = true;
+  else if (answerCarriesSenderText(toolName, result)) taint.untrustedRead = true;
 }
 
 // Pure: does a saved message history hold a general read that returned data?
@@ -188,13 +265,18 @@ function noteUntrustedRead(taint, toolName, result) {
 // result) counts as returned, so a resume fails closed.
 function untrustedReadInHistory(messages) {
   const blocks = (Array.isArray(messages) ? messages : []).flatMap(message => (Array.isArray(message?.content) ? message.content : []));
-  const readIds = blocks.filter(block => block?.type === 'tool_use' && block.name === GENERAL_READ_TOOL).map(block => block.id);
-  if (!readIds.length) return false;
+  const allReads = ibOwnerDirectTaintAllReadsLive();
+  const readBlocks = blocks.filter(block => block?.type === 'tool_use'
+    && (block.name === GENERAL_READ_TOOL || (allReads && (SENDER_TEXT_READ_TOOLS.has(block.name) || isReadTool(block.name)))));
+  if (!readBlocks.length) return false;
   const answers = new Map(blocks.filter(block => block?.type === 'tool_result').map(block => [block.tool_use_id, block]));
-  return readIds.some((id) => {
-    const answer = answers.get(id);
+  return readBlocks.some((read) => {
+    const answer = answers.get(read.id);
     if (!answer) return true;
-    try { return isDataAnswer(JSON.parse(answer.content)); } catch { return true; }
+    try {
+      const parsed = JSON.parse(answer.content);
+      return read.name === GENERAL_READ_TOOL ? isDataAnswer(parsed) : answerCarriesSenderText(read.name, parsed);
+    } catch { return true; }
   });
 }
 
@@ -275,7 +357,8 @@ function directEditPossible(toolName, input = {}) {
     // An array's keys are indexes, never contact fields, so it falls out below.
     const updates = input?.updates;
     const keys = updates && typeof updates === 'object' ? Object.keys(updates) : [];
-    return keys.length > 0 && keys.every(key => DIRECT_CUSTOMER_FIELDS.has(key));
+    return keys.length > 0 && keys.every(key => DIRECT_CUSTOMER_FIELDS.has(key))
+      && !(keys.includes('phone') && ibOwnerDirectTaintAllReadsLive());
   }
   return true;
 }
@@ -427,4 +510,4 @@ You are talking to the owner. Do what they ask.
 - Never send the owner to another screen, never explain limitations, never apologize. If something truly cannot be done from here, say so in one sentence and offer the closest thing you can do.
 - Replies: 1–3 short lines. No preamble, no recap of the request, no "anything else?". Lists and numbers only when the owner asked for data.`;
 
-module.exports = { loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };
+module.exports = { SENDER_TEXT_READ_TOOLS, loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };
