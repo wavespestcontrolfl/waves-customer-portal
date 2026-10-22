@@ -72,12 +72,21 @@ const SETTLED = ['void', 'refunded', 'canceled', 'cancelled', 'paid', 'prepaid',
 
 const payerLabel = (p) => [p.display_name, p.company_name && p.company_name !== p.display_name ? `(${p.company_name})` : null].filter(Boolean).join(' ');
 
-async function resolvePayer(input) {
+// One payer row; under the handler's transaction (lock) it is held FOR SHARE, so an edit to a payer the card
+// names waits for the Bill-To write.
+function payerRow(id, { database = db, lock = false } = {}) {
+  const pid = Number(id);
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  const q = database('payers').where({ id: pid });
+  return (lock ? q.forShare() : q).first();
+}
+
+async function resolvePayer(input, ctx = {}) {
   const rawId = String(input?.payer_id || '').trim();
   const rawName = String(input?.payer_name || '').trim();
   if (Boolean(rawId) === Boolean(rawName)) return refusal('Give exactly one of payer_id or payer_name', 'invalid_target');
   if (rawId) {
-    const payer = await require('../payer').getPayer(rawId);
+    const payer = await payerRow(rawId, ctx);
     if (!payer) return refusal('Payer not found', 'payer_not_found');
     if (payer.active === false) return refusal(`Payer ${payerLabel(payer)} is inactive, so nothing was offered. Reactivate it on the Payers page first.`, 'payer_inactive');
     return { payer };
@@ -100,13 +109,13 @@ async function customerName(customer) {
 // visit (in billed order) that resolves to a payer (liveThirdPartyPayerForPacket), which can be a visit's own payer
 // rather than the account's. Each billed visit is judged by the withdrawal module's own owner answer with the
 // pending customer write laid over it. The handler re-checks the set and each invoice's payer under its locks.
-async function packetOwner(packetId, pending) {
-  const packet = await db('visit_completion_packets').where({ id: packetId }).first('visit_id', 'payload');
+async function packetOwner(packetId, pending, { database = db, lock = false } = {}) {
+  const packet = await database('visit_completion_packets').where({ id: packetId }).first('visit_id', 'payload');
   if (!packet) return null;
   const payload = require('../visit-completion-packets').packetPayload(packet);
   const billed = Array.isArray(payload?.billingSnapshot?.billedServiceIds) ? payload.billingSnapshot.billedServiceIds
-    : await db('visit_completion_packet_items').where({ packet_id: packetId }).pluck('scheduled_service_id');
-  const owners = await require('../visit-linked-invoice-withdrawal').visitOwnerTransitions(db, billed, { pending });
+    : await database('visit_completion_packet_items').where({ packet_id: packetId }).pluck('scheduled_service_id');
+  const owners = await require('../visit-linked-invoice-withdrawal').visitOwnerTransitions(database, billed, { pending, lock });
   const byVisit = new Map(owners.map((o) => [String(o.visitId), o.afterOwner]));
   for (const visitId of billed) {
     const owner = byVisit.get(String(visitId));
@@ -118,12 +127,13 @@ async function packetOwner(packetId, pending) {
 // The unpaid invoices the handler's withdrawal moves to the payer: the visit-linked ones from the
 // withdrawal module's own owner answer (mode 'pre' with the pending customer write), and the unpaid
 // self-pay combined-visit invoices whose billed visits will resolve to a payer (packetMoves).
-async function invoicePlan(customerId, payerId) {
+async function invoicePlan(customerId, payerId, ctx = {}) {
+  const { database = db, lock = false } = ctx;
   const Linked = require('../visit-linked-invoice-withdrawal');
   const pending = { customerPatch: { customerId, payer_id: payerId } };
-  const transitions = await Linked.ownerTransitions(db, { customerId }, { mode: 'pre', pending, stamped: 'unstamped' });
+  const transitions = await Linked.ownerTransitions(database, { customerId }, { mode: 'pre', pending, stamped: 'unstamped', lock });
   const movingIds = transitions.filter((t) => t.moved && String(t.afterOwner) === String(payerId)).map((t) => String(t.invoiceId));
-  const packetRows = await db('invoices').where({ customer_id: customerId }).whereNotIn('status', SETTLED)
+  const packetRows = await database('invoices').where({ customer_id: customerId }).whereNotIn('status', SETTLED)
     .whereNull('payer_id').whereNotNull('visit_completion_packet_id')
     .where((q) => q.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%'))
     .orderBy('id').select('id', 'visit_completion_packet_id');
@@ -131,18 +141,18 @@ async function invoicePlan(customerId, payerId) {
   const ownerOf = new Map(movingIds.map((id) => [id, String(payerId)]));
   for (const row of packetRows) {
     if (ownerOf.has(String(row.id))) continue;
-    const owner = await packetOwner(row.visit_completion_packet_id, pending);
+    const owner = await packetOwner(row.visit_completion_packet_id, pending, ctx);
     if (owner) ownerOf.set(String(row.id), owner);
   }
   const moving = ownerOf.size
-    ? (await db('invoices').whereIn('id', [...ownerOf.keys()]).orderBy('invoice_number')
+    ? (await database('invoices').whereIn('id', [...ownerOf.keys()]).orderBy('invoice_number')
       .select('id', 'invoice_number', 'total', 'status', 'credit_applied', 'visit_completion_packet_id'))
       .map((inv) => ({ ...inv, to_payer_id: ownerOf.get(String(inv.id)) }))
     : [];
   // Every other unpaid self-pay invoice stays with the customer: one with no visit link (nothing resolves a payer
   // for it), or one whose visit keeps its own Bill-To (pinned to the customer).
   const movingSet = new Set(moving.map((inv) => String(inv.id)));
-  const staying = (await db('invoices').where({ customer_id: customerId }).whereNotIn('status', SETTLED)
+  const staying = (await database('invoices').where({ customer_id: customerId }).whereNotIn('status', SETTLED)
     .whereNull('payer_id').whereNull('payer_statement_id')
     .where((q) => q.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%'))
     .orderBy('invoice_number').select('id', 'invoice_number', 'total', 'status', 'credit_applied'))
@@ -151,9 +161,9 @@ async function invoicePlan(customerId, payerId) {
 }
 
 // Upcoming visits that keep their own Bill-To (their own payer, or pinned to the customer).
-async function pinnedVisits(customerId) {
-  const hasSelfPay = await require('../payer').scheduledServicesHasSelfPay(db);
-  const q = db('scheduled_services').where({ customer_id: customerId })
+async function pinnedVisits(customerId, { database = db, lock = false } = {}) {
+  const hasSelfPay = await require('../payer').scheduledServicesHasSelfPay(database);
+  const q = database('scheduled_services').where({ customer_id: customerId })
     // Every visit not finished or cancelled, today's visit already under way included.
     .whereNotIn('status', ['completed', 'cancelled'])
     .where('scheduled_date', '>=', require('../../utils/datetime-et').etDateString());
@@ -161,38 +171,40 @@ async function pinnedVisits(customerId) {
     w.whereNotNull('payer_id');
     if (hasSelfPay) w.orWhere('self_pay_override', true);
   });
-  const row = await q.count('* as n').first();
-  return Number(row?.n) || 0;
+  // Under the handler's transaction the visit rows are held FOR SHARE, so a schedule edit to one waits.
+  const rows = await (lock ? q.orderBy('id').forShare() : q).select('id');
+  return rows.length;
 }
 
 const invoiceLine = (inv) => `${inv.invoice_number} ${money(inv.total)} (${inv.status})`;
 
-async function buildPlan(input) {
+async function buildPlan(input, ctx = {}) {
+  const { database = db } = ctx;
   const customerId = String(input?.customer_id || '').trim().toLowerCase();
   if (!UUID_RE.test(customerId)) return refusal('A valid customer_id is required', 'invalid_target');
-  const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at')
+  const customer = await database('customers').where({ id: customerId }).whereNull('deleted_at')
     .first('id', 'first_name', 'last_name', 'company_name', 'payer_id');
   if (!customer) return refusal('Customer not found', 'customer_not_found');
-  const target = await resolvePayer(input);
+  const target = await resolvePayer(input, ctx);
   if (target.error) return target;
   const { payer } = target;
   const name = await customerName(customer);
   if (customer.payer_id) {
-    const current = await require('../payer').getPayer(customer.payer_id);
+    const current = await payerRow(customer.payer_id, ctx);
     if (String(customer.payer_id) === String(payer.id)) {
       return refusal(`${name || 'This customer'} already bills to ${payerLabel(payer)}. Nothing was changed.`, 'already_set', { customer_id: customer.id });
     }
     return toPage(`${name || 'This customer'} already bills to ${current ? payerLabel(current) : `payer ${customer.payer_id}`}. The bar sets a payer only on a customer who pays for themselves.`, 'has_payer');
   }
-  const { moving, staying } = await invoicePlan(customer.id, String(payer.id));
-  const pinned = await pinnedVisits(customer.id);
+  const { moving, staying } = await invoicePlan(customer.id, String(payer.id), ctx);
+  const pinned = await pinnedVisits(customer.id, ctx);
   const credit = moving.reduce((sum, inv) => sum + (Number(inv.credit_applied) || 0), 0);
   const payerName = payerLabel(payer);
   // A combined-visit invoice can move to a visit's own payer instead of this one: each line names its payer.
   const names = new Map([[String(payer.id), payerName]]);
   for (const inv of moving) {
     if (!names.has(inv.to_payer_id)) {
-      const other = await require('../payer').getPayer(inv.to_payer_id);
+      const other = await payerRow(inv.to_payer_id, ctx);
       names.set(inv.to_payer_id, other ? payerLabel(other) : `payer ${inv.to_payer_id}`);
     }
   }
@@ -229,9 +241,8 @@ async function buildPlan(input) {
     invoices_staying: staying.map((inv) => inv.invoice_number),
     effects,
     sends_to_customer: false,
-    // What the handler re-checks inside its transaction: the payer facts the card showed, and every invoice it
-    // listed (moving ones with the payer each moves to; staying ones must not move).
-    _payer: { display_name: payer.display_name ?? null, company_name: payer.company_name ?? null, payment_terms: payer.payment_terms ?? null, tax_exempt: payer.tax_exempt === true },
+    // Every invoice the card listed, for the handler's after-withdrawal check: the moving ones (with the payer
+    // each moves to) must be exactly the ones withdrawn, each stamped for that payer.
     _invoices: [
       ...moving.map((inv) => ({ id: String(inv.id), status: inv.status, total: inv.total, credit_applied: inv.credit_applied, to_payer_id: inv.to_payer_id })),
       ...staying.map((inv) => ({ id: String(inv.id), status: inv.status, total: inv.total, credit_applied: inv.credit_applied, to_payer_id: null })),
@@ -244,7 +255,7 @@ async function buildPlan(input) {
       payer_name: payerName,
       payer_terms: payer.payment_terms || null,
       payer_tax_exempt: payer.tax_exempt === true,
-      moving: digest(moving.map((inv) => [String(inv.id), inv.status, String(inv.total), String(inv.credit_applied), inv.to_payer_id])),
+      moving: digest(moving.map((inv) => [String(inv.id), inv.status, String(inv.total), String(inv.credit_applied), inv.to_payer_id, names.get(inv.to_payer_id)])),
       staying: digest(staying.map((inv) => [String(inv.id), inv.status, String(inv.total), String(inv.credit_applied)])),
       pinned,
     },
@@ -262,6 +273,24 @@ async function verifiedPlan(input, pinned) {
   return { plan };
 }
 
+// The whole card re-derived INSIDE the handler's transaction, before it writes: the customer row is already held
+// FOR UPDATE there; this pass holds the visits and payers the card reads FOR SHARE, then every unpaid invoice of
+// the customer FOR UPDATE (id order), and derives the card again over those held rows. Any line that differs
+// from the card the operator approved refuses as preview_changed and rolls the edit back before any Stripe cancel.
+function lockedPlanCheck(input, pinned) {
+  return async (trx) => {
+    const ctx = { database: trx, lock: true };
+    await buildPlan(input, ctx);
+    await trx('invoices').where({ customer_id: input.customer_id }).whereNotIn('status', SETTLED).orderBy('id').forUpdate().select('id');
+    const plan = await buildPlan(input, ctx);
+    if (plan.error || JSON.stringify(plan._version) !== JSON.stringify(pinned)) {
+      throw Object.assign(new Error('The customer, the payer or their invoices changed after the card was shown.'), {
+        statusCode: 409, isOperational: true, code: 'preview_changed',
+      });
+    }
+  };
+}
+
 async function readBack(customerId) {
   return db('customers').where({ id: customerId }).first('payer_id').catch(() => null);
 }
@@ -277,7 +306,7 @@ async function commitBillTo(input, actionContext) {
       payerId: plan.payer_id,
       expectedPayerId: null,
       expectedInvoices: plan._invoices,
-      expectedPayer: plan._payer,
+      verifyPlan: lockedPlanCheck({ customer_id: plan.customer_id, payer_id: plan.payer_id }, plan._version),
       actor: { technicianId: actionContext?.technicianId || null },
     });
   } catch (err) {
@@ -346,4 +375,5 @@ module.exports = {
   executeBillToTool,
   setBillToLive,
   cardLines,
+  lockedPlanCheck,
 };

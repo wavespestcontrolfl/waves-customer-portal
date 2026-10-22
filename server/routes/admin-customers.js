@@ -4410,18 +4410,10 @@ const customerUpdateHandler = async (req, res, next) => {
             // Planned and refused here; the Stripe cancels run as the LAST step of this transaction.
             applySessionRelease = payerRelease.apply || null;
           }
-          // The bar card (req.ibExpectedPayer set only by setCustomerBillToFromBar) names an ACTIVE payer with the
-          // name and terms it showed: the payer row is held FOR SHARE so an edit or a deactivation waits for this
-          // one, and an inactive, missing or changed payer refuses, rolling everything back before any Stripe cancel.
-          if (req.ibExpectedPayer && updates.payer_id) {
-            const target = await trx('payers').where({ id: updates.payer_id }).forShare().first('active', 'display_name', 'company_name', 'payment_terms', 'tax_exempt');
-            const shown = req.ibExpectedPayer;
-            if (!target || target.active === false || (target.display_name ?? null) !== shown.display_name
-              || (target.company_name ?? null) !== shown.company_name || (target.payment_terms ?? null) !== shown.payment_terms
-              || (target.tax_exempt === true) !== shown.tax_exempt) {
-              throw Object.assign(new Error('The payer changed after the card was shown.'), { statusCode: 409, isOperational: true, code: 'preview_changed' });
-            }
-          }
+          // req.ibVerifyPlan is set only by setCustomerBillToFromBar (never an HTTP field): it re-derives the whole bar
+          // card inside this transaction over held rows (bill-to-tools.js lockedPlanCheck) and throws preview_changed
+          // on any difference, before the write and before any Stripe cancel (they run last).
+          if (req.ibVerifyPlan) await req.ibVerifyPlan(trx);
           await trx('customers').where({ id: req.params.id }).update(updates);
           // An edited property type also lands on the primary property row,
           // in this transaction, so property-scoped readers agree with the
@@ -4448,17 +4440,11 @@ const customerUpdateHandler = async (req, res, next) => {
               // stay locked through the withdrawal. Every other Bill-To writer for this customer already waits on
               // the customer row; a money path that holds an invoice first can deadlock with this, which
               // PostgreSQL aborts and the operator retries (lock order there is out of scope, owner 2026-10-03).
-              // Every invoice the card listed (moving and staying) is compared; a moving one must be stamped for
-              // the payer the card named for it.
+              // The invoices the bar card listed (req.ibExpectedInvoices, set only by setCustomerBillToFromBar; the
+              // card itself was re-derived above): the withdrawal must move exactly its moving ones, each stamped
+              // for the payer the card named for it.
               const expected = req.ibExpectedInvoices;
               const drift = (message) => Object.assign(new Error(message), { statusCode: 409, isOperational: true, code: 'preview_changed' });
-              if (expected) {
-                const rows = expected.length ? await trx('invoices').whereIn('id', expected.map((e) => e.id)).orderBy('id').forUpdate().select('id', 'status', 'total', 'credit_applied') : [];
-                const cents = (v) => Math.round((Number(v) || 0) * 100);
-                const same = rows.length === expected.length && expected.every((e) => rows.some((r) => String(r.id) === e.id
-                  && r.status === e.status && cents(r.total) === cents(e.total) && cents(r.credit_applied) === cents(e.credit_applied)));
-                if (!same) throw drift('The invoices changed after the card was shown.');
-              }
               const withdrawn = await Packets.withdrawPacketInvoicesForOwner(trx, { customerId: req.params.id });
               if (expected) {
                 const moving = expected.filter((e) => e.to_payer_id);
@@ -6800,10 +6786,10 @@ module.exports = router;
 // what the customer page's Bill-To select sends — without an HTTP request (the admin-invoices.js adapter
 // pattern): the handler gets the request fields it reads and a capture response, and the promise resolves the
 // reply it would send, { status, json }. An error passed to next() rejects. expectedPayerId: the Bill-To the
-// card showed (null = the customer pays); expectedInvoices: every invoice the card listed ({ id, status, total,
-// credit_applied, to_payer_id }; to_payer_id null = stays), re-checked inside the transaction; expectedPayer: the
-// payer's display_name, company_name, payment_terms and tax_exempt the card showed, re-checked on the locked payer row.
-function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, expectedInvoices, expectedPayer, actor }) {
+// card showed (null = the customer pays); verifyPlan(trx): re-derives the whole card inside the transaction and
+// throws preview_changed on any difference; expectedInvoices: every invoice the card listed ({ id, status, total,
+// credit_applied, to_payer_id }; to_payer_id null = stays), checked against what the withdrawal moved.
+function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, expectedInvoices, verifyPlan, actor }) {
   return new Promise((resolve, reject) => {
     const res = {
       statusCode: 200,
@@ -6817,12 +6803,7 @@ function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, expect
       ip: null,
       get: () => null,
       ibExpectedPayerId: expectedPayerId == null ? null : String(expectedPayerId),
-      ibExpectedPayer: {
-        display_name: expectedPayer?.display_name ?? null,
-        company_name: expectedPayer?.company_name ?? null,
-        payment_terms: expectedPayer?.payment_terms ?? null,
-        tax_exempt: expectedPayer?.tax_exempt === true,
-      },
+      ibVerifyPlan: typeof verifyPlan === 'function' ? verifyPlan : null,
       ibExpectedInvoices: (expectedInvoices || []).map((e) => ({ id: String(e.id), status: e.status, total: e.total, credit_applied: e.credit_applied, to_payer_id: e.to_payer_id == null ? null : String(e.to_payer_id) })),
     };
     Promise.resolve(customerUpdateHandler(req, res, reject)).catch(reject);

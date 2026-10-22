@@ -54,10 +54,12 @@ function freshState() {
 // A small knex stand-in keyed on the shape of each read the tool makes. Any write throws.
 function makeDb() {
   function builder(table) {
-    const q = { single: false, packet: false, ids: null, count: false };
+    const q = { single: false, packet: false, ids: null, count: false, whereId: null };
     const rows = () => {
       if (table === 'customers') return q.single ? state.customer : [state.customer];
-      if (table === 'scheduled_services') return { n: state.pinnedVisits };
+      if (table === 'scheduled_services') return Array.from({ length: state.pinnedVisits }, (_v, i) => ({ id: `visit-${i}` }));
+      // Payer rows read by id: the payer fixture through mockGetPayer, so a test can change what the row says.
+      if (table === 'payers') return mockGetPayer(q.whereId);
       if (table === 'visit_completion_packets') return { visit_id: 'sv-1', payload: { billingSnapshot: { billedServiceIds: ['visit-a', 'visit-b'] } } };
       if (table === 'invoices') {
         if (q.ids) return q.ids.map((id) => state.invoices[id]).filter(Boolean);
@@ -71,6 +73,7 @@ function makeDb() {
         if (prop === 'then') return (res, rej) => Promise.resolve().then(rows).then(res, rej);
         if (prop === 'first') return () => { q.single = true; return b; };
         if (prop === 'whereNotNull') return (k) => { if (k === 'visit_completion_packet_id') q.packet = true; return b; };
+        if (prop === 'where') return (k) => { if (k && typeof k === 'object' && 'id' in k) q.whereId = k.id; return b; };
         if (prop === 'whereIn') return (k, v) => { if (k === 'id' && Array.isArray(v)) q.ids = v; return b; };
         if (prop === 'raw') return () => 'RAW';
         if (['insert', 'update', 'del', 'delete', 'upsert'].includes(prop)) throw new Error(`unexpected ${String(prop)} on ${table}`);
@@ -187,7 +190,7 @@ describe('the preview', () => {
     // Every billed visit pinned to the customer: it stays.
     mockVisitOwners.mockResolvedValue([{ visitId: 'visit-a', afterOwner: null }, { visitId: 'visit-b', afterOwner: null }]);
     expect((await preview()).invoices_moving).toEqual(['WPC-2099-0001']);
-    expect(mockVisitOwners).toHaveBeenCalledWith(expect.anything(), ['visit-a', 'visit-b'], { pending: { customerPatch: { customerId: CUST, payer_id: '7' } } });
+    expect(mockVisitOwners).toHaveBeenCalledWith(expect.anything(), ['visit-a', 'visit-b'], { pending: { customerPatch: { customerId: CUST, payer_id: '7' } }, lock: false });
     // One billed visit resolves to the payer: it moves.
     mockVisitOwners.mockResolvedValue([{ visitId: 'visit-a', afterOwner: null }, { visitId: 'visit-b', afterOwner: '7' }]);
     expect((await preview()).invoices_moving).toEqual(['WPC-2099-0001', 'WPC-2099-0003']);
@@ -200,6 +203,10 @@ describe('the preview', () => {
     expect(text).toMatch(/Moves to Other Payer Co: WPC-2099-0003/);
     expect(text).toMatch(/Moves to Synthetic Property Co: WPC-2099-0001/);
     expect(card._invoices.find((i) => i.id === PACKET).to_payer_id).toBe('9');
+    // The other payer renamed after the card: its line no longer names who gets the bill, so the pin refuses.
+    mockGetPayer.mockImplementation(async (id) => (String(id) === '7' ? PAYER : { id: 9, display_name: 'Other Payer Renamed', active: true }));
+    expect(await confirm(card)).toMatchObject({ code: 'preview_changed' });
+    expect(Customers.setCustomerBillToFromBar).not.toHaveBeenCalled();
   });
 
   test('a tax-exempt payer is shown and pinned', async () => {
@@ -250,7 +257,7 @@ describe('the confirmed run', () => {
         { id: LINKED, status: 'sent', total: '90.00', credit_applied: '10.00', to_payer_id: '7' },
         { id: MANUAL, status: 'sent', total: '40.00', credit_applied: undefined, to_payer_id: null },
       ],
-      expectedPayer: { display_name: 'Synthetic Property Co', company_name: null, payment_terms: 'net_30', tax_exempt: false },
+      verifyPlan: expect.any(Function),
     });
   });
 

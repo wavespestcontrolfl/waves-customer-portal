@@ -11,7 +11,7 @@ jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () =
 const db = require('../models/db');
 const StripeService = require('../services/stripe');
 const { setCustomerBillToFromBar } = require('../routes/admin-customers');
-const { executeBillToTool } = require('../services/intelligence-bar/bill-to-tools');
+const { executeBillToTool, lockedPlanCheck } = require('../services/intelligence-bar/bill-to-tools');
 const { etDateString } = require('../utils/datetime-et');
 
 const url = process.env.DATABASE_URL ? new URL(process.env.DATABASE_URL) : null;
@@ -44,10 +44,6 @@ const ADMIN = { isAdmin: true, technicianId: null };
     const [row] = await db('payers').insert({ display_name: `Fixture Bill-To Co ${randomUUID().slice(0, 6)}`, ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
     created.payers.push(row.id);
     return row.id;
-  }
-
-  async function shownPayer(id) {
-    return db('payers').where({ id }).first('display_name', 'company_name', 'payment_terms');
   }
 
   async function selfPayCustomer() {
@@ -102,48 +98,58 @@ const ADMIN = { isAdmin: true, technicianId: null };
     expect(preview.invoices_staying.sort()).toEqual([linked.invoice_number, manual.invoice_number].sort());
   });
 
+  // The card, a change made after it, then the confirmed write through the page handler with the card's
+  // in-transaction re-check (lockedPlanCheck) and its invoice list.
+  async function confirmAfter(customerId, payerId, change) {
+    const card = await executeBillToTool('set_customer_bill_to', { customer_id: customerId, payer_id: String(payerId) }, ADMIN);
+    expect(card.preview).toBe(true);
+    await change(card);
+    return setCustomerBillToFromBar({
+      customerId, payerId, expectedPayerId: null, expectedInvoices: card._invoices, actor: {},
+      verifyPlan: lockedPlanCheck({ customer_id: customerId, payer_id: String(payerId) }, card._version),
+    });
+  }
+
+  function stripeIdle() {
+    jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({});
+    jest.spyOn(StripeService, 'retrievePaymentIntent').mockImplementation(async (id) => ({ id, status: 'requires_payment_method', metadata: {} }));
+  }
+
+  test('the card unchanged: the in-transaction re-check passes and the invoice moves', async () => {
+    const payerId = await payer();
+    const { customerId, linkedId } = await selfPayCustomer();
+    stripeIdle();
+    await expect(confirmAfter(customerId, payerId, async () => {})).resolves.toMatchObject({ status: 200 });
+    expect(await db('customers').where({ id: customerId }).first('payer_id')).toMatchObject({ payer_id: payerId });
+    expect(await db('invoices').where({ id: linkedId }).first()).toMatchObject({ scheduled_send_error: `payer_billed:${payerId}` });
+  });
+
+  test.each([
+    ['a staying invoice changed', async ({ manualId }) => { await db('invoices').where({ id: manualId }).update({ total: 55 }); }],
+    ['a moving invoice changed', async ({ linkedId }) => { await db('invoices').where({ id: linkedId }).update({ total: 95 }); }],
+    ['the payer deactivated', async ({ payerId }) => { await db('payers').where({ id: payerId }).update({ active: false }); }],
+    ['the payer renamed', async ({ payerId }) => { await db('payers').where({ id: payerId }).update({ display_name: 'Fixture Renamed Co' }); }],
+    ['the payer made tax-exempt', async ({ payerId }) => { await db('payers').where({ id: payerId }).update({ tax_exempt: true }); }],
+    ['the visit pinned to the customer', async ({ customerId }) => { await db('scheduled_services').where({ customer_id: customerId }).update({ self_pay_override: true }); }],
+  ])('%s after the card: refused inside the transaction, nothing written', async (_label, change) => {
+    const payerId = await payer();
+    const ids = await selfPayCustomer();
+    stripeIdle();
+    await expect(confirmAfter(ids.customerId, payerId, () => change({ ...ids, payerId })))
+      .rejects.toMatchObject({ code: 'preview_changed' });
+    expect(await db('customers').where({ id: ids.customerId }).first('payer_id')).toMatchObject({ payer_id: null });
+    expect(await db('invoices').where({ id: ids.linkedId }).first()).toMatchObject({ scheduled_send_error: null });
+  });
+
   test('an invoice that would move but was not on the card rolls the whole edit back', async () => {
     const payerId = await payer();
     const { customerId, linkedId } = await selfPayCustomer();
-    jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({});
-    jest.spyOn(StripeService, 'retrievePaymentIntent').mockImplementation(async (id) => ({ id, status: 'requires_payment_method', metadata: {} }));
-    // The card showed no moving invoice; the visit-linked one would move.
-    await expect(setCustomerBillToFromBar({ customerId, payerId, expectedPayerId: null, expectedInvoices: [], expectedPayer: await shownPayer(payerId), actor: {} }))
+    stripeIdle();
+    // No re-check here: only the after-withdrawal check, with a card list that names no moving invoice.
+    await expect(setCustomerBillToFromBar({ customerId, payerId, expectedPayerId: null, expectedInvoices: [], actor: {} }))
       .rejects.toMatchObject({ code: 'preview_changed' });
     expect(await db('customers').where({ id: customerId }).first('payer_id')).toMatchObject({ payer_id: null });
     expect(await db('invoices').where({ id: linkedId }).first()).toMatchObject({ scheduled_send_error: null });
-  });
-
-  test('a staying invoice changed after the card refuses inside the transaction', async () => {
-    const payerId = await payer();
-    const { customerId, linkedId, manualId } = await selfPayCustomer();
-    jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({});
-    jest.spyOn(StripeService, 'retrievePaymentIntent').mockImplementation(async (id) => ({ id, status: 'requires_payment_method', metadata: {} }));
-    const card = await executeBillToTool('set_customer_bill_to', { customer_id: customerId, payer_id: String(payerId) }, ADMIN);
-    await db('invoices').where({ id: manualId }).update({ total: 55 });
-    await expect(setCustomerBillToFromBar({ customerId, payerId, expectedPayerId: null, expectedInvoices: card._invoices, expectedPayer: card._payer, actor: {} }))
-      .rejects.toMatchObject({ code: 'preview_changed' });
-    expect(await db('customers').where({ id: customerId }).first('payer_id')).toMatchObject({ payer_id: null });
-    expect(await db('invoices').where({ id: linkedId }).first()).toMatchObject({ scheduled_send_error: null });
-  });
-
-  test('a payer deactivated after the card refuses inside the transaction', async () => {
-    const payerId = await payer();
-    const { customerId } = await selfPayCustomer();
-    await db('payers').where({ id: payerId }).update({ active: false });
-    await expect(setCustomerBillToFromBar({ customerId, payerId, expectedPayerId: null, expectedInvoices: [], expectedPayer: await shownPayer(payerId), actor: {} }))
-      .rejects.toMatchObject({ code: 'preview_changed' });
-    expect(await db('customers').where({ id: customerId }).first('payer_id')).toMatchObject({ payer_id: null });
-  });
-
-  test('a payer renamed after the card refuses inside the transaction', async () => {
-    const payerId = await payer();
-    const { customerId } = await selfPayCustomer();
-    const shown = await shownPayer(payerId);
-    await db('payers').where({ id: payerId }).update({ display_name: `${shown.display_name} Renamed` });
-    await expect(setCustomerBillToFromBar({ customerId, payerId, expectedPayerId: null, expectedInvoices: [], expectedPayer: shown, actor: {} }))
-      .rejects.toMatchObject({ code: 'preview_changed' });
-    expect(await db('customers').where({ id: customerId }).first('payer_id')).toMatchObject({ payer_id: null });
   });
 
   test('a Bill-To that changed after the card refuses on the locked row and writes nothing', async () => {
@@ -152,7 +158,7 @@ const ADMIN = { isAdmin: true, technicianId: null };
     const { customerId, linkedId } = await selfPayCustomer();
     // Another edit set a payer after the card was shown (the card showed self-pay).
     await db('customers').where({ id: customerId }).update({ payer_id: other });
-    await expect(setCustomerBillToFromBar({ customerId, payerId, expectedPayerId: null, expectedPayer: await shownPayer(payerId), actor: {} }))
+    await expect(setCustomerBillToFromBar({ customerId, payerId, expectedPayerId: null, expectedInvoices: [], actor: {} }))
       .rejects.toMatchObject({ code: 'preview_changed' });
     expect(await db('customers').where({ id: customerId }).first('payer_id')).toMatchObject({ payer_id: other });
     expect(await db('invoices').where({ id: linkedId }).first()).toMatchObject({ scheduled_send_error: null });
