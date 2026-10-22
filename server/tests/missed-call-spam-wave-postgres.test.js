@@ -38,7 +38,7 @@ jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('missed-call bell: robodialer wave on PostgreSQL', () => {
   let database;
   const schema = `missed_call_wave_${randomUUID().replaceAll('-', '')}`;
-  const tables = ['call_log', 'customers', 'notifications', 'blocked_numbers', 'blocked_call_attempts'];
+  const tables = ['call_log', 'scheduled_services', 'invoices', 'customers', 'notifications', 'blocked_numbers', 'blocked_call_attempts'];
 
   beforeAll(async () => {
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 3 } });

@@ -2195,6 +2195,10 @@ const gates = {
   // 2026-10-20): 30 minutes after it rang, in office hours, once. No new
   // bell row. Admin push only.
   missedCallRepush: process.env.GATE_MISSED_CALL_REPUSH === 'true',
+  // A missed-call bell for a customer on file whose visit moved after the call
+  // (en route, arrived or completed, or an invoice paid, same ET day) is retired,
+  // never rung and never re-pushed (owner 2026-10-21). Admin bell only.
+  missedCallVisitUnderway: process.env.GATE_MISSED_CALL_VISIT_UNDERWAY === 'true',
   // Call commitments: every processed call records what Waves promised and
   // what the caller agreed to as evidence-linked rows (call_commitments),
   // seeded from the V2 extraction plus one bounded model pass over the

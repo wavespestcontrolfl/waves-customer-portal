@@ -41,7 +41,7 @@ jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('missed-call re-push on PostgreSQL', () => {
   let database;
   const schema = `missed_call_repush_${randomUUID().replaceAll('-', '')}`;
-  const tables = ['notifications', 'notification_preferences', 'technicians', 'call_log', 'schedule_blackout_dates', 'system_settings'];
+  const tables = ['notifications', 'notification_preferences', 'technicians', 'call_log', 'scheduled_services', 'invoices', 'schedule_blackout_dates', 'system_settings'];
   // Tue 2026-10-20 11:00 ET (EDT) is inside Mon-Sat 8:00-18:00.
   const NOW = new Date('2026-10-20T15:00:00Z');
   const HOURS = { startMin: 8 * 60, endMin: 18 * 60 };
