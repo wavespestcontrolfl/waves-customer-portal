@@ -386,7 +386,7 @@ async function buildLawnFastWateringPreview({ serviceId, productIds, targets = n
     // A product the catalog does not have is an unknown rule, exactly as a report
     // product with no frozen facts: no claim.
     instruction = await reportData.buildReportWateringInstruction({
-      products: entries.map((entry) => ({ product_name: entry.name, approved_report_product_facts: entry.facts, targets: targetsById.get(entry.productId) || [] })),
+      products: entries.map((entry) => ({ product_id: entry.productId, product_name: entry.name, approved_report_product_facts: entry.facts, targets: targetsById.get(entry.productId) || [] })),
       service: { customer_id: svc.customer_id },
       completionTime: now,
       lawnAssessment: { waterContext: { scheduleUnconfirmed: context.scheduleUnconfirmed } },

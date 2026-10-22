@@ -1535,6 +1535,13 @@ describe('buildLawnFastWateringPreview', () => {
       expect(none.state).toBe('hold');
       expect(await buildLawnFastWateringPreview({ serviceId: VISIT, productIds: [split.id], targets: { [split.id]: 'grubs' }, knex, now }))
         .toEqual({ ok: false, reason: 'invalid_targets' });
+      // The form's untouched label prefill (the catalog's first targets) reads the main use; an edited mix reads both.
+      const labeled = { ...split, target_pests: ['Tropical sod webworms', 'White grubs', 'Billbugs'] };
+      const labeledKnex = knexFor([labeled]);
+      const prefill = await buildLawnFastWateringPreview({ serviceId: VISIT, productIds: [labeled.id], targets: { [labeled.id]: ['White grubs', 'Billbugs', 'Tropical sod webworms'] }, knex: labeledKnex, now });
+      expect(prefill.state).toBe('hold');
+      const chosen = await buildLawnFastWateringPreview({ serviceId: VISIT, productIds: [labeled.id], targets: { [labeled.id]: ['Tropical sod webworms', 'White grubs'] }, knex: labeledKnex, now });
+      expect(chosen.state).toBe('hold_then_water_in');
     } finally {
       if (savedEvery === undefined) delete process.env.GATE_LAWN_WATERING_EVERY_VISIT; else process.env.GATE_LAWN_WATERING_EVERY_VISIT = savedEvery;
       if (savedSms === undefined) delete process.env.GATE_LAWN_WATERING_SMS; else process.env.GATE_LAWN_WATERING_SMS = savedSms;

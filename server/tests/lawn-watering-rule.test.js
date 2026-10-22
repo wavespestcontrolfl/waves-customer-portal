@@ -305,14 +305,30 @@ describe('target rules, label minimums and second steps', () => {
     expect(rulesForTargets(rule, ['White grubs'])[0]).toMatchObject({ source: 'owner', label_note: 'grubs' });
   });
 
-  test('a mixed target list (the completion form prefills the label targets) reads the product\'s main use', () => {
-    // Acelepryn prefill: webworms + armyworms + grubs -> the caterpillar hold, never hold-then-water-in.
-    expect(rulesForTargets(valid(ACELEPRYN), ['Tropical sod webworms', 'Fall armyworms', 'White grubs'])).toEqual([expect.objectContaining({ mode: 'hold', hold_hours: 24 })]);
-    // Acelepryn Xtra-style prefill with a target no entry names: still the main use, not no rule.
-    expect(rulesForTargets(valid(ACELEPRYN), ['Southern chinch bugs', 'Tropical sod webworms', 'White grubs'])).toEqual([expect.objectContaining({ mode: 'hold', hold_hours: 24 })]);
-    expect(rulesForTargets(valid(ACELEPRYN), ['Billbugs', 'White grubs'])).toEqual([expect.objectContaining({ mode: 'hold', hold_hours: 24 })]);
-    expect(rulesForTargets(valid(HEADWAY), ['Large patch', 'Spring dead spot'])).toEqual([expect.objectContaining({ mode: 'hold', hold_until: 'dry' })]);
-    expect(rulesForTargets(valid(HEADWAY), ['Large patch', 'Spring dead spot'])[0].by_target).toBeUndefined();
+  test('the untouched label prefill reads the product\'s main use; an edited mixed list reads every named target', () => {
+    const ACELEPRYN_LABEL = ['Tropical sod webworms', 'Fall armyworms', 'White grubs', 'Billbugs'];
+    const XTRA_LABEL = ['Southern chinch bugs', 'Tropical sod webworms', 'White grubs', 'Fall armyworms'];
+    const HEADWAY_LABEL = ['Large patch', 'Gray leaf spot', 'Take-all root rot', 'Fairy ring'];
+    // The prefill (any order, any case): the caterpillar hold, never hold-then-water-in.
+    expect(rulesForTargets(valid(ACELEPRYN), ['White grubs', 'tropical sod webworms', 'Fall armyworms'], { labelTargets: ACELEPRYN_LABEL }))
+      .toEqual([expect.objectContaining({ mode: 'hold', hold_hours: 24 })]);
+    // A prefill with a target no entry names: still the main use, not no rule.
+    expect(rulesForTargets(valid(ACELEPRYN), XTRA_LABEL.slice(0, 3), { labelTargets: XTRA_LABEL }))
+      .toEqual([expect.objectContaining({ mode: 'hold', hold_hours: 24 })]);
+    // A list the technician chose: every named direction (the builder combines them).
+    expect(rulesForTargets(valid(ACELEPRYN), ['Tropical sod webworms', 'White grubs'], { labelTargets: ACELEPRYN_LABEL }).map((r) => r.mode)).toEqual(['hold', 'water_in']);
+    expect(rulesForTargets(valid(HEADWAY), ['Large patch', 'Spring dead spot'], { labelTargets: HEADWAY_LABEL }).map((r) => r.mode)).toEqual(['water_in', 'hold']);
+    expect(rulesForTargets(valid(HEADWAY), ['Large patch', 'Spring dead spot'], { labelTargets: HEADWAY_LABEL })[1].by_target).toBeUndefined();
+    // ...but a chosen target the label gives no line for, on a target-only rule: no rule.
+    expect(rulesForTargets(valid(ACELEPRYN), ['Billbugs', 'White grubs'], { labelTargets: ACELEPRYN_LABEL })).toEqual([]);
+  });
+
+  test('catalog label targets unknown: a list that is not one way is ambiguous, no rule', () => {
+    expect(rulesForTargets(valid(ACELEPRYN), ['Tropical sod webworms', 'Fall armyworms', 'White grubs'])).toEqual([]);
+    expect(rulesForTargets(valid(HEADWAY), ['Large patch', 'Spring dead spot'])).toEqual([]);
+    // One-way lists and lists no entry names do not need them.
+    expect(rulesForTargets(valid(ACELEPRYN), ['White grubs']).map((r) => r.mode)).toEqual(['water_in']);
+    expect(rulesForTargets(valid(HEADWAY), ['Gray leaf spot']).map((r) => r.mode)).toEqual(['hold']);
   });
 
   test('no target logged: the product-wide rule, or for a target-only rule its first entry (the main use)', () => {

@@ -3931,13 +3931,14 @@ async function buildReportWateringInstruction({ products, service, completionTim
   // water-in the label requires wins over a hold that can wait less (rule E).
   // Off: one rule per product, exactly as stored.
   const everyVisit = featureGates.lawnWateringEveryVisitLive();
+  const labelTargets = everyVisit ? await loadLabelTargets(products, knex) : new Map();
   return buildWateringInstruction({
     rules: (Array.isArray(products) ? products : []).flatMap((p) => {
       const name = p?.product_name || null;
       const rule = p?.approved_report_product_facts?.wateringRule || null;
       const mowHoldDays = p?.approved_report_product_facts?.mowHoldDays ?? null;
       if (!everyVisit) return [{ name, rule, mowHoldDays }];
-      const picked = rulesForTargets(rule, p?.targets);
+      const picked = rulesForTargets(rule, p?.targets, { labelTargets: labelTargets.get(String(canonicalProductId(p?.product_id))) ?? null });
       return picked.length ? picked.map((one) => ({ name, rule: one, mowHoldDays })) : [{ name, rule: null, mowHoldDays }];
     }),
     completedAt: completionTime,
@@ -3945,6 +3946,20 @@ async function buildReportWateringInstruction({ products, service, completionTim
     plainWhenNoSetup: forCompletion,
     labelFirst: everyVisit,
   });
+}
+
+// GATE_LAWN_WATERING_EVERY_VISIT: the catalog label targets (target_pests) of
+// each product whose rule splits by target, keyed by catalog id. The completion
+// form prefills a use's targets from them, so rulesForTargets reads an
+// untouched prefill as the product's main use. A failed read throws: the
+// caller treats the watering inputs as unreadable (no instruction, an office
+// alert), never a guess.
+async function loadLabelTargets(products, knex) {
+  const split = (p) => Array.isArray(p?.approved_report_product_facts?.wateringRule?.by_target);
+  const ids = [...new Set((Array.isArray(products) ? products : []).filter(split).map((p) => canonicalProductId(p.product_id)).filter(Boolean))];
+  if (!ids.length || !knex) return new Map();
+  const rows = await knex('products_catalog').whereIn('id', ids).select('id', 'target_pests');
+  return new Map(rows.map((row) => [String(row.id), parseJsonArray(row.target_pests)]));
 }
 
 // The instruction frozen at completion (lawn-report-write-gate.js, under

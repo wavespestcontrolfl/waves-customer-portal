@@ -384,19 +384,36 @@ function withThenStep(rule) {
   }];
 }
 
-// rulesForTargets(rule, targets) -> rule[] : the rules ONE logged use of a
-// product carries. A rule with no by_target is itself. The logged targets are
-// usually the completion form's label prefill (the catalog's first targets),
-// not the use (codex #6449), so they pick a target rule only when they point
-// ONE way: every logged target named by an entry, and every named entry the
-// same mode. A mixed list (the prefill, or a real mix) reads the product's
-// main use: the top-level rule, or for a target-only rule its FIRST entry. So
-// does no target logged. Targets that no entry names read the top-level rule;
-// on a target-only rule that is a use the label gives no watering line for:
-// no rule (no claim). A hold's then_water_in step becomes a rule of its own.
+// rulesForTargets(rule, targets, { labelTargets }) -> rule[] : the rules ONE
+// logged use of a product carries. A rule with no by_target is itself.
+// The completion form prefills a use's targets with the label's first
+// MAX_LABEL_TARGET_PREFILL catalog targets (products_catalog.target_pests), so
+// a logged list is not always the use (codex #6449):
+// - no target logged, or the untouched prefill: the product's main use (the
+//   top-level rule, or for a target-only rule its FIRST entry);
+// - targets that point ONE way (all named by entries of one mode): those
+//   entries;
+// - any other list the technician chose: every entry it names, plus the
+//   top-level rule for a target no entry names. On a target-only rule a
+//   target no entry names is a use the label gives no line for: no rule.
+// labelTargets unknown (null): a list that is not one way is ambiguous, no
+// rule. A hold's then_water_in step becomes a rule of its own.
 // [] = no rule (no claim).
-function rulesForTargets(rule, targets) {
-  return pickTargetRules(rule, targets).flatMap(withThenStep);
+function rulesForTargets(rule, targets, { labelTargets = null } = {}) {
+  return pickTargetRules(rule, targets, labelTargets).flatMap(withThenStep);
+}
+
+// Mirrors the completion form (client SchedulePage.jsx MAX_LABEL_TARGET_PREFILL).
+const MAX_LABEL_TARGET_PREFILL = 3;
+const lowerNames = (list) => targetList(list)
+  .map((target) => (typeof target === 'string' ? target.trim().toLowerCase() : ''))
+  .filter(Boolean);
+
+// The logged list is the form's prefill, untouched: the same set as the
+// label's first catalog targets.
+function isPrefill(names, labelTargets) {
+  const prefill = new Set(lowerNames(labelTargets).slice(0, MAX_LABEL_TARGET_PREFILL));
+  return prefill.size > 0 && names.length === prefill.size && names.every((name) => prefill.has(name));
 }
 
 // service_products.targets as stored (text[], or its JSON text): every caller
@@ -412,22 +429,21 @@ function targetList(targets) {
   }
 }
 
-function pickTargetRules(rule, targets) {
+function pickTargetRules(rule, targets, labelTargets) {
   if (!isPlainObject(rule)) return [];
   const { by_target: entries, ...rest } = rule;
   const base = MODES.includes(rest.mode) ? rest : null;
   if (!Array.isArray(entries) || !entries.length) return base ? [base] : [];
-  const names = targetList(targets)
-    .map((target) => (typeof target === 'string' ? target.trim().toLowerCase() : ''))
-    .filter(Boolean);
+  const names = [...new Set(lowerNames(targets))];
   const main = base || targetRuleOf(entries[0], rule);
-  if (!names.length) return [main];
+  if (!names.length || (labelTargets != null && isPrefill(names, labelTargets))) return [main];
   const covers = (entry, name) => entry.match.some((word) => name.includes(word));
   const picked = entries.filter((entry) => names.some((name) => covers(entry, name)));
   if (!picked.length) return base ? [base] : [];
   const unnamed = names.some((name) => !entries.some((entry) => covers(entry, name)));
-  const oneWay = !unnamed && new Set(picked.map((entry) => entry.mode)).size === 1;
-  return oneWay ? picked.map((entry) => targetRuleOf(entry, rule)) : [main];
+  if (!unnamed && new Set(picked.map((entry) => entry.mode)).size === 1) return picked.map((entry) => targetRuleOf(entry, rule));
+  if (labelTargets == null || (unnamed && !base)) return [];
+  return [...picked.map((entry) => targetRuleOf(entry, rule)), ...(unnamed ? [base] : [])];
 }
 
 module.exports = {

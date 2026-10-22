@@ -148,8 +148,8 @@ describe('item 1: a visit with a water-in product never says "No special waterin
       expect(cleanup.waterInRuleOf([use(['White grubs'])])).toEqual({ inches: 0.25, hours: 24, sameDay: false });
       expect(cleanup.waterInRuleOf([use(['Tropical sod webworm caterpillars'])])).toEqual({ hold: true });
       expect(cleanup.waterInRuleOf([use(['Southern chinch bugs']), product('Granular Fertilizer', WATER_IN_ROW)])).toBeNull();
-      // A mixed list (the form's label prefill) reads the main use: the caterpillar hold.
-      expect(cleanup.waterInRuleOf([use(['White grubs', 'Southern chinch bugs']), product('Granular Fertilizer', WATER_IN_ROW)])).toEqual({ hold: true });
+      // A mixed list: without the catalog label targets the use is ambiguous, so no water-in advice.
+      expect(cleanup.waterInRuleOf([use(['White grubs', 'Tropical sod webworm caterpillars']), product('Granular Fertilizer', WATER_IN_ROW)])).toBeNull();
       // The watering-rule gate off (a kill switch): target rules are not read, as before the gate.
       delete process.env.GATE_LAWN_WATERING_RULE;
       expect(cleanup.waterInRuleOf([use(['White grubs'])])).toBeNull();
