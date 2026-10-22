@@ -17,8 +17,8 @@
 // Retired gates stay out. If the index cannot be read, the gate catalogue
 // (knownGateCatalog(), feature-gates.js only) is the fallback.
 //
-// The value is the raw string, never trimmed: " true " is not "true" to any
-// reader, and that is exactly the setting this page must expose. It is shown
+// The value is the raw string, never trimmed: " true " is not "true" to a
+// strict reader (some readers trim, some do not), so the page shows it as set. It is shown
 // only when its trimmed form is a plain switch word or a timestamp; anything
 // else (an allowlist of ids, say) shows as set, with the value withheld.
 
