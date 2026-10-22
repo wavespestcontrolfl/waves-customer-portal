@@ -446,7 +446,8 @@ function mayExecuteWithoutCard(toolName, input = {}, taint = null, grounding = n
 // or mayExecuteWithoutCard, so this flag cards them all (Codex #6369 r15).
 function noteSameNameContext(taint, taskContext) {
   // Only an owner-direct context: with owner-direct off the flag and the marker mean nothing (Codex #6369 r31).
-  if (taint && ibTargetRulesV2Live() && taskContext?.ownerDirect === true && (taskContext?.candidates?.length || 0) > 1) {
+  if (taint && ibTargetRulesV2Live() && taskContext?.ownerDirect === true
+    && ((taskContext?.candidates?.length || 0) > 1 || taskContext?.sameNameOverflow === true)) {
     taint.sameNameCandidates = true;
     // The reply is then followed by a text-only "yes" as readily as a button tap, whatever the
     // group kind (Codex #6369 r22): the thread marker is left whenever more than one candidate

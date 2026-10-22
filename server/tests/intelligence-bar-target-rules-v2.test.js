@@ -806,7 +806,8 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     const all = [];
     for (const [first, last] of [['Create:', 'Customer Bob'], ['Pat2', 'Ex"ample'], ['Lee\n', 'Park\u{1F600}'], ["Ann-Marie", "O'Neil Smith."], ['12345', '!!!']]) {
       const labels = (await labelsFor(first, last)).filter(Boolean);
-      expect([first, last, labels.length]).toEqual([first, last, 2]);
+      // A name the sanitizer changes ("Pat2", "12345") gets no button: its label would not resolve back (Codex #6369 r33).
+      expect([first, last, labels.length]).toEqual([first, last, /\d/.test(first) ? 0 : 2]);
       for (const label of labels) {
         // Only letters, spaces, apostrophe, hyphen and period in the name, then ", City"; no colon, digit, quote, newline or emoji.
         expect(label).toMatch(/^[\p{L}][\p{L}'. -]*, [\p{L}' -]+$/u);
@@ -817,8 +818,9 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
       }
     }
     expect(all).toContain('Create Customer Bob, Venice');
-    expect(all).toContain('Pat Ex ample, Osprey');
-    expect(all).toContain('Customer Customer, Venice');
+    expect(all).toContain('Lee Park, Venice');
+    expect(all).not.toContain('Pat Ex ample, Osprey');
+    expect(all).not.toContain('Customer Customer, Venice');
     // The raw text never appears in a label.
     expect(all.join('|')).not.toMatch(/Create:|Ex"ample|Pat2/);
     // Safe replies fit the grammar; a colon or digits do not.
@@ -857,9 +859,48 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
       expect(OwnerDirect.looksLikeChoiceReply(label)).toBe(false);
     }
     for (const label of ["Pat O'Neil, Venice", 'Bartholomew F., Fort Myers', 'Ann-Marie Lee, St Pete']) expect(OwnerDirect.isChoiceLabelShape(label)).toBe(true);
-    // Nothing left of the name after stripping: the row is "Customer" or has no button, never a bad label.
+    // Nothing left of the name after stripping, or a leading apostrophe: no button, never a "Customer" stand-in.
     const edge = await Context.choiceLabels([{ id: id(1810), first_name: "'-.", last_name: "Lee'", city: 'Venice' }, { id: id(1811), first_name: 'Pat', last_name: 'Lee', city: 'X' }]);
-    expect(edge).toEqual(['Customer Lee, Venice', null]);
+    expect(edge).toEqual([null, null]);
+  });
+
+  test('gate on: a button is emitted only when its label round-trips to the stored name and to one customer (Codex #6369 r33)', async () => {
+    process.env[ON] = 'true';
+    const labels = await Context.choiceLabels([
+      { id: id(1900), first_name: 'Pat2', last_name: 'Example', city: 'Venice' }, // sanitized to "Pat Example": would not resolve back
+      { id: id(1901), first_name: "'Neil", last_name: 'Park', city: 'Venice' }, // leading apostrophe stripped
+      { id: id(1902), first_name: '!!!', last_name: 'Park', city: 'Venice' }, // "!!!" normalizes to nothing, so "Park" still resolves: no "Customer" stand-in
+      { id: id(1903), first_name: 'Pat', last_name: 'Example', city: 'Venice' }, // plain name: button
+      { id: id(1904), first_name: 'Mary', last_name: 'Lee', city: 'Osprey' },
+      { id: id(1905), first_name: 'Mary', last_name: 'Lee', city: 'Osprey' }, // same label as the row above: neither gets one
+    ]);
+    expect(labels).toEqual([null, null, 'Park, Venice', 'Pat Example, Venice', null, null]);
+  });
+
+  test('gate on: past the 25-row cap the request is still tainted: create_customer is carded, the marker is left; owner-direct v2 scope only (Codex #6369 r33)', async () => {
+    process.env[ON] = 'true';
+    customers = sameName(30);
+    const over = await ask('update Pat Example notes');
+    expect(over).toMatchObject({ code: 'target_clarification_required', candidates: [], sameNameOverflow: true });
+    const owner = Context.ownerDirectContext(over);
+    expect(owner.sameNameOverflow).toBe(true);
+    const create = { first_name: 'Sam', last_name: 'Newcomer', phone: '941-555-0150' };
+    const grounding = OwnerDirect.targetGrounding(owner);
+    expect(OwnerDirect.executesWithoutCard('create_customer', create, null, OwnerDirect.newRequestTaint([]), grounding)).toBe(true);
+    const taint = OwnerDirect.newRequestTaint([]);
+    OwnerDirect.noteSameNameContext(taint, owner);
+    expect(taint.sameNameCandidates).toBe(true);
+    expect(OwnerDirect.sameNameMarkerNeeded(taint)).toBe(true);
+    expect(OwnerDirect.executesWithoutCard('create_customer', create, null, taint, grounding)).toBe(false);
+    expect(OwnerDirect.mayExecuteWithoutCard('create_customer', create, taint, grounding)).toBe(false);
+    // Not an owner-direct context, or gate off: nothing is tainted.
+    const plain = OwnerDirect.newRequestTaint([]);
+    OwnerDirect.noteSameNameContext(plain, { ...owner, ownerDirect: false });
+    expect(plain.sameNameCandidates).toBeUndefined();
+    delete process.env[ON];
+    const off = OwnerDirect.newRequestTaint([]);
+    OwnerDirect.noteSameNameContext(off, owner);
+    expect(off.sameNameCandidates).toBeUndefined();
   });
 
   test('gate off: the selection collapse does not run, candidates stay exactly as found; another admin keeps them too (Codex #6369 r31)', async () => {

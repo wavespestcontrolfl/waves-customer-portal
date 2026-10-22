@@ -724,14 +724,13 @@ const safeChoiceCity = city => {
 };
 
 // ONE sanitizer for every emitted choice label, full and shortened (Codex #6369 r31). A name part keeps
-// only letters, spaces, apostrophe, hyphen and period (runs collapsed, trimmed; nothing left ->
-// "Customer"), and the city goes through safeChoiceCity. So a label is always plain "Name, City" text:
+// only letters, spaces, apostrophe, hyphen and period (runs collapsed, trimmed), and the city goes through safeChoiceCity. So a label is always plain "Name, City" text:
 // a customer-entered ":" or quote can never ride into the button, and the tapped text always matches
 // the strict choice-reply grammar (looksLikeChoiceReply), so the tap is carded by its shape.
 // Each word loses its leading and trailing apostrophes, hyphens and periods (r32).
 const safeNamePart = value => String(value ?? '').replace(/[^\p{L}'. -]+/gu, ' ').split(/\s+/)
   .map(word => word.replace(/^['.-]+|['.-]+$/g, '')).filter(Boolean).join(' ');
-const labelNamePart = value => (String(value ?? '').trim() ? safeNamePart(value) || 'Customer' : '');
+const labelNamePart = value => safeNamePart(value);
 
 async function choiceLabels(customers) {
   const nameOf = customer => [labelNamePart(customer.first_name), labelNamePart(customer.last_name)].filter(Boolean).join(' ');
@@ -754,8 +753,12 @@ async function choiceLabels(customers) {
   }
   // Every candidate label, full or short, must pass the one reply-shape predicate; one that does not
   // gets no button (the row stays listed as text) - Codex #6369 r32.
+  // A button is emitted only when its label round-trips (Codex #6369 r33): each sanitized name part
+  // normalizes to the stored part, so the tapped name resolves back to this customer. A name the
+  // sanitizer changed ("Pat2" -> "Pat", a leading apostrophe, nothing left) gets no button.
+  const roundTrips = customer => [customer.first_name, customer.last_name].every(part => normalizeName(labelNamePart(part)) === normalizeName(part));
   const labels = customers.map((customer) => {
-    if (!safeChoiceCity(customer.city)) return null;
+    if (!safeChoiceCity(customer.city) || !roundTrips(customer)) return null;
     const whole = full(customer);
     if (whole.length <= MAX_LABEL_CHARS) return isChoiceLabelShape(whole) ? whole : null;
     if (!wantsShort(customer)) return null;
@@ -765,8 +768,13 @@ async function choiceLabels(customers) {
   });
   // A label that two customers share (same city and name, or the same first name,
   // last initial and city) cannot pick one of them.
+  // The count covers every row by its STORED name and city, also the rows that got no button, so a
+  // tap resolves to this customer alone within the candidate set.
   const key = label => normalizeName(label);
-  return labels.map(label => (label && labels.filter(other => other && key(other) === key(label)).length === 1 ? label : null));
+  const wouldBe = customers.filter(customer => safeChoiceCity(customer.city))
+    .map(customer => key(`${[customer.first_name, customer.last_name].filter(Boolean).join(' ')}, ${safeChoiceCity(customer.city)}`));
+  return labels.map(label => (label && labels.filter(other => other && key(other) === key(label)).length === 1
+    && wouldBe.filter(other => other === key(label)).length <= 1 ? label : null));
 }
 
 // The one customer a capped name's typed phone or email resolved to, or null (a PICK for the
@@ -923,7 +931,9 @@ async function cappedStage(r) {
     collapseCandidates(r);
     return null;
   }
-  return { page: r.page, candidates: [], target: null, targets: [], ambiguous: false,
+  // sameNameOverflow: the rows are not listed, but the name IS ambiguous, so the owner-direct request is
+  // tainted like a multi-candidate one (Codex #6369 r33).
+  return { page: r.page, candidates: [], target: null, targets: [], ambiguous: false, sameNameOverflow: true,
     error: 'More customers share this name than one lookup can list, so none can be selected here. Identify the customer by phone or email, or start the request from their customer page.',
     code: 'target_clarification_required', requestPhrase: normalizeName(targetClause(r.prompt)), namesRequested: r.nameHint, ...r.typed };
 }
