@@ -285,3 +285,31 @@ test('find_duplicates caps the canonical queue and says so, instead of handing t
     spy.mockRestore();
   }
 });
+
+describe('call log finds calls not linked to a customer', () => {
+  test('search matches transcript words, escapes LIKE wildcards, and returns the matching text', async () => {
+    const transcript = `${'x'.repeat(400)} Jeff is a project manager. I'm the owner of the company. ${'y'.repeat(400)}`;
+    db.__rows = () => [{ id: 'unlinked', customer_id: null, from_phone: '+15555550101', to_phone: '+15555550102', transcription: transcript }];
+    const result = await executeCommsTool('get_call_log', { search: 'project manager', days_back: 14 });
+    expect(result.error).toBeUndefined();
+    expect(db.__queries[0].sql).toMatch(/"?call_log"?\."?transcription"? ILIKE \$\d+ ESCAPE/);
+    expect(db.__queries[0].bindings).toContain('%project manager%');
+    expect(result.calls[0].match_excerpt).toContain('project manager');
+    await executeCommsTool('get_call_log', { search: '50%_off' });
+    expect(db.__queries.at(-1).bindings).toContain('%50\\%\\_off%');
+  });
+
+  test('phone matches the last 10 digits of either number', async () => {
+    db.__rows = () => [];
+    await executeCommsTool('get_call_log', { phone: '(555) 555-0101' });
+    const query = db.__queries[0];
+    expect(query.sql).toMatch(/from_phone[\s\S]*or[\s\S]*to_phone/i);
+    expect(query.bindings.filter((value) => value === '5555550101')).toHaveLength(2);
+  });
+
+  test('short search and incomplete phone are refused before any query', async () => {
+    expect((await executeCommsTool('get_call_log', { search: 'ab' })).error).toMatch(/3 characters/);
+    expect((await executeCommsTool('get_call_log', { phone: '555-0101' })).error).toMatch(/10-digit/);
+    expect(db.__queries).toHaveLength(0);
+  });
+});
