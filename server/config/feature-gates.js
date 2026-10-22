@@ -5782,11 +5782,12 @@ function lawnWateringSmsLive() {
 // the label-first same-day rule when the instruction is built
 // (service-report/report-data.js), and the "no watering change" text plus the
 // office alert when the watering text goes out (lawn-watering-sms.js).
-// It needs GATE_LAWN_WATERING_SMS and GATE_LAWN_WATERING_RULE: either one off
-// (a kill switch) reads it as off everywhere, so every caller is back to the
-// contracted payload.
+// It needs GATE_LAWN_WATERING_RULE: that kill switch off reads it as off
+// everywhere, so the report and every other caller are back to the contracted
+// payload (docs/public-route-contracts.md). The text and its office alert also
+// need GATE_LAWN_WATERING_SMS, which lawn-watering-sms.js checks first.
 function lawnWateringEveryVisitLive() {
-  return process.env.GATE_LAWN_WATERING_EVERY_VISIT === 'true' && lawnWateringSmsLive() && lawnWateringRuleLive();
+  return process.env.GATE_LAWN_WATERING_EVERY_VISIT === 'true' && lawnWateringRuleLive();
 }
 
 // GATE_CALL_ADDRESS_ONFILE_ASSIST read at CALL time — strict `=== 'true'`, off
