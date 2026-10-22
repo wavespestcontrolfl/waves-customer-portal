@@ -647,6 +647,34 @@ describe("Email schedule send", () => {
     }
   });
 
+  it("an unclear restore mark stacks on a may-have-sent guard; each check clears one", async () => {
+    scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "outcome_unknown", mayHaveSent: true }];
+    const base = fetch.getMockImplementation();
+    let cancels = 0;
+    fetch.mockImplementation((input, options = {}) => {
+      const url = String(input);
+      if (url.endsWith("/queued-1/restored")) return Promise.reject(new TypeError("network"));
+      if (url.endsWith("/queued-1/cancel") && (cancels += 1) > 1) return Promise.reject(new TypeError("network"));
+      if (url.endsWith("/queued-1/cancel")) return response({ success: true, draft: { ...scheduledRows[0], status: "cancelled" } });
+      return base(input, options);
+    });
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Scheduled" }, { timeout: 3000 }));
+    const setItem = Storage.prototype.setItem;
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function failPending(key, value) {
+      if (/restored_pending/.test(key)) throw new Error("Quota");
+      return setItem.call(this, key, value);
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Back to draft" }));
+    expect(await screen.findByText(/Gmail may already have sent this email/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "I checked: it is in neither" }));
+    expect(await screen.findByText(/The Scheduled list may still offer this email/)).toBeInTheDocument();
+    const send = () => screen.getAllByRole("button", { name: "Send", exact: true }).at(-1);
+    expect(send()).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "I checked: no other copy" }));
+    await waitFor(() => expect(send()).not.toBeDisabled());
+  });
+
   it("sign-out keeps the restore key, so a cancel whose answer was lost can still be taken back", () => {
     sessionStorage.setItem("waves_email_restored_pending:fixture-schedule-owner", "[\"queued-1\"]");
     sessionStorage.setItem("waves_email_restore_keys:fixture-schedule-owner", "{}");

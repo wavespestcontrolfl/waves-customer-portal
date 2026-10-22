@@ -167,7 +167,8 @@ export default function useEmailEditor(userId) {
     const slot = slotOf(replyId);
     const entry = uncertainSchedule.current[slot];
     if (scheduling || !entry) return;
-    if (!entry.clientKey) { rememberUncertain(slot, null); return; }
+    // A guard with no key is the operator's call; stacked checks go one by one.
+    if (!entry.clientKey) { rememberUncertain(slot, entry.also?.length ? { request: entry.also[0], clientKey: null, also: entry.also.slice(1) } : null); return; }
     const kind = replyId ? "reply" : "compose";
     const say = (message, error = false) => setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error, message } }));
     let row;
@@ -479,8 +480,12 @@ export default function useEmailEditor(userId) {
     setRestoring(null);
     if (mark === "not_durable") { withdrawScheduledDraft(draft); return; }
     if (mark === "unknown") {
+      // Stacks on a guard already there (may have sent, taken over): each
+      // check is asked in turn, none is dropped.
       const slot = slotOf(draft.replyEmailId);
-      if (!rememberUncertain(slot, RESTORE_UNCONFIRMED)) { uncertainSchedule.current[slot] = RESTORE_UNCONFIRMED; notifyDrafts(); }
+      const existing = uncertainSchedule.current[slot];
+      const next = existing ? { ...existing, also: [...(existing.also || []), RESTORE_UNCONFIRMED.request] } : RESTORE_UNCONFIRMED;
+      if (!rememberUncertain(slot, next)) { uncertainSchedule.current[slot] = next; notifyDrafts(); }
     }
     if (!draft.replyEmailId) setShowCompose(true);
   };
