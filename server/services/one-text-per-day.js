@@ -34,8 +34,8 @@
  *    or changed meanwhile sends as it would without the rule and records no proof, so a stale
  *    send cannot cover another visit.
  *  - A text the provider reports undelivered is recorded by id (a `bounced` audit row written from the
- *    status callback, whether or not the proof exists yet); a proof any of whose ids has a bounced row
- *    no longer covers other visits (reconciled at read time). The failed status the callback stores on the
+ *    status callback, whether or not the proof exists yet); a proof all of whose ids (one per contact) have a
+ *    bounced row no longer covers other visits (reconciled at read time); one delivered contact keeps it. The failed status the callback stores on the
  *    sms_log and message rows voids the proof the same way, so a bounce row that could not be written loses
  *    nothing. Nothing is re-sent retroactively.
  *  - NAMED = COVERED. The delivered proof records the ids of the visits the text named
@@ -128,15 +128,15 @@ async function deliveredSibling(conn, ref, kind, technicianId) {
     .where(function liveOrLegacyNullStatus() {
       this.whereNull('sib.status').orWhereNotIn('sib.status', RETAINED_HISTORY_STATUSES);
     })
-    // A delivered text any of whose provider ids was reported undelivered told nobody. Decided at READ time
-    // from the recorded bounce, so it does not matter whether the bounce or the proof was written first.
-    .whereRaw(`NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(COALESCE(al.metadata->'provider_message_ids', '[]'::jsonb)) AS p(sid)
-      JOIN audit_log b ON b.action = ? AND b.metadata->>'sid' = p.sid)`, [BOUNCED_ACTION])
-    // The same, from the status the callback stores on the message rows before the bounce row is written (sms_log
-    // and the conversation message). A bounce whose own row could not be written still voids the proof.
-    .whereRaw(`NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(COALESCE(al.metadata->'provider_message_ids', '[]'::jsonb)) AS p(sid)
-      WHERE EXISTS (SELECT 1 FROM sms_log s WHERE s.twilio_sid = p.sid AND s.status IN ('failed', 'undelivered'))
-         OR EXISTS (SELECT 1 FROM messages m WHERE m.twilio_sid = p.sid AND m.delivery_status IN ('failed', 'undelivered')))`)
+    // A delivered text told the customer only through a provider id that was NOT reported undelivered: the proof
+    // covers while at least one of its ids (one per contact) has no bounce. Decided at READ time from the recorded
+    // bounce row and from the failed status the callback stores on sms_log and the conversation message first, so
+    // neither the bounce/proof order nor a bounce row that could not be written matters.
+    .whereRaw(`(jsonb_array_length(COALESCE(al.metadata->'provider_message_ids', '[]'::jsonb)) = 0
+      OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(al.metadata->'provider_message_ids') AS p(sid)
+        WHERE NOT EXISTS (SELECT 1 FROM audit_log b WHERE b.action = ? AND b.metadata->>'sid' = p.sid)
+          AND NOT EXISTS (SELECT 1 FROM sms_log s WHERE s.twilio_sid = p.sid AND s.status IN ('failed', 'undelivered'))
+          AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.twilio_sid = p.sid AND m.delivery_status IN ('failed', 'undelivered'))))`, [BOUNCED_ACTION])
     .select('sib.id',
       conn.raw("al.metadata->>'customer_id' as customer_id"),
       conn.raw("al.metadata->>'property_id' as property_id"),

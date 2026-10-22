@@ -825,6 +825,34 @@ postgres('one text per customer, address and day', () => {
         expect(texted(TwilioService.sendTechEnRoute)).toBe(2);
       });
 
+      const twoContactSids = ['SM' + 'c'.repeat(31) + '1', 'SM' + 'c'.repeat(31) + '2'];
+      const sendToTwoContacts = () => TwilioService.sendTechEnRoute.mockImplementationOnce(async () => ({
+        success: true, results: twoContactSids.map((providerMessageId) => ({ sent: true, providerMessageId })),
+      }));
+      const markUndelivered = (f, sid) => mockPg('sms_log').insert({ direction: 'outbound', from_phone: '+15550000001', to_phone: f.phone, twilio_sid: sid, message_type: 'tech_en_route', customer_id: f.customerId, status: 'undelivered' });
+
+      test('two contacts, one text bounces: the contact who got it keeps the cover (no duplicate)', async () => {
+        gateOn();
+        const f = await twoVisits();
+        sendToTwoContacts();
+        await enRoute(f.rows[0].id);
+        expect((await proofsFor(f.rows[0].id))[0].metadata.provider_message_ids).toEqual(twoContactSids);
+        await markUndelivered(f, twoContactSids[0]);
+        await enRoute(f.rows[1].id);
+        expect(texted(TwilioService.sendTechEnRoute)).toBe(1);
+      });
+
+      test('two contacts, both texts bounce: a later sibling sends its own', async () => {
+        gateOn();
+        const f = await twoVisits();
+        sendToTwoContacts();
+        await enRoute(f.rows[0].id);
+        await markUndelivered(f, twoContactSids[0]);
+        await markUndelivered(f, twoContactSids[1]);
+        await enRoute(f.rows[1].id);
+        expect(texted(TwilioService.sendTechEnRoute)).toBe(2);
+      });
+
       test('a delivered status on sms_log keeps the cover', async () => {
         gateOn();
         const f = await twoVisits();
