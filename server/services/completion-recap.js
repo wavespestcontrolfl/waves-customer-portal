@@ -125,19 +125,15 @@ function deterministicRecap(input = {}) {
   }
 
   if (completionTextPlainLive()) {
-    // GATE_COMPLETION_TEXT_PLAIN: say what was done. A station visit checked
-    // its stations; it did not treat anything, and the generic "normal
-    // activity" sentence is gone.
-    if (isStationService(serviceType)) {
-      return sentenceJoin([
-        `Today we completed your ${serviceType} and checked your stations.`,
-        'Reply to this message if anything needs attention before your next visit.',
-      ]);
-    }
+    // GATE_COMPLETION_TEXT_PLAIN: say what was done, and only that. A station
+    // check treated nothing, and the generic "normal activity" sentence is
+    // gone. No "reply to this message" line: the recap is the web report's
+    // summary when the visit has no written report (report-data.js
+    // visitSummary), and a service_report_v1 completion text never carries it.
+    if (isStationCheck(serviceType)) return `Today we completed your ${serviceType} and checked your stations.`;
     return sentenceJoin([
       `Today we completed your ${serviceType}.`,
       areas.length ? `We treated ${areas.join(', ')}.` : '',
-      'Reply to this message if anything needs attention before your next visit.',
     ]);
   }
 
@@ -149,10 +145,13 @@ function deterministicRecap(input = {}) {
   ]);
 }
 
-// A station visit checks bait or monitoring stations (Termite Bait Station
-// Service, Rodent Bait Stations, Termite Monitoring ...), it does not treat.
-function isStationService(serviceType) {
-  return /\bstations?\b/i.test(serviceType) || /\bmonitor/i.test(serviceType);
+// A termite or rodent station check (Termite Bait Station Service, Rodent
+// Bait Stations, Termite Monitoring ...) checks its stations; it treats
+// nothing. Installing or setting stations up is not a check.
+function isStationCheck(serviceType) {
+  return /\b(termite|rodent)\b/i.test(serviceType)
+    && /\bstations?\b|\bmonitor/i.test(serviceType)
+    && !/\binstall|\bset ?up\b/i.test(serviceType);
 }
 
 // True when the visit record carries something the AI recap can be specific

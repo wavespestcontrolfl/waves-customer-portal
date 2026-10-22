@@ -217,7 +217,7 @@ describe('completion recap', () => {
       });
       expect(dispatchWithFallback).not.toHaveBeenCalled();
       expect(result).toEqual({
-        recap: `Today we completed your Quarterly Pest Control. ${REPLY} - Waves`,
+        recap: 'Today we completed your Quarterly Pest Control. - Waves',
         source: 'deterministic',
       });
     });
@@ -249,26 +249,37 @@ describe('completion recap', () => {
       expect(result.recap).toContain('service was not completed');
     });
 
-    test('gate on: station visit says checked, not treated, and drops the filler', () => {
+    test('gate on: a termite or rodent station check says checked, not treated, and drops the filler', () => {
       process.env.GATE_COMPLETION_TEXT_PLAIN = 'true';
       for (const name of [
         'Termite Bait Station Service', 'Rodent Bait Stations', 'Termite Bait Monitoring',
         'Rodent Monitoring Service (Monthly)', 'Quarterly Rodent Bait Station Service',
+        'Termite Bait Station Cartridge Replacement',
       ]) {
         const text = deterministicRecap({ serviceType: name, areasTreated: ['Garage'] });
-        expect(text).toBe(`Today we completed your ${name} and checked your stations. ${REPLY}`);
-        expect(text).not.toMatch(/treated|normal activity/i);
+        expect(text).toBe(`Today we completed your ${name} and checked your stations.`);
+        expect(text).not.toMatch(/treated|normal activity|reply/i);
+      }
+    });
+
+    test('gate on: installing or setting up stations, and other station services, are not a station check', () => {
+      process.env.GATE_COMPLETION_TEXT_PLAIN = 'true';
+      for (const name of [
+        'Termite Bait Station Installation', 'Bait Station Setup', 'Rodent Bait Station Set Up',
+        'Mosquito Treatment - Stations', 'Trap-Only Monitoring Retainer',
+      ]) {
+        expect(deterministicRecap({ serviceType: name })).toBe(`Today we completed your ${name}.`);
       }
     });
 
     test('gate on: other visit with areas, and with no areas', () => {
       process.env.GATE_COMPLETION_TEXT_PLAIN = 'true';
       expect(deterministicRecap({ serviceType: 'Pest Control', areasTreated: ['Garage', 'Entry points'] })).toBe(
-        `Today we completed your Pest Control. We treated Garage, Entry points. ${REPLY}`,
+        'Today we completed your Pest Control. We treated Garage, Entry points.',
       );
       const none = deterministicRecap({ serviceType: 'Pest Control' });
-      expect(none).toBe(`Today we completed your Pest Control. ${REPLY}`);
-      expect(none).not.toMatch(/normal activity|accessible service areas/i);
+      expect(none).toBe('Today we completed your Pest Control.');
+      expect(none).not.toMatch(/normal activity|accessible service areas|reply/i);
     });
 
     test('gate on: AI failure on a recorded visit falls back to the plain text', async () => {
@@ -281,7 +292,7 @@ describe('completion recap', () => {
       });
       expect(result.source).toBe('fallback');
       expect(result.recap).toBe(
-        `Today we completed your Termite Bait Station Service and checked your stations. ${REPLY} - Waves`,
+        'Today we completed your Termite Bait Station Service and checked your stations. - Waves',
       );
     });
   });
