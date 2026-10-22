@@ -2012,7 +2012,9 @@ const ReviewService = {
     try {
       // A summary held by quiet hours counts too: its 8 AM replay is a plain
       // text (deferSummarySms queues SMS, no App routing), and this enrollment
-      // waits until that leg is sent, so the ask goes 10 minutes after it.
+      // waits until that leg is sent, so the ask goes 10 minutes after it (or
+      // after the payment, when an unpaid invoice held the enrollment: the
+      // summary is a confirmed text either way).
       const effect = await database("visit_effects").where({ visit_id: visitId, effect_type: "completion_sms" }).first("status", "sent_at");
       return effect?.status === "sent" ? { status: "sent", at: effect.sent_at || new Date() } : null;
     } catch (err) {
