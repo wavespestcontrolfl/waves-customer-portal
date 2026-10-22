@@ -415,8 +415,12 @@ async function processVendorInvoice(email, classification) {
         logger.warn(`[invoice-processor] Email ${email.id} already booked expense ${email.expense_id} but its sender did not authenticate as the From domain — booking left as is`);
         return;
       }
-      await db('emails').where({ id: email.id }).update({
+      // A confirmed-stale link (its expense is gone) is cleared with the marker,
+      // guarded on the id read above so a link made meanwhile is not overwritten.
+      const where = email.expense_id ? { id: email.id, expense_id: email.expense_id } : { id: email.id };
+      await db('emails').where(where).update({
         auto_action: 'invoice_detected:unauthenticated',
+        ...(email.expense_id ? { expense_id: null } : {}),
         updated_at: new Date(),
       });
       logger.warn(`[invoice-processor] Email ${email.id} classified vendor_invoice but its sender did not authenticate as the From domain — not booked, left for review`);

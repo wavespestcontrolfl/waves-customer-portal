@@ -109,7 +109,8 @@ describe('processVendorInvoice authentication', () => {
     mockExpenseExists = false;
     await processVendorInvoice({ ...email(null), expense_id: 'exp-gone' }, CLASSIFICATION);
     expect(inserted()).toBeUndefined();
-    expect(mockWrites).toContainEqual(['emails', 'update', expect.objectContaining({ auto_action: 'invoice_detected:unauthenticated' })]);
+    // the stale link is cleared with the marker, so the row reads not logged
+    expect(mockWrites).toContainEqual(['emails', 'update', expect.objectContaining({ auto_action: 'invoice_detected:unauthenticated', expense_id: null })]);
   });
 
   test('gate on: a sender that authenticated as its From domain still books', async () => {
