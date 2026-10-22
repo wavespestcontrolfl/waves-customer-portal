@@ -31,6 +31,7 @@ const { isEnabled } = require("../config/feature-gates");
 const { billingEmailDetailsLive, customerPropertyAddress, isStreetShapedAddress } = require("./billing-email-details");
 const { estimateDeliverableUnderGate } = require("./pricing-authority-gate");
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require("../constants/business");
+const { ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY } = require("../constants/email-replay-exclusions");
 const {
   assessDepositFollowUpEligibility,
   DEPOSIT_FOLLOWUP_WINDOW,
@@ -682,7 +683,12 @@ async function sendDualChannel(est, { sms, email }) {
         triggerEventId: idempotencyKey,
         idempotencyKey,
         estimateId: est.id,
-        categories: ["estimate_followup", `estimate_followup_${email.stage}`],
+        categories: [
+          "estimate_followup",
+          `estimate_followup_${email.stage}`,
+          // Keeps the stored copy off the provider-retry and bounce-replay rails.
+          ...(email.averageText ? [ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY] : []),
+        ],
         // SendGrid rejection bodies can echo the recipient address — keep
         // them out of the provider log; the catch below redacts too.
         suppressProviderErrorLog: true,

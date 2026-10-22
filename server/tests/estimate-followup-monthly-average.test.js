@@ -25,6 +25,7 @@ jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMe
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(async () => ({ sent: true })),
   loadTemplateByKey: jest.fn(async () => ({ template: { status: 'active' }, activeVersion: mockTemplate.activeVersion })),
+  redactEmailAddresses: (s) => String(s || ''),
 }));
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (url, opts = {}) => `https://short.test/${opts.channel}`) }));
 jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn(async () => 'SMS body'), isTemplateActive: jest.fn(async () => true) }));
@@ -419,5 +420,46 @@ describe('send-time check: the average is re-read at the provider boundary', () 
     const updates = db.mock.results.map((r) => r.value).flatMap((b) => b?.update?.mock?.calls || []).map((c) => c[0]);
     expect(updates.some((u) => u && u.follow_up_count)).toBe(false);
     expect(updates).toContainEqual({ followup_unviewed_sent: false });
+  });
+
+  test('the stored row is marked off the retry rails only when the average is in it', async () => {
+    const withAverage = await pinned();
+    EmailTemplates.sendTemplate.mockClear();
+    await _private.sendDualChannel(row(), { sms: null, email: withAverage });
+    expect(EmailTemplates.sendTemplate.mock.calls[0][0].categories).toEqual([
+      'estimate_followup', 'estimate_followup_unviewed', 'estimate_followup_monthly_average',
+    ]);
+    mockGates.followup = false;
+    EmailTemplates.sendTemplate.mockClear();
+    const plain = await _private.withAverageEmail({ templateKey: KEY, stage: 'unviewed', payload: { first_name: 'T' } }, row());
+    await _private.sendDualChannel(row(), { sms: null, email: plain });
+    expect(EmailTemplates.sendTemplate.mock.calls[0][0].categories).toEqual(['estimate_followup', 'estimate_followup_unviewed']);
+  });
+
+  test.each([
+    ['a thrown provider rejection', () => EmailTemplates.sendTemplate.mockRejectedValueOnce(Object.assign(new Error('SendGrid 400'), { status: 400 }))],
+    ['a rejected result row', () => EmailTemplates.sendTemplate.mockResolvedValueOnce({ sent: false, aborted: false, reason: 'provider_rejected' })],
+  ])('sendDualChannel with no text reports not attempted on %s, so the stage claim is released for the next sweep', async (_name, arrange) => {
+    arrange();
+    const email = await pinned();
+    expect(await _private.sendDualChannel(row(), { sms: null, email })).toBe(false);
+  });
+
+  test('through checkAll: a provider rejection with no text releases the stage and bumps no counter', async () => {
+    require('../routes/admin-sms-templates').getTemplate.mockResolvedValueOnce(null);
+    stageWanted = 'unviewed';
+    candidate = row();
+    EmailTemplates.sendTemplate.mockRejectedValueOnce(Object.assign(new Error('SendGrid 400'), { status: 400 }));
+    await EstimateFollowUp.checkAll();
+    const updates = db.mock.results.map((r) => r.value).flatMap((b) => b?.update?.mock?.calls || []).map((c) => c[0]);
+    expect(updates.some((u) => u && u.follow_up_count)).toBe(false);
+    expect(updates).toContainEqual({ followup_unviewed_sent: false });
+    // The next sweep sends the touch again under the same idempotency key (fresh copy),
+    // because the rails above never re-send the marked stored row.
+    EmailTemplates.sendTemplate.mockResolvedValueOnce({ sent: true });
+    await EstimateFollowUp.checkAll();
+    expect(EmailTemplates.sendTemplate.mock.calls.filter((c) => c[0].templateKey).map((c) => c[0].idempotencyKey)).toEqual([
+      'estimate_followup_unviewed:est-1', 'estimate_followup_unviewed:est-1',
+    ]);
   });
 });
