@@ -140,6 +140,8 @@ CURATED_PREVIEW_TOOL_NAMES.add('propose_admin_edit');
 CURATED_PREVIEW_TOOL_NAMES.add('convert_lead');
 // void_invoice: its card lines come from its own preview (void-invoice-tools.js cardLines). It sends nothing.
 CURATED_PREVIEW_TOOL_NAMES.add('void_invoice');
+// set_customer_bill_to: its card lines come from its own preview (bill-to-tools.js cardLines). It sends nothing.
+CURATED_PREVIEW_TOOL_NAMES.add('set_customer_bill_to');
 
 // Legacy-bare jobs with no mutation-free preview: what the launch does is
 // fixed and known, so the card states it explicitly (job launch, external
@@ -209,6 +211,7 @@ const ACTION_LABELS = {
   propose_admin_edit: 'Edit an admin record',
   convert_lead: 'Convert a lead to a customer (sends nothing)',
   void_invoice: 'Void an invoice (sends nothing)',
+  set_customer_bill_to: 'Set a customer\'s Bill-To payer (sends nothing)',
   block_sender: 'Block a sender',
   create_pending_estimate: 'Create an estimate',
   create_agent_estimate_draft: 'Save an estimate draft',
@@ -845,6 +848,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // void_invoice: the invoice, what the void does and that nothing is sent.
   if (toolName === 'void_invoice' && preview?.preview === true) {
     for (const line of require('./void-invoice-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
+  // set_customer_bill_to: the customer, the payer, the invoices that move and stay, and that nothing is sent.
+  if (toolName === 'set_customer_bill_to' && preview?.preview === true) {
+    for (const line of require('./bill-to-tools').cardLines(toolName, preview)) push(line.kind, line.text);
   }
   // send_invoice: invoice, money and who is contacted.
   if (toolName === 'send_invoice' && preview?.preview === true) {

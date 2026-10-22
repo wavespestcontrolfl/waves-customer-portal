@@ -45,6 +45,8 @@ const REVIEWED_PII_TOOL_NAMES = new Set([
   'convert_lead',
   // void_invoice previews name the customer and the invoice.
   'void_invoice',
+  // set_customer_bill_to previews name the customer, the payer and the invoices.
+  'set_customer_bill_to',
   'get_stop_details',
   'get_recent_completions',
   'get_unanswered_threads',

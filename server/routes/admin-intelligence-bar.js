@@ -950,6 +950,10 @@ const PINNED_DISPLAY_BUILDERS = {
   void_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'void_invoice'
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount: preview.amount, status: preview.status, sends_to_customer: 'nothing' }
     : null),
+  // set_customer_bill_to: the card names the customer and the payer; the lines ride the contract.
+  set_customer_bill_to: (params, preview) => (preview?.preview === true && preview.tool === 'set_customer_bill_to'
+    ? { customer: preview.customer_name || preview.customer_id, bill_to_now: preview.bill_to_now, new_bill_to: preview.payer_name, invoices_moving: preview.invoices_moving.length, sends_to_customer: 'nothing' }
+    : null),
   // Feature switches (Codex r1 on #5489): the card must show the live facts
   // the preview read — current → new, what it means, the target and the
   // restart — not just the raw gate name / value the model sent.
@@ -995,6 +999,8 @@ const VERIFIED_VERSION_PARAMS = {
   convert_lead: '_verified_lead_convert_version',
   // void_invoice binds the invoice state, credit, pay-page session and links the card showed.
   void_invoice: '_verified_invoice_void_version',
+  // set_customer_bill_to binds the current Bill-To, the payer and the invoices that move and stay.
+  set_customer_bill_to: '_verified_bill_to_version',
   cancel_queued_message: '_verified_message_version',
   // resend_receipt binds the invoice, channels, recipients, amount, memo and the receipt
   // state the card showed — a receipt sent in between is refused, never doubled.
@@ -3386,6 +3392,7 @@ RULES:
 - En-route is not by itself a blanket prohibition on edits. Explain actual tool restrictions, and mention navigation coordination separately without inventing another approval requirement.
 - For write operations, prepare the required confirmation card; only the operator's approval can execute the proposed effects
 - Invoices: send_invoice (when it is in your tools) acts only on an EXISTING invoice — it texts the customer one pay-link text (no email). void_invoice (when it is in your tools) voids ONE invoice that has collected nothing and never deletes it; "delete" or "cancel" an invoice means void. Never create an invoice, change an amount, charge a card or refund from the bar; for those, say so and point the operator to that invoice on the Invoices page.
+- Bill-To: set_customer_bill_to (when it is in your tools) sets the Bill-To payer for a customer who pays for themselves today; the customer's unpaid visit invoices move to that payer with it. There is no per-invoice Bill-To: the payer is set on the account. Changing or removing an existing payer, or adding a new payer, stays on the customer page.
 - When showing customer lists, include: name, city, tier, relevant dates, and the specific data point the query is about
 - Look up stored customer, property, service and product facts before asking the operator to retype them. If consequential identity or write scope remains ambiguous, ask one concise clarification. Never guess a write target.
 - Lead with the actual outcome or pending approval and a record link. Normally use at most 80 words; expand only when the operator asks or the effects need explanation.

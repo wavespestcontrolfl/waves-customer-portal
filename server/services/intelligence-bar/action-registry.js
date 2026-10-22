@@ -12,7 +12,7 @@ const {
 } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
 const { mergeCustomersEnabled, deleteDuplicateCustomerEnabled } = require('./customer-lifecycle-tools');
-const { ibAcceptEstimateLive, ibLeadConvertLive, ibRecordPaymentLive, ibVoidInvoiceLive } = require('../../config/feature-gates');
+const { ibAcceptEstimateLive, ibLeadConvertLive, ibRecordPaymentLive, ibVoidInvoiceLive, ibSetBillToLive } = require('../../config/feature-gates');
 const { invoiceActionsLive } = require('./invoice-action-tools');
 const { repriceVisitsLive } = require('./reprice-visits-tools');
 const { adminReadLive } = require('./admin-read-tools');
@@ -75,6 +75,7 @@ const MODULES = [
   ['record-payment-tools', 'RECORD_PAYMENT_TOOLS', 'executeRecordPaymentTool'],
   ['lead-convert-tools', 'LEAD_CONVERT_TOOLS', 'executeLeadConvertTool'],
   ['void-invoice-tools', 'VOID_INVOICE_TOOLS', 'executeVoidInvoiceTool'],
+  ['bill-to-tools', 'BILL_TO_TOOLS', 'executeBillToTool'],
   ['choice-tools', 'CHOICE_TOOLS', 'executeChoiceTool'],
   ['admin-read-tools', 'ADMIN_READ_TOOLS', 'executeAdminReadTool'],
   ['admin-write-tools', 'ADMIN_WRITE_TOOLS', 'executeAdminWriteTool'],
@@ -142,6 +143,7 @@ const GATED_ACTIONS = {
   record_payment: () => ibRecordPaymentLive(),
   convert_lead: () => ibLeadConvertLive(),
   void_invoice: () => ibVoidInvoiceLive(),
+  set_customer_bill_to: () => ibSetBillToLive(),
   find_admin_reads: () => adminReadLive(),
   read_admin_data: () => adminReadLive(),
   find_admin_edits: () => adminWriteLive(),

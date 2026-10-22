@@ -3997,7 +3997,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
 });
 
 // PUT /api/admin/customers/:id
-router.put('/:id', requireAdmin, async (req, res, next) => {
+// Named so the Intelligence Bar's set_customer_bill_to card (setCustomerBillToFromBar, below) runs this very handler.
+const customerUpdateHandler = async (req, res, next) => {
   try {
     const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', profileLabel: 'profile_label', addressLine1: 'address_line1', addressLine2: 'address_line2', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email', serviceContact2Name: 'service_contact2_name', serviceContact2Phone: 'service_contact2_phone', serviceContact2Email: 'service_contact2_email', serviceContact3Name: 'service_contact3_name', serviceContact3Phone: 'service_contact3_phone', serviceContact3Email: 'service_contact3_email', hasLeftGoogleReview: 'has_left_google_review', payerId: 'payer_id', billingMode: 'billing_mode', contactRole: 'contact_role', smsPrimaryForSharedPhone: 'sms_primary_for_shared_phone' };
     const before = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
@@ -4261,6 +4262,14 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // moved, stranding them.
           const lockedBefore = await trx('customers').where({ id: req.params.id }).forUpdate().first() || before;
           contactAuditBefore = lockedBefore;
+          // req.ibExpectedPayerId is set only by setCustomerBillToFromBar (never an HTTP field): the Bill-To
+          // the bar card showed as current. Judged on the LOCKED row, so an edit that landed after the
+          // card's re-check still refuses here and nothing is written.
+          if (req.ibExpectedPayerId !== undefined && String(lockedBefore.payer_id ?? '') !== String(req.ibExpectedPayerId ?? '')) {
+            throw Object.assign(new Error('The Bill-To changed after the card was shown.'), {
+              statusCode: 409, isOperational: true, code: 'preview_changed',
+            });
+          }
           // REBUILD the shared-phone mark clear from the locked row (codex #6268
           // r4/r8): the pre-lock pass may have derived `false` from a stale
           // phone; a save that moved the number and marked it since keeps its
@@ -4695,7 +4704,8 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     }
     next(err);
   }
-});
+};
+router.put('/:id', requireAdmin, customerUpdateHandler);
 
 // PUT /api/admin/customers/:id/notification-prefs
 //
@@ -6744,3 +6754,28 @@ router.findAccountByContact = findAccountByContact;
 router.hasMembership = hasMembership;
 
 module.exports = router;
+
+// The Intelligence Bar's set_customer_bill_to runs the SAME handler as PUT /:id with only { payerId } — exactly
+// what the customer page's Bill-To select sends — without an HTTP request (the admin-invoices.js adapter
+// pattern): the handler gets the request fields it reads and a capture response, and the promise resolves the
+// reply it would send, { status, json }. An error passed to next() rejects. expectedPayerId: the Bill-To the
+// card showed (null = the customer pays).
+function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, actor }) {
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(json) { resolve({ status: this.statusCode, json }); return this; },
+    };
+    const req = {
+      params: { id: customerId },
+      body: { payerId: payerId == null ? '' : String(payerId) },
+      technicianId: actor?.technicianId || null,
+      ip: null,
+      get: () => null,
+      ibExpectedPayerId: expectedPayerId == null ? null : String(expectedPayerId),
+    };
+    Promise.resolve(customerUpdateHandler(req, res, reject)).catch(reject);
+  });
+}
+module.exports.setCustomerBillToFromBar = setCustomerBillToFromBar;
