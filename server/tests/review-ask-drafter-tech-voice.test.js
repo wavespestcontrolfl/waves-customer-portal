@@ -81,6 +81,7 @@ beforeEach(() => {
   mockRepeatCheck.mockReset().mockResolvedValue({ ok: true, json: { repeats: false, sentence: '', earlier_quote: '' } });
   mockGetRecentCalls.mockReset().mockResolvedValue([]);
   mockGates.reviewAskTechVoice = true;
+  mockGates.reviewAskFixedDay0 = false;
   Object.keys(mockTables).forEach((k) => delete mockTables[k]);
   mockTables.service_records = [{ structured_notes: JSON.stringify(REPORT) }];
   mockTables.sms_log = SMS;
@@ -266,6 +267,41 @@ describe('draftTechVoice', () => {
     const weekAgo = parseETDateTime(`${etCalendarDayOf(new Date(Date.now() - 7 * 86400000))}T08:00`);
     mockTables.sms_log = SMS.map((m) => ({ ...m, created_at: weekAgo }));
     expect(await Drafter.draftTechVoice({ ...INPUT, sequenceStep: 2, channel: 'email', serviceDate: weekAgo })).toBe(email.body);
+  });
+});
+
+// Owner 2026-10-22 ("fixed line for all"): the writer recited the activity
+// gauge ("a moderate level of cockroach activity") and booking talk.
+describe('GATE_REVIEW_ASK_FIXED_DAY0 — the same-day text is one fixed line', () => {
+  beforeEach(() => { mockGates.reviewAskFixedDay0 = true; });
+  const yesterday = () => new Date(Date.now() - 36 * 3600 * 1000);
+
+  test('day 0: the fixed line, no model call, recorded as drafted', async () => {
+    const body = await Drafter.draftTechVoice(INPUT);
+    expect(body).toBe("Hi Marta, it's Adam from Waves. Thanks for having us out today. A Google review would really help: {review_url}");
+    expect(mockDispatch).not.toHaveBeenCalled();
+    expect(mockRecordDraft.mock.calls[0][1]).toEqual({ outcome: 'drafted', body, sentences: [], reason: 'fixed_day0' });
+  });
+
+  test('the day after drops "today"; no first name or tech reads plainly', async () => {
+    expect(await Drafter.draftTechVoice({ ...INPUT, serviceDate: yesterday() }))
+      .toBe("Hi Marta, it's Adam from Waves. Thanks for having us out. A Google review would really help: {review_url}");
+    expect(await Drafter.draftTechVoice({ ...INPUT, customer: { ...INPUT.customer, first_name: 'Sunset Vacation Rentals' }, recipientFirstName: 'Sunset', techName: null }))
+      .toBe("Hi, it's Waves Pest Control. Thanks for having us out today. A Google review would really help: {review_url}");
+  });
+
+  test('follow-up texts and emails keep the writer', async () => {
+    mockDispatch.mockResolvedValue(reply(GOOD));
+    expect(await Drafter.draftTechVoice({ ...INPUT, sequenceStep: 1 })).toBe(GOOD.body);
+    await Drafter.draftTechVoice({ ...INPUT, channel: 'email' });
+    expect(mockDispatch).toHaveBeenCalled();
+  });
+
+  test('gate off: day 0 still goes to the writer', async () => {
+    mockGates.reviewAskFixedDay0 = false;
+    mockDispatch.mockResolvedValueOnce(reply(GOOD));
+    await Drafter.draftTechVoice(INPUT);
+    expect(mockDispatch).toHaveBeenCalled();
   });
 });
 
