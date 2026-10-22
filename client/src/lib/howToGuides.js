@@ -41,7 +41,8 @@ const GUIDES = [
       "Tap Billing.",
       "If Auto Pay is off, tap Turn on Auto Pay and follow the steps.",
       "To change the card Auto Pay uses, tap Manage Auto Pay, then Change payment method.",
-      "To save a new card or bank account, tap Add payment.",
+      // Card only: a bank account shows only while GATE_PORTAL_ACH_AUTOPAY is on.
+      "To save a new card, tap Add payment.",
     ],
   },
   {
@@ -54,8 +55,9 @@ const GUIDES = [
       SIGN_IN,
       "Tap Visits.",
       "Scroll down to Service notifications.",
-      "Turn each alert on or off: appointment updates, reminders, on the way and arrival.",
-      "Next to each alert, pick how you want it: text, email or app. Changes save right away.",
+      "Next to each alert, pick how you want it: text, email or app.",
+      "To turn an alert on or off, use its switch. If you have more than one property, the switches are lower down, under Appointment notifications. Pick the property first.",
+      "Changes save right away.",
     ],
   },
   {
@@ -94,7 +96,8 @@ const GUIDES = [
     steps: [
       SIGN_IN,
       "Tap Visits.",
-      "Find the visit and tap Reschedule, then pick a new time.",
+      // Without a self-serve reschedule link the button opens a text to us.
+      "Find the visit and tap Reschedule. Pick a new time, or if it opens a text to us, send it and we will find you a time.",
       "Need an extra visit or seeing pests? Tap Request, choose what you need and send it. We will get back to you.",
     ],
   },
@@ -134,8 +137,9 @@ const GUIDES = [
     steps: [
       SIGN_IN,
       "Tap Refer.",
-      "Tap Text a friend or Email a friend, or share your referral code.",
-      "You earn a credit when they start service.",
+      "Tap Copy to copy your link, or tap Text or Email to share it.",
+      "Or fill in their name and phone number and tap Send SMS invite. You can also enter an email and tap Send email invite.",
+      "The Refer page shows the current reward and how you earn it.",
     ],
   },
 ];
