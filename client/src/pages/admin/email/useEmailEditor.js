@@ -324,15 +324,17 @@ export default function useEmailEditor(userId) {
   const scheduledDraftBlocked = (draft) => (draft.replyEmailId
     ? Boolean((draftSession.drafts.replies[draft.replyEmailId] || "").trim())
     : Object.values(draftSession.drafts.compose).some(Boolean));
+  // Returns false when blocked, else { saved }: whether the tab stored the
+  // draft, so a reload would still find it.
   const restoreScheduledDraft = (draft) => {
     if (scheduledDraftBlocked(draft)) return false;
     if (draft.replyEmailId) {
       setReplyDraft(draft.replyEmailId, draft.draftText);
-      return true;
+      return { saved: draftSession.saved };
     }
     setComposeForm(() => ({ to: draft.to, subject: draft.subject === "(no subject)" ? "" : draft.subject, body: draft.draftText }));
     setShowCompose(true);
-    return true;
+    return { saved: draftSession.saved };
   };
 
   const reconcileSend = (key, outcome) => {

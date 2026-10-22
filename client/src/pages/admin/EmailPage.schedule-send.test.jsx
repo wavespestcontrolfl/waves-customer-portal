@@ -194,6 +194,22 @@ describe("Email schedule send", () => {
     await waitFor(() => expect(posts("/queued-1/restored")).toHaveLength(1));
   });
 
+  it("keeps a cancelled email listed when the tab cannot save its restored draft", async () => {
+    scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "scheduled" }];
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Scheduled (1)" }));
+    const setItem = Storage.prototype.setItem;
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function failDrafts(key, value) {
+      if (!/schedul/i.test(key)) throw new Error("Quota");
+      return setItem.call(this, key, value);
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel send" }));
+    expect(await screen.findByText("Cancelled. The email is open as a draft.")).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Message/)).toHaveValue("Saved text");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(posts("/queued-1/restored")).toHaveLength(0);
+  });
+
   it("does not schedule when the tab cannot save the safety key", async () => {
     mount();
     await writeEmail();

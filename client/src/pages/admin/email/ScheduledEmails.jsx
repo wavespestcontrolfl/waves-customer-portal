@@ -28,11 +28,14 @@ export default function ScheduledEmails({ scheduled, editor, mailbox }) {
     if (!draft) { setFeedback({ error: true, message: error, retry: retryable ? row : null }); return; }
     // A draft started while the cancel was in flight takes the slot: keep a
     // way back (the server repeats the cancel and returns the same draft).
-    if (!editor.restoreScheduledDraft(draft)) {
+    const restored = editor.restoreScheduledDraft(draft);
+    if (!restored) {
       setFeedback({ error: true, retry: row, message: "Cancelled, but another draft is open. Send or discard it, then tap Try again to get this email back." });
       return;
     }
-    scheduled.markRestored(draft.id);
+    // Only a draft the tab saved may leave the list: an unsaved one would be
+    // lost on a reload, and the listed row is its only way back.
+    if (restored.saved) scheduled.markRestored(draft.id);
     if (draft.replyEmailId) mailbox.showEmailById(draft.replyEmailId);
     setFeedback({ message: draft.replyEmailId ? "Cancelled. The reply is back in its conversation as a draft." : "Cancelled. The email is open as a draft." });
   };
