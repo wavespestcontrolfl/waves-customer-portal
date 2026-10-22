@@ -9117,6 +9117,12 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     data, serviceMode, estimate, billsMonthly, isCommercialEstimate, cta, paymentPreference,
     services, selected, selectedCombo, combinedFrequency, pricing, renderFlags,
   }, manualDiscountMonthlyAmount);
+  // GATE_ESTIMATE_APPLICATION_MONTHS: computed once. When it applies, the
+  // summary card carries the per-application prices and month amounts, so the
+  // cards above drop their per-service "$X a month" slices (codex #6399 r2).
+  const applicationMonths = data?.applicationMonthsEnabled === true && monthlyAverage
+    ? applicationMonthsBreakdown(monthlyAverage.model)
+    : null;
 
   // Service/price cards — shared by the live configurator (below) and the
   // read-only recap on an accepted estimate, so reopening an accepted link
@@ -9204,7 +9210,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 section={section}
                 servicesLength={services.length}
                 billsMonthly={billsMonthly}
-                monthlyAverageLine={sectionAverageLine(monthlyAverage, section.key)}
+                monthlyAverageLine={applicationMonths ? null : sectionAverageLine(monthlyAverage, section.key)}
                 monthlyAverageContext={singleServiceAverageContext(monthlyAverage, hasOneTimeBesidePlan)}
                 glassSetupBulletEligible={setupFees.some((fee) => fee?.waivedWithPrepay === true)}
                 ctaSlotMeta={glassContent ? selectedSlotMeta : null}
@@ -9451,7 +9457,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             <MonthlyAverageSummary
               model={monthlyAverage.model}
               hasOneTime={hasOneTimeBesidePlan}
-              breakdown={data?.applicationMonthsEnabled === true ? applicationMonthsBreakdown(monthlyAverage.model) : null}
+              breakdown={applicationMonths}
             />
           ) : null}
 

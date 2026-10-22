@@ -2804,6 +2804,46 @@ describe('monthly average beside per-application prices', () => {
     expect(container.textContent).not.toMatch(/Plan total/i);
   });
 
+  // GATE_ESTIMATE_APPLICATION_MONTHS (EST-2026-1185, codex #6399 r2): with the
+  // breakdown on, the cards drop their "$X a month" slices; the summary card
+  // carries per-application prices, both month amounts and the average.
+  it('pest quarterly + mosquito monthly, both gates on: no per-card slices, the breakdown card instead', async () => {
+    const mosquito = {
+      key: 'mosquito', label: 'Mosquito', isRecurring: true, isPest: false, waveGuardTierEligible: true,
+      defaultFrequencyKey: 'monthly12', copy: { priceWording: {} },
+      frequencies: [{
+        key: 'monthly12', label: 'Monthly', serviceCategory: 'mosquito', serviceTierKey: 'monthly12', visitsPerYear: 12,
+        monthly: 74.7, annual: 896.4, billingFrequencyKey: 'monthly', perTreatment: 74.7, billedPerApplication: true,
+        perServiceTreatments: [{ service: 'mosquito', label: 'Mosquito', displayPrice: 74.7, perTreatment: 74.7, visitsPerYear: 12, monthly: 74.7 }],
+        included: [{ key: 'mosquito_monthly12', label: 'Monthly mosquito control program', detail: null }], addOns: [],
+      }],
+    };
+    const payload = {
+      ...base,
+      monthlyAverageEnabled: true,
+      applicationMonthsEnabled: true,
+      pricing: {
+        services: [pestSection(115.2, 4, 38.4), mosquito],
+        frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 113.1, annual: 1357.2 }],
+        combinedRecurring: { monthlySubtotal: 113.1, annualSubtotal: 1357.2, waveGuardTierLabel: 'Silver', waveGuardDiscountPct: 0.1 },
+        renderFlags: { showRecurringSummary: true }, waveGuardTier: 'Silver', askChips: [],
+        oneTimeBreakdown: { total: 0, items: [] }, defaultServiceMode: 'recurring',
+      },
+    };
+    stub(payload);
+    const { container } = render(<EstimateViewPage />);
+    const summary = await waitFor(() => {
+      const el = container.querySelector('[data-application-months]');
+      expect(el).not.toBeNull();
+      return el;
+    });
+    expect(container.querySelectorAll('[data-monthly-average-line]')).toHaveLength(0);
+    expect(container.textContent).not.toContain('$38.40 a month');
+    expect(summary.querySelector('[data-application-months-applied]').textContent).toContain('$189.90');
+    expect(summary.querySelector('[data-application-months-other]').textContent).toContain('$74.70');
+    expect(summary.querySelector('[data-monthly-average-plan]').textContent).toContain('$113.10 a month');
+  });
+
   it('single service with a positive one-time fee: the context sentence says one-time charges are not in the average', async () => {
     const payload = single(true);
     payload.pricing.setupFee = { amount: 99, service: 'waveguard_setup', label: 'WaveGuard setup', waivedWithPrepay: true };
