@@ -159,7 +159,7 @@ describe('missing tracking stages', () => {
       expect(result.alerts.filter((a) => a.stage === 1)).toHaveLength(1);
     }
     // Without the grouping key they are two separate stops, as every row is
-    // while GATE_VISIT_GROUPS is off.
+    // since grouping was retired (2026-10-22).
     const ungrouped = replay({ synthetic: true, from: '2026-09-10T09:00:00-04:00', to: '2026-09-10T12:00:00-04:00', visits: [
       { id: 'aaa', initial: visit, promises: [promise], events: [], outcome: 'late' },
       { id: 'bbb', initial: visit, promises: [], events: [], outcome: 'unknown' },

@@ -955,7 +955,7 @@ async function recordSentWindowFallback({ visitId, startAtMs, communicatedAt = n
 // member. Evaluating members independently therefore read a sibling's
 // evidence as missing, and could raise several cards for one truck visit
 // (codex P1 round 10). Rows with no visit_id are their own group, which is
-// every row while GATE_VISIT_GROUPS is off.
+// every row since grouping was retired (2026-10-22).
 //
 // The representative is the lowest member id, not the claim owner: the claim
 // moves between members from tier to tier, and the tracking key (and the

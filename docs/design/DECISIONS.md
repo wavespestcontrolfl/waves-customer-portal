@@ -3311,3 +3311,13 @@ candidate finder, both rider scripts, and `GATE_PEST_RIDES_LAWN_AT_ACCEPT` /
 `GATE_RIDER_PAIRS_MONTHLY_LAWN`. Every series walks its own cadence.
 `scheduled_services.rides_parent_id` stays in the schema, unread. This
 supersedes the 2026-09-28 rider entries above.
+
+## 2026-10-22 — Visit groups: nothing creates a group any more
+
+Same owner ruling ("we are not grouping appts anymore"). The code that formed
+groups is removed: the stamping call on every booking and scheduling path,
+the office Combine action on the dispatch day view, the nightly regroup sweep,
+and the series extension's join into the customer's own stop (an own visit on
+the candidate date is now an ordinary clash). `GATE_VISIT_GROUPS` had no
+other reader, so it is removed too. Visits created before this keep working:
+Separate, closeout, the live fan-out, unit moves and the /visit links.

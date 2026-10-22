@@ -582,7 +582,6 @@ function sanitizeServiceType(serviceType) {
 const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, customerPrefersNoWeekends } = require('../services/recurring-appointment-seeder');
 const { getBlackoutLayers } = require('../services/scheduling/blackout-dates');
 const { clearOfBlackout } = require('../services/scheduling/blackout-nudge');
-const { deferredCommitScope } = require('../utils/trx-commit-promise');
 
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1, bimonthly: 2, quarterly: 3, triannual: 4,
@@ -4654,12 +4653,7 @@ async function coveringTermForDate(conn, termIds, coverageDate) {
 // statement leaves a PostgreSQL transaction aborted (25P02) even when
 // JavaScript catches it, so a lookup outside the savepoint would poison the
 // caller and roll back the visit that was just inserted.
-//
-// `commitScope` (default `conn`) is what the operator alerts wait on: a caller
-// writing inside a savepoint it may roll back (extendSeriesOnceLocked's
-// grouped-or-nothing attempts) hands a deferredCommitScope, so a thrown-away
-// row files nothing.
-async function applyExtensionPrepayCoverage(conn, parent, svc = null, coverageDate = null, commitScope = conn) {
+async function applyExtensionPrepayCoverage(conn, parent, svc = null, coverageDate = null) {
   const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
   let resolvedTerm = null;
   const run = async (c) => {
@@ -4682,7 +4676,7 @@ async function applyExtensionPrepayCoverage(conn, parent, svc = null, coverageDa
       // savepoint's executionPromise resolves on RELEASE, so filing against
       // it would let a later rollback leave a false cancellation alert that
       // dedupes the real retry for seven days.
-      notifyConn: commitScope,
+      notifyConn: conn,
     });
   };
   try {
@@ -4702,7 +4696,7 @@ async function applyExtensionPrepayCoverage(conn, parent, svc = null, coverageDa
     logger.warn(`[recurring] prepay coverage re-apply failed for parent=${parent?.id}: ${e.message}`);
     if (resolvedTerm) {
       await AnnualPrepayRenewals._private.fileCoverageExceptionAfterCommit(
-        commitScope, resolvedTerm, 'generator_coverage_failed',
+        conn, resolvedTerm, 'generator_coverage_failed',
         'A newly scheduled visit on this annual prepay could not be marked as covered, so completing it will invoice the customer for prepaid work. Re-apply the prepay coverage to that visit, or void the invoice if it has already been issued.',
       ).catch(() => {});
     }
@@ -6927,10 +6921,6 @@ router.get('/', async (req, res, next) => {
 
     res.json({
       date, services: enriched,
-      // Grouping creation gate, so the day grid hides Combine while the
-      // kill switch is off instead of offering an action the group route
-      // 404s (GH codex #3843 r1 P1). Split/Separate stay ungated.
-      visitGroups: isEnabled('visitGroups'),
       visitCloseout: legacyCloseoutEnabled,
       // GATE_DISPATCH_FIND_TIME_PANEL: shows the Dispatch board's "Find a time" button.
       findTimePanel: isEnabled('dispatchFindTimePanel'),
@@ -9213,13 +9203,11 @@ async function scheduleCreateHandler(req, res, next) {
           if (cols[field]) insertData[field] = value;
         }
       }
-      // Property identity for the visit-group stamp (GH codex r4 P2):
-      // manual bookings have no estimate-linkage regroup, so an unstamped
-      // property makes maybeGroupRow refuse forever — and spawned
-      // children/extensions inherit whatever the parent carries
-      // (copyStampedServiceAddressFields). Only the customer's SOLE active
-      // property is unambiguous; multi-property customers stay
-      // office-placed. Never overrides an explicit stamp.
+      // Property identity (GH codex r4 P2): spawned children/extensions
+      // inherit whatever the parent carries (copyStampedServiceAddressFields).
+      // Only the customer's SOLE active property is unambiguous;
+      // multi-property customers stay office-placed. Never overrides an
+      // explicit stamp.
       if (cols.property_id && insertData.property_id === undefined && !propertyOwnedByEstimateLinkage) {
         insertData.property_id = await require('../services/customer-properties')
           .soleActivePropertyId(customerId, trx);
@@ -9324,9 +9312,6 @@ async function scheduleCreateHandler(req, res, next) {
       await require('../services/area-addon-visit-rows').writeStaffBookedAreaAddOnScopes(trx, {
         scheduledServiceId: svc.id, estimate: lockedLinkedEstimate, ownServiceKey: svc.service_key_snapshot,
       });
-      // Visit groups (visit-group-scope.md §2): stamp at scheduling —
-      // gate-checked + best-effort + self-refusing inside maybeGroupRow.
-      await require('../services/visit-groups').maybeGroupRow(svc.id, { database: trx, createdBy: 'dispatch' });
       // Two-treatment package (cockroach / flea): visit 2 books with visit 1
       // — gate-dark, savepoint-isolated, no-op for every other service
       // (package-followup-booking.js).
@@ -9397,8 +9382,7 @@ async function scheduleCreateHandler(req, res, next) {
         if (cols.weekend_shift && skipWeekendsEffective) childData.weekend_shift = shiftDir;
         if (cols.source_estimate_id && insertLinkId) childData.source_estimate_id = insertLinkId;
         // Property anchor rides the spawn (GH codex #3837 r1 P1): the parent
-        // was anchored at insert, and a child without it is refused by the
-        // maybeGroupRow call below forever.
+        // was anchored at insert.
         copyStampedServiceAddressFields(childData, svc, cols);
         if (!propertyOwnedByEstimateLinkage) await anchorSoleProperty(childData, cols, trx);
         const childAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, nextDateStr, seriesBlackoutDates, skipWeekendsEffective);
@@ -9472,9 +9456,6 @@ async function scheduleCreateHandler(req, res, next) {
           }
         }
         const [childRow] = await trx('scheduled_services').insert(childData).returning('*');
-        // Visit groups: stamp per inserted row (parity with the seeder,
-        // which already stamps identical rows).
-        if (childRow?.id) await require('../services/visit-groups').maybeGroupRow(childRow.id, { database: trx, createdBy: 'dispatch' });
         // Mirror only add-on lines due on this child date. Mixed-cadence
         // bundles stay one visit on overlap months, but slower lines do
         // not ride every faster-cadence child.
@@ -9564,8 +9545,6 @@ async function scheduleCreateHandler(req, res, next) {
             }
           }
           const [boosterRow] = await trx('scheduled_services').insert(boosterData).returning('*');
-          // Visit groups: stamp per inserted row (seeder parity).
-          if (boosterRow?.id) await require('../services/visit-groups').maybeGroupRow(boosterRow.id, { database: trx, createdBy: 'dispatch' });
 
           // Mirror only add-ons due on this booster date; one-time and
           // off-cadence recurring lines stay off future generated visits.
@@ -10681,9 +10660,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   ]);
                 }
                 // Under the row's STOP lock (the visit writers' own key), so a
-                // createOrJoinVisit that would add a sibling serializes BEFORE
-                // this count or after the write; the write below also pins
-                // the observed visit_id (local gate r27).
+                // concurrent visit write serializes BEFORE this count or after
+                // the write; the write below also pins the observed visit_id
+                // (local gate r27).
                 const { openMembers, lockStopForRow, frozenVisitVerdict } = require('../services/visit-groups');
                 await lockStopForRow(trx, id);
                 const members = await openMembers(trx, svc.visit_id);
@@ -14659,8 +14638,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       // combined lock and customer row first now runs to completion before
       // the other can proceed.
       if (commsPeek) await trx('customers').where({ id: commsPeek.customer_id }).forUpdate().first('id');
-      // Lock order: the estimate's add-on lock BEFORE the stop locks and the place locks an address change takes (the
-      // booking takes the estimate lock first and reaches the stop lock later, through maybeGroupRow).
+      // Lock order: the estimate's add-on lock BEFORE the stop locks and the place locks an address change takes.
       if (addressPlan) {
         const linked = await trx('scheduled_services').where({ id: req.params.id }).first('source_estimate_id');
         await areaAddOnRows.lockEstimateAddOns(trx, linked && linked.source_estimate_id);
@@ -14731,12 +14709,9 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         : null;
       // An address change and a cadence rewrite in one save would re-date the
       // relocated children after their stop locks were taken for the ORIGINAL
-      // dates, so the regroup loop at the end of this trx acquires each
-      // rewritten destination stop late (deadlock window against
-      // handleChildStopChanged; the maybeGroupRow savepoint swallows the
-      // abort and the save commits ungrouped). Refuse the combination here —
-      // the locked read above is authoritative and no row has been written
-      // yet — rather than widen the pre-lock set again.
+      // dates. Refuse the combination here — the locked read above is
+      // authoritative and no row has been written yet — rather than widen the
+      // pre-lock set again.
       if (addressPlan && recurringParentBefore?.is_recurring && !recurringParentBefore.recurring_parent_id
         && shouldRewritePendingRecurringRows(recurringParentBefore, { ...recurringParentBefore, ...updates })) {
         throw httpError(422, 'Change the address and the recurrence in separate saves.');
@@ -16662,8 +16637,6 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
               warnings: editWarnings,
             });
             const [childRow] = await trx('scheduled_services').insert(childData).returning('*');
-            // Visit groups: stamp per inserted row (seeder parity).
-            if (childRow?.id) await require('../services/visit-groups').maybeGroupRow(childRow.id, { database: trx, createdBy: 'dispatch' });
             if (childRow?.id) {
               spawnedRecurringChildren.push({
                 id: childRow.id,
@@ -16880,15 +16853,9 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
           }
         }
       }
-      // Address changes can make unattached services share a physical stop.
-      // Use the final date/window/technician after all edits and count changes.
-      // The canonical seam owns eligibility, gates and savepoint isolation.
-      for (const id of addressUpdatedIds) {
-        await require('../services/visit-groups').maybeGroupRow(id, { database: trx, createdBy: 'dispatch' });
-      }
       // Series reassignment and address propagation can change routes beyond
-      // the edited anchor. Probe their FINAL state, including regrouping,
-      // under the complete occupancy/tech-day lock plan acquired above.
+      // the edited anchor. Probe their FINAL state under the complete
+      // occupancy/tech-day lock plan acquired above.
       const arrivalChangedIds = [...new Set([...assignmentUpdatedJobIds, ...addressUpdatedIds])];
       if (useArrivalWindows && arrivalChangedIds.length) {
         const changedRows = await trx('scheduled_services').whereIn('id', arrivalChangedIds)
@@ -20172,8 +20139,6 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     }
     const [row] = await trx('scheduled_services').insert(data).returning('*');
     if (!row?.id) continue;
-    // Visit groups: stamp per inserted row (seeder parity).
-    await require('../services/visit-groups').maybeGroupRow(row.id, { database: trx, createdBy: 'dispatch' });
     // Mirror the parent's add-on lines onto the new visit — a multi-service
     // recurring appointment would otherwise top up with the primary only.
     //
@@ -20388,106 +20353,8 @@ function normalizeTopUpWindow(windowStart, durationMinutes, windowEnd) {
   return { start: validated.window_start, end: validated.window_end };
 }
 
-// The stop's technician for a grouped placement, through the SAME eligibility
-// fence a template technician gets (employment, field dispatchability, absence
-// that day, FOR SHARE on a trx). Not assignable = the grouped attempt fails and
-// its savepoint rolls back; an unassigned stop stays unassigned.
-async function assignablePlacementTechnicianId(conn, parent, technicianId, date) {
-  if (!technicianId) return null;
-  const checked = await assignableRecurringTemplateTechnicianId(conn, {
-    ...parent, recurring_technician_override: true, recurring_technician_id: technicianId,
-  }, date);
-  if (!checked || String(checked) !== String(technicianId)) throw new Error('the stop\'s technician is not assignable on that date');
-  return checked;
-}
-
-// Does a just-placed row's own window overlap any booking OUTSIDE its visit?
-async function placedRowOverlapsOutsideVisit(conn, rowId) {
-  const row = await conn('scheduled_services').where({ id: rowId })
-    .first('id', 'visit_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes');
-  const block = row && occupancyBlockFor(row);
-  if (!block) return false;
-  const members = row.visit_id
-    ? await conn('scheduled_services').where({ visit_id: row.visit_id }).pluck('id')
-    : [row.id];
-  const outside = await findConflictingVisits({
-    db: conn, date: dateOnly(row.scheduled_date), windowStart: block.start, windowEnd: block.end,
-    excludeServiceIds: members, excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
-  });
-  return outside.length > 0;
-}
-
-// Does `rowId` sit in the same (non-null) visit as every row in `otherIds`?
-// The proof a grouped-or-nothing placement is judged by: the canonical
-// maybeGroupRow decided, we only read what it did.
-async function rowsShareVisit(conn, rowId, otherIds) {
-  const rows = await conn('scheduled_services').whereIn('id', [rowId, ...otherIds]).select('id', 'visit_id');
-  const visitOf = (id) => rows.find((r) => String(r.id) === String(id))?.visit_id || null;
-  const mine = visitOf(rowId);
-  return !!mine && otherIds.every((id) => String(visitOf(id) || '') === String(mine));
-}
-
-// Grouped-or-nothing placement of ONE extension row:
-// insert it inside a SAVEPOINT (extendSeriesOnceLocked re-entered with a forced
-// date, so the insert stays the one canonical insert), let the canonical
-// maybeGroupRow decide, and keep the row only if it actually shares a visit with
-// every row in `mustShare`; otherwise roll the savepoint back and treat the date
-// as taken. Never a prediction of whether it will group. `stop` = { technicianId,
-// window? }: the stop's own technician (and, for a ride, its window), carried on
-// the template row the insert copies, so no member is re-assigned. Post-commit
-// work waits on a deferredCommitScope: it fires only for a KEPT row, once every
-// enclosing transaction completes. Returns the spawned-visit payload, or null
-// (nothing left behind).
-async function placeGroupedExtension(ctx, dateStr, mustShare, stop) {
-  const { conn, parent, parentId, cols, svcLike, opts } = ctx;
-  if (cols.recurring_ongoing) {
-    const fresh = await conn('scheduled_services').where({ id: parentId }).first('recurring_ongoing');
-    if (!fresh || !fresh.recurring_ongoing) return null;
-  }
-  const scope = deferredCommitScope(conn);
-  try {
-    const placed = await conn.transaction(async (sp) => {
-      const technicianId = await assignablePlacementTechnicianId(sp, parent, stop.technicianId, dateStr);
-      const template = {
-        ...parent, ...stop.window, recurring_technician_override: true, recurring_technician_id: technicianId,
-      };
-      const visit = await extendSeriesOnceLocked(sp, template, parentId, cols, svcLike, {
-        ...opts, onSkip: undefined, forceDate: dateStr, commitScope: scope,
-      });
-      if (!visit) throw new Error('nothing placed');
-      if (!(await rowsShareVisit(sp, visit.scheduledServiceId, mustShare))) throw new Error('not in the same visit');
-      // The placed row's OWN window (a ride ends by the rider's duration, so it
-      // can run past the stop) must not overlap anything outside its visit —
-      // another customer, a hold. Top-up keeps its advisory-only overlap policy.
-      if (!opts.overlapAdvisoryOnly && (await placedRowOverlapsOutsideVisit(sp, visit.scheduledServiceId))) {
-        throw new Error('overlaps a booking outside the stop');
-      }
-      return visit;
-    });
-    scope.keep();
-    return placed;
-  } catch (err) {
-    scope.drop(err);
-    logger.info(`[recurring] parent=${parentId} ${dateStr} does not group (${err.message}) — treated as taken`);
-    return null;
-  }
-}
-
-// The customer's OWN visit at the candidate's stop (their lawn visit) is not a
-// clash if the new row joins it. Anyone else's visit, a hold, own rows on two
-// technicians (not one stop), or an own visit the row cannot join
-// (placeGroupedExtension rolls back) stays a clash. The row takes the stop's own
-// technician, so no member is re-assigned.
-async function joinOwnStopExtension(ctx, candidate, clashRows) {
-  const ownOnly = clashRows.every((r) => r.customer_id && String(r.customer_id) === String(ctx.parent.customer_id));
-  const stopTechs = [...new Set(clashRows.map((r) => (r.technician_id ? String(r.technician_id) : null)))];
-  if (!ownOnly || stopTechs.length !== 1) return null;
-  return placeGroupedExtension(ctx, candidate, clashRows.map((r) => r.id), { technicianId: stopTechs[0] });
-}
-
 // The next-date search of extendSeriesOnceLocked: the cadence walk. Returns
-// { joined } (a grouped placement already made), or { nextStr, hitMaxDate } for
-// the caller to insert.
+// { nextStr, hitMaxDate } for the caller to insert.
 async function walkExtensionCandidates(ctx) {
   const {
     conn, parent, parentId, opts, latestStr, rOpts, skipParent, dirParent,
@@ -20549,13 +20416,8 @@ async function walkExtensionCandidates(ctx) {
       if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) {
         logger.warn(`[recurring-topup] parent=${parentId} candidate ${candidate} overlaps an existing visit on the calendar — inserting anyway (advisory only, same posture every other admin write already takes)`);
       }
-    } else {
-      const clashRows = await seriesCandidateDateClashRows(conn, clashProbeTemplate, candidate);
-      if (clashRows.length) {
-        const joined = await joinOwnStopExtension(ctx, candidate, clashRows);
-        if (joined) return { joined };
-        attempt++; continue;
-      }
+    } else if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) {
+      attempt++; continue;
     }
     nextStr = candidate;
     break;
@@ -20568,10 +20430,6 @@ async function walkExtensionCandidates(ctx) {
 // else null.
 async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opts = {}) {
   const { onSkip } = opts;
-  // opts.forceDate / opts.commitScope are set only by placeGroupedExtension's
-  // grouped-or-nothing attempts: insert on exactly that date (the template
-  // `parent` then carries the stop's window and technician), skip the candidate
-  // search, and file post-commit work only if the attempt is kept.
   let spawnedVisit = null;
   // Find the latest LIVE visit (pending/confirmed or completed) to
   // calculate the next date — shared anchor query (cancelled/rescheduled
@@ -20637,14 +20495,10 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
     // (booster double-book rationale on the helper).
     const existingDates = await loadActiveSeriesDates(conn, parentId);
     const autoExtendBlackoutDates = await loadSeriesBlackoutDates(conn, latestStr);
-    // The cadence walk (walkExtensionCandidates); a forced date (a grouped
-    // attempt re-entering this function) skips it.
-    const walked = opts.forceDate ? { nextStr: opts.forceDate } : await walkExtensionCandidates({
-      conn, parent, parentId, cols, svcLike, opts, latestStr, rOpts, skipParent, dirParent,
+    const { nextStr, hitMaxDate } = await walkExtensionCandidates({
+      conn, parent, parentId, opts, latestStr, rOpts, skipParent, dirParent,
       blackoutDates: autoExtendBlackoutDates, existingDates, clashProbeTemplate,
     });
-    if (walked.joined) return walked.joined;
-    const { nextStr, hitMaxDate } = walked;
     // Re-check the ongoing flag immediately before inserting: it was
     // read once at the top of this block, and a cancellation (the
     // portal auto-processor or an admin churn) can stop the series
@@ -20782,7 +20636,7 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       // The transient completion-race bell is quiet (this fires per
       // generated visit and reconciliation settles that case); the
       // cancelled-paid-slot bell still rings — nothing re-seeds it.
-      await applyExtensionPrepayCoverage(conn, parent, svcLike, nextStr, opts.commitScope || conn);
+      await applyExtensionPrepayCoverage(conn, parent, svcLike, nextStr);
       // Post-insert re-check closes the remaining race: a
       // cancellation can stop the series between the pre-insert
       // read above and this insert. The row hasn't been mirrored,
@@ -20810,10 +20664,6 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       // extension or register its reminder.
       if (autoExtLive && autoExtRow?.id) {
         await insertRecurringChildAddons(conn, autoExtRow.id, dueAddons, restackedAddonDollars);
-        // Visit groups: stamp ONLY after the post-insert cancellation
-        // re-check passes — stamping earlier could mint a visit whose
-        // member this same transaction compensating-deletes.
-        await require('../services/visit-groups').maybeGroupRow(autoExtRow.id, { database: conn, createdBy: 'dispatch' });
         spawnedVisit = {
           scheduledServiceId: autoExtRow.id,
           customerId: parent.customer_id,
@@ -28104,8 +27954,6 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
           throw Object.assign(httpError(409, unbillableAction.error), { code: unbillableAction.code });
         }
         const [row] = await trx('scheduled_services').insert(data).returning('*');
-        // Visit groups: stamp per inserted row (seeder parity).
-        if (row?.id) await require('../services/visit-groups').maybeGroupRow(row.id, { database: trx, createdBy: 'dispatch' });
         spawned.push({ id: row?.id, date: nd, serviceType: childIdentity.service_type });
         inserted++;
         created++;
@@ -28204,8 +28052,6 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
           throw Object.assign(httpError(409, unbillableAction.error), { code: unbillableAction.code });
         }
         const [row] = await trx('scheduled_services').insert(data).returning('*');
-        // Visit groups: stamp per inserted row (seeder parity).
-        if (row?.id) await require('../services/visit-groups').maybeGroupRow(row.id, { database: trx, createdBy: 'dispatch' });
         spawned.push({ id: row?.id, date: nd, serviceType: childIdentity.service_type });
         inserted++;
         created++;

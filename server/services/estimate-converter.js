@@ -139,7 +139,6 @@ function grassTypeToPersist(recurringServices, estimateData) {
 }
 
 const RecurringAppointmentSeeder = require('./recurring-appointment-seeder');
-const VisitGroups = require('./visit-groups');
 
 const WAVEGUARD_SETUP_FEE = 99;
 
@@ -6961,16 +6960,6 @@ const EstimateConverter = {
                 }
               }
               const inserted = await trx('scheduled_services').insert(standaloneRow).returning('*');
-              // Visit groups (visit-group-scope.md §2): a same-trip row and
-              // the reserved start share one physical stop — stamp them at
-              // scheduling. Gate-checked + best-effort inside maybeGroupRow.
-              // Only when the property identity is already on the row —
-              // null-property reservations group at post-commit property
-              // linkage instead (codex #3590 r10), so a customer-keyed
-              // stop can never absorb a legacy row at another address.
-              if (sameTrip && inserted[0] && inserted[0].property_id) {
-                await VisitGroups.maybeGroupRow(inserted[0].id, { database: trx, createdBy: 'converter' });
-              }
               const parentRow = Array.isArray(inserted) && typeof inserted[0] === 'object'
                 ? inserted[0]
                 : { ...standaloneRow, id: Array.isArray(inserted) ? inserted[0] : inserted };
@@ -7346,26 +7335,6 @@ const EstimateConverter = {
                   }
                 }
               }
-              // Visit groups (visit-group-scope.md §2): the reserved start
-              // had no usable catalog identity at ITS OWN insert time (the
-              // reservation resolver only stamps service_id on engine-keyed
-              // ONE-TIME rows), so the promoted same-trip row's own
-              // maybeGroupRow call above found no groupable partner and the
-              // pair never joined — the only gap: their later-quarter seeded
-              // children DO group, because the seeder's own maybeGroupRow
-              // calls run after this relink stamps the family identity.
-              // Re-run it now, for the reserved row itself, right after that
-              // relink and before the duplicate-series guard below (which
-              // only decides whether a follow-up SERIES seeds — it has no
-              // bearing on whether this trip's rows share a visit). Same
-              // null-property rule as the promoted call: a null-property
-              // reservation groups later at post-commit property linkage.
-              // Gate-checked, savepoint-wrapped and idempotent — a no-op
-              // when nothing relinked (no groupable family) or the row
-              // already carries a visit_id.
-              if (reservedStart.property_id) {
-                await VisitGroups.maybeGroupRow(reservedStart.id, { database: trx, createdBy: 'converter' });
-              }
               const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
                 customerId,
                 serviceId: reservedStart.service_id || null,
@@ -7659,11 +7628,6 @@ const EstimateConverter = {
             const insertedId = Array.isArray(inserted)
               ? (typeof inserted[0] === 'object' ? inserted[0]?.id : inserted[0])
               : (typeof inserted === 'object' ? inserted?.id : inserted);
-            // Visit groups (visit-group-scope.md §2): the recurring-unit
-            // converter path stamps like the standalone path — bare call is
-            // safe: maybeGroupRow refuses null-property/windowless rows
-            // itself, and the property-linkage regroup completes them.
-            if (insertedId) await VisitGroups.maybeGroupRow(insertedId, { database: trx, createdBy: 'converter' });
             // Accepting an estimate IS a real customer booking, so it
             // qualifies for an open inspection-credit promise. Marked
             // in-transaction (dark behind the gate): the marker commits

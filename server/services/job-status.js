@@ -1041,22 +1041,6 @@ async function transitionJobStatus({
           logger.warn(`[job-status] street-level hold reopen failed for ${jobId}: ${e.code || e.name || 'error'}`);
         });
       }
-      // Visit-group seam, reverse direction (codex #3590 r6, narrowed
-      // r7): ONLY a compensated terminal reversal regroups — the terminal
-      // hook may have detached the row (and dissolved its visit), so
-      // rebuild the stop from scratch under the same join rules. Ordinary
-      // forward transitions (pending→confirmed, →en_route, →on_site)
-      // never regroup here; stamping happens at scheduling only.
-      // Regroup on a terminal reversal AND on pending → confirmed: an
-      // office-review booking is join-ineligible until confirmed
-      // (visit-groups.canJoin office_review), so its confirmation is its
-      // grouping moment (codex #3603 r2).
-      const pendingConfirmed = String(fromStatus || '') === 'pending' && String(toStatus || '') === 'confirmed';
-      if (['cancelled', 'skipped', 'no_show'].includes(String(fromStatus || '')) || pendingConfirmed) {
-        void require('./visit-groups').maybeGroupRow(jobId, { createdBy: 'dispatch' }).catch((e) => {
-          logger.warn(`[job-status] visit-group revival seam failed for ${jobId}: ${e.message}`);
-        });
-      }
     }
   }
 

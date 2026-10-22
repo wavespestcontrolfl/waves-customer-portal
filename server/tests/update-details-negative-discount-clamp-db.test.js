@@ -46,7 +46,6 @@ jest.mock('../services/geocoder', () => ({
 }));
 jest.mock('../services/visit-groups', () => ({
   ...jest.requireActual('../services/visit-groups'),
-  maybeGroupRow: jest.fn().mockResolvedValue(null),
   handleChildStopChanged: jest.fn().mockResolvedValue(null),
 }));
 jest.mock('../services/appointment-reminders', () => ({

@@ -2018,7 +2018,6 @@ export default function DispatchPageV2({
               date={date}
               services={services}
               technicians={technicians}
-              canGroup={safeData.visitGroups === true}
               owesCompletion={completionResumeMarked}
               onEdit={(svc) => {
                 // A block wearing the "Closeout owed" chip must open the
