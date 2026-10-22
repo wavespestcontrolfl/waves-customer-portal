@@ -104,7 +104,7 @@ describe("Email schedule send", () => {
       fireEvent.click(screen.getByRole("button", { name: /^Tomorrow morning/ }));
     };
     await pickTomorrow();
-    expect((await screen.findAllByText(/trying again will not queue it twice/)).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(/Look under Scheduled before you schedule or send it again/)).length).toBeGreaterThan(0);
     await pickTomorrow();
     await waitFor(() => expect(posts("/email/schedule")).toHaveLength(2));
     const [first, second] = posts("/email/schedule").map(([, options]) => JSON.parse(options.body).clientKey);

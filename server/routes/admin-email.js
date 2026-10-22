@@ -10,7 +10,7 @@ const { unblockSender, manualBlockSender } = require('../services/email/spam-blo
 const logger = require('../services/logger');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { emailSendLaterLive } = require('../config/feature-gates');
-const { parseETDateTime } = require('../utils/datetime-et');
+const { parseETDateTime, etParts, etWallClockOccurrences } = require('../utils/datetime-et');
 const {
   createStaffOAuthState,
   withClaimedStaffOAuthState,
@@ -364,6 +364,12 @@ router.post('/schedule', async (req, res) => {
     if (typeof clientKey !== 'string' || !/^[\w-]{8,64}$/.test(clientKey)) return res.status(400).json({ error: 'clientKey required' });
     if (typeof sendAt !== 'string' || !SCHEDULE_ET_RE.test(sendAt)) return res.status(400).json({ error: 'sendAt must be YYYY-MM-DDTHH:MM (Eastern)' });
     const when = parseETDateTime(sendAt);
+    // The parsed instant must read back as the same Eastern wall clock (no
+    // Feb 31, no spring-forward gap) and name one moment (not the repeated
+    // fall-back hour).
+    const p = etParts(when);
+    const readBack = `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}T${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}`;
+    if (readBack !== sendAt || etWallClockOccurrences(when) !== 1) return res.status(400).json({ error: 'That time does not exist once in Eastern time. Pick another.' });
     const ahead = when.getTime() - Date.now();
     if (Number.isNaN(ahead) || ahead < 60 * 1000) return res.status(400).json({ error: 'Pick a time at least a minute from now.' });
     if (ahead > SCHEDULE_MAX_DAYS * 86400000) return res.status(400).json({ error: 'Pick a time within a year.' });

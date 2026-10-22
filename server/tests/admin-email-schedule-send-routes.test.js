@@ -47,6 +47,9 @@ test.each([
   ['a time more than a year out', { sendAt: etIn(400 * 24 * 60) }, 'Pick a time within a year.'],
   ['a zoned instant instead of Eastern wall clock', { sendAt: new Date(Date.now() + 3600000).toISOString() }, 'sendAt must be YYYY-MM-DDTHH:MM (Eastern)'],
   ['no draft text to restore', { draftText: '' }, 'to, body and draftText required'],
+  ['a date that does not exist', { sendAt: '2027-02-31T09:00' }, 'That time does not exist once in Eastern time. Pick another.'],
+  ['the spring-forward gap', { sendAt: '2027-03-14T02:30' }, 'That time does not exist once in Eastern time. Pick another.'],
+  ['the repeated fall-back hour', { sendAt: '2026-11-01T01:30' }, 'That time does not exist once in Eastern time. Pick another.'],
   ['no client key', { clientKey: undefined }, 'clientKey required'],
 ])('refuses %s before any write', async (_label, change, error) => {
   process.env.GATE_EMAIL_SEND_LATER = 'true';

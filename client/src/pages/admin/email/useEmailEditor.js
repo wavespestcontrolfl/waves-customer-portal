@@ -247,7 +247,7 @@ export default function useEmailEditor(userId) {
       clearQueued();
       setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, message: `Scheduled for ${formatSendAt(sendAt)}. Find it under Scheduled.` } }));
     } catch {
-      setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: "Scheduling was not confirmed. Look under Scheduled; trying again will not queue it twice." } }));
+      setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: "Scheduling was not confirmed. Look under Scheduled before you schedule or send it again." } }));
     } finally {
       setScheduling(null);
       await onScheduled?.();
