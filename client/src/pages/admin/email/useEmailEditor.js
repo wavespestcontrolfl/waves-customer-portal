@@ -461,7 +461,9 @@ export default function useEmailEditor(userId) {
     // cannot survive a reload is no guard, so the draft does not come back.
     // A draft taken over from another tab waits the same way for the
     // operator's check of that tab.
-    const guard = (draft.mayHaveSent && MAY_HAVE_SENT) || (draft.takenOver && TAKEN_OVER);
+    // Both can apply; they stack, and each check is asked in turn.
+    const kinds = [draft.mayHaveSent && MAY_HAVE_SENT.request, draft.takenOver && TAKEN_OVER.request].filter(Boolean);
+    const guard = kinds.length ? { request: kinds[0], clientKey: null, also: kinds.slice(1) } : null;
     if (guard && !rememberUncertain(slotOf(draft.replyEmailId), guard)) return { guardUnsaved: true };
     // `saved` is this write's own result: a refused or unsaved write is not
     // durable, and the caller then closes the draft again. The slot stays

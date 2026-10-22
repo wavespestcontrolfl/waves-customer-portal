@@ -675,6 +675,25 @@ describe("Email schedule send", () => {
     await waitFor(() => expect(send()).not.toBeDisabled());
   });
 
+  it("taking over an email Gmail may have sent keeps both checks", async () => {
+    scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "cancelled", mayHaveSent: true }];
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation((input, options = {}) => {
+      if (!String(input).endsWith("/queued-1/cancel")) return base(input, options);
+      return JSON.parse(options.body).takeover
+        ? response({ success: true, draft: { ...scheduledRows[0], takenOver: true } })
+        : response({ error: "Open in another tab.", claimedElsewhere: true }, 409);
+    });
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Scheduled" }, { timeout: 3000 }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open as draft" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open here anyway" }));
+    expect(await screen.findByText(/Gmail may already have sent this email/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "I checked: it is in neither" }));
+    expect(await screen.findByText(/may still be open as a draft in another tab/)).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Send", exact: true }).at(-1)).toBeDisabled();
+  });
+
   it("sign-out keeps the restore key, so a cancel whose answer was lost can still be taken back", () => {
     sessionStorage.setItem("waves_email_restored_pending:fixture-schedule-owner", "[\"queued-1\"]");
     sessionStorage.setItem("waves_email_restore_keys:fixture-schedule-owner", "{}");
