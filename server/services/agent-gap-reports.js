@@ -466,6 +466,18 @@ async function setGapStatus(gapId, status) {
 // The refusal code worth a gap row for one failed tool result, or null: a
 // by-design code, an unknown business code, a fault and a plain error record
 // nothing. Reads only; the result's text is classified and never kept.
+// The separate asks inside one search query, split on "and", "then", "also",
+// commas and semicolons.
+function askParts(query) {
+  return String(query || '').toLowerCase().split(/\s*(?:[,;]|\band\b|\bthen\b|\balso\b)\s*/).filter((part) => /[a-z]/.test(part));
+}
+const stemWord = (word) => word.replace(/(?:ing|es|s)$/, '');
+// An ask names a tool when every word of the tool's name is in the ask.
+function askNamesTool(part, tool) {
+  const words = new Set(part.split(/[^a-z0-9]+/).filter(Boolean).map(stemWord));
+  return String(tool).split('_').filter(Boolean).every((word) => words.has(stemWord(word)));
+}
+
 function recordableRefusalCode(result) {
   // Only a policy refusal (the shared predicate: a coded refusal or a
   // refused/refusal marker). An uncoded failure is a fault, whatever its text
@@ -599,9 +611,17 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
       terminal.tools.add(name);
     }
   }
-  // Tied only when the search's own best match is the refusing tool: a search
-  // that merely surfaced it beside other asks keeps its row (Codex #6371 r17).
-  const tiedToTerminalRefusal = (search) => terminal.tools.has(search.closestTool);
+  // A search is tied to a by-design refusal when the refusing tool was surfaced
+  // (or ranked first) for it and EVERY separate ask in its query belongs to a
+  // refusing tool. A one-ask search is tied by the surfaced tool alone, wherever
+  // the ranker put it (r18); a multi-part search keeps its row while any part
+  // ("export payroll hours" beside "send the invoice") is unrelated (r17).
+  const tiedToTerminalRefusal = (search) => {
+    const tools = [...terminal.tools].filter((tool) => search.surfaced.has(tool) || search.closestTool === tool);
+    if (!tools.length) return false;
+    const parts = askParts(search.query);
+    return parts.length <= 1 || parts.every((part) => tools.some((tool) => askNamesTool(part, tool)));
+  };
 
   function toolResult(name, result, failed, meta) {
     trackTerminal(name, result, failed, meta);

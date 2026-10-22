@@ -736,6 +736,27 @@ describe('agent-gap-reports', () => {
         expect(insertedRows[0]).toMatchObject({ kind: 'missing_capability', summary: 'export payroll hours and send the invoice' });
       });
 
+      test('a one-ask search is tied to the refusing tool even when the ranker put another tool first (Codex #6371 r18)', async () => {
+        const collector = collectorFor();
+        collector.discovery({ query: 'send invoice' }, {
+          status: 'capability_unimplemented',
+          capabilities: [{ id: 'cancel_appointment', domain: 'schedule' }, { id: 'get_day_summary', domain: 'schedule' }, { id: 'send_invoice', domain: 'billing' }],
+        });
+        collector.toolResult('send_invoice', refusal('invoice_send_queued'), true, { round: 1 });
+        await collector.flush({ reply: 'The invoice text is already queued.' });
+        expect(insertedRows).toHaveLength(0);
+      });
+
+      test('a multi-part search is dropped only when every part belongs to a refusing tool', async () => {
+        const collector = collectorFor();
+        collector.discovery({ query: 'send the invoice and send invoices again' }, {
+          status: 'capability_unimplemented', capabilities: [{ id: 'list_timesheets', domain: 'payroll' }, { id: 'send_invoice', domain: 'billing' }],
+        });
+        collector.toolResult('send_invoice', refusal('invoice_send_queued'), true, { round: 1 });
+        await collector.flush({ reply: 'The invoice text is already queued.' });
+        expect(insertedRows).toHaveLength(0);
+      });
+
       test('a refusal that IS a gap keeps the search row beside its blocked row', async () => {
         const collector = collectorFor();
         collector.discovery({ query: 'cancel a visit with charges' }, MISS);
