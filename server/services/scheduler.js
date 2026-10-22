@@ -5312,7 +5312,7 @@ function initScheduledJobs() {
               try {
                 const labelDecision = await db('agent_decisions')
                   .where({ id: claimMeta.agent_decision_id })
-                  .first('input_snapshot', 'prompt_version');
+                  .first('input_snapshot', 'prompt_version', 'suggested_message');
                 // The reply guard runs on the final body of every real-answers
                 // decision (an edit may not add label timing); the visit recheck
                 // only for a body that still copies a snapshotted sentence.

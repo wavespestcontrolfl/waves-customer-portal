@@ -167,15 +167,17 @@ async function labelFactsBlock({ decision, outgoingBody }) {
 // RETIRED COMPANY FACTS (owner 2026-10-22, Codex #6447 r1/r2): a real-answers draft written before the answer-book facts
 // (prompt 15_n / 16_n) saw the old inside-spray policy (every visit unless declined) and the old payment policy (technicians take
 // cards, never cash). Phrase matching cannot tell an old claim from a correct new one, so a draft from those prompts is refused
-// at send whenever its final body touches either topic; a person rewrites it. Drafts from 15_n on are not affected.
+// at send whenever its final body touches either topic and is still the AI draft; a person rewrites it. Drafts from 15_n on are not affected.
 const ANSWER_BOOK_PROMPT_NUMBER = 15;
 const RETIRED_FACT_TOPIC_RE = /\b(?:inside|interior|indoors?|cash|cards?|pay|pays|paying|payments?|paid)\b/i;
 function draftedBeforeAnswerBook(decision) {
   const m = /^house_voice_v12_real_answers(\d*)/.exec(String(decision?.prompt_version || ''));
   return !!m && (!m[1] || Number(m[1]) < ANSWER_BOOK_PROMPT_NUMBER);
 }
+// A staff-edited body (it differs from the stored draft) is the reviewer's rewrite, so it goes out (Codex #6447 r5).
 function retiredCompanyFactBlock({ decision, outgoingBody }) {
   if (!draftedBeforeAnswerBook(decision) || !RETIRED_FACT_TOPIC_RE.test(String(outgoingBody || ''))) return null;
+  if (bodyIsStaffEdited(decision.suggested_message, outgoingBody)) return null;
   return 'company fact retired (drafted before the 2026-10-22 inside-spray and payment facts)';
 }
 

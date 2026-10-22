@@ -503,6 +503,11 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
       expect(retiredCompanyFactBlock({ decision, outgoingBody: 'See you Tuesday between 8 and 10!' })).toBeNull();
     }
   });
+  test('a staff rewrite of an old draft goes out; the unedited old draft does not', () => {
+    const decision = { prompt_version: 'house_voice_v12_real_answers13_n', suggested_message: RETIRED_COMPANY_FACT_LINES[10] };
+    expect(retiredCompanyFactBlock({ decision, outgoingBody: 'The technician can take cash at the visit.' })).toBeNull();
+    expect(retiredCompanyFactBlock({ decision, outgoingBody: RETIRED_COMPANY_FACT_LINES[10] })).toMatch(/company fact retired/);
+  });
   test('a draft from the answer-book prompts, or not a real-answers draft, is never refused by it', () => {
     for (const prompt_version of ['house_voice_v12_real_answers15_n', 'house_voice_v12_real_answers16_n+c', 'house_voice_v11', null]) {
       for (const body of [COMPANY_FACTS[10], 'We don’t take cash during your visit; please pay cash through the office.', COMPANY_FACTS[0]]) {
