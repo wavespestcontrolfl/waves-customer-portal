@@ -483,7 +483,9 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
     expect(payOk(REFUND, status)).toBe(false);
     expect(payOk(REFUND, null)).toBe(false);
     // a visit cancel or a prepaid card is not a plan-refund question
-    for (const inbound of ["Please cancel tomorrow's visit", 'Do you accept prepaid debit cards?']) expect(payOk(REFUND, inbound)).toBe(false);
+    for (const inbound of ["Please cancel tomorrow's visit", 'Do you accept prepaid debit cards?', 'Please cancel my lawn service visit', 'Can I cancel my pest service appointment?']) {
+      expect(payOk(REFUND, inbound)).toBe(false);
+    }
   });
   test('only the paying and refund lines are exempt: another fact copied into a payment reply is still judged', () => {
     expect(require('../services/sms-company-facts').moneyPolicyFacts()).toHaveLength(2);
