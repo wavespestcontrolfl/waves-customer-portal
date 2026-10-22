@@ -347,11 +347,13 @@ async function templateShowsAverageNote(templateKey) {
   const loaded = await EmailTemplateLibrary.loadTemplateByKey(templateKey);
   const version = loaded?.activeVersion;
   if (!version) return false;
-  const token = "{{estimate_average_note}}";
+  // Both tokens: the average price row replaces {{price_summary}} and the note rides
+  // in {{estimate_average_note}}; a version missing either would print half of the copy.
+  const tokens = ["{{price_summary}}", "{{estimate_average_note}}"];
   const blocks = typeof version.blocks === "string" ? version.blocks : JSON.stringify(version.blocks || []);
-  if (!blocks.includes(token)) return false;
+  if (!tokens.every((token) => blocks.includes(token))) return false;
   const text = version.text_body;
-  return text == null || !String(text).trim() || String(text).includes(token);
+  return text == null || !String(text).trim() || tokens.every((token) => String(text).includes(token));
 }
 
 async function withMonthlyAverage(payload, est, templateKey) {

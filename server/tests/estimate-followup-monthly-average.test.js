@@ -234,6 +234,23 @@ describe('withMonthlyAverage: only a template whose active version can show the 
     expect(out.estimate_average_note).toBe('Averaged over the year. You pay after each application.');
   });
 
+  test('a custom plain-text body that carries only one of the two tokens keeps the original payload', async () => {
+    for (const text_body of ['Custom text. {{estimate_average_note}}', 'Custom text. {{price_summary}}']) {
+      mockTemplate.activeVersion = { blocks: NOTE_BLOCKS, text_body };
+      const { payload, out } = await apply();
+      expect(out).toBe(payload);
+    }
+  });
+
+  test('a version whose blocks lack the price row (note only) or the note (price only) keeps the original payload', async () => {
+    mockTemplate.activeVersion = { blocks: [NOTE_BLOCKS[1]], text_body: null };
+    let r = await apply();
+    expect(r.out).toBe(r.payload);
+    mockTemplate.activeVersion = { blocks: [NOTE_BLOCKS[0]], text_body: null };
+    r = await apply();
+    expect(r.out).toBe(r.payload);
+  });
+
   test('a blank text body and blocks stored as a JSON string still count as supported', async () => {
     mockTemplate.activeVersion = { blocks: JSON.stringify(NOTE_BLOCKS), text_body: '  ' };
     const { out } = await apply();
