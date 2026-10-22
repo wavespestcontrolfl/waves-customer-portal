@@ -435,7 +435,7 @@ function mayExecuteWithoutCard(toolName, input = {}, taint = null, grounding = n
 // path (customer edits, create_customer and the other exempt tools) asks executesWithoutCard
 // or mayExecuteWithoutCard, so this flag cards them all (Codex #6369 r15).
 function noteSameNameContext(taint, taskContext) {
-  if (taint && ibTargetRulesV2Live() && (taskContext?.candidates?.length || 0) > 1) taint.sameNameCandidates = true;
+  if (taint && ibTargetRulesV2Live() && (taskContext?.candidates?.length || 0) > 1 && taskContext.sameName === true) taint.sameNameCandidates = true;
 }
 
 // Does the final response show same-name choice buttons: a button list that is actually

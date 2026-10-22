@@ -494,69 +494,81 @@ function contactLiteralsOf(clause) {
   return [...found.values()];
 }
 
+const identityConflict = () => Object.assign([], { identityConflict: true });
+const tenDigits = value => String(value || '').replace(/\D/g, '').slice(-10);
+
+// The ids a typed name (and, narrowed, a typed city) picks out. Fail closed: a name lookup
+// that hit its limit has rows we never saw, so the rows we did see cannot show that a name
+// or a city picks out one customer. Incomplete name evidence names nobody.
+function nameGroundedIds(namedResult, normalized, marked) {
+  const ids = new Set();
+  if (namedResult.complete === false) return ids;
+  const groups = new Map();
+  for (const customer of namedResult.matches || []) {
+    const first = normalizeName(customer.first_name), last = normalizeName(customer.last_name);
+    // Rows found by a bare first or last name share one group: the name alone cannot tell them apart.
+    const full = `${first} ${last}`.trim();
+    const key = full.includes(' ') && ` ${normalized} `.includes(` ${full} `) ? full : '*bare name';
+    groups.set(key, [...(groups.get(key) || []), customer]);
+  }
+  for (const group of groups.values()) {
+    const only = group.length === 1 ? group : group.filter(customer => cityIsTyped(customer, marked));
+    if (only.length === 1) ids.add(String(only[0].id));
+  }
+  return ids;
+}
+
+// One lookup per literal, bounded at two rows: a second row proves the phone or email is
+// shared, so it names neither account. No combined limit can hide a duplicate behind other
+// literals' rows.
+async function contactRows(literal) {
+  const rows = await db('customers').whereNull('deleted_at').where(function () {
+    if (literal.phone) this.whereRaw("right(regexp_replace(coalesce(phone, ''), '\\D', '', 'g'), 10) = ?", [literal.phone]);
+    else this.whereRaw("lower(coalesce(email, '')) = ?", [literal.email]);
+  }).limit(2).select('id', 'phone', 'email', 'first_name', 'last_name');
+  return rows.filter(row => (literal.phone ? tenDigits(row.phone) === literal.phone : normalizeEmail(row.email) === literal.email));
+}
+
+// The customers the typed contacts name, and how many literals named nobody or several.
+async function resolveContacts(literals) {
+  const owners = new Map();
+  let unresolved = 0;
+  for (const literal of literals) {
+    const found = await contactRows(literal);
+    if (found.length === 1) owners.set(String(found[0].id), found[0]);
+    else unresolved += 1;
+  }
+  return { owners, unresolved };
+}
+
+// Name and contact evidence must agree (Codex #6369 r18). With a name typed, a contact that
+// names nobody, names several, or names someone else is conflicting evidence: no typed
+// grounding for the request. The name list is capped (26 rows): past the cap, a contact
+// owner agrees with the name when the typed name names that owner (Codex #6369 r2).
+function contactsConflict({ namedResult, normalized, nameIds, owners, unresolved }) {
+  const nameMatched = new Set((namedResult.matches || []).map(customer => String(customer.id)));
+  if (!nameIds.size && !nameMatched.size) return false;
+  const agrees = id => nameMatched.has(id)
+    || (namedResult.complete === false && namesTargetCustomer(normalized, owners.get(id)));
+  const named = [...owners.keys()];
+  return unresolved > 0 || named.some(id => !agrees(id)) || (nameIds.size > 0 && named.some(id => !nameIds.has(id)));
+}
+
+// The customers THIS message names. See the block comment above MAX_CONTACT_LITERALS.
 async function typedCustomerIds(fullPrompt, namedResult) {
   const prompt = boundedPrompt(fullPrompt);
   const clause = targetClause(prompt);
   const normalized = normalizeName(withoutContacts(clause));
   const marked = normalizeName(withoutContacts(clause).replace(/,/g, ` ${COMMA_TOKEN} `));
-  const ids = new Set();
-  const matches = namedResult.matches || [];
-  const contactIds = new Set();
-  // Fail closed: a name lookup that hit its limit has rows we never saw, so the
-  // rows we did see cannot show that a name or a city picks out one customer.
-  // Incomplete name evidence names nobody (a card, never a direct edit).
-  if (namedResult.complete !== false) {
-    const groups = new Map();
-    for (const customer of matches) {
-      const first = normalizeName(customer.first_name), last = normalizeName(customer.last_name);
-      // Rows found by a bare first or last name share one group: the name alone cannot tell them apart.
-      const full = `${first} ${last}`.trim();
-      const key = full.includes(' ') && ` ${normalized} `.includes(` ${full} `) ? full : '*bare name';
-      groups.set(key, [...(groups.get(key) || []), customer]);
-    }
-    for (const group of groups.values()) {
-      const inCity = group.filter(customer => cityIsTyped(customer, marked));
-      const only = group.length === 1 ? group : inCity;
-      if (only.length === 1) ids.add(String(only[0].id));
-    }
-  }
-  const tenDigits = value => String(value || '').replace(/\D/g, '').slice(-10);
-  // One lookup per literal, bounded at two rows: a second row proves the phone
-  // or email is shared, so it names neither account. No combined limit can hide
-  // a duplicate behind other literals' rows.
-  const owners = async (literal) => {
-    const rows = await db('customers').whereNull('deleted_at').where(function () {
-      if (literal.phone) this.whereRaw("right(regexp_replace(coalesce(phone, ''), '\\D', '', 'g'), 10) = ?", [literal.phone]);
-      else this.whereRaw("lower(coalesce(email, '')) = ?", [literal.email]);
-    }).limit(2).select('id', 'phone', 'email', 'first_name', 'last_name');
-    return rows.filter(row => (literal.phone ? tenDigits(row.phone) === literal.phone : normalizeEmail(row.email) === literal.email));
-  };
-  // Work budget (Codex #6369 security P2): a message that types more than
-  // MAX_CONTACT_LITERALS phones or emails names nobody by contact (the edit
-  // keeps its card), and runs no lookup at all.
-  const contactLiterals = contactLiteralsOf(clause);
-  // Fail closed (Codex #6369 r3): the contact check never ran, so the name-derived
-  // ids cannot be shown to agree with the typed contacts. Ground nobody.
-  if (contactLiterals.length > MAX_CONTACT_LITERALS) return Object.assign([], { identityConflict: true });
-  const contactOwners = new Map();
-  for (const literal of contactLiterals) {
-    const found = await owners(literal);
-    if (found.length === 1) { contactIds.add(String(found[0].id)); contactOwners.set(String(found[0].id), found[0]); }
-  }
-  // Name and contact evidence must agree. A name that matched customers and a
-  // phone or email that belongs to someone else is unresolved: it names nobody,
-  // so the edit keeps its card (a phone beside a name may only pick among the
-  // customers that name matched).
-  const nameMatched = new Set(matches.map(customer => String(customer.id)));
-  // The name list is capped (26 rows): past the cap, a contact owner agrees
-  // with the name when the typed name names that owner (Codex #6369 r2).
-  const agreesWithName = (id) => nameMatched.has(id)
-    || (namedResult.complete === false && namesTargetCustomer(normalized, contactOwners.get(id)));
-  if (nameMatched.size && [...contactIds].some(id => !agreesWithName(id))) return Object.assign([], { identityConflict: true });
-  // A name narrowed by city (or a unique name) and a typed phone or email must
-  // name the same customer; two different customers is a conflict too.
-  if (ids.size && [...contactIds].some(id => !ids.has(id))) return Object.assign([], { identityConflict: true });
-  for (const id of contactIds) ids.add(id);
+  const nameIds = nameGroundedIds(namedResult, normalized, marked);
+  // Work budget (Codex #6369 security P2): a message that types more than MAX_CONTACT_LITERALS
+  // phones or emails names nobody by contact and runs no lookup at all. Fail closed (r3): the
+  // contact check never ran, so the name-derived ids cannot be shown to agree. Ground nobody.
+  const literals = contactLiteralsOf(clause);
+  if (literals.length > MAX_CONTACT_LITERALS) return identityConflict();
+  const { owners, unresolved } = await resolveContacts(literals);
+  if (contactsConflict({ namedResult, normalized, nameIds, owners, unresolved })) return identityConflict();
+  const ids = new Set([...nameIds, ...owners.keys()]);
   for (const id of await initialFormIds(prompt)) ids.add(id);
   return [...ids];
 }
@@ -711,13 +723,21 @@ function sameNamePick(scope, r) {
 // named customer from one the model found. identityConflict: the typed name and a
 // typed phone or email point at different customers; owner-direct then trusts no
 // name-resolved target.
+// Are these rows duplicates of ONE typed name: two or more customers with the same
+// normalized full name, and no set quantifier or second named customer in the message?
+// Two DIFFERENT named customers ("Alice Example and Bob Sample") are a cohort, not a
+// same-name ambiguity (Codex #6369 r18).
+const fullNameKey = customer => `${normalizeName(customer.first_name)} ${normalizeName(customer.last_name)}`.trim();
+const isSameNameGroup = (named, cohort) => !cohort && named.length > 1 && new Set(named.map(fullNameKey)).size === 1;
+
 async function candidatesStage(r) {
   const scope = targetRulesV2Scope(r.ownerDirectScope);
-  r.candidates = await labelledCandidates(scope, r.named.map(c => customerTarget(c, 'current_request_lookup')), r.named);
-  Object.assign(r, await typedTarget(scope, r.prompt, r.namedResult));
   // A set quantifier, partly resolved name evidence, or two distinct stated
   // recipients never yields a target, and no selection resolves it.
   r.cohort = setQuantified(r.prompt) || r.namedResult.multiple;
+  r.sameName = scope && isSameNameGroup(r.named, r.cohort);
+  r.candidates = await labelledCandidates(r.sameName, r.named.map(c => customerTarget(c, 'current_request_lookup')), r.named);
+  Object.assign(r, await typedTarget(scope, r.prompt, r.namedResult));
   r.selection = candidateSelection(r.candidates, r.prompt, r.page.customer, r.namedResult.complete, r.cohort, r.nameHint, sameNamePick(scope, r));
   return null;
 }
@@ -792,7 +812,7 @@ function recipientFields(prompt) {
 
 function contextStage(r) {
   const { prompt, page, nameHint } = r;
-  return { page, candidates: r.candidates, ...r.selection, ...r.typed, ...requestedRecordFields(prompt, page, nameHint), requestPhrase: normalizeName(targetClause(prompt)),
+  return { page, candidates: r.candidates, ...(r.sameName ? { sameName: true } : {}), ...r.selection, ...r.typed, ...requestedRecordFields(prompt, page, nameHint), requestPhrase: normalizeName(targetClause(prompt)),
     // An explicitly named customer that did not resolve keeps the request
     // target-specific: broad customer-row readers stay refused until it does.
     namesRequested: nameHint,
@@ -1334,7 +1354,7 @@ function sameNameNote(context) {
   if (context.code === 'target_clarification_required') {
     return { sameNameNote: `More than ${CUSTOMER_LOOKUP_LISTED_V2} customers share the name the owner typed. Ask for a phone number or an email, or ask the owner to open the customer's page. A name or a city cannot pick one customer from a list this long.` };
   }
-  if (rows.length < 2 || context.target) return {};
+  if (rows.length < 2 || context.target || context.sameName !== true) return {};
   // A reply that already narrows the name to one (a choice button sends
   // "Full Name, City"; a typed phone or email works the same) is the owner's
   // pick: no second round of choices.

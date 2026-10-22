@@ -197,7 +197,7 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
       let limit = Infinity;
       const filters = [];
       const digits = value => String(value || '').replace(/\D/g, '').slice(-10);
-      const q = { whereNull: () => q, whereIn: (column, values) => { if (column === 'id' && Array.isArray(values)) filters.push(row => values.includes(row.id)); return q; }, groupBy: () => q, select: () => q,
+      const q = { whereNull: () => q, orWhereIn: () => q, whereIn: (column, values) => { if (column === 'id' && Array.isArray(values)) filters.push(row => values.includes(row.id)); return q; }, groupBy: () => q, select: () => q,
         // A contact lookup narrows the rows the way the SQL would; every other query sees all rows.
         where: (fn) => { if (typeof fn === 'function') fn.call(q); else if (fn?.id) filters.push(row => row.id === fn.id); return q; },
         whereRaw: (sql, bindings) => {
@@ -603,6 +603,63 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(taint.sameNameCandidates).toBeUndefined();
   });
 
+  test('gate on: a unique name plus a contact that names nobody, several, or someone else is conflicting evidence: carded (Codex #6369 r18)', async () => {
+    process.env[ON] = 'true';
+    const pat = { ...sameName(1)[0], phone: '9415550100', email: 'pat@example.test' };
+    const other = n => ({ ...sameName(1)[0], id: id(700 + n), first_name: `Other${n}`, last_name: 'Person', phone: '9415550777', email: `other${n}@example.test`, hiddenFromName: true });
+    customers = [pat, other(1), other(2)];
+    const edit = { customer_id: id(100), updates: { phone: '941-555-0150' } };
+    const direct = async (prompt) => {
+      const resolved = await ask(prompt);
+      return [OwnerDirect.executesWithoutCard('update_customer', edit, null, null, OwnerDirect.targetGrounding(Context.ownerDirectContext(resolved))), resolved.typedCustomerIds];
+    };
+    // Unknown phone: conflict, no typed grounding, so the write keeps its card.
+    expect(await direct('update the notes for Pat Example at 941-555-9999')).toEqual([false, []]);
+    // A phone two customers share: conflict as well.
+    expect(await direct('update the notes for Pat Example at 941-555-0777')).toEqual([false, []]);
+    // Unknown email: same.
+    expect(await direct('update the notes for Pat Example at nobody@example.test')).toEqual([false, []]);
+    // That customer's own phone or email: direct.
+    expect(await direct('update the notes for Pat Example at 941-555-0100')).toEqual([true, [id(100)]]);
+    expect(await direct('update the notes for Pat Example at pat@example.test')).toEqual([true, [id(100)]]);
+    // Contact only, unique: direct as before. Contact only, unknown: names nobody.
+    expect(await direct('fix the notes on 941-555-0100')).toEqual([true, [id(100)]]);
+    expect(await direct('fix the notes on 941-555-9999')).toEqual([false, []]);
+  });
+
+  test('gate on: two different named customers are a cohort, not a same-name ambiguity (Codex #6369 r18)', async () => {
+    process.env[ON] = 'true';
+    customers = [
+      { ...sameName(1)[0], id: id(100), first_name: 'Alice', last_name: 'Example', city: 'Venice' },
+      { ...sameName(1)[0], id: id(101), first_name: 'Bob', last_name: 'Sample', city: 'Osprey', phone: '9415550101' },
+    ];
+    // Two named customers: a cohort, so no same-name context at all.
+    const cohort = await ask('reschedule Alice Example and Bob Sample');
+    expect(cohort.sameName).toBeUndefined();
+    expect(Context.ownerDirectContext(cohort).sameNameNote).toBeUndefined();
+    // Two different customers found by one bare first name: both kept, but they are not duplicates of one name.
+    customers = customers.map(c => ({ ...c, first_name: 'Pat' }));
+    const resolved = await ask('update Pat notes');
+    expect(resolved.sameName).toBeUndefined();
+    expect(resolved.candidates.map(c => c.customer_id).sort()).toEqual([id(100), id(101)]);
+    expect(resolved.candidates.every(c => c.choice_label === undefined && c.last_visit === undefined)).toBe(true);
+    const owner = Context.ownerDirectContext(resolved);
+    expect(owner.sameNameNote).toBeUndefined();
+    const taint = OwnerDirect.newRequestTaint([]);
+    OwnerDirect.noteSameNameContext(taint, owner);
+    expect(taint.sameNameCandidates).toBeUndefined();
+    OwnerDirect.markSameNameChoices(taint, owner, ['Alice Example, Venice', 'Bob Sample, Osprey']);
+    expect(OwnerDirect.sameNameMarkerNeeded(taint)).toBe(false);
+    // Two rows of ONE typed name still get the note, the labels and the taint.
+    customers = sameName(2);
+    const dupes = await ask('update Pat Example notes');
+    expect(dupes.sameName).toBe(true);
+    expect(Context.ownerDirectContext(dupes).sameNameNote).toMatch(/2 customers share the name/);
+    const dupeTaint = OwnerDirect.newRequestTaint([]);
+    OwnerDirect.noteSameNameContext(dupeTaint, Context.ownerDirectContext(dupes));
+    expect(dupeTaint.sameNameCandidates).toBe(true);
+  });
+
   test('gate on: a city disambiguates only in explicit syntax right after the name (Codex #6369 r10)', async () => {
     process.env[ON] = 'true';
     customers = sameName(3); // Venice, Sarasota, Osprey
@@ -960,7 +1017,7 @@ describe('same-name choice marker on the thread (Codex #6369 r16)', () => {
     const grounding = OwnerDirect.targetGrounding(owner);
     // Request 1: same-name candidates in context and choices offered: the reply leaves the marker.
     const first = await load(false);
-    const asked = { candidates: [{ choice_label: 'Pat Example, Venice' }, { choice_label: 'Pat Example, Osprey' }] };
+    const asked = { sameName: true, candidates: [{ choice_label: 'Pat Example, Venice' }, { choice_label: 'Pat Example, Osprey' }] };
     OwnerDirect.noteSameNameContext(first, asked);
     OwnerDirect.markSameNameChoices(first, asked, ['Pat Example, Venice', 'Pat Example, Osprey']);
     expect(OwnerDirect.sameNameMarkerNeeded(first)).toBe(true);
