@@ -494,13 +494,13 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
     expect((await paymentStatusVerdict({ customerId: 'c1', body: 'Your refund went through.', snapshot: null, inboundMessage: 'refund?' })).reason)
       .toBe('payment_status_unauthorized');
   });
-  test('a draft from a prompt before the answer-book facts is refused when it touches inside spray or paying', () => {
-    const old = (v) => ({ prompt_version: `house_voice_v12_real_answers${v}` });
-    for (const decision of [old('13_n'), old('14_n'), old('13_n+bc'), old('')]) {
-      for (const body of [RETIRED_COMPANY_FACT_LINES[0], RETIRED_COMPANY_FACT_LINES[10], 'We don’t take cash during your visit.', 'You can pay by card.']) {
-        expect(retiredCompanyFactBlock({ decision, outgoingBody: body })).toMatch(/company fact retired/);
-      }
-      expect(retiredCompanyFactBlock({ decision, outgoingBody: 'See you Tuesday between 8 and 10!' })).toBeNull();
+  test('an unedited draft from a prompt before the answer-book facts is refused, whatever its words', () => {
+    const old = (v, body) => ({ prompt_version: `house_voice_v12_real_answers${v}`, suggested_message: body });
+    for (const v of ['13_n', '14_n', '13_n+bc', '7_m', '']) {
+      for (const body of [
+        RETIRED_COMPANY_FACT_LINES[0], RETIRED_COMPANY_FACT_LINES[10], 'Every recurring service treats the home as well as the yard unless you opt out.',
+        'The technician accepts plastic at the appointment, never currency.', 'See you Tuesday between 8 and 10!',
+      ]) expect(retiredCompanyFactBlock({ decision: old(v, body), outgoingBody: body })).toMatch(/company fact retired/);
     }
   });
   test('a staff rewrite of an old draft goes out; the unedited old draft does not', () => {
