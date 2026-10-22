@@ -117,6 +117,23 @@ const PHOTO_PREFIX = 'project-photos/';
 // / pre-treat certificate) — a future date can't be attested, so create/edit
 // reject it instead of trusting the keyboard.
 const LEGAL_DOC_DATE_TYPES = new Set(['wdo_inspection', 'pre_treatment_termite_certificate']);
+
+// The pre-treat certificate's final-exterior fields are free text that the
+// customer notice prints (GATE_PRETREAT_STICKER_REPORT). Run the customer
+// copy screen on them at write time: a claim ("pet-safe", "EPA-approved") or
+// an access code is refused, not stored. reports-public applies the same
+// screen at egress for rows written before this guard.
+const FINAL_EXTERIOR_TEXT_KEYS = ['final_exterior_product', 'final_exterior_active_ingredient', 'final_exterior_applicator_name'];
+function finalExteriorCopyViolation(projectType, rawFindings) {
+  if (projectType !== 'pre_treatment_termite_certificate') return null;
+  const findings = normalizeFindings(rawFindings);
+  const { customerCopyViolations, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
+  for (const key of FINAL_EXTERIOR_TEXT_KEYS) {
+    const value = String(findings[key] ?? '').trim();
+    if (value && (customerCopyViolations(value).length || containsReportAccessCode(value))) return key;
+  }
+  return null;
+}
 // project_photos.caption is varchar(200): a longer caption would fail the
 // INSERT after the image is already in S3, stranding an orphan object and
 // blocking every Save retry. Clamp rather than reject — losing the tail of a
@@ -1577,6 +1594,10 @@ router.get('/:id', async (req, res, next) => {
           return Boolean(lastFiling?.s3_key && config.s3?.bucket)
             && !filingBinaryMayDiscloseFee(lastFiling);
         })(),
+        // The customer preview renders the same notice the public page
+        // does when GATE_PRETREAT_STICKER_REPORT is on (preview == public).
+        pretreat_sticker_report: project.project_type === 'pre_treatment_termite_certificate'
+          && isEnabled('pretreatStickerReport'),
         property_profile: propertyProfile,
         wdo_history: wdoHistory,
         wdo_applicator: wdoApplicator,
@@ -1642,6 +1663,13 @@ router.post('/', async (req, res, next) => {
 
     if (!customer_id) return res.status(400).json({ error: 'customer_id required' });
     if (!isValidProjectType(project_type)) return res.status(400).json({ error: 'Invalid project_type' });
+    const createCopyKey = finalExteriorCopyViolation(project_type, findings);
+    if (createCopyKey) {
+      return res.status(422).json({
+        error: 'The final exterior treatment fields print on the customer notice — remove the claim or code and save again.',
+        code: 'final_exterior_copy', field: createCopyKey,
+      });
+    }
     // Types cut over to the typed service-report completion flow no longer
     // create project records — the appointment completion is the artifact.
     // Server-side guard so stale clients can't recreate the dual-entry path.
@@ -2221,6 +2249,15 @@ router.put('/:id', async (req, res, next) => {
     const allowed = ['title', 'project_date', 'findings', 'recommendations', 'followup_date', 'followup_findings'];
     for (const f of allowed) if (req.body[f] !== undefined) updates[f] = req.body[f];
     if (updates.project_date !== undefined) updates.project_date = normalizeDateOnly(updates.project_date);
+    const updateCopyKey = updates.findings !== undefined
+      ? finalExteriorCopyViolation(project.project_type, updates.findings)
+      : null;
+    if (updateCopyKey) {
+      return res.status(422).json({
+        error: 'The final exterior treatment fields print on the customer notice — remove the claim or code and save again.',
+        code: 'final_exterior_copy', field: updateCopyKey,
+      });
+    }
     // Mirror of the create-path clamp: a dated legal filing can't carry a
     // future inspection/treatment date (one already shipped in prod).
     if (updates.project_date && LEGAL_DOC_DATE_TYPES.has(project.project_type) && updates.project_date > etDateString()) {

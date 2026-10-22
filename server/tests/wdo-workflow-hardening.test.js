@@ -588,3 +588,50 @@ describe('signature ink check fails closed', () => {
     });
   });
 });
+
+describe('pre-treat final exterior fields: customer copy screen (GATE_PRETREAT_STICKER_REPORT)', () => {
+  const certificate = () => wdoProject({
+    project_type: 'pre_treatment_termite_certificate',
+    wdo_signature: null,
+    findings: { treatment_date: '2026-06-10', product_name: 'Termidor SC' },
+  });
+
+  test('PUT refuses a banned claim in a final exterior field (422 final_exterior_copy)', async () => {
+    const projects = chain({ first: jest.fn().mockResolvedValue(certificate()) });
+    mockTables({ projects });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ findings: { treatment_date: '2026-06-10', final_exterior_product: 'pet-safe Termidor' } }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(422);
+      expect(body.code).toBe('final_exterior_copy');
+      expect(body.field).toBe('final_exterior_product');
+    });
+    expect(projects.update).not.toHaveBeenCalled();
+  });
+
+  test('PUT accepts plain product, ingredient and applicator values', async () => {
+    const projects = chain({ first: jest.fn().mockResolvedValue(certificate()) });
+    mockTables({ projects });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          findings: {
+            treatment_date: '2026-06-10',
+            final_exterior_date: '2026-06-10',
+            final_exterior_product: 'Termidor SC',
+            final_exterior_active_ingredient: 'Fipronil',
+            final_exterior_applicator_name: 'Alex Tester',
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+    });
+  });
+});
+

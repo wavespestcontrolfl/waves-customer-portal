@@ -892,7 +892,7 @@ function StickerBlank({ label, value }) {
       <div style={{
         minHeight: 24,
         borderBottom: `1px solid ${ESTIMATE_MUTED}`,
-        fontSize: 15,
+        fontSize: 16,
         fontWeight: 600,
         color: ESTIMATE_TEXT,
         padding: '0 0 4px',
@@ -915,7 +915,7 @@ function StickerBlank({ label, value }) {
   );
 }
 
-function TermiteNoticeSticker({ findings, technicianName, projectDateLabel }) {
+export function TermiteNoticeSticker({ findings, technicianName, projectDateLabel }) {
   const f = findings || {};
   const extraApplications = certificateAdditionalApplications(f);
   const product1 = f.product_name === 'Other' && f.product_name_other ? f.product_name_other : f.product_name;
@@ -927,6 +927,9 @@ function TermiteNoticeSticker({ findings, technicianName, projectDateLabel }) {
   ].filter(Boolean).join(' ');
   const concentration = String(f.concentration_pct || '').trim().replace(/%$/, '');
   const navy = ESTIMATE_BUTTON_BG;
+  // "No warranty" certificates carry no retreatment contract, so the
+  // notice drops the label's contract clause and warranty call to action.
+  const noWarranty = /^no warranty$/i.test(String(f.warranty_type || '').trim());
 
   return (
     <div data-testid="termite-notice-sticker" style={{
@@ -1026,9 +1029,9 @@ function TermiteNoticeSticker({ findings, technicianName, projectDateLabel }) {
           border: `1px solid ${ESTIMATE_INPUT_BORDER}`,
         }}>
           This property has been treated for the prevention of subterranean termites in accordance with Florida
-          Building Code 1816 and rules established by the Florida Department of Agriculture &amp; Consumer Services,
-          placed under a retreatment contract renewable by payment of an annual fee. The owner is hereby advised to
-          have the property inspected annually by Waves Pest Control, LLC.
+          Building Code 1816 and rules established by the Florida Department of Agriculture &amp; Consumer Services
+          {noWarranty ? '.' : ', placed under a retreatment contract renewable by payment of an annual fee.'}
+          {' '}The owner is hereby advised to have the property inspected annually by Waves Pest Control, LLC.
         </div>
         <div style={{ fontSize: 14, fontWeight: 600, color: B.red, marginTop: 10, lineHeight: 1.45 }}>
           It is a violation of Florida Statutes 482.226 for anyone other than the property owner to remove this notice.
@@ -1038,7 +1041,8 @@ function TermiteNoticeSticker({ findings, technicianName, projectDateLabel }) {
       <div style={{
         background: navy,
         color: B.white,
-        padding: '16px 24px',
+        padding: '16px 24px 24px',
+        position: 'relative',
         display: 'flex',
         flexWrap: 'wrap',
         alignItems: 'center',
@@ -1046,16 +1050,20 @@ function TermiteNoticeSticker({ findings, technicianName, projectDateLabel }) {
         gap: '8px 20px',
       }}>
         <div>
-          <div style={{ fontSize: 15, fontWeight: 700 }}>Activate your termite warranty</div>
+          <div style={{ fontSize: 16, fontWeight: 700 }}>
+            {noWarranty ? 'Questions about your termite protection' : 'Activate your termite warranty'}
+          </div>
           <div style={{ fontSize: 14, opacity: 0.8, marginTop: 2 }}>
             Waves Pest Control, LLC • 13649 Luxe Ave #110, Bradenton, FL 34211
           </div>
         </div>
-        <div style={{ fontSize: 15, fontWeight: 600, textAlign: 'right' }}>
+        <div style={{ fontSize: 16, fontWeight: 600, textAlign: 'right' }}>
           <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: 'inherit', textDecoration: 'none', whiteSpace: 'nowrap' }}>{WAVES_PHONE_DISPLAY}</a>
           <br />
           <a href="https://www.wavespestcontrol.com/register" target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none', whiteSpace: 'nowrap' }}>wavespestcontrol.com/register</a>
         </div>
+        {/* Form-ID stamp, same treatment as the certificate's WV-002. */}
+        <div style={{ position: 'absolute', right: 10, bottom: 4, fontSize: FS.body, opacity: 0.8 }}>WV-001</div>
       </div>
     </div>
   );
@@ -1151,8 +1159,23 @@ function CertificateFieldGrid({ fields, compact }) {
   );
 }
 
-function CertificateOfCompliance({ findings, customerName, technicianName, projectDateLabel, detailsOnly = false }) {
-  const f = findings || {};
+// "09/14/2026 · Termidor SC / Fipronil · applied by <name>" — the later
+// exterior visit's own record, kept apart from the slab-day attestation.
+function finalExteriorLine(f) {
+  const materials = [f.final_exterior_product, f.final_exterior_active_ingredient].filter(Boolean).join(' / ');
+  const parts = [
+    stickerDate(f.final_exterior_date),
+    materials,
+    f.final_exterior_applicator_name ? `applied by ${f.final_exterior_applicator_name}` : '',
+  ].filter(Boolean);
+  return parts.join(' · ');
+}
+
+// The certificate's field grid. Under the sticker (detailsOnly) it keeps
+// only what the label has no blank for; the label already prints lot,
+// permit, builder, dates, address, organism, sq ft, gallons, concentration
+// and renewal date.
+function certificateFields(f, { technicianName, projectDateLabel, detailsOnly }) {
   const applications = [
     certificateApplicationLines(f),
     ...certificateAdditionalApplications(f).map(certificateApplicationLines),
@@ -1188,9 +1211,6 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
   // Single-application certificates keep the original one-grid layout; a
   // combined job moves the per-product lines into the Application blocks
   // below so each product prints its own chemistry and coverage.
-  // Under the sticker (detailsOnly) the grid keeps only what the label has
-  // no blank for; the label already prints lot, permit, builder, dates,
-  // address, organism, sq ft, gallons, concentration and renewal date.
   const fields = detailsOnly ? [
     ['Time of treatment', formatAppointmentTime(f.treatment_time)],
     ['Method of treatment', methodValue],
@@ -1200,6 +1220,7 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
     ]),
     ['Applicator', applicatorLine],
     ['Warranty / retreatment bond', f.warranty_type],
+    ...(finalExteriorLine(f) ? [['Final exterior treatment', finalExteriorLine(f)]] : []),
   ] : [
     ['Treatment address', addressValue],
     ['Lot / Block / Subdivision', lotLine],
@@ -1216,6 +1237,159 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
     ['Applicator', applicatorLine],
     ['Warranty / retreatment bond', warrantyLine],
   ];
+  return { fields, applications, multiApplication };
+}
+
+function CertificateHeader({ detailsOnly }) {
+  return (
+    <div style={{
+      background: B.white,
+      borderBottom: `1px solid ${ESTIMATE_BORDER}`,
+      padding: '24px 24px 20px',
+      position: 'relative',
+      display: 'flex',
+      alignItems: 'flex-start',
+      gap: 20,
+    }}>
+      <div style={{ flex: 1 }}>
+        <div style={{
+          ...eyebrowStyle,
+          fontWeight: 700,
+          marginBottom: 4,
+        }}>
+          Florida Certificate of Compliance
+        </div>
+        <div style={{
+          fontFamily: FONTS.serif,
+          fontSize: 28,
+          fontWeight: 500,
+          color: ESTIMATE_TEXT,
+          lineHeight: 1.2,
+          letterSpacing: 0,
+        }}>
+          {detailsOnly ? 'Treatment Record Details' : 'Pre-Construction Termite Protection'}
+        </div>
+        {!detailsOnly && (
+          <div style={{
+            fontSize: 14,
+            color: ESTIMATE_BODY,
+            marginTop: 8,
+            lineHeight: 1.35,
+          }}>
+            Required by FL Building Code 1816.1.7 • FL Statutes 482.226 • FDACS LIC. {WAVES_FDACS_LICENSE_NUMBER}
+          </div>
+        )}
+      </div>
+      {!detailsOnly && <img src="/waves-logo.png" alt="Waves" style={{ height: 32, flexShrink: 0 }} />}
+    </div>
+  );
+}
+
+function CertificateWarrantyFooter() {
+  return (
+    <div style={{
+      margin: '16px 24px 24px',
+      background: ESTIMATE_BUTTON_BG,
+      borderRadius: 12,
+      padding: '16px 16px',
+      textAlign: 'center',
+    }}>
+      <div style={{
+        fontFamily: FONT_BODY,
+        fontSize: 16,
+        fontWeight: 700,
+        color: B.white,
+        textTransform: 'uppercase',
+        letterSpacing: 0.5,
+      }}>
+        Activate Your Termite Warranty
+      </div>
+      <div style={{
+        fontSize: 14,
+        color: B.white,
+        opacity: 0.94,
+        marginTop: 4,
+        letterSpacing: 0.3,
+      }}>
+        <a href={`tel:${WAVES_PHONE_TEL}`} style={{
+          color: 'inherit',
+          textDecoration: 'none',
+          whiteSpace: 'nowrap',
+        }}>{WAVES_PHONE_DISPLAY}</a>
+        {' • '}
+        <a href="https://www.wavespestcontrol.com/register" target="_blank" rel="noopener noreferrer" style={{
+          color: 'inherit',
+          textDecoration: 'none',
+          whiteSpace: 'nowrap',
+        }}>wavespestcontrol.com/register</a>
+      </div>
+      <div style={{
+        fontSize: FS.body,
+        color: B.white,
+        opacity: 0.85,
+        marginTop: 8,
+      }}>
+        Waves Pest Control, LLC • 13649 Luxe Ave #110, Bradenton, FL 34211
+      </div>
+    </div>
+  );
+}
+
+function CertificateSignature({ f, technicianName, projectDateLabel }) {
+  return (
+    <div style={{
+      margin: '16px 24px 0',
+      padding: '16px 16px',
+      borderRadius: 12,
+      background: '#F5F1E6',
+      border: `1px solid ${ESTIMATE_BORDER}`,
+    }}>
+      <div style={{
+        ...eyebrowStyle,
+        marginBottom: 8,
+      }}>
+        Signed electronically
+      </div>
+      <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
+        {f.applicator_attestation}
+      </div>
+      <div style={{
+        marginTop: 12,
+        paddingTop: 12,
+        borderTop: `1px solid ${ESTIMATE_BORDER}`,
+        fontSize: 14,
+        color: ESTIMATE_TEXT,
+        lineHeight: 1.5,
+      }}>
+        <span style={{ color: B.green, fontWeight: 700, marginRight: 6 }}>Signed by</span>
+        <span style={{ fontWeight: 700 }}>{f.applicator_name || technicianName}</span>
+        {f.applicator_fdacs_id ? ` · FDACS ID ${f.applicator_fdacs_id}` : ''}
+        {(f.treatment_date || projectDateLabel) ? (
+          <>
+            <br />
+            <span style={{ color: ESTIMATE_BODY, fontSize: 14 }}>
+              Attested on {f.treatment_date ? formatReportDate(f.treatment_date) : projectDateLabel}
+            </span>
+          </>
+        ) : null}
+        {/* The final exterior visit comes later, often by another
+            applicator: this signature never vouches for it. */}
+        {finalExteriorLine(f) ? (
+          <>
+            <br />
+            <span style={{ color: ESTIMATE_BODY, fontSize: 14 }}>
+              This signature covers the initial treatment only. The final exterior treatment is recorded separately above.
+            </span>
+          </>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+export function CertificateOfCompliance({ findings, customerName, technicianName, projectDateLabel, detailsOnly = false }) {
+  const f = findings || {};
+  const { fields, applications, multiApplication } = certificateFields(f, { technicianName, projectDateLabel, detailsOnly });
 
   return (
     <div style={{
@@ -1226,46 +1400,7 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
       overflow: 'hidden',
       position: 'relative',
     }}>
-      <div style={{
-        background: B.white,
-        borderBottom: `1px solid ${ESTIMATE_BORDER}`,
-        padding: '24px 24px 20px',
-        position: 'relative',
-        display: 'flex',
-        alignItems: 'flex-start',
-        gap: 20,
-      }}>
-        <div style={{ flex: 1 }}>
-          <div style={{
-            ...eyebrowStyle,
-            fontWeight: 700,
-            marginBottom: 4,
-          }}>
-            Florida Certificate of Compliance
-          </div>
-          <div style={{
-            fontFamily: FONTS.serif,
-            fontSize: 28,
-            fontWeight: 500,
-            color: ESTIMATE_TEXT,
-            lineHeight: 1.2,
-            letterSpacing: 0,
-          }}>
-            {detailsOnly ? 'Treatment Record Details' : 'Pre-Construction Termite Protection'}
-          </div>
-          {!detailsOnly && (
-            <div style={{
-              fontSize: 14,
-              color: ESTIMATE_BODY,
-              marginTop: 8,
-              lineHeight: 1.35,
-            }}>
-              Required by FL Building Code 1816.1.7 • FL Statutes 482.226 • FDACS LIC. {WAVES_FDACS_LICENSE_NUMBER}
-            </div>
-          )}
-        </div>
-        {!detailsOnly && <img src="/waves-logo.png" alt="Waves" style={{ height: 32, flexShrink: 0 }} />}
-      </div>
+      <CertificateHeader detailsOnly={detailsOnly} />
 
       {/* Property + customer header */}
       <div style={{ padding: '16px 24px 0', display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -1363,93 +1498,11 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
           name + FDACS ID + treatment date together constitute an electronic
           signature accepted by Florida building departments. */}
       {f.applicator_attestation && (f.applicator_name || technicianName) && (
-        <div style={{
-          margin: '16px 24px 0',
-          padding: '16px 16px',
-          borderRadius: 12,
-          background: '#F5F1E6',
-          border: `1px solid ${ESTIMATE_BORDER}`,
-        }}>
-          <div style={{
-            ...eyebrowStyle,
-            marginBottom: 8,
-          }}>
-            Signed electronically
-          </div>
-          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
-            {f.applicator_attestation}
-          </div>
-          <div style={{
-            marginTop: 12,
-            paddingTop: 12,
-            borderTop: `1px solid ${ESTIMATE_BORDER}`,
-            fontSize: 14,
-            color: ESTIMATE_TEXT,
-            lineHeight: 1.5,
-          }}>
-            <span style={{ color: B.green, fontWeight: 700, marginRight: 6 }}>Signed by</span>
-            <span style={{ fontWeight: 700 }}>{f.applicator_name || technicianName}</span>
-            {f.applicator_fdacs_id ? ` · FDACS ID ${f.applicator_fdacs_id}` : ''}
-            {(f.treatment_date || projectDateLabel) ? (
-              <>
-                <br />
-                <span style={{ color: ESTIMATE_BODY, fontSize: 14 }}>
-                  Attested on {f.treatment_date ? formatReportDate(f.treatment_date) : projectDateLabel}
-                </span>
-              </>
-            ) : null}
-          </div>
-        </div>
+        <CertificateSignature f={f} technicianName={technicianName} projectDateLabel={projectDateLabel} />
       )}
 
       {/* The sticker above already carries the warranty footer. */}
-      {detailsOnly ? <div style={{ height: 24 }} /> : (
-      <div style={{
-        margin: '16px 24px 24px',
-        background: ESTIMATE_BUTTON_BG,
-        borderRadius: 12,
-        padding: '16px 16px',
-        textAlign: 'center',
-      }}>
-        <div style={{
-          fontFamily: FONT_BODY,
-          fontSize: 16,
-          fontWeight: 700,
-          color: B.white,
-          textTransform: 'uppercase',
-          letterSpacing: 0.5,
-        }}>
-          Activate Your Termite Warranty
-        </div>
-        <div style={{
-          fontSize: 14,
-          color: B.white,
-          opacity: 0.94,
-          marginTop: 4,
-          letterSpacing: 0.3,
-        }}>
-          <a href={`tel:${WAVES_PHONE_TEL}`} style={{
-            color: 'inherit',
-            textDecoration: 'none',
-            whiteSpace: 'nowrap',
-          }}>{WAVES_PHONE_DISPLAY}</a>
-          {' • '}
-          <a href="https://www.wavespestcontrol.com/register" target="_blank" rel="noopener noreferrer" style={{
-            color: 'inherit',
-            textDecoration: 'none',
-            whiteSpace: 'nowrap',
-          }}>wavespestcontrol.com/register</a>
-        </div>
-        <div style={{
-          fontSize: FS.body,
-          color: B.white,
-          opacity: 0.85,
-          marginTop: 8,
-        }}>
-          Waves Pest Control, LLC • 13649 Luxe Ave #110, Bradenton, FL 34211
-        </div>
-      </div>
-      )}
+      {detailsOnly ? <div style={{ height: 24 }} /> : <CertificateWarrantyFooter />}
 
       {/* Form-ID stamp — bottom right, matches v10 "WV-001" treatment */}
       <div style={{

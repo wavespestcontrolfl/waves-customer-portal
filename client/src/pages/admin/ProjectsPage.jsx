@@ -20,7 +20,12 @@ import ProjectFindingFieldInput, {
   hasCatalogBackedProjectFields,
   normalizeApplicationRows,
 } from "../../components/tech/ProjectFindingFieldInput";
-import { parseSections, TERMITE_COMPLIANCE_SECTIONS } from "../ProjectReportViewPage";
+import {
+  parseSections,
+  TERMITE_COMPLIANCE_SECTIONS,
+  TermiteNoticeSticker,
+  CertificateOfCompliance,
+} from "../ProjectReportViewPage";
 import PoisonControlCopy, { applicatorIdLine } from "../../components/report/PoisonControlCopy";
 import termiteTreatmentMethods from "../../../../shared/termite-treatment-methods.json";
 
@@ -875,6 +880,30 @@ function ProjectPreviewPhotoTile({ photo, projectId }) {
   );
 }
 
+// GATE_PRETREAT_STICKER_REPORT (detail endpoint's pretreat_sticker_report):
+// the certificate previews as the same notice + details block the public
+// page renders, so staff approve what the customer gets.
+function isStickerCertificate(project) {
+  return project.project_type === CERTIFICATE_TYPE && Boolean(project.pretreat_sticker_report);
+}
+
+function StickerCertificatePreview({ project, findings, projectDate }) {
+  const technicianName = project.applicator_name || project.tech_name;
+  const projectDateLabel = projectDate ? fmtDate(projectDate) : "";
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <TermiteNoticeSticker findings={findings} technicianName={technicianName} projectDateLabel={projectDateLabel} />
+      <CertificateOfCompliance
+        findings={findings}
+        customerName={project.customer_name}
+        technicianName={technicianName}
+        projectDateLabel={projectDateLabel}
+        detailsOnly
+      />
+    </div>
+  );
+}
+
 function CustomerProjectReportPreview({
   project,
   projectId,
@@ -946,7 +975,10 @@ function CustomerProjectReportPreview({
     : null;
   const suppressFindingsForNarrative = Boolean(aiNarrativeSections)
     && (project.project_type !== WDO_TYPE || Boolean(project.fdacs_pdf_available));
-  const findingsEntries = suppressFindingsForNarrative ? [] : Object.entries(findings || {}).filter(
+  // GATE_PRETREAT_STICKER_REPORT: the certificate renders as the notice +
+  // details block below, exactly like the public page, so the raw list hides.
+  const stickerCertificate = isStickerCertificate(project);
+  const findingsEntries = (suppressFindingsForNarrative || stickerCertificate) ? [] : Object.entries(findings || {}).filter(
     ([k, v]) => !INTERNAL_FINDING_KEYS.has(k) && hasMeaningfulValue(formatProjectPreviewValue(v)),
   );
   // Same compliance-block rule as the public page (preview == final,
@@ -1032,6 +1064,10 @@ function CustomerProjectReportPreview({
           >
             Open live customer report
           </a>
+        )}
+
+        {stickerCertificate && (
+          <StickerCertificatePreview project={project} findings={findings} projectDate={projectDate} />
         )}
 
         <div

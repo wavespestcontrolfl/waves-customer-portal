@@ -215,4 +215,41 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
     const sticker = await findByTestId('termite-notice-sticker');
     expect(sticker).toHaveTextContent('09/14/2026');
   });
+
+  it('gate on: the notice carries its WV-001 form stamp and the retreatment-contract clause', async () => {
+    const { findByTestId } = renderProjectReport(payload('pre_treatment_termite_certificate', {
+      pretreatStickerReport: true,
+      findings: { ...findings, warranty_type: 'Renewable 5-year retreatment bond' },
+    }));
+    const sticker = await findByTestId('termite-notice-sticker');
+    expect(sticker).toHaveTextContent('WV-001');
+    expect(sticker).toHaveTextContent('placed under a retreatment contract');
+    expect(sticker).toHaveTextContent('Activate your termite warranty');
+  });
+
+  it('gate on: "No warranty" drops the contract clause and the warranty call to action', async () => {
+    const { findByTestId } = renderProjectReport(payload('pre_treatment_termite_certificate', {
+      pretreatStickerReport: true,
+      findings: { ...findings, warranty_type: 'No warranty' },
+    }));
+    const sticker = await findByTestId('termite-notice-sticker');
+    expect(sticker).not.toHaveTextContent('retreatment contract');
+    expect(sticker).not.toHaveTextContent('Activate your termite warranty');
+  });
+
+  it('gate on: a later exterior visit gets its own record line and the signature is scoped to the initial treatment', async () => {
+    const { findByText, getByText } = renderProjectReport(payload('pre_treatment_termite_certificate', {
+      pretreatStickerReport: true,
+      findings: {
+        ...findings,
+        applicator_attestation: 'I am the licensed Florida applicator who performed the treatment described above.',
+        final_exterior_date: '2026-09-14',
+        final_exterior_product: 'Termidor SC',
+        final_exterior_active_ingredient: 'Fipronil',
+        final_exterior_applicator_name: 'Sam Example',
+      },
+    }));
+    expect(await findByText('09/14/2026 · Termidor SC / Fipronil · applied by Sam Example')).toBeInTheDocument();
+    expect(getByText(/This signature covers the initial treatment only\./)).toBeInTheDocument();
+  });
 });

@@ -1165,6 +1165,9 @@ const PROJECT_TYPES = {
       // active_ingredient, which would overwrite the slab-day record.
       { key: 'final_exterior_product', label: 'Final exterior product', type: 'text', section: 'Final exterior treatment (later visit; leave blank on slab day)', placeholder: 'e.g. Termidor SC', disableDictation: true },
       { key: 'final_exterior_active_ingredient', label: 'Final exterior active ingredient', type: 'text', section: 'Final exterior treatment (later visit; leave blank on slab day)', placeholder: 'e.g. fipronil', disableDictation: true },
+      // The slab-day attestation covers the initial treatment only; the
+      // later exterior visit names its own applicator.
+      { key: 'final_exterior_applicator_name', label: 'Final exterior applicator', type: 'text', section: 'Final exterior treatment (later visit; leave blank on slab day)', disableDictation: true },
       { key: 'applicator_name', label: "Applicator's printed name", type: 'text', section: 'Applicator certification', disableDictation: true },
       { key: 'applicator_fdacs_id', label: 'Applicator FDACS ID #', type: 'text', section: 'Applicator certification', disableDictation: true },
       // FBC 1816.1.7 requires an "authorized signature of the licensed
