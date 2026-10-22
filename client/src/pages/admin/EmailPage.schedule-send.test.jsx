@@ -504,6 +504,25 @@ describe("Email schedule send", () => {
     expect(screen.getByText(/This email may already have gone out\. Look in the Gmail Sent folder/)).toBeInTheDocument();
   });
 
+  it("a Sent check on an email another tab already found in Sent settles as sent", async () => {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation((input, options = {}) => {
+      const url = String(input);
+      if (url.endsWith("/email/schedule")) return Promise.reject(new TypeError("network"));
+      if (url.endsWith("/sent-check")) return response({ status: "sent", error: "This email was already settled elsewhere." }, 409);
+      return base(input, options);
+    });
+    reconciledRow = { id: "late-unclear", status: "outcome_unknown", sendAt: "2026-10-23T12:00:00.000Z", to: "customer@example.invalid", subject: "Guide", draftText: "Line one\n<b>two</b>" };
+    mount();
+    await writeEmail();
+    fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Tomorrow morning/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "I checked: it is in neither" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Not in Sent" }));
+    expect((await screen.findAllByText(/Marked as sent\. The draft was removed/)).length).toBeGreaterThan(0);
+    expect(screen.queryByDisplayValue("Line one\n<b>two</b>")).not.toBeInTheDocument();
+  });
+
   it("a Sent check on an email taken back elsewhere keeps Send blocked, as a check of the other tab", async () => {
     const base = fetch.getMockImplementation();
     fetch.mockImplementation((input, options = {}) => {

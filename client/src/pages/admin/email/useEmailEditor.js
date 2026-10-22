@@ -56,6 +56,25 @@ function reconcileOutcome(row) {
     : "That email may have gone out. Look in the Gmail Sent folder, then tap I checked." };
 }
 
+// Records the office's Sent-check answer on the email (the alert stays open
+// until it is). A draft its own tab took back says so (takenBack): its row is
+// already cancelled. One from a reconciled request does not, and the server
+// refuses it if another tab took the email back meanwhile. Resolves "sent",
+// "not_sent", "elsewhere" or "failed"; a 409 because another tab already
+// recorded It is in Sent counts as "sent".
+async function postSentCheck(entry, inSent) {
+  let response;
+  try {
+    response = await adminFetch(`/api/admin/email/scheduled/${encodeURIComponent(entry.rowId)}/sent-check`, {
+      method: "POST", body: JSON.stringify({ inSent, ...(entry.own ? { takenBack: true } : {}) }),
+    });
+  } catch { return "failed"; }
+  if (response.ok) return inSent ? "sent" : "not_sent";
+  if (response.status !== 409) return "failed";
+  const conflict = await response.json().catch(() => null);
+  return conflict?.status === "sent" ? "sent" : "elsewhere";
+}
+
 // The guard a restored email that Gmail may have sent carries: no request
 // fingerprint matches it, so scheduling it again also waits for the check.
 const MAY_HAVE_SENT = { request: "may_have_sent", clientKey: null };
@@ -193,32 +212,23 @@ export default function useEmailEditor(userId) {
   // gone out. The server records it on the row first (sent, or never sent:
   // its recovery copy is used up); only then does the guard clear. Found in
   // Sent, the draft goes too, so it cannot be sent a second time.
-  const resolveSentCheck = async (replyId, inSent) => {
+  const resolveSentCheck = async (replyId, answer) => {
     const slot = slotOf(replyId);
     const entry = uncertainSchedule.current[slot];
     if (scheduling || entry?.request !== MAY_HAVE_SENT.request) return;
     const say = (message, error = false) => setSendFeedback((current) => ({ ...current, [replyId ? "reply" : "compose"]: { messageId: replyId, error, message } }));
-    // The answer is recorded on the email first (the alert stays open until
-    // it is). A draft this tab took back itself says so (takenBack): its row
-    // is already cancelled. One from a reconciled request is not, and the
-    // server refuses it if another tab took the email back meanwhile.
-    let response = null;
-    try {
-      response = await adminFetch(`/api/admin/email/scheduled/${encodeURIComponent(entry.rowId)}/sent-check`, {
-        method: "POST", body: JSON.stringify({ inSent, ...(entry.own ? { takenBack: true } : {}) }),
-      });
-    } catch { response = null; }
+    const result = await postSentCheck(entry, answer);
     if (uncertainSchedule.current[slot]?.rowId !== entry.rowId) return;
     // Settled elsewhere (taken back in another tab): that tab may hold the
     // same text, so the guard stays, now as the operator's own check of it.
-    if (response?.status === 409) {
+    if (result === "elsewhere") {
       rememberUncertain(slot, KEY_SETTLED);
       say("This email was already taken back elsewhere, maybe as a draft in another tab. Look there, then tap I checked.", true);
       return;
     }
-    if (!response?.ok) { say("Could not record the check. Try again in a moment.", true); return; }
+    if (result === "failed") { say("Could not record the check. Try again in a moment.", true); return; }
     rememberUncertain(slot, null);
-    if (!inSent) return;
+    if (result === "not_sent") return;
     // Removed only while it is still that email's text (compared by a
     // fingerprint: storage never holds the email); newer edits stay.
     const current = replyId
@@ -229,6 +239,7 @@ export default function useEmailEditor(userId) {
     else { setComposeForm(() => ({ to: "", subject: "", body: "" })); setShowCompose(false); }
     say("Marked as sent. The draft was removed so it is not sent twice.");
   };
+
   // Removes a draft whose email the server already holds (queued or sent),
   // but only while it is still that email's text: newer edits stay. Returns
   // whether it removed the draft.
