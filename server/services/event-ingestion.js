@@ -82,6 +82,20 @@ const REVIVAL_COND = 'COALESCE(events_raw.end_at, events_raw.start_at) < :etMidn
 // next year's date. Rows with approved_via set (an operator reset one) stay
 // with the operator.
 const REOPEN_CURATION_COND = `(${REVIVAL_COND}) OR (events_raw.admin_status = 'pending' AND events_raw.approved_via IS NULL AND (events_raw.start_at AT TIME ZONE 'America/New_York')::date IS DISTINCT FROM (EXCLUDED.start_at AT TIME ZONE 'America/New_York')::date)`;
+// GATE_NEWSLETTER_CLICK_BOUND: once an editor approved (or featured) an event,
+// a later feed pull no longer re-points its event_url. iCal and calendar-RSS
+// rows are keyed by UID/guid, so without this a feed owner could change the
+// link of an event that newsletters already carry. Gate off = the pulled URL
+// always wins, as before.
+function eventUrlMergeValue(eventUrl) {
+  const { newsletterClickBoundLive } = require('../config/feature-gates');
+  if (!newsletterClickBoundLive()) return eventUrl;
+  return db.raw(
+    "CASE WHEN events_raw.admin_status IN ('approved', 'featured') THEN events_raw.event_url ELSE ? END",
+    [eventUrl],
+  );
+}
+
 function revivalResetFields() {
   // ET-midnight-today as a bound timestamptz — identical to the sweep's
   // parseETDateTime(`${etDateString()}T00:00:00`) (avoids the naive-ISO leak).
@@ -547,7 +561,7 @@ async function pullRssSource(source) {
         description,
         start_at: start,
         city,
-        event_url: eventUrl,
+        event_url: eventUrlMergeValue(eventUrl),
         categories,
         pulled_at: db.fn.now(),
         updated_at: db.fn.now(),
@@ -1228,7 +1242,7 @@ async function pullIcalSource(source) {
         end_at: end,
         venue_name: venueName,
         city,
-        event_url: eventUrl,
+        event_url: eventUrlMergeValue(eventUrl),
         ...(recurrence && {
           event_type: recurrence.event_type,
           recurrence_type: recurrence.recurrence_type,
@@ -1469,6 +1483,7 @@ module.exports = {
   ingestAllEnabledSources,
   ingestSource, // exported for ad-hoc admin-triggered pulls
   revivalResetFields, // exported for unit testing the past→future revival SQL
+  eventUrlMergeValue, // exported for the GATE_NEWSLETTER_CLICK_BOUND freeze test
   resolveProxyConfig, // exported for unit testing the proxy opt-in contract
   enabledSourcesInPullOrder, // exported for the pull-order Postgres test
   // Exported for unit tests — pure pieces of the shared extraction path.

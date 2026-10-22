@@ -130,25 +130,74 @@ function classifyClickAgent(userAgent) {
  * Record one click (deduped). Returns the redirect URL — always a URL,
  * even when nothing was recorded (unknown token = untracked redirect).
  */
+const CLICK_FALLBACK_URL = 'https://www.wavespestcontrol.com/';
+
+function newsletterClickBound() {
+  const { newsletterClickBoundLive } = require('../config/feature-gates');
+  return newsletterClickBoundLive();
+}
+
+/**
+ * GATE_NEWSLETTER_CLICK_BOUND: the redirect target is honoured only when the
+ * engagement token names a real delivery AND the event is in that send's
+ * lineup (locked or alternate ids — the ids the sender substitutes links
+ * for). Any other (token, event) pair goes to the homepage, so the portal
+ * host cannot be used to bounce a visitor to an arbitrary events_raw URL.
+ * Returns { delivery, send, lockedIds, member } (delivery null = unknown token).
+ */
+async function sendMembershipFor(engagementToken, eventId, knex = db) {
+  const { parseLockedEventIds } = require('./newsletter-event-selection');
+  const delivery = await knex('newsletter_send_deliveries')
+    .where({ engagement_token: engagementToken })
+    .first('id', 'send_id');
+  if (!delivery) return { delivery: null, lockedIds: [], member: false };
+  const send = await knex('newsletter_sends').where({ id: delivery.send_id }).first('event_ids', 'alternate_event_ids');
+  const lockedIds = parseLockedEventIds(send?.event_ids).map((id) => String(id).toLowerCase());
+  const alternateIds = parseLockedEventIds(send?.alternate_event_ids).map((id) => String(id).toLowerCase());
+  const target = String(eventId).toLowerCase();
+  return { delivery, lockedIds, member: lockedIds.includes(target) || alternateIds.includes(target) };
+}
+
+/**
+ * Redirect target for a click that is NOT being recorded (the per-IP click
+ * budget is spent). Gate off = the event's URL, as before; gate on = only for
+ * a real delivery whose send carries the event.
+ */
+async function eventRedirectWithoutRecording({ engagementToken, eventId }, knex = db) {
+  const event = await knex('events_raw').where({ id: eventId }).first('id', 'event_url');
+  if (!event) return CLICK_FALLBACK_URL;
+  if (!newsletterClickBound()) return event.event_url || CLICK_FALLBACK_URL;
+  try {
+    const { member } = await sendMembershipFor(engagementToken, eventId, knex);
+    return member ? (event.event_url || CLICK_FALLBACK_URL) : CLICK_FALLBACK_URL;
+  } catch (err) {
+    logger.warn(`[newsletter-event-clicks] membership check failed (homepage): ${err.message}`);
+    return CLICK_FALLBACK_URL;
+  }
+}
+
+/**
+ * Record one click (deduped). Returns the redirect URL — always a URL,
+ * even when nothing was recorded (unknown token = untracked redirect;
+ * with GATE_NEWSLETTER_CLICK_BOUND on, an unknown token or an event outside
+ * the send's lineup redirects to the homepage instead).
+ */
 async function recordEventClick({ engagementToken, eventId, userAgent }, knex = db) {
   const event = await knex('events_raw').where({ id: eventId }).first('id', 'event_url');
-  const fallback = 'https://www.wavespestcontrol.com/';
+  const fallback = CLICK_FALLBACK_URL;
   const destination = event?.event_url || fallback;
   if (!event) return { redirectUrl: fallback, recorded: false };
+  const bound = newsletterClickBound();
   try {
-    const delivery = await knex('newsletter_send_deliveries')
-      .where({ engagement_token: engagementToken })
-      .first('id', 'send_id');
-    if (!delivery) return { redirectUrl: destination, recorded: false };
-    const send = await knex('newsletter_sends').where({ id: delivery.send_id }).first('event_ids');
-    const { parseLockedEventIds } = require('./newsletter-event-selection');
-    const lockedIds = parseLockedEventIds(send?.event_ids).map((id) => String(id).toLowerCase());
+    const { delivery, lockedIds, member } = await sendMembershipFor(engagementToken, eventId, knex);
+    if (!delivery) return { redirectUrl: bound ? fallback : destination, recorded: false };
+    const unboundTarget = bound && !member ? fallback : destination;
     const position = lockedIds.indexOf(String(eventId).toLowerCase());
     if (position < 0) {
       // The event is not in this send's lineup — anyone holding a delivery
       // URL could otherwise swap in an arbitrary events_raw UUID and
       // poison the rollup and future scoring. Redirect, never record.
-      return { redirectUrl: destination, recorded: false };
+      return { redirectUrl: unboundTarget, recorded: false };
     }
     await knex('newsletter_event_clicks')
       .insert({
@@ -163,7 +212,7 @@ async function recordEventClick({ engagementToken, eventId, userAgent }, knex = 
     return { redirectUrl: destination, recorded: true };
   } catch (err) {
     logger.warn(`[newsletter-event-clicks] record failed (redirecting anyway): ${err.message}`);
-    return { redirectUrl: destination, recorded: false };
+    return { redirectUrl: bound ? fallback : destination, recorded: false };
   }
 }
 
@@ -336,6 +385,7 @@ module.exports = {
   resolveEvclickDirect,
   resolveEvclickFromBody,
   eventUrlMapForSend,
+  eventRedirectWithoutRecording,
   recordEventClick,
   rateAdjustment,
   computeLearnedAdjustments,
