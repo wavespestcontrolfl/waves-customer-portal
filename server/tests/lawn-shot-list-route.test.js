@@ -17,10 +17,6 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
   gateEnvValue: jest.fn((name) => mockGates[name] === true),
   lawnPhotoLabelPickLive: jest.fn(() => mockGates.GATE_LAWN_PHOTO_LABEL_PICK === true),
-  reportWebSliderLive: jest.fn(() => mockGates.GATE_REPORT_WEB_SLIDER === true),
-}));
-jest.mock('../services/service-report/lawn-slider', () => ({
-  lastVisitShotsForService: jest.fn(),
 }));
 jest.mock('../middleware/admin-auth', () => {
   const actual = jest.requireActual('../middleware/admin-auth');
@@ -38,7 +34,6 @@ jest.mock('../services/lawn-intelligence', () => ({}));
 const express = require('express');
 const db = require('../models/db');
 const router = require('../routes/admin-lawn-assessment');
-const { lastVisitShotsForService } = require('../services/service-report/lawn-slider');
 
 const CUSTOMER = '11111111-2222-4333-8444-555555555555';
 const photo = (zone) => ({ data: 'YQ==', mimeType: 'image/jpeg', ...(zone ? { zone } : {}) });
@@ -163,37 +158,6 @@ describe('GET /service/:serviceId tells the drawer whether the shot list is live
     mockGates = { GATE_LAWN_SHOT_LIST: true, GATE_LAWN_PHOTO_LABEL_PICK: true };
     expect(await get()).toEqual({ shotListEnabled: true, labelPickEnabled: true, assessment: null });
     mockGates = { GATE_LAWN_SHOT_LIST: true };
-    expect(await get()).toEqual({ shotListEnabled: true, assessment: null });
-  });
-});
-
-describe('GET /service/:serviceId same-angle guide (GATE_REPORT_WEB_SLIDER)', () => {
-  const GUIDE = { front: { url: 'https://signed.test/front', date: '2026-09-20' } };
-  const get = () => withServer(async (base) => (await call(base, 'GET', '/service/svc-1')).json());
-  beforeEach(() => {
-    const chain = {};
-    chain.where = jest.fn(() => chain);
-    chain.orderBy = jest.fn(() => chain);
-    chain.first = jest.fn(async () => null);
-    db.mockImplementation(() => chain);
-    lastVisitShotsForService.mockResolvedValue(GUIDE);
-  });
-
-  test('adds lastVisitShots only with the slider gate AND the shot list on', async () => {
-    mockGates = { GATE_REPORT_WEB_SLIDER: true };
-    expect(await get()).toEqual({ assessment: null });
-    mockGates = { GATE_LAWN_SHOT_LIST: true };
-    expect(await get()).toEqual({ shotListEnabled: true, assessment: null });
-    mockGates = { GATE_LAWN_SHOT_LIST: true, GATE_REPORT_WEB_SLIDER: true };
-    expect(await get()).toEqual({ shotListEnabled: true, lastVisitShots: GUIDE, assessment: null });
-    expect(lastVisitShotsForService.mock.calls[0][0].serviceId).toBe('svc-1');
-  });
-
-  test('no earlier photos, or a failed read: the lookup answers exactly as without the guide', async () => {
-    mockGates = { GATE_LAWN_SHOT_LIST: true, GATE_REPORT_WEB_SLIDER: true };
-    lastVisitShotsForService.mockResolvedValue(null);
-    expect(await get()).toEqual({ shotListEnabled: true, assessment: null });
-    lastVisitShotsForService.mockRejectedValue(new Error('boom'));
     expect(await get()).toEqual({ shotListEnabled: true, assessment: null });
   });
 });

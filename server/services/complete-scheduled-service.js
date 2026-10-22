@@ -6461,7 +6461,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // invoice re-resolves it on its new day.
           if (issuedInvoiceCloseout) {
             const lockedDay = serviceDateOnly(lockedSvcRow?.scheduled_date);
-            const { issuedCloseoutVisitRefusal, issuedDayForInvoice, visitJobTimerRunning } = require('../services/invoice-issued-closeout');
+            const { issuedCloseoutVisitRefusal, issuedDayForInvoice, visitJobTimerRunning, approvedVisitChanged } = require('../services/invoice-issued-closeout');
+            // A closeout approved on a card (record_payment) carries the visit's facts as the card showed them: the LOCKED row must still
+            // match (service type, scheduled date, status, edit time), or the visit is left open for a person (the payment stays recorded).
+            if (issuedInvoiceCloseout.expectedVisit && approvedVisitChanged(lockedSvcRow, issuedInvoiceCloseout.expectedVisit)) {
+              throw Object.assign(new Error('visit changed since the approved card during the issued-invoice closeout'), { code: 'approved_visit_changed' });
+            }
             // The prepayment proof, from the invoice row LOCKED above (and its
             // statement's delivery stamp, for a statement child).
             const lockedIssuedDay = await issuedDayForInvoice(trx, lockedIssuedInvoice, issuedInvoiceCloseout.trigger);
@@ -8830,6 +8835,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
           return ({ status: 409, body: {
             error: 'This visit was started by its technician while its invoice was being issued — the technician completes it.',
             code: 'issued_visit_in_progress',
+          } });
+        }
+        if (err && err.code === 'approved_visit_changed') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 409, body: {
+            error: 'This visit changed after the approving card was shown — the visit stays open.',
+            code: 'approved_visit_changed',
           } });
         }
         if (err && err.code === 'issued_visit_identity_changed') {
