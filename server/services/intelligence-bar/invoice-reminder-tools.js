@@ -487,6 +487,9 @@ function sendNowApproval({ invoice, seq, customer, sms, email }) {
     status: seq.status,
     stepIndex: seq.step_index,
     emailContentHash: email.none ? null : email.contentHash,
+    // What may go out, and the exact text: the send uses this body as it is and skips a channel that is not listed.
+    channels: { sms: Boolean(sms), email: !email.none },
+    smsBody: sms ? sms.body : null,
     phoneDigest: approvalDigest(digitsOf(customer.phone)),
     emailDigest: approvalDigest(email.recipientEmail),
     smsDigest: sms ? approvalDigest(sms.body) : null,
@@ -582,6 +585,7 @@ async function commitSendNow(input, actionContext) {
 const LEG_REASONS = {
   collections_policy_denied: 'held by the collections policy',
   collection_hold: 'held by a collections hold',
+  not_approved: 'it was not on the card',
   missing_email: 'no usable email on file',
   no_customer_phone: 'no phone on file',
   missing_template: 'the message template is switched off',

@@ -291,18 +291,25 @@ async function renderApprovalSmsBody(step, ctx) {
   }, { workflow: 'invoice_followup', entity_type: 'invoice', entity_id: ctx.invoiceId || null }, { noVariants: true, audit: false });
 }
 
-// Why the live recipients or text differ from the card's pin, or null. Only when the pin carries them.
-async function approvalDrift(approved, { row, customer, step }) {
-  if (!approved || !('phoneDigest' in approved)) return null;
-  const phone = phoneKey(customer.phone);
-  if (approvalDigest(phone) !== approved.phoneDigest) return 'recipient_changed';
+// What the bar's card approved for ONE send-now, as the send must honor it (a page send carries no approval: null).
+// channels: only a channel on the card goes out. smsBody: the exact approved text (the pay link as a token), sent as it is:
+// the send never re-resolves the template, so alternate wordings or an edit cannot change it. emailContentHash: the whole
+// email, enforced again at the email send. An approval that names a channel without its text or hash is invalid (fail closed).
+function approvedSendPlan(approved) {
+  if (!approved) return null;
+  const sms = approved.channels?.sms === true;
+  const email = approved.channels?.email === true;
+  const body = typeof approved.smsBody === 'string' ? approved.smsBody : null;
+  const smsValid = !sms || Boolean(body && body.includes(APPROVAL_PAY_LINK_TOKEN) && approvalDigest(body) === approved.smsDigest);
+  const emailValid = !email || (typeof approved.emailContentHash === 'string' && approved.emailContentHash.length > 0);
+  return { sms, email, body, emailContentHash: email ? approved.emailContentHash : null, valid: (sms || email) && smsValid && emailValid };
+}
+
+// Why the live recipients differ from the card's pin, or null.
+async function approvalDrift(approved, customer) {
+  if (approvalDigest(phoneKey(customer.phone)) !== approved.phoneDigest) return 'recipient_changed';
   const { to } = await operatorEmailRecipient(customer, 'invoice-followups');
-  if (approvalDigest(emailKey(to)) !== approved.emailDigest) return 'recipient_changed';
-  const body = phone ? await renderApprovalSmsBody(step, {
-    name: customer.first_name, invoiceTitle: row.title, amount: invoiceAmountDue(row).toFixed(2),
-    serviceDate: formatDateOnly(row.service_date, { fallback: '' }), invoiceId: row.invoice_id,
-  }) : null;
-  return (body ? approvalDigest(body) : null) === approved.smsDigest ? null : 'message_changed';
+  return approvalDigest(emailKey(to)) === approved.emailDigest ? null : 'recipient_changed';
 }
 
 async function logFollowupEmailAttempt({
@@ -1813,17 +1820,20 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
     return;
   }
   // The card's recipients and text, against what is live right now: a change sends neither leg (the caller restores the time).
-  const drift = await approvalDrift(approved, { row, customer, step });
-  if (drift) {
-    logger.warn(`[invoice-followups] send-now on sequence ${row.id} refused: ${drift} since the card was shown`);
-    if (report) report.previewChanged = true;
-    return;
-  }
+  const bar = approvedSendPlan(approved);
   const mdPending = verificationOnly || (gates.divertMicrodepositDunning
     && await StripeService.isInvoiceAwaitingMicrodepositVerification({
       id: row.invoice_id,
       stripe_payment_intent_id: row.invoice_stripe_pi,
     }));
+  // An approved send goes out only as the card showed it: a card with no valid channel set, a bank-verification message
+  // instead of the reminder, or other recipients send nothing.
+  const drift = bar && (!bar.valid ? 'approval_invalid' : mdPending ? 'message_changed' : await approvalDrift(approved, customer));
+  if (drift) {
+    logger.warn(`[invoice-followups] send-now on sequence ${row.id} refused: ${drift} since the card was shown`);
+    if (report) report.previewChanged = true;
+    return;
+  }
   const category = mdPending ? 'payment_issue' : 'invoice';
   let explicitChannels = null;
   if (!operatorInitiated) {
@@ -1972,14 +1982,14 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
   // keeps the claim held until delivery evidence can settle it.
   const ContactLedger = require('./collections/contact-ledger');
   const originalDeliveryTimes = [];
-  let emailResult = { ok: false, skipped: true, reason: 'collections_policy_denied' };
+  let emailResult = { ok: false, skipped: true, reason: bar && !bar.email ? 'not_approved' : 'collections_policy_denied' };
   // A spacing-window denial keeps the selected Email owed on this step; a
   // durable one (flag, suppression) waives it so the step cannot be pinned
   // forever. The global-hold gate above still stops an all-denied touch.
   let emailHold = selectedChannels !== null && emailSelected && !emailPermitted && !emailDurablyDenied;
   // A dispute hold refused a leg at the send boundary after the preflight (a wait, not a failure).
   let holdSuppressedAtBoundary = false;
-  if (emailPermitted) {
+  if (emailPermitted && (!bar || bar.email)) {
     let emailLedger = null;
     try {
       emailLedger = await ContactLedger.recordContact({
@@ -2019,7 +2029,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
               touchKey: step.id, // one branded verification email per follow-up step (same cadence as the SMS)
               enforceBillingPreference: !operatorInitiated,
             })
-          : await sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference: !operatorInitiated, expectedContentHash });
+          : await sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference: !operatorInitiated, expectedContentHash: bar ? bar.emailContentHash : expectedContentHash });
         const attemptHeld = await settleFollowupEmailLedger(
           ContactLedger, emailLedger, emailResult, selectedChannels !== null, originalDeliveryTimes,
         );
@@ -2138,6 +2148,10 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
       }
     }
     if (!nonEmailChannels.length) smsSkipReason = 'no_non_email_selected';
+  } else if (bar && !bar.sms) {
+    // Not on the card: no text, whatever the customer's phone or the template says now.
+    smsSkipReason = 'not_approved';
+    smsLeg = { state: 'skipped', reason: 'not_approved' };
   } else if (!smsPermitted) {
     // Collections policy denial — transient; the no-channel branch below
     // leaves the sequence armed instead of pausing it.
@@ -2145,12 +2159,15 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
     smsLeg = { state: 'held', reason: 'collections_policy_denied' };
   } else if (customer.phone) {
     const messageType = mdPending ? 'bank_verification_incomplete' : 'invoice_followup';
-    const body = mdPending
-      ? await renderSmsTemplate('bank_verification_incomplete', {
+    // An approved send uses the card's exact text (only the pay link token becomes the live link), never a re-resolved template.
+    const body = bar
+      ? bar.body.split(APPROVAL_PAY_LINK_TOKEN).join(ctx.payUrl)
+      : mdPending
+        ? await renderSmsTemplate('bank_verification_incomplete', {
           first_name: ctx.name,
           billing_url: `${publicPortalUrl()}/?tab=billing`,
         }, { workflow: 'microdeposit_verification_reminder', entity_type: 'invoice', entity_id: row.invoice_id })
-      : await resolveBody(step, ctx);
+        : await resolveBody(step, ctx);
     if (!body) {
       smsSkipReason = 'missing_template';
       smsLeg = { state: 'skipped', reason: 'missing_template' };
@@ -3230,6 +3247,11 @@ async function sendNextTouchNow(invoiceId, { operatorInitiated = false, combined
   // step confirmed.
   // The card's email content hash, checked against the live template before the claim so a changed email sends neither leg
   // (sendTemplate enforces the same hash again at the email send itself).
+  // An approved send-now that names the email must carry its hash: without one the email would go out unrestricted.
+  if (approved && approvedSendPlan(approved).email && !approved.emailContentHash) {
+    await restoreAfterRefusal();
+    return SEND_NOW_PREVIEW_CHANGED;
+  }
   if (approved?.emailContentHash) {
     let liveHash = null;
     try {

@@ -394,12 +394,16 @@ describe('send_invoice_reminder_now', () => {
     const emailOnly = await call('send_invoice_reminder_now');
     expect(emailOnly).toMatchObject({ channels: 'email' });
     expect(emailOnly.text_line).toBe('No text: no phone is on file.');
+    // The approval names exactly the channels on the card: a missing channel is not offered to the send.
+    expect(emailOnly._approved).toMatchObject({ channels: { sms: false, email: true }, smsBody: null, emailContentHash: 'hash-1' });
     state.customers[0].phone = '+19415550142';
     BillingEmailSender.operatorEmailRecipient.mockResolvedValue({ refusal: { reason: 'missing_email' } });
     const textOnly = await call('send_invoice_reminder_now');
     expect(textOnly).toMatchObject({ channels: 'text' });
     expect(textOnly.email_line).toBe('No email: no usable email is on file.');
     expect(textOnly.email_body).toBeNull();
+    expect(textOnly._approved).toMatchObject({ channels: { sms: true, email: false }, emailContentHash: null });
+    expect(textOnly._approved.smsBody).toMatch(/\[pay link\]$/);
     state.customers[0].phone = null;
     expect(await call('send_invoice_reminder_now')).toMatchObject({ code: 'invoice_no_channel' });
   });
@@ -445,6 +449,8 @@ describe('send_invoice_reminder_now', () => {
       invoiceId: INV, actor: { technicianId: 'staff-1' },
       approvedReminder: {
         invoiceUpdatedAtMs: new Date('2099-01-01T12:00:00.123Z').getTime(), sequenceId: SEQ, status: 'active', stepIndex: 0, emailContentHash: 'hash-1',
+        // What may go out, and the exact text: the send uses it as it is.
+        channels: { sms: true, email: true }, smsBody: 'Hi Robin, a friendly reminder about your $129.00 invoice: [pay link]',
         // Digests only: the pin never carries the phone, the address or the text itself.
         phoneDigest: approvalDigest('19415550142'), emailDigest: approvalDigest('robin.sample@example.com'), smsDigest: approvalDigest(card.text_line.match(/"(.*)" Not sent/)[1]),
       },

@@ -69,7 +69,14 @@ const INV = 'inv-1';
 const SEQ = 'seq-1';
 const NEXT = new Date('2099-01-06T15:00:00Z');
 const UPDATED = new Date('2099-01-01T12:00:00.123Z');
-const APPROVED = { sequenceId: SEQ, status: 'active', stepIndex: 0, invoiceUpdatedAtMs: UPDATED.getTime() };
+// A bar approval as the card builds it: sequence state, the channel set, the exact text (pay link as a token), the email hash.
+const { approvalDigest } = require('../utils/approval-digest');
+const SMS_BODY = 'Hi Taylor, a friendly reminder: [pay link]';
+const APPROVED = {
+  phoneDigest: approvalDigest('19415550101'), emailDigest: approvalDigest('billing@example.com'), smsDigest: approvalDigest(SMS_BODY),
+  sequenceId: SEQ, status: 'active', stepIndex: 0, invoiceUpdatedAtMs: UPDATED.getTime(),
+  channels: { sms: true, email: true }, smsBody: SMS_BODY, emailContentHash: 'hash-1',
+};
 
 let tables;
 let hooks;
@@ -307,13 +314,12 @@ describe('the report: per-channel outcomes, never step progression', () => {
     expect((await sendNow({ approved: APPROVED, report: true })).report.legs.sms).toEqual({ state: 'sent' });
   });
 
-  test('no phone and no email: both legs are skipped, nothing is sent, and the report says so', async () => {
+  test('no phone and no email now (the card had both): nothing is sent and the click is refused as changed', async () => {
     tables.customers[0].phone = null;
     require('../services/customer-contact').getInvoiceEmailRecipients.mockReturnValueOnce([]);
-    const result = await sendNow({ approved: APPROVED, report: true });
-    expect(result.report.legs.sms).toEqual({ state: 'skipped', reason: 'no_customer_phone' });
-    expect(result.report.legs.email).toEqual({ state: 'skipped', reason: 'missing_email' });
+    expect(await sendNow({ approved: APPROVED, report: true })).toMatchObject({ ok: false, reason: 'preview_changed' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 });
 
@@ -536,7 +542,7 @@ describe('a control racing a send in flight', () => {
 // The card pins the whole email (templateContentHash: every HTML block, wrapper, sender, subject, text body), not only its
 // rendered subject and text. The service checks it against the live template before the claim and hands it to sendTemplate.
 describe('the card’s email content hash', () => {
-  const HASHED = { ...APPROVED, emailContentHash: 'hash-1' };
+  const HASHED = APPROVED;
 
   test('a matching hash sends, and sendTemplate is handed the hash to enforce at the email send', async () => {
     const result = await sendNow({ approved: HASHED, report: true });
@@ -563,32 +569,84 @@ describe('the card’s email content hash', () => {
     expect(await sendNow({ approved: HASHED, report: true })).toMatchObject({ ok: false, reason: 'preview_changed' });
   });
 
-  test('a pin with no hash (no email leg planned) does not look at the template, and the page’s call passes none', async () => {
-    await sendNow({ approved: APPROVED, report: true });
+  test('a card with no email on it (channels.email false) sends no email, however the customer’s address or the template read now', async () => {
+    const result = await sendNow({ approved: { ...APPROVED, channels: { sms: true, email: false }, emailContentHash: null }, report: true });
+    expect(result.report.legs).toEqual({ sms: { state: 'sent' }, email: { state: 'skipped', reason: 'not_approved' } });
     expect(EmailTemplates.loadTemplateByKey).not.toHaveBeenCalled();
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('a card that names the email but carries no hash cannot send it unrestricted: nothing is sent and the time goes back', async () => {
+    for (const emailContentHash of [null, '', undefined]) {
+      fresh();
+      install();
+      jest.clearAllMocks();
+      expect(await sendNow({ approved: { ...APPROVED, emailContentHash }, report: true })).toMatchObject({ ok: false, reason: 'preview_changed' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+      expect(seqRow().next_touch_at).toEqual(NEXT);
+    }
+  });
+
+  test('the page’s call passes no hash to the email send', async () => {
+    await sendNow();
     expect(EmailTemplates.sendTemplate.mock.calls[0][0]).not.toHaveProperty('expectedContentHash');
   });
 });
 
-// The card pins the recipients (phone and email, as digests) and the text digest. The service re-reads the customer after the
-// claim and sends neither leg when any of them differs; the reminder time goes back.
-describe('the card’s recipients and text', () => {
-  const { approvalDigest } = require('../utils/approval-digest');
-  const PINNED = {
-    ...APPROVED,
-    phoneDigest: approvalDigest('19415550101'),
-    emailDigest: approvalDigest('billing@example.com'),
-    smsDigest: approvalDigest('invoice follow-up sms'),
-  };
+// The card carries the exact text and the channel set. The send uses that text as it is (no template re-resolve, so alternate
+// wordings or an edit cannot change it) and sends only the channels on the card; recipients are still pinned as digests.
+describe('the card’s channels, text and recipients', () => {
+  const Templates = require('../routes/admin-sms-templates');
 
-  test('unchanged recipients and text send both channels', async () => {
-    const result = await sendNow({ approved: PINNED, report: true });
+  test('both channels on the card send; the text is the card’s, with the live pay link in place of the token', async () => {
+    const result = await sendNow({ approved: APPROVED, report: true });
     expect(result.report.legs).toEqual({ sms: { state: 'sent' }, email: { state: 'sent' } });
+    const body = sendCustomerMessage.mock.calls[0][0].body;
+    expect(body).toMatch(/^Hi Taylor, a friendly reminder: \S+$/);
+    expect(body).not.toContain('[pay link]');
+    expect(Templates.getTemplate).not.toHaveBeenCalled();
+  });
+
+  test('an edited text template, or one that gained alternate wordings, after the card changes nothing: the approved text goes out', async () => {
+    Templates.getTemplate.mockResolvedValue('a completely different wording');
+    try {
+      await sendNow({ approved: APPROVED, report: true });
+      expect(sendCustomerMessage.mock.calls[0][0].body).toMatch(/^Hi Taylor, a friendly reminder: /);
+      expect(Templates.getTemplate).not.toHaveBeenCalled();
+    } finally {
+      Templates.getTemplate.mockResolvedValue('invoice follow-up sms');
+    }
+  });
+
+  test('a channel that is not on the card is skipped: no text', async () => {
+    const result = await sendNow({ approved: { ...APPROVED, channels: { sms: false, email: true }, smsBody: null, smsDigest: null }, report: true });
+    expect(result.report.legs).toEqual({ sms: { state: 'skipped', reason: 'not_approved' }, email: { state: 'sent' } });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('an approval with no channel, a text with no pay link token, or a text that does not match its digest sends nothing', async () => {
+    const broken = [
+      { ...APPROVED, channels: {} },
+      { ...APPROVED, channels: undefined },
+      { ...APPROVED, smsBody: 'Hi Taylor, no link here', smsDigest: approvalDigest('Hi Taylor, no link here') },
+      { ...APPROVED, smsBody: `${SMS_BODY} (edited)` },
+      { ...APPROVED, smsBody: null },
+    ];
+    for (const approved of broken) {
+      fresh();
+      install();
+      jest.clearAllMocks();
+      expect(await sendNow({ approved, report: true })).toMatchObject({ ok: false, reason: 'preview_changed' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+      expect(seqRow().next_touch_at).toEqual(NEXT);
+    }
   });
 
   test('a phone changed after the card was shown sends nothing and puts the reminder time back', async () => {
     tables.customers[0].phone = '+19415550199';
-    expect(await sendNow({ approved: PINNED, report: true })).toMatchObject({ ok: false, reason: 'preview_changed' });
+    expect(await sendNow({ approved: APPROVED, report: true })).toMatchObject({ ok: false, reason: 'preview_changed' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
     expect(seqRow().next_touch_at).toEqual(NEXT);
@@ -597,21 +655,14 @@ describe('the card’s recipients and text', () => {
 
   test('an email address changed after the card was shown sends nothing', async () => {
     require('../services/customer-contact').getInvoiceEmailRecipients.mockReturnValue([{ email: 'new.address@example.com', name: 'Taylor' }]);
-    expect(await sendNow({ approved: PINNED, report: true })).toMatchObject({ ok: false, reason: 'preview_changed' });
+    expect(await sendNow({ approved: APPROVED, report: true })).toMatchObject({ ok: false, reason: 'preview_changed' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 
-  test('a changed text template sends nothing', async () => {
-    require('../routes/admin-sms-templates').getTemplate.mockResolvedValue('a different wording');
-    expect(await sendNow({ approved: PINNED, report: true })).toMatchObject({ ok: false, reason: 'preview_changed' });
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
-    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
-  });
-
-  test('a pin with no recipients (the page) is not checked', async () => {
+  test('the page’s call (no approval) resolves the template itself and is not limited to a channel set', async () => {
     tables.customers[0].phone = '+19415550199';
-    const result = await sendNow({ approved: APPROVED, report: true });
-    expect(result.report.legs.sms).toEqual({ state: 'sent' });
+    await sendNow();
+    expect(sendCustomerMessage.mock.calls[0][0].body).toBe('invoice follow-up sms');
   });
 });
