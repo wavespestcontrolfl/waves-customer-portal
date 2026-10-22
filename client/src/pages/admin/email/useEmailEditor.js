@@ -155,8 +155,14 @@ export default function useEmailEditor(userId) {
     const slot = slotOf(replyId);
     const entry = uncertainSchedule.current[slot];
     if (scheduling || !entry) return;
-    // A guard with no key is the operator's call.
-    if (!entry.clientKey) { rememberUncertain(slot, null); return; }
+    // A guard with no key is the operator's call. For an email that may have
+    // gone out, that check is also its alert's job done: the server closes it
+    // (best effort; the office can still close it in the bell).
+    if (!entry.clientKey) {
+      if (entry.rowId) adminFetch(`/api/admin/email/scheduled/${encodeURIComponent(entry.rowId)}/sent-checked`, { method: "POST" }).catch(() => {});
+      rememberUncertain(slot, null);
+      return;
+    }
     const kind = replyId ? "reply" : "compose";
     const say = (message, error = false) => setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error, message } }));
     let row;
@@ -447,7 +453,7 @@ export default function useEmailEditor(userId) {
     // Gmail may already have this email: plain Send waits for the same
     // Sent-folder check as an unconfirmed schedule request. A guard that
     // cannot survive a reload is no guard, so the draft does not open.
-    if (draft.mayHaveSent && !rememberUncertain(slotOf(draft.replyEmailId), MAY_HAVE_SENT)) return { opened: false };
+    if (draft.mayHaveSent && !rememberUncertain(slotOf(draft.replyEmailId), { ...MAY_HAVE_SENT, rowId: draft.id })) return { opened: false };
     if (draft.replyEmailId) return { opened: true, saved: setReplyDraft(draft.replyEmailId, draft.draftText)?.saved === true };
     const written = setComposeForm(() => ({ to: draft.to, subject: draft.subject === "(no subject)" ? "" : draft.subject, body: draft.draftText }));
     setShowCompose(true);

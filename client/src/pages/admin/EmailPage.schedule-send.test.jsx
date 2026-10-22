@@ -51,6 +51,7 @@ beforeEach(() => {
       return response({ success: true, scheduled: scheduledRows[0] });
     }
     if (path.endsWith("/email/schedule/reconcile")) return response({ success: true, scheduled: reconciledRow });
+    if (path.endsWith("/sent-checked")) return response({ success: true });
     if (path.endsWith("/queued-1/restored")) return response({ success: true });
     if (path.endsWith("/queued-1/cancel")) {
       const draft = { ...scheduledRows[0], status: "cancelled" };
@@ -488,6 +489,8 @@ describe("Email schedule send", () => {
     expect(send()).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "I checked: it is in neither" }));
     await waitFor(() => expect(send()).not.toBeDisabled());
+    // The Sent check is also the alert's job done.
+    await waitFor(() => expect(posts("/queued-1/sent-checked")).toHaveLength(1));
   });
 
   it("does not open a may-have-sent draft when the tab cannot save the Sent-check guard", async () => {

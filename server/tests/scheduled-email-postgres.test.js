@@ -35,6 +35,9 @@ jest.mock('../services/notification-service', () => ({
     await mockConn('notifications').insert({ recipient_type: 'admin', metadata: { dedupeKey: opts.dedupeKey } });
     return { id: 'fixture-alert' };
   }),
+  // The shared Done writer, reduced to its effect on the fixture table.
+  markAdminDone: jest.fn(async (ids, { by, resolution }) => mockConn('notifications').whereIn('id', ids).whereNull('done_at')
+    .update({ done_at: new Date(), done_by: by, resolution })),
 }));
 
 const express = require('express');
@@ -46,6 +49,7 @@ const migration = require('../models/migrations/20261022130000_scheduled_emails'
 const restoredMigration = require('../models/migrations/20261022150000_scheduled_emails_restored_at');
 const restoreKeyMigration = require('../models/migrations/20261022160000_scheduled_emails_restore_key');
 const sweepIndexMigration = require('../models/migrations/20261022170000_scheduled_emails_sweep_indexes');
+const cancelledIndexMigration = require('../models/migrations/20261022180000_scheduled_emails_cancelled_index_drop_restore_key');
 
 jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('scheduled emails on PostgreSQL', () => {
@@ -75,8 +79,12 @@ jest.setTimeout(30000);
     await restoredMigration.up(database);
     await restoreKeyMigration.up(database);
     await sweepIndexMigration.up(database);
+    await cancelledIndexMigration.up(database);
     // Minimal stand-ins for the tables the sender reads beside its own.
-    await database.schema.createTable('notifications', (t) => { t.increments('id'); t.string('recipient_type'); t.jsonb('metadata'); });
+    await database.schema.createTable('notifications', (t) => {
+      t.increments('id'); t.string('recipient_type'); t.jsonb('metadata');
+      t.timestamp('done_at', { useTz: true }); t.string('done_by', 64); t.text('resolution'); t.timestamp('read_at', { useTz: true });
+    });
     await database.schema.createTable('emails', (t) => { t.uuid('id').primary(); t.string('message_id'); });
     await database.schema.createTable('job_health', (t) => {
       t.string('job_name').primary(); t.timestamp('last_started_at', { useTz: true }); t.timestamp('last_finished_at', { useTz: true });
@@ -310,6 +318,27 @@ jest.setTimeout(30000);
     const late = await queue({ clientKey });
     expect(late.body.scheduled).toMatchObject({ status: 'cancelled' });
     expect((await call('GET', '/scheduled')).body.emails).toEqual([]);
+  });
+
+  test('Back to draft closes a refused email alert; an unclear one closes on the Sent check', async () => {
+    const alertOpen = async (id) => (await database('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`scheduled-email:${id}`]).first()).done_at === null;
+    const refused = await queue({ to: 'refused@example.invalid' });
+    const unclear = await queue({ to: 'unclear@example.invalid' });
+    await database('scheduled_emails').whereIn('id', [refused.body.scheduled.id, unclear.body.scheduled.id])
+      .update({ status: database.raw("CASE WHEN to_address = 'refused@example.invalid' THEN 'failed' ELSE 'outcome_unknown' END") });
+    expect((await sendDueScheduledEmails()).missedAlerts).toBe(0);
+    expect(await alertOpen(refused.body.scheduled.id)).toBe(true);
+    await cancel(refused.body.scheduled.id);
+    expect(await alertOpen(refused.body.scheduled.id)).toBe(false);
+    await cancel(unclear.body.scheduled.id);
+    expect(await alertOpen(unclear.body.scheduled.id)).toBe(true);
+    expect((await call('POST', `/scheduled/${unclear.body.scheduled.id}/sent-checked`)).status).toBe(200);
+    expect(await alertOpen(unclear.body.scheduled.id)).toBe(false);
+  });
+
+  test('reconcile still settles a key with the gate off (it sends nothing)', async () => {
+    delete process.env.GATE_EMAIL_SEND_LATER;
+    expect((await call('POST', '/schedule/reconcile', { clientKey: randomUUID() })).body).toEqual({ success: true, scheduled: null });
   });
 
   test('a refused email waits a minute before any replica tries it again', async () => {

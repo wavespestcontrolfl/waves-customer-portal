@@ -440,8 +440,9 @@ async function voidClientKey(clientKey, createdBy) {
 // under `clientKey`; when there is none, it stores a void row under that key
 // (cancelled and restored: never listed, never sent), so the original
 // request, if it is still on its way, can no longer queue a copy.
+// It sends nothing, so it answers with the gate off too: a browser guard
+// left by a request the gate refused can always be settled.
 router.post('/schedule/reconcile', async (req, res) => {
-  if (!emailSendLaterLive()) return res.status(404).json({ enabled: false, error: 'Schedule send is off.' });
   const clientKey = req.body?.clientKey;
   if (typeof clientKey !== 'string' || !/^[\w-]{8,64}$/.test(clientKey)) return res.status(400).json({ error: 'clientKey required' });
   try {
@@ -479,6 +480,27 @@ router.get('/scheduled', async (req, res) => {
   }
 });
 
+// Closes the scheduled email's admin alert (dedupeKey scheduled-email:<id>)
+// through the shared Done writer. Best effort: a failure leaves the alert for
+// the office to close by hand.
+async function closeScheduledAlert(id, req, resolution) {
+  try {
+    const ids = (await db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
+      .whereRaw("metadata->>'dedupeKey' = ?", [`scheduled-email:${id}`]).select('id')).map((n) => n.id);
+    if (ids.length) await require('../services/notification-service').markAdminDone(ids, { by: req.technicianId || 'scheduled-email', resolution, role: req.techRole });
+  } catch (err) {
+    logger.warn(`[email] scheduled alert close failed (${err.code || 'error'})`);
+  }
+}
+
+// POST /scheduled/:id/sent-checked — the office checked the Gmail Sent
+// folder for an email that may have gone out ("I checked"): its alert is
+// done. Sends nothing, so it answers with the gate off too.
+router.post('/scheduled/:id/sent-checked', async (req, res) => {
+  await closeScheduledAlert(req.params.id, req, 'The office checked the Gmail Sent folder.');
+  res.json({ success: true });
+});
+
 // POST /scheduled/:id/cancel — Gmail's "Cancel send": the row stops and its
 // text comes back for the composer, once. The same UPDATE uses up the row's
 // recovery copy (restored_at), so no repeat, other tab or other admin can
@@ -488,9 +510,15 @@ router.get('/scheduled', async (req, res) => {
 router.post('/scheduled/:id/cancel', async (req, res) => {
   if (!emailSendLaterLive()) return res.status(404).json({ enabled: false, error: 'Schedule send is off.' });
   try {
+    const before = await db('scheduled_emails').where({ id: req.params.id }).first('status');
     const [row] = await db('scheduled_emails').where({ id: req.params.id }).whereIn('status', CANCELLABLE)
       .update({ status: 'cancelled', cancelled_at: db.fn.now(), restored_at: db.fn.now(), updated_at: db.fn.now() }).returning('*');
-    if (row) return res.json({ success: true, draft: scheduledView(row) });
+    if (row) {
+      // A refused email taken back to a draft is its alert's whole job done.
+      // An unclear one waits for the Sent check (POST /scheduled/:id/sent-checked).
+      if (before?.status === 'failed') await closeScheduledAlert(row.id, req, 'Taken back to a draft.');
+      return res.json({ success: true, draft: scheduledView(row) });
+    }
     const current = await db('scheduled_emails').where({ id: req.params.id }).first('status');
     if (current?.status === 'cancelled') {
       return res.status(409).json({ cancelled: true, error: 'This email was already cancelled. Its text is under Scheduled: tap Show text.' });
