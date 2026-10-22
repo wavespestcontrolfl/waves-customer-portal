@@ -717,27 +717,30 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(await viewingBob('update this customer phone and update this customer notes')).toBe(false);
   });
 
-  test('gate on: an explicit record id keeps the page customer\'s authority only if every id belongs to the page customer (Codex #6369 r28)', async () => {
+  test('gate on: an explicit record id keeps the page customer\'s authority only if every id is one the page already holds (Codex #6369 r29)', async () => {
     process.env[ON] = 'true';
     const row = (n, extra) => ({ id: n, first_name: 'Bob', last_name: 'Example', city: 'Venice', phone: '9415550100', email: 'bob@example.test', updated_at: new Date('2026-01-01'), version: '2026-01-01', ...extra });
     customers = [row(id(100)), row(id(101), { first_name: 'Sam', last_name: 'Sample', phone: '9415550101', email: 'sam@example.test', hiddenFromName: true })];
-    const OWN = id(700), OTHER = id(701), GONE = id(702);
+    const OWN = id(700), OTHER = id(701), PRODUCT = id(703);
     appointments = [
       { id: OWN, customer_id: id(100), property_id: null, service_address_line1: '1 Example Way', updated_at: new Date('2026-01-01') },
       { id: OTHER, customer_id: id(101), property_id: null, service_address_line1: '2 Example Way', updated_at: new Date('2026-01-01') },
     ];
     const edit = { customer_id: id(100), updates: { phone: '941-555-0150' } };
+    // The page shows Bob and his visit OWN.
     const viewingBob = async prompt => {
-      const owner = Context.ownerDirectContext(await Context.resolve({ prompt, pageData: { customer_id: id(100) }, selectedTarget: null, ownerDirectScope: true }));
+      const owner = Context.ownerDirectContext(await Context.resolve({ prompt, pageData: { customer_id: id(100), appointment_id: OWN }, selectedTarget: null, ownerDirectScope: true }));
       return [OwnerDirect.executesWithoutCard('update_customer', edit, null, null, OwnerDirect.targetGrounding(owner)), owner.pageGroundingBlocked === true];
     };
-    // An id owned by the page customer: the page keeps its authority.
-    expect(await viewingBob(`reschedule appointment ${OWN} `.trim())).toEqual([true, false]);
-    // An id owned by someone else, one that does not resolve, or one with no kind word: blocked, carded.
-    expect(await viewingBob(`reschedule appointment ${OTHER} `.trim())).toEqual([false, true]);
-    expect(await viewingBob(`reschedule appointment ${GONE} `.trim())).toEqual([false, true]);
-    expect(await viewingBob(`reschedule ${OWN} `.trim())).toEqual([false, true]);
-    // Every id must belong: one own and one foreign id is blocked too.
+    // The page's own visit id (with or without a kind word) and the page customer's id: the page keeps its authority.
+    expect(await viewingBob(`reschedule appointment ${OWN}`)).toEqual([true, false]);
+    expect(await viewingBob(`reschedule ${OWN}`)).toEqual([true, false]);
+    expect(await viewingBob(`reschedule appointment ${id(100)}`)).toEqual([true, false]);
+    // Another customer's visit, an ownerless product id, an id nothing holds: blocked, carded.
+    expect(await viewingBob(`reschedule appointment ${OTHER}`)).toEqual([false, true]);
+    expect(await viewingBob(`reschedule product ${PRODUCT}`)).toEqual([false, true]);
+    expect(await viewingBob(`reschedule appointment ${id(702)}`)).toEqual([false, true]);
+    // Every id must be on the page: one own and one foreign id is blocked too.
     expect(await viewingBob(`reschedule appointment ${OWN} and appointment ${OTHER}`)).toEqual([false, true]);
     // No record id: unchanged.
     expect(await viewingBob('update this customer phone')).toEqual([true, false]);

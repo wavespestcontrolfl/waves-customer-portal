@@ -774,23 +774,18 @@ async function labelledCandidates(scope, candidates, named) {
 // #6369 r26). Page grounding stands when the message names nobody, or names exactly the page
 // customer (one name resolving to the page customer, no contact, no place phrase, one operation).
 // A name that resolves nowhere or elsewhere, a contact, or a place phrase blocks it.
-// Every explicit record id in the message must belong to the page customer (Codex #6369 r28). The
-// owners are resolved the way the page's own records are (readReferences, the lookup validateRecordTarget
-// relies on). An id with no kind word, one that does not resolve, or one owned by someone else fails.
+// Every explicit record id in the message must be one the validated page context already holds
+// (Codex #6369 r29): the page customer keeps direct authority only if each id typed is one of
+// page.ids (customer, visit, invoice, estimate, property...). An id that is foreign, unresolved,
+// ownerless (a product id) or not on the page fails. Exact match: no owner lookup, no database call.
 const RECORD_ID_GLOBAL_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
-const KINDED_RECORD_ID_RE = /\b(customer|property|appointment|estimate|invoice|review|email|call|product|lead)\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi;
-async function recordIdsBelongToPage(bounded, pageCustomerId) {
-  const all = [...bounded.matchAll(RECORD_ID_GLOBAL_RE)].map(match => match[0].toLowerCase());
-  if (!all.length) return true;
-  const refs = {};
-  for (const match of bounded.matchAll(KINDED_RECORD_ID_RE)) (refs[`${match[1].toLowerCase()}_id`] ||= []).push(match[2].toLowerCase());
-  const kinded = new Set(Object.values(refs).flat());
-  if (all.some(id => !kinded.has(id))) return false;
-  const resolved = await readReferences(refs);
-  return !resolved.error && customerIds(resolved.records).every(id => String(id) === String(pageCustomerId));
+function recordIdsAreOnPage(bounded, page) {
+  const onPage = new Set([...Object.values(page?.ids || {}).flat(), page?.customer?.customer_id].filter(Boolean).map(id => String(id).toLowerCase()));
+  return [...bounded.matchAll(RECORD_ID_GLOBAL_RE)].every(match => onPage.has(match[0].toLowerCase()));
 }
 
-async function pageGroundingBlocked(fullPrompt, namedResult, cohort, nameHint, pageCustomerId) {
+function pageGroundingBlocked(fullPrompt, namedResult, cohort, nameHint, page) {
+  const pageCustomerId = page?.customer?.customer_id || page?.ids?.customer_id;
   const bounded = boundedPrompt(fullPrompt);
   // Record ids hold phone-like digit runs; the ids are judged by recordIdsBelongToPage, not as contacts.
   const clause = targetClause(bounded).replace(RECORD_ID_GLOBAL_RE, ' ');
@@ -798,7 +793,7 @@ async function pageGroundingBlocked(fullPrompt, namedResult, cohort, nameHint, p
   const contacts = contactLiteralsOf(clause).length > 0;
   const place = placeQualifierPresent(clause, matches);
   // A compound request takes the page's authority whatever else it says (pre-push audit, r27).
-  if (isCompound(bounded, matches) || !(await recordIdsBelongToPage(bounded, pageCustomerId))) return true;
+  if (isCompound(bounded, matches) || !recordIdsAreOnPage(bounded, page)) return true;
   if (!nameHint && !contacts && !place) return false;
   const exact = !cohort && namedResult.complete !== false && !namedResult.multiple && matches.length === 1
     && String(matches[0].id) === String(pageCustomerId) && !contacts && !place;
@@ -808,12 +803,12 @@ async function pageGroundingBlocked(fullPrompt, namedResult, cohort, nameHint, p
 // Owner-direct scope only: the customers this message points at (typedCustomerIds, for picking) and
 // the one it names in the simplest case (groundedCustomerIds, the only direct authority).
 // typedIds is null outside the scope and `typed` is then empty.
-async function typedTarget(scope, prompt, namedResult, cohort, nameHint, pageCustomerId, truncated = false) {
+async function typedTarget(scope, prompt, namedResult, cohort, nameHint, page, truncated = false) {
   if (!scope) return { typedIds: null, typed: {} };
   const typedIds = await typedCustomerIds(prompt, namedResult);
   // A request longer than the scan budget is only partly read, but the model sees all of it: fail
   // closed, no typed and no page direct authority (pre-push audit, r27).
-  const blocked = truncated || await pageGroundingBlocked(prompt, namedResult, cohort, nameHint, pageCustomerId);
+  const blocked = truncated || pageGroundingBlocked(prompt, namedResult, cohort, nameHint, page);
   const grounded = truncated ? [] : await directGroundedIds(prompt, namedResult, cohort, nameHint);
   return { typedIds, typed: { typedCustomerIds: typedIds, groundedCustomerIds: grounded, ...(blocked ? { pageGroundingBlocked: true } : {}) } };
 }
@@ -871,7 +866,7 @@ async function candidatesStage(r) {
   r.cohort = setQuantified(r.prompt) || r.namedResult.multiple;
   r.sameName = scope && isSameNameGroup(r.named, r.cohort);
   r.candidates = await labelledCandidates(r.sameName, r.named.map(c => customerTarget(c, 'current_request_lookup')), r.named);
-  Object.assign(r, await typedTarget(scope, r.prompt, r.namedResult, r.cohort, r.nameHint, r.page.customer?.customer_id || r.page.ids?.customer_id, r.truncated));
+  Object.assign(r, await typedTarget(scope, r.prompt, r.namedResult, r.cohort, r.nameHint, r.page, r.truncated));
   r.selection = candidateSelection(r.candidates, r.prompt, r.page.customer, r.namedResult.complete, r.cohort, r.nameHint, sameNamePick(scope, r));
   return null;
 }
