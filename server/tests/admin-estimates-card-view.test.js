@@ -54,6 +54,8 @@ jest.mock('../routes/estimate-public', () => ({
   // the /data gate's row verdicts (their rules: estimate-public-viewability.test.js)
   adminDraftPreviewEligible: jest.fn((row, param) => param === '1' && mockView.draftPreview.has(row.id)),
   isEstimateCustomerViewable: jest.fn((row) => mockView.customerViewable.has(row.id)),
+  // stand-in for "can still be accepted" (the real rules: estimate-public-viewability.test.js)
+  isEstimateAcceptActive: jest.fn((row) => ['sent', 'viewed'].includes(row.status) && !row.archived_at),
   acceptanceServiceLists: jest.fn(),
   buildPricingBundle: jest.fn(async () => ({})),
   bookingServiceFor: jest.fn(),
@@ -68,6 +70,8 @@ jest.mock('../services/sendgrid-mail', () => ({ isConfigured: jest.fn(() => true
 jest.mock('../services/automation-runner', () => ({ enrollCustomer: jest.fn() }));
 jest.mock('../services/slot-reservation', () => ({ releaseReservation: jest.fn() }));
 jest.mock('../services/estimate-proposal-billing', () => ({
+  // the real send-time lane read (unit tests: estimate-proposal-billing.test.js)
+  sentBundleBillsPerApplication: jest.requireActual('../services/estimate-proposal-billing').sentBundleBillsPerApplication,
   perApplicationBillingColumnsExist: jest.fn(async () => true),
   resolveFrozenBillingContext: jest.fn(async () => ({ billsPerApplication: true, livePricing: null })),
   estimateBillsPerApplication: jest.fn(async () => { throw new Error('per-row lane lookup must not run on the list'); }),
@@ -87,13 +91,14 @@ const express = require('express');
 const db = require('../models/db');
 const router = require('../routes/admin-estimates');
 
+// Sent in the per-application lane: the bundle keeps its billedPerApplication flags (a monthly-billed send strips them).
 const pestBundle = {
-  frequencies: [{ key: 'quarterly', perTreatment: 94, visitsPerYear: 4, monthly: 31.33, annual: 376 }],
+  frequencies: [{ key: 'quarterly', perTreatment: 94, visitsPerYear: 4, monthly: 31.33, annual: 376, billedPerApplication: true }],
 };
 const comboBundle = {
   combinedRecurring: { waveGuardDiscountPct: 0.1 },
   frequencies: [{
-    key: 'quarterly', monthly: 72.3, annual: 867.6,
+    key: 'quarterly', monthly: 72.3, annual: 867.6, billedPerApplication: true,
     perServiceTreatments: [
       { label: 'Lawn Care', service: 'lawn_care', displayPrice: 56.4, visitsPerYear: 9, monthly: 42.3 },
       { label: 'Pest Control', service: 'pest_control', displayPrice: 90, visitsPerYear: 4, monthly: 30 },
@@ -250,7 +255,8 @@ describe('GET /admin/estimates list shape', () => {
     // one batch phone match for every unlinked row, not one call per row
     const phoneBatch = require('../routes/estimate-public').matchAcceptCustomersByPhoneBatch;
     expect(phoneBatch).toHaveBeenCalledTimes(1);
-    expect(phoneBatch.mock.calls[0][0].map((r) => r.id).sort()).toEqual(['e-unlinked', 'e-unlinked-member', 'e-unlinked-unknown', 'e-won'].sort());
+    // e-won is accepted: it shows the lane it was sent in and is not phone-matched
+    expect(phoneBatch.mock.calls[0][0].map((r) => r.id).sort()).toEqual(['e-unlinked', 'e-unlinked-member', 'e-unlinked-unknown'].sort());
     // constant queries: one customers read for every linked row, no per-row lane lookup
     expect(queries.filter((q) => q.table === 'customers' && q.m === 'whereIn')).toHaveLength(1);
     expect(queries.filter((q) => q.table === 'customers')).toHaveLength(2); // whereIn + select
@@ -287,6 +293,36 @@ describe('GET /admin/estimates list shape', () => {
     // only the row without a sibling owner is phone-matched
     const phoneBatch = require('../routes/estimate-public').matchAcceptCustomersByPhoneBatch;
     expect(phoneBatch.mock.calls[0][0].map((r) => r.id)).toEqual(['e-lone']);
+  });
+
+  test('a quote that can no longer be accepted shows the lane it was sent in, not today\'s', async () => {
+    const strippedBundle = { frequencies: [{ ...pestBundle.frequencies[0], billedPerApplication: undefined }] };
+    const queries = tableDb({
+      customers: [
+        { id: 'c-member', pipeline_stage: 'active_customer', monthly_rate: '50', billing_mode: null },
+        { id: 'c-plain', pipeline_stage: 'lead', monthly_rate: '0', billing_mode: 'per_application' },
+      ],
+      estimates: [
+        // sent per application; the customer has since joined monthly membership
+        base('e-acc-now-member', { status: 'accepted', customer_id: 'c-member' }),
+        // sent while the customer was billed monthly (flags stripped); the customer is per-application today
+        base('e-exp-sent-monthly', { status: 'expired', customer_id: 'c-plain', estimate_data: { sendSnapshot: { pricingBundle: strippedBundle } } }),
+        base('e-archived', { archived_at: '2026-10-01T00:00:00Z', customer_id: 'c-member' }),
+        // still open: today's lane decides
+        base('e-open-member', { customer_id: 'c-member' }),
+      ],
+    });
+    await withServer(async (baseUrl) => {
+      const { estimates } = await (await fetch(`${baseUrl}/estimates?limit=all`)).json();
+      const byId = Object.fromEntries(estimates.map((e) => [e.id, e]));
+      expect(byId['e-acc-now-member'].perApplication).toHaveLength(1);
+      expect(byId['e-exp-sent-monthly'].perApplication).toBeNull();
+      expect(byId['e-archived'].perApplication).toHaveLength(1);
+      expect(byId['e-open-member'].perApplication).toBeNull();
+    });
+    // only the open row's customer is read for today's lane
+    const customerReads = queries.filter((q) => q.table === 'customers' && q.m === 'whereIn');
+    expect(customerReads.map((q) => q.args[1])).toEqual([['c-member']]);
   });
 
   test('staffPreviewable is the /data gate verdict: the row verdicts, then the call-side verdict', async () => {

@@ -73,6 +73,7 @@ const {
   adminDraftPreviewEligible,
   buildPricingBundle,
   bookingServiceFor,
+  isEstimateAcceptActive,
   isEstimateCustomerViewable,
 } = require('./estimate-public');
 const {
@@ -3833,8 +3834,14 @@ function perApplicationLinesForRow(row, estData) {
 }
 
 // Fills `perApplication` for the page's rows. Rows with no frozen per-application
-// lines cost nothing; the rest are checked against the billing lane and the
-// annual-prepay sale and the customer's billing lane (two batched queries).
+// lines cost nothing; the rest are checked against the annual-prepay sale (one
+// batched query) and the billing lane. The lane is the one that applies to the
+// offer: an offer that can still be accepted (isEstimateAcceptActive) reads
+// today's lane, which is what accepting it would bill; every other offer
+// (accepted, declined, expired, archived, held) shows the lane it was SENT in
+// (sentBundleBillsPerApplication), the same lane the staff PDF's frozen view
+// prints, so a later change to the customer's billing never rewrites an old
+// quote.
 async function perApplicationByEstimateId(estimates, parsedDataById) {
   const out = new Map();
   const candidates = [];
@@ -3843,7 +3850,6 @@ async function perApplicationByEstimateId(estimates, parsedDataById) {
     if (lines) candidates.push({ row: e, lines });
   }
   if (!candidates.length) return out;
-  const billing = require('../services/estimate-proposal-billing');
   let prepaidIds = new Set();
   try {
     if (await db.schema.hasTable('annual_prepay_terms')) {
@@ -3857,25 +3863,45 @@ async function perApplicationByEstimateId(estimates, parsedDataById) {
     logger.warn(`[admin-estimates] prepay lookup failed for the per-application card view: ${err.message}`);
     return out;
   }
-  // Billing lane, batched: ONE schema probe (cached in the billing module), then the customer each row's
-  // accept lands on, in the accept's own order (resolveProspectiveAcceptCustomer): the linked customer; for
-  // an UNLINKED grouped row, the owner of its linked sibling (resolveGroupedEstimateOwnerIds); otherwise
-  // the phone match (matchAcceptCustomersByPhoneBatch, the same rules as matchAcceptCustomerByPhone). Each
-  // step is one query (phones: one per 500), so a limit=all list costs a constant number of queries. A
-  // customer who keeps monthly membership bills monthly, so the card shows no per-application price for
-  // them; no match, or an ambiguous one, is per-application, as the resolver answers. A row the phone batch
-  // cannot judge (unresolved) or whose customer could not be read is unknown: no price line.
   const todo = candidates.filter((c) => !prepaidIds.has(c.row.id));
-  if (!todo.length) return out;
+  const { sentBundleBillsPerApplication } = require('../services/estimate-proposal-billing');
+  const liveRows = todo.map((c) => c.row).filter((row) => isEstimateAcceptActive(row));
+  const liveIds = new Set(liveRows.map((row) => row.id));
+  const perApplicationToday = await rowsBilledPerApplicationToday(liveRows);
+  for (const c of todo) {
+    const perApplication = liveIds.has(c.row.id)
+      ? perApplicationToday.has(c.row.id)
+      : sentBundleBillsPerApplication(c.row);
+    if (perApplication) out.set(c.row.id, c.lines);
+  }
+  return out;
+}
+
+// The ids of the offers (that can still be accepted) whose accept would bill
+// per application TODAY. Batched: ONE schema probe (cached in the billing
+// module), then the customer each row's accept lands on, in the accept's own
+// order (resolveProspectiveAcceptCustomer): the linked customer; for an
+// UNLINKED grouped row, the owner of its linked sibling
+// (resolveGroupedEstimateOwnerIds); otherwise the phone match
+// (matchAcceptCustomersByPhoneBatch, the same rules as
+// matchAcceptCustomerByPhone). Each step is one query (phones: one per 500),
+// so a limit=all list costs a constant number of queries. A customer who keeps
+// monthly membership bills monthly; no match, or an ambiguous one, is
+// per-application, as the resolver answers. A row the phone batch cannot judge
+// (unresolved) or whose customer could not be read is unknown, and so is every
+// row when a lookup fails: no price line.
+async function rowsBilledPerApplicationToday(rows) {
+  const ids = new Set();
+  if (!rows.length) return ids;
   const { customerPreservesMonthlyMembership } = require('../services/billing-cadence');
   try {
-    if (!(await billing.perApplicationBillingColumnsExist())) return out;
-    const unlinked = todo.filter((c) => !c.row.customer_id).map((c) => c.row);
+    if (!(await require('../services/estimate-proposal-billing').perApplicationBillingColumnsExist())) return ids;
+    const unlinked = rows.filter((row) => !row.customer_id);
     const ownerIds = unlinked.length
       ? await require('../services/recurring-card-on-file').resolveGroupedEstimateOwnerIds(unlinked, db)
       : new Map();
     const customerIdOf = (row) => row.customer_id || ownerIds.get(row.id) || null;
-    const customerIds = [...new Set(todo.map((c) => customerIdOf(c.row)).filter(Boolean))];
+    const customerIds = [...new Set(rows.map(customerIdOf).filter(Boolean))];
     const customers = customerIds.length
       ? await db('customers').whereIn('id', customerIds).select('id', 'pipeline_stage', 'monthly_rate', 'billing_mode')
       : [];
@@ -3884,25 +3910,25 @@ async function perApplicationByEstimateId(estimates, parsedDataById) {
     const verdicts = phoneRows.length
       ? await require('./estimate-public').matchAcceptCustomersByPhoneBatch(phoneRows, db)
       : new Map();
-    for (const c of todo) {
-      const customerId = customerIdOf(c.row);
+    for (const row of rows) {
+      const customerId = customerIdOf(row);
       let customer = null;
       if (customerId) {
         customer = byId.get(customerId);
         if (!customer) continue;
       } else {
-        const verdict = verdicts.get(c.row.id);
+        const verdict = verdicts.get(row.id);
         if (!verdict) continue;
         customer = verdict.match || null;
       }
       if (customer && customerPreservesMonthlyMembership(customer)) continue;
-      out.set(c.row.id, c.lines);
+      ids.add(row.id);
     }
   } catch (err) {
     logger.warn(`[admin-estimates] billing lane unavailable for the per-application card view: ${err.message}`);
-    out.clear();
+    ids.clear();
   }
-  return out;
+  return ids;
 }
 
 // Rows the staff preview (?adminPreview=1) renders, judged as the /data gate
