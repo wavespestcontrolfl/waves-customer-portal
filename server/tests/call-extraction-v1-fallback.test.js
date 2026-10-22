@@ -31,6 +31,8 @@ const PHONE = '+19415550123';
 const GOOD = {
   first_name: 'Pat',
   last_name: 'Example',
+  call_type: 'new_inquiry',
+  is_lead: true,
   call_summary: 'Caller reported ants.',
   lead_quality: 'warm',
   is_spam: false,
@@ -73,10 +75,8 @@ afterAll(() => {
 describe('backup route', () => {
   test('Claude first, then OpenAI, both pinned (the same models V2 uses)', () => {
     expect(CALL_EXTRACTION_V1_BACKUP_ROUTE.primary).toEqual({ provider: 'anthropic', model: MODELS.CALL_EXTRACTION_ANTHROPIC });
-    expect(CALL_EXTRACTION_V1_BACKUP_ROUTE.fallback.provider).toBe('openai');
-    expect(CALL_EXTRACTION_V1_BACKUP_ROUTE.fallback.model).toBe(_test.CALL_EXTRACTION_ROUTE.primary.provider === 'openai'
-      ? _test.CALL_EXTRACTION_ROUTE.primary.model
-      : _test.CALL_EXTRACTION_ROUTE.fallback.model);
+    // V2's per-provider pin, whichever provider CALL_EXTRACTION_PROVIDER makes V2's primary.
+    expect(CALL_EXTRACTION_V1_BACKUP_ROUTE.fallback).toEqual({ provider: 'openai', model: _test.CALL_EXTRACTION_MODEL_FOR.openai });
     expect(Object.isFrozen(CALL_EXTRACTION_V1_BACKUP_ROUTE)).toBe(true);
   });
 
@@ -182,6 +182,36 @@ describe('gate on', () => {
     mockAnthropicCreate.mockResolvedValue({ id: 'm', model: 'c', stop_reason: 'end_turn', content: [{ type: 'text', text: '[1,2]' }], usage: {} });
     const out = await extractCallData(TRANSCRIPT, PHONE, {});
     expect(out.first_name).toBe('Pat');
+  });
+
+  // normalizeCallExtraction fills gaps instead of failing, so without this
+  // check `{}` from Claude would end the call with no lead, spam or voicemail
+  // decision and OpenAI would never run.
+  test.each([
+    ['an empty object', {}],
+    ['no call_type', { ...GOOD, call_type: undefined }],
+    ['an unknown call_type', { ...GOOD, call_type: 'sales_pitch' }],
+    ['no is_lead', { ...GOOD, is_lead: undefined }],
+    ['is_spam as a string', { ...GOOD, is_spam: 'false' }],
+    ['no is_voicemail', { ...GOOD, is_voicemail: undefined }],
+    ['a blank call_summary', { ...GOOD, call_summary: '  ' }],
+  ])('Claude returns %s -> rejected as incomplete, OpenAI serves', async (_label, answer) => {
+    installFetch({ gemini: () => geminiHttp(402), openai: () => openaiOk(GOOD) });
+    mockAnthropicCreate.mockResolvedValue(claudeOk(answer));
+    const providerMeta = {};
+    const out = await extractCallData(TRANSCRIPT, PHONE, { providerMeta });
+    expect(out).toMatchObject({ first_name: 'Pat', call_type: 'new_inquiry', is_lead: true, is_spam: false });
+    expect(providerMeta.extraction_v1_provider).toBe('openai');
+    expect(openaiCalls()).toHaveLength(1);
+  });
+
+  test('both backup legs incomplete -> the Gemini error rethrows', async () => {
+    installFetch({ gemini: () => geminiHttp(402), openai: () => openaiOk({}) });
+    mockAnthropicCreate.mockResolvedValue(claudeOk({}));
+    const providerMeta = {};
+    await expect(extractCallData(TRANSCRIPT, PHONE, { providerMeta })).rejects.toThrow(/Gemini HTTP 402/);
+    expect(providerMeta).toEqual({});
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('extraction_incomplete'));
   });
 
   test('Gemini HTTP failure and every backup leg fails -> the Gemini error rethrows (extraction_failed path)', async () => {

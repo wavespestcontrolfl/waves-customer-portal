@@ -9630,10 +9630,21 @@ async function v1BackupExtraction({ prompt, callerPhone, why, providerMeta }) {
   const accept = (result) => {
     const json = result && result.json;
     if (!json || typeof json !== 'object' || Array.isArray(json)) return 'extraction_json_invalid';
+    let normalized;
     try {
-      normalizeCallExtraction(json, { callerPhone });
+      normalized = normalizeCallExtraction(json, { callerPhone });
     } catch {
       return 'extraction_normalize_failed';
+    }
+    // normalizeCallExtraction fills gaps instead of failing, so a leg must also
+    // return the decisions routing reads, or the next leg runs: `{}` or a partial
+    // object would end the call with no lead, spam or voicemail decision.
+    // is_spam and is_voicemail pass through unnormalized and are read as
+    // truthy, so only real booleans count.
+    if (!normalized.call_type || normalized.is_lead === null
+      || typeof json.is_spam !== 'boolean' || typeof json.is_voicemail !== 'boolean'
+      || !normalized.call_summary) {
+      return 'extraction_incomplete';
     }
     return null;
   };
@@ -25523,6 +25534,7 @@ CallRecordingProcessor._test = {
   CALL_EXTRACTION_V1_BACKUP_ROUTE,
   callTimeETString,
   CALL_EXTRACTION_ROUTE,
+  CALL_EXTRACTION_MODEL_FOR,
   normalizeOpenAISegments,
   convertCallLeadOnPhoneBooking,
   findReusableCallLead,
