@@ -142,9 +142,10 @@ const ZIP_CITY_ALIASES = {
   '34212': ['lakewood ranch'],
   '34243': ['sarasota'], // USPS labels this Sarasota; map says University Park
   '34242': ['siesta key'],
-  '33980': ['charlotte harbor'],
+  '33980': ['charlotte harbor', 'punta gorda'],
   '33981': ['gulf cove', 'el jobean'],
-  '33983': ['deep creek'],
+  '33982': ['punta gorda'], // shared ZIP: a real postal city; service is decided by services/excluded-localities.js
+  '33983': ['deep creek', 'punta gorda'],
   // Typed-city communities that share a ZIP with the USPS primary (mapped in
   // config/locations.js CITY_TO_LOCATION as of 2026-09-30).
   '33947': ['rotonda west'],

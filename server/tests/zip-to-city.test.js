@@ -17,6 +17,9 @@ describe('zipToCity', () => {
     expect(zipToCity('33952')).toBe('Port Charlotte'); // Charlotte
     expect(zipToCity('33983')).toBe('Port Charlotte'); // Charlotte (Deep Creek, shared with Port Charlotte)
     expect(zipToCity('33982')).toBe('Babcock Ranch'); // Charlotte (shared with Punta Gorda; served town)
+    // Punta Gorda stays a valid postal city on the shared ZIPs (address
+    // corrections); being served is decided by services/excluded-localities.js.
+    for (const zip of ['33980', '33982', '33983']) expect(cityAcceptedForZip(zip, 'Punta Gorda')).toBe(true);
   });
 
   test('Punta Gorda-only ZIPs are not served (owner ruling 2026-10-22)', () => {
