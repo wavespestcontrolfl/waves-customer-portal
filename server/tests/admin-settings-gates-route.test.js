@@ -51,7 +51,9 @@ describe('GET /api/admin/settings/gates', () => {
     expect(res.headers.get('cache-control')).toBe('no-store');
     const body = await res.json();
     const bootRows = body.gates.filter((row) => row.readAt === 'boot');
-    expect(bootRows.map((row) => row.key).sort()).toEqual(Object.keys(featureGates.gates).sort());
+    // Every map entry except the retired selfBookDayCap (GATE_SELF_BOOK_DAY_CAP).
+    expect(bootRows.map((row) => row.key).sort())
+      .toEqual(Object.keys(featureGates.gates).filter((key) => key !== 'selfBookDayCap').sort());
     for (const row of bootRows) {
       expect(row.enabled).toBe(featureGates.gates[row.key] === true);
     }
@@ -161,6 +163,29 @@ describe('listGates variable names', () => {
       if (saved === undefined) delete process.env[name];
       else process.env[name] = saved;
     }
+  });
+
+  test('a call-time gate lists the prerequisites its reader checks', () => {
+    const row = () => listGates().find((g) => g.envName === 'GATE_ADMIN_MFA_ENFORCE');
+    const saved = { mfa: process.env.GATE_ADMIN_MFA, enforce: process.env.GATE_ADMIN_MFA_ENFORCE };
+    try {
+      process.env.GATE_ADMIN_MFA_ENFORCE = 'true';
+      delete process.env.GATE_ADMIN_MFA;
+      expect(row()).toMatchObject({ requires: ['GATE_ADMIN_MFA'], enabled: null });
+      process.env.GATE_ADMIN_MFA = 'true';
+      expect(row().enabled).toBe(true);
+      delete process.env.GATE_ADMIN_MFA_ENFORCE;
+      expect(row().enabled).toBe(false);
+    } finally {
+      for (const [k, v] of [['GATE_ADMIN_MFA', saved.mfa], ['GATE_ADMIN_MFA_ENFORCE', saved.enforce]]) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+
+  test('a gate the catalogue retired is not listed', () => {
+    expect(listGates().some((g) => g.envName === 'GATE_SELF_BOOK_DAY_CAP')).toBe(false);
   });
 
   test('every entry resolves to a variable', () => {

@@ -22,18 +22,38 @@ const fs = require('fs');
 const featureGates = require('../config/feature-gates');
 
 let envNameCache = null;
+let helperCache = new Map();
 
 const GATE_TOKEN = /GATE_[A-Z0-9_]*[A-Z0-9]/g;
 
 // Top-level helper functions in feature-gates.js → the GATE_ variables their
-// bodies read (comments stripped). Entries such as
+// bodies read (comments stripped), following calls to other helpers, so
+// adminMfaEnforceLive() reads GATE_ADMIN_MFA (through adminMfaLive()) and
+// GATE_ADMIN_MFA_ENFORCE. Entries such as
 // `termiteAnnualPlan: termiteAnnualPlanSelectionEnabled()` read their gates
 // only through one of these.
 function helperGateTokens(src) {
-  const helpers = new Map();
+  const direct = new Map();
   for (const [, name, body] of src.matchAll(/^function ([A-Za-z0-9_]+)\([^)]*\) \{\n([\s\S]*?)\n\}/gm)) {
     const code = body.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
-    const tokens = [...new Set(code.match(GATE_TOKEN) || [])];
+    direct.set(name, {
+      tokens: code.match(GATE_TOKEN) || [],
+      calls: [...code.matchAll(/([A-Za-z0-9_]+)\(/g)].map(([, fn]) => fn),
+    });
+  }
+  const resolved = new Map();
+  const resolve = (name, seen = new Set()) => {
+    if (resolved.has(name)) return resolved.get(name);
+    const fn = direct.get(name);
+    if (!fn || seen.has(name)) return [];
+    seen.add(name);
+    const tokens = [...new Set([...fn.calls.flatMap((c) => resolve(c, seen)), ...fn.tokens])];
+    resolved.set(name, tokens);
+    return tokens;
+  };
+  const helpers = new Map();
+  for (const name of direct.keys()) {
+    const tokens = resolve(name);
     if (tokens.length) helpers.set(name, tokens);
   }
   return helpers;
@@ -75,7 +95,20 @@ function gateEnvNames() {
     if (list.length) names.set(currentKey, list);
   }
   envNameCache = names;
+  helperCache = helpers;
   return names;
+}
+
+// The canonical call-time reader of a gate: the smallest helper that reads
+// it. Its other variables are the gate's prerequisites
+// (GATE_ADMIN_MFA_ENFORCE → adminMfaEnforceLive() → needs GATE_ADMIN_MFA).
+function callTimePrerequisites(name) {
+  gateEnvNames();
+  let best = null;
+  for (const tokens of helperCache.values()) {
+    if (tokens.includes(name) && (!best || tokens.length < best.length)) best = tokens;
+  }
+  return (best || []).filter((t) => t !== name);
 }
 
 const ownName = (key) => `GATE_${key.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toUpperCase()}`;
@@ -118,6 +151,15 @@ function callTimeEnabled(doc) {
   return doc.reader === 'loose' ? loose : null;
 }
 
+// A call-time gate set on is effectively on only when every prerequisite is
+// on too. The reader's exact combination is not parsed, so any prerequisite
+// that is not plainly on makes the state unknown rather than a guess.
+function withPrerequisites(own, requires, catalog) {
+  if (own !== true || !requires.length) return own;
+  const reqOn = (name) => callTimeEnabled(catalog.get(name) || { name, kind: 'boolean', reader: 'strict' });
+  return requires.every((name) => reqOn(name) === true) ? true : null;
+}
+
 // Names the catalogue's token scan picks up that are not variables: the tail
 // of the INVERTED_GATE_RE constant and the doc placeholder `GATE_X=value`.
 // Built from parts so the gate-index scan does not list them as gates.
@@ -136,6 +178,10 @@ function listGates() {
     description: doc?.description || null,
   });
   // Rows from the gates map: state as the running code computed it at boot.
+  // A map entry whose variable the catalogue leaves out is RETIRED there (the
+  // catalogue scans every GATE_ name in the file except those), e.g.
+  // GATE_SELF_BOOK_DAY_CAP: it is not offered as a control.
+  const retired = (envName) => catalog.size > 0 && /^GATE_/.test(envName || '') && !catalog.has(envName);
   const mapRows = Object.entries(featureGates.gates).map(([key, value]) => {
     const vars = envNames.get(key) || [];
     const envName = pickOwn(key, vars);
@@ -147,20 +193,23 @@ function listGates() {
       readAt: 'boot',
       ...semantics(envName ? catalog.get(envName) : null),
     };
-  });
+  }).filter((row) => !retired(row.envName));
   // Catalogue gates no map row names (as its own variable or a prerequisite):
   // call-time-only gates such as GATE_ADMIN_MFA.
   const named = new Set(mapRows.flatMap((r) => [r.envName, ...r.requires]));
   const callTimeRows = [...catalog.values()]
     .filter((doc) => !named.has(doc.name) && !NOT_GATES.has(doc.name))
-    .map((doc) => ({
-      key: doc.name,
-      envName: doc.name,
-      requires: [],
-      enabled: callTimeEnabled(doc),
-      readAt: 'call',
-      ...semantics(doc),
-    }));
+    .map((doc) => {
+      const requires = callTimePrerequisites(doc.name);
+      return {
+        key: doc.name,
+        envName: doc.name,
+        requires,
+        enabled: withPrerequisites(callTimeEnabled(doc), requires, catalog),
+        readAt: 'call',
+        ...semantics(doc),
+      };
+    });
   return [...mapRows, ...callTimeRows]
     .sort((a, b) => (a.envName || a.key).localeCompare(b.envName || b.key));
 }
