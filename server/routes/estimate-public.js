@@ -975,7 +975,7 @@ function verifyEstimateAskToken(req, estimate) {
   const supplied = req.get('x-estimate-ask-token') || req.body?.askToken;
   if (!supplied) return false;
   try {
-    const payload = verifyJwtWithKeys(String(supplied), estimateAskVerifyKeys());
+    const payload = verifyJwtWithKeys(String(supplied), estimateAskVerifyKeys(), undefined, ESTIMATE_ASK_TOKEN_TTL_SECONDS);
     return payload?.kind === 'estimate_ask'
       && String(payload.estimateId || '') === String(estimate.id || '')
       && payload.tokenHash === hashEstimateToken(estimate.token || req.params.token);

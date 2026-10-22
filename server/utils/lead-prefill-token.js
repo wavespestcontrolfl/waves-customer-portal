@@ -10,7 +10,7 @@
 //
 // Token format: `<expEpochSec>.<base64url(HMAC-SHA256(lead-prefill:<leadId>:<exp>))>`.
 const crypto = require('crypto');
-const { verifySecretsFor } = require('./jwt-secrets');
+const { verifySecretsFor, retiredExpOk } = require('./jwt-secrets');
 
 const TTL_SECONDS = 60 * 60 * 24 * 14; // 14 days — matches the estimate-handoff window
 
@@ -48,7 +48,8 @@ function verifyLeadPrefillToken(leadId, token, nowSec = Math.floor(Date.now() / 
   const exp = Number(String(token).slice(0, dot));
   const sig = String(token).slice(dot + 1);
   if (!Number.isFinite(exp) || exp < nowSec) return false;
-  return verifySecrets().some((key) => {
+  return verifySecrets().some((key, i) => {
+    if (i > 0 && !retiredExpOk(exp, TTL_SECONDS)) return false;
     const expected = sign(leadId, exp, key);
     if (sig.length !== expected.length) return false;
     try {

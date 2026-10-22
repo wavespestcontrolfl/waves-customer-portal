@@ -1,7 +1,7 @@
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const config = require('../config');
-const { verifyCustomerJwt } = require('../utils/jwt-secrets');
+const { verifyCustomerJwt, verifiedByRetiredKey } = require('../utils/jwt-secrets');
 const db = require('../models/db');
 const logger = require('../services/logger');
 
@@ -485,6 +485,13 @@ async function rotateRefreshSession(refreshToken, options = {}) {
   }
   if (options.expectedFamilyId
     && String(decoded.familyId || '') !== String(options.expectedFamilyId)) {
+    return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
+  }
+  // A token that verifies only under a retired JWT_SECRET (JWT_SECRET_PREVIOUS)
+  // must already be registered in the DB (jti + family): a retired key can
+  // mint a fresh legacy-shaped credential, and the legacy path would migrate
+  // it into a new live family signed with the current key.
+  if (verifiedByRetiredKey(refreshToken, config.jwt.secret) && !(decoded.jti && decoded.familyId)) {
     return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
   }
   const suppliedHash = hashRefreshToken(refreshToken);

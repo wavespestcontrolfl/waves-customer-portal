@@ -9,7 +9,7 @@
 //
 // Token format: `<expEpochSec>.<base64url(HMAC-SHA256(estimateId:exp))>`.
 const crypto = require('crypto');
-const { verifySecretsFor } = require('./jwt-secrets');
+const { verifySecretsFor, retiredExpOk } = require('./jwt-secrets');
 
 const TTL_SECONDS = 60 * 60 * 24 * 14; // 14 days — matches the quote→book window
 
@@ -67,7 +67,11 @@ function verifyEstimateHandoffToken(estimateId, token, nowSec = Math.floor(Date.
   const exp = Number(String(token).slice(0, dot));
   const sig = String(token).slice(dot + 1);
   if (!Number.isFinite(exp) || exp < nowSec) return false;
-  return verifySecrets().some((key) => {
+  // A token accepted only by a retired secret must have been minted before the
+  // rotation cutoff: its expiry cannot exceed the cutoff plus the family TTL.
+  const ttl = String(estimateId).startsWith('estimate-accept:') ? ACCEPT_TTL_SECONDS : TTL_SECONDS;
+  return verifySecrets().some((key, i) => {
+    if (i > 0 && !retiredExpOk(exp, ttl)) return false;
     const expected = sign(estimateId, exp, key);
     if (sig.length !== expected.length) return false;
     try {

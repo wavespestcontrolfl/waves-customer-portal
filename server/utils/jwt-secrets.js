@@ -16,6 +16,17 @@
  * families (jwtVerifySecrets, verifySecretsFor, verifyJwtWithKeys) accept the
  * previous list. A new staff verifier must call verifyStaffJwt.
  *
+ * A RETIRED SECRET IS NOT A PERMANENT KEY. The previous list is honoured only
+ * while JWT_SECRET_ROTATED_AT (ISO time, not in the future) is set and valid,
+ * and a token or link accepted ONLY because of a retired secret must prove it
+ * was minted before that time and not outlive its family's normal lifetime
+ * (JWTs: iat before the cutoff and exp - iat within the family maximum;
+ * HMAC links with an embedded expiry: exp no later than the cutoff plus the
+ * family TTL). Otherwise someone holding a leaked retired key could mint a
+ * fresh long-lived credential. Signatures with no embedded time (outlink
+ * context, SMS attachment, digests) can only be gated by the cutoff itself.
+ * After a suspected secret leak, rotate WITHOUT JWT_SECRET_PREVIOUS.
+ *
  * Only the key list changes. Each verifier keeps its own claim, algorithm,
  * expiry and token_version checks. Where a dedicated secret (X_SECRET) is the
  * effective secret, the previous list does NOT apply: use verifySecretsFor().
@@ -24,9 +35,19 @@
  */
 const jwt = require('jsonwebtoken');
 
+// JWT_SECRET_ROTATED_AT as epoch ms, or null when unset, unparsable or in the
+// future (a future cutoff would let tokens minted today pass as "before").
+function rotatedAtMs() {
+  const raw = process.env.JWT_SECRET_ROTATED_AT;
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  const ms = Date.parse(raw.trim());
+  return Number.isFinite(ms) && ms <= Date.now() ? ms : null;
+}
+
 function parsePrevious(current) {
   const raw = process.env.JWT_SECRET_PREVIOUS;
   if (typeof raw !== 'string' || !raw) return [];
+  if (rotatedAtMs() === null) return [];
   const out = [];
   for (const entry of raw.split(',')) {
     const secret = entry.trim();
@@ -67,6 +88,55 @@ function jwtVerifySecretsOr(devFallback) {
 function verifySecretsFor(dedicated, ...args) {
   if (dedicated) return [dedicated];
   return jwtVerifySecrets(...args);
+}
+
+const CLOCK_SKEW_SECONDS = 60;
+
+/**
+ * A JWT accepted only because of a retired secret must carry iat strictly
+ * before JWT_SECRET_ROTATED_AT and a lifetime (exp - iat) within its family's
+ * maximum. Missing iat or exp fails.
+ */
+function retiredJwtOk(payload, maxLifetimeSeconds) {
+  const cutoff = rotatedAtMs();
+  if (cutoff === null || !payload || typeof payload !== 'object') return false;
+  const { iat, exp } = payload;
+  if (!Number.isFinite(iat) || !Number.isFinite(exp)) return false;
+  if (!Number.isFinite(maxLifetimeSeconds)) return false;
+  return iat * 1000 < cutoff && exp - iat <= maxLifetimeSeconds;
+}
+
+/**
+ * An HMAC link with an embedded expiry (epoch seconds) accepted only because
+ * of a retired secret: minted before the cutoff means it cannot expire later
+ * than the cutoff plus the family's TTL.
+ */
+function retiredExpOk(expSeconds, ttlSeconds) {
+  const cutoff = rotatedAtMs();
+  if (cutoff === null || !Number.isFinite(expSeconds) || !Number.isFinite(ttlSeconds)) return false;
+  return expSeconds <= Math.floor(cutoff / 1000) + ttlSeconds + CLOCK_SKEW_SECONDS;
+}
+
+/** A timestamp (epoch ms) carried in a retired-secret payload must precede the cutoff. */
+function retiredMintedBefore(tsMs) {
+  const cutoff = rotatedAtMs();
+  return cutoff !== null && Number.isFinite(tsMs) && tsMs < cutoff;
+}
+
+const DURATION_UNITS = { s: 1, m: 60, h: 3600, d: 86400, w: 604800, y: 31557600 };
+function durationSeconds(value, fallbackSeconds) {
+  const match = /^\s*(\d+)\s*([smhdwy])?\s*$/i.exec(String(value == null ? '' : value));
+  if (!match) return fallbackSeconds;
+  return Number(match[1]) * (match[2] ? DURATION_UNITS[match[2].toLowerCase()] : 1);
+}
+
+// Normal lifetimes of the customer session tokens (middleware/auth.js signing):
+// access 15 minutes; refresh REFRESH_TOKEN_EXPIRY (default 30 days).
+const CUSTOMER_ACCESS_SECONDS = 15 * 60;
+function customerMaxLifetimeSeconds(payload) {
+  return payload && payload.type === 'refresh'
+    ? durationSeconds(process.env.REFRESH_TOKEN_EXPIRY || '30d', 30 * 86400)
+    : CUSTOMER_ACCESS_SECONDS;
 }
 
 function isBadSignature(err) {
@@ -112,7 +182,9 @@ function verifyCustomerJwt(token, current, options) {
   for (let i = 0; i < keys.length; i += 1) {
     try {
       const payload = runVerify(token, keys[i], options);
-      if (i > 0 && payload && typeof payload === 'object' && STAFF_CLAIMS.some((c) => payload[c] != null)) {
+      if (i > 0 && (!payload || typeof payload !== 'object'
+        || STAFF_CLAIMS.some((c) => payload[c] != null)
+        || !retiredJwtOk(payload, customerMaxLifetimeSeconds(payload)))) {
         throw firstError;
       }
       return payload;
@@ -129,14 +201,21 @@ function runVerify(token, secret, options) {
   return options === undefined ? jwt.verify(token, secret) : jwt.verify(token, secret, options);
 }
 
-/** Link-family jwt.verify over a caller-built key list (never for staff sessions). */
-function verifyJwtWithKeys(token, keys, options) {
+/**
+ * Link-family jwt.verify over a caller-built key list (never for staff
+ * sessions). `maxLifetimeSeconds` is the family's normal exp - iat; a token
+ * accepted only by a retired key must also pass retiredJwtOk with it.
+ */
+function verifyJwtWithKeys(token, keys, options, maxLifetimeSeconds) {
   if (keys.length === 1) return runVerify(token, keys[0], options);
   let firstError;
-  for (const key of keys) {
+  for (let i = 0; i < keys.length; i += 1) {
     try {
-      return runVerify(token, key, options);
+      const payload = runVerify(token, keys[i], options);
+      if (i > 0 && !retiredJwtOk(payload, maxLifetimeSeconds)) throw firstError;
+      return payload;
     } catch (err) {
+      if (err === firstError) throw err;
       if (!isBadSignature(err)) throw err;
       if (!firstError) firstError = err;
     }
@@ -144,7 +223,22 @@ function verifyJwtWithKeys(token, keys, options) {
   throw firstError;
 }
 
+/**
+ * True when `token` verifies only under a retired secret (not the current one).
+ * Used by the refresh exchange to refuse legacy migration for old-key tokens.
+ */
+function verifiedByRetiredKey(token, current) {
+  if (jwtVerifySecrets(current).length <= 1) return false;
+  try {
+    jwt.verify(token, current);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 module.exports = {
   jwtVerifySecrets, jwtVerifySecretsOr, verifySecretsFor, staffVerifySecrets,
-  verifyStaffJwt, verifyCustomerJwt, verifyJwtWithKeys,
+  verifyStaffJwt, verifyCustomerJwt, verifyJwtWithKeys, verifiedByRetiredKey,
+  retiredExpOk, retiredMintedBefore, retiredJwtOk, rotatedAtMs,
 };

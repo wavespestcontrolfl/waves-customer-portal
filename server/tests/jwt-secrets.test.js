@@ -8,11 +8,23 @@ const CURRENT = 'current-secret-aaaaaaaaaaaaaaaa';
 const OLD1 = 'retired-secret-one-bbbbbbbbbb';
 const OLD2 = 'retired-secret-two-cccccccccc';
 
-const saved = { JWT_SECRET: process.env.JWT_SECRET, JWT_SECRET_PREVIOUS: process.env.JWT_SECRET_PREVIOUS };
+const saved = {
+  JWT_SECRET: process.env.JWT_SECRET,
+  JWT_SECRET_PREVIOUS: process.env.JWT_SECRET_PREVIOUS,
+  JWT_SECRET_ROTATED_AT: process.env.JWT_SECRET_ROTATED_AT,
+  REFRESH_TOKEN_EXPIRY: process.env.REFRESH_TOKEN_EXPIRY,
+};
+const NOW_S = () => Math.floor(Date.now() / 1000);
+// The rotation happened one minute ago; "old" tokens were minted 90 seconds ago.
+const CUTOFF_MS = () => Date.now() - 60 * 1000;
 beforeEach(() => {
   process.env.JWT_SECRET = CURRENT;
   delete process.env.JWT_SECRET_PREVIOUS;
+  delete process.env.REFRESH_TOKEN_EXPIRY;
+  process.env.JWT_SECRET_ROTATED_AT = new Date(CUTOFF_MS()).toISOString();
 });
+// A token minted before the rotation, with a normal 10 minute lifetime.
+const oldToken = (payload, secret, expiresIn = '10m', iat = NOW_S() - 90) => jwt.sign({ ...payload, iat }, secret, { expiresIn });
 afterAll(() => {
   for (const [k, v] of Object.entries(saved)) {
     if (v === undefined) delete process.env[k]; else process.env[k] = v;
@@ -73,7 +85,7 @@ describe('staff sessions never rotate through the previous list', () => {
   });
 
   it('verifyStaffJwt rejects a retired-secret token even when it is listed, and matches jwt.verify', () => {
-    const forged = jwt.sign({ technicianId: 7, type: 'access', tokenVersion: 1, mfa: true }, OLD1, { expiresIn: '1h' });
+    const forged = oldToken({ technicianId: 7, type: 'access', tokenVersion: 1, mfa: true }, OLD1);
     expect(() => verifyStaffJwt(forged, CURRENT)).toThrow('invalid signature');
     const good = jwt.sign({ technicianId: 7 }, CURRENT, { expiresIn: '1h' });
     expect(verifyStaffJwt(good, CURRENT)).toEqual(jwt.verify(good, CURRENT));
@@ -82,10 +94,10 @@ describe('staff sessions never rotate through the previous list', () => {
 
   it('verifyCustomerJwt refuses a retired-secret token carrying a staff claim', () => {
     for (const claims of [{ technicianId: 7 }, { customerId: 'c1', technicianId: 7 }, { customerId: 'c1', mfa: true }, { customerId: 'c1', scope: 'terminal' }, { kind: 'admin_marker' }, { customerId: 'c1', tokenVersion: 1 }]) {
-      const forged = jwt.sign(claims, OLD1, { expiresIn: '1h' });
+      const forged = oldToken(claims, OLD1);
       expect(() => verifyCustomerJwt(forged, CURRENT)).toThrow('invalid signature');
     }
-    const customer = jwt.sign({ customerId: 'c1' }, OLD1, { expiresIn: '1h' });
+    const customer = oldToken({ customerId: 'c1' }, OLD1);
     expect(verifyCustomerJwt(customer, CURRENT).customerId).toBe('c1');
     const currentStaff = jwt.sign({ technicianId: 7 }, CURRENT, { expiresIn: '1h' });
     expect(verifyCustomerJwt(currentStaff, CURRENT).technicianId).toBe(7);
@@ -111,7 +123,7 @@ describe('verifyCustomerJwt', () => {
   });
 
   it('accepts a token signed with a listed previous secret, only when listed', () => {
-    const old = jwt.sign({ a: 2 }, OLD2, { expiresIn: '1h' });
+    const old = oldToken({ a: 2 }, OLD2);
     expect(() => verifyCustomerJwt(old, CURRENT)).toThrow('invalid signature');
     process.env.JWT_SECRET_PREVIOUS = `${OLD1},${OLD2}`;
     expect(verifyCustomerJwt(old, CURRENT).a).toBe(2);
@@ -142,8 +154,66 @@ describe('verifyCustomerJwt', () => {
   });
 
   it('verifyJwtWithKeys tries a caller-built list in order', () => {
-    const old = jwt.sign({ a: 3 }, OLD1);
-    expect(verifyJwtWithKeys(old, ['dedicated', OLD1]).a).toBe(3);
+    const old = oldToken({ a: 3 }, OLD1);
+    expect(verifyJwtWithKeys(old, ['dedicated', OLD1], undefined, 600).a).toBe(3);
     expect(() => verifyJwtWithKeys(old, ['dedicated'])).toThrow('invalid signature');
+  });
+});
+
+describe('JWT_SECRET_ROTATED_AT cutoff', () => {
+  beforeEach(() => { process.env.JWT_SECRET_PREVIOUS = OLD1; });
+
+  it('previous secrets are ignored unless JWT_SECRET_ROTATED_AT is set, valid and not in the future', () => {
+    for (const bad of [undefined, '', 'not-a-date', new Date(Date.now() + 3600 * 1000).toISOString()]) {
+      if (bad === undefined) delete process.env.JWT_SECRET_ROTATED_AT; else process.env.JWT_SECRET_ROTATED_AT = bad;
+      expect(jwtVerifySecrets()).toEqual([CURRENT]);
+      expect(verifySecretsFor('')).toEqual([CURRENT]);
+      expect(jwtVerifySecretsOr('dev')).toEqual([CURRENT]);
+      expect(() => verifyCustomerJwt(oldToken({ customerId: 'c1' }, OLD1), CURRENT)).toThrow('invalid signature');
+    }
+    process.env.JWT_SECRET_ROTATED_AT = new Date(CUTOFF_MS()).toISOString();
+    expect(jwtVerifySecrets()).toEqual([CURRENT, OLD1]);
+  });
+
+  it('accepts a legitimate pre-cutoff customer access and refresh token', () => {
+    expect(verifyCustomerJwt(oldToken({ customerId: 'c1' }, OLD1, '15m'), CURRENT).customerId).toBe('c1');
+    const refresh = oldToken({ customerId: 'c1', type: 'refresh', jti: 'j', familyId: 'f' }, OLD1, '30d');
+    expect(verifyCustomerJwt(refresh, CURRENT).type).toBe('refresh');
+  });
+
+  it('refuses a retired-secret token minted after the cutoff', () => {
+    const fresh = jwt.sign({ customerId: 'c1' }, OLD1, { expiresIn: '10m' });
+    expect(() => verifyCustomerJwt(fresh, CURRENT)).toThrow('invalid signature');
+    const afterCutoff = oldToken({ customerId: 'c1' }, OLD1, '10m', Math.floor((CUTOFF_MS() + 5000) / 1000));
+    expect(() => verifyCustomerJwt(afterCutoff, CURRENT)).toThrow('invalid signature');
+    expect(() => verifyJwtWithKeys(fresh, [CURRENT, OLD1], undefined, 600)).toThrow('invalid signature');
+  });
+
+  it('refuses a retired-secret token that outlives its family (exp - iat too long, or missing)', () => {
+    expect(() => verifyCustomerJwt(oldToken({ customerId: 'c1' }, OLD1, '2h'), CURRENT)).toThrow('invalid signature');
+    expect(() => verifyCustomerJwt(oldToken({ customerId: 'c1', type: 'refresh' }, OLD1, '90d'), CURRENT)).toThrow('invalid signature');
+    const noExp = jwt.sign({ customerId: 'c1', iat: NOW_S() - 90 }, OLD1);
+    expect(() => verifyCustomerJwt(noExp, CURRENT)).toThrow('invalid signature');
+    expect(() => verifyJwtWithKeys(oldToken({ a: 1 }, OLD1, '3h'), [CURRENT, OLD1], undefined, 7200)).toThrow('invalid signature');
+    process.env.REFRESH_TOKEN_EXPIRY = '7d';
+    expect(() => verifyCustomerJwt(oldToken({ customerId: 'c1', type: 'refresh' }, OLD1, '30d'), CURRENT)).toThrow('invalid signature');
+    expect(verifyCustomerJwt(oldToken({ customerId: 'c1', type: 'refresh' }, OLD1, '7d'), CURRENT).type).toBe('refresh');
+  });
+
+  it('retiredExpOk bounds an HMAC link expiry by cutoff + family TTL', () => {
+    const { retiredExpOk, retiredMintedBefore } = require('../utils/jwt-secrets');
+    const cutoffS = Math.floor(CUTOFF_MS() / 1000);
+    expect(retiredExpOk(cutoffS + 3600, 3600)).toBe(true);
+    expect(retiredExpOk(cutoffS + 3600 + 3600, 3600)).toBe(false);
+    expect(retiredMintedBefore(CUTOFF_MS() - 1000)).toBe(true);
+    expect(retiredMintedBefore(CUTOFF_MS() + 1000)).toBe(false);
+  });
+
+  it('verifiedByRetiredKey tells a current-key token from a retired-key one', () => {
+    const { verifiedByRetiredKey } = require('../utils/jwt-secrets');
+    expect(verifiedByRetiredKey(jwt.sign({ a: 1 }, CURRENT), CURRENT)).toBe(false);
+    expect(verifiedByRetiredKey(oldToken({ a: 1 }, OLD1), CURRENT)).toBe(true);
+    delete process.env.JWT_SECRET_PREVIOUS;
+    expect(verifiedByRetiredKey(oldToken({ a: 1 }, OLD1), CURRENT)).toBe(false);
   });
 });

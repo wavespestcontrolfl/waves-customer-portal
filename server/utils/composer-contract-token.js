@@ -19,7 +19,7 @@
 // read its own stale insert as the delivered link (GH Codex #3844 r4 P1) —
 // distinct tokens reach activation as unwritten and the row lock refuses.
 const crypto = require('crypto');
-const { verifySecretsFor } = require('./jwt-secrets');
+const { verifySecretsFor, retiredExpOk } = require('./jwt-secrets');
 
 const TTL_SECONDS = 60 * 60 * 12; // an open composer, not a delivery window
 const EXP_DIGITS = 10;
@@ -62,7 +62,8 @@ function verifyComposerContractToken(contractId, token, nowSec = Math.floor(Date
   const nonce = value.slice(EXP_DIGITS, EXP_DIGITS + NONCE_CHARS);
   if (!/^[A-Za-z0-9_-]{16}$/.test(nonce)) return false;
   const sig = value.slice(EXP_DIGITS + NONCE_CHARS);
-  return verifySecrets().some((key) => {
+  return verifySecrets().some((key, i) => {
+    if (i > 0 && !retiredExpOk(exp, TTL_SECONDS)) return false;
     const expected = sign(contractId, exp, nonce, key);
     if (sig.length !== expected.length) return false;
     try {

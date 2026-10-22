@@ -18,12 +18,15 @@ const OTHER = 'rotation-unrelated-secret-zzzzzzzz';
 
 const DEDICATED_VARS = [
   'JWT_SECRET_PREVIOUS', 'ESTIMATE_HANDOFF_SECRET', 'LEAD_PREFILL_SECRET', 'CONTRACT_LINK_SECRET',
-  'REPORT_PIN_SECRET', 'ESTIMATE_DOC_PIN_SECRET', 'BOOKING_CAPTURE_SECRET',
+  'REPORT_PIN_SECRET', 'ESTIMATE_DOC_PIN_SECRET', 'BOOKING_CAPTURE_SECRET', 'JWT_SECRET_ROTATED_AT',
 ];
+// "The rotation happened a second ago"; retired JWTs below are minted 90 s ago.
+const ago = (seconds) => Math.floor(Date.now() / 1000) - seconds;
 const saved = {};
 beforeEach(() => {
   for (const name of DEDICATED_VARS) { saved[name] = process.env[name]; delete process.env[name]; }
   process.env.JWT_SECRET = CURRENT;
+  process.env.JWT_SECRET_ROTATED_AT = new Date(Date.now() - 1000).toISOString();
   db.mockReset();
 });
 afterAll(() => {
@@ -52,7 +55,7 @@ describe('customer auth middleware', () => {
     whereNull: jest.fn().mockReturnThis(),
     first: jest.fn().mockResolvedValue({ id: 'prop-1', active: true, account_id: 'acct-1' }),
   });
-  const oldToken = () => jwt.sign({ customerId: 'prop-1', accountId: 'acct-1' }, OLD, { expiresIn: '15m' });
+  const oldToken = () => jwt.sign({ customerId: 'prop-1', accountId: 'acct-1', iat: ago(90) }, OLD, { expiresIn: '15m' });
 
   it('rejects a token signed with the retired secret when JWT_SECRET_PREVIOUS is unset', async () => {
     const req = { headers: { authorization: `Bearer ${oldToken()}` } };
@@ -137,7 +140,7 @@ describe('staff auth middleware', () => {
     const { rateLimitKey } = require('../middleware/rate-limit-key');
     expect(rateLimitKey({ headers: { authorization: `Bearer ${forged}` }, ip: '203.0.113.5' })).toBe('203.0.113.5');
     expect(rateLimitKey({ headers: { authorization: `Bearer ${staffToken(CURRENT)}` }, ip: '203.0.113.5' })).toBe('tech:7:v1');
-    const customer = jwt.sign({ customerId: 'prop-1' }, OLD, { expiresIn: '15m' });
+    const customer = jwt.sign({ customerId: 'prop-1', iat: ago(90) }, OLD, { expiresIn: '15m' });
     expect(rateLimitKey({ headers: { authorization: `Bearer ${customer}` }, ip: '203.0.113.5' })).toBe('cust:prop-1');
   });
 
@@ -333,7 +336,7 @@ describe('booking capture token (secret read at load, IP key is secret-keyed)', 
 
 describe('estimate document render pin (JWT with a dedicated-secret option)', () => {
   const D = require('../services/pdf/estimate-doc-pdf');
-  const pin = (secret) => jwt.sign({ kind: 'estimate_doc_render', tokenHash: crypto.createHash('sha256').update('tok').digest('hex') }, secret, { expiresIn: 600 });
+  const pin = (secret) => jwt.sign({ kind: 'estimate_doc_render', tokenHash: crypto.createHash('sha256').update('tok').digest('hex'), iat: ago(90) }, secret, { expiresIn: 600 });
 
   it('accepts a retired-secret pin only while listed', () => {
     expect(D.verifyEstimateDocPin(pin(OLD), 'tok')).toBeNull();
@@ -429,6 +432,7 @@ describe('estimate ask token (ESTIMATE_ASK_TOKEN_SECRET || JWT_SECRET, read at l
     kind: 'estimate_ask',
     estimateId: 'est-9',
     tokenHash: crypto.createHash('sha256').update('tok-9').digest('hex'),
+    iat: ago(90),
   }, secret, { expiresIn: 600 });
   const reqWith = (token) => ({ get: () => token, body: {}, params: { token: 'tok-9' } });
 
@@ -448,5 +452,64 @@ describe('estimate ask token (ESTIMATE_ASK_TOKEN_SECRET || JWT_SECRET, read at l
     const different = load('dedicated-ask-secret');
     expect(different.verifyEstimateAskToken(reqWith(askToken(OLD)), estimate)).toBe(false);
     expect(different.verifyEstimateAskToken(reqWith(askToken('dedicated-ask-secret')), estimate)).toBe(true);
+  });
+});
+
+describe('JWT_SECRET_ROTATED_AT gates every family', () => {
+  const T = require('../utils/estimate-handoff-token');
+  const P = require('../utils/lead-prefill-token');
+  const K = require('../utils/composer-contract-token');
+  const M = require('../services/signed-map-image');
+  const A = require('../services/service-report/assessment-pin');
+
+  it('JWT_SECRET_PREVIOUS without a valid JWT_SECRET_ROTATED_AT ignores the previous keys', async () => {
+    const handoff = asRetired(() => T.mintEstimateHandoffToken('est-1'));
+    const prefill = asRetired(() => P.mintLeadPrefillToken('lead-1'));
+    const contract = asRetired(() => K.mintComposerContractToken('contract-1'));
+    const map = asRetired(() => M.signMapImageToken({ lat: 27.3364, lng: -82.5307, zoom: 19, width: 600, height: 400 }));
+    const pin = asRetired(() => A.signAssessmentPin('report-token', 'assess-1'));
+    process.env.JWT_SECRET_PREVIOUS = OLD;
+    const customer = jwt.sign({ customerId: 'prop-1', accountId: 'acct-1', iat: ago(90) }, OLD, { expiresIn: '15m' });
+    for (const cutoff of [undefined, 'garbage', new Date(Date.now() + 3600 * 1000).toISOString()]) {
+      if (cutoff === undefined) delete process.env.JWT_SECRET_ROTATED_AT; else process.env.JWT_SECRET_ROTATED_AT = cutoff;
+      expect(T.verifyEstimateHandoffToken('est-1', handoff)).toBe(false);
+      expect(P.verifyLeadPrefillToken('lead-1', prefill)).toBe(false);
+      expect(K.verifyComposerContractToken('contract-1', contract)).toBe(false);
+      expect(M.verifyMapImageToken(map)).toBeNull();
+      expect(A.verifyAssessmentPin('report-token', 'assess-1', pin.signature, pin.expiresAt)).toBe(false);
+      const out = res(); const next = jest.fn();
+      await authenticate({ headers: { authorization: `Bearer ${customer}` } }, out, next);
+      expect(out.status).toHaveBeenCalledWith(401);
+      expect(next).not.toHaveBeenCalled();
+    }
+  });
+
+  it('refuses a retired-secret link whose expiry outlives the family TTL (minted after the cutoff / chosen exp)', () => {
+    process.env.JWT_SECRET_PREVIOUS = OLD;
+    // 30 days out: well past a 14-day handoff window counted from the cutoff.
+    const farFuture = Math.floor(Date.now() / 1000) + 30 * 86400;
+    const forged = asRetired(() => T.mintEstimateHandoffToken('est-1', farFuture - 14 * 86400));
+    expect(T.verifyEstimateHandoffToken('est-1', forged)).toBe(false);
+    const legit = asRetired(() => T.mintEstimateHandoffToken('est-1'));
+    expect(T.verifyEstimateHandoffToken('est-1', legit)).toBe(true);
+    // An accept link may run a year; it is bounded by cutoff + 365 days, not 14.
+    const accept = asRetired(() => T.mintEstimateAcceptToken('est-1'));
+    expect(T.verifyEstimateHandoffToken('estimate-accept:est-1', accept)).toBe(true);
+    const forgedAccept = asRetired(() => T.mintEstimateAcceptToken('est-1', Date.now() + 30 * 86400 * 1000));
+    expect(T.verifyEstimateHandoffToken('estimate-accept:est-1', forgedAccept)).toBe(false);
+  });
+
+  it('a retired-secret customer token minted after the cutoff or with an oversized lifetime is refused', async () => {
+    process.env.JWT_SECRET_PREVIOUS = OLD;
+    const bad = [
+      jwt.sign({ customerId: 'prop-1', accountId: 'acct-1' }, OLD, { expiresIn: '15m' }), // iat after the cutoff
+      jwt.sign({ customerId: 'prop-1', accountId: 'acct-1', iat: ago(90) }, OLD, { expiresIn: '1h' }), // exp - iat > 15m
+    ];
+    for (const token of bad) {
+      const out = res(); const next = jest.fn();
+      await authenticate({ headers: { authorization: `Bearer ${token}` } }, out, next);
+      expect(out.status).toHaveBeenCalledWith(401);
+      expect(next).not.toHaveBeenCalled();
+    }
   });
 });

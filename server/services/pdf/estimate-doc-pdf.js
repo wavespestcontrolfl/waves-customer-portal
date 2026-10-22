@@ -67,7 +67,7 @@ function verifyEstimateDocPin(pin, token) {
   const secret = docPinSecret();
   if (!secret || !pin) return null;
   try {
-    const payload = verifyJwtWithKeys(String(pin), verifySecretsFor(process.env.ESTIMATE_DOC_PIN_SECRET));
+    const payload = verifyJwtWithKeys(String(pin), verifySecretsFor(process.env.ESTIMATE_DOC_PIN_SECRET), undefined, DOC_PIN_TTL_SECONDS);
     if (payload?.kind !== 'estimate_doc_render') return null;
     if (payload.tokenHash !== hashToken(token)) return null;
     if (payload.vexp != null && Number.isNaN(Date.parse(payload.vexp))) return null;

@@ -8,7 +8,7 @@ const db = require('../models/db');
 const { isAssignable, assertAssignableTechnician } = require('../services/technician-eligibility');
 const { promoteCustomerOnBooking } = require('../services/customer-stages');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
-const { jwtVerifySecrets } = require('../utils/jwt-secrets');
+const { jwtVerifySecrets, retiredExpOk } = require('../utils/jwt-secrets');
 const {
   estimateBelongsToCustomerAccount,
   loadEstimateOwnershipSnapshots,
@@ -1041,6 +1041,7 @@ function verifyCaptureToken(token, ipKey = '', now = Date.now(), req = null) {
   // Reject expired tokens and any exp implausibly far in the future (forged).
   if (!Number.isFinite(exp) || now > exp || exp > now + CAPTURE_TOKEN_TTL_MS + 60000) return false;
   return captureTokenVerifySecrets().some((secret, i) => {
+    if (i > 0 && !retiredExpOk(exp / 1000, CAPTURE_TOKEN_TTL_MS / 1000)) return false;
     const boundIp = i > 0 && req ? captureIpKey(req, secret) : ipKey;
     const expected = crypto.createHmac('sha256', secret).update(`capture:${exp}:${boundIp}`).digest('base64url');
     try {

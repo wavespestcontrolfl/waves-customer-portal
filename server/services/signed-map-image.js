@@ -28,7 +28,7 @@
 
 const crypto = require('crypto');
 const { STATIC_MAP_BASE, sanitizedStaticMapUrlFromStored } = require('./estimate-map-image');
-const { verifySecretsFor } = require('../utils/jwt-secrets');
+const { verifySecretsFor, retiredExpOk } = require('../utils/jwt-secrets');
 
 const ROUTE_PREFIX = '/api/public/map-image';
 const KEY_INFO = 'waves:signed-map-image:v1';
@@ -104,12 +104,14 @@ function verifyMapImageToken(token, { nowSeconds = Math.floor(Date.now() / 1000)
   const parts = token.split('.');
   if (parts.length !== 3 || parts[0] !== 'v1' || !/^[A-Za-z0-9_-]+$/.test(parts[1]) || !/^[A-Za-z0-9_-]{43}$/.test(parts[2])) return null;
   const given = Buffer.from(parts[2]);
-  const signatureOk = keys.some((key) => {
+  const match = PAYLOAD_RE.exec(Buffer.from(parts[1], 'base64url').toString('utf8'));
+  const signatureOk = keys.some((key, i) => {
+    // Accepted only by a retired secret: minted before the rotation cutoff.
+    if (i > 0 && !(match && retiredExpOk(Number(match[8]), MAX_TTL_SECONDS))) return false;
     const expected = Buffer.from(hmac(key, `v1.${parts[1]}`));
     return expected.length === given.length && crypto.timingSafeEqual(expected, given);
   });
   if (!signatureOk) return null;
-  const match = PAYLOAD_RE.exec(Buffer.from(parts[1], 'base64url').toString('utf8'));
   if (!match) return null;
   const exp = Number(match[8]);
   if (!Number.isFinite(exp) || exp <= nowSeconds || exp > nowSeconds + MAX_TTL_SECONDS + CLOCK_SKEW_SECONDS) return null;

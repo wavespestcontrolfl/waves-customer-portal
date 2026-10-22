@@ -1,5 +1,5 @@
 const crypto = require('crypto');
-const { verifySecretsFor } = require('../../utils/jwt-secrets');
+const { verifySecretsFor, retiredExpOk } = require('../../utils/jwt-secrets');
 
 // Signed assessment pins (#3168).
 //
@@ -86,7 +86,10 @@ function verifyAssessmentPin(token, assessmentId, signature, expiresAt, { nowSec
 
   const history = assessmentPinHistory(signature);
   const signed = history ? signature.split('.')[2] : signature;
-  for (const key of keys) {
+  for (let i = 0; i < keys.length; i += 1) {
+    // Accepted only by a retired secret: minted before the rotation cutoff.
+    if (i > 0 && !retiredExpOk(exp, PIN_TTL_SECONDS)) return false;
+    const key = keys[i];
     const expected = computeSignature(key, token, assessmentId, String(expiresAt), plan, history || '');
     if (signed.length !== expected.length) return false;
     try {

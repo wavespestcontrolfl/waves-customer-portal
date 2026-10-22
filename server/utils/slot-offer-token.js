@@ -89,7 +89,7 @@
  * one implementation; codes are the only factor on GET /booking/status/:code.
  */
 const crypto = require('crypto');
-const { jwtVerifySecrets } = require('./jwt-secrets');
+const { jwtVerifySecrets, retiredExpOk } = require('./jwt-secrets');
 
 const RAW_SECRET = process.env.JWT_SECRET || process.env.BOOKING_CAPTURE_SECRET || 'waves-booking-capture-dev';
 const offerKeyFor = (raw) => crypto.createHash('sha256').update(`waves:slot-offer:v1:${raw}`).digest();
@@ -100,6 +100,9 @@ function offerVerifyKeys() {
   const secrets = process.env.JWT_SECRET ? jwtVerifySecrets(RAW_SECRET) : [RAW_SECRET];
   return secrets.length > 1 ? [OFFER_KEY, ...secrets.slice(1).map(offerKeyFor)] : [OFFER_KEY];
 }
+// An offer accepted only by a retired secret must have been minted before the
+// rotation cutoff: its expiry (ms) cannot exceed the cutoff plus the offer TTL.
+const retiredOfferExpOk = (expMs) => retiredExpOk(expMs / 1000, SLOT_OFFER_TTL_MS / 1000);
 
 const SLOT_OFFER_TTL_MS = 45 * 60 * 1000;
 // Tolerance when rejecting implausibly-far-future (forged) expiries — covers
@@ -209,7 +212,8 @@ function verifySlotOffer(payload, sig, now = Date.now()) {
   if (exp > now + SLOT_OFFER_TTL_MS + EXP_SKEW_MS) return false; // forged far-future exp
   if (!sig || typeof sig !== 'string') return false;
   const canonical = canonicalOfferString(payload);
-  return offerVerifyKeys().some((key) => {
+  return offerVerifyKeys().some((key, i) => {
+    if (i > 0 && !retiredOfferExpOk(exp)) return false;
     const expected = crypto.createHmac('sha256', key)
       .update(canonical)
       .digest('base64url');

@@ -15,7 +15,7 @@
 // as identity or pricing authority on a money path (the identity≠pricing
 // rule; see estimate-handoff-token.js).
 const crypto = require('crypto');
-const { verifySecretsFor } = require('./jwt-secrets');
+const { verifySecretsFor, retiredExpOk } = require('./jwt-secrets');
 
 const TTL_SECONDS = 60 * 60 * 24 * 14; // 14 days — owner decision (scope doc §7)
 
@@ -72,7 +72,8 @@ function verifyLeadConsultationToken(token, nowSec = Math.floor(Date.now() / 100
   const channel = parts.length === 4 ? parts[2] : undefined;
   const sig = parts[parts.length - 1];
   if (!leadId || !Number.isFinite(exp) || exp < nowSec) return null;
-  const signatureOk = verifySecrets().some((key) => {
+  const signatureOk = verifySecrets().some((key, i) => {
+    if (i > 0 && !retiredExpOk(exp, TTL_SECONDS)) return false;
     const expected = sign(leadId, exp, channel, key);
     if (sig.length !== expected.length) return false;
     try {
@@ -136,7 +137,8 @@ function verifyWaitlistTicket(ticket, leadId, nowSec = Math.floor(Date.now() / 1
   const [expStr, countyB64, sig] = parts;
   const exp = Number(expStr);
   if (!Number.isFinite(exp) || exp < nowSec) return null;
-  const signatureOk = verifySecrets().some((key) => {
+  const signatureOk = verifySecrets().some((key, i) => {
+    if (i > 0 && !retiredExpOk(exp, WAITLIST_TICKET_TTL_SECONDS)) return false;
     const expected = waitlistTicketSig(leadId, `${expStr}.${countyB64}`, key);
     if (sig.length !== expected.length) return false;
     try {

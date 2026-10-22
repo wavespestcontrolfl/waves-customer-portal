@@ -48,12 +48,23 @@ headers" = `Cache-Control: no-store`, `X-Robots-Tag: noindex`,
 
 ## Secret rotation (`JWT_SECRET_PREVIOUS`)
 
+**After a suspected secret leak (for example the Railway incident of
+2026-10-21), rotate WITHOUT `JWT_SECRET_PREVIOUS`: everyone signs in again and
+old links stop. `JWT_SECRET_PREVIOUS` is for routine rotation only.**
+
 Signed public tokens and links that are keyed by `JWT_SECRET` (directly or as
 the fallback of a dedicated secret) keep verifying across a `JWT_SECRET`
 rotation: the verifier accepts the current secret first, then each retired
 secret listed in `JWT_SECRET_PREVIOUS` (comma-separated, may be unset; unset is
 byte-identical to a single secret). Signing always uses the current
-`JWT_SECRET`. The helper is `server/utils/jwt-secrets.js`; the procedure and
+`JWT_SECRET`. The previous list needs `JWT_SECRET_ROTATED_AT` (ISO time, not in
+the future) and is ignored without it. A token or link accepted only through a
+retired secret must also have been minted before that time and may not outlive
+its family's normal lifetime (JWT `iat` before the cutoff and `exp - iat`
+within the family maximum; embedded-expiry links no later than the cutoff plus
+the family TTL), and a customer refresh token verified only by a retired secret
+must already be registered (`jti` + family) in the database, never migrated as
+a legacy token. The helper is `server/utils/jwt-secrets.js`; the procedure and
 lifetimes are in `docs/gates-and-env.md`. Affected public families: booking
 capture and slot-offer tokens (`/api/booking`), estimate handoff / accept /
 ask / doc-pin / opt-out preview (`/api/estimates/:token`), lead prefill and
