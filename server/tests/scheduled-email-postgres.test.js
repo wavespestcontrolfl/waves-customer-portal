@@ -110,6 +110,7 @@ jest.setTimeout(30000);
     await makeDue(body.scheduled.id, { status: 'cancelled' });
     await sendDueScheduledEmails();
     expect(gmail.sendMessage).not.toHaveBeenCalled();
+    expect((await call('GET', '/scheduled')).body.emails).toEqual([expect.objectContaining({ id: body.scheduled.id, status: 'cancelled' })]);
     const repeated = await call('POST', `/scheduled/${body.scheduled.id}/cancel`);
     expect(repeated).toMatchObject({ status: 200, body: { draft: { draftText: 'Hi\nthere' } } });
 

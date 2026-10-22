@@ -6,12 +6,14 @@ import { formatSendAt } from "./scheduleSend";
 
 const STATUS_TEXT = {
   sending: "Sending now",
+  cancelled: "Cancelled",
   failed: "Not sent: Gmail refused it",
   outcome_unknown: "May have gone out: check the Gmail Sent folder first",
 };
 
 // Email > Scheduled, as in Gmail: what is queued and when, with Cancel send.
-// A row Gmail refused or may have sent shows Back to draft instead.
+// A row Gmail refused or may have sent shows Back to draft; a row cancelled in
+// the last day shows Open as draft (the cancel repeats and returns its text).
 export default function ScheduledEmails({ scheduled, editor, mailbox }) {
   const [feedback, setFeedback] = useState(null);
   const takeBack = async (row) => {
@@ -48,13 +50,13 @@ export default function ScheduledEmails({ scheduled, editor, mailbox }) {
             <p className="m-0 font-medium">To: {row.to}</p>
             <p className="m-0 mt-1">{row.subject || "(no subject)"}</p>
             <p className="m-0 mt-1 truncate text-ink-secondary">{String(row.draftText || "").split("\n")[0]}</p>
-            <p className={row.status === "scheduled" ? "u-nums m-0 mt-1 text-ink-secondary" : "m-0 mt-1 text-alert-fg"}>
+            <p className={["scheduled", "cancelled"].includes(row.status) ? "u-nums m-0 mt-1 text-ink-secondary" : "m-0 mt-1 text-alert-fg"}>
               {row.status === "scheduled" ? `Sends ${formatSendAt(row.sendAt)}` : STATUS_TEXT[row.status] || row.status}
             </p>
           </div>
           {row.status !== "sending" && <Button variant="secondary" className="shrink-0" onClick={() => takeBack(row)}
             disabled={Boolean(scheduled.pendingId)} loading={scheduled.pendingId === row.id}>
-            {row.status === "scheduled" ? "Cancel send" : "Back to draft"}
+            {{ scheduled: "Cancel send", cancelled: "Open as draft" }[row.status] || "Back to draft"}
           </Button>}
         </li>)}</ul>}
     </div>

@@ -385,13 +385,18 @@ router.post('/schedule', async (req, res) => {
   }
 });
 
-// GET /scheduled — what is still waiting or needs the office (sent and
-// cancelled rows drop off). Answers {enabled:false} with the gate off so the
+// GET /scheduled — what is still waiting or needs the office (sent rows drop
+// off; cancelled rows after a day). Answers {enabled:false} with the gate off so the
 // client hides the menu and the tab.
 router.get('/scheduled', async (req, res) => {
   if (!emailSendLaterLive()) return res.json({ enabled: false, emails: [] });
   try {
-    const rows = await db('scheduled_emails').whereIn('status', ['scheduled', 'sending', ...CANCELLABLE.slice(1)]).orderBy('send_at', 'asc').limit(200);
+    // Recently cancelled rows stay listed for a day with "Open as draft", so
+    // a cancel whose answer was lost (or a reload) never strands the text.
+    const rows = await db('scheduled_emails')
+      .where((q) => q.whereIn('status', ['scheduled', 'sending', ...CANCELLABLE.slice(1)])
+        .orWhere((c) => c.where('status', 'cancelled').where('cancelled_at', '>', db.raw("now() - interval '1 day'"))))
+      .orderBy('send_at', 'asc').limit(200);
     res.json({ enabled: true, emails: rows.map(scheduledView) });
   } catch (err) {
     logger.error(`[email] scheduled list failed (${err.code || 'error'})`);

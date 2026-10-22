@@ -111,6 +111,26 @@ describe("Email schedule send", () => {
     expect(second).toBe(first);
   });
 
+  it("queues again under a fresh key when the server answers with an email cancelled earlier", async () => {
+    let first = true;
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation((input, options = {}) => {
+      if (String(input).endsWith("/email/schedule") && first) {
+        first = false;
+        return response({ success: true, scheduled: { id: "old", status: "cancelled" } });
+      }
+      return base(input, options);
+    });
+    mount();
+    await writeEmail();
+    fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Tomorrow morning/ }));
+    await waitFor(() => expect(posts("/email/schedule")).toHaveLength(2));
+    const [a, b] = posts("/email/schedule").map(([, options]) => JSON.parse(options.body).clientKey);
+    expect(b).not.toBe(a);
+    expect((await screen.findAllByText(/^Scheduled for /)).length).toBeGreaterThan(0);
+  });
+
   it("Cancel send brings the email back into the composer", async () => {
     scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "scheduled" }];
     mount();

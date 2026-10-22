@@ -226,11 +226,10 @@ export default function useEmailEditor(userId) {
     const slot = replyId ? `reply:${replyId}` : "compose";
     const request = JSON.stringify({ ...payload, sendAt });
     const prior = uncertainSchedule.current[slot];
-    const clientKey = prior?.request === request ? prior.clientKey : crypto.randomUUID();
-    // Saved before the request: a reload while it is in flight still finds
-    // the key. Cleared only on a definite answer.
-    rememberUncertain(slot, { request, clientKey });
-    try {
+    const submit = async (clientKey) => {
+      // Saved before the request: a reload while it is in flight still finds
+      // the key. Cleared only on a definite answer.
+      rememberUncertain(slot, { request, clientKey });
       const response = await adminFetch("/api/admin/email/schedule", {
         method: "POST",
         body: JSON.stringify({ ...payload, body: encodeEmailBody(payload.body), draftText: payload.body, sendAt, clientKey }),
@@ -238,6 +237,13 @@ export default function useEmailEditor(userId) {
       const result = await response.json().catch(() => null);
       // A 2xx or 5xx without a readable answer may hide a committed insert.
       if (!result || (response.ok && !result.success)) throw new Error("Schedule outcome unknown");
+      return { response, result };
+    };
+    try {
+      let { response, result } = await submit(prior?.request === request ? prior.clientKey : crypto.randomUUID());
+      // A remembered key can name an email that was cancelled since: that is
+      // not this request, so queue it again under a fresh key.
+      if (response.ok && result.scheduled?.status === "cancelled") ({ response, result } = await submit(crypto.randomUUID()));
       if (!response.ok) {
         if (response.status < 500) rememberUncertain(slot, null);
         setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: result.error || "The email was not scheduled. Your draft is still here." } }));
