@@ -97,6 +97,8 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   'accept_estimate',
   // An invoice sent to the customer cannot be unsent.
   'send_invoice',
+  // A recorded payment closes the invoice and stops its reminders; only a refund or void (closed to the bar) undoes it.
+  'record_payment',
 ]);
 
 // Tools whose card lines are curated below from their own preview, not the
@@ -129,6 +131,8 @@ const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
 // send_invoice: its card lines come from its own preview
 // (invoice-action-tools.js cardLines), never the generic dump; it bills the customer.
 CURATED_PREVIEW_TOOL_NAMES.add('send_invoice');
+// record_payment: its card lines come from its own preview (record-payment-tools.js cardLines). Money, not a charge.
+CURATED_PREVIEW_TOOL_NAMES.add('record_payment');
 // propose_admin_edit (owner ruling 2026-10-12): its card lines come from its own
 // preview (admin-write-tools.js cardLines), never the generic dump.
 CURATED_PREVIEW_TOOL_NAMES.add('propose_admin_edit');
@@ -168,6 +172,7 @@ const BILLING_TOOL_NAMES = new Set([
   'create_agent_estimate_draft',
   'set_estimate_presentation',
   'send_invoice',
+  'record_payment',
 ]);
 
 const ACTION_LABELS = {
@@ -200,6 +205,7 @@ const ACTION_LABELS = {
   trigger_review_request: 'Send a review request',
   resend_receipt: 'Re-send a paid receipt',
   send_invoice: 'Send an invoice to the customer',
+  record_payment: 'Record a payment received outside the portal (never charges a card)',
   propose_admin_edit: 'Edit an admin record',
   convert_lead: 'Convert a lead to a customer (sends nothing)',
   void_invoice: 'Void an invoice (sends nothing)',
@@ -827,6 +833,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // label leads with its topic.
   if (toolName === 'accept_estimate' && Array.isArray(preview?.card_lines)) {
     for (const l of preview.card_lines) push(l.kind, l.label, l.before !== undefined ? { before: l.before, after: l.after } : {});
+  }
+  // record_payment: the invoice, the money and that no receipt is sent.
+  if (toolName === 'record_payment' && preview?.preview === true) {
+    for (const line of require('./record-payment-tools').cardLines(toolName, preview)) push(line.kind, line.text);
   }
   // convert_lead: the lead, the customer, the matches, every change and that nothing is sent.
   if (toolName === 'convert_lead' && preview?.preview === true) {

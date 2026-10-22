@@ -2647,7 +2647,23 @@ function parseDateOnly(value, field) {
   return String(value).slice(0, 10);
 }
 
-router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
+// req.ibApprovedPayment is set only by recordPaymentFromBar (the Intelligence Bar card): the amount due the card showed, the
+// card's settlementFence (its invoice pin, held-report and annual-plan checks, run before the Stripe retirement and again under
+// the invoice row lock), and that the invoice is still
+// the customer's own (re-proved under the row lock, like the Zelle paths). The Invoices page never sets it, so its call is unchanged.
+const cardPinsOf = (req) => (req.ibApprovedPayment
+  ? {
+    expectedAmountCents: req.ibApprovedPayment.expectedAmountCents,
+    settlementFence: req.ibApprovedPayment.settlementFence,
+    requireSelfPay: true,
+  }
+  : {});
+
+// The card is told what the post-payment closeout did (the Invoices page's answer is unchanged).
+const cardResultOf = (req, closeout) => (req.ibApprovedPayment ? { closeout: closeout || null } : {});
+
+// Named so the Intelligence Bar's record_payment card (recordPaymentFromBar, below) runs this very handler.
+const recordPaymentHandler = async (req, res, next) => {
   try {
     const { id } = req.params;
     const {
@@ -2672,8 +2688,11 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
     // effects and the receipt all live in services/invoice-manual-payment.js
     // — the one manual-settlement path (shared with the Zelle notice
     // reconciler). Refusals arrive as statusCode-shaped errors.
-    const { invoice, receipt } = await recordManualPayment(id, { method, reference, note, recordedBy, sendReceipt, via, recordedByTechnicianId: req.technicianId || null });
-    res.json({ ok: true, invoice, receipt });
+    const { invoice, receipt, closeout } = await recordManualPayment(id, {
+      method, reference, note, recordedBy, sendReceipt, via, recordedByTechnicianId: req.technicianId || null,
+      ...cardPinsOf(req),
+    });
+    res.json({ ok: true, invoice, receipt, ...cardResultOf(req, closeout) });
   } catch (err) {
     // 400 / 404 refusals and the 409-shaped conflicts (combined-session
     // reservation, PI in flight, lost race — the latter carries the
@@ -2682,12 +2701,15 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
       return res.status(err.statusCode).json({
         error: err.message,
         ...(err.currentStatus !== undefined ? { current_status: err.currentStatus } : {}),
+        // Only a card's pin (amount due / invoice version) can produce these; the page never sets one.
+        ...(err.drift || err.amountMismatch ? { code: 'PREVIEW_CHANGED' } : {}),
       });
     }
     logger.error(`[admin-invoices] record-payment failed: ${err.message}`);
     next(err);
   }
-});
+};
+router.post('/:id/record-payment', requireAdmin, recordPaymentHandler);
 
 
 // GET /:id/credit-context — available account credit + this invoice's
@@ -3781,6 +3803,18 @@ function sendInvoiceFromBar({ invoiceId, body, actor, approvedSend }) {
   return runInvoiceHandler(invoiceSendHandler, barRequest(invoiceId, body, actor, { ibApprovedSend: approvedSend }));
 }
 
+// The Intelligence Bar's record_payment runs the SAME handler as POST /:id/record-payment. `body` is exactly what the
+// Invoices page sends with its Send receipt switch off: the shim forces sendReceipt=false and drops via, so the bar never sends a
+// receipt from here (a receipt is a separate act: resend_receipt, or the Invoices page). The recorder is the staff member's name as
+// the page path would read it from the login; approvedPayment: { expectedAmountCents, settlementFence }.
+function recordPaymentFromBar({ invoiceId, body, actor, approvedPayment }) {
+  const { via: _via, ...withoutVia } = body || {};
+  return runInvoiceHandler(recordPaymentHandler, barRequest(invoiceId, { ...withoutVia, sendReceipt: false }, actor, {
+    technician: actor?.name || actor?.email ? { name: actor.name || null, email: actor.email || null } : undefined,
+    ibApprovedPayment: approvedPayment,
+  }));
+}
+
 // expected: the invoice version the void_invoice card showed (voidInvoice's `expected` option).
 function voidInvoiceFromBar({ invoiceId, expected }) {
   return runInvoiceHandler(invoiceVoidHandler, { params: { id: invoiceId }, body: {}, ibExpectedVoid: expected });
@@ -3788,5 +3822,6 @@ function voidInvoiceFromBar({ invoiceId, expected }) {
 
 module.exports = router;
 module.exports.sendInvoiceFromBar = sendInvoiceFromBar;
+module.exports.recordPaymentFromBar = recordPaymentFromBar;
 module.exports.voidInvoiceFromBar = voidInvoiceFromBar;
 module.exports.getInvoiceDeliveryRecipients = getInvoiceDeliveryRecipients;
