@@ -27,6 +27,17 @@ vi.mock('../utils/api', () => ({
     getCustomerPushStatus: vi.fn(),
   },
 }));
+// The native shell and the device-enrollment hook, so the contact card's
+// "Connect this device" ask can be exercised without Capacitor.
+const native = vi.hoisted(() => ({ isNativeApp: vi.fn(() => false), enable: vi.fn(), deviceState: 'web' }));
+vi.mock('../native/platform', () => ({
+  isNativeApp: native.isNativeApp,
+  nativePlatform: () => 'web',
+  hasSessionToken: () => false,
+}));
+vi.mock('../hooks/useAppNotifications', () => ({
+  default: vi.fn(() => ({ status: null, deviceState: native.deviceState, busy: false, refresh: vi.fn(), enable: native.enable, ready: false })),
+}));
 const alerts = vi.hoisted(() => ({ showCustomerAlert: vi.fn() }));
 vi.mock('../components/brand/CustomerDialogHost', () => ({
   showCustomerAlert: alerts.showCustomerAlert,
@@ -263,5 +274,42 @@ describe('ContactNotificationCard', () => {
     const retry = await screen.findByRole('button', { name: 'Try again' });
     fireEvent.click(retry);
     expect(await screen.findByTestId('contact-notification-card')).toBeInTheDocument();
+  });
+
+  // A fresh native install has no device token until the OS permission is
+  // asked for, and a contact session mounts neither the bell nor the holder's
+  // app rows that ask it (codex #6364 r1 P2): the card asks.
+  it('in the native app, a contact whose phone has not allowed notifications is offered "Connect this device"; the web and a granted device are not', async () => {
+    native.isNativeApp.mockReturnValue(true);
+    native.deviceState = 'prompt';
+    await renderSchedule(contactCustomer);
+    await screen.findByTestId('contact-notification-card');
+    fireEvent.click(screen.getByRole('button', { name: 'Connect this device' }));
+    expect(native.enable).toHaveBeenCalledTimes(1);
+    cleanup();
+    native.deviceState = 'granted';
+    await renderSchedule(contactCustomer);
+    await screen.findByTestId('contact-notification-card');
+    expect(screen.queryByTestId('contact-device-enroll')).not.toBeInTheDocument();
+    cleanup();
+    native.isNativeApp.mockReturnValue(false);
+    native.deviceState = 'web';
+    await renderSchedule(contactCustomer);
+    await screen.findByTestId('contact-notification-card');
+    expect(screen.queryByTestId('contact-device-enroll')).not.toBeInTheDocument();
+  });
+});
+
+describe('ScheduleTab — a contact on several rows', () => {
+  it('sees the property picker but no "Next visit at each property" chips (that summary is never read for a contact — codex r1 P2)', async () => {
+    const properties = [
+      { id: 'cust-1', profileLabel: 'Palm Ave', isPrimaryProfile: true },
+      { id: 'cust-2', profileLabel: 'Oak St', isPrimaryProfile: true },
+    ];
+    render(<ScheduleTab customer={contactCustomer} properties={properties} activePropertyId="cust-1" onSelectProperty={vi.fn()} />);
+    await screen.findByText(/Quarterly Pest Control/);
+    expect(screen.getByText("You're viewing")).toBeInTheDocument();
+    expect(screen.queryByText('Next visit at each property')).not.toBeInTheDocument();
+    expect(screen.queryByText('Checking…')).not.toBeInTheDocument();
   });
 });

@@ -86,20 +86,39 @@ function withholdReportArtifacts(service) {
 // reads ride that connection instead of reserving a second one from the pool.
 async function contactRecordScope(req, dbh = db) {
   if (!req.contactSession) return null;
-  const customerId = req.customerId;
+  return (await contactRecordScopes([req.customerId], dbh)).get(String(req.customerId));
+}
+
+// The scope above for SEVERAL rows at once, keyed by String(customer id):
+// one customer_properties read for all of them. A contact listed on many
+// rows (a property manager's number) has every row's address named in one
+// /auth/properties or login response, and a read per row would hold a pool
+// connection each, concurrently (codex #6364 r2 P2).
+async function contactRecordScopes(customerIds, dbh = db) {
+  const scopes = new Map();
+  const ids = [...new Map(customerIds.map((id) => [String(id), id])).entries()];
+  if (!ids.length) return scopes;
   // The same columns the saved-property resolver selects: the tracking
   // projection (scopedLocationCustomer) reads a non-primary fallback
   // property's address and geocode off the scope (codex #6363 r19 P2).
+  // Retired rows are read too: a profile whose rows were ALL retired is
+  // closed, one that never had a row keeps its customer-wide reads.
   const rows = await dbh('customer_properties')
-    .where({ customer_id: customerId, active: true })
+    .whereIn('customer_id', ids.map(([, id]) => id))
     .orderBy([{ column: 'is_primary', order: 'desc' }, { column: 'created_at', order: 'asc' }])
-    .select('id', 'is_primary', 'label', 'relationship', 'occupancy_type', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
-  if (!rows.length) {
-    const everHadRow = !!(await dbh('customer_properties').where({ customer_id: customerId }).first('id'));
-    return { customerId, enabled: true, multi: false, scoped: everHadRow, closed: everHadRow, property: null };
+    .select('id', 'customer_id', 'active', 'is_primary', 'label', 'relationship', 'occupancy_type', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
+  for (const [key, customerId] of ids) {
+    const mine = rows.filter((r) => String(r.customer_id) === key);
+    const live = mine.filter((r) => r.active === true);
+    if (!live.length) {
+      const everHadRow = mine.length > 0;
+      scopes.set(key, { customerId, enabled: true, multi: false, scoped: everHadRow, closed: everHadRow, property: null });
+      continue;
+    }
+    const property = live.find((r) => r.is_primary === true) || live[0];
+    scopes.set(key, { customerId, enabled: true, multi: live.length > 1, scoped: true, closed: false, property });
   }
-  const property = rows.find((r) => r.is_primary === true) || rows[0];
-  return { customerId, enabled: true, multi: rows.length > 1, scoped: true, closed: false, property };
+  return scopes;
 }
 
 // The scope a session's record reads resolve under: a contact's, above; a
@@ -230,6 +249,7 @@ function contactNextPayload(payload) {
 module.exports = {
   contactSessionReportsWithheld,
   contactRecordScope,
+  contactRecordScopes,
   sessionRecordScope,
   contactAddress,
   scopeContactRecords,
