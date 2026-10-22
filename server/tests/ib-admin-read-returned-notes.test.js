@@ -499,6 +499,26 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     expect(scrubNote(note)).toEqual({ text: note, removed: 0 });
   });
 
+  test('an escaped path or regex that is not a link keeps its backslashes (r13)', async () => {
+    const note = 'path foo\\/bar and regex a\\/b';
+    const result = await read(ENTRY, { id: 1, notes: note, details: { 'key\\/one': 'x' } });
+    expect(result.data.notes).toBe(note);
+    expect(result.data.details).toEqual({ 'key\\/one': 'x' });
+    const mixed = await read(ENTRY, { id: 1, notes: 'see foo\\/bar and https:\\/\\/portal.wavespestcontrol.com\\/l\\/abc234def5 ok' });
+    expect(mixed.data.notes).toBe('see foo\\/bar and [private link removed] ok');
+  });
+
+  test.each([
+    ['DB_PASSWORD=hunter 22', 'DB_PASSWORD=[removed]'],
+    ['API_TOKEN=abc def # note', 'API_TOKEN=[removed] # note'],
+    ['SECRET=one two three', 'SECRET=[removed]'],
+    ['DB_PASSWORD="two words" tail', 'DB_PASSWORD=[removed] tail'],
+    ['DB_PASSWORD=\'it is\' tail', 'DB_PASSWORD=[removed] tail'],
+    ['DB_PASSWORD=[removed] tail text', 'DB_PASSWORD=[removed] tail text'],
+  ])('dotenv-style value: %s', (note, expected) => {
+    expect(scrubNote(note).text).toBe(expected);
+  });
+
   test('a card number inside a long grouped digit run is masked', () => {
     const note = `ref 4242 4242 4242 4242${' 1111'.repeat(27)} end`;
     const { text, removed } = scrubNote(note);

@@ -396,13 +396,24 @@ const leastLeafCost = entry => {
   return serialLength(entry);
 };
 
-// A JSON-escaped slash ("https:\/\/host\/l\/token") is a slash to every link rule:
-// unescape it before the structural link rules run, in notes and in note keys
-// (Codex #6375 r10 pre-push audit P0).
+// A JSON-escaped link (https:\/\/host\/l\/token) is a link to every link rule. It is
+// judged on an unescaped copy, but only a span that is really redacted is replaced:
+// text that is not a redacted link keeps its backslashes, so a regex or an escaped
+// path (foo\/bar) comes back as written (Codex #6375 r10 audit P0, r13).
+const ESCAPED_LINK_RE = /[a-z][a-z0-9+.-]*:(?:\\?\/){2}(?:[^\s"'<>\\]|\\\/)+/gi;
 const unescapeSlashes = text => text.replace(/\\\//g, '/');
+function redactNoteLinks(text, state) {
+  const spans = text.replace(ESCAPED_LINK_RE, (span) => {
+    if (!span.includes('\\/')) return span;
+    const plain = unescapeSlashes(span);
+    const clean = redactString(plain, state);
+    return clean === plain ? span : clean;
+  });
+  return redactString(spans, state);
+}
 
 function returnNoteString(item, state) {
-  const { text, removed } = scrubNote(redactString(unescapeSlashes(trimToScanLimit(item)), state), { truncated: item.length > SCAN_LIMIT });
+  const { text, removed } = scrubNote(redactNoteLinks(trimToScanLimit(item), state), { truncated: item.length > SCAN_LIMIT });
   state.noteSecrets += removed;
   if (state.noteBudget === undefined) return text;
   const room = Math.max(state.noteBudget - 2, 0);
@@ -435,9 +446,8 @@ function returnNoteEntries(item, state, depth) {
     let hiddenKeys = 0;
     for (const [rawKey, entry] of Object.entries(item)) {
       // A key is text the model reads too: a secret-shaped key is replaced (Codex #6375 r3).
-      const plainKey = unescapeSlashes(rawKey);
-      const scrubbedKey = scrubNote(redactString(plainKey, state)).text;
-      const key = scrubbedKey === plainKey ? rawKey : `[removed key ${hiddenKeys += 1}]`;
+      const scrubbedKey = scrubNote(redactNoteLinks(rawKey, state)).text;
+      const key = scrubbedKey === rawKey ? rawKey : `[removed key ${hiddenKeys += 1}]`;
       const keyCost = serialLength(key) + 2;
       if (!noteFits(state, keyCost + leastLeafCost(entry))) { out[CUT] = true; cut = true; break; }
       if (key !== rawKey) state.noteSecrets += 1;
