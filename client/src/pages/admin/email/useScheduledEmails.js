@@ -71,12 +71,15 @@ export default function useScheduledEmails(active) {
 // Scheduled, and the editor extended with the arrow menu's two inputs.
 export function useScheduledSection({ active, tab, editor, baseSections }) {
   const scheduled = useScheduledEmails(active);
-  const showScheduled = tab === "scheduled" && scheduled.enabled;
-  // Scheduled with the gate off falls back to Inbox.
+  // The tab shows with the gate on, and with it off while emails remain to
+  // manage (a rollback can still cancel them); the arrow needs the gate.
+  const tabVisible = scheduled.enabled || scheduled.emails.length > 0;
+  const showScheduled = tab === "scheduled" && tabVisible;
+  // Scheduled with nothing to show falls back to Inbox.
   const pane = tab === "blocked" ? "blocked" : showScheduled ? "scheduled" : "inbox";
   const { reload } = scheduled;
   useEffect(() => { if (showScheduled) reload(); }, [showScheduled, reload]);
-  const sections = scheduled.enabled
+  const sections = tabVisible
     ? [baseSections[0], { key: "scheduled", label: scheduled.tabLabel, Icon: Clock }, ...baseSections.slice(1)]
     : baseSections;
   const mailEditor = { ...editor, scheduleEnabled: scheduled.enabled, onScheduled: reload };

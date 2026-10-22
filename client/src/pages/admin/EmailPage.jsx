@@ -20,7 +20,7 @@ const NAV_GRID = { 2: "grid-cols-2", 3: "grid-cols-3" };
 // With Gmail disconnected, emails already scheduled stay reachable: Cancel
 // send and Back to draft need no Gmail. Composing and sending still do.
 function ScheduledWhileDisconnected({ scheduled, editor, mailbox }) {
-  if (!scheduled.enabled || scheduled.emails.length === 0) return null;
+  if (scheduled.emails.length === 0) return null;
   return <div className="mt-6 text-left">
     <h3 className="mb-2 font-medium">Scheduled emails</h3>
     <ScheduledEmails scheduled={scheduled} editor={editor} mailbox={mailbox} />

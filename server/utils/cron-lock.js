@@ -190,8 +190,9 @@ async function recordJobEnd(jobName, startedAtMs, error, conn) {
 // Health for a lease-free job (an atomically claimed queue that runs on every
 // replica: cron-lock does not wrap those). There is no 'running' write, and
 // the end write is fenced: a failure always records, and a success never
-// overwrites a failure that finished after this run started, so a concurrent
-// empty run on another replica cannot hide a failed one. Same columns and
+// overwrites a failure that finished after this run started or that belongs
+// to the same scheduled minute, so a concurrent or slightly late empty run on
+// another replica cannot hide a failed one. Same columns and
 // meaning as recordJobEnd.
 async function recordLeaseFreeJobEnd(jobName, startedAtMs, error) {
   const startedAt = new Date(startedAtMs);
@@ -212,8 +213,9 @@ async function recordLeaseFreeJobEnd(jobName, startedAtMs, error) {
       ON CONFLICT (job_name) DO UPDATE SET last_started_at = EXCLUDED.last_started_at, last_finished_at = EXCLUDED.last_finished_at,
         last_duration_ms = EXCLUDED.last_duration_ms, last_status = 'success', last_success_at = EXCLUDED.last_success_at,
         last_error = NULL, consecutive_failures = 0, updated_at = EXCLUDED.updated_at
-      WHERE NOT (job_health.last_status = 'failed' AND job_health.last_finished_at > ?)`,
-    [...values, finishedAt, finishedAt, startedAt]);
+      WHERE NOT (job_health.last_status = 'failed'
+        AND (job_health.last_finished_at > ? OR job_health.last_started_at >= date_trunc('minute', ?::timestamptz)))`,
+    [...values, finishedAt, finishedAt, startedAt, startedAt]);
   } catch (err) {
     logger.warn(`[cron-lock] ${jobName}: job_health lease-free end record failed (${err.message})`);
   }

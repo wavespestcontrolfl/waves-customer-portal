@@ -40,10 +40,8 @@ const call = async (method, path, { role = 'admin', body } = {}) => {
   return { status: res.status, body: await res.json() };
 };
 
-test('with the gate off nothing is queued, listed or cancelled', async () => {
+test('with the gate off nothing is queued (listing and cancelling stay available: they send nothing)', async () => {
   expect(await call('POST', '/schedule', { body: valid() })).toEqual({ status: 404, body: { enabled: false, error: 'Schedule send is off.' } });
-  expect(await call('GET', '/scheduled')).toEqual({ status: 200, body: { enabled: false, emails: [] } });
-  expect((await call('POST', '/scheduled/fixture/cancel')).status).toBe(404);
   expect(db).not.toHaveBeenCalled();
 });
 

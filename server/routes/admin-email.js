@@ -349,6 +349,8 @@ const SCHEDULE_ET_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
 const SCHEDULE_MAX_DAYS = 366;
 const CANCELLABLE = ['scheduled', 'failed', 'outcome_unknown'];
 const CANCELLED_DAYS = 30;
+const SENT_CHECK_IN_SENT = 'Office check: found in the Gmail Sent folder';
+const SENT_CHECK_NOT_SENT = 'Office check: not in the Gmail Sent folder';
 const CANCELLED_LIST_CAP = 100;
 const { OUTCOME_UNKNOWN_ERRORS } = require('../services/email/scheduled-email-sender');
 const scheduledView = (row) => ({
@@ -458,8 +460,10 @@ router.post('/schedule/reconcile', async (req, res) => {
 // GET /scheduled — what is still waiting or needs the office, and recent
 // cancels (read-only); sent rows drop off. Answers {enabled:false} with the
 // gate off so the client hides the menu and the tab.
+// With the gate off the list still answers (enabled:false): emails already
+// queued stay visible and cancellable, since only creating and sending are
+// gated.
 router.get('/scheduled', async (req, res) => {
-  if (!emailSendLaterLive()) return res.json({ enabled: false, emails: [] });
   try {
     // Every email still queued or sending, and every one that needs the
     // office (failed, outcome_unknown: their alert says Back to draft), so
@@ -473,7 +477,7 @@ router.get('/scheduled', async (req, res) => {
         .orderBy('cancelled_at', 'desc').limit(CANCELLED_LIST_CAP),
     ]);
     const rows = [...open, ...cancelled].sort((a, b) => new Date(a.send_at) - new Date(b.send_at));
-    res.json({ enabled: true, emails: rows.map(scheduledView) });
+    res.json({ enabled: emailSendLaterLive(), emails: rows.map(scheduledView) });
   } catch (err) {
     logger.error(`[email] scheduled list failed (${err.code || 'error'})`);
     res.status(500).json({ error: 'Scheduled emails are unavailable.' });
@@ -486,13 +490,24 @@ router.get('/scheduled', async (req, res) => {
 // copy is used up (the draft the office holds is the only copy). Atomic on
 // outcome_unknown; a row already taken back stays as it is. The sweep then
 // closes its alert. Sends nothing, so it answers with the gate off too.
+//
+// { takenBack: true } is the tab that took this email back itself (Back to
+// draft): its row is already cancelled, and the check records the verdict on
+// it. Without it, the row must still be outcome_unknown; one taken back
+// elsewhere answers 409, since another tab may hold the same text. Either
+// way the verdict replaces the may-have-sent marker, so the sweep can close
+// the alert only once the office has answered.
 router.post('/scheduled/:id/sent-check', async (req, res) => {
   const inSent = req.body?.inSent;
   if (typeof inSent !== 'boolean') return res.status(400).json({ error: 'inSent must be true or false.' });
+  const verdict = inSent ? SENT_CHECK_IN_SENT : SENT_CHECK_NOT_SENT;
   try {
-    const changed = await db('scheduled_emails').where({ id: req.params.id, status: 'outcome_unknown' }).update(inSent
-      ? { status: 'sent', sent_at: db.fn.now(), last_error: 'Found in the Gmail Sent folder by the office', updated_at: db.fn.now() }
-      : { status: 'cancelled', cancelled_at: db.fn.now(), restored_at: db.fn.now(), updated_at: db.fn.now() });
+    const changed = req.body?.takenBack === true
+      ? await db('scheduled_emails').where({ id: req.params.id, status: 'cancelled' }).whereIn('last_error', [...OUTCOME_UNKNOWN_ERRORS, verdict])
+        .update({ last_error: verdict, updated_at: db.fn.now() })
+      : await db('scheduled_emails').where({ id: req.params.id, status: 'outcome_unknown' }).update(inSent
+        ? { status: 'sent', sent_at: db.fn.now(), last_error: verdict, updated_at: db.fn.now() }
+        : { status: 'cancelled', cancelled_at: db.fn.now(), restored_at: db.fn.now(), last_error: verdict, updated_at: db.fn.now() });
     if (changed) return res.json({ success: true });
     // Nothing changed: the email was already settled elsewhere (taken back
     // to a draft in another tab, or already checked). Its state goes back,
@@ -511,8 +526,9 @@ router.post('/scheduled/:id/sent-check', async (req, res) => {
 // take the same text into a composer again: a repeat answers 409 and the
 // Scheduled list shows the text read-only. A row Gmail is sending or has
 // sent cannot be cancelled (409).
+// Sends nothing, so it works with the gate off too (a rollback must still
+// be able to stop emails already queued).
 router.post('/scheduled/:id/cancel', async (req, res) => {
-  if (!emailSendLaterLive()) return res.status(404).json({ enabled: false, error: 'Schedule send is off.' });
   try {
     const [row] = await db('scheduled_emails').where({ id: req.params.id }).whereIn('status', CANCELLABLE)
       .update({ status: 'cancelled', cancelled_at: db.fn.now(), restored_at: db.fn.now(), updated_at: db.fn.now() }).returning('*');

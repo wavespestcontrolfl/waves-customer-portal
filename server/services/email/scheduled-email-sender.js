@@ -207,8 +207,9 @@ async function claimGroup(conn, tried) {
   return { group, claimFailed: false };
 }
 
-// An alert is done once its email is no longer failed or outcome_unknown
-// (taken back, checked in Sent, used up by a retry, ...). Closing it here,
+// An alert is done once its email is no longer failed or outcome_unknown and
+// no may-have-sent check is still owed (a cancelled row keeps its
+// outcome-unknown marker until the office records its Sent check). Closing it here,
 // from the row's own state, needs no browser call and retries every minute
 // until it succeeds. Returns false when the close could not be written.
 async function closeSettledAlerts(conn = db) {
@@ -216,7 +217,8 @@ async function closeSettledAlerts(conn = db) {
     const open = await conn('notifications as n').where('n.recipient_type', 'admin').whereNull('n.done_at')
       .whereRaw("n.metadata->>'dedupeKey' LIKE 'scheduled-email:%'")
       .whereNotExists(conn('scheduled_emails as s').select(conn.raw('1'))
-        .whereIn('s.status', ['failed', 'outcome_unknown'])
+        .where((q) => q.whereIn('s.status', ['failed', 'outcome_unknown'])
+          .orWhere((c) => c.where('s.status', 'cancelled').whereIn('s.last_error', OUTCOME_UNKNOWN_ERRORS)))
         .whereRaw("n.metadata->>'dedupeKey' = 'scheduled-email:' || s.id::text"))
       .select('n.id');
     if (open.length) {

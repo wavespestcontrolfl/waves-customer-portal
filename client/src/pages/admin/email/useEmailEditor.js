@@ -198,16 +198,17 @@ export default function useEmailEditor(userId) {
     const entry = uncertainSchedule.current[slot];
     if (scheduling || entry?.request !== MAY_HAVE_SENT.request) return;
     const say = (message, error = false) => setSendFeedback((current) => ({ ...current, [replyId ? "reply" : "compose"]: { messageId: replyId, error, message } }));
-    // A draft this tab took back itself already holds the only copy (the
-    // server used it up): the answer is local. One from a reconciled request
-    // (rowId) is recorded on the email first.
-    let response = { ok: true };
-    if (entry.rowId) {
-      try {
-        response = await adminFetch(`/api/admin/email/scheduled/${encodeURIComponent(entry.rowId)}/sent-check`, { method: "POST", body: JSON.stringify({ inSent }) });
-      } catch { response = null; }
-      if (uncertainSchedule.current[slot]?.rowId !== entry.rowId) return;
-    }
+    // The answer is recorded on the email first (the alert stays open until
+    // it is). A draft this tab took back itself says so (takenBack): its row
+    // is already cancelled. One from a reconciled request is not, and the
+    // server refuses it if another tab took the email back meanwhile.
+    let response = null;
+    try {
+      response = await adminFetch(`/api/admin/email/scheduled/${encodeURIComponent(entry.rowId)}/sent-check`, {
+        method: "POST", body: JSON.stringify({ inSent, ...(entry.own ? { takenBack: true } : {}) }),
+      });
+    } catch { response = null; }
+    if (uncertainSchedule.current[slot]?.rowId !== entry.rowId) return;
     // Settled elsewhere (taken back in another tab): that tab may hold the
     // same text, so the guard stays, now as the operator's own check of it.
     if (response?.status === 409) {
@@ -498,7 +499,7 @@ export default function useEmailEditor(userId) {
     // Gmail may already have this email: plain Send waits for the same
     // Sent-folder check as an unconfirmed schedule request. A guard that
     // cannot survive a reload is no guard, so the draft does not open.
-    if (draft.mayHaveSent && !rememberUncertain(slotOf(draft.replyEmailId), { ...MAY_HAVE_SENT, textPrint: emailPrint(draft) })) return { opened: false };
+    if (draft.mayHaveSent && !rememberUncertain(slotOf(draft.replyEmailId), { ...MAY_HAVE_SENT, rowId: draft.id, own: true, textPrint: emailPrint(draft) })) return { opened: false };
     if (draft.replyEmailId) return { opened: true, saved: setReplyDraft(draft.replyEmailId, draft.draftText)?.saved === true };
     const written = setComposeForm(() => ({ to: draft.to, subject: draft.subject === "(no subject)" ? "" : draft.subject, body: draft.draftText }));
     setShowCompose(true);

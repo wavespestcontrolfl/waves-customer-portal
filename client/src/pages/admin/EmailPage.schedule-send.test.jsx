@@ -71,6 +71,16 @@ async function writeEmail() {
 }
 
 describe("Email schedule send", () => {
+  it("with the gate off, emails already queued keep their tab (cancellable) but there is no arrow", async () => {
+    enabled = false;
+    scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "scheduled" }];
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Scheduled (1)" }, { timeout: 3000 }));
+    expect(await screen.findByRole("button", { name: "Cancel send" })).toBeInTheDocument();
+    await writeEmail();
+    expect(screen.queryByRole("button", { name: "Schedule send options" })).not.toBeInTheDocument();
+  });
+
   it("hides the arrow and the Scheduled tab while the gate is off", async () => {
     enabled = false;
     mount();
@@ -569,11 +579,19 @@ describe("Email schedule send", () => {
     expect(screen.getByText(/Gmail may already have sent this email/)).toBeInTheDocument();
     const send = () => screen.getAllByRole("button", { name: "Send", exact: true }).at(-1);
     expect(send()).toBeDisabled();
-    // This tab took it back itself, so it holds the only copy: the answer is
-    // local (the server already used the copy up; the sweep closes the alert).
+    // The answer is recorded on the email (as the tab that took it back)
+    // before the guard clears; a failed request keeps it.
+    const base = fetch.getMockImplementation();
+    let checkFails = true;
+    fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/sent-check") && checkFails
+      ? response({ error: "down" }, 500) : base(input, options)));
+    fireEvent.click(screen.getByRole("button", { name: "Not in Sent" }));
+    expect((await screen.findAllByText("Could not record the check. Try again in a moment.")).length).toBeGreaterThan(0);
+    expect(send()).toBeDisabled();
+    checkFails = false;
     fireEvent.click(screen.getByRole("button", { name: "Not in Sent" }));
     await waitFor(() => expect(send()).not.toBeDisabled());
-    expect(posts("/sent-check")).toHaveLength(0);
+    expect(JSON.parse(posts("/queued-1/sent-check").at(-1)[1].body)).toEqual({ inSent: false, takenBack: true });
     expect(screen.getByLabelText(/^Message/)).toHaveValue("Saved text");
   });
 

@@ -345,6 +345,42 @@ jest.setTimeout(30000);
     expect(await call('POST', `/scheduled/${unclear}/sent-check`, { inSent: false })).toMatchObject({ status: 409, body: { status: 'cancelled' } });
   });
 
+  test('with the gate off, queued emails stay listed and can be cancelled; nothing new is queued', async () => {
+    const { body } = await queue();
+    delete process.env.GATE_EMAIL_SEND_LATER;
+    expect((await call('GET', '/scheduled')).body).toMatchObject({ enabled: false, emails: [expect.objectContaining({ id: body.scheduled.id })] });
+    expect((await cancel(body.scheduled.id)).body.draft).toMatchObject({ draftText: 'Hi\nthere' });
+    expect((await queue()).status).toBe(404);
+  });
+
+  test('a taken-back email that may have gone out keeps its alert until the Sent check is recorded', async () => {
+    const alertOpen = async (id) => (await database('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`scheduled-email:${id}`]).first()).done_at === null;
+    const { body } = await queue();
+    await makeDue(body.scheduled.id);
+    gmail.sendMessage.mockRejectedValue(Object.assign(new Error('timeout'), { providerOutcome: { outcomeUnknown: true } }));
+    await sendDueScheduledEmails();
+    expect((await cancel(body.scheduled.id)).body.draft).toMatchObject({ mayHaveSent: true });
+    await sendDueScheduledEmails();
+    expect(await alertOpen(body.scheduled.id)).toBe(true);
+    // Without takenBack the server refuses: this row was taken back.
+    expect((await call('POST', `/scheduled/${body.scheduled.id}/sent-check`, { inSent: false })).status).toBe(409);
+    expect((await call('POST', `/scheduled/${body.scheduled.id}/sent-check`, { inSent: false, takenBack: true })).status).toBe(200);
+    expect((await call('POST', `/scheduled/${body.scheduled.id}/sent-check`, { inSent: false, takenBack: true })).status).toBe(200);
+    expect((await call('GET', '/scheduled')).body.emails[0]).toMatchObject({ status: 'cancelled', mayHaveSent: false });
+    await sendDueScheduledEmails();
+    expect(await alertOpen(body.scheduled.id)).toBe(false);
+  });
+
+  test('job health: a success never hides a failure of the same scheduled minute', async () => {
+    const health = () => database('job_health').where({ job_name: 'fence-fixture' }).first();
+    const minute = Math.floor(Date.now() / 60000) * 60000;
+    await recordLeaseFreeJobEnd('fence-fixture', minute + 1000, new Error('fast failure'));
+    // A slightly late replica of the same minute starts after that failure finished.
+    await recordLeaseFreeJobEnd('fence-fixture', Date.now() + 5, null);
+    expect(await health()).toMatchObject({ last_status: 'failed' });
+    await database('job_health').del();
+  });
+
   test('reconcile still settles a key with the gate off (it sends nothing)', async () => {
     delete process.env.GATE_EMAIL_SEND_LATER;
     expect((await call('POST', '/schedule/reconcile', { clientKey: randomUUID() })).body).toEqual({ success: true, scheduled: null });
