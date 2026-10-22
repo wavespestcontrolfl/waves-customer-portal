@@ -448,7 +448,13 @@ function mayExecuteWithoutCard(toolName, input = {}, taint = null, grounding = n
 // path (customer edits, create_customer and the other exempt tools) asks executesWithoutCard
 // or mayExecuteWithoutCard, so this flag cards them all (Codex #6369 r15).
 function noteSameNameContext(taint, taskContext) {
-  if (taint && ibTargetRulesV2Live() && (taskContext?.candidates?.length || 0) > 1) taint.sameNameCandidates = true;
+  if (taint && ibTargetRulesV2Live() && (taskContext?.candidates?.length || 0) > 1) {
+    taint.sameNameCandidates = true;
+    // The reply is then followed by a text-only "yes" as readily as a button tap, whatever the
+    // group kind (Codex #6369 r22): the thread marker is left whenever more than one candidate
+    // row reached the model, not only when buttons were shown.
+    taint.sameNameEmitted = true;
+  }
 }
 
 // Does the final response show same-name choice buttons: a button list that is actually

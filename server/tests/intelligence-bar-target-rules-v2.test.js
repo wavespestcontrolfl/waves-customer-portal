@@ -665,6 +665,7 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     const taint = OwnerDirect.newRequestTaint([]);
     OwnerDirect.noteSameNameContext(taint, owner);
     expect(taint.sameNameCandidates).toBe(true);
+    expect(OwnerDirect.sameNameMarkerNeeded(taint)).toBe(true); // the reply leaves the thread marker (r22)
     const grounding = OwnerDirect.targetGrounding(owner);
     const edit = { customer_id: id(100), updates: { phone: '941-555-0150' } };
     expect(OwnerDirect.executesWithoutCard('update_customer', edit, null, taint, grounding)).toBe(false);
@@ -701,13 +702,12 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(resolved.candidates.every(c => c.choice_label === undefined && c.last_visit === undefined)).toBe(true);
     const owner = Context.ownerDirectContext(resolved);
     expect(owner.sameNameNote).toBeUndefined();
-    // Any context with more than one candidate row cards every write (Codex #6369 r20); the thread
-    // marker stays same-name-only, so these rows leave none.
+    // Any context with more than one candidate row cards every write (Codex #6369 r20) and leaves the
+    // thread marker (r22); no choice buttons are shown for these rows, so no labels match.
     const taint = OwnerDirect.newRequestTaint([]);
     OwnerDirect.noteSameNameContext(taint, owner);
     expect(taint.sameNameCandidates).toBe(true);
-    OwnerDirect.markSameNameChoices(taint, owner, ['Alice Example, Venice', 'Bob Sample, Osprey']);
-    expect(OwnerDirect.sameNameMarkerNeeded(taint)).toBe(false);
+    expect(OwnerDirect.sameNameMarkerNeeded(taint)).toBe(true);
     // Two rows of ONE typed name still get the note, the labels and the taint.
     customers = sameName(2);
     const dupes = await ask('update Pat Example notes');
@@ -1188,6 +1188,30 @@ describe('same-name choice marker on the thread (Codex #6369 r16)', () => {
     const third = await load(false);
     expect(third.sameNameCandidates).toBeUndefined();
     expect(OwnerDirect.executesWithoutCard('update_customer', edit, null, third, grounding)).toBe(true);
+  });
+
+  test('bare name with two different full names: the marker is persisted, a text-only "yes" within 30 minutes is carded, later it is direct, a single candidate leaves none (Codex #6369 r22)', async () => {
+    process.env[ON] = 'true';
+    const two = { candidates: [{ customer_id: id(100), label: 'Pat Example' }, { customer_id: id(101), label: 'Pat Sample' }] };
+    const grounding = OwnerDirect.targetGrounding({ targets: [], typedCustomerIds: [], page: { ids: { customer_id: id(100) } } });
+    const viewedEdit = { customer_id: id(100), updates: { phone: '941-555-0150' } };
+    // Request 1: more than one candidate row reached the model, no buttons shown: the marker is left.
+    const first = await load(false);
+    OwnerDirect.noteSameNameContext(first, two);
+    OwnerDirect.markSameNameChoices(first, two, null);
+    expect(OwnerDirect.sameNameMarkerNeeded(first)).toBe(true);
+    // Request 2: a text-only follow-up ("yes") within 30 minutes finds the marker: every write is carded.
+    const followUp = await load(true);
+    expect(followUp.sameNameCandidates).toBe(true);
+    expect(OwnerDirect.executesWithoutCard('update_customer', viewedEdit, null, followUp, grounding)).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('create_customer', { first_name: 'Sam', last_name: 'Newcomer' }, null, followUp, grounding)).toBe(false);
+    // More than 30 minutes later the check is false (the SQL age bound): direct again.
+    const later = await load(false);
+    expect(OwnerDirect.executesWithoutCard('update_customer', viewedEdit, null, later, grounding)).toBe(true);
+    // A single-candidate request leaves no marker.
+    const single = OwnerDirect.newRequestTaint([]);
+    OwnerDirect.noteSameNameContext(single, { candidates: [{ customer_id: id(100) }] });
+    expect(OwnerDirect.sameNameMarkerNeeded(single)).toBe(false);
   });
 
   test('an unreadable thread fails closed; gate off or no thread id ignores the marker', async () => {
