@@ -3718,6 +3718,42 @@ postgres('SMS commitments on PostgreSQL', () => {
       });
     });
 
+    test.each([['first', 'second'], ['second', 'first']])('the shared alert says "can\'t tell" whichever promise is scanned first (%s uncertain, then %s)', async (uncertainOne) => {
+      await mockPg('sms_log').where({ id: message.id }).update({ direction: 'outbound', message_type: 'manual', admin_user_id: STAFF, status: 'sent',
+        from_phone: message.to_phone, to_phone: message.from_phone, message_body: 'Adam will be out there and will call you' });
+      Object.assign(message, { direction: 'outbound', message_body: 'Adam will be out there and will call you' });
+      const promiseContext = { basis: 'promise', property_id: null, property_ambiguous: true, customer_id: message.customer_id, source_at: message.created_at };
+      const a = await addCommitment({ kind: 'other', description: 'will be out there', sms_context: promiseContext });
+      const b = await addCommitment({ kind: 'other', description: 'will call you', sms_context: promiseContext });
+      const unsure = uncertainOne === 'first' ? a : b;
+      await refreshSmsCommitments({ conn: mockPg, now: now(), verifyThread: async () => null,
+        verify: async (row) => ({ verdict: row.id === unsure.id ? 'uncertain' : 'open' }) });
+      // However the rows were scanned, the last copy for the one source alert is "can't tell".
+      const last = NotificationService.notifyAdmin.mock.calls.at(-1);
+      expect(last[3].dedupeKey).toBe(`sms-commitment-source:${message.id}`);
+      expect(last[3].metadata.verification).toBe('uncertain');
+      expect(last[2]).toContain("can't tell if it was done");
+    });
+
+    test('the refreshed shared alert reads a scheduled text as its actual delivery (time and words)', async () => {
+      await mockPg('sms_log').where({ id: message.id }).update({ direction: 'outbound', message_type: 'manual', admin_user_id: STAFF, status: 'sent',
+        from_phone: message.to_phone, to_phone: message.from_phone, message_body: 'queued words' });
+      const deliveredAt = at(6 * 3600000);
+      await mockPg('sms_log').insert({ id: randomUUID(), customer_id: message.customer_id, direction: 'outbound', message_type: 'manual',
+        admin_user_id: STAFF, status: 'sent', from_phone: message.to_phone, to_phone: message.from_phone, message_body: 'Adam will come and will call you',
+        created_at: deliveredAt, metadata: JSON.stringify({ scheduled_sms_log_id: message.id }) });
+      const promiseContext = { basis: 'promise', property_id: null, property_ambiguous: true, customer_id: message.customer_id, source_at: message.created_at };
+      const a = await addCommitment({ kind: 'other', description: 'will come', sms_context: promiseContext });
+      const b = await addCommitment({ kind: 'other', description: 'will call you', sms_context: promiseContext });
+      await staleAlert(`sms-commitment-source:${message.id}`);
+      NotificationService.notifyAdmin.mockClear();
+      await applySmsCommitmentUpdate(mockPg, a.id, { customerId: message.customer_id, action: 'fulfill', reviewedBy: randomUUID() });
+      const [, , , refreshed] = NotificationService.notifyAdmin.mock.calls[0];
+      const when = deliveredAt.toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+      expect(refreshed.detail).toContain(`on ${when} ET`);
+      expect(refreshed.metadata.commitment_ids).toEqual([b.id]);
+    });
+
     test('a non-settling staff update marks the shared source alert read, not done', async () => {
       const a = await addCommitment();
       await addCommitment({ commitment_key: randomUUID() });

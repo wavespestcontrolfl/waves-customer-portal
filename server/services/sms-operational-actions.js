@@ -803,6 +803,53 @@ async function listSmsCommitments(conn, { customerId, limit = 20, offset = 0, no
   return rows.map((row) => ({ ...row, overdue: !!row.due_at && new Date(row.due_at) <= now }));
 }
 
+const stale = (message) => Object.assign(new Error(message), { status: 409 });
+
+// Lock the source row the commitment hangs on and prove the requested profile
+// still owns it (a merge or relink may have moved it while controls were open).
+async function lockCommitmentSource(trx, initial, id, customerId) {
+  if (initial.sms_log_id) {
+    const source = await trx('sms_log').where({ id: initial.sms_log_id }).forUpdate().first();
+    if (source?.customer_id !== customerId) throw stale('SMS follow-up moved; reload this profile');
+    return source.id;
+  }
+  const source = await trx('emails').where({ id: initial.email_id }).forUpdate().first();
+  if (!source) throw stale('Email follow-up moved; reload this profile');
+  const row = await trx('call_commitments').where({ id }).first('email_customer_id');
+  // An ask row's emails.customer_id follows a merge; a staff promise's
+  // SENT row never carries one (email-sync.js never sets it on a SENT
+  // row), so its own email_customer_id does — same rule as refresh.
+  if ((source.customer_id || row?.email_customer_id) !== customerId) throw stale('Email follow-up moved; reload this profile');
+  return source.id;
+}
+
+// The commitment is still this source's, still open, and its lane is on.
+async function assertCommitmentOpen(trx, initial, id, sourceId) {
+  const current = await trx('call_commitments').where({ id }).forUpdate().first();
+  const channel = initial.sms_log_id ? 'SMS' : 'Email';
+  if ((initial.sms_log_id ? current?.sms_log_id : current?.email_id) !== sourceId || current.status !== 'open') {
+    throw stale(`${channel} follow-up changed; reload this profile`);
+  }
+  const gateOpen = initial.sms_log_id ? smsCommitmentsEnabled() : gateEnvValue('GATE_EMAIL_OPERATIONAL_ACTIONS');
+  if (!gateOpen) throw stale(`${channel} follow-up is disabled`);
+}
+
+// Staff settled the promise (dismiss / fulfill): its bell is done, by that
+// person. Any other staff update (an edit, a snooze) leaves the promise
+// open, so the bell is only read.
+// done_by names the workflow and the person (`sms-commitments:<id>`),
+// never a bare person id: the follow-up itself is closed, so the bell
+// Done is not a person's to Reopen (PERSON_DONE_BY_SQL refuses it).
+async function settleCommitmentAlert(trx, initial, id, { action, reviewedBy }) {
+  const settled = ['dismiss', 'fulfill'].includes(action);
+  const channel = initial.sms_log_id ? 'sms' : 'email';
+  const update = settled
+    ? require('./notification-service')._private.doneColumns({ by: `${channel}-commitments:${reviewedBy}`, resolution: `Follow-up ${action === 'dismiss' ? 'dismissed' : 'marked done'} by staff`, keepExisting: true, conn: trx })
+    : { read_at: trx.fn.now() };
+  if (initial.sms_log_id) await closeSmsCommitmentAlerts(trx, { commitmentId: id, smsLogId: initial.sms_log_id, settled }, update);
+  else await trx('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [`email-commitment:${id}`]).update(update);
+}
+
 async function applySmsCommitmentUpdate(conn, id, { customerId, action, note, reviewedBy }) {
   if (!['fulfill', 'dismiss'].includes(action)) throw Object.assign(new Error('SMS follow-up supports Mark done or Dismiss'), { status: 400 });
   if (note !== undefined && typeof note !== 'string') throw Object.assign(new Error('note must be text'), { status: 400 });
@@ -815,57 +862,20 @@ async function applySmsCommitmentUpdate(conn, id, { customerId, action, note, re
     // Refused here rather than risk that path with a null call_log_id
     // (coordinator correction #4, 2026-09-29 — the one deliberate scope
     // limit on this generalization, reported rather than patched around).
-    if (initial.email_id && initial.kind === 'send_reschedule_link') {
-      throw Object.assign(new Error('This follow-up needs staff review outside this panel'), { status: 409 });
-    }
+    if (initial.email_id && initial.kind === 'send_reschedule_link') throw stale('This follow-up needs staff review outside this panel');
     // Match intake/watcher lock order. The requested profile must still own
     // the source after a merge or relink while its controls were open.
     const customer = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first('id');
-    if (!customer) throw Object.assign(new Error('Customer unavailable'), { status: 409 });
-    let sourceId;
-    if (initial.sms_log_id) {
-      const source = await trx('sms_log').where({ id: initial.sms_log_id }).forUpdate().first();
-      if (source?.customer_id !== customerId) throw Object.assign(new Error('SMS follow-up moved; reload this profile'), { status: 409 });
-      sourceId = source.id;
-    } else {
-      const source = await trx('emails').where({ id: initial.email_id }).forUpdate().first();
-      if (!source) throw Object.assign(new Error('Email follow-up moved; reload this profile'), { status: 409 });
-      const row = await trx('call_commitments').where({ id }).first('email_customer_id');
-      // An ask row's emails.customer_id follows a merge; a staff promise's
-      // SENT row never carries one (email-sync.js never sets it on a SENT
-      // row), so its own email_customer_id does — same rule as refresh.
-      const resolvedCustomerId = source.customer_id || row?.email_customer_id;
-      if (resolvedCustomerId !== customerId) throw Object.assign(new Error('Email follow-up moved; reload this profile'), { status: 409 });
-      sourceId = source.id;
-    }
-    const current = await trx('call_commitments').where({ id }).forUpdate().first();
-    if (initial.sms_log_id) {
-      if (current?.sms_log_id !== sourceId || current.status !== 'open') {
-        throw Object.assign(new Error('SMS follow-up changed; reload this profile'), { status: 409 });
-      }
-    } else if (current?.email_id !== sourceId || current.status !== 'open') {
-      throw Object.assign(new Error('Email follow-up changed; reload this profile'), { status: 409 });
-    }
-    const gateOpen = initial.sms_log_id ? smsCommitmentsEnabled() : gateEnvValue('GATE_EMAIL_OPERATIONAL_ACTIONS');
-    if (!gateOpen) throw Object.assign(new Error(initial.sms_log_id ? 'SMS follow-up is disabled' : 'Email follow-up is disabled'), { status: 409 });
+    if (!customer) throw stale('Customer unavailable');
+    const sourceId = await lockCommitmentSource(trx, initial, id, customerId);
+    await assertCommitmentOpen(trx, initial, id, sourceId);
     const { applyHumanUpdate } = require('./call-commitments');
     const updated = await applyHumanUpdate(trx, id, { action, note, reviewedBy });
     // Staff tokens resolve to technicians rows, including the admin role.
     await recordAuditEvent({ trx, critical: true, actor_type: 'technician', actor_id: reviewedBy,
       action: `${initial.sms_log_id ? 'sms' : 'email'}.commitment.${action}`, resource_type: 'call_commitment', resource_id: id,
       metadata: { sms_log_id: initial.sms_log_id || null, email_id: initial.email_id || null, customer_id: customerId } });
-    const settled = ['dismiss', 'fulfill'].includes(action);
-    // Staff settled the promise (dismiss / fulfill): its bell is done, by that
-    // person. Any other staff update (an edit, a snooze) leaves the promise
-    // open, so the bell is only read.
-    // done_by names the workflow and the person (`sms-commitments:<id>`),
-    // never a bare person id: the follow-up itself is closed, so the bell
-    // Done is not a person's to Reopen (PERSON_DONE_BY_SQL refuses it).
-    const alertUpdate = settled
-      ? require('./notification-service')._private.doneColumns({ by: `${initial.sms_log_id ? 'sms' : 'email'}-commitments:${reviewedBy}`, resolution: `Follow-up ${action === 'dismiss' ? 'dismissed' : 'marked done'} by staff`, keepExisting: true, conn: trx })
-      : { read_at: trx.fn.now() };
-    if (initial.sms_log_id) await closeSmsCommitmentAlerts(trx, { commitmentId: id, smsLogId: initial.sms_log_id, settled }, alertUpdate);
-    else await trx('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [`email-commitment:${id}`]).update(alertUpdate);
+    await settleCommitmentAlert(trx, initial, id, { action, reviewedBy });
     return updated;
   });
 }
@@ -1067,14 +1077,15 @@ async function closeSmsCommitmentAlerts(trx, { commitmentId, smsLogId, settled =
 // not ring again (refresh of an OPEN row only; nothing is created).
 async function refreshSharedSmsAlert(trx, smsLogId, remaining) {
   const dedupeKey = smsSourceAlertKey(smsLogId);
-  const source = await trx('sms_log').where({ id: smsLogId }).first(...SOURCE_COLUMNS);
+  const queued = await trx('sms_log').where({ id: smsLogId }).first(...SOURCE_COLUMNS);
+  // The same source the ring used: a scheduled text reads as its actual delivery.
+  const source = queued && await scheduledSourceMessage(trx, queued);
   const shared = source && await trx('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
     .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).forUpdate().first('id');
   if (!shared) return;
   // The state comes from the promises still open, never from the one that just
   // settled (a settled promise's "kept late" must not stay on the alert).
-  const uncertain = remaining.some((item) => item.sms_context?.fulfillment_check?.verdict === 'uncertain');
-  await ringOverdueBell(trx, { row: remaining[0], message: source, verdict: { verdict: uncertain ? 'uncertain' : 'open' },
+  await ringOverdueBell(trx, { row: remaining[0], message: source, verdict: sourceAlertVerdict({ verdict: 'open' }, remaining),
     dedupeKey, promises: remaining, refreshOnly: true });
 }
 
@@ -1184,6 +1195,17 @@ async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceId
   return notification;
 }
 
+// One alert speaks for every promise from the text, so its state is read from
+// all of them, not from whichever row the scan reached first: any promise whose
+// check could not tell makes the alert "can't tell" (uncertain wins over open).
+// `scannedId` is the row being scanned now; its current verdict is `verdict`,
+// the others are read from their stored checks. A kept-late ring stays late.
+function sourceAlertVerdict(verdict, promises, scannedId = null) {
+  if (verdict.late || verdict.verdict === 'uncertain') return verdict;
+  const uncertain = promises.some((item) => item.id !== scannedId && item.sms_context?.fulfillment_check?.verdict === 'uncertain');
+  return uncertain ? { ...verdict, verdict: 'uncertain' } : verdict;
+}
+
 // The overdue alert for a text commitment: one open alert per source text,
 // listing every open promise from it. An alert an older build keyed on one
 // commitment is closed in its favor. `row` is the commitment that triggered the
@@ -1191,7 +1213,8 @@ async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceId
 async function ringSmsSourceBell(trx, { row, message, verdict }) {
   const open = await openSourceCommitments(trx, message.id);
   const promises = [row, ...open.filter((item) => item.id !== row.id)];
-  const notification = await ringOverdueBell(trx, { row, message, verdict, dedupeKey: smsSourceAlertKey(message.id), promises });
+  const notification = await ringOverdueBell(trx, { row, message, verdict: sourceAlertVerdict(verdict, promises, row.id),
+    dedupeKey: smsSourceAlertKey(message.id), promises });
   if (notification?.id) {
     const { doneColumns, openToCloser } = require('./notification-service')._private;
     await openToCloser(trx('notifications').where({ recipient_type: 'admin' })

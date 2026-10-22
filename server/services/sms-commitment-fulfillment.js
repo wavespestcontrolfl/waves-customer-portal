@@ -1063,12 +1063,9 @@ async function holdsPaymentProperty(trx, invoiceId) {
   return true;
 }
 
-// The provider runs outside the transaction. Lock its actual witness and
-// re-read the same evidence before allowing a delayed verdict to close work.
-async function revalidateSmsFulfillment(trx, commitment, message, verdict, now) {
-  // A close from the customer's later thread (sms-commitment-thread-close.js)
-  // cites a text, not a witness record the evidence loader returns.
-  if (verdict.basis === 'thread_confirmation') return require('./sms-commitment-thread-close').revalidateThreadCompletion(trx, commitment, message, verdict, now);
+// Lock the witness rows a fulfilled verdict rests on, without waiting. False
+// when any is gone or busy (the verdict is then retried on a later tick).
+async function lockWitnessRows(trx, commitment, message, verdict) {
   const tables = { sms: 'sms_log', call: 'call_log', email_delivery: 'email_messages',
     // A person's Gmail SENT row (D1's new evidence type) — locked here so a
     // fulfilled verdict citing it can actually commit; without this entry
@@ -1109,6 +1106,16 @@ async function revalidateSmsFulfillment(trx, commitment, message, verdict, now) 
   const estimateId = verdict.record_type === 'estimate' ? verdict.record_id
     : (verdict.linked_record_type === 'estimate' ? verdict.linked_record_id : null);
   if (estimateId && !await holdsLeadOwnership(trx, estimateId, message.customer_id)) return false;
+  return true;
+}
+
+// The provider runs outside the transaction. Lock its actual witness and
+// re-read the same evidence before allowing a delayed verdict to close work.
+async function revalidateSmsFulfillment(trx, commitment, message, verdict, now) {
+  // A close from the customer's later thread (sms-commitment-thread-close.js)
+  // cites a text, not a witness record the evidence loader returns.
+  if (verdict.basis === 'thread_confirmation') return require('./sms-commitment-thread-close').revalidateThreadCompletion(trx, commitment, message, verdict, now);
+  if (!await lockWitnessRows(trx, commitment, message, verdict)) return false;
   const evidence = await loadSmsFulfillmentEvidence(trx, commitment, message, now);
   const eventOnly = verdict.event_only === true;
   if (fulfillmentFingerprint(commitment, evidence, { eventOnly }).evidenceHash !== verdict.evidence_hash) return false;
