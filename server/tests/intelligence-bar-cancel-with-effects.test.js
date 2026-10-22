@@ -250,7 +250,7 @@ describe('cancel_appointment confirm WITH effects replays the Dispatch cancel', 
     mockComputeImpact.mockResolvedValue(legacy);
     const order = [];
     const trx = jest.fn((table) => ({
-      where: (col, val) => ({ forShare: () => ({ first: async () => { order.push(`share:${table}:${col}=${val}`); return { id: val }; } }) }),
+      where: (col, val) => ({ forShare: () => ({ noWait: () => ({ first: async () => { order.push(`share:${table}:${col}=${val}`); return { id: val }; } }) }) }),
     }));
     mockComputeImpact.mockImplementation(async (_id, opts) => { if (opts && opts.conn) order.push('recheck'); return legacy; });
     mockCancelFromBar.mockImplementation(async ({ beforeCommit }) => {
@@ -260,6 +260,31 @@ describe('cancel_appointment confirm WITH effects replays the Dispatch cancel', 
     const result = await executeTool('cancel_appointment', input({ _frozen_cancellation_impact: legacy }), ADMIN);
     expect(result.success).toBe(true);
     expect(order).toEqual(['share:customers:id=cust-1', 'recheck']);
+  });
+
+  test('the legacy customer lock is FOR SHARE NOWAIT; a busy customer fails closed with a try-again result (no preview_changed, nothing cancelled)', async () => {
+    const legacy = { ...FROZEN, legacy_address_fingerprint: 'legacy-fp-1' };
+    mockComputeImpact.mockResolvedValue(legacy);
+    const calls = [];
+    const trx = jest.fn(() => {
+      const q = {
+        where: () => q,
+        forShare: () => { calls.push('forShare'); return q; },
+        noWait: () => { calls.push('noWait'); return q; },
+        first: async () => { throw Object.assign(new Error('could not obtain lock on row'), { code: '55P03' }); },
+      };
+      return q;
+    });
+    mockCancelFromBar.mockImplementation(async ({ beforeCommit }) => {
+      try { await beforeCommit(trx); } catch (err) { return { status: err.status, json: { error: err.message, code: err.code } }; }
+      return { status: 200, json: { success: true } };
+    });
+    const result = await executeTool('cancel_appointment', input({ _frozen_cancellation_impact: legacy }), ADMIN);
+    expect(calls).toEqual(['forShare', 'noWait']);
+    expect(result.code).toBe('customer_busy_cancel');
+    expect(result.error).toMatch(/busy right now.*nothing was cancelled\. Try again in a moment/);
+    expect(result.preview_changed).toBeUndefined();
+    expect(result.success).toBeUndefined();
   });
 
   test('a visit with a stamped address (no legacy fingerprint) takes no customer lock', async () => {

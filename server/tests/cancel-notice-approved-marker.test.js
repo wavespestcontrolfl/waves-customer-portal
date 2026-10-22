@@ -59,8 +59,13 @@ describe('pending_approved is minted only for the approved send and read only by
     expect(jobStatus).toMatch(/\} catch \(claimErr\) \{\s*\n(?:\s*\/\/.*\n)*\s*if \(cancelNoticeApproved\) throw claimErr;/);
   });
 
-  test('an approved text whose claim touched no row is accepted only when the row is terminal / already marked / absent', () => {
-    expect(jobStatus).toMatch(/if \(cancelNoticeApproved && !claimedRows\) \{\s*\n\s*const existing = await sp\('appointment_reminders'\)\.where\(\{ scheduled_service_id: jobId \}\)\.first\('cancellation_notice_state'\);\s*\n\s*if \(existing && !\['suppressed', 'sent', 'pending_approved'\]\.includes\(existing\.cancellation_notice_state\)\) \{\s*\n\s*throw new Error/);
+  test('an approved cancel REPLACES a terminal / approved marker from an earlier cancellation cycle, and aborts on a live older claim', () => {
+    // The claim's WHERE accepts those three states only for an approved cancel (otherwise `false`).
+    expect(jobStatus).toContain("if (cancelNoticeApproved) this.whereIn('cancellation_notice_state', ['suppressed', 'sent', 'pending_approved']);\n                  else this.whereRaw('false');");
+    // A row still unclaimed afterwards holds a live older claim: abort, whatever its state.
+    expect(jobStatus).toMatch(/if \(cancelNoticeApproved && !claimedRows\) \{\s*\n\s*const existing = await sp\('appointment_reminders'\)\.where\(\{ scheduled_service_id: jobId \}\)\.first\('cancellation_notice_state'\);\s*\n\s*if \(existing\) \{\s*\n\s*throw new Error/);
+    // The old allow-list that reused a stale terminal marker is gone.
+    expect(jobStatus).not.toContain("!['suppressed', 'sent', 'pending_approved'].includes(existing.cancellation_notice_state)");
   });
 
   test('the Dispatch handler passes cancelNoticeApproved only for the bar\'s approved text', () => {

@@ -4561,6 +4561,8 @@ const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved card or card request
 // card showed it. The effects are recomputed twice and must match the card: here before the handler runs, and again
 // inside the handler's own cancel transaction right after it locks the visit (nothing new can be minted against a
 // locked visit), so a visit that changed since the card returns preview_changed and nothing is cancelled.
+const CANCEL_CUSTOMER_BUSY_MESSAGE = "This customer's record is busy right now (being edited or merged), so nothing was cancelled. Try again in a moment.";
+
 async function cancelWithEffects(input, actionContext, appt) {
   const { appointment_id, reason } = input;
   const frozen = input._frozen_cancellation_impact;
@@ -4618,13 +4620,21 @@ async function cancelWithEffects(input, actionContext, appt) {
           // A legacy visit with no stamped service address shows (and fingerprints) the customer's primary address.
           // That address lives on the customers row, which the visit lock does not cover, so hold it FOR SHARE (as the
           // bare cancel does) BEFORE the recheck reads it: a concurrent address edit then waits for this cancel to commit.
+          // NOWAIT: this transaction already holds the visit row, and a customer merge locks the customer and then its
+          // visits, so waiting here could deadlock (ABBA). A busy customer fails closed with a try-again result.
           if (frozen.legacy_address_fingerprint && appt.customer_id) {
-            await trx('customers').where('id', appt.customer_id).forShare().first('id');
+            try {
+              await trx('customers').where('id', appt.customer_id).forShare().noWait().first('id');
+            } catch (lockErr) {
+              if (lockErr && lockErr.code === '55P03') throw Object.assign(new Error(CANCEL_CUSTOMER_BUSY_MESSAGE), { status: 409, code: 'customer_busy_cancel', busy: true });
+              throw lockErr;
+            }
           }
           await lockLinkedFollowUps(trx, appointment_id);
           // conn: the handler's cancel transaction, so the estimate deposit ledger lock is held to the commit.
           inLock = await recompute({ piCacheOnly: true, conn: trx });
         } catch (err) {
+          if (err && err.busy) throw err;
           throw Object.assign(new Error(changed.error), { status: 409, code: 'preview_changed', cause: err });
         }
         if (!cancelImpactsMatch(inLock, frozen) || cancelWithEffectsRefusal(inLock)) {
@@ -4687,7 +4697,7 @@ function cancelReplayWarnings(json, sendText) {
 async function cancelReplayResult({ status, json = {} }, { appointment_id, appt, frozen, changed, sendText }) {
   if (status >= 400 || json.success !== true) {
     if (json.code === 'preview_changed') return changed;
-    return { error: json.error || 'The Dispatch cancel was refused — nothing was changed.', ...(json.code ? { code: json.code } : {}), ...(status === 409 ? { preview_changed: true } : {}) };
+    return { error: json.error || 'The Dispatch cancel was refused — nothing was changed.', ...(json.code ? { code: json.code } : {}), ...(status === 409 && json.code !== 'customer_busy_cancel' ? { preview_changed: true } : {}) };
   }
   const customerName = await cancelReceiptName(appt, frozen, appointment_id);
   logger.info(`[intelligence-bar] Cancelled appointment ${appointment_id} via the Dispatch cancel handler`);

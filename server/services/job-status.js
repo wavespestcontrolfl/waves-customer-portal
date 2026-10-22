@@ -667,7 +667,14 @@ async function transitionJobStatus({
             const claimedRows = await sp('appointment_reminders')
               .where({ scheduled_service_id: jobId })
               .where(function claimable() {
-                this.whereNull('cancellation_notice_at').orWhere(function staleLease() {
+                this.whereNull('cancellation_notice_at').orWhere(function priorCycleMarker() {
+                  // A card-approved cancel replaces a terminal / approved marker left by an EARLIER cancellation cycle
+                  // (a restoration whose marker clear was swallowed). This cancel just moved the visit out of a live status
+                  // under its row lock, so no such marker can belong to this cycle; reusing one would leave the new
+                  // approved text with nothing it can claim, and it would be silently skipped.
+                  if (cancelNoticeApproved) this.whereIn('cancellation_notice_state', ['suppressed', 'sent', 'pending_approved']);
+                  else this.whereRaw('false');
+                }).orWhere(function staleLease() {
                   // Singleton leases only (codex r39): a stale SHARED
                   // (series) token stays owned as a group — the sweep
                   // recovers it with the combined copy; stealing one row
@@ -681,10 +688,11 @@ async function transitionJobStatus({
             // The approved text needs its marker (or a terminal state) on the row: when the claim touched nothing because
             // an older pending / pending_notify claim already sits there (a restoration whose marker clear failed), that
             // claim stays eligible for the sweep and would send the live template after a crash. Abort the cancellation.
-            // No reminder row at all is fine: nothing can send.
+            // No reminder row at all is fine: nothing can send. (Terminal / approved markers are replaced above, so a row
+            // still unclaimed here holds a live older claim.)
             if (cancelNoticeApproved && !claimedRows) {
               const existing = await sp('appointment_reminders').where({ scheduled_service_id: jobId }).first('cancellation_notice_state');
-              if (existing && !['suppressed', 'sent', 'pending_approved'].includes(existing.cancellation_notice_state)) {
+              if (existing) {
                 throw new Error('approved cancellation text: an older notice claim holds this reminder, so the approved marker could not be written');
               }
             }
