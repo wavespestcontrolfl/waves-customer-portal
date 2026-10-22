@@ -159,3 +159,60 @@ describe('ProjectReportViewPage Poison Control (owner 2026-09-26)', () => {
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
   });
 });
+
+describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)', () => {
+  const findings = {
+    treatment_address: '100 Sample Way, Testville, FL 34000',
+    lot_block: 'Lot 3',
+    permit_number: 'TEST-PERMIT-1',
+    treatment_date: '2026-06-28',
+    product_name: 'Termidor SC',
+    active_ingredient: 'Fipronil',
+    epa_registration: '7969-210',
+    square_footage: '2450',
+    gallons_applied: '392',
+    concentration_pct: '0.06',
+    applicator_name: 'Alex Tester',
+    applicator_fdacs_id: 'JE000000',
+  };
+
+  it('gate off: the field-grid certificate renders and no sticker', async () => {
+    const { findAllByText, queryByTestId } = renderProjectReport(
+      payload('pre_treatment_termite_certificate', { findings }),
+    );
+    await findAllByText(/Pre-Construction Termite Protection/i);
+    expect(queryByTestId('termite-notice-sticker')).not.toBeInTheDocument();
+  });
+
+  it('gate on: the notice fills the label blanks; slab-day final exterior line stays empty', async () => {
+    const { findByTestId, getByText, queryByText } = renderProjectReport(
+      payload('pre_treatment_termite_certificate', { findings, pretreatStickerReport: true }),
+    );
+    const sticker = await findByTestId('termite-notice-sticker');
+    expect(sticker).toHaveTextContent('Notice of Termite Protection');
+    expect(sticker).toHaveTextContent('06/28/2026');
+    expect(sticker).toHaveTextContent('Termidor SC / Fipronil');
+    expect(sticker).toHaveTextContent('2,450 sq ft');
+    expect(sticker).toHaveTextContent('392 gal');
+    expect(sticker).toHaveTextContent('0.06%');
+    expect(sticker).not.toHaveTextContent('Date of WDO Inspection');
+    // The details block keeps what the label has no blank for.
+    expect(getByText('Treatment Record Details')).toBeInTheDocument();
+    expect(getByText(/EPA Reg\. 7969-210/)).toBeInTheDocument();
+    expect(queryByText('Pre-Construction Termite Protection')).not.toBeInTheDocument();
+  });
+
+  it('gate on: a recorded final exterior visit prints on its own line', async () => {
+    const { findByTestId } = renderProjectReport(payload('pre_treatment_termite_certificate', {
+      pretreatStickerReport: true,
+      findings: {
+        ...findings,
+        final_exterior_date: '2026-09-14',
+        final_exterior_product: 'Termidor SC',
+        final_exterior_active_ingredient: 'Fipronil',
+      },
+    }));
+    const sticker = await findByTestId('termite-notice-sticker');
+    expect(sticker).toHaveTextContent('09/14/2026');
+  });
+});

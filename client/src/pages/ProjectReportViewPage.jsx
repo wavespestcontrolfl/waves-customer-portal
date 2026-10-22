@@ -749,12 +749,23 @@ export default function ProjectReportViewPage() {
           </div>
         )}
 
+        {/* GATE_PRETREAT_STICKER_REPORT: the certificate mirrors the paper
+            Notice of Termite Protection label, with the certificate fields
+            the label has no blank for in a details block under it. */}
+        {isCertificate && data.pretreatStickerReport && (
+          <TermiteNoticeSticker
+            findings={findings}
+            technicianName={data.technicianName}
+            projectDateLabel={projectDateLabel}
+          />
+        )}
         {isCertificate && (
           <CertificateOfCompliance
             findings={findings}
             customerName={data.customerName}
             technicianName={data.technicianName}
             projectDateLabel={projectDateLabel}
+            detailsOnly={Boolean(data.pretreatStickerReport)}
           />
         )}
 
@@ -842,6 +853,209 @@ function AtAGlance({ rows }) {
             <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.35 }}>{value}</div>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * TermiteNoticeSticker — the paper "Notice of Termite Protection" label
+ * (Sticker Mule 5.45″ × 4″, form WV-001) as a document: same blanks in the
+ * same order, filled from the certificate findings, set in the report's own
+ * navy and type (GATE_PRETREAT_STICKER_REPORT). An empty blank prints as an
+ * empty rule, as on paper. The label's "Date of WDO Inspection" blank is for
+ * a later inspector and is left off the web copy. The certificate fields the
+ * label has no blank for render under it (CertificateOfCompliance detailsOnly).
+ */
+function stickerDate(value) {
+  const day = dateOnly(String(value || ''));
+  if (!day) return '';
+  const [y, m, d] = day.split('-');
+  return `${m}/${d}/${y}`;
+}
+
+function stickerMaterials(product, activeIngredient) {
+  return [product, activeIngredient].filter(Boolean).join(' / ');
+}
+
+// "2450" → "2,450 sq ft"; a value the tech typed with its own unit stays as typed.
+function stickerAmount(value, unit) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (!/^\d+(\.\d+)?$/.test(raw)) return raw;
+  return `${Number(raw).toLocaleString('en-US')} ${unit}`;
+}
+
+function StickerBlank({ label, value }) {
+  return (
+    <div style={{ minWidth: 0 }}>
+      <div style={{
+        minHeight: 24,
+        borderBottom: `1px solid ${ESTIMATE_MUTED}`,
+        fontSize: 15,
+        fontWeight: 600,
+        color: ESTIMATE_TEXT,
+        padding: '0 0 4px',
+        wordBreak: 'break-word',
+        fontVariantNumeric: 'tabular-nums',
+      }}>
+        {value || ''}
+      </div>
+      <div style={{
+        fontSize: 11,
+        fontWeight: 600,
+        letterSpacing: 0.6,
+        textTransform: 'uppercase',
+        color: ESTIMATE_MUTED,
+        marginTop: 5,
+      }}>
+        {label}
+      </div>
+    </div>
+  );
+}
+
+function TermiteNoticeSticker({ findings, technicianName, projectDateLabel }) {
+  const f = findings || {};
+  const extraApplications = certificateAdditionalApplications(f);
+  const product1 = f.product_name === 'Other' && f.product_name_other ? f.product_name_other : f.product_name;
+  // Line 1 is application 1. A combined job names the other products in the
+  // details block below, so the label says where to look.
+  const materials1 = [
+    stickerMaterials(product1, f.active_ingredient),
+    extraApplications.length ? `(+${extraApplications.length} more below)` : '',
+  ].filter(Boolean).join(' ');
+  const concentration = String(f.concentration_pct || '').trim().replace(/%$/, '');
+  const navy = ESTIMATE_BUTTON_BG;
+
+  return (
+    <div data-testid="termite-notice-sticker" style={{
+      marginTop: 16,
+      background: B.white,
+      border: `1px solid ${ESTIMATE_BORDER}`,
+      borderRadius: 16,
+      overflow: 'hidden',
+      fontFamily: FONT_BODY,
+      color: ESTIMATE_TEXT,
+    }}>
+      <style>{`
+        .termite-sticker-row { display: grid; gap: 18px 24px; }
+        .termite-sticker-r3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+        .termite-sticker-r12 { grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); }
+        .termite-sticker-r11 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .termite-sticker-r5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+        @media (max-width: 600px) {
+          .termite-sticker-r3, .termite-sticker-r12, .termite-sticker-r11 { grid-template-columns: minmax(0, 1fr); }
+          .termite-sticker-r5 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        }
+        @media print {
+          [data-testid="termite-notice-sticker"] { break-inside: avoid; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+        }
+      `}</style>
+
+      <div style={{
+        background: navy,
+        borderBottom: `4px solid ${B.wavesBlue}`,
+        color: B.white,
+        padding: '22px 24px 20px',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 16,
+      }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: 1.4, textTransform: 'uppercase', opacity: 0.8 }}>
+            Waves Pest Control, LLC
+          </div>
+          <div style={{
+            fontFamily: FONTS.serif,
+            fontSize: 'clamp(22px, 4.6vw, 30px)',
+            fontWeight: 500,
+            lineHeight: 1.15,
+            marginTop: 6,
+          }}>
+            Notice of Termite Protection
+          </div>
+          <div style={{ fontSize: 13, opacity: 0.85, marginTop: 8, lineHeight: 1.4 }}>
+            FL Building Code 1816.1.7 • FL Statutes 482.226 • FDACS Lic. {WAVES_FDACS_LICENSE_NUMBER}
+          </div>
+        </div>
+        <img src="/waves-logo.png" alt="Waves" style={{ height: 52, flexShrink: 0 }} />
+      </div>
+
+      <div style={{ padding: '24px 24px 8px', display: 'flex', flexDirection: 'column', gap: 20 }}>
+        <div className="termite-sticker-row termite-sticker-r3">
+          <StickerBlank label="Lot #" value={[f.lot_block, f.subdivision].filter(Boolean).join(' · ')} />
+          <StickerBlank label="Permit #" value={f.permit_number} />
+          <StickerBlank label="Builder / Contractor" value={f.builder_contractor} />
+        </div>
+        <div className="termite-sticker-row termite-sticker-r12">
+          <StickerBlank
+            label="Date of Initial Treatment"
+            value={f.treatment_date ? stickerDate(f.treatment_date) : projectDateLabel}
+          />
+          <StickerBlank label="Materials Used / Active Ingredient" value={materials1} />
+        </div>
+        <div className="termite-sticker-row termite-sticker-r12">
+          <StickerBlank label="Date of Final Ext. Treatment" value={stickerDate(f.final_exterior_date)} />
+          <StickerBlank
+            label="Materials Used / Active Ingredient"
+            value={stickerMaterials(f.final_exterior_product, f.final_exterior_active_ingredient)}
+          />
+        </div>
+        <div className="termite-sticker-row termite-sticker-r11">
+          <StickerBlank label="Address" value={f.treatment_address} />
+          <StickerBlank label="Wood Destroying Organism Treated For" value={f.wdo_target} />
+        </div>
+        <div className="termite-sticker-row termite-sticker-r5">
+          <StickerBlank label="Sq. Ft. Treated" value={stickerAmount(f.square_footage, 'sq ft')} />
+          <StickerBlank label="Gallons Applied" value={stickerAmount(f.gallons_applied, 'gal')} />
+          <StickerBlank label="Concentration" value={concentration ? `${concentration}%` : ''} />
+          <StickerBlank label="Applicator's Name" value={f.applicator_name || technicianName} />
+          <StickerBlank label="Renewal Due By" value={f.renewal_due} />
+        </div>
+      </div>
+
+      <div style={{ padding: '12px 24px 22px' }}>
+        <div style={{
+          fontSize: 14,
+          lineHeight: 1.55,
+          color: ESTIMATE_BODY,
+          padding: '14px 16px',
+          borderRadius: 10,
+          background: ESTIMATE_INPUT_BG,
+          border: `1px solid ${ESTIMATE_INPUT_BORDER}`,
+        }}>
+          This property has been treated for the prevention of subterranean termites in accordance with Florida
+          Building Code 1816 and rules established by the Florida Department of Agriculture &amp; Consumer Services,
+          placed under a retreatment contract renewable by payment of an annual fee. The owner is hereby advised to
+          have the property inspected annually by Waves Pest Control, LLC.
+        </div>
+        <div style={{ fontSize: 13, fontWeight: 600, color: B.red, marginTop: 10, lineHeight: 1.45 }}>
+          It is a violation of Florida Statutes 482.226 for anyone other than the property owner to remove this notice.
+        </div>
+      </div>
+
+      <div style={{
+        background: navy,
+        color: B.white,
+        padding: '16px 24px',
+        display: 'flex',
+        flexWrap: 'wrap',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: '8px 20px',
+      }}>
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 700 }}>Activate your termite warranty</div>
+          <div style={{ fontSize: 13, opacity: 0.8, marginTop: 2 }}>
+            Waves Pest Control, LLC • 13649 Luxe Ave #110, Bradenton, FL 34211
+          </div>
+        </div>
+        <div style={{ fontSize: 15, fontWeight: 600, textAlign: 'right' }}>
+          <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: 'inherit', textDecoration: 'none', whiteSpace: 'nowrap' }}>{WAVES_PHONE_DISPLAY}</a>
+          <br />
+          <a href="https://www.wavespestcontrol.com/register" target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none', whiteSpace: 'nowrap' }}>wavespestcontrol.com/register</a>
+        </div>
       </div>
     </div>
   );
@@ -937,7 +1151,7 @@ function CertificateFieldGrid({ fields, compact }) {
   );
 }
 
-function CertificateOfCompliance({ findings, customerName, technicianName, projectDateLabel }) {
+function CertificateOfCompliance({ findings, customerName, technicianName, projectDateLabel, detailsOnly = false }) {
   const f = findings || {};
   const applications = [
     certificateApplicationLines(f),
@@ -974,7 +1188,19 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
   // Single-application certificates keep the original one-grid layout; a
   // combined job moves the per-product lines into the Application blocks
   // below so each product prints its own chemistry and coverage.
-  const fields = [
+  // Under the sticker (detailsOnly) the grid keeps only what the label has
+  // no blank for; the label already prints lot, permit, builder, dates,
+  // address, organism, sq ft, gallons, concentration and renewal date.
+  const fields = detailsOnly ? [
+    ['Time of treatment', formatAppointmentTime(f.treatment_time)],
+    ['Method of treatment', methodValue],
+    ...(multiApplication ? [] : [
+      ['Product used', productLine],
+      ['Coverage', coverageLine],
+    ]),
+    ['Applicator', applicatorLine],
+    ['Warranty / retreatment bond', f.warranty_type],
+  ] : [
     ['Treatment address', addressValue],
     ['Lot / Block / Subdivision', lotLine],
     ['Building permit #', f.permit_number],
@@ -1025,18 +1251,20 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
             lineHeight: 1.2,
             letterSpacing: 0,
           }}>
-            Pre-Construction Termite Protection
+            {detailsOnly ? 'Treatment Record Details' : 'Pre-Construction Termite Protection'}
           </div>
-          <div style={{
-            fontSize: 14,
-            color: ESTIMATE_BODY,
-            marginTop: 8,
-            lineHeight: 1.35,
-          }}>
-            Required by FL Building Code 1816.1.7 • FL Statutes 482.226 • FDACS LIC. {WAVES_FDACS_LICENSE_NUMBER}
-          </div>
+          {!detailsOnly && (
+            <div style={{
+              fontSize: 14,
+              color: ESTIMATE_BODY,
+              marginTop: 8,
+              lineHeight: 1.35,
+            }}>
+              Required by FL Building Code 1816.1.7 • FL Statutes 482.226 • FDACS LIC. {WAVES_FDACS_LICENSE_NUMBER}
+            </div>
+          )}
         </div>
-        <img src="/waves-logo.png" alt="Waves" style={{ height: 32, flexShrink: 0 }} />
+        {!detailsOnly && <img src="/waves-logo.png" alt="Waves" style={{ height: 32, flexShrink: 0 }} />}
       </div>
 
       {/* Property + customer header */}
@@ -1174,6 +1402,8 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
         </div>
       )}
 
+      {/* The sticker above already carries the warranty footer. */}
+      {detailsOnly ? <div style={{ height: 24 }} /> : (
       <div style={{
         margin: '16px 24px 24px',
         background: ESTIMATE_BUTTON_BG,
@@ -1219,6 +1449,7 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
           Waves Pest Control, LLC • 13649 Luxe Ave #110, Bradenton, FL 34211
         </div>
       </div>
+      )}
 
       {/* Form-ID stamp — bottom right, matches v10 "WV-001" treatment */}
       <div style={{

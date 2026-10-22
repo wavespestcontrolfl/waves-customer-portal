@@ -1155,6 +1155,13 @@ const PROJECT_TYPES = {
           { key: 'gallons_applied', label: 'Gallons of finished solution applied', type: 'text', disableDictation: true },
         ],
       },
+      // Sticker blank "Date of Final Ext. Treatment" (owner 2026-10-22). The
+      // final exterior is a later visit after grading, so these stay optional
+      // and never gate the send; the office fills them on the sent
+      // certificate when that visit is done.
+      { key: 'final_exterior_date', label: 'Date of final exterior treatment', type: 'date', section: 'Final exterior treatment (later visit; leave blank on slab day)' },
+      { key: 'final_exterior_product', label: 'Final exterior product', type: 'product_search', section: 'Final exterior treatment (later visit; leave blank on slab day)', placeholder: 'Search product catalog or type product name', options: ['Termidor SC', 'Talstar P', 'Premise 2', 'Trelona ATBB', 'Bora-Care'] },
+      { key: 'final_exterior_active_ingredient', label: 'Final exterior active ingredient', type: 'text', section: 'Final exterior treatment (later visit; leave blank on slab day)', placeholder: 'e.g. fipronil', disableDictation: true },
       { key: 'applicator_name', label: "Applicator's printed name", type: 'text', section: 'Applicator certification', disableDictation: true },
       { key: 'applicator_fdacs_id', label: 'Applicator FDACS ID #', type: 'text', section: 'Applicator certification', disableDictation: true },
       // FBC 1816.1.7 requires an "authorized signature of the licensed
