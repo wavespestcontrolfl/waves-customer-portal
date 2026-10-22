@@ -169,9 +169,11 @@ const stampedPayerOf = (error) => /^payer_billed:([^:]+)/.exec(String(error || '
 // and for an invoice in ANY status: ownerTransitions skips terminal invoices (a voided one), but an unvoid restores a draft and
 // then withdraws it from the customer when this answer is a payer, so a caller deciding whether a restore is safe needs the answer
 // before the restore. A SUPERSET of what the withdrawal acts on (it also skips annual-prepay and statement invoices).
+// An invoice with no visit answers through the customer default while GATE_BILL_TO_NO_VISIT_INVOICES is on (the withdrawal
+// moves it then too).
 async function liveVisitPayerOf(database, invoice) {
   const visitId = await linkedVisitOf(invoice, database);
-  if (!visitId) return null;
+  if (!visitId && !coversNoVisit()) return null;
   const { state, activeBefore } = await readOwnerState(database, invoice, visitId, { lock: false, pending: null });
   return ownerOf(state, activeBefore);
 }

@@ -819,11 +819,9 @@ async function unvoidObligationReason(conn, invoice) {
   if (lines.some((li) => li && li[MEMBERSHIP_DUES_LINE_KEY])) return "membership_dues";
   if (lines.some((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()))) return "setup_fee";
   // From the records the restore also touches.
-  if (invoice.scheduled_service_id || invoice.service_record_id) {
-    const Linked = require("./visit-linked-invoice-withdrawal");
-    // Not ownerTransitions: that skips a VOID invoice, which is exactly what the card is asked about at preview.
-    if (await Linked.liveVisitPayerOf(conn, invoice)) return "linked_payer_owner";
-  }
+  // Not ownerTransitions: that skips a VOID invoice, which is exactly what the card is asked about at preview. An invoice
+  // with no visit answers through the customer default when the withdrawal covers it (GATE_BILL_TO_NO_VISIT_INVOICES).
+  if (invoice.customer_id && await require("./visit-linked-invoice-withdrawal").liveVisitPayerOf(conn, invoice)) return "linked_payer_owner";
   if (await conn("sms_log")
     .whereRaw("metadata->>'invoice_id' = ?", [String(invoice.id)])
     .where(function queuedOrFinalizing() {
