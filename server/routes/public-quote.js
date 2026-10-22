@@ -159,10 +159,16 @@ function resolveRealLotSqFt({ enrichedLotSqFt, lotSqFt, lotSizeConfirmed } = {})
 // `footprintUnknown` suppression (an aggregate parcel whose story count is
 // unknown keeps the summed homeSqFt but no footprint) yields NO trusted
 // footprint rather than a reconstruction from that sum (Codex r13 P1).
-function trustedTreeShrubFootprintSqFt(trustedTurf = {}, bodyStories) {
+// Every lookup footprint is living area ÷ stories, so the story count must
+// itself be trusted: 'default' means nobody knew and the lookup fell back to
+// 1, which would pass a whole multi-story home off as its footprint (Codex
+// security r13). The body's story count is never consulted.
+const TRUSTED_STORIES_SOURCES = new Set(['ai', 'permit', 'verified', 'manual']);
+function trustedTreeShrubFootprintSqFt(trustedTurf = {}) {
   const t = trustedTurf && typeof trustedTurf === 'object' ? trustedTurf : {};
   if (t.footprintUnknown === true) return null;
-  const stories = Math.max(1, Math.min(3, Number(t.stories) || Number(bodyStories) || 1));
+  if (!TRUSTED_STORIES_SOURCES.has(t.storiesSource)) return null;
+  const stories = Math.max(1, Math.min(3, Number(t.stories) || 1));
   const perStory = (v) => Math.max(1, Math.round(Number(v) / stories));
   if (Number(t.footprint) > 0) return Number(t.footprint);
   if (Number(t.footprintSqFt) > 0) return Number(t.footprintSqFt);
@@ -1573,7 +1579,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       return null;
     })();
     const buildingSizeMeasured = realFootprintSqFt != null;
-    const treeShrubFootprintSqFt = trustedTreeShrubFootprintSqFt(trustedTurf, stories);
+    const treeShrubFootprintSqFt = trustedTreeShrubFootprintSqFt(trustedTurf);
     let engineInput = {
       homeSqFt: sqft,
       // Tree & Shrub open-parcel basis: the server-measured footprint, never
