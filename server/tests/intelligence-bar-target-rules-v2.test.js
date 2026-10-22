@@ -806,6 +806,20 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(await grounded('reschedule Alice Sample to next Tuesday at 3pm')).toEqual([id(101)]);
     expect(await grounded("update Alice Sample's phone to 941-555-0150")).toEqual([id(101)]);
     expect(await viewingBob('update the phone and removing the notes')).toBe(false);
+    // A replacement value ends at an inflected verb too, so the text after it is checked (r40).
+    expect(await viewingBob("update Bob Example's phone to 941-555-0101 and removing Jhon Smith's notes")).toBe(false);
+    expect(await viewingBob('update the phone to 941-555-0101, then cancelling the visit')).toBe(false);
+    expect(await viewingBob('update the notes to gate code 5')).toBe(true);
+  });
+
+  test('gate on: a city that narrows the group is a pick only when a typed phone does not name an outsider (Codex #6369 r40)', async () => {
+    process.env[ON] = 'true';
+    customers = [...sameName(3), { ...sameName(1)[0], id: id(900), first_name: 'Lee', last_name: 'Other', city: 'Nokomis', phone: '9415559000', email: 'lee@example.test', hiddenFromName: true }];
+    const agree = Context.ownerDirectContext(await ask('update Pat Example in Venice notes'));
+    expect(agree.sameNameNote).toMatch(/picks one of the customers/);
+    const outsider = Context.ownerDirectContext(await ask('update Pat Example in Venice 941-555-9000 notes'));
+    expect(outsider.sameNameNote).toMatch(/names more than one customer/);
+    expect(outsider.sameNameNote).not.toMatch(/picks one of the customers/);
   });
 
   test('gate on: a choice label holds at most five name words, the longest name the lookup resolves (Codex #6369 r39)', () => {

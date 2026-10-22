@@ -617,7 +617,15 @@ function verbForm(word, verbs = ACTION_VERBS) {
 }
 const OPERATION_STARTS = new Set(['qqsep', 'and', 'then', 'also', 'please', 'to']);
 const VALUE_START_RE = /\b(?:name|address|email(?:\s+address)?|phone(?:\s+number)?|mobile(?:\s+(?:phone|number))?|cell(?:\s+(?:phone|number))?|number|label|notes?|instructions|message|contact)\s+(?:to|as|is|=)\s+|:/i;
-const VALUE_END_RE = new RegExp(`(?:[;\\n,]|\\b(?:and|then|also)\\b)\\s*(?:(?:please|also|then)\\s+)*(?=(?:${[...ACTION_VERBS].join('|')})\\b)`, 'i');
+// A value ends at a separator followed by an action verb in ANY inflection ("and removing ..."),
+// the same verbForm the compound count uses (Codex #6369 r40).
+const VALUE_SEPARATOR_RE = /(?:[;\n,]|\b(?:and|then|also)\b)\s*(?:(?:please|also|then)\s+)*([\p{L}]+)/giu;
+function valueEnd(tail) {
+  for (const match of tail.matchAll(VALUE_SEPARATOR_RE)) {
+    if (verbForm(match[1].toLowerCase())) return match.index + match[0].length - match[1].length;
+  }
+  return -1;
+}
 
 function withoutValues(text) {
   let rest = text.replace(/“[^”]*”|"[^"]*"/g, ' ');
@@ -627,7 +635,7 @@ function withoutValues(text) {
     if (!start) break;
     kept += `${rest.slice(0, start.index)} `;
     const tail = rest.slice(start.index + start[0].length);
-    const end = tail.search(VALUE_END_RE);
+    const end = valueEnd(tail);
     rest = end < 0 ? '' : tail.slice(end);
   }
   return kept + rest;
@@ -1629,6 +1637,11 @@ function sameNameNote(context) {
   // pick: no second round of choices.
   const typed = new Set((context.typedCustomerIds || []).map(String));
   const picked = rows.filter(row => typed.has(String(row.customer_id)));
+  // A pick only when EVERY typed identifier agrees on that one row: a phone or email that names a
+  // customer outside the group contradicts it (Codex #6369 r40).
+  if (picked.length === 1 && typed.size > picked.length) {
+    return { sameNameNote: `The owner's message names more than one customer: a name or city that fits ${picked[0].label} and a phone number or email that belongs to someone else. Do not guess. Ask the owner which customer they mean.` };
+  }
   if (picked.length === 1) {
     return { sameNameNote: `The owner's message picks one of the customers who share this name: ${picked[0].label}${safeChoiceCity(picked[0].city) ? `, ${safeChoiceCity(picked[0].city)}` : ''} (customer_id ${picked[0].customer_id}). Use that customer. Do not offer choices again.` };
   }
