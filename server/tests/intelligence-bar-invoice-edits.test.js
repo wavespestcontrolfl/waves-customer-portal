@@ -308,6 +308,44 @@ describe('edit_invoice card', () => {
     expect(a.new_total).toBe('$174.00');
   });
 
+  test('the same line added by two successive confirmed edits persists distinct ids (never a duplicate client_id)', async () => {
+    const input = { line_changes: [{ description: 'Wasp nest removal', unit_price: 75 }] };
+    const first = await run('edit_invoice', input);
+    const firstId = first._body.line_items[2].client_id;
+    // Stable while the invoice is unchanged: a re-derive at Confirm gives the same body and pin.
+    expect((await run('edit_invoice', input))._version).toEqual(first._version);
+    // The first edit lands; an identical addition is asked for again.
+    setInvoice({ line_items: first._body.line_items, updated_at: new Date('2099-01-05T00:00:00Z') });
+    const second = await run('edit_invoice', input);
+    const secondId = second._body.line_items[3].client_id;
+    expect(secondId).not.toBe(firstId);
+    expect(secondId).toMatch(/^li_bar_[0-9a-f]{12}$/);
+    const ids = second._body.line_items.map((li) => li.client_id);
+    expect(new Set(ids).size).toBe(ids.length);
+    // The second addition is also stable between its preview and its Confirm.
+    Invoices.editInvoiceFromBar.mockResolvedValueOnce({ status: 200, json: { id: INV, status: 'sent', total: '279.00' } });
+    const done = await confirm('edit_invoice', second, input);
+    expect(done.success).toBe(true);
+    expect(Invoices.editInvoiceFromBar.mock.calls[0][0].body.line_items[3].client_id).toBe(secondId);
+    // A third, fourth... keep resolving to free ids.
+    setInvoice({ line_items: second._body.line_items, updated_at: new Date('2099-01-06T00:00:00Z') });
+    const third = await run('edit_invoice', input);
+    const thirdIds = third._body.line_items.map((li) => li.client_id);
+    expect(new Set(thirdIds).size).toBe(thirdIds.length);
+  });
+
+  test('two identical lines added in one edit get distinct ids; an id matching a line this edit removes is still not reused', async () => {
+    const twice = await run('edit_invoice', { line_changes: [{ description: 'Gate repair', unit_price: 20 }, { description: 'Gate repair', unit_price: 20 }] });
+    const ids = twice._body.line_items.map((li) => li.client_id);
+    expect(new Set(ids).size).toBe(ids.length);
+    // Seed the id the next identical addition would take on a line this edit removes: it must move on to a free one.
+    const probe = await run('edit_invoice', { line_changes: [{ description: 'Gate repair', unit_price: 20 }] });
+    const wouldBe = probe._body.line_items[2].client_id;
+    setInvoice({ line_items: [...state.invoices[0].line_items, { client_id: wouldBe, description: 'Old gate repair', quantity: 1, unit_price: 20, amount: 20 }] });
+    const next = await run('edit_invoice', { line_changes: [{ line_number: 3, remove: true }, { description: 'Gate repair', unit_price: 20 }] });
+    expect(next._body.line_items.map((li) => li.client_id)).not.toContain(wouldBe);
+  });
+
   test('a commercial customer’s tax rate: percent in, fraction out, tax shown in the totals', async () => {
     setInvoice({ tax_rate: '0.0700', tax_amount: '9.03', total: '138.03' });
     state.customers[0].property_type = 'commercial';

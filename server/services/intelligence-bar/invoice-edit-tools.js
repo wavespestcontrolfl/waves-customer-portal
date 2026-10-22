@@ -387,12 +387,23 @@ function applyLineChanges(stored, changes, invoiceId) {
   }
   let out = next.filter((_li, idx) => !dropped.has(idx));
   let n = 0;
+  // Every id already on the invoice (even a line this edit removes) stays unique: a new line's id is derived from the invoice, the
+  // line and a salt, and the salt moves on until the id is free. The stored lines are part of the card's pinned version, so the
+  // same request gives the same ids at preview and at Confirm; an identical line added by a later edit gets the next free id.
+  const taken = new Set(stored.map((li) => li.client_id).filter(Boolean).map(String));
   for (const change of changes) {
     if (change.line) continue;
     n += 1;
     const qty = change.quantity !== undefined ? change.quantity : 1;
+    let salt = 0;
+    let clientId;
+    do {
+      clientId = `li_bar_${digest([invoiceId, n, change.description, qty, change.unit_price, salt]).slice(0, 12)}`;
+      salt += 1;
+    } while (taken.has(clientId));
+    taken.add(clientId);
     const li = {
-      client_id: `li_bar_${digest([invoiceId, n, change.description, qty, change.unit_price]).slice(0, 12)}`,
+      client_id: clientId,
       description: change.description,
       quantity: qty,
       unit_price: change.unit_price,
