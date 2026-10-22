@@ -1635,10 +1635,13 @@ const HEALTH_ALERT_UNIQUE_RULE_TYPES = ['score_drop', 'critical_risk', 'service_
   'low_engagement', 'satisfaction_drop', 'new_customer_risk'];
 const HEALTH_ALERT_OPEN_STATUSES = ['new', 'acknowledged'];
 
-async function repointHealthAlertsDismissCollisions(trx, table, column, winnerId, loserId) {
-  const rows = await trx(table).where(column, loserId).select('id');
+// Registered for customer_health_alerts only, whose one customer FK is
+// customer_id: a literal table and column, so this is not a dynamic writer
+// (annual-prepay-term-states' dynamic-mutation audit stays at its count).
+async function repointHealthAlertsDismissCollisions(trx, _table, _column, winnerId, loserId) {
+  const rows = await trx('customer_health_alerts').where({ customer_id: loserId }).select('id');
   const move = (id, patch = {}) => trx.transaction(async (sp) => {
-    await sp(table).where({ id }).update({ [column]: winnerId, ...patch });
+    await sp('customer_health_alerts').where({ id }).update({ customer_id: winnerId, ...patch });
   });
   let moved = 0;
   let dismissed = 0;
@@ -1650,9 +1653,9 @@ async function repointHealthAlertsDismissCollisions(trx, table, column, winnerId
     } catch (e) {
       if (!(e && e.code === '23505')) throw e;
     }
-    const loserRow = await trx(table).where({ id }).forUpdate().first('id', 'alert_type', 'status', 'created_at');
-    const winnerRow = loserRow && await trx(table)
-      .where({ [column]: winnerId, alert_type: loserRow.alert_type })
+    const loserRow = await trx('customer_health_alerts').where({ id }).forUpdate().first('id', 'alert_type', 'status', 'created_at');
+    const winnerRow = loserRow && await trx('customer_health_alerts')
+      .where({ customer_id: winnerId, alert_type: loserRow.alert_type })
       .whereIn('status', HEALTH_ALERT_OPEN_STATUSES)
       .forUpdate()
       .first('id', 'created_at');
@@ -1661,7 +1664,7 @@ async function repointHealthAlertsDismissCollisions(trx, table, column, winnerId
       await move(id);
       moved += 1;
     } else if (new Date(loserRow.created_at) > new Date(winnerRow.created_at)) {
-      await trx(table).where({ id: winnerRow.id }).update({ status: 'dismissed', updated_at: trx.fn.now() });
+      await trx('customer_health_alerts').where({ id: winnerRow.id }).update({ status: 'dismissed', updated_at: trx.fn.now() });
       await move(id);
       dismissed += 1;
     } else {
