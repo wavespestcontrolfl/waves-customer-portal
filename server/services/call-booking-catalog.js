@@ -964,6 +964,11 @@ async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actor
           // An invoice or inspection credit that lands between that check and the post-commit hook must not reach the
           // ordinary unpinned void/reversal seam (it never appeared on the card or in moneyReport); it is left for office review.
           ...(approved ? { moneySeam: 'caller' } : {}),
+          // The card promised no text for a linked visit. notifyCustomer false makes the writer write a terminal
+          // 'suppressed' marker, but only behind GATE_CANCEL_NOTICE_HOOK; cancelNoticeApproved writes it in this
+          // transaction whatever the gate says, so no pod can late-claim the child's reminder row and text it.
+          // (A claim an older notice already holds aborts this child's cancel: it stays active and is reported.)
+          ...(approved ? { cancelNoticeApproved: true } : {}),
           trx,
         });
         await trx('scheduled_services')

@@ -72,6 +72,26 @@ describe('cancelCallFollowUpsForParentCancel with approvedChildren', () => {
     expect(transitionJobStatus.mock.calls[0][0].moneySeam).toBe('caller');
   });
 
+  test('an approved child gets the durable no-text disposition (terminal suppressed marker) whatever the hook gate says', async () => {
+    await run();
+    const args = transitionJobStatus.mock.calls[0][0];
+    expect(args.notifyCustomer).toBe(false);
+    expect(args.cancelNoticeApproved).toBe(true);
+  });
+
+  test('an approved child whose marker could not be written (an older claim holds its reminder) is not cancelled and is reported', async () => {
+    transitionJobStatus.mockRejectedValueOnce(new Error('approved cancellation text: an older notice claim holds this reminder, so the approved marker could not be written'));
+    const { cancelled, report } = await run();
+    expect(cancelled).toBe(0);
+    expect(report.skipped).toEqual([{ id: 'child-1', reason: 'cancel_failed' }]);
+  });
+
+  test('without approvedChildren the child does not carry cancelNoticeApproved', async () => {
+    const { conn } = fakeConn({ children: [CHILD], locked: {} });
+    await cancelCallFollowUpsForParentCancel({ conn, parentServiceId: 'svc-parent' });
+    expect(Object.keys(transitionJobStatus.mock.calls[0][0])).not.toContain('cancelNoticeApproved');
+  });
+
   test('without approvedChildren the child keeps the ordinary money seam (no moneySeam key)', async () => {
     const { conn } = fakeConn({ children: [CHILD], locked: {} });
     await cancelCallFollowUpsForParentCancel({ conn, parentServiceId: 'svc-parent' });
