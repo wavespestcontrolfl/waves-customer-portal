@@ -341,16 +341,25 @@ async function matchContactPhoneAccounts({ call, extracted, v2CanonicalExtractio
  * findCustomerViaCallbackSpokenNumber (admin callback of an inbound voicemail from the dialed number,
  * gate on, no operator link, number not a near miss of the dialed one). Read-only.
  */
-async function matchCallbackSpokenNumberAccount({ call, extracted, statedAddress, conn = db }) {
+async function matchCallbackSpokenNumberAccount({ call, extracted, statedAddress, phone = null, conn = db }) {
   let override = null;
   try {
     const meta = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
     override = meta && meta.customer_link_override;
   } catch { override = null; }
   const customerLinkOverride = override && typeof override === 'object' && 'customer_id' in override ? override : null;
-  const found = await require('./call-recording-processor')
-    .findCustomerViaCallbackSpokenNumber(call, extracted, { db: conn, customerLinkOverride });
+  const processor = require('./call-recording-processor');
+  const found = await processor.findCustomerViaCallbackSpokenNumber(call, extracted, { db: conn, customerLinkOverride });
   if (!found) return null;
+  // Only while the pass's normal lookup on the contact number finds nobody: once that number links a
+  // customer, or is an ambiguous shared number, the suggestion is moot and an OPEN card for it retires
+  // (the same lookup the pass runs first; this runs for open cards too, which skip the known-number
+  // check suggestFamilyAccounts applies to new ones).
+  if (phone) {
+    const ambiguity = {};
+    const normal = await processor.findCustomerForCallContact(phone, extracted, { db: conn, multiMatchOut: ambiguity });
+    if (normal || ambiguity.candidates) return null;
+  }
   return {
     basis: 'callback_spoken_number',
     more_accounts: false,
@@ -410,7 +419,11 @@ function cardPayload({ suggestion, extracted, call, phone }) {
     caller_name: [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null,
     // On an office callback the call's own line is ours, not the caller's.
     caller_phone: suggestion.basis === 'callback_spoken_number' ? null : call.from_phone || null,
-    caller_callback_phone: phone && phone !== call.from_phone ? phone : null,
+    // The callback basis shows the number the office actually dialed (the resolved contact phone can be
+    // the spoken number).
+    caller_callback_phone: suggestion.basis === 'callback_spoken_number'
+      ? call.to_phone || null
+      : (phone && phone !== call.from_phone ? phone : null),
     holder_candidates: suggestion.candidates,
     more_accounts: suggestion.more_accounts,
     customer_ids: suggestion.candidates.map((c) => c.id),
@@ -454,7 +467,7 @@ async function fileFamilyAccountCard({
     await conn.transaction(async (trx) => {
       await lockTriageCall(trx, call.id);
       if (procToken && !(await trx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id'))) return;
-      const args = { call, extracted, v2CanonicalExtraction, statedAddress, isOutbound, conn: trx };
+      const args = { call, extracted, v2CanonicalExtraction, statedAddress, isOutbound, phone, conn: trx };
       const match = await matchSuggestedAccounts(args);
       const open = await trx('triage_items').where({ call_log_id: call.id, reason_code: CARD_REASON_CODE, status: 'open' }).first('id');
       if (!match) {

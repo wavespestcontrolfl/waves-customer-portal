@@ -14175,20 +14175,18 @@ const CallRecordingProcessor = {
     // A family member who named the account holder by full name: ONE advisory card listing the live
     // accounts with that name (suggest-only; the office links the call). Reads the state BEFORE this
     // pass creates a customer for the caller, writes nothing else.
-    // The callback_spoken_number basis (GATE_CALLBACK_SPOKEN_NUMBER_LINK) rides the same card: an office
-    // callback's voicemail named a number that is a customer's primary phone. The pass reads the
-    // returned suggestion only to NOT mint a duplicate customer around it.
-    let familySuggestion = null;
     if (!customerLinkOverride) {
-      familySuggestion = await require('./call-family-name-link').fileFamilyAccountCard({
+      await require('./call-family-name-link').fileFamilyAccountCard({
         call, procToken, extracted, v2CanonicalExtraction, statedAddress: v2StatedServiceAddressRaw, phone, isOutbound: isOutboundCall(call),
       });
     }
     const sharedPhoneAmbiguity = {};
-    // True when the family-account card above suggested the owner of an office callback's voicemail
-    // number (suggest-only: that number was said by whoever left the voicemail, so nothing is linked).
-    // The call stays customer-less like the shared-phone case; the card carries the account.
-    const spokenNumberSuggested = familySuggestion?.basis === 'callback_spoken_number';
+    // GATE_CALLBACK_SPOKEN_NUMBER_LINK: true when an office callback's voicemail number is the primary
+    // phone of one account (read-only match, set below only after the normal lookup found nobody).
+    // Suggest-only: that number was said by whoever left the voicemail, so nothing is linked. The call
+    // stays customer-less like the shared-phone case, whether or not the family-account card above
+    // could be written (a failed card write must never turn into a duplicate customer).
+    let spokenNumberSuggested = false;
     let phoneMatchedThisPass = false;
     if (!customerId && phone && !explicitUnlink) {
       // Try to find an existing customer by the external contact phone.
@@ -14210,6 +14208,13 @@ const CallRecordingProcessor = {
         // duplicate customer (codex round-10 P2).
         avDecisive: ['validated_accept', 'corrected'].includes(effectiveAddressValidation?.status),
       });
+      if (!existing && !sharedPhoneAmbiguity.candidates) {
+        spokenNumberSuggested = !!(await findCustomerViaCallbackSpokenNumber(call, extracted, { customerLinkOverride }).catch((e) => {
+          // Code and name only: a query error message can carry the bound phone and names.
+          logger.warn(`[call-proc] Callback spoken-number lookup failed for ${maskSid(callSid)}: ${e?.code || e?.name || 'error'}`);
+          return null;
+        }));
+      }
       if (existing) {
         customerId = existing.id;
         phoneMatchedThisPass = true;
@@ -14245,6 +14250,7 @@ const CallRecordingProcessor = {
         // customer-less, the workable-lead path below still captures the prospect, and the
         // family-account card (filed above, advisory) names the account for staff to confirm and
         // relink (customer_link_override).
+        // A failed card write is the card's own warn line; the next reprocess files it again.
         logger.info(`[call-proc] ${maskSid(callSid)}: callback voicemail's spoken number matches an account — suggest-only card, no link, no new customer`);
       } else if ((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !v2NonCustomerCallNature) {
         // Create new customer. NEVER from a voicemail — a one-sided message
@@ -25517,6 +25523,7 @@ CallRecordingProcessor.recoveryMarkerPayload = recoveryMarkerPayload;
 CallRecordingProcessor.resolveCallContactPhone = resolveCallContactPhone;
 // Read by call-family-name-link (lazy require) for the callback_spoken_number basis.
 CallRecordingProcessor.findCustomerViaCallbackSpokenNumber = findCustomerViaCallbackSpokenNumber;
+CallRecordingProcessor.findCustomerForCallContact = findCustomerForCallContact;
 
 // Production contract for call-booking-link-text.js's own outbound-return
 // prior-contact check (codex r7 P1, pre-push): that lane's own

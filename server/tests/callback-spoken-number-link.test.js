@@ -212,8 +212,14 @@ describe('findCustomerViaCallbackSpokenNumber', () => {
 // (family_account_candidates) as the callback_spoken_number basis, so the card keeps that card's whole
 // lifecycle (refresh and retire on reprocess, admin-only, Resolve, review-status sync, evidence).
 describe('callback_spoken_number basis of the family-account card', () => {
-  function cardTrx({ customers = [], voicemailRow = voicemail() } = {}) {
+  // customers: one result array per customers query, in call order. One match = the voicemail-number
+  // lookup, then the pass's normal lookup on the contact number (its name query and its phone query;
+  // empty = nobody there). A NEW card runs the match twice (suggestFamilyAccounts re-checks it).
+  const matchQueue = (owner = customer()) => [[owner], [], []];
+  function cardTrx({ customers = [[]], voicemailRow = voicemail(), openCard = null, failInsert = false } = {}) {
     const inserted = [];
+    const updates = [];
+    const queue = [...customers];
     const trx = jest.fn((table) => {
       const builder = {
         where: () => builder,
@@ -222,28 +228,36 @@ describe('callback_spoken_number basis of the family-account card', () => {
         whereIn: () => builder,
         whereRaw: () => builder,
         orderBy: () => builder,
+        orderByRaw: () => builder,
+        orWhereRaw: () => builder,
+        count: () => builder,
+        select: () => builder,
         limit: () => builder,
         forUpdate: () => builder,
         modify: () => builder,
-        insert: (row) => { inserted.push(row); return builder; },
+        insert: (row) => {
+          if (failInsert) throw Object.assign(new Error('write failed'), { code: 'XX000' });
+          inserted.push(row);
+          return builder;
+        },
         onConflict: () => builder,
         merge: () => builder,
-        update: () => Promise.resolve(0),
-        first: () => Promise.resolve(table === 'call_log' ? voicemailRow : null),
-        then: (resolve, reject) => Promise.resolve(table === 'customers' ? customers : []).then(resolve, reject),
+        update: (patch) => { updates.push({ table, patch }); return Promise.resolve(1); },
+        first: () => Promise.resolve(table === 'call_log' ? voicemailRow : (table === 'triage_items' ? openCard : null)),
+        then: (resolve, reject) => Promise.resolve(table === 'customers' ? (queue.shift() || []) : []).then(resolve, reject),
       };
       return builder;
     });
     trx.raw = (sql) => sql;
     const conn = { transaction: async (fn) => fn(trx) };
-    return { conn, trx, inserted };
+    return { conn, trx, inserted, updates };
   }
   const args = (conn, over = {}) => ({
     call: callbackCall({ id: 'cb-7' }), extracted: extractedJordan, v2CanonicalExtraction: null, statedAddress: null, phone: DIALED, isOutbound: true, conn, ...over,
   });
 
   test('files ONE advisory family-account card that names the account, the number said and the number dialed', async () => {
-    const { conn, inserted } = cardTrx({ customers: [customer()] });
+    const { conn, inserted } = cardTrx({ customers: [...matchQueue(), ...matchQueue()] });
     const out = await familyLink.fileFamilyAccountCard(args(conn));
     expect(out).toMatchObject({ basis: 'callback_spoken_number' });
     expect(inserted).toHaveLength(1);
@@ -263,26 +277,61 @@ describe('callback_spoken_number basis of the family-account card', () => {
 
   test('gate off: no suggestion and no card', async () => {
     delete process.env.GATE_CALLBACK_SPOKEN_NUMBER_LINK;
-    const { conn, inserted } = cardTrx({ customers: [customer()] });
+    const { conn, inserted } = cardTrx({ customers: [[customer()], []] });
     expect(await familyLink.fileFamilyAccountCard(args(conn))).toBeNull();
     expect(inserted).toHaveLength(0);
   });
 
   test('an ordinary inbound call (not an admin callback) never takes the new basis', async () => {
-    const { conn, inserted } = cardTrx({ customers: [customer()] });
+    const { conn, inserted } = cardTrx({ customers: [[customer()], []] });
     const out = await familyLink.fileFamilyAccountCard(args(conn, { call: callbackCall({ direction: 'inbound', source: 'twilio-voice' }), isOutbound: false }));
     expect(out).toBeNull();
     expect(inserted).toHaveLength(0);
   });
 
   test('two accounts with the first name on the number: no suggestion', async () => {
-    const { conn, inserted } = cardTrx({ customers: [customer(), customer({ id: 'cust-2', last_name: 'Rivers-Hale' })] });
+    const { conn, inserted } = cardTrx({ customers: [[customer(), customer({ id: 'cust-2', last_name: 'Rivers-Hale' })]] });
     expect(await familyLink.fileFamilyAccountCard(args(conn))).toBeNull();
     expect(inserted).toHaveLength(0);
   });
 
+  test('the card shows the number the office dialed, even when the resolved contact phone is the spoken number', async () => {
+    const { conn, inserted } = cardTrx({ customers: [...matchQueue(), ...matchQueue()] });
+    await familyLink.fileFamilyAccountCard(args(conn, { phone: SPOKEN }));
+    expect(JSON.parse(inserted[0].payload).caller_callback_phone).toBe(DIALED);
+  });
+
+  test('the dialed number already links a customer through the normal lookup: no new card', async () => {
+    const { conn, inserted } = cardTrx({ customers: [[customer()], [customer({ id: 'cust-9', first_name: 'Jordan', phone: DIALED })]] });
+    expect(await familyLink.fileFamilyAccountCard(args(conn))).toBeNull();
+    expect(inserted).toHaveLength(0);
+  });
+
+  test('reprocess after the dialed number linked normally: the OPEN card is retired, not refreshed', async () => {
+    const { conn, inserted, updates } = cardTrx({
+      customers: [[customer()], [customer({ id: 'cust-9', first_name: 'Jordan', phone: DIALED })]],
+      openCard: { id: 'card-1' },
+    });
+    expect(await familyLink.fileFamilyAccountCard(args(conn))).toBeNull();
+    expect(inserted).toHaveLength(0);
+    expect(updates).toEqual([expect.objectContaining({ table: 'triage_items', patch: expect.objectContaining({ status: 'dismissed', resolution_source: 'auto', resolution_rule: familyLink.RETIRE_RULE }) })]);
+  });
+
+  test('reprocess with the match still standing: the open card is refreshed and kept', async () => {
+    const { conn, inserted, updates } = cardTrx({ customers: [[customer()], []], openCard: { id: 'card-1' } });
+    expect(await familyLink.fileFamilyAccountCard(args(conn))).toMatchObject({ basis: 'callback_spoken_number' });
+    expect(inserted).toHaveLength(1);
+    expect(updates).toEqual([]);
+  });
+
+  test('a failed card write is swallowed (the pass decides not to mint a customer from the read-only match, not from the card)', async () => {
+    const { conn, inserted } = cardTrx({ customers: [...matchQueue(), ...matchQueue()], failInsert: true });
+    await expect(familyLink.fileFamilyAccountCard(args(conn))).resolves.toBeNull();
+    expect(inserted).toHaveLength(0);
+  });
+
   test('an operator link override on the call: no suggestion', async () => {
-    const { conn } = cardTrx({ customers: [customer()] });
+    const { conn } = cardTrx({ customers: [[customer()], []] });
     const call = callbackCall({ metadata: { relatedCallId: PARENT_ID, customer_link_override: { customer_id: null } } });
     expect(await familyLink.matchCallbackSpokenNumberAccount({ call, extracted: extractedJordan, conn })).toBeNull();
   });
@@ -305,9 +354,15 @@ describe('Step 3 keeps a spoken-number match suggest-only', () => {
     expect(branch).not.toMatch(/db\('(customers|triage_items)'\)/);
   });
 
-  test('the flag comes only from the family-account card suggestion', () => {
-    expect(src).toContain("const spokenNumberSuggested = familySuggestion?.basis === 'callback_spoken_number';");
-    expect(src).toMatch(/familySuggestion = await require\('\.\/call-family-name-link'\)\.fileFamilyAccountCard\(/);
+  test('the flag is the read-only match, set only after the normal lookup found nobody, never the card write', () => {
+    expect(src).not.toContain('familySuggestion');
+    expect(src).toMatch(/let spokenNumberSuggested = false;/);
+    const set = src.indexOf('spokenNumberSuggested = !!(await findCustomerViaCallbackSpokenNumber(');
+    expect(set).toBeGreaterThan(0);
+    // inside the Step 3 block, after the normal lookup and only with no customer and no ambiguity
+    expect(set).toBeGreaterThan(src.indexOf('const existing = await findCustomerForCallContact(phone, extracted, {'));
+    expect(src.slice(set - 120, set)).toContain('if (!existing && !sharedPhoneAmbiguity.candidates) {');
+    expect(src).toMatch(/await require\('\.\/call-family-name-link'\)\.fileFamilyAccountCard\(/);
   });
 
   test('a deliberate customer-less result is not a customer_creation_failed, and the lead path stays unclaimed-only', () => {
