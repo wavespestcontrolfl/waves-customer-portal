@@ -523,3 +523,246 @@ describe('recordManualPayment — settlement', () => {
     expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
   });
 });
+
+
+describe('recordManualPayment — what the Intelligence Bar card adds (settlementFence from record-payment-fences.js)', () => {
+  const { settlementFenceFor } = require('../services/intelligence-bar/record-payment-fences');
+  const SEEN = new Date('2099-01-01T12:00:00.123Z');
+  const COLUMNS = { customer_id: 'cust-1', scheduled_service_id: null, service_record_id: null, visit_completion_packet_id: null, payer_id: null, payer_statement_id: null, total: '117.00', credit_applied: '0' };
+  const pin = (over = {}) => ({ invoiceId: 'inv-1', status: 'sent', updatedAtMs: SEEN.getTime(), columns: COLUMNS, paymentDate: require('../utils/datetime-et').etDateString(), closeout: null, ...over });
+  const card = (over = {}) => openInvoice({ updated_at: SEEN, ...over });
+
+  // A settlement fixture over a mutable locked row. The combined-session release can rewrite the row, as clearPaymentIntentStamps does;
+  // `projects` / `terms` feed the fence's own lookups on the plain connection and on the trx.
+  function settle({ pre = card(), locked = card(), onRelease = null, projects = [], termLinked = false, hasTermTable = true, visit = { id: 'sv-other', status: 'scheduled' }, timer = null } = {}) {
+    const calls = { update: null, updateArgs: null, paymentsInsert: null, projectsLocked: false };
+    const answer = (table, row) => {
+      if (table === 'projects') {
+        const r = recorder();
+        r.forUpdate = jest.fn(() => { calls.projectsLocked = true; return r; });
+        r.select = jest.fn(async () => projects);
+        return r;
+      }
+      if (table === 'annual_prepay_terms') return recorder({ first: termLinked ? { id: 'term-9' } : null });
+      return null || row;
+    };
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return recorder({ first: { ...pre } });
+      if (table === 'projects' || table === 'annual_prepay_terms') return answer(table);
+      if (table === 'scheduled_services') return recorder({ first: visit });
+      if (table === 'time_entries') return recorder({ first: timer });
+      if (table === 'activity_log') return recorder();
+      if (table === 'notification_prefs') return recorder({ first: null });
+      throw new Error(`unexpected table ${table}`);
+    });
+    db.schema = { hasTable: jest.fn(async () => hasTermTable) };
+    db.transaction.mockImplementation(async (fn) => {
+      const trx = jest.fn((table) => {
+        if (table === 'invoices') {
+          const r = recorder({ first: locked, returning: [{ ...locked, status: 'paid' }] });
+          r.first = jest.fn(async () => ({ ...locked }));
+          r.update = jest.fn((args) => { calls.updateArgs = args; return r; });
+          calls.update = r.update;
+          return r;
+        }
+        if (table === 'payments') { const r = recorder(); calls.paymentsInsert = r.insert; return r; }
+        if (table === 'scheduled_services') return recorder({ first: visit });
+        if (table === 'time_entries') return recorder({ first: timer });
+        if (table === 'projects' || table === 'annual_prepay_terms') return answer(table);
+        throw new Error(`unexpected trx table ${table}`);
+      });
+      trx.fn = { now: () => 'NOW()' };
+      trx.schema = { hasTable: jest.fn(async () => hasTermTable) };
+      require('../services/pay-combined').releaseCombinedSessionBeforeCollection.mockReset().mockImplementation(async () => { if (onRelease) onRelease(locked); });
+      return fn(trx);
+    });
+    return calls;
+  }
+  afterEach(() => { delete db.schema; });
+
+  describe('settlementFence', () => {
+    test('runs on the plain connection before the Stripe retirement, and on the transaction with the LOCKED row right before the paid flip', async () => {
+      const fence = jest.fn(async () => true);
+      const calls = settle();
+      await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: fence });
+      expect(fence).toHaveBeenCalledTimes(2);
+      expect(fence.mock.calls[0]).toEqual([db]);
+      expect(fence.mock.calls[1][0]).toEqual(expect.any(Function));
+      expect(fence.mock.calls[1][1]).toMatchObject({ id: 'inv-1', status: 'sent' });
+      expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
+    });
+
+    test('a stale card refuses BEFORE the open card session is retired (edit time compared on the plain read)', async () => {
+      const calls = settle({ pre: card({ updated_at: new Date('2099-01-01T12:00:09Z'), stripe_payment_intent_id: 'pi_live' }) });
+      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin()) }));
+      expect(err).toMatchObject({ statusCode: 409, drift: true });
+      expect(StripeService.retrievePaymentIntent).not.toHaveBeenCalled();
+      expect(db.transaction).not.toHaveBeenCalled();
+      expect(calls.paymentsInsert).toBeNull();
+    });
+
+    test.each([
+      ['the status', { status: 'viewed' }],
+      ['the customer (a customer merge repoints the invoice without touching updated_at)', { customer_id: 'cust-merged' }],
+      ['the visit link', { scheduled_service_id: 'sv-other' }],
+      ['the service record', { service_record_id: 'sr-other' }],
+      ['the amount', { total: '120.00' }],
+      ['the credit applied', { credit_applied: '5.00' }],
+    ])('a change to %s that lands while the release waits is caught on the LOCKED row: nothing written (Codex r2)', async (_name, patch) => {
+      const calls = settle({ onRelease: (row) => Object.assign(row, patch, { updated_at: new Date('2099-01-01T12:00:30Z') }) });
+      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin()) }));
+      expect(err).toMatchObject({ statusCode: 409, drift: true });
+      expect(calls.update).not.toHaveBeenCalled();
+      expect(calls.paymentsInsert).toBeNull();
+    });
+
+    test('a job timer started on the carded visit after the card (the visit row untouched) refuses with drift and records nothing; no running timer records', async () => {
+      const VISIT_EDITED = new Date('2099-01-01T09:00:00.000Z');
+      const visit = { id: 'sv-other', status: 'scheduled', service_type: 'Pest Control', scheduled_date: new Date('2099-01-01T00:00:00Z'), updated_at: VISIT_EDITED };
+      const closeout = { visitId: 'sv-other', serviceType: 'Pest Control', date: '2099-01-01', updatedAtMs: VISIT_EDITED.getTime() };
+      const fenceFor = () => settlementFenceFor(pin({ columns: { ...COLUMNS, scheduled_service_id: 'sv-other' }, closeout, closeoutTarget: 'sv-other' }));
+      const linked = card({ scheduled_service_id: 'sv-other' });
+      const running = settle({ pre: linked, locked: linked, visit, timer: { id: 'te-1' } });
+      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: fenceFor() }));
+      expect(err).toMatchObject({ statusCode: 409, drift: true });
+      expect(err.message).toBe('A technician started the visit timer since this card; try again after the visit — nothing was recorded');
+      expect(running.paymentsInsert).toBeNull();
+      const clear = settle({ pre: linked, locked: linked, visit, timer: null });
+      jest.spyOn(require('../services/invoice-issued-closeout'), 'recordApprovedPaidCloseoutTarget').mockResolvedValue(undefined);
+      jest.spyOn(require('../services/invoice-issued-closeout'), 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: false });
+      await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: fenceFor() });
+      expect(clear.paymentsInsert).toHaveBeenCalledTimes(1);
+      jest.restoreAllMocks();
+    });
+
+    test('a card shown on another ET day refuses with drift and records nothing (the payment is never dated differently than approved)', async () => {
+      const calls = settle();
+      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin({ paymentDate: '2020-01-01' })) }));
+      expect(err).toMatchObject({ statusCode: 409, drift: true });
+      expect(err.message).toMatch(/day changed/);
+      expect(calls.paymentsInsert).toBeNull();
+    });
+
+    test('a linked visit that changed (or is gone) since the card refuses with drift under the lock: nothing written', async () => {
+      const calls = settle({ locked: card({ scheduled_service_id: 'sv-other' }), pre: card({ scheduled_service_id: 'sv-other' }) });
+      const closeout = { visitId: 'sv-other', serviceType: 'Pest Control', date: '2099-01-01', updatedAtMs: 1 };
+      // The settle() fixture's visit row carries no matching edit time / date / type, as an edited visit would not.
+      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin({ columns: { ...COLUMNS, scheduled_service_id: 'sv-other' }, closeout })) }));
+      expect(err).toMatchObject({ statusCode: 409, drift: true });
+      expect(err.message).toMatch(/linked visit changed/);
+      expect(calls.paymentsInsert).toBeNull();
+    });
+
+    test('the release rewriting the invoice edit time is not drift: the approved payment records (Codex pre-push P1)', async () => {
+      const calls = settle({ onRelease: (row) => { row.updated_at = new Date('2099-01-01T12:00:30Z'); } });
+      const out = await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin()) });
+      expect(out.invoice).toBeDefined();
+      expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
+    });
+
+    test.each(['held', 'releasing'])('a %s report that appeared by the lock refuses and rolls back; the project rows are locked FOR UPDATE', async (status) => {
+      const calls = settle({ projects: [{ id: 'p1', report_hold_status: status }] });
+      const fence = settlementFenceFor(pin());
+      // The plain-connection run sees the report too, so the Stripe session is never retired for it.
+      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: fence }));
+      expect(err).toMatchObject({ statusCode: 409, drift: true });
+      expect(err.message).toMatch(/releases a held report to the customer/);
+      expect(calls.paymentsInsert).toBeNull();
+      expect(require('../services/project-report-hold').scheduleHoldReleaseSweep).not.toHaveBeenCalled();
+    });
+
+    test('the lock-time report check locks the project rows, and a released or absent report records', async () => {
+      const calls = settle({ projects: [{ id: 'p1', report_hold_status: 'released' }, { id: 'p2', report_hold_status: null }] });
+      await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin()) });
+      expect(calls.projectsLocked).toBe(true);
+      expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
+    });
+
+    test('a report lookup that throws aborts the settlement and records nothing (fail closed)', async () => {
+      const calls = settle();
+      const base = db.getMockImplementation();
+      db.mockImplementation((table) => { if (table === 'projects') throw new Error('column report_hold_status does not exist'); return base(table); });
+      await expect(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin()) })).rejects.toThrow(/report_hold_status/);
+      expect(calls.paymentsInsert).toBeNull();
+    });
+
+    test.each([
+      ['the invoice carries an annual-plan tag', { pre: card({ annual_prepay_term_id: 'term-1' }), locked: card({ annual_prepay_term_id: 'term-1' }) }],
+      ['a term lists this invoice as its prepay invoice', { termLinked: true }],
+    ])('an annual-plan invoice (%s) refuses with drift and rolls back', async (_name, fixture) => {
+      const calls = settle(fixture);
+      const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin()) }));
+      expect(err).toMatchObject({ statusCode: 409, drift: true });
+      expect(err.message).toMatch(/annual-plan invoice/);
+      expect(calls.paymentsInsert).toBeNull();
+    });
+
+    test('an invoice with no term records, and a missing terms table does not block', async () => {
+      const calls = settle({ hasTermTable: false });
+      await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin()) });
+      expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('the invoice notes are built from the LOCKED row (Codex r2 P1: no concurrent edit is erased)', () => {
+    test('a note saved between the unlocked read and the lock is kept, and the operator note is appended to it', async () => {
+      const calls = settle({ pre: card({ notes: 'old note' }), locked: card({ notes: 'old note\nsaved in the gap' }) });
+      await recordManualPayment('inv-1', { method: 'check', reference: '1042', note: 'left at desk', sendReceipt: false, settlementFence: settlementFenceFor(pin()) });
+      expect(calls.updateArgs.notes).toBe(`old note\nsaved in the gap\n[${require('../utils/datetime-et').etDateString()}] CHECK 1042: left at desk`);
+    });
+
+    test('the page path writes the same notes it always did (no operator note: the existing notes unchanged)', async () => {
+      const calls = settle({ pre: card({ notes: 'keep me' }), locked: card({ notes: 'keep me' }) });
+      await recordManualPayment('inv-1', { method: 'cash', sendReceipt: false });
+      expect(calls.updateArgs.notes).toBe('keep me');
+      const none = settle({ pre: card(), locked: card() });
+      await recordManualPayment('inv-1', { method: 'cash', sendReceipt: false });
+      expect(none.updateArgs.notes).toBeNull();
+    });
+  });
+
+  describe('closeoutTarget on the fence: the visit the card said the payment would complete', () => {
+    const Closeout = require('../services/invoice-issued-closeout');
+    afterEach(() => jest.restoreAllMocks());
+
+    test.each(['visit-live', 'none'])('target %s is pinned IN the settlement transaction and handed to the closeout as its approved target', async (target) => {
+      settle();
+      const pinned = jest.spyOn(Closeout, 'recordApprovedPaidCloseoutTarget').mockResolvedValue(undefined);
+      const closed = jest.spyOn(Closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: false });
+      const closeoutVisit = target === 'none' ? null : { serviceType: 'Pest Control', date: '2099-01-01', status: 'confirmed', updatedAtMs: 7 };
+      const fence = Object.assign(jest.fn(async () => true), { closeoutTarget: target, closeoutVisit });
+      await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: fence, recordedByTechnicianId: 'staff-1' });
+      expect(pinned).toHaveBeenCalledWith('inv-1', target, { conn: expect.any(Function), actorTechnicianId: 'staff-1', approvedVisit: closeoutVisit });
+      expect(closed).toHaveBeenCalledWith({ invoiceId: 'inv-1', trigger: 'paid', actorTechnicianId: 'staff-1', approvedTarget: target, approvedVisit: closeoutVisit });
+    });
+
+    test('the closeout\'s answer is returned beside the payment (the card reports a skipped closeout; the payment stays recorded)', async () => {
+      settle();
+      jest.spyOn(Closeout, 'recordApprovedPaidCloseoutTarget').mockResolvedValue(undefined);
+      jest.spyOn(Closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: false, reason: 'approved_visit_changed', visitId: 'sv-1' });
+      const fence = Object.assign(jest.fn(async () => true), { closeoutTarget: 'sv-1', closeoutVisit: { date: '2099-01-01' } });
+      const out = await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: fence });
+      expect(out.invoice).toBeTruthy();
+      expect(out.closeout).toEqual({ closed: false, reason: 'approved_visit_changed', visitId: 'sv-1' });
+    });
+
+    test('a pin that cannot be written rolls the payment back: nothing is recorded', async () => {
+      const calls = settle();
+      jest.spyOn(Closeout, 'recordApprovedPaidCloseoutTarget').mockRejectedValue(new Error('audit write failed'));
+      const closed = jest.spyOn(Closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: false });
+      const fence = Object.assign(jest.fn(async () => true), { closeoutTarget: 'none' });
+      await expect(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: fence })).rejects.toThrow('audit write failed');
+      expect(closed).not.toHaveBeenCalled();
+      // The pin throws before the ledger insert, inside the transaction: the throw rolls the paid flip back with it.
+      expect(calls.paymentsInsert).toBeNull();
+    });
+
+    test('the page path (no fence, or the Zelle fence with no target) passes no approved target', async () => {
+      settle();
+      const closed = jest.spyOn(Closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: false });
+      await recordManualPayment('inv-1', { method: 'check', sendReceipt: false });
+      await recordManualPayment('inv-1', { method: 'zelle', sendReceipt: false, settlementFence: async () => true });
+      for (const [args] of closed.mock.calls) { expect(args.approvedTarget).toBeUndefined(); expect(args.approvedVisit).toBeUndefined(); }
+    });
+  });
+});

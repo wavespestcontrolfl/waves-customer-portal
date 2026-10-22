@@ -46,6 +46,8 @@ const { pairCustomersAtSameAddress } = require('./customer-address-match');
 const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
 const { isResidenceProperty } = require('./customer-properties');
 const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
+// The retire write's sentinel phone (merge-retired.js) marks a merged-away row.
+const { MERGE_RETIRED_PHONE_PREFIX } = require('./merge-retired');
 const { NEW_SOD_COLUMNS, NEW_SOD_DATE_COLUMNS, clearedNewSodColumns } = require('./lawn-sod-holds');
 const { dateOnlyString } = require('../utils/datetime-et');
 
@@ -1620,6 +1622,61 @@ async function repointRowwiseDropCollisions(trx, table, column, winnerId, loserI
   return `moved ${moved}, dropped ${dropped} duplicate row(s) (winner already has them)`;
 }
 
+// customer_health_alerts: at most one OPEN rule alert per (customer_id,
+// alert_type) — customer_health_alerts_active_rule_uniq (migration
+// 20260626000012), which covers only the rule types below. Both duplicates
+// holding an open rule alert of the same type is one signal twice, scored at
+// different times: the NEWER open row stays open (the index migration's own
+// keep-the-most-recent dedupe) and the older one is DISMISSED, never deleted,
+// so its history and executed actions stay on the merged account. Both rows
+// are re-read under FOR UPDATE after the collision: the alert status route
+// takes no merge lock, so a row closed in between is no longer a collision
+// (ops 2026-10-22: a shared alert aborted a merge with "repoint failed on
+// customer_health_alerts.customer_id"; Codex #6431 r1).
+const HEALTH_ALERT_UNIQUE_RULE_TYPES = ['score_drop', 'critical_risk', 'service_gap', 'payment_issue',
+  'low_engagement', 'satisfaction_drop', 'new_customer_risk'];
+const HEALTH_ALERT_OPEN_STATUSES = ['new', 'acknowledged'];
+
+// Registered for customer_health_alerts only, whose one customer FK is
+// customer_id: a literal table and column, so this is not a dynamic writer
+// (annual-prepay-term-states' dynamic-mutation audit stays at its count).
+async function repointHealthAlertsDismissCollisions(trx, _table, _column, winnerId, loserId) {
+  const rows = await trx('customer_health_alerts').where({ customer_id: loserId }).select('id');
+  const move = (id, patch = {}) => trx.transaction(async (sp) => {
+    await sp('customer_health_alerts').where({ id }).update({ customer_id: winnerId, ...patch });
+  });
+  let moved = 0;
+  let dismissed = 0;
+  for (const { id } of rows) {
+    try {
+      await move(id);
+      moved += 1;
+      continue;
+    } catch (e) {
+      if (!(e && e.code === '23505')) throw e;
+    }
+    const loserRow = await trx('customer_health_alerts').where({ id }).forUpdate().first('id', 'alert_type', 'status', 'created_at');
+    const winnerRow = loserRow && await trx('customer_health_alerts')
+      .where({ customer_id: winnerId, alert_type: loserRow.alert_type })
+      .whereIn('status', HEALTH_ALERT_OPEN_STATUSES)
+      .forUpdate()
+      .first('id', 'created_at');
+    if (!loserRow || !winnerRow || !HEALTH_ALERT_OPEN_STATUSES.includes(loserRow.status)) {
+      // Closed in between: nothing collides now, so the row moves as-is.
+      await move(id);
+      moved += 1;
+    } else if (new Date(loserRow.created_at) > new Date(winnerRow.created_at)) {
+      await trx('customer_health_alerts').where({ id: winnerRow.id }).update({ status: 'dismissed', updated_at: trx.fn.now() });
+      await move(id);
+      dismissed += 1;
+    } else {
+      await move(id, { status: 'dismissed', updated_at: trx.fn.now() });
+      dismissed += 1;
+    }
+  }
+  return `moved ${moved}, dismissed ${dismissed} older duplicate open alert(s) (the newer one stays open)`;
+}
+
 // irrigation_week_plans: UNIQUE(customer_id, week_ending). The row that
 // matters is the available one (published_at or sent_at) — it is the decision the customer
 // received and the report renders, and the Monday sweep's first dedupe key
@@ -1935,6 +1992,7 @@ const UNIQUE_COLLISION_HANDLERS = {
   // (codex #3565 gh-r14/r15/r17).
   irrigation_week_plans: repointWeekPlansKeepAvailable,
   collections_flags: repointFlagsReleaseCollisions,
+  customer_health_alerts: repointHealthAlertsDismissCollisions,
 };
 
 // Customer ids also hide behind polymorphic recipient columns the
@@ -3934,7 +3992,7 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // NOT NULL, so it gets an unmatchable sentinel; the journal snapshot keeps
     // the real values.
     await trx('customers').where({ id: loserId }).update({
-      phone: `merged-${String(loserId).slice(0, 8)}`,
+      phone: `${MERGE_RETIRED_PHONE_PREFIX}${String(loserId).slice(0, 8)}`,
       email: null,
       stripe_customer_id: null,
       payer_id: null,
@@ -7206,6 +7264,11 @@ async function predictCollisionFolds(database, winner, loser) {
   const winnerTags = new Set(tagRows.filter((r) => String(r.customer_id) === String(winnerId)).map((r) => r.tag));
   const sharedTags = [...new Set(tagRows.filter((r) => String(r.customer_id) === String(loserId) && winnerTags.has(r.tag)).map((r) => r.tag))].sort();
   if (sharedTags.length) details.customer_tags = { shared: sharedTags };
+  const alertRows = (await read('customer_health_alerts', ['customer_id', 'alert_type', 'status']))
+    .filter((r) => HEALTH_ALERT_OPEN_STATUSES.includes(r.status) && HEALTH_ALERT_UNIQUE_RULE_TYPES.includes(r.alert_type));
+  const winnerAlerts = new Set(alertRows.filter((r) => String(r.customer_id) === String(winnerId)).map((r) => r.alert_type));
+  const sharedAlerts = [...new Set(alertRows.filter((r) => String(r.customer_id) === String(loserId) && winnerAlerts.has(r.alert_type)).map((r) => r.alert_type))].sort();
+  if (sharedAlerts.length) details.customer_health_alerts = { shared_open_alerts: sharedAlerts };
   const convRows = await read('conversations', ['customer_id', 'channel', 'our_endpoint_id']);
   const key = (r) => `${r.channel}\u0000${r.our_endpoint_id}`;
   const winnerThreads = new Set(convRows.filter((r) => String(r.customer_id) === String(winnerId) && r.channel != null && r.our_endpoint_id != null).map(key));
@@ -7395,6 +7458,7 @@ module.exports = {
     foldContactNotificationPrefs,
     pruneDiscardedContactPrefs,
   repointFlagsReleaseCollisions,
+    repointHealthAlertsDismissCollisions,
     mergeConversationRows,
     UNIQUE_COLLISION_HANDLERS,
     retirePinSuggestionsBeforeSweep,

@@ -114,6 +114,7 @@ const {
   normalizeCompletionForStructuredNotes,
 } = require('../services/lawn-protocol-completion');
 const { freezeTechFindings, rejectedTechFindingEdits } = require('./service-report/tree-shrub-tech-findings');
+const { correctedMethod: correctedGranularMethod } = require('./service-report/report-cleanup-1020');
 const { freezeWatchItems, visitWatchMonth } = require('./tree-shrub-watch-items');
 const { freezePestCheck } = require('./tree-shrub-pest-check');
 const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance, deriveTreeShrubTreatments } = require('../services/tree-shrub-closeout');
@@ -254,12 +255,14 @@ function inferServiceReportApplicationMethod(product = {}, productInput = {}, se
   const explicit = normalizeServiceReportApplicationMethod(
     productInput.applicationMethod || productInput.method || product.application_method || product.method,
   );
-  if (explicit) return explicit;
+  // GATE_REPORT_CLEANUP_1020: a granular product is never stored with a broadcast spray method, whatever the sheet sent.
+  if (explicit) return correctedGranularMethod(explicit, product);
   const category = String(product.category || product.product_category || '').toLowerCase();
   if (category.includes('bait') || category.includes('gel') || category.includes('glue')) return 'bait_placement';
   if (category.includes('fert') || category.includes('granular')) return 'granular_broadcast';
   if (serviceLine === 'mosquito') return 'fog_ulv';
-  if (serviceLine === 'lawn') return category.includes('herb') ? 'spot_treatment' : 'broadcast_spray';
+  // The lawn fallback is corrected too, so the stored method and the report label agree.
+  if (serviceLine === 'lawn') return category.includes('herb') ? 'spot_treatment' : correctedGranularMethod('broadcast_spray', product);
   if (serviceLine === 'palm' || serviceLine === 'tree_shrub') return 'foliar_spray';
   if (serviceLine === 'rodent' || serviceLine === 'termite') return 'station_check';
   return 'perimeter_spray';
@@ -6458,7 +6461,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // invoice re-resolves it on its new day.
           if (issuedInvoiceCloseout) {
             const lockedDay = serviceDateOnly(lockedSvcRow?.scheduled_date);
-            const { issuedCloseoutVisitRefusal, issuedDayForInvoice, visitJobTimerRunning } = require('../services/invoice-issued-closeout');
+            const { issuedCloseoutVisitRefusal, issuedDayForInvoice, visitJobTimerRunning, approvedVisitChanged } = require('../services/invoice-issued-closeout');
+            // A closeout approved on a card (record_payment) carries the visit's facts as the card showed them: the LOCKED row must still
+            // match (service type, scheduled date, status, edit time), or the visit is left open for a person (the payment stays recorded).
+            if (issuedInvoiceCloseout.expectedVisit && approvedVisitChanged(lockedSvcRow, issuedInvoiceCloseout.expectedVisit)) {
+              throw Object.assign(new Error('visit changed since the approved card during the issued-invoice closeout'), { code: 'approved_visit_changed' });
+            }
             // The prepayment proof, from the invoice row LOCKED above (and its
             // statement's delivery stamp, for a statement child).
             const lockedIssuedDay = await issuedDayForInvoice(trx, lockedIssuedInvoice, issuedInvoiceCloseout.trigger);
@@ -8827,6 +8835,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
           return ({ status: 409, body: {
             error: 'This visit was started by its technician while its invoice was being issued — the technician completes it.',
             code: 'issued_visit_in_progress',
+          } });
+        }
+        if (err && err.code === 'approved_visit_changed') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 409, body: {
+            error: 'This visit changed after the approving card was shown — the visit stays open.',
+            code: 'approved_visit_changed',
           } });
         }
         if (err && err.code === 'issued_visit_identity_changed') {

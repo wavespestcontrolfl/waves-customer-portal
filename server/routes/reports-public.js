@@ -35,7 +35,7 @@ const { findReportFollowupAppointment } = require('../services/report-followup-a
 // re-exported below so existing consumers/tests keep their import path.
 const { storedRevisionMatches, writeOrRefreshCtaRequest } = require('../services/cta-service-request');
 
-const { buildReportV1Data, attachLawnWateringCloseOut, stripLiveOnlyScheduleFields, stripLiveOnlyReportProductCopy, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectApplicatorTechnician, resolveProjectReportPreviewFields, completedProtocolActionLabels, completedProtocolActionEntries } = require('../services/service-report/report-data');
+const { buildReportV1Data, attachLawnWateringCloseOut, stripLiveOnlyScheduleFields, stripLiveOnlyReportProductCopy, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectReportPreviewFields, completedProtocolActionLabels, completedProtocolActionEntries } = require('../services/service-report/report-data');
 const { applyReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
@@ -150,6 +150,7 @@ const { isOneTimePressureExcludedRecord } = require('../services/pest-pressure/o
 const { renderServiceReportV1Pdf, countUnreachableReportPhotos } = require('../services/service-report/pdf');
 const { stripFixedReentryTiming, sanitizeProductTargets, REENTRY_SAFE_COPY } = require('../services/social-media');
 const { publicOriginPdfSignature } = require('../utils/portal-url');
+const { reportCleanup1020PdfSignature } = require('../services/service-report/report-cleanup-1020');
 const { dateOnlyStamp } = require('../services/service-report/time-format');
 const {
   getHealthyStoredReportPdf,
@@ -883,23 +884,6 @@ async function heldReportPaymentContext(project) {
   return { payUrl, invoiceNumber, paymentProcessing, payerBilled };
 }
 
-// GATE_REPORT_SIMPLE_WEB (owner 2026-10-17: "skip wdo, and pre treatment, but
-// for everything else the simple layout"): the payload keys that switch the
-// page to the work-order document, for every project type except the two
-// official paper documents (the WDO inspection and the pre-construction
-// termite certificate). Read at call time; a partial gates module reads as
-// off, and off adds nothing. The layout prints a Technician row: it names the
-// technician who PERFORMED the linked visit (the applicator resolver), whether
-// or not that visit applied product, never technician_name, the staffer who
-// created the project record (codex P1 #6353).
-async function simpleWebProjectFields(project) {
-  if (project.project_type === 'wdo_inspection' || project.project_type === 'pre_treatment_termite_certificate') return {};
-  const gates = require('../config/feature-gates');
-  if (typeof gates.reportSimpleWebLive !== 'function' || !gates.reportSimpleWebLive()) return {};
-  const technician = await resolveProjectApplicatorTechnician(project, db);
-  return { simpleWebReport: true, performingTechnicianName: String(technician?.name || '').trim() || null };
-}
-
 // GET /api/reports/project/:token/data — project report JSON for the viewer page
 router.get('/project/:token/data', async (req, res, next) => {
   // Same privacy headers as the sibling /fdacs-pdf route, set before ANY
@@ -1050,7 +1034,6 @@ router.get('/project/:token/data', async (req, res, next) => {
     // the internal-key/fee strip below (structured treatment fields, never
     // free text, so nothing here needs scrubbing).
     const { applicatorFdacsId, applicatorName, poisonControl } = await resolveProjectReportPreviewFields(project, viewerProjectDate, db);
-    const simpleWebFields = await simpleWebProjectFields(project);
 
     // Internal/office-only finding keys must never ride the public JSON — the
     // client registry hides them visually, but any token holder can read the
@@ -1113,7 +1096,11 @@ router.get('/project/:token/data', async (req, res, next) => {
       poisonControl,
       projectDate: viewerProjectDate,
       sentAt: project.sent_at,
-      findings: viewerFindings,
+      findings: project.project_type === 'pre_treatment_termite_certificate'
+        ? require('../services/final-exterior-screen').screenFinalExteriorFindings(viewerFindings)
+        : viewerFindings,
+      pretreatStickerReport: project.project_type === 'pre_treatment_termite_certificate'
+        && require('../config/feature-gates').isEnabled('pretreatStickerReport'),
       // Serve-time inspection-fee guard: covers legacy narratives and any
       // written by an old instance during the deploy window. Two passes —
       // the literal-cue scrub plus the VALUE scrub with the fee this project
@@ -1136,9 +1123,6 @@ router.get('/project/:token/data', async (req, res, next) => {
         status: upcomingAppointment.status,
       } : null,
       photos: photosWithUrls,
-      // GATE_REPORT_SIMPLE_WEB: simpleWebReport + performingTechnicianName
-      // while live (simpleWebProjectFields); nothing when off.
-      ...simpleWebFields,
     });
   } catch (err) { next(err); }
 });
@@ -2202,7 +2186,7 @@ router.get('/:token', async (req, res, next) => {
       // bypassing it into a generic 500.
       const laSignature = await lawnAssessmentPdfSignature(service, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachV2Signature + reserviceV2Signature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + tsParagraphSignature + apSignature + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachV2Signature + reserviceV2Signature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + tsParagraphSignature + apSignature + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature() + reportCleanup1020PdfSignature(),
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -2351,7 +2335,7 @@ router.get('/:token', async (req, res, next) => {
           logger.warn(`[reports-public] ${unreachablePhotos} report photo(s) unreachable for ${service.id} — serving without storing`);
         } else {
           const key = await putReportPdf(service.id, pdf, {
-            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + tsParagraphSignature + apRenderedSignature + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + tsParagraphSignature + apRenderedSignature + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature() + reportCleanup1020PdfSignature(),
           });
           await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
         }
@@ -2567,21 +2551,10 @@ router.get('/:token/data', async (req, res, next) => {
       const pinnedLawnAssessmentId = requestedAssessment;
       const pinnedLawnHistoryIdentity = requestedAssessment ? require('../services/service-report/assessment-pin').assessmentPinHistory(req.query.asig) : null;
       const pinnedWeekPlanAvailableAt = requestedAssessment && requestedPlan ? (requestedPlan === 'none' ? null : requestedPlan) : undefined;
-      // GATE_REPORT_SIMPLE_WEB (owner 2026-10-17): a live view shows the
-      // work-order document the PDF prints, so it is BUILT as the PDF is
-      // (mode 'pdf'): the same compliance strips (no fixed re-entry figures)
-      // and no live-only fields. View tracking above already ran on the live
-      // mode. Gate read at call time; a partial gates module reads as off.
-      const reportGates = require('../config/feature-gates');
-      // A suppressed (internal-only) report keeps the old page and its
-      // "Not sent to the customer" review bar.
-      const simpleWeb = mode === 'live' && !suppressedTypedReport(service)
-        && typeof reportGates.reportSimpleWebLive === 'function' && reportGates.reportSimpleWebLive();
-      const buildMode = simpleWeb ? 'pdf' : mode;
       const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, {
         // The render path is the only consumer of the cross-sell/referral
         // keys, so it is the only caller that pays to compose them.
-        mode: buildMode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true, planSummary: true, upcomingVisitsCard: true, nearYou: true, lawnPhotoFindings: true,
+        mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true, planSummary: true, upcomingVisitsCard: true, nearYou: true, lawnPhotoFindings: true,
         lawnLighting: true,
         lawnWateringCloseOut: true,
         lawnRainfastWatch: true,
@@ -2595,8 +2568,6 @@ router.get('/:token/data', async (req, res, next) => {
       // /reports/:token/recap/video, meaningless in pdf/static renders.
       // Best-effort — never blocks.
       if (
-        // Keyed on the REQUEST mode: the simple web view shows the recap too,
-        // so recap texts and old /recap links (#visit-recap) still play.
         mode === 'live' && service.scheduled_service_id && !v1Data.internalOnly
         && v1Data.serviceLine === 'pest'
         // Cockroach-family typed reports dropped the V2 perimeter story —
@@ -2619,12 +2590,9 @@ router.get('/:token/data', async (req, res, next) => {
       // Glass is the unconditional report theme now (GATE_REPORT_GLASS retired).
       // Live views only — pdf/static/sms_preview renders never mount the scene,
       // so the print pipeline stays byte-identical.
-      if (buildMode === 'live') {
+      if (mode === 'live') {
         v1Data.glassDefault = true;
       }
-      // The key the page reads to render the work-order document. Absent =
-      // byte-identical payload.
-      if (simpleWeb) v1Data.simpleWebReport = true;
       return res.json(v1Data);
     }
 

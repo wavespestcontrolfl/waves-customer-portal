@@ -72,6 +72,22 @@ function askedServiceLines(stored) {
   return [];
 }
 
+// The ONE service line a V2 category / a catalog service name sits in, else
+// null (bundled_waveguard, inspection_only, other, a name that reads as no
+// line or as several). The make-up move (call-reschedule-apply.js) compares
+// the visit's catalog line with the call's, and a null never matches.
+function lineOfV2Category(category) {
+  return LINE_BY_V2_CATEGORY[String(category || '').toLowerCase()] || null;
+}
+function linesOfServiceName(name) {
+  if (typeof name !== 'string' || !name.trim()) return [];
+  return [...new Set(linesOfKeys(serviceKeysFromText(name)))];
+}
+function lineOfServiceName(name) {
+  const lines = linesOfServiceName(name);
+  return lines.length === 1 ? lines[0] : null;
+}
+
 // The lines an ESTIMATE row priced ("Pest + Lawn" -> both). Empty array =
 // unknown: any line the classifier could not place makes the whole estimate
 // unclassifiable (we cannot prove it left the asked line out). Never throws.
@@ -123,4 +139,4 @@ const estimateMatchesAsk = (asked, row) => !serviceLinesConflict(asked, estimate
 // The call_log columns askedLinesForPromise reads.
 const ASK_CALL_COLUMNS = ['id', 'ai_extraction_enriched', 'v2_extraction_status', 'processing_generation'];
 
-module.exports = { askedServiceLines, estimateServiceLines, serviceLinesConflict, askedLinesForPromise, estimateMatchesAsk, ASK_CALL_COLUMNS };
+module.exports = { lineOfV2Category, linesOfServiceName, lineOfServiceName, askedServiceLines, estimateServiceLines, serviceLinesConflict, askedLinesForPromise, estimateMatchesAsk, ASK_CALL_COLUMNS };

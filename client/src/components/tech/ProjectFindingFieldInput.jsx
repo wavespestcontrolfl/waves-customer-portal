@@ -1,3 +1,4 @@
+import { renderWithDidYouMean } from '../admin/DidYouMean';
 import { useEffect, useMemo, useState } from 'react';
 import AddressAutocomplete from '../AddressAutocomplete';
 import { adminFetch } from '../../lib/adminFetch';
@@ -538,7 +539,7 @@ function CustomerSearchInput({ id, name, value, onChange, placeholder, inputStyl
     }
     const timeout = setTimeout(async () => {
       try {
-        const response = await adminFetch(`/admin/customers?search=${encodeURIComponent(query)}&limit=8`);
+        const response = await adminFetch(`/admin/customers?search=${encodeURIComponent(query)}&limit=8&suggest=1`);
         const body = await response.json();
         setResults((body.customers || body || []).slice(0, 8));
       } catch {
@@ -565,7 +566,7 @@ function CustomerSearchInput({ id, name, value, onChange, placeholder, inputStyl
       />
       {focused && results.length > 0 && (
         <div style={themedPopoverStyle(T)}>
-          {results.map((customer, index) => {
+          {renderWithDidYouMean(results, (customer, index) => {
             const label = customerDisplayName(customer) || 'Customer';
             const meta = customerSearchMeta(customer, field);
             return (

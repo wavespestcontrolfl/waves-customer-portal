@@ -9,6 +9,7 @@ import {
 } from '../components/report/markedPhotoCopy';
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
 import ReportText, { reportSectionsForText } from '../components/report/ReportSections';
+import { isTroubleSpotPhoto, rateWithBasis, sameSentence, techTextBeyondSummary } from './serviceReportCleanup';
 
 // Work-order style service report document (owner direction 2026-08-03,
 // modeled on the TruGreen WO / All U Need service-notification formats):
@@ -136,6 +137,22 @@ function fmtAmount(value) {
   if (!Number.isFinite(num)) return String(value || '').trim();
   return String(parseFloat(num.toFixed(3)));
 }
+
+// The rate cell. GATE_REPORT_CLEANUP_1020 adds what the rate is per when the record says.
+function rateLabel(app, cleanup) {
+  if (!(app.rate && app.rateUnit)) return '—';
+  const amount = fmtAmount(app.rate);
+  return (cleanup && rateWithBasis(app, amount)) || `${amount} ${fmtUnit(app.rateUnit)}`;
+}
+
+// GATE_REPORT_CLEANUP_1020: a photo card as tall as its photo. The old card was a fixed 190px box,
+// so a wide photo sat in a tall gray frame. The image now keeps its own shape at the cell width;
+// only a photo taller than 190px at that width is capped (and letterboxed at the sides), so a
+// portrait photo still never runs past a page break.
+const PHOTO_FIT_STYLE = {
+  display: 'block', width: '100%', height: 'auto', maxHeight: 190, objectFit: 'contain',
+  background: '#F7F8F9', borderRadius: 10, border: `1px solid ${HAIR}`,
+};
 
 function fmtUnit(unit) {
   return String(unit || '').replace(/_/g, ' ').trim();
@@ -359,10 +376,7 @@ function Bullet({ children }) {
   );
 }
 
-// `web` (GATE_REPORT_SIMPLE_WEB, owner 2026-10-17): the same document is the
-// page a customer sees at the report link. It then IS the online report, so
-// the lines that point "to your online report" read as plain facts instead.
-export default function ServiceReportDocument({ data, token, web = false }) {
+export default function ServiceReportDocument({ data, token }) {
   // Remote images (the traced S3 snapshot, photos) can fail during the
   // headless capture. A heading with no image under it is a broken-looking
   // claim in a permanent record, so a failed image drops itself and its
@@ -726,8 +740,14 @@ export default function ServiceReportDocument({ data, token, web = false }) {
   // GATE_LAWN_TECH_PARAGRAPH / GATE_TS_TECH_PARAGRAPH: the frozen "From your technician"
   // paragraph. Lawn carries it in the lead; tree & shrub has no lead and carries it
   // as reportV2.techParagraph. Absent key prints nothing.
-  const techParagraph = v2Lead?.techParagraph
+  // GATE_REPORT_CLEANUP_1020 (data.reportCleanup): it prints only the text the summary above
+  // does not already say, and not at all when the summary says all of it.
+  const reportCleanup = data.reportCleanup === true;
+  const techParagraphFrozen = v2Lead?.techParagraph
     || (data.serviceLine === 'tree_shrub' && typeof v2?.techParagraph === 'string' && v2.techParagraph.trim() ? v2.techParagraph : null);
+  const techParagraph = reportCleanup && techParagraphFrozen
+    ? (techTextBeyondSummary(techParagraphFrozen, summaryParagraphs) || null)
+    : techParagraphFrozen;
   // The lawn V2 payload's reconciled watering lines are the only watering
   // instruction the report prints (see the Re-entry block below).
   const lawnV2Watering = data.serviceLine === 'lawn' && Boolean(v2);
@@ -1009,7 +1029,7 @@ export default function ServiceReportDocument({ data, token, web = false }) {
 
   return (
     <div
-      className={`service-report-v1 service-report-document${web ? ' is-web' : ''}`}
+      className="service-report-v1 service-report-document"
       style={{ background: '#fff', color: INK, fontFamily: FONT, minHeight: '100vh' }}
     >
       <style>{`
@@ -1040,29 +1060,6 @@ export default function ServiceReportDocument({ data, token, web = false }) {
         .service-report-document .doc-station-pin.is-ok { background: #0F7B54; }
         .service-report-document .doc-station-pin.is-serviced { background: #B7791F; }
         .service-report-document .doc-station-pin.is-inaccessible { background: ${MUTED}; }
-        /* GATE_REPORT_SIMPLE_WEB: the sizes are set for a letter-size page,
-           too small for a screen. On the web the whole page is scaled up so the
-           smallest text (9.5px labels) reads at 14px, the customer screen floor
-           (owner sheet 2026-09-03), and body text at about 17px.
-           ServiceReportDocument.web-text-floor.test.js holds the floor. is-web
-           only, so the PDF is unchanged. */
-        .service-report-document.is-web .doc-page { zoom: 1.48; }
-        /* A long link (the products-and-safety URL) wraps instead of running
-           past a 320px phone at that scale. */
-        .service-report-document.is-web a { overflow-wrap: anywhere; }
-        /* GATE_REPORT_SIMPLE_WEB: on a phone or a narrow tablet the web view
-           stacks what the letter-size page sets side by side. A media query
-           sees the unzoomed viewport, so the breakpoint is 640px of page width
-           times the 1.48 zoom (947px). is-web only, so the PDF is unchanged. */
-        @media (max-width: 947px) {
-          .service-report-document.is-web .doc-info-grid { grid-template-columns: minmax(0, 1fr) !important; }
-          .service-report-document.is-web .doc-letterhead,
-          .service-report-document.is-web .doc-title-row { flex-direction: column; align-items: flex-start !important; gap: 8px !important; }
-          .service-report-document.is-web .doc-letterhead > div { text-align: left !important; }
-          .service-report-document.is-web .doc-photo-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
-          .service-report-document.is-web .doc-products th,
-          .service-report-document.is-web .doc-products td { white-space: normal !important; }
-        }
       `}</style>
       <div className="doc-page">
 
@@ -1282,7 +1279,7 @@ export default function ServiceReportDocument({ data, token, web = false }) {
                   : [insight.whatWeSaw, insight.whyItMatters, insight.wavesAction]).filter(Boolean).join(' ')}
               </Bullet>
             ))}
-            {defenseBlock?.summary && <Bullet>{defenseBlock.summary}</Bullet>}
+            {defenseBlock?.summary && !(reportCleanup && sameSentence(defenseBlock.summary, v2StatusLine?.detail)) && <Bullet>{defenseBlock.summary}</Bullet>}
             {defenseItems.map((item) => (
               <Bullet key={item.key || item.label}>
                 <strong>{item.label}{item.status ? ` (${item.status})` : ''}:</strong> {item.detail}
@@ -1294,7 +1291,7 @@ export default function ServiceReportDocument({ data, token, web = false }) {
                 {termiteStatusLine.detail ? ` — ${termiteStatusLine.detail}` : ''}
               </Bullet>
             )}
-            {termiteDefenseBlock?.summary && <Bullet>{termiteDefenseBlock.summary}</Bullet>}
+            {termiteDefenseBlock?.summary && !(reportCleanup && sameSentence(termiteDefenseBlock.summary, termiteStatusLine?.detail)) && <Bullet>{termiteDefenseBlock.summary}</Bullet>}
             {termiteDefenseItems.map((item) => (
               <Bullet key={`termite-${item.key || item.label}`}>
                 <strong>{item.label}{item.status ? ` (${item.status})` : ''}:</strong> {item.detail}
@@ -1463,7 +1460,7 @@ export default function ServiceReportDocument({ data, token, web = false }) {
                           {/* both halves or neither: a bare "5" can't be read
                               as ounces, gallons or grams in a pesticide
                               record, which is worse than showing nothing. */}
-                          {app.rate && app.rateUnit ? `${fmtAmount(app.rate)} ${fmtUnit(app.rateUnit)}` : '—'}
+                          {rateLabel(app, reportCleanup)}
                         </td>
                         <td style={{ padding: '6px 0 1px 10px', textAlign: 'right', whiteSpace: 'nowrap' }}>
                           {app.totalAmount && app.amountUnit ? `${fmtAmount(app.totalAmount)} ${fmtUnit(app.amountUnit)}` : '—'}
@@ -1627,7 +1624,7 @@ export default function ServiceReportDocument({ data, token, web = false }) {
                   stationMap.summary.activity ? `${stationMap.summary.activity} ${STATION_ACTIVITY_SUMMARY[stationMap.program] || 'with activity'}` : null,
                   stationMap.summary.inaccessible ? `${stationMap.summary.inaccessible} inaccessible` : null,
                 ].filter(Boolean).join(' · ')}
-                {' '}· positions to scale{web ? '' : ' — satellite view in your online report'}
+                {' '}· positions to scale — satellite view in your online report
               </div>
             )}
           </div>
@@ -1735,7 +1732,8 @@ export default function ServiceReportDocument({ data, token, web = false }) {
                 {data.reportV2?.photoSummary || data.typedReport?.photoSummary}
               </p>
             )}
-            <div className="doc-photo-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10 }}>
+            {/* GATE_REPORT_CLEANUP_1020: each card sizes to its own photo; a taller neighbor no longer stretches it. */}
+            <div className="doc-photo-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10, ...(reportCleanup ? { alignItems: 'start' } : {}) }}>
               {photos.map((photo) => (
                 <figure key={photo.id || photo.url} className="doc-keep" style={{ margin: 0 }}>
                   {/* fixed-height contain thumbnails: a portrait field photo
@@ -1747,7 +1745,7 @@ export default function ServiceReportDocument({ data, token, web = false }) {
                       width: '100%', height: 190, background: '#F7F8F9', borderRadius: 10,
                       border: `1px dashed ${LINE}`, color: MUTED, fontSize: 9.5, padding: 8, boxSizing: 'border-box',
                     }}>
-                      {web ? 'Photo unavailable right now' : 'Photo unavailable in this document — view it in your online report'}
+                      Photo unavailable in this document — view it in your online report
                     </div>
                   ) : (
                   <img
@@ -1758,7 +1756,7 @@ export default function ServiceReportDocument({ data, token, web = false }) {
                        readers and the PDF accessibility layer (codex P1). */
                     alt={(!suppressPhotoCaption(photo) && photo.caption) || 'Service photo'}
                     onError={() => markImageFailed(photo.url)}
-                    style={{ display: 'block', width: '100%', height: 190, objectFit: 'contain', background: '#F7F8F9', borderRadius: 10, border: `1px solid ${HAIR}` }}
+                    style={reportCleanup ? PHOTO_FIT_STYLE : { display: 'block', width: '100%', height: 190, objectFit: 'contain', background: '#F7F8F9', borderRadius: 10, border: `1px solid ${HAIR}` }}
                   />
                   )}
                   {!suppressPhotoCaption(photo) && (photo.caption || photo.stateBadge) && (
@@ -1769,6 +1767,13 @@ export default function ServiceReportDocument({ data, token, web = false }) {
                 </figure>
               ))}
             </div>
+            {/* GATE_REPORT_CLEANUP_1020: the server's one fixed line for a trouble-spot photo
+                (what the spot is, what Waves does next). Only beside that photo. */}
+            {reportCleanup && typeof data.troubleSpotNote === 'string' && data.troubleSpotNote.trim() && photos.some(isTroubleSpotPhoto) && (
+              <p data-testid="doc-trouble-spot-note" style={{ margin: '8px 0 0', fontSize: 11, lineHeight: 1.5, color: INK }}>
+                <strong>Trouble spot:</strong> {data.troubleSpotNote.trim()}
+              </p>
+            )}
           </div>
         )}
 
@@ -1908,20 +1913,14 @@ export default function ServiceReportDocument({ data, token, web = false }) {
             {/* GATE_LAWN_REPORT_COPY_FIXES (server sets lawnCopyFixes on a lawn report): this sentence is
                 the pest program's re-service wording, so a lawn report prints nothing here. */}
             {isWaveGuard && data.lawnCopyFixes !== true ? <>WaveGuard members receive free re-service when covered activity continues after the treatment window.<br /></> : null}
-            {web
-              ? <>Questions about today&apos;s service? Call {WAVES_SUPPORT_PHONE_DISPLAY}.<br /></>
-              : (
-                <>
-                  Questions about today&apos;s service? Ask Waves in your online report or call {WAVES_SUPPORT_PHONE_DISPLAY}.
-                  <br />
-                  Full interactive report:{' '}
-                  {/* a real <a> so the PDF carries a link annotation — viewer URL
-                      autodetection is optional, and this is the only route to the
-                      analysis this record intentionally omits */}
-                  <a href={reportUrl} style={{ color: NAVY, textDecoration: 'underline' }}>{reportUrl}</a>
-                  <br />
-                </>
-              )}
+            Questions about today&apos;s service? Ask Waves in your online report or call {WAVES_SUPPORT_PHONE_DISPLAY}.
+            <br />
+            Full interactive report:{' '}
+            {/* a real <a> so the PDF carries a link annotation — viewer URL
+                autodetection is optional, and this is the only route to the
+                analysis this record intentionally omits */}
+            <a href={reportUrl} style={{ color: NAVY, textDecoration: 'underline' }}>{reportUrl}</a>
+            <br />
             {/* Owner ask 2026-09-28: every record of service links to the
                 public Products & Safety page. The footer prints on every
                 record, product rows or not; the URL shows in full so a

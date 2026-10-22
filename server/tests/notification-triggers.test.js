@@ -200,6 +200,19 @@ describe('notification trigger push tags', () => {
     expect(built.body).not.toContain('calling in now');
   });
 
+  test('promise-chaser headline leads with the caller name; with no name it leads with the formatted number (owner 2026-10-21)', () => {
+    const named = TRIGGER_REGISTRY.promise_chaser.build({
+      name: 'Martin Fixtureson', phone: '+19415550199', what: 'quote', when: 'Oct 19, 3:50 PM', calledAtLabel: '12:31 PM',
+    });
+    expect(named.title).toBe('Martin Fixtureson called back — we still owe a quote');
+    const unnamed = TRIGGER_REGISTRY.promise_chaser.build({
+      name: null, phone: '+19415550199', what: 'quote', when: 'Oct 19, 3:50 PM', calledAtLabel: '12:31 PM',
+    });
+    expect(unnamed.title).toBe('(941) 555-0199 called back — we still owe a quote');
+    expect(unnamed.body).toBe('+19415550199 called at 12:31 PM. We still owe them a quote promised Oct 19, 3:50 PM.');
+    expect(TRIGGER_REGISTRY.promise_chaser.build({ what: 'callback' }).title).toBe('A lead called back — we still owe a callback');
+  });
+
   test('bundle quote trigger distinguishes inquiry from self-applied bundle', () => {
     const inquiry = TRIGGER_REGISTRY.bundle_quote_requested.build({
       customerName: 'Existing Appointment Demo',
@@ -330,6 +343,20 @@ describe('triggerNotification bell outcome', () => {
     db.mockImplementation((table) => (
       table === 'technicians' ? tableMock([{ id: 'admin-1' }]) : tableMock([])
     ));
+  });
+
+  test('pushOnly re-sends the push without writing a second bell row (missed-call push retry)', async () => {
+    const PushService = require('../services/push-notifications');
+    PushService.sendToAdminUsers.mockClear();
+    const stats = await triggerNotification('customer_missed_call', { customerId: null, name: 'Test Caller', phone: '+19415550100', callLogId: 'call-1' },
+      { pushOnly: true });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(stats.bellWritten).toBe(false);
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+    expect(PushService.sendToAdminUsers.mock.calls[0][1]('admin-1').tag).toBe('waves-customer_missed_call-call-1');
+    // Without the option the same call writes its bell as before.
+    await triggerNotification('customer_missed_call', { customerId: null, name: 'Test Caller', phone: '+19415550100', callLogId: 'call-1' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   });
 
   test('a keyed SMS replay reuses its committed bell and does not push again', async () => {

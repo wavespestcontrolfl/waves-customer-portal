@@ -7,6 +7,7 @@ import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import { setGlassDefault } from '../lib/estimate-glass-copy';
 import WavesShell from '../components/brand/WavesShell';
 import TrustFooter from '../components/brand/TrustFooter';
+import { applicationMonthsBreakdown } from '../lib/estimateMonthlyAverage';
 import EstimateViewPage, { CombinedRecurringPriceCard, ContactGapFields, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, MonthlyAverageSummary, PlanTotalSummary, ReviewPhase, SectionOneTimeBlock, ServiceSection, SuccessCard, estimateAddServiceOffer, estimateHasRegulatedCertificateSurface, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimeLawnGuideOffered, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
 import oneTimeCopyModule from '../../../server/services/estimate-one-time-copy.js';
 
@@ -2709,7 +2710,7 @@ describe('OneTimePriceCard fallback (pre-push P0 on #3521)', () => {
   });
 });
 
-// GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): the page prints "about $X a
+// GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): the page prints "$X a
 // month" under each per-application price, one plan line for several services,
 // and the context line once. /data carries monthlyAverageEnabled only with the
 // gate on; without it the page is as before.
@@ -2775,7 +2776,7 @@ describe('monthly average beside per-application prices', () => {
       expect(el).not.toBeNull();
       return el;
     });
-    expect(line.textContent).toBe('about $31.33 a month');
+    expect(line.textContent).toBe('$31.33 a month');
     expect(screen.getAllByText('$94.00').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Averaged over the year. You pay after each application.')).toHaveLength(1);
     expect(container.querySelector('[data-monthly-average-summary]')).toBeNull();
@@ -2790,8 +2791,8 @@ describe('monthly average beside per-application prices', () => {
       return el;
     });
     const rows = [...summary.querySelectorAll('div > div')].map((el) => el.textContent);
-    expect(rows).toContain('Pest Controlabout $30.00 a month');
-    expect(rows).toContain('Lawn Careabout $42.30 a month');
+    expect(rows).toContain('Pest Control$30.00 a month');
+    expect(rows).toContain('Lawn Care$42.30 a month');
     const plan = summary.querySelector('[data-monthly-average-plan]').textContent;
     expect(plan).toContain('Your plan averages (10% bundle savings included)');
     expect(cents(plan.split(')')[1])).toBe(7230);
@@ -2801,6 +2802,45 @@ describe('monthly average beside per-application prices', () => {
     expect(summary.textContent).toContain('One-time charges are not in the average.');
     // The plan line is the SUM of nothing the customer pays at once, and the combined "Plan total" ban stands.
     expect(container.textContent).not.toMatch(/Plan total/i);
+  });
+
+  // Application months (EST-2026-1185, codex #6399 r2): with the monthly
+  // average on, the cards drop their "$X a month" slices; the summary card
+  // carries per-application prices, both month amounts and the average.
+  it('pest quarterly + mosquito monthly: no per-card slices, the breakdown card instead', async () => {
+    const mosquito = {
+      key: 'mosquito', label: 'Mosquito', isRecurring: true, isPest: false, waveGuardTierEligible: true,
+      defaultFrequencyKey: 'monthly12', copy: { priceWording: {} },
+      frequencies: [{
+        key: 'monthly12', label: 'Monthly', serviceCategory: 'mosquito', serviceTierKey: 'monthly12', visitsPerYear: 12,
+        monthly: 74.7, annual: 896.4, billingFrequencyKey: 'monthly', perTreatment: 74.7, billedPerApplication: true,
+        perServiceTreatments: [{ service: 'mosquito', label: 'Mosquito', displayPrice: 74.7, perTreatment: 74.7, visitsPerYear: 12, monthly: 74.7 }],
+        included: [{ key: 'mosquito_monthly12', label: 'Monthly mosquito control program', detail: null }], addOns: [],
+      }],
+    };
+    const payload = {
+      ...base,
+      monthlyAverageEnabled: true,
+      pricing: {
+        services: [pestSection(115.2, 4, 38.4), mosquito],
+        frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 113.1, annual: 1357.2 }],
+        combinedRecurring: { monthlySubtotal: 113.1, annualSubtotal: 1357.2, waveGuardTierLabel: 'Silver', waveGuardDiscountPct: 0.1 },
+        renderFlags: { showRecurringSummary: true }, waveGuardTier: 'Silver', askChips: [],
+        oneTimeBreakdown: { total: 0, items: [] }, defaultServiceMode: 'recurring',
+      },
+    };
+    stub(payload);
+    const { container } = render(<EstimateViewPage />);
+    const summary = await waitFor(() => {
+      const el = container.querySelector('[data-application-months]');
+      expect(el).not.toBeNull();
+      return el;
+    });
+    expect(container.querySelectorAll('[data-monthly-average-line]')).toHaveLength(0);
+    expect(container.textContent).not.toContain('$38.40 a month');
+    expect(summary.querySelector('[data-application-months-applied]').textContent).toContain('$189.90');
+    expect(summary.querySelector('[data-application-months-other]').textContent).toContain('$74.70');
+    expect(summary.querySelector('[data-monthly-average-plan]').textContent).toContain('$113.10 a month');
   });
 
   it('single service with a positive one-time fee: the context sentence says one-time charges are not in the average', async () => {
@@ -2925,7 +2965,7 @@ describe('monthly average beside per-application prices', () => {
       ],
     };
     const { container, rerender } = render(<MonthlyAverageSummary model={model} />);
-    const lines = [...container.querySelectorAll('div > div')].filter((el) => !el.hasAttribute('data-monthly-average-plan') && /^[A-Za-z&\s]+about/.test(el.textContent));
+    const lines = [...container.querySelectorAll('div > div')].filter((el) => !el.hasAttribute('data-monthly-average-plan') && /^[A-Za-z&\s]+\$/.test(el.textContent));
     expect(lines.reduce((sum, el) => sum + cents(el.textContent), 0)).toBe(cents(container.querySelector('[data-monthly-average-plan]').textContent.split(')')[1]));
     rerender(<MonthlyAverageSummary model={{ ...model, credit: { label: 'Referral Credit', monthly: 2.08 } }} hasOneTime />);
     expect(container.textContent).toContain('Referral Credit');
@@ -2934,5 +2974,31 @@ describe('monthly average beside per-application prices', () => {
     // A single service has no summary.
     rerender(<MonthlyAverageSummary model={{ ...model, multi: false }} />);
     expect(container).toBeEmptyDOMElement();
+  });
+
+  // Application months (EST-2026-1185): the customer sees what
+  // each application costs, what each kind of month bills, then the average.
+  it('MonthlyAverageSummary with a breakdown: per-application prices, the two month amounts, then the average', () => {
+    const model = {
+      multi: true, planMonthly: 113.1, bundlePct: 10, credit: null,
+      services: [
+        { key: 'pest_control', label: 'Pest Control', perApplication: 115.2, visits: 4, monthly: 38.4 },
+        { key: 'mosquito', label: 'Mosquito', perApplication: 74.7, visits: 12, monthly: 74.7 },
+      ],
+    };
+    const breakdown = applicationMonthsBreakdown(model);
+    const { container } = render(<MonthlyAverageSummary model={model} breakdown={breakdown} />);
+    const text = container.textContent;
+    expect(text).toContain('$115.20 per application');
+    expect(text).toContain('every 3 months');
+    expect(text).toContain('$74.70 per application');
+    expect(container.querySelector('[data-application-months-applied]').textContent).toContain('Months with Pest Control (4 a year)');
+    expect(container.querySelector('[data-application-months-applied]').textContent).toContain('$189.90');
+    expect(container.querySelector('[data-application-months-other]').textContent).toContain('Other months (8 a year)');
+    expect(container.querySelector('[data-application-months-other]').textContent).toContain('Mosquito only');
+    expect(container.querySelector('[data-monthly-average-plan]').textContent).toContain('$113.10 a month');
+    // The per-service monthly slices are not printed in this layout.
+    expect(text).not.toContain('$38.40');
+    expect(text).not.toMatch(/per visit|\/mo\b/);
   });
 });

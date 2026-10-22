@@ -522,7 +522,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
       } : undefined}
       className={dark ? undefined : "mt-2 mb-3 flex flex-col gap-2"}
     >
-      {shown.map((action) => {
+      {shown.map((action, cardIndex) => {
         const status = statusById[action.id] || action.resolvedStatus || (action.receipt ? receiptState(action.receipt) : undefined);
         const receiptBody = receiptById[action.id] || action.receipt;
         const receiptResult = receiptBody?.result;
@@ -548,6 +548,10 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
         // A card minted as preview-only before the switches' commit path
         // deployed is never confirmable (the server refuses it too).
         const previewOnly = action.contract?.preview_only === true;
+        // Several cards in one answer (GATE_IB_MULTI_CARD): each card says which
+        // one it is, and its buttons are described by that title (their names stay Confirm and Cancel). One card reads as before.
+        const several = shown.length > 1;
+        const titleId = `pending-card-title-${action.id}`;
 
         return (
           <div
@@ -563,10 +567,11 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
             }`}
           >
             <div
+              id={several ? titleId : undefined}
               style={dark ? { color: D.text, fontSize: 14, fontWeight: 500, marginBottom: 6 } : undefined}
               className={dark ? undefined : "text-[14px] text-zinc-900 font-medium mb-1.5"}
             >
-              {expired ? "Expired proposal: " : settled ? "Action result: " : previewOnly ? "Preview only: " : "Awaiting your confirmation: "}{action.contract?.action_label || action.tool}
+              {expired ? "Expired proposal: " : settled ? "Action result: " : previewOnly ? "Preview only: " : several ? `Awaiting your confirmation (card ${cardIndex + 1} of ${shown.length}): ` : "Awaiting your confirmation: "}{action.contract?.action_label || action.tool}
             </div>
 
             {settled || expired ? <details style={{ marginBottom: 8, fontSize: 14 }}>
@@ -654,6 +659,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
                 {!previewOnly && <button
                   type="button"
                   disabled={busy}
+                  aria-describedby={several ? titleId : undefined}
                   onClick={() => decide(action, "confirm")}
                   style={dark ? {
                     background: D.green, color: D.white, border: "none", borderRadius: 8,
@@ -667,6 +673,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
                 <button
                   type="button"
                   disabled={busy}
+                  aria-describedby={several ? titleId : undefined}
                   onClick={() => decide(action, "cancel")}
                   style={dark ? {
                     background: "transparent", color: D.muted, border: `1px solid ${D.border}`,

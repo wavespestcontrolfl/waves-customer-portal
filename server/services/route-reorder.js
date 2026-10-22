@@ -49,6 +49,8 @@ const { computeWindowFitOrder, effectiveWindowRange, currentOrder, computeChrono
   simulateArrivalRoute, isCoVisitPair, advanceCoVisit, startCoVisitChain,
   staleOrderReasons, promisedWindowOrder } = require('./route-reorder-window-fit');
 
+const { loadTechStartPoints, homeFromMap, assertStartPointUnchanged } = require('./scheduling/tech-start-point');
+
 const GOOGLE_WAYPOINT_CAP = 25;
 // The reorder pass models future days, where en_route/on_site can't occur;
 // excluding them anyway keeps the set correct even on a manual re-run.
@@ -217,7 +219,9 @@ function violatesWindowFeasibility(RouteOptimizer, orderedStops, sourceStops, le
 }
 
 /**
- * Distance of an ordered stop sequence (HQ → stops → HQ) under the ONE shared
+ * Distance of an ordered stop sequence (HQ → stops → HQ; `origin` and `end`
+ * are the technician's start point under GATE_TECH_START_POINTS, and the
+ * return leg goes to `end` even when `origin` is the truck's live position) under the ONE shared
  * in-house model (route-optimizer's haversine legs through fallbackLegMetrics,
  * which is gate-consistent for meters). Savings decisions must compare BEFORE
  * and AFTER under the SAME model: optimizeRoute's own reported numbers mix
@@ -227,7 +231,7 @@ function violatesWindowFeasibility(RouteOptimizer, orderedStops, sourceStops, le
  * model decides whether that order is worth writing. Coordless stops
  * contribute nothing on either side.
  */
-function modelDistanceMeters(RouteOptimizer, orderedStops, origin = RouteOptimizer.HQ) {
+function modelDistanceMeters(RouteOptimizer, orderedStops, origin = RouteOptimizer.HQ, end = RouteOptimizer.HQ) {
   let prev = origin;
   let total = 0;
   for (const s of orderedStops) {
@@ -237,7 +241,7 @@ function modelDistanceMeters(RouteOptimizer, orderedStops, origin = RouteOptimiz
     total += RouteOptimizer.fallbackLegMetrics(RouteOptimizer.haversine(prev.lat, prev.lng, lat, lng)).meters;
     prev = { lat, lng };
   }
-  total += RouteOptimizer.fallbackLegMetrics(RouteOptimizer.haversine(prev.lat, prev.lng, RouteOptimizer.HQ.lat, RouteOptimizer.HQ.lng)).meters;
+  total += RouteOptimizer.fallbackLegMetrics(RouteOptimizer.haversine(prev.lat, prev.lng, end.lat, end.lng)).meters;
   return total;
 }
 
@@ -245,7 +249,7 @@ function modelDistanceMeters(RouteOptimizer, orderedStops, origin = RouteOptimiz
  *  model — the duration mirror of modelDistanceMeters, so a caller that sums
  *  a bucket's mileage can report its driving time from the same legs rather
  *  than charging it zero (codex round 4 P1). */
-function modelDriveMinutes(RouteOptimizer, orderedStops, origin = RouteOptimizer.HQ) {
+function modelDriveMinutes(RouteOptimizer, orderedStops, origin = RouteOptimizer.HQ, end = RouteOptimizer.HQ) {
   let prev = origin;
   let total = 0;
   for (const s of orderedStops) {
@@ -255,7 +259,7 @@ function modelDriveMinutes(RouteOptimizer, orderedStops, origin = RouteOptimizer
     total += RouteOptimizer.fallbackLegMetrics(RouteOptimizer.haversine(prev.lat, prev.lng, lat, lng)).minutes || 0;
     prev = { lat, lng };
   }
-  total += RouteOptimizer.fallbackLegMetrics(RouteOptimizer.haversine(prev.lat, prev.lng, RouteOptimizer.HQ.lat, RouteOptimizer.HQ.lng)).minutes || 0;
+  total += RouteOptimizer.fallbackLegMetrics(RouteOptimizer.haversine(prev.lat, prev.lng, end.lat, end.lng)).minutes || 0;
   return total;
 }
 
@@ -504,6 +508,11 @@ function uncertifiableReason({ sourceStops, startMin, googleSource, legs, requir
 function chooseWindowSafeOrder({
   RouteOptimizer, googleOrder: rawGoogleOrder, sourceStops: rawSourceStops, googleSource, legs: rawLegs = null,
   startMin = null, origin = null, requireCalibratedModel = false, elapsedCutoffMin,
+  // Where this technician's day starts and ends (GATE_TECH_START_POINTS, a
+  // staff route tool only). Absent = the office, byte-identical to before.
+  // `origin` (the truck's live position on a day in progress) still wins for
+  // the FIRST leg; the van always drives home to `home`.
+  home = null,
 }) {
   const { sourceStops, googleOrder, legs } = driveableInputs({ rawGoogleOrder, rawSourceStops, rawLegs, origin });
   // beforeMeters (current running order, same model as the nightly ledger's
@@ -514,8 +523,9 @@ function chooseWindowSafeOrder({
   // truck-blind list that conflates separate trucks into one fictitious
   // route (pre-push audit P1 — the exact "wrong savings number" defect
   // class this whole change exists to close).
-  const from = origin || RouteOptimizer.HQ;
-  const beforeMeters = modelDistanceMeters(RouteOptimizer, currentOrder(sourceStops), from);
+  const end = home || RouteOptimizer.HQ;
+  const from = origin || end;
+  const beforeMeters = modelDistanceMeters(RouteOptimizer, currentOrder(sourceStops), from, end);
   // The simulation clock never runs EARLIER than the 08:00 day open — a
   // 07:00 request must not be told the truck can spend that hour driving and
   // mark an 08:00 promise reachable (codex round 2 P1). The elapsed-window
@@ -555,13 +565,13 @@ function chooseWindowSafeOrder({
     // identity off the stop objects it is handed, so simulating the originals
     // makes an overdue bundle look like separate visits, and a null sim is
     // reported as zero drive time for that whole truck (codex round 5 P1).
-    const sim = simulateArrivalRoute(RouteOptimizer, guardRange, relaxed(googleOrder), { startMin: simStart, origin: from });
+    const sim = simulateArrivalRoute(RouteOptimizer, guardRange, relaxed(googleOrder), { startMin: simStart, origin: from, end });
     return {
       orderedStops: googleOrder,
       source: googleSource,
       conflict,
       beforeMeters,
-      afterMeters: modelDistanceMeters(RouteOptimizer, googleOrder, from),
+      afterMeters: modelDistanceMeters(RouteOptimizer, googleOrder, from, end),
       // null only if a legal order somehow fails the same-model simulation
       // the guards themselves already vetted — belt and suspenders.
       afterSeconds: sim ? Math.round(sim.travelMin * 60) : null,
@@ -573,7 +583,7 @@ function chooseWindowSafeOrder({
   }
   const fallback = computeWindowFitOrder(RouteOptimizer, currentOrder(guardStops), {
     effectiveWindowStart, effectiveWindowRange: guardRange, violatesWindowChronology, violatesWindowFeasibility, modelDistanceMeters,
-  }, { startMin: simStart, origin: from });
+  }, { startMin: simStart, origin: from, end });
   if (!fallback) {
     return { orderedStops: null, reason: 'NO_FEASIBLE_IMPROVEMENT', conflict, beforeMeters };
   }
@@ -755,7 +765,10 @@ async function assertTechDayOriginsFresh(trx, dateStr, techDayOrigins, { technic
  * than half-writing another tech's fine segment.
  */
 function resolveWindowSafeOrderByTechDay({ RouteOptimizer, orderedStops, sourceStops, googleSource, legs = null,
-  startMin = null, techDayOrigins = null, requireCalibratedModel = true, elapsedCutoffMin }) {
+  startMin = null, techDayOrigins = null, requireCalibratedModel = true, elapsedCutoffMin,
+  // Map<lowercase tech id, start point> (loadTechStartPoints). Absent, or a
+  // tech not in it: that tech starts and ends at the office.
+  techHomes = null }) {
   const sourceById = new Map(sourceStops.map((s) => [s.id, s]));
   const byTech = new Map();
   for (const s of sourceStops) {
@@ -784,7 +797,7 @@ function resolveWindowSafeOrderByTechDay({ RouteOptimizer, orderedStops, sourceS
     const outcome = chooseWindowSafeOrder({
       RouteOptimizer, googleOrder: slice, sourceStops: techStops, googleSource, legs: legsAlign, startMin,
       origin: techDayOrigins ? techDayOrigins.origins.get(techId) || null : null,
-      requireCalibratedModel, elapsedCutoffMin,
+      requireCalibratedModel, elapsedCutoffMin, home: homeFromMap(techHomes, techId),
     });
     if (!outcome.orderedStops) return { refusal: { technicianId: techId, ...outcome } };
     resolvedByTech.set(techId, outcome);
@@ -974,7 +987,7 @@ function boundedDateList(rawDates, today, lastDate) {
  * any non-Google order (its own window-fit repair included). Legless
  * certification is otherwise only for a day Google never ran on.
  */
-function canonicalizeBaselineOrder(RouteOptimizer, techStops, googleRun = null) {
+function canonicalizeBaselineOrder(RouteOptimizer, techStops, googleRun = null, home = null) {
   const orderedStops = promisedWindowOrder(techStops);
   const ids = (order) => order.map((s) => s.id).join(',');
   const googleAligned = !!googleRun && ids(googleRun.orderedStops || []) === ids(orderedStops);
@@ -982,6 +995,7 @@ function canonicalizeBaselineOrder(RouteOptimizer, techStops, googleRun = null) 
     RouteOptimizer, googleOrder: orderedStops, sourceStops: techStops,
     googleSource: googleAligned ? googleRun.source : 'promised_window',
     legs: googleAligned ? googleRun.legs : null,
+    home,
   });
   if (UNCERTIFIABLE_REASONS.has(guard.reason)) return null;
   if (guard.conflict === 'WINDOW_ORDER_CONFLICT') return { conflict: 'WINDOW_ORDER_CONFLICT' };
@@ -992,8 +1006,8 @@ function canonicalizeBaselineOrder(RouteOptimizer, techStops, googleRun = null) 
 /** True when the promised-window baseline would actually be written for this
  *  tech-day (certified, and different from what is stored) — how a capped
  *  run tells a day it had to pass over from one it could never write. */
-function baselineWritable(RouteOptimizer, techStops) {
-  const baseline = canonicalizeBaselineOrder(RouteOptimizer, techStops);
+function baselineWritable(RouteOptimizer, techStops, home = null) {
+  const baseline = canonicalizeBaselineOrder(RouteOptimizer, techStops, null, home);
   return !!baseline?.orderedStops && routeOrderChanges(techStops, baseline.orderedStops).length > 0;
 }
 
@@ -1086,13 +1100,20 @@ function canonicalSourceLabel(repair, sourceField) {
  * swap/rebooker/manual reorder mid-run — the latter caught by the commit
  * guard's route_order re-check).
  */
-async function writeTechDayOrder(conn, { dateStr, techId, techStops, finalOrdered, repair, opts, now, repairGates }) {
+async function writeTechDayOrder(conn, { dateStr, techId, techStops, finalOrdered, repair, opts, now, repairGates, home }) {
   const stale = (msg) => Object.assign(new Error(msg), { code: 'STALE_TECH_DAY' });
   await conn.transaction(async (trx) => {
     await trx.raw(
       'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
       ['slot-reserve', `${techId}:${dateStr}`],
     );
+    // The start point the order was certified against must still be the
+    // tech's (GATE_TECH_START_POINTS; a caller with no plan point, such as the
+    // cleanup script's rollback, passes none and is not fenced).
+    if (home !== undefined) {
+      await assertStartPointUnchanged(trx, techId, home,
+        () => Object.assign(new Error('technician start point changed during the run'), { code: 'START_POINT_CHANGED' }));
+    }
     const live = await trx('scheduled_services')
       .where('scheduled_services.scheduled_date', dateStr)
       .where('scheduled_services.technician_id', techId)
@@ -1218,6 +1239,11 @@ function classifyWriteError(writeErr, { summary, entryBase }) {
     logger.warn(`[route-reorder] ${entryBase.date} tech ${entryBase.technician_id}: superseded during the run — rolled back (${writeErr.message})`);
     return false;
   }
+  if (writeErr.code === 'START_POINT_CHANGED') {
+    summary.skipped.push({ ...entryBase, reason: 'START_POINT_CHANGED', detail: writeErr.message });
+    logger.warn(`[route-reorder] ${entryBase.date} tech ${entryBase.technician_id}: start point changed during the run — rolled back`);
+    return false;
+  }
   if (writeErr.code === 'LOCKED_STOP') {
     summary.skipped.push({ ...entryBase, reason: 'LOCKED_STOP', detail: writeErr.message });
     logger.warn(`[route-reorder] ${entryBase.date} tech ${entryBase.technician_id}: staff-locked — rolled back`);
@@ -1237,10 +1263,10 @@ function classifyWriteError(writeErr, { summary, entryBase }) {
  * true, failed } once this function has itself pushed the outcome (applied,
  * dry-run plan, or a classified write failure) onto `summary`.
  */
-async function attemptCanonicalizeWrite({ conn, dateStr, techId, techStops, staleReasons, entryBase, opts, now, RouteOptimizer, summary, repairGates, baseline: certified }) {
+async function attemptCanonicalizeWrite({ conn, dateStr, techId, techStops, staleReasons, entryBase, opts, now, RouteOptimizer, summary, repairGates, baseline: certified, home = null }) {
   // `certified`: the baseline the caller already certified against Google's
   // run (canonicalFloorBaseline); absent on the paths where Google never ran.
-  const baseline = certified !== undefined ? certified : canonicalizeBaselineOrder(RouteOptimizer, techStops);
+  const baseline = certified !== undefined ? certified : canonicalizeBaselineOrder(RouteOptimizer, techStops, null, home);
   if (!baseline) return { handled: false };
   if (baseline.conflict) {
     // A DISTINCT, reported skip — never silently falls through to this
@@ -1261,7 +1287,7 @@ async function attemptCanonicalizeWrite({ conn, dateStr, techId, techStops, stal
     return { handled: true, failed: false };
   }
   try {
-    await writeTechDayOrder(conn, { dateStr, techId, techStops, finalOrdered: baseline.orderedStops, repair: null, opts, now, repairGates });
+    await writeTechDayOrder(conn, { dateStr, techId, techStops, finalOrdered: baseline.orderedStops, repair: null, opts, now, repairGates, home });
   } catch (writeErr) {
     return { handled: true, failed: classifyWriteError(writeErr, { summary, entryBase }) };
   }
@@ -1351,9 +1377,9 @@ function techDayCanonicalizeState({ canonicalizeStaleEnabled, techStops, dayFroz
  *  from: the baseline's own distance, else the stored order's (byte-identical
  *  to today when not canonicalizing). A conflicted baseline ({ conflict }, no
  *  `.meters`) is not a usable comparator either — same fallback as none. */
-function canonicalFloorBaseline(RouteOptimizer, { repair, staleReasons, techStops, beforeMeters, googleRun }) {
+function canonicalFloorBaseline(RouteOptimizer, { repair, staleReasons, techStops, beforeMeters, googleRun, home = null }) {
   const canonicalBaseline = (!repair && staleReasons.length > 0)
-    ? canonicalizeBaselineOrder(RouteOptimizer, techStops, googleRun) : null;
+    ? canonicalizeBaselineOrder(RouteOptimizer, techStops, googleRun, home) : null;
   const floorBaselineMeters = canonicalBaseline?.meters != null ? canonicalBaseline.meters : beforeMeters;
   return { canonicalBaseline, floorBaselineMeters };
 }
@@ -1450,6 +1476,11 @@ async function runRouteReorder(opts = {}, conn = db) {
   let status = 'completed';
 
   try {
+    // Each technician's start point: ONE query per run (none with the gate
+    // off), never logged. A tech missing from the map starts and ends at the
+    // office. A failed read is not "no points": it fails the run below, so
+    // nothing is written from the office by mistake.
+    const techHomes = await loadTechStartPoints(conn);
     for (const dateStr of dates) {
       let stops;
       try {
@@ -1546,6 +1577,7 @@ async function runRouteReorder(opts = {}, conn = db) {
 
       for (const [techId, techStops] of byTech) {
         techIds.add(techId);
+        const home = homeFromMap(techHomes, techId);
         const entryBase = { date: dateStr, technician_id: techId, stops: techStops.length };
         try {
           // Staff controls are absolute: auto_dispatch_locked (temporary)
@@ -1565,7 +1597,7 @@ async function runRouteReorder(opts = {}, conn = db) {
             appliedCount: summary.applied.length, maxApplies: config.maxAppliesPerRun,
           });
           const { staleReasons } = canon;
-          const canonicalizeArgs = { conn, dateStr, techId, techStops, staleReasons, entryBase, opts, now, RouteOptimizer, summary, repairGates };
+          const canonicalizeArgs = { conn, dateStr, techId, techStops, staleReasons, entryBase, opts, now, RouteOptimizer, summary, repairGates, home };
           // Either the promised-window baseline write fully handles this
           // tech-day (applied, a dry-run plan entry, or a classified write
           // failure), or `skipEntry` is recorded instead (after `onSkip`) —
@@ -1585,7 +1617,7 @@ async function runRouteReorder(opts = {}, conn = db) {
           // precedence the forward pass gives the cap. A day the shared
           // guard would never certify (any coordless stop) keeps its own
           // coordinate reason — the cap is not why it was skipped.
-          const canonicalizeOnlyOrSkip = (skipEntry, onSkip) => (canon.capped && baselineWritable(RouteOptimizer, techStops)
+          const canonicalizeOnlyOrSkip = (skipEntry, onSkip) => (canon.capped && baselineWritable(RouteOptimizer, techStops, home)
             ? canonicalizeOrSkip(false, { ...entryBase, reason: 'MAX_APPLIES_REACHED' })
             : canonicalizeOrSkip(canon.eligible, skipEntry, onSkip));
           const withCoords = techStops.filter((s) => parseFloat(s.lat) && parseFloat(s.lng));
@@ -1611,7 +1643,7 @@ async function runRouteReorder(opts = {}, conn = db) {
           // Baseline = the current running order. Every stop must survive
           // the repair or optimizer; neither path may silently truncate it.
           const ordered = currentOrder(techStops);
-          const repair = repairEnabled ? computeChronologicalRepair(RouteOptimizer, ordered) : null;
+          const repair = repairEnabled ? computeChronologicalRepair(RouteOptimizer, ordered, home) : null;
           if (!repair && withCoords.length > GOOGLE_WAYPOINT_CAP) {
             // The pure repair never reaches Google's waypoint-limited API —
             // same coordinates-not-needed exception as above.
@@ -1629,12 +1661,12 @@ async function runRouteReorder(opts = {}, conn = db) {
           }
           const result = repair ? {
             orderedStops: repair.orderedStops,
-            totalDistanceMeters: modelDistanceMeters(RouteOptimizer, repair.orderedStops),
+            totalDistanceMeters: modelDistanceMeters(RouteOptimizer, repair.orderedStops, home, home),
             totalDurationSeconds: Math.round(repair.simulation.travelMin * 60),
             source: 'chronological_repair',
           } : await RouteOptimizer.optimizeRoute(
             ordered.map((s) => ({ id: s.id, lat: parseFloat(s.lat) || null, lng: parseFloat(s.lng) || null, serviceType: s.service_type })),
-            { startLat: RouteOptimizer.HQ.lat, startLng: RouteOptimizer.HQ.lng, endAtStart: true, techId },
+            { startLat: home.lat, startLng: home.lng, endAtStart: true, techId },
           );
           // PERMUTATION GUARD (uncapped audit P1): orderedStops is built from
           // the external API's waypoint-index list, and route-optimizer
@@ -1656,8 +1688,8 @@ async function runRouteReorder(opts = {}, conn = db) {
           }
           // SAME-MODEL before/after — never subtract Google road meters from a
           // straight-line baseline (codex round-2 P1).
-          const beforeMeters = modelDistanceMeters(RouteOptimizer, ordered);
-          const afterMeters = modelDistanceMeters(RouteOptimizer, result.orderedStops);
+          const beforeMeters = modelDistanceMeters(RouteOptimizer, ordered, home, home);
+          const afterMeters = modelDistanceMeters(RouteOptimizer, result.orderedStops, home, home);
           const savedMeters = Math.max(0, beforeMeters - afterMeters);
           const metrics = {
             before_distance_meters: beforeMeters,
@@ -1683,7 +1715,7 @@ async function runRouteReorder(opts = {}, conn = db) {
           let finalOrdered = result.orderedStops;
           let appliedMetrics = metrics;
           const guardOutcome = chooseWindowSafeOrder({
-            RouteOptimizer, googleOrder: result.orderedStops, sourceStops: techStops, googleSource: result.source, legs: result.legs,
+            RouteOptimizer, googleOrder: result.orderedStops, sourceStops: techStops, googleSource: result.source, legs: result.legs, home,
           });
           // Stale-order canonicalization: the comparison baseline becomes the
           // promised-window order instead of the stale stored order — the
@@ -1695,6 +1727,7 @@ async function runRouteReorder(opts = {}, conn = db) {
           const { canonicalBaseline, floorBaselineMeters } = canonicalFloorBaseline(RouteOptimizer, {
             repair, staleReasons, techStops, beforeMeters,
             googleRun: repair ? null : { orderedStops: result.orderedStops, legs: result.legs, source: result.source },
+            home,
           });
           // Savings floor for GOOGLE's order. Fallback ON + a guard conflict
           // defers the floor to the fallback's own check below: Google
@@ -1796,7 +1829,7 @@ async function runRouteReorder(opts = {}, conn = db) {
           // nothing.
           if (!opts.dryRun) {
             try {
-              await writeTechDayOrder(conn, { dateStr, techId, techStops, finalOrdered, repair, opts, now, repairGates });
+              await writeTechDayOrder(conn, { dateStr, techId, techStops, finalOrdered, repair, opts, now, repairGates, home });
             } catch (writeErr) {
               if (classifyWriteError(writeErr, { summary, entryBase })) status = 'completed_with_errors';
               continue;

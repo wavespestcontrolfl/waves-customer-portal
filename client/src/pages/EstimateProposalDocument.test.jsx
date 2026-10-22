@@ -935,7 +935,7 @@ describe('Next steps text size', () => {
   });
 });
 
-// GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): "about $X a month" under each
+// GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): "$X a month" under each
 // per-application line, one plan line for two or more services. The server ships
 // proposal.monthlyAverage only with the gate on and a reconciling plan, so an
 // absent key is the gate-off document.
@@ -978,7 +978,7 @@ describe('EstimateProposalDocument — monthly average beside per-application pr
     const text = container.textContent;
     expect(text).toContain('Pest Control — 4 applications/yr');
     expect(text).toContain('$94.00');
-    expect(text).toContain('about $31.33 a month');
+    expect(text).toContain('$31.33 a month');
     expect(text.match(/Averaged over the year\. You pay after each application\./g)).toHaveLength(1);
     expect(text).not.toContain('Your plan averages');
   });
@@ -987,9 +987,9 @@ describe('EstimateProposalDocument — monthly average beside per-application pr
     const { container } = render(<EstimateProposalDocument data={docData(bundle)} token="tok-123" />);
     const text = container.textContent;
     const perLine = [...container.querySelectorAll('[data-monthly-average-line]')].map((el) => el.textContent);
-    expect(perLine).toEqual(['about $42.30 a month', 'about $30.00 a month']);
+    expect(perLine).toEqual(['$42.30 a month', '$30.00 a month']);
     expect(text).toContain('Your plan averages (10% bundle savings included)');
-    expect(container.querySelector('[data-monthly-average-plan]').textContent).toContain('about $72.30 a month');
+    expect(container.querySelector('[data-monthly-average-plan]').textContent).toContain('$72.30 a month');
     const cents = (s) => Math.round(parseFloat(s.match(/\$([\d.,]+)/)[1].replace(/,/g, '')) * 100);
     expect(perLine.reduce((sum, s) => sum + cents(s), 0)).toBe(7230);
     // One-time charges stay out of the average and are said so; the combined
@@ -1010,8 +1010,8 @@ describe('EstimateProposalDocument — monthly average beside per-application pr
     });
     const { container } = render(<EstimateProposalDocument data={data} token="tok-123" />);
     const perLine = [...container.querySelectorAll('[data-monthly-average-line]')].map((el) => el.textContent);
-    expect(perLine).toEqual(['about $35.50 a month', 'about $11.06 a month', 'about $43.77 a month']);
-    expect(container.querySelector('[data-monthly-average-plan]').textContent).toContain('about $90.33 a month');
+    expect(perLine).toEqual(['$35.50 a month', '$11.06 a month', '$43.77 a month']);
+    expect(container.querySelector('[data-monthly-average-plan]').textContent).toContain('$90.33 a month');
   });
 
   it('a plan credit prints as its own negative line', () => {
@@ -1022,7 +1022,7 @@ describe('EstimateProposalDocument — monthly average beside per-application pr
     const text = render1(data);
     expect(text).toContain('Referral Credit');
     expect(text).toContain('−$10.00 a month');
-    expect(text).toContain('about $62.30 a month');
+    expect(text).toContain('$62.30 a month');
   });
 
   it('single service with a plan credit: the credit and plan lines make the arithmetic visible', () => {
@@ -1032,9 +1032,9 @@ describe('EstimateProposalDocument — monthly average beside per-application pr
     });
     const { container } = render(<EstimateProposalDocument data={data} token="tok-123" />);
     const text = container.textContent;
-    expect(container.querySelector('[data-monthly-average-line]').textContent).toBe('about $31.33 a month');
+    expect(container.querySelector('[data-monthly-average-line]').textContent).toBe('$31.33 a month');
     expect(text).toContain('−$10.00 a month');
-    expect(container.querySelector('[data-monthly-average-plan]').textContent).toContain('about $21.33 a month');
+    expect(container.querySelector('[data-monthly-average-plan]').textContent).toContain('$21.33 a month');
   });
 
   it('gate off (no monthlyAverage from the server): the document is exactly as before', () => {
@@ -1053,5 +1053,45 @@ describe('EstimateProposalDocument — monthly average beside per-application pr
     const data = docData(single);
     const text = render1({ ...data, proposal: { ...data.proposal, enabled: true }, cta: { commercialProposal: true } });
     expect(text).not.toMatch(/Averaged over the year/);
+  });
+
+  // Application months (owner 2026-10-22): the page's "What you pay" rows in the PDF.
+  describe('application months', () => {
+    const pestMosquito = {
+      lines: [perAppLine('Pest Control — 4 applications/yr', 115.2, 4), perAppLine('Mosquito — 12 applications/yr', 74.7, 12)],
+      monthlyAverage: { planMonthly: 113.1, credit: null, bundleDiscountPct: 0.1, oneTime: null },
+    };
+
+    it('prints the two month rows, then the plan average, and no per-service monthly slice', () => {
+      const { container } = render(<EstimateProposalDocument data={docData(pestMosquito)} token="tok-123" />);
+      const applied = container.querySelector('[data-application-months-applied]');
+      const other = container.querySelector('[data-application-months-other]');
+      expect(applied.textContent).toBe('Months with Pest Control (4 a year)Pest Control + Mosquito$189.90');
+      expect(other.textContent).toBe('Other months (8 a year)Mosquito only$74.70');
+      expect(container.textContent).toContain('What you pay');
+      expect(container.querySelector('[data-monthly-average-plan]').textContent).toContain('$113.10 a month');
+      expect(container.textContent).toContain('Your plan averages (10% bundle savings included)');
+      expect(container.querySelectorAll('[data-monthly-average-line]')).toHaveLength(0);
+      expect(container.textContent).not.toContain('/mo');
+      expect(container.textContent).not.toContain('applications/yr (');
+    });
+
+    it('a plan the breakdown does not cover keeps the monthly-average document, with no month rows', () => {
+      for (const fixture of [single, bundle]) {
+        expect(render(<EstimateProposalDocument data={docData(fixture)} token="tok-123" />).container.innerHTML)
+          .not.toContain('data-application-months');
+      }
+    });
+
+    it('the monthly average gate off (no inputs from the server) shows nothing', () => {
+      const text = render1(docData({ ...pestMosquito, monthlyAverage: null }));
+      expect(text).not.toMatch(/What you pay|a month|Averaged over the year/);
+    });
+
+    it('a plan credit has no fixed month: the document keeps the credit lines and no month rows', () => {
+      const data = docData({ ...pestMosquito, monthlyAverage: { planMonthly: 108.1, credit: { label: 'Referral Credit', monthly: 5 }, bundleDiscountPct: 0.1, oneTime: null } });
+      const { container } = render(<EstimateProposalDocument data={data} token="tok-123" />);
+      expect(container.querySelector('[data-application-months]')).toBeNull();
+    });
   });
 });

@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getAdminAuthToken } from '../../lib/adminAuth';
-import { TIME_TRACKING_CHANGED } from './timeTrackingEvents';
 
 const API = import.meta.env.VITE_API_URL || '';
 const D = {
@@ -135,14 +134,10 @@ export default function TechTimeTrackingCard({ nextStop, variant }) {
   }, []);
 
   useEffect(() => { load(); }, [load]);
-  // A timer started or undone elsewhere on the page (the geofence prompt's
-  // Start Timer / Undo): reload so the controls match (Codex #5786 P2).
   useEffect(() => {
-    // Window focus too: the clock is a long-lived card on the Today page.
-    window.addEventListener(TIME_TRACKING_CHANGED, load);
+    // Window focus: the clock is a long-lived card on the Today page.
     window.addEventListener('focus', load);
     return () => {
-      window.removeEventListener(TIME_TRACKING_CHANGED, load);
       window.removeEventListener('focus', load);
     };
   }, [load]);
