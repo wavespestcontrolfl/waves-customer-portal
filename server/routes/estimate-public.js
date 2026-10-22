@@ -22,6 +22,7 @@ const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-fo
 const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { groupLinkStillViewable } = require('../services/proposal-bid');
+const { isAssessmentVisit, excludeAssessmentBookings } = require('../services/assessment-booking');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 const { UNISSUED_ESTIMATE, estimateNeverIssued, estimateHasBahiaLawn } = require('../services/estimate-bahia-review');
 const { storedEstimateContainer } = require('../services/estimate-result-container');
@@ -1574,6 +1575,12 @@ function estimateFamilyKeysForAdoption(estimate, estData, { serviceMode, service
 // (generic assessment shells, blank types) never match — adopting them would
 // re-create the cross-family clobber this guard exists to prevent.
 function appointmentMatchesEstimateFamily(row = {}, familyKeys = new Set()) {
+  // A Waves Assessment is a free consultation, never an estimate's first paid
+  // application. Its catalog key (lawn_inspection) classifies into the lawn
+  // family, so without this a lawn plan adopted it: no slot picker, the
+  // assessment restamped with the plan price, the series dated on its day
+  // (owner case 2026-10-21). Checked BEFORE the catalog-first classification.
+  if (isAssessmentVisit(row)) return false;
   // Catalog identity first (codex #3228 r5): a stale service_type label
   // ("Tree & Shrub Care" on a row whose service_id links palm_injection)
   // must classify by what the row actually IS — the same catalog-first rule
@@ -1799,7 +1806,11 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
     });
 
   if (requestedId) q.where('scheduled_services.id', requestedId);
-  let row = await q.first();
+  // Assessment visits never compete for the estimate-linked slot: filtered in
+  // the query so an earlier linked assessment cannot hide a later linked paid
+  // visit behind .first() (the customer-wide fallback only sees unclaimed
+  // rows, so it could never recover that one).
+  let row = await excludeAssessmentBookings(q).first();
 
   // The family/mode gate applies to ESTIMATE-LINKED rows too (codex #3228
   // r8 P1): a mixed estimate whose linked row is a recurring-family visit
@@ -1821,6 +1832,10 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   if (row && anyModeFamilyKeys.size > 0 && !appointmentMatchesEstimateFamily(row, familyKeys)) {
     row = null;
   }
+  // Assessment visits are never adoptable, including under the legacy
+  // no-derivable-family exemption above (the query already filters them;
+  // this guards any caller connection that does not).
+  if (row && isAssessmentVisit(row)) row = null;
 
   // Customer-wide fallback (gated): a customer who already has an upcoming
   // appointment for the SAME service family shouldn't be pushed through the
@@ -13109,8 +13124,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           const lockedFamilyKeys = estimateFamilyKeysForAdoption(estimate, estData, {
             serviceModes: adoptionServiceModesForContract(estimate, estData),
           });
-          const lockedFamilyOk = lockedAnyModeKeys.size === 0
-            || appointmentMatchesEstimateFamily(lockedAdoptRow || {}, lockedFamilyKeys);
+          const lockedFamilyOk = !isAssessmentVisit(lockedAdoptRow)
+            && (lockedAnyModeKeys.size === 0
+              || appointmentMatchesEstimateFamily(lockedAdoptRow || {}, lockedFamilyKeys));
           // Property scope under lock, mirroring the preflight's coverage
           // exactly (owner ruling 2026-08-15: the under-lock recheck must
           // never reject a row the preflight admitted). The preflight
