@@ -470,7 +470,7 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
   test('a verbatim paying or prepay-refund sentence with only inert text is policy, not a payment status', () => {
     expect(payOk(PAY, 'how do I pay?')).toBe(true);
     expect(payOk('The technician can take a card, check or cash at the visit.', 'Can I pay the tech with cash?')).toBe(true);
-    for (const inbound of ['Do I get a refund if I cancel?', 'What if I cancel my prepaid plan?', 'Can I get my money back if I cancel my pest control service?', 'Can I cancel my lawn plan before the next visit?']) {
+    for (const inbound of ['Do I get a refund if I cancel?', 'Can I get my money back if I cancel my pest control service?', 'Will I be reimbursed if I cancel my prepaid plan?']) {
       expect(payOk(REFUND, inbound)).toBe(true);
       expect(payOk(`Hi! ${REFUND} Let us know if you have questions.`, inbound)).toBe(true);
     }
@@ -483,7 +483,9 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
     expect(payOk(REFUND, status)).toBe(false);
     expect(payOk(REFUND, null)).toBe(false);
     // a visit cancel or a prepaid card is not a plan-refund question
-    for (const inbound of ["Please cancel tomorrow's visit", 'Do you accept prepaid debit cards?', 'Please cancel my lawn service visit', 'Can I cancel my pest service appointment?']) {
+    // cancel wording alone is never a refund question: the reply is held for a person instead (Codex #6447 r15)
+    for (const inbound of ["Please cancel tomorrow's visit", 'Do you accept prepaid debit cards?', 'Please cancel my lawn service visit',
+      'Can I cancel my pest service appointment?', "Please cancel my lawn service for tomorrow's visit", 'What if I cancel my prepaid plan?']) {
       expect(payOk(REFUND, inbound)).toBe(false);
     }
   });
