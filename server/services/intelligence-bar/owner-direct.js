@@ -514,14 +514,23 @@ async function seedDirectCounts(task, dbh = null) {
 // named customer still run that one direct.
 const PREVIEW_CUSTOMER_TOOLS = new Set(['reschedule_appointment', 'assign_technician']);
 
+// Is this call's direct decision made from its preview (gate on)? The scheduling tools always
+// are; update_customer only when it writes notes.
+function previewDecides(toolUse) {
+  if (!ibTargetRulesV2Live()) return false;
+  if (PREVIEW_CUSTOMER_TOOLS.has(toolUse?.name)) return true;
+  return toolUse?.name === 'update_customer' && Object.keys(toolUse.input?.updates || {}).includes('notes');
+}
+
 function messageDirectPlan(toolUses, isValid = () => true, taint = null, grounding = null) {
   const plan = new Map();
   for (const toolUse of toolUses || []) {
-    // GATE_IB_TARGET_RULES_V2 (Codex #6369 r19): whether a reschedule or an assignment runs
-    // direct is only known from its finished preview. Counting them up front would let
-    // carded calls (1 eligible + 5 carded) use up the allowance, so they never join the
-    // up-front plan; each is counted as it commits (dynamicCapReached), in order.
-    if (ibTargetRulesV2Live() && PREVIEW_CUSTOMER_TOOLS.has(toolUse?.name)) continue;
+    // GATE_IB_TARGET_RULES_V2 (Codex #6369 r19, r21): whether a call runs direct is only known
+    // from its finished preview for the scheduling tools and for an update_customer that
+    // writes notes (direct only over empty notes). Counting those up front would let carded
+    // calls (1 eligible + 5 carded) use up the allowance, so they never join the up-front
+    // plan; each is counted as it commits (dynamicCapReached), in order.
+    if (previewDecides(toolUse)) continue;
     if (mayExecuteWithoutCard(toolUse?.name, toolUse?.input, taint, grounding) && isValid(toolUse)) plan.set(toolUse.name, (plan.get(toolUse.name) || 0) + 1);
   }
   return plan;
@@ -537,10 +546,10 @@ function cappedTools(committed, plan) {
   return capped;
 }
 
-// The preview-time half of the cap for PREVIEW_CUSTOMER_TOOLS (gate on): refuse
+// The preview-time half of the cap for the preview-decided tools (gate on): refuse
 // once this request has already made its 5 direct edits with the tool.
 function dynamicCapReached(committed, toolName) {
-  if (!ibTargetRulesV2Live() || !PREVIEW_CUSTOMER_TOOLS.has(toolName)) return false;
+  if (!ibTargetRulesV2Live() || !(PREVIEW_CUSTOMER_TOOLS.has(toolName) || toolName === 'update_customer')) return false;
   return committed.has(SEED_FAILED) || (committed.get(toolName) || 0) >= DIRECT_EDITS_V2;
 }
 

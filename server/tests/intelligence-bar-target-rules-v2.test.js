@@ -603,6 +603,30 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(taint.sameNameCandidates).toBeUndefined();
   });
 
+  test('"phone number to", "cell to", "email address to" keep the name grounding; an identifying contact still conflicts', async () => {
+    process.env[ON] = 'true';
+    const customer = { id: id(100), first_name: 'Pat', last_name: 'Example', city: 'Venice', phone: '9415550100', email: 'pat@example.test', updated_at: new Date('2026-01-01'), version: '2026-01-01' };
+    customers = [customer];
+    const named = { matches: customers, complete: true };
+    const grounded = async prompt => [...await Context.typedCustomerIds(prompt, named)];
+    for (const prompt of [
+      "update Pat Example's phone number to 941-555-9999",
+      "change Pat Example's cell to 941-555-9999",
+      "set Pat Example's mobile number to 941-555-9999",
+      "update Pat Example's number to 941-555-9999",
+      "update Pat Example's phone to 941-555-9999",
+      "update Pat Example's email address to new@example.test",
+      "change Pat Example's email to new@example.test",
+    ]) {
+      expect([prompt, await grounded(prompt)]).toEqual([prompt, [id(100)]]);
+    }
+    // An identifying contact beside the name that matches nobody still conflicts, as before.
+    expect(await grounded('update the notes for Pat Example at 941-555-9999')).toEqual([]);
+    expect((await Context.typedCustomerIds('update the notes for Pat Example at 941-555-9999', named)).identityConflict).toBe(true);
+    // And the owner's own phone as identity still grounds.
+    expect(await grounded('update the notes for Pat Example at 941-555-0100')).toEqual([id(100)]);
+  });
+
   test('gate on: a unique name plus a contact that names nobody, several, or someone else is conflicting evidence: carded (Codex #6369 r18)', async () => {
     process.env[ON] = 'true';
     const pat = { ...sameName(1)[0], phone: '9415550100', email: 'pat@example.test' };
@@ -918,6 +942,41 @@ describe('lead edits keep the old cap (Codex #6369 security P2)', () => {
     } finally {
       delete process.env.GATE_IB_TARGET_RULES_V2;
     }
+  });
+});
+
+describe('update_customer notes edits are preview-decided and count as they commit (Codex #6369 r21)', () => {
+  const NAMED = id(1);
+  const notesEdit = n => ({ type: 'tool_use', name: 'update_customer', input: { customer_id: NAMED, updates: { notes: `Gate code ${n}` } } });
+  const phoneEdit = { type: 'tool_use', name: 'update_customer', input: { customer_id: NAMED, updates: { phone: '941-555-0150' } } };
+
+  test('1 grounded phone edit + 5 notes edits over existing notes (carded): the phone edit is not capped; 6 eligible notes edits still cap', () => {
+    process.env[ON] = 'true';
+    const grounding = OwnerDirect.targetGrounding({ targets: [], typedCustomerIds: [NAMED], page: { ids: {} } });
+    const calls = [phoneEdit, ...[1, 2, 3, 4, 5].map(notesEdit)];
+    // Notes edits join no up-front plan; only the phone edit does.
+    const plan = OwnerDirect.messageDirectPlan(calls, () => true, null, grounding);
+    expect(plan.get('update_customer')).toBe(1);
+    expect(OwnerDirect.cappedTools(new Map(), plan).size).toBe(0);
+    // Each notes edit is judged on its own preview: over existing notes it cards and uses no allowance.
+    const covered = { notes_replaced: { before: 'old text' } };
+    const empty = { notes_replaced: { before: '' } };
+    const committed = new Map();
+    const verdict = (call, preview) => {
+      if (!OwnerDirect.executesWithoutCard('update_customer', call.input, preview, null, grounding)) return 'card';
+      if (OwnerDirect.dynamicCapReached(committed, 'update_customer')) return 'refused';
+      OwnerDirect.recordDirectCommit(committed, 'update_customer');
+      return 'direct';
+    };
+    expect([1, 2, 3, 4, 5].map(n => verdict(notesEdit(n), covered))).toEqual(['card', 'card', 'card', 'card', 'card']);
+    expect(verdict(phoneEdit, null)).toBe('direct');
+    // 6 eligible notes edits (empty notes): five direct, the sixth hits the cap.
+    committed.clear();
+    expect([1, 2, 3, 4, 5, 6].map(n => verdict(notesEdit(n), empty))).toEqual(['direct', 'direct', 'direct', 'direct', 'direct', 'refused']);
+    // Gate off: today's plan counts every call.
+    delete process.env[ON];
+    expect(OwnerDirect.messageDirectPlan(calls).get('update_customer')).toBe(6);
+    expect(OwnerDirect.dynamicCapReached(committed, 'update_customer')).toBe(false);
   });
 });
 
