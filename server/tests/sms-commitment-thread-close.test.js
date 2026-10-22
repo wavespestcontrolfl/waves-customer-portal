@@ -98,3 +98,21 @@ describe('sourceAlertVerdict: one state for the whole source text (uncertain > k
     expect(stateOf(sourceAlertVerdict({ verdict: 'open' }, [rows.open]))).toBe('open');
   });
 });
+
+// Codex r6 (#6415): the thread check calls the fast tier, so it reports under
+// its own fastStructured lane, not the highStakes record-check lane.
+describe('the thread check has its own model lane', () => {
+  const read = (rel) => require('fs').readFileSync(require('path').join(__dirname, '..', rel), 'utf8');
+
+  test('the call names its own lane, and the switchboard and lane policies register it', () => {
+    expect(read('services/sms-commitment-thread-close.js')).toMatch(/laneId: 'sms-commitment-thread-close'/);
+    const board = read('services/model-switchboard.js');
+    expect(board).toMatch(/L\('sms-commitment-thread-close', [^\n]*'sms-commitment-thread-close\.js', 'fastText', P\('fastStructured', 'primary'\), P\('fastStructured', 'fallback'\)/);
+    expect(board).toMatch(/L\('sms-commitment-fulfillment', [^\n]*P\('highStakes', 'primary'\), P\('highStakes', 'fallback'\)/);
+    expect(board).toMatch(/'sms-commitment-thread-close': 'sms',/);
+    const { LANE_RUNTIME } = require('../services/agent-control/lane-policies');
+    expect(LANE_RUNTIME['sms-commitment-thread-close']).toMatchObject({ side_effect_class: 'internal_write', ledger: 'call' });
+    // No job of its own: it runs inside SMS intake and the fulfillment revalidation.
+    expect(LANE_RUNTIME['sms-commitment-thread-close'].workflow_id).toBeUndefined();
+  });
+});

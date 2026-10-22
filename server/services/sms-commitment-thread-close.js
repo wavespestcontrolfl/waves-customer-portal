@@ -129,9 +129,9 @@ It must be the same item or action as the obligation. A thank-you or "ok" that n
 This answer can only close a follow-up that is still open. It is never used to reopen or hold one.
 For completed, cite one record_ref and an exact quote from that text. Otherwise both can be null.
 ${stringifySmsEvidence({ obligation, thread: records.map(({ ref, who, created_at: at, text }) => ({ ref, who, at, text })) })}`,
-    // Same lane (and policy) as the record-based completion check, so spend,
-    // switchboard and agent-control reporting stay under one name.
-    jsonSchema: SCHEMA, maxTokens: 1024, laneId: 'sms-commitment-fulfillment', promptVersion: THREAD_PROMPT_VERSION,
+    // Its own fastStructured lane: the record-based completion check is a
+    // separate highStakes lane, so the Models tab reports each accurately.
+    jsonSchema: SCHEMA, maxTokens: 1024, laneId: 'sms-commitment-thread-close', promptVersion: THREAD_PROMPT_VERSION,
   });
   if (!result.ok) return { verdict: 'uncertain', reason: 'provider_failed' };
   return groundThreadVerdict(result.json, records);
