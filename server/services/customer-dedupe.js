@@ -1620,6 +1620,36 @@ async function repointRowwiseDropCollisions(trx, table, column, winnerId, loserI
   return `moved ${moved}, dropped ${dropped} duplicate row(s) (winner already has them)`;
 }
 
+// customer_health_alerts: at most one OPEN rule alert per (customer_id,
+// alert_type) — customer_health_alerts_active_rule_uniq (migration
+// 20260626000012), which covers only the rule types below. Both duplicates
+// holding the same open rule alert is the same signal twice: the winner's
+// stays open and the loser's moves across DISMISSED, the index migration's own
+// dedupe, so its history is kept (ops 2026-10-22: a shared alert aborted a
+// merge with "repoint failed on customer_health_alerts.customer_id").
+const HEALTH_ALERT_UNIQUE_RULE_TYPES = ['score_drop', 'critical_risk', 'service_gap', 'payment_issue',
+  'low_engagement', 'satisfaction_drop', 'new_customer_risk'];
+const HEALTH_ALERT_OPEN_STATUSES = ['new', 'acknowledged'];
+
+async function repointHealthAlertsDismissCollisions(trx, table, column, winnerId, loserId) {
+  const rows = await trx(table).where(column, loserId).select('id');
+  let moved = 0;
+  let dismissed = 0;
+  for (const { id } of rows) {
+    try {
+      await trx.transaction(async (sp) => {
+        await sp(table).where({ id }).update({ [column]: winnerId });
+      });
+      moved += 1;
+    } catch (e) {
+      if (!(e && e.code === '23505')) throw e;
+      await trx(table).where({ id }).update({ [column]: winnerId, status: 'dismissed', updated_at: trx.fn.now() });
+      dismissed += 1;
+    }
+  }
+  return `moved ${moved}, dismissed ${dismissed} duplicate open alert(s) (winner already has them)`;
+}
+
 // irrigation_week_plans: UNIQUE(customer_id, week_ending). The row that
 // matters is the available one (published_at or sent_at) — it is the decision the customer
 // received and the report renders, and the Monday sweep's first dedupe key
@@ -1852,6 +1882,7 @@ const UNIQUE_COLLISION_HANDLERS = {
   // (codex #3565 gh-r14/r15/r17).
   irrigation_week_plans: repointWeekPlansKeepAvailable,
   collections_flags: repointFlagsReleaseCollisions,
+  customer_health_alerts: repointHealthAlertsDismissCollisions,
 };
 
 // Customer ids also hide behind polymorphic recipient columns the
@@ -7102,6 +7133,11 @@ async function predictCollisionFolds(database, winner, loser) {
   const winnerTags = new Set(tagRows.filter((r) => String(r.customer_id) === String(winnerId)).map((r) => r.tag));
   const sharedTags = [...new Set(tagRows.filter((r) => String(r.customer_id) === String(loserId) && winnerTags.has(r.tag)).map((r) => r.tag))].sort();
   if (sharedTags.length) details.customer_tags = { shared: sharedTags };
+  const alertRows = (await read('customer_health_alerts', ['customer_id', 'alert_type', 'status']))
+    .filter((r) => HEALTH_ALERT_OPEN_STATUSES.includes(r.status) && HEALTH_ALERT_UNIQUE_RULE_TYPES.includes(r.alert_type));
+  const winnerAlerts = new Set(alertRows.filter((r) => String(r.customer_id) === String(winnerId)).map((r) => r.alert_type));
+  const sharedAlerts = [...new Set(alertRows.filter((r) => String(r.customer_id) === String(loserId) && winnerAlerts.has(r.alert_type)).map((r) => r.alert_type))].sort();
+  if (sharedAlerts.length) details.customer_health_alerts = { shared_open_alerts: sharedAlerts };
   const convRows = await read('conversations', ['customer_id', 'channel', 'our_endpoint_id']);
   const key = (r) => `${r.channel}\u0000${r.our_endpoint_id}`;
   const winnerThreads = new Set(convRows.filter((r) => String(r.customer_id) === String(winnerId) && r.channel != null && r.our_endpoint_id != null).map(key));
@@ -7289,6 +7325,7 @@ module.exports = {
     repointRowwiseDropCollisions,
     repointWeekPlansKeepAvailable,
   repointFlagsReleaseCollisions,
+    repointHealthAlertsDismissCollisions,
     mergeConversationRows,
     UNIQUE_COLLISION_HANDLERS,
     retirePinSuggestionsBeforeSweep,
