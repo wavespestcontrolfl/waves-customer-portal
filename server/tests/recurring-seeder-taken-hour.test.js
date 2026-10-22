@@ -91,6 +91,14 @@ function holdOn(takenDays) {
   findConflictingVisits.mockImplementation(async ({ date }) => (takenDays.includes(date) ? [{ id: `other-${date}`, customer_id: 'customer-2' }] : []));
 }
 
+// The dates the plan itself gives `parent` (its pattern walk), read from a
+// gate-off pass, so each test can hold the hour on one of them.
+async function planDates(parent) {
+  const { conn, inserted } = makeConn();
+  await seedFollowUpsForParent(conn, parent);
+  return inserted.map((r) => r.scheduled_date);
+}
+
 describe('follow-up seeding hands a taken hour to auto-dispatch', () => {
   afterEach(() => {
     delete process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF;
@@ -98,51 +106,63 @@ describe('follow-up seeding hands a taken hour to auto-dispatch', () => {
   });
 
   test('gate on: the taken day is seeded with no time and its date as the due date; the free days keep 10:00', async () => {
+    const dates = await planDates(PARENT);
+    expect(dates.length).toBeGreaterThanOrEqual(3);
+    const taken = dates[1];
     process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
-    holdOn([day(60)]);
+    holdOn([taken]);
     const { conn, inserted } = makeConn();
-    const result = await seedFollowUpsForParent(conn, PARENT, { overrideDates: [day(30), day(60), day(90)] });
-    expect(result.insertedCount).toBe(3);
+    const result = await seedFollowUpsForParent(conn, PARENT);
+    expect(result.insertedCount).toBe(dates.length);
     const byDate = Object.fromEntries(inserted.map((r) => [r.scheduled_date, r]));
-    expect(byDate[day(60)]).toMatchObject({
+    expect(byDate[taken]).toMatchObject({
       window_start: null, window_end: null, time_window: null, window_display: null, route_order: null,
-      recurring_dispatch_due_date: day(60), technician_id: TECH,
+      recurring_dispatch_due_date: taken, technician_id: TECH,
     });
-    for (const d of [day(30), day(90)]) {
+    for (const d of dates.filter((x) => x !== taken)) {
       expect(byDate[d]).toMatchObject({ window_start: '10:00', window_end: '11:00', time_window: 'morning' });
       expect(byDate[d].recurring_dispatch_due_date).toBeUndefined();
     }
     // The probe asks for the plan's own block, leaves the customer's own rows out, and carries the technician.
     expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
-      date: day(60), windowStart: '10:00', windowEnd: '11:00', excludeCustomerId: 'customer-1', technicianId: TECH,
+      date: taken, windowStart: '10:00', windowEnd: '11:00', excludeCustomerId: 'customer-1', technicianId: TECH,
     }));
   });
 
   test('gate on: a follow-up under four days out keeps its hour (the night tool cannot move it); nothing is probed for it', async () => {
+    // A weekly plan whose first visit was five days ago: its next follow-up is two days out.
+    const weekly = { ...PARENT, scheduled_date: day(-5), recurring_pattern: 'weekly' };
+    const dates = await planDates(weekly);
+    const near = dates.filter((d) => d < day(4));
+    const far = dates.filter((d) => d >= day(4));
+    expect(near.length).toBeGreaterThan(0);
+    expect(far.length).toBeGreaterThan(0);
     process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
-    holdOn([day(2), day(40)]);
+    holdOn(dates);
     const { conn, inserted } = makeConn();
-    await seedFollowUpsForParent(conn, PARENT, { overrideDates: [day(2), day(40)] });
+    await seedFollowUpsForParent(conn, weekly);
     const byDate = Object.fromEntries(inserted.map((r) => [r.scheduled_date, r]));
-    expect(byDate[day(2)].window_start).toBe('10:00');
-    expect(byDate[day(40)].window_start).toBeNull();
-    expect(findConflictingVisits.mock.calls.map(([args]) => args.date)).toEqual([day(40)]);
+    for (const d of near) expect(byDate[d].window_start).toBe('10:00');
+    for (const d of far) expect(byDate[d].window_start).toBeNull();
+    expect(findConflictingVisits.mock.calls.map(([args]) => args.date)).toEqual(far);
   });
 
   test('gate off: no probe, every follow-up keeps the plan hour (unchanged)', async () => {
-    holdOn([day(30), day(60), day(90)]);
+    const dates = await planDates(PARENT);
+    holdOn(dates);
     const { conn, inserted } = makeConn();
-    await seedFollowUpsForParent(conn, PARENT, { overrideDates: [day(30), day(60), day(90)] });
+    await seedFollowUpsForParent(conn, PARENT);
     expect(findConflictingVisits).not.toHaveBeenCalled();
+    expect(inserted.length).toBe(dates.length);
     expect(inserted.every((r) => r.window_start === '10:00')).toBe(true);
   });
 
   test('gate on: a windowless plan has nothing to probe', async () => {
     process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
     const { conn, inserted } = makeConn();
-    await seedFollowUpsForParent(conn, { ...PARENT, window_start: null, window_end: null }, { overrideDates: [day(30)] });
+    await seedFollowUpsForParent(conn, { ...PARENT, window_start: null, window_end: null });
     expect(findConflictingVisits).not.toHaveBeenCalled();
-    expect(inserted[0].window_start).toBeNull();
-    expect(inserted[0].recurring_dispatch_due_date).toBeUndefined();
+    expect(inserted.length).toBeGreaterThan(0);
+    expect(inserted.every((r) => r.window_start == null && r.recurring_dispatch_due_date === undefined)).toBe(true);
   });
 });
