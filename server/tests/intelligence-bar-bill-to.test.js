@@ -17,7 +17,12 @@ jest.mock('../services/payer', () => ({
   scheduledServicesHasSelfPay: async () => true,
 }));
 const mockTransitions = jest.fn();
-jest.mock('../services/visit-linked-invoice-withdrawal', () => ({ ownerTransitions: (...a) => mockTransitions(...a) }));
+const mockVisitOwners = jest.fn();
+jest.mock('../services/visit-linked-invoice-withdrawal', () => ({
+  ownerTransitions: (...a) => mockTransitions(...a),
+  visitOwnerTransitions: (...a) => mockVisitOwners(...a),
+}));
+jest.mock('../services/visit-completion-packets', () => ({ packetPayload: (p) => p.payload }));
 
 const db = require('../models/db');
 const Customers = require('../routes/admin-customers');
@@ -53,9 +58,10 @@ function makeDb() {
     const rows = () => {
       if (table === 'customers') return q.single ? state.customer : [state.customer];
       if (table === 'scheduled_services') return { n: state.pinnedVisits };
+      if (table === 'visit_completion_packets') return { visit_id: 'sv-1', payload: { billingSnapshot: { billedServiceIds: ['visit-a', 'visit-b'] } } };
       if (table === 'invoices') {
         if (q.ids) return q.ids.map((id) => state.invoices[id]).filter(Boolean);
-        if (q.packet) return state.packetIds.map((id) => ({ id }));
+        if (q.packet) return state.packetIds.map((id) => ({ id, visit_completion_packet_id: `packet-${id}` }));
         return state.staying.map((id) => state.invoices[id]);
       }
       return [];
@@ -173,6 +179,19 @@ describe('the preview', () => {
     expect(card.invoices_moving).toEqual([]);
   });
 
+  test('a combined-visit invoice moves only when a visit it bills will resolve to a payer', async () => {
+    const PACKET = '00000000-0000-4000-8000-0000000000a3';
+    state.invoices[PACKET] = { id: PACKET, invoice_number: 'WPC-2099-0003', total: '120.00', status: 'sent', credit_applied: '0', visit_completion_packet_id: `packet-${PACKET}` };
+    state.packetIds = [PACKET];
+    // Every billed visit pinned to the customer: it stays.
+    mockVisitOwners.mockResolvedValue([{ visitId: 'visit-a', afterOwner: null }, { visitId: 'visit-b', afterOwner: null }]);
+    expect((await preview()).invoices_moving).toEqual(['WPC-2099-0001']);
+    expect(mockVisitOwners).toHaveBeenCalledWith(expect.anything(), ['visit-a', 'visit-b'], { pending: { customerPatch: { customerId: CUST, payer_id: '7' } } });
+    // One billed visit resolves to the payer: it moves.
+    mockVisitOwners.mockResolvedValue([{ visitId: 'visit-a', afterOwner: null }, { visitId: 'visit-b', afterOwner: '7' }]);
+    expect((await preview()).invoices_moving).toEqual(['WPC-2099-0001', 'WPC-2099-0003']);
+  });
+
   test('a customer who already has a payer goes to the customer page; the same payer is a no-op', async () => {
     state.customer.payer_id = 9;
     mockGetPayer.mockImplementation(async (id) => (String(id) === '7' ? PAYER : { id: 9, display_name: 'Other Payer Co', active: true }));
@@ -207,7 +226,10 @@ describe('the confirmed run', () => {
     const done = await confirm(card);
     expect(done).toMatchObject({ success: true, sent_to_customer: false, customer_id: CUST, payer_id: '7' });
     expect(Customers.setCustomerBillToFromBar).toHaveBeenCalledTimes(1);
-    expect(Customers.setCustomerBillToFromBar).toHaveBeenCalledWith({ customerId: CUST, payerId: '7', expectedPayerId: null, actor: { technicianId: 'staff-1' } });
+    expect(Customers.setCustomerBillToFromBar).toHaveBeenCalledWith({
+      customerId: CUST, payerId: '7', expectedPayerId: null, actor: { technicianId: 'staff-1' },
+      expectedInvoices: [{ id: LINKED, status: 'sent', total: '90.00', credit_applied: '10.00' }],
+    });
   });
 
   test('no pin, or drift since the card, refuses without running the handler', async () => {

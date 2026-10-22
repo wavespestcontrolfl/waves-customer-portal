@@ -87,6 +87,18 @@ const ADMIN = { isAdmin: true, technicianId: null };
     expect(await db('invoices').where({ id: manualId }).first()).toMatchObject({ payer_id: null, scheduled_send_error: null });
   });
 
+  test('an invoice that would move but was not on the card rolls the whole edit back', async () => {
+    const payerId = await payer();
+    const { customerId, linkedId } = await selfPayCustomer();
+    jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({});
+    jest.spyOn(StripeService, 'retrievePaymentIntent').mockImplementation(async (id) => ({ id, status: 'requires_payment_method', metadata: {} }));
+    // The card showed no moving invoice; the visit-linked one would move.
+    await expect(setCustomerBillToFromBar({ customerId, payerId, expectedPayerId: null, expectedInvoices: [], actor: {} }))
+      .rejects.toMatchObject({ code: 'preview_changed' });
+    expect(await db('customers').where({ id: customerId }).first('payer_id')).toMatchObject({ payer_id: null });
+    expect(await db('invoices').where({ id: linkedId }).first()).toMatchObject({ scheduled_send_error: null });
+  });
+
   test('a Bill-To that changed after the card refuses on the locked row and writes nothing', async () => {
     const payerId = await payer();
     const other = await payer();

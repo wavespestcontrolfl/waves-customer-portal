@@ -97,9 +97,23 @@ async function customerName(customer) {
   return [customer.first_name, customer.last_name].filter(Boolean).join(' ') || customer.company_name || null;
 }
 
+// Whether a combined-visit invoice moves: the packet path withdraws it when any visit it bills resolves to a
+// payer (liveThirdPartyPayerForPacket). Each billed visit is judged by the withdrawal module's own owner answer
+// with the pending customer write laid over it, so a visit with its own Bill-To or pinned to the customer counts
+// as it will. The handler re-checks the final set under its locks.
+async function packetMoves(packetId, pending) {
+  const packet = await db('visit_completion_packets').where({ id: packetId }).first('visit_id', 'payload');
+  if (!packet) return false;
+  const payload = require('../visit-completion-packets').packetPayload(packet);
+  const billed = Array.isArray(payload?.billingSnapshot?.billedServiceIds) ? payload.billingSnapshot.billedServiceIds
+    : await db('visit_completion_packet_items').where({ packet_id: packetId }).pluck('scheduled_service_id');
+  const owners = await require('../visit-linked-invoice-withdrawal').visitOwnerTransitions(db, billed, { pending });
+  return owners.some((o) => o.afterOwner != null);
+}
+
 // The unpaid invoices the handler's withdrawal moves to the payer: the visit-linked ones from the
 // withdrawal module's own owner answer (mode 'pre' with the pending customer write), and the unpaid
-// self-pay combined-visit invoices (the packet path; their visit decides, so the card says "up to").
+// self-pay combined-visit invoices whose billed visits will resolve to a payer (packetMoves).
 async function invoicePlan(customerId, payerId) {
   const Linked = require('../visit-linked-invoice-withdrawal');
   const pending = { customerPatch: { customerId, payer_id: payerId } };
@@ -108,8 +122,11 @@ async function invoicePlan(customerId, payerId) {
   const packetRows = await db('invoices').where({ customer_id: customerId }).whereNotIn('status', SETTLED)
     .whereNull('payer_id').whereNotNull('visit_completion_packet_id')
     .where((q) => q.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%'))
-    .orderBy('id').select('id');
-  const packetIds = packetRows.map((r) => String(r.id)).filter((id) => !movingIds.includes(id));
+    .orderBy('id').select('id', 'visit_completion_packet_id');
+  const packetIds = [];
+  for (const row of packetRows) {
+    if (!movingIds.includes(String(row.id)) && await packetMoves(row.visit_completion_packet_id, pending)) packetIds.push(String(row.id));
+  }
   const moving = [...movingIds, ...packetIds].length
     ? await db('invoices').whereIn('id', [...movingIds, ...packetIds]).orderBy('invoice_number')
       .select('id', 'invoice_number', 'total', 'status', 'credit_applied', 'visit_completion_packet_id')
@@ -165,7 +182,7 @@ async function buildPlan(input) {
       ? { kind: 'billing', text: `${pinned} upcoming visit${pinned === 1 ? ' keeps its' : 's keep their'} own Bill-To (a payer of ${pinned === 1 ? 'its' : 'their'} own, or pinned to the customer).` }
       : null,
     moving.length
-      ? { kind: 'billing', text: `${moving.length === 1 ? '1 unpaid invoice moves' : `Up to ${moving.length} unpaid invoices move`} to ${payerName} now. The customer's pay link for ${moving.length === 1 ? 'it' : 'them'} stops working and reminders pause.` }
+      ? { kind: 'billing', text: `${moving.length === 1 ? '1 unpaid invoice moves' : `${moving.length} unpaid invoices move`} to ${payerName} now. The customer's pay link for ${moving.length === 1 ? 'it' : 'them'} stops working and reminders pause.` }
       : { kind: 'billing', text: 'No unpaid invoice moves: none is tied to a visit.' },
     ...moving.slice(0, MAX_LISTED).map((inv) => ({ kind: 'billing', text: `Moves: ${invoiceLine(inv)}` })),
     ...(moving.length > MAX_LISTED ? [{ kind: 'billing', text: `…and ${moving.length - MAX_LISTED} more.` }] : []),
@@ -188,6 +205,8 @@ async function buildPlan(input) {
     invoices_staying: staying.map((inv) => inv.invoice_number),
     effects,
     sends_to_customer: false,
+    // The invoices the handler must find moving, re-checked inside its transaction (never model-visible output).
+    _moving: moving.map((inv) => ({ id: String(inv.id), status: inv.status, total: inv.total, credit_applied: inv.credit_applied })),
     _version: {
       customer_id: customer.id,
       payer_before: null,
@@ -225,6 +244,7 @@ async function commitBillTo(input, actionContext) {
       customerId: plan.customer_id,
       payerId: plan.payer_id,
       expectedPayerId: null,
+      expectedInvoices: plan._moving,
       actor: { technicianId: actionContext?.technicianId || null },
     });
   } catch (err) {
@@ -257,7 +277,7 @@ async function commitBillTo(input, actionContext) {
   }
   logger.info(`[intelligence-bar:bill-to] customer ${plan.customer_id} -> payer ${plan.payer_id}`);
   return { ...base, success: true, sent_to_customer: false,
-    note: `${plan.customer_name || 'The customer'} now bills to ${plan.payer_name}. ${plan.invoices_moving.length} unpaid invoice${plan.invoices_moving.length === 1 ? '' : 's'} checked for the move. Nothing was sent to anyone.` };
+    note: `${plan.customer_name || 'The customer'} now bills to ${plan.payer_name}. ${plan.invoices_moving.length} unpaid invoice${plan.invoices_moving.length === 1 ? '' : 's'} moved to the payer. Nothing was sent to anyone.` };
 }
 
 // ── card lines (authorization-contract.js) ──────────────────────

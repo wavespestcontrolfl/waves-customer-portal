@@ -4428,7 +4428,27 @@ const customerUpdateHandler = async (req, res, next) => {
             // The opposite transition (a payer assigned) withdraws every
             // self-pay combined-visit invoice this customer now owes to AP,
             // including one the homeowner already holds a pay link for.
-            if (updates.payer_id) await Packets.withdrawPacketInvoicesForOwner(trx, { customerId: req.params.id });
+            if (updates.payer_id) {
+              // req.ibExpectedInvoices is set only by setCustomerBillToFromBar: the invoices the bar card said
+              // move, with the status, total and credit it showed. Checked inside this transaction, after the
+              // customer row lock and before any Stripe cancel (they run last): any other set, or a changed
+              // row, rolls the whole edit back.
+              const expected = req.ibExpectedInvoices;
+              if (expected) {
+                const rows = expected.length ? await trx('invoices').whereIn('id', expected.map((e) => e.id)).select('id', 'status', 'total', 'credit_applied') : [];
+                const cents = (v) => Math.round((Number(v) || 0) * 100);
+                const same = rows.length === expected.length && expected.every((e) => rows.some((r) => String(r.id) === e.id
+                  && r.status === e.status && cents(r.total) === cents(e.total) && cents(r.credit_applied) === cents(e.credit_applied)));
+                if (!same) throw Object.assign(new Error('The invoices changed after the card was shown.'), { statusCode: 409, isOperational: true, code: 'preview_changed' });
+              }
+              const withdrawn = await Packets.withdrawPacketInvoicesForOwner(trx, { customerId: req.params.id });
+              if (expected) {
+                const moved = [...new Set(withdrawn.map(String))].sort();
+                if (JSON.stringify(moved) !== JSON.stringify(expected.map((e) => e.id).sort())) {
+                  throw Object.assign(new Error('Different invoices would move than the card showed.'), { statusCode: 409, isOperational: true, code: 'preview_changed' });
+                }
+              }
+            }
           }
           // Coordinates cleared ATOMICALLY with the address (and the move
           // stamp the fan-out writes in this same transaction): a committed
@@ -6759,8 +6779,9 @@ module.exports = router;
 // what the customer page's Bill-To select sends — without an HTTP request (the admin-invoices.js adapter
 // pattern): the handler gets the request fields it reads and a capture response, and the promise resolves the
 // reply it would send, { status, json }. An error passed to next() rejects. expectedPayerId: the Bill-To the
-// card showed (null = the customer pays).
-function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, actor }) {
+// card showed (null = the customer pays); expectedInvoices: the invoices the card said move ({ id, status, total,
+// credit_applied }), re-checked inside the transaction.
+function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, expectedInvoices, actor }) {
   return new Promise((resolve, reject) => {
     const res = {
       statusCode: 200,
@@ -6774,6 +6795,7 @@ function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, actor 
       ip: null,
       get: () => null,
       ibExpectedPayerId: expectedPayerId == null ? null : String(expectedPayerId),
+      ibExpectedInvoices: (expectedInvoices || []).map((e) => ({ id: String(e.id), status: e.status, total: e.total, credit_applied: e.credit_applied })),
     };
     Promise.resolve(customerUpdateHandler(req, res, reject)).catch(reject);
   });
