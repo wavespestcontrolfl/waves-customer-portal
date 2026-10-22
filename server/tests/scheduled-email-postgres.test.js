@@ -320,20 +320,24 @@ jest.setTimeout(30000);
     expect((await call('GET', '/scheduled')).body.emails).toEqual([]);
   });
 
-  test('Back to draft closes a refused email alert; an unclear one closes on the Sent check', async () => {
+  test('alerts close from the row state: taken back, or the Sent check answered on the email', async () => {
     const alertOpen = async (id) => (await database('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`scheduled-email:${id}`]).first()).done_at === null;
-    const refused = await queue({ to: 'refused@example.invalid' });
-    const unclear = await queue({ to: 'unclear@example.invalid' });
-    await database('scheduled_emails').whereIn('id', [refused.body.scheduled.id, unclear.body.scheduled.id])
-      .update({ status: database.raw("CASE WHEN to_address = 'refused@example.invalid' THEN 'failed' ELSE 'outcome_unknown' END") });
-    expect((await sendDueScheduledEmails()).missedAlerts).toBe(0);
-    expect(await alertOpen(refused.body.scheduled.id)).toBe(true);
-    await cancel(refused.body.scheduled.id);
-    expect(await alertOpen(refused.body.scheduled.id)).toBe(false);
-    await cancel(unclear.body.scheduled.id);
-    expect(await alertOpen(unclear.body.scheduled.id)).toBe(true);
-    expect((await call('POST', `/scheduled/${unclear.body.scheduled.id}/sent-checked`)).status).toBe(200);
-    expect(await alertOpen(unclear.body.scheduled.id)).toBe(false);
+    const rows = {};
+    for (const name of ['refused', 'inSent', 'notSent']) rows[name] = (await queue({ to: `${name}@example.invalid` })).body.scheduled.id;
+    await database('scheduled_emails').where({ id: rows.refused }).update({ status: 'failed' });
+    await database('scheduled_emails').whereIn('id', [rows.inSent, rows.notSent]).update({ status: 'outcome_unknown' });
+    await sendDueScheduledEmails();
+    for (const id of Object.values(rows)) expect(await alertOpen(id)).toBe(true);
+    await cancel(rows.refused);
+    expect((await call('POST', `/scheduled/${rows.inSent}/sent-check`, { inSent: true })).status).toBe(200);
+    expect((await call('POST', `/scheduled/${rows.notSent}/sent-check`, { inSent: false })).status).toBe(200);
+    expect(await row(rows.inSent)).toMatchObject({ status: 'sent' });
+    expect(await row(rows.notSent)).toMatchObject({ status: 'cancelled' });
+    // Not in Sent used up the recovery copy: no second draft from the list.
+    expect((await cancel(rows.notSent)).status).toBe(409);
+    await sendDueScheduledEmails();
+    for (const id of Object.values(rows)) expect(await alertOpen(id)).toBe(false);
+    expect((await call('POST', `/scheduled/${rows.inSent}/sent-check`, {})).status).toBe(400);
   });
 
   test('reconcile still settles a key with the gate off (it sends nothing)', async () => {

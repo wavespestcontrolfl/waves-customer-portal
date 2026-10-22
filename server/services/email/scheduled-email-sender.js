@@ -207,8 +207,35 @@ async function claimGroup(conn, tried) {
   return { group, claimFailed: false };
 }
 
+// An alert is done once its email is no longer failed or outcome_unknown
+// (taken back, checked in Sent, used up by a retry, ...). Closing it here,
+// from the row's own state, needs no browser call and retries every minute
+// until it succeeds. Returns false when the close could not be written.
+async function closeSettledAlerts(conn = db) {
+  try {
+    const open = await conn('notifications as n').where('n.recipient_type', 'admin').whereNull('n.done_at')
+      .whereRaw("n.metadata->>'dedupeKey' LIKE 'scheduled-email:%'")
+      .whereNotExists(conn('scheduled_emails as s').select(conn.raw('1'))
+        .whereIn('s.status', ['failed', 'outcome_unknown'])
+        .whereRaw("n.metadata->>'dedupeKey' = 'scheduled-email:' || s.id::text"))
+      .select('n.id');
+    if (open.length) {
+      await require('../notification-service').markAdminDone(open.map((n) => n.id), { by: 'scheduled-email', resolution: 'The scheduled email was settled.' });
+    }
+    return true;
+  } catch (err) {
+    logger.error(`[scheduled-email] alert close failed (${err.code || 'error'})`);
+    return false;
+  }
+}
+
 async function sendDueScheduledEmails({ conn = db, gmail } = {}) {
-  if (!emailSendLaterLive()) return { enabled: false, settled: 0, results: [] };
+  // Runs with the gate off too: settled emails' alerts still close.
+  const alertsClosed = await closeSettledAlerts(conn);
+  if (!emailSendLaterLive()) {
+    if (!alertsClosed) throw new Error('scheduled-email sweep: settled alerts not closed');
+    return { enabled: false, settled: 0, results: [] };
+  }
   const settled = await settleStaleClaims(conn);
   const results = [];
   const tried = [];
@@ -230,7 +257,7 @@ async function sendDueScheduledEmails({ conn = db, gmail } = {}) {
   // in job_health (runScheduledSweep records the throw).
   // An email Gmail accepted but the sweep could not record as sent is never
   // retried (settleStaleClaims alerts on it later), yet the run is unhealthy.
-  const errors = results.filter((r) => r === 'error' || r === 'sent_unrecorded').length;
+  const errors = results.filter((r) => r === 'error' || r === 'sent_unrecorded').length + (alertsClosed ? 0 : 1);
   if (errors > 0 || missedAlerts > 0) {
     throw Object.assign(new Error(`scheduled-email sweep: ${errors} error(s), ${missedAlerts} alert(s) not raised`), { summary });
   }
@@ -260,4 +287,4 @@ async function runScheduledSweep({ conn = db, gmail } = {}) {
   }
 }
 
-module.exports = { runScheduledSweep, OUTCOME_UNKNOWN_ERRORS, SEND_TIMEOUT_MS, sendDueScheduledEmails, settleStaleClaims, claimNext, sendOne, raiseMissedAlerts, MAX_ATTEMPTS, STALE_MINUTES };
+module.exports = { runScheduledSweep, OUTCOME_UNKNOWN_ERRORS, SEND_TIMEOUT_MS, sendDueScheduledEmails, settleStaleClaims, claimNext, sendOne, raiseMissedAlerts, closeSettledAlerts, MAX_ATTEMPTS, STALE_MINUTES };

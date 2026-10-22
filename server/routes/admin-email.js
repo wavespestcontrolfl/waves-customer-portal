@@ -480,31 +480,24 @@ router.get('/scheduled', async (req, res) => {
   }
 });
 
-// Closes the scheduled email's admin alert (dedupeKey scheduled-email:<id>)
-// through the shared Done writer. Returns false when it could not; the
-// caller decides whether that matters.
-async function closeScheduledAlert(id, req, resolution) {
+// POST /scheduled/:id/sent-check — the office's answer after checking the
+// Gmail Sent folder for an email that may have gone out: { inSent: true }
+// records it as sent; false means it never went out, and the row's recovery
+// copy is used up (the draft the office holds is the only copy). Atomic on
+// outcome_unknown; a row already taken back stays as it is. The sweep then
+// closes its alert. Sends nothing, so it answers with the gate off too.
+router.post('/scheduled/:id/sent-check', async (req, res) => {
+  const inSent = req.body?.inSent;
+  if (typeof inSent !== 'boolean') return res.status(400).json({ error: 'inSent must be true or false.' });
   try {
-    const ids = (await db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
-      .whereRaw("metadata->>'dedupeKey' = ?", [`scheduled-email:${id}`]).select('id')).map((n) => n.id);
-    if (ids.length) await require('../services/notification-service').markAdminDone(ids, { by: req.technicianId || 'scheduled-email', resolution, role: req.techRole });
-    return true;
+    await db('scheduled_emails').where({ id: req.params.id, status: 'outcome_unknown' }).update(inSent
+      ? { status: 'sent', sent_at: db.fn.now(), last_error: 'Found in the Gmail Sent folder by the office', updated_at: db.fn.now() }
+      : { status: 'cancelled', cancelled_at: db.fn.now(), restored_at: db.fn.now(), updated_at: db.fn.now() });
+    res.json({ success: true });
   } catch (err) {
-    logger.warn(`[email] scheduled alert close failed (${err.code || 'error'})`);
-    return false;
+    logger.error(`[email] scheduled sent-check failed (${err.code || 'error'})`);
+    res.status(500).json({ error: 'Could not record the check. Try again.' });
   }
-}
-
-// POST /scheduled/:id/sent-checked — the office checked the Gmail Sent
-// folder for an email that may have gone out ("I checked"): its alert is
-// done. 500 when that could not be recorded, so the browser keeps its guard
-// and the check can be repeated. Sends nothing, so it answers with the gate
-// off too.
-router.post('/scheduled/:id/sent-checked', async (req, res) => {
-  if (!(await closeScheduledAlert(req.params.id, req, 'The office checked the Gmail Sent folder.'))) {
-    return res.status(500).json({ error: 'Could not record the check. Try again.' });
-  }
-  res.json({ success: true });
 });
 
 // POST /scheduled/:id/cancel — Gmail's "Cancel send": the row stops and its
@@ -516,15 +509,10 @@ router.post('/scheduled/:id/sent-checked', async (req, res) => {
 router.post('/scheduled/:id/cancel', async (req, res) => {
   if (!emailSendLaterLive()) return res.status(404).json({ enabled: false, error: 'Schedule send is off.' });
   try {
-    const before = await db('scheduled_emails').where({ id: req.params.id }).first('status');
     const [row] = await db('scheduled_emails').where({ id: req.params.id }).whereIn('status', CANCELLABLE)
       .update({ status: 'cancelled', cancelled_at: db.fn.now(), restored_at: db.fn.now(), updated_at: db.fn.now() }).returning('*');
-    if (row) {
-      // A refused email taken back to a draft is its alert's whole job done.
-      // An unclear one waits for the Sent check (POST /scheduled/:id/sent-checked).
-      if (before?.status === 'failed') await closeScheduledAlert(row.id, req, 'Taken back to a draft.');
-      return res.json({ success: true, draft: scheduledView(row) });
-    }
+    // Its alert closes on the next sweep (the row is no longer unresolved).
+    if (row) return res.json({ success: true, draft: scheduledView(row) });
     const current = await db('scheduled_emails').where({ id: req.params.id }).first('status');
     if (current?.status === 'cancelled') {
       return res.status(409).json({ cancelled: true, error: 'This email was already cancelled. Its text is under Scheduled: tap Show text.' });

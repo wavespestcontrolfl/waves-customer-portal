@@ -48,9 +48,10 @@ function reconcileOutcome(row) {
   }
   if (row.status === "failed") return { next: null, message: "Gmail refused that email. Your draft is still here." };
   // outcome_unknown, or cancelled (its text may be a draft in another tab):
-  // the operator's own check decides, so the guard stays without a key. An
-  // unclear one carries its row, so that check also closes its alert.
-  return { next: row.status === "outcome_unknown" ? { ...KEY_SETTLED, rowId: row.id } : KEY_SETTLED, message: row.status === "cancelled"
+  // the operator's own check decides, so the guard stays without a key. One
+  // Gmail may have sent carries its row, for the Sent check's answer.
+  const mayHaveSent = row.status === "outcome_unknown" || row.mayHaveSent === true;
+  return { next: mayHaveSent ? { ...MAY_HAVE_SENT, rowId: row.id } : KEY_SETTLED, message: row.status === "cancelled"
     ? "That email was cancelled and may be open as a draft in another tab. Look there, then tap I checked."
     : "That email may have gone out. Look in the Gmail Sent folder, then tap I checked." };
 }
@@ -146,8 +147,10 @@ export default function useEmailEditor(userId) {
   // A schedule request for this draft slot has no definite answer: plain Send
   // could deliver a copy now while the queued one still sends later.
   const scheduleUnconfirmed = (replyId = null) => Boolean(uncertainSchedule.current[slotOf(replyId)]);
-  // Why plain Send waits: "may_have_sent", "taken_over", or another kind.
+  // Why plain Send waits ("may_have_sent", ...), and whether the guard names
+  // a row the Sent check can answer for.
   const guardKind = (replyId = null) => uncertainSchedule.current[slotOf(replyId)]?.request;
+  const guardHasRow = (replyId = null) => Boolean(uncertainSchedule.current[slotOf(replyId)]?.rowId);
   // The operator looked under Scheduled and in Gmail Sent: the email is in
   // neither. A schedule request with a key is first settled on the server
   // (its row, or a void row that stops a late copy), and the guard follows
@@ -156,17 +159,8 @@ export default function useEmailEditor(userId) {
     const slot = slotOf(replyId);
     const entry = uncertainSchedule.current[slot];
     if (scheduling || !entry) return;
-    // A guard with no key is the operator's call. For an email that may have
-    // gone out, that check is also its alert's job done: the guard clears only
-    // once the server closed the alert, so a failed request can be repeated.
-    if (!entry.clientKey) {
-      if (entry.rowId && !(await alertClosed(entry.rowId))) {
-        setSendFeedback((current) => ({ ...current, [replyId ? "reply" : "compose"]: { messageId: replyId, error: true, message: "Could not record the check. Try again in a moment." } }));
-        return;
-      }
-      rememberUncertain(slot, null);
-      return;
-    }
+    // A guard with no key is the operator's call.
+    if (!entry.clientKey) { rememberUncertain(slot, null); return; }
     const kind = replyId ? "reply" : "compose";
     const say = (message, error = false) => setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error, message } }));
     let row;
@@ -187,11 +181,27 @@ export default function useEmailEditor(userId) {
     const kept = outcome.withdraw && !withdrawIfQueued(replyId, row);
     say(kept ? `${outcome.message} Your newer edits were not scheduled and are still in the draft.` : outcome.message, Boolean(outcome.next));
   };
-  const alertClosed = async (rowId) => {
+  // The office's answer after checking Gmail Sent for an email that may have
+  // gone out. The server records it on the row first (sent, or never sent:
+  // its recovery copy is used up); only then does the guard clear. Found in
+  // Sent, the draft goes too, so it cannot be sent a second time.
+  const resolveSentCheck = async (replyId, inSent) => {
+    const slot = slotOf(replyId);
+    const entry = uncertainSchedule.current[slot];
+    if (scheduling || !entry?.rowId) return;
+    const say = (message, error = false) => setSendFeedback((current) => ({ ...current, [replyId ? "reply" : "compose"]: { messageId: replyId, error, message } }));
+    let recorded = false;
     try {
-      const response = await adminFetch(`/api/admin/email/scheduled/${encodeURIComponent(rowId)}/sent-checked`, { method: "POST" });
-      return response.ok;
-    } catch { return false; }
+      const response = await adminFetch(`/api/admin/email/scheduled/${encodeURIComponent(entry.rowId)}/sent-check`, { method: "POST", body: JSON.stringify({ inSent }) });
+      recorded = response.ok;
+    } catch { recorded = false; }
+    if (!recorded) { say("Could not record the check. Try again in a moment.", true); return; }
+    if (uncertainSchedule.current[slot]?.rowId !== entry.rowId) return;
+    rememberUncertain(slot, null);
+    if (!inSent) return;
+    if (replyId) setReplyDraft(replyId, "");
+    else { setComposeForm(() => ({ to: "", subject: "", body: "" })); setShowCompose(false); }
+    say("Marked as sent. The draft was removed so it is not sent twice.");
   };
   // Removes a draft whose email the server already holds (queued or sent),
   // but only while it is still that email's text: newer edits stay. Returns
@@ -542,6 +552,8 @@ export default function useEmailEditor(userId) {
     scheduling,
     scheduleUnconfirmed,
     guardKind,
+    guardHasRow,
+    resolveSentCheck,
     confirmScheduleChecked,
     handleComposeSchedule,
     handleReplySchedule,

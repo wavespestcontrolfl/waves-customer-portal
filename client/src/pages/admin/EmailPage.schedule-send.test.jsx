@@ -51,7 +51,7 @@ beforeEach(() => {
       return response({ success: true, scheduled: scheduledRows[0] });
     }
     if (path.endsWith("/email/schedule/reconcile")) return response({ success: true, scheduled: reconciledRow });
-    if (path.endsWith("/sent-checked")) return response({ success: true });
+    if (path.endsWith("/sent-check")) return response({ success: true });
     if (path.endsWith("/queued-1/restored")) return response({ success: true });
     if (path.endsWith("/queued-1/cancel")) {
       const draft = { ...scheduledRows[0], status: "cancelled" };
@@ -209,7 +209,7 @@ describe("Email schedule send", () => {
     expect(screen.queryByDisplayValue("Line one\n<b>two</b>")).not.toBeInTheDocument();
   });
 
-  it("a reconciled email that may have gone out closes its alert on the next I checked", async () => {
+  it("a reconciled email found in Sent is recorded as sent and its draft removed", async () => {
     const base = fetch.getMockImplementation();
     fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/email/schedule")
       ? Promise.reject(new TypeError("network")) : base(input, options)));
@@ -220,8 +220,10 @@ describe("Email schedule send", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Tomorrow morning/ }));
     fireEvent.click(await screen.findByRole("button", { name: "I checked: it is in neither" }));
     expect((await screen.findAllByText(/That email may have gone out/)).length).toBeGreaterThan(0);
-    fireEvent.click(screen.getByRole("button", { name: "I checked: it is in neither" }));
-    await waitFor(() => expect(posts("/late-unclear/sent-checked")).toHaveLength(1));
+    fireEvent.click(screen.getByRole("button", { name: "It is in Sent" }));
+    expect((await screen.findAllByText(/Marked as sent\. The draft was removed/)).length).toBeGreaterThan(0);
+    expect(JSON.parse(posts("/late-unclear/sent-check")[0][1].body)).toEqual({ inSent: true });
+    expect(screen.queryByDisplayValue("Line one\n<b>two</b>")).not.toBeInTheDocument();
   });
 
   it("I checked keeps newer edits when the late request did queue the older text", async () => {
@@ -502,19 +504,20 @@ describe("Email schedule send", () => {
     expect(screen.getByText(/Gmail may already have sent this email/)).toBeInTheDocument();
     const send = () => screen.getAllByRole("button", { name: "Send", exact: true }).at(-1);
     expect(send()).toBeDisabled();
-    // The Sent check is also the alert's job done: the guard clears only
-    // once the server recorded it.
+    // The office's answer is recorded on the email first; only then does
+    // the guard clear.
     const base = fetch.getMockImplementation();
     let checkFails = true;
-    fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/sent-checked") && checkFails
+    fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/sent-check") && checkFails
       ? response({ error: "down" }, 500) : base(input, options)));
-    fireEvent.click(screen.getByRole("button", { name: "I checked: it is in neither" }));
+    fireEvent.click(screen.getByRole("button", { name: "Not in Sent" }));
     expect((await screen.findAllByText("Could not record the check. Try again in a moment.")).length).toBeGreaterThan(0);
     expect(send()).toBeDisabled();
     checkFails = false;
-    fireEvent.click(screen.getByRole("button", { name: "I checked: it is in neither" }));
+    fireEvent.click(screen.getByRole("button", { name: "Not in Sent" }));
     await waitFor(() => expect(send()).not.toBeDisabled());
-    expect(posts("/queued-1/sent-checked")).toHaveLength(2);
+    expect(JSON.parse(posts("/queued-1/sent-check").at(-1)[1].body)).toEqual({ inSent: false });
+    expect(screen.getByLabelText(/^Message/)).toHaveValue("Saved text");
   });
 
   it("does not open a may-have-sent draft when the tab cannot save the Sent-check guard", async () => {

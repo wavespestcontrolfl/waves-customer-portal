@@ -14,8 +14,12 @@ export default function ScheduleUnconfirmed({ editor, replyId = null, className 
   if (!editor.scheduleUnconfirmed(replyId) || editor.scheduling) return null;
   return <ActionFeedback error className={className}>
     {NOTICE[editor.guardKind(replyId)] || NOTICE.unconfirmed}
-    <Button variant="secondary" className="ml-2" onClick={() => editor.confirmScheduleChecked(replyId)}>
+    {editor.guardHasRow(replyId) ? <>
+      {/* Two real answers: the server records either on the email. */}
+      <Button variant="secondary" className="ml-2" onClick={() => editor.resolveSentCheck(replyId, true)}>It is in Sent</Button>
+      <Button variant="secondary" className="ml-2" onClick={() => editor.resolveSentCheck(replyId, false)}>Not in Sent</Button>
+    </> : <Button variant="secondary" className="ml-2" onClick={() => editor.confirmScheduleChecked(replyId)}>
       I checked: it is in neither
-    </Button>
+    </Button>}
   </ActionFeedback>;
 }
