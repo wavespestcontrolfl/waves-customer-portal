@@ -1431,6 +1431,22 @@ const LADDER_MAX_SHIFT_MS = (Math.max(0, ...LADDER_MOVED_STEPS.map((index) => (
 const EARLY_ROW = Symbol('early');
 
 /**
+ * The cron's guarded write on its batch snapshot (same id, still active, same step, same due time) for the stale skip and the
+ * Day 90 ladder moves. A live touch claim is never moved past: the Intelligence Bar's approved send-now holds one while it
+ * dispatches and leaves next_touch_at as it was (stale or not), and its own advance owns the step. Only an expired claim (a
+ * crashed sender, past TOUCH_CLAIM_TTL_MS) lets the cron through. Returns the query for the caller's .update().
+ */
+function cronSnapshotUpdate(row, now) {
+  const claimExpiredBefore = new Date(now.getTime() - TOUCH_CLAIM_TTL_MS);
+  return db('invoice_followup_sequences')
+    .where({ id: row.id, status: 'active', step_index: row.step_index })
+    .where('next_touch_at', row.next_touch_at)
+    .where(function unclaimedOrExpired() {
+      this.whereNull('touch_claimed_at').orWhere('touch_claimed_at', '<', claimExpiredBefore);
+    });
+}
+
+/**
  * Gate off (codex #5126 r2): a row still waiting on a time the Day 90 ladder
  * scheduled goes back to its legacy day. Returns EARLY_ROW for a row the
  * widened batch select picked up that is not due on either cadence (left
@@ -1443,9 +1459,7 @@ async function restoreLegacyDay(row, now) {
   if (!row.next_touch_at || new Date(row.next_touch_at).getTime() <= now.getTime()) return null;
   const legacyAt = legacyTouchFor(row, now);
   if (!legacyAt) return EARLY_ROW;
-  const updated = await db('invoice_followup_sequences')
-    .where({ id: row.id, status: 'active', step_index: row.step_index })
-    .where('next_touch_at', row.next_touch_at)
+  const updated = await cronSnapshotUpdate(row, now)
     .update({ updated_at: db.fn.now(), next_touch_at: legacyAt });
   logger.info(`[invoice-followups] Day 90 ladder off: invoice ${row.invoice_id} step ${row.step_index} `
     + `${updated ? `moved back to ${legacyAt.toISOString()}` : 'unchanged (sequence moved since batch select)'}`);
@@ -1463,9 +1477,7 @@ async function deferToLadderDay(row) {
   if (!ladderThrough90Live() || !row.next_touch_at) return null;
   const due = computeNextTouchAt(sequenceAnchor(row), row.step_index);
   if (!due || due.getTime() <= new Date(row.next_touch_at).getTime()) return null;
-  const updated = await db('invoice_followup_sequences')
-    .where({ id: row.id, status: 'active', step_index: row.step_index })
-    .where('next_touch_at', row.next_touch_at)
+  const updated = await cronSnapshotUpdate(row, new Date())
     .update({ updated_at: db.fn.now(), next_touch_at: due });
   logger.info(`[invoice-followups] Day 90 ladder: invoice ${row.invoice_id} step ${row.step_index} `
     + `${updated ? `moved to ${due.toISOString()}` : 'unchanged (sequence moved since batch select)'}`);
@@ -1612,9 +1624,7 @@ async function skipStaleTouches(row, now) {
     nextIndex += 1;
     nextAt = computeNextTouchAt(anchorAt, nextIndex);
   }
-  const updated = await db('invoice_followup_sequences')
-    .where({ id: row.id, status: 'active', step_index: row.step_index })
-    .where('next_touch_at', row.next_touch_at)
+  const updated = await cronSnapshotUpdate(row, now)
     .update({
       updated_at: db.fn.now(),
       step_index: nextIndex,
