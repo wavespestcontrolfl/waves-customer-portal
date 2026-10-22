@@ -714,6 +714,13 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
       expect(trx.__calls.filter((t) => t === 'technicians')).toHaveLength(1); // the capability lock only
     });
 
+    test('gate switched off after home-based scoring: the move is refused (the scored point was not the office)', async () => {
+      delete process.env.GATE_TECH_START_POINTS;
+      const trx = fakeTrx({ techRows: { t1: row(HOME) } });
+      await expect(guardFor(BEST, () => HOME)({ trx, technicianId: 't1' })).rejects.toMatchObject({ code: 'START_POINT_CHANGED' });
+      expect(trx.__calls.filter((t) => t === 'technicians')).toHaveLength(1); // still no start point query
+    });
+
     test('the lookup reaches the move guard of every attempt, a SLOT_TAKEN fallback included', async () => {
       process.env.GATE_TECH_START_POINTS = 'true';
       process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';

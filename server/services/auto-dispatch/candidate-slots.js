@@ -456,9 +456,30 @@ async function loadStartPoints(ctx, technicianIds) {
   for (const row of rows) cache.set(String(row.id), techStartPoint(row));
 }
 
+// Every technician's point, read BEFORE the slot search reads them itself: the
+// search (legacy path included) scores a destination from its own fresh read,
+// so the cache must hold that technician too, and must not be NEWER than the
+// search. An edit between the two reads leaves the cache older, which the
+// commit fence refuses; the reverse order would hide it. A technician already
+// cached keeps the older snapshot. Once per run (marked on the run's Map).
+async function loadAllStartPoints(ctx) {
+  if (!techStartPointsLive()) return;
+  const cache = ctx.startPoints || (ctx.startPoints = new Map());
+  if (cache.allLoaded) return;
+  const rows = await ctx.db('technicians').select(['id', ...START_COLUMNS]);
+  for (const row of rows) if (!cache.has(String(row.id))) cache.set(String(row.id), techStartPoint(row));
+  cache.allLoaded = true;
+}
+
+// The point a technician was scored from, as the run's cache holds it. Does
+// NOT read the live gate: the commit fence compares it with the live answer,
+// so a gate switched off after home-based scoring is caught there.
+function scoredStartPoint(ctx, technicianId) {
+  return (technicianId && ctx.startPoints && ctx.startPoints.get(String(technicianId))) || HQ;
+}
+
 function homeFor(ctx, technicianId) {
-  if (!techStartPointsLive() || !technicianId || !ctx.startPoints) return HQ;
-  return ctx.startPoints.get(String(technicianId)) || HQ;
+  return techStartPointsLive() ? scoredStartPoint(ctx, technicianId) : HQ;
 }
 
 function slotTaken(placement, occupied) {
@@ -910,6 +931,7 @@ async function seriesDatesInWindow(service, ctx, dateFrom, dateTo) {
 // is only ±tolerance days, so the full set is small; the re-fetch is rare (never
 // at current crew size) and only pays off in a dense window.
 async function everyFeasibleSlot(findTimeArgs, ctx) {
+  await loadAllStartPoints(ctx);
   let res = await findAvailableSlots({ ...findTimeArgs, topN: ctx.fetchCap || FETCH_CAP });
   let slots = (res && res.slots) || [];
   if (res && typeof res.total_feasible === 'number' && res.total_feasible > slots.length) {
@@ -1013,6 +1035,6 @@ module.exports = {
   violatesPreferredTime,
   _internals: {
     hhmmToMin, weekdayOf, isSaturday, loadDayStops, loadDayStopRows, loadGroupContext,
-    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict, loadStartPoints, homeFor, legacyCap, movingUnitIds, dropSlotsTheUnitCannotTake,
+    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict, loadStartPoints, loadAllStartPoints, homeFor, scoredStartPoint, legacyCap, movingUnitIds, dropSlotsTheUnitCannotTake,
   },
 };

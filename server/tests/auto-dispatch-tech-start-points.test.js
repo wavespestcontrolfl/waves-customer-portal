@@ -25,7 +25,9 @@ const { chainDriveMinutes, routeCost } = require('../services/auto-dispatch/rout
 const { ROAD_LEGS } = require('../services/auto-dispatch/road-check');
 const { driveMin, HQ } = require('../services/auto-dispatch/geo');
 const {
-  computeCurrentPlacement, _internals: { loadStartPoints, homeFor, filterAndScoreSharedModelCandidates },
+  computeCurrentPlacement, _internals: {
+    loadStartPoints, loadAllStartPoints, scoredStartPoint, homeFor, filterAndScoreSharedModelCandidates,
+  },
 } = require('../services/auto-dispatch/candidate-slots');
 
 const ENV_GATE = process.env.GATE_TECH_START_POINTS;
@@ -190,6 +192,44 @@ describe('loadStartPoints: one batched read per technician per run', () => {
     await loadStartPoints(ctx, ['t1']);
     expect(db.techCalls).toEqual([]);
     expect(ctx.startPoints).toBeUndefined();
+  });
+});
+
+describe('loadAllStartPoints: the cache holds every technician before the slot search reads them', () => {
+  const rowsOf = (...rows) => {
+    const db = jest.fn(() => ({ select: async () => rows }));
+    return db;
+  };
+  test('one read for the run; a technician already cached keeps the older snapshot; others (no address too) are cached', async () => {
+    process.env.GATE_TECH_START_POINTS = 'true';
+    const db = rowsOf({ id: 't1', start_lat: 1, start_lng: 1 }, { id: 't2', start_lat: HOME.lat, start_lng: HOME.lng }, { id: 't3', start_lat: null, start_lng: null });
+    const run = new Map([['t1', HOME]]);
+    await loadAllStartPoints({ db, startPoints: run });
+    await loadAllStartPoints({ db, startPoints: run });
+    expect(db).toHaveBeenCalledTimes(1);
+    expect(run.get('t1')).toBe(HOME); // older snapshot kept
+    expect(run.get('t2')).toEqual(HOME);
+    expect(run.get('t3')).toBe(HQ);
+  });
+
+  test('gate off: no read, no cache', async () => {
+    delete process.env.GATE_TECH_START_POINTS;
+    const db = rowsOf({ id: 't1', start_lat: HOME.lat, start_lng: HOME.lng });
+    const ctx = { db };
+    await loadAllStartPoints(ctx);
+    expect(db).not.toHaveBeenCalled();
+    expect(ctx.startPoints).toBeUndefined();
+  });
+
+  test('scoredStartPoint answers the cached point even when the gate is now off; homeFor answers the office', () => {
+    delete process.env.GATE_TECH_START_POINTS;
+    const ctx = { startPoints: new Map([['t1', HOME]]) };
+    expect(scoredStartPoint(ctx, 't1')).toEqual(HOME);
+    expect(scoredStartPoint(ctx, 't9')).toBe(HQ);
+    expect(scoredStartPoint({}, 't1')).toBe(HQ);
+    expect(homeFor(ctx, 't1')).toBe(HQ);
+    process.env.GATE_TECH_START_POINTS = 'true';
+    expect(homeFor(ctx, 't1')).toEqual(HOME);
   });
 });
 

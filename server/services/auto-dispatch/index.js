@@ -1277,7 +1277,7 @@ async function applyPlannedMove(pm, run, attempt) {
     sourceConflict: (fresh.current && fresh.current.conflict) || null,
     // The start points this move (and any SLOT_TAKEN fallback) was scored from:
     // the run's cache. The move guard refuses when a Team-tab edit changed one.
-    startPointFor: (technicianId) => require('./candidate-slots')._internals.homeFor(pm.ctx, technicianId),
+    startPointFor: (technicianId) => require('./candidate-slots')._internals.scoredStartPoint(pm.ctx, technicianId),
     ...moveCheck.writeOptions(checked, {
       alternateCandidates: fresh.rankedCandidates,
       rescore: () => evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary),
