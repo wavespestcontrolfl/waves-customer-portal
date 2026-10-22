@@ -295,26 +295,35 @@ const isReadAnswer = result => Boolean(result) && typeof result === 'object' && 
 
 function noteUntrustedRead(taint, toolName, result) {
   if (!taint || !readTaints(toolName)) return;
-  if (toolName === GENERAL_READ_TOOL ? isDataAnswer(result) : isReadAnswer(result)) taint.untrustedRead = true;
+  if (!(toolName === GENERAL_READ_TOOL ? isDataAnswer(result) : isReadAnswer(result))) return;
+  taint.untrustedRead = true;
+  // Which marker the reply leaves on the thread: read_admin_data keeps the old one, every
+  // v2-only tainting read gets the v2 marker (Codex #6369 r19).
+  if (toolName === GENERAL_READ_TOOL) taint.untrustedGeneral = true;
+  else taint.untrustedV2 = true;
 }
 
 // Pure: does a saved message history hold a tainting read that returned data?
 // A read with no saved result (the runner stopped between the call and its
 // result) counts as returned, so a resume fails closed.
-function untrustedReadInHistory(messages) {
+function untrustedReadKindsInHistory(messages) {
   const blocks = (Array.isArray(messages) ? messages : []).flatMap(message => (Array.isArray(message?.content) ? message.content : []));
   const reads = blocks.filter(block => block?.type === 'tool_use' && readTaints(block.name));
-  if (!reads.length) return false;
   const answers = new Map(blocks.filter(block => block?.type === 'tool_result').map(block => [block.tool_use_id, block]));
-  return reads.some((read) => {
+  const returned = (read) => {
     const answer = answers.get(read.id);
     if (!answer) return true;
     try { return (read.name === GENERAL_READ_TOOL ? isDataAnswer : isReadAnswer)(JSON.parse(answer.content)); } catch { return true; }
-  });
+  };
+  const returnedReads = reads.filter(returned);
+  return { general: returnedReads.some(read => read.name === GENERAL_READ_TOOL), v2: returnedReads.some(read => read.name !== GENERAL_READ_TOOL) };
 }
 
+const untrustedReadInHistory = messages => Object.values(untrustedReadKindsInHistory(messages)).some(Boolean);
+
 function newRequestTaint(history) {
-  return { untrustedRead: untrustedReadInHistory(history) };
+  const { general, v2 } = untrustedReadKindsInHistory(history);
+  return { untrustedRead: general || v2, untrustedGeneral: general, untrustedV2: v2 };
 }
 
 // What the server's own thread record says: true (an earlier exchange read
@@ -322,10 +331,10 @@ function newRequestTaint(history) {
 // thread with no such exchange), or null when there is no thread id to look up.
 // Consulted whatever the gates say: the saved marker stays authoritative even
 // after the general read is turned off.
-async function threadTaintVerdict(actorId, threadId) {
+async function threadTaintVerdict(actorId, threadId, marker = null) {
   if (!threadId) return null;
   try {
-    return (await IbThreads.hasUntrustedRead(actorId, threadId)) === true;
+    return (await (marker ? IbThreads.hasUntrustedRead(actorId, threadId, marker) : IbThreads.hasUntrustedRead(actorId, threadId))) === true;
   } catch {
     return true;
   }
@@ -361,10 +370,14 @@ async function loadUntrustedTaint({ history, threadId, actorId, needed = true, f
   if (taint.untrustedRead || !needed) return taint;
   const verdict = await threadTaintVerdict(actorId, threadId);
   if (verdict !== null) {
-    taint.untrustedRead = verdict;
+    // The v2 marker counts only while the v2 gate is on (Codex #6369 r19).
+    taint.untrustedGeneral = verdict;
+    taint.untrustedV2 = !verdict && ibTargetRulesV2Live() && await threadTaintVerdict(actorId, threadId, IbThreads.UNTRUSTED_READ_V2_MARKER) === true;
+    taint.untrustedRead = taint.untrustedGeneral || taint.untrustedV2;
     return taint;
   }
-  taint.untrustedRead = fullAccess === true && Array.isArray(conversationHistory) && conversationHistory.length > 0;
+  taint.untrustedGeneral = fullAccess === true && Array.isArray(conversationHistory) && conversationHistory.length > 0;
+  taint.untrustedRead = taint.untrustedGeneral;
   return taint;
 }
 
@@ -503,20 +516,14 @@ const PREVIEW_CUSTOMER_TOOLS = new Set(['reschedule_appointment', 'assign_techni
 
 function messageDirectPlan(toolUses, isValid = () => true, taint = null, grounding = null) {
   const plan = new Map();
-  const previewCalls = new Map();
   for (const toolUse of toolUses || []) {
-    if (ibTargetRulesV2Live() && PREVIEW_CUSTOMER_TOOLS.has(toolUse?.name)) {
-      if (isValid(toolUse)) previewCalls.set(toolUse.name, (previewCalls.get(toolUse.name) || 0) + 1);
-      continue;
-    }
+    // GATE_IB_TARGET_RULES_V2 (Codex #6369 r19): whether a reschedule or an assignment runs
+    // direct is only known from its finished preview. Counting them up front would let
+    // carded calls (1 eligible + 5 carded) use up the allowance, so they never join the
+    // up-front plan; each is counted as it commits (dynamicCapReached), in order.
+    if (ibTargetRulesV2Live() && PREVIEW_CUSTOMER_TOOLS.has(toolUse?.name)) continue;
     if (mayExecuteWithoutCard(toolUse?.name, toolUse?.input, taint, grounding) && isValid(toolUse)) plan.set(toolUse.name, (plan.get(toolUse.name) || 0) + 1);
   }
-  // A message with more than the limit of these calls is refused as a set
-  // (one bulk card), decided before any of them commits (Codex #6369 r2):
-  // the prompt promises "more than 5 edits" never half-applies.
-  // Counted with the request's earlier direct commits by cappedTools, so four
-  // committed plus a two-call batch is refused as a set too (pre-push audit).
-  for (const [toolName, n] of previewCalls) plan.set(toolName, n);
   return plan;
 }
 

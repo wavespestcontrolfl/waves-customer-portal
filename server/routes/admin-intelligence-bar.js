@@ -324,7 +324,7 @@ const ALLOWED_IMAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/web
 // payload is the CI-only 500 flake; see server/utils/base64-validate.js.
 const { isValidBase64 } = require('../utils/base64-validate');
 // The persisted-turn markers are defined once, with the thread store.
-const { IMAGE_TAINT_MARKER, PII_TAINT_MARKER, UNTRUSTED_READ_MARKER, SAME_NAME_CHOICE_MARKER } = IbThreads;
+const { IMAGE_TAINT_MARKER, PII_TAINT_MARKER, UNTRUSTED_READ_MARKER, UNTRUSTED_READ_V2_MARKER, SAME_NAME_CHOICE_MARKER } = IbThreads;
 const IMAGE_ATTACHMENT_HISTORY_RE = /\[Operator attached \d+ image(?:s)?\]/;
 
 // Validate attachments server-side — never trust the client downscaler. Drop
@@ -440,7 +440,7 @@ function stripInternalHistoryMarkers(message) {
     ...message,
     content: message.content
       .split('\n')
-      .filter((line) => ![IMAGE_TAINT_MARKER, PII_TAINT_MARKER, UNTRUSTED_READ_MARKER, SAME_NAME_CHOICE_MARKER].includes(line.trim()))
+      .filter((line) => ![IMAGE_TAINT_MARKER, PII_TAINT_MARKER, UNTRUSTED_READ_MARKER, UNTRUSTED_READ_V2_MARKER, SAME_NAME_CHOICE_MARKER].includes(line.trim()))
       .join('\n')
       .trim(),
   };
@@ -4174,11 +4174,11 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     );
     // Same-name buttons count only when they are really in the reply (no card or direct action suppressed them).
     OwnerDirect.markSameNameChoices(requestTaint, taskContext, offeredChoices, pendingProposals.length + directActionIds.length);
-    const persistedAssistantTurn = appendTaintMarker(appendTaintMarker(
+    const persistedAssistantTurn = appendTaintMarker(appendTaintMarker(appendTaintMarker(
       appendTaintMarker(appendTaintMarker(finalResponse, imageTainted, IMAGE_TAINT_MARKER), piiTainted, PII_TAINT_MARKER),
-      requestTaint.untrustedRead,
+      requestTaint.untrustedGeneral,
       UNTRUSTED_READ_MARKER,
-    ), OwnerDirect.sameNameMarkerNeeded(requestTaint), SAME_NAME_CHOICE_MARKER);
+    ), OwnerDirect.sameNameMarkerNeeded(requestTaint), SAME_NAME_CHOICE_MARKER), requestTaint.untrustedV2, UNTRUSTED_READ_V2_MARKER);
 
     // Server-persisted threads (GATE_IB_THREADS, owner-ratified 2026-08-31):
     // admin actors only, never tech or the isolated agent_estimate rail.

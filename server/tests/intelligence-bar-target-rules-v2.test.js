@@ -801,26 +801,35 @@ describe('Codex r1 P2: the direct cap counts calls that actually run direct; the
   const reschedule = n => ({ type: 'tool_use', name: 'reschedule_appointment', input: { appointment_id: id(600 + n), new_date: '2026-11-03' } });
   const pin = customer_id => ({ pinned_appointment: { id: id(600), customer_id, visit_id: null } });
 
-  test('gate on: a message with six reschedule calls is refused as a set before any commits; unnamed ones still card (Codex #6369 r2)', () => {
+  test('gate on: only calls that run direct use the allowance: 1 eligible + 5 carded still runs the eligible one; 6 eligible hit the cap (Codex #6369 r19)', () => {
     process.env[ON] = 'true';
     const grounding = OwnerDirect.targetGrounding({ targets: [], typedCustomerIds: [NAMED], page: { ids: {} } });
     const calls = [1, 2, 3, 4, 5, 6].map(reschedule);
-    // More than five such calls in one message: the set goes to the bulk card, decided before the previews.
+    // Reschedules join no up-front plan: whether one runs direct is known only from its preview.
     const committed = new Map();
-    const capped = OwnerDirect.cappedTools(committed, OwnerDirect.messageDirectPlan(calls, () => true, null, grounding));
-    expect([...capped]).toEqual(['reschedule_appointment']);
-    // Five or fewer are left to the per-preview count.
-    expect(OwnerDirect.cappedTools(new Map(), OwnerDirect.messageDirectPlan(calls.slice(0, 5), () => true, null, grounding)).size).toBe(0);
-    // Each call is judged on its own preview, in order, as it commits.
-    const verdicts = [UNNAMED, UNNAMED, UNNAMED, UNNAMED, UNNAMED, NAMED].map((customer_id) => {
-      const direct = OwnerDirect.executesWithoutCard('reschedule_appointment', calls[0].input, pin(customer_id), null, grounding);
-      if (!direct) return 'card';
+    const plan = OwnerDirect.messageDirectPlan(calls, () => true, null, grounding);
+    expect(plan.has('reschedule_appointment')).toBe(false);
+    const capped = OwnerDirect.cappedTools(committed, plan);
+    expect(capped.size).toBe(0);
+    // Judge each call on its own preview, in order, as the route does.
+    const run = (customerIds) => customerIds.map((customer_id) => {
+      if (!OwnerDirect.executesWithoutCard('reschedule_appointment', calls[0].input, pin(customer_id), null, grounding)) return 'card';
       if (capped.has('reschedule_appointment') || OwnerDirect.dynamicCapReached(committed, 'reschedule_appointment')) return 'refused';
       OwnerDirect.recordDirectCommit(committed, 'reschedule_appointment');
       return 'direct';
     });
-    expect(verdicts).toEqual(['card', 'card', 'card', 'card', 'card', 'refused']);
-    expect(committed.size).toBe(0); // nothing half-applied
+    // 1 eligible + 5 carded: the eligible one runs direct, whatever its position.
+    expect(run([UNNAMED, UNNAMED, UNNAMED, UNNAMED, UNNAMED, NAMED])).toEqual(['card', 'card', 'card', 'card', 'card', 'direct']);
+    expect(committed.get('reschedule_appointment')).toBe(1);
+    committed.clear();
+    expect(run([NAMED, UNNAMED, UNNAMED, UNNAMED, UNNAMED, UNNAMED])).toEqual(['direct', 'card', 'card', 'card', 'card', 'card']);
+    // 6 eligible: the first five run direct and the cap still bites on the sixth.
+    committed.clear();
+    expect(run([NAMED, NAMED, NAMED, NAMED, NAMED, NAMED])).toEqual(['direct', 'direct', 'direct', 'direct', 'direct', 'refused']);
+    expect(committed.get('reschedule_appointment')).toBe(5);
+    // Gate off: the plan still counts them, as today.
+    delete process.env[ON];
+    expect(OwnerDirect.messageDirectPlan(calls).get('reschedule_appointment')).toBe(6);
   });
 
   test('gate on: after 5 direct reschedules the 6th is refused; other tools and gate off is unchanged', () => {
@@ -878,15 +887,18 @@ describe('lead edits keep the old cap (Codex #6369 security P2)', () => {
   });
 });
 
-describe('preview-dependent batch counts earlier commits (pre-push audit)', () => {
-  test('four committed reschedules plus a two-call batch is refused as a set', () => {
+describe('preview-dependent calls count earlier commits as they commit (pre-push audit, Codex #6369 r19)', () => {
+  test('four committed reschedules plus a two-call batch: the 5th runs direct, the 6th is refused', () => {
     process.env.GATE_IB_TARGET_RULES_V2 = 'true';
     try {
       const call = n => ({ type: 'tool_use', name: 'reschedule_appointment', input: { appointment_id: `10000000-0000-4000-8000-00000000080${n}`, new_date: '2026-11-03' } });
       const committed = new Map([['reschedule_appointment', 4]]);
-      expect([...OwnerDirect.cappedTools(committed, OwnerDirect.messageDirectPlan([call(1), call(2)]))]).toEqual(['reschedule_appointment']);
-      const three = new Map([['reschedule_appointment', 3]]);
-      expect(OwnerDirect.cappedTools(three, OwnerDirect.messageDirectPlan([call(1), call(2)])).size).toBe(0);
+      // No up-front refusal of the set: a preview-dependent call joins no plan.
+      expect(OwnerDirect.cappedTools(committed, OwnerDirect.messageDirectPlan([call(1), call(2)])).size).toBe(0);
+      // Each call is judged as it commits.
+      expect(OwnerDirect.dynamicCapReached(committed, 'reschedule_appointment')).toBe(false);
+      OwnerDirect.recordDirectCommit(committed, 'reschedule_appointment');
+      expect(OwnerDirect.dynamicCapReached(committed, 'reschedule_appointment')).toBe(true);
     } finally {
       delete process.env.GATE_IB_TARGET_RULES_V2;
     }
@@ -998,6 +1010,56 @@ describe('lead reads taint the request (Codex #6369 r7)', () => {
     // A lead read with no saved result fails closed; one that errored does not taint.
     expect(OwnerDirect.untrustedReadInHistory([history[0]])).toBe(true);
     expect(OwnerDirect.untrustedReadInHistory([history[0], { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: JSON.stringify({ error: 'x' }) }] }])).toBe(false);
+  });
+});
+
+describe('v2 untrusted-read marker (Codex #6369 r19)', () => {
+  const IbThreads = require('../services/intelligence-bar/threads');
+  const edit = { customer_id: id(101), updates: { phone: '941-555-0100' } };
+  const grounding = () => OwnerDirect.targetGrounding({ targets: [], typedCustomerIds: [id(101)], page: { ids: {} } });
+  // A thread whose turns carry the given markers: the real marker argument decides.
+  const loadWith = (markers) => {
+    jest.spyOn(IbThreads, 'hasUntrustedRead').mockImplementation(async (actor, thread, marker = IbThreads.UNTRUSTED_READ_MARKER) => markers.includes(marker));
+    jest.spyOn(IbThreads, 'hasSameNameChoicePending').mockResolvedValue(false);
+    return OwnerDirect.loadRequestTaint({ history: [], threadId: id(1), actorId: id(2), needed: true, fullAccess: true, conversationHistory: [{ role: 'user', content: 'hi' }] });
+  };
+  afterEach(() => jest.restoreAllMocks());
+
+  test('the two markers are distinct strings and neither contains the other', () => {
+    expect(IbThreads.UNTRUSTED_READ_V2_MARKER).not.toBe(IbThreads.UNTRUSTED_READ_MARKER);
+    expect(IbThreads.UNTRUSTED_READ_V2_MARKER).not.toContain(IbThreads.UNTRUSTED_READ_MARKER);
+    expect(IbThreads.UNTRUSTED_READ_MARKER).not.toContain(IbThreads.UNTRUSTED_READ_V2_MARKER);
+    expect(IbThreads.UNTRUSTED_READ_V2_MARKER).not.toMatch(/[%_]/);
+  });
+
+  test('a v2-only tainting read sets the v2 flag, read_admin_data the general one', () => {
+    process.env[ON] = 'true';
+    const callLog = OwnerDirect.newRequestTaint([]);
+    OwnerDirect.noteUntrustedRead(callLog, 'get_call_log', { calls: [] });
+    expect(callLog).toMatchObject({ untrustedRead: true, untrustedV2: true, untrustedGeneral: false });
+    const general = OwnerDirect.newRequestTaint([]);
+    OwnerDirect.noteUntrustedRead(general, 'read_admin_data', { status: 200, data: { rows: [] } });
+    expect(general).toMatchObject({ untrustedRead: true, untrustedGeneral: true, untrustedV2: false });
+  });
+
+  test('a thread with the v2 marker is carded while the gate is on and direct again once it is off', async () => {
+    process.env[ON] = 'true';
+    const withGate = await loadWith([IbThreads.UNTRUSTED_READ_V2_MARKER]);
+    expect(withGate).toMatchObject({ untrustedRead: true, untrustedV2: true, untrustedGeneral: false });
+    expect(OwnerDirect.executesWithoutCard('update_customer', edit, null, withGate, grounding())).toBe(false);
+    delete process.env[ON];
+    const rolledBack = await loadWith([IbThreads.UNTRUSTED_READ_V2_MARKER]);
+    expect(rolledBack.untrustedRead).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('update_customer', edit, null, rolledBack, null)).toBe(true);
+  });
+
+  test('a thread with the old marker (read_admin_data) is carded whatever the gate says', async () => {
+    for (const gate of ['true', undefined]) {
+      if (gate) process.env[ON] = gate; else delete process.env[ON];
+      const taint = await loadWith([IbThreads.UNTRUSTED_READ_MARKER]);
+      expect(taint).toMatchObject({ untrustedRead: true, untrustedGeneral: true });
+      expect(OwnerDirect.executesWithoutCard('update_customer', edit, null, taint, gate ? grounding() : null)).toBe(false);
+    }
   });
 });
 

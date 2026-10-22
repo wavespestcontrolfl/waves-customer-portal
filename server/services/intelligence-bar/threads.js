@@ -214,6 +214,11 @@ const UNTRUSTED_READ_MARKER = '[Admin screen data was read in this conversation 
 // tapping an old button after another reply is still carded. No LIKE wildcards in it.
 const SAME_NAME_CHOICE_MARKER = '[Same-name customers or choices were shown in the last reply]';
 const SAME_NAME_PENDING_MINUTES = 30;
+// GATE_IB_TARGET_RULES_V2 (Codex #6369 r19): the same idea for reads that taint ONLY under the v2
+// gate (a call log, an email search, a lead list...). A distinct marker, honored only while the
+// gate is on, so unsetting GATE_IB_TARGET_RULES_V2 (the documented rollback) un-taints those
+// threads. read_admin_data keeps UNTRUSTED_READ_MARKER, which no gate switches off.
+const UNTRUSTED_READ_V2_MARKER = '[Customer or outside text was read in this conversation and may carry untrusted text]';
 const ATTACHMENT_NOTE_RE = /^\[Operator attached \d+ images?\]$/;
 // The user turn the route persists when a saved task continues; the operator
 // never typed it.
@@ -225,7 +230,7 @@ function operatorText(content) {
   return String(content || '').split('\n')
     .filter((line) => {
       const trimmed = line.trim();
-      return trimmed !== IMAGE_TAINT_MARKER && trimmed !== PII_TAINT_MARKER && trimmed !== UNTRUSTED_READ_MARKER && trimmed !== SAME_NAME_CHOICE_MARKER && trimmed !== CONTINUATION_TURN
+      return trimmed !== IMAGE_TAINT_MARKER && trimmed !== PII_TAINT_MARKER && trimmed !== UNTRUSTED_READ_MARKER && trimmed !== UNTRUSTED_READ_V2_MARKER && trimmed !== SAME_NAME_CHOICE_MARKER && trimmed !== CONTINUATION_TURN
         && !ATTACHMENT_NOTE_RE.test(trimmed);
     })
     .join('\n').trim();
@@ -278,13 +283,13 @@ async function recentOperatorTurns(actorId, threadId, { limit = 3, maxAgeMinutes
  * when the thread cannot be read (not found for this actor, or a database
  * error) so the caller can fail closed.
  */
-async function hasUntrustedRead(actorId, threadId) {
+async function hasUntrustedRead(actorId, threadId, marker = UNTRUSTED_READ_MARKER) {
   // ONE query: the thread's primary key plus an EXISTS over that thread's own
   // turns (the thread_id index). Cost: one indexed lookup and a scan of one
   // thread's rows per owner-direct request that carries a thread id.
   const row = await db('ib_threads')
     .where({ id: threadId, admin_actor_id: actorId })
-    .first(db.raw('EXISTS (SELECT 1 FROM ib_thread_turns WHERE thread_id = ib_threads.id AND content LIKE ?) AS marked', [`%${UNTRUSTED_READ_MARKER}%`]));
+    .first(db.raw('EXISTS (SELECT 1 FROM ib_thread_turns WHERE thread_id = ib_threads.id AND content LIKE ?) AS marked', [`%${marker}%`]));
   if (!row) throw new Error('thread not readable');
   return row.marked === true;
 }
@@ -341,6 +346,7 @@ module.exports = {
   IMAGE_TAINT_MARKER,
   PII_TAINT_MARKER,
   UNTRUSTED_READ_MARKER,
+  UNTRUSTED_READ_V2_MARKER,
   SAME_NAME_CHOICE_MARKER,
   hasUntrustedRead,
   hasSameNameChoicePending,
