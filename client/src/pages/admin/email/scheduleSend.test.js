@@ -26,7 +26,8 @@ describe("formatSendAt and earliestPick", () => {
     expect(formatSendAt("2026-10-23T13:00:00.000Z")).toBe("Fri, Oct 23, 9:00 AM");
   });
 
-  it("starts the picker two minutes out, in Eastern time", () => {
+  it("starts the picker at least two full minutes out, in Eastern time", () => {
     expect(earliestPick(new Date("2026-10-23T13:00:00Z"))).toBe("2026-10-23T09:02");
+    expect(earliestPick(new Date("2026-10-23T13:00:59Z"))).toBe("2026-10-23T09:03");
   });
 });

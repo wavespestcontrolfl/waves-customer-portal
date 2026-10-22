@@ -1,6 +1,5 @@
-import { useEffect } from "react";
 import { useOutletContext } from "react-router-dom";
-import { Ban, Clock, Inbox, Mail, Plus, Send } from "lucide-react";
+import { Ban, Inbox, Mail, Plus, Send } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { UiSurface } from "../../components/ui/UiSurface";
 import { Button } from "../../components/ui/Button";
@@ -9,7 +8,7 @@ import EmailComposer from "./email/EmailComposer";
 import useEmailInbox from "./email/useEmailInbox";
 import useEmailEditor from "./email/useEmailEditor";
 import { EmailSummary, EmailInbox, BlockedSenders } from "./email/EmailMailbox";
-import useScheduledEmails from "./email/useScheduledEmails";
+import { useScheduledSection } from "./email/useScheduledEmails";
 import ScheduledEmails from "./email/ScheduledEmails";
 
 const EMAIL_SECTIONS = [
@@ -27,14 +26,7 @@ export default function EmailPage({ navigation, active }) {
   const connected = !statusState.error && Boolean(status?.connected);
   // Schedule send (GATE_EMAIL_SEND_LATER): the arrow menu and the Scheduled
   // tab appear only once the server reports the gate on.
-  const scheduled = useScheduledEmails(active && connected);
-  const sections = scheduled.enabled
-    ? [EMAIL_SECTIONS[0], { key: "scheduled", label: scheduled.tabLabel, Icon: Clock }, EMAIL_SECTIONS[1]]
-    : EMAIL_SECTIONS;
-  const showScheduled = tab === "scheduled" && scheduled.enabled;
-  const { reload: reloadScheduled } = scheduled;
-  useEffect(() => { if (showScheduled) reloadScheduled(); }, [showScheduled, reloadScheduled]);
-  const mailEditor = { ...editor, scheduleEnabled: scheduled.enabled, onScheduled: scheduled.reload };
+  const { scheduled, sections, pane, mailEditor } = useScheduledSection({ active, connected, tab, editor, baseSections: EMAIL_SECTIONS });
   const action = connected ? {
     key: "compose",
     label: hasComposeDraft ? "Resume draft" : "New email",
@@ -72,9 +64,11 @@ export default function EmailPage({ navigation, active }) {
           <summary className="u-focus-ring min-h-11 cursor-pointer px-4 py-3 font-medium">Email activity</summary>
           <div className="px-4 pb-1"><EmailSummary mailbox={mailbox} /></div>
         </details>
-        {tab === "blocked" && <BlockedSenders mailbox={mailbox} />}
-        {showScheduled && <ScheduledEmails scheduled={scheduled} editor={editor} mailbox={mailbox} />}
-        {tab !== "blocked" && !showScheduled && <EmailInbox active={active} mailbox={mailbox} editor={mailEditor} />}
+        {{
+          blocked: () => <BlockedSenders mailbox={mailbox} />,
+          scheduled: () => <ScheduledEmails scheduled={scheduled} editor={editor} mailbox={mailbox} />,
+          inbox: () => <EmailInbox active={active} mailbox={mailbox} editor={mailEditor} />,
+        }[pane]()}
       </>}
     <EmailComposer active={active && connected} editor={mailEditor} onSent={mailbox.loadStats} />
   </UiSurface>;

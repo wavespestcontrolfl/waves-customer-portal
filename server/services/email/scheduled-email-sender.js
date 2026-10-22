@@ -39,12 +39,33 @@ async function alertOffice(row, kind) {
       doneWhen: 'office_checked',
       who: 'person',
     }, {
-      bell: true, dedupeKey: `scheduled-email:${row.id}`, metadata: { scheduledEmailId: row.id },
+      bell: true, dedupeKey: alertKey(row.id), metadata: { scheduledEmailId: row.id },
       detail: `To: ${row.to_address}\n${unknown ? 'Look in the Gmail Sent folder first. If it is not there, open Email, then Scheduled, and tap Back to draft.' : 'Open Email, then Scheduled, and tap Back to draft to fix and resend it.'}`,
     });
+    return true;
   } catch (err) {
-    logger.error(`[scheduled-email] alert failed for ${row.id}: ${err.message}`);
+    // raiseMissedAlerts tries again on the next run.
+    logger.error(`[scheduled-email] alert failed for ${row.id} (${err.code || 'error'})`);
+    return false;
   }
+}
+
+const alertKey = (id) => `scheduled-email:${id}`;
+const ALERT_LOOKBACK_DAYS = 7;
+
+// A failed or unclear email whose alert write failed has no notification row
+// yet: raise it now. The alert's dedupeKey lives in notifications.metadata.
+async function raiseMissedAlerts(conn = db) {
+  const rows = await conn('scheduled_emails as s')
+    .whereIn('s.status', ['failed', 'outcome_unknown'])
+    .where('s.updated_at', '>', conn.raw(`now() - interval '${ALERT_LOOKBACK_DAYS} days'`))
+    .whereNotExists(conn('notifications').select(conn.raw('1'))
+      .where('recipient_type', 'admin')
+      .whereRaw("metadata->>'dedupeKey' = 'scheduled-email:' || s.id::text"))
+    .select('s.id', 's.to_address', 's.send_at', 's.status');
+  let failed = 0;
+  for (const row of rows) if (!(await alertOffice(row, row.status))) failed += 1;
+  return failed;
 }
 
 // A claim this old belongs to a process that died between claiming and
@@ -69,15 +90,29 @@ async function claimNext(conn = db, tried = []) {
       SELECT id FROM scheduled_emails WHERE status = 'scheduled' AND send_at <= now() AND NOT (id = ANY(?::uuid[]))
       ORDER BY send_at LIMIT 1 FOR UPDATE SKIP LOCKED
     )
-    RETURNING id, to_address, subject, body_html, thread_id, send_at, attempts`, [`{${tried.join(',')}}`]);
+    RETURNING id, to_address, subject, body_html, thread_id, reply_email_id, send_at, attempts`, [`{${tried.join(',')}}`]);
   return rows[0] || null;
+}
+
+// A reply needs the source email's Message-ID (In-Reply-To / References) as
+// well as the thread id to join the conversation, as email-actions.js does.
+// A lookup failure only degrades threading; the email still goes.
+async function sourceMessageId(row, conn) {
+  if (!row.reply_email_id) return null;
+  try {
+    const source = await conn('emails').where({ id: row.reply_email_id }).first('message_id');
+    return source?.message_id || null;
+  } catch (err) {
+    logger.warn(`[scheduled-email] source message lookup failed for ${row.id} (${err.code || 'error'})`);
+    return null;
+  }
 }
 
 async function sendOne(row, { conn = db, gmail = require('./gmail-client') } = {}) {
   const fence = { id: row.id, status: 'sending' };
   let result;
   try {
-    result = await gmail.sendMessage(row.to_address, row.subject, row.body_html, row.thread_id || null);
+    result = await gmail.sendMessage(row.to_address, row.subject, row.body_html, row.thread_id || null, await sourceMessageId(row, conn));
   } catch (err) {
     if (err.providerOutcome?.outcomeUnknown === true) return settleUnknown(row, conn);
     const last = row.attempts >= MAX_ATTEMPTS;
@@ -130,7 +165,14 @@ async function sendDueScheduledEmails({ conn = db, gmail } = {}) {
       results.push('error');
     }
   }
-  return { enabled: true, settled, results };
+  const missedAlerts = await raiseMissedAlerts(conn);
+  const summary = { enabled: true, settled, results, missedAlerts };
+  // Every claimed email was still tried; a run with an error reads as failed
+  // in job_health (runExclusive records the throw).
+  if (results.includes('error') || missedAlerts > 0) {
+    throw Object.assign(new Error(`scheduled-email sweep: ${results.filter((r) => r === 'error').length} error(s), ${missedAlerts} alert(s) not raised`), { summary });
+  }
+  return summary;
 }
 
-module.exports = { sendDueScheduledEmails, settleStaleClaims, claimNext, sendOne, MAX_ATTEMPTS, STALE_MINUTES };
+module.exports = { sendDueScheduledEmails, settleStaleClaims, claimNext, sendOne, raiseMissedAlerts, MAX_ATTEMPTS, STALE_MINUTES };

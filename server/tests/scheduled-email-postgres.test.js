@@ -28,7 +28,14 @@ jest.mock('../services/email/email-actions', () => ({ executeAutoAction: jest.fn
 jest.mock('../services/email/spam-blocker', () => ({ unblockSender: jest.fn(), manualBlockSender: jest.fn() }));
 jest.mock('../services/staff-oauth-state', () => ({}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'fixture-alert' })) }));
+// The alert lands as a notifications row carrying its dedupeKey, which is what
+// raiseMissedAlerts looks for.
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(async (category, title, body, opts = {}) => {
+    await mockConn('notifications').insert({ recipient_type: 'admin', metadata: { dedupeKey: opts.dedupeKey } });
+    return { id: 'fixture-alert' };
+  }),
+}));
 
 const express = require('express');
 const gmail = require('../services/email/gmail-client');
@@ -59,6 +66,9 @@ jest.setTimeout(30000);
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 3 } });
     await database.raw('CREATE SCHEMA ??', [schema]);
     await migration.up(database);
+    // Minimal stand-ins for the tables the sender reads beside its own.
+    await database.schema.createTable('notifications', (t) => { t.increments('id'); t.string('recipient_type'); t.jsonb('metadata'); });
+    await database.schema.createTable('emails', (t) => { t.uuid('id').primary(); t.string('message_id'); });
     mockConn = database;
     const app = express();
     app.use(express.json());
@@ -66,7 +76,7 @@ jest.setTimeout(30000);
     await new Promise((resolve) => { server = app.listen(0, '127.0.0.1', resolve); });
   });
   beforeEach(() => { process.env.GATE_EMAIL_SEND_LATER = 'true'; jest.clearAllMocks(); });
-  afterEach(async () => { await database('scheduled_emails').del(); delete process.env.GATE_EMAIL_SEND_LATER; });
+  afterEach(async () => { await database('scheduled_emails').del(); await database('notifications').del(); await database('emails').del(); delete process.env.GATE_EMAIL_SEND_LATER; });
   afterAll(async () => {
     await new Promise((resolve) => server.close(resolve));
     await database.raw('DROP SCHEMA ?? CASCADE', [schema]);
@@ -88,19 +98,36 @@ jest.setTimeout(30000);
     await makeDue(first.body.scheduled.id);
     gmail.sendMessage.mockResolvedValue({ id: 'gmail-fixture-1' });
     expect((await sendDueScheduledEmails()).results).toEqual(['sent']);
-    expect(gmail.sendMessage).toHaveBeenCalledWith('fixture@example.invalid', 'Fixture', 'Hi<br>there', null);
+    expect(gmail.sendMessage).toHaveBeenCalledWith('fixture@example.invalid', 'Fixture', 'Hi<br>there', null, null);
     expect(await row(first.body.scheduled.id)).toMatchObject({ status: 'sent', gmail_message_id: 'gmail-fixture-1', attempts: 1 });
     expect((await sendDueScheduledEmails()).results).toEqual([]);
     expect(gmail.sendMessage).toHaveBeenCalledTimes(1);
     expect((await call('GET', '/scheduled')).body.emails).toEqual([]);
   });
 
-  test('a reply goes out in its Gmail thread', async () => {
-    const { body } = await queue({ threadId: 'thread-fixture', replyEmailId: randomUUID() });
+  test('a reply goes out in its Gmail thread with the source Message-ID', async () => {
+    const replyEmailId = randomUUID();
+    await database('emails').insert({ id: replyEmailId, message_id: '<source-fixture@example.invalid>' });
+    const { body } = await queue({ threadId: 'thread-fixture', replyEmailId });
     await makeDue(body.scheduled.id);
     gmail.sendMessage.mockResolvedValue({ id: 'gmail-fixture-2' });
     await sendDueScheduledEmails();
-    expect(gmail.sendMessage).toHaveBeenCalledWith('fixture@example.invalid', 'Fixture', 'Hi<br>there', 'thread-fixture');
+    expect(gmail.sendMessage).toHaveBeenCalledWith('fixture@example.invalid', 'Fixture', 'Hi<br>there', 'thread-fixture', '<source-fixture@example.invalid>');
+  });
+
+  test('an alert whose write failed is raised on the next run, and the failing run reads as failed', async () => {
+    const { body } = await queue();
+    await makeDue(body.scheduled.id);
+    gmail.sendMessage.mockRejectedValue(Object.assign(new Error('timeout'), { providerOutcome: { outcomeUnknown: true } }));
+    notifyAdmin.mockRejectedValueOnce(new Error('notifications down'));
+    notifyAdmin.mockRejectedValueOnce(new Error('notifications down'));
+    await expect(sendDueScheduledEmails()).rejects.toMatchObject({ summary: { results: ['outcome_unknown'], missedAlerts: 1 } });
+    expect(await database('notifications')).toHaveLength(0);
+    expect((await sendDueScheduledEmails()).missedAlerts).toBe(0);
+    expect(await database('notifications')).toHaveLength(1);
+    expect((await sendDueScheduledEmails()).missedAlerts).toBe(0);
+    expect(notifyAdmin).toHaveBeenCalledTimes(3);
+    expect(gmail.sendMessage).toHaveBeenCalledTimes(1);
   });
 
   test('Cancel send returns the draft, stops the send, and repeats safely; a sent email cannot be cancelled', async () => {

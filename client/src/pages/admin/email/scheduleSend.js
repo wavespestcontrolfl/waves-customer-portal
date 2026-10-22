@@ -21,8 +21,10 @@ export function formatSendAt(value) {
   return formatETDateTime(iso, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
-// The earliest value the date-and-time picker offers: two minutes out, so the
-// server's one-minute floor still holds when the operator takes a moment.
+// The earliest value the date-and-time picker offers: the next whole minute
+// plus two, so the server's one-minute floor still holds when the operator
+// takes a moment (a picker value has no seconds).
 export function earliestPick(now = new Date()) {
-  return etDatetimeLocalValue(new Date(now.getTime() + 2 * 60 * 1000));
+  const nextMinute = Math.ceil(now.getTime() / 60000) * 60000;
+  return etDatetimeLocalValue(new Date(nextMinute + 2 * 60 * 1000));
 }

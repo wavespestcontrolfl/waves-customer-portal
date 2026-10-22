@@ -352,6 +352,23 @@ const scheduledView = (row) => ({
   replyEmailId: row.reply_email_id, sendAt: row.send_at, status: row.status, sentAt: row.sent_at,
 });
 
+// The send time a schedule request may use, or the reason it may not. The
+// instant must read back as the same Eastern wall clock (no Feb 31, no
+// spring-forward gap), name one moment (not the repeated fall-back hour), and
+// sit between one minute and a year from now.
+function scheduleTimeError(sendAt, now = Date.now()) {
+  if (typeof sendAt !== 'string' || !SCHEDULE_ET_RE.test(sendAt)) return { error: 'sendAt must be YYYY-MM-DDTHH:MM (Eastern)' };
+  const when = parseETDateTime(sendAt);
+  const p = etParts(when);
+  const pad = (n) => String(n).padStart(2, '0');
+  const readBack = `${p.year}-${pad(p.month)}-${pad(p.day)}T${pad(p.hour)}:${pad(p.minute)}`;
+  if (readBack !== sendAt || etWallClockOccurrences(when) !== 1) return { error: 'That time does not exist once in Eastern time. Pick another.' };
+  const ahead = when.getTime() - now;
+  if (!(ahead >= 60 * 1000)) return { error: 'Pick a time at least a minute from now.' };
+  if (ahead > SCHEDULE_MAX_DAYS * 86400000) return { error: 'Pick a time within a year.' };
+  return { when };
+}
+
 // POST /schedule — queue an email for a later send. `sendAt` is ET wall clock
 // (YYYY-MM-DDTHH:MM, like the SMS composer's scheduledFor); `body` is the
 // composer's encoded HTML (as on /send) and `draftText` its plain text, which
@@ -366,17 +383,8 @@ router.post('/schedule', async (req, res) => {
     // retry the chosen time may be under a minute away, or already sent.
     const known = await db('scheduled_emails').where({ client_key: clientKey }).first();
     if (known) return res.json({ success: true, scheduled: scheduledView(known) });
-    if (typeof sendAt !== 'string' || !SCHEDULE_ET_RE.test(sendAt)) return res.status(400).json({ error: 'sendAt must be YYYY-MM-DDTHH:MM (Eastern)' });
-    const when = parseETDateTime(sendAt);
-    // The parsed instant must read back as the same Eastern wall clock (no
-    // Feb 31, no spring-forward gap) and name one moment (not the repeated
-    // fall-back hour).
-    const p = etParts(when);
-    const readBack = `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}T${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}`;
-    if (readBack !== sendAt || etWallClockOccurrences(when) !== 1) return res.status(400).json({ error: 'That time does not exist once in Eastern time. Pick another.' });
-    const ahead = when.getTime() - Date.now();
-    if (Number.isNaN(ahead) || ahead < 60 * 1000) return res.status(400).json({ error: 'Pick a time at least a minute from now.' });
-    if (ahead > SCHEDULE_MAX_DAYS * 86400000) return res.status(400).json({ error: 'Pick a time within a year.' });
+    const { when, error } = scheduleTimeError(sendAt);
+    if (error) return res.status(400).json({ error });
     const [row] = await db('scheduled_emails').insert({
       to_address: String(to).trim(), subject: String(subject || '').trim() || '(no subject)', body_html: body, draft_text: draftText,
       thread_id: threadId || null, reply_email_id: replyEmailId || null, send_at: when, created_by: req.technicianId || null, client_key: clientKey,

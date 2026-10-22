@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Clock } from "lucide-react";
 import { adminFetch } from "./emailApi";
 
 // The Email > Scheduled list (GATE_EMAIL_SEND_LATER). `enabled` stays false
@@ -16,7 +17,8 @@ export default function useScheduledEmails(active) {
       const data = await response.json();
       setState({ enabled: data.enabled === true, emails: Array.isArray(data.emails) ? data.emails : [], loading: false, error: false });
     } catch {
-      setState((current) => ({ ...current, loading: false, error: true }));
+      // Fail closed: an unverifiable gate hides the arrow and the tab.
+      setState((current) => ({ ...current, enabled: false, loading: false, error: true }));
     }
   }, []);
 
@@ -48,4 +50,21 @@ export default function useScheduledEmails(active) {
 
   const queued = state.emails.filter((row) => row.status === "scheduled").length;
   return { ...state, reload, cancel, pendingId, tabLabel: queued ? `Scheduled (${queued})` : "Scheduled" };
+}
+
+// The Email page's view of schedule send: its tab (between Inbox and Blocked,
+// only with the gate on), which pane shows, a fresh list on entering
+// Scheduled, and the editor extended with the arrow menu's two inputs.
+export function useScheduledSection({ active, connected, tab, editor, baseSections }) {
+  const scheduled = useScheduledEmails(active && connected);
+  const showScheduled = tab === "scheduled" && scheduled.enabled;
+  // Scheduled with the gate off falls back to Inbox.
+  const pane = tab === "blocked" ? "blocked" : showScheduled ? "scheduled" : "inbox";
+  const { reload } = scheduled;
+  useEffect(() => { if (showScheduled) reload(); }, [showScheduled, reload]);
+  const sections = scheduled.enabled
+    ? [baseSections[0], { key: "scheduled", label: scheduled.tabLabel, Icon: Clock }, ...baseSections.slice(1)]
+    : baseSections;
+  const mailEditor = { ...editor, scheduleEnabled: scheduled.enabled, onScheduled: reload };
+  return { scheduled, sections, pane, mailEditor };
 }

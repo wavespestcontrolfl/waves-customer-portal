@@ -50,7 +50,7 @@ export default function ScheduledEmails({ scheduled, editor, mailbox }) {
             <p className="m-0 font-medium">To: {row.to}</p>
             <p className="m-0 mt-1">{row.subject || "(no subject)"}</p>
             <p className="m-0 mt-1 truncate text-ink-secondary">{String(row.draftText || "").split("\n")[0]}</p>
-            <p className={["scheduled", "cancelled"].includes(row.status) ? "u-nums m-0 mt-1 text-ink-secondary" : "m-0 mt-1 text-alert-fg"}>
+            <p className={["failed", "outcome_unknown"].includes(row.status) ? "m-0 mt-1 text-alert-fg" : "u-nums m-0 mt-1 text-ink-secondary"}>
               {row.status === "scheduled" ? `Sends ${formatSendAt(row.sendAt)}` : STATUS_TEXT[row.status] || row.status}
             </p>
           </div>
