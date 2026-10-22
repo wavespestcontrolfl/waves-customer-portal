@@ -917,9 +917,9 @@ function isApprovedDethatchingManagerRow(row = {}) {
 // The rows come from the public one-time breakdown, which already reads
 // every layout (nested containers, row and label aliases, discount rows,
 // the pooled manual discount), so this has no row reader of its own
-// (codex #6438 r1-r5). The fee is what the breakdown suppressed, plus a
-// setup row it kept for a plan the converter bills no fee (a standalone
-// rodent bait supplement makes a bundle). It never comes out below the
+// (codex #6438 r1-r5). Only a plan the converter bills no fee loses it (a
+// standalone rodent bait supplement makes a bundle); the fee is what the
+// breakdown suppressed plus any setup row it kept. It never comes out below the
 // billable work rows, so a total that already left it out keeps its work.
 function excludedSetupFeeAmount(estimateData, grossOneTimeTotal) {
   if (!(grossOneTimeTotal > 0) || !estimateData || typeof estimateData !== 'object') return 0;
@@ -927,13 +927,13 @@ function excludedSetupFeeAmount(estimateData, grossOneTimeTotal) {
   const recurringServices = converter.recurringServicesFromEstimateData(estimateData);
   // No recurring service at all is a one-time estimate, not a bundle.
   if (recurringServices.length === 0) return 0;
+  // The converter's plan rule decides whether the fee is billed; a plan it
+  // bills keeps its fee even where the breakdown's own reader suppressed it.
+  if (converter.recurringPlanCarriesSetupFee({ recurringServices, estimateData })) return 0;
   const breakdown = require('../routes/estimate-public').normalizeOneTimeBreakdown(estimateData);
   const rows = Array.isArray(breakdown?.items) ? breakdown.items : [];
   const isSetupRow = (row) => row?.service === 'waveguard_setup';
-  const planBillsNoFee = !converter.recurringPlanCarriesSetupFee({ recurringServices, estimateData });
-  const keptSetupFee = planBillsNoFee
-    ? rows.filter(isSetupRow).reduce((sum, row) => sum + (Number(row.amount) || 0), 0)
-    : 0;
+  const keptSetupFee = rows.filter(isSetupRow).reduce((sum, row) => sum + (Number(row.amount) || 0), 0);
   const feeAmount = roundMoney((Number(breakdown?.suppressedSetupFee) || 0) + keptSetupFee);
   if (!(feeAmount > 0)) return 0;
   const billableWork = Math.max(0, rows

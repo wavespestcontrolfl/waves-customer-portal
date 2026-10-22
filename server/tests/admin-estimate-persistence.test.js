@@ -588,6 +588,17 @@ describe('admin estimate persistence', () => {
     expect(fields.onetime_total).toBe(150);
   });
 
+  test('a solo pest plan in the top-level container keeps its setup fee', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      estimateData: {
+        recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 38.4 }] },
+        result: { oneTime: { items: [], total: 99, membershipFee: 99 } },
+      },
+    });
+    expect(fields.onetime_total).toBe(99);
+  });
+
   test('a setup row named only by displayName comes out of a bundle total', () => {
     const fields = buildEstimatePersistenceFields({
       ...baseBody,
