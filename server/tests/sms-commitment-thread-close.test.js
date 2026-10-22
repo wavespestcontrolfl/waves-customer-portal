@@ -47,6 +47,13 @@ describe('groundThreadVerdict', () => {
     expect(groundThreadVerdict({ verdict: 'contradicted', record_ref: 'sms:in-2', quote: 'where is it' }, [...records, denial])).toEqual({ verdict: 'open' });
   });
 
+  test('a denial that is not after the record witness is ignored', () => {
+    const denial = { ref: 'sms:in-2', id: 'in-2', who: 'customer', created_at: '2026-10-20T10:00:00Z', text: 'I never got it' };
+    const parsed = { verdict: 'contradicted', record_ref: 'sms:in-2', quote: 'never got it' };
+    expect(groundThreadVerdict(parsed, [denial], '2026-10-20T12:00:00Z')).toEqual({ verdict: 'open' });
+    expect(groundThreadVerdict(parsed, [denial], '2026-10-20T09:00:00Z')).toMatchObject({ contradicted: true });
+  });
+
   test('output that breaks the schema is uncertain, not a close', () => {
     expect(groundThreadVerdict({ verdict: 'fulfilled', record_ref: 'sms:in-1', quote: 'Got the report' }, records))
       .toMatchObject({ verdict: 'uncertain', reason: 'invalid_model_output' });

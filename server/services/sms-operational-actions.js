@@ -1055,10 +1055,25 @@ const openSourceCommitments = (conn, smsLogId) => conn('call_commitments')
 async function closeSmsCommitmentAlerts(trx, { commitmentId, smsLogId, settled = true }, update) {
   // A non-settling update (edit, snooze) marks both alerts read; a settling
   // one finishes the shared alert only when no other promise from the text is open.
-  const stillOpen = settled && await openSourceCommitments(trx, smsLogId).whereNot('id', commitmentId).first('id');
-  const keys = [legacyCommitmentAlertKey(commitmentId), ...(stillOpen ? [] : [smsSourceAlertKey(smsLogId)])];
+  const remaining = settled ? await openSourceCommitments(trx, smsLogId).whereNot('id', commitmentId) : [];
+  const keys = [legacyCommitmentAlertKey(commitmentId), ...(remaining.length ? [] : [smsSourceAlertKey(smsLogId)])];
   await trx('notifications').where({ recipient_type: 'admin' })
     .whereIn(trx.raw("metadata->>'dedupeKey'"), keys).update(update);
+  if (remaining.length) await refreshSharedSmsAlert(trx, smsLogId, remaining);
+}
+
+// The shared alert keeps naming a promise that has since settled. Rewrite its
+// copy and commitment list to the promises still open; it stays open and does
+// not ring again (refresh of an OPEN row only; nothing is created).
+async function refreshSharedSmsAlert(trx, smsLogId, remaining) {
+  const dedupeKey = smsSourceAlertKey(smsLogId);
+  const source = await trx('sms_log').where({ id: smsLogId }).first(...SOURCE_COLUMNS);
+  const shared = source && await trx('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
+    .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).forUpdate().first('id', 'metadata');
+  if (!shared) return;
+  const was = shared.metadata?.verification;
+  const verdict = { verdict: was === 'kept_late' ? 'open' : (was || 'open'), ...(was === 'kept_late' ? { late: true } : {}) };
+  await ringOverdueBell(trx, { row: remaining[0], message: source, verdict, dedupeKey, promises: remaining, refreshOnly: true });
 }
 
 // The bell's words (owner audit 2026-10-01): the customer's name and what is owed in the
@@ -1130,14 +1145,14 @@ function overdueBellCopy({ row, message, verdict, customerName, channelWord, pro
 // the title is not the dedupe key (dedupeKey is), so the wording may change.
 // Every existing SMS caller omits the overrides, so the SMS bell keeps its
 // dedupe, link and metadata shape.
-async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceIdField = 'sms_log_id', triggerKey = 'sms_operational_followup', promises = null }) {
+async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceIdField = 'sms_log_id', triggerKey = 'sms_operational_followup', promises = null, refreshOnly = false }) {
   const customerName = await require('./admin-alert-names').lookupCustomerName(trx, message.customer_id);
   const { spec, detail } = overdueBellCopy({ row, message, verdict, customerName, channelWord: sourceIdField === 'email_id' ? 'email' : 'text', promises });
   const ringOpts = {
     trx, bell: true, dedupeKey, dedupeWindowMs: 24 * 60 * 60 * 1000, refreshOnDedupe: true, detail,
     metadata: { triggerKey, customerId: message.customer_id,
       [sourceIdField]: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.late ? 'kept_late' : verdict.verdict,
-      ...(promises?.length > 1 ? { commitment_ids: promises.map((item) => item.id) } : {}) } };
+      ...(promises ? { commitment_ids: promises.map((item) => item.id) } : {}) } };
   const { raiseAdminAlert } = require('./admin-alert-compose');
   // GATE_ALERT_RING_ONCE (owner 2026-10-14): a promise rings once. The probe
   // looks only at OPEN rows, at any age: an open row is refreshed without a
@@ -1145,7 +1160,7 @@ async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceId
   // a new row. With no open row (first time, or a person marked it done and
   // the promise is still overdue) the insert is fresh: one new row, one bell.
   const ringOnce = require('../config/feature-gates').alertRingOnceLive?.();
-  const notification = await raiseAdminAlert('alert', spec, ringOnce
+  const notification = await raiseAdminAlert('alert', spec, ringOnce || refreshOnly
     ? { ...ringOpts, dedupeWindowMs: undefined, dedupeOpenOnly: true, ringOnRefresh: () => false }
     : ringOpts);
   if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
@@ -1156,7 +1171,7 @@ async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceId
   // rows an older build left behind close on the next ring. openToCloser: a
   // row a person marked done is taken over too (their Reopen would bring an
   // obsolete duplicate back); a row a system component closed is left alone.
-  if (notification.id) {
+  if (notification.id && !refreshOnly) {
     const { doneColumns, openToCloser } = require('./notification-service')._private;
     await openToCloser(trx('notifications')
       .where({ recipient_type: 'admin' })
@@ -1190,10 +1205,14 @@ async function ringSmsSourceBell(trx, { row, message, verdict }) {
 // arrive overrides that, so a stale close never hides open work. A failed
 // thread read changes nothing.
 async function reconcileWithThread({ conn, row, current, message, now, verdict, verifyThread }) {
-  if (verdict.retry_after) return verdict;
-  const recordsSaidDone = verdict.verdict === 'fulfilled';
+  // A record check that failed (provider or schema) still gets the thread: a
+  // later customer text may settle it. If the thread cannot, the failed
+  // verdict comes back unchanged, so its retry stays.
+  // A close the thread already overturned keeps the time of the record witness,
+  // so the next tick asks the same question and reuses the cached answer.
+  const recordsSaidDone = verdict.verdict === 'fulfilled' || verdict.reason === 'contradicted_by_thread';
   try {
-    const thread = await verifyThread(conn, current, message, now, recordsSaidDone ? { contradictAfter: verdict.matched_at } : {});
+    const thread = await verifyThread(conn, current, message, now, recordsSaidDone ? { contradictAfter: verdict.matched_at || verdict.contradict_after } : {});
     if (!thread) return verdict;
     current.sms_context = { ...current.sms_context, thread_check: thread };
     if (recordsSaidDone && !thread.contradicted) return verdict;
@@ -1201,7 +1220,9 @@ async function reconcileWithThread({ conn, row, current, message, now, verdict, 
     await conn('call_commitments').where({ id: row.id, status: 'open' }).whereNull('human_state')
       .update({ sms_context: conn.raw("COALESCE(sms_context, '{}'::jsonb) || jsonb_build_object('thread_check', ?::jsonb)", [JSON.stringify(thread)]) });
     // Keep the record check's hash so the next tick reuses it, not a new model call.
-    return recordsSaidDone ? { verdict: 'open', reason: 'contradicted_by_thread', evidence_hash: verdict.evidence_hash, retry_after: null } : verdict;
+    return verdict.verdict === 'fulfilled'
+      ? { verdict: 'open', reason: 'contradicted_by_thread', contradict_after: verdict.matched_at, evidence_hash: verdict.evidence_hash, retry_after: null }
+      : verdict;
   } catch (err) {
     logger.warn(`[sms-operations] thread check failed for commitment ${row.id}: ${err.message}`);
     return verdict;

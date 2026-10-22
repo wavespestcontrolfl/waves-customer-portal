@@ -3709,6 +3709,47 @@ postgres('SMS commitments on PostgreSQL', () => {
       });
     });
 
+
+    test('a denial from before the record witness is stale, so it cannot keep a record close open', async () => {
+      const row = await addCommitment({ kind: 'send_appointment_confirmation', description: 'send the confirmation',
+        sms_context: { basis: 'request', property_id: null, property_ambiguous: true, customer_id: message.customer_id, source_at: message.created_at } });
+      const denial = await text('I never got a confirmation', { ms: 30000 });
+      const confirmation = await text('Your appointment is confirmed', { direction: 'outbound', ms: 60000, status: 'delivered' });
+      await text('Thanks!', { ms: 2 * DAY });
+      dispatchWithFallback.mockImplementation(async (policy, request) => (isThread(request)
+        ? { ok: true, json: { verdict: 'contradicted', record_ref: `sms:${denial}`, quote: 'I never got a confirmation' } }
+        : { ok: true, json: { verdict: 'fulfilled', record_ref: `sms:${confirmation}`, quote: 'Your appointment is confirmed' } }));
+      await refreshSmsCommitments({ conn: mockPg, now: now() });
+      expect(threadCalls()).toHaveLength(1);
+      expect(threadCalls()[0][1].text).toContain('Only a customer text AFTER that time can contradict it');
+      expect((await mockPg('call_commitments').where({ id: row.id }).first()).status).toBe('fulfilled');
+    });
+
+    describe('a failed record check still reaches the thread', () => {
+      const failed = { verdict: 'uncertain', reason: 'provider_failed', retry_after: new Date(Date.now() + 10 * 24 * 3600 * 1000).toISOString() };
+
+      test('a later customer confirmation closes it despite the cached failure', async () => {
+        const ask = await addCommitment();
+        const confirmation = await text('Got the report, thanks', { ms: DAY });
+        answer({ verdict: 'completed', record_ref: `sms:${confirmation}`, quote: 'Got the report' });
+        await refreshSmsCommitments({ conn: mockPg, now: now(), verify: async () => failed });
+        expect((await mockPg('call_commitments').where({ id: ask.id }).first()).status).toBe('fulfilled');
+      });
+
+      test('when the thread cannot settle it either, the failed verdict and its retry stay', async () => {
+        const ask = await addCommitment();
+        await text('Any update?', { ms: DAY });
+        answer({ verdict: 'not_completed', record_ref: null, quote: null });
+        const calls = [];
+        const verify = async () => { calls.push(1); return failed; };
+        await refreshSmsCommitments({ conn: mockPg, now: now(), verify });
+        const row = await mockPg('call_commitments').where({ id: ask.id }).first();
+        expect(row.status).toBe('open');
+        expect(row.sms_context.fulfillment_check).toMatchObject({ reason: 'provider_failed' });
+        expect(row.sms_context.thread_check).toMatchObject({ verdict: 'open' });
+      });
+    });
+
     test('a non-settling staff update marks the shared source alert read, not done', async () => {
       const a = await addCommitment();
       await addCommitment({ commitment_key: randomUUID() });
@@ -3750,8 +3791,19 @@ postgres('SMS commitments on PostgreSQL', () => {
       // The shared alert stays open until the last promise is finished.
       const shared = await mockPg('notifications').insert({ id: randomUUID(), recipient_type: 'admin', category: 'alert', title: 'x', body: 'y',
         metadata: JSON.stringify({ dedupeKey: `sms-commitment-source:${message.id}` }) }).returning('id').then(([row]) => row.id);
+      NotificationService.notifyAdmin.mockClear();
       await applySmsCommitmentUpdate(mockPg, first.id, { customerId: message.customer_id, action: 'fulfill', reviewedBy: randomUUID() });
       expect((await mockPg('notifications').where({ id: shared }).first()).done_at).toBeNull();
+      // The shared alert is rewritten to the promise still open: same key, an
+      // open-row refresh only, and it does not ring again.
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+      const [, , refreshedBody, refreshed] = NotificationService.notifyAdmin.mock.calls[0];
+      expect(refreshed).toMatchObject({ dedupeKey: `sms-commitment-source:${message.id}`, dedupeOpenOnly: true });
+      expect(refreshed.ringOnRefresh()).toBe(false);
+      expect(refreshed.metadata.commitment_ids).toEqual([second.id]);
+      expect(refreshedBody).toContain("he'll look into");
+      expect(refreshedBody).not.toMatch(/will be out there/);
+      expect(refreshed.detail).not.toContain('follow-ups from this one');
       await applySmsCommitmentUpdate(mockPg, second.id, { customerId: message.customer_id, action: 'dismiss', reviewedBy: randomUUID() });
       expect((await mockPg('notifications').where({ id: shared }).first()).done_at).not.toBeNull();
     });
