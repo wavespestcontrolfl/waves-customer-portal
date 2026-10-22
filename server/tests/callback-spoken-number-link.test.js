@@ -72,6 +72,10 @@ const voicemail = (over = {}) => ({
   from_phone: DIALED,
   call_outcome: 'voicemail',
   ai_extraction: { phone: SPOKEN },
+  // settled: ended, no pass holding its token, a terminal status
+  duration_seconds: 42,
+  processing_token: null,
+  processing_status: 'processed',
   ...over,
 });
 const customer = (over = {}) => ({
@@ -163,6 +167,31 @@ describe('findCustomerViaCallbackSpokenNumber', () => {
     mockDb({ call_log: [voicemail({ from_phone: '+19415550177' })], customers: [[customer()]] });
     expect(await findCustomerViaCallbackSpokenNumber(callbackCall(), extractedJordan)).toBeNull();
     expect(tablesRead.filter((t) => t === 'customers')).toEqual([]);
+  });
+
+  // Codex #6419 r8: a parent still being processed keeps its old markers and ai_extraction while a pass
+  // replaces them, so its spoken number is unknown, not "no match".
+  test.each([
+    ['a pass holds its token (force reprocess)', { processing_token: 'tok-1' }],
+    ['a retryable extraction_failed', { processing_status: 'extraction_failed' }],
+    ['still processing', { processing_status: 'processing' }],
+    ['an adopted recording waiting for its pass', { processing_status: null, recording_sid: 'RE0001' }],
+    ['not ended yet (no duration)', { duration_seconds: null }],
+  ])('the voicemail parent is not settled (%s): throws PARENT_UNSETTLED and reads no customer', async (_label, over) => {
+    mockDb({ call_log: [voicemail(over)], customers: [[customer()]] });
+    await expect(findCustomerViaCallbackSpokenNumber(callbackCall(), extractedJordan)).rejects.toMatchObject({ code: 'PARENT_UNSETTLED' });
+    expect(tablesRead.filter((t) => t === 'customers')).toEqual([]);
+  });
+
+  test('an unsettled parent that is not this callback\'s voicemail is still just "no match"', async () => {
+    mockDb({ call_log: [voicemail({ call_outcome: 'answered', answered_by: 'human', processing_status: 'processing', processing_token: 'tok-1' })] });
+    expect(await findCustomerViaCallbackSpokenNumber(callbackCall(), extractedJordan)).toBeNull();
+  });
+
+  test('the pass: an unsettled parent leaves the callback on its retry (no customer, no finalize)', async () => {
+    mockDb({ call_log: [voicemail({ processing_token: 'tok-1' })], customers: [[customer()]] });
+    await expect(callbackSpokenNumberSuggested({ call: callbackCall(), extracted: extractedJordan, conn: db }))
+      .rejects.toMatchObject({ code: 'CALLBACK_SPOKEN_NUMBER_UNRESOLVED', message: expect.stringContaining('PARENT_UNSETTLED') });
   });
 
   test('answered_by voicemail marks a voicemail parent too', async () => {

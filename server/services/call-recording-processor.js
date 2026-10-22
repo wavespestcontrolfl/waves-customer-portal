@@ -4988,10 +4988,20 @@ function callbackSpokenNumberTarget(call, extracted, opts) {
 // call's "Call back" is also an admin-callback: only the inbound voicemail whose caller ID is the
 // number dialed counts, and the spoken number must be a usable external line, different from the
 // dialed one by more than a misheard digit or two (the rule resolveCallContactPhone applies to a
-// dictated number). Pure.
+// dictated number). Throws PARENT_UNSETTLED while the voicemail is not settled. Pure.
 function spokenNumberOfVoicemailParent(call, related) {
   if (!related || !String(related.direction || '').toLowerCase().startsWith('inbound')) return null;
   if (!isVoicemailParent(related) || !samePhone(related.from_phone, call.to_phone)) return null;
+  // Its extraction is read only once the parent is settled (isSettledParent: no pass holds its token,
+  // not in a retryable state such as extraction_failed, no adopted recording waiting). A force
+  // reprocess or a pending retry keeps the old markers and ai_extraction on the row while it replaces
+  // them, and the callback card is not refreshed when that pass ends. Unknown, not "no match": throw,
+  // so the callback stays on its capped retry.
+  if (!isSettledParent(related)) {
+    const unsettled = new Error('callback voicemail parent not settled');
+    unsettled.code = 'PARENT_UNSETTLED';
+    throw unsettled;
+  }
   const spoken = firstExternalPhone(parseLooseJson(related.ai_extraction).phone);
   if (!spoken || samePhone(spoken, call.to_phone) || phoneNearMissOfAni(spoken, call.to_phone)) return null;
   return spoken;
@@ -5018,7 +5028,7 @@ async function findCustomerViaCallbackSpokenNumber(call = {}, extracted = {}, op
   if (!target) return null;
   const conn = opts.db || db;
   const related = await conn('call_log').where({ id: target.relatedId })
-    .first('id', 'direction', 'from_phone', 'call_outcome', 'answered_by', 'processing_status', 'ai_extraction');
+    .first('id', 'direction', 'from_phone', 'call_outcome', 'answered_by', 'processing_status', 'ai_extraction', 'duration_seconds', 'processing_token', 'recording_sid');
   const spoken = spokenNumberOfVoicemailParent(call, related);
   if (!spoken) return null;
   const owners = await conn('customers')
