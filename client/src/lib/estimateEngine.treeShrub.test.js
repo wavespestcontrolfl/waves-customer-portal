@@ -41,13 +41,19 @@ const tsAnnual = (input) => {
 };
 
 describe("tree & shrub lot-derived bed area — server parity", () => {
-  it("derives the FULL lot-density bed area — no cap (owner ruling 2026-08-10)", () => {
-    // 80,000 sf lot, HEAVY shrubs → raw 0.25 * 80,000 = 20,000 sf, priced
-    // in full (the old 8,000 clamp priced this 60% low).
+  it("derives the FULL open-parcel bed area — no cap (owner rulings 2026-08-10, 2026-10-21)", () => {
+    // 80,000 sf lot, HEAVY shrubs. Server parity (owner audit 2026-10-21,
+    // property-calculator.js treeShrubBedBasisSqFt): the 25% runs on the OPEN
+    // parcel — lot − 2,000 footprint − 4,275 estimated hardscape (800 base +
+    // 225 tier-1 + 3,250 tier-2, no pool) = 73,725 → 18,431 sf — priced in
+    // full (the old 8,000 clamp priced this ~57% low; the gross-lot basis
+    // billed 20,000).
     const derived = tsAnnual(tsInput({ lotSqFt: 80000, shrubDensity: "HEAVY" }));
-    const explicit20k = tsAnnual(tsInput({ lotSqFt: 80000, shrubDensity: "HEAVY", bedArea: 20000 }));
+    const explicitOpen = tsAnnual(tsInput({ lotSqFt: 80000, shrubDensity: "HEAVY", bedArea: 18431 }));
+    const explicitGross = tsAnnual(tsInput({ lotSqFt: 80000, shrubDensity: "HEAVY", bedArea: 20000 }));
     const explicit8k = tsAnnual(tsInput({ lotSqFt: 80000, shrubDensity: "HEAVY", bedArea: 8000 }));
-    expect(derived).toBe(explicit20k);
+    expect(derived).toBe(explicitOpen);
+    expect(derived).not.toBe(explicitGross);
     expect(derived).not.toBe(explicit8k);
   });
 
