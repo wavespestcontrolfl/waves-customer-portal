@@ -6147,6 +6147,11 @@ const EstimateConverter = {
     let scheduledCount = 0;
     let termStartDate = null;
     let firstScheduledServiceId = null;
+    // Earliest date actually inserted by the auto-schedule loop (a seasonal
+    // unit can roll to February while a later-inserted unit lands sooner).
+    // firstScheduledServiceId is the first INSERTED unit, not the earliest;
+    // callers that tell the customer or staff the first-visit date read this.
+    let earliestScheduledUnitDate = null;
     // Ids of same-trip top-level recurring parents this accept ACTUALLY
     // CREATED whose first-visit amount is covered by the combined
     // first-application invoice — never a same-day reconstruction that
@@ -7474,9 +7479,9 @@ const EstimateConverter = {
         serviceKey: multiTechTextTimesLive() ? funnelKeyForEstimate(recurringServicesForConversion, estimate) : '',
       });
       termStartDate = firstServiceDate;
-      // Earliest date actually inserted by the loop below — replaces the
-      // picked date when a seasonal roll moved the real first visit.
-      let earliestScheduledUnitDate = null;
+      // Earliest date actually inserted by the loop below (declared at the
+      // function top and returned) — replaces the picked date when a seasonal
+      // roll moved the real first visit.
       // The ANCHOR's own scheduled date — the exact date of whichever unit
       // becomes firstScheduledServiceId below (P1-B) — kept separate from
       // earliestScheduledUnitDate above (which tracks the MINIMUM across
@@ -8952,6 +8957,9 @@ const EstimateConverter = {
       recurringScheduleCheck,
       requiresManualRecurringScheduling: hasCommercialRecurring,
       firstScheduledServiceId,
+      // Additive (Codex r2 on #6412): the earliest date among the units this
+      // conversion auto-scheduled; null when none was inserted.
+      earliestScheduledUnitDate,
       // Additive (Codex round-12 P2, PR #5021): ids of same-trip sibling
       // parents actually promoted for THIS accept's reserved slot — empty
       // for every non-reservation or single-program accept. Callers that

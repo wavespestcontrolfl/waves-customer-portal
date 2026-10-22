@@ -6965,6 +6965,8 @@ router.get('/', async (req, res, next) => {
       // 404s (GH codex #3843 r1 P1). Split/Separate stay ungated.
       visitGroups: isEnabled('visitGroups'),
       visitCloseout: legacyCloseoutEnabled,
+      // GATE_DISPATCH_FIND_TIME_PANEL: shows the Dispatch board's "Find a time" button.
+      findTimePanel: isEnabled('dispatchFindTimePanel'),
       techSummary: Object.values(byTech),
       unassigned,
       technicians,
@@ -10269,7 +10271,7 @@ async function scheduleCreateHandler(req, res, next) {
         // card queued at the top of this block replaces it.
         if (sendTechNotification && resolvedTechId && !visitNoticeLive) {
           try {
-            const { sendTechNotification: pushTechNote } = require('../services/geofence-handler');
+            const { sendTechNotification: pushTechNote } = require('../services/tech-notify');
             const custName = customer ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim() : 'Customer';
             const when = `${scheduledDate}${windowStart ? ' @ ' + windowStart : ''}`;
             await pushTechNote(resolvedTechId, {

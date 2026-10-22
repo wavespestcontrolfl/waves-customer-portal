@@ -1014,7 +1014,8 @@ app.use('/api/tech/notifications', require('./routes/tech-notifications'));
 app.use('/api/tech/line', require('./routes/tech-line'));
 app.use('/api/tech/services', require('./routes/tech-track'));
 app.use('/api/tech/dictation', require('./routes/tech-dictation'));
-app.use('/api/admin/geofence', require('./routes/admin-geofence'));
+const adminVehiclesRouter = require('./routes/admin-vehicles');
+app.use('/api/admin/vehicles', adminVehiclesRouter);
 app.use('/api/admin', require('./routes/admin-billing-health'));
 
 // Health check. Public and unauthenticated (Railway probes it), so it must

@@ -10,6 +10,7 @@ const numbers = require('../config/twilio-numbers');
 const { runExclusive } = require('../utils/cron-lock');
 const { recordAuditEvent } = require('./audit-log');
 const NotificationService = require('./notification-service');
+const { raiseAdminAlert, cutAtWord, breaksAlertRules, MAX_WHY_CHARS } = require('./admin-alert-compose');
 const { validate: isUuid } = require('uuid');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { hashExtractionSource, recordExtractionAttempt, shouldSkipExtraction, TERMINAL_STATUSES } = require('./data-hygiene/source-extraction-store');
@@ -522,6 +523,71 @@ function resolveDueDeadline(item, messageCreatedAt) {
   return { due_at: new Date(new Date(messageCreatedAt).getTime() + hours * 3600000).toISOString(), due_basis: 'default_kind' };
 }
 
+// True when a fact needs no human: a visit-only fact the scope guards stopped, or
+// an access note held back as a temporary instruction (see the ruling above).
+function isQuietTemporaryFact(f) {
+  return (f.duration === 'visit_only' && VISIT_ONLY_SILENCED_OUTCOMES.includes(f.outcome))
+    || (f.field === 'access_notes' && f.outcome === 'temporary_instruction');
+}
+
+// Plain words for the review bell (owner ruling 2026-10-21). The title names
+// the customer; the body says what the reader wanted to save and why it
+// stopped. It NEVER quotes the customer's text (title, body, detail or
+// metadata): a text can hold a code, a spelled-out code word or an address, and
+// no screen caught them all (Codex #6414 r1/r2). The first line is the whole
+// visible bell (the admin brevity guard cuts a multi-line body at its first
+// line and keeps the rest under "Show full text").
+const REVIEW_FIELD_LABELS = Object.freeze({
+  access_notes: 'access note', pet_details: 'pet note', contact_preference: 'contact preference',
+  neighborhood_gate_code: 'neighborhood gate code', property_gate_code: 'gate code', lockbox_code: 'lockbox code',
+  garage_code: 'garage code', irrigation_controller_location: 'irrigation controller location',
+});
+const REVIEW_REASONS = Object.freeze({
+  existing_value_conflict: 'it conflicts with the note on file',
+  temporary_instruction: 'the text sounds like a one-time instruction',
+  property_ambiguous: 'it could not be tied to one property',
+  contact_authority: 'the sender is not the main contact on the account',
+  conflicting_facts: 'the text gives two different values for it',
+  mixed_topics: 'the text mixes several topics',
+  pet_needs_review: 'a "no" or "not sure" pet report needs a person to read it',
+  irrigation_needs_review: 'a "no" or "not sure" report needs a person to read it',
+  preference_uncertain: 'the contact preference is not clear',
+  code_uncertain: 'the code does not clearly match this property',
+  value_too_long: 'the value is too long to save',
+  changed_during_extraction: 'the profile changed while the text was read',
+});
+
+// Why the reader stopped. The verdict code temporary_instruction is also what
+// factVerdict returns for any duration that is not 'durable', so an 'uncertain'
+// label gets its own words (Codex #6414 r3).
+const UNCERTAIN_DURATION_REASON = 'it is not clear if this is lasting or just for one visit';
+function reviewReason(f) {
+  if (f.outcome === 'temporary_instruction' && f.duration === 'uncertain') return UNCERTAIN_DURATION_REASON;
+  return REVIEW_REASONS[f.outcome] || 'it needs a person to check it';
+}
+
+// The admin-alert spec parts (docs/admin-notifications.md): a "Comms — ..."
+// headline inside 60 characters, a one-sentence why inside 110, and the full
+// reason lines in `detail`.
+function reviewBellCopy({ customer, exceptions }) {
+  const { fitAction, fullName } = require('./admin-alert-names');
+  const name = fullName(customer);
+  const action = name
+    ? fitAction('Comms', name, [(n) => `check ${n}'s text note`, (n) => `check ${n}'s note`])
+    : 'check a customer text note';
+  const lines = exceptions.map((f, i) => {
+    const label = REVIEW_FIELD_LABELS[f.field] || String(f.field).replaceAll('_', ' ');
+    return `${i === 0 ? 'Wanted' : 'Also wanted'} to save as ${label}; ${reviewReason(f)}.`;
+  });
+  const more = lines.length > 1 ? ` (+${lines.length - 1} more)` : '';
+  const first = lines[0].replace(/\.$/, '');
+  const room = MAX_WHY_CHARS - more.length - 1;
+  const lead = first.length <= room ? `${first}.` : cutAtWord(first, room + 1);
+  let why = `${lead}${more}`;
+  if (breaksAlertRules(why)) why = 'Part of a customer text needs a person to check it.';
+  return { action, why, detail: [...lines, 'Open the conversation to check.'].join('\n') };
+}
+
 async function recordMessageOperations(conn, message, extracted, matchedContext) {
   const replay = matchedContext.replay === true;
   if (replay && message.direction !== 'inbound') return { skipped: 'source_changed' };
@@ -611,8 +677,17 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     // - A durable fact held back only by temporary wording rings: every fact
     //   quotes the whole message, so the wording cannot be tied to it ("I'm
     //   away tomorrow. My lockbox code is 1234") (r26/r27).
+    // Owner ruling 2026-10-21 ("what does sms instructions need review do?",
+    // all fixes go): a held-back ACCESS NOTE never rings on its own, whatever
+    // duration label the extractor gave it. Live rows that rang for nothing:
+    // "It's the door up the sidewalk" and "You are welcome to come earlier..
+    // I'm here" (both 'uncertain'). An access note is a how-to-reach-the-door
+    // line, not a safety fact, and held back by temporary wording it is by
+    // definition not a profile write. Narrow on purpose: the field is named,
+    // so a gate/lockbox code, a pet or irrigation report held back the same
+    // way (the r10/r26/r27 cases above) still rings.
     const settled = ['applied', 'unchanged', 'proposed', 'superseded', 'previously_applied'];
-    const temporaryFacts = facts.filter((f) => f.duration === 'visit_only' && VISIT_ONLY_SILENCED_OUTCOMES.includes(f.outcome));
+    const temporaryFacts = facts.filter(isQuietTemporaryFact);
     const exceptions = facts.filter((f) => !settled.includes(f.outcome) && !temporaryFacts.includes(f));
     let notification = null;
     // Owner ruling 2026-09-24: dropped model proposals (rejected by the
@@ -621,13 +696,15 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     // `dropped` still rides in `operational_analysis` and, when a bell does
     // fire for a real exception, in that bell's `unverified_count`.
     if (exceptions.length) {
-      const notif = await NotificationService.notifyAdmin('alert', 'SMS instructions need review',
-        'Part of this message needs an evidence, property, timing, or existing-value check. Open the customer profile to review the source conversation.',
-        { trx, bell: true, dedupeKey: `sms-property-instructions:${message.id}`,
-          link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}&tab=comms`,
-          metadata: { triggerKey: 'sms_operational_exception', customerId: customer.id, sms_log_id: message.id,
-            fields: exceptions.map((f) => f.field), unverified_count: extracted.dropped + temporaryFacts.length,
-            reasons: [...new Set(exceptions.map((f) => f.outcome))] } });
+      const copy = reviewBellCopy({ customer, exceptions });
+      const notif = await raiseAdminAlert('alert', {
+        area: 'Comms', action: copy.action, why: copy.why, severity: 'needs-you',
+        link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}&tab=comms`,
+        subject: { type: 'customer', id: String(customer.id) }, doneWhen: 'text_note_checked', who: 'person',
+      }, { trx, bell: true, dedupeKey: `sms-property-instructions:${message.id}`, detail: copy.detail,
+        metadata: { triggerKey: 'sms_operational_exception', customerId: customer.id, sms_log_id: message.id,
+          fields: exceptions.map((f) => f.field), unverified_count: extracted.dropped + temporaryFacts.length,
+          reasons: [...new Set(exceptions.map((f) => f.outcome))] } });
       if (!notif.id) throw new Error('sms_operations_bell_not_persisted');
       notification = notif.deduped
         ? { action: 'preserve_notification', notification_id: notif.id }
@@ -1087,7 +1164,6 @@ async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceId
     trx, bell: true, dedupeKey, dedupeWindowMs: 24 * 60 * 60 * 1000, refreshOnDedupe: true, detail,
     metadata: { triggerKey, customerId: message.customer_id,
       [sourceIdField]: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.late ? 'kept_late' : verdict.verdict } };
-  const { raiseAdminAlert } = require('./admin-alert-compose');
   // GATE_ALERT_RING_ONCE (owner 2026-10-14): a promise rings once. The probe
   // looks only at OPEN rows, at any age: an open row is refreshed without a
   // ring (read state, done state and push stay), so a later check never makes
@@ -1362,4 +1438,4 @@ async function replaySmsProfile({ smsLogId, execute = false, previewHash, conn =
   }, { recordHealth: false });
 }
 
-module.exports = { smsCommitmentsEnabled, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline, ringOverdueBell, keptLate };
+module.exports = { isQuietTemporaryFact, reviewBellCopy, smsCommitmentsEnabled, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline, ringOverdueBell, keptLate };

@@ -4,7 +4,7 @@
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import GeofenceArrivalPrompt from './GeofenceArrivalPrompt';
+import TechNoticeFeed from './TechNoticeFeed';
 
 const TEXT = {
   id: 'n-text', type: 'tech_line_sms', message: 'server message', created_at: '2026-09-08T18:41:00Z',
@@ -25,7 +25,7 @@ function stubFeed(notifications) {
   return calls;
 }
 
-describe('GeofenceArrivalPrompt — tech line text card', () => {
+describe('TechNoticeFeed — tech line text card', () => {
   beforeEach(() => {
     localStorage.setItem('waves_admin_token', 'tech-token');
     vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -39,7 +39,7 @@ describe('GeofenceArrivalPrompt — tech line text card', () => {
 
   it('shows who texted and what they said; a photos-only text names the media', async () => {
     stubFeed([TEXT, PHOTOS]);
-    render(<GeofenceArrivalPrompt />);
+    render(<TechNoticeFeed />);
     await act(async () => { await Promise.resolve(); });
     const cards = await screen.findAllByTestId('tech-line-text');
     expect(cards).toHaveLength(2);
@@ -53,7 +53,7 @@ describe('GeofenceArrivalPrompt — tech line text card', () => {
 
   it('stays until "Got it" (dismiss); the reminder timer never marks it read', async () => {
     const calls = stubFeed([TEXT]);
-    render(<GeofenceArrivalPrompt />);
+    render(<TechNoticeFeed />);
     await act(async () => { await Promise.resolve(); });
     expect(await screen.findByTestId('tech-line-text')).toBeInTheDocument();
 
