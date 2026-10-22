@@ -2717,9 +2717,13 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const path = require('path');
       const { REVIEW_EVERY_5_TICK_MINUTES } = ReviewService.__private;
       const scheduler = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
-      // `4-59/5` = :04, :09 ... :59; both tables are inside it.
-      expect(scheduler).toContain("cron.schedule('4-59/5 * * * *'");
-      const cronMinutes = Array.from({ length: 12 }, (_, i) => 4 + 5 * i);
+      // The registration names :04, :09 ... :59 (a list: node-cron 3 reads a stepped range as
+      // minutes divisible by the step); both tables are inside it.
+      const expr = scheduler.match(/cron\.schedule\('([0-9,]+) \* \* \* \*', async \(\) => \{\s*if \(!isEnabled\('reviewSequences'\)\) return;/)[1];
+      const cronMinutes = expr.split(',').map(Number);
+      const parsed = require('node-cron/src/convert-expression')(`${expr} * * * *`).split(' ')[1].split(',').map(Number);
+      expect(parsed).toEqual(cronMinutes);
+      expect(cronMinutes).toEqual(Array.from({ length: 12 }, (_, i) => 4 + 5 * i));
       expect(REVIEW_EVERY_5_TICK_MINUTES).toEqual(cronMinutes);
       expect(REVIEW_CADENCE_TICK_MINUTES.every((m) => cronMinutes.includes(m))).toBe(true);
       expect(scheduler).toMatch(/const ticks = require\('\.\/review-request'\)\.__private\.reviewCadenceTickMinutes\(\);\s*if \(!ticks\.includes\(minute\) && !ticks\.includes\(\(minute \+ 59\) % 60\)\) return;/);

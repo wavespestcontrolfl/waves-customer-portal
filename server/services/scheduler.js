@@ -8053,7 +8053,8 @@ function initScheduledJobs() {
   // preview/dev env with live creds can't text/email real customers.
   // Suppression and per-customer prefs still apply at the send site.
   // =========================================================================
-  cron.schedule('4-59/5 * * * *', async () => {
+  // An explicit list: node-cron 3 reads `4-59/5` as minutes divisible by 5.
+  cron.schedule('4,9,14,19,24,29,34,39,44,49,54,59 * * * *', async () => {
     if (!isEnabled('reviewSequences')) return;
     const minute = new Date().getUTCMinutes();
     const ticks = require('./review-request').__private.reviewCadenceTickMinutes();
