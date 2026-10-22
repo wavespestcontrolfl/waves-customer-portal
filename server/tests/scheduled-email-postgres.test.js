@@ -45,6 +45,7 @@ const { recordLeaseFreeJobEnd } = require('../utils/cron-lock');
 const migration = require('../models/migrations/20261022130000_scheduled_emails');
 const restoredMigration = require('../models/migrations/20261022150000_scheduled_emails_restored_at');
 const restoreKeyMigration = require('../models/migrations/20261022160000_scheduled_emails_restore_key');
+const sweepIndexMigration = require('../models/migrations/20261022170000_scheduled_emails_sweep_indexes');
 
 jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('scheduled emails on PostgreSQL', () => {
@@ -73,6 +74,7 @@ jest.setTimeout(30000);
     await migration.up(database);
     await restoredMigration.up(database);
     await restoreKeyMigration.up(database);
+    await sweepIndexMigration.up(database);
     // Minimal stand-ins for the tables the sender reads beside its own.
     await database.schema.createTable('notifications', (t) => { t.increments('id'); t.string('recipient_type'); t.jsonb('metadata'); });
     await database.schema.createTable('emails', (t) => { t.uuid('id').primary(); t.string('message_id'); });

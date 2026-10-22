@@ -167,7 +167,9 @@ export default function useScheduledEmails(active, userId) {
     if (savePending(userId, pending)) { reload(); return "durable"; }
     let result = await sendRestoredMark(id) ? "durable" : await probeRestored(userId, id);
     if (result === "unknown" && await sendRestoredMark(id)) result = "durable";
-    if (result !== "durable") pending.delete(id);
+    // "unknown" keeps the id: this tab still hides the row and sends the
+    // mark again on every reload; the draft's guard sends it too.
+    if (result === "not_durable") pending.delete(id);
     reload();
     return result;
   };

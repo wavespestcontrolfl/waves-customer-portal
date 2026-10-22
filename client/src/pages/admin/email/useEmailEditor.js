@@ -168,7 +168,16 @@ export default function useEmailEditor(userId) {
     const entry = uncertainSchedule.current[slot];
     if (scheduling || !entry) return;
     // A guard with no key is the operator's call; stacked checks go one by one.
-    if (!entry.clientKey) { rememberUncertain(slot, entry.also?.length ? { request: entry.also[0], clientKey: null, also: entry.also.slice(1) } : null); return; }
+    // An unclear restore mark is not: the server must confirm the email left
+    // the Scheduled list (POST /restored) before that check clears.
+    if (!entry.clientKey) {
+      if (entry.request === RESTORE_UNCONFIRMED.request && !(await confirmRestoreMark(entry.restoreRowId))) {
+        setSendFeedback((current) => ({ ...current, [replyId ? "reply" : "compose"]: { messageId: replyId, error: true, message: "Could not confirm the Scheduled list let go of this email. Try again in a moment." } }));
+        return;
+      }
+      rememberUncertain(slot, entry.also?.length ? { request: entry.also[0], clientKey: null, also: entry.also.slice(1), restoreRowId: entry.restoreRowId } : null);
+      return;
+    }
     const kind = replyId ? "reply" : "compose";
     const say = (message, error = false) => setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error, message } }));
     let row;
@@ -188,6 +197,13 @@ export default function useEmailEditor(userId) {
     rememberUncertain(slot, outcome.next);
     const kept = outcome.withdraw && !withdrawIfQueued(replyId, row);
     say(kept ? `${outcome.message} Your newer edits were not scheduled and are still in the draft.` : outcome.message, Boolean(outcome.next));
+  };
+  const confirmRestoreMark = async (rowId) => {
+    if (!rowId) return false;
+    try {
+      const response = await adminFetch(`/api/admin/email/scheduled/${encodeURIComponent(rowId)}/restored`, { method: "POST" });
+      return response.ok;
+    } catch { return false; }
   };
   // Removes a draft whose email the server already holds (queued or sent),
   // but only while it is still that email's text: newer edits stay. Returns
@@ -486,7 +502,7 @@ export default function useEmailEditor(userId) {
       // check is asked in turn, none is dropped.
       const slot = slotOf(draft.replyEmailId);
       const existing = uncertainSchedule.current[slot];
-      const next = existing ? { ...existing, also: [...(existing.also || []), RESTORE_UNCONFIRMED.request] } : RESTORE_UNCONFIRMED;
+      const next = { ...(existing ? { ...existing, also: [...(existing.also || []), RESTORE_UNCONFIRMED.request] } : RESTORE_UNCONFIRMED), restoreRowId: draft.id };
       if (!rememberUncertain(slot, next)) { uncertainSchedule.current[slot] = next; notifyDrafts(); }
     }
     if (!draft.replyEmailId) setShowCompose(true);

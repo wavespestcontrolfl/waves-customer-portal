@@ -651,9 +651,10 @@ describe("Email schedule send", () => {
     scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "outcome_unknown", mayHaveSent: true }];
     const base = fetch.getMockImplementation();
     let cancels = 0;
+    let markDown = true;
     fetch.mockImplementation((input, options = {}) => {
       const url = String(input);
-      if (url.endsWith("/queued-1/restored")) return Promise.reject(new TypeError("network"));
+      if (url.endsWith("/queued-1/restored")) return markDown ? Promise.reject(new TypeError("network")) : response({ success: true });
       if (url.endsWith("/queued-1/cancel") && (cancels += 1) > 1) return Promise.reject(new TypeError("network"));
       if (url.endsWith("/queued-1/cancel")) return response({ success: true, draft: { ...scheduledRows[0], status: "cancelled" } });
       return base(input, options);
@@ -671,6 +672,11 @@ describe("Email schedule send", () => {
     expect(await screen.findByText(/The Scheduled list may still offer this email/)).toBeInTheDocument();
     const send = () => screen.getAllByRole("button", { name: "Send", exact: true }).at(-1);
     expect(send()).toBeDisabled();
+    // The unclear mark clears only once the server confirms it.
+    fireEvent.click(screen.getByRole("button", { name: "I checked: no other copy" }));
+    expect((await screen.findAllByText(/Could not confirm the Scheduled list let go of this email/)).length).toBeGreaterThan(0);
+    expect(send()).toBeDisabled();
+    markDown = false;
     fireEvent.click(screen.getByRole("button", { name: "I checked: no other copy" }));
     await waitFor(() => expect(send()).not.toBeDisabled());
   });
