@@ -169,9 +169,9 @@ async function labelFactsBlock({ decision, outgoingBody }) {
 // goes through the office, so a body that repeats the old policy is refused on every send path, whoever wrote the final body.
 const RETIRED_PAYMENT_POLICY_RE = new RegExp([
   String.raw`\b(?:technicians?|techs?)\s+(?:will\s+|can\s+)?(?:accept|take)s?\s+(?:a\s+)?(?:credit\s+|debit\s+)?cards?\b`,
-  String.raw`\bnever\s+(?:take\s+|accept\s+)?cash\b`,
-  String.raw`\b(?:we|technicians?|techs?)\s+(?:do\s+not|don't|can't|cannot|won't)\s+(?:accept|take)\s+cash\b`,
-  String.raw`\bno\s+cash\b`,
+  // a COMPANY-WIDE cash refusal only: "technicians do not take cash at the visit" is the new policy, not the old one
+  String.raw`\b(?:cards?|card\s+only)[,;]?\s+(?:but\s+)?(?:never|no)\s+cash\b`,
+  String.raw`\bwe\s+(?:never|do\s+not|don't|can't|cannot|won't)\s+(?:accept|take)\s+cash\b(?!\s+at\s+(?:the|your)\s+(?:visit|door|home|house|service))`,
 ].join('|'), 'i');
 function retiredCompanyFactBlock({ outgoingBody }) {
   const text = String(outgoingBody || '').replace(/[\u2018\u2019]/g, "'");

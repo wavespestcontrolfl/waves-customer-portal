@@ -487,9 +487,14 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1)', () => {
   });
   test('an older draft that repeats the retired payment policy is refused at send', () => {
     for (const body of [
-      RETIRED_COMPANY_FACT_LINES[10], 'Our techs take cards at the visit.', 'We don’t accept cash.', 'Card only, never cash!', 'We do not take cash.',
+      RETIRED_COMPANY_FACT_LINES[10], 'Our techs take cards at the visit.', 'We don’t accept cash.', 'Card only, never cash!', 'We do not take cash.', 'We take cards, no cash.',
     ]) expect(retiredCompanyFactBlock({ outgoingBody: body })).toMatch(/company fact retired/);
-    for (const body of [COMPANY_FACTS[10], PAY, 'You can pay cash or a check through the office.', 'See you Tuesday!']) {
+    for (const body of [
+      COMPANY_FACTS[10], PAY, 'You can pay cash or a check through the office.', 'See you Tuesday!',
+      // the new policy, said accurately (pre-push audit P1)
+      'Our technicians do not take cash at the visit. You can pay cash through the office.',
+      'Technicians never take cash at the visit.', 'We don\u2019t take cash at the door; pay the office instead.',
+    ]) {
       expect(retiredCompanyFactBlock({ outgoingBody: body })).toBeNull();
     }
   });
