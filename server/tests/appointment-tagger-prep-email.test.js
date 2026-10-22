@@ -242,7 +242,7 @@ describe('appointment tagger prep email automation', () => {
     expect(call.entityType).toBe('scheduled_service');
     expect(call.entityId).toBe('svc-1');
     expect(call.executeImmediately).toBe(false);
-    expect(call.recipient).toEqual({ email: 'taylor@example.com', type: 'customer', id: 'cust-1' });
+    expect(call.recipient).toEqual({ email: 'taylor@example.com', type: 'customer', id: 'cust-1', role: 'primary' });
     expect(call.payload).toMatchObject({
       scheduled_service_id: 'svc-1',
       customer_id: 'cust-1',
@@ -462,6 +462,8 @@ describe('appointment tagger prep email automation', () => {
 
     expect(executor.processTrigger).toHaveBeenCalledTimes(1);
     expect(executor.processTrigger.mock.calls[0][0].recipient.email).toBe('onsite@example.com');
+    // Whose address this is rides with the run (codex #6363 r10 P1).
+    expect(executor.processTrigger.mock.calls[0][0].recipient.role).toBe('service_contact');
   });
 
   test('no email on file falls back to the self-contained prep SMS', async () => {

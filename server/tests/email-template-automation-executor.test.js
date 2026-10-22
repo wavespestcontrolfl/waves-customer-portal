@@ -18,9 +18,18 @@ jest.mock('../utils/cron-lock', () => ({
   runExclusive: jest.fn(async (_name, fn) => fn()),
   wasLockSkipped: jest.requireActual('../utils/cron-lock').wasLockSkipped,
 }));
+// The deferred-send contact recheck (rerouteForContactEmailOptOut): pass-
+// through by default — the same answer the real module gives with the
+// contact-login gate off — so every other test is unchanged; the boundary
+// test flips its SECOND answer.
+jest.mock('../services/contact-notification-prefs', () => ({
+  ...jest.requireActual('../services/contact-notification-prefs'),
+  rerouteForContactEmailOptOut: jest.fn(async (_customerId, email) => ({ email, rerouted: false })),
+}));
 
 const db = require('../models/db');
 const EmailTemplates = require('../services/email-template-library');
+const ContactPrefs = require('../services/contact-notification-prefs');
 const AutomationExecutor = require('../services/email-template-automation-executor');
 
 function chain({ result = [], first, returning } = {}) {
@@ -2295,5 +2304,77 @@ describe('email template automation executor', () => {
       expect(globalDbAccesses).not.toContain('email_template_automation_runs');
       expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
     });
+  });
+
+  // A run addressed to an on-location contact re-runs the contact recheck at
+  // the dispatch boundary (the library's onQueued hook, codex #6363 r30 P2):
+  // the early recheck ran before the claim and the build, and a contact who
+  // turned email off, or whom the holder removed, since would otherwise still
+  // be mailed. A changed answer aborts the attempt before the provider; the
+  // retry re-resolves from the top.
+  test('dispatchRun: a contact recheck that changes between the early read and the handoff aborts the queued attempt before the provider — the retry re-resolves it; the fresh prep claim is handed back', async () => {
+    const prepAutomation = automation({
+      id: 'automation-prep',
+      automation_key: 'prep.flea',
+      template_key: 'prep.flea',
+      trigger_event_key: 'appointment.booked',
+      idempotency_key_template: 'prep.flea:{scheduled_service_id}',
+      conditions: JSON.stringify({ service_type_contains: ['flea'] }),
+      exit_conditions: JSON.stringify({}),
+      retry_policy: JSON.stringify({ max_attempts: 2, backoff_minutes: [15] }),
+    });
+    const queuedRun = run({
+      id: 'run-prep',
+      automation_id: 'automation-prep',
+      automation_key: 'prep.flea',
+      template_key: 'prep.flea',
+      trigger_event_key: 'appointment.booked',
+      trigger_event_id: 'appointment_booked:svc-1',
+      entity_type: 'scheduled_service',
+      entity_id: 'svc-1',
+      idempotency_key: 'prep.flea:svc-1',
+      recipient_type: 'customer',
+      recipient_id: 'cust-1',
+      recipient_email: 'sam@example.com',
+      context: JSON.stringify({ recipient_role: 'service_contact' }),
+      max_attempts: 2,
+      payload: JSON.stringify({ scheduled_service_id: 'svc-1', customer_email: 'sam@example.com', first_name: 'Sam', service_type: 'Flea Control Service', service_date_ymd: '2199-01-01' }),
+    });
+    const retryRun = { ...queuedRun, status: 'retry_scheduled', attempts: 1 };
+    const releaseQuery = chain({});
+    setDbQueues({
+      'email_template_automations as a': [chain({ result: [prepAutomation] })],
+      email_template_automation_runs: [
+        chain({ first: null }),
+        chain({ returning: [queuedRun] }),
+        chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+        chain({ returning: [retryRun] }),
+      ],
+      email_template_automation_run_events: [chain({ returning: [{ id: 'e1' }] }), chain({ returning: [{ id: 'e2' }] }), chain({ returning: [{ id: 'e3' }] })],
+      // Live read, FRESH claim, then — the pre-dispatch abort, retry ahead — the release.
+      scheduled_services: [
+        chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
+        chain({ returning: [{ id: 'svc-1' }] }),
+        releaseQuery,
+      ],
+    });
+    ContactPrefs.rerouteForContactEmailOptOut
+      .mockResolvedValueOnce({ email: 'sam@example.com', rerouted: false })
+      .mockResolvedValueOnce({ email: null, rerouted: true });
+    EmailTemplates.sendTemplate.mockImplementation(async (opts) => ((await opts.onQueued({ id: 'em-1' })) === false
+      ? { sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' }
+      : { sent: true, message: { id: 'em-1' } }));
+
+    const result = await AutomationExecutor.processTrigger({
+      triggerEventKey: 'appointment.booked',
+      triggerEventId: 'appointment_booked:svc-1',
+      payload: { scheduled_service_id: 'svc-1', customer_email: 'sam@example.com', first_name: 'Sam', service_type: 'Flea Control Service', service_date_ymd: '2199-01-01' },
+      now: new Date('2026-07-14T12:00:00.000Z'),
+    });
+
+    expect(result.results[0].run.status).toBe('retry_scheduled');
+    expect(ContactPrefs.rerouteForContactEmailOptOut).toHaveBeenCalledTimes(2);
+    expect(ContactPrefs.rerouteForContactEmailOptOut).toHaveBeenLastCalledWith('cust-1', 'sam@example.com', { recipientRole: 'service_contact' });
+    expect(releaseQuery.update).toHaveBeenCalledWith({ prep_template_key: null });
   });
 });

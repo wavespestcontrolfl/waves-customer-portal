@@ -3,6 +3,7 @@ const MODELS = require('../config/models');
 const logger = require('./logger');
 const { savepointRead } = require('../utils/savepoint-read');
 const { dispatchWithFallback } = require('./llm/call');
+const { completionTextPlainLive } = require('../config/feature-gates');
 
 // Outcomes that always skip the AI path. These are customer-sensitive
 // situations where generated wording could go off-tone or contradict the
@@ -123,12 +124,49 @@ function deterministicRecap(input = {}) {
     ]);
   }
 
+  if (completionTextPlainLive()) {
+    // GATE_COMPLETION_TEXT_PLAIN: say what was done, and only that. A station
+    // check treated nothing, and the generic "normal activity" sentence is
+    // gone. No "reply to this message" line: the recap is the web report's
+    // summary when the visit has no written report (report-data.js
+    // visitSummary), and a service_report_v1 completion text never carries it.
+    if (isStationCheck(serviceType)) return `Today we completed your ${serviceType} and checked your stations.`;
+    return sentenceJoin([
+      `Today we completed your ${serviceType}.`,
+      areas.length ? `We treated ${areas.join(', ')}.` : '',
+    ]);
+  }
+
   return sentenceJoin([
     `Today we completed your ${serviceType}.`,
     areas.length ? `We treated ${areas.join(', ')}.` : 'We treated the accessible service areas.',
     'You may continue to see normal activity for a short period as the service takes effect.',
     'Reply to this message if anything needs attention before your next visit.',
   ]);
+}
+
+// A termite or rodent station check (Termite Bait Station Service, Rodent
+// Bait Stations, Termite Monitoring ...) checks its stations; it treats
+// nothing. Installing or setting stations up is not a check.
+function isStationCheck(serviceType) {
+  return /\b(termite|rodent)\b/i.test(serviceType)
+    && /\bstations?\b|\bmonitor/i.test(serviceType)
+    && !/\binstall|\bset ?up\b/i.test(serviceType);
+}
+
+// True when the visit record carries something the AI recap can be specific
+// about. Reads the same fields buildPrompt turns into visit-specific lines:
+// technician notes, observations, recommendations, the tech's activity
+// rating and the recent customer messages. Products, areas and the season
+// context are not counted: they produced the generic seasonal text.
+function hasVisitSpecificRecord(input = {}) {
+  if (cleanText(input.notes || input.technicianNotes)) return true;
+  if (safeTextList(input.observations).length) return true;
+  if (safeTextList(input.recommendations).length) return true;
+  if (Number.isInteger(input.pestActivityRating)
+    && input.pestActivityRating >= 0 && input.pestActivityRating <= 5) return true;
+  if (cleanText(input.commsContext)) return true;
+  return false;
 }
 
 // Tech-chosen solutions, normalized for the prompt (owner directive
@@ -389,6 +427,12 @@ const REPORT_VOCABULARY_NAME_WORDS = new Set([
 async function generateRecap(input = {}) {
   const outcome = normalizeOutcome(input.visitOutcome);
   if (DETERMINISTIC_OUTCOMES.has(outcome)) {
+    return { recap: sanitizeRecap(deterministicRecap(input)), source: 'deterministic' };
+  }
+
+  // GATE_COMPLETION_TEXT_PLAIN: nothing visit-specific recorded, so the AI
+  // would only write seasonal filler. Send the short fixed text, no AI call.
+  if (outcome === 'completed' && completionTextPlainLive() && !hasVisitSpecificRecord(input)) {
     return { recap: sanitizeRecap(deterministicRecap(input)), source: 'deterministic' };
   }
 

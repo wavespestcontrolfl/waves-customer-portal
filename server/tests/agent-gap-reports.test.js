@@ -701,6 +701,173 @@ describe('agent-gap-reports', () => {
       expect(insertedRows[0].summary).toContain(code);
     });
 
+    describe('a final by-design refusal drops the earlier capability search (Codex #6371 r14)', () => {
+      const MISS = { status: 'capability_unimplemented' };
+      const FOUND = { status: 'capabilities_found', capabilities: [{ id: 'cancel_appointment', domain: 'scheduling' }] };
+      const refusal = (code) => ({ success: false, code, error: "The bar can't do this from here yet." });
+
+      test.each(['cancel_gate_off', 'invoice_send_queued', 'verifier_reject'])('%s ends the request with no missing_capability row', async (code) => {
+        const collector = collectorFor();
+        collector.discovery({ query: 'cancel a visit with charges' }, FOUND);
+        collector.toolResult('cancel_appointment', refusal(code), true, { round: 1 });
+        await collector.flush({ reply: "The bar can't cancel this from here yet." });
+        expect(insertedRows).toHaveLength(0);
+      });
+
+      test('a search about something else keeps its row when another tool declines by design', async () => {
+        const collector = collectorFor();
+        collector.discovery({ query: 'export payroll hours' }, MISS);
+        collector.discovery({ query: 'send the invoice' }, { status: 'capabilities_found', capabilities: [{ id: 'send_invoice', domain: 'billing' }] });
+        collector.toolResult('send_invoice', refusal('invoice_send_queued'), true, { round: 1 });
+        await collector.flush({ reply: "The bar can't export payroll hours from here yet, and the invoice text is already queued." });
+        expect(insertedRows).toHaveLength(1);
+        expect(insertedRows[0]).toMatchObject({ kind: 'missing_capability', summary: 'export payroll hours' });
+      });
+
+      test('a multi-part search that only surfaced the refusing tool keeps its row (Codex #6371 r17)', async () => {
+        const collector = collectorFor();
+        collector.discovery({ query: 'export payroll hours and send the invoice' }, {
+          status: 'capability_unimplemented',
+          capabilities: [{ id: 'list_timesheets', domain: 'payroll' }, { id: 'send_invoice', domain: 'billing' }],
+        });
+        collector.toolResult('send_invoice', refusal('invoice_send_queued'), true, { round: 1 });
+        await collector.flush({ reply: "The bar can't export payroll hours from here yet, and the invoice text is already queued." });
+        expect(insertedRows).toHaveLength(1);
+        expect(insertedRows[0]).toMatchObject({ kind: 'missing_capability', summary: 'export payroll hours and send the invoice' });
+      });
+
+      test('a one-ask search is tied to the refusing tool even when the ranker put another tool first (Codex #6371 r18)', async () => {
+        const collector = collectorFor();
+        collector.discovery({ query: 'send invoice' }, {
+          status: 'capability_unimplemented',
+          capabilities: [{ id: 'cancel_appointment', domain: 'schedule' }, { id: 'get_day_summary', domain: 'schedule' }, { id: 'send_invoice', domain: 'billing' }],
+        });
+        collector.toolResult('send_invoice', refusal('invoice_send_queued'), true, { round: 1 });
+        await collector.flush({ reply: 'The invoice text is already queued.' });
+        expect(insertedRows).toHaveLength(0);
+      });
+
+      test('a multi-part search is dropped only when every part belongs to a refusing tool', async () => {
+        const collector = collectorFor();
+        collector.discovery({ query: 'send the invoice and send invoices again' }, {
+          status: 'capability_unimplemented', capabilities: [{ id: 'list_timesheets', domain: 'payroll' }, { id: 'send_invoice', domain: 'billing' }],
+        });
+        collector.toolResult('send_invoice', refusal('invoice_send_queued'), true, { round: 1 });
+        await collector.flush({ reply: 'The invoice text is already queued.' });
+        expect(insertedRows).toHaveLength(0);
+      });
+
+      test.each(['send invoices again', 'send the invoice again', 'sending the invoices'])('%s names send_invoice in singular or plural (Codex #6371 r21)', async (query) => {
+        const collector = collectorFor();
+        collector.discovery({ query }, { status: 'capabilities_found', capabilities: [{ id: 'send_invoice', domain: 'billing' }] });
+        collector.toolResult('send_invoice', refusal('invoice_send_queued'), true, { round: 1 });
+        await collector.flush({ reply: 'The invoice text is already queued.' });
+        expect(insertedRows).toHaveLength(0);
+      });
+
+      test('a by-design refusal, then a discovery round, then the answer files no row (Codex #6371 r23)', async () => {
+        const collector = collectorFor();
+        collector.toolResult('send_invoice', refusal('invoice_send_queued'), true, { round: 0 });
+        collector.discovery({ query: 'send the invoice' }, { status: 'capabilities_found', capabilities: [{ id: 'send_invoice', domain: 'billing' }] });
+        collector.toolResult('discover_capabilities', { status: 'capabilities_found' }, false, { round: 1 });
+        await collector.flush({ reply: 'The invoice text is already queued.' });
+        expect(insertedRows).toHaveLength(0);
+      });
+
+      test('writes switched off, then a search for the write tool, files no row', async () => {
+        const collector = collectorFor();
+        collector.toolResult('update_customer', { error: "The bar can't make changes from here until writes are switched back on.", code: 'writes_disabled' }, true, { round: 0 });
+        collector.discovery({ query: 'update the customer' }, { status: 'capabilities_found', capabilities: [{ id: 'update_customer', domain: 'customers' }] });
+        collector.toolResult('discover_capabilities', { status: 'capabilities_found' }, false, { round: 1 });
+        await collector.flush({ reply: "The bar can't change that from here right now." });
+        expect(insertedRows).toHaveLength(0);
+      });
+
+      test('a refusal that IS a gap keeps the search row beside its blocked row', async () => {
+        const collector = collectorFor();
+        collector.discovery({ query: 'cancel a visit with charges' }, MISS);
+        collector.toolResult('cancel_appointment', refusal('cancel_with_effects_unsupported'), true, { round: 1 });
+        await collector.flush({ reply: "The bar can't cancel this from here yet." });
+        expect(insertedRows.map((row) => row.kind).sort()).toEqual(['blocked', 'missing_capability']);
+      });
+
+      test('a by-design refusal in an earlier round, recovered by a later success, does not hide the search', async () => {
+        const collector = collectorFor();
+        collector.discovery({ query: 'cancel a visit with charges' }, MISS);
+        collector.toolResult('cancel_appointment', refusal('invoice_send_queued'), true, { round: 1 });
+        collector.toolResult('lookup_visit', { ok: true }, false, { round: 2 });
+        await collector.flush({ reply: "The bar can't cancel this from here yet." });
+        expect(insertedRows.map((row) => row.kind)).toEqual(['missing_capability']);
+      });
+    });
+
+    describe('capability_gaps on a successful result (Codex #6371 r12)', () => {
+      const SUCCESS = { proposal: true, stops: [], capability_gaps: [{ code: 'grouped_visit_move_unsupported' }] };
+
+      test('a successful result that carries a capability gap records a blocked row on tool + code', async () => {
+        const collector = collectorFor();
+        collector.toolResult('move_stops_to_day', SUCCESS, false, { round: 0 });
+        await collector.flush({ reply: 'Moved the others; one stayed.' });
+        expect(insertedRows).toHaveLength(1);
+        expect(insertedRows[0]).toMatchObject({ kind: 'blocked', closest_tool: 'move_stops_to_day' });
+        expect(insertedRows[0].summary).toContain('grouped_visit_move_unsupported');
+      });
+
+      test('a nested gap is kept when the same call proposed a write (the route sends wrote:true)', async () => {
+        const collector = collectorFor();
+        collector.toolResult('move_stops_to_day', SUCCESS, false, { round: 0, wrote: true });
+        collector.toolResult('update_customer', { success: false, error: "The bar can't do this from here yet.", code: 'address_conflict' }, true, { round: 0, wrote: true });
+        await collector.flush({ reply: 'Moved the others; one stayed.' });
+        expect(insertedRows.map((row) => row.closest_tool)).toEqual(['move_stops_to_day']);
+      });
+
+      test('each nested code passes the same rule, and duplicates collapse', async () => {
+        const collector = collectorFor();
+        const nested = { ok: true, capability_gaps: [
+          { code: 'grouped_visit_move_unsupported' }, { code: 'grouped_visit_move_unsupported' },
+          { code: 'address_conflict' }, { code: 'invoice_send_queued' }, { code: 'Not A Code' }, { code: 7 }, null,
+        ] };
+        collector.toolResult('move_stops_to_day', nested, false, { round: 0 });
+        await collector.flush({ reply: 'Done.' });
+        expect(insertedRows.map((row) => row.summary.match(/\((\w+)\)/)[1]).sort()).toEqual(['address_conflict', 'grouped_visit_move_unsupported']);
+      });
+
+      test('a gap a partial success worked around survives later rounds: move, then another tool, then the answer (Codex #6371 r22)', async () => {
+        const collector = collectorFor();
+        collector.toolResult('move_stops_to_day', SUCCESS, false, { round: 0, wrote: true });
+        collector.toolResult('get_customer_detail', { customer: { id: 'c1' } }, false, { round: 1 });
+        await collector.flush({ reply: 'Moved the others; one grouped stop stayed.' });
+        expect(insertedRows).toHaveLength(1);
+        expect(insertedRows[0]).toMatchObject({ kind: 'blocked', closest_tool: 'move_stops_to_day' });
+        expect(insertedRows[0].summary).toContain('grouped_visit_move_unsupported');
+      });
+
+      test('the same gap in two rounds is one row', async () => {
+        const collector = collectorFor();
+        collector.toolResult('move_stops_to_day', SUCCESS, false, { round: 0, wrote: true });
+        collector.toolResult('move_stops_to_day', SUCCESS, false, { round: 2, wrote: true });
+        await collector.flush({ reply: 'Done.' });
+        expect(insertedRows).toHaveLength(1);
+      });
+
+      test('a FAILED result lists every skipped kind; the top-level code and the nested one are stored once (Codex #6371 r15)', async () => {
+        const collector = collectorFor();
+        const failedBatch = { error: "The bar can't move these from here yet.", code: 'grouped_visit_move_unsupported',
+          capability_gaps: [{ code: 'grouped_visit_move_unsupported' }, { code: 'frozen_visit_move_unsupported' }] };
+        collector.toolResult('move_stops_to_day', failedBatch, true, { round: 0 });
+        await collector.flush({ reply: "The bar can't move these." });
+        expect(insertedRows.map((row) => row.summary.match(/\((\w+)\)/)[1]).sort()).toEqual(['frozen_visit_move_unsupported', 'grouped_visit_move_unsupported']);
+      });
+
+      test('a result with no capability_gaps, or only by-design codes, records nothing', async () => {
+        const collector = collectorFor();
+        collector.toolResult('move_stops_to_day', { ok: true }, false, { round: 0 });
+        collector.toolResult('move_stops_to_day', { ok: true, capability_gaps: [{ code: 'invoice_send_queued' }] }, false, { round: 0 });
+        await collector.flush({ reply: 'Done.' });
+        expect(insertedRows).toHaveLength(0);
+      });
+    });
+
     test('a coded refusal that names another screen is recorded under its own code; a refused marker under other_screen', async () => {
       const collector = collectorFor();
       collector.toolResult('reprice_visits', { error: 'Change visit prices on the Schedule screen.', code: 'annual_prepay_customer' }, true, { round: 0 });
