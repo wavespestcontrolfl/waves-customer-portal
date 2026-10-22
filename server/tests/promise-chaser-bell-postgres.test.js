@@ -186,6 +186,28 @@ const OUR_NUMBER = '+19415550100';
       expect((await ringedPayload()).name).toBe('Estella Samplewood');
     });
 
+    test('two different people on the number name nobody, and an estimate does not pick between them (codex #6417 r4)', async () => {
+      await mockConn('customers').insert([
+        { id: randomUUID(), first_name: 'Martin', last_name: 'Fixtureson', phone: PHONE, created_at: new Date(now - 10 * 86400000) },
+        { id: randomUUID(), first_name: 'Paula', last_name: 'Fixtureson', phone: PHONE, created_at: new Date(now - 86400000) },
+      ]);
+      await mockConn('estimates').insert({
+        id: randomUUID(), customer_id: null, customer_name: 'Martin Fixtureson', customer_phone: PHONE, status: 'draft',
+        estimate_data: JSON.stringify({}), created_at: new Date(now - 5 * 86400000), updated_at: new Date(now - 5 * 86400000),
+      });
+      expect((await ringedPayload()).name).toBeNull();
+    });
+
+    test('two estimates with different names on the number name nobody', async () => {
+      for (const [n, d] of [['Estella Samplewood', 5], ['Otto Samplewood', 3]]) {
+        await mockConn('estimates').insert({
+          id: randomUUID(), customer_id: null, customer_name: n, customer_phone: PHONE, status: 'draft',
+          estimate_data: JSON.stringify({}), created_at: new Date(now - d * 86400000), updated_at: new Date(now - d * 86400000),
+        });
+      }
+      expect((await ringedPayload()).name).toBeNull();
+    });
+
     test('a call WITH a customer is that customer\'s: a placeholder-named or missing record gives no name, never another record on the phone (codex #6417 r1 P2)', async () => {
       await mockConn('customers').insert({ id: randomUUID(), first_name: 'Martin', last_name: 'Fixtureson', phone: PHONE, created_at: new Date(now - 86400000) });
       const placeholder = randomUUID();
