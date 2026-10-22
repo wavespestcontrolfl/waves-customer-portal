@@ -86,6 +86,7 @@ beforeAll(() => {
   process.env.GATE_IB_INVOICE_REMINDERS = 'true';
   process.env.GATE_IB_PAYMENT_PLAN = 'true';
   process.env.GATE_IB_CREATE_INVOICE = 'true';
+  process.env.GATE_IB_SET_BILL_TO = 'true';
   // send_invoice is dark behind GATE_IB_INVOICE_ACTIONS; off, its preview refuses.
   process.env.GATE_IB_INVOICE_ACTIONS = 'true';
   process.env.GATE_IB_RECORD_PAYMENT = 'true';
@@ -104,6 +105,7 @@ afterAll(() => {
   delete process.env.GATE_IB_INVOICE_REMINDERS;
   delete process.env.GATE_IB_PAYMENT_PLAN;
   delete process.env.GATE_IB_CREATE_INVOICE;
+  delete process.env.GATE_IB_SET_BILL_TO;
   delete process.env.GATE_IB_DELETE_CUSTOMER;
   if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;
   else process.env.GATE_IB_PLATFORM = ORIGINAL_PLATFORM_GATE;
@@ -200,6 +202,7 @@ const WRITE_TWO_STEP = [
   'create_payment_plan',
   'cancel_payment_plan',
   'create_invoice',
+  'set_customer_bill_to',
   'update_lead_contact',
   // propose_admin_edit (owner ruling 2026-10-12, GATE_IB_GENERAL_EDIT): one reviewed small internal
   // edit, owner login only (FULL_ACCESS_TWO_STEP_TOOL_NAMES), replayed through the screen's own
@@ -830,6 +833,13 @@ const UNCONFIRMED_CALLS = [
     }, {
       customers: [{ id: '00000000-0000-0000-0000-00000000f401', first_name: 'Pat', last_name: 'Tester', city: 'Sampleton', property_type: 'residential', payer_id: null }],
     }],
+    // set_customer_bill_to's preview reads the customer, the payer and the invoices; it may not write without confirmed
+    // (intelligence-bar-bill-to.test.js covers the card itself).
+    ['bill-to-tools', 'executeBillToTool', 'set_customer_bill_to', { customer_id: '00000000-0000-0000-0000-00000000b901', payer_id: '7' }, {
+      customers: [{ id: '00000000-0000-0000-0000-00000000b901', first_name: 'Pat', last_name: 'Tester', payer_id: null, deleted_at: null }],
+      payers: [{ id: 7, display_name: 'Synthetic Property Co', active: true }],
+      invoices: [], scheduled_services: [], service_records: [], annual_prepay_terms: [],
+    }],
     // Outside-service writes (IB scope expansion item 1) build their preview
     // from a live third-party API call, never the DB — OUTSIDE_WRITE_FIXTURES
     // below supplies the token env vars + mocked fetch responses these rows
@@ -1282,7 +1292,8 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
     // propose_admin_edit (_sideEffects): its confirmed run replays a PUT or PATCH to a reviewed admin endpoint.
     // void_invoice (_sideEffects): its confirmed run voids an invoice (live smoke must not).
     // create_invoice (_sideEffects): its confirmed run creates a draft invoice (live smoke must not).
+    // set_customer_bill_to (_sideEffects): its confirmed run sets a customer's Bill-To payer.
     // The invoice reminder and payment-plan tools (_sideEffects): their confirmed runs change reminders, send, schedule or create a plan.
-    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice', 'record_payment', 'void_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan', 'create_invoice', 'propose_admin_edit']);
+    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice', 'record_payment', 'void_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan', 'create_invoice', 'set_customer_bill_to', 'propose_admin_edit']);
   });
 });

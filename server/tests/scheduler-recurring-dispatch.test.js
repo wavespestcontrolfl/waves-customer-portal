@@ -70,7 +70,8 @@ test.each([false, true])('handoff alerts stay registered with cronJobs off and a
   // maintenance) and the consultation-outcome reconcile sweep (#4710 — a
   // completeness guarantee, not a feature cron) are registered above the
   // cronJobs early return and survive.
-  expect(cron.schedule.mock.calls.map(([expression]) => expression).sort()).toEqual(['10 4 * * *', '27 * * * *', '3,18,33,48 * * * *']);
+  // '* * * * *': the bundled tech push sweep, which must send pushes held whether or not cron jobs run (Codex #6459 r2).
+  expect(cron.schedule.mock.calls.map(([expression]) => expression).sort()).toEqual(['* * * * *', '10 4 * * *', '27 * * * *', '3,18,33,48 * * * *']);
   expect(flagUnplacedVisits).toHaveBeenCalledTimes(1);
   expect(runAutoDispatch).not.toHaveBeenCalled();
 });
