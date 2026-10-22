@@ -473,7 +473,8 @@ async function setGapStatus(gapId, status) {
 function askParts(query) {
   return String(query || '').toLowerCase().split(/\s*(?:[,;]|\band\b|\bthen\b|\balso\b)\s*/).filter((part) => /[a-z]/.test(part));
 }
-const stemWord = (word) => word.replace(/(?:ing|es|s)$/, '');
+// Plural and trailing-e forms share a stem ("invoice", "invoices" -> "invoic"; "sends", "sending" -> "send").
+const stemWord = (word) => word.replace(/(?:ing|es|s|e)$/, '');
 // An ask names a tool when every word of the tool's name is in the ask.
 function askNamesTool(part, tool) {
   const words = new Set(part.split(/[^a-z0-9]+/).filter(Boolean).map(stemWord));

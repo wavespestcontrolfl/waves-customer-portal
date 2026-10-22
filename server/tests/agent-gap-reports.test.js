@@ -757,6 +757,14 @@ describe('agent-gap-reports', () => {
         expect(insertedRows).toHaveLength(0);
       });
 
+      test.each(['send invoices again', 'send the invoice again', 'sending the invoices'])('%s names send_invoice in singular or plural (Codex #6371 r21)', async (query) => {
+        const collector = collectorFor();
+        collector.discovery({ query }, { status: 'capabilities_found', capabilities: [{ id: 'send_invoice', domain: 'billing' }] });
+        collector.toolResult('send_invoice', refusal('invoice_send_queued'), true, { round: 1 });
+        await collector.flush({ reply: 'The invoice text is already queued.' });
+        expect(insertedRows).toHaveLength(0);
+      });
+
       test('a refusal that IS a gap keeps the search row beside its blocked row', async () => {
         const collector = collectorFor();
         collector.discovery({ query: 'cancel a visit with charges' }, MISS);
