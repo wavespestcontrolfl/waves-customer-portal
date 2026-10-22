@@ -14312,6 +14312,10 @@ const CallRecordingProcessor = {
       });
       if (!existing && !sharedPhoneAmbiguity.candidates) {
         spokenNumberSuggested = await callbackSpokenNumberSuggested({ call, extracted, customerLinkOverride, cardReport: familyCardReport });
+      } else if (familyCardReport.filed === 'callback_spoken_number') {
+        // The card above was decided before this lookup: the dialed number gained an owner (or became
+        // shared) in between, so the callback card no longer applies. Retire it (Codex #6419 r9).
+        await require('./call-family-name-link').retireCallbackSpokenNumberCard({ callLogId: call.id, procToken });
       }
       if (existing) {
         customerId = existing.id;

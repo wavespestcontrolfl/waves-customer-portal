@@ -454,6 +454,29 @@ async function retireOpenCard(trx, callLogId) {
 }
 
 /**
+ * Retire this call's OPEN card when it carries the callback_spoken_number basis. The pass files the card
+ * before its authoritative contact-number lookup (Step 3), in separate transactions: when that lookup then
+ * links the call (the dialed number gained an owner meanwhile) or finds a shared number, the card would stay
+ * open recommending a relink that conflicts with the call's link. Same lock and token fence as the filer;
+ * other bases and an in_progress card are never touched. Fail-open: an error leaves the card as it was.
+ */
+async function retireCallbackSpokenNumberCard({ callLogId, procToken = null, conn = db }) {
+  try {
+    await conn.transaction(async (trx) => {
+      await lockTriageCall(trx, callLogId);
+      if (procToken && !(await trx('call_log').where({ id: callLogId, processing_token: procToken }).forUpdate().first('id'))) return;
+      const open = await trx('triage_items')
+        .where({ call_log_id: callLogId, reason_code: CARD_REASON_CODE, status: 'open' })
+        .whereRaw("payload->>'match_basis' = 'callback_spoken_number'")
+        .first('id');
+      if (open) await retireOpenCard(trx, callLogId);
+    });
+  } catch (e) {
+    logger.warn(`[call-family-link] callback card retire skipped for call ${callLogId}: ${e.code || e.name || 'error'}`);
+  }
+}
+
+/**
  * File, refresh or retire the card for one processed call (derived purely from the extraction, so a
  * reprocess keeps it true). Runs under the per-call triage lock and the processing-token fence; an
  * in_progress card (an operator is on it) is never touched. Fail-open: an error leaves the call exactly as
@@ -527,4 +550,5 @@ module.exports = {
   suggestFamilyAccounts,
   operatorClosedCard,
   fileFamilyAccountCard,
+  retireCallbackSpokenNumberCard,
 };

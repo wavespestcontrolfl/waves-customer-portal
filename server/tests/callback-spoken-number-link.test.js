@@ -321,6 +321,25 @@ describe('callback_spoken_number basis of the family-account card', () => {
     expect(payload.reason).toBe(familyLink.OWN_ACCOUNT_REASONS.callback_spoken_number);
   });
 
+  // Codex #6419 r9: the card is decided before Step 3's authoritative lookup. When that lookup then links
+  // the call (or finds a shared number), the pass retires the callback-basis card.
+  test('retireCallbackSpokenNumberCard: an open callback-basis card is dismissed by the auto rule', async () => {
+    const { conn, updates } = cardTrx({ openCard: { id: 'card-1' } });
+    await familyLink.retireCallbackSpokenNumberCard({ callLogId: 'cb-7', conn });
+    expect(updates).toEqual([expect.objectContaining({ table: 'triage_items', patch: expect.objectContaining({ status: 'dismissed', resolution_rule: familyLink.RETIRE_RULE }) })]);
+  });
+
+  test('retireCallbackSpokenNumberCard: no open callback-basis card, nothing written', async () => {
+    const { conn, updates } = cardTrx({ openCard: null });
+    await familyLink.retireCallbackSpokenNumberCard({ callLogId: 'cb-7', conn });
+    expect(updates).toEqual([]);
+  });
+
+  test('retireCallbackSpokenNumberCard: a failed write is swallowed (fail-open)', async () => {
+    const conn = { transaction: async () => { throw Object.assign(new Error('down'), { code: '08006' }); } };
+    await expect(familyLink.retireCallbackSpokenNumberCard({ callLogId: 'cb-7', conn })).resolves.toBeUndefined();
+  });
+
   test('gate off: no suggestion and no card', async () => {
     delete process.env.GATE_CALLBACK_SPOKEN_NUMBER_LINK;
     const { conn, inserted } = cardTrx({ customers: [[customer()], []] });
@@ -462,6 +481,13 @@ describe('Step 3 keeps a spoken-number match suggest-only', () => {
     // no swallow: a failed lookup must reach the helper's throw, never become "no match"
     expect(src).not.toContain('spokenNumberSuggested = !!');
     expect(src).toContain('cardReport: familyCardReport');
+  });
+
+  test('a callback card filed before the lookup is retired when the lookup links the call or finds a shared number', () => {
+    const lookup = src.indexOf('const existing = await findCustomerForCallContact(phone, extracted, {');
+    const retire = src.indexOf("retireCallbackSpokenNumberCard({ callLogId: call.id, procToken })");
+    expect(retire).toBeGreaterThan(lookup);
+    expect(src.slice(retire - 400, retire)).toContain("} else if (familyCardReport.filed === 'callback_spoken_number') {");
   });
 
   test('a deliberate customer-less result is not a customer_creation_failed, and the lead path stays unclaimed-only', () => {
