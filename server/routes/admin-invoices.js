@@ -2890,6 +2890,11 @@ async function assertBarCreditFences(trx, locked, expected) {
     return err;
   };
   if (locked.payer_id || locked.payer_statement_id) throw drift('it is now billed to a payer');
+  // The canonical live resolver for EVERY invoice (a customer-default payer assigned after a standalone invoice was minted leaves
+  // its payer columns null); unverifiable is refused (fail closed).
+  if (await require('../services/invoice-payer-ownership').invoicePayerOwnership(locked, trx) !== null) {
+    throw drift('a payer now owns it, or who owes it could not be verified');
+  }
   if ((locked.scheduled_service_id || locked.service_record_id)
     && await require('../services/visit-linked-invoice-withdrawal').liveVisitPayerOf(trx, locked)) {
     throw drift('a payer now owns its visit');

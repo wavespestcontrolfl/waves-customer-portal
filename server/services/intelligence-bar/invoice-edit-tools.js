@@ -780,14 +780,16 @@ async function chargeFenceRefusal(invoice, where) {
 const creditBalanceDue = (invoice) => cents(invoice.total) - cents(invoice.credit_applied);
 
 // Billed to a payer by the row, or owed by one now: the live Bill-To owner of its visit (the credit handler re-checks it under the lock).
+// Who owes the invoice right now: the canonical live resolver (stamped payer, or a payer assigned since through the customer
+// default or the scheduled service; unverifiable = refused), plus the visit a payer now owns (also through a service record).
 async function creditPayerRefusal(invoice) {
-  let payerOwned = Boolean(invoice.payer_id || invoice.payer_statement_id);
-  if (!payerOwned && (invoice.scheduled_service_id || invoice.service_record_id)) {
-    try {
-      payerOwned = Boolean(await require('../visit-linked-invoice-withdrawal').liveVisitPayerOf(db, invoice));
-    } catch {
-      return refusal('The bar could not check who owes this invoice, so it was not offered. Apply the credit from the Invoices page.', 'unverified', { invoice_id: invoice.id });
-    }
+  let payerOwned;
+  try {
+    payerOwned = await require('../invoice-payer-ownership').invoicePayerOwnership(invoice, db) !== null
+      || Boolean((invoice.scheduled_service_id || invoice.service_record_id)
+        && await require('../visit-linked-invoice-withdrawal').liveVisitPayerOf(db, invoice));
+  } catch {
+    return refusal('The bar could not check who owes this invoice, so it was not offered. Apply the credit from the Invoices page.', 'unverified', { invoice_id: invoice.id });
   }
   if (!payerOwned) return null;
   return refusal('This invoice is billed to a third-party payer, and account credit belongs to the homeowner. Account credit cannot be applied to payer invoices.', 'payer_invoice', { invoice_id: invoice.id });

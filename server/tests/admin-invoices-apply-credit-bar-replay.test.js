@@ -196,6 +196,20 @@ describe('apply-credit — the page and the bar', () => {
     expect(mockPostMovement).not.toHaveBeenCalled();
   });
 
+  test('a payer the canonical resolver names now (customer default, no visit link) is drift under the lock; nothing moves', async () => {
+    const ownership = require('../services/invoice-payer-ownership');
+    const spy = jest.spyOn(ownership, 'invoicePayerOwnership').mockResolvedValue('payer_owned');
+    try {
+      const answer = await router.applyCreditFromBar({ invoiceId: 'inv-1', body: { waiveSetupFee: false }, actor: ACTOR, expected: EXPECTED });
+      expect(answer).toMatchObject({ status: 409, json: { code: 'PREVIEW_CHANGED', error: expect.stringMatching(/a payer now owns it/) } });
+      expect(mockPostMovement).not.toHaveBeenCalled();
+      // The page's own call is unchanged (the fence is the bar's).
+      spy.mockClear();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('a partially_paid invoice is refused for the bar under the invoice lock, before any credit moves', async () => {
     preInvoices.first.mockImplementation(async () => ({ ...INVOICE, status: 'partially_paid' }));
     trxInvoices.first.mockImplementation(async () => ({ ...INVOICE, status: 'partially_paid' }));

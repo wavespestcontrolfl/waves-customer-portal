@@ -717,6 +717,22 @@ describe('apply_invoice_credit card', () => {
     expect(await run('apply_invoice_credit', { amount: 12.345 })).toMatchObject({ code: 'invalid_amount' });
   });
 
+  test('a standalone invoice (no visit link) whose customer now has a default payer is refused; an unverifiable owner refuses too', async () => {
+    setInvoice({ scheduled_service_id: null, service_record_id: null });
+    const ownership = require('../services/invoice-payer-ownership');
+    const spy = jest.spyOn(ownership, 'invoicePayerOwnership');
+    try {
+      spy.mockResolvedValueOnce('payer_owned');
+      expect(await run('apply_invoice_credit')).toMatchObject({ code: 'payer_invoice' });
+      spy.mockResolvedValueOnce('payer_unverifiable');
+      expect(await run('apply_invoice_credit')).toMatchObject({ code: 'payer_invoice' });
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ id: INV, scheduled_service_id: null }), expect.anything());
+      expect(Invoices.applyCreditFromBar).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('a legacy partially_paid invoice is refused (its paid part is in payment rows, not on the invoice)', async () => {
     setInvoice({ status: 'partially_paid' });
     expect(await run('apply_invoice_credit')).toMatchObject({ code: 'needs_invoices_page', reason: 'partially_paid' });
