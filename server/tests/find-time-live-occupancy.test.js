@@ -1,6 +1,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
-jest.mock('../services/scheduling/blackout-dates', () => ({ getBlackoutDates: async () => new Set() }));
+const mockBlackout = { dates: new Set() };
+jest.mock('../services/scheduling/blackout-dates', () => ({ getBlackoutDates: async () => mockBlackout.dates }));
 jest.mock('../services/auto-dispatch/geo', () => ({ HQ: { lat: 27, lng: -82 }, driveMin: () => 0 }));
 
 const db = require('../models/db');
@@ -83,5 +84,31 @@ test('confirmed and completed timed rows retain their occupied windows', async (
   for (const status of ['confirmed', 'completed']) {
     wire([stop({ status })]);
     expect((await findAvailableSlots(OPTIONS)).slots).toHaveLength(0);
+  }
+});
+
+
+// searched_dates (auto-dispatch audit 2026-10-22, finding 6; Codex #6468 r1):
+// only the days the finder really searched — an owner blackout day and a day
+// every technician is out are not listed, so the audit never shows them as
+// "searched, nothing open".
+test('reports the days it searched: not a closed day, not a day every technician is out', async () => {
+  const day = (n) => etDateString(addETDays(new Date(), n));
+  const [d1, d2, d3] = [day(20), day(21), day(22)];
+  mockBlackout.dates = new Set([d2]);
+  try {
+    db.raw = sql => sql;
+    db.mockImplementation((table) => {
+      if (table === 'technicians') return { where() { return this; }, select: async () => [{ id: 'tech-1' }] };
+      if (table === 'technician_absences') {
+        const q = { whereBetween: () => q, whereNull: () => q, whereIn: () => q, select: async () => [{ technician_id: 'tech-1', absence_date: d3 }] };
+        return q;
+      }
+      return serviceQuery([]);
+    });
+    const res = await findAvailableSlots({ ...OPTIONS, dateFrom: d1, dateTo: d3 });
+    expect(res.searched_dates).toEqual([d1]);
+  } finally {
+    mockBlackout.dates = new Set();
   }
 });

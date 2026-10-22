@@ -216,11 +216,15 @@ async function findCapacitySlots(opts) {
   // (no credit) for the whole loop, not just the first candidate.
   if (opts.packEnds === true) await ensureCatalogLoaded(db);
   const candidates = [];
+  // The days actually searched (open, someone working), as findAvailableSlots reports them.
+  const searchedDates = [];
   for (const date of enumerateDates(dateFrom, dateTo, { includeWeekends: opts.includeWeekends })) {
     if (date < today || blackout.has(date)) continue;
+    let searched = false;
     for (const tech of techs) {
       if (inactiveTechs.has(tech.id)) continue;
       if (absentDays.has(`${tech.id}:${date}`)) continue;
+      if (!searched) { searched = true; searchedDates.push(date); }
       const context = await loadArrivalRouteContext({ date, technicianId: tech.id, now, travel,
         excludeServiceIds: opts.excludeServiceIds,
         // The requesting estimate's OWN uncommitted hold must not occupy the
@@ -358,7 +362,7 @@ async function findCapacitySlots(opts) {
   packed.sort((a, b) => a.score - b.score || a.waiting_minutes - b.waiting_minutes || a.start_time.localeCompare(b.start_time));
   return { slots: packed.slice(0, topN).map((slot, i) => ({ rank: i + 1, ...slot })),
     evaluated: candidates.length, total_feasible: packed.length, rejections, rejections_by_date: rejectionsByDate,
-    travel: travel.diagnostics() };
+    searched_dates: searchedDates, travel: travel.diagnostics() };
 }
 
 // Route neighbours of a capacity placement, BY TIME rather than
@@ -1313,13 +1317,20 @@ async function findAvailableSlots(opts) {
     slotStepMinutes, durationMinutes, dayOpen, dayClose, everyStepStart,
     techStartPoints: opts.techStartPoints === true,
   };
+  // The days actually searched: open (no owner blackout) with at least one
+  // technician working. Auto-dispatch's audit lists these, so a closed day or
+  // a day nobody works never reads as "searched, nothing open".
+  const searchedDates = [];
   for (const date of dates) {
+    let searched = false;
     for (const tech of techs) {
       if (absentDays.has(`${tech.id}:${date}`)) continue;
+      searched = true;
       const { candidates: dayCandidates, evaluatedGaps } = candidatesForDay(date, tech, dayParams);
       evaluated += evaluatedGaps;
       candidates.push(...dayCandidates);
     }
+    if (searched) searchedDates.push(date);
   }
 
   // Sort by score ascending (lower = better)
@@ -1329,6 +1340,7 @@ async function findAvailableSlots(opts) {
     slots: candidates.slice(0, topN).map((c, i) => ({ rank: i + 1, ...c })),
     evaluated,
     total_feasible: candidates.length,
+    searched_dates: searchedDates,
   };
 }
 

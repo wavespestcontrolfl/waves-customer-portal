@@ -930,6 +930,8 @@ async function seriesDatesInWindow(service, ctx, dateFrom, dateTo) {
 // re-fetch the FULL feasible set so the hard filters see every slot. The window
 // is only ±tolerance days, so the full set is small; the re-fetch is rare (never
 // at current crew size) and only pays off in a dense window.
+// Resolves to { slots, searchedDates }: find-time's slots and the days it
+// actually searched (for the audit's search summary; null when not reported).
 async function everyFeasibleSlot(findTimeArgs, ctx) {
   await loadAllStartPoints(ctx);
   let res = await findAvailableSlots({ ...findTimeArgs, topN: ctx.fetchCap || FETCH_CAP });
@@ -938,21 +940,20 @@ async function everyFeasibleSlot(findTimeArgs, ctx) {
     res = await findAvailableSlots({ ...findTimeArgs, topN: res.total_feasible });
     slots = (res && res.slots) || [];
   }
-  return slots;
+  return { slots, searchedDates: Array.isArray(res && res.searched_dates) ? res.searched_dates : null };
 }
 
 // What the search saw, for the audit row (owner audit 2026-10-22, finding 6):
 // about 66 visits a night ended "no valid slot" with every drop counter at 0,
 // and the row kept neither the days searched nor what the finder offered on
-// them, so a full week read like a fault. The window and, per day searched,
-// how many open starts find-time returned BEFORE any filter (it offers each
-// free gap's earliest start, so a count is the day's open gaps; a day with
-// none reads 0). Sundays are never searched, so they are not listed.
-function searchSummary(dateFrom, dateTo, slots) {
+// them, so a full week read like a fault. The window and, per day find-time
+// actually searched (`searched_dates`: open, someone working — a closed day
+// or one nobody works is not listed, Codex #6468 r1), how many open starts it
+// returned BEFORE any filter (it offers each free gap's earliest start, so a
+// count is the day's open gaps; a full day reads 0).
+function searchSummary(dateFrom, dateTo, slots, searchedDates) {
   const open = {};
-  for (let d = dateFrom; d <= dateTo; d = shiftDateStr(d, 1)) {
-    if (new Date(`${d}T12:00:00Z`).getUTCDay() !== 0) open[d] = 0;
-  }
+  for (const d of searchedDates || []) open[d] = 0;
   for (const slot of slots) if (slot && slot.date in open) open[slot.date] += 1;
   return { date_from: dateFrom, date_to: dateTo, open_starts_by_date: open };
 }
@@ -1013,7 +1014,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
     // consistent with SmartRebooker's overlap check (which treats 'rescheduled'
     // as a conflict). Excluding it here would propose slots apply then rejects.
   };
-  const slots = await everyFeasibleSlot(findTimeArgs, ctx);
+  const { slots, searchedDates } = await everyFeasibleSlot(findTimeArgs, ctx);
 
   // Drop tally — why feasible slots were rejected. Surfaced to the audit so an
   // empty candidate set reads as "honored the customer's preference, nothing
@@ -1037,7 +1038,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // rankSurvivorsForSharedModel). Gate on: SLOT_TAKEN candidates dropped and
   // every survivor re-scored on the shared model.
   const scored = await rankSurvivorsForSharedModel(service, geo, candidates, ctx, drops);
-  return { current, candidates: scored, drops, feasible: slots.length, search: searchSummary(dateFrom, dateTo, slots) };
+  return { current, candidates: scored, drops, feasible: slots.length, search: searchSummary(dateFrom, dateTo, slots, searchedDates) };
 }
 
 module.exports = {

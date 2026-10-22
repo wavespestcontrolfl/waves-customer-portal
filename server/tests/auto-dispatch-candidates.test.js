@@ -196,17 +196,21 @@ describe('findValidCandidateSlots', () => {
         { date: '2026-08-06', technician: { id: 't1', name: 'A' }, start_time: '16:30', end_time: '17:30', detour_minutes: 1, total_drive_minutes: 10, stops_that_day: 3, score: 1 },
       ],
       total_feasible: 3,
+      // The days find-time really searched: 08-07 was closed or nobody worked, so it is not here.
+      searched_dates: ['2026-08-04', '2026-08-05', '2026-08-06', '2026-08-08'],
     });
     const { search, drops } = await findValidCandidateSlots(SERVICE, { service_category: 'general', blackout: null }, ctx());
     expect(drops.after_hours).toBe(1);
-    expect(search.open_starts_by_date['2026-08-05']).toBe(2);
-    expect(search.open_starts_by_date['2026-08-06']).toBe(1);
-    const days = Object.keys(search.open_starts_by_date);
-    // Every searched day is listed — an empty one as 0 — from the window's first day to its last; no Sunday.
-    expect(days[0]).toBe(search.date_from);
-    expect(days.length).toBeGreaterThan(2);
-    expect(days.every((d) => d >= search.date_from && d <= search.date_to && new Date(`${d}T12:00:00Z`).getUTCDay() !== 0)).toBe(true);
-    expect(Object.values(search.open_starts_by_date).filter((n) => n === 0).length).toBe(days.length - 2);
+    // Exactly the searched days, a full one as 0; a day the finder skipped is not listed (Codex #6468 r1).
+    expect(search.open_starts_by_date).toEqual({ '2026-08-04': 0, '2026-08-05': 2, '2026-08-06': 1, '2026-08-08': 0 });
+    expect(typeof search.date_from).toBe('string');
+    expect(typeof search.date_to).toBe('string');
+  });
+
+  test('a finder that reports no searched days lists none (never a made-up full day)', async () => {
+    findAvailableSlots.mockResolvedValue({ slots: [], total_feasible: 0 });
+    const { search } = await findValidCandidateSlots(SERVICE, { service_category: 'general', blackout: null }, ctx());
+    expect(search.open_starts_by_date).toEqual({});
   });
 
   test('returns no candidates (and no_geo note) when the service has no usable coordinates', async () => {
