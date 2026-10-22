@@ -74,6 +74,24 @@ test('the pinned predicate keeps unresolved FIX rows only when something can res
   });
 });
 
+// The far double-booking list (auto-dispatch D1) is an FYI ops digest its
+// sender refreshes in place (created_at never moves) and retires on a clean
+// run (fall-off): it stays pinned while it stands, whatever its kind, or the
+// window would drop it a day after it first appeared (Codex #6478 r2 P2).
+test('an unresolved fall-off row of any kind is pinned, not only a FIX row', () => {
+  const pinned = builder([]); const windowed = builder([]);
+  mockQueue.push(pinned, windowed);
+  const db = require('../models/db');
+  return _private.loadDigestRows(db, new Date('2026-09-10T00:00:00Z')).then(() => {
+    const ops = pinned._ops.map((o) => `${o[0]} ${o[1]}`);
+    const i = ops.findIndex((op, k) => op === "whereRaw COALESCE(metadata->>'resolved', '') <> 'true'"
+      && ops[k + 1] === "andWhereRaw metadata->>'fallOff' = 'true'");
+    expect(i).toBeGreaterThan(-1);
+    // Its own OR branch: the clause right before it is a fresh orWhere, not the FIX clause's AND.
+    expect(ops[i - 1]).toBe('orWhere fn');
+  });
+});
+
 // Admin-alerts-brevity scope (2026-09-28): the bell's ?focus=<id> deep link
 // (server/routes/admin-agents.js -> agent-activity.js) must reach a row
 // that is READ and OLDER than the window — already dropped from the pinned
