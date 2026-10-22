@@ -100,7 +100,7 @@ function looksLikeBasicCredential(header, token) {
 // "PIN: 8842", "gate code: 1234" come back as written. An already removed value (exactly the marker)
 // is left alone, so a second pass changes nothing.
 // A key may be written with spaces after a key prefix: "private key:", "access key id =" (Codex #6375 r21).
-const CREDENTIAL_ASSIGN_RE = /(?<![A-Za-z0-9_.-])(\\?["']?)((?:(?:api|private|secret|signing|access|encryption|ssh)[ \t]+(?:key[ \t]+)?)?[A-Za-z][A-Za-z0-9_.-]*)\1(\s*[=:][ \t]*)/gi;
+const CREDENTIAL_ASSIGN_RE = /(?<![A-Za-z0-9_.-])(-{1,2})?(\\?["']?)((?:(?:api|private|secret|signing|access|encryption|ssh)[ \t]+(?:key[ \t]+)?)?[A-Za-z][A-Za-z0-9_.-]*)\2(\s*[=:][ \t]*)/gi;
 const ENV_STEM_WORDS = new Set(['password', 'passwd', 'pwd', 'passphrase', 'pass', 'secret', 'token', 'apikey', 'credential', 'credentials']);
 const ENV_STEM_PAIRS = [['api', 'key'], ['private', 'key']];
 function isEnvSecretName(key) {
@@ -153,7 +153,9 @@ const ANY_SCHEME_USERINFO_RE = /(?<![A-Za-z0-9+.-])([a-z][a-z0-9+.-]*:(?:\\?\/){
 // non-user character, so a long run is scanned once; the host must have a dot.
 const BARE_USERINFO_RE = /(?<![A-Za-z0-9._%+\-:\/@])([A-Za-z0-9._%+-]+):([^\s\/@"'<>\\:]+)@(?=[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)/g;
 // "mailto:pat@example.com" is an address link, not user:password@host.
-const URI_PREFIXES = new Set(['mailto', 'tel', 'sms', 'sip', 'sips', 'xmpp', 'im', 'facetime', 'callto', 'geo', 'maps']);
+const URI_PREFIXES = new Set(['mailto', 'tel', 'sms', 'sip', 'sips', 'xmpp', 'im', 'facetime', 'callto', 'geo', 'maps',
+  // Labels in front of an address ("Email:pat@example.com", "Reply-To:pat@..."), not a user name (Codex #6375 r26).
+  'email', 'e-mail', 'mail', 'contact', 'reply-to', 'replyto', 'from', 'to', 'cc', 'bcc', 'owner', 'tenant', 'billing', 'office', 'manager']);
 const URL_USERINFO_RE = /^([a-z][a-z0-9+.-]*:(?:\\?\/){2}[^\s/:@?#\\]*:)[^\s/@?#\\]+@/i;
 // A value may hold a JSON-escaped slash (token=abc\/hunter22): it is part of the value (Codex #6375 r15).
 const QUERY_PARAM_RE = /([?&#;])([A-Za-z0-9_.%+[\]-]+)=((?:[^&#\s"'<>\\]|\\\/)*)/g;
@@ -265,8 +267,10 @@ function scrubCredentialAssignments(text) {
   let links = null;
   let match;
   while ((match = pattern.exec(text)) !== null) {
-    const [whole, , key, sep] = match;
-    if (!(isAssignmentSecretKey(key) || (sep.includes('=') && isEnvSecretName(key)))) continue;
+    const [whole, dash, , key, sep] = match;
+    // A command-line option (--password=x, --api-key=x, mysql's -p=x) is a key with a dash prefix (Codex #6375 r26).
+    const shortPasswordOption = dash === '-' && key.toLowerCase() === 'p' && sep.includes('=');
+    if (!(shortPasswordOption || isAssignmentSecretKey(key) || (sep.includes('=') && isEnvSecretName(key)))) continue;
     if (!links) links = [...text.matchAll(URL_RE)].map(link => [link.index, link.index + link[0].length]);
     if (links.some(([from, to]) => match.index >= from && match.index < to)) continue;
     const sepEnd = match.index + whole.length;

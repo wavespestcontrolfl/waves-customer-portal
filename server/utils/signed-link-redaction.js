@@ -392,7 +392,10 @@ function withheldMarker(length) {
 // (the JSON `details` case). Numbers, booleans, null and empty text are not.
 function hasFreeText(item) {
   if (typeof item === 'string') return item.trim() !== '';
-  return item !== null && typeof item === 'object' && Object.keys(item).length > 0;
+  if (Array.isArray(item)) return item.length > 0;
+  if (item === null || typeof item !== 'object') return false;
+  for (const key in item) if (Object.hasOwn(item, key)) return true;
+  return false;
 }
 
 function shouldWithhold(key, item, freeText) {
@@ -567,12 +570,56 @@ function noteLeaves(value, out = [], depth = 0) {
   return out;
 }
 
+// The part of a structured note that is read at all: nodes (keys, leaves, containers) are copied in document
+// order until the copied text passes SCAN_LIMIT characters or MAX_NOTE_NODES nodes, and the rest is skipped,
+// so a huge array or object costs the same as a small one (Codex #6375 r26). `cut` says something was left out.
+const MAX_NOTE_NODES = 2000;
+function boundedNoteCopy(value) {
+  const seen = { chars: 0, nodes: 0, cut: false };
+  const visit = (node, depth) => {
+    if (seen.chars > SCAN_LIMIT || seen.nodes >= MAX_NOTE_NODES || depth > MAX_DEPTH) { seen.cut = true; return undefined; }
+    seen.nodes += 1;
+    if (typeof node === 'string') {
+      const room = Math.max(SCAN_LIMIT - seen.chars, 0);
+      if (node.length > room) seen.cut = true;
+      seen.chars += Math.min(node.length, room);
+      return node.slice(0, room);
+    }
+    if (!node || typeof node !== 'object') { seen.chars += String(node).length; return node; }
+    if (Array.isArray(node)) {
+      const list = [];
+      for (let i = 0; i < node.length; i += 1) {
+        const copy = visit(node[i], depth + 1);
+        if (copy === undefined && seen.cut) break;
+        list.push(copy === undefined ? null : copy);
+      }
+      return list;
+    }
+    const out = {};
+    for (const key in node) {
+      if (!Object.hasOwn(node, key)) continue;
+      if (seen.chars > SCAN_LIMIT || seen.nodes >= MAX_NOTE_NODES) { seen.cut = true; break; }
+      seen.chars += key.length;
+      const copy = visit(node[key], depth + 1);
+      if (copy === undefined && seen.cut) break;
+      out[key] = copy === undefined ? null : copy;
+    }
+    return out;
+  };
+  const copy = visit(value, 0);
+  return { copy, cut: seen.cut };
+}
+
 function returnStructuredNote(item, state) {
-  // First every key and string leaf is scrubbed on its own (credential-named keys, a "Bearer\nabc" the
-  // serialized text hides), with no budget yet; the whole-note checks then read the scrubbed copy.
-  const prescrubbed = returnNote(item, state, 1);
+  // Only a bounded part of the note is read (see boundedNoteCopy). First every key and string leaf of it is
+  // scrubbed on its own (credential-named keys, a "Bearer\nabc" the serialized text hides), with no budget
+  // yet; the whole-note checks then read the scrubbed copy.
+  const bounded = boundedNoteCopy(item);
+  const prescrubbed = returnNote(bounded.copy, state, 1);
   let serialized;
   try { serialized = JSON.stringify(prescrubbed); } catch { serialized = String(prescrubbed); }
+  // A note that was cut short is always longer than the 1,000-character budget (the caps are 20,000 characters
+  // and 2,000 nodes), so the budget walk below puts the [cut] marker in it.
   const cutAtScan = serialized.length > SCAN_LIMIT;
   const { text, removed } = scrubNoteText(redactNoteLinks(trimToScanLimit(serialized), state));
   state.noteSecrets += removed;

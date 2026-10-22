@@ -818,6 +818,54 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     expect(JSON.stringify(bearerAndCard)).not.toMatch(/abc123xyz|4242.*4242/);
   });
 
+  test('huge structured notes cost the same as small ones: only a bounded part is read (r26)', () => {
+    const { redactSecrets, newState } = require('../utils/signed-link-redaction');
+    const huge = {
+      'a 500,000-element array': Array.from({ length: 500000 }, (_, i) => `x${i % 10}`),
+      'a 50,000-key object': Object.fromEntries(Array.from({ length: 50000 }, (_, i) => [`key${i}`, i % 2 ? true : 'v'])),
+      'deep nested lists': Array.from({ length: 3000 }, () => [['a']]),
+    };
+    for (const [label, note] of Object.entries(huge)) {
+      const times = [];
+      let output;
+      for (let run = 0; run < 3; run += 1) {
+        const started = process.hrtime.bigint();
+        output = redactSecrets({ notes: note }, newState(), 0, { freeText: {} });
+        times.push(Number(process.hrtime.bigint() - started) / 1e6);
+      }
+      expect({ label, fast: Math.min(...times) < 200 }).toEqual({ label, fast: true });
+      const text = typeof output.notes === 'string' ? output.notes : JSON.stringify(output.notes);
+      expect(text).toContain('[cut]');
+      expect(text.replace(/\[cut\]/g, '').length).toBeLessThanOrEqual(1100);
+    }
+  });
+
+  test.each([
+    ['--password=hunter22 --verbose', '--password=[removed]'],
+    ['run it with --api-key=abc123 now', 'run it with --api-key=[removed]'],
+    ['mysql -p=hunter22 db', 'mysql -p=[removed]'],
+    ['--secret hunter22', '--secret hunter22'],
+  ])('a command-line option with a credential key is removed: %j (r26)', (note, expected) => {
+    expect(scrubNote(note).text).toBe(expected);
+  });
+
+  test.each([
+    ['--verbose --retries=3'], ['well -p is fine'], ['--out=report.txt'],
+  ])('an ordinary option or dash stays: %j', (note) => {
+    expect(scrubNote(note)).toEqual({ text: note, removed: 0 });
+  });
+
+  test.each([
+    ['Email:pat@example.com'], ['Contact:pat@example.com ok'], ['reply-to:pat@example.com'], ['FROM:pat@example.com'],
+    ['Billing:accounts@example.com'], ['office:front@example.com'], ['to:pat@example.com cc:lee@example.com'],
+  ])('a label in front of an address is not user:password@host: %j (r26)', (note) => {
+    expect(scrubNote(note)).toEqual({ text: note, removed: 0 });
+  });
+
+  test('a real user:password@host.example link is still removed', () => {
+    expect(scrubNote('db at admin:hunter22@db.example.com now').text).toBe('db at admin:[removed]@db.example.com now');
+  });
+
   test('a split card number inside a long structured note is also found after the budget is applied', async () => {
     const note = { items: Array.from({ length: 8 }, (_, i) => `visit ${i}: the dog stays in the back yard.`), card: ['4242', '4242', '4242', '4242'] };
     const result = await read(ENTRY, { id: 1, notes: note });
