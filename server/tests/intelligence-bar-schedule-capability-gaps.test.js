@@ -16,11 +16,11 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
 const mockRebooker = { needsLifecycleRewind: jest.fn(() => false), collectiveMoveGateOn: jest.fn(() => false) };
 jest.mock('../services/rebooker', () => mockRebooker);
-const mockFrozen = new Set();
+const mockFrozen = new Map();
 const mockMembers = new Map();
 jest.mock('../services/visit-groups', () => ({
   openMembers: jest.fn(async (conn, visitId) => mockMembers.get(visitId) || [{ id: visitId }]),
-  frozenVisitVerdict: jest.fn(async (conn, visitId) => (mockFrozen.has(visitId) ? { frozen: true, reason: 'has_records' } : { frozen: false })),
+  frozenVisitVerdict: jest.fn(async (conn, visitId) => (mockFrozen.has(visitId) ? { frozen: true, reason: mockFrozen.get(visitId) } : { frozen: false })),
   dateOnly: (value) => String(value).slice(0, 10),
 }));
 let mockPlan;
@@ -78,8 +78,8 @@ describe('move_stops_to_day with a grouped stop beside movable ones', () => {
       stop('s2', 'visit-frozen'),
       stop('s3', 'visit-frozen-2'),
       { ...stop('s4', null), is_recurring: true });
-    mockFrozen.add('visit-frozen');
-    mockFrozen.add('visit-frozen-2');
+    mockFrozen.set('visit-frozen', 'child_artifacts');
+    mockFrozen.set('visit-frozen-2', 'child_artifacts');
     mockRebooker.collectiveMoveGateOn.mockReturnValue(true);
     try {
       const proposal = await executeScheduleTool('move_stops_to_day', { service_ids: ['s1', 's2', 's3', 's4'], new_date: '2099-01-05' });
@@ -94,7 +94,7 @@ describe('move_stops_to_day with a grouped stop beside movable ones', () => {
   test('an all-skipped batch with grouped and frozen stops keeps grouped as the top code and lists both kinds (Codex #6371 r15)', async () => {
     mockStops.splice(0, mockStops.length, stop('s1', 'visit-grouped'), stop('s2', 'visit-frozen'));
     mockMembers.set('visit-grouped', [{ id: 's1' }, { id: 's3' }]);
-    mockFrozen.add('visit-frozen');
+    mockFrozen.set('visit-frozen', 'child_artifacts');
     try {
       const result = await executeScheduleTool('move_stops_to_day', { service_ids: ['s1', 's2'], new_date: '2099-01-05' });
       expect(result.code).toBe('grouped_visit_move_unsupported');
@@ -117,6 +117,36 @@ describe('move_stops_to_day with a grouped stop beside movable ones', () => {
       expect(result).not.toHaveProperty('capability_gaps');
     } finally {
       mockMembers.clear();
+    }
+  });
+
+  test.each(['visit_not_open', 'completion_in_flight', 'reminder_in_flight'])('a %s wait is busy, not frozen: no gap in the partial plan, a plain code when all are skipped (Codex #6371 r19)', async (reason) => {
+    mockStops.splice(0, mockStops.length, stop('s1', null), stop('s2', 'visit-wait'));
+    mockFrozen.set('visit-wait', reason);
+    try {
+      const partial = await executeScheduleTool('move_stops_to_day', { service_ids: ['s1', 's2'], new_date: '2099-01-05' });
+      expect(partial.proposal).toBe(true);
+      expect(partial).not.toHaveProperty('capability_gaps');
+      expect(partial.skipped_grouped).toEqual([expect.objectContaining({ id: 's2', kind: 'busy', reason })]);
+      mockStops.splice(0, mockStops.length, stop('s2', 'visit-wait'));
+      const all = await executeScheduleTool('move_stops_to_day', { service_ids: ['s2'], new_date: '2099-01-05' });
+      expect(all.code).toBe('visit_busy_move');
+      expect(all.error).toMatch(/Try again in a moment/);
+      expect(all).not.toHaveProperty('capability_gaps');
+      expect(recordableRefusalCode(all)).toBeNull();
+    } finally {
+      mockFrozen.clear();
+    }
+  });
+
+  test.each(['packet_in_flight', 'child_artifacts', 'link_issued', 'payment_attempted'])('a structural %s freeze still emits frozen_visit_move_unsupported', async (reason) => {
+    mockStops.splice(0, mockStops.length, stop('s1', null), stop('s2', 'visit-frozen'));
+    mockFrozen.set('visit-frozen', reason);
+    try {
+      const partial = await executeScheduleTool('move_stops_to_day', { service_ids: ['s1', 's2'], new_date: '2099-01-05' });
+      expect(partial.capability_gaps).toEqual([{ code: 'frozen_visit_move_unsupported' }]);
+    } finally {
+      mockFrozen.clear();
     }
   });
 });

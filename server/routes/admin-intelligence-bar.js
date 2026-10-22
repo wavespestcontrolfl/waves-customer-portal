@@ -88,7 +88,7 @@ const { outsideWritePins } = require('../services/intelligence-bar/outside-write
 const { ibFullAccess } = require('../services/intelligence-bar/ib-access');
 const OwnerDirect = require('../services/intelligence-bar/owner-direct');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
-const { isToolFailure, recordToolOutcome, executionOutcome } = require('../services/intelligence-bar/outcomes');
+const { isToolFailure, recordToolOutcome, executionOutcome, TRANSIENT_FROZEN_REASONS } = require('../services/intelligence-bar/outcomes');
 const ActionRegistry = require('../services/intelligence-bar/action-registry');
 const IbTasks = require('../services/intelligence-bar/tasks');
 const TaskContext = require('../services/intelligence-bar/task-context');
@@ -1244,6 +1244,20 @@ function confirmationDisplayParams(toolName, params, preview) {
   };
 }
 
+// The proposal refusals for moving a visit that is frozen or has a package
+// visit 2. A wait (being finalized or completed) is its own unrecorded code; a
+// structural freeze and a linked visit 2 are capability gaps (Codex #6371 r19).
+function frozenMoveRefusal(reason) {
+  if (TRANSIENT_FROZEN_REASONS.has(reason)) {
+    return { error: 'This visit is busy right now (being finalized, completed, or sending a reminder), so nothing was proposed. Try again in a moment.', code: 'visit_busy_move' };
+  }
+  return { error: 'This visit already has an issued link, records or a payment in progress — the bar can\'t move it from here. Nothing was proposed.', code: 'frozen_visit_move_unsupported' };
+}
+async function packageChildMoveRefusal(appointmentId) {
+  if (!(await require('../services/package-followup-booking').hasLivePackageChild(db, [String(appointmentId)]))) return null;
+  return { error: 'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. The bar can\'t move it from here yet. Nothing was proposed.', code: 'package_visit_two_linked' };
+}
+
 /**
  * Propose a gated write as a pending action instead of executing it.
  *
@@ -1701,10 +1715,11 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
         if (verdict.frozen && verdict.reason === 'unreadable') {
           return { failed: true, modelResult: { error: 'The visit\'s status could not be read just now, so nothing was proposed. Try again in a moment.' } };
         }
-        if (verdict.frozen) {
-          return { failed: true, modelResult: { error: 'This visit already has an issued link, records or a payment in progress — the bar can\'t move it from here. Nothing was proposed.', code: 'frozen_visit_move_unsupported' } };
-        }
+        if (verdict.frozen) return { failed: true, modelResult: frozenMoveRefusal(verdict.reason) };
       }
+      // A package visit 1 with a live visit 2 gets no card (Codex #6371 r19).
+      const packageRefusal = await packageChildMoveRefusal(params.appointment_id);
+      if (packageRefusal) return { failed: true, modelResult: packageRefusal };
       params._appointment_fingerprint = appointmentPinFingerprint(pin);
       preview = { ...preview, pinned_appointment: pin };
     }
@@ -4666,6 +4681,20 @@ const CLAIM_REFUSALS = {
 };
 const CLAIM_REFUSAL_FACTS = { product_choice_required: { code: 'product_choice_required', written: false } };
 
+// /confirm-action builds no tool loop, so its refusals never met the gap
+// collector. The confirmed tool's result goes through the same collector as the
+// query path: blocked rows only (no search or ask signals), best effort
+// (Codex #6371 r19).
+async function recordConfirmedGaps(toolName, result) {
+  try {
+    const collector = createGapCollector({ source: 'intelligence-bar', isRegisteredTool: (name) => ActionRegistry.actions.has(name) });
+    collector.toolResult(toolName, result, isToolFailure(result), { round: 0, wrote: false });
+    await collector.flush({});
+  } catch (err) {
+    logger.warn(`[intelligence-bar] confirm-path gap record failed (${err.code || err.name || 'error'})`);
+  }
+}
+
 async function commitPendingAction(req, { id, contractHash }) {
   let claimedAction = null;
   const reply = (status, body) => ({ status, body, claimed: claimedAction !== null });
@@ -4706,6 +4735,7 @@ async function commitPendingAction(req, { id, contractHash }) {
       && (!ibCancelAppointmentLive() || !action.params?._frozen_cancellation_impact)) {
       const result = { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE, code: ibCancelAppointmentLive() ? 'cancel_with_effects_unsupported' : 'cancel_gate_off' };
       await PendingActions.recordResult(action.id, result);
+      await recordConfirmedGaps(action.tool_name, result);
       return reply(409, result);
     }
 
@@ -5009,6 +5039,7 @@ async function commitPendingAction(req, { id, contractHash }) {
         : {}),
     });
     let receiptSaved = await PendingActions.recordResult(action.id, result);
+    await recordConfirmedGaps(action.tool_name, result);
     if (receiptSaved === false) {
       // Some domains save the receipt atomically with their mutation.
       receiptSaved = !!(await PendingActions.getActionReceipt(action.id, getAdminActorId(req)).catch(() => null))?.result;

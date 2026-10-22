@@ -89,6 +89,8 @@ const UNRECORDED_DECLINE_CODES = new Set([
   'gate_off', 'autopay_off_not_enabled', 'no_rerunnable_checks', 'cancel_gate_off',
   // A page-size limit with a way forward (through_date) in reprice_future_visits (Codex #6371 r15).
   'reprice_page_limit',
+  // A move refused for a wait (a visit being finalized or completed): retry in a moment (Codex #6371 r19).
+  'visit_busy_move',
 ]);
 // A tool's own refusal that sends the operator to another screen. Only used to
 // classify; the text itself is never stored (it can hold customer data).

@@ -238,7 +238,8 @@ describe('proposal-time frozen check (Codex #6371 r4)', () => {
     expect(at).toBeGreaterThan(0);
     const block = src.slice(at, src.indexOf('}', src.indexOf('return', at)) + 1);
     expect(block).not.toContain('code:');
-    expect(at).toBeLessThan(src.indexOf("code: 'frozen_visit_move_unsupported'", at - 2000));
+    // The unreadable branch returns before the frozen refusal (now built by frozenMoveRefusal) is reached.
+    expect(at).toBeLessThan(src.indexOf('frozenMoveRefusal(verdict.reason)', at));
   });
 });
 
@@ -401,6 +402,20 @@ describe('r15: a page-size limit is not a gap; the billing-type hard limit is', 
   test('reprice_page_limit records nothing; too_many_visits (billing type) still records', () => {
     expect(recordableRefusalCode(decline('reprice_page_limit'))).toBeNull();
     expect(recordableRefusalCode(decline('too_many_visits'))).toBe('too_many_visits');
+  });
+});
+
+describe('r19: a wait is not a freeze', () => {
+  test('visit_busy_move records nothing, and the thrown-move mapper turns a transient frozen reason into it', () => {
+    expect(recordableRefusalCode({ success: false, code: 'visit_busy_move', error: "The bar can't move this right now. Try again in a moment." })).toBeNull();
+    const { moveRefusalFromThrown } = require('../services/intelligence-bar/outcomes');
+    for (const reason of ['visit_not_open', 'completion_in_flight', 'reminder_in_flight']) {
+      expect(moveRefusalFromThrown({ code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', reason }).code).toBe('visit_busy_move');
+    }
+    for (const reason of ['packet_in_flight', 'child_artifacts', 'link_issued', 'payment_attempted']) {
+      expect(moveRefusalFromThrown({ code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', reason }).code).toBe('frozen_visit_move_unsupported');
+    }
+    expect(moveRefusalFromThrown({ code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', reason: 'unreadable' })).toBeNull();
   });
 });
 

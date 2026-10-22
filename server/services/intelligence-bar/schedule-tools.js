@@ -18,6 +18,7 @@ const { resolveWindowSafeOrderByTechDay, windowSafeFigures, inProgressStartMin, 
   assertTechDayOriginsFresh,
   ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, routeWriteGuardSignature } = require('../route-reorder');
 const { probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
+const { TRANSIENT_FROZEN_REASONS } = require('./outcomes');
 
 const SCHEDULE_TOOLS = [
   {
@@ -1082,8 +1083,11 @@ async function assignTechnician(input, actionContext = {}) {
 const TERMINAL_MOVE_STATUSES = new Set(require('./proposal-pins').TERMINAL_APPOINTMENT_STATUSES);
 const LIVE_MOVE_STATUSES = new Set(['en_route', 'on_site']);
 
+// A frozen verdict's skip kind: a wait ('busy') or a structural freeze ('frozen').
+const frozenStopKind = (reason) => (TRANSIENT_FROZEN_REASONS.has(reason) ? 'busy' : 'frozen');
+
 // The refusal for a batch move where every selected stop was skipped as grouped,
-// frozen or unreadable. A grouped visit and a frozen single visit are different
+// frozen, busy or unreadable. A grouped visit and a frozen single visit are different
 // reasons, so each entry keeps its kind; a mixed set names both. A stop whose
 // state could not be READ is an outage: no refusal code, so it counts as a fault
 // and files no gap (Codex #6371 r4 audit).
@@ -1095,7 +1099,12 @@ function batchMoveGroupRefusal(skipped) {
     };
   }
   const frozen = skipped.filter((g) => g.kind === 'frozen');
-  const grouped = skipped.length - frozen.length;
+  const busy = skipped.filter((g) => g.kind === 'busy');
+  const grouped = skipped.length - frozen.length - busy.length;
+  // Only waits (a visit being finalized or completed): a plain answer that files no gap (Codex #6371 r19).
+  if (busy.length && !frozen.length && !grouped) {
+    return { error: 'Every selected stop is a visit that is busy right now (being finalized, completed, or sending a reminder), so nothing was moved. Try again in a moment.', code: 'visit_busy_move' };
+  }
   const reasons = [...new Set(frozen.map((g) => g.reason).filter(Boolean))].join(', ');
   const frozenText = `has an issued link, records or a payment in progress${reasons ? ` (${reasons})` : ''}`;
   if (frozen.length && !grouped) {
@@ -1217,7 +1226,7 @@ async function moveStopsToDay(input, actionContext = {}) {
       if (verdict.frozen) {
         skippedGrouped.push(verdict.reason === 'unreadable'
           ? { id: s.id, kind: 'unreadable', status: `${s.status} (group state unverifiable)`, unreadable: true }
-          : { id: s.id, kind: 'frozen', reason: verdict.reason, status: `${s.status} (frozen visit: ${verdict.reason})` });
+          : { id: s.id, kind: frozenStopKind(verdict.reason), reason: verdict.reason, status: `${s.status} (frozen visit: ${verdict.reason})` });
         continue;
       }
       movable.push(s);
