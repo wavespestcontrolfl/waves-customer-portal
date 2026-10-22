@@ -609,6 +609,11 @@ function generateEstimate(input) {
       ? input.treeShrubPricingKnobs.lotBedBasis
       : undefined,
     footprintSqFt: input.footprintSqFt ?? input.footprint,
+    // The footprint the T&S open-parcel basis may use when the caller does
+    // not trust its own homeSqFt (public quote: server-measured only), and
+    // whether such a footprint exists at all (Codex #6398 security r11).
+    treeShrubFootprintSqFt: input.treeShrubFootprintSqFt,
+    treeShrubFootprintTrusted: input.treeShrubFootprintTrusted,
     footprintUnknown: input.footprintUnknown === true,
     unitScoped: input.unitScoped === true,
     perimeterLF: input.perimeterLF ?? input.perimeterLf ?? input.perimeter,

@@ -1928,6 +1928,42 @@ describe('Tree & Shrub lot-based bed area prices the OPEN parcel (owner audit 20
     expect(replayed.requiresManualReview).toBe(false);
   });
 
+  test('a trusted (server-measured) footprint prices the open parcel regardless of the body homeSqFt; no trusted footprint parks the line (Codex #6398 security r11)', () => {
+    // 50,000 sf lot: a claimed 20,000 sf home covers only 45.6% of the lot,
+    // so the half-lot heuristic alone lets the inflated footprint shrink the
+    // bed. The public quote now hands the pricer the SERVER-measured
+    // footprint for the T&S basis; the body's homeSqFt still drives every
+    // other service but never the open-parcel bed.
+    const base = { stories: 1, lotSqFt: 50000, propertyType: 'single_family', features: { shrubs: 'moderate', trees: 'light', complexity: 'simple' }, services: { treeShrub: { tier: 'standard', treeCount: 0 } } };
+    const honest = generateEstimate({ ...base, homeSqFt: 2000 }).lineItems.find((i) => i.service === 'tree_shrub');
+    const inflatedUnguarded = generateEstimate({ ...base, homeSqFt: 20000 }).lineItems.find((i) => i.service === 'tree_shrub');
+    expect(inflatedUnguarded.bedAreaUsed).toBeLessThan(honest.bedAreaUsed);
+    expect(inflatedUnguarded.manualReviewReasons).not.toContain('open_parcel_basis_footprint_over_half_lot');
+    // Same inflated body, but the caller vouches for a 2,000 sf footprint.
+    const guarded = generateEstimate({ ...base, homeSqFt: 20000, treeShrubFootprintSqFt: 2000, treeShrubFootprintTrusted: true }).lineItems.find((i) => i.service === 'tree_shrub');
+    expect(guarded.bedAreaSource).toBe('lot_based');
+    expect(guarded.bedAreaUsed).toBe(honest.bedAreaUsed);
+    expect(guarded.monthly).toBe(honest.monthly);
+    // Same review state as the honest quote (both carry the large-bed gate
+    // on 8,141 sf of beds; neither carries a footprint reason).
+    expect(guarded.manualReviewReasons).toEqual(honest.manualReviewReasons);
+    expect(guarded.manualReviewReasons).not.toContain('open_parcel_basis_unconfirmed_footprint');
+    // The caller has NO trusted footprint: price what the inputs say, park it.
+    const untrusted = generateEstimate({ ...base, homeSqFt: 20000, treeShrubFootprintTrusted: false }).lineItems.find((i) => i.service === 'tree_shrub');
+    expect(untrusted.bedAreaUsed).toBe(inflatedUnguarded.bedAreaUsed);
+    expect(untrusted.requiresManualReview).toBe(true);
+    expect(untrusted.manualReviewReasons).toContain('open_parcel_basis_unconfirmed_footprint');
+    expect(untrusted.warnings.join(' ')).toMatch(/unconfirmed building footprint/);
+    // A typed bed is not a lot-based inference: the verdict is moot.
+    const typed = generateEstimate({ ...base, homeSqFt: 20000, bedArea: 900, treeShrubFootprintTrusted: false }).lineItems.find((i) => i.service === 'tree_shrub');
+    expect(typed.manualReviewReasons ?? []).not.toContain('open_parcel_basis_unconfirmed_footprint');
+    // A replay on the stamped GROSS-lot basis never priced the open parcel.
+    const legacyKnobs = { densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1, callbackReservePerVisit: 0, fallbackBedSqFt: 1200, marginTarget: 0.45, lotBedBasis: 'gross_lot', treeDensityCounts: { none: 0, light: 3, moderate: 6, heavy: 10 } };
+    const replayed = generateEstimate({ ...base, homeSqFt: 20000, treeShrubFootprintTrusted: false, treeShrubPricingKnobs: legacyKnobs }).lineItems.find((i) => i.service === 'tree_shrub');
+    expect(replayed.manualReviewReasons ?? []).not.toContain('open_parcel_basis_unconfirmed_footprint');
+    expect(replayed.manualReviewReasons ?? []).not.toContain('open_parcel_basis_footprint_over_half_lot');
+  });
+
   test('generateEstimate: a home with a pool cage prices fewer beds than the same lot bare, and matches the profile basis', () => {
     const { treeShrubBedBasisSqFt } = require('../services/pricing-engine/property-calculator');
     const base = {

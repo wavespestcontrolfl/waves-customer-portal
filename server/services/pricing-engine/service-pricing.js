@@ -2639,7 +2639,7 @@ function estimateTreeShrubBedAreaFromLot(property = {}, knobs = null) {
     ? lotSqFt
     : treeShrubBedBasisSqFt(
       lotSqFt,
-      property.footprint ?? property.footprintSqFt,
+      treeShrubFootprintOf(property),
       property.hardscape,
     );
   const rawBedArea = Math.max(0, Math.round(basisSqFt * pct));
@@ -2681,6 +2681,13 @@ function treeShrubDensityCountsFor(knobs) {
   return { ...(TREE_SHRUB.treeDensityCounts || {}) };
 }
 
+// The footprint the T&S open-parcel basis prices on: the caller-vouched one
+// when the profile carries it (public quote: server-measured), else the
+// profile's own footprint.
+function treeShrubFootprintOf(property = {}) {
+  return property.treeShrubFootprintSqFt ?? property.footprint ?? property.footprintSqFt;
+}
+
 // Open-parcel coverage guard shared by the residential and commercial T&S
 // pricers (Codex #6398 security P2 / r3): the public quote takes homeSqFt
 // from an unauthenticated body, so an inflated footprint shrinks a lot-based
@@ -2688,12 +2695,26 @@ function treeShrubDensityCountsFor(knobs) {
 // for a parcel — the caller prices what the inputs say but parks the line.
 function openParcelCoverageOverHalfLot(property = {}) {
   const lot = Number(property.lotSqFt) || 0;
-  const fp = Number(property.footprint ?? property.footprintSqFt);
+  const fp = Number(treeShrubFootprintOf(property));
   const hs = Number(property.hardscape);
   const covered = (Number.isFinite(fp) && fp > 0 ? fp : 0) + (Number.isFinite(hs) && hs > 0 ? hs : 0);
   return lot > 0 && covered > lot * 0.5 ? { lot, covered } : null;
 }
 const OPEN_PARCEL_COVERAGE_REASON = 'open_parcel_basis_footprint_over_half_lot';
+// The caller said it has NO trusted footprint for the open-parcel basis
+// (public quote with no server-measured building): the bed was inferred
+// from a footprint nobody vouched for, so the line parks for review rather
+// than publishing (Codex #6398 security r11).
+const OPEN_PARCEL_UNTRUSTED_FOOTPRINT_REASON = 'open_parcel_basis_unconfirmed_footprint';
+const OPEN_PARCEL_UNTRUSTED_FOOTPRINT_WARNING = 'The lot-based bed area was priced on an unconfirmed building footprint — confirm the home size before sending.';
+function openParcelReviewFor(property, lotBedBasis) {
+  if (lotBedBasis === 'gross_lot') return { reasons: [], warnings: [] };
+  const reasons = []; const warnings = [];
+  const coverage = openParcelCoverageOverHalfLot(property);
+  if (coverage) { reasons.push(OPEN_PARCEL_COVERAGE_REASON); warnings.push(openParcelCoverageWarning(coverage)); }
+  if (property.treeShrubFootprintTrusted === false) { reasons.push(OPEN_PARCEL_UNTRUSTED_FOOTPRINT_REASON); warnings.push(OPEN_PARCEL_UNTRUSTED_FOOTPRINT_WARNING); }
+  return { reasons, warnings };
+}
 function openParcelCoverageWarning({ lot, covered }) {
   const sq = (v) => `${Math.round(Number(v)).toLocaleString()} sq ft`;
   return `Building footprint + hardscape (${sq(covered)}) cover more than half the ${sq(lot)} lot;`
@@ -3099,12 +3120,10 @@ function priceTreeShrub(property, options = {}) {
   // the open parcel IS the basis: a pre-change quote replayed on its stamped
   // gross-lot basis was not priced on the open parcel, so the guard must not
   // change the review state of an already-issued quote (Codex #6398 r6).
-  if (bedAreaInfo.bedAreaSource === 'lot_based' && knobs.lotBedBasis !== 'gross_lot') {
-    const coverage = openParcelCoverageOverHalfLot(property);
-    if (coverage) {
-      manualReviewReasonsSet.add(OPEN_PARCEL_COVERAGE_REASON);
-      warnings.push(openParcelCoverageWarning(coverage));
-    }
+  if (bedAreaInfo.bedAreaSource === 'lot_based') {
+    const review = openParcelReviewFor(property, knobs.lotBedBasis === 'gross_lot' ? 'gross_lot' : 'open_parcel');
+    for (const reason of review.reasons) manualReviewReasonsSet.add(reason);
+    warnings.push(...review.warnings);
   }
   // Plant-count review gate. Unarmed: trees plus SERVICE-LINE palms only —
   // exactly what the pre-split classification counted (property palms never
@@ -4126,7 +4145,7 @@ function priceCommercialTreeShrub(property = {}, options = {}) {
   // Only on the open-parcel basis — a replayed pre-change quote keeps its
   // stamped gross-lot basis and its review state (Codex #6398 r6).
   const lotBedBasis = options.lotBedBasis === 'gross_lot' ? 'gross_lot' : 'open_parcel';
-  const coverage = bedBasis === 'lot_based' && lotBedBasis === 'open_parcel' ? openParcelCoverageOverHalfLot(property) : null;
+  const openParcelReview = bedBasis === 'lot_based' ? openParcelReviewFor(property, lotBedBasis) : { reasons: [], warnings: [] };
 
   return {
     service: 'commercial_tree_shrub',
@@ -4143,8 +4162,8 @@ function priceCommercialTreeShrub(property = {}, options = {}) {
     discountable: false,
     excludeFromPctDiscount: true,
     quoteRequired: false,
-    requiresManualReview: !!coverage,
-    ...(coverage ? { manualReviewReasons: [OPEN_PARCEL_COVERAGE_REASON], warnings: [openParcelCoverageWarning(coverage)] } : {}),
+    requiresManualReview: openParcelReview.reasons.length > 0,
+    ...(openParcelReview.reasons.length ? { manualReviewReasons: openParcelReview.reasons, warnings: openParcelReview.warnings } : {}),
     detail: 'Commercial ornamental program (shrub/tree fertilization + insect + bed weed control). Estimated from property data — final price confirmed on site.',
     disclaimer: 'Estimated from property data — final price confirmed on site.',
     bedArea,

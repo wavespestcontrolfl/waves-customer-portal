@@ -156,6 +156,37 @@ describe('priceCommercialTreeShrub — cost-buildup auto-pricer', () => {
   });
 });
 
+describe('priceCommercialTreeShrub — trusted footprint for the open-parcel basis (Codex #6398 security r11)', () => {
+  test('a vouched footprint drives the coverage guard; an untrusted one parks the lot-based bed; gross-lot replays are untouched', () => {
+    // The profile's own footprint is inflated past half the lot, but the
+    // caller vouches for a 2,000 sf building: the guard reads the vouched one.
+    const vouched = priceCommercialTreeShrub(
+      { lotSqFt: 40000, footprint: 30000, treeShrubFootprintSqFt: 2000, treeShrubFootprintTrusted: true, hardscape: 6000, bedArea: 4680, bedAreaSource: 'lot_based' }, { treeCount: 4 },
+    );
+    expect(vouched.requiresManualReview).toBe(false);
+    expect(vouched.manualReviewReasons).toBeUndefined();
+    // No trusted footprint at all: the bed was inferred from a footprint
+    // nobody vouched for — priced as entered, parked for review.
+    const untrusted = priceCommercialTreeShrub(
+      { lotSqFt: 40000, footprint: 8000, treeShrubFootprintTrusted: false, hardscape: 6000, bedArea: 4680, bedAreaSource: 'lot_based' }, { treeCount: 4 },
+    );
+    expect(untrusted.requiresManualReview).toBe(true);
+    expect(untrusted.manualReviewReasons).toEqual(['open_parcel_basis_unconfirmed_footprint']);
+    expect(untrusted.warnings.join(' ')).toMatch(/unconfirmed building footprint/);
+    expect(untrusted.annual).toBeGreaterThan(0);
+    // An explicit bed is not a lot-based inference.
+    const explicit = priceCommercialTreeShrub(
+      { lotSqFt: 40000, footprint: 8000, treeShrubFootprintTrusted: false, hardscape: 6000, bedArea: 720, bedAreaSource: 'explicit' }, { treeCount: 4 },
+    );
+    expect(explicit.requiresManualReview).toBe(false);
+    // A replay on the stamped gross-lot basis never priced the open parcel.
+    const replayed = priceCommercialTreeShrub(
+      { lotSqFt: 40000, footprint: 8000, treeShrubFootprintTrusted: false, hardscape: 6000, bedArea: 7200, bedAreaSource: 'lot_based' }, { treeCount: 4, lotBedBasis: 'gross_lot' },
+    );
+    expect(replayed.requiresManualReview).toBe(false);
+  });
+});
+
 describe('priceCommercialTreeShrub — open-parcel coverage guard (Codex #6398 r3)', () => {
   test('a lot-based bed on a parcel whose footprint + hardscape exceed half the lot parks for review; plausible and explicit beds do not', () => {
     // The profile's lot-based bed arrives with bedAreaSource 'lot_based'.

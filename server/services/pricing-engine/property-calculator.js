@@ -552,6 +552,11 @@ function calculatePropertyProfile(input) {
   // auto-pricing the lookup explicitly suppressed (codex P1 r4 #2721).
   const footprint = explicitFootprint
     || (input.footprintUnknown === true ? 0 : calculateFootprint(input.homeSqFt, input.stories || 1));
+  // The footprint the Tree & Shrub open-parcel basis prices on. A caller
+  // that cannot trust its own homeSqFt (the public quote) passes the
+  // server-measured one here; every other caller's footprint is its own.
+  const treeShrubFootprintSqFt = toPositiveNumber(input.treeShrubFootprintSqFt) || footprint;
+  const treeShrubFootprintTrusted = typeof input.treeShrubFootprintTrusted === 'boolean' ? input.treeShrubFootprintTrusted : null;
   const explicitPerimeter = toPositiveNumber(input.perimeterLF ?? input.perimeterLf ?? input.perimeter);
   const normalizedFeatures = normalizeFeatureInputs(input);
   const hardscape = estimateHardscape(input.lotSqFt, input.propertyType, normalizedFeatures);
@@ -628,7 +633,7 @@ function calculatePropertyProfile(input) {
     // with (input.lotBedBasis from the stamped T&S knobs; Codex #6398 r2);
     // fresh quotes price the open parcel.
     bedArea = estimateBedArea(
-      input.lotBedBasis === 'gross_lot' ? Number(input.lotSqFt) : treeShrubBedBasisSqFt(input.lotSqFt, footprint, hardscape),
+      input.lotBedBasis === 'gross_lot' ? Number(input.lotSqFt) : treeShrubBedBasisSqFt(input.lotSqFt, treeShrubFootprintSqFt, hardscape),
       features.shrubs,
       features.complexity
     );
@@ -715,6 +720,10 @@ function calculatePropertyProfile(input) {
       ? Number(input.hedgeLinearFt)
       : null,
     hedgeLinearFtSource: input.hedgeLinearFtSource || null,
+    // The footprint the T&S lot-based basis used, and whether the caller
+    // vouched for it (null = the caller's own footprint, no verdict).
+    treeShrubFootprintSqFt,
+    treeShrubFootprintTrusted,
     // v2 enriched fields — consumed by modifiers.deriveModifiers()
     yearBuilt: input.yearBuilt || null,
     constructionMaterial: input.constructionMaterial || null,

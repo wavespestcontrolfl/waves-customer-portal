@@ -149,6 +149,23 @@ function resolveRealLotSqFt({ enrichedLotSqFt, lotSqFt, lotSizeConfirmed } = {})
   return null;
 }
 
+// The building footprint the Tree & Shrub open-parcel bed basis may use on
+// the public quote: read from the SERVER-SIDE lookup row only (Codex #6398
+// security r11). The body's homeSqFt is unauthenticated and the half-lot
+// coverage heuristic alone does not catch an inflated footprint on a large
+// lot, so the basis never reads it; with no server-measured building the
+// line is marked untrusted and the pricer parks it for review.
+function trustedTreeShrubFootprintSqFt(trustedTurf = {}, bodyStories) {
+  const t = trustedTurf && typeof trustedTurf === 'object' ? trustedTurf : {};
+  const stories = Math.max(1, Math.min(3, Number(t.stories) || Number(bodyStories) || 1));
+  const perStory = (v) => Math.max(1, Math.round(Number(v) / stories));
+  if (Number(t.footprintSqFt) > 0) return Number(t.footprintSqFt);
+  if (Number(t.buildingSqFt) > 0) return Number(t.buildingSqFt);
+  if (Number(t.homeSqFt) > 0) return perStory(t.homeSqFt);
+  if (Number(t.livingAreaSqFt) > 0) return perStory(t.livingAreaSqFt);
+  return null;
+}
+
 function isPublicCommercialQuote(body = {}, enriched = {}) {
   const enrichedCommercial = isCommercialProperty({
     propertyType: enriched.propertyType,
@@ -1550,8 +1567,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       return null;
     })();
     const buildingSizeMeasured = realFootprintSqFt != null;
+    const treeShrubFootprintSqFt = trustedTreeShrubFootprintSqFt(trustedTurf, stories);
     let engineInput = {
       homeSqFt: sqft,
+      // Tree & Shrub open-parcel basis: the server-measured footprint, never
+      // the body's homeSqFt; absent → the pricer parks the lot-based line.
+      ...(treeShrubFootprintSqFt != null ? { treeShrubFootprintSqFt } : {}),
+      treeShrubFootprintTrusted: treeShrubFootprintSqFt != null,
       // For COMMERCIAL, pass the resolved footprint explicitly (resolvePestFootprint
       // reads footprintSqFt BEFORE homeSqFt, so the synthetic confirm default can't
       // win and there's no double ÷-stories). Residential is unchanged.
@@ -4333,6 +4355,7 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
 
 module.exports = router;
 module.exports._internals = {
+  trustedTreeShrubFootprintSqFt,
   deriveAddressUnverified,
   findPriorOpenWizardLeadId,
   duplicateOfFromExtracted,
