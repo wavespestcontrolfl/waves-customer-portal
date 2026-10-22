@@ -493,6 +493,8 @@ async function fileFamilyAccountCard({
       // The call counts as review-open while this card is open (nothing else in the pass opens it).
       await syncCallReviewStatus(trx, call.id);
     });
+    // The card is durable (filed, refreshed, or already in an operator's hands): say which basis it carries.
+    if (report && suggestion) report.filed = suggestion.basis || 'family';
     return suggestion;
   } catch (e) {
     // `report` lets a caller that must not proceed on a lost card (the callback basis) tell a failed write

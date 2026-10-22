@@ -5032,7 +5032,7 @@ function callbackSpokenNumberUnresolved(reason) {
 // True when an office callback's voicemail number is the primary phone of one account and no person
 // closed the suggestion (so the pass creates no customer). FAILS CLOSED AND RETRYABLE: a failed lookup
 // or read (unknown, not "no match"), or a match whose family-account card could not be written
-// (`cardReport.failed`, set by fileFamilyAccountCard), throws instead of returning false.
+// (`cardReport.filed` unset, `cardReport.failed` set on an error; both by fileFamilyAccountCard), throws instead of returning false.
 async function callbackSpokenNumberSuggested({ call, extracted, customerLinkOverride = null, cardReport = null, conn = db }) {
   let match;
   try {
@@ -5044,7 +5044,12 @@ async function callbackSpokenNumberSuggested({ call, extracted, customerLinkOver
     throw callbackSpokenNumberUnresolved(e?.code || e?.name || 'db_error');
   }
   if (!match) return false;
-  if (cardReport?.failed) throw callbackSpokenNumberUnresolved(`card_${cardReport.failed}`);
+  // Suppressing customer creation needs a DURABLE explanation: the callback card filed, refreshed or
+  // already held by an operator. A lost write and a card that was never owed both retry (the cap ends
+  // in the blocking extraction_failed card, still no duplicate).
+  if (cardReport && cardReport.filed !== 'callback_spoken_number') {
+    throw callbackSpokenNumberUnresolved(`card_${cardReport.failed || 'not_filed'}`);
+  }
   return true;
 }
 

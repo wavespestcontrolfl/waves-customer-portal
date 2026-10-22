@@ -355,6 +355,7 @@ describe('callback_spoken_number basis of the family-account card', () => {
     const report = {};
     await familyLink.fileFamilyAccountCard(args(conn, { report }));
     expect(report.failed).toBeUndefined();
+    expect(report.filed).toBe('callback_spoken_number');
   });
 
   describe('the dialed number resolves only through address disambiguation', () => {
@@ -454,7 +455,12 @@ describe('callbackSpokenNumberSuggested (fail closed, retryable)', () => {
 
   test('a match nobody closed: true (the pass creates no customer)', async () => {
     mockDb({ call_log: [voicemail()], customers: [[customer()]], triage_items: [null] });
-    await expect(run()).resolves.toBe(true);
+    await expect(run({ cardReport: { filed: 'callback_spoken_number' } })).resolves.toBe(true);
+  });
+
+  test('a match with no durable card (never owed, or lost without an error) retries too', async () => {
+    mockDb({ call_log: [voicemail()], customers: [[customer()]], triage_items: [null] });
+    await expect(run({ cardReport: {} })).rejects.toEqual(unresolved('card_not_filed'));
   });
 
   test('no match: false', async () => {
