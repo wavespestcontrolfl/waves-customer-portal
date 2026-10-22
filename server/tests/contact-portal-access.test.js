@@ -347,9 +347,16 @@ describe('contact login — who a number signs in as', () => {
       const bypass = await call('POST', '/api/auth/verify-code', {}, { phone: CONTACT_PHONE, code: '654321' });
       expect(bypass.status).toBe(401);
       expect(TwilioService.checkVerificationCode).not.toHaveBeenCalled();
+      // send-code for that number still sends the real OTP (the bypass will
+      // not accept the fixed code for it), so the contact can sign in.
+      await call('POST', '/api/auth/send-code', {}, { phone: CONTACT_PHONE });
+      expect(TwilioService.sendVerificationCode).toHaveBeenCalledWith(CONTACT_PHONE);
       // The same contact number with a real OTP still signs in as the contact.
       expect((await login(CONTACT_PHONE)).body.actor).toMatchObject({ kind: 'contact' });
       process.env.REVIEW_LOGIN_PHONE = HOLDER_PHONE;
+      TwilioService.sendVerificationCode.mockClear();
+      await call('POST', '/api/auth/send-code', {}, { phone: HOLDER_PHONE });
+      expect(TwilioService.sendVerificationCode).not.toHaveBeenCalled();
       const holder = await call('POST', '/api/auth/verify-code', {}, { phone: HOLDER_PHONE, code: '654321' });
       expect(holder.status).toBe(200);
       expect(holder.body.actor).toEqual({ kind: 'holder' });

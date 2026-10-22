@@ -720,11 +720,32 @@ function contactEmailOnFile(customer, phoneKey) {
   return slot ? String(slot.email).trim() : '';
 }
 
+// The account row a contact's choices overlay — and the lock on each purpose
+// — is the row the SENDERS read for the contact's house (codex #6363 r30 P2):
+// the customer row, unless property texts are enforced and the house the
+// contact is scoped to (contact-session-projection contactRecordScope: the
+// active primary, else the active row standing in for a retired primary) is a
+// NON-primary saved property — then that property's chosen appointment
+// toggles over the ruling-R1 default (property-notification-prefs.js
+// effectivePropertyToggles), exactly as resolveAppointmentPrefs overlays them
+// for a visit stamped to it. Shadow mode and the primary keep the customer
+// row, as the senders do. A failed property read throws (the senders hold
+// under enforcement too) rather than showing the wrong locks.
+async function contactAccountPrefsRow(req, dbh = db) {
+  const accountRow = await dbh('notification_prefs').where({ customer_id: req.customerId }).first().catch(() => null);
+  if (!PropertyTexts.propertyTextsEnforced()) return accountRow;
+  const scope = await require('../services/contact-session-projection').contactRecordScope(req);
+  const property = scope && scope.property;
+  if (!property || property.is_primary === true) return accountRow;
+  const row = await dbh('property_notification_prefs').where({ property_id: property.id }).first(...PropertyTexts.PROPERTY_PREF_COLUMNS);
+  return { ...(accountRow || {}), ...PropertyTexts.effectivePropertyToggles(property, row, accountRow || {}) };
+}
+
 async function contactPreferencePayload(req) {
   const ContactPrefs = require('../services/contact-notification-prefs');
   const contact = req.contactSession;
   const [accountRow, own, optin] = await Promise.all([
-    db('notification_prefs').where({ customer_id: req.customerId }).first().catch(() => null),
+    contactAccountPrefsRow(req),
     ContactPrefs.getContactPrefRow(req.customerId, contact.phone),
     db('recipient_optin').where({ customer_id: req.customerId, phone_key: contact.phoneKey }).first('status').catch(() => null),
   ]);
@@ -821,7 +842,7 @@ router.put('/contact-preferences', async (req, res, next) => {
       // write must not let a text path open without the attestation.
       const [existing, accountRow] = await Promise.all([
         ContactPrefs.getContactPrefRow(req.customerId, contact.phone, { dbh: trx }),
-        trx('notification_prefs').where({ customer_id: req.customerId }).first().catch(() => null),
+        contactAccountPrefsRow(req, trx),
       ]);
       const enablesTexts = ContactPrefs.textPathsOpened(accountRow, existing, patch);
       if (enablesTexts && updates.consentAttested !== true && !existing?.consent_attested_at) return 'consent_required';

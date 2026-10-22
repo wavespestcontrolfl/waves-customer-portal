@@ -155,6 +155,50 @@ describe('GET /contact-preferences', () => {
     expect((await get()).body.preferences.enRouteChannel).toBe('both');
   });
 
+  // The account row the contact's choices overlay is the one the senders read
+  // for the contact's house (codex r30 P2): with property texts enforced and
+  // the saved primary retired, the contact is scoped to the active rental, so
+  // its chosen toggles over the ruling-R1 "start quiet" default decide what
+  // reads on, what reads off and locked, and whether a save opens a text path.
+  test('property texts enforced: a contact scoped to an active non-primary house reads and locks THAT house\'s appointment toggles; the PUT consent decision uses the same baseline', async () => {
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    process.env.GATE_APP_PROPERTY_TEXTS = 'true';
+    try {
+      tables.customer_properties = [
+        { id: 'prop-main', customer_id: 'cust-1', is_primary: true, active: false, relationship: 'own_home' },
+        { id: 'prop-rental', customer_id: 'cust-1', is_primary: false, active: true, relationship: 'rental_owned', created_at: '2026-01-01' },
+      ];
+      tables.property_notification_prefs = [{ property_id: 'prop-rental', customer_id: 'cust-1', tech_en_route: true }];
+      const res = await get();
+      expect(res.status).toBe(200);
+      // The rental's chosen en-route text is on and open; its unchosen
+      // appointment toggles start OFF for a rental and read locked — the
+      // customer row's own "on" never shows through.
+      expect(res.body.preferences.techEnRoute).toBe(true);
+      expect(res.body.accountOff.techEnRoute).toBe(false);
+      expect(res.body.preferences.appointmentConfirmation).toBe(false);
+      expect(res.body.accountOff.appointmentConfirmation).toBe(true);
+      expect(res.body.accountOff.techArrived).toBe(true);
+      // Not a property toggle: the service report stays the customer row's.
+      expect(res.body.accountOff.serviceCompleted).toBe(false);
+      // Turning tech-arrived on opens no text path for THIS house (off for the
+      // rental), so no attestation is asked for; en-route — live here — does.
+      tables.service_contact_notification_prefs.push({ customer_id: 'cust-1', phone_key: '9415550202', tech_en_route: false, tech_arrived: false });
+      expect((await put({ techArrived: true })).status).toBe(200);
+      const opened = await put({ techEnRoute: true });
+      expect(opened.status).toBe(400);
+      expect(opened.body.code).toBe('CONSENT_REQUIRED');
+      // Shadow mode (texts not enforced): the senders follow the customer row, and so does the card.
+      delete process.env.GATE_APP_PROPERTY_TEXTS;
+      const shadow = await get();
+      expect(shadow.body.accountOff.appointmentConfirmation).toBe(false);
+      expect(shadow.body.preferences.techEnRoute).toBe(false);
+    } finally {
+      delete process.env.GATE_APP_PROPERTY_SCOPE;
+      delete process.env.GATE_APP_PROPERTY_TEXTS;
+    }
+  });
+
   test('a holder session is refused (the holder manages contacts through /property-preferences)', async () => {
     mockSession.current.contactSession = null;
     expect((await get()).status).toBe(403);

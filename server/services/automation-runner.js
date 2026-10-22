@@ -690,6 +690,46 @@ async function stepRecipientAfterContactOptOut(enrollment, step, testRecipient) 
   return { blocked };
 }
 
+// The SAME contact recheck again at the FINAL provider boundary (codex #6363
+// r30 P2): stepRecipientAfterContactOptOut runs before the render, and a
+// contact who turns email off, or whom the holder removes, during the
+// delivery checks and SendGrid's own request preparation would still be
+// mailed. sendOne runs this after every one of its awaits, immediately
+// before the request; a changed answer throws CONTACT_RECIPIENT_CHANGED,
+// which sendStepLocked turns into a held step (nothing sent). An unreadable
+// row propagates the same way as the early check's. null for a test send or
+// an enrollment with no customer (nothing to re-resolve). The payment-failed
+// step rides the billing authority's own boundary check instead.
+const CONTACT_RECIPIENT_CHANGED = 'CONTACT_RECIPIENT_CHANGED';
+function contactRecipientBoundaryCheck(enrollment, recipient, testRecipient) {
+  if (testRecipient || !enrollment.customer_id) return null;
+  return async () => {
+    const again = await require('./contact-notification-prefs')
+      .rerouteForContactEmailOptOut(enrollment.customer_id, recipient, { recipientRole: enrollment.metadata?.recipient_role || null });
+    if (again.rerouted) {
+      throw Object.assign(new Error('the on-location contact\'s address or email choice changed before the provider handoff'), {
+        code: CONTACT_RECIPIENT_CHANGED, providerBoundaryBlocked: true,
+      });
+    }
+    return { ok: true };
+  };
+}
+
+// A non-billing step's provider request under that check. A step held there
+// sent nothing: its queued row goes and the step stays due — the next tick
+// re-resolves it (the holder, or a blocked send when the holder has no
+// address). Every other failure is the caller's as before.
+async function dispatchUnderContactBoundary({ dispatch, enrollment, step, recipient, testRecipient, sendId }) {
+  try {
+    return await dispatch(contactRecipientBoundaryCheck(enrollment, recipient, testRecipient));
+  } catch (err) {
+    if (err.code !== CONTACT_RECIPIENT_CHANGED) throw err;
+    logger.info(`[automation-runner] enrollment ${enrollment.id} step ${step.step_order} held at the provider boundary: ${err.message}`);
+    await db('automation_step_sends').where({ id: sendId }).del();
+    return { sent: false, deferred: true, reason: err.message };
+  }
+}
+
 async function sendStepLocked(enrollment, { testRecipient } = {}) {
   const enrollmentId = enrollment.id;
   const template = await db('automation_templates').where({ key: enrollment.template_key }).first();
@@ -778,7 +818,7 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
   try {
     const res = billingSend
       ? await sendPaymentFailedThroughBillingAuthority({ enrollment, template, recipient, sendId: sendRow.id, dispatch })
-      : await dispatch();
+      : await dispatchUnderContactBoundary({ dispatch, enrollment, step, recipient, testRecipient, sendId: sendRow.id });
     if (res?.sent === false) return res;
 
     await db('automation_step_sends').where({ id: sendRow.id }).update({

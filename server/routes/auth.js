@@ -401,8 +401,12 @@ router.post('/send-code', sendCodeLimiter, async (req, res, next) => {
 
     const { phone } = await schema.validateAsync(req.body);
 
-    // App Store reviewer demo phone has no real SMS — skip Twilio entirely.
-    if (isReviewPhone(phone)) {
+    // App Store reviewer demo phone has no real SMS — skip Twilio entirely,
+    // but only while the number resolves to the demo HOLDER row (codex #6363
+    // r30 P2): verify-code accepts the fixed code for that row alone, so a
+    // review number that is only a contact's (the demo row absent or
+    // inactive) takes the normal Verify flow and gets the real OTP it needs.
+    if (isReviewPhone(phone) && await holderLoginIdentity(phone)) {
       logger.info('[auth] review-login send-code (SMS skipped)');
       return res.json(UNIFORM_SEND_RESPONSE);
     }

@@ -336,14 +336,18 @@ async function filterReportEmailRecipientsByContactPrefs(recipients = [], custom
 // slot resolves to NOW — its own address, else the holder's current address
 // (the slot-1 fallback mailbox, customer-contact.js getServiceContact) — is
 // still the resolved address (codex #6363 r28 security P2: an address the
-// holder cleared from the slot is no longer that contact's).
+// holder cleared from the slot is no longer that contact's). EVERY slot
+// carrying the phone is asked (codex r30 P2): the holder may store one
+// number twice with the address on only one slot, and that phone + address
+// identity is live while any of its slots resolves to the address.
 function contactStillListed(customer, contact, channel) {
   const key = phoneKey(contact.phone);
   if (phoneKey(customer.phone) === key) return true;
-  const slot = require('./customer-contact').getServiceContactSlots(customer).find((s) => phoneKey(s.phone) === key);
-  if (!slot) return false;
+  const slots = require('./customer-contact').getServiceContactSlots(customer).filter((s) => phoneKey(s.phone) === key);
+  if (!slots.length) return false;
   if (channel !== 'email' || !contact.email) return true;
-  return emailKey(slot.email || customer.email) === emailKey(contact.email);
+  const address = emailKey(contact.email);
+  return slots.some((s) => emailKey(s.email || customer.email) === address);
 }
 
 async function contactDeclinesChannel(customerId, contact, channel = 'sms', { dbh = db, requireSlot = false } = {}) {

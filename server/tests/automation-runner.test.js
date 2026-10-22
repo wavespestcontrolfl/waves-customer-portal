@@ -40,6 +40,15 @@ jest.mock('../services/billing-channel-email-authority', () => ({
   }),
 }));
 
+// The deferred-send contact recheck (rerouteForContactEmailOptOut): pass-
+// through by default — the same answer the real module gives with the
+// contact-login gate off — so every other suite is unchanged; the boundary
+// suite below flips its SECOND answer.
+jest.mock('../services/contact-notification-prefs', () => ({
+  ...jest.requireActual('../services/contact-notification-prefs'),
+  rerouteForContactEmailOptOut: jest.fn(async (_customerId, email) => ({ email, rerouted: false })),
+}));
+
 const {
   renderAutomationStepContent,
   automationSuppressionGroupKey,
@@ -52,6 +61,7 @@ const db = require('../models/db');
 const sendgrid = require('../services/sendgrid-mail');
 const { buildConsultationEmailBlock } = require('../services/lead-consultation-email-block');
 const BillingEmailAuthority = require('../services/billing-channel-email-authority');
+const ContactPrefs = require('../services/contact-notification-prefs');
 
 function chain({ result = [], first, returning, updateResult = 1 } = {}) {
   const q = {};
@@ -1306,5 +1316,69 @@ describe('sendStepLocked (via sendStep) — consultation-booking block wiring', 
     expect(buildConsultationEmailBlock).not.toHaveBeenCalled();
     const sentArgs = sendgrid.sendOne.mock.calls[0][0];
     expect(sentArgs.html).not.toContain('{{consultation_booking}}');
+  });
+});
+
+// A step addressed to an on-location contact re-runs the contact recheck at
+// SendGrid's provider boundary (codex #6363 r30 P2): the early recheck ran
+// before the render, and a contact who turned email off, or whom the holder
+// removed, during the delivery checks and the provider's request preparation
+// would otherwise still be mailed.
+describe('sendStepLocked — the contact recheck runs again at the provider boundary', () => {
+  const CONTACT_ENROLLMENT = {
+    id: 'enr-contact', status: 'active', template_key: 'bed_bug', customer_id: 'cust-1', current_step: 0, next_send_at: null,
+    email: 'sam@example.com', first_name: 'Sam', last_name: 'Spouse', metadata: { recipient_role: 'service_contact' },
+  };
+  const STEP = {
+    id: 'step-1', step_order: 0, subject: 'Hi {{first_name}}', html_body: '<p>Hi {{first_name}}</p>', text_body: 'Hi {{first_name}}',
+    from_email: 'automations@wavespestcontrol.com', enabled: true,
+  };
+  function queues(sendRowChain = chain({})) {
+    return {
+      // sendStep's pre read, the locked re-read, advanceEnrollment's update.
+      automation_enrollments: [chain({ first: CONTACT_ENROLLMENT }), chain({ first: CONTACT_ENROLLMENT }), chain({})],
+      automation_templates: [chain({ first: { key: 'bed_bug', name: 'Bed bug', asm_group: 'service' } })],
+      automation_steps: [chain({ result: [STEP] })],
+      automation_step_sends: [chain({ returning: [{ id: 'send-1' }] }), sendRowChain],
+      email_suppressions: [chain({ result: [] })],
+    };
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    db.fn = { now: jest.fn(() => 'NOW()') };
+    sendgrid.isConfigured = jest.fn(() => true);
+    ContactPrefs.rerouteForContactEmailOptOut.mockImplementation(async (_customerId, email) => ({ email, rerouted: false }));
+  });
+
+  test('a contact whose address or email choice changed between the early recheck and the handoff: nothing sent, the queued row dropped, the step left due; the check asks with the enrollment\'s recipient stamp', async () => {
+    const sendRowChain = chain({});
+    setDbQueues(queues(sendRowChain));
+    ContactPrefs.rerouteForContactEmailOptOut
+      .mockResolvedValueOnce({ email: 'sam@example.com', rerouted: false })
+      .mockResolvedValueOnce({ email: 'pat@example.com', rerouted: true });
+    sendgrid.sendOne.mockImplementation(async (opts) => { await opts.providerBoundaryCheck({}); return { messageId: 'sg-never' }; });
+
+    const result = await sendStep('enr-contact');
+
+    expect(result).toMatchObject({ sent: false, deferred: true });
+    expect(ContactPrefs.rerouteForContactEmailOptOut).toHaveBeenCalledTimes(2);
+    expect(ContactPrefs.rerouteForContactEmailOptOut).toHaveBeenLastCalledWith('cust-1', 'sam@example.com', { recipientRole: 'service_contact' });
+    expect(sendRowChain.del).toHaveBeenCalled();
+    expect(sendRowChain.update).not.toHaveBeenCalled();
+  });
+
+  test('an unchanged answer at the boundary sends as before; a test send installs no check', async () => {
+    setDbQueues(queues());
+    sendgrid.sendOne.mockImplementation(async (opts) => { await opts.providerBoundaryCheck({}); return { messageId: 'sg-1' }; });
+    expect((await sendStep('enr-contact')).sent).toBe(true);
+    expect(ContactPrefs.rerouteForContactEmailOptOut).toHaveBeenCalledTimes(2);
+
+    setDbQueues(queues());
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-t' });
+    const out = await sendStep('enr-contact', { testRecipient: 'operator@wavespestcontrol.com' });
+    expect(out.test).toBe(true);
+    expect(sendgrid.sendOne.mock.calls[1][0].providerBoundaryCheck).toBeUndefined();
   });
 });

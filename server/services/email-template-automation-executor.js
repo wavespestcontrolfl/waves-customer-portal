@@ -1979,12 +1979,15 @@ async function dispatchRun(run, automation, executionPayload, payloadFingerprint
   // customer's slot-1 on-location contact follows that contact's email
   // switch — off since the run was queued means the holder gets it, or the
   // run is skipped when the holder has no address.
-  if (run.recipient_type === 'customer' && run.recipient_id) {
-    // Whose address the run carries is the enqueue's stamp (context
-    // .recipient_role), never inferred from the address (codex #6363 r10
-    // P1): a run mailing a third party keeps its address.
-    const reroute = await require('./contact-notification-prefs')
-      .rerouteForContactEmailOptOut(run.recipient_id, run.recipient_email, { recipientRole: asObject(run.context).recipient_role || null });
+  // Whose address the run carries is the enqueue's stamp (context
+  // .recipient_role), never inferred from the address (codex #6363 r10 P1):
+  // a run mailing a third party keeps its address.
+  const contactRecheck = run.recipient_type === 'customer' && run.recipient_id
+    ? (email) => require('./contact-notification-prefs')
+      .rerouteForContactEmailOptOut(run.recipient_id, email, { recipientRole: asObject(run.context).recipient_role || null })
+    : null;
+  if (contactRecheck) {
+    const reroute = await contactRecheck(run.recipient_email);
     if (reroute.rerouted && !reroute.email) return { skipReason: 'on-location contact turned email off; no account holder email' };
     if (reroute.rerouted) run = { ...run, recipient_email: reroute.email };
   }
@@ -1993,7 +1996,25 @@ async function dispatchRun(run, automation, executionPayload, payloadFingerprint
   let prepDispatched = false;
   try {
     // Fires immediately before the provider call — the dispatch boundary.
-    const onQueued = () => { prepDispatched = true; };
+    // The contact recheck runs here AGAIN (codex #6363 r30 P2): a contact who
+    // turned email off, or whom the holder removed, between the read above
+    // and the handoff aborts the queued attempt (never a send to the stale
+    // address); the retry re-resolves from the top. An unreadable row aborts
+    // the same way — the library would otherwise log the throw and proceed.
+    const onQueued = async () => {
+      if (contactRecheck) {
+        let again;
+        try {
+          again = await contactRecheck(run.recipient_email);
+        } catch (err) {
+          logger.warn(`[email-template-automation] run ${run.id} contact recheck failed at the provider boundary: ${err.message}`);
+          return false;
+        }
+        if (again.rerouted) return false;
+      }
+      prepDispatched = true;
+      return true;
+    };
     const ledgerStream = ledgerStreamFor(run.template_key);
     let result;
     if (ledgerStream) {

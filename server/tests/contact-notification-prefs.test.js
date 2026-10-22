@@ -249,6 +249,11 @@ describe('contactDeclinesChannel (single-recipient resolvers: review outreach)',
     // Slot 1 now carries another address: the resolved address is no longer Sam's.
     customer = { ...CUSTOMER, service_contact_email: 'other@example.com' };
     expect(await ContactPrefs.contactDeclinesChannel('cust-1', SAM, 'email', opts)).toBe(true);
+    // The same number stored twice with the resolved address on only the
+    // later slot: the phone + address identity is live while ANY slot
+    // carrying the phone resolves to it (codex r30 P2 — not the first alone).
+    customer = { ...CUSTOMER, service_contact_email: 'other@example.com', service_contact3_phone: SAM.phone, service_contact3_email: 'sam@example.com' };
+    expect(await ContactPrefs.contactDeclinesChannel('cust-1', SAM, 'email', opts)).toBe(false);
     // A slot whose address the holder cleared resolves to the HOLDER's current
     // mailbox now (getServiceContact's fallback): the stale address is held,
     // the holder-fallback address passes (codex r28 security P2); texts never
