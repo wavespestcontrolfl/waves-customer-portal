@@ -780,6 +780,8 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     [[4242, 4242, 4242, 4242]],
     [{ card: ['4242', '4242', '4242', '4242'] }],
     [{ a: '4242 4242', b: '4242 4242' }],
+    // Inside more than 120 joined digits (the long-run pass, pre-push audit r24).
+    [['4242', '4242', '4242', '4242', ...Array(27).fill('1234')]],
   ])('a card number split across the items of a structured note is removed: %j', async (note) => {
     const result = await read(ENTRY, { id: 1, notes: note });
     const text = typeof result.data.notes === 'string' ? result.data.notes : JSON.stringify(result.data.notes);

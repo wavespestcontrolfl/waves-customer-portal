@@ -320,7 +320,8 @@ function scrubNoteText(input) {
 // structured note, whose items are joined before the check (Codex #6375 r24).
 function maskCardNumbers(text) {
   const detection = plainDigitsAndSeparators(text);
-  const masked = scrubPans(detection);
+  // The long-run pass too: a card number inside more than 120 joined digits (pre-push audit).
+  const masked = scrubLongDigitRuns(scrubPans(detection)).text;
   return masked === detection ? null : masked;
 }
 
