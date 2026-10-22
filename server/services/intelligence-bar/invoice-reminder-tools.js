@@ -480,12 +480,14 @@ function sendNowEffects({ seq, step, total }) {
 }
 
 // The recipients and text the service re-checks at dispatch (invoice-followups approvalDrift), and the email content hash.
-function sendNowApproval({ invoice, seq, customer, sms, email }) {
+function sendNowApproval({ invoice, seq, customer, sms, email, dueCents }) {
   return {
     invoiceUpdatedAtMs: msOf(invoice.updated_at),
     sequenceId: seq.id,
     status: seq.status,
     stepIndex: seq.step_index,
+    // The balance the text and email state: the service refuses any other amount, and never draws credit on this send.
+    dueCents,
     emailContentHash: email.none ? null : email.contentHash,
     // What may go out, and the exact text: the send uses this body as it is and skips a channel that is not listed.
     channels: { sms: Boolean(sms), email: !email.none },
@@ -514,7 +516,7 @@ function sendNowCard({ invoice, seq, step, steps, dueCents, customer, sms, email
     email_body: email.none ? null : email.text,
     effects: sendNowEffects({ seq, step, total: steps.length }),
     sends_to_customer: true,
-    _approved: sendNowApproval({ invoice, seq, customer, sms, email }),
+    _approved: sendNowApproval({ invoice, seq, customer, sms, email, dueCents }),
     _version: {
       tool: 'send_invoice_reminder_now',
       invoice_id: invoice.id,

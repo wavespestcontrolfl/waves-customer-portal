@@ -448,7 +448,7 @@ describe('send_invoice_reminder_now', () => {
     expect(Invoices.sendReminderNowFromBar).toHaveBeenCalledWith({
       invoiceId: INV, actor: { technicianId: 'staff-1' },
       approvedReminder: {
-        invoiceUpdatedAtMs: new Date('2099-01-01T12:00:00.123Z').getTime(), sequenceId: SEQ, status: 'active', stepIndex: 0, emailContentHash: 'hash-1',
+        invoiceUpdatedAtMs: new Date('2099-01-01T12:00:00.123Z').getTime(), sequenceId: SEQ, status: 'active', stepIndex: 0, emailContentHash: 'hash-1', dueCents: 12900,
         // What may go out, and the exact text: the send uses it as it is.
         channels: { sms: true, email: true }, smsBody: 'Hi Robin, a friendly reminder about your $129.00 invoice: [pay link]',
         // Digests only: the pin never carries the phone, the address or the text itself.

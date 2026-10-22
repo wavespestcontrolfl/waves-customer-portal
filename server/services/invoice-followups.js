@@ -302,7 +302,8 @@ function approvedSendPlan(approved) {
   const body = typeof approved.smsBody === 'string' ? approved.smsBody : null;
   const smsValid = !sms || Boolean(body && body.includes(APPROVAL_PAY_LINK_TOKEN) && approvalDigest(body) === approved.smsDigest);
   const emailValid = !email || (typeof approved.emailContentHash === 'string' && approved.emailContentHash.length > 0);
-  return { sms, email, body, emailContentHash: email ? approved.emailContentHash : null, valid: (sms || email) && smsValid && emailValid };
+  const dueValid = Number.isInteger(approved.dueCents) && approved.dueCents > 0;
+  return { sms, email, body, emailContentHash: email ? approved.emailContentHash : null, valid: (sms || email) && smsValid && emailValid && dueValid };
 }
 
 // Why the live recipients differ from the card's pin, or null.
@@ -1581,12 +1582,50 @@ const TOUCH_CLAIM_TTL_MS = 10 * 60 * 1000;
 // on the invoice row this claim locks; a difference claims and sends nothing (returns { previewChanged: true }).
 // report (the same caller only): an object fireTouch fills with the per-leg outcomes (touchLegReport); the return value then
 // says what happened: { notClaimed }, { previewChanged } or { legs }. Every other caller passes neither and gets what it got.
-async function fireStep(row, { operatorInitiated = false, ownedMicrodeposit = false, approved = null, report = null } = {}) {
+// The cron's claim: a sequence nobody holds (or whose claim expired) takes this stamp.
+function takeDueClaim(trx, sequenceId, claimStamp, preClaimed) {
+  if (preClaimed) return 1; // already ours (checked under the locks by dueOrPreClaimed)
+  return trx('invoice_followup_sequences')
+    .where({ id: sequenceId })
+    .where(function () {
+      this.whereNull('touch_claimed_at').orWhere(
+        'touch_claimed_at', '<', new Date(claimStamp.getTime() - TOUCH_CLAIM_TTL_MS),
+      );
+    })
+    // The claim stamps updated_at too: "a worker is mid-send on this
+    // sequence" is precisely the activity an ownership-change check must
+    // see, and it is the backstop for the ownership gate in fireStep — a claim
+    // taken before the undo's verification pass makes the undo refuse instead
+    // of repointing a sequence out from under an in-flight touch.
+    .update({ touch_claimed_at: claimStamp, updated_at: trx.fn.now() });
+}
+
+// The claim fireStep works under: the one an approved send-now already took, or a fresh stamp.
+const claimOf = (claim) => claim || { preClaimed: false, claimStamp: new Date() };
+
+// The fired row is due now (a cron claim), or still carries the claim an approved send-now took in its locked UPDATE.
+function dueOrPreClaimed(liveSeq, preClaimed, claimStamp) {
+  if (preClaimed) return Boolean(liveSeq.touch_claimed_at) && new Date(liveSeq.touch_claimed_at).getTime() === claimStamp.getTime();
+  return Boolean(liveSeq.next_touch_at) && new Date(liveSeq.next_touch_at).getTime() <= Date.now();
+}
+
+// A pre-taken claim that fireStep does not carry into a send is released (only while it is still this call's).
+function releaseSendNowClaim(row, preClaimed, claimStamp, claimedSeq) {
+  if (!preClaimed || claimedSeq) return undefined;
+  return db('invoice_followup_sequences').where({ id: row.id, touch_claimed_at: claimStamp })
+    .update({ touch_claimed_at: null, updated_at: db.fn.now() })
+    .catch((err) => logger.warn(`[invoice-followups] could not release the send-now claim for ${row.invoice_id}: ${err.message}`));
+}
+
+// claim { preClaimed, claimStamp }: an approved send-now already wrote in the locked UPDATE that judged its card (no re-arm, no
+// moment where the row is due and unclaimed); it is checked here under the locks, never re-taken, and released if the send
+// does not go on.
+async function fireStep(row, { operatorInitiated = false, ownedMicrodeposit = false, approved = null, report = null, claim = null } = {}) {
+  const { preClaimed, claimStamp } = claimOf(claim);
   // The cleanup is predicated on OUR stamp: if this send outlives the TTL
   // and another worker replaces the stale claim, an unconditional clear
   // here would release the successor's live claim and let an edit race its
   // in-flight reminder.
-  const claimStamp = new Date();
   let claimedSeq = null;
   let claimedInvoice = null;
   let ownedBy = null;
@@ -1622,13 +1661,7 @@ async function fireStep(row, { operatorInitiated = false, ownedMicrodeposit = fa
       // due; progress from the LIVE anchor so a postponed timeline is
       // never overwritten from the stale snapshot.
       const liveSeq = await trx('invoice_followup_sequences').where({ id: row.id }).first();
-      if (
-        !liveSeq ||
-        liveSeq.status !== 'active' ||
-        liveSeq.step_index !== row.step_index ||
-        !liveSeq.next_touch_at ||
-        new Date(liveSeq.next_touch_at).getTime() > Date.now()
-      ) {
+      if (!liveSeq || liveSeq.status !== 'active' || liveSeq.step_index !== row.step_index || !dueOrPreClaimed(liveSeq, preClaimed, claimStamp)) {
         return;
       }
       // OWNERSHIP REVALIDATION UNDER THE LOCK (r19 P1 — customer-facing leak).
@@ -1663,29 +1696,20 @@ async function fireStep(row, { operatorInitiated = false, ownedMicrodeposit = fa
       // verification nudge, only if the invoice is still waiting on it.
       ownedBy = await openCustomerScheduleId(trx, row.customer_id);
       if (ownedBy && !ownedMicrodeposit) return;
-      const claimed = await trx('invoice_followup_sequences')
-        .where({ id: row.id })
-        .where(function () {
-          this.whereNull('touch_claimed_at').orWhere(
-            'touch_claimed_at', '<', new Date(claimStamp.getTime() - TOUCH_CLAIM_TTL_MS),
-          );
-        })
-        // The claim stamps updated_at too: "a worker is mid-send on this
-        // sequence" is precisely the activity an ownership-change check must
-        // see, and
-        // it is the backstop for the ownership gate above — a claim taken
-        // before the undo's verification pass makes the undo refuse instead of
-        // repointing a sequence out from under an in-flight touch.
-        .update({ touch_claimed_at: claimStamp, updated_at: trx.fn.now() });
+      const claimed = await takeDueClaim(trx, row.id, claimStamp, preClaimed);
       if (claimed) {
         claimedSeq = liveSeq;
         claimedInvoice = lockedInvoice;
       }
     });
   } catch (err) {
+    // Falls through: nothing was claimed, so the not-claimed answer below is the one given (and a pre-taken claim is released).
     logger.error(`[invoice-followups] touch claim failed for invoice ${row.invoice_id}: ${err.message}`);
-    return report ? { notClaimed: true } : undefined;
+    claimedSeq = null;
+    previewChanged = false;
+    ownedBy = null;
   }
+  await releaseSendNowClaim(row, preClaimed, claimStamp, claimedSeq);
   if (previewChanged) return { previewChanged: true };
   if (ownedBy && !ownedMicrodeposit) {
     logger.info(`[invoice-followups] sequence ${row.id} not fired — customer ${row.customer_id} is on customer reminder schedule ${ownedBy}`);
@@ -1894,12 +1918,23 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
   // it (don't consume credit for an undelivered reminder; matches the send/project
   // rollback).
   let dunAppliedCredit = 0;
-  try {
-    const { autoApplyAccountCreditIfEnabled } = require('./customer-credit');
-    const dunCreditResult = await autoApplyAccountCreditIfEnabled(row.invoice_id);
-    dunAppliedCredit = dunCreditResult?.applied || 0;
-  } catch (creditErr) {
-    logger.warn(`[invoice-followups] account-credit apply before dun skipped for ${row.invoice_id}: ${creditErr.message}`);
+  if (bar) {
+    // An approved send never draws credit (the card's amount is frozen in its text): credit that WOULD apply refuses the send.
+    const { autoApplyWouldApply } = require('./customer-credit');
+    const wouldApply = await autoApplyWouldApply({ id: row.invoice_id, customer_id: customer.id, total: row.total, credit_applied: row.credit_applied });
+    if (wouldApply) {
+      logger.warn(`[invoice-followups] send-now on sequence ${row.id} refused: account credit would apply since the card was shown`);
+      if (report) report.previewChanged = true;
+      return;
+    }
+  } else {
+    try {
+      const { autoApplyAccountCreditIfEnabled } = require('./customer-credit');
+      const dunCreditResult = await autoApplyAccountCreditIfEnabled(row.invoice_id);
+      dunAppliedCredit = dunCreditResult?.applied || 0;
+    } catch (creditErr) {
+      logger.warn(`[invoice-followups] account-credit apply before dun skipped for ${row.invoice_id}: ${creditErr.message}`);
+    }
   }
   // The refresh runs in its OWN try: it is what keeps the reminder's
   // amounts/copy on the just-edited live row instead of the batch snapshot
@@ -1934,6 +1969,12 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
       row.token = fresh.token;
       row.due_date = fresh.due_date;
       row.invoice_number = fresh.invoice_number;
+      // The amount in the approved text and email: any other balance now is a different message.
+      if (bar && Math.round(invoiceAmountDue(row) * 100) !== approved.dueCents) {
+        logger.warn(`[invoice-followups] send-now on sequence ${row.id} refused: the amount due changed since the card was shown`);
+        if (report) report.previewChanged = true;
+        return;
+      }
       if (['prepaid', 'paid'].includes(String(fresh.status || '').toLowerCase())) {
         await stopOnPayment(row.invoice_id).catch(() => {});
         return;
@@ -3186,9 +3227,8 @@ async function sendNextTouchNow(invoiceId, { operatorInitiated = false, combined
   // promotion cannot commit between the check and the write.
   let ownedBy = null;
   let previewChanged = false;
-  let priorNextTouchAt = seq.next_touch_at;
-  // The time THIS call wrote (the re-arm): the put-back below happens only while the row still carries exactly it.
-  let rearmStamp = null;
+  // The approved path does not re-arm: it takes the claim in the locked UPDATE (below).
+  let approvedClaim = null;
   await db.transaction(async (trx) => {
     await lockCustomerDunningShared(trx, seq.customer_id);
     ownedBy = await openCustomerScheduleId(trx, seq.customer_id);
@@ -3205,9 +3245,14 @@ async function sendNextTouchNow(invoiceId, { operatorInitiated = false, combined
       const sameReminder = liveSeq && String(liveSeq.id) === String(approved.sequenceId) && liveSeq.status === approved.status
         && liveSeq.step_index === approved.stepIndex && !liveSeq.touch_claimed_at;
       if (!sameInvoice || !sameReminder) { previewChanged = true; return; }
-      priorNextTouchAt = liveSeq.next_touch_at;
+      // The claim is taken in THIS locked UPDATE and the due time is left alone: there is no moment at which the row is due and
+      // unclaimed for the cron's runPending to take (and send unrestricted). fireStep checks the claim and carries it through
+      // validation and dispatch; it is released only by the conditional restore below or fireStep's own cleanup.
+      approvedClaim = new Date();
+      await trx('invoice_followup_sequences').where({ id: seq.id }).update({ updated_at: trx.fn.now(), touch_claimed_at: approvedClaim });
+      return;
     }
-    rearmStamp = new Date(Date.now() - 1000);
+    const rearmStamp = new Date(Date.now() - 1000);
     await trx('invoice_followup_sequences').where({ id: seq.id }).update({
       updated_at: trx.fn.now(),
       status: 'active',
@@ -3217,6 +3262,12 @@ async function sendNextTouchNow(invoiceId, { operatorInitiated = false, combined
   if (previewChanged) return SEND_NOW_PREVIEW_CHANGED;
   if (ownedBy) return Wiring().sendNowForInvoiceOnSchedule(ownedBy, seq.customer_id, null);
 
+  // The approved send holds the reminder's claim from the locked UPDATE above; a refusal before fireStep releases it, and only
+  // while it is still this call's claim (a stamp that moved on is somebody else's).
+  const restoreAfterRefusal = () => db('invoice_followup_sequences')
+    .where({ id: seq.id, touch_claimed_at: approvedClaim })
+    .update({ updated_at: db.fn.now(), touch_claimed_at: null })
+    .catch((err) => logger.warn(`[invoice-followups] could not release the claim after a refused send-now on ${invoiceId}: ${err.message}`));
   const row = await db('invoice_followup_sequences as s')
     .join('invoices as i', 's.invoice_id', 'i.id')
     .where('s.id', seq.id)
@@ -3226,17 +3277,13 @@ async function sendNextTouchNow(invoiceId, { operatorInitiated = false, combined
       'i.stripe_payment_intent_id as invoice_stripe_pi',
       'i.service_date', 'i.due_date', 'i.invoice_number',
     )
-    .first();
-  if (!row) return SEND_NOW_FINISHED;
+    .first()
+    .catch(async (err) => { if (approved) await restoreAfterRefusal(); throw err; });
+  if (!row) {
+    if (approved) await restoreAfterRefusal();
+    return SEND_NOW_FINISHED;
+  }
 
-  // The Intelligence Bar's pin, again on the row fireStep will claim (a cron advance between the re-arm and this read), and the
-  // invoice edit time on the invoice row fireStep locks. Either difference sends nothing; the re-arm is put back as it was.
-  // Conditional on the re-arm stamp: a newer time written meanwhile (rescheduleForInvoiceEdit after a due-date edit, a cron
-  // advance, a hold) is somebody else's and is never overwritten.
-  const restoreAfterRefusal = () => db('invoice_followup_sequences')
-    .where({ id: seq.id, status: 'active', step_index: approved.stepIndex, next_touch_at: rearmStamp }).whereNull('touch_claimed_at')
-    .update({ updated_at: db.fn.now(), next_touch_at: priorNextTouchAt })
-    .catch((err) => logger.warn(`[invoice-followups] could not restore the reminder time after a refused send-now on ${invoiceId}: ${err.message}`));
   if (approved && row.step_index !== approved.stepIndex) {
     await restoreAfterRefusal();
     return SEND_NOW_PREVIEW_CHANGED;
@@ -3266,7 +3313,7 @@ async function sendNextTouchNow(invoiceId, { operatorInitiated = false, combined
     }
   }
   const reportOut = report ? {} : null;
-  const fired = await fireStep(row, { operatorInitiated, approved, report: reportOut });
+  const fired = await fireStep(row, { operatorInitiated, approved, report: reportOut, claim: approvedClaim && { preClaimed: true, claimStamp: approvedClaim } });
   if (fired?.ownedBy) return Wiring().sendNowForInvoiceOnSchedule(fired.ownedBy, seq.customer_id, null);
   if (fired?.previewChanged) {
     await restoreAfterRefusal();

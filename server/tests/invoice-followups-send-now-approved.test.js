@@ -27,6 +27,7 @@ jest.mock('../services/collections/contact-ledger', () => ({
 }));
 jest.mock('../services/customer-credit', () => ({
   autoApplyAccountCreditIfEnabled: jest.fn(async () => ({ applied: 0 })),
+  autoApplyWouldApply: jest.fn(async () => false),
   reverseAppliedCredit: jest.fn(async () => ({ reversed: 0 })),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -75,7 +76,7 @@ const SMS_BODY = 'Hi Taylor, a friendly reminder: [pay link]';
 const APPROVED = {
   phoneDigest: approvalDigest('19415550101'), emailDigest: approvalDigest('billing@example.com'), smsDigest: approvalDigest(SMS_BODY),
   sequenceId: SEQ, status: 'active', stepIndex: 0, invoiceUpdatedAtMs: UPDATED.getTime(),
-  channels: { sms: true, email: true }, smsBody: SMS_BODY, emailContentHash: 'hash-1',
+  channels: { sms: true, email: true }, smsBody: SMS_BODY, emailContentHash: 'hash-1', dueCents: 12900,
 };
 
 let tables;
@@ -241,9 +242,9 @@ describe('the card pin is judged under the locks, before the re-arm and the clai
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(seqRow()).toMatchObject({ status: 'active', step_index: 0 });
     expect(seqRow().next_touch_at).toEqual(editedNext);
-    // The put-back was tried as a conditional write that matched no row.
-    const putBack = writes.filter((w) => w.table === 'invoice_followup_sequences' && Object.keys(w.patch).sort().join() === 'next_touch_at,updated_at').pop();
-    expect(putBack).toMatchObject({ count: 0 });
+    // The send-now claim is released, and no write ever touched the reminder time.
+    expect(seqRow().touch_claimed_at).toBeNull();
+    expect(writes.filter((w) => w.table === 'invoice_followup_sequences' && 'next_touch_at' in w.patch)).toEqual([]);
   });
 
   test('a cron advance after the re-arm (the row read sees the next step) sends nothing and leaves cron’s own time alone', async () => {
@@ -654,15 +655,95 @@ describe('the card’s channels, text and recipients', () => {
   });
 
   test('an email address changed after the card was shown sends nothing', async () => {
-    require('../services/customer-contact').getInvoiceEmailRecipients.mockReturnValue([{ email: 'new.address@example.com', name: 'Taylor' }]);
-    expect(await sendNow({ approved: APPROVED, report: true })).toMatchObject({ ok: false, reason: 'preview_changed' });
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
-    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    const contact = require('../services/customer-contact');
+    contact.getInvoiceEmailRecipients.mockReturnValue([{ email: 'new.address@example.com', name: 'Taylor' }]);
+    try {
+      expect(await sendNow({ approved: APPROVED, report: true })).toMatchObject({ ok: false, reason: 'preview_changed' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    } finally {
+      contact.getInvoiceEmailRecipients.mockReturnValue([{ email: 'billing@example.com', name: 'Taylor' }]);
+    }
   });
 
   test('the page’s call (no approval) resolves the template itself and is not limited to a channel set', async () => {
     tables.customers[0].phone = '+19415550199';
     await sendNow();
     expect(sendCustomerMessage.mock.calls[0][0].body).toBe('invoice follow-up sms');
+  });
+});
+
+// An approved send-now takes the claim in the same locked UPDATE that judges its card and never re-arms the reminder, so the
+// row is never due and unclaimed (runPending would send that unrestricted). Credit is never drawn on it.
+describe('the approved send holds the claim from the start, and draws no credit', () => {
+  const Credit = require('../services/customer-credit');
+
+  test('the first write is the claim alone: no re-arm, no status or due-time change, and the claim is held when fireStep takes its locks', async () => {
+    const seenAtLock = [];
+    hooks.onInvoiceLock = () => seenAtLock.push({ claimed: Boolean(seqRow().touch_claimed_at), next: seqRow().next_touch_at, status: seqRow().status });
+    await sendNow({ approved: APPROVED, report: true });
+    const first = writes.find((w) => w.table === 'invoice_followup_sequences');
+    expect(Object.keys(first.patch).sort()).toEqual(['touch_claimed_at', 'updated_at']);
+    expect(seenAtLock.length).toBeGreaterThanOrEqual(2);
+    for (const seen of seenAtLock.slice(1)) expect(seen).toEqual({ claimed: true, next: NEXT, status: 'active' });
+  });
+
+  test('the page’s call still re-arms the row (past due) as before', async () => {
+    await sendNow();
+    const first = writes.find((w) => w.table === 'invoice_followup_sequences');
+    expect(first.patch).toMatchObject({ status: 'active' });
+    expect(first.patch.next_touch_at).toBeInstanceOf(Date);
+    expect(first.patch).not.toHaveProperty('touch_claimed_at');
+  });
+
+  test('a claim someone else took between the card’s lock and fireStep is not stolen or released: nothing is sent', async () => {
+    const other = new Date(Date.now() + 5000);
+    let locks = 0;
+    hooks.onInvoiceLock = () => { locks += 1; if (locks === 2) seqRow().touch_claimed_at = other; };
+    const result = await sendNow({ approved: APPROVED, report: true });
+    expect(result.report).toEqual({ notClaimed: true });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(seqRow().touch_claimed_at).toEqual(other);
+  });
+
+  test('a refusal before the send releases the claim and leaves the due time alone (changed template, changed phone)', async () => {
+    EmailTemplates.templateContentHash.mockReturnValueOnce('hash-2');
+    expect(await sendNow({ approved: APPROVED, report: true })).toMatchObject({ ok: false, reason: 'preview_changed' });
+    expect(seqRow()).toMatchObject({ touch_claimed_at: null, status: 'active', step_index: 0 });
+    expect(seqRow().next_touch_at).toEqual(NEXT);
+  });
+
+  test('no account credit is drawn on an approved send; the page’s call still draws it', async () => {
+    await sendNow({ approved: APPROVED, report: true });
+    expect(Credit.autoApplyAccountCreditIfEnabled).not.toHaveBeenCalled();
+    expect(Credit.autoApplyWouldApply).toHaveBeenCalledTimes(1);
+    jest.clearAllMocks();
+    fresh();
+    install();
+    await sendNow();
+    expect(Credit.autoApplyAccountCreditIfEnabled).toHaveBeenCalledTimes(1);
+  });
+
+  test('credit that would apply now refuses the send: nothing is sent, nothing is drawn, the claim is released', async () => {
+    Credit.autoApplyWouldApply.mockResolvedValueOnce(true);
+    expect(await sendNow({ approved: APPROVED, report: true })).toMatchObject({ ok: false, reason: 'preview_changed' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(Credit.autoApplyAccountCreditIfEnabled).not.toHaveBeenCalled();
+    expect(seqRow()).toMatchObject({ touch_claimed_at: null, step_index: 0, touches_sent: 0 });
+  });
+
+  test('a balance that is not the card’s (credit already applied since) refuses the send', async () => {
+    tables.invoices[0].credit_applied = '20';
+    await sendNow({ approved: APPROVED, report: true });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(seqRow()).toMatchObject({ touch_claimed_at: null, step_index: 0 });
+  });
+
+  test('an approval with no amount sends nothing', async () => {
+    const result = await sendNow({ approved: { ...APPROVED, dueCents: undefined }, report: true });
+    expect(result).toMatchObject({ ok: false, reason: 'preview_changed' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 });
