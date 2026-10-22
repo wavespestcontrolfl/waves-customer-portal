@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * GATE_MERGE_LEAD_DEFAULTS, source fix: a customer created from a call no longer
+ * GATE_CALL_LEAD_LAZY_STRIPE, source fix: a customer created from a call no longer
  * gets a Stripe profile at once. The empty profile of a lead that never pays
  * made a later duplicate merge refuse the pair (two Stripe profiles). Every
  * card-save and payment path creates the profile on demand
@@ -22,7 +22,7 @@ function runBlock({ gate }) {
   const ensureStripeCustomer = jest.fn(async () => 'cus_syn');
   const logger = { warn: jest.fn() };
   const stubRequire = (id) => {
-    if (id === '../config/feature-gates') return { mergeLeadDefaultsLive: () => gate };
+    if (id === '../config/feature-gates') return { callLeadLazyStripeLive: () => gate };
     if (id === './stripe') return { ensureStripeCustomer };
     throw new Error(`unexpected require ${id}`);
   };
@@ -59,5 +59,19 @@ describe('call-created customer Stripe profile', () => {
 
   test('the processor has no other eager ensureStripeCustomer call', () => {
     expect(SOURCE.match(/ensureStripeCustomer\(/g)).toHaveLength(1);
+  });
+});
+
+describe('GATE_CALL_LEAD_LAZY_STRIPE reader', () => {
+  afterEach(() => { delete process.env.GATE_CALL_LEAD_LAZY_STRIPE; });
+  it('is dark unless exactly "true", read at call time', () => {
+    const { callLeadLazyStripeLive } = jest.requireActual('../config/feature-gates');
+    expect(callLeadLazyStripeLive()).toBe(false);
+    for (const v of ['1', 'TRUE', 'yes', ' true']) {
+      process.env.GATE_CALL_LEAD_LAZY_STRIPE = v;
+      expect(callLeadLazyStripeLive()).toBe(false);
+    }
+    process.env.GATE_CALL_LEAD_LAZY_STRIPE = 'true';
+    expect(callLeadLazyStripeLive()).toBe(true);
   });
 });

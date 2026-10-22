@@ -14389,11 +14389,11 @@ const CallRecordingProcessor = {
           // Auto-create Stripe customer (non-blocking, but log failures so a
           // misconfigured Stripe key surfaces in the logs instead of silently
           // skipping every new customer's billing record)
-          // GATE_MERGE_LEAD_DEFAULTS: skipped while on. A lead that never pays
+          // GATE_CALL_LEAD_LAZY_STRIPE: skipped while on. A lead that never pays
           // would keep an empty profile forever, and a later duplicate merge
           // would refuse the pair (two Stripe profiles). Every card-save and
           // payment path creates the profile on demand (ensureStripeCustomer).
-          if (require('../config/feature-gates').mergeLeadDefaultsLive?.() !== true) {
+          if (require('../config/feature-gates').callLeadLazyStripeLive?.() !== true) {
             try {
               const StripeService = require('./stripe');
               await StripeService.ensureStripeCustomer(customerId);
