@@ -89,11 +89,13 @@ function changedStopFits(s, { dayOpen, dayClose, admits, startFloorMin, newStart
   const isNew = s.id === NEW_ID;
   if (s.startMin < dayOpen || s.endMin > dayClose) return false;
   if (s.startMin < startFloorMin || (isNew && s.startMin < newStartFloorMin)) return false;
-  return admits({ startMin: s.startMin, endMin: s.endMin, isNew });
+  // offHour is the stop's ORIGINAL classification: an off-hour assessment
+  // shifted onto the hour keeps its off-hour admission rule.
+  return admits({ startMin: s.startMin, endMin: s.endMin, isNew, offHour: s.offHour === true });
 }
 
 function arrangementFeasible(stops, day) {
-  const { home, dayOpen, dayClose, grandfathered, changedIds } = day;
+  const { home, dayOpen, dayClose, grandfathered, changedIds, pairViolates } = day;
   const ordered = [...stops].sort((a, b) => a.startMin - b.startMin);
   if (ordered.some((s) => changedIds.has(s.id) && !changedStopFits(s, day))) return false;
   const first = ordered[0];
@@ -104,13 +106,16 @@ function arrangementFeasible(stops, day) {
     const a = ordered[i];
     const b = ordered[i + 1];
     if (grandfathered.has(pairKey(a, b))) continue;
-    if (travelGapViolation(a, b)) return false;
+    if (pairViolates(a, b)) return false;
   }
   // Non-adjacent overlaps can't happen once adjacent pairs are clean and
   // windows are sorted by start, except when one window swallows another —
   // check that explicitly.
+  // Unchanged pairs are grandfathered here too: the co-timed members of an
+  // existing grouped stop overlap each other by design.
   for (let i = 0; i < ordered.length; i++) {
     for (let j = i + 2; j < ordered.length; j++) {
+      if (!changedIds.has(ordered[i].id) && !changedIds.has(ordered[j].id)) continue;
       if (ordered[i].endMin > ordered[j].startMin) return false;
     }
   }
@@ -171,9 +176,13 @@ function candidateStarts(durationMinutes, dayOpen, dayClose) {
  *   never slid.
  * @param {number} [p.newStartFloorMin=0] The new stop's own lower bound (the
  *   caller's earliest-start preference); slid stops ignore it.
- * @param {{remaining: number}} [p.budget] Shared evaluation budget across a
- *   caller's tech-days; decremented in place. Each day also stops at
+ * @param {{remaining: number, deadline?: number}} [p.budget] Shared budget
+ *   across a caller's tech-days: `remaining` arrangements (decremented in
+ *   place) and an optional Date.now() `deadline`. Each day also stops at
  *   MAX_EVALUATIONS.
+ * @param {Function} [p.pairViolates] (early, late) → truthy when the pair
+ *   can't sit side by side. Default travel-gap.js travelGapViolation; a
+ *   caller with GATE_SLOT_TRAVEL_GAP off passes plain overlap.
  * @returns {{ reason: string|null, baseline: Object|null, offers: Array, truncated?: true }}
  *   offers: one per new-stop start (best saving for that start), sorted by
  *   saving desc: { startMin, endMin, slides: [{id, fromStartMin, toStartMin}],
@@ -182,13 +191,18 @@ function candidateStarts(durationMinutes, dayOpen, dayClose) {
 function findSlideOffers({
   stops, newStop, durationMinutes, home, dayOpen, dayClose, admits = ADMIT_ALL,
   startFloorMin = 0, newStartFloorMin = 0, budget = { remaining: MAX_EVALUATIONS },
+  pairViolates = travelGapViolation,
 }) {
   const none = (reason, baseline = null) => ({ reason, baseline, offers: [] });
   if (!hasCoords(newStop) || !hasCoords(home)) return none('NEW_STOP_COORDLESS');
   if (!Array.isArray(stops) || stops.length === 0) return none('EMPTY_DAY');
   if (stops.some((s) => !hasCoords(s))) return none('COORDLESS_STOPS');
 
-  const base = stops.map((s) => ({ ...s, movable: s.movable === true && s.startMin >= startFloorMin }));
+  const base = stops.map((s) => ({
+    ...s,
+    movable: s.movable === true && s.startMin >= startFloorMin,
+    offHour: s.startMin % HOUR_STEP_MINUTES !== 0,
+  }));
   const day = {
     base,
     home,
@@ -197,6 +211,7 @@ function findSlideOffers({
     admits,
     startFloorMin,
     newStartFloorMin,
+    pairViolates,
     grandfathered: originalPairs(base),
     starts: candidateStarts(durationMinutes, dayOpen, dayClose),
     makeNew: (startMin) => ({
@@ -266,7 +281,7 @@ function bestSlidesByStart(day, baseline, movable, { plainStarts, budget }) {
   let evaluations = 0;
   for (const group of groups) {
     for (const assignment of shiftAssignments(group)) {
-      if (evaluations >= limit) {
+      if (evaluations >= limit || (budget.deadline && Date.now() >= budget.deadline)) {
         budget.remaining -= evaluations;
         return { bestByStart, truncated: true };
       }

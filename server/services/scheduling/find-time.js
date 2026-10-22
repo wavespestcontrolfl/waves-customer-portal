@@ -808,9 +808,23 @@ function isSlidable(row) {
 // the booking path; the estimate picker searches up to 90 days).
 const SLIDE_SHADOW_MAX_DAYS_OUT = 14;
 const SLIDE_SHADOW_REQUEST_EVALUATIONS = 60000;
+// It also sits behind the public, unauthenticated booking-availability route
+// (Codex security r2), so it is sampled: at most one request per
+// SLIDE_SHADOW_MIN_INTERVAL_MS process-wide, and a SLIDE_SHADOW_MAX_MS
+// wall-clock ceiling on that request's whole pass.
+const SLIDE_SHADOW_MIN_INTERVAL_MS = 10000;
+const SLIDE_SHADOW_MAX_MS = 50;
+let nextSlideShadowAt = 0;
+function claimSlideShadowSample(now = Date.now()) {
+  if (now < nextSlideShadowAt) return false;
+  nextSlideShadowAt = now + SLIDE_SHADOW_MIN_INTERVAL_MS;
+  return true;
+}
+const overlapsOnly = (a, b) => a.startMin < b.endMin && b.startMin < a.endMin;
 function logSlideShadow(date, tech, dayStops, params) {
   const daysOut = (new Date(`${date}T12:00:00Z`) - new Date(`${params.geo.todayEt}T12:00:00Z`)) / 86400000;
-  if (daysOut > SLIDE_SHADOW_MAX_DAYS_OUT || params.slideBudget.remaining <= 0) return;
+  const { slideBudget } = params;
+  if (daysOut > SLIDE_SHADOW_MAX_DAYS_OUT || slideBudget.remaining <= 0 || Date.now() >= slideBudget.deadline) return;
   const { geo } = params;
   try {
     const home = params.techStartPoints ? techStartPoint(tech) : HQ;
@@ -826,10 +840,13 @@ function logSlideShadow(date, tech, dayStops, params) {
       // caller's earliest-start preference.
       startFloorMin: date === geo.todayEt ? geo.todayFloorMin : 0,
       newStartFloorMin: startFloorFor(date, geo.earliestStartMin, geo.startFloorByDate),
-      budget: params.slideBudget,
+      budget: slideBudget,
+      // Same pair rule the customer offers use: travel gap when its gate is
+      // on, plain overlap when off.
+      pairViolates: travelGapEnabled() ? undefined : overlapsOnly,
       // Off-hour stops (assessments, re-services) skip only the hour-grid
       // test — lunch block and the last-start rule still apply.
-      admits: ({ startMin, endMin, isNew }) => (isNew || startMin % 60 === 0
+      admits: ({ startMin, endMin, isNew, offHour }) => (isNew || !offHour
         ? customerWindowAdmits({ startMin, endMin })
         : !overlapsLunch(startMin, endMin) && !pastCustomerLastStart(startMin)),
     });
@@ -1366,11 +1383,13 @@ async function findAvailableSlots(opts) {
   const dayOpen = dayStartHour * 60;
   const dayClose = dayEndHour * 60;
 
-  // Slide offers (owner request 2026-10-22) — customer-facing (packed-ends)
-  // callers on THIS legacy path only (capacity mode returned above), shadow-
-  // logged in phase 1. Read at CALL time; kill switch:
-  // unset GATE_SLOT_SLIDE_OFFER.
-  const slideShadow = wantsPackedEnds && gateEnvValue('GATE_SLOT_SLIDE_OFFER');
+  // Slide offers (owner request 2026-10-22) — explicitly customerFacing
+  // packed-ends callers (estimate picker, /book self-serve; NOT the voice
+  // agent, whose shift differs) on THIS legacy path only (capacity mode
+  // returned above), shadow-logged and sampled in phase 1. Read at CALL
+  // time; kill switch: unset GATE_SLOT_SLIDE_OFFER.
+  const slideShadow = opts.customerFacing === true && wantsPackedEnds
+    && gateEnvValue('GATE_SLOT_SLIDE_OFFER') && claimSlideShadowSample();
   const { techs, services, dates, absentDays } = await loadFindTimeContext({
     dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates: opts.includeBlackoutDates, strictBlackout: opts.strictBlackout,
     techStartPoints: opts.techStartPoints === true, slideShadow,
@@ -1407,7 +1426,7 @@ async function findAvailableSlots(opts) {
     slotStepMinutes, durationMinutes, dayOpen, dayClose, everyStepStart,
     techStartPoints: opts.techStartPoints === true,
     slideShadow,
-    slideBudget: { remaining: SLIDE_SHADOW_REQUEST_EVALUATIONS },
+    slideBudget: { remaining: SLIDE_SHADOW_REQUEST_EVALUATIONS, deadline: Date.now() + SLIDE_SHADOW_MAX_MS },
   };
   for (const date of dates) {
     for (const tech of techs) {
@@ -1430,6 +1449,8 @@ async function findAvailableSlots(opts) {
 
 module.exports = {
   findAvailableSlots,
+  // Test seam: reset the process-wide slide-shadow sampling clock.
+  _resetSlideShadowSample: () => { nextSlideShadowAt = 0; },
   GAP_LEGS,
   // Service-day bounds (ET hours) — the one place they are defined; other
   // offer surfaces (rain-out same-day presets) clamp to these.

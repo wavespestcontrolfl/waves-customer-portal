@@ -14,7 +14,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { findAvailableSlots } = require('../services/scheduling/find-time');
+const { findAvailableSlots, _resetSlideShadowSample } = require('../services/scheduling/find-time');
 const { clearExpectedServiceMinutesCache } = require('../services/scheduling/expected-service-minutes');
 
 const ENV_KEYS = ['GATE_SLOT_SLIDE_OFFER', 'GATE_DRIVE_TIME_CALIBRATION', 'GATE_SLOT_TRAVEL_GAP', 'GATE_BOOKING_LUNCH_BLOCK'];
@@ -26,6 +26,7 @@ beforeEach(() => {
   process.env.GATE_SLOT_TRAVEL_GAP = 'true';
   jest.clearAllMocks();
   clearExpectedServiceMinutesCache();
+  _resetSlideShadowSample();
 });
 afterAll(() => {
   for (const k of ENV_KEYS) {
@@ -84,7 +85,7 @@ const CATALOG = [{
 const CALL = {
   lat: 27.18, lng: LNG, durationMinutes: 60, dateFrom: DATE, dateTo: DATE,
   topN: 200, includeWeekends: false, packEnds: true, includeBlackoutDates: true,
-  serviceType: 'pest_control', bufferMinutes: 15,
+  serviceType: 'pest_control', bufferMinutes: 15, customerFacing: true,
 };
 
 const shadowLines = () => logger.info.mock.calls.map(([m]) => m).filter((m) => String(m).startsWith('[slot-slide] shadow'));
@@ -94,6 +95,7 @@ test('gate on: logs the 11 AM slide and leaves the offered slots untouched', asy
   const off = await findAvailableSlots(CALL);
   wireDb();
   process.env.GATE_SLOT_SLIDE_OFFER = 'true';
+  _resetSlideShadowSample();
   const on = await findAvailableSlots(CALL);
 
   expect(on.slots).toEqual(off.slots);
@@ -218,4 +220,22 @@ test('a single-row visit_id does not block a slide', async () => {
   await findAvailableSlots(CALL);
   const payload = JSON.parse(shadowLines()[0].replace('[slot-slide] shadow ', ''));
   expect(payload.slides).toEqual([{ id: 'd', from: '11:00', to: '13:00' }]);
+});
+
+test('a packEnds caller that is not explicitly customerFacing (voice agent) gets no shadow pass', async () => {
+  wireDb();
+  process.env.GATE_SLOT_SLIDE_OFFER = 'true';
+  await findAvailableSlots({ ...CALL, customerFacing: false });
+  expect(shadowLines()).toHaveLength(0);
+  const svcSelect = selects.find((x) => x.table === 'scheduled_services');
+  expect(svcSelect.cols).not.toContain('scheduled_services.status');
+});
+
+test('sampled: a second request inside the interval runs no shadow pass', async () => {
+  process.env.GATE_SLOT_SLIDE_OFFER = 'true';
+  wireDb();
+  await findAvailableSlots(CALL);
+  wireDb();
+  await findAvailableSlots(CALL);
+  expect(shadowLines()).toHaveLength(1);
 });

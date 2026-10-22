@@ -194,3 +194,40 @@ describe('Codex r1 guards', () => {
     expect(second.offers).toEqual([]);
   });
 });
+
+describe('Codex r2 guards', () => {
+  test('an off-hour stop keeps its off-hour admission rule when shifted onto the hour', () => {
+    const seen = [];
+    const admits = (w) => { seen.push(w); return true; };
+    const stops = day().map((x) => (x.id === 'd' ? { ...x, startMin: H(11) + 15, endMin: H(12) + 15 } : x));
+    findSlideOffers({ ...base, stops, admits });
+    const onHourShifts = seen.filter((w) => !w.isNew && w.startMin % 60 === 0 && w.offHour);
+    expect(onHourShifts.length).toBeGreaterThan(0);
+    expect(seen.filter((w) => !w.isNew && !w.offHour && w.startMin % 60 !== 0)).toEqual([]);
+  });
+
+  test('the pair rule is injectable (travel-gap gate off = plain overlap)', () => {
+    // Colocated back-to-back hours with no padding: the travel-gap buffer
+    // (15 min) rejects every plain slot, plain overlap accepts them.
+    const overlapsOnly = (a, b) => a.startMin < b.endMin && b.startMin < a.endMin;
+    const stops = [stop('k', 27.30, 9, { expectedMinutes: 60 })];
+    const args = {
+      ...base, home: at(27.30), newStop: { ...at(27.30), expectedMinutes: 60 }, stops, dayClose: H(11),
+    };
+    expect(findSlideOffers(args).reason).toBe('NO_PLAIN_SLOT');
+    expect(findSlideOffers({ ...args, pairViolates: overlapsOnly }).baseline).not.toBeNull();
+  });
+
+  test('three co-timed members of an unchanged grouped stop do not block the day', () => {
+    const g = (id) => stop(id, 27.32, 12, { movable: false });
+    const stops = [...day().filter((x) => x.id !== 'e'), g('e1'), g('e2'), g('e3')];
+    const result = findSlideOffers({ ...base, stops });
+    expect(result.baseline).not.toBeNull();
+  });
+
+  test('a past deadline stops the search and flags it truncated', () => {
+    const result = findSlideOffers({ ...base, stops: day(), budget: { remaining: 1e9, deadline: Date.now() - 1 } });
+    expect(result.truncated).toBe(true);
+    expect(result.offers).toEqual([]);
+  });
+});
