@@ -7,9 +7,11 @@ jest.mock('../services/admin-alert-compose', () => ({
   raiseAdminAlert: jest.fn(async () => ({ id: 1 })),
 }));
 // The far-conflict Activity row (D1) goes through the ops digest seam; faked.
+const mockDigest = { MAX_ITEM_KEYS: 500 };
 jest.mock('../services/ops-digest', () => ({
   deliverOpsDigest: jest.fn(async () => ({ ok: true, channel: 'in_app', id: 'digest-1' })),
   inAppEnabled: jest.fn(() => true),
+  get MAX_ITEM_KEYS() { return mockDigest.MAX_ITEM_KEYS; },
 }));
 jest.mock('../services/ops-digest-fall-off', () => ({ retireIfClean: jest.fn(async () => 0) }));
 
@@ -290,7 +292,40 @@ describe('needs-a-person notice: far double bookings are listed quietly until 14
     for (let d = 20; d <= 25; d++) notice.collect(bucket, visit(`f${d}`, `2026-11-${d}`), 'no_slot', { kind: 'overlap' });
     expect(await notice.raiseNotices(bucket, { nowDate: NOW, scanComplete: true })).toBe(0);
     expect(raiseAdminAlert).not.toHaveBeenCalled();
-    expect(deliverOpsDigest.mock.calls[0][0].count).toBe(6);
+    // The six far ones, and the near one that could not ring yet: it stays
+    // listed (tracked and re-read) until its notice is written.
+    const digest = deliverOpsDigest.mock.calls[0][0];
+    expect(digest.count).toBe(7);
+    expect(digest.itemKeys).toContain('near:2026-11-03');
+  });
+
+  test('a near conflict whose notice stands is not listed; one whose write failed is', async () => {
+    audit.standingNoticeKeys.mockResolvedValue(new Set(['auto-dispatch-needs-person:stands:2026-11-03']));
+    raiseAdminAlert.mockImplementation(async (_category, spec) => {
+      if (spec.subject.id === 'fails') throw new Error('down');
+      return { id: 1 };
+    });
+    const bucket = new Map();
+    notice.collect(bucket, visit('stands', '2026-11-03'), 'no_slot', { kind: 'overlap' });
+    notice.collect(bucket, visit('fails', '2026-11-04'), 'no_slot', { kind: 'overlap' });
+    notice.collect(bucket, visit('far', '2026-11-20'), 'no_slot', { kind: 'overlap' });
+    await notice.raiseNotices(bucket, { nowDate: NOW, scanComplete: true });
+    expect(deliverOpsDigest.mock.calls[0][0].itemKeys).toEqual(['fails:2026-11-04', 'far:2026-11-20']);
+  });
+
+  test('the list keeps at most the digest key cap, soonest first, and says how many more', async () => {
+    mockDigest.MAX_ITEM_KEYS = 2;
+    try {
+      const bucket = new Map();
+      for (const d of [20, 21, 22, 23]) notice.collect(bucket, visit(`f${d}`, `2026-11-${d}`), 'no_slot', { kind: 'overlap' });
+      await notice.raiseNotices(bucket, { nowDate: NOW, scanComplete: true });
+      const digest = deliverOpsDigest.mock.calls[0][0];
+      expect(digest.count).toBe(4);
+      expect(digest.itemKeys).toEqual(['f20:2026-11-20', 'f21:2026-11-21']);
+      expect(digest.text).toContain('And 2 more after the last date above.');
+    } finally {
+      mockDigest.MAX_ITEM_KEYS = 500;
+    }
   });
 
   test('a run with no far conflict retires the Activity row', async () => {
@@ -351,7 +386,8 @@ describe('needs-a-person notice: far double bookings are listed quietly until 14
     expect(await notice.farListedVisitIds(conn({ metadata: { itemKeys: ['a:2026-11-20', 'b:2026-11-21', 'a:2026-11-27'] } })))
       .toEqual(['a', 'b']);
     expect(await notice.farListedVisitIds(conn(undefined))).toEqual([]);
-    expect(await notice.farListedVisitIds(conn({ metadata: { itemKeys: null, count: 600 } }))).toBeNull();
+    // No stored keys is not a freeze: read as empty; the next complete scan rewrites the list.
+    expect(await notice.farListedVisitIds(conn({ metadata: { itemKeys: null, count: 600 } }))).toEqual([]);
     expect(await notice.farListedVisitIds(conn(null, true))).toBeNull();
   });
 

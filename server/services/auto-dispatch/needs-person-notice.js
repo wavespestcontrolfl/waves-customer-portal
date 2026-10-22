@@ -193,7 +193,11 @@ function splitFar(bucket, nowDate) {
   }
   if (!farOn) return { nearItems: items, farItems: [], farOn };
   const cutoff = farCutoff(nowDate);
-  return { nearItems: items.filter((item) => item.date <= cutoff), farItems: items.filter((item) => item.date > cutoff), farOn };
+  // notifyAdmin writes nothing for an internal test customer, so its visit is
+  // never listed either (it would wait on the list for a notice forever).
+  const { isInternalTestCustomerId } = require('../internal-test-customers');
+  const real = items.filter((item) => !isInternalTestCustomerId(item.customer_id));
+  return { nearItems: items.filter((item) => item.date <= cutoff), farItems: real.filter((item) => item.date > cutoff), farOn };
 }
 
 function farLines(sorted, names, shortDateET) {
@@ -222,8 +226,12 @@ async function farListedVisitIds(conn = require('../../models/db')) {
       .first('metadata');
     if (!row) return [];
     const keys = row.metadata && row.metadata.itemKeys;
-    // A list too long to key (ops-digest MAX_ITEM_KEYS) cannot be re-read.
-    if (!Array.isArray(keys)) return null;
+    // reportFarConflicts never stores more keys than ops-digest keeps; a row
+    // without them is re-read as empty, and the next complete scan rewrites it.
+    if (!Array.isArray(keys)) {
+      logger.warn('[auto-dispatch] far double-booking list has no stored visits; the next complete scan rewrites it');
+      return [];
+    }
     return [...new Set(keys.map((key) => String(key).split(':')[0]).filter(Boolean))];
   } catch (err) {
     logger.warn(`[auto-dispatch] far double-booking list read failed: ${err.message}`);
@@ -251,11 +259,15 @@ async function reportFarConflicts(farItems, { enabled, scanComplete }) {
     }
     const audit = require('./audit');
     const { shortDateET } = require('../admin-alert-names');
-    const sorted = [...farItems].sort((a, b) => (a.date < b.date ? -1 : (a.date > b.date ? 1 : 0)));
+    const all = [...farItems].sort((a, b) => (a.date < b.date ? -1 : (a.date > b.date ? 1 : 0)));
+    // Soonest first, at most the digest's item-key cap: past it ops-digest
+    // stores no keys, and the next run could not re-read the list.
+    const sorted = all.slice(0, require('../ops-digest').MAX_ITEM_KEYS);
     const names = [];
     for (const item of sorted) names.push(await audit.namedVisitAction(item.customer_id, [(who) => `${who}'s visit`], 'A visit'));
     const lines = farLines(sorted, names, shortDateET);
-    const n = sorted.length;
+    if (all.length > sorted.length) lines.push(`And ${all.length - sorted.length} more after the last date above.`);
+    const n = all.length;
     const headline = `Schedule — ${n} double booking${n === 1 ? '' : 's'} more than 2 weeks out`;
     const summary = 'Each one rings as a dispatch alert once it is 2 weeks out.';
     await require('../ops-digest').deliverOpsDigest({
@@ -285,14 +297,28 @@ async function raiseNotices(bucket, { nowDate = new Date(), clearedIds = new Set
   if (!bucket) return 0;
   await closeResolved(bucket, { nowDate, clearedIds });
   const { nearItems, farItems, farOn } = splitFar(bucket, nowDate);
-  await reportFarConflicts(farItems, { enabled: farOn, scanComplete });
-  if (nearItems.length === 0) return 0;
+  const { rang, persisted } = await ringNear(nearItems);
+  // A conflict that just came within FAR_DAYS stays on the list until its
+  // notice is persisted (allowance spent, a failed write): the list keeps it
+  // tracked, and re-read by the next run (index.js conflictsToSettle), even
+  // when the scan no longer loads its visit.
+  const waiting = farOn ? nearItems.filter((item) => !persisted.has(item.key)) : [];
+  await reportFarConflicts([...farItems, ...waiting], { enabled: farOn, scanComplete });
+  return rang;
+}
+
+// The ordinary notices, soonest first inside the shared ring allowance.
+// Returns how many writes rang and the keys whose notice now stands. Never throws.
+async function ringNear(nearItems) {
+  const persisted = new Set();
   let rang = 0;
+  if (!nearItems.length) return { rang, persisted };
   try {
     const audit = require('./audit');
     const { raiseAdminAlert } = require('../admin-alert-compose');
     const { shortDateET } = require('../admin-alert-names');
     const standing = await audit.standingNoticeKeys(`${KEY_PREFIX}%`, RESOLVED_TITLE);
+    for (const item of nearItems) if (standing.has(item.key)) persisted.add(item.key);
     // The allowance counts a key once (audit.recentBudgetKeys), so a key may
     // ring once in 24 hours: one that already rang is not written again,
     // closed-and-reopened or with new wording (Codex #6253 r6). Its notice,
@@ -308,8 +334,10 @@ async function raiseNotices(bucket, { nowDate = new Date(), clearedIds = new Set
       // raiseMissingGeoNotices, Codex #6208 r13 to r16).
       if (left <= 0) break;
       try {
+        const written = await raiseOne(item, raiseAdminAlert, shortDateET);
+        if (written) persisted.add(item.key);
         // Only a write that rang spends a slot.
-        if (audit.noticeRang(await raiseOne(item, raiseAdminAlert, shortDateET))) { left -= 1; rang += 1; }
+        if (audit.noticeRang(written)) { left -= 1; rang += 1; }
       } catch (err) {
         logger.error(`[auto-dispatch] needs-a-person notice failed for ${item.id}: ${err.message}`);
       }
@@ -317,7 +345,7 @@ async function raiseNotices(bucket, { nowDate = new Date(), clearedIds = new Set
   } catch (err) {
     logger.error(`[auto-dispatch] needs-a-person notices failed: ${err.message}`);
   }
-  return rang;
+  return { rang, persisted };
 }
 
 module.exports = {
