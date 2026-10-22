@@ -2648,6 +2648,20 @@ email, the watering text (`lines` only), the hero task and Ask Waves are unchang
 When present on a live payload the displayed one (the note, else the forecast
 sentence) counts toward `reportV2.lead`'s 250-word budget (`leadWords`). No new
 route, query parameter or customer message.
+`GATE_LAWN_WATERING_TEXT_FORECAST` (dark, owner 2026-10-22; needs
+`GATE_LAWN_WATERING_FORECAST`; gate off leaves the payload unchanged, key for key)
+changes when `forecastLine` exists and where it may appear, with no new key: (1) it
+is frozen only when a second source agrees, the NWS hourly forecast giving at least
+one hour inside the same window a rain chance of 60% or more (the chance is never
+printed; the frozen block records `agreement`); (2) a `hold_then_water_in` banner
+whose hold has a printed end and whose `expiresAt` is set (never a hold that waits
+for drying, never a long window or a `later` phase) may carry it, worded for rain
+after the hold ("About ½ inch of rain is forecast between Wed 3 PM and Thu 9 AM. If
+at least ¼ inch falls in that time, it counts as watering in today's treatment. If
+it does not, run the watering above right away."; the frozen block records
+`afterHold: true` and is read only beside such a hold). It stays LIVE VIEW ONLY on
+this route; the lawn watering text, a customer message outside this route, carries
+the same frozen sentence after its steps.
 Amount-only water-in (owner 2026-10-08, permanent and ungated since 2026-10-09;
 requires `GATE_LAWN_WATERING_RULE`): when a water-in is BUILT AT COMPLETION for a
 customer with no sprinkler head type or measured rate on file, its `lines` give

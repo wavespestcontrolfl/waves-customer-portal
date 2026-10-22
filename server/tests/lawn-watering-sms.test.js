@@ -477,3 +477,55 @@ describe('completion route wiring', () => {
     expect(closure).toContain('mergeNotes: mergeRecordNotesKeys');
   });
 });
+
+describe('GATE_LAWN_WATERING_TEXT_FORECAST: the rain sentence closes the text', () => {
+  const ENV_KEYS = ['GATE_LAWN_WATERING_SMS', 'GATE_LAWN_WATERING_RULE', 'GATE_LAWN_WATERING_FORECAST', 'GATE_LAWN_WATERING_TEXT_FORECAST'];
+  let saved;
+  beforeEach(() => {
+    saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
+    for (const k of ENV_KEYS) process.env[k] = 'true';
+  });
+  afterEach(() => {
+    for (const k of ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k];
+    }
+  });
+  const LINE = 'About ½ inch of rain is forecast by Thu 8 AM. If at least ¼ inch has fallen by then, it counts as watering in today’s treatment. If it has not, run the watering above right away.';
+  const frozen = () => ({
+    state: 'water_in',
+    lines: ['Water in today’s treatment with about ¼ inch by Thu 2 PM.', 'Run it even if it is not your usual day.'],
+    completedAt: new Date().toISOString(),
+    waterInBy: new Date(Date.now() + 3600000).toISOString(),
+    waterInInches: 0.25,
+    forecast: { line: LINE, inches: 0.5, source: 'open_meteo', agreement: { source: 'nws', peakChance: 70, hours: 3 } },
+  });
+  const run = async () => {
+    const getTemplate = jest.fn(async (key, vars) => `Watering after today's visit: ${vars.watering_lines}`);
+    const state = {
+      record: { id: 'rec-f', structured_notes: {} },
+      svc: { id: 'svc-f', customer_id: 'cust-f', cust_phone: '+19415550100' },
+      notes: { lawnWateringFreeze: { wateringInstruction: frozen() } },
+      isBackfill: false,
+      deliveryMode: 'auto_send',
+      internalOnly: false,
+      completionTextRequested: true,
+    };
+    await sendLawnWateringSms(state, { db: {}, sendCustomerMessage: jest.fn(async () => ({ sent: true })), getTemplate, mergeNotes: jest.fn(async () => {}), throwIfDeliveryUnverified: (r) => r });
+    return getTemplate.mock.calls[0][1].watering_lines;
+  };
+
+  test('the plan appends the sentence after the steps, in GSM-7 characters', () => {
+    const plan = lawnWateringSmsPlan(planArgs({ instruction: { state: 'water_in', lines: ['One.'] }, forecastLine: LINE }));
+    expect(plan.vars.watering_lines).toBe("One. About 1/2 inch of rain is forecast by Thu 8 AM. If at least 1/4 inch has fallen by then, it counts as watering in today's treatment. If it has not, run the watering above right away.");
+    expect(lawnWateringSmsPlan(planArgs({ instruction: { state: 'water_in', lines: ['One.'] } })).vars.watering_lines).toBe('One.');
+  });
+
+  test('both forecast gates on: the frozen sentence is in the text', async () => {
+    expect(await run()).toBe("Water in today's treatment with about 1/4 inch by Thu 2 PM. Run it even if it is not your usual day. About 1/2 inch of rain is forecast by Thu 8 AM. If at least 1/4 inch has fallen by then, it counts as watering in today's treatment. If it has not, run the watering above right away.");
+  });
+
+  test.each(['GATE_LAWN_WATERING_TEXT_FORECAST', 'GATE_LAWN_WATERING_FORECAST'])('%s off: the text is the steps only, as today', async (key) => {
+    delete process.env[key];
+    expect(await run()).toBe("Water in today's treatment with about 1/4 inch by Thu 2 PM. Run it even if it is not your usual day.");
+  });
+});

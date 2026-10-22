@@ -24,8 +24,11 @@
  */
 
 const logger = require('../logger');
-const { lawnWateringSmsLive, lawnWateringRuleLive } = require('../../config/feature-gates');
+const {
+  lawnWateringSmsLive, lawnWateringRuleLive, lawnWateringForecastLive, lawnWateringTextForecastLive,
+} = require('../../config/feature-gates');
 const { etDateString } = require('../../utils/datetime-et');
+const { frozenForecastLine } = require('./lawn-watering-forecast');
 
 const TEMPLATE_KEY = 'lawn_watering_instruction';
 const PURPOSE = 'lawn_watering_instruction';
@@ -47,14 +50,16 @@ function parseNotes(value) {
   } catch { return {}; }
 }
 
+// Same sentences as the report, with the typographic apostrophe the report
+// uses (U+2019) and the inch fractions (½ ¼ ¾) swapped for ASCII: one such
+// character forces the whole text into UCS-2 and roughly doubles its segments.
+const smsSafe = (line) => line.replace(/\u2019/g, "'").replace(/½/g, '1/2').replace(/¼/g, '1/4').replace(/¾/g, '3/4');
+
 function wateringLinesOf(instruction) {
   if (!instruction || !Array.isArray(instruction.lines)) return [];
-  // Same sentences as the report, with the typographic apostrophe the report
-  // uses (U+2019) and the inch fractions (½ ¼ ¾) swapped for ASCII: one such
-  // character forces the whole text into UCS-2 and roughly doubles its segments.
   return instruction.lines
     .filter((line) => typeof line === 'string' && line.trim() !== '')
-    .map((line) => line.replace(/\u2019/g, "'").replace(/½/g, '1/2').replace(/¼/g, '1/4').replace(/¾/g, '3/4'));
+    .map(smsSafe);
 }
 
 // Has this visit's watering text already been handled (sent, queued, blocked,
@@ -98,6 +103,7 @@ function lawnWateringSmsPlan({
   ruleGateOn = false,
   completedAt = null,
   completionTextRequested = true,
+  forecastLine = null,
   nowMs = Date.now(),
 } = {}) {
   if (!gateOn) return { send: false, reason: 'gate_off' };
@@ -118,7 +124,10 @@ function lawnWateringSmsPlan({
   const lines = wateringLinesOf(instruction);
   if (!lines.length) return { send: false, reason: 'no_lines' };
   if (!wateringInstructionFresh(instruction, completedAt, nowMs)) return { send: false, reason: 'stale' };
-  return { send: true, vars: { watering_lines: lines.join(' ') } };
+  // GATE_LAWN_WATERING_TEXT_FORECAST: the rain sentence frozen with the
+  // instruction (both sources agreed) closes the text, after the steps.
+  const forecast = typeof forecastLine === 'string' && forecastLine.trim() ? smsSafe(forecastLine.trim()) : null;
+  return { send: true, vars: { watering_lines: [...lines, ...(forecast ? [forecast] : [])].join(' ') } };
 }
 
 /**
@@ -155,6 +164,7 @@ async function sendLawnWateringSms(args, deps) {
       ruleGateOn,
       completedAt,
       completionTextRequested: args.completionTextRequested === true,
+      forecastLine: lawnWateringTextForecastLive() && lawnWateringForecastLive() ? frozenForecastLine(instruction) : null,
       nowMs: Date.now(),
     });
     if (!plan.send) return { status: `skip_${plan.reason}` };
