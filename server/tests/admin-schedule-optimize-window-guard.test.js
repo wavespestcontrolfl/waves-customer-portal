@@ -1310,3 +1310,77 @@ test('a short leg list does not count as live evidence', async () => {
   const full = await optimizeRoute({ technicianId: 't1', date: DATE });
   expect(full.status).toBe(200);
 });
+
+// GATE_TECH_START_POINTS part 3 (owner 2026-10-22): one technician on the
+// call starts and ends at their start point; the whole-board call (no
+// technician) stays at the office; the gate off is the office with no extra
+// technician query. Staff-only: the point is never in the response.
+describe('technician start point (GATE_TECH_START_POINTS)', () => {
+  let techQueries;
+  const ENV = process.env.GATE_TECH_START_POINTS;
+  beforeEach(() => {
+    techQueries = [];
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      if (table !== 'technicians') return base(table);
+      const q = {};
+      q.whereNotNull = () => q;
+      q.whereIn = (col, ids) => { techQueries.push(ids); return q; };
+      q.select = async () => [{ id: 't1', start_lat: '5', start_lng: '5' }];
+      return q;
+    });
+    stopsByDate[DATE] = [stop('A', { lng: 1, route_order: 2 }), stop('B', { lng: 2, route_order: 1 })];
+    mockOptimizerOrder(['A', 'B']);
+  });
+  afterEach(() => {
+    if (ENV === undefined) delete process.env.GATE_TECH_START_POINTS;
+    else process.env.GATE_TECH_START_POINTS = ENV;
+  });
+  const startOf = () => {
+    const [, options] = RouteOptimizer.optimizeRoute.mock.calls[0];
+    return [options.startLat, options.startLng];
+  };
+
+  test('gate off: /optimize-route and /optimize start at the office and never read the technician table', async () => {
+    delete process.env.GATE_TECH_START_POINTS;
+    expect((await optimizeRoute({ technicianId: 't1', date: DATE })).status).toBe(200);
+    expect(startOf()).toEqual([0, 0]);
+    RouteOptimizer.optimizeRoute.mockClear();
+    expect((await optimizeAll({ technicianId: 't1', date: DATE })).status).toBe(200);
+    expect(startOf()).toEqual([0, 0]);
+    expect(techQueries).toEqual([]);
+  });
+
+  test('gate on: /optimize-route routes that tech from their start point, one lookup, no coordinates in the response', async () => {
+    process.env.GATE_TECH_START_POINTS = 'true';
+    const { status, body } = await optimizeRoute({ technicianId: 't1', date: DATE });
+    expect(status).toBe(200);
+    expect(startOf()).toEqual([5, 5]);
+    expect(techQueries).toEqual([['t1']]);
+    expect(JSON.stringify(body)).not.toMatch(/start_lat|start_lng|startLat|startLng/);
+  });
+
+  test('gate on: /optimize with one technician uses their start point', async () => {
+    process.env.GATE_TECH_START_POINTS = 'true';
+    expect((await optimizeAll({ technicianId: 't1', date: DATE })).status).toBe(200);
+    expect(startOf()).toEqual([5, 5]);
+    expect(techQueries).toEqual([['t1']]);
+  });
+
+  test('gate on: the whole-board /optimize (no technician) stays at the office and reads no start points', async () => {
+    process.env.GATE_TECH_START_POINTS = 'true';
+    expect((await optimizeAll({ date: DATE })).status).toBe(200);
+    expect(startOf()).toEqual([0, 0]);
+    expect(techQueries).toEqual([]);
+  });
+
+  test('gate on, tech has no usable start point: the office', async () => {
+    process.env.GATE_TECH_START_POINTS = 'true';
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => (table === 'technicians'
+      ? { whereNotNull() { return this; }, whereIn() { return this; }, select: async () => [{ id: 't1', start_lat: 'x', start_lng: '5' }] }
+      : base(table)));
+    expect((await optimizeRoute({ technicianId: 't1', date: DATE })).status).toBe(200);
+    expect(startOf()).toEqual([0, 0]);
+  });
+});

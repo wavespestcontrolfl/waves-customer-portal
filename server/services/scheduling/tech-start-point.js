@@ -50,4 +50,29 @@ async function loadTechStartPoint(conn, technicianId) {
   return techStartPoint(row);
 }
 
-module.exports = { techStartPointsLive, techColumns, techStartPoint, loadTechStartPoint, START_COLUMNS };
+// Every technician's start point in ONE query, for a staff run that routes
+// many techs (the nightly reorder). Map of lowercase tech id -> {lat, lng}
+// holding only techs whose point is usable; anyone absent starts at the
+// office. Gate off: an empty Map and no query. Never log the points.
+async function loadTechStartPoints(conn, technicianIds = null) {
+  if (!techStartPointsLive()) return new Map();
+  const ids = technicianIds ? [...new Set(technicianIds.filter(Boolean))] : null;
+  if (ids && !ids.length) return new Map();
+  const query = conn('technicians').whereNotNull('start_lat').whereNotNull('start_lng');
+  if (ids) query.whereIn('id', ids);
+  const rows = await query.select(['id', ...START_COLUMNS]);
+  const points = new Map();
+  for (const row of rows) {
+    const point = techStartPoint(row);
+    if (point !== RouteOptimizer.HQ) points.set(String(row.id).toLowerCase(), point);
+  }
+  return points;
+}
+
+// A technician's start from a loadTechStartPoints map; the office when the
+// map is absent or does not hold the tech (Postgres hands back lowercase ids).
+function homeFromMap(points, technicianId) {
+  return (points && technicianId != null && points.get(String(technicianId).toLowerCase())) || RouteOptimizer.HQ;
+}
+
+module.exports = { techStartPointsLive, techColumns, techStartPoint, loadTechStartPoint, loadTechStartPoints, homeFromMap, START_COLUMNS };
