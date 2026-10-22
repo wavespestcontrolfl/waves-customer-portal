@@ -629,7 +629,8 @@ function valueEnd(tail) {
 
 // strict (the no-card check, Codex #6369 r41): a value ends at its FIRST separator, so a second
 // clause with no verb ("..., Sam Sample's notes to blank") is still read.
-const VALUE_FIRST_SEPARATOR_RE = /[;\n,]|\b(?:and|then|also)\b/i;
+// A sentence break (". ", "! ", "? ") or a joining symbol ends it too (r42); a period inside a phone or email does not.
+const VALUE_FIRST_SEPARATOR_RE = /[;\n,&+|/]|[.!?](?:\s|$)|\b(?:and|then|also)\b/i;
 function withoutValues(text, strict = false) {
   let rest = text.replace(/“[^”]*”|"[^"]*"/g, ' ');
   let kept = '';
@@ -705,7 +706,8 @@ const WEEKDAY_OR_TIME_RE = /^(?:mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)(?:d
 const REQUEST_WORDS = new Set(['as', 'it', 'its', 'new', 'old', 'done', 'complete', 'completed', 'paid', 'won', 'lost', 'last', 'week', 'up', 'out', 'off', 'into', 'onto', 'about', 'there', 'here', 'right', 'away', 'again', 'too', 'only', 'same', 'other', 'wrong', 'correct', 'bad', 'good', 'missing', 'empty', 'blank']);
 const RECORD_ID_WORDS_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 const knownRequestWord = word => verbForm(word) || NON_PERSON_NAMES.has(word) || SUBJECT_FILLER.has(word) || SUBJECT_END.has(word)
-  || SUBJECT_PRONOUNS.has(word) || CONTACT_CLAUSE_WORDS.has(word) || REQUEST_WORDS.has(word) || WEEKDAY_OR_TIME_RE.test(word) || /^\d+(?:st|nd|rd|th)?$/.test(word);
+  || SUBJECT_PRONOUNS.has(word) || CONTACT_CLAUSE_WORDS.has(word) || REQUEST_WORDS.has(word) || WEEKDAY_OR_TIME_RE.test(word) || /^\d{1,4}(?:st|nd|rd|th)?$/.test(word);
+// A five-digit number may be a ZIP code: place evidence, so it is NOT a known word (Codex #6369 r42).
 
 // THE one check for every no-card path (Codex #6369 r39, after r33-r38 each found one more name form):
 // strip field values, quotes, contacts and record ids, and the ONE span that names `customer` (the

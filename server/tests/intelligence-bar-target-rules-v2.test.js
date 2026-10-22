@@ -814,6 +814,17 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(await viewingBob("update Bob Example's phone to 941-555-0100, Sam Sample's notes to blank")).toBe(false);
     expect(await viewingBob('update the phone to 941-555-0100 and Jhon notes to blank')).toBe(false);
     expect(await viewingBob('update the notes to gate code 5, call first')).toBe(true);
+    // A second sentence or a joining symbol ends a value too; a ZIP code is a place (r42).
+    expect(await viewingBob("update the phone to 941-555-0100. Sam Sample's notes to blank")).toBe(false);
+    expect(await viewingBob("update the phone to 941-555-0100 & Sam Sample's notes to blank")).toBe(false);
+    expect(await viewingBob('update the phone to 941.555.0150')).toBe(true);
+    expect(await viewingBob('update the email to bob.example@example.test')).toBe(true);
+    expect(await viewingBob('update the notes in 34285')).toBe(false);
+    expect(await grounded('update Alice Sample in 34285 notes')).toEqual([]);
+    customers = [row(100, 'Bob', 'Example', '9415550100')];
+    expect(await grounded('fix the notes for 941-555-0100 in 34285')).toEqual([]);
+    expect(await grounded('fix the notes for 941-555-0100')).toEqual([id(100)]);
+    customers = [row(100, 'Bob', 'Example', '9415550100'), row(101, 'Alice', 'Sample', '9415550101'), row(102, 'Carl', 'Other', '9415550102')];
   });
 
   test('gate on: a city that narrows the group is a pick only when a typed phone does not name an outsider (Codex #6369 r40)', async () => {
