@@ -54,7 +54,7 @@ jest.mock('../services/service-completion-profiles', () => ({
 const fs = require('fs');
 const path = require('path');
 const {
-  blogPostAllowedFor, searchReportBlogPosts, resolveReportBlogPostPick, frozenBlogPost, searchTerms, registryLink, wordsOnTheSite,
+  blogPostAllowedFor, searchReportBlogPosts, resolveReportBlogPostPick, frozenBlogPost, frozenBlogPostWithImage, searchTerms, registryLink, wordsOnTheSite,
 } = require('../services/service-report/report-blog-post');
 const router = require('../routes/admin-dispatch');
 
@@ -904,9 +904,49 @@ describe('completion freeze contract', () => {
 describe('report payload', () => {
   const reportSource = fs.readFileSync(path.join(__dirname, '../services/service-report/report-data.js'), 'utf8');
   test('the frozen post is read back through the host check and shown only while the gate is on', () => {
-    expect(reportSource).toMatch(/blogPost: featureGates\.reportBlogPostLive\?\.\(\) === true\s*\?\s*require\('\.\/report-blog-post'\)\.frozenBlogPost\(structured\.blogPost\)\s*:\s*null,/);
+    expect(reportSource).toMatch(/blogPost: featureGates\.reportBlogPostLive\?\.\(\) === true\s*\?\s*await require\('\.\/report-blog-post'\)\.frozenBlogPostWithImage\(knex, structured\.blogPost\)\s*:\s*null,/);
     // Never onto the protocol object the payload also returns (pre-push P0
     // on #5547; the whole payload is pinned in report-blog-post-payload.test.js).
     expect(reportSource).not.toMatch(/protocol\??\.blogPost/);
+  });
+});
+
+// Owner 2026-10-22: the report's blog card shows the post's main image, read
+// from the deployed frontmatter in the content registry when the report loads.
+describe('frozenBlogPostWithImage', () => {
+  const ID = '0b9f3a52-6c1e-4f39-9a51-7d2a7c4e1f10';
+  const FROZEN = { id: ID, title: 'Midges by the lake', url: 'https://www.wavespestcontrol.com/pest-control/midges/' };
+  const knexWith = (row, calls = []) => (table) => ({
+    where(criteria) { calls.push([table, criteria]); return this; },
+    first: async () => (typeof row === 'function' ? row() : row),
+  });
+
+  test('a relative hero image becomes an absolute URL on the site host', async () => {
+    const calls = [];
+    const row = { id: ID, metadata: { frontmatter: { hero_image: { src: '/images/2025/11/midge.webp' } } } };
+    const post = await frozenBlogPostWithImage(knexWith(row, calls), FROZEN);
+    expect(post).toEqual({ title: FROZEN.title, url: FROZEN.url, imageUrl: 'https://www.wavespestcontrol.com/images/2025/11/midge.webp' });
+    expect(calls).toEqual([['content_registry', { id: ID }]]);
+  });
+
+  test('falls back to og_image, and reads the Astro side of a merged row', async () => {
+    const row = { metadata: { astro: { frontmatter: { og_image: 'https://wavespestcontrol.com/images/og.webp' } } } };
+    const post = await frozenBlogPostWithImage(knexWith(row), FROZEN);
+    expect(post.imageUrl).toBe('https://wavespestcontrol.com/images/og.webp');
+  });
+
+  test('an image off the site host, a missing row, or a read error leaves no image', async () => {
+    const offSite = { metadata: { frontmatter: { hero_image: { src: 'https://evil.example/x.webp' } } } };
+    expect(await frozenBlogPostWithImage(knexWith(offSite), FROZEN)).toEqual({ title: FROZEN.title, url: FROZEN.url });
+    expect(await frozenBlogPostWithImage(knexWith(null), FROZEN)).toEqual({ title: FROZEN.title, url: FROZEN.url });
+    const failing = knexWith(() => { throw new Error('db down'); });
+    expect(await frozenBlogPostWithImage(failing, FROZEN)).toEqual({ title: FROZEN.title, url: FROZEN.url });
+  });
+
+  test('no read for a pick without a registry id, and null for a pick the host check refuses', async () => {
+    const calls = [];
+    expect(await frozenBlogPostWithImage(knexWith(null, calls), { ...FROZEN, id: 'post-1' })).toEqual({ title: FROZEN.title, url: FROZEN.url });
+    expect(calls).toEqual([]);
+    expect(await frozenBlogPostWithImage(knexWith(null, calls), { ...FROZEN, url: 'https://evil.example/' })).toBeNull();
   });
 });

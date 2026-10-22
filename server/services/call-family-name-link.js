@@ -45,6 +45,12 @@
  * else. More than MAX_OWN_CANDIDATES accounts suggests nothing. This basis is tried before the
  * caller's-own-account bases: a spoken number is stronger evidence than a first name.
  *
+ * An office callback's voicemail number (GATE_CALLBACK_SPOKEN_NUMBER_LINK, dark; basis callback_spoken_number). The
+ * admin "Call back" dials the voicemail's caller ID, but the voicemail said another number to call, and exactly
+ * one live account has that number as its PRIMARY phone under the same first name (the rules are in
+ * call-recording-processor findCustomerViaCallbackSpokenNumber). Same suggest-only card; the pass also mints no
+ * customer around it. Anyone can name any number in a voicemail, so nothing is linked.
+ *
  * No card: the caller is not a family member, no full name was named, a voicemail
  * (a one-sided transcription never names an account), an outbound call, a call that
  * is already linked or was unlinked on purpose, a number some live account already
@@ -147,6 +153,7 @@ const OWN_ACCOUNT_REASONS = {
   caller_full_name: 'An account carries this caller\'s exact name under another phone number. Confirm it is the same person, then link the call. A customer record may exist under the caller: merge it on the Duplicates page.',
   caller_first_name_recent_visit: 'An account with this caller\'s first name has a visit on the calendar close to this call. Confirm it is the same household, then link the call.',
   contact_phone_on_account: 'The caller gave a phone number for another person, and an account carries that number. Confirm the caller is calling for this account, then link the call. A lead or customer record may exist under the caller: merge it on the Duplicates page.',
+  callback_spoken_number: 'The office called this voicemail back on the number it came from, but the caller had said another number to call. An account has that number as its main phone, under the same first name. Anyone can say any number in a voicemail, so nothing was linked or sent. Confirm it is the same person, then link the call.',
   caller_first_name_city_recent: 'The caller gave a first name only. An account created in the last two weeks has that first name in the same city. Confirm it is the same person, then link the call. A customer record may exist under the caller: merge it on the Duplicates page.',
 };
 
@@ -327,8 +334,43 @@ async function matchContactPhoneAccounts({ call, extracted, v2CanonicalExtractio
 
 // What the card suggests for this call: the family rule first, then a number the caller gave for
 // another person, else the caller's own account.
+/**
+ * An office callback's voicemail number (GATE_CALLBACK_SPOKEN_NUMBER_LINK): the OUTBOUND callback dialed
+ * the voicemail's caller ID, but the voicemail said another number to call, and exactly one live account
+ * has that number as its PRIMARY phone under the same first name. The rules live in
+ * findCustomerViaCallbackSpokenNumber (admin callback of an inbound voicemail from the dialed number,
+ * gate on, no operator link, number not a near miss of the dialed one). Read-only.
+ */
+async function matchCallbackSpokenNumberAccount({ call, extracted, statedAddress, phone = null, contactLookupOpts = {}, conn = db }) {
+  let override = null;
+  try {
+    const meta = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
+    override = meta && meta.customer_link_override;
+  } catch { override = null; }
+  const customerLinkOverride = override && typeof override === 'object' && 'customer_id' in override ? override : null;
+  const processor = require('./call-recording-processor');
+  const found = await processor.findCustomerViaCallbackSpokenNumber(call, extracted, { db: conn, customerLinkOverride });
+  if (!found) return null;
+  // Only while the pass's normal lookup on the contact number finds nobody: once that number links a
+  // customer, or is an ambiguous shared number, the suggestion is moot and an OPEN card for it retires
+  // (the same lookup with the same address inputs the pass runs first; this runs for open cards too,
+  // which skip the known-number check suggestFamilyAccounts applies to new ones).
+  if (phone) {
+    const ambiguity = {};
+    const normal = await processor.findCustomerForCallContact(phone, extracted, { ...contactLookupOpts, db: conn, multiMatchOut: ambiguity });
+    if (normal || ambiguity.candidates) return null;
+  }
+  return {
+    basis: 'callback_spoken_number',
+    more_accounts: false,
+    contact_phones: [found.phone],
+    candidates: [{ ...ownCandidate(found), address_matches: statedAddressCorroborates(statedAddress, found), matched_phone: found.phone }],
+  };
+}
+
 async function matchSuggestedAccounts(args) {
-  return (await matchFamilyAccounts(args)) || (await matchContactPhoneAccounts(args)) || matchCallerOwnAccounts(args);
+  return (await matchFamilyAccounts(args)) || (await matchContactPhoneAccounts(args))
+    || (await matchCallbackSpokenNumberAccount(args)) || matchCallerOwnAccounts(args);
 }
 
 /**
@@ -375,8 +417,13 @@ function cardPayload({ suggestion, extracted, call, phone }) {
     // Set only for contact_phone_on_account: the spoken number(s) an account carries.
     matched_contact_phones: suggestion.contact_phones || null,
     caller_name: [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null,
-    caller_phone: call.from_phone || null,
-    caller_callback_phone: phone && phone !== call.from_phone ? phone : null,
+    // On an office callback the call's own line is ours, not the caller's.
+    caller_phone: suggestion.basis === 'callback_spoken_number' ? null : call.from_phone || null,
+    // The callback basis shows the number the office actually dialed (the resolved contact phone can be
+    // the spoken number).
+    caller_callback_phone: suggestion.basis === 'callback_spoken_number'
+      ? call.to_phone || null
+      : (phone && phone !== call.from_phone ? phone : null),
     holder_candidates: suggestion.candidates,
     more_accounts: suggestion.more_accounts,
     customer_ids: suggestion.candidates.map((c) => c.id),
@@ -407,20 +454,43 @@ async function retireOpenCard(trx, callLogId) {
 }
 
 /**
+ * Retire this call's OPEN card when it carries the callback_spoken_number basis. The pass files the card
+ * before its authoritative contact-number lookup (Step 3), in separate transactions: when that lookup then
+ * links the call (the dialed number gained an owner meanwhile) or finds a shared number, the card would stay
+ * open recommending a relink that conflicts with the call's link. Same lock and token fence as the filer;
+ * other bases and an in_progress card are never touched. Fail-open: an error leaves the card as it was.
+ */
+async function retireCallbackSpokenNumberCard({ callLogId, procToken = null, conn = db }) {
+  try {
+    await conn.transaction(async (trx) => {
+      await lockTriageCall(trx, callLogId);
+      if (procToken && !(await trx('call_log').where({ id: callLogId, processing_token: procToken }).forUpdate().first('id'))) return;
+      const open = await trx('triage_items')
+        .where({ call_log_id: callLogId, reason_code: CARD_REASON_CODE, status: 'open' })
+        .whereRaw("payload->>'match_basis' = 'callback_spoken_number'")
+        .first('id');
+      if (open) await retireOpenCard(trx, callLogId);
+    });
+  } catch (e) {
+    logger.warn(`[call-family-link] callback card retire skipped for call ${callLogId}: ${e.code || e.name || 'error'}`);
+  }
+}
+
+/**
  * File, refresh or retire the card for one processed call (derived purely from the extraction, so a
  * reprocess keeps it true). Runs under the per-call triage lock and the processing-token fence; an
  * in_progress card (an operator is on it) is never touched. Fail-open: an error leaves the call exactly as
  * it was.
  */
 async function fileFamilyAccountCard({
-  call, procToken = null, extracted, v2CanonicalExtraction, statedAddress, phone, isOutbound, conn = db,
+  call, procToken = null, extracted, v2CanonicalExtraction, statedAddress, phone, isOutbound, contactLookupOpts = {}, report = null, conn = db,
 }) {
   try {
     let suggestion = null;
     await conn.transaction(async (trx) => {
       await lockTriageCall(trx, call.id);
       if (procToken && !(await trx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id'))) return;
-      const args = { call, extracted, v2CanonicalExtraction, statedAddress, isOutbound, conn: trx };
+      const args = { call, extracted, v2CanonicalExtraction, statedAddress, isOutbound, phone, contactLookupOpts, conn: trx };
       const match = await matchSuggestedAccounts(args);
       const open = await trx('triage_items').where({ call_log_id: call.id, reason_code: CARD_REASON_CODE, status: 'open' }).first('id');
       if (!match) {
@@ -446,8 +516,13 @@ async function fileFamilyAccountCard({
       // The call counts as review-open while this card is open (nothing else in the pass opens it).
       await syncCallReviewStatus(trx, call.id);
     });
+    // The card is durable (filed, refreshed, or already in an operator's hands): say which basis it carries.
+    if (report && suggestion) report.filed = suggestion.basis || 'family';
     return suggestion;
   } catch (e) {
+    // `report` lets a caller that must not proceed on a lost card (the callback basis) tell a failed write
+    // from "no card owed".
+    if (report) report.failed = e.code || e.name || 'error';
     logger.warn(`[call-family-link] card skipped for call ${call.id}: ${e.code || e.name || 'error'}`);
     return null;
   }
@@ -467,10 +542,13 @@ module.exports = {
   matchFamilyAccounts,
   matchCallerOwnAccounts,
   matchContactPhoneAccounts,
+  matchCallbackSpokenNumberAccount,
   contactPhones,
   RECENT_DAYS,
   MAX_OWN_CANDIDATES,
   OWN_ACCOUNT_REASONS,
   suggestFamilyAccounts,
+  operatorClosedCard,
   fileFamilyAccountCard,
+  retireCallbackSpokenNumberCard,
 };

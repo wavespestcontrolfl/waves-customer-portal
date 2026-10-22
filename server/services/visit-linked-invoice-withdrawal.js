@@ -165,6 +165,17 @@ async function readOwnerState(database, invoice, visitId, { lock, pending }) {
 const linkedVisitOf = (invoice, trx) => require('./invoice').linkedScheduledServiceId(invoice, trx);
 const stampedPayerOf = (error) => /^payer_billed:([^:]+)/.exec(String(error || ''))?.[1] || null;
 
+// The third-party payer that owns this invoice's visit RIGHT NOW (null: self-pay, no visit, or no live payer). Read-only, no locks,
+// and for an invoice in ANY status: ownerTransitions skips terminal invoices (a voided one), but an unvoid restores a draft and
+// then withdraws it from the customer when this answer is a payer, so a caller deciding whether a restore is safe needs the answer
+// before the restore. A SUPERSET of what the withdrawal acts on (it also skips annual-prepay and statement invoices).
+async function liveVisitPayerOf(database, invoice) {
+  const visitId = await linkedVisitOf(invoice, database);
+  if (!visitId) return null;
+  const { state, activeBefore } = await readOwnerState(database, invoice, visitId, { lock: false, pending: null });
+  return ownerOf(state, activeBefore);
+}
+
 async function ownerTransitions(database, scope = {}, { mode = 'post', pending = null, lock = false, stamped = 'unstamped', stampedForPayer = null } = {}) {
   if (scopeIsEmpty(scope)) return [];
   const query = applyScope(database, visitLinkedBase(database, TERMINAL), stamped === 'stamped' ? { ...scope, payerId: null } : scope);
@@ -405,4 +416,4 @@ async function linkedInvoiceChargeInFlight(database, scope = {}, { pending = nul
   return false;
 }
 
-module.exports = { visitOwnerTransitions, lockLinkedOwnershipRows, recordOwnerPlan, ownerTransitions, ownerOf, linkedSessionInvoiceIds, linkedVisitIdsForCustomers, withdrawLinkedInvoicesForOwner, reconcileLinkedInvoices, linkedInvoiceChargeInFlight };
+module.exports = { liveVisitPayerOf, visitOwnerTransitions, lockLinkedOwnershipRows, recordOwnerPlan, ownerTransitions, ownerOf, linkedSessionInvoiceIds, linkedVisitIdsForCustomers, withdrawLinkedInvoicesForOwner, reconcileLinkedInvoices, linkedInvoiceChargeInFlight };

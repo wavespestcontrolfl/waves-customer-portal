@@ -567,15 +567,19 @@ async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = 
       }
     }
   }
-  if (!invoiceRow.scheduled_service_id) return;
+  if (!invoiceRow.scheduled_service_id && !invoiceRow.service_record_id) return;
   let svc = null;
   try {
+    // The visit, also when the invoice reaches it only through its service record (a post-completion invoice voided by a
+    // cancellation, voidOpenInvoicesForCancelledService): every visit guard below applies to it. A failed read refuses.
+    const visitId = await linkedScheduledServiceId(invoiceRow, conn);
+    if (!visitId) return;
     // The in-transaction pass takes the visit row lock (Codex #3493 r8): a
     // concurrent writer holding the row (coverage stamping, cancellation)
     // is uncommitted-invisible to a plain MVCC read, so a lockless second
     // read could pass on the stale version while both commit. FOR UPDATE
     // waits for the in-flight writer and reads the committed result.
-    let q = conn("scheduled_services").where({ id: invoiceRow.scheduled_service_id });
+    let q = conn("scheduled_services").where({ id: visitId });
     if (lock) q = q.forUpdate();
     svc = await q.first();
   } catch (err) {
@@ -783,6 +787,237 @@ function applyVoidExpected(q, expected) {
   if (expected.paymentIntentId) q.where("stripe_payment_intent_id", expected.paymentIntentId);
   else q.whereNull("stripe_payment_intent_id");
   return q;
+}
+
+// THE contract of the Intelligence Bar's unvoid card: on the bar's path an unvoid restores the invoice ROW and nothing else. The
+// restore (unvoidInvoice) also does other work, and every case of it is listed here as a refusal reason, in ONE function, read at
+// preview, at Confirm and again inside the restore on the row its UPDATE holds (a match rolls the restore back). Read-only.
+//   packet_invoice / payer_billed  Bill-To: for a packet invoice the restore re-judges the CUSTOMER's withdrawn packet invoices
+//                                  (reconcileWithdrawnPacketInvoices, withdrawPacketInvoicesForOwner), which can release one to the
+//                                  send queue; that pass runs only when the restored invoice itself carries
+//                                  visit_completion_packet_id, so refusing every packet, payer-billed or payer_billed-stamped
+//                                  invoice keeps it from ever running on the bar's path.
+//   payer_statement                the restore rolls the invoice back into its payer statement's total.
+//   linked_payer_owner             a visit-linked invoice whose visit a payer owns RIGHT NOW (live: visit / customer payer, active, no
+//                                  self-pay override) is withdrawn from the customer by the restore, so it is not collectible after it;
+//                                  checked from the live owner, so it holds at preview while the invoice is still void.
+//   queued_message                 the restore cancels (and hands to terminal hooks, which can re-queue an invoice text) every
+//                                  scheduled / sending text for the invoice, and refuses mid-finalization ones: ANY sms_log row of
+//                                  ANY entry point tied to the invoice that is scheduled, sending or finalize-pending.
+//   followup_sequence              the restore stops an active / autopay_hold reminder sequence.
+//   membership_dues                the restore re-claims the dues month and closes its alert.
+//   setup_fee                      retireRodentSetupObligationForReinstatedInvoice can retire a sibling setup invoice, clear a visit's
+//                                  pending setup fee, close an office handoff alert or void a replacement draft: the setup line, the
+//                                  durable claim, a handoff alert naming the invoice, a live rebill marker.
+// A new side effect of the restore belongs here as a new reason, not as a one-off check elsewhere.
+async function unvoidObligationReason(conn, invoice) {
+  // From the row itself (no read).
+  if (invoice.visit_completion_packet_id) return "packet_invoice";
+  if (invoice.payer_id || /^payer_billed:/.test(String(invoice.scheduled_send_error || ""))) return "payer_billed";
+  if (invoice.payer_statement_id) return "payer_statement";
+  const lines = parseInvoiceLineItems(invoice.line_items);
+  if (lines.some((li) => li && li[MEMBERSHIP_DUES_LINE_KEY])) return "membership_dues";
+  if (lines.some((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()))) return "setup_fee";
+  // From the records the restore also touches.
+  if (invoice.scheduled_service_id || invoice.service_record_id) {
+    const Linked = require("./visit-linked-invoice-withdrawal");
+    // Not ownerTransitions: that skips a VOID invoice, which is exactly what the card is asked about at preview.
+    if (await Linked.liveVisitPayerOf(conn, invoice)) return "linked_payer_owner";
+  }
+  if (await conn("sms_log")
+    .whereRaw("metadata->>'invoice_id' = ?", [String(invoice.id)])
+    .where(function queuedOrFinalizing() {
+      this.whereIn("status", ["scheduled", "sending"]).orWhereRaw("(status = 'sent' AND metadata->>'finalize_pending' = 'true')");
+    })
+    .first("id")) return "queued_message";
+  if (await conn("invoice_followup_sequences").where({ invoice_id: invoice.id }).whereIn("status", ["active", "autopay_hold"]).first("id")) return "followup_sequence";
+  if (await conn("setup_fee_claims").where({ invoice_id: invoice.id }).first("id")) return "setup_fee";
+  if (await conn("dispatch_alerts").where({ type: "setup_fee_office_billing" }).whereRaw("payload->>'sourceInvoiceId' = ?", [String(invoice.id)]).first("id")) return "setup_fee";
+  if (await conn("invoices").where("notes", "like", `%${rodentSetupRebillMarker(invoice.id)}%`).whereNotIn("status", ["void", "cancelled", "canceled", "refunded"]).first("id")) return "setup_fee";
+  return null;
+}
+
+const UNVOID_PREPAY_TERM_TEXT = "Cannot unvoid — this invoice belongs to an annual prepay term; manage it from Annual prepay instead";
+const UNVOID_FINALIZED_STATEMENT_TEXT = "This invoice is on a finalized payer statement — bill it as a new line on the next statement instead of restoring a voided one";
+
+// The annual prepay term that owns the invoice as its prepay invoice, read on `conn`. Fails CLOSED on a read error (Codex #3493).
+// The denormalized annual_prepay_term_id stamp is NOT a reliable test on its own: it is null on some prod prepay invoices (see the
+// pending-completion sweep in annual-prepay-renewals, which compares against the TERM's prepay_invoice_id for the same reason). A
+// term's own prepay invoice restored as an ordinary draft would collect the annual's money beside (or instead of) the term's coverage.
+async function assertNoOwningPrepayTerm(conn, id) {
+  let owningTerm = null;
+  try {
+    owningTerm = await conn("annual_prepay_terms").where({ prepay_invoice_id: id }).first("id");
+  } catch (err) {
+    throw new Error(`Could not verify the annual prepay term link — refusing to unvoid (${err.message})`);
+  }
+  if (owningTerm) throw new Error(UNVOID_PREPAY_TERM_TEXT);
+}
+
+// What the voided row itself says about whether it may be restored as an ordinary draft, in the order unvoidInvoice has always
+// judged it: annual prepay term (stamp, then the term's own lookup), conversion-minted annual charge, prepay-switch supersede
+// marker, returned deposit credit, annual-coverage settlement stamp.
+async function assertUnvoidRowShape(current) {
+  if (current.annual_prepay_term_id) throw new Error(UNVOID_PREPAY_TERM_TEXT);
+  await assertNoOwningPrepayTerm(db, current.id);
+  // A conversion-minted annual prepay invoice whose TERM creation failed was voided with NO term row and NO invoice stamp
+  // (estimate-converter's fail-closed catch) — the guards above can't see it, but restoring it would collect an annual charge
+  // that activates no coverage. The converter titles these invoices distinctively; refuse on the title and route the rebuild
+  // through the annual-prepay flow (Codex #3493 r4).
+  if (/annual prepay/i.test(String(current.title || ""))) {
+    throw new Error("Cannot unvoid — this is an annual prepay charge; rebuild it through Annual prepay so coverage activates with the payment");
+  }
+  // A void carrying the prepay-switch marker was deliberately superseded by an annual prepay: its guarded restore path
+  // (restoreSwitchSupersededInvoicesForPrepay) re-checks coverage and partial re-billing when the prepay is reversed/refunded.
+  // Restoring it here while the prepay stays active would double-bill the covered visit (Codex #3493).
+  if (/\[prepay-switch-superseded-by:[^\]]+\]/.test(String(current.notes || ""))) {
+    throw new Error("Cannot unvoid — this invoice was superseded by an annual prepay switch; reversing that prepay (Annual prepay) restores it with the coverage checks applied");
+  }
+  if (invoiceHasDepositCreditLine(current)) {
+    throw new Error("Cannot unvoid — the deposit credit on this invoice was returned to the customer's deposit when it was voided; create a replacement invoice so the credit re-applies cleanly");
+  }
+  // A voided invoice still carrying the annual-coverage settlement stamp was settled as NON-CASH coverage before the void — its
+  // paid/prepaid stamps and 'annual_prepay_covered' follow-up stop are retained, and the coverage reopen path ignores
+  // non-'prepaid' rows. Restoring this shape would make a covered charge collectible with reminders permanently suppressed
+  // (Codex #3493 r14).
+  if (current.annual_prepay_covered_term_id) {
+    throw new Error("Cannot unvoid — this invoice was settled as annual prepay coverage before it was voided; manage it from Annual prepay instead");
+  }
+}
+
+// Phase 2 mirror of voidInvoice: a voided line was EXCLUDED from its statement's rollup — restoring it under a finalized/sent
+// statement would change the document under the frozen total. Run once as the fast pre-check and again inside the restore
+// transaction with `lock` (a concurrent close could finalize the statement between the two).
+async function assertUnvoidStatementOpen(conn, statementId, lock) {
+  if (!statementId) return;
+  const query = conn("payer_statements").where({ id: statementId });
+  const stmt = await (lock ? query.forUpdate() : query).first("status");
+  if (stmt && stmt.status !== "open") throw new Error(UNVOID_FINALIZED_STATEMENT_TEXT);
+}
+
+// Stale pay-session stamp triage (fail closed, mirrors voidInvoice's): void cancels the open PaymentIntent but keeps the stamp
+// on this row. Verify it is really dead before clearing — restoring a collectible invoice beside a live client secret would let
+// a stale pay page charge an amount nothing reconciles.
+async function assertUnvoidSessionDead(current) {
+  if (!current.stripe_payment_intent_id) return;
+  let pi;
+  try {
+    pi = await require("./stripe").retrievePaymentIntent(current.stripe_payment_intent_id);
+  } catch (e) {
+    throw new Error(`Open payment session ${current.stripe_payment_intent_id} could not be verified (${e.message}); resolve it before unvoiding`);
+  }
+  if (!pi) {
+    throw new Error(`Open payment session ${current.stripe_payment_intent_id} could not be verified (payment service unavailable); resolve it before unvoiding`);
+  }
+  if (pi.status !== "canceled") {
+    throw new Error(`This invoice still has a live payment session (${pi.status}); resolve it before unvoiding`);
+  }
+}
+
+// OWNERSHIP ROWS FIRST, before the unvoid transaction touches the invoice (local audit P0 + the earlier lock-order P1): the
+// restore must decide live Bill-To ownership ATOMICALLY — a collectible draft committed ahead of a separate reconciliation can
+// be paid by the homeowner in between, and a swallowed failure would leave it collectible for good — and the withdrawal it may
+// need takes customer and member rows, which every Bill-To writer takes before the invoice. Taking them first puts this restore
+// on that same order; the reconciliation after the restore is then re-entrant on rows this transaction already holds.
+// The invoice's ownership links are re-read HERE (a plain read, no lock): the outer `current` can predate a customer merge that
+// moved the invoice and its visit, and locking that stale customer would take the winner's lock only later, while holding the
+// invoice. The chain below is built from the fresh row. Returns that row.
+async function lockUnvoidOwnershipRows(trx, id) {
+  const own = await trx("invoices").where({ id }).first("customer_id", "scheduled_service_id", "service_record_id", "visit_completion_packet_id");
+  if (!own) throw new Error("Invoice not found — re-check and retry");
+  if (own.visit_completion_packet_id && own.customer_id) {
+    await trx("customers").where({ id: own.customer_id }).forShare().first("id");
+    const billedMembers = await trx("visit_completion_packet_items")
+      .where({ packet_id: own.visit_completion_packet_id })
+      .pluck("scheduled_service_id");
+    if (billedMembers.length) {
+      await trx("scheduled_services").whereIn("id", billedMembers.filter(Boolean)).orderBy("id").forShare().select("id");
+    }
+  }
+  // A restored invoice WITHOUT a packet (a service-record or direct visit link, or no visit at all, owned through the
+  // customer default) takes the same rows in the same order: the withdrawal after the restore resolves its live owner under them.
+  if (!own.visit_completion_packet_id && own.customer_id) {
+    // customer -> visit -> every payer row the resolver reads (FOR SHARE), the order every Bill-To writer takes, BEFORE the
+    // invoice row is updated.
+    await require("./visit-linked-invoice-withdrawal").lockLinkedOwnershipRows(trx, own);
+  }
+  return own;
+}
+
+// The bar only: a setup-fee or dues obligation that exists by the time the restore holds the invoice row refuses it (rolls
+// back); the page restores those with its own handling.
+async function assertBarUnvoidIsRowOnly(trx, updated, expected) {
+  if (!expected || !(await unvoidObligationReason(trx, updated))) return;
+  throw new Error("Cannot unvoid from the bar — the restore would do more than restore the invoice (cancel or hand over queued messages, stop reminders, re-judge Bill-To, or change a setup fee, a dues month or a statement); restore it from the Invoices page");
+}
+
+// The preserved withdrawal stamp is re-judged against LIVE ownership (Codex #4311 r30 P1): a withdrawn invoice that was voided is
+// skipped by the Bill-To reconciliation (void is terminal), so a payer cleared in the meantime would leave the restored self-pay
+// draft stamped — unpayable and unschedulable for good. The shared reconciliation releases it when the packet is self-pay again
+// and keeps the stamp (re-pointed if the payer changed) while a payer still owes it.
+// EVERY restored packet invoice is re-judged HERE, stamped or not, and the verdict commits with the restore (local audit P0): an
+// invoice voided BEFORE a payer was assigned carries no stamp — the withdrawal skips terminal rows — so the unvoid would otherwise
+// hand the homeowner a collectible link for debt that is now payer-owned, and a payer sitting on a SIBLING billed member escapes
+// the payment rail's representative-service lookup entirely. The ownership rows were taken first (lockUnvoidOwnershipRows), so
+// both calls are re-entrant on the established order.
+async function rejudgeRestoredInvoiceOwnership(trx, updated, id) {
+  if (updated.visit_completion_packet_id) {
+    const Packets = require("./visit-completion-packets");
+    // A stamp that outlived the void is re-pointed or released…
+    await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: updated.customer_id, includeLinked: false });
+    // …and a restored row whose live owner is a payer is withdrawn before it can ever be collected.
+    await Packets.withdrawPacketInvoicesForOwner(trx, { customerId: updated.customer_id, includeLinked: false });
+  } else if (updated.customer_id) {
+    // The same re-judgement for a restored invoice with no packet: a payer assigned to its visit (or, for one with no visit,
+    // to the customer) while it sat void must not hand the homeowner a collectible link on restore.
+    const Linked = require("./visit-linked-invoice-withdrawal");
+    await Linked.reconcileLinkedInvoices(trx, { invoiceId: id }, { requeue: false });
+    await Linked.withdrawLinkedInvoicesForOwner(trx, { invoiceId: id });
+  }
+}
+
+// Money-landed-after-void guard's read and refusal (see unvoidInvoice). Rolling back beats restoring beside collected money.
+async function assertNoPaymentAppliedAfterVoid(trx, updated) {
+  const appliedPayment = await trx("payments")
+    .whereIn("status", ["paid", "processing"])
+    .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [updated.id])
+    .first("id");
+  if (updated.payment_recorded_at || appliedPayment) {
+    throw new Error(
+      `Cannot unvoid an invoice with payment already applied (${appliedPayment ? `payment ${appliedPayment.id}` : "payment recorded"})`,
+    );
+  }
+}
+
+// In-flight dunning touch fence (Codex #3493 r9; shared by the edit path and the unvoid restore): fireStep stamps touch_claimed_at
+// for the duration of a touch and writes the sequence back UNCONDITIONALLY afterward, and a touch renders the invoice's amount,
+// title and pay link and sends externally without a transaction. Refuse while a fresh claim exists so the reminder the customer
+// receives and the pay page it links can't diverge mid-send, and a void+unvoid inside that window can't re-arm the sequence on the
+// restored draft. Crashed senders self-heal past the 10-minute freshness window. Fail CLOSED on read errors. `verb` and `busyText`
+// are the caller's own words ("edit" / "unvoid").
+async function assertNoFreshDunningTouch(conn, id, verb, busyText, touchClaimFreshCutoff = new Date(Date.now() - 10 * 60 * 1000)) {
+  let inFlightTouch = null;
+  try {
+    inFlightTouch = await conn("invoice_followup_sequences")
+      .where({ invoice_id: id })
+      .where("touch_claimed_at", ">", touchClaimFreshCutoff)
+      .first("id");
+  } catch (err) {
+    throw new Error(`Could not verify the follow-up send state — refusing to ${verb} (${err.message})`);
+  }
+  if (inFlightTouch) throw new Error(busyText);
+}
+
+// Fail CLOSED: if we can't confirm the payment-plan state (migration drift, permissions, transient DB error) we must refuse the
+// edit rather than assume there's no plan — assuming none is exactly the committed-workflow drift this guard prevents.
+async function assertNoActivePlanForEdit(id) {
+  let activePlan = null;
+  try {
+    activePlan = await db("payment_plans").where({ invoice_id: id, status: "active" }).first();
+  } catch (err) {
+    throw new Error(`Could not verify the active payment plan state — refusing to edit (${err.message})`);
+  }
+  if (activePlan) throw new Error("This invoice has an active payment plan — cancel the plan before editing the invoice");
 }
 
 function isInvoiceNumberCollision(err) {
@@ -10344,7 +10579,9 @@ const InvoiceService = {
     };
   },
 
-  async update(id, updates) {
+  // `expected` (third argument) is set only by the Intelligence Bar's edit_invoice shim (routes/admin-invoices.js): the invoice
+  // version the card showed (services/invoice-bar-expected.js). The Invoices page calls update(id, body).
+  async update(id, updates, { expected } = {}) {
     // `status` deliberately omitted — admins must use the explicit
     // /void, /charge-card, /record-payment, /archive, /unarchive routes
     // to transition state. Allowing a free-form `status` write here
@@ -10373,6 +10610,8 @@ const InvoiceService = {
     // (line-item path) for their own ledger reasons.
     const existing = await db("invoices").where({ id }).first();
     if (!existing) return null;
+    // The bar's card: an invoice that is no longer the one it showed stops here, before any other read.
+    require("./invoice-bar-expected").assertInvoiceVersion(existing, expected, "editing");
     // Phase 2: a draft invoice ACCRUED to a payer statement may be edited only
     // while that statement is still OPEN. Once it is finalized/sent the invoice is
     // a billed line — editing it would change the document under the frozen total.
@@ -10399,50 +10638,11 @@ const InvoiceService = {
         "This invoice is part of an annual prepay term — edit the term (Annual prepay) instead of the invoice",
       );
     }
-    // Fail CLOSED: if we can't confirm the payment-plan state (migration
-    // drift, permissions, transient DB error) we must refuse the edit rather
-    // than assume there's no plan — assuming none is exactly the committed-
-    // workflow drift this guard prevents.
-    let activePlan = null;
-    try {
-      activePlan = await db("payment_plans")
-        .where({ invoice_id: id, status: "active" })
-        .first();
-    } catch (err) {
-      throw new Error(
-        `Could not verify the active payment plan state — refusing to edit (${err.message})`,
-      );
-    }
-    if (activePlan) {
-      throw new Error(
-        "This invoice has an active payment plan — cancel the plan before editing the invoice",
-      );
-    }
-
-    // In-flight follow-up fence: a dun touch renders the invoice's amount,
-    // title, and pay link and sends externally without a transaction —
-    // fireStep stamps touch_claimed_at on the sequence row for the duration.
-    // Refuse edits while a fresh claim exists so the reminder the customer
-    // receives and the pay page it links can't diverge mid-send. Crashed
-    // senders self-heal past the 10-minute freshness window. Fail CLOSED on
-    // read errors, same as the payment-plan guard.
+    // Fail CLOSED on the payment-plan state, then on a fresh in-flight dunning touch (both helpers say why).
+    await assertNoActivePlanForEdit(id);
+    // The same cutoff is re-used by the re-check under the row lock below.
     const touchClaimFreshCutoff = new Date(Date.now() - 10 * 60 * 1000);
-    let inFlightTouch = null;
-    try {
-      inFlightTouch = await db("invoice_followup_sequences")
-        .where({ invoice_id: id })
-        .where("touch_claimed_at", ">", touchClaimFreshCutoff)
-        .first("id");
-    } catch (err) {
-      throw new Error(
-        `Could not verify the follow-up send state — refusing to edit (${err.message})`,
-      );
-    }
-    if (inFlightTouch) {
-      throw new Error(
-        "A payment reminder for this invoice is sending right now — try again in a minute",
-      );
-    }
+    await assertNoFreshDunningTouch(db, id, "edit", "A payment reminder for this invoice is sending right now — try again in a minute", touchClaimFreshCutoff);
 
     // Applied-money fence for retotals (mirrors voidInvoice). A delivered
     // invoice can stay in sent/viewed/overdue with money already recorded
@@ -10786,6 +10986,7 @@ const InvoiceService = {
           "Only unpaid invoices can be edited — its status or payment state changed while you were editing",
         );
       }
+      require("./invoice-bar-expected").assertInvoiceVersion(lockedRow, expected, "editing");
       // The locked row is the only authority for the dues stamp. A stamp whose
       // month this edit did not lock (never expected: see above) is a stale
       // edit, refused rather than run unlocked.
@@ -10937,7 +11138,7 @@ const InvoiceService = {
               ]);
           });
       }
-      const [edited] = await editQuery.update(data).returning("*");
+      const [edited] = await require("./invoice-bar-expected").applyInvoiceVersion(editQuery, expected).update(data).returning("*");
       if (!edited) {
         throw new Error(
           "Only unpaid invoices can be edited — its status or payment state changed while you were editing",
@@ -11218,123 +11419,23 @@ const InvoiceService = {
    * the operator can re-apply credit deliberately. A payment plan cancelled
    * at void time stays cancelled — recreate it on the restored invoice.
    */
-  async unvoidInvoice(id) {
+  async unvoidInvoice(id, { expected } = {}) {
     const current = await db("invoices").where({ id }).first();
     if (!current) throw new Error("Invoice not found");
+    // The bar's unvoid card pins the invoice version it showed (services/invoice-bar-expected.js; the page passes none):
+    // checked on this read and again as extra predicates on the restore's own UPDATE.
+    require("./invoice-bar-expected").assertInvoiceVersion(current, expected, "unvoiding");
     if (current.status !== "void") {
       throw new Error(
         `Only a voided invoice can be unvoided (current status: ${current.status})`,
       );
     }
-    if (current.annual_prepay_term_id) {
-      throw new Error(
-        "Cannot unvoid — this invoice belongs to an annual prepay term; manage it from Annual prepay instead",
-      );
-    }
-    // The denormalized stamp above is NOT a reliable test on its own:
-    // annual_prepay_term_id is null on some prod prepay invoices (see the
-    // pending-completion sweep in annual-prepay-renewals — it compares
-    // against the TERM's prepay_invoice_id for the same reason). A term's
-    // own prepay invoice restored as an ordinary draft would collect the
-    // annual's money beside (or instead of) the term's coverage. Fail
-    // CLOSED on read errors, same as the payment-plan guard (Codex #3493).
-    let owningTerm = null;
-    try {
-      owningTerm = await db("annual_prepay_terms")
-        .where({ prepay_invoice_id: id })
-        .first("id");
-    } catch (err) {
-      throw new Error(
-        `Could not verify the annual prepay term link — refusing to unvoid (${err.message})`,
-      );
-    }
-    if (owningTerm) {
-      throw new Error(
-        "Cannot unvoid — this invoice belongs to an annual prepay term; manage it from Annual prepay instead",
-      );
-    }
-    // A conversion-minted annual prepay invoice whose TERM creation failed
-    // was voided with NO term row and NO invoice stamp (estimate-converter's
-    // fail-closed catch) — the guards above can't see it, but restoring it
-    // would collect an annual charge that activates no coverage. The
-    // converter titles these invoices distinctively; refuse on the title and
-    // route the rebuild through the annual-prepay flow (Codex #3493 r4).
-    if (/annual prepay/i.test(String(current.title || ""))) {
-      throw new Error(
-        "Cannot unvoid — this is an annual prepay charge; rebuild it through Annual prepay so coverage activates with the payment",
-      );
-    }
-    // A void carrying the prepay-switch marker was deliberately superseded
-    // by an annual prepay: its guarded restore path
-    // (restoreSwitchSupersededInvoicesForPrepay) re-checks coverage and
-    // partial re-billing when the prepay is reversed/refunded. Restoring it
-    // here while the prepay stays active would double-bill the covered
-    // visit (Codex #3493).
-    if (/\[prepay-switch-superseded-by:[^\]]+\]/.test(String(current.notes || ""))) {
-      throw new Error(
-        "Cannot unvoid — this invoice was superseded by an annual prepay switch; reversing that prepay (Annual prepay) restores it with the coverage checks applied",
-      );
-    }
-    if (invoiceHasDepositCreditLine(current)) {
-      throw new Error(
-        "Cannot unvoid — the deposit credit on this invoice was returned to the customer's deposit when it was voided; create a replacement invoice so the credit re-applies cleanly",
-      );
-    }
-    // A voided invoice still carrying the annual-coverage settlement stamp
-    // was settled as NON-CASH coverage before the void — its paid/prepaid
-    // stamps and 'annual_prepay_covered' follow-up stop are retained, and
-    // the coverage reopen path ignores non-'prepaid' rows. Restoring this
-    // shape would make a covered charge collectible with reminders
-    // permanently suppressed (Codex #3493 r14).
-    if (current.annual_prepay_covered_term_id) {
-      throw new Error(
-        "Cannot unvoid — this invoice was settled as annual prepay coverage before it was voided; manage it from Annual prepay instead",
-      );
-    }
+    await assertUnvoidRowShape(current);
     // Linked-visit guards, fast-fail pass (re-checked inside the restore
     // transaction — see assertUnvoidableLinkedVisit).
     await assertUnvoidableLinkedVisit(db, current);
-    // Phase 2 mirror of voidInvoice: a voided line was EXCLUDED from its
-    // statement's rollup — restoring it under a finalized/sent statement
-    // would change the document under the frozen total.
-    if (current.payer_statement_id) {
-      const stmt = await db("payer_statements")
-        .where({ id: current.payer_statement_id })
-        .first("status");
-      if (stmt && stmt.status !== "open") {
-        throw new Error(
-          "This invoice is on a finalized payer statement — bill it as a new line on the next statement instead of restoring a voided one",
-        );
-      }
-    }
-    // Stale pay-session stamp triage (fail closed, mirrors voidInvoice's):
-    // void cancels the open PaymentIntent but keeps the stamp on this row.
-    // Verify it is really dead before clearing — restoring a collectible
-    // invoice beside a live client secret would let a stale pay page charge
-    // an amount nothing reconciles.
-    if (current.stripe_payment_intent_id) {
-      const StripeService = require("./stripe");
-      let pi;
-      try {
-        pi = await StripeService.retrievePaymentIntent(
-          current.stripe_payment_intent_id,
-        );
-      } catch (e) {
-        throw new Error(
-          `Open payment session ${current.stripe_payment_intent_id} could not be verified (${e.message}); resolve it before unvoiding`,
-        );
-      }
-      if (!pi) {
-        throw new Error(
-          `Open payment session ${current.stripe_payment_intent_id} could not be verified (payment service unavailable); resolve it before unvoiding`,
-        );
-      }
-      if (pi.status !== "canceled") {
-        throw new Error(
-          `This invoice still has a live payment session (${pi.status}); resolve it before unvoiding`,
-        );
-      }
-    }
+    await assertUnvoidStatementOpen(db, current.payer_statement_id, false);
+    await assertUnvoidSessionDead(current);
     let invoice = null;
     // Cancelled deferred rows whose entry point registers an onTerminal
     // hook — collected inside the transaction, hooks run after commit
@@ -11342,52 +11443,10 @@ const InvoiceService = {
     // obligation durable: the registry sweep re-runs it if we crash first).
     const cancelledHookRows = [];
     await db.transaction(async (trx) => {
-      // OWNERSHIP ROWS FIRST, before this transaction touches the invoice
-      // (local audit P0 + the earlier lock-order P1): the restore must decide
-      // live Bill-To ownership ATOMICALLY — a collectible draft committed
-      // ahead of a separate reconciliation can be paid by the homeowner in
-      // between, and a swallowed failure would leave it collectible for good
-      // — and the withdrawal it may need takes customer and member rows,
-      // which every Bill-To writer takes before the invoice. Taking them here
-      // puts this restore on that same order; the reconciliation below is
-      // then re-entrant on rows this transaction already holds.
-      // The invoice's ownership links are re-read HERE (a plain read, no lock): the outer `current` can predate
-      // a customer merge that moved the invoice and its visit, and locking that stale customer would take the
-      // winner's lock only later, while holding the invoice. The chain below is built from the fresh row.
-      const own = await trx("invoices").where({ id }).first("customer_id", "scheduled_service_id", "service_record_id", "visit_completion_packet_id");
-      if (!own) throw new Error("Invoice not found — re-check and retry");
-      if (own.visit_completion_packet_id && own.customer_id) {
-        await trx("customers").where({ id: own.customer_id }).forShare().first("id");
-        const billedMembers = await trx("visit_completion_packet_items")
-          .where({ packet_id: own.visit_completion_packet_id })
-          .pluck("scheduled_service_id");
-        if (billedMembers.length) {
-          await trx("scheduled_services").whereIn("id", billedMembers.filter(Boolean)).orderBy("id").forShare().select("id");
-        }
-      }
-      // A restored invoice WITHOUT a packet (a service-record or direct visit link, or no visit at
-      // all, owned through the customer default) takes the same rows in the same order: the
-      // withdrawal below resolves its live owner under them.
-      if (!own.visit_completion_packet_id && own.customer_id) {
-        // customer -> visit -> every payer row the resolver reads (FOR SHARE), the order every Bill-To
-        // writer takes, BEFORE the invoice row below is updated.
-        await require("./visit-linked-invoice-withdrawal").lockLinkedOwnershipRows(trx, own);
-      }
-      // Statement re-check under lock (a concurrent close could finalize it
-      // between the fast pre-check above and this write).
-      if (current.payer_statement_id) {
-        const locked = await trx("payer_statements")
-          .where({ id: current.payer_statement_id })
-          .forUpdate()
-          .first("status");
-        if (locked && locked.status !== "open") {
-          throw new Error(
-            "This invoice is on a finalized payer statement — bill it as a new line on the next statement instead of restoring a voided one",
-          );
-        }
-      }
-      const [updated] = await trx("invoices")
-        .where({ id, status: "void" })
+      const own = await lockUnvoidOwnershipRows(trx, id);
+      await assertUnvoidStatementOpen(trx, current.payer_statement_id, true);
+      const [updated] = await require("./invoice-bar-expected").applyInvoiceVersion(trx("invoices")
+        .where({ id, status: "void" }), expected)
         .update({
           status: "draft",
           send_claim_token: null,
@@ -11407,6 +11466,7 @@ const InvoiceService = {
       if (!updated) {
         throw new Error("Invoice status changed while unvoiding — re-check and retry");
       }
+      await assertBarUnvoidIsRowOnly(trx, updated, expected);
       // The customer is judged again once the invoice itself is held: a merge that committed between the
       // fresh read above and this lock moved the invoice to another customer, whose rows were never taken.
       if (String(updated.customer_id) !== String(own.customer_id)) {
@@ -11421,37 +11481,7 @@ const InvoiceService = {
           resolution: "The dues invoice was restored, so the month is billed on it again",
         });
       }
-      // The preserved withdrawal stamp is re-judged against LIVE ownership
-      // (Codex #4311 r30 P1): a withdrawn invoice that was voided is skipped
-      // by the Bill-To reconciliation (void is terminal), so a payer cleared
-      // in the meantime would leave the restored self-pay draft stamped —
-      // unpayable and unschedulable for good. The shared reconciliation
-      // releases it when the packet is self-pay again and keeps the stamp
-      // (re-pointed if the payer changed) while a payer still owes it.
-      // EVERY restored packet invoice is re-judged HERE, stamped or not, and
-      // the verdict commits with the restore (local audit P0): an invoice
-      // voided BEFORE a payer was assigned carries no stamp — the withdrawal
-      // skips terminal rows — so the unvoid would otherwise hand the
-      // homeowner a collectible link for debt that is now payer-owned, and a
-      // payer sitting on a SIBLING billed member escapes the payment rail's
-      // representative-service lookup entirely. The ownership rows were taken
-      // at the top of this transaction, so both calls are re-entrant on the
-      // established order.
-      if (updated.visit_completion_packet_id) {
-        const Packets = require("./visit-completion-packets");
-        // A stamp that outlived the void is re-pointed or released…
-        await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: updated.customer_id, includeLinked: false });
-        // …and a restored row whose live owner is a payer is withdrawn before
-        // it can ever be collected.
-        await Packets.withdrawPacketInvoicesForOwner(trx, { customerId: updated.customer_id, includeLinked: false });
-      } else if (updated.customer_id) {
-        // The same re-judgement for a restored invoice with no packet: a payer assigned to its
-        // visit (or, for one with no visit, to the customer) while it sat void must not hand the
-        // homeowner a collectible link on restore.
-        const Linked = require("./visit-linked-invoice-withdrawal");
-        await Linked.reconcileLinkedInvoices(trx, { invoiceId: id }, { requeue: false });
-        await Linked.withdrawLinkedInvoicesForOwner(trx, { invoiceId: id });
-      }
+      await rejudgeRestoredInvoiceOwnership(trx, updated, id);
       // Term-link TOCTOU re-check on the FRESH row under the lock (Codex
       // #3493 r2): a concurrent /annual-prepay can create the term and
       // stamp the invoice between the pre-transaction guards and this
@@ -11473,35 +11503,13 @@ const InvoiceService = {
       // are rare staff actions, so the extra lookups are cheap. Errors
       // propagate → unvoid rolls back.
       await InvoiceService.retireRodentSetupObligationForReinstatedInvoice(trx, id, { strict: true });
-      let owningTermNow = null;
-      try {
-        owningTermNow = await trx("annual_prepay_terms")
-          .where({ prepay_invoice_id: id })
-          .first("id");
-      } catch (err) {
-        throw new Error(
-          `Could not verify the annual prepay term link — refusing to unvoid (${err.message})`,
-        );
-      }
-      if (owningTermNow) {
-        throw new Error(
-          "Cannot unvoid — this invoice belongs to an annual prepay term; manage it from Annual prepay instead",
-        );
-      }
+      await assertNoOwningPrepayTerm(trx, id);
       // Money-landed-after-void guard, on the FRESH row under the lock
       // (mirrors voidInvoice's ordering): a late webhook can record a
       // payment against a voided row without flipping the status this
       // update keys on. Rolling back beats restoring beside collected
       // money, which would double-collect.
-      const appliedPayment = await trx("payments")
-        .whereIn("status", ["paid", "processing"])
-        .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [updated.id])
-        .first("id");
-      if (updated.payment_recorded_at || appliedPayment) {
-        throw new Error(
-          `Cannot unvoid an invoice with payment already applied (${appliedPayment ? `payment ${appliedPayment.id}` : "payment recorded"})`,
-        );
-      }
+      await assertNoPaymentAppliedAfterVoid(trx, updated);
       // Saved-card reconciliation fence (Codex #3493 r12): a timed-out or
       // rolled-back saved-card charge leaves durable
       // stripe_invoice_charge_attempts / stripe_orphan_charges records with
@@ -11524,23 +11532,7 @@ const InvoiceService = {
       // restored draft. Refuse (rolling back) while a fresh claim exists;
       // crashed senders self-heal past the 10-minute freshness window.
       // Fail CLOSED on read errors, matching the edit fence.
-      const touchClaimFreshCutoff = new Date(Date.now() - 10 * 60 * 1000);
-      let inFlightTouch = null;
-      try {
-        inFlightTouch = await trx("invoice_followup_sequences")
-          .where({ invoice_id: id })
-          .where("touch_claimed_at", ">", touchClaimFreshCutoff)
-          .first("id");
-      } catch (err) {
-        throw new Error(
-          `Could not verify the follow-up send state — refusing to unvoid (${err.message})`,
-        );
-      }
-      if (inFlightTouch) {
-        throw new Error(
-          "Cannot unvoid — a payment reminder for this invoice is sending right now; retry in a few minutes",
-        );
-      }
+      await assertNoFreshDunningTouch(trx, id, "unvoid", "Cannot unvoid — a payment reminder for this invoice is sending right now; retry in a few minutes");
       // The void-time lifecycle stop is BEST-EFFORT (stopInvoiceFollowupSequence
       // swallows failures, so voidInvoice can succeed with the sequence still
       // ACTIVE), and runPending excludes only terminal invoice statuses — an
@@ -13894,7 +13886,6 @@ module.exports._approvedClaimChecks = {
 };
 module.exports._invoiceHasNonBaseCharges = invoiceHasNonBaseCharges;
 module.exports._invoiceHasDepositCreditLine = invoiceHasDepositCreditLine;
-module.exports._invoiceHasUnbackedDocumentDiscount = invoiceHasUnbackedDocumentDiscount;
 module.exports._parseInvoiceLineItems = parseInvoiceLineItems;
 // The receipt SMS leg's phone-less App admission — shared with the IB closeout
 // repair card so it describes the same reach sendReceipt has.
@@ -13935,6 +13926,8 @@ module.exports.withPayLinkSendClaim = withPayLinkSendClaim;
 // gate's on/off behavior (incl. the combined-packet member check and the
 // service_record_id-only fallback) can be pinned with a minimal conn mock.
 module.exports._assertUnvoidableLinkedVisit = assertUnvoidableLinkedVisit;
+module.exports._unvoidObligationReason = unvoidObligationReason;
+module.exports._invoiceHasUnbackedDocumentDiscount = invoiceHasUnbackedDocumentDiscount;
 // Test-only seam (#5424 r14): the pending-channel replay queue row, to pin the persisted trusted
 // dispute-hold exemption (metadata.hold_exempt) that the replay's eligibility and boundary re-apply.
 module.exports._queuePendingChannelReplay = queuePendingChannelReplay;
