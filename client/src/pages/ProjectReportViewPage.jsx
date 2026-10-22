@@ -927,9 +927,13 @@ export function TermiteNoticeSticker({ findings, technicianName, projectDateLabe
   ].filter(Boolean).join(' ');
   const concentration = String(f.concentration_pct || '').trim().replace(/%$/, '');
   const navy = ESTIMATE_BUTTON_BG;
-  // "No warranty" certificates carry no retreatment contract, so the
-  // notice drops the label's contract clause and warranty call to action.
-  const noWarranty = /^no warranty$/i.test(String(f.warranty_type || '').trim());
+  // The label's renewable-contract clause prints only when the certificate
+  // records a renewable retreatment bond; blank, builder-only and "No
+  // warranty" certificates carry no annual contract. The warranty call to
+  // action needs some recorded warranty.
+  const warranty = String(f.warranty_type || '').trim();
+  const renewableContract = /renewable/i.test(warranty);
+  const noWarranty = !warranty || /^no warranty$/i.test(warranty);
 
   return (
     <div data-testid="termite-notice-sticker" style={{
@@ -1030,7 +1034,7 @@ export function TermiteNoticeSticker({ findings, technicianName, projectDateLabe
         }}>
           This property has been treated for the prevention of subterranean termites in accordance with Florida
           Building Code 1816 and rules established by the Florida Department of Agriculture &amp; Consumer Services
-          {noWarranty ? '.' : ', placed under a retreatment contract renewable by payment of an annual fee.'}
+          {renewableContract ? ', placed under a retreatment contract renewable by payment of an annual fee.' : '.'}
           {' '}The owner is hereby advised to have the property inspected annually by Waves Pest Control, LLC.
         </div>
         <div style={{ fontSize: 14, fontWeight: 600, color: B.red, marginTop: 10, lineHeight: 1.45 }}>
@@ -1236,6 +1240,7 @@ function certificateFields(f, { technicianName, projectDateLabel, detailsOnly })
     ]),
     ['Applicator', applicatorLine],
     ['Warranty / retreatment bond', warrantyLine],
+    ...(finalExteriorLine(f) ? [['Final exterior treatment', finalExteriorLine(f)]] : []),
   ];
   return { fields, applications, multiApplication };
 }
