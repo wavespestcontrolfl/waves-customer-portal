@@ -55,9 +55,10 @@ started with it off.
    - `/api/stripe/terminal/...`, `/api/bouncie/auth`, and
      `/api/bouncie/callback` also return the same 503. Customer-authenticated
      `/api/bouncie/vehicles` and `/api/bouncie/location` remain available.
-   - An authenticated Bouncie geozone webhook still returns 200 and is logged,
-     but reports `staffMaintenanceSuppressed: true`; it must not start or stop a
-     Staff timer while the gate is closed.
+   - An authenticated Bouncie geozone webhook still returns 200 and is logged as
+     ignored. The geofence timer automation was removed in #6408, so no geozone
+     event can start or stop a Staff timer and the reply carries no
+     `staffMaintenanceSuppressed` marker.
    - The separate Bouncie live-tracking receiver may continue refreshing the
      customer map, but its GPS arrival detector reports `staff_maintenance`
      internally and must not auto-mark a service on property or change its

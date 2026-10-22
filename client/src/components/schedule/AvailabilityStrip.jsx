@@ -271,7 +271,7 @@ export function stopPhrase(hour) {
 
 // One line per fact, so four chips side by side stay readable: the time,
 // the drive here, what it adds to the day, rain, and whose route it is.
-function HourChip({ hour, withDay, current, onPick, compact = false, stopNames = false }) {
+export function HourChip({ hour, withDay, current, onPick, compact = false, stopNames = false }) {
   const here = driveHerePhrase(hour);
   const added = addedPhrase(hour);
   const rain = rainPhrase(hour.rainChance);
@@ -300,7 +300,7 @@ function HourChip({ hour, withDay, current, onPick, compact = false, stopNames =
 
 // A row of best-times chips: four side by side, scrolling sideways on a
 // narrow screen rather than wrapping.
-function BestRow({ title, hours, withDay, empty, isCurrent, onPick, stopNames }) {
+export function BestRow({ title, hours, withDay, empty, isCurrent, onPick, stopNames }) {
   return (
     <div style={{ marginTop: 10 }}>
       <div style={{ marginBottom: 6, color: '#52525B' }}>{title}</div>

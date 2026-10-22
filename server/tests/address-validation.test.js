@@ -110,6 +110,40 @@ describe('deriveStatus (Google AV → provider-neutral status)', () => {
   });
 });
 
+describe('deriveStatus: Punta Gorda is not served (owner ruling 2026-10-22)', () => {
+  function pgResult(city, zip) {
+    const r = result();
+    r.address.addressComponents = r.address.addressComponents.map((c) => {
+      if (c.componentType === 'locality') return { ...c, componentName: { text: city } };
+      if (c.componentType === 'postal_code') return { ...c, componentName: { text: zip } };
+      return c;
+    });
+    return r;
+  }
+
+  test('Punta Gorda in served Charlotte County is out_of_service_area', () => {
+    const r = deriveStatus(pgResult('Punta Gorda', '33950'), 'Charlotte County');
+    expect(r.status).toBe(STATUSES.OUT_OF_SERVICE_AREA);
+    expect(r.inServiceArea).toBe(false);
+  });
+
+  test('33982 is shared with Babcock Ranch: the city decides', () => {
+    expect(deriveStatus(pgResult('Babcock Ranch', '33982'), 'Charlotte County').inServiceArea).toBe(true);
+    expect(deriveStatus(pgResult('Punta Gorda', '33982'), 'Charlotte County').inServiceArea).toBe(false);
+  });
+
+  test('a Punta Gorda-only ZIP is out even when the locality is missing', () => {
+    expect(deriveStatus(pgResult('', '33950'), 'Charlotte County').status).toBe(STATUSES.OUT_OF_SERVICE_AREA);
+  });
+
+  test('33983 with Punta Gorda is out; Port Charlotte 33980 / 33948 and Englewood stay served', () => {
+    expect(deriveStatus(pgResult('Punta Gorda', '33983'), 'Charlotte County').status).toBe(STATUSES.OUT_OF_SERVICE_AREA);
+    expect(deriveStatus(pgResult('Port Charlotte', '33980'), 'Charlotte County').status).toBe(STATUSES.VALIDATED_ACCEPT);
+    expect(deriveStatus(pgResult('Port Charlotte', '33948'), 'Charlotte County').status).toBe(STATUSES.VALIDATED_ACCEPT);
+    expect(deriveStatus(pgResult('Englewood', '34223'), 'Charlotte County').status).toBe(STATUSES.VALIDATED_ACCEPT);
+  });
+});
+
 describe('buildAddressLines — spoken raw_text with conversational state-code words', () => {
   // Synthetic transcripts in the extractor's shape. A spoken tail like
   // "so, or it could be Ellenton" used to read as Oregon, the lines went
@@ -158,5 +192,34 @@ describe('buildAddressLines — spoken raw_text with conversational state-code w
       street_line_1: '123 Main St', city: 'Portland', state: null, postal_code: '97201',
       raw_text: '123 Main Street, Portland, OR 97201',
     })).toEqual(['123 Main St', 'Portland OR 97201']);
+  });
+});
+
+describe('reverseGeocodeLocality', () => {
+  const { reverseGeocodeLocality } = require('../services/address-validation');
+  const realFetch = global.fetch;
+  afterEach(() => { global.fetch = realFetch; });
+  const reply = (body) => { global.fetch = jest.fn(async () => ({ ok: true, json: async () => body })); };
+  const PIN = { latitude: 26.97, longitude: -82.09 };
+
+  test('reads locality and ZIP', async () => {
+    reply({ status: 'OK', results: [{ address_components: [
+      { types: ['locality'], long_name: 'Punta Gorda' }, { types: ['postal_code'], long_name: '33950' },
+    ] }] });
+    expect(await reverseGeocodeLocality(PIN, 'k')).toEqual({ city: 'Punta Gorda', zip: '33950' });
+  });
+
+  test('ZERO_RESULTS or no locality and no ZIP is null (unknown)', async () => {
+    reply({ status: 'ZERO_RESULTS', results: [] });
+    expect(await reverseGeocodeLocality(PIN, 'k')).toBeNull();
+    reply({ status: 'OK', results: [{ address_components: [{ types: ['route'], long_name: 'Main St' }] }] });
+    expect(await reverseGeocodeLocality(PIN, 'k')).toBeNull();
+  });
+
+  test('a provider error status or HTTP failure is null', async () => {
+    reply({ status: 'REQUEST_DENIED', results: [] });
+    expect(await reverseGeocodeLocality(PIN, 'k')).toBeNull();
+    global.fetch = jest.fn(async () => ({ ok: false }));
+    expect(await reverseGeocodeLocality(PIN, 'k')).toBeNull();
   });
 });
