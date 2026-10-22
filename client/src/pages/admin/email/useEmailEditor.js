@@ -7,6 +7,7 @@ import {
   updateEmailSendAttempt,
 } from "../../../lib/emailDrafts";
 import { adminFetch } from "./emailApi";
+import { formatSendAt } from "./scheduleSend";
 
 const SEND_ERRORS = {
   reply: "Failed to send reply: ",
@@ -45,6 +46,7 @@ export default function useEmailEditor(userId) {
   const [drafting, setDrafting] = useState(false);
   const [draftResult, setDraftResult] = useState(null);
   const [sendFeedback, setSendFeedback] = useState({});
+  const [scheduling, setScheduling] = useState(null);
   const setShowCompose = (visible) => {
     if (visible) setSendFeedback((current) => ({ ...current, compose: null }));
     setComposeOpen(visible);
@@ -193,6 +195,73 @@ export default function useEmailEditor(userId) {
     );
   };
 
+  // Schedule send (GATE_EMAIL_SEND_LATER). The server queues the email; the
+  // draft clears only if it still holds the text that was queued. Each request
+  // carries its own clientKey, so a duplicated delivery of it queues one row;
+  // an unconfirmed request tells the operator to look under Scheduled first.
+  const scheduleEmail = async (kind, payload, replyId, sendAt, clearQueued, onScheduled) => {
+    if (scheduling || draftSession.sending[kind]) return;
+    setScheduling(kind);
+    setSendFeedback((current) => ({ ...current, [kind]: null }));
+    try {
+      const response = await adminFetch("/api/admin/email/schedule", {
+        method: "POST",
+        body: JSON.stringify({ ...payload, body: encodeEmailBody(payload.body), draftText: payload.body, sendAt, clientKey: crypto.randomUUID() }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.success) {
+        setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: result.error || "The email was not scheduled. Your draft is still here." } }));
+        return;
+      }
+      clearQueued();
+      setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, message: `Scheduled for ${formatSendAt(sendAt)}. Find it under Scheduled.` } }));
+      await onScheduled?.();
+    } catch {
+      setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: "Scheduling was not confirmed. Look under Scheduled before you try again." } }));
+    } finally {
+      setScheduling(null);
+    }
+  };
+
+  const handleComposeSchedule = (sendAt, onScheduled) => {
+    if (!composeForm.to.trim() || !composeForm.body.trim()) return undefined;
+    const queued = composeForm;
+    return scheduleEmail("compose", { to: queued.to.trim(), subject: queued.subject.trim(), body: queued.body }, null, sendAt, () => {
+      if (draftSession.drafts.compose !== queued) return;
+      setComposeForm(() => ({ to: "", subject: "", body: "" }));
+      setShowCompose(false);
+    }, onScheduled);
+  };
+
+  const handleReplySchedule = (email, sendAt, onScheduled) => {
+    const text = drafts.replies[email?.id] || "";
+    if (!email || !text.trim()) return undefined;
+    return scheduleEmail("reply", {
+      to: email.reply_to || email.from_address, subject: `Re: ${email.subject || ""}`, body: text,
+      threadId: email.gmail_thread_id, replyEmailId: email.id,
+    }, email.id, sendAt, () => {
+      if (draftSession.drafts.replies[email.id] === text) setReplyDraft(email.id, "");
+    }, onScheduled);
+  };
+
+  // Gmail's "Cancel send": the cancelled email comes back as a draft. It never
+  // overwrites a draft in progress; the caller says so instead.
+  // Checked BEFORE the server cancel, so a cancelled email always has a
+  // place to land.
+  const scheduledDraftBlocked = (draft) => (draft.replyEmailId
+    ? Boolean((draftSession.drafts.replies[draft.replyEmailId] || "").trim())
+    : Object.values(draftSession.drafts.compose).some(Boolean));
+  const restoreScheduledDraft = (draft) => {
+    if (scheduledDraftBlocked(draft)) return false;
+    if (draft.replyEmailId) {
+      setReplyDraft(draft.replyEmailId, draft.draftText);
+      return true;
+    }
+    setComposeForm(() => ({ to: draft.to, subject: draft.subject === "(no subject)" ? "" : draft.subject, body: draft.draftText }));
+    setShowCompose(true);
+    return true;
+  };
+
   const reconcileSend = (key, outcome) => {
     const attempt = draftSession.attempts[key];
     if (!attempt || draftSession.sending[key === "compose" ? "compose" : "reply"]) return;
@@ -262,5 +331,10 @@ export default function useEmailEditor(userId) {
     handleReply,
     handleComposeSend,
     handleAiDraft,
+    scheduling,
+    handleComposeSchedule,
+    handleReplySchedule,
+    restoreScheduledDraft,
+    scheduledDraftBlocked,
   };
 }

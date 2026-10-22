@@ -1,5 +1,5 @@
 import { useOutletContext } from "react-router-dom";
-import { Ban, Inbox, Mail, Plus, Send } from "lucide-react";
+import { Ban, Clock, Inbox, Mail, Plus, Send } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { UiSurface } from "../../components/ui/UiSurface";
 import { Button } from "../../components/ui/Button";
@@ -8,11 +8,14 @@ import EmailComposer from "./email/EmailComposer";
 import useEmailInbox from "./email/useEmailInbox";
 import useEmailEditor from "./email/useEmailEditor";
 import { EmailSummary, EmailInbox, BlockedSenders } from "./email/EmailMailbox";
+import useScheduledEmails from "./email/useScheduledEmails";
+import ScheduledEmails from "./email/ScheduledEmails";
 
 const EMAIL_SECTIONS = [
   { key: "inbox", label: "Inbox", Icon: Inbox },
   { key: "blocked", label: "Blocked", Icon: Ban },
 ];
+const NAV_GRID = { 2: "grid-cols-2", 3: "grid-cols-3" };
 
 export default function EmailPage({ navigation, active }) {
   const { user } = useOutletContext();
@@ -21,6 +24,14 @@ export default function EmailPage({ navigation, active }) {
   const { status, statusState, actionFeedback, tab, setTab, connecting, handleConnectGmail } = mailbox;
   const { setShowCompose, hasDrafts, hasComposeDraft, storageError, recoveryNotice } = editor;
   const connected = !statusState.error && Boolean(status?.connected);
+  // Schedule send (GATE_EMAIL_SEND_LATER): the arrow menu and the Scheduled
+  // tab appear only once the server reports the gate on.
+  const scheduled = useScheduledEmails(active && connected);
+  const sections = scheduled.enabled
+    ? [EMAIL_SECTIONS[0], { key: "scheduled", label: scheduled.tabLabel, Icon: Clock }, EMAIL_SECTIONS[1]]
+    : EMAIL_SECTIONS;
+  const showScheduled = tab === "scheduled" && scheduled.enabled;
+  const mailEditor = { ...editor, scheduleEnabled: scheduled.enabled, onScheduled: scheduled.reload };
   const action = connected ? {
     key: "compose",
     label: hasComposeDraft ? "Resume draft" : "New email",
@@ -39,9 +50,9 @@ export default function EmailPage({ navigation, active }) {
 
   return <UiSurface density="comfortable" className="mx-auto max-w-[1300px] text-ui-body text-ink-primary">
     <AdminCommandHeader {...navigation}
-      secondarySections={connected ? EMAIL_SECTIONS : []}
+      secondarySections={connected ? sections : []}
       secondaryActiveKey={tab} onSecondaryChange={setTab}
-      secondaryAriaLabel="Email section" secondaryNavGridClassName="grid-cols-2" action={action} />
+      secondaryAriaLabel="Email section" secondaryNavGridClassName={NAV_GRID[sections.length]} action={action} />
     {actionFeedback && <ActionFeedback error={actionFeedback.error} className="mb-4">{actionFeedback.message}</ActionFeedback>}
     {editor.sendFeedback.compose && !editor.showCompose && <ActionFeedback error={editor.sendFeedback.compose.error} className="mb-4">{editor.sendFeedback.compose.message}</ActionFeedback>}
     {statusState.error ? <div className="min-h-64 rounded-md border-hairline border-zinc-200 bg-white p-6">
@@ -59,8 +70,9 @@ export default function EmailPage({ navigation, active }) {
           <div className="px-4 pb-1"><EmailSummary mailbox={mailbox} /></div>
         </details>
         {tab === "blocked" && <BlockedSenders mailbox={mailbox} />}
-        {tab === "inbox" && <EmailInbox active={active} mailbox={mailbox} editor={editor} />}
+        {showScheduled && <ScheduledEmails scheduled={scheduled} editor={editor} mailbox={mailbox} />}
+        {tab !== "blocked" && !showScheduled && <EmailInbox active={active} mailbox={mailbox} editor={mailEditor} />}
       </>}
-    <EmailComposer active={active && connected} editor={editor} onSent={mailbox.loadStats} />
+    <EmailComposer active={active && connected} editor={mailEditor} onSent={mailbox.loadStats} />
   </UiSurface>;
 }

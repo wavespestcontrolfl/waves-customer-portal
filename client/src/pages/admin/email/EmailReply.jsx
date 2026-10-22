@@ -6,6 +6,7 @@ import { ActionFeedback } from "../../../components/ui/ActionFeedback";
 import EmailQuickLinks from "../../../components/admin/EmailQuickLinks";
 import { appendStaticLinkClause } from "../../../lib/composerLinks";
 import EmailSendOutcome from "./EmailSendOutcome";
+import ScheduleSendMenu from "./ScheduleSendMenu";
 
 export default function EmailReply({ active, sender, mailbox, editor }) {
   const { selectedEmail } = mailbox;
@@ -34,9 +35,13 @@ export default function EmailReply({ active, sender, mailbox, editor }) {
       <Button variant="secondary" onClick={() => editor.handleAiDraft(selectedEmail, mailbox.isSelected)} loading={drafting} disabled={sending} className="gap-2">
         <Sparkles size={16} aria-hidden />AI draft
       </Button>
-      <Button onClick={() => editor.handleReply(selectedEmail, mailbox.loadThread)} loading={sending} disabled={Boolean(attempt) || !replyText.trim()} className="gap-2">
-        <Send size={16} aria-hidden />Send reply
-      </Button>
+      <div className="flex gap-px">
+        <Button onClick={() => editor.handleReply(selectedEmail, mailbox.loadThread)} loading={sending || editor.scheduling === "reply"} disabled={Boolean(attempt) || !replyText.trim() || Boolean(editor.scheduling)} className="gap-2">
+          <Send size={16} aria-hidden />Send reply
+        </Button>
+        {editor.scheduleEnabled && <ScheduleSendMenu label="Schedule reply options" disabled={sending || Boolean(attempt) || !replyText.trim() || Boolean(editor.scheduling)}
+          onSchedule={(sendAt) => editor.handleReplySchedule(selectedEmail, sendAt, editor.onScheduled)} />}
+      </div>
     </div>
   </section>;
 }

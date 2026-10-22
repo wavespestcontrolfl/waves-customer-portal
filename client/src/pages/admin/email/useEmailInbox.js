@@ -453,6 +453,8 @@ export default function useEmailInbox(active, clearDraftResult) {
     selectedEmail,
     thread,
     openEmail,
+    // Opens a message by id through the URL, the way a linked email opens.
+    showEmailById: (id) => selectMessageId(id),
     closeEmail,
     handleStar,
     removeEmail,

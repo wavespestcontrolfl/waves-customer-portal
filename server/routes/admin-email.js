@@ -9,6 +9,8 @@ const { executeAutoAction } = require('../services/email/email-actions');
 const { unblockSender, manualBlockSender } = require('../services/email/spam-blocker');
 const logger = require('../services/logger');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { emailSendLaterLive } = require('../config/feature-gates');
+const { parseETDateTime } = require('../utils/datetime-et');
 const {
   createStaffOAuthState,
   withClaimedStaffOAuthState,
@@ -335,6 +337,75 @@ router.post('/send', async (req, res) => {
     logger.error(`[email] Send outcome: ${unknown ? 'unknown' : 'failed'}`);
     res.status(unknown ? 202 : 502).json({ status: unknown ? 'outcome_unknown' : 'failed',
       error: unknown ? 'Check the Sent folder before retrying.' : 'The email was not accepted. Try again.' });
+  }
+});
+
+// ============================================
+// Schedule send (GATE_EMAIL_SEND_LATER; table scheduled_emails)
+// ============================================
+
+const SCHEDULE_ET_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
+const SCHEDULE_MAX_DAYS = 366;
+const CANCELLABLE = ['scheduled', 'failed', 'outcome_unknown'];
+const scheduledView = (row) => ({
+  id: row.id, to: row.to_address, subject: row.subject, draftText: row.draft_text, threadId: row.thread_id,
+  replyEmailId: row.reply_email_id, sendAt: row.send_at, status: row.status, sentAt: row.sent_at,
+});
+
+// POST /schedule — queue an email for a later send. `sendAt` is ET wall clock
+// (YYYY-MM-DDTHH:MM, like the SMS composer's scheduledFor); `body` is the
+// composer's encoded HTML (as on /send) and `draftText` its plain text, which
+// "Back to draft" restores. A repeated `clientKey` returns the first row.
+router.post('/schedule', async (req, res) => {
+  if (!emailSendLaterLive()) return res.status(404).json({ enabled: false, error: 'Schedule send is off.' });
+  try {
+    const { to, subject, body, draftText, threadId, replyEmailId, sendAt, clientKey } = req.body || {};
+    if (!to || !body || !draftText) return res.status(400).json({ error: 'to, body and draftText required' });
+    if (typeof clientKey !== 'string' || !/^[\w-]{8,64}$/.test(clientKey)) return res.status(400).json({ error: 'clientKey required' });
+    if (typeof sendAt !== 'string' || !SCHEDULE_ET_RE.test(sendAt)) return res.status(400).json({ error: 'sendAt must be YYYY-MM-DDTHH:MM (Eastern)' });
+    const when = parseETDateTime(sendAt);
+    const ahead = when.getTime() - Date.now();
+    if (Number.isNaN(ahead) || ahead < 60 * 1000) return res.status(400).json({ error: 'Pick a time at least a minute from now.' });
+    if (ahead > SCHEDULE_MAX_DAYS * 86400000) return res.status(400).json({ error: 'Pick a time within a year.' });
+    const [row] = await db('scheduled_emails').insert({
+      to_address: String(to).trim(), subject: String(subject || '').trim() || '(no subject)', body_html: body, draft_text: draftText,
+      thread_id: threadId || null, reply_email_id: replyEmailId || null, send_at: when, created_by: req.technicianId || null, client_key: clientKey,
+    }).onConflict('client_key').ignore().returning('*');
+    const saved = row || await db('scheduled_emails').where({ client_key: clientKey }).first();
+    res.json({ success: true, scheduled: scheduledView(saved) });
+  } catch (err) {
+    logger.error(`[email] schedule failed: ${err.message}`);
+    res.status(500).json({ error: 'The email was not scheduled. Try again.' });
+  }
+});
+
+// GET /scheduled — what is still waiting or needs the office (sent and
+// cancelled rows drop off). Answers {enabled:false} with the gate off so the
+// client hides the menu and the tab.
+router.get('/scheduled', async (req, res) => {
+  if (!emailSendLaterLive()) return res.json({ enabled: false, emails: [] });
+  try {
+    const rows = await db('scheduled_emails').whereIn('status', ['scheduled', 'sending', ...CANCELLABLE.slice(1)]).orderBy('send_at', 'asc').limit(200);
+    res.json({ enabled: true, emails: rows.map(scheduledView) });
+  } catch (err) {
+    logger.error(`[email] scheduled list failed: ${err.message}`);
+    res.status(500).json({ error: 'Scheduled emails are unavailable.' });
+  }
+});
+
+// POST /scheduled/:id/cancel — Gmail's "Cancel send": the row stops and its
+// text comes back for the composer. A row Gmail is sending or has sent
+// cannot be cancelled (409).
+router.post('/scheduled/:id/cancel', async (req, res) => {
+  if (!emailSendLaterLive()) return res.status(404).json({ enabled: false, error: 'Schedule send is off.' });
+  try {
+    const [row] = await db('scheduled_emails').where({ id: req.params.id }).whereIn('status', CANCELLABLE)
+      .update({ status: 'cancelled', cancelled_at: db.fn.now(), updated_at: db.fn.now() }).returning('*');
+    if (!row) return res.status(409).json({ error: 'This email is already sending or sent, so it cannot be cancelled.' });
+    res.json({ success: true, draft: scheduledView(row) });
+  } catch (err) {
+    logger.error(`[email] scheduled cancel failed: ${err.message}`);
+    res.status(500).json({ error: 'The scheduled email was not cancelled. Try again.' });
   }
 });
 

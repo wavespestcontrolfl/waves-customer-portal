@@ -1064,6 +1064,18 @@ function initScheduledJobs() {
   cron.scheduleTimeout(pmGuardFirstsTick, 120 * 1000);
   cron.schedule('49 */6 * * *', pmGuardFirstsTick, { timezone: 'America/New_York' });
 
+  // EVERY MINUTE — Gmail-style scheduled emails (GATE_EMAIL_SEND_LATER; the
+  // sender returns at once with the gate off). A minute keeps "9:00 AM" at
+  // 9:00-9:01. The row claim makes each email go out at most once.
+  cron.schedule('* * * * *', async () => {
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      await runExclusive('scheduled-email-send', () => require('./email/scheduled-email-sender').sendDueScheduledEmails());
+    } catch (err) {
+      logger.error(`[scheduled-email] sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // EVERY 5 MIN — mark deploy-killed SEO pipeline/site-audit runs as failed.
   cron.schedule('*/5 * * * *', async () => {
     try {

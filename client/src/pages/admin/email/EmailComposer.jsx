@@ -15,6 +15,7 @@ import EmailQuickLinks from "../../../components/admin/EmailQuickLinks";
 import { appendStaticLinkClause } from "../../../lib/composerLinks";
 
 import EmailSendOutcome from "./EmailSendOutcome";
+import ScheduleSendMenu from "./ScheduleSendMenu";
 
 export default function EmailComposer({ active, editor, onSent }) {
   const {
@@ -38,7 +39,7 @@ export default function EmailComposer({ active, editor, onSent }) {
   const [toDropdownOpen, setToDropdownOpen] = useState(false);
   const toFieldRef = useRef(null);
   const sendDisabled =
-    composeSending || Boolean(editor.sendAttempts.compose) || !composeForm.to.trim() || !composeForm.body.trim();
+    composeSending || editor.scheduling === "compose" || Boolean(editor.sendAttempts.compose) || !composeForm.to.trim() || !composeForm.body.trim();
 
   // Debounced customer lookup for the "To" field. Searches by name or
   // partial email via the customers list endpoint and keeps only matches
@@ -144,7 +145,11 @@ export default function EmailComposer({ active, editor, onSent }) {
           <Button variant="ghost" disabled={composeSending} onClick={() => {
             setComposeForm(() => ({ to: "", subject: "", body: "" })); setShowCompose(false);
           }}>Discard draft</Button>
-          <Button onClick={() => handleComposeSend(onSent)} loading={composeSending} disabled={sendDisabled}>Send</Button>
+          <div className="flex gap-px">
+            <Button onClick={() => handleComposeSend(onSent)} loading={composeSending || editor.scheduling === "compose"} disabled={sendDisabled}>Send</Button>
+            {editor.scheduleEnabled && <ScheduleSendMenu disabled={sendDisabled}
+              onSchedule={(sendAt) => editor.handleComposeSchedule(sendAt, editor.onScheduled)} />}
+          </div>
         </div>
       </div>
     </div>, document.body,
