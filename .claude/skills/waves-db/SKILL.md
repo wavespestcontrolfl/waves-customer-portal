@@ -278,14 +278,29 @@ ALL TAKE THE LOCK — that is what the advisory lock buys, and the reasoning is 
 the `reschedule-link-promises.js` module doc: two writers that both take it
 first can never hold a row lock at the same time, so they cannot form a cycle.
 
-It buys nothing against a writer that never queues on it, and two such writers
-exist (below). While they do, a new writer ALSO takes the rows in the order they
-do — `call_log` before `triage_items` — or it can hold the advisory lock and
-`triage_items` while waiting on `call_log` that a legacy transaction holds while
-waiting on `triage_items`: a genuine lock-order inversion the advisory lock
-cannot see. That failure mode is not hypothetical; it is the round-6 P1 recorded
-in that same module doc, where `upsertCommitments` sat outside the lock and
-deadlocked against `applyHumanUpdate`.
+It buys nothing against a writer that never queues on it, and such writers exist
+IN BOTH ORDERS, so there is no row order a new writer can pick that is safe
+against all of them:
+
+- `admin-call-recordings.js` — operator relink and recording adoption:
+  `call_log`, then `triage_items`.
+- `twilio-voice-webhook.js` — the recovery branch of `parkAdditionalRecording`
+  (~514): `triage_items` insert, then `call_log` update. The inverse.
+
+So ORDERING CANNOT MAKE A NEW WRITER SAFE here. A new writer that must touch
+more than one of the four still takes `lockTriageCall` first — that is what
+protects it against every other writer that takes it — and then accepts that no
+ordering protects it against these two until they migrate. If your change needs
+that protection, raise the migration rather than picking an order and hoping:
+ask which of the two moves under the lock. Picking `call_log` first is safe
+against the first bullet and is exactly the inversion against the second.
+
+The failure mode is not hypothetical. It is the round-6 P1 in that same module
+doc, where `upsertCommitments` sat outside the lock and deadlocked against
+`applyHumanUpdate`. And note what the two bullets mean on their own, with no new
+writer involved: they are an unlocked pair in opposite orders on the same call
+id, which is the shape of that same inversion between two paths that ship today.
+That is an owner decision (#6342), not something to settle in a review.
 
 It does NOT describe all existing code, and a review must not read it as
 licence to reject what is there: the two operator-initiated transactions in
@@ -296,8 +311,9 @@ or are documented as safe as they stand is an owner decision, not one to settle
 in a review of whatever file happens to touch them; until it is made, leave them
 as they are and raise the question rather than adding or removing a lock in
 passing. Their row order is `call_log` first, then `triage_items` (relink at
-~553 and ~615, adoption at ~754 and ~843), which is the order a new writer has
-to stay compatible with until they migrate.
+~553 and ~615, adoption at ~754 and ~843) — and the webhook recovery path above
+takes the two in the opposite order, which is why no single compatible order
+exists and the migration question is the real one.
 Skip it and two writers on the same call can still form a row-lock cycle —
 and the deadlock abort lands in a fail-soft `catch`, so the operation reports
 success and is never retried. A settlement locked `call_log` and then updated
