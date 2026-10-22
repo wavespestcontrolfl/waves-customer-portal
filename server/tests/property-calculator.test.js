@@ -2,6 +2,7 @@ const {
   computeTurfArea,
   getLotCategory,
   calculatePropertyProfile,
+  estimateHardscape,
 } = require('../services/pricing-engine/property-calculator');
 const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
 const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
@@ -435,5 +436,16 @@ describe('v1-legacy-mapper T&S bed-area badge (#12b)', () => {
     expect(ts.bedAreaSource).toBe('estimated');
     const mapped = mapV1ToLegacyShape(estimate);
     expect(mapped.results.tsMeta.bedAreaIsEstimated).toBe(false);
+  });
+});
+
+describe('estimateHardscape property type is case-insensitive (Codex #6398 r17)', () => {
+  test('display-style types select the same curve as their lowercase keys', () => {
+    for (const [display, key] of [['Townhome', 'townhome'], ['Interior Townhome', 'interior_townhome'], ['Duplex', 'duplex'], ['Condo', 'condo'], ['Commercial', 'commercial'], ['Single Family', 'single_family']]) {
+      expect(estimateHardscape(10000, display)).toBe(estimateHardscape(10000, key));
+    }
+    // A townhome is not priced as single-family hardscape.
+    expect(estimateHardscape(10000, 'Townhome')).not.toBe(estimateHardscape(10000, 'single_family'));
+    expect(estimateHardscape(10000, undefined)).toBe(estimateHardscape(10000, 'single_family'));
   });
 });

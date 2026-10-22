@@ -88,6 +88,10 @@ describe('tree-shrub-estimates-report extraction', () => {
     expect(extractTreeShrub(raw)).toMatchObject({ shape: 'raw', service: 'commercial_tree_shrub', bedSqFt: 4680, bedSource: 'lot_based', treeCount: 4, monthly: 112.5, lotBedBasis: 'open_parcel' });
     // Admin V2 keeps only the mapped recurring row: price + review flags.
     const mappedOnly = { result: { recurring: { services: [{ service: 'commercial_tree_shrub', mo: 112.5, monthly: 112.5, manualReviewReasons: ['open_parcel_basis_footprint_over_half_lot'], pricingKnobs: { lotBedBasis: 'open_parcel' } }] } } };
+    // An ordinary UNFLAGGED mapped row carries no manualReviewReasons at all
+    // and is still the T&S evidence (Codex #6398 r17).
+    const unflagged = { result: { recurring: { services: [{ service: 'commercial_tree_shrub', mo: 112.5, monthly: 112.5, pricingKnobs: { lotBedBasis: 'open_parcel' } }] } } };
+    expect(extractTreeShrub(unflagged)).toMatchObject({ shape: 'compact', service: 'commercial_tree_shrub', monthly: 112.5, reviewReasons: [] });
     expect(extractTreeShrub(mappedOnly)).toMatchObject({ shape: 'compact', service: 'commercial_tree_shrub', monthly: 112.5, bedSqFt: null, reviewReasons: ['open_parcel_basis_footprint_over_half_lot'], lotBedBasis: 'open_parcel' });
     expect(regimeOf(extractTreeShrub(mappedOnly))).toBe('after_2026_10_21');
     // Raw agrees with the mapped row on price → raw inputs, mapped flags.

@@ -337,7 +337,10 @@ function isInjectionProduct(productRef = {}) {
 // the full SchedulePage form has no such gate, so the server enforces the
 // same condition before the value reaches the typed snapshot that
 // estimate-actuals reads as spray-volume calibration (Codex #6398 r15).
-const LIQUID_APPLICATION_METHODS = new Set(['foliar_spray', 'soil_drench']);
+// Every spray / drench method the completion forms offer; granular, bait,
+// station and trunk-injection work records no finished mix (Codex r17: a
+// liquid fertilizer defaults to broadcast_spray on the full form).
+const LIQUID_APPLICATION_METHODS = new Set(['foliar_spray', 'soil_drench', 'broadcast_spray', 'perimeter_spray', 'spot_treatment', 'fog_ulv', 'pin_stream']);
 function productIsLiquidApplication(productRef = {}) {
   const catalog = productRef.catalog || productRef;
   const input = productRef.input || productRef;

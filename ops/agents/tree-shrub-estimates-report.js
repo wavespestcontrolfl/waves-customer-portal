@@ -231,7 +231,9 @@ function mappedEnvelopeWithoutTreeShrub(estimateData, ctx) {
   const result = estimateData.result;
   const present = result && typeof result === 'object'
     && (Array.isArray(result.lineItems) || (result.results && typeof result.results === 'object') || Array.isArray(result.recurring?.services));
-  return !!present && !ctx.tsMeta && !ctx.mappedLine && !ctx.mappedSelected && ctx.mappedReasons === null;
+  // The mapped recurring row itself is the evidence — an unflagged row
+  // carries no manualReviewReasons (Codex #6398 r17).
+  return !!present && !ctx.tsMeta && !ctx.mappedLine && !ctx.mappedSelected && !ctx.mappedService;
 }
 
 function extractTreeShrub(estimateData) {

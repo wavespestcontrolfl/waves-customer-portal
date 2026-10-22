@@ -84,7 +84,11 @@ function normalizeFeatureInputs(input = {}) {
 }
 
 function estimateHardscape(lotSqFt, propertyType, features = {}) {
-  const type = propertyType || 'single_family';
+  // Display-style types ('Townhome', 'Duplex', 'Condo') reach the public
+  // quote unnormalized; the client mirror lowercases before matching, so
+  // the server must too or a townhome prices single-family hardscape and
+  // the open-parcel T&S bed drifts from the mirror (Codex #6398 r17).
+  const type = String(propertyType || 'single_family').trim().toLowerCase() || 'single_family';
   let fn = HARDSCAPE.single_family;
   if (type === 'commercial') fn = HARDSCAPE.commercial;
   else if (type.includes('townhome') || type === 'duplex') fn = HARDSCAPE.townhome;

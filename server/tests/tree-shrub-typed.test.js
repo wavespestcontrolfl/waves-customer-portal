@@ -161,6 +161,15 @@ describe('spray mix gallons need a liquid application (Codex #6398 r15)', () => 
     expect(hasLiquidApplication([granular], [{ id: 'g1', application_method: 'granular_broadcast' }])).toBe(false);
     expect(hasLiquidApplication([granular, foliar], [])).toBe(true);
     expect(hasLiquidApplication([drench], [])).toBe(true);
+    // Every spray method the full form offers counts; granular / bait /
+    // station / injection do not (Codex #6398 r17: liquid fertilizers
+    // default to broadcast_spray).
+    for (const method of ['broadcast_spray', 'perimeter_spray', 'spot_treatment', 'fog_ulv', 'pin_stream']) {
+      expect(hasLiquidApplication([{ productId: 'x', applicationMethod: method }], [])).toBe(true);
+    }
+    for (const method of ['granular_broadcast', 'bait_placement', 'station_check', 'trunk_injection']) {
+      expect(hasLiquidApplication([{ productId: 'x', applicationMethod: method }], [])).toBe(false);
+    }
     // Catalog default foliar, tech recorded nothing → liquid.
     expect(hasLiquidApplication([{ productId: 'c1' }], [{ id: 'c1', application_method: 'foliar_spray' }])).toBe(true);
     // Tech recorded granular over a catalog foliar default → not liquid.

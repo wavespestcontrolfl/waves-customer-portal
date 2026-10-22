@@ -148,7 +148,9 @@ const DEFAULT_METHOD = 'foliar_spray';
 // Finished spray mix exists only for a liquid application; a granule
 // (Heritage G, palm fertilizer) applies no mix, so the gallons fact is
 // offered and sent only while a liquid product is on the visit (Codex #6398).
-const LIQUID_METHODS = new Set(['foliar_spray', 'soil_drench']);
+// Mirrors LIQUID_APPLICATION_METHODS in server/services/tree-shrub-closeout.js
+// (the server drops the gallons when no recorded product used one of these).
+const LIQUID_METHODS = new Set(['foliar_spray', 'soil_drench', 'broadcast_spray', 'perimeter_spray', 'spot_treatment', 'fog_ulv', 'pin_stream']);
 const hasLiquidApplication = (rows) => rows.some((row) => row.active && LIQUID_METHODS.has(row.method));
 // The four customer-text flags the sheet posts while the Wrap-up is off.
 const CUSTOMER_TEXT_FLAGS = { sendCompletionSms: true, requestReview: true, includePayLink: true, reviewTiming: 'auto' };
