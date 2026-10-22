@@ -14,13 +14,6 @@ jest.mock('../services/annual-prepay-renewals', () => ({
 }));
 jest.mock('../services/estimate-deposits', () => ({ restoreDepositCreditForVoidedInvoice: jest.fn(async () => 0) }));
 jest.mock('../services/pay-combined', () => ({ clearPaymentIntentStamps: jest.fn(async () => undefined) }));
-const mockOwnerTransitions = jest.fn(async () => []);
-jest.mock('../services/visit-linked-invoice-withdrawal', () => ({
-  ownerTransitions: (...a) => mockOwnerTransitions(...a),
-  lockLinkedOwnershipRows: jest.fn(async () => undefined),
-  reconcileLinkedInvoices: jest.fn(async () => 0),
-  withdrawLinkedInvoicesForOwner: jest.fn(async () => []),
-}));
 jest.mock('../services/stripe', () => ({ retrievePaymentIntent: jest.fn(), assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined) }));
 
 const db = require('../models/db');
@@ -354,12 +347,47 @@ describe('unvoid: the bar restores the row and nothing else (structural refusal 
     expect(q.ops).toEqual(expect.arrayContaining([['whereIn', 'status', ['active', 'autopay_hold']]]));
   });
 
-  test('a visit-linked invoice whose visit a payer now owns refuses; one with no owner move does not', async () => {
-    mockOwnerTransitions.mockResolvedValueOnce([{ invoiceId: 'inv-1', moved: true, afterOwner: 'payer-1' }]);
-    await expect(reason(row({ status: 'void', scheduled_service_id: 'visit-1' }))).resolves.toBe('linked_payer_owner');
-    expect(mockOwnerTransitions).toHaveBeenCalledWith(db, { invoiceId: 'inv-1' }, { mode: 'post', lock: false, stamped: 'unstamped' });
-    mockOwnerTransitions.mockResolvedValueOnce([{ invoiceId: 'inv-1', moved: false, afterOwner: null }]);
-    await expect(reason(row({ status: 'void', scheduled_service_id: 'visit-1' }))).resolves.toBeNull();
+  // The REAL owner resolver (visit-linked-invoice-withdrawal.js liveVisitPayerOf) on the table-routing stand-in. The invoice is VOID,
+  // as at preview: the restore would withdraw a draft from the customer when a payer owns its visit now, and ownerTransitions would not
+  // even list a void invoice, so the card has to ask the live owner itself.
+  describe('linked_payer_owner reads the live Bill-To owner of a VOID invoice', () => {
+    const visitInvoice = () => row({ status: 'void', scheduled_service_id: 'visit-1' });
+    const owner = ({ visitPayer = null, customerPayer = null, selfPay = false, active = true, visitCustomer = 'cust-1' } = {}) => {
+      cfg.reads.scheduled_services = [{ id: 'visit-1', customer_id: visitCustomer, payer_id: visitPayer, self_pay_override: selfPay }];
+      cfg.reads.customers = [{ payer_id: customerPayer }];
+      cfg.selects = { payers: [{ id: visitPayer || customerPayer, active }] };
+    };
+
+    test.each([
+      ['a payer assigned to the visit after the void', { visitPayer: 'payer-1' }, 'linked_payer_owner'],
+      ['a payer on the customer', { customerPayer: 'payer-2' }, 'linked_payer_owner'],
+      ['a payer who is not active', { visitPayer: 'payer-1', active: false }, null],
+      ['a self-pay override on the visit', { customerPayer: 'payer-2', selfPay: true }, null],
+      ['no payer at all', {}, null],
+      ['a visit that belongs to another customer', { visitPayer: 'payer-1', visitCustomer: 'cust-9' }, null],
+    ])('%s', async (_label, state, expected) => {
+      owner(state);
+      await expect(reason(visitInvoice())).resolves.toBe(expected);
+    });
+
+    test('a service-record-only invoice resolves its visit through the record; an invoice with no visit link is not asked', async () => {
+      owner({ visitPayer: 'payer-1' });
+      cfg.reads.service_records = [{ scheduled_service_id: 'visit-1' }];
+      await expect(reason(row({ status: 'void', service_record_id: 'rec-1' }))).resolves.toBe('linked_payer_owner');
+      calls.length = 0;
+      await expect(reason(row({ status: 'void' }))).resolves.toBeNull();
+      expect(calls.map((c) => c.table)).not.toContain('scheduled_services');
+    });
+
+    test('the bar’s restore also refuses on the draft row under the lock (a payer assigned after the card), before the withdrawal runs', async () => {
+      owner({ visitPayer: 'payer-1' });
+      // The restore's linked-visit guard asks the schema first.
+      db.schema = { hasColumn: jest.fn(async () => false), hasTable: jest.fn(async () => false) };
+      const voided = visitInvoice();
+      cfg.reads.invoices = [voided];
+      cfg.updateReturning.invoices = [voided];
+      await expect(InvoiceService.unvoidInvoice('inv-1', { expected: { status: 'void', updatedAt: UPDATED.getTime() } })).rejects.toThrow(/^Cannot unvoid from the bar/);
+    });
   });
 
   test('an autopay-decline deferred text (a terminal-hook entry point): the bar refuses under the lock and never cancels it or runs its hook; the page still does both', async () => {

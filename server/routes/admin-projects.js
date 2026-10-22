@@ -2879,10 +2879,20 @@ async function maybeRepriceWdoDraft(invoice, project) {
 // `runner` is the knex transaction when called inside resolveOrCreateProjectInvoice's
 // lock (it must update the projects row on the same connection that holds the
 // FOR UPDATE lock, or it self-deadlocks); defaults to the pooled db otherwise.
+//
+// The invoice row is locked FOR SHARE first, in the same transaction as the link (a savepoint when `runner` is already a transaction),
+// because this is the ONLY writer of projects.invoice_id: a payment path that must not run while a report waits on the invoice (the
+// Intelligence Bar's apply_invoice_credit) holds the invoice row FOR UPDATE and reads projects.invoice_id under it, so a link cannot
+// appear between its read and its commit. Lock order is project (held by the callers that lock it) -> invoice, never the reverse.
 async function persistProjectInvoiceLink(project, invoiceId, runner = db) {
   if (!invoiceId || project.invoice_id === invoiceId) return;
   try {
-    await runner('projects').where({ id: project.id }).update({ invoice_id: invoiceId, updated_at: db.fn.now() });
+    const link = async (t) => {
+      await t('invoices').where({ id: invoiceId }).forShare().first('id');
+      await t('projects').where({ id: project.id }).update({ invoice_id: invoiceId, updated_at: db.fn.now() });
+    };
+    if (typeof runner.transaction === 'function') await runner.transaction(link);
+    else await link(runner);
     project.invoice_id = invoiceId;
   } catch (err) {
     logger.warn(`[projects] could not persist invoice link for ${project.id}: ${err.message}`);
@@ -6067,3 +6077,4 @@ module.exports = router;
 // sweep) via lazy require; lives here so it reuses the send path's WDO
 // helpers (PDF build, filing archive, copies, gates) without moving them.
 module.exports.releaseHeldProjectReport = releaseHeldProjectReport;
+module.exports.persistProjectInvoiceLink = persistProjectInvoiceLink;

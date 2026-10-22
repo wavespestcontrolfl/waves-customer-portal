@@ -192,12 +192,15 @@ describe('apply-credit — the page and the bar', () => {
     expect(mockPostMovement).not.toHaveBeenCalled();
   });
 
-  test('an invoice linked to ANY project is refused for the bar under the invoice lock (project rows locked), before any credit moves; the page is untouched', async () => {
+  test('an invoice linked to ANY project is refused for the bar under the invoice lock, before any credit moves; the page is untouched', async () => {
     trxProjects.first.mockImplementation(async () => ({ id: 'proj-1' }));
     const answer = await router.applyCreditFromBar({ invoiceId: 'inv-1', body: { waiveSetupFee: false }, actor: ACTOR, expected: EXPECTED });
     expect(answer).toMatchObject({ status: 409, json: { code: 'NEEDS_INVOICES_PAGE', error: expect.stringMatching(/linked to a project/) } });
     expect(trxProjects.where).toHaveBeenCalledWith({ invoice_id: 'inv-1' });
-    expect(trxProjects.forUpdate).toHaveBeenCalled();
+    // A plain read under the invoice row's FOR UPDATE (project links take that invoice row FOR SHARE first); no project-row lock, which
+    // would invert the project -> invoice lock order.
+    expect(trxProjects.forUpdate).not.toHaveBeenCalled();
+    expect(trxInvoices.forUpdate).toHaveBeenCalled();
     expect(mockPostMovement).not.toHaveBeenCalled();
     expect(trxInvoices.update).not.toHaveBeenCalled();
     expect(mockStopOnPayment).not.toHaveBeenCalled();

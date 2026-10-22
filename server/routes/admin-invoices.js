@@ -2883,10 +2883,12 @@ const invoiceApplyCreditHandler = async (req, res, next) => {
         }
         // The bar's card, on the locked row: nothing can change the invoice between this check and the draw-down below.
         assertInvoiceVersion(locked, expectedCredit, 'applying credit');
-        // The bar only: an invoice linked to ANY project stays on the page. Paying it nudges the report-release sweep, a report
-        // hold is written without touching the invoice (so the card's pin cannot see it), and the project rows are read here
-        // under lock, after the invoice row is held, so an in-flight hold write is waited for and seen.
-        if (expectedCredit && await trx('projects').where({ invoice_id: id }).forUpdate().first('id')) {
+        // The bar only: an invoice linked to ANY project stays on the page. Paying it nudges the report-release sweep, and a report
+        // hold is written without touching the invoice (so the card's pin cannot see it). This read runs with the invoice row held
+        // FOR UPDATE; the only writer of projects.invoice_id (admin-projects persistProjectInvoiceLink) locks that invoice row FOR
+        // SHARE before linking, so a new link waits for this transaction to commit and cannot appear between this read and the
+        // commit. (A plain read on purpose: locking the project rows here would invert the project -> invoice lock order.)
+        if (expectedCredit && await trx('projects').where({ invoice_id: id }).first('id')) {
           const err = new Error('Cannot apply credit from the bar — this invoice is linked to a project whose report may wait on its payment; apply the credit from the Invoices page');
           err.statusCode = 409; err.isOperational = true; err.code = 'NEEDS_INVOICES_PAGE'; throw err;
         }

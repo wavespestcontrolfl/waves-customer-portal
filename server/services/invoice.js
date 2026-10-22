@@ -794,7 +794,9 @@ function applyVoidExpected(q, expected) {
 //                                  visit_completion_packet_id, so refusing every packet, payer-billed or payer_billed-stamped
 //                                  invoice keeps it from ever running on the bar's path.
 //   payer_statement                the restore rolls the invoice back into its payer statement's total.
-//   linked_payer_owner             a visit-linked invoice whose visit is now owned by a payer is withdrawn by the restore.
+//   linked_payer_owner             a visit-linked invoice whose visit a payer owns RIGHT NOW (live: visit / customer payer, active, no
+//                                  self-pay override) is withdrawn from the customer by the restore, so it is not collectible after it;
+//                                  checked from the live owner, so it holds at preview while the invoice is still void.
 //   queued_message                 the restore cancels (and hands to terminal hooks, which can re-queue an invoice text) every
 //                                  scheduled / sending text for the invoice, and refuses mid-finalization ones: ANY sms_log row of
 //                                  ANY entry point tied to the invoice that is scheduled, sending or finalize-pending.
@@ -815,8 +817,8 @@ async function unvoidObligationReason(conn, invoice) {
   // From the records the restore also touches.
   if (invoice.scheduled_service_id || invoice.service_record_id) {
     const Linked = require("./visit-linked-invoice-withdrawal");
-    const moves = await Linked.ownerTransitions(conn, { invoiceId: invoice.id }, { mode: "post", lock: false, stamped: "unstamped" });
-    if ((moves || []).some((t) => t && t.moved && t.afterOwner)) return "linked_payer_owner";
+    // Not ownerTransitions: that skips a VOID invoice, which is exactly what the card is asked about at preview.
+    if (await Linked.liveVisitPayerOf(conn, invoice)) return "linked_payer_owner";
   }
   if (await conn("sms_log")
     .whereRaw("metadata->>'invoice_id' = ?", [String(invoice.id)])
