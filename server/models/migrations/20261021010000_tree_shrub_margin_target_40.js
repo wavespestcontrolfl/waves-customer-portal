@@ -16,9 +16,11 @@
  * WaveGuard-discounted T&S lines (Silver ~33%, Gold ~29%, Platinum ~25%).
  * Sent estimates replay their stamped pricing; only new quotes move.
  *
- * This file is frozen as first pushed (a preview environment may already
- * have recorded it in knex_migrations); the changelog correction for a
- * preserved admin-tuned row lives in 20261022000000_tree_shrub_margin_changelog_truth.js.
+ * up() is frozen as first pushed (a preview environment may already have
+ * recorded it in knex_migrations); the changelog correction for a preserved
+ * admin-tuned row lives in 20261022000000_tree_shrub_margin_changelog_truth.js.
+ * down() is rollback-only code and has no recorded effect yet, so its
+ * ownership check could be tightened in place.
  */
 const MIGRATION_TAG = 'migration:20261021010000_tree_shrub_margin_target_40';
 const UP_REASON = 'Owner audit 2026-10-21: Tree & Shrub margin target 0.45 -> 0.40 (admin-inclusive)';
@@ -73,11 +75,17 @@ exports.up = async function (knex) {
 };
 
 exports.down = async function (knex) {
+  // Revert only when this migration's own audit row is still the LATEST
+  // activity on the key. The current value alone cannot prove ownership: an
+  // admin who tuned the row after the migration and later deliberately
+  // returned it to 0.40 keeps their choice (Codex #6398 r12).
   if (await knex.schema.hasTable('pricing_config_audit')) {
-    const own = await knex('pricing_config_audit')
-      .where({ config_key: CONFIG_KEY, changed_by: MIGRATION_TAG, reason: UP_REASON })
-      .first('id');
-    if (own) {
+    const latest = await knex('pricing_config_audit')
+      .where({ config_key: CONFIG_KEY })
+      .orderBy('id', 'desc')
+      .first('id', 'changed_by', 'reason');
+    const ownIsLatest = !!latest && latest.changed_by === MIGRATION_TAG && latest.reason === UP_REASON;
+    if (ownIsLatest) {
       const loaded = await loadRow(knex);
       if (loaded && Number(loaded.data.value) === 0.40) {
         await writeValue(knex, loaded.data, 0.45, DOWN_REASON);
