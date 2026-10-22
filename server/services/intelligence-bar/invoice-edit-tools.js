@@ -301,6 +301,9 @@ async function setupFeeAlertTied(invoice, nextNotes) {
   }
 }
 const SETUP_FEE_EFFECT = { kind: 'operational', text: 'This invoice belongs to an accepted estimate. Confirming re-checks the staff alert that asks the office to bill its setup fee: that alert may close, reopen or change (and show as unread again). Nothing is sent to the customer.' };
+// Shown when no estimate link is found: the save re-runs the same reconciliation for whatever link exists at that moment (a visit
+// can gain its estimate between the card and the save), so the card always names the effect instead of promising its absence.
+const SETUP_FEE_IF_TIED_EFFECT = { kind: 'operational', text: 'If this invoice is linked to an accepted estimate when it is saved, confirming re-checks the staff alert that asks the office to bill its setup fee (it may close, reopen or change). Nothing is sent to the customer.' };
 
 function editEffects({ status, dueChanged, setupFeeTied = false }) {
   const effects = [];
@@ -315,7 +318,7 @@ function editEffects({ status, dueChanged, setupFeeTied = false }) {
       ? 'Its payment reminder dates move with the new due date. A due date in the future returns it from overdue to sent.'
       : 'Its payment reminder dates move with the new due date.' });
   }
-  if (setupFeeTied) effects.push(SETUP_FEE_EFFECT);
+  effects.push(setupFeeTied ? SETUP_FEE_EFFECT : SETUP_FEE_IF_TIED_EFFECT);
   effects.push(NOTHING_SENT);
   return effects;
 }
@@ -324,7 +327,8 @@ function editEffects({ status, dueChanged, setupFeeTied = false }) {
 function metadataChanges(invoice, read) {
   const changes = [];
   const body = {};
-  if (read.title !== undefined && (read.title || null) !== (oneLine(invoice.title) || null)) {
+  // Both sides trimmed the same way (internal spacing kept), so a spacing-only fix is a change and an identical title is not.
+  if (read.title !== undefined && (read.title || null) !== ((invoice.title || '').trim() || null)) {
     changes.push(fieldChange('Title', invoice.title, read.title));
     body.title = read.title;
   }
@@ -612,7 +616,7 @@ function unvoidEffects({ invoice, visit, setupFeeTied = false }) {
     { kind: 'operational', text: visit
       ? `Its linked visit (${visit.date || 'no date'}, ${visit.status || 'no status'}) is checked: a cancelled visit refuses the unvoid. The visit is not changed.`
       : 'It is not linked to a visit.' },
-    ...(setupFeeTied ? [SETUP_FEE_EFFECT] : []),
+    setupFeeTied ? SETUP_FEE_EFFECT : SETUP_FEE_IF_TIED_EFFECT,
     NOTHING_SENT,
   ];
 }

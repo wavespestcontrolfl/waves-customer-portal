@@ -276,12 +276,18 @@ describe('edit_invoice card', () => {
     expect(await run('edit_invoice', { title: 'New title' })).toMatchObject({ code: 'unverified' });
   });
 
-  test('an invoice tied to an accepted estimate discloses the setup-fee alert re-check; an untied one does not', async () => {
+  test('an invoice tied to an accepted estimate discloses the setup-fee alert re-check; an untied one still names it as conditional', async () => {
     const untied = await run('edit_invoice', { title: 'New title' });
-    expect(untied.effects.map((e) => e.text).join(' ')).not.toMatch(/re-checks the staff alert/);
+    expect(untied.effects.map((e) => e.text).join(' ')).toMatch(/If this invoice is linked to an accepted estimate when it is saved, confirming re-checks/);
     state.scheduled_services[0].source_estimate_id = 'est-1';
     const tied = await run('edit_invoice', { title: 'New title' });
     expect(tied.effects).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'operational', text: expect.stringMatching(/setup fee: that alert may close, reopen or change/) })]));
+  });
+
+  test('titles compare with the same trimming on both sides: a spacing-only fix is a change, an identical title is not', async () => {
+    setInvoice({ title: 'Quarterly  Service' });
+    expect(await run('edit_invoice', { title: 'Quarterly Service' })).toMatchObject({ preview: true, _body: { title: 'Quarterly Service' } });
+    expect(await run('edit_invoice', { title: 'Quarterly  Service' })).toMatchObject({ code: 'no_change' });
   });
 
   test('"" clears the title and notes (the page sends null)', async () => {
@@ -504,15 +510,15 @@ describe('unvoid_invoice', () => {
     expect(card._expected).toEqual({ status: 'void', updatedAt: UPDATED.getTime(), customerId: CUST });
   });
 
-  test('a voided invoice tied to an accepted estimate discloses the setup-fee alert re-check; an untied one does not', async () => {
-    expect(JSON.stringify((await run('unvoid_invoice')).effects)).not.toMatch(/re-checks the staff alert/);
+  test('a voided invoice tied to an accepted estimate discloses the setup-fee alert re-check; an untied one still names it as conditional', async () => {
+    expect(JSON.stringify((await run('unvoid_invoice')).effects)).toMatch(/If this invoice is linked to an accepted estimate when it is saved/);
     state.scheduled_services[0].source_estimate_id = 'est-1';
     expect(JSON.stringify((await run('unvoid_invoice')).effects)).toMatch(/Confirming re-checks the staff alert that asks the office to bill its setup fee/);
     state.scheduled_services[0].source_estimate_id = null;
     setInvoice({ notes: 'Accepted estimate #est-2' });
     const stamped = (await run('unvoid_invoice'));
     const { acceptedEstimateIdFromNotes } = require('../services/setup-fee-alert-reconcile');
-    expect(JSON.stringify(stamped.effects).includes('re-checks the staff alert')).toBe(Boolean(acceptedEstimateIdFromNotes('Accepted estimate #est-2')));
+    expect(JSON.stringify(stamped.effects).includes('This invoice belongs to an accepted estimate')).toBe(Boolean(acceptedEstimateIdFromNotes('Accepted estimate #est-2')));
   });
 
   test('an estimate link that appears after the card (it changes the setup-fee disclosure) refuses at Confirm as changed', async () => {
