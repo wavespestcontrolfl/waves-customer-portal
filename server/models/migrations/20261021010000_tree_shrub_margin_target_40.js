@@ -15,6 +15,10 @@
  * bundled customers in full; `belowMarginFloor` simply flags more
  * WaveGuard-discounted T&S lines (Silver ~33%, Gold ~29%, Platinum ~25%).
  * Sent estimates replay their stamped pricing; only new quotes move.
+ *
+ * This file is frozen as first pushed (a preview environment may already
+ * have recorded it in knex_migrations); the changelog correction for a
+ * preserved admin-tuned row lives in 20261022000000_tree_shrub_margin_changelog_truth.js.
  */
 const MIGRATION_TAG = 'migration:20261021010000_tree_shrub_margin_target_40';
 const UP_REASON = 'Owner audit 2026-10-21: Tree & Shrub margin target 0.45 -> 0.40 (admin-inclusive)';
@@ -49,28 +53,21 @@ exports.up = async function (knex) {
   const loaded = await loadRow(knex);
   // Only move a row still at the v4.6 value — an admin who already tuned it
   // keeps their number.
-  const current = loaded ? Number(loaded.data.value) : null;
-  const moved = !!(loaded && current === 0.45);
-  if (moved) await writeValue(knex, loaded.data, 0.40, UP_REASON);
+  if (loaded && Number(loaded.data.value) === 0.45) {
+    await writeValue(knex, loaded.data, 0.40, UP_REASON);
+  }
   if (await knex.schema.hasTable('pricing_changelog')) {
-    // The changelog records what actually happened to the LIVE value: a
-    // preserved admin-tuned row is logged as preserved, not as a cut that
-    // never reached the bridge (Codex #6398). Both summaries share the
-    // prefix down() keys on.
-    const preserved = !moved && Number.isFinite(current);
     await knex('pricing_changelog').insert({
       version_from: 'v4.9',
       version_to: 'v4.9',
       changed_by: 'claude-code',
       // pricing_changelog_category_check: bug|leak|rule|cost|architecture|documentation|infrastructure
       category: 'cost',
-      summary: preserved
-        ? `Tree & Shrub margin target 0.45 -> 0.40 in code; the admin-tuned pricing_config row (${current}) was preserved and still governs live pricing.`
-        : 'Tree & Shrub margin target 0.45 -> 0.40 (admin-inclusive); list prices x 0.55/0.60.',
+      summary: 'Tree & Shrub margin target 0.45 -> 0.40 (admin-inclusive); list prices x 0.55/0.60.',
       affected_services: JSON.stringify(['tree_shrub']),
-      before_value: JSON.stringify({ marginTarget: preserved ? current : 0.45, marginTargetSemantics: 'margin_admin_inclusive' }),
-      after_value: JSON.stringify({ marginTarget: preserved ? current : 0.40, codeDefault: 0.40, rowMoved: moved, marginTargetSemantics: 'margin_admin_inclusive', marginFloor: 0.35 }),
-      rationale: 'Owner audit 2026-10-21: T&S was the only recurring program priced to a 45% admin-inclusive margin (lawn/pest price to the 35% floor) and sent quotes read high. The post-discount guard is report-only, so the cut reaches every NEW quote; sent quotes replay their stamped pricingKnobs.marginTarget. belowMarginFloor flags more WaveGuard-discounted T&S lines, which the owner reviews in the estimator.',
+      before_value: JSON.stringify({ marginTarget: 0.45, marginTargetSemantics: 'margin_admin_inclusive' }),
+      after_value: JSON.stringify({ marginTarget: 0.40, marginTargetSemantics: 'margin_admin_inclusive', marginFloor: 0.35 }),
+      rationale: 'Owner audit 2026-10-21: T&S was the only recurring program priced to a 45% admin-inclusive margin (lawn/pest price to the 35% floor) and sent quotes read high. The post-discount guard is report-only, so the cut reaches every customer; belowMarginFloor flags more WaveGuard-discounted T&S lines, which the owner reviews in the estimator.',
     });
   }
 };

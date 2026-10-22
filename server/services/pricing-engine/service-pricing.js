@@ -2619,7 +2619,7 @@ function hasKnownTreeShrubPressure(property = {}) {
   return ['high', 'very_high', 'severe'].includes(overallPressure);
 }
 
-function estimateTreeShrubBedAreaFromLot(property = {}) {
+function estimateTreeShrubBedAreaFromLot(property = {}, knobs = null) {
   const lotSqFt = Number(property.lotSqFt) || 0;
   if (lotSqFt <= 0) return null;
 
@@ -2632,12 +2632,16 @@ function estimateTreeShrubBedAreaFromLot(property = {}) {
   // Open-area basis (owner audit 2026-10-21): lot − footprint − hardscape
   // when the property carries them (the calculatePropertyProfile shape);
   // a bare { lotSqFt } caller still prices on the gross lot. See
-  // property-calculator.js#treeShrubBedBasisSqFt.
-  const basisSqFt = treeShrubBedBasisSqFt(
-    lotSqFt,
-    property.footprint ?? property.footprintSqFt,
-    property.hardscape,
-  );
+  // property-calculator.js#treeShrubBedBasisSqFt. A replayed pre-audit
+  // quote (knobs.lotBedBasis 'gross_lot') keeps the gross-lot basis it was
+  // sent with (Codex #6398 r2).
+  const basisSqFt = knobs && knobs.lotBedBasis === 'gross_lot'
+    ? lotSqFt
+    : treeShrubBedBasisSqFt(
+      lotSqFt,
+      property.footprint ?? property.footprintSqFt,
+      property.hardscape,
+    );
   const rawBedArea = Math.max(0, Math.round(basisSqFt * pct));
   // Owner ruling 2026-08-10: never clamped — the pricer routes large areas
   // (>= BED_AREA_REVIEW_SQFT) to manual review instead.
@@ -2658,6 +2662,23 @@ function treeShrubFallbackBedSqFt(knobs) {
   if (stamped !== null) return stamped;
   const live = treeShrubKnobNumber(TREE_SHRUB.fallbackBedSqFt, 100, 20000);
   return live !== null ? live : TREE_SHRUB_FALLBACK_BED_SQFT;
+}
+
+// The treeDensity→count backstop a quote prices with: a stamped table replays
+// verbatim (each key a non-negative whole number ≤ 50), else the live table.
+function treeShrubDensityCountsFor(knobs) {
+  const stamped = knobs && knobs.treeDensityCounts;
+  if (stamped && typeof stamped === 'object') {
+    const out = {};
+    let valid = true;
+    for (const key of ['none', 'light', 'moderate', 'heavy']) {
+      const n = Number(stamped[key]);
+      if (!Number.isInteger(n) || n < 0 || n > 50) { valid = false; break; }
+      out[key] = n;
+    }
+    if (valid) return out;
+  }
+  return { ...(TREE_SHRUB.treeDensityCounts || {}) };
 }
 
 function treeShrubFallbackWarning(sqft) {
@@ -2709,7 +2730,7 @@ function resolveTreeShrubBedArea(property = {}, warnings = [], knobs = null) {
     };
   }
 
-  const lotEstimate = estimateTreeShrubBedAreaFromLot(property);
+  const lotEstimate = estimateTreeShrubBedAreaFromLot(property, knobs);
   if (lotEstimate) {
     return {
       bedArea: lotEstimate.bedArea,
@@ -2819,7 +2840,10 @@ function priceTreeShrub(property, options = {}) {
     const treeDensity = normalizeTreeShrubEnum(
       property.treeDensity || property.features?.trees || property.features?.treeDensity, ''
     );
-    const densityCount = TREE_SHRUB.treeDensityCounts?.[treeDensity];
+    // A replayed quote keeps the density→count table it was sent with
+    // (stamped pricingKnobs.treeDensityCounts; the 2026-10-21 audit moved the
+    // live table from 3/6/10 to 2/4/6 — Codex #6398 r2).
+    const densityCount = treeShrubDensityCountsFor(options.knobs)[treeDensity];
     if (densityCount !== undefined && densityCount > 0) {
       treeCount = densityCount;
       treeCountSource = 'density_estimate';
@@ -3150,6 +3174,11 @@ function priceTreeShrub(property, options = {}) {
       // 2026-10-21 owner audit; 0.45 before). Stamped so a sent quote
       // replays its own target, never the live one.
       marginTarget,
+      // The two inferred-input rules the same audit changed, stamped for the
+      // same reason: a lot-based bed on the open parcel (gross lot before)
+      // and the treeDensity→count backstop (3/6/10 before).
+      lotBedBasis: (knobs.lotBedBasis === 'gross_lot') ? 'gross_lot' : 'open_parcel',
+      treeDensityCounts: treeShrubDensityCountsFor(knobs),
     },
     access,
     onSiteMin,

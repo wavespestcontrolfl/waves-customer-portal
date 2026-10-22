@@ -40,6 +40,11 @@ const NEUTRAL_TREE_SHRUB_KNOBS = {
   // with no stamped target replays 0.45 so a sent quote keeps its price.
   // Never read from the live constant.
   marginTarget: 0.45,
+  // The inferred-input rules the same audit changed. Every pre-audit quote
+  // priced a lot-based bed on the GROSS lot and backstopped missing tree
+  // counts at 3/6/10; an unstamped line replays both (Codex #6398 r2).
+  lotBedBasis: 'gross_lot',
+  treeDensityCounts: { none: 0, light: 3, moderate: 6, heavy: 10 },
 };
 
 function treeShrubKnobSignalForReplay(estData = {}) {
@@ -82,6 +87,19 @@ function treeShrubKnobSignalForReplay(estData = {}) {
     fallbackBedSqFt: pick('fallbackBedSqFt'),
     // A stamp from before the margin target became a knob priced 0.45.
     marginTarget: pick('marginTarget'),
+    // Pre-stamp lines priced the gross lot and the 3/6/10 table.
+    lotBedBasis: stamped.lotBedBasis === 'open_parcel' ? 'open_parcel' : NEUTRAL_TREE_SHRUB_KNOBS.lotBedBasis,
+    treeDensityCounts: (() => {
+      const table = stamped.treeDensityCounts;
+      if (!table || typeof table !== 'object') return { ...NEUTRAL_TREE_SHRUB_KNOBS.treeDensityCounts };
+      const out = {};
+      for (const key of ['none', 'light', 'moderate', 'heavy']) {
+        const n = Number(table[key]);
+        if (!Number.isInteger(n) || n < 0) return { ...NEUTRAL_TREE_SHRUB_KNOBS.treeDensityCounts };
+        out[key] = n;
+      }
+      return out;
+    })(),
   };
 }
 

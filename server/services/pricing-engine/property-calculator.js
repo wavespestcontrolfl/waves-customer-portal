@@ -624,8 +624,11 @@ function calculatePropertyProfile(input) {
     bedAreaSource = 'estimated';
     bedAreaPricingConfidence = 'medium';
   } else if (toPositiveNumber(input.lotSqFt) > 0) {
+    // A replayed pre-2026-10-21 quote keeps the GROSS-lot basis it was sent
+    // with (input.lotBedBasis from the stamped T&S knobs; Codex #6398 r2);
+    // fresh quotes price the open parcel.
     bedArea = estimateBedArea(
-      treeShrubBedBasisSqFt(input.lotSqFt, footprint, hardscape),
+      input.lotBedBasis === 'gross_lot' ? Number(input.lotSqFt) : treeShrubBedBasisSqFt(input.lotSqFt, footprint, hardscape),
       features.shrubs,
       features.complexity
     );
