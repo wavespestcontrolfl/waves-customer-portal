@@ -167,16 +167,24 @@ async function settleUnknown(row, conn) {
   return 'outcome_unknown';
 }
 
-// Claims up to SEND_CONCURRENCY due rows for one parallel group.
+// Claims up to SEND_CONCURRENCY due rows for one parallel group. A failed
+// claim ends the group but never strands the rows already claimed: they
+// are still sent, and the sweep then reads as failed.
 async function claimGroup(conn, tried) {
   const group = [];
   while (group.length < SEND_CONCURRENCY && tried.length < BATCH) {
-    const row = await claimNext(conn, tried);
+    let row;
+    try {
+      row = await claimNext(conn, tried);
+    } catch (err) {
+      logger.error(`[scheduled-email] claim failed (${err.code || 'error'})`);
+      return { group, claimFailed: true };
+    }
     if (!row) break;
     tried.push(row.id);
     group.push(row);
   }
-  return group;
+  return { group, claimFailed: false };
 }
 
 async function sendDueScheduledEmails({ conn = db, gmail } = {}) {
@@ -186,13 +194,14 @@ async function sendDueScheduledEmails({ conn = db, gmail } = {}) {
   const tried = [];
   const claimUntil = Date.now() + CLAIM_BUDGET_MS;
   while (tried.length < BATCH && Date.now() < claimUntil) {
-    const group = await claimGroup(conn, tried);
+    const { group, claimFailed } = await claimGroup(conn, tried);
     results.push(...await Promise.all(group.map((row) => sendOne(row, { conn, ...(gmail ? { gmail } : {}) }).catch((err) => {
       // The claim stays 'sending'; settleStaleClaims turns it into
       // outcome_unknown with an alert. The other emails still go out.
       logger.error(`[scheduled-email] ${row.id} errored (${err.code || 'error'})`);
       return 'error';
     }))));
+    if (claimFailed) { results.push('error'); break; }
     if (group.length < SEND_CONCURRENCY) break;
   }
   const missedAlerts = await raiseMissedAlerts(conn);

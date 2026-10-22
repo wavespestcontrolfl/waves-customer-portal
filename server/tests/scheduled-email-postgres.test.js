@@ -317,6 +317,24 @@ jest.setTimeout(30000);
     expect((await sendDueScheduledEmails()).results).toEqual(['retry']);
   });
 
+  test('a failed claim still sends the rows already claimed, and the run reads as failed', async () => {
+    const first = await queue({ to: 'first@example.invalid' });
+    const second = await queue({ to: 'second@example.invalid' });
+    await makeDue(first.body.scheduled.id, { send_at: database.raw("now() - interval '2 minutes'") });
+    await makeDue(second.body.scheduled.id);
+    let claims = 0;
+    const flaky = (...args) => database(...args);
+    flaky.fn = database.fn;
+    flaky.raw = (sql, ...rest) => {
+      if (/SET status = 'sending'/.test(sql) && (claims += 1) === 2) return Promise.reject(new Error('claim down'));
+      return database.raw(sql, ...rest);
+    };
+    gmail.sendMessage.mockResolvedValue({ id: 'gmail-first' });
+    await expect(sendDueScheduledEmails({ conn: flaky })).rejects.toMatchObject({ summary: { results: ['sent', 'error'] } });
+    expect(await row(first.body.scheduled.id)).toMatchObject({ status: 'sent' });
+    expect(await row(second.body.scheduled.id)).toMatchObject({ status: 'scheduled' });
+  });
+
   test('due emails go to Gmail up to five at a time', async () => {
     for (let i = 0; i < 6; i += 1) {
       const { body } = await queue({ to: `batch${i}@example.invalid` });
