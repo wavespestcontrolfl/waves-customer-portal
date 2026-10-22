@@ -1896,6 +1896,9 @@ function discardVisionAreaFields(ai) {
   delete out.estimatedBedAreaSf;
   delete out.estimatedBedAreaPercent;
   delete out._bedAreaConfidence;
+  // The hedge-line read is a parcel measurement from the same imagery
+  // (Codex #6398): stale/vacant imagery must not persist it either.
+  delete out.estimatedHedgeLinearFt;
   return out;
 }
 
@@ -6665,4 +6668,9 @@ module.exports._private = {
   isCommercialProfile,
   turfRiskReasons,
   visionContextPromptBlock,
+  // The satellite read's production contract, for the ops bake-off
+  // (ops/agents/satellite-vision-model-bakeoff.js) so a model is scored
+  // against the same validator the lookup applies.
+  normalizeSatelliteAnalysis,
+  isValidSatelliteVisionAnalysis,
 };

@@ -1346,7 +1346,7 @@ describe('Tree & Shrub v4.7 quote-time knob snapshot (sent-estimate replay)', ()
     const neutral = priceTreeShrub({ bedArea: 2000, access: 'easy' }, { tier: 'standard' });
     expect(neutral.pricingKnobs).toEqual({
       densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1, callbackReservePerVisit: 0,
-      fallbackBedSqFt: 1200,
+      fallbackBedSqFt: 1200, marginTarget: 0.40,
     });
     constants.TREE_SHRUB.densityFactors.heavy = 1.3;
     constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 2.5 };
@@ -1354,7 +1354,7 @@ describe('Tree & Shrub v4.7 quote-time knob snapshot (sent-estimate replay)', ()
     const armed = priceTreeShrub({ bedArea: 2000, access: 'easy', shrubDensity: 'heavy' }, { tier: 'standard' });
     expect(armed.pricingKnobs).toEqual({
       densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 2.5, callbackReservePerVisit: 2,
-      fallbackBedSqFt: 1200,
+      fallbackBedSqFt: 1200, marginTarget: 0.40,
     });
   });
 
@@ -1395,7 +1395,7 @@ describe('Tree & Shrub v4.7 quote-time knob snapshot (sent-estimate replay)', ()
   test('legacy estimates (no stamp) replay NEUTRAL — they could only have been priced with the knobs off', () => {
     const { estimateTreeShrubKnobSignal: signal } = require('../routes/estimate-public');
     expect(signal({ result: { lineItems: [{ service: 'tree_shrub' }] } })).toEqual({
-      densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1, callbackReservePerVisit: 0, fallbackBedSqFt: 2000,
+      densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1, callbackReservePerVisit: 0, fallbackBedSqFt: 2000, marginTarget: 0.45,
     });
     // A stamp from before the large-palm factor replays it neutral; a newer
     // stamp replays its own factor.
@@ -1473,7 +1473,7 @@ describe('Tree & Shrub v4.7 knob snapshot survives the mapped admin envelope', (
     const meta = mapV1ToLegacyShape(estimate).results.tsMeta;
     expect(meta.pricingKnobs).toEqual({
       densityFactor: 1, perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 1, callbackReservePerVisit: 0,
-      fallbackBedSqFt: 1200,
+      fallbackBedSqFt: 1200, marginTarget: 0.40,
     });
     expect(meta.palmCount).toBe(10);
     expect(meta.palmCountSource).toBe('service_line');
@@ -1483,13 +1483,13 @@ describe('Tree & Shrub v4.7 knob snapshot survives the mapped admin envelope', (
     const { estimateTreeShrubKnobSignal: signal } = require('../routes/estimate-public');
     expect(signal({
       result: { results: { tsMeta: { pricingKnobs: { densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 } } } },
-    })).toEqual({ densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 1, callbackReservePerVisit: 2, fallbackBedSqFt: 2000 });
+    })).toEqual({ densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 1, callbackReservePerVisit: 2, fallbackBedSqFt: 2000, marginTarget: 0.45 });
     // Mapped legacy T&S estimate saved before the knobs existed.
     expect(signal({ result: { results: { tsMeta: { eb: 2000, et: 3 } } } })).toEqual({
-      densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1, callbackReservePerVisit: 0, fallbackBedSqFt: 2000,
+      densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1, callbackReservePerVisit: 0, fallbackBedSqFt: 2000, marginTarget: 0.45,
     });
     expect(signal({ result: { results: { ts: [{ tier: 'standard', ann: 600 }] } } })).toEqual({
-      densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1, callbackReservePerVisit: 0, fallbackBedSqFt: 2000,
+      densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1, callbackReservePerVisit: 0, fallbackBedSqFt: 2000, marginTarget: 0.45,
     });
     // No T&S anywhere → inject nothing.
     expect(signal({ result: { results: { pest: {} } } })).toBeNull();
@@ -1518,7 +1518,7 @@ describe('Tree & Shrub v4.7 GH review round 1 fixes', () => {
     expect(estimateTreeShrubKnobSignal).toBe(shared.treeShrubKnobSignalForReplay);
     const stamped = { result: { results: { tsMeta: { pricingKnobs: { densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 } } } } };
     expect(shared.treeShrubKnobSignalForReplay(stamped)).toEqual({
-      densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 1, callbackReservePerVisit: 2, fallbackBedSqFt: 2000,
+      densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 1, callbackReservePerVisit: 2, fallbackBedSqFt: 2000, marginTarget: 0.45,
     });
   });
 
@@ -1542,7 +1542,7 @@ describe('Tree & Shrub v4.7 GH review round 1 fixes', () => {
     };
 
     // Membership-lapse reconcile: a DECLARED replay of a persisted row.
-    expect((await run({ replay: true }))?.treeShrubPricingKnobs).toEqual({ ...STAMPED, largePalmFactor: 1, fallbackBedSqFt: 2000 });
+    expect((await run({ replay: true }))?.treeShrubPricingKnobs).toEqual({ ...STAMPED, largePalmFactor: 1, fallbackBedSqFt: 2000, marginTarget: 0.45 });
 
     // Create/revision save: estimateData is browser-controlled, so a posted
     // snapshot must NOT override the admin-only live pricing_config.
@@ -1554,11 +1554,44 @@ describe('Tree & Shrub v4.7 GH review round 1 fixes', () => {
     forged.engineInputs.treeShrubPricingKnobs = {
       densityFactor: 0.5, perPalmAnnual: 0, minutesPerPalmVisit: 0, callbackReservePerVisit: 0,
     };
-    expect((await run({ replay: true, data: forged }))?.treeShrubPricingKnobs).toEqual({ ...STAMPED, largePalmFactor: 1, fallbackBedSqFt: 2000 });
+    expect((await run({ replay: true, data: forged }))?.treeShrubPricingKnobs).toEqual({ ...STAMPED, largePalmFactor: 1, fallbackBedSqFt: 2000, marginTarget: 0.45 });
     // …and with no replay declared, the forged value is simply gone.
     const forgedNoReplay = estData();
     forgedNoReplay.engineInputs.treeShrubPricingKnobs = { densityFactor: 0.5 };
     expect((await run({ data: forgedNoReplay }))?.treeShrubPricingKnobs).toBeUndefined();
+  });
+});
+
+describe('Tree & Shrub margin target replays from the stamp (owner audit 2026-10-21; Codex #6398)', () => {
+  test('a quote sent at 0.45 replays at 0.45 after the live target moved to 0.40', () => {
+    const property = { bedArea: 2000, treeCount: 0, access: 'easy' };
+    const live = priceTreeShrub(property, { tier: 'standard' });
+    expect(live.pricingKnobs.marginTarget).toBe(0.40);
+    expect(live.monthly).toBeCloseTo(41.46, 2);
+    // The stored stamp of a quote priced before the audit.
+    const replayed = priceTreeShrub(property, { tier: 'standard', knobs: { marginTarget: 0.45 } });
+    expect(replayed.marginTarget).toBe(0.45);
+    expect(replayed.pricingKnobs.marginTarget).toBe(0.45);
+    expect(replayed.monthly).toBeCloseTo(45.23, 2);
+    expect(replayed.baseMargin).toBeCloseTo(0.450, 3);
+    // An out-of-range stamp is ignored, never priced.
+    expect(priceTreeShrub(property, { tier: 'standard', knobs: { marginTarget: 2 } }).marginTarget).toBe(0.40);
+  });
+
+  test('the replay signal carries the stamped target and defaults an unstamped line to 0.45', () => {
+    const { treeShrubKnobSignalForReplay } = require('../services/estimate-tree-shrub-knob-replay');
+    expect(treeShrubKnobSignalForReplay({ result: { results: { tsMeta: { pricingKnobs: { marginTarget: 0.40 } } } } }).marginTarget).toBe(0.40);
+    expect(treeShrubKnobSignalForReplay({ result: { results: { tsMeta: { pricingKnobs: { densityFactor: 1 } } } } }).marginTarget).toBe(0.45);
+    expect(treeShrubKnobSignalForReplay({ result: { lineItems: [{ service: 'tree_shrub' }] } }).marginTarget).toBe(0.45);
+  });
+
+  test('generateEstimate replays a stamped 0.45 through treeShrubPricingKnobs', () => {
+    const input = { homeSqFt: 2000, stories: 1, lotSqFt: 10000, bedArea: 2000, propertyType: 'single_family', services: { treeShrub: { tier: 'standard', treeCount: 0 } } };
+    const fresh = generateEstimate(input).lineItems.find((i) => i.service === 'tree_shrub');
+    const replay = generateEstimate({ ...input, treeShrubPricingKnobs: { marginTarget: 0.45 } }).lineItems.find((i) => i.service === 'tree_shrub');
+    expect(fresh.pricingKnobs.marginTarget).toBe(0.40);
+    expect(replay.pricingKnobs.marginTarget).toBe(0.45);
+    expect(replay.monthly).toBeGreaterThan(fresh.monthly);
   });
 });
 
@@ -1575,11 +1608,11 @@ describe('Tree & Shrub v4.7 GH review round 2 fixes', () => {
         results: { tsMeta: { pricingKnobs: { densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 } } },
       },
     });
-    expect(signal).toEqual({ densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 1, callbackReservePerVisit: 2, fallbackBedSqFt: 2000 });
+    expect(signal).toEqual({ densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 1, callbackReservePerVisit: 2, fallbackBedSqFt: 2000, marginTarget: 0.45 });
     // With no mapped stamp, the raw line still answers.
     expect(treeShrubKnobSignalForReplay({
       engineResult: { lineItems: [{ service: 'tree_shrub', pricingKnobs: { densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 } }] },
-    })).toEqual({ densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 1, callbackReservePerVisit: 2, fallbackBedSqFt: 2000 });
+    })).toEqual({ densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 1, callbackReservePerVisit: 2, fallbackBedSqFt: 2000, marginTarget: 0.45 });
   });
 });
 
@@ -1693,9 +1726,10 @@ describe('Tree & Shrub 1,200 sqft fallback bed (owner ruling 2026-10-05) and its
 
   test('a replayed OLD fallback quote reproduces its original 2,000 sqft price; a new one replays 1,200', () => {
     const input = { homeSqFt: 2000, services: { treeShrub: { tier: 'standard' } } };
-    // An old quote: priced at 2,000 and stored with a stamp that has no size.
+    // An old quote: priced at 2,000 (and, like every pre-2026-10-21 quote, at
+    // the 0.45 margin target) and stored with a stamp that has neither key.
     const oldStamp = { densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1, callbackReservePerVisit: 0 };
-    const original = generateEstimate({ ...input, treeShrubPricingKnobs: { ...oldStamp, fallbackBedSqFt: 2000 } })
+    const original = generateEstimate({ ...input, treeShrubPricingKnobs: { ...oldStamp, fallbackBedSqFt: 2000, marginTarget: 0.45 } })
       .lineItems.find((li) => li.service === 'tree_shrub');
     expect(original.bedArea).toBe(2000);
     const storedOld = { result: { lineItems: [{ service: 'tree_shrub', pricingKnobs: oldStamp }] } };

@@ -3010,7 +3010,13 @@ function priceTreeShrub(property, options = {}) {
   const annualDirectCost = materialCost + laborAnnual + callbackReserveAnnual;
   // Admin-INCLUSIVE margin target (v4.6): price = (direct + admin) / (1 - target).
   // The displayed margin below equals marginTarget exactly when no floor binds.
-  const marginTarget = TREE_SHRUB.marginTarget ?? GLOBAL.MARGIN_TARGET_TS ?? 0.45;
+  // A replayed quote keeps the target it was SENT at (options.knobs — the
+  // 2026-10-21 move from 0.45 to 0.40 must not reprice a sent estimate on
+  // view/accept; Codex #6398); fresh quotes read the live config.
+  const snapshotMarginTarget = knobNumber(knobs.marginTarget, 0.05, 0.95);
+  const marginTarget = snapshotMarginTarget !== null
+    ? snapshotMarginTarget
+    : (TREE_SHRUB.marginTarget ?? GLOBAL.MARGIN_TARGET_TS ?? 0.40);
   const baseAnnualPrice = (annualDirectCost + GLOBAL.ADMIN_ANNUAL) / (1 - marginTarget);
   const monthlyCalc = baseAnnualPrice / 12;
   // Monthly floor is a PRE-DISCOUNT list-price floor — discounts may take the
@@ -3122,6 +3128,10 @@ function priceTreeShrub(property, options = {}) {
       // 2,000 before). Stamped so a replay of a sent fallback quote keeps
       // its original size.
       fallbackBedSqFt: treeShrubFallbackBedSqFt(knobs),
+      // The admin-inclusive margin the quote priced at (0.40 since the
+      // 2026-10-21 owner audit; 0.45 before). Stamped so a sent quote
+      // replays its own target, never the live one.
+      marginTarget,
     },
     access,
     onSiteMin,

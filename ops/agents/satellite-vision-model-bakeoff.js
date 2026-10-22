@@ -157,10 +157,20 @@ async function runCase({ row, models, repeat, lookup, dispatch, mapsKey }) {
   for (const model of models) {
     for (let rep = 0; rep < repeat; rep++) {
       const started = Date.now();
+      // The PRODUCTION contract decides what counts as an answer: the same
+      // normalizer + validator the lookup runs on every read, through the
+      // dispatcher's validate hook, so a syntactically valid JSON that drops
+      // a required field is a MISS here exactly as it is in production
+      // (Codex #6398) — never a silent "null measurement" the scorer skips.
       const outcome = await dispatch.dispatchWithFallback(
         { name: `bakeoff:${model}`, primary: { provider: 'gemini', model } },
         { text: prompt, images, jsonMode: true, maxTokens: 4096, thinkingLevel: 'LOW', timeoutMs: 120000, laneId: 'ops_satellite_bakeoff' },
-        {},
+        {
+          validate: (candidate) => {
+            candidate.json = lookup.normalizeSatelliteAnalysis(candidate.json);
+            return lookup.isValidSatelliteVisionAnalysis(candidate.json) ? null : 'invalid_schema';
+          },
+        },
       );
       const ms = Date.now() - started;
       if (!outcome?.ok || !outcome.json || typeof outcome.json !== 'object') {
@@ -201,7 +211,10 @@ function score(cases, models) {
   const out = {};
   for (const model of models) {
     const m = { reads: 0, misses: 0, msTotal: 0, fields: {}, shrubDensityHits: 0, shrubDensityKnown: 0 };
-    for (const f of FIELDS) m.fields[f] = { n: 0, absErr: 0, pctErr: 0, bias: 0, within25: 0 };
+    // pctN counts only reads with a POSITIVE known value — a zero-truth
+    // property (no palms, no trees) has no percentage error, so it must not
+    // inflate the MAPE denominator and hide false positives (Codex #6398).
+    for (const f of FIELDS) m.fields[f] = { n: 0, absErr: 0, pctN: 0, pctErr: 0, bias: 0, within25: 0 };
     for (const c of cases) {
       for (const r of c.reads.filter((x) => x.model === model)) {
         m.reads++; m.msTotal += r.ms;
@@ -212,7 +225,7 @@ function score(cases, models) {
           if (truth === null || got === null) continue;
           const s = m.fields[f];
           s.n++; s.absErr += Math.abs(got - truth); s.bias += got - truth;
-          if (truth > 0) { s.pctErr += Math.abs(got - truth) / truth; if (Math.abs(got - truth) / truth <= 0.25) s.within25++; }
+          if (truth > 0) { s.pctN++; s.pctErr += Math.abs(got - truth) / truth; if (Math.abs(got - truth) / truth <= 0.25) s.within25++; }
           else if (got === 0) s.within25++;
         }
         if (typeof c.known.shrubDensity === 'string') {
@@ -235,11 +248,14 @@ function printReport(cases, models, scores, args) {
   for (const model of models) {
     const m = scores[model];
     console.log(`## ${model} — ${m.reads} reads, ${m.misses} misses, avg ${fmt(m.reads ? m.msTotal / m.reads / 1000 : null, 1)} s/read`);
-    console.log('field            n   MAE      MAPE    bias     within ±25%');
+    console.log('field            n   MAE      MAPE (n>0)   bias     within ±25%');
     for (const f of FIELDS) {
       const s = m.fields[f];
       if (!s.n) { console.log(`${f.padEnd(15)} ${String(0).padStart(3)}   —`); continue; }
-      console.log(`${f.padEnd(15)} ${String(s.n).padStart(3)}   ${fmt(s.absErr / s.n, 1).padStart(7)}  ${fmt((s.pctErr / s.n) * 100, 0).padStart(5)}%  ${fmt(s.bias / s.n, 1).padStart(7)}   ${s.within25}/${s.n}`);
+      // MAPE over positive-truth reads only; zero-truth reads still count in
+      // MAE, bias and the ±25% column (a false positive on a zero shows there).
+      const mape = s.pctN ? `${fmt((s.pctErr / s.pctN) * 100, 0)}% (${s.pctN})` : '— (0)';
+      console.log(`${f.padEnd(15)} ${String(s.n).padStart(3)}   ${fmt(s.absErr / s.n, 1).padStart(7)}  ${mape.padStart(11)}  ${fmt(s.bias / s.n, 1).padStart(7)}   ${s.within25}/${s.n}`);
     }
     if (m.shrubDensityKnown) console.log(`shrubDensity match: ${m.shrubDensityHits}/${m.shrubDensityKnown}`);
     console.log('');
@@ -283,7 +299,7 @@ async function main() {
   const lookup = require(path.join(REPO, 'server/routes/property-lookup-v2'))._private;
   const dispatch = require(path.join(REPO, 'server/services/llm/call'));
   assertNoLedgerWrites(gates, 'after imports');
-  for (const fn of ['geocodeAddress', 'buildVisionContext', 'buildSatelliteVisionPrompt']) {
+  for (const fn of ['geocodeAddress', 'buildVisionContext', 'buildSatelliteVisionPrompt', 'normalizeSatelliteAnalysis', 'isValidSatelliteVisionAnalysis']) {
     if (typeof lookup[fn] !== 'function') { console.error(`property-lookup-v2._private.${fn} is not exported — the script needs updating`); process.exit(2); }
   }
 

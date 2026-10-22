@@ -32,8 +32,10 @@
  *   3. Compact quote-wizard / lead-automation lines carry price only → "unknown".
  *
  * Quotes priced before migration 20261021000000 (open-parcel bed basis, 2/4/6
- * tree backstop) and 20261021010000 (40% margin) keep their stamped numbers;
- * the `pricedBefore` column marks them so the two regimes can be compared.
+ * tree backstop) and 20261021010000 (40% margin) keep their stamped numbers.
+ * The `regime` column tells the two apart from the STORED result (the
+ * `pricingKnobs.marginTarget` stamp the repriced engine writes), never from
+ * the row's created_at, which a revision does not touch.
  */
 const path = require('path');
 const { Client } = require('pg');
@@ -42,8 +44,7 @@ const {
   isInternalTestCustomerId,
   isInternalTestEmail,
 } = require(path.join(__dirname, '..', '..', 'server', 'services', 'internal-test-customers'));
-
-const REPRICE_CUTOVER = '2026-10-21T00:00:00Z'; // first deploy carrying the T&S input fixes
+const { parseETDateTime } = require(path.join(__dirname, '..', '..', 'server', 'utils', 'datetime-et'));
 
 function parseArgs(argv) {
   const args = { days: 90, since: null, json: false, rows: false };
@@ -114,9 +115,14 @@ function extractTreeShrub(estimateData) {
         treeCount: count(raw.treeCount),
         treeSource: enumOf(raw.treeCountSource) || 'unknown',
         palmCount: count(raw.palmCount),
-        tier: enumOf(raw.tier),
-        monthly: positive(raw.monthly) ?? mappedMonthly,
+        // Tier and price: the MAPPED selection wins whenever it exists — a
+        // tier-only revision keeps bed/tree counts (so the raw line still
+        // "agrees") but the price the customer saw is the mapped one
+        // (Codex #6398; same rule as estimate-actuals).
+        tier: enumOf(mappedSelected?.tier) || enumOf(raw.tier),
+        monthly: mappedMonthly ?? positive(raw.monthly),
         reviewReasons: Array.isArray(raw.manualReviewReasons) ? raw.manualReviewReasons : [],
+        marginTarget: num(raw.pricingKnobs?.marginTarget) ?? num(raw.marginTarget),
       };
     }
   }
@@ -133,6 +139,7 @@ function extractTreeShrub(estimateData) {
       tier: enumOf(mappedSelected?.tier),
       monthly: mappedMonthly ?? positive(mappedLine?.monthly),
       reviewReasons: [],
+      marginTarget: num(tsMeta.pricingKnobs?.marginTarget),
     };
   }
   if (mappedLine || raw) {
@@ -141,9 +148,20 @@ function extractTreeShrub(estimateData) {
       bedSqFt: null, bedSource: 'unknown', treeCount: null, treeSource: 'unknown', palmCount: null,
       tier: enumOf((mappedLine || raw).tier), monthly: positive((mappedLine || raw).monthly),
       reviewReasons: [],
+      marginTarget: num((mappedLine || raw).pricingKnobs?.marginTarget),
     };
   }
   return null;
+}
+
+// Which pricing regime a stored quote carries — read from the STORED result,
+// never from the row's created_at (a revision reprices estimate_data without
+// touching created_at, and a deploy instant is not knowable from the data;
+// Codex #6398). The 2026-10-21 reprice stamps pricingKnobs.marginTarget on
+// every T&S line it prices; a line without the stamp predates it.
+function regimeOf(ts) {
+  if (ts.marginTarget === null || ts.marginTarget === undefined) return 'before_2026_10_21';
+  return ts.marginTarget <= 0.40 ? 'after_2026_10_21' : 'before_2026_10_21';
 }
 
 const median = (xs) => {
@@ -170,14 +188,14 @@ function summarize(rows) {
   }
   const treeSources = {};
   for (const r of rows) treeSources[r.treeSource] = (treeSources[r.treeSource] || 0) + 1;
-  const regimes = { before: rows.filter((r) => r.pricedBefore).length, after: rows.filter((r) => !r.pricedBefore).length };
+  const regimes = { before: rows.filter((r) => r.regime === 'before_2026_10_21').length, after: rows.filter((r) => r.regime === 'after_2026_10_21').length };
   return { bySource, treeSources, regimes, total: rows.length };
 }
 
 function printReport(args, rows, excluded, windowStart) {
   const s = summarize(rows);
   console.log(`Tree & Shrub estimates since ${windowStart.slice(0, 10)} — ${s.total} quotes (${excluded} internal/test excluded)`);
-  console.log(`priced before the 2026-10-21 input fixes: ${s.regimes.before}; after: ${s.regimes.after}`);
+  console.log(`priced under the pre-2026-10-21 engine (no marginTarget stamp, or 0.45): ${s.regimes.before}; under the repriced engine (stamped 0.40): ${s.regimes.after}`);
   console.log('');
   console.log('By bed-area source (explicit = typed, estimated = aerial/estimate field, lot_based = % of lot, fallback = 1,200 default; inferred/measured = older mapped-only rows)');
   console.log('source        quotes  sent  accepted  accept%  median bed sqft  median $/mo  density-tree quotes  review-flagged');
@@ -189,9 +207,9 @@ function printReport(args, rows, excluded, windowStart) {
   console.log('Tree count source: ' + Object.entries(s.treeSources).map(([k, v]) => `${k} ${v}`).join(', '));
   if (args.rows) {
     console.log('');
-    console.log('id        created     status        outcome            bed sqft  bed source   trees  tree source       $/mo    tier      before-fix  review');
+    console.log('id        created     status        outcome            bed sqft  bed source   trees  tree source       $/mo    tier      regime               review');
     for (const r of rows) {
-      console.log(`${r.id.slice(0, 8)}  ${r.createdAt.slice(0, 10)}  ${r.status.padEnd(12)}  ${r.outcome.padEnd(17)}  ${(r.bedSqFt === null ? '—' : String(r.bedSqFt)).padStart(8)}  ${r.bedSource.padEnd(11)}  ${(r.treeCount === null ? '—' : String(r.treeCount)).padStart(5)}  ${r.treeSource.padEnd(16)}  ${(r.monthly === null ? '—' : r.monthly.toFixed(2)).padStart(6)}  ${(r.tier || '—').padEnd(8)}  ${r.pricedBefore ? 'yes' : 'no '}         ${r.reviewReasons.join(',')}`);
+      console.log(`${r.id.slice(0, 8)}  ${r.createdAt.slice(0, 10)}  ${r.status.padEnd(12)}  ${r.outcome.padEnd(17)}  ${(r.bedSqFt === null ? '—' : String(r.bedSqFt)).padStart(8)}  ${r.bedSource.padEnd(11)}  ${(r.treeCount === null ? '—' : String(r.treeCount)).padStart(5)}  ${r.treeSource.padEnd(16)}  ${(r.monthly === null ? '—' : r.monthly.toFixed(2)).padStart(6)}  ${(r.tier || '—').padEnd(8)}  ${r.regime.padEnd(19)}  ${r.reviewReasons.join(',')}`);
     }
   }
 }
@@ -203,8 +221,11 @@ async function main() {
     console.error('DATABASE_PUBLIC_URL not set — run via: railway run --service Postgres node ops/agents/tree-shrub-estimates-report.js');
     process.exit(2);
   }
+  // --since is a CALENDAR day in the business's Eastern time (AGENTS.md ET
+  // rule; Codex #6398): parse it as ET midnight and hand Postgres the
+  // instant. The rolling --days window is already instant arithmetic.
   const windowStart = args.since
-    ? `${args.since}T00:00:00Z`
+    ? parseETDateTime(`${args.since}T00:00:00`).toISOString()
     : new Date(Date.now() - args.days * 86400000).toISOString();
 
   const c = new Client({ connectionString: conn, ssl: { rejectUnauthorized: false } });
@@ -240,7 +261,7 @@ async function main() {
         acceptedAt: row.accepted_at ? new Date(row.accepted_at).toISOString() : null,
         status: String(row.status || ''),
         outcome: outcomeOf(row),
-        pricedBefore: createdAt < REPRICE_CUTOVER,
+        regime: regimeOf(ts),
         ...ts,
       });
     }
@@ -254,7 +275,7 @@ async function main() {
   printReport(args, rows, excluded, windowStart);
 }
 
-module.exports = { extractTreeShrub, outcomeOf, summarize, median };
+module.exports = { extractTreeShrub, outcomeOf, regimeOf, summarize, median };
 
 if (require.main === module) {
   main().catch((err) => { console.error(err.message || err); process.exit(1); });

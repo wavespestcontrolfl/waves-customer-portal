@@ -35,6 +35,11 @@ const NEUTRAL_TREE_SHRUB_KNOBS = {
   // (older stamp, or no stamp at all) replays 2,000 so a sent fallback quote
   // keeps its price. Never read from the live constant.
   fallbackBedSqFt: 2000,
+  // The admin-inclusive margin target every v4.6+ quote priced at before the
+  // 2026-10-21 owner audit moved the live value to 0.40. A stored T&S line
+  // with no stamped target replays 0.45 so a sent quote keeps its price.
+  // Never read from the live constant.
+  marginTarget: 0.45,
 };
 
 function treeShrubKnobSignalForReplay(estData = {}) {
@@ -75,6 +80,8 @@ function treeShrubKnobSignalForReplay(estData = {}) {
     // A stamp from before the fallback size became a knob priced 2,000;
     // pick() falls back to that neutral value when the key is absent.
     fallbackBedSqFt: pick('fallbackBedSqFt'),
+    // A stamp from before the margin target became a knob priced 0.45.
+    marginTarget: pick('marginTarget'),
   };
 }
 
