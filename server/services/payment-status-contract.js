@@ -660,12 +660,53 @@ function remainderHasMoney(remainder) {
   try { return !!require('./sms-suggest-mode').hasPriceQuote(text); } catch { return true; }
 }
 
+// COMPANY FACTS money policy (owner 2026-10-22, Codex #6447 r1/r2/r9): the paying and prepay-refund lines (an explicit list,
+// sms-company-facts.moneyPolicyFacts) are fixed policy for every
+// customer, not an account status. A complete, stand-alone copy of one of their sentences (a lead label such as "Paying:" may be
+// dropped) is allowed ONLY with inert text around it (a greeting, thanks, a sign-off) and verbatim status copies: anything else
+// could apply the rule to this customer ("That includes your cancellation."), so that reply is judged as if no policy was copied.
+// A paraphrase is never removed, so it is still held.
+// Each policy sentence answers one kind of question (Codex #6447 r10): a Paying sentence only a how-to-pay question, a refund
+// sentence only a refund / cancel question. With no customer message, or one that asks something else ("Did my payment go
+// through?"), nothing is removed and the detectors judge the whole reply.
+const PAYING_QUESTION_RE = /\b(?:how\s+(?:do|can|should|would)\s+(?:i|we)\s+pay|ways?\s+to\s+pay|pay(?:ment)?\s+(?:options?|methods?)|pay\s+(?:the\s+|your\s+)?(?:tech|technician)|(?:pay|paying)\s+(?:with|by|in)\s+(?:cash|checks?|cheques?|cards?|credit|debit)|(?:take|takes|accept|accepts)\s+(?:cash|checks?|cheques?|cards?|credit|debit)|(?:send|mail)\s+(?:you\s+)?(?:a\s+)?(?:check|cheque|payment))\b/i;
+// only an explicit refund question ("refund", "money back", "reimburse"). Cancel wording is never read as one: "cancel my plan"
+// and "cancel my service for tomorrow's visit" cannot be told apart by a pattern (Codex #6447 r11-r15), and a miss only holds
+// the reply for a person.
+const REFUND_QUESTION_RE = /\b(?:refund\w*|money\s+back|reimburs\w*)\b/i;
+let companyPolicySentenceCache = null;
+function companyPolicySentences() {
+  if (!companyPolicySentenceCache) {
+    const out = new Map();
+    for (const fact of require('./sms-company-facts').moneyPolicyFacts()) {
+      const question = fact.startsWith('Paying:') ? PAYING_QUESTION_RE : REFUND_QUESTION_RE;
+      for (const sentence of fact.split(/(?<=[.!?])\s+/)) {
+        if (MONEY_FIGURE_RE.test(sentence) || ZELLE_WORD_RE.test(sentence)) continue;
+        out.set(sentence, question);
+        const text = /^[A-Z][^:.]{0,40}:\s+(.+)$/.exec(sentence);
+        if (text) out.set(text[1], question);
+      }
+    }
+    companyPolicySentenceCache = [...out].sort((a, b) => b[0].length - a[0].length);
+  }
+  return companyPolicySentenceCache;
+}
+// `remainder` (copies already removed) with the policy copies that answer `inboundText` removed too, when what is left is inert;
+// else unchanged.
+function withoutCompanyPolicyCopies(remainder, inboundText = null) {
+  const inbound = String(inboundText ?? '');
+  const answering = inbound ? companyPolicySentences().filter(([, question]) => question.test(inbound)).map(([text]) => text) : [];
+  if (!answering.length) return remainder;
+  const stripped = withoutCopies(remainder, answering);
+  return stripped !== canonText(remainder) && remainderIsInert(stripped) ? stripped : remainder;
+}
+
 function checkPaymentStatusReply({ reply, sentences, inboundText = null, scopeTexts = [], scoped = false }) {
   const texts = (sentences || []).map((s) => (typeof s === 'string' ? s : s.text));
   const text = String(reply ?? '');
   if (text.length > MAX_REPLY_CHARS) return { ok: false, copied: [], remainder: canonText(text) };
   const copied = copiedSentences(text, texts);
-  const remainder = withoutCopies(text, copied);
+  const remainder = withoutCompanyPolicyCopies(withoutCopies(text, copied), inboundText);
   const ok = !copiesOffTarget(copied, inboundText) && !remainderHasMoney(remainder) && !assertsPaymentStatus(remainder, { inboundText, scopeTexts, scoped });
   return { ok, copied, remainder };
 }
@@ -715,6 +756,7 @@ function autoSendScopeBlock({ reply, inboundText = null, snapshot = null }) {
   if (!scoped) return null;
   const copied = copiedSentences(reply, sentences);
   if (copiesAmbiguousFamily(copied, snapshot) || copiesAnswerNamedSpecifics(copied, inboundText)) return 'payment_status_ambiguous';
+  // a COMPANY FACTS policy copy is never removed here: a policy answer goes to Agent Review, where a person reads it (Codex #6447 r11)
   return remainderIsInert(withoutCopies(reply, copied)) ? null : 'payment_status_not_auto_sendable';
 }
 // HOLD WHEN AMBIGUOUS (owner 2026-10-02, after round 66): code does not guess which record the customer means. A copied receipt or invoice
@@ -834,6 +876,7 @@ function paymentStatusSnapshotFor({ customerId = null, sentences, reply, inbound
 }
 
 module.exports = {
+  withoutCompanyPolicyCopies,
   sentenceFamily,
   familyCounts,
   copiesOffTarget,

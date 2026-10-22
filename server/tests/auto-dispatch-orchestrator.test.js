@@ -52,6 +52,8 @@ jest.mock('../services/auto-dispatch/audit', () => ({
   maintainMissingGeoNotices: jest.fn(async () => {}),
 }));
 
+jest.mock('../services/auto-dispatch/check-down-notice', () => ({ noteRun: jest.fn(async () => ({ action: 'none' })) }));
+
 jest.mock('../services/tech-visit-notifications', () => ({
   pushAutoDispatchSummary: jest.fn(async () => ({ pushed: 1 })),
   beginAutoDispatchRun: jest.fn(async () => ({ pushed: 0 })),
@@ -145,6 +147,17 @@ test('apply mode moves the visit and logs a changed decision', async () => {
   } finally {
     process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
   }
+});
+
+test('every run ends by telling the move-check-down notice what the check did (owner audit 2026-10-22, finding 1)', async () => {
+  const checkDown = require('../services/auto-dispatch/check-down-notice');
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(checkDown.noteRun).toHaveBeenCalledTimes(1);
+  const [state, opts] = checkDown.noteRun.mock.calls[0];
+  expect(opts).toEqual({ enabled: expect.any(Boolean), nowDate: expect.any(Date) });
+  // The run's own tally (null when the check is off), before the run is recorded.
+  expect(state === null || typeof state.broke === 'number').toBe(true);
+  expect(checkDown.noteRun.mock.invocationCallOrder[0]).toBeLessThan(audit.completeRun.mock.invocationCallOrder[0]);
 });
 
 test('a run that moved visits sends the one summary push after the run is recorded; a dry run never does', async () => {
@@ -576,6 +589,13 @@ test('no candidate slots → no_change NO_VALID_SLOT', async () => {
   const res = await runAutoDispatch({ mode: 'dry_run' });
   expect(res.recommended).toBe(0);
   expect(lastDecision('no_change').reason_code).toBe('NO_VALID_SLOT');
+});
+
+test('a NO_VALID_SLOT row keeps what the search saw (the window and each day\'s open starts), so a full week reads as full (finding 6)', async () => {
+  const SEARCH = { date_from: '2026-08-01', date_to: '2026-08-08', open_starts_by_date: { '2026-08-01': 0, '2026-08-03': 0 } };
+  candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [], drops: null, feasible: 0, search: SEARCH });
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(lastDecision('no_change')).toMatchObject({ reason_code: 'NO_VALID_SLOT', constraints: expect.objectContaining({ search: SEARCH }) });
 });
 
 test('apply mode spends a tight cap on the BEST-improvement move, not the first by date', async () => {

@@ -4245,3 +4245,136 @@ describe('duplicateWinnerFor', () => {
     expect(dedupe.REPOINT_EXCLUDED_TABLES).toBeInstanceOf(Set);
   });
 });
+
+describe('GATE_DEDUPE_NO_UNVERIFIED_BACKFILL: auto sweep leaves intake rows with an unverified email for the office', () => {
+  const OLD_GATE = process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL;
+  afterEach(() => {
+    if (OLD_GATE === undefined) delete process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL;
+    else process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL = OLD_GATE;
+  });
+
+  const WINNER_ID = 'dddddddd-0000-0000-0000-000000000001';
+  const LOSER_ID = 'dddddddd-0000-0000-0000-000000000002';
+  const winnerRow = {
+    id: WINNER_ID, first_name: 'Diana', last_name: 'Blowers', phone: '+15555550143', email: null,
+    address_line1: '1 Fixture Ln', zip: '00000', pipeline_stage: 'active_customer', created_at: '2026-07-08',
+  };
+  const shellRow = (extra = {}) => ({
+    id: LOSER_ID, first_name: 'Diana', last_name: null, phone: '5555550143', email: 'typed-by-visitor@example.test',
+    address_line1: null, zip: null, pipeline_stage: 'new_lead', lead_source: 'website_quote',
+    last_contact_type: 'website_quote', created_at: '2026-07-09', ...extra,
+  });
+
+  // Returns { results, backfilled } for one sweep over the winner + loser rows.
+  async function sweep(loserRow) {
+    installDb((table) => {
+      if (table === 'customers') return [winnerRow, loserRow];
+      return [];
+    });
+    const state = { backfilled: null };
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (table === 'customers') {
+        if (q.called('update')) {
+          const payload = q.args('update')[0];
+          if (!payload.deleted_at) state.backfilled = payload;
+          return 1;
+        }
+        return [winnerRow, loserRow];
+      }
+      if (table === 'customer_merge_journal') return [{ id: 'j1' }];
+      if (q.called('update')) return 1;
+      return [];
+    }));
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const results = await dedupe.runAutoMergeSweep({ performedBy: 'test' });
+    return { results, state };
+  }
+
+  it('gate on: a public-quote shell with an email is not auto-merged, and the pair stays listed for a manual merge', async () => {
+    process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL = 'true';
+    const { results } = await sweep(shellRow());
+    expect(results.merged).toEqual([]);
+    expect(results.skipped).toEqual([{ loserId: LOSER_ID, winnerId: WINNER_ID, tier: 'green', reasons: ['unverified_intake_email'] }]);
+    // Still on the Duplicates page (the queue read does not use the gate).
+    const groups = await dedupe.findDuplicateGroups();
+    expect(groups).toHaveLength(1);
+    expect(groups[0].winner.id).toBe(WINNER_ID);
+    expect(groups[0].candidates.map((c) => c.loser.id)).toEqual([LOSER_ID]);
+  });
+
+  it('gate on: a shell without an email is still auto-merged', async () => {
+    process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL = 'true';
+    const { results } = await sweep(shellRow({ email: null }));
+    expect(results.merged).toHaveLength(1);
+    expect(results.skipped).toEqual([]);
+  });
+
+  it('gate on: a shell whose email matches the kept customer is still auto-merged', async () => {
+    process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL = 'true';
+    installDb(() => []);
+    expect(dedupe.unverifiedIntakeEmailSkip({ email: 'Same@Example.test' }, shellRow({ email: ' same@example.test ' }))).toBeNull();
+  });
+
+  it('gate on: an intake shell kept as the WINNER with its own email also blocks the auto-merge', async () => {
+    process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL = 'true';
+    installDb(() => []);
+    const realLoser = { email: 'office-entered@example.test', pipeline_stage: 'new_lead', lead_source: 'referral', last_contact_type: 'call' };
+    expect(dedupe.unverifiedIntakeEmailSkip(shellRow(), realLoser)).toBe('unverified_intake_email');
+    expect(dedupe.unverifiedIntakeEmailSkip(shellRow(), { ...realLoser, email: null })).toBe('unverified_intake_email');
+    expect(dedupe.unverifiedIntakeEmailSkip(shellRow({ email: null }), realLoser)).toBeNull();
+  });
+
+  it('gate on: a loser that is not an intake shell (staff-entered lead) is still auto-merged and backfilled', async () => {
+    process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL = 'true';
+    const { results, state } = await sweep(shellRow({ lead_source: 'referral', last_contact_type: 'call' }));
+    expect(results.merged).toHaveLength(1);
+    expect(state.backfilled.email).toBe('typed-by-visitor@example.test');
+  });
+
+  it('gate off: the same shell is merged and its email backfilled as before', async () => {
+    delete process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL;
+    const { results, state } = await sweep(shellRow());
+    expect(results.merged).toHaveLength(1);
+    expect(results.skipped).toEqual([]);
+    expect(state.backfilled.email).toBe('typed-by-visitor@example.test');
+  });
+
+  it('gate on: a MANUAL merge of the same shell is unchanged', async () => {
+    process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL = 'true';
+    const loserRow = shellRow();
+    const state = { backfilled: null };
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (table === 'customers') {
+        if (q.called('update')) {
+          const payload = q.args('update')[0];
+          if (!payload.deleted_at) state.backfilled = payload;
+          return 1;
+        }
+        return [winnerRow, loserRow];
+      }
+      if (table === 'customer_merge_journal') return [{ id: 'j1' }];
+      if (q.called('update')) return 1;
+      return [];
+    }));
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await dedupe.executeMerge({ winnerId: WINNER_ID, loserId: LOSER_ID, performedBy: 'admin' });
+    expect(state.backfilled.email).toBe('typed-by-visitor@example.test');
+  });
+
+  it('isUnverifiedIntakeShell reads the columns the intake routes set', () => {
+    const { isUnverifiedIntakeShell } = dedupe;
+    expect(isUnverifiedIntakeShell({ pipeline_stage: 'new_lead', lead_source: 'website_quote' })).toBe(true);
+    expect(isUnverifiedIntakeShell({ pipeline_stage: 'new_lead', lead_source: 'google_ads', last_contact_type: 'form_submission' })).toBe(true);
+    expect(isUnverifiedIntakeShell({ pipeline_stage: 'new_lead', lead_source: 'google_ads', form_id: 'f-1' })).toBe(true);
+    expect(isUnverifiedIntakeShell({ pipeline_stage: 'new_lead', lead_source: 'lead_pipeline' })).toBe(true);
+    expect(isUnverifiedIntakeShell({ pipeline_stage: 'estimate_sent', lead_source: 'website_quote' })).toBe(false);
+    expect(isUnverifiedIntakeShell({ pipeline_stage: 'new_lead', lead_source: 'referral', last_contact_type: 'call' })).toBe(false);
+    expect(isUnverifiedIntakeShell(null)).toBe(false);
+  });
+});

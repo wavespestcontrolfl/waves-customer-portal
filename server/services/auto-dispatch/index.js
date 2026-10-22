@@ -37,6 +37,7 @@ const roadCheck = require('./road-check');
 const moveLimit = require('./move-limit');
 const needsPerson = require('./needs-person-notice');
 const moveCheck = require('./proofreader/nightly');
+const checkDown = require('./check-down-notice');
 
 // Self-heal MISSING_GEO: geocode the customer (fills customers.latitude/longitude
 // from their address) and re-check eligibility, so a not-yet-geocoded recurring
@@ -352,7 +353,7 @@ async function settleConflicts(run) {
 
 async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   const {
-    current, candidates, drops, skipped,
+    current, candidates, drops, skipped, search,
   } = await findSlotsOrSkip(service, prefs, ctx);
   const prefsSnapshot = prefs.raw_snapshot;
 
@@ -363,7 +364,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
       reason_code: reason.code,
       reason_description: reason.description,
       conflict: (current && current.conflict) || null,
-      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}), ...conflictOf(current) } },
+      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, ...(search ? { search } : {}), model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}), ...conflictOf(current) } },
     };
   }
 
@@ -1503,6 +1504,9 @@ async function runAutoDispatch(opts = {}) {
   await settleConflicts(run);
   await needsPerson.raiseNotices(run.needsPerson, { nowDate: run.nowDate, clearedIds: run.clearedIds });
   await moveCheck.raiseNotices(run.proofreader);
+  // Every check of the night broke: one notice that the tool is stopped, and
+  // why (owner audit 2026-10-22, finding 1). Best-effort; never throws.
+  await checkDown.noteRun(run.proofreader, { enabled: config.proofreaderEnabled === true, nowDate: run.nowDate });
   runStatus = moveCheck.statusAfterNotices(run.proofreader, runStatus, noticesClosed);
   try {
     await audit.completeRun(runId, { status: runStatus, totals, error: runError });

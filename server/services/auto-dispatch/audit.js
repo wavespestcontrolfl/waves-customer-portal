@@ -200,7 +200,10 @@ const WATCHDOG_BELL_KEYS = ['unpriced-series:', 'lawn-email-gap:', 'prepay-cover
 // date with no time, the time-critical field work the budget rule exempts
 // (docs/admin-notifications.md). The lanes below run after it and see its rings.
 const DUE_DATE_KEY = 'recurring-dispatch:';
-const BUDGET_LANE_KEYS = ['auto-dispatch-missing-geo:', 'recurring-no-window:', 'auto-dispatch-reminder-sync:', 'auto-dispatch-needs-person:', 'auto-dispatch-proofreader:', DUE_DATE_KEY, ...WATCHDOG_BELL_KEYS];
+// The move-check-down notice (check-down-notice.js) is counted and NOT capped
+// either: one ring per outage, for a tool that has stopped moving visits.
+const CHECK_DOWN_KEY = 'auto-dispatch-check-down';
+const BUDGET_LANE_KEYS = ['auto-dispatch-missing-geo:', 'recurring-no-window:', 'auto-dispatch-reminder-sync:', 'auto-dispatch-needs-person:', 'auto-dispatch-proofreader:', DUE_DATE_KEY, CHECK_DOWN_KEY, ...WATCHDOG_BELL_KEYS];
 // Titles a retired notice is rewritten to; the budget read must skip them.
 const NO_WINDOW_RESOLVED_TITLE = 'Recurring visit time alert resolved';
 const MISSING_GEO_RESOLVED_TITLE = 'Address pin alert resolved';
