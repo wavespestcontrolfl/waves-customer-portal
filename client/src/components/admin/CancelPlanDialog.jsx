@@ -125,6 +125,9 @@ export default function CancelPlanDialog({ customer, onClose, onDone, layer }) {
         // The server decides whether "end of paid coverage" is even a
         // choice; snap back to "now" if it stopped being one.
         if (!r.prepay && effectiveDate !== "now") setEffectiveDate("now");
+        // Owner rule (90 days): past day 90 "end now" is not offered — no
+        // refund is owed and the paid visits stay. Default to the one choice.
+        if (r.prepay && r.prepay.endNowAvailable === false && effectiveDate !== "end_of_coverage") setEffectiveDate("end_of_coverage");
       })
       .catch((e) => {
         if (cancelled) return;
@@ -250,7 +253,9 @@ export default function CancelPlanDialog({ customer, onClose, onDone, layer }) {
                       {preview.scopeError === "scope_not_owned"
                         ? "That service is not on the plan any more."
                         : preview.scopeError === "scoped_covers_prepaid"
-                          ? "Upcoming visits in that selection are covered by the annual prepay term — cancel the whole plan (which disposes of the term and records the refund), or leave the covered service in place."
+                          ? (preview.prepayRefund90Day
+                            ? "Upcoming visits in that selection are covered by the annual prepay term — cancel the whole plan instead (a prepaid plan is refunded only within 90 days of its start; after that it ends at the end of paid coverage, no refund), or leave the covered service in place."
+                            : "Upcoming visits in that selection are covered by the annual prepay term — cancel the whole plan (which disposes of the term and records the refund), or leave the covered service in place.")
                           : "The services that would stay cannot be priced from the plan-rate ledger — cancel the whole plan, or repair the ledger first."}
                     </div>
                   )}
@@ -294,14 +299,20 @@ export default function CancelPlanDialog({ customer, onClose, onDone, layer }) {
                   onChange={() => setEffectiveDate("end_of_coverage")}
                   disabled={running}
                 />
-                <Radio
-                  id="cancel-plan-effective-now"
-                  name="cancel-plan-effective"
-                  label="Now — pull every visit and record a refund of the unused prepaid value"
-                  checked={effectiveDate === "now"}
-                  onChange={() => setEffectiveDate("now")}
-                  disabled={running}
-                />
+                {prepay.endNowAvailable === false ? (
+                  <div className="ml-6 text-14 text-ink-secondary">
+                    Ending now is not offered: this plan started more than 90 days ago, so no refund is owed and the paid visits stay (owner rule).
+                  </div>
+                ) : (
+                  <Radio
+                    id="cancel-plan-effective-now"
+                    name="cancel-plan-effective"
+                    label="Now — pull every visit and record a refund of the unused prepaid value"
+                    checked={effectiveDate === "now"}
+                    onChange={() => setEffectiveDate("now")}
+                    disabled={running}
+                  />
+                )}
                 {effectiveDate === "now" && prepay.refund && (
                   <div className="ml-6 text-14 text-ink-secondary">
                     {prepay.refund.needsManualCalc

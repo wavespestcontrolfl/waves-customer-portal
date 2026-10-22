@@ -420,8 +420,9 @@ function clampWindowHours(value) {
 }
 
 // Digest rows for the feed. Two queries, not one windowed query with a
-// LIMIT: the PINNED set — unread actions (ACT: / [Review]) and UNRESOLVED
-// FIX: digests that HAVE a resolution path — must survive however old they
+// LIMIT: the PINNED set — unread actions (ACT: / [Review]), UNRESOLVED
+// FIX: digests that HAVE a resolution path, and any other unresolved
+// fall-off row (an FYI list refreshed in place) — must survive however old they
 // are (their email was suppressed, so the row is the only copy; opening a
 // FIX does not fix it, only the fall-off rule's metadata.resolved does),
 // and a single ORDER BY DESC + LIMIT over the union would silently drop
@@ -466,6 +467,12 @@ async function loadDigestRows(db, since, focusId) {
         .orWhere((f) => f.whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
           .andWhereRaw(IS_FIX)
           .andWhere((r) => r.whereRaw("metadata->>'source' = 'ops-crons'").orWhereRaw("metadata->>'fallOff' = 'true'")))
+        // Any other fall-off row (ops-digest.js `fallOff`: its sender retires
+        // it on a clean run) is current until then, FYI included: a refresh
+        // in place keeps its first created_at, so the window alone would drop
+        // a list that still stands a day after it first appeared (the far
+        // double-booking list, auto-dispatch/needs-person-notice.js).
+        .orWhere((s) => s.whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'").andWhereRaw("metadata->>'fallOff' = 'true'"))
         .orWhere((legacy) => legacy.whereNull('read_at').andWhereRaw(IS_FIX)))
     .orderBy('created_at', 'desc')
     .limit(PINNED_CAP);

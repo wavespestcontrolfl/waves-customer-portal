@@ -632,15 +632,67 @@ async function matchAcceptCustomerByPhone(estimate, database = db, { authoritati
     && await require('../services/recurring-card-on-file').resolveGroupedEstimateOwnerId(estimate, database, { throwOnError: true })) {
     contradicted = false;
   }
-  const verdict = {
+  const verdict = acceptVerdictFromCandidates(estimate, candidates, { typedPhone, contradicted });
+  if (cacheable) acceptPhoneVerdicts.set(estimate, verdict);
+  return verdict;
+}
+
+// The matcher's verdict once its candidates and the two flags are known (pure). Shared by
+// matchAcceptCustomerByPhone and the batch read below so the two can never pick differently.
+function acceptVerdictFromCandidates(estimate, candidates, { typedPhone, contradicted }) {
+  return {
     match: typedPhone && contradicted
       ? null
       : candidates.length === 1 && !contradicted ? candidates[0] : pickAcceptCustomerMatch(candidates, estimate),
     candidateCount: candidates.length,
     ...(contradicted ? { contradicted: true, rejectedCustomerId: candidates[0].id } : {}),
   };
-  if (cacheable) acceptPhoneVerdicts.set(estimate, verdict);
-  return verdict;
+}
+
+// READ-ONLY batch form of matchAcceptCustomerByPhone for LIST views (the admin Pipeline cards): the
+// candidates of every estimate come from one customers query per 500 phones instead of one per row, and
+// each row then gets the SAME verdict (same candidate rule, same typed-phone and contradiction rules,
+// same pickAcceptCustomerMatch) as the per-row matcher gives it.
+// Returns Map(estimate.id -> verdict) for rows it could judge. A row is left OUT (unresolved; callers
+// must treat its answer as unknown) when the per-row matcher would need a lookup this read does not
+// make: a phone-typed mark the row did not carry, or a contradicted lone candidate on a GROUPED
+// estimate (the matcher then asks the group-owner resolver). `database` must be the root handle.
+async function matchAcceptCustomersByPhoneBatch(estimates, database = db) {
+  const verdicts = new Map();
+  const rows = (Array.isArray(estimates) ? estimates : []).filter((e) => e && e.id);
+  const withPhone = rows.filter((e) => e.customer_phone);
+  for (const e of rows) if (!e.customer_phone) verdicts.set(e.id, { match: null, candidateCount: 0 });
+  const CHUNK = 500;
+  for (let i = 0; i < withPhone.length; i += CHUNK) {
+    const chunk = withPhone.slice(i, i + CHUNK);
+    const exact = [...new Set(chunk.map((e) => e.customer_phone))];
+    const digits = [...new Set(chunk.map((e) => phoneLast10(e.customer_phone)).filter(Boolean))];
+    const candidateRows = await database('customers')
+      .where((q) => {
+        q.whereIn('phone', exact);
+        // phoneLast10 yields digits only, so the alternation is safe to bind as one pattern.
+        if (digits.length) q.orWhereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') ~ ?", [`(${digits.join('|')})$`]);
+      })
+      .whereNull('deleted_at')
+      .select('id', 'phone', 'email', 'address_line1', 'address_line2', 'city', 'zip',
+        'pipeline_stage', 'monthly_rate', 'billing_mode', 'updated_at');
+    for (const e of chunk) {
+      const last10 = phoneLast10(e.customer_phone);
+      const candidates = candidateRows
+        .filter((c) => c.phone === e.customer_phone
+          || (last10 && String(c.phone || '').replace(/\D/g, '').endsWith(last10)))
+        .sort((a, b) => (Number(b.phone === e.customer_phone) - Number(a.phone === e.customer_phone))
+          || (new Date(b.updated_at || 0) - new Date(a.updated_at || 0)));
+      if (e.customer_phone_typed === undefined) continue;
+      const typedPhone = phoneTypedByCustomer({ customer_phone: e.customer_phone, customer_phone_typed: e.customer_phone_typed });
+      const contradicted = typedPhone
+        ? candidates.length > 0
+        : candidates.length === 1 && acceptLoneCandidateContradicted(candidates[0], e);
+      if (contradicted && !typedPhone && e.estimate_group_id) continue;
+      verdicts.set(e.id, acceptVerdictFromCandidates(e, candidates, { typedPhone, contradicted }));
+    }
+  }
+  return verdicts;
 }
 
 // The ids of these rows (null and id-less rows skipped).
@@ -28587,6 +28639,42 @@ async function buildPricingBundle(estimate, { monthlyBilled = null } = {}) {
     : addMissingBilledPerApplicationFlags(bundle);
 }
 
+// Whether the page serves the frozen send snapshot AS IS (the fast path in
+// buildPricingBundleInner) instead of rebuilding the offer from live pricing.
+// Pure; also read by the admin Pipeline card, which shows an open offer's
+// per-application price only when the page would sell exactly that snapshot.
+function sentSnapshotServesAsIs(snapshotBundle, estimate, estData) {
+  return Boolean(snapshotBundle)
+    && Array.isArray(snapshotBundle.frequencies)
+    && pricingBundleMatchesEstimateTotals(snapshotBundle, estimate)
+    // Snapshots that violate the lawn program policy (retired Quarterly
+    // cadence, or an itemized lawn price below the program minimum) must NOT
+    // short-circuit — they re-derive through the clamped ladder builders so
+    // outstanding links can't sell the retired/below-floor plan. A snapshot
+    // for an estimate with a recurring LAWN service that carries no
+    // lawn-identifiable element at all can't be policy-checked — those
+    // legacy shapes recompute too (a pre-floor $34/mo lawn snapshot must
+    // not fast-path just because its lawn slice is unitemized).
+    && !pricingBundleViolatesLawnPolicy(snapshotBundle, lawnProgramMinimumMonthlyFor(estData))
+    && !(estimateDataHasRecurringLawn(estData) && !pricingBundleHasLawnIdentifiableRow(snapshotBundle))
+    // A LAWN-ONLY snapshot that never OFFERED the lawn tier ladder (one
+    // generic pre-ladder entry) recomputes so the customer picks a real tier
+    // and accept stamps it — see pricingBundleHasLawnTierLadder /
+    // estimateDataIsLawnOnlyRecurring for why mixed bundles are exempt.
+    && !(estimateDataIsLawnOnlyRecurring(estData) && !pricingBundleHasLawnTierLadder(snapshotBundle))
+    // Pre-split termite snapshots (no monthly on the flat-monthly row) and
+    // pre-fee-rule solo pest/mosquito snapshots (no setup fee the accept
+    // path will invoice) recompute instead of fast-pathing.
+    && !pricingBundleHasStaleTermiteRow(snapshotBundle)
+    && !pricingBundleMissingRequiredSetupFee(snapshotBundle, estData)
+    // Snapshots whose rows never netted the estimate's manual discount
+    // (evidenced by the persisted totals disagreeing with the blob's own
+    // discounted figures) re-derive through the live (discount-aware)
+    // builders — fast-pathing them would bill the undiscounted row a
+    // discounted quote displayed. Already-netted legacy snapshots pass.
+    && !pricingBundleLacksManualDiscountNetting(snapshotBundle, estData, estimate);
+}
+
 async function buildPricingBundleInner(estimate) {
   cleanupEstimatePricingCache();
   const estData = typeof estimate.estimate_data === 'string'
@@ -28671,37 +28759,7 @@ async function buildPricingBundleInner(estimate) {
       : payload;
   };
   const snapshotBundle = estData?.sendSnapshot?.pricingBundle;
-  if (
-    snapshotBundle
-    && Array.isArray(snapshotBundle.frequencies)
-    && pricingBundleMatchesEstimateTotals(snapshotBundle, estimate)
-    // Snapshots that violate the lawn program policy (retired Quarterly
-    // cadence, or an itemized lawn price below the program minimum) must NOT
-    // short-circuit — they re-derive through the clamped ladder builders so
-    // outstanding links can't sell the retired/below-floor plan. A snapshot
-    // for an estimate with a recurring LAWN service that carries no
-    // lawn-identifiable element at all can't be policy-checked — those
-    // legacy shapes recompute too (a pre-floor $34/mo lawn snapshot must
-    // not fast-path just because its lawn slice is unitemized).
-    && !pricingBundleViolatesLawnPolicy(snapshotBundle, lawnProgramMinimumMonthlyFor(estData))
-    && !(estimateDataHasRecurringLawn(estData) && !pricingBundleHasLawnIdentifiableRow(snapshotBundle))
-    // A LAWN-ONLY snapshot that never OFFERED the lawn tier ladder (one
-    // generic pre-ladder entry) recomputes so the customer picks a real tier
-    // and accept stamps it — see pricingBundleHasLawnTierLadder /
-    // estimateDataIsLawnOnlyRecurring for why mixed bundles are exempt.
-    && !(estimateDataIsLawnOnlyRecurring(estData) && !pricingBundleHasLawnTierLadder(snapshotBundle))
-    // Pre-split termite snapshots (no monthly on the flat-monthly row) and
-    // pre-fee-rule solo pest/mosquito snapshots (no setup fee the accept
-    // path will invoice) recompute instead of fast-pathing.
-    && !pricingBundleHasStaleTermiteRow(snapshotBundle)
-    && !pricingBundleMissingRequiredSetupFee(snapshotBundle, estData)
-    // Snapshots whose rows never netted the estimate's manual discount
-    // (evidenced by the persisted totals disagreeing with the blob's own
-    // discounted figures) re-derive through the live (discount-aware)
-    // builders — fast-pathing them would bill the undiscounted row a
-    // discounted quote displayed. Already-netted legacy snapshots pass.
-    && !pricingBundleLacksManualDiscountNetting(snapshotBundle, estData, estimate)
-  ) {
+  if (sentSnapshotServesAsIs(snapshotBundle, estimate, estData)) {
     // Chokepoint stamp AFTER finalizePricingBundle (Codex r5 P0 on #4789):
     // attachPublicPricingContract rebuilds services[] split cards there and
     // would drop an earlier stamp. Never a price field, never written back;
@@ -31769,6 +31827,8 @@ module.exports.pricingBundleMissingRequiredSetupFee = pricingBundleMissingRequir
 module.exports.pricingBundleHasStaleTermiteRow = pricingBundleHasStaleTermiteRow;
 module.exports.cleanStoredName = cleanStoredName;
 module.exports.matchAcceptCustomerByPhone = matchAcceptCustomerByPhone;
+module.exports.matchAcceptCustomersByPhoneBatch = matchAcceptCustomersByPhoneBatch;
+module.exports.sentSnapshotServesAsIs = sentSnapshotServesAsIs;
 module.exports.acceptPhoneParkedVerdict = acceptPhoneParkedVerdict;
 module.exports.estimatePublicBlockingState = estimatePublicBlockingState;
 module.exports.retireOrDenyDroppedCapture = retireOrDenyDroppedCapture;

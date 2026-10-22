@@ -307,10 +307,12 @@ async function standingConflict(seen, id) {
 // missing preference skips it before any conflict read, and an evaluation
 // can fail: Codex #6253 r5 P1), the members a partial group move
 // left behind (a one-time add-on is never loaded by the scan, so it has no
-// ledger entry: Codex #6253 r4 P1), and the visits of the notices still open
-// (a person-placed visit is skipped before the conflict read, so a person's
-// same-day fix would never close its notice: r4 P2). The last kind is
-// `noticeOnly`: it can close a notice, never raise one.
+// ledger entry: Codex #6253 r4 P1), the visits on the standing far
+// double-booking list (D1: listed, so they stay listed or ring at 14 days
+// even when the scan no longer loads them), and the visits of the notices
+// still open (a person-placed visit is skipped before the conflict read, so a
+// person's same-day fix would never close its notice: r4 P2). The last kind
+// is `noticeOnly`: it can close a notice, never raise one.
 async function conflictsToSettle(run) {
   const pending = new Map(run.conflicts);
   if (run.config.conflictMovesEnabled !== true) return pending;
@@ -320,6 +322,9 @@ async function conflictsToSettle(run) {
     if (!pending.has(id)) pending.set(id, unseen({ service, reason: 'SKIPPED' }));
   }
   for (const id of run.strandedIds) if (!pending.has(id)) pending.set(id, unseen({ reason: 'ERROR' }));
+  const farListed = await needsPerson.farListedVisitIds();
+  if (farListed === null) run.conflictScanComplete = false;
+  for (const id of farListed || []) if (!pending.has(id)) pending.set(id, unseen({ reason: 'SKIPPED' }));
   for (const id of await needsPerson.standingVisitIds()) {
     if (!pending.has(id)) pending.set(id, unseen({ noticeOnly: true }));
   }
@@ -334,6 +339,10 @@ async function conflictsToSettle(run) {
 // nothing and closes its standing notice. A re-read that fails keeps what
 // the run saw (nothing, for a visit it never evaluated). Never throws.
 async function settleConflicts(run) {
+  // Whether this read saw every conflict: conflict reads on, the far list
+  // readable (conflictsToSettle), and no re-read failed. The far
+  // double-booking list (needs-person-notice.js, D1) changes only then.
+  run.conflictScanComplete = run.config.conflictMovesEnabled === true;
   const pending = await conflictsToSettle(run);
   // A clear read from earlier in the run is not proof at its end: a person
   // can create an overlap while the run works (Codex #6253 r6). Only this
@@ -344,6 +353,7 @@ async function settleConflicts(run) {
     try {
       now = await standingConflict(seen, id);
     } catch (err) {
+      run.conflictScanComplete = false;
       logger.warn(`[auto-dispatch] conflict re-read failed for ${id}: ${err.message}`);
     }
     if (now && now.clear) run.clearedIds.add(id);
@@ -1502,7 +1512,9 @@ async function runAutoDispatch(opts = {}) {
   await closeMissingGeoNotices(run);
   const noticesClosed = await moveCheck.closeNotices(run.nowDate, { enabled: config.proofreaderEnabled === true });
   await settleConflicts(run);
-  await needsPerson.raiseNotices(run.needsPerson, { nowDate: run.nowDate, clearedIds: run.clearedIds });
+  await needsPerson.raiseNotices(run.needsPerson, {
+    nowDate: run.nowDate, clearedIds: run.clearedIds, scanComplete: !runError && run.conflictScanComplete === true,
+  });
   await moveCheck.raiseNotices(run.proofreader);
   // Every check of the night broke: one notice that the tool is stopped, and
   // why (owner audit 2026-10-22, finding 1). Best-effort; never throws.
