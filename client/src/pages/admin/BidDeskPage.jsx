@@ -181,7 +181,7 @@ function BidDetail({ bidId, onChanged, onClose }) {
           <div className="flex flex-wrap gap-2">
             <Button disabled={busy || !dueInput} onClick={() => save({ due_at: dueInput }, "Due date saved and confirmed")}>Save as confirmed</Button>
             {bid.due_at && !bid.due_confirmed && (
-              <Button variant="secondary" disabled={busy} onClick={() => save({ confirm_due: true }, "Date confirmed as read")}>Confirm date as read</Button>
+              <Button variant="secondary" disabled={busy} onClick={() => save({ confirm_due: true, expected_due_at: bid.due_at }, "Date confirmed as read")}>Confirm date as read</Button>
             )}
             {bid.due_at && (
               <Button variant="ghost" disabled={busy} onClick={() => save({ due_at: null }, "Due date cleared")}>Clear date</Button>

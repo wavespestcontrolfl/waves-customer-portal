@@ -303,7 +303,12 @@ function parseBidEmail(email = {}) {
     job_walk_at: jobWalk ? jobWalk.at : null,
     questions_due_at: null,
     org,
-    group_key: org && groupTitle ? `${org}|${groupTitle}` : null,
+    // One project can carry several packages (a GC invites us to Termite Treatment and to Access Control): the
+    // package is part of the key. group_base (sender org + project) lets a later email that names no package
+    // join the project's only bid.
+    group_base: org && groupTitle ? `${org}|${groupTitle}` : null,
+    group_key: org && groupTitle
+      ? `${org}|${groupTitle}${fields.package_name ? `#${normalizeTitle(fields.package_name)}` : ''}` : null,
   };
 }
 

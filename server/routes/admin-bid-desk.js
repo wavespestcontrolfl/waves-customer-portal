@@ -24,6 +24,7 @@ const etWallTime = Joi.string().pattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/).allow
 const patchSchema = Joi.object({
   due_at: etWallTime,
   confirm_due: Joi.boolean().strict().valid(true),
+  expected_due_at: Joi.string().isoDate(),
   job_walk_at: etWallTime,
   questions_due_at: etWallTime,
   status: Joi.string().valid(...STATUSES),
@@ -116,6 +117,11 @@ router.patch('/:id', async (req, res, next) => {
       });
     } else if (value.confirm_due) {
       if (!bid.due_at) return res.status(400).json({ error: 'There is no date to confirm' });
+      // Confirm only the date the operator looked at: an addendum may have changed the bid since the page loaded.
+      const seen = value.expected_due_at ? new Date(value.expected_due_at).getTime() : NaN;
+      if (seen !== new Date(bid.due_at).getTime()) {
+        return res.status(409).json({ error: 'The due date changed since you opened this bid. Reload and check it again.' });
+      }
       Object.assign(patch, { due_confirmed: true, needs_date_confirmation: false });
     }
     if (value.status !== undefined) patch.status = value.status;

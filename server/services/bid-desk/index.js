@@ -38,7 +38,7 @@ const BID_COLUMNS = [
 
 // ---------- one email ----------
 
-async function findBid(trx, email, groupKey) {
+async function findBid(trx, email, groupKey, groupBase = null) {
   const thread = email.gmail_thread_id;
   if (thread) {
     const byThread = await trx('bid_opportunities')
@@ -48,7 +48,14 @@ async function findBid(trx, email, groupKey) {
       .orderBy('created_at').first();
     if (byThread) return byThread;
   }
-  return groupKey ? trx('bid_opportunities').where({ group_key: groupKey }).orderBy('created_at').first() : null;
+  if (!groupKey) return null;
+  const exact = await trx('bid_opportunities').where({ group_key: groupKey }).orderBy('created_at').first();
+  if (exact || !groupBase || groupKey !== groupBase) return exact || null;
+  // No package named: join the project's bid only when there is exactly one.
+  const candidates = await trx('bid_opportunities')
+    .where((q) => q.where({ group_key: groupBase }).orWhere('group_key', 'like', `${groupBase.replace(/[\\%_]/g, '\\$&')}#%`))
+    .orderBy('created_at').limit(2);
+  return candidates.length === 1 ? candidates[0] : null;
 }
 
 /**
@@ -78,7 +85,7 @@ async function ingestEmail(email, { historical = false, manual = false } = {}) {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', ['bid-desk:ingest']);
     if (await trx('bid_opportunity_emails').where({ email_id: email.id }).first('id')) return { skipped: 'already_filed' };
 
-    const found = await findBid(trx, email, parsed.group_key);
+    const found = await findBid(trx, email, parsed.group_key, parsed.group_base);
     // Re-read the bid under a row lock: an operator saving a date between the read and the update must not be
     // overwritten (the advisory lock only orders intake writers).
     const existing = found ? await trx('bid_opportunities').where({ id: found.id }).forUpdate().first() : null;

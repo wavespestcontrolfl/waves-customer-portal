@@ -314,6 +314,23 @@ describeDb('Bid Desk (PostgreSQL)', () => {
     });
   });
 
+  describe('packages', () => {
+    test('two packages of one project are two bids; a later email naming no package joins the only bid', async () => {
+      const termite = await service.ingestEmail(await storeEmail({ body_text: BC_BODY().replace(': Pest Control', ': Termite Treatment') }));
+      const access = await service.ingestEmail(await storeEmail({ body_text: BC_BODY().replace(': Pest Control', ': Access Control') }));
+      expect(access.bidId).not.toBe(termite.bidId);
+      // With two bids on the project, an email with no package is not guessed into either.
+      const bare = BC_BODY().replace(': Pest Control', '');
+      expect((await service.ingestEmail(await storeEmail({ body_text: bare }))).created).toBe(true);
+    });
+
+    test('with one bid on the project, an email naming no package joins it', async () => {
+      const only = await service.ingestEmail(await storeEmail());
+      const bare = BC_BODY().replace(': Pest Control', '');
+      expect(await service.ingestEmail(await storeEmail({ body_text: bare }))).toMatchObject({ bidId: only.bidId, created: false });
+    });
+  });
+
   describe('manual mark', () => {
     test('files a bid from one email with source manual and no bell, and answers the same bid the second time', async () => {
       const email = await storeEmail({ from_address: 'manager@sample-hoa.example', subject: 'Grounds pest control quote', body_text: 'Please send pricing.' });
@@ -361,7 +378,12 @@ describeDb('Bid Desk (PostgreSQL)', () => {
 
     test('confirm_due confirms the date as read; with no date it is refused', async () => {
       const { bidId } = await filed();
-      expect((await call('PATCH', `/${bidId}`, { confirm_due: true })).status).toBe(200);
+      const seen = (await bidRow(bidId)).due_at.toISOString();
+      // The date the operator looked at must still be the bid's date.
+      expect((await call('PATCH', `/${bidId}`, { confirm_due: true, expected_due_at: '2026-10-01T03:59:00.000Z' })).status).toBe(409);
+      expect((await call('PATCH', `/${bidId}`, { confirm_due: true })).status).toBe(409);
+      expect(await bidRow(bidId)).toMatchObject({ due_confirmed: false });
+      expect((await call('PATCH', `/${bidId}`, { confirm_due: true, expected_due_at: seen })).status).toBe(200);
       expect(await bidRow(bidId)).toMatchObject({ due_confirmed: true, needs_date_confirmation: false });
       await mockPg('bid_opportunities').where({ id: bidId }).update({ due_at: null, due_confirmed: false });
       expect((await call('PATCH', `/${bidId}`, { confirm_due: true })).status).toBe(400);
