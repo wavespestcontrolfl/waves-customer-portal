@@ -670,7 +670,8 @@ function remainderHasMoney(remainder) {
 // sentence only a refund / cancel question. With no customer message, or one that asks something else ("Did my payment go
 // through?"), nothing is removed and the detectors judge the whole reply.
 const PAYING_QUESTION_RE = /\b(?:how\s+(?:do|can|should|would)\s+(?:i|we)\s+pay|ways?\s+to\s+pay|pay(?:ment)?\s+(?:options?|methods?)|pay\s+(?:the\s+|your\s+)?(?:tech|technician)|(?:pay|paying)\s+(?:with|by|in)\s+(?:cash|checks?|cheques?|cards?|credit|debit)|(?:take|takes|accept|accepts)\s+(?:cash|checks?|cheques?|cards?|credit|debit)|(?:send|mail)\s+(?:you\s+)?(?:a\s+)?(?:check|cheque|payment))\b/i;
-const REFUND_QUESTION_RE = /\b(?:refund\w*|cancel\w*|prepa(?:y|id|ying))\b/i;
+// a refund, or cancelling a plan / prepaid service - never "cancel tomorrow's visit" or "a prepaid debit card" (Codex #6447 r11)
+const REFUND_QUESTION_RE = /\brefund\w*\b|\bcancel\w*\s+(?:my\s+|the\s+|our\s+|this\s+)?(?:prepaid\s+|annual\s+|yearly\s+)?(?:plan|service|subscription|contract|membership|program|account)\b|\bprepa(?:y|id|ying)\s+(?:for\s+)?(?:the\s+|a\s+|my\s+)?(?:year|plan|service|annual)/i;
 let companyPolicySentenceCache = null;
 function companyPolicySentences() {
   if (!companyPolicySentenceCache) {
@@ -753,7 +754,8 @@ function autoSendScopeBlock({ reply, inboundText = null, snapshot = null }) {
   if (!scoped) return null;
   const copied = copiedSentences(reply, sentences);
   if (copiesAmbiguousFamily(copied, snapshot) || copiesAnswerNamedSpecifics(copied, inboundText)) return 'payment_status_ambiguous';
-  return remainderIsInert(withoutCompanyPolicyCopies(withoutCopies(reply, copied), inboundText)) ? null : 'payment_status_not_auto_sendable';
+  // a COMPANY FACTS policy copy is never removed here: a policy answer goes to Agent Review, where a person reads it (Codex #6447 r11)
+  return remainderIsInert(withoutCopies(reply, copied)) ? null : 'payment_status_not_auto_sendable';
 }
 // HOLD WHEN AMBIGUOUS (owner 2026-10-02, after round 66): code does not guess which record the customer means. A copied receipt or invoice
 // status line auto-sends only when the draft rendered exactly ONE line of that family; with 2+ candidates (or a snapshot that never
