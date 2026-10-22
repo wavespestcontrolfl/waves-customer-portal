@@ -979,6 +979,11 @@ function generateEstimate(input) {
         // Rep-set plant-density multiplier (very_high → manual); admin-set.
         treeShrubDensity: input.treeShrubDensity,
         floorsArmed: commercialFloorArmedFor('commercial_tree_shrub'),
+        // Replayed lot-based bed basis (see the residential `knobs` below and
+        // calculatePropertyProfile above, which computed the bed on it).
+        lotBedBasis: input.treeShrubPricingKnobs && typeof input.treeShrubPricingKnobs === 'object'
+          ? input.treeShrubPricingKnobs.lotBedBasis
+          : undefined,
       });
       if (!lineItems.some((line) => line.service === result.service)) {
         lineItems.push(result);

@@ -335,6 +335,19 @@ describe('hedge / bed linear feet (owner 2026-10-21, spray-volume groundwork)', 
     expect(treeShrubLine(typed).monthly).toBe(treeShrubLine(none).monthly);
   });
 
+  test('the lookup profile keeps a null or blank aerial hedge read ABSENT, never a zero (Codex #6398 r6)', () => {
+    const { buildEnrichedProfile } = require('../routes/property-lookup-v2');
+    const rc = { squareFootage: 2000, lotSize: 9000, propertyType: 'Single Family', yearBuilt: 2010 };
+    const read = (hedge) => buildEnrichedProfile(rc, { estimatedHedgeLinearFt: hedge }, 27.5, -82.45).estimatedHedgeLinearFt;
+    expect(read(null)).toBeUndefined();
+    expect(read(undefined)).toBeUndefined();
+    expect(read('')).toBeUndefined();
+    expect(read('n/a')).toBeUndefined();
+    expect(read(-4)).toBeUndefined();
+    expect(read(0)).toBe(0); // an explicit zero IS a read
+    expect(read('240')).toBe(240);
+  });
+
   test('a garbage or negative value is absent, not a 400', () => {
     for (const extra of [{ hedgeLinearFt: 'lots' }, { hedgeLinearFt: -5 }, { estimatedHedgeLinearFt: 'n/a' }]) {
       const input = translateV2CallToV1Input(baseProfile(extra), ['TREE_SHRUB'], {});

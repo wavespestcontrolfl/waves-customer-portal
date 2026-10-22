@@ -3095,8 +3095,11 @@ function priceTreeShrub(property, options = {}) {
   // takes homeSqFt from an unauthenticated body, so an inflated footprint
   // shrinks the lot-based bed and the price. A footprint + hardscape above
   // half the lot is implausible for a residential parcel — price it as
-  // entered but park the line for review so it never auto-sends.
-  if (bedAreaInfo.bedAreaSource === 'lot_based') {
+  // entered but park the line for review so it never auto-sends. Only when
+  // the open parcel IS the basis: a pre-change quote replayed on its stamped
+  // gross-lot basis was not priced on the open parcel, so the guard must not
+  // change the review state of an already-issued quote (Codex #6398 r6).
+  if (bedAreaInfo.bedAreaSource === 'lot_based' && knobs.lotBedBasis !== 'gross_lot') {
     const coverage = openParcelCoverageOverHalfLot(property);
     if (coverage) {
       manualReviewReasonsSet.add(OPEN_PARCEL_COVERAGE_REASON);
@@ -4120,7 +4123,10 @@ function priceCommercialTreeShrub(property = {}, options = {}) {
   // Same implausible-coverage guard as the residential pricer (Codex #6398
   // r3): a lot-based bed on a parcel whose footprint + hardscape exceed half
   // the lot prices as entered but parks for review instead of auto-publishing.
-  const coverage = bedBasis === 'lot_based' ? openParcelCoverageOverHalfLot(property) : null;
+  // Only on the open-parcel basis — a replayed pre-change quote keeps its
+  // stamped gross-lot basis and its review state (Codex #6398 r6).
+  const lotBedBasis = options.lotBedBasis === 'gross_lot' ? 'gross_lot' : 'open_parcel';
+  const coverage = bedBasis === 'lot_based' && lotBedBasis === 'open_parcel' ? openParcelCoverageOverHalfLot(property) : null;
 
   return {
     service: 'commercial_tree_shrub',
@@ -4145,6 +4151,11 @@ function priceCommercialTreeShrub(property = {}, options = {}) {
     bedAreaUsed: bedArea,
     bedAreaSource: bedBasis,
     bedAreaEstimated: estimated,
+    // Quote-time stamp of the one inferred-input rule the 2026-10-21 audit
+    // changed for commercial too (the lot-based bed basis; the 3/6/10 tree
+    // table is unchanged here). treeShrubKnobSignalForReplay reads it back
+    // so a sent lot-inferred commercial quote replays its own basis.
+    pricingKnobs: { lotBedBasis },
     treeCount,
     treeShrubDensityMultiplier: densityMult,
     frequency: visits,

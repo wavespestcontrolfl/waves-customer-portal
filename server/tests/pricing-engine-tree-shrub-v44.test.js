@@ -1585,6 +1585,17 @@ describe('Tree & Shrub margin target replays from the stamp (owner audit 2026-10
     expect(priceTreeShrub(property, { tier: 'standard', knobs: { marginTarget: 2 } }).marginTarget).toBe(0.40);
   });
 
+  test('the replay signal recognizes a COMMERCIAL T&S line — raw or mapped recurring row — and replays its bed basis (Codex #6398 r6)', () => {
+    const { treeShrubKnobSignalForReplay } = require('../services/estimate-tree-shrub-knob-replay');
+    // Unstamped pre-change commercial line: the gross-lot basis it priced on.
+    expect(treeShrubKnobSignalForReplay({ result: { lineItems: [{ service: 'commercial_tree_shrub' }] } })).toMatchObject({ lotBedBasis: 'gross_lot' });
+    // Stamped fresh line (raw) and the mapped recurring row Admin V2 keeps.
+    expect(treeShrubKnobSignalForReplay({ engineResult: { lineItems: [{ service: 'commercial_tree_shrub', pricingKnobs: { lotBedBasis: 'open_parcel' } }] } })).toMatchObject({ lotBedBasis: 'open_parcel' });
+    expect(treeShrubKnobSignalForReplay({ result: { recurring: { services: [{ service: 'commercial_pest' }, { service: 'commercial_tree_shrub', pricingKnobs: { lotBedBasis: 'open_parcel' } }] } } })).toMatchObject({ lotBedBasis: 'open_parcel' });
+    // No T&S line of either kind: nothing to inject.
+    expect(treeShrubKnobSignalForReplay({ result: { recurring: { services: [{ service: 'commercial_pest' }] } } })).toBeNull();
+  });
+
   test('the replay signal carries the stamped target and defaults an unstamped line to 0.45', () => {
     const { treeShrubKnobSignalForReplay } = require('../services/estimate-tree-shrub-knob-replay');
     expect(treeShrubKnobSignalForReplay({ result: { results: { tsMeta: { pricingKnobs: { marginTarget: 0.40 } } } } }).marginTarget).toBe(0.40);
@@ -1899,6 +1910,15 @@ describe('Tree & Shrub lot-based bed area prices the OPEN parcel (owner audit 20
     // A typed bed area is not a lot-based inference: no footprint guard.
     const typed = generateEstimate({ ...base, homeSqFt: 20000, bedArea: 900 }).lineItems.find((i) => i.service === 'tree_shrub');
     expect(typed.manualReviewReasons).not.toContain('open_parcel_basis_footprint_over_half_lot');
+    // A pre-change quote replayed on its stamped GROSS-lot basis was never
+    // priced on the open parcel: the guard must not change its review state
+    // (Codex #6398 r6).
+    const legacyKnobs = { densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1, callbackReservePerVisit: 0, fallbackBedSqFt: 1200, marginTarget: 0.45, lotBedBasis: 'gross_lot', treeDensityCounts: { none: 0, light: 3, moderate: 6, heavy: 10 } };
+    const replayed = generateEstimate({ ...base, homeSqFt: 20000, treeShrubPricingKnobs: legacyKnobs }).lineItems.find((i) => i.service === 'tree_shrub');
+    expect(replayed.bedAreaSource).toBe('lot_based');
+    expect(replayed.bedAreaUsed).toBe(22000 * 0.18);
+    expect(replayed.manualReviewReasons).not.toContain('open_parcel_basis_footprint_over_half_lot');
+    expect(replayed.requiresManualReview).toBe(false);
   });
 
   test('generateEstimate: a home with a pool cage prices fewer beds than the same lot bare, and matches the profile basis', () => {

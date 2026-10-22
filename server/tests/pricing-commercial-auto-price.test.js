@@ -175,6 +175,39 @@ describe('priceCommercialTreeShrub — open-parcel coverage guard (Codex #6398 r
       { lotSqFt: 40000, footprint: 30000, hardscape: 6000, bedArea: 720, bedAreaSource: 'explicit' }, { treeCount: 4 },
     );
     expect(explicit.requiresManualReview).toBe(false);
+    // A replay on the stamped gross-lot basis was not priced on the open
+    // parcel: no guard, and the line restates the basis it priced on (Codex #6398 r6).
+    const replayed = priceCommercialTreeShrub(
+      { lotSqFt: 40000, footprint: 30000, hardscape: 6000, bedArea: 7200, bedAreaSource: 'lot_based' }, { treeCount: 4, lotBedBasis: 'gross_lot' },
+    );
+    expect(replayed.requiresManualReview).toBe(false);
+    expect(replayed.pricingKnobs).toEqual({ lotBedBasis: 'gross_lot' });
+    expect(inflated.pricingKnobs).toEqual({ lotBedBasis: 'open_parcel' });
+  });
+
+  test('a sent lot-inferred commercial quote replays its gross-lot bed through the stamp; a fresh one prices the open parcel (Codex #6398 r6)', () => {
+    const { treeShrubKnobSignalForReplay } = require('../services/estimate-tree-shrub-knob-replay');
+    const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+    const input = { propertyType: 'commercial', homeSqFt: 10000, lotSqFt: 40000, features: { shrubs: 'moderate', complexity: 'simple' }, services: { treeShrub: { tier: 'standard' } } };
+    const fresh = generateEstimate(input);
+    const freshLine = fresh.lineItems.find((l) => l.service === 'commercial_tree_shrub');
+    expect(freshLine.bedAreaSource).toBe('lot_based');
+    expect(freshLine.bedAreaUsed).toBeLessThan(40000 * 0.18); // open parcel, not the gross lot
+    expect(freshLine.pricingKnobs).toEqual({ lotBedBasis: 'open_parcel' });
+    // The stored pre-change line carried no stamp: it priced 18% of the gross lot.
+    const legacy = treeShrubKnobSignalForReplay({ result: { lineItems: [{ service: 'commercial_tree_shrub' }] } });
+    const replayed = generateEstimate({ ...input, treeShrubPricingKnobs: legacy }).lineItems.find((l) => l.service === 'commercial_tree_shrub');
+    expect(replayed.bedAreaUsed).toBe(40000 * 0.18);
+    expect(replayed.annual).toBeGreaterThan(freshLine.annual);
+    // The fresh quote replays itself byte-identical from either stored shape:
+    // its raw line, or the mapped recurring row Admin V2 persists.
+    const fromRaw = generateEstimate({ ...input, treeShrubPricingKnobs: treeShrubKnobSignalForReplay({ engineResult: { lineItems: fresh.lineItems } }) }).lineItems.find((l) => l.service === 'commercial_tree_shrub');
+    expect(fromRaw.annual).toBe(freshLine.annual);
+    const mapped = mapV1ToLegacyShape(fresh, input);
+    const mappedRow = mapped.recurring.services.find((s) => s.service === 'commercial_tree_shrub');
+    expect(mappedRow.pricingKnobs).toEqual({ lotBedBasis: 'open_parcel' });
+    const fromMapped = generateEstimate({ ...input, treeShrubPricingKnobs: treeShrubKnobSignalForReplay({ result: mapped }) }).lineItems.find((l) => l.service === 'commercial_tree_shrub');
+    expect(fromMapped.annual).toBe(freshLine.annual);
   });
 });
 

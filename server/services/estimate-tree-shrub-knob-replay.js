@@ -53,7 +53,13 @@ function treeShrubKnobSignalForReplay(estData = {}) {
     ...(Array.isArray(result?.lineItems) ? result.lineItems : []),
     ...(Array.isArray(estData?.engineResult?.lineItems) ? estData.engineResult.lineItems : []),
   ];
-  const tsLine = lineItems.find((li) => (li?.service || '') === 'tree_shrub');
+  // The commercial ornamental line prices through the same lot-based bed
+  // basis (calculatePropertyProfile), so it is a T&S line for replay too;
+  // Admin V2 keeps it only as a mapped recurring row (Codex #6398 r6).
+  const mappedRows = Array.isArray(result?.recurring?.services) ? result.recurring.services : [];
+  const tsLine = lineItems.find((li) => (li?.service || '') === 'tree_shrub')
+    || lineItems.find((li) => (li?.service || '') === 'commercial_tree_shrub')
+    || mappedRows.find((row) => (row?.service || '') === 'commercial_tree_shrub');
   // Admin V2 persists ONLY the mapped legacy envelope (result.results.ts /
   // tsMeta) with no raw lineItems, so the mapped stamp is a first-class
   // source here — without it those quotes would replay off live knobs.

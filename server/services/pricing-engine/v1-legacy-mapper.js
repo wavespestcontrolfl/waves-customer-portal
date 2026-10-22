@@ -1049,6 +1049,10 @@ function mapV1ToLegacyShape(v1Result) {
       // generically (other commercial lines carry their own basis).
       ...(Number(li.stations) > 0 ? { stations: Number(li.stations) } : {}),
       ...(li.pricingBasis ? { pricingBasis: li.pricingBasis } : {}),
+      // Quote-time knob stamp (commercial T&S: the lot-based bed basis) —
+      // Admin V2 persists only this envelope, and the replay signal reads
+      // the stamp back from here (Codex #6398 r6).
+      ...(li.pricingKnobs && typeof li.pricingKnobs === 'object' ? { pricingKnobs: li.pricingKnobs } : {}),
       discountable: false,
       discountEligible: false,
       waveGuardDiscountEligible: false,

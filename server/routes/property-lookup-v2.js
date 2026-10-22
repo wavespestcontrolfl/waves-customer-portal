@@ -3124,9 +3124,14 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     estimatedBedAreaSf: ai?.estimatedBedAreaSf,
     // Shrub/hedge line length the aerial read (owner 2026-10-21): captured
     // and persisted for the spray-volume material model; NOT a pricing input.
-    estimatedHedgeLinearFt: Number.isFinite(Number(ai?.estimatedHedgeLinearFt)) && Number(ai.estimatedHedgeLinearFt) >= 0
-      ? Number(ai.estimatedHedgeLinearFt)
-      : undefined,
+    // A null / blank read stays ABSENT — Number(null) is 0, which would
+    // record "no hedges" for an unmeasured parcel (Codex #6398 r6).
+    estimatedHedgeLinearFt: (() => {
+      const raw = ai?.estimatedHedgeLinearFt;
+      if (raw === null || raw === undefined || String(raw).trim() === '') return undefined;
+      const n = Number(raw);
+      return Number.isFinite(n) && n >= 0 ? n : undefined;
+    })(),
     // Field-level confidence behind the winning bed-area value (stamped by
     // mergeAiAnalyses) — the trust predicate requires it; the blended
     // aiConfidence can be held above the floor by providers that never
