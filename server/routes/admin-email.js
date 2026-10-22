@@ -9,6 +9,7 @@ const { executeAutoAction } = require('../services/email/email-actions');
 const { unblockSender, manualBlockSender } = require('../services/email/spam-blocker');
 const logger = require('../services/logger');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { countProcessedInvoices } = require('../services/email/invoice-outcome');
 const {
   createStaffOAuthState,
   withClaimedStaffOAuthState,
@@ -176,7 +177,7 @@ router.get('/inbox', async (req, res) => {
       .limit(parsedLimit)
       .select('id', 'gmail_id', 'gmail_thread_id', 'from_address', 'from_name', 'to_address',
         'reply_to', 'subject', 'snippet', 'has_attachments', 'received_at', 'is_read', 'is_starred',
-        'is_archived', 'classification', 'extracted_data', 'customer_id');
+        'is_archived', 'classification', 'extracted_data', 'customer_id', 'auto_action', 'expense_id');
 
     res.json({ emails, total: parseInt(count), page: parsedPage, limit: parsedLimit });
   } catch (err) {
@@ -701,7 +702,9 @@ router.get('/daily-digest', async (req, res) => {
       .filter(e => /^spam_(quarantined|trashing|trashed|blocked)/.test(e.auto_action || '')).length;
     // Kept for API back-compat; now mirrors the accurate count.
     digest.spam_blocked = digest.spam_quarantined;
-    digest.invoices_processed = digest.by_category.vendor_invoice || 0;
+    // Only invoices that reached the booking step: invoice_detected:* (not paid,
+    // no amount, failed, unauthenticated sender) is not a processed invoice.
+    digest.invoices_processed = countProcessedInvoices(todayEmails);
 
     // Blocked count today
     const [blocked] = await db('blocked_email_senders')
