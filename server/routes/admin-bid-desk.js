@@ -1,11 +1,14 @@
 const express = require('express');
 const Joi = require('joi');
 const db = require('../models/db');
+const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { bidDeskLive } = require('../config/feature-gates');
 const { markEmailAsBid, BID_COLUMNS } = require('../services/bid-desk');
 const { daysLeft } = require('../services/bid-desk/rules');
-const { parseETDateTime, validCalendarDate } = require('../utils/datetime-et');
+const { parseETDateTime, validCalendarDate, etParts, etWallClockOccurrences } = require('../utils/datetime-et');
+const { openAdminAlertKeys, closeAdminAlertKeys } = require('../services/admin-alert-episodes');
+const { OPEN_STATUSES } = require('../services/bid-desk/rules');
 
 // Bid Desk (GATE_BID_DESK, dark). Staff-only list, detail and decisions for bid invites found in the email table.
 // Nothing here sends a message to anyone; a due date only becomes "confirmed" when the operator types or confirms it.
@@ -35,11 +38,42 @@ const DATE_CHANGED = 'The due date changed since you opened this bid. Reload and
 
 const fromEmailSchema = Joi.object({ email_id: Joi.string().uuid().required() }).unknown(false);
 
+// An operator-typed ET wall time must be exactly one real Eastern clock reading: hours 00-23, minutes 00-59, a
+// real calendar day, not inside the spring-forward gap (parseETDateTime would roll it forward) and not the
+// repeated fall-back hour (two instants; the operator must pick another time).
 function toInstant(value) {
   if (value === null) return { ok: true, at: null };
-  if (!validCalendarDate(value.slice(0, 10))) return { ok: false };
+  const [day, clock] = value.split('T');
+  const [hour, minute] = clock.split(':').map(Number);
+  if (!validCalendarDate(day) || !(hour >= 0 && hour <= 23) || !(minute >= 0 && minute <= 59)) return { ok: false };
   const at = parseETDateTime(value);
-  return Number.isNaN(at.getTime()) ? { ok: false } : { ok: true, at };
+  if (Number.isNaN(at.getTime())) return { ok: false };
+  const p = etParts(at);
+  const pad = (n) => String(n).padStart(2, '0');
+  const roundTrip = `${p.year}-${pad(p.month)}-${pad(p.day)}T${pad(p.hour)}:${pad(p.minute)}`;
+  if (roundTrip !== value || etWallClockOccurrences(at) !== 1) return { ok: false };
+  return { ok: true, at };
+}
+
+// Notifications whose condition a successful save has met leave the bell (docs/admin-notifications.md 4.3).
+async function closeDoneAlerts(bidId, before, after) {
+  const prefixes = [];
+  const reason = [];
+  if (after.due_confirmed && (before.needs_date_confirmation || !before.due_confirmed) && !after.needs_date_confirmation) {
+    prefixes.push(`bid-desk:addendum:${bidId}:`);
+    reason.push('due_date_confirmed');
+  }
+  if (before.status === 'new' && after.status !== 'new') {
+    prefixes.push(`bid-desk:new:${bidId}`);
+    reason.push('bid_decided');
+  }
+  if (OPEN_STATUSES.includes(before.status) && !OPEN_STATUSES.includes(after.status)) {
+    prefixes.push(`bid-desk:new:${bidId}`, `bid-desk:addendum:${bidId}:`, `bid-desk:remind:${bidId}:`);
+    reason.push('bid_closed');
+  }
+  if (!prefixes.length) return 0;
+  const keys = (await Promise.all([...new Set(prefixes)].map((prefix) => openAdminAlertKeys(db, prefix)))).flat();
+  return closeAdminAlertKeys(db, keys, reason.join(','));
 }
 
 function present(row, extra = {}) {
@@ -107,12 +141,22 @@ router.patch('/:id', async (req, res, next) => {
       if (!parsed.ok) return res.status(400).json({ error: `${key} is not a real date` });
       patch[key] = parsed.at;
     }
+    // A date save or confirmation is accepted only against the bid version the operator looked at: an addendum
+    // filed since the page loaded moves updated_at, and the write below is refused. Compared at millisecond
+    // precision, the precision the page has.
+    if (value.due_at !== undefined || value.confirm_due) {
+      if (!value.expected_updated_at) return res.status(409).json({ error: DATE_CHANGED });
+      fence = (q) => q.whereRaw("date_trunc('milliseconds', updated_at) = ?::timestamptz", [value.expected_updated_at]);
+    }
     if (value.due_at !== undefined) {
       const parsed = toInstant(value.due_at);
-      if (!parsed.ok) return res.status(400).json({ error: 'due_at is not a real date' });
+      if (!parsed.ok) return res.status(400).json({ error: 'due_at is not a real Eastern date and time' });
       // A date a person typed is the confirmed date. Clearing it un-confirms. Reminders start over for the new date.
+      // The email line it was read from no longer describes it, unless the typed date is that same date.
+      const unchanged = parsed.at && bid.due_at && new Date(bid.due_at).getTime() === parsed.at.getTime();
       Object.assign(patch, {
         due_at: parsed.at,
+        due_source_line: unchanged ? bid.due_source_line : null,
         due_confirmed: parsed.at !== null,
         needs_date_confirmation: false,
         reminder_7d_sent_at: null,
@@ -120,10 +164,6 @@ router.patch('/:id', async (req, res, next) => {
       });
     } else if (value.confirm_due) {
       if (!bid.due_at) return res.status(400).json({ error: 'There is no date to confirm' });
-      // Confirm only the bid version the operator looked at: an addendum filed since the page loaded moves
-      // updated_at, and the write below is refused. Compared at millisecond precision, the precision the page has.
-      if (!value.expected_updated_at) return res.status(409).json({ error: DATE_CHANGED });
-      fence = (q) => q.whereRaw("date_trunc('milliseconds', updated_at) = ?::timestamptz", [value.expected_updated_at]);
       Object.assign(patch, { due_confirmed: true, needs_date_confirmation: false });
     }
     if (value.status !== undefined) patch.status = value.status;
@@ -132,6 +172,12 @@ router.patch('/:id', async (req, res, next) => {
     const written = await db('bid_opportunities').where({ id: bid.id }).modify((q) => { if (fence) fence(q); }).update({ ...patch, updated_at: db.fn.now() });
     if (!written) return res.status(409).json({ error: DATE_CHANGED });
     const updated = await db('bid_opportunities').where({ id: bid.id }).first(BID_COLUMNS);
+    try {
+      await closeDoneAlerts(bid.id, bid, updated);
+    } catch (err) {
+      // The save stands; an alert left open is closed by hand. Class and code only (row values stay out of logs).
+      logger.warn(`[bid-desk] closing done alerts for ${bid.id} failed: ${err?.name || 'Error'}${err?.code ? ` ${err.code}` : ''}`);
+    }
     res.json({ ok: true, bid: present(updated) });
   } catch (err) {
     next(err);

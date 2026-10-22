@@ -16,7 +16,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { bidDeskLive } = require('../../config/feature-gates');
 const { detectBidEmail, parseBidEmail, classifyKind } = require('./detector');
-const { attachPatch, reminderDue } = require('./rules');
+const { attachPatch, reminderDue, OPEN_STATUSES } = require('./rules');
 const alerts = require('./alerts');
 
 const LOG = '[bid-desk]';
@@ -28,7 +28,17 @@ const FIRST_RUN_LOOKBACK_MS = 60 * 60 * 1000;
 const MAX_ATTEMPTS = 3;
 const REMINDER_LIMIT = 100;
 const RECHECK_WINDOW_MS = 30 * 60 * 1000;
-const EMAIL_COLUMNS = ['id', 'gmail_thread_id', 'from_address', 'from_name', 'subject', 'body_text', 'body_html', 'received_at'];
+const EMAIL_COLUMNS = ['id', 'gmail_thread_id', 'from_address', 'from_name', 'subject', 'body_text', 'body_html', 'received_at', 'classification', 'label_ids'];
+
+// Mail the sync stored as spam (a blocked sender, Gmail's SPAM label) never becomes a bid or a bell.
+const NOT_SPAM_SQL = "COALESCE(classification, '') <> 'spam' AND NOT jsonb_exists(COALESCE(label_ids, '[]'::jsonb), 'SPAM')";
+const NOT_SPAM_SQL_E = NOT_SPAM_SQL.replace(/classification/g, 'e.classification').replace(/label_ids/g, 'e.label_ids');
+function isSpam(email) {
+  if (String(email.classification || '') === 'spam') return true;
+  let labels = email.label_ids;
+  if (typeof labels === 'string') { try { labels = JSON.parse(labels); } catch { labels = []; } }
+  return Array.isArray(labels) && labels.includes('SPAM');
+}
 
 const BID_COLUMNS = [
   'id', 'source', 'buyer_name', 'buyer_email', 'gc_or_agency', 'project_title', 'package_name', 'solicitation_number', 'location',
@@ -49,10 +59,13 @@ async function findBid(trx, email, groupKey, groupBase = null) {
     if (byThread) return byThread;
   }
   if (!groupKey) return null;
-  const exact = await trx('bid_opportunities').where({ group_key: groupKey }).orderBy('created_at').first();
+  // Only OPEN bids group by key: a GC's new solicitation with the same project and package after the old one was
+  // decided is new work. (A reply in the bid's own thread above still joins it.)
+  const exact = await trx('bid_opportunities').where({ group_key: groupKey }).whereIn('status', OPEN_STATUSES)
+    .orderBy('created_at').first();
   if (exact || !groupBase || groupKey !== groupBase) return exact || null;
   // No package named: join the project's bid only when there is exactly one.
-  const candidates = await trx('bid_opportunities')
+  const candidates = await trx('bid_opportunities').whereIn('status', OPEN_STATUSES)
     .where((q) => q.where({ group_key: groupBase }).orWhere('group_key', 'like', `${groupBase.replace(/[\\%_]/g, '\\$&')}#%`))
     .orderBy('created_at').limit(2);
   return candidates.length === 1 ? candidates[0] : null;
@@ -75,12 +88,15 @@ async function detectWithThread(email) {
 async function ingestEmail(email, { historical = false, manual = false } = {}) {
   // A person marking an email by hand is already looking at it, and the backfill files history: no bell for either.
   const quiet = manual || historical;
+  if (!manual && isSpam(email)) return { skipped: 'spam' };
   const detected = manual ? { bid: true, source: 'manual' } : await detectWithThread(email);
   if (!detected.bid) return { skipped: detected.reason };
   const parsed = parseBidEmail(email);
   const kind = detected.reason === 'thread' ? detected.kind : parsed.kind;
 
-  return db.transaction(async (trx) => {
+  // Filing commits on its own. The notification is delivered after the commit (deliverOwedAlert), and an owed one
+  // that fails is retried by every tick, so a bell outage never loses the bid record.
+  const outcome = await db.transaction(async (trx) => {
     // One writer at a time: two emails of one thread must not both create the bid. Volume is a few a month.
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', ['bid-desk:ingest']);
     if (await trx('bid_opportunity_emails').where({ email_id: email.id }).first('id')) return { skipped: 'already_filed' };
@@ -90,15 +106,23 @@ async function ingestEmail(email, { historical = false, manual = false } = {}) {
     // overwritten (the advisory lock only orders intake writers).
     const existing = found ? await trx('bid_opportunities').where({ id: found.id }).forUpdate().first() : null;
     if (existing) {
-      const { patch, notifyAddendum } = attachPatch(existing, parsed, kind);
-      await trx('bid_opportunity_emails').insert({ bid_id: existing.id, email_id: email.id, kind, received_at: email.received_at });
-      const updated = { ...existing, ...patch };
+      // Current mail on a bid the backfill filed as history makes it live again: alerts and reminders apply.
+      const promote = !historical && existing.historical;
+      const live = promote ? { ...existing, historical: false } : existing;
+      const { patch, notifyAddendum } = attachPatch(live, parsed, kind);
+      if (promote) patch.historical = false;
+      const open = OPEN_STATUSES.includes(live.status);
+      let alertKind = null;
+      if (!quiet && notifyAddendum) alertKind = 'addendum';
+      else if (!quiet && promote && open) alertKind = 'new';
+      const [link] = await trx('bid_opportunity_emails')
+        .insert({ bid_id: existing.id, email_id: email.id, kind, received_at: email.received_at, alert_kind: alertKind })
+        .returning(['id']);
       // Every attached email moves the bid's version (updated_at), even with nothing else to change: a date
       // confirmation the page sends against the older version is then refused.
       // clock_timestamp(), not now(): the version must move even inside one long transaction.
       await trx('bid_opportunities').where({ id: existing.id }).update({ ...patch, updated_at: trx.raw('clock_timestamp()') });
-      if (notifyAddendum && !quiet) await alerts.raise(alerts.addendumSpec(updated, email), `bid-desk:addendum:${email.id}`, trx);
-      return { bidId: existing.id, created: false, kind };
+      return { bidId: existing.id, created: false, kind, owedLinkId: alertKind ? link.id : null };
     }
 
     const [bid] = await trx('bid_opportunities').insert({
@@ -122,13 +146,69 @@ async function ingestEmail(email, { historical = false, manual = false } = {}) {
       gmail_thread_id: email.gmail_thread_id || null,
       group_key: parsed.group_key,
     }).returning(BID_COLUMNS);
-    await trx('bid_opportunity_emails').insert({ bid_id: bid.id, email_id: email.id, kind, received_at: email.received_at });
-    if (!historical && !quiet) {
-      await alerts.raise(alerts.newBidSpec(bid, email), `bid-desk:new:${bid.id}`, trx);
-      await trx('bid_opportunities').where({ id: bid.id }).update({ notified_at: trx.fn.now() });
-    }
-    return { bidId: bid.id, created: true, kind };
+    const alertKind = quiet ? null : 'new';
+    const [link] = await trx('bid_opportunity_emails')
+      .insert({ bid_id: bid.id, email_id: email.id, kind, received_at: email.received_at, alert_kind: alertKind })
+      .returning(['id']);
+    return { bidId: bid.id, created: true, kind, owedLinkId: alertKind ? link.id : null };
   });
+
+  if (outcome.owedLinkId) {
+    try {
+      await deliverOwedAlert(outcome.owedLinkId);
+    } catch (err) {
+      logger.error(`${LOG} bell for bid ${outcome.bidId} failed; the next tick retries it: ${safeError(err)}`);
+    }
+  }
+  const { owedLinkId, ...result } = outcome;
+  return result;
+}
+
+// ---------- owed notifications ----------
+
+/**
+ * Rings the notification owed for one filed email, at most once. A bid that is no longer open (decided while the
+ * bell was down) or was filed as history is marked delivered without ringing.
+ */
+async function deliverOwedAlert(linkId) {
+  return db.transaction(async (trx) => {
+    const link = await trx('bid_opportunity_emails').where({ id: linkId }).forUpdate().first();
+    if (!link || !link.alert_kind || link.alerted_at) return false;
+    const bid = await trx('bid_opportunities').where({ id: link.bid_id }).forUpdate().first();
+    const email = await trx('emails').where({ id: link.email_id }).first(['id', 'subject', 'from_name', 'from_address']);
+    const moot = !bid || bid.historical || !OPEN_STATUSES.includes(bid.status);
+    if (!moot) {
+      if (link.alert_kind === 'new') {
+        await alerts.raise(alerts.newBidSpec(bid, email), `bid-desk:new:${bid.id}`, trx);
+        await trx('bid_opportunities').where({ id: bid.id }).update({ notified_at: trx.fn.now() });
+      } else {
+        await alerts.raise(alerts.addendumSpec(bid, email), `bid-desk:addendum:${bid.id}:${link.email_id}`, trx);
+      }
+    }
+    await trx('bid_opportunity_emails').where({ id: linkId }).update({ alerted_at: trx.fn.now() });
+    return !moot;
+  });
+}
+
+async function deliverOwedAlerts({ limit = REMINDER_LIMIT } = {}) {
+  const owed = await db('bid_opportunity_emails').whereNotNull('alert_kind').whereNull('alerted_at')
+    .orderBy('created_at').limit(limit).select('id');
+  let rung = 0;
+  for (const { id } of owed) {
+    try {
+      if (await deliverOwedAlert(id)) rung += 1;
+    } catch (err) {
+      logger.error(`${LOG} owed bell ${id} still failing: ${safeError(err)}`);
+    }
+  }
+  return rung;
+}
+
+// A database or provider error can carry row values; the log keeps its class and code only.
+function safeError(err) {
+  const name = err?.name || 'Error';
+  const code = err?.code ? ` ${err.code}` : '';
+  return `${name}${code}`;
 }
 
 // ---------- the 15-minute job ----------
@@ -166,6 +246,7 @@ async function runBidDeskTick({ now = new Date(), limit = BATCH_LIMIT } = {}) {
   // recovery can store an older message after newer ones, and a receive-time cursor would pass it for good.
   const rows = await db('emails')
     .whereRaw('(created_at, id) > (?::timestamptz, ?::uuid)', [state.at, state.id])
+    .whereRaw(NOT_SPAM_SQL)
     .orderBy([{ column: 'created_at' }, { column: 'id' }])
     .limit(limit)
     // The cursor keeps PostgreSQL's microseconds: a JS Date would cut them and re-read the last row.
@@ -181,7 +262,7 @@ async function runBidDeskTick({ now = new Date(), limit = BATCH_LIMIT } = {}) {
       state = { at: email.cursor_at, id: email.id };
     } catch (err) {
       const attempts = state.retry?.id === email.id ? state.retry.count + 1 : 1;
-      logger.error(`${LOG} email ${email.id} failed (attempt ${attempts}): ${err.message}`);
+      logger.error(`${LOG} email ${email.id} failed (attempt ${attempts}): ${safeError(err)}`);
       result.failed += 1;
       if (attempts < MAX_ATTEMPTS) {
         state = { ...state, retry: { id: email.id, count: attempts } };
@@ -196,6 +277,7 @@ async function runBidDeskTick({ now = new Date(), limit = BATCH_LIMIT } = {}) {
     .whereRaw('e.created_at > ?::timestamptz - make_interval(secs => ?)', [state.at, RECHECK_WINDOW_MS / 1000])
     .whereRaw('e.created_at <= ?::timestamptz', [state.at])
     .whereNotExists(db('bid_opportunity_emails as l').whereRaw('l.email_id = e.id'))
+    .whereRaw(NOT_SPAM_SQL_E)
     .orderBy([{ column: 'e.created_at' }, { column: 'e.id' }])
     .limit(limit)
     .select(EMAIL_COLUMNS.map((c) => `e.${c}`));
@@ -207,10 +289,11 @@ async function runBidDeskTick({ now = new Date(), limit = BATCH_LIMIT } = {}) {
         if (outcome.created) result.created += 1;
       }
     } catch (err) {
-      logger.error(`${LOG} late email ${email.id} failed: ${err.message}`);
+      logger.error(`${LOG} late email ${email.id} failed: ${safeError(err)}`);
     }
   }
   if (rows.length || firstRun) await writeWatermark(state);
+  result.owedAlerts = await deliverOwedAlerts();
   result.reminders = await sendDueReminders({ now });
   return result;
 }
@@ -221,10 +304,14 @@ async function runBidDeskTick({ now = new Date(), limit = BATCH_LIMIT } = {}) {
 async function sendDueReminders({ now = new Date() } = {}) {
   if (!bidDeskLive()) return 0;
   const horizon = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+  const twoDays = new Date(now.getTime() + 2 * 24 * 60 * 60 * 1000);
   const candidates = await db('bid_opportunities')
     .where({ due_confirmed: true, historical: false })
     .whereIn('status', ['new', 'bid'])
     .where('due_at', '>', now).where('due_at', '<=', horizon)
+    // Only bids still owed a window, so already-reminded rows cannot fill the limit and starve later ones.
+    .where((q) => q.where((w) => w.whereNull('reminder_2d_sent_at').where('due_at', '<=', twoDays))
+      .orWhere((w) => w.whereNull('reminder_7d_sent_at').where('due_at', '>', twoDays)))
     .orderBy('due_at').limit(REMINDER_LIMIT).select('id');
   let sent = 0;
   for (const { id } of candidates) {
@@ -246,7 +333,7 @@ async function sendDueReminders({ now = new Date() } = {}) {
       });
       if (done) sent += 1;
     } catch (err) {
-      logger.error(`${LOG} reminder for bid ${id} failed: ${err.message}`);
+      logger.error(`${LOG} reminder for bid ${id} failed: ${safeError(err)}`);
     }
   }
   return sent;
@@ -266,6 +353,7 @@ async function runBackfill({ days = BACKFILL_DAYS, dryRun = true, now = new Date
   for (;;) {
     const rows = await db('emails')
       .whereRaw('(received_at, id) > (?::timestamptz, ?::uuid)', [cursor.at, cursor.id])
+      .whereRaw(NOT_SPAM_SQL)
       .orderBy([{ column: 'received_at' }, { column: 'id' }])
       .limit(BACKFILL_BATCH).select(EMAIL_COLUMNS);
     if (!rows.length) break;
@@ -281,7 +369,7 @@ async function runBackfill({ days = BACKFILL_DAYS, dryRun = true, now = new Date
         else if (outcome.bidId) result.attached += 1;
       } catch (err) {
         result.failed += 1;
-        logger.error(`${LOG} backfill email ${email.id} failed: ${err.message}`);
+        logger.error(`${LOG} backfill email ${email.id} failed: ${safeError(err)}`);
       }
     }
   }
@@ -301,5 +389,5 @@ async function markEmailAsBid(emailId) {
 }
 
 module.exports = {
-  ingestEmail, runBidDeskTick, sendDueReminders, runBackfill, markEmailAsBid, BID_COLUMNS, EMAIL_COLUMNS, WATERMARK_KEY,
+  ingestEmail, runBidDeskTick, sendDueReminders, deliverOwedAlerts, runBackfill, markEmailAsBid, BID_COLUMNS, EMAIL_COLUMNS, WATERMARK_KEY,
 };

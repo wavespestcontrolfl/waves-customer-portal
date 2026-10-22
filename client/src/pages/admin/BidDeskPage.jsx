@@ -179,12 +179,12 @@ function BidDetail({ bidId, onChanged, onClose }) {
             <Input type="datetime-local" value={dueInput} onChange={(event) => setDueInput(event.target.value)} />
           </Field>
           <div className="flex flex-wrap gap-2">
-            <Button disabled={busy || !dueInput} onClick={() => save({ due_at: dueInput }, "Due date saved and confirmed")}>Save as confirmed</Button>
+            <Button disabled={busy || !dueInput} onClick={() => save({ due_at: dueInput, expected_updated_at: bid.updated_at }, "Due date saved and confirmed")}>Save as confirmed</Button>
             {bid.due_at && !bid.due_confirmed && (
               <Button variant="secondary" disabled={busy} onClick={() => save({ confirm_due: true, expected_updated_at: bid.updated_at }, "Date confirmed as read")}>Confirm date as read</Button>
             )}
             {bid.due_at && (
-              <Button variant="ghost" disabled={busy} onClick={() => save({ due_at: null }, "Due date cleared")}>Clear date</Button>
+              <Button variant="ghost" disabled={busy} onClick={() => save({ due_at: null, expected_updated_at: bid.updated_at }, "Due date cleared")}>Clear date</Button>
             )}
           </div>
         </div>

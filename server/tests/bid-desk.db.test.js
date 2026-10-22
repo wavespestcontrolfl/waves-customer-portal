@@ -25,6 +25,7 @@ const knex = require('knex');
 const express = require('express');
 const { randomUUID } = require('crypto');
 const migration = require('../models/migrations/20261022090000_bid_desk');
+const retryMigration = require('../models/migrations/20261022100000_bid_desk_alert_retry_and_cursor_index');
 const service = require('../services/bid-desk');
 const { raiseAdminAlert, composeAdminAlert } = require('../services/admin-alert-compose');
 
@@ -87,17 +88,21 @@ describeDb('Bid Desk (PostgreSQL)', () => {
   const bidRow = (id) => mockPg('bid_opportunities').where({ id }).first();
   const links = (bidId) => mockPg('bid_opportunity_emails').where({ bid_id: bidId }).orderBy('received_at');
   const rung = (kind) => raiseAdminAlert.mock.calls.filter(([, , opts]) => opts.dedupeKey.startsWith(`bid-desk:${kind}:`));
+  const version = async (id) => (await call('GET', `/${id}`)).body.bid.updated_at;
   const call = async (method, url, body) => {
     const res = await fetch(`${baseUrl}/api/admin/bid-desk${url}`, { method, headers: { 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     return { status: res.status, body: await res.json().catch(() => ({})) };
   };
 
-  test('the migration is reversible', async () => {
+  test('the migrations are reversible', async () => {
+    await retryMigration.down(mockPg);
+    expect(await mockPg.schema.hasColumn('bid_opportunity_emails', 'alert_kind')).toBe(false);
     await migration.down(mockPg);
     expect(await mockPg.schema.hasTable('bid_opportunities')).toBe(false);
     await migration.up(mockPg);
+    await retryMigration.up(mockPg);
     expect(await mockPg.schema.hasTable('bid_opportunities')).toBe(true);
-    expect(await mockPg.schema.hasTable('bid_opportunity_emails')).toBe(true);
+    expect(await mockPg.schema.hasColumn('bid_opportunity_emails', 'alert_kind')).toBe(true);
     await expect(mockPg('bid_opportunities').insert({ source: 'carrier_pigeon' })).rejects.toThrow(/source_check/);
   });
 
@@ -222,12 +227,49 @@ describeDb('Bid Desk (PostgreSQL)', () => {
     test('a failing email blocks the batch for two ticks, then is skipped', async () => {
       await mockPg('system_settings').where({ key: service.WATERMARK_KEY }).del();
       await storeEmail({ received_at: new Date(NOW.getTime() - 20 * 60000) });
-      raiseAdminAlert.mockRejectedValue(new Error('bell down'));
+      // Filing itself fails (a trigger inside this test's rolled-back transaction).
+      await mockPg.raw("CREATE FUNCTION pg_temp.bid_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'filing down'; END $$");
+      await mockPg.raw('CREATE TRIGGER bid_fail BEFORE INSERT ON bid_opportunities FOR EACH ROW EXECUTE FUNCTION pg_temp.bid_fail()');
       expect(await service.runBidDeskTick({ now: NOW })).toMatchObject({ failed: 1 });
       expect(await service.runBidDeskTick({ now: NOW })).toMatchObject({ failed: 1 });
       expect(await mockPg('bid_opportunities').count('* as n').first()).toMatchObject({ n: '0' });
       expect(await service.runBidDeskTick({ now: NOW })).toMatchObject({ failed: 1 });
       expect(await service.runBidDeskTick({ now: NOW })).toMatchObject({ read: 0 });
+    });
+
+    test('a bell outage never loses the bid: it is filed, the bell is owed, and a later tick rings it once', async () => {
+      await mockPg('system_settings').where({ key: service.WATERMARK_KEY }).del();
+      await storeEmail({ received_at: new Date(NOW.getTime() - 20 * 60000) });
+      raiseAdminAlert.mockRejectedValue(new Error('bell down'));
+      expect(await service.runBidDeskTick({ now: NOW })).toMatchObject({ filed: 1, created: 1, failed: 0, owedAlerts: 0 });
+      const bid = await mockPg('bid_opportunities').first();
+      expect(bid.notified_at).toBeNull();
+      expect(await mockPg('bid_opportunity_emails').where({ bid_id: bid.id }).first()).toMatchObject({ alert_kind: 'new', alerted_at: null });
+      raiseAdminAlert.mockReset();
+      raiseAdminAlert.mockImplementation(async (_category, spec) => { composeAdminAlert(spec); return { id: randomUUID(), deduped: false }; });
+      expect(await service.runBidDeskTick({ now: NOW })).toMatchObject({ owedAlerts: 1 });
+      expect(await service.runBidDeskTick({ now: NOW })).toMatchObject({ owedAlerts: 0 });
+      expect(rung('new')).toHaveLength(1);
+      expect((await bidRow(bid.id)).notified_at).not.toBeNull();
+    });
+
+    test('an owed bell on a bid decided meanwhile is dropped without ringing', async () => {
+      raiseAdminAlert.mockRejectedValue(new Error('bell down'));
+      const { bidId } = await service.ingestEmail(await storeEmail());
+      await mockPg('bid_opportunities').where({ id: bidId }).update({ status: 'no_bid' });
+      raiseAdminAlert.mockReset();
+      expect(await service.deliverOwedAlerts()).toBe(0);
+      expect(raiseAdminAlert).not.toHaveBeenCalled();
+      expect((await mockPg('bid_opportunity_emails').where({ bid_id: bidId }).first()).alerted_at).not.toBeNull();
+    });
+
+    test('mail the sync stored as spam never becomes a bid', async () => {
+      await mockPg('system_settings').where({ key: service.WATERMARK_KEY }).del();
+      await storeEmail({ classification: 'spam', subject: 'RFP: urgent', received_at: new Date(NOW.getTime() - 20 * 60000) });
+      await storeEmail({ label_ids: JSON.stringify(['SPAM']), subject: 'Invitation to bid', received_at: new Date(NOW.getTime() - 15 * 60000) });
+      expect(await service.runBidDeskTick({ now: NOW })).toMatchObject({ filed: 0, created: 0 });
+      expect(await service.ingestEmail(await storeEmail({ classification: 'spam' }))).toEqual({ skipped: 'spam' });
+      expect(raiseAdminAlert).not.toHaveBeenCalled();
     });
   });
 
@@ -304,6 +346,46 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect(new Set(keys).size).toBe(2);
     });
 
+    test('current mail on a bid the backfill filed as history makes it live, with its bell', async () => {
+      const first = await storeEmail();
+      const { bidId } = await service.ingestEmail(first, { historical: true });
+      raiseAdminAlert.mockClear();
+      await service.ingestEmail(await storeEmail({ gmail_thread_id: first.gmail_thread_id, subject: 'Addendum 2', received_at: new Date(NOW.getTime() - 30000) }));
+      expect(await bidRow(bidId)).toMatchObject({ historical: false, needs_date_confirmation: true });
+      expect(rung('addendum')).toHaveLength(1);
+      expect(rung('addendum')[0][2].dedupeKey.startsWith(`bid-desk:addendum:${bidId}:`)).toBe(true);
+    });
+
+    test('a decided bid does not swallow a new solicitation with the same project and package', async () => {
+      const { bidId } = await service.ingestEmail(await storeEmail());
+      await mockPg('bid_opportunities').where({ id: bidId }).update({ status: 'lost' });
+      const again = await service.ingestEmail(await storeEmail());
+      expect(again.created).toBe(true);
+      expect(again.bidId).not.toBe(bidId);
+    });
+
+    test('reminded bids do not fill the candidate list', async () => {
+      const { bidId } = await service.ingestEmail(await storeEmail({ body_text: 'x', gmail_thread_id: `t-${randomUUID()}`, subject: `RFP ${randomUUID()}` }));
+      await mockPg('bid_opportunities').where({ id: bidId }).update({ due_at: new Date(NOW.getTime() + 6 * DAY), due_confirmed: true, reminder_7d_sent_at: NOW });
+      raiseAdminAlert.mockClear();
+      expect(await service.sendDueReminders({ now: NOW })).toBe(0);
+      expect((await bidRow(bidId)).updated_at).toBeTruthy();
+    });
+
+    test('saving a decision or a confirmed date closes the bell rows whose condition is met', async () => {
+      const { bidId } = await service.ingestEmail(await storeEmail());
+      const insertAlert = (key) => mockPg('notifications').insert({ recipient_type: 'admin', category: 'lead', title: 't', body: 'b', metadata: JSON.stringify({ dedupeKey: key }) });
+      await insertAlert(`bid-desk:new:${bidId}`);
+      await insertAlert(`bid-desk:addendum:${bidId}:${randomUUID()}`);
+      await mockPg('bid_opportunities').where({ id: bidId }).update({ needs_date_confirmation: true });
+      expect((await call('PATCH', `/${bidId}`, { confirm_due: true, expected_updated_at: await version(bidId) })).status).toBe(200);
+      const open = async () => (await mockPg('notifications').whereRaw("metadata->>'dedupeKey' like ?", [`bid-desk:%${bidId}%`])
+        .whereRaw("metadata->>'autoCleared' IS DISTINCT FROM 'true'").select('metadata')).map((r) => r.metadata.dedupeKey);
+      expect(await open()).toEqual([`bid-desk:new:${bidId}`]);
+      expect((await call('PATCH', `/${bidId}`, { status: 'no_bid' })).status).toBe(200);
+      expect(await open()).toEqual([]);
+    });
+
     test('the backfill attaching an old addendum to a live open bid rings nothing', async () => {
       const first = await storeEmail();
       const { bidId } = await service.ingestEmail(first);
@@ -366,20 +448,27 @@ describeDb('Bid Desk (PostgreSQL)', () => {
     test('a typed date is ET, confirmed, clears the flag and restarts the reminders; clearing it un-confirms', async () => {
       const { bidId } = await filed();
       await mockPg('bid_opportunities').where({ id: bidId }).update({ reminder_7d_sent_at: NOW, reminder_2d_sent_at: NOW });
-      const typed = await call('PATCH', `/${bidId}`, { due_at: '2026-10-28T14:00' });
+      // A date save without the version the page showed is refused.
+      expect((await call('PATCH', `/${bidId}`, { due_at: '2026-10-28T14:00' })).status).toBe(409);
+      const typed = await call('PATCH', `/${bidId}`, { due_at: '2026-10-28T14:00', expected_updated_at: await version(bidId) });
       expect(typed.status).toBe(200);
       const row = await bidRow(bidId);
       expect(row.due_at.toISOString()).toBe('2026-10-28T18:00:00.000Z');
-      expect(row).toMatchObject({ due_confirmed: true, needs_date_confirmation: false, reminder_7d_sent_at: null, reminder_2d_sent_at: null });
-      await call('PATCH', `/${bidId}`, { due_at: null });
-      expect(await bidRow(bidId)).toMatchObject({ due_at: null, due_confirmed: false });
-      expect((await call('PATCH', `/${bidId}`, { due_at: '2026-02-30T10:00' })).status).toBe(400);
+      // The typed date is not the email's date: the email line no longer describes it.
+      expect(row).toMatchObject({ due_confirmed: true, needs_date_confirmation: false, reminder_7d_sent_at: null, reminder_2d_sent_at: null, due_source_line: null });
+      await call('PATCH', `/${bidId}`, { due_at: null, expected_updated_at: await version(bidId) });
+      expect(await bidRow(bidId)).toMatchObject({ due_at: null, due_confirmed: false, due_source_line: null });
+      // Only one real Eastern clock reading is accepted.
+      for (const bad of ['2026-02-30T10:00', '2026-10-05T24:00', '2026-10-05T99:99', '2026-03-08T02:30', '2026-11-01T01:30']) {
+        expect((await call('PATCH', `/${bidId}`, { due_at: bad, expected_updated_at: await version(bidId) })).status).toBe(400);
+      }
+      expect((await call('PATCH', `/${bidId}`, { due_at: '2026-11-01T03:30', expected_updated_at: await version(bidId) })).status).toBe(200);
     });
 
     test('confirm_due confirms the date as read; with no date it is refused', async () => {
       const { bidId } = await filed();
       // The page sends the version it showed; a bid changed since then (an addendum filed) is refused.
-      const seen = (await call('GET', `/${bidId}`)).body.bid.updated_at;
+      const seen = await version(bidId);
       expect((await call('PATCH', `/${bidId}`, { confirm_due: true })).status).toBe(409);
       expect((await call('PATCH', `/${bidId}`, { confirm_due: true, expected_updated_at: '2026-01-01T00:00:00.000Z' })).status).toBe(409);
       expect(await bidRow(bidId)).toMatchObject({ due_confirmed: false });
@@ -393,7 +482,7 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect(seen).toBeTruthy();
       expect(await bidRow(bidId)).toMatchObject({ due_confirmed: true, needs_date_confirmation: false });
       await mockPg('bid_opportunities').where({ id: bidId }).update({ due_at: null, due_confirmed: false });
-      expect((await call('PATCH', `/${bidId}`, { confirm_due: true })).status).toBe(400);
+      expect((await call('PATCH', `/${bidId}`, { confirm_due: true, expected_updated_at: await version(bidId) })).status).toBe(400);
     });
 
     test('status and note save together; every status is accepted', async () => {

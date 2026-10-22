@@ -86,7 +86,7 @@ it("opens a bid from the link in its bell, shows its emails and saves a typed da
   fireEvent.change(screen.getByLabelText("Due date (Eastern time)"), { target: { value: "2026-10-28T14:00" } });
   fireEvent.click(screen.getByRole("button", { name: "Save as confirmed" }));
   await waitFor(() => expect(patch).toHaveBeenCalled());
-  expect(patch.mock.calls[0][0].body).toEqual({ due_at: "2026-10-28T14:00" });
+  expect(patch.mock.calls[0][0].body).toEqual({ due_at: "2026-10-28T14:00", expected_updated_at: "2026-10-02T12:00:00.000Z" });
   expect(await screen.findByText("Due date saved and confirmed")).toBeInTheDocument();
 });
 
