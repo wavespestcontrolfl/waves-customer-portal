@@ -290,10 +290,9 @@ describe('GATE_REVIEW_ASK_FIXED_DAY0 — the same-day text is one fixed line', (
       .toBe("Hi, it's Waves Pest Control. Thanks for having us out today. A Google review would really help: {review_url}");
   });
 
-  test('follow-up texts and emails keep the writer', async () => {
+  test('follow-up texts keep the writer', async () => {
     mockDispatch.mockResolvedValue(reply(GOOD));
     expect(await Drafter.draftTechVoice({ ...INPUT, sequenceStep: 1 })).toBe(GOOD.body);
-    await Drafter.draftTechVoice({ ...INPUT, channel: 'email' });
     expect(mockDispatch).toHaveBeenCalled();
   });
 

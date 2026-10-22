@@ -4790,7 +4790,10 @@ const ReviewService = {
       // Retry reuse: a deferred/transiently-failed step re-enters here with no
       // customBody — reuse the draft already persisted for this exact step so
       // one touch can never send two different drafts (Codex P2, r1).
-      if (recipientIsAccountHolder) {
+      // GATE_REVIEW_ASK_FIXED_DAY0: step 0 is always the fixed line, so an AI
+      // draft saved before the gate turned on is never reused (#6423 r1).
+      const fixedDay0 = techVoice && !(Number(sequenceStep) > 0) && require("../config/feature-gates").isEnabled("reviewAskFixedDay0");
+      if (recipientIsAccountHolder && !fixedDay0) {
         try {
           const prior = await db("review_requests")
             // Channel-scoped (codex #3235 r1 P2): a step that flipped

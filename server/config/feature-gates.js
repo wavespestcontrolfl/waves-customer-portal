@@ -1147,7 +1147,7 @@ const gates = {
   // touch sends "Hi <first>, it's <tech> from Waves. Thanks for having us out
   // today. A Google review would really help: {review_url}" with no model
   // call (the writer recited report findings and booking talk). Follow-up
-  // touches and emails keep the tech-voice writer. Strict opt-in; off =
+  // texts keep the tech-voice writer; emails stay fixed as before. Strict opt-in; off =
   // today's writer. Customer-facing text, so opt-in in EVERY env.
   // Rollback: unset.
   reviewAskFixedDay0: process.env.GATE_REVIEW_ASK_FIXED_DAY0 === 'true',
