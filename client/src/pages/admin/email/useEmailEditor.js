@@ -48,8 +48,9 @@ function reconcileOutcome(row) {
   }
   if (row.status === "failed") return { next: null, message: "Gmail refused that email. Your draft is still here." };
   // outcome_unknown, or cancelled (its text may be a draft in another tab):
-  // the operator's own check decides, so the guard stays without a key.
-  return { next: KEY_SETTLED, message: row.status === "cancelled"
+  // the operator's own check decides, so the guard stays without a key. An
+  // unclear one carries its row, so that check also closes its alert.
+  return { next: row.status === "outcome_unknown" ? { ...KEY_SETTLED, rowId: row.id } : KEY_SETTLED, message: row.status === "cancelled"
     ? "That email was cancelled and may be open as a draft in another tab. Look there, then tap I checked."
     : "That email may have gone out. Look in the Gmail Sent folder, then tap I checked." };
 }

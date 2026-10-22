@@ -209,6 +209,21 @@ describe("Email schedule send", () => {
     expect(screen.queryByDisplayValue("Line one\n<b>two</b>")).not.toBeInTheDocument();
   });
 
+  it("a reconciled email that may have gone out closes its alert on the next I checked", async () => {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/email/schedule")
+      ? Promise.reject(new TypeError("network")) : base(input, options)));
+    reconciledRow = { id: "late-unclear", status: "outcome_unknown", sendAt: "2026-10-23T12:00:00.000Z" };
+    mount();
+    await writeEmail();
+    fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Tomorrow morning/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "I checked: it is in neither" }));
+    expect((await screen.findAllByText(/That email may have gone out/)).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: "I checked: it is in neither" }));
+    await waitFor(() => expect(posts("/late-unclear/sent-checked")).toHaveLength(1));
+  });
+
   it("I checked keeps newer edits when the late request did queue the older text", async () => {
     const base = fetch.getMockImplementation();
     fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/email/schedule")
