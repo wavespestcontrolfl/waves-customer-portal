@@ -107,7 +107,7 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       const bid = await bidRow(out.bidId);
       expect(bid).toMatchObject({
         source: 'buildingconnected', status: 'new', historical: false, due_confirmed: false, needs_date_confirmation: false,
-        gc_or_agency: 'Fixture Build Co', project_title: 'Sample Ridge Residences', buyer_email: 'pat.sample@fixture-gc.example',
+        gc_or_agency: 'Fixture Build Co', project_title: 'Sample Ridge Residences', package_name: 'Pest Control', buyer_email: 'pat.sample@fixture-gc.example',
         due_source_line: 'Bid Due: October 20, 2026', first_email_id: email.id, gmail_thread_id: email.gmail_thread_id,
       });
       expect(bid.due_at.toISOString()).toBe('2026-10-21T03:59:00.000Z');

@@ -8,6 +8,7 @@
  *                            sender, a subject match, or an operator marking an email by hand
  *   buyer_*, gc_or_agency,
  *   project_title,
+ *   package_name             the bid package / bid form ("Termite Treatment", "General Requirements")
  *   solicitation_number,
  *   location                 read ONLY from the fixed provider templates; NULL for any other email
  *   due_at                   the due date as read from the email, or typed by the operator; NULL = not read
@@ -46,6 +47,7 @@ exports.up = async function up(knex) {
       t.text('buyer_email');
       t.text('gc_or_agency');
       t.text('project_title');
+      t.text('package_name');
       t.text('solicitation_number');
       t.text('location');
       t.timestamp('due_at', { useTz: true }).nullable();

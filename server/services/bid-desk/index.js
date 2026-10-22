@@ -30,7 +30,7 @@ const REMINDER_LIMIT = 100;
 const EMAIL_COLUMNS = ['id', 'gmail_thread_id', 'from_address', 'from_name', 'subject', 'body_text', 'body_html', 'received_at'];
 
 const BID_COLUMNS = [
-  'id', 'source', 'buyer_name', 'buyer_email', 'gc_or_agency', 'project_title', 'solicitation_number', 'location',
+  'id', 'source', 'buyer_name', 'buyer_email', 'gc_or_agency', 'project_title', 'package_name', 'solicitation_number', 'location',
   'due_at', 'due_source_line', 'due_confirmed', 'job_walk_at', 'questions_due_at', 'status', 'decision_note',
   'historical', 'needs_date_confirmation', 'first_email_id', 'gmail_thread_id', 'created_at', 'updated_at',
 ];
@@ -93,6 +93,7 @@ async function ingestEmail(email, { historical = false, manual = false } = {}) {
       buyer_email: parsed.buyer_email,
       gc_or_agency: parsed.gc_or_agency,
       project_title: parsed.project_title,
+      package_name: parsed.package_name,
       solicitation_number: parsed.solicitation_number,
       location: parsed.location,
       due_at: parsed.due_at,

@@ -19,7 +19,7 @@ const OPEN_STATUSES = ['new', 'bid'];
 const sameInstant = (a, b) => new Date(a).getTime() === new Date(b).getTime();
 
 // Columns an attached email may fill, only where the bid has nothing yet.
-const FILL_FIELDS = ['gc_or_agency', 'project_title', 'location', 'buyer_name', 'buyer_email', 'job_walk_at'];
+const FILL_FIELDS = ['gc_or_agency', 'project_title', 'package_name', 'location', 'buyer_name', 'buyer_email', 'job_walk_at'];
 
 /**
  * @returns {{ patch: object, notifyAddendum: boolean }} `patch` holds only columns that change.

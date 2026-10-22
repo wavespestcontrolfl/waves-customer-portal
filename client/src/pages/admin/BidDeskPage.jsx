@@ -53,7 +53,9 @@ function daysText(days) {
   return `${days} ${days === 1 ? "day" : "days"}`;
 }
 
-const titleOf = (bid) => bid.project_title || bid.first_subject || "(no subject)";
+const titleOf = (bid) => (bid.project_title
+  ? (bid.package_name ? `${bid.project_title}: ${bid.package_name}` : bid.project_title)
+  : bid.first_subject || "(no subject)");
 const buyerOf = (bid) => bid.gc_or_agency || bid.buyer_name || bid.first_from_name || bid.first_from_address || "";
 const emailHref = (emailId) => `/admin/communications?id=${encodeURIComponent(emailId)}#tab=email`;
 
