@@ -765,6 +765,24 @@ describe('agent-gap-reports', () => {
         expect(insertedRows).toHaveLength(0);
       });
 
+      test('a by-design refusal, then a discovery round, then the answer files no row (Codex #6371 r23)', async () => {
+        const collector = collectorFor();
+        collector.toolResult('send_invoice', refusal('invoice_send_queued'), true, { round: 0 });
+        collector.discovery({ query: 'send the invoice' }, { status: 'capabilities_found', capabilities: [{ id: 'send_invoice', domain: 'billing' }] });
+        collector.toolResult('discover_capabilities', { status: 'capabilities_found' }, false, { round: 1 });
+        await collector.flush({ reply: 'The invoice text is already queued.' });
+        expect(insertedRows).toHaveLength(0);
+      });
+
+      test('writes switched off, then a search for the write tool, files no row', async () => {
+        const collector = collectorFor();
+        collector.toolResult('update_customer', { error: "The bar can't make changes from here until writes are switched back on.", code: 'writes_disabled' }, true, { round: 0 });
+        collector.discovery({ query: 'update the customer' }, { status: 'capabilities_found', capabilities: [{ id: 'update_customer', domain: 'customers' }] });
+        collector.toolResult('discover_capabilities', { status: 'capabilities_found' }, false, { round: 1 });
+        await collector.flush({ reply: "The bar can't change that from here right now." });
+        expect(insertedRows).toHaveLength(0);
+      });
+
       test('a refusal that IS a gap keeps the search row beside its blocked row', async () => {
         const collector = collectorFor();
         collector.discovery({ query: 'cancel a visit with charges' }, MISS);

@@ -70,8 +70,9 @@ describe('tool definitions', () => {
     expect(Object.keys(byName)).toEqual(['create_customer_link', 'send_autopay_setup_link']);
     expect(byName.create_customer_link._sideEffects).toBe(true);
     expect(byName.send_autopay_setup_link._sideEffects).toBe(true);
-    // No link-only mode from the bar: sms or email, and the description says where a link-only link lives.
-    expect(byName.send_autopay_setup_link.input_schema.properties.delivery.enum).toEqual(['sms', 'email']);
+    // No link-only mode from the bar: sms or email. "link" is accepted only so the call reaches its coded
+    // refusal (Codex #6371 r23); the description says where a link-only link lives.
+    expect(byName.send_autopay_setup_link.input_schema.properties.delivery.enum).toEqual(['sms', 'email', 'link']);
     expect(byName.send_autopay_setup_link.description).toMatch(/can't make a link-only Auto Pay link .* from here yet/);
     expect(byName.send_autopay_setup_link.description).toMatch(/saved card .* billing change/);
     expect(byName.create_customer_link.input_schema.properties.kind.enum).toEqual([

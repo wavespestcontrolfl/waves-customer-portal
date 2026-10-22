@@ -448,6 +448,16 @@ describe('r19: a wait is not a freeze', () => {
   });
 });
 
+describe('r23: writes switched off is an operator state', () => {
+  test('the loop result carries writes_disabled, which records nothing', () => {
+    const src = fs.readFileSync(fullPath('routes/admin-intelligence-bar.js'), 'utf8');
+    expect(src).toMatch(/result = \{ error: IB_WRITES_DISABLED_MESSAGE, code: 'writes_disabled' \}/);
+    const text = "Intelligence Bar writes are currently disabled by the operator (IB_WRITES_DISABLED). Reads still work, but the bar can't make changes from here until writes are switched back on.";
+    expect(BAR_DECLINE_RE.test(text)).toBe(true);
+    expect(recordableRefusalCode({ error: text, code: 'writes_disabled' })).toBeNull();
+  });
+});
+
 describe('every code main recorded is classified once (pre-push audit on Codex #6371 r10)', () => {
   const decline = (code) => ({ success: false, code, error: "The bar can't do this from here yet." });
   test.each([

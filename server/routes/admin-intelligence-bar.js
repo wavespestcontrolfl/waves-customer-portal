@@ -3950,7 +3950,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
             failed = true;
             errorMessage = result.error;
           } else if (ibWritesDisabled()) {
-            result = { error: IB_WRITES_DISABLED_MESSAGE };
+            result = { error: IB_WRITES_DISABLED_MESSAGE, code: 'writes_disabled' };
             failed = true;
             errorMessage = result.error;
           } else {

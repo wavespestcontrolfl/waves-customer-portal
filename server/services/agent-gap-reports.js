@@ -53,6 +53,8 @@ const BY_DESIGN_REFUSAL_CODES = new Set([
   'write_access_required', 'execution_interrupted', 'verify_failed', 'by_owner_rule',
   // An email reply never carries an owned portal link: a recipient-identity safety rule (Codex #6371 r14).
   'email_link_identity_refused',
+  // The operator switched writes off (IB_WRITES_DISABLED): an operator state, not a missing capability (Codex #6371 r23).
+  'writes_disabled',
 ]);
 // Coded refusals whose text says the bar cannot do something, but that were
 // never gap rows (a switch that is off, a provider-side limit, a gate flip that
@@ -611,8 +613,12 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
   // row. Searches about anything else in the request stay (Codex #6371 r14).
   let terminal = { round: null, nonGap: false, tools: new Set() };
   function trackTerminal(name, result, failed, meta = {}) {
+    // A capability search is not where the request ended: it neither resets nor
+    // sets the last tool round, so a refusal followed by a search still stands
+    // (Codex #6371 r23).
+    if (name === DISCOVERY_TOOL_NAME) return;
     if (meta.round !== terminal.round) terminal = { round: meta.round, nonGap: false, tools: new Set() };
-    if (!failed || name === DISCOVERY_TOOL_NAME) return;
+    if (!failed) return;
     const code = typeof result?.code === 'string' ? result.code.trim() : '';
     if (isPolicyRefusal(result) && CODE_RE.test(code) && recordableRefusalCode(result) === null) {
       terminal.nonGap = true;

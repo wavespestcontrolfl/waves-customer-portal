@@ -111,7 +111,7 @@ Use for: "send the Auto Pay link to this customer", "text Henderson the autopay 
       type: 'object',
       properties: {
         customer_id: { type: 'string', format: 'uuid', description: 'The customer' },
-        delivery: { type: 'string', enum: ['sms', 'email'], description: 'sms (default) or email' },
+        delivery: { type: 'string', enum: ['sms', 'email', 'link'], description: 'sms (default) or email. link is not supported yet; the bar will say so.' },
       },
       required: ['customer_id'],
     },
