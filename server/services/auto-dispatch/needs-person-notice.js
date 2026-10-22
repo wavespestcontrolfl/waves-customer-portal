@@ -225,9 +225,10 @@ async function farListedVisitIds(conn = require('../../models/db')) {
       .orderBy('created_at', 'desc')
       .first('metadata');
     if (!row) return [];
-    const keys = row.metadata && row.metadata.itemKeys;
-    // reportFarConflicts never stores more keys than ops-digest keeps; a row
-    // without them is re-read as empty, and the next complete scan rewrites it.
+    // farVisits: every listed conflict (the list's own metadata, uncapped);
+    // itemKeys: ops-digest's capped copy, for a row written before farVisits.
+    const keys = row.metadata && (Array.isArray(row.metadata.farVisits) ? row.metadata.farVisits : row.metadata.itemKeys);
+    // A row without either is re-read as empty; the next complete scan rewrites it.
     if (!Array.isArray(keys)) {
       logger.warn('[auto-dispatch] far double-booking list has no stored visits; the next complete scan rewrites it');
       return [];
@@ -267,8 +268,9 @@ async function reportFarConflicts(farItems, { enabled, scanComplete }) {
     const audit = require('./audit');
     const { shortDateET } = require('../admin-alert-names');
     const all = [...farItems].sort((a, b) => (a.date < b.date ? -1 : (a.date > b.date ? 1 : 0)));
-    // Soonest first, at most the digest's item-key cap: past it ops-digest
-    // stores no keys, and the next run could not re-read the list.
+    // The text and ops-digest's own itemKeys stop at its item-key cap (past it
+    // ops-digest stores no keys at all); the full set the next run re-reads is
+    // the list's own metadata.farVisits, uncapped.
     const sorted = all.slice(0, require('../ops-digest').MAX_ITEM_KEYS);
     const names = [];
     for (const item of sorted) names.push(await audit.namedVisitAction(item.customer_id, [(who) => `${who}'s visit`], 'A visit'));
@@ -288,6 +290,7 @@ async function reportFarConflicts(farItems, { enabled, scanComplete }) {
       html: `<p>${escapeHtml(summary)}</p><ul>${lines.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>`,
       count: n,
       itemKeys: sorted.map((item) => `${item.id}:${item.date}`),
+      metadata: { farVisits: all.map((item) => `${item.id}:${item.date}`) },
       link: '/admin/dispatch?tab=schedule',
       dedupeKey: `ops-digest:${FAR_DIGEST_KEY}`,
       refreshOnDedupe: true,

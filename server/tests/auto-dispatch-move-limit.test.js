@@ -323,6 +323,8 @@ describe('needs-a-person notice: far double bookings are listed quietly until 14
       expect(digest.count).toBe(4);
       expect(digest.itemKeys).toEqual(['f20:2026-11-20', 'f21:2026-11-21']);
       expect(digest.text).toContain('And 2 more after the last date above.');
+      // The set the next run re-reads is every one, past the cap.
+      expect(digest.metadata.farVisits).toEqual(['f20:2026-11-20', 'f21:2026-11-21', 'f22:2026-11-22', 'f23:2026-11-23']);
     } finally {
       mockDigest.MAX_ITEM_KEYS = 500;
     }
@@ -385,6 +387,9 @@ describe('needs-a-person notice: far double bookings are listed quietly until 14
     });
     expect(await notice.farListedVisitIds(conn({ metadata: { itemKeys: ['a:2026-11-20', 'b:2026-11-21', 'a:2026-11-27'] } })))
       .toEqual(['a', 'b']);
+    // The uncapped set wins over ops-digest's capped itemKeys.
+    expect(await notice.farListedVisitIds(conn({ metadata: { itemKeys: null, farVisits: ['a:2026-11-20', 'c:2026-12-01'] } })))
+      .toEqual(['a', 'c']);
     expect(await notice.farListedVisitIds(conn(undefined))).toEqual([]);
     // No stored keys is not a freeze: read as empty; the next complete scan rewrites the list.
     expect(await notice.farListedVisitIds(conn({ metadata: { itemKeys: null, count: 600 } }))).toEqual([]);
