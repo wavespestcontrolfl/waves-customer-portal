@@ -47,7 +47,7 @@ const SETTLED_MESSAGES = {
   outcome_unknown: "This email may have gone out. Look in the Gmail Sent folder before you send it again.",
   // Never queued again by itself: its text may already be back in a draft
   // in another tab, and a second copy could go out.
-  cancelled: "This email was cancelled after an earlier request (look under Scheduled). Your draft is still here: schedule it again if you still want it.",
+  cancelled: "This email was cancelled after an earlier request, and its text may be open as a draft in another tab. Look there, under Scheduled and in the Gmail Sent folder, then tap I checked to use this draft.",
 };
 
 // The answer to a schedule request that queued (or had already sent) the
@@ -321,10 +321,10 @@ export default function useEmailEditor(userId) {
         return;
       }
       const status = result.scheduled?.status;
-      // A row Gmail may have sent (outcome_unknown, or cancelled from there)
-      // keeps the key, so plain Send waits for the operator's check of Sent;
-      // every other answer is definite.
-      if (!result.scheduled?.mayHaveSent && status !== "outcome_unknown") rememberUncertain(slot, null);
+      // A row Gmail may have sent (outcome_unknown) or one cancelled since
+      // (its text may be a draft in another tab) keeps the key, so plain
+      // Send waits for the operator's check; every other answer is definite.
+      if (!["outcome_unknown", "cancelled"].includes(status) && !result.scheduled?.mayHaveSent) rememberUncertain(slot, null);
       const settled = SETTLED_MESSAGES[status];
       if (settled) {
         setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: settled } }));

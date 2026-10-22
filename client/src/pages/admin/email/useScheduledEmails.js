@@ -7,6 +7,8 @@ import { adminFetch } from "./emailApi";
 // mark again, so Open as draft can never bring the same text back twice.
 // Kept per signed-in user, and removed with the drafts at sign-out
 // (clearEmailDrafts), so another user never marks a row they do not hold.
+export const LIST_RETRY_MS = 30 * 1000;
+
 const pendingKey = (userId) => `waves_email_restored_pending:${userId}`;
 function readPending(userId) {
   try {
@@ -81,6 +83,14 @@ export default function useScheduledEmails(active, userId) {
   useEffect(() => {
     if (active) reload();
   }, [active, reload]);
+
+  // A failed list hides the tab and the arrow (fail closed), which also hides
+  // its Try again: retry by itself while the page stays open.
+  useEffect(() => {
+    if (!active || !state.error) return undefined;
+    const timer = setTimeout(reload, LIST_RETRY_MS);
+    return () => clearTimeout(timer);
+  }, [active, state.error, reload]);
 
   // Cancels on the server, then hands the email back for the composer.
   // Returns the draft, or null with the server's reason.

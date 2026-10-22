@@ -5,12 +5,13 @@
 // over a draft already in progress.
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { BrowserRouter, Outlet, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import EmailPage from "./EmailPage";
 import { clearEmailDrafts } from "../../lib/emailDrafts";
 import { schedulePresets } from "./email/scheduleSend";
+import { LIST_RETRY_MS } from "./email/useScheduledEmails";
 
 vi.mock("../../hooks/useIsMobile", () => ({ default: () => false }));
 const mail = { id: "mail-a", gmail_thread_id: "thread-a", from_address: "a@example.invalid", subject: "Fixture", body_text: "Body", is_read: true, received_at: new Date().toISOString() };
@@ -232,7 +233,7 @@ describe("Email schedule send", () => {
     expect(keys[2]).not.toBe(keys[1]);
   });
 
-  it("never re-queues by itself when a retry finds the email cancelled; the next schedule uses a fresh key", async () => {
+  it("never re-queues by itself when a retry finds the email cancelled; after I checked, a fresh key", async () => {
     let first = true;
     const base = fetch.getMockImplementation();
     fetch.mockImplementation((input, options = {}) => {
@@ -252,10 +253,32 @@ describe("Email schedule send", () => {
     expect((await screen.findAllByText(/This email was cancelled after an earlier request/)).length).toBeGreaterThan(0);
     expect(posts("/email/schedule")).toHaveLength(1);
     expect(screen.getByLabelText(/^Message/)).toHaveValue("Line one\n<b>two</b>");
+    // Its text may be a draft in another tab: plain Send waits for the check.
+    expect(screen.getAllByRole("button", { name: "Send", exact: true }).at(-1)).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "I checked: it is in neither" }));
     await pickTomorrow();
     await waitFor(() => expect(posts("/email/schedule")).toHaveLength(2));
     const [a, b] = posts("/email/schedule").map(([, options]) => JSON.parse(options.body).clientKey);
     expect(b).not.toBe(a);
+  });
+
+  it("retries a failed Scheduled list by itself, so the tab comes back", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let failList = true;
+      const base = fetch.getMockImplementation();
+      fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/email/scheduled") && failList
+        ? response({ error: "down" }, 500) : base(input, options)));
+      mount();
+      await screen.findByRole("button", { name: "Inbox" });
+      await waitFor(() => expect(fetch.mock.calls.some(([url]) => String(url).endsWith("/email/scheduled"))).toBe(true));
+      expect(screen.queryByRole("button", { name: /^Scheduled/ })).not.toBeInTheDocument();
+      failList = false;
+      await act(async () => { await vi.advanceTimersByTimeAsync(LIST_RETRY_MS + 100); });
+      expect(await screen.findByRole("button", { name: /^Scheduled/ })).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("a retry that returns a row the sender already refused keeps the draft and says so", async () => {

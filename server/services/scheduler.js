@@ -1066,25 +1066,16 @@ function initScheduledJobs() {
 
   // EVERY MINUTE — Gmail-style scheduled emails (GATE_EMAIL_SEND_LATER; the
   // sender returns at once with the gate off). A minute keeps "9:00 AM" at
-  // 9:00-9:01. The row claim (FOR UPDATE SKIP LOCKED) makes each email go out
-  // at most once across the fleet, so no cron lease: a lease can wait in the
-  // lock-slot queue for minutes and send late (cron-lock.js excludes such
-  // queues). job_health is recorded directly; one sweep at a time per process.
-  let scheduledEmailSweeping = false;
+  // 9:00-9:01. The row claim makes each email go out at most once. The lease
+  // keeps one sweep across the fleet, so its job_health row is never
+  // overwritten by a concurrent empty sweep; waitForSlot:false skips a busy
+  // minute instead of queuing behind other jobs and sending late.
   cron.schedule('* * * * *', async () => {
-    if (scheduledEmailSweeping) return;
-    scheduledEmailSweeping = true;
-    const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
-    const startedAt = Date.now();
-    await recordJobStart('scheduled-email-send').catch(() => {});
     try {
-      await require('./email/scheduled-email-sender').sendDueScheduledEmails();
-      await recordJobEnd('scheduled-email-send', startedAt, null).catch(() => {});
+      const { runExclusive } = require('../utils/cron-lock');
+      await runExclusive('scheduled-email-send', () => require('./email/scheduled-email-sender').sendDueScheduledEmails(), { waitForSlot: false });
     } catch (err) {
-      await recordJobEnd('scheduled-email-send', startedAt, err).catch(() => {});
       logger.error(`[scheduled-email] sweep failed: ${err.message}`);
-    } finally {
-      scheduledEmailSweeping = false;
     }
   }, { timezone: 'America/New_York' });
 

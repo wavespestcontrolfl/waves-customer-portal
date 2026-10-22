@@ -103,7 +103,7 @@ jest.setTimeout(30000);
     await makeDue(first.body.scheduled.id);
     gmail.sendMessage.mockResolvedValue({ id: 'gmail-fixture-1' });
     expect((await sendDueScheduledEmails()).results).toEqual(['sent']);
-    expect(gmail.sendMessage).toHaveBeenCalledWith('fixture@example.invalid', 'Fixture', 'Hi<br>there', null, null);
+    expect(gmail.sendMessage).toHaveBeenCalledWith('fixture@example.invalid', 'Fixture', 'Hi<br>there', null, null, { timeoutMs: 60000 });
     expect(await row(first.body.scheduled.id)).toMatchObject({ status: 'sent', gmail_message_id: 'gmail-fixture-1', attempts: 1 });
     expect((await sendDueScheduledEmails()).results).toEqual([]);
     expect(gmail.sendMessage).toHaveBeenCalledTimes(1);
@@ -117,7 +117,7 @@ jest.setTimeout(30000);
     await makeDue(body.scheduled.id);
     gmail.sendMessage.mockResolvedValue({ id: 'gmail-fixture-2' });
     await sendDueScheduledEmails();
-    expect(gmail.sendMessage).toHaveBeenCalledWith('fixture@example.invalid', 'Fixture', 'Hi<br>there', 'thread-fixture', '<source-fixture@example.invalid>');
+    expect(gmail.sendMessage).toHaveBeenCalledWith('fixture@example.invalid', 'Fixture', 'Hi<br>there', 'thread-fixture', '<source-fixture@example.invalid>', { timeoutMs: 60000 });
   });
 
   test('an alert whose write failed is raised on the next run, and the failing run reads as failed', async () => {

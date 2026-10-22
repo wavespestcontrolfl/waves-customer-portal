@@ -76,3 +76,11 @@ test.each([{ code: 'ETIMEDOUT' }, { status: 503 }])('OAuth failure before submis
   expect(requests.length).toBeGreaterThan(0);
   expect(requests.every(request => String(request.url).includes('/token'))).toBe(true);
 });
+
+test('an aborted request (timeoutMs) after submission stays uncertain and carries the deadline', async () => {
+  providerFailure = { name: 'TimeoutError' };
+  await expect(gmail.sendMessage('fixture@example.test', 'Synthetic', 'Fixture', null, null, { timeoutMs: 60000 }))
+    .rejects.toMatchObject({ providerOutcome: { outcomeUnknown: true } });
+  expect(requests).toHaveLength(1);
+  expect(requests[0].timeout).toBe(60000);
+});

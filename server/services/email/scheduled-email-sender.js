@@ -16,6 +16,9 @@ const logger = require('../logger');
 const { emailSendLaterLive } = require('../../config/feature-gates');
 
 const MAX_ATTEMPTS = 3;
+// A Gmail request is aborted well before STALE_MINUTES, so no request can
+// still be running when a stale claim becomes outcome_unknown.
+const SEND_TIMEOUT_MS = 60 * 1000;
 const CLAIM_EXPIRED_ERROR = 'claim expired before Gmail answered';
 const UNCONFIRMED_ERROR = 'Gmail did not confirm the send';
 // last_error of a row Gmail may have accepted (kept when it is cancelled).
@@ -119,7 +122,7 @@ async function sendOne(row, { conn = db, gmail = require('./gmail-client') } = {
   const fence = { id: row.id, status: 'sending' };
   let result;
   try {
-    result = await gmail.sendMessage(row.to_address, row.subject, row.body_html, row.thread_id || null, await sourceMessageId(row, conn));
+    result = await gmail.sendMessage(row.to_address, row.subject, row.body_html, row.thread_id || null, await sourceMessageId(row, conn), { timeoutMs: SEND_TIMEOUT_MS });
   } catch (err) {
     if (err.providerOutcome?.outcomeUnknown === true) return settleUnknown(row, conn);
     const last = row.attempts >= MAX_ATTEMPTS;
@@ -182,4 +185,4 @@ async function sendDueScheduledEmails({ conn = db, gmail } = {}) {
   return summary;
 }
 
-module.exports = { OUTCOME_UNKNOWN_ERRORS, sendDueScheduledEmails, settleStaleClaims, claimNext, sendOne, raiseMissedAlerts, MAX_ATTEMPTS, STALE_MINUTES };
+module.exports = { OUTCOME_UNKNOWN_ERRORS, SEND_TIMEOUT_MS, sendDueScheduledEmails, settleStaleClaims, claimNext, sendOne, raiseMissedAlerts, MAX_ATTEMPTS, STALE_MINUTES };

@@ -267,7 +267,11 @@ function ownAddress() {
   return sanitizeHeaderValue(process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com');
 }
 
-async function sendMessage(to, subject, body, threadId = null, inReplyTo = null) {
+// options.timeoutMs (optional) aborts the request: the error is classified
+// like any other post-request failure (outcomeUnknown), never retried blindly.
+const sendRequestOptions = (options) => ({ retry: false, timeout: (options && options.timeoutMs) || undefined });
+
+async function sendMessage(to, subject, body, threadId = null, inReplyTo = null, options) {
   const gmail = await getGmail();
   const fromEmail = ownAddress();
   const safeTo = sanitizeHeaderValue(to);
@@ -294,7 +298,7 @@ async function sendMessage(to, subject, body, threadId = null, inReplyTo = null)
   if (threadId) params.requestBody.threadId = threadId;
 
   try {
-    const res = await gmail.users.messages.send(params, { retry: false });
+    const res = await gmail.users.messages.send(params, sendRequestOptions(options));
     if (!res.data?.id) {
       const err = new Error('Gmail returned no message identifier; reconcile the send before retrying');
       err.providerOutcome = { outcomeUnknown: true };
