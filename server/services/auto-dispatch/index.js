@@ -339,11 +339,15 @@ async function settleConflicts(run) {
   // can create an overlap while the run works (Codex #6253 r6). Only this
   // final read fills clearedIds.
   run.clearedIds.clear();
+  // Whether this read saw every conflict: conflict reads on, and none failed.
+  // The far double-booking list (needs-person-notice.js, D1) changes only then.
+  run.conflictScanComplete = run.config.conflictMovesEnabled === true;
   for (const [id, seen] of pending) {
     let now = seen.conflict ? seen : null;
     try {
       now = await standingConflict(seen, id);
     } catch (err) {
+      run.conflictScanComplete = false;
       logger.warn(`[auto-dispatch] conflict re-read failed for ${id}: ${err.message}`);
     }
     if (now && now.clear) run.clearedIds.add(id);
@@ -1502,7 +1506,9 @@ async function runAutoDispatch(opts = {}) {
   await closeMissingGeoNotices(run);
   const noticesClosed = await moveCheck.closeNotices(run.nowDate, { enabled: config.proofreaderEnabled === true });
   await settleConflicts(run);
-  await needsPerson.raiseNotices(run.needsPerson, { nowDate: run.nowDate, clearedIds: run.clearedIds });
+  await needsPerson.raiseNotices(run.needsPerson, {
+    nowDate: run.nowDate, clearedIds: run.clearedIds, scanComplete: !runError && run.conflictScanComplete === true,
+  });
   await moveCheck.raiseNotices(run.proofreader);
   // Every check of the night broke: one notice that the tool is stopped, and
   // why (owner audit 2026-10-22, finding 1). Best-effort; never throws.

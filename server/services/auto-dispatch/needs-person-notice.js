@@ -207,10 +207,17 @@ function escapeHtml(text) {
 // The standing Activity row of the run's far conflicts (D1): one ops digest,
 // audience fyi (Activity only, never the bell; not a ring-allowance lane),
 // refreshed in place each run and retired on a run with none, or with the
-// lane off (fall-off). In-app only: a missing Activity feed sends no email,
-// it fails and is logged (splitFar rings every conflict in that case). Never throws.
-async function reportFarConflicts(farItems, { enabled }) {
+// lane off (fall-off). The list is a snapshot, so it changes only after a
+// COMPLETE conflict scan (`scanComplete`: the run did not fail, conflict
+// reads were on and none failed); otherwise it stays as it is, the way a
+// notice closes only on proof. In-app only: a missing Activity feed sends no
+// email (splitFar rings every conflict in that case). Never throws.
+async function reportFarConflicts(farItems, { enabled, scanComplete }) {
   try {
+    if (enabled && !scanComplete) {
+      logger.info(`[auto-dispatch] far double-booking list left as it is: this run's conflict scan was incomplete (${farItems.length} far seen)`);
+      return;
+    }
     if (!enabled || !farItems.length) {
       await require('../ops-digest-fall-off').retireIfClean(FAR_DIGEST_KEY, { lockKey: `ops-digest:${FAR_DIGEST_KEY}` });
       return;
@@ -247,11 +254,11 @@ async function reportFarConflicts(farItems, { enabled }) {
 
 // Raise the collected notices: soonest date first, inside the shared ring
 // allowance. Returns how many writes rang. Never throws.
-async function raiseNotices(bucket, { nowDate = new Date(), clearedIds = new Set() } = {}) {
+async function raiseNotices(bucket, { nowDate = new Date(), clearedIds = new Set(), scanComplete = false } = {}) {
   if (!bucket) return 0;
   await closeResolved(bucket, { nowDate, clearedIds });
   const { nearItems, farItems, farOn } = splitFar(bucket, nowDate);
-  await reportFarConflicts(farItems, { enabled: farOn });
+  await reportFarConflicts(farItems, { enabled: farOn, scanComplete });
   if (nearItems.length === 0) return 0;
   let rang = 0;
   try {

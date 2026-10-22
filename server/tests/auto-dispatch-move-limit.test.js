@@ -262,7 +262,7 @@ describe('needs-a-person notice: far double bookings are listed quietly until 14
     notice.collect(bucket, visit('edge', '2026-11-15'), 'no_slot', { kind: 'overlap' });
     notice.collect(bucket, visit('far2', '2026-12-01'), 'move_limit', { kind: 'closed_day' });
     notice.collect(bucket, visit('far1', '2026-11-20'), 'no_slot', { kind: 'overlap' });
-    expect(await notice.raiseNotices(bucket, { nowDate: NOW })).toBe(2);
+    expect(await notice.raiseNotices(bucket, { nowDate: NOW, scanComplete: true })).toBe(2);
     expect(raiseAdminAlert.mock.calls.map(([, , opts]) => opts.dedupeKey))
       .toEqual(['auto-dispatch-needs-person:near:2026-11-10', 'auto-dispatch-needs-person:edge:2026-11-15']);
     expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
@@ -288,7 +288,7 @@ describe('needs-a-person notice: far double bookings are listed quietly until 14
     const bucket = new Map();
     notice.collect(bucket, visit('near', '2026-11-03'), 'no_slot', { kind: 'overlap' });
     for (let d = 20; d <= 25; d++) notice.collect(bucket, visit(`f${d}`, `2026-11-${d}`), 'no_slot', { kind: 'overlap' });
-    expect(await notice.raiseNotices(bucket, { nowDate: NOW })).toBe(0);
+    expect(await notice.raiseNotices(bucket, { nowDate: NOW, scanComplete: true })).toBe(0);
     expect(raiseAdminAlert).not.toHaveBeenCalled();
     expect(deliverOpsDigest.mock.calls[0][0].count).toBe(6);
   });
@@ -296,7 +296,7 @@ describe('needs-a-person notice: far double bookings are listed quietly until 14
   test('a run with no far conflict retires the Activity row', async () => {
     const bucket = new Map();
     notice.collect(bucket, visit('near', '2026-11-03'), 'no_slot', { kind: 'overlap' });
-    await notice.raiseNotices(bucket, { nowDate: NOW });
+    await notice.raiseNotices(bucket, { nowDate: NOW, scanComplete: true });
     expect(deliverOpsDigest).not.toHaveBeenCalled();
     expect(retireIfClean).toHaveBeenCalledWith('auto-dispatch-far-conflicts', { lockKey: 'ops-digest:auto-dispatch-far-conflicts' });
   });
@@ -305,7 +305,7 @@ describe('needs-a-person notice: far double bookings are listed quietly until 14
     inAppEnabled.mockReturnValue(false);
     const bucket = new Map();
     notice.collect(bucket, visit('far', '2026-11-20'), 'no_slot', { kind: 'overlap' });
-    expect(await notice.raiseNotices(bucket, { nowDate: NOW })).toBe(1);
+    expect(await notice.raiseNotices(bucket, { nowDate: NOW, scanComplete: true })).toBe(1);
     expect(raiseAdminAlert.mock.calls[0][2].dedupeKey).toBe('auto-dispatch-needs-person:far:2026-11-20');
     expect(deliverOpsDigest).not.toHaveBeenCalled();
   });
@@ -314,7 +314,7 @@ describe('needs-a-person notice: far double bookings are listed quietly until 14
     delete process.env.GATE_AUTO_DISPATCH_FAR_CONFLICT_QUIET;
     const bucket = new Map();
     notice.collect(bucket, visit('far', '2026-11-20'), 'no_slot', { kind: 'overlap' });
-    expect(await notice.raiseNotices(bucket, { nowDate: NOW })).toBe(1);
+    expect(await notice.raiseNotices(bucket, { nowDate: NOW, scanComplete: true })).toBe(1);
     expect(raiseAdminAlert.mock.calls[0][2].dedupeKey).toBe('auto-dispatch-needs-person:far:2026-11-20');
     expect(deliverOpsDigest).not.toHaveBeenCalled();
     expect(retireIfClean).toHaveBeenCalledTimes(1);
@@ -325,9 +325,22 @@ describe('needs-a-person notice: far double bookings are listed quietly until 14
     audit.namedVisitAction.mockImplementation(async (_id, templates) => fitAction('Schedule', 'Sample Tester', templates));
     const bucket = new Map();
     notice.collect(bucket, visit('far', '2026-11-20'), 'no_slot', { kind: 'overlap' });
-    await notice.raiseNotices(bucket, { nowDate: NOW });
+    await notice.raiseNotices(bucket, { nowDate: NOW, scanComplete: true });
     expect(deliverOpsDigest.mock.calls[0][0].text).toContain("Nov 20: Sample Tester's visit overlaps another stop.");
     audit.namedVisitAction.mockImplementation(async (_id, _templates, generic) => generic);
+  });
+
+  test('an incomplete conflict scan leaves the list as it is: no refresh, no retire; far conflicts still do not ring', async () => {
+    const bucket = new Map();
+    notice.collect(bucket, visit('near', '2026-11-03'), 'no_slot', { kind: 'overlap' });
+    notice.collect(bucket, visit('far', '2026-11-20'), 'no_slot', { kind: 'overlap' });
+    expect(await notice.raiseNotices(bucket, { nowDate: NOW, scanComplete: false })).toBe(1);
+    expect(deliverOpsDigest).not.toHaveBeenCalled();
+    expect(retireIfClean).not.toHaveBeenCalled();
+    expect(raiseAdminAlert.mock.calls.map(([, , opts]) => opts.dedupeKey)).toEqual(['auto-dispatch-needs-person:near:2026-11-03']);
+    // The default is incomplete: no caller retires the list by forgetting the flag.
+    await notice.raiseNotices(new Map(), { nowDate: NOW });
+    expect(retireIfClean).not.toHaveBeenCalled();
   });
 
   test('a failed list is logged and the near notices still ring', async () => {
@@ -335,6 +348,6 @@ describe('needs-a-person notice: far double bookings are listed quietly until 14
     const bucket = new Map();
     notice.collect(bucket, visit('near', '2026-11-03'), 'no_slot', { kind: 'overlap' });
     notice.collect(bucket, visit('far', '2026-11-20'), 'no_slot', { kind: 'overlap' });
-    expect(await notice.raiseNotices(bucket, { nowDate: NOW })).toBe(1);
+    expect(await notice.raiseNotices(bucket, { nowDate: NOW, scanComplete: true })).toBe(1);
   });
 });

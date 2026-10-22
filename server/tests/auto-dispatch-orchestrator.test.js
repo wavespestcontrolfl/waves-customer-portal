@@ -1686,6 +1686,36 @@ describe('move limit (owner 2026-10-09: at most two automatic moves per visit)',
       expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
     });
   });
+
+  // D1 (owner 2026-10-22): the far double-booking list is a snapshot, so the
+  // run tells the notice whether its end-of-run conflict read saw everything.
+  describe('the far list is told whether the conflict scan was complete (D1)', () => {
+    const needsPerson = require('../services/auto-dispatch/needs-person-notice');
+    let spy;
+    beforeEach(() => { spy = jest.spyOn(needsPerson, 'raiseNotices'); });
+    afterEach(() => spy.mockRestore());
+    const scanCompleteOf = () => spy.mock.calls[spy.mock.calls.length - 1][1].scanComplete;
+
+    test('every conflict read succeeded: complete', async () => {
+      candidateSlots.findValidCandidateSlots.mockResolvedValue(inConflict);
+      standing();
+      await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+      expect(scanCompleteOf()).toBe(true);
+    });
+
+    test('a conflict re-read failed: incomplete', async () => {
+      candidateSlots.findValidCandidateSlots.mockResolvedValue(inConflict);
+      rowReads();
+      candidateSlots._internals.readCurrentConflict.mockRejectedValue(new Error('read down'));
+      await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+      expect(scanCompleteOf()).toBe(false);
+    });
+
+    test('conflict reads off: incomplete', async () => {
+      await runAutoDispatch({ mode: 'dry_run' });
+      expect(scanCompleteOf()).toBe(false);
+    });
+  });
 });
 
 describe('move proofreader in pass 2 (GATE_AUTO_DISPATCH_PROOFREADER, owner 2026-10-12)', () => {
