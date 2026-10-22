@@ -710,6 +710,11 @@ const gates = {
   // and the response carries no estimate URL. Quote-mode (CTA) taps keep the
   // request flow at ANY setting.
   reportClickToEstimate: process.env.GATE_REPORT_CLICK_TO_ESTIMATE === 'true',
+  // Pre-treatment certificate renders as the paper Notice of Termite
+  // Protection label with its blanks filled, plus a details block for the
+  // certificate fields the label has no blank for. Off = the field-grid
+  // Certificate of Compliance. Look only; no data or send change.
+  pretreatStickerReport: process.env.GATE_PRETREAT_STICKER_REPORT === 'true',
 
   // "Your plan" section on the LIVE report (owner ask 2026-09-28): an active
   // plan member's completed-visit + re-service COUNTS for this calendar year
