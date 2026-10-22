@@ -1980,14 +1980,23 @@ const ReviewService = {
     if (!serviceRecordId || !texted) return { pulled: 0 };
     try {
       if (!reviewAskAfterReportOn() || !require("../config/feature-gates").isEnabled("reviewSequences")) return { pulled: 0 };
-      const dueAt = new Date(Date.now() + REVIEW_AFTER_REPORT_DELAY_MINUTES * 60000);
-      const pulled = await db("review_sequences")
+      const pending = () => db("review_sequences")
         .where({ service_record_id: serviceRecordId, status: "active", current_step: 0, touches_sent: 0, started_by: "post_service" })
         .whereNull("customer_requested")
         .whereRaw("decision ->> 'reason' = 'smart_window'")
-        .whereNotNull("next_run_at")
-        .update({ next_run_at: dueAt, decision: sequenceDecision({ reason: "after_report", plannedAt: dueAt, nextEvalAt: dueAt }), updated_at: new Date() });
-      return { pulled: Number(pulled) || 0 };
+        .whereNotNull("next_run_at");
+      const rows = await pending().select("id", "customer_id");
+      let pulled = 0;
+      for (const row of rows) {
+        // The customer's send lock, the one _runSequenceStep holds while it
+        // sends: the re-plan and a send never interleave. A held lock means
+        // that ask is being sent right now; it is left alone.
+        const dueAt = new Date(Date.now() + REVIEW_AFTER_REPORT_DELAY_MINUTES * 60000);
+        const result = await runExclusive(`review-send:${row.customer_id}`, () => pending().where({ id: row.id })
+          .update({ next_run_at: dueAt, decision: sequenceDecision({ reason: "after_report", plannedAt: dueAt, nextEvalAt: dueAt }), updated_at: new Date() }), { recordHealth: false });
+        if (!wasLockSkipped(result)) pulled += Number(result) || 0;
+      }
+      return { pulled };
     } catch (err) {
       logger.warn(`[review] held-report pull failed (serviceRecordId=${serviceRecordId}): ${err.message}`);
       return { pulled: 0 };
@@ -6859,6 +6868,10 @@ const ReviewService = {
   async _runSequenceStepUnlocked(sequenceId) {
     const seq = await db("review_sequences").where({ id: sequenceId }).first();
     if (!seq || seq.status !== "active") return { ran: false, reason: "not_active" };
+    // Re-read under the customer's send lock: a row moved to a later time
+    // after the runner selected it (pullAskAfterHeldReport takes the same
+    // lock) is not due yet.
+    if (seq.next_run_at && new Date(seq.next_run_at).getTime() > Date.now()) return { ran: false, deferred: true, reason: "not_due" };
     let plan = Array.isArray(seq.plan) ? seq.plan : JSON.parse(seq.plan || "[]");
     const customer = await db("customers").where({ id: seq.customer_id }).first();
 

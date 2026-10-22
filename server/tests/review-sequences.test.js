@@ -7827,6 +7827,15 @@ describe('review-ask holds (GATE_REVIEW_ASK_TECH_VOICE, build plan PR 2)', () =>
     expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 
+  test('a row moved to a later time after the runner selected it is not sent (codex #6471 pre-push P1)', async () => {
+    const mock = book({ next_run_at: new Date(Date.now() + 9 * 60000) }); // pullAskAfterHeldReport re-planned it
+    db.mockImplementation(mock);
+    const out = await ReviewService._runSequenceStep('seq-hold');
+    expect(out).toMatchObject({ ran: false, deferred: true, reason: 'not_due' });
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(seqRow(mock)).toMatchObject({ current_step: 1, touches_sent: 1 });
+  });
+
   test('a held final step completes the cadence at once (never left active past its plan)', async () => {
     mockGates.reviewAskTechVoice = true;
     const mock = book({ current_step: 2, touches_sent: 2, payment_hold_step: 2, payment_hold_since: new Date(Date.now() - 4 * 86400000) });
@@ -7858,6 +7867,7 @@ describe('review-ask holds (GATE_REVIEW_ASK_TECH_VOICE, build plan PR 2)', () =>
     expect(new Date(seqRow(mock).payment_hold_since).getTime()).toBe(since);
     // Once the first hold is three days old the step is dropped.
     seqRow(mock).payment_hold_since = new Date(Date.now() - 3 * 86400000 - 60000);
+    seqRow(mock).next_run_at = new Date(Date.now() - 1000); // the later tick: the row is due again
     const later = await ReviewService._runSequenceStep('seq-hold');
     expect(later).toMatchObject({ stepSkipped: true, reason: 'ask_dropped_payment_hold' });
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();

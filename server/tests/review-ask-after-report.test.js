@@ -31,7 +31,7 @@ jest.mock('../utils/scheduled-cron', () => ({
   schedule: jest.fn(), scheduleTimeout: jest.fn(), scheduleInterval: jest.fn(),
 }));
 jest.mock('../services/twilio', () => ({}));
-jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, task) => task()), settleDeadRunningJobs: jest.fn(async () => []) }));
+jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, task) => task()), wasLockSkipped: (r) => r?.skipped === true, settleDeadRunningJobs: jest.fn(async () => []) }));
 jest.mock('../services/auto-dispatch', () => ({ runAutoDispatch: jest.fn() }));
 jest.mock('../services/auto-dispatch/audit', () => ({ flagUnplacedVisits: jest.fn() }));
 jest.mock('../services/time-tracking-crons', () => ({ initTimeTrackingCrons: jest.fn() }));
@@ -178,6 +178,7 @@ describe('a report held for the morning pulls its review ask when it goes out as
   function chain(updated = 1) {
     const calls = { where: [], whereNull: [], whereNotNull: [], whereRaw: [], update: null };
     const q = {
+      select: async () => [{ id: 'seq-1', customer_id: 'c-1' }],
       where(...a) { calls.where.push(a); return q; },
       whereNull(c) { calls.whereNull.push(c); return q; },
       whereNotNull(c) { calls.whereNotNull.push(c); return q; },
@@ -196,13 +197,17 @@ describe('a report held for the morning pulls its review ask when it goes out as
     for (const proof of [{ channel: 'sms' }, { channel: 'mms' }, { providerMessageId: 'SM0123456789abcdef0123456789abcdef' }, { providerMessageId: 'MM0123456789abcdef0123456789abcdef' }]) {
       const { q, calls } = chain();
       db.mockImplementation(() => q);
+      const { runExclusive } = require('../utils/cron-lock');
+      runExclusive.mockClear();
       expect(await ReviewService.pullAskAfterHeldReport('sr-1', proof)).toEqual({ pulled: 1 });
+      // the select and the locked write share one predicate; the write is by id under the customer's send lock
       expect(calls.where[0][0]).toEqual({ service_record_id: 'sr-1', status: 'active', current_step: 0, touches_sent: 0, started_by: 'post_service' });
-      expect(calls.whereNull).toEqual(['customer_requested']);
-      expect(calls.whereRaw).toEqual(["decision ->> 'reason' = 'smart_window'"]);
+      expect(calls.where[2][0]).toEqual({ id: 'seq-1' });
+      expect(calls.whereNull).toEqual(['customer_requested', 'customer_requested']);
+      expect(calls.whereRaw).toEqual(["decision ->> 'reason' = 'smart_window'", "decision ->> 'reason' = 'smart_window'"]);
       // earlier or later (the 10-minute floor after a delayed replay); a claimed row (NULL) is skipped
-      expect(calls.whereNotNull).toEqual(['next_run_at']);
-      expect(calls.where).toHaveLength(1);
+      expect(calls.whereNotNull).toEqual(['next_run_at', 'next_run_at']);
+      expect(runExclusive).toHaveBeenCalledWith('review-send:c-1', expect.any(Function), { recordHealth: false });
       expect(calls.update.next_run_at.toISOString()).toBe('2026-10-21T12:13:00.000Z');
       expect(JSON.parse(calls.update.decision)).toMatchObject({ reason: 'after_report' });
     }
@@ -249,5 +254,15 @@ describe('a report held for the morning pulls its review ask when it goes out as
     expect(src).toContain("await require('../review-request').pullAskAfterHeldReport(meta.service_record_id, { channel: ctx.channel, providerMessageId: ctx.providerMessageId || meta.provider_message_id });");
     const scheduler = require('fs').readFileSync(require('path').join(__dirname, '../services/scheduler.js'), 'utf8');
     expect(scheduler).toContain('{ providerMessageId: smsResult.providerMessageId, customerId: msg.customer_id || null, channel: smsResult.channel || null });');
+  });
+
+  test('a held send lock (that ask is being sent right now) is left alone', async () => {
+    process.env.GATE_REVIEW_ASK_AFTER_REPORT = 'true';
+    process.env.GATE_REVIEW_SEQUENCES = 'true';
+    require('../utils/cron-lock').runExclusive.mockImplementationOnce(async () => ({ skipped: true, reason: 'locked' }));
+    const { q, calls } = chain();
+    db.mockImplementation(() => q);
+    expect(await ReviewService.pullAskAfterHeldReport('sr-1', { channel: 'sms' })).toEqual({ pulled: 0 });
+    expect(calls.update).toBeNull();
   });
 });
