@@ -132,6 +132,10 @@ export default function SettingsPage() {
   const [health, setHealth] = useState(null);
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
+  // Live gate list for Advanced → Features and System (owner-only route; the
+  // public /api/health reply stopped carrying gates in #2853).
+  const [gateList, setGateList] = useState(null);
+  const [gateListError, setGateListError] = useState(null);
   // ?tab=X deep-links from the mobile Settings surface land on the right tab.
   const initialTab = VALID_TABS.includes(searchParams.get("tab"))
     ? searchParams.get("tab")
@@ -213,6 +217,17 @@ export default function SettingsPage() {
     ]).then(() => setLoading(false));
   }, []);
 
+  const needsGates = user?.role === "admin" && (tab === "gates" || tab === "system");
+  useEffect(() => {
+    if (!needsGates || gateList) return;
+    let cancelled = false;
+    setGateListError(null);
+    adminFetch("/admin/settings/gates")
+      .then((d) => { if (!cancelled) setGateList(Array.isArray(d?.gates) ? d.gates : []); })
+      .catch((e) => { if (!cancelled) setGateListError(e.message || "Could not load gates"); });
+    return () => { cancelled = true; };
+  }, [needsGates, gateList]);
+
   // A ?tab= deep link into an owner-only group resolves to General once the
   // server-verified profile arrives. Declared ABOVE the early returns —
   // hooks must run on every render path or React throws "Rendered more
@@ -242,7 +257,8 @@ export default function SettingsPage() {
     );
   }
 
-  const gates = health?.gates || {};
+  const gateByEnv = new Map((gateList || []).filter((g) => g.envName).map((g) => [g.envName, g]));
+  const gatesOn = (gateList || []).filter((g) => g.enabled).length;
 
   // Service Reports (coverage config) and Scheduling (blackout days) are
   // requireAdmin end to end server-side — hide the whole groups from
@@ -385,21 +401,25 @@ export default function SettingsPage() {
           <CardHeader>
             <CardTitle>Feature gates</CardTitle>
             <p className="mt-1 text-ui-body text-ink-secondary">
-              Control which integrations are active. Set via Railway environment variables.
+              Live state of every gate, as the server read it at its last start.
+              {gateList && ` ${gatesOn} of ${gateList.length} on.`}
             </p>
           </CardHeader>
           <CardBody>
-            {Object.keys(gates).length === 0 ? null : (
+            {gateListError && <ActionFeedback>Could not load gates: {gateListError}</ActionFeedback>}
+            {!gateList && !gateListError && <ActionFeedback>Loading gates...</ActionFeedback>}
+            {gateList && (
               <div className="divide-y divide-zinc-200">
-                {Object.entries(gates).map(([key, enabled]) => (
-                  <div key={key} className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-3">
-                    <div className="min-w-0">
-                      <div className="break-words font-medium text-zinc-900">{key}</div>
-                      <div className="break-all text-ui-caption text-ink-secondary u-nums">
-                        GATE_{key.replace(/([A-Z])/g, "_$1").toUpperCase()}
-                      </div>
+                {gateList.map((g) => (
+                  <div key={g.key} className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="break-all font-medium text-zinc-900 u-nums">{g.envName || g.key}</div>
+                      {g.description && <div className="mt-1 text-ui-caption text-ink-secondary">{g.description}</div>}
+                      {g.requires?.length > 0 && (
+                        <div className="mt-1 break-all text-ui-caption text-ink-secondary u-nums">Also needs {g.requires.join(", ")}</div>
+                      )}
                     </div>
-                    <Badge tone={enabled ? "strong" : "neutral"} dot>{enabled ? "Enabled" : "Disabled"}</Badge>
+                    <Badge tone={g.enabled ? "strong" : "neutral"} dot>{g.enabled ? "Enabled" : "Disabled"}</Badge>
                   </div>
                 ))}
               </div>
@@ -407,6 +427,7 @@ export default function SettingsPage() {
             <p className="mt-4 rounded-md bg-zinc-50 p-3 text-ui-body text-ink-secondary">
               Gates are controlled via Railway environment variables. To change:
               Railway Dashboard → Variables → set GATE_NAME=true or remove the variable.
+              A change restarts the server.
             </p>
           </CardBody>
         </Card>
@@ -424,12 +445,8 @@ export default function SettingsPage() {
                 {[
                   { label: "Environment", value: health?.environment || "—" },
                   { label: "Status", value: health?.status || "—" },
+                  { label: "Database", value: health?.database || "—" },
                   { label: "Server time", value: health?.timestamp ? new Date(health.timestamp).toLocaleString() : "—" },
-                  { label: "Database", value: "PostgreSQL (Railway)" },
-                  { label: "Frontend", value: "React (Vite)" },
-                  { label: "Backend", value: "Express.js" },
-                  { label: "AI model", value: "Claude Sonnet 4" },
-                  { label: "Migrations", value: "50 migrations" },
                 ].map((field) => (
                   <div key={field.label} className="rounded-md bg-zinc-50 p-3">
                     <dt className="text-ui-caption text-ink-secondary">{field.label}</dt>
@@ -440,33 +457,28 @@ export default function SettingsPage() {
             </CardBody>
           </Card>
           <Card>
-            <CardHeader className="flex flex-wrap items-center justify-between gap-2">
-              <CardTitle>Cron jobs</CardTitle>
-              <Badge tone={gates.cronJobs ? "strong" : "alert"} dot>
-                {gates.cronJobs ? "Enabled" : "Disabled"}
-              </Badge>
-            </CardHeader>
+            <CardHeader><CardTitle>Scheduled jobs</CardTitle></CardHeader>
             <CardBody className="divide-y divide-zinc-200">
+              {gateListError && <ActionFeedback>Could not load gates: {gateListError}</ActionFeedback>}
               {[
-                { time: "1:30 AM Mon", job: "Site audit", gate: "seoIntelligence" },
-                { time: "2:00 AM", job: "Rank tracking", gate: "seoIntelligence" },
-                { time: "2:30 AM", job: "AI Overview check", gate: "seoIntelligence" },
-                { time: "3:00 AM", job: "Customer intelligence", gate: "cronJobs" },
-                { time: "3:30 AM Sun", job: "Backlink scan", gate: "seoIntelligence" },
-                { time: "5:00 AM", job: "Blog auto-generate", gate: "cronJobs" },
-                { time: "5:30 AM Mon", job: "Content decay check", gate: "seoIntelligence" },
-                { time: "6:00 AM", job: "GSC data sync", gate: "cronJobs" },
-                { time: "8:00 AM", job: "Campaign advisor", gate: "cronJobs" },
-                { time: "8:00 AM Fri", job: "CSR weekly rec", gate: "cronJobs" },
-                { time: "Every 2hr", job: "Ad budget adjust", gate: "cronJobs" },
-                { time: ":30 past hr", job: "Follow-up verify", gate: "cronJobs" },
-              ].map((cron) => (
-                <div key={`${cron.time}-${cron.job}`} className="grid grid-cols-[110px_minmax(0,1fr)_auto] items-center gap-3 py-3">
-                  <span className="text-ui-caption text-ink-secondary u-nums">{cron.time}</span>
-                  <span className="text-zinc-700">{cron.job}</span>
-                  <Badge tone={gates[cron.gate] ? "strong" : "neutral"}>{gates[cron.gate] ? "On" : "Off"}</Badge>
-                </div>
-              ))}
+                { env: "GATE_CRON_JOBS", label: "Scheduled jobs" },
+                { env: "GATE_SEO_INTELLIGENCE", label: "SEO jobs" },
+              ].map(({ env, label }) => {
+                const g = gateByEnv.get(env);
+                return (
+                  <div key={env} className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-3">
+                    <div className="min-w-0">
+                      <div className="font-medium text-zinc-900">{label}</div>
+                      <div className="break-all text-ui-caption text-ink-secondary u-nums">{env}</div>
+                    </div>
+                    {g ? (
+                      <Badge tone={g.enabled ? "strong" : "alert"} dot>{g.enabled ? "Enabled" : "Disabled"}</Badge>
+                    ) : (
+                      <Badge tone="neutral">{gateListError ? "Unknown" : "Loading"}</Badge>
+                    )}
+                  </div>
+                );
+              })}
             </CardBody>
           </Card>
         </div>

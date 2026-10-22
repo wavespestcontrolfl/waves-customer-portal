@@ -1,0 +1,85 @@
+/**
+ * Settings → Advanced → Features reads GET /api/admin/settings/gates. The page
+ * used to read gates from the public /api/health reply, which stopped carrying
+ * them in #2853, so the tab sat empty and every cron badge read "Off". This
+ * pins the replacement: owner-only, one row per gates-map entry, each tied to
+ * the GATE_ variable its value expression reads (the last one; earlier ones are
+ * prerequisites), never to a GATE_ named only in a comment.
+ */
+const express = require('express');
+
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/google-business', () => ({}));
+jest.mock('../services/linkedin', () => ({}));
+jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn() }));
+jest.mock('../middleware/admin-auth', () => ({
+  adminAuthenticate: (req, res, next) => {
+    const role = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    if (!role) return res.status(401).json({ error: 'Admin authentication required' });
+    req.techRole = role;
+    return next();
+  },
+  requireAdmin: (req, res, next) => (req.techRole === 'admin' ? next() : res.status(403).json({ error: 'Admin access required' })),
+}));
+
+const featureGates = require('../config/feature-gates');
+const { listGates } = require('../services/gate-list');
+
+let server;
+let base;
+beforeAll(async () => {
+  const a = express();
+  a.use('/api/admin/settings', require('../routes/admin-settings'));
+  server = a.listen(0);
+  await new Promise((resolve) => server.once('listening', resolve));
+  base = `http://127.0.0.1:${server.address().port}`;
+});
+afterAll(() => new Promise((resolve) => server.close(resolve)));
+
+const get = (role) => fetch(`${base}/api/admin/settings/gates`, role ? { headers: { Authorization: `Bearer ${role}` } } : {});
+
+describe('GET /api/admin/settings/gates', () => {
+  test('refuses a signed-out caller and a non-admin role', async () => {
+    expect((await get(null)).status).toBe(401);
+    expect((await get('technician')).status).toBe(403);
+  });
+
+  test('returns one row per gates-map entry with its live state', async () => {
+    const res = await get('admin');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    const body = await res.json();
+    expect(body.gates).toHaveLength(Object.keys(featureGates.gates).length);
+    for (const row of body.gates) {
+      expect(row.enabled).toBe(featureGates.gates[row.key] === true);
+    }
+  });
+});
+
+describe('listGates variable names', () => {
+  const byKey = new Map(listGates().map((g) => [g.key, g]));
+
+  test('a plain entry names its own variable', () => {
+    expect(byKey.get('cronJobs')).toMatchObject({ envName: 'GATE_CRON_JOBS', requires: [] });
+    expect(byKey.get('seoIntelligence')).toMatchObject({ envName: 'GATE_SEO_INTELLIGENCE', requires: [] });
+  });
+
+  test('a compound entry names its own variable last and lists prerequisites', () => {
+    expect(byKey.get('typedDecisionsClef')).toMatchObject({
+      envName: 'GATE_TYPED_DECISIONS_CLEF',
+      requires: ['GATE_TYPED_DECISIONS'],
+    });
+  });
+
+  test('a GATE_ named only in a comment above an entry is not taken', () => {
+    // The comment above appPropertyTexts names GATE_APP_PROPERTY_SCOPE; the
+    // entry must still resolve to the variable in its own value expression.
+    expect(byKey.get('appPropertyTexts')).toMatchObject({ envName: 'GATE_APP_PROPERTY_TEXTS', requires: [] });
+  });
+
+  test('nearly every entry resolves to a variable', () => {
+    const unresolved = listGates().filter((g) => !g.envName);
+    expect(unresolved.length).toBeLessThan(15);
+  });
+});
