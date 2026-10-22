@@ -1815,20 +1815,20 @@
       {
         "id": "taurus-rate",
         "ask": "How much Taurus per gallon?",
-        "rule": "Mix 0.8 fl oz Taurus SC in 1 gallon of water. This is 0.06%. Do not mix Taurus and Talak in the same backpack.",
-        "source": "Two-tank ruling 2026-09-28; label EPA 53883-279"
+        "rule": "Mix 0.4 fl oz Taurus SC in 1 gallon of water. This is 0.03%. Do not mix Taurus and Talak in the same backpack.",
+        "source": "Owner Plan A 2026-10-13; label EPA 53883-279"
       },
       {
         "id": "taurus-band",
         "ask": "Where does Taurus go? How much mix?",
-        "rule": "Spray Taurus on the foundation only. Make the band 1 ft up the wall and 1 ft out on the ground. Use 2 quarts of mix for each 160 ft of wall. A home with 200 ft of wall needs about 0.5 fl oz of Taurus.",
+        "rule": "Spray Taurus on the foundation only. Make the band 1 ft up the wall and 1 ft out on the ground. Use 2 quarts of mix for each 160 ft of wall. A home with 200 ft of wall needs about 0.25 fl oz of Taurus.",
         "source": "Label band volume; owner walkthrough 2026-10-03"
       },
       {
         "id": "taurus-yearly-limit",
         "ask": "Can I use Taurus again?",
-        "rule": "Apply Taurus a maximum of 2 times each calendar year at each home. Apply it in the rainy season, June to September. After 2 applications, do not apply Taurus at that home until the next year.",
-        "source": "Label cap at 0.06%; two-tank ruling 2026-09-28"
+        "rule": "Apply Taurus a maximum of 4 times each calendar year at each home. Wait at least 75 days after the last application. After 4 applications, do not apply Taurus at that home until the next year.",
+        "source": "Label cap at 0.03%; owner Plan A 2026-10-13"
       },
       {
         "id": "talak-rate",
@@ -1967,7 +1967,7 @@
         "visit": 1,
         "month": "Any",
         "primary": "Swept eaves, window frames, door frames, and lanai\nTreated exterior perimeter band\nTreated eaves, lanai or pool cage, and garage\nTreated interior cracks & crevices (activity present)",
-        "secondary": "Applied non-repellent band to foundation (1 ft up, 1 ft out) if due: rainy season, 2 times a year per home\nPlaced glue boards in garage or utility areas\nDocumented moisture, exclusion, or sanitation conditions",
+        "secondary": "Applied non-repellent band to foundation (1 ft up, 1 ft out) if due: 75 days after the last, 4 times a year per home\nPlaced glue boards in garage or utility areas\nDocumented moisture, exclusion, or sanitation conditions",
         "lineMeta": {
           "Swept eaves, window frames, door frames, and lanai": {
             "scope": "exterior",
@@ -1976,7 +1976,7 @@
               "Webster"
             ]
           },
-          "Applied non-repellent band to foundation (1 ft up, 1 ft out) if due: rainy season, 2 times a year per home": {
+          "Applied non-repellent band to foundation (1 ft up, 1 ft out) if due: 75 days after the last, 4 times a year per home": {
             "scope": "exterior",
             "treatmentApplied": true,
             "catalogProductHints": [

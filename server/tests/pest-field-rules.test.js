@@ -48,7 +48,7 @@ describe('pest field rules', () => {
     const taurus = entries.find((e) => e.slug === 'field-rule-pest-taurus-rate');
     expect(taurus.title).toBe('Pest Control Protocol: How much Taurus per gallon?');
     expect(taurus.content.split('\n')[0]).toBe('How much Taurus per gallon?');
-    expect(taurus.content).toContain('Mix 0.8 fl oz Taurus SC in 1 gallon of water.');
+    expect(taurus.content).toContain('Mix 0.4 fl oz Taurus SC in 1 gallon of water.');
     expect(taurus.tags).toEqual(['pest', 'field-rule']);
     expect(new Set(entries.map((e) => e.slug)).size).toBe(entries.length);
   });
@@ -78,12 +78,12 @@ describe('routine pest visit checklist agrees with the field rules', () => {
   });
 });
 
-test('Taurus is an if-due step, never selected base work (2 times a year)', () => {
+test('Taurus is an if-due step, never selected base work (4 times a year)', () => {
   const visit = protocols.pest.visits[0];
   const taurusLine = Object.keys(visit.lineMeta).find((raw) => (visit.lineMeta[raw].catalogProductHints || []).includes('Taurus SC'));
   expect(visit.secondary.split('\n')).toContain(taurusLine);
   expect(visit.primary).not.toContain('non-repellent band');
-  expect(taurusLine).toMatch(/2 times a year/);
+  expect(taurusLine).toMatch(/4 times a year/);
 });
 
 test('standalone rules and the ant visit keep the Taurus cap and the no-Alpine-outside rule', () => {
