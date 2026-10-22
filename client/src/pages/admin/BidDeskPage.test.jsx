@@ -117,6 +117,21 @@ it("saving a decision keeps a due date the operator typed but has not saved", as
   await waitFor(() => expect(screen.getByLabelText("Due date (Eastern time)")).toHaveValue("2026-10-30T09:00"));
 });
 
+it("a date typed before a decision save is saved against the version it was typed on", async () => {
+  const patch = vi.fn()
+    .mockImplementationOnce(() => reply({ ok: true, bid: bid({ status: "bid", updated_at: "2026-10-02T13:00:00.000Z" }) }))
+    .mockImplementationOnce(() => reply({ error: "The due date changed since you opened this bid. Reload and check it again." }, { status: 409 }));
+  route({ "GET /admin/bid-desk/": () => reply({ bids: LIST }), "GET /admin/bid-desk/b1": () => reply({ bid: bid(), emails: [] }), "PATCH /admin/bid-desk/b1": patch });
+  renderPage("/?bid=b1");
+  fireEvent.change(await screen.findByLabelText("Due date (Eastern time)"), { target: { value: "2026-10-30T09:00" } });
+  fireEvent.change(screen.getByLabelText("Decision"), { target: { value: "bid" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save decision" }));
+  await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
+  fireEvent.click(screen.getByRole("button", { name: "Save as confirmed" }));
+  await waitFor(() => expect(patch).toHaveBeenCalledTimes(2));
+  expect(patch.mock.calls[1][0].body).toEqual({ due_at: "2026-10-30T09:00", expected_updated_at: "2026-10-02T12:00:00.000Z" });
+});
+
 it("marks an email as a bid by id and opens the bid", async () => {
   const post = vi.fn(() => reply({ ok: true, bid_id: "b9", created: true }, { status: 201 }));
   route({

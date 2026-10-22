@@ -109,6 +109,9 @@ function BidTable({ bids, selectedId, onSelect }) {
 function BidDetail({ bidId, onChanged, onClose }) {
   const [state, setState] = useState({ loading: true, error: "", bid: null, emails: [] });
   const [dueInput, setDueInput] = useState("");
+  // The bid version the date field was typed against: a date save is fenced on it, so a decision saved in between
+  // (which moves the version) cannot carry a date typed against the older bid.
+  const [dueEditedAt, setDueEditedAt] = useState(null);
   const [status, setStatus] = useState("new");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
@@ -120,6 +123,7 @@ function BidDetail({ bidId, onChanged, onClose }) {
       const data = await api(`/${bidId}`);
       setState({ loading: false, error: "", bid: data.bid, emails: data.emails });
       setDueInput(etDatetimeLocalValue(data.bid.due_at));
+      setDueEditedAt(null);
       setStatus(data.bid.status);
       setNote(data.bid.decision_note || "");
     } catch (err) {
@@ -136,7 +140,10 @@ function BidDetail({ bidId, onChanged, onClose }) {
       setState((s) => ({ ...s, bid: data.bid }));
       // Only a date save resets the date field: a decision saved first keeps a date the operator typed but has
       // not saved yet.
-      if ("due_at" in body || body.confirm_due) setDueInput(etDatetimeLocalValue(data.bid.due_at));
+      if ("due_at" in body || body.confirm_due) {
+        setDueInput(etDatetimeLocalValue(data.bid.due_at));
+        setDueEditedAt(null);
+      }
       setMessage(done);
       onChanged();
     } catch (err) {
@@ -178,10 +185,10 @@ function BidDetail({ bidId, onChanged, onClose }) {
 
         <div className="mb-4 grid gap-3 md:grid-cols-[minmax(0,18rem)_auto] md:items-end">
           <Field id="bid-due" label="Due date (Eastern time)" help="Type the date from the bid documents. Reminders start only after the date is confirmed.">
-            <Input type="datetime-local" value={dueInput} onChange={(event) => setDueInput(event.target.value)} />
+            <Input type="datetime-local" value={dueInput} onChange={(event) => { setDueInput(event.target.value); setDueEditedAt((at) => at || bid.updated_at); }} />
           </Field>
           <div className="flex flex-wrap gap-2">
-            <Button disabled={busy || !dueInput} onClick={() => save({ due_at: dueInput, expected_updated_at: bid.updated_at }, "Due date saved and confirmed")}>Save as confirmed</Button>
+            <Button disabled={busy || !dueInput} onClick={() => save({ due_at: dueInput, expected_updated_at: dueEditedAt || bid.updated_at }, "Due date saved and confirmed")}>Save as confirmed</Button>
             {bid.due_at && !bid.due_confirmed && (
               <Button variant="secondary" disabled={busy} onClick={() => save({ confirm_due: true, expected_updated_at: bid.updated_at }, "Date confirmed as read")}>Confirm date as read</Button>
             )}
