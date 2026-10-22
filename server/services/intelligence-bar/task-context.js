@@ -608,6 +608,13 @@ const STRONG_VERBS = ['update', 'change', 'set', 'edit', 'fix', 'add', 'remove',
   'rename', 'relabel', 'merge', 'archive', 'restore', 'reactivate', 'pause', 'refund', 'notify', 'remind', 'forward', 'resend', 'reply', 'respond', 'send', 'make', 'revise', 'save', 'draft', 'write', 'post', 'submit'];
 const NOUNISH_VERBS = ['email', 'text', 'sms', 'message', 'reminder', 'contact', 'quote', 'schedule', 'call', 'charge', 'invoice', 'credit'];
 const ACTION_VERBS = new Set([...STRONG_VERBS, ...NOUNISH_VERBS]);
+const STRONG_VERB_SET = new Set(STRONG_VERBS);
+// "fixed", "updating", "removing", "changes": an inflected verb of the set is still that verb.
+function verbForm(word, verbs = ACTION_VERBS) {
+  if (verbs.has(word)) return true;
+  const stem = word.replace(/(?:ing|ed|es|s|d)$/, '');
+  return stem !== word && (verbs.has(stem) || verbs.has(`${stem}e`) || verbs.has(stem.replace(/(.)\1$/, '$1')));
+}
 const OPERATION_STARTS = new Set(['qqsep', 'and', 'then', 'also', 'please', 'to']);
 const VALUE_START_RE = /\b(?:name|address|email(?:\s+address)?|phone(?:\s+number)?|mobile(?:\s+(?:phone|number))?|cell(?:\s+(?:phone|number))?|number|label|notes?|instructions|message|contact)\s+(?:to|as|is|=)\s+|:/i;
 const VALUE_END_RE = new RegExp(`(?:[;\\n,]|\\b(?:and|then|also)\\b)\\s*(?:(?:please|also|then)\\s+)*(?=(?:${[...ACTION_VERBS].join('|')})\\b)`, 'i');
@@ -637,7 +644,8 @@ function isCompound(bounded, customers = []) {
     if (name) text = text.replace(` ${name} `, ' qqname ');
   }
   const words = ['qqsep', ...text.trim().split(' ')];
-  return words.filter((word, i) => STRONG_VERBS.includes(word) || (NOUNISH_VERBS.includes(word) && OPERATION_STARTS.has(words[i - 1]))).length > 1;
+  // An inflected strong verb ("removing", "updated") is an operation too (Codex #6369 r39).
+  return words.filter((word, i) => verbForm(word, STRONG_VERB_SET) || (NOUNISH_VERBS.includes(word) && OPERATION_STARTS.has(words[i - 1]))).length > 1;
 }
 
 // DIRECT (no-card) authority from typed evidence, in two simple cases only (Codex #6369 r23,
@@ -670,7 +678,8 @@ async function directGroundedIds(fullPrompt, namedResult, cohort, nameHint) {
   if (!customer) return contactOnlyGroundedIds(bounded, clause, nameHint);
   const full = fullNameKey(customer);
   const typedFull = !others.length && full.includes(' ') && ` ${normalizeName(withoutContacts(clause))} `.includes(` ${full} `);
-  return typedFull && !qualifierPresent(bounded, clause, customer) ? [String(customer.id)] : [];
+  // Every other word must be a known request word (r39): "reschedule Alice Example and Bob Sample" is carded.
+  return typedFull && !qualifierPresent(bounded, clause, customer) && !unknownLeadingSubject(bounded, customer) && !unknownWordsIn(bounded, customer) ? [String(customer.id)] : [];
 }
 
 // The second simple case: one contact literal, no typed name (a name that was requested but
@@ -681,22 +690,32 @@ async function directGroundedIds(fullPrompt, namedResult, cohort, nameHint) {
 // Missing") and the request is carded (Codex #6369 r37: allow-list for the whole clause).
 const CONTACT_CLAUSE_WORDS = new Set(['on', 'for', 'of', 'with', 'at', 'by', 'from', 'in', 'system', 'portal', 'app', 'whose', 'who', 'owner', 'owns', 'belongs', 'belonging', 'person', 'one']);
 const WEEKDAY_OR_TIME_RE = /^(?:mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)(?:day)?s?$|^(?:morning|afternoon|evening|tonight|week|month|am|pm|noon)$|^\d{1,2}(?::?\d{2})?(?:am|pm)?$/;
-// "fixed", "updating", "changes": an inflected action verb is still a verb.
-const actionVerbForm = word => ACTION_VERBS.has(word) || [/(?:ed|d|ing|s|es)$/].some(re => {
-  const stem = word.replace(re, '');
-  return stem !== word && (ACTION_VERBS.has(stem) || ACTION_VERBS.has(`${stem}e`) || ACTION_VERBS.has(stem.replace(/(.)\1$/, '$1')));
-});
-function onlyKnownWordsBesideContact(clause) {
-  if (possessiveNamesSomeone(withoutContacts(clause))) return false;
-  return normalizeName(withoutContacts(clause)).split(' ').filter(Boolean)
-    .every(word => actionVerbForm(word) || NON_PERSON_NAMES.has(word) || SUBJECT_FILLER.has(word) || SUBJECT_END.has(word)
-      || CONTACT_CLAUSE_WORDS.has(word) || WEEKDAY_OR_TIME_RE.test(word));
+// Common words of an edit request that never name a customer.
+const REQUEST_WORDS = new Set(['as', 'it', 'its', 'new', 'old', 'done', 'complete', 'completed', 'paid', 'won', 'lost', 'last', 'week', 'up', 'out', 'off', 'into', 'onto', 'about', 'there', 'here', 'right', 'away', 'again', 'too', 'only', 'same', 'other', 'wrong', 'correct', 'bad', 'good', 'missing', 'empty', 'blank']);
+const RECORD_ID_WORDS_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+const knownRequestWord = word => verbForm(word) || NON_PERSON_NAMES.has(word) || SUBJECT_FILLER.has(word) || SUBJECT_END.has(word)
+  || SUBJECT_PRONOUNS.has(word) || CONTACT_CLAUSE_WORDS.has(word) || REQUEST_WORDS.has(word) || WEEKDAY_OR_TIME_RE.test(word) || /^\d+(?:st|nd|rd|th)?$/.test(word);
+
+// THE one check for every no-card path (Codex #6369 r39, after r33-r38 each found one more name form):
+// strip field values, quotes, contacts and record ids, and the ONE span that names `customer` (the
+// typed or on-screen customer the authority is for). Any word left that is not a known request word,
+// or any possessive of a word that is not a record word or the customer's own name, may be a name the
+// grammar misses ("Pat2 Missing", "... and Bob Sample", "Will's"), and the request is carded.
+function unknownWordsIn(bounded, customer = null) {
+  const own = customer ? [fullNameKey(customer), normalizeName(customer.first_name), normalizeName(customer.last_name)].filter(Boolean) : [];
+  const raw = withoutContacts(withoutValues(bounded).replace(RECORD_ID_WORDS_RE, ' '));
+  const ownParts = new Set(own.flatMap(name => name.split(' ')));
+  if (possessiveNamesSomeone(raw, ownParts)) return true;
+  let text = ` ${normalizeName(raw)} `;
+  const span = own.find(name => text.includes(` ${name} `));
+  if (span) text = text.replace(` ${span} `, ' ');
+  return text.trim().split(' ').filter(Boolean).some(word => !knownRequestWord(word));
 }
 
 async function contactOnlyGroundedIds(bounded, clause, nameHint) {
   const literals = contactLiteralsOf(clause);
   // An unknown leading subject is a typed name too (pre-push audit, r36), and so is any unknown word (r37).
-  if (literals.length !== 1 || nameHint || unknownLeadingSubject(bounded) || !onlyKnownWordsBesideContact(clause) || RECORD_ID_RE.test(clause) || INITIAL_FORM_RE.test(bounded) || placeQualifierPresent(clause)) return [];
+  if (literals.length !== 1 || nameHint || unknownLeadingSubject(bounded) || unknownWordsIn(bounded) || RECORD_ID_RE.test(clause) || INITIAL_FORM_RE.test(bounded) || placeQualifierPresent(clause)) return [];
   const owners = await resolveContacts(literals);
   return owners.size === 1 ? [...owners.keys()] : [];
 }
@@ -853,12 +872,20 @@ const SUBJECT_END = new Set(['needs', 'need', 'wants', 'want', 'has', 'have', 'i
 const SUBJECT_PRONOUNS = new Set(['i', 'we', 'you', 'he', 'she', 'they', 'it']);
 const plainSubjectWord = word => NON_PERSON_NAMES.has(word) || SUBJECT_RECORD_WORDS.has(word) || SUBJECT_PRONOUNS.has(word);
 // normalizeName drops "'s", so possession is read from the raw text.
-const possessiveNamesSomeone = text => [...String(text).matchAll(/([\p{L}\p{N}-]+)[’']s\b/gu)]
-  .some(match => !plainSubjectWord(normalizeName(match[1])));
-function unknownLeadingSubject(bounded) {
+const possessiveNamesSomeone = (text, ownParts = new Set()) => [...String(text).matchAll(/([\p{L}\p{N}-]+)[’']s\b/gu)]
+  .some((match) => {
+    const word = normalizeName(match[1]);
+    return !plainSubjectWord(word) && !ownParts.has(word);
+  });
+// `customer`: the typed customer the authority is for; their own name span stands for "this customer".
+function unknownLeadingSubject(bounded, customer = null) {
   const clause = withoutContacts(targetClause(bounded));
-  if (possessiveNamesSomeone(clause)) return true;
-  const words = normalizeName(clause).split(' ').filter(Boolean);
+  const own = customer ? [fullNameKey(customer), normalizeName(customer.first_name), normalizeName(customer.last_name)].filter(Boolean) : [];
+  if (possessiveNamesSomeone(clause, new Set(own.flatMap(name => name.split(' '))))) return true;
+  let text = ` ${normalizeName(clause)} `;
+  const span = own.find(name => text.includes(` ${name} `));
+  if (span) text = text.replace(` ${span} `, ' customer ');
+  const words = text.trim().split(' ').filter(Boolean);
   for (const [i, word] of words.entries()) {
     if (SUBJECT_END.has(word)) return i > 0 && !plainSubjectWord(words[i - 1]);
     if (ACTION_VERBS.has(word)) return false;
@@ -877,7 +904,7 @@ function pageAuthorityShapeBlocked(bounded, matches, page) {
 // outside the allow-list (r36), a contact, a place, or a name that resolved even when namesRequested
 // missed its form ("Alice Jones needs notes cleared", r34).
 function pageIdentityEvidence(bounded, nameHint, matches, contacts, place) {
-  return nameHint || unknownLeadingSubject(bounded) || contacts || place || matches.length > 0;
+  return nameHint || unknownLeadingSubject(bounded) || unknownWordsIn(bounded) || contacts || place || matches.length > 0;
 }
 
 function pageGroundingBlocked(fullPrompt, namedResult, cohort, nameHint, page) {
@@ -892,7 +919,7 @@ function pageGroundingBlocked(fullPrompt, namedResult, cohort, nameHint, page) {
   if (!pageIdentityEvidence(bounded, nameHint, matches, contacts, place)) return false;
   // With evidence, only the exact page customer, named alone, keeps the page.
   const exact = !cohort && namedResult.complete !== false && !namedResult.multiple && matches.length === 1
-    && String(matches[0].id) === String(pageCustomerId) && !contacts && !place;
+    && String(matches[0].id) === String(pageCustomerId) && !contacts && !place && !unknownWordsIn(bounded, matches[0]);
   return !exact;
 }
 

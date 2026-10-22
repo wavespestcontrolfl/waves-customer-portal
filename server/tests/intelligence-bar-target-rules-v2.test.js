@@ -785,6 +785,34 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(await grounded("update Mark Smith's phone")).toEqual([id(102)]);
   });
 
+  test('gate on: ONE unknown-word check for every no-card path (Codex #6369 r39)', async () => {
+    process.env[ON] = 'true';
+    const row = (n, first, last, phone) => ({ id: id(n), first_name: first, last_name: last, city: 'Venice', phone, email: `${first.toLowerCase()}@example.test`, updated_at: new Date('2026-01-01'), version: '2026-01-01' });
+    customers = [row(100, 'Bob', 'Example', '9415550100'), row(101, 'Alice', 'Sample', '9415550101'), row(102, 'Carl', 'Other', '9415550102')];
+    const edit = { customer_id: id(100), updates: { phone: '941-555-0150' } };
+    const viewingBob = async prompt => {
+      const owner = Context.ownerDirectContext(await Context.resolve({ prompt, pageData: { customer_id: id(100) }, selectedTarget: null, ownerDirectScope: true }));
+      return OwnerDirect.executesWithoutCard('update_customer', edit, null, null, OwnerDirect.targetGrounding(owner));
+    };
+    // Page: an unknown word after the verb is a name too; an inflected second verb is a second operation.
+    expect(await viewingBob('update Pat2 Missing phone')).toBe(false);
+    expect(await viewingBob("update this customer's phone and removing Jhon Smith's notes")).toBe(false);
+    expect(await viewingBob('update the phone to 941-555-0150')).toBe(true);
+    expect(await viewingBob("update Bob Example's phone to 941-555-0150")).toBe(true);
+    // Typed: a second customer joined by "and" grants nothing; the plain case stays direct.
+    const grounded = async prompt => (await ask(prompt)).groundedCustomerIds;
+    expect(await grounded('reschedule Alice Sample and Carl Other')).toEqual([]);
+    expect(await grounded('reschedule Alice Sample and Pat2')).toEqual([]);
+    expect(await grounded('reschedule Alice Sample to next Tuesday at 3pm')).toEqual([id(101)]);
+    expect(await grounded("update Alice Sample's phone to 941-555-0150")).toEqual([id(101)]);
+    expect(await viewingBob('update the phone and removing the notes')).toBe(false);
+  });
+
+  test('gate on: a choice label holds at most five name words, the longest name the lookup resolves (Codex #6369 r39)', () => {
+    expect(OwnerDirect.isChoiceLabelShape('Mary De La Cruz Smith, Venice')).toBe(true);
+    expect(OwnerDirect.isChoiceLabelShape('Mary De La Cruz Van Smith, Venice')).toBe(false);
+  });
+
   test('gate on: an explicit record id keeps the page customer\'s authority only if every id is one the page already holds (Codex #6369 r29)', async () => {
     process.env[ON] = 'true';
     const row = (n, extra) => ({ id: n, first_name: 'Bob', last_name: 'Example', city: 'Venice', phone: '9415550100', email: 'bob@example.test', updated_at: new Date('2026-01-01'), version: '2026-01-01', ...extra });
