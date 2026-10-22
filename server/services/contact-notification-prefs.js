@@ -398,7 +398,11 @@ async function reportEmailRecipientStillAllowed(customer, recipient, { dbh = db 
 // carrying the address is checked and deny wins; the matched slot's phone
 // keys the contact's row. The holder's own address, an address in no slot,
 // and the gate off never decline. Fail CLOSED on an unreadable row or table.
-async function contactEmailDeclines(customerId, email, { dbh = db } = {}) {
+// `requireSlot` (the project-email handoff for a recipient RESOLVED as a
+// service contact, codex #6363 r26 security P2): an address the holder has
+// since removed from every slot (or a customer row that is gone) is a former
+// contact's and declines too.
+async function contactEmailDeclines(customerId, email, { dbh = db, requireSlot = false } = {}) {
   const addr = (v) => String(v || '').trim().toLowerCase();
   const current = addr(email);
   if (!contactPrefsLive() || !customerId || !current) return false;
@@ -410,9 +414,11 @@ async function contactEmailDeclines(customerId, email, { dbh = db } = {}) {
     logger.warn(`[contact-prefs] customer read failed (${err.message}) — holding the email`);
     return true;
   }
-  if (!customer || addr(customer.email) === current) return false;
-  const slots = require('./customer-contact').getServiceContactSlots(customer).filter((s) => s.phone && addr(s.email) === current);
-  for (const slot of slots) {
+  if (!customer) return requireSlot;
+  if (addr(customer.email) === current) return false;
+  const carrying = require('./customer-contact').getServiceContactSlots(customer).filter((s) => addr(s.email) === current);
+  if (!carrying.length) return requireSlot;
+  for (const slot of carrying.filter((s) => s.phone)) {
     if (await contactDeclinesChannel(customerId, { phone: slot.phone, role: slot.role }, 'email', { dbh })) return true;
   }
   return false;

@@ -86,7 +86,8 @@ describe('project email service', () => {
     contactEmailDeclines.mockResolvedValueOnce(true);
     const res = await ProjectEmail.sendProjectReportReady({ project: project(), customer: withContact, reportUrl: 'https://portal.wavespestcontrol.com/report/project/x' });
     expect(res).toEqual({ ok: false, blocked: true, deduped: false, reason: 'contact_declined', messageId: null });
-    expect(contactEmailDeclines).toHaveBeenCalledWith('cust-1', 'tenant@example.com');
+    // A recipient resolved as a service contact must still occupy a slot at the handoff (codex r26 security P2).
+    expect(contactEmailDeclines).toHaveBeenCalledWith('cust-1', 'tenant@example.com', { requireSlot: true });
     // Allowed at the handoff: the send goes through as before.
     EmailTemplates.sendTemplate.mockImplementationOnce(async (opts) => {
       expect(await opts.onQueued()).toBe(true);

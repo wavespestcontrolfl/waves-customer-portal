@@ -417,6 +417,26 @@ describe('contactEmailDeclines (single-recipient emails addressed to the estimat
     delete process.env.GATE_CONTACT_LOGIN;
     expect(await ContactPrefs.contactEmailDeclines('cust-1', 'terry@example.com')).toBe(false);
   });
+
+  // The project-email handoff asks with requireSlot for a recipient resolved
+  // as a service contact: an address the holder removed since is a former
+  // contact's and is held; a kept slot and the holder's address are judged
+  // as before; a phone-less slot still carrying the address counts as present.
+  test('requireSlot: an address in no slot, or a vanished customer row, declines; a kept slot (even phone-less) and the holder\'s address do not', async () => {
+    const opts = { requireSlot: true };
+    rows = [];
+    expect(await ContactPrefs.contactEmailDeclines('cust-1', 'stranger@example.com', opts)).toBe(true);
+    expect(await ContactPrefs.contactEmailDeclines('cust-1', 'sam@example.com', opts)).toBe(false);
+    expect(await ContactPrefs.contactEmailDeclines('cust-1', 'pat@example.com', opts)).toBe(false);
+    customer = { ...CUSTOMER, service_contact_phone: null };
+    expect(await ContactPrefs.contactEmailDeclines('cust-1', 'sam@example.com', opts)).toBe(false);
+    rows = [{ customer_id: 'cust-1', phone_key: '9415550303', email_enabled: false }];
+    expect(await ContactPrefs.contactEmailDeclines('cust-1', 'terry@example.com', opts)).toBe(true);
+    customer = null;
+    expect(await ContactPrefs.contactEmailDeclines('cust-1', 'sam@example.com', opts)).toBe(true);
+    delete process.env.GATE_CONTACT_LOGIN;
+    expect(await ContactPrefs.contactEmailDeclines('cust-1', 'stranger@example.com', opts)).toBe(false);
+  });
 });
 
 describe('contactEmailOffPhoneKeys / whereContactEmailAllowed (review candidates + the inline email dispatch claim, codex r20)', () => {
