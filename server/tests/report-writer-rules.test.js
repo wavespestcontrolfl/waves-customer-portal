@@ -650,6 +650,32 @@ describe('pest writer adapter, rejection detail and repair note', () => {
     expect(rejectedDraftRepairNote({ draft: 'D', rejection: 'banned:gone,cleared' })).toContain('("gone", "cleared")');
     expect(rejectedDraftRepairNote({ draft: 'D', rejection: null })).toBe('');
   });
+
+  // 2026-10-22 replay: the refused date was the supplied REACH-OUT DATE, so naming
+  // it sent the writer back to the same sentence four times. The note now names
+  // what in that sentence was wrong.
+  test('a refused REACH-OUT DATE names the visit word in its sentence and how to write it', () => {
+    const allowedDates = ['Thursday, October 22', 'October 22'];
+    const draft = "WHAT WE FOUND\nAnts.\nWHAT WE DID AND WHY\nWe sprayed.\nWHAT TO EXPECT\nFewer ants.\nWHAT'S NEXT\nIf ants are still trailing by the kitchen window or back door threshold on Thursday, October 22, text or call us.";
+    const detail = writerRulesRejectionDetail(draft, { allowedDates });
+    expect(detail).toEqual({ reason: 'date', match: 'Thursday, October 22', dateUse: { why: 'visit_word', visitWord: 'window' } });
+    const note = rejectedDraftRepairNote({ draft, rejection: 'date', detail, includeDraft: false });
+    expect(note).toContain('also says "window", which reads as a visit or an arrival window');
+    expect(note).toContain('"If you still see them on Thursday, October 22, text or call us."');
+    expect(note).not.toContain('The words that tripped it: "Thursday, October 22"');
+    // The sentence the note asks for passes the same screen.
+    expect(writerRulesRejection("WHAT'S NEXT\nIf you still see ants on Thursday, October 22, text or call us.", { allowedDates })).toBeNull();
+  });
+
+  test('a REACH-OUT DATE with no contact request, or ending a period, says so', () => {
+    const allowedDates = ['Thursday, October 22', 'October 22'];
+    const noContact = writerRulesRejectionDetail("WHAT'S NEXT\nAnts may still trail on Thursday, October 22.", { allowedDates });
+    expect(noContact.dateUse).toEqual({ why: 'no_contact', visitWord: null });
+    expect(rejectedDraftRepairNote({ draft: 'D', rejection: 'date', detail: noContact })).toContain('may appear only in a sentence that asks the customer to text or call us');
+    const period = writerRulesRejectionDetail("WHAT'S NEXT\nProtection lasts through October 22, so call us after that.", { allowedDates });
+    expect(period.dateUse.why).toBe('ends_a_period');
+    expect(rejectedDraftRepairNote({ draft: 'D', rejection: 'date', detail: period })).toContain('never the end of a period');
+  });
 });
 
 // Owner 2026-10-12 ("do whatever you recommend", page KaGtESkh): the writer

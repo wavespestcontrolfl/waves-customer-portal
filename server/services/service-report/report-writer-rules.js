@@ -710,9 +710,15 @@ function writerRulesRejectionDetail(text, { activeIngredients = [], allowedPhras
   for (const date of dates) {
     const datePattern = new RegExp(`(?<![\\w-])${allowedPhrasePattern(date)}(?![\\w-])`, 'i');
     const durationEnd = new RegExp(`${DURATION_END_BEFORE_DATE}${allowedPhrasePattern(date)}(?![\\w-])`, 'i');
-    if (sentences.some((sentence) => datePattern.test(sentence)
-      && (REACH_OUT_DATE_MISUSE_RE.test(sentence) || !REACH_OUT_CONTACT_RE.test(sentence) || durationEnd.test(sentence)))) {
-      return { reason: 'date', match: String(date).trim() };
+    const misused = sentences.find((sentence) => datePattern.test(sentence)
+      && (REACH_OUT_DATE_MISUSE_RE.test(sentence) || !REACH_OUT_CONTACT_RE.test(sentence) || durationEnd.test(sentence)));
+    if (misused) {
+      // Why the supplied date was refused, for the repair note: a word in its
+      // sentence that reads as a visit ("by the kitchen window" trips the
+      // arrival-window cue), no request to contact us, or a period it ends.
+      const visitWord = REACH_OUT_DATE_MISUSE_RE.exec(misused)?.[0] || null;
+      const why = visitWord ? 'visit_word' : (durationEnd.test(misused) ? 'ends_a_period' : 'no_contact');
+      return { reason: 'date', match: String(date).trim(), dateUse: { why, visitWord } };
     }
   }
   // An allowed phrase passes only where it belongs: inside WHAT TO EXPECT
@@ -776,6 +782,23 @@ const REPAIR_DRAFT_MAX = 4000;
 // the words that tripped it when known, and (for the provider that wrote it)
 // the draft itself. `detail` is writerRulesRejectionDetail of that draft. A
 // draft refused for an access code is never sent anywhere again.
+// The supplied REACH-OUT DATE was the date the screen refused, so naming it as
+// "the words that tripped it" sent the writer back to the same sentence: a
+// 2026-10-22 replay of a re-service visit wrote "If ants are still trailing by
+// the kitchen window … on Thursday, October 22, text or call us." on all four
+// tries ("window" reads as an arrival window), and the report fell back to the
+// fixed copy. The note now names what was wrong with the date's sentence and
+// how to write it.
+function reachOutDateRepair({ match, dateUse }) {
+  if (dateUse.why === 'visit_word') {
+    return ` The sentence with the REACH-OUT DATE (${match}) also says "${dateUse.visitWord}", which reads as a visit or an arrival window. Put that date in its own short sentence that only asks the customer to text or call us, with no place in it (for example "If you still see them on ${match}, text or call us."), and name the place in the sentence before it.`;
+  }
+  if (dateUse.why === 'ends_a_period') {
+    return ` The REACH-OUT DATE (${match}) is the day to get in touch, never the end of a period ("until …", "through …").`;
+  }
+  return ` The REACH-OUT DATE (${match}) may appear only in a sentence that asks the customer to text or call us.`;
+}
+
 function rejectedDraftRepairNote({ draft, rejection, detail = null, includeDraft = true } = {}) {
   if (!rejection) return '';
   const code = String(rejection);
@@ -784,7 +807,9 @@ function rejectedDraftRepairNote({ draft, rejection, detail = null, includeDraft
   const why = bannedWords.length
     ? `it uses words the report refuses (${bannedWords.map((word) => `"${word}"`).join(', ')})`
     : (REPAIR_REASONS[code] || 'it broke one of the OWNER RULES');
-  const words = detail && detail.reason === code && detail.match ? ` The words that tripped it: "${detail.match}".` : '';
+  const words = code === 'date' && detail?.reason === 'date' && detail.dateUse
+    ? reachOutDateRepair(detail)
+    : (detail && detail.reason === code && detail.match ? ` The words that tripped it: "${detail.match}".` : '');
   const shown = includeDraft && code !== 'access_code' && draft
     ? `\n\nPREVIOUS DRAFT (rejected; never reuse its wording where it broke the rule):\n${String(draft).slice(0, REPAIR_DRAFT_MAX)}`
     : '';
