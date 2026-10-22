@@ -18,7 +18,7 @@ jest.mock('../config/twilio-numbers', () => ({
 
 const db = require('../models/db');
 const CallRecordingProcessor = require('../services/call-recording-processor');
-const { findCustomerViaCallbackSpokenNumber } = CallRecordingProcessor._test;
+const { findCustomerViaCallbackSpokenNumber, callbackSpokenNumberSuggested, pickSpokenNumberOwner } = CallRecordingProcessor._test;
 const familyLink = require('../services/call-family-name-link');
 
 const DIALED = '+19415550199';
@@ -28,14 +28,20 @@ const PARENT_ID = '11111111-1111-4111-8111-111111111111';
 // Thenable knex-builder mock: chain methods return the builder; `first` and a
 // bare await each take the next queued result for the table, in call order.
 let tablesRead;
+let whereArgs;
 function mockDb(queues) {
   tablesRead = [];
+  whereArgs = [];
   db.mockImplementation((table) => {
     tablesRead.push(table);
-    const next = (fallback) => Promise.resolve((queues[table] || []).shift() ?? fallback);
+    const next = (fallback) => {
+      const v = (queues[table] || []).shift();
+      return v instanceof Error ? Promise.reject(v) : Promise.resolve(v ?? fallback);
+    };
     const builder = {
-      where: () => builder,
+      where: (...a) => { whereArgs.push([table, ...a]); return builder; },
       whereNull: () => builder,
+      whereIn: () => builder,
       whereNot: () => builder,
       whereRaw: () => builder,
       orWhereRaw: () => builder,
@@ -337,8 +343,18 @@ describe('callback_spoken_number basis of the family-account card', () => {
 
   test('a failed card write is swallowed (the pass decides not to mint a customer from the read-only match, not from the card)', async () => {
     const { conn, inserted } = cardTrx({ customers: [...matchQueue(), ...matchQueue()], failInsert: true });
-    await expect(familyLink.fileFamilyAccountCard(args(conn))).resolves.toBeNull();
+    const report = {};
+    await expect(familyLink.fileFamilyAccountCard(args(conn, { report }))).resolves.toBeNull();
     expect(inserted).toHaveLength(0);
+    // …and it says so, so the pass retries instead of finalizing without the card.
+    expect(report.failed).toBe('XX000');
+  });
+
+  test('a card that is written leaves the report clean', async () => {
+    const { conn } = cardTrx({ customers: [...matchQueue(), ...matchQueue()] });
+    const report = {};
+    await familyLink.fileFamilyAccountCard(args(conn, { report }));
+    expect(report.failed).toBeUndefined();
   });
 
   describe('the dialed number resolves only through address disambiguation', () => {
@@ -378,7 +394,7 @@ describe('callback_spoken_number basis of the family-account card', () => {
   test('the processor builds the lookup inputs once and shares them with the card and Step 3', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
     expect(src.match(/const contactLookupOpts = \{/g)).toHaveLength(1);
-    expect(src).toMatch(/fileFamilyAccountCard\(\{[^}]*contactLookupOpts,?\s*\}\)/);
+    expect(src).toMatch(/fileFamilyAccountCard\(\{[^}]*contactLookupOpts, report: familyCardReport,?\s*\}\)/);
     expect(src).toMatch(/const existing = await findCustomerForCallContact\(phone, extracted, \{\s*multiMatchOut: sharedPhoneAmbiguity,\s*\.\.\.contactLookupOpts,\s*\}\);/);
   });
 
@@ -406,21 +422,16 @@ describe('Step 3 keeps a spoken-number match suggest-only', () => {
     expect(branch).not.toMatch(/db\('(customers|triage_items)'\)/);
   });
 
-  test('the flag is the read-only match, set only after the normal lookup found nobody, never the card write', () => {
+  test('the flag comes from the fail-closed helper, set only after the normal lookup found nobody', () => {
     expect(src).not.toContain('familySuggestion');
     expect(src).toMatch(/let spokenNumberSuggested = false;/);
-    const set = src.indexOf('spokenNumberSuggested = !!(await findCustomerViaCallbackSpokenNumber(');
+    const set = src.indexOf('spokenNumberSuggested = await callbackSpokenNumberSuggested({');
     expect(set).toBeGreaterThan(0);
-    // inside the Step 3 block, after the normal lookup and only with no customer and no ambiguity
     expect(set).toBeGreaterThan(src.indexOf('const existing = await findCustomerForCallContact(phone, extracted, {'));
     expect(src.slice(set - 120, set)).toContain('if (!existing && !sharedPhoneAmbiguity.candidates) {');
-    expect(src).toMatch(/await require\('\.\/call-family-name-link'\)\.fileFamilyAccountCard\(/);
-  });
-
-  test('a card an operator closed by hand ends the suppression; a failed read keeps it', () => {
-    const set = src.indexOf('spokenNumberSuggested = !!(await findCustomerViaCallbackSpokenNumber(');
-    const tail = src.slice(set, set + 1400);
-    expect(tail).toMatch(/operatorClosedCard\(db, call\.id\)\.catch\(\(\) => false\)\) \{\s*spokenNumberSuggested = false;/);
+    // no swallow: a failed lookup must reach the helper's throw, never become "no match"
+    expect(src).not.toContain('spokenNumberSuggested = !!');
+    expect(src).toContain('cardReport: familyCardReport');
   });
 
   test('a deliberate customer-less result is not a customer_creation_failed, and the lead path stays unclaimed-only', () => {
@@ -432,5 +443,80 @@ describe('Step 3 keeps a spoken-number match suggest-only', () => {
     const routes = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-triage.js'), 'utf8');
     const gates = require('fs').readFileSync(require('path').join(__dirname, '../services/call-routing-gates.js'), 'utf8');
     for (const text of [src, routes, gates]) expect(text).not.toContain('callback_spoken_number_link');
+  });
+});
+
+// Codex #6419 r7: FAIL CLOSED AND RETRYABLE. Any failure in the spoken-number path throws into the pass's
+// outer guard (the existing capped extraction_failed retry) instead of reading as "no match" or finalizing.
+describe('callbackSpokenNumberSuggested (fail closed, retryable)', () => {
+  const run = (over = {}) => callbackSpokenNumberSuggested({ call: callbackCall(), extracted: extractedJordan, conn: db, ...over });
+  const unresolved = (reason) => expect.objectContaining({ code: 'CALLBACK_SPOKEN_NUMBER_UNRESOLVED', message: expect.stringContaining(reason) });
+
+  test('a match nobody closed: true (the pass creates no customer)', async () => {
+    mockDb({ call_log: [voicemail()], customers: [[customer()]], triage_items: [null] });
+    await expect(run()).resolves.toBe(true);
+  });
+
+  test('no match: false', async () => {
+    mockDb({ call_log: [voicemail()], customers: [[]] });
+    await expect(run()).resolves.toBe(false);
+  });
+
+  test('gate off: false, even with a lost card (nothing in this path runs)', async () => {
+    delete process.env.GATE_CALLBACK_SPOKEN_NUMBER_LINK;
+    mockDb({ call_log: [voicemail()], customers: [[customer()]] });
+    await expect(run({ cardReport: { failed: 'XX000' } })).resolves.toBe(false);
+    expect(tablesRead).toEqual([]);
+  });
+
+  test('a failed lookup is UNKNOWN, not "no match": it throws the retryable error and names no phone', async () => {
+    mockDb({ call_log: [voicemail()], customers: [Object.assign(new Error(`could not read ${SPOKEN} for Jordan`), { code: '57P01' })] });
+    const err = await run().catch((e) => e);
+    expect(err).toMatchObject({ code: 'CALLBACK_SPOKEN_NUMBER_UNRESOLVED' });
+    expect(err.message).toContain('57P01');
+    expect(err.message).not.toContain(SPOKEN);
+    expect(err.message).not.toContain('Jordan');
+  });
+
+  test('a failed read of the related call throws too', async () => {
+    mockDb({ call_log: [Object.assign(new Error('boom'), { code: '08006' })] });
+    await expect(run()).rejects.toEqual(unresolved('08006'));
+  });
+
+  test('a match whose card could not be written throws instead of finalizing', async () => {
+    mockDb({ call_log: [voicemail()], customers: [[customer()]], triage_items: [null] });
+    await expect(run({ cardReport: { failed: 'XX000' } })).rejects.toEqual(unresolved('card_XX000'));
+  });
+
+  test('no match and a failed card write (an unrelated card): false', async () => {
+    mockDb({ call_log: [voicemail()], customers: [[]] });
+    await expect(run({ cardReport: { failed: 'XX000' } })).resolves.toBe(false);
+  });
+
+  test('a card a person closed by hand ends the suppression, lost card or not', async () => {
+    mockDb({ call_log: [voicemail()], customers: [[customer()]], triage_items: [{ id: 'closed' }] });
+    await expect(run({ cardReport: { failed: 'XX000' } })).resolves.toBe(false);
+  });
+
+  test('a failed read of the human-closed state throws (it keeps the suppression and retries)', async () => {
+    mockDb({ call_log: [voicemail()], customers: [[customer()]], triage_items: [Object.assign(new Error('x'), { code: '57014' })] });
+    await expect(run()).rejects.toEqual(unresolved('57014'));
+  });
+});
+
+describe('the spoken-number owner is a live account', () => {
+  test('the query filters on active and not soft-deleted (any pipeline stage, like the phone basis)', async () => {
+    mockDb({ call_log: [voicemail()], customers: [[customer()]] });
+    await findCustomerViaCallbackSpokenNumber(callbackCall(), extractedJordan);
+    expect(whereArgs).toContainEqual(['customers', 'active', true]);
+  });
+
+  test('pickSpokenNumberOwner counts only the rows it is given, and refuses a crowded number', () => {
+    const a = customer({ id: 'a' });
+    const b = customer({ id: 'b', first_name: 'Morgan' });
+    expect(pickSpokenNumberOwner([a, b], SPOKEN, 'jordan')?.id).toBe('a');
+    expect(pickSpokenNumberOwner([a, customer({ id: 'c' })], SPOKEN, 'jordan')).toBeNull();
+    expect(pickSpokenNumberOwner(Array.from({ length: 26 }, (_, i) => customer({ id: `x${i}` })), SPOKEN, 'jordan')).toBeNull();
+    expect(pickSpokenNumberOwner(null, SPOKEN, 'jordan')).toBeNull();
   });
 });

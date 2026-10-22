@@ -4961,42 +4961,91 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
 // backfills or texts from it (the
 // number was said by whoever left the voicemail, so it proves nothing about the
 // person who answered). Read-only; gate off: null, no query.
-async function findCustomerViaCallbackSpokenNumber(call = {}, extracted = {}, opts = {}) {
+// What an admin callback must carry before its voicemail's number is looked at: the gate on, no operator
+// link, an OUTBOUND admin-callback naming a parent call, and a first name on the callback.
+// { relatedId, extractedFirst } or null. Pure.
+function callbackSpokenNumberTarget(call, extracted, opts) {
   if (!require('../config/feature-gates').callbackSpokenNumberLinkLive()) return null;
   if (opts.customerLinkOverride) return null;
   if (!isOutboundCall(call) || call.source !== 'admin-callback') return null;
   const relatedId = callMetadataObject(call).relatedCallId;
   if (!relatedId || !CALLBACK_PARENT_UUID_RE.test(String(relatedId))) return null;
   const extractedFirst = normalizeNamePart(extracted?.first_name);
-  if (!extractedFirst) return null;
-  const conn = opts.db || db;
-  const related = await conn('call_log').where({ id: String(relatedId) })
-    .first('id', 'direction', 'from_phone', 'call_outcome', 'answered_by', 'processing_status', 'ai_extraction');
-  // Any inbound call's "Call back" is also an admin-callback: only the voicemail
-  // this callback was dialed to (its ANI is the number dialed) counts.
+  return extractedFirst ? { relatedId: String(relatedId), extractedFirst } : null;
+}
+
+// The number the caller SPOKEN in the voicemail this callback was dialed to, or null. Any inbound
+// call's "Call back" is also an admin-callback: only the inbound voicemail whose caller ID is the
+// number dialed counts, and the spoken number must be a usable external line, different from the
+// dialed one by more than a misheard digit or two (the rule resolveCallContactPhone applies to a
+// dictated number). Pure.
+function spokenNumberOfVoicemailParent(call, related) {
   if (!related || !String(related.direction || '').toLowerCase().startsWith('inbound')) return null;
   if (!isVoicemailParent(related) || !samePhone(related.from_phone, call.to_phone)) return null;
   const spoken = firstExternalPhone(parseLooseJson(related.ai_extraction).phone);
-  if (!spoken || samePhone(spoken, call.to_phone)) return null;
-  // One or two digits off the dialed number is a misheard digit, not another line
-  // (the same rule resolveCallContactPhone applies to a dictated number).
-  if (phoneNearMissOfAni(spoken, call.to_phone)) return null;
-  // Direct lookup, first name only: a transcriber misspells a last name, and a
-  // household number can hold several people. Link only when exactly one live
-  // customer has the spoken number as their PRIMARY phone and the first name agrees.
-  const spokenKey = phoneKey(spoken);
-  const owners = await conn('customers')
-    .whereNull('deleted_at')
-    .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [spokenKey.slice(-10)])
-    .orderBy('updated_at', 'desc')
-    .limit(26);
-  // A number on more than 25 live customers is a business line, not a household:
-  // the sample could hide a second first-name match, so link no one.
-  if ((owners || []).length > 25) return null;
-  const named = (owners || []).filter((c) => customerPhoneMatches(spoken, c)
+  if (!spoken || samePhone(spoken, call.to_phone) || phoneNearMissOfAni(spoken, call.to_phone)) return null;
+  return spoken;
+}
+
+// The ONE live account that owns the spoken number as its PRIMARY phone under a first name that
+// agrees (a household number can hold several people; a transcriber misspells a last name). "Live" is
+// the family-account matchers' phone-basis predicate: active and not soft-deleted, any pipeline
+// stage (a quote-form customer is still a lead stage). A number on more than 25 accounts is a
+// business line, and the sample could hide a second match, so link no one. Pure.
+const MAX_SPOKEN_NUMBER_OWNERS = 25;
+function pickSpokenNumberOwner(owners, spoken, extractedFirst) {
+  if (!Array.isArray(owners) || owners.length > MAX_SPOKEN_NUMBER_OWNERS) return null;
+  const named = owners.filter((c) => customerPhoneMatches(spoken, c)
     && normalizeNamePart(c.first_name)
     && sameSpokenFirstName(extractedFirst, normalizeNamePart(c.first_name)));
   return named.length === 1 ? named[0] : null;
+}
+
+// Returns the account, or null for "no match". A failed query THROWS: the caller must not read that
+// as "no match" (see callbackSpokenNumberSuggested).
+async function findCustomerViaCallbackSpokenNumber(call = {}, extracted = {}, opts = {}) {
+  const target = callbackSpokenNumberTarget(call, extracted, opts);
+  if (!target) return null;
+  const conn = opts.db || db;
+  const related = await conn('call_log').where({ id: target.relatedId })
+    .first('id', 'direction', 'from_phone', 'call_outcome', 'answered_by', 'processing_status', 'ai_extraction');
+  const spoken = spokenNumberOfVoicemailParent(call, related);
+  if (!spoken) return null;
+  const owners = await conn('customers')
+    .where('active', true)
+    .whereNull('deleted_at')
+    .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneKey(spoken).slice(-10)])
+    .orderBy('updated_at', 'desc')
+    .limit(MAX_SPOKEN_NUMBER_OWNERS + 1);
+  return pickSpokenNumberOwner(owners, spoken, target.extractedFirst);
+}
+
+// A spoken-number failure that must neither create a customer nor finalize the call: thrown into the
+// pass's outer guard, which stamps the existing capped extraction_failed retry (and its blocking card at
+// the cap). The message carries a reason code only: a DB error message can echo the bound phone.
+function callbackSpokenNumberUnresolved(reason) {
+  const err = new Error(`callback spoken-number path unresolved (${reason})`);
+  err.code = 'CALLBACK_SPOKEN_NUMBER_UNRESOLVED';
+  return err;
+}
+
+// True when an office callback's voicemail number is the primary phone of one account and no person
+// closed the suggestion (so the pass creates no customer). FAILS CLOSED AND RETRYABLE: a failed lookup
+// or read (unknown, not "no match"), or a match whose family-account card could not be written
+// (`cardReport.failed`, set by fileFamilyAccountCard), throws instead of returning false.
+async function callbackSpokenNumberSuggested({ call, extracted, customerLinkOverride = null, cardReport = null, conn = db }) {
+  let match;
+  try {
+    match = await findCustomerViaCallbackSpokenNumber(call, extracted, { customerLinkOverride, db: conn });
+    // A person who closed the account suggestion by hand ("not them") has decided: the pass goes
+    // back to what it did before this gate.
+    if (match && await require('./call-family-name-link').operatorClosedCard(conn, call.id)) return false;
+  } catch (e) {
+    throw callbackSpokenNumberUnresolved(e?.code || e?.name || 'db_error');
+  }
+  if (!match) return false;
+  if (cardReport?.failed) throw callbackSpokenNumberUnresolved(`card_${cardReport.failed}`);
+  return true;
 }
 
 async function registerScheduleSideEffects({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType, closeReminderWindows = false, callbackNumberHoldActive = false, disclaimedPhone = null, callLogId = null }) {
@@ -14193,9 +14242,12 @@ const CallRecordingProcessor = {
       // duplicate customer (codex round-10 P2).
       avDecisive: ['validated_accept', 'corrected'].includes(effectiveAddressValidation?.status),
     };
+    // fileFamilyAccountCard never throws; it reports a failed card write here, and a callback match whose
+    // card could not be written retries the call instead of finalizing it (callbackSpokenNumberSuggested).
+    const familyCardReport = {};
     if (!customerLinkOverride) {
       await require('./call-family-name-link').fileFamilyAccountCard({
-        call, procToken, extracted, v2CanonicalExtraction, statedAddress: v2StatedServiceAddressRaw, phone, isOutbound: isOutboundCall(call), contactLookupOpts,
+        call, procToken, extracted, v2CanonicalExtraction, statedAddress: v2StatedServiceAddressRaw, phone, isOutbound: isOutboundCall(call), contactLookupOpts, report: familyCardReport,
       });
     }
     const sharedPhoneAmbiguity = {};
@@ -14215,17 +14267,7 @@ const CallRecordingProcessor = {
         ...contactLookupOpts,
       });
       if (!existing && !sharedPhoneAmbiguity.candidates) {
-        spokenNumberSuggested = !!(await findCustomerViaCallbackSpokenNumber(call, extracted, { customerLinkOverride }).catch((e) => {
-          // Code and name only: a query error message can carry the bound phone and names.
-          logger.warn(`[call-proc] Callback spoken-number lookup failed for ${maskSid(callSid)}: ${e?.code || e?.name || 'error'}`);
-          return null;
-        }));
-        // A person who closed the account suggestion by hand ("not them") has decided: the pass goes
-        // back to what it did before this gate. A failed read keeps the suppression (no duplicate).
-        if (spokenNumberSuggested
-          && await require('./call-family-name-link').operatorClosedCard(db, call.id).catch(() => false)) {
-          spokenNumberSuggested = false;
-        }
+        spokenNumberSuggested = await callbackSpokenNumberSuggested({ call, extracted, customerLinkOverride, cardReport: familyCardReport });
       }
       if (existing) {
         customerId = existing.id;
@@ -25372,6 +25414,8 @@ CallRecordingProcessor._test = {
   extractedNameMatchesCustomer,
   findCustomerForCallContact,
   findCustomerViaCallbackSpokenNumber,
+  callbackSpokenNumberSuggested,
+  pickSpokenNumberOwner,
   firstNameAdvisoryAddressOk,
   normalizeCallExtraction,
   shouldCreateCallLeadForCustomer,

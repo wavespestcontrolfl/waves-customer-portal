@@ -460,7 +460,7 @@ async function retireOpenCard(trx, callLogId) {
  * it was.
  */
 async function fileFamilyAccountCard({
-  call, procToken = null, extracted, v2CanonicalExtraction, statedAddress, phone, isOutbound, contactLookupOpts = {}, conn = db,
+  call, procToken = null, extracted, v2CanonicalExtraction, statedAddress, phone, isOutbound, contactLookupOpts = {}, report = null, conn = db,
 }) {
   try {
     let suggestion = null;
@@ -495,6 +495,9 @@ async function fileFamilyAccountCard({
     });
     return suggestion;
   } catch (e) {
+    // `report` lets a caller that must not proceed on a lost card (the callback basis) tell a failed write
+    // from "no card owed".
+    if (report) report.failed = e.code || e.name || 'error';
     logger.warn(`[call-family-link] card skipped for call ${call.id}: ${e.code || e.name || 'error'}`);
     return null;
   }
