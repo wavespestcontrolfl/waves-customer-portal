@@ -3211,7 +3211,7 @@ comes from its usable photos whose shot has positive color weight in
 shade and hot-edge shots; detail shots do not count) when the visit was read under
 the shot-list prompt, and from EVERY usable photo when it was read under the legacy
 prompt (one whole-visit color score from all photos); which prompt is decided from
-the run's own stored prompt version, never from today's gate. A visit whose usable photos are all direct sun (full sun, sun with shadows) is sun with shadows; any other mix (sun beside cloud or shade, or any low light in the mix) is mixed light (`mixed_light`, visit level only, never a model answer), compared with nothing. Any prompt position with no stored photo row (its insert failed) or no
+the run's own stored prompt version, never from today's gate. A visit whose usable photos are all direct sun (full sun, sun with shadows) is sun with shadows; any other mix (sun beside cloud or shade, or any low light in the mix) is mixed light (`mixed_light`, never a model answer), compared with nothing. A photo read as overcast or open shade with hard shadows contradicts itself (a hard shadow needs direct sun), so that photo is mixed light too, and so is its visit. Any prompt position with no stored photo row (its insert failed) or no
 light read makes the visit's light unknown.
 
 Every code path that reads the gate (`lawnLightingLive()` in

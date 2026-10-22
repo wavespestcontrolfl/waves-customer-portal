@@ -57,14 +57,15 @@ const COMPATIBLE = Object.freeze({
 
 // A visit whose usable photos sit in different kinds of light (sun beside cloud or
 // shade, or any low light in the mix): its one color score rests on no single light,
-// so it is never compared. Visit level only: the model never answers it (LIGHTING is
-// the model's closed set), and it is in no COMPATIBLE row.
+// so it is never compared. Also the light of one photo whose read contradicts itself:
+// overcast or open shade with hard shadows across the turf (a hard shadow needs direct
+// sun), so that read never joins the sun group or the diffuse group. The model never
+// answers it (LIGHTING is the model's closed set), and it is in no COMPATIBLE row.
 const MIXED_LIGHT = 'mixed_light';
 
 const DIFFUSE = new Set(['overcast', 'open_shade']);
 // Direct sun, with or without shadows on the turf: the visit-level sun group.
 const SUNNY = new Set(['full_sun', 'mixed_sun_shade']);
-const HARD_LIGHT = new Set(['full_sun', 'overcast', 'open_shade']);
 const USABLE_QUALITY = new Set(['adequate', 'limited']);
 
 /**
@@ -80,13 +81,17 @@ function normalizeLightRead(entry) {
 }
 
 /**
- * The light a photo counts as for comparison: hard shadows across the turf make
- * any single-light read a mixed one (shadowed and sunlit turf in one frame).
+ * The light a photo counts as for comparison. Hard shadows across the turf mean
+ * direct sun on part of it: full sun with hard shadows is sun with shadows (the sun
+ * group), and an overcast or open-shade read with hard shadows contradicts itself,
+ * so it is mixed light and never compared.
  */
 function effectiveLight(read) {
   if (!read || typeof read !== 'object') return 'unknown';
   const { lighting, hard_shadows: hardShadows } = normalizeLightRead(read);
-  return hardShadows === true && HARD_LIGHT.has(lighting) ? 'mixed_sun_shade' : lighting;
+  if (hardShadows !== true) return lighting;
+  if (lighting === 'full_sun') return 'mixed_sun_shade';
+  return DIFFUSE.has(lighting) ? MIXED_LIGHT : lighting;
 }
 
 /** True when two light reads (visit or photo level) may be compared on color. */
@@ -166,7 +171,8 @@ const readUnderShotList = (promptVersion) => typeof promptVersion === 'string' &
  *   - all overcast / open shade                   -> overcast (open_shade if none is overcast)
  *   - all direct sun (full sun, sun with shadows) -> mixed_sun_shade
  *   - anything else (sun beside cloud or shade,    -> mixed_light, never compared
- *     or any low light in a mix)
+ *     any low light in a mix, or any photo in
+ *     mixed light: a diffuse read with hard shadows)
  * @param {Array<{light:string, quality?:string, zone?:string|null}>} photos
  */
 function visitLightFromPhotos(photos, { shotList: shotListPrompt = true } = {}) {
@@ -176,7 +182,7 @@ function visitLightFromPhotos(photos, { shotList: shotListPrompt = true } = {}) 
   const overview = (Array.isArray(photos) ? photos : [])
     .filter((p) => p && USABLE_QUALITY.has(p.quality) && (!shotListPrompt || shotList.areaWeight(p.zone) > 0));
   if (!overview.length) return 'unknown';
-  const lights = overview.map((p) => (LIGHTING.includes(p.light) ? p.light : 'unknown'));
+  const lights = overview.map((p) => (LIGHTING.includes(p.light) || p.light === MIXED_LIGHT ? p.light : 'unknown'));
   if (lights.includes('unknown')) return 'unknown';
   const distinct = new Set(lights);
   if (distinct.size === 1) return lights[0];

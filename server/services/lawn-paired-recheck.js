@@ -43,8 +43,9 @@
  * Lighting (GATE_LAWN_LIGHTING, owner 2026-10-04): read under lawn-paired-recheck-v3.
  * Each photo's stored light read (the visit assessment's, never a new model call)
  * rides the request, and a pair whose two photos are not in compatible light
- * (lawn-lighting.js: full_sun with full_sun, overcast and open_shade with each
- * other; everything else, and any photo with no read, is NOT comparable) is told
+ * (lawn-lighting.js: full_sun and mixed_sun_shade with each other, overcast and
+ * open_shade with each other; everything else, an overcast or open-shade read with
+ * hard shadows, and any photo with no read, is NOT comparable) is told
  * to judge density, weeds and damaged patches only. The server enforces it too:
  * `color` is dropped from such a pair's what_changed, and a better / worse verdict
  * that rested on color alone is not written. A failed read of the stored light

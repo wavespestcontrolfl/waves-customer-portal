@@ -54,14 +54,17 @@ describe('the color dead band', () => {
 });
 
 describe('a photo\'s light read', () => {
-  test('hard shadows turn any single-light read into mixed sun and shade; a cannot-tell answer stays null', () => {
+  test('hard shadows make full sun into sun with shadows and a cloud or shade read into mixed light; a cannot-tell answer stays null', () => {
     expect(lighting.normalizeLightRead({ lighting: 'full_sun', hard_shadows: 'yes' })).toEqual({ lighting: 'full_sun', hard_shadows: true });
     expect(lighting.normalizeLightRead({ lighting: 'overcast', hard_shadows: 'no' })).toEqual({ lighting: 'overcast', hard_shadows: false });
     expect(lighting.normalizeLightRead({ lighting: 'overcast', hard_shadows: 'unknown' })).toEqual({ lighting: 'overcast', hard_shadows: null });
     expect(lighting.normalizeLightRead({ lighting: 'neon', hard_shadows: 'maybe' })).toEqual({ lighting: 'unknown', hard_shadows: null });
     expect(lighting.normalizeLightRead(undefined)).toEqual({ lighting: 'unknown', hard_shadows: null });
     expect(lighting.effectiveLight({ lighting: 'full_sun', hard_shadows: true })).toBe('mixed_sun_shade');
-    expect(lighting.effectiveLight({ lighting: 'overcast', hard_shadows: true })).toBe('mixed_sun_shade');
+    expect(lighting.effectiveLight({ lighting: 'mixed_sun_shade', hard_shadows: true })).toBe('mixed_sun_shade');
+    expect(lighting.effectiveLight({ lighting: 'overcast', hard_shadows: true })).toBe(lighting.MIXED_LIGHT);
+    expect(lighting.effectiveLight({ lighting: 'open_shade', hard_shadows: 'yes' })).toBe(lighting.MIXED_LIGHT);
+    expect(lighting.effectiveLight({ lighting: 'open_shade', hard_shadows: false })).toBe('open_shade');
     expect(lighting.effectiveLight({ lighting: 'full_sun', hard_shadows: false })).toBe('full_sun');
     expect(lighting.effectiveLight({ lighting: 'full_sun', hard_shadows: null })).toBe('full_sun');
     expect(lighting.effectiveLight({ lighting: 'low_light', hard_shadows: true })).toBe('low_light');
@@ -155,6 +158,30 @@ describe('a visit\'s one light', () => {
     expect(lighting.colorComparability(sunny, 'full_sun')).toEqual({ comparable: true, reason: null });
     expect(lighting.colorComparability(sunny, 'mixed_sun_shade')).toEqual({ comparable: true, reason: null });
     expect(lighting.colorComparability(sunny, 'overcast')).toEqual({ comparable: false, reason: 'light_differs' });
+  });
+  // Codex #6475 r1: a hard shadow needs direct sun, so an overcast or open-shade read with
+  // hard shadows contradicts itself. It must not reach the sun group through
+  // mixed_sun_shade, and it is no diffuse read either: it compares with nothing.
+  test('a cloud or shade read with hard shadows is mixed light: never in the sun group, never compared', () => {
+    const run = {
+      photo_ids: ['p1', 'p2'],
+      photo_quality: [
+        { photo: 1, quality: 'adequate', lighting: 'full_sun', hard_shadows: 'no' },
+        { photo: 2, quality: 'adequate', lighting: 'overcast', hard_shadows: 'yes' },
+      ],
+    };
+    const photos = lighting.photoLightsFromRun(run);
+    expect(photos.map((photo) => photo.light)).toEqual(['full_sun', lighting.MIXED_LIGHT]);
+    const zoned = photos.map((photo, i) => ({ ...photo, zone: ['front', 'back'][i] }));
+    for (const visit of [lighting.visitLightFromPhotos(zoned), lighting.visitLightFromPhotos([zoned[1]])]) {
+      expect(visit).toBe(lighting.MIXED_LIGHT);
+      for (const other of ['full_sun', 'mixed_sun_shade', 'overcast', 'open_shade', lighting.MIXED_LIGHT]) {
+        expect(lighting.colorComparability(visit, other)).toEqual({ comparable: false, reason: 'light_differs' });
+      }
+    }
+    // the paired recheck compares photo by photo
+    expect(lighting.colorComparability(photos[1].light, 'full_sun').comparable).toBe(false);
+    expect(lighting.colorComparability(lighting.effectiveLight({ lighting: 'open_shade', hard_shadows: true }), 'open_shade').comparable).toBe(false);
   });
 });
 
