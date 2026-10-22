@@ -31,6 +31,7 @@ const { isEnabled } = require("../config/feature-gates");
 const { billingEmailDetailsLive, customerPropertyAddress, isStreetShapedAddress } = require("./billing-email-details");
 const { estimateDeliverableUnderGate } = require("./pricing-authority-gate");
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require("../constants/business");
+const { ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY } = require("../constants/email-replay-exclusions");
 const {
   assessDepositFollowUpEligibility,
   DEPOSIT_FOLLOWUP_WINDOW,
@@ -332,6 +333,118 @@ function moneySummary(est = {}) {
   return "";
 }
 
+// GATE_ESTIMATE_FOLLOWUP_MONTHLY_AVERAGE (owner 2026-10-21): the follow-up emails that
+// render the price row (unviewed, viewed, final, expiring notice) show the same
+// average copy as the delivery email. `estimate_average_note` is the context sentence
+// (a paragraph block the templates carry, dropped when blank). Built from a row read
+// now by emailAverageParts, the delivery email's own resolver and eligibility
+// (commercial, quote-required, closed, prepay/monthly-billed, one-time-only all
+// withheld). Returns the payload UNCHANGED (same object) with the gate off, when no
+// average applies, or when the template's ACTIVE version cannot show the context
+// sentence, so those emails stay byte-identical. A template the migration skipped
+// (custom plain-text body, price block removed, publish race) would otherwise print
+// the average price row without its note.
+const monthlyAverageService = () => require("./estimate-monthly-average");
+
+// Returns the id of the ACTIVE version it validated, or null. The send is then pinned
+// to that exact version (sendDualChannel passes it as versionId), so an admin publish
+// between this check and the send cannot put the average copy into a version without
+// the tokens. sendTemplate with a versionId sends that version as long as its template
+// is active, even if a newer version has since become the active one.
+async function averageNoteVersionId(templateKey) {
+  const loaded = await EmailTemplateLibrary.loadTemplateByKey(templateKey);
+  const version = loaded?.activeVersion;
+  if (!version?.id) return null;
+  // Both tokens: the average price row replaces {{price_summary}} and the note rides
+  // in {{estimate_average_note}}; a version missing either would print half of the copy.
+  const tokens = ["{{price_summary}}", "{{estimate_average_note}}"];
+  const blocks = typeof version.blocks === "string" ? version.blocks : JSON.stringify(version.blocks || []);
+  if (!tokens.every((token) => blocks.includes(token))) return null;
+  const text = version.text_body;
+  const supported = text == null || !String(text).trim() || tokens.every((token) => String(text).includes(token));
+  return supported ? version.id : null;
+}
+
+// { payload, versionId, averageText }: set only when the average was applied.
+// averageText is the exact copy put in the email (the send-time check compares it).
+async function applyMonthlyAverage(payload, est, templateKey) {
+  const unchanged = { payload, versionId: null, averageText: null };
+  if (!isEnabled("estimateFollowupMonthlyAverage")) return unchanged;
+  try {
+    const versionId = await averageNoteVersionId(templateKey);
+    if (!versionId) return unchanged;
+    const fresh = (await db("estimates").where({ id: est.id }).first()) || est;
+    const parts = await monthlyAverageService().emailAverageParts(fresh);
+    if (!parts) return unchanged;
+    return {
+      payload: { ...payload, price_summary: parts.priceLine, estimate_average_note: parts.note },
+      versionId,
+      averageText: monthlyAverageService().averageText(parts),
+    };
+  } catch (err) {
+    logger.warn(`[est-followup] monthly average skipped for estimate ${est?.id}: ${err.message}`);
+    return unchanged;
+  }
+}
+
+async function withMonthlyAverage(payload, est, templateKey) {
+  return (await applyMonthlyAverage(payload, est, templateKey)).payload;
+}
+
+// The email spec for sendDualChannel: carries `versionId` only when the average is in
+// the payload; otherwise the very same spec object comes back.
+async function withAverageEmail(email, est) {
+  const { payload, versionId, averageText } = await applyMonthlyAverage(email.payload, est, email.templateKey);
+  return versionId ? { ...email, payload, versionId, averageText } : email;
+}
+
+// Provider-boundary check for an email that carries the average: the estimate row is
+// read again right before the provider request (after the SMS leg and any PDF build),
+// and the send is vetoed unless the same resolver still gives the exact copy in the
+// email. A veto is a definite non-send (providerBoundaryBlocked); a read or resolver
+// failure is a definite non-send the library settles retryable
+// (providerBoundaryCheckFailed). Either way the caller releases the stage and the next
+// sweep sends fresh copy.
+function averageBoundaryCheck(estimateId, expectedText) {
+  return async () => {
+    let current;
+    try {
+      const row = await db("estimates").where({ id: estimateId }).first();
+      current = row ? monthlyAverageService().averageText(await monthlyAverageService().emailAverageParts(row)) : null;
+    } catch (err) {
+      const unavailable = new Error(`estimate ${estimateId} monthly average check unavailable: ${err.message}`);
+      unavailable.providerBoundaryCheckFailed = true;
+      unavailable.cause = err;
+      throw unavailable;
+    }
+    if (current !== expectedText) {
+      const veto = new Error(`estimate ${estimateId} not sent: monthly_average_changed`);
+      veto.providerBoundaryBlocked = true;
+      veto.reason = "monthly_average_changed";
+      throw veto;
+    }
+    return { ok: true };
+  };
+}
+
+// sendTemplate({ withProviderHandoff }) for an email with the average, composed with the
+// PDF fence when the attachment gate built one (both checks run, the PDF fence first).
+function averageProviderHandoff(estimateId, expectedText, pdfHandoff = null) {
+  const check = averageBoundaryCheck(estimateId, expectedText);
+  if (!pdfHandoff) {
+    return async (dispatch) => {
+      await dispatch(undefined, check);
+      return { ok: true };
+    };
+  }
+  return (dispatch) => pdfHandoff(async (database, pdfCheck) => {
+    await dispatch(database, async (args) => {
+      if (pdfCheck) await pdfCheck(args);
+      return check();
+    });
+  });
+}
+
 function estimateEmailPayload(est, firstName, estimateUrl, extra = {}) {
   const serviceSummary = inferEstimateServiceInterest({
     ...est,
@@ -554,17 +667,28 @@ async function sendDualChannel(est, { sms, email }) {
       const pdfCopy = await openEstimateEmailPdf({ estimateId: est.id, templateKey: email.templateKey, recipient: est.customer_email });
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: email.templateKey,
+        // Set only with the monthly average: pins the send to the template version
+        // whose tokens were checked (see averageNoteVersionId).
+        ...(email.versionId ? { versionId: email.versionId } : {}),
         to: est.customer_email,
         payload: await withFollowupPropertyRow(est, { ...(email.payload || {}), ...pdfCopy.payload }),
         ...(pdfCopy.attachments.length ? { attachments: pdfCopy.attachments } : {}),
-        // The fence rides every prepared send, with the file or without it.
-        ...(pdfCopy.withProviderHandoff ? { withProviderHandoff: pdfCopy.withProviderHandoff } : {}),
+        // The fence rides every prepared send, with the file or without it. With the
+        // monthly average the send-time average check rides too (composed with it).
+        ...(email.averageText
+          ? { withProviderHandoff: averageProviderHandoff(est.id, email.averageText, pdfCopy.withProviderHandoff) }
+          : (pdfCopy.withProviderHandoff ? { withProviderHandoff: pdfCopy.withProviderHandoff } : {})),
         recipientType: est.customer_id ? "customer" : "lead",
         recipientId: est.customer_id || null,
         triggerEventId: idempotencyKey,
         idempotencyKey,
         estimateId: est.id,
-        categories: ["estimate_followup", `estimate_followup_${email.stage}`],
+        categories: [
+          "estimate_followup",
+          `estimate_followup_${email.stage}`,
+          // Keeps the stored copy off the provider-retry and bounce-replay rails.
+          ...(email.averageText ? [ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY] : []),
+        ],
         // SendGrid rejection bodies can echo the recipient address — keep
         // them out of the provider log; the catch below redacts too.
         suppressProviderErrorLog: true,
@@ -572,6 +696,10 @@ async function sendDualChannel(est, { sms, email }) {
       if (result?.blocked) {
         logger.warn(
           `[est-followup] Email suppressed for estimate ${est.id} (${email.stage}): ${result.reason || "blocked"}`,
+        );
+      } else if (result?.aborted) {
+        logger.warn(
+          `[est-followup] Email not sent for estimate ${est.id} (${email.stage}): ${result.reason || "aborted"} — the next sweep retries`,
         );
       } else if (result?.deduped) {
         logger.info(
@@ -1275,11 +1403,11 @@ const EstimateFollowUp = {
           }
           const ok = await sendDualChannel(est, {
             sms: smsBody,
-            email: delivery.unviewed.emailEnabled ? {
+            email: delivery.unviewed.emailEnabled ? await withAverageEmail({
               templateKey: "estimate.unviewed_followup",
               stage: "unviewed",
               payload: estimateEmailPayload(est, firstName, emailUrl),
-            } : null,
+            }, est) : null,
           });
           if (ok) {
             await db("estimates")
@@ -1360,11 +1488,11 @@ const EstimateFollowUp = {
           }
           const ok = await sendDualChannel(est, {
             sms: smsBody,
-            email: delivery.viewed.emailEnabled ? {
+            email: delivery.viewed.emailEnabled ? await withAverageEmail({
               templateKey: "estimate.viewed_followup",
               stage: "viewed",
               payload: estimateEmailPayload(est, firstName, emailUrl),
-            } : null,
+            }, est) : null,
           });
           if (ok) {
             await db("estimates")
@@ -1446,11 +1574,11 @@ const EstimateFollowUp = {
           }
           const ok = await sendDualChannel(est, {
             sms: smsBody,
-            email: delivery.final.emailEnabled ? {
+            email: delivery.final.emailEnabled ? await withAverageEmail({
               templateKey: "estimate.followup_final",
               stage: "final",
               payload: estimateEmailPayload(est, firstName, emailUrl),
-            } : null,
+            }, est) : null,
           });
           if (ok) {
             await db("estimates")
@@ -1563,14 +1691,14 @@ const EstimateFollowUp = {
           }
           const ok = await sendDualChannel(est, {
             sms: smsBody,
-            email: delivery.expiring.emailEnabled ? {
+            email: delivery.expiring.emailEnabled ? await withAverageEmail({
               templateKey: "estimate.expiring_notice",
               stage: "expiring",
               payload: {
                 ...estimateEmailPayload(est, firstName, emailUrl),
                 expires_at: expDate,
               },
-            } : null,
+            }, est) : null,
           });
           if (ok) {
             await db("estimates")
@@ -1626,6 +1754,8 @@ module.exports.deferredFollowupStillEligible = deferredFollowupStillEligible;
 module.exports._private = {
   sendDualChannel,
   estimateEmailPayload,
+  withMonthlyAverage,
+  withAverageEmail,
   renderTemplate,
   deferredFollowupStillEligible,
   checkDepositAbandoned,

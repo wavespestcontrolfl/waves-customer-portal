@@ -163,6 +163,7 @@ function FindTimeDrawer({ onClose, onBook }) {
               empty="No open hours that day."
               isCurrent={isCurrent}
               onPick={stale ? undefined : pick}
+              stopNames={availability?.chipStopNames === true}
             />
             {best.weekCovered !== false && (
               <BestRow
@@ -172,6 +173,7 @@ function FindTimeDrawer({ onClose, onBook }) {
                 empty="Nothing fits in the next 7 days."
                 isCurrent={isCurrent}
                 onPick={stale ? undefined : pick}
+                stopNames={availability?.chipStopNames === true}
               />
             )}
             <div className="mt-4 space-y-2">

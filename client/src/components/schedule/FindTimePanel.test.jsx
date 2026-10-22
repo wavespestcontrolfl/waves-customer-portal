@@ -190,6 +190,18 @@ describe('FindTimePanel', () => {
     expect(onBook.mock.calls[0][0].quickAddAddress).toEqual({ address: '200 Example Way Apt 4', city: 'Bradenton', state: 'FL', zip: '34200' });
   });
 
+  it('chips name the stop they follow when the server says so (GATE_BEST_TIMES_CHIP_STOP_NAMES)', async () => {
+    const today = etDateString();
+    const body = answer(today);
+    body.summary.best.day[0] = { ...body.summary.best.day[0], from_name: 'Stop A' };
+    body.summary.chip_stop_names = true;
+    stubFetch(body);
+    render(<FindTimePanel enabled onBook={vi.fn()} />);
+    await openAndPick();
+    await screen.findByTestId('find-time-results');
+    expect(screen.getAllByTestId('availability-hour')[0].textContent).toContain('after Stop A');
+  });
+
   it('a week-row chip books its own date', async () => {
     stubFetch(answer(etDateString()));
     const onBook = vi.fn();

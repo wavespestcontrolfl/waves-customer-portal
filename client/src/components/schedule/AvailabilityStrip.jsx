@@ -261,13 +261,22 @@ function emptyDayLine(day) {
   return 'no hour fits.';
 }
 
+// The stop a chip's hour would follow (GATE_BEST_TIMES_CHIP_STOP_NAMES,
+// owner 2026-10-21): "after <name>", or "from home base" for a first stop.
+// null when the engine named neither (capacity mode, an unpinned neighbour).
+export function stopPhrase(hour) {
+  if (hour.fromHomeBase === true) return 'from home base';
+  return hour.fromName ? `after ${hour.fromName}` : null;
+}
+
 // One line per fact, so four chips side by side stay readable: the time,
 // the drive here, what it adds to the day, rain, and whose route it is.
-export function HourChip({ hour, withDay, current, onPick, compact = false }) {
+export function HourChip({ hour, withDay, current, onPick, compact = false, stopNames = false }) {
   const here = driveHerePhrase(hour);
   const added = addedPhrase(hour);
   const rain = rainPhrase(hour.rainChance);
-  const lines = [here, added, rain, hour.technicianName].filter(Boolean);
+  const stop = stopNames ? stopPhrase(hour) : null;
+  const lines = [here, added, rain, hour.technicianName, stop].filter(Boolean);
   const label = withDay && compact ? fmtHour(hour.start) : `${withDay ? `${fmtDay(hour.date)} · ` : ''}${fmtHour(hour.start)}`;
   const muted = current ? { color: '#fff', opacity: 0.8 } : null;
   const rainInk = !current && Number(hour.rainChance) >= 40 ? { color: '#B45309' } : null;
@@ -291,7 +300,7 @@ export function HourChip({ hour, withDay, current, onPick, compact = false }) {
 
 // A row of best-times chips: four side by side, scrolling sideways on a
 // narrow screen rather than wrapping.
-export function BestRow({ title, hours, withDay, empty, isCurrent, onPick }) {
+export function BestRow({ title, hours, withDay, empty, isCurrent, onPick, stopNames }) {
   return (
     <div style={{ marginTop: 10 }}>
       <div style={{ marginBottom: 6, color: '#52525B' }}>{title}</div>
@@ -301,7 +310,7 @@ export function BestRow({ title, hours, withDay, empty, isCurrent, onPick }) {
       {hours.length ? (
         <div data-testid="best-row" style={bestRowStyle}>
           {hours.map((hour) => (
-            <HourChip key={`${hour.date}-${hour.start}-${hour.technicianId || ''}`} hour={hour} withDay={withDay} compact current={isCurrent(hour)} onPick={onPick} />
+            <HourChip key={`${hour.date}-${hour.start}-${hour.technicianId || ''}`} hour={hour} withDay={withDay} compact current={isCurrent(hour)} onPick={onPick} stopNames={stopNames} />
           ))}
         </div>
       ) : <div style={{ color: '#52525B' }}>{empty}</div>}
@@ -324,6 +333,7 @@ function BestRows({ availability, currentDate, isCurrent, onPick }) {
         empty="No open hours that day. The note above says why."
         isCurrent={isCurrent}
         onPick={onPick}
+        stopNames={availability.chipStopNames === true}
       />
       {best.weekCovered !== false && (
         <BestRow
@@ -333,6 +343,7 @@ function BestRows({ availability, currentDate, isCurrent, onPick }) {
           empty="Nothing fits in the next 7 days."
           isCurrent={isCurrent}
           onPick={onPick}
+          stopNames={availability.chipStopNames === true}
         />
       )}
     </>

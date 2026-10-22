@@ -3028,6 +3028,17 @@ const gates = {
   // Kill switch: unset GATE_ESTIMATE_MONTHLY_AVERAGE (read at boot; the Railway restart applies it).
   estimateMonthlyAverage: isProd ? process.env.GATE_ESTIMATE_MONTHLY_AVERAGE === 'true' : true,
 
+  // Monthly average in the estimate FOLLOW-UP emails (owner 2026-10-21, "follow-ups
+  // too"): the unviewed, viewed, final and expiring-notice emails carry the same
+  // price row and context sentence the delivery email does ("$94.00 per
+  // application · $31.33 a month", or "Priced per application · plan averages
+  // $72.30 a month", plus "Averaged over the year. You pay after each
+  // application."), built by the same shared builder and eligibility rules
+  // (emailAverageParts). Needs GATE_ESTIMATE_MONTHLY_AVERAGE ON too. Off or unset in
+  // prod: every follow-up payload is byte-identical to today.
+  // Kill switch: unset GATE_ESTIMATE_FOLLOWUP_MONTHLY_AVERAGE (read at boot; the Railway restart applies it).
+  estimateFollowupMonthlyAverage: isProd ? process.env.GATE_ESTIMATE_FOLLOWUP_MONTHLY_AVERAGE === 'true' : true,
+
   // Application-month breakdown (owner 2026-10-21, EST-2026-1185: "Which is
   // it? $113 a month or $189 a month?"). With the monthly average on, a plan
   // of one non-monthly service plus monthly services shows each service's
@@ -3660,6 +3671,15 @@ const gates = {
   // environment; scheduling/find-time-hints.js reads it through
   // gateEnvValue() at call time. Kill switch: unset — drive-only order.
   bookingRainRank: gateEnvValue('GATE_BOOKING_RAIN_RANK'),
+
+  // Best-times chip stop names (owner 2026-10-21): each best-times chip in
+  // the admin availability strip names the stop it would follow ("after
+  // <customer>") or "from home base" for a first stop, so the office sees
+  // why an hour is cheap without opening the route. Display only: which
+  // hours fit, their order and the save are unchanged. OFF in every
+  // environment; scheduling/find-time-hints.js reads it through
+  // gateEnvValue() at call time. Kill switch: unset — chips show numbers only.
+  bestTimesChipStopNames: gateEnvValue('GATE_BEST_TIMES_CHIP_STOP_NAMES'),
 
   // Customer rain rank (owner 2026-10-08): the same rain-fit rule on the
   // customer booking surfaces. buildBookingAvailability (routes/booking.js:
@@ -7014,3 +7034,5 @@ function dictationMoneyNormalizeLive() {
 }
 // GATE_DICTATION_MONEY_NORMALIZE reader, on its own line so gate PRs never conflict.
 module.exports.dictationMoneyNormalizeLive = dictationMoneyNormalizeLive;
+// Retired gate names, for the admin gate list (services/gate-list.js), on its own line.
+module.exports.RETIRED_GATES = RETIRED;
