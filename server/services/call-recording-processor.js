@@ -4988,7 +4988,10 @@ async function findCustomerViaCallbackSpokenNumber(call = {}, extracted = {}, op
     .whereNull('deleted_at')
     .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [spokenKey.slice(-10)])
     .orderBy('updated_at', 'desc')
-    .limit(25);
+    .limit(26);
+  // A number on more than 25 live customers is a business line, not a household:
+  // the sample could hide a second first-name match, so link no one.
+  if ((owners || []).length > 25) return null;
   const named = (owners || []).filter((c) => customerPhoneMatches(spoken, c)
     && normalizeNamePart(c.first_name)
     && sameSpokenFirstName(extractedFirst, normalizeNamePart(c.first_name)));

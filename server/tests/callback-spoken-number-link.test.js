@@ -176,6 +176,12 @@ describe('findCustomerViaCallbackSpokenNumber', () => {
     expect(await findCustomerViaCallbackSpokenNumber(callbackCall(), extractedJordan)).toBeNull();
   });
 
+  test('more than 25 customers share the number: null (the sample cannot prove uniqueness)', async () => {
+    const crowd = Array.from({ length: 26 }, (_, i) => customer({ id: `c${i}`, first_name: i === 0 ? 'Jordan' : 'Other' }));
+    mockDb({ call_log: [voicemail()], customers: [crowd] });
+    expect(await findCustomerViaCallbackSpokenNumber(callbackCall(), extractedJordan)).toBeNull();
+  });
+
   test('the number is only a secondary/slot phone on the customer: null', async () => {
     const slotOnly = customer({ phone: '+19415550177', secondary_phone: SPOKEN });
     mockDb({ call_log: [voicemail()], customers: [[slotOnly]] });
