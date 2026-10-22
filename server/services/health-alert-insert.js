@@ -64,13 +64,14 @@ async function insertFenced(trx, row) {
 
 // A caller whose transaction locks payment or invoice rows before the alert
 // insert calls this FIRST. executeMerge locks customers, then re-points
-// payments and invoices; taking the customer share lock first keeps the same
-// order, so the two cannot deadlock. Ids are sorted so two callers take them
-// in one order too. Re-locking the same rows in insertHealthAlert is free.
+// payments and invoices; taking the customer share locks first keeps the same
+// order, so the two cannot deadlock. Each id is resolved as insertHealthAlert
+// resolves it, so a retired id also locks its live merge winner here, not
+// later. The held locks keep any new merge of these rows out until commit, so
+// the later insert resolves to the same rows and re-locking them is free.
 async function lockAlertCustomers(trx, customerIds) {
   const ids = [...new Set(customerIds.filter(Boolean).map(String))].sort();
-  if (!ids.length) return;
-  await trx('customers').whereIn('id', ids).orderBy('id').forShare().select('id');
+  for (const id of ids) await resolveLiveCustomerId(trx, id);
 }
 
 async function insertHealthAlert(row, { trx } = {}) {

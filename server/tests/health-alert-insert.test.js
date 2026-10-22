@@ -115,20 +115,12 @@ test('without a trx it runs in its own transaction', async () => {
   expect(calls.inserts).toHaveLength(1);
 });
 
-test('lockAlertCustomers share-locks the distinct ids in sorted order, and skips an empty list', async () => {
-  const seen = [];
-  const trx = jest.fn(() => {
-    const c = {};
-    c.whereIn = jest.fn((col, ids) => { seen.push(ids); return c; });
-    c.orderBy = jest.fn(() => c);
-    c.forShare = jest.fn(() => c);
-    c.select = jest.fn(async () => []);
-    return c;
-  });
-  await lockAlertCustomers(trx, ['b', null, 'a', 'b', undefined]);
-  expect(seen).toEqual([['a', 'b']]);
-  await lockAlertCustomers(trx, [null]);
-  expect(trx).toHaveBeenCalledTimes(1);
+test('lockAlertCustomers locks each distinct id in sorted order, and the merge winner of a retired one', async () => {
+  const { trx, calls } = makeTrx({ live: new Set(['a', 'winner']), merges: { loser: 'winner' } });
+  await lockAlertCustomers(trx, ['loser', null, 'a', 'loser', undefined]);
+  expect(calls.customers.map((c) => c.filters.id)).toEqual(['a', 'loser', 'winner']);
+  expect(calls.customers.every((c) => c.forShare.mock.calls.length === 1)).toBe(true);
+  expect(calls.inserts).toHaveLength(0);
 });
 
 test('no server file inserts into customer_health_alerts directly, outside the fenced writers', () => {
