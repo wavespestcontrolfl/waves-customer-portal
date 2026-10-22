@@ -2418,7 +2418,7 @@ export function MonthlyAverageSummary({ model, hasOneTime = false, breakdown = n
 // it is an average. `breakdown` comes from applicationMonthsBreakdown.
 function ApplicationMonthsSummary({ model, breakdown, hasOneTime, row, num }) {
   const sub = { fontSize: 14, color: ESTIMATE_MUTED, fontWeight: 500 };
-  const heading = { fontSize: 13, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: ESTIMATE_MUTED };
+  const heading = { fontSize: 14, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: ESTIMATE_MUTED };
   const monthsRow = (group, attr) => (
     <div {...{ [attr]: '' }} style={row}>
       <span>
