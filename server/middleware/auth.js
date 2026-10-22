@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const config = require('../config');
+const { verifyJwtWithRotation } = require('../utils/jwt-secrets');
 const db = require('../models/db');
 const logger = require('../services/logger');
 
@@ -117,7 +118,7 @@ function refreshExpiryDate(token) {
 
 function verifyRefreshCredential(refreshToken) {
   try {
-    const decoded = jwt.verify(refreshToken, config.jwt.secret);
+    const decoded = verifyJwtWithRotation(refreshToken, config.jwt.secret);
     if (decoded.type !== 'refresh' || !decoded.customerId) return null;
     // A transition token minted before refresh-session persistence has neither
     // claim. A partially shaped token is never valid.
@@ -489,7 +490,7 @@ async function authenticateCore(req, res, next, { allowInactive = false, allowCa
   const token = authHeader.split(' ')[1];
 
   try {
-    const decoded = jwt.verify(token, config.jwt.secret);
+    const decoded = verifyJwtWithRotation(token, config.jwt.secret);
 
     // Refresh tokens are exchange-only (POST /auth/refresh). They're minted
     // with a longer TTL, so accepting one here would let a leaked refresh
@@ -643,7 +644,7 @@ async function resolveBearerCustomer(req) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
   try {
-    const decoded = jwt.verify(authHeader.split(' ')[1], config.jwt.secret);
+    const decoded = verifyJwtWithRotation(authHeader.split(' ')[1], config.jwt.secret);
     if (decoded.type === 'refresh' || !decoded.customerId) return null;
     const customer = await db('customers')
       .where({ id: decoded.customerId, active: true })

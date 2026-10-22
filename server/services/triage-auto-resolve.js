@@ -1651,14 +1651,14 @@ async function loadUnambiguousEmailEvidence(conn, items, flag, {
 async function loadContactEvidence(conn, items, flag) {
   const authItems = items.filter((i) => i.reason_code === 'caller_not_authorized' && i.call_customer_id);
   if (!authItems.length) return;
-  const { phoneFingerprint } = require('./service-contact-events');
+  const { phoneFingerprintCandidates } = require('./service-contact-events');
   const rows = await conn('activity_log')
     .whereIn('customer_id', [...new Set(authItems.map((i) => i.call_customer_id))])
     .whereIn('action', ['service_contact_added', 'service_contact_updated'])
     .select('customer_id', 'action', 'created_at', 'metadata');
   for (const item of authItems) {
-    const callerPrint = phoneFingerprint(callerPhone(item));
-    if (!callerPrint) continue;
+    const callerPrints = phoneFingerprintCandidates(callerPhone(item));
+    if (!callerPrints.length) continue;
     const hit = rows.some((r) => {
       if (String(r.customer_id) !== String(item.call_customer_id)) return false;
       if (!strictlyAfter(r.created_at, item.created_at)) return false;
@@ -1668,7 +1668,7 @@ async function loadContactEvidence(conn, items, flag) {
       // carries the unchanged phone — only a phone change is evidence.
       if (r.action === 'service_contact_updated'
         && !(Array.isArray(meta?.changed_fields) && meta.changed_fields.includes('phone'))) return false;
-      return Boolean(meta?.phone_fingerprint) && meta.phone_fingerprint === callerPrint;
+      return Boolean(meta?.phone_fingerprint) && callerPrints.includes(meta.phone_fingerprint);
     });
     if (hit) flag(item.id, 'caller_phone_added');
   }

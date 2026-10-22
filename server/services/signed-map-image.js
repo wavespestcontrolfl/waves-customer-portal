@@ -28,6 +28,7 @@
 
 const crypto = require('crypto');
 const { STATIC_MAP_BASE, sanitizedStaticMapUrlFromStored } = require('./estimate-map-image');
+const { verifySecretsFor } = require('../utils/jwt-secrets');
 
 const ROUTE_PREFIX = '/api/public/map-image';
 const KEY_INFO = 'waves:signed-map-image:v1';
@@ -43,6 +44,14 @@ function signingKey() {
   const base = process.env.REPORT_PIN_SECRET || process.env.JWT_SECRET;
   if (!base || !String(base).trim()) return null;
   return crypto.createHmac('sha256', String(base)).update(KEY_INFO).digest();
+}
+
+// Verify-side keys: the signing key first, then (only while JWT_SECRET is the
+// effective secret) one per JWT_SECRET_PREVIOUS entry.
+function verifyKeys() {
+  const bases = verifySecretsFor(process.env.REPORT_PIN_SECRET);
+  if (!bases.length || !String(bases[0]).trim()) return [];
+  return bases.map((base) => crypto.createHmac('sha256', String(base)).update(KEY_INFO).digest());
 }
 
 function b64url(buf) {
@@ -90,13 +99,16 @@ function signMapImageToken(params, { nowSeconds = Math.floor(Date.now() / 1000),
 // Returns the signed, validated params or null (bad shape, bad signature,
 // expired, or an expiry further out than this server ever mints).
 function verifyMapImageToken(token, { nowSeconds = Math.floor(Date.now() / 1000) } = {}) {
-  const key = signingKey();
-  if (!key || typeof token !== 'string' || token.length > MAX_TOKEN_LENGTH) return null;
+  const keys = verifyKeys();
+  if (!keys.length || typeof token !== 'string' || token.length > MAX_TOKEN_LENGTH) return null;
   const parts = token.split('.');
   if (parts.length !== 3 || parts[0] !== 'v1' || !/^[A-Za-z0-9_-]+$/.test(parts[1]) || !/^[A-Za-z0-9_-]{43}$/.test(parts[2])) return null;
-  const expected = Buffer.from(hmac(key, `v1.${parts[1]}`));
   const given = Buffer.from(parts[2]);
-  if (expected.length !== given.length || !crypto.timingSafeEqual(expected, given)) return null;
+  const signatureOk = keys.some((key) => {
+    const expected = Buffer.from(hmac(key, `v1.${parts[1]}`));
+    return expected.length === given.length && crypto.timingSafeEqual(expected, given);
+  });
+  if (!signatureOk) return null;
   const match = PAYLOAD_RE.exec(Buffer.from(parts[1], 'base64url').toString('utf8'));
   if (!match) return null;
   const exp = Number(match[8]);

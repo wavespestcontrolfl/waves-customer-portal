@@ -22,6 +22,7 @@
 // ============================================================
 
 const jwt = require('jsonwebtoken');
+const { verifyJwtWithKeys, verifySecretsFor } = require('../../utils/jwt-secrets');
 const crypto = require('crypto');
 const logger = require('../logger');
 const { launchBrowser, serviceReportPublicBase } = require('../service-report/pdf-puppeteer');
@@ -66,7 +67,7 @@ function verifyEstimateDocPin(pin, token) {
   const secret = docPinSecret();
   if (!secret || !pin) return null;
   try {
-    const payload = jwt.verify(String(pin), secret);
+    const payload = verifyJwtWithKeys(String(pin), verifySecretsFor(process.env.ESTIMATE_DOC_PIN_SECRET));
     if (payload?.kind !== 'estimate_doc_render') return null;
     if (payload.tokenHash !== hashToken(token)) return null;
     if (payload.vexp != null && Number.isNaN(Date.parse(payload.vexp))) return null;

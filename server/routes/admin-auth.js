@@ -5,6 +5,7 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const config = require('../config');
+const { verifyJwtWithRotation } = require('../utils/jwt-secrets');
 const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const {
@@ -277,7 +278,7 @@ async function loginMfa(req, res, next) {
     }
     let claims;
     try {
-      claims = jwt.verify(challengeToken, config.jwt.secret);
+      claims = verifyJwtWithRotation(challengeToken, config.jwt.secret);
     } catch {
       return restart();
     }

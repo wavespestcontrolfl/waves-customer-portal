@@ -44,6 +44,7 @@ function unitBandPricingEnabled() {
 
 const crypto = require('crypto');
 const { etDateString } = require('../../utils/datetime-et');
+const { jwtVerifySecrets } = require('../../utils/jwt-secrets');
 
 const UNIT_BANDS = ['studio', 'one_bedroom', 'two_bedroom', 'three_bedroom', 'four_plus'];
 
@@ -175,10 +176,15 @@ function keyIdFor(secret) {
 }
 
 function signingKeyring() {
-  const current = nonEmpty(process.env.PRICING_SNAPSHOT_SECRET) || nonEmpty(process.env.JWT_SECRET);
+  const dedicated = nonEmpty(process.env.PRICING_SNAPSHOT_SECRET);
+  const current = dedicated || nonEmpty(process.env.JWT_SECRET);
   if (!current) return { current: null, byKid: new Map() };
-  const previous = String(process.env.PRICING_SNAPSHOT_SECRET_PREVIOUS || '')
-    .split(',').map((v) => v.trim()).filter(Boolean);
+  // JWT_SECRET_PREVIOUS applies only while JWT_SECRET is the effective secret.
+  const jwtPrevious = dedicated ? [] : jwtVerifySecrets(current).slice(1);
+  const previous = [
+    ...String(process.env.PRICING_SNAPSHOT_SECRET_PREVIOUS || '').split(',').map((v) => v.trim()).filter(Boolean),
+    ...jwtPrevious,
+  ];
   const byKid = new Map();
   for (const secret of [current, ...previous]) byKid.set(keyIdFor(secret), secret);
   return { current, byKid };

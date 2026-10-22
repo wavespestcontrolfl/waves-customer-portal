@@ -89,9 +89,17 @@
  * one implementation; codes are the only factor on GET /booking/status/:code.
  */
 const crypto = require('crypto');
+const { jwtVerifySecrets } = require('./jwt-secrets');
 
 const RAW_SECRET = process.env.JWT_SECRET || process.env.BOOKING_CAPTURE_SECRET || 'waves-booking-capture-dev';
-const OFFER_KEY = crypto.createHash('sha256').update(`waves:slot-offer:v1:${RAW_SECRET}`).digest();
+const offerKeyFor = (raw) => crypto.createHash('sha256').update(`waves:slot-offer:v1:${raw}`).digest();
+const OFFER_KEY = offerKeyFor(RAW_SECRET);
+// Verify keys: the signing key first, then (only while JWT_SECRET is the
+// effective secret) each JWT_SECRET_PREVIOUS entry.
+function offerVerifyKeys() {
+  const secrets = RAW_SECRET === process.env.JWT_SECRET ? jwtVerifySecrets(RAW_SECRET) : [RAW_SECRET];
+  return secrets.length > 1 ? [OFFER_KEY, ...secrets.slice(1).map(offerKeyFor)] : [OFFER_KEY];
+}
 
 const SLOT_OFFER_TTL_MS = 45 * 60 * 1000;
 // Tolerance when rejecting implausibly-far-future (forged) expiries — covers
@@ -200,15 +208,18 @@ function verifySlotOffer(payload, sig, now = Date.now()) {
   if (now > exp) return false; // expired offer
   if (exp > now + SLOT_OFFER_TTL_MS + EXP_SKEW_MS) return false; // forged far-future exp
   if (!sig || typeof sig !== 'string') return false;
-  const expected = crypto.createHmac('sha256', OFFER_KEY)
-    .update(canonicalOfferString(payload))
-    .digest('base64url');
-  try {
-    return sig.length === expected.length
-      && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
-  } catch {
-    return false;
-  }
+  const canonical = canonicalOfferString(payload);
+  return offerVerifyKeys().some((key) => {
+    const expected = crypto.createHmac('sha256', key)
+      .update(canonical)
+      .digest('base64url');
+    try {
+      return sig.length === expected.length
+        && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+    } catch {
+      return false;
+    }
+  });
 }
 
 // ---- estimate-surface carrier: sig+exp[+arrivalGrace] inside the slotId ----

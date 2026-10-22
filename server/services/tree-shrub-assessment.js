@@ -21,6 +21,7 @@ const crypto = require('crypto');
 const Ajv = require('ajv');
 const db = require('../models/db');
 const logger = require('./logger');
+const { jwtVerifySecretsOr } = require('../utils/jwt-secrets');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
 const { anthropicText, geminiText, dispatchWithFallback } = require('./llm/call');
@@ -48,12 +49,12 @@ function treeShrubPhotosHash(dataList = []) {
 // observation text, so the completion handler can prove the reviewed scores AND copy
 // it's about to persist actually came from THIS server's /assess-preview for THESE
 // photos. A tampered/stale client can't forge it → the handler re-scores instead.
-function treeShrubReviewSignature(scores = {}, scoredCount, serviceId, photosHash, observations) {
+function treeShrubReviewSignature(scores = {}, scoredCount, serviceId, photosHash, observations, key = process.env.JWT_SECRET || 'tree-shrub-review-key') {
   const obsHash = crypto.createHash('sha256').update(String(observations == null ? '' : observations)).digest('hex');
   const canon = ['foliageFullness', 'leafColorVigor', 'pestActivity', 'diseaseLeafSpot', 'waterHeatStress', 'overallScore']
     .map((k) => (scores && scores[k] != null ? scores[k] : '')).join(',')
     + `|${scoredCount == null ? '' : scoredCount}|${serviceId || ''}|${photosHash || ''}|${obsHash}`;
-  return crypto.createHmac('sha256', process.env.JWT_SECRET || 'tree-shrub-review-key').update(canon).digest('hex');
+  return crypto.createHmac('sha256', key).update(canon).digest('hex');
 }
 
 const TREE_SHRUB_REVIEW_SCORE_KEYS = [
@@ -114,14 +115,16 @@ function validateTreeShrubReviewForReport(review, { serviceId } = {}) {
     return invalid('decisions_invalid');
   }
 
-  const expected = treeShrubReviewSignature(
+  // Current JWT_SECRET first, then each JWT_SECRET_PREVIOUS entry.
+  const signatureOk = jwtVerifySecretsOr('tree-shrub-review-key').some((key) => review.signature === treeShrubReviewSignature(
     scores,
     scoredCount,
     serviceId,
     review.photosHash,
     review.observations,
-  );
-  if (review.signature !== expected) return invalid('signature_mismatch');
+    key,
+  ));
+  if (!signatureOk) return invalid('signature_mismatch');
 
   const hiddenScoreKeys = new Set(decisions
     .filter((decision) => decision.action === 'hidden')

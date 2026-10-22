@@ -1,5 +1,5 @@
-const jwt = require('jsonwebtoken');
 const config = require('../config');
+const { verifyJwtWithRotation } = require('../utils/jwt-secrets');
 const db = require('../models/db');
 const { installStaffCallRecordingPrivacy } = require('./staff-call-recording-privacy');
 const { enforceTechnicianScope } = require('./technician-scope');
@@ -44,7 +44,7 @@ async function adminAuthenticate(req, res, next) {
   }
 
   try {
-    const decoded = jwt.verify(authHeader.split(' ')[1], config.jwt.secret);
+    const decoded = verifyJwtWithRotation(authHeader.split(' ')[1], config.jwt.secret);
     if (!isStaffAccessToken(decoded)) return res.status(401).json({ error: 'Invalid token type' });
     if (!decoded.technicianId) return res.status(401).json({ error: 'Invalid admin token' });
     if (decoded.scope === 'terminal') return res.status(401).json({ error: 'Terminal-scoped token not accepted here' });
@@ -102,7 +102,7 @@ async function verifyStaffBearer(req) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
   try {
-    const decoded = jwt.verify(authHeader.split(' ')[1], config.jwt.secret);
+    const decoded = verifyJwtWithRotation(authHeader.split(' ')[1], config.jwt.secret);
     if (!isStaffAccessToken(decoded)) return null;
     if (!decoded.technicianId) return null;
     if (decoded.scope === 'terminal') return null;

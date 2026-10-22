@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
+const { verifyJwtWithRotation, verifyJwtWithKeys, jwtVerifySecrets, jwtVerifySecretsOr } = require('../utils/jwt-secrets');
 const config = require('../config');
 const db = require('../models/db');
 const { createDefaultCustomerRows } = require('../services/customer-default-rows');
@@ -187,6 +188,12 @@ const ESTIMATE_ASK_TOKEN_SECRET = process.env.ESTIMATE_ASK_TOKEN_SECRET
   || config.jwt.secret
   || crypto.randomBytes(32).toString('hex');
 const ESTIMATE_ASK_TOKEN_TTL_SECONDS = 2 * 60 * 60;
+// JWT_SECRET_PREVIOUS applies only while JWT_SECRET is the effective secret.
+function estimateAskVerifyKeys() {
+  return config.jwt.secret && ESTIMATE_ASK_TOKEN_SECRET === config.jwt.secret
+    ? jwtVerifySecrets(config.jwt.secret)
+    : [ESTIMATE_ASK_TOKEN_SECRET];
+}
 
 const addServiceRequestLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
@@ -914,7 +921,7 @@ function hasAdminMarker(req) {
   const token = readCookie(req, 'waves_admin');
   if (!token) return false;
   try {
-    const payload = jwt.verify(token, config.jwt.secret);
+    const payload = verifyJwtWithRotation(token, config.jwt.secret);
     return payload && payload.kind === 'admin_marker';
   } catch { return false; }
 }
@@ -967,7 +974,7 @@ function verifyEstimateAskToken(req, estimate) {
   const supplied = req.get('x-estimate-ask-token') || req.body?.askToken;
   if (!supplied) return false;
   try {
-    const payload = jwt.verify(String(supplied), ESTIMATE_ASK_TOKEN_SECRET);
+    const payload = verifyJwtWithKeys(String(supplied), estimateAskVerifyKeys());
     return payload?.kind === 'estimate_ask'
       && String(payload.estimateId || '') === String(estimate.id || '')
       && payload.tokenHash === hashEstimateToken(estimate.token || req.params.token);
@@ -17911,8 +17918,8 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     // numbers. Both row-version reads pass through the same JS Date
     // millisecond truncation — never a JS ms date against the raw µs column.
     const rowBasis = estimate.updated_at ? new Date(estimate.updated_at).toISOString() : null;
-    const optOutPreviewDigest = (nextTotals, impactState, oneTimeChoice = null) => crypto
-      .createHmac('sha256', process.env.JWT_SECRET || 'estimate-opt-out-preview')
+    const optOutPreviewDigest = (nextTotals, impactState, oneTimeChoice = null, key = process.env.JWT_SECRET || 'estimate-opt-out-preview') => crypto
+      .createHmac('sha256', key)
       .update(JSON.stringify({
         rowBasis,
         serviceKey,
@@ -18271,7 +18278,10 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
       }) };
     }
     const submittedBasis = typeof body.previewBasis === 'string' ? body.previewBasis : null;
-    if (!submittedBasis || submittedBasis !== previewDigest) {
+    // A preview signed just before a JWT_SECRET rotation still confirms.
+    const retiredPreviewKeys = jwtVerifySecretsOr('estimate-opt-out-preview').slice(1);
+    if (!submittedBasis || (submittedBasis !== previewDigest
+      && !retiredPreviewKeys.some((key) => submittedBasis === optOutPreviewDigest(next, impact, offerTierChoice, key)))) {
       return { status: 409, body: ({ error: 'estimate_changed_since_preview' }) };
     }
 

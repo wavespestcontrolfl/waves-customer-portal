@@ -1,5 +1,5 @@
-const jwt = require('jsonwebtoken');
 const config = require('../config');
+const { verifyJwtWithRotation } = require('../utils/jwt-secrets');
 
 const STAFF_API_PREFIXES = [
   '/api/admin',
@@ -100,7 +100,7 @@ function extractBearerToken(authorization) {
 function isSignedStaffJwt(token) {
   if (typeof token !== 'string' || !token) return false;
   try {
-    const decoded = jwt.verify(token, config.jwt.secret);
+    const decoded = verifyJwtWithRotation(token, config.jwt.secret);
     return decoded?.technicianId != null;
   } catch {
     return false;

@@ -19,6 +19,7 @@
 // read its own stale insert as the delivered link (GH Codex #3844 r4 P1) —
 // distinct tokens reach activation as unwritten and the row lock refuses.
 const crypto = require('crypto');
+const { verifySecretsFor } = require('./jwt-secrets');
 
 const TTL_SECONDS = 60 * 60 * 12; // an open composer, not a delivery window
 const EXP_DIGITS = 10;
@@ -29,8 +30,14 @@ function secret() {
   return process.env.CONTRACT_LINK_SECRET || process.env.JWT_SECRET || '';
 }
 
-function sign(contractId, exp, nonce) {
-  return crypto.createHmac('sha256', secret())
+// Verify keys: the effective secret first, then each JWT_SECRET_PREVIOUS entry
+// (only while JWT_SECRET is the effective secret).
+function verifySecrets() {
+  return verifySecretsFor(process.env.CONTRACT_LINK_SECRET);
+}
+
+function sign(contractId, exp, nonce, key = secret()) {
+  return crypto.createHmac('sha256', key)
     .update(`composer-contract:${contractId}:${exp}:${nonce}`)
     .digest('base64url');
 }
@@ -55,13 +62,15 @@ function verifyComposerContractToken(contractId, token, nowSec = Math.floor(Date
   const nonce = value.slice(EXP_DIGITS, EXP_DIGITS + NONCE_CHARS);
   if (!/^[A-Za-z0-9_-]{16}$/.test(nonce)) return false;
   const sig = value.slice(EXP_DIGITS + NONCE_CHARS);
-  const expected = sign(contractId, exp, nonce);
-  if (sig.length !== expected.length) return false;
-  try {
-    return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
-  } catch {
-    return false;
-  }
+  return verifySecrets().some((key) => {
+    const expected = sign(contractId, exp, nonce, key);
+    if (sig.length !== expected.length) return false;
+    try {
+      return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+    } catch {
+      return false;
+    }
+  });
 }
 
 module.exports = { mintComposerContractToken, verifyComposerContractToken, TTL_SECONDS };
