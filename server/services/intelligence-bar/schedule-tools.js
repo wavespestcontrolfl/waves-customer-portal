@@ -1119,7 +1119,8 @@ function batchMoveGroupRefusal(skipped) {
 // A batch move that goes ahead without some of its stops is a success, so the
 // gap collector cannot see the refusals; it reads this note instead (Codex #6371 r12, r13).
 // One code per kind of skipped stop: grouped, frozen, and collective (series) moves.
-function skippedMoveGaps(skippedGrouped, skippedCollective) {
+function skippedMoveGaps(skippedGrouped, skippedCollective, outage = false) {
+  if (outage) return {};
   const codes = [
     skippedGrouped.some((entry) => entry.kind === 'grouped') && 'grouped_visit_move_unsupported',
     skippedGrouped.some((entry) => entry.kind === 'frozen') && 'frozen_visit_move_unsupported',
@@ -1245,7 +1246,7 @@ async function moveStopsToDay(input, actionContext = {}) {
       error,
       ...(errorCode ? { code: errorCode } : {}),
       // Every kind of stop skipped, not only the top code's (Codex #6371 r15); an unreadable check stays a plain fault.
-      ...(anyUnreadable ? {} : skippedMoveGaps(skippedGrouped, skippedCollective)),
+      ...skippedMoveGaps(skippedGrouped, skippedCollective, anyUnreadable),
       ...(skippedGrouped.length ? { skipped_grouped: skippedGrouped } : {}),
       ...(skippedCollective.length ? { skipped_collective: skippedCollective } : {}),
       ...(skippedUnchanged.length ? { skipped_unchanged: skippedUnchanged } : {}),
