@@ -102,8 +102,8 @@ describe('a visit\'s one light', () => {
     expect(lighting.visitLightFromPhotos([p('full_sun', 'front'), p('full_sun', 'back'), p('full_sun', null), p('mixed_sun_shade', 'blade_crown')])).toBe('full_sun');
   });
 
-  test('half-weight shots (shade, hot edge) move the color score, so they count: a sunny front beside an overcast shade photo is a mixed visit', () => {
-    expect(lighting.visitLightFromPhotos([p('full_sun', 'front'), p('overcast', 'shade')])).toBe('mixed_sun_shade');
+  test('half-weight shots (shade, hot edge) move the color score, so they count: a sunny front beside an overcast shade photo is a mixed-light visit', () => {
+    expect(lighting.visitLightFromPhotos([p('full_sun', 'front'), p('overcast', 'shade')])).toBe(lighting.MIXED_LIGHT);
     expect(lighting.visitLightFromPhotos([p('full_sun', 'front'), p('full_sun', 'hot_edge')])).toBe('full_sun');
     expect(lighting.visitLightFromPhotos([p('full_sun', 'front'), p('unknown', 'hot_edge')])).toBe('unknown');
     // the rule follows the shot list's own weights, not a hard-coded list
@@ -126,12 +126,35 @@ describe('a visit\'s one light', () => {
     expect(lighting.visitLightFromPhotos([p('full_sun', 'front'), p('unknown', 'back')])).toBe('unknown');
   });
 
-  test('overcast and open shade agree as even light; sun beside shade is mixed; all low light stays low light', () => {
+  test('overcast and open shade agree as even light; full sun beside sun with shadows is still sun; all low light stays low light', () => {
     expect(lighting.visitLightFromPhotos([p('overcast', 'front'), p('open_shade', 'back')])).toBe('overcast');
     expect(lighting.visitLightFromPhotos([p('open_shade', 'front'), p('open_shade', 'back')])).toBe('open_shade');
-    expect(lighting.visitLightFromPhotos([p('full_sun', 'front'), p('overcast', 'back')])).toBe('mixed_sun_shade');
     expect(lighting.visitLightFromPhotos([p('full_sun', 'front'), p('mixed_sun_shade', 'back')])).toBe('mixed_sun_shade');
     expect(lighting.visitLightFromPhotos([p('low_light', 'front'), p('low_light', 'back')])).toBe('low_light');
+  });
+
+  // Codex pre-push on option B: only a visit whose photos are all in direct sun joins the
+  // sun group; every other mix is mixed light, which compares with nothing.
+  test('sun beside cloud or shade, and any low light in a mix, is mixed light and never compared', () => {
+    for (const mix of [
+      ['full_sun', 'overcast'], ['full_sun', 'open_shade'], ['mixed_sun_shade', 'overcast'], ['mixed_sun_shade', 'open_shade'],
+      ['overcast', 'low_light'], ['full_sun', 'low_light'], ['mixed_sun_shade', 'low_light'], ['open_shade', 'low_light'],
+    ]) {
+      const light = lighting.visitLightFromPhotos([p(mix[0], 'front'), p(mix[1], 'back')]);
+      expect(light).toBe(lighting.MIXED_LIGHT);
+      for (const other of [...lighting.LIGHTING.filter((l) => l !== 'unknown'), lighting.MIXED_LIGHT]) {
+        expect(lighting.colorComparability(light, other)).toEqual({ comparable: false, reason: 'light_differs' });
+        expect(lighting.colorComparability(other, light)).toEqual({ comparable: false, reason: 'light_differs' });
+      }
+    }
+  });
+
+  test('a visit of sunny photos with and without shadows compares with full sun and with itself, never with cloud', () => {
+    const sunny = lighting.visitLightFromPhotos([p('full_sun', 'front'), p('mixed_sun_shade', 'back'), p('full_sun', null)]);
+    expect(sunny).toBe('mixed_sun_shade');
+    expect(lighting.colorComparability(sunny, 'full_sun')).toEqual({ comparable: true, reason: null });
+    expect(lighting.colorComparability(sunny, 'mixed_sun_shade')).toEqual({ comparable: true, reason: null });
+    expect(lighting.colorComparability(sunny, 'overcast')).toEqual({ comparable: false, reason: 'light_differs' });
   });
 });
 
@@ -199,13 +222,13 @@ describe('loadVisitLights', () => {
     }];
     const photos = [{ id: 'm1', assessment_id: 'M', zone: 'front' }, { id: 'm2', assessment_id: 'M', zone: 'close_up' }];
     const legacy = await lighting.loadVisitLights(fakeKnex({ runs: rows('lawn-visit-v1-lighting'), photos }).knex, ['M']);
-    expect(legacy.get('M')).toBe('mixed_sun_shade'); // the legacy prompt scored color from both photos
+    expect(legacy.get('M')).toBe(lighting.MIXED_LIGHT); // the legacy prompt scored color from both photos: sun beside cloud
     const shot = await lighting.loadVisitLights(fakeKnex({ runs: rows('lawn-visit-v1-shot-list-lighting'), photos }).knex, ['M']);
     expect(shot.get('M')).toBe('full_sun'); // close_up carries no color weight under the shot guide
     expect(lighting.readUnderShotList('lawn-visit-v1-shot-list')).toBe(true);
     expect(lighting.readUnderShotList('lawn-visit-v1-lighting')).toBe(false);
     expect(lighting.readUnderShotList(undefined)).toBe(false);
-    expect(lighting.visitLightFromPhotos([{ light: 'full_sun', zone: 'front', quality: 'adequate' }, { light: 'overcast', zone: 'trouble', quality: 'limited' }], { shotList: false })).toBe('mixed_sun_shade');
+    expect(lighting.visitLightFromPhotos([{ light: 'full_sun', zone: 'front', quality: 'adequate' }, { light: 'overcast', zone: 'trouble', quality: 'limited' }], { shotList: false })).toBe(lighting.MIXED_LIGHT);
   });
 
   test('no ids reads nothing; no run at all reads no photos', async () => {

@@ -3201,14 +3201,17 @@ key to `GET /api/reports/:token/data`; it only removes or never writes color
 wording (the one added key is `initialScores.colorHidden` on the portal route,
 effect 6). A visit assessed before the gate
 has no light read, so its light is `unknown` and its color is never compared.
-Compatible light: full sun with full sun; overcast and open shade with each other;
-mixed sun and shade, low light and unknown are never compatible. A visit's light
+Compatible light: full sun and sun with shadows (`mixed_sun_shade`) with each other
+(owner 2026-10-22, option B: under the lighting prompt the model reads sunlit and
+shadowed turf each against its own light); overcast and open shade with each other;
+sun never with overcast or open shade; low light, mixed light (`mixed_light`) and
+unknown are never compatible. A visit's light
 comes from its usable photos whose shot has positive color weight in
 `shared/lawn-photo-shots.json` (front, back, side, untagged, and the half-weight
 shade and hot-edge shots; detail shots do not count) when the visit was read under
 the shot-list prompt, and from EVERY usable photo when it was read under the legacy
 prompt (one whole-visit color score from all photos); which prompt is decided from
-the run's own stored prompt version, never from today's gate. A mix is mixed light. Any prompt position with no stored photo row (its insert failed) or no
+the run's own stored prompt version, never from today's gate. A visit whose usable photos are all direct sun (full sun, sun with shadows) is sun with shadows; any other mix (sun beside cloud or shade, or any low light in the mix) is mixed light (`mixed_light`, visit level only, never a model answer), compared with nothing. Any prompt position with no stored photo row (its insert failed) or no
 light read makes the visit's light unknown.
 
 Every code path that reads the gate (`lawnLightingLive()` in

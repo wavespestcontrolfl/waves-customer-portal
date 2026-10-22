@@ -55,7 +55,15 @@ const COMPATIBLE = Object.freeze({
   open_shade: Object.freeze(['overcast', 'open_shade']),
 });
 
+// A visit whose usable photos sit in different kinds of light (sun beside cloud or
+// shade, or any low light in the mix): its one color score rests on no single light,
+// so it is never compared. Visit level only: the model never answers it (LIGHTING is
+// the model's closed set), and it is in no COMPATIBLE row.
+const MIXED_LIGHT = 'mixed_light';
+
 const DIFFUSE = new Set(['overcast', 'open_shade']);
+// Direct sun, with or without shadows on the turf: the visit-level sun group.
+const SUNNY = new Set(['full_sun', 'mixed_sun_shade']);
 const HARD_LIGHT = new Set(['full_sun', 'overcast', 'open_shade']);
 const USABLE_QUALITY = new Set(['adequate', 'limited']);
 
@@ -91,7 +99,7 @@ function lightsCompatible(a, b) {
  * @returns {{comparable:boolean, reason:null|'light_unknown'|'light_differs'}}
  */
 function colorComparability(currentLight, priorLight) {
-  const known = (light) => LIGHTING.includes(light) && light !== 'unknown';
+  const known = (light) => (LIGHTING.includes(light) && light !== 'unknown') || light === MIXED_LIGHT;
   if (!known(currentLight) || !known(priorLight)) return { comparable: false, reason: 'light_unknown' };
   return lightsCompatible(currentLight, priorLight)
     ? { comparable: true, reason: null }
@@ -156,8 +164,9 @@ const readUnderShotList = (promptVersion) => typeof promptVersion === 'string' &
  *   - no such photo, or any of them unknown       -> unknown
  *   - all the same                                -> that light
  *   - all overcast / open shade                   -> overcast (open_shade if none is overcast)
- *   - anything else (sun beside shade, low light) -> mixed_sun_shade, or low_light when
- *     every non-matching photo is low light
+ *   - all direct sun (full sun, sun with shadows) -> mixed_sun_shade
+ *   - anything else (sun beside cloud or shade,    -> mixed_light, never compared
+ *     or any low light in a mix)
  * @param {Array<{light:string, quality?:string, zone?:string|null}>} photos
  */
 function visitLightFromPhotos(photos, { shotList: shotListPrompt = true } = {}) {
@@ -172,7 +181,8 @@ function visitLightFromPhotos(photos, { shotList: shotListPrompt = true } = {}) 
   const distinct = new Set(lights);
   if (distinct.size === 1) return lights[0];
   if (lights.every((l) => DIFFUSE.has(l))) return lights.includes('overcast') ? 'overcast' : 'open_shade';
-  return lights.every((l) => l === 'low_light') ? 'low_light' : 'mixed_sun_shade';
+  // Full sun beside sun with shadows is still direct sun; any other mix is mixed light.
+  return lights.every((l) => SUNNY.has(l)) ? 'mixed_sun_shade' : MIXED_LIGHT;
 }
 
 /**
@@ -225,6 +235,7 @@ module.exports = {
   HARD_SHADOWS,
   COLOR_NO_CHANGE_POINTS,
   COMPATIBLE,
+  MIXED_LIGHT,
   normalizeLightRead,
   effectiveLight,
   lightsCompatible,
