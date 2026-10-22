@@ -817,6 +817,12 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     // A second sentence or a joining symbol ends a value too; a ZIP code is a place (r42).
     expect(await viewingBob("update the phone to 941-555-0100. Sam Sample's notes to blank")).toBe(false);
     expect(await viewingBob("update the phone to 941-555-0100 & Sam Sample's notes to blank")).toBe(false);
+    // Any dash or symbol outside the in-value marks ends a value (r43).
+    for (const sep of [' — ', ' – ', ' - ', ' ~ ', ' * ', ' > ', ': ']) {
+      const prompt = `update the phone to 941-555-0100${sep}Sam Sample's notes to blank`;
+      expect([prompt, await viewingBob(prompt)]).toEqual([prompt, false]);
+    }
+    expect(await viewingBob('update the notes to gate code #5 (side gate)')).toBe(true);
     expect(await viewingBob('update the phone to 941.555.0150')).toBe(true);
     expect(await viewingBob('update the email to bob.example@example.test')).toBe(true);
     expect(await viewingBob('update the notes in 34285')).toBe(false);

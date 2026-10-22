@@ -629,8 +629,10 @@ function valueEnd(tail) {
 
 // strict (the no-card check, Codex #6369 r41): a value ends at its FIRST separator, so a second
 // clause with no verb ("..., Sam Sample's notes to blank") is still read.
-// A sentence break (". ", "! ", "? ") or a joining symbol ends it too (r42); a period inside a phone or email does not.
-const VALUE_FIRST_SEPARATOR_RE = /[;\n,&+|/]|[.!?](?:\s|$)|\b(?:and|then|also)\b/i;
+// Allow-list, not a list of separators (r43, after "," r41, ". & + /" r42, "—" r43): the value ends at the first
+// character that is not a letter, digit, space or an in-value mark (' . - @ # ( )), at a spaced hyphen, at a
+// sentence break, or at and/then/also. A period inside a phone or email does not end it.
+const VALUE_FIRST_SEPARATOR_RE = /[^\p{L}\p{N}\s'’.\-@#()]|\s-\s|[.!?](?:\s|$)|\b(?:and|then|also)\b/iu;
 function withoutValues(text, strict = false) {
   let rest = text.replace(/“[^”]*”|"[^"]*"/g, ' ');
   let kept = '';
