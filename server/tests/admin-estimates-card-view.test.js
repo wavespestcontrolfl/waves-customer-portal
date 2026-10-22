@@ -26,7 +26,8 @@ jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMe
 jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn() }));
 jest.mock('../services/estimate-lead-linkage', () => ({ leadIdForEstimate: jest.fn(async () => null) }));
 jest.mock('../services/estimate-delivery-options', () => ({
-  estimateDataHasQuoteRequirement: jest.fn(() => false),
+  // the real recursive check: the card must use the same one the send gate uses
+  estimateDataHasQuoteRequirement: jest.requireActual('../services/estimate-delivery-options').estimateDataHasQuoteRequirement,
   estimateDataHasUnresolvedManagerApproval: jest.fn(() => false),
   commercialRiskTypeReviewNeeded: jest.fn(() => false),
   validateEstimateDeliveryOptions: jest.fn(),
@@ -53,9 +54,9 @@ jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn()
 jest.mock('../services/sendgrid-mail', () => ({ isConfigured: jest.fn(() => true) }));
 jest.mock('../services/automation-runner', () => ({ enrollCustomer: jest.fn() }));
 jest.mock('../services/slot-reservation', () => ({ releaseReservation: jest.fn() }));
-const mockBilling = { lane: new Map() };
 jest.mock('../services/estimate-proposal-billing', () => ({
-  estimateBillsPerApplication: jest.fn(async (row) => (mockBilling.lane.has(row.id) ? mockBilling.lane.get(row.id) : true)),
+  perApplicationBillingColumnsExist: jest.fn(async () => true),
+  estimateBillsPerApplication: jest.fn(async () => { throw new Error('per-row lane lookup must not run on the list'); }),
   resolveProposalBillingContext: jest.fn(async () => ({ billsPerApplication: true, livePricing: null })),
 }));
 
@@ -84,7 +85,7 @@ const base = (id, over = {}) => ({
   ...over,
 });
 
-function tableDb({ estimates, acceptances = [], single = {}, prepaid = [] }) {
+function tableDb({ estimates, acceptances = [], single = {}, prepaid = [], customers = [] }) {
   const queries = [];
   const builderFor = (table) => {
     const b = {};
@@ -98,7 +99,7 @@ function tableDb({ estimates, acceptances = [], single = {}, prepaid = [] }) {
       });
     }
     b.first = jest.fn(async () => single[table]);
-    const rows = { estimates, estimate_acceptances: acceptances, annual_prepay_terms: prepaid }[table] || [];
+    const rows = { estimates, estimate_acceptances: acceptances, annual_prepay_terms: prepaid, customers }[table] || [];
     b.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
     return b;
   };
@@ -140,6 +141,12 @@ describe('perApplicationLinesForRow', () => {
     ['no frozen snapshot', { estimate_data: {} }],
     ['commercial category', { category: 'COMMERCIAL' }],
     ['quote required', { quote_required: true }],
+    ['quote required nested in the stored result', {
+      estimate_data: {
+        sendSnapshot: { pricingBundle: pestBundle },
+        result: { recurring: { services: [{ name: 'Pest', quoteRequired: true }] } },
+      },
+    }],
     ['no monthly total (one-time only)', { monthly_total: '0', onetime_total: '250' }],
     ['stored totals no longer match the snapshot', { monthly_total: '40.00', annual_total: '480.00' }],
   ])('returns null for %s', (_name, over) => {
@@ -160,7 +167,7 @@ describe('perApplicationLinesForRow', () => {
 });
 
 describe('GET /admin/estimates list shape', () => {
-  beforeEach(() => { jest.clearAllMocks(); mockAuth.role = 'admin'; mockBilling.lane = new Map(); });
+  beforeEach(() => { jest.clearAllMocks(); mockAuth.role = 'admin'; });
 
   test('adds perApplication and hasAcceptanceRecord; isolates each row', async () => {
     const rows = [
@@ -168,11 +175,15 @@ describe('GET /admin/estimates list shape', () => {
       base('e-acc', { status: 'accepted', terms_version: 'v1' }),
       base('e-won', { status: 'accepted', terms_version: null }),
       base('e-prepay'),
-      base('e-monthly'),
+      base('e-monthly', { customer_id: 'c-member' }),
+      base('e-linked', { customer_id: 'c-plain' }),
       base('e-bad', { estimate_data: '{not json' }),
     ];
-    mockBilling.lane.set('e-monthly', false);
     const queries = tableDb({
+      customers: [
+        { id: 'c-member', pipeline_stage: 'active_customer', monthly_rate: '50', billing_mode: null },
+        { id: 'c-plain', pipeline_stage: 'lead', monthly_rate: '0', billing_mode: 'per_application' },
+      ],
       estimates: rows,
       acceptances: [{ estimate_id: 'e-acc' }],
       prepaid: [{ source_estimate_id: 'e-prepay' }],
@@ -191,8 +202,13 @@ describe('GET /admin/estimates list shape', () => {
       expect(byId['e-won'].hasAcceptanceRecord).toBe(false);
       expect(byId['e-prepay'].perApplication).toBeNull();
       expect(byId['e-monthly'].perApplication).toBeNull();
+      expect(byId['e-linked'].perApplication).toHaveLength(1);
       expect(byId['e-bad'].perApplication).toBeNull();
     });
+    // constant queries: one customers read for every linked row, no per-row lane lookup
+    expect(queries.filter((q) => q.table === 'customers' && q.m === 'whereIn')).toHaveLength(1);
+    expect(queries.filter((q) => q.table === 'customers')).toHaveLength(2); // whereIn + select
+    expect(require('../services/estimate-proposal-billing').estimateBillsPerApplication).not.toHaveBeenCalled();
     // one batched acceptance query, not one per row
     expect(queries.filter((q) => q.table === 'estimate_acceptances' && q.m === 'whereIn')).toHaveLength(1);
   });

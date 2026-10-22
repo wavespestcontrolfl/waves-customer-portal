@@ -500,7 +500,11 @@ function UrgencyBadge({ urgency }) {
 // accepted estimate. Read-only; staff "Mark won" writes no record, and the
 // action only appears when the list says one exists.
 export function AcceptanceRecordDialog({ estimate, onClose }) {
-  const [state, setState] = useState({ loading: true, record: null, error: "" });
+  const [state, setState] = useState({
+    loading: true,
+    record: null,
+    error: "",
+  });
   const estimateId = estimate?.id;
   useEffect(() => {
     if (!estimateId) return undefined;
@@ -508,10 +512,20 @@ export function AcceptanceRecordDialog({ estimate, onClose }) {
     setState({ loading: true, record: null, error: "" });
     adminFetch(`/admin/estimates/${encodeURIComponent(estimateId)}/acceptance`)
       .then((body) => {
-        if (!cancelled) setState({ loading: false, record: body?.acceptance || null, error: "" });
+        if (!cancelled)
+          setState({
+            loading: false,
+            record: body?.acceptance || null,
+            error: "",
+          });
       })
       .catch((err) => {
-        if (!cancelled) setState({ loading: false, record: null, error: err.message || "Could not load the record" });
+        if (!cancelled)
+          setState({
+            loading: false,
+            record: null,
+            error: err.message || "Could not load the record",
+          });
       });
     return () => {
       cancelled = true;
@@ -550,7 +564,9 @@ export function AcceptanceRecordDialog({ estimate, onClose }) {
               <dd className="u-nums">{record.recordId || "—"}</dd>
             </dl>
             <div>
-              <div className="text-ink-tertiary">Terms the customer accepted</div>
+              <div className="text-ink-tertiary">
+                Terms the customer accepted
+              </div>
               <p className="mt-1 max-h-[40vh] overflow-y-auto whitespace-pre-wrap rounded-md border border-zinc-200 p-3 text-ink-primary">
                 {record.termsText || "—"}
               </p>
@@ -786,11 +802,93 @@ function estimatePriceDisplay(estimate) {
 function estimatePriceInline(display) {
   return [`${display.lead}${display.suffix}`, ...display.secondary].join(" · ");
 }
-// Accepted estimates: the customer page shows only the booking step, so the
-// full accepted document is the PDF (never counts a view).
-function estimateAcceptedPdfHref(estimate) {
-  if (!estimate?.token) return null;
-  return `${API_BASE}/estimates/${encodeURIComponent(estimate.token)}/pdf`;
+// Which "view" action a row gets.
+//  - Open, customer-viewable rows (draft/scheduled/sent/viewed/declined, not
+//    archived, not past expiry): the staff preview of the customer page
+//    (?adminPreview=1, never counts a view).
+//  - Accepted rows: the customer page shows only the booking step, so the full
+//    accepted document is the PDF.
+//  - Everything else (expired, send_failed, archived, any other status): the
+//    public routes 404, so the staff PDF route is the only way to see it.
+// Both PDF kinds come from GET /admin/estimates/:id/proposal.pdf (staff auth,
+// browser document renderer where the row is viewable, pdfkit otherwise, the
+// acceptance record included, never counts a view).
+const PREVIEWABLE_STATUSES = [
+  "draft",
+  "scheduled",
+  "sent",
+  "viewed",
+  "declined",
+];
+function estimateViewAction(estimate) {
+  if (!estimate?.id) return null;
+  if (estimate.status === "accepted") {
+    return { kind: "pdf", label: "View accepted estimate" };
+  }
+  const expired =
+    estimate.expiresAt && new Date(estimate.expiresAt) < new Date();
+  const href = estimatePreviewHref(estimate);
+  if (
+    href &&
+    !estimate.archivedAt &&
+    !expired &&
+    PREVIEWABLE_STATUSES.includes(estimate.status)
+  ) {
+    return { kind: "preview", label: "View estimate", href };
+  }
+  return { kind: "pdf", label: "View estimate (PDF)" };
+}
+// Opens the staff PDF in a new tab. The tab opens synchronously on the click
+// (popup blockers refuse a window.open issued after an await), then the PDF is
+// fetched with the staff token (adminFetch parses JSON, so this is a raw fetch)
+// and shown from an object URL. onError gets a message for an inline display.
+function openStaffEstimatePdf(estimateId, onError) {
+  const win = window.open("", "_blank");
+  if (win) {
+    win.opener = null;
+    try {
+      win.document.write("Opening estimate…");
+    } catch {
+      /* about:blank write can throw in some browsers */
+    }
+  }
+  return fetch(
+    `${API_BASE}/admin/estimates/${encodeURIComponent(estimateId)}/proposal.pdf`,
+    {
+      headers: {
+        Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+      },
+    },
+  )
+    .then((r) => {
+      if (!r.ok)
+        throw new Error(`Could not open the estimate PDF (${r.status})`);
+      return r.blob();
+    })
+    .then((blob) => {
+      const url = URL.createObjectURL(blob);
+      if (win) win.location = url;
+      else window.open(url, "_blank", "noopener,noreferrer");
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    })
+    .catch((err) => {
+      if (win) win.close();
+      onError?.(err.message || "Could not open the estimate PDF");
+    });
+}
+// Menu item for the row's view action; `run` is how the row opens it.
+function estimateViewMenuItem(estimate, onPdfError) {
+  const action = estimateViewAction(estimate);
+  if (!action) return null;
+  return {
+    key: action.kind === "preview" ? "preview" : "view-pdf",
+    label: action.label,
+    icon: <ExternalLink size={16} strokeWidth={1.75} />,
+    onClick: () =>
+      action.kind === "preview"
+        ? window.open(action.href, "_blank", "noopener,noreferrer")
+        : (onPdfError?.(""), openStaffEstimatePdf(estimate.id, onPdfError)),
+  };
 }
 function canSendEstimate(estimate) {
   // Rows without a share token (quote-wizard mirrors, legacy imports) have no
@@ -1726,6 +1824,7 @@ function EstimatePipelineViewV2({
   const [declineTarget, setDeclineTarget] = useState(null);
   const [auditTarget, setAuditTarget] = useState(null);
   const [acceptanceTarget, setAcceptanceTarget] = useState(null);
+  const [viewErrors, setViewErrors] = useState({});
   const [engineReviewTarget, setEngineReviewTarget] = useState(null);
   const [extendTarget, setExtendTarget] = useState(null);
   const [outlineTarget, setOutlineTarget] = useState(null);
@@ -1782,9 +1881,11 @@ function EstimatePipelineViewV2({
         if (!silent && foregroundRequestRef.current === requestId) {
           foregroundRequestRef.current = null;
         }
-        if (requestId === estimatesRequestRef.current
-          && foregroundRequestRef.current === null
-          && queuedSilentRefreshRef.current) {
+        if (
+          requestId === estimatesRequestRef.current &&
+          foregroundRequestRef.current === null &&
+          queuedSilentRefreshRef.current
+        ) {
           queuedSilentRefreshRef.current = false;
           refreshEstimates({ silent: true });
         }
@@ -2203,7 +2304,6 @@ function EstimatePipelineViewV2({
                 const urgency = getUrgencyIndicator(e);
                 const competitor = detectCompetitor(e.notes || e.description);
                 const source = SOURCE_ICON[e.source];
-                const previewHref = estimatePreviewHref(e);
                 const amount = estimatePriceDisplay(e);
                 const canSend = canSendEstimate(e);
                 return (
@@ -2808,41 +2908,17 @@ function EstimatePipelineViewV2({
                                   focus: "all",
                                 }),
                             },
-                            previewHref &&
-                              e.status !== "accepted" && {
-                                key: "preview",
-                                label: "View estimate",
-                                icon: (
-                                  <ExternalLink size={16} strokeWidth={1.75} />
-                                ),
-                                onClick: () =>
-                                  window.open(
-                                    previewHref,
-                                    "_blank",
-                                    "noopener,noreferrer",
-                                  ),
-                              },
-                            e.status === "accepted" &&
-                              estimateAcceptedPdfHref(e) && {
-                                key: "view-accepted",
-                                label: "View accepted estimate",
-                                icon: (
-                                  <ExternalLink size={16} strokeWidth={1.75} />
-                                ),
-                                onClick: () =>
-                                  window.open(
-                                    estimateAcceptedPdfHref(e),
-                                    "_blank",
-                                    "noopener,noreferrer",
-                                  ),
-                              },
+                            estimateViewMenuItem(e, (message) =>
+                              setViewErrors((prev) => ({
+                                ...prev,
+                                [e.id]: message,
+                              })),
+                            ),
                             e.status === "accepted" &&
                               e.hasAcceptanceRecord && {
                                 key: "acceptance-record",
                                 label: "View acceptance record",
-                                icon: (
-                                  <FileText size={16} strokeWidth={1.75} />
-                                ),
+                                icon: <FileText size={16} strokeWidth={1.75} />,
                                 onClick: () => setAcceptanceTarget(e),
                               },
                             (e.status === "sent" || e.status === "viewed") && {
@@ -2891,6 +2967,14 @@ function EstimatePipelineViewV2({
                         />
                       </div>{" "}
                     </div>{" "}
+                    {viewErrors[e.id] && (
+                      <div
+                        role="alert"
+                        className="w-full text-ui-body text-alert-fg"
+                      >
+                        {viewErrors[e.id]}
+                      </div>
+                    )}
                   </Card>
                 );
               })}
@@ -3181,8 +3265,7 @@ export function MobileEstimateRow({
   const amount = estimatePriceDisplay(estimate);
   const amountInline = estimatePriceInline(amount);
   const canSend = canSendEstimate(estimate);
-  const previewHref = estimatePreviewHref(estimate);
-  const acceptedPdfHref = estimateAcceptedPdfHref(estimate);
+  const [viewError, setViewError] = useState("");
   const customerName = estimate.customerName || "Unknown";
   const isDraftMuted = v3Flag && estimate.status === "draft";
   const hasCustomer = !!estimate.customerId;
@@ -3190,426 +3273,423 @@ export function MobileEstimateRow({
     if (hasCustomer) onOpenCustomerPanel?.(estimate.customerId);
   };
   return (
-    <Card
-      data-estimate-id={estimate.id}
-      className={cn(
-        "h-16 px-3 flex items-center gap-1.5",
-        "cursor-default",
-        isDraftMuted && "opacity-60",
-        highlighted &&
-          "ring-2 ring-zinc-500 ring-offset-2 ring-offset-white transition-shadow",
-      )}
-    >
-      {" "}
-      <div className="flex-1 min-w-0 flex flex-col gap-0.5">
-        {hasCustomer ? (
+    <>
+      <Card
+        data-estimate-id={estimate.id}
+        className={cn(
+          "h-16 px-3 flex items-center gap-1.5",
+          "cursor-default",
+          isDraftMuted && "opacity-60",
+          highlighted &&
+            "ring-2 ring-zinc-500 ring-offset-2 ring-offset-white transition-shadow",
+        )}
+      >
+        {" "}
+        <div className="flex-1 min-w-0 flex flex-col gap-0.5">
+          {hasCustomer ? (
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={openPanel}
+              aria-label={`Open ${customerName} customer estimate history`}
+              className="h-auto max-w-full justify-start truncate p-0 text-left"
+            >
+              {customerName}
+            </Button>
+          ) : (
+            <span
+              className="text-14 font-medium text-ink-primary truncate"
+              title="This estimate isn't linked to a customer yet"
+            >
+              {customerName}
+            </span>
+          )}
+          {v3Flag ? (
+            <div className="flex items-center gap-2 flex-wrap">
+              {" "}
+              <span
+                className="u-nums min-w-0 max-w-full truncate whitespace-nowrap text-ui-body text-ink-tertiary"
+                title={amountInline}
+              >
+                {amountInline}
+              </span>{" "}
+              <StatusPillV3 status={estimate.status} />
+              {estimate.viewCount > 1 && (
+                <span
+                  className="u-nums text-ui-body text-ink-tertiary"
+                  title={
+                    estimate.lastViewedAt
+                      ? `Last viewed ${timeAgo(estimate.lastViewedAt)}`
+                      : undefined
+                  }
+                >
+                  {estimate.viewCount}× viewed
+                </span>
+              )}
+              <PricingRiskBadges
+                risk={estimate.pricingRisk}
+                onMissingCogs={() => onAudit?.(estimate, "missing_cogs")}
+                onLowMargin={() => onAudit?.(estimate, "low_margin")}
+              />
+              <AutomationStatusBadge automation={estimate.automation} />
+              {(estimate.estimatorEngine || estimate.agentDraftReview) && (
+                <EngineReviewBadge
+                  engine={estimate.estimatorEngine}
+                  agentReview={estimate.agentDraftReview}
+                  onOpen={() => onEngineReview?.(estimate)}
+                />
+              )}
+              {estimate.riskTypeNeedsReview && (
+                <>
+                  {" "}
+                  <Badge
+                    tone="alert"
+                    title="Set the commercial business type — it drives the pest/rodent service cadence."
+                  >
+                    Risk Type
+                  </Badge>
+                </>
+              )}
+              <LawnOutlineStatusBadge outline={estimate.lawnServiceOutline} />
+              {estimate.confirmedAppointment && (
+                <span
+                  className="text-ui-body text-ink-tertiary truncate"
+                  title={
+                    estimate.confirmedAppointment.linked
+                      ? `This call also booked ${formatApptShort(estimate.confirmedAppointment)} — review the schedule before sending a fresh quote.`
+                      : `Customer has a confirmed appointment ${formatApptShort(estimate.confirmedAppointment)}.`
+                  }
+                >
+                  {" "}
+                  <CalendarCheck
+                    size={11}
+                    strokeWidth={1.75}
+                    className="inline-block align-text-top"
+                    aria-hidden
+                  />
+                  {formatApptShort(estimate.confirmedAppointment)}
+                </span>
+              )}
+              <span className="u-nums text-ui-body text-ink-tertiary">
+                #{shortEstimateRef(estimate.id)}
+              </span>{" "}
+            </div>
+          ) : (
+            <div className="text-ui-body text-ink-tertiary truncate">
+              {" "}
+              <span
+                className="u-nums inline-block min-w-0 max-w-full truncate whitespace-nowrap align-bottom"
+                title={amountInline}
+              >
+                {amountInline}
+              </span>{" "}
+              <span
+                className={cn(
+                  "ml-2 font-medium",
+                  mobileStatusClass(estimate.status),
+                )}
+              >
+                {cfg.label}
+              </span>
+              {estimate.viewCount > 1 && (
+                <span
+                  className="ml-2 u-nums"
+                  title={
+                    estimate.lastViewedAt
+                      ? `Last viewed ${timeAgo(estimate.lastViewedAt)}`
+                      : undefined
+                  }
+                >
+                  {estimate.viewCount}×
+                </span>
+              )}
+              {estimate.pricingRisk?.hasRisk && (
+                <span className="ml-2 text-alert-fg">
+                  {estimate.pricingRisk.missingCogsCount
+                    ? "Missing COGS"
+                    : estimate.pricingRisk.lowMarginCount
+                      ? "Low Margin"
+                      : "Pricing Risk"}
+                </span>
+              )}
+              {automationBadgeLabel(estimate.automation) && (
+                <span
+                  className={cn(
+                    "ml-2",
+                    [
+                      "manual_review_required",
+                      "generation_failed",
+                      "blocked",
+                    ].includes(estimate.automation?.status)
+                      ? "text-alert-fg"
+                      : "text-ink-tertiary",
+                  )}
+                  title={(estimate.automation?.review || []).join(" · ")}
+                >
+                  {automationBadgeLabel(estimate.automation)}
+                </span>
+              )}
+              {estimate.estimatorEngine?.lane && (
+                <span
+                  className={cn(
+                    "ml-2",
+                    estimate.estimatorEngine.lane !== "green"
+                      ? "text-alert-fg"
+                      : "text-ink-tertiary",
+                  )}
+                  title={(estimate.estimatorEngine.laneReasons || []).join(
+                    " · ",
+                  )}
+                >
+                  {estimate.estimatorEngine.lane !== "green"
+                    ? "AI Review"
+                    : "AI Draft"}
+                </span>
+              )}
+              {estimate.lawnServiceOutline && (
+                <span
+                  className={cn(
+                    "ml-2",
+                    estimate.lawnServiceOutline.validationStatus === "blocked"
+                      ? "text-alert-fg"
+                      : "text-ink-tertiary",
+                  )}
+                  title={`Outline ${estimate.lawnServiceOutline.status || "draft"} · ${estimate.lawnServiceOutline.validationStatus || "unchecked"}`}
+                >
+                  Outline{" "}
+                  {estimate.lawnServiceOutline.stale
+                    ? "stale"
+                    : estimate.lawnServiceOutline.ctaClickCount > 0
+                      ? "clicked"
+                      : estimate.lawnServiceOutline.status || "draft"}
+                </span>
+              )}
+              {estimate.confirmedAppointment && (
+                <span
+                  className="ml-2"
+                  title={
+                    estimate.confirmedAppointment.linked
+                      ? `This call also booked ${formatApptShort(estimate.confirmedAppointment)} — review the schedule before sending a fresh quote.`
+                      : `Customer has a confirmed appointment ${formatApptShort(estimate.confirmedAppointment)}.`
+                  }
+                >
+                  {" "}
+                  <CalendarCheck
+                    size={11}
+                    strokeWidth={1.75}
+                    className="inline-block align-text-top"
+                    aria-hidden
+                  />
+                  {formatApptShort(estimate.confirmedAppointment)}
+                </span>
+              )}
+              <span className="ml-2 u-nums">
+                #{shortEstimateRef(estimate.id)}
+              </span>{" "}
+            </div>
+          )}
+        </div>
+        {estimate.customerPhone && (
           <Button
             type="button"
-            variant="ghost"
-            onClick={openPanel}
-            aria-label={`Open ${customerName} customer estimate history`}
-            className="h-auto max-w-full justify-start truncate p-0 text-left"
-          >
-            {customerName}
-          </Button>
-        ) : (
-          <span
-            className="text-14 font-medium text-ink-primary truncate"
-            title="This estimate isn't linked to a customer yet"
-          >
-            {customerName}
-          </span>
-        )}
-        {v3Flag ? (
-          <div className="flex items-center gap-2 flex-wrap">
-            {" "}
-            <span
-              className="u-nums text-ui-body text-ink-tertiary"
-              title={amountInline}
-            >
-              {amountInline}
-            </span>{" "}
-            <StatusPillV3 status={estimate.status} />
-            {estimate.viewCount > 1 && (
-              <span
-                className="u-nums text-ui-body text-ink-tertiary"
-                title={
-                  estimate.lastViewedAt
-                    ? `Last viewed ${timeAgo(estimate.lastViewedAt)}`
-                    : undefined
-                }
-              >
-                {estimate.viewCount}× viewed
-              </span>
-            )}
-            <PricingRiskBadges
-              risk={estimate.pricingRisk}
-              onMissingCogs={() => onAudit?.(estimate, "missing_cogs")}
-              onLowMargin={() => onAudit?.(estimate, "low_margin")}
-            />
-            <AutomationStatusBadge automation={estimate.automation} />
-            {(estimate.estimatorEngine || estimate.agentDraftReview) && (
-              <EngineReviewBadge
-                engine={estimate.estimatorEngine}
-                agentReview={estimate.agentDraftReview}
-                onOpen={() => onEngineReview?.(estimate)}
-              />
-            )}
-            {estimate.riskTypeNeedsReview && (
-              <>
-                {" "}
-                <Badge
-                  tone="alert"
-                  title="Set the commercial business type — it drives the pest/rodent service cadence."
-                >
-                  Risk Type
-                </Badge>
-              </>
-            )}
-            <LawnOutlineStatusBadge outline={estimate.lawnServiceOutline} />
-            {estimate.confirmedAppointment && (
-              <span
-                className="text-ui-body text-ink-tertiary truncate"
-                title={
-                  estimate.confirmedAppointment.linked
-                    ? `This call also booked ${formatApptShort(estimate.confirmedAppointment)} — review the schedule before sending a fresh quote.`
-                    : `Customer has a confirmed appointment ${formatApptShort(estimate.confirmedAppointment)}.`
-                }
-              >
-                {" "}
-                <CalendarCheck
-                  size={11}
-                  strokeWidth={1.75}
-                  className="inline-block align-text-top"
-                  aria-hidden
-                />
-                {formatApptShort(estimate.confirmedAppointment)}
-              </span>
-            )}
-            <span className="u-nums text-ui-body text-ink-tertiary">
-              #{shortEstimateRef(estimate.id)}
-            </span>{" "}
-          </div>
-        ) : (
-          <div className="text-ui-body text-ink-tertiary truncate">
-            {" "}
-            <span className="u-nums" title={amountInline}>
-              {amountInline}
-            </span>{" "}
-            <span
-              className={cn(
-                "ml-2 font-medium",
-                mobileStatusClass(estimate.status),
-              )}
-            >
-              {cfg.label}
-            </span>
-            {estimate.viewCount > 1 && (
-              <span
-                className="ml-2 u-nums"
-                title={
-                  estimate.lastViewedAt
-                    ? `Last viewed ${timeAgo(estimate.lastViewedAt)}`
-                    : undefined
-                }
-              >
-                {estimate.viewCount}×
-              </span>
-            )}
-            {estimate.pricingRisk?.hasRisk && (
-              <span className="ml-2 text-alert-fg">
-                {estimate.pricingRisk.missingCogsCount
-                  ? "Missing COGS"
-                  : estimate.pricingRisk.lowMarginCount
-                    ? "Low Margin"
-                    : "Pricing Risk"}
-              </span>
-            )}
-            {automationBadgeLabel(estimate.automation) && (
-              <span
-                className={cn(
-                  "ml-2",
-                  [
-                    "manual_review_required",
-                    "generation_failed",
-                    "blocked",
-                  ].includes(estimate.automation?.status)
-                    ? "text-alert-fg"
-                    : "text-ink-tertiary",
-                )}
-                title={(estimate.automation?.review || []).join(" · ")}
-              >
-                {automationBadgeLabel(estimate.automation)}
-              </span>
-            )}
-            {estimate.estimatorEngine?.lane && (
-              <span
-                className={cn(
-                  "ml-2",
-                  estimate.estimatorEngine.lane !== "green"
-                    ? "text-alert-fg"
-                    : "text-ink-tertiary",
-                )}
-                title={(estimate.estimatorEngine.laneReasons || []).join(" · ")}
-              >
-                {estimate.estimatorEngine.lane !== "green"
-                  ? "AI Review"
-                  : "AI Draft"}
-              </span>
-            )}
-            {estimate.lawnServiceOutline && (
-              <span
-                className={cn(
-                  "ml-2",
-                  estimate.lawnServiceOutline.validationStatus === "blocked"
-                    ? "text-alert-fg"
-                    : "text-ink-tertiary",
-                )}
-                title={`Outline ${estimate.lawnServiceOutline.status || "draft"} · ${estimate.lawnServiceOutline.validationStatus || "unchecked"}`}
-              >
-                Outline{" "}
-                {estimate.lawnServiceOutline.stale
-                  ? "stale"
-                  : estimate.lawnServiceOutline.ctaClickCount > 0
-                    ? "clicked"
-                    : estimate.lawnServiceOutline.status || "draft"}
-              </span>
-            )}
-            {estimate.confirmedAppointment && (
-              <span
-                className="ml-2"
-                title={
-                  estimate.confirmedAppointment.linked
-                    ? `This call also booked ${formatApptShort(estimate.confirmedAppointment)} — review the schedule before sending a fresh quote.`
-                    : `Customer has a confirmed appointment ${formatApptShort(estimate.confirmedAppointment)}.`
-                }
-              >
-                {" "}
-                <CalendarCheck
-                  size={11}
-                  strokeWidth={1.75}
-                  className="inline-block align-text-top"
-                  aria-hidden
-                />
-                {formatApptShort(estimate.confirmedAppointment)}
-              </span>
-            )}
-            <span className="ml-2 u-nums">
-              #{shortEstimateRef(estimate.id)}
-            </span>{" "}
-          </div>
-        )}
-      </div>
-      {estimate.customerPhone && (
-        <Button
-          type="button"
-          onClick={async (e) => {
-            e.stopPropagation();
-            if (
-              !window.confirm(
-                `Call ${estimate.customerName || "customer"} at ${estimate.customerPhone}?\n\nWaves will call your phone first — press 1 to connect.`,
+            onClick={async (e) => {
+              e.stopPropagation();
+              if (
+                !window.confirm(
+                  `Call ${estimate.customerName || "customer"} at ${estimate.customerPhone}?\n\nWaves will call your phone first — press 1 to connect.`,
+                )
               )
-            )
-              return;
-            try {
-              const r = await adminFetch("/admin/communications/call", {
-                method: "POST",
-                body: JSON.stringify({
-                  to: estimate.customerPhone,
-                  fromNumber: "+19412975749",
-                  customerIdHint: estimate.customerId || undefined,
-                }),
-              });
-              if (!r?.success)
-                alert("Call failed: " + (r?.error || "unknown error"));
-            } catch (err) {
-              alert("Call failed: " + err.message);
-            }
-          }}
-          aria-label="Call via Waves"
-          title="Call via Waves — rings your phone first, press 1 to connect"
-          className="ui-icon-action inline-flex h-11 w-11 items-center justify-center sm:h-9 sm:w-9"
-        >
-          {" "}
-          <Phone size={16} strokeWidth={1.75} />{" "}
-        </Button>
-      )}
-      {estimate.customerPhone && (
-        <Button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            void openEstimateMessages(estimate, openMessages);
-          }}
-          aria-label="SMS"
-          className="ui-icon-action inline-flex h-11 w-11 items-center justify-center sm:h-9 sm:w-9"
-        >
-          {" "}
-          <MessageSquare size={16} strokeWidth={1.75} />{" "}
-        </Button>
-      )}
-      <LawnOutlineQuickButton
-        estimate={estimate}
-        onClick={onLawnOutline}
-        compact
-      />
-      {/* Trailing actions — Call + Text (when phone) + Overflow. All
+                return;
+              try {
+                const r = await adminFetch("/admin/communications/call", {
+                  method: "POST",
+                  body: JSON.stringify({
+                    to: estimate.customerPhone,
+                    fromNumber: "+19412975749",
+                    customerIdHint: estimate.customerId || undefined,
+                  }),
+                });
+                if (!r?.success)
+                  alert("Call failed: " + (r?.error || "unknown error"));
+              } catch (err) {
+                alert("Call failed: " + err.message);
+              }
+            }}
+            aria-label="Call via Waves"
+            title="Call via Waves — rings your phone first, press 1 to connect"
+            className="ui-icon-action inline-flex h-11 w-11 items-center justify-center sm:h-9 sm:w-9"
+          >
+            {" "}
+            <Phone size={16} strokeWidth={1.75} />{" "}
+          </Button>
+        )}
+        {estimate.customerPhone && (
+          <Button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              void openEstimateMessages(estimate, openMessages);
+            }}
+            aria-label="SMS"
+            className="ui-icon-action inline-flex h-11 w-11 items-center justify-center sm:h-9 sm:w-9"
+          >
+            {" "}
+            <MessageSquare size={16} strokeWidth={1.75} />{" "}
+          </Button>
+        )}
+        <LawnOutlineQuickButton
+          estimate={estimate}
+          onClick={onLawnOutline}
+          compact
+        />
+        {/* Trailing actions — Call + Text (when phone) + Overflow. All
        secondary actions live in the overflow sheet so the row stays a
        single 64px scan line. */}
-      <RowActionsMenu
-        label={`Actions for ${customerName}`}
-        items={[
-          canEditEstimateInPlace(estimate) && {
-            key: "edit",
-            label: "Edit estimate",
-            icon: <Pencil size={16} strokeWidth={1.75} />,
-            title:
-              "Reopen in the builder — saving updates this estimate and its existing customer link",
-            onClick: () =>
-              navigate(`/admin/estimates?editEstimateId=${estimate.id}`),
-          },
-          ["draft", "sent", "viewed"].includes(estimate.status) &&
-            canSend && {
-              key: "send",
+        <RowActionsMenu
+          label={`Actions for ${customerName}`}
+          items={[
+            canEditEstimateInPlace(estimate) && {
+              key: "edit",
+              label: "Edit estimate",
+              icon: <Pencil size={16} strokeWidth={1.75} />,
+              title:
+                "Reopen in the builder — saving updates this estimate and its existing customer link",
+              onClick: () =>
+                navigate(`/admin/estimates?editEstimateId=${estimate.id}`),
+            },
+            ["draft", "sent", "viewed"].includes(estimate.status) &&
+              canSend && {
+                key: "send",
+                label:
+                  estimate.status === "draft"
+                    ? "Send estimate"
+                    : "Resend estimate",
+                icon: <Send size={16} strokeWidth={1.75} />,
+                onClick: async () => {
+                  try {
+                    await sendEstimateFromPipeline(estimate.id);
+                    onSend?.();
+                  } catch (err) {
+                    window.alert("Send failed: " + err.message);
+                  }
+                },
+              },
+            (estimate.status === "sent" ||
+              estimate.status === "viewed" ||
+              (estimate.status === "accepted" && !estimate.archivedAt)) && {
+              key: "send-booking",
+              label: "Send booking link",
+              icon: <CalendarCheck size={16} strokeWidth={1.75} />,
+              disabled: !estimate.customerPhone,
+              title: estimate.customerPhone
+                ? "Text the customer a link to self-schedule"
+                : "No phone on file",
+              onClick: () => onSendBooking?.(estimate),
+            },
+            ["sent", "viewed", "expired"].includes(estimate.status) && {
+              key: "extend",
               label:
-                estimate.status === "draft"
-                  ? "Send estimate"
-                  : "Resend estimate",
-              icon: <Send size={16} strokeWidth={1.75} />,
-              onClick: async () => {
-                try {
-                  await sendEstimateFromPipeline(estimate.id);
-                  onSend?.();
-                } catch (err) {
-                  window.alert("Send failed: " + err.message);
-                }
+                estimate.status === "expired"
+                  ? "Reopen + extend"
+                  : "Extend estimate",
+              icon: <CalendarCheck size={16} strokeWidth={1.75} />,
+              onClick: () => onExtend?.(estimate),
+            },
+            canMarkEstimateWon(estimate) && {
+              key: "mark-won",
+              label: "Mark won (verbal yes)",
+              icon: <Check size={16} strokeWidth={1.75} />,
+              onClick: () => onMarkAccepted?.(estimate),
+            },
+            canMarkEstimateAnnualPrepay(estimate) && {
+              key: "annual-prepay",
+              label: "Mark annual prepay",
+              icon: <DollarSign size={16} strokeWidth={1.75} />,
+              onClick: () => onMarkAnnualPrepayAccepted?.(estimate),
+            },
+            (estimate.status === "sent" || estimate.status === "viewed") &&
+              // Same token gate as the desktop menu — no token, no customer link.
+              Boolean(estimate.token) && {
+                key: "copy-link",
+                label: "Copy estimate link",
+                icon: <LinkIcon size={16} strokeWidth={1.75} />,
+                onClick: () => onCopyLink?.(estimate),
+              },
+            estimateHasLawnLine(estimate) && {
+              key: "lawn-outline",
+              label: "Lawn service outline",
+              icon: <ClipboardList size={16} strokeWidth={1.75} />,
+              onClick: () => onLawnOutline?.(estimate),
+            },
+            {
+              key: "audit",
+              label: "Audit pricing",
+              icon: <SlidersHorizontal size={16} strokeWidth={1.75} />,
+              onClick: () => onAudit?.(estimate, "all"),
+            },
+            estimateViewMenuItem(estimate, setViewError),
+            estimate.status === "accepted" &&
+              estimate.hasAcceptanceRecord &&
+              onViewAcceptance && {
+                key: "acceptance-record",
+                label: "View acceptance record",
+                icon: <FileText size={16} strokeWidth={1.75} />,
+                onClick: () => onViewAcceptance(estimate),
+              },
+            Boolean(estimate.estimatorEngine) && {
+              key: "engine-review",
+              label: "AI draft review",
+              icon: <Bot size={16} strokeWidth={1.75} />,
+              onClick: () => onEngineReview?.(estimate),
+            },
+            estimate.customerId && {
+              key: "new-estimate",
+              label: "New estimate for customer",
+              icon: <FilePlus2 size={16} strokeWidth={1.75} />,
+              onClick: () => {
+                const params = new URLSearchParams();
+                params.set("customerId", estimate.customerId);
+                if (estimate.address) params.set("address", estimate.address);
+                if (estimate.customerName)
+                  params.set("customerName", estimate.customerName);
+                if (estimate.customerPhone)
+                  params.set("customerPhone", estimate.customerPhone);
+                if (estimate.customerEmail)
+                  params.set("customerEmail", estimate.customerEmail);
+                navigate(`/admin/estimates?${params.toString()}`);
               },
             },
-          (estimate.status === "sent" ||
-            estimate.status === "viewed" ||
-            (estimate.status === "accepted" && !estimate.archivedAt)) && {
-            key: "send-booking",
-            label: "Send booking link",
-            icon: <CalendarCheck size={16} strokeWidth={1.75} />,
-            disabled: !estimate.customerPhone,
-            title: estimate.customerPhone
-              ? "Text the customer a link to self-schedule"
-              : "No phone on file",
-            onClick: () => onSendBooking?.(estimate),
-          },
-          ["sent", "viewed", "expired"].includes(estimate.status) && {
-            key: "extend",
-            label:
-              estimate.status === "expired"
-                ? "Reopen + extend"
-                : "Extend estimate",
-            icon: <CalendarCheck size={16} strokeWidth={1.75} />,
-            onClick: () => onExtend?.(estimate),
-          },
-          canMarkEstimateWon(estimate) && {
-            key: "mark-won",
-            label: "Mark won (verbal yes)",
-            icon: <Check size={16} strokeWidth={1.75} />,
-            onClick: () => onMarkAccepted?.(estimate),
-          },
-          canMarkEstimateAnnualPrepay(estimate) && {
-            key: "annual-prepay",
-            label: "Mark annual prepay",
-            icon: <DollarSign size={16} strokeWidth={1.75} />,
-            onClick: () => onMarkAnnualPrepayAccepted?.(estimate),
-          },
-          (estimate.status === "sent" || estimate.status === "viewed") &&
-            // Same token gate as the desktop menu — no token, no customer link.
-            Boolean(estimate.token) && {
-              key: "copy-link",
-              label: "Copy estimate link",
-              icon: <LinkIcon size={16} strokeWidth={1.75} />,
-              onClick: () => onCopyLink?.(estimate),
+            !estimate.archivedAt &&
+              ["sent", "viewed", "declined", "expired", "accepted"].includes(
+                estimate.status,
+              ) && {
+                key: "archive",
+                label: "Archive",
+                icon: <Archive size={16} strokeWidth={1.75} />,
+                onClick: () => onArchive?.(estimate),
+              },
+            estimate.archivedAt && {
+              key: "unarchive",
+              label: "Unarchive",
+              icon: <ArrowLeft size={16} strokeWidth={1.75} />,
+              onClick: () => onUnarchive?.(estimate),
             },
-          estimateHasLawnLine(estimate) && {
-            key: "lawn-outline",
-            label: "Lawn service outline",
-            icon: <ClipboardList size={16} strokeWidth={1.75} />,
-            onClick: () => onLawnOutline?.(estimate),
-          },
-          {
-            key: "audit",
-            label: "Audit pricing",
-            icon: <SlidersHorizontal size={16} strokeWidth={1.75} />,
-            onClick: () => onAudit?.(estimate, "all"),
-          },
-          previewHref &&
-            estimate.status !== "accepted" && {
-              key: "preview",
-              label: "View estimate",
-              icon: <ExternalLink size={16} strokeWidth={1.75} />,
-              onClick: () =>
-                window.open(previewHref, "_blank", "noopener,noreferrer"),
+            estimate.status === "draft" && {
+              key: "delete",
+              label: "Delete draft",
+              icon: <Trash2 size={16} strokeWidth={1.75} />,
+              variant: "danger",
+              onClick: () => onDeleteDraft?.(estimate),
             },
-          estimate.status === "accepted" &&
-            acceptedPdfHref && {
-              key: "view-accepted",
-              label: "View accepted estimate",
-              icon: <ExternalLink size={16} strokeWidth={1.75} />,
-              onClick: () =>
-                window.open(acceptedPdfHref, "_blank", "noopener,noreferrer"),
-            },
-          estimate.status === "accepted" &&
-            estimate.hasAcceptanceRecord &&
-            onViewAcceptance && {
-              key: "acceptance-record",
-              label: "View acceptance record",
-              icon: <FileText size={16} strokeWidth={1.75} />,
-              onClick: () => onViewAcceptance(estimate),
-            },
-          Boolean(estimate.estimatorEngine) && {
-            key: "engine-review",
-            label: "AI draft review",
-            icon: <Bot size={16} strokeWidth={1.75} />,
-            onClick: () => onEngineReview?.(estimate),
-          },
-          estimate.customerId && {
-            key: "new-estimate",
-            label: "New estimate for customer",
-            icon: <FilePlus2 size={16} strokeWidth={1.75} />,
-            onClick: () => {
-              const params = new URLSearchParams();
-              params.set("customerId", estimate.customerId);
-              if (estimate.address) params.set("address", estimate.address);
-              if (estimate.customerName)
-                params.set("customerName", estimate.customerName);
-              if (estimate.customerPhone)
-                params.set("customerPhone", estimate.customerPhone);
-              if (estimate.customerEmail)
-                params.set("customerEmail", estimate.customerEmail);
-              navigate(`/admin/estimates?${params.toString()}`);
-            },
-          },
-          !estimate.archivedAt &&
-            ["sent", "viewed", "declined", "expired", "accepted"].includes(
-              estimate.status,
-            ) && {
-              key: "archive",
-              label: "Archive",
-              icon: <Archive size={16} strokeWidth={1.75} />,
-              onClick: () => onArchive?.(estimate),
-            },
-          estimate.archivedAt && {
-            key: "unarchive",
-            label: "Unarchive",
-            icon: <ArrowLeft size={16} strokeWidth={1.75} />,
-            onClick: () => onUnarchive?.(estimate),
-          },
-          estimate.status === "draft" && {
-            key: "delete",
-            label: "Delete draft",
-            icon: <Trash2 size={16} strokeWidth={1.75} />,
-            variant: "danger",
-            onClick: () => onDeleteDraft?.(estimate),
-          },
-        ]}
-      />
-    </Card>
+          ]}
+        />
+      </Card>
+      {viewError && (
+        <p role="alert" className="px-3 pt-1 text-ui-body text-alert-fg">
+          {viewError}
+        </p>
+      )}
+    </>
   );
 }
 

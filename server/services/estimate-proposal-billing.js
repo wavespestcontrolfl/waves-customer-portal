@@ -501,6 +501,7 @@ async function resolveProposalBillingContext(estimate) {
 }
 
 module.exports = {
+  perApplicationBillingColumnsExist,
   estimateBillsPerApplication,
   estimateIsPriceLocked,
   estimateSoldAsAnnualPrepay,

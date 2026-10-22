@@ -132,18 +132,54 @@ describe("MobileEstimateRow per-application price and view actions", () => {
     expect(screen.queryByText("Preview customer view")).toBeNull();
   });
 
-  it("offers the accepted PDF and the acceptance record on an accepted row", () => {
-    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+  it("opens the accepted document from the staff PDF route (works for archived rows too)", async () => {
+    const win = { document: { write: vi.fn() }, close: vi.fn(), location: "" };
+    const open = vi.spyOn(window, "open").mockImplementation(() => win);
+    URL.createObjectURL = vi.fn(() => "blob:accepted");
+    URL.revokeObjectURL = vi.fn();
+    fetch.mockResolvedValue({ ok: true, blob: async () => new Blob(["%PDF"]) });
     const onViewAcceptance = vi.fn();
-    const estimate = { ...ESTIMATE, status: "accepted", hasAcceptanceRecord: true };
+    const estimate = { ...ESTIMATE, status: "accepted", archivedAt: "2026-10-01T00:00:00Z", hasAcceptanceRecord: true };
     renderRow({ estimate, onViewAcceptance });
     openActions();
     expect(screen.queryByRole("button", { name: /^View estimate/ })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /View accepted estimate/ }));
-    expect(open).toHaveBeenCalledWith("/api/estimates/customer-link-token/pdf", "_blank", "noopener,noreferrer");
+    // the tab opens synchronously on the click, before the fetch resolves
+    expect(open).toHaveBeenCalledWith("", "_blank");
+    await waitFor(() => expect(win.location).toBe("blob:accepted"));
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/admin/estimates/estimate-1/proposal.pdf",
+      expect.objectContaining({ headers: expect.objectContaining({ Authorization: expect.stringMatching(/^Bearer /) }) }),
+    );
     openActions();
     fireEvent.click(screen.getByRole("button", { name: /View acceptance record/ }));
     expect(onViewAcceptance).toHaveBeenCalledWith(estimate);
+  });
+
+  it.each([
+    ["expired", { status: "expired" }],
+    ["send_failed", { status: "send_failed" }],
+    ["archived", { archivedAt: "2026-10-01T00:00:00Z" }],
+    ["past its expiry date", { expiresAt: "2020-01-01T00:00:00Z" }],
+  ])("uses the staff PDF (not the public preview) for a %s row", (_name, over) => {
+    vi.spyOn(window, "open").mockImplementation(() => null);
+    renderRow({ estimate: { ...ESTIMATE, ...over } });
+    openActions();
+    expect(screen.getByRole("button", { name: /View estimate \(PDF\)/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^View estimate$/ })).toBeNull();
+  });
+
+  it("shows an inline error, not an alert, when the PDF cannot be opened", async () => {
+    const win = { document: { write: vi.fn() }, close: vi.fn(), location: "" };
+    vi.spyOn(window, "open").mockImplementation(() => win);
+    const alert = vi.spyOn(window, "alert").mockImplementation(() => {});
+    fetch.mockResolvedValue({ ok: false, status: 500 });
+    renderRow({ estimate: { ...ESTIMATE, status: "expired" } });
+    openActions();
+    fireEvent.click(screen.getByRole("button", { name: /View estimate \(PDF\)/ }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not open the estimate PDF (500)");
+    expect(win.close).toHaveBeenCalled();
+    expect(alert).not.toHaveBeenCalled();
   });
 
   it("hides the acceptance record action when none is recorded (Mark won)", () => {

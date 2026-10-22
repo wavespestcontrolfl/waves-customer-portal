@@ -3820,7 +3820,8 @@ function perApplicationLinesForRow(row, estData) {
   try {
     if (!row || String(row.category || '').toUpperCase() === 'COMMERCIAL') return null;
     if (isCommercialProposalData(estData)) return null;
-    if (row.quote_required === true || estData?.quoteRequired === true) return null;
+    // Recursive check (nested result.recurring.services[*].quoteRequired included), the same one the send gate uses.
+    if (row.quote_required === true || estimateDataHasQuoteRequirement(estData)) return null;
     if (!(parseFloat(row.monthly_total || 0) > 0)) return null;
     return recurringPerApplicationLines(normalizeProposal(row, { recurringMode: 'per_application' }));
   } catch (err) {
@@ -3831,7 +3832,7 @@ function perApplicationLinesForRow(row, estData) {
 
 // Fills `perApplication` for the page's rows. Rows with no frozen per-application
 // lines cost nothing; the rest are checked against the billing lane and the
-// annual-prepay sale (one batched prepay query, lane lookups in small chunks).
+// annual-prepay sale and the customer's billing lane (two batched queries).
 async function perApplicationByEstimateId(estimates, parsedDataById) {
   const out = new Map();
   const candidates = [];
@@ -3854,15 +3855,35 @@ async function perApplicationByEstimateId(estimates, parsedDataById) {
     logger.warn(`[admin-estimates] prepay lookup failed for the per-application card view: ${err.message}`);
     return out;
   }
+  // Billing lane, batched: ONE schema probe (cached in the billing module) and
+  // ONE customers query for every linked row, so a limit=all list costs a
+  // constant number of queries. A customer who keeps monthly membership bills
+  // monthly, so the card shows no per-application price for them. UNLINKED rows
+  // (no customer_id) are treated as per-application, the same answer
+  // estimateBillsPerApplication gives when no customer exists. It would run a
+  // phone match per row to find a member behind an unlinked lead; that is
+  // deliberately skipped here to keep the list cheap, and the PDF the card
+  // links to still resolves the full lane.
   const todo = candidates.filter((c) => !prepaidIds.has(c.row.id));
-  for (let i = 0; i < todo.length; i += 10) {
-    await Promise.all(todo.slice(i, i + 10).map(async (c) => {
-      try {
-        if (await billing.estimateBillsPerApplication(c.row) === true) out.set(c.row.id, c.lines);
-      } catch (err) {
-        logger.warn(`[admin-estimates] billing lane unavailable for estimate ${c.row.id}: ${err.message}`);
-      }
-    }));
+  if (!todo.length) return out;
+  const { customerPreservesMonthlyMembership } = require('../services/billing-cadence');
+  try {
+    if (!(await billing.perApplicationBillingColumnsExist())) return out;
+    const customerIds = [...new Set(todo.map((c) => c.row.customer_id).filter(Boolean))];
+    const customers = customerIds.length
+      ? await db('customers').whereIn('id', customerIds).select('id', 'pipeline_stage', 'monthly_rate', 'billing_mode')
+      : [];
+    const byId = new Map(customers.map((c) => [c.id, c]));
+    for (const c of todo) {
+      const customer = c.row.customer_id ? byId.get(c.row.customer_id) : null;
+      // A linked row whose customer could not be read is unknown: show nothing.
+      if (c.row.customer_id && !customer) continue;
+      if (customer && customerPreservesMonthlyMembership(customer)) continue;
+      out.set(c.row.id, c.lines);
+    }
+  } catch (err) {
+    logger.warn(`[admin-estimates] billing lane unavailable for the per-application card view: ${err.message}`);
+    out.clear();
   }
   return out;
 }
