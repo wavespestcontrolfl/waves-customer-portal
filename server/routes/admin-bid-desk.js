@@ -31,6 +31,8 @@ const patchSchema = Joi.object({
   decision_note: Joi.string().trim().max(2000).allow('', null),
 }).min(1).unknown(false);
 
+const DATE_CHANGED = 'The due date changed since you opened this bid. Reload and check it again.';
+
 const fromEmailSchema = Joi.object({ email_id: Joi.string().uuid().required() }).unknown(false);
 
 function toInstant(value) {
@@ -98,6 +100,7 @@ router.patch('/:id', async (req, res, next) => {
     if (!bid) return res.status(404).json({ error: 'Not found' });
 
     const patch = {};
+    let fence = null;
     for (const key of ['job_walk_at', 'questions_due_at']) {
       if (value[key] === undefined) continue;
       const parsed = toInstant(value[key]);
@@ -118,16 +121,19 @@ router.patch('/:id', async (req, res, next) => {
     } else if (value.confirm_due) {
       if (!bid.due_at) return res.status(400).json({ error: 'There is no date to confirm' });
       // Confirm only the date the operator looked at: an addendum may have changed the bid since the page loaded.
-      const seen = value.expected_due_at ? new Date(value.expected_due_at).getTime() : NaN;
-      if (seen !== new Date(bid.due_at).getTime()) {
-        return res.status(409).json({ error: 'The due date changed since you opened this bid. Reload and check it again.' });
+      if (!value.expected_due_at || new Date(value.expected_due_at).getTime() !== new Date(bid.due_at).getTime()) {
+        return res.status(409).json({ error: DATE_CHANGED });
       }
+      // The write itself is fenced too: an addendum filed between this read and the update (it moves updated_at)
+      // wins. Compared at millisecond precision, the precision the row was read at.
+      fence = (q) => q.whereRaw("date_trunc('milliseconds', updated_at) = ?", [bid.updated_at]);
       Object.assign(patch, { due_confirmed: true, needs_date_confirmation: false });
     }
     if (value.status !== undefined) patch.status = value.status;
     if (value.decision_note !== undefined) patch.decision_note = value.decision_note || null;
 
-    await db('bid_opportunities').where({ id: bid.id }).update({ ...patch, updated_at: db.fn.now() });
+    const written = await db('bid_opportunities').where({ id: bid.id }).modify((q) => { if (fence) fence(q); }).update({ ...patch, updated_at: db.fn.now() });
+    if (!written) return res.status(409).json({ error: DATE_CHANGED });
     const updated = await db('bid_opportunities').where({ id: bid.id }).first(BID_COLUMNS);
     res.json({ ok: true, bid: present(updated) });
   } catch (err) {

@@ -97,7 +97,7 @@ it("confirms a date as read and saves a decision with a note", async () => {
   renderPage("/?bid=b1");
   fireEvent.click(await screen.findByRole("button", { name: "Confirm date as read" }));
   await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
-  expect(patch.mock.calls[0][0].body).toEqual({ confirm_due: true });
+  expect(patch.mock.calls[0][0].body).toEqual({ confirm_due: true, expected_due_at: detail.bid.due_at });
   fireEvent.change(screen.getByLabelText("Decision"), { target: { value: "no_bid" } });
   fireEvent.change(screen.getByLabelText("Note"), { target: { value: "Out of area" } });
   fireEvent.click(screen.getByRole("button", { name: "Save decision" }));
