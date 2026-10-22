@@ -238,6 +238,22 @@ describe('Codex #6375 r7: spaced and punctuated credential assignments, any Auth
   test('a short credential after any Authorization scheme goes too (Codex #6375 r9)', () => {
     expect(scrubNote('Authorization: Token abc').text).toBe('Authorization: [removed]');
   });
+  test('spaced credential keys and bare user-info links are scrubbed (Codex #6375 r21)', () => {
+    expect(scrubNote('private key: hunter22').text).toBe('private key: [removed]');
+    expect(scrubNote('access key = abc123xyz').text).toBe('access key = [removed]');
+    expect(scrubNote('signing key: abc123xyz').text).toBe('signing key: [removed]');
+    expect(scrubNote('access key id: AKIDEXAMPLE1').text).toBe('access key id: [removed]');
+    const bare = scrubNote('db is admin:hunter22@db.example.com/prod today');
+    expect(bare.text).toBe('db is admin:[removed]@db.example.com/prod today');
+    expect(scrubNote(bare.text).text).toBe(bare.text);
+    // An ordinary email, a time and a "key under the mat" note stay.
+    for (const note of ['mail pat@example.com at 10:30', 'key under the mat', 'meet at 10:30 @ the gate']) {
+      expect(scrubNote(note).text).toBe(note);
+    }
+    const started = Date.now();
+    scrubNote(`${'a:'.repeat(5000)}x@`); scrubNote(`${'a'.repeat(19990)}:b@c.d`);
+    expect(Date.now() - started).toBeLessThan(200);
+  });
   test('ordinary prose and labels without a credential word stay as written', () => {
     const note = 'the password is in the lockbox. gate code: 1234, PIN: 8842, key under the mat, lockbox passcode: 4321';
     expect(scrubNote(note)).toEqual({ text: note, removed: 0 });

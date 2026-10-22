@@ -99,7 +99,8 @@ function looksLikeBasicCredential(header, token) {
 // inside a link is left to the link rules. Prose has no separator: "the password is in the lockbox",
 // "PIN: 8842", "gate code: 1234" come back as written. An already removed value (exactly the marker)
 // is left alone, so a second pass changes nothing.
-const CREDENTIAL_ASSIGN_RE = /(?<![A-Za-z0-9_.-])(\\?["']?)((?:api[ \t]+)?[A-Za-z][A-Za-z0-9_.-]*)\1(\s*[=:][ \t]*)/gi;
+// A key may be written with spaces after a key prefix: "private key:", "access key id =" (Codex #6375 r21).
+const CREDENTIAL_ASSIGN_RE = /(?<![A-Za-z0-9_.-])(\\?["']?)((?:(?:api|private|secret|signing|access|encryption|ssh)[ \t]+(?:key[ \t]+)?)?[A-Za-z][A-Za-z0-9_.-]*)\1(\s*[=:][ \t]*)/gi;
 const ENV_STEM_WORDS = new Set(['password', 'passwd', 'pass', 'secret', 'token', 'apikey', 'credential', 'credentials']);
 const ENV_STEM_PAIRS = [['api', 'key'], ['private', 'key']];
 function isEnvSecretName(key) {
@@ -139,6 +140,11 @@ const URL_RE = /(?<![A-Za-z0-9+.-])[a-z][a-z0-9+.-]*:(?:\\?\/){2}(?:[^\s"'<>\\]|
 // smb://, ...); the http(s) links above also go through scrubUrl (Codex #6375).
 // A scheme starts after a non-scheme character, so a long run of letters, dots or dashes is scanned once, not from every offset (Codex #6375 r20).
 const ANY_SCHEME_USERINFO_RE = /(?<![A-Za-z0-9+.-])([a-z][a-z0-9+.-]*:(?:\\?\/){2})[^\s\/@:"'<>\\]*:[^\s\/@"'<>\\]+@/gi;
+// user:password@host.example with no scheme at all (Codex #6375 r21). The user part starts after a
+// non-user character, so a long run is scanned once; the host must have a dot.
+const BARE_USERINFO_RE = /(?<![A-Za-z0-9._%+\-:\/@])([A-Za-z0-9._%+-]+):([^\s\/@"'<>\\:]+)@(?=[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)/g;
+// "mailto:pat@example.com" is an address link, not user:password@host.
+const URI_PREFIXES = new Set(['mailto', 'tel', 'sms', 'sip', 'sips', 'xmpp', 'im', 'facetime', 'callto', 'geo', 'maps']);
 const URL_USERINFO_RE = /^([a-z][a-z0-9+.-]*:(?:\\?\/){2}[^\s/:@?#\\]*:)[^\s/@?#\\]+@/i;
 // A value may hold a JSON-escaped slash (token=abc\/hunter22): it is part of the value (Codex #6375 r15).
 const QUERY_PARAM_RE = /([?&#;])([A-Za-z0-9_.%+[\]-]+)=((?:[^&#\s"'<>\\]|\\\/)*)/g;
@@ -268,6 +274,8 @@ function scrubNoteText(input) {
   let text = trimToScanLimit(input);
   text = text.replace(PEM_RE, swap);
   text = text.replace(ANY_SCHEME_USERINFO_RE, (match, scheme) => { removed += 1; return `${scheme}${REMOVED}@`; });
+  text = text.replace(BARE_USERINFO_RE, (match, user, secret) => (isAlreadyRemoved(secret) || URI_PREFIXES.has(user.toLowerCase())
+    ? match : (removed += 1, `${user}:${REMOVED}@`)));
   text = text.replace(URL_RE, (url) => {
     const clean = scrubUrl(url);
     if (clean !== url) removed += 1;
