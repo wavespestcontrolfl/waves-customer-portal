@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { WAVES_FL_LICENSE_LINE, WAVES_PRODUCTS_SAFETY_URL, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 import { cleanVisitSummary, hidesTreatedAreas, reserviceCardView } from './ReportViewPage';
 import { epaReg, isProductApplication, reportHasRodenticide } from '../lib/product-application';
@@ -355,38 +355,12 @@ function DocPoisonControl({ data, listsProducts = false, titled = false, showApp
   );
 }
 
-// GATE_REPORT_GLASS_WEB (owner 2026-10-20): true only inside the web view the
-// server dressed in glass. Every glass attribute below reads this, so with it
-// false (the PDF, gate off) the markup is exactly the plain paper document.
-const GlassDressing = createContext(false);
-
-// Everything the glass dressing changes, in one place so the component body
-// stays flat. Off (the PDF, gate off) returns the paper document's own values.
-function glassView(web, glass) {
-  const on = web && glass === true;
-  return {
-    on,
-    gc: on ? { 'data-glass': 'card' } : {},
-    footer: on ? { className: 'doc-keep doc-footer', 'data-glass': 'card' } : { className: 'doc-keep' },
-    rootClass: on ? ' is-glass' : '',
-    rootBackground: on ? 'transparent' : '#fff',
-  };
-}
-
-// One glass card around a run of blocks; renders the children bare when the
-// dressing is off, so the paper document gains no wrapper element.
-function GlassBlock({ children }) {
-  const glass = useContext(GlassDressing);
-  return glass ? <div data-glass="card">{children}</div> : children;
-}
-
 // A level-2 heading for screen readers (role, not an <h2>: the glass theme
 // forces every h1/h2 to its own size with !important, which would change
 // the PDF). The look is unchanged.
 function SectionHeader({ children }) {
-  const glass = useContext(GlassDressing);
   return (
-    <div role="heading" aria-level={2} className="doc-keep-with-next" {...(glass ? { 'data-gt': 'eyebrow' } : {})} style={{
+    <div role="heading" aria-level={2} className="doc-keep-with-next" style={{
       borderBottom: `1.5px solid ${NAVY}`, margin: '14px 0 6px', paddingBottom: 3,
       color: NAVY, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase',
     }}>{children}</div>
@@ -405,10 +379,7 @@ function Bullet({ children }) {
 // `web` (GATE_REPORT_SIMPLE_WEB, owner 2026-10-17): the same document is the
 // page a customer sees at the report link. It then IS the online report, so
 // the lines that point "to your online report" read as plain facts instead.
-export default function ServiceReportDocument({ data, token, web = false, glass = false }) {
-  // GATE_REPORT_GLASS_WEB: glass dressing for the web view only; the PDF never
-  // gets it, whatever the payload says.
-  const { on: glassOn, gc, footer: footerProps, rootClass: glassClass, rootBackground } = glassView(web, glass);
+export default function ServiceReportDocument({ data, token, web = false }) {
   // Remote images (the traced S3 snapshot, photos) can fail during the
   // headless capture. A heading with no image under it is a broken-looking
   // claim in a permanent record, so a failed image drops itself and its
@@ -1060,10 +1031,9 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
   const interaction = interactionLabel(data.customerInteraction);
 
   return (
-    <GlassDressing.Provider value={glassOn}>
     <div
-      className={`service-report-v1 service-report-document${web ? ' is-web' : ''}${glassClass}`}
-      style={{ background: rootBackground, color: INK, fontFamily: FONT, minHeight: '100vh' }}
+      className={`service-report-v1 service-report-document${web ? ' is-web' : ''}`}
+      style={{ background: '#fff', color: INK, fontFamily: FONT, minHeight: '100vh' }}
     >
       <style>{`
         .service-report-document { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
@@ -1100,17 +1070,6 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
            ServiceReportDocument.web-text-floor.test.js holds the floor. is-web
            only, so the PDF is unchanged. */
         .service-report-document.is-web .doc-page { zoom: 1.48; }
-        /* GATE_REPORT_GLASS_WEB: the glass look over the same document. Cards
-           carry the theme's own surface (data-glass="card"); these rules only
-           space them, keep dark ink on the translucent card and hold the
-           section label at the 14px screen floor under the zoom. */
-        html[data-glass-theme] .service-report-document.is-glass [data-glass="card"] { margin-top: 12px; padding: 12px 14px; box-sizing: border-box; min-width: 0; }
-        html[data-glass-theme] .service-report-document.is-glass [data-glass="card"]:hover { transform: none !important; }
-        html[data-glass-theme] .service-report-document.is-glass .doc-info-grid { gap: 0 12px; }
-        html[data-glass-theme] .service-report-document.is-glass .doc-info-grid > [data-glass="card"] { margin-top: 12px; }
-        html[data-glass-theme] .service-report-document.is-glass .doc-page [data-gt="eyebrow"] { font-size: 9.5px !important; letter-spacing: 0.08em !important; color: #04395E !important; border-bottom: 1px solid rgba(4, 57, 94, 0.16) !important; margin-top: 0 !important; }
-        html[data-glass-theme] .service-report-document.is-glass .doc-footer { border-top: 0 !important; margin-top: 16px !important; padding-top: 12px !important; }
-        html[data-glass-theme] .service-report-document.is-glass .doc-title-row { border-top-color: rgba(4, 57, 94, 0.16) !important; }
         /* A long link (the products-and-safety URL) wraps instead of running
            past a 320px phone at that scale. */
         .service-report-document.is-web a { overflow-wrap: anywhere; }
@@ -1130,8 +1089,6 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
       `}</style>
       <div className="doc-page">
 
-        {/* Letterhead and title: one glass card on the web view, plain otherwise */}
-        <GlassBlock>
         {/* Letterhead */}
         <div className="doc-keep doc-letterhead" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
           <img src="/waves-logo.png" alt="Waves Pest Control" style={{ height: 64, display: 'block' }} />
@@ -1153,20 +1110,19 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
             Report #{reportNumber} · {fmtServiceDate(data.serviceDate)}
           </div>
         </div>
-        </GlassBlock>
 
         {/* Info grid */}
         <div className="doc-keep doc-info-grid" style={{ display: 'grid', gridTemplateColumns: '1.2fr 1.1fr 0.9fr', gap: '4px 22px', marginTop: 10 }}>
           {/* minWidth:0 on each column: grid otherwise honours a long unbroken
               email's min-content width and squeezes the other two columns. */}
-          <div style={{ minWidth: 0 }} {...gc}>
+          <div style={{ minWidth: 0 }}>
             <SectionHeader>Customer</SectionHeader>
             <InfoRow label="Name">{data.customerName}</InfoRow>
             <InfoRow label="Address">{data.serviceAddress || data.propertyAddress}</InfoRow>
             <InfoRow label="Phone">{fmtPhone(data.customerPhone)}</InfoRow>
             <InfoRow label="Email">{data.customerEmail}</InfoRow>
           </div>
-          <div {...gc}>
+          <div>
             <SectionHeader>Service</SectionHeader>
             <InfoRow label="Service">{data.serviceDisplayName || data.serviceType}</InfoRow>
             {/* Member callbacks: the completion panel tells the tech this
@@ -1180,7 +1136,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
             <InfoRow label="Time out">{fmtTime(data.visitTiming?.exitedAt)}</InfoRow>
             <InfoRow label="Contact">{interaction}</InfoRow>
           </div>
-          <div {...gc}>
+          <div>
             <SectionHeader>Conditions</SectionHeader>
             {conditions ? (
               <>
@@ -1198,7 +1154,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
 
         {/* Summary */}
         {summaryParagraphs.length > 0 && (
-          <div className="doc-keep" {...gc}>
+          <div className="doc-keep">
             <SectionHeader>Summary of today&apos;s service</SectionHeader>
             {/* The four-section report prints with its titles; any other
                 paragraph prints as before. */}
@@ -1219,7 +1175,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
             (lead.techParagraph for lawn, reportV2.techParagraph for tree & shrub).
             Absent key prints nothing. */}
         {techParagraph ? (
-          <div className="doc-keep" {...gc}>
+          <div className="doc-keep">
             <SectionHeader>From your technician</SectionHeader>
             <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{techParagraph}</p>
           </div>
@@ -1230,7 +1186,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
             performed-visit summary. The web page's "Still seeing…" button has
             no print equivalent. */}
         {reserviceCard?.showTold && (
-          <div className="doc-keep" {...gc}>
+          <div className="doc-keep">
             <SectionHeader>You told us</SectionHeader>
             {reserviceCard.toldLine && (
               <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{reserviceCard.toldLine}</p>
@@ -1241,7 +1197,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
           </div>
         )}
         {reserviceCard?.showDid && (
-          <div className="doc-keep" {...gc}>
+          <div className="doc-keep">
             <SectionHeader>What we did</SectionHeader>
             {reserviceCard.rows.map(([label, value]) => (
               <InfoRow key={label} label={label}>{value}</InfoRow>
@@ -1257,7 +1213,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
             top-level card. Losing it makes the report read as if the
             concern was ignored. */}
         {concern && (concern.concern || concern.body) && (
-          <div className="doc-keep" {...gc}>
+          <div className="doc-keep">
             {/* buildCustomerConcernCard returns { headline, concern, body,
                 nextStep } — an earlier guess at customerConcern/acknowledgement
                 meant this section never mounted at all (codex P2 r6). */}
@@ -1278,7 +1234,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
             pestV2.expectations is built server-side (pest-report-v2.js) and
             is already PDF-safe as delivered. */}
         {pestV2?.expectations?.spiders?.expectation && (
-          <div className="doc-keep" {...gc}>
+          <div className="doc-keep">
             <SectionHeader>{pestV2.expectations.spiders.headline || 'Spiders'}</SectionHeader>
             {pestV2.expectations.spiders.whatWeDid && (
               <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{pestV2.expectations.spiders.whatWeDid}</p>
@@ -1290,7 +1246,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
           </div>
         )}
         {pestV2?.expectations?.whatToExpect?.lines?.length > 0 && !summarySectionsShown && (
-          <div className="doc-keep" {...gc}>
+          <div className="doc-keep">
             <SectionHeader>What to expect</SectionHeader>
             {pestV2.expectations.whatToExpect.lines.map((line) => (
               <Bullet key={line}>{line}</Bullet>
@@ -1301,7 +1257,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
         {/* A promised revisit is a commitment — dropping it from the permanent
             artifact leaves the customer with no record of it. */}
         {v2?.followUp && (v2.followUp.headline || v2.followUp.reason) && (
-          <div className="doc-keep" {...gc}>
+          <div className="doc-keep">
             <SectionHeader>{v2.followUp.headline || 'Follow-up already planned'}</SectionHeader>
             {v2.followUp.reason && (
               <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{v2.followUp.reason}</p>
@@ -1313,7 +1269,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
         {(findings.length > 0 || recordFindings.length > 0 || activity || lawnObservations
           || mowing?.heightIn != null || v2StatusLine || v2Insights.length > 0 || v2Diagnosis.length > 0 || pestBugFiles.length > 0
           || defenseItems.length > 0 || termiteStatusLine || termiteDefenseItems.length > 0 || pressure || legacyLawnScores?.overallScore != null) && (
-          <div className="doc-keep" {...gc}>
+          <div className="doc-keep">
             <SectionHeader>What we found</SectionHeader>
             {pressure && (
               <Bullet>
@@ -1448,7 +1404,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
             renders when something was actually applied. A real re-entry
             context is itself evidence of treatment and always renders. */}
         {(reentry || (data.advisory?.pet_advisory && hasActualTreatment)) && (
-          <div className="doc-keep" {...gc}>
+          <div className="doc-keep">
             <SectionHeader>Re-entry &amp; precautions</SectionHeader>
             {/* buildReentrySummary emits "<area> ready at 7:03 PM" while the
                 window is still open (reentry.js:39-44) — the same fixed
@@ -1481,7 +1437,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
 
         {/* Recommendations */}
         {recommendations.length > 0 && (
-          <div className="doc-keep" {...gc}>
+          <div className="doc-keep">
             <SectionHeader>What we recommend</SectionHeader>
             {recommendations.map((rec) => <Bullet key={rec}>{rec}</Bullet>)}
           </div>
@@ -1492,7 +1448,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
             are composed for pdf/static too — only the live appointment date
             is stripped — so the document prints them. */}
         {cockroachV2?.whatsNext && (
-          <div className="doc-keep" {...gc}>
+          <div className="doc-keep">
             <SectionHeader>Your cockroach treatment program</SectionHeader>
             <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}><strong>{cockroachV2.whatsNext.title}</strong>{cockroachV2.whatsNext.badge ? ` — ${cockroachV2.whatsNext.badge === 'COMPLETE' ? 'program complete' : 'program in progress'}` : ''}</p>
             {(cockroachV2.whatsNext.lines || []).filter((line) => line && line.text).map((line) => (
@@ -1504,7 +1460,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
         )}
 
         {appliedProducts.length > 0 && (
-          <div {...gc}>
+          <div>
             <SectionHeader>Products applied</SectionHeader>
             <table className="doc-products" style={{ fontSize: 11 }}>
               <thead className="doc-keep-with-next">
@@ -1591,7 +1547,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
             Control prints on its own, mirroring the web report. The
             applicator is named only on real application evidence. */}
         {appliedProducts.length === 0 && (data.applicationMade === true || data.applicationMade === null || reportHasRodenticide(data)) && (
-          <div className="doc-keep" {...gc}>
+          <div className="doc-keep">
             <SectionHeader>Poison Control</SectionHeader>
             <DocPoisonControl data={data} titled showApplicator={data.applicationMade === true} />
           </div>
@@ -1602,7 +1558,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
             satellite basemap never prints (provider ToS — long-standing
             rule), which these two Waves-owned renderings don't involve. */}
         {coverageItems.length > 0 && (
-          <div className="doc-keep" {...gc}>
+          <div className="doc-keep">
             <SectionHeader>Areas serviced</SectionHeader>
             {coverageItems.map((item) => {
               const reason = coverageReasonText(item, data.coverageServiceType);
@@ -1630,7 +1586,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
         )}
 
         {(tracedMapUrl || (schematicSrc && hasRenderableTreatment)) && (
-          <div className="doc-keep" {...gc}>
+          <div className="doc-keep">
             <SectionHeader>Where we treated</SectionHeader>
             <div className="doc-map-frame" style={{ border: `1px solid ${HAIR}`, borderRadius: 10, overflow: 'hidden' }}>
               {tracedMapUrl
@@ -1652,7 +1608,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
             frame. The Google satellite image in the payload must NOT print
             (provider ToS); the online report carries the satellite view. */}
         {stationMap && (
-          <div className="doc-keep" {...gc}>
+          <div className="doc-keep">
             <SectionHeader>{stationMap.program === 'trapping' ? 'Trap placement' : 'Bait station placement'}</SectionHeader>
             <div style={{
               position: 'relative', width: '100%', aspectRatio: '32 / 17',
@@ -1715,7 +1671,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
             CACHING — the malformed document would still be served on each
             download. Nothing marked is better than pins over nothing. */}
         {(data.markedPhotos || []).filter((m) => !failedImages.has(m.url)).map((marked) => (
-          <div key={marked.photoId} className="doc-keep" {...gc}>
+          <div key={marked.photoId} className="doc-keep">
             <SectionHeader>Where we treated</SectionHeader>
             <p style={{ margin: '0 0 8px', fontSize: 11, lineHeight: 1.5, color: INK }}>
               {MARKED_PHOTO_INTRO}
@@ -1794,7 +1750,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
         {/* Service photos — embedded (owner 2026-08-03, supersedes the
             portal-link-only call earlier the same day). */}
         {photos.length > 0 && (
-          <div {...gc}>
+          <div>
             <SectionHeader>Service photos</SectionHeader>
             {/* ONE consolidated, guarded summary — the V2 rule for photo copy. */}
             {(data.reportV2?.photoSummary || data.typedReport?.photoSummary) && (
@@ -1848,7 +1804,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
         )}
 
         {photoFindings.length > 0 && (
-          <div className="doc-keep" data-testid="doc-photo-findings" {...gc}>
+          <div className="doc-keep" data-testid="doc-photo-findings">
             <SectionHeader>What the photos showed</SectionHeader>
             {photoFindings.map((finding, i) => (
               <div key={i} style={{ margin: '0 0 8px' }}>
@@ -1875,7 +1831,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
         )}
 
         {visitHistory.length > 0 && (
-          <div className="doc-keep" {...gc}>
+          <div className="doc-keep">
             <SectionHeader>{data.typedVisitTimeline.label ? `${data.typedVisitTimeline.label} — visit history` : 'Visit history'}</SectionHeader>
             {visitHistory.map((visit) => (
               <Bullet key={visit.serviceRecordId || visit.serviceDate}>
@@ -1890,7 +1846,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
             visit gets its own findings block (staff-only ones filtered out
             above, never printed). */}
         {companions.map((companion) => (
-          <div key={companion.type} className="doc-keep" {...gc}>
+          <div key={companion.type} className="doc-keep">
             <SectionHeader>{companion.reportTypeLabel || companion.typeLabel || 'Additional service'}</SectionHeader>
             {/* Bait-station companion owned by the termite dashboard: its
                 result prints in the Station protection row above, so the
@@ -1973,7 +1929,7 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
         ))}
 
         {/* Record footer */}
-        <div {...footerProps} style={{ borderTop: `1px solid ${LINE}`, marginTop: 18, paddingTop: 8, textAlign: 'center' }}>
+        <div className="doc-keep" style={{ borderTop: `1px solid ${LINE}`, marginTop: 18, paddingTop: 8, textAlign: 'center' }}>
           <div style={{ fontSize: 10, color: MUTED, lineHeight: 1.6 }}>
             {/* No next-service line: stripLiveOnlyScheduleFields deletes
                 nextAppointment (and reportV2.snapshot.nextVisit) from EVERY
@@ -2032,6 +1988,5 @@ export default function ServiceReportDocument({ data, token, web = false, glass 
 
       </div>
     </div>
-    </GlassDressing.Provider>
   );
 }
