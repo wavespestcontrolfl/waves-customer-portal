@@ -269,3 +269,12 @@ describe('Step 3 keeps a spoken-number match suggest-only', () => {
     expect(src).toContain('unclaimedOnly: !!(sharedPhoneAmbiguity.candidates || spokenNumberCandidate)');
   });
 });
+
+describe('triage route keeps the suggestion out of call verdicts', () => {
+  const route = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-triage.js'), 'utf8');
+
+  test('a verdict on the card is refused with an instruction, and a sibling verdict does not sweep it', () => {
+    expect(route).toMatch(/NOT_A_VERDICT_MESSAGES = \{[\s\S]*callback_spoken_number_link:/);
+    expect(route).toMatch(/\.whereNotIn\('reason_code', \[[\s\S]*'callback_spoken_number_link'[\s\S]*\]\)/);
+  });
+});

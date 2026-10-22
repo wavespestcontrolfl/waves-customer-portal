@@ -445,7 +445,7 @@ const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence, name_spe
 const NO_VERDICT_REASONS = new Set([
   "property_role_confirm", "reschedule_link_promise", "attached_booking_followup_unbooked",
   "missing_first_name", "family_account_candidates", "on_file_house_number_conflict",
-  "auto_booking_skipped_after_approval", "text_number_differs", "name_spelling_differs",
+  "auto_booking_skipped_after_approval", "text_number_differs", "name_spelling_differs", "callback_spoken_number_link",
 ]);
 // …of which these are an owed capture on the customer record or the office's link: Resolve is admin-only.
 const ADMIN_RESOLVE_REASONS = new Set(["missing_first_name", "family_account_candidates", "name_spelling_differs"]);
