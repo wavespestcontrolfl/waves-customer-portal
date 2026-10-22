@@ -95,6 +95,13 @@ describe('processVendorInvoice authentication', () => {
     expect(inserted()).toBeUndefined();
   });
 
+  test('gate on: an already-booked email keeps its outcome when reprocessed unauthenticated', async () => {
+    process.env[GATE] = 'true';
+    await processVendorInvoice({ ...email(null), expense_id: 'exp-9' }, CLASSIFICATION);
+    expect(inserted()).toBeUndefined();
+    expect(mockWrites.find(([t, op]) => t === 'emails' && op === 'update')).toBeUndefined();
+  });
+
   test('gate on: a sender that authenticated as its From domain still books', async () => {
     process.env[GATE] = 'true';
     await processVendorInvoice(email(REAL_DKIM), CLASSIFICATION);

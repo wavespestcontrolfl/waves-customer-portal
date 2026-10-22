@@ -11,7 +11,7 @@ const AUTO_ACTION_LABELS = {
 export function autoActionNote(email) {
   const label = AUTO_ACTION_LABELS[email?.classification];
   if (!label) return null;
-  if (email.classification === "vendor_invoice" && /^invoice_detected:/.test(email.auto_action || "")) {
+  if (email.classification === "vendor_invoice" && !email.expense_id && /^invoice_detected:/.test(email.auto_action || "")) {
     return email.auto_action === "invoice_detected:unauthenticated"
       ? { text: "Invoice — check sender, not logged", needsReview: true }
       : { text: "Invoice — not logged", needsReview: false };

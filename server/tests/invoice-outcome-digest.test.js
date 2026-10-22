@@ -7,9 +7,10 @@ test('daily digest counts only invoices that reached booking', () => {
     { classification: 'vendor_invoice', auto_action: null },
     { classification: 'vendor_invoice', auto_action: 'invoice_detected:unauthenticated' },
     { classification: 'vendor_invoice', auto_action: 'invoice_detected:not_paid' },
+    { classification: 'vendor_invoice', auto_action: 'invoice_detected:unauthenticated', expense_id: 'e1' },
     { classification: 'lead_inquiry', auto_action: null },
   ];
-  expect(countProcessedInvoices(emails)).toBe(3);
+  expect(countProcessedInvoices(emails)).toBe(4);
   expect(countProcessedInvoices([])).toBe(0);
 });
 
