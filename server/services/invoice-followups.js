@@ -1943,6 +1943,20 @@ function reminderSmsBody({ mdPending, ctx, step, row }) {
 }
 
 // The text leg of the bar's report when the sender blocked or deferred it.
+// The SMS/App leg's last check before the provider: the invoice is still self-pay (every send), and for the Intelligence Bar's
+// approved send-now (bar) the Eastern 8 AM-8 PM window again. operatorInitiated skips the canonical sender's window validator
+// (the Invoices page's own Send-now keeps that exemption), and a card confirmed at 7:59 PM can wait on locks past 8 PM.
+function followupDispatchCheck(invoiceId, bar) {
+  const ownership = invoiceHelpers.selfPayAtDispatch(invoiceId, db);
+  if (!bar) return ownership;
+  return async (ctx) => {
+    if (!require('./messaging/send-window').isWithinSendWindowET()) {
+      return { ok: false, code: 'OUTSIDE_SEND_WINDOW', reason: 'the bar\'s approved send is not sent between 8 PM and 8 AM Eastern' };
+    }
+    return ownership(ctx);
+  };
+}
+
 function blockedSmsLeg(sendResult, { smsDeferredOwned, smsOutcomeMayHaveDelivered }) {
   if (smsDeferredOwned) return { state: 'queued', reason: 'send_window' };
   if (smsOutcomeMayHaveDelivered) return { state: 'unknown', reason: legReason(sendResult.code) || 'provider_unconfirmed' };
@@ -2382,7 +2396,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
           // by automated touches; the exemption is threaded so the two paths cannot diverge.)
           ...(operatorInitiated ? { operatorInitiated: true } : {}),
           ...(holdExempt ? { holdExempt } : {}),
-          preDispatchCheck: invoiceHelpers.selfPayAtDispatch(row.invoice_id, db),
+          preDispatchCheck: followupDispatchCheck(row.invoice_id, bar),
         });
       } catch (err) {
         result = err.providerOutcome || { deliveryOutcome: 'uncertain', deferred: true };
@@ -2478,7 +2492,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
         // round-trip and the contact-ledger writes are awaited after the
         // re-read above, and this rail holds no claim a Bill-To writer
         // fences on. Fail-closed, with no lock held across provider I/O.
-        preDispatchCheck: invoiceHelpers.selfPayAtDispatch(row.invoice_id, db),
+        preDispatchCheck: followupDispatchCheck(row.invoice_id, bar),
       }) : null;
       if (sendResult && heldByDisputeHold(sendResult)) {
         // Dispute hold landed after the preflight: nothing was sent and nothing failed. Release the

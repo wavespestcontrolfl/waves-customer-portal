@@ -688,6 +688,22 @@ describe('the card’s channels, text and recipients', () => {
     }
   });
 
+  test('the approved text re-checks the 8 PM Eastern window at dispatch; the page’s own send keeps its exemption', async () => {
+    const window = require('../services/messaging/send-window');
+    await sendNow({ approved: APPROVED, report: true });
+    const barCheck = sendCustomerMessage.mock.calls[0][0].preDispatchCheck;
+    const spy = jest.spyOn(window, 'isWithinSendWindowET').mockReturnValue(false);
+    try {
+      expect(await barCheck({ channel: 'sms' })).toMatchObject({ ok: false, code: 'OUTSIDE_SEND_WINDOW' });
+      fresh(); install(); jest.clearAllMocks();
+      await sendNow();
+      const pageCheck = sendCustomerMessage.mock.calls[0][0].preDispatchCheck;
+      expect(await pageCheck({ channel: 'sms' })).toMatchObject({ ok: true });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('the page’s call (no approval) resolves the template itself and is not limited to a channel set', async () => {
     tables.customers[0].phone = '+19415550199';
     await sendNow();
