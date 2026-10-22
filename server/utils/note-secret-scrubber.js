@@ -160,7 +160,8 @@ const QUERY_PARAM_RE = /([?&#;])([A-Za-z0-9_.%+[\]-]+)=((?:[^&#\s"'<>\\]|\\\/)*)
 // Credential names that are not credential words as a field name but are as a
 // query key (the same short list signed-link-redaction.js keeps for links).
 const EXTRA_QUERY_KEYS = new Set(['key', 'auth', 'sid', 'ticket', 'pwd', 'pass', 'sessionid', 'authtoken', 'accesstoken', 'idtoken', 'apikey', 'awsaccesskeyid', 'key-pair-id']);
-const SSN_RE = /(?<![\d-])(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}(?![\d-])/g;
+// 9dd-dd-dddd is an ITIN (a taxpayer number): removed like an SSN (Codex #6375 r24).
+const SSN_RE = /(?<![\d-])(?!000|666)\d{3}-(?!00)\d{2}-(?!0000)\d{4}(?![\d-])/g;
 const LONG_RUN_RE = /[A-Za-z0-9+/_-]{32,}={0,2}/g;
 
 // A query name may be percent-encoded ("%74oken" is "token" to the server);
@@ -297,8 +298,13 @@ function scrubNoteText(input) {
   removed += assigned.count;
   text = assigned.text;
   for (const pattern of PREFIXED_RES) text = text.replace(pattern, swap);
-  const noPans = scrubPans(plainDigitsAndSeparators(text));
-  if (noPans !== text) removed += 1;
+  // The card-number check reads a normalized COPY (typographic dashes and spaces, full-width digits, invisible
+  // characters); the text is replaced by the masked copy only when a card number was really found, so a
+  // note without one comes back byte for byte and is not counted (Codex #6375 r24).
+  const detection = plainDigitsAndSeparators(text);
+  const masked = scrubPans(detection);
+  const noPans = masked === detection ? text : masked;
+  if (masked !== detection) removed += 1;
   const longRuns = scrubLongDigitRuns(noPans);
   removed += longRuns.count;
   text = longRuns.text.replace(SSN_RE, swap);
@@ -310,6 +316,14 @@ function scrubNoteText(input) {
   return { text, removed };
 }
 
+// The masked text when `text` holds a card number (read on the normalized copy), else null. Used for a
+// structured note, whose items are joined before the check (Codex #6375 r24).
+function maskCardNumbers(text) {
+  const detection = plainDigitsAndSeparators(text);
+  const masked = scrubPans(detection);
+  return masked === detection ? null : masked;
+}
+
 // A scrubbed note, cut to NOTE_CAP characters with "[cut]" at the end.
 // `truncated` says a caller already cut the input (the original was longer),
 // so the marker still shows that content was dropped (Codex #6375 r3).
@@ -319,4 +333,4 @@ function scrubNote(input, { truncated = false } = {}) {
   return { text: cut ? `${text.slice(0, NOTE_CAP)}${CUT}` : text, removed };
 }
 
-module.exports = { scrubNote, scrubNoteText, trimToScanLimit, NOTE_CAP, SCAN_LIMIT, CUT, REMOVED };
+module.exports = { scrubNote, scrubNoteText, maskCardNumbers, trimToScanLimit, NOTE_CAP, SCAN_LIMIT, CUT, REMOVED };
