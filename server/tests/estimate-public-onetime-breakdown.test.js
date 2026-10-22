@@ -640,6 +640,8 @@ describe('public estimate one-time breakdown', () => {
       monthly_total: 113.1, annual_total: 1357.2, onetime_total: fields.onetime_total,
     });
     expect(bundle.anchorOneTimePrice).toBe(150);
+    // The suppressed fee stays internal: the public breakdown never carries it.
+    expect(normalizeOneTimeBreakdown(JSON.parse(fields.estimate_data))).not.toHaveProperty('suppressedSetupFee');
   });
 
   test('multi-service recurring bundles emit stacked service sections while preserving combined total', async () => {

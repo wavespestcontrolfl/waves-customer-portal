@@ -20547,6 +20547,14 @@ function findInitialRoachItem(_pestTiers, estData) {
 }
 
 function normalizeOneTimeBreakdown(estData) {
+  const { suppressedSetupFee: _suppressed, ...breakdown } = oneTimeBreakdownWithSuppressedSetupFee(estData);
+  return breakdown;
+}
+
+// The breakdown plus the WaveGuard setup fee it left out for a mix the fee
+// does not apply to. Internal: admin stored totals take off the same amount
+// (#6438); the public payload never carries it.
+function oneTimeBreakdownWithSuppressedSetupFee(estData) {
   // The authoritative container (estimate-result-container.js), the one the area add-on readers use.
   const result = storedEstimateContainer(estData);
   if (!result) return { items: [], total: 0, quoteRequired: false, quoteRequiredItems: [] };
@@ -20799,8 +20807,6 @@ function normalizeOneTimeBreakdown(estData) {
     total: Math.round(total * 100) / 100,
     quoteRequired: quoteRequiredItems.length > 0,
     quoteRequiredItems,
-    // The WaveGuard setup fee this breakdown left out for a mix it does not
-    // apply to. Admin stored totals take off the same amount (#6438).
     suppressedSetupFee: Math.round((Number(suppressedMembershipFee) || 0) * 100) / 100,
   };
 }
@@ -31601,6 +31607,7 @@ module.exports.detectPestRecurring = detectPestRecurring;
 module.exports.buildEstimateAcceptanceContract = buildEstimateAcceptanceContract;
 module.exports.resolveEstimateAcceptance = resolveEstimateAcceptance;
 module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
+module.exports.oneTimeBreakdownWithSuppressedSetupFee = oneTimeBreakdownWithSuppressedSetupFee;
 module.exports.monthlyForRecurringParts = monthlyForRecurringParts;
 module.exports.monthlyForRecurringPartsExact = monthlyForRecurringPartsExact;
 module.exports.pestFloorMonthlyLift = pestFloorMonthlyLift;

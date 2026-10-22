@@ -599,6 +599,20 @@ describe('admin estimate persistence', () => {
     expect(fields.onetime_total).toBe(99);
   });
 
+  test('pest plus a rodent bait supplement drops a label-only setup row', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      onetimeTotal: 0,
+      estimateData: {
+        result: {
+          oneTime: { items: [{ displayName: 'WaveGuard Membership Setup', price: 99 }, { service: 'flea', name: 'Flea Treatment', price: 150 }] },
+          recurring: { grandTotal: 68.4, rodentBaitMo: 30, services: [{ service: 'pest_control', name: 'Pest Control', mo: 38.4 }] },
+        },
+      },
+    });
+    expect(fields.onetime_total).toBe(150);
+  });
+
   test('a setup row named only by displayName comes out of a bundle total', () => {
     const fields = buildEstimatePersistenceFields({
       ...baseBody,

@@ -930,9 +930,10 @@ function excludedSetupFeeAmount(estimateData, grossOneTimeTotal) {
   // The converter's plan rule decides whether the fee is billed; a plan it
   // bills keeps its fee even where the breakdown's own reader suppressed it.
   if (converter.recurringPlanCarriesSetupFee({ recurringServices, estimateData })) return 0;
-  const breakdown = require('../routes/estimate-public').normalizeOneTimeBreakdown(estimateData);
+  const publicEstimate = require('../routes/estimate-public');
+  const breakdown = publicEstimate.oneTimeBreakdownWithSuppressedSetupFee(estimateData);
   const rows = Array.isArray(breakdown?.items) ? breakdown.items : [];
-  const isSetupRow = (row) => row?.service === 'waveguard_setup';
+  const isSetupRow = (row) => row?.service === 'waveguard_setup' || publicEstimate.isWaveGuardSetupOneTimeItem(row || {});
   const keptSetupFee = rows.filter(isSetupRow).reduce((sum, row) => sum + (Number(row.amount) || 0), 0);
   const feeAmount = roundMoney((Number(breakdown?.suppressedSetupFee) || 0) + keptSetupFee);
   if (!(feeAmount > 0)) return 0;
