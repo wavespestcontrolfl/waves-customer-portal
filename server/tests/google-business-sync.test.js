@@ -76,6 +76,10 @@ function createDbMock(initialRows = {}) {
       const covering = JSON.parse(bindings[0]);
       return row => Array.isArray(meta(row).reviewIds) && meta(row).reviewIds.every(id => covering.includes(id));
     }
+    if (sql.includes('gbp_row.google_review_id = google_reviews.gbp_review_name')) {
+      return row => !(String(row.google_review_id || '').startsWith('places_')
+        && state.rows.google_reviews.some(o => o.id !== row.id && o.google_review_id === row.gbp_review_name));
+    }
     if (sql.includes('publish_claimed_until IS NULL OR publish_claimed_until <')) {
       const cutoff = new Date(bindings[0]);
       return row => row.publish_claimed_until == null || new Date(row.publish_claimed_until) < cutoff;
@@ -842,113 +846,92 @@ describe('Google Business review sync', () => {
         name: GBP_ID,
         reviewer: { displayName: 'Reviewer Gamma' },
         starRating: 'FIVE',
-        comment: 'Lovely service',
+        comment: 'Lovely service (edited)',
         createTime: '2026-05-25T12:00:00Z',
       }] });
     });
     const seed = () => {
       // Row A: stored by the Places fallback during an outage; the resource
-      // name resolver later stamped the GBP name on it.
+      // name resolver later stamped the GBP name on it. Stale synced_at.
       db.__state.rows.google_reviews.push({
         id: 'places-row', google_review_id: 'places_place-1_1779710400', gbp_review_name: GBP_ID,
         location_id: 'bradenton', reviewer_name: 'Reviewer Gamma', star_rating: 5, review_text: 'Lovely service',
-        review_created_at: '2026-05-25T12:00:00Z', customer_id: 'cust-1', link_source: 'manual', review_reply: null,
+        review_created_at: '2026-05-25T12:00:00Z', customer_id: 'cust-1', review_reply: null,
+        synced_at: '2026-06-01T00:00:00Z',
       });
       // Row B: the same review under its real GBP id.
       db.__state.rows.google_reviews.push({
         id: 'gbp-row', google_review_id: GBP_ID, gbp_review_name: GBP_ID,
         location_id: 'bradenton', reviewer_name: 'Reviewer Gamma', star_rating: 5, review_text: 'Lovely service',
         review_created_at: '2026-05-25T12:00:00.400Z', customer_id: null, review_reply: null,
+        synced_at: '2026-06-01T00:00:00Z',
       });
     };
 
-    test('merges the Places row into the GBP row: refs moved, places row deleted, stored not failed', async () => {
+    test('updates the GBP row that holds the id; the Places row is left untouched, not removed, no error', async () => {
       seed();
-      db.__state.rows.review_incentive_payouts = [{ id: 'payout-1', google_review_id: 'places-row' }];
-      db.__state.rows.review_graphics = [
-        { id: 'gfx-1', google_review_id: 'places-row', template_key: 'square' },
-        { id: 'gfx-2', google_review_id: 'places-row', template_key: 'story' },
-        { id: 'gfx-3', google_review_id: 'gbp-row', template_key: 'story' },
-      ];
+      const placesBefore = JSON.parse(JSON.stringify(db.__state.rows.google_reviews.find(r => r.id === 'places-row')));
       global.fetch = feed();
-      const logger = require('../services/logger');
+      const NotificationService = require('../services/notification-service');
+      const notify = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue({ id: 'n' });
 
       const result = await service.syncAllReviews();
 
       expect(result.errors).toEqual([]);
       expect(result.synced).toBe(1);
-      const rows = db.__state.rows.google_reviews.filter(r => r.reviewer_name === 'Reviewer Gamma');
-      expect(rows.map(r => r.id)).toEqual(['gbp-row']);
-      // Only what the places row knew is carried over; the GBP identity stays.
-      expect(rows[0]).toMatchObject({ google_review_id: GBP_ID, customer_id: 'cust-1', link_source: 'manual' });
-      expect(db.__state.rows.review_incentive_payouts[0].google_review_id).toBe('gbp-row');
-      // 'story' already exists on the GBP row (unique per review + template): it stays behind and goes with the deleted row.
-      expect(db.__state.rows.review_graphics.find(g => g.id === 'gfx-1').google_review_id).toBe('gbp-row');
-      expect(db.__state.rows.review_graphics.find(g => g.id === 'gfx-2').google_review_id).toBe('places-row');
-      expect(db.__state.deletes).toEqual([{ table: 'google_reviews', id: 'places-row' }]);
-      expect(logger.info).toHaveBeenCalledWith(expect.stringMatching(/Merged Places fallback row places-row into GBP row gbp-row/));
+      const rows = db.__state.rows.google_reviews;
+      expect(rows.find(r => r.id === 'gbp-row')).toMatchObject({ google_review_id: GBP_ID, review_text: 'Lovely service (edited)' });
+      expect(rows.find(r => r.id === 'places-row')).toEqual(placesBefore);
+      expect(rows.find(r => r.id === 'places-row').missing_since ?? null).toBeNull();
+      expect(db.__state.deletes || []).toEqual([]);
+      // The stale copy is not reported as a removed review.
+      expect(notify.mock.calls.filter(c => /removed|no longer|missing/i.test(String(c[1])))).toEqual([]);
+      notify.mockRestore();
     });
 
-    test('keeps the GBP row payout when it already has one; the places row payout is left to the FK', async () => {
+    test('a places row with no GBP holder still upgrades to the GBP identity (unchanged)', async () => {
       seed();
-      db.__state.rows.review_incentive_payouts = [
-        { id: 'payout-a', google_review_id: 'places-row' },
-        { id: 'payout-b', google_review_id: 'gbp-row' },
-      ];
+      db.__state.rows.google_reviews.splice(db.__state.rows.google_reviews.findIndex(r => r.id === 'gbp-row'), 1);
       global.fetch = feed();
 
       const result = await service.syncAllReviews();
 
       expect(result.errors).toEqual([]);
-      expect(db.__state.rows.review_incentive_payouts.find(p => p.id === 'payout-b').google_review_id).toBe('gbp-row');
-      expect(db.__state.rows.review_incentive_payouts.find(p => p.id === 'payout-a').google_review_id).toBe('places-row');
-      expect(db.__state.rows.google_reviews.filter(r => r.reviewer_name === 'Reviewer Gamma').map(r => r.id)).toEqual(['gbp-row']);
+      expect(db.__state.rows.google_reviews.find(r => r.id === 'places-row')).toMatchObject({ google_review_id: GBP_ID, review_text: 'Lovely service (edited)' });
     });
 
-    describe('not corroborated as one review: no merge, the pair stays for manual review', () => {
-      const incoming = { google_review_id: GBP_ID, gbp_review_name: GBP_ID, reviewer_name: 'Reviewer Gamma' };
-      const attempt = async (mutate, normalized = incoming) => {
-        seed();
-        const byId = id => db.__state.rows.google_reviews.find(r => r.id === id);
-        mutate(byId('places-row'), byId('gbp-row'));
-        const merged = await service._mergePlacesRowIntoGbpRow({ ...byId('places-row') }, normalized);
-        expect(merged).toBeNull();
-        expect(db.__state.rows.google_reviews.map(r => r.id)).toEqual(expect.arrayContaining(['places-row', 'gbp-row']));
-        expect(db.__state.deletes || []).toEqual([]);
-      };
-
-      test('holder is a different reviewer', () => attempt((a, b) => { b.reviewer_name = 'Someone Else'; }));
-      test('incoming GBP reviewer name differs from both rows', () => attempt(() => {}, { ...incoming, reviewer_name: 'Someone Else' }));
-      test('different review text', () => attempt((a) => { a.review_text = 'A different review entirely'; }));
-      test('empty text on both rows is not corroboration', () => attempt((a, b) => { a.review_text = ''; b.review_text = null; }));
-      test('different star rating', () => attempt((a) => { a.star_rating = 4; }));
-      test('one hour apart', () => attempt((a) => { a.review_created_at = '2026-05-25T11:00:00Z'; }));
-      test('different location', () => attempt((a) => { a.location_id = 'sarasota'; }));
-    });
-
-    test('whitespace differences in the text still corroborate (and a 2 s gap is allowed)', async () => {
+    test('a Places copy whose GBP name is NOT held by another row can still be stamped as removed', async () => {
       seed();
-      const byId = id => db.__state.rows.google_reviews.find(r => r.id === id);
-      byId('gbp-row').review_text = '  Lovely   service\n';
-      byId('gbp-row').review_created_at = '2026-05-25T12:00:02Z';
-      const merged = await service._mergePlacesRowIntoGbpRow({ ...byId('places-row') }, { google_review_id: GBP_ID, gbp_review_name: GBP_ID, reviewer_name: ' reviewer gamma ' });
-      expect(merged).toMatchObject({ id: 'gbp-row' });
-      expect(db.__state.deletes).toEqual([{ table: 'google_reviews', id: 'places-row' }]);
+      db.__state.rows.google_reviews.splice(db.__state.rows.google_reviews.findIndex(r => r.id === 'gbp-row'), 1);
+      db.__state.rows.google_reviews.find(r => r.id === 'places-row').gbp_review_name = 'accounts/1/locations/2/reviews/gone';
+      global.fetch = jest.fn(async (url) => {
+        if (String(url).includes('maps.googleapis.com')) return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+        return jsonResponse({ reviews: [{ name: 'accounts/1/locations/2/reviews/other', reviewer: { displayName: 'Reviewer Delta' }, starRating: 'FIVE', comment: 'Fine', createTime: '2026-05-26T12:00:00Z' }] });
+      });
+      const NotificationService = require('../services/notification-service');
+      const notify = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue({ id: 'n' });
+
+      await service.syncAllReviews();
+
+      expect(db.__state.rows.google_reviews.find(r => r.id === 'places-row').missing_since).toBeTruthy();
+      notify.mockRestore();
     });
   });
 
-  test('the "rows did not save" alert is plain for the owner and keeps the raw database error behind Show full text', async () => {
+  test('the "rows did not save" alert title is stable across counts (24h dedupe key); count and raw error are not in the title', async () => {
     const NotificationService = require('../services/notification-service');
     const notify = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue(null);
-    const cause = 'review upsert failed: 1 of 39 review row(s) failed to store (38 stored) — first: accounts/1/locations/2/reviews/rev-bad: update "google_reviews" set "google_review_id" = $1 - duplicate key value violates unique constraint "google_reviews_google_review_id_unique"';
-    await service._notifyDegradedSync({ id: 'bradenton', name: 'Parrish' }, cause);
-    const [category, title, body, opts] = notify.mock.calls[0];
-    expect(category).toBe('review');
-    expect(title).toBe('Google reviews: 1 row did not save at Parrish');
-    expect(body).toBe('The reviews on Google are fine. 1 stored copy did not save; Claude can check.');
-    expect(body).not.toMatch(/update "google_reviews"|duplicate key/);
-    expect(opts.detail).toMatch(/duplicate key value violates unique constraint/);
-    expect(opts.metadata).toMatchObject({ locationId: 'bradenton', reason: 'gbp_sync_degraded', cause });
+    const loc = { id: 'bradenton', name: 'Parrish' };
+    const cause = n => `review upsert failed: ${n} of 39 review row(s) failed to store (${39 - n} stored) — first: x: boom`;
+    await service._notifyDegradedSync(loc, cause(1));
+    db.__state.rows.notifications = [];
+    await service._notifyDegradedSync(loc, cause(3));
+    expect(notify.mock.calls[0][1]).toBe('Google reviews: some rows did not save at Parrish');
+    expect(notify.mock.calls[1][1]).toBe(notify.mock.calls[0][1]);
+    expect(notify.mock.calls[0][2]).toBe('The reviews on Google are fine. 1 stored copy did not save; Claude can check.');
+    expect(notify.mock.calls[1][2]).toBe('The reviews on Google are fine. 3 stored copies did not save; Claude can check.');
+    expect(notify.mock.calls[0][3].detail).toMatch(/boom/);
+    expect(notify.mock.calls[0][2]).not.toMatch(/boom/);
     notify.mockRestore();
   });
 
