@@ -1096,7 +1096,11 @@ router.get('/project/:token/data', async (req, res, next) => {
       poisonControl,
       projectDate: viewerProjectDate,
       sentAt: project.sent_at,
-      findings: viewerFindings,
+      findings: project.project_type === 'pre_treatment_termite_certificate'
+        ? require('../services/final-exterior-screen').screenFinalExteriorFindings(viewerFindings)
+        : viewerFindings,
+      pretreatStickerReport: project.project_type === 'pre_treatment_termite_certificate'
+        && require('../config/feature-gates').isEnabled('pretreatStickerReport'),
       // Serve-time inspection-fee guard: covers legacy narratives and any
       // written by an old instance during the deploy window. Two passes —
       // the literal-cue scrub plus the VALUE scrub with the fee this project

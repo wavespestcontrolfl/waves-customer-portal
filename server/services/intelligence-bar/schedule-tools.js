@@ -19,6 +19,7 @@ const { resolveWindowSafeOrderByTechDay, windowSafeFigures, inProgressStartMin, 
   ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, routeWriteGuardSignature } = require('../route-reorder');
 const { probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
 const { TRANSIENT_FROZEN_REASONS } = require('./outcomes');
+const { techStartPoint, homeFromMap, assertStartPointUnchanged } = require('../scheduling/tech-start-point');
 
 const SCHEDULE_TOOLS = [
   {
@@ -310,7 +311,7 @@ function getZone(city) {
 // any miss (row moved or reassigned since) aborts the whole rewrite
 // untouched, and an approved id missing from the fresh day set refuses with
 // preview_changed.
-async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, expectTechFor, loadEligibleIds, RouteOptimizer, technicianId = null }) {
+async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, expectTechFor, loadEligibleIds, RouteOptimizer, technicianId = null, techHomes = null }) {
   const byId = new Map(services.map((s) => [String(s.id), s]));
   if (approvedIds.some((id) => !byId.has(id))) {
     return { error: "The day's stops changed after the card was shown — nothing was reordered. Ask again for a fresh card.", preview_changed: true };
@@ -334,7 +335,7 @@ async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, 
     const revalidated = resolveWindowSafeOrderByTechDay({
       RouteOptimizer, orderedStops: approvedOrder, sourceStops: services,
       googleSource: 'approved_card', startMin: inProgressStartMin(date, preLockNow),
-      techDayOrigins,
+      techDayOrigins, techHomes,
     });
     if (revalidated.refusal) {
       return { error: routeGuardMessage(revalidated.refusal.reason), reason: revalidated.refusal.reason, preview_changed: true };
@@ -349,6 +350,10 @@ async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, 
   try {
     await db.transaction(async (trx) => {
       await lockTechDays(trx, lockKeys);
+      // The start point the approved order was certified against (one tech
+      // only; a changed address means the card is stale).
+      await assertStartPointUnchanged(trx, technicianId, homeFromMap(techHomes, technicianId),
+        () => Object.assign(new Error('technician start point changed'), { code: 'STALE_OPTIMIZE_SET' }));
       // Newly ADDED stops refuse too (pre-push r15 P1): the approved plan
       // covers the complete eligible set the card showed — a geocoded stop
       // added since the confirm preflight would sit ungoverned beside (or
@@ -388,7 +393,7 @@ async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, 
           RouteOptimizer, orderedStops: approvedIds.map((id) => byId.get(id)), sourceStops: services,
           googleSource: 'approved_card', startMin: recheckStart,
           // Clock advances, elapsed cutoff does not — see the admin recheck.
-          elapsedCutoffMin: inProgressStartMin(date, preLockNow), techDayOrigins: freshOrigins,
+          elapsedCutoffMin: inProgressStartMin(date, preLockNow), techDayOrigins: freshOrigins, techHomes,
         });
         if (again.refusal || again.orderedIds.map(String).join(',') !== approvedIds.join(',')) {
           throw Object.assign(new Error('route no longer reachable'), { code: 'STALE_OPTIMIZE_SET' });
@@ -652,6 +657,13 @@ async function optimizeTechRoute(input) {
   const stopsWithCoords = services.filter(s => s.lat && s.lng);
   if (stopsWithCoords.length < 2) return { blocked: true, message: 'Need at least 2 geocoded stops', geocoded: stopsWithCoords.length };
 
+  // This tech's day starts and ends at their start point (GATE_TECH_START_POINTS;
+  // the office when unset or the gate is off). The tech row is `select *`, so
+  // the coordinates ride along with no extra query. Staff-only: never put them
+  // in the card, the summary or a log line.
+  const startPoint = techStartPoint(tech);
+  const techHomes = new Map([[String(tech.id).toLowerCase(), startPoint]]);
+
   // Approved-plan application — same contract as optimize_all_routes above
   // (GH r14 P1).
   if (confirmed === true && Array.isArray(input._verified_ordered_stops) && input._verified_ordered_stops.length) {
@@ -663,6 +675,7 @@ async function optimizeTechRoute(input) {
       expectTechFor: () => tech.id,
       RouteOptimizer,
       technicianId: tech.id,
+      techHomes,
       loadEligibleIds: async (trx) => (await dayStopsQuery(trx, {
         dateStr: date,
         technicianId: tech.id,
@@ -683,7 +696,7 @@ async function optimizeTechRoute(input) {
       id: s.id, lat: parseFloat(s.lat), lng: parseFloat(s.lng),
       customerName: `${s.first_name} ${s.last_name}`, serviceType: s.service_type,
     })),
-    { startLat: RouteOptimizer.HQ.lat, startLng: RouteOptimizer.HQ.lng, endAtStart: true },
+    { startLat: startPoint.lat, startLng: startPoint.lng, endAtStart: true },
   );
 
   // Full day as sourceStops, repaired figures on the card — see the notes in
@@ -694,6 +707,7 @@ async function optimizeTechRoute(input) {
     // Judged as the confirmation will judge it — see optimize_all_routes.
     legs: null, startMin: inProgressStartMin(date),
     techDayOrigins: await loadTechDayOrigins(db, date, { technicianId: tech.id }),
+    techHomes,
   });
   if (guarded.refusal) {
     return { blocked: true, date, tech: tech.name, reason: guarded.refusal.reason,
@@ -2170,6 +2184,8 @@ async function findAvailableSlotsTool(input) {
   const weekOut = etDateString(addETDays(new Date(), 7));
 
   return await findAvailableSlots({
+    // Staff tool: tech start points apply (GATE_TECH_START_POINTS).
+    techStartPoints: true,
     lat, lng,
     durationMinutes: duration_minutes || 60,
     dateFrom: date_from || today,

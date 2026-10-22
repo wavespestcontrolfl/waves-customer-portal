@@ -76,6 +76,20 @@ const PAYLOADS = {
       applicator_attestation: 'I attest that the soil treatment described above was applied in accordance with the product label and Florida Building Code 1816.1.7.',
     },
   }),
+  'certificate-sticker': () => {
+    const base = PAYLOADS.certificate();
+    return {
+      ...base,
+      pretreatStickerReport: true,
+      findings: {
+        ...base.findings,
+        final_exterior_date: '2026-09-14',
+        final_exterior_product: 'Termidor SC',
+        final_exterior_active_ingredient: 'Fipronil',
+      },
+    };
+  },
+  'certificate-sticker-slab-day': () => ({ ...PAYLOADS.certificate(), pretreatStickerReport: true }),
   wdo: () => ({
     ...BASE,
     ...CARTER,

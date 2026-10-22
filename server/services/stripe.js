@@ -3,6 +3,7 @@ const config = require('../config');
 const stripeConfig = require('../config/stripe-config');
 const db = require('../models/db');
 const logger = require('./logger');
+const { insertHealthAlert } = require('./health-alert-insert');
 const { lockCustomerPaymentMethods } = require('../utils/payment-method-lock');
 const { assertNoCollectionHold, recordHoldOverride, excludeHoldDeferralPlaceholders } = require('./collections/collection-hold');
 const PaymentLifecycleEmail = require('./payment-lifecycle-email');
@@ -6033,7 +6034,7 @@ const StripeService = {
             `Invoice ${invoice.invoice_number}. Blocking confirm — customer must use /quote+/finalize.`,
           );
           try {
-            await db('customer_health_alerts').insert({
+            await insertHealthAlert({
               customer_id: invoice.customer_id,
               alert_type: 'surcharge_bypass_blocked',
               severity: 'medium',
@@ -6063,7 +6064,7 @@ const StripeService = {
             `Invoice ${invoice.invoice_number}. Blocking confirm — customer must retry through /quote+/finalize.`,
           );
           try {
-            await db('customer_health_alerts').insert({
+            await insertHealthAlert({
               customer_id: invoice.customer_id,
               // alert_type is varchar(30) — 'surcharge_bypass_unknown_funding'
               // (32 chars) overflowed and made the insert silently fail.
@@ -6176,7 +6177,7 @@ const StripeService = {
             `actual=$${(actualCents / 100).toFixed(2)} (${actualCents}c). Invoice ${invoice.invoice_number}.`,
           );
           try {
-            await db('customer_health_alerts').insert({
+            await insertHealthAlert({
               customer_id: invoice.customer_id,
               alert_type: 'stripe_surcharge_bypass',
               severity: 'high',
