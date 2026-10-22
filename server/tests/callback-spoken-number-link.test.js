@@ -19,7 +19,7 @@ const CallRecordingProcessor = require('../services/call-recording-processor');
 const { findCustomerViaCallbackSpokenNumber } = CallRecordingProcessor._test;
 
 const DIALED = '+19415550199';
-const SPOKEN = '+19415550142';
+const SPOKEN = '+19415558642';
 const PARENT_ID = '11111111-1111-4111-8111-111111111111';
 
 // Thenable knex-builder mock: chain methods return the builder; `first` and a
@@ -120,6 +120,13 @@ describe('findCustomerViaCallbackSpokenNumber', () => {
     mockDb({ call_log: [voicemail({ ai_extraction: { phone: 'anonymous' } })], customers: [[customer()]] });
     expect(await findCustomerViaCallbackSpokenNumber(callbackCall(), extractedJordan)).toBeNull();
     // No customer lookup ran in any of the three.
+    expect(tablesRead.filter((t) => t === 'customers')).toEqual([]);
+  });
+
+  test('spoken number one digit off the dialed number is a misheard digit: null', async () => {
+    const nearMiss = '+19415550198';
+    mockDb({ call_log: [voicemail({ ai_extraction: { phone: nearMiss } })], customers: [[customer({ phone: nearMiss })]] });
+    expect(await findCustomerViaCallbackSpokenNumber(callbackCall(), extractedJordan)).toBeNull();
     expect(tablesRead.filter((t) => t === 'customers')).toEqual([]);
   });
 

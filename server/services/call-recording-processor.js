@@ -4973,6 +4973,9 @@ async function findCustomerViaCallbackSpokenNumber(call = {}, extracted = {}, op
   if (!related || !String(related.direction || '').toLowerCase().startsWith('inbound')) return null;
   const spoken = firstExternalPhone(parseLooseJson(related.ai_extraction).phone);
   if (!spoken || samePhone(spoken, call.to_phone)) return null;
+  // One or two digits off the dialed number is a misheard digit, not another line
+  // (the same rule resolveCallContactPhone applies to a dictated number).
+  if (phoneNearMissOfAni(spoken, call.to_phone)) return null;
   const candidate = await findCustomerForCallContact(spoken, extracted, { db: conn });
   if (!candidate || candidate.deleted_at || !customerPhoneMatches(spoken, candidate)) return null;
   const candidateFirst = normalizeNamePart(candidate.first_name);
