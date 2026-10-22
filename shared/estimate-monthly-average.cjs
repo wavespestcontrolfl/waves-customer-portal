@@ -125,8 +125,8 @@ function planLabel(model) {
     : 'Your plan averages';
 }
 
-// GATE_ESTIMATE_APPLICATION_MONTHS (owner 2026-10-21, EST-2026-1185: "Which is
-// it? $113 a month or $189 a month?"): what the customer pays in the months a
+// Application months (owner 2026-10-21, EST-2026-1185: "Which is it? $113 a
+// month or $189 a month?"): what the customer pays in the months a
 // service is applied, beside the average. Only for the one shape whose months
 // are certain without a schedule: exactly ONE service on an even cadence that
 // divides the year (every 2, 3, 4 or 6 months, or once a year) plus services
@@ -201,10 +201,8 @@ function applicationMonthsSentence(breakdown) {
  *
  * @param {object} model  buildMonthlyAverage() output
  * @param {{amount: number, setup: boolean}|null} [oneTime]  one-time charges, never in the average
- * @param {{applicationMonths?: boolean}} [options]  applicationMonths: put the month-by-month amounts
- *   (applicationMonthsBreakdown) in front of the note when the plan has that shape
  */
-function emailParts(model, oneTime = null, { applicationMonths = false } = {}) {
+function emailParts(model, oneTime = null) {
   if (!model) return null;
   let priceLine;
   if (model.multi) {
@@ -221,7 +219,8 @@ function emailParts(model, oneTime = null, { applicationMonths = false } = {}) {
   const averaged = included.length
     ? `Averaged over the year, ${included.join(' and ')} included.`
     : 'Averaged over the year.';
-  const months = applicationMonths ? applicationMonthsSentence(applicationMonthsBreakdown(model)) : '';
+  // The month-by-month amounts go in front of the note when the plan has that shape.
+  const months = applicationMonthsSentence(applicationMonthsBreakdown(model));
   const parts = [...(months ? [months] : []), averaged, 'You pay after each application.'];
   if (oneTime && Number(oneTime.amount) > 0) {
     parts.push(oneTime.setup

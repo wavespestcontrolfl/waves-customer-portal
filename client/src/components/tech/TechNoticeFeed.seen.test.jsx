@@ -3,7 +3,7 @@
 // SEEN it. Its 5-minute clock starts at first sight; an unseen card is never
 // marked read by the clock.
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import TechNoticeFeed from './TechNoticeFeed';
@@ -28,14 +28,23 @@ const VIEWPORT = { w: 400, h: 800 };
 let covered; // true while a modal sits on top of the card
 function place(el, { top = 100, height = 100 } = {}) {
   const wrapper = el.closest('[data-testid="notice-stack"] > div');
+  const watching = observers.filter((o) => o.targets.has(wrapper));
+  // A report no observer receives would leave the card unseen for good.
+  if (watching.length === 0) throw new Error('place(): no IntersectionObserver watches this card yet; find it with findCard()');
   const rect = { top, bottom: top + height, left: 0, right: VIEWPORT.w, width: VIEWPORT.w, height };
   wrapper.getBoundingClientRect = () => rect;
   const intersects = rect.bottom > 0 && rect.top < VIEWPORT.h;
-  for (const o of observers) {
-    if (!o.targets.has(wrapper)) continue;
-    act(() => o.cb([{ target: wrapper, isIntersecting: intersects }]));
-  }
+  for (const o of watching) act(() => o.cb([{ target: wrapper, isIntersecting: intersects }]));
   return wrapper;
+}
+// The card's observer is created in a passive effect. On a slow runner React
+// can run that effect after findByText has returned, so wait for the observer
+// before place() reports to it.
+async function findCard(text) {
+  const el = await screen.findByText(text);
+  const wrapper = el.closest('[data-testid="notice-stack"] > div');
+  await waitFor(() => expect(observers.some((o) => o.targets.has(wrapper))).toBe(true));
+  return el;
 }
 // Convenience: fully in view.
 const setView = (el, ratio) => (ratio > 0 ? place(el, { top: 100, height: 100 }) : place(el, { top: -500, height: 100 }));
@@ -93,7 +102,7 @@ describe('notices stay until seen', () => {
   it('once seen for 1.5 s, the 5-minute clock starts and the card is then marked read and cleared', async () => {
     const calls = stubFeed([STORM]);
     mount();
-    const text = await screen.findByText(/Storm watch/);
+    const text = await findCard(/Storm watch/);
     setView(text, 1);
     await advance(1500);
     await advance(4 * MIN + 55 * 1000);
@@ -107,7 +116,7 @@ describe('notices stay until seen', () => {
   it('a card that is in view for less than 1.5 s is not seen', async () => {
     const calls = stubFeed([STORM]);
     mount();
-    const text = await screen.findByText(/Storm watch/);
+    const text = await findCard(/Storm watch/);
     setView(text, 1);
     await advance(1000);
     setView(text, 0); // scrolled away
@@ -119,7 +128,7 @@ describe('notices stay until seen', () => {
   it('a tall card needs half the SCREEN showing: 399 px of an 800 px screen is not enough, 400 px is', async () => {
     const calls = stubFeed([STORM]);
     mount();
-    const text = await screen.findByText(/Storm watch/);
+    const text = await findCard(/Storm watch/);
     // 3000 px card whose top 399 px shows: under both half the card and half the screen.
     place(text, { top: VIEWPORT.h - 399, height: 3000 });
     await advance(10 * MIN);
@@ -136,7 +145,7 @@ describe('notices stay until seen', () => {
   it('a short card with less than half showing is not seen; half showing is', async () => {
     const calls = stubFeed([STORM]);
     mount();
-    const text = await screen.findByText(/Storm watch/);
+    const text = await findCard(/Storm watch/);
     place(text, { top: VIEWPORT.h - 49, height: 100 }); // 49% shows
     await advance(10 * MIN);
     expect(posts(calls, '/read')).toHaveLength(0);
@@ -149,7 +158,7 @@ describe('notices stay until seen', () => {
   it('a card under a fixed modal is not seen, though the observer reports it intersecting; it counts once the modal closes', async () => {
     const calls = stubFeed([STORM]);
     mount();
-    const text = await screen.findByText(/Storm watch/);
+    const text = await findCard(/Storm watch/);
     covered = true;
     place(text, { top: 100, height: 100 });
     await advance(10 * MIN);
@@ -165,7 +174,7 @@ describe('notices stay until seen', () => {
   it('a card that scrolled out before the dwell ended is not seen', async () => {
     stubFeed([STORM]);
     mount();
-    const text = await screen.findByText(/Storm watch/);
+    const text = await findCard(/Storm watch/);
     place(text, { top: 100, height: 100 });
     await advance(1000);
     place(text, { top: -500, height: 100 });
@@ -176,7 +185,7 @@ describe('notices stay until seen', () => {
   it('a card in view while the page is hidden is not seen until the page is visible again', async () => {
     stubFeed([STORM]);
     mount();
-    const text = await screen.findByText(/Storm watch/);
+    const text = await findCard(/Storm watch/);
     setDocumentVisibility('hidden');
     setView(text, 1);
     await advance(10 * MIN);
@@ -209,7 +218,7 @@ describe('notices stay until seen', () => {
       return { ok: true, json: async () => ({}) };
     }));
     mount();
-    const text = await screen.findByText('Storm near Okafor');
+    const text = await findCard('Storm near Okafor');
     setView(text, 1);
     await advance(1500 + 4 * MIN);
     feed = [STORM, STORM_B]; // poll brings a second card; the first card's timers are rebuilt
@@ -234,9 +243,12 @@ describe('notices stay until seen', () => {
   it('with no IntersectionObserver, a mounted card on a visible page counts as seen after the dwell', async () => {
     vi.stubGlobal('IntersectionObserver', undefined);
     const calls = stubFeed([STORM]);
+    const spy = vi.spyOn(document, 'elementFromPoint');
     mount();
     const text = await screen.findByText(/Storm watch/);
     text.closest('[data-testid="notice-stack"] > div').getBoundingClientRect = () => ({ top: 100, bottom: 200, left: 0, right: VIEWPORT.w, width: VIEWPORT.w, height: 100 });
+    // The sampler starts in a passive effect too: wait until it has measured the card in view.
+    await waitFor(() => expect(spy).toHaveBeenCalled());
     await advance(2000); // 1.5 s dwell, sampled every 250 ms
     await advance(5 * MIN + 1000);
     expect(screen.queryByText(/Storm watch/)).not.toBeInTheDocument();
@@ -265,7 +277,7 @@ describe('notices stay until seen', () => {
   it('the dwell is continuous: a card covered for most of 1.5 s and uncovered just before the end does not count', async () => {
     const calls = stubFeed([STORM]);
     mount();
-    const text = await screen.findByText(/Storm watch/);
+    const text = await findCard(/Storm watch/);
     covered = true;
     place(text, { top: 100, height: 100 });
     await advance(1400);
@@ -282,9 +294,9 @@ describe('notices stay until seen', () => {
   });
 
   it('a modal that flickers over the card keeps resetting the dwell', async () => {
-    stubFeed([STORM]);
+    const calls = stubFeed([STORM]);
     mount();
-    const text = await screen.findByText(/Storm watch/);
+    const text = await findCard(/Storm watch/);
     place(text, { top: 100, height: 100 });
     for (let i = 0; i < 8; i += 1) {
       await advance(1000);
@@ -292,15 +304,19 @@ describe('notices stay until seen', () => {
       await advance(300);
       covered = false;
     }
+    // The modal then stays open. Had any gap counted as a sighting, its
+    // 5-minute clock would clear the card within these 6 minutes.
+    covered = true;
     await advance(6 * MIN);
     expect(screen.getByText(/Storm watch/)).toBeInTheDocument();
+    expect(posts(calls, '/read')).toHaveLength(0);
   });
 
   it('sampling stops when the card is not near the viewport', async () => {
     stubFeed([STORM]);
     const spy = vi.spyOn(document, 'elementFromPoint');
     mount();
-    const text = await screen.findByText(/Storm watch/);
+    const text = await findCard(/Storm watch/);
     place(text, { top: -500, height: 100 });
     spy.mockClear();
     await advance(10_000);

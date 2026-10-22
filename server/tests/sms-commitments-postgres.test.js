@@ -19,7 +19,7 @@ jest.mock('../services/notification-service', () => ({
 
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');
-const { recordMessageOperations, loadMessageContext, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate } = require('../services/sms-operational-actions');
+const { recordMessageOperations, loadMessageContext, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, closeSmsCommitmentAlerts } = require('../services/sms-operational-actions');
 const numbers = require('../config/twilio-numbers');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { loadSmsFulfillmentEvidence, admissibleWitness, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment, fulfillmentFingerprint, FULFILLMENT_POLICY } = require('../services/sms-commitment-fulfillment');
@@ -565,12 +565,15 @@ postgres('SMS commitments on PostgreSQL', () => {
     const now = new Date(message.created_at.getTime() + 2000);
     await refreshSmsCommitments({ conn: mockPg, now });
     await refreshSmsCommitments({ conn: mockPg, now: new Date(now.getTime() + 300000) });
-    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+    // This test counts the fulfillment check; the later-thread check (own
+    // lane, own cache) is covered in the thread-close tests below.
+    const fulfillmentCalls = () => dispatchWithFallback.mock.calls.filter(([, request]) => request.laneId === 'sms-commitment-fulfillment' && !request.promptVersion.endsWith(':thread')).length;
+    expect(fulfillmentCalls()).toBe(1);
     expect((await mockPg('call_commitments').first()).sms_context.fulfillment_check.evidence_hash).toBeTruthy();
     await mockPg('sms_log').where({ id: reply.id }).update({ status: 'delivered', message_body: 'The issue is resolved' });
     dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `sms:${reply.id}`, quote: 'The issue is resolved' } });
     await refreshSmsCommitments({ conn: mockPg, now: new Date(now.getTime() + 600000) });
-    expect(dispatchWithFallback).toHaveBeenCalledTimes(2);
+    expect(fulfillmentCalls()).toBe(2);
     expect((await mockPg('call_commitments').first()).status).toBe('fulfilled');
   });
 
@@ -3507,6 +3510,376 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(await mockPg('property_preferences')).toHaveLength(0);
     expect(await mockPg('data_hygiene_proposals')).toHaveLength(1);
     expect(await mockPg('call_commitments')).toHaveLength(0);
+  });
+
+
+  describe('owner report 2026-10-22: the later thread settles a follow-up, and one text rings one alert', () => {
+    const STAFF = '00000000-0000-4000-8000-000000000104';
+    const isThread = (request) => request.promptVersion.endsWith(':thread');
+    const at = (ms) => new Date(message.created_at.getTime() + ms);
+    const DAY = 24 * 3600 * 1000;
+    const addCommitment = async (over = {}) => (await mockPg('call_commitments').insert({ sms_log_id: message.id,
+      commitment_key: randomUUID(), party: 'waves', kind: 'send_report', description: 'send the service report', channel: 'sms',
+      due_at: at(3600000), due_basis: 'default_kind', source: 'ai', extractor_version: 'test',
+      evidence: JSON.stringify([{ quote: 'can you help me with the Service Report?', sms_log_id: message.id, matched: true, speaker: 'caller' }]),
+      sms_context: { basis: 'request', property_id: null, property_ambiguous: true, customer_id: message.customer_id, source_at: message.created_at },
+      ...over }).returning('*'))[0];
+    const text = (body, { direction = 'inbound', ms, ...over } = {}) => mockPg('sms_log').insert({ id: randomUUID(), customer_id: message.customer_id,
+      direction, message_body: body, created_at: at(ms), status: direction === 'inbound' ? 'received' : 'sent',
+      from_phone: direction === 'inbound' ? message.from_phone : message.to_phone,
+      to_phone: direction === 'inbound' ? message.to_phone : message.from_phone,
+      ...(direction === 'outbound' ? { message_type: 'manual', admin_user_id: STAFF } : {}), ...over }).returning('id').then(([row]) => row.id);
+    const staleAlert = (dedupeKey) => mockPg('notifications').insert({ id: randomUUID(), recipient_type: 'admin', category: 'alert',
+      title: 'Comms — send Synthetic Fixture the report', body: 'old', metadata: JSON.stringify({ dedupeKey, triggerKey: 'sms_operational_followup' }) }).returning('id').then(([row]) => row.id);
+    // Record checks say "cannot tell"; the thread lane answers as the test sets it.
+    const answer = (thread) => dispatchWithFallback.mockImplementation(async (policy, request) => (isThread(request)
+      ? { ok: true, json: thread } : { ok: true, json: { verdict: 'uncertain', record_ref: null, quote: null } }));
+    const threadCalls = () => dispatchWithFallback.mock.calls.filter(([, request]) => isThread(request));
+    const now = () => at(3 * DAY);
+
+    beforeEach(async () => {
+      await mockPg('sms_log').where({ id: message.id }).update({ message_body: 'can you help me with the Service Report?' });
+      message.message_body = 'can you help me with the Service Report?';
+    });
+
+    test('the real case: the customer later says they got the report, so the follow-up closes and its alert is done', async () => {
+      const ask = await addCommitment();
+      const promise = await addCommitment({ party: 'waves', description: 'get it to you tonite',
+        sms_context: { basis: 'promise', property_id: null, property_ambiguous: true, customer_id: message.customer_id, source_at: message.created_at } });
+      await text('Yes, get it to you tonite', { direction: 'outbound', ms: 60000 });
+      await text('We sent it out this morning to the email on file', { direction: 'outbound', ms: DAY + 3600000 });
+      const confirmation = await text('Got the report! Thanks for your help!', { ms: 2 * DAY });
+      const alertId = await staleAlert(`sms-commitment:${ask.id}`);
+      answer({ verdict: 'completed', record_ref: `sms:${confirmation}`, quote: 'Got the report!' });
+      expect(await refreshSmsCommitments({ conn: mockPg, now: now() })).toMatchObject({ fulfilled: 2 });
+      for (const row of [ask, promise]) {
+        const closed = await mockPg('call_commitments').where({ id: row.id }).first();
+        expect(closed.status).toBe('fulfilled');
+        expect(closed.fulfillment).toMatchObject({ basis: 'thread_confirmation', witness: 'customer', record_id: confirmation, quote: 'Got the report!' });
+        expect(closed.fulfillment.note).toContain(confirmation);
+      }
+      const alert = await mockPg('notifications').where({ id: alertId }).first();
+      expect(alert.done_at).not.toBeNull();
+      expect(alert.resolution).toContain('The text follow-up was done');
+      // Nothing re-raised "can't tell if it was done".
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    });
+
+    test('Codex #6415 r7: inside an open window a visit event earns the check, but a later text cannot close it early', async () => {
+      const due = at(5 * DAY);
+      const ask = await addCommitment({ kind: 'other', due_at: due, due_basis: 'stated' });
+      const [visit] = await mockPg('scheduled_services').insert({
+        customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+        scheduled_date: etDateString(at(DAY)), window_start: '09:00:00', status: 'en_route',
+        created_at: new Date(message.created_at.getTime() - DAY), updated_at: at(DAY),
+      }).returning('id');
+      await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: at(DAY) });
+      const confirmation = await text('Got the report! Thanks for your help!', { ms: 2 * DAY });
+      answer({ verdict: 'completed', record_ref: `sms:${confirmation}`, quote: 'Got the report!' });
+      await refreshSmsCommitments({ conn: mockPg, now: now() });
+      // The event-only record check ran; the thread check waited.
+      expect(dispatchWithFallback.mock.calls.some(([, request]) => !isThread(request))).toBe(true);
+      expect(threadCalls()).toHaveLength(0);
+      expect((await mockPg('call_commitments').where({ id: ask.id }).first()).status).toBe('open');
+      // After the deadline the same text closes it.
+      await refreshSmsCommitments({ conn: mockPg, now: new Date(due.getTime() + 60000) });
+      expect(threadCalls()).toHaveLength(1);
+      expect(await mockPg('call_commitments').where({ id: ask.id }).first()).toMatchObject({ status: 'fulfilled',
+        fulfillment: expect.objectContaining({ basis: 'thread_confirmation' }) });
+    });
+
+    test('a staff text queued before the source text, delivered after it, never closes the follow-up', async () => {
+      const ask = await addCommitment();
+      const queued = await text('We sent it out this morning to the email on file', { direction: 'outbound', ms: -3600000, status: 'scheduled' });
+      const sent = await text('We sent it out this morning to the email on file', { direction: 'outbound', ms: DAY,
+        metadata: JSON.stringify({ scheduled_sms_log_id: queued }) });
+      answer({ verdict: 'completed', record_ref: `sms:${sent}`, quote: 'We sent it out this morning' });
+      await refreshSmsCommitments({ conn: mockPg, now: now() });
+      // The queued text is not in the thread, so nothing grounds a close.
+      expect(threadCalls().every(([, request]) => !request.text.includes(sent))).toBe(true);
+      expect((await mockPg('call_commitments').where({ id: ask.id }).first()).status).toBe('open');
+    });
+
+    test('Codex #6415 security: one customer gets at most three new thread calls a tick; the rest wait for the next tick', async () => {
+      const asks = [];
+      for (let i = 0; i < 5; i += 1) asks.push(await addCommitment({ description: `send the service report ${i}` }));
+      await text('Any update?', { ms: DAY });
+      answer({ verdict: 'not_completed', record_ref: null, quote: null });
+      await refreshSmsCommitments({ conn: mockPg, now: now() });
+      expect(threadCalls()).toHaveLength(3);
+      // Next tick, same thread: the three checked rows reuse their verdict; the other two are checked now.
+      await refreshSmsCommitments({ conn: mockPg, now: at(3 * DAY + 600000) });
+      expect(threadCalls()).toHaveLength(5);
+      const rows = await mockPg('call_commitments').whereIn('id', asks.map((a) => a.id));
+      expect(rows.every((row) => row.status === 'open' && row.sms_context.thread_check?.verdict === 'open')).toBe(true);
+    });
+
+    test('a person\'s later text saying it was sent closes the follow-up too', async () => {
+      const ask = await addCommitment();
+      const sent = await text('We sent it out this morning to the email on file', { direction: 'outbound', ms: DAY });
+      answer({ verdict: 'completed', record_ref: `sms:${sent}`, quote: 'We sent it out this morning' });
+      await refreshSmsCommitments({ conn: mockPg, now: now() });
+      expect(await mockPg('call_commitments').where({ id: ask.id }).first()).toMatchObject({ status: 'fulfilled',
+        fulfillment: expect.objectContaining({ basis: 'thread_confirmation', witness: 'waves_staff' }) });
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    });
+
+    test('a thread that does not settle it leaves it open and still rings once; an unchanged thread is not asked again', async () => {
+      const ask = await addCommitment();
+      await text('Yes, get it to you tonite', { direction: 'outbound', ms: 60000 });
+      await text('Any update?', { ms: DAY });
+      answer({ verdict: 'not_completed', record_ref: null, quote: null });
+      await refreshSmsCommitments({ conn: mockPg, now: now() });
+      await refreshSmsCommitments({ conn: mockPg, now: at(3 * DAY + 600000) });
+      expect(threadCalls()).toHaveLength(1);
+      const row = await mockPg('call_commitments').where({ id: ask.id }).first();
+      expect(row.status).toBe('open');
+      expect(row.sms_context.thread_check).toMatchObject({ verdict: 'open' });
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(2);
+      // A new text changes the thread, so it is read again.
+      const late = await text('Got it, thank you', { ms: 3 * DAY + 900000 });
+      answer({ verdict: 'completed', record_ref: `sms:${late}`, quote: 'Got it, thank you' });
+      await refreshSmsCommitments({ conn: mockPg, now: at(3 * DAY + 1800000) });
+      expect(threadCalls()).toHaveLength(2);
+      expect((await mockPg('call_commitments').where({ id: ask.id }).first()).status).toBe('fulfilled');
+    });
+
+    test('a quote the cited text does not contain, a staff promise of future work, and an automated notice never close it', async () => {
+      const ask = await addCommitment();
+      const promiseOnly = await text('We will send it tonight', { direction: 'outbound', ms: 60000 });
+      await text('Your appointment is tomorrow', { direction: 'outbound', ms: 70000, message_type: 'appointment_reminder', admin_user_id: null });
+      answer({ verdict: 'completed', record_ref: `sms:${promiseOnly}`, quote: 'I sent the report' });
+      await refreshSmsCommitments({ conn: mockPg, now: now() });
+      expect((await mockPg('call_commitments').where({ id: ask.id }).first()).status).toBe('open');
+      const [request] = threadCalls().at(-1).slice(1);
+      expect(request.text).toContain('We will send it tonight');
+      expect(request.text).not.toContain('Your appointment is tomorrow');
+    });
+
+    test('a customer\'s later text that says they did not get it is shown to the model after the staff text', async () => {
+      await addCommitment();
+      await text('We sent it out this morning', { direction: 'outbound', ms: DAY });
+      await text('I did not get anything', { ms: DAY + 3600000 });
+      answer({ verdict: 'not_completed', record_ref: null, quote: null });
+      await refreshSmsCommitments({ conn: mockPg, now: now() });
+      const prompt = threadCalls().at(-1)[1].text;
+      expect(prompt.indexOf('We sent it out this morning')).toBeLessThan(prompt.indexOf('I did not get anything'));
+    });
+
+    test('a text that arrives while the model runs stops the close and the follow-up is read again', async () => {
+      const ask = await addCommitment();
+      const confirmation = await text('Got the report', { ms: DAY });
+      dispatchWithFallback.mockImplementation(async (policy, request) => {
+        if (!isThread(request)) return { ok: true, json: { verdict: 'uncertain', record_ref: null, quote: null } };
+        // Stamped after the tick's `now`: the re-check must still see it.
+        await text('Wait, I cannot open it', { ms: 3 * DAY + 1000 });
+        return { ok: true, json: { verdict: 'completed', record_ref: `sms:${confirmation}`, quote: 'Got the report' } };
+      });
+      await refreshSmsCommitments({ conn: mockPg, now: now() });
+      expect((await mockPg('call_commitments').where({ id: ask.id }).first()).status).toBe('open');
+    });
+
+
+    test('the thread check runs on the fastStructured policy', async () => {
+      await addCommitment();
+      await text('Got the report', { ms: DAY });
+      answer({ verdict: 'not_completed', record_ref: null, quote: null });
+      await refreshSmsCommitments({ conn: mockPg, now: now() });
+      expect(threadCalls().at(-1)[0]).toBe(require('../config/models').TEXT_POLICIES.fastStructured);
+    });
+
+    test('recruiting texts are never thread evidence', async () => {
+      const ask = await addCommitment();
+      await text('Got the report', { ms: DAY, message_type: 'job_applicant_reply' });
+      await text('Interview confirmed', { direction: 'outbound', ms: DAY, message_type: 'job_interview_confirmation' });
+      answer({ verdict: 'completed', record_ref: 'sms:none', quote: 'Got the report' });
+      await refreshSmsCommitments({ conn: mockPg, now: now() });
+      expect(threadCalls()).toHaveLength(0);
+      expect((await mockPg('call_commitments').where({ id: ask.id }).first()).status).toBe('open');
+    });
+
+    test('an undated follow-up closes from the thread too (no deadline, no record witness)', async () => {
+      const ask = await addCommitment({ due_at: null, due_basis: null });
+      const confirmation = await text('Got the report, thanks', { ms: DAY });
+      answer({ verdict: 'completed', record_ref: `sms:${confirmation}`, quote: 'Got the report' });
+      await refreshSmsCommitments({ conn: mockPg, now: now() });
+      expect(await mockPg('call_commitments').where({ id: ask.id }).first()).toMatchObject({ status: 'fulfilled',
+        fulfillment: expect.objectContaining({ basis: 'thread_confirmation' }) });
+      // An undated row that the thread does not settle stays open and silent.
+      const other = await addCommitment({ due_at: null, due_basis: null, commitment_key: randomUUID() });
+      answer({ verdict: 'not_completed', record_ref: null, quote: null });
+      await mockPg('call_commitments').where({ id: ask.id }).update({ status: 'open', fulfillment: null });
+      await refreshSmsCommitments({ conn: mockPg, now: now() });
+      expect((await mockPg('call_commitments').where({ id: other.id }).first()).status).toBe('open');
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    });
+
+    test('only the conversation with the source number counts: another phone on the account never closes it', async () => {
+      const ask = await addCommitment();
+      await text('Got the report', { ms: DAY, from_phone: '+12025550999' });
+      await text('We sent it out this morning', { direction: 'outbound', ms: DAY, to_phone: '+12025550999' });
+      answer({ verdict: 'completed', record_ref: 'sms:none', quote: 'Got the report' });
+      await refreshSmsCommitments({ conn: mockPg, now: now() });
+      expect(threadCalls()).toHaveLength(0);
+      expect((await mockPg('call_commitments').where({ id: ask.id }).first()).status).toBe('open');
+      // The source number itself does count.
+      const own = await text('Got the report, thanks', { ms: DAY + 1000 });
+      answer({ verdict: 'completed', record_ref: `sms:${own}`, quote: 'Got the report' });
+      await refreshSmsCommitments({ conn: mockPg, now: now() });
+      expect((await mockPg('call_commitments').where({ id: ask.id }).first()).status).toBe('fulfilled');
+    });
+
+    test('a close by the records stands as before: the thread is not consulted and a later complaint does not reopen it', async () => {
+      const row = await addCommitment({ kind: 'send_appointment_confirmation', description: 'send the confirmation',
+        sms_context: { basis: 'request', property_id: null, property_ambiguous: true, customer_id: message.customer_id, source_at: message.created_at } });
+      const confirmation = await text('Your appointment is confirmed', { direction: 'outbound', ms: 60000, status: 'delivered' });
+      await text('I never got a confirmation', { ms: 2 * DAY });
+      dispatchWithFallback.mockImplementation(async (policy, request) => ({ ok: true, json: isThread(request)
+        ? { verdict: 'not_completed', record_ref: null, quote: null }
+        : { verdict: 'fulfilled', record_ref: `sms:${confirmation}`, quote: 'Your appointment is confirmed' } }));
+      await refreshSmsCommitments({ conn: mockPg, now: now() });
+      expect(threadCalls()).toHaveLength(0);
+      expect((await mockPg('call_commitments').where({ id: row.id }).first()).status).toBe('fulfilled');
+    });
+
+    describe('a failed record check still reaches the thread', () => {
+      const failed = { verdict: 'uncertain', reason: 'provider_failed', retry_after: new Date(Date.now() + 10 * 24 * 3600 * 1000).toISOString() };
+
+      test('a later customer confirmation closes it despite the cached failure', async () => {
+        const ask = await addCommitment();
+        const confirmation = await text('Got the report, thanks', { ms: DAY });
+        answer({ verdict: 'completed', record_ref: `sms:${confirmation}`, quote: 'Got the report' });
+        await refreshSmsCommitments({ conn: mockPg, now: now(), verify: async () => failed });
+        expect((await mockPg('call_commitments').where({ id: ask.id }).first()).status).toBe('fulfilled');
+      });
+
+      test('when the thread cannot settle it either, the failed verdict and its retry stay', async () => {
+        const ask = await addCommitment();
+        await text('Any update?', { ms: DAY });
+        answer({ verdict: 'not_completed', record_ref: null, quote: null });
+        const calls = [];
+        const verify = async () => { calls.push(1); return failed; };
+        await refreshSmsCommitments({ conn: mockPg, now: now(), verify });
+        const row = await mockPg('call_commitments').where({ id: ask.id }).first();
+        expect(row.status).toBe('open');
+        expect(row.sms_context.fulfillment_check).toMatchObject({ reason: 'provider_failed' });
+        expect(row.sms_context.thread_check).toMatchObject({ verdict: 'open' });
+      });
+    });
+
+    test.each([['first', 'second'], ['second', 'first']])('the shared alert says "can\'t tell" whichever promise is scanned first (%s uncertain, then %s)', async (uncertainOne) => {
+      await mockPg('sms_log').where({ id: message.id }).update({ direction: 'outbound', message_type: 'manual', admin_user_id: STAFF, status: 'sent',
+        from_phone: message.to_phone, to_phone: message.from_phone, message_body: 'Adam will be out there and will call you' });
+      Object.assign(message, { direction: 'outbound', message_body: 'Adam will be out there and will call you' });
+      const promiseContext = { basis: 'promise', property_id: null, property_ambiguous: true, customer_id: message.customer_id, source_at: message.created_at };
+      const a = await addCommitment({ kind: 'other', description: 'will be out there', sms_context: promiseContext });
+      const b = await addCommitment({ kind: 'other', description: 'will call you', sms_context: promiseContext });
+      const unsure = uncertainOne === 'first' ? a : b;
+      await refreshSmsCommitments({ conn: mockPg, now: now(), verifyThread: async () => null,
+        verify: async (row) => ({ verdict: row.id === unsure.id ? 'uncertain' : 'open' }) });
+      // However the rows were scanned, the last copy for the one source alert is "can't tell".
+      const last = NotificationService.notifyAdmin.mock.calls.at(-1);
+      expect(last[3].dedupeKey).toBe(`sms-commitment-source:${message.id}`);
+      expect(last[3].metadata.verification).toBe('uncertain');
+      expect(last[2]).toContain("can't tell if it was done");
+    });
+
+    test('the refreshed shared alert reads a scheduled text as its actual delivery (time and words)', async () => {
+      await mockPg('sms_log').where({ id: message.id }).update({ direction: 'outbound', message_type: 'manual', admin_user_id: STAFF, status: 'sent',
+        from_phone: message.to_phone, to_phone: message.from_phone, message_body: 'queued words' });
+      const deliveredAt = at(6 * 3600000);
+      await mockPg('sms_log').insert({ id: randomUUID(), customer_id: message.customer_id, direction: 'outbound', message_type: 'manual',
+        admin_user_id: STAFF, status: 'sent', from_phone: message.to_phone, to_phone: message.from_phone, message_body: 'Adam will come and will call you',
+        created_at: deliveredAt, metadata: JSON.stringify({ scheduled_sms_log_id: message.id }) });
+      const promiseContext = { basis: 'promise', property_id: null, property_ambiguous: true, customer_id: message.customer_id, source_at: message.created_at };
+      const a = await addCommitment({ kind: 'other', description: 'will come', sms_context: promiseContext });
+      const b = await addCommitment({ kind: 'other', description: 'will call you', sms_context: promiseContext });
+      await staleAlert(`sms-commitment-source:${message.id}`);
+      NotificationService.notifyAdmin.mockClear();
+      await applySmsCommitmentUpdate(mockPg, a.id, { customerId: message.customer_id, action: 'fulfill', reviewedBy: randomUUID() });
+      const [, , , refreshed] = NotificationService.notifyAdmin.mock.calls[0];
+      const when = deliveredAt.toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+      expect(refreshed.detail).toContain(`on ${when} ET`);
+      expect(refreshed.metadata.commitment_ids).toEqual([b.id]);
+    });
+
+    test('settling one sibling keeps the late wording when the remaining promise was kept late', async () => {
+      const ctx = { basis: 'promise', property_id: null, property_ambiguous: true, customer_id: message.customer_id, source_at: message.created_at };
+      const settling = await addCommitment({ kind: 'other', description: 'will be out there', sms_context: ctx });
+      // Kept, but after its deadline: the records show it done, the row has not closed yet.
+      const late = await addCommitment({ kind: 'other', description: 'will call you', due_at: at(3600000),
+        sms_context: { ...ctx, fulfillment_check: { verdict: 'fulfilled', matched_at: at(2 * 3600000).toISOString(), record_type: 'sms' } } });
+      await staleAlert(`sms-commitment-source:${message.id}`);
+      NotificationService.notifyAdmin.mockClear();
+      await applySmsCommitmentUpdate(mockPg, settling.id, { customerId: message.customer_id, action: 'fulfill', reviewedBy: randomUUID() });
+      const [, , body, refreshed] = NotificationService.notifyAdmin.mock.calls[0];
+      expect(refreshed.metadata.verification).toBe('kept_late');
+      expect(refreshed.metadata.commitment_ids).toEqual([late.id]);
+      expect(body).toContain('done only after the promised time');
+      expect(body).not.toContain('nothing on record');
+    });
+
+    test('a non-settling staff update marks the shared source alert read, not done', async () => {
+      const a = await addCommitment();
+      await addCommitment({ commitment_key: randomUUID() });
+      const legacy = await staleAlert(`sms-commitment:${a.id}`);
+      const shared = await staleAlert(`sms-commitment-source:${message.id}`);
+      await mockPg.transaction((trx) => closeSmsCommitmentAlerts(trx, { commitmentId: a.id, smsLogId: message.id, settled: false }, { read_at: trx.fn.now() }));
+      for (const id of [legacy, shared]) {
+        expect(await mockPg('notifications').where({ id }).first()).toMatchObject({ done_at: null, read_at: expect.any(Date) });
+      }
+    });
+
+    test('one text with two promises rings one alert that names both, and closes it only when both are done', async () => {
+      await mockPg('sms_log').where({ id: message.id }).update({ direction: 'outbound', message_type: 'manual', admin_user_id: STAFF, status: 'sent',
+        from_phone: message.to_phone, to_phone: message.from_phone,
+        message_body: "Ok, Adam will be out there and he'll look into how we can resolve it as well" });
+      Object.assign(message, { direction: 'outbound', message_body: "Ok, Adam will be out there and he'll look into how we can resolve it as well" });
+      const promiseContext = { basis: 'promise', property_id: null, property_ambiguous: true, customer_id: message.customer_id, source_at: message.created_at };
+      const first = await addCommitment({ kind: 'other', description: 'will be out there', sms_context: promiseContext,
+        evidence: JSON.stringify([{ quote: "Adam will be out there and he'll look into how we can resolve it", sms_log_id: message.id, matched: true, speaker: 'agent' }]) });
+      const second = await addCommitment({ kind: 'other', description: "he'll look into how we can resolve it", sms_context: promiseContext,
+        evidence: JSON.stringify([{ quote: "Adam will be out there and he'll look into how we can resolve it", sms_log_id: message.id, matched: true, speaker: 'agent' }]) });
+      const oldFirst = await staleAlert(`sms-commitment:${first.id}`);
+      const oldSecond = await staleAlert(`sms-commitment:${second.id}`);
+      await refreshSmsCommitments({ conn: mockPg, now: now(), verify: async () => ({ verdict: 'open' }), verifyThread: async () => null });
+      const calls = NotificationService.notifyAdmin.mock.calls;
+      expect(calls).toHaveLength(2);
+      // Both rows are checked, but they share one alert key (one row per source text).
+      expect(new Set(calls.map(([, , , opts]) => opts.dedupeKey))).toEqual(new Set([`sms-commitment-source:${message.id}`]));
+      const [, title, body, opts] = calls[0];
+      expect(title).toBe('Comms — follow up with Synthetic Fixture');
+      // Both promises are named (either order; the headline is cut at the character limit).
+      expect(body).toMatch(/will be/);
+      expect(body).toContain("he'll look into");
+      expect(opts.detail).toContain('Synthetic Fixture');
+      expect(opts.detail).toContain("• “he'll look into how we can resolve it”");
+      expect(opts.metadata.commitment_ids).toEqual(expect.arrayContaining([first.id, second.id]));
+      // The alerts an older build raised, one per promise, are replaced.
+      for (const id of [oldFirst, oldSecond]) expect((await mockPg('notifications').where({ id }).first()).done_at).not.toBeNull();
+      // The shared alert stays open until the last promise is finished.
+      const shared = await mockPg('notifications').insert({ id: randomUUID(), recipient_type: 'admin', category: 'alert', title: 'x', body: 'y',
+        metadata: JSON.stringify({ dedupeKey: `sms-commitment-source:${message.id}`, verification: 'kept_late' }) }).returning('id').then(([row]) => row.id);
+      NotificationService.notifyAdmin.mockClear();
+      await applySmsCommitmentUpdate(mockPg, first.id, { customerId: message.customer_id, action: 'fulfill', reviewedBy: randomUUID() });
+      expect((await mockPg('notifications').where({ id: shared }).first()).done_at).toBeNull();
+      // The shared alert is rewritten to the promise still open: same key, an
+      // open-row refresh only, and it does not ring again.
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+      const [, , refreshedBody, refreshed] = NotificationService.notifyAdmin.mock.calls[0];
+      expect(refreshed).toMatchObject({ dedupeKey: `sms-commitment-source:${message.id}`, dedupeOpenOnly: true });
+      expect(refreshed.ringOnRefresh()).toBe(false);
+      expect(refreshed.metadata.commitment_ids).toEqual([second.id]);
+      expect(refreshedBody).toContain("he'll look into");
+      expect(refreshedBody).not.toMatch(/will be out there/);
+      expect(refreshed.detail).not.toContain('follow-ups from this one');
+      // The state follows the promise still open, not the one that settled.
+      expect(refreshed.metadata.verification).toBe('open');
+      expect(refreshedBody).not.toContain('promised time');
+      expect(refreshed.detail).not.toContain('only after the promised');
+      await applySmsCommitmentUpdate(mockPg, second.id, { customerId: message.customer_id, action: 'dismiss', reviewedBy: randomUUID() });
+      expect((await mockPg('notifications').where({ id: shared }).first()).done_at).not.toBeNull();
+    });
   });
 
 });
