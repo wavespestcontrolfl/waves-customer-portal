@@ -75,8 +75,8 @@ describe('gate on', () => {
   test('each owner ruling is present', () => {
     const all = COMPANY_FACTS.join('\n');
     for (const needle of [
-      'interior spray', 'lanai and the pool cage', 'mud daubers', 'honeybees', 'rodent trapping only',
-      'Sundays and holidays', 'dry and bond', 'No mowing', 'watering days', 'never cash',
+      'inside spray', 'lanai and the pool cage', 'mud daubers', 'honeybees', 'rodent trapping only',
+      'Sundays and holidays', 'dry and bond', 'No mowing', 'watering days', 'check or cash through the office',
       WAVES_ADDRESS_LINE,
     ]) expect(all).toContain(needle);
   });
@@ -92,8 +92,8 @@ describe('gate on', () => {
 
   test('prompt version is bumped, distinguishable, and fits the column', () => {
     // '_cf' = COMPANY FACTS, '_cfl' = + LABEL FACTS (PR #5416), '_cflv' = + VISIT STATUS & OPEN LOOPS (PR #5499), 'cflvp' = + PAYMENT FACTS (PR #5331), numeric token 5 = FREE RE-SERVICE (PR #5336) + a fresh identity above PR #5334's 3 (LIVE ETA) and #5416's 3_cfl (4 was the pre-contract claim checker, never merged); '7_m' (#5610) = the compact scheme: number 6 + one cumulative key 'm' (+ MISSED VISIT).
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers13_n');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers13_n');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers25_n');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers25_n');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers_cf');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers2');
@@ -115,7 +115,7 @@ describe('service knowledge (owner-approved 2026-10-03)', () => {
       'Arrival windows are two hours and start on the hour.',
       'WaveGuard tiers (Bronze, Silver, Gold, Platinum) depend on how many qualifying recurring services a customer has.',
     ]) expect(section).toContain(`\n- ${line}\n`);
-    expect(COMPANY_FACTS).toHaveLength(19);
+    expect(COMPANY_FACTS).toHaveLength(26);
   });
   test('aftercare lines (owner-delegated 2026-10-09) are in the section, word for word, and promise no visit', () => {
     const section = renderCompanyFactsSection();
@@ -137,11 +137,57 @@ describe('service knowledge (owner-approved 2026-10-03)', () => {
     expect(aftercare[2]).toMatch(/where the technician confirms them/);
     // the whole section must stay inside the judge's cap for it, with room to spare, or its tail is cut
     const { _test: judgeTest } = require('../services/sms-shadow-judge');
-    expect(judgeTest.COMPANY_FACTS_JUDGE_CAP).toBe(4000);
+    expect(judgeTest.COMPANY_FACTS_JUDGE_CAP).toBe(6000);
     expect(section.length).toBeLessThan(judgeTest.COMPANY_FACTS_JUDGE_CAP - 100);
   });
-  test('the two termite lines stay out until the perk is bookable and the warranty wording is right (Codex #5723 r3)', () => {
-    expect(COMPANY_FACTS.join(' ')).not.toMatch(/termite|WDO|warranty|guarantee/i);
+  test('the two held termite lines stay out until the perk is bookable and the warranty wording is right (Codex #5723 r3)', () => {
+    // 2026-10-22 added the WDO report and no-tenting lines; the member free inspection and the pre-slab warranty stay out
+    expect(COMPANY_FACTS.join(' ')).not.toMatch(/warranty|free (annual )?(termite )?inspection|pre-?slab/i);
+  });
+});
+
+// Owner rulings 2026-10-21/22 (Waves AI answer book).
+describe('answer-book facts (owner 2026-10-21/22)', () => {
+  const section = () => renderCompanyFactsSection();
+  const { RETIRED_COMPANY_FACT_LINES } = require('../services/sms-company-facts');
+  const NEW_LINES = [
+    'On a residential general pest plan that includes inside service (not mosquito service), the first visit includes an inside spray. After that, the inside is up to the customer: we treat it whenever they ask. A customer who chose exterior-only service can ask the office to add inside service back. Commercial accounts follow their sold service scope.',
+    'Rodent trapping includes the setup visit and at least one trap check. For more trap checks, the office confirms what the job includes.',
+    'Residential pest and lawn plans have no long-term contract, and those customers can cancel any time. Termite plans and commercial accounts follow their signed agreement.',
+    'A customer who prepays a year of pest or lawn service and cancels within 90 days gets a refund for the visits not yet done.',
+    'We serve Manatee and Sarasota counties and Charlotte County except Punta Gorda, plus Ruskin, Apollo Beach, Sun City Center, Wimauma, Gibsonton and Riverview. We do not serve Punta Gorda, DeSoto County, Tampa, St. Petersburg or Lee County.',
+    'A WDO (termite) inspection report is emailed after the licensed inspector signs it, normally the same business day as the inspection. The office can check on a late report.',
+    'We do not tent for termites. For drywood termites in wood we can reach, we treat the infested wood directly with spot treatment, a borate wood treatment or injected foam. When the activity is widespread or in wood we cannot reach, we refer the customer to a fumigation company.',
+    'Product labels: the office can tell a customer which products were applied at a visit and can email a product label or Safety Data Sheet on request.',
+  ];
+  test('every new or changed line is in the section, word for word', () => {
+    for (const line of NEW_LINES) expect(section()).toContain(`\n- ${line}\n`);
+  });
+  test('the payment line replaces the old card-only wording and keeps the mailing address', () => {
+    const pay = COMPANY_FACTS.find((f) => f.startsWith('Paying:'));
+    expect(pay).not.toMatch(/technicians? (?:do not|don't) take payment/i);
+    // owner 2026-10-22 "add it": the technician takes card, check or cash at the visit
+    expect(pay).toContain('the technician can take a card, check or cash at the visit');
+    expect(pay).toContain('Customers can also pay by the card or bank account on file, or by check or cash through the office');
+    expect(pay).toContain(`Checks are mailed to`);
+    expect(pay).toContain(WAVES_ADDRESS_LINE);
+    expect(section()).not.toMatch(/accept cards at the visit|never cash/);
+    expect(section()).not.toMatch(/interior spray as well as the exterior/);
+    // no invented Zelle contact: no email address, phone number or handle in the section
+    expect(section()).not.toMatch(/@|\d{3}[-.\s]\d{4}/);
+  });
+  test('the retired wording is kept verbatim so earlier stored renders can be rebuilt', () => {
+    expect(Object.keys(RETIRED_COMPANY_FACT_LINES).sort()).toEqual(['0', '10']);
+    expect(RETIRED_COMPANY_FACT_LINES[0]).toMatch(/include an interior spray as well as the exterior/);
+    expect(RETIRED_COMPANY_FACT_LINES[10]).toMatch(/accept cards at the visit, never cash/);
+  });
+  test('no price, product brand, EPA claim, or rain return-visit promise is in the section', () => {
+    expect(COMPANY_FACTS.join('\n')).not.toMatch(/\$\d|\bEPA\b|\bsafe\b|Alpine|Termidor|Talstar|Taurus|Fusilade/i);
+    // rain that washes off a treatment earns no free return visit: no line promises one
+    expect(COMPANY_FACTS.filter((f) => /\brain/i.test(f))).toEqual([
+      'Rain: a treatment needs to dry and bond to surfaces; after that it holds up to weather.',
+    ]);
+    expect(COMPANY_FACTS.join('\n')).not.toMatch(/washe?s? off|rain.{0,60}(return|come back|re-?treat|free)/i);
   });
 });
 
@@ -156,7 +202,7 @@ describe('fact lines pass the drafter\'s own compliance screens', () => {
     for (const reply of [
       'Yes, we work Sundays and holidays, same as any other day.',
       'Rain is fine once the treatment has dried and bonded to surfaces; after that it holds up to weather.',
-      'Techs take cards at the visit, never cash. You can mail a check to Waves Pest Control, 13649 Luxe Ave #110, Bradenton, FL 34211.',
+      'You can pay by the card on file, or by check or cash through the office, or mail a check to Waves Pest Control, 13649 Luxe Ave #110, Bradenton, FL 34211.',
       'You and the friend you refer each get a $25 credit.',
     ]) expect(hasBannedCustomerCopy(reply)).toBe(false);
   });
@@ -349,13 +395,14 @@ describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
   const facts = require('../services/sms-company-facts');
   const { LABEL_FACTS_NONE_SECTION } = require('../services/sms-label-facts');
   const { exactLabelFactsSection: labelSectionOf } = facts;
-  const oldRender = facts.knownCompanyFactsRenders()[1];
+  const oldRender = facts.knownCompanyFactsRenders()[1]; // the 19-line render live from 2026-10-09 to 2026-10-22
+  const oldestRender = facts.knownCompanyFactsRenders()[2]; // the 16-line render of 2026-10-03
   // per-customer head long enough that the company section would not fit a raw 6,000-char prefix
   const head = `CUSTOMER: synthetic\n${Array.from({ length: 110 }, (_, n) => `SERVICE HISTORY ${n}: Quarterly Pest completed`).join('\n')}\n`;
   const tail = 'BILLING:\n- balance: none\nRECENT PHONE CALLS:\n- 2026-10-01: caller was told the tech arrives Thursday\nRECENT SMS THREAD:\n[CUSTOMER] THREAD_SENTINEL';
   const blockWith = (render) => `${head}${render}${LABEL_FACTS_NONE_SECTION}${tail}`;
 
-  test('every earlier render is the first N lines of today\'s list, pinned by its sha256', () => {
+  test('every earlier render is the first N lines of today\'s list (retired wording put back), pinned by its sha256', () => {
     expect(facts.PRIOR_COMPANY_FACTS_RENDERS.length).toBeGreaterThan(0);
     const renders = facts.knownCompanyFactsRenders();
     expect(renders[0]).toBe(facts.renderCompanyFactsSection());
@@ -363,7 +410,14 @@ describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
       expect(prior.lines).toBeLessThan(COMPANY_FACTS.length);
       expect(crypto.createHash('sha256').update(renders[i + 1]).digest('hex')).toBe(prior.sha256);
     });
-    expect(oldRender.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(16);
+    expect(oldRender.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(19);
+    expect(oldestRender.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(16);
+    // the earlier renders still carry the retired wording, today's render does not
+    for (const r of [oldRender, oldestRender]) {
+      expect(r).toContain('include an interior spray as well as the exterior');
+      expect(r).toContain('accept cards at the visit, never cash');
+    }
+    expect(facts.renderCompanyFactsSection()).not.toContain('accept cards at the visit');
   });
 
   test('the judge keeps the size exemption for a block with the earlier render: the thread survives', () => {
@@ -373,6 +427,7 @@ describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
     expect(out).toContain('THREAD_SENTINEL');
     expect(out).toContain('- 2026-10-01: caller was told the tech arrives Thursday');
     expect(out).toContain(oldRender.trim().split('\n').pop()); // the old section itself is still shown, whole
+    expect(sanitizeFactsForJudge(blockWith(oldestRender))).toContain('THREAD_SENTINEL'); // and so is the 16-line one
     // today's render behaves the same
     expect(sanitizeFactsForJudge(blockWith(facts.renderCompanyFactsSection()))).toContain('THREAD_SENTINEL');
     // an UNKNOWN company section gets no exemption (the exact match is still the rule)
@@ -383,11 +438,126 @@ describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
   test('the label-facts reader finds the section behind an earlier render; the sealed contract does not accept it', () => {
     const oldBlock = blockWith(oldRender);
     expect(labelSectionOf(oldBlock)).toBe(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''));
+    expect(labelSectionOf(blockWith(oldestRender))).toBe(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''));
     expect(labelSectionOf(blockWith(facts.renderCompanyFactsSection()))).toBe(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''));
     // contract: today's exact render only, so an old item never grades the new identity
     expect(hasExactCompanyFacts(oldBlock)).toBe(false);
+    expect(hasExactCompanyFacts(blockWith(oldestRender))).toBe(false);
     expect(facts.hasExactLabelFacts(oldBlock)).toBe(false);
     expect(hasExactCompanyFacts(blockWith(facts.renderCompanyFactsSection()))).toBe(true);
     expect(facts.hasExactLabelFacts(blockWith(facts.renderCompanyFactsSection()))).toBe(true);
+  });
+});
+
+// Codex #6447 r1/r2: each answer-book line must be usable by the guards that read a reply.
+describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
+  const paymentStatus = require('../services/payment-status-contract');
+  const { isReserviceOfferPromise } = require('../services/sms-shadow-drafter');
+  const { retiredCompanyFactBlock } = require('../services/agent-decision-send-checks');
+  const { RETIRED_COMPANY_FACT_LINES } = require('../services/sms-company-facts');
+  const PAY = 'Customers can also pay by the card or bank account on file, or by check or cash through the office.';
+  const REFUND = 'A customer who prepays a year of pest or lawn service and cancels within 90 days gets a refund for the visits not yet done.';
+  const payOk = (reply, inboundText) => paymentStatus.checkPaymentStatusReply({ reply, sentences: [], inboundText }).ok;
+
+  test('the inside-spray line is not a free re-service promise, and no line promises a return visit', () => {
+    expect(isReserviceOfferPromise(COMPANY_FACTS[0])).toBe(false);
+    expect(isReserviceOfferPromise('After that, the inside is up to you: we treat it whenever you ask.')).toBe(false);
+    expect(COMPANY_FACTS.join(' ')).not.toMatch(/treat again|re-?treat|at no charge/i);
+  });
+  test('no COMPANY FACTS line mentions Zelle: Zelle is only ever the Payment status sentence', () => {
+    for (const f of COMPANY_FACTS) expect(f).not.toMatch(/zelle/i);
+  });
+  test('a verbatim paying or prepay-refund sentence with only inert text is policy, not a payment status', () => {
+    expect(payOk(PAY, 'how do I pay?')).toBe(true);
+    expect(payOk('The technician can take a card, check or cash at the visit.', 'Can I pay the tech with cash?')).toBe(true);
+    for (const inbound of ['Do I get a refund if I cancel?', 'Can I get my money back if I cancel my pest control service?', 'Will I be reimbursed if I cancel my prepaid plan?']) {
+      expect(payOk(REFUND, inbound)).toBe(true);
+      expect(payOk(`Hi! ${REFUND} Let us know if you have questions.`, inbound)).toBe(true);
+    }
+  });
+  test('a policy sentence counts only for the question it answers (Codex #6447 r10)', () => {
+    const status = 'Did my payment go through?';
+    expect(paymentStatus.autoSendScopeBlock({ reply: REFUND, inboundText: status, snapshot: null })).toBe('payment_status_not_auto_sendable');
+    expect(paymentStatus.autoSendScopeBlock({ reply: 'The technician can take a card, check or cash at the visit.', inboundText: 'Can I get a refund if I cancel?', snapshot: null }))
+      .toBe('payment_status_not_auto_sendable');
+    expect(payOk(REFUND, status)).toBe(false);
+    expect(payOk(REFUND, null)).toBe(false);
+    // a visit cancel or a prepaid card is not a plan-refund question
+    // cancel wording alone is never a refund question: the reply is held for a person instead (Codex #6447 r15)
+    for (const inbound of ["Please cancel tomorrow's visit", 'Do you accept prepaid debit cards?', 'Please cancel my lawn service visit',
+      'Can I cancel my pest service appointment?', "Please cancel my lawn service for tomorrow's visit", 'What if I cancel my prepaid plan?']) {
+      expect(payOk(REFUND, inbound)).toBe(false);
+    }
+  });
+  test('only the paying and refund lines are exempt: another fact copied into a payment reply is still judged', () => {
+    expect(require('../services/sms-company-facts').moneyPolicyFacts()).toHaveLength(2);
+    const inbound = 'Did my payment go through?';
+    for (const fact of ['The office can check on a late report.', 'Termite plans and commercial accounts follow their signed agreement.']) {
+      expect(paymentStatus.autoSendScopeBlock({ reply: fact, inboundText: inbound, snapshot: null })).toBe('payment_status_not_auto_sendable');
+    }
+  });
+  test('the technician payment sentence, copied verbatim, passes the money check', () => {
+    expect(payOk('The technician can take a card, check or cash at the visit.', 'Can I pay the tech in cash?')).toBe(true);
+  });
+  test('a paraphrase, an added status, a personal claim or a framed copy is still held', () => {
+    const inbound = 'Do I get a refund if I cancel?';
+    expect(payOk('If you cancel within 90 days, you get a refund for unused visits.', inbound)).toBe(false);
+    expect(payOk(`Your refund was processed. ${REFUND}`, inbound)).toBe(false);
+    expect(payOk(`${REFUND} That includes your cancellation.`, inbound)).toBe(false);
+    expect(payOk(`${REFUND} That is outdated though, you were refunded.`, inbound)).toBe(false);
+  });
+  test('the send recheck and the auto-send scope read a verbatim policy sentence the same way', async () => {
+    const { paymentStatusVerdict } = require('../services/sms-amount-recheck');
+    expect((await paymentStatusVerdict({ customerId: 'c1', body: REFUND, snapshot: null, inboundMessage: 'refund?' })).reason).toBeNull();
+    // the autonomous send never removes a policy copy: a policy answer goes to a person (Codex #6447 r11)
+    expect((await paymentStatusVerdict({ customerId: 'c1', body: REFUND, snapshot: null, inboundMessage: 'refund?', autoSend: true })).reason).not.toBeNull();
+    expect(paymentStatus.autoSendScopeBlock({ reply: `Hi! ${REFUND}`, inboundText: 'refund?', snapshot: null })).toBe('payment_status_not_auto_sendable');
+    expect((await paymentStatusVerdict({ customerId: 'c1', body: `${REFUND} That includes your cancellation.`, snapshot: null, inboundMessage: 'refund?' })).reason)
+      .toBe('payment_status_unauthorized');
+    expect((await paymentStatusVerdict({ customerId: 'c1', body: 'Your refund went through.', snapshot: null, inboundMessage: 'refund?' })).reason)
+      .toBe('payment_status_unauthorized');
+  });
+  test('an unedited draft from a prompt before the answer-book facts is refused, whatever its words', () => {
+    const old = (v, body) => ({ prompt_version: `house_voice_v12_real_answers${v}`, suggested_message: body });
+    for (const v of ['13_n', '14_n', '15_n', '16_n+c', '17_n', '18_n', '19_n', '20_n+c', '21_n', '22_n', '23_n', '24_n', '13_n+bc', '7_m', '']) {
+      for (const body of [
+        RETIRED_COMPANY_FACT_LINES[0], RETIRED_COMPANY_FACT_LINES[10], 'Every recurring service treats the home as well as the yard unless you opt out.',
+        'The technician accepts plastic at the appointment, never currency.', 'See you Tuesday between 8 and 10!',
+      ]) expect(retiredCompanyFactBlock({ decision: old(v, body), outgoingBody: body })).toMatch(/company fact retired/);
+    }
+  });
+  test('the provider-boundary checks refuse an unedited pre-25 draft too', async () => {
+    const sc = require('../services/agent-decision-send-checks');
+    const body = RETIRED_COMPANY_FACT_LINES[10];
+    const row = { input_snapshot: '{}', prompt_version: 'house_voice_v12_real_answers14_n', suggested_message: body };
+    const dbi = () => ({ where: () => ({ first: async () => row }) });
+    const verdict = await sc.labelFactsProviderPreSendCheck({ decisionId: 'd1', getBody: () => body })({ dbi });
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reason).toMatch(/company fact retired/);
+    const snap = await sc.labelFactsSnapshotProviderPreSendCheck({ promptVersion: 'house_voice_v12_real_answers14_n', getBody: () => body })({});
+    expect(snap.ok).toBe(false);
+    const fresh = await sc.labelFactsSnapshotProviderPreSendCheck({ promptVersion: 'house_voice_v12_real_answers25_n', getBody: () => 'See you Tuesday!' })({});
+    expect(fresh.ok).toBe(true);
+  });
+  test('a scheduled refusal carries its own reason, not the label-timing one', async () => {
+    const sc = require('../services/agent-decision-send-checks');
+    const body = RETIRED_COMPANY_FACT_LINES[10];
+    const reason = await sc.scheduledLabelFactsBlock({ decision: { prompt_version: 'house_voice_v12_real_answers14_n', input_snapshot: '{}', suggested_message: body }, outgoingBody: body });
+    expect(sc.blockReasonIsRetiredCompanyFact(reason)).toBe(true);
+    expect(sc.blockReasonIsRetiredCompanyFact('label timing no longer current (x)')).toBe(false);
+    const src = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
+    expect(src).toContain("companyFactRetired ? 'stale_company_facts_agent_decision' : 'stale_label_facts_agent_decision'");
+  });
+  test('a staff rewrite of an old draft goes out; the unedited old draft does not', () => {
+    const decision = { prompt_version: 'house_voice_v12_real_answers13_n', suggested_message: RETIRED_COMPANY_FACT_LINES[10] };
+    expect(retiredCompanyFactBlock({ decision, outgoingBody: 'The technician can take cash at the visit.' })).toBeNull();
+    expect(retiredCompanyFactBlock({ decision, outgoingBody: RETIRED_COMPANY_FACT_LINES[10] })).toMatch(/company fact retired/);
+  });
+  test('a draft from the answer-book prompts, or not a real-answers draft, is never refused by it', () => {
+    for (const prompt_version of ['house_voice_v12_real_answers25_n', 'house_voice_v12_real_answers26_n+c', 'house_voice_v11', null]) {
+      for (const body of [COMPANY_FACTS[10], 'We don’t take cash during your visit; please pay cash through the office.', COMPANY_FACTS[0]]) {
+        expect(retiredCompanyFactBlock({ decision: { prompt_version }, outgoingBody: body })).toBeNull();
+      }
+    }
   });
 });

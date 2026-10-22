@@ -63,7 +63,7 @@ jest.mock('../services/sms-suggest-mode', () => ({
 jest.mock('../services/sms-auto-send', () => ({
   hasActiveAutoSendClaim: jest.fn(async () => false),
 }));
-jest.mock('../config/feature-gates', () => ({
+jest.mock('../config/feature-gates', () => ({ reviewAskAfterReportLive: () => false,
   isEnabled: () => true,
   gateEnvTimestamp: () => null,
   gates: {},

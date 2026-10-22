@@ -186,4 +186,5 @@ module.exports = {
   parseZelleNotice,
   memoInvoiceNumbers,
   isTrustedZelleSender,
+  authResultClauses,
 };

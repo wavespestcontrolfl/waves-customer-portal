@@ -13,9 +13,14 @@ jest.mock('../services/service-report/application-conditions', () => ({
   ...jest.requireActual('../services/service-report/application-conditions'),
   fetchPropertyForecast: jest.fn(),
 }));
+jest.mock('../services/weather-forecast', () => ({
+  ...jest.requireActual('../services/weather-forecast'),
+  getHourlyRainOutlook: jest.fn(),
+}));
 
 const { buildReportV1Data } = require('../services/service-report/report-data');
 const { fetchPropertyForecast } = require('../services/service-report/application-conditions');
+const { getHourlyRainOutlook } = require('../services/weather-forecast');
 const { finalizeLawnReportSynthesis } = require('../services/service-report/lawn-report-write-gate');
 const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
 const {
@@ -176,6 +181,78 @@ describe('resolveWaterInForecast (frozen at completion)', () => {
   });
 });
 
+describe('GATE_LAWN_WATERING_TEXT_FORECAST: two sources must agree; after a timed hold, rain from the hold end', () => {
+  // NWS hourly answers, one per hour from `fromIso`; `extra` marks a backup answer.
+  const nws = (chances, fromIso, extra = {}) => chances.map((rainChance, i) => ({
+    startTime: new Date(Date.parse(fromIso) + i * 3600000).toISOString(), rainChance, ...extra,
+  }));
+  const heldInstruction = (hold = { mode: 'hold', hold_hours: 24, source: 'owner' }) => JSON.parse(JSON.stringify(buildWateringInstruction({
+    rules: [hold, { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, source: 'label' }],
+    completedAt: COMPLETED,
+    plainWhenNoSetup: true,
+  })));
+  const resolve = (instruction, fetchNwsHourly, extra = {}) => resolveWaterInForecast({
+    instruction, latitude: 27.5, longitude: -82.5, fetchForecast: jest.fn(async () => ok(0.5)), fetchNwsHourly, ...extra,
+  });
+
+  test('NWS calls rain likely inside the window: the sentence is frozen with what agreed', async () => {
+    const fetchNwsHourly = jest.fn(async () => nws([20, 40, 70, 30], '2026-10-07T02:00:00Z'));
+    const out = await resolve(waterIn(), fetchNwsHourly);
+    expect(out).toMatchObject({ source: 'open_meteo', agreement: { source: 'nws', peakChance: 70, hours: 4 }, inches: 0.5 });
+    expect(out.line).toBe(forecastSentence({ forecastInches: 0.5, waterInInches: 0.25, checkpointLabel: out.checkpointLabel }));
+    expect(fetchNwsHourly).toHaveBeenCalledWith(27.5, -82.5, { budgetMs: 3000, nwsBudgetMs: 3000 });
+  });
+
+  test.each([
+    ['NWS says only a chance (50%)', async () => nws([50, 50], '2026-10-07T02:00:00Z')],
+    ['NWS calls rain likely only after the checkpoint', async () => nws([90], '2026-10-07T13:00:00Z')],
+    ['NWS was down and the answer is the Open-Meteo backup', async () => nws([90], '2026-10-07T02:00:00Z', { source: 'open-meteo' })],
+    ['NWS answered nothing', async () => null],
+    ['NWS threw', async () => { throw new Error('timeout'); }],
+  ])('%s: no sentence', async (_, fetchNwsHourly) => {
+    expect(await resolve(waterIn(), fetchNwsHourly)).toBeNull();
+  });
+
+  test('without the second source the block is exactly today\'s (same keys, same read)', async () => {
+    const fetchForecast = jest.fn(async () => ok(0.5));
+    const out = await resolveWaterInForecast({ instruction: waterIn(), latitude: 27.5, longitude: -82.5, fetchForecast });
+    expect(Object.keys(out)).toEqual(['line', 'inches', 'source', 'fetchedAt', 'windowFrom', 'windowTo', 'checkpointAt', 'checkpointLabel']);
+    expect(fetchForecast.mock.calls[0][0].from.getTime()).toBe(Date.parse(COMPLETED));
+  });
+
+  test('a timed hold then a water-in: rain is read from the hold end to the checkpoint, and the sentence names both', async () => {
+    const instruction = heldInstruction();
+    expect(instruction).toMatchObject({ state: 'hold_then_water_in', holdUntilLabel: 'Wed 3 PM' });
+    const fetchForecast = jest.fn(async () => ok(0.5));
+    const fetchNwsHourly = jest.fn(async () => nws([10, 65], instruction.holdUntil));
+    const out = await resolveWaterInForecast({ instruction, latitude: 27.5, longitude: -82.5, fetchForecast, fetchNwsHourly, afterHold: true });
+    expect(fetchForecast.mock.calls[0][0].from.toISOString()).toBe(instruction.holdUntil);
+    expect(out).toMatchObject({ afterHold: true, windowFrom: instruction.holdUntil, checkpointLabel: 'Thu 9 AM' });
+    expect(out.line).toBe('About ½ inch of rain is forecast between Wed 3 PM and Thu 9 AM. If at least ¼ inch falls in that time, it counts as watering in today’s treatment. If it does not, run the watering above right away.');
+    expect(copyIsClean(out.line)).toBe(true);
+    // Rain likely only inside the hold does not agree.
+    expect(await resolve(instruction, async () => nws([95, 95], COMPLETED), { afterHold: true })).toBeNull();
+  });
+
+  test('a hold that waits for drying, or the after-hold read not asked for: no sentence and no forecast read', async () => {
+    const fetchForecast = jest.fn(async () => ok(0.5));
+    const dry = heldInstruction({ mode: 'hold', hold_until: 'dry', source: 'label' });
+    expect(dry.state).toBe('hold_then_water_in');
+    expect(await resolveWaterInForecast({ instruction: dry, latitude: 27.5, longitude: -82.5, fetchForecast, fetchNwsHourly: jest.fn(), afterHold: true })).toBeNull();
+    expect(await resolveWaterInForecast({ instruction: heldInstruction(), latitude: 27.5, longitude: -82.5, fetchForecast })).toBeNull();
+    expect(fetchForecast).not.toHaveBeenCalled();
+  });
+
+  test('frozenForecastLine: an after-hold sentence is read only beside a timed hold, a plain one only on a plain water-in', () => {
+    const held = heldInstruction();
+    const block = (afterHold) => ({ line: 'About ½ inch of rain is forecast between Wed 3 PM and Thu 9 AM.', inches: 0.5, ...(afterHold ? { afterHold: true } : {}) });
+    expect(frozenForecastLine({ ...held, forecast: block(true) })).toBe(block(true).line);
+    expect(frozenForecastLine({ ...held, forecast: block(false) })).toBeNull();
+    expect(frozenForecastLine({ ...waterIn(), forecast: block(true) })).toBeNull();
+    expect(frozenForecastLine({ ...heldInstruction({ mode: 'hold', hold_until: 'dry', source: 'label' }), forecast: block(true) })).toBeNull();
+  });
+});
+
 describe('the write gate freezes the sentence (first writer wins, replays identical)', () => {
   const OLD = process.env.GATE_LAWN_WATERING_FORECAST;
   afterEach(() => {
@@ -221,6 +298,51 @@ describe('the write gate freezes the sentence (first writer wins, replays identi
     expect(result.wateringFreeze.wateringInstruction.forecast).toEqual(frozen.forecast);
     // The property's own coordinates, never a fixed point.
     expect(fetchPropertyForecast).toHaveBeenCalledWith(expect.objectContaining({ latitude: 27.5, longitude: -82.5 }));
+  });
+
+  test('GATE_LAWN_WATERING_TEXT_FORECAST on: NWS must agree, and a timed hold then a water-in gets its after-hold sentence', async () => {
+    process.env.GATE_LAWN_WATERING_FORECAST = 'true';
+    const savedText = process.env.GATE_LAWN_WATERING_TEXT_FORECAST;
+    process.env.GATE_LAWN_WATERING_TEXT_FORECAST = 'true';
+    const hours = (fromIso, chance) => [0, 1, 2].map((i) => ({ startTime: new Date(Date.parse(fromIso) + i * 3600000).toISOString(), rainChance: chance }));
+    const freeze = async (instruction) => {
+      reportOnce(instruction);
+      const { knex, state } = fakeKnex({});
+      await run(knex);
+      return state.notes.lawnWateringFreeze.wateringInstruction;
+    };
+    try {
+      fetchPropertyForecast.mockResolvedValue(ok(0.5));
+      getHourlyRainOutlook.mockResolvedValue(hours('2026-10-07T02:00:00Z', 70));
+      expect((await freeze(waterIn())).forecast).toMatchObject({ agreement: { source: 'nws', peakChance: 70 } });
+      expect(getHourlyRainOutlook).toHaveBeenCalledWith(27.5, -82.5, { budgetMs: 3000, nwsBudgetMs: 3000 });
+
+      getHourlyRainOutlook.mockResolvedValue(hours('2026-10-07T02:00:00Z', 40));
+      const disagreed = waterIn();
+      expect(JSON.stringify(await freeze(disagreed))).toBe(JSON.stringify(disagreed));
+
+      const held = JSON.parse(JSON.stringify(buildWateringInstruction({
+        rules: [{ mode: 'hold', hold_hours: 24, source: 'owner' }, { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, source: 'label' }],
+        completedAt: COMPLETED,
+      })));
+      getHourlyRainOutlook.mockResolvedValue(hours(held.holdUntil, 80));
+      const frozen = await freeze(held);
+      expect(frozen.lines).toEqual(held.lines);
+      expect(frozen.forecast).toMatchObject({ afterHold: true, windowFrom: held.holdUntil });
+      expect(frozenForecastLine(frozen)).toMatch(/^About ½ inch of rain is forecast between Wed 3 PM and Thu 9 AM\./);
+    } finally {
+      if (savedText === undefined) delete process.env.GATE_LAWN_WATERING_TEXT_FORECAST; else process.env.GATE_LAWN_WATERING_TEXT_FORECAST = savedText;
+      getHourlyRainOutlook.mockReset();
+    }
+  });
+
+  test('GATE_LAWN_WATERING_TEXT_FORECAST off: NWS is never read', async () => {
+    process.env.GATE_LAWN_WATERING_FORECAST = 'true';
+    delete process.env.GATE_LAWN_WATERING_TEXT_FORECAST;
+    fetchPropertyForecast.mockResolvedValue(ok(0.5));
+    reportOnce(waterIn());
+    await run(fakeKnex({}).knex);
+    expect(getHourlyRainOutlook).not.toHaveBeenCalled();
   });
 
   test('forecast unavailable or incomplete: the frozen instruction is exactly today\'s', async () => {

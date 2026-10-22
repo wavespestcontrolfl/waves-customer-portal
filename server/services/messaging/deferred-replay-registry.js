@@ -1862,8 +1862,12 @@ async function contactSlotStillAuthorized(meta, label) {
     const { getAppointmentContacts } = require('../customer-contact');
     const { filterRecipientsByOptin } = require('../recipient-optin');
     const digits = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-    const stillAuthorized = (await filterRecipientsByOptin(
-      getAppointmentContacts(customer, prefsRow), meta.customer_id
+    // The contact's own choices (contact login, GATE_CONTACT_LOGIN) are
+    // re-read at replay too, for the purpose this row carries.
+    const replayColumn = require('./policy').PURPOSE_POLICY[String(meta.replay_purpose || '')]?.prefsColumn || null;
+    const stillAuthorized = (await require('../contact-notification-prefs').filterContactsByOwnPrefs(
+      await filterRecipientsByOptin(getAppointmentContacts(customer, prefsRow), meta.customer_id),
+      meta.customer_id, replayColumn, { channel: 'sms' },
     )).some((c) => digits(c.phone) === digits(meta.to_phone));
     if (!stillAuthorized) return { eligible: false, reason: 'contact-removed' };
     // Channel pin (codex r27): a customer who flips the relevant

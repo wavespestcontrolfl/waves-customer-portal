@@ -12,7 +12,7 @@ const {
 } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
 const { mergeCustomersEnabled, deleteDuplicateCustomerEnabled } = require('./customer-lifecycle-tools');
-const { ibAcceptEstimateLive, ibCreateInvoiceLive, ibLeadConvertLive, ibRecordPaymentLive, ibVoidInvoiceLive } = require('../../config/feature-gates');
+const { ibAcceptEstimateLive, ibCreateInvoiceLive, ibLeadConvertLive, ibRecordPaymentLive, ibVoidInvoiceLive, ibInvoiceRemindersLive, ibPaymentPlanLive, ibSetBillToLive } = require('../../config/feature-gates');
 const { invoiceActionsLive } = require('./invoice-action-tools');
 const { repriceVisitsLive } = require('./reprice-visits-tools');
 const { adminReadLive } = require('./admin-read-tools');
@@ -75,7 +75,10 @@ const MODULES = [
   ['record-payment-tools', 'RECORD_PAYMENT_TOOLS', 'executeRecordPaymentTool'],
   ['lead-convert-tools', 'LEAD_CONVERT_TOOLS', 'executeLeadConvertTool'],
   ['void-invoice-tools', 'VOID_INVOICE_TOOLS', 'executeVoidInvoiceTool'],
+  ['invoice-reminder-tools', 'INVOICE_REMINDER_TOOLS', 'executeInvoiceReminderTool'],
+  ['payment-plan-tools', 'PAYMENT_PLAN_TOOLS', 'executePaymentPlanTool'],
   ['create-invoice-tools', 'CREATE_INVOICE_TOOLS', 'executeCreateInvoiceTool'],
+  ['bill-to-tools', 'BILL_TO_TOOLS', 'executeBillToTool'],
   ['choice-tools', 'CHOICE_TOOLS', 'executeChoiceTool'],
   ['admin-read-tools', 'ADMIN_READ_TOOLS', 'executeAdminReadTool'],
   ['admin-write-tools', 'ADMIN_WRITE_TOOLS', 'executeAdminWriteTool'],
@@ -143,7 +146,15 @@ const GATED_ACTIONS = {
   record_payment: () => ibRecordPaymentLive(),
   convert_lead: () => ibLeadConvertLive(),
   void_invoice: () => ibVoidInvoiceLive(),
+  pause_invoice_reminders: () => ibInvoiceRemindersLive(),
+  resume_invoice_reminders: () => ibInvoiceRemindersLive(),
+  stop_invoice_reminders: () => ibInvoiceRemindersLive(),
+  send_invoice_reminder_now: () => ibInvoiceRemindersLive(),
+  schedule_invoice_send: () => ibInvoiceRemindersLive(),
+  create_payment_plan: () => ibPaymentPlanLive(),
+  cancel_payment_plan: () => ibPaymentPlanLive(),
   create_invoice: () => ibCreateInvoiceLive(),
+  set_customer_bill_to: () => ibSetBillToLive(),
   find_admin_reads: () => adminReadLive(),
   read_admin_data: () => adminReadLive(),
   find_admin_edits: () => adminWriteLive(),

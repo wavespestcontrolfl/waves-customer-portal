@@ -13,8 +13,16 @@ jest.mock('../services/email-template-library', () => ({
 // select + prep_template_key update) — stub the db so the token resolves
 // without a live connection.
 jest.mock('../models/db', () => jest.fn());
+// The slot-1 contact's own email master switch (contact login): declined =
+// the mail goes to the account holder instead.
+// …and the address-wide re-read at the dispatch boundary (codex r22).
+jest.mock('../services/contact-notification-prefs', () => ({
+  contactDeclinesChannel: jest.fn(async () => false),
+  contactEmailDeclines: jest.fn(async () => false),
+}));
 
 const db = require('../models/db');
+const { contactDeclinesChannel, contactEmailDeclines } = require('../services/contact-notification-prefs');
 const EmailTemplates = require('../services/email-template-library');
 const ProjectEmail = require('../services/project-email');
 
@@ -60,9 +68,46 @@ function project(overrides = {}) {
 describe('project email service', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    contactDeclinesChannel.mockResolvedValue(false);
+    contactEmailDeclines.mockResolvedValue(false);
     // Project already carries a prep_token, so ensurePrepToken's select
     // returns it and no mint/update path runs.
     db.mockImplementation(() => dbChain({ prep_token: 'preptok123' }));
+  });
+
+  test('the dispatch boundary re-reads the contact\'s email switch: a decline that lands during the library\'s awaits aborts before the provider (codex #6363 r22)', async () => {
+    const withContact = customer({ service_contact_email: 'tenant@example.com', service_contact_name: 'Terry Tenant', service_contact_phone: '+19415550202' });
+    // The library resolves template / idempotency / suppression, then asks
+    // onQueued; false aborts before the provider.
+    EmailTemplates.sendTemplate.mockImplementationOnce(async (opts) => {
+      if (opts.onQueued && (await opts.onQueued()) === false) return { sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' };
+      return { sent: true, message: { provider_message_id: 'sg-1' } };
+    });
+    contactEmailDeclines.mockResolvedValueOnce(true);
+    const res = await ProjectEmail.sendProjectReportReady({ project: project(), customer: withContact, reportUrl: 'https://portal.wavespestcontrol.com/report/project/x' });
+    expect(res).toEqual({ ok: false, blocked: true, deduped: false, reason: 'contact_declined', messageId: null });
+    // A recipient resolved as a service contact must still occupy a slot at the handoff (codex r26 security P2).
+    expect(contactEmailDeclines).toHaveBeenCalledWith('cust-1', 'tenant@example.com', { requireSlot: true });
+    // Allowed at the handoff: the send goes through as before.
+    EmailTemplates.sendTemplate.mockImplementationOnce(async (opts) => {
+      expect(await opts.onQueued()).toBe(true);
+      return { sent: true, message: { provider_message_id: 'sg-2' } };
+    });
+    expect(await ProjectEmail.sendProjectReportReady({ project: project(), customer: withContact, reportUrl: 'https://x' })).toMatchObject({ ok: true, messageId: 'sg-2' });
+  });
+
+  test('the handoff asks only for a recipient resolved AS a service contact: the payer\'s invoice email goes out even when a contact sharing the payer\'s address turned email off (codex r32 security P2)', async () => {
+    const withContact = customer({ service_contact_email: 'ap@payer.example', service_contact_name: 'Terry Tenant', service_contact_phone: '+19415550202' });
+    contactEmailDeclines.mockResolvedValue(true);
+    EmailTemplates.sendTemplate.mockImplementationOnce(async (opts) => {
+      expect(await opts.onQueued()).toBe(true);
+      return { sent: true, message: { provider_message_id: 'sg-payer' } };
+    });
+    const res = await ProjectEmail.sendProjectReportReady({
+      project: project(), customer: withContact, reportUrl: 'https://x', recipient: { email: 'ap@payer.example', name: 'AP', role: 'payer' },
+    });
+    expect(res).toMatchObject({ ok: true, messageId: 'sg-payer' });
+    expect(contactEmailDeclines).not.toHaveBeenCalled();
   });
 
   test('sends project report ready through the template library', async () => {
@@ -87,6 +132,30 @@ describe('project email service', () => {
         property_address: '123 Palm Ave Bradenton, FL 34211',
       }),
     }));
+  });
+
+  test('a slot-1 contact whose email switch is off is skipped for the holder: reports, invoice-bearing variants and prep guides alike (codex #6363 r6 P1)', async () => {
+    contactDeclinesChannel.mockResolvedValue(true);
+    const withContact = customer({ service_contact_email: 'service@example.com', service_contact_name: 'Sam Service', service_contact_phone: '+19415550202' });
+    await ProjectEmail.sendProjectReportReady({ project: project(), customer: withContact, reportUrl: 'https://portal.wavespestcontrol.com/report/project/x' });
+    await ProjectEmail.sendProjectReportWithInvoice({ project: project(), customer: withContact, reportUrl: 'https://x', payUrl: 'https://pay', invoice: { id: 'inv-1', invoice_number: 'INV-1', total: 100 } });
+    await ProjectEmail.sendProjectInvoiceBeforeReport({ project: project(), customer: withContact, payUrl: 'https://pay', invoice: { id: 'inv-1', invoice_number: 'INV-1', total: 100 } });
+    await ProjectEmail.sendPrepGuide({ project: project(), customer: withContact });
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(4);
+    for (const [args] of EmailTemplates.sendTemplate.mock.calls) {
+      expect(args.to).toBe('primary@example.com');
+      expect(args.payload.first_name).toBe('Taylor');
+    }
+    expect(contactDeclinesChannel).toHaveBeenCalledWith('cust-1', { phone: '+19415550202', role: 'service_contact' }, 'email');
+    // An explicit recipient (a report copy, the payer) is never re-routed.
+    EmailTemplates.sendTemplate.mockClear();
+    await ProjectEmail.sendProjectReportReady({ project: project(), customer: withContact, reportUrl: 'https://x', recipient: { email: 'ap@payer.example', name: 'AP', role: 'payer' } });
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ to: 'ap@payer.example' }));
+    // Switch on (the default): the contact gets it, and the holder is never asked.
+    contactDeclinesChannel.mockResolvedValue(false);
+    EmailTemplates.sendTemplate.mockClear();
+    await ProjectEmail.sendProjectReportReady({ project: project(), customer: withContact, reportUrl: 'https://x' });
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ to: 'service@example.com', payload: expect.objectContaining({ first_name: 'Sam' }) }));
   });
 
   test('sends mapped prep guide with supplied idempotency key', async () => {

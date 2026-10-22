@@ -70,6 +70,7 @@ import {
   MAX_REVIEW_DELAY_MS,
   REVIEW_TIMING_DEFAULT,
   REVIEW_TIMING_OPTIONS,
+  completionReportTextExpected,
   completionReviewHint,
   completionReviewSuppressionReason,
   completionTimeOnSiteBody,
@@ -10299,6 +10300,9 @@ function completionProductRowProblem(service, rows, typeFor) {
   const missingArea = rows.find((p) => {
     const requirement = areaOf(p);
     if (!requirement) return false;
+    // Linear feet are optional (owner 2026-10-22, "make feet optional"): an empty box holds nothing; a typed
+    // length must still be above 0 (the server refuses one that is not, linear_ft_invalid).
+    if (requirement.unit === "linear_ft" && (p.areaValue == null || p.areaValue === "")) return false;
     const value = Number(p.areaValue);
     return !Number.isFinite(value) || value <= 0 || p.areaUnit !== requirement.unit;
   });
@@ -14149,6 +14153,7 @@ export function CompletionPanel({
     reviewCustomAt,
     preview: reviewSendPreview,
     reviewAwaitsPayment,
+    customerPhone: service?.customerPhone,
   });
   const smsPreview = [
     smsRecapPreview(customerRecap),
@@ -18161,7 +18166,7 @@ export function CompletionPanel({
       // still carry a later tick range after a tick boundary (codex #4140
       // r15 P2); only a bucket change needs the operator's confirmation.
       if (fresh) setReviewSendPreview(fresh);
-      const verdict = reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, failureNoticed: previewFailureNoticedRef.current });
+      const verdict = reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, failureNoticed: previewFailureNoticedRef.current, reportTextExpected: completionReportTextExpected({ effectiveSendSms, customerPhone: service?.customerPhone }) });
       if (verdict) {
         if (verdict.noticed) previewFailureNoticedRef.current = true;
         if (verdict.dropShown) setReviewSendPreview(null);
