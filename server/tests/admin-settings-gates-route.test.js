@@ -83,6 +83,18 @@ describe('listGates variable names', () => {
     expect(byKey.get('visitCloseout')).toMatchObject({ envName: 'GATE_VISIT_CLOSEOUT', requires: [] });
   });
 
+  test('a gate read through a helper function names its variable and prerequisite', () => {
+    expect(byKey.get('termiteAnnualPlan')).toMatchObject({
+      envName: 'GATE_TERMITE_ANNUAL_PLAN',
+      requires: ['GATE_CANCEL_FLOW_V2'],
+    });
+    expect(byKey.get('emailTemplateAutomations')).toMatchObject({ envName: 'GATE_EMAIL_TEMPLATE_AUTOMATIONS', kind: 'mode' });
+  });
+
+  test('an entry with no GATE_ variable names the plain variable it reads', () => {
+    expect(byKey.get('dunningCustomerScheduleAllowlist')).toMatchObject({ envName: 'DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST' });
+  });
+
   test('mode and inverted gates carry their catalogue semantics', () => {
     expect(byKey.get('reviewAutoReply')).toMatchObject({ envName: 'GATE_REVIEW_AUTO_REPLY', kind: 'mode' });
     expect(listGates().find((g) => g.envName === 'GATE_LATE_PAYMENT_CHECKER_OFF')).toMatchObject({ inverted: true });
@@ -95,8 +107,7 @@ describe('listGates variable names', () => {
     expect(byKey.get('appPropertyTexts')).toMatchObject({ envName: 'GATE_APP_PROPERTY_TEXTS', requires: [] });
   });
 
-  test('nearly every entry resolves to a variable', () => {
-    const unresolved = listGates().filter((g) => !g.envName);
-    expect(unresolved.length).toBeLessThan(15);
+  test('every entry resolves to a variable', () => {
+    expect(listGates().filter((g) => !g.envName).map((g) => g.key)).toEqual([]);
   });
 });

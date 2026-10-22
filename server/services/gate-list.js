@@ -19,9 +19,26 @@ const featureGates = require('../config/feature-gates');
 
 let envNameCache = null;
 
+const GATE_TOKEN = /GATE_[A-Z0-9_]*[A-Z0-9]/g;
+
+// Top-level helper functions in feature-gates.js → the GATE_ variables their
+// bodies read (comments stripped). Entries such as
+// `termiteAnnualPlan: termiteAnnualPlanSelectionEnabled()` read their gates
+// only through one of these.
+function helperGateTokens(src) {
+  const helpers = new Map();
+  for (const [, name, body] of src.matchAll(/^function ([A-Za-z0-9_]+)\([^)]*\) \{\n([\s\S]*?)\n\}/gm)) {
+    const code = body.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+    const tokens = [...new Set(code.match(GATE_TOKEN) || [])];
+    if (tokens.length) helpers.set(name, tokens);
+  }
+  return helpers;
+}
+
 // Map each `gates` key to the GATE_ variables its value expression reads, in
-// order. Comment lines are skipped, so a GATE_ named in a comment above an entry
-// is never taken for that entry's own variable.
+// order, including those read inside a helper it calls. Comment lines are
+// skipped, so a GATE_ named in a comment above an entry is never taken for
+// that entry's own variable.
 function gateEnvNames() {
   if (envNameCache) return envNameCache;
   const src = fs.readFileSync(require.resolve('../config/feature-gates'), 'utf8');
@@ -32,6 +49,7 @@ function gateEnvNames() {
     envNameCache = names;
     return names;
   }
+  const helpers = helperGateTokens(src);
   let currentKey = null;
   for (const line of src.slice(start, end).split('\n').slice(1)) {
     const trimmed = line.trim();
@@ -40,7 +58,14 @@ function gateEnvNames() {
     const code = entry ? entry[2] : trimmed;
     if (entry) currentKey = entry[1];
     if (!currentKey) continue;
-    const tokens = code.replace(/\/\/.*$/, '').match(/GATE_[A-Z0-9_]*[A-Z0-9]/g) || [];
+    const expr = code.replace(/\/\/.*$/, '');
+    const tokens = [
+      ...(expr.match(GATE_TOKEN) || []),
+      ...[...expr.matchAll(/([A-Za-z0-9_]+)\(/g)].flatMap(([, fn]) => helpers.get(fn) || []),
+    ];
+    // A few entries read a plain variable (an allowlist, a token); name it so
+    // the row still says what to set. Only the name is returned, never a value.
+    if (!tokens.length) tokens.push(...[...expr.matchAll(/process\.env\.([A-Z][A-Z0-9_]*)/g)].map(([, v]) => v));
     const list = names.get(currentKey) || [];
     for (const token of tokens) if (!list.includes(token)) list.push(token);
     if (list.length) names.set(currentKey, list);
