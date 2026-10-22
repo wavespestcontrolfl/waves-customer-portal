@@ -129,3 +129,79 @@ describe('gate off (unchanged behaviour)', () => {
     expect(r).toEqual({ redirectUrl: HOME, recorded: false });
   });
 });
+
+describe('per-send URL snapshot (gate on)', () => {
+  beforeEach(() => { process.env.GATE_NEWSLETTER_CLICK_BOUND = 'true'; });
+
+  function snapWorld(snapshot) {
+    return fakeKnex({
+      deliveries: { [TOK]: { id: 'd1', send_id: 's1' } },
+      sends: { s1: { event_ids: JSON.stringify([LOCKED]), alternate_event_ids: JSON.stringify([ALT]), event_url_snapshot: snapshot } },
+      events: {
+        [LOCKED]: { id: LOCKED, event_url: 'https://feed.example/re-pointed' },
+        [ALT]: { id: ALT, event_url: 'https://feed.example/alt-now' },
+      },
+    });
+  }
+
+  test('a locked event redirects to the URL the send carried, not the live feed URL', async () => {
+    const r = await recordEventClick({ engagementToken: TOK, eventId: LOCKED, userAgent: 'Mozilla/5.0' },
+      snapWorld({ [LOCKED]: 'https://venue.example/as-sent' }));
+    expect(r).toEqual({ redirectUrl: 'https://venue.example/as-sent', recorded: true });
+  });
+
+  test('the over-budget path follows the snapshot too', async () => {
+    await expect(eventRedirectWithoutRecording({ engagementToken: TOK, eventId: LOCKED },
+      snapWorld(JSON.stringify({ [LOCKED]: 'https://venue.example/as-sent' }))))
+      .resolves.toBe('https://venue.example/as-sent');
+  });
+
+  test('a snapshot entry without a URL goes home; a send without a snapshot uses the live URL', async () => {
+    await expect(eventRedirectWithoutRecording({ engagementToken: TOK, eventId: LOCKED }, snapWorld({ [LOCKED]: null })))
+      .resolves.toBe(HOME);
+    await expect(eventRedirectWithoutRecording({ engagementToken: TOK, eventId: ALT }, snapWorld(null)))
+      .resolves.toBe('https://feed.example/alt-now');
+  });
+});
+
+describe('snapshotEventUrlsForSend', () => {
+  const { snapshotEventUrlsForSend } = require('../services/newsletter-event-clicks');
+
+  function sendsKnex(row) {
+    const updates = [];
+    const knex = () => {
+      const q = {
+        where() { return q; },
+        whereNull() { return q; },
+        first: async () => row,
+        update: async (u) => { updates.push(u); return 1; },
+      };
+      return q;
+    };
+    knex.updates = updates;
+    return knex;
+  }
+
+  test('gate off: returns the live map and writes nothing', async () => {
+    const live = new Map([[LOCKED, 'https://a.example/']]);
+    const knex = sendsKnex({ event_url_snapshot: null });
+    await expect(snapshotEventUrlsForSend({ id: 's1' }, live, knex)).resolves.toBe(live);
+    expect(knex.updates).toHaveLength(0);
+  });
+
+  test('gate on, first send: stores the live map once', async () => {
+    process.env.GATE_NEWSLETTER_CLICK_BOUND = 'true';
+    const live = new Map([[LOCKED, 'https://a.example/']]);
+    const knex = sendsKnex({ event_url_snapshot: null });
+    await expect(snapshotEventUrlsForSend({ id: 's1' }, live, knex)).resolves.toBe(live);
+    expect(JSON.parse(knex.updates[0].event_url_snapshot)).toEqual({ [LOCKED]: 'https://a.example/' });
+  });
+
+  test('gate on, resumed send: reuses the stored snapshot', async () => {
+    process.env.GATE_NEWSLETTER_CLICK_BOUND = 'true';
+    const knex = sendsKnex({ event_url_snapshot: { [LOCKED]: 'https://first.example/' } });
+    const out = await snapshotEventUrlsForSend({ id: 's1' }, new Map([[LOCKED, 'https://later.example/']]), knex);
+    expect(out.get(LOCKED)).toBe('https://first.example/');
+    expect(knex.updates).toHaveLength(0);
+  });
+});

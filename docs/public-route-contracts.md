@@ -3723,15 +3723,15 @@ records one deduped analytics row then 302s to the DB-locked event
 URL; unknown token = untracked redirect, never blocks the reader.
 With `GATE_NEWSLETTER_CLICK_BOUND=true` the event URL is honoured only
 when the token is a real delivery AND the event is in that send's
-`event_ids` or `alternate_event_ids`; an unknown token, an event outside
-the lineup, or a membership lookup that fails goes to the homepage
-(`https://www.wavespestcontrol.com/`). A click-row write that fails AFTER
-membership was verified still sends the reader to the event. The per-IP
-over-budget path records nothing and applies the same membership check.
-The same gate stops iCal / calendar-RSS feed pulls from overwriting
-`event_url` on an approved or featured event or on any event a send
-carries (send history), and a non-uuid token goes home before any
-query. Gate off = the behaviour
+`event_ids` or `alternate_event_ids`; the target is the URL the send
+carried (`newsletter_sends.event_url_snapshot`, written at send time),
+or the live `event_url` for a send made before snapshots existed. An
+unknown token, an event outside the lineup, a snapshot entry with no
+URL, or a membership lookup that fails goes to the homepage
+(`https://www.wavespestcontrol.com/`); a non-uuid token goes home before
+any query. A click-row write that fails AFTER membership was verified
+still sends the reader to the event. The per-IP over-budget path records
+nothing and applies the same rules. Gate off = the behaviour
 above this note, unchanged)
 — rate-limited, read-only for posts/rss,
 double-opt-in for subscribe (the response is unchanged and uniform; `source` is free text,

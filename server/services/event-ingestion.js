@@ -82,45 +82,10 @@ const REVIVAL_COND = 'COALESCE(events_raw.end_at, events_raw.start_at) < :etMidn
 // next year's date. Rows with approved_via set (an operator reset one) stay
 // with the operator.
 const REOPEN_CURATION_COND = `(${REVIVAL_COND}) OR (events_raw.admin_status = 'pending' AND events_raw.approved_via IS NULL AND (events_raw.start_at AT TIME ZONE 'America/New_York')::date IS DISTINCT FROM (EXCLUDED.start_at AT TIME ZONE 'America/New_York')::date)`;
-// GATE_NEWSLETTER_CLICK_BOUND: once an editor approved (or featured) an event,
-// or any newsletter send carries it, a later feed pull no longer re-points its
-// event_url. iCal and calendar-RSS rows are keyed by UID/guid, so without this
-// a feed owner could change the link of an event newsletters already carry.
-// Send history is checked as well as the status because a sent event can
-// later go back to pending or rejected while its emailed link stays live.
-// No `::` casts here: these fragments share statements with named bindings.
-const URL_FROZEN_COND = "events_raw.admin_status IN ('approved', 'featured') OR EXISTS ("
-  + 'SELECT 1 FROM newsletter_sends ns WHERE jsonb_exists(ns.event_ids, CAST(events_raw.id AS text)) '
-  + "OR jsonb_exists(COALESCE(ns.alternate_event_ids, CAST('[]' AS jsonb)), CAST(events_raw.id AS text)))";
-
-function urlFreezeOn() {
-  const { newsletterClickBoundLive } = require('../config/feature-gates');
-  return newsletterClickBoundLive();
-}
-
-// Gate off = the pulled URL always wins, as before.
-function eventUrlMergeValue(eventUrl) {
-  if (!urlFreezeOn()) return eventUrl;
-  return db.raw(`CASE WHEN ${URL_FROZEN_COND} THEN events_raw.event_url ELSE ? END`, [eventUrl]);
-}
-
-// The URL the row will hold after the merge, for the image side effects
-// below: with the freeze on, a frozen row keeps its stored URL, so its image
-// is not cleared or re-probed as if the link had moved.
-function incomingEventUrlSql() {
-  return urlFreezeOn()
-    ? `(CASE WHEN ${URL_FROZEN_COND} THEN events_raw.event_url ELSE EXCLUDED.event_url END)`
-    : 'EXCLUDED.event_url';
-}
-
 function revivalResetFields() {
   // ET-midnight-today as a bound timestamptz — identical to the sweep's
   // parseETDateTime(`${etDateString()}T00:00:00`) (avoids the naive-ISO leak).
   const etMidnight = parseETDateTime(`${etDateString()}T00:00:00`);
-  const incomingUrl = incomingEventUrlSql();
-  const frozenMovedImageArm = urlFreezeOn()
-    ? `WHEN (${URL_FROZEN_COND}) AND events_raw.event_url IS DISTINCT FROM EXCLUDED.event_url THEN events_raw.image_url `
-    : '';
   return {
     normalized_at: db.raw(`CASE WHEN ${REOPEN_CURATION_COND} THEN NULL ELSE events_raw.normalized_at END`, { etMidnight }),
     freshness_revival_pending: db.raw(`CASE WHEN ${REOPEN_CURATION_COND} THEN true ELSE events_raw.freshness_revival_pending END`, { etMidnight }),
@@ -151,13 +116,11 @@ function revivalResetFields() {
     // image sourced from the OLD page is presumed stale once the url
     // moves, so the feed value is taken verbatim (null clears it) and
     // the re-opened backoff lets the new page be probed.
-    // Freeze on: a frozen row whose feed moved its link keeps its stored
-    // image too, so the kept link and its image stay a pair.
-    image_url: db.raw(`CASE ${frozenMovedImageArm}WHEN (${REVIVAL_COND}) OR (events_raw.event_url IS DISTINCT FROM ${incomingUrl}) THEN EXCLUDED.image_url ELSE COALESCE(EXCLUDED.image_url, events_raw.image_url) END`, { etMidnight }),
+    image_url: db.raw(`CASE WHEN (${REVIVAL_COND}) OR (events_raw.event_url IS DISTINCT FROM EXCLUDED.event_url) THEN EXCLUDED.image_url ELSE COALESCE(EXCLUDED.image_url, events_raw.image_url) END`, { etMidnight }),
     // Re-open the probe backoff when the occurrence revives OR the event
     // url itself changed (the old page's failed probe says nothing about
     // the new page).
-    image_backfill_attempted_at: db.raw(`CASE WHEN (${REVIVAL_COND}) OR (events_raw.event_url IS DISTINCT FROM ${incomingUrl}) THEN NULL ELSE events_raw.image_backfill_attempted_at END`, { etMidnight }),
+    image_backfill_attempted_at: db.raw(`CASE WHEN (${REVIVAL_COND}) OR (events_raw.event_url IS DISTINCT FROM EXCLUDED.event_url) THEN NULL ELSE events_raw.image_backfill_attempted_at END`, { etMidnight }),
   };
 }
 
@@ -584,7 +547,7 @@ async function pullRssSource(source) {
         description,
         start_at: start,
         city,
-        event_url: eventUrlMergeValue(eventUrl),
+        event_url: eventUrl,
         categories,
         pulled_at: db.fn.now(),
         updated_at: db.fn.now(),
@@ -1265,7 +1228,7 @@ async function pullIcalSource(source) {
         end_at: end,
         venue_name: venueName,
         city,
-        event_url: eventUrlMergeValue(eventUrl),
+        event_url: eventUrl,
         ...(recurrence && {
           event_type: recurrence.event_type,
           recurrence_type: recurrence.recurrence_type,
@@ -1506,7 +1469,6 @@ module.exports = {
   ingestAllEnabledSources,
   ingestSource, // exported for ad-hoc admin-triggered pulls
   revivalResetFields, // exported for unit testing the past→future revival SQL
-  eventUrlMergeValue, // exported for the GATE_NEWSLETTER_CLICK_BOUND freeze test
   resolveProxyConfig, // exported for unit testing the proxy opt-in contract
   enabledSourcesInPullOrder, // exported for the pull-order Postgres test
   // Exported for unit tests — pure pieces of the shared extraction path.

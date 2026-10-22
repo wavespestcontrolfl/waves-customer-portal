@@ -154,11 +154,59 @@ async function sendMembershipFor(engagementToken, eventId, knex = db) {
     .where({ engagement_token: engagementToken })
     .first('id', 'send_id');
   if (!delivery) return { delivery: null, lockedIds: [], member: false };
-  const send = await knex('newsletter_sends').where({ id: delivery.send_id }).first('event_ids', 'alternate_event_ids');
+  const send = await knex('newsletter_sends').where({ id: delivery.send_id })
+    .first('event_ids', 'alternate_event_ids', 'event_url_snapshot');
   const lockedIds = parseLockedEventIds(send?.event_ids).map((id) => String(id).toLowerCase());
   const alternateIds = parseLockedEventIds(send?.alternate_event_ids).map((id) => String(id).toLowerCase());
   const target = String(eventId).toLowerCase();
-  return { delivery, lockedIds, member: lockedIds.includes(target) || alternateIds.includes(target) };
+  return {
+    delivery,
+    lockedIds,
+    member: lockedIds.includes(target) || alternateIds.includes(target),
+    snapshotUrl: snapshotUrlFor(send?.event_url_snapshot, target),
+  };
+}
+
+/**
+ * The URL a send carried for an event, from newsletter_sends.event_url_snapshot
+ * (written at send time with the gate on). undefined = no snapshot for this
+ * send (sent before the gate), so the caller falls back to the live URL.
+ */
+function snapshotUrlFor(snapshot, eventIdLower) {
+  let map = snapshot;
+  if (typeof map === 'string') {
+    try { map = JSON.parse(map); } catch { return undefined; }
+  }
+  if (!map || typeof map !== 'object' || Array.isArray(map)) return undefined;
+  if (!Object.prototype.hasOwnProperty.call(map, eventIdLower)) return undefined;
+  const url = map[eventIdLower];
+  return typeof url === 'string' && /^https?:\/\//i.test(url) ? url : null;
+}
+
+/**
+ * Snapshot { eventIdLower: url } for a send, written once at send time with
+ * GATE_NEWSLETTER_CLICK_BOUND on. A resumed send reuses the stored snapshot
+ * so every batch links the same URLs. Returns the Map the sender substitutes
+ * with. Fail-open to the live map (logged): a snapshot write must never stop
+ * a send; the redirect then falls back to the live URL for that send.
+ */
+async function snapshotEventUrlsForSend(send, liveUrlById, knex = db) {
+  if (!newsletterClickBound() || !send?.id) return liveUrlById;
+  try {
+    const stored = await knex('newsletter_sends').where({ id: send.id }).first('event_url_snapshot');
+    let map = stored?.event_url_snapshot;
+    if (typeof map === 'string') { try { map = JSON.parse(map); } catch { map = null; } }
+    if (map && typeof map === 'object' && !Array.isArray(map)) {
+      return new Map(Object.entries(map).map(([k, v]) => [String(k).toLowerCase(), v || null]));
+    }
+    const obj = Object.fromEntries([...liveUrlById].map(([k, v]) => [String(k).toLowerCase(), v || null]));
+    await knex('newsletter_sends').where({ id: send.id }).whereNull('event_url_snapshot')
+      .update({ event_url_snapshot: JSON.stringify(obj) });
+    return liveUrlById;
+  } catch (err) {
+    logger.warn(`[newsletter-event-clicks] event URL snapshot failed (live URLs used): ${err.message}`);
+    return liveUrlById;
+  }
 }
 
 /**
@@ -174,8 +222,10 @@ async function eventRedirectWithoutRecording({ engagementToken, eventId }, knex 
   if (!event) return CLICK_FALLBACK_URL;
   if (!newsletterClickBound()) return event.event_url || CLICK_FALLBACK_URL;
   try {
-    const { member } = await sendMembershipFor(engagementToken, eventId, knex);
-    return member ? (event.event_url || CLICK_FALLBACK_URL) : CLICK_FALLBACK_URL;
+    const { member, snapshotUrl } = await sendMembershipFor(engagementToken, eventId, knex);
+    if (!member) return CLICK_FALLBACK_URL;
+    if (snapshotUrl !== undefined) return snapshotUrl || CLICK_FALLBACK_URL;
+    return event.event_url || CLICK_FALLBACK_URL;
   } catch (err) {
     logger.warn(`[newsletter-event-clicks] membership check failed (homepage): ${err.message}`);
     return CLICK_FALLBACK_URL;
@@ -203,9 +253,12 @@ async function recordEventClick({ engagementToken, eventId, userAgent }, knex = 
   // verification still sends the reader to the event.
   let verifiedTarget = bound ? fallback : destination;
   try {
-    const { delivery, lockedIds, member } = await sendMembershipFor(engagementToken, eventId, knex);
+    const { delivery, lockedIds, member, snapshotUrl } = await sendMembershipFor(engagementToken, eventId, knex);
     if (!delivery) return { redirectUrl: bound ? fallback : destination, recorded: false };
-    const unboundTarget = bound && !member ? fallback : destination;
+    // Gate on: a member event goes to the URL the send carried (snapshot),
+    // or the live URL for a send made before snapshots existed.
+    const memberTarget = snapshotUrl !== undefined ? (snapshotUrl || fallback) : destination;
+    const unboundTarget = bound ? (member ? memberTarget : fallback) : destination;
     verifiedTarget = unboundTarget;
     const position = lockedIds.indexOf(String(eventId).toLowerCase());
     if (position < 0) {
@@ -224,7 +277,7 @@ async function recordEventClick({ engagementToken, eventId, userAgent }, knex = 
       })
       .onConflict(['send_id', 'event_id', 'engagement_token', 'kind'])
       .ignore();
-    return { redirectUrl: destination, recorded: true };
+    return { redirectUrl: unboundTarget, recorded: true };
   } catch (err) {
     logger.warn(`[newsletter-event-clicks] record failed (redirecting anyway): ${err.message}`);
     return { redirectUrl: verifiedTarget, recorded: false };
@@ -401,6 +454,7 @@ module.exports = {
   resolveEvclickFromBody,
   eventUrlMapForSend,
   eventRedirectWithoutRecording,
+  snapshotEventUrlsForSend,
   recordEventClick,
   rateAdjustment,
   computeLearnedAdjustments,
