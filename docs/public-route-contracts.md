@@ -3729,7 +3729,9 @@ the lineup, or a membership lookup that fails goes to the homepage
 membership was verified still sends the reader to the event. The per-IP
 over-budget path records nothing and applies the same membership check.
 The same gate stops iCal / calendar-RSS feed pulls from overwriting
-`event_url` on an approved or featured event. Gate off = the behaviour
+`event_url` on an approved or featured event or on any event a send
+carries (send history), and a non-uuid token goes home before any
+query. Gate off = the behaviour
 above this note, unchanged)
 — rate-limited, read-only for posts/rss,
 double-opt-in for subscribe (the response is unchanged and uniform; `source` is free text,

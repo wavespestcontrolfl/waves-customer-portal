@@ -131,6 +131,7 @@ function classifyClickAgent(userAgent) {
  * even when nothing was recorded (unknown token = untracked redirect).
  */
 const CLICK_FALLBACK_URL = 'https://www.wavespestcontrol.com/';
+const UUID_SHAPE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function newsletterClickBound() {
   const { newsletterClickBoundLive } = require('../config/feature-gates');
@@ -147,6 +148,8 @@ function newsletterClickBound() {
  */
 async function sendMembershipFor(engagementToken, eventId, knex = db) {
   const { parseLockedEventIds } = require('./newsletter-event-selection');
+  // Engagement tokens are uuids; any other shape is answered without a query.
+  if (!UUID_SHAPE_RE.test(String(engagementToken || ''))) return { delivery: null, lockedIds: [], member: false };
   const delivery = await knex('newsletter_send_deliveries')
     .where({ engagement_token: engagementToken })
     .first('id', 'send_id');
@@ -164,6 +167,9 @@ async function sendMembershipFor(engagementToken, eventId, knex = db) {
  * a real delivery whose send carries the event.
  */
 async function eventRedirectWithoutRecording({ engagementToken, eventId }, knex = db) {
+  // Over-budget path: with the gate on, a token that cannot be a delivery
+  // goes home before any lookup, so replayed junk costs no database work.
+  if (newsletterClickBound() && !UUID_SHAPE_RE.test(String(engagementToken || ''))) return CLICK_FALLBACK_URL;
   const event = await knex('events_raw').where({ id: eventId }).first('id', 'event_url');
   if (!event) return CLICK_FALLBACK_URL;
   if (!newsletterClickBound()) return event.event_url || CLICK_FALLBACK_URL;

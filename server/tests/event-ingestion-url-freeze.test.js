@@ -18,11 +18,12 @@ test('gate off: the pulled URL is merged as-is', () => {
   expect(eventUrlMergeValue('https://venue.example/new')).toBe('https://venue.example/new');
 });
 
-test('gate on: approved and featured rows keep their stored URL', () => {
+test('gate on: approved, featured or ever-sent rows keep their stored URL', () => {
   process.env.GATE_NEWSLETTER_CLICK_BOUND = 'true';
   const v = eventUrlMergeValue('https://venue.example/new');
   expect(v.__raw).toBe(true);
-  expect(v.sql).toContain("events_raw.admin_status IN ('approved', 'featured') THEN events_raw.event_url");
+  expect(v.sql).toContain("events_raw.admin_status IN ('approved', 'featured') OR EXISTS (");
+  expect(v.sql).toContain('THEN events_raw.event_url ELSE ? END');
   expect(v.bindings).toEqual(['https://venue.example/new']);
 });
 
