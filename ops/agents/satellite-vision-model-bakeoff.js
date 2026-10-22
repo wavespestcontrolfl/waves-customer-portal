@@ -231,7 +231,15 @@ function scoreField(stat, truth, got) {
 // One model read of one case folded into that model's tally.
 function scoreRead(m, c, r) {
   m.reads++; m.msTotal += r.ms;
-  if (!r.ok) { m.misses++; return; }
+  // A schema / API miss is a read with NO value for every field: each known
+  // field counts as unavailable, so a model that fails on the hard
+  // properties cannot keep a low MAE and a zero unavailable rate (Codex
+  // #6398 r15).
+  if (!r.ok) {
+    m.misses++;
+    for (const f of FIELDS) scoreField(m.fields[f], numericRead(c.known[f]), null);
+    return;
+  }
   for (const f of FIELDS) scoreField(m.fields[f], numericRead(c.known[f]), r.values[f]);
   if (typeof c.known.shrubDensity === 'string') {
     m.shrubDensityKnown++;
@@ -259,7 +267,7 @@ function printReport(cases, models, scores, args) {
   const fmt = (x, d = 0) => (x === null || x === undefined || Number.isNaN(x) ? '—' : Number(x).toFixed(d));
   console.log(`# Satellite vision bake-off — ${cases.length} properties × ${models.join(' vs ')}${args.repeat > 1 ? ` × ${args.repeat} repeats` : ''}`);
   console.log('');
-  console.log('Same five tiles, same scale context, same production prompt per model. Error is against the fixture\'s `known` values; a field with no known value is skipped. `unavailable` = known value but no model read (an optional field omitted or dropped as invalid) — a model that answers only the easy properties shows up there, not as a lower MAE.');
+  console.log('Same five tiles, same scale context, same production prompt per model. Error is against the fixture\'s `known` values; a field with no known value is skipped. `unavailable` = known value but no model read (an optional field omitted, dropped as invalid, or the whole read missed) — a model that answers only the easy properties shows up there, not as a lower MAE.');
   console.log('');
   for (const model of models) {
     const m = scores[model];

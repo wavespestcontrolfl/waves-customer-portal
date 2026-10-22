@@ -275,7 +275,8 @@ function summarize(rows) {
     const b = bySource[key] || (bySource[key] = { quotes: 0, sent: 0, accepted: 0, declined: 0, beds: [], monthlies: [], densityTrees: 0, review: 0 });
     b.quotes++;
     if (['pending', 'accepted', 'accepted_one_time', 'declined', 'expired'].includes(r.outcome)) b.sent++;
-    if (r.outcome === 'accepted') b.accepted++;
+    // Both acceptance modes are conversions (Codex #6398 r15).
+    if (r.outcome === 'accepted' || r.outcome === 'accepted_one_time') b.accepted++;
     if (r.outcome === 'declined') b.declined++;
     if (r.bedSqFt) b.beds.push(r.bedSqFt);
     if (r.monthly) b.monthlies.push(r.monthly);

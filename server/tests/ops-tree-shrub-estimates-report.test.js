@@ -136,13 +136,15 @@ describe('tree-shrub-estimates-report extraction', () => {
       { bedSource: 'explicit', outcome: 'pending', bedSqFt: 600, monthly: 36, treeSource: 'explicit', reviewReasons: [], regime: 'after_2026_10_21' },
       { bedSource: 'explicit', outcome: 'draft', bedSqFt: 500, monthly: 35, treeSource: 'explicit', reviewReasons: [], regime: 'after_2026_10_21' },
       { bedSource: 'lot_based', outcome: 'expired_unsent', bedSqFt: 2000, monthly: 55, treeSource: 'density_estimate', reviewReasons: [], regime: 'before_2026_10_21' },
+      // A one-time acceptance is a conversion too (Codex #6398 r15).
+      { bedSource: 'explicit', outcome: 'accepted_one_time', bedSqFt: 700, monthly: 38, treeSource: 'explicit', reviewReasons: [], regime: 'after_2026_10_21' },
     ];
     const s = summarize(rows);
     // The never-sent expiration counts as a quote, never as sent.
     expect(s.bySource.lot_based).toMatchObject({ quotes: 3, sent: 2, accepted: 1, declined: 1, densityTrees: 3, review: 1 });
-    expect(s.bySource.explicit).toMatchObject({ quotes: 2, sent: 1, accepted: 0 });
+    expect(s.bySource.explicit).toMatchObject({ quotes: 3, sent: 2, accepted: 1 });
     expect(median(s.bySource.lot_based.beds)).toBe(1800);
-    expect(s.treeSources).toEqual({ density_estimate: 3, explicit: 2 });
-    expect(s.regimes).toEqual({ before: 3, after: 2 });
+    expect(s.treeSources).toEqual({ density_estimate: 3, explicit: 3 });
+    expect(s.regimes).toEqual({ before: 3, after: 3 });
   });
 });

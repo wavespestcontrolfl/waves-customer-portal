@@ -32,4 +32,16 @@ describe('satellite-vision-model-bakeoff numericRead', () => {
     // No known value: neither scored nor counted.
     expect(out.m.fields.palms).toMatchObject({ known: 0, unavailable: 0, n: 0 });
   });
+
+  test('a failed read (schema / API miss) counts as unavailable on every known field, never as a clean skip (Codex #6398 r15)', () => {
+    const cases = [
+      { known: { hedgeLinearFt: 200, bedAreaSf: 900 }, reads: [{ model: 'm', ok: false, ms: 10, values: {} }] },
+      { known: { bedAreaSf: 1200 }, reads: [{ model: 'm', ok: true, ms: 10, values: { bedAreaSf: numericRead(1300), hedgeLinearFt: null, ornamentalTrees: null, palms: null } }] },
+    ];
+    const out = score(cases, ['m']);
+    expect(out.m).toMatchObject({ reads: 2, misses: 1 });
+    expect(out.m.fields.bedAreaSf).toMatchObject({ known: 2, unavailable: 1, n: 1, absErr: 100 });
+    expect(out.m.fields.hedgeLinearFt).toMatchObject({ known: 1, unavailable: 1, n: 0 });
+    expect(out.m.fields.palms).toMatchObject({ known: 0, unavailable: 0, n: 0 });
+  });
 });

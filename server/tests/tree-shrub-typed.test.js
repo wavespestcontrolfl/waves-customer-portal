@@ -18,7 +18,7 @@ const {
   getActivityIndicator,
 } = require('../services/service-report/activity-indicators');
 const { PROJECT_TYPES } = require('../services/project-types');
-const { validateTreeShrubTypedCompliance, deriveTreeShrubTreatments } = require('../services/tree-shrub-closeout');
+const { validateTreeShrubTypedCompliance, deriveTreeShrubTreatments, dropSprayGallonsWithoutLiquidApplication, hasLiquidApplication } = require('../services/tree-shrub-closeout');
 
 const BASE_VALUES = {
   plant_groups: 'Palms, Shrubs, Ornamentals',
@@ -150,6 +150,35 @@ describe('tree & shrub schema', () => {
 
   test('the schema slice no longer serves the retired next-step chip list', () => {
     expect(findingsSchemaForType('tree_shrub').nextStepChips).toBeUndefined();
+  });
+});
+
+describe('spray mix gallons need a liquid application (Codex #6398 r15)', () => {
+  const granular = { productId: 'g1', applicationMethod: 'granular_broadcast' };
+  const foliar = { productId: 'f1', applicationMethod: 'foliar_spray' };
+  const drench = { productId: 'd1', applicationMethod: 'soil_drench' };
+  test('the recorded method decides; the catalog default stands in when the input carries none', () => {
+    expect(hasLiquidApplication([granular], [{ id: 'g1', application_method: 'granular_broadcast' }])).toBe(false);
+    expect(hasLiquidApplication([granular, foliar], [])).toBe(true);
+    expect(hasLiquidApplication([drench], [])).toBe(true);
+    // Catalog default foliar, tech recorded nothing → liquid.
+    expect(hasLiquidApplication([{ productId: 'c1' }], [{ id: 'c1', application_method: 'foliar_spray' }])).toBe(true);
+    // Tech recorded granular over a catalog foliar default → not liquid.
+    expect(hasLiquidApplication([{ productId: 'c1', applicationMethod: 'granular_broadcast' }], [{ id: 'c1', application_method: 'foliar_spray' }])).toBe(false);
+    expect(hasLiquidApplication([], [])).toBe(false);
+  });
+  test('a granular-only visit drops spray_mix_gallons from the typed values in place; a sprayed visit keeps them', () => {
+    const granularOnly = { plant_groups: 'Shrubs', spray_mix_gallons: '5', hedge_linear_ft_serviced: '120' };
+    expect(dropSprayGallonsWithoutLiquidApplication(granularOnly, [granular], [])).toBe(granularOnly);
+    expect(granularOnly).toEqual({ plant_groups: 'Shrubs', hedge_linear_ft_serviced: '120' });
+    const sprayed = { plant_groups: 'Shrubs', spray_mix_gallons: '5' };
+    dropSprayGallonsWithoutLiquidApplication(sprayed, [granular, foliar], []);
+    expect(sprayed.spray_mix_gallons).toBe('5');
+    // No gallons submitted: nothing to do, no key invented.
+    const none = { plant_groups: 'Shrubs' };
+    dropSprayGallonsWithoutLiquidApplication(none, [], []);
+    expect(none).toEqual({ plant_groups: 'Shrubs' });
+    expect(dropSprayGallonsWithoutLiquidApplication(null, [], [])).toBeNull();
   });
 });
 

@@ -117,7 +117,7 @@ const { freezeTechFindings, rejectedTechFindingEdits } = require('./service-repo
 const { correctedMethod: correctedGranularMethod } = require('./service-report/report-cleanup-1020');
 const { freezeWatchItems, visitWatchMonth } = require('./tree-shrub-watch-items');
 const { freezePestCheck } = require('./tree-shrub-pest-check');
-const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance, deriveTreeShrubTreatments } = require('../services/tree-shrub-closeout');
+const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance, deriveTreeShrubTreatments, dropSprayGallonsWithoutLiquidApplication } = require('../services/tree-shrub-closeout');
 const { scoreAndStoreTreeShrubAssessment, storeTreeShrubAssessmentFromReview, treeShrubReviewSignature, treeShrubPhotosHash } = require('../services/tree-shrub-assessment');
 const { resolveCompletionProfileForScheduledService, resolveCompletionDeliveryPosture } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
@@ -5434,6 +5434,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // fields no longer exist on the T&S form, so derivation is the only
         // source of treatment claims on the primary path.)
       }
+      // Spray mix gallons exist only when a product was sprayed or drenched:
+      // the full form has no client gate, so a granular-only visit must not
+      // feed a spray volume into estimate-actuals (Codex #6398 r15). Same
+      // in-place mutation, so the snapshot built later agrees.
+      dropSprayGallonsWithoutLiquidApplication(treeShrubComplianceValues, products || [], typedProductRows);
       // The cross-field contradiction rules ran on the pre-derivation values —
       // re-run them so a derived 'Inspection only' can't sit beside an
       // applied-treatment detail field (e.g. pre-emergent marked Yes with
