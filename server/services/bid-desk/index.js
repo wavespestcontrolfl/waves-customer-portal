@@ -113,6 +113,8 @@ async function ingestEmail(email, { historical = false, manual = false } = {}) {
       const live = promote ? { ...existing, historical: false } : existing;
       const { patch, notifyAddendum } = attachPatch(live, parsed, kind);
       if (promote) patch.historical = false;
+      // A bid first filed from a plain email (no cross-thread key) takes the key of the first template email in it.
+      if (!existing.group_key && parsed.group_key) patch.group_key = parsed.group_key;
       // The backfill attaching OLD mail to a live bid records it but changes no date state: an old invite or
       // addendum must not flag a live bid (and pause its reminders) without anyone being told.
       if (historical && !existing.historical) {

@@ -462,6 +462,16 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect(rung('addendum')).toHaveLength(1);
     });
 
+    test('a bid filed from a plain email takes the key of the first template email in its thread', async () => {
+      const plain = await storeEmail({ from_address: 'pat.sample@fixture-gc.example', subject: 'RFP: Sample Ridge Residences', body_text: 'x' });
+      const { bidId } = await service.ingestEmail(plain);
+      expect((await bidRow(bidId)).group_key).toBeNull();
+      await service.ingestEmail(await storeEmail({ gmail_thread_id: plain.gmail_thread_id, received_at: new Date(NOW.getTime() - 30000) }));
+      expect((await bidRow(bidId)).group_key).toBe('fixture build co|sample ridge residences#pest control');
+      // A later template invite in another thread now joins the same bid.
+      expect(await service.ingestEmail(await storeEmail({ received_at: new Date(NOW.getTime() - 20000) }))).toMatchObject({ bidId, created: false });
+    });
+
     test('reminded bids do not fill the candidate list', async () => {
       const { bidId } = await service.ingestEmail(await storeEmail({ body_text: 'x', gmail_thread_id: `t-${randomUUID()}`, subject: `RFP ${randomUUID()}` }));
       await mockPg('bid_opportunities').where({ id: bidId }).update({ due_at: new Date(NOW.getTime() + 6 * DAY), due_confirmed: true, reminder_7d_sent_at: NOW });
