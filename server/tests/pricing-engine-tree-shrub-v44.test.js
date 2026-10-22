@@ -1594,6 +1594,13 @@ describe('Tree & Shrub margin target replays from the stamp (owner audit 2026-10
     expect(treeShrubKnobSignalForReplay({ result: { recurring: { services: [{ service: 'commercial_pest' }, { service: 'commercial_tree_shrub', pricingKnobs: { lotBedBasis: 'open_parcel' } }] } } })).toMatchObject({ lotBedBasis: 'open_parcel' });
     // No T&S line of either kind: nothing to inject.
     expect(treeShrubKnobSignalForReplay({ result: { recurring: { services: [{ service: 'commercial_pest' }] } } })).toBeNull();
+    // The CURRENT mapped commercial row beats a retained, older raw line —
+    // residential or commercial — exactly as tsMeta does (Codex #6398 r7).
+    const staleRaw = { engineResult: { lineItems: [{ service: 'tree_shrub', pricingKnobs: { lotBedBasis: 'gross_lot', marginTarget: 0.45 } }] } };
+    const revised = { ...staleRaw, result: { recurring: { services: [{ service: 'commercial_tree_shrub', pricingKnobs: { lotBedBasis: 'open_parcel' } }] } } };
+    expect(treeShrubKnobSignalForReplay(revised)).toMatchObject({ lotBedBasis: 'open_parcel' });
+    const staleCommercialRaw = { engineResult: { lineItems: [{ service: 'commercial_tree_shrub', pricingKnobs: { lotBedBasis: 'gross_lot' } }] }, result: revised.result };
+    expect(treeShrubKnobSignalForReplay(staleCommercialRaw)).toMatchObject({ lotBedBasis: 'open_parcel' });
   });
 
   test('the replay signal carries the stamped target and defaults an unstamped line to 0.45', () => {

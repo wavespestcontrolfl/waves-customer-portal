@@ -93,7 +93,12 @@ describe('tree-shrub-estimates-report extraction', () => {
   test('outcome and roll-up', () => {
     expect(outcomeOf({ status: 'sent', accepted_at: '2026-10-01' })).toBe('accepted');
     expect(outcomeOf({ status: 'accepted', accepted_at: '2026-10-01', accepted_service_mode: 'one_time' })).toBe('accepted_one_time');
-    expect(outcomeOf({ status: 'viewed', archived_at: '2026-10-01' })).toBe('expired');
+    expect(outcomeOf({ status: 'viewed', archived_at: '2026-10-01', sent_at: '2026-09-01' })).toBe('expired');
+    // A never-sent internal draft that aged out is NOT a sent quote (Codex #6398 r7).
+    expect(outcomeOf({ status: 'expired', disposition: 'expired_unsent', sent_at: '2026-09-01' })).toBe('expired_unsent');
+    expect(outcomeOf({ status: 'expired', disposition: null, sent_at: null })).toBe('expired_unsent');
+    expect(outcomeOf({ status: 'expired', disposition: 'expired_unviewed', sent_at: '2026-09-01' })).toBe('expired');
+    expect(outcomeOf({ status: 'viewed', archived_at: '2026-10-01', sent_at: null, disposition: null })).toBe('expired_unsent');
     expect(outcomeOf({ status: 'draft' })).toBe('draft');
     expect(outcomeOf({ status: 'sent', expires_at: '2099-01-01' })).toBe('pending');
     const rows = [
@@ -101,12 +106,14 @@ describe('tree-shrub-estimates-report extraction', () => {
       { bedSource: 'lot_based', outcome: 'declined', bedSqFt: 1350, monthly: 47, treeSource: 'density_estimate', reviewReasons: ['bed_area_at_or_above_8000'], regime: 'before_2026_10_21' },
       { bedSource: 'explicit', outcome: 'pending', bedSqFt: 600, monthly: 36, treeSource: 'explicit', reviewReasons: [], regime: 'after_2026_10_21' },
       { bedSource: 'explicit', outcome: 'draft', bedSqFt: 500, monthly: 35, treeSource: 'explicit', reviewReasons: [], regime: 'after_2026_10_21' },
+      { bedSource: 'lot_based', outcome: 'expired_unsent', bedSqFt: 2000, monthly: 55, treeSource: 'density_estimate', reviewReasons: [], regime: 'before_2026_10_21' },
     ];
     const s = summarize(rows);
-    expect(s.bySource.lot_based).toMatchObject({ quotes: 2, sent: 2, accepted: 1, declined: 1, densityTrees: 2, review: 1 });
+    // The never-sent expiration counts as a quote, never as sent.
+    expect(s.bySource.lot_based).toMatchObject({ quotes: 3, sent: 2, accepted: 1, declined: 1, densityTrees: 3, review: 1 });
     expect(s.bySource.explicit).toMatchObject({ quotes: 2, sent: 1, accepted: 0 });
-    expect(median(s.bySource.lot_based.beds)).toBe(1575);
-    expect(s.treeSources).toEqual({ density_estimate: 2, explicit: 2 });
-    expect(s.regimes).toEqual({ before: 2, after: 2 });
+    expect(median(s.bySource.lot_based.beds)).toBe(1800);
+    expect(s.treeSources).toEqual({ density_estimate: 3, explicit: 2 });
+    expect(s.regimes).toEqual({ before: 3, after: 2 });
   });
 });

@@ -26,7 +26,7 @@
  * with --show-addresses; the default output carries the fixture id.
  *
  *   railway run --service waves-customer-portal node ops/agents/satellite-vision-model-bakeoff.js \
- *     --fixture /tmp/ts-bakeoff.json [--models gemini-3.8-flash,gemini-4-argon] \
+ *     --fixture /tmp/ts-bakeoff.json --models <live GEMINI_VISION_BEST id>,gemini-4-argon \
  *     [--repeat 2] [--concurrency 2] [--ids p01,p02] [--limit N] [--json] [--show-addresses] \
  *     > /tmp/ts-bakeoff-results.md
  *
@@ -92,7 +92,7 @@ function parseArgs(argv) {
     args[spec.key] = spec.value(raw);
   }
   if (args.help) {
-    console.log('usage: node ops/agents/satellite-vision-model-bakeoff.js --fixture <file> [--models a,b] [--repeat N] [--concurrency N] [--ids a,b] [--limit N] [--json] [--show-addresses]');
+    console.log('usage: node ops/agents/satellite-vision-model-bakeoff.js --fixture <file> --models a,b [--repeat N] [--concurrency N] [--ids a,b] [--limit N] [--json] [--show-addresses]');
     process.exit(0);
   }
   if (!args.fixture) { console.error('--fixture is required'); process.exit(2); }
@@ -138,7 +138,10 @@ async function fetchTiles(lat, lng, mapsKey) {
   return out;
 }
 
+// null / undefined / blank is "not read", never a measured zero — Number(null)
+// is 0 (Codex #6398 r7; same guard as the production merge helper).
 function numericRead(value) {
+  if (value === null || value === undefined || String(value).trim() === '') return null;
   const n = Number(value);
   return Number.isFinite(n) && n >= 0 ? n : null;
 }
@@ -292,8 +295,16 @@ async function main() {
   if (!mapsKey) { console.error('GOOGLE_MAPS_API_KEY (or GOOGLE_API_KEY) is required for geocoding + tiles — run via: railway run --service waves-customer-portal node ops/agents/satellite-vision-model-bakeoff.js …'); process.exit(2); }
   if (!(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY)) { console.error('GEMINI_API_KEY (or GOOGLE_API_KEY) is required'); process.exit(2); }
 
-  const MODELS = require(path.join(REPO, 'server/config/models'));
-  const models = args.models || [MODELS.TEXT_POLICIES?.estimateVision?.primary?.model || 'gemini-3.8-flash', 'gemini-4-argon'];
+  // No pinned defaults: a model id baked in here outlives a provider rename
+  // or a registry swap and the script would silently benchmark a stale id
+  // (Codex #6398 r7). The operator names the candidates; the live lookup
+  // model is GEMINI_VISION_BEST in server/config/models.js.
+  if (!Array.isArray(args.models) || args.models.length < 2) {
+    const MODELS = require(path.join(REPO, 'server/config/models'));
+    console.error(`--models needs at least two model ids, e.g. --models ${MODELS.GEMINI_VISION_BEST},gemini-4-argon (the first is the live lookup model, GEMINI_VISION_BEST)`);
+    process.exit(2);
+  }
+  const models = args.models;
   // Requiring the route module loads the app graph; it is the only home of
   // the production prompt + scale context, and we never call its router.
   const lookup = require(path.join(REPO, 'server/routes/property-lookup-v2'))._private;

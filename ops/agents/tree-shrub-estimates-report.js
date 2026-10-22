@@ -86,10 +86,15 @@ function outcomeOf(row) {
   if (row.status === 'accepted' || row.accepted_at) {
     return row.accepted_service_mode === 'one_time' ? 'accepted_one_time' : 'accepted';
   }
-  if (row.status === 'expired') return 'expired';
+  // An internal draft that aged out was never a sent quote: the repository's
+  // disposition says so (expired_unsent), and a row with no disposition and
+  // no sent_at is the same thing. Counting it as sent inflates the
+  // denominator and depresses the accept rate (Codex #6398 r7).
+  const neverSent = row.disposition === 'expired_unsent' || (!row.disposition && !row.sent_at);
+  if (row.status === 'expired') return neverSent ? 'expired_unsent' : 'expired';
   if (row.status === 'declined') return 'declined';
   if (row.status === 'draft' || row.status === 'scheduled' || row.status === 'sending' || row.status === 'send_failed') return row.status;
-  if (row.archived_at) return 'expired';
+  if (row.archived_at) return neverSent ? 'expired_unsent' : 'expired';
   if (row.expires_at && new Date(row.expires_at) < new Date()) return 'expired';
   return 'pending';
 }
@@ -273,7 +278,7 @@ async function main() {
     // Timestamps are compared as instants (timestamptz vs an ISO instant), so
     // no ET wall-clock conversion is needed for a rolling window.
     const res = await c.query(
-      `SELECT id, customer_id, customer_name, customer_email, status, created_at, sent_at, accepted_at,
+      `SELECT id, customer_id, customer_name, customer_email, status, disposition, created_at, sent_at, accepted_at,
               declined_at, expires_at, archived_at, accepted_service_mode, estimate_data
          FROM estimates
         WHERE (created_at >= $1 OR sent_at >= $1)

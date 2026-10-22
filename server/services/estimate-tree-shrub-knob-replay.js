@@ -57,9 +57,10 @@ function treeShrubKnobSignalForReplay(estData = {}) {
   // basis (calculatePropertyProfile), so it is a T&S line for replay too;
   // Admin V2 keeps it only as a mapped recurring row (Codex #6398 r6).
   const mappedRows = Array.isArray(result?.recurring?.services) ? result.recurring.services : [];
+  const mappedCommercial = mappedRows.find((row) => (row?.service || '') === 'commercial_tree_shrub') || null;
   const tsLine = lineItems.find((li) => (li?.service || '') === 'tree_shrub')
     || lineItems.find((li) => (li?.service || '') === 'commercial_tree_shrub')
-    || mappedRows.find((row) => (row?.service || '') === 'commercial_tree_shrub');
+    || mappedCommercial;
   // Admin V2 persists ONLY the mapped legacy envelope (result.results.ts /
   // tsMeta) with no raw lineItems, so the mapped stamp is a first-class
   // source here — without it those quotes would replay off live knobs.
@@ -74,7 +75,12 @@ function treeShrubKnobSignalForReplay(estData = {}) {
   // authoritative columns the revision just wrote. Preferring it would
   // replay superseded knob values and charge a total the stored result
   // disagrees with.
-  const stamped = (tsMeta && tsMeta.pricingKnobs) || (tsLine && tsLine.pricingKnobs);
+  // The mapped commercial row's stamp wins over a retained raw line the same
+  // way tsMeta does: a revision rewrites result.recurring but can leave an
+  // older engineResult line behind (Codex #6398 r7).
+  const stamped = (tsMeta && tsMeta.pricingKnobs)
+    || (mappedCommercial && mappedCommercial.pricingKnobs)
+    || (tsLine && tsLine.pricingKnobs);
   if (!stamped || typeof stamped !== 'object') return { ...NEUTRAL_TREE_SHRUB_KNOBS };
   const pick = (key) => {
     const n = Number(stamped[key]);
