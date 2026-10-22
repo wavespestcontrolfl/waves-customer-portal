@@ -468,3 +468,65 @@ describe('stop with the card pin and a combined card session', () => {
     expect(seqRow().status).toBe('stopped');
   });
 });
+
+// A reminder claimed by a send in flight (touch_claimed_at): both orders of a control racing the send.
+describe('a control racing a send in flight', () => {
+  const ACTIVE = { sequenceId: SEQ, status: 'active', stepIndex: 0 };
+  const sequenceWrites = () => writes.filter((w) => w.table === 'invoice_followup_sequences');
+
+  describe('the send claimed first: the bar’s pin refuses while it is in flight', () => {
+    beforeEach(() => { seqRow().touch_claimed_at = new Date(); });
+
+    test('pause is refused, nothing written', async () => {
+      expect(await Followups.pauseSequence(INV, { reason: 'x', approved: ACTIVE })).toEqual({ previewChanged: true });
+      // One conditional UPDATE that matched no row.
+      expect(sequenceWrites().every((w) => w.count === 0)).toBe(true);
+      expect(seqRow().status).toBe('active');
+      expect(seqRow().paused_reason).toBeUndefined();
+    });
+
+    test('stop is refused on the first look and on the locked row, before anything is read at Stripe', async () => {
+      tables.invoices[0].stripe_payment_intent_id = 'pi_combined';
+      expect(await Followups.stopSequence(INV, { reason: 'x', adminId: 'admin-1', approved: ACTIVE })).toEqual({ previewChanged: true });
+      // The claim lands between the first look and the lock.
+      seqRow().touch_claimed_at = null;
+      hooks.onSeqLock = () => { seqRow().touch_claimed_at = new Date(); };
+      expect(await Followups.stopSequence(INV, { reason: 'x', adminId: 'admin-1', approved: ACTIVE })).toEqual({ previewChanged: true });
+      expect(Stripe.retrievePaymentIntent).not.toHaveBeenCalled();
+      expect(sequenceWrites()).toEqual([]);
+    });
+
+    test('the page’s pause (no pin) still lands, as it always did', async () => {
+      expect(await Followups.pauseSequence(INV, { reason: 'x', adminId: 'admin-1' })).toBeUndefined();
+      expect(seqRow().status).toBe('paused');
+    });
+  });
+
+  describe('the control landed during the send: the send’s progression does not bring the row back', () => {
+    test('a pause during the send stays paused with no next time; the touch is still recorded', async () => {
+      sendCustomerMessage.mockImplementation(async () => {
+        Object.assign(seqRow(), { status: 'paused', paused_reason: 'paying Friday', next_touch_at: null });
+        return { sent: true, blocked: false, deliveryOutcome: 'accepted', providerMessageId: 'sms-1' };
+      });
+      const result = await sendNow({ approved: APPROVED, report: true });
+      expect(result.report.legs).toEqual({ sms: { state: 'sent' }, email: { state: 'sent' } });
+      expect(seqRow()).toMatchObject({ status: 'paused', paused_reason: 'paying Friday', next_touch_at: null, step_index: 1, touches_sent: 1 });
+      expect(seqRow().last_touch_at).toBeInstanceOf(Date);
+    });
+
+    test('a stop during the send stays stopped', async () => {
+      sendCustomerMessage.mockImplementation(async () => {
+        Object.assign(seqRow(), { status: 'stopped', stopped_reason: 'waived', next_touch_at: null });
+        return { sent: true, blocked: false, deliveryOutcome: 'accepted', providerMessageId: 'sms-1' };
+      });
+      await sendNow({ approved: APPROVED, report: true });
+      expect(seqRow()).toMatchObject({ status: 'stopped', stopped_reason: 'waived', next_touch_at: null, step_index: 1 });
+    });
+
+    test('with no race the row still returns to active with its next time', async () => {
+      await sendNow({ approved: APPROVED, report: true });
+      expect(seqRow()).toMatchObject({ status: 'active', step_index: 1, touches_sent: 1 });
+      expect(seqRow().next_touch_at).toBeInstanceOf(Date);
+    });
+  });
+});

@@ -2365,9 +2365,11 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
   // it still holds the row exactly as it claimed it: a release of the schedule lands every member (a new
   // step, or the schedule's pause), and a send outliving its claim TTL must not overwrite that landing.
   // (A release refuses while this claim is fresh: closeUnderLock's member-claim check.)
+  // The row returns to 'active' (or completes) only while it is still 'active' (the claim required it): a pause or stop that
+  // landed during the send is not overwritten. A write that matched nothing there still records the touch (step, count, time).
   const progressed = await db('invoice_followup_sequences').where({
     id: row.id,
-    ...(verificationOnly ? { touch_claimed_at: claimStamp, step_index: row.step_index, status: 'active' } : {}),
+    ...(verificationOnly ? { touch_claimed_at: claimStamp, step_index: row.step_index, status: 'active' } : { status: 'active' }),
   }).update({
     updated_at: db.fn.now(),
     touches_sent: row.touches_sent + 1,
@@ -2376,6 +2378,15 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
     next_touch_at: nextAt,
     status: nextAt ? 'active' : 'completed',
   });
+  if (!verificationOnly && progressed === 0) {
+    await db('invoice_followup_sequences').where({ id: row.id }).update({
+      updated_at: db.fn.now(),
+      touches_sent: row.touches_sent + 1,
+      step_index: nextIndex,
+      last_touch_at: freshDelivery ? new Date() : originalAt,
+    });
+    logger.warn(`[invoice-followups] sequence ${row.id} was paused or stopped during its send — the touch is recorded and its status is kept`);
+  }
   if (verificationOnly && !Number(progressed)) {
     logger.warn(`[invoice-followups] sequence ${row.id} not advanced after its verification nudge — the row changed under the send (a customer reminder schedule released it); its landing is kept`);
   }
@@ -2598,12 +2609,13 @@ async function handleAutopayFailure(customerId) {
 // approved (the Intelligence Bar's card pin only; the page passes none): { sequenceId, status, stepIndex }. The write is one
 // conditional UPDATE on exactly that reminder state, so a stop, resume or cron advance after the card changes nothing
 // ({ previewChanged: true }). The same pin is judged by resumeSequence and stopSequence under their row locks.
+// A reminder claimed by a send in flight (touch_claimed_at) never matches: the send will write its own progression.
 const matchesApprovedReminder = (seq, approved) => Boolean(seq) && String(seq.id) === String(approved.sequenceId)
-  && seq.status === approved.status && seq.step_index === approved.stepIndex;
+  && seq.status === approved.status && seq.step_index === approved.stepIndex && !seq.touch_claimed_at;
 
 async function pauseSequence(invoiceId, { reason, until, adminId, approved } = {}) {
   const query = db('invoice_followup_sequences').where({ invoice_id: invoiceId });
-  if (approved) query.where({ id: approved.sequenceId, status: approved.status, step_index: approved.stepIndex });
+  if (approved) query.where({ id: approved.sequenceId, status: approved.status, step_index: approved.stepIndex }).whereNull('touch_claimed_at');
   const changed = await query.update({
     updated_at: db.fn.now(),
     status: 'paused',
@@ -2897,7 +2909,7 @@ async function stopSequence(invoiceId, { reason, adminId, approved } = {}) {
   // first → setup's in-lock stopped-dunning re-check excludes the invoice.
   // The card's pin (approved: { sequenceId, status, stepIndex }; the page passes none): checked first, before anything is
   // released at Stripe, and again on the reminder row this transaction locks FOR UPDATE, before the stop is written.
-  if (approved && !matchesApprovedReminder(await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).first('id', 'status', 'step_index'), approved)) {
+  if (approved && !matchesApprovedReminder(await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).first('id', 'status', 'step_index', 'touch_claimed_at'), approved)) {
     return { previewChanged: true };
   }
   let previewChanged = false;
@@ -2925,7 +2937,7 @@ async function stopSequence(invoiceId, { reason, adminId, approved } = {}) {
     // The card's pin, judged on the reminder row locked FOR UPDATE BEFORE anything is read or released at Stripe: a mismatch
     // leaves the transaction with no write at all. Same lock order as the stop always had (combined locks, then this row).
     if (approved) {
-      const lockedSeq = await trx('invoice_followup_sequences').where({ invoice_id: invoiceId }).forUpdate().first('id', 'status', 'step_index');
+      const lockedSeq = await trx('invoice_followup_sequences').where({ invoice_id: invoiceId }).forUpdate().first('id', 'status', 'step_index', 'touch_claimed_at');
       if (!matchesApprovedReminder(lockedSeq, approved)) { previewChanged = true; return; }
     }
     // Re-read under the lock — a setup that committed while we waited may
@@ -2997,7 +3009,7 @@ async function stopSequence(invoiceId, { reason, adminId, approved } = {}) {
     const priorSeq = await trx('invoice_followup_sequences')
       .where({ invoice_id: invoiceId })
       .forUpdate()
-      .first('id', 'step_index', 'status', 'stopped_reason', 'stopped_by_admin_id');
+      .first('id', 'step_index', 'status', 'touch_claimed_at', 'stopped_reason', 'stopped_by_admin_id');
     if (approved && !matchesApprovedReminder(priorSeq, approved)) { previewChanged = true; return; }
     // A PLAN-owned stop is NOT preserved under a system stop (Codex #3493
     // r10): voidInvoice cancels the active plan in the same transaction, so
