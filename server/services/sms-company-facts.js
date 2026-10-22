@@ -1,6 +1,6 @@
 'use strict';
 // Owner-approved company facts for the texting agent (owner rulings
-// 2026-09-29/30; service knowledge added 2026-10-03; aftercare added 2026-10-09). Rendered as one COMPANY FACTS section in the per-draft
+// 2026-09-29/30; service knowledge added 2026-10-03; aftercare added 2026-10-09; answer-book rulings 2026-10-22). Rendered as one COMPANY FACTS section in the per-draft
 // facts block by sms-shadow-drafter.buildFactsBlock, ONLY while
 // GATE_SMS_REAL_ANSWERS is on (gate off: the facts block is byte-identical
 // to before). Because the verifier grounds a draft against that same block,
@@ -16,7 +16,7 @@ const { WAVES_BRAND_NAME, WAVES_ADDRESS_LINE } = require('../constants/business'
 const COMPANY_FACTS_HEADER = 'COMPANY FACTS (owner-approved; state these plainly):';
 
 const COMPANY_FACTS = Object.freeze([
-  'Recurring, one-time and re-service pest visits include an interior spray as well as the exterior. The only exception is a customer who does not want the inside done.',
+  'The first pest visit includes an inside spray. After that, the inside is up to the customer: we treat it at any visit they ask, at no extra charge.',
   'The customer does not need to be home for the exterior treatment. For the inside spray, someone needs to be home, or the customer leaves us access.',
   'Regular pest visits include the lanai and the pool cage.',
   'Wasps, mud daubers and hornet nests on the house are included on regular pest visits.',
@@ -26,7 +26,7 @@ const COMPANY_FACTS = Object.freeze([
   'Rain: a treatment needs to dry and bond to surfaces; after that it holds up to weather.',
   'Lawn program: fertilizer, weed control and insect control only. No mowing. Treatments follow a seasonal rotation. Never name product brands.',
   'Watering advice you may give: follow the county\'s watering days, water early in the morning, and water deeply and less often.',
-  `Paying: technicians accept cards at the visit, never cash. Checks are mailed to ${WAVES_BRAND_NAME}, ${WAVES_ADDRESS_LINE}.`,
+  `Paying: technicians do not take payment at the visit. Customers pay by the card or bank account on file, or by check, cash or Zelle through the office. For Zelle details, ask the office. Checks are mailed to ${WAVES_BRAND_NAME}, ${WAVES_ADDRESS_LINE}.`,
   // Service knowledge (owner-approved 2026-10-03; each line restates an earlier ruling).
   // Scoped to what holds for EVERY customer the line could reach (Codex #5723 r1): the
   // German roach cleanout runs 2-4 visits by severity; pay-after-first-visit is the
@@ -54,37 +54,66 @@ const COMPANY_FACTS = Object.freeze([
   'After a pest treatment it is normal to see some activity for up to two weeks as the treatment flushes pests out, and it fades as the products keep working. This is true of pest treatments only, not of other services. If it has not slowed down after two weeks, tell us.',
   'Drain flies are small, fuzzy, moth-shaped flies that rest on walls near sinks, tubs and showers. Their larvae live in the film inside the drain: scrubbing the drain and an enzyme drain cleaner fix that, a spray does not. Small flies hovering around houseplants are usually fungus gnats, a different insect. A photo tells them apart.',
   'On a lawn plan, insect control is part of the program. When a customer reports chinch bugs or other lawn insects, the technician checks at the next visit and treats where the technician confirms them and the product label allows.',
+  // Owner rulings 2026-10-21/22 (Waves AI answer book). Plain customer wording, no prices, no
+  // product brands. The roach line drops the word "guaranteed" (banned customer copy). Rain that washes off a treatment before it dries is deliberately NOT here:
+  // the owner ruled it earns no free return visit, and a return visit is the FREE RE-SERVICE
+  // fact's job, so no line promises one.
+  'After the second visit of a German roach cleanout, if live German roaches are still active, we treat again at no charge, as often as it takes.',
+  'Rodent trapping includes the setup visit and one trap check. More trap checks cost extra.',
+  'There is no long-term contract. A customer can cancel any time.',
+  'A customer who prepays the year and cancels within 90 days gets a refund for the visits not yet done. After 90 days, prepaid visits are not refunded.',
+  'We serve Manatee and Sarasota counties and Charlotte County except Punta Gorda, plus Ruskin, Apollo Beach, Sun City Center, Wimauma, Gibsonton and Riverview. We do not serve Punta Gorda, DeSoto County, Tampa, St. Petersburg or Lee County.',
+  'A WDO (termite) inspection report is emailed the same business day as the inspection.',
+  'We do not tent for termites. For drywood termites we treat the infested wood directly with spot treatment, a borate wood treatment or injected foam.',
+  'After a lawn visit, wait 24 hours to mow. Do not water for 24 hours unless the visit card says to water it in.',
+  'Weed control takes about 10 to 14 days to show, and some weeds need a second round. If there is no change after two weeks, tell us.',
+  'Product labels: every service report lists each product applied, and the office can email a product label or Safety Data Sheet on request.',
 ]);
+
+// Lines retired by a wording change (owner 2026-10-22), keyed by their index in COMPANY_FACTS.
+// A stored facts_block keeps the render it was drafted with, so the text each retired line had
+// is kept here, verbatim, to rebuild those earlier renders (PRIOR_COMPANY_FACTS_RENDERS below).
+const RETIRED_COMPANY_FACT_LINES = Object.freeze({
+  0: 'Recurring, one-time and re-service pest visits include an interior spray as well as the exterior. The only exception is a customer who does not want the inside done.',
+  10: `Paying: technicians accept cards at the visit, never cash. Checks are mailed to ${WAVES_BRAND_NAME}, ${WAVES_ADDRESS_LINE}.`,
+});
 
 // The static section: fixed owner-approved policy, identical on every draft
 // (the judge's sanitizer exempts exactly this text from its size budget).
 function renderCompanyFactsSection() {
   return renderCompanyFactsLines(COMPANY_FACTS.length);
 }
-function renderCompanyFactsLines(count) {
-  return `${COMPANY_FACTS_HEADER}\n${COMPANY_FACTS.slice(0, count).map((f) => `- ${f}`).join('\n')}\n`;
+// `retired`: true rebuilds an earlier render whose lines 0 and 10 still had the wording
+// RETIRED_COMPANY_FACT_LINES keeps; every other line is the first `count` of today's list.
+function renderCompanyFactsLines(count, { retired = false } = {}) {
+  const lines = COMPANY_FACTS.slice(0, count).map((f, i) => (retired && RETIRED_COMPANY_FACT_LINES[i]) || f);
+  return `${COMPANY_FACTS_HEADER}\n${lines.map((f) => `- ${f}`).join('\n')}\n`;
 }
 
 // ---- Earlier renders still stored in message_drafts.facts_block -----------
 //
-// Lines are only ever APPENDED to COMPANY_FACTS, so an earlier render is the
-// first N lines of today's list. A stored block keeps the render it was
-// drafted with, and the READERS of stored blocks (the nightly judge's size
-// exemption, the label-facts reader behind grounding and send-time rechecks)
-// must still recognize it (Codex #6197 r1 P0): otherwise a block drafted the
-// day before a facts change loses the exemption, the company section eats the
-// judge's prefix budget, and the calls/thread evidence falls off the end.
+// Lines are APPENDED to COMPANY_FACTS. A line whose wording changes is the one exception
+// (owner 2026-10-22): its old text moves to RETIRED_COMPANY_FACT_LINES and every earlier
+// render that carried it is listed with `retired: true`; those renders are the first N lines
+// of today's list with the retired wording put back. A stored block keeps the render it was drafted with, and the READERS
+// of stored blocks (the nightly judge's size exemption, the label-facts reader behind
+// grounding and send-time rechecks) must still recognize it (Codex #6197 r1 P0): otherwise a
+// block drafted the day before a facts change loses the exemption, the company section eats
+// the judge's prefix budget, and the calls/thread evidence falls off the end.
 // Each entry is pinned by the sha256 of its render (sms-company-facts.test.js),
 // so editing one of the first N lines fails CI instead of silently orphaning
 // stored blocks. The sealed-eval CONTRACT stays exact-current on purpose
-// (hasExactCompanyFacts): an old item must never grade the new identity.
+// (hasExactCompanyFacts): an old item must never grade the new identity. Any change to the
+// render also moves both prompt version numbers in sms-shadow-drafter.
 const PRIOR_COMPANY_FACTS_RENDERS = Object.freeze([
+  // 2026-10-09 aftercare lines (#6197): identities 9_m to 14_n, the last render with the old inside-spray and paying wording
+  { lines: 19, retired: true, sha256: '3a72b3d4acb47ca8f95cfe6ddb9aedf65c696f6cc3f60efb5999725bf7880577' },
   // 2026-10-03 service knowledge (#5723): identities 6_cflvp, 7_m, 8_m
-  { lines: 16, sha256: 'abed23421e2f7745d97d48a70e95a496f6636a411764cc02e43360d0d9a2e1e2' },
+  { lines: 16, retired: true, sha256: 'abed23421e2f7745d97d48a70e95a496f6636a411764cc02e43360d0d9a2e1e2' },
 ]);
 // Today's render first, then each earlier one, newest first.
 function knownCompanyFactsRenders() {
-  return [renderCompanyFactsSection(), ...PRIOR_COMPANY_FACTS_RENDERS.map((r) => renderCompanyFactsLines(r.lines))];
+  return [renderCompanyFactsSection(), ...PRIOR_COMPANY_FACTS_RENDERS.map((r) => renderCompanyFactsLines(r.lines, r))];
 }
 
 // ---- Trusted presence check (sealed-eval compatibility) -----------------
@@ -154,6 +183,7 @@ module.exports = {
   hasExactLabelFacts,
   exactLabelFactsSection,
   COMPANY_FACTS,
+  RETIRED_COMPANY_FACT_LINES,
   COMPANY_FACTS_HEADER,
   renderCompanyFactsSection,
   PRIOR_COMPANY_FACTS_RENDERS,

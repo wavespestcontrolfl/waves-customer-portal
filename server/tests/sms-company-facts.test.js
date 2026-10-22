@@ -75,8 +75,8 @@ describe('gate on', () => {
   test('each owner ruling is present', () => {
     const all = COMPANY_FACTS.join('\n');
     for (const needle of [
-      'interior spray', 'lanai and the pool cage', 'mud daubers', 'honeybees', 'rodent trapping only',
-      'Sundays and holidays', 'dry and bond', 'No mowing', 'watering days', 'never cash',
+      'inside spray', 'lanai and the pool cage', 'mud daubers', 'honeybees', 'rodent trapping only',
+      'Sundays and holidays', 'dry and bond', 'No mowing', 'watering days', 'do not take payment at the visit',
       WAVES_ADDRESS_LINE,
     ]) expect(all).toContain(needle);
   });
@@ -92,8 +92,8 @@ describe('gate on', () => {
 
   test('prompt version is bumped, distinguishable, and fits the column', () => {
     // '_cf' = COMPANY FACTS, '_cfl' = + LABEL FACTS (PR #5416), '_cflv' = + VISIT STATUS & OPEN LOOPS (PR #5499), 'cflvp' = + PAYMENT FACTS (PR #5331), numeric token 5 = FREE RE-SERVICE (PR #5336) + a fresh identity above PR #5334's 3 (LIVE ETA) and #5416's 3_cfl (4 was the pre-contract claim checker, never merged); '7_m' (#5610) = the compact scheme: number 6 + one cumulative key 'm' (+ MISSED VISIT).
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers13_n');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers13_n');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers15_n');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers15_n');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers_cf');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers2');
@@ -115,7 +115,7 @@ describe('service knowledge (owner-approved 2026-10-03)', () => {
       'Arrival windows are two hours and start on the hour.',
       'WaveGuard tiers (Bronze, Silver, Gold, Platinum) depend on how many qualifying recurring services a customer has.',
     ]) expect(section).toContain(`\n- ${line}\n`);
-    expect(COMPANY_FACTS).toHaveLength(19);
+    expect(COMPANY_FACTS).toHaveLength(29);
   });
   test('aftercare lines (owner-delegated 2026-10-09) are in the section, word for word, and promise no visit', () => {
     const section = renderCompanyFactsSection();
@@ -137,11 +137,58 @@ describe('service knowledge (owner-approved 2026-10-03)', () => {
     expect(aftercare[2]).toMatch(/where the technician confirms them/);
     // the whole section must stay inside the judge's cap for it, with room to spare, or its tail is cut
     const { _test: judgeTest } = require('../services/sms-shadow-judge');
-    expect(judgeTest.COMPANY_FACTS_JUDGE_CAP).toBe(4000);
+    expect(judgeTest.COMPANY_FACTS_JUDGE_CAP).toBe(6000);
     expect(section.length).toBeLessThan(judgeTest.COMPANY_FACTS_JUDGE_CAP - 100);
   });
-  test('the two termite lines stay out until the perk is bookable and the warranty wording is right (Codex #5723 r3)', () => {
-    expect(COMPANY_FACTS.join(' ')).not.toMatch(/termite|WDO|warranty|guarantee/i);
+  test('the two held termite lines stay out until the perk is bookable and the warranty wording is right (Codex #5723 r3)', () => {
+    // 2026-10-22 added the WDO report and no-tenting lines; the member free inspection and the pre-slab warranty stay out
+    expect(COMPANY_FACTS.join(' ')).not.toMatch(/warranty|free (annual )?(termite )?inspection|pre-?slab/i);
+  });
+});
+
+// Owner rulings 2026-10-21/22 (Waves AI answer book).
+describe('answer-book facts (owner 2026-10-21/22)', () => {
+  const section = () => renderCompanyFactsSection();
+  const { RETIRED_COMPANY_FACT_LINES } = require('../services/sms-company-facts');
+  const NEW_LINES = [
+    'The first pest visit includes an inside spray. After that, the inside is up to the customer: we treat it at any visit they ask, at no extra charge.',
+    'After the second visit of a German roach cleanout, if live German roaches are still active, we treat again at no charge, as often as it takes.',
+    'Rodent trapping includes the setup visit and one trap check. More trap checks cost extra.',
+    'There is no long-term contract. A customer can cancel any time.',
+    'A customer who prepays the year and cancels within 90 days gets a refund for the visits not yet done. After 90 days, prepaid visits are not refunded.',
+    'We serve Manatee and Sarasota counties and Charlotte County except Punta Gorda, plus Ruskin, Apollo Beach, Sun City Center, Wimauma, Gibsonton and Riverview. We do not serve Punta Gorda, DeSoto County, Tampa, St. Petersburg or Lee County.',
+    'A WDO (termite) inspection report is emailed the same business day as the inspection.',
+    'We do not tent for termites. For drywood termites we treat the infested wood directly with spot treatment, a borate wood treatment or injected foam.',
+    'After a lawn visit, wait 24 hours to mow. Do not water for 24 hours unless the visit card says to water it in.',
+    'Weed control takes about 10 to 14 days to show, and some weeds need a second round. If there is no change after two weeks, tell us.',
+    'Product labels: every service report lists each product applied, and the office can email a product label or Safety Data Sheet on request.',
+  ];
+  test('every new or changed line is in the section, word for word', () => {
+    for (const line of NEW_LINES) expect(section()).toContain(`\n- ${line}\n`);
+  });
+  test('the payment line replaces the old card-only wording and keeps the mailing address', () => {
+    const pay = COMPANY_FACTS.find((f) => f.startsWith('Paying:'));
+    expect(pay).toContain('technicians do not take payment at the visit');
+    expect(pay).toContain('card or bank account on file, or by check, cash or Zelle through the office');
+    expect(pay).toContain(`Checks are mailed to`);
+    expect(pay).toContain(WAVES_ADDRESS_LINE);
+    expect(section()).not.toMatch(/accept cards at the visit|never cash/);
+    expect(section()).not.toMatch(/interior spray as well as the exterior/);
+    // no invented Zelle contact: no email address, phone number or handle in the section
+    expect(section()).not.toMatch(/@|\d{3}[-.\s]\d{4}/);
+  });
+  test('the retired wording is kept verbatim so earlier stored renders can be rebuilt', () => {
+    expect(Object.keys(RETIRED_COMPANY_FACT_LINES).sort()).toEqual(['0', '10']);
+    expect(RETIRED_COMPANY_FACT_LINES[0]).toMatch(/include an interior spray as well as the exterior/);
+    expect(RETIRED_COMPANY_FACT_LINES[10]).toMatch(/accept cards at the visit, never cash/);
+  });
+  test('no price, product brand, EPA claim, or rain return-visit promise is in the section', () => {
+    expect(COMPANY_FACTS.join('\n')).not.toMatch(/\$\d|\bEPA\b|\bsafe\b|Alpine|Termidor|Talstar|Taurus|Fusilade/i);
+    // rain that washes off a treatment earns no free return visit: no line promises one
+    expect(COMPANY_FACTS.filter((f) => /\brain/i.test(f))).toEqual([
+      'Rain: a treatment needs to dry and bond to surfaces; after that it holds up to weather.',
+    ]);
+    expect(COMPANY_FACTS.join('\n')).not.toMatch(/washe?s? off|rain.{0,60}(return|come back|re-?treat|free)/i);
   });
 });
 
@@ -156,7 +203,7 @@ describe('fact lines pass the drafter\'s own compliance screens', () => {
     for (const reply of [
       'Yes, we work Sundays and holidays, same as any other day.',
       'Rain is fine once the treatment has dried and bonded to surfaces; after that it holds up to weather.',
-      'Techs take cards at the visit, never cash. You can mail a check to Waves Pest Control, 13649 Luxe Ave #110, Bradenton, FL 34211.',
+      'Our techs do not take payment at the visit. You can pay by the card on file, or mail a check to Waves Pest Control, 13649 Luxe Ave #110, Bradenton, FL 34211.',
       'You and the friend you refer each get a $25 credit.',
     ]) expect(hasBannedCustomerCopy(reply)).toBe(false);
   });
@@ -349,13 +396,14 @@ describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
   const facts = require('../services/sms-company-facts');
   const { LABEL_FACTS_NONE_SECTION } = require('../services/sms-label-facts');
   const { exactLabelFactsSection: labelSectionOf } = facts;
-  const oldRender = facts.knownCompanyFactsRenders()[1];
+  const oldRender = facts.knownCompanyFactsRenders()[1]; // the 19-line render live from 2026-10-09 to 2026-10-22
+  const oldestRender = facts.knownCompanyFactsRenders()[2]; // the 16-line render of 2026-10-03
   // per-customer head long enough that the company section would not fit a raw 6,000-char prefix
   const head = `CUSTOMER: synthetic\n${Array.from({ length: 110 }, (_, n) => `SERVICE HISTORY ${n}: Quarterly Pest completed`).join('\n')}\n`;
   const tail = 'BILLING:\n- balance: none\nRECENT PHONE CALLS:\n- 2026-10-01: caller was told the tech arrives Thursday\nRECENT SMS THREAD:\n[CUSTOMER] THREAD_SENTINEL';
   const blockWith = (render) => `${head}${render}${LABEL_FACTS_NONE_SECTION}${tail}`;
 
-  test('every earlier render is the first N lines of today\'s list, pinned by its sha256', () => {
+  test('every earlier render is the first N lines of today\'s list (retired wording put back), pinned by its sha256', () => {
     expect(facts.PRIOR_COMPANY_FACTS_RENDERS.length).toBeGreaterThan(0);
     const renders = facts.knownCompanyFactsRenders();
     expect(renders[0]).toBe(facts.renderCompanyFactsSection());
@@ -363,7 +411,14 @@ describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
       expect(prior.lines).toBeLessThan(COMPANY_FACTS.length);
       expect(crypto.createHash('sha256').update(renders[i + 1]).digest('hex')).toBe(prior.sha256);
     });
-    expect(oldRender.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(16);
+    expect(oldRender.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(19);
+    expect(oldestRender.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(16);
+    // the earlier renders still carry the retired wording, today's render does not
+    for (const r of [oldRender, oldestRender]) {
+      expect(r).toContain('include an interior spray as well as the exterior');
+      expect(r).toContain('accept cards at the visit, never cash');
+    }
+    expect(facts.renderCompanyFactsSection()).not.toContain('accept cards at the visit');
   });
 
   test('the judge keeps the size exemption for a block with the earlier render: the thread survives', () => {
@@ -373,6 +428,7 @@ describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
     expect(out).toContain('THREAD_SENTINEL');
     expect(out).toContain('- 2026-10-01: caller was told the tech arrives Thursday');
     expect(out).toContain(oldRender.trim().split('\n').pop()); // the old section itself is still shown, whole
+    expect(sanitizeFactsForJudge(blockWith(oldestRender))).toContain('THREAD_SENTINEL'); // and so is the 16-line one
     // today's render behaves the same
     expect(sanitizeFactsForJudge(blockWith(facts.renderCompanyFactsSection()))).toContain('THREAD_SENTINEL');
     // an UNKNOWN company section gets no exemption (the exact match is still the rule)
@@ -383,9 +439,11 @@ describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
   test('the label-facts reader finds the section behind an earlier render; the sealed contract does not accept it', () => {
     const oldBlock = blockWith(oldRender);
     expect(labelSectionOf(oldBlock)).toBe(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''));
+    expect(labelSectionOf(blockWith(oldestRender))).toBe(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''));
     expect(labelSectionOf(blockWith(facts.renderCompanyFactsSection()))).toBe(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''));
     // contract: today's exact render only, so an old item never grades the new identity
     expect(hasExactCompanyFacts(oldBlock)).toBe(false);
+    expect(hasExactCompanyFacts(blockWith(oldestRender))).toBe(false);
     expect(facts.hasExactLabelFacts(oldBlock)).toBe(false);
     expect(hasExactCompanyFacts(blockWith(facts.renderCompanyFactsSection()))).toBe(true);
     expect(facts.hasExactLabelFacts(blockWith(facts.renderCompanyFactsSection()))).toBe(true);

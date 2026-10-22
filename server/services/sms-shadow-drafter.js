@@ -196,7 +196,11 @@ const REAL_ANSWERS_VERSION_FAMILY = 'house_voice_v12_real_answers';
 // (ask AND send the link), plus three ATTENTION RULES (answer every question; a hand-off
 // still answers what the facts cover; conflicting dates are confirmed, not picked). Prompt
 // text only: both numbers move ("13" / "14"), same fact key 'n'.
-const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}13_n`;
+// ANSWER BOOK FACTS (owner 2026-10-21/22): two COMPANY FACTS lines reworded (inside spray, paying)
+// and ten appended (roach guarantee, rodent trap checks, no contract, prepay refund, service area,
+// WDO report, no tenting, lawn mow/water wait, weed timing, product labels). The exact render changed,
+// so both numbers move ("15" / "16"); same fact key 'n', no new section.
+const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}15_n`;
 // NEXT OF SERIES (#6172, 2026-10-08): with GATE_SMS_OFFERS_SCHEDULER on, an unnamed
 // scheduling text from a customer whose upcoming visits are ONE recurring series gets
 // OPEN TIMES for the next one, where it used to get none. A behavior change, not a fact
@@ -206,7 +210,7 @@ const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}13_n`;
 // stamps REAL_ANSWERS_PROMPT_VERSION. The two differ ONLY by that rule, and the two
 // behaviors never pool in graduation, exam, pathology or judge evidence whichever way the
 // gate moves. A prompt or facts revision moves BOTH numbers.
-const NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}14_n`;
+const NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}16_n`;
 const SHADOW_STATUS = 'shadow';
 
 /**

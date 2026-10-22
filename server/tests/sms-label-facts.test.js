@@ -1273,6 +1273,21 @@ describe('r15: a verbatim COMPANY FACTS sentence answers a watering question; it
       }
     }
   });
+  // owner 2026-10-22: the lawn mow / water / weed-timing lines carry figures the clause rules read as label claims
+  test('a verbatim lawn-timing COMPANY FACTS sentence is not a label claim, but a spliced or altered one still is', () => {
+    const MOW = 'After a lawn visit, wait 24 hours to mow.';
+    const WEEDS = 'Weed control takes about 10 to 14 days to show, and some weeds need a second round.';
+    expect(COMPANY_FACTS.join(' ')).toContain(MOW);
+    expect(COMPANY_FACTS.join(' ')).toContain(WEEDS);
+    for (const inbound of ['When can I mow?', Q2, 'hello']) {
+      expect(guard(MOW, inbound)).toBe(false);
+      expect(guard(WEEDS, inbound)).toBe(false);
+    }
+    expect(guard('After a lawn visit, wait 25 hours to mow.', Q2)).toBe(true);
+    expect(guard(`${MOW} Pets can go out in 20 minutes.`, Q2)).toBe(true);
+    expect(guard('After a lawn visit, wait 24 hours to mow and then pets can go out in 10 minutes.', Q2)).toBe(true);
+    expect(guard('Wait 24 hours before pets go out.', Q2)).toBe(true);
+  });
   test('an answer-shaped add-on, a paraphrase or a modified copy is still held', () => {
     for (const reply of [
       'Yes, water whenever.', `Sure! ${WATERING}`, `Yes! ${WATERING}`, `${WATERING} Go for it.`, `${WATERING} Yes, they can.`, `Go for it. ${WATERING}`,
@@ -2729,12 +2744,12 @@ describe('prompt rules and hand-off narrowing', () => {
   test('prompt version: cumulative cflvp (LABEL + VISIT STATUS & OPEN LOOPS + PAYMENT FACTS), prefix kept, fits the column with all four tags', () => {
     process.env[GATE] = 'true';
     // #5331 (payment facts) minted 5_cflvp; #5610 (missed visit) the compact '7_m' (one cumulative key, LABEL FACTS included)
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers13_n');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers13_n');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers15_n');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers15_n');
     expect(REAL_ANSWERS_PROMPT_VERSION.startsWith(require('../services/sms-shadow-drafter').REAL_ANSWERS_VERSION_FAMILY)).toBe(true); // gratitude discovery LIKE 'family%'
     for (const c of REAL_ANSWERS_HANDOFF_CATEGORIES) process.env[c.gate] = 'true';
     const all = currentPromptVersion();
-    expect(all).toBe('house_voice_v12_real_answers13_n+bclm');
+    expect(all).toBe('house_voice_v12_real_answers15_n+bclm');
     expect(all.length).toBeLessThanOrEqual(40);
   });
 });
@@ -2766,7 +2781,7 @@ describe('generateGroundedDraft — LABEL FACTS reach the facts block and the co
     const r = await generateGroundedDraft(args(client));
     expect(mockFetchLabelFacts).toHaveBeenCalledWith({ customerId: 'cust-1' });
     expect(r.factsBlock).toContain(`- ${RAIN3}`);
-    expect(r.promptVersion).toBe('house_voice_v12_real_answers13_n');
+    expect(r.promptVersion).toBe('house_voice_v12_real_answers15_n');
     expect(r.converged).toBe(true);
     expect(r.passes).toBe(1);
   });
@@ -2872,7 +2887,7 @@ describe('sealed-eval fact contract for the _cfl version', () => {
 
   test('every real gate-on facts block satisfies the live contract, with or without label facts', () => {
     process.env[GATE] = 'true';
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers13_n');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers15_n');
     for (const extras of [{}, { labelFacts: labelFacts([product({ rainfastMinutes: 180 })]) }]) {
       expect(itemCompatibleWith(buildFactsBlock(context, { now: NOW, ...extras }), currentPromptVersion())).toBe(true);
     }
