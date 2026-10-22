@@ -300,31 +300,44 @@ function nextVisitDateWords(nextVisit) {
  * labels when those blocks render, and a constant for the static labels. The
  * word-budget test holds this at 250 or less.
  */
-function leadWords(reportV2) {
-  const lead = (reportV2 && reportV2.lead) || null;
-  const banner = (reportV2 && reportV2.banner) || null;
-  const parts = [];
-  if (banner && Array.isArray(banner.lines)) parts.push(...banner.lines);
-  if (banner && banner.mowHold) parts.push(banner.mowHold.line);
+// The banner states the page draws as a hold (LawnReportV2.jsx BANNER_HOLD_STATES).
+const BANNER_HOLD_STATES = ['hold', 'hold_then_water_in'];
+
+// The banner lines the page shows, in order.
+function bannerParts(banner) {
+  if (!banner) return [];
+  const parts = Array.isArray(banner.lines) ? [...banner.lines] : [];
+  if (banner.mowHold) parts.push(banner.mowHold.line);
   // GATE_LAWN_WATERING_FORECAST live-view lines (the payload only carries them
   // on a live render of a water-in; PDF/static strip them before this runs).
   // The page prints the measured-rain note when it exists, else the forecast
-  // sentence: count the one that will be displayed (LawnWateringBanner).
-  if (banner && banner.state !== 'hold' && banner.state !== 'hold_then_water_in') {
-    const live = banner.observedRain && typeof banner.observedRain.line === 'string' && banner.observedRain.line
-      ? banner.observedRain.line : banner.forecastLine;
-    if (typeof live === 'string' && live) parts.push(live);
+  // sentence: count the one that will be displayed (LawnWateringBanner). A hold
+  // shows neither; a hold-then-water-in shows only the forecast sentence frozen
+  // for rain after the hold (GATE_LAWN_WATERING_TEXT_FORECAST).
+  if (banner.state !== 'hold') {
+    const radar = BANNER_HOLD_STATES.includes(banner.state) ? null : banner.observedRain?.line;
+    const live = [radar, banner.forecastLine].find((line) => typeof line === 'string' && line);
+    if (live) parts.push(live);
   }
   // GATE_LAWN_REPORT_CLARITY live-view sprinkler-setup invitation (water-in only).
-  if (banner && typeof banner.setupLine === 'string' && banner.setupLine) parts.push(banner.setupLine);
+  if (typeof banner.setupLine === 'string' && banner.setupLine) parts.push(banner.setupLine);
+  return parts;
+}
+
+// The section labels the page prints for the lead fields that have text.
+function leadLabelWords(lead) {
+  return (LEAD_FIELDS.sinceLast(lead).length ? SINCE_LAST_LABEL_WORDS : 0)
+    + (LEAD_FIELDS.whatToExpect(lead)[0] ? WHAT_TO_EXPECT_LABEL_WORDS : 0)
+    + (LEAD_FIELDS.watching(lead)[0] ? WATCHING_LABEL_WORDS : 0)
+    + (LEAD_FIELDS.techParagraph(lead)[0] ? TECH_PARAGRAPH_LABEL_WORDS : 0);
+}
+
+function leadWords(reportV2) {
+  const lead = (reportV2 && reportV2.lead) || null;
+  const parts = bannerParts((reportV2 && reportV2.banner) || null);
   if (lead) for (const strings of Object.values(LEAD_FIELDS)) parts.push(...strings(lead));
   const dateWords = lead ? nextVisitDateWords(reportV2.snapshot && reportV2.snapshot.nextVisit) : 0;
-  const labelWords = lead
-    ? (LEAD_FIELDS.sinceLast(lead).length ? SINCE_LAST_LABEL_WORDS : 0)
-      + (LEAD_FIELDS.whatToExpect(lead)[0] ? WHAT_TO_EXPECT_LABEL_WORDS : 0)
-      + (LEAD_FIELDS.watching(lead)[0] ? WATCHING_LABEL_WORDS : 0)
-      + (LEAD_FIELDS.techParagraph(lead)[0] ? TECH_PARAGRAPH_LABEL_WORDS : 0)
-    : 0;
+  const labelWords = lead ? leadLabelWords(lead) : 0;
   return parts.reduce((sum, part) => sum + countWords(part), 0) + dateWords + labelWords + STATIC_LABEL_WORDS;
 }
 

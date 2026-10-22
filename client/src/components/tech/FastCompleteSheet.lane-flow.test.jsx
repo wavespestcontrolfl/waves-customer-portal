@@ -291,13 +291,16 @@ describe('the lane record on the sheet', () => {
 });
 
 describe('what holds a lane visit\'s send', () => {
-  test('a product set to Perimeter spray by hand: the sheet can\'t trace a lane visit, so it says to use the Full form', async () => {
+  test('a product set to Perimeter spray by hand holds nothing: no trace is required, and the send goes', async () => {
     const request = makeRequest();
     await openSheet(request);
     addProduct('Temprid FX', '1', 'Perimeter spray');
     await generate();
-    expect(screen.getByText('Temprid FX is a perimeter spray and this visit can’t be traced here. Use the Full form.')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+    // owner 2026-10-22: no trace is required for any service, so an untraced perimeter spray holds nothing
+    expect(screen.queryByText(/is a perimeter spray and this visit can’t be traced here/)).toBeNull();
+    expect(screen.queryByText(/Use the Full form/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false);
+    // this visit can't be traced here, so no trace is offered either
     expect(screen.queryByRole('button', { name: 'Trace where we sprayed' })).toBeNull();
   });
 

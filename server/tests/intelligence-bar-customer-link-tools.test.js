@@ -70,9 +70,10 @@ describe('tool definitions', () => {
     expect(Object.keys(byName)).toEqual(['create_customer_link', 'send_autopay_setup_link']);
     expect(byName.create_customer_link._sideEffects).toBe(true);
     expect(byName.send_autopay_setup_link._sideEffects).toBe(true);
-    // No link-only mode from the bar: sms or email, and the description says where a link-only link lives.
-    expect(byName.send_autopay_setup_link.input_schema.properties.delivery.enum).toEqual(['sms', 'email']);
-    expect(byName.send_autopay_setup_link.description).toMatch(/link-only Auto Pay link .* stays on the Customers page/);
+    // No link-only mode from the bar: sms or email. "link" is accepted only so the call reaches its coded
+    // refusal (Codex #6371 r23); the description says where a link-only link lives.
+    expect(byName.send_autopay_setup_link.input_schema.properties.delivery.enum).toEqual(['sms', 'email', 'link']);
+    expect(byName.send_autopay_setup_link.description).toMatch(/can't make a link-only Auto Pay link .* from here yet/);
     expect(byName.send_autopay_setup_link.description).toMatch(/saved card .* billing change/);
     expect(byName.create_customer_link.input_schema.properties.kind.enum).toEqual([
       'reschedule', 'reservice', 'pay_balance', 'estimate', 'referral', 'consultation', 'appointment',
@@ -250,6 +251,14 @@ describe('send_autopay_setup_link', () => {
     expect(autopay.setupLinkIneligibility).not.toHaveBeenCalled();
   });
 
+  test('a link-only request is its own capability code, which the gap list records (Codex #6371 r21)', async () => {
+    const { _private: { recordableRefusalCode } } = require('../services/agent-gap-reports');
+    const refused = await run({ delivery: 'link' });
+    expect(refused).toMatchObject({ code: 'autopay_link_only_unsupported' });
+    expect(recordableRefusalCode(refused)).toBe('autopay_link_only_unsupported');
+    expect(autopay.setupLinkIneligibility).not.toHaveBeenCalled();
+  });
+
   test.each([
     ['autopay_already_active', 'This customer is already on Auto Pay'],
     ['autopay_paused', /already set up but paused/],
@@ -271,8 +280,8 @@ describe('send_autopay_setup_link', () => {
     autopay.findSavedMethodForAutoSecure.mockResolvedValue({ id: 'pm-1', stripe_payment_method_id: 'pm_synthetic' });
     for (const delivery of ['sms', 'email']) {
       const refused = await run({ delivery });
-      expect(refused).toMatchObject({ blocked: true, code: 'saved_method_available' });
-      expect(refused.error).toBe('This customer has a saved card on file. Enrolling it turns Auto Pay on for the account, which is a billing change the bar does not make — do it from the Customers page.');
+      expect(refused).toMatchObject({ blocked: true, code: 'by_owner_rule', rule: 'saved_method_available' });
+      expect(refused.error).toBe('This customer has a saved card on file. Enrolling it turns Auto Pay on for the account, a billing change the bar does not make. That enrollment stays on the Customers page by the owner\'s rule.');
     }
     expect(autopay.autopayDeliveryPreflight).not.toHaveBeenCalled();
     expect(autopay.requestAutopaySetupLink).not.toHaveBeenCalled();
@@ -392,7 +401,7 @@ describe('send_autopay_setup_link', () => {
 
   test('confirmed: a state that turned ineligible, got a saved card, or cannot deliver now is refused before the service', async () => {
     autopay.findSavedMethodForAutoSecure.mockResolvedValue({ id: 'pm-1' });
-    expect(await run({ confirmed: true, _verified_autopay_version: SMS_PIN })).toMatchObject({ blocked: true, code: 'saved_method_available' });
+    expect(await run({ confirmed: true, _verified_autopay_version: SMS_PIN })).toMatchObject({ blocked: true, code: 'by_owner_rule', rule: 'saved_method_available' });
     autopay.findSavedMethodForAutoSecure.mockResolvedValue(null);
     autopay.autopayDeliveryPreflight.mockResolvedValue({ ok: false, reason: 'email_opted_out' });
     expect(await run({ delivery: 'email', confirmed: true, _verified_autopay_version: EMAIL_PIN })).toMatchObject({ blocked: true, code: 'email_opted_out' });
@@ -519,7 +528,7 @@ describe('customerLinkSendRefusal (comms-tools)', () => {
       const { renderedTextForLinkCheck } = require('../services/intelligence-bar/email-tools');
       expect(renderedTextForLinkCheck(body).split(/\s+/)).toContain(`portal.wavespestcontrol.com/pay/${TOKEN}`);
       links.composerOnlyLinkPresence.mockResolvedValue({ present: true, kinds: ['portal_link'] });
-      expect(await customerLinkSendRefusal(renderedTextForLinkCheck(body), '', null, { phase: 'email' })).toMatchObject({ blocked: true, code: 'customer_link_composer_only' });
+      expect(await customerLinkSendRefusal(renderedTextForLinkCheck(body), '', null, { phase: 'email' })).toMatchObject({ blocked: true, code: 'email_link_identity_refused' });
     });
 
     test('a raw tab or newline left in an HTML reply body is dropped like the URL parser does, so the email path still surfaces the link', () => {
@@ -697,11 +706,11 @@ describe('customerLinkSendRefusal (comms-tools)', () => {
     expect(links.bearerLinkSendCheck).toHaveBeenCalledWith('Running 15 minutes late, sorry!', '9415550123', { trustedCustomerId: CUSTOMER_ID, usDestination: true });
   });
 
-  test('an Auto Pay setup link is refused toward the Customers page button / the composer', async () => {
+  test('an Auto Pay setup link is refused: the bar cannot send it, the composer verifies it', async () => {
     links.autopayLinkSendCheck.mockResolvedValue({ present: true, ok: true, tokens: ['tok'] });
     const refusal = await customerLinkSendRefusal('Set up Auto Pay here: portal.wavespestcontrol.com/secure/tok', '+19415550123', CUSTOMER_ID);
     expect(refusal).toMatchObject({ blocked: true, code: 'customer_link_composer_only' });
-    expect(refusal.error).toMatch(/Customers page Auto Pay button/);
+    expect(refusal.error).toMatch(/can't send it from here; the Auto Pay link is verified at send time/);
     expect(links.bearerLinkSendCheck).not.toHaveBeenCalled();
   });
 
@@ -749,7 +758,7 @@ describe('send_email_reply carries the same guard', () => {
     links.autopayLinkSendCheck.mockResolvedValue({ present: false });
     links.composerOnlyLinkPresence.mockResolvedValue({ present: true, kinds: ['appointment'] });
     const refused = await executeEmailTool('send_email_reply', { email_id: 'em-1', body: 'Your visit: portal.wavespestcontrol.com/appointment/abc' });
-    expect(refused).toMatchObject({ blocked: true, code: 'customer_link_composer_only' });
+    expect(refused).toMatchObject({ blocked: true, code: 'email_link_identity_refused' });
     expect(refused.error).toMatch(/email reply cannot carry a portal link/);
     expect(links.composerOnlyLinkPresence).toHaveBeenCalledWith(expect.stringContaining('portal.wavespestcontrol.com/appointment/abc'), { includeVerifyOnly: true });
     expect(links.bearerLinkSendCheck).not.toHaveBeenCalled();
@@ -807,7 +816,7 @@ describe('send_email_reply carries the same guard', () => {
     links.composerOnlyLinkPresence.mockClear();
     links.composerOnlyLinkPresence.mockResolvedValue({ present: true, kinds: ['receipt'] });
     const refused = await sendEmailReplyProposalRefusal({ email_id: 'em-1', body: `Receipt: https://evil.example/?next=https%3A%2F%2Fportal.wavespestcontrol.com%2Freceipt%2F${TOKEN}` });
-    expect(refused).toMatchObject({ blocked: true, code: 'customer_link_composer_only' });
+    expect(refused).toMatchObject({ blocked: true, code: 'email_link_identity_refused' });
     expect(links.composerOnlyLinkPresence).toHaveBeenCalledWith(expect.stringContaining(NESTED), { includeVerifyOnly: true });
     expect(links.bearerLinkSendCheck).not.toHaveBeenCalled();
 
@@ -933,7 +942,7 @@ describe('send_email_reply carries the same guard', () => {
     links.composerOnlyLinkPresence.mockClear();
     links.composerOnlyLinkPresence.mockResolvedValue({ present: true, kinds: ['receipt'] });
     const refused = await executeEmailTool('send_email_reply', { email_id: 'em-2', body: `Receipt: https://evil.example/?next=https%3A%2F%2Fportal.wavespestcontrol.com%2Freceipt%2F${TOKEN}` });
-    expect(refused).toMatchObject({ blocked: true, code: 'customer_link_composer_only' });
+    expect(refused).toMatchObject({ blocked: true, code: 'email_link_identity_refused' });
     expect(links.composerOnlyLinkPresence).toHaveBeenCalledWith(expect.stringMatching(new RegExp(` ${NESTED}(?: |$)`)), { includeVerifyOnly: true });
     expect(gmail.sendMessage).not.toHaveBeenCalled();
 

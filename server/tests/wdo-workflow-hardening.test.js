@@ -588,3 +588,117 @@ describe('signature ink check fails closed', () => {
     });
   });
 });
+
+describe('pre-treat final exterior fields: customer copy screen (GATE_PRETREAT_STICKER_REPORT)', () => {
+  const certificate = () => wdoProject({
+    project_type: 'pre_treatment_termite_certificate',
+    wdo_signature: null,
+    findings: { treatment_date: '2026-06-10', product_name: 'Termidor SC' },
+  });
+
+  test('PUT refuses a banned claim in a final exterior field (422 final_exterior_copy)', async () => {
+    const projects = chain({ first: jest.fn().mockResolvedValue(certificate()) });
+    mockTables({ projects });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ findings: { treatment_date: '2026-06-10', final_exterior_product: 'pet-safe Termidor' } }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(422);
+      expect(body.code).toBe('final_exterior_copy');
+      expect(body.field).toBe('final_exterior_product');
+    });
+    expect(projects.update).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a future date', () => new Date(Date.now() + 30 * 24 * 3600e3).toISOString().slice(0, 10)],
+    ['an impossible date', () => '2026-02-30'],
+    ['a non-date', () => 'next week'],
+    ['a date before the initial treatment', () => '2026-06-09'],
+  ])('PUT refuses %s as the final exterior date (422 final_exterior_date_invalid)', async (_label, value) => {
+    const projects = chain({ first: jest.fn().mockResolvedValue(certificate()) });
+    mockTables({ projects });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ findings: { treatment_date: '2026-06-10', final_exterior_date: value() } }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(422);
+      expect(body.code).toBe('final_exterior_date_invalid');
+    });
+    expect(projects.update).not.toHaveBeenCalled();
+  });
+
+  test('PUT moving the project date past a stored final exterior date 422s (legacy treatment_date dropped first)', async () => {
+    const projects = chain({
+      first: jest.fn().mockResolvedValue(wdoProject({
+        project_type: 'pre_treatment_termite_certificate',
+        wdo_signature: null,
+        project_date: '2026-06-01',
+        findings: { treatment_date: '2026-06-01', final_exterior_date: '2026-06-05' },
+      })),
+    });
+    mockTables({ projects });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project_date: '2026-06-08' }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(422);
+      expect(body.code).toBe('final_exterior_date_invalid');
+    });
+    expect(projects.update).not.toHaveBeenCalled();
+  });
+
+  test('PUT re-judges the final exterior date on the locked row (an overlapping save moved the project date)', async () => {
+    const snapshot = wdoProject({
+      project_type: 'pre_treatment_termite_certificate', wdo_signature: null,
+      project_date: '2026-06-01', findings: {},
+    });
+    const lockedRow = { ...snapshot, project_date: '2026-06-10' };
+    const projects = chain({
+      first: jest.fn().mockResolvedValueOnce(snapshot).mockResolvedValue(lockedRow),
+    });
+    mockTables({ projects });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ findings: { final_exterior_date: '2026-06-05' } }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(422);
+      expect(body.code).toBe('final_exterior_date_invalid');
+    });
+    expect(projects.update).not.toHaveBeenCalled();
+  });
+
+  test('PUT accepts plain product, ingredient and applicator values', async () => {
+    const projects = chain({ first: jest.fn().mockResolvedValue(certificate()) });
+    mockTables({ projects });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          findings: {
+            treatment_date: '2026-06-10',
+            final_exterior_date: '2026-06-10',
+            final_exterior_product: 'Termidor SC',
+            final_exterior_active_ingredient: 'Fipronil',
+            final_exterior_applicator_name: 'Alex Tester',
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+    });
+  });
+});
+

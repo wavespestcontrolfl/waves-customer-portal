@@ -150,17 +150,124 @@ const USER_AGENTS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0',
 ];
 
+// GATE_BACKLINK_SIGNUP_URL_GUARD (security audit run 2, 2026-10-22): the
+// queued URL and the model's signup_url are third-party-steered, so with the
+// gate on the browser is locked to the queued site the same way the citation
+// filler (seo/browser-form-filler.js) locks its browser: the site's host (and
+// its apex/www sibling) is resolved up front to verified public IPv4 and pinned
+// with --host-resolver-rules, a context-level route aborts every request to any
+// other host (redirects, sub-resources, popups), service workers are blocked
+// and WebSockets are closed. The model's signup_url must be one of the pinned
+// hosts. Gate off = navigation exactly as before.
+const DNS_HOST_RE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
+const DNS_LOOKUP_DEADLINE_MS = 5000;
+
+function withDeadline(promise, ms) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('dns_deadline')), ms); }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+// Discard port on loopback: nothing listens, so a proxied request fails.
+const DEAD_PROXY = 'http://127.0.0.1:9';
+
+function signupUrlGuardOn() {
+  const { backlinkSignupUrlGuardLive } = require('../../config/feature-gates');
+  return backlinkSignupUrlGuardLive();
+}
+
+function httpHostOf(rawUrl) {
+  let u;
+  try { u = new URL(String(rawUrl || '')); } catch { return ''; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
+  return u.hostname.toLowerCase();
+}
+
+/**
+ * Pin set for the queued site: { pinned: Set<host>, rules: 'MAP h ip,...' },
+ * or null when the URL is not http(s) or its host has no public IPv4.
+ */
+async function buildSignupPins(rawUrl, { resolveHostIps } = {}) {
+  const { _internals: filler } = require('../seo/browser-form-filler');
+  const { _internals: ssrf } = require('../seo/contact-finder');
+  const resolve = resolveHostIps || filler.resolvePublicIps;
+  const navHost = httpHostOf(rawUrl);
+  // Strict DNS-name grammar: these hosts are interpolated into Chromium's
+  // --host-resolver-rules and --proxy-bypass-list, which split on ; and ,
+  // and accept * wildcards, so anything outside letters/digits/hyphens and
+  // dots (IP literals included) is refused.
+  if (!navHost || !DNS_HOST_RE.test(navHost) || ssrf.isBlockedHostname(navHost)) return null;
+  const apex = navHost.replace(/^www\./, '');
+  const pinned = new Set();
+  const rules = [];
+  for (const h of new Set([navHost, apex, `www.${apex}`])) {
+    if (!DNS_HOST_RE.test(h)) continue;
+    // A resolver that never answers must not hold the queue: each lookup
+    // has a deadline and a timeout counts as "no public IPv4".
+    const ips = await withDeadline(resolve(h), DNS_LOOKUP_DEADLINE_MS).catch(() => []);
+    if (!ips || !ips.length) continue;
+    rules.push(`MAP ${h} ${ips[0]}`);
+    pinned.add(h);
+  }
+  if (!pinned.has(navHost)) return null;
+  return { pinned, rules: rules.join(',') };
+}
+
+// Redirect hops are followed inside Chromium without reaching context.route,
+// so the network layer is locked too: DNS for the pinned hosts is pinned, and
+// every other destination (literal IPs and loopback included, hence
+// <-loopback>, which removes Chromium's implicit loopback bypass) is sent to
+// a dead local proxy and fails to connect.
+function guardedLaunchArgs(pins) {
+  return [
+    `--host-resolver-rules=${pins.rules}`,
+    `--proxy-server=${DEAD_PROXY}`,
+    `--proxy-bypass-list=<-loopback>;${[...pins.pinned].join(';')}`,
+  ];
+}
+
+function signupRequestAllowed(rawUrl, pinned) {
+  const { _internals: filler } = require('../seo/browser-form-filler');
+  return filler.requestAllowed({ url: rawUrl, allowedHosts: pinned });
+}
+
 async function processSignup(queueItem) {
+  const urlGuard = signupUrlGuardOn();
+  let pins = null;
+  if (urlGuard) {
+    pins = await buildSignupPins(queueItem.url);
+    if (!pins) {
+      await db('backlink_agent_queue').where({ id: queueItem.id }).update({ status: 'failed', error_message: 'URL not allowed (not a public http(s) site)', updated_at: new Date() });
+      return { success: false, reason: 'url_not_allowed' };
+    }
+  }
+
   const browser = await chromium.launch({
     headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+    args: [
+      '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+      ...(pins ? guardedLaunchArgs(pins) : []),
+    ],
   });
 
   const context = await browser.newContext({
     userAgent: USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)],
     viewport: { width: 1280 + Math.floor(Math.random() * 100), height: 800 + Math.floor(Math.random() * 100) },
-    ...(process.env.PROXY_URL ? { proxy: { server: process.env.PROXY_URL } } : {}),
+    // With the guard on, the pinned resolver rules are the egress boundary, so
+    // no forward proxy (a proxy would do its own DNS) and no service workers
+    // (context.route does not see their requests).
+    ...(!pins && process.env.PROXY_URL ? { proxy: { server: process.env.PROXY_URL } } : {}),
+    ...(pins ? { serviceWorkers: 'block' } : {}),
   });
+
+  if (pins) {
+    await context.route('**/*', (route) => (
+      signupRequestAllowed(route.request().url(), pins.pinned) ? route.continue() : route.abort()
+    ));
+    await context.routeWebSocket('**/*', (ws) => { try { ws.close(); } catch { /* noop */ } });
+  }
 
   const page = await context.newPage();
 
@@ -169,6 +276,11 @@ async function processSignup(queueItem) {
 
     // Step 1: Navigate to the site
     await page.goto(queueItem.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    if (pins && !pins.pinned.has(httpHostOf(page.url()))) {
+      await db('backlink_agent_queue').where({ id: queueItem.id }).update({ status: 'failed', error_message: 'Site redirected off the allowed host', updated_at: new Date() });
+      await browser.close();
+      return { success: false, reason: 'redirected_off_host' };
+    }
     await page.waitForTimeout(2000);
 
     // Step 2: Screenshot and ask Claude to find signup
@@ -195,6 +307,11 @@ I need to create an account/profile on this site. Find the signup, register, or 
 
     // Step 3: Navigate to signup page
     if (signupInfo.signup_url) {
+      if (pins && !pins.pinned.has(httpHostOf(signupInfo.signup_url))) {
+        await db('backlink_agent_queue').where({ id: queueItem.id }).update({ status: 'failed', error_message: 'Signup URL not allowed (off-site or not public)', updated_at: new Date() });
+        await browser.close();
+        return { success: false, reason: 'signup_url_not_allowed' };
+      }
       await page.goto(signupInfo.signup_url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     } else if (signupInfo.signup_selector) {
       try {
@@ -378,3 +495,4 @@ async function processQueue(limit = 5) {
 }
 
 module.exports = { processSignup, processQueue, PROFILE };
+module.exports._internals = { buildSignupPins, signupRequestAllowed, httpHostOf, guardedLaunchArgs, DNS_HOST_RE };

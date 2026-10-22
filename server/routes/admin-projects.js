@@ -117,6 +117,84 @@ const PHOTO_PREFIX = 'project-photos/';
 // / pre-treat certificate) — a future date can't be attested, so create/edit
 // reject it instead of trusting the keyboard.
 const LEGAL_DOC_DATE_TYPES = new Set(['wdo_inspection', 'pre_treatment_termite_certificate']);
+
+// The pre-treat certificate's final-exterior fields are free text that the
+// customer notice prints (GATE_PRETREAT_STICKER_REPORT). The shared copy
+// screen runs here at write time: a claim ("pet-safe", "EPA-approved") or an
+// access code is refused, not stored. reports-public blanks the same keys at
+// egress, and the detail payload names them for the staff preview.
+const { failingFinalExteriorKeys } = require('../services/final-exterior-screen');
+// The final exterior date is a completed treatment on a legal document:
+// blank, or a real YYYY-MM-DD no later than today (ET), like project_date,
+// and never before the initial treatment (same day allowed).
+function finalExteriorDateProblem(value, initialDate) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return false;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (!match) return true;
+  const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+  if (date.toISOString().slice(0, 10) !== raw) return true;
+  if (raw > etDateString()) return true;
+  const initial = normalizeDateOnly(initialDate);
+  return Boolean(initial) && raw < initial;
+}
+
+// Staff-preview fields on the project detail (preview == public): whether
+// the certificate renders as the notice (GATE_PRETREAT_STICKER_REPORT), and
+// which stored final-exterior keys the public page blanks.
+function pretreatStickerPreviewFields(project) {
+  if (project?.project_type !== 'pre_treatment_termite_certificate') {
+    return { pretreat_sticker_report: false, final_exterior_screened_keys: [] };
+  }
+  return {
+    pretreat_sticker_report: isEnabled('pretreatStickerReport'),
+    final_exterior_screened_keys: failingFinalExteriorKeys(project.findings),
+  };
+}
+
+// Update-path check on what the save leaves stored: runs only when the
+// findings or the project date change, against `current` (the pre-lock
+// snapshot, then the locked row).
+function finalExteriorRejectionForUpdate(project, updates, current) {
+  if (updates.findings === undefined && updates.project_date === undefined) return null;
+  return finalExteriorRejection(
+    project.project_type,
+    updates.findings !== undefined ? updates.findings : current.findings,
+    updates.project_date !== undefined ? updates.project_date : current.project_date,
+  );
+}
+
+// Create-path checks on a legal document's dates, first failure wins: the
+// stored date can't be in the future, and the final exterior date must fit.
+function legalDocCreateRejection(projectType, projectDate, findings) {
+  if (LEGAL_DOC_DATE_TYPES.has(projectType) && projectDate > etDateString()) {
+    return {
+      error: `The inspection/treatment date can't be in the future (${projectDate}) — use the date the work was actually performed.`,
+      code: 'project_date_in_future',
+    };
+  }
+  return finalExteriorRejection(projectType, findings, projectDate);
+}
+
+// 422 body for a final-exterior field the certificate can't carry, or null.
+function finalExteriorRejection(projectType, rawFindings, projectDate) {
+  if (projectType !== 'pre_treatment_termite_certificate') return null;
+  const findings = normalizeFindings(rawFindings);
+  if (finalExteriorDateProblem(findings.final_exterior_date, findings.treatment_date || projectDate)) {
+    return {
+      error: 'The final exterior treatment date must be a real date between the initial treatment and today — enter it after the visit is done.',
+      code: 'final_exterior_date_invalid', field: 'final_exterior_date',
+    };
+  }
+  const [failingKey] = failingFinalExteriorKeys(findings);
+  if (failingKey) {
+    return {
+      error: 'The final exterior treatment fields print on the customer notice — remove the claim or code and save again.',
+      code: 'final_exterior_copy', field: failingKey,
+    };
+  }
+  return null;
+}
 // project_photos.caption is varchar(200): a longer caption would fail the
 // INSERT after the image is already in S3, stranding an orphan object and
 // blocking every Save retry. Clamp rather than reject — losing the tail of a
@@ -1577,6 +1655,7 @@ router.get('/:id', async (req, res, next) => {
           return Boolean(lastFiling?.s3_key && config.s3?.bucket)
             && !filingBinaryMayDiscloseFee(lastFiling);
         })(),
+        ...pretreatStickerPreviewFields(project),
         property_profile: propertyProfile,
         wdo_history: wdoHistory,
         wdo_applicator: wdoApplicator,
@@ -1756,12 +1835,10 @@ router.post('/', async (req, res, next) => {
     // inspection/treatment actually happened — a future date can't be attested.
     // A typo'd future date has already shipped on a signed prod filing
     // (2027-03-13 for a 2026 inspection), so reject rather than trust.
-    if (LEGAL_DOC_DATE_TYPES.has(project_type) && projectDate > etDateString()) {
-      return res.status(422).json({
-        error: `The inspection/treatment date can't be in the future (${projectDate}) — use the date the work was actually performed.`,
-        code: 'project_date_in_future',
-      });
-    }
+    // The final exterior date is judged against the date actually stored
+    // (resolved from the linked visit when the body omits it).
+    const createDateRejection = legalDocCreateRejection(project_type, projectDate, findings);
+    if (createDateRejection) return res.status(422).json(createDateRejection);
 
     // One visit, one report (#2717 server hardening): stale client caches
     // (week rows, continue snapshots) repeatedly re-offered the create
@@ -2261,6 +2338,11 @@ router.put('/:id', async (req, res, next) => {
     try {
       await db.transaction(async (trx) => {
         const locked = await lockProjectForPhotoMutation(project, trx, 'the edit', null);
+        // The final exterior fields are judged here, on the LOCKED row and
+        // after the legacy-date drop, so an overlapping save that moved the
+        // project date or the final exterior date can't slip past.
+        const lockedRejection = finalExteriorRejectionForUpdate(project, updates, locked || project);
+        if (lockedRejection) throw Object.assign(new Error(lockedRejection.error), { code: 'final_exterior_rejected', body: lockedRejection });
         await trx('projects').where({ id: req.params.id }).update({ ...updates, updated_at: db.fn.now() });
         if (updates.findings !== undefined || updates.project_date !== undefined) {
           const before = locked || project;
@@ -2277,6 +2359,7 @@ router.put('/:id', async (req, res, next) => {
       });
     } catch (e) {
       if (e.code === 'send_in_progress') return res.status(409).json({ error: e.message, code: e.code });
+      if (e.code === 'final_exterior_rejected') return res.status(422).json(e.body);
       throw e;
     }
     const updated = await db('projects').where({ id: req.params.id }).first();

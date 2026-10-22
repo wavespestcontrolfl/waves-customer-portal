@@ -50,11 +50,12 @@ function stopPlanningMinutes(stop) {
   return workDuration({ ...stop, planning_exempt: false }, DEFAULT_DURATION_MINUTES);
 }
 
-/** Total drive minutes for HQ -> ordered stops -> HQ, using the calibrated
+/** Total drive minutes for home -> ordered stops -> home, using the calibrated
  *  chain model (geo.js's driveMin) — a plain point-to-point sum, never a
- *  Google/traffic call. */
-function chainDriveMinutes(orderedGeos) {
-  const points = [HQ, ...(orderedGeos || []).filter(Boolean), HQ];
+ *  Google/traffic call. `home` is where the technician's day starts and ends
+ *  (GATE_TECH_START_POINTS: the tech's start point); omitted, the office. */
+function chainDriveMinutes(orderedGeos, home = HQ) {
+  const points = [home, ...(orderedGeos || []).filter(Boolean), home];
   let total = 0;
   for (let i = 0; i < points.length - 1; i += 1) total += driveMin(points[i], points[i + 1]);
   return total;
@@ -176,10 +177,13 @@ function chainWithVisit(sequence, visit) {
  * (DETOUR_CAP_MIN, 45 min) is calibrated on drive, and the mover's own
  * service minutes are identical for the current placement and every
  * candidate, so adding them there would only saturate that cap.
+ *
+ * `home` (default the office) is where the technician's day starts and ends:
+ * both ends of every chain, and the first/last neighbour of an end stop.
  */
-function routeCost(otherStops, visit) {
+function routeCost(otherStops, visit, home = HQ) {
   const sequence = physicalStops(otherStops);
-  const driveWithoutMinutes = chainDriveMinutes(sequence.map((s) => s.geo));
+  const driveWithoutMinutes = chainDriveMinutes(sequence.map((s) => s.geo), home);
   // Every other stop is on-site time, located or not.
   const otherServiceMinutes = sequence.reduce((sum, s) => sum + s.minutes, 0);
   const routeTimeWithoutMinutes = driveWithoutMinutes + otherServiceMinutes;
@@ -193,25 +197,25 @@ function routeCost(otherStops, visit) {
     };
   }
   const chain = chainWithVisit(sequence, visit);
-  const driveWithMinutes = chainDriveMinutes(chain.map((s) => s.geo));
+  const driveWithMinutes = chainDriveMinutes(chain.map((s) => s.geo), home);
   // The moving unit: the visit plus any co-located group members moving with it.
   const visitMinutes = stopPlanningMinutes(visit) + sumPlanningMinutes(visit.unitMembers);
   const routeTimeWithMinutes = driveWithMinutes + otherServiceMinutes + visitMinutes;
   const detourMinutes = Math.max(0, driveWithMinutes - driveWithoutMinutes);
   return {
     driveWithoutMinutes, driveWithMinutes, detourMinutes, routeTimeWithoutMinutes, routeTimeWithMinutes,
-    neighbours: neighboursOf(chain, visit),
+    neighbours: neighboursOf(chain, visit, home),
   };
 }
 
 // The located stops the van drives from and to around the visit in `chain`
-// (HQ at either end of the day): the three legs the detour is made of, so a
+// (the day's home at either end: the office, or the tech's start point): the three legs the detour is made of, so a
 // caller can price the same detour on another estimator (road-check.js).
-function neighboursOf(chain, visit) {
+function neighboursOf(chain, visit, home = HQ) {
   const located = chain.filter((s) => s.geo);
   const at = located.findIndex((s) => s.id === visit.id || (s.memberIds || []).includes(visit.id));
   if (at < 0) return null;
-  return { prev: (located[at - 1] || { geo: HQ }).geo, stop: located[at].geo, next: (located[at + 1] || { geo: HQ }).geo };
+  return { prev: (located[at - 1] || { geo: home }).geo, stop: located[at].geo, next: (located[at + 1] || { geo: home }).geo };
 }
 
 /**

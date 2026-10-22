@@ -45,6 +45,7 @@ const { flexCandidateRules } = require('./flex-tier');
 const { autoDispatchSharedModelLive } = require('../../config/feature-gates');
 const { isActiveRouteStop } = require('./overlap-predicate');
 const { routeCost, clusterShare } = require('./route-model');
+const { techStartPointsLive, techStartPoint, START_COLUMNS } = require('../scheduling/tech-start-point');
 const { ROAD_LEGS, roadLegsOf } = require('./road-check');
 const { occupiedRows, windowsOverlap } = require('../scheduling/occupancy');
 const { applyAssignable } = require('../technician-eligibility');
@@ -439,6 +440,48 @@ function movedSiblings(siblings, placement, cand) {
   });
 }
 
+// GATE_TECH_START_POINTS: where each technician's day starts and ends. One
+// batched read per run for the technicians not yet seen (ctx.startPoints is
+// the run's cache; without one it lives on the ctx). Gate off:
+// no read, and homeFor answers the office (HQ itself) for everyone.
+async function loadStartPoints(ctx, technicianIds) {
+  if (!techStartPointsLive()) return;
+  // The run's cache (index.js passes run.startPoints); a caller without one
+  // gets a cache on its own ctx, so the read still happens once per ctx.
+  const cache = ctx.startPoints || (ctx.startPoints = new Map());
+  const missing = [...new Set((technicianIds || []).filter(Boolean).map(String))].filter((id) => !cache.has(id));
+  if (!missing.length) return;
+  const rows = await ctx.db('technicians').whereIn('id', missing).select(['id', ...START_COLUMNS]);
+  for (const id of missing) cache.set(id, HQ);
+  for (const row of rows) cache.set(String(row.id), techStartPoint(row));
+}
+
+// Every technician's point, read BEFORE the slot search reads them itself: the
+// search (legacy path included) scores a destination from its own fresh read,
+// so the cache must hold that technician too, and must not be NEWER than the
+// search. An edit between the two reads leaves the cache older, which the
+// commit fence refuses; the reverse order would hide it. A technician already
+// cached keeps the older snapshot. Once per run (marked on the run's Map).
+async function loadAllStartPoints(ctx) {
+  if (!techStartPointsLive()) return;
+  const cache = ctx.startPoints || (ctx.startPoints = new Map());
+  if (cache.allLoaded) return;
+  const rows = await ctx.db('technicians').select(['id', ...START_COLUMNS]);
+  for (const row of rows) if (!cache.has(String(row.id))) cache.set(String(row.id), techStartPoint(row));
+  cache.allLoaded = true;
+}
+
+// The point a technician was scored from, as the run's cache holds it. Does
+// NOT read the live gate: the commit fence compares it with the live answer,
+// so a gate switched off after home-based scoring is caught there.
+function scoredStartPoint(ctx, technicianId) {
+  return (technicianId && ctx.startPoints && ctx.startPoints.get(String(technicianId))) || HQ;
+}
+
+function homeFor(ctx, technicianId) {
+  return techStartPointsLive() ? scoredStartPoint(ctx, technicianId) : HQ;
+}
+
 function slotTaken(placement, occupied) {
   if (!placement) return true;
   return placement.windows.some((w) => {
@@ -460,9 +503,9 @@ function candidateRouteOrder(service, cand) {
 // One surviving candidate's numbers on the shared model — the SAME
 // routeCost/clusterShare computeCurrentPlacement uses — over that tech-day's
 // active stops.
-function scoreOnSharedModel(service, geo, cand, stops, siblings, placement) {
+function scoreOnSharedModel(service, geo, cand, stops, siblings, placement, home = HQ) {
   const moved = movedSiblings(siblings, placement, cand);
-  const cost = routeCost(stops, serviceToRouteStop(service, geo, hhmmToMin(cand.start_time), moved, candidateRouteOrder(service, cand)));
+  const cost = routeCost(stops, serviceToRouteStop(service, geo, hhmmToMin(cand.start_time), moved, candidateRouteOrder(service, cand)), home);
   return {
     ...cand,
     detour_minutes: cost.detourMinutes,
@@ -490,6 +533,7 @@ async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx
     loadOccupiedSpansByDate(ctx.db, dates, excludeIds),
     loadDayStopRows(ctx.db, { technicianIds: candidates.map((c) => c.technician_id), dates, excludeIds }),
   ]);
+  await loadStartPoints(ctx, candidates.map((c) => c.technician_id));
   const stopsByTechDay = new Map();
   const kept = [];
   for (const cand of candidates) {
@@ -500,7 +544,7 @@ async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx
     }
     const key = `${cand.technician_id}|${cand.date}`;
     if (!stopsByTechDay.has(key)) stopsByTechDay.set(key, stopsForTechDay(dayStops, cand.technician_id, cand.date));
-    kept.push(scoreOnSharedModel(service, geo, cand, stopsByTechDay.get(key), siblings, placement));
+    kept.push(scoreOnSharedModel(service, geo, cand, stopsByTechDay.get(key), siblings, placement, homeFor(ctx, cand.technician_id)));
   }
   return kept;
 }
@@ -591,7 +635,8 @@ function violatesPreferredTime(startTime, prefs) {
 
 /**
  * Marginal drive minutes the visit adds to its CURRENT day's route, plus how
- * many stops share that day. HQ book-ends the day. Mirrors find-time's gap math.
+ * many stops share that day. The day's home book-ends it: the office, or the
+ * technician's start point (GATE_TECH_START_POINTS). Mirrors find-time's gap math.
  */
 async function computeCurrentPlacement(service, prefs, ctx) {
   const geo = resolveGeo(service);
@@ -621,10 +666,12 @@ async function computeCurrentPlacement(service, prefs, ctx) {
   }
 
   const myStart = hhmmToMin(service.window_start) ?? DAY_OPEN;
+  await loadStartPoints(ctx, [techId]);
+  const home = homeFor(ctx, techId);
   const anchors = [
-    { geo: HQ, startMin: DAY_OPEN, endMin: DAY_OPEN },
+    { geo: home, startMin: DAY_OPEN, endMin: DAY_OPEN },
     ...neighbors,
-    { geo: HQ, startMin: DAY_CLOSE, endMin: DAY_CLOSE },
+    { geo: home, startMin: DAY_CLOSE, endMin: DAY_CLOSE },
   ];
   let prev = anchors[0];
   let next = anchors[anchors.length - 1];
@@ -700,9 +747,10 @@ async function sharedModelCurrentPlacement(service, geo, ctx, dateStr) {
   const { excludeIds, siblings } = await groupContextFor(service, ctx);
   const dayTech = await resolveCurrentDayTech(ctx.db, service);
   const stops = await loadDayStops(ctx.db, { technicianId: dayTech, dateStr, excludeIds });
+  await loadStartPoints(ctx, [dayTech]);
   // The unit as it stands: every member at its stored window and route_order
   // (route-model's groupUnit sequences it, as a candidate's is).
-  const cost = geo ? routeCost(stops, serviceToRouteStop(service, geo, hhmmToMin(service.window_start) ?? DAY_OPEN, siblings)) : null;
+  const cost = geo ? routeCost(stops, serviceToRouteStop(service, geo, hhmmToMin(service.window_start) ?? DAY_OPEN, siblings), homeFor(ctx, dayTech)) : null;
   return {
     ...(cost ? { detour_minutes: cost.detourMinutes, total_drive_minutes: cost.driveWithMinutes, route_minutes: cost.routeTimeWithMinutes } : {}),
     stops_that_day: stops.length + 1,
@@ -883,6 +931,7 @@ async function seriesDatesInWindow(service, ctx, dateFrom, dateTo) {
 // is only ±tolerance days, so the full set is small; the re-fetch is rare (never
 // at current crew size) and only pays off in a dense window.
 async function everyFeasibleSlot(findTimeArgs, ctx) {
+  await loadAllStartPoints(ctx);
   let res = await findAvailableSlots({ ...findTimeArgs, topN: ctx.fetchCap || FETCH_CAP });
   let slots = (res && res.slots) || [];
   if (res && typeof res.total_feasible === 'number' && res.total_feasible > slots.length) {
@@ -924,6 +973,9 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
     dateTo,
     excludeServiceIds: await movingUnitIds(service, ctx),
     slotStepMinutes: 60, // stops are always on the hour — never 10:15 / 1:30 starts
+    // Each tech's day starts at their start point (GATE_TECH_START_POINTS;
+    // staff-only opt-in, never a public surface).
+    techStartPoints: true,
     // Owner closed days: an unreadable list must stop the search, not read as
     // "open" (owner 2026-10-09; find-time's default fails open for customers).
     strictBlackout: true,
@@ -983,6 +1035,6 @@ module.exports = {
   violatesPreferredTime,
   _internals: {
     hhmmToMin, weekdayOf, isSaturday, loadDayStops, loadDayStopRows, loadGroupContext,
-    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict, legacyCap, movingUnitIds, dropSlotsTheUnitCannotTake,
+    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict, loadStartPoints, loadAllStartPoints, homeFor, scoredStartPoint, legacyCap, movingUnitIds, dropSlotsTheUnitCannotTake,
   },
 };
