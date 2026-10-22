@@ -1035,9 +1035,13 @@ const MAKEUP_HOLDS = [
   // its new row; a person sorts the numbers before the visit moves.
   ['caller_number_disclaimed', ({ booking }) => booking.callbackHold === true],
   ['customer_not_matched', ({ call, customer }) => !call?.customer_id || String(call.customer_id) !== String(customer.id)],
-  ['caller_phone_not_on_file', ({ call, customer }) => {
-    const onFile = new Set(KNOWN_CALLER_PHONE_COLS.flatMap((col) => phoneMatchDigits(customer[col])));
-    return !phoneMatchDigits(counterpartPhone(call)).some((key) => onFile.has(key));
+  // Only the account's own phone authenticates a caller (relay-context.js
+  // AUTHENTICATING_PHONE_COL). The secondary and service-contact slots hold
+  // spouses, tenants and prior occupants: recognition, never authority to
+  // move the account holder's series.
+  ['caller_not_account_phone', ({ call, customer }) => {
+    const accountKeys = phoneMatchDigits(customer[require('./voice-agent/relay-context').AUTHENTICATING_PHONE_COL]);
+    return !phoneMatchDigits(counterpartPhone(call)).some((key) => accountKeys.includes(key));
   }],
   // A matching caller ID alone does not prove an INBOUND caller owns the
   // number: only a carrier-signed STIR/SHAKEN "A" attestation vouches for it

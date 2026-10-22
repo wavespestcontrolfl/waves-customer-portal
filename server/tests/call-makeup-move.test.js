@@ -301,9 +301,21 @@ describe('planMakeupMoveFromCall', () => {
   });
 
   test('identity: a caller on a number not on file, or an unmatched call, holds', () => {
-    expect(planMakeup(baseArgs({ call: call({ from_phone: '+15555550177' }) }))).toEqual(held('caller_phone_not_on_file'));
+    expect(planMakeup(baseArgs({ call: call({ from_phone: '+15555550177' }) }))).toEqual(held('caller_not_account_phone'));
     expect(planMakeup(baseArgs({ call: call({ customer_id: null }) }))).toEqual(held('customer_not_matched'));
     expect(planMakeup(baseArgs({ call: call({ customer_id: 'someone-else' }) }))).toEqual(held('customer_not_matched'));
+  });
+
+  test('only the account\'s own phone authorizes a move: a secondary or service-contact number (spouse, tenant, prior occupant) holds, even fully attested', () => {
+    const other = '+15555550188';
+    for (const col of ['secondary_phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone']) {
+      expect(planMakeup(baseArgs({ call: call({ from_phone: other }), customer: customer({ [col]: other }) }))).toEqual(held('caller_not_account_phone'));
+    }
+    // The same rule for an outbound call: the number we dialed must be the account's.
+    const dialedContact = call({ direction: 'outbound-api', from_phone: '+15555550100', to_phone: other, metadata: null });
+    expect(planMakeup(baseArgs({ call: dialedContact, customer: customer({ service_contact_phone: other }) }))).toEqual(held('caller_not_account_phone'));
+    // Formatting never matters: the account phone stored with punctuation still matches.
+    expect(planMakeup(baseArgs({ customer: customer({ phone: '(555) 555-0101' }) }))).toMatchObject({ action: 'apply' });
   });
 
   test('inferred speaker labels cannot authorize a move', () => {
