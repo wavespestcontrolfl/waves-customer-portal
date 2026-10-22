@@ -328,6 +328,11 @@ async function enrollCustomer({ templateKey, customer, dbh = db, commsLockMode =
   if (!steps.length) return { enrolled: false, reason: 'no steps' };
 
   const leadId = await enrollmentLeadIdFor({ templateKey, customer, normalizedEmail, context });
+  // Whose address this enrollment mails, when the enqueue resolved it to an
+  // on-location contact (project-email.js resolveProjectEmailRecipientForSend
+  // role): the step's dispatch-time contact recheck reads it back (codex
+  // #6363 r10 P1). Absent for the holder's and third-party addresses.
+  const recipientRole = require('./customer-contact').isServiceContactRole(context.recipientRole) ? String(context.recipientRole) : null;
 
   // Customer-linked enrollment mutations serialize with a concurrent
   // merge-undo (r21): the undo's active-enrollment absence probe runs
@@ -401,7 +406,7 @@ async function enrollCustomer({ templateKey, customer, dbh = db, commsLockMode =
         last_name: fresh.last_name || customer.last_name || null,
       };
     }
-    return enrollCustomerLocked({ conn, templateKey, customer: enrollTarget, normalizedEmail, steps, leadId });
+    return enrollCustomerLocked({ conn, templateKey, customer: enrollTarget, normalizedEmail, steps, leadId, recipientRole });
   };
   if (!customer.id) return runEnrollment(dbh);
   if (dbh.isTransaction) {
@@ -462,7 +467,7 @@ async function enrollmentLeadIdFor({ templateKey, customer, normalizedEmail, con
   }
 }
 
-async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normalizedEmail, steps, leadId }) {
+async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normalizedEmail, steps, leadId, recipientRole = null }) {
   const existingQuery = dbh('automation_enrollments').where({ template_key: templateKey });
   if (customer.id) {
     existingQuery.where({ customer_id: customer.id });
@@ -509,9 +514,14 @@ async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normaliz
   // Table-qualified (Codex #4813 r4 P1): the same payload is the
   // ON CONFLICT ... DO UPDATE merge below, where a bare `metadata` is
   // ambiguous between the target row and EXCLUDED and fails the insert.
-  reactivatePayload.metadata = leadId
-    ? dbh.raw("jsonb_set(COALESCE(automation_enrollments.metadata,'{}'::jsonb), '{lead_id}', ?::jsonb, true)", [JSON.stringify(leadId)])
-    : dbh.raw("COALESCE(automation_enrollments.metadata,'{}'::jsonb) - 'lead_id'");
+  // The recipient_role stamp (whose address this episode mails — codex
+  // #6363 r10 P1) is this episode's fact too: set when the enqueue resolved
+  // an on-location contact, dropped otherwise.
+  const stamps = { ...(leadId ? { lead_id: leadId } : {}), ...(recipientRole ? { recipient_role: recipientRole } : {}) };
+  reactivatePayload.metadata = dbh.raw(
+    "(COALESCE(automation_enrollments.metadata,'{}'::jsonb) - 'lead_id' - 'recipient_role') || ?::jsonb",
+    [JSON.stringify(stamps)],
+  );
   if (existing) {
     const [reactivated] = await dbh('automation_enrollments')
       .where({ id: existing.id })
@@ -529,7 +539,7 @@ async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normaliz
     status: 'active',
     current_step: 0,
     next_send_at: nextSendAt,
-    ...(leadId ? { metadata: JSON.stringify({ lead_id: leadId }) } : {}),
+    ...(Object.keys(stamps).length ? { metadata: JSON.stringify(stamps) } : {}),
   };
 
   let row;
@@ -657,6 +667,69 @@ async function resolveConsultationBlock(step, enrollment, recipient) {
   return buildConsultationEmailBlock({ leadId, recipientEmail: recipient });
 }
 
+// The address a step goes to: the enrollment's, unless it is the slot-1
+// on-location contact's and that contact has turned their email off since
+// enqueue (contact-notification-prefs.js rerouteForContactEmailOptOut) —
+// then the account holder's, or a blocked send + cancelled enrollment when
+// the holder has none. Test sends are never re-pointed.
+async function stepRecipientAfterContactOptOut(enrollment, step, testRecipient) {
+  const recipient = testRecipient || enrollment.email;
+  if (testRecipient || !enrollment.customer_id) return { recipient };
+  // Whose address the enrollment carries is the enqueue's stamp
+  // (metadata.recipient_role), never inferred from the address (codex
+  // #6363 r10 P1): an enrollment mailing a third party keeps its address.
+  const reroute = await require('./contact-notification-prefs')
+    .rerouteForContactEmailOptOut(enrollment.customer_id, recipient, { recipientRole: enrollment.metadata?.recipient_role || null });
+  if (!reroute.rerouted) return { recipient };
+  if (reroute.email) return { recipient: reroute.email };
+  const sendRow = await db('automation_step_sends').insert({
+    enrollment_id: enrollment.id, step_id: step.id, step_order: step.step_order, email: recipient, status: 'queued',
+  }).returning('*').then((rows) => rows[0]);
+  const blocked = await blockSendAndCancelEnrollment({ enrollment, sendId: sendRow.id,
+    reason: 'The on-location contact turned email off and the account holder has no email address', cancelReason: 'email_suppressed' });
+  return { blocked };
+}
+
+// The SAME contact recheck again at the FINAL provider boundary (codex #6363
+// r30 P2): stepRecipientAfterContactOptOut runs before the render, and a
+// contact who turns email off, or whom the holder removes, during the
+// delivery checks and SendGrid's own request preparation would still be
+// mailed. sendOne runs this after every one of its awaits, immediately
+// before the request; a changed answer throws CONTACT_RECIPIENT_CHANGED,
+// which sendStepLocked turns into a held step (nothing sent). An unreadable
+// row propagates the same way as the early check's. null for a test send or
+// an enrollment with no customer (nothing to re-resolve). The payment-failed
+// step rides the billing authority's own boundary check instead.
+const CONTACT_RECIPIENT_CHANGED = 'CONTACT_RECIPIENT_CHANGED';
+function contactRecipientBoundaryCheck(enrollment, recipient, testRecipient) {
+  if (testRecipient || !enrollment.customer_id) return null;
+  return async () => {
+    const again = await require('./contact-notification-prefs')
+      .rerouteForContactEmailOptOut(enrollment.customer_id, recipient, { recipientRole: enrollment.metadata?.recipient_role || null });
+    if (again.rerouted) {
+      throw Object.assign(new Error('the on-location contact\'s address or email choice changed before the provider handoff'), {
+        code: CONTACT_RECIPIENT_CHANGED, providerBoundaryBlocked: true,
+      });
+    }
+    return { ok: true };
+  };
+}
+
+// A non-billing step's provider request under that check. A step held there
+// sent nothing: its queued row goes and the step stays due — the next tick
+// re-resolves it (the holder, or a blocked send when the holder has no
+// address). Every other failure is the caller's as before.
+async function dispatchUnderContactBoundary({ dispatch, enrollment, step, recipient, testRecipient, sendId }) {
+  try {
+    return await dispatch(contactRecipientBoundaryCheck(enrollment, recipient, testRecipient));
+  } catch (err) {
+    if (err.code !== CONTACT_RECIPIENT_CHANGED) throw err;
+    logger.info(`[automation-runner] enrollment ${enrollment.id} step ${step.step_order} held at the provider boundary: ${err.message}`);
+    await db('automation_step_sends').where({ id: sendId }).del();
+    return { sent: false, deferred: true, reason: err.message };
+  }
+}
+
 async function sendStepLocked(enrollment, { testRecipient } = {}) {
   const enrollmentId = enrollment.id;
   const template = await db('automation_templates').where({ key: enrollment.template_key }).first();
@@ -688,7 +761,13 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
   const subject = substitute(step.subject || `(${template.name})`, personal);
   const asmGroupId = automationAsmGroupId(template);
   const fromEmail = normalizeAutomationFromEmail(step.from_email);
-  const recipient = testRecipient || enrollment.email;
+  // Dispatch-time recheck (codex #6363 r7 P1): an enrollment addressed to
+  // the slot-1 on-location contact follows that contact's email switch — off
+  // since enqueue means the step goes to the account holder, or is blocked
+  // when the holder has no address. Test sends are never re-pointed.
+  const routed = await stepRecipientAfterContactOptOut(enrollment, step, testRecipient);
+  if (routed.blocked) return routed.blocked;
+  const { recipient } = routed;
   const consultationBlock = await resolveConsultationBlock(step, enrollment, recipient);
   const { html, text } = renderAutomationStepContent({
     template,
@@ -739,7 +818,7 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
   try {
     const res = billingSend
       ? await sendPaymentFailedThroughBillingAuthority({ enrollment, template, recipient, sendId: sendRow.id, dispatch })
-      : await dispatch();
+      : await dispatchUnderContactBoundary({ dispatch, enrollment, step, recipient, testRecipient, sendId: sendRow.id });
     if (res?.sent === false) return res;
 
     await db('automation_step_sends').where({ id: sendRow.id }).update({

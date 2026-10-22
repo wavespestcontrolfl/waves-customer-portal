@@ -3,7 +3,7 @@ const logger = require('./logger');
 const db = require('../models/db');
 const EmailTemplateLibrary = require('./email-template-library');
 const {
-  getPrimaryContact, getServiceContact, getServiceContactSlots, slotWithheldFromReports,
+  getPrimaryContact, getServiceContact, getServiceContactSlots, slotWithheldFromReports, isServiceContactRole,
 } = require('./customer-contact');
 const {
   getProjectType,
@@ -152,10 +152,31 @@ function resolveProjectEmailRecipient(customer = {}, { applyReportRule = false }
   };
 }
 
+// The recipient a SEND uses: the rule above, then the slot-1 contact's own
+// email master switch (contact login, GATE_CONTACT_LOGIN —
+// contact-notification-prefs.js): a contact who turned their email off is
+// skipped for the account holder, prep guides and invoice-bearing reports
+// alike (codex #6363 r6 P1). Fail closed on an unreadable table (the holder
+// gets the mail). The sync resolver above stays the pre-send check and
+// preview the admin routes use.
+async function resolveProjectEmailRecipientForSend(customer = {}, opts = {}) {
+  const recipient = resolveProjectEmailRecipient(customer, opts);
+  if (!isServiceContactRole(recipient.role)) return recipient;
+  const declines = await require('./contact-notification-prefs')
+    .contactDeclinesChannel(customer.id, { phone: customer.service_contact_phone, role: recipient.role }, 'email');
+  if (!declines) return recipient;
+  const primary = getPrimaryContact(customer);
+  return {
+    email: isEmailLike(primary.email) ? cleanEmail(primary.email) : '',
+    name: clean(primary.name) || clean(customer.first_name),
+    role: primary.role || 'primary',
+  };
+}
+
 // The recipient a report send uses: the explicit override (a report copy,
 // the payer or billing contact) or the customer recipient under the rule.
 function reportRecipient(customer, explicitRecipient) {
-  return explicitRecipient || resolveProjectEmailRecipient(customer, { applyReportRule: true });
+  return explicitRecipient || resolveProjectEmailRecipientForSend(customer, { applyReportRule: true });
 }
 
 function resolvePortalInviteRecipient(customer = {}) {
@@ -230,10 +251,11 @@ async function sendProjectTemplate({
   recipient: explicitRecipient = null,
   attachments = [],
 }) {
-  const recipient = explicitRecipient || resolveProjectEmailRecipient(customer);
+  const recipient = explicitRecipient || await resolveProjectEmailRecipientForSend(customer);
   if (!isEmailLike(recipient.email)) {
     return { ok: false, skipped: true, reason: 'missing_email' };
   }
+  const customerId = customer?.id || project?.customer_id || null;
 
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
@@ -241,13 +263,31 @@ async function sendProjectTemplate({
       to: recipient.email,
       payload,
       recipientType: 'customer',
-      recipientId: customer?.id || project?.customer_id || null,
+      recipientId: customerId,
       triggerEventId: triggerEventId || `${templateKey}:${project?.id || customer?.id || 'manual'}`,
       idempotencyKey,
       categories,
       suppressionGroupKey,
       attachments,
+      // The contact's OWN email switch as of the provider handoff (codex
+      // #6363 r22 P2): the recipient resolved above, but a contact who turns
+      // email off while the library resolves the template, idempotency and
+      // suppression is not emailed. Address-wide, deny wins across the slots
+      // carrying the address; fails closed on an unreadable table; a
+      // recipient RESOLVED as a service contact must still occupy a slot
+      // (codex r26 security P2): one the holder removed in between is a
+      // former contact and is held. Only a recipient resolved AS a service
+      // contact is asked (codex r32 security P2): the holder's own address,
+      // a report copy, the payer and the billing contact are independently
+      // authorized recipients — a contact's switch must never veto the
+      // payer's invoice because the two share an address.
+      onQueued: async () => !isServiceContactRole(recipient.role)
+        || !(await require('./contact-notification-prefs').contactEmailDeclines(customerId, recipient.email, { requireSlot: true })),
     });
+    if (result?.aborted) {
+      logger.info(`[project-email] ${templateKey} for project ${project?.id || 'unknown'} held at the dispatch boundary — the contact declined email`);
+      return { ok: false, blocked: true, deduped: false, reason: 'contact_declined', messageId: null };
+    }
     return normalizeTemplateResult(result);
   } catch (err) {
     logger.error(`[project-email] ${templateKey} failed for project ${project?.id || 'unknown'}: ${err.message}`);
@@ -360,7 +400,8 @@ async function sendProjectReportReady({
   // resolution (service contact → primary) stays the customer recipient.
   recipient = null,
 } = {}) {
-  const payload = buildProjectPayload({ project, customer, reportUrl, recipient: reportRecipient(customer, recipient) });
+  const resolvedRecipient = await reportRecipient(customer, recipient);
+  const payload = buildProjectPayload({ project, customer, reportUrl, recipient: resolvedRecipient });
   const suffix = isResend ? `resend:${new Date().toISOString()}` : `initial:${safeKey(project?.report_token || project?.id)}`;
   return sendProjectTemplate({
     project,
@@ -372,7 +413,7 @@ async function sendProjectReportReady({
     triggerEventId: `project_report.ready:${project?.id || 'unknown'}`,
     idempotencyKey: idempotencyKey || `project.report_ready:${project?.id || 'unknown'}:${suffix}`,
     attachments,
-    recipient: reportRecipient(customer, recipient),
+    recipient: resolvedRecipient,
   });
 }
 
@@ -404,8 +445,9 @@ async function sendProjectReportWithInvoice({
   const attachmentsNote = reportAttached
     ? 'The official report PDF and your invoice PDF are attached to this email.'
     : 'Your invoice PDF is attached, and you can view your full report online using the link below.';
+  const resolvedRecipient = await reportRecipient(customer, recipient);
   const payload = {
-    ...buildProjectPayload({ project, customer, reportUrl, recipient: reportRecipient(customer, recipient) }),
+    ...buildProjectPayload({ project, customer, reportUrl, recipient: resolvedRecipient }),
     invoice_url: payUrl || '',
     pay_url: payUrl || '',
     invoice_number: clean(invoice?.invoice_number),
@@ -425,7 +467,7 @@ async function sendProjectReportWithInvoice({
     idempotencyKey: idempotencyKey
       || `project.report_with_invoice:${project?.id || 'unknown'}:${safeKey(invoice?.id || invoice?.invoice_number)}:${sendAttemptKey()}`,
     attachments,
-    recipient: reportRecipient(customer, recipient),
+    recipient: resolvedRecipient,
   });
 }
 
@@ -446,8 +488,9 @@ async function sendProjectInvoiceBeforeReport({
   // Explicit recipient override (payer AP inbox / billing-contact copy).
   recipient = null,
 } = {}) {
+  const resolvedRecipient = await reportRecipient(customer, recipient);
   const payload = {
-    ...buildProjectPayload({ project, customer, recipient: reportRecipient(customer, recipient) }),
+    ...buildProjectPayload({ project, customer, recipient: resolvedRecipient }),
     invoice_url: payUrl || '',
     pay_url: payUrl || '',
     invoice_number: clean(invoice?.invoice_number),
@@ -466,7 +509,7 @@ async function sendProjectInvoiceBeforeReport({
     idempotencyKey: idempotencyKey
       || `project.invoice_before_report:${project?.id || 'unknown'}:${safeKey(invoice?.id || invoice?.invoice_number)}:${sendAttemptKey()}`,
     attachments,
-    recipient: reportRecipient(customer, recipient),
+    recipient: resolvedRecipient,
   });
 }
 
@@ -484,7 +527,9 @@ async function sendPrepGuide({
     project.prep_token = await ensurePrepToken(project.id);
     await db('projects').where({ id: project.id }).update({ prep_template_key: resolvedTemplateKey });
   }
-  const payload = buildProjectPayload({ project, customer });
+  // Resolved once so the greeting names whoever the guide actually reaches.
+  const recipient = await resolveProjectEmailRecipientForSend(customer);
+  const payload = buildProjectPayload({ project, customer, recipient });
   const result = await sendProjectTemplate({
     project,
     customer,
@@ -494,6 +539,7 @@ async function sendPrepGuide({
     categories: ['project_prep', `project_type_${safeKey(project?.project_type)}`],
     triggerEventId: `project_prep.ready:${project?.id || 'unknown'}:${resolvedTemplateKey}`,
     idempotencyKey: idempotencyKey || `project.prep:${project?.id || 'unknown'}:${resolvedTemplateKey}:${sendAttemptKey()}`,
+    recipient,
   });
   if (result?.ok && project?.id) {
     // Confirmed-send marker: the token above is minted BEFORE the send, so
@@ -546,6 +592,7 @@ module.exports = {
   isPrepTemplateKey,
   prepTemplateForProjectType,
   resolveProjectEmailRecipient,
+  resolveProjectEmailRecipientForSend,
   resolvePortalInviteRecipient,
   sendProjectReportReady,
   sendProjectReportWithInvoice,

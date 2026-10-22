@@ -68,4 +68,42 @@ function executionOutcome(result) {
   return 'outcome_unknown';
 }
 
-module.exports = { isToolFailure, isPolicyRefusal, recordToolOutcome, executionOutcome };
+// A move that a locked recheck refuses by throwing (package visit 2 present, a
+// grouped or frozen visit) is a refusal, not a fault. The services throw an
+// UPPER_SNAKE code other callers rely on, which isPolicyRefusal reads as a fault
+// (it wants lowercase), with a message that sends the reader to another screen.
+// The bar maps the thrown error here into its own lowercase refusal and wording;
+// the service's code and text stay as they are.
+const THROWN_MOVE_REFUSALS = {
+  PACKAGE_CHILD_PRESENT: { code: 'package_visit_two_linked' },
+  VISIT_EDIT_SCHEDULE_UNSUPPORTED: {
+    code: 'grouped_visit_move_unsupported',
+    error: "This appointment is grouped with another service at the same stop, and the bar can't move one of them alone from here yet. Nothing was changed.",
+  },
+  VISIT_FROZEN_MOVE_UNSUPPORTED: {
+    code: 'frozen_visit_move_unsupported',
+    error: "This visit already has an issued link, records or a payment in progress, so the bar can't move it from here. Nothing was changed.",
+  },
+};
+
+// Frozen-visit reasons that are a wait, not a structural freeze: the visit is
+// being finalized, a completion is running, or a reminder send holds its lease.
+// A move retried in a moment works, so these are never a capability gap
+// (Codex #6371 r19). Structural reasons (an issued link, artifacts or records,
+// a packet, a payment attempt) keep frozen_visit_move_unsupported.
+const TRANSIENT_FROZEN_REASONS = new Set(['visit_not_open', 'completion_in_flight', 'reminder_in_flight']);
+
+// The bar refusal for a thrown move error, or null when it is not one of them.
+function moveRefusalFromThrown(err) {
+  const mapped = err && THROWN_MOVE_REFUSALS[err.code];
+  if (!mapped) return null;
+  // A frozen-state check that could not READ the visit fails closed with the
+  // same code; that is an outage, not a policy refusal, so it stays a fault.
+  if (err.reason === 'unreadable') return null;
+  if (mapped.code === 'frozen_visit_move_unsupported' && TRANSIENT_FROZEN_REASONS.has(err.reason)) {
+    return { error: 'This visit is busy right now (being finalized, completed, or sending a reminder), so nothing was moved. Try again in a moment.', code: 'visit_busy_move' };
+  }
+  return { error: mapped.error || err.message, code: mapped.code };
+}
+
+module.exports = { isToolFailure, isPolicyRefusal, recordToolOutcome, executionOutcome, moveRefusalFromThrown, TRANSIENT_FROZEN_REASONS };

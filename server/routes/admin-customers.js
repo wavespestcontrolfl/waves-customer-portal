@@ -1453,6 +1453,15 @@ function phoneLast10(phone) {
   return digits.length >= 10 ? digits.slice(-10) : '';
 }
 
+// The contact families on a row are re-judged after a save that rewrites a
+// slot field OR the holder's own number (codex #6363 r35 P2): a number the
+// holder now owns is no contact's — contactSessionFor refuses it — so the
+// family minted for it ends with this edit, not on some later slot save.
+function contactIdentityEdited(updates, before) {
+  return SERVICE_CONTACT_SLOT_FIELDS.flat().some((field) => Object.prototype.hasOwnProperty.call(updates, field))
+    || (updates.phone !== undefined && phoneLast10(updates.phone) !== phoneLast10(before.phone));
+}
+
 function cleanText(value) {
   if (value === undefined || value === null) return '';
   return String(value).trim();
@@ -3997,7 +4006,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
 });
 
 // PUT /api/admin/customers/:id
-router.put('/:id', requireAdmin, async (req, res, next) => {
+// Named so the Intelligence Bar's set_customer_bill_to card (setCustomerBillToFromBar, below) runs this very handler.
+const customerUpdateHandler = async (req, res, next) => {
   try {
     const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', profileLabel: 'profile_label', addressLine1: 'address_line1', addressLine2: 'address_line2', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email', serviceContact2Name: 'service_contact2_name', serviceContact2Phone: 'service_contact2_phone', serviceContact2Email: 'service_contact2_email', serviceContact3Name: 'service_contact3_name', serviceContact3Phone: 'service_contact3_phone', serviceContact3Email: 'service_contact3_email', hasLeftGoogleReview: 'has_left_google_review', payerId: 'payer_id', billingMode: 'billing_mode', contactRole: 'contact_role', smsPrimaryForSharedPhone: 'sms_primary_for_shared_phone' };
     const before = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
@@ -4261,6 +4271,18 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // moved, stranding them.
           const lockedBefore = await trx('customers').where({ id: req.params.id }).forUpdate().first() || before;
           contactAuditBefore = lockedBefore;
+          // req.ibExpectedPayerId is set only by setCustomerBillToFromBar (never an HTTP field): the Bill-To
+          // the bar card showed as current. Judged on the LOCKED row, so an edit that landed after the
+          // card's re-check still refuses here and nothing is written.
+          if (req.ibExpectedPayerId !== undefined && String(lockedBefore.payer_id ?? '') !== String(req.ibExpectedPayerId ?? '')) {
+            throw Object.assign(new Error('The Bill-To changed after the card was shown.'), {
+              statusCode: 409, isOperational: true, code: 'preview_changed',
+            });
+          }
+          // req.ibVerifyPlan is set only by setCustomerBillToFromBar (never an HTTP field): it re-derives the bar card
+          // inside this transaction over held rows (bill-to-tools.js lockedPlanCheck: every open invoice FOR UPDATE)
+          // and throws preview_changed on any difference, before any Bill-To step reads or clears a checkout stamp.
+          if (req.ibVerifyPlan) await req.ibVerifyPlan(trx);
           // REBUILD the shared-phone mark clear from the locked row (codex #6268
           // r4/r8): the pre-lock pass may have derived `false` from a stale
           // phone; a save that moved the number and marked it since keeps its
@@ -4389,7 +4411,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // — an unreleasable session aborts this transaction.
           if (updates.payer_id !== undefined && updates.payer_id) {
             const payerRelease = await require('../services/pay-combined')
-              .releaseUnconfirmedCombinedSessionsForCustomer(trx, req.params.id, { invalidateLinked: true, pending: customerPayerPending, deferApply: true });
+              .releaseUnconfirmedCombinedSessionsForCustomer(trx, req.params.id, {
+                invalidateLinked: true, pending: customerPayerPending, deferApply: true,
+                // The bar card promises no checkout is touched: pin the empty set, so any stamped session refuses
+                // (previewChanged) before a stamp is cleared or a Stripe call is made.
+                ...(req.ibExpectNoMove ? { expectedPaymentIntentIds: [] } : {}),
+              });
             // In-flight combined money DEFERS the payer edit (codex r30
             // P1, same contract as the merge fence): the eventual combined
             // settlement never re-resolves ownership, so committing now
@@ -4402,6 +4429,26 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             applySessionRelease = payerRelease.apply || null;
           }
           await trx('customers').where({ id: req.params.id }).update(updates);
+          // A contact-slot rewrite from the admin editor is the same identity
+          // mutation as the portal's contact save (codex #6363 r7 P2): a
+          // removed phone's own notification choices and portal sessions go
+          // with it, a kept phone that lost its email loses its email-only
+          // choices; a holder-phone change ends the family of a number the
+          // holder now owns. Contact login, GATE_CONTACT_LOGIN.
+          if (contactIdentityEdited(updates, lockedBefore)) {
+            const slotsAfter = require('../services/customer-contact').getServiceContactSlots(lockedAfter)
+              .filter((slot) => slot.phone || slot.email).map((slot) => ({ phone: slot.phone, email: slot.email }));
+            await require('../services/contact-notification-prefs').pruneContactNotificationPrefs(trx, req.params.id, slotsAfter);
+            await require('../middleware/auth').revokeRemovedContactRefreshSessions(trx, req.params.id, slotsAfter.map((slot) => slot.phone));
+          }
+          // Deactivating the account from the editor (active true → false)
+          // ends every contact family on the row (codex #6363 r16 P2) — the
+          // same revocation the cancellation processor's disarm makes — so a
+          // dormant contact device's refresh token cannot come back valid on
+          // a later reactivation without a new code.
+          if (updates.active === false && lockedBefore.active !== false) {
+            await require('../middleware/auth').revokeContactRefreshFamilies(trx, req.params.id);
+          }
           // An edited property type also lands on the primary property row,
           // in this transaction, so property-scoped readers agree with the
           // account. Only an ACTUAL change (the editor posts the whole form).
@@ -4419,7 +4466,15 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             // The opposite transition (a payer assigned) withdraws every
             // self-pay combined-visit invoice this customer now owes to AP,
             // including one the homeowner already holds a pay link for.
-            if (updates.payer_id) await Packets.withdrawPacketInvoicesForOwner(trx, { customerId: req.params.id });
+            if (updates.payer_id) {
+              const withdrawn = await Packets.withdrawPacketInvoicesForOwner(trx, { customerId: req.params.id });
+              // req.ibExpectNoMove is set only by setCustomerBillToFromBar: the bar card is offered only when no
+              // invoice moves. Any withdrawal here means the customer's invoices changed after the card, so the
+              // whole edit rolls back (before any Stripe cancel: they run last).
+              if (req.ibExpectNoMove && withdrawn.length) {
+                throw Object.assign(new Error('An invoice would move to the payer, which the card did not show.'), { statusCode: 409, isOperational: true, code: 'preview_changed' });
+              }
+            }
           }
           // Coordinates cleared ATOMICALLY with the address (and the move
           // stamp the fan-out writes in this same transaction): a committed
@@ -4695,7 +4750,8 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     }
     next(err);
   }
-});
+};
+router.put('/:id', requireAdmin, customerUpdateHandler);
 
 // PUT /api/admin/customers/:id/notification-prefs
 //
@@ -6744,3 +6800,31 @@ router.findAccountByContact = findAccountByContact;
 router.hasMembership = hasMembership;
 
 module.exports = router;
+
+// The Intelligence Bar's set_customer_bill_to runs the SAME handler as PUT /:id with only { payerId } — exactly
+// what the customer page's Bill-To select sends — without an HTTP request (the admin-invoices.js adapter
+// pattern): the handler gets the request fields it reads and a capture response, and the promise resolves the
+// reply it would send, { status, json }. An error passed to next() rejects. expectedPayerId: the Bill-To the
+// card showed (null = the customer pays); verifyPlan(trx): re-checks the card inside the transaction and throws
+// preview_changed on any difference; the change refuses too if any invoice would move (the card promises none).
+function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, verifyPlan, actor }) {
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(json) { resolve({ status: this.statusCode, json }); return this; },
+    };
+    const req = {
+      params: { id: customerId },
+      body: { payerId: payerId == null ? '' : String(payerId) },
+      technicianId: actor?.technicianId || null,
+      ip: null,
+      get: () => null,
+      ibExpectedPayerId: expectedPayerId == null ? null : String(expectedPayerId),
+      ibVerifyPlan: typeof verifyPlan === 'function' ? verifyPlan : null,
+      ibExpectNoMove: true,
+    };
+    Promise.resolve(customerUpdateHandler(req, res, reject)).catch(reject);
+  });
+}
+module.exports.setCustomerBillToFromBar = setCustomerBillToFromBar;

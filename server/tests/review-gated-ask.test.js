@@ -50,6 +50,8 @@ jest.mock('../services/customer-contact', () => ({
     name: c.first_name || 'Sam',
   }),
   firstNameFrom: (v) => String(v == null ? '' : v).trim().split(/\s+/)[0] || '',
+  // The review text's trust level keys on the resolved recipient's role (codex #6363 r33).
+  isServiceContactRole: jest.requireActual('../services/customer-contact').isServiceContactRole,
 }));
 
 const db = require('../models/db');
