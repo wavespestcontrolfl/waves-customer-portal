@@ -485,6 +485,31 @@ describe("Email schedule send", () => {
     expect(posts("/cancel")).toHaveLength(0);
   });
 
+  it("a cancelled email that may have gone out says so in the list and above its text", async () => {
+    scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "cancelled", mayHaveSent: true }];
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Scheduled" }, { timeout: 3000 }));
+    expect(await screen.findByText(/Cancelled, but it may have gone out/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show text" }));
+    expect(screen.getByText(/This email may already have gone out\. Look in the Gmail Sent folder/)).toBeInTheDocument();
+  });
+
+  it("a Sent check on an email taken back elsewhere keeps Send blocked, as a check of the other tab", async () => {
+    scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "outcome_unknown", mayHaveSent: true }];
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/sent-check")
+      ? response({ status: "cancelled", error: "This email was already settled elsewhere." }, 409) : base(input, options)));
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Scheduled" }, { timeout: 3000 }));
+    fireEvent.click(await screen.findByRole("button", { name: "Back to draft" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Not in Sent" }));
+    expect((await screen.findAllByText(/already taken back elsewhere/)).length).toBeGreaterThan(0);
+    const send = () => screen.getAllByRole("button", { name: "Send", exact: true }).at(-1);
+    expect(send()).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "I checked: it is in neither" }));
+    await waitFor(() => expect(send()).not.toBeDisabled());
+  });
+
   it("a cancel whose answer was lost points to Show text instead of retrying", async () => {
     scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "scheduled" }];
     const base = fetch.getMockImplementation();
@@ -493,7 +518,7 @@ describe("Email schedule send", () => {
     mount();
     fireEvent.click(await screen.findByRole("button", { name: "Scheduled (1)" }, { timeout: 3000 }));
     fireEvent.click(await screen.findByRole("button", { name: "Cancel send" }));
-    expect(await screen.findByText(/tap Show text to copy it/)).toBeInTheDocument();
+    expect(await screen.findByText(/tap Show text to see it/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
   });
 

@@ -338,6 +338,11 @@ jest.setTimeout(30000);
     await sendDueScheduledEmails();
     for (const id of Object.values(rows)) expect(await alertOpen(id)).toBe(false);
     expect((await call('POST', `/scheduled/${rows.inSent}/sent-check`, {})).status).toBe(400);
+    // A check on an email already taken back elsewhere is not a success.
+    const unclear = (await queue({ to: 'taken@example.invalid' })).body.scheduled.id;
+    await database('scheduled_emails').where({ id: unclear }).update({ status: 'outcome_unknown' });
+    await cancel(unclear);
+    expect(await call('POST', `/scheduled/${unclear}/sent-check`, { inSent: false })).toMatchObject({ status: 409, body: { status: 'cancelled' } });
   });
 
   test('reconcile still settles a key with the gate off (it sends nothing)', async () => {

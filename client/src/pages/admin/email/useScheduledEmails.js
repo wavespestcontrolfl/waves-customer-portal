@@ -55,7 +55,7 @@ export default function useScheduledEmails(active) {
       if (!response.ok) return { draft: null, error: data.error || "The scheduled email was not cancelled. Try again." };
       return { draft: data.draft };
     } catch {
-      return { draft: null, error: "The cancel was not confirmed. If the email now shows as Cancelled, tap Show text to copy it." };
+      return { draft: null, error: "The cancel was not confirmed. If the email now shows as Cancelled, tap Show text to see it (and check the Gmail Sent folder if the row says it may have gone out)." };
     } finally {
       setPendingId(null);
       reload();

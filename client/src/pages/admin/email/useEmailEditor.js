@@ -198,13 +198,19 @@ export default function useEmailEditor(userId) {
     const entry = uncertainSchedule.current[slot];
     if (scheduling || !entry?.rowId) return;
     const say = (message, error = false) => setSendFeedback((current) => ({ ...current, [replyId ? "reply" : "compose"]: { messageId: replyId, error, message } }));
-    let recorded = false;
+    let response = null;
     try {
-      const response = await adminFetch(`/api/admin/email/scheduled/${encodeURIComponent(entry.rowId)}/sent-check`, { method: "POST", body: JSON.stringify({ inSent }) });
-      recorded = response.ok;
-    } catch { recorded = false; }
-    if (!recorded) { say("Could not record the check. Try again in a moment.", true); return; }
+      response = await adminFetch(`/api/admin/email/scheduled/${encodeURIComponent(entry.rowId)}/sent-check`, { method: "POST", body: JSON.stringify({ inSent }) });
+    } catch { response = null; }
     if (uncertainSchedule.current[slot]?.rowId !== entry.rowId) return;
+    // Settled elsewhere (taken back in another tab): that tab may hold the
+    // same text, so the guard stays, now as the operator's own check of it.
+    if (response?.status === 409) {
+      rememberUncertain(slot, KEY_SETTLED);
+      say("This email was already taken back elsewhere, maybe as a draft in another tab. Look there, then tap I checked.", true);
+      return;
+    }
+    if (!response?.ok) { say("Could not record the check. Try again in a moment.", true); return; }
     rememberUncertain(slot, null);
     if (!inSent) return;
     // Removed only while it is still that email's text (compared by a

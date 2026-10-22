@@ -490,10 +490,15 @@ router.post('/scheduled/:id/sent-check', async (req, res) => {
   const inSent = req.body?.inSent;
   if (typeof inSent !== 'boolean') return res.status(400).json({ error: 'inSent must be true or false.' });
   try {
-    await db('scheduled_emails').where({ id: req.params.id, status: 'outcome_unknown' }).update(inSent
+    const changed = await db('scheduled_emails').where({ id: req.params.id, status: 'outcome_unknown' }).update(inSent
       ? { status: 'sent', sent_at: db.fn.now(), last_error: 'Found in the Gmail Sent folder by the office', updated_at: db.fn.now() }
       : { status: 'cancelled', cancelled_at: db.fn.now(), restored_at: db.fn.now(), updated_at: db.fn.now() });
-    res.json({ success: true });
+    if (changed) return res.json({ success: true });
+    // Nothing changed: the email was already settled elsewhere (taken back
+    // to a draft in another tab, or already checked). Its state goes back,
+    // never a success the browser could read as its own answer recorded.
+    const current = await db('scheduled_emails').where({ id: req.params.id }).first('status');
+    res.status(409).json({ status: current?.status || null, error: 'This email was already settled elsewhere.' });
   } catch (err) {
     logger.error(`[email] scheduled sent-check failed (${err.code || 'error'})`);
     res.status(500).json({ error: 'Could not record the check. Try again.' });

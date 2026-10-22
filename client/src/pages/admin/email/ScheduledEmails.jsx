@@ -11,6 +11,12 @@ const STATUS_TEXT = {
   outcome_unknown: "May have gone out: check the Gmail Sent folder first",
 };
 
+function statusText(row) {
+  if (row.status === "scheduled") return `Sends ${formatSendAt(row.sendAt)}`;
+  if (row.status === "cancelled" && row.mayHaveSent) return "Cancelled, but it may have gone out: check the Gmail Sent folder first";
+  return STATUS_TEXT[row.status] || row.status;
+}
+
 // Email > Scheduled, as in Gmail: what is queued and when, with Cancel send.
 // A row Gmail refused or may have sent shows Back to draft. Cancel and Back
 // to draft hand the text to the composer once; a cancelled row then stays
@@ -57,8 +63,8 @@ export default function ScheduledEmails({ scheduled, editor, mailbox }) {
             <p className="m-0 font-medium">To: {row.to}</p>
             <p className="m-0 mt-1">{row.subject || "(no subject)"}</p>
             <p className="m-0 mt-1 truncate text-ink-secondary">{String(row.draftText || "").split("\n")[0]}</p>
-            <p className={["failed", "outcome_unknown"].includes(row.status) ? "m-0 mt-1 text-alert-fg" : "u-nums m-0 mt-1 text-ink-secondary"}>
-              {row.status === "scheduled" ? `Sends ${formatSendAt(row.sendAt)}` : STATUS_TEXT[row.status] || row.status}
+            <p className={["failed", "outcome_unknown"].includes(row.status) || row.mayHaveSent ? "m-0 mt-1 text-alert-fg" : "u-nums m-0 mt-1 text-ink-secondary"}>
+              {statusText(row)}
             </p>
           </div>
           {row.status === "cancelled"
@@ -67,7 +73,11 @@ export default function ScheduledEmails({ scheduled, editor, mailbox }) {
               disabled={Boolean(scheduled.pendingId)} loading={scheduled.pendingId === row.id}>
               {row.status === "scheduled" ? "Cancel send" : "Back to draft"}
             </Button>}
-          {shownId === row.id && <pre className="m-0 w-full whitespace-pre-wrap break-words rounded-md bg-zinc-50 p-3 text-ui-body" aria-label="Email text">{row.draftText}</pre>}
+          {shownId === row.id && <div className="w-full">
+            {/* Gmail may already have delivered it: say so before the text. */}
+            {row.mayHaveSent && <p className="m-0 mb-2 text-alert-fg">This email may already have gone out. Look in the Gmail Sent folder before you send this text.</p>}
+            <pre className="m-0 whitespace-pre-wrap break-words rounded-md bg-zinc-50 p-3 text-ui-body" aria-label="Email text">{row.draftText}</pre>
+          </div>}
         </li>)}</ul>}
     </div>
   </section>;
