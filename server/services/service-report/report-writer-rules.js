@@ -652,20 +652,33 @@ const WRITER_RULE_SCREENS = Object.freeze([
 // visit itself (Codex #5500). The reach-out sentence names a place and a sign
 // the customer can notice, so there a window is a place ("the kitchen
 // window", "window sills"), "next to" is a place, and a pest that comes back
-// or returns is a sign. Only a time window, a next visit or our own return
-// ties the date to a visit. 2026-10-22 replay: "If ants are still trailing by
-// the kitchen window … on Thursday, October 22, text or call us." was refused
-// on every try, and the report fell back to the fixed copy.
+// or returns is a sign. A time window, a next visit, a booking and our own
+// return still tie the date to a visit. 2026-10-22 replay: "If ants are still
+// trailing by the kitchen window … on Thursday, October 22, text or call us."
+// was refused on every try, and the report fell back to the fixed copy.
 const REACH_OUT_VISIT_CUE_RE = new RegExp([
   '\\bnext\\b(?!\\s+(?:to|couple|few|several)\\b)',
   '\\b(?:upcoming|scheduled|appointment|arriv(?:e|al|ing)|see\\s+you)\\b',
   '\\b(?:arrival|time|service|appointment|visit|[\\w-]*hour)\\s+windows?\\b',
   '\\bwindow\\s+(?:of|between|from)\\b',
-  '\\breturn\\s+(?:trip|visit|service)s?\\b',
-  "\\b(?:we|i)(?:['’](?:ll|re)|\\s+(?:will|are|can|plan\\s+to))?\\s+(?:be\\s+back|come\\s+back|coming\\s+back|return(?:ing)?)\\b",
-  '\\b(?:will|to)\\s+(?:be\\s+back|come\\s+back|return)\\b',
+  '\\bbook(?:ed|ing)?\\b',
+  '\\bvisits?\\b',
 ].join('|'), 'i');
-const REACH_OUT_DATE_MISUSE_RE = new RegExp(`${REACH_OUT_VISIT_CUE_RE.source}|\\bbook(?:ed|ing)?\\b|\\bvisits?\\b`, 'i');
+// A return verb ties the date to a visit unless its clause is a condition
+// about the pest ("if the ants come back", "when spiders return"). With us,
+// the technician or the team in that clause ("our technician is returning",
+// "if we come back") it always does.
+const REACH_OUT_RETURN_RE = /\b(?:be\s+back|comes?\s+back|coming\s+back|returns?|returning)\b/gi;
+const REACH_OUT_CONDITION_RE = /\b(?:if|when|once|should|in\s+case|whether)\b/i;
+const REACH_OUT_OUR_SIDE_RE = /\b(?:we|we['’](?:ll|re|d)|i|i['’](?:ll|m)|our|technician|tech|team|crew|waves)\b/i;
+function reachOutDateMisused(sentence) {
+  if (REACH_OUT_VISIT_CUE_RE.test(sentence)) return true;
+  for (const match of String(sentence).matchAll(REACH_OUT_RETURN_RE)) {
+    const clause = sentence.slice(0, match.index).split(/[,;:]/).pop();
+    if (REACH_OUT_OUR_SIDE_RE.test(clause) || !REACH_OUT_CONDITION_RE.test(clause)) return true;
+  }
+  return false;
+}
 // The reach-out date is the day to get in touch: its sentence must ask the
 // customer to contact us, and the date never ends a period ("keeps working
 // until Wednesday, October 14" would make it a residual claim; Codex #5500).
@@ -726,7 +739,7 @@ function writerRulesRejectionDetail(text, { activeIngredients = [], allowedPhras
     const datePattern = new RegExp(`(?<![\\w-])${allowedPhrasePattern(date)}(?![\\w-])`, 'i');
     const durationEnd = new RegExp(`${DURATION_END_BEFORE_DATE}${allowedPhrasePattern(date)}(?![\\w-])`, 'i');
     if (sentences.some((sentence) => datePattern.test(sentence)
-      && (REACH_OUT_DATE_MISUSE_RE.test(sentence) || !REACH_OUT_CONTACT_RE.test(sentence) || durationEnd.test(sentence)))) {
+      && (reachOutDateMisused(sentence) || !REACH_OUT_CONTACT_RE.test(sentence) || durationEnd.test(sentence)))) {
       return { reason: 'date', match: String(date).trim() };
     }
   }
