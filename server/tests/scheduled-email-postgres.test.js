@@ -40,7 +40,7 @@ jest.mock('../services/notification-service', () => ({
 const express = require('express');
 const gmail = require('../services/email/gmail-client');
 const { notifyAdmin } = require('../services/notification-service');
-const { sendDueScheduledEmails } = require('../services/email/scheduled-email-sender');
+const { sendDueScheduledEmails, recordSweepHealth } = require('../services/email/scheduled-email-sender');
 const migration = require('../models/migrations/20261022130000_scheduled_emails');
 const restoredMigration = require('../models/migrations/20261022150000_scheduled_emails_restored_at');
 const restoreKeyMigration = require('../models/migrations/20261022160000_scheduled_emails_restore_key');
@@ -74,6 +74,11 @@ jest.setTimeout(30000);
     // Minimal stand-ins for the tables the sender reads beside its own.
     await database.schema.createTable('notifications', (t) => { t.increments('id'); t.string('recipient_type'); t.jsonb('metadata'); });
     await database.schema.createTable('emails', (t) => { t.uuid('id').primary(); t.string('message_id'); });
+    await database.schema.createTable('job_health', (t) => {
+      t.string('job_name').primary(); t.timestamp('last_started_at', { useTz: true }); t.timestamp('last_finished_at', { useTz: true });
+      t.integer('last_duration_ms'); t.string('last_status'); t.text('last_error'); t.timestamp('last_success_at', { useTz: true });
+      t.integer('consecutive_failures').notNullable().defaultTo(0); t.timestamp('updated_at', { useTz: true });
+    });
     mockConn = database;
     const app = express();
     app.use(express.json());
@@ -241,7 +246,7 @@ jest.setTimeout(30000);
     expect(await cancel(body.scheduled.id)).toMatchObject({ status: 409, body: { error: 'This email is already back in a draft.' } });
   });
 
-  test('the capped history keeps the newest cancel, whatever its send time', async () => {
+  test('an unconfirmed cancel stays listed however old it is; a confirmed one leaves', async () => {
     const far = Array.from({ length: 110 }, (_, i) => ({
       to_address: `far${i}@example.invalid`, subject: 'Far', body_html: 'x', draft_text: 'x', status: 'cancelled',
       send_at: database.raw(`now() + interval '${i + 30} days'`), cancelled_at: database.raw("now() - interval '1 hour'"),
@@ -250,8 +255,13 @@ jest.setTimeout(30000);
     await database('scheduled_emails').insert(far);
     const { body } = await queue();
     await cancel(body.scheduled.id);
+    // A cancel from days ago whose answer was lost is still recoverable.
+    await database('scheduled_emails').where({ id: body.scheduled.id }).update({ cancelled_at: database.raw("now() - interval '4 days'") });
     const listed = (await call('GET', '/scheduled')).body.emails;
     expect(listed.some((e) => e.id === body.scheduled.id && e.status === 'cancelled')).toBe(true);
+    expect(listed.filter((e) => e.status === 'cancelled')).toHaveLength(111);
+    await call('POST', `/scheduled/${body.scheduled.id}/restored`);
+    expect((await call('GET', '/scheduled')).body.emails.some((e) => e.id === body.scheduled.id)).toBe(false);
   });
 
   test('old settled rows never hide a queued email from the list', async () => {
@@ -265,6 +275,20 @@ jest.setTimeout(30000);
     expect(listed.some((e) => e.id === body.scheduled.id && e.status === 'scheduled')).toBe(true);
     // Every unresolved row stays listed: its alert says Back to draft.
     expect(listed.filter((e) => e.status === 'failed')).toHaveLength(120);
+  });
+
+  test('job health: a success never hides a failure that finished after it started', async () => {
+    const health = () => database('job_health').where({ job_name: 'scheduled-email-send' }).first();
+    const t0 = new Date(Date.now() - 5000);
+    await recordSweepHealth(new Date(Date.now() - 1000), new Error('sweep failed'));
+    expect(await health()).toMatchObject({ last_status: 'failed', consecutive_failures: 1 });
+    // A concurrent sweep that started before the failure finished.
+    await recordSweepHealth(t0, null);
+    expect(await health()).toMatchObject({ last_status: 'failed', consecutive_failures: 1 });
+    // A later sweep that started after it.
+    await recordSweepHealth(new Date(), null);
+    expect(await health()).toMatchObject({ last_status: 'success', consecutive_failures: 0, last_error: null });
+    await database('job_health').del();
   });
 
   test('with the gate off the sender sends nothing, and queued rows wait', async () => {

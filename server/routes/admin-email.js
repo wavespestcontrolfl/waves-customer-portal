@@ -348,7 +348,6 @@ router.post('/send', async (req, res) => {
 const SCHEDULE_ET_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
 const SCHEDULE_MAX_DAYS = 366;
 const CANCELLABLE = ['scheduled', 'failed', 'outcome_unknown'];
-const SETTLED_LIST_CAP = 100;
 const { OUTCOME_UNKNOWN_ERRORS } = require('../services/email/scheduled-email-sender');
 const scheduledView = (row) => ({
   id: row.id, to: row.to_address, subject: row.subject, draftText: row.draft_text, threadId: row.thread_id,
@@ -411,18 +410,15 @@ router.post('/schedule', async (req, res) => {
 router.get('/scheduled', async (req, res) => {
   if (!emailSendLaterLive()) return res.json({ enabled: false, emails: [] });
   try {
-    // Every email still queued or sending, and every one that needs the
-    // office (failed, outcome_unknown: their alert says Back to draft), is
-    // listed, so history can never hide one. Only rows cancelled in the last
-    // day ("Open as draft", so a lost cancel answer never strands the text)
-    // are capped, newest cancel first.
-    const [live, settled] = await Promise.all([
-      db('scheduled_emails').whereIn('status', ['scheduled', 'sending', ...CANCELLABLE.slice(1)]),
-      db('scheduled_emails').where('status', 'cancelled').whereNull('restored_at')
-        .where('cancelled_at', '>', db.raw("now() - interval '1 day'"))
-        .orderBy('cancelled_at', 'desc').limit(SETTLED_LIST_CAP),
-    ]);
-    const rows = [...live, ...settled].sort((a, b) => new Date(a.send_at) - new Date(b.send_at));
+    // Listed until it is settled for good: every email still queued or
+    // sending, every one that needs the office (failed, outcome_unknown: their
+    // alert says Back to draft), and every cancelled one no tab has confirmed
+    // restoring ("Open as draft": a cancel whose answer was lost is never
+    // stranded, however late the retry). A confirmed restore leaves the list.
+    const rows = await db('scheduled_emails')
+      .where((q) => q.whereIn('status', ['scheduled', 'sending', ...CANCELLABLE.slice(1)])
+        .orWhere((c) => c.where('status', 'cancelled').whereNull('restored_at')))
+      .orderBy('send_at', 'asc');
     res.json({ enabled: true, emails: rows.map(scheduledView) });
   } catch (err) {
     logger.error(`[email] scheduled list failed (${err.code || 'error'})`);

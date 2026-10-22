@@ -185,4 +185,56 @@ async function sendDueScheduledEmails({ conn = db, gmail } = {}) {
   return summary;
 }
 
-module.exports = { OUTCOME_UNKNOWN_ERRORS, SEND_TIMEOUT_MS, sendDueScheduledEmails, settleStaleClaims, claimNext, sendOne, raiseMissedAlerts, MAX_ATTEMPTS, STALE_MINUTES };
+const JOB_NAME = 'scheduled-email-send';
+
+// job_health without a fleet lease. Every replica sweeps (the row claim is
+// the fence, so no lease: a lease can wait for a slot or skip a minute and
+// send late). A failure always records; a success never overwrites a failure
+// that finished after this sweep started, so a concurrent empty sweep cannot
+// hide a failed one. No 'running' write, which could also mask a failure.
+async function recordSweepHealth(startedAt, error, conn = db) {
+  const finishedAt = new Date();
+  const values = [JOB_NAME, startedAt, finishedAt, Math.max(0, finishedAt - startedAt)];
+  try {
+    if (error) {
+      const { sanitizeJobError } = require('../../utils/cron-lock');
+      await conn.raw(`INSERT INTO job_health (job_name, last_started_at, last_finished_at, last_duration_ms, last_status, last_error, consecutive_failures, updated_at)
+        VALUES (?, ?, ?, ?, 'failed', ?, 1, ?)
+        ON CONFLICT (job_name) DO UPDATE SET last_started_at = EXCLUDED.last_started_at, last_finished_at = EXCLUDED.last_finished_at,
+          last_duration_ms = EXCLUDED.last_duration_ms, last_status = 'failed', last_error = EXCLUDED.last_error,
+          consecutive_failures = job_health.consecutive_failures + 1, updated_at = EXCLUDED.updated_at`,
+      [...values, sanitizeJobError(error.message || error), finishedAt]);
+      return;
+    }
+    await conn.raw(`INSERT INTO job_health (job_name, last_started_at, last_finished_at, last_duration_ms, last_status, last_success_at, consecutive_failures, updated_at)
+      VALUES (?, ?, ?, ?, 'success', ?, 0, ?)
+      ON CONFLICT (job_name) DO UPDATE SET last_started_at = EXCLUDED.last_started_at, last_finished_at = EXCLUDED.last_finished_at,
+        last_duration_ms = EXCLUDED.last_duration_ms, last_status = 'success', last_success_at = EXCLUDED.last_success_at,
+        last_error = NULL, consecutive_failures = 0, updated_at = EXCLUDED.updated_at
+      WHERE NOT (job_health.last_status = 'failed' AND job_health.last_finished_at > ?)`,
+    [...values, finishedAt, finishedAt, startedAt]);
+  } catch (err) {
+    logger.warn(`[scheduled-email] job_health record failed (${err.code || 'error'})`);
+  }
+}
+
+// The every-minute cron entry: one sweep at a time in this process, health
+// recorded by recordSweepHealth.
+let sweeping = false;
+async function runScheduledSweep({ conn = db, gmail } = {}) {
+  if (sweeping) return { skipped: 'overlap' };
+  sweeping = true;
+  const startedAt = new Date();
+  try {
+    const summary = await sendDueScheduledEmails({ conn, gmail });
+    await recordSweepHealth(startedAt, null, conn);
+    return summary;
+  } catch (err) {
+    await recordSweepHealth(startedAt, err, conn);
+    throw err;
+  } finally {
+    sweeping = false;
+  }
+}
+
+module.exports = { runScheduledSweep, recordSweepHealth, OUTCOME_UNKNOWN_ERRORS, SEND_TIMEOUT_MS, sendDueScheduledEmails, settleStaleClaims, claimNext, sendOne, raiseMissedAlerts, MAX_ATTEMPTS, STALE_MINUTES };
