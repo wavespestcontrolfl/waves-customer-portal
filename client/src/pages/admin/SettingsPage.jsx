@@ -1184,6 +1184,8 @@ function BlackoutDaysTab() {
   const [blackouts, setBlackouts] = useState([]);
   const [weeklyDaysOff, setWeeklyDaysOff] = useState([]);
   const [weeklySaving, setWeeklySaving] = useState(false);
+  const [holidays, setHolidays] = useState([]);
+  const [holidaySaving, setHolidaySaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [date, setDate] = useState("");
   const [reason, setReason] = useState("");
@@ -1195,6 +1197,7 @@ function BlackoutDaysTab() {
       .then((d) => {
         setBlackouts(d.blackouts || []);
         setWeeklyDaysOff(d.weeklyDaysOff || []);
+        setHolidays(d.holidays || []);
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
@@ -1224,6 +1227,31 @@ function BlackoutDaysTab() {
       setError(e.message);
     } finally {
       setWeeklySaving(false);
+    }
+  };
+
+  const toggleHoliday = async (key) => {
+    // Whole-array PUT of the closed keys, like the weekly chips: buttons are
+    // disabled while a save is in flight so an older snapshot never wins.
+    if (holidaySaving) return;
+    const prev = holidays;
+    const next = prev.map((h) => (h.key === key ? { ...h, closed: !h.closed } : h));
+    setHolidaySaving(true);
+    setHolidays(next); // optimistic — reverted on failure
+    setError(null);
+    try {
+      const d = await adminFetch("/admin/schedule/blackout-dates/holidays", {
+        method: "PUT",
+        body: JSON.stringify({ closed: next.filter((h) => h.closed).map((h) => h.key) }),
+      });
+      if (d?.error) throw new Error(d.error);
+      const closed = new Set(d.closedHolidays || []);
+      setHolidays(next.map((h) => ({ ...h, closed: closed.has(h.key) })));
+    } catch (e) {
+      setHolidays(prev);
+      setError(e.message);
+    } finally {
+      setHolidaySaving(false);
     }
   };
 
@@ -1302,6 +1330,36 @@ function BlackoutDaysTab() {
             </Button>
           );
         })}
+      </div>
+
+      <h4 className="text-ui-body font-medium text-zinc-900">Holidays</h4>
+      <p className="mt-1 text-ui-body text-ink-secondary">
+        The days Google asks Florida businesses about. Each one stays open
+        until you close it here, and a closed holiday is closed every year.
+        Visits already booked on a day you close stay booked unless the
+        nightly auto-dispatch moves them.
+      </p>
+      <div className="mb-6 mt-2 divide-y divide-zinc-200">
+        {holidays.map((h) => (
+          <div key={h.key} className="flex min-h-12 flex-wrap items-center justify-between gap-3 py-2">
+            <div>
+              <div className="font-medium text-zinc-900">{h.name}</div>
+              <div className="text-ui-caption text-ink-secondary u-nums">
+                Next: {fmtDay(h.date)}
+                {h.observedDate ? ` · observed ${fmtDay(h.observedDate)}` : ""}
+              </div>
+            </div>
+            <Button
+              variant={h.closed ? "primary" : "secondary"}
+              onClick={() => toggleHoliday(h.key)}
+              disabled={holidaySaving}
+              aria-pressed={h.closed}
+              aria-label={`${h.name} ${h.closed ? "closed" : "open"}`}
+            >
+              {h.closed ? "Closed" : "Open"}
+            </Button>
+          </div>
+        ))}
       </div>
 
       <div className="mb-4 grid items-end gap-3 md:grid-cols-[minmax(180px,0.6fr)_minmax(240px,1fr)_auto]">

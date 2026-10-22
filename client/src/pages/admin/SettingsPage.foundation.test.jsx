@@ -75,8 +75,18 @@ function fixtureFor(url, options = {}) {
   }
   if (path === "/admin/communications/link-library/sync") return { fetched: 1, added: 0, updated: 1, removed: 0 };
   if (path.startsWith("/admin/communications/link-library/")) return { ok: true };
-  if (path === "/admin/schedule/blackout-dates") return { blackouts: [{ id: "day-1", date: "2026-12-25", reason: "Holiday" }], weeklyDaysOff: [0] };
+  if (path === "/admin/schedule/blackout-dates") {
+    return {
+      blackouts: [{ id: "day-1", date: "2026-12-25", reason: "Holiday" }],
+      weeklyDaysOff: [0],
+      holidays: [
+        { key: "thanksgiving", name: "Thanksgiving", date: "2026-11-26", observedDate: null, closed: false },
+        { key: "independence_day", name: "4th of July", date: "2027-07-04", observedDate: "2027-07-05", closed: false },
+      ],
+    };
+  }
   if (path === "/admin/schedule/blackout-dates/weekly") return { weeklyDaysOff: [0, 6] };
+  if (path === "/admin/schedule/blackout-dates/holidays") return { success: true, closedHolidays: JSON.parse(options.body).closed };
   if (path.startsWith("/admin/schedule/blackout-dates/")) return { ok: true };
   if (path === "/admin/gbp/locations") return { locations: [{ id: "bradenton", name: "Bradenton", hasCredentials: true }] };
   if (path === "/admin/settings/linkedin/status") return { configured: true, connected: true, orgVerified: true, hasRefreshToken: true };
@@ -173,6 +183,20 @@ describe("Settings new UI foundation", () => {
       url === "/api/admin/schedule/blackout-dates"
       && options?.method === "POST"
       && options.body === JSON.stringify({ date: "2026-12-31", reason: "Office closed" }))).toBe(true));
+  });
+
+  it("lists the holidays open by default and saves a holiday closure", async () => {
+    mount("blackout-days");
+    await screen.findByText("Thanksgiving");
+    expect(screen.getByText(/observed Mon, Jul 5, 2027/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "4th of July open" })).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(screen.getByRole("button", { name: "Thanksgiving open" }));
+    await waitFor(() => expect(fetch.mock.calls.some(([url, options]) =>
+      url === "/api/admin/schedule/blackout-dates/holidays"
+      && options?.method === "PUT"
+      && options.body === JSON.stringify({ closed: ["thanksgiving"] }))).toBe(true));
+    expect(await screen.findByRole("button", { name: "Thanksgiving closed" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "4th of July open" })).toBeInTheDocument();
   });
 
   it("keeps service-report toggles and the visit-timeline save contracts", async () => {
