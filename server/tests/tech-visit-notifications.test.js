@@ -14,6 +14,8 @@ let mockBeforeLeg = null;
 // sender: a recheck before each leg, onDelivered for each device that has it.
 let mockLegs = null;
 let mockLegsSent = [];
+// Runs after a leg's beforeHandoff passed, while that leg is "in flight".
+let mockAfterCheck = null;
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -30,6 +32,7 @@ jest.mock('../services/push-notifications', () => ({
         if (opts && typeof opts.beforeHandoff === 'function' && (await opts.beforeHandoff()) === false) {
           return { subscriptions: mockLegs.length, sent, superseded: true };
         }
+        if (mockAfterCheck) await mockAfterCheck(leg);
         if (leg.sent) { sent += 1; mockLegsSent.push(leg.id); if (opts.onDelivered) opts.onDelivered({ id: leg.id }); }
       }
       if (!sent) return { subscriptions: mockLegs.length, sent: 0, failed: mockLegs.length };
@@ -63,11 +66,21 @@ function cardsTable() {
   let bundleFilter = false;
   let claimFilter = null;
   let leaseCutoff = null;
+  let techFilter = null;
+  let notInFilter = null;
   const held = (r) => (bundleFilter ? r.payload.push_bundle : r.payload.push_held_run);
   const claimOpen = (r) => !r.payload.push_claimed_at
     || (leaseCutoff != null && new Date(r.payload.push_claimed_at).getTime() < new Date(leaseCutoff).getTime());
   const chain = {
     whereIn: jest.fn((col, vals) => { if (col === 'id') idFilter = vals.map(String); return chain; }),
+    where: jest.fn((col, val) => { if (col === 'technician_id') techFilter = String(val); return chain; }),
+    whereNotIn: jest.fn((col, vals) => { if (col === 'id') notInFilter = vals.map(String); return chain; }),
+    // The bundle's "a held card of this tech outside the bundle" read.
+    first: jest.fn(async () => {
+      const row = cardRows.find((r) => held(r) && !r.dismissed_at
+        && (!techFilter || String(r.technician_id) === techFilter) && (!notInFilter || !notInFilter.includes(String(r.id))));
+      return row ? { id: row.id } : undefined;
+    }),
     whereNull: jest.fn(() => chain),
     whereRaw: jest.fn((sql, bindings) => {
       if (/push_held_run' = \?/.test(sql)) runFilter = String(bindings[0]);
@@ -96,9 +109,16 @@ function cardsTable() {
       const sql = String(payload);
       const [claimedAt, token] = (payload && payload.bindings) || [];
       const apply = () => {
+        // A claim renewal: this owner's cards get a fresh claim time.
+        if (sql.includes("jsonb_set(payload, '{push_claimed_at}'")) {
+          const mine = cardRows.filter((r) => idFilter.includes(String(r.id)) && r.payload.push_claim === claimFilter);
+          for (const r of mine) r.payload.push_claimed_at = claimedAt;
+          return mine.map((r) => ({ id: r.id }));
+        }
         if (sql.includes("jsonb_build_object('push_claimed_at'")) {
           const claimed = cardRows.filter((r) => held(r) && claimOpen(r) && !r.dismissed_at
             && (!runFilter || r.payload.push_held_run === runFilter)
+            && (!techFilter || String(r.technician_id) === techFilter)
             && (!idFilter || idFilter.includes(String(r.id))));
           for (const r of claimed) {
             r.payload.push_claimed_at = claimedAt || 'now';
@@ -719,6 +739,7 @@ describe('bundled pushes for any other mover (GATE_TECH_PUSH_BUNDLE, owner 2026-
     mockBeforeLeg = null;
     mockLegs = null;
     mockLegsSent = [];
+    mockAfterCheck = null;
     bundleLeaseCutoff = null;
     mockClearFailures = 0;
     prime({ techs, visits: visitRows });
@@ -1073,6 +1094,69 @@ describe('bundled pushes for any other mover (GATE_TECH_PUSH_BUNDLE, owner 2026-
     expect(cardRows[2].payload).toMatchObject({ push_bundle: expect.anything(), push_claim: expect.any(String) });
     expect(await notices.flushBundledPushes({ now })).toEqual({ pushed: 0 });
     expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
+  });
+
+  test('each device handoff renews the claim: a slow fan-out is never taken over mid-send (Codex #6459 r3 P2)', async () => {
+    await officeMove('v-1');
+    await officeMove('v-2');
+    mockLegs = [{ id: 'd1', sent: true }, { id: 'd2', sent: true }];
+    let second = null;
+    // Before the second device, the claim is as old as a lease (a slow first leg)...
+    mockBeforeLeg = async (leg) => {
+      if (leg.id !== 'd2') return;
+      for (const r of cardRows) r.payload.push_claimed_at = new Date(Date.now() - notices.BUNDLE_CLAIM_LEASE_MS - 10000).toISOString();
+    };
+    // ...and while the second device is in flight, another sweep runs.
+    mockAfterCheck = async (leg) => {
+      if (leg.id !== 'd2') return;
+      second = await notices.flushBundledPushes({ now: new Date() });
+    };
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    // The renewal at the second handoff kept the claim: the other sweep took nothing.
+    expect(second).toEqual({ pushed: 0 });
+    expect(mockLegsSent).toEqual(['d1', 'd2']);
+    expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
+  });
+
+  test('a new change for the tech that lands after the claim joins the same bundle: one push, not two (Codex #6459 r3 P2)', async () => {
+    await officeMove('v-1');
+    await officeMove('v-2');
+    mockLegs = [{ id: 'd1', sent: true }];
+    mockBeforeLeg = async () => { mockBeforeLeg = null; await officeMove('v-3'); };
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 0 });
+    expect(mockSendToAdminUser).not.toHaveBeenCalled();
+    // Composed again with all three once quiet.
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: '3 visits on your route moved' }));
+  });
+
+  test('past the longest wait the bundle goes out as it is; a change that lands meanwhile waits for the next one', async () => {
+    await officeMove('v-1');
+    await officeMove('v-2');
+    cardRows[0].created_at = new Date(Date.now() - notices.BUNDLE_MAX_WAIT_MS - 1000);
+    mockLegs = [{ id: 'd1', sent: true }];
+    mockBeforeLeg = async () => { mockBeforeLeg = null; await officeMove('v-3'); };
+    expect(await notices.flushBundledPushes({ now: new Date() })).toEqual({ pushed: 1 });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: '2 visits on your route moved' }));
+    expect(cardRows[2].payload.push_bundle).toBeTruthy();
+  });
+
+  test('the run summary and the bundle share one claim core: a run claim carries an owner token too', async () => {
+    process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY = 'true';
+    try {
+      notices._test.setCurrentAutoDispatchRun('run-7');
+      await officeMove('v-1', { actorId: 'auto_dispatch' });
+      mockSendToAdminUser.mockImplementationOnce(async () => {
+        expect(cardRows[0].payload).toMatchObject({ push_held_run: 'run-7', push_claimed_at: expect.any(String), push_claim: expect.any(String) });
+        return { subscriptions: 1, sent: 1 };
+      });
+      expect(await notices.pushAutoDispatchSummary({ runId: 'run-7' })).toEqual({ pushed: 1 });
+      expect(cardRows[0].payload).not.toHaveProperty('push_held_run');
+      expect(cardRows[0].payload).not.toHaveProperty('push_claim');
+    } finally {
+      delete process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY;
+    }
   });
 
   test('a sweep read failure never throws to the scheduler', async () => {

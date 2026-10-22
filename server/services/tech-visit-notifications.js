@@ -671,72 +671,146 @@ function notifyVisitCancelled({ visitId, technicianId = null, actorId = null, sn
   }, visitId);
 }
 
-// A claim on held cards lasts this long: a summary that died between its
+// ---------------------------------------------------------------------------
+// HELD PUSHES: one mechanism for every push a card holds back.
+//
+// A held card says so on its own row, so a crash never loses it (Codex #5786
+// P2): `push_held_run` (an auto-dispatch run's one summary, owner ruling
+// 2026-10-03) or `push_bundle` (a burst from any other mover, one push per
+// tech, owner 2026-10-22). Both are claimed, renewed, cleared, released and
+// dropped by the helpers below, under ONE ownership rule: a claim stamps a
+// time and a random token in ONE update (two instances never take the same
+// card); an owner acts only on cards that still carry its token; a claim
+// older than its lease is open again. The two kinds differ only in when they
+// flush and what the push says: flushHeldAutoDispatchPushes at a run's start
+// and end ("Auto-dispatch moved N visits"), flushBundledPushes every minute
+// once a tech's changes go quiet (their own push, or one count). Codex #6459
+// r3: one core, not two parallel claim protocols.
+// ---------------------------------------------------------------------------
+const HELD_TYPES = Object.values(TYPE_BY_KIND);
+const HELD_MARK = Object.freeze({ run: 'push_held_run', bundle: 'push_bundle' });
+const heldSql = (mark) => `payload->>'${HELD_MARK[mark]}' IS NOT NULL`;
+const CLAIM_OPEN_SQL = "(payload->>'push_claimed_at' IS NULL OR (payload->>'push_claimed_at')::timestamptz < ?)";
+// A run summary's claim lasts this long: a summary that died between its
 // claim and the provider handoff leaves its rows recoverable after it.
 const HELD_CLAIM_LEASE_MS = 10 * 60 * 1000;
+const parsedPayload = (row) => ({ ...row, payload: typeof row.payload === 'string' ? JSON.parse(row.payload) : (row.payload || {}) });
 
-// Claim the held cards (all of them, or one run's) in ONE update — so two
-// instances never push the same batch — and send each tech one push counting
-// theirs. The held marker stays until that tech's push is handed off; a failed
-// send releases the claim, and a crash leaves it to expire, so the next run's
-// start recovers the batch either way (Codex #5786 P2). A card the tech
-// already cleared is not counted: they saw it. The summary gate decided at
-// hold time; only the notifications kill switch stops a held batch.
+// Claim held cards of one kind in ONE update, under `token`. `runId` /
+// `technicianId` narrow it. Resolves to the claimed rows, payload parsed.
+async function claimHeld({ mark, runId = null, technicianId = null, leaseMs, at, token }) {
+  const rows = await db('tech_notifications')
+    .whereIn('type', HELD_TYPES)
+    .whereNull('dismissed_at')
+    .whereRaw(heldSql(mark))
+    .modify((q) => {
+      if (runId) q.whereRaw("payload->>'push_held_run' = ?", [String(runId)]);
+      if (technicianId) q.where('technician_id', technicianId);
+    })
+    .whereRaw(CLAIM_OPEN_SQL, [new Date(at.getTime() - leaseMs)])
+    .update({
+      payload: db.raw("payload || jsonb_build_object('push_claimed_at', ?::text, 'push_claim', ?::text)", [at.toISOString(), token]),
+      updated_at: at,
+    })
+    .returning(['id', 'technician_id', 'payload', 'created_at']);
+  return rows.filter((row) => row && row.technician_id).map(parsedPayload);
+}
+
+// Renew this owner's claim (a long fan-out keeps its lease) and say whether
+// it still holds every card: past its lease a later sweep may have taken them
+// over, and then that sweep owns their push and their cleanup.
+async function renewHeld(ids, token) {
+  const now = new Date();
+  const rows = await db('tech_notifications').whereIn('id', ids).whereRaw("payload->>'push_claim' = ?", [token])
+    .update({ payload: db.raw("jsonb_set(payload, '{push_claimed_at}', to_jsonb(?::text))", [now.toISOString()]), updated_at: now })
+    .returning(['id']);
+  return rows.length === ids.length;
+}
+
+// Clear (`done`: the push went out, or nothing is left to say) or release
+// (another try) cards this owner still holds; a later owner's claim is never
+// touched.
+async function settleHeld(ids, token, { mark, done }) {
+  if (!ids.length) return;
+  await db('tech_notifications').whereIn('id', ids).whereRaw("payload->>'push_claim' = ?", [token])
+    .update({
+      payload: db.raw(done ? `payload - '${HELD_MARK[mark]}' - 'push_claimed_at' - 'push_claim'` : "payload - 'push_claimed_at' - 'push_claim'"),
+      updated_at: new Date(),
+    });
+}
+
+// Clear after a push went out. A failed clear is never a failed send: the
+// cards are not released for another try (Codex #6459 r2); it is tried once
+// more, and should that fail too the claim runs out after its lease and a
+// later flush may push once more (the database was refusing writes; a second
+// push beats a lost one).
+async function clearAfterPush(ids, token, mark, who) {
+  await settleHeld(ids, token, { mark, done: true })
+    .catch(() => settleHeld(ids, token, { mark, done: true }))
+    .catch((err) => logger.error(`[tech-visit-notifications] held push clear failed for ${who} (${errorTag(err)}) after its push`));
+}
+
+// The notifications kill switch DROPS held cards (no push now, none later
+// when it comes back on) — the same outcome as a per-visit push under it
+// (Codex #5786 P2).
+async function dropHeld(mark, runId = null) {
+  await db('tech_notifications')
+    .whereIn('type', HELD_TYPES)
+    .whereRaw(heldSql(mark))
+    .modify((q) => { if (runId) q.whereRaw("payload->>'push_held_run' = ?", [String(runId)]); })
+    .update({ payload: db.raw(`payload - '${HELD_MARK[mark]}' - 'push_claimed_at' - 'push_claim'`), updated_at: new Date() });
+}
+
+// A held push's provider outcome, one rule for both kinds: delivered to a
+// device, or the tech has none (a retry could never land) = done; every
+// device refused (the sender reports provider failures, it does not throw
+// them) = throw, so the cards are released for a retry (pre-push audit P1).
+function heldPushDelivered(result) {
+  const total = Number(result?.subscriptions) || 0;
+  if (total > 0 && !(Number(result?.sent) > 0)) throw new Error(`no device accepted the push (${total} tried)`);
+  return total > 0;
+}
+
+// The run summary: claim the held cards (all of them, or one run's) and send
+// each tech one push counting theirs. The held marker stays until that tech's
+// push is handed off; a failed send releases the claim, and a crash leaves it
+// to expire, so the next run's start recovers the batch either way (Codex
+// #5786 P2). A card the tech already cleared is not counted: they saw it.
+// The summary gate decided at hold time; only the notifications kill switch
+// stops a held batch.
 async function flushHeldAutoDispatchPushes({ runId = null, tag }) {
   if (!enabled()) {
-    // The notifications kill switch DROPS held batches (no push now, none
-    // later when it comes back on) — the same outcome as a per-visit push
-    // under it (Codex #5786 P2).
-    await db('tech_notifications')
-      .whereIn('type', Object.values(TYPE_BY_KIND))
-      .whereRaw("payload->>'push_held_run' IS NOT NULL")
-      .modify((q) => { if (runId) q.whereRaw("payload->>'push_held_run' = ?", [String(runId)]); })
-      .update({ payload: db.raw("payload - 'push_held_run' - 'push_claimed_at'"), updated_at: new Date() });
+    await dropHeld('run', runId);
     return { pushed: 0 };
   }
-  const now = new Date();
-  const claimed = await db('tech_notifications')
-    .whereIn('type', Object.values(TYPE_BY_KIND))
-    .whereNull('dismissed_at')
-    .whereRaw("payload->>'push_held_run' IS NOT NULL")
-    .modify((q) => { if (runId) q.whereRaw("payload->>'push_held_run' = ?", [String(runId)]); })
-    .whereRaw("(payload->>'push_claimed_at' IS NULL OR (payload->>'push_claimed_at')::timestamptz < ?)", [new Date(now.getTime() - HELD_CLAIM_LEASE_MS)])
-    .update({ payload: db.raw("payload || jsonb_build_object('push_claimed_at', ?::text)", [now.toISOString()]), updated_at: now })
-    .returning(['id', 'technician_id']);
+  const token = require('crypto').randomUUID();
+  const claimed = await claimHeld({ mark: 'run', runId, leaseMs: HELD_CLAIM_LEASE_MS, at: new Date(), token });
   const byTech = new Map();
   for (const row of claimed) {
-    if (!row || !row.technician_id) continue;
     const key = String(row.technician_id);
-    if (!byTech.has(key)) byTech.set(key, []);
-    byTech.get(key).push(row.id);
+    byTech.set(key, [...(byTech.get(key) || []), row.id]);
   }
   const PushService = require('./push-notifications');
   let pushed = 0;
   for (const [technicianId, ids] of byTech) {
     const n = ids.length;
+    let delivered;
     try {
-      const result = await PushService.sendToAdminUser(technicianId, {
+      delivered = heldPushDelivered(await PushService.sendToAdminUser(technicianId, {
         title: `Auto-dispatch moved ${n} visit${n === 1 ? '' : 's'}`,
         body: '',
         url: '/admin/today',
         tag,
         priority: 'high',
-      });
-      // Delivered to a device, or the tech has none (a retry could never
-      // land): the batch is done. Every device failed: keep it for a retry
-      // (pre-push audit P1 — the sender reports provider failures, it does
-      // not throw them).
-      const total = Number(result?.subscriptions) || 0;
-      if (total > 0 && !(Number(result?.sent) > 0)) throw new Error(`no device accepted the push (${total} tried)`);
-      await db('tech_notifications').whereIn('id', ids)
-        .update({ payload: db.raw("payload - 'push_held_run' - 'push_claimed_at'"), updated_at: new Date() });
-      if (total > 0) pushed += 1;
+      }));
     } catch (err) {
       logger.warn(`[tech-visit-notifications] auto-dispatch summary push failed for tech ${technicianId}: ${err.message}`);
-      await db('tech_notifications').whereIn('id', ids)
-        .update({ payload: db.raw("payload - 'push_claimed_at'"), updated_at: new Date() })
+      await settleHeld(ids, token, { mark: 'run', done: false })
         .catch((releaseErr) => logger.warn(`[tech-visit-notifications] held claim release failed (${errorTag(releaseErr)}); it expires on its own`));
+      continue;
     }
+    if (delivered) pushed += 1;
+    await clearAfterPush(ids, token, 'run', `tech ${technicianId}`);
   }
   return { pushed };
 }
@@ -787,69 +861,6 @@ function bundleTitle(kinds) {
   if (only === 'cancelled') return `${n} visits on your route were cancelled`;
   return `${n} visits on your route changed`;
 }
-
-const BUNDLE_HELD_SQL = "payload->>'push_bundle' IS NOT NULL";
-const CLAIM_OPEN_SQL = "(payload->>'push_claimed_at' IS NULL OR (payload->>'push_claimed_at')::timestamptz < ?)";
-
-// The held cards of every tech whose bundle is due — no new card for
-// BUNDLE_QUIET_MS, or the oldest waiting BUNDLE_MAX_WAIT_MS — by tech. Not
-// claimed here: each tech's cards are claimed right before their own push
-// (claimBundle), so a long sweep never holds a claim it is not using.
-async function dueBundles(now) {
-  const held = await db('tech_notifications')
-    .whereIn('type', Object.values(TYPE_BY_KIND))
-    .whereNull('dismissed_at')
-    .whereRaw(BUNDLE_HELD_SQL)
-    .whereRaw(CLAIM_OPEN_SQL, [new Date(now.getTime() - BUNDLE_CLAIM_LEASE_MS)])
-    .select('id', 'technician_id', 'created_at');
-  const byTech = new Map();
-  for (const row of held) {
-    if (!row || !row.technician_id) continue;
-    const key = String(row.technician_id);
-    const at = new Date(row.created_at).getTime();
-    const tech = byTech.get(key) || { ids: [], oldest: at, newest: at };
-    byTech.set(key, { ids: [...tech.ids, row.id], oldest: Math.min(tech.oldest, at), newest: Math.max(tech.newest, at) });
-  }
-  return new Map([...byTech]
-    .filter(([, { oldest, newest }]) => now.getTime() - newest >= BUNDLE_QUIET_MS || now.getTime() - oldest >= BUNDLE_MAX_WAIT_MS)
-    .map(([technicianId, { ids }]) => [technicianId, ids]));
-}
-
-// Claim one tech's due cards in ONE update, under this sweep's own token, so
-// two instances never push the same cards. Resolves to the rows the sweep
-// now owns, payload parsed.
-async function claimBundle(ids, claimAt, token) {
-  const claimed = await db('tech_notifications')
-    .whereIn('id', ids)
-    .whereNull('dismissed_at')
-    .whereRaw(BUNDLE_HELD_SQL)
-    .whereRaw(CLAIM_OPEN_SQL, [new Date(claimAt.getTime() - BUNDLE_CLAIM_LEASE_MS)])
-    .update({
-      payload: db.raw("payload || jsonb_build_object('push_claimed_at', ?::text, 'push_claim', ?::text)", [claimAt.toISOString(), token]),
-      updated_at: claimAt,
-    })
-    .returning(['id', 'technician_id', 'payload', 'created_at']);
-  return claimed.filter((row) => row && row.technician_id)
-    .map((row) => ({ ...row, payload: typeof row.payload === 'string' ? JSON.parse(row.payload) : (row.payload || {}) }));
-}
-
-// Do the cards still carry this sweep's token? A sweep that ran past its
-// lease may have lost them to a later sweep, which then owns their push and
-// their cleanup (pre-push audit P1).
-async function stillOwned(ids, token) {
-  const rows = await db('tech_notifications').whereIn('id', ids).whereRaw("payload->>'push_claim' = ?", [token]).select('id');
-  return rows.length === ids.length;
-}
-
-// Clear (sent, or nothing left to say) or release (try again) cards this
-// sweep still owns; a later sweep's claim is never touched.
-async function settleOwned(ids, token, expr) {
-  if (!ids.length) return;
-  await db('tech_notifications').whereIn('id', ids).whereRaw("payload->>'push_claim' = ?", [token])
-    .update({ payload: db.raw(expr), updated_at: new Date() });
-}
-const CLEAR_SQL = "payload - 'push_bundle' - 'push_claimed_at' - 'push_claim'";
-const RELEASE_SQL = "payload - 'push_claimed_at' - 'push_claim'";
 
 // A held card as the notice its own push would have carried.
 function bundledNotice(technicianId, row) {
@@ -941,16 +952,56 @@ class BundleChanged extends Error {}
 // A later sweep took the cards over: it owns their push and their cleanup.
 class BundleLost extends Error {}
 
+// A tech's bundle is due once no new card has landed for BUNDLE_QUIET_MS, or
+// once its oldest card has waited BUNDLE_MAX_WAIT_MS.
+function bundleSpan(rows) {
+  const times = rows.map((row) => new Date(row.created_at).getTime());
+  return { oldest: Math.min(...times), newest: Math.max(...times) };
+}
+const bundleDue = ({ oldest, newest }, now) => now.getTime() - newest >= BUNDLE_QUIET_MS || now.getTime() - oldest >= BUNDLE_MAX_WAIT_MS;
+
+// The techs whose held bundle is due. Nothing is claimed here: each tech's
+// cards are claimed right before their own push.
+async function dueBundleTechs(now) {
+  const held = await db('tech_notifications')
+    .whereIn('type', HELD_TYPES)
+    .whereNull('dismissed_at')
+    .whereRaw(heldSql('bundle'))
+    .whereRaw(CLAIM_OPEN_SQL, [new Date(now.getTime() - BUNDLE_CLAIM_LEASE_MS)])
+    .select('id', 'technician_id', 'created_at');
+  const byTech = new Map();
+  for (const row of held) {
+    if (!row || !row.technician_id) continue;
+    const key = String(row.technician_id);
+    byTech.set(key, [...(byTech.get(key) || []), row]);
+  }
+  return [...byTech].filter(([, rows]) => bundleDue(bundleSpan(rows), now)).map(([technicianId]) => technicianId);
+}
+
+// A held card of this tech that is not in the bundle: a change that landed
+// after the claim (Codex #6459 r3).
+async function heldOutsideBundle(technicianId, ids) {
+  return !!(await db('tech_notifications')
+    .where('technician_id', technicianId)
+    .whereIn('type', HELD_TYPES)
+    .whereNull('dismissed_at')
+    .whereRaw(heldSql('bundle'))
+    .whereNotIn('id', ids)
+    .first('id'));
+}
+
 // ONE push for one tech's claimed cards. Resolves true when a device got it,
 // false when nothing is left to say (the bundle closes). Throws when it must
-// be tried again: the provider failed, every device refused (the run
-// summary's rule), or the bundle changed before ANY device accepted the push
-// — a visit went stale or was cleared, so the count or the kind it names is
-// no longer right (Codex #6459 r1 and its pre-push audit: a device that
-// failed does not count as one that has it). Once a device has it, a later
-// device is skipped only when nothing at all still stands, as for any
-// per-visit push: a retry would push the first device twice.
-async function sendBundle(technicianId, rows, token) {
+// be tried again: the provider failed, every device refused, or the bundle
+// changed before ANY device accepted the push — a visit went stale or was
+// cleared, or a new change for the tech landed (unless the bundle is past its
+// longest wait, which goes out as it is) — so the count or the kind would be
+// wrong (Codex #6459 r1, r3; a device that failed is not one that has it).
+// Each device's handoff first renews the claim, so a long fan-out keeps it,
+// and stops if a later sweep took the cards over (BundleLost). Once a device
+// has it, a later device is skipped only when nothing at all still stands,
+// as for any per-visit push: a retry would push the first device twice.
+async function sendBundle(technicianId, rows, token, { pastLongestWait }) {
   const plan = await bundlePlan(technicianId, rows, db);
   if (!plan.length) return false;
   const ids = rows.map((row) => row.id);
@@ -959,12 +1010,13 @@ async function sendBundle(technicianId, rows, token) {
   let lost = false;
   const beforeHandoff = async () => {
     try {
-      if (!(await stillOwned(ids, token))) {
+      if (!(await renewHeld(ids, token))) {
         lost = true;
         return false;
       }
       const now = await bundlePlan(technicianId, rows, db);
-      if (delivered === 0 && planSignature(now) !== planSignature(plan)) {
+      if (delivered === 0 && (planSignature(now) !== planSignature(plan)
+        || (!pastLongestWait && await heldOutsideBundle(technicianId, ids)))) {
         changed = true;
         return false;
       }
@@ -983,46 +1035,48 @@ async function sendBundle(technicianId, rows, token) {
   if (changed) throw new BundleChanged('the bundle changed before any device had it');
   // Stopped part-way: done either way, and pushed when a device has it.
   if (result?.superseded) return delivered > 0;
-  const total = Number(result?.subscriptions) || 0;
-  if (total > 0 && !(Number(result?.sent) > 0)) throw new Error(`no device accepted the push (${total} tried)`);
-  return total > 0;
+  return heldPushDelivered(result);
 }
 
 /**
- * The every-minute sweep (scheduler.js) for bundled pushes: each tech whose
- * held cards are due gets ONE push (sendBundle), their cards claimed right
- * before it under this sweep's own token. No lock is held across a push
- * (owner ruling 2026-09-30, #5421); a sweep that lost its cards to a later
- * one past the lease stops and leaves them to it. A push to try again
- * releases the claim for the next tick; a card that has waited
- * BUNDLE_GIVE_UP_MS is dropped instead, alone — a newer card in the same
- * bundle keeps its retries (Codex #6459 r1). It runs with the gate off too,
- * so cards held before a flip still go out; only the notifications kill
- * switch drops them. Best-effort; never throws.
+ * The every-minute sweep (scheduler.js) for bundled pushes. For each tech
+ * whose bundle is due it claims EVERY held card of that tech right before
+ * their push (a card that landed after the due read is in it; one that makes
+ * the tech no longer quiet sends the claim back for the next tick), then
+ * sends ONE push (sendBundle). No lock is held across a push (owner ruling
+ * 2026-09-30, #5421). A push to try again releases the claim for the next
+ * tick; a card that has waited BUNDLE_GIVE_UP_MS is dropped instead, alone —
+ * a newer card in the same bundle keeps its retries (Codex #6459 r1). It runs
+ * with the gate off too, so cards held before a flip still go out; only the
+ * notifications kill switch drops them. Best-effort; never throws.
  */
 async function flushBundledPushes({ now = new Date() } = {}) {
   try {
     if (!enabled()) {
-      await db('tech_notifications')
-        .whereIn('type', Object.values(TYPE_BY_KIND))
-        .whereRaw(BUNDLE_HELD_SQL)
-        .update({ payload: db.raw(CLEAR_SQL), updated_at: now });
+      await dropHeld('bundle');
       return { pushed: 0 };
     }
     let pushed = 0;
-    for (const [technicianId, dueIds] of await dueBundles(now)) {
+    for (const technicianId of await dueBundleTechs(now)) {
       const token = require('crypto').randomUUID();
       let rows = [];
       try {
-        rows = await claimBundle(dueIds, new Date(Math.max(now.getTime(), Date.now())), token);
+        rows = await claimHeld({ mark: 'bundle', technicianId, leaseMs: BUNDLE_CLAIM_LEASE_MS, at: new Date(Math.max(now.getTime(), Date.now())), token });
       } catch (err) {
         logger.warn(`[tech-visit-notifications] bundle claim failed for tech ${technicianId} (${errorTag(err)}); next tick`);
       }
       if (!rows.length) continue;
       const ids = rows.map((row) => row.id);
-      let sent;
+      const span = bundleSpan(rows);
+      if (!bundleDue(span, now)) {
+        // A change landed between the due read and the claim: not quiet any more.
+        await settleHeld(ids, token, { mark: 'bundle', done: false })
+          .catch((releaseErr) => logger.warn(`[tech-visit-notifications] bundle claim release failed (${errorTag(releaseErr)}); it expires on its own`));
+        continue;
+      }
+      let delivered;
       try {
-        sent = await sendBundle(technicianId, rows, token);
+        delivered = await sendBundle(technicianId, rows, token, { pastLongestWait: now.getTime() - span.oldest >= BUNDLE_MAX_WAIT_MS });
       } catch (err) {
         if (err instanceof BundleLost) {
           logger.info(`[tech-visit-notifications] bundle for tech ${technicianId} was taken over by a later sweep`);
@@ -1032,21 +1086,14 @@ async function flushBundledPushes({ now = new Date() } = {}) {
         const retry = ids.filter((id) => !expired.includes(id));
         if (err instanceof BundleChanged) logger.info(`[tech-visit-notifications] bundle for tech ${technicianId} changed before sending; composing again next tick`);
         else logger.warn(`[tech-visit-notifications] bundled push failed for tech ${technicianId}: ${err.message}; ${retry.length} retried next tick, ${expired.length} dropped after an hour`);
-        await settleOwned(expired, token, CLEAR_SQL)
+        await settleHeld(expired, token, { mark: 'bundle', done: true })
           .catch((clearErr) => logger.warn(`[tech-visit-notifications] bundle drop failed (${errorTag(clearErr)}); retried next tick`));
-        await settleOwned(retry, token, RELEASE_SQL)
+        await settleHeld(retry, token, { mark: 'bundle', done: false })
           .catch((releaseErr) => logger.warn(`[tech-visit-notifications] bundle claim release failed (${errorTag(releaseErr)}); it expires on its own`));
         continue;
       }
-      if (sent) pushed += 1;
-      // Sent, or nothing left to say: clear. A failed clear is never a failed
-      // send — the cards are not released for another try (Codex #6459 r2);
-      // it is tried once more. Should that fail too, the claim runs out after
-      // BUNDLE_CLAIM_LEASE_MS and a later sweep may push once more: the
-      // database was refusing writes, and a second push beats a lost one.
-      await settleOwned(ids, token, CLEAR_SQL)
-        .catch(() => settleOwned(ids, token, CLEAR_SQL))
-        .catch((clearErr) => logger.error(`[tech-visit-notifications] bundle clear failed for tech ${technicianId} (${errorTag(clearErr)}) after its push`));
+      if (delivered) pushed += 1;
+      await clearAfterPush(ids, token, 'bundle', `tech ${technicianId}`);
     }
     return { pushed };
   } catch (err) {
