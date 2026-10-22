@@ -100,13 +100,13 @@ describe('session epoch guards', () => {
     expect(authApi.customer.cancelled).toBe(true);
   });
 
-  it('a contact login releases this device\'s native registration instead of flushing a token (codex #6363 r4)', async () => {
+  it('a contact login flushes the device token like a holder (the subscribe route re-stamps the device to the contact)', async () => {
     const { flushNativePushToken } = await import('../native/nativePush');
     stubLocalStorage({ waves_token: 'fixture-token' });
     api.getMe.mockResolvedValueOnce({ id: 'fixture-customer', actor: { kind: 'contact', slot: 1 } });
     await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
-    expect(deactivateNativePushToken).toHaveBeenCalledTimes(1);
-    expect(flushNativePushToken).not.toHaveBeenCalled();
+    expect(flushNativePushToken).toHaveBeenCalledTimes(1);
+    expect(deactivateNativePushToken).not.toHaveBeenCalled();
   });
 
   it('clears the badge before waiting for native sign-out cleanup', async () => {

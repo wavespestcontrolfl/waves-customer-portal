@@ -208,9 +208,8 @@ const CONTACT_READS = [
   ['GET', '/api/documents'], ['GET', '/api/documents/service-report/svc-1'], ['GET', '/api/documents/doc-1/download'],
   ['GET', '/api/tracking/active'], ['GET', '/api/tracking/today'], ['GET', '/api/tracking/maps-key'],
   ['GET', '/api/notifications/contact-preferences'], ['PUT', '/api/notifications/contact-preferences'],
+  ['GET', '/api/push/status'], ['POST', '/api/push/native-subscribe'], ['POST', '/api/push/native-unsubscribe'],
   ['POST', '/api/customer/activity/page-view'], ['POST', '/api/customer/activity/heartbeat'], ['POST', '/api/customer/activity/push-open'],
-  // Token-scoped release of this device's holder registration on contact login (codex r4).
-  ['POST', '/api/push/native-unsubscribe'],
 ];
 const HOLDER_ONLY = [
   ['GET', '/api/billing'], ['GET', '/api/billing/balance'], ['GET', '/api/billing/cards'], ['POST', '/api/billing/cards'],
@@ -225,10 +224,9 @@ const HOLDER_ONLY = [
   ['GET', '/api/notifications/property-preferences'], ['PUT', '/api/notifications/property-preferences/cust-holder'],
   ['POST', '/api/requests/restart-plan'], ['GET', '/api/requests'], ['POST', '/api/requests'],
   ['GET', '/api/referrals'],
-  ['POST', '/api/push/native-subscribe'], ['GET', '/api/push/status'],
   ['GET', '/api/customer-notifications/unread-count'],
   ['POST', '/api/ai/chat'],
-  ['POST', '/api/auth/select-property'], ['PUT', '/api/auth/credit-preference'], ['DELETE', '/api/auth/account'],
+  ['PUT', '/api/auth/credit-preference'], ['DELETE', '/api/auth/account'],
 ];
 
 describe('contact login — who a number signs in as', () => {
@@ -448,6 +446,11 @@ describe('contact session — route allow-list', () => {
   });
 });
 
+// /auth/select-property validates customerId as a UUID.
+const OTHER_ID = '11111111-1111-4111-8111-111111111111';
+const STRANGER_ID = '22222222-2222-4222-8222-222222222222';
+const SIBLING_ID = '33333333-3333-4333-8333-333333333333';
+
 describe('contact session — lifecycle', () => {
   test('the refresh token rotates and the new access token is still a contact session', async () => {
     const first = await login(CONTACT_PHONE);
@@ -563,7 +566,76 @@ describe('contact session — lifecycle', () => {
     expect((await call('GET', '/api/auth/me', bearerOf(holder.body.token))).status).toBe(200);
   });
 
-  test('a contact token cannot switch profiles (no select-property), and a forged claim on a non-contact number is refused', async () => {
+  test('a contact on two rows lists both and can switch between them; a row that does not list them is refused', async () => {
+    // A second, UNRELATED account (different account_id) that also lists Sam.
+    tables.customers.push({ ...HOLDER, id: OTHER_ID, account_id: OTHER_ID, phone: '+19415550909', first_name: 'Robin', created_at: '2025-06-01',
+      service_contact2_name: null, service_contact2_phone: null, service_contact2_role: null });
+    tables.customer_accounts.push({ id: OTHER_ID });
+    const first = await login(CONTACT_PHONE);
+    expect(first.body.customer.id).toBe('cust-holder');
+    expect(first.body.properties.map((p) => p.id)).toEqual(['cust-holder', OTHER_ID]);
+    // The whole list is one customer_properties read, not one per row (codex r2 P2).
+    const reads = [];
+    db.mockImplementation((table) => { reads.push(table); return builder(table); });
+    const listed = await call('GET', '/api/auth/properties', bearerOf(first.body.token));
+    installDb();
+    expect(listed.body.properties.map((p) => p.id)).toEqual(['cust-holder', OTHER_ID]);
+    expect(reads.filter((t) => t === 'customer_properties')).toHaveLength(1);
+
+    const switched = await call('POST', '/api/auth/select-property', bearerOf(first.body.token), { customerId: OTHER_ID, refreshToken: first.body.refreshToken });
+    expect(switched.status).toBe(200);
+    expect(switched.body.customer.id).toBe(OTHER_ID);
+    expect(switched.body.actor).toEqual(expect.objectContaining({ kind: 'contact', slot: 1 }));
+    const me = await call('GET', '/api/auth/me', bearerOf(switched.body.token));
+    expect(me.status).toBe(200);
+    expect(me.body.id).toBe(OTHER_ID);
+    expect(me.body.actor.kind).toBe('contact');
+    expect((await call('GET', '/api/billing', bearerOf(switched.body.token))).status).toBe(403);
+    // The moved family still refreshes, as a contact session on the target.
+    const refreshed = await call('POST', '/api/auth/refresh', {}, { refreshToken: switched.body.refreshToken });
+    expect(refreshed.status).toBe(200);
+    expect((await call('GET', '/api/auth/me', bearerOf(refreshed.body.token))).body.id).toBe(OTHER_ID);
+
+    // A row that does not list this number is never a switch target.
+    tables.customers.push({ ...HOLDER, id: STRANGER_ID, account_id: STRANGER_ID, phone: '+19415550808',
+      service_contact_name: null, service_contact_phone: null, service_contact2_name: null, service_contact2_phone: null, service_contact2_role: null });
+    const refused = await call('POST', '/api/auth/select-property', bearerOf(switched.body.token), { customerId: STRANGER_ID, refreshToken: refreshed.body.refreshToken });
+    expect(refused.status).toBe(403);
+    // …and the holder's own sibling profile is not reachable through a forged target either.
+    tables.customers.push({ ...HOLDER, id: SIBLING_ID, account_id: 'cust-holder', is_primary_profile: false, phone: '+19415550101',
+      service_contact_name: null, service_contact_phone: null, service_contact2_name: null, service_contact2_phone: null, service_contact2_role: null });
+    const sibling = await call('POST', '/api/auth/select-property', bearerOf(switched.body.token), { customerId: SIBLING_ID, refreshToken: refreshed.body.refreshToken });
+    expect(sibling.status).toBe(403);
+  });
+
+  test('a contact switch locks both rows and re-reads the target under the lock: a removal that lands at the lock refuses the switch and mints nothing (codex r1 P1)', async () => {
+    tables.customers.push({ ...HOLDER, id: OTHER_ID, account_id: OTHER_ID, phone: '+19415550909', first_name: 'Robin', created_at: '2025-06-01',
+      service_contact2_name: null, service_contact2_phone: null, service_contact2_role: null });
+    tables.customer_accounts.push({ id: OTHER_ID });
+    const first = await login(CONTACT_PHONE);
+    const familiesBefore = tables.customer_refresh_tokens.length;
+    let locks = 0;
+    // Stands in for the target's holder removing Sam, committed between the
+    // request's lookup and the rotation's lock.
+    onCustomersLock = () => {
+      locks += 1;
+      const other = tables.customers.find((r) => r.id === OTHER_ID);
+      Object.assign(other, { service_contact_name: null, service_contact_phone: null, service_contact_email: null });
+    };
+    const switched = await call('POST', '/api/auth/select-property', bearerOf(first.body.token), { customerId: OTHER_ID, refreshToken: first.body.refreshToken });
+    onCustomersLock = null;
+    expect(locks).toBeGreaterThan(0);
+    // The route's own (unlocked) target check passed; the rotation, re-reading
+    // the target under the lock, refuses the exchange — no credentials.
+    expect(switched.status).toBe(401);
+    expect(switched.body.token).toBeUndefined();
+    expect(tables.customer_refresh_tokens.filter((r) => String(r.customer_id) === OTHER_ID)).toHaveLength(0);
+    expect(tables.customer_refresh_tokens.length).toBe(familiesBefore);
+    // The contact's own session on the first row is untouched.
+    expect((await call('GET', '/api/auth/me', bearerOf(first.body.token))).status).toBe(200);
+  });
+
+  test('a forged contact claim on a non-contact number is refused', async () => {
     const forged = auth.generateToken('cust-holder', 'cust-holder', 'fam-x', { contactKey: '9415559999' });
     expect((await call('GET', '/api/auth/me', bearerOf(forged))).status).toBe(401);
     // The holder's own number as a "contact" claim is refused too.
