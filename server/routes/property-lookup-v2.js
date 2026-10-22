@@ -6522,6 +6522,14 @@ function isValidSatelliteVisionAnalysis(analysis) {
   return Object.entries(enums).every(([field, values]) => values.includes(analysis[field]));
 }
 
+// Hedge linear feet (owner 2026-10-21, spray-volume groundwork) is a new,
+// OPTIONAL read: a non-numeric or negative value is dropped rather than
+// failing the whole analysis, so an older model answer still validates.
+function dropInvalidOptionalHedgeRead(normalized) {
+  const v = normalized.estimatedHedgeLinearFt;
+  if (v != null && !(Number.isFinite(v) && v >= 0)) delete normalized.estimatedHedgeLinearFt;
+}
+
 function normalizeSatelliteAnalysis(analysis = {}) {
   const normalized = { ...analysis };
   if (normalized.imperviousSurfacePercent == null && normalized.imperviosSurfacePercent != null) {
@@ -6538,13 +6546,7 @@ function normalizeSatelliteAnalysis(analysis = {}) {
       normalized[field] = Number(value);
     }
   }
-  // Hedge linear feet (owner 2026-10-21, spray-volume groundwork) is a new,
-  // OPTIONAL read: a non-numeric or negative value is dropped rather than
-  // failing the whole analysis, so an older model answer still validates.
-  if (normalized.estimatedHedgeLinearFt != null
-    && !(Number.isFinite(normalized.estimatedHedgeLinearFt) && normalized.estimatedHedgeLinearFt >= 0)) {
-    delete normalized.estimatedHedgeLinearFt;
-  }
+  dropInvalidOptionalHedgeRead(normalized);
   if (!normalized.waterProximity && normalized.nearWater) normalized.waterProximity = normalized.nearWater;
   if (!normalized.nearWater && normalized.waterProximity) normalized.nearWater = normalized.waterProximity;
   if (!normalized.waterDistance) normalized.waterDistance = 'NONE';
