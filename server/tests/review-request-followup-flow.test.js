@@ -1304,7 +1304,8 @@ describe('review request follow-up flow', () => {
         const slotSub = { whereRaw: jest.fn(() => slotSub) };
         listedSub.orWhere.mock.calls[0][0].call(slotSub);
         expect(slotSub.whereRaw).toHaveBeenCalledWith(expect.stringContaining('customers.service_contact_phone'), ['9415550202']);
-        expect(slotSub.whereRaw).toHaveBeenCalledWith(expect.stringContaining('customers.service_contact_email'), ['megan@example.com', 'megan@example.com']);
+        // The slot's own address, else the holder's current one (never a stale address a cleared slot once had — codex r28 security P2).
+        expect(slotSub.whereRaw).toHaveBeenCalledWith(expect.stringMatching(/customers\.service_contact_email.*customers\.email/), ['megan@example.com']);
       } finally {
         delete process.env.GATE_CONTACT_LOGIN;
       }

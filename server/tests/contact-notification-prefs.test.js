@@ -249,9 +249,13 @@ describe('contactDeclinesChannel (single-recipient resolvers: review outreach)',
     // Slot 1 now carries another address: the resolved address is no longer Sam's.
     customer = { ...CUSTOMER, service_contact_email: 'other@example.com' };
     expect(await ContactPrefs.contactDeclinesChannel('cust-1', SAM, 'email', opts)).toBe(true);
-    // …but a slot with no address of its own (the holder's fallback mailbox) still passes, and texts never look at the address.
+    // A slot whose address the holder cleared resolves to the HOLDER's current
+    // mailbox now (getServiceContact's fallback): the stale address is held,
+    // the holder-fallback address passes (codex r28 security P2); texts never
+    // look at the address.
     customer = { ...CUSTOMER, service_contact_email: null };
-    expect(await ContactPrefs.contactDeclinesChannel('cust-1', SAM, 'email', opts)).toBe(false);
+    expect(await ContactPrefs.contactDeclinesChannel('cust-1', SAM, 'email', opts)).toBe(true);
+    expect(await ContactPrefs.contactDeclinesChannel('cust-1', { ...SAM, email: 'pat@example.com' }, 'email', opts)).toBe(false);
     customer = { ...CUSTOMER, service_contact_email: 'other@example.com' };
     expect(await ContactPrefs.contactDeclinesChannel('cust-1', SAM, 'sms', opts)).toBe(false);
     // The holder's own number as the slot-1 fallback identity is not slot-bound.

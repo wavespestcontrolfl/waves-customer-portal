@@ -34,7 +34,7 @@ const EmailTemplateLibrary = require('./email-template-library');
 const { TZ, parseETDateTime, etDateString, formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
 const { portalUrl } = require('../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
-const { withAccountPrimaryContact } = require('./customer-contact');
+const { withAccountPrimaryContact, getServiceContactSlots, SERVICE_CONTACT_COLUMNS } = require('./customer-contact');
 const {
   BASE_TEMPLATE_KEY, SIGNUP_TEMPLATE_KEY, SHORT_TEMPLATE_KEY, SIGNUP_FULL_CATEGORY, SIGNUP_SHORT_CATEGORY,
   QUERY_STATUSES, RETRY_COLUMNS, acceptedForSending, signupGateLive, membershipCoveredBy,
@@ -294,7 +294,7 @@ function renderedCarriesAcceptanceCopy(result) {
 // address always wins. null when there is no usable address anywhere.
 async function resolveRecipient({ customerId, estimateId }) {
   const customer = customerId
-    ? await db('customers').where({ id: customerId }).first('id', 'first_name', 'last_name', 'email', 'account_id', 'is_primary_profile')
+    ? await db('customers').where({ id: customerId }).first('id', 'first_name', 'last_name', 'email', 'account_id', 'is_primary_profile', ...SERVICE_CONTACT_COLUMNS)
     : null;
   const own = usableEmail(customer?.email) ? null : await db('estimates').where({ id: estimateId }).first('customer_name', 'customer_email');
   let email = clean(own ? own.customer_email : customer?.email);
@@ -308,17 +308,24 @@ async function resolveRecipient({ customerId, estimateId }) {
   // premise). The holder's own address and a stranger's pass through; the
   // row's own address (the `own` branch not taken) is the holder's by
   // definition and is never re-checked.
-  // `contactChecked`: the address went through that check and is being sent
-  // to — the send re-reads the same consent at the provider handoff (codex
-  // #6363 r27 P2) since the library's own awaits can straddle a decline.
-  let contactChecked = false;
+  // `handoffCheck`: the address went through that check and is being sent to,
+  // so the send re-reads it at the provider handoff (codex #6363 r27 P2) since
+  // the library's own awaits can straddle a decline — 'slot' when the address
+  // matched one of the row's contact slots at resolution (the handoff then
+  // also requires it to still occupy one, r28 security P2), 'address' when it
+  // matched none (a stranger's estimate address: re-read for a decline only,
+  // never held for being unlisted).
+  let handoffCheck = null;
   if (own && customer && usableEmail(email)) {
     if (await require('./contact-notification-prefs').contactEmailDeclines(customer.id, email)) email = '';
-    else contactChecked = true;
+    else {
+      const lower = email.toLowerCase();
+      handoffCheck = getServiceContactSlots(customer).some((s) => s.email && s.email.toLowerCase() === lower) ? 'slot' : 'address';
+    }
   }
   if (!usableEmail(email) && customer) email = clean((await withAccountPrimaryContact({ ...customer, email: '' })).email);
   if (!usableEmail(email)) return null;
-  return { email, contactChecked, firstName: clean(customer?.first_name || greetingFirstToken({ customerName: own?.customer_name, customer })) || 'there' };
+  return { email, handoffCheck, firstName: clean(customer?.first_name || greetingFirstToken({ customerName: own?.customer_name, customer })) || 'there' };
 }
 
 // One send of the onboarding email: the combined signup variant when given,
@@ -350,12 +357,16 @@ async function sendOnboardingTemplate(ctx, variant) {
     // A contact's address re-checked immediately before the provider call
     // (codex #6363 r27 P2): a decline that lands during the library's own
     // template / idempotency / suppression awaits aborts the send; an
-    // unreadable table aborts too (fail closed). The holder's own address
-    // and a customer-less accept were never checked and are not re-checked.
-    ...(ctx.recipient.contactChecked ? {
+    // unreadable table aborts too (fail closed). An address that matched a
+    // contact slot at resolution must still occupy one (requireSlot, r28
+    // security P2); an unmatched estimate address is only re-read for a
+    // decline. The holder's own address and a customer-less accept were
+    // never checked and are not re-checked.
+    ...(ctx.recipient.handoffCheck ? {
       onQueued: async () => {
         try {
-          return !(await require('./contact-notification-prefs').contactEmailDeclines(ctx.customerId, ctx.recipient.email));
+          return !(await require('./contact-notification-prefs')
+            .contactEmailDeclines(ctx.customerId, ctx.recipient.email, { requireSlot: ctx.recipient.handoffCheck === 'slot' }));
         } catch (err) {
           logger.warn(`[estimate-accepted-email] contact choices unreadable at the handoff for estimate ${ctx.estimateId}: ${err.message}`);
           return false;

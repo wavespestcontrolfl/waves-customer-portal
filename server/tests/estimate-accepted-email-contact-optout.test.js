@@ -86,6 +86,15 @@ test('a contact address is re-checked at the provider handoff (codex r27 P2): a 
   const res = await sendEstimateAcceptedOnboarding({ customerId: 'c1', estimateId: 'est-1', serviceLabel: 'Pest' });
   expect(res).toMatchObject({ sent: false, blocked: true, reason: 'contact_declined' });
   expect(contactEmailDeclines).toHaveBeenCalledTimes(2);
+  // An estimate address that matched NO slot at resolution (a stranger's) is re-read for a decline only.
+  expect(contactEmailDeclines).toHaveBeenLastCalledWith('c1', 'sam@example.com', { requireSlot: false });
+  // One that matched a contact slot must still occupy one at the handoff (codex r28 security P2).
+  jest.clearAllMocks();
+  mockDb({ customerRow: { id: 'c1', first_name: 'Pat', email: 'pat@localhost', is_primary_profile: true, service_contact_phone: '+19415550202', service_contact_email: 'sam@example.com' }, estimateRow: ESTIMATE });
+  contactEmailDeclines.mockResolvedValue(false);
+  EmailTemplates.sendTemplate.mockImplementationOnce(async (opts) => { await opts.onQueued(); return { sent: true, rendered: { text: 'hi' } }; });
+  expect((await sendEstimateAcceptedOnboarding({ customerId: 'c1', estimateId: 'est-1', serviceLabel: 'Pest' })).sent).toBe(true);
+  expect(contactEmailDeclines).toHaveBeenLastCalledWith('c1', 'sam@example.com', { requireSlot: true });
   // An unreadable table at the handoff aborts too (fail closed).
   jest.clearAllMocks();
   mockDb({ customerRow: { id: 'c1', first_name: 'Pat', email: 'pat@localhost', is_primary_profile: true }, estimateRow: ESTIMATE });

@@ -332,14 +332,18 @@ async function filterReportEmailRecipientsByContactPrefs(recipients = [], custom
 // (the slot-1 fallback identity) is never slot-bound.
 // Is the resolved `contact` still one of `customer`'s people for `channel`
 // (pure; `customer` is the row as of now)? The holder's own number is; a slot
-// phone is while a slot carries it and, for email, while that slot's own
-// address (when it has one) is still the resolved address.
+// phone is while a slot carries it and, for email, while the address that
+// slot resolves to NOW — its own address, else the holder's current address
+// (the slot-1 fallback mailbox, customer-contact.js getServiceContact) — is
+// still the resolved address (codex #6363 r28 security P2: an address the
+// holder cleared from the slot is no longer that contact's).
 function contactStillListed(customer, contact, channel) {
   const key = phoneKey(contact.phone);
   if (phoneKey(customer.phone) === key) return true;
   const slot = require('./customer-contact').getServiceContactSlots(customer).find((s) => phoneKey(s.phone) === key);
   if (!slot) return false;
-  return channel !== 'email' || !contact.email || !slot.email || emailKey(slot.email) === emailKey(contact.email);
+  if (channel !== 'email' || !contact.email) return true;
+  return emailKey(slot.email || customer.email) === emailKey(contact.email);
 }
 
 async function contactDeclinesChannel(customerId, contact, channel = 'sms', { dbh = db, requireSlot = false } = {}) {
@@ -507,7 +511,9 @@ async function contactEmailOffPhoneKeys(customerIds = [], { dbh = db } = {}) {
 // `requireSlot` (codex #6363 r27 P2): the claim also requires, as of the
 // same write, that the contact's number still occupies a slot of the customer
 // row (or is the holder's own number — the slot-1 fallback identity) and that
-// the slot's own address, when it has one, is still the resolved address.
+// the address the slot resolves to now — its own, else the holder's current
+// address (the fallback mailbox) — is still the resolved address (r28
+// security P2: a cleared slot address never keeps the stale one authorized).
 const SLOT_PHONE_SQL = (column) => `RIGHT(REGEXP_REPLACE(COALESCE(customers.${column}, ''), '[^0-9]', '', 'g'), 10) = ?`;
 function whereContactEmailAllowed(query, customerIdColumn, contact, { requireSlot = false } = {}) {
   const key = phoneKey(contact && contact.phone);
@@ -528,7 +534,7 @@ function whereContactEmailAllowed(query, customerIdColumn, contact, { requireSlo
         for (const slot of SERVICE_CONTACT_SLOTS) {
           this.orWhere(function slotMatches() {
             this.whereRaw(SLOT_PHONE_SQL(slot.phone), [key]);
-            if (address) this.whereRaw(`LOWER(COALESCE(NULLIF(TRIM(customers.${slot.email}), ''), ?)) = ?`, [address, address]);
+            if (address) this.whereRaw(`LOWER(TRIM(COALESCE(NULLIF(TRIM(customers.${slot.email}), ''), customers.email, ''))) = ?`, [address]);
           });
         }
       });
