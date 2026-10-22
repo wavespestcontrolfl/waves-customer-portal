@@ -127,7 +127,6 @@
  *   GATE_CARD_HOLD_PARK_ON_CANCEL=true (cancelling a visit with a one-time card hold PARKS the hold for the rebooked visit instead of releasing it; fees/offboarding/revocation unchanged)
  *   GATE_PEST_STRANDED_RECOVERY=<ISO timestamp> (stranded-activation recovery sweep covers PEST parents created at/after this epoch; set AFTER a rollout completes so old-instance bookings from the Railway overlap can never match; unset/invalid = pest excluded — owner ruling 2026-08-27)
  *   GATE_COMPLETION_AUTOPAY_CHARGE=true (completion auto-charge extends to EVERY autopay customer's collectible self-pay completion invoice — hard-capped at the visit's accepted price or membership dues rate; no anchor or above-anchor → office review bell, never an uncapped charge)
- *   GATE_COMPLETION_COMMS_GUARD=true (flag completions with open customer comms — admin bell + dispatch alert, never blocks)
  *   GATE_LEAD_TO_CASH_SWEEP=true (daily 6:55 ET read-only lead-to-cash invariants sweep — FIX: email to contact@ only on findings; never writes)
  *   GATE_RESCHEDULE_INTENT_FLAGS=true (real-time reschedule/away SMS flag rows + owner bell/push — owner silenced the lane 2026-08-15)
  *   GATE_CONTACT_CORRECTION=true (auto-apply customer-stated name/email/address corrections from inbound SMS and processed calls)
@@ -3586,18 +3585,6 @@ const gates = {
   // promises and pauses redemption. Kill switch: unset or any non-'true'
   // value.
   inspectionCredit: process.env.GATE_INSPECTION_CREDIT === 'true',
-
-  // Completion-path comms guard (2026-08-07): when a dispatch /complete
-  // lands while the customer has a pending reschedule/away flag (#3232's
-  // comms_guards agent_decisions rows) or an unanswered inbound text, the
-  // post-commit hook surfaces one admin exception — bell notification +
-  // dispatch_alerts card, deduped per visit. Detection/surface ONLY: it
-  // NEVER blocks completion or invoicing and sends no customer
-  // communications. Opt-in in EVERY environment (payerStatements pattern):
-  // dark until the owner flips it after eyeballing the first flagged
-  // completion. Kill switch: unset or any non-'true' value — completions
-  // behave byte-identically to today.
-  completionCommsGuard: process.env.GATE_COMPLETION_COMMS_GUARD === 'true',
 
   // Real-time reschedule/away-intent flag lane (flagger bell/push + the
   // durable agent_decisions flag rows). Owner ruling 2026-08-15: the bells
