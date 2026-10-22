@@ -84,17 +84,32 @@ function pickOwn(key, vars) {
 }
 
 // State of a catalogue gate that has no gates-map entry. These are read only
-// at call time, so the variable as set now is what the next call sees. A mode
-// gate is on when set to anything but an off value. For a boolean gate the two
+// at call time, so the variable as set now is what the next call sees (mode
+// gates: callTimeModeEnabled). For a boolean gate the two
 // reader styles (strict 'true'; gateEnvValue's 1/true/on) agree on most values;
 // where they differ ('on', '1', 'TRUE') the answer is the loose one only when
 // the catalogue saw a gateEnvValue reader, else unknown: the catalogue defaults
 // a gate read in another file to 'strict' without seeing its reader. A gate of
 // kind 'unverified' is unknown too. Only a boolean or null leaves here.
+// A mode gate is off when unset or set to an off value. A timestamp gate
+// (_SINCE / _AT, or documented as a timestamp) goes through the canonical
+// gateEnvTimestamp reader: a value it rejects is off, as the runtime treats
+// it; a valid past time is on; a future one is unknown (readers differ on
+// whether it is armed). Any other set mode value (shadow, auto, an allowlist)
+// is unknown: its meaning belongs to its own reader.
+function callTimeModeEnabled(doc, raw) {
+  if (raw === '' || ['false', 'off', '0'].includes(raw.toLowerCase())) return false;
+  const timestamp = /(_SINCE|_AT)$/.test(doc.name) || /timestamp/i.test(doc.description || '');
+  if (!timestamp) return null;
+  const at = featureGates.gateEnvTimestamp(doc.name);
+  if (!at) return false;
+  return at.getTime() <= Date.now() ? true : null;
+}
+
 function callTimeEnabled(doc) {
   if (doc.kind === 'unverified') return null;
   const raw = String(process.env[doc.name] || '').trim();
-  if (doc.kind === 'mode') return raw !== '' && !['false', 'off', '0'].includes(raw.toLowerCase());
+  if (doc.kind === 'mode') return callTimeModeEnabled(doc, raw);
   const strict = raw === 'true';
   const loose = featureGates.gateEnvValue(doc.name);
   if (strict === loose) return strict;

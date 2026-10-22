@@ -142,6 +142,25 @@ describe('listGates variable names', () => {
     expect(new Set(callNames).size).toBe(callNames.length);
   });
 
+  test('a timestamp gate is on only for a valid past time', () => {
+    const name = 'GATE_SMS_OPERATIONAL_ACTIONS_SINCE';
+    const row = () => listGates().find((g) => g.envName === name);
+    const saved = process.env[name];
+    try {
+      delete process.env[name];
+      expect(row()).toMatchObject({ readAt: 'call', kind: 'mode', enabled: false });
+      process.env[name] = 'true';
+      expect(row().enabled).toBe(false);
+      process.env[name] = '2026-01-01T00:00:00Z';
+      expect(row().enabled).toBe(true);
+      process.env[name] = '2099-01-01T00:00:00Z';
+      expect(row().enabled).toBeNull();
+    } finally {
+      if (saved === undefined) delete process.env[name];
+      else process.env[name] = saved;
+    }
+  });
+
   test('every entry resolves to a variable', () => {
     expect(listGates().filter((g) => !g.envName).map((g) => g.key)).toEqual([]);
   });
