@@ -6,7 +6,9 @@ import { APP_STORE_URL, PLAY_STORE_URL } from "../components/estimate/AppShowcas
 // the cancel plan link). Nothing is sent on pick: the operator reads the
 // draft and sends it. Plain ASCII on purpose, since the same rows go into
 // texts. Every step names a real button label in PortalPage.jsx; when a
-// label there changes, change it here too.
+// label there changes, change it here too. A guide is static, so each step
+// must hold for every account shape (paused Auto Pay, several properties,
+// dark gates). Where it cannot, the step sends the customer to us instead.
 
 export const HOW_TO_CAPTION = "Steps for the customer. Each link opens the right app screen after sign-in.";
 
@@ -24,11 +26,12 @@ const GUIDES = [
     steps: [
       SIGN_IN,
       "Tap Visits.",
-      "Scroll down to the contacts section. If you have more than one property, pick the property first.",
+      "Scroll down to the contacts section.",
       "Type their name, phone number and email. To add more people, tap + Add another contact (up to 3).",
       "Check the box to confirm they agreed to get our texts, then tap Save.",
     ],
-    after: "They will get visit reminders and on-the-way alerts for your property.",
+    // Contacts are stored per profile, not per saved property.
+    after: "They will get visit reminders and on-the-way alerts. If you have more than one property on your account, they get alerts for all of them.",
   },
   {
     key: "autopay",
@@ -40,9 +43,11 @@ const GUIDES = [
       SIGN_IN,
       "Tap Billing.",
       "If Auto Pay is off, tap Turn on Auto Pay and follow the steps.",
-      "To change the card Auto Pay uses, tap Manage Auto Pay, then Change payment method.",
-      // Card only: a bank account shows only while GATE_PORTAL_ACH_AUTOPAY is on.
-      "To save a new card, tap Add payment.",
+      // Change payment method makes the new card the Auto Pay card; Add
+      // payment alone keeps charging the old one.
+      "To change the card Auto Pay uses, tap Manage Auto Pay, then Change payment method, and enter the new card.",
+      // A paused Auto Pay has no Manage button.
+      "If Auto Pay is paused, reply here and we will update the card for you.",
     ],
   },
   {
@@ -55,7 +60,7 @@ const GUIDES = [
       SIGN_IN,
       "Tap Visits.",
       "Scroll down to Service notifications.",
-      "Next to each alert, pick how you want it: text, email or app.",
+      "Next to each alert, pick how you want it, such as text or email.",
       "To turn an alert on or off, use its switch. If you have more than one property, the switches are lower down, under Appointment notifications. Pick the property first.",
       "Changes save right away.",
     ],
@@ -69,8 +74,8 @@ const GUIDES = [
     steps: [
       `Install the app. iPhone: ${APP_STORE_URL} Android: ${PLAY_STORE_URL}`,
       "Open it and sign in with your phone number.",
-      "Allow notifications when the app asks.",
-      "Want visit updates in the app? Tap Visits, scroll to Service notifications and tap Use app for visit updates.",
+      // The in-app delivery controls sit behind GATE_CUSTOMER_APP_NOTIFICATIONS.
+      "If your phone asks, allow notifications.",
     ],
     linkLabel: "Or sign in on the web",
   },
@@ -112,6 +117,8 @@ const GUIDES = [
       "Open My Property. On a phone, tap More, then My Property.",
       "Under Access, fill in Community Gate, Property Gate, Garage Code or Lockbox Code.",
       "Add parking notes and pets too. Changes save on their own.",
+      // A saved secondary property shows a notice instead of the Access fields.
+      "These fields are for your main home. For another property, reply here with the code and we will add it.",
     ],
     after: "Your technician sees these before every visit.",
   },
@@ -124,9 +131,9 @@ const GUIDES = [
     path: "/?tab=visits",
     steps: [
       "Reply with the address and the service you want there, or call us at (941) 297-5749. We add it for you.",
-      "Once it is added, sign in and tap Visits. Use the property menu at the top to switch between homes.",
+      "Once it is added, sign in. To switch homes, tap your initials at the top right to open the Account menu, then pick the home under Service Property.",
     ],
-    after: "Each property keeps its own schedule and notifications.",
+    after: "Each home has its own visit schedule.",
   },
   {
     key: "refer",
