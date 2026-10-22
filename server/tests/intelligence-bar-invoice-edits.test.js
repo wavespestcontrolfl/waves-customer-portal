@@ -24,11 +24,13 @@ const mockLinkedVisit = jest.fn();
 const mockCalc = jest.fn();
 const mockUnbacked = jest.fn();
 const mockObligation = jest.fn();
+const mockUnvoidableVisit = jest.fn(async () => undefined);
 jest.mock('../services/invoice', () => ({
   linkedScheduledServiceId: (...a) => mockLinkedVisit(...a),
   _unvoidObligationReason: (...a) => mockObligation(...a),
   _calculateUpdateFinancials: (...a) => mockCalc(...a),
   _invoiceHasUnbackedDocumentDiscount: (...a) => mockUnbacked(...a),
+  _assertUnvoidableLinkedVisit: (...a) => mockUnvoidableVisit(...a),
 }));
 const mockResolveTerm = jest.fn();
 jest.mock('../services/invoice-prepay', () => ({ resolveInvoiceTermId: (...a) => mockResolveTerm(...a) }));
@@ -282,6 +284,18 @@ describe('edit_invoice card', () => {
       { client_id: 'li_b', description: 'Interior add-on', quantity: 1, unit_price: 30, amount: 30 },
     ] });
     expect(await run('edit_invoice', { line_changes: [{ line_number: 2, unit_price: 50 }] })).toMatchObject({ code: 'line_not_editable' });
+  });
+
+  test('a stored line whose amount is not quantity x unit price (3 x $33.33 = $100.00) is refused, never silently repriced', async () => {
+    setInvoice({ line_items: [
+      { client_id: 'li_a', description: 'Quarterly Pest Control', quantity: 3, unit_price: 33.33, amount: 100, category: 'service' },
+      { client_id: 'li_b', description: 'Interior add-on', quantity: 1, unit_price: 30, amount: 30 },
+    ] });
+    expect(await run('edit_invoice', { line_changes: [{ line_number: 2, unit_price: 50 }] })).toMatchObject({ code: 'line_not_editable', error: expect.stringMatching(/Line 1 has an amount that is not its quantity times its unit price/) });
+    state.customers[0].property_type = 'commercial';
+    expect(await run('edit_invoice', { tax_rate_percent: 6 })).toMatchObject({ code: 'line_not_editable' });
+    // A title-only edit does not retotal: it stays allowed.
+    expect(await run('edit_invoice', { title: 'Quarterly Pest Control (Oct)' })).toMatchObject({ preview: true });
   });
 
   test('an invoice tied to an accepted estimate discloses the setup-fee alert re-check; an untied one does not', async () => {
@@ -873,6 +887,15 @@ describe('unvoid_invoice', () => {
     const stamped = (await run('unvoid_invoice'));
     const { acceptedEstimateIdFromNotes } = require('../services/setup-fee-alert-reconcile');
     expect(JSON.stringify(stamped.effects).includes('re-checks the staff alert')).toBe(Boolean(acceptedEstimateIdFromNotes('Accepted estimate #est-2')));
+  });
+
+  test('a linked visit the unvoid itself refuses (cancelled, free re-service, $0, prepaid) is refused at preview, never carded', async () => {
+    mockUnvoidableVisit.mockRejectedValueOnce(new Error('the linked visit was cancelled'));
+    expect(await run('unvoid_invoice')).toMatchObject({ code: 'visit_refuses_unvoid', error: expect.stringMatching(/linked visit was cancelled/) });
+    mockUnvoidableVisit.mockRejectedValueOnce(Object.assign(new Error(''), {}));
+    expect(await run('unvoid_invoice')).toMatchObject({ code: 'visit_refuses_unvoid' });
+    expect(mockUnvoidableVisit).toHaveBeenCalledWith(db, expect.objectContaining({ id: INV }));
+    expect(state.writes).toEqual([]);
   });
 
   test('an invoice with an old pay-session stamp says it is checked with Stripe; one on a payer statement stays on the page', async () => {

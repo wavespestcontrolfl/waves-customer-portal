@@ -397,9 +397,15 @@ function plainLineRefusal(li, number) {
 // A stored line with an amount but no unit price (a legacy amount-only line), written so it keeps its amount when the bar resubmits
 // every line: InvoiceService.update prices each line as quantity * (unit_price || 0), so an untouched amount-only line would be
 // saved as $0. Returns null when the amount does not split evenly over its quantity (the bar then refuses; the page edits it).
+// The page's update also rewrites every line's amount as round2(quantity * unit_price) (normalizeInvoiceLineItems), so a stored
+// amount that differs from that product (e.g. 3 x $33.33 stored as $100.00) would silently change on any retotal: refused too.
 function canonicalLine(li) {
   const hasUnit = li.unit_price !== undefined && li.unit_price !== null && li.unit_price !== '' && Number.isFinite(Number(li.unit_price));
-  if (hasUnit) return { ...li };
+  if (hasUnit) {
+    const hasAmount = li.amount !== undefined && li.amount !== null && li.amount !== '' && Number.isFinite(Number(li.amount));
+    if (hasAmount && round2((Number(li.quantity) || 1) * Number(li.unit_price)) !== round2(Number(li.amount))) return null;
+    return { ...li };
+  }
   const qty = Number(li.quantity) || 1;
   const amount = lineAmount(li);
   const unit = round2(amount / qty);
@@ -411,7 +417,7 @@ function applyLineChanges(stored, changes, invoiceId) {
   const next = stored.map(canonicalLine);
   const uneven = next.findIndex((li) => li === null);
   if (uneven !== -1) {
-    return refusal(`Line ${uneven + 1} has an amount that does not split evenly over its quantity, so the bar cannot resave it unchanged. Edit this invoice on the Invoices page.`, 'line_not_editable', { lines: numbered(stored) });
+    return refusal(`Line ${uneven + 1} has an amount that is not its quantity times its unit price, so the bar cannot resave it unchanged. Edit this invoice on the Invoices page.`, 'line_not_editable', { lines: numbered(stored) });
   }
   const dropped = new Set();
   const touched = []; // { kind, number, before, after }
@@ -583,7 +589,7 @@ function editedLines({ invoice, stored, read, changes, body }) {
     const canonical = stored.map(canonicalLine);
     const uneven = canonical.findIndex((li) => li === null);
     if (uneven !== -1) {
-      return refusal(`Line ${uneven + 1} has an amount that does not split evenly over its quantity, so the bar cannot reprice this invoice. Edit it on the Invoices page.`, 'line_not_editable', { invoice_id: invoice.id, lines: numbered(stored) });
+      return refusal(`Line ${uneven + 1} has an amount that is not its quantity times its unit price, so the bar cannot reprice this invoice. Edit it on the Invoices page.`, 'line_not_editable', { invoice_id: invoice.id, lines: numbered(stored) });
     }
     if (canonical.some((li, i) => li.unit_price !== stored[i].unit_price)) body.line_items = canonical;
     return { nextLines: canonical };
@@ -1101,8 +1107,19 @@ async function unvoidSideEffectRefusal(invoice) {
 }
 
 // In order; the first refusal wins.
+// The linked-visit eligibility InvoiceService.unvoidInvoice enforces (cancelled, rescheduled, no-show, skipped, free re-service,
+// stamped $0, annual-prepaid): checked at preview so a card that can never succeed is not offered. Fails closed.
+async function unvoidVisitRefusal(invoice) {
+  try {
+    await require('../invoice')._assertUnvoidableLinkedVisit(db, invoice);
+    return null;
+  } catch (err) {
+    return refusal(`This invoice cannot be unvoided: ${err.message || 'its linked visit could not be checked'}. Nothing was changed.`, 'visit_refuses_unvoid', { invoice_id: invoice.id });
+  }
+}
+
 const UNVOID_REFUSALS = [
-  unvoidStatusRefusal, unvoidRowRefusal, unvoidRecordRefusal, unvoidSideEffectRefusal,
+  unvoidStatusRefusal, unvoidRowRefusal, unvoidRecordRefusal, unvoidSideEffectRefusal, unvoidVisitRefusal,
   (invoice) => chargeFenceRefusal(invoice, 'Unvoid it from the Invoices page.'),
 ];
 
