@@ -66,6 +66,10 @@ const BUNDLE_GATE = 'GATE_TECH_PUSH_BUNDLE';
 // once the oldest has waited the longer bound even while cards keep coming.
 const BUNDLE_QUIET_MS = 60 * 1000;
 const BUNDLE_MAX_WAIT_MS = 5 * 60 * 1000;
+// A bundle whose push keeps failing is retried each tick, then dropped once
+// its oldest card is this old: a device that never accepts must not make the
+// sweep retry forever.
+const BUNDLE_GIVE_UP_MS = 60 * 60 * 1000;
 
 const KINDS = Object.freeze(['assigned', 'unassigned', 'rescheduled', 'cancelled']);
 // Lifecycle states with nothing left to announce for an assignment/move card.
@@ -490,7 +494,7 @@ async function pushCard(notice, { checkCurrent = null } = {}) {
       }
       return !stale;
     };
-    await PushService.sendToAdminUser(notice.technicianId, {
+    const result = await PushService.sendToAdminUser(notice.technicianId, {
       title: notice.pushTitle,
       body: '',
       url: '/tech',
@@ -498,8 +502,11 @@ async function pushCard(notice, { checkCurrent = null } = {}) {
       priority: 'high',
     }, { beforeHandoff });
     if (stale) logger.info(`[tech-visit-notifications] stale ${notice.kind || 'tracking'} push skipped for visit ${notice.visitId} (newer state)`);
+    // The outcome, for a caller that retries (a bundled push); others ignore it.
+    return { stale, result };
   } catch (pushErr) {
     logger.warn(`[tech-visit-notifications] push failed for tech ${notice.technicianId} (card already written): ${pushErr.message}`);
+    return { error: pushErr };
   }
 }
 
@@ -840,13 +847,23 @@ async function stillAnnounces(notice, conn) {
   return pushStillCurrent(notice, conn);
 }
 
+// A held push's outcome, the run summary's rule: skipped as stale = done;
+// every device refused = throw, so the bundle is kept for a retry; no devices
+// at all = done (a retry could never land). True when a device got it.
+function settleHeldPush(result) {
+  if (result?.superseded) return false;
+  const total = Number(result?.subscriptions) || 0;
+  if (total > 0 && !(Number(result?.sent) > 0)) throw new Error(`no device accepted the push (${total} tried)`);
+  return total > 0;
+}
+
 // ONE push for one tech's claimed cards: per visit only its newest card that
 // still stands, so a visit moved twice is one change and a visit completed
 // during the hold drops out. One left: exactly its own push, re-checked at the
 // provider boundary. More: one count, re-checked there too. Resolves true
-// when the push went out; throws when every device refused (kept for a
-// retry, the run summary's rule). A recheck ERROR keeps or sends (owner
-// steer: a missed alert is worse than a rare stale one).
+// when the push went out; throws when it failed (settleHeldPush), so the
+// bundle is kept for a retry. A recheck ERROR keeps or sends (owner steer: a
+// missed alert is worse than a rare stale one).
 async function sendBundle(technicianId, rows) {
   const notices = [];
   for (const row of rows) {
@@ -861,8 +878,9 @@ async function sendBundle(technicianId, rows) {
   }
   if (!notices.length) return false;
   if (notices.length === 1) {
-    await pushCard(notices[0], { checkCurrent: (conn) => pushStillCurrent(notices[0], conn) });
-    return true;
+    const outcome = await pushCard(notices[0], { checkCurrent: (conn) => pushStillCurrent(notices[0], conn) });
+    if (outcome.error) throw outcome.error;
+    return outcome.stale ? false : settleHeldPush(outcome.result);
   }
   const beforeHandoff = async () => {
     try {
@@ -883,10 +901,7 @@ async function sendBundle(technicianId, rows) {
     tag: `route-changes-${notices[0].cardId}`,
     priority: 'high',
   }, { beforeHandoff });
-  if (result?.superseded) return false;
-  const total = Number(result?.subscriptions) || 0;
-  if (total > 0 && !(Number(result?.sent) > 0)) throw new Error(`no device accepted the push (${total} tried)`);
-  return total > 0;
+  return settleHeldPush(result);
 }
 
 /**
@@ -919,9 +934,11 @@ async function flushBundledPushes({ now = new Date() } = {}) {
         await db('tech_notifications').whereIn('id', cardIds)
           .update({ payload: db.raw("payload - 'push_bundle' - 'push_claimed_at'"), updated_at: new Date() });
       } catch (err) {
-        logger.warn(`[tech-visit-notifications] bundled push failed for tech ${technicianId}: ${err.message}`);
+        const oldest = Math.min(...rows.map((row) => new Date(row.created_at).getTime()));
+        const giveUp = now.getTime() - oldest >= BUNDLE_GIVE_UP_MS;
+        logger.warn(`[tech-visit-notifications] bundled push failed for tech ${technicianId}: ${err.message}${giveUp ? '; dropped after an hour of retries' : '; retrying next tick'}`);
         await db('tech_notifications').whereIn('id', cardIds)
-          .update({ payload: db.raw("payload - 'push_claimed_at'"), updated_at: new Date() })
+          .update({ payload: db.raw(giveUp ? "payload - 'push_bundle' - 'push_claimed_at'" : "payload - 'push_claimed_at'"), updated_at: new Date() })
           .catch((releaseErr) => logger.warn(`[tech-visit-notifications] bundle claim release failed (${errorTag(releaseErr)}); it expires on its own`));
       }
     }
@@ -1014,5 +1031,6 @@ module.exports = {
   BUNDLE_GATE,
   BUNDLE_QUIET_MS,
   BUNDLE_MAX_WAIT_MS,
+  BUNDLE_GIVE_UP_MS,
   _test: { setCurrentAutoDispatchRun: (id) => { currentAutoDispatchRun = id; }, formatWhen, composeCard, describeActor, visitQueues, pushStillCurrent, newerCardExists },
 };

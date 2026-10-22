@@ -846,6 +846,46 @@ describe('bundled pushes for any other mover (GATE_TECH_PUSH_BUNDLE, owner 2026-
     expect(await beforeHandoff()).toBe(false);
   });
 
+  test('a bundle of one whose push threw, or every device refused, is kept and sent on the next tick (Codex pre-push P1)', async () => {
+    await officeMove('v-1');
+    mockSendToAdminUser.mockRejectedValueOnce(new Error('provider down'));
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 0 });
+    expect(cardRows[0].payload.push_bundle).toBeTruthy();
+    expect(cardRows[0].payload).not.toHaveProperty('push_claimed_at');
+
+    mockSendToAdminUser.mockResolvedValueOnce({ subscriptions: 2, sent: 0, failed: 2 });
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 0 });
+    expect(cardRows[0].payload.push_bundle).toBeTruthy();
+
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    expect(cardRows[0].payload).not.toHaveProperty('push_bundle');
+    expect(mockSendToAdminUser).toHaveBeenLastCalledWith('tech-1', expect.objectContaining({ tag: 'visit-v-1' }));
+  });
+
+  test('a bundle of one gone stale is closed, not retried', async () => {
+    await officeMove('v-1');
+    newerCard = { id: 'card-newer' };
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 0 });
+    expect(mockSendToAdminUser).not.toHaveBeenCalled();
+    expect(cardRows[0].payload).not.toHaveProperty('push_bundle');
+  });
+
+  test('a push that keeps failing is dropped once its oldest card is an hour old (no endless retry)', async () => {
+    await officeMove('v-1');
+    await officeMove('v-2');
+    mockSendToAdminUser.mockRejectedValue(new Error('provider down'));
+    try {
+      expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 0 });
+      expect(cardRows[0].payload.push_bundle).toBeTruthy();
+      const later = new Date(Date.now() + notices.BUNDLE_GIVE_UP_MS + 1000);
+      expect(await notices.flushBundledPushes({ now: later })).toEqual({ pushed: 0 });
+      for (const r of cardRows) expect(r.payload).not.toHaveProperty('push_bundle');
+    } finally {
+      mockSendToAdminUser.mockReset();
+      mockSendToAdminUser.mockResolvedValue({ subscriptions: 1, sent: 1 });
+    }
+  });
+
   test('a sweep read failure never throws to the scheduler', async () => {
     db.mockImplementation(() => { throw new Error('db down'); });
     await expect(notices.flushBundledPushes({ now: quiet() })).resolves.toEqual({ pushed: 0 });
