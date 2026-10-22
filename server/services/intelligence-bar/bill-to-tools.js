@@ -69,7 +69,6 @@ const toPage = (error, reason) => refusal(`${error} Do it from the customer page
 
 // Statuses an invoice can no longer change hands in (the withdrawal's own terminal list, plus processing).
 const SETTLED = ['void', 'refunded', 'canceled', 'cancelled', 'paid', 'prepaid', 'processing'];
-const MAX_LISTED = 8;
 
 const payerLabel = (p) => [p.display_name, p.company_name && p.company_name !== p.display_name ? `(${p.company_name})` : null].filter(Boolean).join(' ');
 
@@ -184,11 +183,11 @@ async function buildPlan(input) {
     moving.length
       ? { kind: 'billing', text: `${moving.length === 1 ? '1 unpaid invoice moves' : `${moving.length} unpaid invoices move`} to ${payerName} now. The customer's pay link for ${moving.length === 1 ? 'it' : 'them'} stops working and reminders pause.` }
       : { kind: 'billing', text: 'No unpaid invoice moves: none is tied to a visit.' },
-    ...moving.slice(0, MAX_LISTED).map((inv) => ({ kind: 'billing', text: `Moves: ${invoiceLine(inv)}` })),
-    ...(moving.length > MAX_LISTED ? [{ kind: 'billing', text: `…and ${moving.length - MAX_LISTED} more.` }] : []),
+    // Every moving invoice is listed: Confirm moves all of them.
+    ...moving.map((inv) => ({ kind: 'billing', text: `Moves: ${invoiceLine(inv)}` })),
     credit > 0.004 ? { kind: 'billing', text: `${money(credit)} of account credit applied to those invoices goes back to the customer's balance.` } : null,
     staying.length
-      ? { kind: 'billing', text: `${staying.length} unpaid invoice${staying.length === 1 ? '' : 's'} with no visit stay${staying.length === 1 ? 's' : ''} billed to the customer: ${staying.slice(0, MAX_LISTED).map(invoiceLine).join(', ')}${staying.length > MAX_LISTED ? ', …' : ''}.` }
+      ? { kind: 'billing', text: `${staying.length} unpaid invoice${staying.length === 1 ? '' : 's'} with no visit stay${staying.length === 1 ? 's' : ''} billed to the customer: ${staying.map(invoiceLine).join(', ')}.` }
       : null,
     { kind: 'billing', text: 'Any open pay-page session on the customer\'s invoices is cancelled. Nothing is charged or refunded.' },
     { kind: 'comms', text: 'Nothing is sent: no text, email or call goes to the customer or the payer.' },
