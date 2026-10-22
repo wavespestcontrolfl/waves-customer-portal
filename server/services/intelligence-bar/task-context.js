@@ -4,7 +4,7 @@
 const db = require('../../models/db');
 const { normalizeEmail } = require('../../utils/contact-normalize');
 const { ibTargetRulesV2Live } = require('../../config/feature-gates');
-const { MAX_LABEL_CHARS } = require('./choice-tools');
+const { MAX_LABEL_CHARS, isChoiceLabelShape } = require('./choice-tools');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const CUSTOMER_FIELDS = ['id', 'first_name', 'last_name', 'address_line1', 'city', 'phone', 'updated_at', 'deleted_at'];
@@ -715,12 +715,12 @@ async function initialFormIds(prompt) {
 // back as the owner's message. Only a plain place name passes: letters, spaces, hyphen
 // and apostrophe, up to 3 words and 30 characters. Anything else ("Update Alice Jones",
 // digits, punctuation) gives the customer no button (Codex #6369 r12).
-const SAFE_CITY_RE = /^\p{L}[\p{L}'-]*(?: \p{L}[\p{L}'-]*){0,2}$/u;
+const SAFE_CITY_RE = /^\p{L}+(?:['-]\p{L}+)*(?: \p{L}+(?:['-]\p{L}+)*){0,2}$/u;
 // A word that reads as a command ("Update", "Assign", "Delete") is never a place name.
 const COMMAND_WORD_RE = new RegExp(`\\b(?:${PERSON_ACTIONS}|assign|add|remove|rate|tier|waive|apply|ignore|disregard|override|instructions?|system|assistant|prompt|previous|rules?|owner|admin|tool|confirm|approve|execute|run)\\b`, 'i');
 const safeChoiceCity = city => {
   const text = String(city || '').trim();
-  return text.length <= 30 && SAFE_CITY_RE.test(text) && !COMMAND_WORD_RE.test(text) ? text : null;
+  return text.length <= 30 && (text.match(/\p{L}/gu) || []).length >= 2 && SAFE_CITY_RE.test(text) && !COMMAND_WORD_RE.test(text) ? text : null;
 };
 
 // ONE sanitizer for every emitted choice label, full and shortened (Codex #6369 r31). A name part keeps
@@ -728,7 +728,9 @@ const safeChoiceCity = city => {
 // "Customer"), and the city goes through safeChoiceCity. So a label is always plain "Name, City" text:
 // a customer-entered ":" or quote can never ride into the button, and the tapped text always matches
 // the strict choice-reply grammar (looksLikeChoiceReply), so the tap is carded by its shape.
-const safeNamePart = value => String(value ?? '').replace(/[^\p{L}'. -]+/gu, ' ').replace(/\s+/g, ' ').trim();
+// Each word loses its leading and trailing apostrophes, hyphens and periods (r32).
+const safeNamePart = value => String(value ?? '').replace(/[^\p{L}'. -]+/gu, ' ').split(/\s+/)
+  .map(word => word.replace(/^['.-]+|['.-]+$/g, '')).filter(Boolean).join(' ');
 const labelNamePart = value => (String(value ?? '').trim() ? safeNamePart(value) || 'Customer' : '');
 
 async function choiceLabels(customers) {
@@ -750,13 +752,16 @@ async function choiceLabels(customers) {
     const found = await initialFormMatches(triples);
     for (const row of found) owners.set(tripleKey([row.first, row.initial, row.city]), row);
   }
+  // Every candidate label, full or short, must pass the one reply-shape predicate; one that does not
+  // gets no button (the row stays listed as text) - Codex #6369 r32.
   const labels = customers.map((customer) => {
     if (!safeChoiceCity(customer.city)) return null;
     const whole = full(customer);
-    if (whole.length <= MAX_LABEL_CHARS) return whole;
+    if (whole.length <= MAX_LABEL_CHARS) return isChoiceLabelShape(whole) ? whole : null;
     if (!wantsShort(customer)) return null;
     const owner = owners.get(tripleKey(tripleOf(customer)));
-    return owner && Number(owner.n) === 1 && String(owner.id) === String(customer.id) ? short(customer) : null;
+    const label = owner && Number(owner.n) === 1 && String(owner.id) === String(customer.id) ? short(customer) : null;
+    return isChoiceLabelShape(label) ? label : null;
   });
   // A label that two customers share (same city and name, or the same first name,
   // last initial and city) cannot pick one of them.
@@ -1541,4 +1546,4 @@ async function validateSenderBlock(params, context) {
   return null;
 }
 
-module.exports = { safeChoiceCity, UUID_RE, pageIds, typedCustomerIds, customerLookupLimit, targetClause, resolve, validateRecordTarget, validateSenderBlock, prepareReadInput, ownerDirectContext, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };
+module.exports = { choiceLabels, safeChoiceCity, UUID_RE, pageIds, typedCustomerIds, customerLookupLimit, targetClause, resolve, validateRecordTarget, validateSenderBlock, prepareReadInput, ownerDirectContext, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };

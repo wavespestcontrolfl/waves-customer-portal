@@ -40,6 +40,7 @@ const { changesAddress } = require('./address-tools');
 const { ibFullAccess } = require('./ib-access');
 const { executionOutcome } = require('./outcomes');
 const IbThreads = require('./threads');
+const { isChoiceLabelShape } = require('./choice-tools');
 
 // Internal single-record edits that execute without a card. A tool is added
 // here deliberately; anything new keeps its card until someone lists it.
@@ -490,10 +491,8 @@ async function sameNameChoicePending({ actorId, threadId, conversationHistory, p
 // the only evidence (Codex #6369 r23). A marker in any of the last 3 assistant turns counts as
 // pending (no clock is available). With no readable history, a message shaped like a choice
 // reply ("Full Name, City" / "First L., City") fails closed.
-// Exactly the label alphabet task-context's choice sanitizer emits: a name of letters, spaces, apostrophe,
-// hyphen and period, then ", City" of letters, spaces, apostrophe and hyphen (safeChoiceCity).
-const CHOICE_REPLY_RE = /^[\p{L}][\p{L}'. -]{1,38},\s*[\p{L}][\p{L}' -]{1,29}$/u;
-const looksLikeChoiceReply = prompt => CHOICE_REPLY_RE.test(String(prompt ?? '').trim());
+// The one label shape (choice-tools isChoiceLabelShape): task-context emits only labels that pass it.
+const looksLikeChoiceReply = prompt => isChoiceLabelShape(String(prompt ?? '').trim());
 const turnText = content => (Array.isArray(content) ? content.map(block => (typeof block === 'string' ? block : block?.text || '')).join('\n') : String(content ?? ''));
 
 function pendingFromHistory(conversationHistory, prompt) {
@@ -690,4 +689,4 @@ You are talking to the owner. Do what they ask.
 - Never send the owner to another screen, never explain limitations, never apologize. If something truly cannot be done from here, say so in one sentence and offer the closest thing you can do.
 - Replies: 1–3 short lines. No preamble, no recap of the request, no "anything else?". Lists and numbers only when the owner asked for data.`;
 
-module.exports = { TRUSTED_READS, looksLikeChoiceReply, noteSameNameContext, markSameNameChoices, sameNameMarkerNeeded, ownerDirectPrompt, dynamicCapReached, targetGrounding, bulkLimitResult, OWNER_DIRECT_TARGET_RULES_PROMPT, DIRECT_EDITS_V2, loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };
+module.exports = { TRUSTED_READS, looksLikeChoiceReply, isChoiceLabelShape, noteSameNameContext, markSameNameChoices, sameNameMarkerNeeded, ownerDirectPrompt, dynamicCapReached, targetGrounding, bulkLimitResult, OWNER_DIRECT_TARGET_RULES_PROMPT, DIRECT_EDITS_V2, loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };

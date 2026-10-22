@@ -827,6 +827,41 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(OwnerDirect.looksLikeChoiceReply('Pat Example, Venice 34285')).toBe(false);
   });
 
+  test('every emitted choice label, full or shortened, passes the one reply-shape predicate; hostile names and cities get no button (Codex #6369 r32)', async () => {
+    process.env[ON] = 'true';
+    // Seeded generator: no flakiness. Mixes letters, edge punctuation, digits, unicode and empties.
+    let seed = 20261022;
+    const rand = n => { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed % n; };
+    const pool = ['a', 'B', 'e', 'Z', 'o', 'n', 'ñ', 'é', 'Ø', "'", '-', '.', ' ', '1', '9', ':', '"', ',', '\n', '\u{1F600}', '\u{1D4D0}', '', 'Mc', "O'", 'Van '];
+    const piece = () => Array.from({ length: rand(9) }, () => pool[rand(pool.length)]).join('');
+    const names = ["'Neil", '-Ann', '.J', 'Mary-', "Pat'", 'A', 'Bartholomew', 'Featherstonehaugh', 'Zoë', '\u{1D4D0}bc'];
+    const cities = ['X', "'Venice", '-Osprey', 'Venice-', 'A B', 'Fort Myers', 'Port Charlotte Beach Club', 'St. Pete', '', null, 'Ñ', 'Øs'];
+    const rows = [];
+    for (let i = 0; i < 220; i += 1) {
+      rows.push({
+        id: id(1500 + i),
+        first_name: i % 5 === 0 ? names[rand(names.length)] : piece(),
+        last_name: i % 7 === 0 ? names[rand(names.length)] : piece(),
+        city: i % 4 === 0 ? cities[rand(cities.length)] : piece(),
+      });
+    }
+    rows.push({ id: id(1800), first_name: 'Bartholomew', last_name: 'Featherstonehaugh', city: 'Fort Myers' });
+    rows.push({ id: id(1801), first_name: "'Bartholomew", last_name: 'Featherstonehaugh', city: 'X' });
+    const labels = await Context.choiceLabels(rows);
+    const emitted = labels.filter(Boolean);
+    expect(labels).toHaveLength(rows.length);
+    expect(emitted.length).toBeGreaterThan(0);
+    for (const label of emitted) expect([label, OwnerDirect.isChoiceLabelShape(label)]).toEqual([label, true]);
+    for (const label of ["'Neil O., Venice", 'Pat Example, X', '-Ann Lee, Venice', 'Pat Example, Venice-', 'Pat Example, Venice 34285']) {
+      expect([label, OwnerDirect.isChoiceLabelShape(label)]).toEqual([label, false]);
+      expect(OwnerDirect.looksLikeChoiceReply(label)).toBe(false);
+    }
+    for (const label of ["Pat O'Neil, Venice", 'Bartholomew F., Fort Myers', 'Ann-Marie Lee, St Pete']) expect(OwnerDirect.isChoiceLabelShape(label)).toBe(true);
+    // Nothing left of the name after stripping: the row is "Customer" or has no button, never a bad label.
+    const edge = await Context.choiceLabels([{ id: id(1810), first_name: "'-.", last_name: "Lee'", city: 'Venice' }, { id: id(1811), first_name: 'Pat', last_name: 'Lee', city: 'X' }]);
+    expect(edge).toEqual(['Customer Lee, Venice', null]);
+  });
+
   test('gate off: the selection collapse does not run, candidates stay exactly as found; another admin keeps them too (Codex #6369 r31)', async () => {
     customers = sameName(2);
     delete process.env[ON];

@@ -97,7 +97,18 @@ async function executeChoiceTool(toolName, input) {
   };
 }
 
+// The ONE shape of a same-name choice label and of the reply a tap sends back (Codex #6369 r32):
+// "Name, City". A name is 1 to 6 words of letters (an apostrophe or hyphen only between letters, a
+// period only ends a word), the city 1 to 3 such words with at least 2 letters and no period. The
+// label builder (task-context choiceLabels) drops any label this rejects, and owner-direct
+// sameNameChoicePending cards any message this accepts, so an emitted button can never be a reply
+// the card rule does not recognise.
+const LABEL_WORD = "\\p{L}+(?:['-]\\p{L}+)*";
+const CHOICE_LABEL_RE = new RegExp(`^${LABEL_WORD}\\.?(?: ${LABEL_WORD}\\.?){0,5},\\s*(?=\\p{L}[^\\p{L}]*\\p{L})${LABEL_WORD}(?: ${LABEL_WORD}){0,2}$`, 'u');
+const isChoiceLabelShape = text => typeof text === 'string' && text.length <= 80 && CHOICE_LABEL_RE.test(text.trim());
+
 module.exports = {
+  isChoiceLabelShape,
   CHOICE_TOOLS, executeChoiceTool, validateChoices, OFFER_CHOICES_TOOL_NAME,
   MIN_OPTIONS, MAX_OPTIONS, MAX_LABEL_CHARS,
 };
