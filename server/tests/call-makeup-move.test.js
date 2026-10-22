@@ -436,6 +436,15 @@ describe('applyCallMakeupMove', () => {
     expect(AppointmentReminders.handleReschedule).not.toHaveBeenCalled();
   });
 
+  test('a series move whose post-commit effects throw is still applied (the reconciler retries), never a review card', async () => {
+    const conn = makeConn();
+    const effects = require('../routes/admin-dispatch').applySeriesMoveEffects;
+    effects.mockRejectedValueOnce(new Error('effects down'));
+    const out = await applyCallMakeupMove(applyArgs(conn, guardedRebooker(conn, { success: true, seriesMoveId: 'series-2' })));
+    expect(out).toMatchObject({ outcome: 'applied', visitId: VISIT_ID });
+    expect(fs.readFileSync(require.resolve('../routes/admin-dispatch'), 'utf8')).toMatch(/RECONCILE_SURFACES = \[[^\]]*'call_makeup'/);
+  });
+
   test('a reprocess finds its own marker and is a no-op (no move, no booking)', async () => {
     const conn = makeConn({ prior: { metadata: JSON.stringify({ call_log_id: CALL_ID, scheduled_service_id: VISIT_ID }) } });
     const rebooker = { reschedule: jest.fn() };

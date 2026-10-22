@@ -820,10 +820,16 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
       }
     }
     if (result?.seriesMoveId) {
-      await require('../routes/admin-dispatch').applySeriesMoveEffects({
-        result, serviceId: visit.id, newDate: plan.newDate, newWindow: plan.newWindow,
-        notify: false, actorId: null, reasonText: null,
-      });
+      // Post-commit: the move already stands. A failure here must not read as
+      // a refused move; the series reconciler ('call_makeup' surface) retries.
+      try {
+        await require('../routes/admin-dispatch').applySeriesMoveEffects({
+          result, serviceId: visit.id, newDate: plan.newDate, newWindow: plan.newWindow,
+          notify: false, actorId: null, reasonText: null,
+        });
+      } catch (err) {
+        logger.warn(`[call-makeup] series effects failed for ${visit.id} (reconciler retries): ${err.message}`);
+      }
     } else {
       // sendNotification false — this path never messages the customer (owner
       // directive 2026-09-08). Unlike reschedule-sms, coverDueWindows is NOT
@@ -1165,10 +1171,16 @@ async function applyCallMakeupMove({ conn, call, procToken = null, procGeneratio
       }
     }
     if (result?.seriesMoveId) {
-      await require('../routes/admin-dispatch').applySeriesMoveEffects({
-        result, serviceId: visit.id, newDate: plan.newDate, newWindow: plan.newWindow,
-        notify: false, actorId: null, reasonText: null,
-      });
+      // Post-commit: the move already stands. A failure here must not read as
+      // a refused move; the series reconciler ('call_makeup' surface) retries.
+      try {
+        await require('../routes/admin-dispatch').applySeriesMoveEffects({
+          result, serviceId: visit.id, newDate: plan.newDate, newWindow: plan.newWindow,
+          notify: false, actorId: null, reasonText: null,
+        });
+      } catch (err) {
+        logger.warn(`[call-makeup] series effects failed for ${visit.id} (reconciler retries): ${err.message}`);
+      }
     } else {
       // No customer message (owner directive 2026-09-08); the reminder cron
       // reads the new time, so coverDueWindows stays unset (see
