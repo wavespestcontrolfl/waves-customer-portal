@@ -87,6 +87,19 @@ describe('the one-voice prompt', () => {
     }
   });
 
+  // Codex #6466 r4: the v4 hard constraint 2 overpromise list carries over whole; no
+  // output screen refuses these words, so the prompt is the only guard.
+  test('bans every overpromise the v4 hard constraints banned', () => {
+    for (const word of ['elimination', 'eradication', 'impenetrable', 'guaranteed', '100%', 'total protection', 'pest-free', 'foolproof']) {
+      expect(PEST_REPORT_VOICE_PROMPT).toContain(word);
+    }
+  });
+
+  // Codex #6466 r4: a product's tag is a target, not a sighting (the stacked adapter's rule).
+  test('a pest a treatment was tagged for is not a finding unless we saw it', () => {
+    expect(PEST_REPORT_VOICE_PROMPT).toContain('is what the work aimed at, not a sighting: it goes here only when the note, Observations or a "Findings observed" line says we saw it');
+  });
+
   // Codex #6466 r3: the stacked writer's v4 hard constraint 1 (minus "sweep", 2026-10-09)
   // carries over, so a HOW IT WORKS line's "crawling invaders" never reaches the report.
   test('bans the military language the v4 hard constraints banned', () => {
