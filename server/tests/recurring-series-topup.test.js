@@ -25,6 +25,11 @@ jest.mock('../services/service-completion-profiles', () => ({
   ...jest.requireActual('../services/service-completion-profiles'),
   resolveCompletionProfileForScheduledService: jest.fn(async () => ({ synthesized: true, billingType: null })),
 }));
+// The child's property anchor, passed through unless a test overrides it.
+jest.mock('../services/customer-properties', () => {
+  const actual = jest.requireActual('../services/customer-properties');
+  return { ...actual, anchorSoleProperty: jest.fn(actual.anchorSoleProperty) };
+});
 jest.mock('../services/appointment-reminders', () => ({
   registerAppointment: jest.fn().mockResolvedValue(undefined),
   resolveCommittedVisitTime: jest.fn(async () => null),
@@ -38,6 +43,7 @@ jest.mock('../services/scheduling/occupancy', () => ({
   // findConflictingVisits' own SQL shape.
   ...jest.requireActual('../services/scheduling/occupancy'),
   findConflictingVisits: jest.fn(),
+  techScopedConfirmActive: jest.fn(() => false),
 }));
 // isFamilyOnPlanHold (Codex GitHub r6 P1) reuses cancellation-processor.js's
 // own familyOfServiceRow — mocked here so this suite's tests control which
@@ -228,7 +234,7 @@ function topupScenario({
   parentOverrides = {}, customerOverrides = {}, seriesDates: initialDates = [daysOut(0)],
   colsOverrides = {}, stampedAnnualTermId = false, stampedPrepaidMethod = null,
   customerCoveredTerm = false, customerPendingUnresolvedTerm = false,
-  captureCustomerCalls = null, activeHold = false, addons = [],
+  captureCustomerCalls = null, activeHold = false, addons = [], otherTable = null,
 } = {}) {
   // isCustomerPrepayLive's two customer-wide probes (Codex GitHub r7 P1):
   // (a) coveredTermsAsOf(conn, null) — a still-validly-paid term (active/
@@ -368,6 +374,11 @@ function topupScenario({
     }
     if (table === 'system_settings') return null;
     if (table === 'schedule_blackout_dates') return [];
+    // A table the scenario does not model, answered by the test (undefined = not handled).
+    if (otherTable) {
+      const answer = otherTable({ table, op, calls });
+      if (answer !== undefined) return answer;
+    }
     return null;
   };
   return { conn: makeConn(handler), inserted, parent, customer, seriesDates };
@@ -1339,6 +1350,160 @@ describe('topUpRecurringSeriesLocked — occupancy clashes are advisory only in 
     expect(clashing.inserted.map((r) => r.scheduled_date)).toEqual(baseline.inserted.map((r) => r.scheduled_date));
     expect(clashingResult.spawnedVisits.length).toBe(baselineResult.spawnedVisits.length);
     expect(clashingResult.skipped).toBeNull();
+  });
+});
+
+describe('topUpRecurringSeriesLocked — a taken hour hands the visit off without a time (GATE_PLAN_TAKEN_HOUR_HANDOFF; owner 2026-10-22, audit D4)', () => {
+  const fixtureArgs = {
+    parentOverrides: {
+      recurring_pattern: 'weekly', window_start: '09:00', window_end: '10:00',
+      estimated_duration_minutes: 60,
+    },
+    colsOverrides: {
+      window_start: {}, window_end: {}, time_window: {}, recurring_dispatch_due_date: {}, window_display: {}, route_order: {},
+    },
+  };
+  afterEach(() => { delete process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF; });
+
+  test('gate on: a first candidate another customer holds goes in on its cadence date with no time, due that date', async () => {
+    findConflictingVisits.mockReset().mockResolvedValue([]);
+    const baseline = topupScenario(fixtureArgs);
+    await topUpRecurringSeriesLocked(baseline.conn, 10, { horizonDays: 14 });
+
+    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+    // The hand-off probe runs first on every candidate (gate on); the first
+    // candidate's sees another customer's visit in the hour.
+    findConflictingVisits.mockReset()
+      .mockResolvedValueOnce([{ id: 'occupied-1', customer_id: 77 }])
+      .mockResolvedValue([]);
+    const handed = topupScenario(fixtureArgs);
+    const result = await topUpRecurringSeriesLocked(handed.conn, 10, { horizonDays: 14 });
+
+    // Same cadence dates: the visit is not skipped and not moved to another date.
+    expect(handed.inserted.map((r) => r.scheduled_date)).toEqual(baseline.inserted.map((r) => r.scheduled_date));
+    const [first, ...rest] = handed.inserted;
+    expect(first).toMatchObject({
+      window_start: null, window_end: null, time_window: null, window_display: null, route_order: null,
+      recurring_dispatch_due_date: first.scheduled_date,
+    });
+    for (const row of rest) expect(row.window_start).toBe('09:00');
+    // Its reminder registers as the windowless placeholder, never the plan's hour.
+    expect(result.spawnedVisits[0].windowStart).toBeNull();
+    expect(findConflictingVisits.mock.calls[0][0]).toMatchObject({ windowStart: '09:00', windowEnd: '10:00', includeInterviews: true });
+    expect(findConflictingVisits.mock.calls[0][0].excludeCustomerId).toBeUndefined();
+  });
+
+  test('gate on: an hour only a booked interview holds is taken too (the advisory probe never sees it)', async () => {
+    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+    // Interviews come back only to a probe that asks for them.
+    findConflictingVisits.mockReset().mockImplementation(async ({ includeInterviews }) => (includeInterviews
+      ? [{ id: 'interview:app-1', customer_id: null, conflict_reason: 'interview' }] : []));
+    const scenario = topupScenario(fixtureArgs);
+    await topUpRecurringSeriesLocked(scenario.conn, 10, { horizonDays: 14 });
+    expect(scenario.inserted[0]).toMatchObject({ window_start: null, recurring_dispatch_due_date: scenario.inserted[0].scheduled_date });
+  });
+
+  test('gate on: the hand-off probe carries the technician the insert uses, not the parent row\'s', async () => {
+    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+    const { techScopedConfirmActive } = require('../services/scheduling/occupancy');
+    techScopedConfirmActive.mockReturnValue(true);
+    try {
+      // Another technician's stop holds the hour.
+      findConflictingVisits.mockReset()
+        .mockResolvedValueOnce([{ id: 'occupied-1', customer_id: 77, technician_id: 'tech-other' }])
+        .mockResolvedValue([]);
+      // The parent's technician cannot take the visit (no assignable row), so
+      // the insert goes in unassigned — and an unassigned visit is blocked by
+      // any technician's stop. Judged as the parent's tech, it would not be.
+      const scenario = topupScenario({ ...fixtureArgs, parentOverrides: { ...fixtureArgs.parentOverrides, technician_id: 'tech-gone' } });
+      await topUpRecurringSeriesLocked(scenario.conn, 10, { horizonDays: 14 });
+      expect(scenario.inserted[0]).toMatchObject({ technician_id: null, window_start: null });
+    } finally {
+      techScopedConfirmActive.mockReturnValue(false);
+    }
+  });
+
+  test('gate on: the insert reuses the technician the hand-off probe read (one lookup, Codex #6476 r1)', async () => {
+    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+    findConflictingVisits.mockReset().mockResolvedValue([]);
+    // The technician is free at the probe; an absence lands right after it.
+    let absenceReads = 0;
+    const otherTable = ({ table, op }) => {
+      if (table === 'technicians' && op === 'first') return { id: 'tech-1', employment_status: 'active', field_dispatchable: true };
+      if (table === 'technician_absences' && op === 'first') { absenceReads += 1; return absenceReads === 1 ? undefined : { id: 'absence-1' }; }
+      return undefined;
+    };
+    const scenario = topupScenario({ ...fixtureArgs, parentOverrides: { ...fixtureArgs.parentOverrides, technician_id: 'tech-1' }, otherTable });
+    await topUpRecurringSeriesLocked(scenario.conn, 10, { horizonDays: 14 });
+    expect(findConflictingVisits.mock.calls[0][0]).toMatchObject({ windowStart: '09:00' });
+    // The probed date keeps the technician its probe read; a second lookup
+    // would have seen the absence and inserted it unassigned. The next date
+    // is read once too, and sees the absence.
+    expect(scenario.inserted[0]).toMatchObject({ technician_id: 'tech-1', window_start: '09:00' });
+    expect(scenario.inserted.length).toBeGreaterThan(1);
+    expect(scenario.inserted[1].technician_id).toBeNull();
+    expect(absenceReads).toBe(scenario.inserted.length);
+  });
+
+  test('gate on: the probe measures the place the child is inserted at, resolved once (the series property the anchor adopts)', async () => {
+    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+    const { anchorSoleProperty } = require('../services/customer-properties');
+    const currentConflict = require('../services/auto-dispatch/current-conflict');
+    anchorSoleProperty.mockClear();
+    // An unstamped legacy parent: the anchor adopts the house the series is already at.
+    anchorSoleProperty.mockImplementationOnce(async (target) => { target.property_id = 'prop-series'; target.service_address_line1 = '200 Sample Road'; });
+    findConflictingVisits.mockReset()
+      .mockResolvedValueOnce([{ id: 'own-stop', customer_id: 5 }])
+      .mockResolvedValue([]);
+    const samePlaceSpy = jest.spyOn(currentConflict, 'samePlaceIdsAt').mockResolvedValue(new Set());
+    try {
+      const scenario = topupScenario(fixtureArgs);
+      await topUpRecurringSeriesLocked(scenario.conn, 10, { horizonDays: 14 });
+      expect(samePlaceSpy.mock.calls[0][1]).toMatchObject({ property_id: 'prop-series', service_address_line1: '200 Sample Road' });
+      // The insert carries that same place, from the one anchor read (no second one for it).
+      expect(scenario.inserted[0]).toMatchObject({ property_id: 'prop-series', service_address_line1: '200 Sample Road' });
+      expect(anchorSoleProperty).toHaveBeenCalledTimes(scenario.inserted.length);
+    } finally {
+      samePlaceSpy.mockRestore();
+    }
+  });
+
+  describe("gate on, the customer's own stop in the hour", () => {
+    const currentConflict = require('../services/auto-dispatch/current-conflict');
+    let samePlaceSpy;
+    beforeEach(() => {
+      process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+      findConflictingVisits.mockReset()
+        .mockResolvedValueOnce([{ id: 'own-stop', customer_id: 5 }])
+        .mockResolvedValueOnce([{ id: 'own-stop', customer_id: 5 }])
+        .mockResolvedValue([]);
+    });
+    afterEach(() => samePlaceSpy.mockRestore());
+
+    test('at the same place (measured from the parent): one stop, inserted with its time, as before', async () => {
+      samePlaceSpy = jest.spyOn(currentConflict, 'samePlaceIdsAt').mockResolvedValue(new Set(['own-stop']));
+      const own = topupScenario(fixtureArgs);
+      await topUpRecurringSeriesLocked(own.conn, 10, { horizonDays: 14 });
+      // Measured from the new visit's own place (the template the insert copies).
+      expect(samePlaceSpy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ customer_id: 5 }), [{ id: 'own-stop', customer_id: 5 }]);
+      expect(own.inserted[0].window_start).toBe('09:00');
+      expect(own.inserted[0].recurring_dispatch_due_date).toBeUndefined();
+    });
+
+    test('at another place: taken, handed off (Codex #6476 r1 P1)', async () => {
+      samePlaceSpy = jest.spyOn(currentConflict, 'samePlaceIdsAt').mockResolvedValue(new Set());
+      const other = topupScenario(fixtureArgs);
+      await topUpRecurringSeriesLocked(other.conn, 10, { horizonDays: 14 });
+      expect(other.inserted[0]).toMatchObject({ window_start: null, recurring_dispatch_due_date: other.inserted[0].scheduled_date });
+    });
+  });
+
+  test('gate off: a clash inserts with the time and makes no second probe (unchanged)', async () => {
+    findConflictingVisits.mockReset().mockResolvedValueOnce([{ id: 'occupied-1', customer_id: 77 }]).mockResolvedValue([]);
+    const off = topupScenario(fixtureArgs);
+    await topUpRecurringSeriesLocked(off.conn, 10, { horizonDays: 14 });
+    expect(off.inserted[0].window_start).toBe('09:00');
+    expect(findConflictingVisits.mock.calls.filter((c) => c[0] && c[0].excludeCustomerId)).toHaveLength(0);
   });
 });
 
