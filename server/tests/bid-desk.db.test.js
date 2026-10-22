@@ -383,7 +383,14 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect((await call('PATCH', `/${bidId}`, { confirm_due: true })).status).toBe(409);
       expect((await call('PATCH', `/${bidId}`, { confirm_due: true, expected_updated_at: '2026-01-01T00:00:00.000Z' })).status).toBe(409);
       expect(await bidRow(bidId)).toMatchObject({ due_confirmed: false });
-      expect((await call('PATCH', `/${bidId}`, { confirm_due: true, expected_updated_at: seen })).status).toBe(200);
+      // A second addendum on an already-flagged bid changes no field but still moves the version.
+      await mockPg('bid_opportunities').where({ id: bidId }).update({ needs_date_confirmation: true });
+      const flagged = (await call('GET', `/${bidId}`)).body.bid.updated_at;
+      await service.ingestEmail(await storeEmail({ gmail_thread_id: (await bidRow(bidId)).gmail_thread_id, subject: 'Addendum 2', body_text: 'See the portal.', received_at: new Date(NOW.getTime() - 20000) }));
+      expect((await call('PATCH', `/${bidId}`, { confirm_due: true, expected_updated_at: flagged })).status).toBe(409);
+      const current = (await call('GET', `/${bidId}`)).body.bid.updated_at;
+      expect((await call('PATCH', `/${bidId}`, { confirm_due: true, expected_updated_at: current })).status).toBe(200);
+      expect(seen).toBeTruthy();
       expect(await bidRow(bidId)).toMatchObject({ due_confirmed: true, needs_date_confirmation: false });
       await mockPg('bid_opportunities').where({ id: bidId }).update({ due_at: null, due_confirmed: false });
       expect((await call('PATCH', `/${bidId}`, { confirm_due: true })).status).toBe(400);

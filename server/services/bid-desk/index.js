@@ -93,7 +93,10 @@ async function ingestEmail(email, { historical = false, manual = false } = {}) {
       const { patch, notifyAddendum } = attachPatch(existing, parsed, kind);
       await trx('bid_opportunity_emails').insert({ bid_id: existing.id, email_id: email.id, kind, received_at: email.received_at });
       const updated = { ...existing, ...patch };
-      if (Object.keys(patch).length) await trx('bid_opportunities').where({ id: existing.id }).update({ ...patch, updated_at: trx.fn.now() });
+      // Every attached email moves the bid's version (updated_at), even with nothing else to change: a date
+      // confirmation the page sends against the older version is then refused.
+      // clock_timestamp(), not now(): the version must move even inside one long transaction.
+      await trx('bid_opportunities').where({ id: existing.id }).update({ ...patch, updated_at: trx.raw('clock_timestamp()') });
       if (notifyAddendum && !quiet) await alerts.raise(alerts.addendumSpec(updated, email), `bid-desk:addendum:${email.id}`, trx);
       return { bidId: existing.id, created: false, kind };
     }
