@@ -615,6 +615,38 @@ describe('public estimate one-time breakdown', () => {
     ]);
   });
 
+  // #6438: the save path stores a bundle's oneTime.total without the setup
+  // fee and marks it; the public anchor (what accept charges) must not take
+  // the fee out a second time. A legacy unmarked total still drops it once.
+  test('a saved bundle total that already excludes the setup fee anchors once, not twice', async () => {
+    const { buildEstimatePersistenceFields } = require('../services/admin-estimate-persistence');
+    const savedData = () => ({
+      result: {
+        recurring: {
+          monthlyTotal: 113.1,
+          annualAfterDiscount: 1357.2,
+          services: [{ service: 'pest_control', name: 'Pest Control', mo: 38.4 }, { service: 'mosquito', name: 'Mosquito', mo: 74.7 }],
+        },
+        oneTime: { items: [{ service: 'flea', name: 'Flea Treatment', price: 150 }], total: 249, membershipFee: 99 },
+      },
+    });
+    const fields = buildEstimatePersistenceFields({
+      address: '123 Palm Ave', customerName: 'Test Person', customerPhone: '(941) 555-0101',
+      estimateData: savedData(), monthlyTotal: 113.1, annualTotal: 1357.2, onetimeTotal: 249,
+    });
+    expect(fields.onetime_total).toBe(150);
+    const marked = await buildPricingBundle({
+      id: 'est-6438-marked', estimate_data: JSON.parse(fields.estimate_data),
+      monthly_total: 113.1, annual_total: 1357.2, onetime_total: fields.onetime_total,
+    });
+    expect(marked.anchorOneTimePrice).toBe(150);
+    const legacy = await buildPricingBundle({
+      id: 'est-6438-legacy', estimate_data: savedData(),
+      monthly_total: 113.1, annual_total: 1357.2, onetime_total: 249,
+    });
+    expect(legacy.anchorOneTimePrice).toBe(150);
+  });
+
   test('multi-service recurring bundles emit stacked service sections while preserving combined total', async () => {
     const payload = await buildPricingBundle({
       id: 'estimate-public-phase-0-pest-bundle-contract-test',

@@ -22898,6 +22898,9 @@ function readV1Shape(estData) {
     waveGuardTier: recurring.waveGuardTier || recurring.tier || null,
     oneTimeTotal: Number(result.oneTime?.total) || 0,
     membershipFee: Number(result.oneTime?.membershipFee) || 0,
+    // The save path already took an excluded setup fee out of oneTime.total
+    // (admin-estimate-persistence, #6438); the anchor must not take it again.
+    oneTimeTotalExcludesFee: result.oneTime?.membershipFeeExcludedFromTotal === true,
     recurringMonthlyTotal: Number(recurring.monthlyTotal) || 0,
     recurringAnnualAfter: Number(recurring.annualAfterDiscount) || 0,
     manualDiscount: normalizeManualDiscountSummary(estData),
@@ -28855,7 +28858,7 @@ async function buildPricingBundleInner(estimate) {
       ? oneTimeChoiceAmountForEstimate(estimate, estData, { frequencies, oneTimeBreakdown: storedOneTimeBreakdown })
       : null;
     const anchorOneTimePrice = choiceOneTimePrice ?? (() => {
-      if (!membershipFeeMixApplies && rawV1OneTimeTotal && v1.membershipFee > 0) {
+      if (!membershipFeeMixApplies && rawV1OneTimeTotal && v1.membershipFee > 0 && !v1.oneTimeTotalExcludesFee) {
         return Math.max(0, Math.round((rawV1OneTimeTotal - v1.membershipFee) * 100) / 100);
       }
       if (membershipFeeMixApplies && (annualPrepayEligible || seasonalSetupFeeDue) && !(v1.membershipFee > 0)) {
