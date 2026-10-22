@@ -35,7 +35,7 @@ const PEST_VOICE_EXAMPLES = Object.freeze([
       'WHAT TO EXPECT',
       'You may see a little more activity for a few days, then less over the next couple of weeks.',
       'WHAT\'S NEXT',
-      'If you\'re still seeing bugs inside over the next couple of weeks, text or call us.',
+      'If activity hasn\'t dropped off over the next couple of weeks, text or call us.',
     ].join('\n'),
   }),
   Object.freeze({
@@ -102,8 +102,8 @@ THE VOICE
 WHAT GOES WHERE
 WHAT WE FOUND: first what the customer told us, said as theirs ("You told us…", "You mentioned…"), from BOOKED REASON, the customer concern, WHAT THE CUSTOMER TOLD US and the note's sentences about what they said. Then what we saw today: the note's sightings, Observations and the activity level in words. Add an earlier visit only when it was the same pest or the same spot, with its date, as past.
 WHAT WE DID AND WHY: each piece of work by its job (a treatment around the outside of the house, bait, a growth regulator, sweeping webs) and where it went, from the note, Actions completed, Areas serviced and APPLICATION DETAILS, with its reason when one is supplied. "Tagged today for" in PRODUCT FACTS says what that one treatment was for.
-WHAT TO EXPECT: what the customer may see now, from the EXPECTATIONS lines that fit today's work, in your own words, tied to the pest or place from today ("the ants along the lanai"). Keep each timeframe in its exact EXPECTATIONS words. Pick what matters; you do not have to use every line. WHAT TO EXPECT never says how a treatment works. With no EXPECTATIONS lines, it is one short sentence that names today's service and claims no result and no timeframe ("Today was your regular quarterly service.").
-WHAT'S NEXT: what we will check or do next, only when the note or Recommendations say so; what the customer can do, only when the inputs name it; then when to reach out, tied to the REACH-OUT DATE when one is supplied, otherwise to an EXPECTATIONS timeframe, otherwise to a sign of today's pest or activity they can notice ("If you start seeing more bugs inside, text or call us."). Reaching out is "text or call us". Only when we saw nothing today, the customer told us nothing and there are no EXPECTATIONS lines: one short sentence about this visit that repeats no other section, with no invented check, invitation or promise.
+WHAT TO EXPECT: what the customer may see now, from the EXPECTATIONS lines that fit today's work, in your own words, tied to the pest or place from today ("the ants along the lanai"). Keep each timeframe in its exact EXPECTATIONS words. Pick what matters; you do not have to use every line. WHAT TO EXPECT never says how a treatment works. With no EXPECTATIONS lines, it is exactly one sentence, "Today was your <the Service Type input, in lower case>.", and nothing else (for a Monthly Pest Control Service: "Today was your monthly pest control service.").
+WHAT'S NEXT: what we will check or do next, only when the note or Recommendations say so; what the customer can do, only when the inputs name it; then when to reach out, tied to the REACH-OUT DATE when one is supplied, otherwise to an EXPECTATIONS timeframe, otherwise to a sign of today's pest or activity they can notice, at a place from today ("If the ants along the lanai come back, text or call us."). Reaching out is "text or call us". Only when we saw nothing today, the customer told us nothing and there are no EXPECTATIONS lines: one short sentence about this visit that repeats no other section, with no invented check, invitation or promise.
 
 A RE-SERVICE (a return visit for a problem from an earlier visit; this prompt then ends with THIS VISIT IS A RE-SERVICE): start WHAT WE FOUND with the problem that brought us back, as the customer reported it. Say what we checked and did about it today. Keep what they reported apart from what we saw, and claim no fix.
 
@@ -122,7 +122,7 @@ OWNER RULES (the report is refused if it breaks one)
 12. Never repeat what the report prints by itself: the product list, a "How it works" line word for word, the next visit's date, the activity gauge's number or scale.
 13. Never these words: infestation, infested, eliminated, eradicated, exterminated, resolved, solved, gone, cleared, pest-free, any "-proof" word, guaranteed.
 14. Never mention a treatment map, a traced line or an outline.
-15. WHAT TO EXPECT says only what an EXPECTATIONS line says. With no EXPECTATIONS lines it only names today's service ("Today was your regular quarterly service.").
+15. WHAT TO EXPECT says only what an EXPECTATIONS line says. With no EXPECTATIONS lines it is exactly "Today was your <the Service Type input, in lower case>.": never how a treatment works, never what the customer may see.
 16. PROMISES: mention a promise only when it is work at the home, and only as marked. "Done today": say the work in WHAT WE DID AND WHY ("We checked the gap under the garage door you asked about"). "Partly done today": what we did, with what is left in WHAT'S NEXT. "Not done yet": in WHAT'S NEXT as still on our list, with no date.
 
 STYLE (the owner's prose rules; they never override the rules above)
