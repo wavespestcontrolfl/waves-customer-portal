@@ -28,7 +28,7 @@ const {
   lawnWateringSmsLive, lawnWateringRuleLive, lawnWateringForecastLive, lawnWateringTextForecastLive,
 } = require('../../config/feature-gates');
 const { etDateString } = require('../../utils/datetime-et');
-const { frozenForecastLine } = require('./lawn-watering-forecast');
+const { textForecastLine } = require('./lawn-watering-forecast');
 
 const TEMPLATE_KEY = 'lawn_watering_instruction';
 const PURPOSE = 'lawn_watering_instruction';
@@ -103,7 +103,7 @@ function lawnWateringSmsPlan({
   ruleGateOn = false,
   completedAt = null,
   completionTextRequested = true,
-  forecastLine = null,
+  forecastLine,
   nowMs = Date.now(),
 } = {}) {
   if (!gateOn) return { send: false, reason: 'gate_off' };
@@ -125,9 +125,8 @@ function lawnWateringSmsPlan({
   if (!lines.length) return { send: false, reason: 'no_lines' };
   if (!wateringInstructionFresh(instruction, completedAt, nowMs)) return { send: false, reason: 'stale' };
   // GATE_LAWN_WATERING_TEXT_FORECAST: the rain sentence frozen with the
-  // instruction (both sources agreed) closes the text, after the steps.
-  const forecast = typeof forecastLine === 'string' && forecastLine.trim() ? smsSafe(forecastLine.trim()) : null;
-  return { send: true, vars: { watering_lines: [...lines, ...(forecast ? [forecast] : [])].join(' ') } };
+  // instruction (both sources agreed; textForecastLine) closes the text.
+  return { send: true, vars: { watering_lines: [...lines, forecastLine].filter(Boolean).map(smsSafe).join(' ') } };
 }
 
 /**
@@ -164,7 +163,7 @@ async function sendLawnWateringSms(args, deps) {
       ruleGateOn,
       completedAt,
       completionTextRequested: args.completionTextRequested === true,
-      forecastLine: lawnWateringTextForecastLive() && lawnWateringForecastLive() ? frozenForecastLine(instruction) : null,
+      forecastLine: lawnWateringTextForecastLive() && lawnWateringForecastLive() ? textForecastLine(instruction) : null,
       nowMs: Date.now(),
     });
     if (!plan.send) return { status: `skip_${plan.reason}` };

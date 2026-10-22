@@ -2659,9 +2659,11 @@ for drying, never a long window or a `later` phase) may carry it, worded for rai
 after the hold ("About ½ inch of rain is forecast between Wed 3 PM and Thu 9 AM. If
 at least ¼ inch falls in that time, it counts as watering in today's treatment. If
 it does not, run the watering above right away."; the frozen block records
-`afterHold: true` and is read only beside such a hold). It stays LIVE VIEW ONLY on
-this route; the lawn watering text, a customer message outside this route, carries
-the same frozen sentence after its steps.
+`afterHold: true` and is read only beside such a hold). The live page shows it under
+that hold-then-water-in (never under a plain hold), and `leadWords` counts it. It
+stays LIVE VIEW ONLY on this route; the lawn watering text, a customer message
+outside this route, carries the same frozen sentence after its steps, but only one
+frozen with the NWS agreement.
 Amount-only water-in (owner 2026-10-08, permanent and ungated since 2026-10-09;
 requires `GATE_LAWN_WATERING_RULE`): when a water-in is BUILT AT COMPLETION for a
 customer with no sprinkler head type or measured rate on file, its `lines` give

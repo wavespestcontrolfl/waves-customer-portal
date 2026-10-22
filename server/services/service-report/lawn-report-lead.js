@@ -300,6 +300,9 @@ function nextVisitDateWords(nextVisit) {
  * labels when those blocks render, and a constant for the static labels. The
  * word-budget test holds this at 250 or less.
  */
+// The banner states the page draws as a hold (LawnReportV2.jsx BANNER_HOLD_STATES).
+const BANNER_HOLD_STATES = ['hold', 'hold_then_water_in'];
+
 function leadWords(reportV2) {
   const lead = (reportV2 && reportV2.lead) || null;
   const banner = (reportV2 && reportV2.banner) || null;
@@ -309,11 +312,13 @@ function leadWords(reportV2) {
   // GATE_LAWN_WATERING_FORECAST live-view lines (the payload only carries them
   // on a live render of a water-in; PDF/static strip them before this runs).
   // The page prints the measured-rain note when it exists, else the forecast
-  // sentence: count the one that will be displayed (LawnWateringBanner).
-  if (banner && banner.state !== 'hold' && banner.state !== 'hold_then_water_in') {
-    const live = banner.observedRain && typeof banner.observedRain.line === 'string' && banner.observedRain.line
-      ? banner.observedRain.line : banner.forecastLine;
-    if (typeof live === 'string' && live) parts.push(live);
+  // sentence: count the one that will be displayed (LawnWateringBanner). A hold
+  // shows neither; a hold-then-water-in shows only the forecast sentence frozen
+  // for rain after the hold (GATE_LAWN_WATERING_TEXT_FORECAST).
+  if (banner && banner.state !== 'hold') {
+    const radar = BANNER_HOLD_STATES.includes(banner.state) ? null : banner.observedRain?.line;
+    const live = [radar, banner.forecastLine].find((line) => typeof line === 'string' && line);
+    if (live) parts.push(live);
   }
   // GATE_LAWN_REPORT_CLARITY live-view sprinkler-setup invitation (water-in only).
   if (banner && typeof banner.setupLine === 'string' && banner.setupLine) parts.push(banner.setupLine);

@@ -524,6 +524,26 @@ describe('GATE_LAWN_WATERING_TEXT_FORECAST: the rain sentence closes the text', 
     expect(await run()).toBe("Water in today's treatment with about 1/4 inch by Thu 2 PM. Run it even if it is not your usual day. About 1/2 inch of rain is forecast by Thu 8 AM. If at least 1/4 inch has fallen by then, it counts as watering in today's treatment. If it has not, run the watering above right away.");
   });
 
+  test('a sentence frozen from Open-Meteo alone (no NWS agreement) never reaches the text', async () => {
+    const steps = "Water in today's treatment with about 1/4 inch by Thu 2 PM. Run it even if it is not your usual day.";
+    for (const agreement of [undefined, { source: 'nws', peakChance: 50, hours: 2 }, { source: 'open_meteo', peakChance: 90, hours: 2 }]) {
+      const getTemplate = jest.fn(async (key, vars) => vars.watering_lines);
+      const instruction = frozen();
+      if (agreement) instruction.forecast.agreement = agreement; else delete instruction.forecast.agreement;
+      const state = {
+        record: { id: 'rec-l', structured_notes: {} },
+        svc: { id: 'svc-l', customer_id: 'cust-l', cust_phone: '+19415550100' },
+        notes: { lawnWateringFreeze: { wateringInstruction: instruction } },
+        isBackfill: false,
+        deliveryMode: 'auto_send',
+        internalOnly: false,
+        completionTextRequested: true,
+      };
+      await sendLawnWateringSms(state, { db: {}, sendCustomerMessage: jest.fn(async () => ({ sent: true })), getTemplate, mergeNotes: jest.fn(async () => {}), throwIfDeliveryUnverified: (r) => r });
+      expect(getTemplate.mock.calls[0][1].watering_lines).toBe(steps);
+    }
+  });
+
   test.each(['GATE_LAWN_WATERING_TEXT_FORECAST', 'GATE_LAWN_WATERING_FORECAST'])('%s off: the text is the steps only, as today', async (key) => {
     delete process.env[key];
     expect(await run()).toBe("Water in today's treatment with about 1/4 inch by Thu 2 PM. Run it even if it is not your usual day.");
