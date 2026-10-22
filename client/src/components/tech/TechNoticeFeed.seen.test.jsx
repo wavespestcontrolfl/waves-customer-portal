@@ -71,7 +71,13 @@ describe('notices stay until seen', () => {
     document.elementFromPoint = (x, y) => (covered ? document.body : document.querySelector('[data-testid="notice-stack"] > div'));
     vi.stubGlobal('IntersectionObserver', FakeObserver);
     localStorage.setItem('waves_admin_token', 'tech-token');
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+    // Fake time only: shouldAdvanceTime let the real clock tick the fake one
+    // while a test awaited, so under CI load a 250 ms sample fired outside
+    // act and its render (the one that arms the 5-minute clock) landed in a
+    // later advance, after the assertion. findByText still polls: the jest
+    // stub lets Testing Library advance the fake clock itself.
+    vi.useFakeTimers();
+    vi.stubGlobal('jest', { advanceTimersByTime: (ms) => vi.advanceTimersByTime(ms) });
   });
   afterEach(() => {
     cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); localStorage.clear();
