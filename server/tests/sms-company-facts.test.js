@@ -151,14 +151,14 @@ describe('answer-book facts (owner 2026-10-21/22)', () => {
   const section = () => renderCompanyFactsSection();
   const { RETIRED_COMPANY_FACT_LINES } = require('../services/sms-company-facts');
   const NEW_LINES = [
-    'The first pest visit includes an inside spray. After that, the inside is up to the customer: we treat it whenever they ask.',
+    'The first pest visit includes an inside spray, unless the customer chose exterior-only service. After that, the inside is up to the customer: we treat it whenever they ask.',
     'Rodent trapping includes the setup visit and at least one trap check. For more trap checks, the office confirms what the job includes.',
     'Residential plans have no long-term contract, and a residential customer can cancel any time. Commercial accounts follow their service agreement.',
-    'A customer who prepays the year and cancels within 90 days gets a refund for the visits not yet done. After 90 days, prepaid visits are not refunded.',
+    'A customer who prepays the year and cancels within 90 days gets a refund for the visits not yet done.',
     'We serve Manatee and Sarasota counties and Charlotte County except Punta Gorda, plus Ruskin, Apollo Beach, Sun City Center, Wimauma, Gibsonton and Riverview. We do not serve Punta Gorda, DeSoto County, Tampa, St. Petersburg or Lee County.',
     'A WDO (termite) inspection report is emailed after the licensed inspector signs it, normally the same business day as the inspection. The office can check on a late report.',
     'We do not tent for termites. For drywood termites we treat the infested wood directly with spot treatment, a borate wood treatment or injected foam.',
-    'Product labels: every service report lists each product applied, and the office can email a product label or Safety Data Sheet on request.',
+    'Product labels: the office can tell a customer which products were applied at a visit and can email a product label or Safety Data Sheet on request.',
   ];
   test('every new or changed line is in the section, word for word', () => {
     for (const line of NEW_LINES) expect(section()).toContain(`\n- ${line}\n`);
@@ -166,7 +166,9 @@ describe('answer-book facts (owner 2026-10-21/22)', () => {
   test('the payment line replaces the old card-only wording and keeps the mailing address', () => {
     const pay = COMPANY_FACTS.find((f) => f.startsWith('Paying:'));
     expect(pay).not.toMatch(/technicians? (?:do not|don't) take payment/i);
-    expect(pay).toContain('card or bank account on file, or by check or cash through the office');
+    // owner 2026-10-22 "add it": the technician takes card, check or cash at the visit
+    expect(pay).toContain('the technician can take a card, check or cash at the visit');
+    expect(pay).toContain('Customers can also pay by the card or bank account on file, or by check or cash through the office');
     expect(pay).toContain(`Checks are mailed to`);
     expect(pay).toContain(WAVES_ADDRESS_LINE);
     expect(section()).not.toMatch(/accept cards at the visit|never cash/);
@@ -453,7 +455,7 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
   const { isReserviceOfferPromise } = require('../services/sms-shadow-drafter');
   const { retiredCompanyFactBlock } = require('../services/agent-decision-send-checks');
   const { RETIRED_COMPANY_FACT_LINES } = require('../services/sms-company-facts');
-  const PAY = 'Customers pay by the card or bank account on file, or by check or cash through the office.';
+  const PAY = 'Customers can also pay by the card or bank account on file, or by check or cash through the office.';
   const REFUND = 'A customer who prepays the year and cancels within 90 days gets a refund for the visits not yet done.';
   const payOk = (reply, inboundText) => paymentStatus.checkPaymentStatusReply({ reply, sentences: [], inboundText }).ok;
 
@@ -471,6 +473,9 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
       expect(payOk(REFUND, inbound)).toBe(true);
       expect(payOk(`Hi! ${REFUND} Let us know if you have questions.`, inbound)).toBe(true);
     }
+  });
+  test('the technician payment sentence, copied verbatim, passes the money check', () => {
+    expect(payOk('The technician can take a card, check or cash at the visit.', 'Can I pay the tech in cash?')).toBe(true);
   });
   test('a paraphrase, an added status, a personal claim or a framed copy is still held', () => {
     const inbound = 'Do I get a refund if I cancel?';

@@ -91,13 +91,14 @@ describe('verifier — prompt contract', () => {
   test('real answers on: how-to-pay grounds on Payment options OR the COMPANY FACTS payment policy; an unlisted method stays a fabrication', () => {
     const p = buildVerifierSystemPrompt({ realAnswers: true });
     expect(p).toMatch(/Payment options line in BILLING exactly OR the owner-approved COMPANY FACTS payment policy/);
-    expect(p).toMatch(/customers pay by the card or bank account on file, or by check or cash through the office/);
+    expect(p).toMatch(/the technician can take a card, check or cash at the visit, and customers can also pay by the card or bank account on file, or by check or cash through the office/);
     expect(p).toMatch(/appears in NEITHER is a fabrication/);
     expect(p).toMatch(/unlisted method[^)]*stays a fabrication/);
     // the facts the rule points at really do carry that policy
     const { renderCompanyFactsSection } = require('../services/sms-company-facts');
     const facts = renderCompanyFactsSection();
-    expect(facts).toMatch(/customers pay by the card or bank account on file/i);
+    expect(facts).toMatch(/the technician can take a card, check or cash at the visit/i);
+    expect(facts).toMatch(/customers can also pay by the card or bank account on file/i);
     expect(facts).toMatch(/check or cash through the office/);
     expect(facts).toMatch(/Checks are mailed to/);
   });
