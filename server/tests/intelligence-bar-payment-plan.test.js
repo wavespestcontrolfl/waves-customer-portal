@@ -288,6 +288,41 @@ describe('create_payment_plan Confirm', () => {
     expect(result.note).toMatch(/confirmation email was not sent/);
   });
 
+  test.each([
+    ['a thrown send / provider timeout (error only)', { ok: false, error: 'Request timed out' }],
+    ['an uncertain provider outcome', { ok: false, error: 'socket hang up', deliveryOutcome: 'uncertain' }],
+    ['an empty answer', {}],
+    ['no answer', undefined],
+  ])('%s: the plan stays created and the email is "unknown, check the invoice timeline", never "not sent"', async (_label, email) => {
+    const card = await create();
+    Invoices.createPaymentPlanFromBar.mockResolvedValueOnce({ status: 201, json: { ok: true, paymentPlan: { id: PLAN, status: 'active' }, ...(email === undefined ? {} : { email }) } });
+    const result = await confirmCreate(card);
+    expect(result).toMatchObject({ success: true, payment_plan_id: PLAN, sent_to_customer: false, confirmation_email: { state: 'unknown' } });
+    expect(result.note).toMatch(/The confirmation email: unknown, check the invoice timeline\./);
+    expect(result.note).not.toMatch(/was not sent/);
+    expect(result.outcome_unknown).toBeUndefined();
+  });
+
+  test.each([
+    ['no recipient', { ok: false, skipped: true, reason: 'missing_email' }, /not sent \(missing email\)/],
+    ['suppressed', { ok: false, blocked: true, reason: 'Suppressed: unsubscribed' }, /not sent \(Suppressed: unsubscribed\)/],
+    ['held by a collections hold', { ok: false, blocked: true, reason: 'collection_hold', deliveryOutcome: 'not_sent' }, /not sent \(collection hold\)/],
+    ['the route’s own suppression after a racing cancel', { ok: false, skipped: true, error: 'Plan is no longer active — confirmation email suppressed' }, /not sent/],
+    ['a plain refusal by the library', { ok: false, blocked: false, reason: 'email_not_sent' }, /not sent \(email not sent\)/],
+  ])('the sender established "not sent" (%s): reported as not sent', async (_label, email, pattern) => {
+    const card = await create();
+    Invoices.createPaymentPlanFromBar.mockResolvedValueOnce({ status: 201, json: { ok: true, paymentPlan: { id: PLAN, status: 'active' }, email } });
+    const result = await confirmCreate(card);
+    expect(result).toMatchObject({ success: true, sent_to_customer: false, confirmation_email: { state: 'not_sent' } });
+    expect(result.note).toMatch(pattern);
+  });
+
+  test('a send already made earlier (deduped) is "already sent", not a new send', async () => {
+    const card = await create();
+    Invoices.createPaymentPlanFromBar.mockResolvedValueOnce({ status: 201, json: { ok: true, paymentPlan: { id: PLAN, status: 'active' }, email: { ok: true, deduped: true } } });
+    expect(await confirmCreate(card)).toMatchObject({ sent_to_customer: false, confirmation_email: { state: 'already_sent' } });
+  });
+
   test('drift in the invoice, the balance, the terms, the reminder row or the recipient refuses and runs nothing', async () => {
     const card = await create();
     state.invoices[0].updated_at = new Date('2099-01-03T00:00:00Z');

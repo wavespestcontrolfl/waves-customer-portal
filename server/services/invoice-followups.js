@@ -3070,6 +3070,8 @@ async function sendNextTouchNow(invoiceId, { operatorInitiated = false, combined
   let ownedBy = null;
   let previewChanged = false;
   let priorNextTouchAt = seq.next_touch_at;
+  // The time THIS call wrote (the re-arm): the put-back below happens only while the row still carries exactly it.
+  let rearmStamp = null;
   await db.transaction(async (trx) => {
     await lockCustomerDunningShared(trx, seq.customer_id);
     ownedBy = await openCustomerScheduleId(trx, seq.customer_id);
@@ -3088,10 +3090,11 @@ async function sendNextTouchNow(invoiceId, { operatorInitiated = false, combined
       if (!sameInvoice || !sameReminder) { previewChanged = true; return; }
       priorNextTouchAt = liveSeq.next_touch_at;
     }
+    rearmStamp = new Date(Date.now() - 1000);
     await trx('invoice_followup_sequences').where({ id: seq.id }).update({
       updated_at: trx.fn.now(),
       status: 'active',
-      next_touch_at: new Date(Date.now() - 1000),
+      next_touch_at: rearmStamp,
     });
   });
   if (previewChanged) return SEND_NOW_PREVIEW_CHANGED;
@@ -3111,8 +3114,10 @@ async function sendNextTouchNow(invoiceId, { operatorInitiated = false, combined
 
   // The Intelligence Bar's pin, again on the row fireStep will claim (a cron advance between the re-arm and this read), and the
   // invoice edit time on the invoice row fireStep locks. Either difference sends nothing; the re-arm is put back as it was.
+  // Conditional on the re-arm stamp: a newer time written meanwhile (rescheduleForInvoiceEdit after a due-date edit, a cron
+  // advance, a hold) is somebody else's and is never overwritten.
   const restoreAfterRefusal = () => db('invoice_followup_sequences')
-    .where({ id: seq.id, status: 'active', step_index: approved.stepIndex }).whereNull('touch_claimed_at')
+    .where({ id: seq.id, status: 'active', step_index: approved.stepIndex, next_touch_at: rearmStamp }).whereNull('touch_claimed_at')
     .update({ updated_at: db.fn.now(), next_touch_at: priorNextTouchAt })
     .catch((err) => logger.warn(`[invoice-followups] could not restore the reminder time after a refused send-now on ${invoiceId}: ${err.message}`));
   if (approved && row.step_index !== approved.stepIndex) {

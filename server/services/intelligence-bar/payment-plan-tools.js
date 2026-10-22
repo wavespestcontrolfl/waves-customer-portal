@@ -400,9 +400,29 @@ async function commitCreate(input, actionContext) {
       error: 'The Invoices page answered, but the plan does not read as active. Check the invoice before trying again.' };
   }
   logger.info(`[intelligence-bar:payment-plan] created plan ${json.paymentPlan.id} on ${plan.invoice_id}`);
-  const emailed = json.email?.ok === true;
-  return { ...base, success: true, payment_plan_id: json.paymentPlan.id, charged_card: false, sent_to_customer: emailed,
-    note: `The payment plan is active on invoice ${plan.invoice_number}: ${plan.installment_count} installment${plan.installment_count === 1 ? '' : 's'}, ${plan.amount_due} in all. No card was charged. ${emailed ? 'The confirmation email was sent.' : 'The confirmation email was not sent (no usable email, or it was held or suppressed); check the invoice timeline.'}` };
+  const email = planEmailState(json.email);
+  const emailNote = {
+    sent: 'The confirmation email was sent.',
+    already_sent: 'The confirmation email had already been sent.',
+    not_sent: `The confirmation email was not sent (${email.reason || 'no usable email, held or suppressed'}).`,
+    unknown: 'The confirmation email: unknown, check the invoice timeline.',
+  }[email.state];
+  return { ...base, success: true, payment_plan_id: json.paymentPlan.id, charged_card: false, sent_to_customer: email.state === 'sent',
+    confirmation_email: email,
+    note: `The payment plan is active on invoice ${plan.invoice_number}: ${plan.installment_count} installment${plan.installment_count === 1 ? '' : 's'}, ${plan.amount_due} in all. No card was charged. ${emailNote}` };
+}
+
+// The plan is created whatever the email does. The email is "not_sent" only when the sender established that (no recipient,
+// suppressed, held, skipped, or a plain "not sent" answer with a reason); an error-only answer (a provider timeout, a thrown
+// send) may have been delivered, so it is "unknown", never "not sent".
+function planEmailState(result) {
+  const r = result || {};
+  const reason = typeof r.reason === 'string' && r.reason ? r.reason.replace(/_/g, ' ').slice(0, 80) : undefined;
+  if (r.ok === true) return { state: r.deduped ? 'already_sent' : 'sent' };
+  if (r.deliveryOutcome === 'uncertain' || r.deliveryOutcome === 'accepted') return { state: 'unknown' };
+  if (r.skipped === true || r.blocked === true || r.deliveryOutcome === 'not_sent') return { state: 'not_sent', ...(reason ? { reason } : {}) };
+  if (reason && !r.error) return { state: 'not_sent', reason };
+  return { state: 'unknown' };
 }
 
 async function commitCancel(input, actionContext) {

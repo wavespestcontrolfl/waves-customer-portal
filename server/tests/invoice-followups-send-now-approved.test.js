@@ -201,6 +201,26 @@ describe('the card pin is judged under the locks, before the re-arm and the clai
     expect(seqRow().next_touch_at).toEqual(NEXT);
   });
 
+  test('a due-date edit between the re-arm and the claim (rescheduleForInvoiceEdit writes a newer time): nothing is sent and that newer time is kept', async () => {
+    const editedNext = new Date('2099-01-20T15:00:00Z');
+    let locks = 0;
+    hooks.onInvoiceLock = (invoice) => {
+      locks += 1;
+      if (locks === 2) {
+        invoice.updated_at = new Date('2099-01-02T00:00:00Z');
+        seqRow().next_touch_at = editedNext; // what rescheduleForInvoiceEdit commits with the edit
+      }
+    };
+    const result = await sendNow({ approved: APPROVED, report: true });
+    expect(result).toMatchObject({ ok: false, reason: 'preview_changed' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(seqRow()).toMatchObject({ status: 'active', step_index: 0 });
+    expect(seqRow().next_touch_at).toEqual(editedNext);
+    // The put-back was tried as a conditional write that matched no row.
+    const putBack = writes.filter((w) => w.table === 'invoice_followup_sequences' && Object.keys(w.patch).sort().join() === 'next_touch_at,updated_at').pop();
+    expect(putBack).toMatchObject({ count: 0 });
+  });
+
   test('a cron advance after the re-arm (the row read sees the next step) sends nothing and leaves cron’s own time alone', async () => {
     const cronNext = new Date('2099-01-13T15:00:00Z');
     const original = db.getMockImplementation();
