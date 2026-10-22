@@ -62,6 +62,11 @@ const WINDOW_SPAN = 15;
 // apply. Default is ZERO — every OTHER unwrapped site fails.
 const ALLOWLIST = [
   {
+    file: 'services/one-text-per-day.js',
+    snippet: "const log = await db('sms_log').where({ twilio_sid: sid }).first('message_type');",
+    reason: 'isTrackerText: keyed by twilio_sid (the text Twilio reports undelivered) and reads only its message type; a send reservation has no sid until it is promoted to a real send, so no placeholder can match.',
+  },
+  {
     file: 'services/access-code-capture.js',
     snippet: "const live = await trx('sms_log').where({ id: message.id }).forUpdate().first('customer_id', 'direction', 'message_type', 'to_phone', 'from_phone', 'message_body');",
     reason: 'sourceStillCurrent: re-locks the ONE inbound text this sweep pass already read, by id, to compare its owner and words; inbound texts are never send reservations.',
