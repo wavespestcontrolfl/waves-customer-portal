@@ -83,7 +83,7 @@ describeDb('Bid Desk (PostgreSQL)', () => {
 
   // ---- fixtures ----
   async function storeEmail(over = {}) {
-    const id = randomUUID();
+    const id = over.id || randomUUID();
     await mockPg('emails').insert({
       id, gmail_id: `g-${id}`, gmail_thread_id: `t-${id}`, from_address: 'invites@buildingconnected.com', from_name: 'Fixture Build Co via BuildingConnected',
       subject: 'Fixture Build Co has invited you to bid on Sample Ridge Residences', body_text: BC_BODY(), received_at: new Date(NOW.getTime() - 60000), ...over,
@@ -518,6 +518,18 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       const live = await mockPg('bid_opportunities').where({ first_email_id: recent.id }).first();
       expect(live).toMatchObject({ historical: false });
       expect(rung('new')).toHaveLength(1);
+    });
+
+    test('the backfill leaves rows after the cursor id to the live intake, even at the same created_at', async () => {
+      const at = new Date(NOW.getTime() - 3 * DAY);
+      const a = await storeEmail({ id: '00000000-0000-4000-8000-000000000001', created_at: at, received_at: at, body_text: BC_BODY('Alpha Fixture Plaza') });
+      const b = await storeEmail({ id: '00000000-0000-4000-8000-000000000002', created_at: at, received_at: at, body_text: BC_BODY('Beta Fixture Plaza') });
+      // The live cursor stopped between the two rows.
+      await mockPg('system_settings').where({ key: service.WATERMARK_KEY }).del();
+      await mockPg('system_settings').insert({ key: service.WATERMARK_KEY, value: JSON.stringify({ at: (await mockPg.raw('SELECT ?::timestamptz::text AS t', [at])).rows[0].t, id: a.id }), category: 'bid_desk', description: 'test' });
+      expect(await service.runBackfill({ days: 180, dryRun: false, now: NOW })).toMatchObject({ created: 1 });
+      expect(await mockPg('bid_opportunity_emails').where({ email_id: a.id }).first()).toBeTruthy();
+      expect(await mockPg('bid_opportunity_emails').where({ email_id: b.id }).first()).toBeUndefined();
     });
 
     test('the backfill dry run counts a later email that would join an earlier match by thread', async () => {

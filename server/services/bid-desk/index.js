@@ -417,7 +417,11 @@ async function runBackfill({ days = BACKFILL_DAYS, dryRun = true, now = new Date
   if (!bidDeskLive()) return { skipped: 'gate_off' };
   const since = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
   const stored = await readWatermark();
-  const until = stored ? stored.at : new Date(now.getTime() - FIRST_RUN_LOOKBACK_MS).toISOString();
+  // The live intake owns everything AFTER this (created_at, id) point; the backfill takes it and everything before.
+  // The id matters: several rows can share one created_at, and the cursor may stop between them.
+  const until = stored
+    ? { at: stored.at, id: stored.id }
+    : { at: new Date(now.getTime() - FIRST_RUN_LOOKBACK_MS).toISOString(), id: '00000000-0000-0000-0000-000000000000' };
   const result = { read: 0, matched: 0, created: 0, attached: 0, failed: 0 };
   // The dry run files nothing, so a later email that would join an earlier match by thread is counted here.
   const previewThreads = new Set();
@@ -425,7 +429,7 @@ async function runBackfill({ days = BACKFILL_DAYS, dryRun = true, now = new Date
   for (;;) {
     const rows = await db('emails')
       .whereRaw('(received_at, id) > (?::timestamptz, ?::uuid)', [cursor.at, cursor.id])
-      .whereRaw('created_at <= ?::timestamptz', [until])
+      .whereRaw('(created_at, id) <= (?::timestamptz, ?::uuid)', [until.at, until.id])
       .whereRaw(NOT_SPAM_SQL)
       .orderBy([{ column: 'received_at' }, { column: 'id' }])
       .limit(BACKFILL_BATCH).select(EMAIL_COLUMNS);
@@ -436,7 +440,7 @@ async function runBackfill({ days = BACKFILL_DAYS, dryRun = true, now = new Date
       await backfillOne(email, { dryRun, previewThreads, result });
     }
   }
-  if (!dryRun && !stored) await writeWatermark({ at: until, id: '00000000-0000-0000-0000-000000000000' });
+  if (!dryRun && !stored) await writeWatermark(until);
   return result;
 }
 
