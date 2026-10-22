@@ -797,6 +797,15 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     expect(JSON.stringify(result)).not.toMatch(/hunter22|correct horse/);
   });
 
+  test('a structured note keeps its per-key and per-leaf scrubbing after the whole-note pass (r24 audit P0)', async () => {
+    const keys = await read(ENTRY, { id: 1, notes: { auth_code: '123456', token_value: 'synthetic-secret', gate: 'west' } });
+    expect(JSON.stringify(keys)).not.toMatch(/123456|synthetic-secret/);
+    expect(keys.data.notes.gate).toBe('west');
+    const bearer = await read(ENTRY, { id: 1, notes: { header: 'Bearer\nabc123xyz', gate: 'west' } });
+    expect(JSON.stringify(bearer)).not.toContain('abc123xyz');
+    expect(bearer.data.notes.gate).toBe('west');
+  });
+
   test('a split card number inside a long structured note is also found after the budget is applied', async () => {
     const note = { items: Array.from({ length: 8 }, (_, i) => `visit ${i}: the dog stays in the back yard.`), card: ['4242', '4242', '4242', '4242'] };
     const result = await read(ENTRY, { id: 1, notes: note });
