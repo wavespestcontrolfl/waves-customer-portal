@@ -303,6 +303,19 @@ function calcUnoptimizedDistance(stops, origin = HQ) {
   return Math.round(total * 1609.34);
 }
 
+// Where a route starts and ends: options.startLat/startLng, else the office.
+// A staff caller passes a technician's start point (GATE_TECH_START_POINTS);
+// every other caller, and every gate-off caller, is the office, whose legs
+// keep their 'HQ' label. A start that is not the office reads 'Start', so a
+// leg label never carries (or implies) a staff home address.
+function routeStart(options = {}) {
+  return { lat: options.startLat || HQ.lat, lng: options.startLng || HQ.lng };
+}
+function startLabel(options = {}) {
+  const start = routeStart(options);
+  return start.lat === HQ.lat && start.lng === HQ.lng ? 'HQ' : 'Start';
+}
+
 /**
  * Call Google Routes API with waypoint optimization.
  *
@@ -390,11 +403,11 @@ async function callGoogleRoutesAPI(stops, options = {}) {
 
       let fromName, toName;
       if (i === 0) {
-        fromName = 'HQ';
+        fromName = startLabel(options);
         toName = orderedStops[0]?.customerName || orderedStops[0]?.customer_name || `Stop ${i + 1}`;
       } else if (i === route.legs.length - 1 && endAtStart) {
         fromName = orderedStops[i - 1]?.customerName || orderedStops[i - 1]?.customer_name || `Stop ${i}`;
-        toName = 'HQ';
+        toName = startLabel(options);
       } else {
         fromName = orderedStops[i - 1]?.customerName || orderedStops[i - 1]?.customer_name || `Stop ${i}`;
         toName = orderedStops[i]?.customerName || orderedStops[i]?.customer_name || `Stop ${i + 1}`;
@@ -466,7 +479,7 @@ function nearestNeighborOptimize(stops, options = {}) {
     const { meters: distMeters, minutes: durationMin } = fallbackLegMetrics(legMiles);
 
     const fromName = ordered.length === 0
-      ? 'HQ'
+      ? startLabel(options)
       : (ordered[ordered.length - 1].customerName || ordered[ordered.length - 1].customer_name || `Stop ${ordered.length}`);
     const toName = nearest.customerName || nearest.customer_name || `Stop ${ordered.length + 1}`;
 
@@ -494,7 +507,7 @@ function nearestNeighborOptimize(stops, options = {}) {
     totalDistanceMeters += returnMeters;
     legs.push({
       from: lastStop.customerName || lastStop.customer_name || `Stop ${ordered.length}`,
-      to: 'HQ',
+      to: startLabel(options),
       distanceMeters: returnMeters,
       durationMinutes: returnMinutes,
     });
@@ -536,7 +549,8 @@ async function optimizeRoute(stops, options = {}) {
   // For a single stop, no optimization needed
   if (stops.length === 1) {
     const s = stops[0];
-    const distToStop = haversine(HQ.lat, HQ.lng, parseFloat(s.lat) || HQ.lat, parseFloat(s.lng) || HQ.lng);
+    const start = routeStart(options);
+    const distToStop = haversine(start.lat, start.lng, parseFloat(s.lat) || start.lat, parseFloat(s.lng) || start.lng);
     const stopName = s.customerName || s.customer_name || 'Stop 1';
 
     // This path is the one fallback leg that never applied the road factor
@@ -573,15 +587,15 @@ async function optimizeRoute(stops, options = {}) {
       totalDurationSeconds,
       unoptimizedDistanceMeters: distMeters,
       legs: [
-        { from: 'HQ', to: stopName, distanceMeters: legMeters, durationMinutes: legMinutes },
-        { from: stopName, to: 'HQ', distanceMeters: legMeters, durationMinutes: legMinutes },
+        { from: startLabel(options), to: stopName, distanceMeters: legMeters, durationMinutes: legMinutes },
+        { from: stopName, to: startLabel(options), distanceMeters: legMeters, durationMinutes: legMinutes },
       ],
       source: 'single_stop',
     };
   }
 
   // Calculate unoptimized distance (original order)
-  const unoptimizedDistanceMeters = calcUnoptimizedDistance(stops);
+  const unoptimizedDistanceMeters = calcUnoptimizedDistance(stops, routeStart(options));
 
   let result;
   let apiWarning = null;

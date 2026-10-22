@@ -265,12 +265,16 @@ async function finalizeLawnReportSynthesis({ service, knex, coverageFreezeAllowe
       // the first-writer-wins freeze: a record that is already frozen is never
       // touched, so a replay is byte-identical. Off, or any miss: exactly the
       // instruction as built.
+      // GATE_LAWN_WATERING_TEXT_FORECAST: the NWS hourly forecast must agree,
+      // and a timed hold then a water-in is read from the hold's end.
       if (featureGates.lawnWateringForecastLive() && !hasFrozenWateringInstruction(record)) {
+        const twoSources = featureGates.lawnWateringTextForecastLive();
         const forecast = await resolveWaterInForecast({
           instruction: instructionOut.instruction,
           latitude: record.customer_latitude ?? record.latitude ?? record.lat,
           longitude: record.customer_longitude ?? record.longitude ?? record.lng,
           fetchForecast: require('./application-conditions').fetchPropertyForecast,
+          ...(twoSources ? { fetchNwsHourly: require('../weather-forecast').getHourlyRainOutlook, afterHold: true } : {}),
         });
         if (forecast) instructionOut.instruction = { ...instructionOut.instruction, forecast };
       }

@@ -375,7 +375,7 @@ Use for: "build the report for the customer we just finished", "who did we finis
   },
   {
     name: 'cancel_appointment',
-    description: 'Cancel ONE appointment through a confirmation card that shows its exact effects (customer name, date, and any comms/tech notice) before anything changes. Only BARE visits qualify: no invoice of any kind on record (any status), no inspection-credit offer tied to it, no prepayment or prepaid plan coverage, no saved card, card request, fee agreement or card hold of any status, no plan make-up visit, not a follow-up visit, not part of a grouped visit — and only while cancelling from the bar is enabled. When the tool refuses, relay the reason and point the operator to the Dispatch screen; never say a visit was cancelled until the card is confirmed.',
+    description: 'Cancel ONE appointment through a confirmation card that shows its exact effects (customer name, date, and any comms/tech notice) before anything changes. Only BARE visits qualify: no invoice of any kind on record (any status), no inspection-credit offer tied to it, no prepayment or prepaid plan coverage, no saved card, card request, fee agreement or card hold of any status, no plan make-up visit, not a follow-up visit, not part of a grouped visit — and only while cancelling from the bar is enabled. When the tool refuses, relay the reason (the bar can\'t cancel a visit with an invoice, credit or linked visit yet) and do not send the operator to another screen; never say a visit was cancelled until the card is confirmed.',
     input_schema: {
       type: 'object',
       properties: {
@@ -3296,7 +3296,7 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
   // An area add-on is priced, sized and limit-checked from an estimate (its sold area, its yearly limit, its price tier): the
   // bar books one service by name with none of that, so it never books one. Same rule as the Schedule screen's hand-made line.
   if (catalogRow && String(catalogRow.service_key || '').startsWith('area_addon_')) {
-    return { error: `"${catalogRow.name}" is an add-on treatment that is priced and limited from an estimate. Build an estimate that sells it, then book from that estimate on the Schedule screen. Nothing was booked.` };
+    return { error: `"${catalogRow.name}" is an add-on treatment that is priced and limited from an estimate, so the bar can't book it by name from here yet. Nothing was booked.`, code: 'addon_by_name_unsupported' };
   }
   const stated = statedPrice !== undefined && statedPrice !== null;
   if (isAlwaysFreeServiceType(bookedType)) {
@@ -3532,7 +3532,7 @@ async function ibBookingProposal(customerId, serviceType, statedPrice, customerR
   const customer = await db('customers').where({ id: customerId }).first();
   if (!customer) return null;
   const booking = await ibBookingPricing({ customer, serviceType, statedPrice });
-  if (booking.error) return { error: booking.error };
+  if (booking.error) return { error: booking.error, ...(booking.code ? { code: booking.code } : {}) };
   const refusal = ibBookingBillingRefusal(customer, bookedServiceTypeFor(booking, serviceType), booking.price);
   if (refusal) return { error: refusal };
   const request = ibBookingCustomerRequest(customerRequest, booking.catalogRow);
@@ -3725,7 +3725,7 @@ async function createAppointment(input, actionContext = {}) {
   // never carries a price the operator did not approve. A call with no pins
   // (never proposed through a card) may only book unpriced.
   const booking = await ibBookingPricing({ customer, serviceType: service_type, statedPrice: input.price });
-  if (booking.error) return { error: booking.error };
+  if (booking.error) return { error: booking.error, ...(booking.code ? { code: booking.code } : {}) };
   // A close or colloquial name books as the exact catalog name it resolved to.
   service_type = bookedServiceTypeFor(booking, service_type);
   // Retired-for-sale catalog rows (quarterly T&S) book only for a customer
@@ -4223,8 +4223,8 @@ async function rescheduleAppointment(input, actionContext = {}) {
     const oldDateStr = oldDate instanceof Date ? oldDate.toISOString().slice(0, 10) : String(oldDate || '').slice(0, 10);
     if (collectiveMoveGateOn() && appt.is_recurring === true && dateStr !== oldDateStr) {
       return {
-        error: 'This visit is part of a recurring plan — with collective moves on, its future visits follow every date move. Move it from Dispatch or the Edit appointment modal for now; Intelligence Bar series moves arrive in a follow-up. Nothing was changed.',
-        code: 'COLLECTIVE_MOVE_REQUIRED',
+        error: 'This visit is part of a recurring plan — with collective moves on, its future visits follow every date move, and the bar can\'t move a series from here yet. Nothing was changed.',
+        code: 'collective_move_unsupported',
       };
     }
   }
@@ -4343,8 +4343,9 @@ async function rescheduleAppointment(input, actionContext = {}) {
   // bar does not move it (ib-write-tools: the card shows everything the
   // commit does). The Schedule screen moves both.
   if (await require('../package-followup-booking').hasLivePackageChild(db, [appt.id])) {
-    return { error: 'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. Move it from the Schedule screen, which moves both. Nothing was changed.' };
+    return { error: 'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. The bar can\'t move it from here yet. Nothing was changed.', code: 'package_visit_two_linked' };
   }
+  let thrownRefusal = null;
   await db.transaction(async (trx) => {
       // Rung 1 (date-wide occupancy) FIRST, then the stop lock (codex
       // #3609 r30 P2): probeSlotOverlap's ordering contract puts the
@@ -4370,7 +4371,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
       // Package visit 2 recheck, atomic with this write (the preflight
       // above is only a fast refusal).
       await require('../package-followup-booking').assertNoLivePackageChildLocked(trx, [appointment_id],
-        'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. Move it from the Schedule screen, which moves both. Nothing was changed.');
+        'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. The bar can\'t move it from here yet. Nothing was changed.');
       // A visit carrying a limited area add-on is judged for the new day at its place (a limit reached refuses the move; nothing
       // is changed). A same-day change and a visit with no limited add-on cost nothing.
       await require('../area-addon-limits').assertMovedVisitLimitsOpen(trx, { visitId: appointment_id, visit: appt, scheduledDate: dateStr, staff: true });
@@ -4437,7 +4438,12 @@ async function rescheduleAppointment(input, actionContext = {}) {
         .returning(['id', 'technician_id']);
       updatedRows = committed.length;
       committedTechId = committed[0]?.technician_id || null;
+  }).catch((err) => {
+    // A locked recheck that throws (package visit 2, grouped, frozen) is a refusal.
+    thrownRefusal = require('./outcomes').moveRefusalFromThrown(err);
+    if (!thrownRefusal) throw err;
   });
+  if (thrownRefusal) return thrownRefusal;
   if (updatedRows === 0) {
     return { error: 'Appointment changed concurrently (status, date, or window) while the reschedule was pending — nothing was moved. Re-check the appointment and retry if still applicable.' };
   }
@@ -4545,7 +4551,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
 // invoice, no inspection-credit offer, and is neither a follow-up child nor
 // grouped — nothing this card would need to void, reverse, or disclose a
 // group/follow-up side effect for. Anything else cancels from Dispatch.
-const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved card or card request on file, a saved-card fee agreement, a prepayment or prepaid plan coverage, an invoice of any kind on record, an inspection-credit offer tied to it, a plan make-up visit, is a follow-up visit, has a linked follow-up visit that cancels with it, or is part of a grouped visit, so it can only be cancelled from the Dispatch screen. Nothing was changed.';
+const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved card or card request on file, a saved-card fee agreement, a prepayment or prepaid plan coverage, an invoice of any kind on record, an inspection-credit offer tied to it, a plan make-up visit, is a follow-up visit, has a linked follow-up visit that cancels with it, or is part of a grouped visit, so the bar can\'t cancel this visit from here yet (a visit with an invoice, credit or linked visit). Nothing was changed.';
 
 async function cancelAppointment(input, actionContext = {}) {
   const { appointment_id, reason } = input;
@@ -4675,7 +4681,7 @@ async function cancelAppointment(input, actionContext = {}) {
     }
     // Owner ruling 2026-09-28: the bar cancels bare visits only.
     if ((freshImpact?.card_cancel_refusals || []).length) {
-      return { error: CARD_CANCEL_REFUSED_MESSAGE };
+      return { error: CARD_CANCEL_REFUSED_MESSAGE, code: 'cancel_with_effects_unsupported' };
     }
   }
 
@@ -4879,7 +4885,7 @@ async function cancelAppointment(input, actionContext = {}) {
       return { error: 'Appointment not found — nothing was changed.' };
     }
     if (err && err.message === '__cancel_card_refused__') {
-      return { error: CARD_CANCEL_REFUSED_MESSAGE };
+      return { error: CARD_CANCEL_REFUSED_MESSAGE, code: 'cancel_with_effects_unsupported' };
     }
     // The visit went cancelled / no_show / skipped between the initial read
     // and the lock chain, which refuses a never-ran visit (Codex round-10

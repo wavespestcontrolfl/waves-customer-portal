@@ -521,7 +521,12 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     // Re-audited 2026-09-30 (B10): +1 = the ONE reason update in
     // repointFlagsReleaseCollisions (dispute-hold promotion / fallback carry), which runs
     // only for collections_flags and writes `reason` — never this table.
-    const AUDITED_DYNAMIC_WRITERS = { 'server/services/customer-dedupe.js': 10 };
+    // Re-audited 2026-10-21 (#6363): +2 = the two updates in
+    // foldContactNotificationPrefs (the customer_id re-point of a moved row and
+    // the most-restrictive fold of a shared phone's choices), which run only
+    // for service_contact_notification_prefs and write its own columns —
+    // never this table, never a status key.
+    const AUDITED_DYNAMIC_WRITERS = { 'server/services/customer-dedupe.js': 12 };
 
     const writes = [];
     const unscannable = [];

@@ -6,6 +6,7 @@ const router = express.Router();
 const Stripe = require('stripe');
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { insertHealthAlert, lockAlertCustomers } = require('../services/health-alert-insert');
 const { isBankMethodType } = require('../services/autopay-eligibility');
 const stripeConfig = require('../config/stripe-config');
 const {
@@ -690,7 +691,7 @@ async function recordStatementPaymentIssue(paymentIntent, statementId, reason) {
 // chars) overflowed the column and every insert silently failed.
 async function alertSurchargeBypass(paymentIntent, invoice, alertType, severity, title, description, metadata = {}) {
   try {
-    await db('customer_health_alerts').insert({
+    await insertHealthAlert({
       customer_id: invoice?.customer_id || paymentIntent.metadata?.waves_customer_id || null,
       alert_type: alertType,
       severity,
@@ -1860,6 +1861,12 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   // flip back so Stripe's redelivery repeats the whole check, instead of a
   // swallowed read leaving the invoice paid with no alert (audit P1).
   const updated = await db.transaction(async (trx) => {
+    // Merge fence first: the payer-billed alert below may insert under this
+    // transaction, and its customer lock must come before the payment and
+    // invoice locks, in the order executeMerge takes them.
+    if (invoiceForTenderGuard?.id) {
+      await lockAlertCustomers(trx, [invoiceForTenderGuard.customer_id, paymentIntent.metadata?.waves_customer_id]);
+    }
     const flipped = await trx('payments')
       .where({ stripe_payment_intent_id: piId, status: 'processing' })
       .update(paymentUpdates);
@@ -1874,14 +1881,14 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
         .forUpdate().first('id', 'invoice_number', 'customer_id', 'scheduled_send_error');
       if (invoiceWithdrawnFromCustomer(settledInvoice)) {
         logger.error(`[stripe-webhook] PI ${piId} settled on invoice ${settledInvoice.id} whose Bill-To moved to a third-party payer mid-payment`);
-        await trx('customer_health_alerts').insert({
+        await insertHealthAlert({
           customer_id: settledInvoice.customer_id || paymentIntent.metadata?.waves_customer_id || null,
           alert_type: 'wh_payer_billed_settled',
           severity: 'high',
           title: 'Customer payment settled on payer-billed debt',
           description: "This invoice's Bill-To moved to a third-party payer while the payment was in flight. The funds are captured and the invoice is paid — refund the customer or re-bill AP.",
           trigger_data: JSON.stringify({ stripe_payment_intent_id: paymentIntent.id, invoice_number: settledInvoice.invoice_number }),
-        });
+        }, { trx });
       }
     }
     return flipped;

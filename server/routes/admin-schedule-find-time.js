@@ -339,6 +339,9 @@ router.post('/', async (req, res) => {
 
     const requestedTopN = Math.min(Math.max(parseInt(topN, 10) || 10, 1), 100);
     const result = await findAvailableSlots({
+      // Staff picker: each tech's day starts at their start point
+      // (GATE_TECH_START_POINTS; tech-start-point.js).
+      techStartPoints: true,
       lat: target.lat,
       lng: target.lng,
       durationMinutes: Math.max(15, parseInt(durationMinutes, 10) || 60),

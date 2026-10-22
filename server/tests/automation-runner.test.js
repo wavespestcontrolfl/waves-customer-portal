@@ -40,6 +40,15 @@ jest.mock('../services/billing-channel-email-authority', () => ({
   }),
 }));
 
+// The deferred-send contact recheck (rerouteForContactEmailOptOut): pass-
+// through by default — the same answer the real module gives with the
+// contact-login gate off — so every other suite is unchanged; the boundary
+// suite below flips its SECOND answer.
+jest.mock('../services/contact-notification-prefs', () => ({
+  ...jest.requireActual('../services/contact-notification-prefs'),
+  rerouteForContactEmailOptOut: jest.fn(async (_customerId, email) => ({ email, rerouted: false })),
+}));
+
 const {
   renderAutomationStepContent,
   automationSuppressionGroupKey,
@@ -52,6 +61,7 @@ const db = require('../models/db');
 const sendgrid = require('../services/sendgrid-mail');
 const { buildConsultationEmailBlock } = require('../services/lead-consultation-email-block');
 const BillingEmailAuthority = require('../services/billing-channel-email-authority');
+const ContactPrefs = require('../services/contact-notification-prefs');
 
 function chain({ result = [], first, returning, updateResult = 1 } = {}) {
   const q = {};
@@ -982,7 +992,7 @@ describe('enrollCustomer — context.leadId persists on automation_enrollments.m
     expect(inserted.metadata).toBe(JSON.stringify({ lead_id: 'lead-123' }));
   });
 
-  test('reactivating a prior enrollment MERGES lead_id via jsonb_set — never overwrites the whole metadata object', async () => {
+  test('reactivating a prior enrollment MERGES lead_id into the row\'s metadata — never overwrites the whole object', async () => {
     const reactivateUpdate = chain();
     reactivateUpdate.update = jest.fn(() => reactivateUpdate);
     reactivateUpdate.returning = jest.fn(async () => [{ id: 'enr-1' }]);
@@ -1002,7 +1012,7 @@ describe('enrollCustomer — context.leadId persists on automation_enrollments.m
     });
 
     const patch = reactivateUpdate.update.mock.calls[0][0];
-    expect(patch.metadata).toEqual({ sql: expect.stringContaining('jsonb_set'), bindings: [JSON.stringify('lead-456')] });
+    expect(patch.metadata).toEqual({ sql: expect.stringContaining("|| ?::jsonb"), bindings: [JSON.stringify({ lead_id: 'lead-456' })] });
     // Table-qualified: the same payload is the ON CONFLICT merge, where a
     // bare `metadata` is ambiguous with EXCLUDED (Codex #4813 r4 P1).
     expect(patch.metadata.sql).toContain('automation_enrollments.metadata');
@@ -1025,9 +1035,32 @@ describe('enrollCustomer — context.leadId persists on automation_enrollments.m
     await enrollCustomer({ templateKey: 'new_lead', customer: { email: 'lead@example.com' } });
 
     const patch = reactivateUpdate.update.mock.calls[0][0];
-    expect(patch.metadata).toEqual({ sql: expect.stringContaining("- 'lead_id'"), bindings: undefined });
+    expect(patch.metadata).toEqual({ sql: expect.stringContaining("- 'lead_id'"), bindings: [JSON.stringify({})] });
     expect(patch.metadata.sql).toContain('automation_enrollments.metadata');
     expect(patch.metadata.sql).not.toContain('jsonb_set');
+  });
+
+  test('context.recipientRole stamps metadata.recipient_role for an on-location contact\'s address only — the dispatch-time contact recheck reads it back (codex #6363 r10 P1)', async () => {
+    const insertChain = chain({ returning: [{ id: 'enr-new' }] });
+    const queues = () => ({
+      automation_templates: [chain({ first: { key: 'bed_bug', name: 'Bed bug', enabled: true } })],
+      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, delay_hours: 0, enabled: true }] })],
+      automation_enrollments: [chain({ first: undefined }), insertChain],
+    });
+    setDbQueues(queues());
+    await enrollCustomer({ templateKey: 'bed_bug', customer: { email: 'onsite@example.com' }, context: { recipientRole: 'service_contact' } });
+    expect(insertChain.insert.mock.calls[0][0].metadata).toBe(JSON.stringify({ recipient_role: 'service_contact' }));
+    // The holder's (primary) address carries no stamp; a reactivation drops a stale one.
+    const insertChain2 = chain({ returning: [{ id: 'enr-2' }] });
+    setDbQueues({ ...queues(), automation_enrollments: [chain({ first: undefined }), insertChain2] });
+    await enrollCustomer({ templateKey: 'bed_bug', customer: { email: 'pat@example.com' }, context: { recipientRole: 'primary' } });
+    expect(insertChain2.insert.mock.calls[0][0].metadata).toBeUndefined();
+    const reactivateUpdate = chain();
+    reactivateUpdate.update = jest.fn(() => reactivateUpdate);
+    reactivateUpdate.returning = jest.fn(async () => [{ id: 'enr-1' }]);
+    setDbQueues({ ...queues(), automation_enrollments: [chain({ first: { id: 'enr-1', status: 'completed', email: 'pat@example.com', metadata: { recipient_role: 'service_contact' } } }), reactivateUpdate] });
+    await enrollCustomer({ templateKey: 'bed_bug', customer: { email: 'pat@example.com' } });
+    expect(reactivateUpdate.update.mock.calls[0][0].metadata).toEqual({ sql: expect.stringContaining("- 'recipient_role'"), bindings: [JSON.stringify({})] });
   });
 
   test('no context.leadId leaves metadata untouched (byte-identical to every pre-existing enroll site)', async () => {
@@ -1283,5 +1316,69 @@ describe('sendStepLocked (via sendStep) — consultation-booking block wiring', 
     expect(buildConsultationEmailBlock).not.toHaveBeenCalled();
     const sentArgs = sendgrid.sendOne.mock.calls[0][0];
     expect(sentArgs.html).not.toContain('{{consultation_booking}}');
+  });
+});
+
+// A step addressed to an on-location contact re-runs the contact recheck at
+// SendGrid's provider boundary (codex #6363 r30 P2): the early recheck ran
+// before the render, and a contact who turned email off, or whom the holder
+// removed, during the delivery checks and the provider's request preparation
+// would otherwise still be mailed.
+describe('sendStepLocked — the contact recheck runs again at the provider boundary', () => {
+  const CONTACT_ENROLLMENT = {
+    id: 'enr-contact', status: 'active', template_key: 'bed_bug', customer_id: 'cust-1', current_step: 0, next_send_at: null,
+    email: 'sam@example.com', first_name: 'Sam', last_name: 'Spouse', metadata: { recipient_role: 'service_contact' },
+  };
+  const STEP = {
+    id: 'step-1', step_order: 0, subject: 'Hi {{first_name}}', html_body: '<p>Hi {{first_name}}</p>', text_body: 'Hi {{first_name}}',
+    from_email: 'automations@wavespestcontrol.com', enabled: true,
+  };
+  function queues(sendRowChain = chain({})) {
+    return {
+      // sendStep's pre read, the locked re-read, advanceEnrollment's update.
+      automation_enrollments: [chain({ first: CONTACT_ENROLLMENT }), chain({ first: CONTACT_ENROLLMENT }), chain({})],
+      automation_templates: [chain({ first: { key: 'bed_bug', name: 'Bed bug', asm_group: 'service' } })],
+      automation_steps: [chain({ result: [STEP] })],
+      automation_step_sends: [chain({ returning: [{ id: 'send-1' }] }), sendRowChain],
+      email_suppressions: [chain({ result: [] })],
+    };
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    db.fn = { now: jest.fn(() => 'NOW()') };
+    sendgrid.isConfigured = jest.fn(() => true);
+    ContactPrefs.rerouteForContactEmailOptOut.mockImplementation(async (_customerId, email) => ({ email, rerouted: false }));
+  });
+
+  test('a contact whose address or email choice changed between the early recheck and the handoff: nothing sent, the queued row dropped, the step left due; the check asks with the enrollment\'s recipient stamp', async () => {
+    const sendRowChain = chain({});
+    setDbQueues(queues(sendRowChain));
+    ContactPrefs.rerouteForContactEmailOptOut
+      .mockResolvedValueOnce({ email: 'sam@example.com', rerouted: false })
+      .mockResolvedValueOnce({ email: 'pat@example.com', rerouted: true });
+    sendgrid.sendOne.mockImplementation(async (opts) => { await opts.providerBoundaryCheck({}); return { messageId: 'sg-never' }; });
+
+    const result = await sendStep('enr-contact');
+
+    expect(result).toMatchObject({ sent: false, deferred: true });
+    expect(ContactPrefs.rerouteForContactEmailOptOut).toHaveBeenCalledTimes(2);
+    expect(ContactPrefs.rerouteForContactEmailOptOut).toHaveBeenLastCalledWith('cust-1', 'sam@example.com', { recipientRole: 'service_contact' });
+    expect(sendRowChain.del).toHaveBeenCalled();
+    expect(sendRowChain.update).not.toHaveBeenCalled();
+  });
+
+  test('an unchanged answer at the boundary sends as before; a test send installs no check', async () => {
+    setDbQueues(queues());
+    sendgrid.sendOne.mockImplementation(async (opts) => { await opts.providerBoundaryCheck({}); return { messageId: 'sg-1' }; });
+    expect((await sendStep('enr-contact')).sent).toBe(true);
+    expect(ContactPrefs.rerouteForContactEmailOptOut).toHaveBeenCalledTimes(2);
+
+    setDbQueues(queues());
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-t' });
+    const out = await sendStep('enr-contact', { testRecipient: 'operator@wavespestcontrol.com' });
+    expect(out.test).toBe(true);
+    expect(sendgrid.sendOne.mock.calls[1][0].providerBoundaryCheck).toBeUndefined();
   });
 });

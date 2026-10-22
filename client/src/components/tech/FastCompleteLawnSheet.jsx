@@ -153,8 +153,7 @@ export const LAWN_CONDITION_OPTIONS = ['Excellent', 'Good', 'Fair', 'Poor', 'Rec
 
 // THE table of what /complete requires per application method for a lawn
 // product (complete-scheduled-service.js, the service_products loop):
-//  - perimeter_spray: positive linear feet, areaUnit 'linear_ft'
-//    (requiresLinearFtForReportApplication, error linear_ft_required);
+//  - perimeter_spray: linear feet, areaUnit 'linear_ft' — OPTIONAL since 2026-10-22 (owner: "make feet optional");
 //  - broadcast_spray, granular_broadcast: positive square feet, areaUnit 'sqft'
 //    (requiresSqftForReportApplication on the lawn line, error area_sqft_required);
 //  - every other method (spot_treatment, soil_drench, foliar_spray, bait_placement,
@@ -198,7 +197,6 @@ const REFUSAL_MESSAGES = {
   typed_findings_required: NOT_ON_THIS_SHEET_MESSAGE,
   area_sqft_required: 'The lawn area is missing for a sprayed or spread product. Tell the office.',
   property_service_area_changed: 'This property\u2019s lawn area changed. We reloaded it. Tap Complete again.',
-  linear_ft_required: 'A perimeter product needs linear feet, which this sheet does not take. Tell the office.',
   waveguard_inventory_lockout: STOCK_LOCKOUT_MESSAGE,
 };
 
@@ -1143,7 +1141,8 @@ const noProductNoteJoined = (note, rows, newSod) => {
 
 function missingRequirement({ sodWait = '', noProductOk = false, form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
   // A method that needs an area needs a positive one, from the plan.
-  const missingArea = rows.find((row) => requirementOf(row) && !(areaOf(row, lawnSqft) > 0));
+  // Linear feet are optional (owner 2026-10-22): only a square-foot requirement holds the sheet.
+  const missingArea = rows.find((row) => requirementOf(row)?.unit === 'sqft' && !(areaOf(row, lawnSqft) > 0));
   const missingSpot = rows.find((row) => row.spotRule && !row.spotExempt && !(row.spotArea > 0) && !hasAmount(row));
   // GATE_LAWN_TROUBLE_AREAS: a spot row goes where the yearly limits allow, and names its place.
   const closedPlace = rows.find((row) => row.placeRule && (row.placeBlock || row.placeNowhere));
@@ -1163,9 +1162,7 @@ function missingRequirement({ sodWait = '', noProductOk = false, form, rows, gui
     // The guide is still reading, or a row on the sheet is not offered for this lawn right now.
     [guideHold, guideHold],
     [areaHold, areaHold],
-    [missingArea, missingArea && (requirementOf(missingArea).unit === 'linear_ft'
-      ? `${missingArea.name} needs linear feet, which this sheet does not take. Tell the office.`
-      : `The lawn area is not on file for ${missingArea.name}. Tell the office.`)],
+    [missingArea, missingArea && `The lawn area is not on file for ${missingArea.name}. Tell the office.`],
     // A spot row needs the area treated or a typed amount (spot rules).
     [missingSpot, missingSpot && `Enter the area treated for ${missingSpot.name}.`],
     [closedPlace, closedPlace && (closedPlace.placeBlock ? `${closedPlace.name} cannot go on ${areaLabelOf(closedPlace)}. ${closedPlace.placeBlock}` : `Remove ${closedPlace.name}: ${closedPlace.placeNowhere}`)],
