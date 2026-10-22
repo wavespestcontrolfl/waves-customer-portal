@@ -3,7 +3,6 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import TechTimeTrackingCard from './TechTimeTrackingCard';
-import { TIME_TRACKING_CHANGED } from './timeTrackingEvents';
 
 function response(status, body) {
   return {
@@ -55,14 +54,14 @@ describe('TechTimeTrackingCard', () => {
     expect(screen.getByRole('button', { name: 'Start job · River Home' })).toBeEnabled();
   });
 
-  it('reloads its status when a timer changes elsewhere on the page (TIME_TRACKING_CHANGED)', async () => {
+  it('reloads its status when the window regains focus', async () => {
     let clockedIn = false;
     const fetchMock = vi.fn(async () => response(200, { clockedIn, onBreak: false, currentJob: null, todaySummary: { shiftMinutes: 0, jobCount: 0 } }));
     vi.stubGlobal('fetch', fetchMock);
     render(<TechTimeTrackingCard variant="field" nextStop={{ id: 'visit-1', status: 'on_site' }} />);
     expect(await screen.findByRole('button', { name: 'Clock in' })).toBeInTheDocument();
     clockedIn = true;
-    window.dispatchEvent(new Event(TIME_TRACKING_CHANGED));
+    window.dispatchEvent(new Event('focus'));
     expect(await screen.findByRole('button', { name: 'Clock out' })).toBeInTheDocument();
   });
 
@@ -70,7 +69,7 @@ describe('TechTimeTrackingCard', () => {
     const pending = [];
     vi.stubGlobal('fetch', vi.fn(() => new Promise((r) => pending.push(r))));
     render(<TechTimeTrackingCard variant="field" nextStop={{ id: 'visit-1', status: 'on_site' }} />);
-    window.dispatchEvent(new Event(TIME_TRACKING_CHANGED));
+    window.dispatchEvent(new Event('focus'));
     const body = (clockedIn) => response(200, { clockedIn, onBreak: false, currentJob: null, todaySummary: { shiftMinutes: 0, jobCount: 0 } });
     // the newer read (after the timer started) answers first, the older one last
     pending[1](body(true));

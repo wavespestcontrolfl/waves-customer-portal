@@ -498,16 +498,13 @@ describe('Staff time schema reconciliation migration', () => {
     expect(migration.sqlStringLiteral("odd'seq")).toBe("'odd''seq'");
   });
 
-  test('Phase-B application stamps every create/reopen-active write as generation 2', () => {
+  test('Phase-B application stamps every create-active write as generation 2', () => {
     expect(ACTIVE_WRITE_GENERATION).toBe(2);
     const service = fs.readFileSync(
       path.join(__dirname, '../services/time-tracking.js'),
       'utf8',
     );
-    expect(service.match(/staff_write_generation: ACTIVE_WRITE_GENERATION/g)).toHaveLength(4);
-    expect(service).toMatch(
-      /async function reopenStoppedEntryInTransaction[\s\S]*staff_write_generation: ACTIVE_WRITE_GENERATION/,
-    );
+    expect(service.match(/staff_write_generation: ACTIVE_WRITE_GENERATION/g)).toHaveLength(3);
   });
 
   test('job replacement closes and creates the timer in one transaction', () => {

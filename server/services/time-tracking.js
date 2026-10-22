@@ -148,7 +148,7 @@ function appendEntryNote(existing, note) {
 
 /**
  * Close a shift and every active child while holding the shift row lock.
- * startJob/startBreak/reopenStoppedEntry take the same lock before creating an
+ * startJob/startBreak take the same lock before creating an
  * active child, so no child can commit after this transaction closes them.
  */
 async function closeActiveShiftAtomically(technicianId, options = {}) {
@@ -455,119 +455,6 @@ function isCompletedEntryIntervalValid(entry) {
   ) return false;
   const expectedMinutes = (clockOutMs - clockInMs) / 60000;
   return Math.abs(durationMinutes - expectedMinutes) <= 0.02;
-}
-
-/**
- * Reopen a stopped child timer. The active-shift
- * lock serializes this with every child start and every shift close.
- */
-async function reopenStoppedEntryInTransaction(trx, technicianId, entryId) {
-  const activeShift = await lockActiveShift(trx, technicianId);
-  if (!activeShift) {
-    throw staffTimeHttpError(409, 'Must be clocked in to restore a stopped timer.');
-  }
-
-  const stopped = await trx('time_entries')
-    .where({ id: entryId, technician_id: technicianId })
-    .forUpdate()
-    .first();
-  if (!stopped) throw staffTimeHttpError(404, 'Stopped time entry not found.');
-  if (!['job', 'break', 'drive', 'admin_time'].includes(stopped.entry_type)) {
-    throw staffTimeHttpError(409, 'Only a stopped child timer can be restored.');
-  }
-  if (!['active', 'completed'].includes(stopped.status)) {
-    throw staffTimeHttpError(409, 'Only a completed child timer can be restored.');
-  }
-
-  const shiftStartedAt = new Date(activeShift.clock_in).getTime();
-  const childStartedAt = new Date(stopped.clock_in).getTime();
-  if (
-    !Number.isFinite(shiftStartedAt)
-    || !Number.isFinite(childStartedAt)
-    || childStartedAt < shiftStartedAt
-  ) {
-    throw staffTimeHttpError(409, 'Stopped timer belongs to an earlier shift.');
-  }
-  if (stopped.status === 'active') return stopped;
-
-  const stoppedAt = new Date(stopped.clock_out).getTime();
-  if (
-    !Number.isFinite(stoppedAt)
-    || Date.now() - stoppedAt > UNDO_STOP_WINDOW_MINUTES * 60 * 1000
-    || stoppedAt > Date.now() + 60 * 1000
-  ) {
-    throw staffTimeHttpError(409, 'Stopped timer is too old to restore safely.');
-  }
-
-  const laterChild = await trx('time_entries')
-    .where({ technician_id: technicianId, entry_type: stopped.entry_type })
-    .whereNot({ id: entryId })
-    .where('status', '!=', 'voided')
-    .where('clock_in', '>=', stopped.clock_out)
-    .first('id');
-  if (laterChild) {
-    throw staffTimeHttpError(409, 'A later timer exists; this stopped timer cannot be restored.');
-  }
-
-  const conflicting = await trx('time_entries')
-    .where({
-      technician_id: technicianId,
-      entry_type: stopped.entry_type,
-      status: 'active',
-    })
-    .whereNot({ id: entryId })
-    .first('id');
-  if (conflicting) {
-    throw staffTimeHttpError(409, `Another ${stopped.entry_type} timer is already active.`);
-  }
-
-  // A completed visit takes no job timer back either (GitHub r2 P1 #5886,
-  // the restore side of startJob's guard): after a stop the office
-  // can complete the visit (the invoice-issued closeout, which only refuses
-  // a RUNNING timer), and Undo would then restart a timer on it. The visit
-  // row is locked here, so this and the completion — which checks for a
-  // running timer while holding the same row lock — cannot both win.
-  // Lock order: this takes the visit row AFTER a time_entries row; startJob
-  // and the time-on-site correction's timer sync take them the other way
-  // round. So the visit lock is NOWAIT: this path never waits while holding
-  // an entry lock, which is what a deadlock needs. A visit row that is busy
-  // (a completion, a correction) answers 409 and the technician taps again.
-  if (stopped.entry_type === 'job' && stopped.job_id) {
-    let visit;
-    try {
-      visit = await trx('scheduled_services').where({ id: stopped.job_id }).forUpdate().noWait().first('id', 'status');
-    } catch (err) {
-      if (err && err.code === '55P03') {
-        throw staffTimeHttpError(409, 'This visit is being updated; retry in a moment.');
-      }
-      throw err;
-    }
-    if (visit && visit.status === 'completed') {
-      throw staffTimeHttpError(409, 'This visit is already completed; its timer cannot be restored.');
-    }
-  }
-
-  const [reopened] = await trx('time_entries')
-    .where({ id: entryId, technician_id: technicianId, status: 'completed' })
-    .update({
-      status: 'active',
-      staff_write_generation: ACTIVE_WRITE_GENERATION,
-      clock_out: null,
-      clock_out_lat: null,
-      clock_out_lng: null,
-      duration_minutes: null,
-      notes: trx.raw("COALESCE(notes, '') || ' [undo-stop]'"),
-      updated_at: new Date(),
-    })
-    .returning('*');
-  if (!reopened) throw staffTimeHttpError(409, 'Stopped timer is no longer restorable.');
-  return reopened;
-}
-
-async function reopenStoppedEntry(technicianId, entryId) {
-  return db.transaction((trx) => (
-    reopenStoppedEntryInTransaction(trx, technicianId, entryId)
-  ));
 }
 
 /**
@@ -1247,8 +1134,6 @@ module.exports = {
   endJob,
   startBreak,
   endBreak,
-  reopenStoppedEntry,
-  reopenStoppedEntryInTransaction,
   closeActiveShiftAtomically,
   getStatus,
   adminEditEntry,
