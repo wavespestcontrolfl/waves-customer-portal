@@ -1155,6 +1155,19 @@ const PROJECT_TYPES = {
           { key: 'gallons_applied', label: 'Gallons of finished solution applied', type: 'text', disableDictation: true },
         ],
       },
+      // Sticker blank "Date of Final Ext. Treatment" (owner 2026-10-22). The
+      // final exterior is a later visit after grading, so these stay optional
+      // and never gate the send; the office fills them on the sent
+      // certificate when that visit is done.
+      { key: 'final_exterior_date', label: 'Date of final exterior treatment', type: 'date', section: 'Final exterior treatment (later visit; leave blank on slab day)' },
+      // Plain text, not product_search: the product picker writes the chosen
+      // product's chemistry into application 1's epa_registration and
+      // active_ingredient, which would overwrite the slab-day record.
+      { key: 'final_exterior_product', label: 'Final exterior product', type: 'text', section: 'Final exterior treatment (later visit; leave blank on slab day)', placeholder: 'e.g. Termidor SC', disableDictation: true },
+      { key: 'final_exterior_active_ingredient', label: 'Final exterior active ingredient', type: 'text', section: 'Final exterior treatment (later visit; leave blank on slab day)', placeholder: 'e.g. fipronil', disableDictation: true },
+      // The slab-day attestation covers the initial treatment only; the
+      // later exterior visit names its own applicator.
+      { key: 'final_exterior_applicator_name', label: 'Final exterior applicator', type: 'text', section: 'Final exterior treatment (later visit; leave blank on slab day)', disableDictation: true },
       { key: 'applicator_name', label: "Applicator's printed name", type: 'text', section: 'Applicator certification', disableDictation: true },
       { key: 'applicator_fdacs_id', label: 'Applicator FDACS ID #', type: 'text', section: 'Applicator certification', disableDictation: true },
       // FBC 1816.1.7 requires an "authorized signature of the licensed

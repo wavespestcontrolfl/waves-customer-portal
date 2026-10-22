@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { insertHealthAlert: insertFencedHealthAlert } = require('./health-alert-insert');
 const TwilioService = require('./twilio');
 const { REPLAY_HOLD_CODES, isReplayHold } = require('./messaging/billing-channel-routing');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
@@ -435,7 +436,7 @@ async function alertUnresolvedMonthlyOutcome(customer, monthKey, unresolvedOutco
 // loop, only lose (and log) the bell.
 async function insertHealthAlert(customerId, row, label) {
   try {
-    await db('customer_health_alerts').insert({ customer_id: customerId, ...row });
+    await insertFencedHealthAlert({ customer_id: customerId, ...row });
   } catch (alertErr) {
     logger.error(`[billing-cron] ${label} alert creation failed for customer ${customerId}: ${alertErr.message}`);
   }
@@ -740,7 +741,7 @@ const BillingCron = {
           }).catch(() => {});
 
           try {
-            await db('customer_health_alerts').insert({
+            await insertFencedHealthAlert({
               customer_id: customer.id,
               alert_type: 'stripe_orphan_charge',
               severity: 'high',
@@ -810,7 +811,7 @@ const BillingCron = {
             details: { source: 'autopay', reason: 'ambiguous_stripe_outcome', parked: true },
           }).catch(() => {});
           try {
-            await db('customer_health_alerts').insert({
+            await insertFencedHealthAlert({
               customer_id: customer.id,
               alert_type: 'payment_failure',
               severity: 'high',
@@ -1169,7 +1170,7 @@ const BillingCron = {
             failure_reason: `${payment.failure_reason || 'Charge failed without a PaymentIntent'} — parked: ambiguous Stripe outcome, reconcile manually before re-charging`,
           }).catch(() => {});
         try {
-          await db('customer_health_alerts').insert({
+          await insertFencedHealthAlert({
             customer_id: payment.customer_id,
             alert_type: 'payment_failure',
             severity: 'high',
@@ -1428,7 +1429,7 @@ const BillingCron = {
             details: { source: 'autopay_retry', stripe_payment_intent_id: err.stripePaymentIntentId, reason: err.message },
           }).catch(() => {});
           try {
-            await db('customer_health_alerts').insert({
+            await insertFencedHealthAlert({
               customer_id: payment.customer_id,
               alert_type: 'stripe_orphan_charge',
               severity: 'high',
@@ -1526,7 +1527,7 @@ const BillingCron = {
             details: { source: 'autopay_retry', reason: 'ambiguous_stripe_outcome', parked: true },
           }).catch(() => {});
           try {
-            await db('customer_health_alerts').insert({
+            await insertFencedHealthAlert({
               customer_id: payment.customer_id,
               alert_type: 'payment_failure',
               severity: 'high',
@@ -1722,7 +1723,7 @@ const BillingCron = {
 
           // Create health alert for admin review
           try {
-            await db('customer_health_alerts').insert({
+            await insertFencedHealthAlert({
               customer_id: payment.customer_id,
               alert_type: 'payment_failure',
               severity: 'high',
@@ -1917,7 +1918,7 @@ const BillingCron = {
           failure_reason: `Collected by retry payment ${newPayment?.id || '(id unknown)'} — full supersede update failed, reconcile metadata manually`,
         }).catch(() => {});
         try {
-          await db('customer_health_alerts').insert({
+          await insertFencedHealthAlert({
             customer_id: payment.customer_id,
             alert_type: 'payment_failure',
             severity: 'high',

@@ -710,6 +710,11 @@ const gates = {
   // and the response carries no estimate URL. Quote-mode (CTA) taps keep the
   // request flow at ANY setting.
   reportClickToEstimate: process.env.GATE_REPORT_CLICK_TO_ESTIMATE === 'true',
+  // Pre-treatment certificate renders as the paper Notice of Termite
+  // Protection label with its blanks filled, plus a details block for the
+  // certificate fields the label has no blank for. Off = the field-grid
+  // Certificate of Compliance. Look only; no data or send change.
+  pretreatStickerReport: process.env.GATE_PRETREAT_STICKER_REPORT === 'true',
 
   // "Your plan" section on the LIVE report (owner ask 2026-09-28): an active
   // plan member's completed-visit + re-service COUNTS for this calendar year
@@ -3043,16 +3048,6 @@ const gates = {
   // prod: every follow-up payload is byte-identical to today.
   // Kill switch: unset GATE_ESTIMATE_FOLLOWUP_MONTHLY_AVERAGE (read at boot; the Railway restart applies it).
   estimateFollowupMonthlyAverage: isProd ? process.env.GATE_ESTIMATE_FOLLOWUP_MONTHLY_AVERAGE === 'true' : true,
-
-  // Application-month breakdown (owner 2026-10-21, EST-2026-1185: "Which is
-  // it? $113 a month or $189 a month?"). With the monthly average on, a plan
-  // of one non-monthly service plus monthly services shows each service's
-  // per-application price and cadence, what the customer pays in the months
-  // that service is applied and in the other months, then the average. The
-  // payment preview's "Per application" row reads "First application". The
-  // page only; email and PDF unchanged. Needs GATE_ESTIMATE_MONTHLY_AVERAGE.
-  // Kill switch: unset GATE_ESTIMATE_APPLICATION_MONTHS (read at boot; the Railway restart applies it).
-  estimateApplicationMonths: isProd ? process.env.GATE_ESTIMATE_APPLICATION_MONTHS === 'true' : true,
 
   // Estimate acceptance terms (owner ruling 2026-08-28): the public estimate
   // renders a one-line authorization + inline "View terms" drawer directly
