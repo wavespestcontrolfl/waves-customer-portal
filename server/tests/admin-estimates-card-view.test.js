@@ -171,8 +171,9 @@ describe('GET /admin/estimates list shape', () => {
 
   test('adds perApplication and hasAcceptanceRecord; isolates each row', async () => {
     const rows = [
-      base('e-sent'),
-      base('e-acc', { status: 'accepted', terms_version: 'v1' }),
+      base('e-sent', { customer_id: 'c-plain' }),
+      base('e-acc', { status: 'accepted', terms_version: 'v1', customer_id: 'c-plain' }),
+      base('e-unlinked'),
       base('e-won', { status: 'accepted', terms_version: null }),
       base('e-prepay'),
       base('e-monthly', { customer_id: 'c-member' }),
@@ -203,6 +204,8 @@ describe('GET /admin/estimates list shape', () => {
       expect(byId['e-prepay'].perApplication).toBeNull();
       expect(byId['e-monthly'].perApplication).toBeNull();
       expect(byId['e-linked'].perApplication).toHaveLength(1);
+      // Unlinked: the billing lane is unknown without a phone match, so today's display.
+      expect(byId['e-unlinked'].perApplication).toBeNull();
       expect(byId['e-bad'].perApplication).toBeNull();
     });
     // constant queries: one customers read for every linked row, no per-row lane lookup

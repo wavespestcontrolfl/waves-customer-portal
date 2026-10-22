@@ -3859,11 +3859,9 @@ async function perApplicationByEstimateId(estimates, parsedDataById) {
   // ONE customers query for every linked row, so a limit=all list costs a
   // constant number of queries. A customer who keeps monthly membership bills
   // monthly, so the card shows no per-application price for them. UNLINKED rows
-  // (no customer_id) are treated as per-application, the same answer
-  // estimateBillsPerApplication gives when no customer exists. It would run a
-  // phone match per row to find a member behind an unlinked lead; that is
-  // deliberately skipped here to keep the list cheap, and the PDF the card
-  // links to still resolves the full lane.
+  // (no customer_id) keep today's display: estimateBillsPerApplication would
+  // phone-match them to a possible monthly member, and a per-row match is too
+  // costly for the list, so their lane is unknown here.
   const todo = candidates.filter((c) => !prepaidIds.has(c.row.id));
   if (!todo.length) return out;
   const { customerPreservesMonthlyMembership } = require('../services/billing-cadence');
@@ -3875,10 +3873,10 @@ async function perApplicationByEstimateId(estimates, parsedDataById) {
       : [];
     const byId = new Map(customers.map((c) => [c.id, c]));
     for (const c of todo) {
+      // Unlinked, or linked to a customer that could not be read: lane unknown.
       const customer = c.row.customer_id ? byId.get(c.row.customer_id) : null;
-      // A linked row whose customer could not be read is unknown: show nothing.
-      if (c.row.customer_id && !customer) continue;
-      if (customer && customerPreservesMonthlyMembership(customer)) continue;
+      if (!customer) continue;
+      if (customerPreservesMonthlyMembership(customer)) continue;
       out.set(c.row.id, c.lines);
     }
   } catch (err) {
