@@ -12,7 +12,7 @@ const { VALID_PAYMENT_METHODS, recordManualPayment, retireOpenPaymentIntentBefor
 const logger = require('../services/logger');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
-const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, visitRefusesSettlement, isStaleClaimReviewHold } = require('../services/invoice-helpers');
+const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, visitRefusesSettlement, lockVisitForSettlement, isStaleClaimReviewHold } = require('../services/invoice-helpers');
 const CustomerCredit = require('../services/customer-credit');
 const PaymentPlans = require('../services/payment-plans');
 const { generateInvoiceSummary, generateThankYouMessage } = require('../services/invoice-ai-summary');
@@ -2953,8 +2953,9 @@ async function assertBarCreditUnderLock(trx, locked, expectedCredit, assertInvoi
   if (!expectedCredit) return;
   assertInvoiceVersion(locked, expectedCredit, 'applying credit');
   // An annual-plan anchor can be linked through its visit by a schedule refresh that never touches the invoice row: the visit row
-  // is held FOR SHARE (a term stamp on it waits for this transaction) and the strict resolver runs again here. Unverifiable refuses.
-  if (locked.scheduled_service_id) await trx('scheduled_services').where({ id: locked.scheduled_service_id }).forShare().first('id');
+  // is taken with lockVisitForSettlement (NOWAIT: a visit held by a staff edit answers visit_busy at once rather than waiting while
+  // this transaction holds the customer and invoice), so a term stamp waits for this commit; then the strict resolver runs again.
+  if (locked.scheduled_service_id) await lockVisitForSettlement(trx, locked.scheduled_service_id, ['id']);
   let annualTerm;
   try {
     annualTerm = await require('../services/invoice-prepay').resolveInvoiceTermId(locked, trx, { strict: true });
