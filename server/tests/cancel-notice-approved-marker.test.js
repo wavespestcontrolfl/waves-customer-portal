@@ -34,21 +34,34 @@ describe('pending_approved is minted only for the approved send and read only by
     expect(dispatch).toContain("...(req.ibApprovedCancelNotice ? { cancelNoticeApproved: true } : {}),");
   });
 
-  test('inside appointment-reminders.js every pending_approved is in handleCancellation (the approved send), none in a sweep', () => {
+  // The approved send is handleCancellation plus the claim/finalize helpers it was split into (Codex #6377 r4 P2):
+  // the module-level block from claimCancellationNotice up to the AppointmentReminders object.
+  const approvedSendRegions = () => {
     const start = reminders.indexOf('  async handleCancellation(scheduledServiceId, options = {}) {');
     const end = reminders.indexOf('  async handleNoShow(');
+    const helpersStart = reminders.indexOf('async function claimCancellationNotice(');
+    const helpersEnd = reminders.indexOf('const AppointmentReminders = {');
+    return { start, end, helpersStart, helpersEnd };
+  };
+
+  test('inside appointment-reminders.js every pending_approved is in the approved send (handleCancellation and its claim helpers), none in a sweep', () => {
+    const { start, end, helpersStart, helpersEnd } = approvedSendRegions();
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
-    const outside = reminders.slice(0, start) + reminders.slice(end);
+    expect(helpersStart).toBeGreaterThan(-1);
+    expect(helpersEnd).toBeGreaterThan(helpersStart);
+    expect(helpersEnd).toBeLessThan(start);
+    const outside = reminders.slice(0, helpersStart) + reminders.slice(helpersEnd, start) + reminders.slice(end);
     expect(outside).not.toContain('pending_approved');
-    // Inside it, the state is added to the live-state lists only when this call carries an approvedNotice.
+    // In the helpers, the marker is adopted only when the call carries an approved send.
+    expect(reminders.slice(helpersStart, helpersEnd)).toContain("if (approvedSend) this.where('cancellation_notice_state', 'pending_approved');");
+    // Inside handleCancellation, the state is added to the live-state lists only when this call carries an approvedNotice.
     expect(reminders.slice(start, end)).toContain("const claimStates = approvedSend ? ['pending', 'pending_notify', 'pending_approved'] : ['pending', 'pending_notify'];");
   });
 
   test('the sweeps and the late-claim fallback list only pending / pending_notify', () => {
-    const start = reminders.indexOf('  async handleCancellation(scheduledServiceId, options = {}) {');
-    const end = reminders.indexOf('  async handleNoShow(');
-    const sweepLists = (reminders.slice(0, start) + reminders.slice(end)).match(/cancellation_notice_state'?,? ?\[[^\]]*\]/g) || [];
+    const { start, end, helpersStart, helpersEnd } = approvedSendRegions();
+    const sweepLists = (reminders.slice(0, helpersStart) + reminders.slice(helpersEnd, start) + reminders.slice(end)).match(/cancellation_notice_state'?,? ?\[[^\]]*\]/g) || [];
     expect(sweepLists.length).toBeGreaterThan(0);
     for (const list of sweepLists) expect(list).not.toContain('pending_approved');
   });

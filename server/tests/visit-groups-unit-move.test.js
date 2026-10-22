@@ -1041,7 +1041,9 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     // r2): handleReschedule delegates after its guarded sync, and the
     // canonical assignment writer invokes the same mechanism post-commit
     // for tech-only repairs.
-    const resched = src.slice(src.indexOf('async handleReschedule'), src.indexOf('if (!sendNotification)'));
+    // Search for the end marker AFTER handleReschedule: module-level cancellation helpers above it hold the same text.
+    const reschedAt = src.indexOf('async handleReschedule');
+    const resched = src.slice(reschedAt, src.indexOf('if (!sendNotification)', reschedAt));
     expect(resched).toMatch(/record\.move_hold_until && record\.move_hold_token && syncedRows > 0/);
     expect(resched).toMatch(/options\.preserveMoveHold !== true/);
     expect(resched).toMatch(/AppointmentReminders\.releaseMoveHoldIfRepaired\(scheduledServiceId\)/);
