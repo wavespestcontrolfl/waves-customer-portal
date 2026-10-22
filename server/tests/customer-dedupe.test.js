@@ -1302,6 +1302,48 @@ describe('executeMerge', () => {
     });
   });
 
+  describe('pruneDiscardedContactPrefs (contact login): rows the sweep brought over for contacts the winner did not keep are dropped (codex #6363 r25)', () => {
+    const { pruneDiscardedContactPrefs } = dedupe._test;
+    const fakeTrx = (seed) => {
+      const rows = seed.map((r) => ({ ...r }));
+      const trx = () => {
+        const conds = [];
+        const api = {
+          where(obj) { conds.push((r) => Object.entries(obj).every(([k, v]) => r[k] === v)); return api; },
+          whereNotIn(col, vals) { conds.push((r) => !vals.includes(r[col])); return api; },
+          whereIn(col, vals) { conds.push((r) => vals.includes(r[col])); return api; },
+          select() { return Promise.resolve(rows.filter((r) => conds.every((c) => c(r))).map((r) => ({ ...r }))); },
+          del() {
+            const before = rows.length;
+            for (let i = rows.length - 1; i >= 0; i -= 1) if (conds.every((c) => c(rows[i]))) rows.splice(i, 1);
+            return Promise.resolve(before - rows.length);
+          },
+        };
+        return api;
+      };
+      trx.rows = rows;
+      return trx;
+    };
+
+    it('keeps the rows of the winner\'s final slots (own and backfilled) and drops the rest; the loser\'s rows are untouched', async () => {
+      const trx = fakeTrx([
+        { customer_id: WINNER, phone_key: '9415550202' },   // winner's own slot 1
+        { customer_id: WINNER, phone_key: '9415550303' },   // backfilled from the loser into slot 2
+        { customer_id: WINNER, phone_key: '9415550404' },   // loser-only contact that found no free slot
+        { customer_id: LOSER, phone_key: '9415550505' },
+      ]);
+      const finalWinner = { service_contact_phone: '(941) 555-0202', service_contact2_phone: '+19415550303', service_contact3_phone: null };
+      expect(await pruneDiscardedContactPrefs(trx, WINNER, finalWinner)).toBe(1);
+      expect(trx.rows.map((r) => [r.customer_id, r.phone_key])).toEqual([[WINNER, '9415550202'], [WINNER, '9415550303'], [LOSER, '9415550505']]);
+    });
+
+    it('a winner with no slots at all keeps no contact rows', async () => {
+      const trx = fakeTrx([{ customer_id: WINNER, phone_key: '9415550202' }]);
+      expect(await pruneDiscardedContactPrefs(trx, WINNER, {})).toBe(1);
+      expect(trx.rows).toEqual([]);
+    });
+  });
+
   it('registers irrigation_week_plans with the keep-available handler (same-week snapshots fold, never abort — codex #3565 gh-r14)', () => {
     const { UNIQUE_COLLISION_HANDLERS, repointWeekPlansKeepAvailable } = dedupe._test;
     expect(UNIQUE_COLLISION_HANDLERS.irrigation_week_plans).toBe(repointWeekPlansKeepAvailable);

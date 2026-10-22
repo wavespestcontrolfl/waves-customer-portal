@@ -322,6 +322,66 @@ describe('contactPhoneDeclinesText (single-number texts addressed to the estimat
     delete process.env.GATE_CONTACT_LOGIN;
     expect(await ContactPrefs.contactPhoneDeclinesText('cust-1', '+19415550202', null)).toBe(false);
   });
+
+  // The provider-boundary re-check (send-customer-message.js) asks with
+  // requireSlot: a number the holder removed since the fan-out is a former
+  // contact and is held, as is a customer row that is gone.
+  test('requireSlot: a number in no slot, or a vanished customer row, declines; a kept slot and the holder\'s number are judged as before', async () => {
+    rows = [{ customer_id: 'cust-1', phone_key: '9415550303', appointment_confirmation: false }];
+    const opts = { requireSlot: true };
+    expect(await ContactPrefs.contactPhoneDeclinesText('cust-1', '+19415559999', 'tech_en_route', opts)).toBe(true);
+    expect(await ContactPrefs.contactPhoneDeclinesText('cust-1', '+19415550202', 'tech_en_route', opts)).toBe(false);
+    expect(await ContactPrefs.contactPhoneDeclinesText('cust-1', '+19415550303', 'appointment_confirmation', opts)).toBe(true);
+    expect(await ContactPrefs.contactPhoneDeclinesText('cust-1', '+19415550101', 'tech_en_route', opts)).toBe(false);
+    customer = null;
+    expect(await ContactPrefs.contactPhoneDeclinesText('cust-1', '+19415550202', 'tech_en_route', opts)).toBe(true);
+    delete process.env.GATE_CONTACT_LOGIN;
+    expect(await ContactPrefs.contactPhoneDeclinesText('cust-1', '+19415559999', 'tech_en_route', opts)).toBe(false);
+  });
+});
+
+describe('reportEmailRecipientStillAllowed (service-report email, as of the provider handoff)', () => {
+  let live;
+  beforeEach(() => {
+    live = { ...CUSTOMER };
+    db.mockImplementation((table) => {
+      if (table !== 'customers') return builder();
+      return { where: () => ({ first: async () => { if (failWith) throw failWith; return live; } }) };
+    });
+  });
+  const samRecipient = { email: 'sam@example.com', name: 'Sam', role: 'service_contact' };
+
+  test('a contact still in a slot with report email allowed passes; the holder always passes', async () => {
+    expect(await ContactPrefs.reportEmailRecipientStillAllowed(CUSTOMER, samRecipient)).toBe(true);
+    expect(await ContactPrefs.reportEmailRecipientStillAllowed(CUSTOMER, { email: 'pat@example.com', role: 'primary' })).toBe(true);
+  });
+
+  test('a contact the holder removed since the recipients resolved is held; so is a vanished customer row', async () => {
+    live = { ...CUSTOMER, service_contact_name: null, service_contact_phone: null, service_contact_email: null };
+    expect(await ContactPrefs.reportEmailRecipientStillAllowed(CUSTOMER, samRecipient)).toBe(false);
+    live = null;
+    expect(await ContactPrefs.reportEmailRecipientStillAllowed(CUSTOMER, samRecipient)).toBe(false);
+  });
+
+  test('a kept address is judged by the slot that carries it NOW, not the slot it had', async () => {
+    // Sam moved from slot 1 to slot 2 and turned report email off there.
+    live = { ...CUSTOMER,
+      service_contact_name: 'Terry', service_contact_phone: '+19415550303', service_contact_email: 'terry@example.com',
+      service_contact2_name: 'Sam', service_contact2_phone: '+19415550202', service_contact2_email: 'sam@example.com' };
+    rows = [{ customer_id: 'cust-1', phone_key: '9415550202', service_completed: false }];
+    expect(await ContactPrefs.reportEmailRecipientStillAllowed(CUSTOMER, samRecipient)).toBe(false);
+    rows = [];
+    expect(await ContactPrefs.reportEmailRecipientStillAllowed(CUSTOMER, samRecipient)).toBe(true);
+  });
+
+  test('an unreadable customer row throws (the sender holds); the gate off passes everyone through', async () => {
+    failWith = new Error('timeout');
+    await expect(ContactPrefs.reportEmailRecipientStillAllowed(CUSTOMER, samRecipient)).rejects.toThrow('timeout');
+    failWith = null;
+    live = null;
+    delete process.env.GATE_CONTACT_LOGIN;
+    expect(await ContactPrefs.reportEmailRecipientStillAllowed(CUSTOMER, samRecipient)).toBe(true);
+  });
 });
 
 describe('contactEmailDeclines (single-recipient emails addressed to the estimate\'s own address: the accept onboarding email)', () => {

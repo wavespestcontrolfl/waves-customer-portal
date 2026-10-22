@@ -95,8 +95,9 @@ test('a contact who declines the purpose after the fan-out filter is held at the
   const result = await sendCustomerMessage(CONTACT_LEG);
   expect(result).toMatchObject({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'CONTACT_DECLINED' });
   expect(result.retryable).not.toBe(true);
-  // The leg's own destination and the purpose's preference column.
-  expect(contactPhoneDeclinesText).toHaveBeenCalledWith('cust-1', '+19415550142', 'tech_en_route');
+  // The leg's own destination and the purpose's preference column; requireSlot
+  // so a number the holder removed since the fan-out is held as a former contact.
+  expect(contactPhoneDeclinesText).toHaveBeenCalledWith('cust-1', '+19415550142', 'tech_en_route', { requireSlot: true });
   expect(persistAudit).toHaveBeenCalledWith(expect.objectContaining({
     validatorsFailed: ['contact_prefs_boundary'],
     blockedBy: expect.objectContaining({ code: 'CONTACT_DECLINED' }),

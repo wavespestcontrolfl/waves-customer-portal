@@ -1869,6 +1869,31 @@ async function foldContactNotificationPrefs(trx, table, column, winnerId, loserI
   return `moved ${moved}, folded ${folded} row(s) most-restrictively into the winner's`;
 }
 
+// After the winner's backfill (codex #6363 r25 P2): the sweep repointed (or
+// folded) the loser's service_contact_notification_prefs rows onto the winner
+// BEFORE the slots were reconciled, so a loser-only contact that found no free
+// slot on the winner left its row behind — adding that number later would
+// resurrect its old channel choices and consent_attested_at under a new
+// contact identity. Drop every winner row whose phone occupies none of the
+// winner's FINAL slots (the row as backfilled). Returns the count; a non-zero
+// count makes the merge non-replayable, like a fold.
+async function pruneDiscardedContactPrefs(trx, winnerId, finalWinner) {
+  const keep = require('./customer-contact').getServiceContactSlots(finalWinner).map((s) => phone10(s.phone)).filter(Boolean);
+  const table = 'service_contact_notification_prefs';
+  let discarded;
+  try {
+    const q = trx(table).where({ customer_id: winnerId });
+    if (keep.length) q.whereNotIn('phone_key', keep);
+    discarded = (await q.select('phone_key')).map((row) => row.phone_key);
+  } catch (err) {
+    if (err && err.code === '42P01') return 0;
+    throw err;
+  }
+  if (!discarded.length) return 0;
+  await trx(table).where({ customer_id: winnerId }).whereIn('phone_key', discarded).del();
+  return discarded.length;
+}
+
 const UNIQUE_COLLISION_HANDLERS = {
   customer_pin_suggestions: repointPinSuggestions,
   service_contact_notification_prefs: foldContactNotificationPrefs,
@@ -4001,6 +4026,13 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     }
     if (Object.keys(backfills).length) {
       await trx('customers').where({ id: winnerId }).update({ ...backfills, updated_at: trx.fn.now() });
+    }
+    // The contact choices rows the sweep brought over are reconciled with the
+    // slots the winner actually ends up with (codex #6363 r25 P2) — a dropped
+    // row is one the undo cannot replay, the same posture as a fold.
+    if (await pruneDiscardedContactPrefs(trx, winnerId, { ...winner, ...backfills })
+      && !collisionHandlers.includes('service_contact_notification_prefs')) {
+      collisionHandlers.push('service_contact_notification_prefs');
     }
     // The backfill above is a live Bill-To transition like any other: a
     // payerless winner that just inherited the loser's payer now owns the
@@ -7353,6 +7385,7 @@ module.exports = {
     repointRowwiseDropCollisions,
     repointWeekPlansKeepAvailable,
     foldContactNotificationPrefs,
+    pruneDiscardedContactPrefs,
   repointFlagsReleaseCollisions,
     mergeConversationRows,
     UNIQUE_COLLISION_HANDLERS,

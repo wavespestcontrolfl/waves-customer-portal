@@ -1210,8 +1210,11 @@ async function sendCustomerMessageCore(input) {
     const column = policy.prefsColumn;
     let declined;
     try {
+      // requireSlot (codex r25 P2): the trust level is the fan-out's earlier
+      // classification — a number the holder removed from every slot since
+      // is a former contact, not an authorized one, and is held too.
       declined = await require('../contact-notification-prefs').contactPhoneDeclinesText(
-        sendInput.customerId, sendInput.to, typeof column === 'string' ? column : null,
+        sendInput.customerId, sendInput.to, typeof column === 'string' ? column : null, { requireSlot: true },
       );
     } catch (err) {
       return {
@@ -1220,7 +1223,7 @@ async function sendCustomerMessageCore(input) {
       };
     }
     return declined
-      ? { ok: false, code: 'CONTACT_DECLINED', reason: 'Contact declined this text through their own notification choices', validator: 'contact_prefs_boundary' }
+      ? { ok: false, code: 'CONTACT_DECLINED', reason: 'Contact declined this text through their own notification choices, or no longer occupies a contact slot', validator: 'contact_prefs_boundary' }
       : { ok: true };
   };
   const providerPreparationCheck = async ({ database: handoffDb } = {}) => {

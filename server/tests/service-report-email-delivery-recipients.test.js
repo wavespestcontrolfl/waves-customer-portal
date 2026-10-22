@@ -517,21 +517,21 @@ describe('service report email recipient delivery', () => {
     ]);
   });
 
-  // Codex #6363 r24 P2: the contact's own report-email choice is re-read at
-  // the provider handoff — a decline landing after the recipient filter
-  // (during the data build, credit read or PDF render) still holds that
-  // recipient, on the template path and on the legacy fallback.
-  describe('contact choices re-read at the provider handoff', () => {
+  // Codex #6363 r24/r25 P2: the contact's slot and own report-email choice are
+  // re-read at the provider handoff (reportEmailRecipientStillAllowed) — a
+  // decline or a removal landing after the recipient filter (during the data
+  // build, credit read or PDF render) still holds that recipient, on the
+  // template path and on the legacy fallback.
+  describe('contact slots + choices re-read at the provider handoff', () => {
     const ContactPrefs = require('../services/contact-notification-prefs');
     let filter;
+    let stillAllowed;
     beforeEach(() => {
-      filter = jest.spyOn(ContactPrefs, 'filterReportEmailRecipientsByContactPrefs')
-        // The recipient filter passes everyone; every later read (the
-        // handoff) finds the tenant has turned report email off.
-        .mockImplementationOnce(async (recipients) => recipients)
-        .mockImplementation(async (recipients) => recipients.filter((r) => r.email !== 'tenant@example.com'));
+      filter = jest.spyOn(ContactPrefs, 'filterReportEmailRecipientsByContactPrefs').mockImplementation(async (recipients) => recipients);
+      stillAllowed = jest.spyOn(ContactPrefs, 'reportEmailRecipientStillAllowed')
+        .mockImplementation(async (_customer, recipient) => recipient.email !== 'tenant@example.com');
     });
-    afterEach(() => { filter.mockRestore(); });
+    afterEach(() => { filter.mockRestore(); stillAllowed.mockRestore(); });
 
     test('template path: the onQueued hook holds the contact, the holder\'s report still goes out', async () => {
       const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
@@ -545,7 +545,10 @@ describe('service report email recipient delivery', () => {
       const result = await sendServiceReportV1Email('record-1', { token: 'token-1' });
       expect(hookVerdicts).toEqual({ 'owner@example.com': true, 'tenant@example.com': false });
       expect(result).toMatchObject({ ok: true, recipientCount: 1, blockedCount: 1, messageIds: ['msg-owner@example.com'] });
-      expect(filter.mock.calls.slice(1).map(([recipients]) => recipients.length)).toEqual([1, 1]);
+      // The handoff asks about each recipient against the customer the recipients were resolved from.
+      expect(stillAllowed.mock.calls.map(([customer, recipient]) => [customer.id, recipient.email]).sort()).toEqual([
+        ['customer-1', 'owner@example.com'], ['customer-1', 'tenant@example.com'],
+      ]);
     });
 
     test('legacy fallback: re-read before its own provider call — the contact\'s queued row fails unsent', async () => {

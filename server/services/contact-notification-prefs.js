@@ -347,7 +347,11 @@ async function contactDeclinesChannel(customerId, contact, channel = 'sms', { db
 // recipient fan-out the other seams filter (codex #6363 r10 P2). The holder's
 // own number, a number in no slot, and the gate off never decline. Fail
 // CLOSED on an unreadable row or table, as every other seam here.
-async function contactPhoneDeclinesText(customerId, phone, column = null, { dbh = db } = {}) {
+// `requireSlot` (the provider-boundary re-check in send-customer-message.js,
+// codex #6363 r25 P2): the leg was classified a service-contact text when the
+// fan-out ran — a number the holder has since removed from every slot (or a
+// customer row that is gone) is a FORMER contact and declines too.
+async function contactPhoneDeclinesText(customerId, phone, column = null, { dbh = db, requireSlot = false } = {}) {
   const key = phoneKey(phone);
   if (!contactPrefsLive() || !customerId || !key) return false;
   let customer;
@@ -358,10 +362,32 @@ async function contactPhoneDeclinesText(customerId, phone, column = null, { dbh 
     logger.warn(`[contact-prefs] customer read failed (${err.message}) — holding the text to ${key.slice(-4)}`);
     return true;
   }
-  if (!customer || phoneKey(customer.phone) === key) return false;
+  if (!customer) return requireSlot;
+  if (phoneKey(customer.phone) === key) return false;
   const slot = require('./customer-contact').getServiceContactSlots(customer).find((s) => phoneKey(s.phone) === key);
-  if (!slot) return false;
+  if (!slot) return requireSlot;
   return (await filterContactsByOwnPrefs([{ phone: slot.phone, role: slot.role }], customerId, column, { channel: 'sms', dbh })).length === 0;
+}
+
+// Service-report EMAIL recipient as of the provider handoff (codex #6363 r24 +
+// r25 P2): the recipient list was resolved before the report data, credit read
+// and PDF render, so the slots are re-read NOW — a service-contact recipient
+// whose address the holder has since removed from every slot (or a customer
+// row that is gone) is a former contact and is held, and a kept address is
+// re-judged by the choices row of the slot that carries it today. Holder and
+// billing recipients always pass; gate off = pass-through. Throws on an
+// unreadable customer row (the caller holds).
+async function reportEmailRecipientStillAllowed(customer, recipient, { dbh = db } = {}) {
+  if (!contactPrefsLive() || !customer || !recipient) return true;
+  const { isServiceContactRole, getServiceContactSlots, SERVICE_CONTACT_COLUMNS } = require('./customer-contact');
+  if (!isServiceContactRole(recipient.role)) return true;
+  const live = await dbh('customers').where({ id: customer.id }).first();
+  if (!live) return false;
+  const current = { ...customer, ...Object.fromEntries(SERVICE_CONTACT_COLUMNS.map((column) => [column, live[column]])) };
+  const address = emailKey(recipient.email);
+  const slot = getServiceContactSlots(current).find((s) => s.email && emailKey(s.email) === address);
+  if (!slot) return false;
+  return (await filterReportEmailRecipientsByContactPrefs([{ ...recipient, role: slot.role }], current, { dbh })).length > 0;
 }
 
 // Does the address a single-recipient EMAIL is going to belong to one of
@@ -546,6 +572,7 @@ module.exports = {
   filterReportEmailRecipientsByContactPrefs,
   contactDeclinesChannel,
   contactPhoneDeclinesText,
+  reportEmailRecipientStillAllowed,
   contactEmailDeclines,
   contactEmailOffPhoneKeys,
   whereContactEmailAllowed,
