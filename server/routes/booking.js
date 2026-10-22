@@ -1734,8 +1734,10 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     customerFacing: selfServeNotice,
     // Slide shadow (GATE_SLOT_SLIDE_OFFER): the same daypart + self-serve
     // notice filters this function applies to find-time's results below,
-    // so a logged slide is one this request could actually show.
-    slideNewStartAllowed: (date, startMin) => {
+    // so a logged slide is one this request could actually show. The
+    // retired per-day cap (GATE_SELF_BOOK_DAY_CAP, owner ruling 2026-09-23)
+    // is resolved only after this call, so with it on /book doesn't opt in.
+    slideNewStartAllowed: selfBookDayCapEnabled() ? undefined : (date, startMin) => {
       const startTime = `${String(Math.floor(startMin / 60)).padStart(2, '0')}:${String(startMin % 60).padStart(2, '0')}`;
       return inTimeOfDay(startTime, timeOfDay)
         && !(selfServeNotice && violatesSelfServeNotice({ date, startTime }, today));

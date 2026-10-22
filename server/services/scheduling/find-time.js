@@ -866,39 +866,32 @@ function claimSlideShadowSample(now = Date.now()) {
 }
 const overlapsOnly = (a, b) => a.startMin < b.endMin && b.startMin < a.endMin;
 
-// Resolves this request's slide-shadow context, or null for no shadow:
-// explicitly customerFacing packed-ends callers only (estimate picker, /book
-// self-serve — NOT the voice agent, whose shift differs), gate on, and the
-// process-wide sample free. One helper so findAvailableSlots carries no
-// shadow branching of its own.
+// Resolves this request's slide-shadow context, or null for no shadow. A
+// caller OPTS IN by passing `slideNewStartAllowed(date, startMin)` — its own
+// "would I show this start?" rule (daypart, notice window, lead time, zone
+// funnel). Only the estimate picker and /book self-serve do; the voice agent,
+// staff tools and the admin slot-debug view never claim the process-wide
+// sample. Also requires customerFacing packed-ends, the gate, and a free
+// sample. One helper so findAvailableSlots carries no shadow branching.
 async function resolveSlideShadow(opts, wantsPackedEnds, services) {
-  if (!(opts.customerFacing === true && wantsPackedEnds
+  if (!(typeof opts.slideNewStartAllowed === 'function' && opts.customerFacing === true && wantsPackedEnds
     && gateEnvValue('GATE_SLOT_SLIDE_OFFER') && claimSlideShadowSample())) return null;
   return loadSlideMeta(services);
 }
-// Every other committed stop on `date` (other technicians' rows) for the
-// slide scorer's blocker check, in the same shape buildDayStops gives own
-// stops — including the expected-minutes credit the callers' collision
-// checks attach (occupancy.js stopCreditResolver), so a padded blocker is
-// measured from its expected end, not its window end.
-function otherStopsOn(date, tech, params) {
-  const rows = params.services.filter((s) => toDateStr(s.scheduled_date) === date
+// True when another technician has committed work on `date`. The shadow
+// scores one-technician days only: the callers' collision checks are
+// tech-blind, so on a shared day a slide's fit depends on the other route
+// too, which this phase does not model (one active technician today).
+function otherTechWorksOn(date, tech, params) {
+  return params.services.some((s) => toDateStr(s.scheduled_date) === date
     && s.technician_id != null && s.technician_id !== tech.id && !params.excludeSet.has(String(s.id)));
-  const creditResolver = params.wantsExpectedMinutesCredit ? stopCreditResolver(rows) : null;
-  return occupiedRows(rows).map((s) => ({
-    id: s.id,
-    startMin: s.startMin,
-    endMin: s.endMin,
-    lat: s.svc_lat || s.cust_lat,
-    lng: s.svc_lng || s.cust_lng,
-    ...(creditResolver ? { expectedMinutes: creditResolver(s, s.endMin - s.startMin) } : {}),
-  }));
 }
 
 function logSlideShadow(date, tech, dayStops, params) {
   const daysOut = (new Date(`${date}T12:00:00Z`) - new Date(`${params.geo.todayEt}T12:00:00Z`)) / 86400000;
   const { slideBudget } = params;
   if (daysOut > SLIDE_SHADOW_MAX_DAYS_OUT || slideBudget.remaining <= 0 || slideBudget.spentMs >= SLIDE_SHADOW_MAX_MS) return;
+  if (otherTechWorksOn(date, tech, params)) return;
   const { geo } = params;
   const t0 = Date.now();
   // The 50 ms counts only time spent HERE, not the request's normal slot
@@ -924,14 +917,11 @@ function logSlideShadow(date, tech, dayStops, params) {
       pairViolates: travelGapEnabled() ? undefined : overlapsOnly,
       // Off-hour stops (assessments, re-services) skip only the hour-grid
       // test — lunch block and the last-start rule still apply.
-      // Other technicians' committed stops that day: the callers' collision
-      // checks are tech-blind, so a change must clear them too.
-      blockers: otherStopsOn(date, tech, params),
       admits: ({ startMin, endMin, isNew, offHour }) => {
         // The caller's own "would I show this start?" rule (daypart, notice
         // window, zone-day funnel) — callers own those filters, find-time
         // doesn't copy them.
-        if (isNew && params.slideNewStartAllowed && !params.slideNewStartAllowed(date, startMin)) return false;
+        if (isNew && !params.slideNewStartAllowed(date, startMin)) return false;
         return isNew || !offHour
           ? customerWindowAdmits({ startMin, endMin })
           : !overlapsLunch(startMin, endMin) && !pastCustomerLastStart(startMin);
@@ -1503,7 +1493,7 @@ async function findAvailableSlots(opts) {
     techStartPoints: opts.techStartPoints === true,
     slideShadow: slideMeta != null,
     slideMeta,
-    slideNewStartAllowed: typeof opts.slideNewStartAllowed === 'function' ? opts.slideNewStartAllowed : null,
+    slideNewStartAllowed: opts.slideNewStartAllowed,
     slideBudget: { remaining: SLIDE_SHADOW_REQUEST_EVALUATIONS, spentMs: 0, deadline: null },
   };
   for (const date of dates) {

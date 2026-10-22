@@ -93,29 +93,10 @@ function changedStopFits(s, { dayOpen, dayClose, admits, startFloorMin, newStart
   return admits({ startMin: s.startMin, endMin: s.endMin, isNew, offHour: s.offHour === true });
 }
 
-// A changed stop against other technicians' committed stops, the way the
-// callers' tech-blind collision check (travel-gap.js travelGapConflicts)
-// measures it: any raw overlap with a blocker clashes, and the travel gap
-// applies only where a blocker is the changed stop's IMMEDIATE neighbour in
-// the combined day (own stops + blockers) — never a farther blocker with a
-// stop in between.
-const overlaps = (a, b) => a.startMin < b.endMin && b.startMin < a.endMin;
-function clashesWithBlocker(s, ordered, { blockers, pairViolates }) {
-  if (!blockers.length) return false;
-  if (blockers.some((b) => overlaps(s, b))) return true;
-  const combined = [...ordered, ...blockers.map((b) => ({ ...b, blocker: true }))]
-    .sort((a, b) => a.startMin - b.startMin);
-  const at = combined.findIndex((x) => x.id === s.id && !x.blocker);
-  const prev = combined[at - 1];
-  const next = combined[at + 1];
-  return Boolean((prev?.blocker && pairViolates(prev, s)) || (next?.blocker && pairViolates(s, next)));
-}
-
 function arrangementFeasible(stops, day) {
   const { home, dayOpen, dayClose, grandfathered, changedIds, pairViolates } = day;
   const ordered = [...stops].sort((a, b) => a.startMin - b.startMin);
   if (ordered.some((s) => changedIds.has(s.id) && !changedStopFits(s, day))) return false;
-  if (ordered.some((s) => changedIds.has(s.id) && clashesWithBlocker(s, ordered, day))) return false;
   const first = ordered[0];
   if (first && changedIds.has(first.id) && first.startMin < dayOpen + driveMin(home, first)) return false;
   const last = ordered[ordered.length - 1];
@@ -203,9 +184,6 @@ function candidateStarts(durationMinutes, dayOpen, dayClose) {
  *   across a caller's tech-days: `remaining` arrangements (decremented in
  *   place) and an optional Date.now() `deadline`. Each day also stops at
  *   MAX_EVALUATIONS.
- * @param {Array<{id, startMin, endMin, lat?, lng?, expectedMinutes?}>} [p.blockers] Other
- *   technicians' committed stops that day. Never moved and never part of
- *   this route's cost, but no changed stop may clash with one.
  * @param {Function} [p.pairViolates] (early, late) → truthy when the pair
  *   can't sit side by side. Default travel-gap.js travelGapViolation; a
  *   caller with GATE_SLOT_TRAVEL_GAP off passes plain overlap.
@@ -217,7 +195,7 @@ function candidateStarts(durationMinutes, dayOpen, dayClose) {
 function findSlideOffers({
   stops, newStop, durationMinutes, home, dayOpen, dayClose, admits = ADMIT_ALL,
   startFloorMin = 0, newStartFloorMin = 0, budget = { remaining: MAX_EVALUATIONS },
-  pairViolates = travelGapViolation, blockers = [],
+  pairViolates = travelGapViolation,
 }) {
   const none = (reason, baseline = null) => ({ reason, baseline, offers: [] });
   if (!hasCoords(newStop) || !hasCoords(home)) return none('NEW_STOP_COORDLESS');
@@ -238,7 +216,6 @@ function findSlideOffers({
     startFloorMin,
     newStartFloorMin,
     pairViolates,
-    blockers,
     grandfathered: originalPairs(base),
     starts: candidateStarts(durationMinutes, dayOpen, dayClose),
     makeNew: (startMin) => ({

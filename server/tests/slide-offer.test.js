@@ -257,37 +257,3 @@ describe('Codex r4 guards', () => {
   });
 });
 
-describe('Codex r5 guards', () => {
-  test('a changed stop may not clash with another technician\'s stop (blockers)', () => {
-    const free = findSlideOffers({ ...base, stops: day() });
-    expect(free.offers.find((o) => o.startMin === H(11))).toBeDefined();
-    const blocked = findSlideOffers({
-      ...base, stops: day(), blockers: [{ id: 'x', ...at(27.18), startMin: H(11), endMin: H(12) }],
-    });
-    expect(blocked.offers.find((o) => o.startMin === H(11))).toBeUndefined();
-  });
-});
-
-describe('Codex r6 guards', () => {
-  test('a far blocker with an own stop in between is not a travel-gap neighbour', () => {
-    // Another tech's 4 PM stop ~60 mi south. The own 3 PM stop sits between
-    // it and every change the 11 AM offer makes (d slides to 1 PM), so it is
-    // never a travel-gap neighbour — checking it anyway (1 PM → 4 PM drive
-    // ≈ the whole gap) would wrongly reject the offer.
-    const blockers = [{ id: 'far', lat: 26.5, lng: -82.45, startMin: H(16), endMin: H(17), expectedMinutes: 30 }];
-    const result = findSlideOffers({ ...base, stops: day(), blockers });
-    expect(result.offers.find((o) => o.startMin === H(11))).toBeDefined();
-  });
-
-  test('an adjacent blocker is checked with its own expected-minutes credit', () => {
-    // A blocker 10:00-11:00 beside the new stop's 11:00. Without credit
-    // (expected = window) the drive can't fit; with a 30-min expected visit
-    // the gap is 30 min and the short leg fits.
-    const near = { id: 'nb', lat: 27.17, lng: -82.45, startMin: H(10), endMin: H(11) };
-    const stops = day().filter((x) => x.id !== 'c');
-    const noCredit = findSlideOffers({ ...base, stops, blockers: [near] });
-    const credit = findSlideOffers({ ...base, stops, blockers: [{ ...near, expectedMinutes: 30 }] });
-    expect(noCredit.offers.find((o) => o.startMin === H(11))).toBeUndefined();
-    expect(credit.offers.find((o) => o.startMin === H(11))).toBeDefined();
-  });
-});

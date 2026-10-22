@@ -86,6 +86,7 @@ const CALL = {
   lat: 27.18, lng: LNG, durationMinutes: 60, dateFrom: DATE, dateTo: DATE,
   topN: 200, includeWeekends: false, packEnds: true, includeBlackoutDates: true,
   serviceType: 'pest_control', bufferMinutes: 15, customerFacing: true,
+  slideNewStartAllowed: () => true,
 };
 
 const shadowLines = () => logger.info.mock.calls.map(([m]) => m).filter((m) => String(m).startsWith('[slot-slide] shadow'));
@@ -307,18 +308,17 @@ test('the caller\'s own start rule (daypart / notice / funnel) binds the logged 
     await findAvailableSlots({ ...CALL, slideNewStartAllowed });
     return shadowLines().map((l) => JSON.parse(l.replace('[slot-slide] shadow ', '')).slideStart);
   };
-  // Positive control: no caller rule → the 11 AM slide.
-  expect(await startsFor(undefined)).toEqual(['11:00']);
+  // Positive control: a rule that allows everything → the 11 AM slide.
+  expect(await startsFor(() => true)).toEqual(['11:00']);
   // An afternoon-only (or notice-window) rule: the morning slide is never logged.
   for (const start of await startsFor((d, m) => m >= 12 * 60)) expect(Number(start.slice(0, 2))).toBeGreaterThanOrEqual(12);
   // A rule that hides the whole date (zone-day funnel): nothing is logged.
   expect(await startsFor(() => false)).toEqual([]);
 });
 
-test('another technician\'s committed stop blocks a slide into its hour', async () => {
-  // A second tech holds 11:00 at the same spot as the new stop. The callers'
-  // collision checks are tech-blind, so the 11 AM slide can't be shown.
-  const rows = [...STOPS, { ...row('t2stop', 27.18, 11), technician_id: 't2' }];
+
+test('a day another technician also works is not scored (one-technician days only)', async () => {
+  const rows = [...STOPS, { ...row('t2stop', 27.30, 14), technician_id: 't2' }];
   db.mockImplementation((table) => {
     if (table === 'technicians') return chain([{ id: 't1', name: 'Tech' }], table);
     if (table === 'scheduled_services') return chain(rows, table);
@@ -327,7 +327,18 @@ test('another technician\'s committed stop blocks a slide into its hour', async 
   });
   process.env.GATE_SLOT_SLIDE_OFFER = 'true';
   await findAvailableSlots(CALL);
-  for (const line of shadowLines()) {
-    expect(JSON.parse(line.replace('[slot-slide] shadow ', '')).slideStart).not.toBe('11:00');
-  }
+  expect(shadowLines()).toHaveLength(0);
+});
+
+test('a customerFacing caller that passes no start rule (admin slot debug) never claims the sample', async () => {
+  wireDb();
+  process.env.GATE_SLOT_SLIDE_OFFER = 'true';
+  const { slideNewStartAllowed, ...debugCall } = CALL;
+  await findAvailableSlots(debugCall);
+  expect(shadowLines()).toHaveLength(0);
+  expect(svcSelects()).toHaveLength(1);
+  // ...and the sample is still free for the next real customer request.
+  wireDb();
+  await findAvailableSlots(CALL);
+  expect(shadowLines()).toHaveLength(1);
 });
