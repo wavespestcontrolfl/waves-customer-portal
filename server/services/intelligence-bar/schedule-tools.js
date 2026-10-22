@@ -2101,6 +2101,8 @@ async function findAvailableSlotsTool(input) {
   const weekOut = etDateString(addETDays(new Date(), 7));
 
   return await findAvailableSlots({
+    // Staff tool: tech start points apply (GATE_TECH_START_POINTS).
+    techStartPoints: true,
     lat, lng,
     durationMinutes: duration_minutes || 60,
     dateFrom: date_from || today,

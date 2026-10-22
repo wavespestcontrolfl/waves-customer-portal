@@ -596,6 +596,8 @@ function computeChronologicalRepair(RouteOptimizer, stops) {
 function simulateArrivalRoute(RouteOptimizer, rangeForStop, seq, {
   startMin = 8 * 60, origin = RouteOptimizer.HQ, dayEndMin = Infinity, reportLate = false,
   includeReturnInFinish = false, legMinutes, bufferMinutes = 0, blockedIntervals = [],
+  // Where the van ends the day (GATE_TECH_START_POINTS: the tech's start point).
+  end = RouteOptimizer.HQ,
 } = {}) {
   if (blockedIntervals.some(block => !Number.isFinite(block.startMin) || !Number.isFinite(block.endMin) || block.endMin <= block.startMin)) return null;
   blockedIntervals = [...blockedIntervals].sort((a, b) => a.startMin - b.startMin);
@@ -614,8 +616,8 @@ function simulateArrivalRoute(RouteOptimizer, rangeForStop, seq, {
   let returnDeparture = state.clock;
   let returnMin;
   for (let attempt = 0; attempt <= blockedIntervals.length; attempt++) {
-    returnMin = legMinutes ? legMinutes(state.prev, RouteOptimizer.HQ, returnDeparture) : RouteOptimizer.fallbackLegMetrics(
-      RouteOptimizer.haversine(state.prev.lat, state.prev.lng, RouteOptimizer.HQ.lat, RouteOptimizer.HQ.lng),
+    returnMin = legMinutes ? legMinutes(state.prev, end, returnDeparture) : RouteOptimizer.fallbackLegMetrics(
+      RouteOptimizer.haversine(state.prev.lat, state.prev.lng, end.lat, end.lng),
     ).minutes || 0;
     if (!Number.isFinite(returnMin) || returnMin < 0) return null;
     const blocked = blockedIntervals.find(block => returnDeparture < block.endMin && returnDeparture + returnMin > block.startMin);
