@@ -49,9 +49,6 @@ const EXCLUDED_FILES = new Set([
   // print artifact (GATE_ESTIMATE_DOC_PDF), modeled on the service-report
   // work-order format above — never an on-screen surface.
   'EstimateProposalDocument.jsx',
-  // Draws inside ServiceReportDocument's web zoom, so it carries the document's print sizes; the
-  // web floor is held by LawnBeforeAfterSlider.test.jsx (smallest size x the document's zoom >= 14px).
-  'LawnBeforeAfterSlider.jsx',
   'AdminLoginPage.jsx', // admin surface that happens to live in pages/
   'TechCapturePreview.jsx', // tech-portal preview harness in pages/
 ]);
