@@ -418,7 +418,6 @@ function GateListError({ error, onRetry }) {
 
 function gateNotes(g) {
   return [
-    g.inverted && "Setting this to true turns the feature off.",
     g.kind === "mode" && "May take a mode value (shadow, auto or a date). Check docs/gates-and-env.md before you set it.",
     g.readAt === "call" && g.enabled !== null && "Read when the feature runs; shown as the variable is set now.",
     g.enabled === null && "Read in another file; the state is not known here. See docs/gate-index.md.",

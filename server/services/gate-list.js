@@ -13,8 +13,10 @@
 // variable is the GATE_ token in its value expression that spells its key
 // (callIncidents → GATE_CALL_INCIDENTS); with no such token, a lone token is
 // the variable and a compound one takes its last token. Every other token is a
-// prerequisite. The description, kind (boolean or mode) and inversion come
-// from the header catalogue entry for that variable, when it has one.
+// prerequisite. The description and kind (boolean or mode) come from the
+// header catalogue entry for that variable, when it has one. The catalogue's
+// `inverted` flag is a name-suffix guess (the IB staff autopay _OFF gate set to true turns
+// that action ON), so it is not passed on.
 
 const fs = require('fs');
 const featureGates = require('../config/feature-gates');
@@ -131,7 +133,6 @@ function listGates() {
   }
   const semantics = (doc) => ({
     kind: doc?.kind === 'mode' ? 'mode' : 'boolean',
-    inverted: doc?.inverted === true,
     description: doc?.description || null,
   });
   // Rows from the gates map: state as the running code computed it at boot.

@@ -96,10 +96,12 @@ describe('listGates variable names', () => {
     expect(byKey.get('dunningCustomerScheduleAllowlist')).toMatchObject({ envName: 'DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST' });
   });
 
-  test('mode and inverted gates carry their catalogue semantics', () => {
+  test('mode gates carry their catalogue kind; no row claims inversion', () => {
     expect(byKey.get('reviewAutoReply')).toMatchObject({ envName: 'GATE_REVIEW_AUTO_REPLY', kind: 'mode' });
-    expect(listGates().find((g) => g.envName === 'GATE_LATE_PAYMENT_CHECKER_OFF')).toMatchObject({ inverted: true });
-    expect(byKey.get('cronJobs')).toMatchObject({ kind: 'boolean', inverted: false });
+    expect(byKey.get('cronJobs')).toMatchObject({ kind: 'boolean' });
+    // The catalogue's suffix-based inversion guess is wrong for this gate
+    // (true turns the action on), so no row carries an inversion claim.
+    expect(listGates().find((g) => g.envName === 'GATE_IB_STAFF_AUTOPAY_OFF')).not.toHaveProperty('inverted');
   });
 
   test('a GATE_ named only in a comment above an entry is not taken', () => {
