@@ -152,8 +152,9 @@ jest.setTimeout(30000);
     await sendDueScheduledEmails();
     expect(gmail.sendMessage).not.toHaveBeenCalled();
     expect((await call('GET', '/scheduled')).body.emails).toEqual([expect.objectContaining({ id: body.scheduled.id, status: 'cancelled' })]);
+    // The text comes back once: a repeat (another tab, a lost answer) gets 409.
     const repeated = await cancel(body.scheduled.id);
-    expect(repeated).toMatchObject({ status: 200, body: { draft: { draftText: 'Hi\nthere' } } });
+    expect(repeated).toMatchObject({ status: 409, body: { cancelled: true } });
 
     const sent = await queue();
     await makeDue(sent.body.scheduled.id, { status: 'sent' });
@@ -214,24 +215,11 @@ jest.setTimeout(30000);
     expect(await row(body.scheduled.id)).toMatchObject({ status: 'outcome_unknown' });
   });
 
-  test('only the tab that cancelled gets the text back; its own repeat still works', async () => {
+  test('two cancels at once: exactly one gets the text', async () => {
     const { body } = await queue();
-    const [a, b] = await Promise.all([cancel(body.scheduled.id, 'tab-a-fixture-key'), cancel(body.scheduled.id, 'tab-b-fixture-key')]);
-    const statuses = [a.status, b.status].sort();
-    expect(statuses).toEqual([200, 409]);
-    const winner = a.status === 200 ? 'tab-a-fixture-key' : 'tab-b-fixture-key';
-    const loser = winner === 'tab-a-fixture-key' ? 'tab-b-fixture-key' : 'tab-a-fixture-key';
-    expect((await cancel(body.scheduled.id, winner)).body.draft).toMatchObject({ draftText: 'Hi\nthere' });
-    expect(await cancel(body.scheduled.id, loser)).toMatchObject({ status: 409, body: { error: expect.stringMatching(/^This email is already open as a draft in another tab/) } });
-    // A claim is never taken over by time.
-    await database('scheduled_emails').where({ id: body.scheduled.id }).update({ updated_at: database.raw("now() - interval '2 days'") });
-    const refused = await cancel(body.scheduled.id, loser);
-    expect(refused).toMatchObject({ status: 409, body: { claimedElsewhere: true } });
-    // Only the operator's explicit takeover moves it; the draft says so.
-    const taken = await call('POST', `/scheduled/${body.scheduled.id}/cancel`, { restoreKey: loser, takeover: true });
-    expect(taken).toMatchObject({ status: 200, body: { draft: { draftText: 'Hi\nthere', takenOver: true } } });
-    expect((await cancel(body.scheduled.id, winner)).status).toBe(409);
-    expect((await call('POST', `/scheduled/${body.scheduled.id}/cancel`, {})).status).toBe(400);
+    const [a, b] = await Promise.all([cancel(body.scheduled.id), cancel(body.scheduled.id)]);
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+    expect([a, b].find((r) => r.status === 200).body.draft).toMatchObject({ draftText: 'Hi\nthere' });
   });
 
   test('an alert that notifyAdmin did not write (null) counts as missed', async () => {
@@ -244,33 +232,19 @@ jest.setTimeout(30000);
     expect(await database('notifications')).toHaveLength(1);
   });
 
-  test('a cancelled email marked restored leaves the list, so its text cannot come back twice', async () => {
-    const { body } = await queue();
-    await cancel(body.scheduled.id);
-    expect((await call('GET', '/scheduled')).body.emails).toEqual([expect.objectContaining({ id: body.scheduled.id, status: 'cancelled' })]);
-    expect((await call('POST', `/scheduled/${body.scheduled.id}/restored`)).status).toBe(200);
-    expect((await call('POST', `/scheduled/${body.scheduled.id}/restored`)).status).toBe(200);
-    expect((await call('GET', '/scheduled')).body.emails).toEqual([]);
-    expect(await row(body.scheduled.id)).toMatchObject({ status: 'cancelled' });
-    expect(await cancel(body.scheduled.id)).toMatchObject({ status: 409, body: { error: 'This email is already back in a draft.' } });
-  });
-
-  test('an unconfirmed cancel stays listed however old it is; a confirmed one leaves', async () => {
-    const far = Array.from({ length: 110 }, (_, i) => ({
-      to_address: `far${i}@example.invalid`, subject: 'Far', body_html: 'x', draft_text: 'x', status: 'cancelled',
-      send_at: database.raw(`now() + interval '${i + 30} days'`), cancelled_at: database.raw("now() - interval '1 hour'"),
-      updated_at: database.raw("now() - interval '1 hour'"), client_key: randomUUID(),
+  test('cancelled emails stay listed read-only for 30 days, newest 100; void rows never show', async () => {
+    const old = Array.from({ length: 105 }, (_, i) => ({
+      to_address: `old${i}@example.invalid`, subject: 'Old', body_html: 'x', draft_text: 'x', status: 'cancelled',
+      send_at: database.raw("now() + interval '1 day'"), cancelled_at: database.raw(`now() - interval '${i + 1} hours'`),
+      restored_at: database.raw('now()'), client_key: randomUUID(),
     }));
-    await database('scheduled_emails').insert(far);
-    const { body } = await queue();
-    await cancel(body.scheduled.id);
-    // A cancel from days ago whose answer was lost is still recoverable.
-    await database('scheduled_emails').where({ id: body.scheduled.id }).update({ cancelled_at: database.raw("now() - interval '4 days'") });
+    await database('scheduled_emails').insert(old);
+    await database('scheduled_emails').insert({ to_address: 'stale@example.invalid', subject: 'Stale', body_html: 'x', draft_text: 'x', status: 'cancelled',
+      send_at: database.raw('now()'), cancelled_at: database.raw("now() - interval '31 days'"), restored_at: database.raw('now()'), client_key: randomUUID() });
+    await call('POST', '/schedule/reconcile', { clientKey: randomUUID() });
     const listed = (await call('GET', '/scheduled')).body.emails;
-    expect(listed.some((e) => e.id === body.scheduled.id && e.status === 'cancelled')).toBe(true);
-    expect(listed.filter((e) => e.status === 'cancelled')).toHaveLength(111);
-    await call('POST', `/scheduled/${body.scheduled.id}/restored`);
-    expect((await call('GET', '/scheduled')).body.emails.some((e) => e.id === body.scheduled.id)).toBe(false);
+    expect(listed).toHaveLength(100);
+    expect(listed.every((e) => e.status === 'cancelled' && e.to !== '' && e.to !== 'stale@example.invalid')).toBe(true);
   });
 
   test('old settled rows never hide a queued email from the list', async () => {
@@ -308,7 +282,8 @@ jest.setTimeout(30000);
     expect(retry.body.scheduled).toMatchObject({ id: body.scheduled.id, status: 'failed' });
     expect(await row(body.scheduled.id)).toMatchObject({ status: 'cancelled' });
     expect((await row(body.scheduled.id)).restored_at).not.toBeNull();
-    expect((await call('GET', '/scheduled')).body.emails).toEqual([]);
+    // Listed read-only (Show text); it can no longer be taken into a draft.
+    expect((await call('GET', '/scheduled')).body.emails).toEqual([expect.objectContaining({ id: body.scheduled.id, status: 'cancelled' })]);
     expect((await cancel(body.scheduled.id)).status).toBe(409);
   });
 
@@ -396,6 +371,24 @@ jest.setTimeout(30000);
     expect((await sendDueScheduledEmails()).results).toEqual(['claim_lost']);
     expect(requested).toBe(false);
     expect(await row(body.scheduled.id)).toMatchObject({ status: 'scheduled', attempts: 0, claimed_at: null });
+  });
+
+  test('an accepted email that cannot be recorded as sent makes the run unhealthy, never a resend', async () => {
+    const { body } = await queue();
+    await makeDue(body.scheduled.id);
+    const flaky = (...args) => {
+      const qb = database(...args);
+      const update = qb.update.bind(qb);
+      qb.update = (fields, ...rest) => (fields?.status === 'sent' ? Promise.reject(new Error('db down')) : update(fields, ...rest));
+      return qb;
+    };
+    flaky.fn = database.fn;
+    flaky.raw = (...args) => database.raw(...args);
+    gmail.sendMessage.mockImplementation(async (...args) => { await args[5].beforeSend(); return { id: 'gmail-accepted' }; });
+    await expect(sendDueScheduledEmails({ conn: flaky })).rejects.toMatchObject({ summary: { results: ['sent_unrecorded'] } });
+    expect(await row(body.scheduled.id)).toMatchObject({ status: 'sending' });
+    expect((await sendDueScheduledEmails()).results).toEqual([]);
+    expect(gmail.sendMessage).toHaveBeenCalledTimes(1);
   });
 
   test('due emails go to Gmail up to five at a time', async () => {

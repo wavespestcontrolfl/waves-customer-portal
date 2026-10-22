@@ -104,12 +104,10 @@ export function updateEmailSendAttempt(session, key, attempt, expectedId = null)
   return false;
 }
 
-// Schedule-send state that belongs to the signed-in user's drafts (schedule
-// keys, unconfirmed restore marks): it goes with them at sign-out. Restore
-// keys (waves_email_restore_keys:<user>) stay: the server may hold a cancel
-// claimed under one whose answer never arrived, and only that key can take
-// the text back after the same user signs in again.
-const SCHEDULE_STATE_PREFIXES = ["waves_email_schedule_uncertain:", "waves_email_restored_pending:"];
+// Schedule-send state that belongs to the signed-in user's drafts (the keys
+// of schedule requests with no definite answer): it goes with them at
+// sign-out.
+const SCHEDULE_STATE_PREFIXES = ["waves_email_schedule_uncertain:"];
 
 export function clearEmailDrafts() {
   activeSession = null;

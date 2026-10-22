@@ -348,6 +348,8 @@ router.post('/send', async (req, res) => {
 const SCHEDULE_ET_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
 const SCHEDULE_MAX_DAYS = 366;
 const CANCELLABLE = ['scheduled', 'failed', 'outcome_unknown'];
+const CANCELLED_DAYS = 30;
+const CANCELLED_LIST_CAP = 100;
 const { OUTCOME_UNKNOWN_ERRORS } = require('../services/email/scheduled-email-sender');
 const scheduledView = (row) => ({
   id: row.id, to: row.to_address, subject: row.subject, draftText: row.draft_text, threadId: row.thread_id,
@@ -452,21 +454,24 @@ router.post('/schedule/reconcile', async (req, res) => {
   }
 });
 
-// GET /scheduled — what is still waiting or needs the office (sent rows drop
-// off; cancelled rows after a day). Answers {enabled:false} with the gate off so the
-// client hides the menu and the tab.
+// GET /scheduled — what is still waiting or needs the office, and recent
+// cancels (read-only); sent rows drop off. Answers {enabled:false} with the
+// gate off so the client hides the menu and the tab.
 router.get('/scheduled', async (req, res) => {
   if (!emailSendLaterLive()) return res.json({ enabled: false, emails: [] });
   try {
-    // Listed until it is settled for good: every email still queued or
-    // sending, every one that needs the office (failed, outcome_unknown: their
-    // alert says Back to draft), and every cancelled one no tab has confirmed
-    // restoring ("Open as draft": a cancel whose answer was lost is never
-    // stranded, however late the retry). A confirmed restore leaves the list.
-    const rows = await db('scheduled_emails')
-      .where((q) => q.whereIn('status', ['scheduled', 'sending', ...CANCELLABLE.slice(1)])
-        .orWhere((c) => c.where('status', 'cancelled').whereNull('restored_at')))
-      .orderBy('send_at', 'asc');
+    // Every email still queued or sending, and every one that needs the
+    // office (failed, outcome_unknown: their alert says Back to draft), so
+    // history never hides one. Cancelled emails of the last CANCELLED_DAYS
+    // days are listed read-only (Show text): a cancel whose answer was lost
+    // still shows its text, but never hands it to a composer a second time.
+    const [open, cancelled] = await Promise.all([
+      db('scheduled_emails').whereIn('status', ['scheduled', 'sending', ...CANCELLABLE.slice(1)]),
+      db('scheduled_emails').where('status', 'cancelled').whereNot('to_address', '')
+        .where('cancelled_at', '>', db.raw(`now() - interval '${CANCELLED_DAYS} days'`))
+        .orderBy('cancelled_at', 'desc').limit(CANCELLED_LIST_CAP),
+    ]);
+    const rows = [...open, ...cancelled].sort((a, b) => new Date(a.send_at) - new Date(b.send_at));
     res.json({ enabled: true, emails: rows.map(scheduledView) });
   } catch (err) {
     logger.error(`[email] scheduled list failed (${err.code || 'error'})`);
@@ -475,57 +480,25 @@ router.get('/scheduled', async (req, res) => {
 });
 
 // POST /scheduled/:id/cancel — Gmail's "Cancel send": the row stops and its
-// text comes back for the composer. The tab's `restoreKey` claims the text in
-// the same UPDATE that cancels the row: a repeat with that key (a lost answer)
-// returns the same draft, any other key gets 409, and nothing comes back once
-// the tab confirmed the restore. A row Gmail is sending or has sent cannot be
-// cancelled (409).
-const RESTORE_KEY_RE = /^[\w-]{8,64}$/;
-async function claimCancelled(id, restoreKey, takeover) {
-  const [row] = await db('scheduled_emails').where({ id }).whereIn('status', CANCELLABLE)
-    .update({ status: 'cancelled', cancelled_at: db.fn.now(), restore_key: restoreKey, updated_at: db.fn.now() }).returning('*');
-  if (row) return { draft: row };
-  // A cancelled row nobody claimed yet, or this tab's own claim. Another
-  // tab's claim moves only on the operator's explicit takeover (never by
-  // time: time cannot tell a lost answer from a draft already in a
-  // composer); the taken draft is marked takenOver so plain Send waits for
-  // the operator's check of that other tab.
-  const [own] = await db('scheduled_emails').where({ id, status: 'cancelled' }).whereNull('restored_at')
-    .where((q) => (takeover ? q : q.whereNull('restore_key').orWhere('restore_key', restoreKey)))
-    .update({ restore_key: restoreKey, updated_at: db.fn.now() }).returning('*');
-  if (own) return { draft: own, takenOver: takeover === true };
-  const current = await db('scheduled_emails').where({ id }).first('status', 'restored_at');
-  if (current?.status !== 'cancelled') return { error: 'This email is already sending or sent, so it cannot be cancelled.' };
-  if (current.restored_at) return { error: 'This email is already back in a draft.', restored: true };
-  return { error: 'This email is already open as a draft in another tab or window. Use that draft, or open it here if that tab is gone.', claimedElsewhere: true };
-}
-
+// text comes back for the composer, once. The same UPDATE uses up the row's
+// recovery copy (restored_at), so no repeat, other tab or other admin can
+// take the same text into a composer again: a repeat answers 409 and the
+// Scheduled list shows the text read-only. A row Gmail is sending or has
+// sent cannot be cancelled (409).
 router.post('/scheduled/:id/cancel', async (req, res) => {
   if (!emailSendLaterLive()) return res.status(404).json({ enabled: false, error: 'Schedule send is off.' });
-  const restoreKey = req.body?.restoreKey;
-  if (typeof restoreKey !== 'string' || !RESTORE_KEY_RE.test(restoreKey)) return res.status(400).json({ error: 'restoreKey is required.' });
   try {
-    const { draft, error, claimedElsewhere, takenOver, restored } = await claimCancelled(req.params.id, restoreKey, req.body?.takeover === true);
-    if (error) return res.status(409).json({ error, ...(claimedElsewhere ? { claimedElsewhere } : {}), ...(restored ? { restored } : {}) });
-    res.json({ success: true, draft: { ...scheduledView(draft), ...(takenOver ? { takenOver } : {}) } });
+    const [row] = await db('scheduled_emails').where({ id: req.params.id }).whereIn('status', CANCELLABLE)
+      .update({ status: 'cancelled', cancelled_at: db.fn.now(), restored_at: db.fn.now(), updated_at: db.fn.now() }).returning('*');
+    if (row) return res.json({ success: true, draft: scheduledView(row) });
+    const current = await db('scheduled_emails').where({ id: req.params.id }).first('status');
+    if (current?.status === 'cancelled') {
+      return res.status(409).json({ cancelled: true, error: 'This email was already cancelled. Its text is under Scheduled: tap Show text.' });
+    }
+    res.status(409).json({ error: 'This email is already sending or sent, so it cannot be cancelled.' });
   } catch (err) {
     logger.error(`[email] scheduled cancel failed (${err.code || 'error'})`);
     res.status(500).json({ error: 'The scheduled email was not cancelled. Try again.' });
-  }
-});
-
-// POST /scheduled/:id/restored — the browser put a cancelled email back in
-// the composer: drop it from the list so Open as draft cannot bring the same
-// text back a second time. Repeating it is harmless.
-router.post('/scheduled/:id/restored', async (req, res) => {
-  if (!emailSendLaterLive()) return res.status(404).json({ enabled: false, error: 'Schedule send is off.' });
-  try {
-    await db('scheduled_emails').where({ id: req.params.id, status: 'cancelled' }).whereNull('restored_at')
-      .update({ restored_at: db.fn.now(), updated_at: db.fn.now() });
-    res.json({ success: true });
-  } catch (err) {
-    logger.error(`[email] scheduled restore mark failed (${err.code || 'error'})`);
-    res.status(500).json({ error: 'Could not mark the draft as restored.' });
   }
 });
 

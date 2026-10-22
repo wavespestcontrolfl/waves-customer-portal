@@ -12,11 +12,14 @@ const STATUS_TEXT = {
 };
 
 // Email > Scheduled, as in Gmail: what is queued and when, with Cancel send.
-// A row Gmail refused or may have sent shows Back to draft; a row cancelled in
-// the last day shows Open as draft (the cancel repeats and returns its text).
+// A row Gmail refused or may have sent shows Back to draft. Cancel and Back
+// to draft hand the text to the composer once; a cancelled row then stays
+// listed a while, read-only, with Show text (a cancel whose answer was lost
+// still shows its text, but never opens it as a second draft).
 export default function ScheduledEmails({ scheduled, editor, mailbox }) {
   const [feedback, setFeedback] = useState(null);
-  const takeBack = async (row, { takeover = false } = {}) => {
+  const [shownId, setShownId] = useState(null);
+  const takeBack = async (row) => {
     setFeedback(null);
     if (editor.scheduledDraftBlocked(row)) {
       setFeedback({ error: true, message: row.replyEmailId
@@ -24,40 +27,24 @@ export default function ScheduledEmails({ scheduled, editor, mailbox }) {
         : "You have a new email in progress. Send or discard it first, then try again." });
       return;
     }
-    const { draft, error, retryable, claimedElsewhere } = await scheduled.cancel(row.id, { takeover });
-    if (!draft) { setFeedback({ error: true, message: error, retry: retryable ? row : null, takeover: claimedElsewhere ? row : null }); return; }
-    // A draft started while the cancel was in flight takes the slot: keep a
-    // way back (the server repeats the cancel and returns the same draft).
+    const { draft, error } = await scheduled.cancel(row.id);
+    if (!draft) { setFeedback({ error: true, message: error }); return; }
     const restored = editor.restoreScheduledDraft(draft);
-    if (restored?.guardUnsaved) {
-      setFeedback({ error: true, retry: row, message: "Cancelled, but this browser could not save its safety check, so the draft did not open. Tap Try again." });
-      return;
-    }
-    if (!restored) {
-      setFeedback({ error: true, retry: row, message: "Cancelled, but another draft is open. Send or discard it, then tap Try again to get this email back." });
-      return;
-    }
-    // The draft stays open only when it is durable: saved in this tab and
-    // its restore mark kept. Otherwise a reload could lose it, or the listed
-    // row could hand the same text out again, so it closes and the row
-    // (claimed by this tab) offers it again.
-    const mark = restored.saved ? await scheduled.markRestored(draft.id) : "not_durable";
-    editor.finishRestore(draft, mark);
-    if (mark === "not_durable") {
-      setFeedback({ error: true, retry: row, message: "Cancelled, but this browser could not save the draft safely, so it closed again. Tap Try again." });
+    if (!restored?.opened) {
+      setShownId(draft.id);
+      setFeedback({ error: true, message: restored === false
+        ? "Cancelled, but another draft is open, so its text is shown below. Copy it from there."
+        : "Cancelled, but this browser could not save its safety check, so its text is shown below. Check the Gmail Sent folder before you use it." });
       return;
     }
     if (draft.replyEmailId) mailbox.showEmailById(draft.replyEmailId);
-    setFeedback({ message: draft.replyEmailId ? "Cancelled. The reply is back in its conversation as a draft." : "Cancelled. The email is open as a draft." });
+    setFeedback({ error: !restored.saved, message: restored.saved
+      ? (draft.replyEmailId ? "Cancelled. The reply is back in its conversation as a draft." : "Cancelled. The email is open as a draft.")
+      : "Cancelled and open as a draft, but this browser could not save it: if you reload, find its text under Scheduled (Show text)." });
   };
 
   return <section aria-label="Scheduled emails" className="space-y-4">
-    {feedback && <ActionFeedback error={feedback.error} onRetry={feedback.retry ? () => takeBack(feedback.retry) : undefined}>
-      {feedback.message}
-      {/* The other tab is gone: the operator moves the claim here. The draft
-          then opens with plain Send waiting for a check of that tab. */}
-      {feedback.takeover && <Button variant="secondary" className="ml-2" onClick={() => takeBack(feedback.takeover, { takeover: true })}>Open here anyway</Button>}
-    </ActionFeedback>}
+    {feedback && <ActionFeedback error={feedback.error}>{feedback.message}</ActionFeedback>}
     <div className="overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
       {scheduled.loading && scheduled.emails.length === 0 ? <p className="m-0 min-h-40 p-6 text-ink-secondary" role="status">Loading scheduled emails…</p>
         : scheduled.error ? <ActionFeedback error onRetry={scheduled.reload} className="min-h-40 p-6">Scheduled emails are unavailable.</ActionFeedback>
@@ -74,10 +61,13 @@ export default function ScheduledEmails({ scheduled, editor, mailbox }) {
               {row.status === "scheduled" ? `Sends ${formatSendAt(row.sendAt)}` : STATUS_TEXT[row.status] || row.status}
             </p>
           </div>
-          {row.status !== "sending" && <Button variant="secondary" className="shrink-0" onClick={() => takeBack(row)}
-            disabled={Boolean(scheduled.pendingId)} loading={scheduled.pendingId === row.id}>
-            {{ scheduled: "Cancel send", cancelled: "Open as draft" }[row.status] || "Back to draft"}
-          </Button>}
+          {row.status === "cancelled"
+            ? <Button variant="secondary" className="shrink-0" onClick={() => setShownId(shownId === row.id ? null : row.id)}>{shownId === row.id ? "Hide text" : "Show text"}</Button>
+            : row.status !== "sending" && <Button variant="secondary" className="shrink-0" onClick={() => takeBack(row)}
+              disabled={Boolean(scheduled.pendingId)} loading={scheduled.pendingId === row.id}>
+              {row.status === "scheduled" ? "Cancel send" : "Back to draft"}
+            </Button>}
+          {shownId === row.id && <pre className="m-0 w-full whitespace-pre-wrap break-words rounded-md bg-zinc-50 p-3 text-ui-body" aria-label="Email text">{row.draftText}</pre>}
         </li>)}</ul>}
     </div>
   </section>;

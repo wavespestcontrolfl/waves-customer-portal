@@ -420,55 +420,29 @@ describe("Email schedule send", () => {
     expect(await screen.findByText("Cancelled. The email is open as a draft.")).toBeInTheDocument();
     expect(screen.getByLabelText(/^Message/)).toHaveValue("Saved text");
     expect(screen.getByLabelText(/^To/)).toHaveValue("customer@example.invalid");
-    await waitFor(() => expect(posts("/queued-1/restored")).toHaveLength(1));
+    expect(posts("/queued-1/restored")).toHaveLength(0);
   });
 
-  it("an unconfirmed restored mark keeps the row hidden and is sent again on the next reload", async () => {
+  it("a cancelled email stays listed read-only: Show text, never a second draft", async () => {
+    scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text\nline two", sendAt: "2026-10-23T13:00:00.000Z", status: "cancelled" }];
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Scheduled" }, { timeout: 3000 }));
+    expect(screen.queryByRole("button", { name: /Open as draft|Back to draft|Cancel send/ })).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Show text" }));
+    expect(screen.getByLabelText("Email text")).toHaveTextContent("Saved text");
+    expect(posts("/cancel")).toHaveLength(0);
+  });
+
+  it("a cancel whose answer was lost points to Show text instead of retrying", async () => {
     scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "scheduled" }];
     const base = fetch.getMockImplementation();
-    let markFails = true;
-    fetch.mockImplementation((input, options = {}) => {
-      if (String(input).endsWith("/queued-1/cancel")) {
-        const draft = { ...scheduledRows[0], status: "cancelled" };
-        scheduledRows = [draft];
-        return response({ success: true, draft });
-      }
-      if (String(input).endsWith("/queued-1/restored")) {
-        if (markFails) return response({ error: "down" }, 500);
-        scheduledRows = [];
-        return response({ success: true });
-      }
-      return base(input, options);
-    });
+    fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/queued-1/cancel")
+      ? Promise.reject(new TypeError("network")) : base(input, options)));
     mount();
-    fireEvent.click(await screen.findByRole("button", { name: "Scheduled (1)" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Scheduled (1)" }, { timeout: 3000 }));
     fireEvent.click(await screen.findByRole("button", { name: "Cancel send" }));
-    expect(await screen.findByText("Cancelled. The email is open as a draft.")).toBeInTheDocument();
-    await waitFor(() => expect(posts("/queued-1/restored").length).toBeGreaterThan(0));
-    await waitFor(() => expect(screen.queryByRole("button", { name: "Open as draft" })).not.toBeInTheDocument());
-    const before = posts("/queued-1/restored").length;
-    markFails = false;
-    fireEvent.click(screen.getByRole("button", { name: "Inbox" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Scheduled" }));
-    await waitFor(() => expect(posts("/queued-1/restored").length).toBeGreaterThan(before));
-    expect(screen.queryByRole("button", { name: "Open as draft" })).not.toBeInTheDocument();
-    expect(JSON.parse(sessionStorage.getItem("waves_email_restored_pending:fixture-schedule-owner"))).toEqual([]);
-  });
-
-  it("closes a restored draft the tab cannot save, and keeps the row listed", async () => {
-    scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "scheduled" }];
-    mount();
-    fireEvent.click(await screen.findByRole("button", { name: "Scheduled (1)" }));
-    const setItem = Storage.prototype.setItem;
-    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function failDrafts(key, value) {
-      if (!/schedul|restore_keys/i.test(key)) throw new Error("Quota");
-      return setItem.call(this, key, value);
-    });
-    fireEvent.click(await screen.findByRole("button", { name: "Cancel send" }));
-    expect(await screen.findByText(/could not save the draft safely, so it closed again/)).toBeInTheDocument();
-    expect(screen.queryByDisplayValue("Saved text")).not.toBeInTheDocument();
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(posts("/queued-1/restored")).toHaveLength(0);
+    expect(await screen.findByText(/tap Show text to copy it/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
   });
 
   it("does not schedule when the tab cannot save the safety key", async () => {
@@ -531,183 +505,11 @@ describe("Email schedule send", () => {
     expect(posts("/queued-1/restored")).toHaveLength(0);
   });
 
-  it("takes the draft back when neither the browser nor the server can record the restore", async () => {
-    scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "scheduled" }];
-    const base = fetch.getMockImplementation();
-    fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/queued-1/restored")
-      ? response({ error: "down" }, 500) : base(input, options)));
-    mount();
-    fireEvent.click(await screen.findByRole("button", { name: "Scheduled (1)" }, { timeout: 3000 }));
-    const setItem = Storage.prototype.setItem;
-    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function failPending(key, value) {
-      if (/restored_pending/.test(key)) throw new Error("Quota");
-      return setItem.call(this, key, value);
-    });
-    fireEvent.click(await screen.findByRole("button", { name: "Cancel send" }));
-    expect(await screen.findByText(/could not save the draft safely, so it closed again/)).toBeInTheDocument();
-    expect(screen.queryByDisplayValue("Saved text")).not.toBeInTheDocument();
-    expect(posts("/queued-1/restored")).toHaveLength(1);
-  });
-
-  it("Open here anyway takes over another tab's claim; plain Send waits for the check of that tab", async () => {
-    scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "cancelled" }];
-    const base = fetch.getMockImplementation();
-    fetch.mockImplementation((input, options = {}) => {
-      if (!String(input).endsWith("/queued-1/cancel")) return base(input, options);
-      const { takeover } = JSON.parse(options.body);
-      return takeover
-        ? response({ success: true, draft: { ...scheduledRows[0], takenOver: true } })
-        : response({ error: "This email is already open as a draft in another tab or window.", claimedElsewhere: true }, 409);
-    });
-    mount();
-    fireEvent.click(await screen.findByRole("button", { name: "Scheduled" }, { timeout: 3000 }));
-    fireEvent.click(await screen.findByRole("button", { name: "Open as draft" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Open here anyway" }));
-    expect(await screen.findByText(/may still be open as a draft in another tab/)).toBeInTheDocument();
-    expect(JSON.parse(posts("/queued-1/cancel")[1][1].body)).toMatchObject({ takeover: true });
-    const send = () => screen.getAllByRole("button", { name: "Send", exact: true }).at(-1);
-    expect(send()).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "I checked: no other copy" }));
-    await waitFor(() => expect(send()).not.toBeDisabled());
-  });
-
-  it("a takeover whose answer was lost keeps its guard on the plain retry", async () => {
-    scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "cancelled" }];
-    const base = fetch.getMockImplementation();
-    let calls = 0;
-    fetch.mockImplementation((input, options = {}) => {
-      if (!String(input).endsWith("/queued-1/cancel")) return base(input, options);
-      calls += 1;
-      if (calls === 1) return response({ error: "Open in another tab.", claimedElsewhere: true }, 409);
-      if (calls === 2) return Promise.reject(new TypeError("network"));
-      // The claim moved on the lost takeover: a plain repeat returns the draft unflagged.
-      return response({ success: true, draft: { ...scheduledRows[0] } });
-    });
-    mount();
-    fireEvent.click(await screen.findByRole("button", { name: "Scheduled" }, { timeout: 3000 }));
-    fireEvent.click(await screen.findByRole("button", { name: "Open as draft" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Open here anyway" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
-    expect(await screen.findByText(/may still be open as a draft in another tab/)).toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: "Send", exact: true }).at(-1)).toBeDisabled();
-  });
-
-  it("a restored new email opens only after its restore mark is durable", async () => {
-    scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "scheduled" }];
-    let finishMark;
-    const base = fetch.getMockImplementation();
-    fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/queued-1/restored")
-      ? new Promise((resolve) => { finishMark = () => resolve(response({ success: true })); }) : base(input, options)));
-    mount();
-    fireEvent.click(await screen.findByRole("button", { name: "Scheduled (1)" }, { timeout: 3000 }));
-    const setItem = Storage.prototype.setItem;
-    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function failPending(key, value) {
-      if (/restored_pending/.test(key)) throw new Error("Quota");
-      return setItem.call(this, key, value);
-    });
-    fireEvent.click(await screen.findByRole("button", { name: "Cancel send" }));
-    await waitFor(() => expect(finishMark).toBeTypeOf("function"));
-    // The mark is still on its way: the composer has not opened.
-    expect(screen.queryByRole("dialog", { name: "New email" })).not.toBeInTheDocument();
-    finishMark();
-    expect(await screen.findByText("Cancelled. The email is open as a draft.")).toBeInTheDocument();
-    expect(screen.getByLabelText(/^Message/)).toHaveValue("Saved text");
-  });
-
-  it.each([
-    ["the mark landed (probe says already back in a draft)", "landed"],
-    ["the mark stays unclear", "unclear"],
-  ])("an unclear restore mark keeps the draft when %s", async (_label, mode) => {
-    scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "scheduled" }];
-    const base = fetch.getMockImplementation();
-    let cancels = 0;
-    fetch.mockImplementation((input, options = {}) => {
-      const url = String(input);
-      if (url.endsWith("/queued-1/restored")) return Promise.reject(new TypeError("network"));
-      if (url.endsWith("/queued-1/cancel") && (cancels += 1) > 1) {
-        return mode === "landed" ? response({ error: "This email is already back in a draft.", restored: true }, 409) : Promise.reject(new TypeError("network"));
-      }
-      return base(input, options);
-    });
-    mount();
-    fireEvent.click(await screen.findByRole("button", { name: "Scheduled (1)" }, { timeout: 3000 }));
-    const setItem = Storage.prototype.setItem;
-    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function failPending(key, value) {
-      if (/restored_pending/.test(key)) throw new Error("Quota");
-      return setItem.call(this, key, value);
-    });
-    fireEvent.click(await screen.findByRole("button", { name: "Cancel send" }));
-    expect(await screen.findByText("Cancelled. The email is open as a draft.")).toBeInTheDocument();
-    expect(screen.getByLabelText(/^Message/)).toHaveValue("Saved text");
-    const send = screen.getAllByRole("button", { name: "Send", exact: true }).at(-1);
-    if (mode === "landed") expect(send).not.toBeDisabled();
-    else {
-      expect(send).toBeDisabled();
-      expect(screen.getByText(/The Scheduled list may still offer this email/)).toBeInTheDocument();
-    }
-  });
-
-  it("an unclear restore mark stacks on a may-have-sent guard; each check clears one", async () => {
-    scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "outcome_unknown", mayHaveSent: true }];
-    const base = fetch.getMockImplementation();
-    let cancels = 0;
-    let markDown = true;
-    fetch.mockImplementation((input, options = {}) => {
-      const url = String(input);
-      if (url.endsWith("/queued-1/restored")) return markDown ? Promise.reject(new TypeError("network")) : response({ success: true });
-      if (url.endsWith("/queued-1/cancel") && (cancels += 1) > 1) return Promise.reject(new TypeError("network"));
-      if (url.endsWith("/queued-1/cancel")) return response({ success: true, draft: { ...scheduledRows[0], status: "cancelled" } });
-      return base(input, options);
-    });
-    mount();
-    fireEvent.click(await screen.findByRole("button", { name: "Scheduled" }, { timeout: 3000 }));
-    const setItem = Storage.prototype.setItem;
-    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function failPending(key, value) {
-      if (/restored_pending/.test(key)) throw new Error("Quota");
-      return setItem.call(this, key, value);
-    });
-    fireEvent.click(await screen.findByRole("button", { name: "Back to draft" }));
-    expect(await screen.findByText(/Gmail may already have sent this email/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "I checked: it is in neither" }));
-    expect(await screen.findByText(/The Scheduled list may still offer this email/)).toBeInTheDocument();
-    const send = () => screen.getAllByRole("button", { name: "Send", exact: true }).at(-1);
-    expect(send()).toBeDisabled();
-    // The unclear mark clears only once the server confirms it.
-    fireEvent.click(screen.getByRole("button", { name: "I checked: no other copy" }));
-    expect((await screen.findAllByText(/Could not confirm the Scheduled list let go of this email/)).length).toBeGreaterThan(0);
-    expect(send()).toBeDisabled();
-    markDown = false;
-    fireEvent.click(screen.getByRole("button", { name: "I checked: no other copy" }));
-    await waitFor(() => expect(send()).not.toBeDisabled());
-  });
-
-  it("taking over an email Gmail may have sent keeps both checks", async () => {
-    scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "cancelled", mayHaveSent: true }];
-    const base = fetch.getMockImplementation();
-    fetch.mockImplementation((input, options = {}) => {
-      if (!String(input).endsWith("/queued-1/cancel")) return base(input, options);
-      return JSON.parse(options.body).takeover
-        ? response({ success: true, draft: { ...scheduledRows[0], takenOver: true } })
-        : response({ error: "Open in another tab.", claimedElsewhere: true }, 409);
-    });
-    mount();
-    fireEvent.click(await screen.findByRole("button", { name: "Scheduled" }, { timeout: 3000 }));
-    fireEvent.click(await screen.findByRole("button", { name: "Open as draft" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Open here anyway" }));
-    expect(await screen.findByText(/Gmail may already have sent this email/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "I checked: it is in neither" }));
-    expect(await screen.findByText(/may still be open as a draft in another tab/)).toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: "Send", exact: true }).at(-1)).toBeDisabled();
-  });
-
-  it("sign-out keeps the restore key, so a cancel whose answer was lost can still be taken back", () => {
-    sessionStorage.setItem("waves_email_restored_pending:fixture-schedule-owner", "[\"queued-1\"]");
-    sessionStorage.setItem("waves_email_restore_keys:fixture-schedule-owner", "{}");
+  it("sign-out removes the schedule keys with the drafts", () => {
     sessionStorage.setItem("waves_email_schedule_uncertain:fixture-schedule-owner", "{}");
     sessionStorage.setItem("unrelated_fixture_key", "kept");
     clearEmailDrafts();
-    // Restore keys stay: a claimed cancel can still come back after sign-in.
-    expect(Object.keys(sessionStorage).sort()).toEqual(["unrelated_fixture_key", "waves_email_restore_keys:fixture-schedule-owner"]);
+    expect(Object.keys(sessionStorage)).toEqual(["unrelated_fixture_key"]);
   });
 
   it("with Gmail disconnected, scheduled emails stay listed and can be cancelled", async () => {

@@ -397,7 +397,6 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/admin/email/schedule/reconcile` | admin-email |
 | GET | `/api/admin/email/scheduled` | admin-email |
 | POST | `/api/admin/email/scheduled/:id/cancel` | admin-email |
-| POST | `/api/admin/email/scheduled/:id/restored` | admin-email |
 | POST | `/api/admin/email/send` | admin-email |
 | GET | `/api/admin/email/stats` | admin-email |
 | POST | `/api/admin/email/sync` | admin-email |

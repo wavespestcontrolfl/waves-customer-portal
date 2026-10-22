@@ -228,8 +228,11 @@ async function sendDueScheduledEmails({ conn = db, gmail } = {}) {
   const summary = { enabled: true, settled, results, missedAlerts };
   // Every claimed email was still tried; a run with an error reads as failed
   // in job_health (runScheduledSweep records the throw).
-  if (results.includes('error') || missedAlerts > 0) {
-    throw Object.assign(new Error(`scheduled-email sweep: ${results.filter((r) => r === 'error').length} error(s), ${missedAlerts} alert(s) not raised`), { summary });
+  // An email Gmail accepted but the sweep could not record as sent is never
+  // retried (settleStaleClaims alerts on it later), yet the run is unhealthy.
+  const errors = results.filter((r) => r === 'error' || r === 'sent_unrecorded').length;
+  if (errors > 0 || missedAlerts > 0) {
+    throw Object.assign(new Error(`scheduled-email sweep: ${errors} error(s), ${missedAlerts} alert(s) not raised`), { summary });
   }
   return summary;
 }

@@ -58,13 +58,6 @@ function reconcileOutcome(row) {
 // fingerprint matches it, so scheduling it again also waits for the check.
 const MAY_HAVE_SENT = { request: "may_have_sent", clientKey: null };
 
-// The guard on a restored draft whose restore mark is unclear: the list may
-// still offer the same email.
-const RESTORE_UNCONFIRMED = { request: "restore_unconfirmed", clientKey: null };
-
-// The guard on a draft taken over from another tab, which may still hold it.
-const TAKEN_OVER = { request: "taken_over", clientKey: null };
-
 // A retried key can return a row the sender already settled: nothing is
 // queued, so the draft stays and the outcome shows.
 const SETTLED_MESSAGES = {
@@ -126,16 +119,11 @@ export default function useEmailEditor(userId) {
   // (saved before the request, so in flight counts too): the same email at
   // the same time reuses it, and plain Send waits until the operator checked
   // the Scheduled list. It is in this tab's sessionStorage, so a reload keeps it.
-  if (!draftSession.schedule) draftSession.schedule = { scheduling: null, restoring: null, uncertain: readUncertainSchedules(userId) };
+  if (!draftSession.schedule) draftSession.schedule = { scheduling: null, uncertain: readUncertainSchedules(userId) };
   const shared = draftSession.schedule;
   const notifyDrafts = () => draftSession.listeners.forEach((notify) => notify());
   const { scheduling } = shared;
   const setScheduling = (kind) => { shared.scheduling = kind; notifyDrafts(); };
-  // The draft slot a cancelled email is being restored into, until its
-  // restore mark is durable: that draft can be neither edited nor sent yet.
-  const restoringSlot = shared.restoring;
-  const setRestoring = (slot) => { shared.restoring = slot; notifyDrafts(); };
-  const isRestoring = (replyId = null) => restoringSlot === slotOf(replyId);
   const uncertainSchedule = { current: shared.uncertain };
   // Returns false when the tab could not save it. A key that cannot survive
   // a reload cannot stop a second row, so the caller must not send.
@@ -156,7 +144,7 @@ export default function useEmailEditor(userId) {
   const slotOf = (replyId) => (replyId ? `reply:${replyId}` : "compose");
   // A schedule request for this draft slot has no definite answer: plain Send
   // could deliver a copy now while the queued one still sends later.
-  const scheduleUnconfirmed = (replyId = null) => Boolean(uncertainSchedule.current[slotOf(replyId)]) || restoringSlot === slotOf(replyId);
+  const scheduleUnconfirmed = (replyId = null) => Boolean(uncertainSchedule.current[slotOf(replyId)]);
   // Why plain Send waits: "may_have_sent", "taken_over", or another kind.
   const guardKind = (replyId = null) => uncertainSchedule.current[slotOf(replyId)]?.request;
   // The operator looked under Scheduled and in Gmail Sent: the email is in
@@ -167,17 +155,8 @@ export default function useEmailEditor(userId) {
     const slot = slotOf(replyId);
     const entry = uncertainSchedule.current[slot];
     if (scheduling || !entry) return;
-    // A guard with no key is the operator's call; stacked checks go one by one.
-    // An unclear restore mark is not: the server must confirm the email left
-    // the Scheduled list (POST /restored) before that check clears.
-    if (!entry.clientKey) {
-      if (entry.request === RESTORE_UNCONFIRMED.request && !(await confirmRestoreMark(entry.restoreRowId))) {
-        setSendFeedback((current) => ({ ...current, [replyId ? "reply" : "compose"]: { messageId: replyId, error: true, message: "Could not confirm the Scheduled list let go of this email. Try again in a moment." } }));
-        return;
-      }
-      rememberUncertain(slot, entry.also?.length ? { request: entry.also[0], clientKey: null, also: entry.also.slice(1), restoreRowId: entry.restoreRowId } : null);
-      return;
-    }
+    // A guard with no key is the operator's call.
+    if (!entry.clientKey) { rememberUncertain(slot, null); return; }
     const kind = replyId ? "reply" : "compose";
     const say = (message, error = false) => setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error, message } }));
     let row;
@@ -197,13 +176,6 @@ export default function useEmailEditor(userId) {
     rememberUncertain(slot, outcome.next);
     const kept = outcome.withdraw && !withdrawIfQueued(replyId, row);
     say(kept ? `${outcome.message} Your newer edits were not scheduled and are still in the draft.` : outcome.message, Boolean(outcome.next));
-  };
-  const confirmRestoreMark = async (rowId) => {
-    if (!rowId) return false;
-    try {
-      const response = await adminFetch(`/api/admin/email/scheduled/${encodeURIComponent(rowId)}/restored`, { method: "POST" });
-      return response.ok;
-    } catch { return false; }
   };
   // Removes a draft whose email the server already holds (queued or sent),
   // but only while it is still that email's text: newer edits stay. Returns
@@ -467,57 +439,19 @@ export default function useEmailEditor(userId) {
   const scheduledDraftBlocked = (draft) => (draft.replyEmailId
     ? Boolean((draftSession.drafts.replies[draft.replyEmailId] || "").trim())
     : Object.values(draftSession.drafts.compose).some(Boolean));
-  // Returns false when blocked, { guardUnsaved } when the tab could not save
-  // the Sent-check guard, else { saved }: whether the tab stored the draft,
-  // so a reload would still find it.
+  // Returns false when blocked, { opened: false } when the tab could not
+  // save the Sent-check guard (the draft does not open), else
+  // { opened: true, saved }: `saved` is the draft write's own result.
   const restoreScheduledDraft = (draft) => {
     if (scheduledDraftBlocked(draft)) return false;
     // Gmail may already have this email: plain Send waits for the same
     // Sent-folder check as an unconfirmed schedule request. A guard that
-    // cannot survive a reload is no guard, so the draft does not come back.
-    // A draft taken over from another tab waits the same way for the
-    // operator's check of that tab.
-    // Both can apply; they stack, and each check is asked in turn.
-    const kinds = [draft.mayHaveSent && MAY_HAVE_SENT.request, draft.takenOver && TAKEN_OVER.request].filter(Boolean);
-    const guard = kinds.length ? { request: kinds[0], clientKey: null, also: kinds.slice(1) } : null;
-    if (guard && !rememberUncertain(slotOf(draft.replyEmailId), guard)) return { guardUnsaved: true };
-    // `saved` is this write's own result: a refused or unsaved write is not
-    // durable, and the caller then closes the draft again. The slot stays
-    // frozen (finishRestore) until the caller has made the restore mark
-    // durable; a new email's composer opens only then.
-    setRestoring(slotOf(draft.replyEmailId));
-    if (draft.replyEmailId) return { saved: setReplyDraft(draft.replyEmailId, draft.draftText)?.saved === true };
+    // cannot survive a reload is no guard, so the draft does not open.
+    if (draft.mayHaveSent && !rememberUncertain(slotOf(draft.replyEmailId), MAY_HAVE_SENT)) return { opened: false };
+    if (draft.replyEmailId) return { opened: true, saved: setReplyDraft(draft.replyEmailId, draft.draftText)?.saved === true };
     const written = setComposeForm(() => ({ to: draft.to, subject: draft.subject === "(no subject)" ? "" : draft.subject, body: draft.draftText }));
-    return { saved: written?.saved === true };
-  };
-  // Ends the freeze. "durable" opens the draft for work; "not_durable" takes
-  // it back out (it was not editable, so it is unchanged, and the row still
-  // offers it); "unknown" keeps it, with plain Send waiting for the
-  // operator's check that the Scheduled list does not offer it again.
-  const finishRestore = (draft, mark) => {
-    setRestoring(null);
-    if (mark === "not_durable") { withdrawScheduledDraft(draft); return; }
-    if (mark === "unknown") {
-      // Stacks on a guard already there (may have sent, taken over): each
-      // check is asked in turn, none is dropped.
-      const slot = slotOf(draft.replyEmailId);
-      const existing = uncertainSchedule.current[slot];
-      const next = { ...(existing ? { ...existing, also: [...(existing.also || []), RESTORE_UNCONFIRMED.request] } : RESTORE_UNCONFIRMED), restoreRowId: draft.id };
-      if (!rememberUncertain(slot, next)) { uncertainSchedule.current[slot] = next; notifyDrafts(); }
-    }
-    if (!draft.replyEmailId) setShowCompose(true);
-  };
-
-  // Takes a just-restored draft back out of the composer (its restore could
-  // not be made durable). Only text that is still exactly the restored text.
-  const withdrawScheduledDraft = (draft) => {
-    if (draft.replyEmailId) {
-      if (draftSession.drafts.replies[draft.replyEmailId] === draft.draftText) setReplyDraft(draft.replyEmailId, "");
-      return;
-    }
-    if (draftSession.drafts.compose.body !== draft.draftText) return;
-    setComposeForm(() => ({ to: "", subject: "", body: "" }));
-    setShowCompose(false);
+    setShowCompose(true);
+    return { opened: true, saved: written?.saved === true };
   };
 
   const reconcileSend = (key, outcome) => {
@@ -596,9 +530,6 @@ export default function useEmailEditor(userId) {
     handleComposeSchedule,
     handleReplySchedule,
     restoreScheduledDraft,
-    finishRestore,
-    isRestoring,
-    withdrawScheduledDraft,
     scheduledDraftBlocked,
   };
 }
