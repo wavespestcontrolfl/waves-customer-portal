@@ -823,6 +823,16 @@ describe('pre-send exits report explicit legs', () => {
     expect(seqRow().touch_claimed_at).toBeNull();
   });
 
+  test('a card with only the text, while policy denies Email: the email leg is "not_approved", never "collections_policy_denied"', async () => {
+    RailGuard.collectionsChannelPermitted.mockImplementation(async ({ detail, channel }) => {
+      const allowed = channel !== 'email';
+      return detail ? { allowed, durable: false } : allowed;
+    });
+    const result = await sendNow({ approved: { ...APPROVED, channels: { sms: true, email: false }, emailContentHash: null }, report: true });
+    expect(result.report.legs).toEqual({ sms: { state: 'sent' }, email: { state: 'skipped', reason: 'not_approved' } });
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
   test('a durable denial (suppression, standing) is skipped on both legs', async () => {
     denyAll(true);
     const result = await sendNow({ approved: APPROVED, report: true });

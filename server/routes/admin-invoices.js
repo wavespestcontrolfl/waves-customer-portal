@@ -1896,9 +1896,12 @@ async function invoiceSendHandler(req, res, next) {
 
 // The bar's schedule-send, on the locked invoice row: runs `update` only while the debt verifiably is still the customer's
 // (null verdict). A payer, or an answer that cannot be verified, schedules nothing ([] = the handler's PREVIEW_CHANGED).
+// An invoice parked under the stale-claim review hold (delivery unverified, shown as "Needs review") schedules nothing either
+// (null): a schedule would clear the hold's evidence, so only the Invoices page's own Resend is the way off it.
 async function scheduleIfCustomerOwned(invoiceId, update) {
   return db.transaction(async (trx) => {
     const locked = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+    if (isStaleClaimReviewHold(locked)) return null;
     if (!locked || await require('../services/invoice-payer-ownership').invoicePayerOwnership(locked, trx) !== null) return [];
     return update(trx);
   });
@@ -1960,7 +1963,11 @@ const invoiceScheduleSendHandler = async (req, res, next) => {
       .returning('*');
     // The bar's schedule also re-asks, on the LOCKED invoice row, who owes the invoice right now (the live Bill-To resolver: a
     // payer assigned through the customer default or the scheduled service leaves every invoice column below untouched).
-    const [invoice] = req.ibApprovedSchedule ? await scheduleIfCustomerOwned(req.params.id, scheduleUpdate) : await scheduleUpdate(db);
+    const updated = req.ibApprovedSchedule ? await scheduleIfCustomerOwned(req.params.id, scheduleUpdate) : await scheduleUpdate(db);
+    if (updated === null) {
+      return res.status(409).json({ error: 'This invoice is parked for review (its earlier send could not be verified), so nothing was scheduled. Review it on the Invoices page.', code: 'PREVIEW_CHANGED' });
+    }
+    const [invoice] = updated;
     if (!invoice) {
       if (req.ibApprovedSchedule) return res.status(409).json({ error: 'The invoice changed after the card was shown, so nothing was scheduled.', code: 'PREVIEW_CHANGED' });
       return res.status(404).json({ error: 'Not found' });
@@ -3540,6 +3547,7 @@ const paymentPlanCreateHandler = async (req, res, next) => {
         paymentPlanId: paymentPlan.id,
         paymentMethodId,
         plan: paymentPlan,
+        invoiceId: invoice.id,
         // The bar's card: the recipient it showed (or none). A different live recipient is sent nothing. The page passes none.
         ...(req.ibApprovedPlan ? { expectedRecipientDigest: req.ibApprovedPlan.emailRecipientDigest } : {}),
         idempotencyKey: `payment.plan_confirmed:${paymentPlan.id}:${planCustomerId}`,

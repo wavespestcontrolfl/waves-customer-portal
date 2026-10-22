@@ -199,6 +199,35 @@ async function logPaymentLifecycleEmailAttempt({
 const HOLD_GATED_TEMPLATES = require('./collections/collection-hold').HOLD_GATED_EMAIL_TEMPLATES;
 const CUSTOMER_INITIATED_EMAIL_CATEGORY = require('./collections/collection-hold').CUSTOMER_INITIATED_EMAIL_CATEGORY;
 
+// True only when the invoice is verifiably the homeowner's right now: no stamped payer, not withdrawn from the customer, and the
+// live resolver names no payer (invoice-payer-ownership). Unreadable or unverifiable reads as NOT self-pay (fail closed).
+async function invoiceSelfPayNow(invoiceId) {
+  try {
+    const invoice = await db('invoices').where({ id: invoiceId }).first();
+    if (!invoice || invoice.payer_id || require('./invoice-helpers').invoiceWithdrawnFromCustomer(invoice)) return false;
+    return await require('./invoice-payer-ownership').invoicePayerOwnership(invoice) === null;
+  } catch (err) {
+    logger.warn(`[payment-lifecycle-email] payer ownership re-check failed for invoice ${invoiceId}: ${err.message}; not sending`);
+    return false;
+  }
+}
+
+// No billing-delivery ownership to hold, but a hold-gated notice still needs the final SendGrid boundary check, and an invoice
+// that is not verifiably the homeowner's sends nothing (onPayerOwned tells the caller why the request never ran).
+function boundaryHandoff({ holdBoundaryCheck, payerOwnershipInvoiceId, onPayerOwned }) {
+  if (!holdBoundaryCheck && !payerOwnershipInvoiceId) return {};
+  return {
+    withProviderHandoff: async (dispatch) => {
+      if (payerOwnershipInvoiceId && !(await invoiceSelfPayNow(payerOwnershipInvoiceId))) {
+        onPayerOwned();
+        return { ok: false };
+      }
+      await dispatch(undefined, holdBoundaryCheck || undefined);
+      return { ok: true };
+    },
+  };
+}
+
 async function sendLifecycleTemplate({
   customerId,
   templateKey,
@@ -221,6 +250,9 @@ async function sendLifecycleTemplate({
   // The Intelligence Bar's plan card only: the digest of the recipient it showed (utils/approval-digest.js; the digest of null =
   // it said no email goes out). A different live recipient sends nothing. Undefined = every other caller.
   expectedRecipientDigest = undefined,
+  // An invoice whose live ownership is re-judged at the provider handoff: a Bill-To assigned through the customer default or the
+  // scheduled service leaves invoices.payer_id null, so a payer-owned (or unverifiable) invoice sends nothing.
+  payerOwnershipInvoiceId,
 }) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found',
@@ -303,6 +335,7 @@ async function sendLifecycleTemplate({
   // as the coded retryable COLLECTION_HOLD_DEFER (never a bare not-sent, which the retry
   // obligation would turn into a terminal block).
   let handoffHold = null;
+  let handoffPayerOwned = false;
   // The FINAL hold check (round-11 P1), handed to SendGrid as sendOne's providerBoundaryCheck: it
   // runs after every await above and after the provider's own request preparation, immediately
   // before the fetch, so a dispute committed after the up-front read still stops the notice. A
@@ -377,14 +410,7 @@ async function sendLifecycleTemplate({
             throw err;
           }
         },
-      } : holdBoundaryCheck ? {
-        // No billing-delivery ownership to hold, but the hold-gated notice still needs the
-        // final SendGrid boundary check.
-        withProviderHandoff: async (dispatch) => {
-          await dispatch(undefined, holdBoundaryCheck);
-          return { ok: true };
-        },
-      } : {}),
+      } : boundaryHandoff({ holdBoundaryCheck, payerOwnershipInvoiceId, onPayerOwned: () => { handoffPayerOwned = true; } })),
     });
 
     if (result.deduped) {
@@ -397,6 +423,13 @@ async function sendLifecycleTemplate({
       };
     }
 
+    if (handoffPayerOwned) {
+      await logPaymentLifecycleEmailAttempt({
+        customerId: customer.id, invoiceId: payerOwnershipInvoiceId, paymentId, paymentMethodId, refundId, paymentPlanId, templateKey, eventType,
+        status: 'skipped', failureReason: 'payer_billed',
+      });
+      return { ok: false, skipped: true, reason: 'payer_billed' };
+    }
     if (!result.sent && handoffHold) {
       await logPaymentLifecycleEmailAttempt({
         customerId: customer.id, invoiceId, paymentId, paymentMethodId, refundId, paymentPlanId, templateKey, eventType,
@@ -1081,6 +1114,7 @@ async function sendPaymentPlanConfirmed({
     payload,
     paymentMethodId,
     paymentPlanId: paymentPlanId || null,
+    ...(planInvoiceId ? { payerOwnershipInvoiceId: planInvoiceId } : {}),
     ...(expectedRecipientDigest !== undefined ? { expectedRecipientDigest } : {}),
     idempotencyKey: idempotencyKey || `payment.plan_confirmed:${paymentPlanId || 'manual'}:${customerId}`,
   });

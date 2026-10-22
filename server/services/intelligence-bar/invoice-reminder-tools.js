@@ -31,6 +31,7 @@
 const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
+const { isStaleClaimReviewHold } = require('../invoice-helpers');
 const { UUID_RE } = require('./task-context');
 const { maskPhone, maskEmail } = require('./closeout-repair-tools');
 const { approvalDigest, phoneKey, emailKey } = require('../../utils/approval-digest');
@@ -177,10 +178,14 @@ const seqVersion = (seq) => (seq ? {
   in_flight: Boolean(seq.touch_claimed_at),
 } : null);
 
+// The pause reason the Bill-To withdrawal writes (visit-completion-packets): only this system sentinel is a payer hold, never
+// an operator's free-form reason that happens to say "payer".
+const PAYER_PAUSE_REASON = 'payer_billed';
+
 // A reminder the bar may not resume: held for a payer (Bill-To withdrawal pauses it with the payer's debt, and a resume would
 // clear that hold), or an invoice that is not the customer's own.
 async function resumeOwnerRefusal(invoice, seq) {
-  if (/payer/i.test(String(seq.paused_reason || ''))) {
+  if (seq.paused_reason === PAYER_PAUSE_REASON) {
     return toPage('These reminders are held because the invoice is billed to a payer.', 'payer_owned', invoice.id);
   }
   return ownerRefusal(invoice);
@@ -244,9 +249,19 @@ function stopEffects({ invoice }) {
   return effects;
 }
 
-function resumeEffects({ invoice, seq, stepLabel }) {
+// Where a resume would leave the reminders, judged as resumeSequence judges it: no step left = finished; the Auto Pay hold marker
+// with the customer still on Auto Pay = back to that hold (a read error keeps the hold); otherwise active. `next` is the
+// due time of the next step.
+async function resumeLanding(invoice, seq) {
   const FollowUps = require('../invoice-followups');
   const next = FollowUps.computeNextTouchAt(seq.anchor_at || invoice.sent_at || invoice.sms_sent_at || invoice.created_at, seq.step_index);
+  if (!next) return { next, state: 'completed' };
+  const held = seq.is_autopay_held && await FollowUps.resumeStillAutopayHeld(seq, invoice.id, db);
+  return { next, state: held ? 'autopay_hold' : 'active' };
+}
+
+function resumeEffects({ invoice, seq, stepLabel, landing }) {
+  const { next, state } = landing;
   const effects = [];
   if (!next) {
     effects.push({ kind: 'operational', text: `Every reminder step has already been used on invoice ${invoice.invoice_number}, so resuming marks its reminders finished.` });
@@ -256,7 +271,8 @@ function resumeEffects({ invoice, seq, stepLabel }) {
       effects.push({ kind: 'comms', text: 'That time has already passed, so the reminder can go out to the customer at the next reminder run (within minutes), not at a time you pick.' });
     }
   }
-  if (seq.is_autopay_held) effects.push({ kind: 'operational', text: 'These reminders carry an Auto Pay hold: if the customer is still on Auto Pay they return to that hold instead of becoming active.' });
+  if (state === 'autopay_hold') effects.push({ kind: 'operational', text: 'These reminders carry an Auto Pay hold and the customer is still on Auto Pay, so they return to that hold instead of becoming active.' });
+  else if (seq.is_autopay_held && state === 'active') effects.push({ kind: 'operational', text: 'These reminders carried an Auto Pay hold, but the customer is no longer on Auto Pay, so they become active.' });
   return effects;
 }
 
@@ -268,8 +284,9 @@ async function buildControlPlan(toolName, input) {
   if (loaded.error) return loaded;
   const { invoice, seq, steps } = loaded;
   const reason = spec.control === 'resume' ? null : cleanReason(input);
+  const landing = spec.control === 'resume' ? await resumeLanding(invoice, seq) : null;
   const effects = [
-    ...CONTROL_EFFECTS[spec.control]({ invoice, seq, stepLabel: steps[seq.step_index]?.label || null }),
+    ...CONTROL_EFFECTS[spec.control]({ invoice, seq, stepLabel: steps[seq.step_index]?.label || null, landing }),
     { kind: 'comms', text: spec.control === 'resume' ? 'Nothing is sent right now.' : 'Nothing is sent to the customer or anyone else.' },
   ];
   return {
@@ -282,6 +299,8 @@ async function buildControlPlan(toolName, input) {
     customer_name: await customerName(invoice.customer_id),
     status: invoice.status,
     reminder_status: seq.status,
+    // A resume only: the state the reminders land in (active, autopay_hold or completed), for the card's summary.
+    ...(landing ? { resumes_to: landing.state } : {}),
     reason,
     effects,
     sends_to_customer: false,
@@ -298,6 +317,7 @@ async function buildControlPlan(toolName, input) {
       payer_id: invoice.payer_id || null,
       payment_intent: invoice.stripe_payment_intent_id || null,
       reminder: seqVersion(seq),
+      ...(landing ? { resumes_to: landing.state } : {}),
       reason: reason || null,
     },
     note: 'PREVIEW ONLY — nothing was changed. Confirm applies exactly this; if anything changed it refuses.',
@@ -677,6 +697,11 @@ function parseSendAt(input, invoiceId) {
 }
 
 function scheduleStatusRefusal(invoice, status) {
+  // A send parked after a stale claim (the provider outcome is unknown): the Invoices page shows it as "Needs review". A new
+  // schedule would clear that evidence, so only the page's own Resend handles it.
+  if (isStaleClaimReviewHold(invoice)) {
+    return refusal(`Invoice ${invoice.invoice_number} is parked for review because an earlier send could not be verified, so it cannot be scheduled from the bar. Review it on the Invoices page.`, 'needs_review', { invoice_id: invoice.id });
+  }
   if (['draft', 'scheduled'].includes(status)) return null;
   return refusal(`Invoice ${invoice.invoice_number} is ${status || 'not a draft'}; only a draft or an already-scheduled invoice can be scheduled.`, 'not_schedulable', { invoice_id: invoice.id });
 }

@@ -28,6 +28,7 @@ const SmsVariants = require('../services/sms-template-variants');
 const BillingEmailSender = require('../services/billing-email-sender');
 const EmailLibrary = require('../services/email-template-library');
 const PayerOwnership = require('../services/invoice-payer-ownership');
+const FollowUps = require('../services/invoice-followups');
 const tools = require('../services/intelligence-bar/invoice-reminder-tools');
 const { executeInvoiceReminderTool, INVOICE_REMINDER_TOOLS, cardLines } = tools;
 const registry = require('../services/intelligence-bar/action-registry');
@@ -238,6 +239,14 @@ describe('pause, resume and stop', () => {
     expect(Invoices.followupControlFromBar).not.toHaveBeenCalled();
   });
 
+  test('an operator’s free-form pause reason that says "payer" is not a payer hold: resume offers the card', async () => {
+    state.invoice_followup_sequences[0].status = 'paused';
+    for (const reason of ['waiting on the payer to call back', 'Payer asked us to wait', 'payer_billed_note']) {
+      state.invoice_followup_sequences[0].paused_reason = reason;
+      expect(await call('resume_invoice_reminders')).toMatchObject({ preview: true, control: 'resume' });
+    }
+  });
+
   test('stop is marked irreversible on its card; pause is not', async () => {
     const stop = await call('stop_invoice_reminders');
     expect(buildContract({ toolName: 'stop_invoice_reminders', params: { invoice_id: INV }, displayParams: {}, preview: stop, summary: 'x' }).irreversible).toBe(true);
@@ -256,6 +265,50 @@ describe('pause, resume and stop', () => {
     expect(result).toMatchObject({ success: true, reminder_status: 'autopay_hold', held_for_autopay: true });
     expect(result.note).toMatch(/still held for Auto Pay, not active/);
     expect(result.note).not.toMatch(/active again/);
+  });
+
+  describe('the resume card’s summary says where the reminders land (as resumeSequence() decides)', () => {
+    const { confirmationDisplayParams } = require('../routes/admin-intelligence-bar');
+    const summary = (card) => confirmationDisplayParams('resume_invoice_reminders', { invoice_id: INV }, card).reminders;
+    afterEach(() => { jest.restoreAllMocks(); });
+    beforeEach(() => {
+      state.invoice_followup_sequences[0].status = 'paused';
+      state.invoice_followup_sequences[0].anchor_at = new Date('2099-06-01T12:00:00Z');
+    });
+
+    test('a hold marker with the customer still on Auto Pay: "paused -> held for Auto Pay", and the Confirm pin carries it', async () => {
+      state.invoice_followup_sequences[0].is_autopay_held = true;
+      const held = jest.spyOn(FollowUps, 'resumeStillAutopayHeld').mockResolvedValue(true);
+      const card = await call('resume_invoice_reminders');
+      expect(card.resumes_to).toBe('autopay_hold');
+      expect(summary(card)).toBe('paused -> held for Auto Pay');
+      expect(effectText(card)).toMatch(/customer is still on Auto Pay, so they return to that hold instead of becoming active/);
+      // Auto Pay ended between the card and Confirm: the card is stale, nothing is changed.
+      held.mockResolvedValue(false);
+      expect(await confirm('resume_invoice_reminders', card)).toMatchObject({ preview_changed: true });
+      expect(Invoices.followupControlFromBar).not.toHaveBeenCalled();
+    });
+
+    test('a stale hold marker (the customer left Auto Pay): "paused -> active"', async () => {
+      state.invoice_followup_sequences[0].is_autopay_held = true;
+      jest.spyOn(FollowUps, 'resumeStillAutopayHeld').mockResolvedValue(false);
+      const card = await call('resume_invoice_reminders');
+      expect(card.resumes_to).toBe('active');
+      expect(summary(card)).toBe('paused -> active');
+      expect(effectText(card)).toMatch(/no longer on Auto Pay, so they become active/);
+    });
+
+    test('no hold marker: "paused -> active" and Auto Pay is never asked', async () => {
+      const held = jest.spyOn(FollowUps, 'resumeStillAutopayHeld');
+      const card = await call('resume_invoice_reminders');
+      expect(summary(card)).toBe('paused -> active');
+      expect(held).not.toHaveBeenCalled();
+    });
+
+    test('every step already used: "paused -> finished"', async () => {
+      state.invoice_followup_sequences[0].step_index = 99;
+      expect(summary(await call('resume_invoice_reminders'))).toBe('paused -> finished');
+    });
   });
 
   test('resume on a future-due reminder does not promise an early send', async () => {
@@ -668,6 +721,19 @@ describe('schedule_invoice_send', () => {
   ])('refused: %s', async (_label, mutate, input, code) => {
     mutate();
     expect(await call('schedule_invoice_send', input)).toMatchObject({ code });
+    expect(Invoices.scheduleSendFromBar).not.toHaveBeenCalled();
+  });
+
+  test('a send parked after a stale claim (scheduled, no time, delivery unverified) is refused at preview and at Confirm', async () => {
+    const { STALE_SEND_PARK_ERROR } = require('../services/invoice-helpers');
+    const card = await call('schedule_invoice_send', { send_at_et: FUTURE });
+    expect(card).toMatchObject({ preview: true });
+    Object.assign(state.invoices[0], { status: 'scheduled', scheduled_send_at: null, scheduled_send_error: STALE_SEND_PARK_ERROR });
+    const refused = await call('schedule_invoice_send', { send_at_et: FUTURE });
+    expect(refused).toMatchObject({ code: 'needs_review' });
+    expect(refused.error).toMatch(/Invoices page/);
+    // The card was built before the park: Confirm re-reads the invoice and refuses it too.
+    expect(await confirm('schedule_invoice_send', card, { send_at_et: FUTURE })).toMatchObject({ code: 'needs_review' });
     expect(Invoices.scheduleSendFromBar).not.toHaveBeenCalled();
   });
 

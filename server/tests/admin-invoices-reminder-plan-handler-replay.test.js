@@ -259,6 +259,19 @@ describe('schedule-send: the bar adds the card’s edit time as one more predica
     expect(Ownership.invoicePayerOwnership).toHaveBeenCalledTimes(2);
   });
 
+  test('the bar’s schedule is refused on the locked row when a stale-claim review hold parked the invoice (the hold’s evidence is kept)', async () => {
+    const { STALE_SEND_PARK_ERROR } = require('../services/invoice-helpers');
+    lockQb = recorder({ first: async () => ({ id: INV, customer_id: 'cust-1', payer_id: null, status: 'scheduled', scheduled_send_at: null, scheduled_send_error: STALE_SEND_PARK_ERROR }) });
+    const trx = jest.fn(() => (trx.mock.calls.length === 1 ? lockQb : updateQb));
+    trx.isTransaction = true;
+    db.transaction.mockImplementation(async (cb) => cb(trx));
+    const bar = await router.scheduleSendFromBar({ invoiceId: INV, body: { scheduledFor: FUTURE }, actor: BAR_ACTOR, approvedSchedule: { updatedAtMs: UPDATED_MS } });
+    expect(bar.status).toBe(409);
+    expect(bar.json).toMatchObject({ code: 'PREVIEW_CHANGED' });
+    expect(bar.json.error).toMatch(/Invoices page/);
+    expect(called(updateQb, 'update')).toEqual([]);
+  });
+
   test('the handler’s own time checks reach the bar unchanged', async () => {
     const past = await router.scheduleSendFromBar({ invoiceId: INV, body: { scheduledFor: '2020-01-15T09:30' }, actor: BAR_ACTOR, approvedSchedule: { updatedAtMs: UPDATED_MS } });
     expect(past).toEqual({ status: 400, json: { error: 'scheduledFor must be in the future' } });

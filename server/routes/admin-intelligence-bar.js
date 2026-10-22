@@ -853,6 +853,10 @@ function deleteDuplicatePins(livePreview) {
   return pins;
 }
 
+// Where a resumed reminder sequence lands (resume_invoice_reminders' preview.resumes_to), in the card summary's words. Held for
+// Auto Pay and finished are not "active": the card must not promise reminders that resumeSequence() will not start.
+const RESUME_LANDING_WORDS = { active: 'active', autopay_hold: 'held for Auto Pay', completed: 'finished' };
+
 const PINNED_DISPLAY_BUILDERS = {
   delete_duplicate_customer: (params, preview) => (preview?.preview === true && preview.card ? preview.card : null),
   trigger_review_request: pinnedRecipientDisplay,
@@ -955,7 +959,7 @@ const PINNED_DISPLAY_BUILDERS = {
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, reminders: `${preview.reminder_status} -> paused`, sends_to_customer: 'nothing' }
     : null),
   resume_invoice_reminders: (params, preview) => (preview?.preview === true && preview.tool === 'resume_invoice_reminders'
-    ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, reminders: `${preview.reminder_status} -> active`, sends_to_customer: 'nothing now' }
+    ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, reminders: `${preview.reminder_status} -> ${RESUME_LANDING_WORDS[preview.resumes_to] || 'active'}`, sends_to_customer: 'nothing now' }
     : null),
   stop_invoice_reminders: (params, preview) => (preview?.preview === true && preview.tool === 'stop_invoice_reminders'
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, reminders: `${preview.reminder_status} -> stopped`, sends_to_customer: 'nothing' }
