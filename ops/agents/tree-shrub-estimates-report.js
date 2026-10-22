@@ -21,7 +21,8 @@
  *
  * Where the inputs come from (three stored payload shapes, mirrored from
  * server/services/estimate-actuals.js#extractTreeShrubEstimate):
- *   1. estimate_data.engineResult.lineItems[service=tree_shrub] — the raw engine
+ *   1. estimate_data.engineResult.lineItems[service=tree_shrub|commercial_tree_shrub]
+ *      — the raw engine
  *      line (bedAreaUsed, bedAreaSource, treeCount, treeCountSource, monthly,
  *      manualReviewReasons). Trusted only when it AGREES with the mapped
  *      envelope (a revision can leave a stale raw line behind).
@@ -99,6 +100,14 @@ function outcomeOf(row) {
   return 'pending';
 }
 
+// Both T&S lines the open-parcel basis repriced: the residential program and
+// the commercial ornamental program (its lot-inferred bed moved too, so the
+// audit must count that cohort; Codex #6398 r14). Admin V2 keeps the
+// commercial line only as a mapped recurring row (no tsMeta).
+const TREE_SHRUB_SERVICES = new Set(['tree_shrub', 'commercial_tree_shrub']);
+const isTreeShrubLine = (li) => !!li && TREE_SHRUB_SERVICES.has(li.service);
+const findTreeShrubLine = (rows) => (Array.isArray(rows) ? rows.find(isTreeShrubLine) : null) || null;
+
 // The MAPPED envelope's T&S facts (Admin V2 persists only this envelope):
 // tsMeta, the selected tier row, the recurring row's review flags.
 function mappedContext(estimateData) {
@@ -107,22 +116,31 @@ function mappedContext(estimateData) {
   const mappedSelected = Array.isArray(tierRows) ? tierRows.find((r) => r?.selected) : null;
   // Review flags ride result.recurring.services (mapV1ToLegacyShape), so a
   // parked quote counts as flagged even with no raw line (Codex #6398 r4).
-  const services = estimateData.result?.recurring?.services;
-  const mappedService = Array.isArray(services) ? services.find((s) => s?.service === 'tree_shrub') : null;
+  const mappedService = findTreeShrubLine(estimateData.result?.recurring?.services);
+  const mappedLine = findTreeShrubLine(estimateData.result?.lineItems);
+  const meta = tsMeta && typeof tsMeta === 'object' ? tsMeta : null;
   return {
-    tsMeta: tsMeta && typeof tsMeta === 'object' ? tsMeta : null,
+    service: mappedService?.service || mappedLine?.service || (meta ? 'tree_shrub' : null),
+    mappedService,
+    tsMeta: meta,
     mappedSelected,
     mappedMonthly: positive(mappedSelected?.mo),
     mappedReasons: mappedService && Array.isArray(mappedService.manualReviewReasons) ? mappedService.manualReviewReasons : null,
-    mappedLine: Array.isArray(estimateData.result?.lineItems)
-      ? estimateData.result.lineItems.find((li) => li?.service === 'tree_shrub') : null,
+    mappedLine,
   };
 }
 
 // A retained raw engine line is trustworthy only while it agrees with the
 // mapped envelope on the inputs (bed, trees, inferred-or-not); a revision
 // that changed them left the raw line stale.
-function rawAgreesWithMapped(raw, tsMeta) {
+function rawAgreesWithMapped(raw, ctx) {
+  const { tsMeta, mappedService } = ctx;
+  // A commercial raw line has no tsMeta; it agrees while the mapped
+  // commercial row (if any) carries the same price.
+  if (raw.service === 'commercial_tree_shrub') {
+    return !mappedService || mappedService.service !== 'commercial_tree_shrub'
+      || (positive(mappedService.monthly ?? mappedService.mo) ?? null) === (positive(raw.monthly) ?? null);
+  }
   if (!tsMeta) return true;
   if ((positive(raw.bedAreaUsed ?? raw.bedArea) ?? null) !== (positive(tsMeta.eb) ?? null)) return false;
   if ((count(raw.treeCount) ?? null) !== (count(tsMeta.et) ?? null)) return false;
@@ -154,6 +172,7 @@ function rawShape(raw, ctx) {
   if (!bedSource && !bedSqFt && !positive(raw.monthly)) return null;
   return {
     shape: 'raw',
+    service: raw.service,
     bedSqFt,
     bedSource: bedSource || 'unknown',
     treeCount: count(raw.treeCount),
@@ -171,6 +190,7 @@ function mappedShape(ctx) {
     ? (tsMeta.bedAreaIsEstimated ? 'inferred' : 'measured') : 'unknown';
   return {
     shape: 'mapped',
+    service: 'tree_shrub',
     bedSqFt: positive(tsMeta.eb),
     bedSource,
     treeCount: count(tsMeta.et),
@@ -190,8 +210,9 @@ function compactShape(line, ctx) {
   if (!line) return null;
   return {
     shape: 'compact',
+    service: TREE_SHRUB_SERVICES.has(line.service) ? line.service : (ctx.service || 'tree_shrub'),
     bedSqFt: null, bedSource: 'unknown', treeCount: null, treeSource: 'unknown', palmCount: null,
-    tier: enumOf(line.tier), monthly: positive(line.monthly),
+    tier: enumOf(line.tier), monthly: positive(line.monthly ?? line.mo),
     reviewReasons: ctx.mappedReasons || [],
     marginTarget: num(line.pricingKnobs?.marginTarget),
     lotBedBasis: enumOf(line.pricingKnobs?.lotBedBasis),
@@ -218,9 +239,11 @@ function extractTreeShrub(estimateData) {
   const ctx = mappedContext(estimateData);
   if (mappedEnvelopeWithoutTreeShrub(estimateData, ctx)) return null;
   const raw = Array.isArray(estimateData.engineResult?.lineItems)
-    ? estimateData.engineResult.lineItems.find((li) => li?.service === 'tree_shrub') : null;
-  const fromRaw = raw && rawAgreesWithMapped(raw, ctx.tsMeta) ? rawShape(raw, ctx) : null;
-  return fromRaw || mappedShape(ctx) || compactShape(ctx.mappedLine || raw, ctx);
+    ? estimateData.engineResult.lineItems.find(isTreeShrubLine) : null;
+  const fromRaw = raw && rawAgreesWithMapped(raw, ctx) ? rawShape(raw, ctx) : null;
+  // A commercial line Admin V2 kept only as a mapped recurring row reports
+  // price and review flags (compact) — it carries no bed/tree inputs.
+  return fromRaw || mappedShape(ctx) || compactShape(ctx.mappedLine || ctx.mappedService || raw, ctx);
 }
 
 // Which pricing regime a stored quote carries — read from the STORED result,
@@ -261,8 +284,10 @@ function summarize(rows) {
   }
   const treeSources = {};
   for (const r of rows) treeSources[r.treeSource] = (treeSources[r.treeSource] || 0) + 1;
+  const byService = {};
+  for (const r of rows) byService[r.service || 'tree_shrub'] = (byService[r.service || 'tree_shrub'] || 0) + 1;
   const regimes = { before: rows.filter((r) => r.regime === 'before_2026_10_21').length, after: rows.filter((r) => r.regime === 'after_2026_10_21').length };
-  return { bySource, treeSources, regimes, total: rows.length };
+  return { bySource, treeSources, byService, regimes, total: rows.length };
 }
 
 function printReport(args, rows, excluded, windowStart) {
@@ -278,11 +303,12 @@ function printReport(args, rows, excluded, windowStart) {
   }
   console.log('');
   console.log('Tree count source: ' + Object.entries(s.treeSources).map(([k, v]) => `${k} ${v}`).join(', '));
+  console.log('Program: ' + Object.entries(s.byService).map(([k, v]) => `${k} ${v}`).join(', '));
   if (args.rows) {
     console.log('');
-    console.log('id        created     status        outcome            bed sqft  bed source   trees  tree source       $/mo    tier      regime               review');
+    console.log('id        created     status        outcome            prog  bed sqft  bed source   trees  tree source       $/mo    tier      regime               review');
     for (const r of rows) {
-      console.log(`${r.id.slice(0, 8)}  ${r.createdAt.slice(0, 10)}  ${r.status.padEnd(12)}  ${r.outcome.padEnd(17)}  ${(r.bedSqFt === null ? '—' : String(r.bedSqFt)).padStart(8)}  ${r.bedSource.padEnd(11)}  ${(r.treeCount === null ? '—' : String(r.treeCount)).padStart(5)}  ${r.treeSource.padEnd(16)}  ${(r.monthly === null ? '—' : r.monthly.toFixed(2)).padStart(6)}  ${(r.tier || '—').padEnd(8)}  ${r.regime.padEnd(19)}  ${r.reviewReasons.join(',')}`);
+      console.log(`${r.id.slice(0, 8)}  ${r.createdAt.slice(0, 10)}  ${r.status.padEnd(12)}  ${r.outcome.padEnd(17)}  ${(r.service === 'commercial_tree_shrub' ? 'comm' : 'res ')}  ${(r.bedSqFt === null ? '—' : String(r.bedSqFt)).padStart(8)}  ${r.bedSource.padEnd(11)}  ${(r.treeCount === null ? '—' : String(r.treeCount)).padStart(5)}  ${r.treeSource.padEnd(16)}  ${(r.monthly === null ? '—' : r.monthly.toFixed(2)).padStart(6)}  ${(r.tier || '—').padEnd(8)}  ${r.regime.padEnd(19)}  ${r.reviewReasons.join(',')}`);
     }
   }
 }

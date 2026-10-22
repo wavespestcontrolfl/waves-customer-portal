@@ -83,6 +83,25 @@ describe('tree-shrub-estimates-report extraction', () => {
     expect(extractTreeShrub({ ...raw, result: {} })).toMatchObject({ shape: 'raw', bedSqFt: 1800 });
   });
 
+  test('commercial Tree & Shrub lines are part of the audit — raw, mapped recurring row, or both (Codex #6398 r14)', () => {
+    const raw = { engineResult: { lineItems: [{ service: 'commercial_tree_shrub', bedArea: 4680, bedAreaSource: 'lot_based', treeCount: 4, monthly: 112.5, manualReviewReasons: [], pricingKnobs: { lotBedBasis: 'open_parcel' } }] } };
+    expect(extractTreeShrub(raw)).toMatchObject({ shape: 'raw', service: 'commercial_tree_shrub', bedSqFt: 4680, bedSource: 'lot_based', treeCount: 4, monthly: 112.5, lotBedBasis: 'open_parcel' });
+    // Admin V2 keeps only the mapped recurring row: price + review flags.
+    const mappedOnly = { result: { recurring: { services: [{ service: 'commercial_tree_shrub', mo: 112.5, monthly: 112.5, manualReviewReasons: ['open_parcel_basis_footprint_over_half_lot'], pricingKnobs: { lotBedBasis: 'open_parcel' } }] } } };
+    expect(extractTreeShrub(mappedOnly)).toMatchObject({ shape: 'compact', service: 'commercial_tree_shrub', monthly: 112.5, bedSqFt: null, reviewReasons: ['open_parcel_basis_footprint_over_half_lot'], lotBedBasis: 'open_parcel' });
+    expect(regimeOf(extractTreeShrub(mappedOnly))).toBe('after_2026_10_21');
+    // Raw agrees with the mapped row on price → raw inputs, mapped flags.
+    expect(extractTreeShrub({ ...raw, ...mappedOnly })).toMatchObject({ shape: 'raw', service: 'commercial_tree_shrub', bedSqFt: 4680, reviewReasons: ['open_parcel_basis_footprint_over_half_lot'] });
+    // A repriced mapped row (different price) makes the raw line stale.
+    const repriced = { result: { recurring: { services: [{ service: 'commercial_tree_shrub', mo: 98, monthly: 98, manualReviewReasons: [] }] } } };
+    expect(extractTreeShrub({ ...raw, ...repriced })).toMatchObject({ shape: 'compact', service: 'commercial_tree_shrub', monthly: 98 });
+    // The residential shapes still report service 'tree_shrub' and the roll-up counts both programs.
+    const residential = extractTreeShrub({ engineResult: { lineItems: [{ service: 'tree_shrub', bedAreaUsed: 2400, bedAreaSource: 'lot_based', treeCount: 4, monthly: 58.1 }] } });
+    expect(residential.service).toBe('tree_shrub');
+    const base = { outcome: 'pending', regime: 'after_2026_10_21', reviewReasons: [], treeSource: 'unknown' };
+    expect(summarize([{ ...base, ...residential }, { ...base, ...extractTreeShrub(raw) }]).byService).toEqual({ tree_shrub: 1, commercial_tree_shrub: 1 });
+  });
+
   test('a compact quote-wizard line reports price only, never a fabricated zero', () => {
     const data = { result: { lineItems: [{ service: 'tree_shrub', monthly: 35, tier: 'standard' }] } };
     expect(extractTreeShrub(data)).toMatchObject({ shape: 'compact', bedSqFt: null, bedSource: 'unknown', treeCount: null, monthly: 35 });

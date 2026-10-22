@@ -47,41 +47,57 @@ const NEUTRAL_TREE_SHRUB_KNOBS = {
   treeDensityCounts: { none: 0, light: 3, moderate: 6, heavy: 10 },
 };
 
-function treeShrubKnobSignalForReplay(estData = {}) {
-  const result = estData?.result && typeof estData.result === 'object' ? estData.result : (estData || {});
-  const lineItems = [
-    ...(Array.isArray(result?.lineItems) ? result.lineItems : []),
+// The stored T&S evidence a replay can read, in every shape an estimate
+// persists: raw engine lines (agent drafts, legacy saves), the Admin V2
+// mapped envelope (result.results.tsMeta / ts), and the mapped commercial
+// recurring row — the commercial ornamental line prices through the same
+// lot-based bed basis (calculatePropertyProfile), so it is a T&S line for
+// replay too; Admin V2 keeps it only as a mapped recurring row (Codex #6398 r6).
+const storedResultOf = (estData) => (estData?.result && typeof estData.result === 'object' ? estData.result : (estData || {}));
+const storedLineItemsOf = (estData) => {
+  const result = storedResultOf(estData);
+  return [
+    ...(Array.isArray(result.lineItems) ? result.lineItems : []),
     ...(Array.isArray(estData?.engineResult?.lineItems) ? estData.engineResult.lineItems : []),
   ];
-  // The commercial ornamental line prices through the same lot-based bed
-  // basis (calculatePropertyProfile), so it is a T&S line for replay too;
-  // Admin V2 keeps it only as a mapped recurring row (Codex #6398 r6).
-  const mappedRows = Array.isArray(result?.recurring?.services) ? result.recurring.services : [];
-  const mappedCommercial = mappedRows.find((row) => (row?.service || '') === 'commercial_tree_shrub') || null;
-  const tsLine = lineItems.find((li) => (li?.service || '') === 'tree_shrub')
-    || lineItems.find((li) => (li?.service || '') === 'commercial_tree_shrub')
+};
+const storedTsMetaOf = (estData) => {
+  const meta = storedResultOf(estData).results?.tsMeta;
+  return meta && typeof meta === 'object' ? meta : null;
+};
+const serviceIs = (name) => (li) => (li?.service || '') === name;
+function storedTreeShrubReplaySources(estData = {}) {
+  const result = storedResultOf(estData);
+  const lineItems = storedLineItemsOf(estData);
+  const mappedRows = Array.isArray(result.recurring?.services) ? result.recurring.services : [];
+  const mappedCommercial = mappedRows.find(serviceIs('commercial_tree_shrub')) || null;
+  const tsLine = lineItems.find(serviceIs('tree_shrub'))
+    || lineItems.find(serviceIs('commercial_tree_shrub'))
     || mappedCommercial;
   // Admin V2 persists ONLY the mapped legacy envelope (result.results.ts /
   // tsMeta) with no raw lineItems, so the mapped stamp is a first-class
   // source here — without it those quotes would replay off live knobs.
-  const tsMeta = (result?.results?.tsMeta && typeof result.results.tsMeta === 'object')
-    ? result.results.tsMeta
-    : (estData?.result?.results?.tsMeta || null);
-  const hasMappedTs = !!tsMeta || (Array.isArray(result?.results?.ts) && result.results.ts.length > 0);
-  if (!tsLine && !hasMappedTs) return null;
-  // The MAPPED stamp wins. A save/revision replaces estimateData.result with
-  // the freshly mapped server result but leaves an agent draft's original
-  // raw engineResult in place, so the raw line can be older than the
-  // authoritative columns the revision just wrote. Preferring it would
-  // replay superseded knob values and charge a total the stored result
-  // disagrees with.
-  // The mapped commercial row's stamp wins over a retained raw line the same
-  // way tsMeta does: a revision rewrites result.recurring but can leave an
-  // older engineResult line behind (Codex #6398 r7).
-  const stamped = (tsMeta && tsMeta.pricingKnobs)
-    || (mappedCommercial && mappedCommercial.pricingKnobs)
-    || (tsLine && tsLine.pricingKnobs);
-  if (!stamped || typeof stamped !== 'object') return { ...NEUTRAL_TREE_SHRUB_KNOBS };
+  const tsMeta = storedTsMetaOf(estData);
+  const hasMappedTs = !!tsMeta || (Array.isArray(result.results?.ts) && result.results.ts.length > 0);
+  return { tsLine, tsMeta, hasMappedTs, mappedCommercial };
+}
+
+// The stamped density table, or the pre-stamp 3/6/10 table when the stamp
+// has none or carries a malformed entry (never a partial table).
+function replayTreeDensityCounts(table) {
+  if (!table || typeof table !== 'object') return { ...NEUTRAL_TREE_SHRUB_KNOBS.treeDensityCounts };
+  const out = {};
+  for (const key of ['none', 'light', 'moderate', 'heavy']) {
+    const n = Number(table[key]);
+    if (!Number.isInteger(n) || n < 0) return { ...NEUTRAL_TREE_SHRUB_KNOBS.treeDensityCounts };
+    out[key] = n;
+  }
+  return out;
+}
+
+// Every knob a stamp carries replays verbatim; a key the stamp predates
+// replays the neutral value that quote could only have priced under.
+function knobsFromTreeShrubStamp(stamped) {
   const pick = (key) => {
     const n = Number(stamped[key]);
     return Number.isFinite(n) ? n : NEUTRAL_TREE_SHRUB_KNOBS[key];
@@ -101,18 +117,27 @@ function treeShrubKnobSignalForReplay(estData = {}) {
     marginTarget: pick('marginTarget'),
     // Pre-stamp lines priced the gross lot and the 3/6/10 table.
     lotBedBasis: stamped.lotBedBasis === 'open_parcel' ? 'open_parcel' : NEUTRAL_TREE_SHRUB_KNOBS.lotBedBasis,
-    treeDensityCounts: (() => {
-      const table = stamped.treeDensityCounts;
-      if (!table || typeof table !== 'object') return { ...NEUTRAL_TREE_SHRUB_KNOBS.treeDensityCounts };
-      const out = {};
-      for (const key of ['none', 'light', 'moderate', 'heavy']) {
-        const n = Number(table[key]);
-        if (!Number.isInteger(n) || n < 0) return { ...NEUTRAL_TREE_SHRUB_KNOBS.treeDensityCounts };
-        out[key] = n;
-      }
-      return out;
-    })(),
+    treeDensityCounts: replayTreeDensityCounts(stamped.treeDensityCounts),
   };
+}
+
+function treeShrubKnobSignalForReplay(estData = {}) {
+  const { tsLine, tsMeta, hasMappedTs, mappedCommercial } = storedTreeShrubReplaySources(estData);
+  if (!tsLine && !hasMappedTs) return null;
+  // The MAPPED stamp wins. A save/revision replaces estimateData.result with
+  // the freshly mapped server result but leaves an agent draft's original
+  // raw engineResult in place, so the raw line can be older than the
+  // authoritative columns the revision just wrote. Preferring it would
+  // replay superseded knob values and charge a total the stored result
+  // disagrees with.
+  // The mapped commercial row's stamp wins over a retained raw line the same
+  // way tsMeta does: a revision rewrites result.recurring but can leave an
+  // older engineResult line behind (Codex #6398 r7).
+  const stamped = (tsMeta && tsMeta.pricingKnobs)
+    || (mappedCommercial && mappedCommercial.pricingKnobs)
+    || (tsLine && tsLine.pricingKnobs);
+  if (!stamped || typeof stamped !== 'object') return { ...NEUTRAL_TREE_SHRUB_KNOBS };
+  return knobsFromTreeShrubStamp(stamped);
 }
 
 // ── Termite station cost (plan 2026-09-03 §A1) ───────────────────────────
@@ -326,16 +351,10 @@ function termiteKnobSignalForReplay(estData = {}) {
 //   null           — no stored T&S line (fresh quote / service just added):
 //                    the translator output stands.
 function treeShrubPalmProvenanceForReplay(estData = {}) {
-  const result = estData?.result && typeof estData.result === 'object' ? estData.result : (estData || {});
-  const lineItems = [
-    ...(Array.isArray(result?.lineItems) ? result.lineItems : []),
-    ...(Array.isArray(estData?.engineResult?.lineItems) ? estData.engineResult.lineItems : []),
-  ];
-  const tsLine = lineItems.find((li) => (li?.service || '') === 'tree_shrub');
-  const tsMeta = (result?.results?.tsMeta && typeof result.results.tsMeta === 'object')
-    ? result.results.tsMeta
-    : (estData?.result?.results?.tsMeta || null);
-  const hasMappedTs = !!tsMeta || (Array.isArray(result?.results?.ts) && result.results.ts.length > 0);
+  const result = storedResultOf(estData);
+  const tsLine = storedLineItemsOf(estData).find(serviceIs('tree_shrub'));
+  const tsMeta = storedTsMetaOf(estData);
+  const hasMappedTs = !!tsMeta || (Array.isArray(result.results?.ts) && result.results.ts.length > 0);
   if (!tsLine && !hasMappedTs) return null;
   // The MAPPED envelope is authoritative and EXCLUSIVE whenever it exists
   // (see the knob signal above for why): a revision replaces result but
