@@ -19,6 +19,8 @@
  * the Invoices page, because that invoice is addressed to the payer and may join a payer statement. A visit
  * invoice that would consume an estimate deposit or a granted retention offer is left to the page too (the card
  * could not show that total), and the visit route is handed refuseDepositCredit so it refuses instead.
+ * A service record that is not completed, or that has no scheduled visit (no mint lock to serialize invoice writers on), is
+ * left to the page too. An invoice total over what the decimal(10,2) columns hold, or a tax rate past four decimals, is refused.
  *
  * Always a confirm card (write-gates.js two-step), admin only, never owner-direct, platform path only, dark behind
  * GATE_IB_CREATE_INVOICE (which needs GATE_IB_PLATFORM).
@@ -50,6 +52,9 @@ const TITLE_LIMIT = 200;
 const DESCRIPTION_LIMIT = 200;
 const NOTES_LIMIT = 1000;
 const DEFAULT_DUE_DAYS = 30;
+// invoices.subtotal, tax_amount and total are decimal(10,2): the most one can store is $99,999,999.99.
+const INVOICE_MAX_CENTS = 9999999999;
+const OVER_CAPACITY = 'the amount is more than an invoice can hold';
 
 const CREATE_INVOICE_TOOLS = [
   {
@@ -59,7 +64,7 @@ It creates a DRAFT only. Nothing is sent to the customer (no text, email or call
 Two ways to call it:
 1. Lines: customer_id, a title, and line_items (each a description, a quantity and a unit_price above 0; at most 25 lines). Optional: notes, due_date (YYYY-MM-DD; default 30 days from today), service_date (YYYY-MM-DD), tax_rate (a fraction such as 0.07; only a commercial customer is taxed, and a residential customer is never taxed), service_record_id (links a completed visit of this customer).
 2. From a completed visit the operator names: customer_id, service_record_id and amount (above 0), optional description. No line_items, title, notes or dates. Tax follows the customer's rules.
-Refused with the reason: no customer, an amount of 0 or less, no lines, more than 25 lines, a visit that is not this customer's, a customer whose invoices go to a third-party payer (use the Invoices page), and a visit invoice that would use an estimate deposit or a retention offer (use the Invoices page). Discounts, custom email text, attachments and scheduled sending are not offered here. Admin only.
+Refused with the reason: no customer, an amount of 0 or less, no lines, more than 25 lines, a visit that is not this customer's, not completed, or without a scheduled visit (use the Invoices page), an invoice total over $99,999,999.99, a tax rate with more than four decimals, a customer whose invoices go to a third-party payer (use the Invoices page), and a visit invoice that would use an estimate deposit or a retention offer (use the Invoices page). Discounts, custom email text, attachments and scheduled sending are not offered here. Admin only.
 Use for: "create an invoice for this customer", "invoice them $150 for the extra visit", "bill this customer", "make a draft invoice", "invoice this completed visit for $120".`,
     input_schema: {
       type: 'object',
@@ -118,67 +123,94 @@ function dollars(value) {
 }
 const dayOf = (value) => (value ? (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value) ? value.slice(0, 10) : etCalendarDayOf(value)) : null);
 
-// What the call asks for, checked and normalised: { mode, ... } or a refusal.
-function readInput(input) {
+// What the call asks for, checked and normalised: { mode, ... } or a refusal (an object with `error`).
+const present = (value) => value !== undefined && value !== null && value !== '';
+
+function readTarget(input) {
   const rawCustomer = String(input?.customer_id || '').trim();
   if (!rawCustomer) return refusal('A customer is required: name the customer to invoice', 'invalid_target');
   if (!UUID_RE.test(rawCustomer)) return refusal('A valid customer_id is required', 'invalid_target');
-  const customerId = rawCustomer.toLowerCase();
   const rawRecord = String(input?.service_record_id || '').trim();
   if (rawRecord && !UUID_RE.test(rawRecord)) return refusal('A valid service_record_id is required', 'invalid_target');
-  const serviceRecordId = rawRecord ? rawRecord.toLowerCase() : null;
-  const hasLines = input?.line_items !== undefined && input?.line_items !== null;
-  const hasAmount = input?.amount !== undefined && input?.amount !== null;
+  return { customerId: rawCustomer.toLowerCase(), serviceRecordId: rawRecord ? rawRecord.toLowerCase() : null };
+}
 
-  if (hasAmount) {
-    if (hasLines) return refusal('Give either line_items or one visit amount, not both', 'invalid_input');
-    if (!serviceRecordId) return refusal('Billing a visit needs its service_record_id', 'invalid_input');
-    const extras = ['title', 'notes', 'due_date', 'service_date', 'tax_rate'].filter((k) => input[k] !== undefined && input[k] !== null && input[k] !== '');
-    if (extras.length) return refusal(`Billing a visit takes only the visit, the amount and a description; leave out ${extras.join(', ')}`, 'invalid_input');
-    const amount = dollars(input.amount);
-    if (amount === null) return refusal('The amount must be above $0 with at most two decimals', 'invalid_amount');
-    const description = clean(input.description);
-    if (description.length > DESCRIPTION_LIMIT) return refusal(`The description is limited to ${DESCRIPTION_LIMIT} characters`, 'invalid_input');
-    return { mode: 'from_visit', customerId, serviceRecordId, amount, description };
-  }
+function readVisitInput(input, target) {
+  if (input.line_items !== undefined && input.line_items !== null) return refusal('Give either line_items or one visit amount, not both', 'invalid_input');
+  if (!target.serviceRecordId) return refusal('Billing a visit needs its service_record_id', 'invalid_input');
+  const extras = ['title', 'notes', 'due_date', 'service_date', 'tax_rate'].filter((k) => present(input[k]));
+  if (extras.length) return refusal(`Billing a visit takes only the visit, the amount and a description; leave out ${extras.join(', ')}`, 'invalid_input');
+  const amount = dollars(input.amount);
+  if (amount === null) return refusal('The amount must be above $0 with at most two decimals', 'invalid_amount');
+  if (cents(amount) > INVOICE_MAX_CENTS) return refusal(OVER_CAPACITY, 'invalid_amount');
+  const description = clean(input.description);
+  if (description.length > DESCRIPTION_LIMIT) return refusal(`The description is limited to ${DESCRIPTION_LIMIT} characters`, 'invalid_input');
+  return { mode: 'from_visit', ...target, amount, description };
+}
 
-  if (input?.description !== undefined && input.description !== null && input.description !== '') {
-    return refusal('description belongs to billing a visit with an amount; put each line’s text in line_items', 'invalid_input');
-  }
-  if (!hasLines) return refusal('Give line_items, or a service_record_id with an amount', 'invalid_input');
-  if (!Array.isArray(input.line_items) || !input.line_items.length) return refusal('At least one line is required', 'invalid_input');
-  if (input.line_items.length > MAX_LINES) return refusal(`An invoice from the bar has at most ${MAX_LINES} lines; use the Invoices page for more`, 'too_many_lines');
+function readLine(raw, at) {
+  const description = clean(raw?.description);
+  if (!description) return refusal(`${at} needs a description`, 'invalid_input');
+  if (description.length > DESCRIPTION_LIMIT) return refusal(`${at}: the description is limited to ${DESCRIPTION_LIMIT} characters`, 'invalid_input');
+  const quantity = present(raw?.quantity) ? Number(raw.quantity) : 1;
+  if (!Number.isFinite(quantity) || quantity <= 0 || quantity > MAX_QUANTITY) return refusal(`${at}: the quantity must be above 0`, 'invalid_amount');
+  const unitPrice = dollars(raw?.unit_price);
+  if (unitPrice === null) return refusal(`${at}: the unit price must be above $0 with at most two decimals`, 'invalid_amount');
+  const amount = Math.round(quantity * unitPrice * 100) / 100;
+  if (!(amount > 0)) return refusal(`${at}: the line amount must be above $0`, 'invalid_amount');
+  if (cents(amount) > INVOICE_MAX_CENTS) return refusal(`${at}: ${OVER_CAPACITY}`, 'invalid_amount');
+  return { description, quantity, unit_price: unitPrice, amount };
+}
+
+function readLines(rawLines) {
+  if (!Array.isArray(rawLines) || !rawLines.length) return refusal('At least one line is required', 'invalid_input');
+  if (rawLines.length > MAX_LINES) return refusal(`An invoice from the bar has at most ${MAX_LINES} lines; use the Invoices page for more`, 'too_many_lines');
   const lines = [];
-  for (const [i, raw] of input.line_items.entries()) {
-    const at = `Line ${i + 1}`;
-    const description = clean(raw?.description);
-    if (!description) return refusal(`${at} needs a description`, 'invalid_input');
-    if (description.length > DESCRIPTION_LIMIT) return refusal(`${at}: the description is limited to ${DESCRIPTION_LIMIT} characters`, 'invalid_input');
-    const quantity = raw?.quantity === undefined || raw?.quantity === null || raw?.quantity === '' ? 1 : Number(raw.quantity);
-    if (!Number.isFinite(quantity) || quantity <= 0 || quantity > MAX_QUANTITY) return refusal(`${at}: the quantity must be above 0`, 'invalid_amount');
-    const unitPrice = dollars(raw?.unit_price);
-    if (unitPrice === null) return refusal(`${at}: the unit price must be above $0 with at most two decimals`, 'invalid_amount');
-    const amount = Math.round(quantity * unitPrice * 100) / 100;
-    if (!(amount > 0)) return refusal(`${at}: the line amount must be above $0`, 'invalid_amount');
-    lines.push({ description, quantity, unit_price: unitPrice, amount });
+  for (const [i, raw] of rawLines.entries()) {
+    const line = readLine(raw, `Line ${i + 1}`);
+    if (line.error) return line;
+    lines.push(line);
   }
+  return { lines };
+}
+
+// An optional YYYY-MM-DD field: { day } (null when absent) or a refusal.
+function readDay(value, name) {
+  if (!present(value)) return { day: null };
+  const day = validDay(value);
+  return day ? { day } : refusal(`${name} must be a real date written YYYY-MM-DD`, 'invalid_input');
+}
+
+// An optional tax rate, a fraction with at most the four decimals invoices.tax_rate (decimal(5,4)) stores.
+function readTaxRate(value) {
+  if (!present(value)) return { taxRate: undefined };
+  const rate = Number(value);
+  const valid = Number.isFinite(rate) && rate >= 0 && rate <= 1 && Math.abs(rate * 10000 - Math.round(rate * 10000)) < 1e-6;
+  return valid ? { taxRate: Math.round(rate * 10000) / 10000 } : refusal('tax_rate is a fraction between 0 and 1 with at most four decimals, for example 0.07', 'invalid_input');
+}
+
+function readLinesInput(input, target) {
+  if (present(input.description)) return refusal('description belongs to billing a visit with an amount; put each line’s text in line_items', 'invalid_input');
+  if (!present(input.line_items)) return refusal('Give line_items, or a service_record_id with an amount', 'invalid_input');
+  const read = readLines(input.line_items);
+  if (read.error) return read;
   const title = clean(input.title);
   if (title.length > TITLE_LIMIT) return refusal(`The title is limited to ${TITLE_LIMIT} characters`, 'invalid_input');
-  if (!title && !serviceRecordId) return refusal('A title is required', 'invalid_input');
+  if (!title && !target.serviceRecordId) return refusal('A title is required', 'invalid_input');
   const notes = String(input.notes ?? '').trim();
   if (notes.length > NOTES_LIMIT) return refusal(`The notes are limited to ${NOTES_LIMIT} characters`, 'invalid_input');
-  const wantsDue = input.due_date !== undefined && input.due_date !== null && input.due_date !== '';
-  const dueDate = wantsDue ? validDay(input.due_date) : null;
-  if (wantsDue && !dueDate) return refusal('due_date must be a real date written YYYY-MM-DD', 'invalid_input');
-  const wantsService = input.service_date !== undefined && input.service_date !== null && input.service_date !== '';
-  const serviceDate = wantsService ? validDay(input.service_date) : null;
-  if (wantsService && !serviceDate) return refusal('service_date must be a real date written YYYY-MM-DD', 'invalid_input');
-  let taxRate;
-  if (input.tax_rate !== undefined && input.tax_rate !== null && input.tax_rate !== '') {
-    taxRate = Number(input.tax_rate);
-    if (!Number.isFinite(taxRate) || taxRate < 0 || taxRate > 1) return refusal('tax_rate is a fraction between 0 and 1, for example 0.07', 'invalid_input');
-  }
-  return { mode: 'lines', customerId, serviceRecordId, lines, title, notes, dueDate, serviceDate, taxRate };
+  const due = readDay(input.due_date, 'due_date');
+  const service = due.error ? due : readDay(input.service_date, 'service_date');
+  const tax = service.error ? service : readTaxRate(input.tax_rate);
+  const failed = [due, service, tax].find((r) => r.error);
+  if (failed) return failed;
+  return { mode: 'lines', ...target, lines: read.lines, title, notes, dueDate: due.day, serviceDate: service.day, taxRate: tax.taxRate };
+}
+
+function readInput(input) {
+  const target = readTarget(input);
+  if (target.error) return target;
+  return present(input?.amount) ? readVisitInput(input, target) : readLinesInput(input || {}, target);
 }
 
 async function loadCustomer(customerId) {
@@ -186,7 +218,6 @@ async function loadCustomer(customerId) {
   return customer || null;
 }
 
-// The completed visit the invoice links or bills: it must be this customer's own.
 // Invoices that bill the visit: those stamped with its service record AND those linked only through its scheduled visit
 // (scheduled-visit mints write scheduled_service_id alone).
 async function liveInvoicesOnVisit(conn, serviceRecordId, scheduledServiceId) {
@@ -200,15 +231,30 @@ async function liveInvoicesOnVisit(conn, serviceRecordId, scheduledServiceId) {
   return existing.map((r) => ({ id: r.id, number: r.invoice_number, status: r.status, total: cents(r.total) })).sort((a, b) => String(a.id).localeCompare(String(b.id)));
 }
 
+// What the card shows and pins of the service record, and what the transaction re-reads under a row lock.
+const recordPin = (sr) => `${sr.service_type || ''}|${dayOf(sr.service_date) || ''}|${sr.status || ''}|${sr.scheduled_service_id || ''}`;
+
+// The title InvoiceService.create generates for a record-linked invoice with no title (service type and month, ET). Mirrors
+// create(): the card shows it and the lines body carries it, so the stored title is the carded one.
+function generatedTitle(serviceType, serviceDate) {
+  const when = typeof serviceDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(serviceDate) ? new Date(`${serviceDate}T12:00:00`) : new Date(serviceDate);
+  return `${serviceType} — ${when.toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'America/New_York' })}`;
+}
+
+// The completed visit the invoice links or bills: it must be this customer's own, completed, and tied to a scheduled visit
+// (the mint lock every invoice writer takes is keyed on it; a record without one has no lock to serialize against).
 async function loadVisit(customerId, serviceRecordId) {
   if (!serviceRecordId) return { visit: null };
   const sr = await db('service_records').where({ id: serviceRecordId, customer_id: customerId })
-    .first('id', 'customer_id', 'service_type', 'service_date', 'scheduled_service_id');
+    .first('id', 'customer_id', 'service_type', 'service_date', 'status', 'scheduled_service_id');
   if (!sr) return { refusal: refusal('That visit is not one of this customer’s service records, so nothing was offered.', 'record_unavailable') };
+  if (sr.status !== 'completed') return { refusal: refusal(`That visit is ${sr.status || 'not completed'}, not completed, so nothing was offered.`, 'visit_not_completed') };
+  if (!sr.scheduled_service_id) return { refusal: toPage('That service record has no scheduled visit, so a second invoice for it could not be guarded.', 'unscheduled_record') };
   return {
     visit: {
-      id: sr.id, service_type: sr.service_type || null, date: dayOf(sr.service_date), scheduled_service_id: sr.scheduled_service_id || null,
-      invoices: await liveInvoicesOnVisit(db, serviceRecordId, sr.scheduled_service_id || null),
+      id: sr.id, service_type: sr.service_type || null, date: dayOf(sr.service_date), raw_date: sr.service_date, pin: recordPin(sr),
+      scheduled_service_id: sr.scheduled_service_id,
+      invoices: await liveInvoicesOnVisit(db, serviceRecordId, sr.scheduled_service_id),
     },
   };
 }
@@ -265,7 +311,7 @@ function versionOf({ customer, name, mode, body, visit, totals }) {
     customer_id: customer.id,
     customer: customerPin(customer, name),
     body: digest(body),
-    visit: visit ? `${visit.id}:${visit.service_type}:${visit.date}:${visit.scheduled_service_id || ''}` : null,
+    visit: visit ? `${visit.id}:${visit.pin}` : null,
     visit_invoices: visit ? visit.invoices.map(invoicePin) : [],
     subtotal: cents(totals.subtotal),
     tax_rate: totals.tax_rate === undefined || totals.tax_rate === null ? null : Number(totals.tax_rate),
@@ -274,37 +320,53 @@ function versionOf({ customer, name, mode, body, visit, totals }) {
   };
 }
 
-async function buildPlan(input) {
-  const read = readInput(input);
-  if (read.error) return read;
-  const customer = await loadCustomer(read.customerId);
-  if (!customer) return refusal('Customer not found', 'customer_not_found');
-  const { visit, refusal: visitRefusal } = await loadVisit(customer.id, read.serviceRecordId);
-  if (visitRefusal) return visitRefusal;
-  const pageOnly = await pageOnlyRefusal(customer, visit, read.mode);
-  if (pageOnly) return pageOnly;
+// The exact body the handler receives. Lines mode always carries an explicit title (the operator's, or the one create()
+// would generate from the visit) and an explicit due date, so the stored invoice has the carded ones.
+function bodyOf(read, customer, { title, dueDate }) {
+  if (read.mode === 'from_visit') {
+    return { serviceRecordId: read.serviceRecordId, amount: read.amount, ...(read.description ? { description: read.description } : {}) };
+  }
+  return {
+    customerId: customer.id,
+    ...(read.serviceRecordId ? { serviceRecordId: read.serviceRecordId } : {}),
+    ...(title ? { title } : {}),
+    lineItems: read.lines.map((l) => ({ description: l.description, quantity: l.quantity, unit_price: l.unit_price, amount: l.amount })),
+    notes: read.notes || null,
+    dueDate,
+    ...(read.serviceDate ? { serviceDate: read.serviceDate } : {}),
+    ...(read.taxRate !== undefined ? { taxRate: read.taxRate } : {}),
+  };
+}
 
+// The scope the create transaction re-checks under its locks (recheckApprovedScope). Never shown.
+function approvedOf(read, customer, name, visit, totals) {
+  return {
+    expectedTotalCents: cents(totals.total),
+    customerId: customer.id,
+    customerPin: customerPin(customer, name),
+    mode: read.mode,
+    serviceRecordId: visit ? visit.id : null,
+    scheduledServiceId: visit ? visit.scheduled_service_id : null,
+    recordPin: visit ? visit.pin : null,
+    visitInvoices: visit ? visit.invoices.map(invoicePin) : [],
+  };
+}
+
+// The subtotal, the server's tax and total, and the title the invoice will carry; or a refusal.
+async function priceOf(read, customer, visit) {
   const fromVisit = read.mode === 'from_visit';
   const subtotal = fromVisit ? read.amount : Math.round(read.lines.reduce((sum, l) => sum + l.amount, 0) * 100) / 100;
   if (!(subtotal > 0)) return refusal('The invoice total must be above $0', 'invalid_amount');
-  const totals = await serverTotals({ customer, subtotal, visit, title: fromVisit ? null : read.title, taxRate: fromVisit ? undefined : read.taxRate });
+  if (cents(subtotal) > INVOICE_MAX_CENTS) return refusal(`The invoice total: ${OVER_CAPACITY}`, 'invalid_amount');
+  const title = read.title || (visit ? generatedTitle(visit.service_type, (!fromVisit && read.serviceDate) || visit.raw_date) : '');
+  const totals = await serverTotals({ customer, subtotal, visit, title: fromVisit ? null : title, taxRate: fromVisit ? undefined : read.taxRate });
   if (!totals) return refusal('The bar could not work out the tax and total, so nothing was offered. Create it from the Invoices page.', 'unverified');
+  if (cents(totals.total) > INVOICE_MAX_CENTS || cents(totals.tax_amount) > INVOICE_MAX_CENTS) return refusal(`The invoice total with tax: ${OVER_CAPACITY}`, 'invalid_amount');
+  return { totals, title };
+}
 
-  // The exact body the handler receives. The due date is always explicit for lines mode, so the invoice gets the carded date.
-  const dueDate = fromVisit ? null : (read.dueDate || etDateString(addETDays(new Date(), DEFAULT_DUE_DAYS)));
-  const body = fromVisit
-    ? { serviceRecordId: read.serviceRecordId, amount: read.amount, ...(read.description ? { description: read.description } : {}) }
-    : {
-      customerId: customer.id,
-      ...(read.serviceRecordId ? { serviceRecordId: read.serviceRecordId } : {}),
-      ...(read.title ? { title: read.title } : {}),
-      lineItems: read.lines.map((l) => ({ description: l.description, quantity: l.quantity, unit_price: l.unit_price, amount: l.amount })),
-      notes: read.notes || null,
-      dueDate,
-      ...(read.serviceDate ? { serviceDate: read.serviceDate } : {}),
-      ...(read.taxRate !== undefined ? { taxRate: read.taxRate } : {}),
-    };
-  const name = personName(customer) || customer.id;
+function previewOf({ read, customer, name, visit, totals, title, dueDate, body }) {
+  const fromVisit = read.mode === 'from_visit';
   const lines = fromVisit
     ? [{ description: read.description || visit.service_type || 'Service', quantity: 1, unit_price: read.amount, amount: read.amount }]
     : read.lines;
@@ -315,7 +377,7 @@ async function buildPlan(input) {
     customer_id: customer.id,
     customer_name: name,
     customer_city: customer.city || null,
-    title: fromVisit ? null : (read.title || null),
+    title: title || null,
     lines: lines.map((l) => `${l.description}: ${l.quantity} x ${money(l.unit_price)} = ${money(l.amount)}`),
     subtotal: money(totals.subtotal),
     tax_rate: totals.tax_rate ?? null,
@@ -332,18 +394,25 @@ async function buildPlan(input) {
     _version: versionOf({ customer, name, mode: read.mode, body, visit, totals }),
     _body: body,
     _expectedTotalCents: cents(totals.total),
-    // What the handler re-checks inside the create transaction, under the visit's mint lock (recheckApprovedScope). Never shown.
-    _approved: {
-      expectedTotalCents: cents(totals.total),
-      customerId: customer.id,
-      customerPin: customerPin(customer, name),
-      mode: read.mode,
-      serviceRecordId: visit ? visit.id : null,
-      scheduledServiceId: visit ? visit.scheduled_service_id : null,
-      visitInvoices: visit ? visit.invoices.map(invoicePin) : [],
-    },
+    _approved: approvedOf(read, customer, name, visit, totals),
     note: 'PREVIEW ONLY — nothing was created. Confirm creates exactly this draft; if anything changed it refuses. The draft is not sent: use send_invoice to send it.',
   };
+}
+
+async function buildPlan(input) {
+  const read = readInput(input);
+  if (read.error) return read;
+  const customer = await loadCustomer(read.customerId);
+  if (!customer) return refusal('Customer not found', 'customer_not_found');
+  const { visit, refusal: visitRefusal } = await loadVisit(customer.id, read.serviceRecordId);
+  if (visitRefusal) return visitRefusal;
+  const pageOnly = await pageOnlyRefusal(customer, visit, read.mode);
+  if (pageOnly) return pageOnly;
+  const priced = await priceOf(read, customer, visit);
+  if (priced.error) return priced;
+  const dueDate = read.mode === 'from_visit' ? null : (read.dueDate || etDateString(addETDays(new Date(), DEFAULT_DUE_DAYS)));
+  const body = bodyOf(read, customer, { title: priced.title, dueDate });
+  return previewOf({ read, customer, name: personName(customer) || customer.id, visit, totals: priced.totals, title: priced.title, dueDate, body });
 }
 
 // The re-derived plan when it still matches the card's pin, or the refusal.
@@ -360,46 +429,54 @@ async function verifiedPlan(input, pinned) {
 const scopeChanged = (why) => Object.assign(new Error(`${why}, so nothing was created. Ask again for a fresh confirmation card.`),
   { isOperational: true, statusCode: 409, code: 'IB_SCOPE_CHANGED' });
 
-// Run by the create handler INSIDE the create transaction, after it holds the visit's mint lock and before it mints: the
-// scope the card was approved under must still hold. A payer assigned, an invoice committed on the visit, a retention offer
-// granted, or the customer or visit link changed while the create waited for the lock is a 409 (IB_SCOPE_CHANGED) and the
-// transaction rolls back. The customer row is taken FOR SHARE (a payer assignment updates it and waits for this commit).
-async function recheckApprovedScope(conn, approved) {
-  // The shared scheduled-mint lock chain every scheduled-price writer takes, in its one order: mint advisory lock, customer
-  // FOR SHARE, visit row FOR UPDATE. The visit lock also stops a payer-only edit of the visit (it takes the visit row) from
-  // committing between the Bill-To read below and create()'s own payer resolution.
-  let lockedVisit = null;
-  if (approved.scheduledServiceId) {
-    try {
-      lockedVisit = await require('../scheduled-invoice-mint').acquireScheduledMintLockChain(conn, {
-        scheduledServiceId: approved.scheduledServiceId, customerId: approved.customerId, visitColumns: ['id', 'customer_id', 'payer_id'], customerLock: 'share',
-      });
-    } catch (err) {
-      // The visit was cancelled or otherwise stopped being billable while this create waited for the lock.
-      if (err?.status) throw scopeChanged(`The visit changed after the card was shown (${err.message})`);
-      throw err;
-    }
-    if (!lockedVisit || String(lockedVisit.customer_id) !== String(approved.customerId)) throw scopeChanged('The visit changed after the card was shown');
-  } else if (approved.serviceRecordId) {
-    // A record with no scheduled visit has no mint lock: serialize the bar's own creates for it, so two confirmations
-    // cannot both see an empty invoice list and each create a draft.
-    await conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`ib_create_invoice:service_record:${approved.serviceRecordId}`]);
+// The shared scheduled-mint lock chain every scheduled-price writer takes, in its one order: mint advisory lock, customer
+// FOR SHARE, visit row FOR UPDATE. The visit lock also stops a payer-only edit of the visit (it takes the visit row) from
+// committing between the Bill-To read and create()'s own payer resolution. Null when the invoice links no visit.
+async function lockApprovedVisit(conn, approved) {
+  if (!approved.scheduledServiceId) return null;
+  let locked;
+  try {
+    locked = await require('../scheduled-invoice-mint').acquireScheduledMintLockChain(conn, {
+      scheduledServiceId: approved.scheduledServiceId, customerId: approved.customerId, visitColumns: ['id', 'customer_id', 'payer_id'], customerLock: 'share',
+    });
+  } catch (err) {
+    // The visit was cancelled or otherwise stopped being billable while this create waited for the lock.
+    if (err?.status) throw scopeChanged(`The visit changed after the card was shown (${err.message})`);
+    throw err;
   }
-  const customer = await conn('customers').where({ id: approved.customerId }).whereNull('deleted_at').forShare().first();
-  if (!customer || customerPin(customer, personName(customer) || customer.id) !== approved.customerPin) throw scopeChanged('The customer changed after the card was shown');
-  if (approved.serviceRecordId) {
-    const sr = await conn('service_records').where({ id: approved.serviceRecordId, customer_id: approved.customerId }).first('scheduled_service_id');
-    if (!sr || (sr.scheduled_service_id || null) !== (approved.scheduledServiceId || null)) throw scopeChanged('The visit changed after the card was shown');
-    const live = (await liveInvoicesOnVisit(conn, approved.serviceRecordId, approved.scheduledServiceId || null)).map(invoicePin);
-    if (JSON.stringify(live) !== JSON.stringify(approved.visitInvoices)) throw scopeChanged('An invoice on this visit changed after the card was shown');
-  }
-  // Hold the payer rows this Bill-To resolves through (the visit's own and the customer default, active or not) FOR SHARE
-  // before reading them, as create() does for a linked create: a payer activation locks the payer row FOR UPDATE and waits for
-  // this commit, so the self-pay answer below is still true when create() resolves the payer again to insert the invoice.
+  if (!locked || String(locked.customer_id) !== String(approved.customerId)) throw scopeChanged('The visit changed after the card was shown');
+  return locked;
+}
+
+// The service record as the card showed it (type, date, status, scheduled link), read FOR SHARE so a correction waits for this
+// commit, and the invoices already on the visit.
+async function recheckApprovedRecord(conn, approved) {
+  const sr = await conn('service_records').where({ id: approved.serviceRecordId, customer_id: approved.customerId }).forShare()
+    .first('service_type', 'service_date', 'status', 'scheduled_service_id');
+  if (!sr || recordPin(sr) !== approved.recordPin) throw scopeChanged('The visit changed after the card was shown');
+  const live = (await liveInvoicesOnVisit(conn, approved.serviceRecordId, approved.scheduledServiceId)).map(invoicePin);
+  if (JSON.stringify(live) !== JSON.stringify(approved.visitInvoices)) throw scopeChanged('An invoice on this visit changed after the card was shown');
+}
+
+// Hold the payer rows this Bill-To resolves through (the visit's own and the customer default, active or not) FOR SHARE
+// before reading them, as create() does for a linked create: a payer activation locks the payer row FOR UPDATE and waits for
+// this commit, so the self-pay answer is still true when create() resolves the payer again to insert the invoice.
+async function recheckApprovedBillTo(conn, approved, customer, lockedVisit) {
   const payerIds = [...new Set([lockedVisit?.payer_id, customer.payer_id].filter(Boolean).map(String))].sort();
   if (payerIds.length) await conn('payers').whereIn('id', payerIds).orderBy('id').forShare().select('id');
   const refused = await pageOnlyRefusal(customer, { scheduled_service_id: approved.scheduledServiceId || null }, approved.mode, conn);
   if (refused) throw scopeChanged(`${refused.error.replace(/ Create it from the Invoices page\.$/, '')} (it changed after the card was shown)`);
+}
+
+// Run by the create handler INSIDE the create transaction, before it mints: the scope the card was approved under must still
+// hold. A payer assigned, an invoice committed on the visit, a retention offer granted, or the customer or the visit record
+// changed while the create waited for the locks is a 409 (IB_SCOPE_CHANGED) and the transaction rolls back.
+async function recheckApprovedScope(conn, approved) {
+  const lockedVisit = await lockApprovedVisit(conn, approved);
+  const customer = await conn('customers').where({ id: approved.customerId }).whereNull('deleted_at').forShare().first();
+  if (!customer || customerPin(customer, personName(customer) || customer.id) !== approved.customerPin) throw scopeChanged('The customer changed after the card was shown');
+  if (approved.serviceRecordId) await recheckApprovedRecord(conn, approved);
+  await recheckApprovedBillTo(conn, approved, customer, lockedVisit);
 }
 
 async function commitCreate(input) {

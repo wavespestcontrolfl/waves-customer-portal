@@ -36,7 +36,7 @@ let state;
 function freshState() {
   return {
     customers: [{ id: CUST, first_name: 'Robin', last_name: 'Sample', city: 'Sampleton', property_type: 'residential', payer_id: null, deleted_at: null }],
-    service_records: [{ id: REC, customer_id: CUST, service_type: 'Quarterly Pest Control', service_date: '2099-01-05', scheduled_service_id: VISIT }],
+    service_records: [{ id: REC, customer_id: CUST, service_type: 'Quarterly Pest Control', service_date: '2099-01-05', status: 'completed', scheduled_service_id: VISIT }],
     invoices: [],
     retention_offers: [],
     scheduled_services: [{ id: VISIT, customer_id: CUST, payer_id: null }],
@@ -195,7 +195,7 @@ describe('the preview (lines)', () => {
       ],
     });
     expect(card._expectedTotalCents).toBe(12600);
-    expect(card._approved).toEqual({ expectedTotalCents: 12600, customerId: CUST, customerPin: 'Robin Sample|Sampleton', mode: 'lines', serviceRecordId: null, scheduledServiceId: null, visitInvoices: [] });
+    expect(card._approved).toEqual({ expectedTotalCents: 12600, customerId: CUST, customerPin: 'Robin Sample|Sampleton', mode: 'lines', serviceRecordId: null, scheduledServiceId: null, recordPin: null, visitInvoices: [] });
     expect(Invoices.createInvoiceFromBar).not.toHaveBeenCalled();
     const lines = cardLines('create_invoice', card).map((l) => l.text).join('\n');
     expect(lines).toMatch(/Create a draft invoice for Robin Sample \(Sampleton\): \$126\.00, "Extra work"/);
@@ -283,6 +283,58 @@ describe('the preview (from a completed visit)', () => {
   test('a customer with a granted retention offer stays on the Invoices page', async () => {
     state.retention_offers.push({ id: 'r1', customer_id: CUST, status: 'granted' });
     expect(await preview(visitInput())).toMatchObject({ code: 'needs_invoices_page', reason: 'retention_offer' });
+  });
+});
+
+describe('the visit and the amounts the card will not take', () => {
+  test('a service record that is not completed, or has no scheduled visit, stays on the Invoices page', async () => {
+    for (const status of ['scheduled', 'in_progress', 'cancelled', 'incomplete']) {
+      state.service_records[0].status = status;
+      expect(await preview(lineInput({ service_record_id: REC }))).toMatchObject({ code: 'visit_not_completed' });
+      expect(await preview(visitInput())).toMatchObject({ code: 'visit_not_completed' });
+    }
+    state.service_records[0].status = 'completed';
+    state.service_records[0].scheduled_service_id = null;
+    expect(await preview(lineInput({ service_record_id: REC }))).toMatchObject({ code: 'needs_invoices_page', reason: 'unscheduled_record' });
+    expect(await preview(visitInput())).toMatchObject({ code: 'needs_invoices_page', reason: 'unscheduled_record' });
+    // No visit named: nothing to guard, the lines card still works.
+    expect(await preview(lineInput())).toMatchObject({ preview: true });
+  });
+
+  test('an amount over what the decimal(10,2) invoice columns hold is refused, in a line, in the sum, with tax, and for a visit', async () => {
+    const big = { description: 'x', quantity: 10000, unit_price: 1000000 };
+    expect(await preview(lineInput({ line_items: [big] }))).toMatchObject({ code: 'invalid_amount', error: expect.stringMatching(/Line 1: .*more than an invoice can hold/) });
+    const near = { description: 'x', quantity: 99, unit_price: 1000000 };
+    const rest = { description: 'y', unit_price: 999999.99 };
+    expect(await preview(lineInput({ line_items: [near, rest] }))).toMatchObject({ preview: true, total: '$99999999.99' });
+    expect(await preview(lineInput({ line_items: [near, rest, { description: 'z', unit_price: 0.01 }] }))).toMatchObject({ code: 'invalid_amount', error: expect.stringMatching(/invoice total/) });
+    mockPreviewTotals.mockResolvedValue({ subtotal: 99999999.99, tax_rate: 0.07, tax_amount: 7000000, total: 106999999.99 });
+    expect(await preview(lineInput({ line_items: [near, rest], tax_rate: 0.07 }))).toMatchObject({ code: 'invalid_amount', error: expect.stringMatching(/with tax/) });
+    expect(await preview(visitInput({ amount: 100000000 }))).toMatchObject({ code: 'invalid_amount' });
+  });
+
+  test('a tax rate past the four decimals invoices.tax_rate stores is refused; four decimals pass', async () => {
+    expect(await preview(lineInput({ tax_rate: 0.075555 }))).toMatchObject({ code: 'invalid_input', error: expect.stringMatching(/at most four decimals/) });
+    const card = await preview(lineInput({ tax_rate: 0.0756 }));
+    expect(card._body.taxRate).toBe(0.0756);
+    expect(card.tax_rate).toBe(0);
+  });
+
+  test('the generated title is shown, carried in the lines body and pinned; an operator title wins', async () => {
+    const card = await preview(lineInput({ title: '', service_record_id: REC }));
+    expect(card.title).toBe('Quarterly Pest Control — January 2099');
+    expect(card._body.title).toBe('Quarterly Pest Control — January 2099');
+    expect(cardLines('create_invoice', card)[0].text).toMatch(/"Quarterly Pest Control — January 2099"/);
+    const dated = await preview(lineInput({ title: '', service_record_id: REC, service_date: '2099-03-02' }));
+    expect(dated.title).toBe('Quarterly Pest Control — March 2099');
+    expect(dated._version).not.toEqual(card._version);
+    expect((await preview(lineInput({ service_record_id: REC })))._body.title).toBe('Extra work');
+    // Visit mode: create() names it; the card shows the same name, and the pin moves if the type changes.
+    const visit = await preview(visitInput());
+    expect(visit.title).toBe('Quarterly Pest Control — January 2099');
+    expect(visit._body.title).toBeUndefined();
+    state.service_records[0].service_type = 'Termite Inspection';
+    expect((await preview(visitInput())).title).toBe('Termite Inspection — January 2099');
   });
 });
 
@@ -427,23 +479,29 @@ describe('recheckApprovedScope (inside the create transaction)', () => {
     const order = [];
     mockResolvePayer.mockImplementation(async () => { order.push(`resolve after ${state.locks.join(',')}`); return { payerId: null }; });
     await recheck(approved);
-    expect(state.locks).toEqual(['customers', 'payers']);
-    expect(order).toEqual(['resolve after customers,payers']);
+    expect(state.locks).toEqual(['customers', 'service_records', 'payers']);
+    expect(order).toEqual(['resolve after customers,service_records,payers']);
     // A visit payer override is held too.
     state.scheduled_services[0].payer_id = 'payer-2';
     state.payers.push({ id: 'payer-2' });
     state.locks.length = 0;
     await recheck(approved);
-    expect(state.locks).toEqual(['customers', 'payers']);
+    expect(state.locks).toEqual(['customers', 'service_records', 'payers']);
   });
 
-  test('a service record with no scheduled visit is serialized on its own advisory lock before the invoice list is read', async () => {
-    state.service_records[0].scheduled_service_id = null;
+  test('the service record is re-read FOR SHARE and its type, date, status and link must be what the card showed', async () => {
     const approved = await approvedOf();
-    expect(approved).toMatchObject({ serviceRecordId: REC, scheduledServiceId: null });
+    expect(approved.recordPin).toBe('Quarterly Pest Control|2099-01-05|completed|' + VISIT);
     await recheck(approved);
-    expect(mockMintChain).not.toHaveBeenCalled();
-    expect(db.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', [`ib_create_invoice:service_record:${REC}`]);
+    expect(state.locks).toContain('service_records');
+    state.service_records[0].service_type = 'Termite Inspection';
+    await expect(recheck(approved)).rejects.toMatchObject({ code: 'IB_SCOPE_CHANGED', message: expect.stringMatching(/visit changed/) });
+    state.service_records[0].service_type = 'Quarterly Pest Control';
+    state.service_records[0].service_date = '2099-01-06';
+    await expect(recheck(approved)).rejects.toMatchObject({ code: 'IB_SCOPE_CHANGED' });
+    state.service_records[0].service_date = '2099-01-05';
+    state.service_records[0].status = 'cancelled';
+    await expect(recheck(approved)).rejects.toMatchObject({ code: 'IB_SCOPE_CHANGED' });
   });
 
   test('the visit row is locked (shared chain) before the Bill-To read; a visit that stopped being billable or moved is a 409', async () => {
