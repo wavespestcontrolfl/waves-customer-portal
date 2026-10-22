@@ -164,28 +164,27 @@ async function labelFactsBlock({ decision, outgoingBody }) {
   return reason ? `label timing no longer current (${reason})` : null;
 }
 
-// RETIRED COMPANY FACTS (owner 2026-10-22, Codex #6447 r1): a draft written before the answer-book rulings can still tell the
-// customer the old payment policy ("technicians accept cards at the visit, never cash"). Technicians now take no payment and cash
-// goes through the office, so a body that repeats the old policy is refused on every send path, whoever wrote the final body.
-const RETIRED_PAYMENT_POLICY_RE = new RegExp([
-  String.raw`\b(?:technicians?|techs?)\s+(?:will\s+|can\s+)?(?:accept|take)s?\s+(?:a\s+)?(?:credit\s+|debit\s+)?cards?\b`,
-  // a COMPANY-WIDE cash refusal only: "technicians do not take cash at the visit" is the new policy, not the old one
-  String.raw`\b(?:cards?|card\s+only)[,;]?\s+(?:but\s+)?(?:never|no)\s+cash\b`,
-  String.raw`\bwe\s+(?:never|do\s+not|don't|can't|cannot|won't)\s+(?:accept|take)\s+cash\b(?!\s+at\s+(?:the|your)\s+(?:visit|door|home|house|service))`,
-].join('|'), 'i');
-function retiredCompanyFactBlock({ outgoingBody }) {
-  const text = String(outgoingBody || '').replace(/[\u2018\u2019]/g, "'");
-  return RETIRED_PAYMENT_POLICY_RE.test(text) ? 'company fact retired (old payment policy)' : null;
+// RETIRED COMPANY FACTS (owner 2026-10-22, Codex #6447 r1/r2): a real-answers draft written before the answer-book facts
+// (prompt 15_n / 16_n) saw the old inside-spray policy (every visit unless declined) and the old payment policy (technicians take
+// cards, never cash). Phrase matching cannot tell an old claim from a correct new one, so a draft from those prompts is refused
+// at send whenever its final body touches either topic; a person rewrites it. Drafts from 15_n on are not affected.
+const ANSWER_BOOK_PROMPT_NUMBER = 15;
+const RETIRED_FACT_TOPIC_RE = /\b(?:inside|interior|indoors?|cash|cards?|pay|pays|paying|payments?|paid)\b/i;
+function draftedBeforeAnswerBook(decision) {
+  const m = /^house_voice_v12_real_answers(\d*)/.exec(String(decision?.prompt_version || ''));
+  return !!m && (!m[1] || Number(m[1]) < ANSWER_BOOK_PROMPT_NUMBER);
+}
+function retiredCompanyFactBlock({ decision, outgoingBody }) {
+  if (!draftedBeforeAnswerBook(decision) || !RETIRED_FACT_TOPIC_RE.test(String(outgoingBody || ''))) return null;
+  return 'company fact retired (drafted before the 2026-10-22 inside-spray and payment facts)';
 }
 
 // The scheduled-send version of the same check: the scheduler reads the decision row itself, and a row it cannot read (missing,
 // or not yet visible) must never mean "no snapshot, so send" - the reply guard cannot run without the decision, so it refuses.
-// It also carries the retired-company-fact check, which needs no decision read.
+// It also carries the retired-company-fact check (it needs the decision's prompt_version, which the scheduler selects).
 async function scheduledLabelFactsBlock({ decision, outgoingBody }) {
-  const retired = retiredCompanyFactBlock({ outgoingBody });
-  if (retired) return retired;
   if (!decision) return 'label timing could not be checked (the agent decision was not found)';
-  return labelFactsBlock({ decision, outgoingBody });
+  return retiredCompanyFactBlock({ decision, outgoingBody }) || labelFactsBlock({ decision, outgoingBody });
 }
 
 // LIVE ETA (independent review + Codex round-1 finding, PR #5334): a
@@ -639,7 +638,7 @@ async function scheduledOpenLoopsBlockReason({ agentDecisionId, dbh }) {
 async function agentDecisionSendBlockReason({ decision, outgoingBody }) {
   return (await openTimesBlock({ decision, outgoingBody }))
     || followupBlock({ decision, outgoingBody })
-    || retiredCompanyFactBlock({ outgoingBody })
+    || retiredCompanyFactBlock({ decision, outgoingBody })
     || (await labelFactsBlock({ decision, outgoingBody }))
     || (await amountsBlock({ decision, outgoingBody }))
     || (await reserviceBlock({ decision, outgoingBody }))

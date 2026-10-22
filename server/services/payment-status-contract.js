@@ -660,9 +660,11 @@ function remainderHasMoney(remainder) {
   try { return !!require('./sms-suggest-mode').hasPriceQuote(text); } catch { return true; }
 }
 
-// COMPANY FACTS money policy (owner 2026-10-22, Codex #6447 r1): the paying and prepay-refund lines are fixed policy for every
+// COMPANY FACTS money policy (owner 2026-10-22, Codex #6447 r1/r2): the paying and prepay-refund lines are fixed policy for every
 // customer, not an account status. A complete, stand-alone copy of one of their sentences (a lead label such as "Paying:" may be
-// dropped) is removed before the detectors read the rest; a paraphrase is still judged, so it is still held.
+// dropped) is allowed ONLY with inert text around it (a greeting, thanks, a sign-off) and verbatim status copies: anything else
+// could apply the rule to this customer ("That includes your cancellation."), so that reply is judged as if no policy was copied.
+// A paraphrase is never removed, so it is still held.
 let companyPolicySentenceCache = null;
 function companyPolicySentences() {
   if (!companyPolicySentenceCache) {
@@ -679,7 +681,11 @@ function companyPolicySentences() {
   }
   return companyPolicySentenceCache;
 }
-const withoutCompanyPolicyCopies = (text) => withoutCopies(text, companyPolicySentences());
+// `remainder` (copies already removed) with its policy copies removed too, when what is left is inert; else unchanged.
+function withoutCompanyPolicyCopies(remainder) {
+  const stripped = withoutCopies(remainder, companyPolicySentences());
+  return stripped !== canonText(remainder) && remainderIsInert(stripped) ? stripped : remainder;
+}
 
 function checkPaymentStatusReply({ reply, sentences, inboundText = null, scopeTexts = [], scoped = false }) {
   const texts = (sentences || []).map((s) => (typeof s === 'string' ? s : s.text));
@@ -736,7 +742,7 @@ function autoSendScopeBlock({ reply, inboundText = null, snapshot = null }) {
   if (!scoped) return null;
   const copied = copiedSentences(reply, sentences);
   if (copiesAmbiguousFamily(copied, snapshot) || copiesAnswerNamedSpecifics(copied, inboundText)) return 'payment_status_ambiguous';
-  return remainderIsInert(withoutCopies(reply, copied)) ? null : 'payment_status_not_auto_sendable';
+  return remainderIsInert(withoutCompanyPolicyCopies(withoutCopies(reply, copied))) ? null : 'payment_status_not_auto_sendable';
 }
 // HOLD WHEN AMBIGUOUS (owner 2026-10-02, after round 66): code does not guess which record the customer means. A copied receipt or invoice
 // status line auto-sends only when the draft rendered exactly ONE line of that family; with 2+ candidates (or a snapshot that never

@@ -115,7 +115,7 @@ describe('service knowledge (owner-approved 2026-10-03)', () => {
       'Arrival windows are two hours and start on the hour.',
       'WaveGuard tiers (Bronze, Silver, Gold, Platinum) depend on how many qualifying recurring services a customer has.',
     ]) expect(section).toContain(`\n- ${line}\n`);
-    expect(COMPANY_FACTS).toHaveLength(28);
+    expect(COMPANY_FACTS).toHaveLength(27);
   });
   test('aftercare lines (owner-delegated 2026-10-09) are in the section, word for word, and promise no visit', () => {
     const section = renderCompanyFactsSection();
@@ -152,7 +152,6 @@ describe('answer-book facts (owner 2026-10-21/22)', () => {
   const { RETIRED_COMPANY_FACT_LINES } = require('../services/sms-company-facts');
   const NEW_LINES = [
     'The first pest visit includes an inside spray. After that, the inside is up to the customer: we treat it whenever they ask.',
-    'After the second visit of a German roach cleanout, if live German roaches are still active, we treat again at no charge, as often as it takes.',
     'Rodent trapping includes the setup visit and one trap check. More trap checks cost extra.',
     'There is no long-term contract. A customer can cancel any time.',
     'A customer who prepays the year and cancels within 90 days gets a refund for the visits not yet done. After 90 days, prepaid visits are not refunded.',
@@ -449,8 +448,8 @@ describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
   });
 });
 
-// Codex #6447 r1: each answer-book line must be usable by the guards that read a reply.
-describe('answer-book facts pass the reply guards (Codex #6447 r1)', () => {
+// Codex #6447 r1/r2: each answer-book line must be usable by the guards that read a reply.
+describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
   const paymentStatus = require('../services/payment-status-contract');
   const { isReserviceOfferPromise } = require('../services/sms-shadow-drafter');
   const { retiredCompanyFactBlock } = require('../services/agent-decision-send-checks');
@@ -459,43 +458,52 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1)', () => {
   const REFUND = 'A customer who prepays the year and cancels within 90 days gets a refund for the visits not yet done.';
   const payOk = (reply, inboundText) => paymentStatus.checkPaymentStatusReply({ reply, sentences: [], inboundText }).ok;
 
-  test('the inside-spray line is not a free re-service promise', () => {
+  test('the inside-spray line is not a free re-service promise, and no line promises a return visit', () => {
     expect(isReserviceOfferPromise(COMPANY_FACTS[0])).toBe(false);
     expect(isReserviceOfferPromise('After that, the inside is up to you: we treat it whenever you ask.')).toBe(false);
+    expect(COMPANY_FACTS.join(' ')).not.toMatch(/treat again|re-?treat|at no charge/i);
   });
   test('no COMPANY FACTS line mentions Zelle: Zelle is only ever the Payment status sentence', () => {
     for (const f of COMPANY_FACTS) expect(f).not.toMatch(/zelle/i);
   });
-  test('a verbatim paying or prepay-refund sentence is policy, not a payment status', () => {
+  test('a verbatim paying or prepay-refund sentence with only inert text is policy, not a payment status', () => {
     for (const inbound of ['how do I pay?', 'Do I get a refund if I cancel?', null]) {
       expect(payOk(PAY, inbound)).toBe(true);
       expect(payOk(REFUND, inbound)).toBe(true);
       expect(payOk(`Hi! ${REFUND} Let us know if you have questions.`, inbound)).toBe(true);
     }
   });
-  test('a paraphrase, an added status or a framed copy is still held', () => {
+  test('a paraphrase, an added status, a personal claim or a framed copy is still held', () => {
     const inbound = 'Do I get a refund if I cancel?';
     expect(payOk('If you cancel within 90 days, you get a refund for unused visits.', inbound)).toBe(false);
     expect(payOk(`Your refund was processed. ${REFUND}`, inbound)).toBe(false);
+    expect(payOk(`${REFUND} That includes your cancellation.`, inbound)).toBe(false);
     expect(payOk(`${REFUND} That is outdated though, you were refunded.`, inbound)).toBe(false);
   });
-  test('the send recheck reads a verbatim policy sentence the same way', async () => {
+  test('the send recheck and the auto-send scope read a verbatim policy sentence the same way', async () => {
     const { paymentStatusVerdict } = require('../services/sms-amount-recheck');
     expect((await paymentStatusVerdict({ customerId: 'c1', body: REFUND, snapshot: null, inboundMessage: 'refund?' })).reason).toBeNull();
+    expect((await paymentStatusVerdict({ customerId: 'c1', body: REFUND, snapshot: null, inboundMessage: 'refund?', autoSend: true })).reason).toBeNull();
+    expect(paymentStatus.autoSendScopeBlock({ reply: `Hi! ${REFUND}`, inboundText: 'refund?', snapshot: null })).toBeNull();
+    expect((await paymentStatusVerdict({ customerId: 'c1', body: `${REFUND} That includes your cancellation.`, snapshot: null, inboundMessage: 'refund?' })).reason)
+      .toBe('payment_status_unauthorized');
     expect((await paymentStatusVerdict({ customerId: 'c1', body: 'Your refund went through.', snapshot: null, inboundMessage: 'refund?' })).reason)
       .toBe('payment_status_unauthorized');
   });
-  test('an older draft that repeats the retired payment policy is refused at send', () => {
-    for (const body of [
-      RETIRED_COMPANY_FACT_LINES[10], 'Our techs take cards at the visit.', 'We don’t accept cash.', 'Card only, never cash!', 'We do not take cash.', 'We take cards, no cash.',
-    ]) expect(retiredCompanyFactBlock({ outgoingBody: body })).toMatch(/company fact retired/);
-    for (const body of [
-      COMPANY_FACTS[10], PAY, 'You can pay cash or a check through the office.', 'See you Tuesday!',
-      // the new policy, said accurately (pre-push audit P1)
-      'Our technicians do not take cash at the visit. You can pay cash through the office.',
-      'Technicians never take cash at the visit.', 'We don\u2019t take cash at the door; pay the office instead.',
-    ]) {
-      expect(retiredCompanyFactBlock({ outgoingBody: body })).toBeNull();
+  test('a draft from a prompt before the answer-book facts is refused when it touches inside spray or paying', () => {
+    const old = (v) => ({ prompt_version: `house_voice_v12_real_answers${v}` });
+    for (const decision of [old('13_n'), old('14_n'), old('13_n+bc'), old('')]) {
+      for (const body of [RETIRED_COMPANY_FACT_LINES[0], RETIRED_COMPANY_FACT_LINES[10], 'We don’t take cash during your visit.', 'You can pay by card.']) {
+        expect(retiredCompanyFactBlock({ decision, outgoingBody: body })).toMatch(/company fact retired/);
+      }
+      expect(retiredCompanyFactBlock({ decision, outgoingBody: 'See you Tuesday between 8 and 10!' })).toBeNull();
+    }
+  });
+  test('a draft from the answer-book prompts, or not a real-answers draft, is never refused by it', () => {
+    for (const prompt_version of ['house_voice_v12_real_answers15_n', 'house_voice_v12_real_answers16_n+c', 'house_voice_v11', null]) {
+      for (const body of [COMPANY_FACTS[10], 'We don’t take cash during your visit; please pay cash through the office.', COMPANY_FACTS[0]]) {
+        expect(retiredCompanyFactBlock({ decision: { prompt_version }, outgoingBody: body })).toBeNull();
+      }
     }
   });
 });

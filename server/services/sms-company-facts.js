@@ -55,10 +55,11 @@ const COMPANY_FACTS = Object.freeze([
   'Drain flies are small, fuzzy, moth-shaped flies that rest on walls near sinks, tubs and showers. Their larvae live in the film inside the drain: scrubbing the drain and an enzyme drain cleaner fix that, a spray does not. Small flies hovering around houseplants are usually fungus gnats, a different insect. A photo tells them apart.',
   'On a lawn plan, insect control is part of the program. When a customer reports chinch bugs or other lawn insects, the technician checks at the next visit and treats where the technician confirms them and the product label allows.',
   // Owner rulings 2026-10-21/22 (Waves AI answer book). Plain customer wording, no prices, no
-  // product brands. The roach line drops the word "guaranteed" (banned customer copy). Rain that washes off a treatment before it dries is deliberately NOT here:
+  // product brands. NOT here: the German roach cleanout re-treat after visit two (owner R1) - it promises a return visit, which is the
+  // FREE RE-SERVICE fact's job (Codex #6447 r2: its restatements read as a re-service offer); the agent hands it to the office.
+  // Rain that washes off a treatment before it dries is deliberately NOT here:
   // the owner ruled it earns no free return visit, and a return visit is the FREE RE-SERVICE
   // fact's job, so no line promises one.
-  'After the second visit of a German roach cleanout, if live German roaches are still active, we treat again at no charge, as often as it takes.',
   'Rodent trapping includes the setup visit and one trap check. More trap checks cost extra.',
   'There is no long-term contract. A customer can cancel any time.',
   'A customer who prepays the year and cancels within 90 days gets a refund for the visits not yet done. After 90 days, prepaid visits are not refunded.',
