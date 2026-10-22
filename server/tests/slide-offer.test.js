@@ -131,17 +131,17 @@ describe('findSlideOffers', () => {
 });
 
 describe('evaluation budget', () => {
-  test('a dense off-hour day stops at MAX_EVALUATIONS and says so', () => {
+  test('a dense day stops at MAX_EVALUATIONS and says so', () => {
     const { MAX_EVALUATIONS } = require('../services/scheduling/slide-offer');
-    // Ten off-hour stops: 45 pairs × 16² shifts × ~9 starts ≫ the budget.
+    // A stop every 45 minutes (on and off the hour), the new stop beside the
+    // last one so a plain 4 PM slot exists and the slide search really runs.
     const stops = Array.from({ length: 10 }, (_, i) => stop(`o${i}`, 27.05 + i * 0.04, 8, {
       startMin: H(8) + 15 + i * 45, endMin: H(8) + 45 + i * 45, expectedMinutes: 20,
     }));
     const t0 = Date.now();
-    // New stop beside the last stop, so a plain 4 PM slot exists and the
-    // slide search really runs.
     const result = findSlideOffers({
       ...base, stops, newStop: { ...at(27.41), expectedMinutes: 20 }, durationMinutes: 30,
+      budget: { remaining: 500 },
     });
     expect(result.baseline).not.toBeNull();
     expect(result.truncated).toBe(true);
@@ -229,5 +229,15 @@ describe('Codex r2 guards', () => {
     const result = findSlideOffers({ ...base, stops: day(), budget: { remaining: 1e9, deadline: Date.now() - 1 } });
     expect(result.truncated).toBe(true);
     expect(result.offers).toEqual([]);
+  });
+});
+
+describe('Codex r3 guards', () => {
+  test('every slide destination is on the hour, including for an off-hour stop', () => {
+    const stops = day().map((x) => (x.id === 'd' ? { ...x, startMin: H(11) + 15, endMin: H(12) + 15 } : x));
+    const seen = [];
+    findSlideOffers({ ...base, stops, admits: (w) => { if (!w.isNew) seen.push(w.startMin); return true; } });
+    expect(seen.length).toBeGreaterThan(0);
+    for (const startMin of seen) expect(startMin % 60).toBe(0);
   });
 });

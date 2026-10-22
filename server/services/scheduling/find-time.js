@@ -721,7 +721,7 @@ async function resolveCandidateExpectedMinutes({
 // findAvailableSlots' own branching stays in the loop that drives it, not
 // the row-shaping itself.
 function buildDayStops(services, {
-  tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit, slideShadow = false,
+  tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit, slideShadow = false, needsLifecycleRewind = null,
 }) {
   const filtered = services.filter((s) => {
     if (excludeSet.has(String(s.id))) return false;
@@ -776,7 +776,9 @@ function buildDayStops(services, {
         ...(creditResolver ? {
           expectedMinutes: creditResolver(s, endMin - startMin),
         } : {}),
-        ...(slideShadow ? { movable: isSlidable(s) && !(visitMembers.get(s.visit_id) > 1) } : {}),
+        ...(slideShadow ? {
+          movable: isSlidable(s, needsLifecycleRewind) && !(visitMembers.get(s.visit_id) > 1),
+        } : {}),
       };
     })
     .sort((a, b) => a.startMin - b.startMin);
@@ -784,16 +786,24 @@ function buildDayStops(services, {
 
 // Whether a committed stop may be slid to another time the same day to make
 // room for a better-routed booking (GATE_SLOT_SLIDE_OFFER, owner rulings
-// 2026-10-22: any appointment type may slide). Never a live estimate hold
-// (it may lapse), a visit already under way, a staff-locked or excluded
-// visit, or one member of a version-2 combined allocation (visit-capacity.js
-// allocationKey — its span is shared with its siblings). A plain single-
-// service reservation_service_mix (every estimate-booked visit) is fine.
-const UNDER_WAY_STATUSES = new Set(['en_route', 'on_site', 'completed']);
-function isSlidable(row) {
+// 2026-10-22: any appointment type may slide). Never an estimate hold
+// (customer_id NULL — travel-gap.js isHoldStop's definition; a committed row
+// with a stray reservation_expires_at is committed), a completed visit, a
+// visit with ANY tracker evidence of being under way (rebooker's own
+// needsLifecycleRewind: status, track_state, or a lifecycle stamp — manual
+// En Route taps advance track_state without syncing status), a staff-locked
+// or excluded visit, or one member of a version-2 combined allocation
+// (visit-capacity.js allocationKey — its span is shared with its siblings).
+// A plain single-service reservation_service_mix (every estimate-booked
+// visit) is fine.
+const SLIDE_LIFECYCLE_COLUMNS = [
+  'track_state', 'en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time',
+  'track_sms_sent_at', 'arrival_sms_sent_at',
+];
+function isSlidable(row, needsLifecycleRewind) {
   return row.customer_id != null
-    && row.reservation_expires_at == null
-    && !UNDER_WAY_STATUSES.has(row.status)
+    && row.status !== 'completed'
+    && !needsLifecycleRewind(row)
     && row.auto_dispatch_locked !== true
     && row.auto_dispatch_excluded !== true
     && allocationKey(row) == null;
@@ -824,8 +834,12 @@ const overlapsOnly = (a, b) => a.startMin < b.endMin && b.startMin < a.endMin;
 function logSlideShadow(date, tech, dayStops, params) {
   const daysOut = (new Date(`${date}T12:00:00Z`) - new Date(`${params.geo.todayEt}T12:00:00Z`)) / 86400000;
   const { slideBudget } = params;
-  if (daysOut > SLIDE_SHADOW_MAX_DAYS_OUT || slideBudget.remaining <= 0 || Date.now() >= slideBudget.deadline) return;
+  if (daysOut > SLIDE_SHADOW_MAX_DAYS_OUT || slideBudget.remaining <= 0 || slideBudget.spentMs >= SLIDE_SHADOW_MAX_MS) return;
   const { geo } = params;
+  const t0 = Date.now();
+  // The 50 ms counts only time spent HERE, not the request's normal slot
+  // work between tech-days.
+  slideBudget.deadline = t0 + (SLIDE_SHADOW_MAX_MS - slideBudget.spentMs);
   try {
     const home = params.techStartPoints ? techStartPoint(tech) : HQ;
     const result = findSlideOffers({
@@ -865,6 +879,8 @@ function logSlideShadow(date, tech, dayStops, params) {
     })}`);
   } catch (err) {
     logger.warn(`[slot-slide] shadow failed: ${err.message}`);
+  } finally {
+    slideBudget.spentMs += Date.now() - t0;
   }
 }
 
@@ -1073,7 +1089,8 @@ function candidatesForDay(date, tech, params) {
     durationMinutes, dayOpen, dayClose,
   } = params;
   const dayStops = buildDayStops(services, {
-    tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit, slideShadow: params.slideShadow,
+    tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
+    slideShadow: params.slideShadow, needsLifecycleRewind: params.needsLifecycleRewind,
   });
   if (params.slideShadow && dayStops.length) logSlideShadow(date, tech, dayStops, params);
   // Build virtual stop list: HQ ... stops ... HQ
@@ -1312,10 +1329,10 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
       ...(slideShadow ? [
         'scheduled_services.status',
         'scheduled_services.customer_id',
-        'scheduled_services.reservation_expires_at',
         'scheduled_services.auto_dispatch_locked',
         'scheduled_services.auto_dispatch_excluded',
         'scheduled_services.visit_id',
+        ...SLIDE_LIFECYCLE_COLUMNS.map((col) => `scheduled_services.${col}`),
       ] : []),
     );
 
@@ -1426,7 +1443,10 @@ async function findAvailableSlots(opts) {
     slotStepMinutes, durationMinutes, dayOpen, dayClose, everyStepStart,
     techStartPoints: opts.techStartPoints === true,
     slideShadow,
-    slideBudget: { remaining: SLIDE_SHADOW_REQUEST_EVALUATIONS, deadline: Date.now() + SLIDE_SHADOW_MAX_MS },
+    slideBudget: { remaining: SLIDE_SHADOW_REQUEST_EVALUATIONS, spentMs: 0, deadline: null },
+    // Lazy (rebooker.js pulls in the scheduling modules this file sits
+    // beside), resolved here — before any shadow time is counted.
+    needsLifecycleRewind: slideShadow ? require('../rebooker').needsLifecycleRewind : null,
   };
   for (const date of dates) {
     for (const tech of techs) {

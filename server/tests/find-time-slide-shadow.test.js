@@ -239,3 +239,34 @@ test('sampled: a second request inside the interval runs no shadow pass', async 
   await findAvailableSlots(CALL);
   expect(shadowLines()).toHaveLength(1);
 });
+
+const runWith = async (rows) => {
+  db.mockImplementation((table) => {
+    if (table === 'technicians') return chain([{ id: 't1', name: 'Tech' }], table);
+    if (table === 'scheduled_services') return chain(rows, table);
+    if (table === 'services') return chain(CATALOG, table);
+    return chain([], table);
+  });
+  process.env.GATE_SLOT_SLIDE_OFFER = 'true';
+  await findAvailableSlots(CALL);
+  return shadowLines().map((l) => JSON.parse(l.replace('[slot-slide] shadow ', '')).slides.map((x) => x.id));
+};
+
+test('tracker evidence of a visit under way blocks a slide even when status still says confirmed', async () => {
+  selects.length = 0;
+  for (const evidence of [{ track_state: 'en_route' }, { en_route_at: new Date() }, { track_sms_sent_at: new Date() }]) {
+    _resetSlideShadowSample();
+    logger.info.mockClear();
+    const ids = await runWith(STOPS.map((x) => (x.id === 'd' ? { ...x, ...evidence } : x)));
+    for (const slid of ids) expect(slid).not.toContain('d');
+  }
+  const svcSelect = selects.find((x) => x.table === 'scheduled_services');
+  expect(svcSelect.cols).toContain('scheduled_services.track_state');
+  expect(svcSelect.cols).toContain('scheduled_services.en_route_at');
+});
+
+test('a committed visit with a stray reservation_expires_at can still slide', async () => {
+  const ids = await runWith(STOPS.map((x) => (x.id === 'd'
+    ? { ...x, reservation_expires_at: new Date(Date.now() + 3600000) } : x)));
+  expect(ids[0]).toEqual(['d']);
+});

@@ -10,8 +10,8 @@
  *   - Slides go earlier OR later, bounded by MAX_SLIDE_MINUTES either way.
  *   - Allowed inside 72h (no reminder freeze — the 24h reminder carries the
  *     new time; that is an owner call, not this module's).
- *   - On-the-hour stops slide on the hour grid; off-hour stops (assessments,
- *     re-services) slide on a finer OFF_HOUR_STEP_MINUTES grid.
+ *   - Every slide lands on the hour (window_start is always HH:00); an
+ *     off-hour legacy stop (assessment, re-service) slides onto the grid.
  *   - Offered only when the whole day's drive beats the best plain (no-slide)
  *     insertion by BOTH MIN_SAVING_MINUTES and MIN_SAVING_MILES.
  *
@@ -38,12 +38,11 @@ const { travelGapViolation } = require('./travel-gap');
 const MAX_SLIDES = 2;
 const MAX_SLIDE_MINUTES = 120;
 const HOUR_STEP_MINUTES = 60;
-const OFF_HOUR_STEP_MINUTES = 15;
 const MIN_SAVING_MINUTES = 6;
 const MIN_SAVING_MILES = 0.5;
 // Hard ceiling on arrangements scored per tech-day. This runs synchronously
-// on customer booking requests: an on-hour day costs a few thousand, but
-// off-hour stops (15-minute steps) multiply pairs ×16 each. Past the
+// on customer booking requests: a typical day costs a few thousand, a
+// dense one with many movable stops far more. Past the
 // budget the search stops and reports what it found so far (truncated).
 const MAX_EVALUATIONS = 20000;
 const NEW_ID = '__new__';
@@ -122,11 +121,16 @@ function arrangementFeasible(stops, day) {
   return true;
 }
 
+// Every slide destination starts on the hour (AGENTS.md: window_start is
+// always HH:00 — the canonical writers reject :15/:30 starts), within
+// MAX_SLIDE_MINUTES of the stop's current start. An off-hour legacy row
+// (assessment / re-service) may slide, but only onto the hour grid.
 function shiftOptions(stop) {
-  const onHour = stop.startMin % HOUR_STEP_MINUTES === 0;
-  const step = onHour ? HOUR_STEP_MINUTES : OFF_HOUR_STEP_MINUTES;
   const out = [];
-  for (let d = step; d <= MAX_SLIDE_MINUTES; d += step) out.push(d, -d);
+  const lo = Math.ceil((stop.startMin - MAX_SLIDE_MINUTES) / HOUR_STEP_MINUTES) * HOUR_STEP_MINUTES;
+  for (let to = lo; to <= stop.startMin + MAX_SLIDE_MINUTES; to += HOUR_STEP_MINUTES) {
+    if (to !== stop.startMin) out.push(to - stop.startMin);
+  }
   return out;
 }
 
