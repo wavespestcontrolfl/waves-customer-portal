@@ -171,7 +171,9 @@ describe('the report text anchor (completion enrollment + paid invoice share one
 
   test('a sent text anchors to its send time; a delivered held text to its delivery', () => {
     expect(reportTextAnchorFromNotes({ completionSmsStatus: 'sent', sentSmsAt: '2026-10-20T14:00:00.000Z' })).toEqual({ status: 'sent', at: '2026-10-20T14:00:00.000Z' });
-    expect(reportTextAnchorFromNotes({ completionSmsStatus: 'deferred', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z', completionSmsDeferredDeliveredAt: '2026-10-20T12:03:00.000Z' })).toEqual({ status: 'sent', at: '2026-10-20T12:03:00.000Z' });
+    expect(reportTextAnchorFromNotes({ completionSmsStatus: 'deferred', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z', completionSmsDeferredDeliveredAt: '2026-10-20T12:03:00.000Z', sentSmsChannel: 'sms' })).toEqual({ status: 'sent', at: '2026-10-20T12:03:00.000Z' });
+    // A held replay delivered before the channel stamp may have gone to the App (codex #6434 r9 P2).
+    expect(reportTextAnchorFromNotes({ completionSmsStatus: 'sent', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z', completionSmsDeferredDeliveredAt: '2026-10-20T12:03:00.000Z' }, { atPayment: true })).toBeNull();
   });
 
   test('a completion notice routed to the customer App is not a report text', () => {

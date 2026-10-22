@@ -82,6 +82,8 @@ describe('the Automatic hint while the ask goes out after the report text', () =
   test('an unpaid completion invoice: 10 minutes after payment', () => {
     const { text } = completionReviewHint({ willReview: true, effectiveSendSms: true, reviewTiming: 'auto', preview: afterReport, reviewAwaitsPayment: true });
     expect(text).toMatch(/waits for the invoice to be paid, then goes out about 10 minutes after payment/);
+    // A report still queued for the morning comes first (codex #6434 r9 P2).
+    expect(text).toMatch(/or after the report text if that is still queued for the morning/);
   });
 
   test.each([
