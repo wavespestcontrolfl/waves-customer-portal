@@ -175,14 +175,15 @@ describe('per-send URL snapshot (gate on)', () => {
 describe('snapshotEventUrlsForSend', () => {
   const { snapshotEventUrlsForSend } = require('../services/newsletter-event-clicks');
 
-  function sendsKnex(row) {
+  function sendsKnex(row, { lose = null } = {}) {
     const updates = [];
+    let reads = 0;
     const knex = () => {
       const q = {
         where() { return q; },
         whereNull() { return q; },
-        first: async () => row,
-        update: async (u) => { updates.push(u); return 1; },
+        first: async () => { reads += 1; return lose && reads > 1 ? lose : row; },
+        update: async (u) => { updates.push(u); return lose ? 0 : 1; },
       };
       return q;
     };
@@ -213,6 +214,13 @@ describe('snapshotEventUrlsForSend', () => {
     expect(out.get(LOCKED)).toBe('https://first.example/');
     expect(out.get(ALT)).toBe('https://alt.example/');
     expect(JSON.parse(knex.updates[0].event_url_snapshot)).toEqual({ [LOCKED]: 'https://first.example/', [ALT]: 'https://alt.example/' });
+  });
+
+  test('gate on, lost the snapshot race: links what the winning batch stored', async () => {
+    process.env.GATE_NEWSLETTER_CLICK_BOUND = 'true';
+    const knex = sendsKnex({ event_url_snapshot: null }, { lose: { event_url_snapshot: { [LOCKED]: 'https://winner.example/' } } });
+    const out = await snapshotEventUrlsForSend({ id: 's1' }, new Map([[LOCKED, 'https://mine.example/']]), knex);
+    expect(out.get(LOCKED)).toBe('https://winner.example/');
   });
 
   test('gate on, resumed send: reuses the stored snapshot', async () => {

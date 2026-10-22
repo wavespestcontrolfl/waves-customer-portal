@@ -212,9 +212,16 @@ async function snapshotEventUrlsForSend(send, liveUrlById, knex = db) {
       return merged;
     }
     const obj = Object.fromEntries([...liveUrlById].map(([k, v]) => [String(k).toLowerCase(), v || null]));
-    await knex('newsletter_sends').where({ id: send.id }).whereNull('event_url_snapshot')
+    const written = await knex('newsletter_sends').where({ id: send.id }).whereNull('event_url_snapshot')
       .update({ event_url_snapshot: JSON.stringify(obj) });
-    return liveUrlById;
+    if (written) return liveUrlById;
+    // Another batch stored the snapshot first: link exactly what it stored.
+    const winner = await knex('newsletter_sends').where({ id: send.id }).first('event_url_snapshot');
+    let wmap = winner?.event_url_snapshot;
+    if (typeof wmap === 'string') { try { wmap = JSON.parse(wmap); } catch { wmap = null; } }
+    return wmap && typeof wmap === 'object' && !Array.isArray(wmap)
+      ? new Map(Object.entries(wmap).map(([k, v]) => [String(k).toLowerCase(), v || null]))
+      : liveUrlById;
   } catch (err) {
     logger.warn(`[newsletter-event-clicks] event URL snapshot failed (live URLs used): ${err.message}`);
     return liveUrlById;
