@@ -5,7 +5,7 @@
 // date and the best 4 in the next 7 days (the same chips and numbers as the
 // New Appointment time box; useBestTimes with summary + bestRows on an
 // address alone). Tap a chip, then Book: New Appointment opens with that
-// day, hour and technician and the address already in its New customer block.
+// day and hour and the address already in its New customer block.
 // This panel writes nothing — no customer, no visit — and it never ranks near
 // the caller's own other visits (a new caller has none).
 //
@@ -14,26 +14,16 @@
 // `enabled` is the gate; off renders nothing at all.
 
 import { useEffect, useMemo, useState } from 'react';
-import { createPortal } from 'react-dom';
 import AddressAutocomplete from '../AddressAutocomplete';
-import useModalFocus from '../../hooks/useModalFocus';
+import {
+  Button, Field, Select, Input, Sheet, SheetHeader, SheetBody, UiSurface, inputStyles, useUiDensity,
+} from '../ui';
 import { etDateString } from '../../lib/timezone';
 import { useBestTimes } from './useBestTimes';
 import { BestRow, fmtDay, fmtHour } from './AvailabilityStrip';
 
 const LENGTHS = [30, 45, 60, 90, 120, 180];
 const DEFAULT_LENGTH = 60;
-
-const labelStyle = { display: 'block', marginBottom: 4, fontSize: 12, color: '#52525B' };
-const fieldStyle = {
-  width: '100%', minHeight: 44, padding: '8px 10px', borderRadius: 4, border: '0.5px solid #D4D4D8',
-  background: '#fff', color: '#18181B', fontSize: 16, fontFamily: 'inherit', boxSizing: 'border-box',
-};
-const noteStyle = { marginTop: 12, color: '#52525B', fontSize: 14, lineHeight: 1.5 };
-const primaryButton = {
-  width: '100%', minHeight: 44, borderRadius: 6, border: 'none', background: '#18181B', color: '#fff',
-  fontSize: 14, fontWeight: 500, fontFamily: 'inherit', cursor: 'pointer',
-};
 
 // The one line shown in place of the results.
 function statusNote({ target, checking, gated, best }) {
@@ -49,23 +39,20 @@ const hourKey = (hour) => (hour ? `${hour.date}|${String(hour.start).slice(0, 5)
 export default function FindTimePanel({ enabled = false, onBook }) {
   const [open, setOpen] = useState(false);
   if (!enabled) return null;
+  // UiSurface sets the 14px / 44px touch density for the button and, through
+  // the portal, for the Sheet and every control in it.
   return (
-    <>
-      <button
-        type="button"
-        data-testid="find-time-open"
-        onClick={() => setOpen(true)}
-        className="inline-flex items-center justify-center u-label px-3 h-11 md:h-8 rounded-sm border-hairline border-zinc-300 bg-white text-ink-secondary u-focus-ring hover:bg-zinc-50"
-      >
+    <UiSurface density="comfortable" className="inline-block">
+      <Button variant="secondary" data-testid="find-time-open" onClick={() => setOpen(true)}>
         Find a time
-      </button>
+      </Button>
       {open && <FindTimeDrawer onClose={() => setOpen(false)} onBook={onBook} />}
-    </>
+    </UiSurface>
   );
 }
 
 function FindTimeDrawer({ onClose, onBook }) {
-  const dialogRef = useModalFocus(true, onClose);
+  const density = useUiDensity();
   const today = etDateString();
   const [addressText, setAddressText] = useState('');
   // The address the search stands on: set only when a suggestion is picked
@@ -74,13 +61,6 @@ function FindTimeDrawer({ onClose, onBook }) {
   const [date, setDate] = useState(today);
   const [length, setLength] = useState(DEFAULT_LENGTH);
   const [selected, setSelected] = useState(null);
-
-  // The page behind stays put while the panel is open.
-  useEffect(() => {
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => { document.body.style.overflow = prev; };
-  }, []);
 
   const { availability, checking, gated } = useBestTimes({
     date,
@@ -123,39 +103,17 @@ function FindTimeDrawer({ onClose, onBook }) {
   const pick = (hour) => setSelected(hourKey(hour));
   const isCurrent = (hour) => hourKey(hour) === selected;
 
-  return createPortal(
-    <div
-      style={{ position: 'fixed', inset: 0, zIndex: 999, background: 'rgba(0,0,0,0.3)', display: 'flex', justifyContent: 'flex-end' }}
-      onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
-    >
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-label="Find a time"
-        style={{
-          width: 440, maxWidth: '100%', height: '100dvh', overflowY: 'auto', boxSizing: 'border-box',
-          background: '#fff', fontSize: 14, color: '#18181B', lineHeight: 1.5,
-          // Full height on a phone: clear the status bar and home indicator.
-          padding: 'calc(16px + env(safe-area-inset-top, 0px)) 16px calc(16px + env(safe-area-inset-bottom, 0px))',
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-          <div style={{ fontSize: 18, fontWeight: 600 }}>Find a time</div>
-          <button
-            type="button"
-            aria-label="Close"
-            onClick={onClose}
-            style={{ minWidth: 44, minHeight: 44, border: 'none', background: 'none', fontSize: 14, cursor: 'pointer', color: '#52525B' }}
-          >
-            Close
-          </button>
-        </div>
-
-        <div style={{ marginBottom: 12 }}>
-          <label style={labelStyle} htmlFor="find-time-address">Service address</label>
+  return (
+    // The Sheet owns the portal, the backdrop, Escape, the focus trap, the page
+    // scroll lock and the top and bottom safe-area padding (full height on a phone).
+    <Sheet open onClose={onClose} width="sm" ariaLabel="Find a time">
+      <SheetHeader>
+        <h2 className="text-18 font-medium text-ink-primary">Find a time</h2>
+        <Button variant="ghost" aria-label="Close" onClick={onClose}>Close</Button>
+      </SheetHeader>
+      <SheetBody className="space-y-4">
+        <Field label="Service address" id="find-time-address">
           <AddressAutocomplete
-            id="find-time-address"
             value={addressText}
             onChange={(val) => { setAddressText(val); setTarget(null); }}
             onSelect={(parts) => {
@@ -174,34 +132,30 @@ function FindTimeDrawer({ onClose, onBook }) {
               });
             }}
             appearance="admin"
-            style={fieldStyle}
+            className={inputStyles({ density })}
             placeholder="Start typing the address"
           />
-        </div>
+        </Field>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 12 }}>
-          <div>
-            <label style={labelStyle} htmlFor="find-time-length">Visit length (for the search)</label>
-            <select id="find-time-length" value={length} onChange={(e) => setLength(Number(e.target.value))} style={fieldStyle}>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <Field label="Visit length (for the search)" id="find-time-length">
+            <Select value={length} onChange={(e) => setLength(Number(e.target.value))}>
               {LENGTHS.map((m) => <option key={m} value={m}>{m} min</option>)}
-            </select>
-          </div>
-          <div>
-            <label style={labelStyle} htmlFor="find-time-date">Day</label>
-            <input
-              id="find-time-date"
+            </Select>
+          </Field>
+          <Field label="Day" id="find-time-date">
+            <Input
               type="date"
               min={today}
               value={date}
               onChange={(e) => { if (e.target.value >= today) setDate(e.target.value); }}
-              style={fieldStyle}
             />
-          </div>
+          </Field>
         </div>
 
-        {note && <div data-testid={note.testId} style={noteStyle}>{note.text}</div>}
+        {note && <div data-testid={note.testId} className="text-ui-body text-ink-secondary">{note.text}</div>}
         {best && (
-          <div data-testid="find-time-results" style={{ opacity: stale ? 0.6 : 1 }}>
+          <div data-testid="find-time-results" className={stale ? 'opacity-60' : undefined}>
             <BestRow
               title={`Best on ${fmtDay(availability?.pickedDate || date)}`}
               hours={best.day}
@@ -220,24 +174,22 @@ function FindTimeDrawer({ onClose, onBook }) {
                 onPick={stale ? undefined : pick}
               />
             )}
-            <div style={{ marginTop: 16 }}>
-              <button
-                type="button"
+            <div className="mt-4 space-y-2">
+              <Button
+                className="w-full"
                 data-testid="find-time-book"
                 disabled={!selectedHour || stale}
                 onClick={book}
-                style={{ ...primaryButton, opacity: selectedHour && !stale ? 1 : 0.4, cursor: selectedHour && !stale ? 'pointer' : 'default' }}
               >
                 {selectedHour ? `Book ${fmtDay(selectedHour.date)} · ${fmtHour(selectedHour.start)}` : 'Tap a time to book it'}
-              </button>
-              <div style={{ ...noteStyle, marginTop: 8, fontSize: 12 }}>
+              </Button>
+              <div className="text-ui-caption text-ink-secondary">
                 Opens New Appointment with this day, hour and address. Pick the service there: its time box checks the hour and the technician. Nothing is saved until you save there.
               </div>
             </div>
           </div>
         )}
-      </div>
-    </div>,
-    document.body,
+      </SheetBody>
+    </Sheet>
   );
 }

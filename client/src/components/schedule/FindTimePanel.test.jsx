@@ -167,7 +167,7 @@ describe('FindTimePanel', () => {
     // The next answer hangs, so the rows on screen are the 60-minute ones.
     fetcher.mockImplementation(() => new Promise((resolve) => { release = resolve; }));
     fireEvent.change(screen.getByLabelText('Visit length (for the search)'), { target: { value: '120' } });
-    await waitFor(() => expect(screen.getByTestId('find-time-results').style.opacity).toBe('0.6'));
+    await waitFor(() => expect(screen.getByTestId('find-time-results').className).toContain('opacity-60'));
     const chips = screen.getAllByTestId('availability-hour');
     expect(chips.every((chip) => chip.disabled)).toBe(true);
     const book = screen.getByTestId('find-time-book');

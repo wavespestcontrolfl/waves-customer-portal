@@ -3642,8 +3642,9 @@ const gates = {
   // panel on the admin Dispatch board. Office staff on a call with a NEW caller
   // type an address and see the best hours for it (the find-time best-times
   // chips, no customer record needed); tapping a chip opens New Appointment
-  // filled with that day, hour and technician and the address in its New
-  // customer block. The panel itself writes nothing. It needs
+  // filled with that day and hour and the address in its New customer
+  // block; the form's own time box then re-checks the hour for the chosen
+  // service and technician. The panel itself writes nothing. It needs
   // GATE_BEST_TIME_HINTS + GATE_RESCHEDULE_AVAILABILITY on to get an answer;
   // without them it says best times are off. OFF in every environment; the
   // admin schedule day view carries it to the page (findTimePanel). Kill
