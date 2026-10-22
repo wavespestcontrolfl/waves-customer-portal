@@ -2218,6 +2218,14 @@ const gates = {
   // voicemail's open Needs Review cards and dismisses its open callback
   // promise, so a settled voicemail stops asking for work (2026-10-09 audit).
   callbackSpamClosesParent: process.env.GATE_CALLBACK_SPAM_CLOSES_PARENT === 'true',
+  // Callback spoken-number link (2026-10-20 audit): an office callback dials the
+  // voicemail's caller ID, but the caller may have spoken another number to ring
+  // back, already a customer's primary phone (a quote form filed minutes
+  // later). On, the call pass tries that number as a second chance before it
+  // would create a customer. Nothing is sent or written to the phone fields.
+  // Strict opt-in, read at call time via callbackSpokenNumberLinkLive(). Off =
+  // today's behavior. Rollback: unset.
+  callbackSpokenNumberLink: process.env.GATE_CALLBACK_SPOKEN_NUMBER_LINK === 'true',
   // Missed-call bell and push say more (owner "ALL" 2026-10-20): the line the
   // caller dialed, how many seconds they stayed on, and a customer's next
   // visit date. Admin copy only; nothing reaches a customer. Off = today's
@@ -6251,6 +6259,14 @@ function callFirstNameAdvisoryLive() {
   return process.env.GATE_CALL_FIRST_NAME_ADVISORY === 'true';
 }
 
+// GATE_CALLBACK_SPOKEN_NUMBER_LINK read at CALL time — strict `=== 'true'`, dark by
+// default. The canonical reader for call-recording-processor.js
+// findCustomerViaCallbackSpokenNumber. The `callbackSpokenNumberLink` gates-map
+// entry above is for logGateStatus only.
+function callbackSpokenNumberLinkLive() {
+  return process.env.GATE_CALLBACK_SPOKEN_NUMBER_LINK === 'true';
+}
+
 // GATE_CALL_LAST_NAME_LOOKUP read at CALL time — strict `=== 'true'`, dark by
 // default (owner ruling 2026-10-08). The canonical reader for
 // services/call-last-name-lookup.js: on, a call that left a customer with a
@@ -6831,6 +6847,7 @@ module.exports.callCommercialAssessmentBookingLive = callCommercialAssessmentBoo
 module.exports.callExtractionSystemPromptLive = callExtractionSystemPromptLive;
 module.exports.callSpellingCollapseTriggerLive = callSpellingCollapseTriggerLive;
 module.exports.callFirstNameAdvisoryLive = callFirstNameAdvisoryLive;
+module.exports.callbackSpokenNumberLinkLive = callbackSpokenNumberLinkLive;
 module.exports.callLeadFormAddressStreetLevelLive = callLeadFormAddressStreetLevelLive;
 module.exports.bookPreferredTimeLive = bookPreferredTimeLive;
 module.exports.lawnWateringRuleLive = lawnWateringRuleLive;
