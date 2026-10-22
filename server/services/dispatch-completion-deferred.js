@@ -151,9 +151,10 @@ async function finalizeDeferredCompletionSend(claimMeta = {}, { retry = false } 
   // function from a finalize_only retry row when any of them failed —
   // without that retry, one transient DB error after the SMS delivered
   // would permanently leave the invoice in draft or double-send the
-  // review ask. The notes/event writes below stay cosmetic best-effort
-  // (an event-row duplicate on retry would mislead analytics, a missed
-  // one loses nothing).
+  // review ask. The notes write is a state step too (the after-report review
+  // hold reads its delivered-at stamp); the event write stays cosmetic
+  // best-effort (an event-row duplicate on retry would mislead analytics, a
+  // missed one loses nothing).
   let ok = true;
 
   // Invoice pay link delivered → draft becomes sent, follow-ups schedule.
@@ -215,6 +216,11 @@ async function finalizeDeferredCompletionSend(claimMeta = {}, { retry = false } 
         ),
       });
     } catch (err) {
+      // A STATE step since GATE_REVIEW_ASK_AFTER_REPORT: the review ask waits
+      // for completionSmsDeferredDeliveredAt, so a missed stamp would hold it
+      // for a day. The merge is idempotent (the delivered-at stamp is written
+      // once), so the finalize_only retry may re-run it.
+      ok = false;
       logger.warn(`[completion-deferred] notes update failed for record ${recordId}: ${err.message}`);
     }
     // Not on retries — the event insert is not idempotent and a duplicate

@@ -8154,6 +8154,21 @@ describe('GATE_REVIEW_ASK_AFTER_REPORT — Day-0 ask 10 minutes after the report
         expect(JSON.parse(mock.__state.rows.review_sequences[0].decision || '{}').reason).not.toBe('report_pending');
       });
 
+      test('a held report whose replay then failed moves the ask to the smart window from its release', async () => {
+        freezeAt('2026-10-20T12:11:00Z'); // 8:11 AM ET, the 8:00 replay died
+        mockGates.reviewAskAfterReport = true;
+        const mock = book({ completionSmsStatus: 'failed', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z', completionSmsError: 'deferred replay terminally blocked' }, { started_at: new Date('2026-10-20T01:00:00Z'), service_type: 'Quarterly Pest Control' });
+        db.mockImplementation(mock);
+
+        const out = await ReviewService._runSequenceStep('seq-rp');
+
+        expect(out).toMatchObject({ ran: false, deferred: true, reason: 'report_pending' });
+        expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+        const smart = ReviewService.__private.calculateReviewSendPlan(new Date('2026-10-20T12:00:00.000Z'), 'Quarterly Pest Control', { jitter: false }).at;
+        expect(new Date(mock.__state.rows.review_sequences[0].next_run_at).getTime()).toBe(smart.getTime());
+        expect(smart.getTime()).toBeGreaterThan(Date.now());
+      });
+
       test('report delivered 3 minutes ago: waits until 10 minutes after its delivery', async () => {
         freezeAt('2026-10-20T12:13:00Z');
         mockGates.reviewAskAfterReport = true;
@@ -8250,8 +8265,8 @@ describe('GATE_REVIEW_ASK_AFTER_REPORT — Day-0 ask 10 minutes after the report
         expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
       });
 
-      test('failed report text: the ask is not held forever behind it', async () => {
-        freezeAt('2026-10-20T12:11:00Z');
+      test('failed report text: the ask is not held forever behind it (past its smart window it runs)', async () => {
+        freezeAt('2026-10-20T19:00:00Z'); // 3 PM ET, well past the smart window from the 8 AM release
         mockGates.reviewAskAfterReport = true;
         db.mockImplementation(book({ completionSmsStatus: 'failed', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z' }));
         expect((await ReviewService._runSequenceStep('seq-rp'))?.reason).not.toBe('report_pending');

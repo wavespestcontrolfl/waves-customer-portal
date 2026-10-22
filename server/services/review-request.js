@@ -2023,6 +2023,19 @@ const ReviewService = {
       // the Automatic ask.
       if (this.completionReviewDelay(notes) !== undefined) return null;
       if (notes.completionSmsStatus === "deferred" && !notes.completionSmsDeferredDeliveredAt) return { retryAt };
+      // A held report whose replay then died (terminalDeferredCompletionSend
+      // writes 'failed' and keeps completionSmsDeferredTo): the ask was planned
+      // for its release + 10 min, so move it to the smart window a failed text
+      // gets, computed from the release time (jitter off, so every recheck
+      // names the same instant).
+      if (notes.completionSmsStatus === "failed" && notes.completionSmsDeferredTo && !notes.completionSmsDeferredDeliveredAt) {
+        const releasedAt = new Date(notes.completionSmsDeferredTo);
+        if (!Number.isNaN(releasedAt.getTime())) {
+          const smartAt = calculateReviewSendPlan(releasedAt, seq.service_type, { jitter: false }).at;
+          if (smartAt && Date.now() < smartAt.getTime()) return { retryAt: smartAt };
+        }
+        return null;
+      }
       if (notes.completionSmsDeferredDeliveredAt) {
         const deliveredMs = new Date(notes.completionSmsDeferredDeliveredAt).getTime();
         const readyMs = deliveredMs + REVIEW_AFTER_REPORT_DELAY_MINUTES * 60000;

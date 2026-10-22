@@ -161,6 +161,12 @@ test('the delivered-at stamp is only added when the record has none; status is a
   expect(Number.isNaN(Date.parse(stamp.completionSmsDeferredDeliveredAt))).toBe(false);
 });
 
+test('a failed delivered-at stamp is a state failure, so the finalize-only retry re-runs it (the after-report review hold reads it)', async () => {
+  chain.update.mockImplementationOnce(() => Promise.reject(new Error('transient')));
+  expect(await finalizeDeferredCompletionSend({ service_record_id: 'rec-2' })).toEqual({ ok: false });
+  expect(await finalizeDeferredCompletionSend({ service_record_id: 'rec-2' }, { retry: true })).toEqual({ ok: true });
+});
+
 test('wrapper invoice completion forwards the original App witness on finalize-only retry', async () => {
   const Invoice = require('../services/invoice');
   const meta = { invoice_id: 'inv-1', mark_invoice_delivery: true, app_event_already_visible_at: '2026-09-08T15:00:00Z' };
