@@ -88,19 +88,19 @@ function providerAlreadyNoted(existing, callDate, name) {
 }
 
 // GATE_CALL_ENRICH_CODES_REQUIRE_ANI: the call's far-end number (caller ID on an
-// inbound call) must be a number on the customer's file — the primary phone or a
-// service-contact phone — before the call may write gate / garage / lockbox codes
-// or access notes. The customer id can come from a callback number the caller
-// SPOKE, and a spoken number proves nothing about who is on the line.
+// inbound call) must be the customer's PRIMARY phone before the call may write
+// gate / garage / lockbox codes or access notes. The customer id can come from a
+// callback number the caller SPOKE, and a spoken number proves nothing about who
+// is on the line. Service-contact slot phones do not count: the same call can
+// file the caller as a new service contact (persistCallSecondaryContact) before
+// this runs, which would let the caller vouch for themselves. This matches the
+// SMS path, which auto-applies only for the account's sole primary phone.
 const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
 async function callerPhoneOnFile(customerId, callerPhone) {
   const key = last10(callerPhone);
   if (key.length !== 10) return false;
-  const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
-  const cust = await db('customers').where({ id: customerId }).first();
-  if (!cust) return false;
-  return [cust.phone, ...SERVICE_CONTACT_SLOTS.map((slot) => cust[slot.phone])]
-    .some((phone) => last10(phone) === key);
+  const cust = await db('customers').where({ id: customerId }).first('phone');
+  return !!cust && last10(cust.phone) === key;
 }
 
 /**
@@ -124,7 +124,7 @@ async function enrichFromCall({ customerId, extraction, legacy = null, callCreat
       // account. Otherwise skip them (pets and internal color are unchanged);
       // the office still hears the call, and the SMS path files codes for accept.
       if (!(await callerPhoneOnFile(customerId, callerPhone))) {
-        logger.warn(`[profile-enrichment] customer ${customerId}: caller ID not on file — access codes and notes not written`);
+        logger.warn(`[profile-enrichment] customer ${customerId}: caller ID is not the primary phone — access codes and notes not written`);
         accessNotes = null;
       }
     }

@@ -156,11 +156,11 @@ describe('GATE_CALL_ENRICH_CODES_REQUIRE_ANI', () => {
     expect(pref.u.access_notes).toContain('front gate code is 4545');
   });
 
-  test('gate on, caller ID is a service-contact phone on the account: written', async () => {
+  test('gate on, caller ID is only a service-contact phone (maybe filed by this same call): skipped', async () => {
     callEnrichCodesRequireAniLive.mockReturnValue(true);
     const writes = setup({ service_contact_phone: '+19415550177' });
-    await enrichFromCall({ customerId: 'c1', extraction, callerPhone: '+19415550177' });
-    expect(writes.find((w) => w.table === 'property_preferences').u.property_gate_code).toBe('4545');
+    await enrichFromCall({ customerId: 'c1', extraction: { property: { access_notes: 'front gate code is 4545' } }, callerPhone: '+19415550177' });
+    expect(writes).toEqual([]);
   });
 
   test('gate off: written with no caller ID check, as before', async () => {
