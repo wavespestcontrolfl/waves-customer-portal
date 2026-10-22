@@ -284,10 +284,12 @@ describe('invoice-followups passes the operator exemption for "send now" only', 
   const src = require('fs').readFileSync(require('path').join(__dirname, '../services/invoice-followups.js'), 'utf8');
 
   test('the ladder consult forwards holdExempt "operator" only for an operator-initiated touch (automated touches wait)', () => {
-    expect(src).toMatch(/collectionsChannelPermitted\(row\.customer_id, row\.invoice_id, channel, ownLedgerIds, true, mdPending, operatorInitiated \? 'operator' : null\)/);
+    expect(src).toMatch(/collectionsChannelPermitted\(row\.customer_id, row\.invoice_id, channel, ownLedgerIds, true, mdPending, holdExempt\)/);
+    // the exemption is the page's own Send-now only: an approved (bar) send never has it
+    expect(src).toMatch(/const holdExempt = operatorInitiated && !bar \? 'operator' : null;/);
     expect(src).toMatch(/\.\.\.\(holdExempt \? \{ holdExempt \} : \{\}\)/);
     // the operator flag is set by sendNextTouchNow's caller and threads fireStep -> fireTouch
-    expect(src).toMatch(/await fireStep\(row, \{ operatorInitiated, approved, report: reportOut(, claim: approvedClaim && \{ preClaimed: true, claimStamp: approvedClaim \})? \}\)/);
+    expect(src).toMatch(/await fireStep\(row, \{ operatorInitiated, approved, report: reportOut(, claim)? \}\)/);
     expect(src).toMatch(/await fireTouch\(row, \{ operatorInitiated(, claimStamp)?(, verificationOnly: !!ownedBy)?(, report)?(, approved)?(, expectedContentHash: [^}]+)? \}\)/);
   });
 });

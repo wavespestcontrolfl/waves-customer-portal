@@ -324,7 +324,7 @@ async function controlThrown(spec, plan, base, err) {
   const now = await readReminder(plan.invoice_id).catch(() => null);
   if (now && spec.done.includes(now.status)) {
     return { ...base, success: true, reminder_status: now.status, sent_to_customer: false, warning: true,
-      note: `The reminders on invoice ${plan.invoice_number} are now ${now.status.replace('_', ' ')}, but the Invoices page reported a problem. Check the invoice.` };
+      note: `The reminders on invoice ${plan.invoice_number} are now ${controlOutcomeWords(spec.control, now.status)}, but the Invoices page reported a problem. Check the invoice.` };
   }
   logger.error(`[intelligence-bar:invoice-reminders] ${spec.control} handler failed (${err.code || err.name || 'error'})`);
   return { ...base, outcome_unknown: true, code: 'execution_interrupted',
@@ -342,6 +342,14 @@ function controlRefusal({ status, json }, base) {
   }
   if (status === 200) return null;
   return { ...base, failed: true, code: status === 404 ? 'not_found' : 'reminder_refused', error: `The reminders were not changed: ${json?.error || 'the Invoices page refused it'}` };
+}
+
+// The stored state after a control, in words. A resume can land in two other states than "active again": finished (every step
+// was used) and held for Auto Pay (the customer is still on Auto Pay, so the reminders wait there until Auto Pay ends or fails).
+function controlOutcomeWords(control, status) {
+  if (status === 'completed') return 'finished (every step was used)';
+  if (status === 'autopay_hold') return 'still held for Auto Pay, not active (they stay off while the customer is on Auto Pay)';
+  return { pause: 'paused', resume: 'active again', stop: 'stopped' }[control];
 }
 
 async function commitControl(toolName, input, actionContext) {
@@ -366,9 +374,9 @@ async function commitControl(toolName, input, actionContext) {
       error: 'The Invoices page answered, but the reminders do not read as changed. Check the invoice before trying again.' };
   }
   logger.info(`[intelligence-bar:invoice-reminders] ${spec.control} reminders on ${plan.invoice_id}`);
-  const word = { pause: 'paused', resume: 'active again', stop: 'stopped' }[spec.control];
   return { ...base, success: true, reminder_status: now.status, sent_to_customer: false,
-    note: `The reminders on invoice ${plan.invoice_number} are ${now.status === 'completed' ? 'finished (every step was used)' : word}. Nothing was sent to anyone.` };
+    ...(now.status === 'autopay_hold' ? { held_for_autopay: true } : {}),
+    note: `The reminders on invoice ${plan.invoice_number} are ${controlOutcomeWords(spec.control, now.status)}. Nothing was sent to anyone.` };
 }
 
 // ── send_invoice_reminder_now ──────────────────────────────────

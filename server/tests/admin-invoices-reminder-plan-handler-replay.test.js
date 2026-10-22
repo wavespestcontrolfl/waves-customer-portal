@@ -192,6 +192,7 @@ describe('send-now: the bar hands the card’s pin to the service, which judges 
 describe('schedule-send: the bar adds the card’s edit time as one more predicate on the UPDATE', () => {
   let updateQb;
   let readQb;
+  let lockQb;
   beforeEach(() => {
     readQb = recorder({ first: async () => ({ payer_statement_id: null, scheduled_send_error: null }) });
     updateQb = recorder({ returning: async () => [{ id: INV, status: 'scheduled', scheduled_send_at: new Date('2099-01-15T14:30:00Z') }] });
@@ -200,7 +201,17 @@ describe('schedule-send: the bar adds the card’s edit time as one more predica
       const used = db.mock.calls.length;
       return used <= 2 ? readQb : updateQb;
     });
+    // The bar's UPDATE runs inside a transaction that first locks the invoice row (the live ownership check).
+    wireTransaction();
+    require('../services/invoice-payer-ownership').invoicePayerOwnership.mockResolvedValue(null);
   });
+  function wireTransaction() {
+    lockQb = recorder({ first: async () => ({ id: INV, customer_id: 'cust-1', payer_id: null }) });
+    const trx = jest.fn(() => (trx.mock.calls.length === 1 ? lockQb : updateQb));
+    trx.isTransaction = true;
+    trx.fn = { now: jest.fn(() => 'NOW()') };
+    db.transaction.mockImplementation(async (cb) => cb(trx));
+  }
 
   test('the page’s UPDATE has no edit-time predicate', async () => {
     const result = await page('/schedule-send', { scheduledFor: FUTURE, ibApprovedSchedule: { updatedAtMs: 1 } });
@@ -229,6 +240,23 @@ describe('schedule-send: the bar adds the card’s edit time as one more predica
     db.mockClear();
     const viaPage = await page('/schedule-send', { scheduledFor: FUTURE });
     expect(viaPage).toEqual({ status: 404, json: { error: 'Not found' } });
+  });
+
+  test('the bar’s schedule is refused on the locked row when the live resolver names a payer (every invoice column untouched) or cannot answer; the page is not asked', async () => {
+    const Ownership = require('../services/invoice-payer-ownership');
+    for (const verdict of ['payer_owned', 'payer_unverifiable']) {
+      Ownership.invoicePayerOwnership.mockResolvedValue(verdict);
+      db.mockClear();
+      wireTransaction();
+      const bar = await router.scheduleSendFromBar({ invoiceId: INV, body: { scheduledFor: FUTURE }, actor: BAR_ACTOR, approvedSchedule: { updatedAtMs: UPDATED_MS } });
+      expect(bar.status).toBe(409);
+      expect(bar.json).toMatchObject({ code: 'PREVIEW_CHANGED' });
+    }
+    expect(called(lockQb, 'forUpdate')).not.toEqual([]);
+    expect(called(updateQb, 'update')).toEqual([]);
+    db.mockClear();
+    expect((await page('/schedule-send', { scheduledFor: FUTURE })).status).toBe(200);
+    expect(Ownership.invoicePayerOwnership).toHaveBeenCalledTimes(2);
   });
 
   test('the handler’s own time checks reach the bar unchanged', async () => {
@@ -377,6 +405,23 @@ describe('payment plans: the real create and cancel handlers', () => {
       expect(planUpdates).toHaveLength(2);
       expect(planUpdates[0]).toMatchObject({ status: 'cancelled', cancelled_by: 'admin-1' });
       expect(planUpdates[1]).toMatchObject({ status: 'cancelled', cancelled_by: 'Pat Staff' });
+    });
+
+    test('a plan another admin already cancelled: the page treats it as an idempotent retry (200), the bar’s approval is 409 PREVIEW_CHANGED with no re-arm and no audit', async () => {
+      const gone = () => {
+        let n = 0;
+        trxPlans = recorder({ first: async () => (++n === 1 ? undefined : { ...PLAN, status: 'cancelled' }) });
+      };
+      gone();
+      const viaPage = await page('/payment-plan/cancel', { paymentPlanId: 'plan-1' });
+      expect(viaPage.status).toBe(200);
+      expect(viaPage.json).toMatchObject({ alreadyCancelled: true });
+      gone();
+      trxFollowups = recorder({ first: async () => undefined });
+      const viaBar = await router.cancelPaymentPlanFromBar({ invoiceId: INV, body: { paymentPlanId: 'plan-1' }, actor: BAR_ACTOR, approvedCancel: { planId: 'plan-1' } });
+      expect(viaBar.status).toBe(409);
+      expect(viaBar.json).toMatchObject({ code: 'PREVIEW_CHANGED' });
+      expect(trxFollowups.calls.filter(([n]) => n === 'forUpdate' || n === 'update')).toEqual([]);
     });
 
     test('the plan id is required, exactly as on the page', async () => {

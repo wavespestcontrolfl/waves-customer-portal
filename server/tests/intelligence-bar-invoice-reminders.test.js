@@ -245,6 +245,19 @@ describe('pause, resume and stop', () => {
     expect(buildContract({ toolName: 'pause_invoice_reminders', params: { invoice_id: INV }, displayParams: {}, preview: pause, summary: 'x' }).irreversible).toBeFalsy();
   });
 
+  test('a resume that lands in Auto Pay hold is reported as still held, not "active again"', async () => {
+    state.invoice_followup_sequences[0].status = 'paused';
+    const card = await call('resume_invoice_reminders');
+    Invoices.followupControlFromBar.mockImplementationOnce(async () => {
+      state.invoice_followup_sequences[0].status = 'autopay_hold';
+      return { status: 200, json: { ok: true } };
+    });
+    const result = await confirm('resume_invoice_reminders', card);
+    expect(result).toMatchObject({ success: true, reminder_status: 'autopay_hold', held_for_autopay: true });
+    expect(result.note).toMatch(/still held for Auto Pay, not active/);
+    expect(result.note).not.toMatch(/active again/);
+  });
+
   test('resume on a future-due reminder does not promise an early send', async () => {
     state.invoice_followup_sequences[0].status = 'paused';
     state.invoice_followup_sequences[0].anchor_at = new Date('2099-06-01T12:00:00Z');

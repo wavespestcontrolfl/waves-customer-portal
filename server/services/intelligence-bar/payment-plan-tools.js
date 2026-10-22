@@ -476,6 +476,19 @@ function planEmailState(result) {
   return { state: 'unknown' };
 }
 
+// The handler's answer when it did not cancel (or cancelled but could not re-arm), in the tool's words, or null for a 200.
+function cancelRefusal({ status, json }, base, plan) {
+  if (status === 502 && json?.paymentPlan?.status === 'cancelled') {
+    return { ...base, success: true, warning: true, code: 'reminders_not_rearmed',
+      note: `The plan on invoice ${plan.invoice_number} is cancelled, but re-arming its reminders failed. Its reminders stay off until someone re-arms them; tell the office.` };
+  }
+  if (status === 409 && json?.code === 'PREVIEW_CHANGED') {
+    return { ...base, failed: true, code: 'preview_changed', preview_changed: true, error: `Nothing was cancelled: ${json.error}` };
+  }
+  if (status === 200) return null;
+  return { ...base, failed: true, code: status === 404 ? 'not_found' : 'cancel_refused', error: `The plan was not cancelled: ${json?.error || 'the Invoices page refused it'}` };
+}
+
 async function commitCancel(input, actionContext) {
   const { plan, refusal: refused } = await verifiedPlan(() => buildCancelPlan(input), input._verified_payment_plan_version, 'cancel');
   if (refused) return refused;
@@ -484,6 +497,7 @@ async function commitCancel(input, actionContext) {
   try {
     result = await require('../../routes/admin-invoices').cancelPaymentPlanFromBar({
       invoiceId: plan.invoice_id, body: plan._body, actor: await actorOf(actionContext),
+      approvedCancel: { planId: plan.payment_plan_id },
     });
   } catch (err) {
     logger.error(`[intelligence-bar:payment-plan] cancel handler failed (${err.code || err.name || 'error'})`);
@@ -494,14 +508,9 @@ async function commitCancel(input, actionContext) {
     return { ...base, outcome_unknown: true, code: 'execution_interrupted',
       error: 'Cancelling the plan was interrupted — it may or may not have happened. Check the invoice before trying again.' };
   }
-  const { status, json } = result;
-  if (status === 502 && json?.paymentPlan?.status === 'cancelled') {
-    return { ...base, success: true, warning: true, code: 'reminders_not_rearmed',
-      note: `The plan on invoice ${plan.invoice_number} is cancelled, but re-arming its reminders failed. Its reminders stay off until someone re-arms them; tell the office.` };
-  }
-  if (status !== 200) {
-    return { ...base, failed: true, code: status === 404 ? 'not_found' : 'cancel_refused', error: `The plan was not cancelled: ${json?.error || 'the Invoices page refused it'}` };
-  }
+  const refusedByHandler = cancelRefusal(result, base, plan);
+  if (refusedByHandler) return refusedByHandler;
+  const { json } = result;
   if (json?.completedInsteadOfCancelled) {
     return { ...base, success: true, completed_instead: true, note: 'The invoice settled while cancelling, so the plan was completed, not cancelled.' };
   }

@@ -830,3 +830,51 @@ describe('pre-send exits report explicit legs', () => {
     expect(await sendNow({ approved: APPROVED, report: true })).toMatchObject({ ok: false, reason: 'preview_changed' });
   });
 });
+
+// The dispute-hold exemption belongs to the Invoices page's own operator Send-now. The bar's approved send never has it, on any
+// leg: a hold created after the card was shown stops the policy check, the text and the email.
+describe('the approved send has no dispute-hold exemption', () => {
+  const RailGuard = require('../services/collections/rail-guard');
+  const Holds = require('../services/collections/collection-hold');
+
+  test('the bar: no holdExempt on the policy check or the text, no operator email category, and the email handoff honors a dispute hold', async () => {
+    const result = await sendNow({ approved: APPROVED, report: true });
+    expect(result.report.legs).toEqual({ sms: { state: 'sent' }, email: { state: 'sent' } });
+    for (const [arg] of RailGuard.collectionsChannelPermitted.mock.calls) expect(arg.holdExempt).toBeUndefined();
+    const text = sendCustomerMessage.mock.calls[0][0];
+    expect(text.operatorInitiated).toBe(true);
+    expect(text).not.toHaveProperty('holdExempt');
+    const email = EmailTemplates.sendTemplate.mock.calls[0][0];
+    expect(email.categories).not.toContain(Holds.OPERATOR_INITIATED_EMAIL_CATEGORY);
+    // A dispute hold that appears before the provider handoff stops the email: the handoff asks without ignoring it.
+    Holds.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: true, reasons: ['dispute'] });
+    const dispatch = jest.fn();
+    const outcome = await email.withProviderHandoff(dispatch);
+    expect(Holds.messagingHeldByCollectionHold).toHaveBeenLastCalledWith('cust-1', expect.anything(), { ignoreDisputeHold: false });
+    expect(outcome.ok).toBe(false);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test('a dispute hold standing at the policy check holds both legs of the bar’s send (it is not exempt)', async () => {
+    RailGuard.collectionsChannelPermitted.mockImplementation(async ({ detail, holdExempt }) => (detail ? { allowed: holdExempt === 'operator', durable: false, hold: true } : holdExempt === 'operator'));
+    try {
+      const result = await sendNow({ approved: APPROVED, report: true });
+      expect(result.report.legs).toEqual({ sms: { state: 'held', reason: 'collections_policy_denied' }, email: { state: 'held', reason: 'collections_policy_denied' } });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      // The page's own Send-now keeps the exemption.
+      fresh();
+      install();
+      jest.clearAllMocks();
+      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, deliveryOutcome: 'accepted', providerMessageId: 'sms-1' });
+      await sendNow();
+      expect(sendCustomerMessage.mock.calls[0][0].holdExempt).toBe('operator');
+      expect(EmailTemplates.sendTemplate.mock.calls[0][0].categories).toContain(Holds.OPERATOR_INITIATED_EMAIL_CATEGORY);
+      const [pageEmail] = EmailTemplates.sendTemplate.mock.calls[0];
+      Holds.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: false });
+      await pageEmail.withProviderHandoff(jest.fn());
+      expect(Holds.messagingHeldByCollectionHold).toHaveBeenLastCalledWith('cust-1', expect.anything(), { ignoreDisputeHold: true });
+    } finally {
+      RailGuard.collectionsChannelPermitted.mockImplementation(async ({ detail }) => (detail ? { allowed: true, durable: false } : true));
+    }
+  });
+});

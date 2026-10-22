@@ -439,7 +439,16 @@ describe('cancel_payment_plan', () => {
     expect(Invoices.cancelPaymentPlanFromBar).toHaveBeenCalledWith({
       invoiceId: INV, body: { paymentPlanId: PLAN, reason: 'paid by check' },
       actor: { technicianId: 'staff-1', name: 'Pat Staff', email: 'pat.staff@example.com' },
+      approvedCancel: { planId: PLAN },
     });
+  });
+
+  test('a plan the handler finds no longer active (another admin cancelled it) is preview_changed, never reported as this approval’s cancel', async () => {
+    const card = await cancel();
+    Invoices.cancelPaymentPlanFromBar.mockResolvedValueOnce({ status: 409, json: { error: 'The payment plan changed after the card was shown (it is no longer active), so nothing was cancelled.', code: 'PREVIEW_CHANGED' } });
+    const result = await confirmCancel(card);
+    expect(result).toMatchObject({ failed: true, code: 'preview_changed', preview_changed: true });
+    expect(result).not.toHaveProperty('success');
   });
 
   test('a replacement plan, a changed plan, a changed reminder row or a changed invoice refuses at Confirm', async () => {

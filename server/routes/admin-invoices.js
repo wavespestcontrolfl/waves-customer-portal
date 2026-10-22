@@ -1894,6 +1894,16 @@ async function invoiceSendHandler(req, res, next) {
   }
 }
 
+// The bar's schedule-send, on the locked invoice row: runs `update` only while the debt verifiably is still the customer's
+// (null verdict). A payer, or an answer that cannot be verified, schedules nothing ([] = the handler's PREVIEW_CHANGED).
+async function scheduleIfCustomerOwned(invoiceId, update) {
+  return db.transaction(async (trx) => {
+    const locked = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+    if (!locked || await require('../services/invoice-payer-ownership').invoicePayerOwnership(locked, trx) !== null) return [];
+    return update(trx);
+  });
+}
+
 // POST /:id/schedule-send — send invoice later via the scheduler.
 // Named so the Intelligence Bar's schedule_invoice_send card (scheduleSendFromBar, below) runs this very handler.
 const invoiceScheduleSendHandler = async (req, res, next) => {
@@ -1926,7 +1936,7 @@ const invoiceScheduleSendHandler = async (req, res, next) => {
       });
     }
 
-    const [invoice] = await db('invoices')
+    const scheduleUpdate = (dbh) => dbh('invoices')
       .where({ id: req.params.id })
       .whereIn('status', ['draft', 'scheduled'])
       .whereNull('payer_statement_id')
@@ -1948,6 +1958,9 @@ const invoiceScheduleSendHandler = async (req, res, next) => {
         updated_at: new Date(),
       })
       .returning('*');
+    // The bar's schedule also re-asks, on the LOCKED invoice row, who owes the invoice right now (the live Bill-To resolver: a
+    // payer assigned through the customer default or the scheduled service leaves every invoice column below untouched).
+    const [invoice] = req.ibApprovedSchedule ? await scheduleIfCustomerOwned(req.params.id, scheduleUpdate) : await scheduleUpdate(db);
     if (!invoice) {
       if (req.ibApprovedSchedule) return res.status(409).json({ error: 'The invoice changed after the card was shown, so nothing was scheduled.', code: 'PREVIEW_CHANGED' });
       return res.status(404).json({ error: 'Not found' });
@@ -3603,6 +3616,13 @@ const paymentPlanCancelHandler = async (req, res, next) => {
             .where({ invoice_id: id, status: 'cancelled', id: expectedPlanId })
             .orderBy('cancelled_at', 'desc')
             .first();
+          // req.ibApprovedPlanCancel is set only by cancelPaymentPlanFromBar (never an HTTP field): the card approved cancelling
+          // THIS active plan, so a plan another admin already cancelled is not this approval's work. No retry path for the
+          // bar: PREVIEW_CHANGED, and nothing is reported as done by it.
+          if (req.ibApprovedPlanCancel) {
+            const e = new Error('The payment plan changed after the card was shown (it is no longer active), so nothing was cancelled.');
+            e.statusCode = 409; e.previewChanged = true; throw e;
+          }
           if (lastCancelled) return { invoice, plan: lastCancelled, alreadyCancelled: true, rearm: await rearmFollowupsForCancelledPlan(trx, id, lastCancelled.id) };
           const e = new Error('Invoice has no active payment plan'); e.statusCode = 409; throw e;
         }
@@ -3649,7 +3669,7 @@ const paymentPlanCancelHandler = async (req, res, next) => {
       });
     } catch (err) {
       if (err?.statusCode === 404 || err?.statusCode === 409) {
-        return res.status(err.statusCode).json({ error: err.message });
+        return res.status(err.statusCode).json({ error: err.message, ...(err.previewChanged ? { code: 'PREVIEW_CHANGED' } : {}) });
       }
       throw err;
     }
@@ -3957,8 +3977,10 @@ function createPaymentPlanFromBar({ invoiceId, body, actor, approvedPlan }) {
     ibApprovedPlan: approvedPlan,
   }));
 }
-function cancelPaymentPlanFromBar({ invoiceId, body, actor }) {
+// approvedCancel: { planId } — the active plan the cancel card showed; a plan no longer active under the lock is PREVIEW_CHANGED.
+function cancelPaymentPlanFromBar({ invoiceId, body, actor, approvedCancel }) {
   return runInvoiceHandler(paymentPlanCancelHandler, barRequest(invoiceId, body, actor, {
+    ibApprovedPlanCancel: approvedCancel,
     technician: actor?.name || actor?.email ? { name: actor.name || null, email: actor.email || null } : undefined,
   }));
 }
