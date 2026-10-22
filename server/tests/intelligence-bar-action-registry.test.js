@@ -370,8 +370,13 @@ const SCOPE_SNAPSHOT = {
     // convert_lead carries lead_id + customer_id (validateRecordTarget binds both to the task customer).
     'convert_lead',
     'void_invoice',
+    // The invoice reminder and payment-plan cards carry invoice_id (or invoice_number, bound like send_invoice's).
+    'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send',
+    'create_payment_plan', 'cancel_payment_plan',
     // create_invoice carries customer_id: the draft invoice is that customer's own.
     'create_invoice',
+    // set_customer_bill_to carries customer_id: the Bill-To and invoices it moves are that customer's own.
+    'set_customer_bill_to',
     'add_customer_property', 'assign_technician', 'block_sender', 'bulk_update_customers', 'bulk_update_leads', 'cancel_appointment', 'cancel_plan',
     'create_agent_estimate_draft',
     // reprice_future_visits carries customer_id; every visit it changes is that customer's own.

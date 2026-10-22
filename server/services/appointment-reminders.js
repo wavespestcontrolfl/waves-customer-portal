@@ -135,9 +135,15 @@ async function hasTextReachableApptRecipient(customer, prefsRow = undefined) {
   // count as text-reachable, or the no-reachable-channel human alert gets
   // suppressed by a phone we deliberately are not texting (#2956 r4).
   const { filterRecipientsByOptin } = require('./recipient-optin');
-  const reachableContacts = await filterRecipientsByOptin(
+  const optedIn = await filterRecipientsByOptin(
     getAppointmentContacts(customer, prefs || {}), customer.id
   ).catch(() => getAppointmentContacts(customer, prefs || {}));
+  // A contact who switched their own texts off (contact login,
+  // GATE_CONTACT_LOGIN) is not text-reachable either, whatever the SMS log
+  // says about last month (codex #6363 r3 P2). Fails closed like the send
+  // path: an unreadable table holds the contact, so the alert still fires.
+  const reachableContacts = await require('./contact-notification-prefs')
+    .filterContactsByOwnPrefs(optedIn, customer.id, null, { channel: 'sms' });
   for (const contact of reachableContacts) {
     const digits = lastTenDigits(contact.phone);
     if (!digits) continue;
@@ -1735,7 +1741,7 @@ async function renderCancellationBody({ customer, contact, record, scheduledServ
 // Who an appointment notice goes to, before any send-time hold: the appointment contacts, minus third parties still
 // waiting on their double opt-in, with the account holder as the fallback (never over an explicit opt-out). The ONE
 // resolution safeSendAppointment sends with and the Intelligence Bar cancel card previews.
-async function resolveNoticeContacts(customer, prefs, messageType) {
+async function resolveNoticeContacts(customer, prefs, messageType, purpose = 'appointment') {
   const contacts = getAppointmentContacts(customer, prefs);
   if (!contacts.length) return { contacts, allowedContacts: [] };
   // Recipient double opt-in hold (gated): third-party contacts the portal
@@ -1744,6 +1750,12 @@ async function resolveNoticeContacts(customer, prefs, messageType) {
   // en-route/arrived loops; fail-open on lookup errors.
   const { filterRecipientsByOptin } = require('./recipient-optin');
   let allowedContacts = await filterRecipientsByOptin(contacts, customer.id);
+  // The contact's OWN choices (contact login, GATE_CONTACT_LOGIN): a contact
+  // who declined this purpose, or texts altogether, is held — narrows only;
+  // the customer row's toggle above still decides for everyone.
+  allowedContacts = await require('./contact-notification-prefs').filterContactsByOwnPrefs(
+    allowedContacts, customer.id, require('./messaging/policy').PURPOSE_POLICY[purpose]?.prefsColumn || null, { channel: 'sms' },
+  );
   // Hold emptied a NON-empty list: fall back to the primary account holder
   // (always a legitimate recipient of their own appointment changes; their
   // own consent is validated at send time) so reschedule/cancel/no-show
@@ -1837,7 +1849,7 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
       return false;
     }
   }
-  const resolvedNotice = await resolveNoticeContacts(customer, prefs, messageType);
+  const resolvedNotice = await resolveNoticeContacts(customer, prefs, messageType, purpose);
   if (!resolvedNotice.contacts.length) {
     logger.warn(`[appt-remind] No appointment contact for customer ${customer?.id || 'unknown'}, skipping SMS`);
     return false;
@@ -4550,7 +4562,8 @@ const AppointmentReminders = {
     if (!customer) return none('customer_not_found');
     const prefs = await visitPrefsRow(record.customer_id, scheduledServiceId);
     if (prefs === PREFS_UNAVAILABLE || prefs?.__prefsUnavailable === true) return none('preferences_unavailable');
-    const { allowedContacts } = await resolveNoticeContacts(customer, prefs || {}, 'appointment_cancelled');
+    // The same purpose the cancel send uses, so the card previews exactly who gets it.
+    const { allowedContacts } = await resolveNoticeContacts(customer, prefs || {}, 'appointment_cancelled', 'appointment_cancellation');
     if (!allowedContacts.length) return none('no_recipient');
     const variant = approved ? null : await require('./sms-template-variants').selectVariant('appointment_cancelled').catch(() => null);
     const templateBody = approved ? (approved.template_body ?? null) : (variant?.body ?? null);
@@ -6052,6 +6065,12 @@ async function replayRecipient({ customerId, scheduledServiceId, contactKey, acc
   const recipient = getAppointmentContacts(acct, prefs.raw).find((c) => String(c.phone).replace(/\D/g, '').slice(-10) === contactKey);
   const optin = await db('recipient_optin').where({ customer_id: customerId, phone_key: contactKey }).first('status');
   if (!recipient || optin?.status !== 'confirmed') return { reason: 'not_a_recipient' };
+  // The contact's own choice (contact login): declined confirmations = no text.
+  const ContactPrefs = require('./contact-notification-prefs');
+  if (ContactPrefs.contactPrefsLive()
+    && !ContactPrefs.contactAllows(await ContactPrefs.getContactPrefRow(customerId, contactKey), 'appointment_confirmation', 'sms')) {
+    return { reason: 'sms_not_chosen' };
+  }
   if (await confirmationLoggedForVisitPhone({ scheduledServiceId, phone: contactKey })) return { reason: 'already_sent' };
   return { recipient };
 }

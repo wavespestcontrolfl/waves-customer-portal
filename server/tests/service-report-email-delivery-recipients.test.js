@@ -517,6 +517,53 @@ describe('service report email recipient delivery', () => {
     ]);
   });
 
+  // Codex #6363 r24/r25 P2: the contact's slot and own report-email choice are
+  // re-read at the provider handoff (reportEmailRecipientStillAllowed) — a
+  // decline or a removal landing after the recipient filter (during the data
+  // build, credit read or PDF render) still holds that recipient, on the
+  // template path and on the legacy fallback.
+  describe('contact slots + choices re-read at the provider handoff', () => {
+    const ContactPrefs = require('../services/contact-notification-prefs');
+    let filter;
+    let stillAllowed;
+    beforeEach(() => {
+      filter = jest.spyOn(ContactPrefs, 'filterReportEmailRecipientsByContactPrefs').mockImplementation(async (recipients) => recipients);
+      stillAllowed = jest.spyOn(ContactPrefs, 'reportEmailRecipientStillAllowed')
+        .mockImplementation(async (_customer, recipient) => recipient.email !== 'tenant@example.com');
+    });
+    afterEach(() => { filter.mockRestore(); stillAllowed.mockRestore(); });
+
+    test('template path: the onQueued hook holds the contact, the holder\'s report still goes out', async () => {
+      const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+      const hookVerdicts = {};
+      EmailTemplateLibrary.sendTemplate.mockImplementation(async ({ to, onQueued }) => {
+        hookVerdicts[to] = await onQueued({ id: `queued-${to}` });
+        return hookVerdicts[to] === false
+          ? { sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' }
+          : { sent: true, message: { provider_message_id: `msg-${to}` } };
+      });
+      const result = await sendServiceReportV1Email('record-1', { token: 'token-1' });
+      expect(hookVerdicts).toEqual({ 'owner@example.com': true, 'tenant@example.com': false });
+      expect(result).toMatchObject({ ok: true, recipientCount: 1, blockedCount: 1, messageIds: ['msg-owner@example.com'] });
+      // The handoff asks about each recipient against the customer the recipients were resolved from.
+      expect(stillAllowed.mock.calls.map(([customer, recipient]) => [customer.id, recipient.email]).sort()).toEqual([
+        ['customer-1', 'owner@example.com'], ['customer-1', 'tenant@example.com'],
+      ]);
+    });
+
+    test('legacy fallback: re-read before its own provider call — the contact\'s queued row fails unsent', async () => {
+      const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+      EmailTemplateLibrary.sendTemplate.mockRejectedValue(new Error('active template not found'));
+      sendgrid.sendOne.mockResolvedValue({ messageId: 'legacy-owner' });
+      const result = await sendServiceReportV1Email('record-1', { token: 'token-1' });
+      expect(result).toMatchObject({ ok: true, recipientCount: 1, blockedCount: 1, messageIds: ['legacy-owner'] });
+      expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ to: 'owner@example.com' }));
+      const tenantRow = emailMessageRows.find((row) => row.recipient_email_snapshot === 'tenant@example.com');
+      expect(tenantRow).toMatchObject({ status: 'failed', error_message: 'Suppressed: contact declined service report email' });
+    });
+  });
+
   test('legacy fallback blocks a suppressed recipient before sending', async () => {
     const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
 
