@@ -207,6 +207,33 @@ async function mapLimit(items, limit, fn) {
   return results;
 }
 
+// One field of one read against the fixture's known value. pctN counts only
+// reads with a POSITIVE known value — a zero-truth property (no palms, no
+// trees) has no percentage error, so it must not inflate the MAPE
+// denominator and hide false positives (Codex #6398).
+function scoreField(stat, truth, got) {
+  if (truth === null || got === null) return;
+  stat.n++; stat.absErr += Math.abs(got - truth); stat.bias += got - truth;
+  if (truth > 0) {
+    const pct = Math.abs(got - truth) / truth;
+    stat.pctN++; stat.pctErr += pct;
+    if (pct <= 0.25) stat.within25++;
+  } else if (got === 0) {
+    stat.within25++;
+  }
+}
+
+// One model read of one case folded into that model's tally.
+function scoreRead(m, c, r) {
+  m.reads++; m.msTotal += r.ms;
+  if (!r.ok) { m.misses++; return; }
+  for (const f of FIELDS) scoreField(m.fields[f], numericRead(c.known[f]), r.values[f]);
+  if (typeof c.known.shrubDensity === 'string') {
+    m.shrubDensityKnown++;
+    if (r.shrubDensity === c.known.shrubDensity.toUpperCase()) m.shrubDensityHits++;
+  }
+}
+
 // Per model, per field: mean absolute error, mean absolute % error against
 // the owner's known value, bias (signed mean error), and how many reads
 // landed within 25% of truth. Only cases with a known value count.
@@ -214,28 +241,9 @@ function score(cases, models) {
   const out = {};
   for (const model of models) {
     const m = { reads: 0, misses: 0, msTotal: 0, fields: {}, shrubDensityHits: 0, shrubDensityKnown: 0 };
-    // pctN counts only reads with a POSITIVE known value — a zero-truth
-    // property (no palms, no trees) has no percentage error, so it must not
-    // inflate the MAPE denominator and hide false positives (Codex #6398).
     for (const f of FIELDS) m.fields[f] = { n: 0, absErr: 0, pctN: 0, pctErr: 0, bias: 0, within25: 0 };
     for (const c of cases) {
-      for (const r of c.reads.filter((x) => x.model === model)) {
-        m.reads++; m.msTotal += r.ms;
-        if (!r.ok) { m.misses++; continue; }
-        for (const f of FIELDS) {
-          const truth = numericRead(c.known[f]);
-          const got = r.values[f];
-          if (truth === null || got === null) continue;
-          const s = m.fields[f];
-          s.n++; s.absErr += Math.abs(got - truth); s.bias += got - truth;
-          if (truth > 0) { s.pctN++; s.pctErr += Math.abs(got - truth) / truth; if (Math.abs(got - truth) / truth <= 0.25) s.within25++; }
-          else if (got === 0) s.within25++;
-        }
-        if (typeof c.known.shrubDensity === 'string') {
-          m.shrubDensityKnown++;
-          if (r.shrubDensity === c.known.shrubDensity.toUpperCase()) m.shrubDensityHits++;
-        }
-      }
+      for (const r of c.reads) if (r.model === model) scoreRead(m, c, r);
     }
     out[model] = m;
   }

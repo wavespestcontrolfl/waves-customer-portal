@@ -99,93 +99,116 @@ function outcomeOf(row) {
   return 'pending';
 }
 
-// One T&S extraction per estimate payload. `bedSource` is the four-value enum
-// when the raw line is trustworthy, else the coarse inferred/measured verdict
-// from the mapped envelope, else 'unknown'.
-function extractTreeShrub(estimateData) {
-  if (!estimateData || typeof estimateData !== 'object') return null;
+// The MAPPED envelope's T&S facts (Admin V2 persists only this envelope):
+// tsMeta, the selected tier row, the recurring row's review flags.
+function mappedContext(estimateData) {
   const tsMeta = estimateData.result?.results?.tsMeta;
-  const hasMapped = !!(tsMeta && typeof tsMeta === 'object');
   const tierRows = estimateData.result?.results?.ts;
   const mappedSelected = Array.isArray(tierRows) ? tierRows.find((r) => r?.selected) : null;
-  const mappedMonthly = positive(mappedSelected?.mo);
-  // Review flags on the MAPPED envelope: mapV1ToLegacyShape carries the T&S
-  // line's manualReviewReasons on result.recurring.services (Admin V2
-  // persists only that envelope), so a parked quote is counted as flagged
-  // even with no raw line (Codex #6398 r4).
-  const mappedService = Array.isArray(estimateData.result?.recurring?.services)
-    ? estimateData.result.recurring.services.find((s) => s?.service === 'tree_shrub') : null;
-  const mappedReasons = mappedService && Array.isArray(mappedService.manualReviewReasons)
-    ? mappedService.manualReviewReasons : null;
-
-  const agrees = (q) => {
-    if (!hasMapped) return true;
-    if ((positive(q.bedAreaUsed ?? q.bedArea) ?? null) !== (positive(tsMeta.eb) ?? null)) return false;
-    if ((count(q.treeCount) ?? null) !== (count(tsMeta.et) ?? null)) return false;
-    const src = enumOf(q.bedAreaSource);
-    if (src && typeof tsMeta.bedAreaIsEstimated === 'boolean'
-      && (src === 'lot_based' || src === 'fallback') !== tsMeta.bedAreaIsEstimated) return false;
-    return true;
+  // Review flags ride result.recurring.services (mapV1ToLegacyShape), so a
+  // parked quote counts as flagged even with no raw line (Codex #6398 r4).
+  const services = estimateData.result?.recurring?.services;
+  const mappedService = Array.isArray(services) ? services.find((s) => s?.service === 'tree_shrub') : null;
+  return {
+    tsMeta: tsMeta && typeof tsMeta === 'object' ? tsMeta : null,
+    mappedSelected,
+    mappedMonthly: positive(mappedSelected?.mo),
+    mappedReasons: mappedService && Array.isArray(mappedService.manualReviewReasons) ? mappedService.manualReviewReasons : null,
+    mappedLine: Array.isArray(estimateData.result?.lineItems)
+      ? estimateData.result.lineItems.find((li) => li?.service === 'tree_shrub') : null,
   };
+}
 
+// A retained raw engine line is trustworthy only while it agrees with the
+// mapped envelope on the inputs (bed, trees, inferred-or-not); a revision
+// that changed them left the raw line stale.
+function rawAgreesWithMapped(raw, tsMeta) {
+  if (!tsMeta) return true;
+  if ((positive(raw.bedAreaUsed ?? raw.bedArea) ?? null) !== (positive(tsMeta.eb) ?? null)) return false;
+  if ((count(raw.treeCount) ?? null) !== (count(tsMeta.et) ?? null)) return false;
+  const src = enumOf(raw.bedAreaSource);
+  if (src && typeof tsMeta.bedAreaIsEstimated === 'boolean'
+    && (src === 'lot_based' || src === 'fallback') !== tsMeta.bedAreaIsEstimated) return false;
+  return true;
+}
+
+// The fields a revision can change WITHOUT touching bed/trees — provenance,
+// tier, price, review flags and knob stamps — where the mapped revision wins
+// over a retained raw line (Codex #6398 r3/r4; same rule as estimate-actuals).
+function mappedOverRaw(raw, ctx) {
+  const { tsMeta, mappedSelected, mappedMonthly, mappedReasons } = ctx;
+  return {
+    treeSource: enumOf(tsMeta?.treeCountSource) || enumOf(raw.treeCountSource) || 'unknown',
+    tier: enumOf(mappedSelected?.tier) || enumOf(raw.tier),
+    monthly: mappedMonthly ?? positive(raw.monthly),
+    reviewReasons: mappedReasons ?? (Array.isArray(raw.manualReviewReasons) ? raw.manualReviewReasons : []),
+    marginTarget: num(tsMeta?.pricingKnobs?.marginTarget) ?? num(raw.pricingKnobs?.marginTarget) ?? num(raw.marginTarget),
+    lotBedBasis: enumOf(tsMeta?.pricingKnobs?.lotBedBasis) || enumOf(raw.pricingKnobs?.lotBedBasis),
+  };
+}
+
+// Raw shape: the full source enums from the engine line.
+function rawShape(raw, ctx) {
+  const bedSource = enumOf(raw.bedAreaSource);
+  const bedSqFt = positive(raw.bedAreaUsed ?? raw.bedArea);
+  if (!bedSource && !bedSqFt && !positive(raw.monthly)) return null;
+  return {
+    shape: 'raw',
+    bedSqFt,
+    bedSource: bedSource || 'unknown',
+    treeCount: count(raw.treeCount),
+    palmCount: count(raw.palmCount),
+    ...mappedOverRaw(raw, ctx),
+  };
+}
+
+// Mapped shape: tsMeta keeps the numbers but not the four-value source enum,
+// so the bed source is the coarse inferred / measured verdict.
+function mappedShape(ctx) {
+  const { tsMeta, mappedSelected, mappedMonthly, mappedReasons, mappedLine } = ctx;
+  if (!tsMeta || !(positive(tsMeta.eb) || positive(tsMeta.et) || mappedMonthly)) return null;
+  const bedSource = typeof tsMeta.bedAreaIsEstimated === 'boolean'
+    ? (tsMeta.bedAreaIsEstimated ? 'inferred' : 'measured') : 'unknown';
+  return {
+    shape: 'mapped',
+    bedSqFt: positive(tsMeta.eb),
+    bedSource,
+    treeCount: count(tsMeta.et),
+    treeSource: enumOf(tsMeta.treeCountSource) || 'unknown',
+    palmCount: null,
+    tier: enumOf(mappedSelected?.tier),
+    monthly: mappedMonthly ?? positive(mappedLine?.monthly),
+    reviewReasons: mappedReasons || [],
+    marginTarget: num(tsMeta.pricingKnobs?.marginTarget),
+    lotBedBasis: enumOf(tsMeta.pricingKnobs?.lotBedBasis),
+  };
+}
+
+// Compact shape: a quote-wizard / lead-automation line carries price only —
+// never a fabricated zero for the inputs.
+function compactShape(line, ctx) {
+  if (!line) return null;
+  return {
+    shape: 'compact',
+    bedSqFt: null, bedSource: 'unknown', treeCount: null, treeSource: 'unknown', palmCount: null,
+    tier: enumOf(line.tier), monthly: positive(line.monthly),
+    reviewReasons: ctx.mappedReasons || [],
+    marginTarget: num(line.pricingKnobs?.marginTarget),
+    lotBedBasis: enumOf(line.pricingKnobs?.lotBedBasis),
+  };
+}
+
+// One T&S extraction per estimate payload, in precedence order: a raw engine
+// line that still agrees with the mapped envelope (full source enums), else
+// the mapped envelope (coarse inferred/measured), else a compact line, else
+// null.
+function extractTreeShrub(estimateData) {
+  if (!estimateData || typeof estimateData !== 'object') return null;
+  const ctx = mappedContext(estimateData);
   const raw = Array.isArray(estimateData.engineResult?.lineItems)
     ? estimateData.engineResult.lineItems.find((li) => li?.service === 'tree_shrub') : null;
-  if (raw && agrees(raw)) {
-    const bedSource = enumOf(raw.bedAreaSource);
-    if (bedSource || positive(raw.bedAreaUsed ?? raw.bedArea) || positive(raw.monthly)) {
-      return {
-        shape: 'raw',
-        bedSqFt: positive(raw.bedAreaUsed ?? raw.bedArea),
-        bedSource: bedSource || 'unknown',
-        treeCount: count(raw.treeCount),
-        // The mapped revision's provenance wins (v1-legacy-mapper persists
-        // tsMeta.treeCountSource): a revision that typed the same count the
-        // density table inferred keeps `agrees` true but is no longer a
-        // density-tree quote (Codex #6398 r3).
-        treeSource: enumOf(tsMeta?.treeCountSource) || enumOf(raw.treeCountSource) || 'unknown',
-        palmCount: count(raw.palmCount),
-        // Tier and price: the MAPPED selection wins whenever it exists — a
-        // tier-only revision keeps bed/tree counts (so the raw line still
-        // "agrees") but the price the customer saw is the mapped one
-        // (Codex #6398; same rule as estimate-actuals).
-        tier: enumOf(mappedSelected?.tier) || enumOf(raw.tier),
-        monthly: mappedMonthly ?? positive(raw.monthly),
-        reviewReasons: mappedReasons ?? (Array.isArray(raw.manualReviewReasons) ? raw.manualReviewReasons : []),
-        // Same rule for the knob stamps: the mapped revision's stamp wins
-        // over a retained raw line's (Codex #6398 r3).
-        marginTarget: num(tsMeta?.pricingKnobs?.marginTarget) ?? num(raw.pricingKnobs?.marginTarget) ?? num(raw.marginTarget),
-        lotBedBasis: enumOf(tsMeta?.pricingKnobs?.lotBedBasis) || enumOf(raw.pricingKnobs?.lotBedBasis),
-      };
-    }
-  }
-  const mappedLine = Array.isArray(estimateData.result?.lineItems)
-    ? estimateData.result.lineItems.find((li) => li?.service === 'tree_shrub') : null;
-  if (hasMapped && (positive(tsMeta.eb) || positive(tsMeta.et) || mappedMonthly)) {
-    return {
-      shape: 'mapped',
-      bedSqFt: positive(tsMeta.eb),
-      bedSource: typeof tsMeta.bedAreaIsEstimated === 'boolean' ? (tsMeta.bedAreaIsEstimated ? 'inferred' : 'measured') : 'unknown',
-      treeCount: count(tsMeta.et),
-      treeSource: enumOf(tsMeta.treeCountSource) || 'unknown',
-      palmCount: null,
-      tier: enumOf(mappedSelected?.tier),
-      monthly: mappedMonthly ?? positive(mappedLine?.monthly),
-      reviewReasons: mappedReasons || [],
-      marginTarget: num(tsMeta.pricingKnobs?.marginTarget),
-      lotBedBasis: enumOf(tsMeta.pricingKnobs?.lotBedBasis),
-    };
-  }
-  if (mappedLine || raw) {
-    return {
-      shape: 'compact',
-      bedSqFt: null, bedSource: 'unknown', treeCount: null, treeSource: 'unknown', palmCount: null,
-      tier: enumOf((mappedLine || raw).tier), monthly: positive((mappedLine || raw).monthly),
-      reviewReasons: mappedReasons || [],
-      marginTarget: num((mappedLine || raw).pricingKnobs?.marginTarget),
-      lotBedBasis: enumOf((mappedLine || raw).pricingKnobs?.lotBedBasis),
-    };
-  }
-  return null;
+  const fromRaw = raw && rawAgreesWithMapped(raw, ctx.tsMeta) ? rawShape(raw, ctx) : null;
+  return fromRaw || mappedShape(ctx) || compactShape(ctx.mappedLine || raw, ctx);
 }
 
 // Which pricing regime a stored quote carries — read from the STORED result,
