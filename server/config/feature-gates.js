@@ -5387,6 +5387,16 @@ function reportWriterRulesLive() {
   return process.env.GATE_REPORT_WRITER_RULES === 'true';
 }
 
+// GATE_COMPLETION_TEXT_PLAIN read at CALL time — off unless exactly 'true'.
+// On, the completion recap text (server/services/completion-recap.js) makes
+// no AI call for a completed visit with nothing visit-specific recorded and
+// sends a short fixed text instead of seasonal filler; the fixed text drops
+// the generic "normal activity" sentence and says "checked your stations" on
+// a station visit instead of "we treated". Off, byte-identical.
+function completionTextPlainLive() {
+  return process.env.GATE_COMPLETION_TEXT_PLAIN === 'true';
+}
+
 // GATE_REPORT_BLOG_POST read at CALL time — strict `=== 'true'`, dark in
 // every environment. Off, the blog search answers unavailable, a picked post
 // is ignored at completion and no report shows one (frozen picks included).
@@ -6788,6 +6798,7 @@ module.exports.seriesMoveCarriesVisitLive = seriesMoveCarriesVisitLive;
 // GATE_REPORT_WRITER_RULES reader, exported at the end of the file (after the
 // shared list) so gate PRs adding lines above never touch this one.
 module.exports.reportWriterRulesLive = reportWriterRulesLive;
+module.exports.completionTextPlainLive = completionTextPlainLive;
 // GATE_REPORT_BLOG_POST reader, on its own line beside the writer rules'.
 module.exports.reportBlogPostLive = reportBlogPostLive;
 module.exports.reportAskAiLive = reportAskAiLive;
