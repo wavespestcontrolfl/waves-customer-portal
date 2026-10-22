@@ -1803,14 +1803,28 @@ function emailLegReport(result, permitted) {
   return { state: 'unknown', reason: 'email_outcome_unconfirmed' };
 }
 
-async function fireTouch(row, { operatorInitiated = false, claimStamp = null, verificationOnly = false, report = null, approved = null, expectedContentHash = null } = {}) {
+// A touch that ends before any sender ran: the report (the bar's per-leg outcome) says so on both legs, with the reason.
+// Delivery is "unknown" only when a sender actually ran and its answer was not clear; a touch that stops earlier is a plain
+// "nothing was sent" (held = the reminder stays on its schedule, skipped = it does not apply, not_sent = it could not go).
+function exitNoSend(report, state, reason) {
+  if (report) report.legs = { sms: { state, reason }, email: { state, reason } };
+}
+
+// Every exit of fireTouchBody that did not reach a sender leaves report.legs unset; this fills it, so no pre-send exit reads
+// as an unknown delivery (a refusal for a changed card is report.previewChanged, never legs).
+async function fireTouch(row, opts = {}) {
+  await fireTouchBody(row, opts);
+  if (opts.report && !opts.report.legs && !opts.report.previewChanged) exitNoSend(opts.report, 'not_sent', 'not_sent_before_dispatch');
+}
+
+async function fireTouchBody(row, { operatorInitiated = false, claimStamp = null, verificationOnly = false, report = null, approved = null, expectedContentHash = null } = {}) {
   // A row of a customer on a combined schedule (fireStep's ownedMicrodeposit):
   // re-judged now, after the claim committed and outside any lock. No longer
   // waiting on verification -> the invoice is the schedule's: nothing is sent
   // or written here (the claim clears in fireStep's finally).
   if (verificationOnly && !(await awaitingMicrodepositVerification(row))) {
     logger.info(`[invoice-followups] sequence ${row.id} not sent — invoice ${row.invoice_id} is no longer waiting on bank verification and customer ${row.customer_id} is on a customer reminder schedule`);
-    return;
+    return exitNoSend(report, 'skipped', 'customer_schedule');
   }
   const step = followupSteps()[row.step_index];
   if (!step) {
@@ -1819,7 +1833,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
       status: 'completed',
       next_touch_at: null,
     });
-    return;
+    return exitNoSend(report, 'skipped', 'no_reminder_step');
   }
 
   // Third-party Bill-To: never send a dunning touch for a payer-billed invoice —
@@ -1846,7 +1860,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
       .update({ updated_at: db.fn.now(), next_touch_at: new Date(Date.now() + 30 * 60 * 1000) })
       .catch(() => {});
     logger.warn(`[invoice-followups] skipped sequence ${row.id} — could not re-read invoice ${row.invoice_id} ownership before the touch; retrying in 30m`);
-    return;
+    return exitNoSend(report, 'not_sent', 'ownership_unverified');
   }
   const payerId = liveInvoice.payer_id ?? null;
   const sendError = liveInvoice.scheduled_send_error ?? null;
@@ -1857,7 +1871,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
       next_touch_at: null,
     });
     logger.info(`[invoice-followups] paused sequence ${row.id} — invoice ${row.invoice_id} is billed to a third-party payer`);
-    return;
+    return exitNoSend(report, 'skipped', 'invoice_payer_billed');
   }
 
   const customer = await db('customers').where({ id: row.customer_id }).first();
@@ -1873,11 +1887,11 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
       next_touch_at: null,
     });
     logger.info(`[invoice-followups] paused sequence ${row.id} — customer ${row.customer_id} is soft-deleted`);
-    return;
+    return exitNoSend(report, 'skipped', 'customer_unavailable');
   }
   if (!customer) {
     logger.warn(`[invoice-followups] skipped sequence ${row.id} — customer ${row.customer_id} is missing`);
-    return;
+    return exitNoSend(report, 'skipped', 'customer_unavailable');
   }
   // The card's recipients and text, against what is live right now: a change sends neither leg (the caller restores the time).
   const bar = approvedSendPlan(approved);
@@ -1902,7 +1916,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
       explicitChannels = explicitBillingChannels(prefs || {}, category);
     } catch (err) {
       logger.warn(`[invoice-followups] skipped sequence ${row.id} — channel preferences unavailable: ${err.message}`);
-      return;
+      return exitNoSend(report, 'not_sent', 'preferences_unavailable');
     }
   }
   // Collections policy — BOTH legs' permissions resolved here, ahead of the
@@ -1924,7 +1938,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
     catch (err) {
       logger.warn(`[invoice-followups] skipped sequence ${row.id} — step ledger unavailable: ${err.message}`);
       await holdTouchUntilNextDay(row, claimStamp, 'step_ledger_unavailable', { operatorInitiated });
-      return;
+      return exitNoSend(report, 'held', 'ledger_unavailable');
     }
   }
   const policyResults = await Promise.all(policyChannels.map((channel) =>
@@ -1943,7 +1957,8 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
     if (policyChannels.some((_channel, index) => !verdictDurablyDenied(policyResults[index]))) {
       await holdTouchUntilNextDay(row, claimStamp, 'collections_policy_denied', { operatorInitiated });
     }
-    return;
+    // Both channels denied: no sender ran. Held when a denial is transient (the reminder stays on its schedule), else skipped.
+    return exitNoSend(report, policyChannels.some((_channel, index) => !verdictDurablyDenied(policyResults[index])) ? 'held' : 'skipped', 'collections_policy_denied');
   }
   // Apply any available account credit before dunning so the reminder bills amount
   // due, not the gross balance — credit issued AFTER the invoice was sent isn't drawn
@@ -1987,7 +2002,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
     // the touch and the sweep re-judges it next run.
     if (!fresh) {
       logger.warn(`[invoice-followups] skipped sequence ${row.id} — invoice ${row.invoice_id} could not be re-read before the send`);
-      return;
+      return exitNoSend(report, 'not_sent', 'invoice_unreadable');
     }
     // OWNERSHIP AGAIN, on this last read before the provider (local audit):
     // the policy, credit and ledger work above is all awaited, and a Bill-To
@@ -1996,7 +2011,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
     // simply stops.
     if (fresh && (fresh.payer_id || invoiceWithdrawnFromCustomer(fresh))) {
       logger.info(`[invoice-followups] dropped touch for sequence ${row.id} — invoice ${row.invoice_id} moved to a third-party payer during this run`);
-      return;
+      return exitNoSend(report, 'skipped', 'invoice_payer_billed');
     }
     if (fresh) {
       row.total = fresh.total;
@@ -2013,7 +2028,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
       }
       if (['prepaid', 'paid'].includes(String(fresh.status || '').toLowerCase())) {
         await stopOnPayment(row.invoice_id).catch(() => {});
-        return;
+        return exitNoSend(report, 'skipped', 'invoice_not_eligible');
       }
     }
   } catch (refreshErr) {
@@ -2023,7 +2038,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
     // change may have landed. The sequence keeps its schedule and the next
     // sweep re-judges it.
     logger.warn(`[invoice-followups] skipped sequence ${row.id} — invoice refresh before dun failed for ${row.invoice_id}: ${refreshErr.message}`);
-    return;
+    return exitNoSend(report, 'not_sent', 'invoice_unreadable');
   }
   // Dun for amount DUE (total − applied account credit), not the pre-credit total.
   const amount = invoiceAmountDue(row).toFixed(2);

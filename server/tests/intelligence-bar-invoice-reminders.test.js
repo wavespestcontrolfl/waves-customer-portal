@@ -491,6 +491,16 @@ describe('send_invoice_reminder_now', () => {
     expect(result.note).toMatch(/Text: held \(held by the collections policy\), not sent; the reminder stays on its schedule\. Email: sent\./);
   });
 
+  test('both channels held by the collections policy before any sender ran: nothing was sent, not an unknown delivery', async () => {
+    const card = await call('send_invoice_reminder_now');
+    const held = { state: 'held', reason: 'collections_policy_denied' };
+    Invoices.sendReminderNowFromBar.mockResolvedValueOnce(answer({ legs: { sms: held, email: held } }));
+    const result = await confirm('send_invoice_reminder_now', card);
+    expect(result).toMatchObject({ success: true, sent_to_customer: false, code: 'not_sent' });
+    expect(result).not.toHaveProperty('outcome_unknown');
+    expect(result.note).toMatch(/^Nothing was sent to the customer\. Text: held \(held by the collections policy\), not sent; the reminder stays on its schedule\. Email: held/);
+  });
+
   test('both channels known not to have gone out: "Nothing was sent", with each reason', async () => {
     const card = await call('send_invoice_reminder_now');
     Invoices.sendReminderNowFromBar.mockResolvedValueOnce(answer({ legs: { sms: { state: 'not_sent', reason: 'CUSTOMER_OPTED_OUT' }, email: { state: 'skipped', reason: 'missing_email' } } }));

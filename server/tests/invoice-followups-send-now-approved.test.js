@@ -13,6 +13,10 @@ jest.mock('../services/collections/collection-hold', () => ({
   ...jest.requireActual('../services/collections/collection-hold'),
   messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
 }));
+jest.mock('../services/collections/rail-guard', () => ({
+  ...jest.requireActual('../services/collections/rail-guard'),
+  collectionsChannelPermitted: jest.fn(async ({ detail }) => (detail ? { allowed: true, durable: false } : true)),
+}));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/billing-channel-email-authority', () => ({
   loadBillingEmailContext: jest.fn(),
@@ -783,5 +787,46 @@ describe('the card’s rendered email', () => {
       expect(sendCustomerMessage).not.toHaveBeenCalled();
       expect(Library.sendTemplate).not.toHaveBeenCalled();
     }
+  });
+});
+
+// A touch that ends before any sender ran reports explicit legs (never an unknown delivery): collections policy denying both
+// channels, a customer that is gone, an invoice that became payer-billed. Unknown stays for a sender that ran and was unclear.
+describe('pre-send exits report explicit legs', () => {
+  const RailGuard = require('../services/collections/rail-guard');
+  const denyAll = (durable) => RailGuard.collectionsChannelPermitted.mockImplementation(async ({ detail }) => (detail ? { allowed: false, durable } : false));
+  afterEach(() => {
+    RailGuard.collectionsChannelPermitted.mockImplementation(async ({ detail }) => (detail ? { allowed: true, durable: false } : true));
+  });
+
+  test('collections policy denies both channels (a transient denial): both legs held, nothing sent, no unknown', async () => {
+    denyAll(false);
+    const result = await sendNow({ approved: APPROVED, report: true });
+    expect(result.report.legs).toEqual({ sms: { state: 'held', reason: 'collections_policy_denied' }, email: { state: 'held', reason: 'collections_policy_denied' } });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(seqRow().touch_claimed_at).toBeNull();
+  });
+
+  test('a durable denial (suppression, standing) is skipped on both legs', async () => {
+    denyAll(true);
+    const result = await sendNow({ approved: APPROVED, report: true });
+    expect(result.report.legs).toEqual({ sms: { state: 'skipped', reason: 'collections_policy_denied' }, email: { state: 'skipped', reason: 'collections_policy_denied' } });
+  });
+
+  test('a customer deleted since the card, and an invoice that became payer-billed, end with skipped legs', async () => {
+    tables.customers[0].deleted_at = new Date();
+    expect((await sendNow({ approved: APPROVED, report: true })).report.legs.sms).toEqual({ state: 'skipped', reason: 'customer_unavailable' });
+    fresh();
+    install();
+    tables.invoices[0].payer_id = 'payer-1';
+    const payer = await sendNow({ approved: APPROVED, report: true });
+    expect(payer.report.legs).toEqual({ sms: { state: 'skipped', reason: 'invoice_payer_billed' }, email: { state: 'skipped', reason: 'invoice_payer_billed' } });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a changed card still reports previewChanged, not legs', async () => {
+    tables.customers[0].phone = '+19415550199';
+    expect(await sendNow({ approved: APPROVED, report: true })).toMatchObject({ ok: false, reason: 'preview_changed' });
   });
 });
