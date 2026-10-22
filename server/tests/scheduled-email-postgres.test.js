@@ -210,7 +210,11 @@ jest.setTimeout(30000);
     const winner = a.status === 200 ? 'tab-a-fixture-key' : 'tab-b-fixture-key';
     const loser = winner === 'tab-a-fixture-key' ? 'tab-b-fixture-key' : 'tab-a-fixture-key';
     expect((await cancel(body.scheduled.id, winner)).body.draft).toMatchObject({ draftText: 'Hi\nthere' });
-    expect(await cancel(body.scheduled.id, loser)).toMatchObject({ status: 409, body: { error: 'This email is already open as a draft in another tab.' } });
+    expect(await cancel(body.scheduled.id, loser)).toMatchObject({ status: 409, body: { error: expect.stringMatching(/^This email is already open as a draft in another tab\./) } });
+    // A claim left untouched 10+ minutes (its tab closed) can be taken over.
+    await database('scheduled_emails').where({ id: body.scheduled.id }).update({ updated_at: database.raw("now() - interval '11 minutes'") });
+    expect((await cancel(body.scheduled.id, loser)).body.draft).toMatchObject({ draftText: 'Hi\nthere' });
+    expect((await cancel(body.scheduled.id, winner)).status).toBe(409);
     expect((await call('POST', `/scheduled/${body.scheduled.id}/cancel`, {})).status).toBe(400);
   });
 
