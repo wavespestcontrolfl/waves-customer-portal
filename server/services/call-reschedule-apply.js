@@ -145,6 +145,19 @@ function counterpartPhone(call) {
   return outbound ? (call.to_phone || null) : (call.from_phone || null);
 }
 
+function isOutboundDirection(call) {
+  return String(call?.direction || '').toLowerCase().startsWith('outbound');
+}
+
+function callMetadata(call) {
+  const meta = call?.metadata;
+  if (!meta) return {};
+  if (typeof meta === 'string') {
+    try { return JSON.parse(meta) || {}; } catch (_e) { return {}; }
+  }
+  return meta;
+}
+
 function skip(reason, extra = {}) {
   return { action: 'skip', reason, ...extra };
 }
@@ -996,6 +1009,14 @@ function planMakeupMoveFromCall({ v2, call, customer, properties = [], candidate
   const duration = windowDurationMinutes(visit.window_start, visit.window_end, visit.estimated_duration_minutes) || DEFAULT_DURATION_MINUTES;
   const newEnd = deriveWindowEnd(newStart, duration);
   if (!newEnd) return skip('window_runs_past_midnight', { visitId: visit.id });
+  // A matching caller ID alone does not prove an INBOUND caller owns the
+  // number: only a carrier-signed STIR/SHAKEN "A" attestation vouches for it
+  // (a B or C, or no attestation, is exactly the spoofable population). An
+  // outbound call reached the number we dialed. A missed visit exists here,
+  // so an unproven caller holds for review rather than booking a duplicate.
+  if (!isOutboundDirection(call) && !require('./voice-agent/relay-context').isFullAttestation(callMetadata(call).stir_verstat)) {
+    return needsReview('caller_not_attested', { visitId: visit.id, candidateIds: [visit.id] });
+  }
   return {
     action: 'apply',
     propertyKey: scope.targetKey,

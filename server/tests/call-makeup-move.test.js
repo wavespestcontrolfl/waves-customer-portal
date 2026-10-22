@@ -93,7 +93,7 @@ function v2(overrides = {}) {
 
 const call = (overrides = {}) => ({
   id: CALL_ID, customer_id: CUSTOMER_ID, direction: 'inbound', from_phone: PHONE, to_phone: '+15555550100',
-  created_at: CALL_START, transcription: TRANSCRIPT, ...overrides,
+  created_at: CALL_START, transcription: TRANSCRIPT, metadata: { stir_verstat: 'TN-Validation-Passed-A' }, ...overrides,
 });
 const customer = (overrides = {}) => ({ id: CUSTOMER_ID, phone: PHONE, ...ADDRESS, ...overrides });
 const visit = (overrides = {}) => {
@@ -266,6 +266,15 @@ describe('planMakeupMoveFromCall', () => {
     expect(planMakeup(baseArgs({ v2: v2({ scheduling: { caller_accepted_slot: false } }) }))).toMatchObject({ action: 'skip', reason: 'caller_did_not_accept' });
     expect(planMakeup(baseArgs({ v2: v2({ scheduling: { caller_accepted_slot: null } }) }))).toMatchObject({ action: 'skip', reason: 'caller_did_not_accept' });
     expect(planMakeup(baseArgs({ v2: v2({ scheduling: { agent_committed_booking: false } }) }))).toMatchObject({ action: 'skip', reason: 'agent_did_not_commit' });
+  });
+
+  test('an inbound caller the carrier did not fully attest holds for review; an outbound call needs no attestation', () => {
+    for (const metadata of [{ stir_verstat: 'TN-Validation-Passed-B' }, { stir_verstat: 'TN-Validation-Passed-C' }, { stir_verstat: 'No-TN-Validation' }, {}, null]) {
+      expect(planMakeup(baseArgs({ call: call({ metadata }) }))).toMatchObject({ action: 'needs_review', reason: 'caller_not_attested', visitId: VISIT_ID });
+    }
+    expect(planMakeup(baseArgs({ call: call({ metadata: JSON.stringify({ stir_verstat: 'TN-Validation-Passed-A' }) }) }))).toMatchObject({ action: 'apply' });
+    const outbound = call({ direction: 'outbound-dial', from_phone: '+15555550100', to_phone: PHONE, metadata: null });
+    expect(planMakeup(baseArgs({ call: outbound }))).toMatchObject({ action: 'apply', visitId: VISIT_ID });
   });
 
   test('the move stands in for the booking only: no booking slot, or a different one, is skipped', () => {

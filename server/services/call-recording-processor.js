@@ -10362,9 +10362,9 @@ async function reviseDispositionAfterAppliedMove({ call, callSid, procGeneration
   const fresh = await query.first('disposition', 'processing_generation', 'v2_extraction_status', 'ai_extraction_enriched');
   if (!fresh || !STALE_AFTER_APPLIED_MOVE.has(fresh.disposition)) return;
   const v2 = fresh.v2_extraction_status === 'valid' ? fresh.ai_extraction_enriched : null;
-  const { independent, reason } = await hasIndependentCallbackObligation(call.id, v2);
+  const { independent, reason: standingReason } = await hasIndependentCallbackObligation(call.id, v2);
   if (independent) {
-    logger.info(`[call-proc] Leaving callback_task_created standing for ${maskSid(callSid)} after applied move: ${reason}`);
+    logger.info(`[call-proc] Leaving callback_task_created standing for ${maskSid(callSid)} after applied move: ${standingReason}`);
     return;
   }
   await writeCallDisposition({
