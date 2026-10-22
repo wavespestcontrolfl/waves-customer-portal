@@ -48,7 +48,10 @@ function scopeIsEmpty({ customerId, scheduledServiceId, scheduledServiceIds, pay
 
 // Invoices with no packet, no statement and no annual-prepay term: the ones that ride a visit, and (gate on)
 // the ones that ride none, judged through the customer default alone.
-const coversNoVisit = () => require('../config/feature-gates').billToNoVisitInvoicesLive() === true;
+const coversNoVisit = () => {
+  const live = require('../config/feature-gates').billToNoVisitInvoicesLive;
+  return typeof live === 'function' && live() === true; // a stubbed gate module without the reader reads as off
+};
 function visitLinkedBase(trx, statusesExcluded) {
   const query = trx('invoices').whereNotIn('status', statusesExcluded)
     .whereNull('payer_id').whereNull('payer_statement_id')
