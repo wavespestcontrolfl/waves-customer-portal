@@ -121,7 +121,7 @@ Use for: "unarchive this invoice", "bring invoice WPC-2026-0534 back to the list
   },
   {
     name: 'unvoid_invoice',
-    description: `Unvoid ONE voided invoice: the Invoices page "Unvoid" (restore to draft). The invoice becomes a DRAFT again: editable and collectible (payable once it is sent). Its payment reminders do NOT restart now: they restart only when the invoice is sent again. Any text queued for it before the void is cancelled; account credit applied before the void was returned at the void and is not re-applied. The first call returns a PREVIEW and writes nothing; the operator approves on the confirmation card; the confirmed run re-checks all of it and refuses if the invoice changed.
+    description: `Unvoid ONE voided invoice: the Invoices page "Unvoid" (restore to draft). The invoice becomes a DRAFT again: editable and collectible (payable once it is sent). Its payment reminders do NOT restart now: they restart only when the invoice is sent again. It restores the invoice row and nothing else: an invoice with a queued message, a reminder sequence, a combined-visit packet, a payer or statement, a setup fee or a dues month is left to the Invoices page. Account credit applied before the void was returned at the void and is not re-applied. The first call returns a PREVIEW and writes nothing; the operator approves on the confirmation card; the confirmed run re-checks all of it and refuses if the invoice changed.
 Refused with the page's own reasons: not void, an annual-plan invoice, one with a deposit credit, a payment already applied, a finalized payer statement, a live card-payment session, a saved-card charge in progress, a visit that was cancelled. Nothing is sent to the customer (no text, email or call), no card is charged and nothing is refunded. Admin only.
 Takes invoice_id OR invoice_number, exactly one.
 Use for: "unvoid this invoice", "undo the void on invoice WPC-2026-0534", "restore the voided invoice", "I voided that by mistake, bring it back".`,
@@ -882,8 +882,11 @@ async function unvoidRefusal(invoice) {
   try {
     const obligation = await require('../invoice')._unvoidObligationReason(db, invoice);
     if (obligation === 'membership_dues') return toPage(`Invoice ${invoice.invoice_number} is a membership-dues invoice: restoring it re-claims a month of coverage.`, 'membership_dues', at);
-    if (obligation === 'packet_invoice' || obligation === 'payer_billed') {
-      return toPage(`Invoice ${invoice.invoice_number} is a combined-visit or payer-billed invoice: restoring it re-checks who owes it, and for every withdrawn combined-visit invoice of the customer that can release it to the send queue (an invoice text).`, obligation, at);
+    if (obligation === 'packet_invoice' || obligation === 'payer_billed' || obligation === 'payer_statement' || obligation === 'linked_payer_owner') {
+      return toPage(`Invoice ${invoice.invoice_number} is a combined-visit, payer-billed or statement invoice: restoring it re-checks who owes it, and for every withdrawn combined-visit invoice of the customer that can release it to the send queue (an invoice text).`, obligation, at);
+    }
+    if (obligation === 'queued_message' || obligation === 'followup_sequence') {
+      return toPage(`Invoice ${invoice.invoice_number} still has a queued message or an active reminder sequence: restoring it cancels those and can hand the invoice to the sender again (an invoice text).`, obligation, at);
     }
     if (obligation) return toPage(`Invoice ${invoice.invoice_number} carries a bait-station setup fee: restoring it can also retire a sibling setup invoice, clear a visit's pending setup fee or close an office billing alert.`, 'setup_fee', at);
   } catch (err) {
@@ -896,13 +899,12 @@ async function unvoidRefusal(invoice) {
   return null;
 }
 
-function unvoidEffects({ invoice, visit, statementOpen }) {
+function unvoidEffects({ invoice, visit }) {
   return [
     { kind: 'billing', text: `Invoice ${invoice.invoice_number} (${money(invoice.total)}) becomes a draft again: editable and payable (collectible) once it is sent. It is not sent by this step.` },
     { kind: 'operational', text: 'Its payment reminders do NOT restart now: the stopped reminder sequence stays stopped until the invoice is sent again.' },
-    { kind: 'operational', text: 'Any text queued for this invoice before it was voided is cancelled. Account credit applied before the void was returned then and is not applied again.' },
+    { kind: 'operational', text: 'Nothing queued for it is cancelled or handed over: an invoice with a queued message, a reminder sequence, a packet, a payer or statement, a setup fee or a dues month stays on the Invoices page. Account credit applied before the void was returned then and is not applied again.' },
     ...(invoice.archived_at ? [{ kind: 'operational', text: 'It also leaves the archive and returns to the default invoice list.' }] : []),
-    ...(statementOpen ? [{ kind: 'billing', text: 'It goes back into the payer’s open monthly statement total.' }] : []),
     ...(invoice.stripe_payment_intent_id ? [{ kind: 'operational', text: 'Its old card-payment session is checked with Stripe and must be cancelled; if it is live the unvoid refuses.' }] : []),
     { kind: 'operational', text: visit
       ? `Its linked visit (${visit.date || 'no date'}, ${visit.status || 'no status'}) is checked: a cancelled visit refuses the unvoid. The visit is not changed.`
@@ -918,7 +920,6 @@ async function buildUnvoidPlan(input) {
   const refused = await unvoidRefusal(invoice);
   if (refused) return refused;
   const visit = await linkedVisit(invoice);
-  const statement = await statementOf(invoice);
   const customer = await customerOf(invoice.customer_id);
   return {
     preview: true,
@@ -931,7 +932,7 @@ async function buildUnvoidPlan(input) {
     amount: money(invoice.total),
     becomes: 'draft (editable, collectible again)',
     reminders_restart: false,
-    effects: unvoidEffects({ invoice, visit, statementOpen: Boolean(statement && statement.status === 'open') }),
+    effects: unvoidEffects({ invoice, visit }),
     sends_to_customer: false,
     _version: {
       invoice_id: invoice.id,

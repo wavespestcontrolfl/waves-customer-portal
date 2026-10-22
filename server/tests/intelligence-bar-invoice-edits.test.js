@@ -150,6 +150,7 @@ beforeEach(() => {
     const lines = Array.isArray(invoice.line_items) ? invoice.line_items : [];
     if (invoice.visit_completion_packet_id) return 'packet_invoice';
     if (invoice.payer_id || /^payer_billed:/.test(String(invoice.scheduled_send_error || ''))) return 'payer_billed';
+    if (invoice.payer_statement_id) return 'payer_statement';
     if (lines.some((li) => li && li.membership_dues_month)) return 'membership_dues';
     if (lines.some((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || '').trim()))) return 'setup_fee';
     if (await conn('setup_fee_claims').where({ invoice_id: invoice.id }).first()) return 'setup_fee';
@@ -766,13 +767,13 @@ describe('archive_invoice / unarchive_invoice', () => {
 describe('unvoid_invoice', () => {
   beforeEach(() => setInvoice({ status: 'void', archived_at: new Date('2099-01-02T00:00:00Z') }));
 
-  test('the card says the invoice becomes a draft (editable, collectible), reminders do not restart until it is sent, queued texts are cancelled, nothing is sent', async () => {
+  test('the card says the invoice becomes a draft (editable, collectible), reminders do not restart until it is sent, nothing queued is cancelled or handed over, nothing is sent', async () => {
     const card = await run('unvoid_invoice');
     expect(card).toMatchObject({ preview: true, tool: 'unvoid_invoice', status: 'void', amount: '$129.00', becomes: 'draft (editable, collectible again)', reminders_restart: false, sends_to_customer: false });
     const text = JSON.stringify(card.effects);
     expect(text).toMatch(/becomes a draft again: editable and payable/);
     expect(text).toMatch(/reminders do NOT restart now/);
-    expect(text).toMatch(/queued for this invoice before it was voided is cancelled/);
+    expect(text).toMatch(/Nothing queued for it is cancelled or handed over/);
     expect(text).toMatch(/leaves the archive/);
     expect(text).toMatch(/linked visit \(2099-01-01, completed\)/);
     nothingSent(card);
@@ -780,12 +781,22 @@ describe('unvoid_invoice', () => {
     expect(card._expected).toEqual({ status: 'void', updatedAt: UPDATED.getTime() });
   });
 
-  test('an invoice on an open payer statement and one with an old pay-session stamp say so', async () => {
-    setInvoice({ payer_statement_id: 'stmt-1', stripe_payment_intent_id: 'pi_test_1' });
+  test('an invoice with an old pay-session stamp says it is checked with Stripe; one on a payer statement stays on the page', async () => {
+    setInvoice({ stripe_payment_intent_id: 'pi_test_1' });
+    expect(JSON.stringify((await run('unvoid_invoice')).effects)).toMatch(/old card-payment session is checked with Stripe/);
+    setInvoice({ stripe_payment_intent_id: null, payer_statement_id: 'stmt-1' });
     state.payer_statements = [{ id: 'stmt-1', status: 'open' }];
-    const text = JSON.stringify((await run('unvoid_invoice')).effects);
-    expect(text).toMatch(/payer’s open monthly statement/);
-    expect(text).toMatch(/old card-payment session is checked with Stripe/);
+    expect(await run('unvoid_invoice')).toMatchObject({ code: 'needs_invoices_page', reason: 'payer_statement' });
+  });
+
+  test.each([
+    ['a scheduled or sending message (any kind) tied to it', 'queued_message'],
+    ['an active reminder sequence', 'followup_sequence'],
+    ['a visit-linked invoice a payer now owns', 'linked_payer_owner'],
+  ])('%s leaves it to the Invoices page (reasons come from InvoiceService._unvoidObligationReason, tested for real in invoice-bar-expected-version)', async (_label, reason) => {
+    mockObligation.mockResolvedValueOnce(reason);
+    expect(await run('unvoid_invoice')).toMatchObject({ code: 'needs_invoices_page', reason });
+    expect(Invoices.unvoidInvoiceFromBar).not.toHaveBeenCalled();
   });
 
   test.each([

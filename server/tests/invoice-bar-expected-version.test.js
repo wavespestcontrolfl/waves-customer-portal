@@ -14,6 +14,13 @@ jest.mock('../services/annual-prepay-renewals', () => ({
 }));
 jest.mock('../services/estimate-deposits', () => ({ restoreDepositCreditForVoidedInvoice: jest.fn(async () => 0) }));
 jest.mock('../services/pay-combined', () => ({ clearPaymentIntentStamps: jest.fn(async () => undefined) }));
+const mockOwnerTransitions = jest.fn(async () => []);
+jest.mock('../services/visit-linked-invoice-withdrawal', () => ({
+  ownerTransitions: (...a) => mockOwnerTransitions(...a),
+  lockLinkedOwnershipRows: jest.fn(async () => undefined),
+  reconcileLinkedInvoices: jest.fn(async () => 0),
+  withdrawLinkedInvoicesForOwner: jest.fn(async () => []),
+}));
 jest.mock('../services/stripe', () => ({ retrievePaymentIntent: jest.fn(), assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined) }));
 
 const db = require('../models/db');
@@ -95,7 +102,8 @@ function builder(table) {
   calls.push(q);
   const chain = new Proxy({}, {
     get(_t, prop) {
-      if (prop === 'then') return (res, rej) => Promise.resolve(q.isUpdate ? 1 : []).then(res, rej);
+      if (prop === 'then') return (res, rej) => Promise.resolve(q.isUpdate ? 1 : q.selected ? (cfg.selects?.[table] || []) : []).then(res, rej);
+      if (prop === 'select') return (...args) => { q.selected = true; q.ops.push(['select', ...args]); return chain; };
       if (prop === 'first') return async () => {
         const reads = cfg.reads[table];
         if (!reads) return undefined;
@@ -245,7 +253,7 @@ describe('unvoid: setup-fee and dues invoices are left to the Invoices page (Inv
 
   test('an ordinary invoice has no obligation: the four reads come back empty', async () => {
     await expect(reason(row({ status: 'void' }))).resolves.toBeNull();
-    expect(calls.map((c) => c.table)).toEqual(['setup_fee_claims', 'dispatch_alerts', 'invoices']);
+    expect(calls.map((c) => c.table)).toEqual(['sms_log', 'invoice_followup_sequences', 'setup_fee_claims', 'dispatch_alerts', 'invoices']);
   });
 
   test('a membership-dues month and the setup line are found from the lines, with no read', async () => {
@@ -293,8 +301,8 @@ describe('unvoid: setup-fee and dues invoices are left to the Invoices page (Inv
     cfg.updateReturning.invoices = [voided];
     cfg.reads.setup_fee_claims = [{ id: 'claim-1' }];
     await expect(InvoiceService.unvoidInvoice('inv-1', { expected: { status: 'void', updatedAt: UPDATED.getTime() } })).rejects.toThrow(/^Cannot unvoid from the bar/);
-    // Nothing after the fence ran: no annual-term, reminder or text cancel work was started on the transaction.
-    expect(calls.filter((c) => ['sms_log', 'invoice_followup_sequences'].includes(c.table))).toEqual([]);
+    // Nothing after the fence ran: no write to the text queue or the reminder sequences (the fence only READ them).
+    expect(calls.filter((c) => ['sms_log', 'invoice_followup_sequences'].includes(c.table) && (c.isUpdate || c.ops.some(([name]) => name === 'update')))).toEqual([]);
     calls.length = 0;
     cfg.reads.invoices = [voided];
     // The page restores the same invoice (it has its own handling of those records): the bar-only fence is not applied.
@@ -321,3 +329,65 @@ describe('unvoid: a packet / payer-billed invoice never reaches the customer-wid
   });
 });
 
+
+describe('unvoid: the bar restores the row and nothing else (structural refusal reasons)', () => {
+  const reason = (invoice) => InvoiceService._unvoidObligationReason(db, invoice);
+
+  test('a payer statement is found from the row, with no read', async () => {
+    await expect(reason(row({ status: 'void', payer_statement_id: 'stmt-1' }))).resolves.toBe('payer_statement');
+    expect(calls).toEqual([]);
+  });
+
+  test('ANY scheduled / sending / finalize-pending message tied to the invoice refuses, whatever its entry point', async () => {
+    cfg.reads.sms_log = [{ id: 'sms-1' }];
+    await expect(reason(row({ status: 'void' }))).resolves.toBe('queued_message');
+    const q = calls.find((c) => c.table === 'sms_log');
+    expect(q.ops[0]).toEqual(['whereRaw', "metadata->>'invoice_id' = ?", ['inv-1']]);
+    // No entry-point list anywhere in the query: a new kind of queued message cannot slip past.
+    expect(JSON.stringify(q.ops.map(([name, arg]) => (typeof arg === 'string' ? arg : name)))).not.toMatch(/entry_point/);
+  });
+
+  test('an active or autopay-held reminder sequence refuses', async () => {
+    cfg.reads.invoice_followup_sequences = [{ id: 'seq-1' }];
+    await expect(reason(row({ status: 'void' }))).resolves.toBe('followup_sequence');
+    const q = calls.find((c) => c.table === 'invoice_followup_sequences');
+    expect(q.ops).toEqual(expect.arrayContaining([['whereIn', 'status', ['active', 'autopay_hold']]]));
+  });
+
+  test('a visit-linked invoice whose visit a payer now owns refuses; one with no owner move does not', async () => {
+    mockOwnerTransitions.mockResolvedValueOnce([{ invoiceId: 'inv-1', moved: true, afterOwner: 'payer-1' }]);
+    await expect(reason(row({ status: 'void', scheduled_service_id: 'visit-1' }))).resolves.toBe('linked_payer_owner');
+    expect(mockOwnerTransitions).toHaveBeenCalledWith(db, { invoiceId: 'inv-1' }, { mode: 'post', lock: false, stamped: 'unstamped' });
+    mockOwnerTransitions.mockResolvedValueOnce([{ invoiceId: 'inv-1', moved: false, afterOwner: null }]);
+    await expect(reason(row({ status: 'void', scheduled_service_id: 'visit-1' }))).resolves.toBeNull();
+  });
+
+  test('an autopay-decline deferred text (a terminal-hook entry point): the bar refuses under the lock and never cancels it or runs its hook; the page still does both', async () => {
+    const registry = require('../services/messaging/deferred-replay-registry');
+    const entry = 'autopay_completion_decline_deferred';
+    // The real registry: this entry point DOES carry a terminal hook (handOverHeldInvoiceToSender), the path that re-queues an invoice text.
+    expect(registry.requiresTerminalHook(entry)).toBe(true);
+    const hook = jest.spyOn(registry, 'runTerminalHookDurably').mockResolvedValue({ ok: true });
+    try {
+      const voided = row({ status: 'void' });
+      // Bar: the queued text is found by the fence (no entry-point list), the restore rolls back, the text is untouched, the hook is not run.
+      cfg.reads.invoices = [voided];
+      cfg.updateReturning.invoices = [voided];
+      cfg.reads.sms_log = [{ id: 'sms-1' }];
+      cfg.selects = { sms_log: [{ id: 'sms-1', metadata: { entry_point: entry, invoice_id: 'inv-1' } }] };
+      await expect(InvoiceService.unvoidInvoice('inv-1', { expected: { status: 'void', updatedAt: UPDATED.getTime() } })).rejects.toThrow(/^Cannot unvoid from the bar/);
+      expect(calls.filter((c) => c.table === 'sms_log' && (c.isUpdate || c.ops.some(([name]) => name === 'update')))).toEqual([]);
+      expect(hook).not.toHaveBeenCalled();
+      // Page (no `expected`): the same row is cancelled with its terminal_pending stamp and the hook runs after the commit - the work the bar must not do.
+      calls.length = 0;
+      cfg.reads.invoices = [voided];
+      cfg.reads.sms_log = [undefined];
+      await InvoiceService.unvoidInvoice('inv-1');
+      const cancel = calls.find((c) => c.table === 'sms_log' && c.ops.some(([name]) => name === 'update'));
+      expect(JSON.stringify(cancel.ops)).toMatch(/terminal_pending/);
+      expect(hook).toHaveBeenCalledWith('sms-1', entry, expect.objectContaining({ entry_point: entry }), { alreadyClaimed: true });
+    } finally {
+      hook.mockRestore();
+    }
+  });
+});
