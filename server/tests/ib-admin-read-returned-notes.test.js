@@ -270,7 +270,7 @@ describe('Codex #6375 r7: spaced and punctuated credential assignments, any Auth
     }
   });
   test('ordinary prose and labels without a credential word stay as written', () => {
-    const note = 'the password is in the lockbox. gate code: 1234, PIN: 8842, key under the mat, password: ab';
+    const note = 'the password is in the lockbox. gate code: 1234, PIN: 8842, key under the mat, lockbox passcode: 4321';
     expect(scrubNote(note)).toEqual({ text: note, removed: 0 });
   });
   test('a second pass over scrubbed text changes nothing', () => {
@@ -625,6 +625,39 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     }
   });
 
+  test.each([
+    ['access_key_id=abc123xyz', 'access_key_id=[removed]'],
+    ['secret_access_key=abc123xyz', 'secret_access_key=[removed]'],
+    ['signing_key_id: abc123xyz', 'signing_key_id: [removed]'],
+    ['api_key_id=abc123xyz', 'api_key_id=[removed]'],
+    ['key_id=abc', 'key_id=abc'],
+  ])('three-word key ids use the same key rule: %s (r18)', (note, expected) => {
+    expect(scrubNote(note).text).toBe(expected);
+  });
+
+  test.each([
+    ['password: abc', 'password: [removed]'],
+    ['db.password: pw', 'db.password: [removed]'],
+    ['X-API-Key: x', 'X-API-Key: [removed]'],
+    ['Token: ab, mode: fast', 'Token: [removed], mode: fast'],
+    // the owner-ruled choice: a credential word with a separator is removed, even when the value reads as prose
+    ['password: on weekdays', 'password: [removed]'],
+  ])('a short unquoted value after an explicit credential key and separator is removed: %s (r18)', (note, expected) => {
+    expect(scrubNote(note).text).toBe(expected);
+  });
+
+  test('owner-ruled prose and access words stay (r18)', () => {
+    const note = 'the password is in the lockbox. PIN: 8842. lockbox passcode: 4321. gate code: 1234.';
+    expect(scrubNote(note)).toEqual({ text: note, removed: 0 });
+  });
+
+  test('a tracker wrapping an encoded bare credential query is removed (r18)', async () => {
+    const result = await read(ENTRY, { id: 1, notes: 'go https://track.example.test/c?u=%3Ftoken%3Dabc123xyz now' });
+    expect(result.data.notes).toBe('go [signed link removed] now');
+    const kept = await read(ENTRY, { id: 1, notes: 'go https://track.example.test/c?u=%3Fpage%3D2 now' });
+    expect(kept.data.notes).toBe('go https://track.example.test/c?u=%3Fpage%3D2 now');
+  });
+
   test('an unquoted env value with an equals sign or colon inside runs through the line (audit P0)', () => {
     expect(scrubNote('DB_PASSWORD=correct horse battery staple q=1').text).toBe('DB_PASSWORD=[removed]');
     expect(scrubNote('DB_PASSWORD=correct horse: battery staple # keep this').text).toBe('DB_PASSWORD=[removed] # keep this');
@@ -748,5 +781,44 @@ describe('Codex #6375 r14: keep-mode rows return their reviewed note fields whil
     expect(result.data.line_items[0]).toEqual({ quantity: 1, amount: 99 });
     expect(result).not.toHaveProperty('notes_returned');
     expect(result.note).not.toContain('reviewed note fields');
+  });
+});
+
+describe('Codex #6375 r18: the estimate list returns reviewNotes under estimatorEngine while the notes gate is on', () => {
+  const ESTIMATES = catalog.entries.find(entry => entry.endpoint === '/admin/estimates');
+  const gates = ['GATE_IB_GENERAL_READ', 'GATE_IB_PLATFORM', 'GATE_IB_READ_NOTES'];
+  let saved;
+  beforeEach(() => { saved = gates.map(name => process.env[name]); process.env.GATE_IB_GENERAL_READ = 'true'; process.env.GATE_IB_PLATFORM = 'true'; });
+  afterEach(() => { gates.forEach((name, i) => { if (saved[i] === undefined) delete process.env[name]; else process.env[name] = saved[i]; }); });
+  const body = {
+    estimates: [{ id: 'e1', status: 'sent', notes: 'Dog in the yard', estimatorEngine: { reviewNotes: 'Check the north fence. DB_PASSWORD=hunter 22', hidden: 'dropped' }, extra: 'dropped' }],
+    total: 1,
+  };
+  const ask = () => {
+    global.fetch = jest.fn(async () => jsonResponse(body));
+    return executeAdminReadTool('read_admin_data', { endpoint: ESTIMATES.endpoint }, READER);
+  };
+
+  test('the reviewed path is nested', () => {
+    expect(ESTIMATES.keepNotes).toContain('estimates.*.estimatorEngine.reviewNotes');
+    expect(ESTIMATES.keepNotes).not.toContain('estimates.*.reviewNotes');
+  });
+
+  test('gate on: reviewNotes comes back scrubbed under estimatorEngine, other keys stay dropped', async () => {
+    process.env.GATE_IB_READ_NOTES = 'true';
+    const result = await ask();
+    const estimate = result.data.estimates[0];
+    expect(estimate.estimatorEngine).toEqual({ reviewNotes: 'Check the north fence. DB_PASSWORD=[removed]' });
+    expect(estimate.notes).toBe('Dog in the yard');
+    expect(estimate).not.toHaveProperty('extra');
+    expect(result.notes_returned).toBeGreaterThanOrEqual(2);
+  });
+
+  test('gate off: no estimatorEngine and no notes', async () => {
+    delete process.env.GATE_IB_READ_NOTES;
+    const result = await ask();
+    const estimate = result.data.estimates[0];
+    expect(estimate).not.toHaveProperty('notes');
+    expect(JSON.stringify(estimate)).not.toContain('north fence');
   });
 });

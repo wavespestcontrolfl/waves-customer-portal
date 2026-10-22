@@ -112,7 +112,7 @@ const AUTH_HEADER_RE = /(\bauthorization[ \t]*[:=][ \t]*)([A-Za-z][A-Za-z0-9_-]*
 // ("id":1,"password":"x") cannot swallow the next one (pre-push audit, r9).
 // A double-serialized blob keeps its quotes escaped ({\"password\":\"hunter22\"}); the key and
 // value quotes may be a backslash plus a quote, and the output keeps that shape (Codex #6375 r11).
-const KEY_ASSIGN_RE = /(?<![A-Za-z0-9_.-])(\\?["']?)((?:api[ \t]+)?[A-Za-z][A-Za-z0-9_.-]*)\1([ \t]*[=:][ \t]*)(\\"(?:[^\\\n]|\\(?!"))*\\"|\\'(?:[^\\\n]|\\(?!'))*\\'|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|(?=[^\s,;}\]"']{4}|\[removed\])(?:\[removed\]|[^\s,;}\]"'])+)/gi;
+const KEY_ASSIGN_RE = /(?<![A-Za-z0-9_.-])(\\?["']?)((?:api[ \t]+)?[A-Za-z][A-Za-z0-9_.-]*)\1([ \t]*[=:][ \t]*)(\\"(?:[^\\\n]|\\(?!"))*\\"|\\'(?:[^\\\n]|\\(?!'))*\\'|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|(?:\[removed\]|[^\s,;}\]"'])+)/gi;
 // The credential vocabulary of a fixed-format key (Codex #6375 r17). It is the
 // shared classifier's list less the words that name an ACCESS instruction the
 // owner wants returned (ruling 2026-10-13: pin, passcode) or that are ordinary
@@ -128,7 +128,9 @@ function isAssignmentSecretKey(key) {
   if (ASSIGN_KEY_WORDS.has(last)) return true;
   if (last === 'key') return SECRET_KEY_PREFIXES.has(prev);
   // password_hash, session_id-style pairs: a hash, salt or id of a credential.
-  return ['hash', 'salt', 'id'].includes(last) && CREDENTIAL_PREFIX_WORDS.has(prev);
+  if (!['hash', 'salt', 'id'].includes(last)) return false;
+  // access_key_id, secret_access_key-style ids: the words before the id are judged by the same key rule.
+  return CREDENTIAL_PREFIX_WORDS.has(prev) || (prev === 'key' && SECRET_KEY_PREFIXES.has(words[words.length - 3]));
 }
 // Only the exact marker (bare, or inside matching quotes or escaped quotes) counts as already removed:
 // "[removed]hunter22" still has its secret (Codex #6375 r15).

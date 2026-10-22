@@ -792,7 +792,7 @@
         "estimates.*.notes",
         "estimates.*.declineReason",
         "estimates.*.dispositionNote",
-        "estimates.*.reviewNotes"
+        "estimates.*.estimatorEngine.reviewNotes"
       ],
       "acceptSignals": [
         "credential_field:token",

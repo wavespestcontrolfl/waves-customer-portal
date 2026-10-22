@@ -236,6 +236,32 @@ function decodeOnce(text) {
 // A decoded wrapper part is judged by the same four link shapes the top level uses:
 // absolute, protocol-relative ("//host/l/code"), scheme-less host ("host/l/code") and
 // relative ("/l/code"), each with the same verdict function (Codex #6375 r16).
+function hostedTextVerdict(text, depth) {
+  for (const match of text.match(HOST_LINK_RE) || []) {
+    const { link } = splitTail(match);
+    if (!/[/?#]/.test(link) && !/^www\./i.test(link)) continue;
+    let candidate;
+    try { candidate = new URL(`https://${link}`); } catch { continue; }
+    const verdict = absoluteLinkVerdict(candidate.href, depth);
+    if (verdict) return verdict;
+  }
+  return null;
+}
+
+function relativeTextVerdict(text) {
+  for (const match of text.match(RELATIVE_LINK_RE) || []) {
+    const { link } = splitTail(match);
+    const verdict = link.length > 1 ? relativeLinkVerdict(link) : null;
+    if (verdict) return verdict;
+  }
+  // The fifth top-level rule: a bare query string that carries a credential ("?token=...").
+  for (const match of text.match(BARE_QUERY_RE) || []) {
+    const { link } = splitTail(match);
+    if (carriesCredential(link.slice(1)) && /=[^&]/.test(link)) return REDACTED_LINK;
+  }
+  return null;
+}
+
 function linkInTextVerdict(text, depth) {
   for (const match of text.match(URL_IN_TEXT_RE) || []) {
     const verdict = absoluteLinkVerdict(splitTail(match).link, depth);
@@ -245,20 +271,7 @@ function linkInTextVerdict(text, depth) {
     const verdict = absoluteLinkVerdict(`https:${splitTail(match).link}`, depth);
     if (verdict) return verdict;
   }
-  for (const match of text.match(HOST_LINK_RE) || []) {
-    const { link } = splitTail(match);
-    if (!/[/?#]/.test(link) && !/^www\./i.test(link)) continue;
-    let candidate;
-    try { candidate = new URL(`https://${link}`); } catch { continue; }
-    const verdict = absoluteLinkVerdict(candidate.href, depth);
-    if (verdict) return verdict;
-  }
-  for (const match of text.match(RELATIVE_LINK_RE) || []) {
-    const { link } = splitTail(match);
-    const verdict = link.length > 1 ? relativeLinkVerdict(link) : null;
-    if (verdict) return verdict;
-  }
-  return null;
+  return hostedTextVerdict(text, depth) || relativeTextVerdict(text);
 }
 
 function wrappedLinkVerdict(url, depth) {
