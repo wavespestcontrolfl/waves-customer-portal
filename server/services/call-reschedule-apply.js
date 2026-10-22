@@ -913,6 +913,21 @@ const MAKEUP_REASON_CODE = 'ai_call_makeup'; // reschedule_log.reason_code varch
 const MAKEUP_LOOKBACK_DAYS = 30;
 const MAKEUP_INTENTS = ['follow_up_existing_service'];
 const MAKEUP_NATURES = ['existing_customer_scheduling'];
+// Any of these on the visit, or a service record for it, means someone worked
+// it: the 6 PM customer_noshow row then means "not closed out", not "missed"
+// (not-closed-out.js: 27% were later completed).
+const FIELD_WORK_COLUMNS = ['en_route_at', 'arrived_at', 'check_in_time', 'actual_start_time', 'completed_at'];
+
+// Proof the visit was really missed: a person confirmed the miss on the
+// not-closed-out card, or the visit shows no field work at all. The call adds
+// the rest: the customer is asking for this service and agreed a new slot.
+function missedVisitEvidence(visit, log) {
+  if (log?.miss_confirmed_at) return 'miss_confirmed';
+  if (visit.has_service_record !== false) return null;
+  if (FIELD_WORK_COLUMNS.some((col) => !Object.hasOwn(visit, col) || visit[col] != null)) return null;
+  return 'no_field_work';
+}
+
 const GENERIC_SERVICE_NAME_RE = /^(?:waves pest control appointment service|waves appointment)$/i;
 
 function needsReview(reason, extra = {}) {
@@ -982,7 +997,8 @@ function planMakeupMoveFromCall({ v2, call, customer, properties = [], candidate
     && !OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(row.source_action)
     && dateOnly(row.scheduled_date) >= earliest && dateOnly(row.scheduled_date) < today
     && rowAtProperty(row, scope)
-    && openNoShowForSlot(row, noshowLogs));
+    && openNoShowForSlot(row, noshowLogs)
+    && missedVisitEvidence(row, openNoShowForSlot(row, noshowLogs)));
   if (!missed.length) return skip('no_missed_visit');
 
   // Service identity. A missed row with no real catalog identity (its catalog
@@ -1042,10 +1058,19 @@ async function loadMakeupCandidates(conn, customerId, now = new Date()) {
   const inRange = (rows || []).filter((row) => MOVABLE_STATUSES.includes(row.status)
     && dateOnly(row.scheduled_date) >= earliest && dateOnly(row.scheduled_date) < today);
   if (!inRange.length) return [];
-  const extra = await conn('scheduled_services').whereIn('id', inRange.map((r) => r.id)).select('id', 'parent_service_id', 'source_call_log_id');
+  const ids = inRange.map((r) => r.id);
+  const extra = await conn('scheduled_services').whereIn('id', ids)
+    .select('id', 'parent_service_id', 'source_call_log_id', ...FIELD_WORK_COLUMNS);
+  const recorded = await conn('service_records').whereIn('scheduled_service_id', ids).select('scheduled_service_id');
+  const recordedIds = new Set((recorded || []).map((r) => String(r.scheduled_service_id)));
   const byId = new Map((extra || []).map((r) => [String(r.id), r]));
-  return inRange.map((row) => ({ ...row, parent_service_id: byId.get(String(row.id))?.parent_service_id ?? null,
-    source_call_log_id: byId.get(String(row.id))?.source_call_log_id ?? null }));
+  return inRange.map((row) => {
+    const more = byId.get(String(row.id)) || {};
+    const fieldWork = {};
+    for (const col of FIELD_WORK_COLUMNS) fieldWork[col] = more[col] ?? null;
+    return { ...row, ...fieldWork, parent_service_id: more.parent_service_id ?? null,
+      source_call_log_id: more.source_call_log_id ?? null, has_service_record: recordedIds.has(String(row.id)) };
+  });
 }
 
 function loadOpenNoShows(conn, customerId, visitIds) {
@@ -1054,7 +1079,7 @@ function loadOpenNoShows(conn, customerId, visitIds) {
     .where({ customer_id: customerId, reason_code: 'customer_noshow' })
     .whereNull('resolved_at')
     .whereIn('scheduled_service_id', visitIds)
-    .select('id', 'scheduled_service_id', 'original_date', 'original_window', 'resolved_at');
+        .select('id', 'scheduled_service_id', 'original_date', 'original_window', 'resolved_at', 'miss_confirmed_at');
 }
 
 /**
@@ -1206,8 +1231,14 @@ async function applyCallMakeupMove({ conn, call, procToken = null, procGeneratio
       // No customer message (owner directive 2026-09-08); the reminder cron
       // reads the new time, so coverDueWindows stays unset (see
       // applyCallReschedule).
+      // The durable sync is the scheduled_services_sync_reminder trigger
+      // (migration 20260716150000): it moved appointment_time and re-armed the
+      // 24h reminder INSIDE the move's transaction. This call is the same
+      // silent re-sync every single-visit mover makes; it reports failure by
+      // returning null, so check the value instead of trusting the try.
       try {
-        await require('./appointment-reminders').handleReschedule(visit.id, `${plan.newDate}T${plan.newWindow.start}`, { sendNotification: false });
+        const synced = await require('./appointment-reminders').handleReschedule(visit.id, `${plan.newDate}T${plan.newWindow.start}`, { sendNotification: false });
+        if (!synced) logger.warn(`[call-makeup] reminder re-sync returned nothing for ${visit.id}; the in-transaction trigger sync stands`);
       } catch (err) {
         logger.warn(`[call-makeup] reminder sync failed for ${visit.id}: ${err.message}`);
       }

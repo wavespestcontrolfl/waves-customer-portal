@@ -102,6 +102,7 @@ const visit = (overrides = {}) => {
     scheduled_date: new Date('2026-10-13T00:00:00Z'), window_start: '09:00:00', window_end: '10:00:00',
     estimated_duration_minutes: null, status: 'confirmed', source_action: null, visit_id: null, parent_service_id: null,
     source_call_log_id: null, internal_notes: null, is_recurring: true, self_booking_id: null, customer_confirmed: true,
+    en_route_at: null, arrived_at: null, check_in_time: null, actual_start_time: null, completed_at: null, has_service_record: false,
     ...overrides,
   };
   if (!Object.hasOwn(row, 'catalog_service_name')) row.catalog_service_name = row.service_id ? row.service_type : null;
@@ -275,6 +276,26 @@ describe('planMakeupMoveFromCall', () => {
     expect(planMakeup(baseArgs({ call: call({ metadata: JSON.stringify({ stir_verstat: 'TN-Validation-Passed-A' }) }) }))).toMatchObject({ action: 'apply' });
     const outbound = call({ direction: 'outbound-dial', from_phone: '+15555550100', to_phone: PHONE, metadata: null });
     expect(planMakeup(baseArgs({ call: outbound }))).toMatchObject({ action: 'apply', visitId: VISIT_ID });
+  });
+
+  test('the open no-show row alone is not proof of a miss: any field work or a service record leaves the visit alone', () => {
+    for (const worked of [{ en_route_at: new Date() }, { arrived_at: new Date() }, { check_in_time: new Date() },
+      { actual_start_time: '14:05' }, { completed_at: new Date() }, { has_service_record: true }]) {
+      expect(planMakeup(baseArgs({ candidates: [visit(worked)] }))).toMatchObject({ action: 'skip', reason: 'no_missed_visit' });
+    }
+    // Field-work columns never loaded: no proof, never a move.
+    const unknown = visit();
+    delete unknown.arrived_at;
+    expect(planMakeup(baseArgs({ candidates: [unknown] }))).toMatchObject({ action: 'skip', reason: 'no_missed_visit' });
+    // A person's "This was a miss" on the card is proof even when a column is set.
+    expect(planMakeup(baseArgs({ candidates: [visit({ en_route_at: new Date() })], noshowLogs: [noshow({ miss_confirmed_at: new Date() })] })))
+      .toMatchObject({ action: 'apply', visitId: VISIT_ID });
+  });
+
+  test('the no-show detector reads make-up moves as call promises', () => {
+    const detector = fs.readFileSync(require.resolve('../services/no-show-detector'), 'utf8');
+    expect(detector).toContain("const CALL_MOVE_ACTIONS = ['call_reschedule_applied', 'call_makeup_move_applied'];");
+    expect(detector).not.toMatch(/action'?: 'call_reschedule_applied' \}/);
   });
 
   test('the move stands in for the booking only: no booking slot, or a different one, is skipped', () => {
