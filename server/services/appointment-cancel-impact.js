@@ -455,7 +455,7 @@ const EFFECTS_MONEY_BLOCKERS = new Set([
 ]);
 
 const CANCEL_FEE_DUE_MESSAGE = "This visit has a late-cancel fee due, and the bar can't cancel a visit with a fee due yet; the Dispatch screen handles the fee. Nothing was changed.";
-const CANCEL_MONEY_RULE_MESSAGE = "This visit, or a linked visit, has money or a card on it (a saved card or card request, a prepayment or prepaid plan coverage, an estimate deposit or annual prepay, an invoice that holds a payment, has a card charge in progress, or has setup-fee, annual-prepay or membership-dues effects, or a redeemed inspection credit), and refunds, card charges and credit reversals stay closed to the bar by the owner's rule, so the bar can't cancel it. Nothing was changed.";
+const CANCEL_MONEY_RULE_MESSAGE = "This visit, or a linked visit, has money or a card on it (a saved card or card request, a prepayment or prepaid plan coverage, an estimate deposit or annual prepay, an invoice that holds a payment or a card charge (on file or in progress), has a payment plan, or has setup-fee, annual-prepay or membership-dues effects, or a redeemed inspection credit), and refunds, card charges and credit reversals stay closed to the bar by the owner's rule, so the bar can't cancel it. Nothing was changed.";
 const CANCEL_COMBINED_PAYMENT_MESSAGE = "A combined card payment on this visit's invoice also covers other visits, and combined payments stay with the office by the owner's rule, so the bar can't cancel it; cancel it from Dispatch. Nothing was changed.";
 const CANCEL_STILL_UNSUPPORTED_MESSAGE = "This visit is a plan make-up visit, a follow-up visit, part of a grouped visit, or has a linked follow-up visit that is part of a grouped visit, so the bar can't cancel this visit from here yet. Nothing was changed.";
 
@@ -504,22 +504,22 @@ async function invoiceDownstreamReason(conn, invoiceRows) {
   const ids = open.map((inv) => inv.id);
   if (await conn('setup_fee_claims').whereIn('invoice_id', ids).first('id')) return 'setup_fee_claim';
   if (await conn('annual_prepay_terms').whereIn('prepay_invoice_id', ids).first('id')) return 'annual_prepay_invoice';
-  return invoiceChargeInFlightReason(conn, open);
+  return invoiceVoidClassifierReason(conn, open);
 }
 
-// An unresolved saved-card charge on an open invoice: a worker can die after submitting the charge to Stripe, leaving the
-// invoice 'sent' with no PaymentIntent or payments row but an unresolved claim, so money may already be collected. Voiding
-// it would hide that. Read-only, on the given connection (the same fence the bar's void_invoice runs); a reconciliation
-// verdict refuses, anything else (a failed read) throws so the card or the lock-time check fails closed.
-async function invoiceChargeInFlightReason(conn, openInvoices) {
-  const { assertNoInvoiceChargeReconciliationPending } = require('./stripe');
+// The bar's own void rules (void_invoice's classifier, shared): charge markers (a card charge on file, a paid date), a payment
+// on file, an unresolved saved-card charge, a payment plan, a finalized statement, and the page-only effects (dues, setup fee,
+// annual plan, combined payment, queued text). The card refuses an invoice the bar's void tool would refuse, and the pinned
+// void repeats this under the invoice lock. A deposit credit line is skipped here: the cancel restores it deliberately (the
+// estimate-level deposit checks above refuse the cases that matter). A refusal reads as a reason string; a check that could
+// not be completed throws, so the card build or the lock-time check fails closed.
+async function invoiceVoidClassifierReason(conn, openInvoices) {
+  const { invoiceVoidRefusal } = require('./invoice-void-classifier');
   for (const inv of openInvoices) {
-    try {
-      await assertNoInvoiceChargeReconciliationPending(inv.id, conn, { readOnly: true });
-    } catch (err) {
-      if (err?.reconciliationRequired || /^STRIPE_/.test(String(err?.code || ''))) return 'charge_in_progress';
-      throw err;
-    }
+    const refused = await invoiceVoidRefusal(inv, conn, { skip: ['deposit_collected'] });
+    if (!refused) continue;
+    if (refused.code === 'unverified') throw new Error(refused.error);
+    return `void_rule_${refused.reason || refused.code}`;
   }
   return null;
 }
@@ -549,7 +549,7 @@ async function linkedChildMoneyReason(conn, followUps) {
 async function loadLinkedEffects(scheduledServiceId, actorId = null, conn = db) {
   const InvoiceService = require('./invoice');
   const [invoiceRows, followUps] = await Promise.all([
-    InvoiceService.anyInvoiceLinkedToVisit(db, scheduledServiceId).orderBy('id').select('id', 'invoice_number', 'status', 'total', 'line_items'),
+    InvoiceService.anyInvoiceLinkedToVisit(db, scheduledServiceId).orderBy('id').select('*'),
     linkedFollowUpRows(db, scheduledServiceId),
   ]);
   const invoiceDownstream = await invoiceDownstreamReason(conn, invoiceRows || []);

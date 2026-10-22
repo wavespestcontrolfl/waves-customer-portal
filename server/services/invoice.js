@@ -5782,21 +5782,6 @@ async function refusedSendCleanupSkip(trx, locked, { refusedClaimToken, schedule
   return null;
 }
 
-// A pinned (card-confirmed) void only: an unresolved saved-card charge (a worker that died after submitting to Stripe leaves
-// the invoice 'sent' with no PaymentIntent or payments row) means money may already be collected. Same read-only fence the
-// bar's void_invoice runs under its invoice lock. A reconciliation verdict skips the void; a failed read throws (fail closed).
-async function pinnedChargeFenceSkip(trx, locked) {
-  try {
-    await require("./stripe").assertNoInvoiceChargeReconciliationPending(locked.id, trx, { readOnly: true });
-  } catch (err) {
-    if (err?.reconciliationRequired || /^STRIPE_/.test(String(err?.code || ""))) {
-      return { skipped: "a saved-card charge is in progress or unresolved on this invoice; reconcile it instead of voiding (needs office review)", invoice: locked };
-    }
-    throw err;
-  }
-  return null;
-}
-
 // Normal cancellation, under the invoice row lock: still a voidable status, and (pinned) still what the card showed.
 // Returns a skip result, or null to go on.
 async function lockedCandidateSkip(trx, locked, { pinnedById, pinnedMismatch }) {
@@ -5806,14 +5791,12 @@ async function lockedCandidateSkip(trx, locked, { pinnedById, pinnedMismatch }) 
   if (pinnedMismatch(locked)) {
     return { skipped: "amounts changed since the confirmed card; needs office review", invoice: locked };
   }
-  if (pinnedById) {
-    const fenced = await pinnedChargeFenceSkip(trx, locked);
-    if (fenced) return fenced;
-  }
   if (pinnedById && await require("./appointment-cancel-impact").invoiceDownstreamReason(trx, [locked])) {
-    // Setup-fee, annual-prepay or membership-dues effects the card refused at preview: an invoice edited
-    // since can keep its amounts and still gain one, and the void would then restore an unapproved obligation.
-    return { skipped: "downstream billing effects appeared since the confirmed card; needs office review", invoice: locked };
+    // Everything the card refused at preview, repeated on the locked row: the bar's void rules (charge markers, a paid date,
+    // a payment on file, an unresolved saved-card charge, a payment plan, page-only effects) and setup-fee, annual-prepay or
+    // membership-dues effects. An invoice edited or charged since can keep its amounts and still gain one; the void would
+    // then hide money or restore an unapproved obligation. A check that cannot complete throws, leaving the invoice open.
+    return { skipped: "money or billing effects appeared since the confirmed card (a card charge, a paid date, a payment plan, an unresolved charge, or downstream effects); needs office review", invoice: locked };
   }
   return null;
 }

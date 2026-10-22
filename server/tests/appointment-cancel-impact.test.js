@@ -42,8 +42,10 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-const mockChargeFence = jest.fn(async () => {});
-jest.mock('../services/stripe', () => ({ assertNoInvoiceChargeReconciliationPending: (...a) => mockChargeFence(...a) }));
+// The bar's void rules, shared with void_invoice (invoice-void-classifier.js, covered by its own suites and the pinned-void
+// suite): mocked here to prove the card CALLS it for every open linked invoice and refuses on any verdict.
+const mockVoidRefusal = jest.fn(async () => null);
+jest.mock('../services/invoice-void-classifier', () => ({ invoiceVoidRefusal: (...a) => mockVoidRefusal(...a) }));
 // The schedule route's canonical money-commitment readers (prepaid coverage,
 // Codex round 9 P1) — mocked so this suite never loads the 26k-line router.
 const mockCoveredReason = jest.fn(() => null);
@@ -866,34 +868,39 @@ describe('computeCancelAppointmentImpact({ withEffects: true })', () => {
       expect(refusal.error).toMatch(/setup-fee, annual-prepay or membership-dues effects/);
     });
 
-    // The crash state: invoice 'sent' with no PaymentIntent / payments row but an unresolved submitted charge claim.
+    // Each verdict the bar's void_invoice would give (charge markers, paid date, payment plan, the crash state of an
+    // unresolved submitted charge claim) refuses the card the same way.
     test.each([
-      ['an ambiguous submitted claim', { code: 'STRIPE_AMBIGUOUS_OUTCOME', reconciliationRequired: true }],
-      ['a saved-card charge in progress', { code: 'STRIPE_CHARGE_IN_PROGRESS' }],
-    ])('an open invoice with %s refuses the card (invoice_downstream_effects, by_owner_rule, mentions the charge)', async (_label, fence) => {
+      ['a card charge on file (stripe_charge_id)', { code: 'by_owner_rule', reason: 'charge_on_file' }],
+      ['a paid date (paid_at)', { code: 'by_owner_rule', reason: 'paid_date' }],
+      ['an active payment plan', { code: 'by_owner_rule', reason: 'payment_plan' }],
+      ['an unresolved submitted saved-card charge (worker died after submitting)', { code: 'by_owner_rule', reason: 'charge_in_progress' }],
+      ['a queued pay-link text', { code: 'needs_invoices_page', reason: 'queued_text' }],
+    ])('an open invoice with %s refuses the card (invoice_downstream_effects, by_owner_rule)', async (_label, verdict) => {
       noCard();
       mockAnyInvoiceLinked.mockReturnValue(owed());
-      mockChargeFence.mockRejectedValueOnce(Object.assign(new Error('charge pending'), fence));
+      mockVoidRefusal.mockResolvedValueOnce({ error: 'refused', ...verdict });
       const impact = await run();
       expect(impact.card_cancel_refusals).toEqual(['invoice_downstream_effects']);
-      expect(mockChargeFence).toHaveBeenCalledWith('inv-1', expect.anything(), { readOnly: true });
+      // The same classifier call void_invoice makes: this invoice, on the connection in use, deposit credit handled by the cancel.
+      expect(mockVoidRefusal).toHaveBeenCalledWith(expect.objectContaining({ id: 'inv-1' }), expect.anything(), { skip: ['deposit_collected'] });
       const refusal = cancelWithEffectsRefusal(impact);
       expect(refusal.code).toBe('by_owner_rule');
-      expect(refusal.error).toMatch(/card charge in progress/);
+      expect(refusal.error).toMatch(/card charge \(on file or in progress\), has a payment plan/);
     });
 
-    test('a charge-fence read that fails (not a verdict) fails the card build closed', async () => {
+    test('a check that cannot be completed (the classifier reports unverified) fails the card build closed', async () => {
       noCard();
       mockAnyInvoiceLinked.mockReturnValue(owed());
-      mockChargeFence.mockRejectedValueOnce(new Error('connection terminated'));
-      await expect(run()).rejects.toThrow('connection terminated');
+      mockVoidRefusal.mockResolvedValueOnce({ error: 'The bar could not check for a card charge in progress', code: 'unverified' });
+      await expect(run()).rejects.toThrow(/could not check/);
     });
 
-    test('an already-void invoice never reaches the charge fence', async () => {
+    test('an already-void invoice never reaches the classifier', async () => {
       noCard();
       mockAnyInvoiceLinked.mockReturnValue(owed({ status: 'void' }));
       await run();
-      expect(mockChargeFence).not.toHaveBeenCalled();
+      expect(mockVoidRefusal).not.toHaveBeenCalled();
     });
 
     test('a plain visit invoice, and an already-void one with a setup line, are carded', async () => {

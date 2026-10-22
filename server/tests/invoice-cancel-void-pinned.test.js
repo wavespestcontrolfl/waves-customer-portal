@@ -394,6 +394,29 @@ describe('pinned void rechecks downstream billing effects under the invoice lock
     expect(mockChargeFence).toHaveBeenCalledWith('inv-b', expect.anything(), { readOnly: true });
   });
 
+  // The bar's void_invoice rules, run on the locked row by the shared classifier (invoice-void-classifier.js): an invoice that
+  // gained a charge marker, a paid date or an active payment plan after the card is left open (reported by the follow-through).
+  test.each([
+    ['a Stripe charge id (stripe_charge_id)', () => { mockLockedOverride['inv-b'] = { stripe_charge_id: 'ch_test' }; }],
+    ['a paid date (paid_at)', () => { mockLockedOverride['inv-b'] = { paid_at: '2026-10-20T12:00:00Z' }; }],
+    ['a recorded payment (payment_recorded_at)', () => { mockLockedOverride['inv-b'] = { payment_recorded_at: '2026-10-20T12:00:00Z' }; }],
+    ['an active payment plan', () => { mockOtherRows.payment_plans = [{ id: 'plan-1', status: 'active' }]; }],
+  ])('an invoice that gained %s since the card is NOT voided by the pinned sweep', async (_label, drift) => {
+    mockInvoiceRows = [INV_B];
+    const pinned = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');
+    drift();
+    const voided = [...(await InvoiceService.voidOpenInvoicesForCancelledService('svc-1', { pinnedInvoices: pinned }))];
+    expect(voided).toEqual([]);
+    expect(voidedIds()).toEqual([]);
+  });
+
+  test("the same markers do not stop Dispatch's unpinned sweep (unchanged)", async () => {
+    mockInvoiceRows = [INV_B];
+    mockLockedOverride['inv-b'] = { stripe_charge_id: 'ch_test', paid_at: '2026-10-20T12:00:00Z' };
+    mockOtherRows.payment_plans = [{ id: 'plan-1', status: 'active' }];
+    expect([...(await InvoiceService.voidOpenInvoicesForCancelledService('svc-1'))]).toEqual(['inv-b']);
+  });
+
   test('a fence read that FAILS (not a reconciliation verdict) also leaves the invoice open', async () => {
     mockInvoiceRows = [INV_B];
     const pinned = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');
