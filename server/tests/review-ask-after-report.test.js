@@ -149,12 +149,17 @@ describe('the combined-visit anchor (reportTextAnchorForVisit)', () => {
     expect(await ReviewService.reportTextAnchorForVisit('v-1', fakeDatabase({ status: 'sent', sent_at: sentAt }))).toEqual({ status: 'sent', at: sentAt });
   });
 
+  test('a summary held by quiet hours and sent at 8 AM anchors to that text (codex #6471 r1 P2)', async () => {
+    process.env.GATE_REVIEW_ASK_AFTER_REPORT = 'true';
+    const sentAt = new Date('2026-10-20T12:01:00Z');
+    expect(await ReviewService.reportTextAnchorForVisit('v-1', fakeDatabase({ status: 'sent', sent_at: sentAt, scheduled_at: new Date('2026-10-20T12:00:00Z') }))).toEqual({ status: 'sent', at: sentAt });
+  });
+
   test.each([
     ['suppressed', { status: 'suppressed', sent_at: null }],
     ['missing', null],
     ['failed', { status: 'failed', sent_at: null }],
     ['unreadable', new Error('db down')],
-    ['held by quiet hours, then sent at 8 AM (codex #6434 r12 P2)', { status: 'sent', sent_at: new Date('2026-10-20T12:01:00Z'), scheduled_at: new Date('2026-10-20T12:00:00Z') }],
   ])('gate on, summary text %s: no anchor (smart window)', async (_label, effect) => {
     process.env.GATE_REVIEW_ASK_AFTER_REPORT = 'true';
     expect(await ReviewService.reportTextAnchorForVisit('v-1', fakeDatabase(effect))).toBeNull();
@@ -171,10 +176,11 @@ describe('a report held for the morning pulls its review ask when it goes out as
   const ReviewService = require('../services/review-request');
   const db = require('../models/db');
   function chain(updated = 1) {
-    const calls = { where: [], whereNull: [], whereRaw: [], update: null };
+    const calls = { where: [], whereNull: [], whereNotNull: [], whereRaw: [], update: null };
     const q = {
       where(...a) { calls.where.push(a); return q; },
       whereNull(c) { calls.whereNull.push(c); return q; },
+      whereNotNull(c) { calls.whereNotNull.push(c); return q; },
       whereRaw(sql) { calls.whereRaw.push(sql); return q; },
       update: async (patch) => { calls.update = patch; return updated; },
     };
@@ -184,56 +190,63 @@ describe('a report held for the morning pulls its review ask when it goes out as
   beforeEach(() => { restore = db.getMockImplementation(); jest.spyOn(Date, 'now').mockReturnValue(new Date('2026-10-21T12:03:00Z').getTime()); });
   afterEach(() => { db.mockImplementation(restore); Date.now.mockRestore(); });
 
-  test('gate on, sent as SMS/MMS: one conditional write moves an untouched smart-window Day-0 ask to 10 minutes from now', async () => {
+  test('gates on, sent as SMS/MMS (or proved by a Twilio SID): one conditional write re-plans an untouched smart-window Day-0 ask to 10 minutes from now', async () => {
     process.env.GATE_REVIEW_ASK_AFTER_REPORT = 'true';
-    for (const channel of ['sms', 'mms']) {
+    process.env.GATE_REVIEW_SEQUENCES = 'true';
+    for (const proof of [{ channel: 'sms' }, { channel: 'mms' }, { providerMessageId: 'SM0123456789abcdef0123456789abcdef' }, { providerMessageId: 'MM0123456789abcdef0123456789abcdef' }]) {
       const { q, calls } = chain();
       db.mockImplementation(() => q);
-      expect(await ReviewService.pullAskAfterHeldReport('sr-1', channel)).toEqual({ pulled: 1 });
+      expect(await ReviewService.pullAskAfterHeldReport('sr-1', proof)).toEqual({ pulled: 1 });
       expect(calls.where[0][0]).toEqual({ service_record_id: 'sr-1', status: 'active', current_step: 0, touches_sent: 0, started_by: 'post_service' });
       expect(calls.whereNull).toEqual(['customer_requested']);
       expect(calls.whereRaw).toEqual(["decision ->> 'reason' = 'smart_window'"]);
-      // only ever earlier: rows already due sooner (or claimed, next_run_at NULL) are skipped
-      expect(calls.where[1][0]).toBe('next_run_at');
-      expect(calls.where[1][1]).toBe('>');
-      expect(calls.where[1][2].toISOString()).toBe('2026-10-21T12:13:00.000Z');
+      // earlier or later (the 10-minute floor after a delayed replay); a claimed row (NULL) is skipped
+      expect(calls.whereNotNull).toEqual(['next_run_at']);
+      expect(calls.where).toHaveLength(1);
       expect(calls.update.next_run_at.toISOString()).toBe('2026-10-21T12:13:00.000Z');
       expect(JSON.parse(calls.update.decision)).toMatchObject({ reason: 'after_report' });
     }
   });
 
   test.each([
-    ['the App', 'push'],
-    ['an unknown channel (finalize-only retry)', undefined],
-    ['email', 'email'],
-  ])('%s: nothing moves, no write', async (_label, channel) => {
+    ['the App (no provider SID)', { channel: 'push' }],
+    ['no channel and no provider proof', {}],
+    ['a provider id that is not a Twilio SID', { providerMessageId: 'push-abc' }],
+    ['email', { channel: 'email' }],
+  ])('%s: nothing moves, no write', async (_label, proof) => {
     process.env.GATE_REVIEW_ASK_AFTER_REPORT = 'true';
+    process.env.GATE_REVIEW_SEQUENCES = 'true';
     const { q, calls } = chain();
     db.mockImplementation(() => q);
-    expect(await ReviewService.pullAskAfterHeldReport('sr-1', channel)).toEqual({ pulled: 0 });
+    expect(await ReviewService.pullAskAfterHeldReport('sr-1', proof)).toEqual({ pulled: 0 });
     expect(calls.update).toBeNull();
   });
 
-  test('gate off, or no record: nothing moves', async () => {
+  test('gate off, cadences off (codex #6471 r1 P2), or no record: nothing moves', async () => {
     const { q, calls } = chain();
     db.mockImplementation(() => q);
-    expect(await ReviewService.pullAskAfterHeldReport('sr-1', 'sms')).toEqual({ pulled: 0 });
+    process.env.GATE_REVIEW_SEQUENCES = 'true';
+    expect(await ReviewService.pullAskAfterHeldReport('sr-1', { channel: 'sms' })).toEqual({ pulled: 0 });
     process.env.GATE_REVIEW_ASK_AFTER_REPORT = 'true';
-    expect(await ReviewService.pullAskAfterHeldReport(null, 'sms')).toEqual({ pulled: 0 });
+    delete process.env.GATE_REVIEW_SEQUENCES;
+    expect(await ReviewService.pullAskAfterHeldReport('sr-1', { channel: 'sms' })).toEqual({ pulled: 0 });
+    process.env.GATE_REVIEW_SEQUENCES = 'true';
+    expect(await ReviewService.pullAskAfterHeldReport(null, { channel: 'sms' })).toEqual({ pulled: 0 });
     expect(calls.update).toBeNull();
   });
 
   test('a failed write never throws', async () => {
     process.env.GATE_REVIEW_ASK_AFTER_REPORT = 'true';
+    process.env.GATE_REVIEW_SEQUENCES = 'true';
     const { q } = chain();
     q.update = async () => { throw new Error('db down'); };
     db.mockImplementation(() => q);
-    expect(await ReviewService.pullAskAfterHeldReport('sr-1', 'sms')).toEqual({ pulled: 0 });
+    expect(await ReviewService.pullAskAfterHeldReport('sr-1', { channel: 'sms' })).toEqual({ pulled: 0 });
   });
 
-  test('the completion replay finalize passes the first pass channel; a retry pulls nothing', async () => {
+  test('the completion replay finalize passes the channel and the provider id (a finalize-only retry still applies it)', async () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/messaging/deferred-replay-registry.js'), 'utf8');
-    expect(src).toContain("if (ctx.retry !== true) await require('../review-request').pullAskAfterHeldReport(meta.service_record_id, ctx.channel);");
+    expect(src).toContain("await require('../review-request').pullAskAfterHeldReport(meta.service_record_id, { channel: ctx.channel, providerMessageId: ctx.providerMessageId || meta.provider_message_id });");
     const scheduler = require('fs').readFileSync(require('path').join(__dirname, '../services/scheduler.js'), 'utf8');
     expect(scheduler).toContain('{ providerMessageId: smsResult.providerMessageId, customerId: msg.customer_id || null, channel: smsResult.channel || null });');
   });

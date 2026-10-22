@@ -1964,23 +1964,28 @@ const ReviewService = {
 
   // GATE_REVIEW_ASK_AFTER_REPORT for a report the send window held for the
   // morning: enrollment kept the smart window (no confirmable text yet). When
-  // the held report's replay is accepted as a TEXT (SMS/MMS), the untouched
-  // Day-0 ask still planned on that window moves up to 10 minutes from now. It
-  // only ever moves an ask EARLIER, in one conditional write (a row the runner
-  // has claimed has next_run_at NULL and is skipped). Anything unconfirmed — the
-  // App, an unknown channel, a finalize-only retry, an explicit or customer-
-  // requested timing, a decision another deferral rewrote — leaves the smart
-  // window. Never throws.
-  async pullAskAfterHeldReport(serviceRecordId, channel) {
-    if (!serviceRecordId || !["sms", "mms"].includes(channel)) return { pulled: 0 };
+  // the held report's replay is accepted as a TEXT, the untouched Day-0 ask
+  // still planned on that window is re-planned to 10 minutes from now, in one
+  // conditional write: earlier when its window was later, later when its window
+  // was sooner (the 10-minute floor after a delayed replay). A row the runner
+  // has claimed (next_run_at NULL) is skipped; a re-run (finalize-only retry)
+  // finds the row already 'after_report' and does nothing. The channel is the
+  // replay's own (first pass) or read from the accepted provider id (a Twilio
+  // SMS/MMS SID; an App push has none), so crash recovery still applies it.
+  // Anything unconfirmed — the App, no provider proof, cadences off, an
+  // explicit or customer-requested timing, a decision another deferral
+  // rewrote — leaves the smart window. Never throws.
+  async pullAskAfterHeldReport(serviceRecordId, { channel = null, providerMessageId = null } = {}) {
+    const texted = ["sms", "mms"].includes(channel) || /^(SM|MM)[0-9a-f]{32}$/i.test(String(providerMessageId || ""));
+    if (!serviceRecordId || !texted) return { pulled: 0 };
     try {
-      if (!reviewAskAfterReportOn()) return { pulled: 0 };
+      if (!reviewAskAfterReportOn() || !require("../config/feature-gates").isEnabled("reviewSequences")) return { pulled: 0 };
       const dueAt = new Date(Date.now() + REVIEW_AFTER_REPORT_DELAY_MINUTES * 60000);
       const pulled = await db("review_sequences")
         .where({ service_record_id: serviceRecordId, status: "active", current_step: 0, touches_sent: 0, started_by: "post_service" })
         .whereNull("customer_requested")
         .whereRaw("decision ->> 'reason' = 'smart_window'")
-        .where("next_run_at", ">", dueAt)
+        .whereNotNull("next_run_at")
         .update({ next_run_at: dueAt, decision: sequenceDecision({ reason: "after_report", plannedAt: dueAt, nextEvalAt: dueAt }), updated_at: new Date() });
       return { pulled: Number(pulled) || 0 };
     } catch (err) {
@@ -1992,14 +1997,15 @@ const ReviewService = {
   // The same anchor for a combined visit (visit-completion-packets): its
   // completion_sms effect. Enrollment there runs only once the delivery legs
   // are sent or suppressed, so a 'sent' effect anchors the ask to that text; a
-  // suppressed, missing or held one keeps the smart window.
+  // suppressed or missing one keeps the smart window.
   async reportTextAnchorForVisit(visitId, database = db) {
     if (!visitId || !reviewAskAfterReportOn()) return null;
     try {
-      // A summary held by quiet hours (deferSummarySms sets scheduled_at, which
-      // its 8 AM replay keeps) keeps the smart window, like a held report.
-      const effect = await database("visit_effects").where({ visit_id: visitId, effect_type: "completion_sms" }).first("status", "sent_at", "scheduled_at");
-      return effect?.status === "sent" && !effect.scheduled_at ? { status: "sent", at: effect.sent_at || new Date() } : null;
+      // A summary held by quiet hours counts too: its 8 AM replay is a plain
+      // text (deferSummarySms queues SMS, no App routing), and this enrollment
+      // waits until that leg is sent, so the ask goes 10 minutes after it.
+      const effect = await database("visit_effects").where({ visit_id: visitId, effect_type: "completion_sms" }).first("status", "sent_at");
+      return effect?.status === "sent" ? { status: "sent", at: effect.sent_at || new Date() } : null;
     } catch (err) {
       logger.warn(`[review] visit report anchor lookup failed (visitId=${visitId}): ${err.message}`);
       return null;

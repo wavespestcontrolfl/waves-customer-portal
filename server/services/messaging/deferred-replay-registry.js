@@ -680,9 +680,10 @@ const REGISTRY = {
       const result = await finalizeDeferredCompletionSend(meta, { retry: ctx.retry === true });
       // GATE_REVIEW_ASK_AFTER_REPORT: the held report just went out; when it
       // went as a TEXT (the first pass knows the channel; a finalize-only retry
-      // does not, and changes nothing), its review ask moves up to 10 minutes
-      // after it. Never throws, never changes this finalize's outcome.
-      if (ctx.retry !== true) await require('../review-request').pullAskAfterHeldReport(meta.service_record_id, ctx.channel);
+      // reads it from the accepted provider id), its review ask is re-planned
+      // to 10 minutes after it. Idempotent; never throws, never changes this
+      // finalize's outcome.
+      await require('../review-request').pullAskAfterHeldReport(meta.service_record_id, { channel: ctx.channel, providerMessageId: ctx.providerMessageId || meta.provider_message_id });
       return result;
     },
     async onTerminal(meta) {
