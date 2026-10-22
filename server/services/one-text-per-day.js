@@ -300,8 +300,9 @@ function otherVisitsOfTheText(ref, kind, technicianId) {
 /**
  * What this text names, and so what it will cover ("named = covered"): { ids, label }.
  *  - arrived: the sender plus those other visits, all in one merged label (existing per-visit label
- *    builder); the label is passed to the sender. If the label cannot be built, the text names only the
- *    sender's own service and covers only the sender.
+ *    builder); the label is passed to the sender. A visit whose own label is empty or generic is left out
+ *    of the text and so not covered. If the label cannot be built, the text names only the sender's own
+ *    service and covers only the sender.
  *  - on the way: it names no service, so it stands for every live visit of that customer, property, ET
  *    day and technician at the moment it is delivered (no label). A visit added afterwards is not covered.
  * Any lookup failure: the sender alone (the text goes out as it would without the rule).
@@ -314,10 +315,17 @@ async function namedScope(ref, kind, technicianId) {
     const ids = [String(ref.id), ...others.map((v) => String(v.id))];
     if (kind !== 'arrived') return { ids, label: null };
     const { buildServiceLabel } = require('./appointment-reminders');
-    const labels = [];
-    for (const v of [ref, ...others]) labels.push(await buildServiceLabel(v.id, v.service_type));
+    const labels = [await buildServiceLabel(ref.id, ref.service_type)];
+    const namedIds = [String(ref.id)];
+    // Named = covered: a visit whose label is empty or the generic "service" is dropped from the text,
+    // so it is not covered either; it sends its own.
+    for (const v of others) {
+      const own = await buildServiceLabel(v.id, v.service_type);
+      if (joinLabels([own])) { labels.push(own); namedIds.push(String(v.id)); }
+    }
+    if (namedIds.length < 2) return alone;
     const label = joinLabels(labels);
-    return label ? { ids, label } : alone;
+    return label ? { ids: namedIds, label } : alone;
   } catch (err) {
     logger.warn(`[one-text-per-day] named-visits lookup failed for ${ref.id} (covers only itself): ${err.message}`);
     return alone;

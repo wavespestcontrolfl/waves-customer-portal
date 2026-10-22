@@ -696,6 +696,26 @@ postgres('one text per customer, address and day', () => {
         expect(texted(TwilioService.sendTechArrived)).toBe(2);
       });
 
+      test('a sibling whose label is only the generic "service" is not named, so not covered: it sends its own', async () => {
+        gateOn();
+        const f = await twoVisits();
+        await enRoute(f.rows[0].id);
+        await enRoute(f.rows[1].id);
+        const reminders = require('../services/appointment-reminders');
+        const real = reminders.buildServiceLabel;
+        const spy = jest.spyOn(reminders, 'buildServiceLabel').mockImplementation(async (id, type) => (
+          String(id) === String(f.rows[1].id) ? 'service' : real(id, type)));
+        try {
+          await onSite(f.rows[0].id);
+        } finally {
+          spy.mockRestore();
+        }
+        expect(texted(TwilioService.sendTechArrived)).toBe(1);
+        expect((await proofsFor(f.rows[0].id)).find((r) => r.metadata.kind === 'arrived').metadata.named_service_ids).toEqual([String(f.rows[0].id)]);
+        await onSite(f.rows[1].id);
+        expect(texted(TwilioService.sendTechArrived)).toBe(2);
+      });
+
       const addVisit = async (f, { start, end, name }) => {
         const [row] = await mockPg('scheduled_services').insert({
           customer_id: f.customerId, property_id: f.rows[0].property_id, technician_id: technicians[0], service_type: name,
