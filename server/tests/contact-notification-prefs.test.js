@@ -231,6 +231,76 @@ describe('contactDeclinesChannel (single-recipient resolvers: review outreach)',
     const trx = Object.assign(() => builder(), { isTransaction: true });
     await expect(ContactPrefs.contactDeclinesChannel('cust-1', SAM, 'sms', { dbh: trx })).rejects.toThrow('boom');
   });
+
+  // The dispatch-boundary re-checks (review outreach, codex r27 P2) ask with
+  // requireSlot: the customer row is re-read and a contact the holder removed
+  // since the recipient resolved — or whose slot now carries a different
+  // address — is held; the holder's own number (slot-1 fallback) never is.
+  test('requireSlot: a removed contact, a vanished row or a changed slot address declines; a kept slot and the holder fallback are judged by the row', async () => {
+    let customer = { ...CUSTOMER };
+    db.mockImplementation((table) => {
+      if (table !== 'customers') return builder();
+      return { where: () => ({ first: async () => { if (failWith) throw failWith; return customer; } }) };
+    });
+    const opts = { requireSlot: true };
+    rows = [];
+    expect(await ContactPrefs.contactDeclinesChannel('cust-1', SAM, 'email', opts)).toBe(false);
+    expect(await ContactPrefs.contactDeclinesChannel('cust-1', { phone: '+19415559999', email: 'x@example.com', role: 'service_contact' }, 'email', opts)).toBe(true);
+    // Slot 1 now carries another address: the resolved address is no longer Sam's.
+    customer = { ...CUSTOMER, service_contact_email: 'other@example.com' };
+    expect(await ContactPrefs.contactDeclinesChannel('cust-1', SAM, 'email', opts)).toBe(true);
+    // …but a slot with no address of its own (the holder's fallback mailbox) still passes, and texts never look at the address.
+    customer = { ...CUSTOMER, service_contact_email: null };
+    expect(await ContactPrefs.contactDeclinesChannel('cust-1', SAM, 'email', opts)).toBe(false);
+    customer = { ...CUSTOMER, service_contact_email: 'other@example.com' };
+    expect(await ContactPrefs.contactDeclinesChannel('cust-1', SAM, 'sms', opts)).toBe(false);
+    // The holder's own number as the slot-1 fallback identity is not slot-bound.
+    customer = { ...CUSTOMER, service_contact_phone: null };
+    expect(await ContactPrefs.contactDeclinesChannel('cust-1', { ...PRIMARY, role: 'service_contact' }, 'email', opts)).toBe(false);
+    customer = null;
+    expect(await ContactPrefs.contactDeclinesChannel('cust-1', SAM, 'email', opts)).toBe(true);
+    customer = { ...CUSTOMER };
+    failWith = new Error('timeout');
+    expect(await ContactPrefs.contactDeclinesChannel('cust-1', SAM, 'email', opts)).toBe(true);
+    const trx = Object.assign((table) => db(table), { isTransaction: true });
+    await expect(ContactPrefs.contactDeclinesChannel('cust-1', SAM, 'email', { ...opts, dbh: trx })).rejects.toThrow('timeout');
+    failWith = null;
+    delete process.env.GATE_CONTACT_LOGIN;
+    expect(await ContactPrefs.contactDeclinesChannel('cust-1', { phone: '+19415559999', role: 'service_contact' }, 'email', opts)).toBe(false);
+  });
+});
+
+describe('contactAddressStillAllowed (appointment email, as of the provider handoff)', () => {
+  let live;
+  beforeEach(() => {
+    live = { ...CUSTOMER };
+    db.mockImplementation((table) => {
+      if (table !== 'customers') return builder();
+      return { where: () => ({ first: async () => { if (failWith) throw failWith; return live; } }) };
+    });
+  });
+
+  test('a kept address with no decline passes; a removed address, a vanished row, or a decline on any slot carrying it holds', async () => {
+    expect(await ContactPrefs.contactAddressStillAllowed(CUSTOMER, 'Sam@Example.com', 'appointment.confirmation')).toBe(true);
+    live = { ...CUSTOMER, service_contact_email: null };
+    expect(await ContactPrefs.contactAddressStillAllowed(CUSTOMER, 'sam@example.com', 'appointment.confirmation')).toBe(false);
+    live = { ...CUSTOMER, service_contact3_phone: '+19415550404', service_contact3_email: 'sam@example.com' };
+    rows = [{ customer_id: 'cust-1', phone_key: '9415550404', appointment_confirmation: false }];
+    expect(await ContactPrefs.contactAddressStillAllowed(CUSTOMER, 'sam@example.com', 'appointment.confirmation')).toBe(false);
+    expect(await ContactPrefs.contactAddressStillAllowed(CUSTOMER, 'sam@example.com', 'tech.en_route')).toBe(true);
+    live = null;
+    expect(await ContactPrefs.contactAddressStillAllowed(CUSTOMER, 'sam@example.com', 'appointment.confirmation')).toBe(false);
+  });
+
+  test('an unreadable row throws (the sender holds); the gate off and an empty address pass', async () => {
+    failWith = new Error('timeout');
+    await expect(ContactPrefs.contactAddressStillAllowed(CUSTOMER, 'sam@example.com', 'appointment.confirmation')).rejects.toThrow('timeout');
+    failWith = null;
+    expect(await ContactPrefs.contactAddressStillAllowed(CUSTOMER, '', 'appointment.confirmation')).toBe(true);
+    live = null;
+    delete process.env.GATE_CONTACT_LOGIN;
+    expect(await ContactPrefs.contactAddressStillAllowed(CUSTOMER, 'sam@example.com', 'appointment.confirmation')).toBe(true);
+  });
 });
 
 describe('rerouteForContactEmailOptOut (deferred sends: automation steps, queued template runs)', () => {

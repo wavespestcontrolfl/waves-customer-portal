@@ -75,6 +75,30 @@ test('the row\'s own usable address is the holder\'s: sent as is, never checked;
   expect(contactEmailDeclines).not.toHaveBeenCalled();
 });
 
+test('a contact address is re-checked at the provider handoff (codex r27 P2): a decline during the library\'s awaits aborts; the holder\'s own address carries no hook', async () => {
+  mockDb({ customerRow: { id: 'c1', first_name: 'Pat', email: 'pat@localhost', is_primary_profile: true }, estimateRow: ESTIMATE });
+  // The resolution saw no decline; by the handoff the contact turned email off.
+  contactEmailDeclines.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+  EmailTemplates.sendTemplate.mockImplementationOnce(async (opts) => {
+    if (opts.onQueued && (await opts.onQueued()) === false) return { sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' };
+    return { sent: true, rendered: { text: 'hi' } };
+  });
+  const res = await sendEstimateAcceptedOnboarding({ customerId: 'c1', estimateId: 'est-1', serviceLabel: 'Pest' });
+  expect(res).toMatchObject({ sent: false, blocked: true, reason: 'contact_declined' });
+  expect(contactEmailDeclines).toHaveBeenCalledTimes(2);
+  // An unreadable table at the handoff aborts too (fail closed).
+  jest.clearAllMocks();
+  mockDb({ customerRow: { id: 'c1', first_name: 'Pat', email: 'pat@localhost', is_primary_profile: true }, estimateRow: ESTIMATE });
+  contactEmailDeclines.mockResolvedValueOnce(false).mockRejectedValueOnce(new Error('timeout'));
+  EmailTemplates.sendTemplate.mockImplementationOnce(async (opts) => ((await opts.onQueued()) === false ? { sent: false, aborted: true } : { sent: true }));
+  expect(await sendEstimateAcceptedOnboarding({ customerId: 'c1', estimateId: 'est-1', serviceLabel: 'Pest' })).toMatchObject({ sent: false, blocked: true, reason: 'contact_declined' });
+  // The holder's own address: no handoff hook at all.
+  jest.clearAllMocks();
+  mockDb({ customerRow: { id: 'c1', first_name: 'Pat', email: 'pat@example.com', is_primary_profile: true } });
+  await sendEstimateAcceptedOnboarding({ customerId: 'c1', estimateId: 'est-1', serviceLabel: 'Pest' });
+  expect(EmailTemplates.sendTemplate.mock.calls[0][0].onQueued).toBeUndefined();
+});
+
 test('a failing check is a transient failure, never a send to the unchecked address', async () => {
   mockDb({ customerRow: { id: 'c1', first_name: 'Pat', email: null, is_primary_profile: true }, estimateRow: ESTIMATE });
   contactEmailDeclines.mockRejectedValue(new Error('timeout'));

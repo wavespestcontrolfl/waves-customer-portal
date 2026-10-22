@@ -308,13 +308,17 @@ async function resolveRecipient({ customerId, estimateId }) {
   // premise). The holder's own address and a stranger's pass through; the
   // row's own address (the `own` branch not taken) is the holder's by
   // definition and is never re-checked.
-  if (own && customer && usableEmail(email)
-    && await require('./contact-notification-prefs').contactEmailDeclines(customer.id, email)) {
-    email = '';
+  // `contactChecked`: the address went through that check and is being sent
+  // to — the send re-reads the same consent at the provider handoff (codex
+  // #6363 r27 P2) since the library's own awaits can straddle a decline.
+  let contactChecked = false;
+  if (own && customer && usableEmail(email)) {
+    if (await require('./contact-notification-prefs').contactEmailDeclines(customer.id, email)) email = '';
+    else contactChecked = true;
   }
   if (!usableEmail(email) && customer) email = clean((await withAccountPrimaryContact({ ...customer, email: '' })).email);
   if (!usableEmail(email)) return null;
-  return { email, firstName: clean(customer?.first_name || greetingFirstToken({ customerName: own?.customer_name, customer })) || 'there' };
+  return { email, contactChecked, firstName: clean(customer?.first_name || greetingFirstToken({ customerName: own?.customer_name, customer })) || 'there' };
 }
 
 // One send of the onboarding email: the combined signup variant when given,
@@ -343,6 +347,21 @@ async function sendOnboardingTemplate(ctx, variant) {
     // SendGrid 4xx bodies can echo the recipient address — keep provider
     // errors out of the logs and log a redacted reason below.
     suppressProviderErrorLog: true,
+    // A contact's address re-checked immediately before the provider call
+    // (codex #6363 r27 P2): a decline that lands during the library's own
+    // template / idempotency / suppression awaits aborts the send; an
+    // unreadable table aborts too (fail closed). The holder's own address
+    // and a customer-less accept were never checked and are not re-checked.
+    ...(ctx.recipient.contactChecked ? {
+      onQueued: async () => {
+        try {
+          return !(await require('./contact-notification-prefs').contactEmailDeclines(ctx.customerId, ctx.recipient.email));
+        } catch (err) {
+          logger.warn(`[estimate-accepted-email] contact choices unreadable at the handoff for estimate ${ctx.estimateId}: ${err.message}`);
+          return false;
+        }
+      },
+    } : {}),
   });
   let sent = { result: null, variant };
   try {
@@ -352,6 +371,9 @@ async function sendOnboardingTemplate(ctx, variant) {
     logger.warn(`[estimate-accepted-email] ${variant.templateKey} unavailable for estimate ${ctx.estimateId}; sending the plain onboarding email`);
     sent = { result: await send(null), variant: null };
   }
+  // Aborted at the handoff: nothing reached the provider; the contact's
+  // decline is terminal for this address, like a suppression.
+  if (sent.result?.aborted) sent = { ...sent, result: { sent: false, blocked: true, reason: 'contact_declined' } };
   const { result } = sent;
   if (result?.sent) logger.info(`[estimate-accepted-email] onboarding email sent for estimate ${ctx.estimateId}`);
   else logger.info(`[estimate-accepted-email] onboarding email NOT sent for estimate ${ctx.estimateId} (${result?.blocked ? 'suppression-blocked' : (result?.reason || 'not sent')})`);

@@ -7,11 +7,12 @@ jest.mock('../services/email-template-library', () => ({
 // The contact's OWN email declines (contact login, GATE_CONTACT_LOGIN): empty
 // unless a test says otherwise.
 const mockDeclinedRoles = new Set();
-// …and the addresses re-read at the dispatch boundary (codex r21).
+// …and the addresses re-read at the dispatch boundary (codex r21 / r27): an
+// address in this set is declined (or removed) as of the handoff.
 const mockDeclinedEmails = new Set();
 jest.mock('../services/contact-notification-prefs', () => ({
   declinedEmailSlotRoles: jest.fn(async () => mockDeclinedRoles),
-  declinedEmailAddresses: jest.fn(async () => mockDeclinedEmails),
+  contactAddressStillAllowed: jest.fn(async (_customer, email) => !mockDeclinedEmails.has(String(email).toLowerCase())),
 }));
 
 const db = require('../models/db');
@@ -160,7 +161,8 @@ describe('appointment email recipient resolution (fan-out to appointment contact
       });
       expect(res.ok).toBe(true);
       expect(EmailTemplates.sendTemplate.mock.calls.map(([c]) => c.to).sort()).toEqual(['primary@example.com', 'sue@service.com']);
-      expect(ContactPrefs.declinedEmailAddresses).toHaveBeenCalledWith(expect.objectContaining({ id: 'c1' }), 'appointment.confirmation');
+      // Re-read against the customer row as of the handoff, for the contact's address and this event.
+      expect(ContactPrefs.contactAddressStillAllowed).toHaveBeenCalledWith(expect.objectContaining({ id: 'c1' }), 'sue@service.com', 'appointment.confirmation');
     } finally {
       mockDeclinedEmails.clear();
     }
@@ -170,7 +172,7 @@ describe('appointment email recipient resolution (fan-out to appointment contact
     // address resolves as the holder's and the handoff lets it through, and
     // the contact declines are not even read for it.
     EmailTemplates.sendTemplate.mockClear();
-    ContactPrefs.declinedEmailAddresses.mockClear();
+    ContactPrefs.contactAddressStillAllowed.mockClear();
     mockDb({
       customer: {
         id: 'c1', first_name: 'Pat', email: 'shared@example.com', phone: '+19415551234',
@@ -185,7 +187,7 @@ describe('appointment email recipient resolution (fan-out to appointment contact
       });
       expect(shared.ok).toBe(true);
       expect(EmailTemplates.sendTemplate.mock.calls.map(([c]) => c.to)).toEqual(['shared@example.com']);
-      expect(ContactPrefs.declinedEmailAddresses).not.toHaveBeenCalled();
+      expect(ContactPrefs.contactAddressStillAllowed).not.toHaveBeenCalled();
     } finally {
       mockDeclinedEmails.clear();
     }
@@ -198,7 +200,7 @@ describe('appointment email recipient resolution (fan-out to appointment contact
       },
       prefs: { appointment_notify_primary: false },
     });
-    ContactPrefs.declinedEmailAddresses.mockRejectedValueOnce(new Error('timeout'));
+    ContactPrefs.contactAddressStillAllowed.mockRejectedValueOnce(new Error('timeout'));
     const held = await AppointmentEmail.sendAppointmentConfirmationEmail({
       customerId: 'c1', scheduledServiceId: 'ss1', appointmentTime: '2026-06-22T14:00:00.000Z', serviceLabel: 'Quarterly Pest Control',
     });

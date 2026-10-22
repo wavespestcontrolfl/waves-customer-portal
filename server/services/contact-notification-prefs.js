@@ -241,12 +241,10 @@ function declinedEmailsOf(slots, rows, column) {
 }
 
 // The addresses (lower-cased) a contact declined for an appointment EMAIL
-// event, read now: the recipient resolution reads them through
-// declinedEmailSlotRoles below, and the dispatch boundary (appointment-
-// email.js sendTemplate onQueued) reads them again as of the provider
-// handoff (codex #6363 r21 P2) — a decline that lands during the library's
-// own awaits still holds that recipient. Empty with the gate off; throws on
-// an unreadable table (the caller holds).
+// event, read now — the recipient resolution reads them through
+// declinedEmailSlotRoles below; the dispatch boundary re-reads per address
+// through contactAddressStillAllowed (codex #6363 r21 / r27 P2). Empty with
+// the gate off; throws on an unreadable table (the caller holds).
 async function declinedEmailAddresses(customer, eventType, { dbh = db } = {}) {
   if (!contactPrefsLive() || !customer) return new Set();
   const { getServiceContactSlots } = require('./customer-contact');
@@ -325,9 +323,39 @@ async function filterReportEmailRecipientsByContactPrefs(recipients = [], custom
 // instead of filterContactsByOwnPrefs. Primary / billing recipients never
 // decline here; gate off = never. Fail CLOSED on an unreadable table: a
 // contact whose choices cannot be read is treated as declining.
-async function contactDeclinesChannel(customerId, contact, channel = 'sms', { dbh = db } = {}) {
+// `requireSlot` (the dispatch-boundary re-checks, codex #6363 r27 P2): the
+// contact was resolved when the send was prepared — the customer row is
+// re-read NOW and a number the holder has since removed from every slot (or a
+// customer row that is gone) is a former contact and declines; for email, a
+// slot that now carries a DIFFERENT address of its own declines too (the
+// resolved address is no longer that contact's). The holder's own number
+// (the slot-1 fallback identity) is never slot-bound.
+// Is the resolved `contact` still one of `customer`'s people for `channel`
+// (pure; `customer` is the row as of now)? The holder's own number is; a slot
+// phone is while a slot carries it and, for email, while that slot's own
+// address (when it has one) is still the resolved address.
+function contactStillListed(customer, contact, channel) {
+  const key = phoneKey(contact.phone);
+  if (phoneKey(customer.phone) === key) return true;
+  const slot = require('./customer-contact').getServiceContactSlots(customer).find((s) => phoneKey(s.phone) === key);
+  if (!slot) return false;
+  return channel !== 'email' || !contact.email || !slot.email || emailKey(slot.email) === emailKey(contact.email);
+}
+
+async function contactDeclinesChannel(customerId, contact, channel = 'sms', { dbh = db, requireSlot = false } = {}) {
   if (!contactPrefsLive() || !contact || !contact.phone) return false;
   if (!require('./customer-contact').isServiceContactRole(contact.role)) return false;
+  if (requireSlot) {
+    let customer;
+    try {
+      customer = await dbh('customers').where({ id: customerId }).first();
+    } catch (err) {
+      if (dbh && dbh.isTransaction) throw err;
+      logger.warn(`[contact-prefs] customer read failed (${err.message}) — holding the service contact's ${channel}`);
+      return true;
+    }
+    if (!customer || !contactStillListed(customer, contact, channel)) return true;
+  }
   let row;
   try {
     row = await getContactPrefRow(customerId, contact.phone, { dbh });
@@ -337,6 +365,24 @@ async function contactDeclinesChannel(customerId, contact, channel = 'sms', { db
     return true;
   }
   return !contactAllows(row, null, channel);
+}
+
+// An appointment EMAIL recipient's address as of the provider handoff (codex
+// #6363 r27 P2): the customer's slots are re-read NOW — an address the holder
+// has since removed from every slot (or a customer row that is gone) is a
+// former contact's and is held, and a kept address is re-judged by the choices
+// row of every slot that carries it today (deny wins). Gate off = allowed.
+// Throws on an unreadable row or table (the caller holds).
+async function contactAddressStillAllowed(customer, email, eventType, { dbh = db } = {}) {
+  const address = emailKey(email);
+  if (!contactPrefsLive() || !customer || !address) return true;
+  const { getServiceContactSlots } = require('./customer-contact');
+  const live = await dbh('customers').where({ id: customer.id }).first();
+  if (!live) return false;
+  const carrying = getServiceContactSlots(live).filter((s) => emailKey(s.email) === address);
+  if (!carrying.length) return false;
+  const rows = await loadContactPrefRows(customer.id, { dbh });
+  return !declinedEmailsOf(carrying, rows, columnForEmailEvent(eventType)).has(address);
 }
 
 // Does the number a single-recipient TEXT is addressed to belong to one of
@@ -458,13 +504,34 @@ async function contactEmailOffPhoneKeys(customerIds = [], { dbh = db } = {}) {
 // turns their email off while the template resolves is not emailed. Adds
 // nothing with the gate off or for a recipient with no phone (the holder's
 // own address never carries a contact row).
-function whereContactEmailAllowed(query, customerIdColumn, contact) {
+// `requireSlot` (codex #6363 r27 P2): the claim also requires, as of the
+// same write, that the contact's number still occupies a slot of the customer
+// row (or is the holder's own number — the slot-1 fallback identity) and that
+// the slot's own address, when it has one, is still the resolved address.
+const SLOT_PHONE_SQL = (column) => `RIGHT(REGEXP_REPLACE(COALESCE(customers.${column}, ''), '[^0-9]', '', 'g'), 10) = ?`;
+function whereContactEmailAllowed(query, customerIdColumn, contact, { requireSlot = false } = {}) {
   const key = phoneKey(contact && contact.phone);
   if (!contactPrefsLive() || !key) return query;
-  return query.whereNotExists(function contactEmailConsent() {
+  query.whereNotExists(function contactEmailConsent() {
     this.select(db.raw('1')).from(TABLE)
       .whereRaw(`${TABLE}.customer_id = ${customerIdColumn}`)
       .where({ [`${TABLE}.phone_key`]: key, [`${TABLE}.email_enabled`]: false });
+  });
+  if (!requireSlot) return query;
+  const address = emailKey(contact.email);
+  const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
+  return query.whereExists(function contactSlotLive() {
+    this.select(db.raw('1')).from('customers')
+      .whereRaw(`customers.id = ${customerIdColumn}`)
+      .where(function contactStillListed() {
+        this.whereRaw(SLOT_PHONE_SQL('phone'), [key]);
+        for (const slot of SERVICE_CONTACT_SLOTS) {
+          this.orWhere(function slotMatches() {
+            this.whereRaw(SLOT_PHONE_SQL(slot.phone), [key]);
+            if (address) this.whereRaw(`LOWER(COALESCE(NULLIF(TRIM(customers.${slot.email}), ''), ?)) = ?`, [address, address]);
+          });
+        }
+      });
   });
 }
 
@@ -573,10 +640,10 @@ module.exports = {
   getContactPrefRow,
   filterContactsByOwnPrefs,
   textPathsOpened,
-  declinedEmailAddresses,
   declinedEmailSlotRoles,
   filterReportEmailRecipientsByContactPrefs,
   contactDeclinesChannel,
+  contactAddressStillAllowed,
   contactPhoneDeclinesText,
   reportEmailRecipientStillAllowed,
   contactEmailDeclines,

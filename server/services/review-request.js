@@ -3025,7 +3025,10 @@ const ReviewService = {
       // removed since the recipient check) so it fails closed (pre-push
       // Codex P1 on bd85be714).
       const { whereContactEmailAllowed } = require("./contact-notification-prefs");
-      cleared = await whereContactEmailAllowed(db("review_requests"), "review_requests.customer_id", contact)
+      // requireSlot (codex r27 P2): the contact must still occupy a slot of
+      // the customer row as of this same write — a contact the holder
+      // removed while the template resolved is a former contact, not emailed.
+      cleared = await whereContactEmailAllowed(db("review_requests"), "review_requests.customer_id", contact, { requireSlot: true })
         .where({ id: requestId })
         .whereNotNull("email_leg_owed_at")
         .whereNotIn("status", INLINE_RETRY_TERMINAL_STATUSES)
@@ -5642,7 +5645,9 @@ const ReviewService = {
         suppressProviderErrorLog: true,
         onQueued: async () => {
           // Fail closed: an unreadable choices table reads as declined.
-          if (await require("./contact-notification-prefs").contactDeclinesChannel(customer.id, contact, "email")) {
+          // requireSlot (codex r27 P2): a contact the holder removed from
+          // the slots since the recipient resolved is held too.
+          if (await require("./contact-notification-prefs").contactDeclinesChannel(customer.id, contact, "email", { requireSlot: true })) {
             contactDeclinedAtDispatch = true;
             return false;
           }

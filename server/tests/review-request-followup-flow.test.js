@@ -15,6 +15,9 @@ jest.mock('../services/customer-contact', () => ({
   getServiceContactSmsRecipient: jest.fn(),
   firstNameFrom: jest.requireActual('../services/customer-contact').firstNameFrom,
   isServiceContactRole: jest.requireActual('../services/customer-contact').isServiceContactRole,
+  // The handoff re-checks re-read the customer row's slots (codex r27 P2).
+  getServiceContactSlots: jest.requireActual('../services/customer-contact').getServiceContactSlots,
+  SERVICE_CONTACT_SLOTS: jest.requireActual('../services/customer-contact').SERVICE_CONTACT_SLOTS,
 }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(),
@@ -1286,6 +1289,22 @@ describe('review request follow-up flow', () => {
         expect(sub.from).toHaveBeenCalledWith('service_contact_notification_prefs');
         expect(sub.whereRaw).toHaveBeenCalledWith('service_contact_notification_prefs.customer_id = review_requests.customer_id');
         expect(sub.where).toHaveBeenCalledWith({ 'service_contact_notification_prefs.phone_key': '9415550202', 'service_contact_notification_prefs.email_enabled': false });
+        // …and, as of the same write, the contact must still occupy a slot of
+        // the customer row with the resolved address (codex r27 P2).
+        const live = rrQ.whereExists.mock.calls.map(([fn]) => fn).find((fn) => fn.name === 'contactSlotLive');
+        const liveSub = { select: jest.fn(() => liveSub), from: jest.fn(() => liveSub), whereRaw: jest.fn(() => liveSub), where: jest.fn(() => liveSub), orWhere: jest.fn(() => liveSub) };
+        live.call(liveSub);
+        expect(liveSub.from).toHaveBeenCalledWith('customers');
+        expect(liveSub.whereRaw).toHaveBeenCalledWith('customers.id = review_requests.customer_id');
+        const listed = liveSub.where.mock.calls.map(([fn]) => fn).find((fn) => typeof fn === 'function' && fn.name === 'contactStillListed');
+        const listedSub = { whereRaw: jest.fn(() => listedSub), orWhere: jest.fn(() => listedSub) };
+        listed.call(listedSub);
+        expect(listedSub.whereRaw).toHaveBeenCalledWith(expect.stringContaining('customers.phone'), ['9415550202']);
+        expect(listedSub.orWhere).toHaveBeenCalledTimes(3);
+        const slotSub = { whereRaw: jest.fn(() => slotSub) };
+        listedSub.orWhere.mock.calls[0][0].call(slotSub);
+        expect(slotSub.whereRaw).toHaveBeenCalledWith(expect.stringContaining('customers.service_contact_phone'), ['9415550202']);
+        expect(slotSub.whereRaw).toHaveBeenCalledWith(expect.stringContaining('customers.service_contact_email'), ['megan@example.com', 'megan@example.com']);
       } finally {
         delete process.env.GATE_CONTACT_LOGIN;
       }
@@ -1390,25 +1409,30 @@ describe('review request follow-up flow', () => {
       process.env.GATE_CONTACT_LOGIN = 'true';
       const rrUpdate = jest.fn().mockResolvedValue(1);
       try {
-        db.mockImplementation((table) => {
+        // The customer row as of the handoff (codex r27 P2: re-read so a removed contact is held too).
+        const liveRow = { id: 'cust-1', phone: '+19415550101', service_contact_phone: '+19415550202', service_contact_email: 'megan@example.com' };
+        const wireHandoff = ({ prefRows, customerRow = liveRow }) => db.mockImplementation((table) => {
           if (table === 'review_requests') return chain({ update: rrUpdate });
-          // The contact's row: email off — written between sendOutreachTouch's read and the handoff.
-          if (table === 'service_contact_notification_prefs') return chain({ select: jest.fn().mockResolvedValue([{ phone_key: '9415550202', email_enabled: false }]) });
+          if (table === 'customers') return chain({ first: jest.fn().mockResolvedValue(customerRow) });
+          if (table === 'service_contact_notification_prefs') return chain({ select: jest.fn().mockResolvedValue(prefRows) });
           throw new Error(`Unexpected table query: ${table}`);
         });
+        // The contact's row: email off — written between sendOutreachTouch's read and the handoff.
+        wireHandoff({ prefRows: [{ phone_key: '9415550202', email_enabled: false }] });
         const args = { request: { id: 'rr-11' }, customer: { id: 'cust-1', first_name: 'Megan' }, contact: { email: 'megan@example.com', name: 'Megan', phone: '+19415550202', role: 'service_contact' }, reviewUrl: 'https://x/rate/t', techName: 'Adam', manageRetryVia: null };
-        EmailLib.sendTemplate.mockImplementationOnce(async (opts) => {
+        const abortIfDeclined = async (opts) => {
           if ((await opts.onQueued({ id: 'em-11' })) === false) return { sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' };
           throw new Error('must not dispatch');
-        });
+        };
+        EmailLib.sendTemplate.mockImplementationOnce(abortIfDeclined);
         expect(await ReviewService._sendOutreachEmail(args)).toEqual({ ok: false, blocked: true, terminal: true, channel: 'email', requestId: 'rr-11', reason: 'opted_out' });
         expect(rrUpdate).toHaveBeenCalledWith({ status: 'suppressed' });
-        // Email still on at the handoff: dispatched as before.
-        db.mockImplementation((table) => {
-          if (table === 'review_requests') return chain({ update: rrUpdate });
-          if (table === 'service_contact_notification_prefs') return chain({ select: jest.fn().mockResolvedValue([]) });
-          throw new Error(`Unexpected table query: ${table}`);
-        });
+        // The holder removed the contact between the resolution and the handoff: held the same way (codex r27 P2).
+        wireHandoff({ prefRows: [], customerRow: { ...liveRow, service_contact_phone: null, service_contact_email: null } });
+        EmailLib.sendTemplate.mockImplementationOnce(abortIfDeclined);
+        expect(await ReviewService._sendOutreachEmail(args)).toEqual({ ok: false, blocked: true, terminal: true, channel: 'email', requestId: 'rr-11', reason: 'opted_out' });
+        // Email still on and the contact still listed at the handoff: dispatched as before.
+        wireHandoff({ prefRows: [] });
         EmailLib.sendTemplate.mockImplementationOnce(async (opts) => { await opts.onQueued({ id: 'em-12' }); return { sent: true }; });
         expect(await ReviewService._sendOutreachEmail(args)).toEqual({ ok: true, sent: true, channel: 'email', requestId: 'rr-11' });
       } finally {

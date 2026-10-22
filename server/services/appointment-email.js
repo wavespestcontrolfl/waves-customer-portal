@@ -417,13 +417,15 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
           if (holdVisitId && await require('./street-level-hold').isStreetLevelHoldVisit(holdVisitId)) { abortedBy = 'street_level_hold'; return false; }
           if (moveHoldServiceId && await moveHoldLive(moveHoldServiceId, renderedSlotMs)) { abortedBy = 'move_hold'; return false; }
           if (recipient.holder) return true;
-          let declinedNow;
+          // The slots are re-read as of NOW (codex r27 P2): a contact the
+          // holder removed since the recipients resolved is held too.
+          let allowedNow;
           try {
-            declinedNow = await require('./contact-notification-prefs').declinedEmailAddresses(customer, eventType);
+            allowedNow = await require('./contact-notification-prefs').contactAddressStillAllowed(customer, recipient.email, eventType);
           } catch {
             abortedBy = 'preferences_unavailable'; return false;
           }
-          if (declinedNow.has(recipient.email.toLowerCase())) { abortedBy = 'contact_declined'; return false; }
+          if (!allowedNow) { abortedBy = 'contact_declined'; return false; }
           return true;
         },
       });
