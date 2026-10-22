@@ -2015,7 +2015,7 @@ function isUnverifiedIntakeShell(row) {
 // in the fields it changed) and the other operator writers (Intelligence Bar
 // update_customer, triage email confirm: 'customer.email_set_by_staff'). Read
 // inside a savepoint so an unreadable table cannot abort the merge; unreadable
-// counts as "staff edited" (see the catch).
+// counts as "not staff edited" (see the catch).
 async function staffEditedCustomerEmail(trx, customerId) {
   try {
     const rows = await ledgerReferenceRead(trx, (k) => k('audit_log')
@@ -2027,10 +2027,10 @@ async function staffEditedCustomerEmail(trx, customerId) {
       .limit(1));
     return Array.isArray(rows) && rows.length > 0;
   } catch (e) {
-    // Provenance unreadable: do not guess it away. Treat as staff-verified, so
-    // the gate never skips a backfill it cannot justify (old behavior).
+    // Provenance unreadable: fail CLOSED. The gate is on, so an email we cannot
+    // vouch for is not copied; the journal keeps it for the office.
     logger.warn(`[customer-dedupe] email provenance read failed for ${customerId}: ${e.message}`);
-    return true;
+    return false;
   }
 }
 

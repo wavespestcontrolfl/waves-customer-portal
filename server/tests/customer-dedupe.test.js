@@ -787,7 +787,11 @@ describe('executeMerge', () => {
         }
         return [];
       }
-      if (table === 'audit_log') { state.auditReads = (state.auditReads || 0) + 1; return auditRows; }
+      if (table === 'audit_log') {
+        state.auditReads = (state.auditReads || 0) + 1;
+        if (auditRows instanceof Error) throw auditRows;
+        return auditRows;
+      }
       if (table === 'customer_merge_journal') {
         state.journal = q.args('insert')[0];
         return [{ id: journalId }];
@@ -971,6 +975,13 @@ describe('executeMerge', () => {
       expect(state.auditReads).toBeGreaterThan(0);
       expect(state.backfilled.email).toBe('typed-by-visitor@example.test');
       expect(result.skippedBackfills).toEqual({});
+    });
+
+    it('gate on: an unreadable provenance lookup fails closed (email not copied, journal keeps it)', async () => {
+      process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL = 'true';
+      const { result, state } = await runAuto(realCustomer, quoteShell, new Error('audit_log unreadable'));
+      expect(state.backfilled).not.toHaveProperty('email');
+      expect(result.skippedBackfills).toEqual({ email: 'typed-by-visitor@example.test' });
     });
 
     it('gate on: a manual merge of the same shell still backfills the email', async () => {

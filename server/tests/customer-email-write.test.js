@@ -12,6 +12,9 @@ jest.mock('../services/customer-email-fanout', () => ({
   propagateCustomerEmailChange: mockPropagateCustomerEmailChange,
 }));
 
+const mockAuditEmailSet = jest.fn(async () => undefined);
+jest.mock('../services/audit-log', () => ({ auditCustomerEmailSetByStaff: (...args) => mockAuditEmailSet(...args) }));
+
 const { applyOperatorCustomerEmail, findCrossAccountEmailConflict } = require('../services/customer-email-write');
 
 function fakeTrx(customers, { isTransaction = true } = {}) {
@@ -93,6 +96,7 @@ describe('applyOperatorCustomerEmail', () => {
     ]);
     const result = await applyOperatorCustomerEmail(trx, { customerId: 'c1', email: 'shared@example.com' });
     expect(result.outcome).toBe('changed');
+    expect(mockAuditEmailSet).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'c1' }));
     expect(rows[0].email).toBe('shared@example.com');
   });
 
@@ -103,6 +107,8 @@ describe('applyOperatorCustomerEmail', () => {
     expect(result.emailSync).toBeNull();
     expect(order).toEqual(['row-lock', 'key:customer-email:same@example.com']);
     expect(mockPropagateCustomerEmailChange).not.toHaveBeenCalled();
+    // A staff confirmation of the stored address is still email provenance for the duplicate auto-merge.
+    expect(mockAuditEmailSet).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'c1' }));
   });
 
   test('a missing customer row reports customer_not_found', async () => {
