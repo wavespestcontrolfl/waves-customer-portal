@@ -204,6 +204,33 @@ function escapeHtml(text) {
   return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// The visits on the standing far list (D1), from its stored itemKeys
+// (`<visit>:<date>`). The run's end re-reads each one (index.js
+// conflictsToSettle), so a listed conflict whose visit the scan no longer
+// loads (locked, excluded) stays listed while it stands and rings at
+// FAR_DAYS, the way a standing notice keeps its visit in the re-read.
+// [] when no list stands; null when it cannot be read (the scan is then
+// incomplete and the list is left as it is). Never throws.
+async function farListedVisitIds(conn = require('../../models/db')) {
+  try {
+    const row = await conn('notifications')
+      .where({ recipient_type: 'admin', category: 'ops_digest' })
+      .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
+      .whereRaw("metadata->>'opsKey' = ?", [FAR_DIGEST_KEY])
+      .whereRaw("metadata->>'source' IS NULL")
+      .orderBy('created_at', 'desc')
+      .first('metadata');
+    if (!row) return [];
+    const keys = row.metadata && row.metadata.itemKeys;
+    // A list too long to key (ops-digest MAX_ITEM_KEYS) cannot be re-read.
+    if (!Array.isArray(keys)) return null;
+    return [...new Set(keys.map((key) => String(key).split(':')[0]).filter(Boolean))];
+  } catch (err) {
+    logger.warn(`[auto-dispatch] far double-booking list read failed: ${err.message}`);
+    return null;
+  }
+}
+
 // The standing Activity row of the run's far conflicts (D1): one ops digest,
 // audience fyi (Activity only, never the bell; not a ring-allowance lane),
 // refreshed in place each run and retired on a run with none, or with the
@@ -294,5 +321,5 @@ async function raiseNotices(bucket, { nowDate = new Date(), clearedIds = new Set
 }
 
 module.exports = {
-  RESOLVED_TITLE, noticeKey, FAR_DAYS, FAR_DIGEST_KEY, collect, collectUnmoved, raiseNotices, standingVisitIds,
+  RESOLVED_TITLE, noticeKey, FAR_DAYS, FAR_DIGEST_KEY, collect, collectUnmoved, raiseNotices, standingVisitIds, farListedVisitIds,
 };

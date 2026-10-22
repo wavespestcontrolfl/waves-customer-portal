@@ -343,6 +343,18 @@ describe('needs-a-person notice: far double bookings are listed quietly until 14
     expect(retireIfClean).not.toHaveBeenCalled();
   });
 
+  test('farListedVisitIds reads the standing list: its visits, none, too long to key, unreadable', async () => {
+    const conn = (row, fail = false) => jest.fn(() => {
+      const q = { where: () => q, whereRaw: () => q, orderBy: () => q, first: async () => { if (fail) throw new Error('db down'); return row; } };
+      return q;
+    });
+    expect(await notice.farListedVisitIds(conn({ metadata: { itemKeys: ['a:2026-11-20', 'b:2026-11-21', 'a:2026-11-27'] } })))
+      .toEqual(['a', 'b']);
+    expect(await notice.farListedVisitIds(conn(undefined))).toEqual([]);
+    expect(await notice.farListedVisitIds(conn({ metadata: { itemKeys: null, count: 600 } }))).toBeNull();
+    expect(await notice.farListedVisitIds(conn(null, true))).toBeNull();
+  });
+
   test('a failed list is logged and the near notices still ring', async () => {
     deliverOpsDigest.mockRejectedValueOnce(new Error('down'));
     const bucket = new Map();

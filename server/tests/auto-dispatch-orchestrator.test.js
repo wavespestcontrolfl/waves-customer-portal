@@ -1692,8 +1692,12 @@ describe('move limit (owner 2026-10-09: at most two automatic moves per visit)',
   describe('the far list is told whether the conflict scan was complete (D1)', () => {
     const needsPerson = require('../services/auto-dispatch/needs-person-notice');
     let spy;
-    beforeEach(() => { spy = jest.spyOn(needsPerson, 'raiseNotices'); });
-    afterEach(() => spy.mockRestore());
+    let listSpy;
+    beforeEach(() => {
+      spy = jest.spyOn(needsPerson, 'raiseNotices');
+      listSpy = jest.spyOn(needsPerson, 'farListedVisitIds').mockResolvedValue([]);
+    });
+    afterEach(() => { spy.mockRestore(); listSpy.mockRestore(); });
     const scanCompleteOf = () => spy.mock.calls[spy.mock.calls.length - 1][1].scanComplete;
 
     test('every conflict read succeeded: complete', async () => {
@@ -1713,6 +1717,25 @@ describe('move limit (owner 2026-10-09: at most two automatic moves per visit)',
 
     test('conflict reads off: incomplete', async () => {
       await runAutoDispatch({ mode: 'dry_run' });
+      expect(scanCompleteOf()).toBe(false);
+    });
+
+    test('a listed far visit the scan no longer loads (locked) is re-read and, still in conflict, collected', async () => {
+      servicesResult = [];
+      unscannedRows = [svc({ id: 'listed-1' })];
+      listSpy.mockResolvedValue(['listed-1']);
+      standing();
+      await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+      const bucket = spy.mock.calls[spy.mock.calls.length - 1][0];
+      expect([...bucket.values()].map((item) => item.id)).toEqual(['listed-1']);
+      expect(scanCompleteOf()).toBe(true);
+    });
+
+    test('an unreadable far list makes the scan incomplete', async () => {
+      listSpy.mockResolvedValue(null);
+      candidateSlots.findValidCandidateSlots.mockResolvedValue(inConflict);
+      standing();
+      await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
       expect(scanCompleteOf()).toBe(false);
     });
   });
