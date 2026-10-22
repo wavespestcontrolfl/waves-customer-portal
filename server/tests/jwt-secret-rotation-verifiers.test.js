@@ -414,3 +414,39 @@ describe('service-contact phone fingerprint', () => {
     expect(old).not.toBe(current);
   });
 });
+
+describe('estimate ask token (ESTIMATE_ASK_TOKEN_SECRET || JWT_SECRET, read at load)', () => {
+  const load = (askSecret) => {
+    let mod;
+    const before = process.env.ESTIMATE_ASK_TOKEN_SECRET;
+    if (askSecret) process.env.ESTIMATE_ASK_TOKEN_SECRET = askSecret; else delete process.env.ESTIMATE_ASK_TOKEN_SECRET;
+    jest.isolateModules(() => { mod = require('../routes/estimate-public'); });
+    if (before === undefined) delete process.env.ESTIMATE_ASK_TOKEN_SECRET; else process.env.ESTIMATE_ASK_TOKEN_SECRET = before;
+    return mod;
+  };
+  const estimate = { id: 'est-9', token: 'tok-9' };
+  const askToken = (secret) => jwt.sign({
+    kind: 'estimate_ask',
+    estimateId: 'est-9',
+    tokenHash: crypto.createHash('sha256').update('tok-9').digest('hex'),
+  }, secret, { expiresIn: 600 });
+  const reqWith = (token) => ({ get: () => token, body: {}, params: { token: 'tok-9' } });
+
+  it('JWT fallback: a retired-secret ask token verifies only while listed', () => {
+    const mod = load(null);
+    expect(mod.verifyEstimateAskToken(reqWith(askToken(OLD)), estimate)).toBe(false);
+    process.env.JWT_SECRET_PREVIOUS = OLD;
+    expect(mod.verifyEstimateAskToken(reqWith(askToken(OLD)), estimate)).toBe(true);
+    expect(mod.verifyEstimateAskToken(reqWith(askToken(CURRENT)), estimate)).toBe(true);
+  });
+
+  it('a configured dedicated secret ignores the previous list, even when it equals JWT_SECRET', () => {
+    process.env.JWT_SECRET_PREVIOUS = OLD;
+    const sameValue = load(CURRENT);
+    expect(sameValue.verifyEstimateAskToken(reqWith(askToken(OLD)), estimate)).toBe(false);
+    expect(sameValue.verifyEstimateAskToken(reqWith(askToken(CURRENT)), estimate)).toBe(true);
+    const different = load('dedicated-ask-secret');
+    expect(different.verifyEstimateAskToken(reqWith(askToken(OLD)), estimate)).toBe(false);
+    expect(different.verifyEstimateAskToken(reqWith(askToken('dedicated-ask-secret')), estimate)).toBe(true);
+  });
+});

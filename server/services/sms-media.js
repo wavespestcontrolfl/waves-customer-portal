@@ -48,7 +48,7 @@ function isValidAttachmentToken(attachment = {}) {
   if (!attachment.key.startsWith(OUTBOUND_PREFIX)) return false;
   // JWT_SECRET_PREVIOUS applies only while JWT_SECRET is the effective secret.
   const secret = attachmentTokenSecret();
-  const secrets = secret && secret === config.jwt?.secret ? jwtVerifySecrets(secret) : [secret];
+  const secrets = config.jwt?.secret ? jwtVerifySecrets(secret) : [secret];
   return secrets.some((candidate) => {
     const expected = createAttachmentToken({
       key: attachment.key,

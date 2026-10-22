@@ -189,8 +189,9 @@ const ESTIMATE_ASK_TOKEN_SECRET = process.env.ESTIMATE_ASK_TOKEN_SECRET
   || crypto.randomBytes(32).toString('hex');
 const ESTIMATE_ASK_TOKEN_TTL_SECONDS = 2 * 60 * 60;
 // JWT_SECRET_PREVIOUS applies only while JWT_SECRET is the effective secret.
+const ESTIMATE_ASK_TOKEN_DEDICATED = Boolean(process.env.ESTIMATE_ASK_TOKEN_SECRET);
 function estimateAskVerifyKeys() {
-  return config.jwt.secret && ESTIMATE_ASK_TOKEN_SECRET === config.jwt.secret
+  return !ESTIMATE_ASK_TOKEN_DEDICATED && config.jwt.secret
     ? jwtVerifySecrets(config.jwt.secret)
     : [ESTIMATE_ASK_TOKEN_SECRET];
 }

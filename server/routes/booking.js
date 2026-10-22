@@ -1028,7 +1028,7 @@ function mintCaptureToken(ipKey = '', now = Date.now()) {
 // Verify keys: the signing secret first, then (only while JWT_SECRET is the
 // effective secret) each JWT_SECRET_PREVIOUS entry.
 function captureTokenVerifySecrets() {
-  return CAPTURE_TOKEN_SECRET === process.env.JWT_SECRET
+  return process.env.JWT_SECRET
     ? jwtVerifySecrets(CAPTURE_TOKEN_SECRET)
     : [CAPTURE_TOKEN_SECRET];
 }

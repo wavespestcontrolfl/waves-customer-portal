@@ -46,6 +46,31 @@ and ineligible rows are indistinguishable (no existence oracle); "privacy
 headers" = `Cache-Control: no-store`, `X-Robots-Tag: noindex`,
 `Referrer-Policy: no-referrer`.
 
+## Secret rotation (`JWT_SECRET_PREVIOUS`)
+
+Signed public tokens and links that are keyed by `JWT_SECRET` (directly or as
+the fallback of a dedicated secret) keep verifying across a `JWT_SECRET`
+rotation: the verifier accepts the current secret first, then each retired
+secret listed in `JWT_SECRET_PREVIOUS` (comma-separated, may be unset; unset is
+byte-identical to a single secret). Signing always uses the current
+`JWT_SECRET`. The helper is `server/utils/jwt-secrets.js`; the procedure and
+lifetimes are in `docs/gates-and-env.md`. Affected public families: booking
+capture and slot-offer tokens (`/api/booking`), estimate handoff / accept /
+ask / doc-pin / opt-out preview (`/api/estimates/:token`), lead prefill and
+consultation / waitlist tokens (`/api/inspection/:token`), signed map images
+(`/api/public/map-image`), report assessment pins (`/api/reports/:token`),
+outlink click context (`/go/:code`), SMS attachment tokens, and surcharge
+quote tokens.
+
+Exceptions, unchanged by rotation: a family whose dedicated secret is set
+(`REPORT_PIN_SECRET`, `ESTIMATE_HANDOFF_SECRET`, `LEAD_PREFILL_SECRET`,
+`CONTRACT_LINK_SECRET`, `ESTIMATE_DOC_PIN_SECRET`, `ESTIMATE_ASK_TOKEN_SECRET`)
+follows only that secret's own rotation, decided by whether the variable is
+configured. Staff sessions (staff bearer, MFA challenge, terminal, staff socket,
+the `waves_admin` marker) never accept the previous list, so a retired secret
+cannot mint a staff identity. A token signed with a secret that is not listed
+fails exactly as a forged one does.
+
 ## Routes
 
 Customer page-view log (no payload, gate, or header change): the data GET of

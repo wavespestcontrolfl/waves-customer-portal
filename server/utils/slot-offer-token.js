@@ -97,7 +97,7 @@ const OFFER_KEY = offerKeyFor(RAW_SECRET);
 // Verify keys: the signing key first, then (only while JWT_SECRET is the
 // effective secret) each JWT_SECRET_PREVIOUS entry.
 function offerVerifyKeys() {
-  const secrets = RAW_SECRET === process.env.JWT_SECRET ? jwtVerifySecrets(RAW_SECRET) : [RAW_SECRET];
+  const secrets = process.env.JWT_SECRET ? jwtVerifySecrets(RAW_SECRET) : [RAW_SECRET];
   return secrets.length > 1 ? [OFFER_KEY, ...secrets.slice(1).map(offerKeyFor)] : [OFFER_KEY];
 }
 
