@@ -159,6 +159,17 @@ const USER_AGENTS = [
 // other host (redirects, sub-resources, popups), service workers are blocked
 // and WebSockets are closed. The model's signup_url must be one of the pinned
 // hosts. Gate off = navigation exactly as before.
+const DNS_HOST_RE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
+const DNS_LOOKUP_DEADLINE_MS = 5000;
+
+function withDeadline(promise, ms) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('dns_deadline')), ms); }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 // Discard port on loopback: nothing listens, so a proxied request fails.
 const DEAD_PROXY = 'http://127.0.0.1:9';
 
@@ -183,12 +194,19 @@ async function buildSignupPins(rawUrl, { resolveHostIps } = {}) {
   const { _internals: ssrf } = require('../seo/contact-finder');
   const resolve = resolveHostIps || filler.resolvePublicIps;
   const navHost = httpHostOf(rawUrl);
-  if (!navHost || ssrf.isBlockedHostname(navHost)) return null;
+  // Strict DNS-name grammar: these hosts are interpolated into Chromium's
+  // --host-resolver-rules and --proxy-bypass-list, which split on ; and ,
+  // and accept * wildcards, so anything outside letters/digits/hyphens and
+  // dots (IP literals included) is refused.
+  if (!navHost || !DNS_HOST_RE.test(navHost) || ssrf.isBlockedHostname(navHost)) return null;
   const apex = navHost.replace(/^www\./, '');
   const pinned = new Set();
   const rules = [];
   for (const h of new Set([navHost, apex, `www.${apex}`])) {
-    const ips = await resolve(h);
+    if (!DNS_HOST_RE.test(h)) continue;
+    // A resolver that never answers must not hold the queue: each lookup
+    // has a deadline and a timeout counts as "no public IPv4".
+    const ips = await withDeadline(resolve(h), DNS_LOOKUP_DEADLINE_MS).catch(() => []);
     if (!ips || !ips.length) continue;
     rules.push(`MAP ${h} ${ips[0]}`);
     pinned.add(h);
@@ -477,4 +495,4 @@ async function processQueue(limit = 5) {
 }
 
 module.exports = { processSignup, processQueue, PROFILE };
-module.exports._internals = { buildSignupPins, signupRequestAllowed, httpHostOf, guardedLaunchArgs };
+module.exports._internals = { buildSignupPins, signupRequestAllowed, httpHostOf, guardedLaunchArgs, DNS_HOST_RE };

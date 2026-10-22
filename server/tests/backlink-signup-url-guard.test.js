@@ -60,6 +60,23 @@ describe('buildSignupPins', () => {
   });
 });
 
+test('hosts outside the strict DNS grammar are refused before any lookup (no ; , * or IP literals)', async () => {
+  const resolveHostIps = jest.fn(async () => ['93.184.216.34']);
+  for (const url of ['http://x;127.0.0.1;*.attacker.example/', 'http://*.attacker.example/', 'http://a,b.example/', 'http://93.184.216.34/']) {
+    await expect(buildSignupPins(url, { resolveHostIps })).resolves.toBeNull();
+  }
+  expect(resolveHostIps).not.toHaveBeenCalled();
+});
+
+test('a resolver that never answers times out instead of holding the queue', async () => {
+  jest.useFakeTimers();
+  try {
+    const p = buildSignupPins('https://directory.example/', { resolveHostIps: () => new Promise(() => {}) });
+    await jest.advanceTimersByTimeAsync(20000);
+    await expect(p).resolves.toBeNull();
+  } finally { jest.useRealTimers(); }
+});
+
 test('route guard allows only pinned hosts (redirects, sub-resources, private-resolving names all abort)', () => {
   const pinned = new Set(['directory.example', 'www.directory.example']);
   expect(signupRequestAllowed('https://directory.example/app.js', pinned)).toBe(true);
