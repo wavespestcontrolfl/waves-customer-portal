@@ -8081,6 +8081,45 @@ describe('GATE_REVIEW_ASK_AFTER_REPORT — Day-0 ask 10 minutes after the report
     expect(decisionOf(mock)).toMatchObject({ reason: 'after_report' });
   });
 
+  describe('a smart-window ask waits while its own report is still queued (codex #6471 r3 P2)', () => {
+    const seqRowFor = (over = {}) => ({
+      id: 'seq-q', customer_id: 'ar-q', status: 'active', current_step: 0, touches_sent: 0, service_record_id: 'sr-q', started_by: 'post_service',
+      plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
+      started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 1000),
+      decision: JSON.stringify({ reason: 'smart_window' }), ...over,
+    });
+    const bookQ = (notes, over) => makeMock({
+      ...customer('ar-q'),
+      review_sequences: [seqRowFor(over)],
+      service_records: [{ id: 'sr-q', customer_id: 'ar-q', service_type: 'Quarterly Pest Control', status: 'completed', structured_notes: notes }],
+    });
+
+    test('report still queued: no send, re-checked in 5 minutes, reason stays smart_window for the replay pull', async () => {
+      mockGates.reviewAskAfterReport = true;
+      const mock = bookQ({ completionSmsStatus: 'deferred', completionSmsDeferredTo: new Date().toISOString() });
+      db.mockImplementation(mock);
+      const out = await ReviewService._runSequenceStep('seq-q');
+      expect(out).toMatchObject({ ran: false, deferred: true, reason: 'report_queued' });
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      const row = mock.__state.rows.review_sequences[0];
+      expect(new Date(row.next_run_at).getTime() - Date.now()).toBeGreaterThan(4 * 60000);
+      expect(JSON.parse(row.decision)).toMatchObject({ reason: 'smart_window' });
+    });
+
+    test.each([
+      ['the report went out', { completionSmsStatus: 'sent' }, {}],
+      ['the gate is off', { completionSmsStatus: 'deferred' }, {}, false],
+      ['enrolled over 24 hours ago', { completionSmsStatus: 'deferred' }, { started_at: new Date(Date.now() - 25 * 3600000) }],
+      ['an operator timing', { completionSmsStatus: 'deferred' }, { decision: JSON.stringify({ reason: 'operator_timing' }) }],
+    ])('%s: the ask sends as before', async (_label, notes, over, gate = true) => {
+      mockGates.reviewAskAfterReport = gate;
+      const mock = bookQ(notes, over);
+      db.mockImplementation(mock);
+      const out = await ReviewService._runSequenceStep('seq-q');
+      expect(out?.reason).not.toBe('report_queued');
+    });
+  });
+
   describe('the report text decides (quiet hours, failed, blocked)', () => {
 
     test.each([

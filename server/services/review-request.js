@@ -1975,6 +1975,24 @@ const ReviewService = {
   // Anything unconfirmed — the App, no provider proof, cadences off, an
   // explicit or customer-requested timing, a decision another deferral
   // rewrote — leaves the smart window. Never throws.
+  // GATE_REVIEW_ASK_AFTER_REPORT: the next check time when an untouched Day-0
+  // post-service smart-window ask's own report is still queued by the send
+  // window (completionSmsStatus 'deferred'), else null. Bounded at 24 hours
+  // from enrollment, so a rail that never replays cannot hold an ask forever.
+  // A failed read never holds (the ask keeps today's behavior).
+  async _heldReportQueuedRetryAt(seq) {
+    if (!seq.service_record_id || seq.started_by !== "post_service" || Number(seq.current_step || 0) !== 0 || Number(seq.touches_sent || 0) !== 0) return null;
+    if (parseDecision(seq.decision)?.reason !== "smart_window" || Date.now() - new Date(seq.started_at || 0).getTime() > 24 * 3600000) return null;
+    try {
+      if (!reviewAskAfterReportOn()) return null;
+      const row = await db("service_records").where({ id: seq.service_record_id }).first("structured_notes");
+      return structuredNotesObject(row?.structured_notes).completionSmsStatus === "deferred" ? new Date(Date.now() + 5 * 60000) : null;
+    } catch (err) {
+      logger.warn(`[review] held-report check failed (sequenceId=${seq.id}): ${err.message}`);
+      return null;
+    }
+  },
+
   async pullAskAfterHeldReport(serviceRecordId, { channel = null, providerMessageId = null } = {}) {
     const texted = ["sms", "mms"].includes(channel) || /^(SM|MM)[0-9a-f]{32}$/i.test(String(providerMessageId || ""));
     if (!serviceRecordId || !texted) return { pulled: 0 };
@@ -6874,6 +6892,16 @@ const ReviewService = {
     // after the runner selected it (pullAskAfterHeldReport takes the same
     // lock) is not due yet.
     if (seq.next_run_at && new Date(seq.next_run_at).getTime() > Date.now()) return { ran: false, deferred: true, reason: "not_due" };
+    // A smart-window ask whose report the send window still queues (worker
+    // downtime can bring this runner back before the scheduled-SMS rail)
+    // waits for that report; the reason stays smart_window so the replay's
+    // pullAskAfterHeldReport still finds it.
+    const reportQueuedUntil = await this._heldReportQueuedRetryAt(seq);
+    if (reportQueuedUntil) {
+      await db("review_sequences").where({ id: seq.id, status: "active" })
+        .update({ next_run_at: reportQueuedUntil, decision: sequenceDecision({ reason: "smart_window", plannedAt: reportQueuedUntil, nextEvalAt: reportQueuedUntil }), updated_at: new Date() });
+      return { ran: false, deferred: true, reason: "report_queued", retryAt: reportQueuedUntil };
+    }
     let plan = Array.isArray(seq.plan) ? seq.plan : JSON.parse(seq.plan || "[]");
     const customer = await db("customers").where({ id: seq.customer_id }).first();
 

@@ -80,7 +80,7 @@ function afterReportHint(preview, reportTextExpected, { afterPayment = false } =
   const ticks = (preview.cadenceTickMinutesOfHour || [14, 44]).map((m) => `:${String(m).padStart(2, "0")}`).join(" and ");
   const windowNote = preview.smsSendWindowEnabled ? " A target after 8 PM waits for the next morning." : "";
   const held = afterPayment
-    ? " If the report was held for the morning: about 10 minutes after that report text when the payment comes before it, otherwise at the smart send window."
+    ? " If the report was held for the morning: about 10 minutes after that report text or the payment, whichever is later (a single visit's held report that went out before the payment keeps the smart send window)."
     : " If the report is held for the morning, it goes about 10 minutes after that report text goes out.";
   return `${lead} at the first review send (${ticks} each hour) at least ${afterReportMinutes(preview)} minutes after ${after}.${windowNote}${held} If the report goes by the Waves app, or texts are turned off for this customer, it goes at the smart send window.`;
 }

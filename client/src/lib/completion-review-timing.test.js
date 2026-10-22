@@ -83,7 +83,7 @@ describe('the Automatic hint while the ask goes out after the report text', () =
     const { text } = completionReviewHint({ willReview: true, effectiveSendSms: true, reviewTiming: 'auto', preview: afterReport, reviewAwaitsPayment: true });
     expect(text).toMatch(/waits for the invoice to be paid, then goes out at the first review send \(:14 and :44 each hour\) at least 10 minutes after payment/);
     // Any report not texted right away keeps the smart window (codex #6434 r11 P2).
-    expect(text).toMatch(/If the report was held for the morning: about 10 minutes after that report text when the payment comes before it, otherwise at the smart send window\./);
+    expect(text).toMatch(/If the report was held for the morning: about 10 minutes after that report text or the payment, whichever is later \(a single visit's held report that went out before the payment keeps the smart send window\)\./);
   });
 
   test.each([
