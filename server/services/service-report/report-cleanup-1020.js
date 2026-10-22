@@ -25,6 +25,8 @@ const live = () => typeof featureGates.reportCleanup1020Live === 'function' && f
 // (approved_report_product_facts: wateringRule, irrigationNotes, irrigationRequired), the same facts buildAftercare reads
 // through applications[].product. ONE eligibility rule decides what the cleanup may do:
 //   - a hold rule on any product: { hold: true } (no fallback; only the neutral "No special watering" line is dropped);
+//   - GATE_LAWN_WATERING_EVERY_VISIT, a use whose targets give no known direction here: { hold: true, unresolved: true }
+//     (it may be a hold, so the same: no water-in line and no "No special watering");
 //   - the water-in fallback: ONLY when every product is a structured water_in rule (or a structured "none"), or has no
 //     structured rule AND no recorded watering text at all (no irrigation_notes, no irrigation_required);
 //   - anything else (a recorded note or flag with no structured rule): null, and the normal aftercare runs unchanged.
@@ -54,7 +56,9 @@ function waterInRuleOf(products) {
   // A known hold stands whatever else is unclear; a product whose use gave no direction blocks only water-in advice.
   const known = rules.filter(Boolean).flat();
   if (known.some((rule) => rule.mode === 'hold')) return { hold: true };
-  if (rules.some((one) => one === null)) return null;
+  // A use whose direction is unknown here (a mixed target list, read without the catalog targets) may be a hold:
+  // no affirmative water-in, and no "No special watering" either ({ hold: true } blanks the neutral line).
+  if (rules.some((one) => one === null)) return { hold: true, unresolved: true };
   const eligible = facts.every((f, i) => (rules[i].length ? rules[i].every((rule) => ['water_in', 'none'].includes(rule.mode)) : !hasWateringText(f)));
   const waterIns = known.filter((rule) => rule.mode === 'water_in');
   if (!eligible || !waterIns.length) return null;
