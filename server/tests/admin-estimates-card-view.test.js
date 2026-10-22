@@ -76,6 +76,12 @@ jest.mock('../services/estimate-proposal-billing', () => ({
 
 const mockGeneratePdf = jest.fn((estimate, res) => res.status(200).end());
 jest.mock('../services/pdf/estimate-pdf', () => ({ generateEstimateProposalPDF: (...a) => mockGeneratePdf(...a) }));
+// no browser here: a viewable row's browser render fails and falls through to pdfkit, as the route allows
+const mockRenderDocPdf = jest.fn(async () => { throw new Error('no browser in tests'); });
+jest.mock('../services/pdf/estimate-doc-pdf', () => ({
+  renderEstimateDocumentPdf: (...a) => mockRenderDocPdf(...a),
+  sanitizeRenderError: (e) => e.message,
+}));
 
 const express = require('express');
 const db = require('../models/db');
@@ -361,7 +367,11 @@ describe('GET /admin/estimates/:id/acceptance', () => {
 
 describe('GET /admin/estimates/:id/proposal.pdf billing context', () => {
   const billing = () => require('../services/estimate-proposal-billing');
-  beforeEach(() => { jest.clearAllMocks(); mockAuth.role = 'admin'; });
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockAuth.role = 'admin';
+    mockView.customerViewable = new Set();
+  });
 
   test.each([
     ['expired', { status: 'expired' }],
@@ -370,11 +380,16 @@ describe('GET /admin/estimates/:id/proposal.pdf billing context', () => {
     ['archived', { status: 'sent', archived_at: '2026-10-01T00:00:00Z' }],
     // the expiry sweep has not run yet: still 'sent', but the public page refuses it
     ['date-expired', { status: 'sent', expires_at: '2026-01-01T00:00:00Z' }],
+    // still 'sent', but held for a re-price (or invalidated): the public page refuses it too
+    ['held', { status: 'sent' }],
   ])('a %s quote is rendered from the frozen send snapshot, never repriced live', async (_name, over) => {
     tableDb({ estimates: [], single: { estimates: base('e-old', over) } });
     await withServer(async (baseUrl) => {
       expect((await fetch(`${baseUrl}/estimates/e-old/proposal.pdf`)).status).toBe(200);
     });
+    // judged by the public page's own predicate, so no browser render is tried for it
+    expect(require('../routes/estimate-public').isEstimateCustomerViewable).toHaveBeenCalledWith(expect.objectContaining({ id: 'e-old' }));
+    expect(mockRenderDocPdf).not.toHaveBeenCalled();
     expect(billing().resolveFrozenBillingContext).toHaveBeenCalledTimes(1);
     expect(billing().resolveProposalBillingContext).not.toHaveBeenCalled();
     expect(mockGeneratePdf.mock.calls[0][2]).toMatchObject({ billsPerApplication: true, livePricing: null });
@@ -391,6 +406,17 @@ describe('GET /admin/estimates/:id/proposal.pdf billing context', () => {
     await withServer(async (baseUrl) => {
       expect((await fetch(`${baseUrl}/estimates/e-draft/proposal.pdf`)).status).toBe(200);
     });
+    expect(billing().resolveProposalBillingContext).toHaveBeenCalledTimes(1);
+    expect(billing().resolveFrozenBillingContext).not.toHaveBeenCalled();
+  });
+
+  test('a quote the public page serves keeps the live lane (the customer\'s copy)', async () => {
+    mockView.customerViewable = new Set(['e-live']);
+    tableDb({ estimates: [], single: { estimates: base('e-live') } });
+    await withServer(async (baseUrl) => {
+      expect((await fetch(`${baseUrl}/estimates/e-live/proposal.pdf`)).status).toBe(200);
+    });
+    expect(mockRenderDocPdf).toHaveBeenCalledTimes(1);
     expect(billing().resolveProposalBillingContext).toHaveBeenCalledTimes(1);
     expect(billing().resolveFrozenBillingContext).not.toHaveBeenCalled();
   });

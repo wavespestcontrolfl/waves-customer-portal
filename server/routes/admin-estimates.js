@@ -5020,14 +5020,13 @@ router.get('/:id/proposal.pdf', async (req, res, next) => {
     // Browser-rendered document (GATE_ESTIMATE_DOC_PDF) — same renderer as
     // the customer download so the operator's copy matches the customer's.
     // Only for rows the public /data route will serve (the headless page
-    // fetches it): drafts/scheduled/expired/send_failed/archived rows keep
-    // the pdfkit generator, which reads the row directly. Any render failure
-    // also falls through to pdfkit — the admin download must never 500 on a
-    // browser hiccup.
+    // fetches it), judged by the public page's own predicate: drafts,
+    // scheduled, expired, send_failed, archived, held and invalidated rows
+    // keep the pdfkit generator, which reads the row directly. Any render
+    // failure also falls through to pdfkit — the admin download must never
+    // 500 on a browser hiccup.
     const unsent = ['draft', 'scheduled'].includes(estimate.status);
-    const publicViewable = !estimate.archived_at && !unsent
-      && !['expired', 'send_failed'].includes(estimate.status)
-      && !(estimate.expires_at && new Date(estimate.expires_at) < new Date() && !['accepted', 'declined'].includes(estimate.status));
+    const publicViewable = isEstimateCustomerViewable(estimate);
     if (publicViewable && require('../config/feature-gates').isEnabled('estimateDocPdf')) {
       try {
         const { renderEstimateDocumentPdf } = require('../services/pdf/estimate-doc-pdf');
@@ -5045,8 +5044,9 @@ router.get('/:id/proposal.pdf', async (req, res, next) => {
     const { resolveProposalBillingContext, resolveFrozenBillingContext } = require('../services/estimate-proposal-billing');
     const { acceptanceRecordForEstimate } = require('../services/estimate-acceptance-record');
     // A delivered quote the public page no longer serves (archived, expired by
-    // status or by date, send_failed after an earlier delivery) is viewed as the
-    // offer that was SENT: resolveProposalBillingContext would reprice it live
+    // status or by date, send_failed after an earlier delivery, held for a
+    // re-price, invalidated) is viewed as the offer that was SENT:
+    // resolveProposalBillingContext would reprice it live
     // (it only freezes accepted / declined / price-locked rows), so those rows
     // render from the frozen send bundle instead. Only a real handoff writes that
     // bundle, so a row without one (a first send that failed on every channel)
