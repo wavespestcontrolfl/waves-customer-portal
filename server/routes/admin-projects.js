@@ -139,6 +139,43 @@ function finalExteriorDateProblem(value, initialDate) {
   return Boolean(initial) && raw < initial;
 }
 
+// Staff-preview fields on the project detail (preview == public): whether
+// the certificate renders as the notice (GATE_PRETREAT_STICKER_REPORT), and
+// which stored final-exterior keys the public page blanks.
+function pretreatStickerPreviewFields(project) {
+  if (project?.project_type !== 'pre_treatment_termite_certificate') {
+    return { pretreat_sticker_report: false, final_exterior_screened_keys: [] };
+  }
+  return {
+    pretreat_sticker_report: isEnabled('pretreatStickerReport'),
+    final_exterior_screened_keys: failingFinalExteriorKeys(project.findings),
+  };
+}
+
+// Update-path check on what the save leaves stored: runs only when the
+// findings or the project date change, against `current` (the pre-lock
+// snapshot, then the locked row).
+function finalExteriorRejectionForUpdate(project, updates, current) {
+  if (updates.findings === undefined && updates.project_date === undefined) return null;
+  return finalExteriorRejection(
+    project.project_type,
+    updates.findings !== undefined ? updates.findings : current.findings,
+    updates.project_date !== undefined ? updates.project_date : current.project_date,
+  );
+}
+
+// Create-path checks on a legal document's dates, first failure wins: the
+// stored date can't be in the future, and the final exterior date must fit.
+function legalDocCreateRejection(projectType, projectDate, findings) {
+  if (LEGAL_DOC_DATE_TYPES.has(projectType) && projectDate > etDateString()) {
+    return {
+      error: `The inspection/treatment date can't be in the future (${projectDate}) — use the date the work was actually performed.`,
+      code: 'project_date_in_future',
+    };
+  }
+  return finalExteriorRejection(projectType, findings, projectDate);
+}
+
 // 422 body for a final-exterior field the certificate can't carry, or null.
 function finalExteriorRejection(projectType, rawFindings, projectDate) {
   if (projectType !== 'pre_treatment_termite_certificate') return null;
@@ -1618,15 +1655,7 @@ router.get('/:id', async (req, res, next) => {
           return Boolean(lastFiling?.s3_key && config.s3?.bucket)
             && !filingBinaryMayDiscloseFee(lastFiling);
         })(),
-        // The customer preview renders the same notice the public page
-        // does when GATE_PRETREAT_STICKER_REPORT is on (preview == public).
-        pretreat_sticker_report: project.project_type === 'pre_treatment_termite_certificate'
-          && isEnabled('pretreatStickerReport'),
-        // Stored final-exterior keys the public page blanks (shared screen),
-        // so the preview blanks them too.
-        final_exterior_screened_keys: project.project_type === 'pre_treatment_termite_certificate'
-          ? failingFinalExteriorKeys(project.findings)
-          : [],
+        ...pretreatStickerPreviewFields(project),
         property_profile: propertyProfile,
         wdo_history: wdoHistory,
         wdo_applicator: wdoApplicator,
@@ -1806,16 +1835,10 @@ router.post('/', async (req, res, next) => {
     // inspection/treatment actually happened — a future date can't be attested.
     // A typo'd future date has already shipped on a signed prod filing
     // (2027-03-13 for a 2026 inspection), so reject rather than trust.
-    if (LEGAL_DOC_DATE_TYPES.has(project_type) && projectDate > etDateString()) {
-      return res.status(422).json({
-        error: `The inspection/treatment date can't be in the future (${projectDate}) — use the date the work was actually performed.`,
-        code: 'project_date_in_future',
-      });
-    }
-    // Judged against the date actually stored (resolved from the linked
-    // visit when the body omits it).
-    const createFinalExteriorRejection = finalExteriorRejection(project_type, findings, projectDate);
-    if (createFinalExteriorRejection) return res.status(422).json(createFinalExteriorRejection);
+    // The final exterior date is judged against the date actually stored
+    // (resolved from the linked visit when the body omits it).
+    const createDateRejection = legalDocCreateRejection(project_type, projectDate, findings);
+    if (createDateRejection) return res.status(422).json(createDateRejection);
 
     // One visit, one report (#2717 server hardening): stale client caches
     // (week rows, continue snapshots) repeatedly re-offered the create
@@ -2299,16 +2322,6 @@ router.put('/:id', async (req, res, next) => {
     if (updates.recommendations != null) updates.recommendations = redactProjectFreeTextForWrite(updates.recommendations, project.project_type, writeFeeValues);
     if (updates.title != null) updates.title = redactProjectTitleForWrite(updates.title, project.project_type, writeFeeValues);
     dropStaleCertTreatmentDate(project, updates);
-    // Judged on what this save leaves stored (after the legacy-date drop),
-    // whenever the findings or the project date change.
-    const updateFinalExteriorRejection = (updates.findings !== undefined || updates.project_date !== undefined)
-      ? finalExteriorRejection(
-        project.project_type,
-        updates.findings !== undefined ? updates.findings : project.findings,
-        updates.project_date !== undefined ? updates.project_date : project.project_date,
-      )
-      : null;
-    if (updateFinalExteriorRejection) return res.status(422).json(updateFinalExteriorRejection);
     if (Object.keys(updates).length === 0) return res.json({ project });
 
     // Serialized with in-flight deliveries the same way photo mutations are:
@@ -2325,6 +2338,11 @@ router.put('/:id', async (req, res, next) => {
     try {
       await db.transaction(async (trx) => {
         const locked = await lockProjectForPhotoMutation(project, trx, 'the edit', null);
+        // The final exterior fields are judged here, on the LOCKED row and
+        // after the legacy-date drop, so an overlapping save that moved the
+        // project date or the final exterior date can't slip past.
+        const lockedRejection = finalExteriorRejectionForUpdate(project, updates, locked || project);
+        if (lockedRejection) throw Object.assign(new Error(lockedRejection.error), { code: 'final_exterior_rejected', body: lockedRejection });
         await trx('projects').where({ id: req.params.id }).update({ ...updates, updated_at: db.fn.now() });
         if (updates.findings !== undefined || updates.project_date !== undefined) {
           const before = locked || project;
@@ -2341,6 +2359,7 @@ router.put('/:id', async (req, res, next) => {
       });
     } catch (e) {
       if (e.code === 'send_in_progress') return res.status(409).json({ error: e.message, code: e.code });
+      if (e.code === 'final_exterior_rejected') return res.status(422).json(e.body);
       throw e;
     }
     const updated = await db('projects').where({ id: req.params.id }).first();
