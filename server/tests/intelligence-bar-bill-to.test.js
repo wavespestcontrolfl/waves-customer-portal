@@ -22,7 +22,8 @@ jest.mock('../services/visit-linked-invoice-withdrawal', () => ({
   ownerTransitions: (...a) => mockTransitions(...a),
   visitOwnerTransitions: (...a) => mockVisitOwners(...a),
 }));
-jest.mock('../services/visit-completion-packets', () => ({ packetPayload: (p) => p.payload }));
+const mockInFlight = jest.fn();
+jest.mock('../services/visit-completion-packets', () => ({ packetPayload: (p) => p.payload, packetInvoiceSendInFlight: (...a) => mockInFlight(...a) }));
 
 const db = require('../models/db');
 const Customers = require('../routes/admin-customers');
@@ -48,6 +49,7 @@ function freshState() {
     packetIds: [],
     staying: [MANUAL],
     pinnedVisits: 0,
+    closedPackets: [],
   };
 }
 
@@ -60,6 +62,7 @@ function makeDb() {
       if (table === 'scheduled_services') return Array.from({ length: state.pinnedVisits }, (_v, i) => ({ id: `visit-${i}` }));
       // Payer rows read by id: the payer fixture through mockGetPayer, so a test can change what the row says.
       if (table === 'payers') return mockGetPayer(q.whereId);
+      if (table === 'visit_completion_packets' && q.ids) return q.ids.filter((id) => state.closedPackets.includes(id));
       if (table === 'visit_completion_packets') return { visit_id: 'sv-1', payload: { billingSnapshot: { billedServiceIds: ['visit-a', 'visit-b'] } } };
       if (table === 'invoices') {
         if (q.ids) return q.ids.map((id) => state.invoices[id]).filter(Boolean);
@@ -104,6 +107,7 @@ beforeEach(() => {
   mockGetPayer.mockImplementation(async (id) => (String(id) === '7' ? PAYER : null));
   mockListPayers.mockResolvedValue([PAYER]);
   mockTransitions.mockResolvedValue([{ invoiceId: LINKED, moved: true, beforeOwner: null, afterOwner: '7' }]);
+  mockInFlight.mockResolvedValue(false);
   Customers.setCustomerBillToFromBar.mockImplementation(async () => {
     state.customer = { ...state.customer, payer_id: 7 };
     return { status: 200, json: { success: true } };
@@ -170,6 +174,22 @@ describe('the preview', () => {
     expect(cardLines('set_customer_bill_to', card)[0].text).toBe('Bill-To for Robin Sample: The customer (self-pay) → Synthetic Property Co');
     const contract = buildContract({ toolName: 'set_customer_bill_to', params: { customer_id: CUST }, displayParams: {}, preview: card, summary: 'x' });
     expect(JSON.stringify(contract)).toMatch(/Nothing is sent/);
+    // Confirm cancels pay-page sessions in Stripe: the card carries "Cannot be undone".
+    expect(contract.irreversible).toBe(true);
+    expect(text).toMatch(/cancelled in Stripe\. That cannot be undone/);
+  });
+
+  test('a combined-visit send or payment in flight: no card is offered', async () => {
+    mockInFlight.mockResolvedValue(true);
+    expect(await preview()).toMatchObject({ code: 'invoice_send_in_flight' });
+    expect(mockInFlight).toHaveBeenCalledWith({ customerId: CUST }, expect.anything(), { pending: { customerPatch: { customerId: CUST, payer_id: '7' } } });
+  });
+
+  test('the customer renamed after the card refuses', async () => {
+    const card = await preview();
+    state.customer = { ...state.customer, first_name: 'Robyn' };
+    expect(await confirm(card)).toMatchObject({ code: 'preview_changed' });
+    expect(Customers.setCustomerBillToFromBar).not.toHaveBeenCalled();
   });
 
   test('upcoming visits with their own Bill-To are named; a customer with nothing to move says so', async () => {
@@ -193,7 +213,16 @@ describe('the preview', () => {
     expect(mockVisitOwners).toHaveBeenCalledWith(expect.anything(), ['visit-a', 'visit-b'], { pending: { customerPatch: { customerId: CUST, payer_id: '7' } }, lock: false });
     // One billed visit resolves to the payer: it moves.
     mockVisitOwners.mockResolvedValue([{ visitId: 'visit-a', afterOwner: null }, { visitId: 'visit-b', afterOwner: '7' }]);
-    expect((await preview()).invoices_moving).toEqual(['WPC-2099-0001', 'WPC-2099-0003']);
+    const moved = await preview();
+    expect(moved.invoices_moving).toEqual(['WPC-2099-0001', 'WPC-2099-0003']);
+    const movedText = moved.effects.map((e) => e.text).join('\n');
+    expect(movedText).toMatch(/1 combined-visit invoice moves: its visit goes on billing hold\.$/m);
+    // A packet whose close already finished also gets the office review alert, and that is pinned.
+    state.closedPackets = [`packet-${PACKET}`];
+    const reviewed = await preview();
+    expect(reviewed.effects.map((e) => e.text).join('\n')).toMatch(/That visit already closed, so the office gets a visit close-out review alert/);
+    expect(await confirm(moved)).toMatchObject({ code: 'preview_changed' });
+    state.closedPackets = [];
     // The first billed visit that resolves to a payer decides, in billed order: visit-a's own payer 9 here.
     mockVisitOwners.mockResolvedValue([{ visitId: 'visit-b', afterOwner: '7' }, { visitId: 'visit-a', afterOwner: '9' }]);
     mockGetPayer.mockImplementation(async (id) => (String(id) === '7' ? PAYER : { id: 9, display_name: 'Other Payer Co', active: true }));

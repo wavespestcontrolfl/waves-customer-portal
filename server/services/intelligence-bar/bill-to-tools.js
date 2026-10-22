@@ -67,8 +67,8 @@ const digest = (value) => crypto.createHash('sha256').update(JSON.stringify(valu
 const refusal = (error, code, extra = {}) => ({ error, code, ...extra });
 const toPage = (error, reason) => refusal(`${error} Do it from the customer page Bill-To select.`, 'needs_customer_page', { reason });
 
-// Statuses an invoice can no longer change hands in (the withdrawal's own terminal list, plus processing).
-const SETTLED = ['void', 'refunded', 'canceled', 'cancelled', 'paid', 'prepaid', 'processing'];
+// Statuses an invoice can no longer change hands in: the canonical uncollectible list (processing included).
+const SETTLED = require('../invoice-helpers').INVOICE_UNCOLLECTIBLE_STATUSES;
 
 const payerLabel = (p) => [p.display_name, p.company_name && p.company_name !== p.display_name ? `(${p.company_name})` : null].filter(Boolean).join(' ');
 
@@ -178,8 +178,87 @@ async function pinnedVisits(customerId, { database = db, lock = false } = {}) {
 
 const invoiceLine = (inv) => `${inv.invoice_number} ${money(inv.total)} (${inv.status})`;
 
+// A customer who already has a payer: the same payer is a no-op, another one stays on the customer page.
+async function hasPayerRefusal(customer, payer, name, ctx) {
+  const who = name || 'This customer';
+  if (String(customer.payer_id) === String(payer.id)) {
+    return refusal(`${who} already bills to ${payerLabel(payer)}. Nothing was changed.`, 'already_set', { customer_id: customer.id });
+  }
+  const current = await payerRow(customer.payer_id, ctx);
+  return toPage(`${who} already bills to ${current ? payerLabel(current) : `payer ${customer.payer_id}`}. The bar sets a payer only on a customer who pays for themselves.`, 'has_payer');
+}
+
+// A combined-visit invoice can move to a visit's own payer instead of this one: each line names its payer.
+async function payerNames(payer, moving, ctx) {
+  const names = new Map([[String(payer.id), payerLabel(payer)]]);
+  for (const inv of moving) {
+    if (!names.has(inv.to_payer_id)) {
+      const other = await payerRow(inv.to_payer_id, ctx);
+      names.set(inv.to_payer_id, other ? payerLabel(other) : `payer ${inv.to_payer_id}`);
+    }
+  }
+  return names;
+}
+
+// The combined-visit invoices that move: the withdrawal puts each one's visit on billing hold, and for a visit
+// whose close already finished it records an office review (one open visit_closeout_review alert).
+async function packetEffects(moving, { database = db } = {}) {
+  const packetIds = [...new Set(moving.map((inv) => inv.visit_completion_packet_id).filter(Boolean).map(String))];
+  if (!packetIds.length) return { held: 0, review: 0 };
+  const closed = await database('visit_completion_packets').whereIn('id', packetIds).where({ status: 'done' }).pluck('id');
+  const closedSet = new Set(closed.map(String));
+  const packetMoving = moving.filter((inv) => inv.visit_completion_packet_id);
+  return { held: packetMoving.length, review: packetMoving.filter((inv) => closedSet.has(String(inv.visit_completion_packet_id))).length };
+}
+
+const plural = (n, one, many) => (n === 1 ? one : many);
+
+function planEffects({ name, payer, payerName, names, moving, staying, pinned, packets }) {
+  const allToThis = moving.every((inv) => inv.to_payer_id === String(payer.id));
+  const credit = moving.reduce((sum, inv) => sum + (Number(inv.credit_applied) || 0), 0);
+  return [
+    { kind: 'billing', text: `New invoices for ${name || 'this customer'} bill to ${payerName}${payer.payment_terms ? ` (terms: ${String(payer.payment_terms).replace(/_/g, ' ')})` : ''}.` },
+    payer.tax_exempt ? { kind: 'billing', text: `${payerName} is tax-exempt: invoices billed to it carry no sales tax.` } : null,
+    pinned > 0
+      ? { kind: 'billing', text: `${pinned} upcoming ${plural(pinned, 'visit keeps its', 'visits keep their')} own Bill-To (a payer of ${plural(pinned, 'its', 'their')} own, or pinned to the customer).` }
+      : null,
+    moving.length
+      ? { kind: 'billing', text: `${plural(moving.length, '1 unpaid invoice moves', `${moving.length} unpaid invoices move`)} to ${allToThis ? payerName : 'a payer (named on each line)'} now. The customer's pay link for ${plural(moving.length, 'it', 'them')} stops working and reminders pause.` }
+      : { kind: 'billing', text: 'No unpaid invoice moves to the payer.' },
+    // Every moving invoice is listed: Confirm moves all of them.
+    ...moving.map((inv) => ({ kind: 'billing', text: `Moves to ${names.get(inv.to_payer_id)}: ${invoiceLine(inv)}` })),
+    packets.held > 0
+      ? { kind: 'billing', text: `${packets.held} combined-visit ${plural(packets.held, 'invoice moves', 'invoices move')}: ${plural(packets.held, 'its visit goes', 'their visits go')} on billing hold.${packets.review > 0 ? ` ${packets.held === 1 ? 'That visit' : `${packets.review} of those visits`} already closed, so the office gets a visit close-out review alert.` : ''}` }
+      : null,
+    credit > 0.004 ? { kind: 'billing', text: `${money(credit)} of account credit applied to those invoices goes back to the customer's balance.` } : null,
+    staying.length
+      ? { kind: 'billing', text: `${staying.length} unpaid ${plural(staying.length, 'invoice stays', 'invoices stay')} billed to the customer (no visit, or a visit pinned to the customer): ${staying.map(invoiceLine).join(', ')}.` }
+      : null,
+    { kind: 'billing', text: 'Open pay-page sessions for the invoices that move, and any combined pay-page session on the customer\'s invoices, are cancelled in Stripe. That cannot be undone. Pay links on the invoices that stay keep working. Nothing is charged or refunded.' },
+    { kind: 'comms', text: 'Nothing is sent: no text, email or call goes to the customer or the payer.' },
+  ].filter(Boolean);
+}
+
+// What the confirm re-checks: every fact the card showed.
+function planVersion({ customer, name, payer, payerName, names, moving, staying, pinned, packets }) {
+  return {
+    customer_id: customer.id,
+    customer_name: name,
+    payer_before: null,
+    payer_after: String(payer.id),
+    payer_active: payer.active !== false,
+    payer_name: payerName,
+    payer_terms: payer.payment_terms || null,
+    payer_tax_exempt: payer.tax_exempt === true,
+    moving: digest(moving.map((inv) => [String(inv.id), inv.status, String(inv.total), String(inv.credit_applied), inv.to_payer_id, names.get(inv.to_payer_id)])),
+    staying: digest(staying.map((inv) => [String(inv.id), inv.status, String(inv.total), String(inv.credit_applied)])),
+    pinned,
+    packets,
+  };
+}
+
 async function buildPlan(input, ctx = {}) {
-  const { database = db } = ctx;
+  const { database = db, lock = false } = ctx;
   const customerId = String(input?.customer_id || '').trim().toLowerCase();
   if (!UUID_RE.test(customerId)) return refusal('A valid customer_id is required', 'invalid_target');
   const customer = await database('customers').where({ id: customerId }).whereNull('deleted_at')
@@ -189,46 +268,19 @@ async function buildPlan(input, ctx = {}) {
   if (target.error) return target;
   const { payer } = target;
   const name = await customerName(customer);
-  if (customer.payer_id) {
-    const current = await payerRow(customer.payer_id, ctx);
-    if (String(customer.payer_id) === String(payer.id)) {
-      return refusal(`${name || 'This customer'} already bills to ${payerLabel(payer)}. Nothing was changed.`, 'already_set', { customer_id: customer.id });
-    }
-    return toPage(`${name || 'This customer'} already bills to ${current ? payerLabel(current) : `payer ${customer.payer_id}`}. The bar sets a payer only on a customer who pays for themselves.`, 'has_payer');
+  if (customer.payer_id) return hasPayerRefusal(customer, payer, name, ctx);
+  // The handler's own in-flight fence, read-only here, so no card is offered that the confirm must refuse.
+  // (Inside the handler's transaction the handler already ran it on the locked rows.)
+  if (!lock && await require('../visit-completion-packets').packetInvoiceSendInFlight({ customerId: customer.id }, database,
+    { pending: { customerPatch: { customerId: customer.id, payer_id: String(payer.id) } } })) {
+    return refusal('A combined-visit invoice for this customer is being sent or paid right now, so nothing was offered. Ask again in a moment.', 'invoice_send_in_flight');
   }
   const { moving, staying } = await invoicePlan(customer.id, String(payer.id), ctx);
   const pinned = await pinnedVisits(customer.id, ctx);
-  const credit = moving.reduce((sum, inv) => sum + (Number(inv.credit_applied) || 0), 0);
+  const packets = await packetEffects(moving, ctx);
   const payerName = payerLabel(payer);
-  // A combined-visit invoice can move to a visit's own payer instead of this one: each line names its payer.
-  const names = new Map([[String(payer.id), payerName]]);
-  for (const inv of moving) {
-    if (!names.has(inv.to_payer_id)) {
-      const other = await payerRow(inv.to_payer_id, ctx);
-      names.set(inv.to_payer_id, other ? payerLabel(other) : `payer ${inv.to_payer_id}`);
-    }
-  }
-  const allToThis = moving.every((inv) => inv.to_payer_id === String(payer.id));
-  const effects = [
-    { kind: 'billing', text: `New invoices for ${name || 'this customer'} bill to ${payerName}${payer.payment_terms ? ` (terms: ${String(payer.payment_terms).replace(/_/g, ' ')})` : ''}.` },
-    payer.tax_exempt
-      ? { kind: 'billing', text: `${payerName} is tax-exempt: invoices billed to it carry no sales tax.` }
-      : null,
-    pinned > 0
-      ? { kind: 'billing', text: `${pinned} upcoming visit${pinned === 1 ? ' keeps its' : 's keep their'} own Bill-To (a payer of ${pinned === 1 ? 'its' : 'their'} own, or pinned to the customer).` }
-      : null,
-    moving.length
-      ? { kind: 'billing', text: `${moving.length === 1 ? '1 unpaid invoice moves' : `${moving.length} unpaid invoices move`} to ${allToThis ? payerName : 'a payer (named on each line)'} now. The customer's pay link for ${moving.length === 1 ? 'it' : 'them'} stops working and reminders pause.` }
-      : { kind: 'billing', text: 'No unpaid invoice moves to the payer.' },
-    // Every moving invoice is listed: Confirm moves all of them.
-    ...moving.map((inv) => ({ kind: 'billing', text: `Moves to ${names.get(inv.to_payer_id)}: ${invoiceLine(inv)}` })),
-    credit > 0.004 ? { kind: 'billing', text: `${money(credit)} of account credit applied to those invoices goes back to the customer's balance.` } : null,
-    staying.length
-      ? { kind: 'billing', text: `${staying.length} unpaid invoice${staying.length === 1 ? '' : 's'} stay${staying.length === 1 ? 's' : ''} billed to the customer (no visit, or a visit pinned to the customer): ${staying.map(invoiceLine).join(', ')}.` }
-      : null,
-    { kind: 'billing', text: 'Open pay-page sessions for the invoices that move, and any combined pay-page session on the customer\'s invoices, are cancelled. Pay links on the invoices that stay keep working. Nothing is charged or refunded.' },
-    { kind: 'comms', text: 'Nothing is sent: no text, email or call goes to the customer or the payer.' },
-  ].filter(Boolean);
+  const names = await payerNames(payer, moving, ctx);
+  const facts = { customer, name, payer, payerName, names, moving, staying, pinned, packets };
   return {
     preview: true,
     tool: 'set_customer_bill_to',
@@ -239,7 +291,7 @@ async function buildPlan(input, ctx = {}) {
     payer_name: payerName,
     invoices_moving: moving.map((inv) => inv.invoice_number),
     invoices_staying: staying.map((inv) => inv.invoice_number),
-    effects,
+    effects: planEffects(facts),
     sends_to_customer: false,
     // Every invoice the card listed, for the handler's after-withdrawal check: the moving ones (with the payer
     // each moves to) must be exactly the ones withdrawn, each stamped for that payer.
@@ -247,18 +299,7 @@ async function buildPlan(input, ctx = {}) {
       ...moving.map((inv) => ({ id: String(inv.id), status: inv.status, total: inv.total, credit_applied: inv.credit_applied, to_payer_id: inv.to_payer_id })),
       ...staying.map((inv) => ({ id: String(inv.id), status: inv.status, total: inv.total, credit_applied: inv.credit_applied, to_payer_id: null })),
     ],
-    _version: {
-      customer_id: customer.id,
-      payer_before: null,
-      payer_after: String(payer.id),
-      payer_active: payer.active !== false,
-      payer_name: payerName,
-      payer_terms: payer.payment_terms || null,
-      payer_tax_exempt: payer.tax_exempt === true,
-      moving: digest(moving.map((inv) => [String(inv.id), inv.status, String(inv.total), String(inv.credit_applied), inv.to_payer_id, names.get(inv.to_payer_id)])),
-      staying: digest(staying.map((inv) => [String(inv.id), inv.status, String(inv.total), String(inv.credit_applied)])),
-      pinned,
-    },
+    _version: planVersion(facts),
     note: 'PREVIEW ONLY — nothing was changed. Confirm sets exactly this Bill-To; if anything changed it refuses.',
   };
 }
@@ -295,6 +336,43 @@ async function readBack(customerId) {
   return db('customers').where({ id: customerId }).first('payer_id').catch(() => null);
 }
 
+// The handler threw: its own refusals rolled everything back; anything else is judged by reading the Bill-To back.
+async function handlerErrorResult(err, plan, base) {
+  if (err?.code === 'preview_changed') {
+    return { ...base, failed: true, code: 'preview_changed', preview_changed: true, error: 'The Bill-To changed after the card was shown, so nothing was changed. Ask again for a fresh confirmation card.' };
+  }
+  // The handler's own refusals (a send or a bank payment in flight, a credit that cannot be returned)
+  // roll the whole transaction back: nothing was written.
+  if (err?.code === 'invoice_send_in_flight' || /in flight|retry the payer change|credit reversal incomplete/i.test(String(err?.message || ''))) {
+    return { ...base, failed: true, code: 'bill_to_refused', error: `The Bill-To was not changed: ${err.message}` };
+  }
+  const now = await readBack(plan.customer_id);
+  logger.error(`[intelligence-bar:bill-to] handler failed (${err?.code || err?.name || 'error'})`);
+  if (now && String(now.payer_id ?? '') === plan.payer_id) {
+    return { ...base, success: true, warning: true, sent_to_customer: false,
+      note: `${plan.customer_name || 'The customer'} now bills to ${plan.payer_name}, but a later step reported a problem. Check the customer page.` };
+  }
+  return { ...base, outcome_unknown: true, code: 'execution_interrupted',
+    error: 'The Bill-To change was interrupted — it may or may not have happened. Check the customer page before trying again.' };
+}
+
+// The handler answered: a non-200 is its refusal; a 200 counts only when the Bill-To reads back as the payer.
+async function handlerReplyResult({ status, json }, plan, base) {
+  if (status !== 200) {
+    return { ...base, failed: true, code: status === 404 ? 'not_found' : 'bill_to_refused',
+      error: `The Bill-To was not changed: ${String(json?.error || json?.message || 'the customer page refused it')}` };
+  }
+  const now = await readBack(plan.customer_id);
+  if (!now || String(now.payer_id ?? '') !== plan.payer_id) {
+    return { ...base, outcome_unknown: true, code: 'bill_to_unverified',
+      error: 'The customer page answered, but the Bill-To does not read as the new payer. Check the customer page before trying again.' };
+  }
+  logger.info(`[intelligence-bar:bill-to] customer ${plan.customer_id} -> payer ${plan.payer_id}`);
+  const n = plan.invoices_moving.length;
+  return { ...base, success: true, sent_to_customer: false,
+    note: `${plan.customer_name || 'The customer'} now bills to ${plan.payer_name}. ${n} unpaid ${plural(n, 'invoice', 'invoices')} moved to the payer. Nothing was sent to anyone.` };
+}
+
 async function commitBillTo(input, actionContext) {
   const { plan, refusal: refused } = await verifiedPlan(input, input._verified_bill_to_version);
   if (refused) return refused;
@@ -310,36 +388,9 @@ async function commitBillTo(input, actionContext) {
       actor: { technicianId: actionContext?.technicianId || null },
     });
   } catch (err) {
-    if (err?.code === 'preview_changed') {
-      return { ...base, failed: true, code: 'preview_changed', preview_changed: true, error: 'The Bill-To changed after the card was shown, so nothing was changed. Ask again for a fresh confirmation card.' };
-    }
-    // The handler's own refusals (a send or a bank payment in flight, a credit that cannot be returned)
-    // roll the whole transaction back: nothing was written.
-    if (err?.code === 'invoice_send_in_flight' || /in flight|retry the payer change|credit reversal incomplete/i.test(String(err?.message || ''))) {
-      return { ...base, failed: true, code: 'bill_to_refused', error: `The Bill-To was not changed: ${err.message}` };
-    }
-    const now = await readBack(plan.customer_id);
-    logger.error(`[intelligence-bar:bill-to] handler failed (${err?.code || err?.name || 'error'})`);
-    if (now && String(now.payer_id ?? '') === plan.payer_id) {
-      return { ...base, success: true, warning: true, sent_to_customer: false,
-        note: `${plan.customer_name || 'The customer'} now bills to ${plan.payer_name}, but a later step reported a problem. Check the customer page.` };
-    }
-    return { ...base, outcome_unknown: true, code: 'execution_interrupted',
-      error: 'The Bill-To change was interrupted — it may or may not have happened. Check the customer page before trying again.' };
+    return handlerErrorResult(err, plan, base);
   }
-  const { status, json } = result;
-  if (status !== 200) {
-    return { ...base, failed: true, code: status === 404 ? 'not_found' : 'bill_to_refused',
-      error: `The Bill-To was not changed: ${String(json?.error || json?.message || 'the customer page refused it')}` };
-  }
-  const now = await readBack(plan.customer_id);
-  if (!now || String(now.payer_id ?? '') !== plan.payer_id) {
-    return { ...base, outcome_unknown: true, code: 'bill_to_unverified',
-      error: 'The customer page answered, but the Bill-To does not read as the new payer. Check the customer page before trying again.' };
-  }
-  logger.info(`[intelligence-bar:bill-to] customer ${plan.customer_id} -> payer ${plan.payer_id}`);
-  return { ...base, success: true, sent_to_customer: false,
-    note: `${plan.customer_name || 'The customer'} now bills to ${plan.payer_name}. ${plan.invoices_moving.length} unpaid invoice${plan.invoices_moving.length === 1 ? '' : 's'} moved to the payer. Nothing was sent to anyone.` };
+  return handlerReplyResult(result, plan, base);
 }
 
 // ── card lines (authorization-contract.js) ──────────────────────
