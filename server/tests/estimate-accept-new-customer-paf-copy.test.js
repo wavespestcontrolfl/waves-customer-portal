@@ -25,19 +25,19 @@ describe('accept notification copy (new customer, pay after first visit)', () =>
   });
 
   test('first visit booked with a date: names the day and asks for nothing', () => {
-    const payload = buildAcceptNotificationPayload({ ...base, reservationCommitted: true, firstVisitDate: '2026-10-24' });
-    expect(payload.adminBody).toBe('Bronze WaveGuard $49.00/mo approved. Billed after the first visit; nothing is charged today. First visit: Oct 24.');
+    const payload = buildAcceptNotificationPayload({ ...base, reservationCommitted: true, firstVisitDate: '2026-10-24', billingVisitDate: '2026-10-24' });
+    expect(payload.adminBody).toBe('Bronze WaveGuard $49.00/mo approved. Billed after the Oct 24 visit; nothing is charged today.');
     expect(payload.adminNext).toBe('Billed after the first visit; nothing to do');
     expect(payload.adminDoneWhen).toBeNull();
-    expect(payload.customerBody).toBe('Your Bronze WaveGuard plan is confirmed. Nothing is charged today — you pay after your first visit.');
+    expect(payload.customerBody).toBe('Your Bronze WaveGuard plan is confirmed. Nothing is charged today — you pay after your Oct 24 visit.');
   });
 
   test('booked without a known date, and a date without the committed flag, both count as booked', () => {
     const noDate = buildAcceptNotificationPayload({ ...base, reservationCommitted: true });
     expect(noDate.adminNext).toBe('Billed after the first visit; nothing to do');
-    expect(noDate.adminBody).not.toMatch(/First visit:|No first visit/);
+    expect(noDate.adminBody).toBe('Bronze WaveGuard $49.00/mo approved. Billed after the first visit; nothing is charged today.');
     const dateOnly = buildAcceptNotificationPayload({ ...base, firstVisitDate: new Date('2026-11-02T00:00:00Z') });
-    expect(dateOnly.adminBody).toMatch(/First visit: Nov 2\.$/);
+    expect(dateOnly.adminBody).toMatch(/Billed after the first visit; nothing is charged today\.$/);
     expect(dateOnly.adminDoneWhen).toBeNull();
   });
 
@@ -73,7 +73,9 @@ describe('accept notification copy (new customer, pay after first visit)', () =>
 });
 
 // Codex round 1 on #6412.
-const { resolveCardLaneAfterVisit, resolveAcceptedFirstVisit, cardEnrollmentSettled } = require('../routes/estimate-public');
+const {
+  resolveCardLaneAfterVisit, resolveAcceptedFirstVisit, cardEnrollmentSettled, resolveBillingVisitDate,
+} = require('../routes/estimate-public');
 
 // Minimal knex stand-in: table -> row (or Error) for .where().[whereNotIn()].first().
 const fakeDb = (tables) => (table) => {
@@ -151,9 +153,9 @@ describe('resolveAcceptedFirstVisit (converter-created visits count)', () => {
     }, fakeDb({ scheduled_services: { scheduled_date: new Date('2026-11-03T00:00:00Z') } }));
     expect(out).toEqual({ firstVisitDate: '2026-11-03', firstVisitBooked: true, firstVisitPriced: false });
     const payload = buildAcceptNotificationPayload({
-      customerName: 'Pat Tester', waveguardTier: 'Bronze', monthlyTotal: 49, cardLaneAfterVisit: true, ...out,
+      customerName: 'Pat Tester', waveguardTier: 'Bronze', monthlyTotal: 49, cardLaneAfterVisit: true, ...out, billingVisitDate: out.firstVisitDate,
     });
-    expect(payload.adminBody).toMatch(/First visit: Nov 3\.$/);
+    expect(payload.adminBody).toMatch(/Billed after the Nov 3 visit; nothing is charged today\.$/);
     expect(payload.adminBody).not.toMatch(/No first visit/);
     expect(payload.adminDoneWhen).toBeNull();
   });
@@ -190,9 +192,9 @@ describe('resolveAcceptedFirstVisit (earliest converter unit, priced flag)', () 
     expect(out.firstVisitDate).toBe('2026-10-29');
     expect(out.firstVisitBooked).toBe(true);
     const payload = buildAcceptNotificationPayload({
-      customerName: 'Pat Tester', waveguardTier: 'Bronze', monthlyTotal: 49, cardLaneAfterVisit: true, ...out,
+      customerName: 'Pat Tester', waveguardTier: 'Bronze', monthlyTotal: 49, cardLaneAfterVisit: true, ...out, billingVisitDate: out.firstVisitDate,
     });
-    expect(payload.adminBody).toMatch(/First visit: Oct 29\.$/);
+    expect(payload.adminBody).toMatch(/Billed after the Oct 29 visit; nothing is charged today\.$/);
     expect(payload.adminBody).not.toMatch(/Feb/);
   });
 
@@ -261,5 +263,57 @@ describe('card enrollment must have landed (Codex r3: failed enrollment stays ac
   test('the helper fails closed when the caller does not say enrollment settled', async () => {
     const db = fakeDb({ customers: { billing_mode: 'per_application', per_application_fee: 49 } });
     await expect(resolveCardLaneAfterVisit({ recurringCardLaneActive: true, treatAsOneTime: false, customerId: 'c1' }, db)).resolves.toBe(false);
+  });
+});
+
+describe('billing visit: collection waits for the visit the first-application invoice hangs on', () => {
+  test('invoice attached to a later seasonal unit: its date is shown, not the earlier unit\'s', async () => {
+    // Earliest unit Oct 29; the invoice is attached to firstScheduledServiceId (seasonal, Feb 8).
+    const billingVisitDate = await resolveBillingVisitDate({
+      billingVisitId: 'ss-seasonal',
+      acceptedAppointments: [],
+      fallbackDate: '2026-10-29',
+    }, fakeDb({ scheduled_services: { scheduled_date: new Date('2027-02-08T00:00:00Z') } }));
+    expect(billingVisitDate).toBe('2027-02-08');
+    const payload = buildAcceptNotificationPayload({
+      customerName: 'Pat Tester', waveguardTier: 'Bronze', monthlyTotal: 49, cardLaneAfterVisit: true,
+      firstVisitDate: '2026-10-29', firstVisitBooked: true, billingVisitDate,
+    });
+    expect(payload.adminBody).toBe('Bronze WaveGuard $49.00/mo approved. Billed after the Feb 8 visit; nothing is charged today.');
+    expect(payload.adminBody).not.toMatch(/Oct 29/);
+    expect(payload.customerBody).toBe('Your Bronze WaveGuard plan is confirmed. Nothing is charged today — you pay after your Feb 8 visit.');
+    expect(payload.adminNext).toBe('Billed after the first visit; nothing to do');
+    expect(payload.adminDoneWhen).toBeNull();
+  });
+
+  test('a committed appointment that is the attached visit needs no query', async () => {
+    const out = await resolveBillingVisitDate({
+      billingVisitId: 'ss1', acceptedAppointments: [{ id: 'ss1', scheduled_date: '2026-11-03' }], fallbackDate: '2026-10-01',
+    }, fakeDb({ scheduled_services: new Error('must not be read') }));
+    expect(out).toBe('2026-11-03');
+  });
+
+  test('no invoice attached (fee billed at each visit): the earliest visit date is used', async () => {
+    await expect(resolveBillingVisitDate({ billingVisitId: null, fallbackDate: '2026-10-29' }, fakeDb({}))).resolves.toBe('2026-10-29');
+    await expect(resolveBillingVisitDate({ billingVisitId: null, fallbackDate: null }, fakeDb({}))).resolves.toBe(null);
+  });
+
+  test('attached visit unreadable or cancelled: unknown (never the earlier unit\'s date) and the copy says "the first visit"', async () => {
+    await expect(resolveBillingVisitDate({ billingVisitId: 'ss9', fallbackDate: '2026-10-29' }, fakeDb({ scheduled_services: new Error('boom') }))).resolves.toBe(null);
+    await expect(resolveBillingVisitDate({ billingVisitId: 'ss9', fallbackDate: '2026-10-29' }, fakeDb({ scheduled_services: undefined }))).resolves.toBe(null);
+    const payload = buildAcceptNotificationPayload({
+      customerName: 'Pat Tester', waveguardTier: 'Bronze', monthlyTotal: 49, cardLaneAfterVisit: true,
+      firstVisitDate: '2026-10-29', firstVisitBooked: true, billingVisitDate: null,
+    });
+    expect(payload.adminBody).toBe('Bronze WaveGuard $49.00/mo approved. Billed after the first visit; nothing is charged today.');
+    expect(payload.customerBody).toBe('Your Bronze WaveGuard plan is confirmed. Nothing is charged today — you pay after your first visit.');
+  });
+
+  test('no visit booked still asks for the booking, whatever the billing date', () => {
+    const payload = buildAcceptNotificationPayload({
+      customerName: 'Pat Tester', waveguardTier: 'Bronze', monthlyTotal: 49, cardLaneAfterVisit: true,
+    });
+    expect(payload.adminBody).toMatch(/No first visit is booked yet\.$/);
+    expect(payload.adminDoneWhen).toBe('visit_booked');
   });
 });
