@@ -288,6 +288,13 @@ async function finalizeLawnReportSynthesis({ service, knex, coverageFreezeAllowe
         .then((row) => parseJsonObject(row && row.structured_notes).lawnWateringFreeze || null);
     }
 
+    // GATE_LAWN_WATERING_EVERY_VISIT: why this visit froze NO instruction (a
+    // product with no rule, a clash), for the office alert the watering text
+    // raises. Never stored here and never customer copy.
+    const builtNoClaim = instructionOut.instruction && !instructionOut.instruction.state && !instructionOut.productsLoadFailed
+      ? instructionOut.instruction.noClaim : null;
+    const wateringNoClaim = !wateringFreeze && builtNoClaim && featureGates.lawnWateringEveryVisitLive() ? builtNoClaim : null;
+
     // "From your technician" paragraph (GATE_LAWN_TECH_PARAGRAPH, fixed sentences):
     // at most ONE model call, here, frozen first-writer-wins under its own top-level
     // key (never inside lawnReportV2, whose write above replaces the whole object).
@@ -309,6 +316,7 @@ async function finalizeLawnReportSynthesis({ service, knex, coverageFreezeAllowe
 
     return withVisitSummary({
       smsSummary: frozen.smsSummary, frozen, wateringFreeze, reportToken: token, warnings, persisted: true,
+      ...(wateringNoClaim ? { wateringNoClaim } : {}),
       ...(techParagraphFreeze ? { techParagraphFreeze } : {}),
       ...factsResult(reportFactsFreeze),
     }, visitSummaryFreeze);

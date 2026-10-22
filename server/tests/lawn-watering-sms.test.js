@@ -477,3 +477,133 @@ describe('completion route wiring', () => {
     expect(closure).toContain('mergeNotes: mergeRecordNotesKeys');
   });
 });
+
+// GATE_LAWN_WATERING_EVERY_VISIT (owner 2026-10-22: "for all combinations, a text goes out, but the text is accurate").
+describe('every lawn visit gets a watering text or an office alert', () => {
+  const { composeAdminAlert } = require('../services/admin-alert-compose');
+  const ENV_KEYS = ['GATE_LAWN_WATERING_SMS', 'GATE_LAWN_WATERING_RULE', 'GATE_LAWN_WATERING_EVERY_VISIT'];
+  let saved;
+  beforeEach(() => {
+    saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
+    process.env.GATE_LAWN_WATERING_SMS = 'true';
+    process.env.GATE_LAWN_WATERING_RULE = 'true';
+    process.env.GATE_LAWN_WATERING_EVERY_VISIT = 'true';
+    jest.clearAllMocks();
+  });
+  afterEach(() => {
+    for (const k of ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k];
+    }
+  });
+
+  const NONE = { state: 'none', lines: ['No watering change from today’s treatment.'] };
+  const LONG_NAME = 'LESCO T-Storm Flowable Thiophanate-Methyl 46.2 Systemic Liquid Fungicide';
+
+  function harness({ notes = {}, noClaim = null } = {}) {
+    const sendCustomerMessage = jest.fn(async () => ({ sent: true }));
+    const getTemplate = jest.fn(async (key, vars) => `Watering after today's visit: ${vars.watering_lines}`);
+    const mergeNotes = jest.fn(async () => {});
+    // The real composer: an alert that breaks the notification rules throws here.
+    const raiseAdminAlert = jest.fn(async (category, spec) => ({ id: 'n-1', composed: composeAdminAlert(spec) }));
+    const state = {
+      record: { id: 'rec-1', structured_notes: {} },
+      svc: { id: 'svc-1', customer_id: 'cust-1', cust_phone: '+19415550100' },
+      notes,
+      isBackfill: false,
+      deliveryMode: 'auto_send',
+      internalOnly: false,
+      completionTextRequested: true,
+      noClaim,
+    };
+    const deps = { db: {}, sendCustomerMessage, getTemplate, mergeNotes, raiseAdminAlert, throwIfDeliveryUnverified: (r) => r };
+    return { state, deps, sendCustomerMessage, mergeNotes, raiseAdminAlert };
+  }
+
+  test('the plan sends a "no watering change" visit only under the gate', () => {
+    expect(lawnWateringSmsPlan(planArgs({ instruction: NONE, everyVisit: true }))).toMatchObject({ send: true });
+    expect(lawnWateringSmsPlan(planArgs({ instruction: NONE }))).toEqual({ send: false, reason: 'no_instruction' });
+  });
+
+  test('a frozen "none" instruction goes out as its own text', async () => {
+    const h = harness({ notes: { lawnWateringFreeze: { wateringInstruction: { ...NONE, completedAt: new Date().toISOString() } } } });
+    expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'sent' });
+    expect(h.sendCustomerMessage.mock.calls[0][0].body).toBe("Watering after today's visit: No watering change from today's treatment.");
+  });
+
+  test.each([
+    ['unruled_product', [LONG_NAME], /T-Storm.*has no watering rule/],
+    ['water_in_conflict', ['Dylox 6.2 G Granular Insecticide', 'LESCO Three-Way Selective Herbicide'], /Dylox.*and LESCO Three-Way.*need opposite watering/],
+    ['same_day_too_late', ['Dylox 6.2 G Granular Insecticide'], /Dylox.*must be watered in today/],
+  ])('no instruction (%s): one marker, one office alert that meets the notification rules', async (reason, products, why) => {
+    const h = harness({ noClaim: { reason, products } });
+    expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'alerted_no_instruction' });
+    expect(h.sendCustomerMessage).not.toHaveBeenCalled();
+    expect(h.mergeNotes).toHaveBeenCalledWith('rec-1', { lawnWateringSmsStatus: 'skipped_no_instruction', lawnWateringNoClaimReason: reason });
+    expect(h.raiseAdminAlert).toHaveBeenCalledTimes(1);
+    const [category, spec, opts] = h.raiseAdminAlert.mock.calls[0];
+    expect(category).toBe('service');
+    expect(spec).toMatchObject({ area: 'Comms', severity: 'needs-you', subject: { type: 'visit', id: 'svc-1' } });
+    expect(spec.why).toMatch(why);
+    expect(spec.why.length).toBeLessThanOrEqual(110);
+    expect(opts).toMatchObject({ dedupeKey: 'lawn-watering-no-instruction:rec-1', metadata: { reason, products } });
+    expect(opts.detail).toContain(products[0]);
+  });
+
+  test('a visit that logged no product, or had no text due, raises nothing', async () => {
+    const empty = harness({ noClaim: { reason: 'no_products', products: [] } });
+    expect(await sendLawnWateringSms(empty.state, empty.deps)).toEqual({ status: 'skip_no_instruction' });
+    const noPhone = harness({ noClaim: { reason: 'unruled_product', products: ['X'] } });
+    noPhone.state.svc.cust_phone = null;
+    expect(await sendLawnWateringSms(noPhone.state, noPhone.deps)).toEqual({ status: 'skip_no_phone' });
+    for (const h of [empty, noPhone]) {
+      expect(h.raiseAdminAlert).not.toHaveBeenCalled();
+      expect(h.mergeNotes).not.toHaveBeenCalled();
+    }
+  });
+
+  test('gate off: no alert and a "none" instruction still sends nothing', async () => {
+    delete process.env.GATE_LAWN_WATERING_EVERY_VISIT;
+    const h = harness({ noClaim: { reason: 'unruled_product', products: ['X'] } });
+    expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'skip_no_instruction' });
+    expect(h.raiseAdminAlert).not.toHaveBeenCalled();
+  });
+});
+
+describe('the no-instruction alert is on record before the visit is marked handled', () => {
+  const saved = Object.fromEntries(['GATE_LAWN_WATERING_SMS', 'GATE_LAWN_WATERING_RULE', 'GATE_LAWN_WATERING_EVERY_VISIT'].map((k) => [k, process.env[k]]));
+  beforeEach(() => {
+    process.env.GATE_LAWN_WATERING_SMS = 'true';
+    process.env.GATE_LAWN_WATERING_RULE = 'true';
+    process.env.GATE_LAWN_WATERING_EVERY_VISIT = 'true';
+  });
+  afterAll(() => {
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  });
+  const state = () => ({
+    record: { id: 'rec-2', structured_notes: {} },
+    svc: { id: 'svc-2', customer_id: 'cust-2', cust_phone: '+19415550100' },
+    notes: {},
+    deliveryMode: 'auto_send',
+    completionTextRequested: true,
+    noClaim: { reason: 'unruled_product', products: ['Medallion SC'] },
+  });
+
+  test.each([
+    ['returns null', async () => null],
+    ['throws', async () => { throw new Error('insert failed'); }],
+  ])('an alert that %s leaves the visit unmarked, so a retry raises it', async (_, raiseAdminAlert) => {
+    const mergeNotes = jest.fn(async () => {});
+    const out = await sendLawnWateringSms(state(), { mergeNotes, raiseAdminAlert, sendCustomerMessage: jest.fn(), getTemplate: jest.fn() });
+    expect(out).toEqual({ status: 'skip_no_instruction' });
+    expect(mergeNotes).not.toHaveBeenCalled();
+  });
+
+  test('the marker follows a recorded alert', async () => {
+    const calls = [];
+    const raiseAdminAlert = jest.fn(async () => { calls.push('alert'); return { id: 'n-2' }; });
+    const mergeNotes = jest.fn(async () => { calls.push('marker'); });
+    const out = await sendLawnWateringSms(state(), { mergeNotes, raiseAdminAlert, sendCustomerMessage: jest.fn(), getTemplate: jest.fn() });
+    expect(out).toEqual({ status: 'alerted_no_instruction' });
+    expect(calls).toEqual(['alert', 'marker']);
+  });
+});

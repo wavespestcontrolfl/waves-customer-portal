@@ -1504,6 +1504,40 @@ describe('buildLawnFastWateringPreview', () => {
     expect(preview.sentence).toBeNull();
   });
 
+  test('GATE_LAWN_WATERING_EVERY_VISIT: the targets the completion will log pick the same direction as the report', async () => {
+    process.env.GATE_LAWN_WATERING_RULE = 'true';
+    const savedEvery = process.env.GATE_LAWN_WATERING_EVERY_VISIT;
+    process.env.GATE_LAWN_WATERING_EVERY_VISIT = 'true';
+    try {
+      const split = {
+        ...herbicide,
+        name: 'Split Insecticide',
+        category: 'insecticide',
+        post_application_watering: {
+          by_target: [
+            { match: ['webworm'], mode: 'hold', hold_hours: 24 },
+            { match: ['grub'], mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24 },
+          ],
+          source: 'label',
+        },
+      };
+      const knex = knexFor([split]);
+      const grubs = await buildLawnFastWateringPreview({ serviceId: VISIT, productIds: [split.id], targets: { [split.id]: ['White grubs'] }, knex, now });
+      const report = await reportData.buildReportWateringInstruction({
+        products: [{ product_name: split.name, approved_report_product_facts: reportData.approvedReportProductFacts(split), targets: ['White grubs'] }],
+        service: { customer_id: 'cust-1' }, completionTime: now, lawnAssessment: null, knex, forCompletion: true,
+      });
+      expect(grubs.state).toBe('water_in');
+      expect(grubs.lines).toEqual(reportData.buildWateringBanner(report, null).lines);
+      const none = await buildLawnFastWateringPreview({ serviceId: VISIT, productIds: [split.id], knex, now });
+      expect(none.state).toBe('hold');
+      expect(await buildLawnFastWateringPreview({ serviceId: VISIT, productIds: [split.id], targets: { [split.id]: 'grubs' }, knex, now }))
+        .toEqual({ ok: false, reason: 'invalid_targets' });
+    } finally {
+      if (savedEvery === undefined) delete process.env.GATE_LAWN_WATERING_EVERY_VISIT; else process.env.GATE_LAWN_WATERING_EVERY_VISIT = savedEvery;
+    }
+  });
+
   test('an unknown product id is an unknown rule, so no claim', async () => {
     process.env.GATE_LAWN_WATERING_RULE = 'true';
     const preview = await buildLawnFastWateringPreview({ serviceId: VISIT, productIds: [P_HERB, P_MISSING], knex: knexFor([herbicide]), now });

@@ -204,6 +204,20 @@ describe('Acelepryn caterpillar hold reaches the customer instruction', () => {
     expect(instruction.mowHold.line).toMatch(/^Mowing: hold off until .*, 1 day after today's treatment\.$/);
   });
 
+  test('a target-only catalog rule (GATE_LAWN_WATERING_EVERY_VISIT data) still takes the caterpillar hold, entries kept', () => {
+    const { validateRule } = require('../services/service-report/lawn-watering-rule');
+    const targetOnly = validateRule({
+      by_target: [{ match: ['caterpillar'], mode: 'hold', hold_hours: 24 }, { match: ['grub'], mode: 'water_in' }],
+      source: 'owner',
+    }).rule;
+    const facts = withApplicationHold({ ...approvedReportProductFacts(acelepryn), wateringRule: targetOnly }, { hours: 24, targets: ['caterpillars'] });
+    expect(facts.wateringRule).toMatchObject({ mode: 'hold', hold_hours: 24, source: 'label', by_target: targetOnly.by_target });
+    expect(facts.mowHoldDays).toBe(1);
+    // A product-wide catalog rule stands as stored.
+    const ruled = { ...approvedReportProductFacts(acelepryn), wateringRule: { mode: 'none', source: 'owner' } };
+    expect(withApplicationHold(ruled, { hours: 24, targets: ['caterpillars'] })).toBe(ruled);
+  });
+
   test('a grub use (target says grubs) or a row with no gate is unchanged, so the water-in is not contradicted', () => {
     const base = approvedReportProductFacts(acelepryn);
     expect(withApplicationHold(base, { hours: 24, targets: ['White grubs'] })).toBe(base);
