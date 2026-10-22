@@ -163,7 +163,7 @@ jest.mock('../services/short-url', () => ({
   invoiceShortCodePrefix: jest.fn(() => 'wpc'),
   shortLinkBaseUrl: () => 'https://wavespest.co',
 }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: () => true, gates: {}, logGateStatus: jest.fn() }));
+jest.mock('../config/feature-gates', () => ({ reviewAskAfterReportLive: () => false, isEnabled: () => true, gates: {}, logGateStatus: jest.fn() }));
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ messages: { create: jest.fn() } })));
 
 const express = require('express');

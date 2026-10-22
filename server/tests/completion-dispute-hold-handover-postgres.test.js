@@ -55,7 +55,7 @@ jest.mock('../services/tech-visit-notifications', () => ({ notifyTechVisitChange
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(), loadTemplateByKey: jest.fn(async () => null), activeSuppressionFor: jest.fn(async () => null),
 }));
-jest.mock('../services/review-request', () => ({ enrollPostService: jest.fn(async () => ({ started: true })), completionReviewDelay: jest.fn(() => undefined) }));
+jest.mock('../services/review-request', () => ({ reportTextAnchorForRecord: jest.fn(async () => null), reportTextAnchorForVisit: jest.fn(async () => null), enrollPostService: jest.fn(async () => ({ started: true })), completionReviewDelay: jest.fn(() => undefined) }));
 
 const knex = require('knex');
 const { randomUUID } = require('crypto');
