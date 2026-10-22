@@ -196,8 +196,8 @@ const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { geocodeAddressWithStatus } = require('../services/geocoder');
 const { reverseGeocodeCounty, reverseGeocodeLocality } = require('../services/address-validation');
 const { isInServiceAreaCounty } = require('../services/call-triage-flags');
-const { isInServiceAreaBox, isInServiceAreaCoarseBox, servedSouthHillsborough, isExcludedLocality, isExcludedZip } = require('../services/service-area');
-const { isPuntaGordaSharedZip } = require('../services/excluded-localities');
+const { isInServiceAreaBox, isInServiceAreaCoarseBox, servedSouthHillsborough } = require('../services/service-area');
+const { isExcludedLocality, isExcludedZip, isPuntaGordaSharedZip } = require('../services/excluded-localities');
 const { isAssessmentBooking, scopeToAssessmentBookings, ASSESSMENT_SERVICE_KEY } = require('../services/assessment-booking');
 const { isOpenLeadRow } = require('../services/lead-statuses');
 // The Waves Assessment's catalog identity for travel-gap padding — shared by

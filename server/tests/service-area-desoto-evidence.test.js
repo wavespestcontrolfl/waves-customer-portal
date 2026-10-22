@@ -5,10 +5,11 @@
  * lookup. Fictitious data only.
  */
 const fs = require('fs');
+const { isInServiceAreaBox, zipFromAddressText } = require('../services/service-area');
 const {
-  isDesotoLocality, isDesotoZip, isInServiceAreaBox, zipFromAddressText,
+  isDesotoLocality, isDesotoZip,
   isPuntaGordaLocality, isPuntaGordaZip, isExcludedLocality, isExcludedZip,
-} = require('../services/service-area');
+} = require('../services/excluded-localities');
 
 describe('DeSoto locality list', () => {
   test.each(['Arcadia', 'Lake Suzy', 'Ft. Ogden', 'ft ogden', 'Nocatee', 'Brownville', 'Southeast Arcadia'])(

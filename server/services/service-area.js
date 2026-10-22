@@ -52,14 +52,9 @@ const DESOTO_EXCLUSION = Object.freeze({
 
 // Excluded localities (DeSoto County, owner ruling 2026-09-30; Punta Gorda,
 // owner ruling 2026-10-22) live in services/excluded-localities.js, the one
-// list every text-evidence check reads. The DeSoto names are re-exported here
-// for existing callers. Punta Gorda has no coordinate rectangle: city / ZIP
-// text evidence only.
-const {
-  DESOTO_LOCALITIES, DESOTO_ZIPS, PUNTA_GORDA_LOCALITIES, PUNTA_GORDA_ZIPS,
-  isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip,
-  isExcludedLocality, isExcludedZip,
-} = require('./excluded-localities');
+// list every text-evidence check reads; callers import it directly. This file
+// keeps only the coordinate tests. Punta Gorda has no coordinate rectangle:
+// city / ZIP text evidence only.
 
 // Pull a 5-digit ZIP out of free address text ("..., FL 34240, USA",
 // "... Sarasota FL 34240-1234", "... 34240"). The ZIP after the state wins;
@@ -144,9 +139,7 @@ function servedSouthHillsborough(county, address) {
 
 module.exports = {
   isServedSouthHillsboroughTown, servedSouthHillsborough,
-  SERVICE_AREA_BOUNDS, DESOTO_EXCLUSION, DESOTO_LOCALITIES, DESOTO_ZIPS,
-  PUNTA_GORDA_LOCALITIES, PUNTA_GORDA_ZIPS,
-  isInServiceAreaBox, isInServiceAreaCoarseBox, isInDesotoExclusion, isDesotoLocality, isDesotoZip,
-  isPuntaGordaLocality, isPuntaGordaZip, isExcludedLocality, isExcludedZip,
+  SERVICE_AREA_BOUNDS, DESOTO_EXCLUSION,
+  isInServiceAreaBox, isInServiceAreaCoarseBox, isInDesotoExclusion,
   zipFromAddressText,
 };
