@@ -343,6 +343,8 @@ function moneySummary(est = {}) {
 // sentence, so those emails stay byte-identical. A template the migration skipped
 // (custom plain-text body, price block removed, publish race) would otherwise print
 // the average price row without its note.
+const monthlyAverageService = () => require("./estimate-monthly-average");
+
 // Returns the id of the ACTIVE version it validated, or null. The send is then pinned
 // to that exact version (sendDualChannel passes it as versionId), so an admin publish
 // between this check and the send cannot put the average copy into a version without
@@ -362,17 +364,22 @@ async function averageNoteVersionId(templateKey) {
   return supported ? version.id : null;
 }
 
-// { payload, versionId }: versionId is set only when the average was applied.
+// { payload, versionId, averageText }: set only when the average was applied.
+// averageText is the exact copy put in the email (the send-time check compares it).
 async function applyMonthlyAverage(payload, est, templateKey) {
-  const unchanged = { payload, versionId: null };
+  const unchanged = { payload, versionId: null, averageText: null };
   if (!isEnabled("estimateFollowupMonthlyAverage")) return unchanged;
   try {
     const versionId = await averageNoteVersionId(templateKey);
     if (!versionId) return unchanged;
     const fresh = (await db("estimates").where({ id: est.id }).first()) || est;
-    const parts = await require("./estimate-monthly-average").emailAverageParts(fresh);
+    const parts = await monthlyAverageService().emailAverageParts(fresh);
     if (!parts) return unchanged;
-    return { payload: { ...payload, price_summary: parts.priceLine, estimate_average_note: parts.note }, versionId };
+    return {
+      payload: { ...payload, price_summary: parts.priceLine, estimate_average_note: parts.note },
+      versionId,
+      averageText: monthlyAverageService().averageText(parts),
+    };
   } catch (err) {
     logger.warn(`[est-followup] monthly average skipped for estimate ${est?.id}: ${err.message}`);
     return unchanged;
@@ -386,8 +393,55 @@ async function withMonthlyAverage(payload, est, templateKey) {
 // The email spec for sendDualChannel: carries `versionId` only when the average is in
 // the payload; otherwise the very same spec object comes back.
 async function withAverageEmail(email, est) {
-  const { payload, versionId } = await applyMonthlyAverage(email.payload, est, email.templateKey);
-  return versionId ? { ...email, payload, versionId } : email;
+  const { payload, versionId, averageText } = await applyMonthlyAverage(email.payload, est, email.templateKey);
+  return versionId ? { ...email, payload, versionId, averageText } : email;
+}
+
+// Provider-boundary check for an email that carries the average: the estimate row is
+// read again right before the provider request (after the SMS leg and any PDF build),
+// and the send is vetoed unless the same resolver still gives the exact copy in the
+// email. A veto is a definite non-send (providerBoundaryBlocked); a read or resolver
+// failure is a definite non-send the library settles retryable
+// (providerBoundaryCheckFailed). Either way the caller releases the stage and the next
+// sweep sends fresh copy.
+function averageBoundaryCheck(estimateId, expectedText) {
+  return async () => {
+    let current;
+    try {
+      const row = await db("estimates").where({ id: estimateId }).first();
+      current = row ? monthlyAverageService().averageText(await monthlyAverageService().emailAverageParts(row)) : null;
+    } catch (err) {
+      const unavailable = new Error(`estimate ${estimateId} monthly average check unavailable: ${err.message}`);
+      unavailable.providerBoundaryCheckFailed = true;
+      unavailable.cause = err;
+      throw unavailable;
+    }
+    if (current !== expectedText) {
+      const veto = new Error(`estimate ${estimateId} not sent: monthly_average_changed`);
+      veto.providerBoundaryBlocked = true;
+      veto.reason = "monthly_average_changed";
+      throw veto;
+    }
+    return { ok: true };
+  };
+}
+
+// sendTemplate({ withProviderHandoff }) for an email with the average, composed with the
+// PDF fence when the attachment gate built one (both checks run, the PDF fence first).
+function averageProviderHandoff(estimateId, expectedText, pdfHandoff = null) {
+  const check = averageBoundaryCheck(estimateId, expectedText);
+  if (!pdfHandoff) {
+    return async (dispatch) => {
+      await dispatch(undefined, check);
+      return { ok: true };
+    };
+  }
+  return (dispatch) => pdfHandoff(async (database, pdfCheck) => {
+    await dispatch(database, async (args) => {
+      if (pdfCheck) await pdfCheck(args);
+      return check();
+    });
+  });
 }
 
 function estimateEmailPayload(est, firstName, estimateUrl, extra = {}) {
@@ -618,8 +672,11 @@ async function sendDualChannel(est, { sms, email }) {
         to: est.customer_email,
         payload: await withFollowupPropertyRow(est, { ...(email.payload || {}), ...pdfCopy.payload }),
         ...(pdfCopy.attachments.length ? { attachments: pdfCopy.attachments } : {}),
-        // The fence rides every prepared send, with the file or without it.
-        ...(pdfCopy.withProviderHandoff ? { withProviderHandoff: pdfCopy.withProviderHandoff } : {}),
+        // The fence rides every prepared send, with the file or without it. With the
+        // monthly average the send-time average check rides too (composed with it).
+        ...(email.averageText
+          ? { withProviderHandoff: averageProviderHandoff(est.id, email.averageText, pdfCopy.withProviderHandoff) }
+          : (pdfCopy.withProviderHandoff ? { withProviderHandoff: pdfCopy.withProviderHandoff } : {})),
         recipientType: est.customer_id ? "customer" : "lead",
         recipientId: est.customer_id || null,
         triggerEventId: idempotencyKey,
@@ -633,6 +690,10 @@ async function sendDualChannel(est, { sms, email }) {
       if (result?.blocked) {
         logger.warn(
           `[est-followup] Email suppressed for estimate ${est.id} (${email.stage}): ${result.reason || "blocked"}`,
+        );
+      } else if (result?.aborted) {
+        logger.warn(
+          `[est-followup] Email not sent for estimate ${est.id} (${email.stage}): ${result.reason || "aborted"} — the next sweep retries`,
         );
       } else if (result?.deduped) {
         logger.info(

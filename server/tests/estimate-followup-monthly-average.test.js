@@ -35,6 +35,10 @@ jest.mock('../services/estimate-deposits', () => ({
   assessDepositFollowUpEligibility: jest.fn(async () => ({ eligible: false })),
   DEPOSIT_FOLLOWUP_WINDOW: { minAgeHours: 2, maxAgeHours: 72 },
 }));
+const mockPdf = { copy: { attachments: [], payload: {} } };
+jest.mock('../services/estimate-email-pdf', () => ({
+  openEstimateEmailPdf: jest.fn(async () => mockPdf.copy),
+}));
 const mockBilling = { ctx: { billsPerApplication: true, livePricing: null } };
 jest.mock('../services/estimate-proposal-billing', () => ({
   resolveProposalBillingContext: jest.fn(async () => mockBilling.ctx),
@@ -118,6 +122,7 @@ beforeEach(() => {
   mockGates.followup = true;
   mockGates.base = true;
   mockBilling.ctx = { billsPerApplication: true, livePricing: null };
+  mockPdf.copy = { attachments: [], payload: {} };
   mockTemplate.activeVersion = { id: 'ver-1', blocks: NOTE_BLOCKS, text_body: null };
   candidate = row();
   freshOverride = undefined;
@@ -318,5 +323,101 @@ describe('the send is pinned to the template version whose tokens were checked',
     EmailTemplates.sendTemplate.mockClear();
     await _private.sendDualChannel(row(), { sms: null, email: pinned });
     expect(pinnedSend(EmailTemplates.sendTemplate.mock.calls)).toMatchObject({ versionId: 'ver-1' });
+  });
+});
+
+describe('send-time check: the average is re-read at the provider boundary', () => {
+  const KEY = 'estimate.unviewed_followup';
+  const pinned = async () => {
+    freshOverride = row();
+    return _private.withAverageEmail(
+      { templateKey: KEY, stage: 'unviewed', payload: _private.estimateEmailPayload(row(), 'Taylor', 'https://x.test') },
+      row(),
+    );
+  };
+  // Hands the library's dispatch to the handoff the follow-up installed and returns the check it was given.
+  const checkOf = async (handoff) => {
+    let check;
+    const verdict = await handoff(async (_database, providerCheck) => { check = providerCheck; });
+    expect(verdict).toEqual({ ok: true });
+    return check;
+  };
+  const installedHandoff = async (email) => {
+    EmailTemplates.sendTemplate.mockClear();
+    await _private.sendDualChannel(row(), { sms: null, email });
+    return EmailTemplates.sendTemplate.mock.calls[0][0].withProviderHandoff;
+  };
+
+  test('the email spec records the exact copy it carries; an unpinned email installs no handoff', async () => {
+    const email = await pinned();
+    expect(email.averageText).toBe('$94.00 per application · $31.33 a month\nAveraged over the year. You pay after each application.');
+    mockGates.followup = false;
+    const plain = { templateKey: KEY, stage: 'unviewed', payload: { first_name: 'T' } };
+    expect(await installedHandoff(await _private.withAverageEmail(plain, row()))).toBeUndefined();
+  });
+
+  test('unchanged row: the check passes (PDF gate off)', async () => {
+    const check = await checkOf(await installedHandoff(await pinned()));
+    freshOverride = row();
+    await expect(check({ database: db })).resolves.toEqual({ ok: true });
+  });
+
+  test('a price edit between build and handoff vetoes the send (PDF gate off)', async () => {
+    const check = await checkOf(await installedHandoff(await pinned()));
+    freshOverride = row({ estimate_data: { sendSnapshot: { pricingBundle: { frequencies: [{ key: 'quarterly', perTreatment: 99, visitsPerYear: 4, monthly: 33, annual: 396 }] } } }, monthly_total: '33.00' });
+    await expect(check({ database: db })).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'monthly_average_changed' });
+  });
+
+  test('the estimate turning ineligible (accepted) or disappearing vetoes it', async () => {
+    const check = await checkOf(await installedHandoff(await pinned()));
+    freshOverride = row({ status: 'accepted' });
+    await expect(check()).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'monthly_average_changed' });
+    freshOverride = null;
+    await expect(check()).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'monthly_average_changed' });
+  });
+
+  test('a read failure is a retryable check failure, not a veto', async () => {
+    const check = await checkOf(await installedHandoff(await pinned()));
+    db.mockImplementationOnce(() => { throw new Error('db down'); });
+    await expect(check()).rejects.toMatchObject({ providerBoundaryCheckFailed: true });
+    freshOverride = row();
+    await expect(check()).resolves.toEqual({ ok: true }); // the next sweep's check passes again
+  });
+
+  test('with the PDF fence both run, the PDF fence first; a PDF veto or a price edit each stops the send', async () => {
+    const pdfCheck = jest.fn(async () => ({ ok: true }));
+    const pdfHandoff = jest.fn(async (dispatch) => { await dispatch(undefined, pdfCheck); return { ok: true }; });
+    mockPdf.copy = { attachments: [], payload: {}, withProviderHandoff: pdfHandoff };
+    const check = await checkOf(await installedHandoff(await pinned()));
+    expect(pdfHandoff).toHaveBeenCalledTimes(1);
+
+    freshOverride = row();
+    await expect(check()).resolves.toEqual({ ok: true });
+    expect(pdfCheck).toHaveBeenCalledTimes(1);
+
+    pdfCheck.mockRejectedValueOnce(Object.assign(new Error('pdf veto'), { providerBoundaryBlocked: true, reason: 'estimate_changed_since_render' }));
+    await expect(check()).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'estimate_changed_since_render' });
+
+    freshOverride = row({ monthly_total: '40.00' });
+    await expect(check()).rejects.toMatchObject({ reason: 'monthly_average_changed' });
+  });
+
+  test('a PDF-only email (no average) keeps the PDF handoff untouched', async () => {
+    const pdfHandoff = jest.fn(async (dispatch) => { await dispatch(); return { ok: true }; });
+    mockPdf.copy = { attachments: [], payload: {}, withProviderHandoff: pdfHandoff };
+    mockGates.followup = false;
+    const email = { templateKey: KEY, stage: 'unviewed', payload: { first_name: 'T' } };
+    expect(await installedHandoff(await _private.withAverageEmail(email, row()))).toBe(pdfHandoff);
+  });
+
+  test('a vetoed send (no text went out) takes the existing abort path: counters stay, the stage claim is released', async () => {
+    require('../routes/admin-sms-templates').getTemplate.mockResolvedValueOnce(null);
+    stageWanted = 'unviewed';
+    candidate = row();
+    EmailTemplates.sendTemplate.mockResolvedValueOnce({ sent: false, aborted: true, boundaryBlocked: true, reason: 'provider_boundary_blocked' });
+    await EstimateFollowUp.checkAll();
+    const updates = db.mock.results.map((r) => r.value).flatMap((b) => b?.update?.mock?.calls || []).map((c) => c[0]);
+    expect(updates.some((u) => u && u.follow_up_count)).toBe(false);
+    expect(updates).toContainEqual({ followup_unviewed_sent: false });
   });
 });
