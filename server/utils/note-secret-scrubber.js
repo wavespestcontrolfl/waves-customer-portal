@@ -86,9 +86,9 @@ function looksLikeBasicCredential(header, token) {
 }
 // An environment-style assignment whose NAME says it is a secret (DB_PASSWORD=x,
 // STRIPE_SECRET_KEY=x, API_TOKEN=x). A fixed config format, not a prose label:
-// upper-case name, '='. An unquoted value runs to the end of the line or an inline
+// upper-case name, '=' (spaces around it allowed). An unquoted value runs to the end of the line or an inline
 // comment (" #"), as dotenv reads it: DB_PASSWORD=hunter 22 (Codex #6375 r2, r13).
-const ENV_SECRET_RE = /\b((?:[A-Z][A-Z0-9_]*)?(?:PASSWORD|PASSWD|PASS|SECRET|TOKEN|API_?KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]*)=(\\"(?:[^\\\n]|\\(?!"))*\\"|\\'(?:[^\\\n]|\\(?!'))*\\'|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+(?:[ \t]+(?!#)\S+)*)/g;
+const ENV_SECRET_RE = /\b((?:[A-Z][A-Z0-9_]*)?(?:PASSWORD|PASSWD|PASS|SECRET|TOKEN|API_?KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]*)([ \t]*=[ \t]*)(\\"(?:[^\\\n]|\\(?!"))*\\"|\\'(?:[^\\\n]|\\(?!'))*\\'|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+(?:[ \t]+(?!#)\S+)*)/g;
 // Structural credential assignments in a config or header format (Codex #6375 r7):
 // "db.password: hunter22", "DB_PASSWORD = hunter22", "X-API-Key: abc123xyz",
 // "Authorization: Token abc123xyz". The KEY must end in a credential word (names
@@ -244,10 +244,10 @@ function scrubNoteText(input) {
   text = text.replace(JWT_RE, swap)
     .replace(BEARER_RE, (match, header, token) => (looksLikeBearerToken(header, token) ? `${header || ''}${swap()}` : match))
     .replace(BASIC_RE, (match, header, scheme, token) => (looksLikeBasicCredential(header, token) ? `${header || ''}${swap()}` : match));
-  text = text.replace(ENV_SECRET_RE, (match, name, value) => {
+  text = text.replace(ENV_SECRET_RE, (match, name, sep, value) => {
     if (isAlreadyRemoved(value)) return match;
     removed += 1;
-    return `${name}=${REMOVED}`;
+    return `${name}${sep}${REMOVED}`;
   });
   text = text.replace(AUTH_HEADER_RE, (match, head, scheme, value) => (isAlreadyRemoved(scheme) || isAlreadyRemoved(value) ? match : `${head}${swap()}`));
   text = text.replace(KEY_ASSIGN_RE, (match, quote, key, sep, value) => {
