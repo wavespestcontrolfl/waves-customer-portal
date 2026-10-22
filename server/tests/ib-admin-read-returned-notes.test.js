@@ -663,6 +663,19 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     expect(scrubNote(text).text).toBe(text);
   });
 
+  test.each([
+    ['password: "hunter22', 'password: "[removed]"'],
+    ['password: "first\nsecond" after', 'password: "[removed]" after'],
+    ["token: 'a b\nc' end", "token: '[removed]' end"],
+    ['DB_PASSWORD="hunter 22', 'DB_PASSWORD=[removed]'],
+    ['DB_PASSWORD="first\nsecond" tail', 'DB_PASSWORD=[removed] tail'],
+    ['x: "not a credential\nline"', 'x: "not a credential\nline"'],
+  ])('an unterminated or multi-line quoted credential value fails closed: %j (r18 audit P0)', async (note, expected) => {
+    expect(scrubNote(note).text).toBe(expected);
+    const result = await read(ENTRY, { id: 1, notes: note });
+    expect(result.data.notes).toBe(expected);
+  });
+
   test('owner-ruled prose and access words stay (r18)', () => {
     const note = 'the password is in the lockbox. PIN: 8842. lockbox passcode: 4321. gate code: 1234.';
     expect(scrubNote(note)).toEqual({ text: note, removed: 0 });
@@ -701,6 +714,8 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
       'password: abcd\n'.repeat(1300),
       `{"password":[${'"a]",'.repeat(3000)}"z"]}`,
       'password: ['.repeat(3000),
+      'password: "'.repeat(3000),
+      `DB_PASSWORD="${'a '.repeat(9000)}`,
     ];
     for (const input of inputs) {
       const started = Date.now();

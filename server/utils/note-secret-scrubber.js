@@ -112,7 +112,7 @@ const AUTH_HEADER_RE = /(\bauthorization[ \t]*[:=][ \t]*)([A-Za-z][A-Za-z0-9_-]*
 // ("id":1,"password":"x") cannot swallow the next one (pre-push audit, r9).
 // A double-serialized blob keeps its quotes escaped ({\"password\":\"hunter22\"}); the key and
 // value quotes may be a backslash plus a quote, and the output keeps that shape (Codex #6375 r11).
-const KEY_ASSIGN_RE = /(?<![A-Za-z0-9_.-])(\\?["']?)((?:api[ \t]+)?[A-Za-z][A-Za-z0-9_.-]*)\1([ \t]*[=:][ \t]*)(\\"(?:[^\\\n]|\\(?!"))*\\"|\\'(?:[^\\\n]|\\(?!'))*\\'|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|(?:\[removed\]|[^\s,;}\]"'])+)/gi;
+const KEY_ASSIGN_RE = /(?<![A-Za-z0-9_.-])(\\?["']?)((?:api[ \t]+)?[A-Za-z][A-Za-z0-9_.-]*)\1([ \t]*[=:][ \t]*)(\\"(?:[^\\\n]|\\(?!"))*\\"|\\'(?:[^\\\n]|\\(?!'))*\\'|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|\\?["']|(?:\[removed\]|[^\s,;}\]"'])+)/gi;
 // The credential vocabulary of a fixed-format key (Codex #6375 r17). It is the
 // shared classifier's list less the words that name an ACCESS instruction the
 // owner wants returned (ruling 2026-10-13: pin, passcode) or that are ordinary
@@ -275,7 +275,8 @@ function scrubEnvAssignments(text) {
     if (whole === '') { pattern.lastIndex += 1; continue; }
     if (isAlreadyRemoved(value)) continue;
     let end = match.index + whole.length;
-    if (!/^["'\\]/.test(value)) end = envValueEnd(text, end);
+    if (isDanglingQuote(value)) end = quotedValueEnd(text, end - value.length, openerOf(value));
+    else if (!/^["'\\]/.test(value)) end = envValueEnd(text, end);
     count += 1;
     out += `${text.slice(last, match.index)}${name}${sep}${REMOVED}`;
     last = end;
@@ -328,6 +329,24 @@ function structuredValueEnd(text, start) {
   return text.length;
 }
 
+// A quoted value that is not closed on its own line ("hunter22 with no end quote, or one that runs over
+// several lines) is read across newlines up to its closing quote, or to the end of the text when there
+// is none: an explicitly labelled credential fails closed (Codex #6375 r18 audit).
+const COMPLETE_QUOTED_RE = /^(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\\"(?:[^\\]|\\(?!"))*\\"|\\'(?:[^\\]|\\(?!'))*\\')$/;
+function quotedValueEnd(text, valueStart, opener) {
+  const quote = opener.slice(-1);
+  const escaped = opener.length === 2;
+  for (let i = valueStart + opener.length; i < text.length; i += 1) {
+    if (text[i] === '\\') {
+      if (escaped && text[i + 1] === quote) return i + 2;
+      i += 1;
+    } else if (!escaped && text[i] === quote) return i + 1;
+  }
+  return text.length;
+}
+const openerOf = value => (value.match(/^\\?["']/) || [''])[0];
+const isDanglingQuote = value => Boolean(openerOf(value)) && !COMPLETE_QUOTED_RE.test(value);
+
 // A structural credential assignment (db.password: x, X-API-Key: x). A quoted value ends at its
 // closing quote. An unquoted value that is followed by a space is a passphrase: it is extended by the
 // same linear scan as the env-style values, to the end of the line or an inline " #" comment, stopping
@@ -345,7 +364,8 @@ function scrubKeyAssignments(text) {
     if (isAlreadyRemoved(value) || !isAssignmentSecretKey(key)) continue;
     const valueQuote = (value.match(/^\\?["']/) || [''])[0];
     let end = match.index + whole.length;
-    if (!valueQuote && /^[[{]/.test(value) && !value.startsWith(REMOVED)) end = structuredValueEnd(text, end - value.length);
+    if (isDanglingQuote(value)) end = quotedValueEnd(text, end - value.length, valueQuote);
+    else if (!valueQuote && /^[[{]/.test(value) && !value.startsWith(REMOVED)) end = structuredValueEnd(text, end - value.length);
     else if (!valueQuote && /[ \t]/.test(text[end] || '')) end = envValueEnd(text, end);
     count += 1;
     out += `${text.slice(last, match.index)}${quote}${key}${quote}${sep}${valueQuote}${REMOVED}${valueQuote}`;
