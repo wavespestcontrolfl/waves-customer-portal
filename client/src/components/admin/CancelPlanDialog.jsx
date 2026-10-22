@@ -297,14 +297,18 @@ export default function CancelPlanDialog({ customer, onClose, onDone, layer }) {
                 <Radio
                   id="cancel-plan-effective-now"
                   name="cancel-plan-effective"
-                  label="Now — pull every visit and record a refund of the unused prepaid value"
+                  label={prepay.refundWindowPassed || (prepay.refund && prepay.refund.reason === "past_90_day_window")
+                    ? "Now — pull every visit (no refund: prepaid more than 90 days ago)"
+                    : "Now — pull every visit and record a refund of the unused prepaid value"}
                   checked={effectiveDate === "now"}
                   onChange={() => setEffectiveDate("now")}
                   disabled={running}
                 />
                 {effectiveDate === "now" && prepay.refund && (
                   <div className="ml-6 text-14 text-ink-secondary">
-                    {prepay.refund.needsManualCalc
+                    {prepay.refund.reason === "past_90_day_window"
+                      ? "No refund — this plan started more than 90 days ago (owner rule: prepaid visits are refunded only within 90 days)."
+                      : prepay.refund.needsManualCalc
                       ? "Refund amount needs a manual calculation (the term has no included-visit count). An office task will say so."
                       : `${money(prepay.refund.amount)} = ${money(prepay.refund.prepaidAmount)} ÷ ${prepay.refund.includedVisits} visits × ${prepay.refund.remainingVisits} remaining. Recorded on the case and opened as an office task — not refunded automatically.`}
                   </div>
@@ -434,7 +438,7 @@ export default function CancelPlanDialog({ customer, onClose, onDone, layer }) {
               )}
               {result.lateFeeWaived && <Fact label="Scheduled-visit fee">waived</Fact>}
               {result.refund && (
-                <Fact label="Refund recorded">{result.refund.needsManualCalc ? "needs manual calculation (office task)" : `${money(result.refund.amount)} (office task; not refunded automatically)`}</Fact>
+                <Fact label="Refund recorded">{result.refund.reason === "past_90_day_window" ? "none — more than 90 days after the plan started" : result.refund.needsManualCalc ? "needs manual calculation (office task)" : `${money(result.refund.amount)} (office task; not refunded automatically)`}</Fact>
               )}
               <Fact label="Customer told">
                 {result.confirmationRequested

@@ -1118,7 +1118,9 @@ function confirmationDisplayParams(toolName, params, preview) {
       ...(prepay ? {
         prepay: prepay.disposition === 'end_at_term'
           ? `ends at term ${prepay.termEnd}; no renewal`
-          : `ended now — refund ${prepay.refund && !prepay.refund.needsManualCalc ? `$${prepay.refund.amount.toFixed(2)}` : 'needs manual calc'} recorded as an office task (not automatic)`,
+          : prepay.refund && prepay.refund.reason === 'past_90_day_window'
+            ? 'ended now — no refund (prepaid more than 90 days ago; owner rule)'
+            : `ended now — refund ${prepay.refund && !prepay.refund.needsManualCalc ? `$${prepay.refund.amount.toFixed(2)}` : 'needs manual calc'} recorded as an office task (not automatic)`,
       } : {}),
       // Per-application repricing of surviving visits (scoped cancels on the
       // per-visit billing lane) — real charge changes the operator approves.
