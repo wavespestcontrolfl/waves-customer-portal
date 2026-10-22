@@ -14,17 +14,21 @@ const ms = (value) => (value ? new Date(value).getTime() : null);
 const cents = (value) => Math.round((Number(value) || 0) * 100);
 const has = (expected, key) => Object.prototype.hasOwnProperty.call(expected, key) && expected[key] !== undefined;
 
-// True when the invoice row no longer reads as the card showed it.
+// Each pinned key: how the row reads it and how the card's value is normalized, so the two compare as equal strings.
+const VERSION_FIELDS = {
+  status: [(row) => String(row.status || ''), (v) => String(v || '')],
+  updatedAt: [(row) => ms(row.updated_at), (v) => v ?? null],
+  total: [(row) => cents(row.total), (v) => cents(v)],
+  creditApplied: [(row) => cents(row.credit_applied), (v) => cents(v)],
+  paymentIntentId: [(row) => row.stripe_payment_intent_id || null, (v) => v || null],
+  archived: [(row) => Boolean(row.archived_at), (v) => Boolean(v)],
+  payerId: [(row) => String(row.payer_id || ''), (v) => String(v || '')],
+};
+
+// True when the invoice row no longer reads as the card showed it (only the keys the card named are compared).
 function invoiceVersionChanged(row, expected) {
   if (!expected) return false;
-  if (has(expected, 'status') && String(row.status || '') !== String(expected.status || '')) return true;
-  if (has(expected, 'updatedAt') && ms(row.updated_at) !== (expected.updatedAt ?? null)) return true;
-  if (has(expected, 'total') && cents(row.total) !== cents(expected.total)) return true;
-  if (has(expected, 'creditApplied') && cents(row.credit_applied) !== cents(expected.creditApplied)) return true;
-  if (has(expected, 'paymentIntentId') && (row.stripe_payment_intent_id || null) !== (expected.paymentIntentId || null)) return true;
-  if (has(expected, 'archived') && Boolean(row.archived_at) !== Boolean(expected.archived)) return true;
-  if (has(expected, 'payerId') && String(row.payer_id || '') !== String(expected.payerId || '')) return true;
-  return false;
+  return Object.entries(VERSION_FIELDS).some(([key, [live, pinned]]) => has(expected, key) && live(row) !== pinned(expected[key]));
 }
 
 function previewChangedError(message) {
