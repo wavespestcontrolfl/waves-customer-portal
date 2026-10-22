@@ -822,6 +822,22 @@ function recordIdsAreOnPage(bounded, page) {
   return [...bounded.matchAll(RECORD_ID_GLOBAL_RE)].every(match => onPage.has(match[0].toLowerCase()));
 }
 
+// The words a request may open with before its verb without naming anyone: polite and filler words,
+// record nouns, and the NON_PERSON_NAMES vocabulary. Every other leading word is treated as a
+// possible name, so the page customer keeps direct authority only when the subject is plainly
+// "this customer", "the account", "his phone"... (Codex #6369 r36: allow-list, not one more name pattern).
+const SUBJECT_FILLER = new Set(['please', 'can', 'could', 'would', 'will', 'you', 'hey', 'ok', 'okay', 'now', 'also', 'then', 'and', 'so', 'just', 'go', 'ahead', 'i', 'we', 'lets', 'let', 'us', 'to',
+  'account', 'profile', 'record', 'file', 'card', 'property', 'appointment', 'visit', 'service', 'invoice', 'estimate', 'number', 'cell', 'mobile', 'info', 'information', 'contact', 'gate', 'code', 's']);
+const SUBJECT_END = new Set(['needs', 'need', 'wants', 'want', 'has', 'have', 'is', 'are', 'should', 'would', 'asked', 'asks', 'must', 'got', 'gets']);
+function unknownLeadingSubject(bounded) {
+  const words = normalizeName(targetClause(bounded)).split(' ').filter(Boolean);
+  for (const word of words) {
+    if (ACTION_VERBS.has(word) || SUBJECT_END.has(word)) return false;
+    if (!NON_PERSON_NAMES.has(word) && !SUBJECT_FILLER.has(word)) return true;
+  }
+  return false;
+}
+
 function pageGroundingBlocked(fullPrompt, namedResult, cohort, nameHint, page) {
   const pageCustomerId = page?.customer?.customer_id || page?.ids?.customer_id;
   const bounded = boundedPrompt(fullPrompt);
@@ -835,7 +851,9 @@ function pageGroundingBlocked(fullPrompt, namedResult, cohort, nameHint, page) {
   if (isCompound(bounded, matches) || !recordIdsAreOnPage(bounded, page) || hasUnreadTail(bounded)) return true;
   // A name that resolved to a customer is identity evidence even when namesRequested missed its form
   // ("Alice Jones needs notes cleared"): only the exact page customer keeps the page (Codex #6369 r34).
-  if (!nameHint && !contacts && !place && !matches.length) return false;
+  // A leading word outside the allow-list is identity evidence too (r36).
+  const nameEvidence = nameHint || unknownLeadingSubject(bounded);
+  if (!nameEvidence && !contacts && !place && !matches.length) return false;
   const exact = !cohort && namedResult.complete !== false && !namedResult.multiple && matches.length === 1
     && String(matches[0].id) === String(pageCustomerId) && !contacts && !place;
   return !exact;

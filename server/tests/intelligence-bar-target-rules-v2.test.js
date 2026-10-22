@@ -745,6 +745,15 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(await viewingBob('Jhon Smith needs a new phone')).toBe(false);
     expect(await viewingBob('Jhon needs a new phone')).toBe(false);
     expect(await viewingBob('this customer needs a new phone')).toBe(true);
+    // Allow-list, not a name pattern (r36): any leading word that is not a known non-name word is a name.
+    for (const prompt of ['Jhon Smith account needs a phone update', 'Jhon A Smith needs a new phone', 'Jhon Smith phone 941-555-0150', 'Jhon Smith\'s account needs a phone update']) {
+      expect([prompt, await viewingBob(prompt)]).toEqual([prompt, false]);
+    }
+    for (const prompt of ['update the phone to 941-555-0150', 'please update this customer phone', 'the account needs a new phone', 'his phone needs an update', 'can you update the phone']) {
+      expect([prompt, await viewingBob(prompt)]).toEqual([prompt, true]);
+    }
+    // The page customer's own name in subject position still resolves to the page: direct.
+    expect(await viewingBob('Bob Example account needs a new phone')).toBe(true);
     // A quoted or cut-off name takes the page too; a field's own colon or quoted value does not.
     expect(await viewingBob('update "Jhon Smith" phone')).toBe(false);
     expect(await viewingBob('update this customer phone: Jhon Smith')).toBe(true);
