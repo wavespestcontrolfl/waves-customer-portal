@@ -85,11 +85,13 @@ describe('tree & shrub schema', () => {
     // so the required simplified closeout is untouched and none of it can
     // reach the customer report. Any other detail field on the primary
     // slice is a regression against the 2026-07-21 simplification.
+    // spray_mix_gallons + hedge_linear_ft_serviced: owner 2026-10-21
+    // spray-volume groundwork, same optional + internal shape as bed sqft.
     expect(schema.fields.filter((f) => f.detail).map((f) => f.key).sort()).toEqual([
-      'access_difficulty', 'bed_sqft_serviced', 'palm_count_total',
-      'shrub_density', 'tree_count_total',
+      'access_difficulty', 'bed_sqft_serviced', 'hedge_linear_ft_serviced', 'palm_count_total',
+      'shrub_density', 'spray_mix_gallons', 'tree_count_total',
     ]);
-    for (const key of ['bed_sqft_serviced', 'palm_count_total', 'tree_count_total', 'shrub_density', 'access_difficulty']) {
+    for (const key of ['bed_sqft_serviced', 'palm_count_total', 'tree_count_total', 'shrub_density', 'access_difficulty', 'spray_mix_gallons', 'hedge_linear_ft_serviced']) {
       expect({ key, internal: byKey[key].internal, required: byKey[key].required })
         .toEqual({ key, internal: true, required: false });
     }

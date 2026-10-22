@@ -911,6 +911,12 @@ const PROJECT_TYPES = {
       // silently vanish at the reconcile parse). The client renders unknown
       // types as a plain text input — no client change needed.
       { key: 'bed_sqft_serviced', label: 'Ornamental bed area serviced (sq ft)', type: 'measurement', section: 'Property measurements', detail: true, internal: true, placeholder: 'e.g. 2400' },
+      // Spray mix actually used (owner 2026-10-21): the gallons of finished
+      // mix applied this visit, so the T&S material model can be re-derived
+      // from label carrier volume per 1,000 sq ft of foliage instead of a
+      // per-bed-sqft guess. Optional, internal costing data like bed sqft.
+      { key: 'spray_mix_gallons', label: 'Spray mix used (gallons)', type: 'measurement', section: 'Property measurements', detail: true, internal: true, placeholder: 'e.g. 5' },
+      { key: 'hedge_linear_ft_serviced', label: 'Shrub / hedge line sprayed (linear ft)', type: 'measurement', section: 'Property measurements', detail: true, internal: true, placeholder: 'e.g. 180' },
       { key: 'palm_count_total', label: 'Palms on property', type: 'count', section: 'Property measurements', detail: true, internal: true },
       { key: 'tree_count_total', label: 'Trees on property (non-palm)', type: 'count', section: 'Property measurements', detail: true, internal: true },
       { key: 'shrub_density', label: 'Shrub density', type: 'select', section: 'Property measurements', detail: true, internal: true, options: ['Light', 'Moderate', 'Heavy'] },

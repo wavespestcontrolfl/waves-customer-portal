@@ -3119,6 +3119,11 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // mergeAiAnalyses) — same contract as bedAreaConfidence below.
     treeCountConfidence: ai?._treeCountConfidence,
     estimatedBedAreaSf: ai?.estimatedBedAreaSf,
+    // Shrub/hedge line length the aerial read (owner 2026-10-21): captured
+    // and persisted for the spray-volume material model; NOT a pricing input.
+    estimatedHedgeLinearFt: Number.isFinite(Number(ai?.estimatedHedgeLinearFt)) && Number(ai.estimatedHedgeLinearFt) >= 0
+      ? Number(ai.estimatedHedgeLinearFt)
+      : undefined,
     // Field-level confidence behind the winning bed-area value (stamped by
     // mergeAiAnalyses) — the trust predicate requires it; the blended
     // aiConfidence can be held above the floor by providers that never
@@ -6116,6 +6121,19 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     bedAreaSource: p.bedAreaSource === 'manual' ? 'manual' : p.estimatedBedAreaSf !== undefined && p.estimatedBedAreaSf !== null && p.estimatedBedAreaSf !== ''
       ? 'estimated'
       : undefined,
+    // Hedge / bed linear feet (owner 2026-10-21): the operator's typed value,
+    // else the aerial read. Rides the PROPERTY block only — never
+    // services.treeShrub — so it persists in the stored engineRequest without
+    // touching the price until the spray-volume model is calibrated.
+    hedgeLinearFt: (() => {
+      const typed = Number(p.hedgeLinearFt);
+      if (p.hedgeLinearFt !== undefined && p.hedgeLinearFt !== null && p.hedgeLinearFt !== '' && Number.isFinite(typed) && typed >= 0) return typed;
+      const aerial = Number(p.estimatedHedgeLinearFt);
+      return Number.isFinite(aerial) && aerial >= 0 ? aerial : undefined;
+    })(),
+    hedgeLinearFtSource: p.hedgeLinearFt !== undefined && p.hedgeLinearFt !== null && p.hedgeLinearFt !== '' && Number.isFinite(Number(p.hedgeLinearFt)) && Number(p.hedgeLinearFt) >= 0
+      ? 'manual'
+      : (Number.isFinite(Number(p.estimatedHedgeLinearFt)) && Number(p.estimatedHedgeLinearFt) >= 0 ? 'estimated' : undefined),
     palmCount: positiveIntegerValue(p.palmCount),
     // The AI estimate leg honors the stamped trust verdict (same `!== false`
     // contract as the client prefill): a distrusted count must not be
@@ -6505,11 +6523,18 @@ function normalizeSatelliteAnalysis(analysis = {}) {
   }
   // Models sometimes quote measurements. Accept finite numeric strings,
   // while leaving blanks, nulls and booleans for the validator to reject.
-  for (const field of ['estimatedTurfSf', 'estimatedBedAreaSf', 'estimatedPalmCount', 'estimatedTreeCount', 'sharedWallCount', 'outbuildingCount', 'confidenceScore', 'imperviousSurfacePercent', 'imperviosSurfacePercent', 'shadeCoveragePercent']) {
+  for (const field of ['estimatedTurfSf', 'estimatedBedAreaSf', 'estimatedHedgeLinearFt', 'estimatedPalmCount', 'estimatedTreeCount', 'sharedWallCount', 'outbuildingCount', 'confidenceScore', 'imperviousSurfacePercent', 'imperviosSurfacePercent', 'shadeCoveragePercent']) {
     const value = normalized[field];
     if (typeof value === 'string' && value.trim() && Number.isFinite(Number(value))) {
       normalized[field] = Number(value);
     }
+  }
+  // Hedge linear feet (owner 2026-10-21, spray-volume groundwork) is a new,
+  // OPTIONAL read: a non-numeric or negative value is dropped rather than
+  // failing the whole analysis, so an older model answer still validates.
+  if (normalized.estimatedHedgeLinearFt != null
+    && !(Number.isFinite(normalized.estimatedHedgeLinearFt) && normalized.estimatedHedgeLinearFt >= 0)) {
+    delete normalized.estimatedHedgeLinearFt;
   }
   if (!normalized.waterProximity && normalized.nearWater) normalized.waterProximity = normalized.nearWater;
   if (!normalized.nearWater && normalized.waterProximity) normalized.nearWater = normalized.waterProximity;
@@ -6552,6 +6577,7 @@ Return ONLY valid JSON with these fields:
   "estimatedPalmCount": number,
   "estimatedTreeCount": number (count of ORNAMENTAL trees a tree & shrub program would treat — small/medium landscape trees under roughly 25 ft such as crape myrtle, ligustrum, holly, magnolia, citrus or bottlebrush, in or beside the beds; EXCLUDE palms (they belong in estimatedPalmCount) and large native canopy trees such as mature oaks, pines and cypress, which are not sprayed; 0 when none),
   "estimatedBedAreaSf": number (estimated LANDSCAPE BED area in sq ft — the mulch/rock/planted foundation and island beds holding shrubs, hedges, groundcover or ornamental trees; measure the bed footprint ONLY: exclude turf, driveways/walkways/patios, the pool deck and everything inside a screened pool cage, bare dirt with no plantings, and tree canopy hanging over grass; a typical SWFL single-family home runs roughly 300-1,500 sq ft; 0 when there are no beds),
+  "estimatedHedgeLinearFt": number (estimated total LINEAR FEET of shrub/hedge line a technician would spray — the running length of planted bed edge along the foundation, fences, drives and islands, measured along the bed, not around it; use the scale lines; exclude bare mulch with no shrubs and the cage interior; a typical SWFL single-family home runs roughly 80-300 ft; 0 when there are no shrubs),
   "turfCondition": "GOOD" | "FAIR" | "POOR" | "UNKNOWN",
   "possibleGrassType": "ST_AUGUSTINE" | "BERMUDA" | "BAHIA" | "ZOYSIA" | "MIXED" | "UNKNOWN",
   "shadeCoveragePercent": number,

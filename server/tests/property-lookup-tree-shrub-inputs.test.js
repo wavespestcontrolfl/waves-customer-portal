@@ -315,3 +315,30 @@ describe('admin tree & shrub service-line inputs (audit INP-001/002/004)', () =>
     }
   });
 });
+
+describe('hedge / bed linear feet (owner 2026-10-21, spray-volume groundwork)', () => {
+  test('operator value wins, aerial estimate backstops, and it persists on the engine property without touching price', () => {
+    const typed = translateV2CallToV1Input(baseProfile({ hedgeLinearFt: '180', estimatedHedgeLinearFt: 240 }), ['TREE_SHRUB'], {});
+    const aerial = translateV2CallToV1Input(baseProfile({ estimatedHedgeLinearFt: 240 }), ['TREE_SHRUB'], {});
+    const none = translateV2CallToV1Input(baseProfile(), ['TREE_SHRUB'], {});
+    expect(typed).toMatchObject({ hedgeLinearFt: 180, hedgeLinearFtSource: 'manual' });
+    expect(aerial).toMatchObject({ hedgeLinearFt: 240, hedgeLinearFtSource: 'estimated' });
+    expect(none.hedgeLinearFt).toBeUndefined();
+    // Never on the service line — the pricer must not see it yet.
+    expect(typed.services.treeShrub).not.toHaveProperty('hedgeLinearFt');
+
+    const withFt = generateEstimate(typed);
+    const without = generateEstimate(none);
+    expect(withFt.property.hedgeLinearFt).toBe(180);
+    expect(withFt.property.hedgeLinearFtSource).toBe('manual');
+    expect(without.property.hedgeLinearFt).toBeNull();
+    expect(treeShrubLine(typed).monthly).toBe(treeShrubLine(none).monthly);
+  });
+
+  test('a garbage or negative value is absent, not a 400', () => {
+    for (const extra of [{ hedgeLinearFt: 'lots' }, { hedgeLinearFt: -5 }, { estimatedHedgeLinearFt: 'n/a' }]) {
+      const input = translateV2CallToV1Input(baseProfile(extra), ['TREE_SHRUB'], {});
+      expect(input.hedgeLinearFt).toBeUndefined();
+    }
+  });
+});

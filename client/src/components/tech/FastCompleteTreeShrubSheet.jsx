@@ -471,6 +471,9 @@ function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tips
         // Yes when the app ran the rotation check (the context loaded its
         // warnings) or the tech confirmed it by hand.
         ...(irac ? { irac_frac_logged: 'Yes' } : {}),
+        // Optional internal costing fact (project-types.js spray_mix_gallons);
+        // blank stays absent so the typed-findings validator never sees ''.
+        ...(String(form.sprayGallons ?? '').trim() !== '' ? { spray_mix_gallons: String(form.sprayGallons).trim() } : {}),
       },
     },
     completionPhotos: photos.map((photo, index) => ({
@@ -583,6 +586,10 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
     plantGroups: new Set(PLANT_GROUP_OPTIONS.filter((option) => (ctx.lastVisit?.plantGroups || []).includes(option))),
     areas: new Set(AREA_OPTIONS.filter((option) => (ctx.lastVisit?.areasTreated || []).includes(option))),
     condition: '', pollinator: '', irac: '', tipId: '', customTip: '',
+    // Gallons of finished spray mix used this visit (owner 2026-10-21): an
+    // optional costing fact for the spray-volume material model, never on
+    // the customer report.
+    sprayGallons: '',
     customerHome: DEFAULT_CUSTOMER_HOME,
   }));
   const setField = useCallback((key, value) => setForm((prev) => ({ ...prev, [key]: value })), []);
@@ -668,6 +675,9 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
           )}
           <PestCheckSection state={pestCheck} locked={locked} onRemoveBlocked={removeBlocked} />
           <ProductsSection ctx={ctx} products={products} neonicLines={neonicCap.lines} locked={locked} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
+          {rows.some((row) => row.active) && (
+            <SprayGallonsSection value={form.sprayGallons} locked={locked} onChange={(value) => setField('sprayGallons', value)} />
+          )}
           {(insect || iracRows) && (
             <ComplianceSection form={form} setField={setField} insect={insect} iracRows={iracRows} manualIrac={needsManualIrac(rows, ctx)} locked={locked} />
           )}
@@ -1162,6 +1172,32 @@ function ProductEditor({ row, warnings, neonicLine, locked, onChange, onRemove }
 
 // The compliance taps the server's checks need, only when a product on the
 // sheet calls for them.
+// Gallons of finished mix used on the visit (owner 2026-10-21): the one
+// number that lets the office re-derive Tree & Shrub material from label
+// carrier volume instead of a per-bed-sqft guess. Optional; office-only.
+function SprayGallonsSection({ value, locked, onChange }) {
+  const id = useId();
+  return (
+    <section className="tech-visit-choice-section">
+      <div className="tech-visit-section-head">
+        <h3 className="tech-visit-section-title"><label htmlFor={id}>Spray mix used (gallons, office only)</label></h3>
+      </div>
+      <input
+        id={id}
+        className="ui-control tech-visit-control"
+        type="number"
+        inputMode="decimal"
+        min="0"
+        step="0.5"
+        value={value}
+        disabled={locked}
+        placeholder="e.g. 5"
+        onChange={(e) => onChange(e.target.value)}
+      />
+    </section>
+  );
+}
+
 function ComplianceSection({ form, setField, insect, iracRows, manualIrac, locked }) {
   return (
     <>

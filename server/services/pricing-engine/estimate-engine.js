@@ -625,6 +625,10 @@ function generateEstimate(input) {
     estimatedBedAreaPercent: input.estimatedBedAreaPercent,
     bedArea: input.bedArea,
     bedAreaSource: input.bedAreaSource,
+    // Hedge / bed linear feet: persisted on the profile for the spray-volume
+    // material model (owner 2026-10-21); no pricer reads it yet.
+    hedgeLinearFt: input.hedgeLinearFt,
+    hedgeLinearFtSource: input.hedgeLinearFtSource,
     palmCount: input.palmCount,
     palmInventory: input.palmInventory,
     propertyType: propertyTypeForProfile,

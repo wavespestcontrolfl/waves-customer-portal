@@ -704,6 +704,14 @@ function calculatePropertyProfile(input) {
     storiesSource: input.storiesSource || null,
     propertyType: input.propertyType || 'single_family',
     features,
+    // Hedge / bed linear feet (owner 2026-10-21): the shrub line a tech
+    // sprays, kept on the profile so the stored engineRequest carries it for
+    // the spray-volume material model. Finite non-negative or null; nothing
+    // downstream prices from it yet.
+    hedgeLinearFt: Number.isFinite(Number(input.hedgeLinearFt)) && input.hedgeLinearFt !== null && input.hedgeLinearFt !== '' && Number(input.hedgeLinearFt) >= 0
+      ? Number(input.hedgeLinearFt)
+      : null,
+    hedgeLinearFtSource: input.hedgeLinearFtSource || null,
     // v2 enriched fields — consumed by modifiers.deriveModifiers()
     yearBuilt: input.yearBuilt || null,
     constructionMaterial: input.constructionMaterial || null,
