@@ -10,8 +10,8 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../routes/admin-invoices', () => ({ createInvoiceFromBar: jest.fn(), createInvoiceFromServiceFromBar: jest.fn() }));
-const mockMintLock = jest.fn(async () => {});
-jest.mock('../services/scheduled-invoice-mint', () => ({ acquireScheduledInvoiceMintLock: (...a) => mockMintLock(...a) }));
+const mockMintChain = jest.fn();
+jest.mock('../services/scheduled-invoice-mint', () => ({ acquireScheduledMintLockChain: (...a) => mockMintChain(...a) }));
 const mockPreviewTotals = jest.fn();
 jest.mock('../services/invoice', () => ({ previewInvoiceTotals: (...a) => mockPreviewTotals(...a) }));
 const mockResolvePayer = jest.fn();
@@ -103,6 +103,8 @@ beforeEach(() => {
   state = freshState();
   db.mockImplementation(makeDb());
   db.raw = jest.fn(async () => {});
+  // The shared lock chain returns the locked visit row.
+  mockMintChain.mockImplementation(async () => ({ ...state.scheduled_services[0] }));
   envGate(true);
   mockResolvePayer.mockResolvedValue({ payerId: null, taxExempt: false, snapshot: null, paymentTerms: null });
   // The service's own mirror of create(): the sum of the lines, no tax for a residential customer.
@@ -411,11 +413,11 @@ describe('recheckApprovedScope (inside the create transaction)', () => {
     const approved = await approvedOf();
     expect(approved).toMatchObject({ scheduledServiceId: VISIT, serviceRecordId: REC, visitInvoices: [] });
     await expect(recheck(approved)).resolves.toBeUndefined();
-    expect(mockMintLock).toHaveBeenCalledWith(db, VISIT);
+    expect(mockMintChain).toHaveBeenCalledWith(db, expect.objectContaining({ scheduledServiceId: VISIT, customerId: CUST, customerLock: 'share' }));
     const unlinked = await approvedOf(lineInput());
-    mockMintLock.mockClear();
+    mockMintChain.mockClear();
     await expect(recheck(unlinked)).resolves.toBeUndefined();
-    expect(mockMintLock).not.toHaveBeenCalled();
+    expect(mockMintChain).not.toHaveBeenCalled();
   });
 
   test('the customer and the payer rows are held FOR SHARE before the payer is read, so a payer activation waits for the commit', async () => {
@@ -440,8 +442,23 @@ describe('recheckApprovedScope (inside the create transaction)', () => {
     const approved = await approvedOf();
     expect(approved).toMatchObject({ serviceRecordId: REC, scheduledServiceId: null });
     await recheck(approved);
-    expect(mockMintLock).not.toHaveBeenCalled();
+    expect(mockMintChain).not.toHaveBeenCalled();
     expect(db.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', [`ib_create_invoice:service_record:${REC}`]);
+  });
+
+  test('the visit row is locked (shared chain) before the Bill-To read; a visit that stopped being billable or moved is a 409', async () => {
+    const approved = await approvedOf();
+    const order = [];
+    mockMintChain.mockImplementation(async () => { order.push('chain'); return { ...state.scheduled_services[0] }; });
+    mockResolvePayer.mockImplementation(async () => { order.push('payer'); return { payerId: null }; });
+    await recheck(approved);
+    expect(order).toEqual(['chain', 'payer']);
+    mockMintChain.mockRejectedValueOnce(Object.assign(new Error('Scheduled service was cancelled'), { status: 409 }));
+    await expect(recheck(approved)).rejects.toMatchObject({ code: 'IB_SCOPE_CHANGED', message: expect.stringMatching(/visit changed/) });
+    mockMintChain.mockResolvedValueOnce({ id: VISIT, customer_id: OTHER, payer_id: null });
+    await expect(recheck(approved)).rejects.toMatchObject({ code: 'IB_SCOPE_CHANGED' });
+    mockMintChain.mockRejectedValueOnce(new Error('db down'));
+    await expect(recheck(approved)).rejects.toThrow('db down');
   });
 
   test('a payer assigned after the card is a 409 IB_SCOPE_CHANGED', async () => {

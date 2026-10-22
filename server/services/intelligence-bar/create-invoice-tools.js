@@ -29,8 +29,8 @@
  *   confirmed   -> re-derives the preview and refuses with preview_changed on any drift, then runs the handler with
  *                  exactly the carded body (the due date included) and the approved scope (the total, the customer,
  *                  the visit link, the invoices already on the visit, no payer, no retention offer). The handler
- *                  creates the invoice in one transaction; under the visit's mint lock and share locks on the
- *                  customer row and the payer rows it re-checks that scope (recheckApprovedScope) before it mints, and rolls back if
+ *                  creates the invoice in one transaction; under the shared scheduled-mint lock chain (mint lock,
+ *                  customer share, visit row) and share locks on the payer rows it re-checks that scope (recheckApprovedScope) before it mints, and rolls back if
  *                  the scope or the total it computed differs from the card's (409).
  */
 const crypto = require('crypto');
@@ -365,8 +365,21 @@ const scopeChanged = (why) => Object.assign(new Error(`${why}, so nothing was cr
 // granted, or the customer or visit link changed while the create waited for the lock is a 409 (IB_SCOPE_CHANGED) and the
 // transaction rolls back. The customer row is taken FOR SHARE (a payer assignment updates it and waits for this commit).
 async function recheckApprovedScope(conn, approved) {
+  // The shared scheduled-mint lock chain every scheduled-price writer takes, in its one order: mint advisory lock, customer
+  // FOR SHARE, visit row FOR UPDATE. The visit lock also stops a payer-only edit of the visit (it takes the visit row) from
+  // committing between the Bill-To read below and create()'s own payer resolution.
+  let lockedVisit = null;
   if (approved.scheduledServiceId) {
-    await require('../scheduled-invoice-mint').acquireScheduledInvoiceMintLock(conn, approved.scheduledServiceId);
+    try {
+      lockedVisit = await require('../scheduled-invoice-mint').acquireScheduledMintLockChain(conn, {
+        scheduledServiceId: approved.scheduledServiceId, customerId: approved.customerId, visitColumns: ['id', 'customer_id', 'payer_id'], customerLock: 'share',
+      });
+    } catch (err) {
+      // The visit was cancelled or otherwise stopped being billable while this create waited for the lock.
+      if (err?.status) throw scopeChanged(`The visit changed after the card was shown (${err.message})`);
+      throw err;
+    }
+    if (!lockedVisit || String(lockedVisit.customer_id) !== String(approved.customerId)) throw scopeChanged('The visit changed after the card was shown');
   } else if (approved.serviceRecordId) {
     // A record with no scheduled visit has no mint lock: serialize the bar's own creates for it, so two confirmations
     // cannot both see an empty invoice list and each create a draft.
@@ -383,10 +396,7 @@ async function recheckApprovedScope(conn, approved) {
   // Hold the payer rows this Bill-To resolves through (the visit's own and the customer default, active or not) FOR SHARE
   // before reading them, as create() does for a linked create: a payer activation locks the payer row FOR UPDATE and waits for
   // this commit, so the self-pay answer below is still true when create() resolves the payer again to insert the invoice.
-  const visitPayer = approved.scheduledServiceId
-    ? await conn('scheduled_services').where({ id: approved.scheduledServiceId, customer_id: approved.customerId }).first('payer_id')
-    : null;
-  const payerIds = [...new Set([visitPayer?.payer_id, customer.payer_id].filter(Boolean).map(String))].sort();
+  const payerIds = [...new Set([lockedVisit?.payer_id, customer.payer_id].filter(Boolean).map(String))].sort();
   if (payerIds.length) await conn('payers').whereIn('id', payerIds).orderBy('id').forShare().select('id');
   const refused = await pageOnlyRefusal(customer, { scheduled_service_id: approved.scheduledServiceId || null }, approved.mode, conn);
   if (refused) throw scopeChanged(`${refused.error.replace(/ Create it from the Invoices page\.$/, '')} (it changed after the card was shown)`);
