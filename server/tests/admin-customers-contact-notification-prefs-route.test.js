@@ -18,6 +18,12 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
 jest.mock('../services/irrigation-weekly-email', () => ({ hasLawnServiceEvidence: jest.fn(async () => false), hasIrrigationEmailOptIn: jest.fn(async () => false) }));
 jest.mock('../services/account-membership-email', () => ({ sendAccountUpdated: jest.fn(async () => ({ ok: true })) }));
+// The technician assignment guard the GET shares with the profile and cards
+// reads; flipped per test.
+jest.mock('../services/technician-visit-scope', () => ({
+  ...jest.requireActual('../services/technician-visit-scope'),
+  technicianServicesCustomer: jest.fn(async () => true),
+}));
 
 const mockState = { customer: null, prefsRow: null, contactRows: [], optins: [] };
 
@@ -60,6 +66,7 @@ jest.mock('../models/db', () => {
 
 const router = require('../routes/admin-customers');
 const { recordAuditEvent } = require('../services/audit-log');
+const { technicianServicesCustomer } = require('../services/technician-visit-scope');
 
 async function run(method, path, { slot, body } = {}) {
   const layer = router.stack.find((e) => e.route?.path === path && e.route?.methods?.[method]);
@@ -114,6 +121,14 @@ describe('GET /:id/contact-notification-prefs', () => {
   test('unknown customer is a 404', async () => {
     mockState.customer = null;
     expect((await get()).status).toBe(404);
+  });
+
+  test('a technician reads a customer\'s contacts only when a visit is assigned to them: otherwise the same 404 as the profile read, before any row is read (codex security r1)', async () => {
+    const db = require('../models/db');
+    technicianServicesCustomer.mockResolvedValueOnce(false);
+    expect((await get()).status).toBe(404);
+    expect(technicianServicesCustomer).toHaveBeenCalledWith(expect.objectContaining({ params: { id: 'cust-1' } }), 'cust-1');
+    expect(db).not.toHaveBeenCalledWith('customers');
   });
 });
 

@@ -144,14 +144,21 @@ const CONTACT_PUSH_COLUMN = {
   tech_arrived: 'tech_arrived',
   service_completed: 'service_completed',
   lawn_watering_instruction: 'service_completed',
+  // The completion notices, by EXACT type (codex #6364 security r1): the
+  // push carries the rendered text body, and the `_with_invoice`,
+  // `_paid_receipt` and `_annual_prepay` variants carry payment links or
+  // receipt facts — billing a contact device never sees. Only the plain
+  // report notices are contact-safe.
+  service_complete: 'service_completed',
+  service_report_v1: 'service_completed',
 };
 
 // { allowed, column } for a push: allowed=false = contact devices excluded.
+// An explicit allowlist — no prefix match — so a new completion variant is
+// excluded until someone judges its body contact-safe.
 function contactPushPurpose(messageType) {
   const type = String(messageType || '');
-  if (!type) return { allowed: false, column: null };
-  if (type.startsWith('service_complete') || type.startsWith('service_report_v1')) return { allowed: true, column: 'service_completed' };
-  if (!Object.prototype.hasOwnProperty.call(CONTACT_PUSH_COLUMN, type)) return { allowed: false, column: null };
+  if (!type || !Object.prototype.hasOwnProperty.call(CONTACT_PUSH_COLUMN, type)) return { allowed: false, column: null };
   return { allowed: true, column: CONTACT_PUSH_COLUMN[type] };
 }
 

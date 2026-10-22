@@ -4825,6 +4825,12 @@ async function contactNotificationChoices(customerId) {
 
 router.get('/:id/contact-notification-prefs', async (req, res, next) => {
   try {
+    // Contact names, numbers and addresses: a technician reads them only
+    // for a customer with a visit assigned to them, as the profile and
+    // cards reads do (codex #6364 security r1).
+    if (!(await technicianServicesCustomer(req, req.params.id))) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
     const payload = await contactNotificationChoices(req.params.id);
     if (!payload) return res.status(404).json({ error: 'Customer not found' });
     res.json(payload);

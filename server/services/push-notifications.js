@@ -132,7 +132,9 @@ async function contactDevicesAllowed(subs, purpose, customerId, database = db) {
   if (!contactSubs.length) return holderSubs;
   const ContactPrefs = require('./contact-notification-prefs');
   if (!purpose.allowed || !ContactPrefs.contactPrefsLive()) return holderSubs;
-  const { findServiceContactSlotByPhoneKey, SERVICE_CONTACT_COLUMNS } = require('./customer-contact');
+  const {
+    findServiceContactSlotByPhoneKey, contactSlotMayLogIn, slotWithheldFromReports, withAccountPrimaryContact,
+  } = require('./customer-contact');
   const kept = [];
   const customers = new Map();
   const prefRows = new Map();
@@ -140,7 +142,11 @@ async function contactDevicesAllowed(subs, purpose, customerId, database = db) {
     const id = String(sub.customer_id);
     try {
       if (!customers.has(id)) {
-        customers.set(id, await database('customers').where({ id: sub.customer_id }).first('id', 'phone', ...SERVICE_CONTACT_COLUMNS));
+        // The whole row, with the account primary's role filled in: the
+        // consent attestation, the withheld-key list and the report rule
+        // below read more than the slot columns.
+        const row = await database('customers').where({ id: sub.customer_id }).first();
+        customers.set(id, row ? await withAccountPrimaryContact(row, { db: database }) : null);
       }
       if (!prefRows.has(id)) prefRows.set(id, await ContactPrefs.loadContactPrefRows(sub.customer_id, { dbh: database }));
     } catch (err) {
@@ -148,7 +154,15 @@ async function contactDevicesAllowed(subs, purpose, customerId, database = db) {
       continue;
     }
     const customer = customers.get(id);
-    if (!customer || !findServiceContactSlotByPhoneKey(customer, sub.contact_phone_key)) continue;
+    const slot = customer ? findServiceContactSlotByPhoneKey(customer, sub.contact_phone_key) : null;
+    if (!slot) continue;
+    // The same authorization the login and the Documents tab apply (codex
+    // #6364 security r1): a number whose attestation no longer covers it
+    // may not be reached, and a contact the report rule withholds reports
+    // from (a tenant; a non-manager on a managed account) gets no report
+    // push — its body and link would hand them the report anyway.
+    if (!contactSlotMayLogIn(customer, sub.contact_phone_key)) continue;
+    if (purpose.column === 'service_completed' && slotWithheldFromReports(customer, slot)) continue;
     // Push rides the contact's TEXT choice: a purpose they declined, texts
     // off, or an email-only delivery choice all hold the push too.
     if (!ContactPrefs.contactAllows(prefRows.get(id).get(String(sub.contact_phone_key)) || null, purpose.column, 'sms')) continue;
