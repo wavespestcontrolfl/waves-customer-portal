@@ -92,8 +92,8 @@ describe('gate on', () => {
 
   test('prompt version is bumped, distinguishable, and fits the column', () => {
     // '_cf' = COMPANY FACTS, '_cfl' = + LABEL FACTS (PR #5416), '_cflv' = + VISIT STATUS & OPEN LOOPS (PR #5499), 'cflvp' = + PAYMENT FACTS (PR #5331), numeric token 5 = FREE RE-SERVICE (PR #5336) + a fresh identity above PR #5334's 3 (LIVE ETA) and #5416's 3_cfl (4 was the pre-contract claim checker, never merged); '7_m' (#5610) = the compact scheme: number 6 + one cumulative key 'm' (+ MISSED VISIT).
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers21_n');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers21_n');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers23_n');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers23_n');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers_cf');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers2');
@@ -151,7 +151,7 @@ describe('answer-book facts (owner 2026-10-21/22)', () => {
   const section = () => renderCompanyFactsSection();
   const { RETIRED_COMPANY_FACT_LINES } = require('../services/sms-company-facts');
   const NEW_LINES = [
-    'On a residential general pest plan (not mosquito service), the first visit includes an inside spray, unless the customer chose exterior-only service. After that, the inside is up to the customer: we treat it whenever they ask. Commercial accounts follow their sold service scope.',
+    'On a residential general pest plan that includes inside service (not mosquito service), the first visit includes an inside spray. After that, the inside is up to the customer: we treat it whenever they ask. A customer who chose exterior-only service can ask the office to add inside service back. Commercial accounts follow their sold service scope.',
     'Rodent trapping includes the setup visit and at least one trap check. For more trap checks, the office confirms what the job includes.',
     'Residential pest and lawn plans have no long-term contract, and those customers can cancel any time. Termite plans and commercial accounts follow their signed agreement.',
     'A customer who prepays a year of pest or lawn service and cancels within 90 days gets a refund for the visits not yet done.',
@@ -470,7 +470,7 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
   test('a verbatim paying or prepay-refund sentence with only inert text is policy, not a payment status', () => {
     expect(payOk(PAY, 'how do I pay?')).toBe(true);
     expect(payOk('The technician can take a card, check or cash at the visit.', 'Can I pay the tech with cash?')).toBe(true);
-    for (const inbound of ['Do I get a refund if I cancel?', 'What if I cancel my prepaid plan?']) {
+    for (const inbound of ['Do I get a refund if I cancel?', 'What if I cancel my prepaid plan?', 'Can I get my money back if I cancel my pest control service?']) {
       expect(payOk(REFUND, inbound)).toBe(true);
       expect(payOk(`Hi! ${REFUND} Let us know if you have questions.`, inbound)).toBe(true);
     }
@@ -515,14 +515,14 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
   });
   test('an unedited draft from a prompt before the answer-book facts is refused, whatever its words', () => {
     const old = (v, body) => ({ prompt_version: `house_voice_v12_real_answers${v}`, suggested_message: body });
-    for (const v of ['13_n', '14_n', '15_n', '16_n+c', '17_n', '18_n', '19_n', '20_n+c', '13_n+bc', '7_m', '']) {
+    for (const v of ['13_n', '14_n', '15_n', '16_n+c', '17_n', '18_n', '19_n', '20_n+c', '21_n', '22_n', '13_n+bc', '7_m', '']) {
       for (const body of [
         RETIRED_COMPANY_FACT_LINES[0], RETIRED_COMPANY_FACT_LINES[10], 'Every recurring service treats the home as well as the yard unless you opt out.',
         'The technician accepts plastic at the appointment, never currency.', 'See you Tuesday between 8 and 10!',
       ]) expect(retiredCompanyFactBlock({ decision: old(v, body), outgoingBody: body })).toMatch(/company fact retired/);
     }
   });
-  test('the provider-boundary checks refuse an unedited pre-21 draft too', async () => {
+  test('the provider-boundary checks refuse an unedited pre-23 draft too', async () => {
     const sc = require('../services/agent-decision-send-checks');
     const body = RETIRED_COMPANY_FACT_LINES[10];
     const row = { input_snapshot: '{}', prompt_version: 'house_voice_v12_real_answers14_n', suggested_message: body };
@@ -532,7 +532,7 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
     expect(verdict.reason).toMatch(/company fact retired/);
     const snap = await sc.labelFactsSnapshotProviderPreSendCheck({ promptVersion: 'house_voice_v12_real_answers14_n', getBody: () => body })({});
     expect(snap.ok).toBe(false);
-    const fresh = await sc.labelFactsSnapshotProviderPreSendCheck({ promptVersion: 'house_voice_v12_real_answers21_n', getBody: () => 'See you Tuesday!' })({});
+    const fresh = await sc.labelFactsSnapshotProviderPreSendCheck({ promptVersion: 'house_voice_v12_real_answers23_n', getBody: () => 'See you Tuesday!' })({});
     expect(fresh.ok).toBe(true);
   });
   test('a staff rewrite of an old draft goes out; the unedited old draft does not', () => {
@@ -541,7 +541,7 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
     expect(retiredCompanyFactBlock({ decision, outgoingBody: RETIRED_COMPANY_FACT_LINES[10] })).toMatch(/company fact retired/);
   });
   test('a draft from the answer-book prompts, or not a real-answers draft, is never refused by it', () => {
-    for (const prompt_version of ['house_voice_v12_real_answers21_n', 'house_voice_v12_real_answers22_n+c', 'house_voice_v11', null]) {
+    for (const prompt_version of ['house_voice_v12_real_answers23_n', 'house_voice_v12_real_answers24_n+c', 'house_voice_v11', null]) {
       for (const body of [COMPANY_FACTS[10], 'We don’t take cash during your visit; please pay cash through the office.', COMPANY_FACTS[0]]) {
         expect(retiredCompanyFactBlock({ decision: { prompt_version }, outgoingBody: body })).toBeNull();
       }

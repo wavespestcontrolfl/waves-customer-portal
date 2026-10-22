@@ -16,7 +16,7 @@ const { WAVES_BRAND_NAME, WAVES_ADDRESS_LINE } = require('../constants/business'
 const COMPANY_FACTS_HEADER = 'COMPANY FACTS (owner-approved; state these plainly):';
 
 const COMPANY_FACTS = Object.freeze([
-  'On a residential general pest plan (not mosquito service), the first visit includes an inside spray, unless the customer chose exterior-only service. After that, the inside is up to the customer: we treat it whenever they ask. Commercial accounts follow their sold service scope.',
+  'On a residential general pest plan that includes inside service (not mosquito service), the first visit includes an inside spray. After that, the inside is up to the customer: we treat it whenever they ask. A customer who chose exterior-only service can ask the office to add inside service back. Commercial accounts follow their sold service scope.',
   'The customer does not need to be home for the exterior treatment. For the inside spray, someone needs to be home, or the customer leaves us access.',
   'Regular pest visits include the lanai and the pool cage.',
   'Wasps, mud daubers and hornet nests on the house are included on regular pest visits.',
