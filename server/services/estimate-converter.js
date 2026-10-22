@@ -4598,35 +4598,21 @@ async function rolledSeasonalFirstDate(baseDateStr) {
   return out;
 }
 
-// What seedRecurringFollowUpsForParent would hand the seeder for this
-// service/parent pair, or null when it would seed nothing. Split out so the
-// rider context can plan a lawn series' dates with the same opts.
-function followUpSeedPlan(parentRow, svc = {}, opts = {}) {
-  const pattern = converterFollowUpSeedingPattern(svc, parentRow, opts.fallbackFrequency, opts.acceptedPlanFrequency);
-  if (!pattern) return null;
-  const serviceDurationMinutes = durationMinutesForRecurringService(svc, pattern, parentRow);
-  return {
-    // A termite bond is a billing rider on the bait program, not a bait visit:
-    // it never rides the lawn.
-    family: /^termite_bond/.test(String(recurringServiceKey(svc) || '')) ? 'termite_bond' : seedingFamilyKey(svc, parentRow),
-    pattern,
-    seedOpts: {
-      pattern,
-      visitsPerYear: annualPrepayCoverageVisits(svc, pattern, opts.acceptedPlanFrequency),
-      skipWeekends: true,
-      weekendShift: 'forward',
-      durationMinutes: serviceDurationMinutes || parentRow?.estimated_duration_minutes || undefined,
-      // undefined = the seeder's parent-copy price (every caller but the
-      // multi-program reserved accept).
-      estimatedPrice: opts.estimatedPrice,
-    },
-  };
-}
-
 async function seedRecurringFollowUpsForParent(database, parentRow, svc = {}, opts = {}) {
-  const plan = followUpSeedPlan(parentRow, svc, opts);
-  if (!plan) return { pattern: null, insertedCount: 0, insertedRows: [] };
-  const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(database, parentRow, { ...plan.seedOpts });
+  const pattern = converterFollowUpSeedingPattern(svc, parentRow, opts.fallbackFrequency, opts.acceptedPlanFrequency);
+  if (!pattern) return { pattern: null, insertedCount: 0, insertedRows: [] };
+  const visitsPerYear = annualPrepayCoverageVisits(svc, pattern, opts.acceptedPlanFrequency);
+  const serviceDurationMinutes = durationMinutesForRecurringService(svc, pattern, parentRow);
+  const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(database, parentRow, {
+    pattern,
+    visitsPerYear,
+    skipWeekends: true,
+    weekendShift: 'forward',
+    durationMinutes: serviceDurationMinutes || parentRow?.estimated_duration_minutes || undefined,
+    // undefined = the seeder's parent-copy price (every caller but the
+    // multi-program reserved accept).
+    estimatedPrice: opts.estimatedPrice,
+  });
   if (opts.registerReminders !== false) {
     await registerSeededFollowUpReminders(seedResult.insertedRows, parentRow.customer_id);
   }

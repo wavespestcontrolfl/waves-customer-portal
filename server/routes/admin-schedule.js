@@ -28855,7 +28855,6 @@ router._test = {
   topUpRecurringSeries,
   topUpRecurringSeriesWithLocks,
   topUpRecurringSeriesLocked,
-  topupSeriesSkipReason,
   isAnnualPrepaySeries,
   isCustomerPrepayLive,
   isFamilyOnPlanHold,
