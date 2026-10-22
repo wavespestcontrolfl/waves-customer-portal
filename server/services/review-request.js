@@ -724,8 +724,18 @@ const REVIEW_CADENCE_TICK_MINUTES = [14, 44];
 // `*/5` (scheduler.js), so while the gate is on the sender also runs on every
 // fifth minute. Kept in step by review-ask-after-report.test.js.
 const REVIEW_AFTER_REPORT_TICK_MINUTES = [0, 5, 10, 14, 15, 20, 25, 30, 35, 40, 44, 45, 50, 55];
-function cadenceTickMinutes() {
-  return reviewAskAfterReportOn() ? REVIEW_AFTER_REPORT_TICK_MINUTES : REVIEW_CADENCE_TICK_MINUTES;
+// `fast` = an after-report Day-0 row (isAfterReportFastRow): only those ride
+// the */5 tick; every other row keeps :14/:44.
+function cadenceTickMinutes(fast = false) {
+  return fast && reviewAskAfterReportOn() ? REVIEW_AFTER_REPORT_TICK_MINUTES : REVIEW_CADENCE_TICK_MINUTES;
+}
+// The rows the */5 tick runs (processReviewSequences({ afterReportOnly })):
+// an untouched Day-0 post-service ask whose plan came from the report anchor.
+const AFTER_REPORT_FAST_REASONS = ["after_report", "report_pending"];
+function isAfterReportFastRow(r) {
+  if (!r || Number(r.current_step || 0) !== 0 || Number(r.touches_sent || 0) !== 0 || r.started_by !== "post_service") return false;
+  const d = parseDecision(r.decision);
+  return AFTER_REPORT_FAST_REASONS.includes(d?.reason);
 }
 // The legacy (cadences-off) path: processScheduled runs on the scheduler's
 // `*/15` cron (kept in step by review-sequences.test.js), and a legacy row's
@@ -740,17 +750,17 @@ const LEGACY_REVIEW_TICK_MINUTES = [0, 15, 30, 45];
 // reopens (codex #4140 r11 P2). Email steps are not windowed. A no-link
 // check-in labelled "email" is forced to SMS by sendOutreachTouch, so only
 // an ask step's own "email" channel is email here.
-function nextSendTickFor(step, from) {
-  return isEmailAskStep(step) ? nextCadenceTickAt(from) : windowedSmsTickAt(from);
+function nextSendTickFor(step, from, fast = false) {
+  return isEmailAskStep(step) ? nextCadenceTickAt(from, fast) : windowedSmsTickAt(from, fast);
 }
 // The tick an ask step lands on if it swaps to the OTHER channel at send
 // time ({ fallbackChannel, fallbackTickAt }); both null when the step is not
 // an ask (a check-in is always SMS) or the other channel's tick is the same.
-function fallbackTickFor(step, from) {
+function fallbackTickFor(step, from, fast = false) {
   const none = { fallbackChannel: null, plannedChannel: null, fallbackTickAt: null };
   if (!from || !OUTREACH.isAskTemplate(step?.templateKey)) return none;
-  const emailTick = nextCadenceTickAt(from);
-  const smsTick = windowedSmsTickAt(from);
+  const emailTick = nextCadenceTickAt(from, fast);
+  const smsTick = windowedSmsTickAt(from, fast);
   if (!emailTick || !smsTick || smsTick.getTime() === emailTick.getTime()) return none;
   // Both channel names are spelled here (text/email) so the page renders
   // them without deciding anything.
@@ -761,13 +771,13 @@ function fallbackTickFor(step, from) {
 function isEmailAskStep(step) {
   return String(step?.channel || "sms").toLowerCase() === "email" && OUTREACH.isAskTemplate(step?.templateKey);
 }
-function windowedSmsTickAt(from) {
-  const tick = nextCadenceTickAt(from);
+function windowedSmsTickAt(from, fast = false) {
+  const tick = nextCadenceTickAt(from, fast);
   if (!tick || !require("../config/feature-gates").isEnabled("smsSendWindow")) return tick;
   const { isWithinSendWindowET, nextSendWindowOpenET } = require("./messaging/send-window");
-  return isWithinSendWindowET(tick) ? tick : nextCadenceTickAt(nextSendWindowOpenET(tick));
+  return isWithinSendWindowET(tick) ? tick : nextCadenceTickAt(nextSendWindowOpenET(tick), fast);
 }
-function nextCadenceTickAt(from) {
+function nextCadenceTickAt(from, fast = false) {
   const d = from instanceof Date ? from : new Date(from);
   if (Number.isNaN(d.getTime())) return null;
   const minute = d.getUTCMinutes();
@@ -775,7 +785,7 @@ function nextCadenceTickAt(from) {
   const tick = new Date(d.getTime());
   tick.setUTCSeconds(0, 0);
   // Minutes are zone-independent (every ET offset is a whole hour).
-  const tickMinutes = cadenceTickMinutes();
+  const tickMinutes = cadenceTickMinutes(fast);
   const next = tickMinutes.find((m) => m > minute || (m === minute && !pastTheMinute));
   if (next != null) {
     tick.setUTCMinutes(next);
@@ -7476,17 +7486,28 @@ const ReviewService = {
     return { redeemed };
   },
 
-  async processReviewSequences() {
+  // afterReportOnly: the GATE_REVIEW_ASK_AFTER_REPORT */5 tick runs only the
+  // after-report Day-0 rows; every other row (and the deferred-enrollment
+  // sweep) stays on the :14/:44 cadence.
+  async processReviewSequences({ afterReportOnly = false } = {}) {
     let redeemed = 0;
-    try {
-      ({ redeemed } = await this._sweepDeferredEnrollments());
-    } catch (err) {
-      logger.error(`[review] deferred-enrollment sweep failed (errType=${err?.name || "Error"})`);
+    if (!afterReportOnly) {
+      try {
+        ({ redeemed } = await this._sweepDeferredEnrollments());
+      } catch (err) {
+        logger.error(`[review] deferred-enrollment sweep failed (errType=${err?.name || "Error"})`);
+      }
     }
-    const due = await db("review_sequences")
+    let dueQuery = db("review_sequences")
       .where({ status: "active" })
       .whereNotNull("next_run_at")
-      .where("next_run_at", "<=", new Date())
+      .where("next_run_at", "<=", new Date());
+    if (afterReportOnly) {
+      dueQuery = dueQuery
+        .where({ current_step: 0, touches_sent: 0, started_by: "post_service" })
+        .whereIn(db.raw("decision ->> 'reason'"), AFTER_REPORT_FAST_REASONS);
+    }
+    const due = await dueQuery
       .orderBy("next_run_at", "asc")
       .limit(25);
     let sent = 0;
@@ -8038,7 +8059,7 @@ const ReviewService = {
         // runner holds the claim). An overdue row (missed tick, gate re-enabled
         // between ticks) is picked up at the next tick from NOW, not at a tick
         // that has already passed (codex #4140 r8).
-        nextSendTickAt: nextFrom && !staleRetire ? (parked ? nextCadenceTickAt(nextFrom) : nextSendTickFor(plan[r.current_step], nextFrom)) : null,
+        nextSendTickAt: nextFrom && !staleRetire ? (parked ? nextCadenceTickAt(nextFrom) : nextSendTickFor(plan[r.current_step], nextFrom, isAfterReportFastRow(r))) : null,
         // An ask step can swap channel at send time (sendOutreachTouch: the
         // intended channel unavailable, the other allowed) — email→SMS then
         // meets the send window, SMS→email escapes it — so the page shows the
@@ -8279,6 +8300,7 @@ ReviewService.__private = {
   REVIEW_AFTER_REPORT_TICK_MINUTES,
   reportTextAnchorFromNotes,
   cadenceTickMinutes,
+  isAfterReportFastRow,
   LEGACY_REVIEW_TICK_MINUTES,
   sequenceDecision,
   nextTouchRunAt,

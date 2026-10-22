@@ -8349,13 +8349,26 @@ describe('GATE_REVIEW_ASK_AFTER_REPORT — Day-0 ask 10 minutes after the report
   describe('cadence ticks', () => {
     const { nextCadenceTickAt, REVIEW_CADENCE_TICK_MINUTES, REVIEW_AFTER_REPORT_TICK_MINUTES } = ReviewService.__private;
 
-    test('gate off: only :14/:44; gate on: every fifth minute as well', () => {
+    test('gate off: only :14/:44; gate on: every fifth minute for after-report rows only', () => {
       const from = new Date('2026-10-20T15:10:30Z');
-      expect(nextCadenceTickAt(from).toISOString()).toBe('2026-10-20T15:14:00.000Z');
+      expect(nextCadenceTickAt(from, true).toISOString()).toBe('2026-10-20T15:14:00.000Z');
       mockGates.reviewAskAfterReport = true;
-      expect(nextCadenceTickAt(from).toISOString()).toBe('2026-10-20T15:14:00.000Z');
-      expect(nextCadenceTickAt(new Date('2026-10-20T15:15:30Z')).toISOString()).toBe('2026-10-20T15:20:00.000Z');
-      expect(nextCadenceTickAt(new Date('2026-10-20T15:56:00Z')).toISOString()).toBe('2026-10-20T16:00:00.000Z');
+      expect(nextCadenceTickAt(from, true).toISOString()).toBe('2026-10-20T15:14:00.000Z');
+      expect(nextCadenceTickAt(new Date('2026-10-20T15:15:30Z'), true).toISOString()).toBe('2026-10-20T15:20:00.000Z');
+      expect(nextCadenceTickAt(new Date('2026-10-20T15:56:00Z'), true).toISOString()).toBe('2026-10-20T16:00:00.000Z');
+      // every other row keeps :14/:44 even with the gate on
+      expect(nextCadenceTickAt(new Date('2026-10-20T15:15:30Z')).toISOString()).toBe('2026-10-20T15:44:00.000Z');
+    });
+
+    test('only an untouched Day-0 post-service after-report row rides the fast tick', () => {
+      const { isAfterReportFastRow } = ReviewService.__private;
+      const row = { current_step: 0, touches_sent: 0, started_by: 'post_service', decision: { reason: 'after_report' } };
+      expect(isAfterReportFastRow(row)).toBe(true);
+      expect(isAfterReportFastRow({ ...row, decision: JSON.stringify({ reason: 'report_pending' }) })).toBe(true);
+      expect(isAfterReportFastRow({ ...row, decision: { reason: 'operator_timing' } })).toBe(false);
+      expect(isAfterReportFastRow({ ...row, current_step: 1 })).toBe(false);
+      expect(isAfterReportFastRow({ ...row, touches_sent: 1 })).toBe(false);
+      expect(isAfterReportFastRow({ ...row, started_by: 'admin' })).toBe(false);
     });
 
     test('the tick table is the union of the two cron registrations in scheduler.js', () => {
@@ -8364,6 +8377,7 @@ describe('GATE_REVIEW_ASK_AFTER_REPORT — Day-0 ask 10 minutes after the report
       const scheduler = require('fs').readFileSync(require('path').join(__dirname, '../services/scheduler.js'), 'utf8');
       expect(scheduler).toContain(`cron.schedule('${REVIEW_CADENCE_TICK_MINUTES.join(',')} * * * *'`);
       expect(scheduler).toMatch(/cron\.schedule\('\*\/5 \* \* \* \*', async \(\) => \{\s*if \(!isEnabled\('reviewSequences'\)\) return;\s*if \(!require\('\.\.\/config\/feature-gates'\)\.reviewAskAfterReportLive\(\)\) return;/);
+      expect(scheduler).toContain('await runReviewSequencesTick({ afterReportOnly: true });');
     });
   });
 });

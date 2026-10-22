@@ -56,7 +56,7 @@ function reviewTimingHintDetails({ reviewTiming, reviewCustomAt, preview, bundle
   if (awaitsPayment && reviewTiming === "auto") {
     if (preview?.afterReport === true && reportTextExpected === false) return NO_REPORT_TEXT_AWAITS_PAYMENT_HINT;
     if (preview?.afterReport === true) {
-      return `Review text waits for the invoice to be paid, then goes out about ${afterReportMinutes(preview)} minutes after payment${preview.smsSendWindowEnabled ? ", inside the 8 AM–8 PM window" : ""}.`;
+      return `Review text waits for the invoice to be paid, then goes out about ${afterReportMinutes(preview)} minutes after payment${preview.smsSendWindowEnabled ? ", inside the 8 AM–8 PM window" : ""}. If the report went by the Waves app instead of a text, it goes at the smart send window.`;
     }
     return preview?.reviewSequencesEnabled
       ? "Review text waits for the invoice to be paid, then goes out at the smart send window computed from the payment."
@@ -76,7 +76,7 @@ export function timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled
     // words it, never a client-side approximation of either rule.
     if (preview?.afterReport === true && reportTextExpected === false) return NO_REPORT_TEXT_HINT;
     if (preview?.afterReport === true) {
-      return `Review text goes out separately, about ${afterReportMinutes(preview)} minutes after the report text${preview.smsSendWindowEnabled ? ", inside the 8 AM–8 PM window" : ""}.`;
+      return `Review text goes out separately, about ${afterReportMinutes(preview)} minutes after the report text${preview.smsSendWindowEnabled ? ", inside the 8 AM–8 PM window" : ""}. If the report goes by the Waves app instead of a text, it goes at the smart send window.`;
     }
     if (!preview?.at) return "Review text goes out separately at the smart send window.";
     // In cadence mode `at` is a jitter-free eligibility time: enrollment
