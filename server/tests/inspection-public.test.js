@@ -3260,6 +3260,50 @@ describe('checkServiceArea unit coverage (P1 :355)', () => {
     }
   });
 
+  // Owner ruling 2026-10-22: Punta Gorda is not served although Charlotte
+  // County is, so the address's own city / ZIP refuses it, before any lookup.
+  describe('Punta Gorda is out of area (city / ZIP evidence, county ignored)', () => {
+    const PORT_CHARLOTTE_PIN = { lat: 26.9759, lng: -82.0909 };
+
+    test('Punta Gorda + Charlotte county is refused', async () => {
+      mockCounty.mockImplementation(async () => 'Charlotte');
+      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Punta Gorda', zip: '33950' })).toEqual({ ok: false, county: null });
+      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Punta Gorda Isles' })).toEqual({ ok: false, county: null });
+    });
+
+    test('33950 alone is refused', async () => {
+      mockCounty.mockImplementation(async () => 'Charlotte');
+      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { zip: '33950' })).toEqual({ ok: false, county: null });
+    });
+
+    test('33983 + Punta Gorda is refused; 33980 + Port Charlotte is served', async () => {
+      mockCounty.mockImplementation(async () => 'Charlotte');
+      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Punta Gorda', zip: '33983' })).toEqual({ ok: false, county: null });
+      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Port Charlotte', zip: '33980' })).toEqual({ ok: true, county: 'Charlotte' });
+    });
+
+    test('Port Charlotte 33948, Englewood and ZIP-only 33983 stay served', async () => {
+      mockCounty.mockImplementation(async () => 'Charlotte');
+      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Port Charlotte', zip: '33948' })).toEqual({ ok: true, county: 'Charlotte' });
+      expect(await checkServiceArea({ lat: 26.96, lng: -82.35 }, { city: 'Englewood', zip: '34223' })).toEqual({ ok: true, county: 'Charlotte' });
+      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { zip: '33983' })).toEqual({ ok: true, county: 'Charlotte' });
+    });
+
+    test('with no key the same refusal applies', async () => {
+      const savedA = process.env.GOOGLE_API_KEY;
+      const savedB = process.env.GOOGLE_MAPS_API_KEY;
+      delete process.env.GOOGLE_API_KEY;
+      delete process.env.GOOGLE_MAPS_API_KEY;
+      try {
+        expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Punta Gorda' })).toEqual({ ok: false, county: null });
+        expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Port Charlotte', zip: '33980' })).toEqual({ ok: true, county: null });
+      } finally {
+        if (savedA !== undefined) process.env.GOOGLE_API_KEY = savedA;
+        if (savedB !== undefined) process.env.GOOGLE_MAPS_API_KEY = savedB;
+      }
+    });
+  });
+
   test('key configured, county resolves and is NOT served → out_of_area shape', async () => {
     mockCounty.mockResolvedValueOnce('Hardee');
     expect(await checkServiceArea({ lat: 27.5, lng: -81.8 })).toEqual({ ok: false, county: 'Hardee' });

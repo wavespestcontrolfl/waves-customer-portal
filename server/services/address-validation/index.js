@@ -7,8 +7,9 @@
  * { status: 'not_attempted' } and the gate falls back to model/deterministic
  * address signals exactly as before.
  *
- * Service area: Manatee, Sarasota, Charlotte (FL); DeSoto is NOT served. An address that
- * resolves outside these counties is out_of_service_area.
+ * Service area: Manatee, Sarasota, Charlotte (FL); DeSoto County and the city of
+ * Punta Gorda (Charlotte County) are NOT served. An address that resolves outside
+ * these counties, or in Punta Gorda, is out_of_service_area.
  *
  * AddressValidationResult:
  *   {
@@ -27,6 +28,7 @@
 
 const logger = require('../logger');
 const { isInServiceAreaCounty } = require('../call-triage-flags');
+const { isPuntaGordaLocality, isPuntaGordaZip } = require('../excluded-localities');
 const { normalizeState, normalizeStreetLine, parseRawAddress } = require('../../utils/address-normalizer');
 
 // Google address calls are fail-open by design — a HUNG call must fail the
@@ -98,7 +100,6 @@ function deriveStatus(result, county) {
   const verdict = result?.verdict || {};
   const address = result?.address || {};
   const components = address.addressComponents || [];
-  const inServiceArea = county ? isInServiceAreaCounty(county) : null;
   const granularity = verdict.validationGranularity || null;
   const premiseLevel = granularity === 'PREMISE' || granularity === 'SUB_PREMISE';
 
@@ -108,6 +109,11 @@ function deriveStatus(result, county) {
     state: pickComponent(components, 'administrative_area_level_1') || null,
     postal_code: pickComponent(components, 'postal_code') || null,
   };
+
+  // A served county does not make Punta Gorda served (owner ruling
+  // 2026-10-22): the validated city, or a Punta Gorda-only ZIP, is out.
+  const puntaGorda = isPuntaGordaLocality(normalized.city) || isPuntaGordaZip(normalized.postal_code);
+  const inServiceArea = county ? (isInServiceAreaCounty(county) && !puntaGorda) : null;
 
   const base = {
     inServiceArea,

@@ -196,7 +196,7 @@ const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { geocodeAddressWithStatus } = require('../services/geocoder');
 const { reverseGeocodeCounty } = require('../services/address-validation');
 const { isInServiceAreaCounty } = require('../services/call-triage-flags');
-const { isInServiceAreaBox, isInServiceAreaCoarseBox, servedSouthHillsborough } = require('../services/service-area');
+const { isInServiceAreaBox, isInServiceAreaCoarseBox, servedSouthHillsborough, isExcludedLocality, isExcludedZip } = require('../services/service-area');
 const { isAssessmentBooking, scopeToAssessmentBookings, ASSESSMENT_SERVICE_KEY } = require('../services/assessment-booking');
 const { isOpenLeadRow } = require('../services/lead-statuses');
 // The Waves Assessment's catalog identity for travel-gap padding — shared by
@@ -682,6 +682,11 @@ async function checkServiceArea(location, address = null) {
   // county with a served county's name (Charlotte County, VA) would pass
   // the name match alone. Outside the box is out of area, no network call.
   if (!isInServiceAreaCoarseBox(location.lat, location.lng)) return { ok: false, county: null };
+  // Excluded localities (Punta Gorda, owner ruling 2026-10-22) sit inside a
+  // served county, so the county name below cannot refuse them: the address's
+  // own city, or a ZIP that belongs only to one, does. No county is named in
+  // the answer (serviceAreaFailure uses the city / ZIP as the region).
+  if (isExcludedLocality(address?.city) || isExcludedZip(address?.zip)) return { ok: false, county: null };
   const key = process.env.GOOGLE_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
   // No key: no county lookup, so the DeSoto rectangle applies unless the
   // address's own ZIP proves a served locality (isInServiceAreaBox). With a

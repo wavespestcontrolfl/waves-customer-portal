@@ -6032,7 +6032,11 @@ supplied one is tried), parsed with `parseRawAddress` and geocoded with
 street-level quality filtering but `requireInServiceArea:false` (the box
 alone is never grounds to discard a geocode as unresolvable); checked
 against the service area via `checkServiceArea`, applied uniformly to every
-resolved location including a customer's stored coordinates: county via
+resolved location including a customer's stored coordinates: first, the
+address's own city or a Punta Gorda-only ZIP (33950, 33951, 33955, 33982) is out
+(Punta Gorda is not served per the 2026-10-22 owner ruling, although Charlotte
+County is; `services/excluded-localities.js`, city / ZIP only, no coordinate
+box); then county via
 `services/address-validation`'s `reverseGeocodeCounty` when a Google key is
 configured (a null county is NOT permission — 503
 `{ error: 'service_area_unavailable' }`, recoverable; a DeSoto county is out,

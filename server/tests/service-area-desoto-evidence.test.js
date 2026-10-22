@@ -7,6 +7,7 @@
 const fs = require('fs');
 const {
   isDesotoLocality, isDesotoZip, isInServiceAreaBox, zipFromAddressText,
+  isPuntaGordaLocality, isPuntaGordaZip, isExcludedLocality, isExcludedZip,
 } = require('../services/service-area');
 
 describe('DeSoto locality list', () => {
@@ -26,6 +27,49 @@ describe('DeSoto locality list', () => {
     expect(isDesotoZip('34266')).toBe(true);
     expect(isDesotoZip('34269-1234')).toBe(true);
     expect(isDesotoZip('34286')).toBe(false);
+  });
+});
+
+// Owner ruling 2026-10-22 ("block punta gorda"): the city is not served even
+// though Charlotte County is. City / ZIP text evidence only, no coordinate box.
+describe('Punta Gorda excluded locality', () => {
+  test.each(['Punta Gorda', 'punta gorda', 'PUNTA  GORDA', 'Punta Gorda Isles', 'Punta Gorda.'])(
+    '%s is Punta Gorda', (city) => {
+      expect(isPuntaGordaLocality(city)).toBe(true);
+      expect(isExcludedLocality(city)).toBe(true);
+    },
+  );
+
+  test.each(['Port Charlotte', 'Englewood', 'Rotonda West', 'North Port', 'Placida', 'Charlotte Harbor', '', null])(
+    '%s is not Punta Gorda and stays served', (city) => {
+      expect(isPuntaGordaLocality(city)).toBe(false);
+      expect(isExcludedLocality(city)).toBe(false);
+    },
+  );
+
+  test('Punta Gorda-only ZIPs are excluded, ZIP+4 included', () => {
+    for (const zip of ['33950', '33951', '33955', '33982', '33950-1234']) {
+      expect(isPuntaGordaZip(zip)).toBe(true);
+      expect(isExcludedZip(zip)).toBe(true);
+    }
+  });
+
+  test('ZIPs shared with Port Charlotte-area addresses (33980, 33983) are not excluded by ZIP alone', () => {
+    for (const zip of ['33980', '33983', '33948', '33952', '34223', '']) {
+      expect(isPuntaGordaZip(zip)).toBe(false);
+      expect(isExcludedZip(zip)).toBe(false);
+    }
+  });
+
+  test('the DeSoto helpers are unchanged and the excluded predicates still include DeSoto', () => {
+    expect(isExcludedLocality('Arcadia')).toBe(true);
+    expect(isExcludedZip('34266')).toBe(true);
+    expect(isPuntaGordaLocality('Arcadia')).toBe(false);
+  });
+
+  test('there is no Punta Gorda coordinate box: a Punta Gorda point stays decided by county', () => {
+    // 26.93, -82.05 is outside the DeSoto rectangle, so the coarse box passes it.
+    expect(isInServiceAreaBox(26.93, -82.05)).toBe(true);
   });
 });
 

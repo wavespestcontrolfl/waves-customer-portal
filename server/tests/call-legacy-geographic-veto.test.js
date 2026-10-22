@@ -195,6 +195,51 @@ describe('legacyGeographicVeto: conflicting evidence and on-file address (Codex 
   });
 });
 
+// Owner ruling 2026-10-22: Punta Gorda is not served; the rest of Charlotte
+// County is. A positive AV county verdict cannot clear it.
+describe('legacyGeographicVeto: Punta Gorda', () => {
+  const avCharlotte = { status: 'validated_accept', inServiceArea: true, county: 'Charlotte County' };
+
+  test('Punta Gorda + Charlotte county is vetoed, even with a positive AV verdict', () => {
+    expect(legacyGeographicVeto({
+      addressValidation: avCharlotte,
+      extracted: { city: 'Punta Gorda', zip: '33950', county: 'Charlotte' },
+    })).toEqual({ reason: 'punta_gorda_locality', county: 'Charlotte' });
+    expect(legacyGeographicVeto({
+      v2Extraction: { property: { service_address: { city: 'Punta Gorda', county: 'Charlotte' } } },
+      extracted: {},
+    })).toEqual(expect.objectContaining({ reason: 'punta_gorda_locality' }));
+  });
+
+  test('33950 alone (no city) is vetoed', () => {
+    expect(legacyGeographicVeto({ extracted: { zip: '33950' } }))
+      .toEqual(expect.objectContaining({ reason: 'punta_gorda_locality' }));
+  });
+
+  test('33983 with Punta Gorda is vetoed; 33980 with Port Charlotte and 33983 alone are served', () => {
+    expect(legacyGeographicVeto({ extracted: { city: 'Punta Gorda', zip: '33983' } }))
+      .toEqual(expect.objectContaining({ reason: 'punta_gorda_locality' }));
+    expect(legacyGeographicVeto({ addressValidation: avCharlotte, extracted: { city: 'Port Charlotte', zip: '33980' } })).toBeNull();
+    expect(legacyGeographicVeto({ addressValidation: avCharlotte, extracted: { zip: '33983' } })).toBeNull();
+  });
+
+  test('Port Charlotte 33948 and Englewood are served', () => {
+    expect(legacyGeographicVeto({ addressValidation: avCharlotte, extracted: { city: 'Port Charlotte', zip: '33948' } })).toBeNull();
+    expect(legacyGeographicVeto({ addressValidation: avCharlotte, extracted: { city: 'Englewood', zip: '34223' } })).toBeNull();
+  });
+
+  test('an on-file Punta Gorda address vetoes even when the call names a served town', () => {
+    expect(legacyGeographicVeto({
+      extracted: { city: 'Port Charlotte', zip: '33948' },
+      onFile: { city: 'Punta Gorda', zip: '33950' },
+    })).toEqual(expect.objectContaining({ reason: 'punta_gorda_locality' }));
+    expect(legacyGeographicVeto({
+      extracted: {},
+      onFile: { city: 'Punta Gorda', zip: '33982' },
+    })).toEqual(expect.objectContaining({ reason: 'punta_gorda_locality' }));
+  });
+});
+
 describe('legacy booking branch wiring', () => {
   test('only a VALID V2 extraction feeds the veto, and the on-file row is read before the booking branch', () => {
     const callAt = source.indexOf('legacyGeoVeto = legacyGeographicVeto({');

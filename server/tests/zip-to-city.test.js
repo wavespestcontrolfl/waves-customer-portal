@@ -15,7 +15,14 @@ describe('zipToCity', () => {
     expect(zipToCity('34293')).toBe('Venice'); // Sarasota
     expect(zipToCity('34286')).toBe('North Port'); // Sarasota
     expect(zipToCity('33952')).toBe('Port Charlotte'); // Charlotte
-    expect(zipToCity('33950')).toBe('Punta Gorda'); // Charlotte
+    expect(zipToCity('33983')).toBe('Port Charlotte'); // Charlotte (Deep Creek, shared with Port Charlotte)
+  });
+
+  test('Punta Gorda-only ZIPs are not served (owner ruling 2026-10-22)', () => {
+    for (const zip of ['33950', '33951', '33955', '33982']) expect(zipToCity(zip)).toBe('');
+    // Shared with Port Charlotte-area addresses: the ZIP alone stays served.
+    expect(zipToCity('33980')).toBe('Port Charlotte');
+    expect(zipToCity('33983')).not.toBe('Punta Gorda');
   });
 
   test('covers the canonical service-area ZIPs Codex flagged as missing', () => {
