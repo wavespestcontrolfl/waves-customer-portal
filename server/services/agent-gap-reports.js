@@ -599,7 +599,9 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
       terminal.tools.add(name);
     }
   }
-  const tiedToTerminalRefusal = (search) => [...terminal.tools].some((tool) => search.surfaced.has(tool) || search.closestTool === tool);
+  // Tied only when the search's own best match is the refusing tool: a search
+  // that merely surfaced it beside other asks keeps its row (Codex #6371 r17).
+  const tiedToTerminalRefusal = (search) => terminal.tools.has(search.closestTool);
 
   function toolResult(name, result, failed, meta) {
     trackTerminal(name, result, failed, meta);

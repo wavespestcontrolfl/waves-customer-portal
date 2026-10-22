@@ -724,6 +724,18 @@ describe('agent-gap-reports', () => {
         expect(insertedRows[0]).toMatchObject({ kind: 'missing_capability', summary: 'export payroll hours' });
       });
 
+      test('a multi-part search that only surfaced the refusing tool keeps its row (Codex #6371 r17)', async () => {
+        const collector = collectorFor();
+        collector.discovery({ query: 'export payroll hours and send the invoice' }, {
+          status: 'capability_unimplemented',
+          capabilities: [{ id: 'list_timesheets', domain: 'payroll' }, { id: 'send_invoice', domain: 'billing' }],
+        });
+        collector.toolResult('send_invoice', refusal('invoice_send_queued'), true, { round: 1 });
+        await collector.flush({ reply: "The bar can't export payroll hours from here yet, and the invoice text is already queued." });
+        expect(insertedRows).toHaveLength(1);
+        expect(insertedRows[0]).toMatchObject({ kind: 'missing_capability', summary: 'export payroll hours and send the invoice' });
+      });
+
       test('a refusal that IS a gap keeps the search row beside its blocked row', async () => {
         const collector = collectorFor();
         collector.discovery({ query: 'cancel a visit with charges' }, MISS);
