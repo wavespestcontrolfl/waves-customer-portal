@@ -941,6 +941,22 @@ async function everyFeasibleSlot(findTimeArgs, ctx) {
   return slots;
 }
 
+// What the search saw, for the audit row (owner audit 2026-10-22, finding 6):
+// about 66 visits a night ended "no valid slot" with every drop counter at 0,
+// and the row kept neither the days searched nor what the finder offered on
+// them, so a full week read like a fault. The window and, per day searched,
+// how many open starts find-time returned BEFORE any filter (it offers each
+// free gap's earliest start, so a count is the day's open gaps; a day with
+// none reads 0). Sundays are never searched, so they are not listed.
+function searchSummary(dateFrom, dateTo, slots) {
+  const open = {};
+  for (let d = dateFrom; d <= dateTo; d = shiftDateStr(d, 1)) {
+    if (new Date(`${d}T12:00:00Z`).getUTCDay() !== 0) open[d] = 0;
+  }
+  for (const slot of slots) if (slot && slot.date in open) open[slot.date] += 1;
+  return { date_from: dateFrom, date_to: dateTo, open_starts_by_date: open };
+}
+
 async function findValidCandidateSlots(service, prefs, baseCtx) {
   const geo = resolveGeo(service);
   if (!geo) return { current: null, candidates: [], note: 'no_geo' };
@@ -955,7 +971,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   if (dateFrom > dateTo) {
     // Window collapsed (visit sits at the very edge of the horizon) — nothing to do.
     const current = await computeCurrentPlacement(service, prefs, ctx);
-    return { current, candidates: [], drops: null, feasible: 0 };
+    return { current, candidates: [], drops: null, feasible: 0, search: { date_from: dateFrom, date_to: dateTo, open_starts_by_date: {} } };
   }
   const duration = service.estimated_duration_minutes || DEFAULT_DURATION;
   const category = prefs.service_category;
@@ -1021,7 +1037,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // rankSurvivorsForSharedModel). Gate on: SLOT_TAKEN candidates dropped and
   // every survivor re-scored on the shared model.
   const scored = await rankSurvivorsForSharedModel(service, geo, candidates, ctx, drops);
-  return { current, candidates: scored, drops, feasible: slots.length };
+  return { current, candidates: scored, drops, feasible: slots.length, search: searchSummary(dateFrom, dateTo, slots) };
 }
 
 module.exports = {

@@ -187,6 +187,28 @@ describe('findValidCandidateSlots', () => {
     expect(candidates.map((c) => c.date)).toEqual(['2026-08-10']);
   });
 
+  test('records what the search saw: the window and each searched day\'s open starts before any filter, so a full week reads as full (owner audit 2026-10-22, finding 6)', async () => {
+    findAvailableSlots.mockResolvedValue({
+      slots: [
+        { date: '2026-08-05', technician: { id: 't1', name: 'A' }, start_time: '08:00', end_time: '09:00', detour_minutes: 1, total_drive_minutes: 10, stops_that_day: 3, score: 1 },
+        { date: '2026-08-05', technician: { id: 't1', name: 'A' }, start_time: '13:00', end_time: '14:00', detour_minutes: 2, total_drive_minutes: 12, stops_that_day: 3, score: 2 },
+        // Dropped later (ends after the 17:00 close), still counted: the count is what find-time offered.
+        { date: '2026-08-06', technician: { id: 't1', name: 'A' }, start_time: '16:30', end_time: '17:30', detour_minutes: 1, total_drive_minutes: 10, stops_that_day: 3, score: 1 },
+      ],
+      total_feasible: 3,
+    });
+    const { search, drops } = await findValidCandidateSlots(SERVICE, { service_category: 'general', blackout: null }, ctx());
+    expect(drops.after_hours).toBe(1);
+    expect(search.open_starts_by_date['2026-08-05']).toBe(2);
+    expect(search.open_starts_by_date['2026-08-06']).toBe(1);
+    const days = Object.keys(search.open_starts_by_date);
+    // Every searched day is listed — an empty one as 0 — from the window's first day to its last; no Sunday.
+    expect(days[0]).toBe(search.date_from);
+    expect(days.length).toBeGreaterThan(2);
+    expect(days.every((d) => d >= search.date_from && d <= search.date_to && new Date(`${d}T12:00:00Z`).getUTCDay() !== 0)).toBe(true);
+    expect(Object.values(search.open_starts_by_date).filter((n) => n === 0).length).toBe(days.length - 2);
+  });
+
   test('returns no candidates (and no_geo note) when the service has no usable coordinates', async () => {
     const r = await findValidCandidateSlots({ ...SERVICE, lat: null, lng: null }, prefs, ctx());
     expect(r.candidates).toEqual([]);

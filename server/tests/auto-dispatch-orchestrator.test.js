@@ -578,6 +578,13 @@ test('no candidate slots → no_change NO_VALID_SLOT', async () => {
   expect(lastDecision('no_change').reason_code).toBe('NO_VALID_SLOT');
 });
 
+test('a NO_VALID_SLOT row keeps what the search saw (the window and each day\'s open starts), so a full week reads as full (finding 6)', async () => {
+  const SEARCH = { date_from: '2026-08-01', date_to: '2026-08-08', open_starts_by_date: { '2026-08-01': 0, '2026-08-03': 0 } };
+  candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [], drops: null, feasible: 0, search: SEARCH });
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(lastDecision('no_change')).toMatchObject({ reason_code: 'NO_VALID_SLOT', constraints: expect.objectContaining({ search: SEARCH }) });
+});
+
 test('apply mode spends a tight cap on the BEST-improvement move, not the first by date', async () => {
   const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
   process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
