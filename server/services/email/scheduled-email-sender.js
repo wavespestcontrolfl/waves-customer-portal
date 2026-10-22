@@ -16,6 +16,12 @@ const logger = require('../logger');
 const { emailSendLaterLive } = require('../../config/feature-gates');
 
 const MAX_ATTEMPTS = 3;
+const RETRY_GAP_SECONDS = 60;
+// Up to SEND_CONCURRENCY Gmail requests at once, and no new claim after
+// CLAIM_BUDGET_MS, so a slow Gmail cannot hold one sweep for many minutes
+// (the rest go on the next sweep, here or on another replica).
+const SEND_CONCURRENCY = 5;
+const CLAIM_BUDGET_MS = 30 * 1000;
 // A Gmail request is aborted well before STALE_MINUTES, so no request can
 // still be running when a stale claim becomes outcome_unknown.
 const SEND_TIMEOUT_MS = 60 * 1000;
@@ -90,14 +96,17 @@ async function settleStaleClaims(conn = db) {
   return rows.length;
 }
 
-// Claims ONE due row, just before it is sent, so an error on one email never
-// leaves others claimed but unsent (those would settle as outcome_unknown).
-// `tried` holds this run's rows: a refused email waits for the next minute.
+// Claims ONE due row, just before it is sent, so an error never leaves rows
+// claimed but unsent (those would settle as outcome_unknown). A refused email
+// keeps its claimed_at, so no replica claims it again for RETRY_GAP_SECONDS:
+// a brief Gmail failure cannot burn every attempt within one minute.
+// `tried` holds this run's rows.
 async function claimNext(conn = db, tried = []) {
   const { rows } = await conn.raw(`
     UPDATE scheduled_emails SET status = 'sending', claimed_at = now(), attempts = attempts + 1, updated_at = now()
     WHERE id = (
       SELECT id FROM scheduled_emails WHERE status = 'scheduled' AND send_at <= now() AND NOT (id = ANY(?::uuid[]))
+        AND (claimed_at IS NULL OR claimed_at <= now() - interval '${RETRY_GAP_SECONDS} seconds')
       ORDER BY send_at LIMIT 1 FOR UPDATE SKIP LOCKED
     )
     RETURNING id, to_address, subject, body_html, thread_id, reply_email_id, send_at, attempts`, [`{${tried.join(',')}}`]);
@@ -127,7 +136,8 @@ async function sendOne(row, { conn = db, gmail = require('./gmail-client') } = {
     if (err.providerOutcome?.outcomeUnknown === true) return settleUnknown(row, conn);
     const last = row.attempts >= MAX_ATTEMPTS;
     await conn('scheduled_emails').where(fence).update({
-      status: last ? 'failed' : 'scheduled', claimed_at: null,
+      // claimed_at stays: RETRY_GAP_SECONDS after it, any replica may try again.
+      status: last ? 'failed' : 'scheduled',
       last_error: String(err.message || 'send failed').slice(0, 500), updated_at: conn.fn.now(),
     });
     if (last) await alertOffice(row, 'failed');
@@ -157,28 +167,38 @@ async function settleUnknown(row, conn) {
   return 'outcome_unknown';
 }
 
+// Claims up to SEND_CONCURRENCY due rows for one parallel group.
+async function claimGroup(conn, tried) {
+  const group = [];
+  while (group.length < SEND_CONCURRENCY && tried.length < BATCH) {
+    const row = await claimNext(conn, tried);
+    if (!row) break;
+    tried.push(row.id);
+    group.push(row);
+  }
+  return group;
+}
+
 async function sendDueScheduledEmails({ conn = db, gmail } = {}) {
   if (!emailSendLaterLive()) return { enabled: false, settled: 0, results: [] };
   const settled = await settleStaleClaims(conn);
   const results = [];
   const tried = [];
-  for (let i = 0; i < BATCH; i += 1) {
-    const row = await claimNext(conn, tried);
-    if (!row) break;
-    tried.push(row.id);
-    try {
-      results.push(await sendOne(row, { conn, ...(gmail ? { gmail } : {}) }));
-    } catch (err) {
+  const claimUntil = Date.now() + CLAIM_BUDGET_MS;
+  while (tried.length < BATCH && Date.now() < claimUntil) {
+    const group = await claimGroup(conn, tried);
+    results.push(...await Promise.all(group.map((row) => sendOne(row, { conn, ...(gmail ? { gmail } : {}) }).catch((err) => {
       // The claim stays 'sending'; settleStaleClaims turns it into
       // outcome_unknown with an alert. The other emails still go out.
       logger.error(`[scheduled-email] ${row.id} errored (${err.code || 'error'})`);
-      results.push('error');
-    }
+      return 'error';
+    }))));
+    if (group.length < SEND_CONCURRENCY) break;
   }
   const missedAlerts = await raiseMissedAlerts(conn);
   const summary = { enabled: true, settled, results, missedAlerts };
   // Every claimed email was still tried; a run with an error reads as failed
-  // in job_health (runExclusive records the throw).
+  // in job_health (runScheduledSweep records the throw).
   if (results.includes('error') || missedAlerts > 0) {
     throw Object.assign(new Error(`scheduled-email sweep: ${results.filter((r) => r === 'error').length} error(s), ${missedAlerts} alert(s) not raised`), { summary });
   }
@@ -187,54 +207,25 @@ async function sendDueScheduledEmails({ conn = db, gmail } = {}) {
 
 const JOB_NAME = 'scheduled-email-send';
 
-// job_health without a fleet lease. Every replica sweeps (the row claim is
-// the fence, so no lease: a lease can wait for a slot or skip a minute and
-// send late). A failure always records; a success never overwrites a failure
-// that finished after this sweep started, so a concurrent empty sweep cannot
-// hide a failed one. No 'running' write, which could also mask a failure.
-async function recordSweepHealth(startedAt, error, conn = db) {
-  const finishedAt = new Date();
-  const values = [JOB_NAME, startedAt, finishedAt, Math.max(0, finishedAt - startedAt)];
-  try {
-    if (error) {
-      const { sanitizeJobError } = require('../../utils/cron-lock');
-      await conn.raw(`INSERT INTO job_health (job_name, last_started_at, last_finished_at, last_duration_ms, last_status, last_error, consecutive_failures, updated_at)
-        VALUES (?, ?, ?, ?, 'failed', ?, 1, ?)
-        ON CONFLICT (job_name) DO UPDATE SET last_started_at = EXCLUDED.last_started_at, last_finished_at = EXCLUDED.last_finished_at,
-          last_duration_ms = EXCLUDED.last_duration_ms, last_status = 'failed', last_error = EXCLUDED.last_error,
-          consecutive_failures = job_health.consecutive_failures + 1, updated_at = EXCLUDED.updated_at`,
-      [...values, sanitizeJobError(error.message || error), finishedAt]);
-      return;
-    }
-    await conn.raw(`INSERT INTO job_health (job_name, last_started_at, last_finished_at, last_duration_ms, last_status, last_success_at, consecutive_failures, updated_at)
-      VALUES (?, ?, ?, ?, 'success', ?, 0, ?)
-      ON CONFLICT (job_name) DO UPDATE SET last_started_at = EXCLUDED.last_started_at, last_finished_at = EXCLUDED.last_finished_at,
-        last_duration_ms = EXCLUDED.last_duration_ms, last_status = 'success', last_success_at = EXCLUDED.last_success_at,
-        last_error = NULL, consecutive_failures = 0, updated_at = EXCLUDED.updated_at
-      WHERE NOT (job_health.last_status = 'failed' AND job_health.last_finished_at > ?)`,
-    [...values, finishedAt, finishedAt, startedAt]);
-  } catch (err) {
-    logger.warn(`[scheduled-email] job_health record failed (${err.code || 'error'})`);
-  }
-}
-
-// The every-minute cron entry: one sweep at a time in this process, health
-// recorded by recordSweepHealth.
+// The every-minute cron entry: one sweep at a time in this process. No fleet
+// lease (the row claim is the fence); job_health through cron-lock's
+// recordLeaseFreeJobEnd, so a concurrent empty sweep cannot hide a failure.
 let sweeping = false;
 async function runScheduledSweep({ conn = db, gmail } = {}) {
   if (sweeping) return { skipped: 'overlap' };
   sweeping = true;
-  const startedAt = new Date();
+  const { recordLeaseFreeJobEnd } = require('../../utils/cron-lock');
+  const startedAt = Date.now();
   try {
     const summary = await sendDueScheduledEmails({ conn, gmail });
-    await recordSweepHealth(startedAt, null, conn);
+    await recordLeaseFreeJobEnd(JOB_NAME, startedAt, null);
     return summary;
   } catch (err) {
-    await recordSweepHealth(startedAt, err, conn);
+    await recordLeaseFreeJobEnd(JOB_NAME, startedAt, err);
     throw err;
   } finally {
     sweeping = false;
   }
 }
 
-module.exports = { runScheduledSweep, recordSweepHealth, OUTCOME_UNKNOWN_ERRORS, SEND_TIMEOUT_MS, sendDueScheduledEmails, settleStaleClaims, claimNext, sendOne, raiseMissedAlerts, MAX_ATTEMPTS, STALE_MINUTES };
+module.exports = { runScheduledSweep, OUTCOME_UNKNOWN_ERRORS, SEND_TIMEOUT_MS, sendDueScheduledEmails, settleStaleClaims, claimNext, sendOne, raiseMissedAlerts, MAX_ATTEMPTS, STALE_MINUTES };

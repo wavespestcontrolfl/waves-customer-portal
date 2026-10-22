@@ -40,7 +40,8 @@ jest.mock('../services/notification-service', () => ({
 const express = require('express');
 const gmail = require('../services/email/gmail-client');
 const { notifyAdmin } = require('../services/notification-service');
-const { sendDueScheduledEmails, recordSweepHealth } = require('../services/email/scheduled-email-sender');
+const { sendDueScheduledEmails } = require('../services/email/scheduled-email-sender');
+const { recordLeaseFreeJobEnd } = require('../utils/cron-lock');
 const migration = require('../models/migrations/20261022130000_scheduled_emails');
 const restoredMigration = require('../models/migrations/20261022150000_scheduled_emails_restored_at');
 const restoreKeyMigration = require('../models/migrations/20261022160000_scheduled_emails_restore_key');
@@ -62,7 +63,8 @@ jest.setTimeout(30000);
     to: 'fixture@example.invalid', subject: 'Fixture', body: 'Hi<br>there', draftText: 'Hi\nthere', sendAt: etIn(60), clientKey: randomUUID(), ...extra,
   });
   const cancel = (id, restoreKey = 'fixture-restore-key') => call('POST', `/scheduled/${id}/cancel`, { restoreKey });
-  const makeDue = (id, extra = {}) => database('scheduled_emails').where({ id }).update({ send_at: database.raw("now() - interval '1 minute'"), ...extra });
+  // Due now, and past any retry gap (time has passed since the last attempt).
+  const makeDue = (id, extra = {}) => database('scheduled_emails').where({ id }).update({ send_at: database.raw("now() - interval '1 minute'"), claimed_at: null, ...extra });
   const row = (id) => database('scheduled_emails').where({ id }).first();
 
   beforeAll(async () => {
@@ -279,16 +281,45 @@ jest.setTimeout(30000);
 
   test('job health: a success never hides a failure that finished after it started', async () => {
     const health = () => database('job_health').where({ job_name: 'scheduled-email-send' }).first();
-    const t0 = new Date(Date.now() - 5000);
-    await recordSweepHealth(new Date(Date.now() - 1000), new Error('sweep failed'));
+    const t0 = Date.now() - 5000;
+    await recordLeaseFreeJobEnd('scheduled-email-send', Date.now() - 1000, new Error('sweep failed'));
     expect(await health()).toMatchObject({ last_status: 'failed', consecutive_failures: 1 });
     // A concurrent sweep that started before the failure finished.
-    await recordSweepHealth(t0, null);
+    await recordLeaseFreeJobEnd('scheduled-email-send', t0, null);
     expect(await health()).toMatchObject({ last_status: 'failed', consecutive_failures: 1 });
     // A later sweep that started after it.
-    await recordSweepHealth(new Date(), null);
+    await recordLeaseFreeJobEnd('scheduled-email-send', Date.now(), null);
     expect(await health()).toMatchObject({ last_status: 'success', consecutive_failures: 0, last_error: null });
     await database('job_health').del();
+  });
+
+  test('a refused email waits a minute before any replica tries it again', async () => {
+    const { body } = await queue();
+    await makeDue(body.scheduled.id);
+    gmail.sendMessage.mockRejectedValue(new Error('Pre-send failure'));
+    expect((await sendDueScheduledEmails()).results).toEqual(['retry']);
+    // Another replica's sweep right after (its own tried list is empty).
+    expect((await sendDueScheduledEmails()).results).toEqual([]);
+    expect(await row(body.scheduled.id)).toMatchObject({ status: 'scheduled', attempts: 1 });
+    await database('scheduled_emails').where({ id: body.scheduled.id }).update({ claimed_at: database.raw("now() - interval '61 seconds'") });
+    expect((await sendDueScheduledEmails()).results).toEqual(['retry']);
+  });
+
+  test('due emails go to Gmail up to five at a time', async () => {
+    for (let i = 0; i < 6; i += 1) {
+      const { body } = await queue({ to: `batch${i}@example.invalid` });
+      await makeDue(body.scheduled.id);
+    }
+    let live = 0;
+    let peak = 0;
+    gmail.sendMessage.mockImplementation(async () => {
+      live += 1; peak = Math.max(peak, live);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      live -= 1;
+      return { id: `gmail-${randomUUID()}` };
+    });
+    expect((await sendDueScheduledEmails()).results).toEqual(Array(6).fill('sent'));
+    expect(peak).toBe(5);
   });
 
   test('with the gate off the sender sends nothing, and queued rows wait', async () => {
