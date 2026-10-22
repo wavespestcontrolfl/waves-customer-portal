@@ -24,12 +24,19 @@
  */
 
 const logger = require('../logger');
-const { lawnWateringSmsLive, lawnWateringRuleLive } = require('../../config/feature-gates');
+const { lawnWateringSmsLive, lawnWateringRuleLive, lawnWateringEveryVisitLive } = require('../../config/feature-gates');
 const { etDateString } = require('../../utils/datetime-et');
 
 const TEMPLATE_KEY = 'lawn_watering_instruction';
 const PURPOSE = 'lawn_watering_instruction';
 const SENDABLE_STATES = Object.freeze(['hold', 'water_in', 'hold_then_water_in']);
+// GATE_LAWN_WATERING_EVERY_VISIT (owner 2026-10-22, "for all combinations, a
+// text goes out"): a visit whose products need no watering change gets its
+// text too ("No watering change from today's treatment.").
+const EVERY_VISIT_STATES = Object.freeze([...SENDABLE_STATES, 'none']);
+// Why a visit has no instruction, for the office alert. A visit that logged no
+// product, or has no completion time, is not a watering question.
+const ALERT_REASONS = Object.freeze(['unruled_product', 'water_in_conflict', 'same_day_too_late', 'unchecked_rules', 'inputs_unreadable', 'report_not_built']);
 
 // Statuses that end the obligation for this visit. One try, then stop (owner
 // 2026-10-01): a send known NOT delivered ('failed') is final too, never
@@ -98,6 +105,7 @@ function lawnWateringSmsPlan({
   ruleGateOn = false,
   completedAt = null,
   completionTextRequested = true,
+  everyVisit = false,
   nowMs = Date.now(),
 } = {}) {
   if (!gateOn) return { send: false, reason: 'gate_off' };
@@ -112,7 +120,7 @@ function lawnWateringSmsPlan({
   // that failed or was withheld still gets it (owner 2026-09-30).
   if (!completionTextRequested) return { send: false, reason: 'completion_text_not_requested' };
   if (alreadySent) return { send: false, reason: 'already_sent' };
-  if (!instruction || !SENDABLE_STATES.includes(instruction.state)) {
+  if (!instruction || !(everyVisit ? EVERY_VISIT_STATES : SENDABLE_STATES).includes(instruction.state)) {
     return { send: false, reason: 'no_instruction' };
   }
   const lines = wateringLinesOf(instruction);
@@ -131,7 +139,8 @@ function lawnWateringSmsPlan({
  * @param {boolean} args.isBackfill
  * @param {string} args.deliveryMode  typedDeliveryMode
  * @param {boolean} args.internalOnly
- * @param {object} deps               { db, sendCustomerMessage, getTemplate, mergeNotes, throwIfDeliveryUnverified }
+ * @param {object} args.noClaim      write-gate wateringNoClaim (GATE_LAWN_WATERING_EVERY_VISIT): why the visit froze no instruction
+ * @param {object} deps               { db, sendCustomerMessage, getTemplate, mergeNotes, throwIfDeliveryUnverified, raiseAdminAlert? }
  * @returns {Promise<{ status: string }>} never throws
  */
 async function sendLawnWateringSms(args, deps) {
@@ -144,6 +153,7 @@ async function sendLawnWateringSms(args, deps) {
     const { record, svc, notes } = args;
     const instruction = notes?.lawnWateringFreeze?.wateringInstruction || null;
     const completedAt = instruction?.completedAt || null;
+    const everyVisit = lawnWateringEveryVisitLive();
     const plan = lawnWateringSmsPlan({
       instruction,
       isBackfill: args.isBackfill === true,
@@ -155,9 +165,19 @@ async function sendLawnWateringSms(args, deps) {
       ruleGateOn,
       completedAt,
       completionTextRequested: args.completionTextRequested === true,
+      everyVisit,
       nowMs: Date.now(),
     });
-    if (!plan.send) return { status: `skip_${plan.reason}` };
+    if (!plan.send) {
+      // GATE_LAWN_WATERING_EVERY_VISIT: the text was due (every earlier skip,
+      // such as no phone or a backfill, means it was not) but the visit froze
+      // no instruction. One office alert names the product or the clash, so a
+      // person can give the customer the steps.
+      if (everyVisit && plan.reason === 'no_instruction' && !instruction) {
+        return alertNoInstruction({ record, svc, notes, noClaim: args.noClaim }, deps);
+      }
+      return { status: `skip_${plan.reason}` };
+    }
 
     // Fail closed on a missing/inactive template row: no body, no send. No
     // marker either, so a later retry after the row is fixed can still send.
@@ -318,10 +338,90 @@ async function sendLawnWateringSms(args, deps) {
   }
 }
 
+// ── No instruction: the office alert ─────────────────────────────────────
+// The one-sentence why per reason; names are cut to fit the 110-character why.
+const NO_INSTRUCTION_WHY = {
+  unruled_product: ([a]) => `${a} has no watering rule, so the customer got no watering steps.`,
+  unchecked_rules: ([a]) => `${a} has no checked watering rule, so the customer got no watering steps.`,
+  water_in_conflict: ([a, b]) => (b ? `${a} and ${b} need opposite watering, so no watering text went out.`
+    : `${a} needs watering that clashes with another product, so no watering text went out.`),
+  same_day_too_late: ([a]) => `${a} must be watered in today, but the visit ended too late for a run.`,
+  inputs_unreadable: () => 'The visit\'s products or watering settings could not be read, so no text went out.',
+  report_not_built: () => 'The lawn report for this visit could not be built, so no watering text went out.',
+};
+const WHY_MAX = 110;
+
+function noInstructionWhy(noClaim) {
+  const { truncateAtWord } = require('../ops-digest');
+  const names = (noClaim.products.length ? noClaim.products : ['A product']).slice(0, 2);
+  for (const max of [40, 32, 24, 16]) {
+    const why = NO_INSTRUCTION_WHY[noClaim.reason](names.map((name) => truncateAtWord(name, max)));
+    if (why.length <= WHY_MAX) return why;
+  }
+  return NO_INSTRUCTION_WHY[noClaim.reason](['A product', 'another product']);
+}
+
+// The detail's first sentence per reason, from the product names (or "A product").
+const NO_INSTRUCTION_DETAIL = {
+  unruled_product: (products) => `${products} has no watering rule in the product catalog`,
+  unchecked_rules: (products) => `${products} has only a guessed watering rule`,
+  water_in_conflict: (products) => `${products} ask for watering that cannot be done together (a hold the label requires beside a water-in the label requires)`,
+  same_day_too_late: (products) => `${products} must be watered in the same day, and the visit ended too late to fit a run before 11 PM`,
+  inputs_unreadable: () => 'The visit\'s products or watering settings could not be read when the visit was completed',
+  report_not_built: () => 'The lawn report for this visit could not be built when the visit was completed',
+};
+const RULE_FIX = 'Text the customer the watering steps from the product labels, then ask Claude to fix the product\'s watering rule.';
+const READ_FIX = 'Text the customer the watering steps from the product labels, then check the products logged on this visit.';
+
+async function alertNoInstruction({ record, svc, notes, noClaim }, deps) {
+  if (!noClaim || !ALERT_REASONS.includes(noClaim.reason) || !Array.isArray(noClaim.products)) {
+    return { status: 'skip_no_instruction' };
+  }
+  // The alert first: its dedupe key makes a retry safe, so the visit is marked
+  // handled only once the alert is on record (never a marker with no alert).
+  const dedupeKey = `lawn-watering-no-instruction:${record.id}`;
+  let created = null;
+  try {
+    const raise = deps.raiseAdminAlert || require('../admin-alert-compose').raiseAdminAlert;
+    const products = noClaim.products.join(', ') || 'A product';
+    created = await raise('service', {
+      area: 'Comms',
+      action: 'Lawn watering text not sent',
+      why: noInstructionWhy(noClaim),
+      severity: 'needs-you',
+      who: 'either',
+      link: `/admin/customers?customerId=${svc.customer_id}`,
+      subject: { type: 'visit', id: String(svc.id) },
+      doneWhen: 'customer_given_watering_steps',
+    }, {
+      bell: true,
+      dedupeKey,
+      detail: `${NO_INSTRUCTION_DETAIL[noClaim.reason](products)}, so this lawn visit froze no watering instruction and the customer got no watering text. ${['inputs_unreadable', 'report_not_built'].includes(noClaim.reason) ? READ_FIX : RULE_FIX}`,
+      metadata: { reason: noClaim.reason, products: noClaim.products, scheduledServiceId: svc.id, serviceRecordId: record.id, customerId: svc.customer_id, dedupeKey },
+    });
+  } catch (err) {
+    logger.warn(`[lawn-watering-sms] no-instruction alert failed for service_record ${record.id}: ${err.message}`);
+    return { status: 'skip_no_instruction' };
+  }
+  if (!created) {
+    logger.warn(`[lawn-watering-sms] no-instruction alert NOT recorded for service_record ${record.id}; a retry raises it`);
+    return { status: 'skip_no_instruction' };
+  }
+  try {
+    const marker = { lawnWateringSmsStatus: 'skipped_no_instruction', lawnWateringNoClaimReason: noClaim.reason };
+    await deps.mergeNotes(record.id, marker);
+    Object.assign(notes, marker);
+  } catch (err) {
+    logger.warn(`[lawn-watering-sms] no-instruction marker write failed for service_record ${record.id}: ${err.message}`);
+  }
+  return { status: 'alerted_no_instruction' };
+}
+
 module.exports = {
   TEMPLATE_KEY,
   PURPOSE,
   SENDABLE_STATES,
+  EVERY_VISIT_STATES,
   lawnWateringSmsPlan,
   lawnWateringSmsAlreadyHandled,
   sendLawnWateringSms,

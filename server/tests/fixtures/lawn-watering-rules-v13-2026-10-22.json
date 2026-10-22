@@ -1,0 +1,201 @@
+{
+  "Acelepryn Insecticide": {
+    "by_target": [
+      {
+        "match": [
+          "caterpillar",
+          "armyworm",
+          "webworm",
+          "cutworm",
+          "looper",
+          "grassworm"
+        ],
+        "mode": "hold",
+        "hold_hours": 24,
+        "label_minimum": {
+          "hold_until": "dry"
+        }
+      },
+      {
+        "match": [
+          "grub"
+        ],
+        "mode": "water_in",
+        "water_in_inches": 0.25,
+        "water_in_by_hours": 24
+      }
+    ],
+    "source": "owner"
+  },
+  "Arena 50 WDG": {
+    "mode": "water_in",
+    "water_in_inches": 0.25,
+    "water_in_by_hours": 24,
+    "source": "owner"
+  },
+  "Artavia 2 SC (Azoxy)": {
+    "mode": "hold",
+    "hold_until": "dry",
+    "hold_hours": null,
+    "source": "owner"
+  },
+  "Atticus Talak 7.9 F": {
+    "mode": "hold",
+    "hold_hours": 24,
+    "label_minimum": {
+      "hold_until": "dry"
+    },
+    "source": "label"
+  },
+  "Blindside Herbicide": {
+    "mode": "hold",
+    "hold_hours": 24,
+    "label_minimum": {
+      "hold_until": "dry"
+    },
+    "then_water_in": {
+      "water_in_inches": 0.5,
+      "water_in_by_hours": 168
+    },
+    "source": "label"
+  },
+  "Celsius WG": {
+    "mode": "hold",
+    "hold_until": "dry",
+    "hold_hours": 24,
+    "label_minimum": {
+      "hold_until": "dry"
+    },
+    "source": "owner"
+  },
+  "Certainty Turf Herbicide": {
+    "mode": "hold",
+    "hold_hours": 24,
+    "label_minimum": {
+      "hold_hours": 2
+    },
+    "source": "owner"
+  },
+  "Dimension 2EW Dithiopyr 24% Pre-Emergent Liquid Herbicide": {
+    "mode": "water_in",
+    "water_in_inches": 0.5,
+    "water_in_by_hours": 336,
+    "source": "owner"
+  },
+  "Dispatch Sprayable Wetting Agent": {
+    "mode": "none",
+    "source": "label"
+  },
+  "Dylox 6.2 G Granular Insecticide": {
+    "mode": "water_in",
+    "water_in_inches": 0.25,
+    "water_in_by_hours": 24,
+    "water_in_same_day": true,
+    "source": "owner"
+  },
+  "Fusilade II Post Emergent Liquid Herbicide": {
+    "mode": "hold",
+    "hold_hours": 24,
+    "label_minimum": {
+      "hold_hours": 1
+    },
+    "source": "owner"
+  },
+  "Gravex 20 EW": {
+    "mode": "hold",
+    "hold_until": "dry",
+    "hold_hours": null,
+    "source": "owner"
+  },
+  "Headway Fungicide": {
+    "mode": "hold",
+    "hold_until": "dry",
+    "hold_hours": null,
+    "by_target": [
+      {
+        "match": [
+          "spring dead spot"
+        ],
+        "mode": "water_in",
+        "water_in_inches": 0.25,
+        "water_in_by_hours": 24,
+        "water_in_same_day": true
+      },
+      {
+        "match": [
+          "root dysfunction"
+        ],
+        "mode": "water_in",
+        "water_in_inches": 0.2,
+        "water_in_by_hours": 24
+      }
+    ],
+    "source": "owner"
+  },
+  "LESCO 10-0-22 50% PolyPlus OPTI45 50% YaraRega 2% Fe 2% Mg KMAG MOP SOP Turfgrass Granular Fertilizer": {
+    "mode": "water_in",
+    "water_in_inches": 0.25,
+    "water_in_by_hours": 24,
+    "source": "owner"
+  },
+  "LESCO 24-0-11 with PolyPlus OPTI": {
+    "mode": "water_in",
+    "water_in_inches": 0.25,
+    "water_in_by_hours": 24,
+    "source": "owner"
+  },
+  "LESCO 90/10 Nonionic Surfactant": {
+    "mode": "none",
+    "source": "owner"
+  },
+  "LESCO Chelated AM + Micros Turf & Ornamental Liquid Micronutrient": {
+    "mode": "none",
+    "source": "owner"
+  },
+  "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer": {
+    "mode": "water_in",
+    "water_in_inches": 0.5,
+    "water_in_by_hours": 336,
+    "source": "owner"
+  },
+  "LESCO K-Flow 0-0-25 17% S Turfgrass Liquid Fertilizer": {
+    "mode": "none",
+    "source": "owner"
+  },
+  "LESCO Nutra-TECH T&O Micronutrient Package": {
+    "mode": "none",
+    "source": "owner"
+  },
+  "LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide": {
+    "mode": "water_in",
+    "water_in_inches": 0.5,
+    "water_in_by_hours": 336,
+    "source": "label"
+  },
+  "Recognition Post Emergent Herbicide": {
+    "mode": "hold",
+    "hold_hours": 24,
+    "label_minimum": {
+      "hold_hours": 3
+    },
+    "source": "owner"
+  },
+  "Tetrino Insecticide": {
+    "mode": "water_in",
+    "water_in_inches": 0.25,
+    "water_in_by_hours": 24,
+    "source": "label"
+  },
+  "Topchoice Granular Insecticide": {
+    "mode": "water_in",
+    "water_in_inches": 0.25,
+    "water_in_by_hours": 24,
+    "source": "owner"
+  },
+  "Velista": {
+    "mode": "hold",
+    "hold_until": "dry",
+    "hold_hours": null,
+    "source": "label"
+  }
+}

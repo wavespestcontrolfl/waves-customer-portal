@@ -132,6 +132,25 @@ describe('item 1: a visit with a water-in product never says "No special waterin
       .toEqual({ inches: 0.5, hours: 24, sameDay: false });
   });
 
+  test('GATE_LAWN_WATERING_EVERY_VISIT: logged targets pick a target rule; a target the label gives no line for gives no advice', () => {
+    gateOn();
+    const prior = process.env.GATE_LAWN_WATERING_EVERY_VISIT;
+    process.env.GATE_LAWN_WATERING_EVERY_VISIT = 'true';
+    try {
+      const TARGET_ONLY = { source: 'label', by_target: [
+        { match: ['caterpillar'], mode: 'hold', hold_until: 'dry' },
+        { match: ['grub'], mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24 },
+      ] };
+      const use = (targets) => ({ ...product('Test Target Insecticide', TARGET_ONLY), targets });
+      expect(cleanup.waterInRuleOf([use(['White grubs'])])).toEqual({ inches: 0.25, hours: 24, sameDay: false });
+      expect(cleanup.waterInRuleOf([use(['Tropical sod webworm caterpillars'])])).toEqual({ hold: true });
+      expect(cleanup.waterInRuleOf([use(['Southern chinch bugs']), product('Granular Fertilizer', WATER_IN_ROW)])).toBeNull();
+      expect(cleanup.waterInRuleOf([use(['White grubs', 'Southern chinch bugs']), product('Granular Fertilizer', WATER_IN_ROW)])).toBeNull();
+    } finally {
+      if (prior === undefined) delete process.env.GATE_LAWN_WATERING_EVERY_VISIT; else process.env.GATE_LAWN_WATERING_EVERY_VISIT = prior;
+    }
+  });
+
   test('water-in beside a product with no rule (no hold) gives the water-in line', () => {
     gateOn();
     const rule = cleanup.waterInRuleOf([product('Granular Fertilizer', WATER_IN_ROW), product('Test Fungicide', null)]);

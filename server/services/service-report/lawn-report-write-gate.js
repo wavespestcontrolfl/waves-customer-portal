@@ -147,6 +147,19 @@ async function freezeReportFactsOnly({ service, knex } = {}) {
   }
 }
 
+// GATE_LAWN_WATERING_EVERY_VISIT: why this lawn visit froze NO watering
+// instruction, for the office alert the watering text raises. Never stored and
+// never customer copy. null = an instruction froze (or the gate is off). Every
+// exit of the synthesis reads it, so a step that failed (a read, the report
+// build, a write) alerts too: nothing later retries the freeze.
+function noClaimFor(instructionOut, wateringFreeze) {
+  if (wateringFreeze || !featureGates.lawnWateringEveryVisitLive()) return null;
+  if (instructionOut.productsLoadFailed || instructionOut.inputsFailed) return { reason: 'inputs_unreadable', products: [] };
+  const instruction = instructionOut.instruction;
+  if (instruction && !instruction.state && instruction.noClaim) return instruction.noClaim;
+  return { reason: 'report_not_built', products: [] };
+}
+
 /**
  * @param {object} input
  * @param {object} input.service  the service_records row (needs id, service_line/type, customer_id)
@@ -162,7 +175,14 @@ async function finalizeLawnReportSynthesis({ service, knex, coverageFreezeAllowe
   // Set once the report facts are frozen below; every return after that point carries it, so the completion
   // path folds it into its in-memory notes (its later whole-object writes would otherwise erase the key).
   let reportFactsFreeze = null;
-  const emptyWithFacts = () => (reportFactsFreeze ? { ...empty, reportFactsFreeze } : empty);
+  // Declared out here so every exit, the catch included, can say why no watering instruction froze.
+  const instructionOut = {};
+  let wateringFreeze = null;
+  const emptyWithFacts = () => {
+    const out = reportFactsFreeze ? { ...empty, reportFactsFreeze } : empty;
+    const wateringNoClaim = noClaimFor(instructionOut, wateringFreeze);
+    return wateringNoClaim ? { ...out, wateringNoClaim } : out;
+  };
 
   try {
     const { buildReportV1Data } = require('./report-data');
@@ -182,7 +202,6 @@ async function finalizeLawnReportSynthesis({ service, knex, coverageFreezeAllowe
     // reads them. The gate controls only this freeze; a render never reads it. Gate off: no read, no write.
     ({ record, freeze: reportFactsFreeze } = await freezeFactsInto(record, knex));
     const token = await ensureReportToken(service.id, knex);
-    const instructionOut = {};
     const coverageOut = {};
     const programVisitOut = {};
     const data = await buildReportV1Data(record, token, knex, buildOptions(instructionOut, programVisitOut, coverageOut)).catch(() => null);
@@ -250,7 +269,6 @@ async function finalizeLawnReportSynthesis({ service, knex, coverageFreezeAllowe
     // writes nothing; a retry (or a gate rollback and re-run) changes nothing
     // either. Gate off builds no instruction, so nothing is written, and
     // nothing here ever deletes an existing snapshot.
-    let wateringFreeze = null;
     // The frozen banner keeps only the treatment-specific lines: plan-dependent
     // sentences are composed at each render, never frozen.
     // Only a real claim is a snapshot: a state-null instruction, or one built
@@ -288,6 +306,8 @@ async function finalizeLawnReportSynthesis({ service, knex, coverageFreezeAllowe
         .then((row) => parseJsonObject(row && row.structured_notes).lawnWateringFreeze || null);
     }
 
+    const wateringNoClaim = noClaimFor(instructionOut, wateringFreeze);
+
     // "From your technician" paragraph (GATE_LAWN_TECH_PARAGRAPH, fixed sentences):
     // at most ONE model call, here, frozen first-writer-wins under its own top-level
     // key (never inside lawnReportV2, whose write above replaces the whole object).
@@ -309,6 +329,7 @@ async function finalizeLawnReportSynthesis({ service, knex, coverageFreezeAllowe
 
     return withVisitSummary({
       smsSummary: frozen.smsSummary, frozen, wateringFreeze, reportToken: token, warnings, persisted: true,
+      ...(wateringNoClaim ? { wateringNoClaim } : {}),
       ...(techParagraphFreeze ? { techParagraphFreeze } : {}),
       ...factsResult(reportFactsFreeze),
     }, visitSummaryFreeze);

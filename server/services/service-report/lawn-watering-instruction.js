@@ -30,6 +30,15 @@
 //      deadline: a window it reaches is still no claim, for review. Hold end
 //      = completion + longest timed hold rounded UP to the clock hour in ET.
 //
+//   E. (labelFirst only) a water-in the label requires THE SAME DAY (Dylox,
+//      water_in_same_day) beside a hold that leaves it no honest deadline:
+//      the label wins over our own rule. A hold whose rule carries a
+//      label_minimum (the owner's 24-hour herbicide hold, a "for best
+//      results" line) shortens to that minimum; a hold without one is the
+//      label's own direction and stays. Drying is then judged with
+//      SAME_DAY_DRY_HOURS instead of the six-hour floor (a spray on turf dries
+//      well inside it in daylight). Still no deadline: no claim, for review.
+//
 //   D. a water-in whose window is longer than LONG_WINDOW_HOURS (a
 //      pre-emergent: the label allows 14 days to get its ½ inch, owner
 //      2026-10-09 "follow the labels") is never a special run: it is one
@@ -112,6 +121,8 @@ const NONE_LINE_2 = 'Follow this week’s plan below.';
 // prohibited customer copy). This floor is used ONLY as the base for the
 // water-in deadline maths and is never printed.
 const DRY_HOLD_FLOOR_HOURS = 6; // used only when no dry-hold rule carries hold_hours
+// Rule E only: the drying allowance beside a same-day water-in the label requires.
+const SAME_DAY_DRY_HOURS = 2;
 const DRY_LABEL = 'today’s treatment has dried';
 const DRY_PLAN_LABEL = 'the spray has dried';
 const FULL_CYCLE = 'one full cycle on each turf zone';
@@ -410,7 +421,9 @@ function longWaterInLines(long, lead, combined) {
 
 // Each resolved rule by what it asks of the customer. A water-in is short (a
 // one-off run) or long (rule D) by its own window.
-const isLongWaterIn = (r) => finitePositive(r.water_in_by_hours, 24) > LONG_WINDOW_HOURS;
+// rain_counts: a label step rain may do ("if no rain falls within 7 days,
+// irrigate"), worded as a long window whatever its length.
+const isLongWaterIn = (r) => r.rain_counts === true || finitePositive(r.water_in_by_hours, 24) > LONG_WINDOW_HOURS;
 const RULE_GROUP = {
   hold: () => 'holds',
   water_in: (r) => (isLongWaterIn(r) ? 'longs' : 'waterIns'),
@@ -439,7 +452,7 @@ function noneInstruction(out, nones) {
 // rule's EXPLICIT hold_hours is a recorded minimum, so it counts as a timed
 // hold too (printed as a clock time beside the drying condition). The
 // synthetic six-hour floor is for the conflict check only and is never printed.
-function holdWindow(holds, at) {
+function holdWindow(holds, at, dryFloorHours = DRY_HOLD_FLOOR_HOURS) {
   const dryHolds = holds.filter((r) => r.hold_until === 'dry');
   const dryHours = dryHolds.map((r) => Number(r.hold_hours)).filter((h) => Number.isFinite(h) && h > 0);
   const timedHours = [
@@ -450,10 +463,33 @@ function holdWindow(holds, at) {
     ? ceilToHour(new Date(at.getTime() + Math.max(...timedHours) * HOUR_MS))
     : null;
   const dryEnd = dryHolds.length && !dryHours.length
-    ? new Date(at.getTime() + DRY_HOLD_FLOOR_HOURS * HOUR_MS)
+    ? new Date(at.getTime() + dryFloorHours * HOUR_MS)
     : null;
   const effectiveEnd = [timedEnd, dryEnd].filter(Boolean).sort((x, y) => y - x)[0] || null;
   return { timedEnd, effectiveEnd, waitsForDry: dryHolds.length > 0 };
+}
+
+// E. A hold shortened to the label's own minimum (rule unchanged when it
+// carries none).
+function toLabelMinimum(rule) {
+  const minimum = rule && rule.label_minimum;
+  if (!minimum || typeof minimum !== 'object') return rule;
+  const { label_minimum: _drop, hold_until: _until, hold_hours: _hours, ...rest } = rule;
+  return {
+    ...rest,
+    ...(minimum.hold_until === 'dry' ? { hold_until: 'dry' } : {}),
+    hold_hours: Number.isFinite(Number(minimum.hold_hours)) && Number(minimum.hold_hours) > 0 ? Number(minimum.hold_hours) : null,
+  };
+}
+
+// Why a visit has no instruction, for the office alert only. Never
+// enumerable, so it reaches no payload, freeze or log by accident.
+function withNoClaim(out, reason, products = []) {
+  Object.defineProperty(out, 'noClaim', {
+    value: { reason, products: [...new Set(products.filter(Boolean))] },
+    enumerable: false,
+  });
+  return out;
 }
 
 // B. Until-dry + timed hold is ONE hold that keeps both conditions: the clock
@@ -536,12 +572,13 @@ function finishInstruction(out, { hold, holdLabel, short, long }) {
   return out;
 }
 
-function buildWateringInstruction({ rules, completedAt, runtime = null, plainWhenNoSetup } = {}) {
+function buildWateringInstruction({ rules, completedAt, runtime = null, plainWhenNoSetup, labelFirst = false } = {}) {
   const out = emptyInstruction();
   const list = Array.isArray(rules) ? rules : [];
   const resolved = list.map(ruleOf);
   const at = toDate(completedAt);
-  if (!at || !list.length) return out;
+  if (!list.length) return withNoClaim(out, 'no_products');
+  if (!at) return withNoClaim(out, 'no_completion_time');
   // The visit's completion instant the lines are anchored to ("today",
   // "tonight"): the watering text checks freshness against it.
   out.completedAt = at.toISOString();
@@ -556,20 +593,46 @@ function buildWateringInstruction({ rules, completedAt, runtime = null, plainWhe
 
   // A. Any applied product with no rule: no claim, the legacy fail-closed path.
   // No other product may force a direction over a product we know nothing about.
-  if (resolved.some((r) => !r)) return out;
+  if (resolved.some((r) => !r)) {
+    return withNoClaim(out, 'unruled_product', list.map((entry, i) => (resolved[i] ? null : nameOf(entry))));
+  }
 
   const { holds, waterIns, longs, nones } = groupRules(resolved);
-  if (!holds.length && !waterIns.length && !longs.length) return noneInstruction(out, nones);
+  if (!holds.length && !waterIns.length && !longs.length) {
+    const none = noneInstruction(out, nones);
+    return none.state ? none : withNoClaim(none, 'unchecked_rules', list.map(nameOf));
+  }
 
-  const hold = holds.length ? holdWindow(holds, at) : null;
-  const short = waterIns.length
+  let hold = holds.length ? holdWindow(holds, at) : null;
+  let short = waterIns.length
     ? applyWaterIn(out, { waterIns, runtime, plainWhenNoSetup, at, holdEnd: hold && hold.effectiveEnd, timedEnd: hold && hold.timedEnd })
     : null;
+  // E. A same-day water-in the label requires wins over a hold that can wait
+  // less (see the header). Only when C left no deadline.
+  if (labelFirst && waterIns.length && !short && hold && waterIns.some((r) => r.water_in_same_day === true)) {
+    const shortened = holdWindow(holds.map(toLabelMinimum), at, SAME_DAY_DRY_HOURS);
+    const retry = applyWaterIn(out, { waterIns, runtime, plainWhenNoSetup, at, holdEnd: shortened.effectiveEnd, timedEnd: shortened.timedEnd });
+    if (retry) {
+      hold = shortened;
+      short = retry;
+    }
+  }
   // C. A short water-in with no honest deadline: no claim (see waterInDeadline).
-  if (waterIns.length && !short) return out;
+  if (waterIns.length && !short) {
+    // With no hold, only a same-day water-in fails: too late in the day to fit a run.
+    const clash = list.filter((entry, i) => resolved[i].mode === 'hold' || waterIns.includes(resolved[i])).map(nameOf);
+    return withNoClaim(out, hold ? 'water_in_conflict' : 'same_day_too_late', clash);
+  }
 
-  out.ruleSource = ruleSourceOf([...holds, ...waterIns, ...longs]);
   const long = longs.length ? longWaterIn(longs, at) : null;
+  // A long water-in whose deadline falls inside the hold cannot be followed
+  // (a 7-day hold beside a 7-day "if no rain, irrigate" step): no claim, the
+  // office hears of the clash. Gate off: as before.
+  if (labelFirst && long && hold && hold.effectiveEnd && long.by.getTime() <= hold.effectiveEnd.getTime()) {
+    const clash = list.filter((entry, i) => resolved[i].mode === 'hold' || longs.includes(resolved[i])).map(nameOf);
+    return withNoClaim(out, 'water_in_conflict', clash);
+  }
+  out.ruleSource = ruleSourceOf([...holds, ...waterIns, ...longs]);
   if (long && !short) applyLongOnly(out, long);
   const holdLabel = hold ? applyHold(out, hold, at) : null;
   return finishInstruction(out, { hold, holdLabel, short, long });
