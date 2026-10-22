@@ -382,11 +382,17 @@ function cutToSerial(text, room) {
   }
   return text.slice(0, end);
 }
-// What an entry needs at least: its own text for a scalar, brackets for a container
-// and the quotes for a string (the string is then cut to what is left).
+// A cut marker is paid for before it is needed: ,"[cut]":true in an object and
+// ,"[cut]" in a list (Codex #6375 r11). A container holds that room back while it
+// is filled, so a marker is never added without a charge.
+const OBJECT_MARKER_COST = JSON.stringify({ [CUT]: true }).length + 1;
+const LIST_MARKER_COST = JSON.stringify(CUT).length + 1;
+const markerCost = container => (Array.isArray(container) ? LIST_MARKER_COST : OBJECT_MARKER_COST);
+// What an entry needs at least: its own text for a scalar; brackets and its own
+// marker room for a container; the quotes for a string (then cut to what is left).
 const leastLeafCost = entry => {
   if (typeof entry === 'string') return 2;
-  if (entry && typeof entry === 'object') return 2;
+  if (entry && typeof entry === 'object') return 2 + markerCost(entry);
   return serialLength(entry);
 };
 
@@ -413,33 +419,38 @@ function returnNoteScalar(item, state) {
 }
 
 function returnNoteEntries(item, state, depth) {
-  chargeNote(state, 2);
+  const room = markerCost(item);
+  chargeNote(state, 2 + room);
+  let cut = false;
+  let out;
   if (Array.isArray(item)) {
-    const list = [];
+    out = [];
     for (const entry of item) {
-      if (!noteFits(state, 1 + leastLeafCost(entry))) { list.push(CUT); break; }
+      if (!noteFits(state, 1 + leastLeafCost(entry))) { out.push(CUT); cut = true; break; }
       chargeNote(state, 1);
-      list.push(returnNote(entry, state, depth + 1));
+      out.push(returnNote(entry, state, depth + 1));
     }
-    return list;
+  } else {
+    out = {};
+    let hiddenKeys = 0;
+    for (const [rawKey, entry] of Object.entries(item)) {
+      // A key is text the model reads too: a secret-shaped key is replaced (Codex #6375 r3).
+      const plainKey = unescapeSlashes(rawKey);
+      const scrubbedKey = scrubNote(redactString(plainKey, state)).text;
+      const key = scrubbedKey === plainKey ? rawKey : `[removed key ${hiddenKeys += 1}]`;
+      const keyCost = serialLength(key) + 2;
+      if (!noteFits(state, keyCost + leastLeafCost(entry))) { out[CUT] = true; cut = true; break; }
+      if (key !== rawKey) state.noteSecrets += 1;
+      chargeNote(state, keyCost);
+      if (entry !== null && entry !== undefined && isCredentialField(rawKey, entry)) {
+        state.noteSecrets += 1;
+        out[key] = REDACTED_FIELD;
+        chargeNote(state, serialLength(REDACTED_FIELD));
+      } else out[key] = returnNote(entry, state, depth + 1);
+    }
   }
-  const out = {};
-  let hiddenKeys = 0;
-  for (const [rawKey, entry] of Object.entries(item)) {
-    // A key is text the model reads too: a secret-shaped key is replaced (Codex #6375 r3).
-    const plainKey = unescapeSlashes(rawKey);
-    const scrubbedKey = scrubNote(redactString(plainKey, state)).text;
-    const key = scrubbedKey === plainKey ? rawKey : `[removed key ${hiddenKeys += 1}]`;
-    const keyCost = serialLength(key) + 2;
-    if (!noteFits(state, keyCost + leastLeafCost(entry))) { out[CUT] = true; break; }
-    if (key !== rawKey) state.noteSecrets += 1;
-    chargeNote(state, keyCost);
-    if (entry !== null && entry !== undefined && isCredentialField(rawKey, entry)) {
-      state.noteSecrets += 1;
-      out[key] = REDACTED_FIELD;
-      chargeNote(state, serialLength(REDACTED_FIELD));
-    } else out[key] = returnNote(entry, state, depth + 1);
-  }
+  // The marker room was held back; give it back when no marker was needed.
+  if (!cut) chargeNote(state, -room);
   return out;
 }
 
@@ -451,7 +462,7 @@ function returnNote(item, state, depth = 0) {
     state.noteBudget = NOTE_CAP;
     try { return returnNote(item, state, 1); } finally { delete state.noteBudget; }
   }
-  if (depth > MAX_DEPTH) { state.noteSecrets += 1; return '[too deeply nested]'; }
+  if (depth > MAX_DEPTH) { state.noteSecrets += 1; chargeNote(state, serialLength('[too deeply nested]')); return '[too deeply nested]'; }
   return returnNoteEntries(item, state, depth);
 }
 

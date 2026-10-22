@@ -87,7 +87,7 @@ function looksLikeBasicCredential(header, token) {
 // An environment-style assignment whose NAME says it is a secret (DB_PASSWORD=x,
 // STRIPE_SECRET_KEY=x, API_TOKEN=x). A fixed config format, not a prose label:
 // upper-case name, '=', no spaces (Codex #6375 r2).
-const ENV_SECRET_RE = /\b((?:[A-Z][A-Z0-9_]*)?(?:PASSWORD|PASSWD|PASS|SECRET|TOKEN|API_?KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]*)=("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)/g;
+const ENV_SECRET_RE = /\b((?:[A-Z][A-Z0-9_]*)?(?:PASSWORD|PASSWD|PASS|SECRET|TOKEN|API_?KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]*)=(\\"(?:[^\\\n]|\\(?!"))*\\"|\\'(?:[^\\\n]|\\(?!'))*\\'|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)/g;
 // Structural credential assignments in a config or header format (Codex #6375 r7):
 // "db.password: hunter22", "DB_PASSWORD = hunter22", "X-API-Key: abc123xyz",
 // "Authorization: Token abc123xyz". The KEY must end in a credential word (names
@@ -104,7 +104,9 @@ const AUTH_HEADER_RE = /(\bauthorization[ \t]*[:=][ \t]*)([A-Za-z][A-Za-z0-9_-]*
 // {"password":"hunter22"} (Codex #6375 r9).
 // A quoted value honors backslash escapes (\" inside JSON); an unquoted value stops at a field delimiter, so a harmless field before it
 // ("id":1,"password":"x") cannot swallow the next one (pre-push audit, r9).
-const KEY_ASSIGN_RE = /(?<![A-Za-z0-9_.-])(["']?)((?:api[ \t]+)?[A-Za-z][A-Za-z0-9_.-]*)\1([ \t]*[=:][ \t]*)("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|[^\s,;}\]"']{4,})/gi;
+// A double-serialized blob keeps its quotes escaped ({\"password\":\"hunter22\"}); the key and
+// value quotes may be a backslash plus a quote, and the output keeps that shape (Codex #6375 r11).
+const KEY_ASSIGN_RE = /(?<![A-Za-z0-9_.-])(\\?["']?)((?:api[ \t]+)?[A-Za-z][A-Za-z0-9_.-]*)\1([ \t]*[=:][ \t]*)(\\"(?:[^\\\n]|\\(?!"))*\\"|\\'(?:[^\\\n]|\\(?!'))*\\'|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|[^\s,;}\]"']{4,})/gi;
 const ASSIGN_KEY_WORDS = new Set(['password', 'passwd', 'secret', 'token', 'apikey', 'credential', 'credentials', 'auth', 'authorization']);
 function isAssignmentSecretKey(key) {
   const words = nameWords(key);
@@ -114,7 +116,7 @@ function isAssignmentSecretKey(key) {
 }
 // Matched by the marker's opening (an unquoted value now stops before ']').
 const REMOVED_OPEN = REMOVED.replace(/\]$/, '');
-const isAlreadyRemoved = value => value.replace(/^["']/, '').startsWith(REMOVED_OPEN);
+const isAlreadyRemoved = value => value.replace(/^\\?["']/, '').startsWith(REMOVED_OPEN);
 
 const JWT_RE = /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*/g;
 // A JSON-escaped link (https:\/\/user:pw@host\/path) is a link too: the scheme slashes
@@ -199,10 +201,16 @@ function scrubLongDigitRuns(text) {
 const BACKSTOP_TOKEN_RE = /[^\s,;:="'{}[\]()]+/g;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}(?::?\d{2}(?::?\d{2}(?:\.\d+)?)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/i;
+// Readable text is not random: an e-mail address, or a token that splits on - _ . /
+// into plain words and short numbers ("door-code-is-1234-west-side",
+// "invoice_2026_10_service_report.pdf"), stays (Codex #6375 r11).
+const PLAIN_PART_RE = /^(?:[A-Za-z]+|\d{1,6})$/;
+const isReadableToken = token => token.includes('@') || token.split(/[-_./]/).filter(Boolean).every(part => PLAIN_PART_RE.test(part));
+const letterDigitTransitions = token => (token.match(/[A-Za-z]\d|\d[A-Za-z]/g) || []).length;
 function looksLikeRandomToken(token) {
   if (token.length < 20 || !/[A-Za-z]/.test(token) || !/\d/.test(token)) return false;
-  if (UUID_RE.test(token) || ISO_DATE_RE.test(token)) return false;
-  if (new Set(token).size < 10) return false;
+  if (UUID_RE.test(token) || ISO_DATE_RE.test(token) || isReadableToken(token)) return false;
+  if (new Set(token).size < 10 || letterDigitTransitions(token) < 3) return false;
   return !/(.)\1{4}/.test(token);
 }
 function scrubRandomTokens(text) {
@@ -237,7 +245,7 @@ function scrubNoteText(input) {
   text = text.replace(KEY_ASSIGN_RE, (match, quote, key, sep, value) => {
     if (isAlreadyRemoved(value) || !isAssignmentSecretKey(key)) return match;
     removed += 1;
-    const valueQuote = /^["']/.test(value) ? value[0] : '';
+    const valueQuote = (value.match(/^\\?["']/) || [''])[0];
     return `${quote}${key}${quote}${sep}${valueQuote}${REMOVED}${valueQuote}`;
   });
   for (const pattern of PREFIXED_RES) text = text.replace(pattern, swap);

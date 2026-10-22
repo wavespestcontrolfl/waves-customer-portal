@@ -429,6 +429,44 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     expect(result.data.details.ok).toBe('fine');
   });
 
+  test('a 35-level object with one 2,000-character leaf stays within the cap plus one marker (r11)', async () => {
+    let note = { leaf: 'the dog stays in the back yard. '.repeat(63) };
+    for (let level = 0; level < 35; level += 1) note = { [`level_${level}`]: note, sibling: 'x' };
+    const result = await read(ENTRY, { id: 1, notes: note });
+    const marker = JSON.stringify({ [CUT]: true }).length + 1;
+    expect(JSON.stringify(result.data.notes).length).toBeLessThanOrEqual(NOTE_CAP + marker);
+    expect(JSON.stringify(result.data.notes)).toContain(CUT);
+  });
+
+  test('a deep object of scalars never appends an unpaid marker (r11)', async () => {
+    let note = { a: true };
+    for (let level = 0; level < 30; level += 1) {
+      note = Object.fromEntries([[`n${level}`, note], ...Array.from({ length: 40 }, (_, i) => [`k${level}_${i}`, i % 2 === 0])]);
+    }
+    const result = await read(ENTRY, { id: 1, notes: note });
+    expect(JSON.stringify(result.data.notes).length).toBeLessThanOrEqual(NOTE_CAP + JSON.stringify({ [CUT]: true }).length + 1);
+  });
+
+  test('a double-serialized blob with escaped quotes loses its password and keeps its shape (r11)', () => {
+    const blob = JSON.stringify(JSON.stringify({ id: 1, password: 'hunter22', ok: 'fine' }));
+    const { text, removed } = scrubNote(blob);
+    expect(text).not.toContain('hunter22');
+    expect(text).toContain('\\"password\\":\\"[removed]\\"');
+    expect(text).toContain('\\"ok\\":\\"fine\\"');
+    expect(removed).toBeGreaterThan(0);
+    expect(scrubNote('DB_PASSWORD=\\"hunter 22\\" next').text).not.toContain('hunter');
+  });
+
+  test('readable text with letters and digits stays: e-mail, door-code words, file names (r11)', () => {
+    const note = 'mail customer2026@example.com, door-code-is-1234-west-side, invoice_2026_10_service_report.pdf, WPC-2026-0001-final-notes-v2';
+    expect(scrubNote(note)).toEqual({ text: note, removed: 0 });
+  });
+
+  test('a random key and a random token are still removed (r11)', () => {
+    const { text } = scrubNote('keys k9Xq2LmZ7pR4tW8vB3nY6cH1dF5gJ0sQ and k3J9x2LmQ8vN4pR7tY1wZ5aB done');
+    expect(text).toBe(`keys ${REMOVED} and ${REMOVED} done`);
+  });
+
   test('a card number inside a long grouped digit run is masked', () => {
     const note = `ref 4242 4242 4242 4242${' 1111'.repeat(27)} end`;
     const { text, removed } = scrubNote(note);
