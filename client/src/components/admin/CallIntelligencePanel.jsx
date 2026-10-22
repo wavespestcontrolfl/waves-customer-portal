@@ -17,6 +17,7 @@
 //     a way to repoint it;
 //   - recordings that arrived after processing, adoptable in one click;
 //   - later outcomes (lead, estimate, visit, invoice) as associations.
+import { renderWithDidYouMean } from "./DidYouMean";
 import { useEffect, useRef, useState } from "react";
 import { Badge, Button, Input, Select, cn } from "../ui";
 import { adminFetch } from "../../utils/admin-fetch";
@@ -296,7 +297,7 @@ export default function CallIntelligencePanel({ callId, onJumpToQuote, onPlayAt,
                   const seq = ++searchSeq.current;
                   if (query.trim().length < 2) { setRelink((r) => (r ? { ...r, results: [] } : r)); return; }
                   try {
-                    const body = await adminFetch(`/admin/customers?search=${encodeURIComponent(query.trim())}&limit=8`);
+                    const body = await adminFetch(`/admin/customers?search=${encodeURIComponent(query.trim())}&limit=8&suggest=1`);
                     if (seq !== searchSeq.current) return;
                     const results = Array.isArray(body?.customers) ? body.customers : Array.isArray(body) ? body : [];
                     setRelink((r) => (r ? { ...r, results } : r));
@@ -307,7 +308,7 @@ export default function CallIntelligencePanel({ callId, onJumpToQuote, onPlayAt,
                 }}
               />
               <div className="flex flex-wrap gap-1.5">
-                {relink.results.map((cust) => (
+                {renderWithDidYouMean(relink.results, (cust) => (
                   <Button
                     key={cust.id}
                     size="sm"
@@ -320,7 +321,7 @@ export default function CallIntelligencePanel({ callId, onJumpToQuote, onPlayAt,
                   >
                     {[cust.first_name, cust.last_name].filter(Boolean).join(" ") || cust.id}
                   </Button>
-                ))}
+                ), { style: { flexBasis: "100%" } })}
                 {view.links.customer_id && (
                   <Button
                     size="sm"

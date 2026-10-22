@@ -7,7 +7,8 @@ import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import { setGlassDefault } from '../lib/estimate-glass-copy';
 import WavesShell from '../components/brand/WavesShell';
 import TrustFooter from '../components/brand/TrustFooter';
-import EstimateViewPage, { CombinedRecurringPriceCard, ContactGapFields, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, SectionOneTimeBlock, ServiceSection, SuccessCard, estimateAddServiceOffer, estimateHasRegulatedCertificateSurface, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimeLawnGuideOffered, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
+import { applicationMonthsBreakdown } from '../lib/estimateMonthlyAverage';
+import EstimateViewPage, { CombinedRecurringPriceCard, ContactGapFields, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, MonthlyAverageSummary, PlanTotalSummary, ReviewPhase, SectionOneTimeBlock, ServiceSection, SuccessCard, estimateAddServiceOffer, estimateHasRegulatedCertificateSurface, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimeLawnGuideOffered, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
 import oneTimeCopyModule from '../../../server/services/estimate-one-time-copy.js';
 
 const { oneTimeOnlyIntelligenceCopy, resolveOneTimeServiceCopy } = oneTimeCopyModule;
@@ -2706,5 +2707,299 @@ describe('OneTimePriceCard fallback (pre-push P0 on #3521)', () => {
   it('OneTimeBreakdownCard renders nothing for an empty breakdown (why the fallback exists)', () => {
     const { container } = render(<OneTimeBreakdownCard breakdown={{ total: 257, items: [] }} />);
     expect(container).toBeEmptyDOMElement();
+  });
+});
+
+// GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): the page prints "$X a
+// month" under each per-application price, one plan line for several services,
+// and the context line once. /data carries monthlyAverageEnabled only with the
+// gate on; without it the page is as before.
+describe('monthly average beside per-application prices', () => {
+  const cents = (text) => Math.round(parseFloat(text.match(/\$([\d.,]+)/)[1].replace(/,/g, '')) * 100);
+  const base = {
+    glassDefault: true,
+    estimate: {
+      customerFirstName: 'Casey', address: '1 Plan Way, Sarasota, FL 34236', serviceCategory: 'bundle',
+      acceptance: { mode: 'standard_slot_pick' }, defaultServiceMode: 'recurring', isOneTimeOnly: false,
+      showOneTimeOption: false, billByInvoice: false, membership: null, intelligence: null,
+    },
+    cta: { canAccept: true, terminalState: null, quoteRequired: false, reviewBeforeBooking: false },
+  };
+  const pestSection = (perApp, visits, monthly, extra = {}) => ({
+    key: 'pest_control', label: 'Pest Control', isRecurring: true, isPest: true, waveGuardTierEligible: true,
+    defaultFrequencyKey: 'quarterly', copy: { priceWording: {} },
+    frequencies: [{
+      key: 'quarterly', label: 'Quarterly', monthly, annual: monthly * 12, perVisit: perApp, perTreatment: perApp, visitsPerYear: visits,
+      perServiceTreatments: [{ service: 'pest_control', label: 'Pest Control', displayPrice: perApp, perTreatment: perApp, visitsPerYear: visits, monthly }],
+      included: [{ key: 'pest_control', label: 'Pest Control', detail: null }], addOns: [],
+    }],
+    ...extra,
+  });
+  const lawnSection = (perApp, visits, monthly) => ({
+    key: 'lawn_care', label: 'Lawn Care', isRecurring: true, isPest: false, waveGuardTierEligible: true,
+    defaultFrequencyKey: 'standard', copy: { priceWording: {} },
+    frequencies: [{
+      key: 'standard', label: 'Lawn Program', serviceCategory: 'lawn_care', visitsPerYear: visits, monthly, annual: monthly * 12,
+      billingFrequencyKey: 'monthly', perTreatment: perApp, billedPerApplication: true,
+      perServiceTreatments: [{ service: 'lawn_care', label: 'Lawn Care', displayPrice: perApp, perTreatment: perApp, visitsPerYear: visits, monthly }],
+      included: [{ key: 'fert', label: 'Fertilization + weed control', detail: null }], addOns: [],
+    }],
+  });
+  const stub = (payload) => vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => payload })));
+  const single = (enabled) => ({
+    ...base,
+    ...(enabled ? { monthlyAverageEnabled: true } : {}),
+    pricing: {
+      services: [pestSection(94, 4, 31.33)], renderFlags: {}, waveGuardTier: 'Bronze', askChips: [],
+      oneTimeBreakdown: { total: 0, items: [] }, defaultServiceMode: 'recurring',
+    },
+  });
+  const multi = (enabled) => ({
+    ...base,
+    ...(enabled ? { monthlyAverageEnabled: true } : {}),
+    pricing: {
+      services: [pestSection(90, 4, 30), lawnSection(56.4, 9, 42.3)],
+      frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 72.3, annual: 867.6 }],
+      combinedRecurring: { monthlySubtotal: 72.3, annualSubtotal: 867.6, waveGuardTierLabel: 'Silver', waveGuardDiscountPct: 0.1 },
+      renderFlags: { showRecurringSummary: true }, waveGuardTier: 'Silver', askChips: [],
+      setupFee: { amount: 99, service: 'waveguard_setup', label: 'WaveGuard setup', waivedWithPrepay: true },
+      oneTimeBreakdown: { total: 99, items: [{ service: 'waveguard_setup', label: 'WaveGuard setup', amount: 99, kind: 'charge' }] },
+      defaultServiceMode: 'recurring',
+    },
+  });
+
+  it('single service, gate on: the per-application price stays the price, the average hangs under it', async () => {
+    stub(single(true));
+    const { container } = render(<EstimateViewPage />);
+    const line = await waitFor(() => {
+      const el = container.querySelector('[data-monthly-average-line]');
+      expect(el).not.toBeNull();
+      return el;
+    });
+    expect(line.textContent).toBe('$31.33 a month');
+    expect(screen.getAllByText('$94.00').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Averaged over the year. You pay after each application.')).toHaveLength(1);
+    expect(container.querySelector('[data-monthly-average-summary]')).toBeNull();
+  });
+
+  it('multi service, gate on: service lines add up to the plan line, which equals the stored monthly total', async () => {
+    stub(multi(true));
+    const { container } = render(<EstimateViewPage />);
+    const summary = await waitFor(() => {
+      const el = container.querySelector('[data-monthly-average-summary]');
+      expect(el).not.toBeNull();
+      return el;
+    });
+    const rows = [...summary.querySelectorAll('div > div')].map((el) => el.textContent);
+    expect(rows).toContain('Pest Control$30.00 a month');
+    expect(rows).toContain('Lawn Care$42.30 a month');
+    const plan = summary.querySelector('[data-monthly-average-plan]').textContent;
+    expect(plan).toContain('Your plan averages (10% bundle savings included)');
+    expect(cents(plan.split(')')[1])).toBe(7230);
+    const perCard = [...container.querySelectorAll('[data-monthly-average-line]')].map((el) => cents(el.textContent));
+    expect(perCard.reduce((a, b) => a + b, 0)).toBe(7230);
+    expect(summary.textContent).toContain('Averaged over the year. You pay after each application.');
+    expect(summary.textContent).toContain('One-time charges are not in the average.');
+    // The plan line is the SUM of nothing the customer pays at once, and the combined "Plan total" ban stands.
+    expect(container.textContent).not.toMatch(/Plan total/i);
+  });
+
+  // GATE_ESTIMATE_APPLICATION_MONTHS (EST-2026-1185, codex #6399 r2): with the
+  // breakdown on, the cards drop their "$X a month" slices; the summary card
+  // carries per-application prices, both month amounts and the average.
+  it('pest quarterly + mosquito monthly, both gates on: no per-card slices, the breakdown card instead', async () => {
+    const mosquito = {
+      key: 'mosquito', label: 'Mosquito', isRecurring: true, isPest: false, waveGuardTierEligible: true,
+      defaultFrequencyKey: 'monthly12', copy: { priceWording: {} },
+      frequencies: [{
+        key: 'monthly12', label: 'Monthly', serviceCategory: 'mosquito', serviceTierKey: 'monthly12', visitsPerYear: 12,
+        monthly: 74.7, annual: 896.4, billingFrequencyKey: 'monthly', perTreatment: 74.7, billedPerApplication: true,
+        perServiceTreatments: [{ service: 'mosquito', label: 'Mosquito', displayPrice: 74.7, perTreatment: 74.7, visitsPerYear: 12, monthly: 74.7 }],
+        included: [{ key: 'mosquito_monthly12', label: 'Monthly mosquito control program', detail: null }], addOns: [],
+      }],
+    };
+    const payload = {
+      ...base,
+      monthlyAverageEnabled: true,
+      applicationMonthsEnabled: true,
+      pricing: {
+        services: [pestSection(115.2, 4, 38.4), mosquito],
+        frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 113.1, annual: 1357.2 }],
+        combinedRecurring: { monthlySubtotal: 113.1, annualSubtotal: 1357.2, waveGuardTierLabel: 'Silver', waveGuardDiscountPct: 0.1 },
+        renderFlags: { showRecurringSummary: true }, waveGuardTier: 'Silver', askChips: [],
+        oneTimeBreakdown: { total: 0, items: [] }, defaultServiceMode: 'recurring',
+      },
+    };
+    stub(payload);
+    const { container } = render(<EstimateViewPage />);
+    const summary = await waitFor(() => {
+      const el = container.querySelector('[data-application-months]');
+      expect(el).not.toBeNull();
+      return el;
+    });
+    expect(container.querySelectorAll('[data-monthly-average-line]')).toHaveLength(0);
+    expect(container.textContent).not.toContain('$38.40 a month');
+    expect(summary.querySelector('[data-application-months-applied]').textContent).toContain('$189.90');
+    expect(summary.querySelector('[data-application-months-other]').textContent).toContain('$74.70');
+    expect(summary.querySelector('[data-monthly-average-plan]').textContent).toContain('$113.10 a month');
+  });
+
+  it('single service with a positive one-time fee: the context sentence says one-time charges are not in the average', async () => {
+    const payload = single(true);
+    payload.pricing.setupFee = { amount: 99, service: 'waveguard_setup', label: 'WaveGuard setup', waivedWithPrepay: true };
+    payload.pricing.renderFlags = { showWaveGuardSetupFee: true };
+    stub(payload);
+    const { container } = render(<EstimateViewPage />);
+    await waitFor(() => expect(container.querySelector('[data-monthly-average-line]')).not.toBeNull());
+    expect(screen.getAllByText('Averaged over the year. You pay after each application. One-time charges are not in the average.')).toHaveLength(1);
+    // No fee: the plain sentence only (covered above).
+  });
+
+  describe('the one-time notice follows additive one-time breakdown rows, not either/or options', () => {
+    const flea = { service: 'flea', label: 'Flea Treatment', amount: 150, kind: 'charge' };
+    const notice = 'One-time charges are not in the average.';
+
+    it('single service: an additive row (flea) triggers it', async () => {
+      const payload = single(true);
+      payload.pricing.oneTimeBreakdown = { total: 150, items: [flea] };
+      stub(payload);
+      const { container } = render(<EstimateViewPage />);
+      await waitFor(() => expect(container.querySelector('[data-monthly-average-line]')).not.toBeNull());
+      expect(container.textContent).toContain(notice);
+    });
+
+    it('multi service summary: the same rule', async () => {
+      const payload = multi(true);
+      payload.pricing.setupFee = null;
+      payload.pricing.oneTimeBreakdown = { total: 150, items: [flea] };
+      stub(payload);
+      const { container } = render(<EstimateViewPage />);
+      const summary = await waitFor(() => {
+        const el = container.querySelector('[data-monthly-average-summary]');
+        expect(el).not.toBeNull();
+        return el;
+      });
+      expect(summary.textContent).toContain(notice);
+    });
+
+    it('an either/or one-time option (showOneTimeOption) does not trigger it', async () => {
+      const payload = single(true);
+      payload.estimate.showOneTimeOption = true;
+      payload.pricing.oneTimeBreakdown = { total: 250, items: [{ service: 'pest_control', label: 'One-Time Pest Control', amount: 250, kind: 'charge' }] };
+      stub(payload);
+      const { container } = render(<EstimateViewPage />);
+      await waitFor(() => expect(container.querySelector('[data-monthly-average-line]')).not.toBeNull());
+      expect(container.textContent).not.toContain(notice);
+    });
+
+    it('no one-time rows, no notice', async () => {
+      stub(single(true));
+      const { container } = render(<EstimateViewPage />);
+      await waitFor(() => expect(container.querySelector('[data-monthly-average-line]')).not.toBeNull());
+      expect(container.textContent).not.toContain(notice);
+    });
+  });
+
+  describe('plan credit comes from the SELECTED cadence combo', () => {
+    const comboPayload = ({ comboCredit, comboSuppressed = false, baseCredit = null }) => {
+      const payload = multi(true);
+      payload.pricing.frequencies = [{ key: 'quarterly', label: 'Quarterly', monthly: 72.3, annual: 867.6, ...(baseCredit ? { manualDiscount: baseCredit } : {}) }];
+      payload.pricing.serviceCadenceCombos = [{
+        selection: { pest_control: 'quarterly', lawn_care: 'standard' },
+        monthly: 62.3, annual: 747.6,
+        ...(comboCredit ? { manualDiscount: comboCredit } : {}),
+        ...(comboSuppressed ? { manualDiscountSuppressed: true } : {}),
+      }];
+      return payload;
+    };
+    const credit = { label: 'Referral Credit', amount: 120, recurringAmount: 120 };
+
+    it('uses the combo\'s own credit even when the base frequency carries none', async () => {
+      stub(comboPayload({ comboCredit: credit }));
+      const { container } = render(<EstimateViewPage />);
+      const summary = await waitFor(() => {
+        const el = container.querySelector('[data-monthly-average-summary]');
+        expect(el).not.toBeNull();
+        return el;
+      });
+      expect(summary.textContent).toContain('Referral Credit');
+      expect(summary.textContent).toContain('−$10.00 a month');
+      expect(cents(summary.querySelector('[data-monthly-average-plan]').textContent.split(')')[1])).toBe(6230);
+    });
+
+    it('ignores a stale base-frequency credit the combo suppresses, and then shows no average (nothing explains the gap)', async () => {
+      stub(comboPayload({ comboSuppressed: true, baseCredit: credit }));
+      const { container } = render(<EstimateViewPage />);
+      await screen.findAllByText('Pest Control');
+      expect(container.querySelector('[data-monthly-average-summary]')).toBeNull();
+      expect(container.querySelector('[data-monthly-average-line]')).toBeNull();
+    });
+  });
+
+  it('gate off: no average line, no summary, no context sentence', async () => {
+    stub(multi(false));
+    const { container } = render(<EstimateViewPage />);
+    await screen.findAllByText('Pest Control');
+    expect(container.querySelector('[data-monthly-average-line]')).toBeNull();
+    expect(container.querySelector('[data-monthly-average-summary]')).toBeNull();
+    expect(container.textContent).not.toMatch(/a month|Averaged over the year|Your plan averages/);
+  });
+
+  it('a plan whose cards do not add up to the stored monthly shows no average', async () => {
+    const payload = multi(true);
+    payload.pricing.frequencies = [{ key: 'quarterly', label: 'Quarterly', monthly: 99, annual: 1188 }];
+    payload.pricing.combinedRecurring = { ...payload.pricing.combinedRecurring, monthlySubtotal: 99 };
+    stub(payload);
+    const { container } = render(<EstimateViewPage />);
+    await screen.findAllByText('Pest Control');
+    expect(container.querySelector('[data-monthly-average-line]')).toBeNull();
+    expect(container.querySelector('[data-monthly-average-summary]')).toBeNull();
+  });
+
+  it('MonthlyAverageSummary: rounding remainder lines sum to the plan line; a credit prints as its own negative line', () => {
+    const model = {
+      multi: true, planMonthly: 90.33, bundlePct: 15, credit: null,
+      services: [
+        { key: 'a', label: 'Lawn Care', monthly: 35.5 },
+        { key: 'b', label: 'Pest Control', monthly: 11.06 },
+        { key: 'c', label: 'Tree & Shrub', monthly: 43.77 },
+      ],
+    };
+    const { container, rerender } = render(<MonthlyAverageSummary model={model} />);
+    const lines = [...container.querySelectorAll('div > div')].filter((el) => !el.hasAttribute('data-monthly-average-plan') && /^[A-Za-z&\s]+\$/.test(el.textContent));
+    expect(lines.reduce((sum, el) => sum + cents(el.textContent), 0)).toBe(cents(container.querySelector('[data-monthly-average-plan]').textContent.split(')')[1]));
+    rerender(<MonthlyAverageSummary model={{ ...model, credit: { label: 'Referral Credit', monthly: 2.08 } }} hasOneTime />);
+    expect(container.textContent).toContain('Referral Credit');
+    expect(container.textContent).toContain('−$2.08 a month');
+    expect(container.textContent).toContain('One-time charges are not in the average.');
+    // A single service has no summary.
+    rerender(<MonthlyAverageSummary model={{ ...model, multi: false }} />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  // GATE_ESTIMATE_APPLICATION_MONTHS (EST-2026-1185): the customer sees what
+  // each application costs, what each kind of month bills, then the average.
+  it('MonthlyAverageSummary with a breakdown: per-application prices, the two month amounts, then the average', () => {
+    const model = {
+      multi: true, planMonthly: 113.1, bundlePct: 10, credit: null,
+      services: [
+        { key: 'pest_control', label: 'Pest Control', perApplication: 115.2, visits: 4, monthly: 38.4 },
+        { key: 'mosquito', label: 'Mosquito', perApplication: 74.7, visits: 12, monthly: 74.7 },
+      ],
+    };
+    const breakdown = applicationMonthsBreakdown(model);
+    const { container } = render(<MonthlyAverageSummary model={model} breakdown={breakdown} />);
+    const text = container.textContent;
+    expect(text).toContain('$115.20 per application');
+    expect(text).toContain('every 3 months');
+    expect(text).toContain('$74.70 per application');
+    expect(container.querySelector('[data-application-months-applied]').textContent).toContain('Months with Pest Control (4 a year)');
+    expect(container.querySelector('[data-application-months-applied]').textContent).toContain('$189.90');
+    expect(container.querySelector('[data-application-months-other]').textContent).toContain('Other months (8 a year)');
+    expect(container.querySelector('[data-application-months-other]').textContent).toContain('Mosquito only');
+    expect(container.querySelector('[data-monthly-average-plan]').textContent).toContain('$113.10 a month');
+    // The per-service monthly slices are not printed in this layout.
+    expect(text).not.toContain('$38.40');
+    expect(text).not.toMatch(/per visit|\/mo\b/);
   });
 });

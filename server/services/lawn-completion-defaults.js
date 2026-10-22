@@ -11,6 +11,7 @@ const { calculateLawnOverallScore, resolveStressDamage } = require('../../shared
 const { detectServiceLine } = require('./service-report/service-line-configs');
 const { normalizeInventoryUnit } = require('./inventory-units');
 const { isServingProtocol } = require('./lawn-program');
+const { correctedMethod } = require('./service-report/report-cleanup-1020');
 
 function lawnCompletionDefaultsEnabled() {
   return gateEnvValue('GATE_LAWN_COMPLETION_DEFAULTS') && gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
@@ -84,7 +85,8 @@ function completionMethod(item, protocolProduct) {
   // without an explicit mode lets the parsed scope decide (Codex r13 P1).
   const mode = protocolProduct?.applicationMode;
   if (mode === 'spot' || (!mode && item.scope?.includes('SPOT'))) return 'spot_treatment';
-  if (item.product?.applicationMethod) return item.product.applicationMethod;
+  // GATE_REPORT_CLEANUP_1020: a granular product is never planned with a broadcast spray method.
+  if (item.product?.applicationMethod) return correctedMethod(item.product.applicationMethod, item.product);
   // Weighed WDG/WG/WSG/WP concentrates are still sprayed. The catalog
   // formulation, never the quantity unit, distinguishes spreader granules
   // ('Granule (G)', 'Granular pre-emergent on fertilizer', 'Granular bait')
@@ -292,4 +294,4 @@ function buildLawnCompletionDefaults(plan, context) {
   };
 }
 
-module.exports = { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttributesVisit, loadLawnCompletionContext, buildLawnCompletionDefaults, matchesLawnCompletionProtocol, archivedLawnRecipeMatches };
+module.exports = { completionMethod, lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttributesVisit, loadLawnCompletionContext, buildLawnCompletionDefaults, matchesLawnCompletionProtocol, archivedLawnRecipeMatches };

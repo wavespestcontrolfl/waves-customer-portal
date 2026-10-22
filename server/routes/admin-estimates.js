@@ -255,7 +255,9 @@ function estimateEmailIdempotencyKey(estimate, explicitAttemptKey = null) {
   return `estimate.delivery:${crypto.createHash('sha256').update(rawKey).digest('hex')}`;
 }
 
-function moneySummary(estimate = {}, { allowTotals = false } = {}) {
+const REVIEW_STALE_MESSAGE = 'The saved offer, its PDF copy or its monthly average changed before delivery. Review the current version; nothing was sent.';
+
+function moneySummary(estimate = {}, { allowTotals = false, average = null } = {}) {
   const monthlyTotal = parseFloat(estimate.monthly_total || estimate.monthlyTotal || 0);
   const annualTotal = parseFloat(estimate.annual_total || estimate.annualTotal || 0);
   const oneTimeTotal = parseFloat(estimate.onetime_total || estimate.oneTimeTotal || estimate.onetimeTotal || 0);
@@ -269,6 +271,10 @@ function moneySummary(estimate = {}, { allowTotals = false } = {}) {
         ? `$${monthlyTotal.toFixed(2)}/mo · $${annualTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/yr`
         : `$${monthlyTotal.toFixed(2)}/mo`;
     }
+    // GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): `average` is the
+    // resolved {priceLine, note} for a plan whose per-application lines
+    // reconcile to the stored monthly total; absent = the line as before.
+    if (average?.priceLine) return average.priceLine;
     return 'Priced per application — full breakdown inside';
   }
   if (oneTimeTotal > 0) return `$${oneTimeTotal.toFixed(2)} one-time`;
@@ -289,7 +295,11 @@ function estimateSendableAmount(estimate = {}) {
 // is intentionally rejected for them. Use proposal-specific copy instead.
 const PROPOSAL_NEXT_STEP_SUMMARY = 'Your formal proposal is attached as a PDF. There is no online checkout for a commercial bid — your Waves account manager will follow up to answer questions and finalize the agreement. Call (941) 297-5749 anytime.';
 
-function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode = false }) {
+// The PDF-copy decision helpers live with the rest of the feature (the review
+// preview, the verdict check and the send all use these).
+const emailPdfCopy = () => require('../services/estimate-email-pdf');
+
+function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode = false, pdfNote = '', average = null }) {
   const serviceSummary = inferEstimateServiceInterest({
     ...estimate,
     estimateData: estimate.estimate_data,
@@ -297,12 +307,20 @@ function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposa
   return {
     first_name: firstName,
     estimate_url: viewUrl,
-    price_summary: priceLine || moneySummary(estimate, { allowTotals: proposalMode }),
+    price_summary: !proposalMode && average?.priceLine
+      ? moneySummary(estimate, { average })
+      : (priceLine || moneySummary(estimate, { allowTotals: proposalMode })),
     service_summary: serviceSummary || '',
     property_address: estimate.address || '',
+    // GATE_ESTIMATE_MONTHLY_AVERAGE: the "Averaged over the year ..." line rides
+    // in front of the next-step paragraph (the template has no block for it, and
+    // a template publish is not needed). Absent average = the sentence as before.
     next_step_summary: proposalMode
       ? PROPOSAL_NEXT_STEP_SUMMARY
-      : 'When you are ready, open the estimate and accept it online. We will collect the final setup details after that.',
+      : `${average?.note ? `${average.note} ` : ''}When you are ready, open the estimate and accept it online. We will collect the final setup details after that.`,
+    // Only present when the PDF copy rides along (GATE_ESTIMATE_EMAIL_PDF):
+    // an absent key renders no block, so a send without it is unchanged.
+    ...(pdfNote ? { estimate_pdf_note: pdfNote } : {}),
   };
 }
 
@@ -893,20 +911,40 @@ async function buildEstimateSendPreview(estimate) {
   const viewUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
   const proposalMode = normalizeProposal(estimate).enabled;
   const priceLine = estimateEmailPriceLine(estimate);
+  // GATE_ESTIMATE_MONTHLY_AVERAGE: null with the gate off, so the email is unchanged.
+  const average = proposalMode ? null : await require('../services/estimate-monthly-average').emailAverageParts(estimate);
+  // The reviewed average copy is recorded with the review (and with a schedule built from it) so the send can
+  // refuse a changed one; absent = none (like pdfCopy, present only when there is one).
+  const averageText = require('../services/estimate-monthly-average').averageText(average);
   const sms = await smsTemplatesRouter.getTemplate('estimate_sent', {
     first_name: firstName, estimate_url: viewUrl,
   }, {}, { noVariants: true, audit: false });
   let email = null;
   const library = sendgrid.isConfigured() ? await EmailTemplateLibrary.loadTemplateByKey(proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery') : null;
+  // The reviewed PDF decision, recorded on SendGrid AND SMTP-fallback previews
+  // (the SMTP email has no note line, but the file rides along the same way): a
+  // review or schedule without it means "no PDF" at send time.
+  const pdfCopy = !proposalMode && await emailPdfCopy().deliveryPdfCopyDecision(estimate);
   if (library?.activeVersion) {
+    // GATE_ESTIMATE_EMAIL_PDF: the reviewer sees the PDF line the customer
+    // gets when the copy is attached. The note is a payload variable, not
+    // template text, so the reviewed contentHash (a template-version hash)
+    // is unaffected; the messageVersion covers the previewed text, and the
+    // send re-runs this same builder, so a review and its send agree.
+    const pdfNote = pdfCopy ? require('../services/pdf/estimate-doc-pdf').ESTIMATE_EMAIL_PDF_NOTES.delivery : '';
     const rendered = EmailTemplateLibrary.renderTemplate({
       template: library.template, version: library.activeVersion,
-      payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode }),
+      payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode, pdfNote, average }),
     });
-    email = { provider: 'sendgrid', subject: rendered.subject, text: rendered.text, versionId: library.activeVersion.id, contentHash: EmailTemplateLibrary.templateContentHash(library.template, library.activeVersion) };
+    // `pdfCopy` is the reviewed PDF decision, kept with the review (and with a
+    // schedule built from it). Present only when true, so a send with no PDF
+    // keeps its review byte-identical to before; a review without it means "no
+    // PDF" (sendEstimateNowInner).
+    email = { provider: 'sendgrid', subject: rendered.subject, text: rendered.text, versionId: library.activeVersion.id, contentHash: EmailTemplateLibrary.templateContentHash(library.template, library.activeVersion), ...(pdfCopy ? { pdfCopy: true } : {}), ...(averageText ? { monthlyAverage: averageText } : {}) };
   } else if (smtpFallbackAllowed()) {
     const rendered = estimateSmtpContent({ firstName, viewUrl, priceLine, proposalMode });
-    email = { provider: 'smtp', subject: rendered.subject, text: rendered.text, contentHash: crypto.createHash('sha256').update(JSON.stringify(rendered)).digest('hex') };
+    // The content hash is of the SMTP content alone (no note), so it is unchanged.
+    email = { provider: 'smtp', subject: rendered.subject, text: rendered.text, contentHash: crypto.createHash('sha256').update(JSON.stringify(rendered)).digest('hex'), ...(pdfCopy ? { pdfCopy: true } : {}) };
   }
   const messages = { sms: sms || null, email };
   const attempts = parseEstimateData(estimate.estimate_data)?.manualSendAttempts;
@@ -928,8 +966,10 @@ async function buildEstimateSendPreview(estimate) {
   };
 }
 
-async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey, attachments = [], proposalMode = false, versionId = null, expectedContentHash = null, reviewedProvider = null, onDispatch = null, estimateIds = null }) {
+async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey, attachments = [], pdf, proposalMode = false, versionId = null, expectedContentHash = null, reviewedProvider = null, onDispatch = null, estimateIds = null, average = null }) {
   const provider = sendgrid.isConfigured() ? 'sendgrid' : 'smtp';
+  // The delivery PDF copy's note, fence and veto handling (estimate-email-pdf.js).
+  const pdfPieces = emailPdfCopy().deliverySendPieces(pdf);
   if (reviewedProvider && reviewedProvider !== provider) return { ok: false, error: 'The reviewed email provider changed. Review the message again before sending.' };
   if (reviewedProvider === 'smtp') {
     const content = estimateSmtpContent({ firstName, viewUrl: `https://portal.wavespestcontrol.com/estimate/${estimate.token}`, priceLine, proposalMode });
@@ -942,13 +982,15 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
         ...(versionId ? { versionId } : {}),
         ...(expectedContentHash ? { expectedContentHash } : {}),
         to: estimate.customer_email,
-        payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode }),
+        payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode, pdfNote: pdfPieces.note, average }),
         recipientType: estimate.customer_id ? 'customer' : 'lead',
         recipientId: estimate.customer_id || null,
         triggerEventId: `estimate_delivery:${estimate.id}`,
         idempotencyKey: estimateEmailIdempotencyKey(estimate, idempotencyKey),
         categories: ['estimate_delivery'],
         attachments: Array.isArray(attachments) ? attachments : [],
+        // The delivery fence runs at the provider boundary (with the file or without it).
+        ...pdfPieces.templateOptions,
         onQueued: onDispatch,
         estimateId: estimate.id,
         ...(estimateIds ? { estimateIds } : {}),
@@ -956,7 +998,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
       if (result.blocked) {
         return { ok: false, blocked: true, error: result.reason || 'Email suppressed', template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
       }
-      return { ok: !!result.sent, providerAttempted: result.providerAttempted === true, providerAccepted: result.providerAccepted === true, messageId: result.message?.provider_message_id || null, template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
+      return { ok: !!result.sent, providerAttempted: result.providerAttempted === true, providerAccepted: result.providerAccepted === true, messageId: result.message?.provider_message_id || null, template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' , ...pdfPieces.resultExtras(result) };
     } catch (err) {
       if (versionId || !canFallbackFromTemplateEmailError(err)) {
         throw err;
@@ -1016,6 +1058,8 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
   } catch (err) {
     return { ok: false, providerAttempted: false, error: err.message, provider: 'smtp_fallback' };
   }
+  // The same final fence for the attached PDF copy on the SMTP path.
+  await pdfPieces.assertSmtpFence();
   onDispatch?.();
   await transporter.sendMail({
     from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
@@ -2676,6 +2720,14 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     // (deliveryClaimFresh in admin-estimate-persistence.js), so no marker
     // can slip in between this lock releasing and the provider handoff —
     // the lock itself is never held across provider calls.
+    // GATE_ESTIMATE_MONTHLY_AVERAGE: the reviewed average copy must still be what this send would carry
+    // (a gate flip or a price edit since the review or schedule). Resolved BEFORE the claim transaction because
+    // it reads billing state on other connections; a mismatch refuses the whole send below, before any channel.
+    const reviewedAverageStale = sendMethod !== 'sms'
+      && await require('../services/estimate-monthly-average').reviewedAverageStale(
+        options.reviewedMessages,
+        async () => (await db('estimates').where({ id: estimate.id }).first()) || estimate,
+      );
     const invalidatedNow = await db.transaction(async (trx) => {
       // Group advisory lock BEFORE any row lock when siblings are claimed
       // below (pre-push audit P1 after r42): two grouped sends / extensions
@@ -2691,6 +2743,14 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       if (!verdictRow) return 'invalidated_before_delivery';
       if (verdictRow.archived_at) return 'invalidated_before_delivery';
       if (options.reviewedOffer && estimateOfferVersion(verdictRow) !== options.reviewedOffer) {
+        return 'saved_offer_changed';
+      }
+      // The reviewed PDF decision must still hold (a gate flip, or the estimate
+      // joining a group, since the review or schedule): never silently add or
+      // drop the file. Reviews that carry no decision mean "no PDF" and are not
+      // stale (codex #6343 r6).
+      if (reviewedAverageStale) return 'saved_offer_changed';
+      if (sendMethod !== 'sms' && emailPdfCopy().reviewedPdfDecisionStale(options.reviewedMessages, await emailPdfCopy().deliveryPdfCopyDecision(verdictRow, trx))) {
         return 'saved_offer_changed';
       }
       let data;
@@ -2769,7 +2829,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     });
     if (invalidatedNow) {
       if (invalidatedNow === 'saved_offer_changed') {
-        throw Object.assign(new Error('The saved offer changed before delivery. Review the current version; nothing was sent.'), { statusCode: 409, code: 'ESTIMATE_REVIEW_STALE' });
+        throw Object.assign(new Error(REVIEW_STALE_MESSAGE), { statusCode: 409, code: 'ESTIMATE_REVIEW_STALE' });
       }
       await db('estimates')
         .where({ id: estimate.id, status: 'sending' })
@@ -3000,6 +3060,17 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             logger.error(`[admin-estimates] proposal PDF attachment failed for estimate ${estimate.id}: ${e.message}`);
           }
         }
+        // GATE_ESTIMATE_EMAIL_PDF: an ordinary estimate email carries the
+        // browser work-order document too, for customers who cannot open the
+        // link. The whole decision, address check, fence and render live in
+        // prepareDeliveryPdfCopy; it never throws, and no attachment sends the
+        // email exactly as before (no PDF, no note) with a warning on the
+        // channel result. The same validThrough pin as the proposal path keeps
+        // the PDF's date equal to the link's.
+        const pdfCopy = await emailPdfCopy().prepareDeliveryPdfCopy({
+          freshEstimate, sendTo: estimate.customer_email, validThrough: nextExpiresAt,
+          reviewedMessages: options.reviewedMessages, proposalMode,
+        });
         if (proposalPdfFailed) {
           // The proposal email + template promise an attached PDF, and the
           // public link doesn't expose it, so never send proposal copy with
@@ -3019,13 +3090,28 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             }
           }
           if (options.reviewedMessages && !options.reviewedMessages.email) throw new Error('The reviewed email template was unavailable. Review a new message before sending.');
+          // GATE_ESTIMATE_MONTHLY_AVERAGE: resolved from the row read just
+          // before this send (freshEstimate), not the row the request started
+          // with, so a price edit that landed during the send never ships a
+          // stale average. The review preview resolves from the row it read.
+          // Null with the gate off or for a commercial proposal.
+          const averageService = require('../services/estimate-monthly-average');
+          const average = proposalMode ? null : await averageService.emailAverageParts(freshEstimate);
+          // The early check (before the claim) stops the text too; this one covers an edit that landed between
+          // it and this build: the copy handed to the provider must be the copy the office reviewed. A mismatch
+          // fails the email channel (operator-visible, nothing dispatched, so not uncertain).
+          if (averageService.averageDiffersFromReview(options.reviewedMessages, average)) {
+            throw Object.assign(new Error(REVIEW_STALE_MESSAGE), { statusCode: 409, code: 'ESTIMATE_REVIEW_STALE' });
+          }
           const result = await sendEstimateEmail({
             estimate: proposalMode ? freshEstimate : estimate,
             firstName,
             viewUrl: emailViewUrl,
             priceLine: proposalMode ? freshPriceLine : priceLine,
+            average,
             idempotencyKey: options.idempotencyKey || options.emailIdempotencyKey || null,
-            attachments: proposalAttachments,
+            attachments: pdfCopy.attachment ? [pdfCopy.attachment] : proposalAttachments,
+            pdf: pdfCopy,
             proposalMode,
             versionId: options.reviewedMessages?.email?.versionId || null,
             expectedContentHash: options.reviewedMessages?.email?.contentHash || null,
@@ -3036,7 +3122,11 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           channels.email = result.ok
             ? { ok: true, providerAttempted: result.providerAttempted, providerAccepted: result.providerAccepted, provider: result.template || result.provider || 'email' }
             : { ok: false, error: result.error || 'Email send failed' };
+          pdfCopy.annotate(channels.email, result);
           if (result.ok && result.providerAccepted) {
+            // The provider accepted the email that carried the PDF: only now is
+            // its rate review disclosure evidence (never throws).
+            await pdfCopy.recordDelivered(result);
             if (options.leadShapeRef) options.leadShapeRef.delivered = true;
             await stampLeadHandoffWitness(estimate, options);
           }
@@ -5773,6 +5863,8 @@ router._internals = {
   estimateDataHasBlockingLeadAutomation,
   estimateMatchesSentOnlyScope,
   sendEstimateEmail,
+  moneySummary,
+  estimateEmailPayload,
   estimateEmailIdempotencyKey,
   smtpFallbackAllowed,
   resolveEstimateStatusPatch,

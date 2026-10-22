@@ -4,13 +4,14 @@
  * Without a window the key dedupes forever (unchanged behavior); with one,
  * only rows younger than the window count, under the same stable lock.
  */
-const mockCalls = { where: [], whereRaw: [], orderBy: [], raw: [], locks: [] };
+const mockCalls = { where: [], whereRaw: [], whereNull: [], orderBy: [], raw: [], locks: [] };
 const mockState = { existingRow: null };
 jest.mock('../models/db', () => {
   const builder = {
     where: jest.fn((...a) => { mockCalls.where.push(a); return builder; }),
     whereRaw: jest.fn((...a) => { mockCalls.whereRaw.push(a); return builder; }),
     orderBy: jest.fn((...a) => { mockCalls.orderBy.push(a); return builder; }),
+    whereNull: jest.fn((...a) => { mockCalls.whereNull.push(a); return builder; }),
     modify: jest.fn((fn) => { fn(builder); return builder; }),
     first: jest.fn(async () => mockState.existingRow),
   };
@@ -27,7 +28,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const NotificationService = require('../services/notification-service');
 
 beforeEach(() => {
-  mockCalls.where.length = 0; mockCalls.whereRaw.length = 0; mockCalls.orderBy.length = 0; mockCalls.raw.length = 0; mockCalls.locks.length = 0;
+  mockCalls.where.length = 0; mockCalls.whereRaw.length = 0; mockCalls.orderBy.length = 0; mockCalls.raw.length = 0; mockCalls.whereNull.length = 0; mockCalls.locks.length = 0;
   mockState.existingRow = null;
   jest.spyOn(NotificationService, 'create').mockResolvedValue({ id: 'n-new' });
 });
@@ -78,4 +79,26 @@ test('trx: the lock + probe + insert run on the CALLER\'s transaction, and error
   expect(NotificationService.create).toHaveBeenCalledWith(expect.objectContaining({ connection: callerTrx }));
   NotificationService.create.mockResolvedValueOnce(null);
   await expect(NotificationService.notifyAdmin('service', 't', 'b', { dedupeKey: 'k', trx: callerTrx })).rejects.toThrow(/insert failed/);
+});
+
+test('dedupeOpenOnly probes open rows only, at any age: a row someone closed never hides a new ring', async () => {
+  const out = await NotificationService.notifyAdmin('alert', 't', 'b', { dedupeKey: 'k', dedupeOpenOnly: true });
+  // No open row found: a fresh insert, and the option is not passed on to create().
+  expect(out).toMatchObject({ id: 'n-new', deduped: false });
+  expect(mockCalls.whereNull).toEqual([['done_at']]);
+  expect(mockCalls.where.some((a) => a[0] === 'created_at')).toBe(false);
+  expect(NotificationService.create).toHaveBeenCalledTimes(1);
+  expect(NotificationService.create.mock.calls[0][0]).not.toHaveProperty('dedupeOpenOnly');
+});
+
+test('without dedupeOpenOnly the probe never filters on done_at (unchanged)', async () => {
+  await NotificationService.notifyAdmin('alert', 't', 'b', { dedupeKey: 'k', dedupeWindowMs: 1000 });
+  expect(mockCalls.whereNull).toEqual([]);
+});
+
+test('dedupeOpenOnly with an open row: deduped, create never runs', async () => {
+  mockState.existingRow = { id: 'n-open', done_at: null };
+  const out = await NotificationService.notifyAdmin('alert', 't', 'b', { dedupeKey: 'k', dedupeOpenOnly: true });
+  expect(out).toMatchObject({ id: 'n-open', deduped: true });
+  expect(NotificationService.create).not.toHaveBeenCalled();
 });

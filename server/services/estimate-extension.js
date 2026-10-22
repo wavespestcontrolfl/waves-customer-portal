@@ -648,6 +648,10 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
         const newExpiryLabel = newExpiry.toLocaleDateString('en-US', {
           month: 'long', day: 'numeric', timeZone: 'America/New_York',
         });
+        // GATE_ESTIMATE_EMAIL_PDF: the PDF copy rides along (empty = as before).
+        const pdfCopy = await require('./estimate-email-pdf').openEstimateEmailPdf({
+          estimateId: estimate.id, templateKey: 'estimate.extended', validThrough: newExpiry, recipient: estimate.customer_email,
+        });
         const result = await EmailTemplateLibrary.sendTemplate({
           templateKey: 'estimate.extended',
           to: estimate.customer_email,
@@ -655,7 +659,10 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
             first_name: firstName,
             estimate_url: `https://portal.wavespestcontrol.com/estimate/${estimate.token}`,
             new_expiry: newExpiryLabel,
+            ...pdfCopy.payload,
           },
+          ...(pdfCopy.attachments.length ? { attachments: pdfCopy.attachments } : {}),
+          ...(pdfCopy.withProviderHandoff ? { withProviderHandoff: pdfCopy.withProviderHandoff } : {}),
           recipientType: estimate.customer_id ? 'customer' : 'lead',
           recipientId: estimate.customer_id || null,
           triggerEventId: `estimate_extended:${estimate.id}:${newExpiry.toISOString()}`,
@@ -668,6 +675,7 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
         });
         if (result?.sent) {
           emailResult = { sent: true };
+          await pdfCopy.recordDelivered?.(result);
         } else if (result?.deduped) {
           emailResult = { sent: false, reason: 'deduped' };
         } else {

@@ -206,13 +206,14 @@ async function loadLawnSqft(svc, knex) {
 
 // Whether /complete treats a 0 stock count on this visit as an advisory, not a
 // hold: a WaveGuard member's lawn completion allows negative inventory and
-// records the shortfall (complete-scheduled-service.js isWaveGuardLawnCompletion,
-// the same classifier, so the sheet never refuses what the server accepts). A
-// failed read answers false: the sheet then keeps its stock hold.
+// records the shortfall, and so does any lawn visit under GATE_LAWN_TS_STOCK_ADVISORY
+// (complete-scheduled-service.js isStockAdvisoryCompletion, the same classifier,
+// so the sheet never refuses what the server accepts). A failed read answers
+// false: the sheet then keeps its stock hold.
 async function loadStockAdvisory(svc, knex) {
   try {
     const customer = await knex('customers').where({ id: svc.customer_id }).first('waveguard_tier');
-    return require('./complete-scheduled-service').isWaveGuardLawnCompletion({
+    return require('./complete-scheduled-service').isStockAdvisoryCompletion({
       cust_waveguard_tier: customer?.waveguard_tier || null,
       service_type: svc.service_type,
     });
@@ -276,6 +277,11 @@ async function buildLawnReserviceFastContext(serviceId, knex = db) {
     lastVisit,
     // GATE_FAST_COMPLETE_WRAP_UP: the sheet shows its Wrap-up section. Gate off = no key at all.
     ...(require('../config/feature-gates').fastCompleteWrapUpLive() && { wrapUp: true }),
+    // GATE_ONE_TAP_REPORT: the sheet reads no note for products (its "fill from the note" tap goes); the note's mic
+    // stays. Gate off = no key at all.
+    ...(require('../config/feature-gates').oneTapReportLive() && { oneTap: true }),
+    // GATE_REPORT_CLEANUP_1020: the sheet's granular method default is on. Gate off = no key at all.
+    ...require('./service-report/report-cleanup-1020').methodCorrectionKey(),
   };
 }
 

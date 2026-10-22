@@ -46,6 +46,7 @@ jest.mock('../models/db', () => mockDb);
 jest.mock('../config/feature-gates', () => ({
   isEnabled: (key) => key === 'webhooks' || (key === 'legacyAiDrafts' && mockState.legacyGate),
   gateEnvValue: (gate) => process.env[gate] === 'true',
+  smsCourtesyAfterTemplateLive: () => process.env.GATE_SMS_COURTESY_AFTER_TEMPLATE === 'true',
 }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(async () => ({})) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));

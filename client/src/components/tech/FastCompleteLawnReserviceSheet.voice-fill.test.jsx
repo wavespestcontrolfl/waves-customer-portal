@@ -59,11 +59,11 @@ const read = (products, unclear = []) => ({ enabled: true, available: true, stat
 const CELSIUS_HALF = { productId: 'celsius', amount: 0.5, unit: 'oz', sameAsLast: false, method: 'spot_treatment', heard: 'half an ounce of Celsius' };
 const HEADWAY_THREE = { productId: 'headway', amount: 3, unit: 'lb', sameAsLast: false, method: 'granular_broadcast', heard: 'three pounds of Headway' };
 
-function makeRequest({ fill = read([CELSIUS_HALF]) } = {}) {
+function makeRequest({ fill = read([CELSIUS_HALF]), context = CONTEXT } = {}) {
   const calls = [];
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options });
-    if (path.endsWith('/lawn-reservice/fast-context')) return CONTEXT;
+    if (path.endsWith('/lawn-reservice/fast-context')) return context;
     if (path.endsWith('/voice-fill/products')) {
       const answer = typeof request.fill === 'function' ? request.fill() : request.fill;
       if (answer instanceof Error) throw answer;
@@ -100,6 +100,17 @@ describe('lawn re-service, voice fill off', () => {
     await openSheet(makeRequest(), {});
     expect(screen.queryByRole('button', { name: 'Fill products from my note' })).toBeNull();
     expect(mic.props.clipHandler).toBeUndefined();
+  });
+});
+
+describe('lawn re-service, voice fill on, the one-tap report (GATE_ONE_TAP_REPORT)', () => {
+  test('no fill button and no products read; the note\'s mic stays', async () => {
+    const request = makeRequest({ context: { ...CONTEXT, oneTap: true } });
+    await openSheet(request);
+    typeNote();
+    expect(screen.queryByRole('button', { name: 'Fill products from my note' })).toBeNull();
+    expect(typeof mic.props.clipHandler).toBe('function');
+    expect(request.fills()).toEqual([]);
   });
 });
 

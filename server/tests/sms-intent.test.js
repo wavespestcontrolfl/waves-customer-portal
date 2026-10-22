@@ -128,3 +128,85 @@ describe('isQuietSmsReaction — only affirmative tapbacks on non-questions are 
     }
   });
 });
+
+// 2026-10-14: Google Messages (Android) sends an emoji tapback as
+// `<emoji> to “<our text>”` with zero-width spaces around the emoji and spaces
+// inside the quotes — no "Reacted". It read as a normal text and rang the bell.
+describe('Android emoji tapback shape (no "Reacted")', () => {
+  const { isQuietSmsReaction } = require('../services/sms-intent');
+  const ZW = '\u200b';
+  const visitText = 'Hi Dana, Sam from Waves is here for your Every 6 Weeks Lawn Care Service.';
+  const android = (emoji, target = visitText) => ` ${ZW}${emoji}${ZW} to \u201c ${target} \u201d `;
+
+  test('the exact production body is a quiet reaction', () => {
+    const body = ` \u200b👍\u200b to \u201c Hi Dana, Sam from Waves is here for your Every 6 Weeks Lawn Care Service. \u201d `;
+    expect(isSmsReaction(body)).toBe(true);
+    expect(isQuietSmsReaction(body)).toBe(true);
+    expect(hasRescheduleOrAwayIntent(body)).toBe(false);
+  });
+
+  test('affirmative emoji on a statement are quiet; with or without the zero-width padding', () => {
+    for (const emoji of ['👍', '❤️', '👍🏽', '🙏']) {
+      expect([emoji, isQuietSmsReaction(android(emoji))]).toEqual([emoji, true]);
+      expect([emoji, isQuietSmsReaction(`${emoji} to \u201c${visitText}\u201d`)]).toEqual([emoji, true]);
+    }
+    expect(isQuietSmsReaction(android('👍', 'Your service is tomorrow'))).toBe(true);
+  });
+
+  test('a question target, or a non-acknowledgement emoji, stays loud', () => {
+    expect(isSmsReaction(android('👍', 'Does 9am work?'))).toBe(true);
+    expect(isQuietSmsReaction(android('👍', 'Does 9am work?'))).toBe(false);
+    expect(isQuietSmsReaction(android('👍', 'Reply YES to confirm Thursday'))).toBe(false);
+    for (const emoji of ['❓', '👎', '🚨']) {
+      expect(isSmsReaction(android(emoji))).toBe(true);
+      expect([emoji, isQuietSmsReaction(android(emoji))]).toEqual([emoji, false]);
+    }
+  });
+
+  test('prose and a real ask after the quote are not reactions', () => {
+    expect(isSmsReaction('👍 to everything')).toBe(false);
+    expect(isSmsReaction('Thumbs up to \u201cFriday\u201d')).toBe(false);
+    expect(isSmsReaction(`${android('👍')} Actually, can we reschedule to Friday?`)).toBe(false);
+    expect(isSmsReaction(`${android('👍')} Actually, can we reschedule to \u201cFriday\u201d`)).toBe(false);
+    expect(isSmsReaction('👍')).toBe(false);
+  });
+
+  test('existing shapes and removal shapes keep working', () => {
+    expect(isQuietSmsReaction('Reacted 👍 to "All done for today"')).toBe(true);
+    expect(isQuietSmsReaction('Removed ❤️ from "Thanks for the update"')).toBe(true);
+    expect(isQuietSmsReaction('Removed a like from "ok"')).toBe(true);
+    expect(isQuietSmsReaction('Liked \u201cSee you Thursday between 2 and 4\u201d')).toBe(true);
+  });
+});
+
+// codex #6331 r1: pad and emoji parts that can match the same character
+// backtrack cubically — 1600 zero-width joiners then 'x' took ~4.6 s.
+describe('reaction recognizers stay linear on adversarial input', () => {
+  const { isQuietSmsReaction, isAffirmativeSmsReaction } = require('../services/sms-intent');
+  const time = (fn) => { const t = process.hrtime.bigint(); const out = fn(); return [out, Number(process.hrtime.bigint() - t) / 1e6]; };
+  const units = ['\u200d', '\u200b', '\u200c', '\ufeff', ' ', '\u{1F3FD}', '\ufe0f', '👍', '1\ufe0f\u20e3'];
+  const inputs = {
+    zwj: '\u200d'.repeat(1600) + 'x',
+    zwsp: '\u200b'.repeat(1600) + 'x',
+    zwjThenQuote: ` \u200b${'\u200d'.repeat(1600)} to \u201cx\u201dx`,
+    emojiRun: '👍'.repeat(1600) + 'x',
+    modifierRun: '\u{1F3FD}'.repeat(1600) + 'x',
+    reactedZwj: `Reacted ${'\u200d'.repeat(1600)}x`,
+    mixed: Array.from({ length: 1600 }, (_, i) => units[i % units.length]).join('') + 'x',
+  };
+
+  test.each(Object.entries(inputs))('%s returns false quickly', (_name, body) => {
+    for (const fn of [isSmsReaction, isQuietSmsReaction, isAffirmativeSmsReaction]) {
+      const [out, ms] = time(() => fn(body));
+      expect(out).toBe(false);
+      expect(ms).toBeLessThan(50);
+    }
+  });
+
+  test('a body over the cap is not a reaction', () => {
+    const long = `Liked \u201c${'a'.repeat(5000)}\u201d`;
+    expect(isSmsReaction(long)).toBe(false);
+    expect(isAffirmativeSmsReaction(long)).toBe(false);
+    expect(isSmsReaction(`Liked \u201c${'a'.repeat(1600)}\u201d`)).toBe(true); // a full-length quoted text still counts
+  });
+});

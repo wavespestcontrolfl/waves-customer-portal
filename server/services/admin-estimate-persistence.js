@@ -13,6 +13,7 @@ const {
   isCommercialEstimateData,
 } = require('./estimate-delivery-options');
 const {
+  CLOSED_LEAD_STATUSES,
   attachLeadToEstimate,
   assertLeadCanAttachEstimate,
   leadMatchesEstimateContact,
@@ -39,6 +40,48 @@ function errorWithStatus(message, statusCode) {
 
 function normalizeLinkedLeadId(leadId) {
   return typeof leadId === 'string' ? leadId.trim() : leadId;
+}
+
+// A lead-form lead already owns a customer row (lead-webhook makes both), but
+// the Leads page's Create Estimate passes only the lead. Without this the saved
+// estimate kept customer_id NULL: hidden from the customer's page and its
+// lead-webhook draft orphaned (EST-2026-1185). The lead's customer is used only
+// when the lead is open, the customer row is live, and the typed contact still
+// matches the lead — the same contact rule the lead attach enforces — so a
+// builder retargeted at another person never inherits this customer.
+async function leadCustomerIdForEstimate(database, leadId, body) {
+  if (!leadId || body.customerId) return null;
+  const lead = await database('leads').where({ id: leadId }).whereNull('deleted_at')
+    .first('id', 'customer_id', 'status', 'phone', 'email');
+  if (!lead?.customer_id || CLOSED_LEAD_STATUSES.has(lead.status)) return null;
+  if (!leadMatchesEstimateContact(
+    { phone: lead.phone, email: lead.email },
+    { customer_phone: body.customerPhone, customer_email: body.customerEmail },
+  )) return null;
+  const customer = await database('customers').where({ id: lead.customer_id }).whereNull('deleted_at').first('id');
+  return customer ? String(customer.id) : null;
+}
+
+// The lead-form webhook's draft is superseded once staff save the lead's real
+// estimate. lead-webhook never FK-links that draft to its lead, so no save
+// reuses or retires it: it sat in the drafts list beside the sent quote
+// (EST-2026-1184), and the auto-send lane could still mail it. Only an
+// untouched one goes: never sent, viewed, scheduled or claimed by auto-send,
+// and linked to no lead. Archived, not deleted, so it can be restored; every
+// draft reader (auto-send, clarify asks, lists) skips an archived row.
+async function retireSupersededLeadWebhookDrafts(trx, { customerId, keepId }) {
+  return trx('estimates')
+    .where({ customer_id: customerId, source: 'lead_webhook', status: 'draft' })
+    .whereNot({ id: keepId })
+    .whereNull('archived_at')
+    .whereNull('sent_at')
+    .whereNull('viewed_at')
+    .whereNull('scheduled_at')
+    .whereRaw("COALESCE(estimate_data->'automation'->'autoSend'->>'claimedAt', '') = ''")
+    .whereNotExists(function linkedToLead() {
+      this.select(1).from('leads').whereRaw('leads.estimate_id = estimates.id');
+    })
+    .update({ archived_at: trx.fn.now(), updated_at: trx.fn.now() });
 }
 
 function estimateViewUrl(token) {
@@ -2282,6 +2325,10 @@ async function createOrReuseAdminEstimate({
     throw errorWithStatus('Invalid draft identifier.', 400);
   }
   const linkedLeadId = normalizeLinkedLeadId(body.leadId);
+  // Resolved BEFORE pricing so member perks, property checks and the write all
+  // see the same customer the builder would have sent.
+  const leadCustomerId = await leadCustomerIdForEstimate(database, linkedLeadId, body);
+  if (leadCustomerId) body = { ...body, customerId: leadCustomerId };
   const pricingOut = {};
   const writeFields = await resolveEstimateWritePayload({
     database,
@@ -2383,6 +2430,17 @@ async function createOrReuseAdminEstimate({
     if (linkedLeadId) {
       const lead = await firstForUpdate(trx('leads').where({ id: linkedLeadId }).whereNull('deleted_at'));
       if (!lead) throw errorWithStatus('Lead not found', 404);
+      // The lead's customer was read before pricing, unlocked. Re-assert it on
+      // the locked lead and the live customer row: a lead unlinked or a
+      // customer deleted during pricing must not commit the stale customer
+      // (codex #6394 r1). The customer row is read, not locked — taking a
+      // customer lock after the lead lock would invert the order other
+      // customer writers use.
+      if (leadCustomerId) {
+        const customerStillLive = String(lead.customer_id || '') === leadCustomerId
+          && await trx('customers').where({ id: leadCustomerId }).whereNull('deleted_at').first('id');
+        if (!customerStillLive) throw errorWithStatus('This lead changed while saving; refresh and try again.', 409);
+      }
 
       if (lead.estimate_id) {
         const existingEstimate = await firstForUpdate(trx('estimates').where({ id: lead.estimate_id }));
@@ -2486,6 +2544,11 @@ async function createOrReuseAdminEstimate({
           // maximal edit, not a sent-unedited (same contract as
           // reviseAdminEstimate — see estimate-learning.js).
           await recordPreSendRevision({ priorEstimate: existingEstimate, trx });
+          // A reused lead draft supersedes the webhook draft the same way a
+          // new estimate does (codex #6394 r1).
+          if (updated.customer_id) {
+            await retireSupersededLeadWebhookDrafts(trx, { customerId: updated.customer_id, keepId: updated.id });
+          }
           clearEstimatePricingCache(existingEstimate.id);
           return {
             estimate: updated,
@@ -2524,6 +2587,9 @@ async function createOrReuseAdminEstimate({
         technician,
         allowReplacingEstimateId: canReplaceLinkedEstimate,
       });
+      if (created.customer_id) {
+        await retireSupersededLeadWebhookDrafts(trx, { customerId: created.customer_id, keepId: created.id });
+      }
     }
 
     return {

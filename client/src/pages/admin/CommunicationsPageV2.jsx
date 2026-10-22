@@ -53,6 +53,7 @@
 //   messages. This is the untrusted-input boundary — flag any
 //   missing signature verification or path that creates customers
 //   from arbitrary inbound numbers without rate-limiting.
+import { renderWithDidYouMean } from "../../components/admin/DidYouMean";
 import { isAcceptedSms, unansweredSmsReply } from "../../utils/sms-delivery";
 import React, {
   useState,
@@ -62,7 +63,7 @@ import React, {
   useRef,
 } from "react";
 import useLinkLibrary from "../../hooks/useLinkLibrary";
-import { STATIC_COMPOSER_LINKS, appendStaticLinkClause, libraryLinkClause, combineAppendedDraft, consultationLineOf, removeConsultationClause } from "../../lib/composerLinks";
+import { STATIC_COMPOSER_LINKS, appendStaticLinkClause, staticLinkPresent, libraryLinkClause, combineAppendedDraft, consultationLineOf, removeConsultationClause } from "../../lib/composerLinks";
 import {
   Bell,
   Bot,
@@ -96,6 +97,7 @@ import CallRoutingSettingsV2 from "../../components/admin/CallRoutingSettingsV2"
 import { callViaBridge } from "../../components/admin/CallBridgeLink";
 import Customer360ProfileV2 from "../../components/admin/Customer360ProfileV2";
 import InsertLinkSheet from "../../components/admin/InsertLinkSheet";
+import { HOW_TO_CAPTION, HOW_TO_GUIDE_LINKS } from "../../lib/howToGuides";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import {
   Badge,
@@ -2524,11 +2526,11 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // bearer-link machinery — append once, confirm in the result line, and
   // refuse to stack a duplicate.
   const handleInsertLibraryLink = (link) => {
-    if (msgBody.includes(link.url)) {
+    if (staticLinkPresent(msgBody, link)) {
       setSendResult({ ok: true, text: `${link.name} is already in the message.` });
       return;
     }
-    setMsgBody((b) => appendStaticLinkClause(b, { url: link.url, clause: libraryLinkClause(link) }));
+    setMsgBody((b) => appendStaticLinkClause(b, { url: link.url, clause: libraryLinkClause(link), guide: Array.isArray(link.steps) ? link : null }));
     setSendResult({ ok: true, text: `${link.name} added.` });
   };
 
@@ -2812,6 +2814,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       ...CUSTOMER_COMPOSER_LINKS.filter((l) => (!l.dynamic || (smsIsAdminRole && toNumber.trim()))
         && (l.key !== "receipt" || receiptLinksEnabled)
         && (l.key !== "consultation" || consultationLinksEnabled)),
+      ...HOW_TO_GUIDE_LINKS,
       ...(libraryLinks || []),
     ],
     [libraryLinks, smsIsAdminRole, toNumber, receiptLinksEnabled, consultationLinksEnabled],
@@ -3368,7 +3371,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
               if (val.length >= 2) {
                 try {
                   const r = await fetch(
-                    `${API_BASE}/admin/customers?search=${encodeURIComponent(val)}&limit=8`,
+                    `${API_BASE}/admin/customers?search=${encodeURIComponent(val)}&limit=8&suggest=1`,
                     {
                       headers: {
                         Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
@@ -3396,7 +3399,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         </Field>
         {toResults.length > 0 && (
           <div className="bg-white border-hairline border-zinc-300 border-t-0 rounded-b-sm max-h-[180px] overflow-y-auto mb-3">
-            {toResults.map((c) => (
+            {renderWithDidYouMean(toResults, (c) => (
               <div
                 key={c.id}
                 onClick={() => {
@@ -3889,6 +3892,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           onPick={handleInsertSheetPick}
           groupCaptions={{
             customer: "Personal links — each one is looked up for this recipient",
+            howto: HOW_TO_CAPTION,
             website: "Every wavespestcontrol.com page, synced nightly from the sitemap",
           }}
         />

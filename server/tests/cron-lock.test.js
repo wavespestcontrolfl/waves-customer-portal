@@ -445,7 +445,7 @@ describe('cron-lock runExclusive', () => {
     }, { timezone: 'America/New_York' });
     const [expr, wrappedTick, opts] = nodeCron.schedule.mock.calls.at(-1);
     expect(expr).toBe('0 8 * * *');
-    expect(opts).toEqual({ timezone: 'America/New_York' });
+    expect(opts).toEqual({ recoverMissedExecutions: true, timezone: 'America/New_York' });
     await wrappedTick();
     await new Promise((resolve) => setImmediate(resolve));
     expect(tickBody).not.toHaveBeenCalled(); // waiting, not failed

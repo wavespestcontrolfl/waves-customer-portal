@@ -292,7 +292,7 @@ async function ringGapBell(trx, event) {
 // sightings: only the inserter rings). The bell row and the belled_at stamp
 // are written in a savepoint of the same transaction (ringGapBell), so they
 // commit with the sighting or not at all.
-async function upsertGapRow(row, database = db) {
+async function upsertGapRow(row, database = db, { quiet = false } = {}) {
   const now = new Date();
   return database.transaction(async (trx) => {
     const prior = await trx('agent_gap_reports')
@@ -324,7 +324,11 @@ async function upsertGapRow(row, database = db) {
       && (prior?.status === 'new' || prior?.status === 'building');
     const rang = inserted || reopened || neverRang;
     const id = Number(result.id);
-    const belled = rang
+    // quiet: the caller rings its own bell for this event (the model-failure
+    // notice), so the gap's "build gap N" bell must not ring beside it. The row
+    // is stamped as rung so a later ordinary sighting never rings it either.
+    if (quiet && rang) await trx('agent_gap_reports').where('id', id).whereNull('belled_at').update({ belled_at: now });
+    const belled = rang && !quiet
       ? await ringGapBell(trx, { id, source: row.source, domain: result.domain || null, reopened, at: now })
       : false;
     // bigint ids come back from pg as strings; "gap #<id>" wants a number.
@@ -357,7 +361,7 @@ async function recordGap({ source, summary, attempted, closestTool } = {}, datab
  * throws; a failed write is logged with the error code only — the error text
  * can carry a compiled query with the summary in it.
  */
-async function writeGapRows(signals, database = db) {
+async function writeGapRows(signals, database = db, options = {}) {
   if (!gapReportsEnabled()) return [];
   const seen = new Set();
   const saved = [];
@@ -366,7 +370,7 @@ async function writeGapRows(signals, database = db) {
       const row = prepareGapRow(signal);
       if (!row || seen.has(row.fingerprint)) continue;
       seen.add(row.fingerprint);
-      const result = await upsertGapRow(row, database);
+      const result = await upsertGapRow(row, database, options);
       if (result) saved.push(result);
     } catch (err) {
       logger.warn(`[agent-gap-reports] record failed (${err.code || err.name || 'error'})`);

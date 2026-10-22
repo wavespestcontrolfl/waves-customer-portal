@@ -1083,10 +1083,20 @@ function overdueBellCopy({ row, message, verdict, customerName, channelWord }) {
 async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceIdField = 'sms_log_id', triggerKey = 'sms_operational_followup' }) {
   const customerName = await require('./admin-alert-names').lookupCustomerName(trx, message.customer_id);
   const { spec, detail } = overdueBellCopy({ row, message, verdict, customerName, channelWord: sourceIdField === 'email_id' ? 'email' : 'text' });
-  const notification = await require('./admin-alert-compose').raiseAdminAlert('alert', spec, {
+  const ringOpts = {
     trx, bell: true, dedupeKey, dedupeWindowMs: 24 * 60 * 60 * 1000, refreshOnDedupe: true, detail,
     metadata: { triggerKey, customerId: message.customer_id,
-      [sourceIdField]: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.late ? 'kept_late' : verdict.verdict } });
+      [sourceIdField]: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.late ? 'kept_late' : verdict.verdict } };
+  const { raiseAdminAlert } = require('./admin-alert-compose');
+  // GATE_ALERT_RING_ONCE (owner 2026-10-14): a promise rings once. The probe
+  // looks only at OPEN rows, at any age: an open row is refreshed without a
+  // ring (read state, done state and push stay), so a later check never makes
+  // a new row. With no open row (first time, or a person marked it done and
+  // the promise is still overdue) the insert is fresh: one new row, one bell.
+  const ringOnce = require('../config/feature-gates').alertRingOnceLive?.();
+  const notification = await raiseAdminAlert('alert', spec, ringOnce
+    ? { ...ringOpts, dedupeWindowMs: undefined, dedupeOpenOnly: true, ringOnRefresh: () => false }
+    : ringOpts);
   if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
   // The 24h window rolls from created_at, so a promise still overdue after a
   // day gets a NEW row and the old one stayed open: one promise piled up four

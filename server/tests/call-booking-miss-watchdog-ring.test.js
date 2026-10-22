@@ -8,7 +8,7 @@
 // are synthetic.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), alertRingOnceLive: jest.fn(() => false) }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((_name, fn) => fn()) }));
 
 const mockState = { calls: [], booked: [], triage: [], customers: [], alertedKeys: new Set(), rung: [] };
@@ -82,6 +82,7 @@ beforeEach(() => {
   mockState.alertedKeys = new Set();
   mockState.rung = [];
   NotificationService.notifyAdmin.mockReset();
+  require('../config/feature-gates').alertRingOnceLive.mockReturnValue(false);
   NotificationService.notifyAdmin.mockResolvedValue({ id: 'n-new', deduped: false });
   logger.warn.mockClear();
 });
@@ -311,6 +312,22 @@ describe('repeat paging', () => {
     expect(opts.dedupeKey).toBe(`call-booking-miss-repeat:${CALL_ID}`);
     expect(opts.metadata.repeat).toBe(true);
     expect(opts.dedupeWindowMs).toBe(REPEAT_INTERVAL_MINUTES * 60000);
+  });
+
+  test('GATE_ALERT_RING_ONCE on: no repeat ring even when one is due', async () => {
+    require('../config/feature-gates').alertRingOnceLive.mockReturnValue(true);
+    mockState.rung = [{ call_log_id: CALL_ID, last_at: new Date(NOW.getTime() - (REPEAT_INTERVAL_MINUTES + 10) * 60000).toISOString() }];
+    const result = await runCallBookingMissWatchdog({ now: NOW });
+    expect(result).toMatchObject({ alerted: 0, repeated: 0 });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('GATE_ALERT_RING_ONCE on: the first ring still goes out', async () => {
+    require('../config/feature-gates').alertRingOnceLive.mockReturnValue(true);
+    mockState.alertedKeys = new Set();
+    const result = await runCallBookingMissWatchdog({ now: NOW });
+    expect(result).toMatchObject({ alerted: 1, repeated: 0 });
+    expect(NotificationService.notifyAdmin.mock.calls[0][3].dedupeKey).toBe(`call-booking-miss:${CALL_ID}`);
   });
 
   test('no repeat while the last bell is younger than the interval', async () => {

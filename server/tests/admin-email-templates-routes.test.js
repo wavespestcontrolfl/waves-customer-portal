@@ -1162,3 +1162,54 @@ describe('onboarding audience checks in the existing admin preview', () => {
     expect(EmailTemplates.renderVersion).not.toHaveBeenCalled();
   });
 });
+
+// codex #6343 r1: migration 20261019200000 seeds estimate_pdf_note into the
+// default fixtures. A test send never attaches a file, so it must not render
+// the "a PDF is attached" line; the preview (mails nothing) keeps it.
+describe('test sends and the estimate PDF-copy line', () => {
+  const EmailTemplates = require('../services/email-template-library');
+  const sendgrid = require('../services/sendgrid-mail');
+  const NOTE = "Your estimate is attached as a PDF if the link won't open. Reply or call (941) 297-5749 to get started.";
+  const post = (baseUrl, route, payload) => fetch(`${baseUrl}/admin/email-templates/versions/version-1/${route}`, {
+    method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ payload, toEmail: 'contact@wavespestcontrol.com' }),
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    sendgrid.isConfigured.mockReturnValue(true);
+    jest.spyOn(EmailTemplates, 'sendTemplate').mockResolvedValue({ sent: true, message: { id: 'm1' } });
+    jest.spyOn(EmailTemplates, 'renderVersion').mockResolvedValue({ html: '<p>x</p>', text: 'x' });
+  });
+  afterEach(() => { jest.restoreAllMocks(); sendgrid.isConfigured.mockReturnValue(false); });
+
+  test('a test send blanks the note and keeps every other fixture value', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'test', { first_name: 'Sam', estimate_pdf_note: NOTE });
+      expect(res.status).toBe(200);
+    });
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
+    const args = EmailTemplates.sendTemplate.mock.calls[0][0];
+    expect(args.test).toBe(true);
+    expect(args).not.toHaveProperty('attachments');
+    expect(args.payload).toEqual({ first_name: 'Sam', estimate_pdf_note: '' });
+  });
+
+  test('a test send of any other template, or with no payload, is untouched', async () => {
+    await withServer(async (baseUrl) => {
+      await post(baseUrl, 'test', { first_name: 'Sam' });
+      await post(baseUrl, 'test', undefined);
+    });
+    expect(EmailTemplates.sendTemplate.mock.calls[0][0].payload).toEqual({ first_name: 'Sam' });
+    expect(EmailTemplates.sendTemplate.mock.calls[1][0].payload).toEqual({});
+  });
+
+  test('the preview still shows the note: it renders the layout of the attached-PDF send and mails nothing', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'preview', { first_name: 'Sam', estimate_pdf_note: NOTE });
+      expect(res.status).toBe(200);
+    });
+    expect(EmailTemplates.renderVersion).toHaveBeenCalledWith('version-1', { first_name: 'Sam', estimate_pdf_note: NOTE }, expect.any(Object));
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+});

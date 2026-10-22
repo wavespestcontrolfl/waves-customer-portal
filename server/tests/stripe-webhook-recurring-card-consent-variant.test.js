@@ -56,7 +56,6 @@ jest.mock('../services/recurring-card-on-file', () => ({
   completeRecurringCardEnrollment: (...a) => mockCompleteEnrollment(...a),
 }));
 jest.mock('../routes/estimate-public', () => ({
-  isCommercialAutoAcceptEstimate: jest.fn(() => false),
   findLinkedUpcomingAppointment: jest.fn(async () => ({ id: 'ss-1' })),
   isEstimateAcceptActive: jest.fn(() => false),
 }));

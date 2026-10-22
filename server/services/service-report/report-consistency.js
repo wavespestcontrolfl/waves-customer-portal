@@ -18,6 +18,7 @@
 
 const { aftercareCustomerTask, hasCreditableWaterIn, normalizeLawnAftercare } = require('./lawn-aftercare');
 const { deriveLawnLead } = require('./lawn-report-lead');
+const cleanup1020 = require('./report-cleanup-1020');
 
 // Customer-facing lead extraction for the today's-result hero. Unlike
 // firstSentence (whose callers want a short excerpt and tolerate a "…"),
@@ -907,6 +908,10 @@ function applyLawnReportReconciliation(data, dynamicContext = null) {
   // reportV2.lead.techParagraph.
   const techParagraph = (data && data.reportV2 && data.reportV2.techParagraph) || null;
   applyReconciliationFixes(data, dynamicContext);
+  // GATE_REPORT_CLEANUP_1020: before the lead reads them, the follow-up reason is a whole customer sentence and the
+  // repeated stock lines are gone. Each call is a no-op while the gate is off.
+  cleanup1020.cleanFollowUp(data);
+  cleanup1020.dropStockLines(data);
   // The lead is derived from the FINAL reconciled
   // strings, so it runs after the fixes above and even when
   // reconcileLawnReport returned null. Lawn only: the reportV2 slot also
@@ -918,7 +923,8 @@ function applyLawnReportReconciliation(data, dynamicContext = null) {
       if (lead) data.reportV2 = { ...data.reportV2, lead };
     } catch { /* the lead is best-effort — the report renders without it */ }
   }
-  return data;
+  // GATE_REPORT_CLEANUP_1020: the flag the page keys off, and the trouble-spot note (it reads the final follow-up).
+  return cleanup1020.attachCleanupFields(data);
 }
 
 module.exports = {

@@ -255,3 +255,43 @@ describe('spelledEmailSettled', () => {
     expect(spelledEmailSettled(one('not-an-email'), 'not-an-email')).toBe(false);
   });
 });
+
+// 2026-10-19 call audit: address_unverified filed beside the other address cards.
+describe('dropUnneededCallCards: one address card per call', () => {
+  const stated = ext({ status: 'requested', intent: 'new_service' });
+  stated.property = { service_address: { street_line_1: '1234 Sample Palm Dr' } };
+
+  test('address_unverified is the survivor: its peers drop (it alone carries the recovery candidates, Codex #6347 r1)', () => {
+    let r = dropUnneededCallCards(['address_unverified', 'address_unverifiable'], stated);
+    expect(r.flags).toEqual(['address_unverified']);
+    expect(r.dropped).toEqual(['address_unverifiable']);
+    r = dropUnneededCallCards(['address_unverified', 'missing_service_address'], ext({ status: 'requested', intent: 'new_service' }));
+    expect(r.flags).toEqual(['address_unverified']);
+    r = dropUnneededCallCards(['address_unverified', 'address_unverifiable', 'missing_service_address'], stated);
+    expect(r.flags).toEqual(['address_unverified']);
+  });
+
+  test('without address_unverified the peers keep their cards', () => {
+    expect(dropUnneededCallCards(['address_unverifiable'], stated).flags).toEqual(['address_unverifiable']);
+  });
+
+  test('address_unverified stays when it is the only address card', () => {
+    expect(dropUnneededCallCards(['address_unverified'], stated).flags).toEqual(['address_unverified']);
+    expect(dropUnneededCallCards(['address_unverified', 'out_of_service_area', 'low_confidence_address'], stated).flags)
+      .toEqual(['address_unverified', 'out_of_service_area', 'low_confidence_address']);
+  });
+
+  test('with no ask and no street, the no-ask rule still leaves address_unverified as the one card', () => {
+    // No ask and no street: both peers drop under the no-ask rule; address_unverified is then the call's one card.
+    const noAsk = ext({ status: 'none', intent: null });
+    const r = dropUnneededCallCards(['address_unverified', 'address_unverifiable', 'missing_service_address'], noAsk);
+    expect(r.flags).toEqual(['address_unverified']);
+    expect(r.dropped.sort()).toEqual(['address_unverifiable', 'missing_service_address']);
+  });
+
+  test('only the card goes: the routing flags the caller passed in are not mutated', () => {
+    const flags = ['address_unverified', 'address_unverifiable'];
+    dropUnneededCallCards(flags, stated);
+    expect(flags).toEqual(['address_unverified', 'address_unverifiable']);
+  });
+});

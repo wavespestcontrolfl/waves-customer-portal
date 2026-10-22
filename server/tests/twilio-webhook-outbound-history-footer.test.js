@@ -65,6 +65,7 @@ jest.mock('../models/db', () => mockDb);
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((gate) => gate === 'webhooks'),
   gateEnvValue: (gate) => process.env[gate] === 'true',
+  smsCourtesyAfterTemplateLive: () => process.env.GATE_SMS_COURTESY_AFTER_TEMPLATE === 'true',
 }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn(async () => ({ ok: true, json: { solicitation: false, confidence: 0 } })) }));
 jest.mock('../config/models', () => ({ TEXT_POLICIES: { fastStructured: 'test-policy' } }));

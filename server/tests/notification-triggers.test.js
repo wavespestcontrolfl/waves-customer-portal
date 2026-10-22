@@ -116,6 +116,21 @@ describe('notification trigger push tags', () => {
     expect(built.link).toBe('/admin/communications');
   });
 
+  test('SMS reply trigger leads with a lead\'s CALL / TEXT choice and is unchanged without it', () => {
+    const base = { fromName: 'Dana Example', message: 'Call', threadId: 'customer-123', twilioSid: 'SM1' };
+    const call = TRIGGER_REGISTRY.sms_reply.build({ ...base, leadPreference: 'call', textCount: 1 });
+    const text = TRIGGER_REGISTRY.sms_reply.build({ ...base, leadPreference: 'text', textCount: 2 });
+    const plain = TRIGGER_REGISTRY.sms_reply.build({ ...base, textCount: 1 });
+    const plainMany = TRIGGER_REGISTRY.sms_reply.build({ ...base, textCount: 3 });
+    expect(call.title).toBe('Wants a call: Dana Example');
+    expect(text.title).toBe('Prefers text: Dana Example (2 texts)');
+    expect(plain.title).toBe('SMS from Dana Example');
+    expect(plainMany.title).toBe('3 texts from Dana Example');
+    // Body and link are identical with or without the preference.
+    expect(call.body).toBe(plain.body);
+    expect(call.link).toBe(plain.link);
+  });
+
   test('SMS reply trigger masks fallback phone and redacts sensitive message text', () => {
     const built = TRIGGER_REGISTRY.sms_reply.build({
       fromPhone: '+19415551234',
@@ -317,6 +332,20 @@ describe('triggerNotification bell outcome', () => {
     ));
   });
 
+  test('pushOnly re-sends the push without writing a second bell row (missed-call push retry)', async () => {
+    const PushService = require('../services/push-notifications');
+    PushService.sendToAdminUsers.mockClear();
+    const stats = await triggerNotification('customer_missed_call', { customerId: null, name: 'Test Caller', phone: '+19415550100', callLogId: 'call-1' },
+      { pushOnly: true });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(stats.bellWritten).toBe(false);
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+    expect(PushService.sendToAdminUsers.mock.calls[0][1]('admin-1').tag).toBe('waves-customer_missed_call-call-1');
+    // Without the option the same call writes its bell as before.
+    await triggerNotification('customer_missed_call', { customerId: null, name: 'Test Caller', phone: '+19415550100', callLogId: 'call-1' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
   test('a keyed SMS replay reuses its committed bell and does not push again', async () => {
     NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'committed-bell', deduped: true });
     expect(await triggerNotification('sms_reply', { twilioSid: 'SM-synthetic-replay' },
@@ -357,6 +386,45 @@ describe('triggerNotification bell outcome', () => {
     expect(took).toMatchObject({ title: '3 texts from Dana Example', body: 'Newer text', link: '/admin/communications?thread=cust-1&message=SM-new' });
     expect(took.quiet).toBeUndefined();
     expect(took.metadata.payload).toMatchObject({ twilioSid: 'SM-new', textCount: 3 });
+  });
+
+  // The bell title always matches the text the row displays: a label belongs to ONE text
+  // (GATE_LEAD_CALL_TEXT_PREFERENCE), the next newer text replaces it, an older late text cannot move it.
+  describe('lead CALL / TEXT label on a standing thread row', () => {
+    const ring = async (payload, keepOlder) => {
+      NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'thread-row', deduped: true, refreshed: true });
+      await triggerNotification('sms_reply', { threadId: 'cust-1', fromName: 'Dana Example', message: 'x', textCount: 1, ...payload }, {
+        dedupeKey: 'sms-thread:cust-1', refreshOnDedupe: true, bumpOnRefresh: true,
+        refreshPayload: (_row, base) => ({ payload: { textCount: base.textCount + 1 }, keepContent: keepOlder }),
+      });
+      return NotificationService.notifyAdmin.mock.calls.at(-1)[3].standingRefresh;
+    };
+    const row = { body: 'Held text', link: '/admin/communications?thread=cust-1&message=SM-held', detail: null };
+
+    test('a newer plain text replaces the label', async () => {
+      const refresh = await ring({ twilioSid: 'SM-new', message: 'ants again' }, false);
+      const took = await refresh(row, { payload: { twilioSid: 'SM-held', leadPreference: 'call', textCount: 1 } });
+      expect(took.title).toBe('2 texts from Dana Example');
+      expect(took.metadata.payload.leadPreference).toBeUndefined();
+    });
+
+    test('a newer CALL text labels the row', async () => {
+      const refresh = await ring({ twilioSid: 'SM-new', message: 'Call', leadPreference: 'call' }, false);
+      const took = await refresh(row, { payload: { twilioSid: 'SM-held', textCount: 1 } });
+      expect(took.title).toBe('Wants a call: Dana Example (2 texts)');
+      expect(took.metadata.payload.leadPreference).toBe('call');
+    });
+
+    test('an OLDER late text cannot change the title: not add a label, not remove one', async () => {
+      const olderCall = await ring({ twilioSid: 'SM-old', message: 'Call', leadPreference: 'call' }, true);
+      const plainRow = await olderCall(row, { payload: { fromName: 'Dana Example', threadId: 'cust-1', twilioSid: 'SM-held', textCount: 1 } });
+      expect(plainRow.title).toBe('2 texts from Dana Example');
+      expect(plainRow.metadata.payload.leadPreference).toBeUndefined();
+      const olderPlain = await ring({ twilioSid: 'SM-old', message: 'hello' }, true);
+      const labelled = await olderPlain(row, { payload: { fromName: 'Dana Example', threadId: 'cust-1', twilioSid: 'SM-held', leadPreference: 'text', textCount: 1 } });
+      expect(labelled.title).toBe('Prefers text: Dana Example (2 texts)');
+      expect(labelled.metadata.payload.leadPreference).toBe('text');
+    });
   });
 
   test('a thread row hit with identical content (a replayed text) is not a refresh and does not push again', async () => {

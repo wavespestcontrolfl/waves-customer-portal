@@ -116,6 +116,14 @@ function commercialLeadFields(readiness) {
     : {};
 }
 
+// Whether a new web lead rings Adam's cell (announce, or Press-1 bridge
+// under leadAutoBridge). Business hours only, and only with
+// GATE_LEAD_ALERT_CALL on (owner 2026-10-14: off for now). Otherwise the
+// lead takes the after-hours path: new_lead bell, legacy SMS as fallback.
+function shouldPlaceLeadAlertCall({ isDuringHours }) {
+  return !!isDuringHours && isEnabled('leadAlertCall');
+}
+
 // Enrolls this submission in the local new_lead automation sequence
 // (SendGrid-backed). Runs AFTER leadRecord is resolved (both the call-lead
 // attach branch and the fresh-insert branch) so `leadId` is this
@@ -753,7 +761,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
 
     try {
       const twilioClient = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-      if (isDuringHours && twilioClient) {
+      if (shouldPlaceLeadAlertCall({ isDuringHours }) && twilioClient) {
         // During business hours: ring Adam's cell with a voice announcement of
         // the lead (no Press-1-to-connect, no auto-dialing the lead). Adam calls
         // back manually from the admin portal or directly.
@@ -873,7 +881,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           legacyLeadSmsWanted = true;
         }
       } else {
-        // After hours: no call — the new_lead bell below covers the alert,
+        // After hours, or GATE_LEAD_ALERT_CALL off: no call — the new_lead
+        // bell below covers the alert,
         // with the legacy SMS as delivery fallback only.
         legacyLeadSmsWanted = true;
       }
@@ -2195,6 +2204,7 @@ function buildExistingCustomerLeadUpdates({ existing, leadSource }) {
 module.exports = router;
 module.exports.flushPendingLeadFallbacks = flushPendingLeadFallbacks;
 module.exports._test = {
+  shouldPlaceLeadAlertCall,
   leadCommercialSignalFromReadiness,
   commercialLeadFields,
   buildExistingCustomerLeadUpdates,

@@ -134,6 +134,8 @@ const LANE_RUNTIME = {
   // One FLAGSHIP pass per processed call, after finalization (dark behind GATE_CALL_COMMITMENTS);
   // no cross-provider answer — a miss records no commitment rows.
   call_commitments: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction' },
+  // Shadow only (GATE_DAY_AGREEMENT_SHADOW): one model call per call or quiet text thread that agreed a day; writes day_agreement_decisions rows, no visit, no text.
+  day_agreement: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', maturity: 'M0', workflow_id: 'day-agreement-shadow', ...LONG_BATCH },
   // The hourly cron only verifies follow-ups (no model call); the model runs
   // per scored call and for the weekly recommendation — candidate-driven.
   // call (2026-09-26): csr_coach, signal_detector, retention_drafts, ads_advisor and wiki_qa had moved onto the adapter
@@ -394,6 +396,10 @@ const LANE_RUNTIME = {
   // chart_builder_image + knowledge_qa are offline: no deadline on the Gemini leg / background enrichment that returns null on a miss.
   // offline: the /query handler runs every tool-loop round on one Anthropic client — 503 without a key, error path on failure, no second provider (Codex r13).
   ib_admin: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'sql_tool', expected_duration_ms: 120_000 },
+  // The OpenAI backup of the /query loop (GATE_IB_OPENAI_BACKUP): the same tools and writes as ib_admin, run on a Claude provider error.
+  ib_admin_backup: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'sql_tool', expected_duration_ms: 120_000 },
+  // The technician bar's OpenAI backup (same gate): tech tools only, ledgered apart from the admin backup.
+  ib_tech_backup: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'sql_tool' },
   // internal_write: every tech IB request logs an intelligence_bar_queries row and tool use a tool_health_events row — Codex r10.
   ib_tech: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'sql_tool' },
   // M2 (Codex r21): the email tool returns a marked draft and procurement research inserts pending price-approval rows — nothing acts without the later approval.

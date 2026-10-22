@@ -907,6 +907,24 @@ function pretreatDroppedCards(preConstructionPretreat) {
   return preConstructionPretreat ? ['missing_unit_number'] : [];
 }
 
+// The cards that say the same thing as address_unverified: the model's own
+// "could not verify the address" and the deterministic "no address given".
+const ADDRESS_UNVERIFIED_PEERS = ['address_unverifiable', 'missing_service_address'];
+// The 2026-10-19 audit rule, kept out of dropUnneededCallCards' complexity.
+// `dropped` is what the rules before it already dropped.
+function duplicateAddressCards(list, dropped) {
+  // address_unverified, address_unverifiable and missing_service_address are
+  // the same ask on one call (30 filed beside 54 and 53, 3 and 7 closed). One
+  // address card per call, and the survivor is address_unverified: it is the
+  // only one that carries the near-miss address candidates
+  // (addressRecoveryPayload) staff act on (Codex #6347 r1). When an earlier
+  // rule already dropped it, the peers stay, so the call never ends with none.
+  // The routing verdict keeps every flag: nothing that blocks or allows a
+  // booking changes.
+  if (!list.includes('address_unverified') || dropped.has('address_unverified')) return [];
+  return ADDRESS_UNVERIFIED_PEERS.filter((f) => list.includes(f));
+}
+
 function dropUnneededCallCards(flags, extraction, options) {
   const { canonicalStreet, preConstructionPretreat } = options || {};
   const list = Array.isArray(flags) ? flags : [];
@@ -934,6 +952,8 @@ function dropUnneededCallCards(flags, extraction, options) {
   // different reading for review). The routing verdict keeps both flags;
   // only the card goes.
   if (has('missing_service_address') && !statedStreet) dropped.add('address_unverifiable');
+  // The 2026-10-19 audit rule (one address card per call).
+  duplicateAddressCards(list, dropped).forEach((f) => dropped.add(f));
   const relationship = String(extraction?.caller?.relationship_to_property || '').trim().toLowerCase();
   if (SCHEDULING_NO_ASK_STATUSES.has(status)
       && (AUTHORIZED_THIRD_PARTY_RELATIONSHIPS.has(relationship)
@@ -992,6 +1012,7 @@ function callEndedWithNothingToDo(extraction) {
   if (openThread) return false;
   return extraction.service_request?.quote_promised !== true;
 }
+
 
 function noActionCallCards(extraction, { canonicalStreet } = {}) {
   if (!callEndedWithNothingToDo(extraction)) return [];

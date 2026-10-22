@@ -1,3 +1,4 @@
+import { renderWithDidYouMean } from "./DidYouMean";
 import { useEffect, useId, useRef, useState } from "react";
 import { adminFetch } from "../../lib/adminFetch";
 import { Button } from "../ui/Button";
@@ -57,7 +58,7 @@ export default function PrepGuideForm({ active, guide, initialSearch = "", initi
     setSearchError(null);
     const timer = setTimeout(async () => {
       try {
-        const response = await adminFetch(`/admin/customers?search=${encodeURIComponent(search.trim())}&limit=8`);
+        const response = await adminFetch(`/admin/customers?search=${encodeURIComponent(search.trim())}&limit=8&suggest=1`);
         if (!response.ok) throw new Error("Couldn't search customers. Try again.");
         const data = await response.json();
         if (!cancelled) setResults(data.customers || []);
@@ -131,7 +132,7 @@ export default function PrepGuideForm({ active, guide, initialSearch = "", initi
               <p className="text-zinc-600">No customers found.</p>
             )}
             <div className="empty:hidden border-hairline border-zinc-200 rounded-sm divide-y divide-zinc-100 max-h-60 overflow-y-auto">
-              {results.map((customer) => (
+              {renderWithDidYouMean(results, (customer) => (
                 <button key={customer.id} type="button" className="w-full text-left px-3 py-3 border-0 bg-transparent hover:bg-zinc-50 u-focus-ring"
                   onClick={() => { setSelected(customer); setResults([]); setResult(null); }}>
                   <span className="block font-medium">{customerName(customer)}</span>

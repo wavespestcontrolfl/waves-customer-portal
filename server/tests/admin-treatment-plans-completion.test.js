@@ -80,3 +80,20 @@ test('a technician is pinned to an assigned visit for EVERY plan read, not only 
   expect(ok.statusCode).toBe(200);
   expect(buildPlanForService).toHaveBeenCalledTimes(1);
 });
+
+test.each([
+  ['Lawn Care', 'true', true],
+  ['Lawn Care', undefined, false],
+  ['Tree & Shrub Care', 'true', true],
+  ['Pest Control', 'true', false],
+])('GATE_LAWN_TS_STOCK_ADVISORY: a %s plan carries stockAdvisory only while the gate makes it advisory (gate=%s)', async (service, gate, advisory) => {
+  if (gate) process.env.GATE_LAWN_TS_STOCK_ADVISORY = gate;
+  try {
+    buildPlanForService.mockResolvedValue({ serviceId: 'visit', propertyGate: { service, serviceTier: 'Commercial' } });
+    const res = await run({ query: {} });
+    if (advisory) expect(res.body.plan.stockAdvisory).toBe(true);
+    else expect(res.body.plan).not.toHaveProperty('stockAdvisory');
+  } finally {
+    delete process.env.GATE_LAWN_TS_STOCK_ADVISORY;
+  }
+});

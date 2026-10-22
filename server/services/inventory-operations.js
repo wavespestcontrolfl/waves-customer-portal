@@ -26,6 +26,24 @@ const { AUTO_REORDER_SOURCE } = require('./procurement/auto-reorder');
 const { validCalendarDate } = require('../utils/datetime-et');
 const { restockMeta } = require('./inventory-restock-queue');
 
+// GATE_PEST_STOCK_ADVISORY: the office alert a pest visit raises for a product it took below zero
+// (complete-scheduled-service.js notifyOfficeOfStockShortfalls) is keyed by product.
+const stockShortfallKey = (productId) => `stock-shortfall:${productId}`;
+
+// A movement that brings the count back to zero or above closes that alert (docs/admin-notifications.md, "Clear
+// yourself"); with none open it updates nothing. In a savepoint, so a failed close is logged and never rolls back
+// the stock it follows. Every write that can raise a count calls it: adjustStock, a restock request's receive, and
+// the Products table's inline stock edit (routes/admin-inventory.js PUT /:id).
+async function clearStockShortfallAlert(trx, productId, stockAfter, unit) {
+  if (!(Number(stockAfter) >= 0)) return;
+  try {
+    await trx.transaction((sp) => require('./admin-alert-episodes').closeAdminAlertKeys(sp, [stockShortfallKey(productId)],
+      'stock_restocked', { resolution: `Stock is back to ${stockAfter} ${unit}` }));
+  } catch (err) {
+    require('./logger').error(`[inventory] stock shortfall alert close failed (non-blocking): ${err.message}`);
+  }
+}
+
 const optionalText = Joi.string().allow('', null);
 // The portal's receive composer sends numeric text. Joi converts that text
 // while rejecting booleans, arrays, blanks and non-finite/malformed amounts.
@@ -171,6 +189,7 @@ async function adjustStock(productId, raw, options = {}) {
     if (!movement?.id || numberOrNull(saved?.inventory_on_hand) !== plan.stockAfter || saved.inventory_unit !== plan.inventoryUnit) {
       throw inventoryError('Saved stock did not match the adjustment', 409, 'verification_failed');
     }
+    await clearStockShortfallAlert(trx, productId, plan.stockAfter, plan.inventoryUnit);
     return { success: true, product: updated, movement,
       verification: { persisted: true, product_id: productId, movement_id: movement.id, stock_match: true }, href: `/admin/inventory?tab=products&search=${encodeURIComponent(product.name)}&productId=${productId}` };
   };
@@ -471,6 +490,7 @@ async function updateRestockRequest(requestId, raw, options = {}) {
       if (!movement?.id || numberOrNull(saved?.inventory_on_hand) !== plan.stockAfter || saved.inventory_unit !== plan.inventoryUnit) {
         throw inventoryError('Saved stock did not match the receipt', 409, 'verification_failed');
       }
+      await clearStockShortfallAlert(trx, product.id, plan.stockAfter, plan.inventoryUnit);
       if (plan.secondReceive) await dispatch.settleLandedAfterReceive(trx, requestId);
     }
     const [updated] = await trx('product_restock_requests').where({ id: requestId }).update({
@@ -490,4 +510,5 @@ async function updateRestockRequest(requestId, raw, options = {}) {
 
 module.exports = { previewStockAdjustment, adjustStock, previewRestockRequest, createRestockRequest,
   previewRestockAction, updateRestockRequest, productIdentity, createCatalogProduct,
-  lockCatalogCreate, findActiveProductByExactName, findAliasByNormalizedName, createProductAlias };
+  lockCatalogCreate, findActiveProductByExactName, findAliasByNormalizedName, createProductAlias, stockShortfallKey,
+  clearStockShortfallAlert };

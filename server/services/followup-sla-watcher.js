@@ -38,6 +38,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
+const { askedLinesForPromise, estimateMatchesAsk, ASK_CALL_COLUMNS } = require('./call-estimate-service-match');
 const commitments = require('./call-commitments');
 const { etDateString, etCalendarDayOf, etParts } = require('../utils/datetime-et');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
@@ -393,6 +394,19 @@ async function reviewedQuoteIds(conn, scoped, alreadyDone) {
   return done;
 }
 
+// The asked service line of each quote promise, read from the extraction that
+// filed it (call-estimate-service-match.askedLinesForPromise), in one query.
+async function quoteAsks(conn, scoped) {
+  const quotes = scoped.filter((x) => x.r.kind === 'send_estimate' && x.r.call_log_id);
+  const asks = new Map();
+  if (!quotes.length) return asks;
+  const calls = await conn('call_log').whereIn('id', [...new Set(quotes.map((x) => x.r.call_log_id))])
+    .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b)).select(...ASK_CALL_COLUMNS);
+  const byId = new Map(calls.map((c) => [String(c.id), c]));
+  for (const x of quotes) asks.set(String(x.r.id), askedLinesForPromise(x.r, byId.get(String(x.r.call_log_id))));
+  return asks;
+}
+
 // send_estimate: ANY estimate sent to the customer after the promise ("send me
 // the quote" is kept by the quote arriving, linked to this call or not;
 // Codex #5543 r3). A linked caller is read through the canonical ownership
@@ -403,8 +417,11 @@ async function reviewedQuoteIds(conn, scoped, alreadyDone) {
 // estimateSentTo does. The canonical delivery witness (handedOffWithin /
 // witnessAt: a real handoff or an acceptance, never a suppressed send's bare
 // sent_at) after the evidence boundary `since`.
-async function quoteEstimateIds(conn, scoped) {
+async function quoteEstimateIds(conn, scoped, asks = new Map()) {
   const done = new Set();
+  // Same service-line check as the fulfillment proof (Codex #6344 r2): an
+  // estimate for another line never counts for a quote promise whose ask is known.
+  const fits = (x, e) => estimateMatchesAsk(asks.get(String(x.r.id)) || [], e);
   const quotes = scoped.filter((x) => x.r.kind === 'send_estimate');
   const linked = quotes.filter((x) => x.r.customer_id);
   if (linked.length) {
@@ -412,9 +429,9 @@ async function quoteEstimateIds(conn, scoped) {
     // each customer's fence OR'd, the matched owner read back per row.
     const lowest = new Date(Math.min(...linked.map((x) => x.since.getTime())));
     const sent = await commitments.whereEstimateOwnedByAny(commitments.handedOffWithin(conn('estimates'), lowest), linked.map((x) => x.r.customer_id))
-      .select(...commitments.HANDOFF_COLS(conn), conn.raw(`${commitments.ESTIMATE_OWNER_SQL} AS owner_customer_id`));
+      .select(...commitments.HANDOFF_COLS(conn), 'service_interest', 'estimate_data', conn.raw(`${commitments.ESTIMATE_OWNER_SQL} AS owner_customer_id`));
     for (const x of linked) {
-      if (sent.some((e) => String(e.owner_customer_id) === String(x.r.customer_id) && commitments.witnessAt(e, x.since))) done.add(x.r.id);
+      if (sent.some((e) => String(e.owner_customer_id) === String(x.r.customer_id) && commitments.witnessAt(e, x.since) && fits(x, e))) done.add(x.r.id);
     }
   }
   const unlinked = quotes.filter((x) => x.phone);
@@ -422,9 +439,9 @@ async function quoteEstimateIds(conn, scoped) {
   const lowest = new Date(Math.min(...unlinked.map((x) => x.since.getTime())));
   const sent = await commitments.handedOffWithin(conn('estimates'), lowest).whereNull('customer_id')
     .modify((b) => commitments.phoneWhereAny(b, 'customer_phone', [...new Set(unlinked.map((x) => x.phone))]))
-    .select(...commitments.HANDOFF_COLS(conn), 'customer_phone');
+    .select(...commitments.HANDOFF_COLS(conn), 'customer_phone', 'service_interest', 'estimate_data');
   for (const x of unlinked) {
-    if (sent.some((e) => phoneKey(e.customer_phone) === x.phone && commitments.witnessAt(e, x.since))) done.add(x.r.id);
+    if (sent.some((e) => phoneKey(e.customer_phone) === x.phone && commitments.witnessAt(e, x.since) && fits(x, e))) done.add(x.r.id);
   }
   return done;
 }
@@ -471,10 +488,14 @@ async function followedUpIds(conn, rows, { renewed: preloaded } = {}) {
   const visitBooked = await bookedVisits(conn, scoped, contact, bookedFloor);
   const calls = await staffCalls(conn, contact, floor);
   const { personTexts, estimateTexts } = await deliveredTexts(conn, scoped, contact, floor);
+  const asks = await quoteAsks(conn, scoped);
   const hinted = await quoteHintIds(conn, scoped);
   const quoteKept = new Set([...hinted, ...await reviewedQuoteIds(conn, scoped, hinted),
-    ...await quoteEstimateIds(conn, scoped), ...await callbackOwnQuoteIds(conn, scoped)]);
-  const quoteTextKept = (x) => x.r.kind === 'send_estimate' && estimateTexts.some((t) => (belongsTo(t, x)
+    ...await quoteEstimateIds(conn, scoped, asks), ...await callbackOwnQuoteIds(conn, scoped)]);
+  // An estimate text names no estimate, so it cannot be checked for a service
+  // line: it counts only when the promise's ask is unknown. Its estimate row
+  // (always sent beside it) is what quoteEstimateIds checks (Codex #6344 r2).
+  const quoteTextKept = (x) => x.r.kind === 'send_estimate' && !(asks.get(String(x.r.id)) || []).length && estimateTexts.some((t) => (belongsTo(t, x)
     || (!t.customer_id && !!x.callerPhone && phoneKey(t.to_phone) === x.callerPhone)) && createdAfter(t, x.since));
   for (const x of scoped) {
     if (visitBooked(x)

@@ -348,6 +348,48 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
     expect(prompt).toMatch(/Voice dictation often mishears digits/);
   });
 
+  describe('GATE_DICTATION_MONEY_NORMALIZE: a dictated message\'s amounts', () => {
+    const ASK = "The operator's dictated amount '6133' is ambiguous: ask with offer_choices between $61.33 and $6,133 before using it.";
+    const READ = 'The operator dictated "sixty-one thirty-three", which may mean $61.33. Before using an amount from this dictation, read it back ("I heard $61.33, is that right?") unless a confirmation card shows it.';
+    const promptFor = async (body) => {
+      mockExecuteTool.mockResolvedValue({ customers: [] });
+      scriptModelTurns([[{ type: 'text', text: 'hi' }]]);
+      await withServer(async (baseUrl) => { await postQuery(baseUrl, { prompt: 'charge 6133 a month', context: 'customers', ...body }); });
+      return mockMessagesCreate.mock.calls[0][0].system.map((b) => b.text).join('\n');
+    };
+    afterEach(() => { delete process.env.GATE_DICTATION_MONEY_NORMALIZE; });
+
+    test('gate on + dictation_used: an unclear amount in the question gets the ask, once', async () => {
+      process.env.GATE_DICTATION_MONEY_NORMALIZE = 'true';
+      const prompt = await promptFor({ dictation_used: true });
+      expect(prompt).toContain(ASK);
+      expect(prompt.split(ASK)).toHaveLength(2);
+    });
+
+    test('gate on + dictation_used: a clear reading gets the read-back note, from the server\'s own parse', async () => {
+      process.env.GATE_DICTATION_MONEY_NORMALIZE = 'true';
+      const prompt = await promptFor({ prompt: 'charge sixty-one thirty-three a month', dictation_used: true, dictation_money: [{ heard: 'x', suggested: '$1,000,000' }] });
+      expect(prompt).toContain(READ);
+      expect(prompt).not.toContain('1,000,000');
+    });
+
+    test('a typed message (no dictation_used) gets no note, whatever it says', async () => {
+      process.env.GATE_DICTATION_MONEY_NORMALIZE = 'true';
+      expect(await promptFor({})).not.toContain('dictated');
+      expect(await promptFor({ dictation_used: 'true' })).not.toContain('dictated');
+      expect(await promptFor({ dictation_used: 1 })).not.toContain('dictated');
+    });
+
+    test('gate off: a dictated message adds nothing', async () => {
+      expect(await promptFor({ dictation_used: true })).not.toContain('dictated');
+    });
+
+    test('gate on: a dictated question with no amount in it adds nothing', async () => {
+      process.env.GATE_DICTATION_MONEY_NORMALIZE = 'true';
+      expect(await promptFor({ prompt: 'gate code sixty-one thirty-three', dictation_used: true })).not.toContain('dictated');
+    });
+  });
+
   test.each(['get_customer_detail', 'query_customers', 'get_schedule_view'])('%s redacts query telemetry', async name => {
     mockExecuteTool.mockResolvedValue({ address: '200 Test Street' });
     scriptModelTurns([

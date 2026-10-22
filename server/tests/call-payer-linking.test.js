@@ -30,6 +30,22 @@ describe('resolveCallBillingPayer', () => {
     );
   });
 
+  test('a raw V2 billing party carrying the answering staff member\'s name becomes a payer without that name', async () => {
+    const v2 = { secondary_contact: { first_name: 'Robin', last_name: 'Sample', email: 'ap@example.com', role: 'other', is_billing_party: true } };
+    const call = { direction: 'inbound', metadata: { forward_acceptance: { accepted: true, csr_name: 'Robin' } } };
+    expect(await proc._test.resolveCallBillingPayer([], v2, null, call)).toBe(42);
+    expect(PayerService.findOrCreatePayerByEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ apEmail: 'ap@example.com', displayName: null }),
+    );
+    PayerService.findOrCreatePayerByEmail.mockClear();
+    // Another staff member answered: the name stands.
+    const other = { direction: 'inbound', metadata: { forward_acceptance: { accepted: true, csr_name: 'Jordan' } } };
+    await proc._test.resolveCallBillingPayer([], v2, null, other);
+    expect(PayerService.findOrCreatePayerByEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ apEmail: 'ap@example.com', displayName: 'Robin Sample' }),
+    );
+  });
+
   test('no billing party → null, never touches the payer service', async () => {
     const contacts = [{ first_name: 'Tenant', email: 'tenant@example.com', is_billing_party: false }];
     expect(await proc._test.resolveCallBillingPayer(contacts)).toBeNull();

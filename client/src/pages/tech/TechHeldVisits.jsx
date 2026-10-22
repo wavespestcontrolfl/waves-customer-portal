@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { getAdminAuthToken } from '../../lib/adminAuth';
 import { etDateString } from '../../lib/timezone';
-import { fromCall, heldWhen, kindText } from '../admin/HeldVisitsStrip';
+import { fromCall, heldWhen, kindText, moveLinkLabel, moveVisitHref } from '../admin/HeldVisitsStrip';
 
 // "From calls, not on the calendar" on the Today page (GATE_CALL_HELD_VISIT, owner
 // 2026-10-12): visits promised or discussed on a recorded call for today that nothing on the
@@ -61,10 +61,12 @@ export default function TechHeldVisits() {
             {(place || row.service) && <div>{[place, row.service].filter(Boolean).join(' · ')}</div>}
             <div className="tf-muted">{fromCall(row)}{row.phone ? ` · ${row.phone}` : ''}</div>
             {row.notes && <div className="tf-muted">From the call: {row.notes}</div>}
+            {/* A move is not a booking: link the old-day visit, never "Book" (Codex #6345 r3). */}
+            {row.kind === 'move_day_only' && <div><Link to={moveVisitHref(row)}>{moveLinkLabel(row)}</Link></div>}
           </div>
         );
       })}
-      <div className="tf-actions"><Link className="tf-button" to={`/admin/dispatch?tab=schedule&date=${state.date}`}>Book in Dispatch</Link></div>
+      <div className="tf-actions"><Link className="tf-button" to={`/admin/dispatch?tab=schedule&date=${state.date}`}>Open in Dispatch</Link></div>
     </section>
   );
 }

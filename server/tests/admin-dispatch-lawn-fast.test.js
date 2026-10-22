@@ -194,6 +194,43 @@ describe('GET lawn-fast/context', () => {
   });
 });
 
+describe('GET lawn-fast/context carries the stock advisory (GATE_LAWN_TS_STOCK_ADVISORY)', () => {
+  const saved = process.env.GATE_LAWN_TS_STOCK_ADVISORY;
+  const savedFast = process.env.GATE_LAWN_FAST_COMPLETE;
+  const ctxFor = (serviceType) => ({ ok: true, eligible: true, reason: null, visitType: 'recurring', service: { id: 'visit-1', serviceType } });
+  beforeEach(() => {
+    process.env.GATE_LAWN_FAST_COMPLETE = 'true';
+    mockDbCurrent = dbWithOwner('tech-1');
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.GATE_LAWN_TS_STOCK_ADVISORY; else process.env.GATE_LAWN_TS_STOCK_ADVISORY = saved;
+    if (savedFast === undefined) delete process.env.GATE_LAWN_FAST_COMPLETE; else process.env.GATE_LAWN_FAST_COMPLETE = savedFast;
+    mockDbCurrent = null;
+    buildLawnFastContext.mockReset();
+  });
+
+  test.each([undefined, '', 'false', '1', 'TRUE'])('gate %p: no stockAdvisory key, so the sheet keeps its WaveGuard-tier rule', async (value) => {
+    if (value === undefined) delete process.env.GATE_LAWN_TS_STOCK_ADVISORY; else process.env.GATE_LAWN_TS_STOCK_ADVISORY = value;
+    buildLawnFastContext.mockResolvedValue(ctxFor('Lawn Care'));
+    const res = await invoke('get', CONTEXT, { params });
+    expect(res.body).not.toHaveProperty('stockAdvisory');
+  });
+
+  test('gate on (exactly true), a lawn visit: stockAdvisory is true', async () => {
+    process.env.GATE_LAWN_TS_STOCK_ADVISORY = 'true';
+    buildLawnFastContext.mockResolvedValue(ctxFor('Lawn Care'));
+    const res = await invoke('get', CONTEXT, { params });
+    expect(res.body).toMatchObject({ enabled: true, eligible: true, stockAdvisory: true });
+  });
+
+  test('gate on, a visit /complete still refuses below zero (mosquito): no stockAdvisory key', async () => {
+    process.env.GATE_LAWN_TS_STOCK_ADVISORY = 'true';
+    buildLawnFastContext.mockResolvedValue(ctxFor('Mosquito Control'));
+    const res = await invoke('get', CONTEXT, { params });
+    expect(res.body).not.toHaveProperty('stockAdvisory');
+  });
+});
+
 describe('POST lawn-fast/watering-preview', () => {
   const savedGate = process.env.GATE_LAWN_FAST_COMPLETE;
   beforeEach(() => { process.env.GATE_LAWN_FAST_COMPLETE = 'true'; });

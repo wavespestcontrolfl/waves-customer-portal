@@ -459,3 +459,31 @@ describe('the taint follows the conversation (thread record)', () => {
     expect(append.mock.calls[0][0].assistantText).not.toContain(IbThreads.UNTRUSTED_READ_MARKER);
   });
 });
+
+describe('GATE_DICTATION_MONEY_NORMALIZE keeps the dictation flag with the saved task', () => {
+  const Tasks = require('../services/intelligence-bar/tasks');
+  const savedRequest = () => Tasks.begin.mock.calls.at(-1)[0].request;
+  afterEach(() => { delete process.env.GATE_DICTATION_MONEY_NORMALIZE; });
+  const ask = (extra) => withServer(baseUrl => postQuery(baseUrl, 'Bearer owner-token-abcdef', { prompt: 'charge 6133 a month', context: 'customers', ...extra }));
+
+  test('gate on: a customer pick or a resume rebuilds the request with the flag, and only the flag', async () => {
+    process.env.GATE_DICTATION_MONEY_NORMALIZE = 'true';
+    scriptModel([]);
+    await ask({ dictation_used: true, dictation_money: [{ heard: '6133', suggested: '$1' }] });
+    expect(savedRequest().dictation_used).toBe(true);
+    expect(savedRequest()).not.toHaveProperty('dictation_money');
+  });
+
+  test('gate on: only a real true is kept', async () => {
+    process.env.GATE_DICTATION_MONEY_NORMALIZE = 'true';
+    scriptModel([]);
+    await ask({ dictation_used: 'yes' });
+    expect(savedRequest()).not.toHaveProperty('dictation_used');
+  });
+
+  test('gate off: the saved request is exactly as before', async () => {
+    scriptModel([]);
+    await ask({ dictation_used: true });
+    expect(savedRequest()).not.toHaveProperty('dictation_used');
+  });
+});

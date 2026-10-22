@@ -3801,6 +3801,8 @@ router.put('/:id', async (req, res, next) => {
             adjustedBy: req.adminUser?.id || req.adminUser?.email || req.adminUser?.name || null,
           },
         });
+        // GATE_PEST_STOCK_ADVISORY: a count back to zero or above closes the product's open shortfall alert.
+        await inventoryOperations.clearStockShortfallAlert(trx, req.params.id, after, movementUnit);
       }
       // A changed catalog size changes how vendor rows scale (per-oz size or
       // count) — recalculate so the fix lands without an operator re-saving

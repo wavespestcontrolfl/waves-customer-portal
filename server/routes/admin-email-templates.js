@@ -1304,6 +1304,18 @@ router.post('/versions/:id/preview', async (req, res) => {
   }
 });
 
+// A test send never attaches a file, so a fixture's PDF-copy line (the
+// estimate_pdf_note the senders fill only when the PDF really rides along,
+// migration 20261019200000) must not render in it: the test email would tell
+// the reader a PDF is attached when none is. Previews keep the line: they show
+// the layout of the attached-PDF send and mail nothing.
+function testSendPayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload || {};
+  return Object.prototype.hasOwnProperty.call(payload, 'estimate_pdf_note')
+    ? { ...payload, estimate_pdf_note: '' }
+    : payload;
+}
+
 // POST /api/admin/email-templates/versions/:id/test
 router.post('/versions/:id/test', async (req, res) => {
   try {
@@ -1315,7 +1327,7 @@ router.post('/versions/:id/test', async (req, res) => {
     const result = await EmailTemplates.sendTemplate({
       versionId: req.params.id,
       to,
-      payload: req.body.payload || {},
+      payload: testSendPayload(req.body.payload),
       test: true,
       unsubscribeUrl: sendgrid.unsubscribeUrl('test-' + req.params.id),
       categories: ['email_template_test'],

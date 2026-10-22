@@ -214,7 +214,8 @@ describe('the customer record', () => {
     const record = await buildCustomerRecord(fakeConn({ ...TABLES, sms_log: [
       text({ message_type: 'manual', operator_sent: false }), text({ message_type: 'ai_approved', operator_sent: false }), text({ message_type: 'manual', operator_sent: true }),
     ] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
-    expect(record.entries.filter((e) => e.channel === 'text').map((e) => e.from)).toEqual(['system', 'staff', 'staff']);
+    // Equal times sort by sender (r102), so the senders are compared sorted.
+    expect(record.entries.filter((e) => e.channel === 'text').map((e) => e.from).sort()).toEqual(['staff', 'staff', 'system']);
   });
 
   test('an outbound text created in the minutes before the move may not have been sent yet: unread', async () => {
@@ -332,7 +333,8 @@ describe('the customer record', () => {
       customer_interactions: [{ interaction_type: 'note', subject: 'Afternoons only', body: null, created_at: '2026-07-01T10:00:00.000Z' }] });
     const record = await buildCustomerRecord(conn, { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
     expect(record.serviceTypes).toEqual(['Pest', 'Lawn']);
-    expect(record.entries.filter((e) => e.channel === 'visit_note').map((e) => e.text)).toEqual(['Pest note', 'Lawn: Tuesdays only']);
+    // Undated notes of one channel keep one fixed order on every read (r100), by a digest: compared sorted.
+    expect(record.entries.filter((e) => e.channel === 'visit_note').map((e) => e.text).sort()).toEqual(['Lawn: Tuesdays only', 'Pest note']);
     expect(conn.calls.some(([t, method, col, ids]) => t === 'scheduled_services' && method === 'whereIn' && col === 'id' && ids.join() === 'p1,p2,s1,s2')).toBe(true);
     // Another occurrence's note is about that visit: the series' other rows are never read.
     expect(conn.calls.some(([t, method, col]) => t === 'scheduled_services' && method === 'orWhereIn' && col === 'recurring_parent_id')).toBe(false);
@@ -348,6 +350,671 @@ describe('the customer record', () => {
     expect(record.entries.filter((e) => e.channel === 'portal_chat').map((e) => [e.from, e.text])).toEqual([['customer', 'Never schedule me on Tuesdays.'], ['system', 'Noted.']]);
     expect(conn.calls.some(([t, method, col, op, value]) => t === 'agent_messages' && method === 'where' && col === 'agent_messages.created_at' && op === '<' && value === AS_OF)).toBe(true);
     expect(conn.calls.some(([t, method, col, value]) => t === 'agent_messages' && method === 'where' && col === 'agent_sessions.customer_id' && value === 'c1')).toBe(true);
+  });
+
+  describe('a time or a day in the same sentence as an access code', () => {
+    const { maskHidTime } = require('../services/auto-dispatch/proofreader/record')._internals;
+    const { redactAccessCodes } = require('../services/context-aggregator');
+    const hid = (text) => maskHidTime(text, redactAccessCodes(text));
+
+    // Security r97: the count reads only the text near the masks.
+    test('the count reads the text near the masks only, and still sees a hidden time', () => {
+      const { nearMasks } = require('../services/auto-dispatch/proofreader/record')._internals;
+      const far = 'the dog is friendly. '.repeat(100);
+      const raw = `${far}GATE CODE 4821, MONDAY ONLY. ${far}Tuesday works.`;
+      const [rawNear, maskedNear] = nearMasks(raw, redactAccessCodes(raw));
+      expect(rawNear.length).toBeLessThan(700);
+      expect(maskedNear).toContain('[redacted]');
+      expect(rawNear).not.toContain('Tuesday');
+      expect(hid(raw)).toBe(true);
+      expect(hid(`${far}Gate code 4821. ${far}Monday only.`)).toBe(false);
+    });
+
+    test('the scan budget goes to the same texts whatever order the rows come in (r100)', async () => {
+      const { buildCustomerRecord: build } = require('../services/auto-dispatch/proofreader/record');
+      const note = (n) => `Gate code 4821, the dog is friendly. ${'x'.repeat(n)}`;
+      const texts = [note(11000), note(5000), note(5000), note(5000)];
+      const printOf = (rows) => build(fakeConn({ customer_interactions: rows }), { customerId: 'c1', asOf: AS_OF })
+        .then((r) => JSON.stringify([r.entries.map((e) => e.text), r.unread]));
+      const rows = texts.map((t, i) => ({ id: i + 1, interaction_type: 'note', subject: null, body: t, created_at: new Date('2026-10-01T12:00:00Z') }));
+      expect(await printOf(rows)).toBe(await printOf([...rows].reverse()));
+    });
+
+    test('rows equal in time, channel and text keep one order by sender (r102)', async () => {
+      const { buildCustomerRecord: build } = require('../services/auto-dispatch/proofreader/record');
+      const at = new Date('2026-10-01T12:00:00Z');
+      const rows = [
+        { id: 1, interaction_type: 'note', subject: null, body: 'Same words', created_at: at, created_by: 'staff' },
+        { id: 2, interaction_type: 'customer_message', subject: null, body: 'Same words', created_at: at },
+      ];
+      const printOf = (list) => build(fakeConn({ customer_interactions: list }), { customerId: 'c1', asOf: AS_OF })
+        .then((r) => JSON.stringify(r.entries.map(({ id: _id, ...e }) => e)));
+      expect(await printOf(rows)).toBe(await printOf([...rows].reverse()));
+    });
+
+    test('texts masked alike but different underneath keep one order (r103)', async () => {
+      const { buildCustomerRecord: build } = require('../services/auto-dispatch/proofreader/record');
+      const at = new Date('2026-10-01T12:00:00Z');
+      const pad = 'the dog is friendly. '.repeat(430);
+      const rows = ['MONDAY', 'MANAGER'].map((w, i) => ({ id: i + 1, interaction_type: 'note', subject: null, body: `Gate code 4821, ask ${w}. ${pad}`, created_at: at }));
+      const printOf = (list) => build(fakeConn({ customer_interactions: list }), { customerId: 'c1', asOf: AS_OF })
+        .then((r) => JSON.stringify([r.entries.map(({ id: _id, ...e }) => e), r.unread]));
+      expect(await printOf(rows)).toBe(await printOf([...rows].reverse()));
+    });
+
+    test('the order the model reads never depends on the access code (security r106)', async () => {
+      const { buildCustomerRecord: build } = require('../services/auto-dispatch/proofreader/record');
+      const textsOf = (code) => build(fakeConn({ customer_interactions: [
+        { id: 1, interaction_type: 'note', subject: null, body: `Gate code ${code}, side door.`, created_at: null },
+        { id: 2, interaction_type: 'note', subject: null, body: 'Ring the bell first.', created_at: null },
+      ] }), { customerId: 'c1', asOf: AS_OF }).then((r) => r.entries.map((e) => e.text));
+      const orders = new Set();
+      for (let code = 1000; code < 1030; code += 1) orders.add(JSON.stringify(await textsOf(code)));
+      expect(JSON.parse([...orders][0])).toHaveLength(2);
+      expect(orders.size).toBe(1);
+    });
+
+    test('two alike card-only notes are not counted as unread by the group budget (r107)', async () => {
+      const { buildCustomerRecord: build } = require('../services/auto-dispatch/proofreader/record');
+      const note = `Card 4111 1111 1111 1111 on file. ${'the dog is friendly. '.repeat(80)}`;
+      const record = await build(fakeConn({ customer_interactions: [1, 2].map((id) => ({ id, interaction_type: 'note', subject: null, body: note, created_at: null })) }), { customerId: 'c1', asOf: AS_OF });
+      expect(record.entries.filter((e) => e.channel === 'note')).toHaveLength(2);
+      expect(record.unread.filter((u) => u.reason === 'time_masked')).toEqual([]);
+    });
+
+    test('a large group of alike texts stops at the budget (security r112)', async () => {
+      const { buildCustomerRecord: build } = require('../services/auto-dispatch/proofreader/record');
+      const body = `Gate code 4821, ask MANAGER. ${'the dog is friendly. '.repeat(40)}`;
+      const rows = Array.from({ length: 400 }, (_, i) => ({ id: i + 1, interaction_type: 'note', subject: null, body, created_at: null }));
+      const record = await build(fakeConn({ customer_interactions: rows }), { customerId: 'c1', asOf: AS_OF });
+      expect(record.unread.filter((u) => u.reason === 'time_masked')).toHaveLength(400);
+    });
+
+    test('too many held texts: none is held, each is not fully read (security r114)', async () => {
+      const { buildCustomerRecord: build } = require('../services/auto-dispatch/proofreader/record');
+      const rows = Array.from({ length: 300 }, (_, i) => ({ id: i + 1, interaction_type: 'note', subject: null, body: `Gate code ${1000 + i}, side door. ${'the dog is friendly. '.repeat(50)}`, created_at: new Date(Date.UTC(2026, 8, 1, 0, i)) }));
+      const record = await build(fakeConn({ customer_interactions: rows }), { customerId: 'c1', asOf: AS_OF });
+      expect(record.unread.filter((u) => u.reason === 'time_masked')).toHaveLength(300);
+      const few = await build(fakeConn({ customer_interactions: rows.slice(0, 2) }), { customerId: 'c1', asOf: AS_OF });
+      expect(few.unread.filter((u) => u.reason === 'time_masked')).toHaveLength(0);
+    });
+
+    test('a worst-case long text with one mask is scanned fast', () => {
+      const raw = `gate code 4821. ${'a '.repeat(6000)}`;
+      expect(hid(raw)).toBe(false);
+    });
+
+    test.each([
+      'Gate code 4821, not before 10am please',
+      'CODE 4821 FRIDAYS ONLY',
+      'Gate code 4821 and never before 9',
+      'Lockbox code 5521, 9:30 works',
+      'The access code 4821 works 7-7',
+      'Gate code 4821, only between 9 and 11',
+      'Gate code 4821, no earlier than 9',
+      'Gate code 4821, come at 2 o\'clock',
+      'Gate code 4821, 3 or later is best',
+      'Gate code 4821, any time past 3',
+      // A day-word credential AND a real statement: the statement still counts.
+      'Gate code Friday, never before 10am',
+      'Friday is the gate code, never before 10am',
+      'CODE 4821 DO NOT COME BEFORE NINE',
+      'No gate code after 9',
+      'CODE 4821, AT NINE O\'CLOCK ONLY',
+      // A passphrase of day or time words cannot be told from a time statement: the safe side is a person.
+      'Gate password Friday morning',
+      'Gate code 4821, AFTER LUNCH ONLY',
+      'CODE 4821 BEFORE SUNSET',
+      'Gate code 4821, TOMORROW ONLY',
+      'CODE 4821 NOT ON HOLIDAYS',
+      'CODE 4821 NEXT WEEK',
+      'ACCESS CODE 4821 EXPIRES 10/20',
+      'CODE 4821 UNTIL OCT 20',
+      'Gate code 4821 expires October 20th',
+      'Access code expires 10/20',
+      'Gate code 4821, PM ONLY',
+      'Friday is when the gate code works',
+      'Gate code 4821 expires 2026-10-20',
+      'Gate code 4821, 10 in the morning only',
+      'CODE 4821, 9 SHARP',
+      'Gate code 4821 expires the 20th',
+      'Gate code 4821, need 7 days notice',
+      'Gate code 4821 changes every 30 days',
+      'Gate code WEEKDAYS ONLY',
+      'GATE CODE 4821, AM ONLY',
+      'Gate code 4821, BEFORE lunch only',
+      'Gate code 4821, TEN THIRTY in the morning only',
+      'Gate code 4821, NINE in the morning',
+      'Gate code 4821 expires on 10/20',
+      'Friday was the gate code, MONDAYS ONLY',
+      'Gate code 4821, QUARTER TO TEN ONLY',
+      'Gate code WEEKDAYS, ONLY',
+      'Gate code WEEKDAYS (ONLY)',
+      'Gate code 4821, need TWO DAYS NOTICE',
+      'Gate code 4821, ONE WEEK NOTICE',
+      'Gate code 4821 changes every TWO WEEKS',
+      'Gate code 4821 expires in TWO DAYS',
+      'Gate code 4821, do not arrive before 1400 hours',
+      'CODE 4821, 0800 HRS ONLY',
+      'GATE CODE 4821, ONLY ON THE 20TH',
+      'Gate code 4821, only on 10/20',
+      'Gate code 4821, NOT ON 2026-10-20',
+      'Gate code 4821, except OCT 20',
+      'Gate code 4821, requires 48-hour notice',
+      'Gate code 4821, on 10/20 only',
+      'GATE CODE 4821, EVERY OTHER WEEK ONLY',
+      'Gate code 4821, BEFORE noon only',
+      'Gate code 4821, BY Friday',
+      'Gate code 4821, around 10ish',
+      'Gate code 4821, 10-ish',
+      'Gate code 4821, need 2 business days notice',
+      'Gate code 4821, 10 A.M. ONLY',
+      'Gate code 4821, 10 AM ONLY',
+      'Gate code 4821, every OTHER Tuesday',
+      'Gate code 4821, NINE A.M. ONLY',
+      'Gate code 4821, TWO AND A HALF HOURS NOTICE',
+      'Gate code 4821 expires 20 October',
+      'Gate code 4821, AFTER HOURS ONLY',
+      'Gate code 4821, NEVER Fridays',
+      'Gate code 4821, TEN TO TWO ONLY',
+      'Gate code 4821, NEVER WEEKENDS',
+      'GATE CODE 4821, NINE EARLIEST',
+      'Gate code 4821, FIFTEEN TO TWO ONLY',
+      'Gate code 4821, 2 days minimum notice',
+      'Gate code 4821 expires 20 May',
+      'Gate code 4821, END OF DAY ONLY',
+      'Gate code 4821, NIGHT ONLY',
+      'Gate code 4821, appointment time 9 only',
+      'Gate code 4821 expires 20 May only',
+      'Gate code 4821, FIRST APPOINTMENT ONLY',
+      'TUESDAY is available with gate code 4821',
+      'Gate code 4821, need 30 minutes notice',
+      'Gate code 4821, 9 works for us',
+      'Gate code 4821, TEN ONLY',
+      'Gate code 4821, MIDDAY ONLY',
+      'Gate code 4821, 0800 ONLY',
+      'Gate code 4821 VALID THROUGH OCTOBER',
+      'Gate code 4821, 2:30ish only',
+      'Gate code 4821, 10/31 works',
+      'Gate code 4821, THIRTY MINUTES NOTICE',
+      'Gate code 4821, 1st appointment only',
+      'GATE CODE 4821 EXPIRES 20 OCTOBER',
+      'Gate code 4821 is valid for 30 days',
+      'Gate code 4821 expires after 30 days',
+      'GATE CODE 4821 ACCESS ENDS OCTOBER 20',
+      'Gate code 4821 changes on 11/1',
+      'Gate code 4821, HALF HOUR NOTICE',
+      'Gate code 4821 VALID THROUGH OCTOBER 2026',
+      'Gate code 4821, GIVE US 30 MINUTES HEADS UP',
+      'Gate code 4821, scheduled for 9',
+      'Gate code 4821, AS EARLY AS 9',
+      'Gate code 4821, AN HOUR AND A HALF NOTICE',
+      'GATE CODE 4821, VALID TILL END OF OCTOBER',
+      'Gate code 4821, SCHEDULE FOR TUESDAY',
+      "Gate code 4821, CAN'T DO FRIDAY",
+      'Gate code 4821 VALID THROUGH 2026',
+      'Gate code 4821, need 30 minutes warning',
+      'Gate code 4821, 2 days lead time',
+      'Gate code 4821, LUNCH ONLY',
+      "GATE CODE 4821, TUESDAY DOESN'T WORK",
+      'Gate code 4821, VALID FOR ONE HOUR',
+      'Gate code 4821, AFTER WORK ONLY',
+      'GATE CODE 4821 EXPIRES 10-20-2026',
+      "GATE CODE 4821, NEED ONE DAY'S NOTICE",
+      'GATE CODE 4821, 800 HRS ONLY',
+      'GATE CODE 4821, NOT AVAILABLE MONDAY',
+      'GATE CODE 4821, MONDAY UNAVAILABLE',
+      'Gate code 4821, want the 1st appointment',
+      'GATE CODE 4821 VALID THROUGH YEAR END',
+      'GATE CODE 4821, VALID TILL MONTH-END',
+      "GATE CODE 4821, DON'T COME FRIDAY",
+      'GATE CODE 4821, CANNOT COME MONDAY',
+      'GATE CODE 4821, SOLO LOS MARTES',
+      'GATE CODE 4821, NUNCA ANTES DE LAS DIEZ',
+      'GATE CODE 4821 EXPIRES END OF THIS YEAR',
+      'GATE CODE 4821, TUESDAY WILL NOT WORK',
+      'GATE CODE 4821, DO NOT COME FOR TWO WEEKS',
+      'GATE CODE 4821, COME BACK IN TWO WEEKS',
+      'GATE CODE 4821, COME BACK IN 30 MINUTES',
+      'GATE CODE 4821, WAIT 10 MINS',
+      'GATE CODE 4821, OUT OF TOWN FOR TWO WEEKS',
+      'GATE CODE 4821, NO SERVICE UNTIL FURTHER NOTICE',
+      'GATE CODE 4821, SERVICE ON HOLD',
+      'GATE CODE 4821 EXPIRES FRIDAY',
+      'GATE CODE 4821, NO EARLY APPOINTMENTS',
+      'GATE CODE 4821, PLEASE COME LATE',
+      'GATE CODE 4821, FIRST WEEK OF THE MONTH ONLY',
+      'GATE CODE 4821, LAST WEEK OF THE MONTH',
+      'GATE CODE 4821, SECOND TUESDAY OF THE MONTH',
+      'GATE CODE 4821, EXPIRES: FRIDAY',
+      'GATE CODE 4821, THIS COMING FRIDAY',
+      'GATE CODE 4821, MONDAY APPOINTMENTS ONLY',
+      'GATE CODE 4821, RETURN AFTER THE HOLIDAYS',
+      'GATE CODE 4821, RETURN AFTER CHRISTMAS',
+      'GATE CODE 4821 EXPIRES TOMORROW',
+      'GATE CODE 4821 STARTS TODAY',
+      'GATE CODE 4821, ONLY WORKS MONDAY',
+      'GATE CODE 4821, LAST DAY OF THE MONTH ONLY',
+      'GATE CODE 4821, FIRST DAY OF THE MONTH',
+      'GATE CODE 4821, RETURN IN A COUPLE OF DAYS',
+      'GATE CODE 4821, AWAY FOR A FEW WEEKS',
+      'GATE CODE 4821, TENTH DAY OF THE MONTH ONLY',
+      'GATE CODE 4821, 15TH DAY OF THE MONTH',
+      'Gate code 4821, Monday 10',
+      'Gate code 4821, Monday 900',
+      'Gate code 4821, appointment at 930',
+      'GATE CODE 4821, EARLIEST APPOINTMENT ONLY',
+      'GATE CODE 4821, LAST TWO WEEKS OF THE MONTH ONLY',
+      'GATE CODE 4821, SOLO A LAS 10',
+      'GATE CODE 4821, A LAS DIEZ',
+      'GATE CODE 4821, DO NOT RESCHEDULE',
+      'GATE CODE 4821, DO NOT MOVE APPOINTMENT',
+      'GATE CODE 4821, APPOINTMENT CANNOT BE MOVED',
+      'GATE CODE 4821, MIDDLE OF THE MONTH ONLY',
+      'GATE CODE 4821, MONDAY MORNING ONLY',
+      'GATE CODE 4821, APPOINTMENT IS TOMORROW',
+      'GATE CODE 4821, SCHEDULED FOR TOMORROW',
+      'GATE CODE 4821, NO SERVICE UNTIL SPRING',
+      'GATE CODE 4821, WINTER ONLY',
+      'GATE CODE 4821, AWAY FOR THE SUMMER',
+      'GATE CODE 4821, APPOINTMENT IS OCTOBER 20',
+      'GATE CODE 4821, DAYLIGHT ONLY',
+      "Gate code 4821, DON'T COME TOO EARLY",
+      'GATE CODE 4821, APPOINTMENT IS MONDAY',
+      'GATE CODE 4821, START OF DAY ONLY',
+      'GATE CODE 4821, APPOINTMENT IS THE WEEK OF OCTOBER 20',
+      'GATE CODE 4821, APPOINTMENT DATE IS OCTOBER 20',
+      'GATE CODE 4821, VISIT DATE 10/20',
+      'GATE CODE 4821, NOT ON VETERANS DAY',
+      "GATE CODE 4821, NOT ON MOTHER'S DAY",
+      'GATE CODE 4821, END OF DAY ONLY',
+      'GATE CODE 4821, NEXT APPOINTMENT IS MONDAY',
+      'GATE CODE 4821, SCHEDULE DATE IS OCTOBER 20',
+      'GATE CODE 4821, SERVICE MUST BE MONDAY',
+      'GATE CODE 4821, SERVICE DATE MUST BE OCTOBER 20',
+      'GATE CODE 4821, SERVICE NEEDS TO BE MONDAY',
+      'GATE CODE 4821, SERVICE CANNOT BE MONDAY',
+      'GATE CODE 4821, APPOINTMENT MUST NOT BE MONDAY',
+      'GATE CODE 4821, WINDOW IS 2 THROUGH 4',
+      'GATE CODE 4821, SERVICE CAN ONLY BE MONDAY',
+      'GATE CODE 4821, SKIP OCTOBER 20',
+      'GATE CODE 4821, APPOINTMENT MUST BE TOMORROW',
+      'GATE CODE 4821, APPOINTMENT DATE: OCTOBER 20',
+      'GATE CODE 4821, VISIT DATE: 10/20',
+      'GATE CODE 4821, APPOINTMENT: MONDAY',
+      'GATE CODE 4821, NO SERVICE IN OCTOBER',
+      'GATE CODE 4821, APPOINTMENT IS FIXED',
+      'GATE CODE 4821, DATE IS FIRM',
+      'GATE CODE 4821, KEEP APPOINTMENT AS IS',
+      'GATE CODE WORKS MONDAY',
+      'GATE CODE AVAILABLE MONDAY',
+      'GATE CODE 4821, APPOINTMENT IS MON',
+      'GATE CODE 4821, SERVICE MUST BE SAT',
+      'GATE CODE 4821, SOLO POR LA TARDE',
+      'GATE CODE 4821, DO NOT COME TOMORROW',
+      'GATE CODE 4821, ONLY AVAILABLE DAY IS MONDAY',
+      'GATE CODE 4821, BEST DAY IS FRIDAY',
+      'GATE CODE 4821, NINE TO FIVE',
+      'GATE CODE 4821 VALID THROUGH MAY',
+      'GATE CODE 4821, START OF THE WEEK ONLY',
+      'GATE CODE 4821, MIDDLE OF WEEK PLEASE',
+      'GATE CODE 4821, DO NOT SCHEDULE TOMORROW',
+      'GATE CODE 4821, DO NOT BOOK TOMORROW',
+      'GATE CODE 4821, RESCHEDULE FOR OCTOBER 20',
+      'GATE CODE 4821, WE ARE UNAVAILABLE TOMORROW',
+      'GATE CODE 4821, NEW CODE EVERY WEEK',
+      'GATE CODE 4821, AFTER 3 ET',
+      'GATE CODE 4821, COME AT 10 EST',
+      'GATE CODE 4821, COME ON OCTOBER 20',
+      'GATE CODE 4821, ARRIVE OCTOBER 20',
+      'GATE CODE 4821, CITA EL LUNES',
+      'GATE CODE 4821, CANNOT DO OCTOBER 20',
+      'GATE CODE 4821, WE CANNOT DO TOMORROW',
+      'GATE CODE 4821, AVOID TOMORROW',
+      'GATE CODE 4821, CLOSED THANKSGIVING DAY',
+      'GATE CODE 4821, CITA EL 20 DE OCTUBRE',
+      'GATE CODE 4821, CITA 10/20',
+      'GATE CODE 4821, 0900-1100 ONLY',
+      'GATE CODE 4821, APPOINTMENT MUST STAY ON OCTOBER 20',
+      'GATE CODE 4821, NOT AVAILABLE OCTOBER 20',
+      'GATE CODE 4821, LEAVE APPOINTMENT AS IS',
+      'GATE CODE 4821, DATE IS OCTOBER 20',
+      'GATE CODE 4821, WE WILL BE OUT OF TOWN OCTOBER 20',
+      'GATE CODE 4821, NOT FRI',
+      'GATE CODE 4821, AVOID MON',
+      'GATE CODE 4821, ENTRE LAS 9 Y LAS 11',
+      'GATE CODE 4821, DE 9 A 11',
+      'GATE CODE 4821, OCTOBER 20 WILL NOT WORK',
+      'GATE CODE 4821, OCTOBER 20 IS NOT GOOD',
+      'GATE CODE 4821, 9 DOES NOT WORK',
+      "GATE CODE 4821, 10 WON'T WORK",
+      'GATE CODE 4821, 9 IS TOO EARLY',
+      'GATE CODE 4821, SNOWBIRD OCT-APR ONLY',
+      'GATE CODE 4821, HERE OCTOBER-MAY',
+      'GATE CODE 4821, CITA HOY',
+      'GATE CODE 4821, SERVICIO MA\u00d1ANA',
+      'GATE CODE 4821, OCT. 20 ONLY',
+      'GATE CODE 4821, OCTOBER 20 IS THE APPOINTMENT',
+      'GATE CODE 4821, KEEP THE CURRENT APPOINTMENT TIME',
+      'GATE CODE 4821, I CANNOT MAKE OCTOBER 20',
+      'GATE CODE 4821, NO LATER THAN OCTOBER 20',
+      'GATE CODE 4821, NO EARLIER THAN OCTOBER 20',
+      'GATE CODE 4821, REQUESTED OCTOBER 20',
+      'GATE CODE 4821, PREFER OCTOBER 20',
+      'GATE CODE 4821, NEED OCTOBER 20',
+      'GATE CODE 4821, 9\u201311',
+      'GATE CODE 4821, 9 \u2014 11',
+      'GATE CODE 4821, OUT OF TOWN, BACK OCTOBER 20',
+      'GATE CODE 4821, RETURNING OCTOBER 20',
+      'Gate code 4821, next visit 10/20',
+      'Gate code 4821, every visit 10/20',
+      'GATE CODE 4821, SCHEDULE ME FOR OCTOBER 20',
+      'GATE CODE 4821, RESCHEDULE ME TO OCTOBER 20',
+      'GATE CODE 4821, WEEK OF OCTOBER 20',
+      'GATE CODE 4821, DURING THE WEEK OF OCTOBER 20',
+      'Gate code 4821, please come 10',
+      'GATE CODE 4821, ARRIVE 9 PLEASE',
+      'GATE CODE 4821, PLEASE COME TEN',
+      'GATE CODE 4821, BE HERE TEN',
+      'GATE CODE 4821, I WOULD LIKE OCTOBER 20',
+      'GATE CODE 4821, START AT 9',
+      "GATE CODE 4821, I CAN'T MAKE IT ON OCTOBER 20",
+      'GATE CODE 4821, OCTOBER 20 IS UNAVAILABLE',
+      'GATE CODE 4821, OCTOBER 20 IS BUSY',
+      'GATE CODE 4821, I PREFER TOMORROW',
+      'GATE CODE 4821, WOULD LIKE TOMORROW',
+      'GATE CODE 4821, REQUESTED TOMORROW',
+      "GATE CODE 4821, CAN'T MAKE IT TOMORROW",
+      'GATE CODE 4821, TOMORROW IS THE APPOINTMENT',
+      "GATE CODE 4821, TOMORROW WON'T WORK",
+      'GATE CODE 4821, 10 IS THE APPOINTMENT TIME',
+      'GATE CODE 4821, TEN IS THE APPOINTMENT TIME',
+      'Gate code 4821, 10 WOULD BE BEST',
+      'Gate code 4821, OCTOBER 20 WON\u2019T WORK',
+      "Gate code 4821, I CAN'T BE THERE OCTOBER 20",
+      'GATE CODE 4821, OCTOBER 20 WOULD WORK',
+      'GATE CODE 4821, 10 SHOULD WORK',
+      'GATE CODE 4821, APPOINTMENT STAYS AS IS',
+      'GATE CODE 4821, APPOINTMENT REMAINS AS IS',
+      'GATE CODE 4821, PLEASE KEEP IT ON OCTOBER 20',
+      'GATE CODE 4821, KEEP IT MONDAY',
+      'GATE CODE 4821, OCTOBER 20 IS PERFECT',
+      'GATE CODE 4821, PLEASE COME AS EARLY AS POSSIBLE',
+      'GATE CODE 4821, THE LATER THE BETTER',
+      'Gate code 4821, APPOINTMENT 10-20-2026 10-11',
+      'GATE CODE 4821 VALID THROUGH MAY ONLY',
+      'GATE CODE 4821, SERVICE CANNOT BE TOMORROW',
+      'GATE CODE 4821, AVOID 10/20',
+      'GATE CODE 4821, BEGINNING OF THE MONTH ONLY',
+      'GATE CODE 4821, FIRST THING IN THE MORNING',
+      'GATE CODE 4821, SERVICE SUSPENDED',
+      'Gate code 4821, ON MONDAY',
+      'Gate code 4821, MONDAY WORKS',
+      'CODE 4821 MON-FRI ONLY',
+      'CODE 4821 SAT ONLY',
+      'Gate code 4821, PM ONLY',
+      'Gate code 4821, BUSINESS HOURS ONLY',
+      'CODE 4821 OFFICE HOURS',
+      'Gate code 4821, never before 9 please',
+    ])('the mask hides it: %s', (text) => {
+      expect(hid(text)).toBe(true);
+      expect(redactAccessCodes(text)).not.toContain('4821');
+    });
+
+    test.each([
+      'Side gate code 4821, latch sticks.',
+      'The gate code is 1234. Never on Fridays.',
+      'Please come Tuesday at 2pm',
+      // Lowercase words outside the code slot are not masked: the model reads them.
+      'Gate code 4821, come at nine o\'clock',
+      'No codes here, any day is fine',
+      // The mask also takes the day numbers of a note's date stamps: not a time statement.
+      '[call Fri Aug 14] Gate code: 4821.',
+      '[2026-10-09 from messages] Gate code 4821 is unconfirmed',
+      'Community gate code 4821# given by the owner 10/1.',
+      // The credential itself is a day or a time word: not a statement about when.
+      'Gate code Friday',
+      'Gate password is noon',
+      'The garage code: sunday',
+      'Friday is the gate code',
+      // A quantity is not a time.
+      'Gate code 4821, dog weighs about 50 lbs',
+      'Gate code 4821, about 5 dogs roam the yard',
+      'Gate code 4821, lot is about 5/8 acre',
+      'Gate code 4821, the fence is 6 feet tall',
+      'GATE CODE 4821 I AM THE OWNER',
+      'Gate code 4821, good 10/10 service',
+      'Gate code 4821, contact PM for access',
+      'Gate code 4821, spoke with owner on 10/10',
+      'Gate code 4821, about THREE acres',
+      'Gate code 4821, got it from ONE of the owners',
+      'Gate code 4821, house 1400 on the left',
+      'GATE CODE 4821, DOG GETS DAILY MEDICATION',
+      'Gate code 4821, only 2 dogs roam the yard',
+      'Gate code 4821, PM approved access',
+      'GATE CODE 4821, DOGS MAY BARK',
+      'Gate code 4821, NIGHT LIGHT IS BROKEN',
+      'Gate code 4821, mix ratio 1:10',
+      '[CALL FRI AUG 14] Gate code: 4821.',
+      'Gate code 4821, ONLY JANITOR HAS KEY',
+      'Gate code 4821, FULL SUN IN BACK YARD',
+      'Gate code 4821, OWNER CALLED MONDAY',
+      'Gate code 4821, DOG EATS BREAKFAST INSIDE',
+      'Gate code 4821, OWNER IS AT WORK',
+      'Gate code 4821, KEY IS AT SCHOOL',
+      'Gate code 4821, SPOKE TO PM',
+      'GATE CODE 4821, FIRST APPOINTMENT COMPLETED',
+      'GATE CODE 4821, ONLY TWO DOGS',
+      'GATE CODE 4821, THE GATE IS MIDNIGHT BLUE',
+      'GATE CODE 1234 ONLY',
+      'GATE CODE 4821, SUSPENDED CEILING IN LOBBY',
+      'GATE CODE 4821, HOY HABL\u00c9 CON EL DUE\u00d1O',
+      'GATE CODE 4821, TECH MAY ONLY USE SIDE GATE',
+      'GATE CODE 4821, MORNING GLORY IN FLOWER BED',
+      'GATE CODE 4821, AFTERNOON SUN IN BACK YARD',
+      'GATE CODE 4821, FIRST THING ON LEFT IS THE SHED',
+      'Gate code 4821, ask MANAGER\nFriday works.',
+      'Gate code 4821, ask MANAGER. Friday works.',
+      'Gate code 4821, owner called YESTERDAY',
+      'Gate code 4821, owner called TODAY about the bill',
+      'Friday is the front door access code',
+      'Gate code 4821, the latch opens after 5 seconds of pressing',
+      'Noon is the gate password',
+    ])('nothing about when is hidden: %s', (text) => {
+      expect(hid(text)).toBe(false);
+    });
+
+    test('a long stored text is scanned in bounded time (no retry at every byte)', () => {
+      const text = `Gate code 1234. ${'A'.repeat(64 * 1024)}`;
+      // A long run of spaces: the record collapses white space before the mask
+      // runs (record.js clean), so only this check sees it raw. Timed alone.
+      const spaces = `Gate code${' '.repeat(32 * 1024)}!`;
+      const spacesMasked = redactAccessCodes(spaces.replace(/\s+/g, ' '));
+      // No wall-clock bound (it failed on slower machines, Codex r72): these
+      // inputs only have to finish; the record path never scans an entry past
+      // MAX_SCAN_ENTRY_CHARS (tested below).
+      expect(typeof hid(text)).toBe('boolean');
+      expect(typeof maskHidTime(spaces, spacesMasked)).toBe('boolean');
+      // A text past the record's limit is not scanned: the record is too long anyway.
+      const huge = `Gate code 1234. today ${'x '.repeat(200000)}`;
+      expect(maskHidTime(huge, huge.replace('1234', '[redacted]'))).toBe(false);
+      // ...unless the mask made it short: a long credential run hides a statement, unscanned.
+      const longCode = `Gate code ${'A'.repeat(300000)}1 TOMORROW ONLY`;
+      expect(maskHidTime(longCode, redactAccessCodes(longCode))).toBe(true);
+    });
+
+    test('one record shares one scan budget: a text past what is left is not scanned and counts as not fully read', async () => {
+      // Two long credential runs: each masks to a few words, so the record is
+      // short, but their raw texts together pass the budget.
+      const long = `Gate code ${'A'.repeat(200000)}1 please call`;
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: long, crm_notes: long }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(record.tooLong).toBe(false);
+      expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(true);
+      // The flag never reaches the returned entries.
+      expect(record.entries.every((row) => !('maskedTime' in row))).toBe(true);
+    });
+
+    test('a day the one-line mask hides on a second line is listed as not fully read', async () => {
+      const note = 'Gate code 4821, ask MANAGER\nFRIDAY WORKS.';
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(JSON.stringify(record.entries)).not.toContain('FRIDAY');
+      expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(true);
+    });
+
+    test('within the limits, a text whose only mask is a card number is not taken for a hidden time', async () => {
+      const short = `Paid with card 4111111111111111. ${'word '.repeat(100)}`;
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: short }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(false);
+      // Past the per-entry limit no more work is done on it: counted as not
+      // fully read, the safe side (security r73).
+      const long = `Paid with card 4111111111111111. ${'word '.repeat(6000)}`;
+      const big = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: long }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(big.unread.some((u) => u.reason === 'time_masked')).toBe(true);
+    });
+
+    test('a long text with an SSN and an access code is still counted as not fully read', async () => {
+      const note = `SSN 123-45-6789, gate code 4821 FRIDAYS ONLY. ${'word '.repeat(6000)}`;
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(true);
+    });
+
+
+    test('a text with very many masks is counted as not fully read without a scan', async () => {
+      const note = `Gate code 4821, ${'AB '.repeat(2000)}`;
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(true);
+    });
+
+    test('the stored text is charged at its own length, spaces included', async () => {
+      const spaced = `Gate code 4821,${' '.repeat(30000)}MONDAY ONLY`; // short once collapsed
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: spaced }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      // Past the per-entry scan limit at its stored length: not scanned, counted as not fully read.
+      expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(true);
+    });
+
+    test('a long text the mask changed is counted as not fully read without a scan', async () => {
+      const masked = `Gate code 4821 ${'word '.repeat(6000)}`; // 30 KB, past the per-entry scan limit
+      const plain = `Gate opens by itself ${'word '.repeat(6000)}`; // 30 KB, the mask changes nothing
+      const flagged = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: masked }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      const clear = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: plain }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(flagged.unread.some((u) => u.reason === 'time_masked')).toBe(true);
+      expect(clear.unread.some((u) => u.reason === 'time_masked')).toBe(false);
+    });
+
+    test('a multi-word password on the next line is masked as before in the text the model reads', async () => {
+      const plain = 'Gate password below blue house today';
+      const note = 'Gate password below\nblue house today';
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      const entry = record.entries.find((row) => row.text.includes('password'));
+      expect(entry.text).toBe(redactAccessCodes(plain));
+      expect(entry.text).not.toContain('blue house');
+    });
+
+    test('a [redacted] already in the stored text is not taken for the mask', async () => {
+      const note = 'Gate code 4821. Prior caller [redacted] Monday appointment.';
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(false);
+    });
+
+    test('an upper-case [REDACTED] already in the stored text is not taken for the mask', async () => {
+      const note = 'Gate code 4821 prior [REDACTED] Monday appointment completed';
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(false);
+    });
+
+    test('a masked text past the record limit is not scanned (the record is too long, no model is asked)', async () => {
+      const note = `Gate code 4821 ${'AB '.repeat(100000)}`;
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(record.tooLong).toBe(true);
+      expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(false);
+    });
+
+    test.each([
+      'SSN 123456789, MONDAY ONLY',
+      'Front gate 4821, Monday only',
+      'GATE CODE 4821, I REALLY AM THE OWNER',
+      'GATE CODE 4821, PUMP HAS 1400 HOURS',
+      'GATE CODE 4821, MOWER HAS 900 HOURS',
+      'Gate code 4821, unit 5, Monday only',
+      'Gate code 4821, spoke to MANAGER Monday.',
+      'GATE CODE 4821, MIX RATIO 1/10 ONLY',
+      'GOOD MORNING! GATE CODE IS 4821',
+      'Gate code 4821, ask MANAGER April',
+      'Gate code 4821, spoke to MANAGER Monday morning.',
+      'GATE CODE 4821, AM I THE OWNER ON FILE',
+      'GATE CODE 4821, OWNER CALLED MONDAY MORNING',
+      'GATE CODE 4821, PM ONLY HAS THE KEY',
+      'GATE CODE 4821, SHED SAT 10 FEET FROM HOUSE',
+      'GATE CODE 4821, OWNER CALLED MONDAY, LATCH BROKEN',
+      'GATE CODE 4821, THE GATE CANNOT BE MOVED',
+      'GATE CODE 4821, END OF MONTH REPORT IS DUE',
+      'GATE CODE 4821, SPRING IS BROKEN',
+      'GATE CODE 4821, BACK YARD GETS FULL SUN',
+      'GATE CODE 4821, EL DUE\u00d1O LLAM\u00d3 EL MARTES',
+      'GATE CODE 4821, END OF DAY REPORT IS DUE',
+      'GATE CODE 4821, LAST APPOINTMENT WAS MONDAY',
+      'GATE CODE 4821, SHED IS 10-20 FEET FROM HOUSE',
+      'BUENOS DIAS, GATE CODE 4821',
+      'GATE CODE 4821, LAST APPOINTMENT WAS TODAY',
+      'GATE CODE 4821, HABL\u00c9 CON EL DUE\u00d1O EN OCTUBRE',
+      'GATE CODE 4821, EL PERRO DUERME POR LAS TARDES',
+      'GATE CODE 4821, AFTER HOURS EMERGENCY NUMBER IS 5551234',
+      'GATE CODE 4821, CHANGES MAY BE NEEDED',
+      'GATE CODE 4821, AVISO DE PERRO EN LA PUERTA',
+      'GATE CODE 4821, PM PLEASE CALL OWNER',
+      'GATE CODE 4821, WINTER IS HARD ON THE LOCK',
+      'GATE CODE 4821, CUSTOMER WAS ON HOLD WITH OFFICE',
+      'GATE CODE 4821, OWNER PUT ME ON HOLD',
+      'GATE CODE 4821, CHANGES MAY ONLY BE MADE BY OWNER',
+      'CVV number is 123, MONDAY ONLY',
+      'GATE CODE 4821, TODAY IS HOT',
+      'GATE CODE 4821, SHED IS 10-20 SQ FT',
+      'GATE CODE 4821, SHED IS 10-20 SQUARE FEET',
+      'GATE CODE 4821, APRIL ONLY HAS THE KEY',
+      'GATE CODE 4821, I ALSO AM THE OWNER',
+      'GATE CODE 4821, THERMOSTAT IS 70-75 DEGREES',
+      'Gate code 4821, Monday OWNER called',
+      'GATE CODE 4821, TREAT UNIT 9 ONLY',
+      'GATE CODE 4821, APT 9 ONLY',
+      'GATE CODE 4821, BAY 9 PLEASE',
+      'Gate code 4821, come 2 times a month',
+      'GATE CODE 4821, START 2 IRRIGATION ZONES',
+      'GATE CODE 4821, PROPERTY HAS 30-40 PALMS',
+      'GATE CODE 4821, PROPERTY HAS 10-20 PALMS',
+      'GATE CODE 4821, SERVICE MONDAY COMPLETED',
+      'GATE CODE 4821, APPOINTMENT OCTOBER 20 COMPLETED',
+      'GATE CODE 4821, PIPE IS 10-20 CM LONG',
+      'GATE CODE 4821, USE 10-20 OUNCES',
+      'GATE CODE 4821, EL DUE\u00d1O LLAM\u00d3 HACE TRES D\u00cdAS',
+      'GATE CODE 4821, TRABAJO TERMINADO HACE DOS SEMANAS',
+      "GATE CODE 4821, SHED IS 10-20' FROM HOUSE",
+      'Password blue, front gate 4821 Monday only, ask MANAGER\nFriday works.',
+    ])('a number masked beside a visible day is not taken for a hidden time: %s', async (note) => {
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(false);
+    });
+
+    test('a card number masked beside a visible day is not taken for a hidden time', async () => {
+      const note = 'Card 4111111111111111, MONDAY ONLY';
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(JSON.stringify(record.entries)).not.toContain('4111111111111111');
+      expect(record.unread.some((u) => u.reason === 'time_masked')).toBe(false);
+    });
+
+    test('a code split across lines is still masked in the text the model reads', async () => {
+      const note = 'Front door: 4821 is the\ngate code';
+      const record = await buildCustomerRecord(fakeConn({ ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: note }] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(JSON.stringify(record.entries)).not.toContain('4821');
+    });
+
+    test('the entry is read with the code masked and listed as not fully read, so the verdict is never allow', async () => {
+      const tables = { ...TABLES, customers: [{ ...TABLES.customers[0], access_notes: 'Gate code 4821, not before 10am please' }] };
+      const record = await buildCustomerRecord(fakeConn(tables), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+      expect(JSON.stringify(record.entries)).not.toContain('4821');
+      expect(record.unread).toEqual(expect.arrayContaining([expect.objectContaining({ reason: 'time_masked' })]));
+      expect(record.entries.every((row) => !('maskedTime' in row))).toBe(true);
+      expect(judge({ verdict: 'allow', entry_id: '', quote: '', reason: 'fine' }, record)).toMatchObject({ verdict: 'unknown', why: 'record_incomplete' });
+    });
   });
 
   test('a source that cannot be read is listed as unread and the rest is still built', async () => {

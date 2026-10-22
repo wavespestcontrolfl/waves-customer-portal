@@ -176,3 +176,39 @@ describe('POST tree-shrub/assess-preview suggestedCondition', () => {
     expect(res.body).toMatchObject({ status: 'failed', scores: null, suggestedCondition: null });
   });
 });
+
+describe('GET tree-shrub/fast-context carries the stock advisory (GATE_LAWN_TS_STOCK_ADVISORY)', () => {
+  const saved = process.env.GATE_LAWN_TS_STOCK_ADVISORY;
+  const savedFast = process.env.GATE_TS_FAST_COMPLETE;
+  const CONTEXT = { ok: true, eligible: true, reason: null, service: { id: 'visit-1', serviceType: 'Tree & Shrub Care' }, products: [] };
+  beforeEach(() => {
+    process.env.GATE_TS_FAST_COMPLETE = 'true';
+    mockDbCurrent = dbWithOwner('tech-1');
+    buildTreeShrubFastContext.mockReset().mockResolvedValue(CONTEXT);
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.GATE_LAWN_TS_STOCK_ADVISORY; else process.env.GATE_LAWN_TS_STOCK_ADVISORY = saved;
+    if (savedFast === undefined) delete process.env.GATE_TS_FAST_COMPLETE; else process.env.GATE_TS_FAST_COMPLETE = savedFast;
+    mockDbCurrent = null;
+  });
+
+  test.each([undefined, '', 'false', '1', 'TRUE'])('gate %p: no stockAdvisory key, the context exactly as before', async (value) => {
+    if (value === undefined) delete process.env.GATE_LAWN_TS_STOCK_ADVISORY; else process.env.GATE_LAWN_TS_STOCK_ADVISORY = value;
+    const res = await invoke('get', FAST, { params });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({ enabled: true, eligible: true, reason: null, service: CONTEXT.service, products: [] });
+  });
+
+  test('gate on (exactly true), a tree & shrub visit: stockAdvisory is true', async () => {
+    process.env.GATE_LAWN_TS_STOCK_ADVISORY = 'true';
+    const res = await invoke('get', FAST, { params });
+    expect(res.body.stockAdvisory).toBe(true);
+  });
+
+  test('gate on, a visit /complete still refuses below zero (palm): no stockAdvisory key', async () => {
+    process.env.GATE_LAWN_TS_STOCK_ADVISORY = 'true';
+    buildTreeShrubFastContext.mockResolvedValue({ ...CONTEXT, service: { id: 'visit-1', serviceType: 'Palm Injection' } });
+    const res = await invoke('get', FAST, { params });
+    expect(res.body).not.toHaveProperty('stockAdvisory');
+  });
+});
