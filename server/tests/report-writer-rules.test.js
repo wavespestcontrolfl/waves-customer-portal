@@ -575,6 +575,9 @@ describe('four-section report: the reach-out date asks the customer to get in to
     ["WHAT'S NEXT\nIf they come back by Wednesday, October 14, text or call us."],
     ["WHAT'S NEXT\nWe returned to the kitchen today; if ants remain by Wednesday, October 14, call us."],
     ["WHAT'S NEXT\nCall us on Wednesday, October 14 to follow up if ants remain."],
+    ["WHAT'S NEXT\nIf ants are still trailing by the office window on Wednesday, October 14, call us."],
+    ["WHAT'S NEXT\nIf you see spiders by the front window on Wednesday, October 14, text or call us."],
+    ["WHAT'S NEXT\nIf the mud daubers come back to the eaves by Wednesday, October 14, give us a call."],
   ])('a place or a sign of the pest passes: %s', (text) => {
     expect(writerRulesRejection(text, { allowedDates, allowedPhrases: ['over the next couple of weeks'] })).toBeNull();
   });
@@ -597,6 +600,12 @@ describe('four-section report: the reach-out date asks the customer to get in to
     ["WHAT'S NEXT\nThe technician handling your service will return on Wednesday, October 14, so call us if anything changes."],
     ["WHAT'S NEXT\nIf needed, our technician will return on Wednesday, October 14, so call us first."],
     ["WHAT'S NEXT\nIf the kitchen window is open when we come back on Wednesday, October 14, call us."],
+    ["WHAT'S NEXT\nIf the service professional returns on Wednesday, October 14, call us."],
+    ["WHAT'S NEXT\nIf the service professional is returning on Wednesday, October 14, call us."],
+    ["WHAT'S NEXT\nWe’re coming back Wednesday, October 14; call us with any questions."],
+    ["WHAT'S NEXT\nThe team returns Wednesday, October 14, so let us know before then."],
+    ["WHAT'S NEXT\nYour next few treatments begin Wednesday, October 14; call us if anything changes."],
+    ["WHAT'S NEXT\nIf the schedule holds, the crew comes back Wednesday, October 14; call us with questions."],
   ])('a visit, our return or a time window is still refused: %s', (text) => {
     expect(writerRulesRejection(text, { allowedDates })).toBe('date');
   });

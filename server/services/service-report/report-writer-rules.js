@@ -10,6 +10,8 @@
  * pest writer and the remaining-service modules other than the two below.
  */
 const { HUMAN_PROSE_RULES } = require('../llm/human-prose-rules');
+const { PEST_TARGET_SUGGESTIONS } = require('../../config/treatment-target-vocabulary');
+const { PROVIDER_SUBJECT_RE } = require('./next-visit-claims');
 
 const REPORT_WRITER_RULES_VERSION = 'report_writer_rules_v5';
 
@@ -653,22 +655,43 @@ const WRITER_RULE_SCREENS = Object.freeze([
 const REACH_OUT_DATE_MISUSE_RE = new RegExp(`${VISIT_CUE_RE.source}|\\bbook(?:ed|ing)?\\b|\\bvisits?\\b`, 'i');
 // A reach-out sentence names a place and a sign the customer can notice. Three
 // phrasings there trip the visit cues while naming no visit, so they are
-// masked before the test, and nothing else is: a window as a place ("the
-// kitchen window", "window frames"), "next to" or "the next couple of weeks",
-// and an if/when clause in which something other than us comes back or
-// returns ("if the ants along the lanai come back"). 2026-10-22 replay: "If
+// masked before the test, and nothing else is: a window qualified by a place
+// ("the kitchen window", "the office window", "window frames"; places from
+// PLACE_NOUNS), "next to" or "the next couple of weeks", and an if/when clause
+// whose subject is a pest or a sign of one, from the catalog's pest words, and
+// names no provider ("if the ants along the lanai come back"). A provider's
+// return is judged on the unmasked sentence, so no mask can hide one ("the
+// service professional returns", "we're coming back"). 2026-10-22 replay: "If
 // ants are still trailing by the kitchen window … on Thursday, October 22,
 // text or call us." was refused on every try, and the report fell back to the
 // fixed copy.
-const REACH_OUT_PLACE_WINDOW_RE = /\b(?:(?:kitchen|bathroom|bedroom|laundry(?:\s+room)?|garage|living\s+room|dining\s+room|front|back|side|rear|bay|basement|attic|porch|lanai|patio|sliding|screen(?:ed)?|storm|upstairs|downstairs)\s+windows?|windows?\s+(?:sills?|frames?|screens?|tracks?|ledges?|wells?|seals?|casings?|trim|panes?))\b/gi;
-const REACH_OUT_NEXT_PLACE_RE = /\bnext\s+(?:to|couple|few|several)\b/gi;
+const WINDOW_PLACE_WORDS = [
+  ...PLACE_NOUNS.filter((noun) => noun !== 'windows?'),
+  'front', 'back', 'side', 'rear', 'bay', 'corner', 'sliding', 'screen(?:ed)?', 'storm', 'upstairs', 'downstairs',
+];
+const REACH_OUT_PLACE_WINDOW_RE = new RegExp(`\\b(?:(?:${WINDOW_PLACE_WORDS.join('|')})\\s+windows?|windows?\\s+(?:sills?|frames?|screens?|tracks?|ledges?|wells?|seals?|casings?|trim|panes?))\\b`, 'gi');
+const REACH_OUT_NEXT_PLACE_RE = /\bnext\s+(?:to|(?:couple(?:\s+of)?|few|several)\s+(?:days?|weeks?|months?))\b/gi;
+const singularPestWord = (word) => (/(?:mice|lice|fish)$/.test(word)
+  ? word
+  : word.replace(/ies$/, 'y').replace(/(ch|sh|x|o)es$/, '$1').replace(/s$/, ''));
+const REACH_OUT_PEST_SIGN_WORDS = [...new Set([
+  ...PEST_TARGET_SUGGESTIONS
+    .flatMap((target) => target.toLowerCase().split(/\s*[&/()]\s*/))
+    .map((part) => part.trim().split(/[\s-]+/).pop()),
+  'roaches', 'bees', 'rodents', 'mouse', 'insects', 'pests', 'bugs', 'activity', 'webs', 'nests', 'trails', 'they',
+].filter(Boolean).flatMap((word) => [word, singularPestWord(word)]))];
+const REACH_OUT_PEST_SIGN_RE = new RegExp(`\\b(?:${REACH_OUT_PEST_SIGN_WORDS.join('|')})\\b`, 'i');
 const REACH_OUT_SIGN_RETURN_RE = /\b(?:if|when|once|in\s+case)\s+([a-z'’ -]{1,60}?)\s+(?:still\s+)?(?:com(?:e|es|ing)\s+back|returns?|returning)\b/gi;
-const REACH_OUT_PROVIDER_RE = /\b(?:we|we['’](?:ll|re|d|ve)|i|i['’](?:ll|m|d)|us|our|technicians?|techs?|team|crew|specialists?|inspectors?|someone|somebody|waves)\b/i;
+const REACH_OUT_OUR_WORDS_RE = /\b(?:us|our|ours)\b/i;
+const REACH_OUT_PROVIDER_RETURN_RE = new RegExp(`${PROVIDER_SUBJECT_RE.source}(?:['’](?:ll|re|s|m|d))?(?:\\s+[a-z’']+){0,3}?\\s+(?:returns?|returning|com(?:e|es|ing)\\s+back|be\\s+back)\\b`, 'i');
 function reachOutDateMisused(sentence) {
-  const masked = String(sentence || '')
+  const text = String(sentence || '');
+  if (REACH_OUT_PROVIDER_RETURN_RE.test(text)) return true;
+  const masked = text
     .replace(REACH_OUT_PLACE_WINDOW_RE, 'the place')
     .replace(REACH_OUT_NEXT_PLACE_RE, 'near')
-    .replace(REACH_OUT_SIGN_RETURN_RE, (full, subject) => (REACH_OUT_PROVIDER_RE.test(subject) ? full : 'if it shows again'));
+    .replace(REACH_OUT_SIGN_RETURN_RE, (full, subject) => (REACH_OUT_PEST_SIGN_RE.test(subject)
+      && !PROVIDER_SUBJECT_RE.test(subject) && !REACH_OUT_OUR_WORDS_RE.test(subject) ? 'if it shows again' : full));
   return REACH_OUT_DATE_MISUSE_RE.test(masked);
 }
 // The reach-out date is the day to get in touch: its sentence must ask the
