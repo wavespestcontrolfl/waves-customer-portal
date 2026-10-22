@@ -383,6 +383,29 @@ describe('edit_invoice card', () => {
     expect(mockCalc).toHaveBeenCalledWith(expect.objectContaining({ taxRate: 0.06 }));
   });
 
+  test('a tax-only edit keeps a legacy amount-only line’s amount, priced by the REAL update calculator (never $0)', async () => {
+    const realCalc = jest.requireActual('../services/invoice')._calculateUpdateFinancials;
+    mockCalc.mockImplementation((args) => realCalc(args));
+    setInvoice({ tax_rate: '0.0700', tax_amount: '9.03', total: '138.03', line_items: [
+      { client_id: 'li_a', description: 'Quarterly Pest Control', quantity: 1, amount: 99, category: 'service' },
+      { client_id: 'li_b', description: 'Interior add-on', quantity: 1, unit_price: 30, amount: 30 },
+    ] });
+    state.customers[0].property_type = 'commercial';
+    const card = await run('edit_invoice', { tax_rate_percent: 6 });
+    // The page's update reprices the lines it is sent: the legacy line goes with its unit price, so both sides keep $99.
+    expect(card._body.line_items[0]).toMatchObject({ client_id: 'li_a', quantity: 1, unit_price: 99, amount: 99 });
+    expect(card._body.tax_rate).toBe(0.06);
+    const confirmTime = await realCalc({ lineItems: card._body.line_items, customer: state.customers[0], invoice: state.invoices[0], taxRate: 0.06 });
+    expect(Number(confirmTime.subtotal)).toBe(129);
+    expect(card.new_total).toBe(`$${(129 + Number(confirmTime.tax_amount)).toFixed(2)}`);
+    // Lines that already carry unit prices send no line_items at all (a pure tax change, as before).
+    setInvoice({ line_items: [
+      { client_id: 'li_a', description: 'Quarterly Pest Control', quantity: 1, unit_price: 99, amount: 99, category: 'service' },
+      { client_id: 'li_b', description: 'Interior add-on', quantity: 1, unit_price: 30, amount: 30 },
+    ] });
+    expect((await run('edit_invoice', { tax_rate_percent: 6 }))._body).toEqual({ tax_rate: 0.06 });
+  });
+
   test('a residential customer’s tax rate is refused (the page taxes only commercial customers)', async () => {
     mockCalc.mockImplementation(async (args) => ({ ...calc(args), tax_rate: 0, tax_amount: 0 }));
     expect(await run('edit_invoice', { tax_rate_percent: 7 })).toMatchObject({ code: 'tax_rate_not_applicable' });

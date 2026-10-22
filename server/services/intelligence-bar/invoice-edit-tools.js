@@ -577,7 +577,17 @@ function metadataChanges(invoice, read) {
 
 // The line changes applied to the stored lines: the next lines and one card change per touched line (or a refusal).
 function editedLines({ invoice, stored, read, changes, body }) {
-  if (!read.lineChanges.length) return { nextLines: stored };
+  if (!read.lineChanges.length) {
+    // A retotal with no line change (a tax-rate edit) still reprices every stored line as quantity * (unit_price || 0), in the
+    // preview and again in the page's update: a legacy amount-only line is sent with its unit price, so it keeps its amount.
+    const canonical = stored.map(canonicalLine);
+    const uneven = canonical.findIndex((li) => li === null);
+    if (uneven !== -1) {
+      return refusal(`Line ${uneven + 1} has an amount that does not split evenly over its quantity, so the bar cannot reprice this invoice. Edit it on the Invoices page.`, 'line_not_editable', { invoice_id: invoice.id, lines: numbered(stored) });
+    }
+    if (canonical.some((li, i) => li.unit_price !== stored[i].unit_price)) body.line_items = canonical;
+    return { nextLines: canonical };
+  }
   const applied = applyLineChanges(stored, read.lineChanges, invoice.id);
   if (applied.error) return { ...applied, invoice_id: invoice.id };
   for (const t of applied.touched) {
