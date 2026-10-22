@@ -169,9 +169,6 @@ function normalizeTemporalText(value) {
 // optional: "the service technician", "technician"), or the company. "They"
 // is deliberately absent: in care copy it is the pests ("if they come back").
 const PROVIDER_SUBJECT = String.raw`(?:i|we|waves|someone|somebody|(?:(?:the|your|our)\s+)?(?:[a-z]+\s+)?(?:technicians?|techs?|team|crew|specialists?|inspectors?|professionals?))`;
-// The same provider, as a whole-word pattern for other screens (the report
-// writer's reach-out date test).
-const PROVIDER_SUBJECT_RE = new RegExp(`\\b${PROVIDER_SUBJECT}\\b`, 'i');
 // What a visit is, as a verb: returning, coming, arriving, stopping by,
 // checking back, following up, being back/there/out, re-treating, seeing you.
 const VISIT_VERB = String.raw`(?:return\w*|com(?:e|es|ing)|came|arriv\w*|visit\w*|back|(?:stop|swing|drop)\w*\s+by|check\w*\s+(?:back|in|on)|follow\w*[-\s]+up|head\w*\s+(?:out|over|back)|re-?treat\w*|re-?inspect\w*|re-?servic\w*|see\s+you|be\s+(?:there|out|over))`;
@@ -841,5 +838,5 @@ function withoutTimedClauses(sentence) {
 }
 
 module.exports = {
-  nextVisitProblems, isVisitClaim, splitSentences, withoutTimedVisitClaims, PROVIDER_SUBJECT_RE,
+  nextVisitProblems, isVisitClaim, splitSentences, withoutTimedVisitClaims,
 };
