@@ -1016,8 +1016,6 @@ app.use('/api/tech/services', require('./routes/tech-track'));
 app.use('/api/tech/dictation', require('./routes/tech-dictation'));
 const adminVehiclesRouter = require('./routes/admin-vehicles');
 app.use('/api/admin/vehicles', adminVehiclesRouter);
-// Old path for the same router (the geofence feature is gone; the vehicle map stayed).
-app.use('/api/admin/geofence/vehicles', adminVehiclesRouter);
 app.use('/api/admin', require('./routes/admin-billing-health'));
 
 // Health check. Public and unauthenticated (Railway probes it), so it must

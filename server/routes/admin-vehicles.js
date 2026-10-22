@@ -1,7 +1,6 @@
 /**
  * Admin vehicle ↔ technician mapping (Bouncie IMEI / VIN / vehicle name).
- * Mounted at /api/admin/vehicles, and still at /api/admin/geofence/vehicles (the
- * old path) so any caller of the old URL keeps working.
+ * Mounted at /api/admin/vehicles.
  */
 const express = require('express');
 const router = express.Router();
