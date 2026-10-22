@@ -8,6 +8,7 @@
  * Set these as environment variables on Railway:
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
  *   GATE_CALL_ENRICH_CODES_REQUIRE_ANI=true (a call writes gate / garage / lockbox codes and access notes to a customer's profile only when the call's caller ID is that customer's primary phone; a spoken callback number alone no longer does. Pets and internal notes are unchanged. Read at call time via callEnrichCodesRequireAniLive(), strict === 'true', dark by default; off = unchanged; sends nothing to a customer)
+ *   GATE_BACKLINK_SIGNUP_URL_GUARD=true (security audit run 2, 2026-10-22: the backlink signup worker's Chromium opens only an http(s) URL whose host resolves to public IPv4, the model's signup_url must stay on the queued site, and a route guard aborts requests to blocked hostnames or literal non-public IPs. Read at call time via backlinkSignupUrlGuardLive(), strict 'true', dark by default; off = navigation exactly as before. Sends nothing to a customer.)
  *   GATE_EMAIL_AUTH_STRICT=true (inbound email trust: hasAlignedAuth parses only real Authentication-Results method results, and a vendor invoice books an expense only when the sender authenticated as its From domain; strict `=== 'true'`, read at call time by emailAuthStrictLive(); dark by default; sends nothing to a customer)
  *   GATE_SMS_ANY_LANGUAGE_TRIAL=true (test answers to customer texts in another language: the text is translated to English, the normal SMS drafter answers it with every English check, and the reply is translated back and double-checked (numbers, times, prices, links unchanged; a back-translation must say the same thing). Stored in sms_translation_trials for the owner to read; NOTHING is sent and the real reply path for these texts is unchanged. Strict opt-in via gateEnvValue, read at call time by server/services/sms-translation.js; dark by default. Sends nothing to a customer.)
  *   GATE_SMS_ANY_LANGUAGE_INBOX=true (inbox assist for a customer text in another language: when GATE_SMS_ANY_LANGUAGE_TRIAL has stored a test answer for the customer's latest text and nobody has answered it, the Communications composer shows the English translation of their text and the checked reply in their language beside its English, with a Use button that fills the message box. Staff press Send through the ordinary composer; nothing sends on its own and no reply path changes. Strict opt-in via gateEnvValue, read at call time by server/services/sms-translation.js inboxAssistFor(); dark by default; off = GET /admin/communications/agent-draft returns translation: null.)
@@ -15,6 +16,7 @@
  *   GATE_DUPLICATES_SAME_ADDRESS=true (the admin Duplicates page and /api/admin/customer-duplicates also list customers at the same address with different phones, for the office to merge or mark as separate; review-only, never auto-merged, the auto-merge cron cannot see them; read at request time via duplicatesSameAddressLive(), strict === 'true', dark by default; off = the page and API are byte-identical to before; sends nothing to a customer)
  *   GATE_DUPLICATES_SAME_NAME=true (the admin Duplicates page and /api/admin/customer-duplicates also list customers with the same first and last name but a different phone and address, for the office to merge, merge while keeping the other address as a second property, or mark as separate; review-only, never auto-merged, the auto-merge cron cannot see them; pairs the shared-phone and same-address lists already show are left out; read at request time via duplicatesSameNameLive(), strict === 'true', dark by default; off = the page and API are byte-identical to before; sends nothing to a customer)
  *   GATE_IB_LEAD_CONVERT=true (the Intelligence Bar's convert_lead write tool, owner ruling 2026-10-12 "yes to all recommendations" on the Stage 3 plan: an admin can convert one lead to an EXISTING customer on a confirm card (never owner-direct), by running the Leads page's own Convert to Customer handler (POST /admin/leads/:id/convert) in process. Writes the lead only (status won, customer link, value fields, a converted activity row, the ad funnel stage, and the lead's own estimate attached to the customer); creates no customer, books nothing, charges nothing, accepts no estimate and sends NO text, email or call to anyone. Needs GATE_IB_PLATFORM. Read at call time via ibLeadConvertLive(), strict 'true', dark by default; off = the tool is not offered and refuses every call, changing nothing.)
+ *   GATE_IB_SET_BILL_TO=true (the Intelligence Bar's set_customer_bill_to write tool, owner ruling 2026-10-21 "BUILD" on IB gap #9: an admin can set ONE self-pay customer's Bill-To payer on a confirm card (never owner-direct), by running the customer page's own save handler (PUT /admin/customers/:id with only payerId) in process. Future billing only: offered only when the customer has no open invoice without a payer and no open checkout, so no invoice moves and nothing is cancelled; sends nothing. Changing or removing an existing payer stays on the customer page. Needs GATE_IB_PLATFORM. Read at call time via ibSetBillToLive(), strict 'true', dark by default; off = the tool is not offered and a forced call refuses, changing nothing.)
  *   GATE_IB_VOID_INVOICE=true (the Intelligence Bar's void_invoice write tool, owner ruling 2026-10-12 "yes to all recommendations" on the Stage 3 plan: an admin can void ONE invoice that has collected nothing on a confirm card (never owner-direct), by running the Invoices page's own Void handler (POST /admin/invoices/:id/void) in process. Voids the invoice, stops its reminders, returns applied account credit, cancels an unconfirmed pay-page session; sends nothing. Refuses (by_owner_rule) any invoice with money received or in flight: refunds and card charges stay on the Invoices page. Needs GATE_IB_PLATFORM. Read at call time via ibVoidInvoiceLive(), strict 'true', dark by default; off = the tool is not offered and a forced call refuses, changing nothing.)
  *   GATE_IB_INVOICE_REMINDERS=true (the Intelligence Bar's invoice reminder and scheduled-send write tools, dark: an admin can pause, resume or stop ONE invoice's automatic reminders (send nothing), send the invoice's next reminder now (texts and emails the customer; the card shows the channel, the masked recipient and the exact message), or schedule an unsent invoice to go out at a set Eastern time, each on a confirm card (never owner-direct), by running the Invoices page's own handlers (POST /admin/invoices/:id/followup/pause|resume|stop|send-now and /schedule-send) in process. Needs GATE_IB_PLATFORM. Read at call time via ibInvoiceRemindersLive(), strict 'true', dark by default; off = the tools are not offered and a forced call refuses, changing nothing.)
  *   GATE_IB_PAYMENT_PLAN=true (the Intelligence Bar's create_payment_plan and cancel_payment_plan write tools, dark: an admin can create a payment plan on ONE invoice (the card lists each installment date and amount, says the plan charges no card, and says the customer is emailed the plan confirmation) or cancel the invoice's active plan (reminders re-arm), each on a confirm card (never owner-direct), by running the Invoices page's own handlers (POST /admin/invoices/:id/payment-plan and /payment-plan/cancel) in process. Needs GATE_IB_PLATFORM. Read at call time via ibPaymentPlanLive(), strict 'true', dark by default; off = the tools are not offered and a forced call refuses, changing nothing.)
@@ -5139,6 +5141,14 @@ function ibCreateInvoiceLive() {
   return process.env.GATE_IB_CREATE_INVOICE === 'true' && gateEnvValue('GATE_IB_PLATFORM');
 }
 
+// GATE_IB_SET_BILL_TO read at CALL time — strict `=== 'true'`, dark, and it needs
+// GATE_IB_PLATFORM (the tool exists only on the platform path). The Intelligence
+// Bar's set_customer_bill_to tool (services/intelligence-bar/bill-to-tools.js):
+// offered and executable only while on. Kill: unset.
+function ibSetBillToLive() {
+  return process.env.GATE_IB_SET_BILL_TO === 'true' && gateEnvValue('GATE_IB_PLATFORM');
+}
+
 // GATE_IB_GENERAL_READ read at CALL time — strict `=== 'true'`, dark, and it
 // needs GATE_IB_PLATFORM. The Intelligence Bar's find_admin_reads /
 // read_admin_data tools (services/intelligence-bar/admin-read-tools.js):
@@ -5273,6 +5283,12 @@ function estimateSentClosesAssessmentLive() {
 function callEnrichCodesRequireAniLive() {
   return process.env.GATE_CALL_ENRICH_CODES_REQUIRE_ANI === 'true';
 }
+// GATE_BACKLINK_SIGNUP_URL_GUARD read at CALL time — strict `=== 'true'`, dark by
+// default. URL and egress guard for the backlink signup worker's browser.
+function backlinkSignupUrlGuardLive() {
+  return process.env.GATE_BACKLINK_SIGNUP_URL_GUARD === 'true';
+}
+
 // GATE_EMAIL_AUTH_STRICT read at CALL time, strict `=== 'true'`, dark. On, hasAlignedAuth
 // (services/email/inbox-hygiene.js) reads only real method results of Google's
 // Authentication-Results (comments and quoted strings dropped, authserv-id mx.google.com), so a quoted
@@ -6985,6 +7001,8 @@ module.exports.ibInvoiceRemindersLive = ibInvoiceRemindersLive;
 module.exports.ibPaymentPlanLive = ibPaymentPlanLive;
 // GATE_IB_CREATE_INVOICE reader, on its own line.
 module.exports.ibCreateInvoiceLive = ibCreateInvoiceLive;
+// GATE_IB_SET_BILL_TO reader, on its own line so gate PRs never conflict.
+module.exports.ibSetBillToLive = ibSetBillToLive;
 // GATE_IB_GENERAL_READ reader, on its own line so gate PRs never conflict.
 module.exports.ibGeneralReadLive = ibGeneralReadLive;
 // GATE_IB_READ_NOTES reader, on its own line so gate PRs never conflict.
@@ -7178,3 +7196,4 @@ module.exports.emailAuthStrictLive = emailAuthStrictLive;
 module.exports.RETIRED_GATES = RETIRED;
 // GATE_CALL_ENRICH_CODES_REQUIRE_ANI reader, on its own line so gate PRs never conflict.
 module.exports.callEnrichCodesRequireAniLive = callEnrichCodesRequireAniLive;
+module.exports.backlinkSignupUrlGuardLive = backlinkSignupUrlGuardLive;
