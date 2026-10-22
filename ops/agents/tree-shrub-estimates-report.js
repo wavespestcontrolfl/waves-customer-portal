@@ -56,7 +56,7 @@ function parseArgs(argv) {
       if (!Number.isInteger(n) || n < 1) { console.error(`--days needs a positive whole number, got ${JSON.stringify(v ?? null)}`); process.exit(2); }
       args.days = n;
     } else if (k === '--since') {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) || Number.isNaN(Date.parse(`${v}T00:00:00Z`))) { console.error(`--since needs YYYY-MM-DD, got ${JSON.stringify(v ?? null)}`); process.exit(2); }
+      if (!isRealCalendarDate(v)) { console.error(`--since needs a real YYYY-MM-DD calendar date, got ${JSON.stringify(v ?? null)}`); process.exit(2); }
       args.since = v;
     } else if (k === '--json') args.json = true;
     else if (k === '--rows') args.rows = true;
@@ -64,6 +64,17 @@ function parseArgs(argv) {
     else { console.error(`unknown flag ${raw}`); process.exit(2); }
   }
   return args;
+}
+
+// Date.parse normalizes an impossible date (2026-02-31 -> March 3) instead of
+// rejecting it, which would silently drop days from the cohort (Codex #6398
+// r5): the components must round-trip through a UTC date unchanged.
+function isRealCalendarDate(v) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(v || ''));
+  if (!m) return false;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d;
 }
 
 const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
@@ -255,8 +266,10 @@ async function main() {
   let rows = [];
   let excluded = 0;
   try {
-    await c.query('BEGIN');
-    await c.query('SET default_transaction_read_only = on');
+    // READ ONLY on the BEGIN itself: default_transaction_read_only is copied
+    // into a transaction when it STARTS, so setting it after BEGIN left this
+    // transaction writable (Codex #6398 r5).
+    await c.query('BEGIN READ ONLY');
     // Timestamps are compared as instants (timestamptz vs an ISO instant), so
     // no ET wall-clock conversion is needed for a rolling window.
     const res = await c.query(
@@ -297,7 +310,7 @@ async function main() {
   printReport(args, rows, excluded, windowStart);
 }
 
-module.exports = { extractTreeShrub, outcomeOf, regimeOf, summarize, median };
+module.exports = { extractTreeShrub, outcomeOf, regimeOf, summarize, median, isRealCalendarDate };
 
 if (require.main === module) {
   main().catch((err) => { console.error(err.message || err); process.exit(1); });

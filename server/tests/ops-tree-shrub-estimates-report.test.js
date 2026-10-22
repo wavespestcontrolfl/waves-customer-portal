@@ -4,7 +4,7 @@
 // claims to read must each resolve, and a stale raw line must lose to the
 // mapped envelope exactly as estimate-actuals does.
 const path = require('path');
-const { extractTreeShrub, outcomeOf, regimeOf, summarize, median } = require(path.join(__dirname, '..', '..', 'ops', 'agents', 'tree-shrub-estimates-report.js'));
+const { extractTreeShrub, outcomeOf, regimeOf, summarize, median, isRealCalendarDate } = require(path.join(__dirname, '..', '..', 'ops', 'agents', 'tree-shrub-estimates-report.js'));
 
 describe('tree-shrub-estimates-report extraction', () => {
   test('raw engine line that agrees with the mapped envelope carries the full source enums', () => {
@@ -77,6 +77,17 @@ describe('tree-shrub-estimates-report extraction', () => {
     const data = { result: { lineItems: [{ service: 'tree_shrub', monthly: 35, tier: 'standard' }] } };
     expect(extractTreeShrub(data)).toMatchObject({ shape: 'compact', bedSqFt: null, bedSource: 'unknown', treeCount: null, monthly: 35 });
     expect(extractTreeShrub({ result: { lineItems: [{ service: 'lawn_care', monthly: 60 }] } })).toBeNull();
+  });
+
+  test('--since accepts only real calendar dates (Codex #6398 r5)', () => {
+    expect(isRealCalendarDate('2026-02-28')).toBe(true);
+    expect(isRealCalendarDate('2028-02-29')).toBe(true);
+    // Date.parse would normalize these to March 3 / March 2 and silently drop days.
+    expect(isRealCalendarDate('2026-02-31')).toBe(false);
+    expect(isRealCalendarDate('2026-02-29')).toBe(false);
+    expect(isRealCalendarDate('2026-13-01')).toBe(false);
+    expect(isRealCalendarDate('2026-1-01')).toBe(false);
+    expect(isRealCalendarDate(undefined)).toBe(false);
   });
 
   test('outcome and roll-up', () => {

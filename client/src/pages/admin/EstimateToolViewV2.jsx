@@ -3625,6 +3625,9 @@ export default function EstimateToolViewV2({
           // Parcel-wide canopy count from the earlier bare-building lookup
           // (pre-push codex P1 r4); palms clear through palmPrefillAllowed.
           treeCount: "",
+          // The whole building's hedge line would otherwise persist as the
+          // unit's manual measurement (Codex #6398 r5).
+          hedgeLinearFt: "",
         });
       }
       // Only a DECIDED pool prefills. POSSIBLE is satellite seeing a pool

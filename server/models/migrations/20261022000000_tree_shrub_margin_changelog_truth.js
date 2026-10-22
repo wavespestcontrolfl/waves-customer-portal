@@ -15,13 +15,18 @@
  *   - otherwise rewrite that changelog row to say the admin-tuned value
  *     (read live — even when it already reads 0.40) was preserved and still
  *     governs pricing; without the audit row no cut happened here.
- * down() restores the original wording only on the row it rewrote.
+ * down() restores the original summary, values and rationale only on the
+ * row it rewrote.
  */
 const PREV_TAG = 'migration:20261021010000_tree_shrub_margin_target_40';
 const PREV_UP_REASON = 'Owner audit 2026-10-21: Tree & Shrub margin target 0.45 -> 0.40 (admin-inclusive)';
 const CONFIG_KEY = 'global_margin_target_ts';
 const ORIGINAL_SUMMARY = 'Tree & Shrub margin target 0.45 -> 0.40 (admin-inclusive); list prices x 0.55/0.60.';
 const PRESERVED_PREFIX = 'Tree & Shrub margin target 0.45 -> 0.40 in code; the admin-tuned pricing_config row (';
+// The rationale 20261021010000 wrote, restored with the summary on down()
+// so a rolled-back row does not claim a cut and a preserved row at once
+// (Codex #6398 r5).
+const ORIGINAL_RATIONALE = 'Owner audit 2026-10-21: T&S was the only recurring program priced to a 45% admin-inclusive margin (lawn/pest price to the 35% floor) and sent quotes read high. The post-discount guard is report-only, so the cut reaches every customer; belowMarginFloor flags more WaveGuard-discounted T&S lines, which the owner reviews in the estimator.';
 
 async function liveValue(knex) {
   if (!(await knex.schema.hasTable('pricing_config'))) return null;
@@ -65,5 +70,6 @@ exports.down = async function (knex) {
       summary: ORIGINAL_SUMMARY,
       before_value: JSON.stringify({ marginTarget: 0.45, marginTargetSemantics: 'margin_admin_inclusive' }),
       after_value: JSON.stringify({ marginTarget: 0.40, marginTargetSemantics: 'margin_admin_inclusive', marginFloor: 0.35 }),
+      rationale: ORIGINAL_RATIONALE,
     });
 };
