@@ -140,7 +140,9 @@ function BidDetail({ bidId, onChanged, onClose }) {
       setState((s) => ({ ...s, bid: data.bid }));
       // Only a date save resets the date field: a decision saved first keeps a date the operator typed but has
       // not saved yet.
-      if ("due_at" in body || body.confirm_due) {
+      // After a date save, or when the operator has not touched the date field, the field shows the saved date.
+      // A date typed but not saved yet stays, still tied to the version it was typed on (dueEditedAt).
+      if ("due_at" in body || body.confirm_due || !dueEditedAt) {
         setDueInput(etDatetimeLocalValue(data.bid.due_at));
         setDueEditedAt(null);
       }

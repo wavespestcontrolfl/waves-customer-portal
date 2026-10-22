@@ -132,6 +132,16 @@ it("a date typed before a decision save is saved against the version it was type
   expect(patch.mock.calls[1][0].body).toEqual({ due_at: "2026-10-30T09:00", expected_updated_at: "2026-10-02T12:00:00.000Z" });
 });
 
+it("an untouched date field shows the saved date after a decision save", async () => {
+  const patch = vi.fn(() => reply({ ok: true, bid: bid({ status: "bid", due_at: "2026-10-28T18:00:00.000Z" }) }));
+  route({ "GET /admin/bid-desk/": () => reply({ bids: LIST }), "GET /admin/bid-desk/b1": () => reply({ bid: bid(), emails: [] }), "PATCH /admin/bid-desk/b1": patch });
+  renderPage("/?bid=b1");
+  await screen.findByLabelText("Due date (Eastern time)");
+  fireEvent.change(screen.getByLabelText("Decision"), { target: { value: "bid" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save decision" }));
+  await waitFor(() => expect(screen.getByLabelText("Due date (Eastern time)")).toHaveValue("2026-10-28T14:00"));
+});
+
 it("marks an email as a bid by id and opens the bid", async () => {
   const post = vi.fn(() => reply({ ok: true, bid_id: "b9", created: true }, { status: 201 }));
   route({
