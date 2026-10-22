@@ -204,12 +204,19 @@ async function snapshotEventUrlsForSend(send, liveUrlById, knex = db) {
       // since the first batch is added once with its URL as of now.
       const merged = new Map(Object.entries(map).map(([k, v]) => [String(k).toLowerCase(), v || null]));
       const added = [...liveUrlById].filter(([k]) => !merged.has(String(k).toLowerCase()));
-      if (added.length) {
-        for (const [k, v] of added) merged.set(String(k).toLowerCase(), v || null);
-        await knex('newsletter_sends').where({ id: send.id })
-          .update({ event_url_snapshot: JSON.stringify(Object.fromEntries(merged)) });
-      }
-      return merged;
+      if (!added.length) return merged;
+      // One atomic jsonb merge where the STORED entries win (`new || stored`),
+      // so concurrent batches can only add keys, never replace one; then
+      // link exactly what is stored.
+      const addObj = Object.fromEntries(added.map(([k, v]) => [String(k).toLowerCase(), v || null]));
+      await knex('newsletter_sends').where({ id: send.id })
+        .update({ event_url_snapshot: knex.raw('CAST(? AS jsonb) || event_url_snapshot', [JSON.stringify(addObj)]) });
+      const after = await knex('newsletter_sends').where({ id: send.id }).first('event_url_snapshot');
+      let amap = after?.event_url_snapshot;
+      if (typeof amap === 'string') { try { amap = JSON.parse(amap); } catch { amap = null; } }
+      return amap && typeof amap === 'object' && !Array.isArray(amap)
+        ? new Map(Object.entries(amap).map(([k, v]) => [String(k).toLowerCase(), v || null]))
+        : merged;
     }
     const obj = Object.fromEntries([...liveUrlById].map(([k, v]) => [String(k).toLowerCase(), v || null]));
     const written = await knex('newsletter_sends').where({ id: send.id }).whereNull('event_url_snapshot')

@@ -175,19 +175,24 @@ describe('per-send URL snapshot (gate on)', () => {
 describe('snapshotEventUrlsForSend', () => {
   const { snapshotEventUrlsForSend } = require('../services/newsletter-event-clicks');
 
-  function sendsKnex(row, { lose = null } = {}) {
+  function sendsKnex(row, { lose = null, afterUpdate = null } = {}) {
     const updates = [];
     let reads = 0;
     const knex = () => {
       const q = {
         where() { return q; },
         whereNull() { return q; },
-        first: async () => { reads += 1; return lose && reads > 1 ? lose : row; },
+        first: async () => {
+          reads += 1;
+          if (reads > 1 && (lose || afterUpdate)) return lose || afterUpdate;
+          return row;
+        },
         update: async (u) => { updates.push(u); return lose ? 0 : 1; },
       };
       return q;
     };
     knex.updates = updates;
+    knex.raw = (sql, bindings) => ({ sql, bindings });
     return knex;
   }
 
@@ -206,14 +211,18 @@ describe('snapshotEventUrlsForSend', () => {
     expect(JSON.parse(knex.updates[0].event_url_snapshot)).toEqual({ [LOCKED]: 'https://a.example/' });
   });
 
-  test('gate on, resumed send with a new lineup event: adds it once and keeps the stored ones', async () => {
+  test('gate on, resumed send with a new lineup event: one atomic merge where stored entries win', async () => {
     process.env.GATE_NEWSLETTER_CLICK_BOUND = 'true';
-    const knex = sendsKnex({ event_url_snapshot: { [LOCKED]: 'https://first.example/' } });
+    const stored = { [LOCKED]: 'https://first.example/' };
+    const after = { event_url_snapshot: { ...stored, [ALT]: 'https://alt.example/' } };
+    const knex = sendsKnex({ event_url_snapshot: stored }, { afterUpdate: after });
     const out = await snapshotEventUrlsForSend({ id: 's1' },
       new Map([[LOCKED, 'https://later.example/'], [ALT, 'https://alt.example/']]), knex);
     expect(out.get(LOCKED)).toBe('https://first.example/');
     expect(out.get(ALT)).toBe('https://alt.example/');
-    expect(JSON.parse(knex.updates[0].event_url_snapshot)).toEqual({ [LOCKED]: 'https://first.example/', [ALT]: 'https://alt.example/' });
+    const raw = knex.updates[0].event_url_snapshot;
+    expect(raw.sql).toBe('CAST(? AS jsonb) || event_url_snapshot');
+    expect(JSON.parse(raw.bindings[0])).toEqual({ [ALT]: 'https://alt.example/' });
   });
 
   test('gate on, lost the snapshot race: links what the winning batch stored', async () => {
