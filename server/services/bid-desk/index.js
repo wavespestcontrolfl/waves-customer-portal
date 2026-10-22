@@ -78,7 +78,10 @@ async function ingestEmail(email, { historical = false, manual = false } = {}) {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', ['bid-desk:ingest']);
     if (await trx('bid_opportunity_emails').where({ email_id: email.id }).first('id')) return { skipped: 'already_filed' };
 
-    const existing = await findBid(trx, email, parsed.group_key);
+    const found = await findBid(trx, email, parsed.group_key);
+    // Re-read the bid under a row lock: an operator saving a date between the read and the update must not be
+    // overwritten (the advisory lock only orders intake writers).
+    const existing = found ? await trx('bid_opportunities').where({ id: found.id }).forUpdate().first() : null;
     if (existing) {
       const { patch, notifyAddendum } = attachPatch(existing, parsed, kind);
       await trx('bid_opportunity_emails').insert({ bid_id: existing.id, email_id: email.id, kind, received_at: email.received_at });

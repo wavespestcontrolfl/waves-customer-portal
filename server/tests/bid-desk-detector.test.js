@@ -270,3 +270,12 @@ describe('parseBidEmail: template line breaks as delivered', () => {
       .toMatchObject({ bid: true, source: 'email_subject', kind: 'addendum' });
   });
 });
+
+describe('parseDateET: AM/PM in any case', () => {
+  test('a numeric date with an uppercase PM keeps its time', () => {
+    expect(parseDateET('10/5/2026 at 2:00 PM').at.toISOString()).toBe('2026-10-05T18:00:00.000Z');
+    expect(parseDateET('10/5/2026 at 2:00 pm').at.toISOString()).toBe('2026-10-05T18:00:00.000Z');
+    expect(parseDateET('October 5, 2026 at 9:30 AM').at.toISOString()).toBe('2026-10-05T13:30:00.000Z');
+  });
+});
+

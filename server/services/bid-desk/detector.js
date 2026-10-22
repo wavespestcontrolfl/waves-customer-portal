@@ -34,7 +34,7 @@ const MONTH_INDEX = {
 const MONTH_NAME = 'Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?';
 const TIME_TAIL = '(?:\\s*(?:,|at|@|by|-)?\\s*(\\d{1,2})(?::(\\d{2}))?\\s*([ap])\\.?m\\.?)?';
 const NAMED_DATE = new RegExp(`\\b(${MONTH_NAME})\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?,?\\s+(\\d{4})\\b${TIME_TAIL}`, 'i');
-const NUMERIC_DATE = new RegExp(`\\b(\\d{1,2})/(\\d{1,2})/(\\d{4})\\b${TIME_TAIL}`);
+const NUMERIC_DATE = new RegExp(`\\b(\\d{1,2})/(\\d{1,2})/(\\d{4})\\b${TIME_TAIL}`, 'i');
 
 const pad = (n) => String(n).padStart(2, '0');
 
