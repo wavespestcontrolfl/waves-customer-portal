@@ -155,7 +155,7 @@ async function loadAnchorMap(db, serviceIds) {
       .whereIn('scheduled_service_id', serviceIds)
       .where('action', 'changed')
       .orderBy('created_at', 'asc')
-      .select('scheduled_service_id', 'old_scheduled_date', 'created_at');
+      .select('scheduled_service_id', 'old_scheduled_date', 'new_scheduled_date', 'created_at');
 
     const earliestAt = new Map(); // sid -> timestamp of the record backing map's date
     const consider = (sid, dateVal, createdAt) => {
@@ -186,21 +186,20 @@ async function loadAnchorMap(db, serviceIds) {
  *   restart — the origin of the newest auto move that did not start where
  *             the move before it left the visit (re-dated in between), else null;
  *   unknown — a row without a readable date, or an audit move with no
- *             source-1 row beside it: the chain is incomplete, so no restart
+ *             source-1 row of its own: the chain is incomplete, so no restart
  *             (resolveAnchor keeps the earliest date — never guess a budget).
  */
 function toolMoveChains(moveRows, auditRows) {
   const chains = new Map();
-  const movesAt = new Map(); // sid -> source-1 timestamps
+  const moves = new Map(); // sid -> its source-1 moves, for the audit pairing below
   for (const r of moveRows) {
     const sid = r.scheduled_service_id;
     if (!sid) continue;
-    const at = new Date(r.created_at || 0).getTime();
-    movesAt.set(sid, [...(movesAt.get(sid) || []), at]);
-    const chain = chains.get(sid);
-    if (chain && chain.unknown) continue;
     const from = toDateStr(r.original_date);
     const to = toDateStr(r.new_date);
+    moves.set(sid, [...(moves.get(sid) || []), { at: new Date(r.created_at || 0).getTime(), from, to, paired: false }]);
+    const chain = chains.get(sid);
+    if (chain && chain.unknown) continue;
     if (!from || !to) chains.set(sid, { unknown: true });
     else if (!chain) chains.set(sid, { restart: null, lastTo: to });
     else {
@@ -208,11 +207,20 @@ function toolMoveChains(moveRows, auditRows) {
       chain.lastTo = to;
     }
   }
+  // Each audit move pairs with ONE source-1 row of its own: unused, inside
+  // the window, with the same dates (the nearest one). An audit move left
+  // without one is a move the chain misses (Codex #6481 r1).
   for (const r of auditRows) {
     const sid = r.scheduled_service_id;
+    if (!sid) continue;
     const at = new Date(r.created_at || 0).getTime();
-    const paired = (movesAt.get(sid) || []).some((t) => Math.abs(t - at) <= MOVE_PAIR_WINDOW_MS);
-    if (sid && !paired) chains.set(sid, { unknown: true });
+    const from = toDateStr(r.old_scheduled_date);
+    const to = toDateStr(r.new_scheduled_date);
+    const match = (moves.get(sid) || [])
+      .filter((m) => from && to && !m.paired && m.from === from && m.to === to && Math.abs(m.at - at) <= MOVE_PAIR_WINDOW_MS)
+      .sort((x, y) => Math.abs(x.at - at) - Math.abs(y.at - at))[0];
+    if (match) match.paired = true;
+    else chains.set(sid, { unknown: true });
   }
   return chains;
 }

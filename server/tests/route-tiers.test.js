@@ -205,7 +205,7 @@ describe('anchor derivation: a re-date the tool did not make restarts the budget
   // One auto move, Dec 16 -> Dec 14, both durable records (seconds apart, as in prod).
   const oneMove = {
     moveRows: [{ scheduled_service_id: 's1', original_date: '2026-12-16', new_date: '2026-12-14', created_at: '2026-09-19T08:10:00Z' }],
-    auditRows: [{ scheduled_service_id: 's1', old_scheduled_date: '2026-12-16', created_at: '2026-09-19T08:10:01Z' }],
+    auditRows: [{ scheduled_service_id: 's1', old_scheduled_date: '2026-12-16', new_scheduled_date: '2026-12-14', created_at: '2026-09-19T08:10:01Z' }],
   };
   afterEach(() => { delete process.env.GATE_AUTO_DISPATCH_REDATE_ANCHOR; });
 
@@ -256,9 +256,26 @@ describe('anchor derivation: a re-date the tool did not make restarts the budget
     process.env.GATE_AUTO_DISPATCH_REDATE_ANCHOR = 'true';
     const map = await loadAnchorMap(anchorDbStub({
       moveRows: oneMove.moveRows,
-      auditRows: [...oneMove.auditRows, { scheduled_service_id: 's1', old_scheduled_date: '2026-12-14', created_at: '2026-10-01T08:10:00Z' }],
+      auditRows: [...oneMove.auditRows, { scheduled_service_id: 's1', old_scheduled_date: '2026-12-14', new_scheduled_date: '2026-12-28', created_at: '2026-10-01T08:10:00Z' }],
     }), ['s1']);
     expect(resolveAnchor({ id: 's1', scheduled_date: '2026-12-28', auto_dispatch_change_count: 2 }, map)).toBe('2026-12-16');
+  });
+
+  test('gate on: each audit move needs an atomic row of its own, with the same dates (Codex #6481 r1)', async () => {
+    process.env.GATE_AUTO_DISPATCH_REDATE_ANCHOR = 'true';
+    const svc = { id: 's1', scheduled_date: '2026-12-28', auto_dispatch_change_count: 2 };
+    // Two audit moves inside one atomic row's window: the second has no row of its own.
+    const twoAudits = await loadAnchorMap(anchorDbStub({
+      moveRows: oneMove.moveRows,
+      auditRows: [...oneMove.auditRows, { scheduled_service_id: 's1', old_scheduled_date: '2026-12-14', new_scheduled_date: '2026-12-28', created_at: '2026-09-19T08:15:00Z' }],
+    }), ['s1']);
+    expect(resolveAnchor(svc, twoAudits)).toBe('2026-12-16');
+    // An audit move beside the row but with other dates is not its pair.
+    const otherDates = await loadAnchorMap(anchorDbStub({
+      moveRows: oneMove.moveRows,
+      auditRows: [{ scheduled_service_id: 's1', old_scheduled_date: '2026-12-16', new_scheduled_date: '2026-12-18', created_at: '2026-09-19T08:10:01Z' }],
+    }), ['s1']);
+    expect(resolveAnchor(svc, otherDates)).toBe('2026-12-16');
   });
 
   test('gate on: a lost audit row is not a re-date', async () => {
