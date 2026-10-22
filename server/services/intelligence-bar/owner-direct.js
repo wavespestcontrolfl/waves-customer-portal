@@ -520,12 +520,12 @@ You are talking to the owner. Do what they ask.
 - Replies: 1–3 short lines. No preamble, no recap of the request, no "anything else?". Lists and numbers only when the owner asked for data.`;
 
 // With GATE_IB_OWNER_DIRECT_TAINT_ALL_READS on, a phone change always shows a
-// card and so does every edit after a read of message, email, call, lead or
-// note text. Gate off: OWNER_DIRECT_PROMPT, unchanged.
+// card and so does every edit after a read that returned untrusted text. The
+// prompt names no particular reads: any earlier read can cause a card. Gate off: OWNER_DIRECT_PROMPT, unchanged.
 const OWNER_DIRECT_PROMPT_TAINT_ALL_READS = OWNER_DIRECT_PROMPT
   .replace('executes directly for name, phone, lead source, and notes', 'executes directly for name, lead source, and notes')
   .replace('an email, tier, rate, active or pipeline-stage change still shows a card', 'a phone, email, tier, rate, active or pipeline-stage change still shows a card')
-  .replace('Never tell the owner to confirm these.', 'Never tell the owner to confirm these. Exception: after you read customer texts, emails, calls, lead or review text or notes, every edit in that request shows a card; then say "tap Confirm".');
+  .replace('Never tell the owner to confirm these.', 'Never tell the owner to confirm these. Exception: when a call comes back as a pending card instead of executed: true, no matter which tool you used, say "tap Confirm" and do not claim the change is done. Any earlier read in the request can cause this.');
 
 function ownerDirectPrompt() {
   return ibOwnerDirectTaintAllReadsLive() ? OWNER_DIRECT_PROMPT_TAINT_ALL_READS : OWNER_DIRECT_PROMPT;

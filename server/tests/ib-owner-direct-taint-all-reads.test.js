@@ -171,7 +171,10 @@ describe('the owner-direct prompt', () => {
     expect(prompt).toMatch(/executes directly for name, lead source, and notes/);
     expect(prompt).not.toMatch(/name, phone, lead source/);
     expect(prompt).toMatch(/a phone, email, tier, rate, active or pipeline-stage change still shows a card/);
-    expect(prompt).toMatch(/every edit in that request shows a card/);
+    expect(prompt).toMatch(/when a call comes back as a pending card instead of executed: true, no matter which tool you used, say "tap Confirm"/);
+    expect(prompt).toMatch(/Any earlier read in the request can cause this/);
+    // No enumerated list of reads that could contradict an identity-field taint.
+    expect(prompt).not.toMatch(/after you read customer texts/);
   });
 
   test('gate off: the prompt is the unchanged constant', () => {
