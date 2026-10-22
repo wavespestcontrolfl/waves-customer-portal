@@ -2097,9 +2097,16 @@ function isUnverifiedIntakeShell(row) {
 // Duplicates page for a manual merge. Returns the skip reason or null.
 const UNVERIFIED_INTAKE_EMAIL_REASON = 'unverified_intake_email';
 function unverifiedIntakeEmailSkip(winner, loser) {
-  if (!dedupeNoUnverifiedBackfillLive() || !isUnverifiedIntakeShell(loser) || isEmptyValue(loser.email)) return null;
-  const same = String(winner.email || '').trim().toLowerCase() === String(loser.email).trim().toLowerCase();
-  return same ? null : UNVERIFIED_INTAKE_EMAIL_REASON;
+  if (!dedupeNoUnverifiedBackfillLive()) return null;
+  const sameEmail = String(winner.email || '').trim().toLowerCase()
+    === String(loser.email || '').trim().toLowerCase();
+  // Loser shell: its email would fill or differ from the kept customer's.
+  if (isUnverifiedIntakeShell(loser) && !isEmptyValue(loser.email) && !sameEmail) return UNVERIFIED_INTAKE_EMAIL_REASON;
+  // Winner shell (an older intake row kept over a newer real one): the
+  // survivor would carry the visitor-typed email forward. Both directions
+  // are left for the office.
+  if (isUnverifiedIntakeShell(winner) && !isEmptyValue(winner.email) && !sameEmail) return UNVERIFIED_INTAKE_EMAIL_REASON;
+  return null;
 }
 
 function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null } = {}) {

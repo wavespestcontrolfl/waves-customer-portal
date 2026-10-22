@@ -4318,6 +4318,15 @@ describe('GATE_DEDUPE_NO_UNVERIFIED_BACKFILL: auto sweep leaves intake rows with
     expect(dedupe.unverifiedIntakeEmailSkip({ email: 'Same@Example.test' }, shellRow({ email: ' same@example.test ' }))).toBeNull();
   });
 
+  it('gate on: an intake shell kept as the WINNER with its own email also blocks the auto-merge', async () => {
+    process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL = 'true';
+    installDb(() => []);
+    const realLoser = { email: 'office-entered@example.test', pipeline_stage: 'new_lead', lead_source: 'referral', last_contact_type: 'call' };
+    expect(dedupe.unverifiedIntakeEmailSkip(shellRow(), realLoser)).toBe('unverified_intake_email');
+    expect(dedupe.unverifiedIntakeEmailSkip(shellRow(), { ...realLoser, email: null })).toBe('unverified_intake_email');
+    expect(dedupe.unverifiedIntakeEmailSkip(shellRow({ email: null }), realLoser)).toBeNull();
+  });
+
   it('gate on: a loser that is not an intake shell (staff-entered lead) is still auto-merged and backfilled', async () => {
     process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL = 'true';
     const { results, state } = await sweep(shellRow({ lead_source: 'referral', last_contact_type: 'call' }));
