@@ -10,15 +10,14 @@ jest.mock('../models/db', () => {
   mock.raw = jest.fn((sql) => sql);
   return mock;
 });
-const mockGate = { on: true, months: false };
+const mockGate = { on: true };
 jest.mock('../services/estimate-proposal-billing', () => ({
   ...jest.requireActual('../services/estimate-proposal-billing'),
   resolveProposalBillingContext: jest.fn(async () => ({ billsPerApplication: true, livePricing: null })),
 }));
 jest.mock('../config/feature-gates', () => ({
   ...jest.requireActual('../config/feature-gates'),
-  isEnabled: jest.fn((gate) => gate === 'estimateDocPdf' || (gate === 'estimateMonthlyAverage' && mockGate.on)
-    || (gate === 'estimateApplicationMonths' && mockGate.months)),
+  isEnabled: jest.fn((gate) => gate === 'estimateDocPdf' || (gate === 'estimateMonthlyAverage' && mockGate.on)),
   gateEnvValue: jest.fn(() => false),
   gates: {},
 }));
@@ -110,7 +109,7 @@ async function withServer(fn) {
 }
 
 describe('GET /:token/data — monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)', () => {
-  beforeEach(() => { mockGate.on = true; mockGate.months = false; dbRows = { estimates: perApplicationRow() }; });
+  beforeEach(() => { mockGate.on = true; dbRows = { estimates: perApplicationRow() }; });
 
   test('document pass: the inputs reconcile to the stored monthly total', async () => {
     await withServer(async (baseUrl) => {
@@ -125,41 +124,6 @@ describe('GET /:token/data — monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)',
       });
       expect(body.monthlyAverageEnabled).toBe(true);
     });
-  });
-
-  // GATE_ESTIMATE_APPLICATION_MONTHS (EST-2026-1185): the page switch rides
-  // only beside the monthly average, absent otherwise.
-  test('application months: the switch rides only with both gates on', async () => {
-    mockGate.months = true;
-    await withServer(async (baseUrl) => {
-      const body = await (await fetch(`${baseUrl}/estimates/unitprojectiontoken/data`)).json();
-      expect(body.applicationMonthsEnabled).toBe(true);
-    });
-    mockGate.on = false;
-    await withServer(async (baseUrl) => {
-      const body = await (await fetch(`${baseUrl}/estimates/unitprojectiontoken/data`)).json();
-      expect(body).not.toHaveProperty('applicationMonthsEnabled');
-    });
-    mockGate.on = true;
-    mockGate.months = false;
-    await withServer(async (baseUrl) => {
-      const body = await (await fetch(`${baseUrl}/estimates/unitprojectiontoken/data`)).json();
-      expect(body).not.toHaveProperty('applicationMonthsEnabled');
-    });
-  });
-
-  // The PDF document reads the same switch from /data: the document pass (?mode=pdf) carries it
-  // beside proposal.monthlyAverage when both gates are on, and neither otherwise.
-  test('application months: the document pass carries the switch with both gates on and not otherwise', async () => {
-    const pdf = async () => (await (await fetch(`${baseUrl}/estimates/unitprojectiontoken/data?mode=pdf`)).json());
-    let baseUrl;
-    mockGate.months = true;
-    await withServer(async (url) => { baseUrl = url; const body = await pdf(); expect(body.documentRender).toBe(true); expect(body.applicationMonthsEnabled).toBe(true); expect(body.proposal).toHaveProperty('monthlyAverage'); });
-    mockGate.months = false;
-    await withServer(async (url) => { baseUrl = url; expect(await pdf()).not.toHaveProperty('applicationMonthsEnabled'); });
-    mockGate.months = true;
-    mockGate.on = false;
-    await withServer(async (url) => { baseUrl = url; const body = await pdf(); expect(body).not.toHaveProperty('applicationMonthsEnabled'); expect(body.proposal).not.toHaveProperty('monthlyAverage'); });
   });
 
   test('gate off: neither key exists, the response is as before', async () => {
