@@ -113,12 +113,22 @@ const AUTH_HEADER_RE = /(\bauthorization[ \t]*[:=][ \t]*)([A-Za-z][A-Za-z0-9_-]*
 // A double-serialized blob keeps its quotes escaped ({\"password\":\"hunter22\"}); the key and
 // value quotes may be a backslash plus a quote, and the output keeps that shape (Codex #6375 r11).
 const KEY_ASSIGN_RE = /(?<![A-Za-z0-9_.-])(\\?["']?)((?:api[ \t]+)?[A-Za-z][A-Za-z0-9_.-]*)\1([ \t]*[=:][ \t]*)(\\"(?:[^\\\n]|\\(?!"))*\\"|\\'(?:[^\\\n]|\\(?!'))*\\'|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|(?=[^\s,;}\]"']{4}|\[removed\])(?:\[removed\]|[^\s,;}\]"'])+)/gi;
-const ASSIGN_KEY_WORDS = new Set(['password', 'passwd', 'secret', 'token', 'apikey', 'credential', 'credentials', 'auth', 'authorization']);
+// The credential vocabulary of a fixed-format key (Codex #6375 r17). It is the
+// shared classifier's list less the words that name an ACCESS instruction the
+// owner wants returned (ruling 2026-10-13: pin, passcode) or that are ordinary
+// note words (session, signature, sig, hash/salt on their own).
+const ASSIGN_KEY_WORDS = new Set(['password', 'passwords', 'passwd', 'secret', 'secrets', 'token', 'tokens', 'apikey', 'credential',
+  'credentials', 'auth', 'authorization', 'cookie', 'cookies', 'nonce', 'jwt', 'bearer', 'otp']);
+const SECRET_KEY_PREFIXES = new Set(['api', 'private', 'secret', 'signing', 'access', 'encryption', 'ssh']);
+const CREDENTIAL_PREFIX_WORDS = new Set(['password', 'passwd', 'secret', 'token', 'api', 'auth', 'session']);
 function isAssignmentSecretKey(key) {
   const words = nameWords(key);
   const last = words[words.length - 1];
+  const prev = words[words.length - 2];
   if (ASSIGN_KEY_WORDS.has(last)) return true;
-  return last === 'key' && words[words.length - 2] === 'api';
+  if (last === 'key') return SECRET_KEY_PREFIXES.has(prev);
+  // password_hash, session_id-style pairs: a hash, salt or id of a credential.
+  return ['hash', 'salt', 'id'].includes(last) && CREDENTIAL_PREFIX_WORDS.has(prev);
 }
 // Only the exact marker (bare, or inside matching quotes or escaped quotes) counts as already removed:
 // "[removed]hunter22" still has its secret (Codex #6375 r15).

@@ -259,6 +259,16 @@ describe('Codex #6375 r7: spaced and punctuated credential assignments, any Auth
     expect(escaped.text).toBe('{"password":"[removed]"}');
     expect(scrubNote('DB_PASSWORD="abc\\"hunter22" next').text).toBe('DB_PASSWORD=[removed] next');
   });
+  test('the wider credential vocabulary is scrubbed in fixed formats; access words stay (Codex #6375 r17)', () => {
+    expect(scrubNote('{"private_key":"hunter22"}').text).toBe('{"private_key":"[removed]"}');
+    expect(scrubNote('password_hash: abc123').text).toBe('password_hash: [removed]');
+    expect(scrubNote('Cookie: sessionid=abc123').text).not.toContain('abc123');
+    expect(scrubNote('session_id=abcd1234ef').text).toBe('session_id=[removed]');
+    // Access instructions and ordinary note words are returned (owner ruling 2026-10-13).
+    for (const note of ['PIN: 8842', 'lockbox passcode: 4321', 'session: Tuesday mornings', 'signature: required on delivery', 'gate code: 1234']) {
+      expect(scrubNote(note).text).toBe(note);
+    }
+  });
   test('ordinary prose and labels without a credential word stay as written', () => {
     const note = 'the password is in the lockbox. gate code: 1234, PIN: 8842, key under the mat, password: ab';
     expect(scrubNote(note)).toEqual({ text: note, removed: 0 });
