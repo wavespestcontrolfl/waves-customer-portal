@@ -290,12 +290,15 @@ async function buildPlan(input, ctx = {}) {
     { pending: { customerPatch: { customerId: customer.id, payer_id: String(payer.id) } } })) {
     return refusal('A combined-visit invoice for this customer is being sent or paid right now, so nothing was offered. Ask again in a moment.', 'invoice_send_in_flight');
   }
-  // A combined-visit invoice in 'processing' with no claim the fence sees: the packet withdrawal would still move it,
-  // while the card leaves processing invoices out, so the card could never be confirmed. Refuse it here instead.
+  // Any self-pay invoice with a payment processing: the card leaves processing invoices out (SETTLED), yet the packet
+  // withdrawal would still move a combined-visit one, and a manual one's live owner would turn to the payer unmoved
+  // (if the debit then fails it is collectible again with no payer stamp). Refuse until it settles or fails.
   const processing = await database('invoices').where({ customer_id: customer.id, status: 'processing' })
-    .whereNull('payer_id').whereNotNull('visit_completion_packet_id').first('invoice_number');
+    .whereNull('payer_id').whereNull('payer_statement_id')
+    .where((q) => q.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%'))
+    .first('invoice_number');
   if (processing) {
-    return refusal(`Combined-visit invoice ${processing.invoice_number} has a payment processing, so nothing was offered. Ask again once it settles or fails.`, 'invoice_payment_processing');
+    return refusal(`Invoice ${processing.invoice_number} has a payment processing, so nothing was offered. Ask again once it settles or fails.`, 'invoice_payment_processing');
   }
   const { moving, staying } = await invoicePlan(customer.id, String(payer.id), ctx);
   const unsafe = await ownerUnsafeStaying(staying, ctx);

@@ -110,6 +110,14 @@ const ADMIN = { isAdmin: true, technicianId: null };
     expect((await executeBillToTool('set_customer_bill_to', { customer_id: customerId, payer_id: String(payerId) }, ADMIN))._version.pinned).toBe(1);
   });
 
+  test('any self-pay invoice with a payment processing (a manual one included): no card', async () => {
+    const payerId = await payer();
+    const { customerId, manualId } = await selfPayCustomer();
+    await db('invoices').where({ id: manualId }).update({ status: 'processing', scheduled_service_id: null });
+    expect(await executeBillToTool('set_customer_bill_to', { customer_id: customerId, payer_id: String(payerId) }, ADMIN))
+      .toMatchObject({ code: 'invoice_payment_processing' });
+  });
+
   test('an unpaid invoice with no visit: no card, nothing written', async () => {
     const payerId = await payer();
     const { customerId, manualId } = await selfPayCustomer();
