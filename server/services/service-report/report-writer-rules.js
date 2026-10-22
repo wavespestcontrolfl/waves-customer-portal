@@ -649,8 +649,23 @@ const WRITER_RULE_SCREENS = Object.freeze([
 // this visit's trade names), only while the rules apply.
 // A visit tied to a supplied date ("your next visit is …", "we'll be back
 // …", "booked for …") is never a reach-out date: the report shows the next
-// visit itself (Codex #5500).
-const REACH_OUT_DATE_MISUSE_RE = new RegExp(`${VISIT_CUE_RE.source}|\\bbook(?:ed|ing)?\\b|\\bvisits?\\b`, 'i');
+// visit itself (Codex #5500). The reach-out sentence names a place and a sign
+// the customer can notice, so there a window is a place ("the kitchen
+// window", "window sills"), "next to" is a place, and a pest that comes back
+// or returns is a sign. Only a time window, a next visit or our own return
+// ties the date to a visit. 2026-10-22 replay: "If ants are still trailing by
+// the kitchen window … on Thursday, October 22, text or call us." was refused
+// on every try, and the report fell back to the fixed copy.
+const REACH_OUT_VISIT_CUE_RE = new RegExp([
+  '\\bnext\\b(?!\\s+(?:to|couple|few|several)\\b)',
+  '\\b(?:upcoming|scheduled|appointment|arriv(?:e|al|ing)|see\\s+you)\\b',
+  '\\b(?:arrival|time|service|appointment|visit|[\\w-]*hour)\\s+windows?\\b',
+  '\\bwindow\\s+(?:of|between|from)\\b',
+  '\\breturn\\s+(?:trip|visit|service)s?\\b',
+  "\\b(?:we|i)(?:['’](?:ll|re)|\\s+(?:will|are|can|plan\\s+to))?\\s+(?:be\\s+back|come\\s+back|coming\\s+back|return(?:ing)?)\\b",
+  '\\b(?:will|to)\\s+(?:be\\s+back|come\\s+back|return)\\b',
+].join('|'), 'i');
+const REACH_OUT_DATE_MISUSE_RE = new RegExp(`${REACH_OUT_VISIT_CUE_RE.source}|\\bbook(?:ed|ing)?\\b|\\bvisits?\\b`, 'i');
 // The reach-out date is the day to get in touch: its sentence must ask the
 // customer to contact us, and the date never ends a period ("keeps working
 // until Wednesday, October 14" would make it a residual claim; Codex #5500).

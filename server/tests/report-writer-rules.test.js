@@ -559,6 +559,32 @@ describe('four-section report: the reach-out date asks the customer to get in to
     expect(writerRulesRejection(text, { allowedDates })).toBeNull();
   });
 
+  // 2026-10-22 replay: a window, "next to" and a pest that comes back or returns
+  // are places and signs in a reach-out sentence, not a visit.
+  test.each([
+    ["WHAT'S NEXT\nIf ants are still trailing by the kitchen window or back door on Wednesday, October 14, text or call us."],
+    ["WHAT'S NEXT\nIf you still see spiders around the window frames on Wednesday, October 14, text or call us."],
+    ["WHAT'S NEXT\nIf the ants along the lanai come back by Wednesday, October 14, text or call us."],
+    ["WHAT'S NEXT\nIf spiders return to the eaves by Wednesday, October 14, give us a call."],
+    ["WHAT'S NEXT\nIf ants are still active next to the pool on Wednesday, October 14, let us know."],
+    ["WHAT'S NEXT\nIf activity has not dropped over the next couple of weeks, text or call us on Wednesday, October 14."],
+  ])('a place or a sign of the pest passes: %s', (text) => {
+    expect(writerRulesRejection(text, { allowedDates, allowedPhrases: ['over the next couple of weeks'] })).toBeNull();
+  });
+
+  test.each([
+    ["WHAT'S NEXT\nWe'll come back on Wednesday, October 14, so text or call us if anything changes."],
+    ["WHAT'S NEXT\nWe’re coming back Wednesday, October 14; call us with any questions."],
+    ["WHAT'S NEXT\nOur technician will return on Wednesday, October 14, so let us know before then."],
+    ["WHAT'S NEXT\nText or call us before your arrival window on Wednesday, October 14."],
+    ["WHAT'S NEXT\nWe plan to be back on Wednesday, October 14; contact us with questions."],
+    ["WHAT'S NEXT\nIf ants are still there on Wednesday, October 14, call us and we will make a return trip."],
+    ["WHAT'S NEXT\nText or call us to book a visit for Wednesday, October 14."],
+    ["WHAT'S NEXT\nCall us about your next service on Wednesday, October 14."],
+  ])('a visit, our return or a time window is still refused: %s', (text) => {
+    expect(writerRulesRejection(text, { allowedDates })).toBe('date');
+  });
+
   test.each([
     ['WHAT TO EXPECT\nThe treatment keeps working until Wednesday, October 14.'],
     ['WHAT TO EXPECT\nThe treatment keeps working until Wednesday, October 14, so let us know.'],
