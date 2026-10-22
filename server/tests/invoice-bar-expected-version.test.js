@@ -238,3 +238,51 @@ describe('InvoiceService.unvoidInvoice(id, { expected })', () => {
     expect(pageRestore.ops.filter(([name]) => name === 'whereRaw')).toEqual([]);
   });
 });
+
+describe('unvoid: setup-fee and dues invoices are left to the Invoices page (InvoiceService._unvoidObligationReason)', () => {
+  const reason = (invoice) => InvoiceService._unvoidObligationReason(db, invoice);
+  const SETUP_LINE = { description: 'Bait Station Setup — one-time setup fee', amount: 99 };
+
+  test('an ordinary invoice has no obligation: the four reads come back empty', async () => {
+    await expect(reason(row({ status: 'void' }))).resolves.toBeNull();
+    expect(calls.map((c) => c.table)).toEqual(['setup_fee_claims', 'dispatch_alerts', 'invoices']);
+  });
+
+  test('a membership-dues month and the setup line are found from the lines, with no read', async () => {
+    await expect(reason(row({ line_items: [{ description: 'Dues', amount: 50, membership_dues_month: '2099-01' }] }))).resolves.toBe('membership_dues');
+    await expect(reason(row({ line_items: [SETUP_LINE] }))).resolves.toBe('setup_fee');
+    expect(calls).toEqual([]);
+  });
+
+  test.each([
+    ['the durable setup-fee claim (a renamed line hides the text)', 'setup_fee_claims'],
+    ['an office handoff alert naming the invoice', 'dispatch_alerts'],
+  ])('%s', async (_label, table) => {
+    cfg.reads[table] = [{ id: 'x' }];
+    await expect(reason(row({ status: 'void' }))).resolves.toBe('setup_fee');
+  });
+
+  test('a live replacement draft carrying the rebill marker for this invoice', async () => {
+    cfg.reads.invoices = [{ id: 'inv-rebill' }];
+    await expect(reason(row({ status: 'void' }))).resolves.toBe('setup_fee');
+    const rebill = calls.find((c) => c.table === 'invoices');
+    expect(rebill.ops).toEqual(expect.arrayContaining([
+      ['where', 'notes', 'like', '%[rodent-setup-rebill:inv-1]%'],
+      ['whereNotIn', 'status', ['void', 'cancelled', 'canceled', 'refunded']],
+    ]));
+  });
+
+  test('the bar’s restore refuses on the row its UPDATE holds (an obligation that appeared after the card) and rolls back; the page’s does not use the fence', async () => {
+    const voided = row({ status: 'void' });
+    cfg.reads.invoices = [voided];
+    cfg.updateReturning.invoices = [voided];
+    cfg.reads.setup_fee_claims = [{ id: 'claim-1' }];
+    await expect(InvoiceService.unvoidInvoice('inv-1', { expected: { status: 'void', updatedAt: UPDATED.getTime() } })).rejects.toThrow(/^Cannot unvoid from the bar/);
+    // Nothing after the fence ran: no annual-term, reminder or text cancel work was started on the transaction.
+    expect(calls.filter((c) => ['sms_log', 'invoice_followup_sequences'].includes(c.table))).toEqual([]);
+    calls.length = 0;
+    cfg.reads.invoices = [voided];
+    // The page restores the same invoice (it has its own handling of those records): the bar-only fence is not applied.
+    await expect(InvoiceService.unvoidInvoice('inv-1')).resolves.toMatchObject({ id: 'inv-1' });
+  });
+});

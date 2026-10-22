@@ -785,6 +785,22 @@ function applyVoidExpected(q, expected) {
   return q;
 }
 
+// The Intelligence Bar's unvoid card leaves to the Invoices page every invoice the restore also acts beyond the invoice itself on:
+// a membership-dues month (the restore re-claims it and closes its alert), and a rodent bait-station setup fee (the restore's
+// retireRodentSetupObligationForReinstatedInvoice can retire a sibling setup invoice, clear a visit's pending setup fee, close
+// an office handoff alert or void a replacement draft). Detected from the same provenance that helper reads: the setup line, the
+// durable claim, a handoff alert naming the invoice, and a live rebill marker. Returns a reason or null; read-only. The card runs
+// it at preview and at confirm, and the bar's restore runs it again on the row its UPDATE holds.
+async function unvoidObligationReason(conn, invoice) {
+  const lines = parseInvoiceLineItems(invoice.line_items);
+  if (lines.some((li) => li && li[MEMBERSHIP_DUES_LINE_KEY])) return "membership_dues";
+  if (lines.some((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()))) return "setup_fee";
+  if (await conn("setup_fee_claims").where({ invoice_id: invoice.id }).first("id")) return "setup_fee";
+  if (await conn("dispatch_alerts").where({ type: "setup_fee_office_billing" }).whereRaw("payload->>'sourceInvoiceId' = ?", [String(invoice.id)]).first("id")) return "setup_fee";
+  if (await conn("invoices").where("notes", "like", `%${rodentSetupRebillMarker(invoice.id)}%`).whereNotIn("status", ["void", "cancelled", "canceled", "refunded"]).first("id")) return "setup_fee";
+  return null;
+}
+
 function isInvoiceNumberCollision(err) {
   return err?.code === "23505" &&
     `${err.constraint || ""} ${err.detail || ""}`.includes("invoice_number");
@@ -11411,6 +11427,11 @@ const InvoiceService = {
       if (!updated) {
         throw new Error("Invoice status changed while unvoiding — re-check and retry");
       }
+      // The bar only: a setup-fee or dues obligation that exists by the time the restore holds the invoice row refuses it
+      // (rolls back); the page restores those with its own handling.
+      if (expected && await unvoidObligationReason(trx, updated)) {
+        throw new Error("Cannot unvoid from the bar — this invoice carries a bait-station setup fee or a membership-dues month, which the restore also changes elsewhere; restore it from the Invoices page");
+      }
       // The customer is judged again once the invoice itself is held: a merge that committed between the
       // fresh read above and this lock moved the invoice to another customer, whose rows were never taken.
       if (String(updated.customer_id) !== String(own.customer_id)) {
@@ -13940,6 +13961,7 @@ module.exports.withPayLinkSendClaim = withPayLinkSendClaim;
 module.exports._assertUnvoidableLinkedVisit = assertUnvoidableLinkedVisit;
 // The Intelligence Bar's edit_invoice card computes the new totals with the edit's own arithmetic (read-only).
 module.exports._calculateUpdateFinancials = calculateUpdateFinancials;
+module.exports._unvoidObligationReason = unvoidObligationReason;
 module.exports._invoiceHasUnbackedDocumentDiscount = invoiceHasUnbackedDocumentDiscount;
 // Test-only seam (#5424 r14): the pending-channel replay queue row, to pin the persisted trusted
 // dispute-hold exemption (metadata.hold_exempt) that the replay's eligibility and boundary re-apply.

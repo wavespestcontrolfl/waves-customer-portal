@@ -23,8 +23,10 @@ jest.mock('../services/stripe', () => ({
 const mockLinkedVisit = jest.fn();
 const mockCalc = jest.fn();
 const mockUnbacked = jest.fn();
+const mockObligation = jest.fn();
 jest.mock('../services/invoice', () => ({
   linkedScheduledServiceId: (...a) => mockLinkedVisit(...a),
+  _unvoidObligationReason: (...a) => mockObligation(...a),
   _calculateUpdateFinancials: (...a) => mockCalc(...a),
   _invoiceHasUnbackedDocumentDiscount: (...a) => mockUnbacked(...a),
 }));
@@ -62,7 +64,7 @@ function freshState() {
       ],
     }],
     customers: [{ id: CUST, first_name: 'Robin', last_name: 'Sample', property_type: 'residential' }],
-    payments: [], payer_statements: [], payment_plans: [], stripe_invoice_charge_attempts: [], annual_prepay_terms: [], projects: [],
+    payments: [], payer_statements: [], payment_plans: [], stripe_invoice_charge_attempts: [], annual_prepay_terms: [], projects: [], setup_fee_claims: [], dispatch_alerts: [],
     scheduled_services: [{ id: VISIT, status: 'completed', scheduled_date: '2099-01-01', window_start: '09:00:00', window_end: '11:00:00' }],
     technicians: [{ id: 'staff-1', name: 'Pat Admin', email: 'admin@example.com' }],
     writes: [],
@@ -74,17 +76,25 @@ function freshState() {
 // Any write throws.
 function makeDb() {
   function builder(table) {
-    const q = { wheres: [], nots: [], nulls: [], single: false };
+    const q = { wheres: [], nots: [], nulls: [], likes: [], notIns: [], single: false };
     const rows = () => {
       const found = (state[table] || []).filter((row) => q.wheres.every((w) => Object.entries(w).every(([k, v]) => String(row[k]) === String(v)))
         && q.nots.every(([k, v]) => String(row[k]) !== String(v))
-        && q.nulls.every((k) => row[k] == null));
+        && q.nulls.every((k) => row[k] == null)
+        && q.likes.every(([k, text]) => String(row[k] || '').includes(text))
+        && q.notIns.every(([k, values]) => !values.includes(row[k])));
       return q.single ? found[0] : found;
     };
     const b = new Proxy({}, {
       get(_t, prop) {
         if (prop === 'then') return (res, rej) => Promise.resolve().then(rows).then(res, rej);
-        if (prop === 'where') return (arg) => { if (arg && typeof arg === 'object' && typeof arg !== 'function') q.wheres.push(arg); return b; };
+        if (prop === 'where') return (arg, op, value) => {
+          if (arg && typeof arg === 'object' && typeof arg !== 'function') q.wheres.push(arg);
+          // A LIKE on a text column (the rebill marker in notes) is matched on the seeded rows.
+          if (typeof arg === 'string' && String(op).toLowerCase() === 'like') q.likes.push([arg, String(value).replace(/%/g, '')]);
+          return b;
+        };
+        if (prop === 'whereNotIn') return (k, v) => { q.notIns.push([k, v]); return b; };
         if (prop === 'whereNot') return (k, v) => { q.nots.push([k, v]); return b; };
         if (prop === 'whereNull') return (k) => { q.nulls.push(k); return b; };
         if (prop === 'first') return () => { q.single = true; return b; };
@@ -134,6 +144,17 @@ beforeEach(() => {
   mockUnbacked.mockResolvedValue(false);
   mockBalance.mockResolvedValue(500);
   mockCalc.mockImplementation(async (args) => calc(args));
+  // The same provenance reads as InvoiceService._unvoidObligationReason (covered against the real one in
+  // invoice-bar-expected-version.test.js), run on this file's fake database.
+  mockObligation.mockImplementation(async (conn, invoice) => {
+    const lines = Array.isArray(invoice.line_items) ? invoice.line_items : [];
+    if (lines.some((li) => li && li.membership_dues_month)) return 'membership_dues';
+    if (lines.some((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || '').trim()))) return 'setup_fee';
+    if (await conn('setup_fee_claims').where({ invoice_id: invoice.id }).first()) return 'setup_fee';
+    if (await conn('dispatch_alerts').where({ type: 'setup_fee_office_billing' }).first()) return 'setup_fee';
+    if (await conn('invoices').where('notes', 'like', `%[rodent-setup-rebill:${invoice.id}]%`).whereNotIn('status', ['void']).first()) return 'setup_fee';
+    return null;
+  });
   Invoices.editInvoiceFromBar.mockResolvedValue({ status: 200, json: { id: INV, status: 'sent', total: '149.00' } });
   Invoices.applyCreditFromBar.mockResolvedValue({ status: 200, json: { ok: true, invoice: { id: INV, status: 'prepaid' }, applied: 129, balance: 371 } });
   Invoices.archiveInvoiceFromBar.mockResolvedValue({ status: 200, json: { id: INV, status: 'void', archived_at: '2099-01-02T00:00:00Z' } });
@@ -710,6 +731,41 @@ describe('unvoid_invoice', () => {
     setInvoice(change);
     expect(await run('unvoid_invoice')).toMatchObject({ code });
     expect(Invoices.unvoidInvoiceFromBar).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a bait-station setup fee line', { line_items: [{ description: 'Bait Station Setup — one-time setup fee', amount: 99 }] }],
+    ['a membership-dues month', { line_items: [{ description: 'Dues', amount: 50, membership_dues_month: '2099-01' }] }],
+  ])('%s is left to the Invoices page: the restore also changes other records', async (_label, change) => {
+    setInvoice(change);
+    expect(await run('unvoid_invoice')).toMatchObject({ code: 'needs_invoices_page' });
+    expect(Invoices.unvoidInvoiceFromBar).not.toHaveBeenCalled();
+  });
+
+  test('a setup-fee claim, an office handoff alert and a live replacement draft each leave it to the Invoices page, even with a renamed line', async () => {
+    state.setup_fee_claims = [{ id: 'claim-1', invoice_id: INV }];
+    expect(await run('unvoid_invoice')).toMatchObject({ code: 'needs_invoices_page', reason: 'setup_fee' });
+    state.setup_fee_claims = [];
+    state.dispatch_alerts = [{ id: 'alert-1', type: 'setup_fee_office_billing' }];
+    expect(await run('unvoid_invoice')).toMatchObject({ code: 'needs_invoices_page', reason: 'setup_fee' });
+    state.dispatch_alerts = [];
+    state.invoices.push({ id: 'inv-rebill', status: 'draft', notes: `Re-billed after invoice ${INV} was voided [rodent-setup-rebill:${INV}]` });
+    expect(await run('unvoid_invoice')).toMatchObject({ code: 'needs_invoices_page', reason: 'setup_fee' });
+  });
+
+  test('an unreadable obligation check fails closed', async () => {
+    mockObligation.mockRejectedValueOnce(new Error('db down'));
+    expect(await run('unvoid_invoice')).toMatchObject({ code: 'unverified' });
+  });
+
+  test('a setup-fee claim that appears after the card refuses at Confirm, before the handler; the restore’s own fence maps to the page', async () => {
+    const card = await run('unvoid_invoice');
+    state.setup_fee_claims = [{ id: 'claim-1', invoice_id: INV }];
+    expect(await confirm('unvoid_invoice', card)).toMatchObject({ code: 'needs_invoices_page', preview_changed: true });
+    expect(Invoices.unvoidInvoiceFromBar).not.toHaveBeenCalled();
+    state.setup_fee_claims = [];
+    Invoices.unvoidInvoiceFromBar.mockResolvedValueOnce({ status: 409, json: { error: 'Cannot unvoid from the bar — this invoice carries a bait-station setup fee or a membership-dues month; restore it from the Invoices page' } });
+    expect(await confirm('unvoid_invoice', card)).toMatchObject({ failed: true, code: 'needs_invoices_page' });
   });
 
   test('a payment on file, an owning annual term, a finalized statement and a charge in progress are refused', async () => {

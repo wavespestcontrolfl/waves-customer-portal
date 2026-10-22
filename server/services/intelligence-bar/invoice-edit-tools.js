@@ -862,6 +862,15 @@ async function unvoidRefusal(invoice) {
   if (paid) return ownerRule(`A payment (${paid.status}) is on file for invoice ${invoice.invoice_number}.`, 'payment_on_file', at);
   const statement = await statementOf(invoice);
   if (statement && statement.status !== 'open') return toPage(`Invoice ${invoice.invoice_number} is on a finalized payer statement; bill it as a new line on the next statement.`, 'finalized_statement', at);
+  // A restore that also changes other records (a setup-fee obligation on a visit or sibling invoice, a dues month) stays on the page.
+  try {
+    const obligation = await require('../invoice')._unvoidObligationReason(db, invoice);
+    if (obligation === 'membership_dues') return toPage(`Invoice ${invoice.invoice_number} is a membership-dues invoice: restoring it re-claims a month of coverage.`, 'membership_dues', at);
+    if (obligation) return toPage(`Invoice ${invoice.invoice_number} carries a bait-station setup fee: restoring it can also retire a sibling setup invoice, clear a visit's pending setup fee or close an office billing alert.`, 'setup_fee', at);
+  } catch (err) {
+    logger.warn(`[intelligence-bar:invoice-edit] unvoid obligation check failed (${err.code || err.name || 'error'})`);
+    return refusal('The bar could not check what else restoring this invoice would change, so nothing was offered. Unvoid it from the Invoices page.', 'unverified', { invoice_id: at });
+  }
   const charge = await chargeInProgress(invoice);
   if (charge === 'charge_in_progress') return ownerRule(`Invoice ${invoice.invoice_number} has a saved-card charge in progress or unresolved.`, 'charge_in_progress', at);
   if (charge) return refusal('The bar could not check for a card charge in progress, so nothing was offered. Unvoid it from the Invoices page.', 'unverified', { invoice_id: at });
@@ -940,7 +949,11 @@ async function commitUnvoid(input) {
     return { ...baseOf(plan), outcome_unknown: true, code: 'execution_interrupted',
       error: 'The unvoid was interrupted — it may or may not have happened. Check the invoice before trying again.' };
   }
-  if (result.status !== 200) return handlerFailure(plan, result, 'The invoice was not unvoided', { moneyWords: /payment already applied|saved-card charge|unresolved (Stripe )?charge/i });
+  if (result.status !== 200) {
+    const failed = handlerFailure(plan, result, 'The invoice was not unvoided', { moneyWords: /payment already applied|saved-card charge|unresolved (Stripe )?charge/i });
+    // The restore's own in-transaction fence for a setup-fee or dues invoice: the Invoices page does those.
+    return /Cannot unvoid from the bar/.test(String(result.json?.error || '')) ? { ...failed, code: 'needs_invoices_page' } : failed;
+  }
   if (result.json?.status !== 'draft') {
     return { ...baseOf(plan), outcome_unknown: true, code: 'unvoid_unverified',
       error: 'The Invoices page answered, but the invoice does not read as a draft. Check the invoice before trying again.' };

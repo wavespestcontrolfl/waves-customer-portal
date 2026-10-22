@@ -1014,6 +1014,10 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
         jest.spyOn(require('../services/customer-credit'), 'getBalance').mockResolvedValue(500),
         jest.spyOn(require('../services/invoice-prepay'), 'resolveInvoiceTermId').mockResolvedValue(null),
       ] : [];
+    // unvoid_invoice's setup-fee / dues provenance reads filter by column (a LIKE on invoices.notes), which this recorder does not
+    // model; its own cases run against the real function in invoice-bar-expected-version.test.js.
+    const unvoidObligation = toolName === 'unvoid_invoice'
+      ? jest.spyOn(require('../services/invoice'), '_unvoidObligationReason').mockResolvedValue(null) : null;
     const repriceCoverage = toolName === 'reprice_future_visits'
       ? jest.spyOn(require('../routes/admin-schedule'), 'findBillingCoveredVisits').mockResolvedValue(new Map()) : null;
     // accept_estimate's card is the accept run as a dry run (rolled back in its
@@ -1087,6 +1091,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       invoiceActionSpies.forEach((spy) => spy.mockRestore());
       recordPaymentSpies.forEach((spy) => spy.mockRestore());
       invoiceCreditSpies.forEach((spy) => spy.mockRestore());
+      unvoidObligation?.mockRestore();
       dedupeReaders.forEach((spy) => spy.mockRestore());
       repriceCoverage?.mockRestore();
       acceptDryRun?.mockRestore();
