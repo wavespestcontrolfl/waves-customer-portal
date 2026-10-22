@@ -1253,6 +1253,16 @@ function frozenMoveRefusal(reason) {
   }
   return { error: 'This visit already has an issued link, records or a payment in progress — the bar can\'t move it from here. Nothing was proposed.', code: 'frozen_visit_move_unsupported' };
 }
+// The visit a reschedule card would move, or the refusal that stops the card
+// before it exists: no such visit, or a live package visit 1 whose visit 2 the
+// card would not show (Codex #6371 r19). A finished visit keeps its own
+// "already completed" refusal at the caller.
+async function loadMovePin(appointmentId) {
+  const pin = await loadAppointmentPin(String(appointmentId));
+  if (!pin) return { refusal: { error: 'Appointment not found — nothing was proposed.' } };
+  const refusal = TERMINAL_APPOINTMENT_STATUSES_FOR_PINS.includes(String(pin.status)) ? null : await packageChildMoveRefusal(appointmentId);
+  return refusal ? { refusal } : { pin };
+}
 async function packageChildMoveRefusal(appointmentId) {
   if (!(await require('../services/package-followup-booking').hasLivePackageChild(db, [String(appointmentId)]))) return null;
   return { error: 'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. The bar can\'t move it from here yet. Nothing was proposed.', code: 'package_visit_two_linked' };
@@ -1678,8 +1688,8 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // service, and current date/window it is approving a move FROM, and
       // /confirm-action refuses if the visit changed during the pending
       // window (the executor's own read happens only after Confirm).
-      const pin = await loadAppointmentPin(String(params.appointment_id));
-      if (!pin) return { failed: true, modelResult: { error: 'Appointment not found — nothing was proposed.' } };
+      const { pin, refusal: pinRefusal } = await loadMovePin(params.appointment_id);
+      if (!pin) return { failed: true, modelResult: pinRefusal };
       if (TERMINAL_APPOINTMENT_STATUSES_FOR_PINS.includes(String(pin.status))) {
         return { failed: true, modelResult: { error: `This appointment is already ${pin.status} and can't be moved.` } };
       }
@@ -1717,9 +1727,6 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
         }
         if (verdict.frozen) return { failed: true, modelResult: frozenMoveRefusal(verdict.reason) };
       }
-      // A package visit 1 with a live visit 2 gets no card (Codex #6371 r19).
-      const packageRefusal = await packageChildMoveRefusal(params.appointment_id);
-      if (packageRefusal) return { failed: true, modelResult: packageRefusal };
       params._appointment_fingerprint = appointmentPinFingerprint(pin);
       preview = { ...preview, pinned_appointment: pin };
     }
