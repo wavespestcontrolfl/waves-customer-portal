@@ -653,6 +653,10 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     ['{"token":{"a":{"b":[1,2,"}"]}},"keep":"yes"}', '{"token":[removed],"keep":"yes"}'],
     ['{\\"password\\":[\\"a]b\\",\\"c\\"],\\"x\\":1}', '{\\"password\\":[removed],\\"x\\":1}'],
     ['password: ["unterminated", "more', 'password: [removed]'],
+    ["password: ['first]hunter22', 'secret2']", 'password: [removed]'],
+    ["token: {'a':'b}c'} tail", 'token: [removed] tail'],
+    ["secret: {a: don't, b: 2} rest", 'secret: [removed] rest'],
+    ['{\\"password\\":[\\\'a]b\\\',\\\'c\\\'],\\"x\\":1}', '{\\"password\\":[removed],\\"x\\":1}'],
   ])('a serialized list or object under a credential key is removed whole: %s (r18 audit)', (note, expected) => {
     const { text } = scrubNote(note);
     expect(text).toBe(expected);
@@ -662,6 +666,12 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
   test('owner-ruled prose and access words stay (r18)', () => {
     const note = 'the password is in the lockbox. PIN: 8842. lockbox passcode: 4321. gate code: 1234.';
     expect(scrubNote(note)).toEqual({ text: note, removed: 0 });
+  });
+
+  test('a single-quoted list under a credential key is removed through the returned-note path (r18 audit P0)', async () => {
+    const result = await read(ENTRY, { id: 1, notes: "password: ['first]hunter22', 'secret2'] then gate side" });
+    expect(result.data.notes).toBe('password: [removed] then gate side');
+    expect(JSON.stringify(result)).not.toMatch(/hunter22|secret2/);
   });
 
   test('a tracker wrapping an encoded bare credential query is removed (r18)', async () => {

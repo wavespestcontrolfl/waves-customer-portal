@@ -287,19 +287,43 @@ function scrubEnvAssignments(text) {
 // The end of a serialized list or object value that starts at `start` ("[" or "{"): a linear scan that
 // counts brackets and skips quoted strings (plain or backslash-escaped quotes), so {"password":["a]b"]}
 // is removed whole. An unbalanced value fails closed to the end of the text (Codex #6375 r18 audit).
+// Inside a string that ends at `closer`: the index of the last character the string used (the closing
+// quote or an escaped pair), and whether it ended there.
+function stringStep(text, i, closer) {
+  const c = text[i];
+  if (c === '\\') return { at: i + 1, ended: closer.length === 2 && text[i + 1] === closer[1] };
+  return { at: i, ended: closer.length === 1 && c === closer };
+}
+
+// The quote that opens a string at `i`, or null. A single quote opens one only where a value can
+// start, so an apostrophe inside a word is not one.
+function stringOpener(text, i, previous) {
+  const escaped = text[i] === '\\' && (text[i + 1] === '"' || text[i + 1] === "'");
+  const quote = escaped ? text[i + 1] : text[i];
+  if (quote !== '"' && !(quote === "'" && (previous === '' || '[{,:'.includes(previous)))) return null;
+  return escaped ? `\\${quote}` : quote;
+}
+
 function structuredValueEnd(text, start) {
   let depth = 0;
-  let quote = null;
+  let closer = null;
+  let previous = '';
   for (let i = start; i < text.length; i += 1) {
     const c = text[i];
-    if (quote === '"') {
-      if (c === '\\') i += 1; else if (c === '"') quote = null;
-    } else if (quote) {
-      if (c === '\\' && text[i + 1] === '"') { quote = null; i += 1; } else if (c === '\\') i += 1;
-    } else if (c === '"') quote = '"';
-    else if (c === '\\' && text[i + 1] === '"') { quote = '\\"'; i += 1; }
-    else if (c === '[' || c === '{') depth += 1;
+    if (closer) {
+      const step = stringStep(text, i, closer);
+      i = step.at;
+      if (step.ended) closer = null;
+      continue;
+    }
+    if (c === ' ' || c === '\t' || c === '\n') continue;
+    const opener = stringOpener(text, i, previous);
+    if (opener) {
+      closer = opener;
+      if (opener.length === 2) i += 1;
+    } else if (c === '[' || c === '{') depth += 1;
     else if ((c === ']' || c === '}') && (depth -= 1) === 0) return i + 1;
+    previous = c;
   }
   return text.length;
 }
