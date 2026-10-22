@@ -1053,7 +1053,9 @@ const openSourceCommitments = (conn, smsLogId) => conn('call_commitments')
 // Close the alert for a finished commitment. The shared source alert stays
 // open while another promise from the same text is still open.
 async function closeSmsCommitmentAlerts(trx, { commitmentId, smsLogId, settled = true }, update) {
-  const stillOpen = !settled || await openSourceCommitments(trx, smsLogId).whereNot('id', commitmentId).first('id');
+  // A non-settling update (edit, snooze) marks both alerts read; a settling
+  // one finishes the shared alert only when no other promise from the text is open.
+  const stillOpen = settled && await openSourceCommitments(trx, smsLogId).whereNot('id', commitmentId).first('id');
   const keys = [legacyCommitmentAlertKey(commitmentId), ...(stillOpen ? [] : [smsSourceAlertKey(smsLogId)])];
   await trx('notifications').where({ recipient_type: 'admin' })
     .whereIn(trx.raw("metadata->>'dedupeKey'"), keys).update(update);
@@ -1061,6 +1063,29 @@ async function closeSmsCommitmentAlerts(trx, { commitmentId, smsLogId, settled =
 
 // The bell's words (owner audit 2026-10-01): the customer's name and what is owed in the
 // headline, their quoted words in the why, the whole story in `detail`.
+// The parts of the bell that differ between one promise and several from one
+// text: the kind's wording, the quoted lines, the headline words and the status.
+function bellParts({ row, message, group, names, closing, state }) {
+  const rawQuote = obligationWords(row, message);
+  const quote = names.redactedWords(rawQuote);
+  if (!group) {
+    const alert = KIND_ALERT[row.kind] || KIND_ALERT.other;
+    return { alert, promised: row.sms_context?.basis === 'promise', quoteLine: quote ? `“${quote.slice(0, 600)}”` : null,
+      closingLine: closing, openStatus: alert.open, headline: quote && headlineWords(quote, rawQuote, row.description, names.redactedWords) };
+  }
+  // The words each promise is quoted by; promises that quote alike show once.
+  const words = [...new Set(group.map((item) => {
+    const raw = obligationWords(item, message);
+    return headlineWords(names.redactedWords(raw), raw, item.description, names.redactedWords);
+  }).filter(Boolean))];
+  const kinds = new Set(group.map((item) => item.kind));
+  return { alert: KIND_ALERT[kinds.size === 1 ? row.kind : 'other'] || KIND_ALERT.other,
+    promised: group.every((item) => item.sms_context?.basis === 'promise'),
+    quoteLine: words.map((w) => `• “${w.slice(0, 300)}”`).join('\n'),
+    closingLine: `${group.length} follow-ups from this one ${state.channelWord} are still open. ${closing}`,
+    openStatus: 'nothing on record shows them done', headline: words.join('” and “') };
+}
+
 function overdueBellCopy({ row, message, verdict, customerName, channelWord, promises = null }) {
   const names = require('./admin-alert-names');
   const when = new Date(message.created_at).toLocaleString('en-US', {
@@ -1070,31 +1095,21 @@ function overdueBellCopy({ row, message, verdict, customerName, channelWord, pro
   // One text with several promises: one alert that names all of them. Same
   // kind keeps the kind's wording; mixed kinds fall back to a general follow-up.
   const group = Array.isArray(promises) && promises.length > 1 ? promises : null;
-  const kinds = new Set((group || [row]).map((item) => item.kind));
-  const alert = KIND_ALERT[kinds.size === 1 ? row.kind : 'other'] || KIND_ALERT.other;
-  const promised = (group || [row]).every((item) => item.sms_context?.basis === 'promise');
-  const rawQuote = obligationWords(row, message);
-  const quote = names.redactedWords(rawQuote);
+  const closing = (OVERDUE_BELL_DETAIL[state] || OVERDUE_BELL_DETAIL.open)(when, channelWord);
+  const parts = bellParts({ row, message, group, names, closing, state: { channelWord } });
   const status = state === 'late' ? 'done only after the promised time'
-    : (state === 'uncertain' ? "can't tell if it was done" : (group ? 'nothing on record shows them done' : alert.open));
+    : (state === 'uncertain' ? "can't tell if it was done" : parts.openStatus);
   const day = names.shortDateET(message.created_at);
-  // The words each promise is quoted by; promises that quote alike show once.
-  const groupWords = group ? [...new Set(group.map((item) => {
-    const raw = obligationWords(item, message);
-    return headlineWords(names.redactedWords(raw), raw, item.description, names.redactedWords);
-  }).filter(Boolean))] : [];
   const detail = [
-    `${customerName || 'A customer'}: ${promised ? `we promised ${group ? 'these' : 'this'} by ${channelWord}` : `asked by ${channelWord}`} on ${when} ET.`,
-    group ? groupWords.map((words) => `• “${words.slice(0, 300)}”`).join('\n') : (quote ? `“${quote.slice(0, 600)}”` : null),
-    group ? `${group.length} follow-ups from this one ${channelWord} are still open. ${(OVERDUE_BELL_DETAIL[state] || OVERDUE_BELL_DETAIL.open)(when, channelWord)}` : (OVERDUE_BELL_DETAIL[state] || OVERDUE_BELL_DETAIL.open)(when, channelWord),
+    `${customerName || 'A customer'}: ${parts.promised ? `we promised ${group ? 'these' : 'this'} by ${channelWord}` : `asked by ${channelWord}`} on ${when} ET.`,
+    parts.quoteLine, parts.closingLine,
   ].filter(Boolean).join('\n');
-  const headline = group ? groupWords.join('” and “') : (quote && headlineWords(quote, rawQuote, row.description, names.redactedWords));
   return {
     detail,
     spec: {
-      area: alert.area,
-      action: names.fitAction(alert.area, customerName || 'the customer', [alert.action]),
-      why: names.whyWithQuote({ lead: promised ? 'We said ' : '', quote: headline,
+      area: parts.alert.area,
+      action: names.fitAction(parts.alert.area, customerName || 'the customer', [parts.alert.action]),
+      why: names.whyWithQuote({ lead: parts.promised ? 'We said ' : '', quote: parts.headline,
         tail: `${day ? ` (${day})` : ''} — ${status}.` }),
       severity: 'needs-you',
       link: `/admin/customers?customerId=${encodeURIComponent(message.customer_id)}&tab=comms`,
@@ -1169,6 +1184,30 @@ async function ringSmsSourceBell(trx, { row, message, verdict }) {
   return notification;
 }
 
+// Reconcile the record check with what the customer said next. Not settled by
+// the records: the thread may close it (customer got it, or a person said it
+// was sent). Settled by the records: a LATER customer text saying it did not
+// arrive overrides that, so a stale close never hides open work. A failed
+// thread read changes nothing.
+async function reconcileWithThread({ conn, row, current, message, now, verdict, verifyThread }) {
+  if (verdict.retry_after) return verdict;
+  const recordsSaidDone = verdict.verdict === 'fulfilled';
+  try {
+    const thread = await verifyThread(conn, current, message, now, recordsSaidDone ? { contradictAfter: verdict.matched_at } : {});
+    if (!thread) return verdict;
+    current.sms_context = { ...current.sms_context, thread_check: thread };
+    if (recordsSaidDone && !thread.contradicted) return verdict;
+    if (thread.verdict === 'fulfilled') return thread;
+    await conn('call_commitments').where({ id: row.id, status: 'open' }).whereNull('human_state')
+      .update({ sms_context: conn.raw("COALESCE(sms_context, '{}'::jsonb) || jsonb_build_object('thread_check', ?::jsonb)", [JSON.stringify(thread)]) });
+    // Keep the record check's hash so the next tick reuses it, not a new model call.
+    return recordsSaidDone ? { verdict: 'open', reason: 'contradicted_by_thread', evidence_hash: verdict.evidence_hash, retry_after: null } : verdict;
+  } catch (err) {
+    logger.warn(`[sms-operations] thread check failed for commitment ${row.id}: ${err.message}`);
+    return verdict;
+  }
+}
+
 // One open row: skip, verify, and close or bell. Returns what happened so
 // the caller can count it.
 async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verifyThreadCompletion) {
@@ -1189,10 +1228,11 @@ async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verif
   // No deadline to enforce yet (none stated, or the window is still open)
   // and nothing on file even looks like an answer: skip the model call
   // entirely rather than spend it on an obligation with no chance of a
-  // grounded verdict, and leave the row open and silent.
-  if (!deadlinePassed && !evidence.records.some((record) => admissibleWitness(record, current, evidence.records))) {
-    return { outcome: settle('no_witness') };
-  }
+  // grounded verdict, and leave the row open and silent. An undated row has
+  // one more way to finish: the later text thread (threadOnly below).
+  const noWitness = !deadlinePassed && !evidence.records.some((record) => admissibleWitness(record, current, evidence.records));
+  const threadOnly = noWitness && row.due_at == null;
+  if (noWitness && !threadOnly) return { outcome: settle('no_witness') };
   // R1 (owner ruling 2026-09-24): inside an open window only an event may
   // act. An admissible visit record (field progress, a move, a
   // cancellation) reaches `verify` at once; a message witness (a staff
@@ -1205,24 +1245,9 @@ async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verif
   const eventWitness = evidence.records.some((record) => SYSTEM_EVENT_TYPES.includes(record.type)
     && admissibleWitness(record, current, evidence.records));
   if (!eventWitness && inWindow) return { outcome: settle('not_due') };
-  let verdict = await verify(current, evidence, { now, eventOnly: inWindow });
-  // The record checks above never read what the customer said next. When they
-  // cannot settle the row, read the later thread: the customer confirming they
-  // got it, or a person's text saying it was sent, closes it (and so the alert
-  // never rings again for finished work). A failed thread read changes nothing.
-  if (verdict.verdict !== 'fulfilled' && !verdict.retry_after) {
-    try {
-      const thread = await verifyThread(conn, current, message, now);
-      if (thread) {
-        current.sms_context = { ...current.sms_context, thread_check: thread };
-        if (thread.verdict === 'fulfilled') verdict = thread;
-        else await conn('call_commitments').where({ id: row.id, status: 'open' }).whereNull('human_state')
-          .update({ sms_context: conn.raw("COALESCE(sms_context, '{}'::jsonb) || jsonb_build_object('thread_check', ?::jsonb)", [JSON.stringify(thread)]) });
-      }
-    } catch (err) {
-      logger.warn(`[sms-operations] thread check failed for commitment ${row.id}: ${err.message}`);
-    }
-  }
+  const checked = threadOnly ? { verdict: 'open' } : await verify(current, evidence, { now, eventOnly: inWindow });
+  const verdict = await reconcileWithThread({ conn, row, current, message, now, verdict: checked, verifyThread });
+  if (threadOnly && verdict.verdict !== 'fulfilled') return { outcome: settle('no_witness') };
   let closed = false;
   // Only a verdict this transaction actually persisted counts as handled.
   // Every early exit — a relinked or changed source, the gate turning off, a
@@ -1434,4 +1459,4 @@ async function replaySmsProfile({ smsLogId, execute = false, previewHash, conn =
   }, { recordHealth: false });
 }
 
-module.exports = { smsCommitmentsEnabled, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline, ringOverdueBell, keptLate };
+module.exports = { smsCommitmentsEnabled, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, closeSmsCommitmentAlerts, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline, ringOverdueBell, keptLate };
