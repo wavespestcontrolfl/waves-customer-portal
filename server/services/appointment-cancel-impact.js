@@ -455,7 +455,7 @@ const EFFECTS_MONEY_BLOCKERS = new Set([
 ]);
 
 const CANCEL_FEE_DUE_MESSAGE = "This visit has a late-cancel fee due, and the bar can't cancel a visit with a fee due yet; the Dispatch screen handles the fee. Nothing was changed.";
-const CANCEL_MONEY_RULE_MESSAGE = "This visit, or a linked visit, has money or a card on it (a saved card or card request, a prepayment or prepaid plan coverage, an estimate deposit or annual prepay, an invoice that holds a payment or has setup-fee, annual-prepay or membership-dues effects, or a redeemed inspection credit), and refunds, card charges and credit reversals stay closed to the bar by the owner's rule, so the bar can't cancel it. Nothing was changed.";
+const CANCEL_MONEY_RULE_MESSAGE = "This visit, or a linked visit, has money or a card on it (a saved card or card request, a prepayment or prepaid plan coverage, an estimate deposit or annual prepay, an invoice that holds a payment, has a card charge in progress, or has setup-fee, annual-prepay or membership-dues effects, or a redeemed inspection credit), and refunds, card charges and credit reversals stay closed to the bar by the owner's rule, so the bar can't cancel it. Nothing was changed.";
 const CANCEL_COMBINED_PAYMENT_MESSAGE = "A combined card payment on this visit's invoice also covers other visits, and combined payments stay with the office by the owner's rule, so the bar can't cancel it; cancel it from Dispatch. Nothing was changed.";
 const CANCEL_STILL_UNSUPPORTED_MESSAGE = "This visit is a plan make-up visit, a follow-up visit, part of a grouped visit, or has a linked follow-up visit that is part of a grouped visit, so the bar can't cancel this visit from here yet. Nothing was changed.";
 
@@ -504,6 +504,23 @@ async function invoiceDownstreamReason(conn, invoiceRows) {
   const ids = open.map((inv) => inv.id);
   if (await conn('setup_fee_claims').whereIn('invoice_id', ids).first('id')) return 'setup_fee_claim';
   if (await conn('annual_prepay_terms').whereIn('prepay_invoice_id', ids).first('id')) return 'annual_prepay_invoice';
+  return invoiceChargeInFlightReason(conn, open);
+}
+
+// An unresolved saved-card charge on an open invoice: a worker can die after submitting the charge to Stripe, leaving the
+// invoice 'sent' with no PaymentIntent or payments row but an unresolved claim, so money may already be collected. Voiding
+// it would hide that. Read-only, on the given connection (the same fence the bar's void_invoice runs); a reconciliation
+// verdict refuses, anything else (a failed read) throws so the card or the lock-time check fails closed.
+async function invoiceChargeInFlightReason(conn, openInvoices) {
+  const { assertNoInvoiceChargeReconciliationPending } = require('./stripe');
+  for (const inv of openInvoices) {
+    try {
+      await assertNoInvoiceChargeReconciliationPending(inv.id, conn, { readOnly: true });
+    } catch (err) {
+      if (err?.reconciliationRequired || /^STRIPE_/.test(String(err?.code || ''))) return 'charge_in_progress';
+      throw err;
+    }
+  }
   return null;
 }
 

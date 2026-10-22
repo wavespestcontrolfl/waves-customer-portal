@@ -73,7 +73,11 @@ jest.mock('../services/annual-prepay-renewals', () => ({
 }));
 const mockStopSequence = jest.fn(async () => {});
 jest.mock('../services/invoice-followups', () => ({ stopSequence: (...a) => mockStopSequence(...a) }));
-jest.mock('../services/stripe', () => ({ retrievePaymentIntent: jest.fn(), cancelPaymentIntent: jest.fn() }));
+const mockChargeFence = jest.fn(async () => {});
+jest.mock('../services/stripe', () => ({
+  retrievePaymentIntent: jest.fn(), cancelPaymentIntent: jest.fn(),
+  assertNoInvoiceChargeReconciliationPending: (...a) => mockChargeFence(...a),
+}));
 
 const InvoiceService = require('../services/invoice');
 
@@ -371,6 +375,39 @@ describe('pinned void rechecks downstream billing effects under the invoice lock
     const voided = [...(await InvoiceService.voidOpenInvoicesForCancelledService('svc-1', { pinnedInvoices: pinned }))];
     expect(voided).toEqual([]);
     expect(voidedIds()).toEqual([]);
+  });
+
+  // The crash state: a worker died after submitting a saved-card charge to Stripe, so the invoice is still 'sent' with no
+  // PaymentIntent and no payments row, but an unresolved submitted claim exists. The pinned void must refuse it.
+  test.each([
+    ['an ambiguous submitted claim', { code: 'STRIPE_AMBIGUOUS_OUTCOME', reconciliationRequired: true }],
+    ['a saved-card charge in progress', { code: 'STRIPE_CHARGE_IN_PROGRESS' }],
+    ['an unresolved orphan charge', { code: 'STRIPE_CHARGED_DB_FAILED', reconciliationRequired: true }],
+  ])('an invoice with %s is NOT voided by the pinned sweep (the invoice stays open)', async (_label, fence) => {
+    mockInvoiceRows = [INV_B];
+    const pinned = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');
+    mockChargeFence.mockRejectedValueOnce(Object.assign(new Error('charge pending'), fence));
+    const voided = [...(await InvoiceService.voidOpenInvoicesForCancelledService('svc-1', { pinnedInvoices: pinned }))];
+    expect(voided).toEqual([]);
+    expect(voidedIds()).toEqual([]);
+    // Read-only, on the void transaction, for this invoice.
+    expect(mockChargeFence).toHaveBeenCalledWith('inv-b', expect.anything(), { readOnly: true });
+  });
+
+  test('a fence read that FAILS (not a reconciliation verdict) also leaves the invoice open', async () => {
+    mockInvoiceRows = [INV_B];
+    const pinned = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');
+    mockChargeFence.mockRejectedValueOnce(new Error('connection terminated'));
+    expect([...(await InvoiceService.voidOpenInvoicesForCancelledService('svc-1', { pinnedInvoices: pinned }))]).toEqual([]);
+    expect(voidedIds()).toEqual([]);
+  });
+
+  test("Dispatch's unpinned sweep does not run the charge fence (unchanged)", async () => {
+    mockInvoiceRows = [INV_B];
+    mockChargeFence.mockRejectedValue(Object.assign(new Error('charge pending'), { code: 'STRIPE_AMBIGUOUS_OUTCOME', reconciliationRequired: true }));
+    expect([...(await InvoiceService.voidOpenInvoicesForCancelledService('svc-1'))]).toEqual(['inv-b']);
+    expect(mockChargeFence).not.toHaveBeenCalled();
+    mockChargeFence.mockReset().mockResolvedValue(undefined);
   });
 
   test('an unchanged plain invoice is still voided', async () => {
