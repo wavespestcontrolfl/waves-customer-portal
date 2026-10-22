@@ -12,10 +12,25 @@ jest.mock('../services/new-recurring-welcome-sms', () => ({
 jest.mock('../services/account-membership-email', () => ({ sendMembershipStarted: jest.fn() }));
 jest.mock('../services/tech-visit-notifications', () => ({ notifyTechVisitChange: async () => {} }));
 jest.mock('../services/inspection-credit', () => ({ markBookingForInspectionCredit: async () => {} }));
-jest.mock('../services/scheduling/blackout-dates', () => ({
-  isBlackoutDate: async () => false, getBlackoutLayers: async () => ({ dates: new Set() }),
-  lockClosureState: jest.requireActual('../services/scheduling/blackout-dates').lockClosureState,
-}));
+// Saturday and Sunday are the only closed days. The converter's fallback first
+// visit is today + 7, nudged only off closed days, while the follow-ups it seeds
+// skip weekends. With no closed day at all, a Saturday or Sunday run put the first
+// visit on a weekend, the schedule audit flagged the spacing, and 4 cases failed
+// every weekend. Both readers mirror the real module's weekly-days-off layer.
+jest.mock('../services/scheduling/blackout-dates', () => {
+  const actual = jest.requireActual('../services/scheduling/blackout-dates');
+  const weekend = new Set([0, 6]);
+  return {
+    isBlackoutDate: async (date) => {
+      const day = date instanceof Date ? date.toISOString().slice(0, 10) : String(date || '').split('T')[0];
+      return !!day && weekend.has(new Date(`${day}T12:00:00`).getDay());
+    },
+    getBlackoutLayers: async (from, to) => ({
+      dates: new Set(actual.expandWeeklyDaysOff(from, to, weekend)), weeklyDaysOff: weekend,
+    }),
+    lockClosureState: actual.lockClosureState,
+  };
+});
 jest.mock('../services/slot-zone', () => ({ resolveEstimateZone: async () => null, zoneSlugOf: () => null }));
 const mockTestCustomerIds = new Set();
 jest.mock('../services/internal-test-customers', () => ({

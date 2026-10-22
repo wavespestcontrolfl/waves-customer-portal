@@ -287,6 +287,9 @@ async function candidateLeadEstimateAutoSends({
   return database('estimates')
     .where({ source: 'lead_webhook', status: 'draft' })
     .where('created_at', '<=', cutoff)
+    // A draft staff superseded with the lead's real estimate is archived;
+    // mailing it would send the customer a second quote.
+    .whereNull('archived_at')
     .whereNull('sent_at')
     .whereNull('scheduled_at')
     .whereRaw("estimate_data->'automation'->'draftEstimateAutomation'->>'status' = 'generated'")
@@ -437,6 +440,7 @@ async function claimLeadEstimateAutoSend(database, estimate, { now = new Date(),
 
   const [updated] = await database('estimates')
     .where({ id: estimate.id, source: 'lead_webhook', status: 'draft' })
+    .whereNull('archived_at')
     .whereNull('sent_at')
     .whereNull('scheduled_at')
     .whereRaw("estimate_data->'automation'->'draftEstimateAutomation'->>'status' = 'generated'")

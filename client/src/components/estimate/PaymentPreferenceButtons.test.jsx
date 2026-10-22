@@ -245,6 +245,21 @@ describe('PaymentPreferenceButtons', () => {
     expect(screen.getByText('$224.00')).toBeInTheDocument();
   });
 
+  it('names the preview row "First application" with GATE_ESTIMATE_APPLICATION_MONTHS (EST-2026-1185)', () => {
+    render(
+      <PaymentPreferenceButtons
+        onSelect={vi.fn()}
+        disabled={false}
+        serviceMode="recurring"
+        setupFee={null}
+        selectedFrequency={{ key: 'quarterly', monthly: 41.6667 }}
+        firstApplicationLabel
+      />,
+    );
+    expect(screen.getByText('First application')).toBeInTheDocument();
+    expect(screen.queryByText('Per application')).toBeNull();
+  });
+
   it('previews up-front extra rows (rodent bait-station setup) inside the first invoice (codex #3591 r33 P1)', () => {
     const onSelect = vi.fn();
     render(

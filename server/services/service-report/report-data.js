@@ -3963,29 +3963,16 @@ function applyAfterHoldOverlay(waterContext, instruction) {
 // completion that reaches the water-in amount turns it into "water_in_by_rain" (the rain did the watering in); before
 // that a generic spray-and-rotor figure pair reads as an amount first. Only a REPLAY of a frozen instruction is touched
 // (the completion build, its freeze and its text never see this), and any miss in the rain read leaves it as frozen.
-async function waterInRainInstruction(instruction, { products, service, now = new Date(), sharedSeries: offeredSeries = null, completionTime = null }) {
+async function waterInRainInstruction(instruction, { products, service, now = new Date() }) {
   if (!lawnWaterInRain.appliesTo(instruction)) return instruction;
   try {
-    // The shared completion-to-now series serves only a chip-eligible visit (completed inside the chip's window). An
-    // older report keeps the banner's own deadline-bounded read: a long window is refused by the forecast reader
-    // (bad_window beyond 16 days) and would cost the banner its rain-covered state.
-    const { withinChipWindow } = require('./lawn-live-chip');
-    const sharedSeries = offeredSeries && withinChipWindow(completionTime, offeredSeries.now) && withinChipWindow(instruction.completedAt, offeredSeries.now)
-      ? offeredSeries : null;
-    const latitude = service.customer_latitude ?? service.latitude ?? service.lat;
-    const longitude = service.customer_longitude ?? service.longitude ?? service.lng;
-    // GATE_REPORT_WEB_LIVE_CHIP: while the chip is live this view makes ONE weather read, shared with the chip (the
-    // chip's series starts at the earlier of the two completion times, so it holds both windows).
-    const from = new Date(Math.min(Date.parse(instruction.completedAt), Date.parse(completionTime) || Infinity));
     const coverage = await lawnWaterInRain.resolveRainCoverage({
       instruction,
       products,
-      now: sharedSeries ? sharedSeries.now : now,
-      latitude,
-      longitude,
-      fetchForecast: sharedSeries
-        ? require('./lawn-live-chip').sharedCoverageReader(sharedSeries, { latitude, longitude, from })
-        : require('./application-conditions').fetchPropertyForecast,
+      now,
+      latitude: service.customer_latitude ?? service.latitude ?? service.lat,
+      longitude: service.customer_longitude ?? service.longitude ?? service.lng,
+      fetchForecast: require('./application-conditions').fetchPropertyForecast,
     });
     return lawnWaterInRain.applyWaterInRain(instruction, coverage);
   // read-failure-exempt: the rain read is an optional improvement of a frozen banner; a miss leaves the banner as frozen.
@@ -4446,13 +4433,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // geometry read is not proof of default zones, so nothing is frozen. The
   // render never reads it.
   let coverageReadFailed = false;
-  // GATE_REPORT_WEB_PEOPLE: a failed findings read is not proof of a clean visit (see webPeopleReadsOk).
-  let findingsReadFailed = false;
   const [rawProducts, geometryRow, dbZones, dbFindings, photos, scheduledService, approvedVisualMoments, stationRows, stationCheckRows] = await Promise.all([
     knex('service_products').where({ service_record_id: service.id }).orderBy('created_at').catch(() => { productsLoadFailed = true; return []; }),
     knex('property_geometries').where({ customer_id: service.customer_id }).orderBy('version', 'desc').first().catch(() => { coverageReadFailed = true; return null; }),
     knex('property_zones').where({ customer_id: service.customer_id, is_active: true }).orderBy('letter').catch(() => { coverageReadFailed = true; return []; }),
-    knex('service_findings').where({ service_record_id: service.id }).orderBy('created_at').catch(() => { findingsReadFailed = true; return []; }),
+    knex('service_findings').where({ service_record_id: service.id }).orderBy('created_at').catch(() => []),
     knex('service_photos').where({ service_record_id: service.id }).orderBy('sort_order').orderBy('created_at').catch(() => []),
     scheduledServicePromise,
     loadApprovedVisualServiceMomentsForReport(service, knex).catch(() => []),
@@ -4609,11 +4594,6 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // paths already refuse to cache on image-resolution failures.
   imageResolutionFailures += Number(lawnAssessment?.photoSetUnresolved) || 0;
   imageResolutionFailures += Number(lawnAssessment?.photoFindingsUnresolved) || 0;
-  // GATE_REPORT_WEB_SLIDER: last visit's photo beside today's, same shot, same property. The route asks only for
-  // a live simple-web view while the gate is live. A failed read means no slider, never a failed report.
-  const lawnSlider = opts.lawnSlider === true && serviceLine === 'lawn' && lawnAssessment?.assessmentId
-    ? await require('./lawn-slider').buildLawnSlider({ assessmentId: lawnAssessment.assessmentId, knex, photoUrl: lawnPhotoUrl }).catch(() => null)
-    : null;
   // A failed service_products read leaves this build's product list empty, not
   // known-empty. The "From your technician" paragraph is frozen once and never
   // rewritten, so it must not be written from such a build whatever the copy-v6
@@ -5664,7 +5644,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   const hideDefaultLawnCoverage = serviceLine === 'lawn'
     && featureGates.lawnCoverageHideDefaultZonesLive()
     && frozenCoverageDefaultsOnly(structured);
-  const coverageInput = {
+  const serviceCoverage = hideDefaultLawnCoverage ? { enabled: false } : normalizeServiceCoverage({
     serviceReportId: service.id,
     serviceLine,
     serviceType: service.service_type,
@@ -5678,18 +5658,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     serviceAreas: areaLabels,
     serviceLocations,
     zones: publicZones,
-  };
-  const serviceCoverage = hideDefaultLawnCoverage ? { enabled: false } : normalizeServiceCoverage(coverageInput, serviceCoverageConfig || {});
-  // GATE_REPORT_WEB_PEOPLE: the clean-visit check reads the recorded coverage evidence, not the display. The display can be
-  // switched off (config, hidden lawn defaults) and then shows no items; this runs the same normalizer with the display forced on.
-  // null = the evidence could not be read, and the review link fails closed.
-  let webPeopleCoverage = null;
-  if (opts.webPeopleNext === true) {
-    try {
-      const raw = normalizeServiceCoverage(coverageInput, { enabled: true, showOnCustomerReports: true });
-      webPeopleCoverage = (Array.isArray(raw.items) ? raw.items : []).map((item) => ({ status: item.status, needsFollowUp: item.needsFollowUp === true }));
-    } catch { /* evidence stays null */ }
-  }
+  }, serviceCoverageConfig || {});
 
   // WaveGuard membership tier for THIS visit (null for non-members). Prefer the tier
   // frozen at completion (service_records.service_tier — admin-dispatch snapshots the
@@ -5819,7 +5788,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         // GATE_LAWN_WATER_IN_RAIN: the frozen instruction as it reads now (after the write gate's copy above, so the
         // freeze and the completion text never see it). A replay only.
         if (wateringInstruction && !opts.wateringInstructionOut && opts.lawnWaterInRain === true && typeof featureGates.lawnWaterInRainLive === 'function' && featureGates.lawnWaterInRainLive() && readFrozenWateringInstruction(structured)) {
-          wateringInstruction = await waterInRainInstruction(wateringInstruction, { products, service, sharedSeries: opts.liveChipOut?.series || null, completionTime });
+          wateringInstruction = await waterInRainInstruction(wateringInstruction, { products, service });
         }
         // In place, so the lawnAssessment the payload returns never carries
         // the raw {holdUntil} token either (a null instruction drops it).
@@ -6259,16 +6228,6 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // retreat-check on the frozen visit memory and hands one fixed Watching
       // sentence to the lead, the same non-enumerable way as sinceLastCopy.
       // Fail closed and best-effort: any miss leaves the report as it was.
-      // GATE_REPORT_WEB_LIVE_CHIP: hand the route the inputs the live chip reads (an out-param; nothing joins the payload).
-      if (opts.liveChipOut && typeof opts.liveChipOut === 'object') {
-        Object.assign(opts.liveChipOut, {
-          completedAt: completionTime,
-          instruction: wateringInstruction,
-          products,
-          latitude: service.customer_latitude ?? service.latitude ?? service.lat,
-          longitude: service.customer_longitude ?? service.longitude ?? service.lng,
-        });
-      }
       if (reportV2 && opts.mode === 'live' && opts.lawnRainfastWatch === true && typeof featureGates.lawnRainfastWatchLive === 'function' && featureGates.lawnRainfastWatchLive()) {
         try {
           const watch = await require('./lawn-rainfast-watch').resolveRainfastWatch({
@@ -6766,19 +6725,14 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // every customer question was paying for this scan nobody reads, under
   // the general report limiter, repeatedly.
   let upcomingVisitsCard = null;
-  // GATE_REPORT_WEB_PEOPLE (owner 2026-10-20): the simple web view is built in 'pdf' mode, so the card above never ran
-  // for it. opts.webPeopleNext asks for the same property-scoped visits (never a reschedule link) in that build; the route
-  // moves them into webPeople.nextVisit. The gate itself is read by the route, which is the only caller that sets it.
-  const webPeopleNext = opts.webPeopleNext === true;
-  if (webPeopleNext || (opts.mode === 'live' && opts.upcomingVisitsCard === true
-    && process.env.GATE_REPORT_UPCOMING_VISITS === 'true')) {
+  if (opts.mode === 'live' && opts.upcomingVisitsCard === true
+    && process.env.GATE_REPORT_UPCOMING_VISITS === 'true') {
     // GATE_LAWN_REPORT_CLARITY (owner 2026-10-08): a LAWN report's card shows one
     // visit, the next upcoming LAWN visit at this property (never another
     // line's). The card then starts EMPTY and stays empty when there is none (or
     // a read fails), so the plan section falls back to no visit line rather than
     // naming another line's visit in its place. Other lines are untouched.
-    // The people card's next visit is the next visit at the property on any line, so it skips the lawn-only filter.
-    const lawnOnly = !webPeopleNext && serviceLine === 'lawn' && lawnReportClarityLive();
+    const lawnOnly = serviceLine === 'lawn' && lawnReportClarityLive();
     const visitCap = lawnOnly ? 1 : 6;
     if (lawnOnly) upcomingVisitsCard = reportPlanRescheduleLive() ? { visits: [], merged: true } : { visits: [] };
     try {
@@ -6980,8 +6934,6 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           for (const row of candidates) {
             if (matched.length >= visitCap) break;
             if (lawnOnly && !isSameLineVisit(row, { serviceLine: 'lawn' })) continue;
-            // The people card names the next SCHEDULED visit: a visit already under way (en_route / on_site) is skipped.
-            if (webPeopleNext && !['pending', 'confirmed'].includes(String(row.status || '').toLowerCase())) continue;
             // Bounded (PAGE_SIZE rows/page, MAX_PAGES pages), and the
             // property_id/source_estimate_id lookups below are cache hits
             // after the batched reads above.
@@ -7011,8 +6963,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           // short-link row each time. null when no link applies (too close
           // to the visit, dispatch-owned pending, grouped visit, ...) and on
           // ANY failure: the report never breaks.
-          // The web-people build never carries a reschedule link: it is a bearer credential and that card links to the signed-in portal.
-          const planReschedule = reportPlanRescheduleLive() && !webPeopleNext;
+          const planReschedule = reportPlanRescheduleLive();
           const buildRescheduleLink = planReschedule ? require('../reschedule-link').buildRescheduleLink : null;
           const visits = await Promise.all(matched.map(async (row) => {
             let rescheduleUrl = null;
@@ -7371,7 +7322,6 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     reportV2,
     token,
     serviceRecordId: service.id,
-    ...(lawnSlider ? { lawnSlider } : {}),
     serviceType: service.service_type,
     serviceDisplayName: linkedServiceName,
     serviceLine,
@@ -7633,10 +7583,6 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // opted in (codex round-5 P2, e.g. the Q&A endpoint) — same
     // opts.upcomingVisitsCard check the work above already gated on.
     ...(process.env.GATE_REPORT_UPCOMING_VISITS === 'true' && opts.upcomingVisitsCard === true ? { upcomingVisitsCard } : {}),
-    // GATE_REPORT_WEB_PEOPLE: the visits for webPeople.nextVisit. The route deletes this key after it reads it.
-    // webPeopleReadsOk: false when the findings or zones read failed, so the review card fails closed. The route deletes both keys.
-    ...(webPeopleNext ? { webPeopleReadsOk: !findingsReadFailed && !coverageReadFailed, webPeopleCoverage } : {}),
-    ...(webPeopleNext ? { webPeopleNext: (Array.isArray(upcomingVisitsCard?.visits) ? upcomingVisitsCard.visits : []).map(({ serviceType, scheduledDate, windowStart }) => ({ serviceType, scheduledDate, windowStart })) } : {}),
     // "Your plan" section data (owner ask 2026-09-28): omitted entirely when
     // the gate is off, there's no customer, or there's nothing to show —
     // stripLiveOnlyScheduleFields deletes it for every non-live render, same
@@ -7799,7 +7745,6 @@ function termiteStationPinsFlag({ stationMap, mode, gateValue = process.env.GATE
 
 module.exports = {
   buildReportV1Data,
-  waterInRainInstruction,
   resolveRecordedProtocolVersion,
   termiteStationPinsFlag,
   resolveApplicatorFdacsId,
@@ -7841,7 +7786,6 @@ module.exports = {
   resolveLawnAssessmentAndHistory,
   resolveLawnPhotoAssessmentIds,
   loadLinkedLawnAssessment,
-  formatLawnAssessmentScore,
   PinnedAssessmentUnavailable,
   loadPinnedLawnAssessment,
   lawnAssessmentPdfSignature,

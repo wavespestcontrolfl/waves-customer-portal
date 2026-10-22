@@ -346,6 +346,57 @@ function bundleAverageScenario() {
   };
 }
 
+// GATE_ESTIMATE_APPLICATION_MONTHS fixture (owner 2026-10-21, EST-2026-1185
+// shape, synthetic customer): quarterly pest $115.20 + monthly mosquito $74.70
+// per application, Silver 10%, stored monthly $113.10. Months with pest bill
+// $189.90, the other 8 bill $74.70.
+function pestMosquitoMonthsScenario() {
+  const base = bundleAverageScenario();
+  return {
+    ...base,
+    pricing: {
+      ...base.pricing,
+      services: [
+        base.pricing.services[0] && {
+          ...base.pricing.services[0],
+          frequencies: [{
+            key: 'quarterly', label: 'Quarterly', monthly: 38.4, annual: 460.8, perVisit: 128, perTreatment: 115.2, visitsPerYear: 4,
+            perServiceTreatments: [{ service: 'pest_control', label: 'Pest Control', displayPrice: 115.2, perTreatment: 128, visitsPerYear: 4 }],
+            included: [{ key: 'pest_control', label: 'Pest Control', detail: null }], addOns: [],
+          }],
+        },
+        {
+          key: 'mosquito',
+          label: 'Mosquito',
+          isRecurring: true,
+          isPest: false,
+          waveGuardTierEligible: true,
+          defaultFrequencyKey: 'monthly12',
+          frequencies: [{
+            key: 'monthly12', label: 'Monthly', serviceCategory: 'mosquito', serviceTierKey: 'monthly12', visitsPerYear: 12,
+            monthly: 74.7, monthlyBase: 83, annual: 896.4, billingFrequencyKey: 'monthly', perTreatment: 74.7, billedPerApplication: true,
+            perServiceTreatments: [{ service: 'mosquito', label: 'Monthly Mosquito Program (12 visits)', displayPrice: 74.7, perTreatment: 83, visitsPerYear: 12, monthly: 74.7 }],
+            included: [{ key: 'mosquito_monthly12', label: 'Monthly mosquito control program', detail: '12 visits per year' }],
+            addOns: [],
+          }],
+          copy: { priceWording: {} },
+        },
+      ],
+      frequencies: [{
+        key: 'quarterly', label: 'Quarterly', monthly: 113.1, annual: 1357.2, perVisit: 128, sameDayTreatmentTotal: 211,
+        perServiceTreatments: [
+          { service: 'pest_control', label: 'Pest Control (Quarterly)', displayPrice: 115.2, perTreatment: 128, visitsPerYear: 4 },
+          { service: 'mosquito', label: 'Monthly Mosquito Program (12 visits)', displayPrice: 74.7, perTreatment: 83, visitsPerYear: 12, monthly: 74.7 },
+        ],
+      }],
+      combinedRecurring: { monthlySubtotal: 113.1, annualSubtotal: 1357.2, waveGuardTierLabel: 'Silver', waveGuardDiscountPct: 0.1 },
+      setupFee: null,
+      oneTimeBreakdown: { total: 0, items: [] },
+      renderFlags: { ...base.pricing.renderFlags, showWaveGuardSetupFee: false },
+    },
+  };
+}
+
 function acceptedScenario() {
   const base = pestScenario();
   return {
@@ -1025,6 +1076,7 @@ const PAYLOADS = {
   pest: pestScenario,
   pest_average: pestAverageScenario,
   bundle_average: bundleAverageScenario,
+  pest_mosquito_months: pestMosquitoMonthsScenario,
   mosquito: mosquitoScenario,
   tree_shrub: treeShrubScenario,
   termite_bait: termiteBaitScenario,
@@ -1123,6 +1175,8 @@ window.fetch = async (input, init) => {
       glassDefault: true,
       // The harness runs with GATE_ESTIMATE_MONTHLY_AVERAGE on (as dev does).
       monthlyAverageEnabled: true,
+      // GATE_ESTIMATE_APPLICATION_MONTHS on in the harness (as dev does).
+      applicationMonthsEnabled: true,
       ...returnVisit,
       lawnCalendar: { programs: { standard: { visitsPerYear: 9 } } },
       ...referral,
