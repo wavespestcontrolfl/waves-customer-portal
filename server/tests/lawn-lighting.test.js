@@ -12,16 +12,20 @@ describe('the compatibility table', () => {
     const allowed = [];
     for (const a of LIGHTS) for (const b of LIGHTS) if (lighting.lightsCompatible(a, b)) allowed.push(`${a}+${b}`);
     expect(allowed.sort()).toEqual([
-      'full_sun+full_sun',
+      'full_sun+full_sun', 'full_sun+mixed_sun_shade',
+      'mixed_sun_shade+full_sun', 'mixed_sun_shade+mixed_sun_shade',
       'open_shade+open_shade', 'open_shade+overcast',
       'overcast+open_shade', 'overcast+overcast',
     ]);
   });
 
-  test('it is symmetric, and mixed sun and shade, low light and unknown are never compatible, not even with themselves', () => {
+  test('it is symmetric, sun never meets diffuse light, and low light and unknown are never compatible, not even with themselves', () => {
     for (const a of LIGHTS) for (const b of LIGHTS) expect(lighting.lightsCompatible(a, b)).toBe(lighting.lightsCompatible(b, a));
-    for (const never of ['mixed_sun_shade', 'low_light', 'unknown']) {
+    for (const never of ['low_light', 'unknown']) {
       for (const other of LIGHTS) expect(lighting.lightsCompatible(never, other)).toBe(false);
+    }
+    for (const sun of ['full_sun', 'mixed_sun_shade']) {
+      for (const diffuse of ['overcast', 'open_shade']) expect(lighting.lightsCompatible(sun, diffuse)).toBe(false);
     }
     expect(lighting.lightsCompatible('full_sun', 'overcast')).toBe(false);
     expect(lighting.lightsCompatible(undefined, 'full_sun')).toBe(false);
@@ -34,7 +38,10 @@ describe('the compatibility table', () => {
       expect(lighting.colorComparability(a, b)).toEqual({ comparable: false, reason: 'light_unknown' });
     }
     expect(lighting.colorComparability('full_sun', 'overcast')).toEqual({ comparable: false, reason: 'light_differs' });
-    expect(lighting.colorComparability('mixed_sun_shade', 'mixed_sun_shade')).toEqual({ comparable: false, reason: 'light_differs' });
+    // A sunny frame with shadows is direct sun: it compares with sun, never with cloud.
+    expect(lighting.colorComparability('mixed_sun_shade', 'mixed_sun_shade')).toEqual({ comparable: true, reason: null });
+    expect(lighting.colorComparability('mixed_sun_shade', 'full_sun')).toEqual({ comparable: true, reason: null });
+    expect(lighting.colorComparability('mixed_sun_shade', 'overcast')).toEqual({ comparable: false, reason: 'light_differs' });
     expect(lighting.colorComparability('low_light', 'low_light')).toEqual({ comparable: false, reason: 'light_differs' });
   });
 });

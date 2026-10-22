@@ -36,13 +36,21 @@ const HARD_SHADOWS = Object.freeze(['yes', 'no', 'unknown']);
 const COLOR_NO_CHANGE_POINTS = 8;
 
 // Which light reads may be compared on color, symmetric. Only these pairs:
-//   full_sun   with full_sun                     (same hard light)
-//   overcast   with overcast or open_shade       (both even, diffuse light)
-//   open_shade with open_shade or overcast
-// mixed_sun_shade (sun and shade in one frame), low_light and unknown are never
-// compatible, not even with themselves.
+//   full_sun        with full_sun or mixed_sun_shade   (sunlit turf, in direct sun)
+//   mixed_sun_shade with mixed_sun_shade or full_sun
+//   overcast        with overcast or open_shade        (both even, diffuse light)
+//   open_shade      with open_shade or overcast
+// Sun is never compared with diffuse light. A sunny frame with tree or house shadows
+// (mixed_sun_shade) is the same direct sun as full_sun: under the lighting prompt the
+// model reads the sunlit and the shadowed turf each against its own light (the LIGHT
+// block in lawn-visit-input.js), so the shadows do not move the color score. The
+// 2026-10-22 replay of 6 customers' visit pairs kept the color comparison for 1 of 6
+// when mixed_sun_shade compared with nothing, almost every sunny SW Florida yard
+// having a shadow on it (owner 2026-10-22: option B on the report prompt review). low_light and unknown are never compatible, not even with
+// themselves.
 const COMPATIBLE = Object.freeze({
-  full_sun: Object.freeze(['full_sun']),
+  full_sun: Object.freeze(['full_sun', 'mixed_sun_shade']),
+  mixed_sun_shade: Object.freeze(['full_sun', 'mixed_sun_shade']),
   overcast: Object.freeze(['overcast', 'open_shade']),
   open_shade: Object.freeze(['overcast', 'open_shade']),
 });

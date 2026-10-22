@@ -70,8 +70,8 @@ describe('color is compared only in known, compatible light', () => {
     }
   });
 
-  test('two known but incompatible lights (sun against cloud, mixed, low light): unclear, gate light_differs', () => {
-    for (const guard of [SUN_VS_CLOUD, { currentLight: 'mixed_sun_shade', priorLight: 'mixed_sun_shade' }, { currentLight: 'low_light', priorLight: 'low_light' }]) {
+  test('two known but incompatible lights (sun against cloud, sun with shadows against shade, low light): unclear, gate light_differs', () => {
+    for (const guard of [SUN_VS_CLOUD, { currentLight: 'mixed_sun_shade', priorLight: 'open_shade' }, { currentLight: 'low_light', priorLight: 'low_light' }]) {
       const progress = compare({ days: 30, guard, cur: { color_health: 95 } });
       expect(colorItem(progress)).toMatchObject({ state: 'unclear', gate: 'light_differs' });
     }
