@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({ navigationBusy: vi.fn(), socketEvent: null }))
 vi.mock('socket.io-client', () => ({ io: () => ({ on: (_event, callback) => { mocks.socketEvent = callback; }, off: vi.fn(), disconnect: vi.fn() }) }));
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: (key) => key === 'pest-recap-v1', useFeatureFlagReady: () => ({ enabled: false, ready: true }) }));
 vi.mock('../../components/tech/TechIntelligenceBar', () => ({ default: () => <div>Field assistant</div> }));
-vi.mock('../../components/tech/GeofenceArrivalPrompt', () => ({ default: ({ inlineScheduleChanges, placement }) => <div data-testid="floating-notices" data-inline={String(Boolean(inlineScheduleChanges))} data-placement={placement} /> }));
+vi.mock('../../components/tech/TechNoticeFeed', () => ({ default: ({ inlineScheduleChanges, placement }) => <div data-testid="floating-notices" data-inline={String(Boolean(inlineScheduleChanges))} data-placement={placement} /> }));
 vi.mock('../../components/tech/CreateProjectModal', () => ({
   default: ({ onPendingPhotosChange, onCreated }) => <div role="dialog" aria-label="Create project fixture">
     <button onClick={() => onPendingPhotosChange(true)}>Queue report photo</button>

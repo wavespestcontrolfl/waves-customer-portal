@@ -140,13 +140,23 @@ async function generateAlerts(customerId, scoreData) {
       // one active (new/acknowledged) row per (customer_id, alert_type) for the
       // RULE types this function emits; the loser hits 23505 and is skipped.
       // (Operational alerts from other paths are out of that index's scope.)
+      // Merge fence (Codex #6431 r3): executeMerge holds both customer rows
+      // FOR UPDATE while it re-points this table, then retires the loser. The
+      // FOR SHARE read makes the insert wait for an in-flight merge and then
+      // skip a retired profile, so no late alert lands on a merged-away record.
       let inserted;
       try {
-        [inserted] = await db('customer_health_alerts').insert(alert).returning('*');
+        inserted = await db.transaction(async (trx) => {
+          const live = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forShare().first('id');
+          if (!live) return null;
+          const [row] = await trx('customer_health_alerts').insert(alert).returning('*');
+          return row;
+        });
       } catch (err) {
         if (err.code === '23505') continue;
         throw err;
       }
+      if (!inserted) continue;
       created.push(inserted);
       logger.info(`[health-alert] Created ${rule.severity} alert "${rule.type}" for customer ${customerId}`);
     } catch (err) {
@@ -349,9 +359,14 @@ async function executeAction(alertId, actionIndex) {
   await db('customer_health_alerts').where('id', alertId).update({
     auto_action_taken: JSON.stringify(autoAction),
     recommended_actions: JSON.stringify(actions),
-    status: 'acknowledged',
     updated_at: new Date(),
   });
+  // Acknowledge only a still-open alert (Codex #6431 r3): a customer merge can
+  // fold this alert into the kept account as `dismissed` while the action
+  // runs. Re-opening it would collide with the kept account's open alert of
+  // the same type (customer_health_alerts_active_rule_uniq) and fail AFTER the
+  // side effect above committed, so each retry would repeat that side effect.
+  await db('customer_health_alerts').where('id', alertId).where('status', 'new').update({ status: 'acknowledged' });
 
   // Log to activity_log
   try {

@@ -5309,8 +5309,6 @@ of reporting a taken slot.
 
 Monthly average beside per-application prices (owner ruling 2026-10-20, `GATE_ESTIMATE_MONTHLY_AVERAGE`, read through `featureGates.isEnabled('estimateMonthlyAverage')`; off unless exactly `true` in production). `GET /:token/data` adds two OPTIONAL fields, both ABSENT (not false, not null) with the gate off, so a gate-off response is byte-identical to before. (1) Top-level `monthlyAverageEnabled: true`: present on any `/data` response when the gate is on. It is a switch only; the estimate page derives the figures itself from the SELECTED cadences (`client/src/lib/estimateMonthlyAverage.js`) and shows nothing for commercial, quote-required, one-time, monthly-billed, annual-prepay, accepted or declined estimates, or when the per-service averages cannot be made to add up to the plan's monthly. (2) `proposal.monthlyAverage`: present ONLY on the document (PDF) pass (`?mode=pdf`, the signed-pin headless render, under `GATE_ESTIMATE_DOC_PDF`), only with the gate on, and only when the plan is a residential estimate billed per application whose recurring lines are ALL per-application lines, that is not an authored or commercial proposal and not quote-required, and whose lines reconcile to the stored `monthly_total` (rounding within $0.05, or a declared plan credit explaining the gap); otherwise the key is absent. Shape: `{ planMonthly: number (the stored monthly_total, dollars), credit: { label: string, monthly: number } | null (a declared plan-level credit, per month), bundleDiscountPct: number (fraction, 0.1 = 10%; 0 when none), oneTime: { amount: number, setup: boolean } | null (one-time charges, never part of the average; setup is true only when every one-time line reads as setup) }`. The document runs the shared builder (`shared/estimate-monthly-average.cjs`) over its own per-application lines and these inputs to print "$X a month" under each line, a plan line (two or more services, or one service with a credit) and "Averaged over the year. You pay after each application." Public contract: the plan average always equals `monthly_total`, the per-service averages add up to it (less any credit line) to the cent, and one-time charges never enter it. The delivery email (`estimate.delivery`) uses the same builder server-side and adds no public field.
 
-Application-month breakdown (owner 2026-10-21, `GATE_ESTIMATE_APPLICATION_MONTHS`, read through `featureGates.isEnabled('estimateApplicationMonths')`; off unless exactly `true` in production). `GET /:token/data` adds one OPTIONAL top-level field, `applicationMonthsEnabled: true`, present only when BOTH `estimateMonthlyAverage` and `estimateApplicationMonths` are on, and ABSENT (not false, not null) when either is off, so a response with either gate off is byte-identical to before. It is a switch only and carries no figures: the estimate page derives the per-application prices, the month amounts and the average from the same selected-cadence data it already uses for the monthly average (`applicationMonthsBreakdown` in `client/src/lib/estimateMonthlyAverage.js`), and renders exactly as before for any plan shape the breakdown does not cover. The PDF document pass reads the same switch (no new field: the document derives the month rows from `proposal.monthlyAverage` and the lines it already receives, through the shared `applicationMonthsBreakdown` in `shared/estimate-monthly-average.cjs`), and the delivery and follow-up emails build the same breakdown server-side. No other route and no other payload field changes.
-
 
 Appointment reminders registered by `/accept` derive their date and arrival
 from the committed service row. A server-owned `reservation_service_mix`
@@ -6032,11 +6030,20 @@ supplied one is tried), parsed with `parseRawAddress` and geocoded with
 street-level quality filtering but `requireInServiceArea:false` (the box
 alone is never grounds to discard a geocode as unresolvable); checked
 against the service area via `checkServiceArea`, applied uniformly to every
-resolved location including a customer's stored coordinates: county via
+resolved location including a customer's stored coordinates: first, the
+address's own city or a Punta Gorda-only ZIP (33950, 33951, 33955; 33982 is shared with Babcock Ranch, so the city decides) is out
+(Punta Gorda is not served per the 2026-10-22 owner ruling, although Charlotte
+County is; `services/excluded-localities.js`, city / ZIP only, no coordinate
+box); then county via
 `services/address-validation`'s `reverseGeocodeCounty` when a Google key is
 configured (a null county is NOT permission — 503
 `{ error: 'service_area_unavailable' }`, recoverable; a DeSoto county is out,
-DeSoto is not served per the 2026-09-30 owner ruling), else the explicit
+DeSoto is not served per the 2026-09-30 owner ruling; when that county is
+Charlotte, a second lookup, `reverseGeocodeLocality`, reads the locality and
+ZIP Google places on the coordinate: an excluded locality or Punta Gorda-only
+ZIP is out even when the submitted address names none, and a failed or empty
+lookup, or no locality on a shared ZIP 33980 / 33982 / 33983, is 503
+`{ error: 'service_area_unavailable' }`, recoverable), else the explicit
 no-key fallback: outside the coarse box is out; inside the DeSoto exclusion
 rectangle (`DESOTO_EXCLUSION`) the point is out unless the address's own ZIP
 is a served ZIP (`isInServiceAreaBox(lat, lng, { zip })`, which holds no

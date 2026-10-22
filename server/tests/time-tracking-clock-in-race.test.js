@@ -1,7 +1,6 @@
-// clockIn() is what keeps two concurrent geofence ENTERs from making two
-// shifts: it locks the technician row (FOR UPDATE), then refuses when a shift
-// is already active. The refusal carries a code so the geofence handler can
-// fall through to startJob instead of treating it as a failure.
+// clockIn() keeps two concurrent clock-ins from making two shifts: it locks the
+// technician row (FOR UPDATE), then refuses when a shift is already active. The
+// refusal carries the code ALREADY_CLOCKED_IN so the caller can tell it apart.
 
 jest.mock('../models/db', () => ({ transaction: jest.fn() }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -31,19 +30,19 @@ function makeTrx({ technician = { id: 'tech-1' }, existingShift = null } = {}) {
   return { trx, calls };
 }
 
-describe('clockIn serialization for geofence auto clock-in', () => {
-  test('locks the technician row and records source geofence_auto', async () => {
+describe('clockIn serialization', () => {
+  test('locks the technician row and records source auto', async () => {
     const { trx, calls } = makeTrx();
     db.transaction.mockImplementation(async (fn) => fn(trx));
 
     const entry = await timeTracking.clockIn('tech-1', {
-      lat: 27.1, lng: -82.4, source: 'geofence_auto', notes: 'Auto clock-in on arrival at first stop',
+      lat: 27.1, lng: -82.4, source: 'auto', notes: 'Auto clock-in on arrival at first stop',
     });
 
     expect(calls.forUpdate).toBe(1);
     expect(calls.inserted).toHaveLength(1);
     expect(calls.inserted[0]).toMatchObject({
-      technician_id: 'tech-1', entry_type: 'shift', status: 'active', source: 'geofence_auto',
+      technician_id: 'tech-1', entry_type: 'shift', status: 'active', source: 'auto',
     });
     expect(entry.id).toBe('shift-new');
   });
@@ -52,7 +51,7 @@ describe('clockIn serialization for geofence auto clock-in', () => {
     const { trx, calls } = makeTrx({ existingShift: { id: 'shift-1' } });
     db.transaction.mockImplementation(async (fn) => fn(trx));
 
-    await expect(timeTracking.clockIn('tech-1', { source: 'geofence_auto' }))
+    await expect(timeTracking.clockIn('tech-1', { source: 'auto' }))
       .rejects.toMatchObject({ code: 'ALREADY_CLOCKED_IN', message: expect.stringMatching(/^Already clocked in/) });
     expect(calls.inserted).toHaveLength(0);
   });
@@ -61,7 +60,7 @@ describe('clockIn serialization for geofence auto clock-in', () => {
     const { trx, calls } = makeTrx({ technician: null });
     db.transaction.mockImplementation(async (fn) => fn(trx));
 
-    await expect(timeTracking.clockIn('tech-1', { source: 'geofence_auto' }))
+    await expect(timeTracking.clockIn('tech-1', { source: 'auto' }))
       .rejects.toMatchObject({ code: 'ACCOUNT_INACTIVE' });
     expect(calls.inserted).toHaveLength(0);
   });

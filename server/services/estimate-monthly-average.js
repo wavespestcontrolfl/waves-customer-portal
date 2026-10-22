@@ -28,12 +28,6 @@ function gateOn() {
   return featureGates.isEnabled('estimateMonthlyAverage');
 }
 
-// GATE_ESTIMATE_APPLICATION_MONTHS (needs the monthly-average gate too): the page, the
-// PDF document and the emails show the month-by-month amounts beside the average.
-function applicationMonthsOn() {
-  return gateOn() && featureGates.isEnabled('estimateApplicationMonths');
-}
-
 function parseData(value) {
   if (!value) return {};
   if (typeof value === 'string') {
@@ -216,7 +210,7 @@ async function emailAverageParts(estimate) {
     const proposal = normalizeProposal(copy, { recurringMode: 'per_application', livePricing: ctx.livePricing || null });
     const bundle = ctx.livePricing?.bundle || parseData(copy.estimate_data ?? copy.estimateData)?.sendSnapshot?.pricingBundle || null;
     const result = monthlyAverageFor({ estimate: copy, proposal, bundle, livePricing: ctx.livePricing || null });
-    return result ? shared.emailParts(result.model, result.inputs.oneTime, { applicationMonths: applicationMonthsOn() }) : null;
+    return result ? shared.emailParts(result.model, result.inputs.oneTime) : null;
   } catch (err) {
     logger.warn(`[estimate-monthly-average] email parts unavailable for estimate ${estimate?.id}: ${err.message}`);
     return null;

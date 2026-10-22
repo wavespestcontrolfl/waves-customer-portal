@@ -1034,15 +1034,27 @@ function keepRowProblem(row) {
   return keepProblem(row.keep, { isFreeText: isFreeTextName, content });
 }
 
+// keepNotes: response key paths of a keep-mode row that hold free-text notes. They are kept ONLY while
+// GATE_IB_READ_NOTES is on (the returned-notes branch then scrubs them); with the gate off the projection is
+// exactly `keep`. The same path syntax as keep, but a free-text name is allowed here, and a field that is
+// never kept (KEEP_NEVER) is still refused (Codex #6375 r14).
+function keepNotesProblem(row) {
+  if (row.keepNotes === undefined) return null;
+  if (!row.keep) return 'keepNotes needs a keep list';
+  const problem = keepProblem(row.keepNotes);
+  if (problem) return problem.replace(/^keep/, 'keepNotes').replace(/ keep /g, ' keepNotes ');
+  return row.keepNotes.find(path => row.keep.includes(path)) ? 'keepNotes must not repeat a keep path' : null;
+}
+
 // What a row hands the run-time reader beyond scope and query: the response projection and the finder phrases.
-const readerFields = row => ({ ...(row.omit ? { omit: row.omit } : {}), ...(row.keep ? { keep: row.keep } : {}), ...(row.keywords ? { keywords: row.keywords } : {}) });
+const readerFields = row => ({ ...(row.omit ? { omit: row.omit } : {}), ...(row.keep ? { keep: row.keep } : {}), ...(row.keepNotes ? { keepNotes: row.keepNotes } : {}), ...(row.keywords ? { keywords: row.keywords } : {}) });
 
 function validateReviewedRow(row) {
   const fail = message => { throw new Error(`admin-read-reviewed.json ${row.endpoint}: ${message}`); };
   if (!Object.hasOwn(ROW_SCOPES, row.scope)) fail(`scope must be one of ${Object.keys(ROW_SCOPES).join(', ')}`);
   const names = rules.patternParams(row.endpoint);
   const problem = idParamProblem(row) || scopeParamProblem(row) || paramKindProblem(row, names) || queryProblem(row, names)
-    || acceptSignalsProblem(row) || keywordsProblem(row) || (row.omit === undefined ? null : omitProblem(row.omit)) || keepRowProblem(row);
+    || acceptSignalsProblem(row) || keywordsProblem(row) || (row.omit === undefined ? null : omitProblem(row.omit)) || keepRowProblem(row) || keepNotesProblem(row);
   if (problem) fail(problem);
 }
 
