@@ -473,7 +473,10 @@ function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tips
         ...(irac ? { irac_frac_logged: 'Yes' } : {}),
         // Optional internal costing fact (project-types.js spray_mix_gallons);
         // blank stays absent so the typed-findings validator never sees ''.
-        ...(String(form.sprayGallons ?? '').trim() !== '' ? { spray_mix_gallons: String(form.sprayGallons).trim() } : {}),
+        // Sent only while a product is still on the visit: the field hides
+        // when the last product is removed, and a hidden stale value must not
+        // record spray volume against an empty products array (Codex #6398).
+        ...(active.length && String(form.sprayGallons ?? '').trim() !== '' ? { spray_mix_gallons: String(form.sprayGallons).trim() } : {}),
       },
     },
     completionPhotos: photos.map((photo, index) => ({
