@@ -26,6 +26,7 @@ const logger = require('./logger');
 const WATERING_COPY = require('../../shared/watering-copy.json');
 const { buildWeekPlan, defaultEventMinutes, HEAD_LABELS, normalizeRuntimeInputs, WEEK_PLAN_CONSTANTS } = require('@waves/irrigation-runtime');
 const { resolveRateTable, ratesForTable, rateTableInputs } = require('./irrigation-rates');
+const { irrigationWaterSavedLive, waterSavedForDecision, waterSavedSentence } = require('./irrigation-water-saved');
 const { queuedRowInFlight, QUEUED_IN_FLIGHT_MS, ABORTED_BEFORE_DISPATCH } = require('./email-template-library');
 const { currentRestrictionPolicy } = require('../config/irrigation-restrictions');
 const { lastCompletedWeekEndingET } = require('../utils/datetime-et');
@@ -120,6 +121,12 @@ function decideWeekPlan({
   // GATE_IRRIGATION_OWNER_RATES picks it. The snapshot freezes the choice (decisionInputs.rateTable, owner only), and a
   // replay passes the stored table back in, so the gate never re-decides a stored row.
   rateTable = undefined,
+  // Lawn area on file (customer_turf_profiles.lawn_sqft) for the "water you saved" gallons; null = no sentence.
+  lawnSqft = null,
+  // The frozen "water you saved" block ('irrigation-water-saved.js'). Omitted = a NEW decision: the live
+  // GATE_IRRIGATION_WATER_SAVINGS decides and the block is computed from this decision's inputs. A replay passes the
+  // snapshot's stored block (or null for a row without one), so a gate flip or a lawn-size edit never re-decides it.
+  waterSaved = undefined,
   now = new Date(),
 } = {}) {
   const table = resolveRateTable(rateTable);
@@ -185,6 +192,11 @@ function decideWeekPlan({
     rates: ratesForTable(table),
   });
   const runtime = normalizeRuntimeInputs({ runMinutes, wateringDays, systemType });
+  const waterSavedBlock = waterSaved !== undefined
+    ? (waterSaved || null)
+    : (irrigationWaterSavedLive()
+      ? waterSavedForDecision({ lawnSqft, runMinutes, wateringDays, systemType, explicitInchesPerWeek, rates: ratesForTable(table) })
+      : null);
   // Everything the decision was made from, for the snapshot (the report
   // renders comparisons from these, never from today's prefs).
   const decisionInputs = {
@@ -222,6 +234,9 @@ function decideWeekPlan({
     // The head rate table behind this decision, frozen with it (key only for the owner table, so a package-table
     // snapshot is byte-identical to before).
     ...rateTableInputs(table),
+    // The "water you saved" gallons, frozen with the decision (key only while the gate is live AND a lawn area is on
+    // file, so every other snapshot is byte-identical to before).
+    ...(waterSavedBlock ? { waterSaved: waterSavedBlock } : {}),
   };
   return { plan, restriction, decisionInputs };
 }
@@ -261,7 +276,7 @@ function fullCycleClause(rateTable) {
  * Email copy for a decision. Returns null for an 'unavailable' plan so the
  * sender keeps its pre-plan template.
  */
-function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', runMinutes = null, restriction = null, omitRateNote = false, omitSensorNote = false, scheduleUnconfirmed = false, rateTable = undefined } = {}) {
+function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', runMinutes = null, restriction = null, omitRateNote = false, omitSensorNote = false, scheduleUnconfirmed = false, rateTable = undefined, waterSaved = null } = {}) {
   if (!plan || plan.action === 'unavailable') return null;
   const name = String(firstName || '').trim() || 'there';
   const notes = [];
@@ -355,6 +370,10 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
       ? 'before each run, if ½" or more has fallen since your previous permitted watering day (skipped or not — since the start of the week, for the first), skip that run.'
       : 'if we get ½" or more of rain before your run, skip it.'));
   }
+  // "Water you saved" (GATE_IRRIGATION_WATER_SAVINGS): the block frozen in this decision's snapshot, never recomputed
+  // here. Last, after the rain rule, so the number sits beside the skip it describes.
+  const saved = waterSavedSentence(waterSaved, plan);
+  if (saved) notes.push(saved);
 
   return {
     plan_subject: subject,

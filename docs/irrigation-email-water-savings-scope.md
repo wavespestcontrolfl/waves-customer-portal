@@ -5,7 +5,10 @@ two days a week, about 20 minutes a zone, even in weeks when rain already covere
 the lawn. When the Monday email tells them to skip, how much water and money does
 that skip actually represent, and is it worth putting the number in the email?
 
-Status: proposal only. Nothing in this document is built.
+Status: phase 1 (gallons only) is BUILT behind `GATE_IRRIGATION_WATER_SAVINGS`, dark by
+default (owner go-ahead 2026-10-22). Contract: `docs/gates-and-env.md`; code in
+`server/services/irrigation-water-saved.js`. Phase 2 (water source + dollars) is
+not built.
 
 ## What the email already knows
 

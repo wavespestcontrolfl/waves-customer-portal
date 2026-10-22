@@ -423,6 +423,10 @@ function decideWeeklyEmail({
   // Head rate table ('owner' | 'package') for this decision. Omitted = a NEW decision, so the live
   // GATE_IRRIGATION_OWNER_RATES picks it; a replay of a stored plan passes the stored table (storedRateTable).
   rateTable = undefined,
+  // Lawn area on file for the plan's "water you saved" gallons (null = no sentence).
+  lawnSqft = null,
+  // The frozen "water you saved" block for a replay (null for a row without one); omitted = a NEW decision reads the gate.
+  waterSaved = undefined,
   now = new Date(),
 } = {}, rawArgs = {}) {
   const table = resolveRateTable(rateTable);
@@ -717,6 +721,8 @@ function decideWeeklyEmail({
       priorWeekPrescribedInches,
       rainOnlyCarryover: scheduleUnconfirmed,
       rateTable: table,
+      lawnSqft,
+      waterSaved,
       now,
     });
     // A derived schedule's provenance sentence (below) already names the
@@ -730,6 +736,8 @@ function decideWeeklyEmail({
       omitSensorNote: scheduleSource === 'portal_derived' && sensorOn,
       scheduleUnconfirmed,
       rateTable: table,
+      // The gallons sentence reads the block this decision froze (or the replayed snapshot's), never the live gate.
+      waterSaved: decisionInputs.waterSaved || null,
     });
     // No plan to render (no policy in force) for an unconfirmed schedule:
     // never fall through with the former home's payload — re-enter the
@@ -1122,6 +1130,8 @@ async function findEligibleCustomers({ now = new Date(), customerId = null, incl
          LIMIT 1
       ) as assessment_irrigation_inches_per_week`),
       'tp.grass_type',
+      // Lawn area for the plan's "water you saved" gallons (GATE_IRRIGATION_WATER_SAVINGS); never defaulted.
+      'tp.lawn_sqft as turf_lawn_sqft',
       'c.lawn_type',
     )
     .orderBy('c.id');
@@ -1132,7 +1142,7 @@ async function findEligibleCustomers({ now = new Date(), customerId = null, incl
 // the sweep pins the live one once per customer. Omitted = a NEW decision: the live gate is read ONCE here, and that one
 // table feeds both the move guard below and (through the returned `rateTable`) the decision, so the two can never
 // disagree about a runtime near the plausibility ceiling.
-function weeklyInputsForCustomer(customer, { weekEnding, weekWeather, priorWeek = null, weekPlanEnabled, planWeekEnd, now, rateTable = undefined }) {
+function weeklyInputsForCustomer(customer, { weekEnding, weekWeather, priorWeek = null, weekPlanEnabled, planWeekEnd, now, rateTable = undefined, waterSaved = undefined }) {
   const table = resolveRateTable(rateTable);
   // After a move, every NON-NULL sizing field must have been re-saved
   // (irrigation_confirmed_fields, reset by the move, accrues one field
@@ -1155,6 +1165,9 @@ function weeklyInputsForCustomer(customer, { weekEnding, weekWeather, priorWeek 
     // profile) the plan sizes from the unknown-grass fallback and the
     // copy says "your lawn".
     grassType: grassConfirmedAfterMove(customer) ? resolveGrassType(customer) : null,
+    // Lawn area is a property of the LAWN too: after a move the turf profile describes the former yard until a
+    // turf writer re-establishes it, so it rides the same ledger entry as the grass (no area ⇒ no gallons sentence).
+    lawnSqft: grassConfirmedAfterMove(customer) ? (customer.turf_lawn_sqft ?? null) : null,
     weekEnding,
     irrigationInchesPerWeek: customer.irrigation_inches_per_week,
     turfIrrigationInchesPerWeek: customer.turf_irrigation_inches_per_week,
@@ -1186,6 +1199,9 @@ function weeklyInputsForCustomer(customer, { weekEnding, weekWeather, priorWeek 
     // The restriction must cover the WHOLE plan week (through this Sunday).
     planWeekEnd,
     rateTable: table,
+    // A replay or a published row's re-decide carries the snapshot's frozen "water you saved" block (null for a row
+    // without one); a NEW decision leaves the key out so decideWeekPlan reads the live gate once.
+    ...(waterSaved !== undefined ? { waterSaved } : {}),
     now,
   };
 }
@@ -1205,6 +1221,9 @@ function replayWeekPlanForCustomer(snapshot, current) {
       now: new Date(snapshot.planAsOf),
       // The stored table, never the live gate: a gate flip after publication must not change a published decision.
       rateTable: storedRateTable(inputs),
+      // The stored "water you saved" block (null for a row without one): a gate flip or a lawn-size edit after
+      // publication must neither change the sentence nor withhold the plan.
+      waterSaved: inputs.waterSaved ?? null,
     }),
     forecastRainInches: inputs.forecastRainInches,
     forecastEt0Inches: inputs.forecastEt0Inches,
@@ -1684,6 +1703,8 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
         weekEnding, weekWeather, priorWeek, weekPlanEnabled, planWeekEnd, now: saved ? new Date(saved.planAsOf) : planAsOf,
         // A published row keeps the table it was decided on; a new decision pins today's gate once for every pass below.
         rateTable: frozen ? storedRateTable(frozen) : resolveRateTable(),
+        // Likewise the frozen "water you saved" block (null for a published row without one).
+        waterSaved: frozen ? (frozen.waterSaved ?? null) : undefined,
       });
       // Replay already validated this premise and the current settings. Keep
       // its saved spelling so a formatting edit cannot change the claim hash.
