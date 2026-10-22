@@ -587,7 +587,7 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
   const eligible = (over = {}) => ({ id: 's2', service_type: 'Lawn Fertilization', is_recurring: true, recurring_parent_id: 'p2', status: 'confirmed', scheduled_date: FAR, auto_dispatch_locked: false, auto_dispatch_excluded: false, customer_active: true, customer_latitude: 27.5, customer_longitude: -82.4, ...over });
   // `capsByTech` answers the capability read per technician_id (the fence's
   // where clause); plain `caps` answers regardless of tech.
-  const fakeTrx = ({ siblings = [], caps = [], capsByTech = null, seriesClash = null, planAlert = null, moveRows = [] } = {}) => {
+  const fakeTrx = ({ siblings = [], caps = [], capsByTech = null, seriesClash = null, planAlert = null, moveRows = [], techRows = null } = {}) => {
     const calls = [];
     let ssCalls = 0;
     const trx = jest.fn((table) => {
@@ -596,7 +596,7 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
       const probe = isSS && ssCalls++ > 0;
       let techFilter = null;
       const api = {
-        where: (w) => { if (typeof w === 'function') w.call(api); else if (w && w.technician_id) techFilter = w.technician_id; return api; },
+        where: (w) => { if (typeof w === 'function') w.call(api); else if (w && w.technician_id) techFilter = w.technician_id; else if (w && table === 'technicians' && w.id) techFilter = w.id; return api; },
         orWhere: () => api,
         whereIn: (column, values) => { if (column === 'technician_id') [techFilter] = values; return api; },
         whereNotIn: () => api, whereNull: () => api, leftJoin: () => api,
@@ -604,7 +604,7 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
         // move-limit.js: the durable move-log count (reschedule_log), grouped per visit
         whereRaw: () => api, groupBy: () => api, count: () => api,
         select: async () => (table === 'reschedule_log' ? moveRows : (isSS ? siblings : (capsByTech ? (capsByTech[techFilter] || []) : caps))),
-        first: async () => (table === 'recurring_plan_alerts' ? planAlert : (probe ? seriesClash : null)),
+        first: async () => (table === 'recurring_plan_alerts' ? planAlert : (table === 'technicians' && techRows ? (techRows[techFilter] || null) : (probe ? seriesClash : null))),
       };
       return api;
     });
@@ -658,6 +658,95 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     const pestPrimary = makeMoveGuard({ service: { ...SERVICE, service_type: 'Quarterly Pest Control' }, best: BEST });
     trx = fakeTrx({ caps: [{ service_category: lawn, active: false }] });
     await expect(pestPrimary({ trx, technicianId: 't1', service: { id: 's2', service_type: 'Lawn Fertilization' } })).rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' });
+  });
+
+  describe('move guard: the start points the move was scored from (GATE_TECH_START_POINTS)', () => {
+    const { makeMoveGuard } = require('../services/auto-dispatch/apply');
+    const ORIGINAL = process.env.GATE_TECH_START_POINTS;
+    afterEach(() => { if (ORIGINAL === undefined) delete process.env.GATE_TECH_START_POINTS; else process.env.GATE_TECH_START_POINTS = ORIGINAL; });
+    const HQ = require('../services/route-optimizer').HQ;
+    const HOME = { lat: 27.0998, lng: -82.4543 };
+    const OTHER_HOME = { lat: 27.2, lng: -82.3 };
+    const row = (point) => ({ start_lat: point ? String(point.lat) : null, start_lng: point ? String(point.lng) : null });
+    // Scored from HOME for t1 and the office for t2.
+    const scoredFrom = (id) => ({ t1: HOME, t2: HQ }[id]);
+    const guardFor = (best, startPointFor = scoredFrom) => makeMoveGuard({ service: SERVICE, best, config: { startPointFor } });
+
+    test('gate on, point unchanged: the move passes; the technician is re-read once, after the capability read', async () => {
+      process.env.GATE_TECH_START_POINTS = 'true';
+      const trx = fakeTrx({ techRows: { t1: row(HOME) } });
+      await expect(guardFor(BEST)({ trx, technicianId: 't1' })).resolves.toBeUndefined();
+      expect(trx.__calls.filter((t) => t === 'technicians')).toHaveLength(2); // capability share lock + start point fence
+    });
+
+    test('gate on, source start address edited after scoring: refused with START_POINT_CHANGED, no coordinate in the error', async () => {
+      process.env.GATE_TECH_START_POINTS = 'true';
+      const err = await guardFor(BEST)({ trx: fakeTrx({ techRows: { t1: row(OTHER_HOME) } }), technicianId: 't1' }).catch((e) => e);
+      expect(err).toMatchObject({ code: 'START_POINT_CHANGED', statusCode: 409, isOperational: true });
+      expect(JSON.stringify([err.message, err.code])).not.toMatch(/27\.|82\./);
+    });
+
+    test('gate on, start address cleared after scoring: refused', async () => {
+      process.env.GATE_TECH_START_POINTS = 'true';
+      await expect(guardFor(BEST)({ trx: fakeTrx({ techRows: { t1: row(null) } }), technicianId: 't1' })).rejects.toMatchObject({ code: 'START_POINT_CHANGED' });
+    });
+
+    test('gate on, a tech scored from the office who gained a start address is refused', async () => {
+      process.env.GATE_TECH_START_POINTS = 'true';
+      const toT2 = guardFor({ ...BEST, technician_id: 't2' });
+      await expect(toT2({ trx: fakeTrx({ techRows: { t1: row(HOME), t2: row(OTHER_HOME) } }), technicianId: 't1' })).rejects.toMatchObject({ code: 'START_POINT_CHANGED' });
+      // t2 still without an address, t1 unchanged: the move to t2 passes (both techs checked).
+      const trx = fakeTrx({ techRows: { t1: row(HOME), t2: row(null) } });
+      await expect(toT2({ trx, technicianId: 't1' })).resolves.toBeUndefined();
+      expect(trx.__calls.filter((t) => t === 'technicians')).toHaveLength(3); // t2 capability lock + t1 and t2 fence
+    });
+
+    test('gate on, only the SOURCE tech changed on a move to another tech: refused', async () => {
+      process.env.GATE_TECH_START_POINTS = 'true';
+      const toT2 = guardFor({ ...BEST, technician_id: 't2' });
+      await expect(toT2({ trx: fakeTrx({ techRows: { t1: row(OTHER_HOME), t2: row(null) } }), technicianId: 't1' })).rejects.toMatchObject({ code: 'START_POINT_CHANGED' });
+    });
+
+    test('gate off: no extra technicians query (office everywhere)', async () => {
+      delete process.env.GATE_TECH_START_POINTS;
+      const trx = fakeTrx({ techRows: { t1: row(OTHER_HOME) } });
+      await expect(guardFor(BEST, () => HQ)({ trx, technicianId: 't1' })).resolves.toBeUndefined();
+      expect(trx.__calls.filter((t) => t === 'technicians')).toHaveLength(1); // the capability lock only
+    });
+
+    test('gate switched off after home-based scoring: the move is refused (the scored point was not the office)', async () => {
+      delete process.env.GATE_TECH_START_POINTS;
+      const trx = fakeTrx({ techRows: { t1: row(HOME) } });
+      await expect(guardFor(BEST, () => HOME)({ trx, technicianId: 't1' })).rejects.toMatchObject({ code: 'START_POINT_CHANGED' });
+      expect(trx.__calls.filter((t) => t === 'technicians')).toHaveLength(1); // still no start point query
+    });
+
+    test('the lookup reaches the move guard of every attempt, a SLOT_TAKEN fallback included', async () => {
+      process.env.GATE_TECH_START_POINTS = 'true';
+      process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+      try {
+        const alt = { ...BEST, start_time: '13:00', end_time: '15:00' };
+        const live = readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'confirmed', auto_dispatch_locked: false, auto_dispatch_excluded: false });
+        const queue = [live, live];
+        db.mockImplementation(() => queue.shift() || { where() { return this; }, update: jest.fn().mockResolvedValue(1), insert: jest.fn(), first: async () => null });
+        SmartRebooker.reschedule.mockRejectedValueOnce(Object.assign(new Error('taken'), { code: 'SLOT_TAKEN' }));
+        await applyAutoDispatchMove(SERVICE, BEST, 'run1', { startPointFor: scoredFrom, alternateCandidates: [alt] });
+        expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(2);
+        for (const call of SmartRebooker.reschedule.mock.calls) {
+          const trx = fakeTrx({ techRows: { t1: row(OTHER_HOME) } });
+          await expect(call[5].moveGuard({ trx, technicianId: 't1' })).rejects.toMatchObject({ code: 'START_POINT_CHANGED' });
+        }
+      } finally {
+        delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
+      }
+    });
+
+    test('no lookup handed in (a caller that scores from the office): nothing is checked', async () => {
+      process.env.GATE_TECH_START_POINTS = 'true';
+      const trx = fakeTrx({ techRows: { t1: row(OTHER_HOME) } });
+      await expect(makeMoveGuard({ service: SERVICE, best: BEST, config: {} })({ trx, technicianId: 't1' })).resolves.toBeUndefined();
+      expect(trx.__calls.filter((t) => t === 'technicians')).toHaveLength(1);
+    });
   });
 
   test('a proofread move is refused under the stop lock when the visit is in a grouped stop', async () => {

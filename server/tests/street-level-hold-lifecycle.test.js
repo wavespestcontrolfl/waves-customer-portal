@@ -531,11 +531,6 @@ describe('r26: the shared field-advance seam and the recap delivery honor a live
     expect(read('../routes/tech-timetracking.js')).toContain("err.code === 'street_level_hold') return res.status(409)");
   });
 
-  test('geofence auto-start and the notification start both fall back through the startJob refusal (reminder / 409)', () => {
-    expect(read('../services/geofence-handler.js')).toContain('auto startJob failed, falling back to reminder');
-    expect(read('../routes/tech-notifications.js')).toContain('return res.status(409).json({ error: err.message });');
-  });
-
   test('startJob and markOnProperty behave: hold refuses / skips, no hold proceeds', async () => {
     jest.resetModules();
     jest.doMock('../services/street-level-hold', () => ({ ...jest.requireActual('../services/street-level-hold'), isStreetLevelHoldVisit: jest.fn(async () => true) }));

@@ -20,6 +20,7 @@ import {
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import "./TimeTrackingPage.css";
 import { TECH_LINE_NUMBERS } from "../../constants/techLines";
+import AddressAutocomplete from "../../components/AddressAutocomplete";
 import {
   etDateString,
   etDatetimeLocalValue,
@@ -2610,7 +2611,34 @@ const EMPTY_TECH_FORM = {
   emergencyContactName: "",
   emergencyContactPhone: "",
   ssnLast4: "",
+  // Where the day starts and ends. "office" = no saved point (the server clears
+  // all three columns); "home" needs a picked suggestion with coordinates.
+  // startText is the visible input; startPoint is the last picked suggestion.
+  startMode: "office",
+  startText: "",
+  startPoint: null,
 };
+
+// Wire shape for `startPoint` on PUT: null (office) or { address, lat, lng }.
+// A typed-but-unpicked address has no coordinates and is never sent.
+function buildStartPointPayload(form) {
+  if (form.startMode !== "home") return null;
+  const p = form.startPoint;
+  return p ? { address: p.address, lat: p.lat, lng: p.lng } : null;
+}
+
+function startPointNeedsPick(form) {
+  return form.startMode === "home" && !form.startPoint;
+}
+
+// "Starts: home, 100 Example Way, Bradenton" from the saved formatted address.
+function describeStartPoint(tech) {
+  if (!tech.start_address || tech.start_lat == null || tech.start_lng == null) {
+    return "Starts: office";
+  }
+  const [street, city] = String(tech.start_address).split(",").map((x) => x.trim());
+  return `Starts: home, ${[street, city].filter(Boolean).join(", ")}`;
+}
 
 export function TeamTab({ showToast }) {
   const [techs, setTechs] = useState([]);
@@ -2696,9 +2724,10 @@ export function TeamTab({ showToast }) {
     setSaving(true);
     try {
       if (editingId) {
+        const { startMode, startText, startPoint, ...rest } = form;
         const res = await adminFetch(`/admin/timetracking/technicians/${editingId}`, {
           method: "PUT",
-          body: JSON.stringify(form),
+          body: JSON.stringify({ ...rest, startPoint: buildStartPointPayload(form) }),
         });
         // Leaving the dispatch pool through Edit (Employment → Inactive or
         // Prospective, or field eligibility removed) surfaces the same
@@ -2711,9 +2740,10 @@ export function TeamTab({ showToast }) {
             : "Technician updated",
         );
       } else {
+        const { startMode, startText, startPoint, ...rest } = form;
         await adminFetch("/admin/timetracking/technicians", {
           method: "POST",
-          body: JSON.stringify(form),
+          body: JSON.stringify(rest),
         });
         showToast("Technician added");
       }
@@ -2789,6 +2819,17 @@ export function TeamTab({ showToast }) {
       emergencyContactName: tech.emergency_contact_name || "",
       emergencyContactPhone: tech.emergency_contact_phone || "",
       ssnLast4: tech.ssn_last4 || "",
+      ...(tech.start_address && tech.start_lat != null && tech.start_lng != null
+        ? {
+            startMode: "home",
+            startText: tech.start_address,
+            startPoint: {
+              address: tech.start_address,
+              lat: Number(tech.start_lat),
+              lng: Number(tech.start_lng),
+            },
+          }
+        : { startMode: "office", startText: "", startPoint: null }),
     });
     // Auto-expand payroll section if this tech already has any payroll
     // fields filled in — saves a click for the "edit existing wage"
@@ -2945,6 +2986,73 @@ export function TeamTab({ showToast }) {
                 ))}
               </select>{" "}
             </div>{" "}
+            {/* Start-of-day point. Edit only: the add form does not send it.
+                Empty = the office (today's routing). Home needs an address
+                picked from the list so it carries coordinates. */}
+            {editingId && (
+              <div style={{ gridColumn: "1 / -1" }}>
+                {" "}
+                <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+                  Starts the day from
+                </div>{" "}
+                <select
+                  aria-label="Starts the day from"
+                  value={form.startMode}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, startMode: e.target.value }))
+                  }
+                  style={sInput}
+                >
+                  <option value="office">Office</option>
+                  <option value="home">Home address</option>
+                </select>{" "}
+                {form.startMode === "home" && (
+                  <div style={{ marginTop: 8 }}>
+                    <AddressAutocomplete
+                      aria-label="Home address"
+                      value={form.startText}
+                      onChange={(val) =>
+                        setForm((f) => ({
+                          ...f,
+                          startText: val,
+                          startPoint:
+                            f.startPoint && f.startPoint.address === val
+                              ? f.startPoint
+                              : null,
+                        }))
+                      }
+                      onSelect={(parts) => {
+                        const address = parts.formatted || parts.line1 || "";
+                        const lat = Number(parts.lat);
+                        const lng = Number(parts.lng);
+                        const ok =
+                          address &&
+                          parts.lat != null &&
+                          parts.lng != null &&
+                          Number.isFinite(lat) &&
+                          Number.isFinite(lng);
+                        setForm((f) => ({
+                          ...f,
+                          startText: address || f.startText,
+                          startPoint: ok
+                            ? { address: address.slice(0, 300), lat, lng }
+                            : null,
+                        }));
+                      }}
+                      geocodeOnBlur={false}
+                      appearance="admin"
+                      placeholder="Start typing the home address"
+                      style={sInput}
+                    />
+                    {startPointNeedsPick(form) && (
+                      <div style={{ fontSize: 11, color: D.amber, marginTop: 4 }}>
+                        Pick the address from the list
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
           {/* Field eligibility (Field Team Program, Phase 0). Employment
               says whether someone is on staff; this says whether they may
@@ -3268,10 +3376,10 @@ export function TeamTab({ showToast }) {
             {" "}
             <button
               onClick={handleSave}
-              disabled={saving || !form.name.trim()}
+              disabled={saving || !form.name.trim() || (!!editingId && startPointNeedsPick(form))}
               style={{
                 ...sBtn(D.green, D.white),
-                opacity: saving || !form.name.trim() ? 0.5 : 1,
+                opacity: saving || !form.name.trim() || (!!editingId && startPointNeedsPick(form)) ? 0.5 : 1,
               }}
             >
               {saving ? "Saving..." : editingId ? "Update" : "Add"}
@@ -3386,6 +3494,11 @@ export function TeamTab({ showToast }) {
                 >
                   {" "}
                   <div>{t.name}</div>
+                  {isAdmin && (
+                    <div style={{ fontSize: 11, fontWeight: 400, color: D.muted, marginTop: 2 }}>
+                      {describeStartPoint(t)}
+                    </div>
+                  )}
                   {(t.job_title || t.pay_rate) && (
                     <div
                       style={{

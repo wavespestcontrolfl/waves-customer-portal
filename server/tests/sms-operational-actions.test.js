@@ -11,7 +11,7 @@ jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((name, work) => w
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 
 const { groundExtraction, extractSmsOperations, buildPrompt, stringifySmsEvidence, statesClock } = require('../services/sms-operational-extractor');
-const { eligibleMessage, factVerdict, runSmsOperationalActions, resolveDueDeadline, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS } = require('../services/sms-operational-actions');
+const { eligibleMessage, factVerdict, isQuietTemporaryFact, reviewBellCopy, runSmsOperationalActions, resolveDueDeadline, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS } = require('../services/sms-operational-actions');
 const { groundFulfillment, admissibleWitness, verifySmsFulfillment, fulfillmentFingerprint } = require('../services/sms-commitment-fulfillment');
 const { dispatchWithFallback } = require('../services/llm/call');
 const numbers = require('../config/twilio-numbers');
@@ -1799,5 +1799,61 @@ describe('listSmsCommitments lane option', () => {
     const none = fakeConn();
     await listSmsCommitments(none, { customerId: 'c1' });
     for (const ops of none.parts) expect(rawsOf(ops).some((sql) => /basis/.test(sql))).toBe(false);
+  });
+});
+
+describe('SMS review bell (owner ruling 2026-10-21)', () => {
+  const held = (extra) => ({ field: 'access_notes', duration: 'uncertain', outcome: 'temporary_instruction', ...extra });
+
+  test('a held-back access note is quiet at any duration; safety and code facts are not', () => {
+    expect(isQuietTemporaryFact(held())).toBe(true);
+    expect(isQuietTemporaryFact(held({ duration: 'durable' }))).toBe(true);
+    expect(isQuietTemporaryFact(held({ duration: 'visit_only' }))).toBe(true);
+    expect(isQuietTemporaryFact(held({ outcome: 'existing_value_conflict', duration: 'durable' }))).toBe(false);
+    expect(isQuietTemporaryFact(held({ field: 'pet_details', duration: 'durable' }))).toBe(false);
+    expect(isQuietTemporaryFact(held({ field: 'lockbox_code', duration: 'durable' }))).toBe(false);
+    expect(isQuietTemporaryFact(held({ field: 'irrigation_controller_location' }))).toBe(false);
+    expect(isQuietTemporaryFact(held({ field: 'pet_details', duration: 'visit_only', outcome: 'pet_needs_review' }))).toBe(false);
+  });
+
+  test('copy names the customer in a bounded Comms headline and says what was wanted and why it stopped, never quoting the text', () => {
+    const exception = { field: 'access_notes', outcome: 'existing_value_conflict' };
+    const copy = reviewBellCopy({ customer: { first_name: 'Synthetic', last_name: 'Fixture' }, exceptions: [exception],
+      messageBody: "Ok I'm the last house on the left. Use BLUE at the keypad. 8 US 41" });
+    expect(copy).toEqual({ action: "check Synthetic Fixture's text note",
+      why: 'Wanted to save as access note; it conflicts with the note on file.',
+      detail: 'Wanted to save as access note; it conflicts with the note on file.\nOpen the conversation to check.' });
+    expect(JSON.stringify(copy)).not.toMatch(/BLUE|US 41|last house/);
+  });
+
+  test('a long name still fits the 60-character headline and the composed alert passes the admin-alert rules', () => {
+    const { composeAdminAlert } = require('../services/admin-alert-compose');
+    const exceptions = [{ field: 'irrigation_controller_location', outcome: 'irrigation_needs_review' },
+      { field: 'pet_details', outcome: 'pet_needs_review' }];
+    const copy = reviewBellCopy({ customer: { first_name: 'Synthetically', last_name: 'Fixture-Longname Hyphenated Surname' }, exceptions });
+    const composed = composeAdminAlert({ area: 'Comms', action: copy.action, why: copy.why, severity: 'needs-you', link: '/admin/customers?customerId=c1',
+      subject: { type: 'customer', id: 'c1' }, doneWhen: 'text_note_checked', who: 'person' });
+    expect(composed.headline.length).toBeLessThanOrEqual(60);
+    expect(composed.headline).toMatch(/^Comms — check /);
+    expect(copy.why.length).toBeLessThanOrEqual(110);
+    expect(copy.why).toMatch(/\(\+1 more\)$/);
+    expect(copy.detail.split('\n')).toHaveLength(3);
+  });
+
+  test('extra exceptions get a line each in the detail; no name gives a nameless headline; property_ambiguous covers a null property', () => {
+    const exceptions = [{ field: 'pet_details', outcome: 'pet_needs_review' }, { field: 'irrigation_controller_location', outcome: 'mixed_topics' },
+      { field: 'access_notes', outcome: 'property_ambiguous' }];
+    const lines = reviewBellCopy({ customer: { first_name: 'Synthetic', last_name: '' }, exceptions }).detail.split('\n');
+    expect(lines[0]).toMatch(/^Wanted to save as pet note; .*needs a person to read it\.$/);
+    expect(lines[1]).toBe('Also wanted to save as irrigation controller location; the text mixes several topics.');
+    expect(lines[2]).toBe('Also wanted to save as access note; it could not be tied to one property.');
+    expect(reviewBellCopy({ customer: {}, exceptions: [exceptions[0]] }).action).toBe('check a customer text note');
+  });
+
+  test('Codex #6414 r3: the reason follows the duration label, not just the outcome code', () => {
+    const why = (duration) => reviewBellCopy({ customer: {}, exceptions: [{ field: 'access_notes', outcome: 'temporary_instruction', duration }] }).why;
+    expect(why('uncertain')).toBe('Wanted to save as access note; it is not clear if this is lasting or just for one visit.');
+    expect(why('visit_only')).toBe('Wanted to save as access note; the text sounds like a one-time instruction.');
+    expect(why('durable')).toBe('Wanted to save as access note; the text sounds like a one-time instruction.');
   });
 });

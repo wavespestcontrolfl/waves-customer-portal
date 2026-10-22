@@ -26,6 +26,17 @@
 //      each edge for the day-boundary convention of the source) are counted; a
 //      lower bound, never a guess about the hours of a partial day.
 //
+// GATE_LAWN_WATERING_TEXT_FORECAST (owner 2026-10-22: "account for weather
+// ... we have two sources now") changes piece 1 only, at completion:
+//   - the sentence is frozen only when BOTH sources agree: the Open-Meteo
+//     amount reaches the label amount (as above) AND the NWS hourly forecast
+//     calls rain likely in the same window (nwsAgreement);
+//   - a timed hold then a short water-in gets the sentence too, for rain
+//     between the hold's printed end and the checkpoint. Rain inside the hold
+//     never counts; a hold that waits for drying has no clock end and gets none;
+//   - the watering text carries the frozen sentence (lawn-watering-sms.js).
+//     The PDF and `lines` stay as written.
+//
 // Copy rules: inches only, never a probability or a percent; fixed sentences
 // chosen by code from facts; no model; no re-entry or "keep off" wording.
 
@@ -45,6 +56,9 @@ const CLOSE_OUT_DEADLINE_MS = 2500;
 // completion to checkpoint is itself at least this long.
 const CHECKPOINT_HOURS_BEFORE_DEADLINE = 6;
 const MIN_CHECKPOINT_WINDOW_HOURS = 6;
+// The NWS "rain likely" band starts at 60% (its forecast wording: "chance" up
+// to 50%, "likely" 60-70%). The second source agrees only at or above it.
+const NWS_LIKELY_CHANCE = 60;
 
 function finitePositive(value) {
   if (value == null || value === '') return null;
@@ -59,10 +73,15 @@ function toMs(value) {
 }
 
 // The fixed sentences. Every number is in inches; none is a probability.
-function forecastSentence({ forecastInches, waterInInches, checkpointLabel }) {
+function forecastSentence({ forecastInches, waterInInches, checkpointLabel, holdEndLabel = null }) {
   const forecast = formatInches(forecastInches);
   const amount = formatInches(waterInInches);
   if (!forecast || !amount || !checkpointLabel) return null;
+  // After a timed hold only rain from the hold's end counts, so the window
+  // names both ends (GATE_LAWN_WATERING_TEXT_FORECAST).
+  if (holdEndLabel) {
+    return `About ${forecast} of rain is forecast between ${holdEndLabel} and ${checkpointLabel}. If at least ${amount} falls in that time, it counts as watering in today’s treatment. If it does not, run the watering above right away.`;
+  }
   return `About ${forecast} of rain is forecast by ${checkpointLabel}. If at least ${amount} has fallen by then, it counts as watering in today’s treatment. If it has not, run the watering above right away.`;
 }
 
@@ -91,7 +110,56 @@ function isPlainWaterIn(instruction) {
     && !instruction.holdUntil && !instruction.holdUntilLabel && instruction.longWindow !== true;
 }
 
+// A timed hold, then a short water-in (GATE_LAWN_WATERING_TEXT_FORECAST). The
+// hold must end by the clock: a hold that waits for drying leaves expiresAt
+// null. A long window, or a short water-in beside a long one, gets nothing.
+function isAfterHoldWaterIn(instruction) {
+  return !!instruction && typeof instruction === 'object' && instruction.state === 'hold_then_water_in'
+    && !!instruction.holdUntil && !!instruction.expiresAt && instruction.longWindow !== true && !instruction.later;
+}
+
 // ── 1. Frozen at completion ─────────────────────────────────────────────
+
+// The forecast window [from, checkpoint] and its labels, or null. From the
+// completion for a plain water-in; from the hold's printed end after a timed
+// hold (afterHold). Labels are relative to the completion, like the lines.
+function forecastWindow(instruction, { afterHold = false } = {}) {
+  const held = afterHold && isAfterHoldWaterIn(instruction);
+  if (!held && !isPlainWaterIn(instruction)) return null;
+  const amount = finitePositive(instruction.waterInInches);
+  const completedMs = toMs(instruction.completedAt);
+  const fromMs = held ? toMs(instruction.holdUntil) : completedMs;
+  const deadlineMs = toMs(instruction.waterInBy);
+  if (amount == null || !Number.isFinite(completedMs) || !Number.isFinite(fromMs) || !Number.isFinite(deadlineMs) || deadlineMs <= fromMs) return null;
+  // The customer is asked to look at the rain by the checkpoint, not the
+  // deadline: no sentence unless there are at least 6 hours to the checkpoint.
+  const checkpointMs = deadlineMs - CHECKPOINT_HOURS_BEFORE_DEADLINE * HOUR_MS;
+  if (checkpointMs - fromMs < MIN_CHECKPOINT_WINDOW_HOURS * HOUR_MS) return null;
+  const checkpointLabel = formatWhen(new Date(checkpointMs), new Date(completedMs));
+  if (typeof checkpointLabel !== 'string' || !checkpointLabel) return null;
+  const holdEndLabel = held ? instruction.holdUntilLabel : null;
+  if (held && (typeof holdEndLabel !== 'string' || !holdEndLabel)) return null;
+  return { amount, fromMs, checkpointMs, checkpointLabel, holdEndLabel };
+}
+
+// The second source: the NWS hourly forecast (weather-forecast.js
+// getHourlyRainOutlook) calls rain likely in at least one hour that overlaps
+// the window. A backup answer is Open-Meteo again (its hours carry
+// `source: 'open-meteo'`), so it never agrees. Returns what agreed, or null.
+function nwsAgreement(hours, windowFromMs, windowToMs) {
+  if (!Array.isArray(hours) || !hours.length || hours.some((h) => h && h.source === 'open-meteo')) return null;
+  let peakChance = null;
+  let inside = 0;
+  for (const hour of hours) {
+    const start = toMs(hour && hour.startTime);
+    if (!Number.isFinite(start) || start + HOUR_MS <= windowFromMs || start >= windowToMs) continue;
+    inside += 1;
+    const chance = hour.rainChance;
+    if (typeof chance === 'number' && Number.isFinite(chance) && (peakChance == null || chance > peakChance)) peakChance = chance;
+  }
+  if (!inside || peakChance == null || peakChance < NWS_LIKELY_CHANCE) return null;
+  return { source: 'nws', peakChance, hours: inside };
+}
 
 /**
  * The forecast block to freeze beside a water-in instruction, or null (the
@@ -104,24 +172,30 @@ function isPlainWaterIn(instruction) {
  * @param {number|string|null} input.latitude
  * @param {number|string|null} input.longitude
  * @param {Function} input.fetchForecast  fetchPropertyForecast
+ * @param {Function} [input.fetchNwsHourly]  getHourlyRainOutlook; given, the NWS
+ *   hourly forecast must agree (GATE_LAWN_WATERING_TEXT_FORECAST)
+ * @param {boolean} [input.afterHold]  also read a timed hold then a water-in
+ *   (GATE_LAWN_WATERING_TEXT_FORECAST)
  */
-async function resolveWaterInForecast({ instruction, latitude, longitude, fetchForecast } = {}) {
+async function resolveWaterInForecast({ instruction, latitude, longitude, fetchForecast, fetchNwsHourly, afterHold } = {}) {
   try {
-    if (!isPlainWaterIn(instruction) || typeof fetchForecast !== 'function') return null;
-    const amount = finitePositive(instruction.waterInInches);
-    const fromMs = toMs(instruction.completedAt);
-    const deadlineMs = toMs(instruction.waterInBy);
-    if (amount == null || !Number.isFinite(fromMs) || !Number.isFinite(deadlineMs) || deadlineMs <= fromMs) return null;
-    // The customer is asked to look at the rain by the checkpoint, not the
-    // deadline: no sentence unless there are at least 6 hours to the checkpoint.
-    const checkpointMs = deadlineMs - CHECKPOINT_HOURS_BEFORE_DEADLINE * HOUR_MS;
-    if (checkpointMs - fromMs < MIN_CHECKPOINT_WINDOW_HOURS * HOUR_MS) return null;
-    const checkpointLabel = formatWhen(new Date(checkpointMs), new Date(fromMs));
-    if (typeof checkpointLabel !== 'string' || !checkpointLabel) return null;
-
-    const result = await fetchForecast({
-      latitude, longitude, from: new Date(fromMs), to: new Date(checkpointMs), timeoutMs: FORECAST_TIMEOUT_MS,
-    });
+    if (typeof fetchForecast !== 'function') return null;
+    const window = forecastWindow(instruction, { afterHold });
+    if (!window) return null;
+    const { amount, fromMs, checkpointMs, checkpointLabel, holdEndLabel } = window;
+    const needsNws = typeof fetchNwsHourly === 'function';
+    // Both reads at once: the second source adds no wait beyond the slower read.
+    const [result, agreement] = await Promise.all([
+      fetchForecast({
+        latitude, longitude, from: new Date(fromMs), to: new Date(checkpointMs), timeoutMs: FORECAST_TIMEOUT_MS,
+      }),
+      needsNws
+        ? Promise.resolve()
+          .then(() => fetchNwsHourly(latitude, longitude, { budgetMs: FORECAST_TIMEOUT_MS, nwsBudgetMs: FORECAST_TIMEOUT_MS }))
+          .then((hours) => nwsAgreement(hours, fromMs, checkpointMs))
+          .catch(() => null)
+        : null,
+    ]);
     if (!result || result.status !== 'ok') return null;
     const total = result.precipitationInTotal;
     // null = a needed hour had no reading (or no whole hour in the window):
@@ -130,12 +204,15 @@ async function resolveWaterInForecast({ instruction, latitude, longitude, fetchF
     // The sentence only exists when the forecast TO THE CHECKPOINT reaches the
     // label amount; rain forecast only after it would leave the customer waiting.
     if (total < amount) return null;
-    const line = forecastSentence({ forecastInches: total, waterInInches: amount, checkpointLabel });
+    if (needsNws && !agreement) return null;
+    const line = forecastSentence({ forecastInches: total, waterInInches: amount, checkpointLabel, holdEndLabel });
     if (!copyIsClean(line)) return null;
     return {
       line,
       inches: Math.round(total * 100) / 100,
       source: 'open_meteo',
+      ...(agreement ? { agreement } : {}),
+      ...(holdEndLabel ? { afterHold: true } : {}),
       fetchedAt: typeof result.fetchedAt === 'string' ? result.fetchedAt : null,
       windowFrom: new Date(fromMs).toISOString(),
       windowTo: new Date(checkpointMs).toISOString(),
@@ -147,14 +224,27 @@ async function resolveWaterInForecast({ instruction, latitude, longitude, fetchF
   }
 }
 
-// The frozen sentence, shape-checked, for the banner. Anything unexpected is
-// ignored (today's banner), never repaired.
+// The frozen sentence, shape-checked, for the banner and the watering text.
+// Anything unexpected is ignored (today's banner), never repaired. A sentence
+// frozen after a hold is read only beside the hold it was written for.
 function frozenForecastLine(instruction) {
-  if (!isPlainWaterIn(instruction)) return null;
-  const forecast = instruction.forecast;
+  const forecast = instruction && instruction.forecast;
   if (!forecast || typeof forecast !== 'object' || Array.isArray(forecast)) return null;
+  if (!(forecast.afterHold === true ? isAfterHoldWaterIn(instruction) : isPlainWaterIn(instruction))) return null;
   if (!Number.isFinite(Number(forecast.inches)) || Number(forecast.inches) <= 0) return null;
   return copyIsClean(forecast.line) ? forecast.line : null;
+}
+
+// The sentence the watering text may carry (GATE_LAWN_WATERING_TEXT_FORECAST):
+// only one frozen with the NWS agreement. A visit frozen while only Open-Meteo
+// was read keeps its sentence on the live banner, never in a text.
+function textForecastLine(instruction) {
+  // A short water-in beside a long one (instruction.later) gets no sentence:
+  // rain that covers today's short amount does not cover the later one.
+  if (instruction && instruction.later) return null;
+  const agreement = instruction && instruction.forecast && instruction.forecast.agreement;
+  if (!agreement || agreement.source !== 'nws' || !(Number(agreement.peakChance) >= NWS_LIKELY_CHANCE)) return null;
+  return frozenForecastLine(instruction);
 }
 
 // ── 2. Live close-out ───────────────────────────────────────────────────
@@ -275,8 +365,11 @@ module.exports = {
   closeOutSentence,
   copyIsClean,
   isPlainWaterIn,
+  isAfterHoldWaterIn,
+  nwsAgreement,
   resolveWaterInForecast,
   frozenForecastLine,
+  textForecastLine,
   wholeDaysInsideWindow,
   observedCloseOut,
   attachLiveCloseOut,

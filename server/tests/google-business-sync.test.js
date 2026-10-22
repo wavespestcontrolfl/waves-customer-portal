@@ -504,6 +504,23 @@ describe('Google Business review sync', () => {
     upsert.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); places.mockRestore();
   });
 
+  test('the "rows did not save" alert: stable title (24h dedupe key), plain body, raw error only in detail', async () => {
+    const NotificationService = require('../services/notification-service');
+    const notify = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue(null);
+    const loc = { id: 'bradenton', name: 'Parrish' };
+    const cause = n => `review upsert failed: ${n} of 39 review row(s) failed to store (${39 - n} stored) — first: x: boom`;
+    await service._notifyDegradedSync(loc, cause(1));
+    db.__state.rows.notifications = [];
+    await service._notifyDegradedSync(loc, cause(3));
+    expect(notify.mock.calls[0][1]).toBe('Google reviews: some rows did not save at Parrish');
+    expect(notify.mock.calls[1][1]).toBe(notify.mock.calls[0][1]);
+    expect(notify.mock.calls[0][2]).toBe('The reviews on Google are fine. 1 stored copy did not save; Claude can check.');
+    expect(notify.mock.calls[1][2]).toBe('The reviews on Google are fine. 3 stored copies did not save; Claude can check.');
+    expect(notify.mock.calls[0][3].detail).toMatch(/boom/);
+    expect(notify.mock.calls[0][2]).not.toMatch(/boom/);
+    notify.mockRestore();
+  });
+
   test('a breaker-trip alert says no Places fallback runs when GOOGLE_MAPS_API_KEY is unset (codex r10 P2)', async () => {
     const NotificationService = require('../services/notification-service');
     const notify = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue(null);
@@ -512,18 +529,18 @@ describe('Google Business review sync', () => {
     const saved = process.env.GOOGLE_MAPS_API_KEY;
     delete process.env.GOOGLE_MAPS_API_KEY;
     await service._notifyDegradedSync(loc, trip);
-    expect(notify.mock.calls[0][2]).toMatch(/no Places fallback is available \(GOOGLE_MAPS_API_KEY is not set\)/);
-    expect(notify.mock.calls[0][2]).not.toMatch(/will attempt/);
+    expect(notify.mock.calls[0][3].detail).toMatch(/no Places fallback is available \(GOOGLE_MAPS_API_KEY is not set\)/);
+    expect(notify.mock.calls[0][3].detail).not.toMatch(/will attempt/);
     process.env.GOOGLE_MAPS_API_KEY = 'test-key';
     db.__state.rows.notifications = [];
     await service._notifyDegradedSync({ ...loc, id: 'sarasota', name: 'Sarasota' }, trip);
-    expect(notify.mock.calls[1][2]).toMatch(/will attempt the Places sample fallback/);
+    expect(notify.mock.calls[1][3].detail).toMatch(/will attempt the Places sample fallback/);
     // A breaker trip before any row stored uses the `(0 stored; last: …)`
     // format — the body must not claim the stored reviews are current (codex r11 P2).
     db.__state.rows.notifications = [];
     await service._notifyDegradedSync({ ...loc, id: 'venice', name: 'Venice' }, trip.replace('(2 stored;', '(0 stored;'));
-    expect(notify.mock.calls[2][2]).toMatch(/NO review from this pull was stored/);
-    expect(notify.mock.calls[1][2]).toMatch(/The stored reviews are current/);
+    expect(notify.mock.calls[2][3].detail).toMatch(/NO review from this pull was stored/);
+    expect(notify.mock.calls[1][3].detail).toMatch(/The stored reviews are current/);
     if (saved === undefined) delete process.env.GOOGLE_MAPS_API_KEY; else process.env.GOOGLE_MAPS_API_KEY = saved;
     notify.mockRestore();
   });

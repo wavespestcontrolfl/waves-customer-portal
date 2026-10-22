@@ -511,6 +511,70 @@
     "approval": "ui_confirm",
     "scope": "record"
   },
+  "pause_invoice_reminders": {
+    "module": "invoice-reminder-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "resume_invoice_reminders": {
+    "module": "invoice-reminder-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "stop_invoice_reminders": {
+    "module": "invoice-reminder-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "send_invoice_reminder_now": {
+    "module": "invoice-reminder-tools.js",
+    "domain": "customers",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "schedule_invoice_send": {
+    "module": "invoice-reminder-tools.js",
+    "domain": "customers",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "create_payment_plan": {
+    "module": "payment-plan-tools.js",
+    "domain": "customers",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "cancel_payment_plan": {
+    "module": "payment-plan-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "create_invoice": {
+    "module": "create-invoice-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "remove_saved_payment_method": {
     "module": "billing-write-tools.js",
     "domain": "customers",

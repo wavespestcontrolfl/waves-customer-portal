@@ -311,7 +311,7 @@ async function submitReviewReply(reviewId, replyText, groundingToken, { reviewPi
     const grounding = await buildReplyGrounding(review);
     const recentReplies = await Drafter.loadRecentPostedReplies(review.location_id);
     const verdict = Drafter.verifyReplyText(replyText, grounding, { recentReplies });
-    if (verdict) return { error: `That reply does not pass the public-reply safety checks (${verdict}). Draft it again with draft_review_reply, or post it from the Reviews page editor.`, code: 'verifier_reject', rejection: verdict };
+    if (verdict) return { error: `That reply does not pass the public-reply safety checks (${verdict}). Draft it again with draft_review_reply; the bar can\'t post a reply that fails them from here.`, code: 'verifier_reject', rejection: verdict };
     // The draft is bound to the review + account facts it was WRITTEN from
     // (the grounding_token draft_review_reply returned), not to whatever the
     // row says at submission time: a reviewer rewrite the sync recorded in

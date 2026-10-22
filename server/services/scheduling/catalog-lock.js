@@ -17,7 +17,7 @@
 // every INSERT / UPDATE / DELETE on `services` takes implicitly — and with
 // the SHARE ROW EXCLUSIVE lock the engine-key migrations take explicitly. So
 // service-library's admin writes AND Railway pre-deploy migrations (which run
-// while previous instances are still live, railway.toml) wait out any
+// while previous instances are still live, Railway pre-deploy) wait out any
 // in-flight certification, with no advisory-lock convention for a writer to
 // forget. SHARE does not conflict with SHARE or with the ROW SHARE lock a
 // FOR SHARE read takes, so concurrent bookings never block each other.

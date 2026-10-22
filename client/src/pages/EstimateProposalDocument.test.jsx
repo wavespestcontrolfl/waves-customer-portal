@@ -1055,16 +1055,15 @@ describe('EstimateProposalDocument — monthly average beside per-application pr
     expect(text).not.toMatch(/Averaged over the year/);
   });
 
-  // GATE_ESTIMATE_APPLICATION_MONTHS (owner 2026-10-22): the page's "What you pay" rows in the PDF.
+  // Application months (owner 2026-10-22): the page's "What you pay" rows in the PDF.
   describe('application months', () => {
     const pestMosquito = {
       lines: [perAppLine('Pest Control — 4 applications/yr', 115.2, 4), perAppLine('Mosquito — 12 applications/yr', 74.7, 12)],
       monthlyAverage: { planMonthly: 113.1, credit: null, bundleDiscountPct: 0.1, oneTime: null },
     };
-    const withSwitch = (data, on = true) => ({ ...data, ...(on ? { applicationMonthsEnabled: true } : {}) });
 
     it('prints the two month rows, then the plan average, and no per-service monthly slice', () => {
-      const { container } = render(<EstimateProposalDocument data={withSwitch(docData(pestMosquito))} token="tok-123" />);
+      const { container } = render(<EstimateProposalDocument data={docData(pestMosquito)} token="tok-123" />);
       const applied = container.querySelector('[data-application-months-applied]');
       const other = container.querySelector('[data-application-months-other]');
       expect(applied.textContent).toBe('Months with Pest Control (4 a year)Pest Control + Mosquito$189.90');
@@ -1077,25 +1076,20 @@ describe('EstimateProposalDocument — monthly average beside per-application pr
       expect(container.textContent).not.toContain('applications/yr (');
     });
 
-    it('switch off (absent on /data): the document is the monthly-average one, byte for byte', () => {
-      const off = render(<EstimateProposalDocument data={withSwitch(docData(pestMosquito), false)} token="tok-123" />).container.innerHTML;
-      expect(off).not.toContain('data-application-months');
-      expect(render(<EstimateProposalDocument data={withSwitch(docData(pestMosquito), false)} token="tok-123" />).container.querySelectorAll('[data-monthly-average-line]')).toHaveLength(2);
-      // and the switch changes nothing for a plan the breakdown does not cover
-      const strip = (html) => html.replace(/\s+/g, ' ');
+    it('a plan the breakdown does not cover keeps the monthly-average document, with no month rows', () => {
       for (const fixture of [single, bundle]) {
-        expect(strip(render(<EstimateProposalDocument data={withSwitch(docData(fixture))} token="tok-123" />).container.innerHTML))
-          .toBe(strip(render(<EstimateProposalDocument data={withSwitch(docData(fixture), false)} token="tok-123" />).container.innerHTML));
+        expect(render(<EstimateProposalDocument data={docData(fixture)} token="tok-123" />).container.innerHTML)
+          .not.toContain('data-application-months');
       }
     });
 
-    it('the monthly average gate off (no inputs from the server) shows nothing even with the switch', () => {
-      const text = render1(withSwitch(docData({ ...pestMosquito, monthlyAverage: null })));
+    it('the monthly average gate off (no inputs from the server) shows nothing', () => {
+      const text = render1(docData({ ...pestMosquito, monthlyAverage: null }));
       expect(text).not.toMatch(/What you pay|a month|Averaged over the year/);
     });
 
     it('a plan credit has no fixed month: the document keeps the credit lines and no month rows', () => {
-      const data = withSwitch(docData({ ...pestMosquito, monthlyAverage: { planMonthly: 108.1, credit: { label: 'Referral Credit', monthly: 5 }, bundleDiscountPct: 0.1, oneTime: null } }));
+      const data = docData({ ...pestMosquito, monthlyAverage: { planMonthly: 108.1, credit: { label: 'Referral Credit', monthly: 5 }, bundleDiscountPct: 0.1, oneTime: null } });
       const { container } = render(<EstimateProposalDocument data={data} token="tok-123" />);
       expect(container.querySelector('[data-application-months]')).toBeNull();
     });

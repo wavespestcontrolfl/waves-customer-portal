@@ -45,7 +45,7 @@ describe('startJob with a technician request', () => {
     expect(entry).toMatchObject({ job_id: 'job-A', customer_id: 'cust-1' });
   });
 
-  test('the geofence path (no scopeReq) is unchanged', async () => {
+  test('an unscoped (admin) start (no scopeReq) is unchanged', async () => {
     mockJob = { id: 'job-B', customer_id: 'cust-2', service_type: 'Pest' };
     await timeTracking.startJob('tech-A', 'job-B', {});
     const jobRead = mockCalls.find(([k, t]) => k === 'query' && t === 'scheduled_services')[2];
@@ -58,8 +58,8 @@ describe('route wiring', () => {
   const path = require('path');
   const read = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
 
-  test('both technician start paths pass the request as scope and answer 404', () => {
-    for (const rel of ['routes/tech-timetracking.js', 'routes/tech-notifications.js']) {
+  test('the technician start path passes the request as scope and answers 404', () => {
+    for (const rel of ['routes/tech-timetracking.js']) {
       const src = read(rel);
       expect(src).toMatch(/startJob\(req\.technicianId, [^)]*scopeReq: req \}\)/);
       expect(src).toMatch(/job_not_assigned'\) return res\.status\(404\)/);

@@ -207,11 +207,12 @@ describe('invoice-followups micro-deposit diversion', () => {
       expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('not advanced after its verification nudge'));
     });
 
-    test('an ordinary (unowned) touch keeps its unguarded advance, as before', async () => {
+    test('an ordinary (unowned) touch advances only while the row is still active (no claim or step guard)', async () => {
       const progress = chain({ updateResult: 1 });
       setDbQueues(queues(progress));
       await InvoiceFollowUps._test.fireStep({ ...row });
-      expect(progress.where.mock.calls[0][0]).toEqual({ id: 'seq-1' });
+      // A pause or stop that landed during the send is not overwritten.
+      expect(progress.where.mock.calls[0][0]).toEqual({ id: 'seq-1', status: 'active' });
     });
   });
 

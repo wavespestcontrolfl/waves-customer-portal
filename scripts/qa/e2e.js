@@ -366,11 +366,12 @@ async function main() {
           products: [{ productId: fixture.productId, totalAmount: 1, amountUnit: 'fl_oz', rateUnit: 'fl_oz', areaValue: 100, areaUnit: 'linear_ft', applicationArea: 'Exterior' }], sendCompletionSms: false, requestReview: false, offerInspectionCredit: false,
           timeOnSite: 30, areasServiced: ['Exterior'], protocolActionsCompleted: [] },
       };
-      const missingArea = await json(await page.request.post(`${baseUrl}/api/admin/dispatch/${fixture.appointmentId}/complete`, {
-        ...completionRequest, headers: { ...completionRequest.headers, 'Idempotency-Key': `${fixture.runId}-missing-area` },
-        data: { ...completionRequest.data, products: [{ ...completionRequest.data.products[0], areaValue: null, areaUnit: null }] },
+      // Linear feet are optional on a perimeter spray, but a length that is sent must be a positive number.
+      const badLength = await json(await page.request.post(`${baseUrl}/api/admin/dispatch/${fixture.appointmentId}/complete`, {
+        ...completionRequest, headers: { ...completionRequest.headers, 'Idempotency-Key': `${fixture.runId}-bad-length` },
+        data: { ...completionRequest.data, products: [{ ...completionRequest.data.products[0], areaValue: 0, areaUnit: 'linear_ft' }] },
       }), 400);
-      assert.equal(missingArea.code, 'linear_ft_required');
+      assert.equal(badLength.code, 'linear_ft_invalid');
       assert.equal((await db('service_records').where({ scheduled_service_id: fixture.appointmentId })).length, 0);
       assert.equal(Number((await db('products_catalog').where({ id: fixture.productId }).first()).inventory_on_hand), 10);
       const completions = await Promise.all([

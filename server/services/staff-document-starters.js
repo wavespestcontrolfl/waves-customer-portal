@@ -98,8 +98,8 @@ Call emergency services when needed and notify the Operations Lead immediately; 
 
 ## Facts and follow-up {#incident-follow-up}
 Record observed facts, immediate controls, notification evidence and the corrective-action owner and deadline. The Office Manager tracks paperwork and deadlines, the Operations Lead owns immediate field controls, and the Owner or authorized Acting Owner owns final business review. The Certified Operator in Charge handles applicable regulatory reporting; internal approval must not delay required reporting. [DECISION: verify the incident contact roster, applicable reporting deadlines and review responsibilities].`, [field('incident-time', 'Incident date and time'), field('location-reference', 'Work location / service ID'), field('observed-facts', 'Observed facts', 'textarea'), field('notifications', 'Who was notified and when', 'textarea'), field('corrective-action', 'Controls and corrective-action evidence', 'textarea'), field('review-reference', 'Supervisor review reference')]) },
-  // Parity with the draft the owner created by hand in production (same key). Auto clock-in requires a
-  // completed record on this form (services/geofence-auto-clock-in.js hasVehicleAgreement).
+  // Parity with the draft the owner created by hand in production (same key). The onboarding
+  // reads (services/staff-onboarding.js VEHICLE_AGREEMENT_KEY) look for a completed record on this form.
   { key: 'vehicle-use-commuting-agreement', kind: 'form', access: 'staff', source: source('Vehicle Use & Commuting Agreement', `## Company vehicle and commuting {#vehicle-commuting}
 This agreement covers the company vehicle assigned to you and the drive between your home and your first and last stops. [DECISION: confirm the commuting terms, including whether the commute is paid time, personal use limits and any reimbursement or deduction, before issuing].
 

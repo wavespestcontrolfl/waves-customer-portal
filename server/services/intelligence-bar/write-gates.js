@@ -105,6 +105,19 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   // void_invoice (owner ruling 2026-10-12): the Invoices page's Void handler, run in process behind a card;
   // an invoice with nothing collected only, sends nothing.
   'void_invoice',
+  // Invoice reminder and payment-plan cards (owner ruling 2026-10-12, Stage 3 purpose-built cards): each runs the Invoices
+  // page's own handler in process behind a card. send_invoice_reminder_now, schedule_invoice_send and create_payment_plan
+  // reach the customer (a reminder text and email, a scheduled invoice send, the plan confirmation email); the rest send nothing.
+  'pause_invoice_reminders',
+  'resume_invoice_reminders',
+  'stop_invoice_reminders',
+  'send_invoice_reminder_now',
+  'schedule_invoice_send',
+  'create_payment_plan',
+  'cancel_payment_plan',
+  // create_invoice (owner ruling 2026-10-12): the Invoices page's create handler, run in process behind a card;
+  // a draft only, sends nothing.
+  'create_invoice',
   'update_lead_contact',
   // propose_admin_edit (owner ruling 2026-10-12): one reviewed small internal
   // edit, replayed through the screen's own PUT or PATCH after a confirm card.

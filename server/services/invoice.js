@@ -6664,6 +6664,9 @@ const InvoiceService = {
     serviceRecordId = null,
     scheduledServiceId = null,
     title = null,
+    // Intelligence Bar create_invoice only: the caller's explicit taxRate, resolved as create() resolves one (residential or
+    // payer-exempt = 0; a verified exemption zeroes it for a self-pay invoice). undefined = the calculator, as before.
+    taxRate = undefined,
     database = db,
   }) {
     const cust =
@@ -6737,6 +6740,16 @@ const InvoiceService = {
     if (!isCommercial || payerTaxExempt) {
       rate = 0;
       taxAmount = 0;
+    } else if (taxRate !== undefined) {
+      rate = taxRate;
+      if (Number(rate) > 0 && !previewPayerBilled) {
+        try {
+          if (await TaxCalculator.findVerifiedExemption(customerId, { database })) rate = 0;
+        } catch (err) {
+          logger.warn(`[invoice] preview verified-exemption check failed for explicit taxRate (customer ${customerId}): ${err.message}`);
+        }
+      }
+      taxAmount = Math.round(subtotal * rate * 100) / 100;
     } else {
       try {
         // Mirror create(): a non-exempt payer's preview must not show the
