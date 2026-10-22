@@ -759,6 +759,13 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(await contactGrounded('Jhon A Smith needs notes updated at 941-555-0100')).toEqual([]);
     expect(await contactGrounded('fix the notes on 941-555-0100')).toEqual([id(100)]);
     expect(await contactGrounded('941-555-0100 needs the notes fixed')).toEqual([id(100)]);
+    // Any unknown word beside the contact may be a name the grammar misses: carded (r37).
+    for (const prompt of ['update notes for Pat2 Missing phone 941-555-0100', 'update notes for Jhon phone 941-555-0100', 'update notes 941-555-0100 Smith']) {
+      expect([prompt, await contactGrounded(prompt)]).toEqual([prompt, []]);
+    }
+    for (const prompt of ['update the notes for the customer with phone 941-555-0100', 'change the notes on 941-555-0100', 'update the account notes for 941-555-0100']) {
+      expect([prompt, await contactGrounded(prompt)]).toEqual([prompt, [id(100)]]);
+    }
     // A quoted or cut-off name takes the page too; a field's own colon or quoted value does not.
     expect(await viewingBob('update "Jhon Smith" phone')).toBe(false);
     expect(await viewingBob('update this customer phone: Jhon Smith')).toBe(true);

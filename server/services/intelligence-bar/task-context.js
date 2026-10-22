@@ -675,10 +675,27 @@ async function directGroundedIds(fullPrompt, namedResult, cohort, nameHint) {
 
 // The second simple case: one contact literal, no typed name (a name that was requested but
 // resolved to nobody is a typed name), and that contact names exactly one customer.
+// Owner ruling 2026-10-22: a contact goes direct only with "no name or other qualifier". So every
+// word beside the contact must be a known word (an action verb, a field or record word, filler or a
+// small preposition); any other word may be a name in a form the name grammar misses ("Pat2
+// Missing") and the request is carded (Codex #6369 r37: allow-list for the whole clause).
+const CONTACT_CLAUSE_WORDS = new Set(['on', 'for', 'of', 'with', 'at', 'by', 'from', 'in', 'system', 'portal', 'app', 'whose', 'who', 'owner', 'owns', 'belongs', 'belonging', 'person', 'one']);
+const WEEKDAY_OR_TIME_RE = /^(?:mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)(?:day)?s?$|^(?:morning|afternoon|evening|tonight|week|month|am|pm|noon)$|^\d{1,2}(?::?\d{2})?(?:am|pm)?$/;
+// "fixed", "updating", "changes": an inflected action verb is still a verb.
+const actionVerbForm = word => ACTION_VERBS.has(word) || [/(?:ed|d|ing|s|es)$/].some(re => {
+  const stem = word.replace(re, '');
+  return stem !== word && (ACTION_VERBS.has(stem) || ACTION_VERBS.has(`${stem}e`) || ACTION_VERBS.has(stem.replace(/(.)\1$/, '$1')));
+});
+function onlyKnownWordsBesideContact(clause) {
+  return normalizeName(withoutContacts(clause)).split(' ').filter(Boolean)
+    .every(word => actionVerbForm(word) || NON_PERSON_NAMES.has(word) || SUBJECT_FILLER.has(word) || SUBJECT_END.has(word)
+      || CONTACT_CLAUSE_WORDS.has(word) || WEEKDAY_OR_TIME_RE.test(word));
+}
+
 async function contactOnlyGroundedIds(bounded, clause, nameHint) {
   const literals = contactLiteralsOf(clause);
-  // An unknown leading subject is a typed name too (pre-push audit, r36).
-  if (literals.length !== 1 || nameHint || unknownLeadingSubject(bounded) || RECORD_ID_RE.test(clause) || INITIAL_FORM_RE.test(bounded) || placeQualifierPresent(clause)) return [];
+  // An unknown leading subject is a typed name too (pre-push audit, r36), and so is any unknown word (r37).
+  if (literals.length !== 1 || nameHint || unknownLeadingSubject(bounded) || !onlyKnownWordsBesideContact(clause) || RECORD_ID_RE.test(clause) || INITIAL_FORM_RE.test(bounded) || placeQualifierPresent(clause)) return [];
   const owners = await resolveContacts(literals);
   return owners.size === 1 ? [...owners.keys()] : [];
 }
@@ -839,6 +856,19 @@ function unknownLeadingSubject(bounded) {
   return false;
 }
 
+// Shapes that take the page's authority whatever the message names: a compound request (pre-push
+// audit, r27), a record id not on the page (r29), text after a cut that is never read for identity (r34).
+function pageAuthorityShapeBlocked(bounded, matches, page) {
+  return isCompound(bounded, matches) || !recordIdsAreOnPage(bounded, page) || hasUnreadTail(bounded);
+}
+
+// Whether the message carries identity evidence about a customer: a requested name, a leading word
+// outside the allow-list (r36), a contact, a place, or a name that resolved even when namesRequested
+// missed its form ("Alice Jones needs notes cleared", r34).
+function pageIdentityEvidence(bounded, nameHint, matches, contacts, place) {
+  return nameHint || unknownLeadingSubject(bounded) || contacts || place || matches.length > 0;
+}
+
 function pageGroundingBlocked(fullPrompt, namedResult, cohort, nameHint, page) {
   const pageCustomerId = page?.customer?.customer_id || page?.ids?.customer_id;
   const bounded = boundedPrompt(fullPrompt);
@@ -847,14 +877,9 @@ function pageGroundingBlocked(fullPrompt, namedResult, cohort, nameHint, page) {
   const matches = namedResult.matches || [];
   const contacts = contactLiteralsOf(clause).length > 0;
   const place = placeQualifierPresent(clause, matches);
-  // A compound request takes the page's authority whatever else it says (pre-push audit, r27).
-  // Text after a cut is never read for identity, so it takes the page's authority too (pre-push audit, r34).
-  if (isCompound(bounded, matches) || !recordIdsAreOnPage(bounded, page) || hasUnreadTail(bounded)) return true;
-  // A name that resolved to a customer is identity evidence even when namesRequested missed its form
-  // ("Alice Jones needs notes cleared"): only the exact page customer keeps the page (Codex #6369 r34).
-  // A leading word outside the allow-list is identity evidence too (r36).
-  const nameEvidence = nameHint || unknownLeadingSubject(bounded);
-  if (!nameEvidence && !contacts && !place && !matches.length) return false;
+  if (pageAuthorityShapeBlocked(bounded, matches, page)) return true;
+  if (!pageIdentityEvidence(bounded, nameHint, matches, contacts, place)) return false;
+  // With evidence, only the exact page customer, named alone, keeps the page.
   const exact = !cohort && namedResult.complete !== false && !namedResult.multiple && matches.length === 1
     && String(matches[0].id) === String(pageCustomerId) && !contacts && !place;
   return !exact;
