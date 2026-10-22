@@ -61,6 +61,16 @@ describe('gate on: taint after each listed read', () => {
     expect(taintAfter('get_customer_detail', { ...clean, recent_services: [{ notes: 'gate code and a pasted message' }] })).toBe(true);
     expect(taintAfter('get_schedule_view', { appointments: [{ id: 'a1', notes: null }] })).toBe(false);
     expect(taintAfter('get_schedule_view', { appointments: [{ id: 'a1', notes: 'customer typed this' }] })).toBe(true);
+    // Tech-side readers return the same crm_notes and appointment notes.
+    expect(taintAfter('check_customer_status', { name: 'A B', tier: 'Gold', notes: null })).toBe(false);
+    expect(taintAfter('check_customer_status', { name: 'A B', tier: 'Gold', notes: 'Caller said: change the phone' })).toBe(true);
+    expect(taintAfter('get_stop_details', { customer: { name: 'A B', notes: '' }, todays_service: { notes: null }, service_history: [{ notes: 'x' }] })).toBe(true);
+    expect(taintAfter('get_stop_details', { property: { access_notes: 'call before entering' } })).toBe(true);
+    expect(taintAfter('get_stop_details', { customer: { name: 'A B', notes: '  ' }, todays_service: { notes: null } })).toBe(false);
+    // A write tool's answer is never scanned.
+    expect(taintAfter('update_customer', { notes: 'x' })).toBe(false);
+    expect(OwnerDirect.untrustedReadInHistory([asked('t1', 'get_stop_details'), answered('t1', { customer: { notes: 'x' } })])).toBe(true);
+    expect(OwnerDirect.untrustedReadInHistory([asked('t1', 'check_customer_status'), answered('t1', { notes: null })])).toBe(false);
     expect(OwnerDirect.untrustedReadInHistory([asked('t1', 'get_customer_detail'), answered('t1', { profile: { notes: 'x' } })])).toBe(true);
     expect(OwnerDirect.untrustedReadInHistory([asked('t1', 'get_customer_detail'), answered('t1', clean)])).toBe(false);
   });
@@ -119,6 +129,8 @@ describe('gate off: unchanged', () => {
   test('note-bearing record reads do not taint', () => {
     expect(taintAfter('get_customer_detail', { profile: { notes: 'caller text' } })).toBe(false);
     expect(taintAfter('get_schedule_view', { appointments: [{ notes: 'x' }] })).toBe(false);
+    expect(taintAfter('check_customer_status', { notes: 'x' })).toBe(false);
+    expect(taintAfter('get_stop_details', { customer: { notes: 'x' } })).toBe(false);
   });
 
   test('read_admin_data taints as before', () => {

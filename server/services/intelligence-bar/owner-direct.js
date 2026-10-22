@@ -189,12 +189,14 @@ function isDataAnswer(result) {
 // A prompt-injected message read through one of them could drive a cardless
 // write (a phone-only update_customer changes the portal login key). With the
 // gate on, every tool in this one list sets the same per-request flag.
-// Record lookups the owner-direct edit flow starts from (query_customers,
-// get_customer_detail, get_schedule_view) taint only when the answer holds a
-// free-text note (NOTE_READ_TOOLS below): the call processor writes
-// caller-derived text into crm_notes, and booking notes are customer-typed
-// (Codex r1 on the audit fix). A record with no note stays card-free, so a
-// plain "fix this customer's name" flow keeps working.
+// Every OTHER read tool (action-policy.json kind 'read') taints only when its
+// answer holds a free-text note field (NOTE_FIELD below): the call processor
+// writes caller-derived text into crm_notes and booking notes are
+// customer-typed, and several readers return them (get_customer_detail,
+// get_schedule_view, check_customer_status, get_stop_details, ...). Scanning
+// the answer for the field, not naming each reader, keeps a reader added later
+// covered (Codex r1/r2 on this fix). A record with no note stays card-free, so
+// a plain "fix this customer's name" lookup keeps working.
 // A new read tool that returns sender-authored text is added here.
 const SENDER_TEXT_READ_TOOLS = new Set([
   // SMS and calls (comms-tools.js)
@@ -210,19 +212,31 @@ const SENDER_TEXT_READ_TOOLS = new Set([
   'search_ib_history',
 ]);
 
-// Record reads that carry sender text only in their note fields.
-const NOTE_READ_TOOLS = {
-  get_customer_detail: result => Boolean(String(result?.profile?.notes ?? '').trim())
-    || (Array.isArray(result?.recent_services) && result.recent_services.some(row => String(row?.notes ?? '').trim())),
-  get_schedule_view: result => Array.isArray(result?.appointments) && result.appointments.some(row => String(row?.notes ?? '').trim()),
-};
+const POLICY = require('./action-policy.json');
+const NOTE_FIELD = /^(?:[a-z]+_)*notes?$/i;
+const SCAN_NODE_LIMIT = 20000;
+
+// Does the answer hold a non-empty note string anywhere? Past the node limit
+// the scan gives up and says yes (fail closed).
+function holdsNoteText(result) {
+  let nodes = 0;
+  const walk = (value, depth) => {
+    if (++nodes > SCAN_NODE_LIMIT || depth > 8) return true;
+    if (Array.isArray(value)) return value.some(item => walk(item, depth + 1));
+    if (!value || typeof value !== 'object') return false;
+    return Object.entries(value).some(([key, item]) => (typeof item === 'string' && NOTE_FIELD.test(key) ? Boolean(item.trim()) : walk(item, depth + 1)));
+  };
+  return walk(result, 0);
+}
+
+const isReadTool = toolName => Object.hasOwn(POLICY, toolName) && POLICY[toolName].kind === 'read';
 
 // Does this tool's answer carry text a lower-trust sender could have written?
 // Only with the gate on. Unparseable or missing answers are decided by callers.
 function answerCarriesSenderText(toolName, result) {
   if (!ibOwnerDirectTaintAllReadsLive()) return false;
   if (SENDER_TEXT_READ_TOOLS.has(toolName)) return carriesSenderText(result);
-  return Object.hasOwn(NOTE_READ_TOOLS, toolName) && NOTE_READ_TOOLS[toolName](result);
+  return isReadTool(toolName) && holdsNoteText(result);
 }
 
 // A refusal that carries only a message holds no sender text; any other answer
@@ -246,7 +260,7 @@ function untrustedReadInHistory(messages) {
   const blocks = (Array.isArray(messages) ? messages : []).flatMap(message => (Array.isArray(message?.content) ? message.content : []));
   const allReads = ibOwnerDirectTaintAllReadsLive();
   const readBlocks = blocks.filter(block => block?.type === 'tool_use'
-    && (block.name === GENERAL_READ_TOOL || (allReads && (SENDER_TEXT_READ_TOOLS.has(block.name) || Object.hasOwn(NOTE_READ_TOOLS, block.name)))));
+    && (block.name === GENERAL_READ_TOOL || (allReads && (SENDER_TEXT_READ_TOOLS.has(block.name) || isReadTool(block.name)))));
   if (!readBlocks.length) return false;
   const answers = new Map(blocks.filter(block => block?.type === 'tool_result').map(block => [block.tool_use_id, block]));
   return readBlocks.some((read) => {
@@ -489,4 +503,4 @@ You are talking to the owner. Do what they ask.
 - Never send the owner to another screen, never explain limitations, never apologize. If something truly cannot be done from here, say so in one sentence and offer the closest thing you can do.
 - Replies: 1–3 short lines. No preamble, no recap of the request, no "anything else?". Lists and numbers only when the owner asked for data.`;
 
-module.exports = { SENDER_TEXT_READ_TOOLS, NOTE_READ_TOOLS, loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };
+module.exports = { SENDER_TEXT_READ_TOOLS, loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };
