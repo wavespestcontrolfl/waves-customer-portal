@@ -3720,7 +3720,17 @@ or that widens the hold beyond `missing_token`, is a P0),
 posts/by-slug/:slug, rss, quiz/:token/:quizId/:answer,
 feedback/:token/:reaction, e/:token/:eventId (event click-through:
 records one deduped analytics row then 302s to the DB-locked event
-URL; unknown token = untracked redirect, never blocks the reader)
+URL; unknown token = untracked redirect, never blocks the reader.
+With `GATE_NEWSLETTER_CLICK_BOUND=true` the event URL is honoured only
+when the token is a real delivery AND the event is in that send's
+`event_ids` or `alternate_event_ids`; an unknown token, an event outside
+the lineup, or a membership lookup that fails goes to the homepage
+(`https://www.wavespestcontrol.com/`). A click-row write that fails AFTER
+membership was verified still sends the reader to the event. The per-IP
+over-budget path records nothing and applies the same membership check.
+The same gate stops iCal / calendar-RSS feed pulls from overwriting
+`event_url` on an approved or featured event. Gate off = the behaviour
+above this note, unchanged)
 — rate-limited, read-only for posts/rss,
 double-opt-in for subscribe (the response is unchanged and uniform; `source` is free text,
 and ONLY `source: "out_of_area_waitlist"` also reads the optional body `zip` / `city`

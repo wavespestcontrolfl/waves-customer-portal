@@ -188,10 +188,15 @@ async function recordEventClick({ engagementToken, eventId, userAgent }, knex = 
   const destination = event?.event_url || fallback;
   if (!event) return { redirectUrl: fallback, recorded: false };
   const bound = newsletterClickBound();
+  // Gate on: the event URL is released only after membership is verified;
+  // a failed membership lookup goes home, a failed click-row write after
+  // verification still sends the reader to the event.
+  let verifiedTarget = bound ? fallback : destination;
   try {
     const { delivery, lockedIds, member } = await sendMembershipFor(engagementToken, eventId, knex);
     if (!delivery) return { redirectUrl: bound ? fallback : destination, recorded: false };
     const unboundTarget = bound && !member ? fallback : destination;
+    verifiedTarget = unboundTarget;
     const position = lockedIds.indexOf(String(eventId).toLowerCase());
     if (position < 0) {
       // The event is not in this send's lineup — anyone holding a delivery
@@ -212,7 +217,7 @@ async function recordEventClick({ engagementToken, eventId, userAgent }, knex = 
     return { redirectUrl: destination, recorded: true };
   } catch (err) {
     logger.warn(`[newsletter-event-clicks] record failed (redirecting anyway): ${err.message}`);
-    return { redirectUrl: bound ? fallback : destination, recorded: false };
+    return { redirectUrl: verifiedTarget, recorded: false };
   }
 }
 

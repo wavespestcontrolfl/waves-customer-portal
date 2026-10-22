@@ -17,11 +17,14 @@ const LOCKED = '11111111-1111-4111-8111-111111111111';
 const ALT = '22222222-2222-4222-8222-222222222222';
 const OTHER = '33333333-3333-4333-8333-333333333333';
 
-function fakeKnex({ deliveries = {}, sends = {}, events = {} } = {}) {
+function fakeKnex({ deliveries = {}, sends = {}, events = {}, failInsert = false, failMembership = false } = {}) {
   const inserts = [];
   const tables = {
     events_raw: (where) => events[where.id] || undefined,
-    newsletter_send_deliveries: (where) => deliveries[where.engagement_token] || undefined,
+    newsletter_send_deliveries: (where) => {
+      if (failMembership) throw new Error('db down');
+      return deliveries[where.engagement_token] || undefined;
+    },
     newsletter_sends: (where) => sends[where.id] || undefined,
   };
   const knex = (table) => {
@@ -31,7 +34,7 @@ function fakeKnex({ deliveries = {}, sends = {}, events = {} } = {}) {
       first: async () => (tables[table] ? tables[table](where) : undefined),
       insert(row) { inserts.push({ table, row }); return q; },
       onConflict() { return q; },
-      ignore: async () => undefined,
+      ignore: async () => { if (failInsert) throw new Error('insert failed'); },
     };
     return q;
   };
@@ -39,8 +42,9 @@ function fakeKnex({ deliveries = {}, sends = {}, events = {} } = {}) {
   return knex;
 }
 
-function world() {
+function world(opts = {}) {
   return fakeKnex({
+    ...opts,
     deliveries: { tok: { id: 'd1', send_id: 's1' } },
     sends: { s1: { event_ids: JSON.stringify([LOCKED]), alternate_event_ids: JSON.stringify([ALT]) } },
     events: {
@@ -76,6 +80,18 @@ describe('gate on', () => {
   test('unknown token goes home', async () => {
     const r = await recordEventClick({ engagementToken: 'nope', eventId: LOCKED, userAgent: 'Mozilla/5.0' }, world());
     expect(r).toEqual({ redirectUrl: HOME, recorded: false });
+  });
+
+  test('verified member still reaches the event when the click write fails', async () => {
+    const r = await recordEventClick({ engagementToken: 'tok', eventId: LOCKED, userAgent: 'Mozilla/5.0' }, world({ failInsert: true }));
+    expect(r).toEqual({ redirectUrl: 'https://venue.example/locked', recorded: false });
+  });
+
+  test('a failed membership lookup goes home', async () => {
+    const knex = world({ failMembership: true });
+    const r = await recordEventClick({ engagementToken: 'tok', eventId: LOCKED, userAgent: 'Mozilla/5.0' }, knex);
+    expect(r).toEqual({ redirectUrl: HOME, recorded: false });
+    await expect(eventRedirectWithoutRecording({ engagementToken: 'tok', eventId: LOCKED }, knex)).resolves.toBe(HOME);
   });
 
   test('over-budget path applies the same binding', async () => {
