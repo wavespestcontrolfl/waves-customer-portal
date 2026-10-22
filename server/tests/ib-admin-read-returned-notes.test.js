@@ -265,6 +265,13 @@ describe('Codex #6375 r7: spaced and punctuated credential assignments, any Auth
       expect(out).toContain('[private link removed]');
     }
   });
+  test('a card number with typographic separators or full-width digits is removed (Codex #6375 security r23)', () => {
+    for (const note of ['card 4242\u20134242\u20134242\u20134242 on file', 'card 4242\u00A04242\u00A04242\u00A04242', 'card \uFF14\uFF12\uFF14\uFF12 4242 4242 4242', 'card 4242\u200B4242\u200B4242\u200B4242']) {
+      const out = scrubNote(note);
+      expect(out.text).not.toMatch(/4242.?4242.?4242/);
+      expect(out.removed).toBeGreaterThan(0);
+    }
+  });
   test('ordinary prose and labels without a credential word stay as written', () => {
     const note = 'the password is in the lockbox. gate code: 1234, PIN: 8842, key under the mat, lockbox passcode: 4321';
     expect(scrubNote(note)).toEqual({ text: note, removed: 0 });

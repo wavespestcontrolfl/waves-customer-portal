@@ -131,6 +131,15 @@ function isAssignmentSecretKey(key) {
 const ALREADY_REMOVED_RE = /^(?:\[removed\]|(["']|\\["'])\[removed\]\1)$/;
 const isAlreadyRemoved = value => ALREADY_REMOVED_RE.test(value);
 
+// Typographic dashes and spaces become plain ones, full-width digits become ASCII
+// and invisible format characters go, so a card number written with them is
+// still found (Codex #6375 security r23).
+const plainDigitsAndSeparators = text => text
+  .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+  .replace(/[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/g, '-')
+  .replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
+  .replace(/[\uFF10-\uFF19]/g, digit => String.fromCharCode(digit.charCodeAt(0) - 0xFF10 + 48));
+
 const JWT_RE = /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*/g;
 // A JSON-escaped link (https:\/\/user:pw@host\/path) is a link too: the scheme slashes
 // and the path may carry a backslash before each slash (Codex #6375 r10).
@@ -288,7 +297,7 @@ function scrubNoteText(input) {
   removed += assigned.count;
   text = assigned.text;
   for (const pattern of PREFIXED_RES) text = text.replace(pattern, swap);
-  const noPans = scrubPans(text);
+  const noPans = scrubPans(plainDigitsAndSeparators(text));
   if (noPans !== text) removed += 1;
   const longRuns = scrubLongDigitRuns(noPans);
   removed += longRuns.count;
