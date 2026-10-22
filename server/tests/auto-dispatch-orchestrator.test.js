@@ -1742,6 +1742,27 @@ describe('move proofreader in pass 2 (GATE_AUTO_DISPATCH_PROOFREADER, owner 2026
     });
   });
 
+  test('a technician start address changed after scoring: nothing moves, no_change START_POINT_CHANGED, not a failed run', async () => {
+    await applyMode(async () => {
+      checkMove.mockResolvedValue(ALLOW);
+      apply.applyAutoDispatchMove.mockRejectedValue(Object.assign(new Error('start address changed'), { code: 'START_POINT_CHANGED', statusCode: 409 }));
+      const res = await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true });
+      expect(res).toMatchObject({ changed: 0, failed: 0, status: 'completed' });
+      expect(lastDecision('no_change').reason_code).toBe('START_POINT_CHANGED');
+      expect(lastDecision('failed')).toBeUndefined();
+    });
+  });
+
+  test('the same refusal with no proofreader check: no_change, and the apply is handed the start-point lookup', async () => {
+    await applyMode(async () => {
+      apply.applyAutoDispatchMove.mockRejectedValue(Object.assign(new Error('start address changed'), { code: 'START_POINT_CHANGED', statusCode: 409 }));
+      const res = await runAutoDispatch({ mode: 'apply' });
+      expect(res).toMatchObject({ changed: 0, failed: 0 });
+      expect(lastDecision('no_change').reason_code).toBe('START_POINT_CHANGED');
+      expect(typeof apply.applyAutoDispatchMove.mock.calls[0][3].startPointFor).toBe('function');
+    });
+  });
+
   test('the customer changed a stored preference while the model read: the visit stays and the next run rescores it', async () => {
     await applyMode(async () => {
       const preferences = require('../services/auto-dispatch/preferences');

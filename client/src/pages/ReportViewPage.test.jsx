@@ -102,6 +102,18 @@ describe('ReportViewPage report chrome helpers', () => {
     expect(reportAskPrompts(data, 'tree_shrub')).toContain('What areas were treated?');
   });
 
+  it('suggests exactly three questions on every service line, the visit\'s own first (owner 2026-10-22)', () => {
+    for (const line of ['pest', 'lawn', 'mosquito', 'tree_shrub']) {
+      expect(reportAskPrompts({}, line)).toHaveLength(3);
+    }
+    // A named product leads, and the fill adds no second "why" question beside it.
+    expect(reportAskPrompts({ applications: [{ product: { name: 'Taurus SC' } }] }, 'pest'))
+      .toEqual(['Why was Taurus SC used?', 'What should I watch for next?', 'What did you find today?']);
+    // Mosquito reports get the fixed-rule answer, so each fill question is one those rules answer as asked.
+    expect(reportAskPrompts({}, 'mosquito'))
+      .toEqual(['What can I do to cut down mosquitoes?', 'What did you find today?', 'When is my next service?']);
+  });
+
   it('visitWorkSummary counts serviced areas off the pest line only', () => {
     const base = {
       applications: [{ product: { name: 'Taurus SC' }, method: 'broadcast_spray' }],

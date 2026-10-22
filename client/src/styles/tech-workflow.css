@@ -448,6 +448,7 @@
 .tech-lawn-sheet textarea.ui-control.tech-visit-control { padding: 14px; }
 /* The mic inside the note's box (VisitNote micInside): bottom-right corner, with room so words never run under it. */
 .tech-visit-note-row--inside { position: relative; display: block; }
+.tech-visit-note-row--inside .tech-visit-note-field { position: relative; }
 .tech-visit-note-row--inside .tech-visit-note-mic { position: absolute; right: 8px; bottom: 8px; display: flex; }
 .tech-visit-note-row--inside textarea.ui-control.tech-visit-control { padding-right: 60px; }
 .tech-lawn-sheet .tech-visit-note-row--inside textarea.ui-control.tech-visit-control { padding: 14px 60px 14px 14px; }
@@ -500,3 +501,8 @@
 .tech-lawn-sheet .ui-action.tech-visit-action.tech-visit-complete { height: 48px; border: none; background: #111111; color: #ffffff; }
 .tech-lawn-sheet .ui-action.tech-visit-action.tech-visit-complete:hover:where(:not(:disabled)) { background: #000000; }
 .tech-lawn-sheet .ui-action.tech-visit-action.tech-visit-complete:disabled { opacity: .5; }
+
+/* The sheet header's call and email links (owner 2026-10-22). Each wraps on its own;
+   a long email breaks rather than widen the header. */
+.tech-visit-contact { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.tech-visit-contact a { color: inherit; text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; min-height: 24px; }

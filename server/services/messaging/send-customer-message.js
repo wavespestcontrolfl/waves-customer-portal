@@ -1205,6 +1205,27 @@ async function sendCustomerMessageCore(input) {
       };
     }
   };
+  const contactPrefsBoundaryVerdict = async () => {
+    if (sendInput.channel !== 'sms' || resolvedTrust !== 'service_contact_authorized') return { ok: true };
+    const column = policy.prefsColumn;
+    let declined;
+    try {
+      // requireSlot (codex r25 P2): the trust level is the fan-out's earlier
+      // classification — a number the holder removed from every slot since
+      // is a former contact, not an authorized one, and is held too.
+      declined = await require('../contact-notification-prefs').contactPhoneDeclinesText(
+        sendInput.customerId, sendInput.to, typeof column === 'string' ? column : null, { requireSlot: true },
+      );
+    } catch (err) {
+      return {
+        ok: false, code: 'CONTACT_PREFS_LOOKUP_FAILED', retryable: true, validator: 'contact_prefs_lookup_boundary',
+        reason: `Could not re-read the contact's notification choices: ${err.message}`,
+      };
+    }
+    return declined
+      ? { ok: false, code: 'CONTACT_DECLINED', reason: 'Contact declined this text through their own notification choices, or no longer occupies a contact slot', validator: 'contact_prefs_boundary' }
+      : { ok: true };
+  };
   const providerPreparationCheck = async ({ database: handoffDb } = {}) => {
     if (sendInput.metadata?.billingDeliveryLeg) {
       // Settings can change while a provider prepares its request. Never
@@ -1283,6 +1304,17 @@ async function sendCustomerMessageCore(input) {
     if (await callbackNumberHoldBlocksSend(sendInput)) {
       return rememberBoundaryBlock({ ...CALLBACK_NUMBER_HOLD_BLOCK }, 'callback_number_hold_boundary');
     }
+    // On-location contact's own choices boundary re-check (codex #6363 r24
+    // P2): the fan-outs (appointment reminders, en-route, arrived, …) filter
+    // their recipient lists through filterContactsByOwnPrefs before the body
+    // renders and the provider prepares — a contact who turns this purpose or
+    // texts off in between must still be held HERE, the one chokepoint every
+    // SMS leg passes. Keyed on the leg's trust level: only a service-contact
+    // leg (identityTrustLevel 'service_contact_authorized') carries a row;
+    // the holder's own number and the gate off never decline. Fail closed:
+    // the helper holds an unreadable row; a thrown read defers retryably.
+    const { validator: contactValidator, ...contactVerdict } = await contactPrefsBoundaryVerdict();
+    if (!contactVerdict.ok) return rememberBoundaryBlock(contactVerdict, contactValidator);
     const callerVerdict = await runCallerPreSendCheck(handoffDb);
     if (!callerVerdict.ok) return rememberBoundaryBlock(callerVerdict, 'pre_send_check_boundary');
     const providerVerdict = await runCallerPreProviderCheck();

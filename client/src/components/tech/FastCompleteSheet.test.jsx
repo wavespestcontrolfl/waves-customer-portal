@@ -123,7 +123,9 @@ describe('FastCompleteSheet', () => {
     fireEvent.change(screen.getByLabelText('Which pest?'), { target: { value: 'Palmetto bugs' } });
     fireEvent.click(screen.getByRole('button', { name: 'Outside' }));
     fireEvent.click(screen.getByRole('button', { name: 'Perimeter spray' }));
-    expect(screen.getByText('Enter the linear feet you sprayed.')).toBeTruthy();
+    // Linear feet are optional (owner 2026-10-22): the box shows, but an empty one holds nothing.
+    expect(screen.getByLabelText('Linear ft sprayed')).toBeTruthy();
+    expect(screen.queryByText('Enter the linear feet you sprayed.')).toBeNull();
     fireEvent.change(screen.getByLabelText('Linear ft sprayed'), { target: { value: '140' } });
     fireEvent.click(screen.getByRole('button', { name: 'Heavy' }));
     fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));

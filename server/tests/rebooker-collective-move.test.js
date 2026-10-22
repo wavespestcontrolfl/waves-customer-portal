@@ -1593,7 +1593,7 @@ describe('caller wiring (source)', () => {
   test('the IB reschedule tool refuses a gated cadence date move instead of moving one row (until its series path lands)', () => {
     const src = read('../services/intelligence-bar/tools.js');
     const fn = src.indexOf('async function rescheduleAppointment(');
-    const refuse = src.indexOf("code: 'COLLECTIVE_MOVE_REQUIRED'", fn);
+    const refuse = src.indexOf("code: 'collective_move_unsupported'", fn);
     const write = src.indexOf('scheduled_date: dateStr,', fn);
     expect(refuse).toBeGreaterThan(fn);
     expect(refuse).toBeLessThan(write);
