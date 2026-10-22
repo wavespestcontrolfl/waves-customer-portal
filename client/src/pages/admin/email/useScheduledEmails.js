@@ -5,15 +5,17 @@ import { adminFetch } from "./emailApi";
 // Cancelled emails already back in the composer whose "restored" mark the
 // server has not confirmed. They stay hidden here, and every reload sends the
 // mark again, so Open as draft can never bring the same text back twice.
-const PENDING_KEY = "waves_email_restored_pending";
-function readPending() {
+// Kept per signed-in user, and removed with the drafts at sign-out
+// (clearEmailDrafts), so another user never marks a row they do not hold.
+const pendingKey = (userId) => `waves_email_restored_pending:${userId}`;
+function readPending(userId) {
   try {
-    const ids = JSON.parse(sessionStorage.getItem(PENDING_KEY) || "[]");
+    const ids = JSON.parse(sessionStorage.getItem(pendingKey(userId)) || "[]");
     return new Set(Array.isArray(ids) ? ids.filter((id) => typeof id === "string") : []);
   } catch { return new Set(); }
 }
-function savePending(ids) {
-  try { sessionStorage.setItem(PENDING_KEY, JSON.stringify([...ids])); } catch { /* memory copy still hides them */ }
+function savePending(userId, ids) {
+  try { sessionStorage.setItem(pendingKey(userId), JSON.stringify([...ids])); } catch { /* memory copy still hides them */ }
 }
 async function sendRestoredMark(id) {
   try {
@@ -25,14 +27,14 @@ async function sendRestoredMark(id) {
 // Per scheduled email, the key this tab claims its text with on Cancel send.
 // Kept in sessionStorage so a retry after a lost answer, even after a reload,
 // sends the same key and gets the draft; another tab's key gets 409.
-const RESTORE_KEYS = "waves_email_restore_keys";
-function restoreKeyFor(id) {
+const restoreKeysKey = (userId) => `waves_email_restore_keys:${userId}`;
+function restoreKeyFor(userId, id) {
   let keys = {};
-  try { keys = JSON.parse(sessionStorage.getItem(RESTORE_KEYS) || "{}") || {}; } catch { keys = {}; }
+  try { keys = JSON.parse(sessionStorage.getItem(restoreKeysKey(userId)) || "{}") || {}; } catch { keys = {}; }
   if (typeof keys[id] === "string") return keys[id];
   const key = crypto.randomUUID();
   try {
-    sessionStorage.setItem(RESTORE_KEYS, JSON.stringify({ ...keys, [id]: key }));
+    sessionStorage.setItem(restoreKeysKey(userId), JSON.stringify({ ...keys, [id]: key }));
     return key;
   } catch { return null; }
 }
@@ -40,13 +42,13 @@ function restoreKeyFor(id) {
 // The Email > Scheduled list (GATE_EMAIL_SEND_LATER). `enabled` stays false
 // until the server says the gate is on, so the Send arrow and the tab stay
 // hidden with the gate off or the list unreadable.
-export default function useScheduledEmails(active) {
+export default function useScheduledEmails(active, userId) {
   const [state, setState] = useState({ enabled: false, emails: [], loading: false, error: false });
   const [pendingId, setPendingId] = useState(null);
   // Reloads can finish out of order: only the newest one publishes.
   const latest = useRef(0);
   const pendingRestored = useRef(null);
-  if (pendingRestored.current === null) pendingRestored.current = readPending();
+  if (pendingRestored.current === null) pendingRestored.current = readPending(userId);
 
   // Sends every unconfirmed mark again; a confirmed one leaves the set.
   const flushRestored = useCallback(async () => {
@@ -54,8 +56,8 @@ export default function useScheduledEmails(active) {
     if (!pending.size) return;
     const done = await Promise.all([...pending].map(async (id) => ((await sendRestoredMark(id)) ? id : null)));
     done.filter(Boolean).forEach((id) => pending.delete(id));
-    savePending(pending);
-  }, []);
+    savePending(userId, pending);
+  }, [userId]);
 
   const reload = useCallback(async () => {
     const seq = ++latest.current;
@@ -85,7 +87,7 @@ export default function useScheduledEmails(active) {
   const cancel = async (id) => {
     if (pendingId) return { draft: null };
     // Without a saved key a lost answer could not be recovered: do not start.
-    const restoreKey = restoreKeyFor(id);
+    const restoreKey = restoreKeyFor(userId, id);
     if (!restoreKey) return { draft: null, error: "Cancel did not start: this browser could not save its safety key." };
     setPendingId(id);
     try {
@@ -110,7 +112,7 @@ export default function useScheduledEmails(active) {
   // every reload (see PENDING_KEY).
   const markRestored = async (id) => {
     pendingRestored.current.add(id);
-    savePending(pendingRestored.current);
+    savePending(userId, pendingRestored.current);
     await reload();
   };
 
@@ -121,8 +123,8 @@ export default function useScheduledEmails(active) {
 // The Email page's view of schedule send: its tab (between Inbox and Blocked,
 // only with the gate on), which pane shows, a fresh list on entering
 // Scheduled, and the editor extended with the arrow menu's two inputs.
-export function useScheduledSection({ active, connected, tab, editor, baseSections }) {
-  const scheduled = useScheduledEmails(active && connected);
+export function useScheduledSection({ active, connected, tab, editor, baseSections, userId }) {
+  const scheduled = useScheduledEmails(active && connected, userId);
   const showScheduled = tab === "scheduled" && scheduled.enabled;
   // Scheduled with the gate off falls back to Inbox.
   const pane = tab === "blocked" ? "blocked" : showScheduled ? "scheduled" : "inbox";

@@ -362,7 +362,7 @@ describe("Email schedule send", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Scheduled" }));
     await waitFor(() => expect(posts("/queued-1/restored").length).toBeGreaterThan(before));
     expect(screen.queryByRole("button", { name: "Open as draft" })).not.toBeInTheDocument();
-    expect(JSON.parse(sessionStorage.getItem("waves_email_restored_pending"))).toEqual([]);
+    expect(JSON.parse(sessionStorage.getItem("waves_email_restored_pending:fixture-schedule-owner"))).toEqual([]);
   });
 
   it("keeps a cancelled email listed when the tab cannot save its restored draft", async () => {
@@ -411,6 +411,28 @@ describe("Email schedule send", () => {
     finish();
     expect((await screen.findAllByText(/Your newer edits were not scheduled/)).length).toBeGreaterThan(0);
     expect(screen.getByLabelText(/^Message/)).toHaveValue("Edited later");
+  });
+
+  it("Back to draft on an email Gmail may have sent keeps plain Send blocked until the Sent check", async () => {
+    scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "outcome_unknown", mayHaveSent: true }];
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Scheduled" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Back to draft" }));
+    expect(await screen.findByText("Cancelled. The email is open as a draft.")).toBeInTheDocument();
+    expect(screen.getByText(/Gmail may already have sent this email/)).toBeInTheDocument();
+    const send = () => screen.getAllByRole("button", { name: "Send", exact: true }).at(-1);
+    expect(send()).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "I checked: it is in neither" }));
+    await waitFor(() => expect(send()).not.toBeDisabled());
+  });
+
+  it("sign-out removes the schedule-send state with the drafts", () => {
+    sessionStorage.setItem("waves_email_restored_pending:fixture-schedule-owner", "[\"queued-1\"]");
+    sessionStorage.setItem("waves_email_restore_keys:fixture-schedule-owner", "{}");
+    sessionStorage.setItem("waves_email_schedule_uncertain:fixture-schedule-owner", "{}");
+    sessionStorage.setItem("unrelated_fixture_key", "kept");
+    clearEmailDrafts();
+    expect(Object.keys(sessionStorage)).toEqual(["unrelated_fixture_key"]);
   });
 
   it("never cancels over a new email in progress", async () => {

@@ -36,6 +36,10 @@ function keyLookedUp(result) {
   return result.keyChecked === true;
 }
 
+// The guard a restored email that Gmail may have sent carries: no request
+// fingerprint matches it, so scheduling it again also waits for the check.
+const MAY_HAVE_SENT = { request: "may_have_sent", clientKey: null };
+
 // A retried key can return a row the sender already settled: nothing is
 // queued, so the draft stays and the outcome shows.
 const SETTLED_MESSAGES = {
@@ -123,6 +127,8 @@ export default function useEmailEditor(userId) {
   // A schedule request for this draft slot has no definite answer: plain Send
   // could deliver a copy now while the queued one still sends later.
   const scheduleUnconfirmed = (replyId = null) => Boolean(uncertainSchedule.current[slotOf(replyId)]);
+  // Whether the block comes from a restored email Gmail may have sent.
+  const restoredMayHaveSent = (replyId = null) => uncertainSchedule.current[slotOf(replyId)]?.request === MAY_HAVE_SENT.request;
   // The operator looked under Scheduled and in Gmail Sent: the email is in neither.
   const confirmScheduleChecked = (replyId = null) => {
     if (!scheduling) rememberUncertain(slotOf(replyId), null);
@@ -372,6 +378,12 @@ export default function useEmailEditor(userId) {
   // draft, so a reload would still find it.
   const restoreScheduledDraft = (draft) => {
     if (scheduledDraftBlocked(draft)) return false;
+    // Gmail may already have this email: plain Send waits for the same
+    // Sent-folder check as an unconfirmed schedule request.
+    if (draft.mayHaveSent) {
+      const slot = slotOf(draft.replyEmailId);
+      if (!rememberUncertain(slot, MAY_HAVE_SENT)) { uncertainSchedule.current[slot] = MAY_HAVE_SENT; notifyDrafts(); }
+    }
     if (draft.replyEmailId) {
       setReplyDraft(draft.replyEmailId, draft.draftText);
       return { saved: draftSession.saved };
@@ -452,6 +464,7 @@ export default function useEmailEditor(userId) {
     handleAiDraft,
     scheduling,
     scheduleUnconfirmed,
+    restoredMayHaveSent,
     confirmScheduleChecked,
     handleComposeSchedule,
     handleReplySchedule,

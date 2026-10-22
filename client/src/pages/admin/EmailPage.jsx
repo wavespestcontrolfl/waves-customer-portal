@@ -26,7 +26,7 @@ export default function EmailPage({ navigation, active }) {
   const connected = !statusState.error && Boolean(status?.connected);
   // Schedule send (GATE_EMAIL_SEND_LATER): the arrow menu and the Scheduled
   // tab appear only once the server reports the gate on.
-  const { scheduled, sections, pane, mailEditor } = useScheduledSection({ active, connected, tab, editor, baseSections: EMAIL_SECTIONS });
+  const { scheduled, sections, pane, mailEditor } = useScheduledSection({ active, connected, tab, editor, baseSections: EMAIL_SECTIONS, userId: user.id });
   const action = connected ? {
     key: "compose",
     label: hasComposeDraft ? "Resume draft" : "New email",

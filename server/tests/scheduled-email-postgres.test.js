@@ -162,6 +162,9 @@ jest.setTimeout(30000);
     expect(notifyAdmin).toHaveBeenCalledTimes(1);
     expect(notifyAdmin.mock.calls[0][1]).toBe('Comms — check Sent for a scheduled email');
     expect(notifyAdmin.mock.calls[0][2]).not.toContain('fixture@example.invalid');
+    // The list and the cancelled draft both say Gmail may have it.
+    expect((await call('GET', '/scheduled')).body.emails[0]).toMatchObject({ status: 'outcome_unknown', mayHaveSent: true });
+    expect((await cancel(body.scheduled.id)).body.draft).toMatchObject({ status: 'cancelled', mayHaveSent: true });
   });
 
   test('three definite refusals end in failed with one alert; Back to draft still works', async () => {
@@ -260,7 +263,8 @@ jest.setTimeout(30000);
     const { body } = await queue();
     const listed = (await call('GET', '/scheduled')).body.emails;
     expect(listed.some((e) => e.id === body.scheduled.id && e.status === 'scheduled')).toBe(true);
-    expect(listed.filter((e) => e.status === 'failed')).toHaveLength(100);
+    // Every unresolved row stays listed: its alert says Back to draft.
+    expect(listed.filter((e) => e.status === 'failed')).toHaveLength(120);
   });
 
   test('with the gate off the sender sends nothing, and queued rows wait', async () => {

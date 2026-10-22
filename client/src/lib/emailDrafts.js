@@ -104,8 +104,17 @@ export function updateEmailSendAttempt(session, key, attempt, expectedId = null)
   return false;
 }
 
+// Schedule-send state that belongs to the signed-in user's drafts (keys,
+// claims, unconfirmed restore marks): it goes with them at sign-out.
+const SCHEDULE_STATE_PREFIXES = ["waves_email_schedule_uncertain:", "waves_email_restore_keys:", "waves_email_restored_pending:"];
+
 export function clearEmailDrafts() {
   activeSession = null;
   window.removeEventListener("beforeunload", warnBeforeDraftUnload);
-  try { sessionStorage.removeItem(STORAGE_KEY); } catch { /* storage unavailable */ }
+  try {
+    sessionStorage.removeItem(STORAGE_KEY);
+    for (const key of Object.keys(sessionStorage)) {
+      if (SCHEDULE_STATE_PREFIXES.some((prefix) => key.startsWith(prefix))) sessionStorage.removeItem(key);
+    }
+  } catch { /* storage unavailable */ }
 }

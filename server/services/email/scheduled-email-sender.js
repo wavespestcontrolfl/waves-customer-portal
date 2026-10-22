@@ -16,6 +16,10 @@ const logger = require('../logger');
 const { emailSendLaterLive } = require('../../config/feature-gates');
 
 const MAX_ATTEMPTS = 3;
+const CLAIM_EXPIRED_ERROR = 'claim expired before Gmail answered';
+const UNCONFIRMED_ERROR = 'Gmail did not confirm the send';
+// last_error of a row Gmail may have accepted (kept when it is cancelled).
+const OUTCOME_UNKNOWN_ERRORS = [CLAIM_EXPIRED_ERROR, UNCONFIRMED_ERROR];
 const STALE_MINUTES = 10;
 const BATCH = 20;
 
@@ -77,7 +81,7 @@ async function settleStaleClaims(conn = db) {
   const rows = await conn('scheduled_emails')
     .where({ status: 'sending' })
     .where('claimed_at', '<', conn.raw(`now() - interval '${STALE_MINUTES} minutes'`))
-    .update({ status: 'outcome_unknown', last_error: 'claim expired before Gmail answered', updated_at: conn.fn.now() })
+    .update({ status: 'outcome_unknown', last_error: CLAIM_EXPIRED_ERROR, updated_at: conn.fn.now() })
     .returning(['id', 'to_address', 'send_at']);
   for (const row of rows) await alertOffice(row, 'outcome_unknown');
   return rows.length;
@@ -144,7 +148,7 @@ async function sendOne(row, { conn = db, gmail = require('./gmail-client') } = {
 
 async function settleUnknown(row, conn) {
   await conn('scheduled_emails').where({ id: row.id, status: 'sending' })
-    .update({ status: 'outcome_unknown', last_error: 'Gmail did not confirm the send', updated_at: conn.fn.now() });
+    .update({ status: 'outcome_unknown', last_error: UNCONFIRMED_ERROR, updated_at: conn.fn.now() });
   await alertOffice(row, 'outcome_unknown');
   logger.error(`[scheduled-email] outcome unknown for ${row.id}`);
   return 'outcome_unknown';
@@ -178,4 +182,4 @@ async function sendDueScheduledEmails({ conn = db, gmail } = {}) {
   return summary;
 }
 
-module.exports = { sendDueScheduledEmails, settleStaleClaims, claimNext, sendOne, raiseMissedAlerts, MAX_ATTEMPTS, STALE_MINUTES };
+module.exports = { OUTCOME_UNKNOWN_ERRORS, sendDueScheduledEmails, settleStaleClaims, claimNext, sendOne, raiseMissedAlerts, MAX_ATTEMPTS, STALE_MINUTES };

@@ -8,7 +8,9 @@ import { Button } from "../../../components/ui/Button";
 export default function ScheduleUnconfirmed({ editor, replyId = null, className }) {
   if (!editor.scheduleUnconfirmed(replyId) || editor.scheduling) return null;
   return <ActionFeedback error className={className}>
-    A schedule request for this email was not confirmed. Look under Scheduled and in the Gmail Sent folder.
+    {editor.restoredMayHaveSent(replyId)
+      ? "Gmail may already have sent this email. Look in the Gmail Sent folder and under Scheduled."
+      : "A schedule request for this email was not confirmed. Look under Scheduled and in the Gmail Sent folder."}
     <Button variant="secondary" className="ml-2" onClick={() => editor.confirmScheduleChecked(replyId)}>I checked: it is in neither</Button>
   </ActionFeedback>;
 }
