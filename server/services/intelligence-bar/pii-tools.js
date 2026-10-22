@@ -45,6 +45,11 @@ const REVIEWED_PII_TOOL_NAMES = new Set([
   'convert_lead',
   // void_invoice previews name the customer and the invoice.
   'void_invoice',
+  // The invoice edit cards name the customer and the invoice (edit_invoice also its title and notes).
+  'edit_invoice',
+  'archive_invoice',
+  'unarchive_invoice',
+  'unvoid_invoice',
   // The invoice reminder and payment-plan previews name the customer and the invoice, with masked recipients.
   'pause_invoice_reminders',
   'resume_invoice_reminders',
