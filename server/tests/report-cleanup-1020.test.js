@@ -148,6 +148,8 @@ describe('item 1: a visit with a water-in product never says "No special waterin
       expect(cleanup.waterInRuleOf([use(['White grubs'])])).toEqual({ inches: 0.25, hours: 24, sameDay: false });
       expect(cleanup.waterInRuleOf([use(['Tropical sod webworm caterpillars'])])).toEqual({ hold: true });
       expect(cleanup.waterInRuleOf([use(['Southern chinch bugs']), product('Granular Fertilizer', WATER_IN_ROW)])).toBeNull();
+      // A known hold beside a use with no direction still reads as a hold, never "No special watering".
+      expect(cleanup.waterInRuleOf([use(['Southern chinch bugs']), product('Test Herbicide', { mode: 'hold', hold_hours: 24, source: 'owner' })])).toEqual({ hold: true });
       // A mixed list: without the catalog label targets the use is ambiguous, so no water-in advice.
       expect(cleanup.waterInRuleOf([use(['White grubs', 'Tropical sod webworm caterpillars']), product('Granular Fertilizer', WATER_IN_ROW)])).toBeNull();
       // The SMS gate off changes nothing in the report (the route contract names only the rule gate).

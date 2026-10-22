@@ -51,10 +51,12 @@ function waterInRuleOf(products) {
   const list = Array.isArray(products) ? products : [];
   const facts = list.map((p) => (p && p.approved_report_product_facts) || {});
   const rules = list.map((p, i) => visitRulesOf(p, facts[i]));
+  // A known hold stands whatever else is unclear; a product whose use gave no direction blocks only water-in advice.
+  const known = rules.filter(Boolean).flat();
+  if (known.some((rule) => rule.mode === 'hold')) return { hold: true };
   if (rules.some((one) => one === null)) return null;
-  if (rules.flat().some((rule) => rule.mode === 'hold')) return { hold: true };
   const eligible = facts.every((f, i) => (rules[i].length ? rules[i].every((rule) => ['water_in', 'none'].includes(rule.mode)) : !hasWateringText(f)));
-  const waterIns = rules.flat().filter((rule) => rule.mode === 'water_in');
+  const waterIns = known.filter((rule) => rule.mode === 'water_in');
   if (!eligible || !waterIns.length) return null;
   const inches = Math.max(...waterIns.map((r) => Number(r.water_in_inches) || 0.25));
   const hours = Math.min(...waterIns.map((r) => Number(r.water_in_by_hours) || 24));
