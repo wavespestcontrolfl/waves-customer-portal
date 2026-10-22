@@ -2081,6 +2081,18 @@ const ReviewService = {
     }
   },
 
+  // GATE_REVIEW_ASK_AFTER_REPORT timing for an ask about to send. On: the
+  // report_pending hold. Off: a row the gate planned (isAfterReportFastRow)
+  // goes back to the smart window from its enrollment (completion, or the
+  // payment that lifted the invoice hold), so turning the gate off restores
+  // the old timing for asks already queued, not only for new ones.
+  async _afterReportTimingHold(seq) {
+    if (reviewAskAfterReportOn()) return this._reportPendingHold(seq);
+    if (!isAfterReportFastRow(seq) || !seq.started_at) return null;
+    const smartAt = calculateReviewSendPlan(new Date(seq.started_at), seq.service_type, { jitter: false }).at;
+    return smartAt && Date.now() < smartAt.getTime() ? { retryAt: smartAt, reason: "smart_window" } : null;
+  },
+
   async _reportPendingHold(seq) {
     if (!reportPendingEligible(seq)) return null;
     const nowMs = Date.now();
@@ -7295,8 +7307,9 @@ const ReviewService = {
     // send window queued for the morning waits until the scheduled-SMS rail has
     // actually delivered that text (and 10 minutes after it), however late a
     // retry runs. Keyed on enrollment facts and the record, never on `decision`.
-    if (stepIsAsk && reviewAskAfterReportOn()) {
-      const pending = await this._reportPendingHold(seq);
+    // With the gate off, a row it planned returns to the smart window.
+    if (stepIsAsk) {
+      const pending = await this._afterReportTimingHold(seq);
       if (pending) {
         await db("review_sequences")
           .where({ id: seq.id, status: "active" })

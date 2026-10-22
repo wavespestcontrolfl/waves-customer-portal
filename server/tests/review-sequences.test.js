@@ -8210,6 +8210,21 @@ describe('GATE_REVIEW_ASK_AFTER_REPORT — Day-0 ask 10 minutes after the report
         expect(mockSendCustomerMessage).not.toHaveBeenCalled();
       });
 
+      test('gate turned off after enrollment: a queued after-report ask goes back to the smart window (codex #6434 r10 P2)', async () => {
+        freezeAt('2026-10-20T14:10:00Z');
+        mockGates.reviewAskAfterReport = false;
+        const mock = book({ completionSmsStatus: 'sent', sentSmsAt: '2026-10-20T14:00:00.000Z', sentSmsChannel: 'sms' }, { started_at: new Date('2026-10-20T14:00:00Z'), service_type: 'Quarterly Pest Control', decision: JSON.stringify({ reason: 'after_report' }) });
+        db.mockImplementation(mock);
+
+        const out = await ReviewService._runSequenceStep('seq-rp');
+
+        const smart = ReviewService.__private.calculateReviewSendPlan(new Date('2026-10-20T14:00:00Z'), 'Quarterly Pest Control', { jitter: false }).at;
+        expect(smart.getTime()).toBeGreaterThan(Date.now());
+        expect(out).toMatchObject({ ran: false, deferred: true, reason: 'smart_window' });
+        expect(new Date(mock.__state.rows.review_sequences[0].next_run_at).getTime()).toBe(smart.getTime());
+        expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      });
+
       test('a smart-window fallback row leaves the */5 after-report tick', () => {
         const { isAfterReportFastRow } = ReviewService.__private;
         expect(isAfterReportFastRow({ current_step: 0, touches_sent: 0, started_by: 'post_service', decision: { reason: 'smart_window' } })).toBe(false);
