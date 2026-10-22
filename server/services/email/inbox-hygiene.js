@@ -29,6 +29,7 @@ const psl = require('psl');
 const db = require('../../models/db');
 const logger = require('../logger');
 const gmailClient = require('./gmail-client');
+const { emailAuthStrictLive } = require('../../config/feature-gates');
 const { isOperationalDomain, domainFromAddress, normalizeAddress } = require('./spam-blocker');
 
 const QUARANTINE_LABEL = 'Quarantine';
@@ -481,6 +482,33 @@ async function settleDeferredBlock(row) {
   }
 }
 
+// Strict reader for hasAlignedAuth (GATE_EMAIL_AUTH_STRICT). The sender picks
+// the SMTP MAIL FROM, and Google echoes it in the SPF comment and in
+// smtp.mailfrom, so a quoted local part such as
+// "x dkim=pass header.d=victim.com y"@evil.example put fake method results
+// into the header text. Same structural parse as the Zelle check: clauses
+// split on ';' outside comments and quoted strings, comments and quoted
+// strings dropped (a quote or backslash inside a comment makes the whole
+// header untrusted), then only a clause that STARTS with dkim=pass / spf=pass
+// is read, and only when the header's authserv-id is Google's receiving MX.
+function hasAlignedAuthStrict(auth, aligned) {
+  const { authResultClauses } = require('../zelle-notice');
+  const clauses = authResultClauses(auth);
+  if (!clauses.length || !/^mx\.google\.com(?: \d+)?$/.test(clauses[0])) return false;
+  for (const clause of clauses.slice(1)) {
+    if (/^dkim=pass\b/.test(clause)) {
+      for (const d of clause.matchAll(/\bheader\.[di]=(?:[^@\s]*@)?([a-z0-9.-]+)/g)) {
+        if (aligned(d[1])) return true;
+      }
+    } else if (/^spf=pass\b/.test(clause)) {
+      for (const d of clause.matchAll(/\b(?:smtp\.mailfrom|smtp\.helo)=(?:[^@\s]*@)?([a-z0-9.-]+)/g)) {
+        if (aligned(d[1])) return true;
+      }
+    }
+  }
+  return false;
+}
+
 /**
  * True when Gmail's own Authentication-Results header shows the message
  * actually authenticated as the domain it claims: DKIM pass whose d= aligns
@@ -503,6 +531,10 @@ function hasAlignedAuth(authResults, fromDomain) {
   const fromOrg = orgDomain(domain);
   const aligned = (value) => value === domain
     || (fromOrg !== null && orgDomain(value) === fromOrg);
+  // GATE_EMAIL_AUTH_STRICT: read only real resinfo results (comments and
+  // quoted strings dropped), from Google's own authserv-id. Gate off keeps
+  // the whole-string match below byte-for-byte.
+  if (emailAuthStrictLive()) return hasAlignedAuthStrict(auth, aligned);
   const dkim = auth.match(/dkim=pass[^;]*/g) || [];
   for (const clause of dkim) {
     // header.i may carry a full identity (user@domain); align on the domain.

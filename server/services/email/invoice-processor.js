@@ -3,6 +3,7 @@ const db = require('../../models/db');
 const gmailClient = require('./gmail-client');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { emailAuthStrictLive } = require('../../config/feature-gates');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-wire');
 // First TEXT block of a Message — a thinking block leads the content on
 // always-thinking models (Opus 5.5, Fable), so content[0] is not the answer.
@@ -395,6 +396,24 @@ async function bookExpense(email, { vendorName, vendorSource, expenseCategory, p
 }
 
 async function processVendorInvoice(email, classification) {
+  // GATE_EMAIL_AUTH_STRICT: a From header is typed by the sender, and the
+  // vendor mapping below (vendor name, tax category, deduction policy) trusts
+  // it. Book automatically only when Gmail's own Authentication-Results shows
+  // the mail authenticated as the From domain; otherwise leave it for a human
+  // (auto_action marks the email, nothing is written to expenses). Checked
+  // before the PDF is sent to the model so a forged mail costs nothing.
+  if (emailAuthStrictLive()) {
+    const { hasAlignedAuth } = require('./inbox-hygiene');
+    const { domainFromAddress } = require('./spam-blocker');
+    if (!hasAlignedAuth(email.authentication_results, domainFromAddress(email.from_address))) {
+      await db('emails').where({ id: email.id }).update({
+        auto_action: 'invoice_detected:unauthenticated',
+        updated_at: new Date(),
+      });
+      logger.warn(`[invoice-processor] Email ${email.id} classified vendor_invoice but its sender did not authenticate as the From domain — not booked, left for review`);
+      return;
+    }
+  }
   const vendor = await vendorForSender(email.from_address);
   const expenseCategory = realCategoryName(vendor?.expense_category) || 'Uncategorized';
 
