@@ -115,6 +115,7 @@ describe("Email schedule send", () => {
   it.each([
     ["a gate-off answer", { enabled: false, error: "Schedule send is off." }, 404],
     ["a sign-in failure", { error: "Session expired. Sign in again." }, 401],
+    ["a rate limit", { error: "Too many requests. Try again shortly." }, 429],
   ])("keeps the client key through %s, so a later retry finds the first row", async (_label, refusal, status) => {
     let calls = 0;
     const base = fetch.getMockImplementation();
@@ -140,6 +141,34 @@ describe("Email schedule send", () => {
     await waitFor(() => expect(posts("/email/schedule")).toHaveLength(3));
     const keys = posts("/email/schedule").map(([, options]) => JSON.parse(options.body).clientKey);
     expect(new Set(keys).size).toBe(1);
+  });
+
+  it("drops the key after a refusal the schedule route made past its key lookup", async () => {
+    let calls = 0;
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation((input, options = {}) => {
+      if (String(input).endsWith("/email/schedule")) {
+        calls += 1;
+        if (calls === 1) return Promise.reject(new TypeError("network"));
+        if (calls === 2) return response({ error: "Pick a time at least a minute from now.", keyChecked: true }, 400);
+      }
+      return base(input, options);
+    });
+    mount();
+    await writeEmail();
+    const pickTomorrow = async () => {
+      fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
+      fireEvent.click(screen.getByRole("button", { name: /^Tomorrow morning/ }));
+    };
+    await pickTomorrow();
+    expect((await screen.findAllByText(/Look under Scheduled before you schedule or send it again/)).length).toBeGreaterThan(0);
+    await pickTomorrow();
+    expect((await screen.findAllByText("Pick a time at least a minute from now.")).length).toBeGreaterThan(0);
+    await pickTomorrow();
+    await waitFor(() => expect(posts("/email/schedule")).toHaveLength(3));
+    const keys = posts("/email/schedule").map(([, options]) => JSON.parse(options.body).clientKey);
+    expect(keys[1]).toBe(keys[0]);
+    expect(keys[2]).not.toBe(keys[1]);
   });
 
   it("queues again under a fresh key when the server answers with an email cancelled earlier", async () => {

@@ -385,7 +385,9 @@ router.post('/schedule', async (req, res) => {
     const known = await db('scheduled_emails').where({ client_key: clientKey }).first();
     if (known) return res.json({ success: true, scheduled: scheduledView(known) });
     const { when, error } = scheduleTimeError(sendAt);
-    if (error) return res.status(400).json({ error });
+    // keyChecked: this refusal came after the clientKey lookup, so the
+    // browser may drop the key (no row exists under it).
+    if (error) return res.status(400).json({ error, keyChecked: true });
     const [row] = await db('scheduled_emails').insert({
       to_address: String(to).trim(), subject: String(subject || '').trim() || '(no subject)', body_html: body, draft_text: draftText,
       thread_id: threadId || null, reply_email_id: replyEmailId || null, send_at: when, created_by: req.technicianId || null, client_key: clientKey,
@@ -431,22 +433,20 @@ router.get('/scheduled', async (req, res) => {
 // the tab confirmed the restore. A row Gmail is sending or has sent cannot be
 // cancelled (409).
 const RESTORE_KEY_RE = /^[\w-]{8,64}$/;
-const CLAIM_ABANDON_MINUTES = 10;
 async function claimCancelled(id, restoreKey) {
   const [row] = await db('scheduled_emails').where({ id }).whereIn('status', CANCELLABLE)
     .update({ status: 'cancelled', cancelled_at: db.fn.now(), restore_key: restoreKey, updated_at: db.fn.now() }).returning('*');
   if (row) return { draft: row };
-  // A cancelled row nobody claimed yet, this tab's own claim, or a claim left
-  // untouched for CLAIM_ABANDON_MINUTES (its tab closed before the answer: a
-  // live tab confirms the restore within seconds).
+  // A cancelled row nobody claimed yet, or this tab's own claim. A claim is
+  // never taken over: elapsed time cannot tell a lost answer from a draft
+  // already in a composer, and a second copy could be sent.
   const [own] = await db('scheduled_emails').where({ id, status: 'cancelled' }).whereNull('restored_at')
-    .where((q) => q.whereNull('restore_key').orWhere('restore_key', restoreKey)
-      .orWhere('updated_at', '<', db.raw(`now() - interval '${CLAIM_ABANDON_MINUTES} minutes'`)))
+    .where((q) => q.whereNull('restore_key').orWhere('restore_key', restoreKey))
     .update({ restore_key: restoreKey, updated_at: db.fn.now() }).returning('*');
   if (own) return { draft: own };
   const current = await db('scheduled_emails').where({ id }).first('status', 'restored_at');
   if (current?.status !== 'cancelled') return { error: 'This email is already sending or sent, so it cannot be cancelled.' };
-  return { error: current.restored_at ? 'This email is already back in a draft.' : 'This email is already open as a draft in another tab. If that tab is closed, try again in 10 minutes.' };
+  return { error: current.restored_at ? 'This email is already back in a draft.' : 'This email is already open as a draft in another tab or window. Use that draft.' };
 }
 
 router.post('/scheduled/:id/cancel', async (req, res) => {
