@@ -1,10 +1,12 @@
 // Make-up move (GATE_CALL_MAKEUP_MOVE): a recurring visit that was MISSED and
 // then agreed to a new time on a call is MOVED, never booked a second time.
-// Pure planner, the agreement grounding it uses, the applier against a mocked
-// connection, and the processor wiring (a full processRecording() run cannot
-// be mocked end to end, so the step is tested behaviorally and the branch order
-// is pinned structurally). Fixtures are fictitious (555-01xx numbers, synthetic
-// ids and addresses).
+// The decision sits at the booking transaction's fresh insert, so the pure
+// planner judges the booking's own row; then the booking-transaction check,
+// the reprocess check and the move against a mocked connection, and the
+// processor wiring (a full processRecording() run cannot be mocked end to
+// end, so the steps are tested behaviorally and the hook's position is pinned
+// structurally). Fixtures are fictitious (555-01xx numbers, synthetic ids and
+// addresses).
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../routes/admin-dispatch', () => ({ applySeriesMoveEffects: jest.fn().mockResolvedValue({}) }));
@@ -17,8 +19,11 @@ jest.mock('../config/feature-gates', () => {
 
 const fs = require('fs');
 const path = require('path');
+const { createHash } = require('crypto');
 const {
   planMakeupMoveFromCall: planWithLabelTrust,
+  planCallMakeupForBooking,
+  priorCallMakeupDecision,
   applyCallMakeupMove,
   MAKEUP_ACTIVITY_ACTION,
   MAKEUP_REASON_CODE,
@@ -46,8 +51,6 @@ const AGENT_SLOT = 'We will come by on Tuesday October 20 at 5 PM.';
 const ACCEPT = 'Yes, that works.';
 const TRANSCRIPT = `Caller: Nobody came on the 13th.\nAgent: No, I need to come by. ${AGENT_SLOT}\nCaller: ${ACCEPT}`;
 const WORDS = { day: 'Tuesday October 20', hour: '5', period: 'PM' };
-// The ET wall clock the booking step would have inserted (V1 preferred_date_time).
-const BOOKING_SLOT = '2026-10-20T17:00';
 
 function deepMerge(a, b) {
   const out = { ...a };
@@ -111,15 +114,33 @@ const visit = (overrides = {}) => {
 const noshow = (overrides = {}) => ({
   id: NOSHOW_ID, scheduled_service_id: VISIT_ID, original_date: '2026-10-13', original_window: '09:00:00-10:00:00', resolved_at: null, ...overrides,
 });
-const baseArgs = (over = {}) => ({ v2: v2(), call: call(), customer: customer(), candidates: [visit()], noshowLogs: [noshow()], now: NOW, bookingSlot: BOOKING_SLOT, ...over });
+// The row the booking transaction was about to insert (call-recording-
+// processor.js insertData), plus what the booking knew about its follow-up
+// plan and re-service catalog row.
+const booking = (overrides = {}) => ({
+  customer_id: CUSTOMER_ID, property_id: null,
+  service_address_line1: ADDRESS.address_line1, service_address_line2: null, service_address_city: ADDRESS.city, service_address_zip: ADDRESS.zip,
+  scheduled_date: '2026-10-20', window_start: '17:00', status: 'confirmed', followUpPlanned: false, reService: false, callbackHold: false, ...overrides,
+});
+const baseArgs = (over = {}) => ({ v2: v2(), call: call(), customer: customer(), properties: [], booking: booking(),
+  candidates: [visit()], noshowLogs: [noshow()], now: NOW, ...over });
+const held = (reason) => expect.objectContaining({ action: 'needs_review', reason });
 
 describe('planMakeupMoveFromCall', () => {
-  test('the incident: a missed confirmed quarterly visit with an open no-show moves to the agreed slot', () => {
+  test('the incident: a missed confirmed quarterly visit with an open no-show moves to the booking\'s slot', () => {
     expect(planMakeup(baseArgs())).toMatchObject({
-      action: 'apply', visitId: VISIT_ID, dateMove: true, noshowLogId: NOSHOW_ID,
+      action: 'apply', visitId: VISIT_ID, noshowLogId: NOSHOW_ID,
       from: { date: '2026-10-13', start: '09:00', end: '10:00' },
       newDate: '2026-10-20', newWindow: { start: '17:00', end: '18:00' },
     });
+  });
+
+  test('the visit keeps its own length at the booking\'s start', () => {
+    const long = { candidates: [visit({ window_end: '10:30:00' })], noshowLogs: [noshow({ original_window: '09:00:00-10:30:00' })] };
+    expect(planMakeup(baseArgs(long))).toMatchObject({ action: 'apply', newWindow: { start: '17:00', end: '18:30' } });
+    // A booking start the visit's length would carry past midnight holds.
+    const late = { booking: booking({ window_start: '23:00' }), v2: v2({ scheduling: { confirmed_start_at: '2026-10-20T23:00:00-04:00' } }) };
+    expect(planMakeup(baseArgs({ ...late, ...long }))).toEqual(held('window_runs_past_midnight'));
   });
 
   test('a lawn customer\'s missed every-6-weeks visit moves even when the call names the one-time lawn service', () => {
@@ -131,18 +152,56 @@ describe('planMakeupMoveFromCall', () => {
     expect(plan).toMatchObject({ action: 'apply', visitId: LAWN_VISIT_ID });
   });
 
-  test('a call still filed as reschedule_requested is the reschedule lane\'s, not a make-up', () => {
-    expect(planMakeup(baseArgs({ v2: v2({ scheduling: { status: 'reschedule_requested' } }) }))).toMatchObject({ action: 'skip', reason: 'not_a_confirmed_slot' });
+  // With a missed visit of the call's line on the books, nothing below lets
+  // the insert through: each one HOLDS the booking for a person.
+  test('a call still filed as reschedule_requested is held, never booked beside the missed visit', () => {
+    expect(planMakeup(baseArgs({ v2: v2({ scheduling: { status: 'reschedule_requested' } }) }))).toEqual(held('not_a_confirmed_slot'));
   });
 
-  test('a call that is neither a follow-up nor existing-customer scheduling is skipped', () => {
-    const plan = planMakeup(baseArgs({ v2: v2({ call_nature: 'new_lead', service_request: { service_intent: 'quote_only' } }) }));
-    expect(plan).toMatchObject({ action: 'skip', reason: 'not_a_follow_up_call' });
+  test('a call that is neither a follow-up nor existing-customer scheduling is held; either one alone is enough', () => {
+    expect(planMakeup(baseArgs({ v2: v2({ call_nature: 'new_lead', service_request: { service_intent: 'quote_only' } }) }))).toEqual(held('not_a_follow_up_call'));
     expect(planMakeup(baseArgs({ v2: v2({ call_nature: 'new_lead' }) }))).toMatchObject({ action: 'apply' });
   });
 
-  test('secondary categories send the call back to today\'s path', () => {
-    expect(planMakeup(baseArgs({ v2: v2({ service_request: { secondary_categories: ['lawn_care'] } }) }))).toMatchObject({ action: 'skip', reason: 'service_needs_review' });
+  test('secondary categories hold', () => {
+    expect(planMakeup(baseArgs({ v2: v2({ service_request: { secondary_categories: ['lawn_care'] } }) }))).toEqual(held('service_needs_review'));
+  });
+
+  test.each([
+    ['bed bugs', 'bed_bug'],
+    ['a wasp nest', 'stinging_insect'],
+  ])('a specialty call (%s) beside a missed general pest visit is held, never a move of the program visit', (_label, category) => {
+    expect(planMakeup(baseArgs({ v2: v2({ service_request: { primary_service_category: category } }) }))).toEqual(held('specialty_service'));
+  });
+
+  test('a WDO inspection or termite call beside missed bait monitoring is held', () => {
+    const bait = visit({ service_id: 'termite-bait', service_type: 'Termite Bait Monitoring Service' });
+    for (const category of ['wdo', 'termite']) {
+      expect(planMakeup(baseArgs({ candidates: [bait], v2: v2({ service_request: { primary_service_category: category, specific_service_name: null } }) })))
+        .toEqual(held('specialty_service'));
+    }
+  });
+
+  test('a promised visit 2 or a package follow-up holds: the moved visit has no such child', () => {
+    expect(planMakeup(baseArgs({ booking: booking({ followUpPlanned: true }) }))).toEqual(held('follow_up_visit_promised'));
+  });
+
+  test('a covered re-service booking holds: the call says the last treatment happened', () => {
+    expect(planMakeup(baseArgs({ booking: booking({ reService: true }) }))).toEqual(held('reservice_booking'));
+  });
+
+  test('the extraction\'s agreed slot must be the booking\'s own', () => {
+    expect(planMakeup(baseArgs({ v2: v2({ scheduling: { confirmed_start_at: '2026-10-20T18:00:00-04:00' } }) }))).toEqual(held('slot_differs_from_extraction'));
+    expect(planMakeup(baseArgs({ v2: v2({ scheduling: { confirmed_start_at: null } }) }))).toEqual(held('slot_differs_from_extraction'));
+    expect(planMakeup(baseArgs({ v2: v2({ scheduling: { confirmed_start_at: '2026-10-20T21:00:00Z' } }) }))).toMatchObject({ action: 'apply' });
+  });
+
+  test('a pass that armed the disclaimed-number hold holds: a person sorts the numbers before the visit moves', () => {
+    expect(planMakeup(baseArgs({ booking: booking({ callbackHold: true }) }))).toEqual(held('caller_number_disclaimed'));
+  });
+
+  test('a booking that would have gone in pending for an address check holds', () => {
+    expect(planMakeup(baseArgs({ booking: booking({ status: 'pending' }) }))).toEqual(held('address_needs_review'));
   });
 
   test('no open no-show row: nothing proves a missed visit', () => {
@@ -164,6 +223,14 @@ describe('planMakeupMoveFromCall', () => {
       .toMatchObject({ reason: 'no_missed_visit' });
     expect(planMakeup(baseArgs({ candidates: [visit({ scheduled_date: new Date('2026-10-17T00:00:00Z') })], noshowLogs: [noshow({ original_date: '2026-10-17' })] })))
       .toMatchObject({ reason: 'no_missed_visit' });
+  });
+
+  test('a visit moved after the call FROM a missed date is held, with no evidence needed: someone already acted on it', () => {
+    const moved = visit({ scheduled_date: new Date('2026-10-24T00:00:00Z'), moved_after_call: true });
+    expect(planMakeup(baseArgs({ candidates: [moved], noshowLogs: [] }))).toEqual(held('handled_after_call'));
+    // The same future row without that history is just an upcoming visit.
+    expect(planMakeup(baseArgs({ candidates: [visit({ scheduled_date: new Date('2026-10-24T00:00:00Z') })], noshowLogs: [] })))
+      .toMatchObject({ action: 'skip', reason: 'no_missed_visit' });
   });
 
   test('a visit older than the 30-day look-back is left alone', () => {
@@ -193,7 +260,8 @@ describe('planMakeupMoveFromCall', () => {
     const second = visit({ id: LAWN_VISIT_ID, scheduled_date: new Date('2026-10-10T00:00:00Z') });
     const plan = planMakeup(baseArgs({ candidates: [visit(), second],
       noshowLogs: [noshow(), noshow({ id: 'b2', scheduled_service_id: LAWN_VISIT_ID, original_date: '2026-10-10' })] }));
-    expect(plan).toMatchObject({ action: 'needs_review', reason: 'ambiguous_missed_visit' });
+    expect(plan).toEqual(held('ambiguous_missed_visit'));
+    expect(plan.visitId).toBeNull();
     expect(plan.candidateIds.sort()).toEqual([VISIT_ID, LAWN_VISIT_ID].sort());
   });
 
@@ -204,69 +272,61 @@ describe('planMakeupMoveFromCall', () => {
     expect(plan).toMatchObject({ action: 'apply', visitId: VISIT_ID });
   });
 
-  test('a missed visit of a different service line than the call is skipped', () => {
+  test('a missed visit of a different service line than the call says nothing about this booking: the insert goes ahead', () => {
     expect(planMakeup(baseArgs({ v2: v2({ service_request: { primary_service_category: 'lawn_care', specific_service_name: 'Lawn Care Service' } }) })))
       .toMatchObject({ action: 'skip', reason: 'service_line_differs' });
   });
 
-  test('a call that names a real service of another line is skipped, a generic or same-line name is compatible', () => {
-    expect(planMakeup(baseArgs({ v2: v2({ service_request: { specific_service_name: 'Mosquito Control Service' } }) }))).toMatchObject({ reason: 'service_line_differs' });
+  test('a call that names a real service of another line holds; a generic or same-line name is compatible', () => {
+    expect(planMakeup(baseArgs({ v2: v2({ service_request: { specific_service_name: 'Mosquito Control Service' } }) }))).toEqual(held('service_line_differs'));
     expect(planMakeup(baseArgs({ v2: v2({ service_request: { specific_service_name: 'Quarterly Pest Control Service' } }) }))).toMatchObject({ action: 'apply' });
     expect(planMakeup(baseArgs({ v2: v2({ service_request: { specific_service_name: null } }) }))).toMatchObject({ action: 'apply' });
   });
 
-  test('a call whose category names no line cannot pick a visit', () => {
-    expect(planMakeup(baseArgs({ v2: v2({ service_request: { primary_service_category: 'other' } }) }))).toMatchObject({ reason: 'service_line_unknown' });
+  test('a call whose category names no line cannot pick a visit: held', () => {
+    expect(planMakeup(baseArgs({ v2: v2({ service_request: { primary_service_category: 'other' } }) }))).toEqual(held('service_line_unknown'));
   });
 
-  test('the catch-all placeholder visit is never moved', () => {
-    const placeholder = visit({ service_id: 'general', service_type: 'Waves Pest Control Appointment Service', catalog_service_key: 'general_appointment', catalog_service_name: 'Waves Pest Control Appointment Service' });
-    expect(planMakeup(baseArgs({ candidates: [placeholder] }))).toMatchObject({ action: 'skip', reason: 'placeholder_candidate' });
+  test('the catch-all placeholder visit is never moved, alone or beside a real one', () => {
+    const placeholder = (over = {}) => visit({ service_id: 'general', service_type: 'Waves Pest Control Appointment Service',
+      catalog_service_key: 'general_appointment', catalog_service_name: 'Waves Pest Control Appointment Service', ...over });
+    expect(planMakeup(baseArgs({ candidates: [placeholder()] }))).toEqual(held('placeholder_candidate'));
+    expect(planMakeup(baseArgs({ candidates: [visit(), placeholder({ id: LAWN_VISIT_ID })],
+      noshowLogs: [noshow(), noshow({ id: 'b2', scheduled_service_id: LAWN_VISIT_ID })] }))).toEqual(held('placeholder_candidate'));
   });
 
-  test('a placeholder missed beside a real one is review, not a silent pick', () => {
-    const placeholder = visit({ id: LAWN_VISIT_ID, service_id: 'general', catalog_service_key: 'general_appointment', catalog_service_name: 'Waves Pest Control Appointment Service' });
-    expect(planMakeup(baseArgs({ candidates: [visit(), placeholder], noshowLogs: [noshow(), noshow({ id: 'b2', scheduled_service_id: LAWN_VISIT_ID })] })))
-      .toMatchObject({ action: 'needs_review', reason: 'service_needs_review' });
-  });
-
-  test('a call that names a different appointment date is not a make-up of this visit', () => {
-    expect(planMakeup(baseArgs({ v2: v2({ scheduling: { moved_appointment_date: '2026-10-24' } }) }))).toMatchObject({ reason: 'moved_appointment_not_candidate' });
+  test('a call that names a different appointment date is about another visit: held', () => {
+    expect(planMakeup(baseArgs({ v2: v2({ scheduling: { moved_appointment_date: '2026-10-24' } }) }))).toEqual(held('moved_appointment_not_candidate'));
     expect(planMakeup(baseArgs({ v2: v2({ scheduling: { moved_appointment_date: '2026-10-13' } }) }))).toMatchObject({ action: 'apply' });
   });
 
-  test('identity: a caller on a number not on file, or an unmatched call, is skipped', () => {
-    expect(planMakeup(baseArgs({ call: call({ from_phone: '+15555550177' }) }))).toMatchObject({ reason: 'caller_phone_not_on_file' });
-    expect(planMakeup(baseArgs({ call: call({ customer_id: null }) }))).toMatchObject({ reason: 'customer_not_matched' });
-    expect(planMakeup(baseArgs({ customer: customer({ id: 'someone-else' }) }))).toMatchObject({ reason: 'customer_not_matched' });
+  test('identity: a caller on a number not on file, or an unmatched call, holds', () => {
+    expect(planMakeup(baseArgs({ call: call({ from_phone: '+15555550177' }) }))).toEqual(held('caller_phone_not_on_file'));
+    expect(planMakeup(baseArgs({ call: call({ customer_id: null }) }))).toEqual(held('customer_not_matched'));
+    expect(planMakeup(baseArgs({ call: call({ customer_id: 'someone-else' }) }))).toEqual(held('customer_not_matched'));
   });
 
   test('inferred speaker labels cannot authorize a move', () => {
-    expect(planWithLabelTrust(baseArgs())).toMatchObject({ reason: 'untrusted_speaker_labels' });
+    expect(planWithLabelTrust(baseArgs())).toEqual(held('untrusted_speaker_labels'));
   });
 
-  test('low or missing scheduling confidence is skipped', () => {
-    expect(planMakeup(baseArgs({ v2: v2({ confidence: { scheduling_window: 0.5 } }) }))).toMatchObject({ reason: 'low_scheduling_confidence' });
-    expect(planMakeup(baseArgs({ v2: v2({ confidence: { scheduling_window: null } }) }))).toMatchObject({ reason: 'low_scheduling_confidence' });
+  test('low or missing scheduling confidence holds', () => {
+    expect(planMakeup(baseArgs({ v2: v2({ confidence: { scheduling_window: 0.5 } }) }))).toEqual(held('low_scheduling_confidence'));
+    expect(planMakeup(baseArgs({ v2: v2({ confidence: { scheduling_window: null } }) }))).toEqual(held('low_scheduling_confidence'));
   });
 
-  test('a confirmed start in the past, or off the hour, is skipped', () => {
-    expect(planMakeup(baseArgs({ now: new Date('2026-10-21T00:00:00Z') }))).toMatchObject({ reason: 'confirmed_start_in_past' });
-    expect(planMakeup(baseArgs({ v2: v2({ scheduling: { confirmed_start_at: '2026-10-20T17:30:00-04:00' } }) }))).toMatchObject({ reason: 'off_grid_start_time' });
+  test('spam, voicemail, a non-decision-maker, a do-not-contact request and no extraction hold', () => {
+    expect(planMakeup(baseArgs({ v2: v2({ meta: { is_spam: true } }) }))).toEqual(held('spam_or_voicemail'));
+    expect(planMakeup(baseArgs({ v2: v2({ meta: { is_voicemail: true } }) }))).toEqual(held('spam_or_voicemail'));
+    expect(planMakeup(baseArgs({ v2: v2({ caller: { decision_maker_present: false } }) }))).toEqual(held('caller_not_decision_maker'));
+    expect(planMakeup(baseArgs({ v2: v2({ consent: { do_not_contact_request: true } }) }))).toEqual(held('do_not_contact_requested'));
+    expect(planMakeup(baseArgs({ v2: null }))).toEqual(held('no_v2_extraction'));
   });
 
-  test('spam, voicemail, a non-decision-maker and a do-not-contact request are skipped', () => {
-    expect(planMakeup(baseArgs({ v2: v2({ meta: { is_spam: true } }) }))).toMatchObject({ reason: 'spam' });
-    expect(planMakeup(baseArgs({ v2: v2({ meta: { is_voicemail: true } }) }))).toMatchObject({ reason: 'voicemail' });
-    expect(planMakeup(baseArgs({ v2: v2({ caller: { decision_maker_present: false } }) }))).toMatchObject({ reason: 'caller_not_decision_maker' });
-    expect(planMakeup(baseArgs({ v2: v2({ consent: { do_not_contact_request: true } }) }))).toMatchObject({ reason: 'do_not_contact_requested' });
-    expect(planMakeup(baseArgs({ v2: null }))).toMatchObject({ reason: 'no_v2_extraction' });
-  });
-
-  test('the caller must have accepted, and an agent who did not commit fails closed', () => {
-    expect(planMakeup(baseArgs({ v2: v2({ scheduling: { caller_accepted_slot: false } }) }))).toMatchObject({ action: 'skip', reason: 'caller_did_not_accept' });
-    expect(planMakeup(baseArgs({ v2: v2({ scheduling: { caller_accepted_slot: null } }) }))).toMatchObject({ action: 'skip', reason: 'caller_did_not_accept' });
-    expect(planMakeup(baseArgs({ v2: v2({ scheduling: { agent_committed_booking: false } }) }))).toMatchObject({ action: 'skip', reason: 'agent_did_not_commit' });
+  test('the caller must have accepted, and an agent who did not commit holds', () => {
+    expect(planMakeup(baseArgs({ v2: v2({ scheduling: { caller_accepted_slot: false } }) }))).toEqual(held('caller_did_not_accept'));
+    expect(planMakeup(baseArgs({ v2: v2({ scheduling: { caller_accepted_slot: null } }) }))).toEqual(held('caller_did_not_accept'));
+    expect(planMakeup(baseArgs({ v2: v2({ scheduling: { agent_committed_booking: false } }) }))).toEqual(held('agent_did_not_commit'));
   });
 
   test('an inbound caller the carrier did not fully attest holds for review; an outbound call needs no attestation', () => {
@@ -298,17 +358,17 @@ describe('planMakeupMoveFromCall', () => {
     expect(detector).not.toMatch(/action'?: 'call_reschedule_applied' \}/);
   });
 
-  test('the move stands in for the booking only: no booking slot, or a different one, is skipped', () => {
-    expect(planMakeup(baseArgs({ bookingSlot: null }))).toMatchObject({ action: 'skip', reason: 'not_the_booking_slot' });
-    expect(planMakeup(baseArgs({ bookingSlot: '2026-10-20T18:00' }))).toMatchObject({ action: 'skip', reason: 'not_the_booking_slot' });
-    expect(planMakeup(baseArgs({ bookingSlot: '2026-10-21T17:00' }))).toMatchObject({ action: 'skip', reason: 'not_the_booking_slot' });
-    expect(planMakeup(baseArgs({ bookingSlot: '2026-10-20T17:00:00-04:00' }))).toMatchObject({ action: 'apply', visitId: VISIT_ID });
-  });
-
-  test('a visit at another saved property is not a candidate when the call is about the primary one', () => {
-    const other = visit({ property_id: 'prop-2' });
+  test('the booking\'s own property: a visit at another saved property is not a candidate, the same one is', () => {
     const props = [{ id: 'prop-2', active: true, address_line1: '200 Other Road', city: 'Bradenton', zip: '34205' }];
-    expect(planMakeup(baseArgs({ candidates: [other], properties: props }))).toMatchObject({ action: 'skip', reason: 'property_needs_review' });
+    const other = visit({ property_id: 'prop-2' });
+    expect(planMakeup(baseArgs({ candidates: [other], properties: props }))).toMatchObject({ action: 'skip', reason: 'no_missed_visit' });
+    const atOther = booking({ property_id: 'prop-2', service_address_line1: '200 Other Road' });
+    expect(planMakeup(baseArgs({ candidates: [other], properties: props, booking: atOther }))).toMatchObject({ action: 'apply', visitId: VISIT_ID });
+    // A visit that carries its own service address is matched on it.
+    expect(planMakeup(baseArgs({ candidates: [visit({ service_address_line1: '200 Other Road', service_address_city: 'Bradenton', service_address_zip: '34205' })] })))
+      .toMatchObject({ action: 'skip', reason: 'no_missed_visit' });
+    // A property id that no active saved property resolves never falls back to the primary address.
+    expect(planMakeup(baseArgs({ candidates: [visit({ property_id: 'prop-gone' })] }))).toMatchObject({ action: 'skip', reason: 'no_missed_visit' });
   });
 });
 
@@ -354,13 +414,14 @@ describe('service lines', () => {
   });
 });
 
-// ── applier against a mocked connection ─────────────────────────────────
+// ── the database steps against a mocked connection ──────────────────────
 function makeConn({ prior = null, cust = customer(), visits = [visit()], logs = [noshow()], properties = [], extraction = v2(),
-  settledCall = {}, handled = false, moved = false, portalRequest = null, smsOffer = false, callBooking = null, dayTaken = null } = {}) {
+  settledCall = {}, handled = false, moved = false, movedAfter = [], portalRequest = null, smsOffer = false, callBooking = null, dayTaken = null } = {}) {
   const writes = { updates: [], inserts: [] };
   const offerRows = smsOffer ? [{ id: 'pending-offer', notes: JSON.stringify({ option1: { date: '2026-10-24', window: { start: '08:00', end: '09:00' } } }) }] : [];
   const builder = (table) => {
     const state = { table, where: [], whereIn: [], nullCols: [], updateArg: null };
+    const whereHas = (key) => state.where.some(([w]) => w === key || (w && typeof w === 'object' && key in w));
     const q = {
       where(...a) { state.where.push(a); return q; },
       whereIn(...a) { state.whereIn.push(a); return q; },
@@ -388,8 +449,8 @@ function makeConn({ prior = null, cust = customer(), visits = [visit()], logs = 
         if (table === 'triage_items') return Promise.resolve(state.counted ? { n: 0 } : (handled ? { id: 'handled-card' } : undefined));
         if (table === 'reschedule_log') return Promise.resolve(moved ? { id: 'later-move' } : undefined);
         if (table === 'service_requests') return Promise.resolve(portalRequest || undefined);
-        if (table === 'scheduled_services' && state.where.some(([w]) => w && typeof w === 'object' && 'source_call_log_id' in w)) return Promise.resolve(callBooking || undefined);
-        if (table === 'scheduled_services' && state.where.some(([w]) => w === 'scheduled_date')) return Promise.resolve(dayTaken || undefined);
+        if (table === 'scheduled_services' && whereHas('source_call_log_id')) return Promise.resolve(callBooking || undefined);
+        if (table === 'scheduled_services' && whereHas('scheduled_date')) return Promise.resolve(dayTaken || undefined);
         if (table === 'scheduled_services') return Promise.resolve(visits[0]);
         return Promise.resolve(undefined);
       },
@@ -398,7 +459,7 @@ function makeConn({ prior = null, cust = customer(), visits = [visit()], logs = 
         if (table === 'reschedule_log') {
           if (state.nullCols.includes('customer_response')) return Promise.resolve(offerRows).then(resolve, reject);
           if (state.nullCols.includes('resolved_at')) return Promise.resolve(logs).then(resolve, reject);
-          return Promise.resolve([]).then(resolve, reject);
+          return Promise.resolve(movedAfter).then(resolve, reject);
         }
         if (table === 'scheduled_services' && state.updateArg == null) return Promise.resolve(visits).then(resolve, reject);
         if (state.updateArg != null) return Promise.resolve(1).then(resolve, reject);
@@ -421,9 +482,92 @@ const guardedRebooker = (conn, result = { success: true }) => ({
     return result;
   }),
 });
-const applyArgs = (conn, rebooker, over = {}) => ({ conn, call: call(), procToken: 'tok-1', procGeneration: 3, now: NOW, rebooker, bookingSlot: BOOKING_SLOT, ...over });
+const bookingArgs = (over = {}) => ({ call: call(), procToken: 'tok-1', procGeneration: 3, booking: booking(), now: NOW, ...over });
+// The plan the booking transaction hands the processor (planCallMakeupForBooking).
+const applyPlan = () => ({ ...planMakeup(baseArgs()), booking: booking() });
+const applyArgs = (conn, rebooker, over = {}) => ({ conn, call: call(), plan: applyPlan(), procToken: 'tok-1', procGeneration: 3, now: NOW, rebooker, ...over });
+// The move's own transaction sees a different database than the booking's did.
+const racingRebooker = (conn, lateConn) => ({ reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => opts.moveGuard({ trx: lateConn, service: conn.visits[0] })) });
 
-describe('applyCallMakeupMove', () => {
+describe('planCallMakeupForBooking (the booking transaction, at its insert)', () => {
+  test('the incident: apply, with the booking it was judged on, nothing written', async () => {
+    const trx = makeConn();
+    const plan = await planCallMakeupForBooking(trx, bookingArgs());
+    expect(plan).toMatchObject({ action: 'apply', visitId: VISIT_ID, newDate: '2026-10-20', newWindow: { start: '17:00', end: '18:00' }, booking: booking() });
+    expect(trx.writes.inserts).toHaveLength(0);
+    expect(trx.writes.updates).toHaveLength(0);
+  });
+
+  test('no missed visit: skip, so the row is inserted as always', async () => {
+    const trx = makeConn({ logs: [] });
+    expect(await planCallMakeupForBooking(trx, bookingArgs())).toMatchObject({ action: 'skip', reason: 'no_missed_visit' });
+    expect(trx.writes.inserts).toHaveLength(0);
+  });
+
+  test.each([
+    ['a pass that lost the claim', { processing_token: 'other-token' }, 'superseded_by_newer_pass'],
+    ['a newer generation', { processing_generation: 4 }, 'superseded_by_newer_pass'],
+    ['a call linked to another customer', { customer_id: 'another-customer' }, 'customer_link_changed'],
+  ])('%s stands down to the booking\'s own outcome', async (_label, settledCall, reason) => {
+    expect(await planCallMakeupForBooking(makeConn({ settledCall }), bookingArgs())).toMatchObject({ action: 'skip', reason });
+  });
+
+  test.each([
+    ['this call\'s own earlier booking (live, or cancelled by staff)', { callBooking: { id: 'earlier-booking' } }, 'call_already_booked'],
+    ['a staff-handled card', { handled: true }, 'handled_by_staff'],
+    ['a move of the visit after the call', { moved: true }, 'handled_after_call'],
+    ['an open portal reschedule request', { portalRequest: { id: 'req-1' } }, 'portal_request_open'],
+    ['an outstanding reschedule-options text', { smsOffer: true }, 'pending_sms_offer'],
+  ])('%s holds the booking for review', async (_label, state, reason) => {
+    const trx = makeConn(state);
+    expect(await planCallMakeupForBooking(trx, bookingArgs())).toMatchObject({ action: 'needs_review', reason, visitId: VISIT_ID });
+    expect(trx.writes.inserts).toHaveLength(0);
+  });
+
+  test('a visit moved after the call from a missed date is loaded and held, even with its no-show settled', async () => {
+    const trx = makeConn({ visits: [visit({ scheduled_date: new Date('2026-10-24T00:00:00Z') })], logs: [], movedAfter: [{ scheduled_service_id: VISIT_ID }] });
+    expect(await planCallMakeupForBooking(trx, bookingArgs())).toMatchObject({ action: 'needs_review', reason: 'handled_after_call' });
+  });
+
+  test('two missed candidates hold', async () => {
+    const second = visit({ id: LAWN_VISIT_ID, scheduled_date: new Date('2026-10-10T00:00:00Z') });
+    const trx = makeConn({ visits: [visit(), second], logs: [noshow(), noshow({ id: 'b2', scheduled_service_id: LAWN_VISIT_ID, original_date: '2026-10-10' })] });
+    expect(await planCallMakeupForBooking(trx, bookingArgs())).toMatchObject({ action: 'needs_review', reason: 'ambiguous_missed_visit' });
+  });
+
+  test('a call still filed as reschedule_requested holds beside the missed visit', async () => {
+    const trx = makeConn({ extraction: v2({ scheduling: { status: 'reschedule_requested' } }) });
+    expect(await planCallMakeupForBooking(trx, bookingArgs())).toMatchObject({ action: 'needs_review', reason: 'not_a_confirmed_slot' });
+  });
+});
+
+describe('priorCallMakeupDecision (the reprocess check, before the booking branch)', () => {
+  const movedVisit = () => visit({ scheduled_date: new Date('2026-10-20T00:00:00Z'), window_start: '17:00:00', window_end: '18:00:00', source_call_log_id: CALL_ID });
+  const marker = (over = {}) => ({ metadata: JSON.stringify({
+    call_log_id: CALL_ID, scheduled_service_id: VISIT_ID, to: { date: '2026-10-20', start: '17:00', end: '18:00' }, processing_generation: 2,
+    source_hash: createHash('sha256').update(JSON.stringify([TRANSCRIPT, v2()])).digest('hex'), ...over }) });
+
+  test('a call that never applied a make-up: null, the booking branch runs', async () => {
+    expect(await priorCallMakeupDecision(makeConn(), { call: call(), procToken: 'tok-1' })).toBeNull();
+  });
+
+  test('the same call and the visit still at the marked slot: noop, the moved visit IS the booking (a reprocess bumps the generation)', async () => {
+    const conn = makeConn({ prior: marker(), visits: [movedVisit()] });
+    expect(await priorCallMakeupDecision(conn, { call: call(), procToken: 'tok-1' })).toEqual({ outcome: 'noop', reason: 'already_applied', visitId: VISIT_ID });
+    expect(conn.writes.inserts).toHaveLength(0);
+  });
+
+  test('a changed transcript or extraction, a moved visit, or another pass\'s claim holds for review', async () => {
+    const decide = (state) => priorCallMakeupDecision(makeConn({ prior: marker(), visits: [movedVisit()], ...state }), { call: call(), procToken: 'tok-1' });
+    const review = { outcome: 'needs_review', reason: 'prior_makeup_differs', visitId: VISIT_ID };
+    expect(await decide({ settledCall: { transcription: `${TRANSCRIPT}\nCaller: Actually, make it Wednesday.` } })).toEqual(review);
+    expect(await decide({ extraction: v2({ scheduling: { confirmed_start_at: '2026-10-21T17:00:00-04:00' } }) })).toEqual(review);
+    expect(await decide({ visits: [visit({ scheduled_date: new Date('2026-10-23T00:00:00Z'), window_start: '09:00:00', window_end: '10:00:00' })] })).toEqual(review);
+    expect(await decide({ settledCall: { processing_token: 'peer-token' } })).toEqual(review);
+  });
+});
+
+describe('applyCallMakeupMove (after the booking transaction)', () => {
   beforeEach(() => {
     AppointmentReminders.handleReschedule.mockClear().mockResolvedValue({});
     emitDispatchJobUpdate.mockClear().mockResolvedValue({});
@@ -440,13 +584,14 @@ describe('applyCallMakeupMove', () => {
     expect([id, date, win, reason, by]).toEqual([VISIT_ID, '2026-10-20', { start: '17:00', end: '18:00' }, MAKEUP_REASON_CODE, INITIATED_BY]);
     expect(MAKEUP_REASON_CODE).toBe('ai_call_makeup');
     expect(reason.length).toBeLessThanOrEqual(30);
-    expect(opts).toMatchObject({ keepStatus: true, notifyRequested: false, expect: { scheduled_date: '2026-10-13', window_start: '09:00:00', status: 'confirmed', is_recurring: true } });
+    expect(opts).toMatchObject({ keepStatus: true, notifyRequested: false, sourceSurface: 'call_makeup',
+      expect: { scheduled_date: '2026-10-13', window_start: '09:00:00', status: 'confirmed', is_recurring: true } });
     expect(opts).not.toHaveProperty('seriesPolicy');
 
     const activity = conn.writes.inserts.find((i) => i.table === 'activity_log');
     expect(activity.row.action).toBe(MAKEUP_ACTIVITY_ACTION);
     expect(JSON.parse(activity.row.metadata)).toMatchObject({ call_log_id: CALL_ID, scheduled_service_id: VISIT_ID, noshow_log_id: NOSHOW_ID,
-      from: { date: '2026-10-13' }, to: { date: '2026-10-20', start: '17:00', end: '18:00' } });
+      from: { date: '2026-10-13' }, to: { date: '2026-10-20', start: '17:00', end: '18:00' }, processing_generation: 3 });
     // The moved row carries the call (booking dedup + commitment proof), only when nobody else's.
     const stamp = conn.writes.updates.find((u) => u.table === 'scheduled_services' && u.arg.source_call_log_id);
     expect(stamp.arg.source_call_log_id).toBe(CALL_ID);
@@ -476,101 +621,31 @@ describe('applyCallMakeupMove', () => {
     expect(fs.readFileSync(require.resolve('../routes/admin-dispatch'), 'utf8')).toMatch(/RECONCILE_SURFACES = \[[^\]]*'call_makeup'/);
   });
 
-  test('a reprocess finds its own marker and is a no-op (no move, no booking)', async () => {
+  test('a marker another pass wrote meanwhile makes the move a no-op that writes nothing', async () => {
     const conn = makeConn({ prior: { metadata: JSON.stringify({ call_log_id: CALL_ID, scheduled_service_id: VISIT_ID }) } });
-    const rebooker = { reschedule: jest.fn() };
-    expect(await applyCallMakeupMove(applyArgs(conn, rebooker))).toMatchObject({ outcome: 'noop', reason: 'already_applied', visitId: VISIT_ID });
-    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    expect(await applyCallMakeupMove(applyArgs(conn, guardedRebooker(conn)))).toMatchObject({ outcome: 'noop', reason: 'already_applied', visitId: VISIT_ID });
     expect(conn.writes.inserts).toHaveLength(0);
-  });
-
-  test('no missed visit: skipped, nothing written, rebooker untouched (today\'s booking runs)', async () => {
-    const conn = makeConn({ logs: [] });
-    const rebooker = { reschedule: jest.fn() };
-    expect(await applyCallMakeupMove(applyArgs(conn, rebooker))).toMatchObject({ outcome: 'skipped', reason: 'no_missed_visit' });
-    expect(rebooker.reschedule).not.toHaveBeenCalled();
-    expect(conn.writes.inserts).toHaveLength(0);
-    expect(conn.writes.updates).toHaveLength(0);
-  });
-
-  test('a normal reschedule call (reschedule_requested) is skipped by this lane', async () => {
-    const conn = makeConn({ extraction: v2({ scheduling: { status: 'reschedule_requested' } }) });
-    expect(await applyCallMakeupMove(applyArgs(conn, { reschedule: jest.fn() }))).toMatchObject({ outcome: 'skipped', reason: 'not_a_confirmed_slot' });
   });
 
   test.each([
     ['a pass that lost the claim', { processing_token: 'other-token' }, 'superseded_by_newer_pass'],
     ['a newer generation', { processing_generation: 4 }, 'superseded_by_newer_pass'],
-    ['a finalized call link edit', { customer_id: 'another-customer' }, 'customer_link_changed'],
-  ])('%s stands down', async (_label, settledCall, reason) => {
-    const conn = makeConn({ settledCall });
+    ['a call linked to another customer', { customer_id: 'another-customer' }, 'customer_link_changed'],
+  ])('%s holds without moving (the booking already inserted nothing)', async (_label, settledCall, reason) => {
     const rebooker = { reschedule: jest.fn() };
-    expect(await applyCallMakeupMove(applyArgs(conn, rebooker))).toMatchObject({ outcome: 'skipped', reason });
+    expect(await applyCallMakeupMove(applyArgs(makeConn({ settledCall }), rebooker))).toMatchObject({ outcome: 'needs_review', reason, visitId: VISIT_ID });
     expect(rebooker.reschedule).not.toHaveBeenCalled();
-  });
-
-  test('a visit this call already booked (live or staff-cancelled) leaves it to the booking guards; seen during the move, it holds', async () => {
-    const rebooker = { reschedule: jest.fn() };
-    expect(await applyCallMakeupMove(applyArgs(makeConn({ callBooking: { id: 'earlier-booking' } }), rebooker)))
-      .toMatchObject({ outcome: 'skipped', reason: 'call_already_booked' });
-    expect(rebooker.reschedule).not.toHaveBeenCalled();
-    const conn = makeConn();
-    const lateConn = makeConn({ callBooking: { id: 'earlier-booking' } });
-    const racing = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => opts.moveGuard({ trx: lateConn, service: conn.visits[0] })) };
-    expect(await applyCallMakeupMove(applyArgs(conn, racing))).toMatchObject({ outcome: 'needs_review', reason: 'handled_after_call' });
-    expect(lateConn.writes.inserts).toHaveLength(0);
-  });
-
-  test('a live visit already on the agreed day holds for review (pre-check and under the move transaction)', async () => {
-    const rebooker = { reschedule: jest.fn() };
-    expect(await applyCallMakeupMove(applyArgs(makeConn({ dayTaken: { id: 'staff-replacement' } }), rebooker)))
-      .toMatchObject({ outcome: 'needs_review', reason: 'existing_appointment_on_target_date', visitId: VISIT_ID });
-    expect(rebooker.reschedule).not.toHaveBeenCalled();
-    const conn = makeConn();
-    const lateConn = makeConn({ dayTaken: { id: 'staff-replacement' } });
-    const racing = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => opts.moveGuard({ trx: lateConn, service: conn.visits[0] })) };
-    expect(await applyCallMakeupMove(applyArgs(conn, racing))).toMatchObject({ outcome: 'needs_review', reason: 'handled_after_call' });
-    expect(lateConn.writes.inserts).toHaveLength(0);
-  });
-
-  test('a move of the candidate after the call HOLDS (never books); only the candidate counts, and the no-show evidence row does not', async () => {
-    const conn = makeConn({ moved: true });
-    const rebooker = { reschedule: jest.fn() };
-    expect(await applyCallMakeupMove(applyArgs(conn, rebooker))).toMatchObject({ outcome: 'needs_review', reason: 'handled_after_call', visitId: VISIT_ID });
-    expect(rebooker.reschedule).not.toHaveBeenCalled();
-    // Scoped to the candidate visit: an unrelated visit's move never waves the duplicate booking through.
-    expect(fs.readFileSync(require.resolve('../services/call-reschedule-apply'), 'utf8')).toMatch(/newerMove = \(trx, visitId\) => trx\('reschedule_log'\)\n\s+\.where\(\{ scheduled_service_id: visitId \}\)/);
-    // The newer-move fence excludes customer_noshow rows (the evidence is itself one).
-    const source = fs.readFileSync(require.resolve('../services/call-reschedule-apply'), 'utf8');
-    expect(source).toMatch(/whereNot\('reason_code', 'customer_noshow'\)/);
   });
 
   test.each([
-    ['an open portal reschedule request', { portalRequest: { id: 'req-1' } }, 'portal_request_open'],
-    ['an outstanding reschedule-options text', { smsOffer: true }, 'pending_sms_offer'],
-    ['a staff-handled card', { handled: true }, 'handled_by_staff'],
-  ])('%s holds the booking for review', async (_label, state, reason) => {
-    const conn = makeConn(state);
-    const rebooker = { reschedule: jest.fn() };
-    expect(await applyCallMakeupMove(applyArgs(conn, rebooker))).toMatchObject({ outcome: 'needs_review', reason, visitId: VISIT_ID });
-    expect(rebooker.reschedule).not.toHaveBeenCalled();
-    expect(conn.writes.inserts).toHaveLength(0);
-  });
-
-  test('two missed candidates hold the booking and move nothing', async () => {
-    const second = visit({ id: LAWN_VISIT_ID, scheduled_date: new Date('2026-10-10T00:00:00Z') });
-    const conn = makeConn({ visits: [visit(), second], logs: [noshow(), noshow({ id: 'b2', scheduled_service_id: LAWN_VISIT_ID, original_date: '2026-10-10' })] });
-    const rebooker = { reschedule: jest.fn() };
-    expect(await applyCallMakeupMove(applyArgs(conn, rebooker))).toMatchObject({ outcome: 'needs_review', reason: 'ambiguous_missed_visit' });
-    expect(rebooker.reschedule).not.toHaveBeenCalled();
-  });
-
-  test('a portal request opened during the move is caught on the move transaction and holds', async () => {
+    ['a live visit landing on the agreed day', { dayTaken: { id: 'staff-replacement' } }, 'existing_appointment_on_target_date'],
+    ['this call\'s own booking appearing', { callBooking: { id: 'earlier-booking' } }, 'call_already_booked'],
+    ['a portal request opened', { portalRequest: { id: 'req-late' } }, 'portal_request_open'],
+    ['a staff move of the visit', { moved: true }, 'handled_after_call'],
+  ])('%s between the booking transaction and the move\'s own holds', async (_label, state, reason) => {
     const conn = makeConn();
-    // The request appears between the pre-check and the guard: the guard's own transaction sees it.
-    const lateConn = makeConn({ portalRequest: { id: 'req-late' } });
-    const rebooker = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => opts.moveGuard({ trx: lateConn, service: conn.visits[0] })) };
-    expect(await applyCallMakeupMove(applyArgs(conn, rebooker))).toMatchObject({ outcome: 'needs_review', reason: 'handled_after_call' });
+    const lateConn = makeConn(state);
+    expect(await applyCallMakeupMove(applyArgs(conn, racingRebooker(conn, lateConn)))).toMatchObject({ outcome: 'needs_review', reason, visitId: VISIT_ID });
     expect(lateConn.writes.inserts).toHaveLength(0);
   });
 
@@ -584,11 +659,13 @@ describe('applyCallMakeupMove', () => {
 
   test('a no-show settled during the move (someone rebooked it) holds instead of double-moving', async () => {
     const conn = makeConn();
-    const rebooker = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => {
-      const settledConn = makeConn({ logs: [] });
-      await opts.moveGuard({ trx: settledConn, service: conn.visits[0] });
-    }) };
-    expect(await applyCallMakeupMove(applyArgs(conn, rebooker))).toMatchObject({ outcome: 'needs_review', reason: 'changed_before_apply' });
+    expect(await applyCallMakeupMove(applyArgs(conn, racingRebooker(conn, makeConn({ logs: [] }))))).toMatchObject({ outcome: 'needs_review', reason: 'changed_before_apply' });
+  });
+
+  test('an extraction rewritten during the move holds', async () => {
+    const conn = makeConn();
+    const lateConn = makeConn({ extraction: v2({ scheduling: { caller_accepted_slot: false } }) });
+    expect(await applyCallMakeupMove(applyArgs(conn, racingRebooker(conn, lateConn)))).toMatchObject({ outcome: 'needs_review', reason: 'changed_before_apply' });
   });
 
   test('a rebooker refusal (slot taken, bad window) HOLDS the booking and writes no activity row', async () => {
@@ -598,10 +675,14 @@ describe('applyCallMakeupMove', () => {
     expect(conn.writes.inserts).toHaveLength(0);
   });
 
-  test('a failed reminder sync does not undo a committed move', async () => {
+  test('a failed or empty reminder sync does not undo a committed move (the in-transaction trigger re-timed the reminder)', async () => {
     AppointmentReminders.handleReschedule.mockRejectedValueOnce(new Error('sms provider down'));
     const conn = makeConn();
     expect(await applyCallMakeupMove(applyArgs(conn, guardedRebooker(conn)))).toMatchObject({ outcome: 'applied' });
+    AppointmentReminders.handleReschedule.mockResolvedValueOnce(null);
+    const again = makeConn();
+    expect(await applyCallMakeupMove(applyArgs(again, guardedRebooker(again)))).toMatchObject({ outcome: 'applied' });
+    expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('reminder re-sync returned nothing'));
   });
 });
 
@@ -609,22 +690,19 @@ describe('applyCallMakeupMove', () => {
 describe('processor wiring', () => {
   const source = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
 
-  describe('applyCallMakeupMoveStep', () => {
-    const { applyCallMakeupMoveStep } = require('../services/call-recording-processor')._test;
-    const applyModule = require('../services/call-reschedule-apply');
-    afterEach(() => jest.restoreAllMocks());
+  describe('callMakeupStep', () => {
+    const { callMakeupStep } = require('../services/call-recording-processor')._test;
 
-    test('passes the claim and the resolved customer to the applier and returns its outcome', async () => {
-      const spy = jest.spyOn(applyModule, 'applyCallMakeupMove').mockResolvedValue({ outcome: 'applied', visitId: VISIT_ID });
-      const out = await applyCallMakeupMoveStep({ call: call({ customer_id: null }), callSid: 'CA1', customerId: CUSTOMER_ID, procToken: 'tok-1', procGeneration: 3 });
-      expect(out).toEqual({ outcome: 'applied', visitId: VISIT_ID });
-      expect(spy.mock.calls[0][0]).toMatchObject({ procToken: 'tok-1', procGeneration: 3, call: { id: CALL_ID, customer_id: CUSTOMER_ID } });
+    test('runs against the make-up module and returns its outcome', async () => {
+      const run = jest.fn().mockResolvedValue({ outcome: 'applied', visitId: VISIT_ID });
+      expect(await callMakeupStep('move', 'CA1', run)).toEqual({ outcome: 'applied', visitId: VISIT_ID });
+      expect(run).toHaveBeenCalledWith(require('../services/call-reschedule-apply'));
+      expect(await callMakeupStep('prior', 'CA1', jest.fn().mockResolvedValue(null))).toBeNull();
     });
 
     test('an unexpected throw HOLDS the booking (needs_review), it never falls back to booking', async () => {
-      jest.spyOn(applyModule, 'applyCallMakeupMove').mockRejectedValue(new Error('db down'));
-      expect(await applyCallMakeupMoveStep({ call: call(), callSid: 'CA1', customerId: CUSTOMER_ID, procToken: 't', procGeneration: 1 }))
-        .toMatchObject({ outcome: 'needs_review', reason: 'makeup_check_failed' });
+      expect(await callMakeupStep('move', 'CA1', jest.fn().mockRejectedValue(new Error('db down'))))
+        .toEqual({ outcome: 'needs_review', reason: 'makeup_check_failed' });
     });
   });
 
@@ -637,43 +715,70 @@ describe('processor wiring', () => {
     expect(source.slice(revise, revise + 220)).toMatch(/\.catch\(/);
   });
 
-  test('the step runs only behind the gate, after every earlier veto, and BEFORE the booking transaction', () => {
-    const gate = source.indexOf("isEnabled('callMakeupMove') && !v2RoutingBlocked && !legacyGeoVeto");
-    expect(gate).toBeGreaterThan(-1);
-    const stepCall = source.indexOf('await applyCallMakeupMoveStep(', gate);
-    const chainStart = source.indexOf('    if (v2RoutingBlocked) {', gate);
-    const appliedBranch = source.indexOf("} else if (makeupMove && makeupMove.outcome !== 'needs_review') {");
-    const heldBranch = source.indexOf('} else if (makeupMove) {');
-    const bookingBranch = source.indexOf('} else if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && canCreateAppointmentFromCall) {\n      // Declared OUTSIDE the try');
-    expect(stepCall).toBeGreaterThan(gate);
-    expect(chainStart).toBeGreaterThan(stepCall);
-    expect(appliedBranch).toBeGreaterThan(chainStart);
-    expect(heldBranch).toBeGreaterThan(appliedBranch);
-    // Both make-up branches come before the booking branch, so a moved or held call never inserts.
-    expect(bookingBranch).toBeGreaterThan(heldBranch);
+  test('the decision sits at the booking transaction\'s fresh insert, after every booking guard', () => {
+    const hook = source.indexOf("require('./call-reschedule-apply').planCallMakeupForBooking(trx, {");
+    expect(hook).toBeGreaterThan(-1);
+    for (const guard of [
+      'const existing = await findExistingCallAppointment({',
+      'const attachable = await findAttachableCallAppointment({',
+      'const sameDayExisting = await trx(\'scheduled_services\')',
+      "return { __held: { reason: 'open_reservice_callback_exists' } };",
+      "return { __held: { reason: 'arranger_slot_elapsed_pre_insert' } };",
+    ]) {
+      const at = source.indexOf(guard);
+      expect(at).toBeGreaterThan(-1);
+      expect(at).toBeLessThan(hook);
+    }
+    const insert = source.indexOf('.insert(insertData)', hook);
+    expect(insert).toBeGreaterThan(hook);
+    const block = source.slice(source.lastIndexOf('if (makeupGateOn) {', hook), insert);
+    expect(block).toContain("if (makeup.action !== 'skip') return { __makeup: makeup };");
+    expect(block).toContain('followUpPlanned: Boolean(callFollowUpPlan), reService: isReServiceCatalogRow(callBookingCatalogRow)');
+    expect(block).toContain('callbackHold: callbackNumberNeededHoldActive');
   });
 
-  test('applied: no schedule row is reported, so no confirmation text, and the enforce fallback files no card', () => {
-    const start = source.indexOf("} else if (makeupMove && makeupMove.outcome !== 'needs_review') {");
-    const block = source.slice(start, source.indexOf('} else if (makeupMove) {'));
-    expect(block).toContain("skippedReason: 'makeup_move_applied'");
-    expect(block).toContain('scheduleCreated: false');
-    expect(block).toContain('smsSent: false');
+  test('after the booking transaction: held, then make-up, then the inserted or reused row', () => {
+    const heldBranch = source.indexOf('if (svc && svc.__held) {');
+    const makeupBranch = source.indexOf('} else if (svc && svc.__makeup) {', heldBranch);
+    const rowBranch = source.indexOf('if (reusedExistingSchedule) {\n                scheduleWasReused = true;', makeupBranch);
+    expect(heldBranch).toBeGreaterThan(-1);
+    expect(makeupBranch).toBeGreaterThan(heldBranch);
+    expect(rowBranch).toBeGreaterThan(makeupBranch);
+    const block = source.slice(makeupBranch, rowBranch);
+    expect(block).toContain("makeup.applyCallMakeupMove({ conn: db, call, plan: svc.__makeup, procToken, procGeneration })");
+    expect(block).toContain("svc.__makeup.action === 'apply'");
+    expect(block).toContain('appointmentResult = await settleMakeup(');
+  });
+
+  test('the reprocess check runs behind the gate, after every earlier veto, before the booking branch', () => {
+    const gate = source.indexOf("const makeupGateOn = isEnabled('callMakeupMove') && !v2RoutingBlocked && !legacyGeoVeto");
+    expect(gate).toBeGreaterThan(-1);
+    const prior = source.indexOf('makeup.priorCallMakeupDecision(db, {', gate);
+    const chainStart = source.indexOf('    if (v2RoutingBlocked) {', gate);
+    const priorBranch = source.indexOf('} else if (makeupPrior) {\n      appointmentResult = await settleMakeup(makeupPrior);', chainStart);
+    const bookingBranch = source.indexOf('} else if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && canCreateAppointmentFromCall) {\n      // Declared OUTSIDE the try');
+    expect(prior).toBeGreaterThan(gate);
+    expect(chainStart).toBeGreaterThan(prior);
+    expect(priorBranch).toBeGreaterThan(chainStart);
+    expect(bookingBranch).toBeGreaterThan(priorBranch);
+  });
+
+  test('settled: moved reports no schedule row (no confirmation text, no fallback card); held files the review card, never a visit', () => {
+    const start = source.indexOf('const settleMakeup = async (makeup) => {');
+    const block = source.slice(start, source.indexOf('    if (v2RoutingBlocked) {', start));
+    const [moved, heldPart] = block.split("logger.warn(`[call-proc] Held auto-booking");
+    expect(moved).toContain('scheduleCreated: false');
+    expect(moved).toContain('smsSent: false');
+    expect(moved).toContain("skippedReason: 'makeup_move_applied'");
+    expect(heldPart).toContain("bridgeNeedsConfirmation.push('missed_visit_makeup_needs_review')");
+    expect(heldPart).toContain('fileSkippedBookingCard(');
+    expect(heldPart).toContain("skippedReason: 'missed_visit_makeup_needs_review'");
     expect(block).not.toContain('scheduledServiceId');
+    expect(block).not.toMatch(/insert\(/);
     expect(source).toMatch(/const heldReasons = new Set\(\[[^\]]*'makeup_move_applied'\]\)/);
   });
 
-  test('needs_review: held with a review card, never a new visit', () => {
-    const start = source.indexOf('} else if (makeupMove) {');
-    const block = source.slice(start, source.indexOf('} else if (extracted.appointment_confirmed', start));
-    expect(block).toContain("skippedReason: 'missed_visit_makeup_needs_review'");
-    expect(block).toContain('fileSkippedBookingCard(');
-    expect(block).toContain("bridgeNeedsConfirmation.push('missed_visit_makeup_needs_review')");
-    expect(block).not.toContain('scheduledServiceId:');
-    expect(block).not.toMatch(/insert\(/);
-  });
-
-  test('gate off: dark unless GATE_CALL_MAKEUP_MOVE is exactly true, and the step is its only reader', () => {
+  test('gate off: dark unless GATE_CALL_MAKEUP_MOVE is exactly true, read in one place', () => {
     const read = (value) => {
       const saved = process.env.GATE_CALL_MAKEUP_MOVE;
       if (value === undefined) delete process.env.GATE_CALL_MAKEUP_MOVE; else process.env.GATE_CALL_MAKEUP_MOVE = value;

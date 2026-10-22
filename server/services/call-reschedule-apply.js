@@ -153,7 +153,7 @@ function callMetadata(call) {
   const meta = call?.metadata;
   if (!meta) return {};
   if (typeof meta === 'string') {
-    try { return JSON.parse(meta) || {}; } catch (_e) { return {}; }
+    try { return JSON.parse(meta) || {}; } catch { return {}; }
   }
   return meta;
 }
@@ -212,29 +212,6 @@ function humanHandledRescheduleCard(conn, callLogId, { excludeId = null } = {}) 
 function authoritativeServiceName(row) {
   if (!row.service_id) return row.service_key_snapshot ? null : row.service_type;
   return row.catalog_service_key === PLACEHOLDER_SERVICE_KEY ? null : row.catalog_service_name;
-}
-
-// The property a call is about: the stated new address when the caller gave
-// one, else the customer's only known address. `targetKey` is null when the
-// call needs review (several known addresses with none stated, or a stated
-// address that is not one of the customer's).
-function callPropertyScope(v2, customer, properties) {
-  const saved = properties.filter((p) => p.active !== false);
-  const primaryKey = customer.address_line1 ? addressKey(customer) : null;
-  const knownKeys = new Set([primaryKey, ...saved.map((p) => addressKey(p))].filter(Boolean));
-  const stated = v2.property?.service_address || {};
-  const key = statesNewAddress(v2)
-    ? (stated.street_line_1 ? addressKey({ address_line1: stated.street_line_1, address_line2: stated.street_line_2,
-      city: stated.city, zip: stated.postal_code }) : null)
-    : (knownKeys.size === 1 ? [...knownKeys][0] : null);
-  return { saved, primaryKey, targetKey: key && knownKeys.has(key) ? key : null };
-}
-
-function rowAtProperty(row, { saved, primaryKey, targetKey }) {
-  if (row.property_id) return saved.some((p) => String(p.id) === String(row.property_id) && addressKey(p) === targetKey);
-  const key = row.service_address_line1 ? addressKey({ address_line1: row.service_address_line1,
-    address_line2: row.service_address_line2, city: row.service_address_city, zip: row.service_address_zip }) : primaryKey;
-  return key === targetKey;
 }
 
 /**
@@ -301,10 +278,21 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
     nearby = candidates.filter((row) => String(row.id) === String(humanOverride.visitId)
       && String(row.customer_id) === String(customer.id));
   } else {
-    const scope = callPropertyScope(v2, customer, properties);
-    targetKey = scope.targetKey;
-    if (!targetKey) return skip('property_needs_review');
-    const atProperty = candidates.filter((row) => rowAtProperty(row, scope));
+    const saved = properties.filter((p) => p.active !== false);
+    const primaryKey = customer.address_line1 ? addressKey(customer) : null;
+    const knownKeys = new Set([primaryKey, ...saved.map((p) => addressKey(p))].filter(Boolean));
+    const stated = v2.property?.service_address || {};
+    targetKey = statesNewAddress(v2)
+      ? (stated.street_line_1 ? addressKey({ address_line1: stated.street_line_1, address_line2: stated.street_line_2,
+        city: stated.city, zip: stated.postal_code }) : null)
+      : (knownKeys.size === 1 ? [...knownKeys][0] : null);
+    if (!targetKey || !knownKeys.has(targetKey)) return skip('property_needs_review');
+    const atProperty = candidates.filter((row) => {
+      if (row.property_id) return saved.some((p) => String(p.id) === String(row.property_id) && addressKey(p) === targetKey);
+      const key = row.service_address_line1 ? addressKey({ address_line1: row.service_address_line1,
+        address_line2: row.service_address_line2, city: row.service_address_city, zip: row.service_address_zip }) : primaryKey;
+      return key === targetKey;
+    });
     if (!atProperty.length) return skip('no_visit_on_books');
     const serviceRequest = v2.service_request || {};
     // A call V2 files under more than one service ("move my pest and lawn
@@ -614,7 +602,11 @@ async function stampSkipOnCards(conn, callLogId, plan) {
 // application for this call at all (a caller with requireSameGeneration
 // always passes proof and never sees null, since it already gated on
 // `prior` existing).
-async function priorApplicationMatchesLiveCall(conn, call, { requireSameGeneration = true, proof = undefined } = {}) {
+//
+// `claimToken`: a caller still inside its own processing pass (the make-up
+// reprocess check, priorCallMakeupDecision) holds the call's claim, so the
+// live row's processing_token is that pass's own, not a peer's.
+async function priorApplicationMatchesLiveCall(conn, call, { requireSameGeneration = true, proof = undefined, claimToken } = {}) {
   let resolvedProof = proof;
   if (resolvedProof === undefined) {
     const prior = await conn('activity_log').where({ action: ACTIVITY_ACTION })
@@ -631,7 +623,8 @@ async function priorApplicationMatchesLiveCall(conn, call, { requireSameGenerati
   // customer_id on hand skips this particular check rather than comparing
   // liveCall against itself.
   const referenceCustomerId = call.customer_id ?? liveCall?.customer_id;
-  const sameDecision = Boolean(liveCall) && !liveCall.processing_token && liveCall.customer_id === referenceCustomerId
+  const sameDecision = Boolean(liveCall) && (!liveCall.processing_token || liveCall.processing_token === claimToken)
+    && liveCall.customer_id === referenceCustomerId
     && liveCall.v2_extraction_status === 'valid'
     && (!requireSameGeneration || Number(liveCall.processing_generation) === Number(resolvedProof?.processing_generation))
     && createHash('sha256').update(JSON.stringify([liveCall.transcription, liveCall.ai_extraction_enriched])).digest('hex') === resolvedProof?.source_hash;
@@ -806,71 +799,60 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
         property_id: visit.property_id, service_id: visit.service_id, service_type: visit.service_type,
         status: visit.status, visit_id: visit.visit_id, source_action: visit.source_action, is_recurring: visit.is_recurring },
     });
-    // Post-commit fan-out. A series move runs the shared durable pass; a
-    // SINGLE move had NO fan-out at all (GH codex #4204 r8), which defeated
-    // this service's own purpose: SmartRebooker never touches
-    // appointment_reminders, so the 72h/24h reminder kept the OLD slot — the
-    // exact failure this path exists to prevent. Each effect is best-effort
-    // after a committed move, the way every other reschedule caller treats
-    // them: a socket or snapshot hiccup must not undo the visit move.
-    //
-    // The /book snapshot first, and for BOTH shapes — the anchor moved either
-    // way, and reschedule-public.js:823-839 syncs it ahead of the same split.
-    // The public availability builder counts self_booked_appointments for the
-    // day cap and GET /api/booking/status/:code reads the date and times back
-    // to the customer, so a stale row leaves their confirmation code showing
-    // the old appointment forever (GH codex #4204 r8 P2).
-    if (visit.self_booking_id) {
-      try {
-        await conn('self_booked_appointments').where({ id: visit.self_booking_id }).update({
-          date: plan.newDate,
-          start_time: plan.newWindow.start,
-          end_time: plan.newWindow.end,
-          updated_at: new Date(),
-        });
-      } catch (err) {
-        logger.warn(`[call-reschedule] self-booking snapshot sync failed for ${visit.id}: ${err.message}`);
-      }
-    }
-    if (result?.seriesMoveId) {
-      // Post-commit: the move already stands. A failure here must not read as
-      // a refused move; the series reconciler ('call_makeup' surface) retries.
-      try {
-        await require('../routes/admin-dispatch').applySeriesMoveEffects({
-          result, serviceId: visit.id, newDate: plan.newDate, newWindow: plan.newWindow,
-          notify: false, actorId: null, reasonText: null,
-        });
-      } catch (err) {
-        logger.warn(`[call-makeup] series effects failed for ${visit.id} (reconciler retries): ${err.message}`);
-      }
-    } else {
-      // sendNotification false — this path never messages the customer (owner
-      // directive 2026-09-08). Unlike reschedule-sms, coverDueWindows is NOT
-      // set: that caller sends its own confirmation text, so it covers the
-      // already-due window. We send nothing, so covering it would suppress
-      // the only notice the customer gets about the new time. Letting the
-      // cron fire the standard reminder at the new slot IS the design.
-      try {
-        await require('./appointment-reminders').handleReschedule(
-          visit.id,
-          `${plan.newDate}T${plan.newWindow.start}`,
-          { sendNotification: false },
-        );
-      } catch (err) {
-        logger.warn(`[call-reschedule] reminder sync failed for ${visit.id}: ${err.message}`);
-      }
-      try {
-        await require('./dispatch-assignment').emitDispatchJobUpdate({ jobId: visit.id, actorId: null });
-      } catch (err) {
-        logger.warn(`[call-reschedule] board broadcast failed for ${visit.id}: ${err.message}`);
-      }
-    }
+    // Post-commit fan-out (afterCallMove). A SINGLE move had NO fan-out at all
+    // once (GH codex #4204 r8), which defeated this service's own purpose: the
+    // 72h/24h reminder kept the OLD slot.
+    await afterCallMove({ conn, visit, plan, result, tag: 'call-reschedule' });
   } catch (err) {
     const reasons = { CALL_RESCHEDULE_CHANGED: 'changed_before_apply', CALL_RESCHEDULE_HANDLED: 'handled_after_call', CALL_RESCHEDULE_ALREADY_APPLIED: 'already_applied' };
     if (!reasons[err.code]) throw err;
     return { outcome: 'skipped', reason: reasons[err.code], visitId: visit.id };
   }
   return { outcome: 'applied', visitId: visit.id, newDate: plan.newDate, newWindow: plan.newWindow, cardsResolved };
+}
+
+// Post-commit fan-out after a call moved a visit (applyCallReschedule,
+// applyCallMakeupMove). SmartRebooker never touches the /book snapshot, and
+// the move already stands, so each effect is best-effort: a socket or
+// snapshot hiccup must not undo or refuse it. The /book snapshot first, for
+// both shapes (the anchor moved either way; reschedule-public.js syncs it
+// ahead of the same split): the public availability builder counts
+// self_booked_appointments for the day cap, and GET /api/booking/status/:code
+// reads the date and times back to the customer (GH codex #4204 r8 P2). A
+// series move then runs the shared durable pass, whose reconciler retries a
+// failure. A SINGLE move re-syncs the reminder and broadcasts the board. The
+// durable reminder sync is the scheduled_services_sync_reminder trigger
+// (migration 20260716150000): it re-timed the reminder row inside the move's
+// own transaction. handleReschedule is the silent re-sync every single-visit
+// mover also makes, and it reports a failure by returning null. No customer
+// message (owner directive 2026-09-08), so coverDueWindows stays unset:
+// covering an already-due window would suppress the only notice of the new
+// time, the standard reminder the cron fires at the new slot.
+async function afterCallMove({ conn, visit, plan, result, tag }) {
+  const attempt = async (effect, run) => {
+    try {
+      return await run();
+    } catch (err) {
+      logger.warn(`[${tag}] ${effect} failed for ${visit.id}: ${err.message}`);
+      return null;
+    }
+  };
+  if (visit.self_booking_id) {
+    await attempt('self-booking snapshot sync', () => conn('self_booked_appointments').where({ id: visit.self_booking_id }).update({
+      date: plan.newDate, start_time: plan.newWindow.start, end_time: plan.newWindow.end, updated_at: new Date(),
+    }));
+  }
+  if (result?.seriesMoveId) {
+    await attempt('series effects (the reconciler retries)', () => require('../routes/admin-dispatch').applySeriesMoveEffects({
+      result, serviceId: visit.id, newDate: plan.newDate, newWindow: plan.newWindow,
+      notify: false, actorId: null, reasonText: null,
+    }));
+    return;
+  }
+  const synced = await attempt('reminder sync', () => require('./appointment-reminders')
+    .handleReschedule(visit.id, `${plan.newDate}T${plan.newWindow.start}`, { sendNotification: false }));
+  if (!synced) logger.warn(`[${tag}] reminder re-sync returned nothing for ${visit.id}; the in-transaction trigger sync stands`);
+  await attempt('board broadcast', () => require('./dispatch-assignment').emitDispatchJobUpdate({ jobId: visit.id, actorId: null }));
 }
 
 // ---------------------------------------------------------------------------
@@ -880,43 +862,53 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
 // still 'confirmed', dated in the past, an unresolved customer_noshow row from
 // the 6 PM missed-appointment check). She called, the agent said "I need to
 // come by", agreed Tuesday ~5 PM and she accepted. The pipeline INSERTED a new
-// placeholder visit beside the missed one: planRescheduleFromCall never saw it
-// (status confirmed, not reschedule_requested; candidates are upcoming-only;
-// the booking branch had already created a visit). The owner's ruling: the
-// missed appointment is rescheduled and moved up, never booked as a new
-// general service.
+// placeholder visit beside the missed one. The owner's ruling: the missed
+// appointment is rescheduled and moved up, never booked as a new general
+// service.
 //
-// This is a SEPARATE planner from planRescheduleFromCall (that one is
-// hardened and unchanged). It moves a visit only when ALL of this holds, and
-// otherwise returns skip (nothing changes: today's booking behavior) or
-// needs_review (a missed-visit candidate exists but cannot be moved safely, so
-// the processor HOLDS the booking instead of inserting a new visit):
-//   - the same call checks as the reschedule planner (valid V2, not spam or
-//     voicemail, scheduling_window confidence, matched caller on a phone on
-//     file, future on-the-hour confirmed_start_at, trusted speaker labels);
-//   - scheduling.status 'confirmed', service_intent follow_up_existing_service
-//     or call_nature existing_customer_scheduling, no secondary categories;
-//   - the booking step itself accepted this call's slot (bookingSlot: the
-//     ET wall clock the booking would have inserted) and confirmed_start_at
-//     is that same slot. The move REPLACES that booking, so it uses the
-//     booking's own agreement bar, never a stricter one: a stricter bar
-//     (word-for-word slot quotes) failed the incident call ("I'll get there
-//     around five") and let the duplicate booking through;
-//   - exactly ONE recurring, ungrouped, non-dispatch-owned visit of the
-//     customer at the identified property, pending/confirmed, dated within the
-//     last MAKEUP_LOOKBACK_DAYS and before today, whose OWN missed slot has an
-//     open customer_noshow row (the evidence), of the same service line as the
-//     call (pest, lawn, ...) and with a real catalog identity.
+// Where it runs: inside the booking transaction, at its fresh INSERT, after
+// every booking guard has passed (this call's own booking reused, the ±1-day
+// attach, the same-day hold, the re-service checks, the slot-elapsed
+// recheck). It never re-implements those guards: it only ever stands in for
+// that insert, at the booking's own customer, property and slot.
+// planCallMakeupForBooking decides:
+//   skip         no missed recurring visit of the call's line at the booking's
+//                property: the row is inserted as always;
+//   apply        exactly one, and no MAKEUP_HOLDS check fires: the booking
+//                transaction ends without inserting, and applyCallMakeupMove
+//                moves THAT visit (default series policy) to the booking's
+//                slot through the rebooker;
+//   needs_review a missed visit of the line exists but a check fires: the
+//                booking is HELD with a review card, never inserted beside it.
+// Missed = recurring, ungrouped, not dispatch-owned or office-review, pending
+// or confirmed, dated within MAKEUP_LOOKBACK_DAYS before today, with an open
+// customer_noshow row for its own slot and proof of the miss; or a visit of
+// that shape someone moved after the call (held: it was already acted on).
+// A reprocess of a call whose move applied is priorCallMakeupDecision's.
+// NO customer communication (owner directive 2026-09-08).
 // ---------------------------------------------------------------------------
 const MAKEUP_ACTIVITY_ACTION = 'call_makeup_move_applied';
 const MAKEUP_REASON_CODE = 'ai_call_makeup'; // reschedule_log.reason_code varchar(30)
 const MAKEUP_LOOKBACK_DAYS = 30;
 const MAKEUP_INTENTS = ['follow_up_existing_service'];
 const MAKEUP_NATURES = ['existing_customer_scheduling'];
+// The V2 categories that name a line's recurring PROGRAM. A specialty category
+// on the same line can be a different booking (a WDO inspection or a termite
+// treatment beside bait monitoring, bed bugs or a wasp nest beside general
+// pest, exclusion beside rodent bait): held, never moved.
+const MAKEUP_PROGRAM_CATEGORIES = ['pest_general', 'lawn_care', 'mosquito'];
 // Any of these on the visit, or a service record for it, means someone worked
 // it: the 6 PM customer_noshow row then means "not closed out", not "missed"
 // (not-closed-out.js: 27% were later completed).
 const FIELD_WORK_COLUMNS = ['en_route_at', 'arrived_at', 'check_in_time', 'actual_start_time', 'completed_at'];
+// The live statuses the booking's own same-day hold counts (call-recording-
+// processor.js sameDayExisting).
+const SAME_DAY_DONE_STATUSES = ['cancelled', 'rescheduled', 'skipped', 'completed'];
+
+const notSandbox = (b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b);
+const claimedBy = (row, procToken, procGeneration) => Boolean(row)
+  && (!procToken || row.processing_token === procToken)
+  && (procGeneration == null || Number(row.processing_generation) === Number(procGeneration));
 
 // Proof the visit was really missed: a person confirmed the miss on the
 // not-closed-out card, or the visit shows no field work at all. The call adds
@@ -949,114 +941,154 @@ function openNoShowForSlot(visit, logs) {
     && (!log.original_window || log.original_window === windowText(visit))) || null;
 }
 
-function planMakeupMoveFromCall({ v2, call, customer, properties = [], candidates = [], noshowLogs = [], now = new Date(), transcriptLabelsTrusted = false, bookingSlot = null } = {}) {
-  if (!v2 || typeof v2 !== 'object') return skip('no_v2_extraction');
-  if (v2.meta?.is_spam === true) return skip('spam');
-  if (v2.meta?.is_voicemail === true) return skip('voicemail');
-  const scheduling = v2.scheduling || {};
-  if (scheduling.status !== 'confirmed') return skip('not_a_confirmed_slot');
-  const serviceRequest = v2.service_request || {};
-  if (!MAKEUP_INTENTS.includes(serviceRequest.service_intent) && !MAKEUP_NATURES.includes(v2.call_nature)) return skip('not_a_follow_up_call');
-  if (serviceRequest.secondary_categories?.length) return skip('service_needs_review');
-  if (!scheduling.confirmed_start_at) return skip('no_confirmed_start');
-  if (scheduling.caller_accepted_slot !== true) return skip('caller_did_not_accept');
-  if (scheduling.agent_committed_booking === false) return skip('agent_did_not_commit');
-  const confidence = v2.confidence?.scheduling_window;
-  if (typeof confidence !== 'number' || confidence < MIN_SCHEDULING_CONFIDENCE) return skip('low_scheduling_confidence');
-  if (v2.caller?.decision_maker_present === false) return skip('caller_not_decision_maker');
-  if (v2.consent?.do_not_contact_request === true) return skip('do_not_contact_requested');
+function serviceAddressKey(row) {
+  return row.service_address_line1 ? addressKey({ address_line1: row.service_address_line1,
+    address_line2: row.service_address_line2, city: row.service_address_city, zip: row.service_address_zip }) : null;
+}
 
-  if (!call?.customer_id || !customer?.id || String(call.customer_id) !== String(customer.id)) return skip('customer_not_matched');
-  const phoneKeys = phoneMatchDigits(counterpartPhone(call));
-  const onFileKeys = new Set(KNOWN_CALLER_PHONE_COLS.flatMap((col) => phoneMatchDigits(customer[col])));
-  if (!phoneKeys.some((key) => onFileKeys.has(key))) return skip('caller_phone_not_on_file');
+// The booking's own resolved property. Two rows that both carry a property id
+// compare by id. Otherwise by address: a row's own service address, else its
+// saved property's, else (no property id) the customer's primary address.
+function atBookingProperty(row, { booking, customer, properties }) {
+  if (row.property_id && booking.property_id) return String(row.property_id) === String(booking.property_id);
+  const keyOf = (r) => {
+    if (r.service_address_line1) return serviceAddressKey(r);
+    if (!r.property_id) return customer.address_line1 ? addressKey(customer) : null;
+    const saved = properties.find((p) => String(p.id) === String(r.property_id));
+    return saved ? addressKey(saved) : null;
+  };
+  const key = keyOf(row);
+  return Boolean(key) && key === keyOf(booking);
+}
 
-  const target = new Date(scheduling.confirmed_start_at);
-  if (Number.isNaN(target.getTime())) return skip('unparseable_confirmed_start');
-  if (target.getTime() <= now.getTime()) return skip('confirmed_start_in_past');
-  const parts = etParts(target);
-  if (!confirmedStartOnTheHour(scheduling.confirmed_start_at) || target.getUTCMilliseconds() !== 0) return skip('off_grid_start_time');
-  if (!transcriptLabelsTrusted) return skip('untrusted_speaker_labels');
-  const newDate = etDateString(target);
-  const newStart = `${pad2(parts.hour)}:${pad2(parts.minute)}`;
-  if (etWallClockOfConfirmedStart(scheduling.confirmed_start_at) !== `${newDate}T${newStart}`) return skip('inconsistent_start_offset');
-
-  // Everything above fails closed to today's behavior. The slot must be the
-  // one the booking step accepted and would have inserted: the move only ever
-  // stands in for that booking.
-  if (typeof bookingSlot !== 'string' || bookingSlot.slice(0, 16) !== `${newDate}T${newStart}`) return skip('not_the_booking_slot');
-
-  const scope = callPropertyScope(v2, customer, properties);
-  if (!scope.targetKey) return skip('property_needs_review');
-  const today = etDateString(now);
-  const earliest = etDateString(addETDays(now, -MAKEUP_LOOKBACK_DAYS));
-  const missed = candidates.filter((row) => String(row.customer_id) === String(customer.id)
-    && MOVABLE_STATUSES.includes(row.status)
+function isMissedAtCall(row, ctx) {
+  const shape = String(row.customer_id) === String(ctx.customer.id) && MOVABLE_STATUSES.includes(row.status)
     && !row.parent_service_id && !row.visit_id && row.is_recurring === true
     && !DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(row.source_action)
     && !OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(row.source_action)
-    && dateOnly(row.scheduled_date) >= earliest && dateOnly(row.scheduled_date) < today
-    && rowAtProperty(row, scope)
-    && openNoShowForSlot(row, noshowLogs)
-    && missedVisitEvidence(row, openNoShowForSlot(row, noshowLogs)));
-  if (!missed.length) return skip('no_missed_visit');
+    && atBookingProperty(row, ctx);
+  if (!shape || row.moved_after_call === true) return shape;
+  const date = dateOnly(row.scheduled_date);
+  const log = openNoShowForSlot(row, ctx.noshowLogs);
+  return date >= etDateString(addETDays(ctx.now, -MAKEUP_LOOKBACK_DAYS)) && date < etDateString(ctx.now)
+    && Boolean(log) && Boolean(missedVisitEvidence(row, log));
+}
 
-  // Service identity. A missed row with no real catalog identity (its catalog
-  // row gone, or the catch-all placeholder) is never moved; beside a row that
-  // has one it could be the visit the caller means, so that is a review.
-  const known = missed.filter((row) => authoritativeServiceName(row));
-  if (!known.length) return skip('placeholder_candidate');
-  if (known.length !== missed.length) return needsReview('service_needs_review', { candidateIds: missed.map((r) => r.id) });
-  const callLine = lineOfV2Category(serviceRequest.primary_service_category);
-  if (!callLine) return skip('service_line_unknown');
-  const named = typeof serviceRequest.specific_service_name === 'string' && !GENERIC_SERVICE_NAME_RE.test(serviceRequest.specific_service_name.trim())
-    ? linesOfServiceName(serviceRequest.specific_service_name) : [];
-  if (named.length && !named.includes(callLine)) return skip('service_line_differs');
-  const sameLine = known.filter((row) => lineOfServiceName(authoritativeServiceName(row)) === callLine);
-  if (!sameLine.length) return skip('service_line_differs');
-  if (sameLine.length > 1) return needsReview('ambiguous_missed_visit', { candidateIds: sameLine.map((r) => r.id) });
+// The lines a real (non-placeholder) specific_service_name reads as.
+function namedLines(v2) {
+  const name = v2.service_request?.specific_service_name;
+  return typeof name === 'string' && !GENERIC_SERVICE_NAME_RE.test(name.trim()) ? linesOfServiceName(name) : [];
+}
 
-  const visit = sameLine[0];
-  const currentDate = dateOnly(visit.scheduled_date);
-  // A caller who names a DIFFERENT appointment date is talking about another
-  // visit: the reschedule lane's business, not a make-up.
-  const movedDate = stringDate(scheduling.moved_appointment_date);
-  if (movedDate && movedDate !== currentDate) return skip('moved_appointment_not_candidate', { visitId: visit.id });
+// The visit keeps its own length at the booking's start.
+function makeupWindow(visit, booking) {
+  const start = hhmm(booking.window_start);
   const duration = windowDurationMinutes(visit.window_start, visit.window_end, visit.estimated_duration_minutes) || DEFAULT_DURATION_MINUTES;
-  const newEnd = deriveWindowEnd(newStart, duration);
-  if (!newEnd) return skip('window_runs_past_midnight', { visitId: visit.id });
-  // A matching caller ID alone does not prove an INBOUND caller owns the
-  // number: only a carrier-signed STIR/SHAKEN "A" attestation vouches for it
-  // (a B or C, or no attestation, is exactly the spoofable population). An
-  // outbound call reached the number we dialed. A missed visit exists here,
-  // so an unproven caller holds for review rather than booking a duplicate.
-  if (!isOutboundDirection(call) && !require('./voice-agent/relay-context').isFullAttestation(callMetadata(call).stir_verstat)) {
-    return needsReview('caller_not_attested', { visitId: visit.id, candidateIds: [visit.id] });
-  }
-  return {
-    action: 'apply',
-    propertyKey: scope.targetKey,
-    visitId: visit.id,
-    dateMove: true,
-    from: { date: currentDate, start: hhmm(visit.window_start), end: hhmm(visit.window_end) },
-    newDate,
-    newWindow: { start: newStart, end: newEnd },
-    noshowLogId: openNoShowForSlot(visit, noshowLogs).id,
-  };
+  return { start, end: start ? deriveWindowEnd(start, duration) : null };
 }
 
 function stringDate(value) {
   return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value) ? value.slice(0, 10) : null;
 }
 
-// The customer's pending/confirmed visits of the last MAKEUP_LOOKBACK_DAYS,
-// with the columns the planner needs beyond loadCandidates'.
-async function loadMakeupCandidates(conn, customerId, now = new Date()) {
-  const rows = await loadCandidates(conn, customerId, now, { includePast: true });
+// Every reason a found missed visit is HELD instead of moved, in the order
+// the card reports them. A move shifts a recurring series on what one call
+// said, so the call itself must be unambiguous about the visit, the slot and
+// the caller; none of these ever lets the insert through (the visit exists).
+const MAKEUP_HOLDS = [
+  ['no_v2_extraction', ({ v2 }) => !v2 || typeof v2 !== 'object'],
+  ['spam_or_voicemail', ({ v2 }) => v2.meta?.is_spam === true || v2.meta?.is_voicemail === true],
+  ['not_a_confirmed_slot', ({ v2 }) => v2.scheduling?.status !== 'confirmed'],
+  ['not_a_follow_up_call', ({ v2 }) => !MAKEUP_INTENTS.includes(v2.service_request?.service_intent) && !MAKEUP_NATURES.includes(v2.call_nature)],
+  ['service_line_unknown', ({ callLine }) => !callLine],
+  ['specialty_service', ({ v2 }) => !MAKEUP_PROGRAM_CATEGORIES.includes(v2.service_request?.primary_service_category)],
+  ['service_needs_review', ({ v2 }) => (v2.service_request?.secondary_categories || []).length > 0],
+  ['service_line_differs', ({ v2, callLine }) => namedLines(v2).length > 0 && !namedLines(v2).includes(callLine)],
+  // A row with no catalog identity to weigh (its catalog row gone, or the
+  // catch-all placeholder) may be the visit the caller means.
+  ['placeholder_candidate', ({ relevant }) => relevant.some((row) => !lineOfServiceName(authoritativeServiceName(row)))],
+  ['ambiguous_missed_visit', ({ relevant }) => relevant.length > 1],
+  ['handled_after_call', ({ visit }) => visit.moved_after_call === true],
+  // A caller who names a DIFFERENT appointment date means another visit.
+  ['moved_appointment_not_candidate', ({ v2, visit }) => ![null, dateOnly(visit.scheduled_date)].includes(stringDate(v2.scheduling.moved_appointment_date))],
+  // The booking would have seeded a promised visit 2 (or a package follow-up)
+  // beside its new row; a moved recurring visit has no such child.
+  ['follow_up_visit_promised', ({ booking }) => booking.followUpPlanned === true],
+  // A covered re-service call says the last treatment happened.
+  ['reservice_booking', ({ booking }) => booking.reService === true],
+  // The booking would have gone in pending (a street-level address the
+  // office confirms first); a move would skip that review.
+  ['address_needs_review', ({ booking }) => booking.status !== 'confirmed'],
+  ['slot_differs_from_extraction', ({ v2, booking }) => etWallClockOfConfirmedStart(v2.scheduling.confirmed_start_at)
+    !== `${dateOnly(booking.scheduled_date)}T${hhmm(booking.window_start)}`],
+  ['caller_did_not_accept', ({ v2 }) => v2.scheduling.caller_accepted_slot !== true],
+  ['agent_did_not_commit', ({ v2 }) => v2.scheduling.agent_committed_booking === false],
+  ['low_scheduling_confidence', ({ v2 }) => typeof v2.confidence?.scheduling_window !== 'number' || v2.confidence.scheduling_window < MIN_SCHEDULING_CONFIDENCE],
+  ['caller_not_decision_maker', ({ v2 }) => v2.caller?.decision_maker_present === false],
+  ['do_not_contact_requested', ({ v2 }) => v2.consent?.do_not_contact_request === true],
+  // This pass armed the disclaimed-number hold (the caller said the line is
+  // not theirs, or cannot get texts): the booking would have carried it onto
+  // its new row; a person sorts the numbers before the visit moves.
+  ['caller_number_disclaimed', ({ booking }) => booking.callbackHold === true],
+  ['customer_not_matched', ({ call, customer }) => !call?.customer_id || String(call.customer_id) !== String(customer.id)],
+  ['caller_phone_not_on_file', ({ call, customer }) => {
+    const onFile = new Set(KNOWN_CALLER_PHONE_COLS.flatMap((col) => phoneMatchDigits(customer[col])));
+    return !phoneMatchDigits(counterpartPhone(call)).some((key) => onFile.has(key));
+  }],
+  // A matching caller ID alone does not prove an INBOUND caller owns the
+  // number: only a carrier-signed STIR/SHAKEN "A" attestation vouches for it
+  // (a B or C, or none, is exactly the spoofable population). An outbound
+  // call reached the number we dialed.
+  ['caller_not_attested', ({ call }) => !isOutboundDirection(call)
+    && !require('./voice-agent/relay-context').isFullAttestation(callMetadata(call).stir_verstat)],
+  ['untrusted_speaker_labels', ({ transcriptLabelsTrusted }) => !transcriptLabelsTrusted],
+  ['window_runs_past_midnight', ({ visit, booking }) => !makeupWindow(visit, booking).end],
+];
+
+/**
+ * Pure decision. `booking` is the row the booking transaction was about to
+ * insert (customer_id, property_id, service address, scheduled_date,
+ * window_start, status) plus followUpPlanned / reService / callbackHold;
+ * `candidates` come from loadMakeupCandidates; `now` is the clock "missed"
+ * is judged on.
+ */
+function planMakeupMoveFromCall({ v2, call, customer, properties, booking, candidates, noshowLogs, now, transcriptLabelsTrusted = false }) {
+  const missed = candidates.filter((row) => isMissedAtCall(row, { customer, properties, booking, noshowLogs, now }));
+  if (!missed.length) return skip('no_missed_visit');
+  const callLine = lineOfV2Category(v2?.service_request?.primary_service_category);
+  // A missed visit of ANOTHER line says nothing about this booking. One of
+  // the call's line, or of no known line, is the visit the call may mean.
+  const relevant = missed.filter((row) => !callLine || [callLine, null].includes(lineOfServiceName(authoritativeServiceName(row))));
+  if (!relevant.length) return skip('service_line_differs');
+  const visit = relevant[0];
+  const hold = MAKEUP_HOLDS.find(([, holds]) => holds({ v2, call, customer, booking, relevant, visit, callLine, transcriptLabelsTrusted }));
+  if (hold) return needsReview(hold[0], { visitId: relevant.length === 1 ? visit.id : null, candidateIds: relevant.map((row) => row.id) });
+  return {
+    action: 'apply',
+    visitId: visit.id,
+    visit,
+    from: { date: dateOnly(visit.scheduled_date), start: hhmm(visit.window_start), end: hhmm(visit.window_end) },
+    newDate: dateOnly(booking.scheduled_date),
+    newWindow: makeupWindow(visit, booking),
+    noshowLogId: openNoShowForSlot(visit, noshowLogs)?.id || null,
+  };
+}
+
+// The customer's live visits that were missed when the call was made: dated
+// in the look-back before today, or moved since the call FROM such a date
+// (moved_after_call; the planner holds those), with the columns the planner
+// needs beyond loadCandidates'.
+async function loadMakeupCandidates(conn, customerId, now, callCreatedAt) {
   const earliest = etDateString(addETDays(now, -MAKEUP_LOOKBACK_DAYS));
   const today = etDateString(now);
-  const inRange = (rows || []).filter((row) => MOVABLE_STATUSES.includes(row.status)
-    && dateOnly(row.scheduled_date) >= earliest && dateOnly(row.scheduled_date) < today);
+  const rows = await loadCandidates(conn, customerId, now, { includePast: true });
+  const movedRows = await conn('reschedule_log').where({ customer_id: customerId })
+    .whereNot('reason_code', 'customer_noshow').where('created_at', '>', callCreatedAt)
+    .where('original_date', '>=', earliest).where('original_date', '<', today)
+    .select('scheduled_service_id');
+  const movedAfterCall = new Set((movedRows || []).map((r) => String(r.scheduled_service_id)));
+  const inRange = (rows || []).filter((row) => movedAfterCall.has(String(row.id))
+    || (dateOnly(row.scheduled_date) >= earliest && dateOnly(row.scheduled_date) < today));
   if (!inRange.length) return [];
   const ids = inRange.map((r) => r.id);
   const extra = await conn('scheduled_services').whereIn('id', ids)
@@ -1066,10 +1098,9 @@ async function loadMakeupCandidates(conn, customerId, now = new Date()) {
   const byId = new Map((extra || []).map((r) => [String(r.id), r]));
   return inRange.map((row) => {
     const more = byId.get(String(row.id)) || {};
-    const fieldWork = {};
-    for (const col of FIELD_WORK_COLUMNS) fieldWork[col] = more[col] ?? null;
-    return { ...row, ...fieldWork, parent_service_id: more.parent_service_id ?? null,
-      source_call_log_id: more.source_call_log_id ?? null, has_service_record: recordedIds.has(String(row.id)) };
+    const fieldWork = Object.fromEntries(FIELD_WORK_COLUMNS.map((col) => [col, more[col] ?? null]));
+    return { ...row, ...fieldWork, parent_service_id: more.parent_service_id ?? null, source_call_log_id: more.source_call_log_id ?? null,
+      has_service_record: recordedIds.has(String(row.id)), moved_after_call: movedAfterCall.has(String(row.id)) };
   });
 }
 
@@ -1079,33 +1110,106 @@ function loadOpenNoShows(conn, customerId, visitIds) {
     .where({ customer_id: customerId, reason_code: 'customer_noshow' })
     .whereNull('resolved_at')
     .whereIn('scheduled_service_id', visitIds)
-        .select('id', 'scheduled_service_id', 'original_date', 'original_window', 'resolved_at', 'miss_confirmed_at');
+    .select('id', 'scheduled_service_id', 'original_date', 'original_window', 'resolved_at', 'miss_confirmed_at');
+}
+
+// The plan from the database, read through `conn`: the booking transaction's,
+// then again the move's own (where it must still agree).
+async function planMakeupFromDb(conn, { settled, booking, now }) {
+  const customer = await conn('customers').where({ id: booking.customer_id }).first();
+  if (!customer) return skip('customer_not_matched');
+  const properties = await conn('customer_properties').where({ customer_id: customer.id, active: true }).select('*');
+  const candidates = await loadMakeupCandidates(conn, customer.id, now, settled.created_at);
+  const noshowLogs = await loadOpenNoShows(conn, customer.id, candidates.map((r) => r.id));
+  return planMakeupMoveFromCall({
+    v2: settled.v2_extraction_status === 'valid' ? settled.ai_extraction_enriched : null,
+    call: settled, customer, properties, booking, candidates, noshowLogs, now,
+    transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'),
+  });
+}
+
+const makeupMarker = (conn, callId) => conn('activity_log').where({ action: MAKEUP_ACTIVITY_ACTION })
+  .whereRaw("metadata->>'call_log_id' = ?", [String(callId)]).first('metadata');
+
+// A move of THE VISIT by anyone after the call, other than the missed-
+// appointment check's own customer_noshow row (that row is the evidence).
+const newerMove = (conn, visitId, since) => conn('reschedule_log')
+  .where({ scheduled_service_id: visitId })
+  .whereNot('reason_code', 'customer_noshow')
+  .where('created_at', '>', since).first('id');
+
+// What makes a found missed visit unsafe to move now, checked in the booking
+// transaction and again in the move's own (there under the visit's row lock):
+// this call already booked a visit (an earlier pass; live, or cancelled by
+// staff), staff handled the call's card, someone moved the visit after the
+// call, or a staff-owned request or a live reply-1/2 offer is open on it.
+async function makeupConflict(conn, { settled, visitId, now }) {
+  const checks = [
+    ['call_already_booked', () => conn('scheduled_services').where({ source_call_log_id: settled.id }).whereNot({ id: visitId }).first('id')],
+    ['handled_by_staff', () => humanHandledRescheduleCard(conn, settled.id)],
+    ['handled_after_call', () => newerMove(conn, visitId, settled.created_at)],
+    ['portal_request_open', () => openPortalRequest(conn, settled.customer_id, visitId)],
+    ['pending_sms_offer', () => pendingSmsOffer(conn, settled.customer_id, visitId, now)],
+  ];
+  for (const [reason, found] of checks) {
+    // Sequential on purpose: the first hit decides, and the rest never run.
+    if (await found()) return reason;
+  }
+  return null;
 }
 
 /**
- * Entry point for the processor, run BEFORE the booking transaction opens
- * (the rebooker opens its own transaction; it must never nest in the booking's).
- * The call is still claimed by this pass: `procToken` + `procGeneration` fence
- * it, and the V2 extraction and transcript are read from the row the pass
- * persisted. Never throws for business reasons. Outcomes:
- *   skipped      no make-up here: the processor books exactly as it does today
- *   applied      the missed visit moved; the processor books nothing
- *   noop         this call's make-up move already applied (reprocess); same
- *   needs_review a missed-visit candidate exists but cannot be moved; the
- *                processor HOLDS the booking, never inserts a new visit
+ * The booking transaction's make-up check, at its fresh insert (every booking
+ * guard already passed), read through that transaction. Returns the plan with
+ * the booking it was judged on: skip (insert as always), apply (end the
+ * transaction without inserting; the processor then runs
+ * applyCallMakeupMove), or needs_review (hold, never insert).
  */
-async function applyCallMakeupMove({ conn, call, procToken = null, procGeneration = null, now = new Date(), rebooker = null, bookingSlot = null } = {}) {
-  if (!conn || !call?.id) return { outcome: 'skipped', reason: 'missing_context' };
-  const settled = await conn('call_log').where({ id: call.id }).modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b)).first();
-  if (!settled || (procToken && settled.processing_token !== procToken)
-    || (procGeneration != null && Number(settled.processing_generation) !== Number(procGeneration))) {
-    return { outcome: 'skipped', reason: 'superseded_by_newer_pass' };
-  }
-  if (!settled.customer_id || settled.customer_id !== call.customer_id) return { outcome: 'skipped', reason: 'customer_link_changed' };
+async function planCallMakeupForBooking(trx, { call, procToken = null, procGeneration = null, booking, now = new Date() }) {
+  const settled = await trx('call_log').where({ id: call.id }).modify(notSandbox).first();
+  if (!claimedBy(settled, procToken, procGeneration)) return skip('superseded_by_newer_pass');
+  if (String(settled.customer_id) !== String(booking.customer_id)) return skip('customer_link_changed');
+  const plan = await planMakeupFromDb(trx, { settled, booking, now });
+  const conflict = plan.action === 'apply' ? await makeupConflict(trx, { settled, visitId: plan.visitId, now }) : null;
+  return conflict ? needsReview(conflict, { visitId: plan.visitId, candidateIds: [plan.visitId] }) : { ...plan, booking };
+}
+
+/**
+ * Before the booking branch: a reprocess of a call whose make-up move already
+ * applied. The moved visit IS the booking (noop) while the live call and visit
+ * still match what the marker recorded, judged by the reschedule path's own
+ * predicate (the pass holds the claim, and a reprocess bumps the generation);
+ * a changed transcript, extraction, customer or visit holds for review.
+ * Null when this call never applied one.
+ */
+async function priorCallMakeupDecision(conn, { call, procToken = null }) {
+  const prior = await makeupMarker(conn, call.id);
+  if (!prior) return null;
+  const proof = typeof prior.metadata === 'string' ? JSON.parse(prior.metadata) : prior.metadata;
+  const visitId = proof?.scheduled_service_id || null;
+  const matches = await priorApplicationMatchesLiveCall(conn, call, { requireSameGeneration: false, proof, claimToken: procToken });
+  return matches ? { outcome: 'noop', reason: 'already_applied', visitId } : { outcome: 'needs_review', reason: 'prior_makeup_differs', visitId };
+}
+
+/**
+ * The move, run by the processor AFTER the booking transaction returned an
+ * apply plan without inserting (the rebooker opens its own transaction; it
+ * must never nest in the booking's). The call is still claimed by this pass:
+ * `procToken` + `procGeneration` fence it. Never throws. Outcomes:
+ *   applied      the missed visit moved; the processor books nothing
+ *   noop         this call's make-up move already applied; same
+ *   needs_review it did not move (the call or visit changed, someone acted,
+ *                the rebooker refused): the processor HOLDS the booking
+ */
+async function applyCallMakeupMove({ conn, call, plan, procToken = null, procGeneration = null, now = new Date(), rebooker = null }) {
+  const visit = plan.visit;
+  const review = (reason) => ({ outcome: 'needs_review', reason, visitId: visit.id });
+  const settled = await conn('call_log').where({ id: call.id }).modify(notSandbox).first();
+  if (!claimedBy(settled, procToken, procGeneration)) return review('superseded_by_newer_pass');
+  if (String(settled.customer_id) !== String(plan.booking.customer_id)) return review('customer_link_changed');
   const v2 = settled.v2_extraction_status === 'valid' ? settled.ai_extraction_enriched : null;
   const sourceHash = createHash('sha256').update(JSON.stringify([settled.transcription, v2])).digest('hex');
-  const fenced = (current) => current && current.processing_token === settled.processing_token
-    && Number(current.processing_generation) === Number(settled.processing_generation)
+  const fenced = (current) => claimedBy(current, settled.processing_token, settled.processing_generation)
     && current.customer_id === settled.customer_id && current.v2_extraction_status === 'valid'
     && JSON.stringify(current.ai_extraction_enriched) === JSON.stringify(v2) && current.transcription === settled.transcription;
   // Same lock order as the reviewed reschedule: the call-booking creator's
@@ -1115,101 +1219,44 @@ async function applyCallMakeupMove({ conn, call, procToken = null, procGeneratio
     await trx('customers').where({ id: settled.customer_id }).forShare().first('id');
     await trx('customer_properties').where({ customer_id: settled.customer_id, active: true }).forShare().select('id');
     await lockTriageCall(trx, call.id);
-    await trx('call_log').where({ id: call.id }).modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b)).forUpdate().first('id');
+    await trx('call_log').where({ id: call.id }).modify(notSandbox).forUpdate().first('id');
   };
-  const markerFor = (conn_) => conn_('activity_log').where({ action: MAKEUP_ACTIVITY_ACTION })
-    .whereRaw("metadata->>'call_log_id' = ?", [String(call.id)]).first('metadata');
-  const prior = await markerFor(conn);
-  if (prior) {
-    const proof = typeof prior.metadata === 'string' ? JSON.parse(prior.metadata) : prior.metadata;
-    return { outcome: 'noop', reason: 'already_applied', visitId: proof?.scheduled_service_id || null };
-  }
-  // A visit this call already booked (an earlier pass, e.g. with the gate
-  // off), live or cancelled by staff, belongs to the booking step's own
-  // guards: it reuses a live row and holds a cancelled one. Moving the missed
-  // visit as well would sit beside that row or undo the staff cancel.
-  const priorCallBooking = (trx, exceptId = null) => {
-    const q = trx('scheduled_services').where({ source_call_log_id: call.id });
-    if (exceptId) q.whereNot({ id: exceptId });
-    return q.first('id');
-  };
-  if (await priorCallBooking(conn)) return { outcome: 'skipped', reason: 'call_already_booked' };
-  // A move of THE CANDIDATE made by anyone after the call, other than the
-  // missed-appointment check's own customer_noshow row (that row is the
-  // EVIDENCE for this move). Scoped to the candidate: a move of an unrelated
-  // visit says nothing about this one, and must never wave the duplicate
-  // booking through. A candidate someone already touched holds for review.
-  const newerMove = (trx, visitId) => trx('reschedule_log')
-    .where({ scheduled_service_id: visitId })
-    .whereNot('reason_code', 'customer_noshow')
-    .where('created_at', '>', settled.created_at).first('id');
-
-  const customer = await conn('customers').where({ id: settled.customer_id }).first();
-  const properties = await conn('customer_properties').where({ customer_id: settled.customer_id, active: true }).select('*');
-  const candidates = await loadMakeupCandidates(conn, settled.customer_id, now);
-  const noshowLogs = await loadOpenNoShows(conn, settled.customer_id, candidates.map((r) => r.id));
-  const trusted = isEnabled('callAgentCommitTrustedLabels');
-  const plan = planMakeupMoveFromCall({ v2, call: settled, customer, properties, candidates, noshowLogs, now, transcriptLabelsTrusted: trusted, bookingSlot });
-  if (plan.action === 'needs_review') return { outcome: 'needs_review', reason: plan.reason, candidateIds: plan.candidateIds || [] };
-  if (plan.action === 'skip') return { outcome: 'skipped', reason: plan.reason, visitId: plan.visitId || null };
-  const visit = candidates.find((r) => r.id === plan.visitId);
-  const review = (reason) => ({ outcome: 'needs_review', reason, visitId: plan.visitId });
-  if (await openPortalRequest(conn, settled.customer_id, plan.visitId)) return review('portal_request_open');
-  if (await pendingSmsOffer(conn, settled.customer_id, plan.visitId, now)) return review('pending_sms_offer');
-  if (await humanHandledRescheduleCard(conn, call.id)) return review('handled_by_staff');
-  if (await newerMove(conn, plan.visitId)) return review('handled_after_call');
-  // A live visit already on the agreed day (staff booked a replacement, or a
-  // separate service) is what the booking branch would attach to or hold
-  // for: moving the missed visit beside it makes two. Hold for review.
-  const targetDayTaken = (trx) => trx('scheduled_services')
-    .where({ customer_id: settled.customer_id })
-    .where('scheduled_date', plan.newDate)
-    .whereNull('parent_service_id')
-    .whereNotIn('status', ['cancelled', 'rescheduled', 'skipped', 'completed', 'no_show'])
-    .whereNot({ id: plan.visitId })
-    .first('id');
-  if (await targetDayTaken(conn)) return review('existing_appointment_on_target_date');
-
-  const note = `Missed visit ${plan.visitId} moved from ${plan.from.date} to ${plan.newDate} ${plan.newWindow.start} from the call. No customer message sent.`;
+  const note = `Missed visit ${visit.id} moved from ${plan.from.date} to ${plan.newDate} ${plan.newWindow.start} from the call. No customer message sent.`;
   const writeDecision = async ({ trx, service }) => {
     await lockTriageCall(trx, call.id);
-    const current = await trx('call_log').where({ id: call.id }).modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b)).forUpdate().first();
-    if (!fenced(current)) throw Object.assign(new Error('The call changed before its make-up move could apply'), { code: 'CALL_MAKEUP_CHANGED' });
-    if (await markerFor(trx)) throw Object.assign(new Error('This call was already applied'), { code: 'CALL_MAKEUP_ALREADY_APPLIED' });
-    const handled = await humanHandledRescheduleCard(trx, call.id);
-    const moved = await newerMove(trx, visit.id);
-    const booked = await priorCallBooking(trx, visit.id);
-    const dayTaken = await targetDayTaken(trx);
+    const current = await trx('call_log').where({ id: call.id }).modify(notSandbox).forUpdate().first();
+    if (!fenced(current)) throw Object.assign(new Error('The call changed before its make-up move could apply'), { code: 'CALL_MAKEUP_CHANGED', reason: 'changed_before_apply' });
+    if (await makeupMarker(trx, call.id)) throw Object.assign(new Error('This call was already applied'), { code: 'CALL_MAKEUP_ALREADY_APPLIED' });
     // Under the visit's own row lock (as applyCallReschedule): a portal
     // request filed meanwhile is either seen here or starts after the move.
     await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('id');
-    const portalRequest = await openPortalRequest(trx, settled.customer_id, visit.id);
-    const smsOffer = await pendingSmsOffer(trx, settled.customer_id, visit.id, now);
-    if (handled || moved || booked || dayTaken || portalRequest || smsOffer) throw Object.assign(new Error('The request was handled after this call'), { code: 'CALL_MAKEUP_HANDLED' });
-    const latestCustomer = await trx('customers').where({ id: settled.customer_id }).forShare().first();
-    const latestProperties = await trx('customer_properties').where({ customer_id: settled.customer_id, active: true }).forShare().select('*');
-    const latestCandidates = await loadMakeupCandidates(trx, settled.customer_id, now);
-    const latestNoShows = await loadOpenNoShows(trx, settled.customer_id, latestCandidates.map((r) => r.id));
-    const checked = planMakeupMoveFromCall({ v2, call: current, customer: latestCustomer, properties: latestProperties,
-      candidates: latestCandidates.map((row) => row.id === visit.id ? { ...row, ...service } : row), noshowLogs: latestNoShows, now, transcriptLabelsTrusted: trusted, bookingSlot });
+    // The booking's same-day hold ran in its transaction, which ended before
+    // this one began: a live visit landing on the agreed day in between holds.
+    const conflict = await makeupConflict(trx, { settled: current, visitId: visit.id, now })
+      || (await trx('scheduled_services').where({ customer_id: settled.customer_id, scheduled_date: plan.newDate })
+        .whereNull('parent_service_id').whereNotIn('status', SAME_DAY_DONE_STATUSES).whereNot({ id: visit.id }).first('id')
+        ? 'existing_appointment_on_target_date' : null);
+    if (conflict) throw Object.assign(new Error('The request was handled after this call'), { code: 'CALL_MAKEUP_HANDLED', reason: conflict });
+    const checked = await planMakeupFromDb(trx, { settled: current, booking: plan.booking, now });
     const unchanged = service && dateOnly(service.scheduled_date) === dateOnly(visit.scheduled_date)
       && ['customer_id', 'property_id', 'service_id', 'service_type', 'status', 'source_action', 'visit_id', 'is_recurring', 'window_start', 'window_end', 'estimated_duration_minutes']
         .every((key) => (service[key] ?? null) === (visit[key] ?? null));
-    if (!unchanged || checked.action !== plan.action || checked.visitId !== plan.visitId || checked.propertyKey !== plan.propertyKey) {
-      throw Object.assign(new Error('The visit changed before its make-up move could apply'), { code: 'CALL_MAKEUP_CHANGED' });
+    if (!unchanged || checked.action !== 'apply' || checked.visitId !== visit.id) {
+      throw Object.assign(new Error('The visit changed before its make-up move could apply'), { code: 'CALL_MAKEUP_CHANGED', reason: 'changed_before_apply' });
     }
     // The moved row carries the call, so the booking dedup guard and the
     // commitment tracker (visit_booked_from_this_call) find it on a reprocess.
     // Only a row no other call claimed.
     await trx('scheduled_services').where({ id: visit.id }).whereNull('source_call_log_id').update({ source_call_log_id: call.id, updated_at: new Date() });
     await trx('activity_log').insert({ customer_id: settled.customer_id, action: MAKEUP_ACTIVITY_ACTION, description: note,
-      metadata: JSON.stringify({ call_log_id: String(call.id), scheduled_service_id: String(visit.id), noshow_log_id: String(plan.noshowLogId),
+      metadata: JSON.stringify({ call_log_id: String(call.id), scheduled_service_id: String(visit.id), noshow_log_id: plan.noshowLogId ? String(plan.noshowLogId) : null,
         from: plan.from, to: { date: plan.newDate, ...plan.newWindow },
         processing_generation: current.processing_generation, source_hash: sourceHash }) });
     await resolveRescheduleCards(trx, call.id, note);
   };
+  let result;
   try {
-    const result = await (rebooker || require('./rebooker')).reschedule(visit.id, plan.newDate, plan.newWindow, MAKEUP_REASON_CODE, INITIATED_BY, {
+    result = await (rebooker || require('./rebooker')).reschedule(visit.id, plan.newDate, plan.newWindow, MAKEUP_REASON_CODE, INITIATED_BY, {
       // DEFAULT series policy (owner rulings 2026-07-30 + 08-28): a date move of
       // a recurring visit carries its cadence; never seriesPolicy 'single'.
       keepStatus: true, beforeMove, moveGuard: writeDecision,
@@ -1219,54 +1266,13 @@ async function applyCallMakeupMove({ conn, call, procToken = null, procGeneratio
         property_id: visit.property_id, service_id: visit.service_id, service_type: visit.service_type,
         status: visit.status, visit_id: visit.visit_id, source_action: visit.source_action, is_recurring: visit.is_recurring },
     });
-    if (visit.self_booking_id) {
-      try {
-        await conn('self_booked_appointments').where({ id: visit.self_booking_id }).update({
-          date: plan.newDate, start_time: plan.newWindow.start, end_time: plan.newWindow.end, updated_at: new Date(),
-        });
-      } catch (err) {
-        logger.warn(`[call-makeup] self-booking snapshot sync failed for ${visit.id}: ${err.message}`);
-      }
-    }
-    if (result?.seriesMoveId) {
-      // Post-commit: the move already stands. A failure here must not read as
-      // a refused move; the series reconciler ('call_makeup' surface) retries.
-      try {
-        await require('../routes/admin-dispatch').applySeriesMoveEffects({
-          result, serviceId: visit.id, newDate: plan.newDate, newWindow: plan.newWindow,
-          notify: false, actorId: null, reasonText: null,
-        });
-      } catch (err) {
-        logger.warn(`[call-makeup] series effects failed for ${visit.id} (reconciler retries): ${err.message}`);
-      }
-    } else {
-      // No customer message (owner directive 2026-09-08); the reminder cron
-      // reads the new time, so coverDueWindows stays unset (see
-      // applyCallReschedule).
-      // The durable sync is the scheduled_services_sync_reminder trigger
-      // (migration 20260716150000): it moved appointment_time and re-armed the
-      // 24h reminder INSIDE the move's transaction. This call is the same
-      // silent re-sync every single-visit mover makes; it reports failure by
-      // returning null, so check the value instead of trusting the try.
-      try {
-        const synced = await require('./appointment-reminders').handleReschedule(visit.id, `${plan.newDate}T${plan.newWindow.start}`, { sendNotification: false });
-        if (!synced) logger.warn(`[call-makeup] reminder re-sync returned nothing for ${visit.id}; the in-transaction trigger sync stands`);
-      } catch (err) {
-        logger.warn(`[call-makeup] reminder sync failed for ${visit.id}: ${err.message}`);
-      }
-      try {
-        await require('./dispatch-assignment').emitDispatchJobUpdate({ jobId: visit.id, actorId: null });
-      } catch (err) {
-        logger.warn(`[call-makeup] board broadcast failed for ${visit.id}: ${err.message}`);
-      }
-    }
   } catch (err) {
-    // A candidate exists, so ANY failure holds the booking (never a new visit).
-    const reasons = { CALL_MAKEUP_CHANGED: 'changed_before_apply', CALL_MAKEUP_HANDLED: 'handled_after_call', CALL_MAKEUP_ALREADY_APPLIED: 'already_applied' };
-    if (err.code === 'CALL_MAKEUP_ALREADY_APPLIED') return { outcome: 'noop', reason: reasons[err.code], visitId: visit.id };
+    // A missed visit exists, so ANY failure holds the booking (never a new visit).
+    if (err.code === 'CALL_MAKEUP_ALREADY_APPLIED') return { outcome: 'noop', reason: 'already_applied', visitId: visit.id };
     logger.warn(`[call-makeup] move refused for ${visit.id}: ${err.code || err.name || 'error'}`);
-    return { outcome: 'needs_review', reason: reasons[err.code] || `move_failed_${err.code || err.statusCode || 'error'}`, visitId: visit.id };
+    return review(err.reason || `move_failed_${err.code || err.statusCode || 'error'}`);
   }
+  await afterCallMove({ conn, visit, plan, result, tag: 'call-makeup' });
   return { outcome: 'applied', visitId: visit.id, newDate: plan.newDate, newWindow: plan.newWindow };
 }
 
@@ -1274,7 +1280,9 @@ module.exports = {
   applyReviewedCallReschedule,
   applyCallReschedule,
   applyCallMakeupMove,
+  planCallMakeupForBooking,
   planMakeupMoveFromCall,
+  priorCallMakeupDecision,
   planRescheduleFromCall,
   loadCandidates,
   // The staff-owned schedule-change request fence, shared with the SMS
