@@ -76,3 +76,31 @@ test.each([{ code: 'ETIMEDOUT' }, { status: 503 }])('OAuth failure before submis
   expect(requests.length).toBeGreaterThan(0);
   expect(requests.every(request => String(request.url).includes('/token'))).toBe(true);
 });
+
+test('an aborted request (timeoutMs) after submission stays uncertain and carries the deadline', async () => {
+  providerFailure = { name: 'TimeoutError' };
+  await expect(gmail.sendMessage('fixture@example.test', 'Synthetic', 'Fixture', null, null, { timeoutMs: 60000 }))
+    .rejects.toMatchObject({ providerOutcome: { outcomeUnknown: true } });
+  expect(requests).toHaveLength(1);
+  expect(requests[0].timeout).toBe(60000);
+});
+
+test('a beforeSend hook that refuses stops the send before any message request', async () => {
+  acceptedData = { id: 'never' };
+  const hook = jest.fn(async () => { throw Object.assign(new Error('claim no longer held'), { code: 'claim_lost' }); });
+  const err = await gmail.sendMessage('fixture@example.test', 'Synthetic', 'Fixture', null, null, { beforeSend: hook }).catch((e) => e);
+  expect(err).toMatchObject({ code: 'claim_lost' });
+  expect(err.providerOutcome).toBeUndefined();
+  expect(hook).toHaveBeenCalledTimes(1);
+  expect(requests).toHaveLength(0);
+});
+
+test('beforeSend runs after the token refresh and before the message request', async () => {
+  expired = true;
+  acceptedData = { id: 'fixture-sent', access_token: 'synthetic-new', expires_in: 3600 };
+  let seenAtHook;
+  await gmail.sendMessage('fixture@example.test', 'Synthetic', 'Fixture', null, null, { beforeSend: async () => { seenAtHook = requests.map((r) => String(r.url)); } });
+  expect(seenAtHook).toHaveLength(1);
+  expect(seenAtHook[0]).toMatch(/token/);
+  expect(String(requests.at(-1).url)).toMatch(/messages\/send/);
+});

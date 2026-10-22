@@ -61,7 +61,8 @@ test('rejects a malformed message_id/customer_id before touching the database, a
   // the tool must reject it explicitly, not silently treat it as sms.
   const emailChannel = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'email' });
   expect(emailChannel.error).toMatch(/channel must be "sms"/i);
-  expect(emailChannel.error).toMatch(/emails send within seconds/i);
+  expect(emailChannel.error).toMatch(/cancels scheduled texts only/i);
+  expect(emailChannel.error).toMatch(/Email > Scheduled/);
 
   expect(db).not.toHaveBeenCalled();
 });
