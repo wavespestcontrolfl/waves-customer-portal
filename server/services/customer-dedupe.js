@@ -45,7 +45,7 @@ const { BILLING_DELIVERY_FIELDS, mergedBillingChannelUpdates } = require('./bill
 const { pairCustomersAtSameAddress } = require('./customer-address-match');
 const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
 const { isResidenceProperty } = require('./customer-properties');
-const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
+const { CUSTOMER_STAGES, FORMER_CUSTOMER_STAGES, ALL_PIPELINE_STAGES } = require('./customer-stages');
 const { NEW_SOD_COLUMNS, NEW_SOD_DATE_COLUMNS, clearedNewSodColumns } = require('./lawn-sod-holds');
 const { dateOnlyString } = require('../utils/datetime-et');
 
@@ -1880,22 +1880,44 @@ const REFERRAL_FOLD_COUNTERS = ['referral_balance_cents', 'total_earned_cents',
   'total_paid_out_cents', 'total_clicks', 'total_referrals_sent', 'total_referrals_converted',
   'available_balance_cents', 'pending_earnings_cents'];
 
-// GATE_MERGE_LEAD_DEFAULTS (dark): a retired row that never had a billing
-// relationship (no saved card, no designated autopay card, no autopay log row)
-// carries customers.autopay_enabled=false only as the intake default, not as a
-// customer decision. Read from the database (not the passed row) so a stale or
-// partial row object can never read as "never billed", and BEFORE the
-// executor's FK sweep, which moves these rows to the winner. Fails closed.
-async function loserNeverBilled(database, loser) {
+// GATE_MERGE_LEAD_DEFAULTS (dark): a retired row that is POSITIVELY an intake
+// lead carries customers.autopay_enabled=false only as the intake default, not
+// as a customer decision. Absent billing rows alone prove nothing: a customer
+// restored after archival has autopay disarmed on purpose (the restore route
+// disarms billing; the office re-arms it) and may hold no card or autopay log
+// either. So ALL of these must hold:
+//   - a pre-customer pipeline stage (not a live, former or lost one)
+//   - no lifecycle evidence: no churned_at, churn_episode_id or member_since,
+//     and no completed services (total_services)
+//   - no archive/restore evidence: the customer.archive / customer.restore
+//     audit_log rows the admin archive and restore routes write
+//   - never billed: no designated autopay card, no payment_methods row, no
+//     autopay_log row
+// Read from the database (not the passed row) so a stale or partial row object
+// can never read as a lead, and BEFORE the executor's FK sweep, which moves
+// these rows to the winner. Any unreadable signal fails closed (false).
+const INTAKE_LEAD_STAGES = new Set(ALL_PIPELINE_STAGES.filter((stage) => (
+  !CUSTOMER_STAGES.includes(stage) && !FORMER_CUSTOMER_STAGES.includes(stage) && stage !== 'lost'
+)));
+const ARCHIVE_RESTORE_AUDIT_ACTIONS = ['customer.archive', 'customer.restore'];
+
+async function loserIsIntakeLead(database, loser) {
   if (require('../config/feature-gates').mergeLeadDefaultsLive?.() !== true) return false;
   try {
-    const row = await database('customers').where({ id: loser.id }).first('autopay_payment_method_id');
-    if (!row || row.autopay_payment_method_id) return false;
+    const row = await database('customers').where({ id: loser.id })
+      .first('pipeline_stage', 'churned_at', 'churn_episode_id', 'member_since', 'total_services', 'autopay_payment_method_id');
+    if (!row || !INTAKE_LEAD_STAGES.has(row.pipeline_stage)) return false;
+    if (row.churned_at || row.churn_episode_id || row.member_since || row.autopay_payment_method_id) return false;
+    if (Number(row.total_services || 0) !== 0) return false;
+    if (await database('audit_log')
+      .where({ resource_type: 'customer', resource_id: loser.id })
+      .whereIn('action', ARCHIVE_RESTORE_AUDIT_ACTIONS)
+      .first('id')) return false;
     if (await database('payment_methods').where({ customer_id: loser.id }).first('id')) return false;
     if (await database('autopay_log').where({ customer_id: loser.id }).first('id')) return false;
     return true;
   } catch (e) {
-    logger.warn(`[customer-dedupe] never-billed check failed: ${e.message}`);
+    logger.warn(`[customer-dedupe] intake-lead check failed: ${e.message}`);
     return false;
   }
 }
@@ -1912,13 +1934,13 @@ async function loserNeverBilled(database, loser) {
 //                                must survive on the surviving row
 //   autopay_paused_until       — a longer, still-future pause wins (+ its reason)
 //
-// `loserNeverBilled` (GATE_MERGE_LEAD_DEFAULTS, from loserNeverBilled()): the
-// retired row never had a card, an autopay card or an autopay log row, so its
-// autopay_enabled=false is an intake default and is not inherited. Pauses and
-// the credit opt-out keep the rule above.
-function inheritedAutopayRestrictions(winner, loser, now = Date.now(), { loserNeverBilled: neverBilled = false } = {}) {
+// `loserIntakeLead` (GATE_MERGE_LEAD_DEFAULTS, from loserIsIntakeLead()): the
+// retired row is positively an intake lead, so its autopay_enabled=false is an
+// intake default and is not inherited. Pauses and the credit opt-out keep the
+// rule above.
+function inheritedAutopayRestrictions(winner, loser, now = Date.now(), { loserIntakeLead: intakeLead = false } = {}) {
   const restrictions = {};
-  if (loser.autopay_enabled === false && winner.autopay_enabled !== false && !neverBilled) {
+  if (loser.autopay_enabled === false && winner.autopay_enabled !== false && !intakeLead) {
     restrictions.autopay_enabled = false;
   }
   if (loser.auto_apply_account_credit === false && winner.auto_apply_account_credit === true) {
@@ -3141,7 +3163,7 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     if (rowConflict) throw new Error(`executeMerge: ${rowConflict.message}`);
     // GATE_MERGE_LEAD_DEFAULTS, read HERE — before the FK sweep moves the
     // loser's cards and autopay log rows to the winner.
-    const leadNeverBilled = await loserNeverBilled(trx, loser);
+    const leadIsIntake = await loserIsIntakeLead(trx, loser);
     // Saved cards live on a specific STRIPE customer: charge paths attach
     // PaymentIntents to ensureStripeCustomer(winner), so a moved method
     // attached elsewhere would strand and autopay/card-on-file charges fail.
@@ -3819,7 +3841,7 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // monthly cron must never charge a customer whose retired row said stop.
     // autopay_log keeps the provenance; re-enabling is an operator action on
     // the surviving row.
-    const autopayRestrictions = inheritedAutopayRestrictions(winner, loser, Date.now(), { loserNeverBilled: leadNeverBilled });
+    const autopayRestrictions = inheritedAutopayRestrictions(winner, loser, Date.now(), { loserIntakeLead: leadIsIntake });
     // Journal the winner's ORIGINAL customer-level autopay fields for
     // exactly the columns this block overwrites (applied directly, not via
     // winner_backfills), so an undo can put the winner's own autopay state
@@ -7161,9 +7183,9 @@ async function describeMergeEffects(database, winner, loser) {
   // would refuse is stated so the preview refuses too.
   const savedCards = await deriveSavedCardStripeCustomer(database, winner, loser);
   const { backfills } = predictWinnerBackfills(winner, loser, { derivedStripeCustomerId: savedCards.derivedStripeCustomerId });
-  // GATE_MERGE_LEAD_DEFAULTS: the same never-billed read the executor makes
+  // GATE_MERGE_LEAD_DEFAULTS: the same intake-lead read the executor makes
   // before its sweep (a no-op while the gate is off).
-  const leadNeverBilled = await loserNeverBilled(database, loser);
+  const leadIsIntake = await loserIsIntakeLead(database, loser);
   // The loser cards the executor will strip of default/autopay (its own
   // reader) — ids and before-flags on the card, pinned by the fingerprint.
   const saved_card_demotions = await predictSavedCardDemotions(database, winner.id, loser.id);
@@ -7188,7 +7210,7 @@ async function describeMergeEffects(database, winner, loser) {
     per_application_fee_adopted_from_loser: adoptsFee ? Number(loser.per_application_fee) : null,
     loser_plan_rate_rows_deleted: loserPlanRates,
     referral_fold: referral,
-    autopay_restrictions_inherited: inheritedAutopayRestrictions(winner, loser, Date.now(), { loserNeverBilled: leadNeverBilled }),
+    autopay_restrictions_inherited: inheritedAutopayRestrictions(winner, loser, Date.now(), { loserIntakeLead: leadIsIntake }),
     // Fill-if-empty identity/address/contact/billing values the winner takes
     // from the loser (predictWinnerBackfills — the executor's own rule).
     winner_backfills: backfills,
@@ -7271,7 +7293,7 @@ module.exports = {
   predictCollisionFolds,
   nonFkMergeRewrites,
   rowLevelMergeConflict,
-  loserNeverBilled,
+  loserIsIntakeLead,
   inheritedAutopayRestrictions,
   acquirePairAdjudicationLock,
   REFERRAL_FOLD_COUNTERS,

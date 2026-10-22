@@ -2,7 +2,7 @@
  * GATE_MERGE_LEAD_DEFAULTS against live Postgres (skipped without DATABASE_URL;
  * CI runs it): the real executeMerge on synthetic call-lead pairs.
  *
- *  - gate on: a never-billed lead's autopay=false is not inherited
+ *  - gate on: a call lead's autopay=false is not inherited
  *  - gate off: it is inherited, as before
  *  - gate on: a loser with a saved card or an autopay log row still passes its
  *    autopay=false on
@@ -33,6 +33,7 @@ maybeDescribe('GATE_MERGE_LEAD_DEFAULTS (real executeMerge)', () => {
     if (made.length) {
       await best(() => db('customer_merge_journal').where((q) => q.whereIn('winner_customer_id', made).orWhereIn('loser_customer_id', made)).del());
       await best(() => db('customer_duplicate_dismissals').where((q) => q.whereIn('customer_id_a', made).orWhereIn('customer_id_b', made)).del());
+      await best(() => db('audit_log').where({ resource_type: 'customer' }).whereIn('resource_id', made).del());
       for (const table of ['autopay_log', 'payment_methods']) {
         await best(() => db(table).whereIn('customer_id', made).del());
       }
@@ -65,7 +66,7 @@ maybeDescribe('GATE_MERGE_LEAD_DEFAULTS (real executeMerge)', () => {
   });
   const row = (id) => db('customers').where({ id }).first();
 
-  test('gate on: a never-billed lead\'s autopay=false is not inherited', async () => {
+  test('gate on: a plain call lead\'s autopay=false is not inherited', async () => {
     process.env.GATE_MERGE_LEAD_DEFAULTS = 'true';
     const { winnerId, loserId } = await leadPair();
     await merge(winnerId, loserId);
@@ -96,6 +97,46 @@ maybeDescribe('GATE_MERGE_LEAD_DEFAULTS (real executeMerge)', () => {
     await db('autopay_log').insert({ customer_id: loserId, event_type: 'autopay_disabled' });
     await merge(winnerId, loserId);
     expect((await row(winnerId)).autopay_enabled).toBe(false);
+  });
+
+  describe('gate on: a loser that is NOT positively an intake lead still passes autopay=false on', () => {
+    beforeEach(() => { process.env.GATE_MERGE_LEAD_DEFAULTS = 'true'; });
+    const audit = (resourceId, action) => db('audit_log').insert({
+      actor_type: 'technician', action, resource_type: 'customer', resource_id: resourceId,
+    });
+
+    test('restored after archival: disarmed on purpose, no billing rows (audit rows, still a lead stage)', async () => {
+      const { winnerId, loserId } = await leadPair();
+      await audit(loserId, 'customer.archive');
+      await audit(loserId, 'customer.restore');
+      await merge(winnerId, loserId);
+      expect((await row(winnerId)).autopay_enabled).toBe(false);
+    });
+
+    test('restored customer whose audit row is missing but whose stage is a customer stage', async () => {
+      const { winnerId, loserId } = await leadPair();
+      await db('customers').where({ id: loserId }).update({ pipeline_stage: 'active_customer' });
+      await merge(winnerId, loserId);
+      expect((await row(winnerId)).autopay_enabled).toBe(false);
+    });
+
+    test('churned customer with no billing rows', async () => {
+      const { winnerId, loserId } = await leadPair();
+      await db('customers').where({ id: loserId }).update({ pipeline_stage: 'churned', churned_at: '2026-05-01' });
+      await merge(winnerId, loserId);
+      expect((await row(winnerId)).autopay_enabled).toBe(false);
+    });
+
+    test('a lead stage row with a member_since date or completed services', async () => {
+      const a = await leadPair();
+      await db('customers').where({ id: a.loserId }).update({ member_since: '2025-06-01' });
+      await merge(a.winnerId, a.loserId);
+      expect((await row(a.winnerId)).autopay_enabled).toBe(false);
+      const b = await leadPair();
+      await db('customers').where({ id: b.loserId }).update({ total_services: 2 });
+      await merge(b.winnerId, b.loserId);
+      expect((await row(b.winnerId)).autopay_enabled).toBe(false);
+    });
   });
 
   test('gate on: the undo still works after an autopay-skipping merge', async () => {

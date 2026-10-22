@@ -1,7 +1,9 @@
 /**
- * GATE_MERGE_LEAD_DEFAULTS (dark) — a retired call lead that never had a billing
- * relationship carries autopay_enabled=false only as the intake default. A merge
- * must not copy it onto the real customer's row.
+ * GATE_MERGE_LEAD_DEFAULTS (dark) — a retired call lead's autopay_enabled=false is
+ * the intake default, not a customer decision, so a merge must not copy it onto
+ * the real customer's row. Only a row that is POSITIVELY an intake lead counts:
+ * a customer restored after archival has autopay disarmed on purpose and may hold
+ * no billing rows, so absent rows alone must not read as "lead".
  *
  * Pure unit tests with a table-routed fake knex (no database). The executor round
  * trip runs on real Postgres in customer-dedupe-lead-defaults-postgres.test.js
@@ -25,7 +27,7 @@ function fakeDb(routes = {}) {
   const database = (table) => {
     queried.push(table);
     const q = {};
-    for (const m of ['where', 'select']) q[m] = () => q;
+    for (const m of ['where', 'whereIn', 'select']) q[m] = () => q;
     q.first = () => { q._first = true; return q; };
     q.then = (resolve, reject) => Promise.resolve().then(() => {
       const value = routes[table];
@@ -59,49 +61,84 @@ describe('the merge rules the gate must not touch', () => {
   });
 });
 
-describe('inheritedAutopayRestrictions with a never-billed loser', () => {
+describe('inheritedAutopayRestrictions with an intake-lead loser', () => {
   const NOW = Date.parse('2026-10-21T12:00:00Z');
   const winner = { autopay_enabled: true, auto_apply_account_credit: true };
   it('default: the loser autopay=false is inherited (unchanged)', () => {
     expect(dedupe.inheritedAutopayRestrictions(winner, { autopay_enabled: false }, NOW)).toEqual({ autopay_enabled: false });
   });
-  it('never-billed loser: autopay=false is NOT inherited', () => {
-    expect(dedupe.inheritedAutopayRestrictions(winner, { autopay_enabled: false }, NOW, { loserNeverBilled: true })).toEqual({});
+  it('intake-lead loser: autopay=false is NOT inherited', () => {
+    expect(dedupe.inheritedAutopayRestrictions(winner, { autopay_enabled: false }, NOW, { loserIntakeLead: true })).toEqual({});
   });
-  it('never-billed loser: a live pause and the credit opt-out are still inherited', () => {
+  it('intake-lead loser: a live pause and the credit opt-out are still inherited', () => {
     expect(dedupe.inheritedAutopayRestrictions(
       winner,
       { autopay_enabled: false, auto_apply_account_credit: false, autopay_paused_until: '2026-12-01T00:00:00Z', autopay_pause_reason: 'asked' },
       NOW,
-      { loserNeverBilled: true },
+      { loserIntakeLead: true },
     )).toEqual({ auto_apply_account_credit: false, autopay_paused_until: '2026-12-01T00:00:00Z', autopay_pause_reason: 'asked' });
   });
 });
 
-describe('loserNeverBilled', () => {
+describe('loserIsIntakeLead', () => {
   afterEach(() => { delete process.env.GATE_MERGE_LEAD_DEFAULTS; });
   const lead = { id: 'l1', autopay_enabled: false };
-  const noBilling = { customers: { autopay_payment_method_id: null }, payment_methods: null, autopay_log: null };
+  const customerRow = {
+    pipeline_stage: 'new_lead', churned_at: null, churn_episode_id: null, member_since: null, total_services: 0, autopay_payment_method_id: null,
+  };
+  const plainLead = { customers: customerRow, audit_log: undefined, payment_methods: undefined, autopay_log: undefined };
+  const withRow = (over) => ({ ...plainLead, customers: { ...customerRow, ...over } });
 
   it('gate off: false, no query', async () => {
-    const database = fakeDb(noBilling);
-    expect(await dedupe.loserNeverBilled(database, lead)).toBe(false);
+    const database = fakeDb(plainLead);
+    expect(await dedupe.loserIsIntakeLead(database, lead)).toBe(false);
     expect(database.queried).toEqual([]);
   });
 
   describe('gate on', () => {
     beforeEach(() => { process.env.GATE_MERGE_LEAD_DEFAULTS = 'true'; });
-    it('no designated card, no card, no autopay log: never billed', async () => {
-      expect(await dedupe.loserNeverBilled(fakeDb(noBilling), lead)).toBe(true);
+
+    it.each(['new_lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'follow_up', 'negotiating'])(
+      'a plain call lead at %s: an intake lead', async (stage) => {
+        expect(await dedupe.loserIsIntakeLead(fakeDb(withRow({ pipeline_stage: stage })), lead)).toBe(true);
+      },
+    );
+    it('a total_services of null counts as none', async () => {
+      expect(await dedupe.loserIsIntakeLead(fakeDb(withRow({ total_services: null })), lead)).toBe(true);
     });
+
+    it.each(['active_customer', 'won', 'at_risk', 'churned', 'past_customer', 'dormant', 'lost', null, 'something_new'])(
+      'stage %s: not an intake lead', async (stage) => {
+        expect(await dedupe.loserIsIntakeLead(fakeDb(withRow({ pipeline_stage: stage })), lead)).toBe(false);
+      },
+    );
+
     it.each([
-      ['a designated autopay card', { ...noBilling, customers: { autopay_payment_method_id: 'pm1' } }],
-      ['a saved card', { ...noBilling, payment_methods: { id: 'pm1' } }],
-      ['an autopay log row', { ...noBilling, autopay_log: { id: 'log1' } }],
-      ['a missing customer row', { ...noBilling, customers: null }],
-      ['an unreadable autopay log', { ...noBilling, autopay_log: new Error('boom') }],
-    ])('%s: billed', async (_label, routes) => {
-      expect(await dedupe.loserNeverBilled(fakeDb(routes), lead)).toBe(false);
+      ['churned_at', { churned_at: '2026-01-01' }],
+      ['churn_episode_id', { churn_episode_id: 'ep1' }],
+      ['member_since', { member_since: '2025-06-01' }],
+      ['completed services', { total_services: 3 }],
+      ['a designated autopay card', { autopay_payment_method_id: 'pm1' }],
+    ])('a lead row with %s: not an intake lead', async (_label, over) => {
+      expect(await dedupe.loserIsIntakeLead(fakeDb(withRow(over)), lead)).toBe(false);
+    });
+
+    it.each([
+      ['an archive audit row', { audit_log: { id: 'a1' } }],
+      ['a restore audit row (a restored customer with disarmed autopay and no billing rows)', { audit_log: { id: 'a2' } }],
+      ['a saved card', { payment_methods: { id: 'pm1' } }],
+      ['an autopay log row', { autopay_log: { id: 'log1' } }],
+    ])('%s: not an intake lead', async (_label, over) => {
+      expect(await dedupe.loserIsIntakeLead(fakeDb({ ...plainLead, ...over }), lead)).toBe(false);
+    });
+
+    it.each([
+      ['a missing customer row', { customers: null }],
+      ['an unreadable audit log', { audit_log: new Error('boom') }],
+      ['an unreadable autopay log', { autopay_log: new Error('boom') }],
+      ['an unreadable customers read', { customers: new Error('boom') }],
+    ])('%s: fails closed', async (_label, over) => {
+      expect(await dedupe.loserIsIntakeLead(fakeDb({ ...plainLead, ...over }), lead)).toBe(false);
     });
   });
 });
