@@ -3,6 +3,9 @@ const db = require('../../models/db');
 const gmailClient = require('./gmail-client');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const featureGates = require('../../config/feature-gates');
+// Tolerates a test that partially mocks feature-gates (reader missing = gate off).
+const emailAuthStrictLive = () => typeof featureGates.emailAuthStrictLive === 'function' && featureGates.emailAuthStrictLive();
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-wire');
 // First TEXT block of a Message — a thinking block leads the content on
 // always-thinking models (Opus 5.5, Fable), so content[0] is not the answer.
@@ -395,6 +398,35 @@ async function bookExpense(email, { vendorName, vendorSource, expenseCategory, p
 }
 
 async function processVendorInvoice(email, classification) {
+  // GATE_EMAIL_AUTH_STRICT: a From header is typed by the sender, and the
+  // vendor mapping below (vendor name, tax category, deduction policy) trusts
+  // it. Book automatically only when Gmail's own Authentication-Results shows
+  // the mail authenticated as the From domain; otherwise leave it for a human
+  // (auto_action marks the email, nothing is written to expenses). Checked
+  // before the PDF is sent to the model so a forged mail costs nothing.
+  if (emailAuthStrictLive()) {
+    const { hasAlignedAuth } = require('./inbox-hygiene');
+    const { domainFromAddress } = require('./spam-blocker');
+    if (!hasAlignedAuth(email.authentication_results, domainFromAddress(email.from_address))) {
+      // A reclassified email that already booked an expense keeps its booking
+      // outcome: do not overwrite it. The expense row must still exist; an admin-
+      // deleted one leaves a stale id and the email is unbooked.
+      if (email.expense_id && await db('expenses').where({ id: email.expense_id }).first('id')) {
+        logger.warn(`[invoice-processor] Email ${email.id} already booked expense ${email.expense_id} but its sender did not authenticate as the From domain — booking left as is`);
+        return;
+      }
+      // A confirmed-stale link (its expense is gone) is cleared with the marker,
+      // guarded on the id read above so a link made meanwhile is not overwritten.
+      const where = email.expense_id ? { id: email.id, expense_id: email.expense_id } : { id: email.id };
+      await db('emails').where(where).update({
+        auto_action: 'invoice_detected:unauthenticated',
+        ...(email.expense_id ? { expense_id: null } : {}),
+        updated_at: new Date(),
+      });
+      logger.warn(`[invoice-processor] Email ${email.id} classified vendor_invoice but its sender did not authenticate as the From domain — not booked, left for review`);
+      return;
+    }
+  }
   const vendor = await vendorForSender(email.from_address);
   const expenseCategory = realCategoryName(vendor?.expense_category) || 'Uncategorized';
 
