@@ -296,6 +296,16 @@ describe('GATE_REVIEW_ASK_FIXED_DAY0 — the same-day text is one fixed line', (
     expect(mockDispatch).toHaveBeenCalled();
   });
 
+  test('isFixedDay0Line knows every fixed wording and no writer draft', () => {
+    for (const b of [
+      "Hi Marta, it's Adam from Waves. Thanks for having us out today. A Google review would really help: {review_url}",
+      "Hi Marta, it's Adam from Waves. Thanks for having us out. A Google review would really help: {review_url}",
+      "Hi, it's Waves Pest Control. Thanks for having us out today. A Google review would really help: {review_url}",
+    ]) expect(Drafter.isFixedDay0Line(b)).toBe(true);
+    expect(Drafter.isFixedDay0Line(GOOD.body)).toBe(false);
+    expect(Drafter.isFixedDay0Line(null)).toBe(false);
+  });
+
   test('gate off: day 0 still goes to the writer', async () => {
     mockGates.reviewAskFixedDay0 = false;
     mockDispatch.mockResolvedValueOnce(reply(GOOD));

@@ -1437,6 +1437,13 @@ function fixedDay0Line({ firstName, techName, stepKind }) {
   return `${hello}${who} ${thanks} A Google review would really help: {review_url}`;
 }
 
+// A body this fixed line wrote (any name / tech / day wording), so retry
+// reuse can tell it from a writer draft after the gate is rolled back.
+const FIXED_DAY0_RE = /^Hi(?: [^,]+)?, it's [^.]+\. Thanks for having us out(?: today)?\. A Google review would really help: \{review_url\}$/;
+function isFixedDay0Line(body) {
+  return FIXED_DAY0_RE.test(String(body || ""));
+}
+
 // What the writer made of one touch: { outcome: 'drafted', body, sentences }
 // | { outcome: 'held', body, repeat, sentences } | { outcome: 'fallback', reason }.
 async function techVoiceOutcome({ customer, recipientFirstName, recipientName, serviceType, techName, sequenceStep, serviceDate, serviceRecordId, sequenceId, channel }) {
@@ -1520,6 +1527,7 @@ const ReviewAskDrafter = {
    * repeats an earlier touch of this cadence: send nothing for this step.
    */
   draftTechVoice,
+  isFixedDay0Line,
   HeldTouch,
 
   /**

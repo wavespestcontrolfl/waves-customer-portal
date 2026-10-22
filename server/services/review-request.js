@@ -4825,7 +4825,10 @@ const ReviewService = {
             && (prior.service_type || null) === (serviceType || null)
             && (prior.service_record_id || null) === (serviceRecordId || null)
             && (prior.service_date ? etCalendarDayOf(prior.service_date) : null) === (serviceDate ? etCalendarDayOf(serviceDate) : null));
-          const reusable = prior?.custom_body && sameDay && sameAttribution && (priorTechVoice
+          // #6423 r2: a fixed Day-0 line saved while GATE_REVIEW_ASK_FIXED_DAY0
+          // was on is not reused after the gate is rolled back (the writer runs).
+          const priorFixedDay0 = require("./review-ask-drafter").isFixedDay0Line(prior?.custom_body);
+          const reusable = prior?.custom_body && !priorFixedDay0 && sameDay && sameAttribution && (priorTechVoice
             || require("./review-ask-drafter").verifyDraftBody(prior.custom_body,
               { firstName: firstNameFrom(contact.name) || customer.first_name || "" }) === null);
           if (reusable) persistedBody = prior.custom_body;
