@@ -125,7 +125,7 @@ Use for: "restart the server", "bounce the portal service", "it's hung, restart 
   },
   {
     name: 'set_railway_gate',
-    description: `Propose setting ONE known feature gate (a GATE_* variable) to the literal value 'true' or 'false' on the portal's production service in Railway. Owner login only, through a confirmation card showing the current value, the new value, what the gate controls and what the new value means. Railway redeploys the portal when a variable changes (a brief restart). Only gates the portal already knows AND has a description for are accepted — a made-up name, a mode gate or an undocumented gate is refused (those change in the Railway dashboard).
+    description: `Propose setting ONE known feature gate (a GATE_* variable) to the literal value 'true' or 'false' on the portal's production service in Railway. Owner login only, through a confirmation card showing the current value, the new value, what the gate controls and what the new value means. Railway redeploys the portal when a variable changes (a brief restart). Only gates the portal already knows AND has a description for are accepted — a made-up name, a mode gate or an undocumented gate is refused (by the owner's rule those settings stay in the Railway dashboard).
 The value is the RAW variable value, not "on/off". Some gates are inverted: a name ending in _OFF, _DISABLE, _DISABLED or _KILL_SWITCH means 'true' turns the named thing OFF (GATE_LATE_PAYMENT_CHECKER_OFF=true disables the late-payment checker). Map what the operator wants to HAPPEN through the gate's meaning; if it is unclear which value they want, ask before proposing.
 Use for: "set GATE_X to true", "turn the Y feature on" (after mapping it to the right value), "flip the gate for Z"`,
     input_schema: {
@@ -619,9 +619,10 @@ function gateNotFlippable(entry) {
   if (!entry.boolean) {
     return {
       error: entry.kind === 'mode'
-        ? `${entry.name} takes a mode or timestamp, not just on/off — change it in the Railway dashboard.`
-        : `${entry.name} is a known gate, but the portal's code does not show it is a plain on/off switch, so it cannot be flipped from here — change it in the Railway dashboard.`,
-      code: 'not_a_boolean_gate',
+        ? `${entry.name} takes a mode or timestamp, not just on/off. By the owner\'s rule, settings like this stay in the Railway dashboard.`
+        : `${entry.name} is a known gate, but the portal's code does not show it is a plain on/off switch, so the bar cannot flip it from here. By the owner\'s rule, settings like this stay in the Railway dashboard.`,
+      code: 'by_owner_rule',
+      rule: 'not_a_boolean_gate',
     };
   }
   if (!entry.description) {
