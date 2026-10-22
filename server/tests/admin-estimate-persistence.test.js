@@ -559,6 +559,21 @@ describe('admin estimate persistence', () => {
     expect(fields.onetime_total).toBe(350);
   });
 
+  test('the itemized-work floor reads the amount and total aliases (codex #6438 r4)', () => {
+    for (const row of [{ service: 'flea', amount: 150 }, { service: 'flea', total: 150 }]) {
+      const fields = buildEstimatePersistenceFields({
+        ...baseBody,
+        estimateData: {
+          result: {
+            oneTime: { items: [row], total: 150, membershipFee: 99 },
+            recurring: { grandTotal: 113.1, services: [{ service: 'pest_control', mo: 38.4 }, { service: 'mosquito', mo: 74.7 }] },
+          },
+        },
+      });
+      expect(fields.onetime_total).toBe(150);
+    }
+  });
+
   test('a pooled one-time discount lowers the itemized-work floor', () => {
     const fields = buildEstimatePersistenceFields({
       ...baseBody,
