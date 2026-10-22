@@ -435,20 +435,21 @@ function mayExecuteWithoutCard(toolName, input = {}, taint = null, grounding = n
 // path (customer edits, create_customer and the other exempt tools) asks executesWithoutCard
 // or mayExecuteWithoutCard, so this flag cards them all (Codex #6369 r15).
 function noteSameNameContext(taint, taskContext) {
-  if (taint && ibTargetRulesV2Live() && (taskContext?.candidates?.length || 0) > 1) {
-    taint.sameNameCandidates = true;
-    taint.sameNameEmitted = true;
-  }
+  if (taint && ibTargetRulesV2Live() && (taskContext?.candidates?.length || 0) > 1) taint.sameNameCandidates = true;
 }
 
-// A request that offered choice buttons also leaves a pending same-name choice: the tap
-// sends the button text back as the next message (Codex #6369 r16).
-function noteChoicesOffered(taint, choices) {
-  if (taint && ibTargetRulesV2Live() && Array.isArray(choices) && choices.length) taint.sameNameEmitted = true;
+// Does the final response show same-name choice buttons: a button list that is actually
+// in the reply the client gets (not suppressed by a card or a direct action) and whose
+// options are the choice labels built from this request's same-name candidates? An
+// ordinary amount, date or product choice never marks (Codex #6369 r17). The tap sends
+// the label text back as the next message, so the thread then cards the next writes.
+function markSameNameChoices(taint, taskContext, shownChoices) {
+  const labels = new Set((taskContext?.candidates || []).map(candidate => candidate?.choice_label).filter(Boolean));
+  if (taint && ibTargetRulesV2Live() && Array.isArray(shownChoices) && shownChoices.some(choice => labels.has(choice))) taint.sameNameEmitted = true;
 }
 
 // Does this request's reply leave a pending same-name choice on the thread? Only what THIS
-// request emitted counts, never what it consumed, so the marker clears after one exchange.
+// request showed counts, never what it consumed.
 const sameNameMarkerNeeded = taint => Boolean(taint?.sameNameEmitted) && ibTargetRulesV2Live();
 
 // The marker check for a new request: a pending same-name choice cards every write in it.
@@ -658,4 +659,4 @@ You are talking to the owner. Do what they ask.
 - Never send the owner to another screen, never explain limitations, never apologize. If something truly cannot be done from here, say so in one sentence and offer the closest thing you can do.
 - Replies: 1–3 short lines. No preamble, no recap of the request, no "anything else?". Lists and numbers only when the owner asked for data.`;
 
-module.exports = { TRUSTED_READS, noteSameNameContext, noteChoicesOffered, sameNameMarkerNeeded, ownerDirectPrompt, dynamicCapReached, targetGrounding, bulkLimitResult, OWNER_DIRECT_TARGET_RULES_PROMPT, DIRECT_EDITS_V2, loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };
+module.exports = { TRUSTED_READS, noteSameNameContext, markSameNameChoices, sameNameMarkerNeeded, ownerDirectPrompt, dynamicCapReached, targetGrounding, bulkLimitResult, OWNER_DIRECT_TARGET_RULES_PROMPT, DIRECT_EDITS_V2, loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };

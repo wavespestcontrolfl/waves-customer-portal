@@ -104,17 +104,19 @@ const CUSTOMER_LOOKUP_LISTED_V2 = 25;
 const targetRulesV2Scope = scope => scope === true && ibTargetRulesV2Live();
 const customerLookupLimit = (scope = true) => (targetRulesV2Scope(scope) ? CUSTOMER_LOOKUP_LISTED_V2 + 1 : CUSTOMER_LOOKUP_LIMIT);
 
-// GATE_IB_TARGET_RULES_V2 (Codex #6369 r9): every typed-target parse (names, cities,
-// phones, emails, the "First L., City" reply) reads only the first characters of the
-// message. A multi-megabyte prompt cannot make the parse materialize every match; the
-// owner's target is named at the start of a request. Gate off: the whole message.
+// GATE_IB_TARGET_RULES_V2 (Codex #6369 r9, r17): in the owner-direct scope every typed-target
+// parse (names, cities, phones, emails, the "First L., City" reply) reads only the first
+// characters of the message: resolve() cuts the prompt once, and typedCustomerIds cuts it again
+// for direct callers. A multi-megabyte prompt cannot make the parse materialize every match; the
+// owner's target is named at the start of a request. Other admins, and owner-direct off, read
+// the whole message as before.
 const TYPED_TARGET_SCAN_CHARS = 4000;
-const typedTargetText = prompt => (ibTargetRulesV2Live() ? String(prompt ?? '').slice(0, TYPED_TARGET_SCAN_CHARS) : String(prompt));
+const boundedPrompt = prompt => String(prompt ?? '').slice(0, TYPED_TARGET_SCAN_CHARS);
 
 function targetClause(prompt, retainRecordConstraints = false) {
   // Message bodies and replacement values are data, even when they contain
   // another customer's exact name. They never select a recipient/account.
-  let clause = typedTargetText(prompt).split(/[:;\n“”"]|\bwith\s+(?:(?:the|a|this|following)\s+)*(?:text|body|message|content|notes?|instructions|comments)\b|\b(?:notes?|message|instructions|comments)\s+(?:that|mentioning|referencing|containing|with|reading)\b|\b(?:saying|regarding|about)\b/i)[0];
+  let clause = String(prompt).split(/[:;\n“”"]|\bwith\s+(?:(?:the|a|this|following)\s+)*(?:text|body|message|content|notes?|instructions|comments)\b|\b(?:notes?|message|instructions|comments)\s+(?:that|mentioning|referencing|containing|with|reading)\b|\b(?:saying|regarding|about)\b/i)[0];
   for (const replacement of clause.matchAll(/\b(?:name|address|email|phone|label|notes?|instructions|message|contact)\s+(?:to|as|is|=)\s+/gi)) {
     const action = [...clause.slice(0, replacement.index).matchAll(new RegExp(`\\b(?:${PERSON_ACTIONS}|change|set|rename|relabel|add|save|draft|write|post|submit)\\b`, 'gi'))].at(-1)?.[0];
     if (/^(?:change|update|set|rename|relabel|add|save)$/i.test(action || '')) {
@@ -492,7 +494,8 @@ function contactLiteralsOf(clause) {
   return [...found.values()];
 }
 
-async function typedCustomerIds(prompt, namedResult) {
+async function typedCustomerIds(fullPrompt, namedResult) {
+  const prompt = boundedPrompt(fullPrompt);
   const clause = targetClause(prompt);
   const normalized = normalizeName(withoutContacts(clause));
   const marked = normalizeName(withoutContacts(clause).replace(/,/g, ` ${COMMA_TOKEN} `));
@@ -590,7 +593,7 @@ async function initialFormMatches(triples) {
 }
 
 async function initialFormIds(prompt) {
-  const match = typedTargetText(prompt || '').match(INITIAL_FORM_RE);
+  const match = String(prompt || '').match(INITIAL_FORM_RE);
   if (!match) return [];
   const [, first, initial, city] = match.map(part => normalizeName(part));
   if (!first || !initial || !city) return [];
@@ -671,7 +674,8 @@ async function typedTarget(scope, prompt, namedResult) {
 // resolve() is a short pipeline. `r` is the shared state; each stage owns one
 // concern and returns either a finished result (the pipeline stops) or null (the
 // next stage runs). The last stage always returns the context.
-async function resolveBase({ prompt, pageData, selectedTarget, ownerDirectScope = false }) {
+async function resolveBase({ prompt: fullPrompt, pageData, selectedTarget, ownerDirectScope = false }) {
+  const prompt = targetRulesV2Scope(ownerDirectScope) ? boundedPrompt(fullPrompt) : fullPrompt;
   // Object(null) is {} — an absent or null selection reads as no customer id.
   // Candidate ids come from PostgreSQL in lowercase; a selection may not.
   const selectedId = String(Object(selectedTarget).customer_id || '').toLowerCase() || null;

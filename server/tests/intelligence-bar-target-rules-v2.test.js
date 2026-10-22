@@ -469,14 +469,30 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect([...over]).toEqual([]);
     expect(over.identityConflict).toBe(true);
     // The whole parse is bounded, not just the contact scan.
-    const startedClause = Date.now();
-    Context.targetClause(`${'x '.repeat(2500000)} update Pat Example`);
-    expect(Date.now() - startedClause).toBeLessThan(1500);
+    const startedResolve = Date.now();
+    const resolvedBig = await Context.resolve({ prompt: `update Pat Example notes ${'x '.repeat(2500000)}`, pageData: {}, selectedTarget: null, ownerDirectScope: true });
+    expect(Date.now() - startedResolve).toBeLessThan(1500);
+    expect(resolvedBig.target.customer_id).toBe(id(100));
     // Stuffing after the scan window is never read: the name at the start still grounds.
     expect(await Context.typedCustomerIds(`update Pat Example notes ${'a'.repeat(4000)} ${phones}`, named)).toEqual([id(100)]);
     // Gate off: the whole prompt is read, as today.
     delete process.env[ON];
     expect(Context.targetClause(`${'a'.repeat(5000)} tail`)).toContain('tail');
+  });
+
+  test('the 4,000-character scan budget is owner-direct scope only: a name after the cutoff still resolves for another admin (Codex #6369 r17)', async () => {
+    process.env[ON] = 'true';
+    customers = sameName(1);
+    const filler = `${'x'.repeat(50)} `.repeat(85); // about 4,300 characters, 85 words
+    const prompt = `${filler}update Pat Example phone`;
+    expect(prompt.indexOf('Pat Example')).toBeGreaterThan(4000);
+    const other = await Context.resolve({ prompt, pageData: {}, selectedTarget: null, ownerDirectScope: false });
+    expect(other.target.customer_id).toBe(id(100));
+    const owner = await Context.resolve({ prompt, pageData: {}, selectedTarget: null, ownerDirectScope: true });
+    expect(owner.target).toBeNull();
+    // Gate off, owner scope claimed: still the whole prompt.
+    delete process.env[ON];
+    expect((await Context.resolve({ prompt, pageData: {}, selectedTarget: null, ownerDirectScope: true })).target.customer_id).toBe(id(100));
   });
 
   test('gate on: the owner viewing one of several same-name customers and typing that name targets the viewed one, no choices (Codex #6369 r13)', async () => {
@@ -944,8 +960,9 @@ describe('same-name choice marker on the thread (Codex #6369 r16)', () => {
     const grounding = OwnerDirect.targetGrounding(owner);
     // Request 1: same-name candidates in context and choices offered: the reply leaves the marker.
     const first = await load(false);
-    OwnerDirect.noteSameNameContext(first, { candidates: [{}, {}] });
-    OwnerDirect.noteChoicesOffered(first, ['Pat Example, Venice', 'Pat Example, Osprey']);
+    const asked = { candidates: [{ choice_label: 'Pat Example, Venice' }, { choice_label: 'Pat Example, Osprey' }] };
+    OwnerDirect.noteSameNameContext(first, asked);
+    OwnerDirect.markSameNameChoices(first, asked, ['Pat Example, Venice', 'Pat Example, Osprey']);
     expect(OwnerDirect.sameNameMarkerNeeded(first)).toBe(true);
     // Request 2: the owner sends the label text back. The marker is pending: every write is carded,
     // although this request carries no same-name candidates of its own.
@@ -955,7 +972,7 @@ describe('same-name choice marker on the thread (Codex #6369 r16)', () => {
     expect(OwnerDirect.executesWithoutCard('create_customer', { first_name: 'Sam', last_name: 'Newcomer' }, null, second, grounding)).toBe(false);
     // What request 2 consumed is not re-emitted, so its reply leaves no marker.
     expect(OwnerDirect.sameNameMarkerNeeded(second)).toBe(false);
-    // Request 3: the latest assistant turn has no marker, so writes run direct again.
+    // Request 3 (more than 30 minutes later, or a thread that never showed same-name choices): direct again.
     const third = await load(false);
     expect(third.sameNameCandidates).toBeUndefined();
     expect(OwnerDirect.executesWithoutCard('update_customer', edit, null, third, grounding)).toBe(true);
@@ -969,8 +986,35 @@ describe('same-name choice marker on the thread (Codex #6369 r16)', () => {
     delete process.env[ON];
     expect((await load(true)).sameNameCandidates).toBeUndefined();
     const off = OwnerDirect.newRequestTaint([]);
-    OwnerDirect.noteChoicesOffered(off, ['a', 'b']);
+    OwnerDirect.markSameNameChoices(off, { candidates: [{ choice_label: 'a' }] }, ['a', 'b']);
     expect(OwnerDirect.sameNameMarkerNeeded(off)).toBe(false);
+  });
+
+  test('only same-name choices that are really shown mark the thread; amount, date and product choices never do (Codex #6369 r17)', () => {
+    process.env[ON] = 'true';
+    const asked = { candidates: [{ choice_label: 'Pat Example, Venice' }, { choice_label: 'Pat Example, Osprey' }, { choice_label: null }] };
+    const marks = (context, shown) => { const t = OwnerDirect.newRequestTaint([]); OwnerDirect.markSameNameChoices(t, context, shown); return OwnerDirect.sameNameMarkerNeeded(t); };
+    expect(marks(asked, ['Pat Example, Venice', 'Pat Example, Osprey'])).toBe(true);
+    // An ordinary choice list never marks, even in a request that carries same-name candidates.
+    expect(marks(asked, ['$60.33', '$61.33'])).toBe(false);
+    expect(marks(asked, ['Tuesday the 14th', 'Thursday the 16th'])).toBe(false);
+    expect(marks({ candidates: [] }, ['$60.33', '$61.33'])).toBe(false);
+    // Buttons suppressed by a card or a direct action (the route passes null) do not mark.
+    expect(marks(asked, null)).toBe(false);
+    expect(marks(asked, [])).toBe(false);
+  });
+
+  test('the pending check is cursor-free: ANY assistant turn with the marker in the last 30 minutes counts (Codex #6369 r17)', async () => {
+    const dbModule = require('../models/db');
+    let seen;
+    dbModule.mockReset().mockImplementation(() => ({ where: () => ({ first: async (raw) => { seen = raw; return { pending: true }; } }) }));
+    dbModule.raw = (text, bindings) => ({ text, bindings });
+    expect(await IbThreads.hasSameNameChoicePending(id(2), id(1))).toBe(true);
+    // No "latest assistant turn" cursor: nothing takes MAX(seq), and the age bound is 30 minutes.
+    expect(seen.text).not.toMatch(/MAX\(/i);
+    expect(seen.text).toMatch(/t\.role = 'assistant'/);
+    expect(seen.text).toMatch(/t\.created_at >= NOW\(\)/);
+    expect(seen.bindings).toEqual([`%${IbThreads.SAME_NAME_CHOICE_MARKER}%`, '30']);
   });
 
   test('the marker has no LIKE wildcard characters', () => {

@@ -4064,7 +4064,6 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         OwnerDirect.noteUntrustedRead(requestTaint, toolUse.name, result);
         if (toolUse.name === 'search_field_intelligence' && !failed && isEmptyKnowledgeSearch(result)) knowledgeMisses.add(result.query);
         offeredChoices = toolUse.name === OFFER_CHOICES_TOOL_NAME && !failed && result?.status === 'choices_shown' ? result.choices : null;
-        OwnerDirect.noteChoicesOffered(requestTaint, offeredChoices);
         // A clarification stays open until the same operation succeeds in a
         // later round; an unrelated or sibling call succeeding does not answer it.
         if (result?.code === 'target_clarification_required') unresolvedClarifications.set(callKey(toolUse), { operation: operationKey(toolUse), round });
@@ -4167,6 +4166,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       piiTainted,
       PII_TAINT_MARKER,
     );
+    // Same-name buttons count only when they are really in the reply (no card or direct action suppressed them).
+    OwnerDirect.markSameNameChoices(requestTaint, taskContext, offeredChoices && !pendingProposals.length && !directActionIds.length ? offeredChoices : null);
     const persistedAssistantTurn = appendTaintMarker(appendTaintMarker(
       appendTaintMarker(appendTaintMarker(finalResponse, imageTainted, IMAGE_TAINT_MARKER), piiTainted, PII_TAINT_MARKER),
       requestTaint.untrustedRead,
