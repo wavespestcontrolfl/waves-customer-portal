@@ -32,7 +32,8 @@ const { rejectImpossibleSpokenPhones } = require('./call-spoken-phone-guard');
 const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
 const { callStartedAt } = require('../utils/call-timeline');
 const { resolveLocation } = require('../config/locations');
-const { isInDesotoExclusion, isDesotoLocality, isDesotoZip, isServedSouthHillsboroughTown } = require('./service-area');
+const { isInDesotoExclusion, isServedSouthHillsboroughTown } = require('./service-area');
+const { isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip } = require('./excluded-localities');
 const { zipToCity } = require('../utils/zip-to-city');
 const { safeErrorToken } = require('../utils/sentry-scrub');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
@@ -1888,13 +1889,15 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
 // CALL_EXTRACTION_V2_ENABLED off, or V2 in shadow with
 // CALL_EXTRACTION_V2_DRIVES_ROUTING off, the legacy inbound condition would
 // auto-book an out-of-area address (DeSoto/Arcadia, owner ruling
-// 2026-09-30). This survives every routing mode. Callers pass only a VALID
-// V2 extraction (v2CanonicalExtraction) — a schema_failed/normalization_failed
+// 2026-09-30; Punta Gorda, owner ruling 2026-10-22). This survives every
+// routing mode. Callers pass only a VALID V2 extraction (v2CanonicalExtraction) — a schema_failed/normalization_failed
 // object is untrusted and must not suppress a valid V1 booking. Evidence:
 //   1. any DeSoto locality evidence — a DeSoto city, a DeSoto ZIP, or an
 //      on-file pin in the DeSoto rectangle — vetoes first, ahead of a
 //      positive AV verdict (which may describe a different, V2 address) and
 //      of any served-town exemption (Riverview + 34266 cannot launder it).
+//      Punta Gorda (city, or a Punta Gorda-only ZIP; Charlotte County is
+//      otherwise served) vetoes at the same point, on the call or on file.
 //   2. a positive Address Validation verdict (inServiceArea === true) then
 //      clears the rest, including a model-stated county NAME of DeSoto.
 //   3. an AV out_of_service_area / inServiceArea false verdict, or a county
@@ -1947,6 +1950,13 @@ function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, e
   const countyKey = normalizeCounty(statedCounty);
   if (cities.some(isDesotoLocality) || zips.some(isDesotoZip) || onFileDesoto) {
     return { reason: 'desoto_locality', county: 'DeSoto' };
+  }
+  // Punta Gorda (owner ruling 2026-10-22) is inside served Charlotte County,
+  // so a positive AV county verdict cannot clear it; the city or a Punta
+  // Gorda-only ZIP (on the call or on file) vetoes first, like DeSoto.
+  if (cities.some(isPuntaGordaLocality) || zips.some(isPuntaGordaZip)
+    || onFileCities.some(isPuntaGordaLocality) || onFileZips.some(isPuntaGordaZip)) {
+    return { reason: 'punta_gorda_locality', county: 'Charlotte' };
   }
   if (av && av.inServiceArea === true) return null;
   if (countyKey === 'desoto') {

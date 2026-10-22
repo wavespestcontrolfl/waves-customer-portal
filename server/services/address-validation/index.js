@@ -7,8 +7,9 @@
  * { status: 'not_attempted' } and the gate falls back to model/deterministic
  * address signals exactly as before.
  *
- * Service area: Manatee, Sarasota, Charlotte (FL); DeSoto is NOT served. An address that
- * resolves outside these counties is out_of_service_area.
+ * Service area: Manatee, Sarasota, Charlotte (FL); DeSoto County and the city of
+ * Punta Gorda (Charlotte County) are NOT served. An address that resolves outside
+ * these counties, or in Punta Gorda, is out_of_service_area.
  *
  * AddressValidationResult:
  *   {
@@ -27,6 +28,7 @@
 
 const logger = require('../logger');
 const { isInServiceAreaCounty } = require('../call-triage-flags');
+const { isPuntaGordaLocality, isPuntaGordaZip } = require('../excluded-localities');
 const { normalizeState, normalizeStreetLine, parseRawAddress } = require('../../utils/address-normalizer');
 
 // Google address calls are fail-open by design — a HUNG call must fail the
@@ -83,6 +85,40 @@ async function reverseGeocodeCounty(location, key, signal = null) {
   }
 }
 
+// The locality and ZIP Google places on a coordinate, for the excluded-locality
+// check inside a served county (Punta Gorda, owner ruling 2026-10-22): the
+// submitted city/ZIP can be missing or wrong, so the verdict must not rest on
+// them alone. Returns { city, zip } (either may be null when Google names
+// none) or null when the lookup itself failed, which callers treat as
+// unknown and fail closed on.
+async function reverseGeocodeLocality(location, key, signal = null) {
+  if (!location || typeof location.latitude !== 'number') return null;
+  try {
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${location.latitude},${location.longitude}`
+      + `&result_type=street_address|premise|subpremise|route|postal_code|locality&key=${key}`;
+    const res = await fetch(url, { signal: withTimeout(signal) });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.status && data.status !== 'OK' && data.status !== 'ZERO_RESULTS') return null;
+    let city = null;
+    let zip = null;
+    for (const r of data.results || []) {
+      for (const c of r.address_components || []) {
+        const types = c.types || [];
+        if (!city && types.includes('locality')) city = c.long_name || c.short_name || null;
+        if (!zip && types.includes('postal_code')) zip = c.long_name || c.short_name || null;
+      }
+      if (city && zip) break;
+    }
+    // Nothing usable (ZERO_RESULTS, or no locality and no ZIP) is unknown,
+    // not "not Punta Gorda": callers fail closed on null.
+    if (!city && !zip) return null;
+    return { city, zip };
+  } catch {
+    return null;
+  }
+}
+
 // Pure status derivation — testable without the network. `county` is supplied
 // by the caller (reverse-geocoded). The cardinal safety rule: VALIDATED_ACCEPT
 // requires inServiceArea === true. Unknown county (null) is NOT good enough —
@@ -98,7 +134,6 @@ function deriveStatus(result, county) {
   const verdict = result?.verdict || {};
   const address = result?.address || {};
   const components = address.addressComponents || [];
-  const inServiceArea = county ? isInServiceAreaCounty(county) : null;
   const granularity = verdict.validationGranularity || null;
   const premiseLevel = granularity === 'PREMISE' || granularity === 'SUB_PREMISE';
 
@@ -108,6 +143,11 @@ function deriveStatus(result, county) {
     state: pickComponent(components, 'administrative_area_level_1') || null,
     postal_code: pickComponent(components, 'postal_code') || null,
   };
+
+  // A served county does not make Punta Gorda served (owner ruling
+  // 2026-10-22): the validated city, or a Punta Gorda-only ZIP, is out.
+  const puntaGorda = isPuntaGordaLocality(normalized.city) || isPuntaGordaZip(normalized.postal_code);
+  const inServiceArea = county ? (isInServiceAreaCounty(county) && !puntaGorda) : null;
 
   const base = {
     inServiceArea,
@@ -263,4 +303,4 @@ function buildAddressLines(serviceAddress) {
   return [line1, line2].filter(Boolean);
 }
 
-module.exports = { validateAddress, deriveStatus, buildAddressLines, STATUSES, VERSION, SERVICE_STATE, reverseGeocodeCounty };
+module.exports = { validateAddress, deriveStatus, buildAddressLines, STATUSES, VERSION, SERVICE_STATE, reverseGeocodeCounty, reverseGeocodeLocality };

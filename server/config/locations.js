@@ -178,7 +178,7 @@ const CITY_TO_LOCATION = {
   'oneco': 'bradenton', 'tallevast': 'bradenton', 'myakka city': 'bradenton',
   'sarasota': 'sarasota', 'siesta key': 'sarasota', 'lido key': 'sarasota', 'osprey': 'sarasota', 'longboat key': 'sarasota',
   'venice': 'venice', 'north port': 'venice', 'englewood': 'venice', 'nokomis': 'venice', 'laurel': 'venice',
-  'port charlotte': 'venice', 'punta gorda': 'venice', 'placida': 'venice', 'boca grande': 'venice',
+  'port charlotte': 'venice', 'babcock ranch': 'venice', 'punta gorda': 'venice', 'placida': 'venice', 'boca grande': 'venice',
   'parrish': 'parrish', 'palmetto': 'parrish', 'ellenton': 'parrish', 'terra ceia': 'parrish',
   // Communities that appear as the typed city on real customer records
   // (2026-09-30 audit of served customers: Duette 7, North Venice 2, Lake
