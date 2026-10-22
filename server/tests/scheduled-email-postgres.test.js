@@ -108,9 +108,9 @@ jest.setTimeout(30000);
     expect(gmail.sendMessage).not.toHaveBeenCalled();
 
     await makeDue(first.body.scheduled.id);
-    gmail.sendMessage.mockResolvedValue({ id: 'gmail-fixture-1' });
+    gmail.sendMessage.mockImplementation(async (...args) => { await args[5].beforeSend(); return { id: 'gmail-fixture-1' }; });
     expect((await sendDueScheduledEmails()).results).toEqual(['sent']);
-    expect(gmail.sendMessage).toHaveBeenCalledWith('fixture@example.invalid', 'Fixture', 'Hi<br>there', null, null, { timeoutMs: 60000 });
+    expect(gmail.sendMessage).toHaveBeenCalledWith('fixture@example.invalid', 'Fixture', 'Hi<br>there', null, null, expect.objectContaining({ timeoutMs: 60000 }));
     expect(await row(first.body.scheduled.id)).toMatchObject({ status: 'sent', gmail_message_id: 'gmail-fixture-1', attempts: 1 });
     expect((await sendDueScheduledEmails()).results).toEqual([]);
     expect(gmail.sendMessage).toHaveBeenCalledTimes(1);
@@ -124,7 +124,7 @@ jest.setTimeout(30000);
     await makeDue(body.scheduled.id);
     gmail.sendMessage.mockResolvedValue({ id: 'gmail-fixture-2' });
     await sendDueScheduledEmails();
-    expect(gmail.sendMessage).toHaveBeenCalledWith('fixture@example.invalid', 'Fixture', 'Hi<br>there', 'thread-fixture', '<source-fixture@example.invalid>', { timeoutMs: 60000 });
+    expect(gmail.sendMessage).toHaveBeenCalledWith('fixture@example.invalid', 'Fixture', 'Hi<br>there', 'thread-fixture', '<source-fixture@example.invalid>', expect.objectContaining({ timeoutMs: 60000 }));
   });
 
   test('an alert whose write failed is raised on the next run, and the failing run reads as failed', async () => {
@@ -333,6 +333,22 @@ jest.setTimeout(30000);
     await expect(sendDueScheduledEmails({ conn: flaky })).rejects.toMatchObject({ summary: { results: ['sent', 'error'] } });
     expect(await row(first.body.scheduled.id)).toMatchObject({ status: 'sent' });
     expect(await row(second.body.scheduled.id)).toMatchObject({ status: 'scheduled' });
+  });
+
+  test('a claim settled by another sweep before the Gmail request stops the send', async () => {
+    const { body } = await queue();
+    await makeDue(body.scheduled.id);
+    let requested = false;
+    gmail.sendMessage.mockImplementation(async (...args) => {
+      // Sign-in stalled; meanwhile another replica settled the stale claim.
+      await database('scheduled_emails').where({ id: body.scheduled.id }).update({ status: 'outcome_unknown' });
+      await args[5].beforeSend();
+      requested = true;
+      return { id: 'gmail-late' };
+    });
+    expect((await sendDueScheduledEmails()).results).toEqual(['claim_lost']);
+    expect(requested).toBe(false);
+    expect(await row(body.scheduled.id)).toMatchObject({ status: 'outcome_unknown' });
   });
 
   test('due emails go to Gmail up to five at a time', async () => {

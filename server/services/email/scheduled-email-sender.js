@@ -127,12 +127,25 @@ async function sourceMessageId(row, conn) {
   }
 }
 
+// Just before the Gmail request (after the reply lookup and sign-in, which
+// can stall), the claim must still be this sweep's: it is refreshed here, so
+// settleStaleClaims cannot turn it into outcome_unknown while the request
+// runs. A claim already settled stops the send.
+async function holdClaim(row, conn) {
+  const held = await conn('scheduled_emails').where({ id: row.id, status: 'sending' })
+    .update({ claimed_at: conn.fn.now(), updated_at: conn.fn.now() });
+  if (!held) throw Object.assign(new Error('claim no longer held'), { code: 'claim_lost' });
+}
+
 async function sendOne(row, { conn = db, gmail = require('./gmail-client') } = {}) {
   const fence = { id: row.id, status: 'sending' };
   let result;
   try {
-    result = await gmail.sendMessage(row.to_address, row.subject, row.body_html, row.thread_id || null, await sourceMessageId(row, conn), { timeoutMs: SEND_TIMEOUT_MS });
+    result = await gmail.sendMessage(row.to_address, row.subject, row.body_html, row.thread_id || null, await sourceMessageId(row, conn),
+      { timeoutMs: SEND_TIMEOUT_MS, beforeSend: () => holdClaim(row, conn) });
   } catch (err) {
+    // Another sweep settled the row first: nothing was sent, nothing to write.
+    if (err.code === 'claim_lost') return 'claim_lost';
     if (err.providerOutcome?.outcomeUnknown === true) return settleUnknown(row, conn);
     const last = row.attempts >= MAX_ATTEMPTS;
     await conn('scheduled_emails').where(fence).update({

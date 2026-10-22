@@ -270,6 +270,9 @@ function ownAddress() {
 // options.timeoutMs (optional) aborts the request: the error is classified
 // like any other post-request failure (outcomeUnknown), never retried blindly.
 const sendRequestOptions = (options) => ({ retry: false, timeout: (options && options.timeoutMs) || undefined });
+// options.beforeSend (optional) runs after sign-in and just before the
+// message request; it throws to stop a send that is no longer wanted.
+const runBeforeSend = async (options) => { if (options && options.beforeSend) await options.beforeSend(); };
 
 async function sendMessage(to, subject, body, threadId = null, inReplyTo = null, options) {
   const gmail = await getGmail();
@@ -297,6 +300,7 @@ async function sendMessage(to, subject, body, threadId = null, inReplyTo = null,
   const params = { userId: 'me', requestBody: { raw } };
   if (threadId) params.requestBody.threadId = threadId;
 
+  await runBeforeSend(options);
   try {
     const res = await gmail.users.messages.send(params, sendRequestOptions(options));
     if (!res.data?.id) {

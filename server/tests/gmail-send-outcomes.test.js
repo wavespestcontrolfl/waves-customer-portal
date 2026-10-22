@@ -84,3 +84,13 @@ test('an aborted request (timeoutMs) after submission stays uncertain and carrie
   expect(requests).toHaveLength(1);
   expect(requests[0].timeout).toBe(60000);
 });
+
+test('a beforeSend hook that refuses stops the send before any message request', async () => {
+  acceptedData = { id: 'never' };
+  const hook = jest.fn(async () => { throw Object.assign(new Error('claim no longer held'), { code: 'claim_lost' }); });
+  const err = await gmail.sendMessage('fixture@example.test', 'Synthetic', 'Fixture', null, null, { beforeSend: hook }).catch((e) => e);
+  expect(err).toMatchObject({ code: 'claim_lost' });
+  expect(err.providerOutcome).toBeUndefined();
+  expect(hook).toHaveBeenCalledTimes(1);
+  expect(requests).toHaveLength(0);
+});
