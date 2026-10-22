@@ -182,12 +182,12 @@ maybeDescribe('GATE_MERGE_LEAD_DEFAULTS (real executeMerge)', () => {
     });
   });
 
-  test('credit default: a plain call lead\'s auto_apply_account_credit=false is not inherited (gate on), inherited (gate off)', async () => {
+  test('credit preference: a call lead\'s auto_apply_account_credit=false is inherited, gate on or off (it may be a real opt-out)', async () => {
     process.env.GATE_MERGE_LEAD_DEFAULTS = 'true';
     const on = await leadPair();
     await db('customers').where({ id: on.winnerId }).update({ auto_apply_account_credit: true });
     await merge(on.winnerId, on.loserId);
-    expect((await row(on.winnerId)).auto_apply_account_credit).toBe(true);
+    expect((await row(on.winnerId)).auto_apply_account_credit).toBe(false);
     delete process.env.GATE_MERGE_LEAD_DEFAULTS;
     const off = await leadPair();
     await db('customers').where({ id: off.winnerId }).update({ auto_apply_account_credit: true });

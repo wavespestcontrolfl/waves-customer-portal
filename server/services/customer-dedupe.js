@@ -1961,15 +1961,16 @@ async function loserIsIntakeLead(database, loser) {
 //
 // `loserIntakeLead` (GATE_MERGE_LEAD_DEFAULTS, from loserIsIntakeLead()): the
 // retired row is positively an intake lead, so its autopay_enabled=false is an
-// intake default and is not inherited; the same goes for its
-// auto_apply_account_credit=false (column default false, never set by a call
-// lead). A live pause keeps the rule above.
+// intake default and is not inherited. auto_apply_account_credit=false is
+// still inherited: the portal credit slider writes only that column, with no
+// trace of who set it, so a lead's false may be a real opt-out (Codex #6421
+// r10). A live pause keeps the rule above.
 function inheritedAutopayRestrictions(winner, loser, now = Date.now(), { loserIntakeLead: intakeLead = false } = {}) {
   const restrictions = {};
   if (loser.autopay_enabled === false && winner.autopay_enabled !== false && !intakeLead) {
     restrictions.autopay_enabled = false;
   }
-  if (loser.auto_apply_account_credit === false && winner.auto_apply_account_credit === true && !intakeLead) {
+  if (loser.auto_apply_account_credit === false && winner.auto_apply_account_credit === true) {
     restrictions.auto_apply_account_credit = false;
   }
   const pauseTs = (v) => (v ? new Date(v).getTime() : null);
