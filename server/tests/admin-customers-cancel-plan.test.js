@@ -3189,6 +3189,33 @@ describe('GATE_PREPAY_REFUND_90_DAY (owner R7: no end-now, no refund after 90 da
     });
   });
 
+  test('a stale open acceptance from BEFORE this term started does not grandfather it (Codex #6477 r3): end-now stays refused', async () => {
+    await withServer(async (baseUrl) => {
+      seedTerm('2026-03-01');
+      mockState.service_requests = [{
+        id: 'req-old', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+        subject: 'Cancel plan (Admin (user admin-1))', description: '',
+        metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: false, effectiveDate: 'now', prepayDisposition: 'end_now_refund' } }),
+        created_at: new Date('2026-02-10T12:00:00-05:00'),
+      }];
+      gateOn();
+      const preview = await previewOf(baseUrl);
+      expect(preview.prepay).toEqual(expect.objectContaining({ endNowAvailable: false }));
+      const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'now', previewFingerprint: preview.previewFingerprint });
+      expect(res.status).toBe(409);
+      expect(refundTasks()).toHaveLength(0);
+    });
+  });
+
+  test('acceptanceBelongsToTerm: created on/after the term start (ET date) only; no date = not proven', () => {
+    const { acceptanceBelongsToTerm } = require('../services/admin-cancellation');
+    const term = { term_start: '2026-03-01' };
+    expect(acceptanceBelongsToTerm({ created_at: new Date('2026-03-01T00:30:00-05:00') }, term)).toBe(true);
+    expect(acceptanceBelongsToTerm({ created_at: new Date('2026-02-28T23:30:00-05:00') }, term)).toBe(false);
+    expect(acceptanceBelongsToTerm({ created_at: null }, term)).toBe(false);
+    expect(acceptanceBelongsToTerm(null, term)).toBe(false);
+  });
+
   test('accepted PAST day 90 with the gate OFF, run RESOLVED with changed refund facts, gate turned ON: the repair previews available and commits the new refund', async () => {
     await withServer(async (baseUrl) => {
       seedTerm('2026-03-01');
