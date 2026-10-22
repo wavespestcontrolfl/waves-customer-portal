@@ -285,10 +285,16 @@ function withApplicationHold(facts, { hours, targets } = {}) {
   const rule = facts && facts.wateringRule;
   if (!facts || (rule && WATERING_MODES.includes(rule.mode)) || !(wait > 0)) return facts;
   if (!(Array.isArray(targets) ? targets : []).some((target) => CATERPILLAR_TARGET.test(String(target)))) return facts;
+  // The caterpillar entry's label minimum rides along, so rule E can still
+  // shorten this hold beside a same-day water-in (Dylox).
+  const entries = rule && Array.isArray(rule.by_target) ? rule.by_target : null;
+  const caterpillar = entries && entries.find((entry) => entry.mode === 'hold' && entry.label_minimum
+    && entry.match.some((word) => CATERPILLAR_TARGET.test(word)));
   const checked = validateRule({
     mode: 'hold', hold_hours: wait, source: 'label',
     label_note: `Label: delay watering (irrigation) or mowing for ${wait} hours after application (caterpillar use).`,
-    ...(rule && Array.isArray(rule.by_target) ? { by_target: rule.by_target } : {}),
+    ...(caterpillar ? { label_minimum: caterpillar.label_minimum } : {}),
+    ...(entries ? { by_target: entries } : {}),
   });
   if (!checked.valid) return facts;
   return { ...facts, wateringRule: checked.rule, mowHoldDays: facts.mowHoldDays ?? normalizeMowHoldDays(Math.ceil(wait / 24)) };

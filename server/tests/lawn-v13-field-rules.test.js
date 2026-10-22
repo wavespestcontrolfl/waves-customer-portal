@@ -218,6 +218,25 @@ describe('Acelepryn caterpillar hold reaches the customer instruction', () => {
     expect(withApplicationHold(ruled, { hours: 24, targets: ['caterpillars'] })).toBe(ruled);
   });
 
+  test('the caterpillar hold keeps the label minimum of the real Acelepryn rule, so Dylox the same day still gets its text', () => {
+    const { validateRule, rulesForTargets } = require('../services/service-report/lawn-watering-rule');
+    const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
+    const migration = require('../models/migrations/20261022160000_watering_rule_lawn_targets_and_minimums');
+    const stored = validateRule(migration.FILL.find((item) => item.name === 'Acelepryn Insecticide').rule).rule;
+    const labelTargets = ['Tropical sod webworms', 'Fall armyworms', 'White grubs', 'Billbugs'];
+    const prefill = labelTargets.slice(0, 3);
+    const facts = withApplicationHold({ ...approvedReportProductFacts(acelepryn), wateringRule: stored }, { hours: 24, targets: prefill });
+    expect(facts.wateringRule).toMatchObject({ mode: 'hold', hold_hours: 24, label_minimum: { hold_until: 'dry' } });
+    const picked = rulesForTargets(facts.wateringRule, prefill, { labelTargets });
+    expect(picked).toEqual([expect.objectContaining({ mode: 'hold', label_minimum: { hold_until: 'dry' } })]);
+    const dylox = { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, water_in_same_day: true, source: 'label' };
+    const ins = buildWateringInstruction({
+      rules: [...picked.map((rule) => ({ name: 'Acelepryn Insecticide', rule })), { name: 'Dylox 6.2 G', rule: dylox }],
+      completedAt: '2026-10-21T14:00:00Z', plainWhenNoSetup: true, labelFirst: true,
+    });
+    expect(ins.state).toBe('hold_then_water_in');
+  });
+
   test('a grub use (target says grubs) or a row with no gate is unchanged, so the water-in is not contradicted', () => {
     const base = approvedReportProductFacts(acelepryn);
     expect(withApplicationHold(base, { hours: 24, targets: ['White grubs'] })).toBe(base);
