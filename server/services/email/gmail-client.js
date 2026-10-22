@@ -270,9 +270,16 @@ function ownAddress() {
 // options.timeoutMs (optional) aborts the request: the error is classified
 // like any other post-request failure (outcomeUnknown), never retried blindly.
 const sendRequestOptions = (options) => ({ retry: false, timeout: (options && options.timeoutMs) || undefined });
-// options.beforeSend (optional) runs after sign-in and just before the
-// message request; it throws to stop a send that is no longer wanted.
-const runBeforeSend = async (options) => { if (options && options.beforeSend) await options.beforeSend(); };
+// options.beforeSend (optional) runs just before the message request; it
+// throws to stop a send that is no longer wanted. The access token is
+// refreshed first (the SDK would otherwise refresh it inside messages.send,
+// after the hook), so nothing slow is left between the hook and the request.
+async function runBeforeSend(gmail, options) {
+  if (!options || !options.beforeSend) return;
+  const auth = gmail.context && gmail.context._options && gmail.context._options.auth;
+  if (auth && auth.getAccessToken) await auth.getAccessToken();
+  await options.beforeSend();
+}
 
 async function sendMessage(to, subject, body, threadId = null, inReplyTo = null, options) {
   const gmail = await getGmail();
@@ -300,7 +307,7 @@ async function sendMessage(to, subject, body, threadId = null, inReplyTo = null,
   const params = { userId: 'me', requestBody: { raw } };
   if (threadId) params.requestBody.threadId = threadId;
 
-  await runBeforeSend(options);
+  await runBeforeSend(gmail, options);
   try {
     const res = await gmail.users.messages.send(params, sendRequestOptions(options));
     if (!res.data?.id) {

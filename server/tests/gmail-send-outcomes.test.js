@@ -94,3 +94,13 @@ test('a beforeSend hook that refuses stops the send before any message request',
   expect(hook).toHaveBeenCalledTimes(1);
   expect(requests).toHaveLength(0);
 });
+
+test('beforeSend runs after the token refresh and before the message request', async () => {
+  expired = true;
+  acceptedData = { id: 'fixture-sent', access_token: 'synthetic-new', expires_in: 3600 };
+  let seenAtHook;
+  await gmail.sendMessage('fixture@example.test', 'Synthetic', 'Fixture', null, null, { beforeSend: async () => { seenAtHook = requests.map((r) => String(r.url)); } });
+  expect(seenAtHook).toHaveLength(1);
+  expect(seenAtHook[0]).toMatch(/token/);
+  expect(String(requests.at(-1).url)).toMatch(/messages\/send/);
+});
