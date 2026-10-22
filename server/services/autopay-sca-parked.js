@@ -11,8 +11,8 @@
 //   2. raises ONE office alert whose wording says what happened to that intent.
 // Nothing here closes the alert: a person marks it done after collecting. Never throws, so a
 // Stripe or alert failure for one customer cannot abort the billing loop.
-const db = require('../models/db');
 const logger = require('./logger');
+const { insertHealthAlert } = require('./health-alert-insert');
 
 const KEY_PREFIX = 'autopay-sca-parked:';
 // One key per customer + PaymentIntent (the payment row id when no PI is known), so a replay
@@ -116,7 +116,7 @@ async function parkScaChargeForOffice(customer, err, { amount, source }) {
     // Same fallback row the ambiguous-outcome branch writes. Like that one, it has no automatic
     // closer: staff resolve it by hand in the health-alerts list.
     try {
-      await db('customer_health_alerts').insert({
+      await insertHealthAlert({
         customer_id: customer.id,
         alert_type: 'payment_failure',
         severity: 'high',

@@ -71,7 +71,7 @@ function makeFakeConn(resultsByQuery) {
       return q;
     };
     const q = {};
-    ['whereIn', 'where', 'andWhere', 'orWhere', 'whereNull', 'orWhereRaw', 'orderBy', 'limit', 'offset', 'leftJoin', 'select'].forEach((m) => {
+    ['whereIn', 'where', 'andWhere', 'orWhere', 'whereNull', 'orWhereRaw', 'whereRaw', 'orderBy', 'limit', 'offset', 'leftJoin', 'select'].forEach((m) => {
       q[m] = record(m);
     });
     q.first = async () => {

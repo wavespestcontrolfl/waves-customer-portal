@@ -125,6 +125,75 @@ function planLabel(model) {
     : 'Your plan averages';
 }
 
+// Application months (owner 2026-10-21, EST-2026-1185: "Which is it? $113 a
+// month or $189 a month?"): what the customer pays in the months a
+// service is applied, beside the average. Only for the one shape whose months
+// are certain without a schedule: exactly ONE service on an even cadence that
+// divides the year (every 2, 3, 4 or 6 months, or once a year) plus services
+// applied every month. Two non-monthly services could land in the same month
+// or not, and a 9-application cadence has no fixed months, so those plans keep
+// today's summary. A plan credit has no fixed month either. The two amounts,
+// weighted by their month counts, must land on the plan average to the cent
+// band the average itself allows, or nothing new shows. Pure; the page, the
+// PDF document and the emails all call this one function.
+const CADENCE_TEXT = { 1: 'once a year', 2: 'every 6 months', 3: 'every 4 months', 4: 'every 3 months', 6: 'every 2 months', 12: 'every month' };
+
+function cadenceText(visits) {
+  return CADENCE_TEXT[visits] || null;
+}
+
+// The proposal's per-application lines read "Pest Control — 4 applications/yr" (or carry a
+// "(12 visits)" in the name); the month rows name the service and say the cadence themselves, so
+// the suffix is dropped. A label without
+// it (the page's section labels) is unchanged.
+const CADENCE_SUFFIX = /\s+[—–-]\s+\d+\s+applications?\s*\/\s*(?:yr|year)\s*$/i;
+const VISITS_PAREN = /\s*\(\s*\d+\s+(?:visits?|applications?)[^)]*\)\s*$/i;
+const plainServiceName = (label) => String(label || '').replace(CADENCE_SUFFIX, '').replace(VISITS_PAREN, '').trim();
+
+function applicationMonthsBreakdown(model) {
+  if (!model || !model.multi || model.credit) return null;
+  const services = Array.isArray(model.services) ? model.services : [];
+  if (services.length < 2 || services.some((s) => !cadenceText(s.visits))) return null;
+  const spaced = services.filter((s) => s.visits !== 12);
+  const monthly = services.filter((s) => s.visits === 12);
+  if (spaced.length !== 1 || monthly.length === 0) return null;
+  const anchor = { ...spaced[0], label: plainServiceName(spaced[0].label) };
+  const named = (list) => list.map((s) => plainServiceName(s.label));
+  const cents = (n) => Math.round(Number(n) * 100);
+  const monthlyCents = monthly.reduce((sum, s) => sum + cents(s.perApplication), 0);
+  const applicationCents = monthlyCents + cents(anchor.perApplication);
+  const appliedMonths = anchor.visits;
+  const otherMonths = 12 - appliedMonths;
+  const averageCents = (applicationCents * appliedMonths + monthlyCents * otherMonths) / 12;
+  if (Math.abs(averageCents - cents(model.planMonthly)) > 5) return null;
+  return {
+    services: services.map((s) => ({ key: s.key, label: plainServiceName(s.label), perApplication: s.perApplication, cadence: cadenceText(s.visits) })),
+    applicationMonths: {
+      label: `Months with ${anchor.label}`,
+      count: appliedMonths,
+      amount: applicationCents / 100,
+      detail: named(services).join(' + '),
+    },
+    otherMonths: {
+      label: 'Other months',
+      count: otherMonths,
+      amount: monthlyCents / 100,
+      detail: `${named(monthly).join(' + ')} only`,
+    },
+    planMonthly: model.planMonthly,
+  };
+}
+
+// The breakdown as two plain sentences for the emails, in front of the average
+// sentence: "Months with Pest Control (4 a year): $189.90. Other months (8 a
+// year): $74.70, Mosquito only."
+function applicationMonthsSentence(breakdown) {
+  if (!breakdown) return '';
+  const a = breakdown.applicationMonths;
+  const o = breakdown.otherMonths;
+  return `${a.label} (${a.count} a year): ${money(a.amount)}. ${o.label} (${o.count} a year): ${money(o.amount)}, ${o.detail}.`;
+}
+
 /**
  * The delivery email's two pieces. `priceLine` replaces the "Estimated price"
  * row value; `note` is the second line, which rides in front of the existing
@@ -150,7 +219,9 @@ function emailParts(model, oneTime = null) {
   const averaged = included.length
     ? `Averaged over the year, ${included.join(' and ')} included.`
     : 'Averaged over the year.';
-  const parts = [averaged, 'You pay after each application.'];
+  // The month-by-month amounts go in front of the note when the plan has that shape.
+  const months = applicationMonthsSentence(applicationMonthsBreakdown(model));
+  const parts = [...(months ? [months] : []), averaged, 'You pay after each application.'];
   if (oneTime && Number(oneTime.amount) > 0) {
     parts.push(oneTime.setup
       ? `One-time setup ${money(oneTime.amount)}, not in the average.`
@@ -167,4 +238,7 @@ module.exports = {
   monthlyText,
   emailParts,
   money,
+  cadenceText,
+  applicationMonthsBreakdown,
+  applicationMonthsSentence,
 };

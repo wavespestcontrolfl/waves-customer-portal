@@ -3963,29 +3963,16 @@ function applyAfterHoldOverlay(waterContext, instruction) {
 // completion that reaches the water-in amount turns it into "water_in_by_rain" (the rain did the watering in); before
 // that a generic spray-and-rotor figure pair reads as an amount first. Only a REPLAY of a frozen instruction is touched
 // (the completion build, its freeze and its text never see this), and any miss in the rain read leaves it as frozen.
-async function waterInRainInstruction(instruction, { products, service, now = new Date(), sharedSeries: offeredSeries = null, completionTime = null }) {
+async function waterInRainInstruction(instruction, { products, service, now = new Date() }) {
   if (!lawnWaterInRain.appliesTo(instruction)) return instruction;
   try {
-    // The shared completion-to-now series serves only a chip-eligible visit (completed inside the chip's window). An
-    // older report keeps the banner's own deadline-bounded read: a long window is refused by the forecast reader
-    // (bad_window beyond 16 days) and would cost the banner its rain-covered state.
-    const { withinChipWindow } = require('./lawn-live-chip');
-    const sharedSeries = offeredSeries && withinChipWindow(completionTime, offeredSeries.now) && withinChipWindow(instruction.completedAt, offeredSeries.now)
-      ? offeredSeries : null;
-    const latitude = service.customer_latitude ?? service.latitude ?? service.lat;
-    const longitude = service.customer_longitude ?? service.longitude ?? service.lng;
-    // GATE_REPORT_WEB_LIVE_CHIP: while the chip is live this view makes ONE weather read, shared with the chip (the
-    // chip's series starts at the earlier of the two completion times, so it holds both windows).
-    const from = new Date(Math.min(Date.parse(instruction.completedAt), Date.parse(completionTime) || Infinity));
     const coverage = await lawnWaterInRain.resolveRainCoverage({
       instruction,
       products,
-      now: sharedSeries ? sharedSeries.now : now,
-      latitude,
-      longitude,
-      fetchForecast: sharedSeries
-        ? require('./lawn-live-chip').sharedCoverageReader(sharedSeries, { latitude, longitude, from })
-        : require('./application-conditions').fetchPropertyForecast,
+      now,
+      latitude: service.customer_latitude ?? service.latitude ?? service.lat,
+      longitude: service.customer_longitude ?? service.longitude ?? service.lng,
+      fetchForecast: require('./application-conditions').fetchPropertyForecast,
     });
     return lawnWaterInRain.applyWaterInRain(instruction, coverage);
   // read-failure-exempt: the rain read is an optional improvement of a frozen banner; a miss leaves the banner as frozen.
@@ -4607,11 +4594,6 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // paths already refuse to cache on image-resolution failures.
   imageResolutionFailures += Number(lawnAssessment?.photoSetUnresolved) || 0;
   imageResolutionFailures += Number(lawnAssessment?.photoFindingsUnresolved) || 0;
-  // GATE_REPORT_WEB_SLIDER: last visit's photo beside today's, same shot, same property. The route asks only for
-  // a live simple-web view while the gate is live. A failed read means no slider, never a failed report.
-  const lawnSlider = opts.lawnSlider === true && serviceLine === 'lawn' && lawnAssessment?.assessmentId
-    ? await require('./lawn-slider').buildLawnSlider({ assessmentId: lawnAssessment.assessmentId, knex, photoUrl: lawnPhotoUrl }).catch(() => null)
-    : null;
   // A failed service_products read leaves this build's product list empty, not
   // known-empty. The "From your technician" paragraph is frozen once and never
   // rewritten, so it must not be written from such a build whatever the copy-v6
@@ -5806,7 +5788,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         // GATE_LAWN_WATER_IN_RAIN: the frozen instruction as it reads now (after the write gate's copy above, so the
         // freeze and the completion text never see it). A replay only.
         if (wateringInstruction && !opts.wateringInstructionOut && opts.lawnWaterInRain === true && typeof featureGates.lawnWaterInRainLive === 'function' && featureGates.lawnWaterInRainLive() && readFrozenWateringInstruction(structured)) {
-          wateringInstruction = await waterInRainInstruction(wateringInstruction, { products, service, sharedSeries: opts.liveChipOut?.series || null, completionTime });
+          wateringInstruction = await waterInRainInstruction(wateringInstruction, { products, service });
         }
         // In place, so the lawnAssessment the payload returns never carries
         // the raw {holdUntil} token either (a null instruction drops it).
@@ -6246,16 +6228,6 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // retreat-check on the frozen visit memory and hands one fixed Watching
       // sentence to the lead, the same non-enumerable way as sinceLastCopy.
       // Fail closed and best-effort: any miss leaves the report as it was.
-      // GATE_REPORT_WEB_LIVE_CHIP: hand the route the inputs the live chip reads (an out-param; nothing joins the payload).
-      if (opts.liveChipOut && typeof opts.liveChipOut === 'object') {
-        Object.assign(opts.liveChipOut, {
-          completedAt: completionTime,
-          instruction: wateringInstruction,
-          products,
-          latitude: service.customer_latitude ?? service.latitude ?? service.lat,
-          longitude: service.customer_longitude ?? service.longitude ?? service.lng,
-        });
-      }
       if (reportV2 && opts.mode === 'live' && opts.lawnRainfastWatch === true && typeof featureGates.lawnRainfastWatchLive === 'function' && featureGates.lawnRainfastWatchLive()) {
         try {
           const watch = await require('./lawn-rainfast-watch').resolveRainfastWatch({
@@ -7350,7 +7322,6 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     reportV2,
     token,
     serviceRecordId: service.id,
-    ...(lawnSlider ? { lawnSlider } : {}),
     serviceType: service.service_type,
     serviceDisplayName: linkedServiceName,
     serviceLine,
@@ -7429,13 +7400,14 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       : null,
     // "From the Waves blog" (GATE_REPORT_BLOG_POST, live report only: the
     // client renders it above the footer): the post the record froze, its
-    // title and live URL checked again against the site's own host
-    // (report-blog-post.js). Null unless the gate is on; the switch hides
+    // title and live URL checked again against the site's own host, plus
+    // the post's main image from the content registry (report-blog-post.js).
+    // Null unless the gate is on; the switch hides
     // frozen posts too. Read here only, never onto the protocol object the
     // payload also returns, so this gated field is the post's one way out
     // (pre-push P0 on #5547).
     blogPost: featureGates.reportBlogPostLive?.() === true
-      ? require('./report-blog-post').frozenBlogPost(structured.blogPost)
+      ? await require('./report-blog-post').frozenBlogPostWithImage(knex, structured.blogPost)
       : null,
     // Owner directive 2026-07-05: the report mirrors the estimate document and
     // shows the customer's own email/phone with the service address. Like the
@@ -7774,7 +7746,6 @@ function termiteStationPinsFlag({ stationMap, mode, gateValue = process.env.GATE
 
 module.exports = {
   buildReportV1Data,
-  waterInRainInstruction,
   resolveRecordedProtocolVersion,
   termiteStationPinsFlag,
   resolveApplicatorFdacsId,
@@ -7816,7 +7787,6 @@ module.exports = {
   resolveLawnAssessmentAndHistory,
   resolveLawnPhotoAssessmentIds,
   loadLinkedLawnAssessment,
-  formatLawnAssessmentScore,
   PinnedAssessmentUnavailable,
   loadPinnedLawnAssessment,
   lawnAssessmentPdfSignature,

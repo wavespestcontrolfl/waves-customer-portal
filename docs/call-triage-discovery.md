@@ -558,7 +558,7 @@ Accept criteria: backfill labeling shows zero critical false-positive auto-creat
 
 1. Google Address Validation API enabled in the Cloud project. Boot check confirms.
 2. `administrative_area_level_2` reliably populated in FL AV responses (true in spot checks; test fixture covers the unincorporated-area edge case).
-3. Service area = {Manatee, Sarasota, Charlotte} plus the south-Hillsborough towns. DeSoto was removed by owner ruling 2026-09-30 (originally confirmed 2026-04-29 with DeSoto).
+3. Service area = {Manatee, Sarasota, Charlotte} plus the south-Hillsborough towns. DeSoto was removed by owner ruling 2026-09-30 (originally confirmed 2026-04-29 with DeSoto). The city of Punta Gorda (Charlotte County) is also not served, owner ruling 2026-10-22: city names and the Punta Gorda-only ZIPs 33950, 33951 and 33955 are refused by `services/excluded-localities.js`; 33980, 33982 (shared with served Babcock Ranch) and 33983 are decided by city.
 4. `expires_at = validated_at + 30d` aligns with Google T&C downstream-use scope (validated against Google Maps Platform Service-Specific Terms; last checked 2026-04-29). Re-verify if T&C change.
 5. Anthropic native structured outputs available on whichever Anthropic model `MODELS.FLAGSHIP` currently resolves to (see `server/config/models.js` — never reference the concrete model ID outside that file per AGENTS.md). Confirmed in API docs at the time of writing.
 6. Twilio `X-Forwarded-Proto` header survives Railway's edge (it does for all current endpoints — verified during PR1 fixture work).

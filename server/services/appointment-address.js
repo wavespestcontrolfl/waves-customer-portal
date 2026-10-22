@@ -5,6 +5,23 @@ const { dateOnly } = require('./visit-groups');
 const { recurringServiceAddress } = require('./booking/visit-financial-stamps');
 
 const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
+// The address future generated visits copy (recurringServiceAddress reads the
+// template row unless an override names one). A series move points it at the
+// destination. A one-visit move of the template row itself keeps the pre-move
+// address, so only this visit moves (ops 2026-10-21: a Saturday move on a
+// quarterly template would have sent January there too).
+function futureTemplateDefault(plan, locked, addressRows, stamp) {
+  if (plan.parentId) return { id: plan.parentId, address: recurringServiceAddress(stamp) };
+  const anchor = locked.find((row) => row.id === plan.anchor.id);
+  if (plan.scope !== 'visit' || !anchor || !anchor.is_recurring || anchor.recurring_parent_id) return null;
+  if (!addressRows.some((row) => row.id === anchor.id) || String(anchor.property_id ?? '') === String(stamp.property_id)) return null;
+  let overrides = anchor.recurring_template_overrides;
+  if (typeof overrides === 'string') {
+    try { overrides = JSON.parse(overrides); } catch { overrides = null; }
+  }
+  return overrides?.appointment_address ? null : { id: anchor.id, address: recurringServiceAddress(anchor) };
+}
+
 const retry = () => Object.assign(new Error('Appointments changed while saving. Reload and choose the address again.'), { statusCode: 409, isOperational: true });
 
 // The template remains the address source for future recurrence generation.
@@ -47,7 +64,7 @@ async function planAppointmentAddress(conn, serviceId, propertyId, scope = 'seri
 
 // Called after occupancy, tech-day, maintenance and comms locks, before stop/appointment rows.
 async function lockAppointmentAddress(trx, plan, updates = {}, { noWait = false } = {}) {
-  // Match createOrJoinVisit: customer row before every stop lock.
+  // Customer row before every stop lock (the visit writers' order).
   await trx('customers').where({ id: plan.anchor.customer_id }).forNoKeyUpdate().first('id');
   const keys = new Set(plan.stopKeys);
   if (updates.scheduled_date) {
@@ -133,6 +150,7 @@ async function applyAppointmentAddress(trx, plan, actorId) {
     pre_service_brief_generated_at: null,
     updated_at: trx.fn.now(),
   };
+  const futureDefault = futureTemplateDefault(plan, locked, addressRows, stamp);
   await trx('scheduled_services').whereIn('id', addressRows.map((row) => row.id)).update(stamp);
   // A trace is drawn on the satellite photo of the property it was traced
   // at, and the report shows it beside the visit's live address: a visit
@@ -140,11 +158,11 @@ async function applyAppointmentAddress(trx, plan, actorId) {
   // in S3 unreferenced, as when a visit is deleted.
   const movedIds = addressRows.filter((row) => String(row.property_id ?? '') !== String(property.id)).map((row) => row.id);
   if (movedIds.length) await trx('treatment_zone_maps').whereIn('scheduled_service_id', movedIds).del();
-  if (plan.parentId) {
-    await trx('scheduled_services').where({ id: plan.parentId, customer_id: plan.anchor.customer_id }).update({
+  if (futureDefault) {
+    await trx('scheduled_services').where({ id: futureDefault.id, customer_id: plan.anchor.customer_id }).update({
       recurring_template_overrides: trx.raw(
         "COALESCE(recurring_template_overrides, '{}'::jsonb) || ?::jsonb",
-        [JSON.stringify({ appointment_address: recurringServiceAddress(stamp) })],
+        [JSON.stringify({ appointment_address: futureDefault.address })],
       ),
     });
   }

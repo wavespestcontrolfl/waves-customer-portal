@@ -51,7 +51,7 @@ const { labelFactsSendBlockReason } = require('../services/sms-label-facts');
 const { agentDecisionSendBlockReason, parseInputSnapshot, scheduledEtaBlockReason, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks, scheduledLabelFactsBlock, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, blockReasonIsRecheckInfrastructure, blockReasonIsLabelInfrastructure } = require('../services/agent-decision-send-checks');
 
 const SNAP = { open_times_snapshot: { lookup: { city: 'Venice', customerId: 'c1', estimateId: null, serviceType: 'Lawn Care' }, quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }] } };
-const decision = (over = {}) => ({ id: 'd1', customer_id: 'c1', suggested_message: 'How about Tuesday 9:00 AM - 11:00 AM?', input_snapshot: JSON.stringify(SNAP), prompt_version: 'house_voice_v12_real_answers', ...over });
+const decision = (over = {}) => ({ id: 'd1', customer_id: 'c1', suggested_message: 'How about Tuesday 9:00 AM - 11:00 AM?', input_snapshot: JSON.stringify(SNAP), prompt_version: 'house_voice_v12_real_answers25_n', ...over });
 
 beforeEach(() => {
   drafter.planOpenTimesRecheck.mockReset().mockReturnValue({ action: 'recheck', quotedWindows: SNAP.open_times_snapshot.quotedWindows });
@@ -73,7 +73,7 @@ test('parseInputSnapshot: string, object, malformed, absent', () => {
 test('everything passes → null; the recheck carries the snapshot lookup including serviceType', async () => {
   await expect(agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM?' })).resolves.toBeNull();
   expect(drafter.openTimesStillOffered).toHaveBeenCalledWith(expect.objectContaining({ city: 'Venice', customerId: 'c1', serviceType: 'Lawn Care' }));
-  expect(outgoingAmountsStale).toHaveBeenCalledWith({ customerId: 'c1', body: 'How about Tuesday 9:00 AM - 11:00 AM?', promptVersion: 'house_voice_v12_real_answers', zelleInvoiceId: null, inboundMessage: null, paymentStatusSnapshot: null, humanEditedBody: false, trustOwedAmounts: false });
+  expect(outgoingAmountsStale).toHaveBeenCalledWith({ customerId: 'c1', body: 'How about Tuesday 9:00 AM - 11:00 AM?', promptVersion: 'house_voice_v12_real_answers25_n', zelleInvoiceId: null, inboundMessage: null, paymentStatusSnapshot: null, humanEditedBody: false, trustOwedAmounts: false });
 });
 
 // Pre-push audit P1 (finding 2): the invoice the drafter's Zelle fact was
@@ -271,7 +271,7 @@ describe('inbound message threading (round 6)', () => {
 // claim for any decision, a figure / payment-status assertion for a real-answers one.
 describe('customerless decisions (round 28)', () => {
   const noCustomer = (over = {}) => decision({ input_snapshot: JSON.stringify({}), prompt_version: 'house_voice_v11', customer_id: null, ...over });
-  const v12 = (over = {}) => noCustomer({ prompt_version: 'house_voice_v12_real_answers5_cflvp', ...over });
+  const v12 = (over = {}) => noCustomer({ prompt_version: 'house_voice_v12_real_answers25_cflvp', ...over });
   test.each(["Zelle isn't available right now.", 'You can use Zelle.'])('pre-v12 blocked: %s', async (body) => {
     await expect(agentDecisionSendBlockReason({ decision: noCustomer(), outgoingBody: body })).resolves.toBe('amount no longer authorized (amount_recheck_no_customer)');
     expect(outgoingAmountsStale).not.toHaveBeenCalled();
@@ -297,7 +297,7 @@ describe('customerless decisions (round 28)', () => {
 // The decision's own inbound scopes the detector: a bare pronoun clause is a payment status only in a payment conversation.
 describe('customerless decisions carry their inbound into the detector', () => {
   const withInbound = (inbound, over = {}) => decision({
-    input_snapshot: JSON.stringify({ sms: { body: inbound } }), prompt_version: 'house_voice_v12_real_answers5_cflvp', customer_id: null, ...over,
+    input_snapshot: JSON.stringify({ sms: { body: inbound } }), prompt_version: 'house_voice_v12_real_answers25_cflvp', customer_id: null, ...over,
   });
   test.each(['It settled.', 'It failed.', 'That cleared out.', "They're sorted."])('%s after a payment question is blocked (cannot verify, no customer)', async (body) => {
     await expect(agentDecisionSendBlockReason({ decision: withInbound('Did my payment go through?', { suggested_message: body }), outgoingBody: body })).resolves.toBe('amount no longer authorized (amount_recheck_no_customer)');
@@ -364,7 +364,7 @@ describe('re-service promise revalidation (Codex round-3 P2)', () => {
       outgoingBody: "Good news — we'll send your free re-service link now.",
       customerId: 'c1',
       promisedLanes: ['pest'],
-      decisionMeta: { promptVersion: 'house_voice_v12_real_answers', draftId: null, intendedActions: null, bookedCallbacks: null, inboundMessage: null },
+      decisionMeta: { promptVersion: 'house_voice_v12_real_answers25_n', draftId: null, intendedActions: null, bookedCallbacks: null, inboundMessage: null },
     });
   });
 
@@ -392,7 +392,7 @@ describe('re-service promise revalidation (Codex round-3 P2)', () => {
       outgoingBody: 'You owe $5.',
       customerId: 'c1',
       promisedLanes: null,
-      decisionMeta: { promptVersion: 'house_voice_v12_real_answers', draftId: null, intendedActions: null, bookedCallbacks: null, inboundMessage: null },
+      decisionMeta: { promptVersion: 'house_voice_v12_real_answers25_n', draftId: null, intendedActions: null, bookedCallbacks: null, inboundMessage: null },
     });
   });
 });
@@ -652,7 +652,7 @@ describe('provider-boundary ETA predicates use the handoff connection (dbi)', ()
 describe('staff-edited bodies (owner ruling 2026-10-01)', () => {
   const { bodyIsStaffEdited } = require('../services/agent-decision-send-checks');
   const AI = 'Your account has no balance due.';
-  const v12 = (over = {}) => decision({ prompt_version: 'house_voice_v12_real_answers5_cflvp', suggested_message: AI, input_snapshot: JSON.stringify({ payment_status_snapshot: { customer_id: 'c1', sentences: [AI] } }), ...over });
+  const v12 = (over = {}) => decision({ prompt_version: 'house_voice_v12_real_answers25_cflvp', suggested_message: AI, input_snapshot: JSON.stringify({ payment_status_snapshot: { customer_id: 'c1', sentences: [AI] } }), ...over });
 
   test('bodyIsStaffEdited: whitespace-normalized compare; a missing stored draft is NOT an edit (strict)', () => {
     expect(bodyIsStaffEdited(AI, `  ${AI.replace(' ', '   ')}\n`)).toBe(false);
@@ -684,7 +684,7 @@ describe('staff-edited bodies (owner ruling 2026-10-01)', () => {
 describe('amountsProviderPreSendCheck / billingFingerprintForSend - billing unchanged at the provider boundary', () => {
   const { amountsProviderPreSendCheck, billingFingerprintForSend } = require('../services/agent-decision-send-checks');
   const db = require('../models/db');
-  const decision = { id: 'd1', customer_id: 'c1', prompt_version: 'house_voice_v12_real_answers5_cflvp', suggested_message: 'Your account balance is $100.00.', input_snapshot: null, inbound_message: 'what do I owe?' };
+  const decision = { id: 'd1', customer_id: 'c1', prompt_version: 'house_voice_v12_real_answers25_cflvp', suggested_message: 'Your account balance is $100.00.', input_snapshot: null, inbound_message: 'what do I owe?' };
   const dbiWith = (fp) => ({ raw: jest.fn(async () => (fp instanceof Error ? Promise.reject(fp) : { rows: [{ fingerprint: fp }] })) });
   afterEach(() => { delete db.raw; });
   test('a body the recheck cannot judge takes no fingerprint and registers nothing', async () => {
@@ -754,7 +754,7 @@ describe('amountsProviderPreSendCheck / billingFingerprintForSend - billing unch
 // Local Codex review pass 1 (P2): a staff edit's own status wording takes no boundary check either - a customerless one could never send
 test('a staff-edited status body registers no billing boundary check; the unedited AI body does', () => {
   const { amountsProviderPreSendCheck } = require('../services/agent-decision-send-checks');
-  const decision = { id: 'd1', customer_id: null, prompt_version: 'house_voice_v12_real_answers5_cflvp', suggested_message: 'Thanks for reaching out!', input_snapshot: null, inbound_message: 'did you get my payment?' };
+  const decision = { id: 'd1', customer_id: null, prompt_version: 'house_voice_v12_real_answers25_cflvp', suggested_message: 'Thanks for reaching out!', input_snapshot: null, inbound_message: 'did you get my payment?' };
   expect(amountsProviderPreSendCheck({ decision, getBody: () => 'We got your payment, thank you!' })).toBeUndefined();
   expect(typeof amountsProviderPreSendCheck({ decision: { ...decision, suggested_message: 'We got your payment, thank you!' }, getBody: () => 'We got your payment, thank you!' })).toBe('function');
 });
@@ -762,7 +762,7 @@ test('a staff-edited status body registers no billing boundary check; the unedit
 describe('LABEL FACTS at the provider boundary (Codex #5416 P1)', () => {
   const trxFor = (row) => jest.fn(() => ({ where: () => ({ first: async () => row }) }));
   const SNAP = { customer_id: 'c1', visit_date: '2026-09-29', record_ids: ['r1'], sentences: ['S1'] };
-  const decision = { input_snapshot: { label_facts_snapshot: SNAP, sms: { body: 'Can the dogs go out?' } }, prompt_version: 'house_voice_v12_real_answers3_cfl' };
+  const decision = { input_snapshot: { label_facts_snapshot: SNAP, sms: { body: 'Can the dogs go out?' } }, prompt_version: 'house_voice_v12_real_answers25_cfl' };
   beforeEach(() => { labelFactsSendBlockReason.mockReset().mockResolvedValue(null); });
 
   test('reads the decision and the latest visit through the handoff connection, and passes a current reply', async () => {
@@ -795,12 +795,12 @@ describe('LABEL FACTS at the provider boundary (Codex #5416 P1)', () => {
   test('the snapshot variant (auto-send claim) runs for real-answers drafts and snapshots only, through dbi', async () => {
     expect(labelFactsSnapshotProviderPreSendCheck({ labelFactsSnapshot: null, promptVersion: 'house_voice_v8', getBody: () => 'x' })).toBeUndefined();
     const trx = jest.fn();
-    const check = labelFactsSnapshotProviderPreSendCheck({ labelFactsSnapshot: SNAP, inboundMessage: 'dogs?', promptVersion: 'house_voice_v12_real_answers3_cfl', getBody: () => 'S1' });
+    const check = labelFactsSnapshotProviderPreSendCheck({ labelFactsSnapshot: SNAP, inboundMessage: 'dogs?', promptVersion: 'house_voice_v12_real_answers25_cfl', getBody: () => 'S1' });
     await expect(check({ dbi: trx })).resolves.toEqual({ ok: true });
     expect(labelFactsSendBlockReason).toHaveBeenCalledWith(expect.objectContaining({ snapshot: SNAP, inbound: 'dogs?', body: 'S1', conn: trx }));
     labelFactsSendBlockReason.mockRejectedValueOnce(new Error('boom'));
     await expect(check({ dbi: trx })).resolves.toMatchObject({ ok: false, retryable: true });
-    expect(typeof labelFactsSnapshotProviderPreSendCheck({ labelFactsSnapshot: null, promptVersion: 'house_voice_v12_real_answers3_cfl', getBody: () => 'x' })).toBe('function');
+    expect(typeof labelFactsSnapshotProviderPreSendCheck({ labelFactsSnapshot: null, promptVersion: 'house_voice_v12_real_answers25_cfl', getBody: () => 'x' })).toBe('function');
   });
   test('every decision-linked send path composes it at the boundary', () => {
     const read = (f) => require('fs').readFileSync(require('path').join(__dirname, f), 'utf8');

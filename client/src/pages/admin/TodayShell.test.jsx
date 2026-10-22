@@ -18,7 +18,7 @@ vi.mock('../../hooks/useStaffDocumentsAvailable', () => ({ default: () => docs.a
 vi.mock('../../hooks/usePayGrowthAvailable', () => ({ default: () => true }));
 vi.mock('../../components/tech/AddToHomeScreenHint', () => ({ default: () => null }));
 vi.mock('../../components/tech/TechIntelligenceBar', () => ({ default: () => <div>Field assistant</div> }));
-vi.mock('../../components/tech/GeofenceArrivalPrompt', () => ({ default: () => null }));
+vi.mock('../../components/tech/TechNoticeFeed', () => ({ default: () => null }));
 vi.mock('../../components/tech/CreateProjectModal', () => ({ default: () => null, wdoFeeSeedFromVisit: () => null }));
 vi.mock('../../components/tech/TechTimeTrackingCard', () => ({ default: () => <div>Shift time</div> }));
 vi.mock('../../components/tech/TechServicePhotosModal', () => ({ default: () => null }));

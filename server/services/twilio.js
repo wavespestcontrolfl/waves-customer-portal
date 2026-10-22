@@ -31,7 +31,8 @@ const HARDCODED_OWNER_FALLBACKS = ["+19413187612", "+19415993489"];
 // strips admin suffixes, joins add-ons) so the arrival text reads like the
 // reminders the customer already received. Best-effort: a failed lookup
 // falls back to "service" rather than dropping the arrival notice.
-async function arrivedServiceLabel(scheduledServiceId) {
+async function arrivedServiceLabel(scheduledServiceId, override) {
+  if (override) return override;
   if (!scheduledServiceId) return "service";
   try {
     const visit = await db("scheduled_services").where({ id: scheduledServiceId }).first("service_type");
@@ -2017,6 +2018,8 @@ const TwilioService = {
     const { getPrimaryContact } = require("./customer-contact");
     const enRouteUnfiltered = getAppointmentContacts(customer, prefs);
     let contacts = await filterRecipientsByOptin(enRouteUnfiltered, customer.id);
+    // The contact's own choices (contact login, GATE_CONTACT_LOGIN) narrow further.
+    contacts = await require("./contact-notification-prefs").filterContactsByOwnPrefs(contacts, customer.id, "tech_en_route", { channel: "sms" });
     // Hold emptied a NON-empty list: fall back to the primary account
     // holder (their own consent is validated at send time) — an email-less
     // customer must still get the en-route notice somewhere (#2956 r9).
@@ -2217,7 +2220,7 @@ const TwilioService = {
    * text. Copy must not say "on the way" (that's en-route). Fired from
    * track-transitions markOnProperty when the live tracker flips to on-site.
    */
-  async sendTechArrived(customerId, techName, { scheduledServiceId = null, scheduledDate = null, scheduledWindowStart = null, arrivedAt = null } = {}) {
+  async sendTechArrived(customerId, techName, { scheduledServiceId = null, scheduledDate = null, scheduledWindowStart = null, arrivedAt = null, serviceLabel } = {}) {
     const customer = await db("customers").where({ id: customerId }).first();
     // Same per-property toggle as en-route (app property scope, PR 3).
     const prefs = await this._visitPrefsFor(customerId, scheduledServiceId, 'arrived');
@@ -2260,7 +2263,15 @@ const TwilioService = {
     // notice; #2956 codex r5).
     const { filterRecipientsByOptin } = require("./recipient-optin");
     const unfilteredContacts = getAppointmentContacts(customer, prefs);
-    const contacts = await filterRecipientsByOptin(unfilteredContacts, customer.id);
+    const optedInContacts = await filterRecipientsByOptin(unfilteredContacts, customer.id);
+    // The contact's own choices (contact login, GATE_CONTACT_LOGIN) narrow
+    // further. A list THIS filter empties is a standing preference, not the
+    // transient opt-in hold: heldAllSms below keys off the opt-in filter
+    // alone, so an opted-out contact reads as handled, never retried
+    // (codex #6363 r2 P2).
+    const contacts = await require("./contact-notification-prefs").filterContactsByOwnPrefs(
+      optedInContacts, customer.id, "tech_arrived", { channel: "sms" },
+    );
     if (channel === "sms" && !contacts.length && !unfilteredContacts.length) {
       return { success: false, suppressed: true, reason: "no_contacts" };
     }
@@ -2268,7 +2279,8 @@ const TwilioService = {
     const results = [];
     const { sendCustomerMessage } = require("./messaging/send-customer-message");
     const customerTechName = formatTechnicianForCustomer({ name: techName });
-    const serviceType = await arrivedServiceLabel(scheduledServiceId);
+    // serviceLabel: the one-text-per-day rule's merged label when this single text stands for several visits.
+    const serviceType = await arrivedServiceLabel(scheduledServiceId, serviceLabel);
     const arrivalDigits = (v) => String(v || "").replace(/\D/g, "").slice(-10);
     const arrivalHolderDigits = arrivalDigits(customer.phone);
     // Codex round 7 P2: under a callback-number hold the App-push arrival
@@ -2345,7 +2357,7 @@ const TwilioService = {
       // by a durable call_sms_cleared_at stamp, not a reply), and an
       // accepted email under it IS the notice, not a retry candidate — see
       // callbackNumberHoldActive on ctx and ARRIVAL_DELIVERY.sms below.
-      heldAllSms: smsAllowed && !contacts.length && unfilteredContacts.length > 0,
+      heldAllSms: smsAllowed && !optedInContacts.length && unfilteredContacts.length > 0,
       callbackNumberHoldActive,
       // Round 7 P2: the App leg a callback-number hold must NOT suppress.
       appLegUnderHold: callbackNumberHoldActive && channel === "push" && !!arrivalHolderDigits

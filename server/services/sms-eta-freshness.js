@@ -647,7 +647,7 @@ async function technicianDeviceReason(boundEntries, rows, dbh) {
     && entry.scheduledServiceIds.some((id) => String(techById.get(id) ?? '') !== String(entry.technicianId)))) return 'eta_claim_tech_changed';
   // Round-22/41: an entry that recorded the ETA's tracker device (and/or the mapping
   // GENERATION, technicians.bouncie_imei_changed_at) must still find its technician
-  // mapped to that same device under that same generation (admin-geofence can
+  // mapped to that same device under that same generation (the admin vehicles route can
   // re-point it). The generation catches A->B->A, where the device fingerprint
   // returns to its previous value although the earlier ETA facts predate the remap.
   for (const entry of boundEntries) {

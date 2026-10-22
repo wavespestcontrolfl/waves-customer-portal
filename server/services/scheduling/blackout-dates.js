@@ -8,6 +8,11 @@
  *   - weekly days off    (system_settings key `schedule_weekly_days_off`:
  *                         JSON array of JS day-of-week ints, 0=Sun…6=Sat —
  *                         every matching date is treated as blacked out)
+ *   - closed holidays    (system_settings key `schedule_holiday_closures`:
+ *                         JSON array of holiday keys from
+ *                         scheduling/holidays.js — every day a closed holiday
+ *                         falls on, each year, is treated as blacked out;
+ *                         missing or empty = every holiday open)
  *
  * Consumers:
  *   - scheduling/find-time.js       (offer enumeration: /book, reschedule,
@@ -26,14 +31,15 @@
  * still surface anything that slips through.
  *
  * One exception, by option: `{ strict: true }` makes getWeeklyDaysOff,
- * getBlackoutDates and isBlackoutDate THROW on a read failure instead. The
- * nightly auto-dispatch path passes it (owner 2026-10-09): an unreadable
+ * getClosedHolidays, getBlackoutDates and isBlackoutDate THROW on a read
+ * failure instead. The nightly auto-dispatch path passes it (owner 2026-10-09): an unreadable
  * closed-day list there must stop a move, never let one onto a closed day.
  * Customer-facing callers keep the fail-open default.
  */
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { HOLIDAY_CLOSURES_KEY, holidaysBetween, isClosedHoliday, parseHolidayClosures } = require('./holidays');
 
 const WEEKLY_DAYS_OFF_KEY = 'schedule_weekly_days_off';
 
@@ -100,8 +106,28 @@ function expandWeeklyDaysOff(fromStr, toStr, dowSet) {
   return dates;
 }
 
+// Set of holiday keys the business closes (scheduling/holidays.js). Fail-open
+// (empty set = every holiday open) and `strict`, like getWeeklyDaysOff.
+async function getClosedHolidays(conn = db, { strict = false } = {}) {
+  try {
+    const row = await readOptional(conn, (dbh) => dbh('system_settings').where('key', HOLIDAY_CLOSURES_KEY).first('value'));
+    return parseHolidayClosures(row && row.value);
+  } catch (err) {
+    if (strict) throw err;
+    logger.warn(`[blackout-dates] holiday closures lookup failed (failing open): ${err.message}`);
+    return new Set();
+  }
+}
+
+// Concrete YYYY-MM-DD dates within [fromStr, toStr] that the closed holidays
+// take off (observed weekdays included). Pure — exported for tests.
+function expandHolidayClosures(fromStr, toStr, closedHolidays) {
+  if (!closedHolidays || !closedHolidays.size) return [];
+  return holidaysBetween(fromStr, toStr, closedHolidays).map((day) => day.date);
+}
+
 // Set of YYYY-MM-DD blackout dates within [fromStr, toStr] (inclusive) —
-// one-off dates plus every weekly-day-off occurrence in the range.
+// one-off dates plus every weekly-day-off and closed-holiday day in the range.
 async function getBlackoutDates(fromStr, toStr, conn = db, { strict = false } = {}) {
   let dates = new Set();
   try {
@@ -115,13 +141,16 @@ async function getBlackoutDates(fromStr, toStr, conn = db, { strict = false } = 
   }
   const weekly = await getWeeklyDaysOff(conn, { strict });
   for (const d of expandWeeklyDaysOff(fromStr, toStr, weekly)) dates.add(d);
+  const holidays = await getClosedHolidays(conn, { strict });
+  for (const d of expandHolidayClosures(fromStr, toStr, holidays)) dates.add(d);
   return dates;
 }
 
-// Both blackout layers for a series-generation horizon, read through the
-// CALLER's conn: { dates: Set<YYYY-MM-DD>, weeklyDaysOff: Set<dow> }. The
-// weeklyDaysOff layer lets consumers enforce weekly closures on dates past
-// the expanded horizon (long-cadence plans generate years out). `conn` may
+// Every blackout layer for a series-generation horizon, read through the
+// CALLER's conn: { dates: Set<YYYY-MM-DD>, weeklyDaysOff: Set<dow>,
+// closedHolidays: Set<holiday key> }. The weeklyDaysOff and closedHolidays
+// layers let consumers enforce weekly and holiday closures on dates past the
+// expanded horizon (long-cadence plans generate years out). `conn` may
 // be a transaction — the reads run in a nested transaction (SAVEPOINT), and
 // unlike the fail-open helpers above this THROWS on a lookup failure, so a
 // failed read rolls the savepoint back instead of leaving the caller's
@@ -130,16 +159,20 @@ async function getBlackoutLayers(fromStr, toStr, conn = db) {
   return conn.transaction(async (sp) => {
     const weeklyRow = await sp('system_settings').where('key', WEEKLY_DAYS_OFF_KEY).first('value');
     const weeklyDaysOff = parseWeeklyDaysOff(weeklyRow && weeklyRow.value);
+    const holidayRow = await sp('system_settings').where('key', HOLIDAY_CLOSURES_KEY).first('value');
+    const closedHolidays = parseHolidayClosures(holidayRow && holidayRow.value);
     const rows = await sp('schedule_blackout_dates')
       .whereBetween('date', [fromStr, toStr])
       .select('date');
     const dates = new Set(rows.map((r) => toDateStr(r.date)));
     for (const d of expandWeeklyDaysOff(fromStr, toStr, weeklyDaysOff)) dates.add(d);
-    return { dates, weeklyDaysOff };
+    for (const d of expandHolidayClosures(fromStr, toStr, closedHolidays)) dates.add(d);
+    return { dates, weeklyDaysOff, closedHolidays };
   });
 }
 
-// True when a single date is blacked out (one-off or weekly). Accepts
+// True when a single date is blacked out (one-off, weekly or a closed
+// holiday). Accepts
 // YYYY-MM-DD strings OR JS Date values (pg DATE columns arrive as either
 // depending on the caller) — String() on a Date is a locale string that
 // would silently never match.
@@ -154,6 +187,7 @@ async function isBlackoutDate(dateVal, conn = db, { strict = false } = {}) {
   if (!dateStr) return false;
   const weekly = await getWeeklyDaysOff(conn, { strict });
   if (weekly.has(dowOfDateStr(dateStr))) return true;
+  if (isClosedHoliday(dateStr, await getClosedHolidays(conn, { strict }))) return true;
   try {
     // Through readOptional's savepoint, like its siblings (codex r12 P2): a
     // failed query inside a CALLER'S transaction aborts that transaction, so
@@ -171,8 +205,9 @@ async function isBlackoutDate(dateVal, conn = db, { strict = false } = {}) {
 }
 
 // Closure-state advisory lock — serializes the blackout-date / weekly-days-off
-// mutation endpoints (routes/admin-schedule.js: PUT /blackout-dates/weekly,
-// POST /blackout-dates, DELETE /blackout-dates/:id) against the capacity
+// / holiday mutation endpoints (routes/admin-schedule.js: PUT
+// /blackout-dates/weekly, PUT /blackout-dates/holidays, POST /blackout-dates,
+// DELETE /blackout-dates/:id) against the capacity
 // reservation transaction's closure-state read (arrival-route.js
 // assertCapacityEligibility → getBlackoutLayers). Without this, a READ
 // COMMITTED reservation can read the pre-mutation closure state and commit a
@@ -185,7 +220,7 @@ async function isBlackoutDate(dateVal, conn = db, { strict = false } = {}) {
 //
 // Lock order: readers (the capacity check inside a reservation transaction)
 // already hold the date occupancy lock, tech-day fences, and row locks
-// before taking this lock SHARED. Writers (the three mutation endpoints)
+// before taking this lock SHARED. Writers (the four mutation endpoints)
 // take ONLY this lock, EXCLUSIVE, before their write, and hold no other
 // scheduling lock. A writer therefore never holds anything a reader could be
 // waiting on, so no lock-order cycle is possible.
@@ -214,6 +249,9 @@ module.exports = {
   isBlackoutDate,
   getWeeklyDaysOff,
   expandWeeklyDaysOff,
+  getClosedHolidays,
+  expandHolidayClosures,
   lockClosureState,
   WEEKLY_DAYS_OFF_KEY,
+  HOLIDAY_CLOSURES_KEY,
 };

@@ -42,6 +42,15 @@ test('a proposal-pinned customer id validates for reply_via_sms while a forged o
   expect(registry.validateInput('reply_via_sms', { ...pinned, customer_id: 'not-a-uuid' }, scope)).toMatchObject({ code: 'invalid_input' });
 });
 
+test('send_autopay_setup_link validates delivery "link" so its coded refusal is reachable (Codex #6371 r23)', async () => {
+  const scope = { role: 'admin', context: 'platform' };
+  const input = { customer_id: '10000000-0000-4000-8000-000000000002', delivery: 'link' };
+  expect(registry.validateInput('send_autopay_setup_link', input, scope)).toBeNull();
+  expect(registry.validateInput('send_autopay_setup_link', { ...input, delivery: 'carrier pigeon' }, scope)).toMatchObject({ code: 'invalid_input' });
+  const refused = await require('../services/intelligence-bar/customer-link-tools').executeCustomerLinkTool('send_autopay_setup_link', input, { isAdmin: true });
+  expect(refused).toMatchObject({ code: 'autopay_link_only_unsupported' });
+});
+
 test('every existing tool has an explicit valid policy and a concrete executor', () => {
   expect(registry.policyErrors).toEqual([]);
   expect(registry.actions.size).toBe(Object.keys(require('../services/intelligence-bar/action-policy.json')).length);
@@ -353,12 +362,23 @@ const SCOPE_SNAPSHOT = {
     'create_customer_link', 'send_autopay_setup_link',
     // send_invoice carries invoice_id (or invoice_number, bound like resend_receipt's).
     'send_invoice',
+    // record_payment carries invoice_id (or invoice_number, bound like send_invoice's).
+    'record_payment',
     // propose_admin_edit carries customer_id for a customer or visit scoped edit (the tool binds it to the record in the endpoint);
     // a broad edit (template, timesheet) carries none and touches no customer record.
     'propose_admin_edit',
     // convert_lead carries lead_id + customer_id (validateRecordTarget binds both to the task customer).
     'convert_lead',
     'void_invoice',
+    // The invoice edit cards carry invoice_id (or invoice_number, bound like send_invoice's).
+    'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice',
+    // The invoice reminder and payment-plan cards carry invoice_id (or invoice_number, bound like send_invoice's).
+    'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send',
+    'create_payment_plan', 'cancel_payment_plan',
+    // create_invoice carries customer_id: the draft invoice is that customer's own.
+    'create_invoice',
+    // set_customer_bill_to carries customer_id: the Bill-To and invoices it moves are that customer's own.
+    'set_customer_bill_to',
     'add_customer_property', 'assign_technician', 'block_sender', 'bulk_update_customers', 'bulk_update_leads', 'cancel_appointment', 'cancel_plan',
     'create_agent_estimate_draft',
     // reprice_future_visits carries customer_id; every visit it changes is that customer's own.

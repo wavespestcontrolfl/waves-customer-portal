@@ -19,6 +19,13 @@
  * credit), nothing is written and a 409 says so, so the ledger can never
  * record a different sum than the money that arrived.
  *
+ * The card also supplies a settlementFence (below), carrying `closeoutTarget` (the visit id its card said the payment's closeout would
+ * complete, or 'none') and `closeoutVisit` (that visit's facts as the card showed them: service type, scheduled date, status, edit time):
+ * written as a pin inside the settlement transaction and handed to the closeout as its approved target and visit, so a visit that became
+ * closable after the card, or was edited, rescheduled, reclassified or cancelled since, is left open (the closeout re-asserts the facts
+ * under the visit's lock), on the first run and on every retry. The payment stays recorded; the result carries `closeout`. It throws its own 409 refusals (`drift: true`); the fence is handed the LOCKED
+ * invoice row as its second argument when it runs under the lock.
+ *
  * requireSelfPay (optional, both Zelle notice paths): the caller matched the
  * invoice as an OPEN SELF-PAY invoice (no payer, no statement, live payer
  * resolution empty) before calling. Re-run those predicates on the LOCKED row
@@ -64,6 +71,15 @@ const PaymentPlans = require('./payment-plans');
 const { guardOpenPaymentIntentForPrepaid } = require('./prepaid-pi-guard');
 const { etDateString } = require('../utils/datetime-et');
 const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, visitRefusesSettlement, lockVisitForSettlement } = require('./invoice-helpers');
+
+// Append the operator note to the invoice notes (don't clobber existing notes). Built from the LOCKED row's notes inside the
+// settlement transaction, so a note saved between the unlocked read and the lock is kept, not overwritten.
+function appendOperatorNote(existing, { method, reference, note }) {
+  if (!note) return existing || null;
+  // ET wall-clock date (the one convention — utils/datetime-et), not UTC.
+  const line = `[${etDateString()}] ${method.toUpperCase()}${reference ? ` ${reference}` : ''}: ${note}`;
+  return existing ? `${existing}\n${line}` : line;
+}
 
 const VALID_PAYMENT_METHODS = ['cash', 'check', 'zelle', 'venmo', 'paypal', 'other'];
 const VALID_RECEIPT_CHANNELS = ['email', 'sms', 'both'];
@@ -121,6 +137,9 @@ async function recordManualPayment(id, {
   if (sendReceipt && !VALID_RECEIPT_CHANNELS.includes(via)) {
     throw refusal(400, "via must be 'email', 'sms', or 'both'");
   }
+  // The visit the Intelligence Bar card said this payment would close out ('none' = none); undefined for the Invoices page.
+  const approvedCloseoutTarget = settlementFence?.closeoutTarget;
+  const approvedCloseoutVisit = settlementFence?.closeoutVisit;
   const trimmedReference = typeof reference === 'string' ? reference.trim().slice(0, 200) : '';
   const trimmedNote = typeof note === 'string' ? note.trim().slice(0, 400) : '';
 
@@ -174,7 +193,7 @@ async function recordManualPayment(id, {
   if (requireSelfPay) {
     const { rowIsSelfPayDue } = require('./open-balance');
     if (invoice.payer_id || invoice.payer_statement_id || !(await rowIsSelfPayDue(invoice.customer_id, invoice))) {
-      throw refusal(409, 'Invoice is no longer an open self-pay invoice (a payer or statement was assigned) — nothing was recorded');
+      throw refusal(409, 'Invoice is no longer an open self-pay invoice (a payer or statement was assigned) — nothing was recorded', { drift: true });
     }
   }
   if (settlementFence && !(await settlementFence(db))) {
@@ -183,15 +202,6 @@ async function recordManualPayment(id, {
   const triagedPiId = invoice.stripe_payment_intent_id || null;
   const openPi = await retireOpenPaymentIntentBeforeSettlement(invoice, { action: 'recording a manual payment' });
   if (openPi) throw refusal(openPi.status, openPi.error);
-
-  // Append operator note to invoice notes (don't clobber existing notes).
-  let nextNotes = invoice.notes || null;
-  if (trimmedNote) {
-    // ET wall-clock date (the one convention — utils/datetime-et), not UTC.
-    const stamp = etDateString();
-    const line = `[${stamp}] ${method.toUpperCase()}${trimmedReference ? ` ${trimmedReference}` : ''}: ${trimmedNote}`;
-    nextNotes = nextNotes ? `${nextNotes}\n${line}` : line;
-  }
 
   // Atomic transition. Two concurrent double-clicks both pass the
   // precheck above, but Postgres serializes UPDATEs against the same
@@ -296,7 +306,7 @@ async function recordManualPayment(id, {
       const neverRan = await visitRefusesSettlement(trx, locked.scheduled_service_id);
       if (neverRan) return { visitNeverRan: neverRan };
     }
-    if (settlementFence && !(await settlementFence(trx))) return { fenceLost: true };
+    if (settlementFence && !(await settlementFence(trx, locked))) return { fenceLost: true };
     const [row] = await trx('invoices')
       .where({ id })
       .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
@@ -316,11 +326,13 @@ async function recordManualPayment(id, {
         // seam comparison, which already ran.
         stripe_payment_intent_id: null,
         processor: null,
-        notes: nextNotes,
+        notes: appendOperatorNote(locked.notes, { method, reference: trimmedReference, note: trimmedNote }),
         updated_at: trx.fn.now(),
       })
       .returning('*');
     if (!row) return null;
+    // The card's closeout target as a pin, in this transaction: it commits with the payment or not at all.
+    await require('./invoice-issued-closeout').recordApprovedPaidCloseoutTarget(id, approvedCloseoutTarget, { conn: trx, actorTechnicianId: recordedByTechnicianId, approvedVisit: approvedCloseoutVisit });
 
     // Payments-ledger row so revenue dashboards (admin-dashboard, monthly
     // reports) sum manual cash/check/Zelle alongside Stripe collections.
@@ -390,7 +402,7 @@ async function recordManualPayment(id, {
     throw refusal(409, `${updatedInvoice.chargeReconciliationPending} — resolve it before recording another payment`);
   }
   if (updatedInvoice?.notSelfPay) {
-    throw refusal(409, 'Invoice is no longer an open self-pay invoice (a payer or statement was assigned) — nothing was recorded');
+    throw refusal(409, 'Invoice is no longer an open self-pay invoice (a payer or statement was assigned) — nothing was recorded', { drift: true });
   }
   if (!updatedInvoice) {
     // Lost the race to a concurrent caller (or another path marked it
@@ -545,12 +557,14 @@ async function recordManualPayment(id, {
   // visit happened — close it out quietly. Best-effort after the payment
   // is recorded.
   const { closeOutVisitForIssuedInvoice } = require('./invoice-issued-closeout');
-  await closeOutVisitForIssuedInvoice({ invoiceId: id, trigger: 'paid', actorTechnicianId: recordedByTechnicianId });
+  const closeout = await closeOutVisitForIssuedInvoice({ invoiceId: id, trigger: 'paid', actorTechnicianId: recordedByTechnicianId, approvedTarget: approvedCloseoutTarget, approvedVisit: approvedCloseoutVisit });
 
   const final = await db('invoices').where({ id }).first();
   return {
     invoice: final,
     receipt: !sendReceipt ? null : queued ? { queued: true } : { email: emailResult, sms: smsResult },
+    // What the post-payment closeout did (the Intelligence Bar card reports it; the Invoices page route does not forward it).
+    closeout,
   };
 }
 

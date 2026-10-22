@@ -885,6 +885,10 @@ function initScheduledJobs() {
           // proofreader's own gate is off.
           const moveCheckClosed = await require('./auto-dispatch/proofreader/nightly').closeNotices(new Date(), { enabled: getAutoDispatchConfig().proofreaderEnabled === true });
           if (!moveCheckClosed) failures.push(new Error('move-check notice close failed'));
+          // The move-check-down notice by the same rule: it closes when its
+          // gate or the check is off; with no run, nothing else changes it.
+          const checkDown = await require('./auto-dispatch/check-down-notice').noteRun(null, { enabled: getAutoDispatchConfig().proofreaderEnabled === true, nowDate: new Date() });
+          if (checkDown.action === 'error') failures.push(new Error('move-check-down notice upkeep failed'));
           if (failures.length) throw failures[0];
           return;
         }
@@ -953,6 +957,26 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Consultation-outcome reconcile tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY MIN — Bundled tech pushes (GATE_TECH_PUSH_BUNDLE). A burst of
+  // visit changes (an office script, many single moves in a row) sends each
+  // tech ONE push once their changes go quiet, not one per visit. Registered
+  // before the GATE_CRON_JOBS return below, like the reconcile above: with
+  // the bundle gate on, deliver() holds pushes whether or not cron jobs run,
+  // and only this sweep sends them (Codex #6459 r2). No runExclusive on
+  // purpose: each tech's cards are claimed in one UPDATE under the sweep's own
+  // token, so overlapping deploy instances never push the same cards, and no
+  // lock is held across a push (owner ruling 2026-09-30, #5421). It runs with
+  // the gate off too, so cards held before a flip still go out.
+  // =========================================================================
+  cron.schedule('* * * * *', async () => {
+    try {
+      await require('./tech-visit-notifications').flushBundledPushes();
+    } catch (err) {
+      logger.error(`[tech-push-bundle] sweep failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -1063,6 +1087,20 @@ function initScheduledJobs() {
   };
   cron.scheduleTimeout(pmGuardFirstsTick, 120 * 1000);
   cron.schedule('49 */6 * * *', pmGuardFirstsTick, { timezone: 'America/New_York' });
+
+  // EVERY MINUTE — Gmail-style scheduled emails (GATE_EMAIL_SEND_LATER; the
+  // sender returns at once with the gate off). A minute keeps "9:00 AM" at
+  // 9:00-9:01. No cron lease: the row claim (FOR UPDATE SKIP LOCKED) makes
+  // each email go out at most once across the fleet, and a lease could wait
+  // or skip and send late. runScheduledSweep records job_health so that a
+  // concurrent empty sweep never hides a failed one.
+  cron.schedule('* * * * *', async () => {
+    try {
+      await require('./email/scheduled-email-sender').runScheduledSweep();
+    } catch (err) {
+      logger.error(`[scheduled-email] sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
 
   // EVERY 5 MIN — mark deploy-killed SEO pipeline/site-audit runs as failed.
   cron.schedule('*/5 * * * *', async () => {
@@ -1368,31 +1406,6 @@ function initScheduledJobs() {
   };
   cron.schedule('55 3 * * *', () => runPropertyEnrichBackfill(), { timezone: 'America/New_York' });
   registerDeployKillRetry('property-enrich-backfill', () => runPropertyEnrichBackfill({ afterKill: true }));
-
-  // =========================================================================
-  // DAILY 2:25AM ET — same-stop regroup sweep. Future same-day services at
-  // one stop that qualify for a visit group but were never grouped (written
-  // before the gates, while autopay customers were excluded, or by a writer
-  // that never calls maybeGroupRow: moves, series extension) are folded into
-  // one visit through the canonical maybeGroupRow / createOrJoinVisit path.
-  // Only loose pairs more than 76h out (no reminder due or in flight), so a
-  // tech's near days never change under them.
-  // Inert unless GATE_VISIT_GROUPS is on (checked inside the sweep). Grouping
-  // writes no customer message. runExclusive: read-then-act; a deploy overlap
-  // must not run two sweeps over the same rows.
-  // =========================================================================
-  cron.schedule('25 2 * * *', async () => {
-    if (!isEnabled('visitGroups')) return;
-    try {
-      const res = await runExclusive('visit-regroup-same-stop', () =>
-        require('./visit-regroup').regroupUngroupedSameStopRows({ dryRun: false }));
-      if (res && !res.skipped && (res.groups.length || res.left.length)) {
-        logger.info(`[visit-regroup] grouped ${res.groups.length} stop(s); left ${res.left.length} row(s) alone (${res.candidates} candidates)`);
-      }
-    } catch (err) {
-      logger.error(`[visit-regroup] nightly same-stop regroup failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
 
   // =========================================================================
   // WEEKLY MON 7:41AM ET — Manatee permit sync (public ACA CSV reports →
@@ -2077,6 +2090,30 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`[pin-parked-check] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // EVERY 15 MIN — Bid Desk intake (GATE_BID_DESK, dark): files bid invites found in new `emails` rows as
+  // bid opportunities and sends the 7-day and 2-day reminders for due dates the operator confirmed. No AI call; it
+  // posts admin notifications only and sends nothing to a buyer, contractor or customer. The gate is read per tick,
+  // so a flip or an unset needs no restart. runExclusive records the job health.
+  cron.schedule('0 3,18,33,48 * * * *', async () => {
+    if (!require('../config/feature-gates').bidDeskLive()) return;
+    try {
+      const lockRes = await runExclusive('bid-desk-intake', async () => {
+        const result = await require('./bid-desk').runBidDeskTick();
+        if (result.created > 0) logger.info(`[bid-desk] ${result.created} new bid(s)`);
+      });
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`bid-desk-intake tick skipped: ${lockRes.reason || 'no_connection'}`);
+        await recordJobStart('bid-desk-intake').catch(() => {});
+        await recordJobEnd('bid-desk-intake', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch (err) {
+      logger.error(`[bid-desk] tick failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -5284,11 +5321,13 @@ function initScheduledJobs() {
             // visit today, or a changed label blocks it. Same fail-closed
             // block+retire path, no new mechanism.
             let labelStale = false;
+            // the same check also refuses an unedited draft written before the 2026-10-22 company facts (#6447): its own reason and note
+            let companyFactRetired = false;
             if (!anchorStale && !amountsStale && !openTimesStale && !slaStale) {
               try {
                 const labelDecision = await db('agent_decisions')
                   .where({ id: claimMeta.agent_decision_id })
-                  .first('input_snapshot', 'prompt_version');
+                  .first('input_snapshot', 'prompt_version', 'suggested_message');
                 // The reply guard runs on the final body of every real-answers
                 // decision (an edit may not add label timing); the visit recheck
                 // only for a body that still copies a snapshotted sentence.
@@ -5301,6 +5340,7 @@ function initScheduledJobs() {
                   logger.warn(`[scheduled-sms] ${msg.id} label-facts recheck unreadable; deferring to the provider-boundary check`);
                 } else {
                   labelStale = Boolean(labelReason);
+                  companyFactRetired = require('./agent-decision-send-checks').blockReasonIsRetiredCompanyFact(labelReason);
                 }
               } catch (err) {
                 logger.warn(`[scheduler] label-facts revalidation failed for scheduled sms ${msg.id}: ${err.message}; deferring to the provider-boundary check`);
@@ -5376,7 +5416,7 @@ function initScheduledJobs() {
                     : slaStale
                       ? 'stale_sla_agent_decision'
                       : labelStale
-                        ? 'stale_label_facts_agent_decision'
+                        ? (companyFactRetired ? 'stale_company_facts_agent_decision' : 'stale_label_facts_agent_decision')
                         : reserviceStale
                           ? 'stale_reservice_agent_decision'
                           : openLoopsStale
@@ -5419,7 +5459,9 @@ function initScheduledJobs() {
                         : slaStale
                           ? 'This scheduled reply’s follow-up timing no longer matches the current window — review the thread.'
                           : labelStale
-                            ? 'This scheduled reply quoted product label timing that is no longer current for the customer’s latest visit — review the thread.'
+                            ? (companyFactRetired
+                              ? 'This scheduled reply was drafted before the current company facts (payment and inside-spray policy) — rewrite it, then send.'
+                              : 'This scheduled reply quoted product label timing that is no longer current for the customer’s latest visit — review the thread.')
                             : reserviceStale
                               ? `This scheduled reply promises a free re-service that could not be revalidated (${reserviceReason}) — review the thread.`
                               : openLoopsStale

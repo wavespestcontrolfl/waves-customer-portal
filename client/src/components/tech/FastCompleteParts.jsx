@@ -219,16 +219,39 @@ export function EmbeddedPartFrame({ dialogRef, titleId, hiddenProps, overlay, di
 // open, that opens the appointment details sheet (quick move, cancel,
 // reschedule, price edit) — the same one the full form's Details pill and the
 // lawn sheet open. Absent (the tech portal mounts no such sheet) = no pill.
-export function SheetHeader({ titleId, title, service, visit, done, locked, dictationPending, submitting, onFullForm, onViewDetails, onClose, fullFormOffered = true }) {
+// The customer's phone as (941) 555-0100; any other shape shows as stored.
+function phoneLabel(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  const ten = digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
+  return ten.length === 10 ? `(${ten.slice(0, 3)}) ${ten.slice(3, 6)}-${ten.slice(6)}` : String(phone || '').trim();
+}
+
+// `contact` (owner 2026-10-22): the customer's phone and email under the address, each a link
+// (call, email). Absent or empty = no link; neither = no line.
+const CONTACT_LINKS = [
+  { key: 'phone', href: (value) => `tel:${value.replace(/[^\d+]/g, '')}`, label: phoneLabel },
+  { key: 'email', href: (value) => `mailto:${value}`, label: (value) => value },
+];
+const contactLinksOf = (contact) => CONTACT_LINKS
+  .map((link) => ({ ...link, value: String(contact?.[link.key] ?? '').trim() }))
+  .filter((link) => link.value);
+
+export function SheetHeader({ titleId, title, service, visit, contact, done, locked, dictationPending, submitting, onFullForm, onViewDetails, onClose, fullFormOffered = true }) {
   const address = liveAddressLine(visit?.address);
+  const contactLinks = contactLinksOf(contact);
   return (
     <header className="tech-visit-header">
       <div className="tech-visit-header-text">
         <h2 id={titleId} className="tech-visit-title">{title}</h2>
-        <p className="tech-visit-muted">
-          {customerNameOf(visit, service) || 'Customer'}{service?.serviceType ? ` · ${service.serviceType}` : ''}
-        </p>
+        {/* Name and service on their own lines (owner 2026-10-22). */}
+        <p className="tech-visit-muted">{customerNameOf(visit, service) || 'Customer'}</p>
+        {service?.serviceType && <p className="tech-visit-muted">{service.serviceType}</p>}
         {address && <p className="tech-visit-muted">{address}</p>}
+        {contactLinks.length > 0 && (
+          <p className="tech-visit-muted tech-visit-contact">
+            {contactLinks.map((link) => <a key={link.key} href={link.href(link.value)}>{link.label(link.value)}</a>)}
+          </p>
+        )}
       </div>
       {/* Details and Full form share one group that wraps (stacks) on a narrow
           phone, so neither is clipped beside the title and the close button. */}
@@ -779,12 +802,18 @@ export function VisitNote({ note, onChange, onDictated, onDictationPending, serv
       </div>
       <div className={cn('tech-visit-note-row', micInside && 'tech-visit-note-row--inside')}>
         {micInside ? (
-          <>
-            {children ? <div className="tech-visit-note-box">{text}{children}</div> : text}
-            <span className="tech-visit-note-mic">
-              <DictationButton onAppend={onDictated} onPendingChange={onDictationPending} palette={MIC_PALETTE} size={40} title="Talk about the visit" disabled={locked} uploadServiceId={serviceId} clipHandler={onClip} />
-            </span>
-          </>
+          // The mic sits in the text area's own corner, so photos in the box (children) never run under it.
+          (() => {
+            const field = (
+              <div className="tech-visit-note-field">
+                {text}
+                <span className="tech-visit-note-mic">
+                  <DictationButton onAppend={onDictated} onPendingChange={onDictationPending} palette={MIC_PALETTE} size={40} title="Talk about the visit" disabled={locked} uploadServiceId={serviceId} clipHandler={onClip} />
+                </span>
+              </div>
+            );
+            return children ? <div className="tech-visit-note-box">{field}{children}</div> : field;
+          })()
         ) : (
           <>
             <DictationButton onAppend={onDictated} onPendingChange={onDictationPending} palette={MIC_PALETTE} size={48} title="Talk about the visit" disabled={locked} uploadServiceId={serviceId} clipHandler={onClip} />

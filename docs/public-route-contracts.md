@@ -140,10 +140,16 @@ payload (`/api/reports/:token/data` and the renders that share
 blog post the technician or the office picked at completion, frozen on the
 record (`structured_notes.blogPost`) with its live URL and re-checked at read
 to be on the marketing site's own host
-(`server/services/service-report/report-blog-post.js`). The web report
-renders it in live mode only, above the footer. Off, or nothing frozen, the
-field is `null` (the switch hides frozen posts too). Auth, headers and routes
-are unchanged.
+(`server/services/service-report/report-blog-post.js`). Owner 2026-10-22: the
+object may also carry `imageUrl`, the post's main image, read when the
+report loads from the content registry row the pick froze (its deployed
+frontmatter `hero_image.src`, else `og_image`), made absolute on the
+marketing site's host and kept only when it is on that host. A pick with no
+registry id, a row with no image, an off-host image or a failed read leaves
+`imageUrl` out; the rest of the object is unchanged. The web report renders
+it in live mode only, right under the status card, with the image and
+without the raw URL. Off, or nothing frozen, the field is `null` (the switch
+hides frozen posts too). Auth, headers and routes are unchanged.
 
 Pest Pressure technician direct score (owner ruling 2026-09-24): on the
 service-report payload (`/api/reports/:token/data` and the renders that share
@@ -2648,6 +2654,22 @@ email, the watering text (`lines` only), the hero task and Ask Waves are unchang
 When present on a live payload the displayed one (the note, else the forecast
 sentence) counts toward `reportV2.lead`'s 250-word budget (`leadWords`). No new
 route, query parameter or customer message.
+`GATE_LAWN_WATERING_TEXT_FORECAST` (dark, owner 2026-10-22; needs
+`GATE_LAWN_WATERING_FORECAST`; gate off leaves the payload unchanged, key for key)
+changes when `forecastLine` exists and where it may appear, with no new key: (1) it
+is frozen only when a second source agrees, the NWS hourly forecast giving at least
+one hour inside the same window a rain chance of 60% or more (the chance is never
+printed; the frozen block records `agreement`); (2) a `hold_then_water_in` banner
+whose hold has a printed end and whose `expiresAt` is set (never a hold that waits
+for drying, never a long window or a `later` phase) may carry it, worded for rain
+after the hold ("About ½ inch of rain is forecast between Wed 3 PM and Thu 9 AM. If
+at least ¼ inch falls in that time, it counts as watering in today's treatment. If
+it does not, run the watering above right away."; the frozen block records
+`afterHold: true` and is read only beside such a hold). The live page shows it under
+that hold-then-water-in (never under a plain hold), and `leadWords` counts it. It
+stays LIVE VIEW ONLY on this route; the lawn watering text, a customer message
+outside this route, carries the same frozen sentence after its steps, but only one
+frozen with the NWS agreement.
 Amount-only water-in (owner 2026-10-08, permanent and ungated since 2026-10-09;
 requires `GATE_LAWN_WATERING_RULE`): when a water-in is BUILT AT COMPLETION for a
 customer with no sprinkler head type or measured rate on file, its `lines` give
@@ -2776,19 +2798,6 @@ gain a `categories` list); every older frozen entry replays unchanged. The lawn 
 signature carries `:copyfix=1` only while the gate is live, and the narrative key
 part is the `-tn0` sentinel for a lawn report.
 `GATE_LAWN_NEW_SOD_REPORT_CARD` (dark, strict `true`, read at call time; also needs `GATE_LAWN_NEW_SOD_NOTE`; gate off leaves the payload byte-identical) adds one optional top-level key to the lawn `/api/reports/:token/data` payload (lawn only; no new route, token, privacy or rate-limit surface): `lawnNewSod: { title, lead, items: [string, ...], rest: string | null, swap: string | null, close }`. Every value is a fixed sentence built by `server/services/lawn-sod-report-card.js` from the block frozen at completion (`structured_notes.lawnNewSod = { v: 1, visitDay, sodLaidOn, covers, planRan, held: [{ kind, until, rootedCheck }], swap: { name } | null }`); the only variable parts are calendar dates (the day the sod was laid and the day each held product class starts again). No staff free text is in the payload: the office's name for the sod area (`property_preferences.sod_area`) is never frozen or sent, and the swap product name is frozen but not printed. `rest` and the long form of `close` ("Everything else ran as normal.") are sent only when the frozen `planRan` is true (every other planned product was applied); else `rest` is null and `close` is "Same visit, same price.". The key is absent when the visit record has no valid frozen block (no planned product was held, the sheet's sod record no longer matched at completion, or the visit completed before the gate was on). The live web report prints it as the "New sod" card; the PDF and static views ignore it.
-
-`GATE_REPORT_SIMPLE_WEB` (dark, strict `true`, read at call time; gate off leaves the payload byte-identical) changes the live `/api/reports/:token/data` payload of a `service_report_v1` record (no new route, token, privacy or rate-limit surface). While live, a live-mode request is built exactly as the `mode=pdf` render builds it (the same field strips and compliance copy rules, no `glassDefault`) and carries one new optional key, `simpleWebReport: true`; report view tracking still runs as a live view. The approved recap (`recap: { ready, durationMs }`) is still attached under its existing guards (live request, pest line, not internal-only, not a cockroach-family typed report, not a callback under the re-service copy gate), so recap texts and old `/recap` links that land on `#visit-recap` still play. A suppressed (internal-only) report is never switched. `mode=pdf`, `static` and `sms_preview` requests are unchanged.
-
-The same gate adds two optional keys to the project report payload, `/api/reports/project/:token/data`: `simpleWebReport: true` and `performingTechnicianName` (string or `null`), present only while the gate is live and only for a project type other than `wdo_inspection` and `pre_treatment_termite_certificate` (owner 2026-10-17), which never carry them. The page then shows the work-order layout. `performingTechnicianName` is the technician who performed the project's linked visit (the applicator resolver: the visit's technician, the project's creator only when no visit is linked, `null` when unknown), printed as the layout's Technician row; `technicianName` keeps meaning the staffer who created the project. Nothing else in that payload changes, the payment-held `402` and the `404`/`410` answers are untouched, and gate off leaves the payload byte-identical. No new route, token, privacy or rate-limit surface.
-
-`GATE_REPORT_GLASS_WEB` (dark, strict `true`, read at call time via `reportGlassWebLive()`; gate off leaves the payload byte-identical) adds one optional boolean key, `glassWeb: true`, to the live `/api/reports/:token/data` payload of a `service_report_v1` record, only while `GATE_REPORT_SIMPLE_WEB` has also switched the request to the simple web report (so it is present only beside `simpleWebReport: true`). The page then dresses the same document as glass cards; the key carries no data and no copy. `mode=pdf`, `static` and `sms_preview` requests never carry it, and the PDF ignores it. No new route, token, privacy or rate-limit surface.
-`GATE_REPORT_WEB_SHARE` (dark, strict `true`, read at call time via `reportWebShareLive()`; gate off leaves the payload byte-identical) adds one optional key, `webShare: { score, assessmentId }`, to the live `/api/reports/:token/data` payload of a `service_report_v1` lawn record, only beside `simpleWebReport: true` (so never in `mode=pdf`, `static` or `sms_preview`, and never on a suppressed report). It is present only when the lawn score is 85 or more, the visit has a customer-visible front-yard photo, the visit is not a callback and the referral program is active (strict live-settings read); `score` is the rounded overall score of the visit's own lawn assessment and `assessmentId` is that assessment; ONE eligibility function (`resolveShareEligibility` in `server/services/service-report/web-share.js`: lawn line, not a callback, score 85 or more, a customer-visible front photo) decides the offer, the photo route and the referral tap. New route `GET /api/reports/:token/share-photo?assessment=<assessmentId>` (token-keyed 10/min limiter; the query value must be the visit's own assessment, else the generic 404) returns that front photo as `image/jpeg` (resized to at most 1600 px, upright, file metadata removed; `Cache-Control: no-store`, `X-Robots-Tag: noindex`, `Referrer-Policy: no-referrer`); dark gate (either gate off) is a generic 404 from `reportSharePhotoPreGuard`, mounted app-level ahead of the global `/api` limiter and again first in the reports router, so a dark probe spends no limiter budget, reads no row and fires no token param read; the guard matches GET and HEAD with ANY token segment, and while live it also answers the same 404 for a token that is not 32 hex characters (no limiter budget, no row read); `reportsAskPrivacyHeaders` stamps `no-store` + `noindex` on every outcome of this path, trailing slash and malformed token included; an unknown token, suppressed or callback report or no front photo are the same generic 404. It exists because the photo bucket sends no CORS headers, so a browser canvas cannot export an image drawn from a signed S3 URL. The existing `POST /api/reports/:token/referral-link` and the `referral_cta_clicked` event also answer while this gate and `GATE_REPORT_SIMPLE_WEB` are live, without `GATE_REPORT_CROSS_SELL`; with that gate off the referral tap re-runs the same eligibility function before any promoter enrollment and answers the gates-off refusal for an ineligible visit (callback and suppressed rules unchanged). The card the page builds from these holds the photo, the score, the logo and the customer's own referral link; no address, name or other customer detail leaves the server for it. Nothing is sent to anyone.
-
-`GATE_REPORT_WEB_PROGRAM` (dark, strict `true`, read at call time via `reportWebProgramLive()`; gate off leaves the payload byte-identical) adds one optional key, `programPromise: { monthLine, items: [{ key, label, state, sentence }] }`, to the live `/api/reports/:token/data` payload of a recurring lawn plan visit, only beside `simpleWebReport: true`. `state` is `on_track`, `ahead` or `behind`; every string is a fixed sentence from `shared/lawn-program-targets.json`, and the scores and targets themselves are not sent. The month counts from the first row of the property-scoped lawn history (`lawn-assessment-history`, with move resets), never from the customer-wide trend. Absent for one-time jobs, callbacks, records with no frozen service key, when no verified property history is available, when the visit's photo confidence is below moderate, and when no category has a score. A category the two vision models disagreed on is left out of `items` (the progress engine's `unclear` rule). `mode=pdf`, `static` and `sms_preview` requests never carry it. No new route, token, privacy or rate-limit surface.
-
-`GATE_REPORT_WEB_LIVE_CHIP` (dark, strict `true`, read at call time via `reportWebLiveChipLive()`; gate off leaves the payload byte-identical) adds one optional key, `liveChip: { state, text }`, to the live `/api/reports/:token/data` payload of a lawn visit completed in the last 7 days that has a linked tech-confirmed lawn assessment (the chip reads the home's coordinates and the products' frozen watering facts from that build; a visit without one gets no chip), only beside `simpleWebReport: true`. `state` is `recent_rain`, `watered_in` or `no_rain`; `text` is a fixed sentence (`shared/report-live-chip-copy.json`). It is computed on each request from past-hour rain at the home (one 2.5 s capped read through the existing 10-minute Open-Meteo cache, shared by the rain wording, the dry test and the water-in coverage), never stored, and carries no coordinates, amounts or product names. Absent when the visit has no linked lawn assessment, the rain is unknown, the visit is older than 7 days, or the read fails. `mode=pdf`, `static` and `sms_preview` requests never carry it and never trigger the rain read. No new route or token; one extra weather read per live view while the gate is on.
-
-`GATE_REPORT_WEB_SLIDER` (dark, strict `true`, read at call time via `reportWebSliderLive()`; gate off leaves the payload byte-identical) adds one optional key, `lawnSlider`, to the live `/api/reports/:token/data` payload of a lawn `service_report_v1` record, only on a live simple-web view (beside `simpleWebReport: true`). Shape: `{ pairs: [{ key: 'front', label: 'Front yard', before: { url, date }, after: { url, date } }] }`, one pair (front only) for the shot that has a customer-visible photo on this visit and on the previous confirmed lawn visit at the same property (`lawn-assessment-history`; an unresolvable property or no earlier visit gives no key). `url` is a signed photo link with the same lifetime as the report's other photos; `date` is the visit's calendar day, `YYYY-MM-DD`. The key is absent, not empty, when there is no pair. `mode=pdf`, `static` and `sms_preview` requests never carry it. No new route, token, privacy or rate-limit surface; no address or name rides in the key.
 
 `GATE_REPORT_CLEANUP_1020` (dark, strict `true`, read at call time; gate off leaves the payload, the stored method, the PDF and every cached PDF key byte-identical) changes the `/api/reports/:token/data` payload of a `service_report_v1` record, and the same render the PDF queue builds. No new route, token, privacy or rate-limit surface; every item below exists only while the gate is live. New top-level keys: `reportCleanup: true` (absent when off; the page keys items off it) and `troubleSpotNote` (a fixed sentence string, or `null` when the visit has no Trouble spot photo; absent when off). Changed fields: (1) `reportV2.aftercare.watering`: for a lawn visit whose watering instruction makes no claim and whose frozen product rules hold a `water_in` rule, no `hold` rule, and no product with a recorded watering note or `irrigation_required` but no structured rule, the line is "Water in about ½ inch within 24 hours." (deepest amount, shortest window; "today" for a same-day label) instead of the neutral "No special watering is needed…", with `waterInTask` set and `creditableWaterIn: false`; when any product carries a `hold` rule and the instruction makes no claim, `watering` is the empty string and neither line prints. A visit with a full instruction is unchanged. (2) `applications[].method` and `applications[].methodLabel`: `broadcast_spray` becomes `granular_broadcast` when the product name says granular (water-dispersible granules excluded); the completion also stores `granular_broadcast` in `service_products.application_method` for such a product. (3) `reportV2.followUp.reason`: a reason that is cut with an ellipsis, has no final stop, or carries a percent or a score is replaced by the fixed sentence "We’ll recheck the areas we flagged and compare them against today’s photos." (4) `reportV2.insights`: the lawn all-clear card (category `overall`) is left out; a tree & shrub all-clear card keeps its place but its `nextVisitPlan` is `null`. (5) `findings`: the softened `no_activity` finding titled "No corrective findings logged this visit" is left out. The PDF cache key gains `:cleanup1020=1`. The tech Fast Complete context (`GET /api/admin/dispatch/:id/lawn-fast/context` and the lawn re-service context) gains `methodCorrection: true` while live (absent otherwise).
 
@@ -3717,7 +3726,19 @@ or that widens the hold beyond `missing_token`, is a P0),
 posts/by-slug/:slug, rss, quiz/:token/:quizId/:answer,
 feedback/:token/:reaction, e/:token/:eventId (event click-through:
 records one deduped analytics row then 302s to the DB-locked event
-URL; unknown token = untracked redirect, never blocks the reader)
+URL; unknown token = untracked redirect, never blocks the reader.
+With `GATE_NEWSLETTER_CLICK_BOUND=true` the event URL is honoured only
+when the token is a real delivery AND the event is in that send's
+`event_ids` or `alternate_event_ids`; the target is the URL the send
+carried (`newsletter_sends.event_url_snapshot`, written at send time),
+or the live `event_url` for a send made before snapshots existed. An
+unknown token, an event outside the lineup, a send whose snapshot lacks
+the event or its URL, or a membership lookup that fails goes to the homepage
+(`https://www.wavespestcontrol.com/`); a non-uuid token goes home before
+any query. A click-row write that fails AFTER membership was verified
+still sends the reader to the event. The per-IP over-budget path records
+nothing and applies the same rules. Gate off = the behaviour
+above this note, unchanged)
 — rate-limited, read-only for posts/rss,
 double-opt-in for subscribe (the response is unchanged and uniform; `source` is free text,
 and ONLY `source: "out_of_area_waitlist"` also reads the optional body `zip` / `city`
@@ -5459,6 +5480,41 @@ send runs only when the number matches an active customer), so a timing
 observer can still distinguish known numbers — do not widen the claim
 beyond the body, and do not add a second observable difference. `/me`, `/properties`, `/select-property`
 require the customer JWT.
+Contact login on the same routes (`GATE_CONTACT_LOGIN`, dark; strict
+`=== 'true'`, read at call time — `contactLoginLive()`): when live, send-code
+and verify-code also serve an ON-LOCATION CONTACT — a number stored in a
+customer's `service_contact*_phone` slot whose holder attestation
+(`service_contacts_consent_at`) covers it (`contactSlotMayLogIn`; the
+`DISABLE_CONTACT_CONSENT_GATE` SMS rollback switch never opens the login) —
+resolved ONLY when no active account-holder row carries the number
+(`resolveLoginIdentity`: the holder first; a contact on several rows lands
+on the primary profile, then the oldest). send-code then sends that contact
+the OTP under the same uniform body; verify-code mints a session whose
+access AND refresh tokens carry `contactKey` (the last-10 phone key, also
+`customer_refresh_tokens.contact_key`) and returns `actor { kind:
+'contact', slot, name, phone, email }` — a holder's response carries `actor
+{ kind: 'holder' }` — with the contact's own name, phone and email in
+`customer`, never the holder's identity, referral code, credits, prepay,
+rate or tier (the `/me` payload is projected the same way, its `address`
+the house the contact's reads are scoped to and `notificationPrefs: null`).
+The App Store reviewer bypass (`REVIEW_LOGIN_PHONE` + `REVIEW_LOGIN_CODE`)
+resolves the demo HOLDER row only — never a contact — and send-code skips
+Twilio only while the review number resolves to it. refresh rotates a
+contact family only while the gate is on, the row is `active` (the
+cancelled read-only allowance does not apply to contacts) and the number
+still occupies a slot; otherwise it answers the same 401
+`INVALID_REFRESH_TOKEN` and REVOKES the family (`contact_removed`), a
+profile switch is refused, and the holder's contact save revokes the
+families of the phones it removed — re-adding a number never revives a
+removed device's session. A contact bearer reaches only
+`CONTACT_SESSION_ROUTES` (`server/middleware/auth.js`: `/auth/me`,
+`/auth/properties`, schedule and visit-history reads, tracking, documents
+reads, activity beacons, GET/PUT `/notifications/contact-preferences`, the
+token-scoped push release); every other authenticated route answers 403
+`ACCOUNT_HOLDER_ONLY` (never a 401 the client would read as a dead session).
+Gate off: a contact number is unknown at send-code (uniform body, no OTP),
+refused at verify-code, and an existing contact bearer or refresh family is
+refused (401) — byte-identical to before.
 Staff authentication (`server/routes/admin-auth.js`, mounted at
 `/api/admin/auth`): `POST /login` sits behind the same `authLimiter` (10 per
 15 min) and answers every failure with a generic 401 `Invalid credentials`;
@@ -6043,11 +6099,20 @@ supplied one is tried), parsed with `parseRawAddress` and geocoded with
 street-level quality filtering but `requireInServiceArea:false` (the box
 alone is never grounds to discard a geocode as unresolvable); checked
 against the service area via `checkServiceArea`, applied uniformly to every
-resolved location including a customer's stored coordinates: county via
+resolved location including a customer's stored coordinates: first, the
+address's own city or a Punta Gorda-only ZIP (33950, 33951, 33955; 33982 is shared with Babcock Ranch, so the city decides) is out
+(Punta Gorda is not served per the 2026-10-22 owner ruling, although Charlotte
+County is; `services/excluded-localities.js`, city / ZIP only, no coordinate
+box); then county via
 `services/address-validation`'s `reverseGeocodeCounty` when a Google key is
 configured (a null county is NOT permission — 503
 `{ error: 'service_area_unavailable' }`, recoverable; a DeSoto county is out,
-DeSoto is not served per the 2026-09-30 owner ruling), else the explicit
+DeSoto is not served per the 2026-09-30 owner ruling; when that county is
+Charlotte, a second lookup, `reverseGeocodeLocality`, reads the locality and
+ZIP Google places on the coordinate: an excluded locality or Punta Gorda-only
+ZIP is out even when the submitted address names none, and a failed or empty
+lookup, or no locality on a shared ZIP 33980 / 33982 / 33983, is 503
+`{ error: 'service_area_unavailable' }`, recoverable), else the explicit
 no-key fallback: outside the coarse box is out; inside the DeSoto exclusion
 rectangle (`DESOTO_EXCLUSION`) the point is out unless the address's own ZIP
 is a served ZIP (`isInServiceAreaBox(lat, lng, { zip })`, which holds no
@@ -7266,3 +7331,5 @@ AGENTS.md P0 rule "Public route surface", not in this document. This
 document holds the per-route entries only.
 
 Report greeting first name (follow-up to #5559 / #5612): the service-report V1 payload (`/api/reports/:token/data`, and the PDF and report-email renders that share `buildReportV1Data`), the legacy-format service-report payload from the same route, and the project report payload (`/api/reports/project/:token/data`) now carry `customerFirstName` beside the unchanged `customerName`: the customer's own trimmed `first_name`, or `null` when it is blank (the call booker's last-name-only customers, where the composed `customerName` is only the surname). The report pages, the report email, and the visit recap greet by it and fall back to "there" when it is `null`; a payload without the key (cached or older frozen payloads) greets by the first token of `customerName` as before. On a service record that carries a completion-time identity snapshot the value comes from the snapshot's first name, the same source as `customerName`, so a frozen report keeps greeting the way it did at completion. It is the customer's own first name only, already shown inside `customerName`: no new exposure, token, eligibility, privacy or rate-limit change, and no display change to the full name. A report-email recipient's own contact name still greets by its first token.
+
+Pre-treat sticker report (GATE_PRETREAT_STICKER_REPORT, dark): the project report payload (`/api/reports/project/:token/data`) carries a new boolean `pretreatStickerReport`. It is `true` only when the project is a `pre_treatment_termite_certificate` AND the gate is on; every other type and gate-off return `false`. The client then renders the certificate as the Notice of Termite Protection label (form WV-001) with a details block under it; `false` or a missing key renders today's certificate. The certificate's `findings` may also carry four new optional keys, `final_exterior_date`, `final_exterior_product`, `final_exterior_active_ingredient` and `final_exterior_applicator_name`, entered by staff on the certificate form; they ride the same `findings` object, with the same token, hold and fee-scrub rules as every other certificate field. The three free-text keys also pass the customer copy screen (`customerCopyViolations` + `containsReportAccessCode`): the admin create/update routes refuse a failing value with 422 `final_exterior_copy`, and `/data` blanks one that is already stored. `final_exterior_date` must be blank or a real date no later than today (ET), else 422 `final_exterior_date_invalid`. No new route, token, eligibility, privacy or rate-limit change, and no send-readiness change.

@@ -20,6 +20,10 @@ const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 // config/feature-gates + utils only.
 const isAssignable = (...args) => require('./technician-eligibility').isAssignable(...args);
 
+// activity_log actions that record a call moving a visit to the slot agreed
+// on that call (applied reschedule; make-up of a missed recurring visit).
+const CALL_MOVE_ACTIONS = ['call_reschedule_applied', 'call_makeup_move_applied'];
+
 const enabled = () => gateEnvValue('GATE_NOSHOW_DETECTOR');
 const LIVE_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
 // The one terminal status that means the truck actually reached the stop.
@@ -523,7 +527,10 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // round-5 fix made for directly captured call promises (codex P1 round
       // 9). callCommitmentInstant below reads the call's end from these.
       .leftJoin('call_log as cl', conn.raw("cl.id::text = al.metadata->>'call_log_id'"))
-      .where({ 'al.action': 'call_reschedule_applied' })
+      // A make-up move (call-reschedule-apply.js applyCallMakeupMove) writes
+      // the same metadata shape (call_log_id, scheduled_service_id, to) and is
+      // the same promise: the slot the customer agreed on the call.
+      .whereIn('al.action', CALL_MOVE_ACTIONS)
       .whereRaw("al.metadata->>'scheduled_service_id' = ANY(?::text[])", [visitIds])
       .where('al.created_at', '<=', now)
       .select('al.id', 'al.metadata', 'al.created_at', 'cl.created_at as call_created_at',
@@ -948,7 +955,7 @@ async function recordSentWindowFallback({ visitId, startAtMs, communicatedAt = n
 // member. Evaluating members independently therefore read a sibling's
 // evidence as missing, and could raise several cards for one truck visit
 // (codex P1 round 10). Rows with no visit_id are their own group, which is
-// every row while GATE_VISIT_GROUPS is off.
+// every row since grouping was retired (2026-10-22).
 //
 // The representative is the lowest member id, not the claim owner: the claim
 // moves between members from tier to tier, and the tracking key (and the
@@ -1154,7 +1161,7 @@ async function promisedVisitIds(conn, { now }) {
     // to pull the visit into the candidate set — a day of slack on either
     // side costs a few extra candidates, and evaluateNoShow applies the real
     // window to every one of them.
-    conn('activity_log').where({ action: 'call_reschedule_applied' })
+    conn('activity_log').whereIn('action', CALL_MOVE_ACTIONS)
       .whereBetween(conn.raw("metadata->'to'->>'date'"), [recallFromDate, recallToDate])
       .select(conn.raw("metadata->>'scheduled_service_id' as meta_visit_id")),
     conn('scheduled_services as sv').join('call_log as cl', 'cl.id', 'sv.source_call_log_id')

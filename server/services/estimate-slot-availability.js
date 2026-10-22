@@ -1762,13 +1762,14 @@ async function stopDatesInRange(dateFrom, dateTo, ownEstimateId = null) {
 // Filter a customer-facing slot pool by time-of-day preference ('morning' |
 // 'afternoon' | 'evening' | 'any'). morning = before noon; afternoon/evening
 // fall inside the 12pm–5pm working window.
+function startInTimeOfDay(min, timeOfDay) {
+  if (!timeOfDay || timeOfDay === 'any' || min == null) return true;
+  return timeOfDay === 'morning' ? min < 12 * 60 : min >= 12 * 60;
+}
+
 function filterTimeOfDay(slots, timeOfDay) {
   if (!timeOfDay || timeOfDay === 'any') return slots;
-  return (Array.isArray(slots) ? slots : []).filter((s) => {
-    const min = timeToMinutes(s.windowStart);
-    if (min == null) return true;
-    return timeOfDay === 'morning' ? min < 12 * 60 : min >= 12 * 60;
-  });
+  return (Array.isArray(slots) ? slots : []).filter((s) => startInTimeOfDay(timeToMinutes(s.windowStart), timeOfDay));
 }
 
 // Drop any candidate on today's Eastern date whose displayed window starts
@@ -2206,6 +2207,16 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       // customer grid (09:00-17:00, docs/public-route-contracts.md) — never
       // an 08:00 start (Codex r3 P0 on #4663).
       customerFacing: true,
+      // Slide shadow (GATE_SLOT_SLIDE_OFFER): the daypart, live lead time and
+      // zone-day funnel this picker applies to the results below, so a
+      // logged slide is one it could actually show. (A seeded funnel picks
+      // one day from the final pool, which isn't known yet — only the
+      // clustered funnel days are applied here.)
+      slideNewStartAllowed: (date, startMin) => {
+        if (funnelDays && !funnelDays.has(date)) return false;
+        if (startMin < earliestBookableMinuteForDate(date, new Date(), opts.minimumLeadMinutes)) return false;
+        return startInTimeOfDay(startMin, opts.timeOfDay);
+      },
       dateFrom: segFrom,
       dateTo: segTo,
       topN: Number.MAX_SAFE_INTEGER,

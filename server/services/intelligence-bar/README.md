@@ -109,6 +109,8 @@ that no tool can prove: when a response has a free-text field, the row must decl
 `ticket`, `passcode`, `password`, `pwd`, `bearer`, ...) come from the same name list as the credential
 fields (`utils/credential-fields.js`); `code` is left out on purpose because it is too common.
 
+**Returned notes (`GATE_IB_READ_NOTES`, owner ruling 2026-10-13, needs `GATE_IB_GENERAL_READ`).** With the gate on, the owner login gets the text of the free-text keys that the rule above withholds, instead of `[note withheld: N characters]` (the same keys: a `note` declaration or a name-matched key not declared `content`; `notes_returned` counts them). The text passes the structural link redaction every string gets (signed and private links become markers) and ONE fixed-format scrubber (`utils/note-secret-scrubber.js`: key and token shapes, Bearer tokens, JWTs, PEM blocks, credential query parameters in URLs, card numbers, SSN pattern, runs of 32+ base64/hex characters) and is cut at 1,000 characters (`[cut]`). It has no prose rules on purpose: gate codes, lockbox instructions and a password written as plain words come back as written (known limit). One structural rule covers labelled credentials: when a credential KEY (password, passwd, secret, token, api key, credential, auth, authorization, cookie, nonce, jwt, bearer, otp, `*_key` such as private_key, `*_key_id`, password_hash, or an env-style name such as DB_PASSWORD_FILE) is followed by `:` or `=`, EVERYTHING after the separator to the end of that note string is replaced by one `[removed]`; the text before the key, the key and the separator stay. No value format is parsed (quotes, lists, objects, YAML blocks, several words, line breaks, CRLF and an unclosed quote all end the same way), so a value cannot hide part of itself. A structured note applies the rule inside each string leaf. A key inside a link is left to the link rules. `PIN`, `passcode`, `session` and `signature` are not credential keys (owner ruling). The answer is still a data answer, so the untrusted-read taint below applies and later writes show cards. Gate off = the withholding above, unchanged. Do not add label-and-value rules to the note scrubber.
+
 **Core screens, projections and accepted signals (owner 2026-10-13: "access to everything").** The reviewed list
 includes the record screens the owner uses most: the customer list, a customer's timeline, texts and calls, estimates,
 cards on file, collection holds and deposit credit; the schedule list (one day is `from=to=date`, a week is a seven-day
@@ -134,6 +136,10 @@ consultation-link read mints a link and stays out). Three row fields make that s
   the secret scrubber. The generator refuses a kept key that looks like free text (unless the row declares it `content`) and
   a fixed list of operator-entered fields (payment_reference, profileLabel, tags, competitorName, title, metadata ...).
   Every row added with the core screens and leads is in keep mode; the rows already on main are not.
+- `keepNotes` (keep-mode rows only): response key paths that hold free-text notes (`notes`, `line_items.*.description`). They are
+  kept ONLY while `GATE_IB_READ_NOTES` is on, and then pass the returned-notes scrubber like any other note; gate off, the
+  projection is exactly `keep`. Reviewed per row (invoice list and detail, visit, collection holds, estimate list); the
+  generator refuses a path that is never kept (`title`, `tags`, `metadata` ...). Rows without it return no notes in either state.
 - `keywords`: plain-language phrases `find_admin_reads` matches ("texts with this customer", "unpaid invoices"); they weigh
   like path words.
 Left out, with the reason: the Customer 360 payload (`GET /admin/customers/:id`: its chain reaches the estimate pricing

@@ -500,10 +500,25 @@ describe('POST /recording-status', () => {
       processing_status: 'processed', transcription: 'Agent: fixture line.', review_status: null,
       metadata: { additional_recordings: [{ recording_sid: REC_2, recording_url: `${URL_2}.mp3`, parked_because: 'processing_status_processed' }] },
     });
-    await post('/recording-status', recordingCallback({ RecordingSid: REC_2, RecordingUrl: URL_2, RecordingDuration: '80' }));
+    // Record the tables each transaction touches, in order.
+    const txTables = [];
+    const realTx = db.transaction;
+    db.transaction = jest.fn(async (fn) => {
+      const seen = [];
+      txTables.push(seen);
+      return fn(Object.assign((t) => { seen.push(t); return db(t); }, { raw: db.raw }));
+    });
+    try {
+      await post('/recording-status', recordingCallback({ RecordingSid: REC_2, RecordingUrl: URL_2, RecordingDuration: '80' }));
+    } finally {
+      db.transaction = realTx;
+    }
     expect(tables.triage_items).toHaveLength(1);
     expect(tables.triage_items[0]).toMatchObject({ call_log_id: 'c1', reason_code: 'additional_recording', status: 'open' });
     expect(tables.call_log[0].review_status).toBe('open');
+    // The recovery transaction takes call_log BEFORE triage_items, the order of every other unlocked
+    // writer of the pair (codex #6342: the inverse order can deadlock against them).
+    expect(txTables[txTables.length - 1]).toEqual(['call_log', 'triage_items']);
     // Still exactly one parked entry — the retry appended nothing.
     expect(tables.call_log[0].metadata.additional_recordings).toHaveLength(1);
   });

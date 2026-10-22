@@ -444,17 +444,6 @@ describe('malformed SUPPLIED bounds are refused at intake (before the unchanged-
 });
 
 
-test('address regrouping uses final edit values inside the transaction', () => {
-  const handler = src.slice(src.indexOf("router.put('/:id/update-details'"));
-  const regroup = handler.indexOf('for (const id of addressUpdatedIds)');
-  const lastCountReconcile = handler.lastIndexOf('await reconcileRecurringSeriesVisitCount(trx,', regroup);
-  const postCommit = handler.indexOf('// Tech-facing notice for a same-tech date/time move');
-  expect(lastCountReconcile).toBeGreaterThan(-1);
-  expect(regroup).toBeGreaterThan(lastCountReconcile);
-  expect(regroup).toBeLessThan(postCommit);
-  expect(handler.slice(regroup, postCommit)).toContain("maybeGroupRow(id, { database: trx, createdBy: 'dispatch' })");
-});
-
 // These ordering guards cover the modal's transaction wiring; real PostgreSQL
 // concurrency remains a separate dev-database verification requirement.
 test('address saves fence destination partner technicians and reject changed snapshots before writes', () => {

@@ -971,7 +971,11 @@ export function LawnWateringBanner({ banner: frozenBanner, style = null, setupHr
   // the two with this same rule.
   const live = watering && !ended && !printed && !hold;
   const observedLine = live && typeof banner.observedRain?.line === 'string' && banner.observedRain.line ? banner.observedRain.line : null;
-  const forecastLine = live && !observedLine && typeof banner.forecastLine === 'string' && banner.forecastLine ? banner.forecastLine : null;
+  // GATE_LAWN_WATERING_TEXT_FORECAST: a hold-then-water-in may carry a forecast
+  // sentence for rain after the hold (the server freezes one only for a hold
+  // with a printed end); a plain hold never shows one.
+  const forecastLive = watering && !ended && !printed && banner.state !== 'hold';
+  const forecastLine = forecastLive && !observedLine && typeof banner.forecastLine === 'string' && banner.forecastLine ? banner.forecastLine : null;
   // GATE_LAWN_REPORT_CLARITY: the invitation under a water-in that gives the
   // amount and no minutes (no sprinkler setup on file). Live view only, like the
   // lines above, but it also shows under a hold-then-water-in; the server only

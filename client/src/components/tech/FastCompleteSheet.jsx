@@ -307,7 +307,9 @@ function missingRequirement(form, rows, ratingAllowed, dictationPending, openChe
   // zero (unless the stock is advisory); a stock already at zero is named here instead.
   const outOfStock = !stockAdvisory && active.find(isOutOfStockRow);
   const missingAmount = active.find((row) => !hasAmount(row));
-  const needsLinearFt = active.some((row) => rowMethod(row, form.method) === 'perimeter_spray');
+  // Linear feet are optional (owner 2026-10-22): an empty box holds nothing, but a typed length must be above 0.
+  const badLinearFt = String(form.linearFt).trim() !== '' && !(Number(form.linearFt) > 0)
+    && active.some((row) => rowMethod(row, form.method) === 'perimeter_spray');
   const [, reason = '', stockRow = null] = [
     // A recorded clip still being taken or transcribed would miss the save.
     [dictationPending, 'Finish dictating before you complete.'],
@@ -317,7 +319,7 @@ function missingRequirement(form, rows, ratingAllowed, dictationPending, openChe
     [!form.pests.size, 'Select at least one pest.'],
     [form.pests.has('Other') && !form.otherPest.trim(), 'Name the other pest.'],
     [!form.areas.size, 'Select where you treated.'],
-    [needsLinearFt && !(Number(form.linearFt) > 0), 'Enter the linear feet you sprayed.'],
+    [badLinearFt, 'Enter the linear feet above 0, or leave the box empty.'],
     [ratingAllowed && !form.activity, 'Select activity seen.'],
     // Voice fill: something it could not settle is still open.
     [openChecks > 0, 'Check what I couldn\'t fill.'],
@@ -370,7 +372,8 @@ function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailabl
         amountUnit,
         applicationArea,
         ...(Number(rate) > 0 && rateUnit ? { rate: Number(rate), rateUnit } : {}),
-        ...(applicationMethod === 'perimeter_spray' ? { areaValue: Number(form.linearFt), areaUnit: 'linear_ft' } : {}),
+        // Linear feet are optional (owner 2026-10-22): an empty box sends no length, never 0.
+        ...(applicationMethod === 'perimeter_spray' ? { areaValue: Number(form.linearFt) > 0 ? Number(form.linearFt) : null, areaUnit: 'linear_ft' } : {}),
       };
     }),
     areasServiced: [...form.areas],
@@ -507,6 +510,7 @@ function useFastCompleteContext({
             laneFlow: !!laneKey, laneKey, typedFlow: !!typedType, typedType,
           }),
           visit,
+          contact: data?.contact || null,
           products,
           commonProducts,
           // The house totals are in the unit the resolver gives (4 fl oz), so
@@ -638,8 +642,11 @@ export default function FastCompleteSheet({ service, request: plainRequest, oper
   const [voiceBusy, setVoiceBusy] = useState(false);
   // The Wrap-up's submit-time check of the review send time is reading: the sheet is locked like a submit.
   const [wrapChecking, setWrapChecking] = useState(false);
+  // The inline tracer is open (owner 2026-10-22: it sits in the page, with no cover over the sheet): Full form,
+  // Details and Close wait for it, so its points and a save in flight are never dropped.
+  const [tracing, setTracing] = useState(false);
   // The form's own word that this visit needs the full form (see the header).
-  usePartBusy('pest', [submitting, voiceBusy, wrapChecking, dictationPending, photoBusy].some(Boolean));
+  usePartBusy('pest', [submitting, voiceBusy, wrapChecking, dictationPending, photoBusy, tracing].some(Boolean));
   const [fullFormNeeded, setFullFormNeeded] = useState(false);
   const fullFormOffered = fullFormOfferedFor({ reportFlow, fullFormNeeded, ctx, stationsFlow: routedStationsOf(service) });
 
@@ -652,12 +659,12 @@ export default function FastCompleteSheet({ service, request: plainRequest, oper
   const close = useCallback(() => {
     // Voice still recording, transcribing or filling: closing (×, backdrop or
     // Escape all come through here) would drop those words and the sheet's edits.
-    if ([submitting, voiceBusy, wrapChecking].some(Boolean)) return;
+    if ([submitting, voiceBusy, wrapChecking, tracing].some(Boolean)) return;
     // The completion response rides along: admin Dispatch reads its invoice
     // fields to stage the payment handoff.
     if (done) onCompleted?.(done.response || null);
     else onClose?.(ctx.blockedReason || submission.failure ? { refresh: true } : undefined);
-  }, [submitting, voiceBusy, wrapChecking, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
+  }, [submitting, voiceBusy, wrapChecking, tracing, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
   closeRef.current = close;
   // Nothing is editable while a save is in flight, unresolved, or refused
   // for good; the recap modal (Full form) can't resume a /complete attempt,
@@ -677,13 +684,13 @@ export default function FastCompleteSheet({ service, request: plainRequest, oper
         <TechServicePhotosModal serviceId={service?.id} customerName={customerNameOf(ctx.visit, service)} onClose={photoManager.close} />
       )) || sheetOverlay}
     >
-      <SheetHeader titleId={titleId} title={sheetTitle(reportFlow, ctx.visit, done)} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending || photoBusy || voiceBusy} submitting={[submitting, voiceBusy, wrapChecking].some(Boolean)} onFullForm={onFullForm} onViewDetails={detailsHandler(ctx, onViewDetails)} onClose={close} fullFormOffered={fullFormOffered} />
-      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} onOverlay={setSheetOverlay} dictationPending={dictationPending} onDictationPending={setDictationPending} onPhotoBusy={setPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} onFullFormNeeded={setFullFormNeeded} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled === true} onVoiceBusy={setVoiceBusy} sharedNote={sharedNote} onWrapChecking={setWrapChecking} />
+      <SheetHeader titleId={titleId} title={sheetTitle(reportFlow, ctx.visit, done)} service={service} visit={ctx.visit} contact={ctx.contact} done={!!done} locked={locked} dictationPending={dictationPending || photoBusy || voiceBusy || tracing} submitting={[submitting, voiceBusy, wrapChecking, tracing].some(Boolean)} onFullForm={onFullForm} onViewDetails={detailsHandler(ctx, onViewDetails)} onClose={close} fullFormOffered={fullFormOffered} />
+      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} onOverlay={setSheetOverlay} dictationPending={dictationPending} onDictationPending={setDictationPending} onPhotoBusy={setPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} onFullFormNeeded={setFullFormNeeded} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled === true} onVoiceBusy={setVoiceBusy} sharedNote={sharedNote} onWrapChecking={setWrapChecking} onTracing={setTracing} />
     </Frame>
   );
 }
 
-function SheetBody({ service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending, onPhotoBusy, onCompleted, onFullForm, onFullFormNeeded, isMobile, voiceFillEnabled, onVoiceBusy, sharedNote, onWrapChecking }) {
+function SheetBody({ service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending, onPhotoBusy, onCompleted, onFullForm, onFullFormNeeded, isMobile, voiceFillEnabled, onVoiceBusy, sharedNote, onWrapChecking, onTracing }) {
   const reportFlow = service?.reportFlow === true;
   // The report flow keeps its form mounted through the saved view: what the
   // tech marked shows there.
@@ -705,7 +712,7 @@ function SheetBody({ service, request, ctx, submission, locked, photos, onOverla
   const stop = ctx.loadError || ctx.blockedReason;
   if (stop) return <ActionFeedback error={!!ctx.loadError} className="tech-visit-feedback tech-visit-loading">{stop}</ActionFeedback>;
   if (reportFlow) {
-    return <ReportFlowForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} onOverlay={onOverlay} dictationPending={dictationPending} onDictationPending={onDictationPending} onPhotoBusy={onPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} onFullFormNeeded={onFullFormNeeded} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} sharedNote={sharedNote} onWrapChecking={onWrapChecking} />;
+    return <ReportFlowForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} onOverlay={onOverlay} dictationPending={dictationPending} onDictationPending={onDictationPending} onPhotoBusy={onPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} onFullFormNeeded={onFullFormNeeded} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} sharedNote={sharedNote} onWrapChecking={onWrapChecking} onTracing={onTracing} />;
   }
   return <FastCompleteForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} onVoiceBusy={onVoiceBusy} onWrapChecking={onWrapChecking} />;
 }
@@ -873,7 +880,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
             (now or added later) can end the speech session early. */}
         <fieldset className="tech-visit-form" disabled={formLocked}>
           <VoiceFillReview voice={voice} locked={formLocked} />
-          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={dictating.note} serviceId={serviceId} locked={formLocked} />
+          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={dictating.note} serviceId={serviceId} locked={formLocked} micInside />
           <OfficeNote voice={voice} locked={formLocked} />
           {/* A clip being recorded keeps recording behind the photo manager, so
               photos wait until the dictation is finished. */}
@@ -1170,12 +1177,6 @@ function reportFlowNeedsFullForm({ generateMissing, completeMissing, report, vis
   return !!report.writeError || (!oneTap && (visitPhotos.failed === true || trace.failed === true));
 }
 
-// A hold's fix as the footer's own button: the missing trace opens the tracer
-// with the outline read started.
-const HOLD_FIXES = {
-  trace: (missing, openTracer) => (missing.fix === 'trace' ? () => openTracer(true) : null),
-};
-
 const sendHoldsFor = (mode) => ({ lane: laneSendHolds, typed: typedSendHolds })[mode] || sendHolds;
 
 const NO_PRODUCT_HOLDS = {
@@ -1185,7 +1186,7 @@ const NO_PRODUCT_HOLDS = {
 
 // What still holds the report (generate) or the completion (complete), in
 // screen order, the product whose stock holds it, and the fix the hold
-// offers on the sheet ('remove_trace', or 'trace': the footer's Auto-trace).
+// offers on the sheet ('remove_trace').
 // What an empty product list says for this record mode (null: no hold).
 const noProductHold = (mode) => (mode in NO_PRODUCT_HOLDS ? NO_PRODUCT_HOLDS[mode] : 'Select at least one product.');
 
@@ -1197,7 +1198,7 @@ const noProductHold = (mode) => (mode in NO_PRODUCT_HOLDS ? NO_PRODUCT_HOLDS[mod
 // lists every such product for the sheet to name.
 // `oneTap` (GATE_ONE_TAP_REPORT, owner 2026-10-17): the photo read holds nothing (photos are optional, shown when
 // saved; the body then omits photoCaptionsSeen until the read answers). A photo change still being saved still holds.
-function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, photosLoaded, photosFailed, promisesLoaded, stage, mode, voiceHolds, productsFromNote, stationHold, stockAdvisory, oneTap, ...sendInputs }) {
+function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, traceHold, photosLoaded, photosFailed, promisesLoaded, stage, mode, voiceHolds, productsFromNote, stationHold, stockAdvisory, oneTap, ...sendInputs }) {
   const outOfStock = active.find(isOutOfStockRow);
   const unread = stage === 'generate' && productsFromNote;
   const missingAmount = unread ? null : active.find((row) => !hasAmount(row));
@@ -1205,6 +1206,7 @@ function reportFlowMissing({ form, active, ratingAllowed, dictationPending, phot
   const [, reason = '', stockRow = null, fix = null] = [
     [dictationPending, 'Finish dictating first.'],
     [photoHold, photoHold],
+    [traceHold, traceHold],
     [!oneTap && !photosLoaded, 'Loading photos…'],
     [!oneTap && photosFailed, 'Read the photos again first.'],
     [!promisesLoaded, 'Loading promises…'],
@@ -1334,7 +1336,6 @@ function laneSendHolds({ active, draft, writing, perimeterFeet, traceRead, lane,
   const ready = reportReadyHolds({ draft, writing, traceRead });
   const laneAreas = laneRecord.areas;
   const perimeterRow = perimeterSprayRow(active, draft);
-  const untraced = !perimeterFeet && perimeterRow;
   // A saved trace claims what it shows: a perimeter a spray around the
   // house, an outline (the lawn and yard workflows) an area treated, so each
   // stands only with a product that went down that way (codex local r2 on
@@ -1368,7 +1369,7 @@ function laneSendHolds({ active, draft, writing, perimeterFeet, traceRead, lane,
     // with a work state) goes on the full form, which records the work.
     [laneRecordNeedsAction(SERVICE_COMPLETION_PRESETS[lane], laneRecord), 'A finding on this record needs the work you did recorded beside it, and only the Full form records that. Use the Full form.'],
     ...ready.trace,
-    [untraced, untraced && `${untraced.name} is a perimeter spray and this visit can’t be traced here. Use the Full form.`],
+    // No trace is required on any visit (owner 2026-10-22): an untraced perimeter spray holds nothing.
     [unusedTrace, areaTrace
       ? 'Your saved outline would show on the customer’s report as the area treated, but nothing on this visit was broadcast, spread or misted across an area. Remove the trace, or use the Full form.'
       : 'Your saved trace would show on the customer’s report, but nothing on this visit was sprayed around the house. Remove the trace, or use the Full form.', null, 'remove_trace'],
@@ -1413,8 +1414,6 @@ function typedSendHolds({ active, draft, writing, perimeterFeet, traceRead, reco
   const score = typedScoreOf(typedSchema, record);
   const scoreConflict = typedActivityScoreConflict(typedSchema.type, values, score);
   const standardWording = typedZeroStateRefusesBody(typedSchema.type, values, score);
-  const perimeterRow = perimeterSprayRow(active, draft);
-  const untraced = !perimeterFeet && perimeterRow;
   const shownTrace = draft && traceOnReport && traceRead.zone;
   // A product's place is the visit's treated side on the report (as on a
   // lane visit): the form's own area field, or, for a form whose places the
@@ -1440,39 +1439,38 @@ function typedSendHolds({ active, draft, writing, perimeterFeet, traceRead, reco
     [scoreConflict, scoreConflict],
     [standardWording, 'Nothing was found on this record, so the customer’s report uses its standard wording, not this one. Use the Full form.'],
     ...ready.trace,
-    [untraced, untraced && `${untraced.name} is a perimeter spray and this visit can’t be traced here. Use the Full form.`],
+    // No trace is required on any visit (owner 2026-10-22): an untraced perimeter spray holds nothing.
     [shownTrace, 'This visit has a saved trace the customer’s report would show, and this sheet doesn’t check it. Remove the trace, or use the Full form.', null, 'remove_trace'],
   ];
 }
 
-// Complete & send on a pest visit waits only on the report, the trace check
-// and a perimeter spray's traced length. What the note's read heard (places,
-// pests, how the sprays went down) shows in "Heard from you" but never holds
-// the send: rewriting the note for it took too long in the field (owner
-// 2026-10-10), so the record goes as it was heard.
-// The one-tap report (`oneTap`, owner 2026-10-17): the trace is optional. A perimeter spray with no saved trace is
-// covered by the feet the tech types (`typedFeet`, a whole number above 0), so the trace still can be done but
-// never has to be, and "can't be traced here" never sends the tech to the Full form. Its read holds nothing either:
-// still loading or failed, the typed feet cover the spray and the body omits traceSeen (a saved trace the sheet
-// could not read still shows on the report). A saved trace that gives no feet (an outline, an old trace) keeps the
-// rules below: the record would show it beside the typed feet.
-function sendHolds({ active, draft, writing, perimeterFeet, traceAvailable, traceRead, oneTap = false, typedFeet = null }) {
+// Complete & send on a pest visit waits only on the report and the trace check. What the note's read heard
+// (places, pests, how the sprays went down) shows in "Heard from you" but never holds the send: rewriting the note
+// for it took too long in the field (owner 2026-10-10), so the record goes as it was heard.
+// No visit needs a trace or typed feet (owner 2026-10-22). The one-tap report (`oneTap`, owner 2026-10-17) offers a
+// "Feet sprayed" box for a perimeter spray with no saved trace, and its trace read holds nothing: still loading or
+// failed, the body omits traceSeen (a saved trace the sheet could not read still shows on the report). A saved trace
+// that gives no feet (an outline, an old trace) keeps the rules below.
+function sendHolds({ active, draft, writing, perimeterFeet, traceRead, oneTap = false, reusing = false, typedFeet = null, typedFeetText = '' }) {
   const ready = reportReadyHolds({ draft, writing, traceRead });
-  const perimeterRow = perimeterSprayRow(active, draft);
-  const untraced = !perimeterFeet && perimeterRow;
+  // "Same as last visit" still copying: the send waits for the trace it will carry.
+  const copying = [reusing, 'Copying the last trace…'];
+  // No trace and no typed feet are required on any visit (owner 2026-10-22, "trace should not be required for any
+  // service"). Feet typed in the box (shown beside a perimeter spray, feetFieldFor) must be a whole number above 0: a
+  // mistake is corrected, never dropped. A box the visit no longer shows holds nothing.
   if (oneTap && !traceRead.zone) {
-    return [
-      ...ready.report,
-      [untraced && !typedFeet, 'Type the feet you sprayed, or trace it.', null, traceAvailable ? 'trace' : null],
-    ];
+    const badFeet = String(typedFeetText).trim() !== '' && typedFeet == null && perimeterSprayRow(active, draft);
+    return [...ready.report, copying, [badFeet, 'Type the feet as a whole number above 0, or leave the box empty.']];
   }
   return [
     ...ready.report,
-    // Whether a trace is saved decides the hold below.
+    copying,
+    // A saved trace is still read first, so the send carries the stamp of the trace the tech saw.
     ...ready.trace,
-    [untraced, untraced && (traceAvailable
-      ? `Trace where you sprayed: ${untraced.name} is a perimeter spray.`
-      : `${untraced.name} is a perimeter spray and this visit can’t be traced here. Use the Full form.`), null, traceAvailable ? 'trace' : null],
+    // A saved outline (a lawn or yard capture, no perimeter length) beside a perimeter spray would show on the report
+    // as the place sprayed: the tech removes it, or traces the perimeter (the check the required trace used to make).
+    // With no perimeter spray, a saved trace holds nothing (owner 2026-10-10).
+    [traceRead.zone && !perimeterFeet && perimeterSprayRow(active, draft), 'Your saved trace is an outline, not the perimeter you sprayed. Remove the trace, or trace the perimeter.', null, 'remove_trace'],
   ];
 }
 
@@ -1868,7 +1866,7 @@ function productLaneOf(service) {
 
 function ReportFlowForm({
   service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending,
-  onPhotoBusy, onCompleted, onFullForm, onFullFormNeeded, isMobile, voiceFillEnabled, sharedNote, onWrapChecking,
+  onPhotoBusy, onCompleted, onFullForm, onFullFormNeeded, isMobile, voiceFillEnabled, sharedNote, onWrapChecking, onTracing,
 }) {
   // Only opened for a visit in the report flow (service.reportFlow), so the
   // service is always there.
@@ -1952,13 +1950,25 @@ function ReportFlowForm({
   // The property this sheet loaded: a trace saved or removed here is refused
   // if the office has moved the visit to another one since.
   const loadedPropertyId = ctx.visit?.propertyId;
+  const [traceError, setTraceError] = useState('');
+  // "Same as last visit" (GATE_TRACE_REUSE), for a plain pest visit with no trace of its own.
+  const reuse = useTraceReuse({
+    serviceId: service.id, request, propertyId: loadedPropertyId, trace, mode, traceAvailable, writing, setError: setTraceError,
+  });
+  // The inline tracer sits inside each step, so while it is open the report, the send and every way to another step
+  // wait (a step change would remount it and drop its points, or a save in flight), and so do the header's Full form
+  // and Close.
+  const [tracerOpen, setTracerOpen] = useState(false);
+  const traceHold = tracerOpen ? 'Finish the trace first.' : '';
+  useEffect(() => { onTracing?.(tracerOpen); }, [tracerOpen, onTracing]);
+  useEffect(() => () => onTracing?.(false), [onTracing]);
   const promiseMarks = visitPromises.available ? promiseMarksPayload(form.promiseMarks, visitPromises.promises) : [];
   const signature = writerSignature(form, rows, promiseMarks, visitPhotos.photos, recordState.signaturePart(record));
   const stale = !!draft && draft.signature !== signature;
   const ratingAllowed = ctx.rating.allowed;
   const action = writeAction(draft, stale, report.writeError);
   const holdInputs = {
-    form, active, ratingAllowed, dictationPending, photoHold, photosLoaded: visitPhotos.loaded, photosFailed: visitPhotos.failed, promisesLoaded: visitPromises.loaded, mode,
+    form, active, ratingAllowed, dictationPending, photoHold, traceHold, photosLoaded: visitPhotos.loaded, photosFailed: visitPhotos.failed, promisesLoaded: visitPromises.loaded, mode,
     stationHold: recordState.stationGate.generate,
     stockAdvisory: ctx.stockAdvisory,
     oneTap,
@@ -1969,7 +1979,7 @@ function ReportFlowForm({
   });
   const completeMissing = reportFlowMissing({
     ...holdInputs, stage: 'complete', draft, writing, perimeterFeet, traceAvailable, traceRead: trace, lane, record, typedSchema: recordState.schema, traceOnReport: ctx.traceOnReport,
-    stationSendHold: recordState.stationGate.complete, typedFeet: typedFeetValue,
+    stationSendHold: recordState.stationGate.complete, typedFeet: typedFeetValue, typedFeetText: typedFeet, reusing: reuse.reusing,
     voiceHolds: productVoice.enabled ? { confirms: productVoice.confirms.length, checks: productVoice.checks.length } : null,
   });
   // The header's Full form button: a hold that sends the tech to the full
@@ -2075,11 +2085,12 @@ function ReportFlowForm({
   // A part of a stop (prepare mode): a change behind the handed-over body, or a part that can no longer be prepared
   // (a stale report, a hold), revokes it.
   useEffect(() => { submission.revokeIfChanged(buildBody, { valid: canPrepare }); });
-  // The tracer opens over the sheet, the way the photo manager does.
-  // `autoTrace`: the footer's button, which starts the outline read at once.
-  const openTracer = (autoTrace = false) => onOverlay(
+  // The tracer opens in the page, under the trace section (owner 2026-10-22, "should be on the same page"): no
+  // cover over the sheet, and Done or × folds it away.
+  const openTracer = () => setTracerOpen(true);
+  const renderTracer = () => (
     <TechTreatmentZoneModal
-      autoTrace={autoTrace}
+      inline
       serviceId={service.id}
       expectedPropertyId={loadedPropertyId}
       openVisitOnly
@@ -2087,20 +2098,19 @@ function ReportFlowForm({
       address={service.routedAddress || service.address || ''}
       lat={service.lat}
       lng={service.lng}
-      onClose={() => onOverlay(null)}
+      onClose={() => setTracerOpen(false)}
       onSaved={trace.saved}
-    />,
+    />
   );
+  const tracer = tracerOpen ? renderTracer() : null;
+  // The trace is offered (never required), on both steps, beside a perimeter spray the sheet can trace. The spray's
+  // method is known once the report is written: on the visit step, that is after the one-tap rating's write.
+  const stepTrace = traceAvailable && perimeterSprayRow(active, draft) ? trace : null;
 
   // "Remove the trace": a saved trace the note no longer backs comes off,
   // then the trace is read again. A refusal (the visit moved, or was
   // completed elsewhere) is shown and the hold stays.
   const [removingTrace, setRemovingTrace] = useState(false);
-  const [traceError, setTraceError] = useState('');
-  // "Same as last visit" (GATE_TRACE_REUSE), for a plain pest visit with no trace of its own.
-  const reuse = useTraceReuse({
-    serviceId: service.id, request, propertyId: loadedPropertyId, trace, mode, traceAvailable, writing, setError: setTraceError,
-  });
   const removeTrace = async () => {
     setRemovingTrace(true);
     setTraceError('');
@@ -2127,7 +2137,6 @@ function ReportFlowForm({
     );
   }
   if (step === 'report') {
-    const stepTrace = traceAvailable && perimeterSprayRow(active, draft) ? trace : null;
     return (
       <ReportStep
         wrapUp={wrapUp}
@@ -2166,7 +2175,7 @@ function ReportFlowForm({
         onWrite={write}
         onSubmit={submit}
         onTrace={() => openTracer()}
-        onAutoTrace={HOLD_FIXES.trace(completeMissing, openTracer)}
+        tracer={tracer}
         onBack={() => setStep('visit')}
         onConfirm={() => submission.confirm(summary())}
         // A promise that changed after the report was written: the list
@@ -2211,12 +2220,16 @@ function ReportFlowForm({
       noteClipEnabled={voiceFill}
       onRate={backgroundWrite.request}
       stockNotices={stockNotices}
+      trace={stepTrace}
+      tracer={tracer}
+      onTrace={() => openTracer()}
       footer={action
         // One-tap: while the rating tap's write runs, the button only opens the report step; it never starts a second write.
         ? { reason: generateMissing.reason, label: action.label, onAction: () => (backgroundWrite.running ? setStep('report') : write(action.fresh)) }
         // A photo change in hand (a description open, a change saving, a
-        // removal to answer) holds the way back too (codex local r2).
-        : { reason: photoHold, label: 'Back to the report', onAction: () => setStep('report') }}
+        // removal to answer) holds the way back too (codex local r2), and so
+        // does an open tracer.
+        : { reason: photoHold || traceHold, label: 'Back to the report', onAction: () => setStep('report') }}
       writing={backgroundWrite.foreground || preReading}
       warn={!!generateMissing.stockRow}
       stockButton={stockButton}
@@ -2229,16 +2242,11 @@ function ReportFlowForm({
 // No copy offered (a lane or typed visit, a spot visit, a trace already saved).
 const NO_REUSE = { offer: null, reusing: false, feet: null };
 
-// `traceStep`: the report step has a perimeter spray to trace (the hold the
-// copy clears); with none, the last trace is not offered.
-function TraceFooterButtons({ locked, onRetryTrace, onRemoveTrace, removingTrace, reuse, traceStep, onAutoTrace }) {
+// `traceStep`: the report step has a perimeter spray to trace (offered, never
+// required); with none, the last trace is not offered.
+function TraceFooterButtons({ locked, onRetryTrace, onRemoveTrace, removingTrace, reuse, traceStep }) {
   return (
     <>
-      {/* The hold is the missing trace (owner 2026-10-09): its fix sits beside
-          Complete & send, not only in the section above the fold. */}
-      {onAutoTrace && (
-        <Button type="button" className="tech-visit-action tech-visit-wide" disabled={locked || reuse.reusing} onClick={onAutoTrace}>Auto-trace the house</Button>
-      )}
       {onRetryTrace && (
         <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={locked} onClick={onRetryTrace}>Check the trace again</Button>
       )}
@@ -2259,8 +2267,8 @@ function TraceFooterButtons({ locked, onRetryTrace, onRemoveTrace, removingTrace
 // prompt, write the report, or complete & send.
 function ReportStep({
   wrapUp, service, report, stale, action, locked, submission, generateMissing, completeMissing, stockButton, trace, traced, sources, photoCount,
-  blogPost, pestHeard, productVoice, laneCard, onWrite, onSubmit, onTrace, onRetryTrace, onRemoveTrace, removingTrace, traceError, onBack, onConfirm,
-  onBackFromPrompt, reuse = NO_REUSE, onAutoTrace = null, feetField, stockNotices,
+  blogPost, pestHeard, productVoice, laneCard, onWrite, onSubmit, onTrace, tracer, onRetryTrace, onRemoveTrace, removingTrace, traceError, onBack, onConfirm,
+  onBackFromPrompt, reuse = NO_REUSE, feetField, stockNotices,
 }) {
   const { draft, writing, writeError } = report;
   const [editing, setEditing] = useState(false);
@@ -2275,7 +2283,6 @@ function ReportStep({
         removingTrace={removingTrace}
         reuse={reuse}
         traceStep={!!trace}
-        onAutoTrace={trace ? onAutoTrace : null}
       />
     </CompleteFooter>
   );
@@ -2292,7 +2299,7 @@ function ReportStep({
     <div className="tech-visit-form-area">
       <div className="tech-visit-body">
         <WrapUpClock wrapUp={wrapUp} since={service.onSiteAt} />
-        <Button type="button" variant="ghost" className="tech-visit-action tech-report-back" disabled={locked || writing} onClick={() => { setEditing(false); onBack(); }}>
+        <Button type="button" variant="ghost" className="tech-visit-action tech-report-back" disabled={locked || writing || !!tracer} onClick={() => { setEditing(false); onBack(); }}>
           Back to the visit
         </Button>
         {writing && <WritingView sources={sources} />}
@@ -2319,7 +2326,7 @@ function ReportStep({
             ✓; a wrong one is changed back on the visit (Products, Edit). */}
         {showDraft && <VoiceFillReview voice={productVoice} locked={locked} />}
         {laneCard}
-        {showDraft && trace && <TraceSection trace={trace} locked={locked || reuse.reusing} onTrace={onTrace} />}
+        {showDraft && <TraceSection trace={trace} locked={locked || reuse.reusing} onTrace={onTrace} tracer={tracer} />}
         <FeetSprayedField field={feetField} locked={locked} />
         {wrapUp.enabled && <fieldset className="tech-visit-form" disabled={locked}><FastCompleteWrapUp wrapUp={wrapUp} /></fieldset>}
         {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
@@ -2335,7 +2342,7 @@ function VisitStep({
   wrapUp, service, ctx, form, setForm, products, active, sprayMethod, tips, blog, visitPromises, photos, onPhotos, locked, dictationPending,
   onDictationPending, onFullForm, isMobile, onAddProduct, footer, writing, warn, stockButton,
   noteBoxPhotos, photosReadFailed, request, photoHold, onPhotoHold, onPhotosUpdate, onPhotosChanged,
-  productVoice, noteClipEnabled = false, sharedNote, onRate, stockNotices,
+  productVoice, noteClipEnabled = false, sharedNote, onRate, stockNotices, trace, tracer, onTrace,
 }) {
   const [editAmounts, setEditAmounts] = useState(false);
   const [productsOpen, setProductsOpen] = useState(false);
@@ -2379,7 +2386,7 @@ function VisitStep({
           {/* Photos in the note's box (GATE_NOTE_BOX_PHOTOS): the note's mic
               waits while a photo's description is open or a change is
               saving, so one microphone records at a time. */}
-          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={dictating.note} serviceId={service?.id} locked={locked || !!photoHold} onClip={noteClip.onClip} shared={sharedNote != null}>
+          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={dictating.note} serviceId={service?.id} locked={locked || !!photoHold} onClip={noteClip.onClip} micInside shared={sharedNote != null}>
             {noteBoxPhotos ? (
               <TechNoteBoxPhotos
                 serviceId={service.id}
@@ -2417,6 +2424,7 @@ function VisitStep({
           {/* A clip being recorded keeps recording behind the photo manager, so
               photos wait until the dictation is finished. */}
           {!noteBoxPhotos && <PhotoStripSection photos={photos} locked={locked || dictationPending} onOpen={onPhotos} />}
+          <TraceSection trace={trace} locked={locked} busy={writing} onTrace={onTrace} tracer={tracer} optional />
           <CustomerHomeSection value={form.customerHome} locked={locked} onChange={(value) => setField('customerHome', value)} />
           {ctx.rating.allowed && (
             <ActivitySection

@@ -857,18 +857,28 @@ async function optinHeldPhoneKeys(customerIds = [], { dbh = db } = {}) {
 // (Postgres has already aborted that transaction).
 async function resolveServiceContactSmsRecipient(customer, { dbh = db } = {}) {
   const { getServiceContactSmsRecipient, getPrimaryContact } = require('./customer-contact');
+  const primary = () => ({ ...getPrimaryContact(customer), role: 'primary' });
+  let resolved;
   if (!customer || !recipientPhoneKey(customer.service_contact_phone) || !isDoubleOptinEnabled()) {
-    return getServiceContactSmsRecipient(customer);
+    resolved = getServiceContactSmsRecipient(customer);
+  } else {
+    let heldPhoneKeys;
+    try {
+      heldPhoneKeys = (await optinHeldPhoneKeys([customer.id], { dbh })).get(String(customer.id)) || null;
+    } catch (err) {
+      if (dbh && dbh.isTransaction) throw err;
+      logger.warn(`[recipient-optin] single-recipient lookup failed (${err.message}) — holding the service contact`);
+      return primary();
+    }
+    resolved = getServiceContactSmsRecipient(customer, { heldPhoneKeys });
   }
-  let heldPhoneKeys;
-  try {
-    heldPhoneKeys = (await optinHeldPhoneKeys([customer.id], { dbh })).get(String(customer.id)) || null;
-  } catch (err) {
-    if (dbh && dbh.isTransaction) throw err;
-    logger.warn(`[recipient-optin] single-recipient lookup failed (${err.message}) — holding the service contact`);
-    return { ...getPrimaryContact(customer), role: 'primary' };
+  // The contact's OWN texts master switch (contact login, GATE_CONTACT_LOGIN)
+  // holds them the way an unconfirmed opt-in does: the account holder takes
+  // the text instead (codex #6363 r4 P1). Gate off = pass-through.
+  if (customer && await require('./contact-notification-prefs').contactDeclinesChannel(customer.id, resolved, 'sms', { dbh })) {
+    return primary();
   }
-  return getServiceContactSmsRecipient(customer, { heldPhoneKeys });
+  return resolved;
 }
 
 // Send-path filter shared by every fanout loop (appointment reminders +

@@ -1732,6 +1732,16 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // phone bookings follow the full 8am-6pm business-hours shift, matching
     // call-recording-processor.js's own sanity bound (Codex r3 P0 on #4663).
     customerFacing: selfServeNotice,
+    // Slide shadow (GATE_SLOT_SLIDE_OFFER): the same daypart + self-serve
+    // notice filters this function applies to find-time's results below,
+    // so a logged slide is one this request could actually show. The
+    // retired per-day cap (GATE_SELF_BOOK_DAY_CAP, owner ruling 2026-09-23)
+    // is resolved only after this call, so with it on /book doesn't opt in.
+    slideNewStartAllowed: selfBookDayCapEnabled() ? undefined : (date, startMin) => {
+      const startTime = `${String(Math.floor(startMin / 60)).padStart(2, '0')}:${String(startMin % 60).padStart(2, '0')}`;
+      return inTimeOfDay(startTime, timeOfDay)
+        && !(selfServeNotice && violatesSelfServeNotice({ date, startTime }, today));
+    },
     // Waves works weekends (Sat AND Sun) — the estimate slot flow already
     // offers Sundays (estimate-slot-availability defaults includeWeekends:true).
     // find-time's legacy default drops Sundays, which silently hid every Sunday
@@ -4508,23 +4518,6 @@ async function createSelfBooking(payload = {}) {
         const { persistArrivalOrder } = require('../services/scheduling/arrival-route');
         await persistArrivalOrder(trx, capacityCommitFit, scheduledRow.id);
       }
-      // Visit groups (visit-group-scope.md §2): the primary self-booked row
-      // stamps at scheduling, same as the seeded series rows below.
-      // Gate-checked + best-effort + self-refusing inside maybeGroupRow
-      // (savepoint on the trx — a grouping failure never poisons the
-      // booking). Automatic grouping needs BOTH a catalog identity
-      // (services.groupable / group_family via service_id) and a property
-      // anchor: estimate-backed rows gain both downstream (converter
-      // catalog relink + the estimate-property-linkage regroup pass);
-      // non-estimate self-books carry no service_id by design — the
-      // catalog resolver refuses to guess a row from a funnel label
-      // (wrong identity = wrong billing/completion profile) — so they
-      // stay ungrouped until a catalog-linkage lane stamps them
-      // (GH codex #3699 r6 P2: a deliberate skip, not an oversight).
-      {
-        const { maybeGroupRow } = require('../services/visit-groups');
-        await maybeGroupRow(scheduledRow.id, { database: trx, createdBy: 'seeder' });
-      }
       // Two-treatment package (cockroach / flea / bed bug): visit 2 books with
       // visit 1 when the row carries the catalog identity (internal callers'
       // service_id; a label-only self-book names no catalog service and is
@@ -5620,11 +5613,6 @@ async function createSelfBooking(payload = {}) {
             }
           }
           const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(trx, seriesParentRow, {
-            // Grouping runs AFTER the occupancy sweep below (codex #3590
-            // r5): the sweep can demote a seeded row to windowless, and a
-            // pre-sweep group would make the sweep see the visit sibling
-            // as a clash.
-            visitGrouping: false,
             pattern: wizardSeriesPlan.pattern,
             plannedCount: wizardSeriesPlan.visits,
             skipWeekends: true,
@@ -5793,20 +5781,6 @@ async function createSelfBooking(payload = {}) {
           } catch (linkErr) {
             logger.warn(`[booking:confirm] in-activation property linkage failed for ${seriesParentRow.id} (non-blocking, rolled back to savepoint): ${linkErr.message}`);
             await trx.raw('ROLLBACK TO SAVEPOINT wizard_activation_linkage');
-          }
-          // Visit-group seam, post-sweep AND post-linkage (codex #3590
-          // r5/r7): group each surviving seeded row using its NORMALIZED
-          // window/tech and its LINKED property_id — grouping before
-          // linkAcceptedEstimateProperty could match null-property legacy
-          // rows at another address. Demoted (windowless) rows are
-          // skipped — the office places them first. Best-effort savepoint
-          // inside maybeGroupRow.
-          {
-            const { maybeGroupRow } = require('../services/visit-groups');
-            for (const row of seededRows) {
-              if (!row?.id || !row.window_start) continue;
-              await maybeGroupRow(row.id, { database: trx, createdBy: 'seeder' });
-            }
           }
           // Transaction-health probe: throws if anything above left the
           // transaction aborted, so the activation can never "commit" as

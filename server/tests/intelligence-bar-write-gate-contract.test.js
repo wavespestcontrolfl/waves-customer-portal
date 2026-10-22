@@ -83,8 +83,14 @@ beforeAll(() => {
   process.env.GATE_IB_ACCEPT_ESTIMATE = 'true';
   process.env.GATE_IB_LEAD_CONVERT = 'true';
   process.env.GATE_IB_VOID_INVOICE = 'true';
+  process.env.GATE_IB_INVOICE_EDITS = 'true';
+  process.env.GATE_IB_INVOICE_REMINDERS = 'true';
+  process.env.GATE_IB_PAYMENT_PLAN = 'true';
+  process.env.GATE_IB_CREATE_INVOICE = 'true';
+  process.env.GATE_IB_SET_BILL_TO = 'true';
   // send_invoice is dark behind GATE_IB_INVOICE_ACTIONS; off, its preview refuses.
   process.env.GATE_IB_INVOICE_ACTIONS = 'true';
+  process.env.GATE_IB_RECORD_PAYMENT = 'true';
   process.env.GATE_IB_DELETE_CUSTOMER = 'true';
   // propose_admin_edit is dark behind GATE_IB_GENERAL_EDIT (and owner login only); off, its preview refuses.
   process.env.GATE_IB_GENERAL_EDIT = 'true';
@@ -92,10 +98,16 @@ beforeAll(() => {
 afterAll(() => {
   delete process.env.GATE_IB_GENERAL_EDIT;
   delete process.env.GATE_IB_INVOICE_ACTIONS;
+  delete process.env.GATE_IB_RECORD_PAYMENT;
   delete process.env.GATE_IB_MERGE_CUSTOMERS;
   delete process.env.GATE_IB_ACCEPT_ESTIMATE;
   delete process.env.GATE_IB_LEAD_CONVERT;
   delete process.env.GATE_IB_VOID_INVOICE;
+  delete process.env.GATE_IB_INVOICE_EDITS;
+  delete process.env.GATE_IB_INVOICE_REMINDERS;
+  delete process.env.GATE_IB_PAYMENT_PLAN;
+  delete process.env.GATE_IB_CREATE_INVOICE;
+  delete process.env.GATE_IB_SET_BILL_TO;
   delete process.env.GATE_IB_DELETE_CUSTOMER;
   if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;
   else process.env.GATE_IB_PLATFORM = ORIGINAL_PLATFORM_GATE;
@@ -110,7 +122,7 @@ afterAll(() => {
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'model-failure.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'invoice-action-effects.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'billing-mode-change.js', 'tier-upgrade-email.js', 'name-match.js', 'booking-service-match.js', 'tool-search.js', 'multi-card.js', 'ib-openai-backup.js', 'openai-tool-adapter.js', 'admin-write-snapshots.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'model-failure.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'invoice-action-effects.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'billing-mode-change.js', 'tier-upgrade-email.js', 'name-match.js', 'booking-service-match.js', 'tool-search.js', 'multi-card.js', 'ib-openai-backup.js', 'openai-tool-adapter.js', 'admin-write-snapshots.js', 'record-payment-fences.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -182,7 +194,21 @@ const WRITE_TWO_STEP = [
   'correct_invoice_address',
   'accept_estimate',
   'send_invoice',
+  'record_payment',
   'void_invoice',
+  'edit_invoice',
+  'archive_invoice',
+  'unarchive_invoice',
+  'unvoid_invoice',
+  'pause_invoice_reminders',
+  'resume_invoice_reminders',
+  'stop_invoice_reminders',
+  'send_invoice_reminder_now',
+  'schedule_invoice_send',
+  'create_payment_plan',
+  'cancel_payment_plan',
+  'create_invoice',
+  'set_customer_bill_to',
   'update_lead_contact',
   // propose_admin_edit (owner ruling 2026-10-12, GATE_IB_GENERAL_EDIT): one reviewed small internal
   // edit, owner login only (FULL_ACCESS_TWO_STEP_TOOL_NAMES), replayed through the screen's own
@@ -582,7 +608,20 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
   const propertySeed = { customers: [{ id: 'cust-property', first_name: 'Fixture' }],
     customer_properties: [{ id: 'prop-saved', customer_id: 'cust-property', active: true,
       address_line1: '1 Example Grove', city: 'Sarasota', state: 'FL', zip: '34201', occupancy_type: 'unknown' }] };
-  const UNCONFIRMED_CALLS = [
+  // One invoice with an active reminder sequence and a customer, shared by the invoice reminder and payment-plan rows below.
+const REMINDER_SEED = {
+  invoices: [{
+    id: '00000000-0000-0000-0000-00000000f401', invoice_number: 'WPC-2099-0401', status: 'sent', customer_id: 'cust-1', payer_id: null,
+    total: '129.00', credit_applied: '0', title: 'Pest Control', updated_at: '2026-10-01T00:00:00Z', sent_at: '2026-10-01T00:00:00Z', line_items: [{ description: 'Pest Control', amount: 129 }],
+  }],
+  customers: [{ id: 'cust-1', first_name: 'Pat', last_name: 'Tester', phone: '9415550100', email: 'pat@example.com' }],
+  invoice_followup_sequences: [{
+    id: '00000000-0000-0000-0000-00000000f403', invoice_id: '00000000-0000-0000-0000-00000000f401', customer_id: 'cust-1',
+    status: 'active', step_index: 0, touches_sent: 0, next_touch_at: '2099-01-01T15:00:00Z', anchor_at: '2026-10-01T00:00:00Z', touch_claimed_at: null,
+  }],
+};
+
+const UNCONFIRMED_CALLS = [
     ['customer-estimate-tools', 'executeCustomerEstimateTool', 'save_customer_estimate', {
       customer_id: 'cust-estimate', property_id: '00000000-0000-0000-0000-000000000003', lawn_applications: 9,
     }, { customers: [{ id: 'cust-estimate', first_name: 'Estimate', last_name: 'Fixture' }],
@@ -749,6 +788,12 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       invoices: [{ id: '00000000-0000-0000-0000-00000000f101', invoice_number: 'WPC-2099-0101', status: 'sent', customer_id: 'cust-1', payer_id: null, total: '129.00', credit_applied: '0', line_items: [{ description: 'Pest Control', amount: 129 }] }],
       customers: [{ id: 'cust-1', first_name: 'Pat', last_name: 'Tester' }],
     }],
+    // record_payment reads the invoice, the customer, the payer ownership, the annual-plan check and the closeout
+    // probe (spied below; intelligence-bar-record-payment.test.js covers the card itself). Its preview writes nothing.
+    ['record-payment-tools', 'executeRecordPaymentTool', 'record_payment', { invoice_id: '00000000-0000-0000-0000-00000000f102', amount: 129, method: 'check' }, {
+      invoices: [{ id: '00000000-0000-0000-0000-00000000f102', invoice_number: 'WPC-2099-0102', status: 'sent', customer_id: 'cust-1', payer_id: null, total: '129.00', credit_applied: '0', updated_at: '2026-10-01T00:00:00Z' }],
+      customers: [{ id: 'cust-1', first_name: 'Pat', last_name: 'Tester' }],
+    }],
     // propose_admin_edit validates the body against a reviewed catalog row (a template's wording here,
     // which needs no seeded record) and writes nothing until confirmed; the full allow-list behavior is
     // covered by ib-admin-write-tools.test.js. It runs for the owner login with a bearer on the context.
@@ -773,6 +818,45 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       invoices: [{ id: '00000000-0000-0000-0000-00000000f301', invoice_number: 'WPC-2099-0301', status: 'sent', customer_id: 'cust-1', total: '129.00', credit_applied: '0', line_items: [{ description: 'Pest Control', amount: 129 }] }],
       customers: [{ id: 'cust-1', first_name: 'Pat', last_name: 'Tester' }],
       payments: [], payment_plans: [], setup_fee_claims: [], annual_prepay_terms: [], scheduled_services: [],
+    }],
+    // The invoice edit cards' previews read the invoice, its payments, plan, statement and links; none may write without
+    // confirmed (intelligence-bar-invoice-edits.test.js covers the cards themselves).
+    ...[
+      ['edit_invoice', { due_date: '2099-02-01' }, 'f401'],
+      ['archive_invoice', {}, 'f403'],
+      ['unarchive_invoice', {}, 'f404'],
+      ['unvoid_invoice', {}, 'f405'],
+    ].map(([tool, extra, tail]) => ['invoice-edit-tools', 'executeInvoiceEditTool', tool, { invoice_id: `00000000-0000-0000-0000-00000000${tail}`, ...extra }, {
+      invoices: [{ id: `00000000-0000-0000-0000-00000000${tail}`, invoice_number: `WPC-2099-${tail}`, status: ['archive_invoice', 'unarchive_invoice', 'unvoid_invoice'].includes(tool) ? 'void' : 'sent', archived_at: tool === 'unarchive_invoice' ? '2099-01-02T00:00:00Z' : null, customer_id: 'cust-1', total: '129.00', credit_applied: '0', due_date: '2099-01-15', line_items: [{ description: 'Pest Control', amount: 129 }] }],
+      customers: [{ id: 'cust-1', first_name: 'Pat', last_name: 'Tester' }],
+      payments: [], payment_plans: [], payer_statements: [], stripe_invoice_charge_attempts: [], annual_prepay_terms: [], scheduled_services: [], projects: [], customer_credit_ledger: [],
+    }]),
+    // The invoice reminder and payment-plan previews read the invoice, the customer, the reminder row and the plan rows (the
+    // route helpers and the message renderers are spied below; intelligence-bar-invoice-reminders.test.js and
+    // intelligence-bar-payment-plan.test.js cover the cards). They write and send nothing without confirmed.
+    ['invoice-reminder-tools', 'executeInvoiceReminderTool', 'pause_invoice_reminders', { invoice_id: '00000000-0000-0000-0000-00000000f401' }, REMINDER_SEED],
+    ['invoice-reminder-tools', 'executeInvoiceReminderTool', 'resume_invoice_reminders', { invoice_id: '00000000-0000-0000-0000-00000000f401' }, { ...REMINDER_SEED, invoice_followup_sequences: [{ ...REMINDER_SEED.invoice_followup_sequences[0], status: 'paused' }] }],
+    ['invoice-reminder-tools', 'executeInvoiceReminderTool', 'stop_invoice_reminders', { invoice_id: '00000000-0000-0000-0000-00000000f401' }, REMINDER_SEED],
+    ['invoice-reminder-tools', 'executeInvoiceReminderTool', 'send_invoice_reminder_now', { invoice_id: '00000000-0000-0000-0000-00000000f401' }, REMINDER_SEED],
+    ['invoice-reminder-tools', 'executeInvoiceReminderTool', 'schedule_invoice_send', { invoice_id: '00000000-0000-0000-0000-00000000f401', send_at_et: '2099-01-15T09:30' }, { ...REMINDER_SEED, invoices: [{ ...REMINDER_SEED.invoices[0], status: 'draft' }] }],
+    ['payment-plan-tools', 'executePaymentPlanTool', 'create_payment_plan', { invoice_id: '00000000-0000-0000-0000-00000000f401', payment_amount: 50, payment_frequency: 'monthly', next_payment_date: '2099-02-01' }, { ...REMINDER_SEED, payment_plans: [] }],
+    ['payment-plan-tools', 'executePaymentPlanTool', 'cancel_payment_plan', { invoice_id: '00000000-0000-0000-0000-00000000f401' }, {
+      ...REMINDER_SEED,
+      payment_plans: [{ id: '00000000-0000-0000-0000-00000000f402', invoice_id: '00000000-0000-0000-0000-00000000f401', status: 'active', total_balance: '129.00', payment_amount: '50.00', payment_frequency: 'monthly', next_payment_date: '2099-02-01' }],
+    }],
+    // create_invoice's preview reads the customer and the service's own totals mirror (spied below); it may not write
+    // without confirmed (intelligence-bar-create-invoice.test.js covers the card itself).
+    ['create-invoice-tools', 'executeCreateInvoiceTool', 'create_invoice', {
+      customer_id: '00000000-0000-0000-0000-00000000f401', title: 'Extra visit', line_items: [{ description: 'Extra visit', quantity: 1, unit_price: 85 }],
+    }, {
+      customers: [{ id: '00000000-0000-0000-0000-00000000f401', first_name: 'Pat', last_name: 'Tester', city: 'Sampleton', property_type: 'residential', payer_id: null }],
+    }],
+    // set_customer_bill_to's preview reads the customer, the payer and the invoices; it may not write without confirmed
+    // (intelligence-bar-bill-to.test.js covers the card itself).
+    ['bill-to-tools', 'executeBillToTool', 'set_customer_bill_to', { customer_id: '00000000-0000-0000-0000-00000000b901', payer_id: '7' }, {
+      customers: [{ id: '00000000-0000-0000-0000-00000000b901', first_name: 'Pat', last_name: 'Tester', payer_id: null, deleted_at: null }],
+      payers: [{ id: 7, display_name: 'Synthetic Property Co', active: true }],
+      invoices: [], scheduled_services: [], service_records: [], annual_prepay_terms: [],
     }],
     // Outside-service writes (IB scope expansion item 1) build their preview
     // from a live third-party API call, never the DB — OUTSIDE_WRITE_FIXTURES
@@ -973,6 +1057,39 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
         jest.spyOn(require('../services/invoice-followups'), 'planFollowupSequence').mockResolvedValue({ arms: false, state: 'not_schedulable', cadence: [3, 7, 14, 30] }),
         jest.spyOn(require('../services/lead-estimate-link'), 'invoiceSentConversionTargets').mockResolvedValue({ leadIds: [] }),
       ] : [];
+    const recordPaymentSpies = toolName === 'record_payment'
+      ? [
+        jest.spyOn(require('../services/open-balance'), 'rowIsSelfPayDue').mockResolvedValue(true),
+        jest.spyOn(require('../services/invoice-prepay'), 'resolveInvoiceTermId').mockResolvedValue(null),
+        jest.spyOn(require('../services/invoice-issued-closeout'), 'issuedCloseoutTarget').mockResolvedValue(null),
+      ] : [];
+    // unvoid_invoice's setup-fee / dues provenance reads filter by column (a LIKE on invoices.notes), which this recorder does not
+    // model; its own cases run against the real function in invoice-bar-expected-version.test.js.
+    const unvoidObligation = toolName === 'unvoid_invoice'
+      ? jest.spyOn(require('../services/invoice'), '_unvoidObligationReason').mockResolvedValue(null) : null;
+    const reminderPlanSpies = ['pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan'].includes(toolName)
+      ? [
+        jest.spyOn(require('../services/invoice-payer-ownership'), 'invoicePayerOwnership').mockResolvedValue(null),
+        jest.spyOn(require('../routes/admin-invoices'), 'getInvoiceDeliveryRecipients')
+          .mockResolvedValue({ customerName: 'Pat Tester', primaryContact: { phone: '9415550100' }, emailRecipient: { email: 'pat@example.com' } }),
+        jest.spyOn(require('../services/customer-dunning/wiring'), 'customerScheduleSummary').mockResolvedValue(null),
+        jest.spyOn(require('../services/customer-dunning/wiring'), 'customerScheduleSummaryForInvoice').mockResolvedValue(null),
+        jest.spyOn(require('../services/messaging/send-window'), 'isWithinSendWindowET').mockReturnValue(true),
+        jest.spyOn(require('../services/collections/collection-hold'), 'customerHasActiveMessagingHoldChecked').mockResolvedValue(false),
+        jest.spyOn(require('../services/customer-credit'), 'autoApplyWouldApply').mockResolvedValue(false),
+        jest.spyOn(require('../routes/admin-sms-templates'), 'getTemplate').mockResolvedValue('Hi Pat, a reminder about your invoice: [pay link]'),
+        jest.spyOn(require('../services/billing-email-sender'), 'operatorEmailRecipient').mockResolvedValue({ recipient: { name: 'Pat Tester', email: 'pat@example.com' }, to: 'pat@example.com' }),
+        jest.spyOn(require('../services/email-template-library'), 'loadTemplateByKey').mockResolvedValue({ template: { template_key: 'invoice.followup_3_day', name: 'Reminder' }, activeVersion: { id: 'v1' } }),
+        jest.spyOn(require('../services/email-template-library'), 'templateContentHash').mockReturnValue('hash-1'),
+        jest.spyOn(require('../services/email-template-library'), 'renderTemplate').mockReturnValue({ subject: 'A reminder about your invoice', text: 'Hi Pat, a reminder about your invoice.' }),
+      ] : [];
+    // create_invoice's totals come from the invoice service's mirror of create() and its payer lookup; both are covered by
+    // their own suites, so this recorder (no tax or payer tables) answers a residential self-pay customer.
+    const createInvoiceSpies = toolName === 'create_invoice'
+      ? [
+        jest.spyOn(require('../services/invoice'), 'previewInvoiceTotals').mockResolvedValue({ subtotal: 85, tax_rate: 0, tax_amount: 0, total: 85 }),
+        jest.spyOn(require('../services/payer'), 'resolveForInvoice').mockResolvedValue({ payerId: null }),
+      ] : [];
     const repriceCoverage = toolName === 'reprice_future_visits'
       ? jest.spyOn(require('../routes/admin-schedule'), 'findBillingCoveredVisits').mockResolvedValue(new Map()) : null;
     // accept_estimate's card is the accept run as a dry run (rolled back in its
@@ -1044,6 +1161,10 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       receiptResolvers.forEach((spy) => spy.mockRestore());
       autopayPreflight?.mockRestore();
       invoiceActionSpies.forEach((spy) => spy.mockRestore());
+      reminderPlanSpies.forEach((spy) => spy.mockRestore());
+      recordPaymentSpies.forEach((spy) => spy.mockRestore());
+      unvoidObligation?.mockRestore();
+      createInvoiceSpies.forEach((spy) => spy.mockRestore());
       dedupeReaders.forEach((spy) => spy.mockRestore());
       repriceCoverage?.mockRestore();
       acceptDryRun?.mockRestore();
@@ -1189,9 +1310,14 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
     // explicitly opts out of live smoke; its preview is exercised above. So does
     // resend_receipt (_sideEffects): its confirmed run emails/texts the customer.
     const explicitlySkipped = WRITE_TWO_STEP.filter(name => ib.get(name)?.sideEffects === true);
-    // send_invoice (_sideEffects): its confirmed run texts/emails the customer.
+    // send_invoice (_sideEffects): its confirmed run texts/emails the customer. record_payment (_sideEffects): its
+    // confirmed run settles an invoice (it sends no receipt).
     // propose_admin_edit (_sideEffects): its confirmed run replays a PUT or PATCH to a reviewed admin endpoint.
     // void_invoice (_sideEffects): its confirmed run voids an invoice (live smoke must not).
-    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice', 'void_invoice', 'propose_admin_edit']);
+    // The invoice edit cards (_sideEffects): their confirmed runs edit (title, notes, due date), archive, unarchive or unvoid an invoice.
+    // create_invoice (_sideEffects): its confirmed run creates a draft invoice (live smoke must not).
+    // set_customer_bill_to (_sideEffects): its confirmed run sets a customer's Bill-To payer.
+    // The invoice reminder and payment-plan tools (_sideEffects): their confirmed runs change reminders, send, schedule or create a plan.
+    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice', 'record_payment', 'void_invoice', 'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan', 'create_invoice', 'set_customer_bill_to', 'propose_admin_edit']);
   });
 });

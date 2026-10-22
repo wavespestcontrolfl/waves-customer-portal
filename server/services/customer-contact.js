@@ -449,6 +449,47 @@ async function withAccountPrimaryContact(row, opts = {}) {
   return withAccountPrimaryFallback(row, primary);
 }
 
+// Last-10-digit key of a phone ('' when none) — the identity recipient_optin
+// and the contact-login session claim both use.
+function phoneKeyOf(value) {
+  return clean(value).replace(/\D/g, '').slice(-10);
+}
+
+// The on-location contact slot a phone key occupies on this customer row
+// (contact login, GATE_CONTACT_LOGIN): the FIRST slot whose phone matches,
+// never a slot whose phone is the account holder's own number (that person
+// signs in as the holder). Null when the key is not a contact here.
+// `slot` is 1-based (the column family), `role` the slot's sender label.
+function findServiceContactSlotByPhoneKey(customer, phoneKey) {
+  const key = phoneKeyOf(phoneKey);
+  if (!customer || !key || key.length < 10) return null;
+  if (phoneKeyOf(customer.phone) === key) return null;
+  const slots = getServiceContactSlots(customer);
+  for (let i = 0; i < slots.length; i += 1) {
+    const slot = slots[i];
+    if (slot.phone && phoneKeyOf(slot.phone) === key) {
+      return { slot: i + 1, name: slot.name, phone: slot.phone, email: slot.email, role: slot.role, contactRole: slot.contactRole, phoneKey: key };
+    }
+  }
+  return null;
+}
+
+// Contact login (GATE_CONTACT_LOGIN): may the person at this slot phone sign
+// in as a contact? Only a number the account holder put there and attested
+// to (service_contacts_consent_at) — the same boundary every text resolver
+// applies. A phone the call pipeline inferred and filed as unconsented
+// (unconsented_slot_phone_keys, #5467) waits for that person's own YES,
+// exactly as their texts do: a plausible-but-wrong inferred number must not
+// become a login to the customer's address, schedule and reports (codex
+// #6363 r4 security P2). The ACTUAL stamp, never serviceContactsConsented:
+// that helper honors DISABLE_CONTACT_CONSENT_GATE=1, the SMS fan-out rollback
+// switch, which must not open the login to unstamped numbers (codex r6 P1).
+function contactSlotMayLogIn(customer, phoneKey) {
+  const key = phoneKeyOf(phoneKey);
+  if (!customer || !key) return false;
+  return !!customer.service_contacts_consent_at && !unconsentedSlotPhoneKeys(customer).has(key);
+}
+
 // True if this customer has a distinct service contact configured (any slot).
 // Used by audit tools + the admin UI to surface a "Service contact: …" chip.
 function hasDistinctServiceContact(customer) {
@@ -474,6 +515,9 @@ module.exports = {
   getServiceContact,
   getServiceContactSmsRecipient,
   getServiceContactSlots,
+  contactSlotMayLogIn,
+  findServiceContactSlotByPhoneKey,
+  phoneKeyOf,
   isServiceContactRole,
   slotWithheldFromReports,
   withAccountPrimaryContactStrict,

@@ -1315,9 +1315,19 @@ describe('retired topics', () => {
     expect(resolveRetiredLinks(['/lawn-care/venice-dollar-spot-fungus-lawn-treatment/'])).toEqual(['/lawn-care/venice-dollar-spot-fungus-lawn-treatment/']);
   });
 
-  test('registry size is deliberate (45 retired of 51 proposed, plus 1 live topic owner)', () => {
-    expect(gate._internals.RETIRED_POSTS.filter((p) => !p.live)).toHaveLength(45);
+  test('registry size is deliberate (45 retired of 51 proposed on 10-01, quarterly-pest-control on 10-22, plus 1 live topic owner)', () => {
+    expect(gate._internals.RETIRED_POSTS.filter((p) => !p.live)).toHaveLength(46);
     expect(gate._internals.RETIRED_POSTS.filter((p) => p.live).map((p) => p.url)).toEqual(['/lawn-care/venice-dollar-spot-fungus-lawn-treatment/']);
+  });
+
+  test('quarterly pest control is merged into the visit post (2026-10-22): its topic is refused, its links resolve there', () => {
+    for (const cand of [{ query: 'quarterly pest control in Venice' }, { title: 'Quarterly Pest Control in Lakewood Ranch' }, { slug: '/pest-control/quarterly-pest-control/' }]) {
+      const r = gate.evaluate(blog(cand), { requireCorpus: false });
+      expect(r.findings.find((f) => f.code === gate.CODES.RETIRED_TOPIC)).toMatchObject({ url: '/pest-control/quarterly-pest-control/', merged_into: '/pest-control/what-to-expect-pest-control-visit/' });
+    }
+    expect(gate.evaluate(blog({ query: 'quarterly vs monthly pest control' }), { requireCorpus: false }).findings.filter((f) => f.code === gate.CODES.RETIRED_TOPIC)).toEqual([]);
+    const { resolveRetiredLinks } = require('../services/content/retired-blog-links');
+    expect(resolveRetiredLinks(['/pest-control/quarterly-pest-control/', '/pest-control/what-to-expect-pest-control-visit/'])).toEqual(['/pest-control/what-to-expect-pest-control-visit/']);
   });
 
   test('a different topic in the same family still passes', () => {

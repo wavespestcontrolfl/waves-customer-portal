@@ -32,7 +32,8 @@ const { rejectImpossibleSpokenPhones } = require('./call-spoken-phone-guard');
 const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
 const { callStartedAt } = require('../utils/call-timeline');
 const { resolveLocation } = require('../config/locations');
-const { isInDesotoExclusion, isDesotoLocality, isDesotoZip, isServedSouthHillsboroughTown } = require('./service-area');
+const { isInDesotoExclusion, isServedSouthHillsboroughTown } = require('./service-area');
+const { isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip } = require('./excluded-localities');
 const { zipToCity } = require('../utils/zip-to-city');
 const { safeErrorToken } = require('../utils/sentry-scrub');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
@@ -982,6 +983,7 @@ const CONFIRM_REASON_TEXT = {
   address_unit_conflict: 'the street line and the unit disagree on the door (e.g. "…Apt 4" vs "Apt 5") — the street line was kept; confirm the unit with the caller before dispatch',
   street_level_address_review: 'web-form address: Google matched only the street, not the house — confirm the address with the customer, then confirm the visit (it is booked pending)',
   text_number_differs: "caller said the line they called from can't get texts — texts go to the number they gave (or ask for one), calls stay on the line they called from; update the customer's phones. Resolve when the phones are updated — the calling line stays blocked for texts. Use Line can get texts if the line can get texts after all.",
+  missed_visit_makeup_needs_review: 'the customer has a MISSED recurring visit of the service this call booked, so no new visit was booked beside it — if the call was about that visit, move it to the agreed time by hand; if it was about something else, book that by hand',
   callback_number_needed: 'caller said this incoming number is not theirs (shared/office line) and gave no callback number — get a personal cell before texting confirmations or reminders',
 };
 const describeConfirmReason = (r) => CONFIRM_REASON_TEXT[r] || r;
@@ -1888,13 +1890,15 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
 // CALL_EXTRACTION_V2_ENABLED off, or V2 in shadow with
 // CALL_EXTRACTION_V2_DRIVES_ROUTING off, the legacy inbound condition would
 // auto-book an out-of-area address (DeSoto/Arcadia, owner ruling
-// 2026-09-30). This survives every routing mode. Callers pass only a VALID
-// V2 extraction (v2CanonicalExtraction) — a schema_failed/normalization_failed
+// 2026-09-30; Punta Gorda, owner ruling 2026-10-22). This survives every
+// routing mode. Callers pass only a VALID V2 extraction (v2CanonicalExtraction) — a schema_failed/normalization_failed
 // object is untrusted and must not suppress a valid V1 booking. Evidence:
 //   1. any DeSoto locality evidence — a DeSoto city, a DeSoto ZIP, or an
 //      on-file pin in the DeSoto rectangle — vetoes first, ahead of a
 //      positive AV verdict (which may describe a different, V2 address) and
 //      of any served-town exemption (Riverview + 34266 cannot launder it).
+//      Punta Gorda (city, or a Punta Gorda-only ZIP; Charlotte County is
+//      otherwise served) vetoes at the same point, on the call or on file.
 //   2. a positive Address Validation verdict (inServiceArea === true) then
 //      clears the rest, including a model-stated county NAME of DeSoto.
 //   3. an AV out_of_service_area / inServiceArea false verdict, or a county
@@ -1947,6 +1951,13 @@ function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, e
   const countyKey = normalizeCounty(statedCounty);
   if (cities.some(isDesotoLocality) || zips.some(isDesotoZip) || onFileDesoto) {
     return { reason: 'desoto_locality', county: 'DeSoto' };
+  }
+  // Punta Gorda (owner ruling 2026-10-22) is inside served Charlotte County,
+  // so a positive AV county verdict cannot clear it; the city or a Punta
+  // Gorda-only ZIP (on the call or on file) vetoes first, like DeSoto.
+  if (cities.some(isPuntaGordaLocality) || zips.some(isPuntaGordaZip)
+    || onFileCities.some(isPuntaGordaLocality) || onFileZips.some(isPuntaGordaZip)) {
+    return { reason: 'punta_gorda_locality', county: 'Charlotte' };
   }
   if (av && av.inServiceArea === true) return null;
   if (countyKey === 'desoto') {
@@ -4945,6 +4956,122 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
     }
   }
   return null;
+}
+
+// GATE_CALLBACK_SPOKEN_NUMBER_LINK: an office callback ("Call back" on a
+// voicemail; call_log.source admin-callback + metadata.relatedCallId) dials the
+// voicemail's ANI, but the caller may have SPOKEN a different number to ring
+// ("call me back at ..."), and that number may already belong to a customer
+// (a quote form filed minutes after the voicemail). The pass keyed the callback
+// on the dialed number only, found nobody and minted a duplicate customer.
+// This looks the voicemail's spoken number up as a SECOND chance, only when the
+// normal lookup found no one: exactly one live customer has that number as their
+// PRIMARY phone and a first name that agrees with the callback's. Returns that
+// customer or null. It is a SUGGESTION: call-family-name-link files it as the
+// callback_spoken_number basis of the family-account card and nothing links,
+// backfills or texts from it (the
+// number was said by whoever left the voicemail, so it proves nothing about the
+// person who answered). Read-only; gate off: null, no query.
+// What an admin callback must carry before its voicemail's number is looked at: the gate on, no operator
+// link, an OUTBOUND admin-callback naming a parent call, and a first name on the callback.
+// { relatedId, extractedFirst } or null. Pure.
+function callbackSpokenNumberTarget(call, extracted, opts) {
+  if (!require('../config/feature-gates').callbackSpokenNumberLinkLive()) return null;
+  if (opts.customerLinkOverride) return null;
+  if (!isOutboundCall(call) || call.source !== 'admin-callback') return null;
+  const relatedId = callMetadataObject(call).relatedCallId;
+  if (!relatedId || !CALLBACK_PARENT_UUID_RE.test(String(relatedId))) return null;
+  const extractedFirst = normalizeNamePart(extracted?.first_name);
+  return extractedFirst ? { relatedId: String(relatedId), extractedFirst } : null;
+}
+
+// The number the caller SPOKEN in the voicemail this callback was dialed to, or null. Any inbound
+// call's "Call back" is also an admin-callback: only the inbound voicemail whose caller ID is the
+// number dialed counts, and the spoken number must be a usable external line, different from the
+// dialed one by more than a misheard digit or two (the rule resolveCallContactPhone applies to a
+// dictated number). Throws PARENT_UNSETTLED while the voicemail is not settled. Pure.
+function spokenNumberOfVoicemailParent(call, related) {
+  if (!related || !String(related.direction || '').toLowerCase().startsWith('inbound')) return null;
+  if (!isVoicemailParent(related) || !samePhone(related.from_phone, call.to_phone)) return null;
+  // Its extraction is read only once the parent is settled (isSettledParent: no pass holds its token,
+  // not in a retryable state such as extraction_failed, no adopted recording waiting). A force
+  // reprocess or a pending retry keeps the old markers and ai_extraction on the row while it replaces
+  // them, and the callback card is not refreshed when that pass ends. Unknown, not "no match": throw,
+  // so the callback stays on its capped retry.
+  if (!isSettledParent(related)) {
+    const unsettled = new Error('callback voicemail parent not settled');
+    unsettled.code = 'PARENT_UNSETTLED';
+    throw unsettled;
+  }
+  const spoken = firstExternalPhone(parseLooseJson(related.ai_extraction).phone);
+  if (!spoken || samePhone(spoken, call.to_phone) || phoneNearMissOfAni(spoken, call.to_phone)) return null;
+  return spoken;
+}
+
+// The ONE live account that owns the spoken number as its PRIMARY phone under a first name that
+// agrees (a household number can hold several people; a transcriber misspells a last name). "Live" is
+// the family-account matchers' phone-basis predicate: active and not soft-deleted, any pipeline
+// stage (a quote-form customer is still a lead stage). A number on more than 25 accounts is a
+// business line, and the sample could hide a second match, so link no one. Pure.
+const MAX_SPOKEN_NUMBER_OWNERS = 25;
+function pickSpokenNumberOwner(owners, spoken, extractedFirst) {
+  if (!Array.isArray(owners) || owners.length > MAX_SPOKEN_NUMBER_OWNERS) return null;
+  const named = owners.filter((c) => customerPhoneMatches(spoken, c)
+    && normalizeNamePart(c.first_name)
+    && sameSpokenFirstName(extractedFirst, normalizeNamePart(c.first_name)));
+  return named.length === 1 ? named[0] : null;
+}
+
+// Returns the account, or null for "no match". A failed query THROWS: the caller must not read that
+// as "no match" (see callbackSpokenNumberSuggested).
+async function findCustomerViaCallbackSpokenNumber(call = {}, extracted = {}, opts = {}) {
+  const target = callbackSpokenNumberTarget(call, extracted, opts);
+  if (!target) return null;
+  const conn = opts.db || db;
+  const related = await conn('call_log').where({ id: target.relatedId })
+    .first('id', 'direction', 'from_phone', 'call_outcome', 'answered_by', 'processing_status', 'ai_extraction', 'duration_seconds', 'processing_token', 'recording_sid');
+  const spoken = spokenNumberOfVoicemailParent(call, related);
+  if (!spoken) return null;
+  const owners = await conn('customers')
+    .where('active', true)
+    .whereNull('deleted_at')
+    .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneKey(spoken).slice(-10)])
+    .orderBy('updated_at', 'desc')
+    .limit(MAX_SPOKEN_NUMBER_OWNERS + 1);
+  return pickSpokenNumberOwner(owners, spoken, target.extractedFirst);
+}
+
+// A spoken-number failure that must neither create a customer nor finalize the call: thrown into the
+// pass's outer guard, which stamps the existing capped extraction_failed retry (and its blocking card at
+// the cap). The message carries a reason code only: a DB error message can echo the bound phone.
+function callbackSpokenNumberUnresolved(reason) {
+  const err = new Error(`callback spoken-number path unresolved (${reason})`);
+  err.code = 'CALLBACK_SPOKEN_NUMBER_UNRESOLVED';
+  return err;
+}
+
+// True when an office callback's voicemail number is the primary phone of one account and no person
+// closed the suggestion (so the pass creates no customer). FAILS CLOSED AND RETRYABLE: a failed lookup
+// or read (unknown, not "no match"), or a match whose family-account card could not be written
+// (`cardReport.filed` unset, `cardReport.failed` set on an error; both by fileFamilyAccountCard), throws instead of returning false.
+async function callbackSpokenNumberSuggested({ call, extracted, customerLinkOverride = null, cardReport = null, conn = db }) {
+  let match;
+  try {
+    match = await findCustomerViaCallbackSpokenNumber(call, extracted, { customerLinkOverride, db: conn });
+    // A person who closed the account suggestion by hand ("not them") has decided: the pass goes
+    // back to what it did before this gate.
+    if (match && await require('./call-family-name-link').operatorClosedCard(conn, call.id)) return false;
+  } catch (e) {
+    throw callbackSpokenNumberUnresolved(e?.code || e?.name || 'db_error');
+  }
+  if (!match) return false;
+  // Suppressing customer creation needs a DURABLE explanation: the callback card filed, refreshed or
+  // already held by an operator. A lost write and a card that was never owed both retry (the cap ends
+  // in the blocking extraction_failed card, still no duplicate).
+  if (cardReport && cardReport.filed !== 'callback_spoken_number') {
+    throw callbackSpokenNumberUnresolved(`card_${cardReport.failed || 'not_filed'}`);
+  }
+  return true;
 }
 
 async function registerScheduleSideEffects({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType, closeReminderWindows = false, callbackNumberHoldActive = false, disclaimedPhone = null, callLogId = null }) {
@@ -10194,7 +10321,7 @@ async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v
       }
     }
     if (customerId) {
-      await enrichFromCall({ customerId, extraction: v2ForDisposition, legacy: extracted, callCreatedAt: call.created_at });
+      await enrichFromCall({ customerId, extraction: v2ForDisposition, legacy: extracted, callCreatedAt: call.created_at, callerPhone: clarifyAskTargetPhone(call) });
     }
   } catch (zeroTriageErr) {
     logger.warn(`[call-proc] zero-triage layer error for ${maskSid(callSid)}: ${zeroTriageErr.message}`);
@@ -10345,15 +10472,15 @@ async function hasIndependentCallbackObligation(callId, v2) {
 // (Codex #4721 r1 P2): the token that fenced this pass is already cleared
 // by finalization, so without this a stale, slow pass could revise a
 // disposition a newer reprocess generation already re-decided for itself.
-async function reviseDispositionAfterAppliedMove({ call, callSid, procGeneration = null }) {
+async function reviseDispositionAfterAppliedMove({ call, callSid, procGeneration = null, reason = 'reschedule_applied' }) {
   const query = db('call_log').where({ id: call.id });
   if (procGeneration != null) query.where({ processing_generation: procGeneration });
   const fresh = await query.first('disposition', 'processing_generation', 'v2_extraction_status', 'ai_extraction_enriched');
   if (!fresh || !STALE_AFTER_APPLIED_MOVE.has(fresh.disposition)) return;
   const v2 = fresh.v2_extraction_status === 'valid' ? fresh.ai_extraction_enriched : null;
-  const { independent, reason } = await hasIndependentCallbackObligation(call.id, v2);
+  const { independent, reason: standingReason } = await hasIndependentCallbackObligation(call.id, v2);
   if (independent) {
-    logger.info(`[call-proc] Leaving callback_task_created standing for ${maskSid(callSid)} after applied move: ${reason}`);
+    logger.info(`[call-proc] Leaving callback_task_created standing for ${maskSid(callSid)} after applied move: ${standingReason}`);
     return;
   }
   await writeCallDisposition({
@@ -10361,7 +10488,7 @@ async function reviseDispositionAfterAppliedMove({ call, callSid, procGeneration
     priorDisposition: fresh.disposition,
     priorGeneration: procGeneration,
     disposition: 'existing_customer_routed',
-    reason: 'reschedule_applied',
+    reason,
     callSid,
   });
 }
@@ -10445,6 +10572,24 @@ async function applyRescheduleFollowUps({ call, callSid, result, procGeneration 
   }))) return;
   await reviseDispositionAfterAppliedMove({ call, callSid, procGeneration })
     .catch((err) => logger.warn(`[call-proc] post-reschedule disposition revision failed for ${maskSid(callSid)}: ${err.message}`));
+}
+
+// Make-up move (GATE_CALL_MAKEUP_MOVE, owner 2026-10-22). The decision runs
+// inside the booking transaction, at its fresh insert
+// (planCallMakeupForBooking). These steps run outside any transaction: the
+// reprocess check before the booking branch, and the move itself after the
+// booking transaction ended without inserting (the rebooker opens its own).
+// An unexpected throw cannot say whether a missed visit exists: it holds,
+// since booking anyway is the very duplicate this step prevents.
+async function callMakeupStep(step, callSid, run) {
+  try {
+    const result = await run(require('./call-reschedule-apply'));
+    if (result) logger.info(`[call-proc] makeup-${step} for ${maskSid(callSid)}: ${result.outcome}${result.reason ? ` (${result.reason})` : ''}${result.visitId ? ` visit=${result.visitId}` : ''}`);
+    return result;
+  } catch (err) {
+    logger.warn(`[call-proc] makeup-${step} step failed for ${maskSid(callSid)}: ${err.code || err.name || 'error'}`);
+    return { outcome: 'needs_review', reason: 'makeup_check_failed' };
+  }
 }
 
 async function applyCallRescheduleStep({ call, callSid, customerId, extracted, v2Result, appointmentResult, procGeneration }) {
@@ -14123,12 +14268,39 @@ const CallRecordingProcessor = {
     // A family member who named the account holder by full name: ONE advisory card listing the live
     // accounts with that name (suggest-only; the office links the call). Reads the state BEFORE this
     // pass creates a customer for the caller, writes nothing else.
+    // The address-disambiguation inputs of the contact-number lookup below, built ONCE: the callback
+    // basis of the card re-runs that same lookup (GATE_CALLBACK_SPOKEN_NUMBER_LINK), and a lookup with
+    // other inputs could keep a card for a call this pass links normally.
+    const contactLookupOpts = {
+      callAddress: {
+        address_line1: extracted.address_line1,
+        address_line2: extracted.address_line2 || null,
+        city: extracted.city,
+        zip: extracted.zip,
+      },
+      // Keyed on the same effective (recovery-aware) verdict the routing
+      // gate consumes: when street recovery found a single validated
+      // premise, extracted already carries the recovered address, so the
+      // address-disambiguation leg must see it as decisive too — otherwise
+      // an agent-role slot caller about the recovered property minted a
+      // duplicate customer (codex round-10 P2).
+      avDecisive: ['validated_accept', 'corrected'].includes(effectiveAddressValidation?.status),
+    };
+    // fileFamilyAccountCard never throws; it reports a failed card write here, and a callback match whose
+    // card could not be written retries the call instead of finalizing it (callbackSpokenNumberSuggested).
+    const familyCardReport = {};
     if (!customerLinkOverride) {
       await require('./call-family-name-link').fileFamilyAccountCard({
-        call, procToken, extracted, v2CanonicalExtraction, statedAddress: v2StatedServiceAddressRaw, phone, isOutbound: isOutboundCall(call),
+        call, procToken, extracted, v2CanonicalExtraction, statedAddress: v2StatedServiceAddressRaw, phone, isOutbound: isOutboundCall(call), contactLookupOpts, report: familyCardReport,
       });
     }
     const sharedPhoneAmbiguity = {};
+    // GATE_CALLBACK_SPOKEN_NUMBER_LINK: true when an office callback's voicemail number is the primary
+    // phone of one account (read-only match, set below only after the normal lookup found nobody).
+    // Suggest-only: that number was said by whoever left the voicemail, so nothing is linked. The call
+    // stays customer-less like the shared-phone case, whether or not the family-account card above
+    // could be written (a failed card write must never turn into a duplicate customer).
+    let spokenNumberSuggested = false;
     let phoneMatchedThisPass = false;
     if (!customerId && phone && !explicitUnlink) {
       // Try to find an existing customer by the external contact phone.
@@ -14136,20 +14308,15 @@ const CallRecordingProcessor = {
       // signal (single owner / AV-address / household) — see the cascade.
       const existing = await findCustomerForCallContact(phone, extracted, {
         multiMatchOut: sharedPhoneAmbiguity,
-        callAddress: {
-          address_line1: extracted.address_line1,
-          address_line2: extracted.address_line2 || null,
-          city: extracted.city,
-          zip: extracted.zip,
-        },
-        // Keyed on the same effective (recovery-aware) verdict the routing
-        // gate consumes: when street recovery found a single validated
-        // premise, extracted already carries the recovered address, so the
-        // address-disambiguation leg must see it as decisive too — otherwise
-        // an agent-role slot caller about the recovered property minted a
-        // duplicate customer (codex round-10 P2).
-        avDecisive: ['validated_accept', 'corrected'].includes(effectiveAddressValidation?.status),
+        ...contactLookupOpts,
       });
+      if (!existing && !sharedPhoneAmbiguity.candidates) {
+        spokenNumberSuggested = await callbackSpokenNumberSuggested({ call, extracted, customerLinkOverride, cardReport: familyCardReport });
+      } else if (familyCardReport.filed === 'callback_spoken_number') {
+        // The card above was decided before this lookup: the dialed number gained an owner (or became
+        // shared) in between, so the callback card no longer applies. Retire it (Codex #6419 r9).
+        await require('./call-family-name-link').retireCallbackSpokenNumberCard({ callLogId: call.id, procToken });
+      }
       if (existing) {
         customerId = existing.id;
         phoneMatchedThisPass = true;
@@ -14180,6 +14347,13 @@ const CallRecordingProcessor = {
           .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
           .ignore()
           .catch((triageErr) => logger.warn(`[call-proc] shared-phone triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
+      } else if (spokenNumberSuggested) {
+        // Minting a second customer here is the duplicate this gate exists to stop. The call stays
+        // customer-less, the workable-lead path below still captures the prospect, and the
+        // family-account card (filed above, advisory) names the account for staff to confirm and
+        // relink (customer_link_override).
+        // A failed card write is the card's own warn line; the next reprocess files it again.
+        logger.info(`[call-proc] ${maskSid(callSid)}: callback voicemail's spoken number matches an account — suggest-only card, no link, no new customer`);
       } else if ((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !v2NonCustomerCallNature) {
         // Create new customer. NEVER from a voicemail — a one-sided message
         // transcription is too lossy to mint a customer record from (the Josh
@@ -14379,11 +14553,17 @@ const CallRecordingProcessor = {
           // Auto-create Stripe customer (non-blocking, but log failures so a
           // misconfigured Stripe key surfaces in the logs instead of silently
           // skipping every new customer's billing record)
-          try {
-            const StripeService = require('./stripe');
-            await StripeService.ensureStripeCustomer(customerId);
-          } catch (e) {
-            logger.warn(`[call-proc] Stripe customer create failed for ${customerId}: ${e.message}`);
+          // GATE_CALL_LEAD_LAZY_STRIPE: skipped while on. A lead that never pays
+          // would keep an empty profile forever, and a later duplicate merge
+          // would refuse the pair (two Stripe profiles). Every card-save and
+          // payment path creates the profile on demand (ensureStripeCustomer).
+          if (require('../config/feature-gates').callLeadLazyStripeLive?.() !== true) {
+            try {
+              const StripeService = require('./stripe');
+              await StripeService.ensureStripeCustomer(customerId);
+            } catch (e) {
+              logger.warn(`[call-proc] Stripe customer create failed for ${customerId}: ${e.message}`);
+            }
           }
 
           newsletterCandidate = {
@@ -16097,7 +16277,9 @@ const CallRecordingProcessor = {
     // customer_creation_failed and pollute failure reporting (codex r4 P2).
     // An explicit operator unlink is an INTENTIONAL customer-less result,
     // never a creation failure to file a card for on every reprocess.
-    const customerExpected = !!((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature && !explicitUnlink);
+    // …and a spoken-number suggestion (GATE_CALLBACK_SPOKEN_NUMBER_LINK) is the same: the pass
+    // deliberately created nobody and the family-account card names the account.
+    const customerExpected = !!((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature && !explicitUnlink && !spokenNumberSuggested);
     const customerLanded = !!customerId;
     // Downgraded below if a customer-less recovery lead was expected but its
     // insert failed — that lead is the only durable record for this call, and
@@ -16339,7 +16521,7 @@ const CallRecordingProcessor = {
         const sameCallEligibility = {
           customerId,
           workableUnnamedLead,
-          unclaimedOnly: !!sharedPhoneAmbiguity.candidates,
+          unclaimedOnly: !!(sharedPhoneAmbiguity.candidates || spokenNumberSuggested),
         };
         const { lead: existingLead, matchedVia: existingLeadVia, phoneNameConflictLeadId } = await findReusableCallLead(db, {
           phone,
@@ -18956,6 +19138,44 @@ const CallRecordingProcessor = {
         addressValidation: effectiveAddressValidation, v2Extraction: v2CanonicalExtraction, extracted, onFile: onFileGeo,
       });
     }
+    // Make-up move (GATE_CALL_MAKEUP_MOVE): a booking confirmed by an existing
+    // customer whose recurring visit was MISSED moves that visit instead of
+    // inserting a new one beside it. Only where the booking branch below would
+    // run (every earlier veto keeps today's behavior). The decision is the
+    // booking transaction's, at its fresh insert, after every booking guard;
+    // here only a reprocess of a call whose move already applied.
+    const makeupGateOn = isEnabled('callMakeupMove') && !v2RoutingBlocked && !legacyGeoVeto && !extracted.is_spam
+      && v2Result?.status === 'valid' && extracted.appointment_confirmed && extracted.preferred_date_time
+      && customerId && hasSpecificTime && canCreateAppointmentFromCall;
+    const makeupPrior = makeupGateOn
+      ? await callMakeupStep('prior', callSid, (makeup) => makeup.priorCallMakeupDecision(db, { call: { ...call, customer_id: customerId }, procToken }))
+      : null;
+    // A make-up outcome becomes the call's booking result. Moved (applied, or
+    // applied on an earlier pass): no schedule row, so no confirmation text
+    // (the reminder cron reads the new time) and no card. Held: the review
+    // card is filed here in every routing mode (the enforce-mode fallback
+    // below merges into the same card), never a new visit beside the missed one.
+    const settleMakeup = async (makeup) => {
+      const result = {
+        service: extracted.matched_service || extracted.requested_service || null,
+        dateTime: extracted.preferred_date_time,
+        scheduleCreated: false,
+        smsSent: false,
+      };
+      if (makeup.outcome !== 'needs_review') {
+        logger.info(`[call-proc] Missed visit moved from the call; not creating a new appointment for ${maskSid(callSid)}`);
+        return { ...result, skippedReason: 'makeup_move_applied', movedVisitId: makeup.visitId || null };
+      }
+      logger.warn(`[call-proc] Held auto-booking for ${maskSid(callSid)}: missed_visit_makeup_needs_review (${makeup.reason || 'unknown'})`);
+      if (!bridgeNeedsConfirmation.includes('missed_visit_makeup_needs_review')) bridgeNeedsConfirmation.push('missed_visit_makeup_needs_review');
+      await fileSkippedBookingCard({
+        call, procToken, customerId, extraction: v2CanonicalExtraction || undefined,
+        skippedReason: 'missed_visit_makeup_needs_review',
+        preferredDateTime: extracted.preferred_date_time,
+        serviceType: result.service, bridgeNeedsConfirmation, callSid,
+      });
+      return { ...result, skippedReason: 'missed_visit_makeup_needs_review', existingScheduledServiceId: makeup.visitId || null };
+    };
     if (v2RoutingBlocked) {
       appointmentResult = {
         service: extracted.matched_service || extracted.requested_service || null,
@@ -18993,6 +19213,8 @@ const CallRecordingProcessor = {
           serviceType: appointmentResult.service, bridgeNeedsConfirmation, callSid,
         });
       }
+    } else if (makeupPrior) {
+      appointmentResult = await settleMakeup(makeupPrior);
     } else if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && canCreateAppointmentFromCall) {
       // Declared OUTSIDE the try so the catch can see whether a schedule row
       // was already inserted when a later confirmation/SMS step threw — the
@@ -19914,14 +20136,6 @@ const CallRecordingProcessor = {
                         .onConflict('idempotency_key')
                         .ignore()
                         .returning('*');
-                      // Visit groups (visit-group-scope.md §2): stamp at
-                      // scheduling, inside this savepoint — dispatch-owned
-                      // but NOT office-review (ai_call_pipeline_followup),
-                      // so it is join-eligible; self-refusing otherwise.
-                      // Absent on the idempotency-conflict reuse (no row).
-                      if (fuRow?.id) {
-                        await require('./visit-groups').maybeGroupRow(fuRow.id, { database: sp, createdBy: 'dispatch' });
-                      }
                       return fuRow || null;
                     });
                   } catch (fuErr) {
@@ -20957,18 +21171,27 @@ const CallRecordingProcessor = {
                   logger.warn(`[call-proc] Scheduled date ${scheduledDate} elapsed while the scheduling transaction was in flight; refusing the insert for ${maskSid(callSid)}`);
                   return { __held: { reason: 'arranger_slot_elapsed_pre_insert' } };
                 }
+                // Make-up move (GATE_CALL_MAKEUP_MOVE, owner 2026-10-22): every
+                // booking guard above passed and this fresh row is about to be
+                // inserted. When the customer has a MISSED recurring visit of
+                // the call's line at this property, the row is not inserted:
+                // that visit moves to this slot after this transaction (the
+                // rebooker opens its own), or the booking holds for review.
+                // Nothing above wrote on this path, so ending here writes nothing.
+                if (makeupGateOn) {
+                  const makeup = await require('./call-reschedule-apply').planCallMakeupForBooking(trx, {
+                    call, procToken, procGeneration,
+                    booking: { ...insertData, followUpPlanned: Boolean(callFollowUpPlan), reService: isReServiceCatalogRow(callBookingCatalogRow),
+                      callbackHold: callbackNumberNeededHoldActive },
+                  });
+                  if (makeup.action !== 'skip') return { __makeup: makeup };
+                }
                 const [created] = await trx('scheduled_services')
                   .insert(insertData)
                   .onConflict('idempotency_key')
                   .ignore()
                   .returning('*');
                 if (created) {
-                  // Visit groups (visit-group-scope.md §2): stamp at
-                  // scheduling — a confirmed phone booking never passes
-                  // through the job-status pending→confirmed regroup hook.
-                  // Absent on the idempotency-conflict reuse branch below
-                  // (the original insert already stamped).
-                  await require('./visit-groups').maybeGroupRow(created.id, { database: trx, createdBy: 'dispatch' });
                   // Inspection credit: a booked phone sale is a REAL
                   // customer booking — durable evidence, same transaction
                   // (Codex #3178 r6 P0). The hourly sweep mints from it.
@@ -21175,6 +21398,12 @@ const CallRecordingProcessor = {
                 // fired (deduped, so on_file_house_number_conflict's own
                 // dedicated push elsewhere is never doubled).
                 if (!bridgeNeedsConfirmation.includes(svc.__held.reason)) bridgeNeedsConfirmation.push(svc.__held.reason);
+              } else if (svc && svc.__makeup) {
+                // The booking transaction found a missed recurring visit and
+                // inserted nothing: move it now, or hold (never a new visit).
+                appointmentResult = await settleMakeup(svc.__makeup.action === 'apply'
+                  ? await callMakeupStep('move', callSid, (makeup) => makeup.applyCallMakeupMove({ conn: db, call, plan: svc.__makeup, procToken, procGeneration }))
+                  : { outcome: 'needs_review', reason: svc.__makeup.reason, visitId: svc.__makeup.visitId || null });
               } else {
               if (reusedExistingSchedule) {
                 scheduleWasReused = true;
@@ -22333,11 +22562,21 @@ const CallRecordingProcessor = {
                   // this from the Step 5 gate, and this is a TEXT TO A
                   // CUSTOMER. Re-check immediately before it (codex P1).
                   if (!(await claimStillOwned())) return false;
-                  const sendResult = (holdImpliedSmsLeg || v2SmsBlocked)
+                  // A confirmation addressed to one of the account's on-location
+                  // CONTACTS' numbers follows that contact's own choices (contact
+                  // login, GATE_CONTACT_LOGIN): texts or appointment updates off
+                  // holds it, exactly as the fan-out below is narrowed (codex
+                  // #6363 r9 P2). Decided by the number's slot on the row, not
+                  // by whether the recipient was redirected: with no account
+                  // phone, validation resolves a slot phone directly (codex r21
+                  // P2). The holder's own number never declines. Fail closed.
+                  const contactDeclined = await require('./contact-notification-prefs')
+                    .contactPhoneDeclinesText(customerId, smsRecipient, 'appointment_confirmation');
+                  const sendResult = (holdImpliedSmsLeg || v2SmsBlocked || contactDeclined)
                     ? {
                       sent: false,
                       blocked: true,
-                      code: holdImpliedSmsLeg ? 'implied_consent_non_ani_recipient' : 'v2_tcpa_gate',
+                      code: holdImpliedSmsLeg ? 'implied_consent_non_ani_recipient' : (v2SmsBlocked ? 'v2_tcpa_gate' : 'contact_declined'),
                     }
                     : await sendCustomerMessage({
                       to: smsRecipient,
@@ -22457,9 +22696,12 @@ const CallRecordingProcessor = {
                       }
                       const fanLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
                       const { filterRecipientsByOptin } = require('./recipient-optin');
+                      // …then the contact's own choices (contact login, GATE_CONTACT_LOGIN) narrow further.
                       const extraContacts = !v2SmsConsentExplicit ? [] : (await filterRecipientsByOptin(
                         getAppointmentContacts(freshCustomer || {}, prefsRow), customerId
-                      )).filter((c) => c.phone && fanLast10(c.phone) !== fanLast10(smsPhone)
+                      ).then((optedIn) => require('./contact-notification-prefs')
+                        .filterContactsByOwnPrefs(optedIn, customerId, 'appointment_confirmation', { channel: 'sms' }))
+                      ).filter((c) => c.phone && fanLast10(c.phone) !== fanLast10(smsPhone)
                         // Claim-failed phones fail CLOSED (no row ≠ grandfathered here).
                         && !optinClaimFailedPhones.has(fanLast10(c.phone)));
                       for (const contact of extraContacts) {
@@ -22891,7 +23133,7 @@ const CallRecordingProcessor = {
     if (CALL_EXTRACTION_V2_DRIVES_ROUTING && v2ApprovedExtraction && extracted.appointment_confirmed) {
       const bookedServiceId = appointmentResult?.scheduledServiceId || null;
       // Held bookings already opened their own reason-specific card above.
-      const heldReasons = new Set(['existing_appointment_same_date', 'ambiguous_existing_appointment', 'auto_booking_previously_cancelled', 'open_reservice_callback_exists', 'reservice_eligibility_lapsed', 'reservice_property_uncovered', 'on_file_proof_customer_mismatch', 'arranger_slot_elapsed_pre_insert']);
+      const heldReasons = new Set(['existing_appointment_same_date', 'ambiguous_existing_appointment', 'auto_booking_previously_cancelled', 'open_reservice_callback_exists', 'reservice_eligibility_lapsed', 'reservice_property_uncovered', 'on_file_proof_customer_mismatch', 'arranger_slot_elapsed_pre_insert', 'makeup_move_applied']);
       // The house-number hold has its own card only when that card actually
       // landed (a thrown insert or a lost claim holds the booking without
       // one) — otherwise the fallback card below is the call's only
@@ -24214,6 +24456,16 @@ const CallRecordingProcessor = {
       // agent-committed move of an on-the-books visit lands on the visit.
       // No customer comms. Generation-fenced, never blocking.
       await applyCallRescheduleStep({ call, callSid, customerId, extracted, v2Result, appointmentResult, procGeneration });
+      // Make-up move (at the booking transaction's insert, then callMakeupStep): the
+      // disposition above was decided with no appointment created, so a
+      // callback the model recommended for the same visit is no longer
+      // outstanding once the missed visit moved. Same revision, same
+      // independent-callback guard and generation fence as an applied
+      // reschedule.
+      if (appointmentResult?.skippedReason === 'makeup_move_applied' && isEnabled('callDispositionV1')) {
+        await reviseDispositionAfterAppliedMove({ call, callSid, procGeneration, reason: 'makeup_move_applied' })
+          .catch((err) => logger.warn(`[call-proc] post-makeup disposition revision failed for ${maskSid(callSid)}: ${err.message}`));
+      }
       if (isEnabled('rescheduleProposalCard')) {
         try {
           await require('./call-reschedule-proposals').stageProposal(db, { callId: call.id, procGeneration });
@@ -25209,6 +25461,7 @@ function legacyDisputeServiceIntent(extracted) {
 }
 
 CallRecordingProcessor._test = {
+  callMakeupStep,
   fileNameSpellingCard,
   contactPassTrigger,
   contactPassTriggerLogged,
@@ -25285,6 +25538,9 @@ CallRecordingProcessor._test = {
   slotOnlyLinkAllowed,
   extractedNameMatchesCustomer,
   findCustomerForCallContact,
+  findCustomerViaCallbackSpokenNumber,
+  callbackSpokenNumberSuggested,
+  pickSpokenNumberOwner,
   firstNameAdvisoryAddressOk,
   normalizeCallExtraction,
   shouldCreateCallLeadForCustomer,
@@ -25446,6 +25702,9 @@ CallRecordingProcessor.recoveryMarkerPayload = recoveryMarkerPayload;
 // not from_phone). It lived only under `_test` — every real caller outside
 // this file got `undefined`.
 CallRecordingProcessor.resolveCallContactPhone = resolveCallContactPhone;
+// Read by call-family-name-link (lazy require) for the callback_spoken_number basis.
+CallRecordingProcessor.findCustomerViaCallbackSpokenNumber = findCustomerViaCallbackSpokenNumber;
+CallRecordingProcessor.findCustomerForCallContact = findCustomerForCallContact;
 
 // Production contract for call-booking-link-text.js's own outbound-return
 // prior-contact check (codex r7 P1, pre-push): that lane's own

@@ -44,7 +44,6 @@ jest.mock('../services/geocoder', () => ({
 }));
 jest.mock('../services/visit-groups', () => ({
   ...jest.requireActual('../services/visit-groups'),
-  maybeGroupRow: jest.fn().mockResolvedValue(null),
   handleChildStopChanged: jest.fn().mockResolvedValue(null),
 }));
 jest.mock('../services/appointment-reminders', () => ({
@@ -61,7 +60,7 @@ const express = require('express');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { gates } = require('../config/feature-gates');
 const router = require('../routes/admin-schedule');
-const { maybeGroupRow, dateOnly } = require('../services/visit-groups');
+const { dateOnly } = require('../services/visit-groups');
 const { geocodeAddress } = require('../services/geocoder');
 const connection = process.env.ARRIVAL_ROUTE_TEST_DATABASE_URL;
 const describeDb = connection ? describe : describe.skip;
@@ -116,7 +115,6 @@ describeDb('staff series/address arrival checks on PostgreSQL', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     mockBeforeSave = null;
-    maybeGroupRow.mockReset().mockResolvedValue(null);
     geocodeAddress.mockReset().mockResolvedValue(null);
     process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
     mockConn = await database.transaction();
@@ -261,17 +259,6 @@ describeDb('staff series/address arrival checks on PostgreSQL', () => {
     const rows = await mockConn('scheduled_services').whereIn('id', [PARENT, CHILD]).orderBy('id');
     expect(rows.every(row => row.property_id === PROPERTY)).toBe(true);
     expect(rows.every(row => row.window_start === '09:00:00' && row.window_end === '10:00:00')).toBe(true);
-  });
-
-  test('the route warning observes the address regroup result inside the same transaction', async () => {
-    await mockConn('scheduled_services').where({ id: NEIGHBOUR }).update({ property_id: PROPERTY });
-    maybeGroupRow.mockImplementation(async (id, { database: trx }) => {
-      if (id === CHILD) await trx('scheduled_services').where({ id })
-        .update({ technician_id: TECH, estimated_duration_minutes: 240 });
-    });
-    const result = await save({ propertyId: PROPERTY });
-    expect(result).toEqual(expect.objectContaining({ status: 200 }));
-    expect(result.body.warnings).toEqual([expect.stringContaining(LATER)]);
   });
 
   test.each([

@@ -97,6 +97,13 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   'accept_estimate',
   // An invoice sent to the customer cannot be unsent.
   'send_invoice',
+  // A recorded payment closes the invoice and stops its reminders; only a refund or void (closed to the bar) undoes it.
+  'record_payment',
+  // A reminder text and email cannot be unsent; the plan confirmation email cannot be unsent either.
+  'send_invoice_reminder_now',
+  'create_payment_plan',
+  // A stopped reminder sequence has no undo in the portal (the panel offers Resume only for paused or Auto Pay-held ones).
+  'stop_invoice_reminders',
 ]);
 
 // Tools whose card lines are curated below from their own preview, not the
@@ -124,11 +131,16 @@ const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
   'send_autopay_setup_link',
   // The invoice text (one text with the pay link; the bar sends no email).
   'send_invoice',
+  // The confirmed run texts and/or emails the customer their next payment reminder, or the payment plan confirmation.
+  'send_invoice_reminder_now',
+  'create_payment_plan',
 ]);
 
 // send_invoice: its card lines come from its own preview
 // (invoice-action-tools.js cardLines), never the generic dump; it bills the customer.
 CURATED_PREVIEW_TOOL_NAMES.add('send_invoice');
+// record_payment: its card lines come from its own preview (record-payment-tools.js cardLines). Money, not a charge.
+CURATED_PREVIEW_TOOL_NAMES.add('record_payment');
 // propose_admin_edit (owner ruling 2026-10-12): its card lines come from its own
 // preview (admin-write-tools.js cardLines), never the generic dump.
 CURATED_PREVIEW_TOOL_NAMES.add('propose_admin_edit');
@@ -136,6 +148,15 @@ CURATED_PREVIEW_TOOL_NAMES.add('propose_admin_edit');
 CURATED_PREVIEW_TOOL_NAMES.add('convert_lead');
 // void_invoice: its card lines come from its own preview (void-invoice-tools.js cardLines). It sends nothing.
 CURATED_PREVIEW_TOOL_NAMES.add('void_invoice');
+// The invoice edit cards: card lines come from their own previews (invoice-edit-tools.js cardLines). None sends anything.
+for (const name of ['edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice']) CURATED_PREVIEW_TOOL_NAMES.add(name);
+// The invoice reminder and payment-plan cards: their card lines come from their own previews (invoice-reminder-tools.js and
+// payment-plan-tools.js cardLines), never the generic dump.
+for (const name of ['pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan']) CURATED_PREVIEW_TOOL_NAMES.add(name);
+// create_invoice: its card lines come from its own preview (create-invoice-tools.js cardLines). A draft only; it sends nothing.
+CURATED_PREVIEW_TOOL_NAMES.add('create_invoice');
+// set_customer_bill_to: its card lines come from its own preview (bill-to-tools.js cardLines). It sends nothing.
+CURATED_PREVIEW_TOOL_NAMES.add('set_customer_bill_to');
 
 // Legacy-bare jobs with no mutation-free preview: what the launch does is
 // fixed and known, so the card states it explicitly (job launch, external
@@ -168,6 +189,9 @@ const BILLING_TOOL_NAMES = new Set([
   'create_agent_estimate_draft',
   'set_estimate_presentation',
   'send_invoice',
+  'record_payment',
+  'create_payment_plan',
+  'cancel_payment_plan',
 ]);
 
 const ACTION_LABELS = {
@@ -200,9 +224,23 @@ const ACTION_LABELS = {
   trigger_review_request: 'Send a review request',
   resend_receipt: 'Re-send a paid receipt',
   send_invoice: 'Send an invoice to the customer',
+  record_payment: 'Record a payment received outside the portal (never charges a card)',
   propose_admin_edit: 'Edit an admin record',
   convert_lead: 'Convert a lead to a customer (sends nothing)',
   void_invoice: 'Void an invoice (sends nothing)',
+  edit_invoice: 'Edit an invoice’s title, notes or due date (sends nothing)',
+  archive_invoice: 'Archive a voided invoice (sends nothing)',
+  unarchive_invoice: 'Unarchive an invoice (sends nothing)',
+  unvoid_invoice: 'Restore a voided invoice to a draft (sends nothing)',
+  pause_invoice_reminders: 'Pause an invoice’s reminders (sends nothing)',
+  resume_invoice_reminders: 'Resume an invoice’s reminders',
+  stop_invoice_reminders: 'Stop an invoice’s reminders (sends nothing)',
+  send_invoice_reminder_now: 'Send an invoice reminder to the customer now',
+  schedule_invoice_send: 'Schedule an invoice to send later',
+  create_payment_plan: 'Create a payment plan (no card charged; emails the customer)',
+  cancel_payment_plan: 'Cancel a payment plan',
+  create_invoice: 'Create a draft invoice (sends nothing)',
+  set_customer_bill_to: 'Set a customer\'s Bill-To payer (sends nothing)',
   block_sender: 'Block a sender',
   create_pending_estimate: 'Create an estimate',
   create_agent_estimate_draft: 'Save an estimate draft',
@@ -828,6 +866,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   if (toolName === 'accept_estimate' && Array.isArray(preview?.card_lines)) {
     for (const l of preview.card_lines) push(l.kind, l.label, l.before !== undefined ? { before: l.before, after: l.after } : {});
   }
+  // record_payment: the invoice, the money and that no receipt is sent.
+  if (toolName === 'record_payment' && preview?.preview === true) {
+    for (const line of require('./record-payment-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
   // convert_lead: the lead, the customer, the matches, every change and that nothing is sent.
   if (toolName === 'convert_lead' && preview?.preview === true) {
     for (const line of require('./lead-convert-tools').cardLines(toolName, preview)) push(line.kind, line.text);
@@ -835,6 +877,32 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // void_invoice: the invoice, what the void does and that nothing is sent.
   if (toolName === 'void_invoice' && preview?.preview === true) {
     for (const line of require('./void-invoice-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
+  // The invoice edit cards: the invoice, each change before -> after, what it does and that nothing is sent.
+  if (['edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice'].includes(toolName) && preview?.preview === true) {
+    for (const line of require('./invoice-edit-tools').cardLines(toolName, preview)) push(line.kind, line.text, line.before !== undefined ? { before: line.before, after: line.after } : {});
+  }
+  // The invoice reminder cards: what each does, and for send-now and schedule the channel, the masked recipient and the message.
+  if (['pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send'].includes(toolName) && preview?.preview === true) {
+    for (const line of require('./invoice-reminder-tools').cardLines(toolName, preview)) {
+      if (line.more) moreEffects.push({ kind: line.kind, label: line.text });
+      else push(line.kind, line.text);
+    }
+  }
+  // The payment-plan cards: each installment, that no card is charged, the customer email, and the reminders.
+  if (['create_payment_plan', 'cancel_payment_plan'].includes(toolName) && preview?.preview === true) {
+    for (const line of require('./payment-plan-tools').cardLines(toolName, preview)) {
+      if (line.more) moreEffects.push({ kind: line.kind, label: line.text });
+      else push(line.kind, line.text);
+    }
+  }
+  // create_invoice: the customer, every line, the totals, and that the draft is not sent.
+  if (toolName === 'create_invoice' && preview?.preview === true) {
+    for (const line of require('./create-invoice-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
+  // set_customer_bill_to: the customer, the payer, the invoices that move and stay, and that nothing is sent.
+  if (toolName === 'set_customer_bill_to' && preview?.preview === true) {
+    for (const line of require('./bill-to-tools').cardLines(toolName, preview)) push(line.kind, line.text);
   }
   // send_invoice: invoice, money and who is contacted.
   if (toolName === 'send_invoice' && preview?.preview === true) {

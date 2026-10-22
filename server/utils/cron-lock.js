@@ -187,6 +187,40 @@ async function recordJobEnd(jobName, startedAtMs, error, conn) {
   }
 }
 
+// Health for a lease-free job (an atomically claimed queue that runs on every
+// replica: cron-lock does not wrap those). There is no 'running' write, and
+// the end write is fenced: a failure always records, and a success never
+// overwrites a failure that finished after this run started or that belongs
+// to the same scheduled minute, so a concurrent or slightly late empty run on
+// another replica cannot hide a failed one. Same columns and
+// meaning as recordJobEnd.
+async function recordLeaseFreeJobEnd(jobName, startedAtMs, error) {
+  const startedAt = new Date(startedAtMs);
+  const finishedAt = new Date();
+  const values = [jobName, startedAt, finishedAt, Math.max(0, finishedAt - startedAt)];
+  try {
+    if (error) {
+      await db.raw(`INSERT INTO job_health (job_name, last_started_at, last_finished_at, last_duration_ms, last_status, last_error, consecutive_failures, updated_at)
+        VALUES (?, ?, ?, ?, 'failed', ?, 1, ?)
+        ON CONFLICT (job_name) DO UPDATE SET last_started_at = EXCLUDED.last_started_at, last_finished_at = EXCLUDED.last_finished_at,
+          last_duration_ms = EXCLUDED.last_duration_ms, last_status = 'failed', last_error = EXCLUDED.last_error,
+          consecutive_failures = job_health.consecutive_failures + 1, updated_at = EXCLUDED.updated_at`,
+      [...values, sanitizeJobError(error.message || error), finishedAt]);
+      return;
+    }
+    await db.raw(`INSERT INTO job_health (job_name, last_started_at, last_finished_at, last_duration_ms, last_status, last_success_at, consecutive_failures, updated_at)
+      VALUES (?, ?, ?, ?, 'success', ?, 0, ?)
+      ON CONFLICT (job_name) DO UPDATE SET last_started_at = EXCLUDED.last_started_at, last_finished_at = EXCLUDED.last_finished_at,
+        last_duration_ms = EXCLUDED.last_duration_ms, last_status = 'success', last_success_at = EXCLUDED.last_success_at,
+        last_error = NULL, consecutive_failures = 0, updated_at = EXCLUDED.updated_at
+      WHERE NOT (job_health.last_status = 'failed'
+        AND (job_health.last_finished_at > ? OR job_health.last_started_at >= date_trunc('minute', ?::timestamptz)))`,
+    [...values, finishedAt, finishedAt, startedAt, startedAt]);
+  } catch (err) {
+    logger.warn(`[cron-lock] ${jobName}: job_health lease-free end record failed (${err.message})`);
+  }
+}
+
 // options.recordHealth (default true): set false for DYNAMIC per-entity
 // locks (review-send:${customerId}, per-run approval locks) — those are
 // mutual-exclusion uses, not scheduled jobs, and recording them would grow
@@ -638,4 +672,4 @@ async function settleDeadRunningJobs() {
   return settled;
 }
 
-module.exports = { runExclusive, isLocked, lockHeldByAnySession, recordJobStart, recordJobEnd, recordMissedTick, settleDeadRunningJobs, DEAD_RUN_ERROR, wasLockSkipped, sanitizeJobError, getHeldConnection };
+module.exports = { runExclusive, isLocked, lockHeldByAnySession, recordJobStart, recordJobEnd, recordLeaseFreeJobEnd, recordMissedTick, settleDeadRunningJobs, DEAD_RUN_ERROR, wasLockSkipped, sanitizeJobError, getHeldConnection };

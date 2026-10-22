@@ -11,7 +11,6 @@
  * terminal primaries).
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/visit-groups', () => ({ maybeGroupRow: jest.fn(async () => {}) }));
 jest.mock('../services/tech-visit-notifications', () => ({ notifyTechVisitChange: jest.fn() }));
 jest.mock('../services/technician-eligibility', () => ({ assertAssignableTechnician: jest.fn(async () => true) }));
 jest.mock('../services/scheduling/occupancy', () => ({
@@ -27,7 +26,6 @@ const { assertAssignableTechnician } = require('../services/technician-eligibili
 const { findConflictingVisits, fenceBookingDay } = require('../services/scheduling/occupancy');
 const { raiseAdminAlert } = require('../services/admin-alert-compose');
 const { createScheduledService } = require('../services/booking/create-scheduled-service');
-const { maybeGroupRow } = require('../services/visit-groups');
 const logger = require('../services/logger');
 const {
   ensurePackageFollowUpVisit, packageFollowUpDate, isPackageFollowUpServiceKey,
@@ -226,7 +224,6 @@ describe('ensurePackageFollowUpVisit', () => {
     expect(insertData.notes).toMatch(/Treatment 2 of 2/);
     expect(insertData.source_estimate_id).toBeUndefined(); // never correlates as an accept retry
     expect(assertAssignableTechnician).toHaveBeenCalledWith('tech-1', { conn: trx, date: '2026-10-19' });
-    expect(maybeGroupRow).toHaveBeenCalledWith('child-1', { database: trx, createdBy: 'dispatch' });
     expect(raiseAdminAlert).not.toHaveBeenCalled();
   });
 

@@ -15,7 +15,7 @@
 //     see the "Non-lawn shipped chips" / "Lawn V2 insight chips" sections.
 
 const { answerProjectReportQuestion } = require('../services/project-report-assistant');
-const { answerServiceReportQuestion } = require('../services/service-report/report-assistant');
+const { answerServiceReportQuestion, routeServiceReportQuestion } = require('../services/service-report/report-assistant');
 // AW-06: import the same shared chip list ProjectReportEngage.jsx ships and
 // project-report-assistant.js whitelists — enumerating from the source
 // instead of a hand-retyped list means a chip added, removed, or reworded
@@ -354,6 +354,31 @@ describe('service report — every shipped chip answers its own category (AW-06)
   test('chip "When is my next service?" answers the next appointment', () => {
     const answer = answerServiceReportQuestion({ question: 'When is my next service?', data: pestData, nextAppointment });
     expect(answer).toMatch(/Your next appointment is/);
+  });
+
+  // The fill chips that keep every report at three questions (owner 2026-10-22,
+  // ReportViewPage.jsx reportAskPrompts). A mosquito report never gets the AI
+  // answer, so these rule answers are what its customer reads.
+  test('chip "What did you find today?" answers the findings', () => {
+    expect(answerServiceReportQuestion({ question: 'What did you find today?', data: pestData, nextAppointment }))
+      .toMatch(/Ant activity noted/);
+  });
+
+  test('chip "What can I do to cut down mosquitoes?" answers customer next steps', () => {
+    expect(answerServiceReportQuestion({ question: 'What can I do to cut down mosquitoes?', data: pestData, nextAppointment }))
+      .toMatch(/Priority next step: Recheck bait stations/);
+  });
+
+  // Every fill question (all lines) gets its own routed answer from the fixed rules even on a report with no data
+  // to quote, never the generic "this service is complete" line (Codex #6452).
+  test.each([
+    ['What should I watch for next?', 'next_steps'],
+    ['What did you find today?', 'findings'],
+    ['When is my next service?', 'next_visit'],
+    ['How is my lawn trending?', 'results'],
+    ['What can I do to cut down mosquitoes?', 'next_steps'],
+  ])('fill chip "%s" routes to %s with no report data', (question, topic) => {
+    expect(routeServiceReportQuestion({ question, data: {}, nextAppointment: null }).topic).toBe(topic);
   });
   test.each([
     'When can we go outside again?',

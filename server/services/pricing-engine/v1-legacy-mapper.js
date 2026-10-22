@@ -1260,7 +1260,19 @@ function mapV1ToLegacyShape(v1Result) {
 
   // v2 convention: WaveGuard Membership ($99 initial fee) counts in
   // oneTime.total but NOT in oneTime.items[]. Match that.
-  const membershipFee = pestLI?.initialFee || 0;
+  // The fee belongs only to a solo pest or solo mosquito plan (owner
+  // 2026-07-10, restated 2026-10-21: "waived if they do multiple services";
+  // estimate-converter's recurringMixHasMembershipFeeService, the rule the
+  // page, the invoice and the accept use). The engine still prices it on the
+  // pest line of a bundle, so a pest + mosquito estimate cached a $99 nobody
+  // bills and stored it in onetime_total (EST-2026-1185). The writer leaves
+  // it out, so no reader has to take it back out (#6438). Palm injection
+  // rides outside services[] (recurring.palmInjectionMo); the public page's
+  // recurringServicesWithSupplements counts it as a line, so it counts here.
+  const feeMixServices = palmMonthlyAfterCredits > 0 ? [...services, { service: 'palm_injection' }] : services;
+  const membershipFee = require('../estimate-converter').recurringMixHasMembershipFeeService(feeMixServices)
+    ? (pestLI?.initialFee || 0)
+    : 0;
 
   const oneTimeItemsMoney = v1OtItems.reduce((s, i) => s + (i.price || 0), 0);
   const specialtyMoney = v1SpecItems

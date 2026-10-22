@@ -1054,4 +1054,44 @@ describe('EstimateProposalDocument — monthly average beside per-application pr
     const text = render1({ ...data, proposal: { ...data.proposal, enabled: true }, cta: { commercialProposal: true } });
     expect(text).not.toMatch(/Averaged over the year/);
   });
+
+  // Application months (owner 2026-10-22): the page's "What you pay" rows in the PDF.
+  describe('application months', () => {
+    const pestMosquito = {
+      lines: [perAppLine('Pest Control — 4 applications/yr', 115.2, 4), perAppLine('Mosquito — 12 applications/yr', 74.7, 12)],
+      monthlyAverage: { planMonthly: 113.1, credit: null, bundleDiscountPct: 0.1, oneTime: null },
+    };
+
+    it('prints the two month rows, then the plan average, and no per-service monthly slice', () => {
+      const { container } = render(<EstimateProposalDocument data={docData(pestMosquito)} token="tok-123" />);
+      const applied = container.querySelector('[data-application-months-applied]');
+      const other = container.querySelector('[data-application-months-other]');
+      expect(applied.textContent).toBe('Months with Pest Control (4 a year)Pest Control + Mosquito$189.90');
+      expect(other.textContent).toBe('Other months (8 a year)Mosquito only$74.70');
+      expect(container.textContent).toContain('What you pay');
+      expect(container.querySelector('[data-monthly-average-plan]').textContent).toContain('$113.10 a month');
+      expect(container.textContent).toContain('Your plan averages (10% bundle savings included)');
+      expect(container.querySelectorAll('[data-monthly-average-line]')).toHaveLength(0);
+      expect(container.textContent).not.toContain('/mo');
+      expect(container.textContent).not.toContain('applications/yr (');
+    });
+
+    it('a plan the breakdown does not cover keeps the monthly-average document, with no month rows', () => {
+      for (const fixture of [single, bundle]) {
+        expect(render(<EstimateProposalDocument data={docData(fixture)} token="tok-123" />).container.innerHTML)
+          .not.toContain('data-application-months');
+      }
+    });
+
+    it('the monthly average gate off (no inputs from the server) shows nothing', () => {
+      const text = render1(docData({ ...pestMosquito, monthlyAverage: null }));
+      expect(text).not.toMatch(/What you pay|a month|Averaged over the year/);
+    });
+
+    it('a plan credit has no fixed month: the document keeps the credit lines and no month rows', () => {
+      const data = docData({ ...pestMosquito, monthlyAverage: { planMonthly: 108.1, credit: { label: 'Referral Credit', monthly: 5 }, bundleDiscountPct: 0.1, oneTime: null } });
+      const { container } = render(<EstimateProposalDocument data={data} token="tok-123" />);
+      expect(container.querySelector('[data-application-months]')).toBeNull();
+    });
+  });
 });

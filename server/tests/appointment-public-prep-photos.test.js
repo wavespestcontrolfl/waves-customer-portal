@@ -623,7 +623,7 @@ describe('POST /api/public/appointment/:token/photos', () => {
       expect(res.status).toBe(201);
       expect(dbState.lockReads).toBeGreaterThanOrEqual(1);
       // Customer row before the visit rows (Codex r3 P1), and taken before
-      // the stop lock too (Codex #5306 r2 P2: createOrJoinVisit's order).
+      // the stop lock too (Codex #5306 r2 P2).
       expect(dbState.lockOrder[0]).toBe('customers');
       expect(dbState.lockOrder.indexOf('customers')).toBeLessThan(dbState.lockOrder.indexOf('scheduled_services'));
       const body = await res.json();

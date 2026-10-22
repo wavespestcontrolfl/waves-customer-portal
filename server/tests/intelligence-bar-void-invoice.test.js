@@ -335,7 +335,7 @@ describe('invoices left to the Invoices page (needs_invoices_page)', () => {
     mockRetrievePi.mockResolvedValue({ id: 'pi_test_1', status: 'requires_payment_method' });
     const res = await preview();
     expect(res).toMatchObject({ code: 'needs_invoices_page' });
-    expect(res.error).toMatch(/Void it from the Invoices page/);
+    expect(res.error).toMatch(/The bar can't void this invoice from here yet/);
   });
 
   test('a link check that fails refuses (fail closed)', async () => {

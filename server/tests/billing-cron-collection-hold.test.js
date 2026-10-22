@@ -69,6 +69,11 @@ jest.mock('../models/db', () => {
   return db;
 });
 
+// The merge fence (health-alert-insert) has its own suite; here it passes the
+// row straight to the mocked db so this suite's insert assertions still hold.
+jest.mock('../services/health-alert-insert', () => ({
+  insertHealthAlert: (row) => require('../models/db')('customer_health_alerts').insert(row),
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 jest.mock('../services/prepaid-pi-guard', () => ({ neutralizeOpenPaymentIntent: jest.fn() }));

@@ -14,7 +14,6 @@ import { alsoSteps, lawnLayoutStatusData, lawnTodaysResult, reentryIsTimed, reen
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
 import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
 import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap';
-import WebPromiseCards from '../components/report/WebPromiseCards';
 import MosquitoReportV2Section from '../components/report/mosquitoV2/MosquitoReportV2Section';
 import TermiteReportV2Section from '../components/report/termiteV2/TermiteReportV2Section';
 import CockroachReportV2Section from '../components/report/cockroachV2/CockroachReportV2Section';
@@ -67,7 +66,6 @@ import PestPressureCard from '../components/PestPressureCard';
 import { etDateString } from '../lib/timezone';
 import TREATMENT_AREA_SCOPES from '../../../shared/treatment-area-scopes.json';
 import ReferralShareCard from '../components/referral/ReferralShareCard';
-import ShareLawnCard from '../components/report/ShareLawnCard';
 import ActivityCard from '../components/ActivityCard';
 import { WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
 import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
@@ -2592,26 +2590,29 @@ export function TechNoteCard({ data, mode = 'live' }) {
 
 // "From the Waves blog" (GATE_REPORT_BLOG_POST): the one post the technician
 // or the office picked at completion, frozen on the record with its title
-// and live URL (the server checks the URL is on the Waves site). The last
-// card before the footer; live view only, like the tech note.
+// and live URL (the server checks the URL is on the Waves site), plus the
+// post's main image when the site has one. Owner 2026-10-22: it sits right
+// under the status card (weather), shows the image, and never prints the
+// raw URL. Live view only, like the tech note.
 export function BlogPostCard({ data, mode = 'live' }) {
   const post = data?.blogPost;
   if (mode !== 'live' || !post?.url || !post?.title) return null;
-  let host = '';
   try {
-    const parsed = new URL(post.url);
-    host = `${parsed.hostname.replace(/^www\./i, '')}${parsed.pathname}`;
+    new URL(post.url);
   } catch {
     return null;
   }
+  const imageUrl = typeof post.imageUrl === 'string' && /^https:\/\//i.test(post.imageUrl) ? post.imageUrl : null;
   return (
-    <section data-glass="card" className="sr-section" id="from-the-blog">
+    <section data-glass="card" className="sr-section blog-post-card" id="from-the-blog">
       {/* h2, not .section-eyebrow — see PlanSummaryCard. */}
       <h2>From the Waves blog</h2>
-      <p className="map-context-copy" style={{ fontWeight: 600 }}>
-        <a href={post.url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--text, #04395E)' }}>{post.title}</a>
-      </p>
-      <p className="map-context-copy" style={{ fontSize: 14, overflowWrap: 'anywhere' }}>{host}</p>
+      <a className="blog-post-link" href={post.url} target="_blank" rel="noopener noreferrer">
+        {imageUrl && (
+          <img className="blog-post-image" src={imageUrl} alt="" loading="lazy" />
+        )}
+        <span className="blog-post-title">{post.title}</span>
+      </a>
     </section>
   );
 }
@@ -3113,6 +3114,8 @@ function PlanSummaryCard({ data, mode }) {
                   <a
                     className="plan-visit-reschedule"
                     href={visit.rescheduleUrl}
+                    // The gold glass accent of the report's other CTAs (owner 2026-10-22).
+                    data-glass-accent=""
                     style={{ ...actionButtonStyle('plain'), minHeight: 44, padding: '0 14px' }}
                     aria-label={`Reschedule ${formatNextAppointmentLabel(visit) || nextServiceName(visit.serviceType) || 'this visit'}`}
                   >
@@ -3137,6 +3140,24 @@ function PlanSummaryCard({ data, mode }) {
 // "Mon, Jan 4" for the plan card, or null for a missing, unreadable or past
 // date (a report opened months later must not promise a visit that has gone).
 // Past is judged on the Eastern calendar, whatever the browser's zone.
+// True when the plan card or the upcoming visits card (live view only) prints
+// the visit `data.nextSameServiceAppointment` names: the same date and
+// service in its visits list, or as the plan card's "Your next … visit" line.
+export function nextVisitShownInPlanCard(data, mode) {
+  const next = data?.nextSameServiceAppointment;
+  if (mode !== 'live' || !next?.scheduledDate) return false;
+  const sameVisit = (visit) => Boolean(visit)
+    && String(visit.scheduledDate || '').slice(0, 10) === String(next.scheduledDate).slice(0, 10)
+    && String(visit.serviceType || '') === String(next.serviceType || '');
+  const listed = Array.isArray(data.upcomingVisitsCard?.visits) ? data.upcomingVisitsCard.visits : [];
+  if (listed.some(sameVisit)) return true;
+  const plan = data.planSummary;
+  const planLine = !data.upcomingVisitsCard && Boolean(plan) && Number(plan.visitsThisYear) > 0
+    && Boolean(planNextVisitDateLabel(data.nextAppointment))
+    && Boolean(String(nextServiceName(data.nextAppointment?.serviceType) || '').replace(/\s+service$/i, '').trim());
+  return planLine && sameVisit(data.nextAppointment);
+}
+
 function planNextVisitDateLabel(nextAppointment, todayEt = etDateString()) {
   const date = calendarDateFromDateOnlyValue(nextAppointment?.scheduledDate);
   if (!date) return null;
@@ -3194,122 +3215,14 @@ function ToolLabel({ full, short }) {
   );
 }
 
-// Copies or shares the customer's report link (the glass report and the
-// simple web report both use it). Returns 'copied' when the clipboard fallback
-// ran so the action bar can show feedback. Canceling the native share sheet is
-// not an error and records no event.
-async function shareReportLink(token) {
-  const reportUrl = typeof window !== 'undefined' ? `${window.location.origin}/report/${token}` : `/report/${token}`;
-  try {
-    if (navigator.share) {
-      await navigator.share({ title: 'Waves service report', url: reportUrl });
-      trackReportEvent(token, 'share_link_copied', { method: 'native_share' });
-      return null;
-    }
-  } catch {
-    return null; // share sheet canceled
-  }
-  try {
-    // Optional chaining resolves undefined (no throw) when the Clipboard
-    // API is absent (in-app webviews, non-secure contexts) — never report
-    // "Link copied" without an actual write.
-    if (typeof navigator.clipboard?.writeText !== 'function') return null;
-    await navigator.clipboard.writeText(reportUrl);
-    trackReportEvent(token, 'share_link_copied', { method: 'clipboard' });
-    return 'copied';
-  } catch {
-    return null; // clipboard unavailable
-  }
-}
-
-// The Report Tools bar's own rules. ServiceReportV1 interpolates these same
-// strings at the same places in its sheet; the simple web report (which has no
-// .service-report-v1 sheet) prints them once through REPORT_TOOLS_SHEET.
-const REPORT_TOOLS_BASE_CSS = `
-        .report-action-bar {
-          display: block;
-          /* owner 2026-07-16: the tools card sits almost overlapping the
-             Waves AI strip below it */
-          margin: 0 0 2px;
-          padding: 20px 24px;
-          background: var(--paper, #fff);
-          border: 1px solid var(--line, rgba(4, 57, 94, 0.12));
-          border-radius: 12px;
-        }
-        .report-action-bar .section-eyebrow {
-          margin-bottom: 8px;
-        }
-        .report-action-buttons {
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 12px;
-          margin-top: 16px;
-        }
-        .report-action-buttons > a,
-        .report-action-buttons > button,
-        .report-action-buttons > span {
-          width: 100%;
-        }
-        .report-action-label-short { display: none; }
-`;
-// Very narrow phones (320-374px): even slimmed 2-up columns can't hold the
-// nowrap button labels, so they fall back to a single column there only. The
-// extra .report-action-bar specificity outranks the 760px block's 2-up rule
-// regardless of source order (codex P2 #3038).
-const REPORT_TOOLS_NARROW_CSS = `
-          .report-action-bar .report-action-buttons { grid-template-columns: 1fr; }
-`;
-// Phones show the tools as one row of short labels (owner pick B, 2026-10-03).
-// Column auto-flow keeps the row full when Print is hidden in the app. The
-// .report-action-bar prefix outranks the narrow single-column rule;
-// !important beats the buttons' inline docButton sizing. The tools keep the
-// 44px touch floor; the bar's padding gives it back.
-const REPORT_TOOLS_PHONE_CSS = `
-          .report-action-bar { padding: 16px; }
-          .report-action-buttons { grid-template-columns: 1fr 1fr; gap: 10px; }
-          .report-action-buttons > a,
-          .report-action-buttons > button { padding-left: 10px; padding-right: 10px; }
-          .report-action-bar[aria-label="Report tools"] { padding: 6px 8px; }
-          .report-action-bar .report-action-buttons {
-            grid-template-columns: none;
-            grid-auto-flow: column;
-            grid-auto-columns: minmax(0, 1fr);
-            gap: 6px;
-            margin-top: 0;
-          }
-          .report-action-bar .report-action-buttons > a,
-          .report-action-bar .report-action-buttons > button {
-            min-height: 44px !important;
-            padding: 0 4px !important;
-            font-size: 14px !important;
-          }
-          .report-action-bar .report-action-buttons svg { display: none; }
-          .report-action-label-full {
-            position: absolute;
-            width: 1px;
-            height: 1px;
-            margin: -1px;
-            overflow: hidden;
-            clip: rect(0 0 0 0);
-            white-space: nowrap;
-          }
-          .report-action-label-short { display: inline; }
-`;
-const REPORT_TOOLS_SHEET = `${REPORT_TOOLS_BASE_CSS}
-        @media (max-width: 374px) {${REPORT_TOOLS_NARROW_CSS}        }
-        @media (max-width: 760px) {${REPORT_TOOLS_PHONE_CSS}        }
-        @media print { .report-action-bar { display: none; } }
-`;
-
-function ReportActionBar({ pdfUrl, token, fileName = 'Waves-Service-Report.pdf' }) {
-
+function ReportActionBar({ pdfUrl, token, onShare, fileName = 'Waves-Service-Report.pdf' }) {
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef(null);
   // Clear the copied-feedback timer on unmount so it can't fire setState on
   // an unmounted component.
   useEffect(() => () => window.clearTimeout(copiedTimerRef.current), []);
   const handleShare = async () => {
-    const result = await shareReportLink(token);
+    const result = await onShare();
     if (result === 'copied') {
       setCopied(true);
       window.clearTimeout(copiedTimerRef.current);
@@ -3535,9 +3448,19 @@ export function reportAskPrompts(data = {}, serviceLine = 'pest') {
   else if ((data.applications || []).length) add('Why were these products used?');
   if (hasPressure) add('What does Pest Pressure mean?');
   if (hasInaccessible) add('What should I do about the inaccessible area?');
-  add(serviceLine === 'lawn' ? 'How is my lawn trending?' : 'What should I watch for next?');
-  add('When is my next service?');
-  return prompts.slice(0, 5);
+  // Exactly three questions on every report (owner 2026-10-22). Visit-specific
+  // questions lead; this per-line set fills any gap so each line always has 3.
+  // Each fill question gets its own answer from the report's fixed-rule router
+  // (report-assistant.js) with no AI and no extra report data: that answer is
+  // what a mosquito report always gives, and what the others give when the AI
+  // is off or misses.
+  const FILL_BY_LINE = {
+    lawn: ['How is my lawn trending?', 'What should I watch for next?', 'When is my next service?'],
+    mosquito: ['What can I do to cut down mosquitoes?', 'What did you find today?', 'When is my next service?'],
+    tree_shrub: ['What did you find today?', 'What should I watch for next?', 'When is my next service?'],
+  };
+  (FILL_BY_LINE[serviceLine] || ['What should I watch for next?', 'What did you find today?', 'When is my next service?']).forEach(add);
+  return prompts.slice(0, 3);
 }
 
 // Floating Ask Waves — the report's AI helper as a slim bar pinned under the
@@ -6538,6 +6461,7 @@ function visualProofMomentIntro(moments = []) {
 
 function ServiceReportV1({ data, token, mode = 'live' }) {
   const pdfUrl = data.pdfUrl ? `${API_BASE}${data.pdfUrl.replace(/^\/api/, '')}` : null;
+  const reportUrl = typeof window !== 'undefined' ? `${window.location.origin}/report/${token}` : `/report/${token}`;
   const serviceCoverage = normalizeServiceCoverage(data);
   const hasApplications = (data.applications || []).length > 0;
   const dynamicContext = data.dynamicContext || {};
@@ -6667,7 +6591,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   // own service line for "What's next" (live view only: the server strips
   // it from every other render).
   const reportSections = Array.isArray(data.reportSections) ? data.reportSections : null;
-  const nextSameServiceLabel = formatNextAppointmentLabel(data.nextSameServiceAppointment);
+  // Owner 2026-10-22 ("we dont need to mention the next service twice"):
+  // "What's next" leaves out its "Next visit:" line when the "Your plan" /
+  // upcoming visits card already names that same visit.
+  const nextSameServiceLabel = nextVisitShownInPlanCard(data, mode)
+    ? null
+    : formatNextAppointmentLabel(data.nextSameServiceAppointment);
   // When the four-section report is what a termite or cockroach dashboard
   // shows, its next visit is the property-scoped one opening "What's next";
   // the dashboard's own customer-wide label stays off (Codex #5500).
@@ -6714,6 +6643,32 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
       // the mosquito where-we-treated picture.
       || data.serviceLine === 'pest')
       && !data.treatmentMap?.traced?.snapshotUrl);
+
+  // Returns 'copied' when the clipboard fallback ran so the action bar can
+  // show feedback. Canceling the native share sheet is not an error and
+  // records no event.
+  const share = async () => {
+    try {
+      if (navigator.share) {
+        await navigator.share({ title: 'Waves service report', url: reportUrl });
+        trackReportEvent(token, 'share_link_copied', { method: 'native_share' });
+        return null;
+      }
+    } catch {
+      return null; // share sheet canceled
+    }
+    try {
+      // Optional chaining resolves undefined (no throw) when the Clipboard
+      // API is absent (in-app webviews, non-secure contexts) — never report
+      // "Link copied" without an actual write.
+      if (typeof navigator.clipboard?.writeText !== 'function') return null;
+      await navigator.clipboard.writeText(reportUrl);
+      trackReportEvent(token, 'share_link_copied', { method: 'clipboard' });
+      return 'copied';
+    } catch {
+      return null; // clipboard unavailable
+    }
+  };
 
   if (mode === 'sms_preview') return <SmsReportPreview data={data} />;
 
@@ -6823,7 +6778,20 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
            (audit G-01, DECISIONS 2026-09-11 "R2a"). Only the print-only
            padding override below still targets this class name. */
         .sr-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
-${REPORT_TOOLS_BASE_CSS}        .report-action-title {
+        .report-action-bar {
+          display: block;
+          /* owner 2026-07-16: the tools card sits almost overlapping the
+             Waves AI strip below it */
+          margin: 0 0 2px;
+          padding: 20px 24px;
+          background: var(--paper);
+          border: 1px solid var(--line);
+          border-radius: 12px;
+        }
+        .report-action-bar .section-eyebrow {
+          margin-bottom: 8px;
+        }
+        .report-action-title {
           margin: 8px 0 4px;
           font-family: ${FONTS.serif};
           font-weight: 500;
@@ -6837,6 +6805,18 @@ ${REPORT_TOOLS_BASE_CSS}        .report-action-title {
           font-size: 14px;
           line-height: 1.5;
         }
+        .report-action-buttons {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 12px;
+          margin-top: 16px;
+        }
+        .report-action-buttons > a,
+        .report-action-buttons > button,
+        .report-action-buttons > span {
+          width: 100%;
+        }
+        .report-action-label-short { display: none; }
         .service-report-hero {
           padding: 8px 0 0;
         }
@@ -8430,13 +8410,19 @@ ${REPORT_TOOLS_BASE_CSS}        .report-action-title {
           font-size: 14px;
           line-height: 1.5;
         }
+        /* Owner 2026-10-22: the product facts read top to bottom in one
+           box (Purpose, then Active ingredient, then EPA Reg. No.), the
+           same grammar as the "How it works" box under it. */
         .product-purpose-grid {
           display: grid;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 12px;
+          grid-template-columns: minmax(0, 1fr);
+          gap: 14px;
           margin-top: 12px;
+          border: 1px solid var(--line);
+          border-radius: 10px;
+          background: var(--wash);
+          padding: 12px;
         }
-        .product-purpose-grid > div,
         .product-why {
           border: 1px solid var(--line);
           border-radius: 10px;
@@ -8590,7 +8576,9 @@ ${REPORT_TOOLS_BASE_CSS}        .report-action-title {
           background: var(--report-surface);
           border: 1px solid var(--report-border);
           border-radius: 12px;
-          padding: 20px;
+          /* 24px like .sr-section, so text in every card starts at the same
+             left edge (owner 2026-10-22, "make sure fonts are aligned"). */
+          padding: 24px;
           /* matches .sr-section's 20px rhythm — hover-lift headroom */
           margin-top: 20px;
           break-inside: avoid;
@@ -8630,10 +8618,20 @@ ${REPORT_TOOLS_BASE_CSS}        .report-action-title {
         .review-request-card-top {
           margin-bottom: 16px;
         }
+        /* Desktop (owner 2026-10-22, "renders funny on desktop"): one row,
+           headline left and button right. Phones keep the center stack. */
+        @media (min-width: 761px) {
+          .review-request-card {
+            grid-template-columns: 1fr auto;
+            justify-items: start;
+          }
+          .service-report-v1 .review-request-card.report-card h3 { text-align: left; margin: 0 !important; }
+        }
         .review-request-card h3 {
           margin-bottom: 0;
         }
         .review-request-card .review-cta {
+          box-sizing: border-box;
           display: inline-flex;
           align-items: center;
           justify-content: center;
@@ -8751,6 +8749,26 @@ ${REPORT_TOOLS_BASE_CSS}        .report-action-title {
           gap: 10px;
         }
         .referral-share-row .cross-sell-cta { min-width: 0; width: 100%; }
+        /* Owner 2026-10-22: the quote offer card is centered. */
+        .cross-sell-card[data-section="cross-sell"] { text-align: center; }
+        .blog-post-link { display: block; color: var(--text); text-decoration: none; }
+        .blog-post-image {
+          display: block;
+          width: 100%;
+          aspect-ratio: 16 / 9;
+          object-fit: cover;
+          border-radius: 10px;
+          margin-top: 12px;
+        }
+        .blog-post-title {
+          display: block;
+          margin-top: 12px;
+          font-size: 16px;
+          font-weight: 600;
+          line-height: 1.4;
+          text-decoration: underline;
+          text-underline-offset: 3px;
+        }
         .cross-sell-card .cross-sell-cta {
           display: inline-flex;
           align-items: center;
@@ -9523,12 +9541,58 @@ ${REPORT_TOOLS_BASE_CSS}        .report-action-title {
           transform: none;
           box-shadow: none;
         }
-        @media (max-width: 374px) {${REPORT_TOOLS_NARROW_CSS}        }
+        /* Very narrow phones (320-374px): even slimmed 2-up columns can't hold
+           the nowrap button labels — fall back to a single column there only.
+           The extra .report-action-bar specificity outranks the 760px block's
+           2-up rule regardless of source order (codex P2 #3038). */
+        @media (max-width: 374px) {
+          .report-action-bar .report-action-buttons { grid-template-columns: 1fr; }
+        }
         @media (max-width: 760px) {
           .sr-top-inner { align-items: center; flex-direction: row; }
           .sr-actions { width: 100%; justify-content: stretch; }
           .sr-actions a, .sr-actions button { flex: 1; }
-${REPORT_TOOLS_PHONE_CSS}          .service-status-main,
+          .report-action-bar { padding: 16px; }
+          /* Keep the 2×2 grid on phones — four stacked full-width buttons made
+             the utility bar a full screen tall (audit 2026-07-28). Slimmer
+             button padding so "Download PDF" / "Portal Login" fit a half-width
+             column (the doc buttons are nowrap — codex P2 #3038). */
+          .report-action-buttons { grid-template-columns: 1fr 1fr; gap: 10px; }
+          .report-action-buttons > a,
+          .report-action-buttons > button { padding-left: 10px; padding-right: 10px; }
+          /* Owner pick B (2026-10-03): on phones the tools are one row of
+             short labels — PDF / Share / Print / Login — so the greeting
+             and Today's result fit the first screen. Column
+             auto-flow keeps the row full when Print is hidden in the app.
+             The .report-action-bar prefix outranks the 374px single-column
+             rule; !important beats the buttons' inline docButton sizing. The
+             tools keep the 44px touch floor; the bar's padding gives it back. */
+          .report-action-bar[aria-label="Report tools"] { padding: 6px 8px; }
+          .report-action-bar .report-action-buttons {
+            grid-template-columns: none;
+            grid-auto-flow: column;
+            grid-auto-columns: minmax(0, 1fr);
+            gap: 6px;
+            margin-top: 0;
+          }
+          .report-action-bar .report-action-buttons > a,
+          .report-action-bar .report-action-buttons > button {
+            min-height: 44px !important;
+            padding: 0 4px !important;
+            font-size: 14px !important;
+          }
+          .report-action-bar .report-action-buttons svg { display: none; }
+          .report-action-label-full {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0 0 0 0);
+            white-space: nowrap;
+          }
+          .report-action-label-short { display: inline; }
+          .service-status-main,
           .readiness-card-header { flex-direction: column; }
           .sr-pressure { justify-self: stretch; }
           .sr-band { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -9607,6 +9671,11 @@ ${REPORT_TOOLS_PHONE_CSS}          .service-status-main,
            with "[Report kind] · [the service performed]" above the header,
            mirroring the project report's kicker. */
         html[data-glass-theme] .service-report-v1 .service-report-hero .section-eyebrow { display: block; }
+        /* Owner 2026-10-22 ("make sure fonts are aligned"): the pest, lawn,
+           tree and mosquito status cards print their prose in the same
+           grey, size and line height as every other card. */
+        html[data-glass-theme] .service-report-v1 .sr-v2-body,
+        html[data-glass-theme] .service-report-v1 .sr-v2-body p { color: #3F4A65 !important; font-size: 16px !important; line-height: 1.5 !important; }
         html[data-glass-theme] .service-report-v1 .sr-cell,
         html[data-glass-theme] .service-report-v1 .sr-metric {
           background: rgba(255, 255, 255, 0.42);
@@ -9776,7 +9845,7 @@ ${REPORT_TOOLS_PHONE_CSS}          .service-status-main,
             render at the TOP of EVERY service report, above the Waves AI
             bar. */}
         {mode === 'live' && !data.internalOnly && (
-          <ReportActionBar pdfUrl={pdfUrl} token={token} fileName={reportPdfDownloadName(data)} />
+          <ReportActionBar pdfUrl={pdfUrl} token={token} onShare={share} fileName={reportPdfDownloadName(data)} />
         )}
 
         {/* Ask Waves floats with the customer: sticky under the shell header for
@@ -9797,6 +9866,7 @@ ${REPORT_TOOLS_PHONE_CSS}          .service-status-main,
               data={data}
               slots={{
                 status: <LawnStatusCard data={data} mode={mode} layout />,
+                blog: <BlogPostCard data={data} mode={mode} />,
                 reservice: <ReserviceReportCard data={data} mode={mode} />,
                 plan: <PlanSummaryCard data={data} mode={mode} />,
                 upcoming: <UpcomingVisitsCard data={data} mode={mode} />,
@@ -9822,6 +9892,10 @@ ${REPORT_TOOLS_PHONE_CSS}          .service-status-main,
           )}
         >
         <LawnStatusCard data={data} mode={mode} layout={false} />
+
+        {/* The Waves blog post picked at completion, right under the status
+            card and its weather call (owner 2026-10-22; live only). */}
+        <BlogPostCard data={data} mode={mode} />
 
         {/* The lawn watering instruction (GATE_LAWN_WATERING_RULE) sits right
             under the visit status, ahead of everything else the customer
@@ -10398,9 +10472,6 @@ ${REPORT_TOOLS_PHONE_CSS}          .service-status-main,
         {!reviewAskOnTop && <ReviewRequestCard data={data} token={token} mode={mode} placement="bottom" />}
         </LawnLayoutSwitch>
 
-        {/* The Waves blog post picked at completion, at the bottom of the
-            report on every layout (live only). */}
-        <BlogPostCard data={data} mode={mode} />
 
 
 
@@ -10455,79 +10526,6 @@ function reportDataUrl(token, mode, pinnedAssessment) {
 // page left open (or restored from the background) past this re-requests just
 // the map fields, silently, instead of leaving a dead map behind.
 const REPORT_MAP_STALE_MS = 90 * 60 * 1000;
-
-// GATE_REPORT_SIMPLE_WEB (owner 2026-10-17: "the simpler service reports,
-// that we modeled after trugreen and all u need"): the report link shows the
-// work-order document the PDF prints, with one Download PDF button over it.
-// The server builds this payload as it builds the PDF's (same compliance
-// strips), and sets data.simpleWebReport only while the gate is live.
-function SimpleWebReport({ data, token }) {
-  // GATE_REPORT_GLASS_WEB (owner 2026-10-20): the server sets glassWeb only
-  // while that gate is live. The page-level useGlassSurface already mounted
-  // the scene; this only drops the white sheet and dresses the cards.
-  const glass = data.glassWeb === true;
-  const pdfUrl = data.pdfUrl ? `${API_BASE}${data.pdfUrl.replace(/^\/api/, '')}` : null;
-  useEffect(() => {
-    trackReportEvent(token, 'service_report_viewed', { layout: 'simple' });
-  }, [token]);
-  return (
-    <div style={{ background: glass ? 'transparent' : '#fff', flex: 1 }}>
-      {glass ? (
-        // Owner 2026-10-20: the buttons the glass report had on top (Download
-        // PDF / Share / Print / Portal Login), then Ask Waves, as before. Same
-        // components, same order. Rides GATE_REPORT_GLASS_WEB; gate off keeps
-        // the lone Download PDF link below.
-        <div className="sr-shell" style={{ maxWidth: 760, margin: '0 auto', padding: '16px 16px 0' }}>
-          <style>{REPORT_TOOLS_SHEET}</style>
-          <ReportActionBar pdfUrl={pdfUrl} token={token} fileName={reportPdfDownloadName(data)} />
-          <FloatingAskWaves mode="live" token={token} serviceLine={data.serviceLine} data={data} />
-        </div>
-      ) : pdfUrl ? (
-        <div style={{ maxWidth: 760, margin: '0 auto', padding: '16px 16px 0', display: 'flex', justifyContent: 'flex-end' }}>
-          <a
-            href={pdfUrl}
-            download
-            onClick={(e) => {
-              trackReportEvent(token, 'pdf_downloaded');
-              // In the Capacitor shell an <a download> dead-ends the webview —
-              // route through the native share sheet (same as ReportActionBar).
-              if (canSaveNative()) {
-                e.preventDefault();
-                saveUrlNative(pdfUrl, reportPdfDownloadName(data))
-                  .catch(() => showCustomerAlert('Could not save the PDF. Please try again.'));
-              }
-            }}
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: 8, minHeight: 44, padding: '0 16px',
-              borderRadius: 10, background: '#04395E', color: '#fff', fontWeight: 600, fontSize: 15, textDecoration: 'none',
-            }}
-          ><Download size={16} /> Download PDF</a>
-        </div>
-      ) : null}
-      {/* GATE_REPORT_WEB_LIVE_CHIP / GATE_REPORT_WEB_PROGRAM: each shows only when the server sent its key. */}
-      <WebPromiseCards data={data} glass={glass} />
-      {/* The recap texts link to #visit-recap, so the clip stays on this page. */}
-      {data.recap?.ready ? (
-        <div style={{ maxWidth: 760, margin: '0 auto', padding: '16px 16px 0' }}>
-          <RecapVideoCard recap={data.recap} token={token} />
-        </div>
-      ) : null}
-      <ServiceReportDocument data={data} token={token} web glass={glass} />
-      {/* GATE_REPORT_WEB_SHARE: the server sends webShare only for a lawn score of 85+ (see ShareLawnCard). */}
-      {data.webShare?.score >= 85 ? (
-        <ShareLawnCard
-          token={token}
-          score={data.webShare.score}
-          assessmentId={data.webShare.assessmentId}
-          apiBase={API_BASE}
-          staffView={data.staffViewer === true}
-          glass={glass}
-          onTap={() => trackReportEvent(token, 'referral_cta_clicked', { source: 'lawn_card' })}
-        />
-      ) : null}
-    </div>
-  );
-}
 
 export default function ReportViewPage() {
   const { token } = useParams();
@@ -10770,9 +10768,6 @@ export default function ReportViewPage() {
     // the post-service email attachment all serve this capture. The glass
     // web report (live) and the unused static mode are unchanged.
     if (mode === 'pdf') return <ServiceReportDocument data={data} token={token} />;
-    // GATE_REPORT_SIMPLE_WEB (owner 2026-10-17): the server set this key, so
-    // the report link shows the same work-order document as the PDF.
-    if (mode === 'live' && data.simpleWebReport === true && !data.internalOnly) return <SimpleWebReport data={data} token={token} />;
     // GATE_LAWN_REPORT_STAGE1_FIXES: the web page leaves out an applied card that repeats Today's result (the PDF returns above).
     return <ServiceReportV1 data={withoutRepeatedAppliedCard(data)} token={token} mode={mode} />;
   }

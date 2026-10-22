@@ -155,7 +155,7 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
         <h2 className="sr-v2-hero-title" style={{ fontFamily: FONTS.serif, fontWeight: 500, fontSize: 20, color: TEXT, margin: 0 }}>{status.label}</h2>
       </div>
       {statusSummary ? (
-        <p style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '10px 0 0' }}>{statusSummary}</p>
+        <p className="sr-v2-body" style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '10px 0 0' }}>{statusSummary}</p>
       ) : null}
       {/* The score pill hides when the reading is still insufficient (score
           null) — the metric may then exist solely to carry the rating picker. */}
@@ -181,7 +181,8 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
           text={aiSummary.body}
           sections={reportSections}
           nextVisitLabel={nextVisitLabel}
-          style={{ fontSize: 16, color: TEXT, lineHeight: 1.55, margin: '12px 0 0' }}
+          className="sr-v2-body"
+          style={{ fontSize: 16, color: TEXT, lineHeight: 1.5, margin: '12px 0 0' }}
           titleStyle={{ color: TEXT, fontSize: 18 }}
         />
       ) : null}
@@ -240,13 +241,17 @@ function SupportingMetric({ metric }) {
   const showOutOf = metric.score != null && metric.max;
   return (
     <div style={{
-      display: 'inline-flex', alignItems: 'baseline', gap: 8,
+      display: 'inline-flex', alignItems: 'center', gap: 8,
       marginTop: 14, padding: '8px 14px', background: CARD,
-      border: `1px solid ${BORDER}`, borderRadius: 999,
+      border: `1px solid ${BORDER}`, borderRadius: 999, lineHeight: 1.2,
     }}>
       <span style={{ fontSize: 14, color: MUTED, fontWeight: 600 }}>{metric.caption}</span>
-      <span style={{ fontFamily: FONTS.body, fontWeight: 700, fontSize: 18, color: TEXT }}>{value}</span>
-      {showOutOf ? <span style={{ fontSize: 14, color: MUTED }}>/ {metric.max}</span> : null}
+      {/* Score and its scale read as one unit, "1.4/5" (owner 2026-10-22: the
+          spaced "1.4 / 5" rendered weird). */}
+      <span style={{ fontFamily: FONTS.body, fontWeight: 700, fontSize: 16, color: TEXT, whiteSpace: 'nowrap' }}>
+        {value}
+        {showOutOf ? <span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}>/{metric.max}</span> : null}
+      </span>
       {metric.label && metric.score != null ? <span style={{ fontSize: 14, color: MUTED }}>· {metric.label}</span> : null}
       <TrendArrow trend={metric.trend} />
     </div>

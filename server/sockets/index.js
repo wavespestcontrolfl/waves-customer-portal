@@ -165,6 +165,9 @@ function attachSockets(httpServer) {
     if (socket.userType === 'admin' || socket.userType === 'technician') {
       socket.join('dispatch:admins');
       startStaffSocketRevalidation(socket);
+      // A board open across a deploy that retired an alert type drops those
+      // cards here (see services/retired-dispatch-alerts.js).
+      require('../services/retired-dispatch-alerts').emitRetiredAlertResolutions(socket);
     } else if (socket.userType === 'customer' || socket.userType === 'customer-track') {
       // Customer joins exactly one room: their own. socket.userId
       // came from socket auth's verified DB lookup (or, for

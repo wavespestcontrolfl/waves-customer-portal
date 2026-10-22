@@ -21,7 +21,7 @@ vi.mock('../../hooks/useFeatureFlag', () => ({
   useFeatureFlagReady: (key) => (key === 'station-map-v1' ? mocks.stationMap : { enabled: false, ready: true }),
 }));
 vi.mock('../../components/tech/TechIntelligenceBar', () => ({ default: () => <div>Field assistant</div> }));
-vi.mock('../../components/tech/GeofenceArrivalPrompt', () => ({ default: () => null }));
+vi.mock('../../components/tech/TechNoticeFeed', () => ({ default: () => null }));
 vi.mock('../../components/tech/CreateProjectModal', () => ({
   default: ({ defaultScheduledServiceId }) => <div>Project editor for {defaultScheduledServiceId}</div>,
   wdoFeeSeedFromVisit: () => null,

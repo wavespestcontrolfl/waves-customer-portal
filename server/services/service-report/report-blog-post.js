@@ -423,8 +423,52 @@ function frozenBlogPost(value) {
   return { title: title.slice(0, MAX_TITLE_CHARS), url };
 }
 
+// The post's main image, read from the deployed page's frontmatter in the
+// content registry (hero_image.src, else og_image), as an absolute URL on the
+// site's own host, or null. The frozen pick keeps only id, title and URL, so
+// the image is read when the report loads: reports frozen before this read
+// show it too, and a page whose image changed shows the new one.
+const IMAGE_ALIASES = [['hero_image', 'src'], ['heroImage', 'src'], ['og_image'], ['image']];
+function deployedImagePath(row) {
+  for (const base of FRONTMATTER_BASES) {
+    for (const alias of IMAGE_ALIASES) {
+      const value = [...base, ...alias].reduce((node, key) => (node && typeof node === 'object' ? node[key] : undefined), row?.metadata);
+      if (typeof value === 'string' && value.trim()) return value.trim();
+    }
+  }
+  return null;
+}
+function siteImageUrl(path) {
+  if (!path) return null;
+  let url;
+  try {
+    url = new URL(path, `https://www.${SITE_HOST}`).href;
+  } catch {
+    return null;
+  }
+  return isSiteUrl(url) ? url : null;
+}
+
+// frozenBlogPost plus `imageUrl` when the registry row the pick froze has an
+// image. Fails soft: any read error leaves the card without an image.
+async function frozenBlogPostWithImage(knex, value) {
+  const post = frozenBlogPost(value);
+  if (!post) return null;
+  const id = typeof value?.id === 'string' ? value.id : '';
+  if (!UUID_RE.test(id)) return post;
+  try {
+    const row = await knex('content_registry').where({ id }).first(['id', 'metadata']);
+    const imageUrl = siteImageUrl(deployedImagePath(row));
+    return imageUrl ? { ...post, imageUrl } : post;
+  } catch (err) {
+    logger.warn(`[report-blog-post] image read failed for ${id}: ${err.message}`);
+    return post;
+  }
+}
+
 module.exports = {
   blogPostAllowedFor,
+  frozenBlogPostWithImage,
   searchReportBlogPosts,
   resolveReportBlogPostPick,
   frozenBlogPost,

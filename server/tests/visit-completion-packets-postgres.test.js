@@ -55,7 +55,7 @@ jest.mock('../services/email-template-library', () => ({
   loadTemplateByKey: jest.fn(async () => ({ template: { template_key: 'service.visit_summary' } })),
   activeSuppressionFor: jest.fn(async () => null),
 }));
-jest.mock('../services/review-request', () => ({ enrollPostService: jest.fn(async () => ({ started: true })), completionReviewDelay: jest.fn(() => undefined) }));
+jest.mock('../services/review-request', () => ({ reportTextAnchorForRecord: jest.fn(async () => null), reportTextAnchorForVisit: jest.fn(async () => null), enrollPostService: jest.fn(async () => ({ started: true })), completionReviewDelay: jest.fn(() => undefined) }));
 
 const knex = require('knex');
 const { randomUUID } = require('crypto');
@@ -1135,12 +1135,10 @@ postgres('visit completion packet records on PostgreSQL', () => {
         processor: 'stripe', method_type: 'card', stripe_payment_method_id: 'pm_fixture_visit',
         is_default: true, autopay_enabled: true, exp_month: 12, exp_year: new Date().getUTCFullYear() + 1 });
       await mockPg('customers').where({ id: fixture.customerId }).update({ autopay_enabled: true, autopay_payment_method_id: methodId });
-      await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ visit_id: null });
-      await mockPg('service_visits').where({ id: fixture.visitId }).del();
+      // A version-2 visit, as the closeout gate created them before grouping was retired.
       await mockPg('services').where({ id: fixture.catalogId }).update({ groupable: true, group_family: 'recurring_property_service' });
-      const visit = await require('../services/visit-groups').createOrJoinVisit({ rows: fixture.serviceIds, createdBy: 'test' });
-      expect(visit.behavior_version).toBe(2);
-      fixture.visitId = visit.id;
+      await mockPg('service_visits').where({ id: fixture.visitId })
+        .update({ behavior_version: 2, group_family: 'recurring_property_service' });
       chargeInvoiceWithSavedCard.mockImplementation(async (invoiceId, selectedMethod, options) => {
         expect(selectedMethod).toBe(methodId);
         await mockPg.transaction(async (trx) => {
@@ -1312,27 +1310,6 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
     expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
     expect(await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId })).toHaveLength(0);
-  });
-
-  test('Auto Pay grouping becomes eligible only with the full closeout gate and summary key', async () => {
-    const { createOrJoinVisit } = require('../services/visit-groups');
-    await mockPg('customers').where({ id: fixture.customerId }).update({ autopay_enabled: true });
-    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ visit_id: null });
-    await mockPg('service_visits').where({ id: fixture.visitId }).del();
-    await mockPg('services').where({ id: fixture.catalogId }).update({ groupable: true, group_family: 'recurring_property_service' });
-    process.env.GATE_VISIT_CLOSEOUT = 'false';
-    await expect(createOrJoinVisit({ rows: fixture.serviceIds, createdBy: 'test' })).rejects.toThrow('autopay_enrolled');
-    process.env.GATE_VISIT_CLOSEOUT = 'true';
-    delete process.env.DATA_HYGIENE_VAULT_KEY;
-    await expect(createOrJoinVisit({ rows: fixture.serviceIds, createdBy: 'test' })).rejects.toThrow('autopay_enrolled');
-    process.env.DATA_HYGIENE_VAULT_KEY = 'synthetic-visit-summary-test-key';
-    expect(await createOrJoinVisit({ rows: fixture.serviceIds, createdBy: 'test' })).toMatchObject({ behavior_version: 2 });
-    // The staff grouping route's fast path renders the same decision.
-    const { groupingRefusedByAutopay } = require('../services/visit-groups');
-    expect(await groupingRefusedByAutopay(fixture.customerId)).toBe(false);
-    process.env.GATE_VISIT_CLOSEOUT = 'false';
-    expect(await groupingRefusedByAutopay(fixture.customerId)).toBe(true);
-    process.env.GATE_VISIT_CLOSEOUT = 'true';
   });
 
   test('a technician cannot close a visit that left their current window after the preflight read', async () => {
@@ -4366,38 +4343,6 @@ postgres('visit completion packet records on PostgreSQL', () => {
     }
   });
 
-  test.each([1, 2])('automatic grouping ignores an open version-%s visit after the closeout gate changes', async (previousVersion) => {
-    const groups = require('../services/visit-groups');
-    jest.replaceProperty(require('../config/feature-gates').gates, 'visitGroups', true);
-    process.env.GATE_VISIT_CLOSEOUT = previousVersion === 1 ? 'true' : 'false';
-    const propertyId = randomUUID();
-    await mockPg('customer_properties').insert({ id: propertyId, customer_id: fixture.customerId });
-    await mockPg('services').where({ id: fixture.catalogId }).update({ groupable: true, group_family: 'recurring_property_service' });
-    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ property_id: propertyId, status: 'confirmed' });
-    await mockPg('service_visits').where({ id: fixture.visitId }).update({ property_id: propertyId,
-      behavior_version: previousVersion, group_family: 'recurring_property_service',
-      stop_base_key: stopBaseKey({ customerId: fixture.customerId, propertyId, scheduledDate: etDateString() }) });
-    const unattached = [randomUUID(), randomUUID()];
-    await mockPg('scheduled_services').insert(unattached.map((id) => ({ id, customer_id: fixture.customerId,
-      property_id: propertyId, technician_id: fixture.techId, service_id: fixture.catalogId,
-      service_type: 'Fixture General Pest Control', scheduled_date: etDateString(),
-      window_start: '09:00', window_end: '11:00', status: 'confirmed' })));
-
-    const grouped = await groups.maybeGroupRow(unattached[0], { createdBy: 'test' });
-    expect(grouped).toMatchObject({ behavior_version: previousVersion === 1 ? 2 : 1 });
-    expect(grouped.id).not.toBe(fixture.visitId);
-    expect(await mockPg('scheduled_services').where({ visit_id: grouped.id }).pluck('id')).toEqual(expect.arrayContaining(unattached));
-    expect(await mockPg('scheduled_services').where({ visit_id: fixture.visitId }).pluck('id')).toEqual(expect.arrayContaining(fixture.serviceIds));
-  });
-
-  test('joining under the closeout gate cannot rewrite an existing legacy visit contract', async () => {
-    await mockPg('services').where({ id: fixture.catalogId }).update({ groupable: true, group_family: 'recurring_property_service' });
-    await expect(require('../services/visit-groups').createOrJoinVisit({ rows: fixture.serviceIds, createdBy: 'test' }))
-      .rejects.toThrow('closeout behavior differs');
-    expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ behavior_version: 1, status: 'open' });
-    expect(await mockPg('scheduled_services').where({ visit_id: fixture.visitId })).toHaveLength(2);
-  });
-
   test('a transient email dispatch-claim failure retries the same email instead of suppressing it', async () => {
     const groups = require('../services/visit-groups');
     const begin = groups.beginVisitNotificationDispatch;
@@ -4782,10 +4727,10 @@ postgres('visit completion packet records on PostgreSQL', () => {
     const baseline = { visitId: fixture.visitId, serviceIds: fixture.serviceIds, key: fixture.key,
       estimateIds: fixture.estimateIds, httpServer: fixture.httpServer };
     const gateNames = ['GATE_SCHEDULING_CAPACITY', 'GATE_VISIT_COMBINED_CAPACITY',
-      'GATE_SEPARATE_COMBO_VISITS', 'GATE_VISIT_GROUPS', 'GATE_CUSTOMER_PROPERTIES'];
+      'GATE_SEPARATE_COMBO_VISITS', 'GATE_CUSTOMER_PROPERTIES'];
     const originalEnv = Object.fromEntries(gateNames.map((name) => [name, process.env[name]]));
     const gates = require('../config/feature-gates').gates;
-    const originalGates = { visitGroups: gates.visitGroups, visitCombinedCapacity: gates.visitCombinedCapacity,
+    const originalGates = { visitCombinedCapacity: gates.visitCombinedCapacity,
       separateComboVisits: gates.separateComboVisits };
     const artifactPath = path.resolve(__dirname, '../../.tmp/qa/combined-stop/backend-journey.json');
     let coordsSpy;
@@ -4793,7 +4738,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     mockPg = trx;
     Object.assign(process.env, Object.fromEntries(gateNames.map((name) => [name, 'true'])));
     process.env.GATE_SCHEDULING_CAPACITY = 'false';
-    Object.assign(gates, { visitGroups: true, visitCombinedCapacity: true, separateComboVisits: true });
+    Object.assign(gates, { visitCombinedCapacity: true, separateComboVisits: true });
     try {
       // Remove the generic beforeEach stop inside this rollback-only case.
       // Every later ID comes from this reservation and its conversion.
@@ -4865,7 +4810,8 @@ postgres('visit completion packet records on PostgreSQL', () => {
         })),
         database: trx });
       // The public acceptance route calls this real post-commit coordinator;
-      // it stamps the converted booking, then forms the physical stop.
+      // it stamps the converted booking's property. Grouping is retired
+      // (2026-10-22), so the accept leaves the two rows apart.
       expect(await require('../services/estimate-property-linkage').linkAcceptedEstimateProperty({
         estimateId, customerId: fixture.customerId, database: trx,
       })).toMatchObject({ propertyId });
@@ -4877,10 +4823,16 @@ postgres('visit completion packet records on PostgreSQL', () => {
       expect(parents.reduce((sum, row) => sum + Number(row.estimated_duration_minutes), 0)).toBe(120);
       expect(parents.map((row) => [row.window_start, row.window_end]).sort())
         .toEqual([['09:00:00', '10:00:00'], ['10:00:00', '11:00:00']]);
-      expect(new Set(parents.map((row) => row.visit_id)).size).toBe(1);
-      expect(parents.every((row) => row.property_id === propertyId && row.visit_id)).toBe(true);
-      const visitId = parents[0].visit_id;
-      expect(await trx('scheduled_services').where({ visit_id: visitId })).toHaveLength(2);
+      expect(parents.every((row) => row.property_id === propertyId && row.visit_id === null)).toBe(true);
+      // The rest is what a stop grouped before the retirement still gets:
+      // attach both rows to one open visit, as the accept-time grouping did.
+      const [{ id: visitId }] = await trx('service_visits').insert({
+        customer_id: fixture.customerId, property_id: propertyId, technician_id: parents[0].technician_id,
+        scheduled_date: parents[0].scheduled_date, window_start: '09:00', window_end: '11:00',
+        stop_base_key: stopBaseKey({ propertyId, scheduledDate: parents[0].scheduled_date }), stop_seq: 1,
+        group_family: catalogs[0].group_family, behavior_version: 2, status: 'open', created_by: 'converter',
+      }).returning('id');
+      await trx('scheduled_services').whereIn('id', parents.map((row) => row.id)).update({ visit_id: visitId });
 
       // Reach the booked day, then exercise the real technician arrival route
       // so its stop fan-out moves both converted members on site.
@@ -5010,7 +4962,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
       const observations = { estimateId, reservationId: held.scheduledServiceId, visitId,
         serviceIds: fixture.serviceIds, packetId: packet.id, invoiceId: invoice.id,
         gates: { schedulingCapacity: false, visitCombinedCapacity: true,
-          separateComboVisits: true, visitGroups: true, customerProperties: true },
+          separateComboVisits: true, customerProperties: true },
         acceptedPricing: { billingTerm: 'standard', rowAmounts: services.map((service) => service.perTreatment),
           firstApplicationAmount, visitEstimatedPrice },
         reservedMix: profile.reservationServiceMix,

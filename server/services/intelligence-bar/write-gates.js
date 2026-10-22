@@ -99,9 +99,34 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   // send_invoice (owner ruling 2026-10-07): an existing invoice only,
   // through the Invoices page's own send handler.
   'send_invoice',
+  // record_payment (owner ruling 2026-10-12): the Invoices page's Record payment handler, run in process behind a
+  // card; records money already received, never charges a card.
+  'record_payment',
   // void_invoice (owner ruling 2026-10-12): the Invoices page's Void handler, run in process behind a card;
   // an invoice with nothing collected only, sends nothing.
   'void_invoice',
+  // The Invoices page's edit-type handlers (owner ruling 2026-10-12), each run in process behind its own card: edit an unpaid
+  // invoice's title, notes or due date, archive / unarchive a voided invoice, unvoid. None sends or moves money.
+  'edit_invoice',
+  'archive_invoice',
+  'unarchive_invoice',
+  'unvoid_invoice',
+  // Invoice reminder and payment-plan cards (owner ruling 2026-10-12, Stage 3 purpose-built cards): each runs the Invoices
+  // page's own handler in process behind a card. send_invoice_reminder_now, schedule_invoice_send and create_payment_plan
+  // reach the customer (a reminder text and email, a scheduled invoice send, the plan confirmation email); the rest send nothing.
+  'pause_invoice_reminders',
+  'resume_invoice_reminders',
+  'stop_invoice_reminders',
+  'send_invoice_reminder_now',
+  'schedule_invoice_send',
+  'create_payment_plan',
+  'cancel_payment_plan',
+  // create_invoice (owner ruling 2026-10-12): the Invoices page's create handler, run in process behind a card;
+  // a draft only, sends nothing.
+  'create_invoice',
+  // set_customer_bill_to (owner ruling 2026-10-21, IB gap #9): the customer page's Bill-To save, run in
+  // process behind a card; a self-pay customer only, sends nothing.
+  'set_customer_bill_to',
   'update_lead_contact',
   // propose_admin_edit (owner ruling 2026-10-12): one reviewed small internal
   // edit, replayed through the screen's own PUT or PATCH after a confirm card.
