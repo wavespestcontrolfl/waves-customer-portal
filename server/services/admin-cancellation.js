@@ -393,6 +393,28 @@ function acceptanceBelongsToTerm(acceptance, term) {
   return !!created && !!start && created >= start;
 }
 
+// GATE_PREPAY_REFUND_90_DAY on: an open acceptance that predates the live term
+// is a leftover from an earlier plan term (a reactivated customer), not a retry
+// of THIS cancel. It must not hand this cancel its choices (effectiveDate,
+// prepayDisposition, waiver) or read as a repair retry; the operator's own
+// choice stands and, past the window, end of paid coverage succeeds. The old
+// row is left alone: findCancelAcceptance orders newest first, so an open
+// acceptance from this term is always found before it, and once this run
+// resolves, the stale row is dropped here again on every later lookup. Whole
+// plan with a live term only; no readable term = unchanged. Gate off = unchanged.
+async function acceptanceOfCurrentTerm(customerId, wholeAccount, acceptance) {
+  if (!acceptance || !wholeAccount || !prepayRefund90DayLive()) return acceptance;
+  let term = null;
+  try {
+    term = await resolveLiveTerm(customerId, true);
+  } catch {
+    return acceptance; // the real term read after this surfaces the same refusal
+  }
+  if (!term || acceptanceBelongsToTerm(acceptance, term)) return acceptance;
+  logger.info(`[admin-cancellation] open request ${acceptance.id} predates the live term ${term.id} — not a retry of this cancel`);
+  return null;
+}
+
 function endNowBlockedForTerm(term, wholeAccount, disposition, hasRun) {
   return prepayRefund90DayLive() && !!term && wholeAccount === true
     && disposition === 'end_now_refund' && !hasRun && prepayRefundWindowPassed(term);
@@ -1023,6 +1045,7 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
   let acceptance = null;
   try {
     acceptance = requestedAcceptance || await findCancelAcceptance(customerId, wholeAccount, scope, 'new');
+    acceptance = await acceptanceOfCurrentTerm(customerId, wholeAccount, acceptance);
     repairRetry = !!acceptance;
     if (acceptance) {
       // The commit inherits the FIRST attempt's accepted choices (sticky
@@ -1400,7 +1423,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         'Could not verify whether an unfinished cancellation already exists for this customer — nothing was changed. Try again shortly.');
     }
   };
-  const openAcceptance = requestedAcceptance || await findOpenAcceptance();
+  const openAcceptance = await acceptanceOfCurrentTerm(customerId, wholeAccount, requestedAcceptance || await findOpenAcceptance());
   // Durable approved facts, inherited BEFORE prepay resolution: a
   // fingerprint-exempt repair retry from dialog defaults must never flip a
   // refunded end-now into end-at-term (or move the approved boundary) on

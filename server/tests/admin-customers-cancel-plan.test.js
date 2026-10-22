@@ -3207,6 +3207,48 @@ describe('GATE_PREPAY_REFUND_90_DAY (owner R7: no end-now, no refund after 90 da
     });
   });
 
+  const staleRequest = () => ({
+    id: 'req-old', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+    subject: 'Cancel plan (Admin (user admin-1))', description: '',
+    metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: false, effectiveDate: 'now', prepayDisposition: 'end_now_refund' } }),
+    created_at: new Date('2026-02-10T12:00:00-05:00'),
+  });
+
+  test('a stale open end-now acceptance from before this term hands this cancel NO choices: End of paid coverage previews as a fresh cancel and succeeds on its own request', async () => {
+    await withServer(async (baseUrl) => {
+      seedTerm('2026-03-01');
+      mockState.service_requests = [staleRequest()];
+      gateOn();
+      const preview = await previewOf(baseUrl, { effectiveDate: 'end_of_coverage' });
+      expect(preview.repairRetry).toBe(false);
+      expect(preview.effectiveDate).toBe('end_of_coverage');
+      expect(preview.prepay).toEqual(expect.objectContaining({ disposition: 'end_at_term', endNowAvailable: false, refund: null }));
+      mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-05-31' });
+      const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'end_of_coverage', previewFingerprint: preview.previewFingerprint });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toEqual(expect.objectContaining({ prepayDisposition: 'end_at_term', keptThrough: '2027-05-31' }));
+      expect(body.refund).toBeUndefined();
+      expect(refundTasks()).toEqual([]);
+      // A NEW request carried this run; the old row is left exactly as it was.
+      expect(body.requestId).not.toBe('req-old');
+      expect(mockState.service_requests.find((r) => r.id === 'req-old').status).toBe('new');
+      expect(mockState.service_requests.find((r) => r.id === body.requestId)).toBeTruthy();
+    });
+  });
+
+  test('gate OFF: the same stale acceptance is still inherited as a repair retry (unchanged)', async () => {
+    await withServer(async (baseUrl) => {
+      seedTerm('2026-03-01');
+      mockState.service_requests = [staleRequest()];
+      const preview = await previewOf(baseUrl, { effectiveDate: 'end_of_coverage' });
+      expect(preview.repairRetry).toBe(true);
+      expect(preview.effectiveDate).toBe('now');
+      expect(preview.prepay).toEqual(expect.objectContaining({ disposition: 'end_now_refund' }));
+      expect(preview.prepay).not.toHaveProperty('endNowAvailable');
+    });
+  });
+
   test('acceptanceBelongsToTerm: created on/after the term start (ET date) only; no date = not proven', () => {
     const { acceptanceBelongsToTerm } = require('../services/admin-cancellation');
     const term = { term_start: '2026-03-01' };
