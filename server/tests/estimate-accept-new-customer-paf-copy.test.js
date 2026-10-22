@@ -73,7 +73,7 @@ describe('accept notification copy (new customer, pay after first visit)', () =>
 });
 
 // Codex round 1 on #6412.
-const { resolveCardLaneAfterVisit, resolveAcceptedFirstVisit } = require('../routes/estimate-public');
+const { resolveCardLaneAfterVisit, resolveAcceptedFirstVisit, cardEnrollmentSettled } = require('../routes/estimate-public');
 
 // Minimal knex stand-in: table -> row (or Error) for .where().[whereNotIn()].first().
 const fakeDb = (tables) => (table) => {
@@ -90,7 +90,7 @@ const fakeDb = (tables) => (table) => {
 };
 
 describe('resolveCardLaneAfterVisit (billing lane the accept left on the customer)', () => {
-  const args = { recurringCardLaneActive: true, treatAsOneTime: false, customerId: 'c1' };
+  const args = { recurringCardLaneActive: true, treatAsOneTime: false, customerId: 'c1', enrollmentSettled: true };
 
   test('per_application customer: after-visit copy applies', async () => {
     const db = fakeDb({ customers: { billing_mode: 'per_application', waveguard_tier: 'Bronze', monthly_rate: 49, per_application_fee: 49 } });
@@ -214,5 +214,52 @@ describe('resolveAcceptedFirstVisit (earliest converter unit, priced flag)', () 
     expect((await resolveAcceptedFirstVisit({ acceptedAppointments: [{ scheduled_date: '2026-10-24', estimated_price: 49 }] }, fakeDb({}))).firstVisitPriced).toBe(true);
     expect((await resolveAcceptedFirstVisit({ acceptedAppointments: [{ scheduled_date: '2026-10-24', estimated_price: null }] }, fakeDb({}))).firstVisitPriced).toBe(false);
     expect((await resolveAcceptedFirstVisit({ acceptedAppointments: [], conversionVisitId: 'ss1' }, fakeDb({ scheduled_services: { scheduled_date: '2026-11-05', estimated_price: null } }))).firstVisitPriced).toBe(false);
+  });
+});
+
+describe('card enrollment must have landed (Codex r3: failed enrollment stays actionable)', () => {
+  const policy = { required: true };
+
+  test('enrolled, already-active Auto Pay, paused/opted-out hold and opt-out-kept capture all count as settled', () => {
+    expect(cardEnrollmentSettled({ policy, enrollmentResult: { enrolled: true, paymentMethodRowId: 'pm1' } })).toBe(true);
+    expect(cardEnrollmentSettled({ policy: { exemptReason: 'autopay_already_active' }, enrollmentResult: null })).toBe(true);
+    expect(cardEnrollmentSettled({ policy: { required: true, autopayPaused: true }, enrollmentResult: null })).toBe(true);
+    expect(cardEnrollmentSettled({ policy: { exemptReason: 'saved_method_consented', autopayDisabled: true }, enrollmentResult: null })).toBe(true);
+    expect(cardEnrollmentSettled({ policy, enrollmentResult: { enrolled: false, reason: 'autopay_opt_out_kept' } })).toBe(true);
+  });
+
+  test('failed, refused, errored or never-run enrollment is not settled', () => {
+    expect(cardEnrollmentSettled({ policy, enrollmentResult: { enrolled: false, reason: 'pm_ownership_mismatch' } })).toBe(false);
+    expect(cardEnrollmentSettled({ policy, enrollmentResult: { enrolled: false, reason: 'boom', transient: true } })).toBe(false);
+    expect(cardEnrollmentSettled({ policy: { exemptReason: 'saved_method_consented' }, enrollmentResult: null })).toBe(false);
+    expect(cardEnrollmentSettled({ policy, enrollmentResult: null })).toBe(false);
+    expect(cardEnrollmentSettled({})).toBe(false);
+  });
+
+  test('enrollment failed: generic actionable copy with invoice_followed_up; already-active: after-visit copy', async () => {
+    const db = fakeDb({ customers: { billing_mode: 'per_application', per_application_fee: 49 } });
+    const base = { recurringCardLaneActive: true, treatAsOneTime: false, customerId: 'c1' };
+    const failed = await resolveCardLaneAfterVisit({
+      ...base,
+      enrollmentSettled: cardEnrollmentSettled({ policy, enrollmentResult: { enrolled: false, reason: 'refused' } }),
+    }, db);
+    expect(failed).toBe(false);
+    const failedCopy = buildAcceptNotificationPayload({ customerName: 'Pat Tester', waveguardTier: 'Bronze', monthlyTotal: 49, cardLaneAfterVisit: failed });
+    expect(failedCopy.adminBody).toMatch(/Invoice follow-up needed\.$/);
+    expect(failedCopy.adminDoneWhen).toBe('invoice_followed_up');
+
+    const active = await resolveCardLaneAfterVisit({
+      ...base,
+      enrollmentSettled: cardEnrollmentSettled({ policy: { exemptReason: 'autopay_already_active' }, enrollmentResult: null }),
+    }, db);
+    expect(active).toBe(true);
+    const activeCopy = buildAcceptNotificationPayload({ customerName: 'Pat Tester', waveguardTier: 'Bronze', monthlyTotal: 49, cardLaneAfterVisit: active, reservationCommitted: true });
+    expect(activeCopy.adminBody).toMatch(/Billed after the first visit/);
+    expect(activeCopy.adminDoneWhen).toBeNull();
+  });
+
+  test('the helper fails closed when the caller does not say enrollment settled', async () => {
+    const db = fakeDb({ customers: { billing_mode: 'per_application', per_application_fee: 49 } });
+    await expect(resolveCardLaneAfterVisit({ recurringCardLaneActive: true, treatAsOneTime: false, customerId: 'c1' }, db)).resolves.toBe(false);
   });
 });

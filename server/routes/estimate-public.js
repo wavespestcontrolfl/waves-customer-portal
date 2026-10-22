@@ -1054,6 +1054,21 @@ function confirmationServiceLabel(oneTimeList, estimate, fallbackLabel) {
   return String(specific).replace(/\s+/g, ' ').trim() || String(fallbackLabel || '').trim();
 }
 
+// Did the accept leave the card protection it promised? A fresh capture or a
+// saved method must have enrolled Auto Pay; a failed or refused enrollment
+// raises an office exception (the visits would invoice unprotected), so the
+// notification must stay actionable. Exempt, because no enrollment is owed:
+// an already-active Auto Pay method (autopay_already_active), a paused or
+// opted-out customer (the hold is intentional), and a fresh capture whose
+// enrollment was deliberately skipped (autopay_opt_out_kept).
+function cardEnrollmentSettled({ policy, enrollmentResult } = {}) {
+  if (!policy) return false;
+  if (policy.exemptReason === 'autopay_already_active') return true;
+  if (policy.autopayPaused === true || policy.autopayDisabled === true) return true;
+  if (enrollmentResult?.enrolled === true) return true;
+  return enrollmentResult?.reason === 'autopay_opt_out_kept';
+}
+
 // "Billed after the first visit" is true only when (1) the customer the accept
 // landed on is billed per visit / per application and (2) there is evidence
 // something collectible will be billed. The accept's recurring-card lane is
@@ -1069,8 +1084,9 @@ function confirmationServiceLabel(oneTimeList, estimate, fallbackLabel) {
 // other lane keeps the generic copy.
 async function resolveCardLaneAfterVisit({
   recurringCardLaneActive, treatAsOneTime, customerId, attachedInvoiceTotal = 0, firstVisitPriced = false,
+  enrollmentSettled = false,
 }, database = db) {
-  if (recurringCardLaneActive !== true || treatAsOneTime || !customerId) return false;
+  if (recurringCardLaneActive !== true || treatAsOneTime || !customerId || enrollmentSettled !== true) return false;
   try {
     const row = await database('customers').where({ id: customerId }).first('billing_mode', 'waveguard_tier', 'monthly_rate', 'per_application_fee');
     if (!row) return false;
@@ -16415,6 +16431,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // first visit. The customer's per-application fee is read there.
         attachedInvoiceTotal: txResult.standardInvoiceAttached === true ? Number(txResult.invoiceAmount) || 0 : 0,
         firstVisitPriced: acceptedFirstVisit.firstVisitPriced,
+        enrollmentSettled: cardEnrollmentSettled({
+          policy: recurringCardPolicy,
+          enrollmentResult: recurringCardPayerFallback ? null : recurringCardEnrollmentResult,
+        }),
       });
       const notificationPayload = buildAcceptNotificationPayload({
         customerName: estimate.customer_name,
@@ -31753,6 +31773,7 @@ module.exports.collectServiceCategories = collectServiceCategories;
 module.exports.hasOnlyLawnCareServiceMix = hasOnlyLawnCareServiceMix;
 module.exports.isLawnCareOneTimeItem = isLawnCareOneTimeItem;
 module.exports.resolveCardLaneAfterVisit = resolveCardLaneAfterVisit;
+module.exports.cardEnrollmentSettled = cardEnrollmentSettled;
 module.exports.resolveAcceptedFirstVisit = resolveAcceptedFirstVisit;
 module.exports.oneTimeItemsForRender = oneTimeItemsForRender;
 module.exports.oneTimeItemFamilyKeys = oneTimeItemFamilyKeys;
