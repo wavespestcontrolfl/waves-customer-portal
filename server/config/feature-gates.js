@@ -5467,6 +5467,15 @@ function reportWriterRulesLive() {
   return process.env.GATE_REPORT_WRITER_RULES === 'true';
 }
 
+// GATE_PEST_REPORT_VOICE read at CALL time — strict `=== 'true'`, dark in
+// every environment. On (with GATE_REPORT_WRITER_RULES), the recurring pest
+// report writer gets one prompt in one voice (service-report/pest-report-voice.js)
+// in place of its stacked blocks; inputs and output screens are unchanged.
+// Off, the pest prompt is byte-identical to before.
+function pestReportVoiceLive() {
+  return process.env.GATE_PEST_REPORT_VOICE === 'true';
+}
+
 // GATE_COMPLETION_TEXT_PLAIN read at CALL time — off unless exactly 'true'.
 // On, the completion recap text (server/services/completion-recap.js) makes
 // no AI call for a completed visit with nothing visit-specific recorded and
@@ -6887,6 +6896,7 @@ module.exports.seriesMoveCarriesVisitLive = seriesMoveCarriesVisitLive;
 // GATE_REPORT_WRITER_RULES reader, exported at the end of the file (after the
 // shared list) so gate PRs adding lines above never touch this one.
 module.exports.reportWriterRulesLive = reportWriterRulesLive;
+module.exports.pestReportVoiceLive = pestReportVoiceLive;
 module.exports.completionTextPlainLive = completionTextPlainLive;
 // GATE_REPORT_BLOG_POST reader, on its own line beside the writer rules'.
 module.exports.reportBlogPostLive = reportBlogPostLive;
