@@ -3672,6 +3672,16 @@ const gates = {
   // gateEnvValue() at call time. Kill switch: unset — drive-only order.
   bookingRainRank: gateEnvValue('GATE_BOOKING_RAIN_RANK'),
 
+  // Technician start points (owner 2026-10-22): a tech with a start address
+  // (Team tab, technicians.start_lat/lng) starts and ends the day there, not
+  // at the office, in the staff picker's open-gap search and the arrival-
+  // window route check (scheduling/tech-start-point.js). Auto-dispatch, route
+  // reorder and the estimate slot list follow in later PRs; flip only after
+  // they merge, so every engine prices the same day the same way. OFF in
+  // every environment; read through gateEnvValue() at call time. Kill switch:
+  // unset — every route starts and ends at the office, as before.
+  techStartPoints: gateEnvValue('GATE_TECH_START_POINTS'),
+
   // Best-times chip stop names (owner 2026-10-21): each best-times chip in
   // the admin availability strip names the stop it would follow ("after
   // <customer>") or "from home base" for a first stop, so the office sees

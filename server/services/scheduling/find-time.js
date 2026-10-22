@@ -17,6 +17,7 @@ const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { HQ, driveMin } = require('../auto-dispatch/geo');
+const { techColumns, techStartPoint } = require('./tech-start-point');
 const { etParts, etDateString } = require('../../utils/datetime-et');
 const { stampedDivergesSql } = require('../stamped-address');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
@@ -107,7 +108,7 @@ async function findArrivalWindowSlots(opts) {
   const { dateFrom, dateTo, durationMinutes = 60, technicianId, topN = 10 } = opts;
   let query = applyAssignable(db('technicians'));
   if (technicianId) query = query.where('technicians.id', technicianId);
-  const techs = await query.select('id', 'name');
+  const techs = await query.select(techColumns(['id', 'name']));
   // Loaded once per request, right where the techs are (technician-
   // eligibility.js) — an absent tech-day is never offered here, matching
   // the commit-time date-scoped assertAssignableTechnician check.
@@ -186,7 +187,7 @@ async function findCapacitySlots(opts) {
   const { dateFrom, dateTo, durationMinutes = 30, technicianId, topN = 10 } = opts;
   let query = applyAssignable(db('technicians'));
   if (technicianId) query = query.where('technicians.id', technicianId);
-  const techs = await query.select('id', 'name');
+  const techs = await query.select(techColumns(['id', 'name']));
   // Loaded once per request, right where the techs are — see
   // findArrivalWindowSlots above.
   const absentDays = await absentTechDays(db, { dateFrom, dateTo, technicianIds: techs.map((tech) => tech.id) });
@@ -979,10 +980,13 @@ function candidatesForDay(date, tech, params) {
   });
   // Build virtual stop list: HQ ... stops ... HQ
   // "Stops" include timing. For gaps we evaluate between consecutive anchors.
+  // HQ is this tech's start point: home under GATE_TECH_START_POINTS when one
+  // is set, else the office (tech-start-point.js).
+  const home = techStartPoint(tech);
   const anchors = [
-    { id: 'HQ_START', lat: HQ.lat, lng: HQ.lng, startMin: dayOpen, endMin: dayOpen, customer: 'HQ (start)' },
+    { id: 'HQ_START', lat: home.lat, lng: home.lng, startMin: dayOpen, endMin: dayOpen, customer: 'HQ (start)' },
     ...dayStops,
-    { id: 'HQ_END', lat: HQ.lat, lng: HQ.lng, startMin: dayClose, endMin: dayClose, customer: 'HQ (end)' },
+    { id: 'HQ_END', lat: home.lat, lng: home.lng, startMin: dayClose, endMin: dayClose, customer: 'HQ (end)' },
   ];
   const found = [];
   let evaluatedGaps = 0;
@@ -1156,7 +1160,7 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
   // placeholder or an office-only account never contributes a day.
   let techQuery = applyAssignable(db('technicians'));
   if (technicianId) techQuery = techQuery.where('technicians.id', technicianId);
-  const techs = await techQuery.select('id', 'name');
+  const techs = await techQuery.select(techColumns(['id', 'name']));
   if (!techs.length) return { techs, services: [], dates: [], absentDays: new Set() };
 
   // Loaded once per request, right where the techs are — see
@@ -1338,6 +1342,8 @@ module.exports = {
     packCapacityEnds,
     capacityGapNeighbours,
     buildDayStops,
+    // GATE_TECH_START_POINTS: one (date, tech) day's candidates, anchored at the tech's start point.
+    candidatesForDay,
     // Shared travel-gap neighbour shape (Codex r4 on #5314) — reused by
     // slot-reservation.js's reserve-time rival-hold check so it builds the
     // EXACT same entity shape the offer side does, never a hand-rolled one.
