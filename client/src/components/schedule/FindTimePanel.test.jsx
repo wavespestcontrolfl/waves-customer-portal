@@ -140,6 +140,29 @@ describe('FindTimePanel', () => {
     });
   });
 
+  it('while a new length re-checks, the old chips take no pick and Book is off', async () => {
+    const today = etDateString();
+    let release;
+    const fetcher = vi.fn(async () => ({ ok: true, status: 200, json: async () => answer(today) }));
+    vi.stubGlobal('fetch', fetcher);
+    const onBook = vi.fn();
+    render(<FindTimePanel enabled onBook={onBook} />);
+    await openAndPick();
+    await screen.findByTestId('find-time-results');
+    fireEvent.click(screen.getAllByTestId('availability-hour')[0]);
+    // The next answer hangs, so the rows on screen are the 60-minute ones.
+    fetcher.mockImplementation(() => new Promise((resolve) => { release = resolve; }));
+    fireEvent.change(screen.getByLabelText('Visit length'), { target: { value: '120' } });
+    await waitFor(() => expect(screen.getByTestId('find-time-results').style.opacity).toBe('0.6'));
+    const chips = screen.getAllByTestId('availability-hour');
+    expect(chips.every((chip) => chip.disabled)).toBe(true);
+    const book = screen.getByTestId('find-time-book');
+    expect(book.disabled).toBe(true);
+    fireEvent.click(book);
+    expect(onBook).not.toHaveBeenCalled();
+    release?.({ ok: true, status: 200, json: async () => answer(today) });
+  });
+
   it('a week-row chip books its own date', async () => {
     stubFetch(answer(etDateString()));
     const onBook = vi.fn();

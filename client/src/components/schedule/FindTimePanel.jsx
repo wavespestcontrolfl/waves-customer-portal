@@ -94,6 +94,9 @@ function FindTimeDrawer({ onClose, onBook }) {
     bestRows: true,
   });
   const best = availability?.best || null;
+  // Mid re-check the rows are the previous answer's (another date or length):
+  // show them dimmed, but take no pick and no Book until the new answer lands.
+  const stale = !!availability?.stale;
   const note = statusNote({ target, checking, gated, best });
 
   // A new place, date or length is a new question: the old pick no longer applies.
@@ -103,7 +106,7 @@ function FindTimeDrawer({ onClose, onBook }) {
   const selectedHour = shown.find((hour) => hourKey(hour) === selected) || null;
 
   const book = () => {
-    if (!selectedHour || !target) return;
+    if (!selectedHour || !target || stale) return;
     onBook?.({
       date: selectedHour.date,
       windowStart: String(selectedHour.start).slice(0, 5),
@@ -190,14 +193,14 @@ function FindTimeDrawer({ onClose, onBook }) {
 
         {note && <div data-testid={note.testId} style={noteStyle}>{note.text}</div>}
         {best && (
-          <div data-testid="find-time-results" style={{ opacity: availability?.stale ? 0.6 : 1 }}>
+          <div data-testid="find-time-results" style={{ opacity: stale ? 0.6 : 1 }}>
             <BestRow
-              title={`Best on ${fmtDay(date)}`}
+              title={`Best on ${fmtDay(availability?.pickedDate || date)}`}
               hours={best.day}
               withDay={false}
               empty="No open hours that day."
               isCurrent={isCurrent}
-              onPick={pick}
+              onPick={stale ? undefined : pick}
             />
             {best.weekCovered !== false && (
               <BestRow
@@ -206,16 +209,16 @@ function FindTimeDrawer({ onClose, onBook }) {
                 withDay
                 empty="Nothing fits in the next 7 days."
                 isCurrent={isCurrent}
-                onPick={pick}
+                onPick={stale ? undefined : pick}
               />
             )}
             <div style={{ marginTop: 16 }}>
               <button
                 type="button"
                 data-testid="find-time-book"
-                disabled={!selectedHour}
+                disabled={!selectedHour || stale}
                 onClick={book}
-                style={{ ...primaryButton, opacity: selectedHour ? 1 : 0.4, cursor: selectedHour ? 'pointer' : 'default' }}
+                style={{ ...primaryButton, opacity: selectedHour && !stale ? 1 : 0.4, cursor: selectedHour && !stale ? 'pointer' : 'default' }}
               >
                 {selectedHour ? `Book ${fmtDay(selectedHour.date)} · ${fmtHour(selectedHour.start)}` : 'Tap a time to book it'}
               </button>
