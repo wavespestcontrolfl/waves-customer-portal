@@ -3044,16 +3044,6 @@ const gates = {
   // Kill switch: unset GATE_ESTIMATE_FOLLOWUP_MONTHLY_AVERAGE (read at boot; the Railway restart applies it).
   estimateFollowupMonthlyAverage: isProd ? process.env.GATE_ESTIMATE_FOLLOWUP_MONTHLY_AVERAGE === 'true' : true,
 
-  // Application-month breakdown (owner 2026-10-21, EST-2026-1185: "Which is
-  // it? $113 a month or $189 a month?"). With the monthly average on, a plan
-  // of one non-monthly service plus monthly services shows each service's
-  // per-application price and cadence, what the customer pays in the months
-  // that service is applied and in the other months, then the average. The
-  // payment preview's "Per application" row reads "First application". The
-  // page only; email and PDF unchanged. Needs GATE_ESTIMATE_MONTHLY_AVERAGE.
-  // Kill switch: unset GATE_ESTIMATE_APPLICATION_MONTHS (read at boot; the Railway restart applies it).
-  estimateApplicationMonths: isProd ? process.env.GATE_ESTIMATE_APPLICATION_MONTHS === 'true' : true,
-
   // Estimate acceptance terms (owner ruling 2026-08-28): the public estimate
   // renders a one-line authorization + inline "View terms" drawer directly
   // above Accept (same steps, no extra page) and the accept route records
