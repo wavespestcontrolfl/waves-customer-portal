@@ -88,11 +88,12 @@ function looksLikeBasicCredential(header, token) {
 // STRIPE_SECRET_KEY=x, API_TOKEN=x). A fixed config format, not a prose label:
 // name in any case (api_token=x), '=' (spaces around it allowed); a stem (PASS, SECRET, TOKEN, PASSWORD, ...)
 // counts only as a whole name segment, so compass=, bypass=, SECRETARY_NAME= and TOKENIZER_MODEL= are
-// ordinary words (Codex #6375 r14, r15). An unquoted value runs to the end of the line or an inline
-// comment (" #"), as dotenv reads it: DB_PASSWORD=hunter 22 (Codex #6375 r2, r13). It is read as at most 13 words (a passphrase), stops before a
-// field delimiter (", " or "; ") and gives up the extra words when another assignment follows on the
-// line with no delimiter between ("x=hunter22 and api key: y"): that one is taken by the rules after this.
-const ENV_SECRET_RE = /\b((?:[A-Z][A-Z0-9_]*)?(?<![A-Z0-9])(?:PASSWORD|PASSWD|PASS|SECRET|TOKEN|API_?KEY|PRIVATE_KEY|CREDENTIALS?)(?![A-Z0-9])[A-Z0-9_]*)([ \t]*=[ \t]*)(\\"(?:[^\\\n]|\\(?!"))*\\"|\\'(?:[^\\\n]|\\(?!'))*\\'|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[removed\](?![^\s,;}\]])|\S*[^\s,;}\]](?:[ \t]+(?!#)[^\s=:]*[^\s,;}\]=:]){0,12}(?![^\n#,;]{0,200}[=:])|\S*[^\s,;}\]])/gi;
+// ordinary words (Codex #6375 r14, r15). The regex reads the name, the separator and the first word of
+// an unquoted value; scrubEnvAssignments then extends an unquoted value by a linear scan (no regex
+// backtracking) to the end of the line or an inline " #" comment, as dotenv reads it
+// (DB_PASSWORD=correct horse battery staple q=1), stopping early only at ", " or "; " followed by
+// another name= / name: assignment.
+const ENV_SECRET_RE = /\b((?:[A-Z][A-Z0-9_]*)?(?<![A-Z0-9])(?:PASSWORD|PASSWD|PASS|SECRET|TOKEN|API_?KEY|PRIVATE_KEY|CREDENTIALS?)(?![A-Z0-9])[A-Z0-9_]*)([ \t]*=[ \t]*)(\\"(?:[^\\\n]|\\(?!"))*\\"|\\'(?:[^\\\n]|\\(?!'))*\\'|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[removed\](?![^\s,;}\]])|\S*[^\s,;}\]])/gi;
 // Structural credential assignments in a config or header format (Codex #6375 r7):
 // "db.password: hunter22", "DB_PASSWORD = hunter22", "X-API-Key: abc123xyz",
 // "Authorization: Token abc123xyz". The KEY must end in a credential word (names
@@ -235,11 +236,8 @@ function scrubRandomTokens(text) {
   return { text: out, count };
 }
 
-// The env-style value regex reads at most ENV_MAX_WORDS words (bounded matching). When a value
-// reaches that cap, the rest of the passphrase is removed here by a linear scan: to the end of the
-// line or an inline " #" comment, stopping early only at ", " or "; " followed by another
-// name= / name: assignment (Codex #6375 r15).
-const ENV_MAX_WORDS = 13;
+// Where an unquoted env-style value ends: the end of its line or an inline " #" comment, or a ", " / "; "
+// followed by another name= / name: assignment, whichever comes first (Codex #6375 r15).
 const ENV_NEXT_ASSIGNMENT_RE = /[,;][ \t]+[A-Za-z_][\w.-]*[ \t]*[=:]/;
 function envValueEnd(text, from) {
   const newline = text.indexOf('\n', from);
@@ -265,7 +263,7 @@ function scrubEnvAssignments(text) {
     if (whole === '') { pattern.lastIndex += 1; continue; }
     if (isAlreadyRemoved(value)) continue;
     let end = match.index + whole.length;
-    if (!/^["'\\]/.test(value) && value.split(/[ \t]+/).length >= ENV_MAX_WORDS) end = Math.max(end, envValueEnd(text, end));
+    if (!/^["'\\]/.test(value)) end = envValueEnd(text, end);
     count += 1;
     out += `${text.slice(last, match.index)}${name}${sep}${REMOVED}`;
     last = end;

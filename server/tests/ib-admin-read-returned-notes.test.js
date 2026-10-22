@@ -584,6 +584,12 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     expect(scrubNote('DB_PASSWORD=hunter 22, mode=fast').text).toBe('DB_PASSWORD=[removed], mode=fast');
   });
 
+  test('an unquoted env value with an equals sign or colon inside runs through the line (audit P0)', () => {
+    expect(scrubNote('DB_PASSWORD=correct horse battery staple q=1').text).toBe('DB_PASSWORD=[removed]');
+    expect(scrubNote('DB_PASSWORD=correct horse: battery staple # keep this').text).toBe('DB_PASSWORD=[removed] # keep this');
+    expect(scrubNote('API_TOKEN=one two, MODE=fast').text).toBe('API_TOKEN=[removed], MODE=fast');
+  });
+
   test('repeated markers and long word runs after an env-style name finish fast (r15 audit P1)', () => {
     const { redactSecrets, newState } = require('../utils/signed-link-redaction');
     const inputs = [
