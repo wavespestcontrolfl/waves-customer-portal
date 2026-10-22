@@ -547,6 +547,53 @@ describe('admin estimate persistence', () => {
     expect(again.onetime_total).toBe(150);
   });
 
+  // codex #6438 r2: the converter's own rule decides, so a standalone rodent
+  // bait supplement makes a one-line pest plan a bundle, and a setup fee stored
+  // as its own row comes out too.
+  test('pest plus a standalone rodent bait supplement stores no setup fee', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      estimateData: {
+        result: {
+          oneTime: { items: [], total: 99, membershipFee: 99 },
+          recurring: { grandTotal: 68.4, rodentBaitMo: 30, services: [{ service: 'pest_control', name: 'Pest Control', mo: 38.4 }] },
+        },
+      },
+    });
+    expect(fields.onetime_total).toBe(0);
+  });
+
+  test('a bundle whose setup fee is an explicit row and no cached total drops that row', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      onetimeTotal: 0,
+      estimateData: {
+        result: {
+          oneTime: { items: [
+            { service: 'waveguard_setup', name: 'WaveGuard setup', price: 99 },
+            { service: 'flea', name: 'Flea Treatment', price: 150 },
+          ] },
+          recurring: { grandTotal: 113.1, services: [{ service: 'pest_control', mo: 38.4 }, { service: 'mosquito', mo: 74.7 }] },
+        },
+      },
+    });
+    expect(fields.onetime_total).toBe(150);
+  });
+
+  test('a pest-only plan with an explicit setup row keeps it', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      onetimeTotal: 0,
+      estimateData: {
+        result: {
+          oneTime: { items: [{ service: 'waveguard_setup', name: 'WaveGuard setup', price: 99 }] },
+          recurring: { grandTotal: 38.4, services: [{ service: 'pest_control', name: 'Pest Control', mo: 38.4 }] },
+        },
+      },
+    });
+    expect(fields.onetime_total).toBe(99);
+  });
+
   test('the full create path stores the bundle one-time total once reduced', async () => {
     const fixture = makeDatabase({});
     const { estimate } = await createOrReuseAdminEstimate({
