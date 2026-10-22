@@ -876,13 +876,22 @@ async function resolveSlideShadow(opts, wantsPackedEnds, services) {
     && gateEnvValue('GATE_SLOT_SLIDE_OFFER') && claimSlideShadowSample())) return null;
   return loadSlideMeta(services);
 }
-// Every other committed stop on `date` (other technicians' rows) as
-// {id, startMin, endMin, lat, lng} for the slide scorer's blocker check.
+// Every other committed stop on `date` (other technicians' rows) for the
+// slide scorer's blocker check, in the same shape buildDayStops gives own
+// stops — including the expected-minutes credit the callers' collision
+// checks attach (occupancy.js stopCreditResolver), so a padded blocker is
+// measured from its expected end, not its window end.
 function otherStopsOn(date, tech, params) {
   const rows = params.services.filter((s) => toDateStr(s.scheduled_date) === date
     && s.technician_id != null && s.technician_id !== tech.id && !params.excludeSet.has(String(s.id)));
+  const creditResolver = params.wantsExpectedMinutesCredit ? stopCreditResolver(rows) : null;
   return occupiedRows(rows).map((s) => ({
-    id: s.id, startMin: s.startMin, endMin: s.endMin, lat: s.svc_lat || s.cust_lat, lng: s.svc_lng || s.cust_lng,
+    id: s.id,
+    startMin: s.startMin,
+    endMin: s.endMin,
+    lat: s.svc_lat || s.cust_lat,
+    lng: s.svc_lng || s.cust_lng,
+    ...(creditResolver ? { expectedMinutes: creditResolver(s, s.endMin - s.startMin) } : {}),
   }));
 }
 
