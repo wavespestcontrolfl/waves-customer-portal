@@ -144,6 +144,18 @@ describe("Email schedule send", () => {
     expect(screen.queryByText(/^Scheduled for /)).not.toBeInTheDocument();
   });
 
+  it("a retry that returns an email already sent says it went out, not Scheduled", async () => {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/email/schedule")
+      ? response({ success: true, scheduled: { id: "old", status: "sent" } }) : base(input, options)));
+    mount();
+    await writeEmail();
+    fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Tomorrow morning/ }));
+    expect((await screen.findAllByText("This email already went out. It is in the Gmail Sent folder.")).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/^Scheduled for /)).not.toBeInTheDocument();
+  });
+
   it("an older list answer that arrives last does not replace the newer one", async () => {
     scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "scheduled" }];
     const base = fetch.getMockImplementation();

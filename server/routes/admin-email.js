@@ -347,6 +347,7 @@ router.post('/send', async (req, res) => {
 const SCHEDULE_ET_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
 const SCHEDULE_MAX_DAYS = 366;
 const CANCELLABLE = ['scheduled', 'failed', 'outcome_unknown'];
+const SETTLED_LIST_CAP = 100;
 const scheduledView = (row) => ({
   id: row.id, to: row.to_address, subject: row.subject, draftText: row.draft_text, threadId: row.thread_id,
   replyEmailId: row.reply_email_id, sendAt: row.send_at, status: row.status, sentAt: row.sent_at,
@@ -403,12 +404,18 @@ router.post('/schedule', async (req, res) => {
 router.get('/scheduled', async (req, res) => {
   if (!emailSendLaterLive()) return res.json({ enabled: false, emails: [] });
   try {
-    // Recently cancelled rows stay listed for a day with "Open as draft", so
-    // a cancel whose answer was lost (or a reload) never strands the text.
-    const rows = await db('scheduled_emails')
-      .where((q) => q.whereIn('status', ['scheduled', 'sending', ...CANCELLABLE.slice(1)])
-        .orWhere((c) => c.where('status', 'cancelled').where('cancelled_at', '>', db.raw("now() - interval '1 day'"))))
-      .orderBy('send_at', 'asc').limit(200);
+    // Every email still queued or sending is listed, so old history can never
+    // hide one. Settled rows that need the office (failed, outcome_unknown)
+    // and rows cancelled in the last day ("Open as draft", so a lost cancel
+    // answer never strands the text) are capped, newest first.
+    const [live, settled] = await Promise.all([
+      db('scheduled_emails').whereIn('status', ['scheduled', 'sending']),
+      db('scheduled_emails')
+        .where((q) => q.whereIn('status', CANCELLABLE.slice(1))
+          .orWhere((c) => c.where('status', 'cancelled').where('cancelled_at', '>', db.raw("now() - interval '1 day'"))))
+        .orderBy('send_at', 'desc').limit(SETTLED_LIST_CAP),
+    ]);
+    const rows = [...live, ...settled].sort((a, b) => new Date(a.send_at) - new Date(b.send_at));
     res.json({ enabled: true, emails: rows.map(scheduledView) });
   } catch (err) {
     logger.error(`[email] scheduled list failed (${err.code || 'error'})`);

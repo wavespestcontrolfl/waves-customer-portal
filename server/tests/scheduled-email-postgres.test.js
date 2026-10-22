@@ -197,6 +197,18 @@ jest.setTimeout(30000);
     expect(await row(body.scheduled.id)).toMatchObject({ status: 'outcome_unknown' });
   });
 
+  test('old settled rows never hide a queued email from the list', async () => {
+    const old = Array.from({ length: 120 }, (_, i) => ({
+      to_address: `old${i}@example.invalid`, subject: 'Old', body_html: 'x', draft_text: 'x', status: 'failed',
+      send_at: database.raw(`now() - interval '${i + 2} days'`), client_key: randomUUID(),
+    }));
+    await database('scheduled_emails').insert(old);
+    const { body } = await queue();
+    const listed = (await call('GET', '/scheduled')).body.emails;
+    expect(listed.some((e) => e.id === body.scheduled.id && e.status === 'scheduled')).toBe(true);
+    expect(listed.filter((e) => e.status === 'failed')).toHaveLength(100);
+  });
+
   test('with the gate off the sender sends nothing, and queued rows wait', async () => {
     const { body } = await queue();
     await makeDue(body.scheduled.id);

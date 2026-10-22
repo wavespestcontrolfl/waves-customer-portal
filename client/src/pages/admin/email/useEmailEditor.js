@@ -265,6 +265,11 @@ export default function useEmailEditor(userId) {
         return;
       }
       clearQueued();
+      // The first request's email already went out: say so, never "Scheduled".
+      if (result.scheduled?.status === "sent") {
+        setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, message: "This email already went out. It is in the Gmail Sent folder." } }));
+        return;
+      }
       setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, message: `Scheduled for ${formatSendAt(sendAt)}. Find it under Scheduled.` } }));
     } catch {
       setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: "Scheduling was not confirmed. Look under Scheduled before you schedule or send it again." } }));
