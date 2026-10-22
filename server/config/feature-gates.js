@@ -7049,5 +7049,15 @@ function bidDeskLive() {
 }
 // GATE_BID_DESK reader, on its own line so gate PRs never conflict.
 module.exports.bidDeskLive = bidDeskLive;
+// GATE_MERGE_LEAD_DEFAULTS read at CALL time, strict `=== 'true'`, dark in every environment. The one reader for two
+// call-lead fixes. (1) services/call-recording-processor.js: a customer created from a call no longer gets a Stripe
+// profile at once (every card-save and payment path creates it on demand). (2) services/customer-dedupe.js: a merge
+// no longer copies a never-billed retired row's autopay_enabled=false onto the surviving row. Sends nothing.
+// Off = today's behavior, byte for byte.
+function mergeLeadDefaultsLive() {
+  return process.env.GATE_MERGE_LEAD_DEFAULTS === 'true';
+}
+// GATE_MERGE_LEAD_DEFAULTS reader, on its own line so gate PRs never conflict.
+module.exports.mergeLeadDefaultsLive = mergeLeadDefaultsLive;
 // Retired gate names, for the admin gate list (services/gate-list.js), on its own line.
 module.exports.RETIRED_GATES = RETIRED;

@@ -1880,6 +1880,26 @@ const REFERRAL_FOLD_COUNTERS = ['referral_balance_cents', 'total_earned_cents',
   'total_paid_out_cents', 'total_clicks', 'total_referrals_sent', 'total_referrals_converted',
   'available_balance_cents', 'pending_earnings_cents'];
 
+// GATE_MERGE_LEAD_DEFAULTS (dark): a retired row that never had a billing
+// relationship (no saved card, no designated autopay card, no autopay log row)
+// carries customers.autopay_enabled=false only as the intake default, not as a
+// customer decision. Read from the database (not the passed row) so a stale or
+// partial row object can never read as "never billed", and BEFORE the
+// executor's FK sweep, which moves these rows to the winner. Fails closed.
+async function loserNeverBilled(database, loser) {
+  if (require('../config/feature-gates').mergeLeadDefaultsLive?.() !== true) return false;
+  try {
+    const row = await database('customers').where({ id: loser.id }).first('autopay_payment_method_id');
+    if (!row || row.autopay_payment_method_id) return false;
+    if (await database('payment_methods').where({ customer_id: loser.id }).first('id')) return false;
+    if (await database('autopay_log').where({ customer_id: loser.id }).first('id')) return false;
+    return true;
+  } catch (e) {
+    logger.warn(`[customer-dedupe] never-billed check failed: ${e.message}`);
+    return false;
+  }
+}
+
 // The most-restrictive customer-level autopay/credit settings the winner
 // INHERITS from the loser (applied by executeMerge under its locks; read by
 // the IB merge preview so the approval card shows them). Pure: same inputs,
@@ -1891,9 +1911,14 @@ const REFERRAL_FOLD_COUNTERS = ['referral_balance_cents', 'total_earned_cents',
 //                                to the winner, so "don't apply my credit"
 //                                must survive on the surviving row
 //   autopay_paused_until       — a longer, still-future pause wins (+ its reason)
-function inheritedAutopayRestrictions(winner, loser, now = Date.now()) {
+//
+// `loserNeverBilled` (GATE_MERGE_LEAD_DEFAULTS, from loserNeverBilled()): the
+// retired row never had a card, an autopay card or an autopay log row, so its
+// autopay_enabled=false is an intake default and is not inherited. Pauses and
+// the credit opt-out keep the rule above.
+function inheritedAutopayRestrictions(winner, loser, now = Date.now(), { loserNeverBilled: neverBilled = false } = {}) {
   const restrictions = {};
-  if (loser.autopay_enabled === false && winner.autopay_enabled !== false) {
+  if (loser.autopay_enabled === false && winner.autopay_enabled !== false && !neverBilled) {
     restrictions.autopay_enabled = false;
   }
   if (loser.auto_apply_account_credit === false && winner.auto_apply_account_credit === true) {
@@ -3114,6 +3139,9 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // card for a merge this executor would unconditionally refuse.
     const rowConflict = rowLevelMergeConflict(winner, loser);
     if (rowConflict) throw new Error(`executeMerge: ${rowConflict.message}`);
+    // GATE_MERGE_LEAD_DEFAULTS, read HERE — before the FK sweep moves the
+    // loser's cards and autopay log rows to the winner.
+    const leadNeverBilled = await loserNeverBilled(trx, loser);
     // Saved cards live on a specific STRIPE customer: charge paths attach
     // PaymentIntents to ensureStripeCustomer(winner), so a moved method
     // attached elsewhere would strand and autopay/card-on-file charges fail.
@@ -3791,7 +3819,7 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // monthly cron must never charge a customer whose retired row said stop.
     // autopay_log keeps the provenance; re-enabling is an operator action on
     // the surviving row.
-    const autopayRestrictions = inheritedAutopayRestrictions(winner, loser);
+    const autopayRestrictions = inheritedAutopayRestrictions(winner, loser, Date.now(), { loserNeverBilled: leadNeverBilled });
     // Journal the winner's ORIGINAL customer-level autopay fields for
     // exactly the columns this block overwrites (applied directly, not via
     // winner_backfills), so an undo can put the winner's own autopay state
@@ -7133,6 +7161,9 @@ async function describeMergeEffects(database, winner, loser) {
   // would refuse is stated so the preview refuses too.
   const savedCards = await deriveSavedCardStripeCustomer(database, winner, loser);
   const { backfills } = predictWinnerBackfills(winner, loser, { derivedStripeCustomerId: savedCards.derivedStripeCustomerId });
+  // GATE_MERGE_LEAD_DEFAULTS: the same never-billed read the executor makes
+  // before its sweep (a no-op while the gate is off).
+  const leadNeverBilled = await loserNeverBilled(database, loser);
   // The loser cards the executor will strip of default/autopay (its own
   // reader) — ids and before-flags on the card, pinned by the fingerprint.
   const saved_card_demotions = await predictSavedCardDemotions(database, winner.id, loser.id);
@@ -7157,7 +7188,7 @@ async function describeMergeEffects(database, winner, loser) {
     per_application_fee_adopted_from_loser: adoptsFee ? Number(loser.per_application_fee) : null,
     loser_plan_rate_rows_deleted: loserPlanRates,
     referral_fold: referral,
-    autopay_restrictions_inherited: inheritedAutopayRestrictions(winner, loser),
+    autopay_restrictions_inherited: inheritedAutopayRestrictions(winner, loser, Date.now(), { loserNeverBilled: leadNeverBilled }),
     // Fill-if-empty identity/address/contact/billing values the winner takes
     // from the loser (predictWinnerBackfills — the executor's own rule).
     winner_backfills: backfills,
@@ -7240,6 +7271,7 @@ module.exports = {
   predictCollisionFolds,
   nonFkMergeRewrites,
   rowLevelMergeConflict,
+  loserNeverBilled,
   inheritedAutopayRestrictions,
   acquirePairAdjudicationLock,
   REFERRAL_FOLD_COUNTERS,
