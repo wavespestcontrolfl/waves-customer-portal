@@ -3600,6 +3600,20 @@ postgres('SMS commitments on PostgreSQL', () => {
       expect((await mockPg('call_commitments').where({ id: ask.id }).first()).status).toBe('open');
     });
 
+    test('Codex #6415 security: one customer gets at most three new thread calls a tick; the rest wait for the next tick', async () => {
+      const asks = [];
+      for (let i = 0; i < 5; i += 1) asks.push(await addCommitment({ description: `send the service report ${i}` }));
+      await text('Any update?', { ms: DAY });
+      answer({ verdict: 'not_completed', record_ref: null, quote: null });
+      await refreshSmsCommitments({ conn: mockPg, now: now() });
+      expect(threadCalls()).toHaveLength(3);
+      // Next tick, same thread: the three checked rows reuse their verdict; the other two are checked now.
+      await refreshSmsCommitments({ conn: mockPg, now: at(3 * DAY + 600000) });
+      expect(threadCalls()).toHaveLength(5);
+      const rows = await mockPg('call_commitments').whereIn('id', asks.map((a) => a.id));
+      expect(rows.every((row) => row.status === 'open' && row.sms_context.thread_check?.verdict === 'open')).toBe(true);
+    });
+
     test('a person\'s later text saying it was sent closes the follow-up too', async () => {
       const ask = await addCommitment();
       const sent = await text('We sent it out this morning to the email on file', { direction: 'outbound', ms: DAY });

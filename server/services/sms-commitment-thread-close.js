@@ -146,12 +146,15 @@ ${stringifySmsEvidence({ obligation, thread: records.map(({ ref, who, created_at
 // call). Otherwise a verdict ({ verdict: 'fulfilled' | 'open' | 'uncertain' })
 // with its evidence hash; a repeat check on an unchanged thread reuses the
 // stored sms_context.thread_check instead of calling the model again.
-async function verifyThreadCompletion(conn, commitment, message, now = new Date()) {
+// `mayCall` is the sweep's per-customer budget: when it says no, the check is
+// skipped (null) and the record verdict stands, so its alert still rings.
+async function verifyThreadCompletion(conn, commitment, message, now = new Date(), { mayCall } = {}) {
   const { records } = await loadThreadMessages(conn, message, now);
   if (!records.length) return null;
   const { obligation, evidenceHash } = threadFingerprint(commitment, records);
   const previous = commitment.sms_context?.thread_check;
   if (previous?.evidence_hash === evidenceHash && (!previous.retry_after || new Date(previous.retry_after) > now)) return previous;
+  if (mayCall && !mayCall()) return null;
   const verdict = await checkThread(obligation, records);
   return { ...verdict, evidence_hash: evidenceHash,
     retry_after: ['provider_failed', 'invalid_model_output'].includes(verdict.reason)

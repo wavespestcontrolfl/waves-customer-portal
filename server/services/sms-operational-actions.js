@@ -1317,6 +1317,8 @@ async function ringSmsSourceBell(trx, { row, message, verdict }) {
 // close when a later text clearly confirms it: the customer got it, or a person
 // said it was sent. A close by the records stands exactly as before; the thread
 // never reopens or holds anything. A failed thread read changes nothing.
+const THREAD_CALLS_PER_CUSTOMER = 3;
+
 async function reconcileWithThread({ conn, row, current, message, now, verdict, verifyThread }) {
   if (verdict.verdict === 'fulfilled') return verdict;
   try {
@@ -1496,10 +1498,21 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
   ];
   const rows = [...new Map([...eventRows.map(({ event_seen_through: _at, event_customer_id: _customer, ...row }) => row), ...pages.flatMap((p) => p.rows)]
     .map((row) => [row.id, row])).values()];
+  // Every new text changes each row's thread fingerprint, so one text per tick
+  // could buy a model call for every open row of that customer. Each customer
+  // gets THREAD_CALLS_PER_CUSTOMER new thread calls a tick; the rest keep
+  // their record verdict (and its alert) until a later tick (Codex #6415).
+  const threadCalls = new Map();
+  const budgetedThread = (c, commitment, message, at) => verifyThread(c, commitment, message, at, { mayCall: () => {
+    const used = threadCalls.get(message.customer_id) || 0;
+    if (used >= THREAD_CALLS_PER_CUSTOMER) return false;
+    threadCalls.set(message.customer_id, used + 1);
+    return true;
+  } });
   for (const row of rows) {
     if (!smsCommitmentsEnabled()) return { ...counts, skipped: 'gate_off' };
     counts.scanned += 1;
-    const result = await refreshSmsCommitment(conn, row, now, verify, verifyThread);
+    const result = await refreshSmsCommitment(conn, row, now, verify, budgetedThread);
     if (result.outcome === 'no_witness') counts.skipped_no_witness += 1;
     if (result.outcome === 'not_due') counts.skipped_not_due += 1;
     if (result.verdict?.verdict === 'uncertain') counts.unverified += 1;
