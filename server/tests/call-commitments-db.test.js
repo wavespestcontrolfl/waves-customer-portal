@@ -783,6 +783,14 @@ maybeDescribe('call_commitments (live Postgres)', () => {
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
       // The shared list is what callers read.
       expect(cc.isMissingName('  No Name ')).toBe(true);
+      // Placeholders call/text-created records carry (outbound-voicemail-sms.js).
+      for (const p of ['Unknown Caller', 'N/A', 'NA', 'None', 'Test', '-', '?', 'Unknown Unknown']) {
+        expect(cc.isMissingName(p)).toBe(true);
+      }
+      await db('customers').whereIn('id', [owner.id, ph.id]).update({ first_name: 'Unknown', last_name: 'Caller' });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
+      await db('customers').whereIn('id', [owner.id, ph.id]).update({ first_name: 'N/A', last_name: null });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
       expect(cc.isMissingName('Martin Fixtureson')).toBe(false);
     } finally {
       await db('estimates').where({ id: est.id }).del();

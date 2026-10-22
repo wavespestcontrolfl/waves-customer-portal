@@ -1901,8 +1901,14 @@ async function completedVisit(conn, { after, until, customerId }) {
 const nameKey = (c) => `${c.first_name || ""} ${c.last_name || ""}`.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 // Names intake writes when it has no real one. ONE list: the promise-chaser
 // bell's headline lookup and the shared-number rule both read it, and the
-// promised-estimate digest SQL builds its regex from it.
-const PLACEHOLDER_NAMES = Object.freeze(["unknown", "caller", "lead", "customer", "new", "no name", "anonymous"]);
+// promised-estimate digest SQL builds its regex from it. Entries are in the
+// normalized form nameKey/isMissingName compare against (punctuation becomes a
+// space, so "N/A" is "n a"); it covers outbound-voicemail-sms.js's
+// PLACEHOLDER_NAMES too ("-" and "?" normalize to blank, already missing).
+const PLACEHOLDER_NAMES = Object.freeze([
+  "unknown", "unknown caller", "unknown unknown", "caller", "lead", "customer", "new",
+  "no name", "anonymous", "n a", "na", "none", "test",
+]);
 const PLACEHOLDER_NAME_SQL_RE = `^(${PLACEHOLDER_NAMES.join("|")})$`;
 // A name that tells us nothing about who this is: blank or a placeholder.
 const isMissingName = (text) => {
