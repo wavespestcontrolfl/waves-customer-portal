@@ -67,8 +67,8 @@ const COMPANY_FACTS = Object.freeze([
   // the owner ruled it earns no free return visit, and a return visit is the FREE RE-SERVICE
   // fact's job, so no line promises one.
   'Rodent trapping includes the setup visit and at least one trap check. For more trap checks, the office confirms what the job includes.',
-  'Residential plans have no long-term contract, and a residential customer can cancel any time. Commercial accounts follow their service agreement.',
-  'A customer who prepays the year and cancels within 90 days gets a refund for the visits not yet done.',
+  'Residential pest and lawn plans have no long-term contract, and those customers can cancel any time. Termite plans and commercial accounts follow their signed agreement.',
+  'A customer who prepays a year of pest or lawn service and cancels within 90 days gets a refund for the visits not yet done.',
   'We serve Manatee and Sarasota counties and Charlotte County except Punta Gorda, plus Ruskin, Apollo Beach, Sun City Center, Wimauma, Gibsonton and Riverview. We do not serve Punta Gorda, DeSoto County, Tampa, St. Petersburg or Lee County.',
   'A WDO (termite) inspection report is emailed after the licensed inspector signs it, normally the same business day as the inspection. The office can check on a late report.',
   'We do not tent for termites. For drywood termites we treat the infested wood directly with spot treatment, a borate wood treatment or injected foam. When the activity is too widespread for that, we refer the customer to a fumigation company.',

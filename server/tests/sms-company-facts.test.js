@@ -153,8 +153,8 @@ describe('answer-book facts (owner 2026-10-21/22)', () => {
   const NEW_LINES = [
     'The first pest visit includes an inside spray, unless the customer chose exterior-only service. After that, the inside is up to the customer: we treat it whenever they ask.',
     'Rodent trapping includes the setup visit and at least one trap check. For more trap checks, the office confirms what the job includes.',
-    'Residential plans have no long-term contract, and a residential customer can cancel any time. Commercial accounts follow their service agreement.',
-    'A customer who prepays the year and cancels within 90 days gets a refund for the visits not yet done.',
+    'Residential pest and lawn plans have no long-term contract, and those customers can cancel any time. Termite plans and commercial accounts follow their signed agreement.',
+    'A customer who prepays a year of pest or lawn service and cancels within 90 days gets a refund for the visits not yet done.',
     'We serve Manatee and Sarasota counties and Charlotte County except Punta Gorda, plus Ruskin, Apollo Beach, Sun City Center, Wimauma, Gibsonton and Riverview. We do not serve Punta Gorda, DeSoto County, Tampa, St. Petersburg or Lee County.',
     'A WDO (termite) inspection report is emailed after the licensed inspector signs it, normally the same business day as the inspection. The office can check on a late report.',
     'We do not tent for termites. For drywood termites we treat the infested wood directly with spot treatment, a borate wood treatment or injected foam. When the activity is too widespread for that, we refer the customer to a fumigation company.',
@@ -456,7 +456,7 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
   const { retiredCompanyFactBlock } = require('../services/agent-decision-send-checks');
   const { RETIRED_COMPANY_FACT_LINES } = require('../services/sms-company-facts');
   const PAY = 'Customers can also pay by the card or bank account on file, or by check or cash through the office.';
-  const REFUND = 'A customer who prepays the year and cancels within 90 days gets a refund for the visits not yet done.';
+  const REFUND = 'A customer who prepays a year of pest or lawn service and cancels within 90 days gets a refund for the visits not yet done.';
   const payOk = (reply, inboundText) => paymentStatus.checkPaymentStatusReply({ reply, sentences: [], inboundText }).ok;
 
   test('the inside-spray line is not a free re-service promise, and no line promises a return visit', () => {
@@ -496,7 +496,7 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
   });
   test('an unedited draft from a prompt before the answer-book facts is refused, whatever its words', () => {
     const old = (v, body) => ({ prompt_version: `house_voice_v12_real_answers${v}`, suggested_message: body });
-    for (const v of ['13_n', '14_n', '13_n+bc', '7_m', '']) {
+    for (const v of ['13_n', '14_n', '15_n', '16_n+c', '13_n+bc', '7_m', '']) {
       for (const body of [
         RETIRED_COMPANY_FACT_LINES[0], RETIRED_COMPANY_FACT_LINES[10], 'Every recurring service treats the home as well as the yard unless you opt out.',
         'The technician accepts plastic at the appointment, never currency.', 'See you Tuesday between 8 and 10!',
@@ -513,7 +513,7 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
     expect(verdict.reason).toMatch(/company fact retired/);
     const snap = await sc.labelFactsSnapshotProviderPreSendCheck({ promptVersion: 'house_voice_v12_real_answers14_n', getBody: () => body })({});
     expect(snap.ok).toBe(false);
-    const fresh = await sc.labelFactsSnapshotProviderPreSendCheck({ promptVersion: 'house_voice_v12_real_answers15_n', getBody: () => 'See you Tuesday!' })({});
+    const fresh = await sc.labelFactsSnapshotProviderPreSendCheck({ promptVersion: 'house_voice_v12_real_answers17_n', getBody: () => 'See you Tuesday!' })({});
     expect(fresh.ok).toBe(true);
   });
   test('a staff rewrite of an old draft goes out; the unedited old draft does not', () => {
@@ -522,7 +522,7 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
     expect(retiredCompanyFactBlock({ decision, outgoingBody: RETIRED_COMPANY_FACT_LINES[10] })).toMatch(/company fact retired/);
   });
   test('a draft from the answer-book prompts, or not a real-answers draft, is never refused by it', () => {
-    for (const prompt_version of ['house_voice_v12_real_answers15_n', 'house_voice_v12_real_answers16_n+c', 'house_voice_v11', null]) {
+    for (const prompt_version of ['house_voice_v12_real_answers17_n', 'house_voice_v12_real_answers18_n+c', 'house_voice_v11', null]) {
       for (const body of [COMPANY_FACTS[10], 'We don’t take cash during your visit; please pay cash through the office.', COMPANY_FACTS[0]]) {
         expect(retiredCompanyFactBlock({ decision: { prompt_version }, outgoingBody: body })).toBeNull();
       }
