@@ -916,9 +916,10 @@ function isWaveGuardSetupRow(row) {
 }
 
 const ONE_TIME_ROW_AMOUNT_KEYS = ['price', 'estimatedPrice', 'baseEstimatePrice'];
-// An explicit setup row sold at a net amount bills that amount
+// A row sold at a net amount bills that amount
 // (estimate-manual-acceptance-effects), so the net aliases come first.
 const SETUP_ROW_NET_AMOUNT_KEYS = ['priceAfterDiscount', 'totalAfterDiscount', 'amount', ...ONE_TIME_ROW_AMOUNT_KEYS];
+const WORK_ROW_NET_AMOUNT_KEYS = ['priceAfterDiscount', 'totalAfterDiscount', ...ONE_TIME_ROW_AMOUNT_KEYS];
 
 // The part of a one-time total that is a WaveGuard setup fee the plan is not
 // billed. The fee belongs only to a solo pest or solo mosquito plan (owner
@@ -941,15 +942,21 @@ function excludedSetupFeeAmount(result, estimateData, grossOneTimeTotal, oneTime
   if (require('./estimate-converter').recurringPlanCarriesSetupFee({ recurringServices: recurringRows, estimateData })) return 0;
   const setupRows = oneTimeRows.filter(isWaveGuardSetupRow);
   const feeAmount = setupRows.length > 0
-    ? roundMoney(setupRows.reduce((sum, row) => {
-      const key = SETUP_ROW_NET_AMOUNT_KEYS.find((k) => moneyValue(row[k]) !== null);
-      return sum + (key ? moneyValue(row[key]) : 0);
-    }, 0))
+    ? sumSignedAmounts(setupRows, SETUP_ROW_NET_AMOUNT_KEYS)
     : (positiveMoney(result?.oneTime?.membershipFee) ?? 0);
   if (!(feeAmount > 0)) return 0;
-  // Never below the itemized work: a total that already left the fee out
-  // keeps its real charges (codex #6438 r3).
-  const itemizedWork = Math.max(0, sumSignedAmounts(oneTimeRows.filter((row) => !isWaveGuardSetupRow(row)), ONE_TIME_ROW_AMOUNT_KEYS));
+  // Never below the billable itemized work: a total that already left the
+  // fee out keeps its real charges (codex #6438 r3). Rows count at their net
+  // amount, less the pooled one-time slice of a manual discount, which the
+  // mapper takes off oneTime.total and not off the rows (estimate-public
+  // reads the same three places).
+  const pooledOneTimeDiscount = [result?.manualDiscount, result?.totals?.manualDiscount, result?.summary?.manualDiscount]
+    .map((discount) => positiveMoney(discount?.oneTimeAmount))
+    .find((amount) => amount !== null) ?? 0;
+  const itemizedWork = Math.max(0, sumSignedAmounts(
+    oneTimeRows.filter((row) => !isWaveGuardSetupRow(row)),
+    WORK_ROW_NET_AMOUNT_KEYS,
+  ) - pooledOneTimeDiscount);
   const net = Math.min(grossOneTimeTotal, Math.max(grossOneTimeTotal - feeAmount, itemizedWork));
   return roundMoney(Math.max(0, grossOneTimeTotal - net));
 }

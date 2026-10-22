@@ -559,6 +559,20 @@ describe('admin estimate persistence', () => {
     expect(fields.onetime_total).toBe(350);
   });
 
+  test('a pooled one-time discount lowers the itemized-work floor', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      estimateData: {
+        result: {
+          manualDiscount: { type: 'FIXED', value: 50, oneTimeAmount: 50 },
+          oneTime: { items: [{ service: 'pest_initial_roach', name: 'Roach Treatment', price: 350 }], total: 399, membershipFee: 99 },
+          recurring: { grandTotal: 113.1, services: [{ service: 'pest_control', mo: 38.4 }, { service: 'mosquito', mo: 74.7 }] },
+        },
+      },
+    });
+    expect(fields.onetime_total).toBe(300);
+  });
+
   test('an explicit setup row sold at a net amount comes out at that amount', () => {
     const fields = buildEstimatePersistenceFields({
       ...baseBody,
