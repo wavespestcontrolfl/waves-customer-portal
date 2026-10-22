@@ -189,9 +189,12 @@ function isDataAnswer(result) {
 // A prompt-injected message read through one of them could drive a cardless
 // write (a phone-only update_customer changes the portal login key). With the
 // gate on, every tool in this one list sets the same per-request flag.
-// Deliberately NOT listed: structured record lookups the owner-direct edit flow
-// starts from (query_customers, get_customer_detail, schedule views); they
-// return fields, not message bodies, and tainting them would end owner-direct.
+// Record lookups the owner-direct edit flow starts from (query_customers,
+// get_customer_detail, get_schedule_view) taint only when the answer holds a
+// free-text note (NOTE_READ_TOOLS below): the call processor writes
+// caller-derived text into crm_notes, and booking notes are customer-typed
+// (Codex r1 on the audit fix). A record with no note stays card-free, so a
+// plain "fix this customer's name" flow keeps working.
 // A new read tool that returns sender-authored text is added here.
 const SENDER_TEXT_READ_TOOLS = new Set([
   // SMS and calls (comms-tools.js)
@@ -207,6 +210,21 @@ const SENDER_TEXT_READ_TOOLS = new Set([
   'search_ib_history',
 ]);
 
+// Record reads that carry sender text only in their note fields.
+const NOTE_READ_TOOLS = {
+  get_customer_detail: result => Boolean(String(result?.profile?.notes ?? '').trim())
+    || (Array.isArray(result?.recent_services) && result.recent_services.some(row => String(row?.notes ?? '').trim())),
+  get_schedule_view: result => Array.isArray(result?.appointments) && result.appointments.some(row => String(row?.notes ?? '').trim()),
+};
+
+// Does this tool's answer carry text a lower-trust sender could have written?
+// Only with the gate on. Unparseable or missing answers are decided by callers.
+function answerCarriesSenderText(toolName, result) {
+  if (!ibOwnerDirectTaintAllReadsLive()) return false;
+  if (SENDER_TEXT_READ_TOOLS.has(toolName)) return carriesSenderText(result);
+  return Object.hasOwn(NOTE_READ_TOOLS, toolName) && NOTE_READ_TOOLS[toolName](result);
+}
+
 // A refusal that carries only a message holds no sender text; any other answer
 // (rows, a list of matches, a draft) may, so it taints.
 function carriesSenderText(result) {
@@ -218,7 +236,7 @@ function carriesSenderText(result) {
 function noteUntrustedRead(taint, toolName, result) {
   if (!taint) return;
   if (toolName === GENERAL_READ_TOOL && isDataAnswer(result)) taint.untrustedRead = true;
-  else if (SENDER_TEXT_READ_TOOLS.has(toolName) && ibOwnerDirectTaintAllReadsLive() && carriesSenderText(result)) taint.untrustedRead = true;
+  else if (answerCarriesSenderText(toolName, result)) taint.untrustedRead = true;
 }
 
 // Pure: does a saved message history hold a general read that returned data?
@@ -228,7 +246,7 @@ function untrustedReadInHistory(messages) {
   const blocks = (Array.isArray(messages) ? messages : []).flatMap(message => (Array.isArray(message?.content) ? message.content : []));
   const allReads = ibOwnerDirectTaintAllReadsLive();
   const readBlocks = blocks.filter(block => block?.type === 'tool_use'
-    && (block.name === GENERAL_READ_TOOL || (allReads && SENDER_TEXT_READ_TOOLS.has(block.name))));
+    && (block.name === GENERAL_READ_TOOL || (allReads && (SENDER_TEXT_READ_TOOLS.has(block.name) || Object.hasOwn(NOTE_READ_TOOLS, block.name)))));
   if (!readBlocks.length) return false;
   const answers = new Map(blocks.filter(block => block?.type === 'tool_result').map(block => [block.tool_use_id, block]));
   return readBlocks.some((read) => {
@@ -236,7 +254,7 @@ function untrustedReadInHistory(messages) {
     if (!answer) return true;
     try {
       const parsed = JSON.parse(answer.content);
-      return read.name === GENERAL_READ_TOOL ? isDataAnswer(parsed) : carriesSenderText(parsed);
+      return read.name === GENERAL_READ_TOOL ? isDataAnswer(parsed) : answerCarriesSenderText(read.name, parsed);
     } catch { return true; }
   });
 }
@@ -471,4 +489,4 @@ You are talking to the owner. Do what they ask.
 - Never send the owner to another screen, never explain limitations, never apologize. If something truly cannot be done from here, say so in one sentence and offer the closest thing you can do.
 - Replies: 1–3 short lines. No preamble, no recap of the request, no "anything else?". Lists and numbers only when the owner asked for data.`;
 
-module.exports = { SENDER_TEXT_READ_TOOLS, loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };
+module.exports = { SENDER_TEXT_READ_TOOLS, NOTE_READ_TOOLS, loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };

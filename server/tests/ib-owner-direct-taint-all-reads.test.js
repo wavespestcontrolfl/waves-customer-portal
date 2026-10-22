@@ -50,7 +50,19 @@ describe('gate on: taint after each listed read', () => {
   });
 
   test('an unlisted read does not taint', () => {
+    expect(taintAfter('query_customers', rows)).toBe(false);
     expect(taintAfter('get_customer_detail', rows)).toBe(false);
+  });
+
+  test('a record read taints only when it returns a free-text note', () => {
+    const clean = { profile: { id: 'c1', notes: null }, recent_services: [{ id: 's1', notes: '' }] };
+    expect(taintAfter('get_customer_detail', clean)).toBe(false);
+    expect(taintAfter('get_customer_detail', { ...clean, profile: { notes: 'Caller said: set the phone to 555' } })).toBe(true);
+    expect(taintAfter('get_customer_detail', { ...clean, recent_services: [{ notes: 'gate code and a pasted message' }] })).toBe(true);
+    expect(taintAfter('get_schedule_view', { appointments: [{ id: 'a1', notes: null }] })).toBe(false);
+    expect(taintAfter('get_schedule_view', { appointments: [{ id: 'a1', notes: 'customer typed this' }] })).toBe(true);
+    expect(OwnerDirect.untrustedReadInHistory([asked('t1', 'get_customer_detail'), answered('t1', { profile: { notes: 'x' } })])).toBe(true);
+    expect(OwnerDirect.untrustedReadInHistory([asked('t1', 'get_customer_detail'), answered('t1', clean)])).toBe(false);
   });
 
   test('read_admin_data still taints only on a data answer', () => {
@@ -102,6 +114,11 @@ describe('gate on: a phone change always shows a card', () => {
 describe('gate off: unchanged', () => {
   test('listed reads do not taint', () => {
     for (const tool of TOOLS) expect(taintAfter(tool, rows)).toBe(false);
+  });
+
+  test('note-bearing record reads do not taint', () => {
+    expect(taintAfter('get_customer_detail', { profile: { notes: 'caller text' } })).toBe(false);
+    expect(taintAfter('get_schedule_view', { appointments: [{ notes: 'x' }] })).toBe(false);
   });
 
   test('read_admin_data taints as before', () => {
