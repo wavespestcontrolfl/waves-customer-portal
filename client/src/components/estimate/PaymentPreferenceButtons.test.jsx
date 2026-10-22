@@ -245,7 +245,7 @@ describe('PaymentPreferenceButtons', () => {
     expect(screen.getByText('$224.00')).toBeInTheDocument();
   });
 
-  it('names the preview row "First application" with GATE_ESTIMATE_APPLICATION_MONTHS (EST-2026-1185)', () => {
+  it('names the preview row "First application" when the page shows the monthly average (EST-2026-1185)', () => {
     render(
       <PaymentPreferenceButtons
         onSelect={vi.fn()}
@@ -385,7 +385,7 @@ describe('PaymentPreferenceButtons', () => {
       />,
     );
 
-    // No exact "Per application $X" / invoice rows — they'd contradict the
+    // No exact "First application $X" / invoice rows — they'd contradict the
     // "$X–$Y, confirmed on site" range, and the accept creates no invoice.
     expect(screen.queryByText('Per application')).not.toBeInTheDocument();
     expect(screen.queryByText('Invoice total')).not.toBeInTheDocument();

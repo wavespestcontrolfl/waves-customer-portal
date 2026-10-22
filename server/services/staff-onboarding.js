@@ -12,9 +12,8 @@
  * The card deep-links document + version; the record screen starts the member's own
  * record when none is picked.
  *
- * Gate off = the read functions return empty before any query. The auto clock-in
- * vehicle-agreement check (hasCompletedIssuedRecord) is NOT gated: it is a pay-compliance
- * precondition that applies whenever GATE_GEOFENCE_AUTO_CLOCK_IN is on.
+ * Gate off = the read functions return empty before any query. The vehicle-agreement
+ * check (hasCompletedIssuedRecord) is NOT gated.
  */
 const db = require('../models/db');
 const featureGates = require('../config/feature-gates');

@@ -2814,6 +2814,109 @@ describe('runAutoMergeSweep', () => {
   });
 });
 
+describe('customer_health_alerts merge (ops 2026-10-22)', () => {
+  it('registers customer_health_alerts with the dismiss-collisions handler (a shared open alert folds, never aborts)', () => {
+    const { UNIQUE_COLLISION_HANDLERS, repointHealthAlertsDismissCollisions } = dedupe._test;
+    expect(UNIQUE_COLLISION_HANDLERS.customer_health_alerts).toBe(repointHealthAlertsDismissCollisions);
+  });
+
+  // rows: the loser's alerts; winnerOpen: the winner's open alert of the same type
+  // (null = closed in between); collide: loser ids whose FIRST plain move collides.
+  function alertTrx({ rows, winnerOpen, collide }) {
+    const writes = [];
+    const locks = [];
+    let deleted = 0;
+    const collided = new Set();
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (q.called('first')) {
+        const where = q.args('where')[0];
+        locks.push(q.called('forUpdate'));
+        if (where.id) return rows.find((r) => r.id === where.id);
+        return winnerOpen;
+      }
+      if (q.called('select')) return rows.map(({ id }) => ({ id }));
+      if (q.called('del')) { deleted += 1; return 1; }
+      if (q.called('update')) {
+        const rowId = q.args('where')[0].id;
+        const patch = q.args('update')[0];
+        if (collide.includes(rowId) && patch.customer_id && !patch.status && !collided.has(rowId) && winnerOpen) {
+          collided.add(rowId);
+          const e = new Error('duplicate key'); e.code = '23505'; throw e;
+        }
+        writes.push({ rowId, patch });
+        return 1;
+      }
+      return [];
+    }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: jest.fn(() => 'NOW') };
+    return { trx, writes, locks, deletedCount: () => deleted };
+  }
+  const run = (trx) => dedupe._test.repointHealthAlertsDismissCollisions(trx, 'customer_health_alerts', 'customer_id', 'W', 'L');
+
+  it('moves an alert the winner lacks; a colliding OLDER loser alert moves across dismissed (never deleted)', async () => {
+    const t = alertTrx({
+      rows: [{ id: 'a1' }, { id: 'a2', alert_type: 'low_engagement', status: 'new', created_at: '2026-10-01T00:00:00Z' }],
+      winnerOpen: { id: 'w1', created_at: '2026-10-10T00:00:00Z' },
+      collide: ['a2'],
+    });
+    const result = await run(t.trx);
+    expect(t.writes).toEqual([
+      { rowId: 'a1', patch: { customer_id: 'W' } },
+      { rowId: 'a2', patch: { customer_id: 'W', status: 'dismissed', updated_at: 'NOW' } },
+    ]);
+    expect(t.locks).toEqual([true, true]);
+    expect(t.deletedCount()).toBe(0);
+    expect(result).toMatch(/moved 1, dismissed 1/);
+  });
+
+  it('a NEWER loser alert stays open: the winner\'s older open alert is dismissed instead (Codex #6431 r1 P1)', async () => {
+    const t = alertTrx({
+      rows: [{ id: 'a2', alert_type: 'critical_risk', status: 'new', created_at: '2026-10-20T00:00:00Z' }],
+      winnerOpen: { id: 'w1', created_at: '2026-09-01T00:00:00Z' },
+      collide: ['a2'],
+    });
+    await run(t.trx);
+    expect(t.writes).toEqual([
+      { rowId: 'w1', patch: { status: 'dismissed', updated_at: 'NOW' } },
+      { rowId: 'a2', patch: { customer_id: 'W' } },
+    ]);
+  });
+
+  it('when the winner\'s alert closed after the collision, the loser alert moves across still open (Codex #6431 r1 P2)', async () => {
+    const t = alertTrx({
+      rows: [{ id: 'a2', alert_type: 'low_engagement', status: 'new', created_at: '2026-10-01T00:00:00Z' }],
+      winnerOpen: { id: 'w1', created_at: '2026-10-10T00:00:00Z' },
+      collide: ['a2'],
+    });
+    // The winner row is gone from the open set by the time it is re-read.
+    const first = t.trx;
+    let reads = 0;
+    const trx = jest.fn((table) => {
+      const chain = first(table);
+      const orig = chain.first;
+      chain.first = async (...a) => { reads += 1; const r = await orig.apply(chain, a); return reads === 2 ? undefined : r; };
+      return chain;
+    });
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = first.fn;
+    await run(trx);
+    expect(t.writes).toEqual([{ rowId: 'a2', patch: { customer_id: 'W' } }]);
+  });
+
+  it('a non-unique error still aborts the merge', async () => {
+    const { repointHealthAlertsDismissCollisions } = dedupe._test;
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (q.called('select')) return [{ id: 'a1' }];
+      if (q.called('update')) { const e = new Error('boom'); e.code = '57014'; throw e; }
+      return [];
+    }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
+    await expect(repointHealthAlertsDismissCollisions(trx, 'customer_health_alerts', 'customer_id', 'W', 'L')).rejects.toThrow('boom');
+  });
+});
+
 describe('collections_flags merge (codex 2026-08-15 r6)', () => {
   it('registers collections_flags with the release-collisions handler (shared active flags fold, never abort)', () => {
     const { UNIQUE_COLLISION_HANDLERS, repointFlagsReleaseCollisions } = dedupe._test;
@@ -3218,7 +3321,7 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
       if (table === 'referral_promoters') return null;
       // The collision-fold prediction reads both sides' rows of each
       // unique-keyed table (predictCollisionFolds).
-      if (['notification_prefs', 'property_preferences', 'customer_properties', 'customer_tags', 'conversations'].includes(table)) return collisions[table] || [];
+      if (['notification_prefs', 'property_preferences', 'customer_properties', 'customer_tags', 'conversations', 'customer_health_alerts'].includes(table)) return collisions[table] || [];
       if (table === 'payment_methods') {
         const owner = q.args('where')[0].customer_id;
         if (q.called('first')) return defaults[owner] ? { id: `${owner}-default` } : null;
@@ -3248,6 +3351,25 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
     expect(JSON.parse(out.fingerprint).financial_effects.predicted_collision_folds).toEqual(out.financial_effects.predicted_collision_folds);
     // A pref row on ONE side only, tags that do not overlap, threads on different endpoints: nothing folds.
     install({}, { collisions: { property_preferences: [{ customer_id: 'L' }], customer_tags: [{ customer_id: 'W', tag: 'a' }, { customer_id: 'L', tag: 'b' }], conversations: [{ customer_id: 'W', channel: 'sms', our_endpoint_id: 'ep1' }, { customer_id: 'L', channel: 'sms', our_endpoint_id: 'ep2' }] } });
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.predicted_collision_handlers).toEqual([]);
+  });
+
+  it('predicts a shared OPEN rule health alert as a fold; closed or non-rule alerts do not fold (ops 2026-10-22)', async () => {
+    install({}, { collisions: { customer_health_alerts: [
+      { customer_id: 'W', alert_type: 'low_engagement', status: 'new' },
+      { customer_id: 'L', alert_type: 'low_engagement', status: 'acknowledged' },
+      { customer_id: 'L', alert_type: 'score_drop', status: 'new' },
+    ] } });
+    const out = await dedupe.describeMergeEffects(db, winner, loser);
+    expect(out.financial_effects.predicted_collision_handlers).toEqual(['customer_health_alerts']);
+    expect(out.financial_effects.predicted_collision_folds.customer_health_alerts).toEqual({ shared_open_alerts: ['low_engagement'] });
+    expect(out.financial_effects.revertible_from_queue).toBe(false);
+    install({}, { collisions: { customer_health_alerts: [
+      { customer_id: 'W', alert_type: 'low_engagement', status: 'dismissed' },
+      { customer_id: 'L', alert_type: 'low_engagement', status: 'new' },
+      { customer_id: 'W', alert_type: 'payment_failed', status: 'new' },
+      { customer_id: 'L', alert_type: 'payment_failed', status: 'new' },
+    ] } });
     expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.predicted_collision_handlers).toEqual([]);
   });
 
@@ -3516,7 +3638,7 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
     const route = (counts) => (table, q) => {
       if (table === 'referral_promoters') return null;
       if (table === 'payment_methods') return q.called('first') ? null : [];
-      if (['notification_prefs', 'property_preferences', 'customer_properties', 'customer_tags', 'conversations'].includes(table)) return [];
+      if (['notification_prefs', 'property_preferences', 'customer_properties', 'customer_tags', 'conversations', 'customer_health_alerts'].includes(table)) return [];
       if (table === 'invoices' && !q.called('count')) return [];
       if (table === 'customer_plan_rates') return { n: 0 };
       return { n: counts[table] || 0 };
@@ -3642,7 +3764,7 @@ describe('previewCollectionCaseReconciliation (the executor\'s reconcile rule, d
     installDb((table, q) => {
       if (table === 'referral_promoters') return null;
       if (table === 'payment_methods') return [];
-      if (['notification_prefs', 'property_preferences', 'customer_properties', 'customer_tags', 'conversations'].includes(table)) return [];
+      if (['notification_prefs', 'property_preferences', 'customer_properties', 'customer_tags', 'conversations', 'customer_health_alerts'].includes(table)) return [];
       if (table === 'invoices' && !q.called('count')) return [];
       return { n: 0 };
     });

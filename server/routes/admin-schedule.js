@@ -10271,7 +10271,7 @@ async function scheduleCreateHandler(req, res, next) {
         // card queued at the top of this block replaces it.
         if (sendTechNotification && resolvedTechId && !visitNoticeLive) {
           try {
-            const { sendTechNotification: pushTechNote } = require('../services/geofence-handler');
+            const { sendTechNotification: pushTechNote } = require('../services/tech-notify');
             const custName = customer ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim() : 'Customer';
             const when = `${scheduledDate}${windowStart ? ' @ ' + windowStart : ''}`;
             await pushTechNote(resolvedTechId, {

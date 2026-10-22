@@ -57,6 +57,20 @@ describe('sensitive SPA document headers', () => {
     expect(res.set).toHaveBeenCalledWith('Referrer-Policy', 'no-referrer');
   });
 
+  test('marks the portal home and login page noindex only', () => {
+    for (const path of ['/', '/login', '/login/']) {
+      const res = mockResponse();
+      applySensitiveSpaHeaders(path, res);
+      expect(res.set).toHaveBeenCalledTimes(1);
+      expect(res.set).toHaveBeenCalledWith('X-Robots-Tag', 'noindex');
+    }
+    for (const path of ['/book', '/login-help', '/loginx']) {
+      const res = mockResponse();
+      applySensitiveSpaHeaders(path, res);
+      expect(res.set).not.toHaveBeenCalled();
+    }
+  });
+
   test('does not apply service outline privacy headers to unrelated SPA pages', () => {
     const res = mockResponse();
 
