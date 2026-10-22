@@ -24,7 +24,9 @@
  * probe (window-rules.js seriesCandidateDateClashRows): a live stop in the
  * hour — tech-blind until the schedule is technician-scoped, with the
  * writer's own statuses (rebooker.js probeMoveConflicts: no cancelled,
- * skipped, no-show or rescheduled row, nor a completed one). The same
+ * skipped, no-show or rescheduled row, nor a completed one) and the owner's
+ * booked interviews (occupancy.js includeInterviews: a failed interview read
+ * throws, as on every writer that reads them). The same
  * customer at the same place is one stop with the new visit, not a conflict
  * (samePlaceIds, measured from the plan's stored parent row); the same
  * customer at another property, or at a place that cannot be read, is a
@@ -86,6 +88,7 @@ async function takenHourHandoff(conn, row, { date = row?.scheduled_date, now = n
   const clash = await seriesCandidateDateClashRows(conn, row, day, {
     technicianId: row.technician_id || null,
     excludeStatuses: TAKEN_EXCLUDE_STATUSES,
+    includeInterviews: true,
   });
   if (!clash.length) return false;
   const samePlace = placeId && row.customer_id

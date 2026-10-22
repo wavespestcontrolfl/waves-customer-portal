@@ -188,7 +188,7 @@ function occupancyBlockFor(row) {
 //   technicianId       scopes the probe once the schedule is technician-
 //                      scoped (occupancy.js techScopedConfirmActive).
 async function seriesCandidateDateClashRows(conn, template, date, {
-  excludeCustomerId = null, technicianId = null, excludeStatuses = ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+  excludeCustomerId = null, technicianId = null, excludeStatuses = ADMIN_OCCUPANCY_EXCLUDE_STATUSES, includeInterviews = false,
 } = {}) {
   const block = occupancyBlockFor(template);
   if (!block) return [];
@@ -200,6 +200,7 @@ async function seriesCandidateDateClashRows(conn, template, date, {
     excludeStatuses,
     ...(excludeCustomerId ? { excludeCustomerId } : {}),
     ...(technicianId ? { technicianId } : {}),
+    ...(includeInterviews ? { includeInterviews: true } : {}),
   });
 }
 

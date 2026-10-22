@@ -37,6 +37,11 @@ describe('seriesCandidateDateClashRows', () => {
     expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({ excludeStatuses: ['x'] }));
   });
 
+  test('interviews only when asked', async () => {
+    await seriesCandidateDateClashRows('conn', { window_start: '09:00', window_end: '10:00' }, '2026-11-03', { includeInterviews: true });
+    expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({ includeInterviews: true }));
+  });
+
   test('existing callers (no options): the same tech-blind probe as before', async () => {
     await seriesCandidateDateClashRows('conn', { window_start: '09:00', window_end: '10:00' }, '2026-11-03');
     expect(findConflictingVisits).toHaveBeenCalledWith({
@@ -81,6 +86,14 @@ describe('plan-taken-hour', () => {
     // No customer is excluded wholesale (Codex #6476 r1 P1); a rescheduled or completed row is no stop (r1 P2).
     expect(probe.excludeCustomerId).toBeUndefined();
     expect(probe.excludeStatuses).toEqual(expect.arrayContaining(['cancelled', 'skipped', 'no_show', 'rescheduled', 'completed']));
+    // The owner's booked interviews hold the hour too, as for the night tool.
+    expect(probe.includeInterviews).toBe(true);
+  });
+
+  test('an interview in the hour (no customer) is taken', async () => {
+    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+    findConflictingVisits.mockResolvedValue([{ id: 'interview:app-1', customer_id: null, conflict_reason: 'interview' }]);
+    expect(await planTakenHour.takenHourHandoff('conn', { ...row, recurring_parent_id: 'parent-1', scheduled_date: day(30) })).toBe(true);
   });
 
   // The same customer is one stop only at the same place: the night tool's
