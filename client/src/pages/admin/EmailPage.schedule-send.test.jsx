@@ -400,7 +400,7 @@ describe("Email schedule send", () => {
     expect(JSON.parse(sessionStorage.getItem("waves_email_restored_pending:fixture-schedule-owner"))).toEqual([]);
   });
 
-  it("keeps a cancelled email listed when the tab cannot save its restored draft", async () => {
+  it("closes a restored draft the tab cannot save, and keeps the row listed", async () => {
     scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "scheduled" }];
     mount();
     fireEvent.click(await screen.findByRole("button", { name: "Scheduled (1)" }));
@@ -410,8 +410,8 @@ describe("Email schedule send", () => {
       return setItem.call(this, key, value);
     });
     fireEvent.click(await screen.findByRole("button", { name: "Cancel send" }));
-    expect(await screen.findByText("Cancelled. The email is open as a draft.")).toBeInTheDocument();
-    expect(screen.getByLabelText(/^Message/)).toHaveValue("Saved text");
+    expect(await screen.findByText(/could not save the draft safely, so it closed again/)).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("Saved text")).not.toBeInTheDocument();
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(posts("/queued-1/restored")).toHaveLength(0);
   });
@@ -489,7 +489,7 @@ describe("Email schedule send", () => {
       return setItem.call(this, key, value);
     });
     fireEvent.click(await screen.findByRole("button", { name: "Cancel send" }));
-    expect(await screen.findByText(/could not save its safety mark, so the draft closed again/)).toBeInTheDocument();
+    expect(await screen.findByText(/could not save the draft safely, so it closed again/)).toBeInTheDocument();
     expect(screen.queryByDisplayValue("Saved text")).not.toBeInTheDocument();
     expect(posts("/queued-1/restored")).toHaveLength(1);
   });
