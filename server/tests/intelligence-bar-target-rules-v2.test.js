@@ -655,8 +655,28 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     const grounded = async prompt => (await ask(prompt)).groundedCustomerIds;
     expect(await grounded("update Pat Example's phone to 941-555-0100 and update Sam Sample's phone to 941-555-0101")).toEqual([]);
     expect(await grounded("update Pat Example's notes and then update Sam Sample's notes")).toEqual([]);
-    // One operation: direct, as before.
+    // More than one action verb anywhere, whatever separates them (Codex #6369 r27).
+    for (const prompt of [
+      "update Pat Example's phone to 941-555-0100; change Sam Sample's notes",
+      "update Pat Example's phone to 941-555-0100\nchange Sam Sample's notes",
+      "update Pat Example's phone to 941-555-0100, change Sam Sample's notes",
+      "update Pat Example's phone to 941-555-0100 also change Sam Sample's notes",
+      "update Pat Example's phone to 941-555-0100 and change Sam Sample's notes",
+      "update Pat Example's notes to gate code 5 and then move Sam Sample's visit",
+      'update Pat Example phone then reschedule the visit',
+      'fix the notes on 941-555-0100 and mark it done',
+    ]) {
+      expect([prompt, await grounded(prompt)]).toEqual([prompt, []]);
+    }
+    // One operation: direct, as before. A verb inside a replacement value or a note body is data.
     expect(await grounded("update Pat Example's phone to 941-555-0100")).toEqual([id(100)]);
+    expect(await grounded('fix the notes on 941-555-0100')).toEqual([id(100)]);
+    expect(await grounded("set Pat Example's notes to please update gate code")).toEqual([id(100)]);
+    expect(await grounded('update Pat Example\'s notes: please change the gate code')).toEqual([id(100)]);
+    expect(await grounded('update Pat Example\'s notes to "update the gate code"')).toEqual([id(100)]);
+    // A name that is also a verb is not counted.
+    customers = [{ id: id(102), first_name: 'Mark', last_name: 'Sample', city: 'Osprey', phone: '9415550102', email: 'mark@example.test', updated_at: new Date('2026-01-01'), version: '2026-01-01' }];
+    expect(await grounded("update Mark Sample's phone")).toEqual([id(102)]);
   });
 
   test('gate on: failed identity evidence takes the on-screen customer\'s authority too; the page stands when the message names nobody or exactly the page customer (Codex #6369 r26)', async () => {
@@ -750,7 +770,8 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     }
     // Plain words after "in", "at" or a comma are not a place.
     expect(await direct('fix the notes on 941-555-0100 in the system')).toEqual([true, [id(100)]]);
-    expect(await direct('fix the notes on 941-555-0100, update the phone')).toEqual([true, [id(100)]]);
+    // Two action verbs (fix, update) make it a compound request: carded.
+    expect(await direct('fix the notes on 941-555-0100, update the phone')).toEqual([false, []]);
     // A contact beside a record id or a choice reply is a qualifier.
     expect(await direct('fix the notes on 941-555-0100 10000000-0000-4000-8000-000000000999')).toEqual([false, []]);
     // A replacement value is stripped first and never counts as the contact.

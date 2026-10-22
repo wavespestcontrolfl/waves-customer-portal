@@ -592,10 +592,41 @@ function qualifierPresent(bounded, clause, customer) {
 }
 const RECORD_ID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 
-// More than one operation in the message ("update A's phone to X and update B's phone to Y")?
-// targetClause cuts everything from a replacement field on, so the later operations' targets are
-// invisible to it; a compound request grants no direct authority (Codex #6369 pre-push audit, r26).
-const isCompound = bounded => bounded.split(ACTION_CLAUSE_SPLIT).length > 1;
+// COMPOUND requests: more than one action verb ANYWHERE in the message, whatever separates them
+// ("and", "then", "also", a semicolon, a comma, a newline). targetClause cuts everything from a
+// replacement field or a separator on, so a later operation's target is invisible to it; a
+// compound request grants no direct authority, typed or on-screen (Codex #6369 pre-push audits, r26).
+// Verbs inside a replacement value or a note body are data and are not counted: the value after
+// "<field> to", a quoted text, or the text after a colon runs up to the next separator that is
+// followed by an action verb ("... notes to gate code 5 and change Sam's phone").
+const ACTION_VERBS = new Set(['update', 'change', 'set', 'edit', 'fix', 'add', 'remove', 'move', 'reschedule', 'assign', 'cancel', 'book', 'mark', 'put', 'replace', 'swap', 'switch', 'delete', 'clear']);
+const VALUE_START_RE = /\b(?:name|address|email(?:\s+address)?|phone(?:\s+number)?|mobile(?:\s+(?:phone|number))?|cell(?:\s+(?:phone|number))?|number|label|notes?|instructions|message|contact)\s+(?:to|as|is|=)\s+|:/i;
+const VALUE_END_RE = new RegExp(`(?:[;\\n,]|\\b(?:and|then|also)\\b)\\s*(?:(?:please|also|then)\\s+)*(?=(?:${[...ACTION_VERBS].join('|')})\\b)`, 'i');
+
+function withoutValues(text) {
+  let rest = text.replace(/“[^”]*”|"[^"]*"/g, ' ');
+  let kept = '';
+  for (let i = 0; i < 50 && rest; i++) {
+    const start = VALUE_START_RE.exec(rest);
+    if (!start) break;
+    kept += `${rest.slice(0, start.index)} `;
+    const tail = rest.slice(start.index + start[0].length);
+    const end = tail.search(VALUE_END_RE);
+    rest = end < 0 ? '' : tail.slice(end);
+  }
+  return kept + rest;
+}
+
+// Each typed customer's own name is stripped first ("Mark Smith" is not the verb "mark").
+function isCompound(bounded, customers = []) {
+  let text = ` ${normalizeName(withoutValues(bounded))} `;
+  for (const customer of customers) {
+    for (const name of [fullNameKey(customer), normalizeName(customer.first_name), normalizeName(customer.last_name)]) {
+      if (name) text = text.split(` ${name} `).join(' qqname ');
+    }
+  }
+  return text.trim().split(' ').filter(word => ACTION_VERBS.has(word)).length > 1;
+}
 
 // DIRECT (no-card) authority from typed evidence, in two simple cases only (Codex #6369 r23,
 // owner ruling 2026-10-22):
@@ -610,7 +641,7 @@ async function directGroundedIds(fullPrompt, namedResult, cohort, nameHint) {
   const bounded = boundedPrompt(fullPrompt);
   const clause = targetClause(bounded);
   const [customer, ...others] = namedResult.matches || [];
-  if (cohort || namedResult.complete === false || namedResult.multiple || isCompound(bounded)) return [];
+  if (cohort || namedResult.complete === false || namedResult.multiple || isCompound(bounded, namedResult.matches)) return [];
   if (!customer) return contactOnlyGroundedIds(bounded, clause, nameHint);
   const full = fullNameKey(customer);
   const typedFull = !others.length && full.includes(' ') && ` ${normalizeName(withoutContacts(clause))} `.includes(` ${full} `);
@@ -742,7 +773,7 @@ function pageGroundingBlocked(fullPrompt, namedResult, cohort, nameHint, pageCus
   const place = placeQualifierPresent(clause, matches);
   if (!nameHint && !contacts && !place) return false;
   const exact = !cohort && namedResult.complete !== false && !namedResult.multiple && matches.length === 1
-    && String(matches[0].id) === String(pageCustomerId) && !contacts && !place && !isCompound(bounded);
+    && String(matches[0].id) === String(pageCustomerId) && !contacts && !place && !isCompound(bounded, matches);
   return !exact;
 }
 
