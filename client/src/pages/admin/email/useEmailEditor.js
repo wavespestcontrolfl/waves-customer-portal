@@ -171,6 +171,9 @@ export default function useEmailEditor(userId) {
       say("Could not check that request. Try again in a moment.", true);
       return;
     }
+    // The answer is for this key only: if the slot's guard changed while it
+    // ran (a second tap, a new request), it says nothing about the new one.
+    if (uncertainSchedule.current[slot]?.clientKey !== entry.clientKey) return;
     const outcome = reconcileOutcome(row);
     rememberUncertain(slot, outcome.next);
     const kept = outcome.withdraw && !withdrawIfQueued(replyId, row);
