@@ -542,12 +542,23 @@ export function perimeterFeetOf(zone) {
 
 // `optional` (the visit step, owner 2026-10-22): says "Optional" until a trace is saved; a trace never holds the send.
 // `tracer`: the inline tracer, open under the button. `busy` (a report being written): the button waits, so the
-// tracer never opens just before the sheet moves to the report step. No trace offered: nothing renders.
+// tracer never opens just before the sheet moves to the report step. No trace offered: nothing renders, except an
+// open tracer, which stays mounted in the same place when the offer goes (a product changed while tracing), so its
+// points and a save in flight stay and its Done or × still closes it.
 export function TraceSection({ trace, locked, busy = false, onTrace, optional = false, tracer = null }) {
-  if (!trace) return null;
-  const feet = perimeterFeetOf(trace.zone);
+  if (!trace && !tracer) return null;
   return (
     <section className="tech-visit-choice-section">
+      {trace && <TraceOffer trace={trace} locked={locked || busy} onTrace={onTrace} optional={optional} />}
+      {tracer}
+    </section>
+  );
+}
+
+function TraceOffer({ trace, locked, onTrace, optional }) {
+  const feet = perimeterFeetOf(trace.zone);
+  return (
+    <>
       <div className="tech-visit-section-head">
         <h3 className="tech-visit-section-title">Trace where we sprayed</h3>
         {trace.zone
@@ -555,11 +566,10 @@ export function TraceSection({ trace, locked, busy = false, onTrace, optional = 
           : optional && <span className="tech-visit-muted">Optional</span>}
       </div>
       <p className="tech-visit-muted">Drag along where you sprayed on the satellite photo of the home. The line shows on the customer’s report.</p>
-      <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={locked || busy} onClick={onTrace}>
+      <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={locked} onClick={onTrace}>
         {trace.zone ? 'Trace again' : 'Trace where we sprayed'}
       </Button>
-      {tracer}
-    </section>
+    </>
   );
 }
 
