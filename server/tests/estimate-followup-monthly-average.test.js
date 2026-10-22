@@ -5,7 +5,7 @@
  * (emailAverageParts) from a row read at send time. Gate off = the payload is
  * the very same object the sender built before.
  */
-const mockGates = { followup: true, base: true };
+const mockGates = { followup: true, base: true, months: false };
 const NOTE_BLOCKS = [
   { type: 'details', rows: [{ label: 'Estimate', value: '{{price_summary}}' }] },
   { type: 'paragraph', content: '{{estimate_average_note}}' },
@@ -19,7 +19,8 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((gate) => (gate === 'estimateFollowupMonthlyAverage' ? mockGates.followup
-    : gate === 'estimateMonthlyAverage' ? mockGates.base : false)),
+    : gate === 'estimateMonthlyAverage' ? mockGates.base
+      : gate === 'estimateApplicationMonths' ? mockGates.months : false)),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true })) }));
 jest.mock('../services/email-template-library', () => ({
@@ -122,6 +123,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockGates.followup = true;
   mockGates.base = true;
+  mockGates.months = false;
   mockBilling.ctx = { billsPerApplication: true, livePricing: null };
   mockPdf.copy = { attachments: [], payload: {} };
   mockTemplate.activeVersion = { id: 'ver-1', blocks: NOTE_BLOCKS, text_body: null };
@@ -461,5 +463,65 @@ describe('send-time check: the average is re-read at the provider boundary', () 
     expect(EmailTemplates.sendTemplate.mock.calls.filter((c) => c[0].templateKey).map((c) => c[0].idempotencyKey)).toEqual([
       'estimate_followup_unviewed:est-1', 'estimate_followup_unviewed:est-1',
     ]);
+  });
+});
+
+describe('application months (GATE_ESTIMATE_APPLICATION_MONTHS) in the follow-ups', () => {
+  const KEY = 'estimate.unviewed_followup';
+  const BREAKDOWN = 'Months with Pest Control (4 a year): $189.90. Other months (8 a year): $74.70, Mosquito only.';
+  const pestMosquitoBundle = {
+    combinedRecurring: { waveGuardDiscountPct: 0.1 },
+    frequencies: [{
+      key: 'quarterly', monthly: 113.1, annual: 1357.2,
+      perServiceTreatments: [
+        { label: 'Pest Control', service: 'pest_control', displayPrice: 115.2, visitsPerYear: 4, monthly: 38.4 },
+        { label: 'Mosquito', service: 'mosquito', displayPrice: 74.7, visitsPerYear: 12, monthly: 74.7 },
+      ],
+    }],
+  };
+  const est1185 = (overrides = {}) => row({
+    service_interest: 'Pest + Mosquito', monthly_total: '113.10', annual_total: '1357.20', onetime_total: '0',
+    estimate_data: { sendSnapshot: { pricingBundle: pestMosquitoBundle } }, ...overrides,
+  });
+
+  test.each(STAGES)('%s: EST-2026-1185 shows the plan average in the row and the two month amounts in the note', async (stage, templateKey, mutate) => {
+    mockGates.months = true;
+    const sent = await runStage(stage, mutate, est1185);
+    expect(sent.templateKey).toBe(templateKey);
+    expect(sent.payload.price_summary).toBe('Priced per application · plan averages $113.10 a month');
+    expect(sent.payload.estimate_average_note).toBe(`${BREAKDOWN} Averaged over the year, bundle savings included. You pay after each application.`);
+  });
+
+  test('months gate off: the same plan reads as the monthly-average follow-up did', async () => {
+    const sent = await runStage('unviewed', (r) => r, est1185);
+    expect(sent.payload.estimate_average_note).toBe('Averaged over the year, bundle savings included. You pay after each application.');
+  });
+
+  test('plans the breakdown does not cover are unchanged with the gate on', async () => {
+    mockGates.months = true;
+    const sent = await runStage('unviewed', (r) => r);
+    expect(sent.payload.price_summary).toBe('$94.00 per application · $31.33 a month');
+    expect(sent.payload.estimate_average_note).toBe('Averaged over the year. You pay after each application.');
+  });
+
+  test('the send-time check compares the same text: it passes unchanged and vetoes when the gate flips off in between', async () => {
+    mockGates.months = true;
+    freshOverride = est1185();
+    const email = await _private.withAverageEmail(
+      { templateKey: KEY, stage: 'unviewed', payload: _private.estimateEmailPayload(est1185(), 'Taylor', 'https://x.test') },
+      est1185(),
+    );
+    expect(email.averageText).toContain(BREAKDOWN);
+    EmailTemplates.sendTemplate.mockClear();
+    await _private.sendDualChannel(est1185(), { sms: null, email });
+    const check = await (async () => {
+      let c;
+      await EmailTemplates.sendTemplate.mock.calls[0][0].withProviderHandoff(async (_d, providerCheck) => { c = providerCheck; });
+      return c;
+    })();
+    freshOverride = est1185();
+    await expect(check()).resolves.toEqual({ ok: true });
+    mockGates.months = false;
+    await expect(check()).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'monthly_average_changed' });
   });
 });
