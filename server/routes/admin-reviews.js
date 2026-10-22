@@ -164,10 +164,11 @@ router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, async (r
       // and enrolls a sequence nothing ticks — the panel must say "paused",
       // not "[review link inserted]" (r17 P2).
       bundlesImmediateAsk: !reviewCadenceGate && serviceReportV1Delivery === false,
-      // processReviewSequences runs on fixed minutes of the hour (:14/:44);
+      // processReviewSequences runs on fixed minutes of the hour (:14/:44, or
+      // every 5 minutes with GATE_REVIEW_SENDER_EVERY_5_MIN);
       // the panel uses them to say when a custom time actually goes out
       // (codex #4140 r5 P2).
-      cadenceTickMinutesOfHour: ReviewService.__private.REVIEW_CADENCE_TICK_MINUTES,
+      cadenceTickMinutesOfHour: ReviewService.__private.reviewCadenceTickMinutes(),
       // The legacy path's worker (processScheduled, the */15 cron) has ticks
       // of its own; with cadences off the panel names those, not the
       // requested eligibility minute (codex #4140 r18 P2).

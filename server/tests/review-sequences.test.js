@@ -2712,11 +2712,30 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
   describe('the planned send is the worker tick, not the eligibility instant (codex #4140 r4 P2)', () => {
     const { nextCadenceTickAt, REVIEW_CADENCE_TICK_MINUTES } = ReviewService.__private;
 
-    test('the scheduler cron and the tick table name the same minutes', () => {
+    test('the scheduler cron fires on every minute either tick table names, and runs only on the live table', () => {
       const fs = require('fs');
       const path = require('path');
+      const { REVIEW_EVERY_5_TICK_MINUTES } = ReviewService.__private;
       const scheduler = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
-      expect(scheduler).toContain(`cron.schedule('${REVIEW_CADENCE_TICK_MINUTES.join(',')} * * * *'`);
+      // `4-59/5` = :04, :09 ... :59; both tables are inside it.
+      expect(scheduler).toContain("cron.schedule('4-59/5 * * * *'");
+      const cronMinutes = Array.from({ length: 12 }, (_, i) => 4 + 5 * i);
+      expect(REVIEW_EVERY_5_TICK_MINUTES).toEqual(cronMinutes);
+      expect(REVIEW_CADENCE_TICK_MINUTES.every((m) => cronMinutes.includes(m))).toBe(true);
+      expect(scheduler).toMatch(/const ticks = require\('\.\/review-request'\)\.__private\.reviewCadenceTickMinutes\(\);\s*if \(!ticks\.includes\(minute\) && !ticks\.includes\(\(minute \+ 59\) % 60\)\) return;/);
+    });
+
+    test('GATE_REVIEW_SENDER_EVERY_5_MIN: the tick table and the next tick follow the gate', () => {
+      const { reviewCadenceTickMinutes } = ReviewService.__private;
+      const from = new Date('2026-10-20T15:15:30Z');
+      expect(reviewCadenceTickMinutes()).toEqual([14, 44]);
+      expect(nextCadenceTickAt(from).toISOString()).toBe('2026-10-20T15:44:00.000Z');
+      mockGates.reviewSenderEvery5Min = true;
+      try {
+        expect(reviewCadenceTickMinutes()).toEqual(ReviewService.__private.REVIEW_EVERY_5_TICK_MINUTES);
+        expect(nextCadenceTickAt(from).toISOString()).toBe('2026-10-20T15:19:00.000Z');
+        expect(nextCadenceTickAt(new Date('2026-10-20T15:59:30Z')).toISOString()).toBe('2026-10-20T16:04:00.000Z');
+      } finally { mockGates.reviewSenderEvery5Min = false; }
     });
 
     test('the legacy scheduler cron (processScheduled, */15) and the legacy tick table name the same minutes (codex #4140 r18 P2)', () => {

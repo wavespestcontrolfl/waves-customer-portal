@@ -76,10 +76,12 @@ function afterReportHint(preview, reportTextExpected, { afterPayment = false } =
   // texted at completion anchors it; the server keeps the smart window for any other (held for
   // the morning, the Waves app, opted out, failed), which the panel cannot know ahead of time.
   const after = afterPayment ? "payment" : "the report text";
-  const ticks = (preview.cadenceTickMinutesOfHour || [14, 44]).map((m) => `:${String(m).padStart(2, "0")}`).join(" and ");
+  const tickList = preview.cadenceTickMinutesOfHour || [14, 44];
+  // GATE_REVIEW_SENDER_EVERY_5_MIN names twelve minutes; say it in words.
+  const ticks = tickList.length > 2 ? "every 5 minutes" : `${tickList.map((m) => `:${String(m).padStart(2, "0")}`).join(" and ")} each hour`;
   const windowNote = preview.smsSendWindowEnabled ? " A target after 8 PM waits for the next morning." : "";
   const report = afterPayment ? "the report did not go out" : "the report does not go out";
-  return `${lead} at the first review send (${ticks} each hour) at least ${afterReportMinutes(preview)} minutes after ${after}.${windowNote} If ${report} as a text right away (held for the morning, sent by the Waves app, or texts turned off for this customer), it goes at the smart send window.`;
+  return `${lead} at the first review send (${ticks}) at least ${afterReportMinutes(preview)} minutes after ${after}.${windowNote} If ${report} as a text right away (held for the morning, sent by the Waves app, or texts turned off for this customer), it goes at the smart send window.`;
 }
 export function timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled, reportTextExpected }) {
   // GATE_REVIEW_ASK_AFTER_REPORT: the server names the rule; the panel

@@ -8043,13 +8043,21 @@ function initScheduledJobs() {
 
   // =========================================================================
   // EVERY 30 MIN (:14/:44 — own minutes) — Multi-touch review cadence driver (Day 0/3/4 SMS+email).
+  // GATE_REVIEW_SENDER_EVERY_5_MIN: every 5 minutes on the same offset
+  // (:04 ... :59). The cron fires on all of those minutes; the body runs only
+  // on the minutes reviewCadenceTickMinutes() names, so the Reviews page and
+  // the completion panel show the ticks it really runs on. A late callback
+  // (a busy loop can push it past the minute) still counts as its minute.
   // Advances operator-started review_sequences whose next_run_at has passed,
   // auto-stopping on review/opt-out. Dark behind GATE_REVIEW_SEQUENCES so a
   // preview/dev env with live creds can't text/email real customers.
   // Suppression and per-customer prefs still apply at the send site.
   // =========================================================================
-  cron.schedule('14,44 * * * *', async () => {
+  cron.schedule('4-59/5 * * * *', async () => {
     if (!isEnabled('reviewSequences')) return;
+    const minute = new Date().getUTCMinutes();
+    const ticks = require('./review-request').__private.reviewCadenceTickMinutes();
+    if (!ticks.includes(minute) && !ticks.includes((minute + 59) % 60)) return;
     try {
       await runExclusive('review-sequences', async () => {
         const ReviewService = require('./review-request');
