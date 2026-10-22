@@ -20408,10 +20408,11 @@ async function walkExtensionCandidates(ctx) {
       // carries the technician the insert will use on this date (the
       // template tech, or none when that tech cannot take it:
       // assignableRecurringTemplateTechnicianId), read once and reused by the
-      // insert (Codex #6476 r1); the place is the parent's.
+      // insert (Codex #6476 r1), and the template's place, which the insert
+      // copies (copyStampedServiceAddressFields).
       if (planTakenHour.handoffEnabled()) {
         technicianId = await assignableRecurringTemplateTechnicianId(conn, parent, candidate);
-        handOff = await planTakenHour.takenHourHandoff(conn, { ...clashProbeTemplate, technician_id: technicianId }, { date: candidate, placeId: parentId });
+        handOff = await planTakenHour.takenHourHandoff(conn, { ...clashProbeTemplate, technician_id: technicianId }, { date: candidate });
       }
       if (handOff) {
         logger.info(`[recurring-topup] parent=${parentId} candidate ${candidate}: the plan's hour is taken — inserting without a time for auto-dispatch to place`);

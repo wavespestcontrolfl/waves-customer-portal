@@ -28,9 +28,10 @@
  * booked interviews (occupancy.js includeInterviews: a failed interview read
  * throws, as on every writer that reads them). The same
  * customer at the same place is one stop with the new visit, not a conflict
- * (samePlaceIds, measured from the plan's stored parent row); the same
+ * (current-conflict.js samePlaceIdsAt, measured from the new visit's own
+ * place, which can differ from any stored row of its plan); the same
  * customer at another property, or at a place that cannot be read, is a
- * conflict (Codex #6476 r1). Probe-only, no lock, like every plan-writer
+ * conflict (Codex #6476 r1, r2). Probe-only, no lock, like every plan-writer
  * probe; a same-instant booking can still overlap, and the night tool's
  * conflict read catches that one.
  *
@@ -75,13 +76,11 @@ function handoffFields(date) {
   };
 }
 
-// Whether `row` (a new plan visit: customer, technician, date, window) would
-// land on an hour another stop holds, and is far enough out for the night
-// tool to place it. `placeId` is the stored row whose place the new visit
-// shares (its plan's parent; a follow-up row names it as
-// recurring_parent_id). False with the gate off, without a window, or inside
-// HANDOFF_MIN_DAYS_OUT — nothing is read then.
-async function takenHourHandoff(conn, row, { date = row?.scheduled_date, now = new Date(), placeId = row?.recurring_parent_id || null } = {}) {
+// Whether `row` (a new plan visit: customer, technician, date, window, and
+// its own place fields) would land on an hour another stop holds, and is far
+// enough out for the night tool to place it. False with the gate off,
+// without a window, or inside HANDOFF_MIN_DAYS_OUT — nothing is read then.
+async function takenHourHandoff(conn, row, { date = row?.scheduled_date, now = new Date() } = {}) {
   if (!handoffEnabled() || !row || !row.window_start) return false;
   const day = toDateStr(date);
   if (!day || day < firstHandoffDate(now)) return false;
@@ -91,8 +90,12 @@ async function takenHourHandoff(conn, row, { date = row?.scheduled_date, now = n
     includeInterviews: true,
   });
   if (!clash.length) return false;
-  const samePlace = placeId && row.customer_id
-    ? await require('../auto-dispatch/current-conflict').samePlaceIds(conn, { id: placeId, customer_id: row.customer_id }, clash)
+  // The new visit's own place: its fields with the plan's template address
+  // override applied, exactly as both writers stamp it on the insert
+  // (booking/visit-financial-stamps.js recurringServiceAddress).
+  const { recurringServiceAddress } = require('../booking/visit-financial-stamps');
+  const samePlace = row.customer_id
+    ? await require('../auto-dispatch/current-conflict').samePlaceIdsAt(conn, { ...row, ...recurringServiceAddress(row) }, clash)
     : new Set();
   return clash.some((r) => !samePlace.has(String(r.id)));
 }

@@ -1443,16 +1443,17 @@ describe('topUpRecurringSeriesLocked — a taken hour hands the visit off withou
     afterEach(() => samePlaceSpy.mockRestore());
 
     test('at the same place (measured from the parent): one stop, inserted with its time, as before', async () => {
-      samePlaceSpy = jest.spyOn(currentConflict, 'samePlaceIds').mockResolvedValue(new Set(['own-stop']));
+      samePlaceSpy = jest.spyOn(currentConflict, 'samePlaceIdsAt').mockResolvedValue(new Set(['own-stop']));
       const own = topupScenario(fixtureArgs);
       await topUpRecurringSeriesLocked(own.conn, 10, { horizonDays: 14 });
-      expect(samePlaceSpy).toHaveBeenCalledWith(expect.anything(), { id: 10, customer_id: 5 }, [{ id: 'own-stop', customer_id: 5 }]);
+      // Measured from the new visit's own place (the template the insert copies).
+      expect(samePlaceSpy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ customer_id: 5 }), [{ id: 'own-stop', customer_id: 5 }]);
       expect(own.inserted[0].window_start).toBe('09:00');
       expect(own.inserted[0].recurring_dispatch_due_date).toBeUndefined();
     });
 
     test('at another place: taken, handed off (Codex #6476 r1 P1)', async () => {
-      samePlaceSpy = jest.spyOn(currentConflict, 'samePlaceIds').mockResolvedValue(new Set());
+      samePlaceSpy = jest.spyOn(currentConflict, 'samePlaceIdsAt').mockResolvedValue(new Set());
       const other = topupScenario(fixtureArgs);
       await topUpRecurringSeriesLocked(other.conn, 10, { horizonDays: 14 });
       expect(other.inserted[0]).toMatchObject({ window_start: null, recurring_dispatch_due_date: other.inserted[0].scheduled_date });

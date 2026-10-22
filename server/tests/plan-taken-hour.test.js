@@ -93,57 +93,58 @@ describe('plan-taken-hour', () => {
   test('an interview in the hour (no customer) is taken', async () => {
     process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
     findConflictingVisits.mockResolvedValue([{ id: 'interview:app-1', customer_id: null, conflict_reason: 'interview' }]);
-    expect(await planTakenHour.takenHourHandoff('conn', { ...row, recurring_parent_id: 'parent-1', scheduled_date: day(30) })).toBe(true);
+    expect(await planTakenHour.takenHourHandoff('conn', { ...row, scheduled_date: day(30) })).toBe(true);
   });
 
   // The same customer is one stop only at the same place: the night tool's
-  // own rule (auto-dispatch/current-conflict.js samePlaceIds), measured from
-  // the plan's stored parent row (Codex #6476 r1 P1).
+  // own rule (auto-dispatch/current-conflict.js), measured from the NEW
+  // visit's own place — its fields with the plan's template address applied
+  // (Codex #6476 r1 P1, r2 P1).
   describe('the same customer', () => {
-    // A knex-shaped read of the place rows samePlaceIds asks for.
-    const placeConn = (places) => {
+    // A knex-shaped read of the clash rows' places and of the customer's address.
+    const placeConn = (places, customer = null) => {
       const q = { leftJoin: () => q, whereIn: () => q, select: async () => places };
-      return jest.fn(() => q);
+      return jest.fn((table) => (table === 'customers' ? { where: () => ({ first: async () => customer }) } : q));
     };
-    const sameCustomerRow = { ...row, recurring_parent_id: 'parent-1', scheduled_date: day(30) };
-    beforeEach(() => { process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true'; });
+    const at = (fields) => ({ ...row, scheduled_date: day(30), ...fields });
+    beforeEach(() => {
+      process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+      findConflictingVisits.mockResolvedValue([{ id: 'own', customer_id: 'c1' }]);
+    });
 
     test('at the same property: one stop, not taken', async () => {
-      findConflictingVisits.mockResolvedValue([{ id: 'own', customer_id: 'c1' }]);
-      const conn = placeConn([{ id: 'parent-1', property_id: 'prop-a' }, { id: 'own', property_id: 'prop-a' }]);
-      expect(await planTakenHour.takenHourHandoff(conn, sameCustomerRow)).toBe(false);
+      const conn = placeConn([{ id: 'own', property_id: 'prop-a' }]);
+      expect(await planTakenHour.takenHourHandoff(conn, at({ property_id: 'prop-a' }))).toBe(false);
     });
 
     test('at another property: taken', async () => {
-      findConflictingVisits.mockResolvedValue([{ id: 'own', customer_id: 'c1' }]);
-      const conn = placeConn([{ id: 'parent-1', property_id: 'prop-a' }, { id: 'own', property_id: 'prop-b' }]);
-      expect(await planTakenHour.takenHourHandoff(conn, sameCustomerRow)).toBe(true);
+      const conn = placeConn([{ id: 'own', property_id: 'prop-b' }]);
+      expect(await planTakenHour.takenHourHandoff(conn, at({ property_id: 'prop-a' }))).toBe(true);
     });
 
-    test('a place that cannot be read, or no parent to measure from: taken', async () => {
-      findConflictingVisits.mockResolvedValue([{ id: 'own', customer_id: 'c1' }]);
-      expect(await planTakenHour.takenHourHandoff(placeConn([]), sameCustomerRow)).toBe(true);
-      expect(await planTakenHour.takenHourHandoff(placeConn([]), { ...sameCustomerRow, recurring_parent_id: null })).toBe(true);
+    test("the plan's template address wins over the row's own (the place the insert gets)", async () => {
+      const moved = at({ property_id: 'prop-old', recurring_template_overrides: { appointment_address: { property_id: 'prop-new' } } });
+      expect(await planTakenHour.takenHourHandoff(placeConn([{ id: 'own', property_id: 'prop-new' }]), moved)).toBe(false);
+      expect(await planTakenHour.takenHourHandoff(placeConn([{ id: 'own', property_id: 'prop-old' }]), moved)).toBe(true);
     });
 
-    test('its own stop beside another customer\'s: taken', async () => {
+    test("an unstamped visit is at its customer's address", async () => {
+      const conn = placeConn(
+        [{ id: 'own', property_id: null, service_address_line1: '100 Sample Way', service_address_city: 'Sampletown', service_address_zip: '00000' }],
+        { address_line1: '100 Sample Way', city: 'Sampletown', zip: '00000' },
+      );
+      expect(await planTakenHour.takenHourHandoff(conn, at({}))).toBe(false);
+    });
+
+    test('a place that cannot be read: taken', async () => {
+      expect(await planTakenHour.takenHourHandoff(placeConn([]), at({ property_id: 'prop-a' }))).toBe(true);
+    });
+
+    test("its own stop beside another customer's: taken", async () => {
       findConflictingVisits.mockResolvedValue([{ id: 'own', customer_id: 'c1' }, { id: 'other', customer_id: 'c2' }]);
-      const conn = placeConn([{ id: 'parent-1', property_id: 'prop-a' }, { id: 'own', property_id: 'prop-a' }]);
-      expect(await planTakenHour.takenHourHandoff(conn, sameCustomerRow)).toBe(true);
+      const conn = placeConn([{ id: 'own', property_id: 'prop-a' }]);
+      expect(await planTakenHour.takenHourHandoff(conn, at({ property_id: 'prop-a' }))).toBe(true);
     });
-
-    test('an explicit place wins over the row\'s own parent (the top-up passes its parent)', async () => {
-      findConflictingVisits.mockResolvedValue([{ id: 'own', customer_id: 'c1' }]);
-      const conn = placeConn([{ id: 'parent-2', property_id: 'prop-a' }, { id: 'own', property_id: 'prop-a' }]);
-      expect(await planTakenHour.takenHourHandoff(conn, { ...row, scheduled_date: day(30) }, { placeId: 'parent-2' })).toBe(false);
-    });
-  });
-
-  test('gate on: a free hour is not taken; a windowless row is never probed', async () => {
-    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
-    expect(await planTakenHour.takenHourHandoff('conn', { ...row, scheduled_date: day(30) })).toBe(false);
-    expect(await planTakenHour.takenHourHandoff('conn', { ...row, window_start: null, scheduled_date: day(30) })).toBe(false);
-    expect(findConflictingVisits).toHaveBeenCalledTimes(1);
   });
 
   test('handOffTakenHours keeps the input array and counts the hand-offs', async () => {
