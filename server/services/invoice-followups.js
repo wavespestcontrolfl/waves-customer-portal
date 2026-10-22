@@ -1527,7 +1527,11 @@ async function skipStaleTouches(row, now) {
  * self-heals via the TTL window.
  */
 const TOUCH_CLAIM_TTL_MS = 10 * 60 * 1000;
-async function fireStep(row, { operatorInitiated = false, ownedMicrodeposit = false } = {}) {
+// approved (the Intelligence Bar's send-now card only): { invoiceUpdatedAtMs } — the invoice edit time the card showed, checked
+// on the invoice row this claim locks; a difference claims and sends nothing (returns { previewChanged: true }).
+// report (the same caller only): an object fireTouch fills with the per-leg outcomes (touchLegReport); the return value then
+// says what happened: { notClaimed }, { previewChanged } or { legs }. Every other caller passes neither and gets what it got.
+async function fireStep(row, { operatorInitiated = false, ownedMicrodeposit = false, approved = null, report = null } = {}) {
   // The cleanup is predicated on OUR stamp: if this send outlives the TTL
   // and another worker replaces the stale claim, an unconditional clear
   // here would release the successor's live claim and let an edit race its
@@ -1536,6 +1540,7 @@ async function fireStep(row, { operatorInitiated = false, ownedMicrodeposit = fa
   let claimedSeq = null;
   let claimedInvoice = null;
   let ownedBy = null;
+  let previewChanged = false;
   try {
     // Claim inside a transaction that locks the INVOICE row first.
     // InvoiceService.update locks the same row before re-checking the claim,
@@ -1555,6 +1560,10 @@ async function fireStep(row, { operatorInitiated = false, ownedMicrodeposit = fa
         .forUpdate()
         .first();
       if (!lockedInvoice) return;
+      if (approved && (lockedInvoice.updated_at ? new Date(lockedInvoice.updated_at).getTime() : null) !== approved.invoiceUpdatedAtMs) {
+        previewChanged = true;
+        return;
+      }
       // Post-claim... now post-LOCK revalidation: the caller's row is a
       // batch snapshot — a due-date edit (rescheduleForInvoiceEdit, which
       // commits atomically with its invoice edit) can postpone
@@ -1625,15 +1634,16 @@ async function fireStep(row, { operatorInitiated = false, ownedMicrodeposit = fa
     });
   } catch (err) {
     logger.error(`[invoice-followups] touch claim failed for invoice ${row.invoice_id}: ${err.message}`);
-    return;
+    return report ? { notClaimed: true } : undefined;
   }
+  if (previewChanged) return { previewChanged: true };
   if (ownedBy && !ownedMicrodeposit) {
     logger.info(`[invoice-followups] sequence ${row.id} not fired — customer ${row.customer_id} is on customer reminder schedule ${ownedBy}`);
     return { ownedBy };
   }
   if (!claimedSeq) {
     logger.info(`[invoice-followups] sequence ${row.id} in flight or changed after batch select; skipping touch`);
-    return;
+    return report ? { notClaimed: true } : undefined;
   }
   // Hand fireTouch POST-LOCK state, not the batch snapshot (r19 P1). The
   // ownership gate above proved customer_id has not moved; these are the
@@ -1650,7 +1660,7 @@ async function fireStep(row, { operatorInitiated = false, ownedMicrodeposit = fa
   row.invoice_status = claimedInvoice.status;
   row.token = claimedInvoice.token;
   try {
-    await fireTouch(row, { operatorInitiated, claimStamp, verificationOnly: !!ownedBy });
+    await fireTouch(row, { operatorInitiated, claimStamp, verificationOnly: !!ownedBy, report });
   } finally {
     await db('invoice_followup_sequences')
       .where({ id: row.id, touch_claimed_at: claimStamp })
@@ -1661,9 +1671,28 @@ async function fireStep(row, { operatorInitiated = false, ownedMicrodeposit = fa
         `[invoice-followups] could not clear touch claim for ${row.invoice_id}: ${err.message}`,
       ));
   }
+  return report ? { legs: report.legs || null } : undefined;
 }
 
-async function fireTouch(row, { operatorInitiated = false, claimStamp = null, verificationOnly = false } = {}) {
+// The per-leg outcome of one touch, for the Intelligence Bar's send-now card: { state, reason? } per channel.
+// States: sent (a new delivery), already_delivered (an earlier delivery of this step, not repeated), held (kept for a later
+// run), queued (text deferred to the send-window open), skipped (nothing to send to or with), not_sent (refused before the
+// provider), unknown (the provider may have taken it: never read as "not sent"). Reasons are codes, never addresses.
+const legReason = (value) => (typeof value === 'string' && value ? value.slice(0, 80) : undefined);
+function emailLegReport(result, permitted) {
+  const r = result || {};
+  if (r.ok === true) return { state: r.deduped ? 'already_delivered' : 'sent' };
+  if (r.deduped) return { state: 'unknown', reason: 'duplicate_unconfirmed' };
+  if (r.deliveryOutcome === 'uncertain' || r.deliveryOutcome === 'accepted') return { state: 'unknown', reason: legReason(r.reason) || 'provider_unconfirmed' };
+  if (permitted !== true) return { state: 'held', reason: 'collections_policy_denied' };
+  if (heldByDisputeHold(r)) return { state: 'held', reason: 'collection_hold' };
+  if (r.deferred === true || r.retryable === true) return { state: 'held', reason: legReason(r.reason) };
+  if (r.skipped === true || r.resolved === true) return { state: 'skipped', reason: legReason(r.reason) };
+  if (r.blocked === true || r.deliveryOutcome === 'not_sent') return { state: 'not_sent', reason: legReason(r.reason) };
+  return { state: 'unknown', reason: 'email_outcome_unconfirmed' };
+}
+
+async function fireTouch(row, { operatorInitiated = false, claimStamp = null, verificationOnly = false, report = null } = {}) {
   // A row of a customer on a combined schedule (fireStep's ownedMicrodeposit):
   // re-judged now, after the claim committed and outside any lock. No longer
   // waiting on verification -> the invoice is the schedule's: nothing is sent
@@ -1954,6 +1983,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
   let smsSent = false;
   let actualSmsSent = false;
   let appSent = false;
+  let smsLeg = null;
   let smsSkipReason = null;
   let smsDeferUntil = null;
   let smsDeferredOwned = false;
@@ -2061,6 +2091,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
     // Collections policy denial — transient; the no-channel branch below
     // leaves the sequence armed instead of pausing it.
     smsSkipReason = 'collections_policy_denied';
+    smsLeg = { state: 'held', reason: 'collections_policy_denied' };
   } else if (customer.phone) {
     const messageType = mdPending ? 'bank_verification_incomplete' : 'invoice_followup';
     const body = mdPending
@@ -2071,6 +2102,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
       : await resolveBody(step, ctx);
     if (!body) {
       smsSkipReason = 'missing_template';
+      smsLeg = { state: 'skipped', reason: 'missing_template' };
       logger.warn(`[invoice-followups] template ${step.template_key} missing/disabled for sequence ${row.id}`);
     } else {
       // RECORD-THEN-SEND: the ledger row precedes the SMS attempt; an
@@ -2087,6 +2119,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
         });
       } catch (ledgerErr) {
         smsSkipReason = 'ledger_unavailable';
+        smsLeg = { state: 'skipped', reason: 'ledger_unavailable' };
         logger.warn(`[invoice-followups] SMS leg skipped for sequence ${row.id} — contact ledger unavailable: ${ledgerErr.message}`);
       }
       const sendResult = smsLedger ? await sendCustomerMessage({
@@ -2128,6 +2161,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
         // paused, never queued onto the scheduled-SMS rail (the queued row would carry the pay link).
         await ContactLedger.releaseHeldReservation(smsLedger);
         smsSkipReason = 'collection_hold';
+        smsLeg = { state: 'held', reason: 'collection_hold' };
         smsDeferUntil = heldTouchFloor();
         smsHoldUnowned = true;
         holdSuppressedAtBoundary = true;
@@ -2194,15 +2228,31 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
             }
           }
         }
+        smsLeg = smsDeferredOwned ? { state: 'queued', reason: 'send_window' }
+          : smsOutcomeMayHaveDelivered ? { state: 'unknown', reason: legReason(sendResult.code) || 'provider_unconfirmed' }
+            : { state: sendResult.deferred ? 'held' : 'not_sent', reason: legReason(sendResult.code) || 'sms_blocked' };
         logger.warn(`[invoice-followups] SMS blocked for sequence ${row.id}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
       } else if (sendResult) {
         smsSent = true;
         actualSmsSent = true;
+        smsLeg = { state: 'sent' };
       }
     }
   } else {
     smsSkipReason = 'no_customer_phone';
+    smsLeg = { state: 'skipped', reason: 'no_customer_phone' };
     logger.warn(`[invoice-followups] no phone for customer ${row.customer_id}`);
+  }
+  if (report) {
+    // The explicit-channel branch keeps its state in flags; the single-text branch above set smsLeg itself.
+    if (!smsLeg) {
+      smsLeg = actualSmsSent || appSent ? { state: 'sent' }
+        : smsSent ? { state: 'already_delivered' }
+          : smsSkipReason === 'outcome_unconfirmed' || smsOutcomeMayHaveDelivered ? { state: 'unknown', reason: 'provider_unconfirmed' }
+            : smsHoldUnowned || ['collections_policy_denied', 'collection_hold'].includes(smsSkipReason) ? { state: 'held', reason: legReason(smsSkipReason) }
+              : { state: 'not_sent', reason: legReason(smsSkipReason) };
+    }
+    report.legs = { sms: smsLeg, email: emailLegReport(emailResult, emailPermitted) };
   }
 
   if (!smsSent && !emailResult.ok) {
@@ -2957,6 +3007,9 @@ async function stopSequence(invoiceId, { reason, adminId } = {}) {
 const SEND_NOW_FINISHED = Object.freeze({
   ok: false, reason: 'nothing_to_send', message: 'Not sent: this invoice is paid or its reminders are finished.',
 });
+const SEND_NOW_PREVIEW_CHANGED = Object.freeze({
+  ok: false, reason: 'preview_changed', message: 'The invoice or its reminder changed after the card was shown, so nothing was sent.',
+});
 const SEND_NOW_NO_SEQUENCE = Object.freeze({
   ok: false, reason: 'nothing_to_send', message: 'Not sent: this invoice has no follow-up reminders.',
 });
@@ -2983,7 +3036,7 @@ const SEND_NOW_NO_SEQUENCE = Object.freeze({
  * having been paid (or its row finished) since the panel loaded does not end
  * the click while the schedule still covers the customer's other invoices.
  */
-async function sendNextTouchNow(invoiceId, { operatorInitiated = false, combined = null } = {}) {
+async function sendNextTouchNow(invoiceId, { operatorInitiated = false, combined = null, approved = null, report = false } = {}) {
   const Wiring = () => require('./customer-dunning/wiring');
   const seq = await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
 
@@ -3015,16 +3068,33 @@ async function sendNextTouchNow(invoiceId, { operatorInitiated = false, combined
   // Checked and written under the customer's dunning key (SHARED), so a
   // promotion cannot commit between the check and the write.
   let ownedBy = null;
+  let previewChanged = false;
+  let priorNextTouchAt = seq.next_touch_at;
   await db.transaction(async (trx) => {
     await lockCustomerDunningShared(trx, seq.customer_id);
     ownedBy = await openCustomerScheduleId(trx, seq.customer_id);
     if (ownedBy) return;
+    // The Intelligence Bar's card pin (approved: { sequenceId, status, stepIndex, invoiceUpdatedAtMs }), judged HERE, under the
+    // invoice row lock and the reminder row lock, before the re-arm below: the reminder the card showed is still this
+    // reminder, still active and unclaimed, on the same step, and the invoice is as it was. A difference sends and re-arms
+    // nothing, so a pause or a cron advance that landed after the card is never overwritten.
+    if (approved) {
+      const lockedInvoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first('updated_at');
+      const liveSeq = await trx('invoice_followup_sequences').where({ id: seq.id }).forUpdate()
+        .first('id', 'status', 'step_index', 'next_touch_at', 'touch_claimed_at');
+      const sameInvoice = lockedInvoice && (lockedInvoice.updated_at ? new Date(lockedInvoice.updated_at).getTime() : null) === approved.invoiceUpdatedAtMs;
+      const sameReminder = liveSeq && String(liveSeq.id) === String(approved.sequenceId) && liveSeq.status === approved.status
+        && liveSeq.step_index === approved.stepIndex && !liveSeq.touch_claimed_at;
+      if (!sameInvoice || !sameReminder) { previewChanged = true; return; }
+      priorNextTouchAt = liveSeq.next_touch_at;
+    }
     await trx('invoice_followup_sequences').where({ id: seq.id }).update({
       updated_at: trx.fn.now(),
       status: 'active',
       next_touch_at: new Date(Date.now() - 1000),
     });
   });
+  if (previewChanged) return SEND_NOW_PREVIEW_CHANGED;
   if (ownedBy) return Wiring().sendNowForInvoiceOnSchedule(ownedBy, seq.customer_id, null);
 
   const row = await db('invoice_followup_sequences as s')
@@ -3039,12 +3109,30 @@ async function sendNextTouchNow(invoiceId, { operatorInitiated = false, combined
     .first();
   if (!row) return SEND_NOW_FINISHED;
 
+  // The Intelligence Bar's pin, again on the row fireStep will claim (a cron advance between the re-arm and this read), and the
+  // invoice edit time on the invoice row fireStep locks. Either difference sends nothing; the re-arm is put back as it was.
+  const restoreAfterRefusal = () => db('invoice_followup_sequences')
+    .where({ id: seq.id, status: 'active', step_index: approved.stepIndex }).whereNull('touch_claimed_at')
+    .update({ updated_at: db.fn.now(), next_touch_at: priorNextTouchAt })
+    .catch((err) => logger.warn(`[invoice-followups] could not restore the reminder time after a refused send-now on ${invoiceId}: ${err.message}`));
+  if (approved && row.step_index !== approved.stepIndex) {
+    await restoreAfterRefusal();
+    return SEND_NOW_PREVIEW_CHANGED;
+  }
+
   // A promotion that committed after the re-arm above: fireStep refused under
   // the key (nothing was claimed or sent), so the click needs the schedule's
   // step confirmed.
-  const fired = await fireStep(row, { operatorInitiated });
+  const reportOut = report ? {} : null;
+  const fired = await fireStep(row, { operatorInitiated, approved, report: reportOut });
   if (fired?.ownedBy) return Wiring().sendNowForInvoiceOnSchedule(fired.ownedBy, seq.customer_id, null);
-  return undefined;
+  if (fired?.previewChanged) {
+    await restoreAfterRefusal();
+    return SEND_NOW_PREVIEW_CHANGED;
+  }
+  // report: what each leg did ({ legs: null } = the run could not establish it), or { notClaimed } when another run held the
+  // reminder (nothing was sent by this click).
+  return report ? { ok: true, report: fired || { legs: null } } : undefined;
 }
 
 /**

@@ -287,7 +287,7 @@ describe('invoice-followups passes the operator exemption for "send now" only', 
     expect(src).toMatch(/collectionsChannelPermitted\(row\.customer_id, row\.invoice_id, channel, ownLedgerIds, true, mdPending, operatorInitiated \? 'operator' : null\)/);
     expect(src).toMatch(/\.\.\.\(holdExempt \? \{ holdExempt \} : \{\}\)/);
     // the operator flag is set by sendNextTouchNow's caller and threads fireStep -> fireTouch
-    expect(src).toMatch(/await fireStep\(row, \{ operatorInitiated \}\)/);
-    expect(src).toMatch(/await fireTouch\(row, \{ operatorInitiated(, claimStamp)?(, verificationOnly: !!ownedBy)? \}\)/);
+    expect(src).toMatch(/await fireStep\(row, \{ operatorInitiated, approved, report: reportOut \}\)/);
+    expect(src).toMatch(/await fireTouch\(row, \{ operatorInitiated(, claimStamp)?(, verificationOnly: !!ownedBy)?(, report)? \}\)/);
   });
 });

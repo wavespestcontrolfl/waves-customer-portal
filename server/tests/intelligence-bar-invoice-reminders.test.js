@@ -115,10 +115,9 @@ beforeEach(() => {
     state.invoice_followup_sequences[0].status = { pause: 'paused', resume: 'active', stop: 'stopped' }[control];
     return { status: 200, json: { ok: true } };
   });
-  Invoices.sendReminderNowFromBar.mockImplementation(async () => {
-    state.invoice_followup_sequences[0].touches_sent += 1;
-    return { status: 200, json: { ok: true } };
-  });
+  Invoices.sendReminderNowFromBar.mockImplementation(async () => ({
+    status: 200, json: { ok: true, reminder: { legs: { sms: { state: 'sent' }, email: { state: 'sent' } } } },
+  }));
   Invoices.scheduleSendFromBar.mockImplementation(async ({ approvedSchedule }) => ({
     status: 200, json: { ok: true, invoice: { id: INV, status: 'scheduled', scheduled_send_at: new Date('2099-01-15T14:30:00Z'), approved: approvedSchedule } },
   }));
@@ -395,7 +394,8 @@ describe('send_invoice_reminder_now', () => {
     const card = await call('send_invoice_reminder_now');
     const result = await confirm('send_invoice_reminder_now', card);
     expect(result).toMatchObject({ success: true, sent_to_customer: true, invoice_number: 'WPC-2099-0002' });
-    expect(result.note).toMatch(/Reminder step 1 of \d+ .* was sent/);
+    expect(result.note).toMatch(/^Reminder step 1 of \d+.* Text: sent\. Email: sent\.$/);
+    expect(result.legs).toEqual({ text: { state: 'sent' }, email: { state: 'sent' } });
     expect(Invoices.sendReminderNowFromBar).toHaveBeenCalledTimes(1);
     expect(Invoices.sendReminderNowFromBar).toHaveBeenCalledWith({
       invoiceId: INV, actor: { technicianId: 'staff-1' },
@@ -403,12 +403,60 @@ describe('send_invoice_reminder_now', () => {
     });
   });
 
-  test('a reminder the handler held (opt-out, policy, earlier delivery) is never reported as sent', async () => {
+  const answer = (reminder) => ({ status: 200, json: { ok: true, reminder } });
+
+  test('the result is the handler’s per-channel outcome: a held text and a sent email', async () => {
     const card = await call('send_invoice_reminder_now');
-    Invoices.sendReminderNowFromBar.mockResolvedValueOnce({ status: 200, json: { ok: true } });
+    Invoices.sendReminderNowFromBar.mockResolvedValueOnce(answer({ legs: { sms: { state: 'held', reason: 'collections_policy_denied' }, email: { state: 'sent' } } }));
     const result = await confirm('send_invoice_reminder_now', card);
-    expect(result).toMatchObject({ success: true, sent_to_customer: false, code: 'held_not_sent' });
-    expect(result.note).toMatch(/Nothing went out/);
+    expect(result).toMatchObject({ success: true, sent_to_customer: true, legs: { text: { state: 'held' }, email: { state: 'sent' } } });
+    expect(result.note).toMatch(/Text: held \(held by the collections policy\), not sent; the reminder stays on its schedule\. Email: sent\./);
+  });
+
+  test('both channels known not to have gone out: "Nothing was sent", with each reason', async () => {
+    const card = await call('send_invoice_reminder_now');
+    Invoices.sendReminderNowFromBar.mockResolvedValueOnce(answer({ legs: { sms: { state: 'not_sent', reason: 'CUSTOMER_OPTED_OUT' }, email: { state: 'skipped', reason: 'missing_email' } } }));
+    const result = await confirm('send_invoice_reminder_now', card);
+    expect(result).toMatchObject({ success: true, sent_to_customer: false, code: 'not_sent' });
+    expect(result.note).toMatch(/^Nothing was sent to the customer\. Text: not sent \(CUSTOMER OPTED OUT\)\. Email: skipped \(no usable email on file\), not sent\.$/);
+  });
+
+  test('a leg delivered earlier is not called a new send, and a queued text is not called sent', async () => {
+    const card = await call('send_invoice_reminder_now');
+    Invoices.sendReminderNowFromBar.mockResolvedValueOnce(answer({ legs: { sms: { state: 'queued', reason: 'send_window' }, email: { state: 'already_delivered' } } }));
+    const result = await confirm('send_invoice_reminder_now', card);
+    expect(result).toMatchObject({ success: true, sent_to_customer: false });
+    expect(result.note).toMatch(/Text: queued \(it waits for the 8 AM text window\), not sent yet\. Email: already delivered earlier, not sent again\./);
+  });
+
+  test('an uncertain channel is "unknown, check the invoice timeline" — never "nothing went out" — even when the other channel sent', async () => {
+    const card = await call('send_invoice_reminder_now');
+    Invoices.sendReminderNowFromBar.mockResolvedValueOnce(answer({ legs: { sms: { state: 'sent' }, email: { state: 'unknown', reason: 'provider_unconfirmed' } } }));
+    const result = await confirm('send_invoice_reminder_now', card);
+    expect(result).toMatchObject({ outcome_unknown: true, code: 'delivery_unknown', sent_to_customer: true });
+    expect(result.error).toMatch(/Text: sent\. Email: unknown, check the invoice timeline/);
+    expect(JSON.stringify(result)).not.toMatch(/Nothing (went out|was sent)/);
+    Invoices.sendReminderNowFromBar.mockResolvedValueOnce(answer({ legs: { sms: { state: 'unknown' }, email: { state: 'held', reason: 'collection_hold' } } }));
+    const both = await confirm('send_invoice_reminder_now', card);
+    expect(both).toMatchObject({ outcome_unknown: true, sent_to_customer: false });
+    expect(JSON.stringify(both)).not.toMatch(/Nothing (went out|was sent)/);
+  });
+
+  test('no report from the handler (the run could not establish it) is unknown, not "not sent"', async () => {
+    const card = await call('send_invoice_reminder_now');
+    for (const reminder of [undefined, { legs: null }, { legs: { sms: { state: 'sent' } } }]) {
+      Invoices.sendReminderNowFromBar.mockResolvedValueOnce(answer(reminder));
+      const result = await confirm('send_invoice_reminder_now', card);
+      expect(result).toMatchObject({ outcome_unknown: true, code: 'delivery_unknown' });
+      expect(result.error).toMatch(/unknown\. Check the invoice timeline/);
+      expect(result.success).toBeUndefined();
+    }
+  });
+
+  test('a run that did not get the reminder (another run held it) says nothing was sent by this click', async () => {
+    const card = await call('send_invoice_reminder_now');
+    Invoices.sendReminderNowFromBar.mockResolvedValueOnce(answer({ notClaimed: true }));
+    expect(await confirm('send_invoice_reminder_now', card)).toMatchObject({ failed: true, code: 'reminder_busy', sent_to_customer: false });
   });
 
   test('a handler 409 PREVIEW_CHANGED, another refusal, and a throw each stop short of "sent"', async () => {

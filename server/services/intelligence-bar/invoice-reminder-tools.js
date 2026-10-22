@@ -450,7 +450,6 @@ async function buildSendNowPlan(input) {
     effects,
     sends_to_customer: true,
     _approved: { invoiceUpdatedAtMs: msOf(invoice.updated_at), sequenceId: seq.id, status: seq.status, stepIndex: seq.step_index },
-    _touches: Number(seq.touches_sent) || 0,
     _version: {
       tool: 'send_invoice_reminder_now',
       invoice_id: invoice.id,
@@ -490,18 +489,62 @@ async function commitSendNow(input, actionContext) {
   if (status !== 200) {
     return { ...base, failed: true, code: status === 409 ? 'reminder_refused' : 'send_failed', error: `The reminder was not sent: ${json?.error || 'the Invoices page refused it'}` };
   }
-  const now = await readReminder(plan.invoice_id).catch(() => null);
-  if (!now) {
-    return { ...base, outcome_unknown: true, code: 'send_unverified',
-      error: 'The Invoices page answered, but the reminder state could not be read back. Check the invoice timeline before sending again.' };
+  return sendNowOutcome(base, plan, json?.reminder);
+}
+
+// What each channel did, in the operator's words. The handler reports per-leg states (invoice-followups.js emailLegReport and
+// the text branch of fireTouch); "sent" is a new delivery, and an unreadable or uncertain leg is "unknown", never "not sent".
+const LEG_REASONS = {
+  collections_policy_denied: 'held by the collections policy',
+  collection_hold: 'held by a collections hold',
+  missing_email: 'no usable email on file',
+  no_customer_phone: 'no phone on file',
+  missing_template: 'the message template is switched off',
+  ledger_unavailable: 'the contact record could not be written',
+  template_unavailable: 'the email template is unavailable',
+  billing_email_not_selected: 'the customer did not choose email for invoices',
+  send_window: 'it waits for the 8 AM text window',
+  invoice_not_eligible: 'the invoice is no longer eligible',
+  invoice_payer_billed: 'the invoice is billed to a payer',
+};
+function legSentence(label, leg) {
+  const why = leg?.reason ? (LEG_REASONS[leg.reason] || String(leg.reason).replace(/_/g, ' ')) : null;
+  switch (leg?.state) {
+    case 'sent': return `${label}: sent.`;
+    case 'already_delivered': return `${label}: already delivered earlier, not sent again.`;
+    case 'queued': return `${label}: queued${why ? ` (${why})` : ''}, not sent yet.`;
+    case 'held': return `${label}: held${why ? ` (${why})` : ''}, not sent; the reminder stays on its schedule.`;
+    case 'skipped': return `${label}: skipped${why ? ` (${why})` : ''}, not sent.`;
+    case 'not_sent': return `${label}: not sent${why ? ` (${why})` : ''}.`;
+    default: return `${label}: unknown, check the invoice timeline${why ? ` (${why})` : ''}.`;
   }
-  if ((Number(now.touches_sent) || 0) > plan._touches) {
-    logger.info(`[intelligence-bar:invoice-reminders] reminder sent for ${plan.invoice_id}`);
-    return { ...base, success: true, sent_to_customer: true,
-      note: `Reminder step ${plan.step} was sent. Which channel reached the customer is on the invoice timeline.` };
+}
+
+function sendNowOutcome(base, plan, reminder) {
+  if (reminder?.notClaimed) {
+    return { ...base, failed: true, code: 'reminder_busy', sent_to_customer: false,
+      error: 'Nothing was sent: another run had this reminder or it changed. Check the invoice timeline, then ask again.' };
   }
-  return { ...base, success: true, sent_to_customer: false, code: 'held_not_sent',
-    note: 'Nothing went out: the customer’s opt-out, the collections policy or an earlier delivery held the reminder. It stays on its schedule; check the invoice timeline.' };
+  const legs = reminder?.legs;
+  if (!legs?.sms || !legs?.email) {
+    return { ...base, outcome_unknown: true, code: 'delivery_unknown',
+      error: 'Whether the reminder went out is unknown. Check the invoice timeline before sending again.' };
+  }
+  const entries = [['Text', legs.sms], ['Email', legs.email]];
+  const sentences = entries.map(([label, leg]) => legSentence(label, leg)).join(' ');
+  const states = entries.map(([, leg]) => leg?.state);
+  const sentAny = states.includes('sent');
+  const legsOut = { text: legs.sms, email: legs.email };
+  logger.info(`[intelligence-bar:invoice-reminders] reminder send-now on ${plan.invoice_id}: text ${states[0]}, email ${states[1]}`);
+  if (states.some((state) => !['sent', 'already_delivered', 'queued', 'held', 'skipped', 'not_sent'].includes(state))) {
+    return { ...base, outcome_unknown: true, code: 'delivery_unknown', sent_to_customer: sentAny, legs: legsOut,
+      error: `Delivery could not be fully established. ${sentences} Check the invoice timeline before sending again.` };
+  }
+  if (sentAny) {
+    return { ...base, success: true, sent_to_customer: true, legs: legsOut, note: `Reminder step ${plan.step}. ${sentences}` };
+  }
+  return { ...base, success: true, sent_to_customer: false, code: 'not_sent', legs: legsOut,
+    note: `Nothing was sent to the customer. ${sentences}` };
 }
 
 // ── schedule_invoice_send ──────────────────────────────────────

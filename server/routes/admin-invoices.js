@@ -3775,18 +3775,14 @@ const invoiceFollowupSendNowHandler = async (req, res, next) => {
       ? { scheduleId: typeof body.scheduleId === 'string' ? body.scheduleId : null, stepIndex: Number.isInteger(body.stepIndex) ? body.stepIndex : null }
       : null;
     // req.ibApprovedReminder is set only by sendReminderNowFromBar (never an HTTP field): the invoice edit time and the
-    // reminder step and status the card showed. A difference sends nothing (409 PREVIEW_CHANGED). The page's call is unchanged.
-    if (req.ibApprovedReminder) {
-      const approved = req.ibApprovedReminder;
-      const liveInvoice = await db('invoices').where({ id: req.params.id }).first('updated_at', 'status');
-      const liveSeq = await db('invoice_followup_sequences').where({ invoice_id: req.params.id }).first('id', 'status', 'step_index');
-      const sameInvoice = liveInvoice && (liveInvoice.updated_at ? new Date(liveInvoice.updated_at).getTime() : null) === approved.invoiceUpdatedAtMs;
-      const sameStep = liveSeq && String(liveSeq.id) === String(approved.sequenceId) && liveSeq.status === approved.status && liveSeq.step_index === approved.stepIndex;
-      if (!sameInvoice || !sameStep) {
-        return res.status(409).json({ error: 'The invoice or its reminder changed after the card was shown, so nothing was sent.', code: 'PREVIEW_CHANGED' });
-      }
-    }
-    const routed = await FollowUps.sendNextTouchNow(req.params.id, { operatorInitiated: true, combined });
+    // reminder id, step and status the card showed. The service judges it under the invoice and reminder row locks, before
+    // it re-arms or claims anything, and returns what each channel did (`reminder`). A difference sends nothing (409
+    // PREVIEW_CHANGED). The page's call and answer are unchanged.
+    const approved = req.ibApprovedReminder || null;
+    const routed = await FollowUps.sendNextTouchNow(req.params.id, approved
+      ? { operatorInitiated: true, combined, approved, report: true }
+      : { operatorInitiated: true, combined });
+    if (routed?.reason === 'preview_changed') return res.status(409).json({ error: routed.message, code: 'PREVIEW_CHANGED' });
     // Nothing to send (no sequence, a finished one, a paid or void invoice): never a 200 the panel
     // would read as "Done".
     if (routed?.reason === 'nothing_to_send') return res.status(409).json({ error: routed.message, code: 'NOT_SENT' });
@@ -3809,7 +3805,7 @@ const invoiceFollowupSendNowHandler = async (req, res, next) => {
       }
       return res.status(result.status).json(result.body);
     }
-    res.json({ ok: true });
+    res.json(routed?.report ? { ok: true, reminder: routed.report } : { ok: true });
   } catch (err) { next(err); }
 };
 router.post('/:id/followup/send-now', requireAdmin, invoiceFollowupSendNowHandler);

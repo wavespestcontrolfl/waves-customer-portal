@@ -113,54 +113,37 @@ describe('follow-up controls: the page and the bar reach the same service calls'
   });
 });
 
-describe('send-now: the bar’s pin refuses a changed invoice or reminder and sends nothing', () => {
-  const SEQ = { id: 'seq-1', status: 'active', step_index: 0 };
+describe('send-now: the bar hands the card’s pin to the service, which judges it under its locks', () => {
   const approved = { invoiceUpdatedAtMs: UPDATED_MS, sequenceId: 'seq-1', status: 'active', stepIndex: 0 };
-  let invoiceRow;
-  let seqRow;
-  beforeEach(() => {
-    invoiceRow = { updated_at: UPDATED, status: 'sent' };
-    seqRow = { ...SEQ };
-    db.mockImplementation((table) => recorder({
-      first: async () => (table === 'invoices' ? invoiceRow : table === 'invoice_followup_sequences' ? seqRow : null),
-    }));
-  });
 
-  test('the page’s call is unchanged: no pin read, the operator flag, no combined confirmation', async () => {
+  test('the page’s call is unchanged: the operator flag, no combined confirmation, no pin, no report, and no extra read', async () => {
     const result = await page('/followup/send-now');
     expect(result).toEqual({ status: 200, json: { ok: true } });
     expect(FollowUps.sendNextTouchNow).toHaveBeenCalledWith(INV, { operatorInitiated: true, combined: null });
     expect(db).not.toHaveBeenCalled();
   });
 
-  test('the HTTP body can never carry a pin', async () => {
-    invoiceRow.updated_at = new Date('2099-06-01T00:00:00Z');
-    const result = await page('/followup/send-now', { ibApprovedReminder: { invoiceUpdatedAtMs: 1, sequenceId: 'x', status: 'paused', stepIndex: 9 } });
-    expect(result.status).toBe(200);
-    expect(FollowUps.sendNextTouchNow).toHaveBeenCalledTimes(1);
-  });
-
-  test('a matching pin sends once, with the same call as the page', async () => {
-    const result = await router.sendReminderNowFromBar({ invoiceId: INV, actor: BAR_ACTOR, approvedReminder: approved });
+  test('the HTTP body can never carry a pin or ask for a report', async () => {
+    const result = await page('/followup/send-now', { approved, report: true, ibApprovedReminder: approved });
     expect(result).toEqual({ status: 200, json: { ok: true } });
-    expect(FollowUps.sendNextTouchNow).toHaveBeenCalledTimes(1);
     expect(FollowUps.sendNextTouchNow).toHaveBeenCalledWith(INV, { operatorInitiated: true, combined: null });
   });
 
-  test.each([
-    ['the invoice was edited', () => { invoiceRow.updated_at = new Date('2099-01-02T00:00:00Z'); }],
-    ['the invoice has no edit time', () => { invoiceRow.updated_at = null; }],
-    ['the reminder moved to the next step', () => { seqRow.step_index = 1; }],
-    ['the reminder was paused', () => { seqRow.status = 'paused'; }],
-    ['the reminder was replaced', () => { seqRow.id = 'seq-2'; }],
-    ['the reminder is gone', () => { seqRow = undefined; }],
-    ['the invoice is gone', () => { invoiceRow = undefined; }],
-  ])('%s: 409 PREVIEW_CHANGED and nothing is sent', async (_label, mutate) => {
-    mutate();
+  test('the bar passes the pin and asks for the per-channel report; the answer carries it', async () => {
+    const legs = { sms: { state: 'sent' }, email: { state: 'held', reason: 'collections_policy_denied' } };
+    FollowUps.sendNextTouchNow.mockResolvedValueOnce({ ok: true, report: { legs } });
     const result = await router.sendReminderNowFromBar({ invoiceId: INV, actor: BAR_ACTOR, approvedReminder: approved });
-    expect(result.status).toBe(409);
-    expect(result.json).toMatchObject({ code: 'PREVIEW_CHANGED' });
-    expect(FollowUps.sendNextTouchNow).not.toHaveBeenCalled();
+    expect(result).toEqual({ status: 200, json: { ok: true, reminder: { legs } } });
+    expect(FollowUps.sendNextTouchNow).toHaveBeenCalledTimes(1);
+    expect(FollowUps.sendNextTouchNow).toHaveBeenCalledWith(INV, { operatorInitiated: true, combined: null, approved, report: true });
+    // The route does its own unlocked pin read no more: the service judges the pin under the locks.
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('a service refusal of the pin is a 409 PREVIEW_CHANGED', async () => {
+    FollowUps.sendNextTouchNow.mockResolvedValueOnce({ ok: false, reason: 'preview_changed', message: 'The invoice or its reminder changed after the card was shown, so nothing was sent.' });
+    const result = await router.sendReminderNowFromBar({ invoiceId: INV, actor: BAR_ACTOR, approvedReminder: approved });
+    expect(result).toEqual({ status: 409, json: { error: 'The invoice or its reminder changed after the card was shown, so nothing was sent.', code: 'PREVIEW_CHANGED' } });
   });
 
   test('the handler’s own "nothing to send" answer reaches the bar as a 409 NOT_SENT', async () => {
