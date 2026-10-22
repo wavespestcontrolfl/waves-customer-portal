@@ -254,6 +254,17 @@ describe('Codex #6375 r7: spaced and punctuated credential assignments, any Auth
     scrubNote(`${'a:'.repeat(5000)}x@`); scrubNote(`${'a'.repeat(19990)}:b@c.d`);
     expect(Date.now() - started).toBeLessThan(200);
   });
+  test('abbreviated credential names and twice-encoded fragment links are scrubbed (Codex #6375 r22)', () => {
+    expect(scrubNote('Server=db;User ID=admin;Pwd=hunter22').text).toBe('Server=db;User ID=admin;Pwd=[removed]');
+    expect(scrubNote('passphrase: correct horse').text).toBe('passphrase: [removed]');
+    const { redactString, newState } = require('../utils/signed-link-redaction');
+    const inner = 'https://portal.wavespestcontrol.com/l/abc234def5';
+    for (const encoded of [encodeURIComponent(encodeURIComponent(inner)), encodeURIComponent(encodeURIComponent(encodeURIComponent(inner)))]) {
+      const out = redactString(`see https://track.example.test/c#${encoded}`, newState());
+      expect(out).not.toContain('abc234def5');
+      expect(out).toContain('[private link removed]');
+    }
+  });
   test('ordinary prose and labels without a credential word stay as written', () => {
     const note = 'the password is in the lockbox. gate code: 1234, PIN: 8842, key under the mat, lockbox passcode: 4321';
     expect(scrubNote(note)).toEqual({ text: note, removed: 0 });

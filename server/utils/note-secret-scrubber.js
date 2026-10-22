@@ -101,7 +101,7 @@ function looksLikeBasicCredential(header, token) {
 // is left alone, so a second pass changes nothing.
 // A key may be written with spaces after a key prefix: "private key:", "access key id =" (Codex #6375 r21).
 const CREDENTIAL_ASSIGN_RE = /(?<![A-Za-z0-9_.-])(\\?["']?)((?:(?:api|private|secret|signing|access|encryption|ssh)[ \t]+(?:key[ \t]+)?)?[A-Za-z][A-Za-z0-9_.-]*)\1(\s*[=:][ \t]*)/gi;
-const ENV_STEM_WORDS = new Set(['password', 'passwd', 'pass', 'secret', 'token', 'apikey', 'credential', 'credentials']);
+const ENV_STEM_WORDS = new Set(['password', 'passwd', 'pwd', 'passphrase', 'pass', 'secret', 'token', 'apikey', 'credential', 'credentials']);
 const ENV_STEM_PAIRS = [['api', 'key'], ['private', 'key']];
 function isEnvSecretName(key) {
   const parts = key.toLowerCase().split(/[_.-]/).filter(Boolean);
@@ -111,7 +111,7 @@ function isEnvSecretName(key) {
 // shared classifier's list less the words that name an ACCESS instruction the
 // owner wants returned (ruling 2026-10-13: pin, passcode) or that are ordinary
 // note words (session, signature, sig, hash/salt on their own).
-const ASSIGN_KEY_WORDS = new Set(['password', 'passwords', 'passwd', 'secret', 'secrets', 'token', 'tokens', 'apikey', 'credential',
+const ASSIGN_KEY_WORDS = new Set(['password', 'passwords', 'passwd', 'pwd', 'passphrase', 'secret', 'secrets', 'token', 'tokens', 'apikey', 'credential',
   'credentials', 'auth', 'authorization', 'cookie', 'cookies', 'nonce', 'jwt', 'bearer', 'otp']);
 const SECRET_KEY_PREFIXES = new Set(['api', 'private', 'secret', 'signing', 'access', 'encryption', 'ssh']);
 const CREDENTIAL_PREFIX_WORDS = new Set(['password', 'passwd', 'secret', 'token', 'api', 'auth', 'session']);

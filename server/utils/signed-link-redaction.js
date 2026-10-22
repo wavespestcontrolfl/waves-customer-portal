@@ -278,12 +278,24 @@ function wrappedLinkVerdict(url, depth) {
   if (depth >= MAX_WRAP_DEPTH) return null;
   const parts = [...url.searchParams.values(), url.hash.replace(/^#/, ''), decodeOnce(url.pathname)];
   for (const part of parts) {
-    for (const text of [part, decodeOnce(part)]) {
+    for (const text of decodedForms(part)) {
       const verdict = linkInTextVerdict(text, depth + 1);
       if (verdict) return verdict;
     }
   }
   return null;
+}
+
+// A part as written and each percent-decoded form until it stops changing,
+// at most 3 decodes (a fragment carries no implicit decode) (Codex #6375 r22).
+function decodedForms(part) {
+  const forms = [part];
+  for (let i = 0; i < 3; i += 1) {
+    const next = decodeOnce(forms[forms.length - 1]);
+    if (next === forms[forms.length - 1]) break;
+    forms.push(next);
+  }
+  return forms;
 }
 
 // The verdict for an absolute link (href with a scheme), or null to leave it.
