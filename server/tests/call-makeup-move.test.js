@@ -262,6 +262,12 @@ describe('planMakeupMoveFromCall', () => {
     expect(planMakeup(baseArgs({ v2: null }))).toMatchObject({ reason: 'no_v2_extraction' });
   });
 
+  test('the caller must have accepted, and an agent who did not commit fails closed', () => {
+    expect(planMakeup(baseArgs({ v2: v2({ scheduling: { caller_accepted_slot: false } }) }))).toMatchObject({ action: 'skip', reason: 'caller_did_not_accept' });
+    expect(planMakeup(baseArgs({ v2: v2({ scheduling: { caller_accepted_slot: null } }) }))).toMatchObject({ action: 'skip', reason: 'caller_did_not_accept' });
+    expect(planMakeup(baseArgs({ v2: v2({ scheduling: { agent_committed_booking: false } }) }))).toMatchObject({ action: 'skip', reason: 'agent_did_not_commit' });
+  });
+
   test('the move stands in for the booking only: no booking slot, or a different one, is skipped', () => {
     expect(planMakeup(baseArgs({ bookingSlot: null }))).toMatchObject({ action: 'skip', reason: 'not_the_booking_slot' });
     expect(planMakeup(baseArgs({ bookingSlot: '2026-10-20T18:00' }))).toMatchObject({ action: 'skip', reason: 'not_the_booking_slot' });
@@ -462,9 +468,13 @@ describe('applyCallMakeupMove', () => {
     expect(rebooker.reschedule).not.toHaveBeenCalled();
   });
 
-  test('a move by anyone after the call stands the lane down; the no-show evidence row does not count as one', async () => {
+  test('a move of the candidate after the call HOLDS (never books); only the candidate counts, and the no-show evidence row does not', async () => {
     const conn = makeConn({ moved: true });
-    expect(await applyCallMakeupMove(applyArgs(conn, { reschedule: jest.fn() }))).toMatchObject({ outcome: 'skipped', reason: 'handled_after_call' });
+    const rebooker = { reschedule: jest.fn() };
+    expect(await applyCallMakeupMove(applyArgs(conn, rebooker))).toMatchObject({ outcome: 'needs_review', reason: 'handled_after_call', visitId: VISIT_ID });
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    // Scoped to the candidate visit: an unrelated visit's move never waves the duplicate booking through.
+    expect(fs.readFileSync(require.resolve('../services/call-reschedule-apply'), 'utf8')).toMatch(/newerMove = \(trx, visitId\) => trx\('reschedule_log'\)\n\s+\.where\(\{ scheduled_service_id: visitId \}\)/);
     // The newer-move fence excludes customer_noshow rows (the evidence is itself one).
     const source = fs.readFileSync(require.resolve('../services/call-reschedule-apply'), 'utf8');
     expect(source).toMatch(/whereNot\('reason_code', 'customer_noshow'\)/);

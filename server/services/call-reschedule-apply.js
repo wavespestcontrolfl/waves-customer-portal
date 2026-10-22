@@ -925,6 +925,8 @@ function planMakeupMoveFromCall({ v2, call, customer, properties = [], candidate
   if (!MAKEUP_INTENTS.includes(serviceRequest.service_intent) && !MAKEUP_NATURES.includes(v2.call_nature)) return skip('not_a_follow_up_call');
   if (serviceRequest.secondary_categories?.length) return skip('service_needs_review');
   if (!scheduling.confirmed_start_at) return skip('no_confirmed_start');
+  if (scheduling.caller_accepted_slot !== true) return skip('caller_did_not_accept');
+  if (scheduling.agent_committed_booking === false) return skip('agent_did_not_commit');
   const confidence = v2.confidence?.scheduling_window;
   if (typeof confidence !== 'number' || confidence < MIN_SCHEDULING_CONFIDENCE) return skip('low_scheduling_confidence');
   if (v2.caller?.decision_maker_present === false) return skip('caller_not_decision_maker');
@@ -1070,13 +1072,15 @@ async function applyCallMakeupMove({ conn, call, procToken = null, procGeneratio
     const proof = typeof prior.metadata === 'string' ? JSON.parse(prior.metadata) : prior.metadata;
     return { outcome: 'noop', reason: 'already_applied', visitId: proof?.scheduled_service_id || null };
   }
-  // A move made by anyone after the call, other than the missed-appointment
-  // check's own customer_noshow row (that row is the EVIDENCE for this move).
-  const newerMove = (trx) => trx('reschedule_log')
-    .whereIn('scheduled_service_id', trx('scheduled_services').where({ customer_id: settled.customer_id }).select('id'))
+  // A move of THE CANDIDATE made by anyone after the call, other than the
+  // missed-appointment check's own customer_noshow row (that row is the
+  // EVIDENCE for this move). Scoped to the candidate: a move of an unrelated
+  // visit says nothing about this one, and must never wave the duplicate
+  // booking through. A candidate someone already touched holds for review.
+  const newerMove = (trx, visitId) => trx('reschedule_log')
+    .where({ scheduled_service_id: visitId })
     .whereNot('reason_code', 'customer_noshow')
     .where('created_at', '>', settled.created_at).first('id');
-  if (await newerMove(conn)) return { outcome: 'skipped', reason: 'handled_after_call' };
 
   const customer = await conn('customers').where({ id: settled.customer_id }).first();
   const properties = await conn('customer_properties').where({ customer_id: settled.customer_id, active: true }).select('*');
@@ -1091,6 +1095,7 @@ async function applyCallMakeupMove({ conn, call, procToken = null, procGeneratio
   if (await openPortalRequest(conn, settled.customer_id, plan.visitId)) return review('portal_request_open');
   if (await pendingSmsOffer(conn, settled.customer_id, plan.visitId, now)) return review('pending_sms_offer');
   if (await humanHandledRescheduleCard(conn, call.id)) return review('handled_by_staff');
+  if (await newerMove(conn, plan.visitId)) return review('handled_after_call');
 
   const note = `Missed visit ${plan.visitId} moved from ${plan.from.date} to ${plan.newDate} ${plan.newWindow.start} from the call. No customer message sent.`;
   const writeDecision = async ({ trx, service }) => {
@@ -1099,7 +1104,7 @@ async function applyCallMakeupMove({ conn, call, procToken = null, procGeneratio
     if (!fenced(current)) throw Object.assign(new Error('The call changed before its make-up move could apply'), { code: 'CALL_MAKEUP_CHANGED' });
     if (await markerFor(trx)) throw Object.assign(new Error('This call was already applied'), { code: 'CALL_MAKEUP_ALREADY_APPLIED' });
     const handled = await humanHandledRescheduleCard(trx, call.id);
-    const moved = await newerMove(trx);
+    const moved = await newerMove(trx, visit.id);
     // Under the visit's own row lock (as applyCallReschedule): a portal
     // request filed meanwhile is either seen here or starts after the move.
     await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('id');
