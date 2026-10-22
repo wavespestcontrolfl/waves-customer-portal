@@ -223,7 +223,12 @@ jest.setTimeout(30000);
     expect(await cancel(body.scheduled.id, loser)).toMatchObject({ status: 409, body: { error: expect.stringMatching(/^This email is already open as a draft in another tab/) } });
     // A claim is never taken over by time.
     await database('scheduled_emails').where({ id: body.scheduled.id }).update({ updated_at: database.raw("now() - interval '2 days'") });
-    expect((await cancel(body.scheduled.id, loser)).status).toBe(409);
+    const refused = await cancel(body.scheduled.id, loser);
+    expect(refused).toMatchObject({ status: 409, body: { claimedElsewhere: true } });
+    // Only the operator's explicit takeover moves it; the draft says so.
+    const taken = await call('POST', `/scheduled/${body.scheduled.id}/cancel`, { restoreKey: loser, takeover: true });
+    expect(taken).toMatchObject({ status: 200, body: { draft: { draftText: 'Hi\nthere', takenOver: true } } });
+    expect((await cancel(body.scheduled.id, winner)).status).toBe(409);
     expect((await call('POST', `/scheduled/${body.scheduled.id}/cancel`, {})).status).toBe(400);
   });
 

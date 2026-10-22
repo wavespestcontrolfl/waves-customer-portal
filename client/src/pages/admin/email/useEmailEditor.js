@@ -58,6 +58,9 @@ function reconcileOutcome(row) {
 // fingerprint matches it, so scheduling it again also waits for the check.
 const MAY_HAVE_SENT = { request: "may_have_sent", clientKey: null };
 
+// The guard on a draft taken over from another tab, which may still hold it.
+const TAKEN_OVER = { request: "taken_over", clientKey: null };
+
 // A retried key can return a row the sender already settled: nothing is
 // queued, so the draft stays and the outcome shows.
 const SETTLED_MESSAGES = {
@@ -145,8 +148,8 @@ export default function useEmailEditor(userId) {
   // A schedule request for this draft slot has no definite answer: plain Send
   // could deliver a copy now while the queued one still sends later.
   const scheduleUnconfirmed = (replyId = null) => Boolean(uncertainSchedule.current[slotOf(replyId)]);
-  // Whether the block comes from a restored email Gmail may have sent.
-  const restoredMayHaveSent = (replyId = null) => uncertainSchedule.current[slotOf(replyId)]?.request === MAY_HAVE_SENT.request;
+  // Why plain Send waits: "may_have_sent", "taken_over", or another kind.
+  const guardKind = (replyId = null) => uncertainSchedule.current[slotOf(replyId)]?.request;
   // The operator looked under Scheduled and in Gmail Sent: the email is in
   // neither. A schedule request with a key is first settled on the server
   // (its row, or a void row that stops a late copy), and the guard follows
@@ -442,7 +445,10 @@ export default function useEmailEditor(userId) {
     // Gmail may already have this email: plain Send waits for the same
     // Sent-folder check as an unconfirmed schedule request. A guard that
     // cannot survive a reload is no guard, so the draft does not come back.
-    if (draft.mayHaveSent && !rememberUncertain(slotOf(draft.replyEmailId), MAY_HAVE_SENT)) return { guardUnsaved: true };
+    // A draft taken over from another tab waits the same way for the
+    // operator's check of that tab.
+    const guard = (draft.mayHaveSent && MAY_HAVE_SENT) || (draft.takenOver && TAKEN_OVER);
+    if (guard && !rememberUncertain(slotOf(draft.replyEmailId), guard)) return { guardUnsaved: true };
     if (draft.replyEmailId) {
       setReplyDraft(draft.replyEmailId, draft.draftText);
       return { saved: draftSession.saved };
@@ -535,7 +541,7 @@ export default function useEmailEditor(userId) {
     handleAiDraft,
     scheduling,
     scheduleUnconfirmed,
-    restoredMayHaveSent,
+    guardKind,
     confirmScheduleChecked,
     handleComposeSchedule,
     handleReplySchedule,

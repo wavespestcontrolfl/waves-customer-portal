@@ -16,7 +16,7 @@ const STATUS_TEXT = {
 // the last day shows Open as draft (the cancel repeats and returns its text).
 export default function ScheduledEmails({ scheduled, editor, mailbox }) {
   const [feedback, setFeedback] = useState(null);
-  const takeBack = async (row) => {
+  const takeBack = async (row, { takeover = false } = {}) => {
     setFeedback(null);
     if (editor.scheduledDraftBlocked(row)) {
       setFeedback({ error: true, message: row.replyEmailId
@@ -24,8 +24,8 @@ export default function ScheduledEmails({ scheduled, editor, mailbox }) {
         : "You have a new email in progress. Send or discard it first, then try again." });
       return;
     }
-    const { draft, error, retryable } = await scheduled.cancel(row.id);
-    if (!draft) { setFeedback({ error: true, message: error, retry: retryable ? row : null }); return; }
+    const { draft, error, retryable, claimedElsewhere } = await scheduled.cancel(row.id, { takeover });
+    if (!draft) { setFeedback({ error: true, message: error, retry: retryable ? row : null, takeover: claimedElsewhere ? row : null }); return; }
     // A draft started while the cancel was in flight takes the slot: keep a
     // way back (the server repeats the cancel and returns the same draft).
     const restored = editor.restoreScheduledDraft(draft);
@@ -51,7 +51,12 @@ export default function ScheduledEmails({ scheduled, editor, mailbox }) {
   };
 
   return <section aria-label="Scheduled emails" className="space-y-4">
-    {feedback && <ActionFeedback error={feedback.error} onRetry={feedback.retry ? () => takeBack(feedback.retry) : undefined}>{feedback.message}</ActionFeedback>}
+    {feedback && <ActionFeedback error={feedback.error} onRetry={feedback.retry ? () => takeBack(feedback.retry) : undefined}>
+      {feedback.message}
+      {/* The other tab is gone: the operator moves the claim here. The draft
+          then opens with plain Send waiting for a check of that tab. */}
+      {feedback.takeover && <Button variant="secondary" className="ml-2" onClick={() => takeBack(feedback.takeover, { takeover: true })}>Open here anyway</Button>}
+    </ActionFeedback>}
     <div className="overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
       {scheduled.loading && scheduled.emails.length === 0 ? <p className="m-0 min-h-40 p-6 text-ink-secondary" role="status">Loading scheduled emails…</p>
         : scheduled.error ? <ActionFeedback error onRetry={scheduled.reload} className="min-h-40 p-6">Scheduled emails are unavailable.</ActionFeedback>

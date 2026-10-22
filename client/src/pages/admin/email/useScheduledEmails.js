@@ -98,18 +98,18 @@ export default function useScheduledEmails(active, userId) {
 
   // Cancels on the server, then hands the email back for the composer.
   // Returns the draft, or null with the server's reason.
-  const cancel = async (id) => {
+  const cancel = async (id, { takeover = false } = {}) => {
     if (pendingId) return { draft: null };
     // Without a saved key a lost answer could not be recovered: do not start.
     const restoreKey = restoreKeyFor(userId, id);
     if (!restoreKey) return { draft: null, error: "Cancel did not start: this browser could not save its safety key." };
     setPendingId(id);
     try {
-      const response = await adminFetch(`/api/admin/email/scheduled/${encodeURIComponent(id)}/cancel`, { method: "POST", body: JSON.stringify({ restoreKey }) });
+      const response = await adminFetch(`/api/admin/email/scheduled/${encodeURIComponent(id)}/cancel`, { method: "POST", body: JSON.stringify({ restoreKey, ...(takeover ? { takeover } : {}) }) });
       const data = await response.json().catch(() => null);
       // No readable answer, or a server error: the cancel may have happened.
       if (!data || response.status >= 500 || (response.ok && !data.draft)) throw new Error("Cancel outcome unknown");
-      if (!response.ok) return { draft: null, error: data.error || "The scheduled email was not cancelled. Try again." };
+      if (!response.ok) return { draft: null, error: data.error || "The scheduled email was not cancelled. Try again.", claimedElsewhere: data.claimedElsewhere === true };
       return { draft: data.draft };
     } catch {
       // The server may have cancelled it; a repeated cancel returns the same
