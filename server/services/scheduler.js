@@ -4282,6 +4282,23 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY MIN — Bundled tech pushes (GATE_TECH_PUSH_BUNDLE). A burst of
+  // visit changes (an office script, many single moves in a row) sends each
+  // tech ONE push once their changes go quiet, not one per visit. No
+  // runExclusive on purpose: the flush claims its cards in one UPDATE, so
+  // overlapping deploy instances never push the same cards, and no lock is
+  // held across a push (owner ruling 2026-09-30, #5421). It runs with the
+  // gate off too, so cards held before a flip still go out.
+  // =========================================================================
+  cron.schedule('* * * * *', async () => {
+    try {
+      await require('./tech-visit-notifications').flushBundledPushes();
+    } catch (err) {
+      logger.error(`[tech-push-bundle] sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 15 MIN — Storm watch. Probes the NWS hourly forecast at the
   // CUSTOMER coordinates of each tech's upcoming stops and nudges the
   // tech (tech_notifications, same channel as geofence prompts) when

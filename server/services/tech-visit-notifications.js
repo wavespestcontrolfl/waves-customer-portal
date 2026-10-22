@@ -54,6 +54,18 @@ const GATE = 'GATE_TECH_VISIT_NOTIFICATIONS';
 // once is fine"). Read at call time; unset = one push per visit, as before.
 const SUMMARY_GATE = 'GATE_AUTO_DISPATCH_PUSH_SUMMARY';
 const AUTO_DISPATCH_ACTOR_TEXT = 'by auto-dispatch';
+// A burst from any other mover — an office script, many single moves in a
+// row — gets the same treatment (owner 2026-10-22: "the dispatch alerts need
+// to be bundled in one alert", after one script's 17 moves sent 17 pushes).
+// With this gate on, every other card is still written at once, but its push
+// is held, and the every-minute sweep (flushBundledPushes, scheduler.js)
+// sends ONE push per tech once their changes go quiet. Read at call time;
+// unset = one push per visit, as before.
+const BUNDLE_GATE = 'GATE_TECH_PUSH_BUNDLE';
+// A tech's held pushes go out once no new card has landed for this long, or
+// once the oldest has waited the longer bound even while cards keep coming.
+const BUNDLE_QUIET_MS = 60 * 1000;
+const BUNDLE_MAX_WAIT_MS = 5 * 60 * 1000;
 
 const KINDS = Object.freeze(['assigned', 'unassigned', 'rescheduled', 'cancelled']);
 // Lifecycle states with nothing left to announce for an assignment/move card.
@@ -380,6 +392,22 @@ async function prepareNotice({
 // whatever the row holds by delivery time; the row supplies the rest
 // (customer, service, address) and — for a moved-off card — who holds the
 // visit NOW, so rapid A→B→C never tells A "Now with B".
+// A held card says so on the row itself, so the summary or the sweep claims
+// it from the database and a crash never loses it (Codex #5786 P2): an
+// auto-dispatch card names its run; a bundled card keeps what its own push
+// is re-checked against, so a bundle of ONE visit sends exactly the push it
+// would have sent.
+function heldPayload(notice, payload) {
+  if (notice.holdForRun) return { ...payload, push_held_run: notice.holdForRun };
+  if (notice.holdForBundle) {
+    return {
+      ...payload,
+      push_bundle: { kind: notice.kind, snapshot: notice.snapshot || null, previous_status: notice.previousStatus || null },
+    };
+  }
+  return payload;
+}
+
 async function writeCard(notice) {
   return db.transaction(async (trx) => {
     const row = await loadVisit(notice.visitId, trx, { lock: true });
@@ -402,10 +430,7 @@ async function writeCard(notice) {
       technician_id: notice.technicianId,
       type: notice.type,
       message: card.message,
-      // An auto-dispatch card whose push is held (deliver) says so on the row
-      // itself, with its run: the summary claims it from the database, so a
-      // crash mid-run never loses it (Codex #5786 P2).
-      payload: JSON.stringify(notice.holdForRun ? { ...card.payload, push_held_run: notice.holdForRun } : card.payload),
+      payload: JSON.stringify(heldPayload(notice, card.payload)),
     }).returning('id');
     // The inserted row's id: the push recheck asks whether a NEWER card for
     // the same tech and visit exists (pushStillCurrent).
@@ -493,8 +518,12 @@ async function deliver(notices) {
   // An auto-dispatch card's push is held for the run's one summary push; the
   // decision is made once, before the write, and recorded on the row.
   const holdRun = currentAutoDispatchRun && gateEnvValue(SUMMARY_GATE) ? currentAutoDispatchRun : null;
+  // Every other card's push waits for its tech's bundle (same once-only rule).
+  const bundle = !!gateEnvValue(BUNDLE_GATE);
   for (const raw of notices.filter((x) => x && x.ok)) {
-    const n = holdRun && raw.actorText === AUTO_DISPATCH_ACTOR_TEXT ? { ...raw, holdForRun: holdRun } : raw;
+    let n = raw;
+    if (holdRun && raw.actorText === AUTO_DISPATCH_ACTOR_TEXT) n = { ...raw, holdForRun: holdRun };
+    else if (bundle) n = { ...raw, holdForBundle: true };
     try {
       const card = await writeCard(n);
       if (card) written.push({ ...n, cardId: card.id || null });
@@ -504,7 +533,7 @@ async function deliver(notices) {
     }
   }
   for (const n of written) {
-    if (n.holdForRun) continue;
+    if (n.holdForRun || n.holdForBundle) continue;
     await pushCard(n, { checkCurrent: (conn) => pushStillCurrent(n, conn) });
   }
   return { written: written.length, dropped };
@@ -738,6 +767,136 @@ async function pushAutoDispatchSummary({ runId } = {}) {
   }
 }
 
+// One line, no customer details on the lock screen (PUSH_TITLE_BY_KIND).
+function bundleTitle(kinds) {
+  const n = kinds.length;
+  const only = new Set(kinds).size === 1 ? kinds[0] : null;
+  if (only === 'rescheduled') return `${n} visits on your route moved`;
+  if (only === 'assigned') return `You have ${n} new visits on your route`;
+  if (only === 'unassigned') return `${n} visits were moved off your route`;
+  if (only === 'cancelled') return `${n} visits on your route were cancelled`;
+  return `${n} visits on your route changed`;
+}
+
+const BUNDLE_HELD_SQL = "payload->>'push_bundle' IS NOT NULL";
+const CLAIM_OPEN_SQL = "(payload->>'push_claimed_at' IS NULL OR (payload->>'push_claimed_at')::timestamptz < ?)";
+
+// The held cards of every tech whose bundle is due — no new card for
+// BUNDLE_QUIET_MS, or the oldest waiting BUNDLE_MAX_WAIT_MS — claimed in ONE
+// update with the run summary's lease, so two instances never push the same
+// cards. Resolves to the claimed rows, payload parsed.
+async function claimDueBundles(now) {
+  const types = Object.values(TYPE_BY_KIND);
+  const leaseCutoff = new Date(now.getTime() - HELD_CLAIM_LEASE_MS);
+  const held = await db('tech_notifications')
+    .whereIn('type', types)
+    .whereNull('dismissed_at')
+    .whereRaw(BUNDLE_HELD_SQL)
+    .whereRaw(CLAIM_OPEN_SQL, [leaseCutoff])
+    .select('id', 'technician_id', 'created_at');
+  const spans = new Map();
+  for (const row of held) {
+    if (!row || !row.technician_id) continue;
+    const at = new Date(row.created_at).getTime();
+    const span = spans.get(String(row.technician_id)) || { oldest: at, newest: at };
+    spans.set(String(row.technician_id), { oldest: Math.min(span.oldest, at), newest: Math.max(span.newest, at) });
+  }
+  const due = new Set([...spans]
+    .filter(([, { oldest, newest }]) => now.getTime() - newest >= BUNDLE_QUIET_MS || now.getTime() - oldest >= BUNDLE_MAX_WAIT_MS)
+    .map(([technicianId]) => technicianId));
+  const ids = held.filter((row) => row && due.has(String(row.technician_id))).map((row) => row.id);
+  if (!ids.length) return [];
+  const claimed = await db('tech_notifications')
+    .whereIn('id', ids)
+    .whereNull('dismissed_at')
+    .whereRaw(BUNDLE_HELD_SQL)
+    .whereRaw(CLAIM_OPEN_SQL, [leaseCutoff])
+    .update({ payload: db.raw("payload || jsonb_build_object('push_claimed_at', ?::text)", [now.toISOString()]), updated_at: now })
+    .returning(['id', 'technician_id', 'payload', 'created_at']);
+  return claimed.filter((row) => row && row.technician_id)
+    .map((row) => ({ ...row, payload: typeof row.payload === 'string' ? JSON.parse(row.payload) : (row.payload || {}) }));
+}
+
+// ONE push for one tech's claimed cards. Resolves true when a device got it;
+// throws when every device refused (keep the bundle for a retry, the run
+// summary's rule).
+async function sendBundle(technicianId, rows) {
+  // One entry per visit, its newest card: a visit moved twice is one change.
+  const ordered = [...rows].sort((a, b) => new Date(a.created_at) - new Date(b.created_at) || String(a.id).localeCompare(String(b.id)));
+  const visits = [...new Map(ordered.map((row) => [String(row.payload.visit_id), row])).values()];
+  if (visits.length === 1) {
+    const { id, payload } = visits[0];
+    const held = payload.push_bundle || {};
+    const notice = {
+      visitId: payload.visit_id,
+      kind: held.kind,
+      technicianId,
+      snapshot: held.snapshot || null,
+      previousStatus: held.previous_status || null,
+      cardId: id,
+      pushTitle: PUSH_TITLE_BY_KIND[held.kind],
+    };
+    // Exactly the per-visit push, re-checked at the provider boundary; like
+    // any per-visit push it never throws and is not retried.
+    await pushCard(notice, { checkCurrent: (conn) => pushStillCurrent(notice, conn) });
+    return true;
+  }
+  const PushService = require('./push-notifications');
+  const result = await PushService.sendToAdminUser(technicianId, {
+    title: bundleTitle(visits.map((row) => (row.payload.push_bundle || {}).kind)),
+    body: '',
+    url: '/admin/today',
+    tag: `route-changes-${ordered[0].id}`,
+    priority: 'high',
+  });
+  const total = Number(result?.subscriptions) || 0;
+  if (total > 0 && !(Number(result?.sent) > 0)) throw new Error(`no device accepted the push (${total} tried)`);
+  return total > 0;
+}
+
+/**
+ * The every-minute sweep (scheduler.js) for bundled pushes: each tech whose
+ * held cards are due gets ONE push (sendBundle). No lock is held across a
+ * push (owner ruling 2026-09-30, #5421); a failed push releases the claim
+ * for the next tick. It runs with the gate off too, so cards held before a
+ * flip still go out; only the notifications kill switch drops them.
+ * Best-effort; never throws.
+ */
+async function flushBundledPushes({ now = new Date() } = {}) {
+  try {
+    if (!enabled()) {
+      await db('tech_notifications')
+        .whereIn('type', Object.values(TYPE_BY_KIND))
+        .whereRaw(BUNDLE_HELD_SQL)
+        .update({ payload: db.raw("payload - 'push_bundle' - 'push_claimed_at'"), updated_at: now });
+      return { pushed: 0 };
+    }
+    const byTech = new Map();
+    for (const row of await claimDueBundles(now)) {
+      const key = String(row.technician_id);
+      byTech.set(key, [...(byTech.get(key) || []), row]);
+    }
+    let pushed = 0;
+    for (const [technicianId, rows] of byTech) {
+      const cardIds = rows.map((row) => row.id);
+      try {
+        if (await sendBundle(technicianId, rows)) pushed += 1;
+        await db('tech_notifications').whereIn('id', cardIds)
+          .update({ payload: db.raw("payload - 'push_bundle' - 'push_claimed_at'"), updated_at: new Date() });
+      } catch (err) {
+        logger.warn(`[tech-visit-notifications] bundled push failed for tech ${technicianId}: ${err.message}`);
+        await db('tech_notifications').whereIn('id', cardIds)
+          .update({ payload: db.raw("payload - 'push_claimed_at'"), updated_at: new Date() })
+          .catch((releaseErr) => logger.warn(`[tech-visit-notifications] bundle claim release failed (${errorTag(releaseErr)}); it expires on its own`));
+      }
+    }
+    return { pushed };
+  } catch (err) {
+    logger.warn(`[tech-visit-notifications] bundled push sweep failed (${errorTag(err)})`);
+    return { pushed: 0 };
+  }
+}
+
 // Follow-through shares the staff notification and push paths. Its live
 // card is rendered by the shared feed, so it needs no separate Got it tap.
 async function recordTrackingNotice(trx, { visitId, technicianId, stage, dedupeKey, message, payload }) {
@@ -816,5 +975,9 @@ module.exports = {
   pushAutoDispatchSummary,
   beginAutoDispatchRun,
   SUMMARY_GATE,
+  flushBundledPushes,
+  BUNDLE_GATE,
+  BUNDLE_QUIET_MS,
+  BUNDLE_MAX_WAIT_MS,
   _test: { setCurrentAutoDispatchRun: (id) => { currentAutoDispatchRun = id; }, formatWhen, composeCard, describeActor, visitQueues, pushStillCurrent, newerCardExists },
 };
