@@ -6965,6 +6965,8 @@ router.get('/', async (req, res, next) => {
       // 404s (GH codex #3843 r1 P1). Split/Separate stay ungated.
       visitGroups: isEnabled('visitGroups'),
       visitCloseout: legacyCloseoutEnabled,
+      // GATE_DISPATCH_FIND_TIME_PANEL: shows the Dispatch board's "Find a time" button.
+      findTimePanel: isEnabled('dispatchFindTimePanel'),
       techSummary: Object.values(byTech),
       unassigned,
       technicians,
