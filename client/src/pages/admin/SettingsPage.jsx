@@ -1346,6 +1346,7 @@ function BlackoutDaysTab() {
               <div className="font-medium text-zinc-900">{h.name}</div>
               <div className="text-ui-caption text-ink-secondary u-nums">
                 Next: {fmtDay(h.date)}
+                {h.observed ? " (observed)" : ""}
                 {h.observedDate ? ` · observed ${fmtDay(h.observedDate)}` : ""}
               </div>
             </div>

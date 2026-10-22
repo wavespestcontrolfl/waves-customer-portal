@@ -101,9 +101,9 @@ describe('upcomingHolidays (the settings list)', () => {
   test('lists all 14 by their next date, from today', () => {
     const list = upcomingHolidays('2026-10-22');
     expect(list).toHaveLength(14);
-    expect(list[0]).toEqual({ key: 'veterans_day', name: 'Veterans Day', date: '2026-11-11', observedDate: null });
+    expect(list[0]).toEqual({ key: 'veterans_day', name: 'Veterans Day', date: '2026-11-11', observed: false, observedDate: null });
     expect(list.find((h) => h.key === 'independence_day'))
-      .toEqual({ key: 'independence_day', name: '4th of July', date: '2027-07-04', observedDate: '2027-07-05' });
+      .toEqual({ key: 'independence_day', name: '4th of July', date: '2027-07-04', observed: false, observedDate: '2027-07-05' });
     expect(list.find((h) => h.key === 'new_years_eve').date).toBe('2026-12-31');
     expect(list.at(-1)).toMatchObject({ key: 'labor_day', date: '2027-09-06' });
     expect(list.map((h) => h.date)).toEqual([...list.map((h) => h.date)].sort());
@@ -114,9 +114,25 @@ describe('upcomingHolidays (the settings list)', () => {
     expect(upcomingHolidays('2026-11-27').find((h) => h.key === 'thanksgiving').date).toBe('2027-11-25');
   });
 
-  test('a Saturday New Year’s Day shows its observed Friday in the old year', () => {
-    expect(upcomingHolidays('2027-12-31').find((h) => h.key === 'new_years_day'))
-      .toEqual({ key: 'new_years_day', name: "New Year's Day", date: '2028-01-01', observedDate: '2027-12-31' });
+  test('a Saturday New Year’s Day shows its observed Friday in the old year, and sorts by it', () => {
+    const list = upcomingHolidays('2027-12-31');
+    expect(list.find((h) => h.key === 'new_years_day'))
+      .toEqual({ key: 'new_years_day', name: "New Year's Day", date: '2028-01-01', observed: false, observedDate: '2027-12-31' });
+    expect(list.slice(0, 2).map((h) => h.key)).toEqual(['new_years_day', 'new_years_eve']); // both close Fri Dec 31
+  });
+
+  test('never a past day: on the Monday a Sunday holiday is observed, that Monday is next', () => {
+    expect(upcomingHolidays('2027-07-05').find((h) => h.key === 'independence_day'))
+      .toEqual({ key: 'independence_day', name: '4th of July', date: '2027-07-05', observed: true, observedDate: null });
+    // A Saturday holiday seen on its own day: the Friday it was observed is past.
+    expect(upcomingHolidays('2026-07-04').find((h) => h.key === 'independence_day'))
+      .toEqual({ key: 'independence_day', name: '4th of July', date: '2026-07-04', observed: false, observedDate: null });
+    for (const today of ['2026-07-04', '2027-07-05', '2027-12-25', '2027-12-31']) {
+      for (const h of upcomingHolidays(today)) {
+        expect(h.date >= today).toBe(true);
+        if (h.observedDate) expect(h.observedDate >= today).toBe(true);
+      }
+    }
   });
 
   test('a bad date returns nothing', () => {

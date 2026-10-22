@@ -80,8 +80,9 @@ function fixtureFor(url, options = {}) {
       blackouts: [{ id: "day-1", date: "2026-12-25", reason: "Holiday" }],
       weeklyDaysOff: [0],
       holidays: [
-        { key: "thanksgiving", name: "Thanksgiving", date: "2026-11-26", observedDate: null, closed: false },
-        { key: "independence_day", name: "4th of July", date: "2027-07-04", observedDate: "2027-07-05", closed: false },
+        { key: "thanksgiving", name: "Thanksgiving", date: "2026-11-26", observed: false, observedDate: null, closed: false },
+        { key: "independence_day", name: "4th of July", date: "2027-07-04", observed: false, observedDate: "2027-07-05", closed: false },
+        { key: "christmas", name: "Christmas", date: "2027-12-24", observed: true, observedDate: null, closed: false },
       ],
     };
   }
@@ -189,6 +190,7 @@ describe("Settings new UI foundation", () => {
     mount("blackout-days");
     await screen.findByText("Thanksgiving");
     expect(screen.getByText(/observed Mon, Jul 5, 2027/)).toBeInTheDocument();
+    expect(screen.getByText(/Fri, Dec 24, 2027 \(observed\)/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "4th of July open" })).toHaveAttribute("aria-pressed", "false");
     fireEvent.click(screen.getByRole("button", { name: "Thanksgiving open" }));
     await waitFor(() => expect(fetch.mock.calls.some(([url, options]) =>

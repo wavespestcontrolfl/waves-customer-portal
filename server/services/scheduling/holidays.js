@@ -127,23 +127,35 @@ function isClosedHoliday(dateValue, closedKeys) {
   return holidayKeysOn(dateValue).some((key) => closedKeys.has(key));
 }
 
-// The next time each holiday comes around, on or after todayStr, for the
-// settings list: [{ key, name, date, observedDate }] in date order.
-// observedDate is the weekday that closes in its place, else null.
+// The next time each holiday comes around, for the settings list:
+// [{ key, name, date, observed, observedDate }] in date order, never a day
+// before todayStr. `date` is the holiday's own day; `observedDate` is the
+// weekday that also closes for it while that day is still ahead, else null.
+// When the own day is past but its observed weekday is not (a Sunday holiday,
+// seen on its Monday), the observed weekday becomes `date` and `observed`
+// is true.
 function upcomingHolidays(todayStr) {
   if (!isDateStr(todayStr)) return [];
   const thisYear = Number(todayStr.slice(0, 4));
   const upcoming = [];
   for (const holiday of HOLIDAYS) {
     for (let year = thisYear - 1; year <= thisYear + 1; year++) {
-      const days = holidayDays(holiday, year);
-      if (!days.some((day) => day.date >= todayStr)) continue;
-      const observed = days.find((day) => day.observed);
-      upcoming.push({ key: holiday.key, name: holiday.name, date: days[0].date, observedDate: observed ? observed.date : null });
+      const [own, observed] = holidayDays(holiday, year);
+      const observedAhead = !!observed && observed.date >= todayStr;
+      if (own.date >= todayStr) {
+        upcoming.push({ key: holiday.key, name: holiday.name, date: own.date, observed: false,
+          observedDate: observedAhead ? observed.date : null });
+      } else if (observedAhead) {
+        upcoming.push({ key: holiday.key, name: holiday.name, date: observed.date, observed: true, observedDate: null });
+      } else {
+        continue;
+      }
       break;
     }
   }
-  return upcoming.sort((a, b) => a.date.localeCompare(b.date));
+  // A Saturday holiday closes its Friday first: order by the earliest day.
+  const firstDay = (h) => (h.observedDate && h.observedDate < h.date ? h.observedDate : h.date);
+  return upcoming.sort((a, b) => firstDay(a).localeCompare(firstDay(b)) || a.key.localeCompare(b.key));
 }
 
 // The stored closure list as a Set of known holiday keys. Malformed values
