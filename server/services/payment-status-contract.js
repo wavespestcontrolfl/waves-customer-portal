@@ -660,12 +660,33 @@ function remainderHasMoney(remainder) {
   try { return !!require('./sms-suggest-mode').hasPriceQuote(text); } catch { return true; }
 }
 
+// COMPANY FACTS money policy (owner 2026-10-22, Codex #6447 r1): the paying and prepay-refund lines are fixed policy for every
+// customer, not an account status. A complete, stand-alone copy of one of their sentences (a lead label such as "Paying:" may be
+// dropped) is removed before the detectors read the rest; a paraphrase is still judged, so it is still held.
+let companyPolicySentenceCache = null;
+function companyPolicySentences() {
+  if (!companyPolicySentenceCache) {
+    const out = new Set();
+    for (const fact of require('./sms-company-facts').COMPANY_FACTS) {
+      for (const sentence of fact.split(/(?<=[.!?])\s+/)) {
+        if (!TOPIC_RE.test(sentence) || MONEY_FIGURE_RE.test(sentence) || ZELLE_WORD_RE.test(sentence)) continue;
+        out.add(sentence);
+        const text = /^[A-Z][^:.]{0,40}:\s+(.+)$/.exec(sentence);
+        if (text) out.add(text[1]);
+      }
+    }
+    companyPolicySentenceCache = [...out].sort((a, b) => b.length - a.length);
+  }
+  return companyPolicySentenceCache;
+}
+const withoutCompanyPolicyCopies = (text) => withoutCopies(text, companyPolicySentences());
+
 function checkPaymentStatusReply({ reply, sentences, inboundText = null, scopeTexts = [], scoped = false }) {
   const texts = (sentences || []).map((s) => (typeof s === 'string' ? s : s.text));
   const text = String(reply ?? '');
   if (text.length > MAX_REPLY_CHARS) return { ok: false, copied: [], remainder: canonText(text) };
   const copied = copiedSentences(text, texts);
-  const remainder = withoutCopies(text, copied);
+  const remainder = withoutCompanyPolicyCopies(withoutCopies(text, copied));
   const ok = !copiesOffTarget(copied, inboundText) && !remainderHasMoney(remainder) && !assertsPaymentStatus(remainder, { inboundText, scopeTexts, scoped });
   return { ok, copied, remainder };
 }
@@ -834,6 +855,7 @@ function paymentStatusSnapshotFor({ customerId = null, sentences, reply, inbound
 }
 
 module.exports = {
+  withoutCompanyPolicyCopies,
   sentenceFamily,
   familyCounts,
   copiesOffTarget,

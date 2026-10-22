@@ -16,7 +16,7 @@ const { WAVES_BRAND_NAME, WAVES_ADDRESS_LINE } = require('../constants/business'
 const COMPANY_FACTS_HEADER = 'COMPANY FACTS (owner-approved; state these plainly):';
 
 const COMPANY_FACTS = Object.freeze([
-  'The first pest visit includes an inside spray. After that, the inside is up to the customer: we treat it at any visit they ask, at no extra charge.',
+  'The first pest visit includes an inside spray. After that, the inside is up to the customer: we treat it whenever they ask.',
   'The customer does not need to be home for the exterior treatment. For the inside spray, someone needs to be home, or the customer leaves us access.',
   'Regular pest visits include the lanai and the pool cage.',
   'Wasps, mud daubers and hornet nests on the house are included on regular pest visits.',
@@ -26,7 +26,7 @@ const COMPANY_FACTS = Object.freeze([
   'Rain: a treatment needs to dry and bond to surfaces; after that it holds up to weather.',
   'Lawn program: fertilizer, weed control and insect control only. No mowing. Treatments follow a seasonal rotation. Never name product brands.',
   'Watering advice you may give: follow the county\'s watering days, water early in the morning, and water deeply and less often.',
-  `Paying: technicians do not take payment at the visit. Customers pay by the card or bank account on file, or by check, cash or Zelle through the office. For Zelle details, ask the office. Checks are mailed to ${WAVES_BRAND_NAME}, ${WAVES_ADDRESS_LINE}.`,
+  `Paying: technicians do not take payment at the visit. Customers pay by the card or bank account on file, or by check or cash through the office. Checks are mailed to ${WAVES_BRAND_NAME}, ${WAVES_ADDRESS_LINE}.`,
   // Service knowledge (owner-approved 2026-10-03; each line restates an earlier ruling).
   // Scoped to what holds for EVERY customer the line could reach (Codex #5723 r1): the
   // German roach cleanout runs 2-4 visits by severity; pay-after-first-visit is the

@@ -151,7 +151,7 @@ describe('answer-book facts (owner 2026-10-21/22)', () => {
   const section = () => renderCompanyFactsSection();
   const { RETIRED_COMPANY_FACT_LINES } = require('../services/sms-company-facts');
   const NEW_LINES = [
-    'The first pest visit includes an inside spray. After that, the inside is up to the customer: we treat it at any visit they ask, at no extra charge.',
+    'The first pest visit includes an inside spray. After that, the inside is up to the customer: we treat it whenever they ask.',
     'After the second visit of a German roach cleanout, if live German roaches are still active, we treat again at no charge, as often as it takes.',
     'Rodent trapping includes the setup visit and one trap check. More trap checks cost extra.',
     'There is no long-term contract. A customer can cancel any time.',
@@ -168,7 +168,7 @@ describe('answer-book facts (owner 2026-10-21/22)', () => {
   test('the payment line replaces the old card-only wording and keeps the mailing address', () => {
     const pay = COMPANY_FACTS.find((f) => f.startsWith('Paying:'));
     expect(pay).toContain('technicians do not take payment at the visit');
-    expect(pay).toContain('card or bank account on file, or by check, cash or Zelle through the office');
+    expect(pay).toContain('card or bank account on file, or by check or cash through the office');
     expect(pay).toContain(`Checks are mailed to`);
     expect(pay).toContain(WAVES_ADDRESS_LINE);
     expect(section()).not.toMatch(/accept cards at the visit|never cash/);
@@ -446,5 +446,51 @@ describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
     expect(facts.hasExactLabelFacts(oldBlock)).toBe(false);
     expect(hasExactCompanyFacts(blockWith(facts.renderCompanyFactsSection()))).toBe(true);
     expect(facts.hasExactLabelFacts(blockWith(facts.renderCompanyFactsSection()))).toBe(true);
+  });
+});
+
+// Codex #6447 r1: each answer-book line must be usable by the guards that read a reply.
+describe('answer-book facts pass the reply guards (Codex #6447 r1)', () => {
+  const paymentStatus = require('../services/payment-status-contract');
+  const { isReserviceOfferPromise } = require('../services/sms-shadow-drafter');
+  const { retiredCompanyFactBlock } = require('../services/agent-decision-send-checks');
+  const { RETIRED_COMPANY_FACT_LINES } = require('../services/sms-company-facts');
+  const PAY = 'Technicians do not take payment at the visit.';
+  const REFUND = 'A customer who prepays the year and cancels within 90 days gets a refund for the visits not yet done.';
+  const payOk = (reply, inboundText) => paymentStatus.checkPaymentStatusReply({ reply, sentences: [], inboundText }).ok;
+
+  test('the inside-spray line is not a free re-service promise', () => {
+    expect(isReserviceOfferPromise(COMPANY_FACTS[0])).toBe(false);
+    expect(isReserviceOfferPromise('After that, the inside is up to you: we treat it whenever you ask.')).toBe(false);
+  });
+  test('no COMPANY FACTS line mentions Zelle: Zelle is only ever the Payment status sentence', () => {
+    for (const f of COMPANY_FACTS) expect(f).not.toMatch(/zelle/i);
+  });
+  test('a verbatim paying or prepay-refund sentence is policy, not a payment status', () => {
+    for (const inbound of ['how do I pay?', 'Do I get a refund if I cancel?', null]) {
+      expect(payOk(PAY, inbound)).toBe(true);
+      expect(payOk(REFUND, inbound)).toBe(true);
+      expect(payOk(`Hi! ${REFUND} Let us know if you have questions.`, inbound)).toBe(true);
+    }
+  });
+  test('a paraphrase, an added status or a framed copy is still held', () => {
+    const inbound = 'Do I get a refund if I cancel?';
+    expect(payOk('If you cancel within 90 days, you get a refund for unused visits.', inbound)).toBe(false);
+    expect(payOk(`Your refund was processed. ${REFUND}`, inbound)).toBe(false);
+    expect(payOk(`${REFUND} That is outdated though, you were refunded.`, inbound)).toBe(false);
+  });
+  test('the send recheck reads a verbatim policy sentence the same way', async () => {
+    const { paymentStatusVerdict } = require('../services/sms-amount-recheck');
+    expect((await paymentStatusVerdict({ customerId: 'c1', body: REFUND, snapshot: null, inboundMessage: 'refund?' })).reason).toBeNull();
+    expect((await paymentStatusVerdict({ customerId: 'c1', body: 'Your refund went through.', snapshot: null, inboundMessage: 'refund?' })).reason)
+      .toBe('payment_status_unauthorized');
+  });
+  test('an older draft that repeats the retired payment policy is refused at send', () => {
+    for (const body of [
+      RETIRED_COMPANY_FACT_LINES[10], 'Our techs take cards at the visit.', 'We don’t accept cash.', 'Card only, never cash!', 'We do not take cash.',
+    ]) expect(retiredCompanyFactBlock({ outgoingBody: body })).toMatch(/company fact retired/);
+    for (const body of [COMPANY_FACTS[10], PAY, 'You can pay cash or a check through the office.', 'See you Tuesday!']) {
+      expect(retiredCompanyFactBlock({ outgoingBody: body })).toBeNull();
+    }
   });
 });

@@ -197,8 +197,8 @@ const REAL_ANSWERS_VERSION_FAMILY = 'house_voice_v12_real_answers';
 // still answers what the facts cover; conflicting dates are confirmed, not picked). Prompt
 // text only: both numbers move ("13" / "14"), same fact key 'n'.
 // ANSWER BOOK FACTS (owner 2026-10-21/22): two COMPANY FACTS lines reworded (inside spray, paying)
-// and ten appended (roach guarantee, rodent trap checks, no contract, prepay refund, service area,
-// WDO report, no tenting, lawn mow/water wait, weed timing, product labels). The exact render changed,
+// and nine appended (roach re-treat, rodent trap checks, no contract, prepay refund, service area,
+// WDO report, no tenting, mowing per the visit card, product labels). The exact render changed,
 // so both numbers move ("15" / "16"); same fact key 'n', no new section.
 const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}15_n`;
 // NEXT OF SERIES (#6172, 2026-10-08): with GATE_SMS_OFFERS_SCHEDULER on, an unnamed

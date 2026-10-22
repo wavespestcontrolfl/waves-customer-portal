@@ -164,9 +164,26 @@ async function labelFactsBlock({ decision, outgoingBody }) {
   return reason ? `label timing no longer current (${reason})` : null;
 }
 
+// RETIRED COMPANY FACTS (owner 2026-10-22, Codex #6447 r1): a draft written before the answer-book rulings can still tell the
+// customer the old payment policy ("technicians accept cards at the visit, never cash"). Technicians now take no payment and cash
+// goes through the office, so a body that repeats the old policy is refused on every send path, whoever wrote the final body.
+const RETIRED_PAYMENT_POLICY_RE = new RegExp([
+  String.raw`\b(?:technicians?|techs?)\s+(?:will\s+|can\s+)?(?:accept|take)s?\s+(?:a\s+)?(?:credit\s+|debit\s+)?cards?\b`,
+  String.raw`\bnever\s+(?:take\s+|accept\s+)?cash\b`,
+  String.raw`\b(?:we|technicians?|techs?)\s+(?:do\s+not|don't|can't|cannot|won't)\s+(?:accept|take)\s+cash\b`,
+  String.raw`\bno\s+cash\b`,
+].join('|'), 'i');
+function retiredCompanyFactBlock({ outgoingBody }) {
+  const text = String(outgoingBody || '').replace(/[\u2018\u2019]/g, "'");
+  return RETIRED_PAYMENT_POLICY_RE.test(text) ? 'company fact retired (old payment policy)' : null;
+}
+
 // The scheduled-send version of the same check: the scheduler reads the decision row itself, and a row it cannot read (missing,
 // or not yet visible) must never mean "no snapshot, so send" - the reply guard cannot run without the decision, so it refuses.
+// It also carries the retired-company-fact check, which needs no decision read.
 async function scheduledLabelFactsBlock({ decision, outgoingBody }) {
+  const retired = retiredCompanyFactBlock({ outgoingBody });
+  if (retired) return retired;
   if (!decision) return 'label timing could not be checked (the agent decision was not found)';
   return labelFactsBlock({ decision, outgoingBody });
 }
@@ -622,6 +639,7 @@ async function scheduledOpenLoopsBlockReason({ agentDecisionId, dbh }) {
 async function agentDecisionSendBlockReason({ decision, outgoingBody }) {
   return (await openTimesBlock({ decision, outgoingBody }))
     || followupBlock({ decision, outgoingBody })
+    || retiredCompanyFactBlock({ outgoingBody })
     || (await labelFactsBlock({ decision, outgoingBody }))
     || (await amountsBlock({ decision, outgoingBody }))
     || (await reserviceBlock({ decision, outgoingBody }))
@@ -658,4 +676,4 @@ async function scheduledReserviceBlockReason({ agentDecisionId, outgoingBody, fa
   }
 }
 
-module.exports = { bodyIsStaffEdited, agentDecisionSendBlockReason, scheduledReserviceBlockReason, scheduledOpenLoopsBlockReason, openLoopsBlockReason, openLoopsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, gratitudeOpenLoopsProviderPreSendCheck, parseInputSnapshot, labelFactsBlock, scheduledLabelFactsBlock, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, amountsProviderPreSendCheck, billingFingerprintForSend, composeProviderPreSendChecks, markRepeatable, isLabelRecheckInfrastructureFailure, blockReasonIsLabelInfrastructure, blockReasonIsBillingInfrastructure, blockReasonIsRecheckInfrastructure };
+module.exports = { bodyIsStaffEdited, agentDecisionSendBlockReason, scheduledReserviceBlockReason, scheduledOpenLoopsBlockReason, openLoopsBlockReason, openLoopsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, gratitudeOpenLoopsProviderPreSendCheck, parseInputSnapshot, labelFactsBlock, scheduledLabelFactsBlock, retiredCompanyFactBlock, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, amountsProviderPreSendCheck, billingFingerprintForSend, composeProviderPreSendChecks, markRepeatable, isLabelRecheckInfrastructureFailure, blockReasonIsLabelInfrastructure, blockReasonIsBillingInfrastructure, blockReasonIsRecheckInfrastructure };
