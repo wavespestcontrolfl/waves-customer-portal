@@ -21,6 +21,7 @@ jest.mock('../middleware/admin-auth', () => ({
   requireAdmin: (_req, _res, next) => next(),
   requireTechOrAdmin: (_req, _res, next) => next(),
 }));
+jest.mock('../services/invoice-payer-ownership', () => ({ invoicePayerOwnership: jest.fn(async () => null) }));
 jest.mock('../services/payment-lifecycle-email', () => ({ sendPaymentPlanConfirmed: jest.fn(async () => ({ ok: true })) }));
 jest.mock('../services/invoice-followups', () => ({
   pauseSequence: jest.fn(async () => undefined),
@@ -247,11 +248,12 @@ describe('payment plans: the real create and cancel handlers', () => {
   let trxPlans;
   let trxFollowups;
   let lockedInvoice;
+  let lockedReminder;
 
   function wireDb() {
     trxInvoices = recorder({ first: async () => lockedInvoice });
     trxPlans = recorder({ insert: () => ({ returning: async () => [CREATED] }), first: async (...a) => (a[0] === 'status' ? { status: 'active' } : null) });
-    trxFollowups = recorder();
+    trxFollowups = recorder({ first: async () => lockedReminder });
     const trx = jest.fn((table) => ({ invoices: trxInvoices, payment_plans: trxPlans, invoice_followup_sequences: trxFollowups }[table]));
     trx.isTransaction = true;
     trx.raw = jest.fn((sql, bindings) => ({ __raw: sql, __bindings: bindings }));
@@ -266,6 +268,8 @@ describe('payment plans: the real create and cancel handlers', () => {
 
   beforeEach(() => {
     lockedInvoice = { ...INVOICE };
+    lockedReminder = { touch_claimed_at: null };
+    require('../services/invoice-payer-ownership').invoicePayerOwnership.mockResolvedValue(null);
     wireDb();
   });
 
@@ -303,6 +307,31 @@ describe('payment plans: the real create and cancel handlers', () => {
     expect(trxPlans.calls.filter(([n]) => n === 'insert')).toEqual([]);
     expect(trxFollowups.calls.filter(([n]) => n === 'update')).toEqual([]);
     expect(PaymentLifecycleEmail.sendPaymentPlanConfirmed).not.toHaveBeenCalled();
+  });
+
+  test('create: the bar’s plan is refused on the locked row when the live resolver names a payer (invoices.payer_id still NULL) or cannot answer; the page is not asked', async () => {
+    const Ownership = require('../services/invoice-payer-ownership');
+    for (const verdict of ['payer_owned', 'payer_unverifiable']) {
+      Ownership.invoicePayerOwnership.mockResolvedValue(verdict);
+      const result = await router.createPaymentPlanFromBar({ invoiceId: INV, body: BODY, actor: BAR_ACTOR, approvedPlan: { updatedAtMs: UPDATED_MS } });
+      expect(result.status).toBe(409);
+      expect(result.json).toMatchObject({ code: 'PREVIEW_CHANGED' });
+    }
+    expect(trxPlans.calls.filter(([n]) => n === 'insert')).toEqual([]);
+    expect(PaymentLifecycleEmail.sendPaymentPlanConfirmed).not.toHaveBeenCalled();
+    expect((await page('/payment-plan', BODY)).status).toBe(201);
+    expect(Ownership.invoicePayerOwnership).toHaveBeenCalledTimes(2);
+  });
+
+  test('create: the bar’s plan locks the reminder row and is refused while a reminder worker holds its claim; the page is not asked', async () => {
+    lockedReminder = { touch_claimed_at: new Date() };
+    const result = await router.createPaymentPlanFromBar({ invoiceId: INV, body: BODY, actor: BAR_ACTOR, approvedPlan: { updatedAtMs: UPDATED_MS } });
+    expect(result.status).toBe(409);
+    expect(result.json).toMatchObject({ code: 'PREVIEW_CHANGED' });
+    expect(called(trxFollowups, 'forUpdate')).not.toEqual([]);
+    expect(trxPlans.calls.filter(([n]) => n === 'insert')).toEqual([]);
+    expect(trxFollowups.calls.filter(([n]) => n === 'update')).toEqual([]);
+    expect((await page('/payment-plan', BODY)).status).toBe(201);
   });
 
   test('create: the page carries no pin, so an edited invoice still creates (unchanged), and its HTTP body cannot add one', async () => {

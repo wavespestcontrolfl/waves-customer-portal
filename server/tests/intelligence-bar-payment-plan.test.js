@@ -9,6 +9,7 @@
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/invoice-payer-ownership', () => ({ invoicePayerOwnership: jest.fn(async () => null) }));
 jest.mock('../routes/admin-invoices', () => ({
   createPaymentPlanFromBar: jest.fn(),
   cancelPaymentPlanFromBar: jest.fn(),
@@ -91,6 +92,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   state = freshState();
   db.mockImplementation(makeDb());
+  require('../services/invoice-payer-ownership').invoicePayerOwnership.mockResolvedValue(null);
   envGate(true);
   Invoices.getInvoiceDeliveryRecipients.mockResolvedValue({ customerName: 'Robin Sample', primaryContact: { phone: '+19415550142' }, emailRecipient: { email: 'robin.sample@example.com' } });
   Invoices.createPaymentPlanFromBar.mockResolvedValue({ status: 201, json: { ok: true, paymentPlan: { id: PLAN, status: 'active' }, email: { ok: true } } });
@@ -254,6 +256,9 @@ describe('create_payment_plan preview', () => {
     ['a first payment before the start', () => {}, { plan_start_date: '2099-03-01' }, 'invalid_plan'],
     ['a made-up start date', () => {}, { plan_start_date: '2099-13-01' }, 'invalid_plan'],
     ['more than 60 installments', (s) => { s.invoices[0].total = '5000.00'; }, { payment_amount: 50 }, 'too_many_installments'],
+    ['a payer found by the live resolver (invoices.payer_id is still NULL)', () => require('../services/invoice-payer-ownership').invoicePayerOwnership.mockResolvedValue('payer_owned'), { }, 'payer_owned'],
+    ['an ownership answer the bar cannot verify', () => require('../services/invoice-payer-ownership').invoicePayerOwnership.mockResolvedValue('payer_unverifiable'), { }, 'unverified'],
+    ['a reminder send in flight (a worker holds the claim)', (s) => { s.invoice_followup_sequences[0].touch_claimed_at = new Date(); }, { }, 'send_in_progress'],
   ])('refused: %s', async (_label, mutate, input, code) => {
     mutate(state);
     expect(await create(input)).toMatchObject({ code });

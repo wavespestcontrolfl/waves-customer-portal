@@ -375,7 +375,7 @@ describe('send_invoice_reminder_now', () => {
     expect(JSON.stringify(card)).not.toMatch(/9415550142|robin\.sample@/);
     expect(effectText(card)).toMatch(/Sends reminder step 1 of \d+/);
     expect(effectText(card)).toMatch(/unless the customer opted out, the collections policy blocks it, or that step was already delivered/);
-    expect(effectText(card)).toMatch(/inside the 8 AM to 8 PM text window/);
+    expect(effectText(card)).toMatch(/8 AM to 8 PM Eastern text window is checked again when you confirm/);
     expect(Invoices.sendReminderNowFromBar).not.toHaveBeenCalled();
     const [render] = SmsTemplates.getTemplate.mock.calls;
     expect(render[1]).toMatchObject({ first_name: 'Robin', amount: '129.00', pay_url: '[pay link]' });
@@ -387,6 +387,29 @@ describe('send_invoice_reminder_now', () => {
     expect(contract.notifies_customer).toBe(true);
     expect(contract.irreversible).toBe(true);
     expect(JSON.stringify(contract)).toMatch(/Text to \*\*\*0142/);
+  });
+
+  test('the card does not depend on the clock: a later minute fingerprints the same, so an open card still confirms', async () => {
+    const { previewFingerprint } = require('../services/intelligence-bar/authorization-contract');
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'queueMicrotask'] });
+    try {
+      jest.setSystemTime(new Date('2098-12-31T15:00:10Z'));
+      const first = await call('send_invoice_reminder_now');
+      jest.setSystemTime(new Date('2098-12-31T15:07:50Z'));
+      const later = await call('send_invoice_reminder_now');
+      expect(previewFingerprint(later)).toBe(previewFingerprint(first));
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('the card pins the whole rendered email: a different greeting or amount changes the pin and the approval digest', async () => {
+    const before = await call('send_invoice_reminder_now');
+    EmailLibrary.renderTemplate.mockReturnValue({ subject: 'A friendly reminder about your invoice', text: 'Hi Robin, your invoice WPC-2099-0002 has a balance of $99.00.' });
+    const after = await call('send_invoice_reminder_now');
+    expect(after._approved.emailRenderedDigest).not.toBe(before._approved.emailRenderedDigest);
+    expect(after._version.email_text).toBe(after._approved.emailRenderedDigest);
+    expect(after._version.email_text).not.toBe(before._version.email_text);
   });
 
   test('only one channel when the customer has no phone, or no usable email', async () => {
@@ -449,6 +472,7 @@ describe('send_invoice_reminder_now', () => {
       invoiceId: INV, actor: { technicianId: 'staff-1' },
       approvedReminder: {
         invoiceUpdatedAtMs: new Date('2099-01-01T12:00:00.123Z').getTime(), sequenceId: SEQ, status: 'active', stepIndex: 0, emailContentHash: 'hash-1', dueCents: 12900,
+        emailRenderedDigest: card._version.email_text,
         // What may go out, and the exact text: the send uses it as it is.
         channels: { sms: true, email: true }, smsBody: 'Hi Robin, a friendly reminder about your $129.00 invoice: [pay link]',
         // Digests only: the pin never carries the phone, the address or the text itself.

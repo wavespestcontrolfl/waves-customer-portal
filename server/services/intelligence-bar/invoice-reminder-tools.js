@@ -387,7 +387,9 @@ const PAY_LINK_TOKEN = '[pay link]';
 const lowerEmail = emailKey;
 const digitsOf = phoneKey;
 
-// The email leg as the card shows it. `recipientEmail` is the address the service pins whether or not a template exists.
+// The email leg as the card shows it. `recipientEmail` is the address the service pins whether or not a template exists. The
+// payload is built by the same function the send uses (invoice-followups followupEmailPayload) and the card pins the digest of
+// the whole rendered email, which the send re-renders and compares (a changed greeting, amount or wording refuses the leg).
 async function reminderEmail(step, customer, invoice) {
   const FollowUps = require('../invoice-followups');
   const { recipient, to, refusal: noRecipient } = await require('../billing-email-sender').operatorEmailRecipient(customer, 'ib-invoice-reminders');
@@ -395,28 +397,17 @@ async function reminderEmail(step, customer, invoice) {
   const templateKey = FollowUps.FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID[step.id];
   if (!templateKey) return { none: 'this step has no email', recipientEmail };
   if (noRecipient) return { none: 'no usable email is on file', recipientEmail };
-  const Library = require('../email-template-library');
-  const loaded = await Library.loadTemplateByKey(templateKey);
-  if (!loaded?.template || !loaded.activeVersion) return { none: 'the email template is not set up', recipientEmail };
   const { formatDateOnly } = require('../../utils/date-only');
-  const first = (v) => flat(v).split(/\s+/)[0] || '';
-  const serviceDate = formatDateOnly(invoice.service_date, { fallback: '' });
-  const payload = {
-    first_name: first(recipient.name) || first(customer.first_name) || 'there',
-    invoice_title: invoice.title || 'your service',
-    invoice_number: invoice.invoice_number || '',
-    amount_due: require('../email-template').currency(require('../invoice-helpers').invoiceAmountDue(invoice)),
-    due_date: formatDateOnly(invoice.due_date, { fallback: '' }),
-    service_date: serviceDate,
-    service_date_clause: invoice.service_date ? ` completed on ${serviceDate}` : '',
-    pay_url: PAY_LINK_TOKEN,
-    customer_portal_url: `${require('../../utils/portal-url').publicPortalUrl()}/?tab=billing`,
-  };
-  const rendered = Library.renderTemplate({ template: loaded.template, version: loaded.activeVersion, payload });
-  // The whole email, not just its subject and plain text: the template content hash covers every HTML block, the call to
-  // action, the wrapper and the sender. The send refuses a different hash (sendTemplate expectedContentHash).
-  const contentHash = Library.templateContentHash(loaded.template, loaded.activeVersion);
-  return { to, recipientEmail, templateKey, subject: flat(rendered.subject), text: String(rendered.text || '').trim(), contentHash };
+  const payload = FollowUps.followupEmailPayload({
+    recipient, customer, invoice,
+    invoiceTitle: invoice.title || 'your service',
+    invoiceNumber: invoice.invoice_number || '',
+    serviceDateClause: invoice.service_date ? ` completed on ${formatDateOnly(invoice.service_date, { fallback: '' })}` : '',
+    payUrl: PAY_LINK_TOKEN,
+  });
+  const fingerprint = await FollowUps.renderedEmailFingerprint(templateKey, payload);
+  if (!fingerprint) return { none: 'the email template is not set up', recipientEmail };
+  return { to, recipientEmail, templateKey, subject: fingerprint.subject, text: fingerprint.text, contentHash: fingerprint.contentHash, renderedDigest: fingerprint.digest };
 }
 
 // What the live customer, credit and bank state would change about the message: a refusal, or null (fail closed).
@@ -474,7 +465,7 @@ async function sendNowText(invoice, step, customer, dueCents) {
 function sendNowEffects({ seq, step, total }) {
   return [
     { kind: 'comms', text: `Sends reminder step ${seq.step_index + 1} of ${total}${step.label ? ` (${step.label})` : ''} now, even if the schedule had it for later (it was due ${seq.next_touch_at ? etWhen(seq.next_touch_at) : 'on its schedule'}). The following reminders then move on from that step.` },
-    { kind: 'comms', text: `Each channel is sent unless the customer opted out, the collections policy blocks it, or that step was already delivered; a blocked reminder is held and nothing goes out. It is ${etWhen(new Date())} now, inside the 8 AM to 8 PM text window.` },
+    { kind: 'comms', text: 'Each channel is sent unless the customer opted out, the collections policy blocks it, or that step was already delivered; a blocked reminder is held and nothing goes out. The 8 AM to 8 PM Eastern text window is checked again when you confirm.' },
     { kind: 'comms', text: `The pay link shown as ${PAY_LINK_TOKEN} is this invoice’s own pay link.` },
   ];
 }
@@ -489,6 +480,8 @@ function sendNowApproval({ invoice, seq, customer, sms, email, dueCents }) {
     // The balance the text and email state: the service refuses any other amount, and never draws credit on this send.
     dueCents,
     emailContentHash: email.none ? null : email.contentHash,
+    // The whole rendered email (greeting, amount, wording; the pay link as a token): the send re-renders and compares.
+    emailRenderedDigest: email.none ? null : email.renderedDigest,
     // What may go out, and the exact text: the send uses this body as it is and skips a channel that is not listed.
     channels: { sms: Boolean(sms), email: !email.none },
     smsBody: sms ? sms.body : null,
@@ -528,7 +521,7 @@ function sendNowCard({ invoice, seq, step, steps, dueCents, customer, sms, email
       step: step.id,
       recipients: digest({ phone: sms ? digitsOf(sms.phone) : null, email: email.none ? null : email.recipientEmail }),
       sms_text: sms ? digest(sms.body) : null,
-      email_text: email.none ? null : digest([email.templateKey, email.subject, email.text, email.contentHash]),
+      email_text: email.none ? null : email.renderedDigest,
     },
     note: 'PREVIEW ONLY — nothing was sent. Confirm sends exactly this; if anything changed it refuses.',
   };

@@ -43,6 +43,7 @@ jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(async () => ({ sent: true, message: { provider_message_id: 'sg-1', sent_at: '2099-01-05T14:00:00.000Z' } })),
   loadTemplateByKey: jest.fn(async () => ({ template: { template_key: 'invoice.followup_3_day' }, activeVersion: { id: 'v1' } })),
   templateContentHash: jest.fn(() => 'hash-1'),
+  renderTemplate: jest.fn(() => ({ subject: 'A friendly reminder', text: 'Hi Taylor, your invoice has a balance.' })),
 }));
 jest.mock('../services/customer-contact', () => ({
   getInvoiceEmailRecipients: jest.fn(() => [{ email: 'billing@example.com', name: 'Taylor' }]),
@@ -77,6 +78,8 @@ const APPROVED = {
   phoneDigest: approvalDigest('19415550101'), emailDigest: approvalDigest('billing@example.com'), smsDigest: approvalDigest(SMS_BODY),
   sequenceId: SEQ, status: 'active', stepIndex: 0, invoiceUpdatedAtMs: UPDATED.getTime(),
   channels: { sms: true, email: true }, smsBody: SMS_BODY, emailContentHash: 'hash-1', dueCents: 12900,
+  // The whole rendered email as the card pinned it (template key, subject, text, content hash).
+  emailRenderedDigest: approvalDigest(['invoice.followup_3_day', 'A friendly reminder', 'Hi Taylor, your invoice has a balance.', 'hash-1']),
 };
 
 let tables;
@@ -745,5 +748,40 @@ describe('the approved send holds the claim from the start, and draws no credit'
     const result = await sendNow({ approved: { ...APPROVED, dueCents: undefined }, report: true });
     expect(result).toMatchObject({ ok: false, reason: 'preview_changed' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+});
+
+// The card pins the whole rendered email, not just the template: the send re-renders with the live greeting, amount and wording
+// (the pay link as the card's token) and compares one digest before the email leg.
+describe('the card’s rendered email', () => {
+  const Library = require('../services/email-template-library');
+
+  test('the send renders the email as the card did and sends', async () => {
+    const result = await sendNow({ approved: APPROVED, report: true });
+    expect(result.report.legs.email).toEqual({ state: 'sent' });
+    const payload = Library.renderTemplate.mock.calls.pop()[0].payload;
+    expect(payload).toMatchObject({ first_name: 'Taylor', pay_url: '[pay link]', invoice_number: 'WPC-2099-0001' });
+  });
+
+  test('a greeting, amount or wording that renders differently now refuses the email leg; the text still goes (it is its own pin)', async () => {
+    Library.renderTemplate.mockReturnValue({ subject: 'A friendly reminder', text: 'Hi Taylor, your invoice has a balance of $109.00.' });
+    try {
+      const result = await sendNow({ approved: APPROVED, report: true });
+      expect(result.report.legs.email).toEqual({ state: 'skipped', reason: 'email_content_changed' });
+      expect(Library.sendTemplate).not.toHaveBeenCalled();
+    } finally {
+      Library.renderTemplate.mockReturnValue({ subject: 'A friendly reminder', text: 'Hi Taylor, your invoice has a balance.' });
+    }
+  });
+
+  test('a card that names the email but carries no rendered digest cannot send it', async () => {
+    for (const emailRenderedDigest of [null, '', undefined]) {
+      fresh();
+      install();
+      jest.clearAllMocks();
+      expect(await sendNow({ approved: { ...APPROVED, emailRenderedDigest }, report: true })).toMatchObject({ ok: false, reason: 'preview_changed' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(Library.sendTemplate).not.toHaveBeenCalled();
+    }
   });
 });

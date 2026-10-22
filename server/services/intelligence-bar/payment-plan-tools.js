@@ -157,11 +157,27 @@ const seqVersion = (seq) => (seq ? {
 
 // ── create_payment_plan ────────────────────────────────────────
 
+// Who owes the invoice RIGHT NOW (invoice-payer-ownership.js, the live Bill-To resolver, not the snapshot columns: a payer
+// assigned through the customer's default or the scheduled service leaves invoices.payer_id NULL). Only a verified
+// customer-owned invoice goes on; a payer-owned one, or an answer that cannot be verified, is refused (fail closed). The create
+// handler repeats the same check on the locked invoice row.
+async function livePayerRefusal(invoice) {
+  if (invoice.payer_id || require('../invoice-helpers').invoiceWithdrawnFromCustomer(invoice)) {
+    return refusal('Invoice is billed to a third-party payer — payment plans are not supported for payer invoices', 'payer_owned', { invoice_id: invoice.id });
+  }
+  const verdict = await require('../invoice-payer-ownership').invoicePayerOwnership(invoice, db);
+  if (verdict === null) return null;
+  return verdict === 'payer_owned'
+    ? refusal('Invoice is billed to a third-party payer — payment plans are not supported for payer invoices', 'payer_owned', { invoice_id: invoice.id })
+    : refusal('The bar could not verify who owes this invoice, so nothing was offered. Use the Invoices page for this one.', 'unverified', { invoice_id: invoice.id });
+}
+
 // The invoice-side refusals, in the route's order (then the bar's own), or null.
 async function createInvoiceRefusal(invoice) {
   const at = invoice.id;
   const { assertInvoiceCollectible } = require('../invoice-helpers');
-  if (invoice.payer_id) return refusal('Invoice is billed to a third-party payer — payment plans are not supported for payer invoices', 'payer_owned', { invoice_id: at });
+  const owner = await livePayerRefusal(invoice);
+  if (owner) return owner;
   try {
     assertInvoiceCollectible(invoice);
   } catch (err) {
@@ -245,6 +261,11 @@ async function buildCreatePlan(input) {
   if (!who) return refusal('Invoice not found', 'invoice_not_found');
   const email = who.emailRecipient?.email ? String(who.emailRecipient.email) : null;
   const seq = await db('invoice_followup_sequences').where({ invoice_id: invoice.id }).first();
+  // A reminder worker (cron or Send now) already owns the row: the plan would stop a row whose send is still going out. The
+  // create handler repeats this under the reminder-row lock.
+  if (seq?.touch_claimed_at) {
+    return refusal('A reminder for this invoice is being sent right now. Wait a minute, then ask again.', 'send_in_progress', { invoice_id: invoice.id });
+  }
   return {
     preview: true,
     tool: 'create_payment_plan',

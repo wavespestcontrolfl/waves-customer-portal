@@ -301,9 +301,10 @@ function approvedSendPlan(approved) {
   const email = approved.channels?.email === true;
   const body = typeof approved.smsBody === 'string' ? approved.smsBody : null;
   const smsValid = !sms || Boolean(body && body.includes(APPROVAL_PAY_LINK_TOKEN) && approvalDigest(body) === approved.smsDigest);
-  const emailValid = !email || (typeof approved.emailContentHash === 'string' && approved.emailContentHash.length > 0);
+  const emailValid = !email || (typeof approved.emailContentHash === 'string' && approved.emailContentHash.length > 0
+    && typeof approved.emailRenderedDigest === 'string' && approved.emailRenderedDigest.length > 0);
   const dueValid = Number.isInteger(approved.dueCents) && approved.dueCents > 0;
-  return { sms, email, body, emailContentHash: email ? approved.emailContentHash : null, valid: (sms || email) && smsValid && emailValid && dueValid };
+  return { sms, email, body, emailContentHash: email ? approved.emailContentHash : null, emailRenderedDigest: email ? approved.emailRenderedDigest : null, valid: (sms || email) && smsValid && emailValid && dueValid };
 }
 
 // Why the live recipients differ from the card's pin, or null.
@@ -347,10 +348,47 @@ async function logFollowupEmailAttempt({
   }
 }
 
+// The reminder email's merge values, built one way for the Intelligence Bar's card and for the send, so the card's rendered
+// subject and body are exactly what the send renders (the pay link is the only value that differs: a token on the card).
+function followupEmailPayload({ recipient, customer, invoice, invoiceTitle, invoiceNumber, serviceDateClause, payUrl }) {
+  return {
+    first_name: firstToken(recipient.name) || firstToken(customer.first_name) || 'there',
+    invoice_title: invoiceTitle,
+    invoice_number: invoiceNumber,
+    amount_due: currency(invoiceAmountDue(invoice)),
+    due_date: formatDateOnly(invoice.due_date, { fallback: '' }),
+    service_date: formatDateOnly(invoice.service_date, { fallback: '' }),
+    service_date_clause: serviceDateClause,
+    pay_url: payUrl,
+    customer_portal_url: `${publicPortalUrl()}/?tab=billing`,
+  };
+}
+
+// The rendered email for a payload: subject, plain text, the template content hash and one digest over all of them (what the
+// card pins). Null when the template is not set up.
+async function renderedEmailFingerprint(templateKey, payload) {
+  const Library = require('./email-template-library');
+  const loaded = await Library.loadTemplateByKey(templateKey);
+  if (!loaded?.template || !loaded.activeVersion) return null;
+  const rendered = Library.renderTemplate({ template: loaded.template, version: loaded.activeVersion, payload });
+  const subject = String(rendered.subject || '').replace(/\s+/g, ' ').trim();
+  const text = String(rendered.text || '').trim();
+  const contentHash = Library.templateContentHash(loaded.template, loaded.activeVersion);
+  return { subject, text, contentHash, digest: approvalDigest([templateKey, subject, text, contentHash]) };
+}
+
+// The send's own rendering against the card's digest (the pay link as the card's token): a changed greeting, amount or wording
+// since the card was shown refuses the leg before anything is sent.
+async function emailDriftRefusal(templateKey, payload, expectedEmailDigest) {
+  if (!expectedEmailDigest) return null;
+  const live = await renderedEmailFingerprint(templateKey, { ...payload, pay_url: APPROVAL_PAY_LINK_TOKEN }).catch(() => null);
+  return live && live.digest === expectedEmailDigest ? null : { ok: false, skipped: true, reason: 'email_content_changed' };
+}
+
 // expectedContentHash (the Intelligence Bar's send-now card only): the email template content hash the card showed
 // (email-template-library templateContentHash: subject, preview, every block, text body, wrapper, sender). sendTemplate refuses
 // a different one before anything is sent.
-async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference = true, expectedContentHash = null }) {
+async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference = true, expectedContentHash = null, expectedEmailDigest = null }) {
   const templateKey = FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID[step.id];
   if (!templateKey) return { ok: false, skipped: true, reason: 'no_email_template_mapping' };
 
@@ -380,17 +418,15 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
     : await operatorEmailRecipient(customer, 'invoice-followups');
   if (refusal) return refusal;
 
-  const payload = {
-    first_name: firstToken(recipient.name) || firstToken(customer.first_name) || 'there',
-    invoice_title: ctx.invoiceTitle || latestInvoice.title || latestInvoice.service_type || 'your service',
-    invoice_number: latestInvoice.invoice_number || row.invoice_number || '',
-    amount_due: currency(invoiceAmountDue(latestInvoice)),
-    due_date: formatDateOnly(latestInvoice.due_date, { fallback: '' }),
-    service_date: formatDateOnly(latestInvoice.service_date, { fallback: '' }),
-    service_date_clause: ctx.serviceDate ? ` completed on ${ctx.serviceDate}` : '',
-    pay_url: ctx.payUrl,
-    customer_portal_url: `${publicPortalUrl()}/?tab=billing`,
-  };
+  const payload = followupEmailPayload({
+    recipient, customer, invoice: latestInvoice,
+    invoiceTitle: ctx.invoiceTitle || latestInvoice.title || latestInvoice.service_type || 'your service',
+    invoiceNumber: latestInvoice.invoice_number || row.invoice_number || '',
+    serviceDateClause: ctx.serviceDate ? ` completed on ${ctx.serviceDate}` : '',
+    payUrl: ctx.payUrl,
+  });
+  const drifted = await emailDriftRefusal(templateKey, payload, expectedEmailDigest);
+  if (drifted) return drifted;
 
   const log = (fields) => logFollowupEmailAttempt({
     customerId: customer.id, invoiceId: row.invoice_id, stepId: step.id, templateKey, ...fields,
@@ -2070,7 +2106,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
               touchKey: step.id, // one branded verification email per follow-up step (same cadence as the SMS)
               enforceBillingPreference: !operatorInitiated,
             })
-          : await sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference: !operatorInitiated, expectedContentHash: bar ? bar.emailContentHash : expectedContentHash });
+          : await sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference: !operatorInitiated, expectedContentHash: bar ? bar.emailContentHash : expectedContentHash, expectedEmailDigest: bar ? bar.emailRenderedDigest : null });
         const attemptHeld = await settleFollowupEmailLedger(
           ContactLedger, emailLedger, emailResult, selectedChannels !== null, originalDeliveryTimes,
         );
@@ -3465,6 +3501,8 @@ module.exports = {
   // The Intelligence Bar's send-now card: the same text rendering and digest the service pins at dispatch.
   approvalDigest,
   renderApprovalSmsBody,
+  followupEmailPayload,
+  renderedEmailFingerprint,
   // Exported for tests only (fireStep + the batch ownership predicate: the
   // customer-dunning PostgreSQL concurrency suite drives them directly).
   _test: {

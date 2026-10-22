@@ -266,6 +266,20 @@ function paymentPlanFollowupStopReason(paymentPlanId) {
   return `payment_plan_created:${paymentPlanId || 'unknown'}`;
 }
 
+// The bar's plan, on the LOCKED invoice row: the debt must still verifiably be the customer's (the live Bill-To resolver; the
+// snapshot payer_id is NULL when a payer was assigned later), and no reminder worker may own the reminder row (its send would go
+// out after the plan stopped the row). The reminder row is locked here, so a worker's claim either committed first (seen) or
+// waits for this transaction. Either answer is the card's PREVIEW_CHANGED: re-asking re-derives the card, which refuses.
+async function assertBarPlanOwnershipAndReminder(trx, lockedInvoice) {
+  const refuse = (message) => { const e = new Error(message); e.statusCode = 409; e.previewChanged = true; return e; };
+  if (lockedInvoice.payer_id || require('../services/invoice-helpers').invoiceWithdrawnFromCustomer(lockedInvoice)
+    || await require('../services/invoice-payer-ownership').invoicePayerOwnership(lockedInvoice, trx) !== null) {
+    throw refuse('The invoice is billed to a payer (or who owes it could not be verified), so no payment plan was created.');
+  }
+  const seq = await trx('invoice_followup_sequences').where({ invoice_id: lockedInvoice.id }).forUpdate().first('touch_claimed_at');
+  if (seq?.touch_claimed_at) throw refuse('A reminder for this invoice is being sent right now, so no payment plan was created.');
+}
+
 async function stopInvoiceFollowupsForPaymentPlan(invoiceId, {
   paymentPlanId = null,
   adminId = null,
@@ -3382,6 +3396,7 @@ const paymentPlanCreateHandler = async (req, res, next) => {
             const e = new Error('The invoice changed after the card was shown, so no payment plan was created.');
             e.statusCode = 409; e.previewChanged = true; throw e;
           }
+          await assertBarPlanOwnershipAndReminder(trx, lockedInvoice);
         }
         // Re-assert collectibility on the LOCKED row: a record-payment /
         // apply-credit / webhook settlement can commit while this request
