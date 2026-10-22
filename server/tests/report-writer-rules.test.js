@@ -662,9 +662,19 @@ describe('pest writer adapter, rejection detail and repair note', () => {
     const note = rejectedDraftRepairNote({ draft, rejection: 'date', detail, includeDraft: false });
     expect(note).toContain('also says "window", which reads as a visit or an arrival window');
     expect(note).toContain('"If you still see them on Thursday, October 22, text or call us."');
+    expect(note).toContain('If that sentence named a place, say the place in the sentence before it instead.');
     expect(note).not.toContain('The words that tripped it: "Thursday, October 22"');
     // The sentence the note asks for passes the same screen.
     expect(writerRulesRejection("WHAT'S NEXT\nIf you still see ants on Thursday, October 22, text or call us.", { allowedDates })).toBeNull();
+  });
+
+  // Codex #6480 r7: a non-place visit word never asks for a place the inputs may not hold.
+  test('a refused REACH-OUT DATE with a non-place visit word asks for no place', () => {
+    const allowedDates = ['Thursday, October 22', 'October 22'];
+    const draft = "WHAT'S NEXT\nIf ants are still around at your next service on Thursday, October 22, text or call us.";
+    const note = rejectedDraftRepairNote({ draft, rejection: 'date', detail: writerRulesRejectionDetail(draft, { allowedDates }) });
+    expect(note).toContain('also says "next", which reads as a visit or an arrival window');
+    expect(note).not.toMatch(/\bplace\b/);
   });
 
   test('a REACH-OUT DATE with no contact request, or ending a period, says so', () => {

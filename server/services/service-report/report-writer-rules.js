@@ -787,7 +787,10 @@ const REPAIR_DRAFT_MAX = 4000;
 function reachOutDateRepair({ match, sentence }) {
   const visitWord = REACH_OUT_DATE_MISUSE_RE.exec(sentence)?.[0];
   if (visitWord) {
-    return ` The sentence with the REACH-OUT DATE (${match}) also says "${visitWord}", which reads as a visit or an arrival window. Put that date in its own short sentence that only asks the customer to text or call us, with no place in it (for example "If you still see them on ${match}, text or call us."), and name the place in the sentence before it.`;
+    // Only a window is a place the draft itself named; never ask for a place
+    // the inputs may not hold.
+    const place = /^window/i.test(visitWord) ? ' If that sentence named a place, say the place in the sentence before it instead.' : '';
+    return ` The sentence with the REACH-OUT DATE (${match}) also says "${visitWord}", which reads as a visit or an arrival window. Put that date in its own short sentence that only asks the customer to text or call us (for example "If you still see them on ${match}, text or call us.").${place}`;
   }
   if (new RegExp(`${DURATION_END_BEFORE_DATE}${allowedPhrasePattern(match)}(?![\\w-])`, 'i').test(sentence)) {
     return ` The REACH-OUT DATE (${match}) is the day to get in touch, never the end of a period ("until …", "through …").`;
