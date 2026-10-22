@@ -951,8 +951,13 @@ function isFirstDeliveryRow(row) {
 
 
 // POST / — create invoice manually
-router.post('/', requireAdmin, async (req, res, next) => {
+// Named so the Intelligence Bar's create_invoice card (createInvoiceFromBar, below) runs this very handler.
+const invoiceCreateHandler = async (req, res, next) => {
   try {
+    // req.ibApprovedCreate is set only by createInvoiceFromBar (never an HTTP field): { expectedTotalCents }, the total the
+    // card showed. The create then runs in one transaction and rolls back if the invoice it computed differs. The page's
+    // path is unchanged.
+    const ibExpectedTotalCents = req.ibApprovedCreate?.expectedTotalCents;
     const { customerId, serviceRecordId, title, lineItems, notes, emailMessage, dueDate, taxRate, discountIds, serviceDate, expected_discount_stacking: expectedDiscountStacking } = req.body;
     if (!customerId) return res.status(400).json({ error: 'customerId required' });
     if (!lineItems?.length) return res.status(400).json({ error: 'lineItems required' });
@@ -992,7 +997,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       title, lineItems, notes, emailMessage, dueDate, taxRate, discountIds, serviceDate,
       ...(expectedDiscountStacking !== undefined ? { expectedDiscountStacking } : {}),
     };
-    const invoice = (linkedScheduledServiceId || stampedEstimateId)
+    const invoice = (linkedScheduledServiceId || stampedEstimateId || ibExpectedTotalCents !== undefined)
       ? await db.transaction(async (trx) => {
         if (linkedScheduledServiceId) {
           const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
@@ -1001,7 +1006,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (stampedEstimateId) {
           await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`unminted_setup_fee_manual_billing:${stampedEstimateId}`]);
         }
-        return InvoiceService.create({ ...createArgs, database: trx });
+        const created = await InvoiceService.create({ ...createArgs, database: trx });
+        if (ibExpectedTotalCents !== undefined && Math.round((Number(created.total) || 0) * 100) !== ibExpectedTotalCents) {
+          throw Object.assign(new Error('The invoice total differs from the one the card showed, so nothing was created.'),
+            { isOperational: true, statusCode: 409, code: 'IB_TOTAL_MISMATCH' });
+        }
+        return created;
       })
       : await InvoiceService.create(createArgs);
     if (stampedEstimateId) {
@@ -1032,18 +1042,35 @@ router.post('/', requireAdmin, async (req, res, next) => {
     }
     next(err);
   }
-});
+};
+router.post('/', requireAdmin, invoiceCreateHandler);
 
 // POST /from-service — create from service record (convenience)
-router.post('/from-service', requireAdmin, async (req, res, next) => {
+// Named so the Intelligence Bar's create_invoice card (createInvoiceFromServiceFromBar, below) runs this very handler.
+const invoiceFromServiceHandler = async (req, res, next) => {
   try {
+    // req.ibApprovedCreate is set only by the bar's shim (never an HTTP field): { expectedTotalCents }. The bar's create
+    // refuses to consume an estimate deposit (refuseDepositCredit) and rolls back if the total differs from the card's.
+    const ibApproved = req.ibApprovedCreate;
     const { serviceRecordId, amount, description, taxRate } = req.body;
     if (!serviceRecordId) return res.status(400).json({ error: 'serviceRecordId required' });
     if (!amount) return res.status(400).json({ error: 'amount required' });
 
-    const invoice = await InvoiceService.createFromService(serviceRecordId, {
+    const mint = (database) => InvoiceService.createFromService(serviceRecordId, {
       amount: parseFloat(amount), description, taxRate,
+      ...(ibApproved ? { refuseDepositCredit: true } : {}),
+      ...(database ? { database } : {}),
     });
+    const invoice = ibApproved
+      ? await db.transaction(async (trx) => {
+        const created = await mint(trx);
+        if (Math.round((Number(created.total) || 0) * 100) !== ibApproved.expectedTotalCents) {
+          throw Object.assign(new Error('The invoice total differs from the one the card showed, so nothing was created.'),
+            { isOperational: true, statusCode: 409, code: 'IB_TOTAL_MISMATCH' });
+        }
+        return created;
+      })
+      : await mint();
     // Coverage-creating transition (PR #3476): a linked from-service
     // invoice may satisfy a parked setup-fee alert — retire it now, not
     // on the daily sweep. Post-commit, best-effort.
@@ -1060,8 +1087,14 @@ router.post('/from-service', requireAdmin, async (req, res, next) => {
       ...invoice,
       payUrl,
     });
-  } catch (err) { next(err); }
-});
+  } catch (err) {
+    if (err?.isOperational && err.statusCode && err.code === 'IB_TOTAL_MISMATCH') {
+      return res.status(err.statusCode).json({ error: err.message, code: err.code });
+    }
+    next(err);
+  }
+};
+router.post('/from-service', requireAdmin, invoiceFromServiceHandler);
 
 // POST /batch — create identical invoice for multiple customers
 // Body: { customerIds: string[], title, lineItems, notes?, dueDate?, taxRate?, sendImmediately?: boolean }
@@ -3820,8 +3853,20 @@ function voidInvoiceFromBar({ invoiceId, expected }) {
   return runInvoiceHandler(invoiceVoidHandler, { params: { id: invoiceId }, body: {}, ibExpectedVoid: expected });
 }
 
+// The Intelligence Bar's create_invoice runs the SAME handlers as POST / (manual create) and POST /from-service (a completed
+// visit's own convenience route). `body` is exactly the carded body; expectedTotalCents is the total the card showed, enforced
+// in the same transaction as the create. A DRAFT only: neither handler sends anything.
+function createInvoiceFromBar({ body, expectedTotalCents }) {
+  return runInvoiceHandler(invoiceCreateHandler, { body, ibApprovedCreate: { expectedTotalCents } });
+}
+function createInvoiceFromServiceFromBar({ body, expectedTotalCents }) {
+  return runInvoiceHandler(invoiceFromServiceHandler, { body, ibApprovedCreate: { expectedTotalCents } });
+}
+
 module.exports = router;
 module.exports.sendInvoiceFromBar = sendInvoiceFromBar;
 module.exports.recordPaymentFromBar = recordPaymentFromBar;
 module.exports.voidInvoiceFromBar = voidInvoiceFromBar;
+module.exports.createInvoiceFromBar = createInvoiceFromBar;
+module.exports.createInvoiceFromServiceFromBar = createInvoiceFromServiceFromBar;
 module.exports.getInvoiceDeliveryRecipients = getInvoiceDeliveryRecipients;
