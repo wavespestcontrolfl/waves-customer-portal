@@ -626,7 +626,7 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     // Another visit's running timer never blocks this one.
   });
 
-  test('no job timer starts on a COMPLETED visit — the geofence arrival that raced a closeout is refused before any time_entries write (GitHub r2 P1 #5886)', async () => {
+  test('no job timer starts on a COMPLETED visit — a timer start that raced a closeout is refused before any time_entries write (GitHub r2 P1 #5886)', async () => {
     const timeTracking = require('../services/time-tracking');
     const techId = randomUUID();
     await trx('technicians').insert({ id: techId, name: 'Fixture Tech' });
@@ -636,7 +636,7 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     const currentTimer = randomUUID();
     await trx('time_entries').insert({ id: currentTimer, technician_id: techId, entry_type: 'job', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: new Date(Date.now() - 600000), job_id: current.id });
     const done = await visit({ status: 'completed', technician_id: techId });
-    // Unscoped, exactly as geofence-handler calls it.
+    // Unscoped (admin start).
     await expect(timeTracking.startJob(techId, done.id, { lat: 27.4, lng: -82.5 })).rejects.toMatchObject({ status: 409, code: 'job_already_completed' });
     expect(await trx('time_entries').where({ job_id: done.id })).toHaveLength(0);
     // The refusal came before the "close any other active job" write.
@@ -653,7 +653,7 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
       await trx('time_entries').insert({ id, technician_id: techId, entry_type: 'job', status: 'completed', clock_in: new Date(Date.now() - 900000), clock_out: new Date(Date.now() - 30000), duration_minutes: 14.5, job_id: jobId });
       return id;
     };
-    // Geofence stop, then the payment completed the visit, then Undo.
+    // A stop, then the payment completed the visit, then Undo.
     const done = await visit({ status: 'completed', technician_id: techId });
     const doneTimer = await stoppedTimer(done.id);
     const before = await trx('time_entries').where({ id: doneTimer }).first();

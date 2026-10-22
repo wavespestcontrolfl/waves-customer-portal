@@ -1,33 +1,14 @@
 /**
  * Tech in-app notifications (polled by the tech PWA).
- * Currently used by the geofence arrival/exit prompts.
+ * Cards: visit schedule changes, texts on a tech's own line, missing-tracking
+ * notices, customer visit photos, open-visit nudges and storm-watch alerts.
  */
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const timeTracking = require('../services/time-tracking');
-const matcher = require('../services/geofence-matcher');
-const geofenceHandler = require('../services/geofence-handler');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
-
-// Arrival prompts and the auto-start card wait for the tech to see them, but
-// not past the end of the ET day they were raised: Start timer on yesterday's
-// visit is wrong, and "Timer auto-started" days later is noise. A stop notice
-// is not held: it is served only inside its 30-minute Undo window. Only the
-// two ACTIONABLE types (reminder, select) get the high sort bucket in the
-// order below;
-// the started card keeps its old sort position so a burst of them (two rows
-// per automatic stop) cannot crowd out an unseen prompt.
-const DAY_CAPPED_TYPES = ['geofence_arrival_reminder', 'geofence_arrival_select', 'geofence_timer_started'];
-const UNDO_WINDOW_MINUTES = 30;
-
-// 00:00 ET of today as an instant (the server runs UTC).
-function startOfTodayET(now = new Date()) {
-  const { etDateString, parseETDateTime } = require('../utils/datetime-et');
-  return parseETDateTime(`${etDateString(now)}T00:00`);
-}
 
 // GET /api/tech/notifications?unreadOnly=true
 router.get('/', async (req, res, next) => {
@@ -43,22 +24,6 @@ router.get('/', async (req, res, next) => {
       .where(function stormFreshness() {
         this.whereNot({ type: 'storm_watch_alert' })
           .orWhereRaw("created_at >= now() - interval '6 hours'");
-      })
-      // A stop notice is only useful inside its Undo window (undo-stop
-      // answers 410 after it), so the feed stops serving it then, seen or not.
-      .where(function stopFreshness() {
-        this.whereNot({ type: 'geofence_timer_stopped' })
-          .orWhereRaw(`created_at >= now() - interval '${UNDO_WINDOW_MINUTES} minutes'`);
-      })
-      // Arrival prompts and the started card stay until the tech has SEEN them (owner 2026-10-06,
-      // "keep notices"): the client starts its 5-minute clock only after the
-      // card has been on screen, and marks it read then. Until that, the row
-      // stays unread and this feed keeps serving it. The hard cap is the end
-      // of the tech's ET day, so an unseen prompt from earlier days cannot
-      // pile up into a wall of cards on the next load.
-      .where(function noticeDayCap() {
-        this.whereNotIn('type', DAY_CAPPED_TYPES)
-          .orWhere('created_at', '>=', startOfTodayET());
       });
     // GATE_NOSHOW_DETECTOR is the feature's kill switch, and turning it off
     // stops the sweep — which is the only thing that dismisses a tracking
@@ -84,45 +49,36 @@ router.get('/', async (req, res, next) => {
       q = photoAlerts.scopePhotoCardsToLiveVisits(q, db);
     }
     if (unreadOnly) q = q.where({ read: false });
-    // FRESH non-storm rows outrank everything inside the 20-row window: a
-    // storm burst must never crowd an actionable geofence/timer prompt out
-    // of the poll result. The priority is freshness-scoped, though — a stale
-    // backlog of ≥20 unread non-storm rows must not displace a live storm
-    // warning either, so aged rows compete with storms purely on recency.
+    // FRESH non-storm rows outrank everything else inside the 20-row window,
+    // so a storm burst never crowds them out. The priority is
+    // freshness-scoped, though: a stale backlog of 20 or more unread
+    // non-storm rows must not displace a live storm warning, so aged rows
+    // compete with storms purely on recency.
     // Visit notices (visit_* — tech-visit-notifications.js) never expire and
-    // a bulk assign can mint dozens at once, so they must not push an
-    // arrival/Undo prompt (bucket 0) or a fresh storm warning (bucket 1)
-    // past the limit — the client shows two at a time and promotes the rest
-    // as they clear. They share the LAST bucket with stale rows and compete
-    // there on recency: a backlog of ≥20 stale legacy rows (e.g. the old
-    // `new_appointment` type the client never rendered) must not starve
-    // every schedule-change card out of the window either. Texts on a tech's
-    // own line (tech_line_sms — tech-line.js) are kept the same way and sit
-    // in the same bucket, as does a customer's visit-prep photo submission
-    // (customer_visit_photos — visit-prep-tech-alert.js): also persistent,
-    // also fine to share the never-expiring bucket rather than starve out
-    // an older un-dismissed one for the sake of a fresher storm/reminder.
-    // Missing-tracking notices (follow_through_tracking
-    // — no-show-detector.js) are their OWN bucket 0, regardless of age: they
-    // are undismissed only while the visit is still overdue with no arrival
-    // evidence (the sweep's reconcile pass dismisses them the moment that
-    // stops being true), and the generic recency rule dropped one past six
-    // hours into the routine kept-card bucket — so a tech who was offline
-    // while a stage-2 notice aged, then collected 20 newer assignment or text
-    // cards, never received the row at all and the client's own MAX_VISIT_CARDS
-    // ranking could not rescue what the server never returned (codex P2
-    // round 8). Its OWN bucket, ahead of every other fresh row: sharing
-    // bucket 0 with them meant an offline tech who collected 20 newer
-    // geofence/timer prompts — two events across ten stops — still lost the
-    // stage-2 card from the window (codex P2 round 17). The other buckets
-    // keep their relative order, one step down. Actionable arrival prompts
-    // (reminder, select) are held until the tech has seen them (owner
-    // 2026-10-06, "keep notices"), so they get their OWN bucket 1 for the
-    // rest of their ET day: a burst of informational started/stopped cards
-    // (automatic mode writes two per stop) or visit cards cannot push an
-    // unseen prompt out of the window.
+    // a bulk assign can mint dozens at once, so they must not push a fresh
+    // storm warning (bucket 3) past the limit — the client shows two at a time
+    // and promotes the rest as they clear. They share the LAST bucket with
+    // stale rows and compete there on recency: a backlog of 20 or more stale
+    // legacy rows (e.g. the old `new_appointment` type the client never
+    // rendered) must not starve every schedule-change card out of the window
+    // either. Texts on a tech's own line (tech_line_sms — tech-line.js) are
+    // kept the same way and sit in the same bucket, as does a customer's
+    // visit-prep photo submission (customer_visit_photos —
+    // visit-prep-tech-alert.js): also persistent, also fine to share the
+    // never-expiring bucket rather than starve out an older un-dismissed one
+    // for the sake of a fresher storm or routine card.
+    // Missing-tracking notices (follow_through_tracking — no-show-detector.js)
+    // are their OWN bucket 0, regardless of age: they are undismissed only
+    // while the visit is still overdue with no arrival evidence (the sweep's
+    // reconcile pass dismisses them the moment that stops being true), and
+    // the generic recency rule dropped one past six hours into the routine
+    // kept-card bucket — so a tech who was offline while a stage-2 notice
+    // aged, then collected 20 newer assignment or text cards, never received
+    // the row at all and the client's own MAX_VISIT_CARDS ranking could not
+    // rescue what the server never returned (codex P2 round 8). Its OWN
+    // bucket, ahead of every other fresh row (codex P2 round 17).
     const rows = await q
-      .orderByRaw("CASE WHEN type = 'follow_through_tracking' THEN 0 WHEN type IN ('geofence_arrival_reminder', 'geofence_arrival_select') THEN 1 WHEN type LIKE 'visit\\_%' OR type IN ('tech_line_sms', 'customer_visit_photos') THEN 4 WHEN type = 'storm_watch_alert' THEN 3 WHEN created_at >= now() - interval '6 hours' THEN 2 ELSE 4 END")
+      .orderByRaw("CASE WHEN type = 'follow_through_tracking' THEN 0 WHEN type LIKE 'visit\\_%' OR type IN ('tech_line_sms', 'customer_visit_photos') THEN 4 WHEN type = 'storm_watch_alert' THEN 3 WHEN created_at >= now() - interval '6 hours' THEN 2 ELSE 4 END")
       // Stage 2 before stage 1 INSIDE the tracking bucket, before the limit
       // truncates: a tech with more than 20 undismissed tracking cards would
       // otherwise lose an older critical arrival check behind 20 newer
@@ -250,7 +206,7 @@ router.post('/:id/read', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /:id/dismiss — tech tapped "Not here yet" or close
+// POST /:id/dismiss — tech tapped Got it or close
 router.post('/:id/dismiss', async (req, res, next) => {
   try {
     const row = await db('tech_notifications')
@@ -269,140 +225,9 @@ router.post('/:id/dismiss', async (req, res, next) => {
       .update({ read: true, dismissed_at: new Date(), updated_at: new Date(),
         payload: db.raw("COALESCE(payload, '{}'::jsonb) - 'superseded_at'") });
 
-    // If it was an arrival reminder, log the dismissal in geofence_events
-    if (row.type === 'geofence_arrival_reminder') {
-      const payload = parsePayload(row.payload);
-      await matcher.logEvent({
-        bouncie_imei: 'n/a',
-        technician_id: row.technician_id,
-        event_type: 'ENTER',
-        action_taken: 'dismissed',
-        matched_customer_id: payload.customer_id || null,
-        matched_job_id: payload.job_id || null,
-        event_timestamp: new Date(),
-      });
-    }
-
     res.json({ success: true });
   } catch (err) { next(err); }
 });
-
-// POST /:id/confirm-start — tech tapped "Start Timer" on an arrival reminder
-// For multi-select notifications, pass { customer_id, job_id } in body to pick one candidate.
-router.post('/:id/confirm-start', async (req, res, next) => {
-  try {
-    const { lat, lng, customer_id: bodyCustomerId, job_id: bodyJobId } = req.body || {};
-    const row = await db('tech_notifications')
-      .where({ id: req.params.id, technician_id: req.technicianId })
-      .first();
-    if (!row) return res.status(404).json({ error: 'Notification not found' });
-
-    const payload = parsePayload(row.payload);
-    // Body override takes priority (multi-select); otherwise use the payload's primary pick.
-    const jobId = bodyJobId !== undefined ? bodyJobId : (payload.job_id || null);
-    const customerId = bodyCustomerId || payload.customer_id || null;
-
-    let entry;
-    try {
-      entry = await timeTracking.startJob(req.technicianId, jobId, { lat, lng, scopeReq: req });
-    } catch (err) {
-      if (err.code === 'job_not_assigned') return res.status(404).json({ error: err.message });
-      return res.status(409).json({ error: err.message });
-    }
-
-    if (jobId) {
-      // markOnProperty (via markOnPropertyFromGeofence → track-transitions) is
-      // the sole owner of the customer arrival SMS now — it fires once,
-      // idempotently when the tracker flips to on-site. Don't double-send here.
-      // startJob above already fired it as the acting tech; pass req.technicianId
-      // again so that if that first send was released for retry, this no-op-or-
-      // retry call still names the tech who confirmed the start, not a stale one.
-      await geofenceHandler.markOnPropertyFromGeofence(jobId, new Date(), {
-        actingTechId: req.technicianId,
-        ...(req.techRole === 'technician' ? { expectTechnicianId: req.technicianId } : {}),
-      });
-    }
-
-    await db('tech_notifications')
-      .where({ id: row.id })
-      .update({ read: true, dismissed_at: new Date(), updated_at: new Date() });
-
-    await matcher.logEvent({
-      bouncie_imei: 'n/a',
-      technician_id: req.technicianId,
-      event_type: 'ENTER',
-      action_taken: 'timer_started',
-      matched_customer_id: customerId,
-      matched_job_id: jobId,
-      time_entry_id: entry.id,
-      event_timestamp: new Date(),
-    });
-
-    res.json({ timeEntry: entry });
-  } catch (err) { next(err); }
-});
-
-// POST /:id/undo-stop — tech tapped "Undo" on a timer-stopped toast
-router.post('/:id/undo-stop', async (req, res, next) => {
-  try {
-    let reopened;
-    try {
-      reopened = await db.transaction(async (trx) => {
-        // Claim the notification row first and keep that claim in the same
-        // transaction as the timer reopen. Read receipts are advisory and may
-        // race with an Undo tap; only an explicit dismissal (or a prior undo)
-        // is terminal. A concurrent dismissal either wins before this lock or
-        // waits until the handled state commits.
-        const row = await trx('tech_notifications')
-          .where({ id: req.params.id, technician_id: req.technicianId })
-          .forUpdate()
-          .first();
-        if (!row || row.type !== 'geofence_timer_stopped') {
-          throw notificationHttpError(404, 'Stop notification not found');
-        }
-        if (row.dismissed_at) {
-          throw notificationHttpError(409, 'Stop notification was already handled');
-        }
-        const createdAt = new Date(row.created_at).getTime();
-        if (!Number.isFinite(createdAt) || Date.now() - createdAt > 30 * 60 * 1000) {
-          throw notificationHttpError(410, 'Undo window expired');
-        }
-
-        const payload = parsePayload(row.payload);
-        const stoppedEntryId = payload.time_entry_id;
-        if (!stoppedEntryId) {
-          throw notificationHttpError(400, 'No time entry to restore');
-        }
-
-        const entry = await timeTracking.reopenStoppedEntryInTransaction(
-          trx,
-          req.technicianId,
-          stoppedEntryId,
-        );
-        const claimed = await trx('tech_notifications')
-          .where({ id: row.id, technician_id: req.technicianId })
-          .whereNull('dismissed_at')
-          .update({ read: true, dismissed_at: new Date(), updated_at: new Date() });
-        if (claimed !== 1) {
-          throw notificationHttpError(409, 'Stop notification was already handled');
-        }
-        return entry;
-      });
-    } catch (error) {
-      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
-      throw error;
-    }
-
-    res.json({ timeEntry: reopened });
-  } catch (err) { next(err); }
-});
-
-function notificationHttpError(statusCode, message) {
-  const error = new Error(message);
-  error.statusCode = statusCode;
-  error.isOperational = true;
-  return error;
-}
 
 function parsePayload(v) {
   if (!v) return {};

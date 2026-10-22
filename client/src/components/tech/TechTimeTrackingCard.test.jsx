@@ -55,7 +55,7 @@ describe('TechTimeTrackingCard', () => {
     expect(screen.getByRole('button', { name: 'Start job · River Home' })).toBeEnabled();
   });
 
-  it('reloads its status when a timer changes elsewhere on the page (the geofence prompt\'s Start Timer)', async () => {
+  it('reloads its status when a timer changes elsewhere on the page (TIME_TRACKING_CHANGED)', async () => {
     let clockedIn = false;
     const fetchMock = vi.fn(async () => response(200, { clockedIn, onBreak: false, currentJob: null, todaySummary: { shiftMinutes: 0, jobCount: 0 } }));
     vi.stubGlobal('fetch', fetchMock);

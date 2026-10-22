@@ -504,13 +504,9 @@ describe('Staff time schema reconciliation migration', () => {
       path.join(__dirname, '../services/time-tracking.js'),
       'utf8',
     );
-    const notifications = fs.readFileSync(
-      path.join(__dirname, '../routes/tech-notifications.js'),
-      'utf8',
-    );
     expect(service.match(/staff_write_generation: ACTIVE_WRITE_GENERATION/g)).toHaveLength(4);
-    expect(notifications).toMatch(
-      /undo-stop[\s\S]*db\.transaction[\s\S]*\.forUpdate\(\)[\s\S]*reopenStoppedEntryInTransaction[\s\S]*whereNull\('dismissed_at'\)[\s\S]*\.update\(/,
+    expect(service).toMatch(
+      /async function reopenStoppedEntryInTransaction[\s\S]*staff_write_generation: ACTIVE_WRITE_GENERATION/,
     );
   });
 
@@ -524,12 +520,7 @@ describe('Staff time schema reconciliation migration', () => {
     )?.[0];
 
     expect(startJob).toMatch(/db\.transaction\(async \(trx\)/);
-    // The shift lock moved into lockShiftForStart (auto clock-in, #6083); it
-    // still runs inside startJob's transaction and still locks the active shift.
-    expect(startJob).toMatch(/lockShiftForStart\(\s*trx,\s*technicianId/);
-    expect(service).toMatch(
-      /async function lockShiftForStart\(trx, technicianId[\s\S]*?lockActiveShift\(trx, technicianId\)/,
-    );
+    expect(startJob).toMatch(/lockActiveShift\(trx, technicianId\)/);
     expect(service).toMatch(
       /async function lockActiveShift[\s\S]*entry_type: 'shift'[\s\S]*\.forUpdate\(\)/,
     );

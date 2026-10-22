@@ -928,10 +928,6 @@ describe('Staff active timer serialization', () => {
       path.join(__dirname, '../services/time-tracking-crons.js'),
       'utf8',
     );
-    const notificationSource = fs.readFileSync(
-      path.join(__dirname, '../routes/tech-notifications.js'),
-      'utf8',
-    );
 
     expect(serviceSource).toMatch(/async function clockOut[\s\S]*closeActiveShiftAtomically/);
     expect(serviceSource).toMatch(/async function autoClockOutCheck[\s\S]*closeActiveShiftAtomically/);
@@ -939,7 +935,6 @@ describe('Staff active timer serialization', () => {
     expect(serviceSource).toMatch(/async function startJob[\s\S]*lockActiveShift\(trx/);
     expect(serviceSource).toMatch(/async function startBreak[\s\S]*lockActiveShift\(trx/);
     expect(serviceSource).toMatch(/async function reopenStoppedEntry[\s\S]*lockActiveShift\(trx/);
-    expect(notificationSource).toMatch(/undo-stop[\s\S]*timeTracking\.reopenStoppedEntry/);
   });
 });
 
