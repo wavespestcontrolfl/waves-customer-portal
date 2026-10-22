@@ -881,12 +881,48 @@ describe('Google Business review sync', () => {
       expect(result.synced).toBe(1);
       const rows = db.__state.rows.google_reviews;
       expect(rows.find(r => r.id === 'gbp-row')).toMatchObject({ google_review_id: GBP_ID, review_text: 'Lovely service (edited)' });
-      expect(rows.find(r => r.id === 'places-row')).toEqual(placesBefore);
-      expect(rows.find(r => r.id === 'places-row').missing_since ?? null).toBeNull();
+      // The copy keeps everything it had; the one change is the superseded stamp.
+      const { missing_since: stampedAt, ...placesAfter } = rows.find(r => r.id === 'places-row');
+      expect(placesAfter).toEqual(placesBefore);
+      expect(stampedAt).toEqual(expect.any(String));
+      expect(db.__state.updates.filter(u => u.id === 'places-row').map(u => Object.keys(u.record))).toEqual([['missing_since']]);
+      // The holder stays live.
+      expect(rows.find(r => r.id === 'gbp-row').missing_since ?? null).toBeNull();
       expect(db.__state.deletes || []).toEqual([]);
       // The stale copy is not reported as a removed review.
       expect(notify.mock.calls.filter(c => /removed|no longer|missing/i.test(String(c[1])))).toEqual([]);
+      expect(notify.mock.calls.filter(c => c[3]?.metadata?.reason === 'reviews_missing')).toEqual([]);
       notify.mockRestore();
+    });
+
+    test('a second sync leaves the superseded copy stamped as first written and raises no removal alert', async () => {
+      seed();
+      global.fetch = feed();
+      const NotificationService = require('../services/notification-service');
+      const notify = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue({ id: 'n' });
+      await service.syncAllReviews();
+      const first = db.__state.rows.google_reviews.find(r => r.id === 'places-row').missing_since;
+      global.fetch = feed();
+      await service.syncAllReviews();
+      expect(db.__state.rows.google_reviews.find(r => r.id === 'places-row').missing_since).toBe(first);
+      expect(notify.mock.calls.filter(c => c[3]?.metadata?.reason === 'reviews_missing')).toEqual([]);
+      notify.mockRestore();
+    });
+
+    test('payout scans only read live rows, so the superseded copy is not scanned (review-incentives whereNull missing_since)', async () => {
+      const calls = [];
+      const conn = (table) => {
+        const q = new Proxy({}, {
+          get: (_t, name) => {
+            if (name === 'then') return (res) => res([]);
+            return (...args) => { calls.push([table, name, ...args]); return q; };
+          },
+        });
+        return q;
+      };
+      const incentives = require('../services/review-incentives');
+      await incentives.syncReviewIncentives({ conn, policy: { enabled: true } });
+      expect(calls).toEqual(expect.arrayContaining([['google_reviews', 'whereNull', 'missing_since']]));
     });
 
     test('a places row with no GBP holder still upgrades to the GBP identity (unchanged)', async () => {

@@ -967,14 +967,20 @@ class GoogleBusinessService {
   // its google_review_id would hit google_reviews_google_review_id_unique
   // against the row that already holds that id. When another row holds the
   // incoming GBP id, that row is the review's real record: update it exactly
-  // as if the lookup had found it first. The places row is left untouched (no
-  // id change, no delete, no state copy) — it is a stale fallback copy.
+  // as if the lookup had found it first. The places row keeps its id and state
+  // (no delete, no state copy); it is only marked superseded (missing_since).
   async _preferGbpHolder(existing, normalized) {
     if (!existing || !normalized.google_review_id || existing.google_review_id === normalized.google_review_id) return existing;
     if (!String(existing.google_review_id || '').startsWith('places_')) return existing;
     const holder = await db('google_reviews').where({ google_review_id: normalized.google_review_id }).first();
     if (!holder || holder.id === existing.id) return existing;
-    logger.info(`[gbp] Places fallback row ${existing.id} shares ${normalized.gbp_review_name || normalized.google_review_id} with GBP row ${holder.id}: updating the GBP row, leaving the fallback copy as is`);
+    // Mark the copy superseded so every live-review reader (payout scans,
+    // public reviews, graphic candidates: all whereNull('missing_since'))
+    // counts the review once. One column, only while NULL, no notification: the
+    // removal alert is raised by the reconcile, which skips stamped rows.
+    const stamped = await db('google_reviews').where({ id: existing.id }).whereNull('missing_since')
+      .update({ missing_since: new Date().toISOString() }, ['id']);
+    logger.info(`[gbp] Places fallback row ${existing.id} shares ${normalized.gbp_review_name || normalized.google_review_id} with GBP row ${holder.id}: updating the GBP row, ${(stamped || []).length > 0 ? 'fallback copy marked superseded' : 'fallback copy already marked'}`);
     return holder;
   }
 
