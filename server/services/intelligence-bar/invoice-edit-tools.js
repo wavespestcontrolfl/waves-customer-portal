@@ -514,7 +514,8 @@ function fieldChange(field, before, after) {
   return { field, before: before === null || before === undefined || before === '' ? '(empty)' : String(before), after: after === null || after === undefined || after === '' ? '(empty)' : String(after) };
 }
 
-// Whether saving runs the setup-fee alert reconciliation (the update handler runs it for the edited row and the pre-edit row):
+// Whether confirming runs the setup-fee alert reconciliation (the update handler runs it for the edited row and the pre-edit row;
+// InvoiceService.unvoidInvoice runs it after the unvoid):
 // the invoice, before or after the edit, is stamped for an accepted estimate or linked to an estimate-sourced visit. Mirrors
 // reconcileSetupFeeAlertForInvoice's own lookup; an unreadable link counts as tied (the card discloses rather than hides).
 async function setupFeeAlertTied(invoice, nextNotes) {
@@ -531,7 +532,7 @@ async function setupFeeAlertTied(invoice, nextNotes) {
     return true;
   }
 }
-const SETUP_FEE_EFFECT = { kind: 'operational', text: 'This invoice belongs to an accepted estimate. Saving re-checks the staff alert that asks the office to bill its setup fee: that alert may close, reopen or change (and show as unread again). Nothing is sent to the customer.' };
+const SETUP_FEE_EFFECT = { kind: 'operational', text: 'This invoice belongs to an accepted estimate. Confirming re-checks the staff alert that asks the office to bill its setup fee: that alert may close, reopen or change (and show as unread again). Nothing is sent to the customer.' };
 
 function editEffects({ invoice, status, dueChanged, totalChanged, oldTotal, newTotal, statement, setupFeeTied = false }) {
   const effects = [];
@@ -1103,7 +1104,7 @@ async function unvoidRefusal(invoice) {
   return null;
 }
 
-function unvoidEffects({ invoice, visit }) {
+function unvoidEffects({ invoice, visit, setupFeeTied = false }) {
   return [
     { kind: 'billing', text: `Invoice ${invoice.invoice_number} (${money(invoice.total)}) becomes a draft again: editable and payable (collectible) once it is sent. It is not sent by this step.` },
     { kind: 'operational', text: 'Its payment reminders do NOT restart now: the stopped reminder sequence stays stopped until the invoice is sent again.' },
@@ -1113,6 +1114,7 @@ function unvoidEffects({ invoice, visit }) {
     { kind: 'operational', text: visit
       ? `Its linked visit (${visit.date || 'no date'}, ${visit.status || 'no status'}) is checked: a cancelled visit refuses the unvoid. The visit is not changed.`
       : 'It is not linked to a visit.' },
+    ...(setupFeeTied ? [SETUP_FEE_EFFECT] : []),
     NOTHING_SENT,
   ];
 }
@@ -1136,7 +1138,7 @@ async function buildUnvoidPlan(input) {
     amount: money(invoice.total),
     becomes: 'draft (editable, collectible again)',
     reminders_restart: false,
-    effects: unvoidEffects({ invoice, visit }),
+    effects: unvoidEffects({ invoice, visit, setupFeeTied: await setupFeeAlertTied(invoice) }),
     sends_to_customer: false,
     _version: {
       invoice_id: invoice.id,

@@ -286,7 +286,7 @@ describe('edit_invoice card', () => {
 
   test('an invoice tied to an accepted estimate discloses the setup-fee alert re-check; an untied one does not', async () => {
     const untied = await run('edit_invoice', { line_changes: [{ line_number: 2, unit_price: 50 }] });
-    expect(untied.effects.map((e) => e.text).join(' ')).not.toMatch(/setup fee/);
+    expect(untied.effects.map((e) => e.text).join(' ')).not.toMatch(/re-checks the staff alert/);
     state.scheduled_services[0].source_estimate_id = 'est-1';
     const tied = await run('edit_invoice', { line_changes: [{ line_number: 2, unit_price: 50 }] });
     expect(tied.effects).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'operational', text: expect.stringMatching(/setup fee: that alert may close, reopen or change/) })]));
@@ -839,6 +839,17 @@ describe('unvoid_invoice', () => {
     nothingSent(card);
     expect(cardLines('unvoid_invoice', card)[0].text).toBe('Unvoid invoice WPC-2099-0001 for Robin Sample: $129.00, void -> draft');
     expect(card._expected).toEqual({ status: 'void', updatedAt: UPDATED.getTime() });
+  });
+
+  test('a voided invoice tied to an accepted estimate discloses the setup-fee alert re-check; an untied one does not', async () => {
+    expect(JSON.stringify((await run('unvoid_invoice')).effects)).not.toMatch(/re-checks the staff alert/);
+    state.scheduled_services[0].source_estimate_id = 'est-1';
+    expect(JSON.stringify((await run('unvoid_invoice')).effects)).toMatch(/Confirming re-checks the staff alert that asks the office to bill its setup fee/);
+    state.scheduled_services[0].source_estimate_id = null;
+    setInvoice({ notes: 'Accepted estimate #est-2' });
+    const stamped = (await run('unvoid_invoice'));
+    const { acceptedEstimateIdFromNotes } = require('../services/setup-fee-alert-reconcile');
+    expect(JSON.stringify(stamped.effects).includes('re-checks the staff alert')).toBe(Boolean(acceptedEstimateIdFromNotes('Accepted estimate #est-2')));
   });
 
   test('an invoice with an old pay-session stamp says it is checked with Stripe; one on a payer statement stays on the page', async () => {
