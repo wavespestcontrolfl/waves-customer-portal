@@ -570,6 +570,9 @@ describe('four-section report: the reach-out date asks the customer to get in to
     ["WHAT'S NEXT\nIf activity has not dropped over the next couple of weeks, text or call us on Wednesday, October 14."],
     ["WHAT'S NEXT\nCall us if the ants come back by Wednesday, October 14."],
     ["WHAT'S NEXT\nWhen you see roaches returning to the kitchen by Wednesday, October 14, text or call us."],
+    ["WHAT'S NEXT\nActivity sometimes returns around the kitchen; if you still see ants by Wednesday, October 14, call us."],
+    ["WHAT'S NEXT\nIf you see ants around your windows on Wednesday, October 14, text or call us."],
+    ["WHAT'S NEXT\nIf they come back by Wednesday, October 14, text or call us."],
   ])('a place or a sign of the pest passes: %s', (text) => {
     expect(writerRulesRejection(text, { allowedDates, allowedPhrases: ['over the next couple of weeks'] })).toBeNull();
   });
@@ -587,6 +590,9 @@ describe('four-section report: the reach-out date asks the customer to get in to
     ["WHAT'S NEXT\nThe team returns Wednesday, October 14, so let us know before then."],
     ["WHAT'S NEXT\nIf we come back on Wednesday, October 14, text or call us first."],
     ["WHAT'S NEXT\nIf the ants come back, we'll be back on Wednesday, October 14, so call us."],
+    ["WHAT'S NEXT\nYour window is Wednesday, October 14, so call us if anything changes."],
+    ["WHAT'S NEXT\nReturning on Wednesday, October 14; call us with questions."],
+    ["WHAT'S NEXT\nText or call us and we will look again next time, on Wednesday, October 14."],
   ])('a visit, our return or a time window is still refused: %s', (text) => {
     expect(writerRulesRejection(text, { allowedDates })).toBe('date');
   });

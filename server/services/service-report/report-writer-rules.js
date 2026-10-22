@@ -10,6 +10,7 @@
  * pest writer and the remaining-service modules other than the two below.
  */
 const { HUMAN_PROSE_RULES } = require('../llm/human-prose-rules');
+const { isVisitClaim } = require('./next-visit-claims');
 
 const REPORT_WRITER_RULES_VERSION = 'report_writer_rules_v5';
 
@@ -649,35 +650,26 @@ const WRITER_RULE_SCREENS = Object.freeze([
 // this visit's trade names), only while the rules apply.
 // A visit tied to a supplied date ("your next visit is …", "we'll be back
 // …", "booked for …") is never a reach-out date: the report shows the next
-// visit itself (Codex #5500). The reach-out sentence names a place and a sign
-// the customer can notice, so there a window is a place ("the kitchen
-// window", "window sills"), "next to" is a place, and a pest that comes back
-// or returns is a sign. A time window, a next visit, a booking and our own
-// return still tie the date to a visit. 2026-10-22 replay: "If ants are still
-// trailing by the kitchen window … on Thursday, October 22, text or call us."
-// was refused on every try, and the report fell back to the fixed copy.
-const REACH_OUT_VISIT_CUE_RE = new RegExp([
-  '\\bnext\\b(?!\\s+(?:to|couple|few|several)\\b)',
-  '\\b(?:upcoming|scheduled|appointment|arriv(?:e|al|ing)|see\\s+you)\\b',
-  '\\b(?:arrival|time|service|appointment|visit|[\\w-]*hour)\\s+windows?\\b',
-  '\\bwindow\\s+(?:of|between|from)\\b',
+// visit itself (Codex #5500). A reach-out sentence names a place and a sign
+// the customer can notice, so a window there is a place ("the kitchen
+// window", "window sills") and a pest that comes back or returns is a sign.
+// isVisitClaim (next-visit-claims.js) tells our return ("our technician is
+// returning", "we'll be back") from the pest's ("if they come back"); the
+// words below add booking, a visit named as a thing, scheduling words and a
+// time window ("your window is …", "a two-hour window"). 2026-10-22 replay:
+// "If ants are still trailing by the kitchen window … on Thursday, October
+// 22, text or call us." was refused on every try, and the report fell back
+// to the fixed copy.
+const REACH_OUT_VISIT_WORDS_RE = new RegExp([
   '\\bbook(?:ed|ing)?\\b',
   '\\bvisits?\\b',
+  '\\b(?:upcoming|scheduled|appointments?|arriv(?:e|al|ing)|see\\s+you)\\b',
+  '\\bnext\\s+(?:time|visit|service|appointment|treatment)s?\\b',
+  '\\b(?:arrival|time|service|appointment|visit|[\\w-]*hour)\\s+windows?\\b',
+  '\\bwindows?\\s+(?:is|are|was|will|of|between|from|opens?|closes?|starts?|ends?)\\b',
 ].join('|'), 'i');
-// A return verb ties the date to a visit unless its clause is a condition
-// about the pest ("if the ants come back", "when spiders return"). With us,
-// the technician or the team in that clause ("our technician is returning",
-// "if we come back") it always does.
-const REACH_OUT_RETURN_RE = /\b(?:be\s+back|comes?\s+back|coming\s+back|returns?|returning)\b/gi;
-const REACH_OUT_CONDITION_RE = /\b(?:if|when|once|should|in\s+case|whether)\b/i;
-const REACH_OUT_OUR_SIDE_RE = /\b(?:we|we['’](?:ll|re|d)|i|i['’](?:ll|m)|our|technician|tech|team|crew|waves)\b/i;
 function reachOutDateMisused(sentence) {
-  if (REACH_OUT_VISIT_CUE_RE.test(sentence)) return true;
-  for (const match of String(sentence).matchAll(REACH_OUT_RETURN_RE)) {
-    const clause = sentence.slice(0, match.index).split(/[,;:]/).pop();
-    if (REACH_OUT_OUR_SIDE_RE.test(clause) || !REACH_OUT_CONDITION_RE.test(clause)) return true;
-  }
-  return false;
+  return isVisitClaim(sentence) || REACH_OUT_VISIT_WORDS_RE.test(sentence);
 }
 // The reach-out date is the day to get in touch: its sentence must ask the
 // customer to contact us, and the date never ends a period ("keeps working
