@@ -47,7 +47,7 @@ jest.mock('../services/admin-estimate-persistence', () => ({
   estimateViewUrl: jest.fn(),
 }));
 const mockPhone = { verdicts: new Map() };
-const mockView = { draftPreview: new Set(), customerViewable: new Set() };
+const mockView = { draftPreview: new Set(), customerViewable: new Set(), snapshotRejected: new Set() };
 jest.mock('../routes/estimate-public', () => ({
   // the batch phone matcher is tested against the real per-row matcher in estimate-public-accept-phone-match.test.js
   matchAcceptCustomersByPhoneBatch: jest.fn(async () => mockPhone.verdicts),
@@ -56,6 +56,8 @@ jest.mock('../routes/estimate-public', () => ({
   isEstimateCustomerViewable: jest.fn((row) => mockView.customerViewable.has(row.id)),
   // stand-in for "can still be accepted" (the real rules: estimate-public-viewability.test.js)
   isEstimateAcceptActive: jest.fn((row) => ['sent', 'viewed'].includes(row.status) && !row.archived_at),
+  // stand-in for the page's fast-path predicate (extracted from buildPricingBundleInner, unchanged)
+  sentSnapshotServesAsIs: jest.fn((bundle, row) => !mockView.snapshotRejected.has(row.id)),
   acceptanceServiceLists: jest.fn(),
   buildPricingBundle: jest.fn(async () => ({})),
   bookingServiceFor: jest.fn(),
@@ -72,6 +74,7 @@ jest.mock('../services/slot-reservation', () => ({ releaseReservation: jest.fn()
 jest.mock('../services/estimate-proposal-billing', () => ({
   // the real send-time lane read (unit tests: estimate-proposal-billing.test.js)
   sentBundleBillsPerApplication: jest.requireActual('../services/estimate-proposal-billing').sentBundleBillsPerApplication,
+  estimateIsPriceLocked: jest.requireActual('../services/estimate-proposal-billing').estimateIsPriceLocked,
   perApplicationBillingColumnsExist: jest.fn(async () => true),
   resolveFrozenBillingContext: jest.fn(async () => ({ billsPerApplication: true, livePricing: null })),
   estimateBillsPerApplication: jest.fn(async () => { throw new Error('per-row lane lookup must not run on the list'); }),
@@ -201,6 +204,7 @@ describe('GET /admin/estimates list shape', () => {
     mockGroup.owners = new Map();
     mockView.draftPreview = new Set();
     mockView.customerViewable = new Set();
+    mockView.snapshotRejected = new Set();
   });
 
   test('adds perApplication and hasAcceptanceRecord; isolates each row', async () => {
@@ -323,6 +327,39 @@ describe('GET /admin/estimates list shape', () => {
     // only the open row's customer is read for today's lane
     const customerReads = queries.filter((q) => q.table === 'customers' && q.m === 'whereIn');
     expect(customerReads.map((q) => q.args[1])).toEqual([['c-member']]);
+  });
+
+  test('an open offer shows its price only while the page still sells that exact snapshot in that lane', async () => {
+    const strippedBundle = { frequencies: [{ ...pestBundle.frequencies[0], billedPerApplication: undefined }] };
+    mockView.snapshotRejected = new Set(['e-open-rejected']);
+    // the call is gone, so the /data gate refuses this sent offer: it is closed, and shows its send-time lane
+    mockView.customerViewable = new Set(['e-open-blocked']);
+    tableDb({
+      customers: [
+        { id: 'c-member', pipeline_stage: 'active_customer', monthly_rate: '50', billing_mode: null },
+        { id: 'c-plain', pipeline_stage: 'lead', monthly_rate: '0', billing_mode: 'per_application' },
+      ],
+      estimates: [
+        base('e-open-ok', { customer_id: 'c-plain' }),
+        // e.g. a retired lawn cadence: the page rebuilds this offer from live pricing
+        base('e-open-rejected', { customer_id: 'c-plain' }),
+        // sent while the customer was billed monthly; per-application today (the page reconciles it)
+        base('e-open-lapsed', { customer_id: 'c-plain', estimate_data: { sendSnapshot: { pricingBundle: strippedBundle } } }),
+        base('e-open-blocked', {
+          customer_id: 'c-member',
+          estimate_data: { sendSnapshot: { pricingBundle: pestBundle }, estimatorEngine: { callLogId: 'call-gone' } },
+        }),
+      ],
+    });
+    await withServer(async (baseUrl) => {
+      const { estimates } = await (await fetch(`${baseUrl}/estimates?limit=all`)).json();
+      const byId = Object.fromEntries(estimates.map((e) => [e.id, e]));
+      expect(byId['e-open-ok'].perApplication).toHaveLength(1);
+      expect(byId['e-open-rejected'].perApplication).toBeNull();
+      expect(byId['e-open-lapsed'].perApplication).toBeNull();
+      expect(byId['e-open-blocked'].perApplication).toHaveLength(1);
+      expect(byId['e-open-blocked'].staffPreviewable).toBe(false);
+    });
   });
 
   test('staffPreviewable is the /data gate verdict: the row verdicts, then the call-side verdict', async () => {
@@ -468,6 +505,27 @@ describe('GET /admin/estimates/:id/proposal.pdf billing context', () => {
     expect(mockRenderDocPdf).not.toHaveBeenCalled();
     expect(billing().resolveFrozenBillingContext).toHaveBeenCalledTimes(1);
     expect(billing().resolveProposalBillingContext).not.toHaveBeenCalled();
+  });
+
+  test('an accepted quote whose billing lane moved since it was sent renders the frozen document', async () => {
+    mockView.customerViewable = new Set(['e-acc']);
+    // today's lane is monthly; the quote was sent (and accepted) per application
+    billing().resolveProposalBillingContext.mockResolvedValueOnce({ billsPerApplication: false, livePricing: null });
+    tableDb({ estimates: [], single: { estimates: base('e-acc', { status: 'accepted' }) } });
+    await withServer(async (baseUrl) => {
+      expect((await fetch(`${baseUrl}/estimates/e-acc/proposal.pdf`)).status).toBe(200);
+    });
+    expect(mockRenderDocPdf).not.toHaveBeenCalled();
+    expect(mockGeneratePdf.mock.calls[0][2]).toMatchObject({ billsPerApplication: true, livePricing: null });
+  });
+
+  test('an accepted quote still in the lane it was sent in is the customer\'s own document', async () => {
+    mockView.customerViewable = new Set(['e-acc']);
+    tableDb({ estimates: [], single: { estimates: base('e-acc', { status: 'accepted' }) } });
+    await withServer(async (baseUrl) => {
+      expect((await fetch(`${baseUrl}/estimates/e-acc/proposal.pdf`)).status).toBe(200);
+    });
+    expect(mockRenderDocPdf).toHaveBeenCalledTimes(1);
   });
 
   test('a quote the public page serves keeps the live lane (the customer\'s copy)', async () => {

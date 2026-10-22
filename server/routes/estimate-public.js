@@ -28639,6 +28639,42 @@ async function buildPricingBundle(estimate, { monthlyBilled = null } = {}) {
     : addMissingBilledPerApplicationFlags(bundle);
 }
 
+// Whether the page serves the frozen send snapshot AS IS (the fast path in
+// buildPricingBundleInner) instead of rebuilding the offer from live pricing.
+// Pure; also read by the admin Pipeline card, which shows an open offer's
+// per-application price only when the page would sell exactly that snapshot.
+function sentSnapshotServesAsIs(snapshotBundle, estimate, estData) {
+  return Boolean(snapshotBundle)
+    && Array.isArray(snapshotBundle.frequencies)
+    && pricingBundleMatchesEstimateTotals(snapshotBundle, estimate)
+    // Snapshots that violate the lawn program policy (retired Quarterly
+    // cadence, or an itemized lawn price below the program minimum) must NOT
+    // short-circuit — they re-derive through the clamped ladder builders so
+    // outstanding links can't sell the retired/below-floor plan. A snapshot
+    // for an estimate with a recurring LAWN service that carries no
+    // lawn-identifiable element at all can't be policy-checked — those
+    // legacy shapes recompute too (a pre-floor $34/mo lawn snapshot must
+    // not fast-path just because its lawn slice is unitemized).
+    && !pricingBundleViolatesLawnPolicy(snapshotBundle, lawnProgramMinimumMonthlyFor(estData))
+    && !(estimateDataHasRecurringLawn(estData) && !pricingBundleHasLawnIdentifiableRow(snapshotBundle))
+    // A LAWN-ONLY snapshot that never OFFERED the lawn tier ladder (one
+    // generic pre-ladder entry) recomputes so the customer picks a real tier
+    // and accept stamps it — see pricingBundleHasLawnTierLadder /
+    // estimateDataIsLawnOnlyRecurring for why mixed bundles are exempt.
+    && !(estimateDataIsLawnOnlyRecurring(estData) && !pricingBundleHasLawnTierLadder(snapshotBundle))
+    // Pre-split termite snapshots (no monthly on the flat-monthly row) and
+    // pre-fee-rule solo pest/mosquito snapshots (no setup fee the accept
+    // path will invoice) recompute instead of fast-pathing.
+    && !pricingBundleHasStaleTermiteRow(snapshotBundle)
+    && !pricingBundleMissingRequiredSetupFee(snapshotBundle, estData)
+    // Snapshots whose rows never netted the estimate's manual discount
+    // (evidenced by the persisted totals disagreeing with the blob's own
+    // discounted figures) re-derive through the live (discount-aware)
+    // builders — fast-pathing them would bill the undiscounted row a
+    // discounted quote displayed. Already-netted legacy snapshots pass.
+    && !pricingBundleLacksManualDiscountNetting(snapshotBundle, estData, estimate);
+}
+
 async function buildPricingBundleInner(estimate) {
   cleanupEstimatePricingCache();
   const estData = typeof estimate.estimate_data === 'string'
@@ -28723,37 +28759,7 @@ async function buildPricingBundleInner(estimate) {
       : payload;
   };
   const snapshotBundle = estData?.sendSnapshot?.pricingBundle;
-  if (
-    snapshotBundle
-    && Array.isArray(snapshotBundle.frequencies)
-    && pricingBundleMatchesEstimateTotals(snapshotBundle, estimate)
-    // Snapshots that violate the lawn program policy (retired Quarterly
-    // cadence, or an itemized lawn price below the program minimum) must NOT
-    // short-circuit — they re-derive through the clamped ladder builders so
-    // outstanding links can't sell the retired/below-floor plan. A snapshot
-    // for an estimate with a recurring LAWN service that carries no
-    // lawn-identifiable element at all can't be policy-checked — those
-    // legacy shapes recompute too (a pre-floor $34/mo lawn snapshot must
-    // not fast-path just because its lawn slice is unitemized).
-    && !pricingBundleViolatesLawnPolicy(snapshotBundle, lawnProgramMinimumMonthlyFor(estData))
-    && !(estimateDataHasRecurringLawn(estData) && !pricingBundleHasLawnIdentifiableRow(snapshotBundle))
-    // A LAWN-ONLY snapshot that never OFFERED the lawn tier ladder (one
-    // generic pre-ladder entry) recomputes so the customer picks a real tier
-    // and accept stamps it — see pricingBundleHasLawnTierLadder /
-    // estimateDataIsLawnOnlyRecurring for why mixed bundles are exempt.
-    && !(estimateDataIsLawnOnlyRecurring(estData) && !pricingBundleHasLawnTierLadder(snapshotBundle))
-    // Pre-split termite snapshots (no monthly on the flat-monthly row) and
-    // pre-fee-rule solo pest/mosquito snapshots (no setup fee the accept
-    // path will invoice) recompute instead of fast-pathing.
-    && !pricingBundleHasStaleTermiteRow(snapshotBundle)
-    && !pricingBundleMissingRequiredSetupFee(snapshotBundle, estData)
-    // Snapshots whose rows never netted the estimate's manual discount
-    // (evidenced by the persisted totals disagreeing with the blob's own
-    // discounted figures) re-derive through the live (discount-aware)
-    // builders — fast-pathing them would bill the undiscounted row a
-    // discounted quote displayed. Already-netted legacy snapshots pass.
-    && !pricingBundleLacksManualDiscountNetting(snapshotBundle, estData, estimate)
-  ) {
+  if (sentSnapshotServesAsIs(snapshotBundle, estimate, estData)) {
     // Chokepoint stamp AFTER finalizePricingBundle (Codex r5 P0 on #4789):
     // attachPublicPricingContract rebuilds services[] split cards there and
     // would drop an earlier stamp. Never a price field, never written back;
@@ -31822,6 +31828,7 @@ module.exports.pricingBundleHasStaleTermiteRow = pricingBundleHasStaleTermiteRow
 module.exports.cleanStoredName = cleanStoredName;
 module.exports.matchAcceptCustomerByPhone = matchAcceptCustomerByPhone;
 module.exports.matchAcceptCustomersByPhoneBatch = matchAcceptCustomersByPhoneBatch;
+module.exports.sentSnapshotServesAsIs = sentSnapshotServesAsIs;
 module.exports.acceptPhoneParkedVerdict = acceptPhoneParkedVerdict;
 module.exports.estimatePublicBlockingState = estimatePublicBlockingState;
 module.exports.retireOrDenyDroppedCapture = retireOrDenyDroppedCapture;

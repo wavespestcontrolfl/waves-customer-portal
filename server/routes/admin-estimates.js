@@ -75,6 +75,7 @@ const {
   bookingServiceFor,
   isEstimateAcceptActive,
   isEstimateCustomerViewable,
+  sentSnapshotServesAsIs,
 } = require('./estimate-public');
 const {
   leadEstimateAutoSendConfigFromEnv,
@@ -3833,16 +3834,18 @@ function perApplicationLinesForRow(row, estData) {
   }
 }
 
-// Fills `perApplication` for the page's rows. Rows with no frozen per-application
-// lines cost nothing; the rest are checked against the annual-prepay sale (one
-// batched query) and the billing lane. The lane is the one that applies to the
-// offer: an offer that can still be accepted (isEstimateAcceptActive) reads
-// today's lane, which is what accepting it would bill; every other offer
-// (accepted, declined, expired, archived, held) shows the lane it was SENT in
-// (sentBundleBillsPerApplication), the same lane the staff PDF's frozen view
-// prints, so a later change to the customer's billing never rewrites an old
-// quote.
-async function perApplicationByEstimateId(estimates, parsedDataById) {
+// Fills `perApplicationById` for the page's rows. Rows with no frozen
+// per-application lines cost nothing; the rest are checked against the
+// annual-prepay sale (one batched query) and the billing lane. A closed offer
+// (accepted, declined, expired, archived, held, call-blocked) shows the lane it
+// was SENT in (sentBundleBillsPerApplication), the lane the staff PDF's frozen
+// view prints, so a later change to the customer's billing never rewrites an
+// old quote. An offer that can still be accepted (isEstimateAcceptActive, no
+// call-side block) shows the price only while the customer page still sells
+// exactly that snapshot in that lane: sent per application, billed per
+// application today (what accepting would bill), and served as is
+// (sentSnapshotServesAsIs; a rejected snapshot is rebuilt from live pricing).
+async function perApplicationByEstimateId(estimates, parsedDataById, callBlocks) {
   const out = new Map();
   const candidates = [];
   for (const e of estimates) {
@@ -3865,14 +3868,15 @@ async function perApplicationByEstimateId(estimates, parsedDataById) {
   }
   const todo = candidates.filter((c) => !prepaidIds.has(c.row.id));
   const { sentBundleBillsPerApplication } = require('../services/estimate-proposal-billing');
-  const liveRows = todo.map((c) => c.row).filter((row) => isEstimateAcceptActive(row));
+  const liveRows = todo.map((c) => c.row).filter((row) => isEstimateAcceptActive(row) && !callBlocks.has(row.id));
   const liveIds = new Set(liveRows.map((row) => row.id));
   const perApplicationToday = await rowsBilledPerApplicationToday(liveRows);
+  const stillSold = (row) => {
+    const data = parsedDataById.get(row.id);
+    return perApplicationToday.has(row.id) && sentSnapshotServesAsIs(data?.sendSnapshot?.pricingBundle, row, data);
+  };
   for (const c of todo) {
-    const perApplication = liveIds.has(c.row.id)
-      ? perApplicationToday.has(c.row.id)
-      : sentBundleBillsPerApplication(c.row);
-    if (perApplication) out.set(c.row.id, c.lines);
+    if (sentBundleBillsPerApplication(c.row) && (!liveIds.has(c.row.id) || stillSold(c.row))) out.set(c.row.id, c.lines);
   }
   return out;
 }
@@ -3929,18 +3933,6 @@ async function rowsBilledPerApplicationToday(rows) {
     ids.clear();
   }
   return ids;
-}
-
-// Rows the staff preview (?adminPreview=1) renders, judged as the /data gate
-// judges them: its row verdicts (the staff draft preview, or a row the
-// customer page shows), then the call-side verdict for engine-drafted rows
-// (callSideBlocksForEstimates, one batched read; it fails closed). A held,
-// invalidated, expired, archived or call-blocked row 404s there even for
-// staff, so the card opens the staff PDF instead.
-async function staffPreviewableIdSet(estimates, parsedDataById) {
-  const byRow = estimates.filter((e) => adminDraftPreviewEligible(e, '1') || isEstimateCustomerViewable(e));
-  const blocked = await callSideBlocksForEstimates(db, byRow.map((e) => ({ id: e.id, status: e.status, data: parsedDataById.get(e.id) })));
-  return new Set(byRow.filter((e) => !blocked.has(e.id)).map((e) => e.id));
 }
 
 // Accepted rows that have a recorded acceptance (terms_version set AND a
@@ -4167,9 +4159,15 @@ router.get('/', async (req, res, next) => {
 
     // Parsed once: the per-application lines and the row payload read the same data.
     const parsedDataById = new Map(estimates.map((e) => [e.id, parseEstimateData(e.estimate_data)]));
-    const perApplicationById = await perApplicationByEstimateId(estimates, parsedDataById);
+    // The /data gate, judged per row: its row verdicts (the staff draft preview,
+    // or a row the customer page shows), then the call-side verdict for the
+    // rows it would serve (callSideBlocksForEstimates, one batched read; fails
+    // closed). A blocked row is neither previewable nor acceptable.
+    const servedRows = estimates.filter((e) => adminDraftPreviewEligible(e, '1') || isEstimateCustomerViewable(e));
+    const callBlocks = await callSideBlocksForEstimates(db, servedRows.map((e) => ({ id: e.id, status: e.status, data: parsedDataById.get(e.id) })));
+    const staffPreviewableIds = new Set(servedRows.filter((e) => !callBlocks.has(e.id)).map((e) => e.id));
+    const perApplicationById = await perApplicationByEstimateId(estimates, parsedDataById, callBlocks);
     const acceptanceRecordIds = await acceptanceRecordIdSet(estimates);
-    const staffPreviewableIds = await staffPreviewableIdSet(estimates, parsedDataById);
 
     res.json({
       estimates: estimates.map(e => {
@@ -4217,7 +4215,9 @@ router.get('/', async (req, res, next) => {
           // Per-application price lines for the card, or null (see perApplicationLinesForRow).
           perApplication: perApplicationById.get(e.id) || null,
           hasAcceptanceRecord: acceptanceRecordIds.has(e.id),
-          // Whether the staff preview renders this row (see staffPreviewableIdSet).
+          // Whether the staff preview (?adminPreview=1) renders this row; a held,
+          // invalidated, expired, archived or call-blocked row 404s there even for
+          // staff, so the card opens the staff PDF instead.
           staffPreviewable: staffPreviewableIds.has(e.id),
           tier: e.waveguard_tier, createdBy: e.created_by_name,
           sentAt: e.sent_at,
@@ -5054,20 +5054,41 @@ router.get('/:id/proposal.pdf', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
-    // Browser-rendered document (GATE_ESTIMATE_DOC_PDF) — same renderer as
-    // the customer download so the operator's copy matches the customer's.
-    // Only for rows the public /data route will serve (the headless page
-    // fetches it), judged as that route judges them: the public page's own
-    // predicate, then the call-side verdict. Drafts, scheduled, expired,
-    // send_failed, archived, held, invalidated and call-blocked rows keep the
-    // pdfkit generator, which reads the row directly. Any render failure also
-    // falls through to pdfkit — the admin download must never 500 on a
-    // browser hiccup.
+    const billing = require('../services/estimate-proposal-billing');
     const data = parseEstimateData(estimate.estimate_data);
     const unsent = ['draft', 'scheduled'].includes(estimate.status);
+    // Only a real handoff writes the send bundle; a row without one (unsent,
+    // or a first send that failed on every channel) has nothing to freeze to.
+    const sentBundle = data?.sendSnapshot?.pricingBundle;
+    const hasSentBundle = !unsent && Boolean(sentBundle) && typeof sentBundle === 'object';
+    // Judged as the public /data route judges the row: the public page's own
+    // predicate, then the call-side verdict.
     const publicViewable = isEstimateCustomerViewable(estimate)
       && !(await callSideBlockForEstimateData(db, data, { estimateStatus: estimate.status }));
-    if (publicViewable && require('../config/feature-gates').isEnabled('estimateDocPdf')) {
+    // A price-locked quote (accepted / declined) is the offer as it was SENT.
+    // The customer's document reads today's billing lane, so when that lane is
+    // no longer the one the quote was sent in, the staff copy is the frozen one.
+    let laneMoved = false;
+    if (publicViewable && hasSentBundle && billing.estimateIsPriceLocked(estimate)) {
+      const [today, sent] = await Promise.all([
+        billing.resolveProposalBillingContext(estimate),
+        billing.resolveFrozenBillingContext(estimate),
+      ]);
+      laneMoved = today.billsPerApplication !== sent.billsPerApplication;
+    }
+    // A delivered quote the public page no longer serves (archived, expired by
+    // status or by date, send_failed after an earlier delivery, held for a
+    // re-price, invalidated, call-blocked), or a locked quote whose lane moved,
+    // renders from the frozen send bundle in the lane it was sent in
+    // (resolveFrozenBillingContext); resolveProposalBillingContext would reprice
+    // an unlocked row live and reads today's lane. Everything else is the
+    // customer's own document: the browser renderer (GATE_ESTIMATE_DOC_PDF,
+    // the renderer of the customer download, so the operator's copy matches the
+    // customer's), else pdfkit on the same live billing lane. Any render
+    // failure falls through to pdfkit — the admin download must never 500 on a
+    // browser hiccup.
+    const sentOfferView = hasSentBundle && (!publicViewable || laneMoved);
+    if (!sentOfferView && publicViewable && require('../config/feature-gates').isEnabled('estimateDocPdf')) {
       try {
         const { renderEstimateDocumentPdf } = require('../services/pdf/estimate-doc-pdf');
         const buffer = await renderEstimateDocumentPdf(estimate);
@@ -5079,23 +5100,9 @@ router.get('/:id/proposal.pdf', async (req, res, next) => {
         logger.warn(`[admin-estimates] browser document render failed for estimate ${estimate.id}; serving pdfkit fallback: ${sanitizeRenderError(e)}`);
       }
     }
-    // Same live billing lane the customer-facing download resolves, so the
-    // operator's copy and the customer's copy stay byte-identical.
-    const { resolveProposalBillingContext, resolveFrozenBillingContext } = require('../services/estimate-proposal-billing');
     const { acceptanceRecordForEstimate } = require('../services/estimate-acceptance-record');
-    // A delivered quote the public page no longer serves (archived, expired by
-    // status or by date, send_failed after an earlier delivery, held for a
-    // re-price, invalidated, call-blocked) is viewed as the offer that was
-    // SENT: resolveProposalBillingContext would reprice it live (it only
-    // freezes accepted / declined / price-locked rows), so those rows render
-    // from the frozen send bundle instead. Only a real handoff writes that
-    // bundle, so a row without one (a first send that failed on every channel)
-    // has nothing to freeze to and keeps the live lane, like unsent rows
-    // (draft, scheduled, archived or not) and live quotes.
-    const sentBundle = data?.sendSnapshot?.pricingBundle;
-    const sentOfferView = !publicViewable && !unsent && Boolean(sentBundle) && typeof sentBundle === 'object';
     generateEstimateProposalPDF(estimate, res, {
-      ...(await (sentOfferView ? resolveFrozenBillingContext : resolveProposalBillingContext)(estimate)),
+      ...(await (sentOfferView ? billing.resolveFrozenBillingContext : billing.resolveProposalBillingContext)(estimate)),
       // Same recorded acceptance the customer's download carries (strict: an
       // accepted document is never produced without its record).
       acceptance: await acceptanceRecordForEstimate(estimate, { strict: true }),
