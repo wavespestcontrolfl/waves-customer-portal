@@ -10,7 +10,9 @@ import { APP_STORE_URL, PLAY_STORE_URL } from "../components/estimate/AppShowcas
 // must hold for every account shape (paused Auto Pay, several properties,
 // dark gates). Where it cannot, the step sends the customer to us instead.
 
-export const HOW_TO_CAPTION = "Steps for the customer. Each link opens the right app screen after sign-in.";
+// A cancelled account keeps only Plan, Visits history, Billing and Documents
+// (CANCELLED_TABS), so the caption tells staff the guides are for active plans.
+export const HOW_TO_CAPTION = "For customers with an active plan. Each guide gives steps and a link that opens the right app screen after sign-in.";
 
 const portalLink = (path) => `portal.wavespestcontrol.com/login?next=${encodeURIComponent(path)}`;
 
@@ -31,7 +33,7 @@ const GUIDES = [
       "Check the box to confirm they agreed to get our texts, then tap Save.",
     ],
     // Contacts are stored per profile, not per saved property.
-    after: "They will get visit reminders and on-the-way alerts. If you have more than one property on your account, they get alerts for all of them.",
+    after: "They will get the visit alerts you have turned on, such as reminders and on-the-way alerts. We may text them once to confirm first. If you have more than one property on your account, they get alerts for all of them.",
   },
   {
     key: "autopay",
@@ -89,7 +91,8 @@ const GUIDES = [
       SIGN_IN,
       "Open Documents. On a phone, tap More, then Documents.",
       "Your reports are under Service Reports. Tap one to open it.",
-      "Invoices and receipts are in Billing, under Payment History.",
+      // Payment History lists payments only; open invoices are Pay now links.
+      "Anything you owe shows at the top of Billing with a Pay now link. Paid receipts are in Billing, under Payment History.",
     ],
   },
   {
