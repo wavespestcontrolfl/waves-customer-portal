@@ -79,13 +79,15 @@ async function operatorEmailRecipient(customer, logTag) {
 // the operator's trusted exemption (ignoreDisputeHold: a plain dispute hold is skipped, a wrong-number /
 // wrong-party fallback hold still stops the send; a lookup that cannot answer holds it too). A held
 // send is the shared retryable hold outcome (one WAIT everywhere), never a failure (Codex #5424 r15 P1).
-function selfPayOnlyHandoff(invoiceId, state, { holdCustomerId = null } = {}) {
+// ignoreDisputeHold: the operator Send-now on the Invoices page keeps its email through a dispute hold; the Intelligence Bar's
+// approved send passes false and honors it.
+function selfPayOnlyHandoff(invoiceId, state, { holdCustomerId = null, ignoreDisputeHold = true } = {}) {
   return async (dispatch) => {
     const verdict = await require('./invoice-helpers').selfPayAtDispatch(invoiceId, db)();
     if (verdict.ok !== true) return verdict;
     if (holdCustomerId) {
       const collectionHold = require('./collections/collection-hold');
-      const held = await collectionHold.messagingHeldByCollectionHold(holdCustomerId, db, { ignoreDisputeHold: true });
+      const held = await collectionHold.messagingHeldByCollectionHold(holdCustomerId, db, { ignoreDisputeHold });
       if (held.held) {
         const outcome = collectionHold.holdDeferOutcome(held);
         state.boundaryBlock = outcome;

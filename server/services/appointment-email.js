@@ -128,7 +128,23 @@ async function loadCustomer(customerId) {
 // failed property read under enforcement reads as prefs-unavailable.
 const PROPERTY_PREFS_UNAVAILABLE = 'PROPERTY_PREFS_UNAVAILABLE';
 
-async function resolveRecipients(customer, { scheduledServiceId = null } = {}) {
+// An unreadable per-contact choices table holds the email exactly like an
+// unreadable prefs row (sendTemplate re-resolves on the next scan).
+function heldContactPrefsError(customer, err) {
+  const held = new Error(`contact notification choices unreadable for customer ${customer.id}: ${err.message}`);
+  held.code = PROPERTY_PREFS_UNAVAILABLE;
+  return held;
+}
+
+// The notification_prefs row an appointment EMAIL resolves against: the
+// customer row, the on-site texts-only demotion undone, the visit's saved
+// property overlaid. Throws PROPERTY_PREFS_UNAVAILABLE when either read is
+// unreadable — ONE posture: the recipient list cannot be built (the
+// service-contact fan-out and the primary fallback would send a notice
+// whose notify-primary is unknown), so sendTemplate HOLDS, never sends —
+// the same fail-closed rule safeSendAppointment applies to the SMS twin
+// (in-session review on f9945dc89).
+async function resolveEmailPrefs(customer, scheduledServiceId) {
   let prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
   const unreadable = (p) => p === PREFS_UNAVAILABLE || p?.__prefsUnavailable === true;
   // The on-site flow's caller demotion (GATE_ONSITE_CALLER_DEMOTE) switches
@@ -149,26 +165,33 @@ async function resolveRecipients(customer, { scheduledServiceId = null } = {}) {
       prefs = PREFS_UNAVAILABLE;
     }
   }
-  // ONE posture for an unreadable row — the customer row's read or the
-  // property's under enforcement: the recipient list cannot be built (the
-  // service-contact fan-out and the primary fallback below would send a
-  // notice whose notify-primary is unknown), so sendTemplate HOLDS, never
-  // sends — the same fail-closed rule safeSendAppointment applies to the
-  // SMS twin (in-session review on f9945dc89).
   if (unreadable(prefs)) {
     const held = new Error(`notification preferences unreadable for customer ${customer.id}`);
     held.code = PROPERTY_PREFS_UNAVAILABLE;
     throw held;
   }
-  const seen = new Set();
+  return prefs;
+}
+
+async function resolveRecipients(customer, { scheduledServiceId = null, eventType = null } = {}) {
+  const prefs = await resolveEmailPrefs(customer, scheduledServiceId);
   const recipients = [];
-  const add = (email, name) => {
+  // Each recipient carries WHOSE mailbox it is: `holder` for the account
+  // holder's own address (as themselves, or as a slot's fallback), false
+  // for a contact's own. The dispatch-boundary re-read of the contact
+  // declines (sendTemplate onQueued) applies to a contact's mailbox only —
+  // a contact whose address happens to equal the holder's must not silence
+  // the holder's notice (codex #6363 r23 security P2); an address both
+  // added is the holder's.
+  const add = (email, name, { holder = false } = {}) => {
     const value = clean(email);
-    const key = value.toLowerCase();
-    if (isEmailLike(value) && !seen.has(key)) {
-      seen.add(key);
-      recipients.push({ email: value, name });
+    if (!isEmailLike(value)) return;
+    const existing = recipients.find((r) => r.email.toLowerCase() === value.toLowerCase());
+    if (existing) {
+      if (holder) existing.holder = true;
+      return;
     }
+    recipients.push({ email: value, name, holder });
   };
   // The SMS appointment recipients first (service contacts and/or primary).
   // A service contact's email inside getAppointmentContacts falls back to the
@@ -178,22 +201,35 @@ async function resolveRecipients(customer, { scheduledServiceId = null } = {}) {
   // mislabels the email (phone-only buyer/tenant slots made this common).
   const primary = getPrimaryContact(customer);
   const slotEmailByRole = new Map(getServiceContactSlots(customer).map((s) => [s.role, s.email]));
+  // The contact's OWN choices (contact login, GATE_CONTACT_LOGIN): a slot
+  // whose phone declined this purpose by email is left out of BOTH loops
+  // below. Same fail-closed posture as an unreadable prefs row: hold.
+  const declinedSlotRoles = await require('./contact-notification-prefs')
+    .declinedEmailSlotRoles(customer, eventType)
+    .catch((err) => { throw heldContactPrefsError(customer, err); });
   // skipConsentGate: the consent artifact attests to receiving TEXTS; email
   // routing follows notification prefs alone (see the recipient spec in
   // tests/appointment-email-recipients.test.js).
+  let declinedByContact = false;
   for (const c of getAppointmentContacts(customer, prefs || {}, { skipConsentGate: true })) {
+    if (declinedSlotRoles.has(c.role)) { declinedByContact = true; continue; }
     const ownEmail = slotEmailByRole.has(c.role) ? slotEmailByRole.get(c.role) : c.email;
-    if (ownEmail) add(ownEmail, c.name);
-    else add(primary.email, primary.name);
+    if (ownEmail) add(ownEmail, c.name, { holder: c.role === 'primary' });
+    else add(primary.email, primary.name, { holder: true });
   }
   // A service-contact slot can carry an email WITHOUT a phone, so it never appears
   // in the SMS contact list above — include those addresses too so an email-only
   // service contact can still receive the notice.
-  for (const slot of getServiceContactSlots(customer)) add(slot.email, slot.name);
+  for (const slot of getServiceContactSlots(customer)) {
+    if (declinedSlotRoles.has(slot.role)) { declinedByContact = true; continue; }
+    add(slot.email, slot.name);
+  }
   // Last resort: the primary customer email (e.g. email-only customer with no
-  // appointment phone contacts at all).
-  if (!recipients.length) {
-    add(primary.email, primary.name);
+  // appointment phone contacts at all). Never when a contact's OWN decline
+  // emptied the list: that would reroute the notice to a holder who turned
+  // their appointment notices off (codex #6363 r2 P2).
+  if (!recipients.length && !declinedByContact) {
+    add(primary.email, primary.name, { holder: true });
   }
   return recipients;
 }
@@ -296,7 +332,7 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
 
   let recipients;
   try {
-    recipients = await resolveRecipients(customer, { scheduledServiceId });
+    recipients = await resolveRecipients(customer, { scheduledServiceId, eventType });
   } catch (err) {
     if (err?.code !== PROPERTY_PREFS_UNAVAILABLE) throw err;
     // Held, not skipped: the next scan re-resolves — and like the reminders'
@@ -371,12 +407,36 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
         // error holds rather than sends.
         // Street-level address hold boundary re-check (owner ruling 2026-10-01): a promotion that commits
         // during the library's own awaits still holds the send; the predicate fails closed.
+        // The contact's OWN choices as of the handoff too (codex #6363 r21
+        // P2): a decline that lands during those awaits aborts THIS
+        // recipient, as the review email's dispatch claim does; an
+        // unreadable table holds the notice (fail closed, like the
+        // recipient resolution above). The holder's own mailbox is never
+        // subject to a contact's decline (codex r23 security P2).
         onQueued: async () => {
           if (holdVisitId && await require('./street-level-hold').isStreetLevelHoldVisit(holdVisitId)) { abortedBy = 'street_level_hold'; return false; }
           if (moveHoldServiceId && await moveHoldLive(moveHoldServiceId, renderedSlotMs)) { abortedBy = 'move_hold'; return false; }
+          if (recipient.holder) return true;
+          // The slots are re-read as of NOW (codex r27 P2): a contact the
+          // holder removed since the recipients resolved is held too.
+          let allowedNow;
+          try {
+            allowedNow = await require('./contact-notification-prefs').contactAddressStillAllowed(customer, recipient.email, eventType);
+          } catch {
+            abortedBy = 'preferences_unavailable'; return false;
+          }
+          if (!allowedNow) { abortedBy = 'contact_declined'; return false; }
           return true;
         },
       });
+      // One recipient's own decline leaves the others' notices alone: skip
+      // it (no delivery, an attempt row saying why) and carry on.
+      if (result?.aborted && abortedBy === 'contact_declined') {
+        logger.info(`[appointment-email] ${eventType} for ${customer.id}: a contact declined at the dispatch boundary — recipient skipped`);
+        await logEmailAttempt({ customerId: customer.id, templateKey, eventType, status: 'skipped', failureReason: abortedBy, metadata });
+        outcomes.push({ reason: abortedBy });
+        continue;
+      }
       // An onQueued abort is a HELD outcome, not a delivery failure: stop
       // the fan-out (the hold covers the visit) and let the caller defer.
       if (result?.aborted && abortedBy) {

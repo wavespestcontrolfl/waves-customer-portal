@@ -1276,11 +1276,12 @@ describe('products', () => {
     expect(screen.queryByLabelText('Area treated today (sq ft)')).toBeNull();
   });
 
-  test('a perimeter product is held in words: this sheet has no linear-feet entry', async () => {
+  // Linear feet are optional (owner 2026-10-22): a perimeter product no longer holds the sheet.
+  test('a perimeter product holds nothing: linear feet are optional', async () => {
     await openSheet({ request: makeRequest({ ctx: plannedOne('perimeter_spray', { treatedSqft: 6000, areaUnit: 'sqft' }) }) });
-    await analyze();
-    await waitFor(() => expect(footerNote()).toBe('Talak 7.9% needs linear feet, which this sheet does not take. Tell the office.'));
-    expect(completeButton().disabled).toBe(true);
+    await analyzeAndComplete();
+    expect(screen.queryByText(/needs linear feet/)).toBeNull();
+    expect(completeCalls()).toHaveLength(1);
   });
 
   // [method as the plan or catalog spells it, the unit the server wants or null]
@@ -1309,7 +1310,6 @@ describe('products', () => {
 
   test('the server\'s area refusals get plain words with no button to follow', () => {
     expect(plainRefusalMessage({ code: 'area_sqft_required' })).toBe('The lawn area is missing for a sprayed or spread product. Tell the office.');
-    expect(plainRefusalMessage({ code: 'linear_ft_required' })).toBe('A perimeter product needs linear feet, which this sheet does not take. Tell the office.');
   });
 });
 
@@ -1714,9 +1714,12 @@ describe('the note box', () => {
     const note = screen.getByLabelText('Tell me about the visit');
     const row = note.closest('.tech-visit-note-row');
     expect(row.classList.contains('tech-visit-note-row--inside')).toBe(true);
-    expect(row.querySelector('.tech-visit-note-mic')).not.toBeNull();
-    // The textarea is the row's first child: nothing to its left.
-    expect(row.firstElementChild).toBe(note);
+    // The mic shares the textarea's own wrapper, so it sits in the text area's corner.
+    const field = note.closest('.tech-visit-note-field');
+    expect(field.querySelector('.tech-visit-note-mic')).not.toBeNull();
+    // The textarea leads its wrapper, and the wrapper leads the row: nothing to its left.
+    expect(field.firstElementChild).toBe(note);
+    expect(row.firstElementChild).toBe(field);
   });
 });
 

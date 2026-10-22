@@ -80,6 +80,27 @@ router.post('/native-subscribe', async (req, res, next) => {
 router.post('/native-unsubscribe', async (req, res, next) => {
   try {
     const { token } = req.body || {};
+    // A contact session (GATE_CONTACT_LOGIN) may release only the device it
+    // presents: the token-less "deactivate all of my devices" form belongs to
+    // the account holder, whose devices those are (codex #6363 r5 P2).
+    if (req.contactSession && (!token || typeof token !== 'string')) {
+      return res.status(400).json({ error: 'device token required', code: 'DEVICE_TOKEN_REQUIRED' });
+    }
+    // A CONTACT session's token-bearing release is keyed on the device token
+    // alone, whatever row holds it (codex #6363 r7 P1): the device is
+    // presenting its own token after a holder's logout failed to release it,
+    // and that registration sits under the HOLDER's account — which may be
+    // another account than the one this contact signed into. The token is
+    // the device's own credential, so deactivating exactly it stops pushes
+    // to this device only; a contact session never subscribes, so there is
+    // nothing of its own to protect here.
+    if (req.contactSession) {
+      const deactivated = await db('push_subscriptions')
+        .where({ device_token: token })
+        .whereIn('platform', ['ios', 'android'])
+        .update({ active: false });
+      return res.json({ ok: true, deactivated: Number(deactivated) || 0 });
+    }
     // Token-bearing releases are ACCOUNT-scoped: this device is presenting
     // its own token, and after a failed property re-point the row can sit
     // under a SIBLING profile of the same account — a release scoped to the
