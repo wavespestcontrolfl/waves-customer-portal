@@ -207,14 +207,15 @@ export default function useEmailEditor(userId) {
     setSendFeedback((current) =>
       current.reply?.messageId === id ? { ...current, reply: null } : current,
     );
-    changeDrafts((current) => ({
+    // The store's answer: { saved } for this write, or null if it was refused.
+    return changeDrafts((current) => ({
       ...current,
       replies: { ...current.replies, [id]: text },
     }));
   };
   const setComposeForm = (update) => {
     setSendFeedback((current) => ({ ...current, compose: null }));
-    changeDrafts((current) => ({
+    return changeDrafts((current) => ({
       ...current,
       compose: update(current.compose),
     }));
@@ -452,13 +453,12 @@ export default function useEmailEditor(userId) {
     // operator's check of that tab.
     const guard = (draft.mayHaveSent && MAY_HAVE_SENT) || (draft.takenOver && TAKEN_OVER);
     if (guard && !rememberUncertain(slotOf(draft.replyEmailId), guard)) return { guardUnsaved: true };
-    if (draft.replyEmailId) {
-      setReplyDraft(draft.replyEmailId, draft.draftText);
-      return { saved: draftSession.saved };
-    }
-    setComposeForm(() => ({ to: draft.to, subject: draft.subject === "(no subject)" ? "" : draft.subject, body: draft.draftText }));
+    // `saved` is this write's own result: a refused or unsaved write is not
+    // durable, and the caller then closes the draft again.
+    if (draft.replyEmailId) return { saved: setReplyDraft(draft.replyEmailId, draft.draftText)?.saved === true };
+    const written = setComposeForm(() => ({ to: draft.to, subject: draft.subject === "(no subject)" ? "" : draft.subject, body: draft.draftText }));
     setShowCompose(true);
-    return { saved: draftSession.saved };
+    return { saved: written?.saved === true };
   };
 
   // Takes a just-restored draft back out of the composer (its restore could
