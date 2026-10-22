@@ -134,7 +134,9 @@ function BidDetail({ bidId, onChanged, onClose }) {
     try {
       const data = await api(`/${bidId}`, { method: "PATCH", body });
       setState((s) => ({ ...s, bid: data.bid }));
-      setDueInput(etDatetimeLocalValue(data.bid.due_at));
+      // Only a date save resets the date field: a decision saved first keeps a date the operator typed but has
+      // not saved yet.
+      if ("due_at" in body || body.confirm_due) setDueInput(etDatetimeLocalValue(data.bid.due_at));
       setMessage(done);
       onChanged();
     } catch (err) {

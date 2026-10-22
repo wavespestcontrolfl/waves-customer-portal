@@ -105,6 +105,18 @@ it("confirms a date as read and saves a decision with a note", async () => {
   expect(patch.mock.calls[1][0].body).toEqual({ status: "no_bid", decision_note: "Out of area" });
 });
 
+it("saving a decision keeps a due date the operator typed but has not saved", async () => {
+  const patch = vi.fn(() => reply({ ok: true, bid: bid({ status: "bid" }) }));
+  route({ "GET /admin/bid-desk/": () => reply({ bids: LIST }), "GET /admin/bid-desk/b1": () => reply({ bid: bid(), emails: [] }), "PATCH /admin/bid-desk/b1": patch });
+  renderPage("/?bid=b1");
+  const due = await screen.findByLabelText("Due date (Eastern time)");
+  fireEvent.change(due, { target: { value: "2026-10-30T09:00" } });
+  fireEvent.change(screen.getByLabelText("Decision"), { target: { value: "bid" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save decision" }));
+  await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(screen.getByLabelText("Due date (Eastern time)")).toHaveValue("2026-10-30T09:00"));
+});
+
 it("marks an email as a bid by id and opens the bid", async () => {
   const post = vi.fn(() => reply({ ok: true, bid_id: "b9", created: true }, { status: 201 }));
   route({

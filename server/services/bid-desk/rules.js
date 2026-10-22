@@ -49,7 +49,7 @@ function attachPatch(bid, parsed, kind) {
  * historical. Each fires once: a bid already inside 2 days that never had the 7-day reminder gets the 2-day one only.
  */
 function reminderDue(bid, now = new Date()) {
-  if (!bid || bid.historical || bid.due_confirmed !== true || !bid.due_at) return null;
+  if (!bid || bid.historical || bid.due_confirmed !== true || !bid.due_at || bid.needs_date_confirmation) return null;
   if (!OPEN_STATUSES.includes(bid.status)) return null;
   const left = new Date(bid.due_at).getTime() - new Date(now).getTime();
   if (!(left > 0)) return null;

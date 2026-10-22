@@ -56,6 +56,10 @@ describe('attachPatch: an email never overwrites a due date', () => {
 });
 
 describe('reminderDue', () => {
+  test('a date waiting on an addendum check is not reminded', () => {
+    expect(reminderDue(due(3 * DAY, { needs_date_confirmation: true }), NOW)).toBeNull();
+  });
+
   const due = (ms, over = {}) => bid({ due_at: new Date(NOW.getTime() + ms), due_confirmed: true, ...over });
 
   test('an unconfirmed date never reminds', () => {
@@ -137,6 +141,10 @@ describe('notification copy follows the admin notification rule', () => {
       expect(spec.severity).toBe('needs-you');
     }
     expect(addendumSpec(confirmed, email).detail).toBe('Addendum on Sample Ridge Residences: confirm the due date');
-    expect(reminderSpec(confirmed, '2d').spec.action).toMatch(/due in 2 days/);
+    // The words come from the date, not the window: a 7-day reminder for a bid due tomorrow says tomorrow.
+    const at = (dueAt) => ({ ...confirmed, due_at: dueAt });
+    expect(reminderSpec(at(new Date(NOW.getTime() + 2 * DAY)), '2d', NOW).spec.action).toMatch(/due in 2 days/);
+    expect(reminderSpec(at(new Date(NOW.getTime() + 1 * DAY)), '7d', NOW).spec.action).toMatch(/due tomorrow/);
+    expect(reminderSpec(at(new Date(NOW.getTime() + 3 * DAY)), '7d', NOW).spec.action).toMatch(/due in 3 days/);
   });
 });

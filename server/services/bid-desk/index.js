@@ -28,6 +28,8 @@ const FIRST_RUN_LOOKBACK_MS = 60 * 60 * 1000;
 const MAX_ATTEMPTS = 3;
 const REMINDER_LIMIT = 100;
 const RECHECK_WINDOW_MS = 30 * 60 * 1000;
+// Pages of `limit` rows the late pass may read per tick (bounds one tick; 30 minutes of mail is far below it).
+const LATE_MAX_PAGES = 10;
 const EMAIL_COLUMNS = ['id', 'gmail_thread_id', 'from_address', 'from_name', 'subject', 'body_text', 'body_html', 'received_at', 'classification', 'label_ids'];
 
 // Mail the sync stored as spam (a blocked sender, Gmail's SPAM label) never becomes a bid or a bell.
@@ -276,25 +278,32 @@ async function runBidDeskTick({ now = new Date(), limit = BATCH_LIMIT } = {}) {
     }
   }
   // Concurrent inserts can commit out of created_at order. Re-read the last RECHECK_WINDOW behind the cursor for
-  // rows not yet filed; ingestEmail is idempotent, so a row seen twice is skipped.
-  const late = await db('emails as e')
-    .whereRaw('e.created_at > ?::timestamptz - make_interval(secs => ?)', [state.at, RECHECK_WINDOW_MS / 1000])
-    .whereRaw('e.created_at <= ?::timestamptz', [state.at])
-    .whereNotExists(db('bid_opportunity_emails as l').whereRaw('l.email_id = e.id'))
-    .whereRaw(NOT_SPAM_SQL_E)
-    .orderBy([{ column: 'e.created_at' }, { column: 'e.id' }])
-    .limit(limit)
-    .select(EMAIL_COLUMNS.map((c) => `e.${c}`));
-  for (const email of late) {
-    try {
-      const outcome = await ingestEmail(email);
-      if (outcome.bidId) {
-        result.filed += 1;
-        if (outcome.created) result.created += 1;
+  // rows not yet filed; ingestEmail is idempotent, so a row seen twice is skipped. The pass pages through the whole
+  // window, so non-bid mail (never filed, so never excluded) cannot hold a late bid row past the limit.
+  let lateCursor = null;
+  for (let page = 0; page < LATE_MAX_PAGES; page += 1) {
+    const late = await db('emails as e')
+      .whereRaw('e.created_at > ?::timestamptz - make_interval(secs => ?)', [state.at, RECHECK_WINDOW_MS / 1000])
+      .whereRaw('e.created_at <= ?::timestamptz', [state.at])
+      .modify((q) => { if (lateCursor) q.whereRaw('(e.created_at, e.id) > (?::timestamptz, ?::uuid)', [lateCursor.at, lateCursor.id]); })
+      .whereNotExists(db('bid_opportunity_emails as l').whereRaw('l.email_id = e.id'))
+      .whereRaw(NOT_SPAM_SQL_E)
+      .orderBy([{ column: 'e.created_at' }, { column: 'e.id' }])
+      .limit(limit)
+      .select([...EMAIL_COLUMNS.map((c) => `e.${c}`), db.raw('e.created_at::text AS cursor_at')]);
+    for (const email of late) {
+      try {
+        const outcome = await ingestEmail(email);
+        if (outcome.bidId) {
+          result.filed += 1;
+          if (outcome.created) result.created += 1;
+        }
+      } catch (err) {
+        logger.error(`${LOG} late email ${email.id} failed: ${safeError(err)}`);
       }
-    } catch (err) {
-      logger.error(`${LOG} late email ${email.id} failed: ${safeError(err)}`);
     }
+    if (late.length < limit) break;
+    lateCursor = { at: late[late.length - 1].cursor_at, id: late[late.length - 1].id };
   }
   if (rows.length || firstRun) await writeWatermark(state);
   result.owedAlerts = await deliverOwedAlerts();
@@ -310,7 +319,8 @@ async function sendDueReminders({ now = new Date() } = {}) {
   const horizon = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
   const twoDays = new Date(now.getTime() + 2 * 24 * 60 * 60 * 1000);
   const candidates = await db('bid_opportunities')
-    .where({ due_confirmed: true, historical: false })
+    // A date waiting on an addendum check is not reminded until it is confirmed again.
+    .where({ due_confirmed: true, historical: false, needs_date_confirmation: false })
     .whereIn('status', ['new', 'bid'])
     .where('due_at', '>', now).where('due_at', '<=', horizon)
     // Only bids still owed a window, so already-reminded rows cannot fill the limit and starve later ones.
@@ -326,7 +336,7 @@ async function sendDueReminders({ now = new Date() } = {}) {
         const window = reminderDue(bid, now);
         if (!window) return false;
         // The due date is in the key: a changed date (PATCH clears the stamps) gets its own reminders.
-        await alerts.raise(alerts.reminderSpec(bid, window), `bid-desk:remind:${bid.id}:${window}:${new Date(bid.due_at).toISOString()}`, trx);
+        await alerts.raise(alerts.reminderSpec(bid, window, now), `bid-desk:remind:${bid.id}:${window}:${new Date(bid.due_at).toISOString()}`, trx);
         // Inside 2 days the 7-day reminder is moot: stamp both so it can never fire late.
         await trx('bid_opportunities').where({ id }).update({
           reminder_2d_sent_at: window === '2d' ? trx.fn.now() : bid.reminder_2d_sent_at,

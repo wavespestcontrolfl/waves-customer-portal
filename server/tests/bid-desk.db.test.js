@@ -375,6 +375,35 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect(again.bidId).not.toBe(bidId);
     });
 
+    test('the late pass pages past non-bid mail to a late bid row', async () => {
+      await mockPg('system_settings').where({ key: service.WATERMARK_KEY }).del();
+      await storeEmail({ from_address: 'friend@example.test', subject: 'Lunch?', created_at: new Date(NOW.getTime() - 2 * 60000), received_at: new Date(NOW.getTime() - 2 * 60000) });
+      await service.runBidDeskTick({ now: NOW, limit: 2 });
+      // Three non-bid rows and then a bid row commit behind the cursor, all inside the recheck window.
+      for (let i = 0; i < 3; i += 1) {
+        await storeEmail({ from_address: 'friend@example.test', subject: `Note ${i}`, created_at: new Date(NOW.getTime() - (20 - i) * 60000), received_at: new Date(NOW.getTime() - (20 - i) * 60000) });
+      }
+      const bidMail = await storeEmail({ created_at: new Date(NOW.getTime() - 10 * 60000), received_at: new Date(NOW.getTime() - 10 * 60000) });
+      expect(await service.runBidDeskTick({ now: NOW, limit: 2 })).toMatchObject({ created: 1 });
+      expect((await mockPg('bid_opportunities').first()).first_email_id).toBe(bidMail.id);
+    });
+
+    test('a date waiting on an addendum check gets no reminder until it is confirmed again', async () => {
+      const { bidId } = await service.ingestEmail(await storeEmail({ body_text: 'x', gmail_thread_id: `t-${randomUUID()}`, subject: `RFP ${randomUUID()}` }));
+      await mockPg('bid_opportunities').where({ id: bidId }).update({ due_at: new Date(NOW.getTime() + 6 * DAY), due_confirmed: true, needs_date_confirmation: true });
+      raiseAdminAlert.mockClear();
+      expect(await service.sendDueReminders({ now: NOW })).toBe(0);
+      await mockPg('bid_opportunities').where({ id: bidId }).update({ needs_date_confirmation: false });
+      expect(await service.sendDueReminders({ now: NOW })).toBe(1);
+    });
+
+    test('a very long subject still files (the grouping key is capped)', async () => {
+      const subject = `RFP ${'Sample long solicitation title words '.repeat(400)}`;
+      const out = await service.ingestEmail(await storeEmail({ from_address: 'buyer@sample-county.example', subject, body_text: 'x' }));
+      expect(out.created).toBe(true);
+      expect((await bidRow(out.bidId)).group_key.length).toBeLessThan(400);
+    });
+
     test('reminded bids do not fill the candidate list', async () => {
       const { bidId } = await service.ingestEmail(await storeEmail({ body_text: 'x', gmail_thread_id: `t-${randomUUID()}`, subject: `RFP ${randomUUID()}` }));
       await mockPg('bid_opportunities').where({ id: bidId }).update({ due_at: new Date(NOW.getTime() + 6 * DAY), due_confirmed: true, reminder_7d_sent_at: NOW });

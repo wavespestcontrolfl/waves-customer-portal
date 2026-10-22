@@ -37,6 +37,7 @@ const NAMED_DATE = new RegExp(`\\b(${MONTH_NAME})\\.?\\s+(\\d{1,2})(?:st|nd|rd|t
 const NUMERIC_DATE = new RegExp(`\\b(\\d{1,2})/(\\d{1,2})/(\\d{4})\\b${TIME_TAIL}`, 'i');
 
 const pad = (n) => String(n).padStart(2, '0');
+const KEY_PART_MAX = 160;
 
 // "Friday, September 25, 2026 at 12:00 pm" -> { at: Date, hasTime }. null when no complete, real date is in the text.
 function parseDateET(text, { defaultTime = '23:59' } = {}) {
@@ -306,9 +307,11 @@ function parseBidEmail(email = {}) {
     // One project can carry several packages (a GC invites us to Termite Treatment and to Access Control): the
     // package is part of the key. group_base (sender org + project) lets a later email that names no package
     // join the project's only bid.
-    group_base: org && groupTitle ? `${org}|${groupTitle}` : null,
+    // Each part is capped so the indexed key stays far below PostgreSQL's B-tree entry limit; the full names stay
+    // in their own columns.
+    group_base: org && groupTitle ? `${org.slice(0, KEY_PART_MAX)}|${groupTitle.slice(0, KEY_PART_MAX)}` : null,
     group_key: org && groupTitle
-      ? `${org}|${groupTitle}${fields.package_name ? `#${normalizeTitle(fields.package_name)}` : ''}` : null,
+      ? `${org.slice(0, KEY_PART_MAX)}|${groupTitle.slice(0, KEY_PART_MAX)}${fields.package_name ? `#${normalizeTitle(fields.package_name).slice(0, KEY_PART_MAX)}` : ''}` : null,
   };
 }
 

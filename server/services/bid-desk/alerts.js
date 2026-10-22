@@ -7,6 +7,7 @@
  */
 const { raiseAdminAlert, cutAtWord, breaksAlertRules, MAX_WHY_CHARS } = require('../admin-alert-compose');
 const { fitAction, shortDateET } = require('../admin-alert-names');
+const { daysLeft } = require('./rules');
 
 const AREA = 'Estimates';
 const CATEGORY = 'lead';
@@ -78,13 +79,23 @@ function addendumSpec(bid, email) {
   };
 }
 
-function reminderSpec(bid, window) {
+// The words for how far off the due date is, from the date itself: a reminder can fire late or for a date
+// confirmed inside its window, so the window ('7d' / '2d') is never the day count.
+function dueInWords(bid, now) {
+  const days = daysLeft(bid.due_at, now);
+  if (days == null) return 'bid due';
+  if (days <= 0) return 'bid due today';
+  if (days === 1) return 'bid due tomorrow';
+  return `bid due in ${days} days`;
+}
+
+function reminderSpec(bid, window, now = new Date()) {
   const title = titleOf(bid, null);
-  const days = window === '2d' ? 2 : 7;
+  const due = dueInWords(bid, now);
   return {
     spec: {
       area: AREA,
-      action: fitAction(AREA, title, [(n) => `bid due in ${days} days: ${n}`, (n) => `bid due in ${days} days, ${n}`]),
+      action: fitAction(AREA, title, [(n) => `${due}: ${n}`, (n) => `${due}, ${n}`]),
       why: cutAtWord(`Due ${shortDateET(bid.due_at)}${etTimeWords(bid.due_at)}; ${STATUS_LABEL[bid.status] || bid.status}.`, MAX_WHY_CHARS),
       severity: 'needs-you',
       link: linkFor(bid),
@@ -92,7 +103,7 @@ function reminderSpec(bid, window) {
       doneWhen: 'bid_decided',
       who: 'person',
     },
-    detail: `Bid reminder: ${title} is due ${shortDateET(bid.due_at)}${etTimeWords(bid.due_at)} (${days} days). Status: ${bid.status}.`,
+    detail: `Bid reminder (${window === '2d' ? '2-day' : '7-day'}): ${title} is due ${shortDateET(bid.due_at)}${etTimeWords(bid.due_at)}. Status: ${bid.status}.`,
   };
 }
 
