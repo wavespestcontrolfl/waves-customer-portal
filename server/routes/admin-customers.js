@@ -4441,10 +4441,13 @@ const customerUpdateHandler = async (req, res, next) => {
               // req.ibExpectedInvoices is set only by setCustomerBillToFromBar: the invoices the bar card said
               // move, with the status, total and credit it showed. Checked inside this transaction, after the
               // customer row lock and before any Stripe cancel (they run last): any other set, or a changed
-              // row, rolls the whole edit back.
+              // row, rolls the whole edit back. The rows are locked FOR UPDATE (id order) before the compare and
+              // stay locked through the withdrawal. Every other Bill-To writer for this customer already waits on
+              // the customer row; a money path that holds an invoice first can deadlock with this, which
+              // PostgreSQL aborts and the operator retries (lock order there is out of scope, owner 2026-10-03).
               const expected = req.ibExpectedInvoices;
               if (expected) {
-                const rows = expected.length ? await trx('invoices').whereIn('id', expected.map((e) => e.id)).select('id', 'status', 'total', 'credit_applied') : [];
+                const rows = expected.length ? await trx('invoices').whereIn('id', expected.map((e) => e.id)).orderBy('id').forUpdate().select('id', 'status', 'total', 'credit_applied') : [];
                 const cents = (v) => Math.round((Number(v) || 0) * 100);
                 const same = rows.length === expected.length && expected.every((e) => rows.some((r) => String(r.id) === e.id
                   && r.status === e.status && cents(r.total) === cents(e.total) && cents(r.credit_applied) === cents(e.credit_applied)));
