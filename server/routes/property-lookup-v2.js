@@ -6133,15 +6133,16 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     // else the aerial read. Rides the PROPERTY block only — never
     // services.treeShrub — so it persists in the stored engineRequest without
     // touching the price until the spray-volume model is calibrated.
-    hedgeLinearFt: (() => {
-      const typed = Number(p.hedgeLinearFt);
-      if (p.hedgeLinearFt !== undefined && p.hedgeLinearFt !== null && p.hedgeLinearFt !== '' && Number.isFinite(typed) && typed >= 0) return typed;
-      const aerial = Number(p.estimatedHedgeLinearFt);
-      return Number.isFinite(aerial) && aerial >= 0 ? aerial : undefined;
+    // Presence is checked before coercion on BOTH legs: Number(null) is 0,
+    // which would persist an unmeasured aerial read as an "estimated" zero
+    // (Codex #6398 r8).
+    ...(() => {
+      const present = (v) => v !== undefined && v !== null && String(v).trim() !== '';
+      const nonNegative = (v) => present(v) && Number.isFinite(Number(v)) && Number(v) >= 0;
+      if (nonNegative(p.hedgeLinearFt)) return { hedgeLinearFt: Number(p.hedgeLinearFt), hedgeLinearFtSource: 'manual' };
+      if (nonNegative(p.estimatedHedgeLinearFt)) return { hedgeLinearFt: Number(p.estimatedHedgeLinearFt), hedgeLinearFtSource: 'estimated' };
+      return { hedgeLinearFt: undefined, hedgeLinearFtSource: undefined };
     })(),
-    hedgeLinearFtSource: p.hedgeLinearFt !== undefined && p.hedgeLinearFt !== null && p.hedgeLinearFt !== '' && Number.isFinite(Number(p.hedgeLinearFt)) && Number(p.hedgeLinearFt) >= 0
-      ? 'manual'
-      : (Number.isFinite(Number(p.estimatedHedgeLinearFt)) && Number(p.estimatedHedgeLinearFt) >= 0 ? 'estimated' : undefined),
     palmCount: positiveIntegerValue(p.palmCount),
     // The AI estimate leg honors the stamped trust verdict (same `!== false`
     // contract as the client prefill): a distrusted count must not be
