@@ -113,7 +113,7 @@ export default function useEmailEditor(userId) {
   // A schedule request for this draft slot has no definite answer: plain Send
   // could deliver a copy now while the queued one still sends later.
   const scheduleUnconfirmed = (replyId = null) => Boolean(uncertainSchedule.current[slotOf(replyId)]);
-  // The operator looked under Scheduled and the email is not there.
+  // The operator looked under Scheduled and in Gmail Sent: the email is in neither.
   const confirmScheduleChecked = (replyId = null) => {
     if (!scheduling) rememberUncertain(slotOf(replyId), null);
   };
@@ -279,7 +279,7 @@ export default function useEmailEditor(userId) {
     // the same time may go (it reuses that key). A changed one would get a new
     // key and could queue a second copy beside the first.
     if (prior && prior.request !== request) {
-      setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: "An earlier schedule request for this email was not confirmed. Look under Scheduled, then tap I checked before you change it." } }));
+      setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: "An earlier schedule request for this email was not confirmed. Look under Scheduled and in the Gmail Sent folder, then tap I checked before you change it." } }));
       return;
     }
     setScheduling(kind);

@@ -154,7 +154,7 @@ describe("Email schedule send", () => {
     expect(await screen.findByText(/A schedule request for this email was not confirmed/)).toBeInTheDocument();
     const send = () => screen.getAllByRole("button", { name: "Send", exact: true }).at(-1);
     expect(send()).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "I checked: it is not there" }));
+    fireEvent.click(screen.getByRole("button", { name: "I checked: it is in neither" }));
     await waitFor(() => expect(send()).not.toBeDisabled());
     expect(screen.queryByText(/A schedule request for this email was not confirmed/)).not.toBeInTheDocument();
   });
@@ -178,7 +178,7 @@ describe("Email schedule send", () => {
     await pickTomorrow();
     expect((await screen.findAllByText(/An earlier schedule request for this email was not confirmed/)).length).toBeGreaterThan(0);
     expect(posts("/email/schedule")).toHaveLength(1);
-    fireEvent.click(screen.getByRole("button", { name: "I checked: it is not there" }));
+    fireEvent.click(screen.getByRole("button", { name: "I checked: it is in neither" }));
     await pickTomorrow();
     await waitFor(() => expect(posts("/email/schedule")).toHaveLength(2));
     const [first, second] = posts("/email/schedule").map(([, options]) => JSON.parse(options.body).clientKey);
