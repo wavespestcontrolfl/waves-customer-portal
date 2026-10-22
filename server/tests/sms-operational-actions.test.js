@@ -1816,49 +1816,25 @@ describe('SMS review bell (owner ruling 2026-10-21)', () => {
     expect(isQuietTemporaryFact(held({ field: 'pet_details', duration: 'visit_only', outcome: 'pet_needs_review' }))).toBe(false);
   });
 
-  test('copy names the customer, says what was wanted and why it stopped, and quotes the text', () => {
+  test('copy names the customer, says what was wanted and why it stopped, and never quotes the text', () => {
     const exception = { field: 'access_notes', outcome: 'existing_value_conflict' };
-    const copy = reviewBellCopy({ customer: { first_name: 'Synthetic', last_name: 'Fixture' }, facts: [exception],
-      exceptions: [exception], messageBody: "Ok I'm the last house on the left" });
+    const copy = reviewBellCopy({ customer: { first_name: 'Synthetic', last_name: 'Fixture' }, exceptions: [exception],
+      messageBody: "Ok I'm the last house on the left. Use BLUE at the keypad. 8 US 41" });
     expect(copy).toEqual({ title: 'SMS note to check — Synthetic Fixture',
-      body: 'Wanted to save as access note; it conflicts with the note on file.\nCustomer wrote: "Ok I\'m the last house on the left"' });
+      body: 'Wanted to save as access note; it conflicts with the note on file.\nOpen the conversation to check.' });
     expect(copy.body.split('\n')[0].length).toBeLessThan(110);
+    expect(JSON.stringify(copy)).not.toMatch(/BLUE|US 41|last house/);
   });
 
-  test('long text is cut near 140 characters, phone numbers are masked, extra exceptions get a line each', () => {
-    const exceptions = [{ field: 'pet_details', outcome: 'pet_needs_review' }, { field: 'irrigation_controller_location', outcome: 'mixed_topics' }];
-    const copy = reviewBellCopy({ customer: { first_name: 'Synthetic', last_name: '' }, facts: exceptions, exceptions,
-      messageBody: `Call me at 202-555-0143 ${'word '.repeat(60)}` });
+  test('extra exceptions get a line each; a missing name gives a bare title; property_ambiguous covers a null property', () => {
+    const exceptions = [{ field: 'pet_details', outcome: 'pet_needs_review' }, { field: 'irrigation_controller_location', outcome: 'mixed_topics' },
+      { field: 'access_notes', outcome: 'property_ambiguous' }];
+    const copy = reviewBellCopy({ customer: { first_name: 'Synthetic', last_name: '' }, exceptions });
     const lines = copy.body.split('\n');
     expect(copy.title).toBe('SMS note to check — Synthetic');
     expect(lines[0]).toMatch(/^Wanted to save as pet note; .*needs a person to read it\.$/);
     expect(lines[1]).toBe('Also wanted to save as irrigation controller location; the text mixes several topics.');
-    expect(lines[2]).toMatch(/^Customer wrote: "Call me at \*\*\*0143 word/);
-    expect(lines[2]).not.toContain('202-555');
-    expect(lines[2].length).toBeLessThanOrEqual('Customer wrote: ""'.length + 140);
-    expect(lines[2].endsWith('…"')).toBe(true);
-  });
-
-  test('a text with an access code is not quoted', () => {
-    const code = { field: 'lockbox_code', outcome: 'temporary_instruction' };
-    const copy = reviewBellCopy({ customer: {}, facts: [code], exceptions: [code], messageBody: 'My lockbox code is 4821' });
-    expect(copy.title).toBe('SMS note to check');
-    expect(copy.body).not.toContain('4821');
-    expect(copy.body).toContain('not quoted');
-  });
-
-  test('Codex #6414 r1: the quote decision reads the text, even when the code fact was dropped', () => {
-    const pet = { field: 'pet_details', outcome: 'pet_needs_review' };
-    const mixed = reviewBellCopy({ customer: { first_name: 'Synthetic', last_name: 'Fixture' }, facts: [pet], exceptions: [pet],
-      messageBody: 'My lockbox code is 4821. Not sure whether the cat will be out.' });
-    expect(JSON.stringify(mixed)).not.toContain('4821');
-    expect(mixed.body).toContain('not quoted');
-    const gate = reviewBellCopy({ customer: {}, facts: [pet], exceptions: [pet], messageBody: 'gate 1234#' });
-    expect(gate.body).not.toContain('1234');
-    expect(gate.body).toContain('not quoted');
-    const bareDigits = reviewBellCopy({ customer: {}, facts: [pet], exceptions: [pet], messageBody: 'Not sure about the cat, it is 4821' });
-    expect(bareDigits.body).toContain('not quoted');
-    const plain = reviewBellCopy({ customer: {}, facts: [pet], exceptions: [pet], messageBody: 'Not sure whether the cat will be out.' });
-    expect(plain.body).toContain('Customer wrote: "Not sure whether the cat will be out."');
+    expect(lines[2]).toBe('Also wanted to save as access note; it could not be tied to one property.');
+    expect(reviewBellCopy({ customer: {}, exceptions: [exceptions[0]] }).title).toBe('SMS note to check');
   });
 });

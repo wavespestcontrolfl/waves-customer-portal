@@ -1009,31 +1009,25 @@ postgres('SMS operations on PostgreSQL', () => {
     await recordMessageOperations(mockPg, message, { ...result, facts: [pet] }, context);
     const [, title, body, opts] = NotificationService.notifyAdmin.mock.calls[0];
     expect(title).toBe('SMS note to check — Synthetic Fixture');
-    expect(body).toBe(`Wanted to save as pet note; the text sounds like a one-time instruction.\nCustomer wrote: "${message.message_body}"`);
+    expect(body).toBe(`Wanted to save as pet note; the text sounds like a one-time instruction.\nOpen the conversation to check.`);
     expect(opts.dedupeKey).toBe(`sms-property-instructions:${message.id}`);
     expect(opts.metadata).toMatchObject({ triggerKey: 'sms_operational_exception', fields: ['pet_details'], reasons: ['temporary_instruction'] });
   });
 
-  test('owner ruling 2026-10-21: a bell for a text with an access code never quotes the text', async () => {
-    message.message_body = "For tomorrow's visit use the side gate. My lockbox code is 4821";
-    await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
-    const code = { field: 'lockbox_code', value: '4821', quote: message.message_body, duration: 'durable', property_id: context.properties[0].id };
-    await recordMessageOperations(mockPg, message, { ...result, facts: [code] }, context);
-    const body = NotificationService.notifyAdmin.mock.calls[0][2];
-    expect(body).toContain('Wanted to save as lockbox code;');
-    expect(body).not.toContain('4821');
-  });
-
-  test('Codex #6414 r1: a code in the text is not quoted when only the pet exception survives', async () => {
-    message.message_body = 'My lockbox code is 4821. Not sure whether the cat will be out.';
-    await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
-    const pet = { field: 'pet_details', value: message.message_body, quote: message.message_body, duration: 'durable',
-      property_id: context.properties[0].id };
-    await recordMessageOperations(mockPg, message, { ...result, facts: [pet] }, context);
+  test.each([
+    ['access_notes', 'Use BLUE at the keypad. The house is at 8 US 41, also 9 PO Box 42. My lockbox code is 4821.'],
+    ['pet_details', 'Not sure whether the cat will be out. Use BLUE at the keypad, 8 US 41.'],
+  ])('Codex #6414 r2: the bell never quotes the customer text (%s)', async (field, text) => {
+    message.message_body = text;
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: text });
+    const property_id = context.properties[0].id;
+    const facts = [{ field, value: text, quote: text, duration: 'durable', property_id },
+      { field: 'lockbox_code', value: '4821', quote: text, duration: 'durable', property_id }];
+    await recordMessageOperations(mockPg, message, { ...result, facts }, context);
     const [, title, body, opts] = NotificationService.notifyAdmin.mock.calls[0];
-    expect(JSON.stringify([title, body, opts.detail, opts.metadata])).not.toContain('4821');
-    expect(body).toContain('Wanted to save as pet note;');
-    expect(body).toContain('not quoted');
+    const everything = JSON.stringify([title, body, opts.detail, opts.metadata]);
+    for (const secret of ['BLUE', 'US 41', 'PO Box', '4821', 'keypad']) expect(everything).not.toContain(secret);
+    expect(title).toBe('SMS note to check — Synthetic Fixture');
   });
 
   test('R4 owner ruling 2026-09-24: an existing-value conflict still rings the review bell', async () => {

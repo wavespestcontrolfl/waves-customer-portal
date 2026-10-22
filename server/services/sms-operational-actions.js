@@ -531,9 +531,11 @@ function isQuietTemporaryFact(f) {
 
 // Plain words for the review bell (owner ruling 2026-10-21). The title names
 // the customer; the body says what the reader wanted to save and why it
-// stopped, then quotes the text. The first line is the whole visible bell (the
-// admin brevity guard cuts a multi-line body at its first line and keeps the
-// rest under "Show full text").
+// stopped. It NEVER quotes the customer's text (title, body, detail or
+// metadata): a text can hold a code, a spelled-out code word or an address, and
+// no screen caught them all (Codex #6414 r1/r2). The first line is the whole
+// visible bell (the admin brevity guard cuts a multi-line body at its first
+// line and keeps the rest under "Show full text").
 const REVIEW_FIELD_LABELS = Object.freeze({
   access_notes: 'access note', pet_details: 'pet note', contact_preference: 'contact preference',
   neighborhood_gate_code: 'neighborhood gate code', property_gate_code: 'gate code', lockbox_code: 'lockbox code',
@@ -542,7 +544,7 @@ const REVIEW_FIELD_LABELS = Object.freeze({
 const REVIEW_REASONS = Object.freeze({
   existing_value_conflict: 'it conflicts with the note on file',
   temporary_instruction: 'the text sounds like a one-time instruction',
-  property_ambiguous: 'the customer has more than one property',
+  property_ambiguous: 'it could not be tied to one property',
   contact_authority: 'the sender is not the main contact on the account',
   conflicting_facts: 'the text gives two different values for it',
   mixed_topics: 'the text mixes several topics',
@@ -553,17 +555,8 @@ const REVIEW_REASONS = Object.freeze({
   value_too_long: 'the value is too long to save',
   changed_during_extraction: 'the profile changed while the text was read',
 });
-const REVIEW_QUOTE_CHARS = 140;
 
-const CREDENTIAL_WORDS = /\b(?:code|lock ?box|gate|pin|password|passcode|combo(?:nation)?|key ?box|alarm)s?\b/i;
-const factsHoldCode = (facts) => facts.some((f) => String(f.field).endsWith('_code'));
-// Takes text already run through redactSensitiveText: a masked phone ("***0143")
-// or address ("[address]") is not a credential, any other run of 3+ digits is.
-function textMayHoldCredential(redacted) {
-  return CREDENTIAL_WORDS.test(redacted) || /\d{3,}/.test(redacted.replace(/\*\*\*\d{4}/g, '').replace(/\[address\]/g, ''));
-}
-
-function reviewBellCopy({ customer, facts, exceptions, messageBody }) {
+function reviewBellCopy({ customer, exceptions }) {
   const name = [customer.first_name, customer.last_name].map((part) => String(part || '').trim()).filter(Boolean).join(' ');
   const title = name ? `SMS note to check — ${name}` : 'SMS note to check';
   const lines = exceptions.map((f, i) => {
@@ -571,23 +564,7 @@ function reviewBellCopy({ customer, facts, exceptions, messageBody }) {
     const reason = REVIEW_REASONS[f.outcome] || 'it needs a person to check it';
     return `${i === 0 ? 'Wanted' : 'Also wanted'} to save as ${label}; ${reason}.`;
   });
-  // A text that may carry an access credential stays out of the bell: the code
-  // lives in the vault and the conversation, and a bell row is plain text. The
-  // decision reads the message itself, not the surviving facts: grounding can
-  // drop a code fact and keep a pet exception from the same text (Codex #6414 r1).
-  let quote = null;
-  if (!factsHoldCode(facts)) {
-    try {
-      const { redactSensitiveText } = require('./notification-triggers').__private;
-      const flat = redactSensitiveText(String(messageBody || '').replace(/\s+/g, ' ').trim());
-      if (flat && !textMayHoldCredential(flat)) {
-        quote = flat.length > REVIEW_QUOTE_CHARS ? `${flat.slice(0, REVIEW_QUOTE_CHARS - 1).trimEnd()}…` : flat;
-      }
-    } catch (err) {
-      logger.warn(`[sms-operational-actions] review bell quote skipped: ${err.message}`);
-    }
-  }
-  lines.push(quote ? `Customer wrote: "${quote}"` : 'The text may hold an access code, so it is not quoted here. Open the conversation.');
+  lines.push('Open the conversation to check.');
   return { title, body: lines.join('\n') };
 }
 
@@ -699,7 +676,7 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     // `dropped` still rides in `operational_analysis` and, when a bell does
     // fire for a real exception, in that bell's `unverified_count`.
     if (exceptions.length) {
-      const copy = reviewBellCopy({ customer, facts, exceptions, messageBody: message.message_body });
+      const copy = reviewBellCopy({ customer, exceptions });
       const notif = await NotificationService.notifyAdmin('alert', copy.title, copy.body,
         { trx, bell: true, dedupeKey: `sms-property-instructions:${message.id}`,
           link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}&tab=comms`,
