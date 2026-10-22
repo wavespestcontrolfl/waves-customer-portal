@@ -1,8 +1,11 @@
-// Schedule send routes (GATE_EMAIL_SEND_LATER) before any database write:
-// the gate, admin-only access, and the send-time checks. No network or DB.
-// The only read allowed is the client-key lookup (no row); any write throws.
-const mockInsert = jest.fn(() => { throw new Error('no writes in this suite'); });
-jest.mock('../models/db', () => jest.fn(() => ({ where: () => ({ first: async () => undefined }), insert: mockInsert })));
+// Schedule send routes (GATE_EMAIL_SEND_LATER): the gate, admin-only access,
+// and the send-time checks. No network or DB. The reads find no row; the only
+// write a refusal may make is the void row that settles its client key.
+const mockInsert = jest.fn((row) => {
+  if (row.status !== 'cancelled' || row.restored_at === undefined) throw new Error('only the void row may be written');
+  return { onConflict: () => ({ ignore: () => ({ returning: async () => [{ id: 'void-fixture' }] }) }) };
+});
+jest.mock('../models/db', () => Object.assign(jest.fn(() => ({ where: () => ({ first: async () => undefined }), insert: mockInsert })), { fn: { now: () => 'now()' } }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     req.techRole = req.headers.authorization;
@@ -53,13 +56,15 @@ test.each([
   ['the spring-forward gap', { sendAt: '2027-03-14T02:30' }, 'That time does not exist once in Eastern time. Pick another.'],
   ['the repeated fall-back hour', { sendAt: '2026-11-01T01:30' }, 'That time does not exist once in Eastern time. Pick another.'],
   ['no client key', { clientKey: undefined }, 'clientKey required'],
-])('refuses %s before any write', async (_label, change, error) => {
+])('refuses %s, queuing nothing', async (_label, change, error) => {
   process.env.GATE_EMAIL_SEND_LATER = 'true';
   const res = await call('POST', '/schedule', { body: { ...valid(), ...change } });
   // Only a refusal made after the clientKey lookup lets the browser drop it.
   const afterLookup = !/required$/.test(error);
   expect(res).toEqual({ status: 400, body: { error, ...(afterLookup ? { keyChecked: true } : {}) } });
-  expect(mockInsert).not.toHaveBeenCalled();
+  // A refusal after the lookup voids the key (one void row); none queues.
+  expect(mockInsert).toHaveBeenCalledTimes(afterLookup ? 1 : 0);
+  if (afterLookup) expect(mockInsert.mock.calls[0][0]).toMatchObject({ status: 'cancelled', client_key: 'fixture-key-0001' });
 });
 
 test.each([[null, 401], ['technician', 403]])('role %s cannot schedule', async (role, status) => {

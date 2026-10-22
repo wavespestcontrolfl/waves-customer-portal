@@ -195,7 +195,7 @@ describe("Email schedule send", () => {
     const base = fetch.getMockImplementation();
     fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/email/schedule")
       ? Promise.reject(new TypeError("network")) : base(input, options)));
-    reconciledRow = { id: "late-1", status: "scheduled", sendAt: "2026-10-23T12:00:00.000Z", to: "customer@example.invalid", draftText: "Line one\n<b>two</b>" };
+    reconciledRow = { id: "late-1", status: "scheduled", sendAt: "2026-10-23T12:00:00.000Z", to: "customer@example.invalid", subject: "Guide", draftText: "Line one\n<b>two</b>" };
     mount();
     await writeEmail();
     fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
@@ -212,7 +212,7 @@ describe("Email schedule send", () => {
     const base = fetch.getMockImplementation();
     fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/email/schedule")
       ? Promise.reject(new TypeError("network")) : base(input, options)));
-    reconciledRow = { id: "late-1", status: "scheduled", sendAt: "2026-10-23T12:00:00.000Z", to: "customer@example.invalid", draftText: "Line one\n<b>two</b>" };
+    reconciledRow = { id: "late-1", status: "scheduled", sendAt: "2026-10-23T12:00:00.000Z", to: "customer@example.invalid", subject: "Guide", draftText: "Line one\n<b>two</b>" };
     mount();
     await writeEmail();
     fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));

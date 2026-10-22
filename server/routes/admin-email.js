@@ -401,9 +401,14 @@ router.post('/schedule', async (req, res) => {
     const known = await db('scheduled_emails').where({ client_key: clientKey }).first();
     if (known) return res.json({ success: true, scheduled: scheduledView(await consumeFailedRetry(known)) });
     const { when, error } = scheduleTimeError(sendAt);
-    // keyChecked: this refusal came after the clientKey lookup, so the
-    // browser may drop the key (no row exists under it).
-    if (error) return res.status(400).json({ error, keyChecked: true });
+    if (error) {
+      // The refusal voids the key in the same step, so a first request
+      // still on its way cannot queue under it later; then the browser may
+      // drop the key (keyChecked). A row that landed meanwhile is returned.
+      const { voided, known: landed } = await voidClientKey(clientKey, req.technicianId);
+      if (!voided) return res.json({ success: true, scheduled: scheduledView(await consumeFailedRetry(landed)) });
+      return res.status(400).json({ error, keyChecked: true });
+    }
     const [row] = await db('scheduled_emails').insert({
       to_address: String(to).trim(), subject: String(subject || '').trim() || '(no subject)', body_html: body, draft_text: draftText,
       thread_id: threadId || null, reply_email_id: replyEmailId || null, send_at: when, created_by: req.technicianId || null, client_key: clientKey,
@@ -416,6 +421,18 @@ router.post('/schedule', async (req, res) => {
   }
 });
 
+// Stores a void row under clientKey (cancelled and restored: never listed,
+// never sent), unless a row is already there. Either way the key is settled
+// for good: { voided: true }, or { voided: false, known } with that row.
+async function voidClientKey(clientKey, createdBy) {
+  const [voided] = await db('scheduled_emails').insert({
+    to_address: '', subject: '(withdrawn)', body_html: '', draft_text: '', send_at: db.fn.now(), status: 'cancelled',
+    cancelled_at: db.fn.now(), restored_at: db.fn.now(), created_by: createdBy || null, client_key: clientKey,
+  }).onConflict('client_key').ignore().returning('id');
+  if (voided) return { voided: true };
+  return { voided: false, known: await db('scheduled_emails').where({ client_key: clientKey }).first() };
+}
+
 // POST /schedule/reconcile — settles a schedule request whose answer never
 // came, before the browser lets plain Send go. It returns the row stored
 // under `clientKey`; when there is none, it stores a void row under that key
@@ -426,12 +443,8 @@ router.post('/schedule/reconcile', async (req, res) => {
   const clientKey = req.body?.clientKey;
   if (typeof clientKey !== 'string' || !/^[\w-]{8,64}$/.test(clientKey)) return res.status(400).json({ error: 'clientKey required' });
   try {
-    const [voided] = await db('scheduled_emails').insert({
-      to_address: '', subject: '(withdrawn)', body_html: '', draft_text: '', send_at: db.fn.now(), status: 'cancelled',
-      cancelled_at: db.fn.now(), restored_at: db.fn.now(), created_by: req.technicianId || null, client_key: clientKey,
-    }).onConflict('client_key').ignore().returning('id');
+    const { voided, known } = await voidClientKey(clientKey, req.technicianId);
     if (voided) return res.json({ success: true, scheduled: null });
-    const known = await db('scheduled_emails').where({ client_key: clientKey }).first();
     res.json({ success: true, scheduled: scheduledView(await consumeFailedRetry(known)) });
   } catch (err) {
     logger.error(`[email] schedule reconcile failed (${err.code || 'error'})`);

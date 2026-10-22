@@ -183,7 +183,8 @@ export default function useEmailEditor(userId) {
       return true;
     }
     const current = draftSession.drafts.compose;
-    if (current.body !== row.draftText || current.to.trim() !== row.to) return false;
+    const subject = current.subject.trim() || "(no subject)";
+    if (current.body !== row.draftText || current.to.trim() !== row.to || subject !== row.subject) return false;
     setComposeForm(() => ({ to: "", subject: "", body: "" }));
     setShowCompose(false);
     return true;

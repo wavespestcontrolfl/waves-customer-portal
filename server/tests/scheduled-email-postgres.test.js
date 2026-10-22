@@ -321,6 +321,15 @@ jest.setTimeout(30000);
       .toMatchObject({ id: known.body.scheduled.id, status: 'scheduled' });
   });
 
+  test('a time refusal voids its key, so a first request landing later cannot queue', async () => {
+    const clientKey = randomUUID();
+    const refused = await queue({ clientKey, sendAt: etIn(-5) });
+    expect(refused).toMatchObject({ status: 400, body: { keyChecked: true } });
+    const late = await queue({ clientKey });
+    expect(late.body.scheduled).toMatchObject({ status: 'cancelled' });
+    expect((await call('GET', '/scheduled')).body.emails).toEqual([]);
+  });
+
   test('a refused email waits a minute before any replica tries it again', async () => {
     const { body } = await queue();
     await makeDue(body.scheduled.id);
