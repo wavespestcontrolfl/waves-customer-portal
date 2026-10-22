@@ -10356,7 +10356,7 @@ async function hasIndependentCallbackObligation(callId, v2) {
 // (Codex #4721 r1 P2): the token that fenced this pass is already cleared
 // by finalization, so without this a stale, slow pass could revise a
 // disposition a newer reprocess generation already re-decided for itself.
-async function reviseDispositionAfterAppliedMove({ call, callSid, procGeneration = null }) {
+async function reviseDispositionAfterAppliedMove({ call, callSid, procGeneration = null, reason = 'reschedule_applied' }) {
   const query = db('call_log').where({ id: call.id });
   if (procGeneration != null) query.where({ processing_generation: procGeneration });
   const fresh = await query.first('disposition', 'processing_generation', 'v2_extraction_status', 'ai_extraction_enriched');
@@ -10372,7 +10372,7 @@ async function reviseDispositionAfterAppliedMove({ call, callSid, procGeneration
     priorDisposition: fresh.disposition,
     priorGeneration: procGeneration,
     disposition: 'existing_customer_routed',
-    reason: 'reschedule_applied',
+    reason,
     callSid,
   });
 }
@@ -24293,6 +24293,16 @@ const CallRecordingProcessor = {
       // agent-committed move of an on-the-books visit lands on the visit.
       // No customer comms. Generation-fenced, never blocking.
       await applyCallRescheduleStep({ call, callSid, customerId, extracted, v2Result, appointmentResult, procGeneration });
+      // Make-up move (applyCallMakeupMoveStep, before the booking branch): the
+      // disposition above was decided with no appointment created, so a
+      // callback the model recommended for the same visit is no longer
+      // outstanding once the missed visit moved. Same revision, same
+      // independent-callback guard and generation fence as an applied
+      // reschedule.
+      if (appointmentResult?.skippedReason === 'makeup_move_applied' && isEnabled('callDispositionV1')) {
+        await reviseDispositionAfterAppliedMove({ call, callSid, procGeneration, reason: 'makeup_move_applied' })
+          .catch((err) => logger.warn(`[call-proc] post-makeup disposition revision failed for ${maskSid(callSid)}: ${err.message}`));
+      }
       if (isEnabled('rescheduleProposalCard')) {
         try {
           await require('./call-reschedule-proposals').stageProposal(db, { callId: call.id, procGeneration });

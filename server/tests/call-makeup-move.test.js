@@ -585,6 +585,15 @@ describe('processor wiring', () => {
     });
   });
 
+  test('after the disposition is written, an applied make-up move revises a stale callback disposition (gated, never blocking)', () => {
+    const zero = source.indexOf('await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, appointmentResult, customerId');
+    const revise = source.indexOf("reviseDispositionAfterAppliedMove({ call, callSid, procGeneration, reason: 'makeup_move_applied' })");
+    expect(zero).toBeGreaterThan(-1);
+    expect(revise).toBeGreaterThan(zero);
+    expect(source.slice(revise - 200, revise)).toMatch(/skippedReason === 'makeup_move_applied' && isEnabled\('callDispositionV1'\)/);
+    expect(source.slice(revise, revise + 220)).toMatch(/\.catch\(/);
+  });
+
   test('the step runs only behind the gate, after every earlier veto, and BEFORE the booking transaction', () => {
     const gate = source.indexOf("isEnabled('callMakeupMove') && !v2RoutingBlocked && !legacyGeoVeto");
     expect(gate).toBeGreaterThan(-1);
