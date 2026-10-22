@@ -79,6 +79,8 @@ describeDb('Bid Desk (PostgreSQL)', () => {
     await mockPg('emails').insert({
       id, gmail_id: `g-${id}`, gmail_thread_id: `t-${id}`, from_address: 'invites@buildingconnected.com', from_name: 'Fixture Build Co via BuildingConnected',
       subject: 'Fixture Build Co has invited you to bid on Sample Ridge Residences', body_text: BC_BODY(), received_at: new Date(NOW.getTime() - 60000), ...over,
+      // The job's cursor is the INSERT time. Unless a test says otherwise, a row is stored when it was received.
+      created_at: over.created_at || over.received_at || new Date(NOW.getTime() - 60000),
     });
     return mockPg('emails').where({ id }).first();
   }
@@ -242,11 +244,12 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect(await service.sendDueReminders({ now: NOW })).toBe(1);
       expect(await service.sendDueReminders({ now: NOW })).toBe(0);
       expect(rung('remind')).toHaveLength(1);
-      expect(rung('remind')[0][2].dedupeKey).toBe(`bid-desk:remind:${id}:7d`);
+      const due = (await bidRow(id)).due_at.toISOString();
+      expect(rung('remind')[0][2].dedupeKey).toBe(`bid-desk:remind:${id}:7d:${due}`);
       const later = new Date(NOW.getTime() + 5 * DAY);
       expect(await service.sendDueReminders({ now: later })).toBe(1);
       expect(await service.sendDueReminders({ now: later })).toBe(0);
-      expect(rung('remind').map((c) => c[2].dedupeKey)).toEqual([`bid-desk:remind:${id}:7d`, `bid-desk:remind:${id}:2d`]);
+      expect(rung('remind').map((c) => c[2].dedupeKey)).toEqual([`bid-desk:remind:${id}:7d:${due}`, `bid-desk:remind:${id}:2d:${due}`]);
       expect(await bidRow(id)).toMatchObject({ reminder_7d_sent_at: expect.any(Date), reminder_2d_sent_at: expect.any(Date) });
     });
 
@@ -263,8 +266,51 @@ describeDb('Bid Desk (PostgreSQL)', () => {
     test('a bid first seen inside 2 days gets one 2-day reminder and never a late 7-day one', async () => {
       const id = await confirmedBid(1);
       expect(await service.sendDueReminders({ now: NOW })).toBe(1);
-      expect(rung('remind')[0][2].dedupeKey).toBe(`bid-desk:remind:${id}:2d`);
+      expect(rung('remind')[0][2].dedupeKey).toBe(`bid-desk:remind:${id}:2d:${(await bidRow(id)).due_at.toISOString()}`);
       expect(await bidRow(id)).toMatchObject({ reminder_7d_sent_at: expect.any(Date), reminder_2d_sent_at: expect.any(Date) });
+    });
+  });
+
+  describe('review fixes', () => {
+    test('an older message stored after the cursor passed it is still filed (the cursor is the insert time)', async () => {
+      await mockPg('system_settings').where({ key: service.WATERMARK_KEY }).del();
+      await storeEmail({ from_address: 'friend@example.test', subject: 'Lunch?', received_at: new Date(NOW.getTime() - 5 * 60000) });
+      await service.runBidDeskTick({ now: NOW });
+      // Received two hours ago, stored by a sync retry only now.
+      const late = await storeEmail({ received_at: new Date(NOW.getTime() - 2 * 60 * 60000), created_at: new Date(NOW.getTime() - 60000) });
+      expect(await service.runBidDeskTick({ now: NOW })).toMatchObject({ filed: 1, created: 1 });
+      expect((await mockPg('bid_opportunities').first()).first_email_id).toBe(late.id);
+    });
+
+    test('a row that commits behind the cursor inside the recheck window is filed on the next tick', async () => {
+      await mockPg('system_settings').where({ key: service.WATERMARK_KEY }).del();
+      await storeEmail({ from_address: 'friend@example.test', subject: 'Lunch?', created_at: new Date(NOW.getTime() - 5 * 60000), received_at: new Date(NOW.getTime() - 5 * 60000) });
+      await service.runBidDeskTick({ now: NOW });
+      const behind = await storeEmail({ created_at: new Date(NOW.getTime() - 15 * 60000), received_at: new Date(NOW.getTime() - 15 * 60000) });
+      expect(await service.runBidDeskTick({ now: NOW })).toMatchObject({ read: 0, filed: 1, created: 1 });
+      expect((await mockPg('bid_opportunities').first()).first_email_id).toBe(behind.id);
+    });
+
+    test('a changed due date gets its own reminders', async () => {
+      const { bidId } = await service.ingestEmail(await storeEmail({ body_text: 'x', gmail_thread_id: `t-${randomUUID()}`, subject: `RFP ${randomUUID()}` }));
+      await mockPg('bid_opportunities').where({ id: bidId }).update({ due_at: new Date(NOW.getTime() + 6 * DAY), due_confirmed: true });
+      raiseAdminAlert.mockClear();
+      expect(await service.sendDueReminders({ now: NOW })).toBe(1);
+      // The operator moves the date (the PATCH clears both stamps).
+      await mockPg('bid_opportunities').where({ id: bidId }).update({ due_at: new Date(NOW.getTime() + 5 * DAY), reminder_7d_sent_at: null, reminder_2d_sent_at: null });
+      expect(await service.sendDueReminders({ now: NOW })).toBe(1);
+      const keys = rung('remind').map((c) => c[2].dedupeKey);
+      expect(keys).toHaveLength(2);
+      expect(new Set(keys).size).toBe(2);
+    });
+
+    test('the backfill attaching an old addendum to a live open bid rings nothing', async () => {
+      const first = await storeEmail();
+      const { bidId } = await service.ingestEmail(first);
+      raiseAdminAlert.mockClear();
+      const out = await service.ingestEmail(await storeEmail({ gmail_thread_id: first.gmail_thread_id, subject: 'Addendum 1', received_at: new Date(NOW.getTime() - 30000) }), { historical: true });
+      expect(out).toMatchObject({ bidId, created: false, kind: 'addendum' });
+      expect(raiseAdminAlert).not.toHaveBeenCalled();
     });
   });
 

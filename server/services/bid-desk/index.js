@@ -27,6 +27,7 @@ const BACKFILL_BATCH = 500;
 const FIRST_RUN_LOOKBACK_MS = 60 * 60 * 1000;
 const MAX_ATTEMPTS = 3;
 const REMINDER_LIMIT = 100;
+const RECHECK_WINDOW_MS = 30 * 60 * 1000;
 const EMAIL_COLUMNS = ['id', 'gmail_thread_id', 'from_address', 'from_name', 'subject', 'body_text', 'body_html', 'received_at'];
 
 const BID_COLUMNS = [
@@ -65,8 +66,8 @@ async function detectWithThread(email) {
 }
 
 async function ingestEmail(email, { historical = false, manual = false } = {}) {
-  // A person marking an email by hand is already looking at it: no bell for that.
-  const quiet = manual;
+  // A person marking an email by hand is already looking at it, and the backfill files history: no bell for either.
+  const quiet = manual || historical;
   const detected = manual ? { bid: true, source: 'manual' } : await detectWithThread(email);
   if (!detected.bid) return { skipped: detected.reason };
   const parsed = parseBidEmail(email);
@@ -148,11 +149,13 @@ async function runBidDeskTick({ now = new Date(), limit = BATCH_LIMIT } = {}) {
     // First run: start an hour back (the backfill covers history). Nothing older is notified as new.
     state = { at: new Date(now.getTime() - FIRST_RUN_LOOKBACK_MS).toISOString(), id: '00000000-0000-0000-0000-000000000000' };
   }
+  // The cursor is the row's INSERT time (created_at), not Gmail's receive time: a sync retry or a newest-first
+  // recovery can store an older message after newer ones, and a receive-time cursor would pass it for good.
   const rows = await db('emails')
-    .whereRaw('(received_at, id) > (?::timestamptz, ?::uuid)', [state.at, state.id])
-    .orderBy([{ column: 'received_at' }, { column: 'id' }])
+    .whereRaw('(created_at, id) > (?::timestamptz, ?::uuid)', [state.at, state.id])
+    .orderBy([{ column: 'created_at' }, { column: 'id' }])
     .limit(limit)
-    .select(EMAIL_COLUMNS);
+    .select([...EMAIL_COLUMNS, 'created_at']);
   const result = { read: rows.length, filed: 0, created: 0, failed: 0 };
   for (const email of rows) {
     try {
@@ -161,7 +164,7 @@ async function runBidDeskTick({ now = new Date(), limit = BATCH_LIMIT } = {}) {
         result.filed += 1;
         if (outcome.created) result.created += 1;
       }
-      state = { at: new Date(email.received_at).toISOString(), id: email.id };
+      state = { at: new Date(email.created_at).toISOString(), id: email.id };
     } catch (err) {
       const attempts = state.retry?.id === email.id ? state.retry.count + 1 : 1;
       logger.error(`${LOG} email ${email.id} failed (attempt ${attempts}): ${err.message}`);
@@ -170,7 +173,27 @@ async function runBidDeskTick({ now = new Date(), limit = BATCH_LIMIT } = {}) {
         state = { ...state, retry: { id: email.id, count: attempts } };
         break;
       }
-      state = { at: new Date(email.received_at).toISOString(), id: email.id };
+      state = { at: new Date(email.created_at).toISOString(), id: email.id };
+    }
+  }
+  // Concurrent inserts can commit out of created_at order. Re-read the last RECHECK_WINDOW behind the cursor for
+  // rows not yet filed; ingestEmail is idempotent, so a row seen twice is skipped.
+  const recheckFrom = new Date(new Date(state.at).getTime() - RECHECK_WINDOW_MS).toISOString();
+  const late = await db('emails as e')
+    .where('e.created_at', '>', recheckFrom).where('e.created_at', '<=', state.at)
+    .whereNotExists(db('bid_opportunity_emails as l').whereRaw('l.email_id = e.id'))
+    .orderBy([{ column: 'e.created_at' }, { column: 'e.id' }])
+    .limit(limit)
+    .select(EMAIL_COLUMNS.map((c) => `e.${c}`));
+  for (const email of late) {
+    try {
+      const outcome = await ingestEmail(email);
+      if (outcome.bidId) {
+        result.filed += 1;
+        if (outcome.created) result.created += 1;
+      }
+    } catch (err) {
+      logger.error(`${LOG} late email ${email.id} failed: ${err.message}`);
     }
   }
   if (rows.length || firstRun) await writeWatermark(state);
@@ -197,7 +220,8 @@ async function sendDueReminders({ now = new Date() } = {}) {
         const bid = await trx('bid_opportunities').where({ id }).forUpdate().first();
         const window = reminderDue(bid, now);
         if (!window) return false;
-        await alerts.raise(alerts.reminderSpec(bid, window), `bid-desk:remind:${bid.id}:${window}`, trx);
+        // The due date is in the key: a changed date (PATCH clears the stamps) gets its own reminders.
+        await alerts.raise(alerts.reminderSpec(bid, window), `bid-desk:remind:${bid.id}:${window}:${new Date(bid.due_at).toISOString()}`, trx);
         // Inside 2 days the 7-day reminder is moot: stamp both so it can never fire late.
         await trx('bid_opportunities').where({ id }).update({
           reminder_2d_sent_at: window === '2d' ? trx.fn.now() : bid.reminder_2d_sent_at,

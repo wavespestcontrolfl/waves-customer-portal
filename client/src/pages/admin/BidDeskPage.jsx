@@ -319,7 +319,7 @@ export default function BidDeskPage() {
 
           {selectedId && (
             <div className="mt-4">
-              <BidDetail bidId={selectedId} onChanged={load} onClose={() => select("")} />
+              <BidDetail key={selectedId} bidId={selectedId} onChanged={load} onClose={() => select("")} />
             </div>
           )}
         </>
