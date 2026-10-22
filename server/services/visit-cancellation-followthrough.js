@@ -37,18 +37,43 @@ const {
   recordTrackTransitionResultFailure,
 } = require('./track-transition-alerts');
 
+// Approved effects another worker or admin already carried out between the cancel's commit and this sweep: the sweep
+// only lists still-open invoices and still-redeemed offers, so those are absent from its result and would otherwise be
+// reported as "changed since the card". Re-read just the missing ones; an invoice already void, or an offer already
+// reopened or expired with no booking bound, is the state the card promised. A failed re-read settles nothing (the
+// effect is then reported, the safe side).
+async function alreadySettledApprovedEffects(pinned, missingInvoiceIds, creditNeedsCheck) {
+  const settled = { invoices: new Set(), creditsReversed: 0 };
+  try {
+    if (missingInvoiceIds.length) {
+      const rows = await db('invoices').whereIn('id', missingInvoiceIds).select('id', 'status');
+      for (const row of rows || []) if (String(row.status) === 'void') settled.invoices.add(String(row.id));
+    }
+    if (creditNeedsCheck) {
+      const rows = await db('inspection_credit_offers').whereIn('id', pinned.creditReversalOfferIds || []).select('id', 'status', 'redeemed_scheduled_service_id');
+      settled.creditsReversed = (rows || []).filter((r) => ['offered', 'expired'].includes(String(r.status)) && !r.redeemed_scheduled_service_id).length;
+    }
+  } catch (err) {
+    logger.warn(`[cancel-followthrough] could not re-read approved effects: ${err.message}`);
+  }
+  return settled;
+}
+
 // Opt-in (pinnedEffects): which approved money effects were not acted on. An approved invoice that was not voided
 // changed since the card (amounts, a payment in flight, a different PaymentIntent) and is left for the office; an
-// approved credit reversal that did not run was rebound, deferred or lost a race.
-function reportUnactedMoney(moneyReport, pinned, voided) {
+// approved credit reversal that did not run was rebound, deferred or lost a race. An effect somebody else already
+// completed (the invoice is void, the offer reversed) counts as done.
+async function reportUnactedMoney(moneyReport, pinned, voided) {
   if (!moneyReport || !Array.isArray(moneyReport.skipped)) return;
   const done = new Set((voided || []).map(String));
-  for (const inv of pinned.invoices || []) {
-    if (!done.has(String(inv.id))) moneyReport.skipped.push({ kind: 'invoice', id: inv.id, reason: 'not_voided_changed_since_card' });
-  }
+  const missing = (pinned.invoices || []).filter((inv) => !done.has(String(inv.id)));
   const wanted = (pinned.creditReversalOfferIds || []).length;
   const reversed = voided?.inspectionCreditReversal?.reversed ?? 0;
-  if (reversed < wanted) moneyReport.skipped.push({ kind: 'inspection_credit', reason: 'not_reversed' });
+  const settled = await alreadySettledApprovedEffects(pinned, missing.map((inv) => inv.id), reversed < wanted);
+  for (const inv of missing) {
+    if (!settled.invoices.has(String(inv.id))) moneyReport.skipped.push({ kind: 'invoice', id: inv.id, reason: 'not_voided_changed_since_card' });
+  }
+  if (Math.max(reversed, settled.creditsReversed) < wanted) moneyReport.skipped.push({ kind: 'inspection_credit', reason: 'not_reversed' });
 }
 
 // Opt-in (linkedChildren): the tracker cancel, which runs the linked-visit cascade, did not finish, so no approved
@@ -68,7 +93,7 @@ async function closeVisitInvoices(id, pinned, moneyReport) {
       pinnedInvoices: pinned.invoices || [],
       pinnedCreditReversalOfferIds: pinned.creditReversalOfferIds || [],
     });
-    reportUnactedMoney(moneyReport, pinned, voided);
+    await reportUnactedMoney(moneyReport, pinned, voided);
   } else {
     await InvoiceService.voidOpenInvoicesForCancelledService(id);
   }

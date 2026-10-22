@@ -202,6 +202,28 @@ describe('handleCancellation sends the approved text', () => {
     expect(states[states.length - 1]).toBe('sent');
   });
 
+  test('a carded contact removed from the appointment contacts before the send is reported as a gap, not a full success', async () => {
+    mockState.customer = {
+      ...mockState.customer, service_contact_name: 'Sam', service_contact_phone: '+19415550202', service_contacts_consent_at: '2026-07-23T00:00:00Z',
+    };
+    const preview = await AppointmentReminders.previewCancellationText('svc-1');
+    expect(preview.recipients).toHaveLength(2);
+    // The service contact is removed after the last preview check: only the primary is left to send to.
+    delete mockState.customer.service_contact_name;
+    delete mockState.customer.service_contact_phone;
+    const outcome = {};
+    await AppointmentReminders.handleCancellation('svc-1', {
+      outcome, approvedNotice: preview.recipients.map(({ recipient_key, body }) => ({ recipient_key, body })),
+    });
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(outcome.notificationSent).toBe(true);
+    expect(outcome.notificationPartial).toBe(true);
+    expect(outcome.notificationError).toMatch(/not to 1 approved recipient\(s\) no longer on the appointment contacts/);
+    expect(outcome.notificationError).not.toMatch(/\d{10}/);
+    const states = mockState.updates.filter((p) => typeof p.cancellation_notice_state === 'string').map((p) => p.cancellation_notice_state);
+    expect(states[states.length - 1]).toBe('sent');
+  });
+
   test('every recipient reached is a clean success (no partial flag)', async () => {
     mockState.customer = {
       ...mockState.customer, service_contact_name: 'Sam', service_contact_phone: '+19415550202', service_contacts_consent_at: '2026-07-23T00:00:00Z',

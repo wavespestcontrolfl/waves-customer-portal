@@ -10,6 +10,9 @@
 let mockCancellationTime = '2030-01-09T18:00:00Z';
 let mockInvoices = [];
 let mockInvoiceReadFails = false;
+// The approved-effects re-read (invoices by id, inspection credit offers by id).
+let mockInvoiceStatusRows = [];
+let mockOfferRows = [];
 jest.mock('../models/db', () => {
   const mock = jest.fn((table) => {
     let where = {};
@@ -17,6 +20,8 @@ jest.mock('../models/db', () => {
     const chain = {
       where: jest.fn((value) => { where = value; return chain; }),
       whereNot: jest.fn().mockReturnThis(),
+      whereIn: jest.fn().mockReturnThis(),
+      select: jest.fn(async () => (table === 'invoices' ? mockInvoiceStatusRows : table === 'inspection_credit_offers' ? mockOfferRows : [])),
       whereNotIn: jest.fn((column, values) => { excluded = values; return chain; }),
       orderBy: jest.fn().mockReturnThis(),
       first: jest.fn(async () => {
@@ -32,7 +37,7 @@ jest.mock('../models/db', () => {
   mock.transaction = jest.fn();
   return mock;
 });
-beforeEach(() => { mockInvoices = []; mockInvoiceReadFails = false; });
+beforeEach(() => { mockInvoices = []; mockInvoiceReadFails = false; mockInvoiceStatusRows = []; mockOfferRows = []; });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const mockHoldCancel = jest.fn();
 const mockApptCancel = jest.fn(async () => ({ released: true }));
@@ -366,6 +371,38 @@ describe('approved money effects (pinnedEffects + moneyReport)', () => {
   });
 
   it('an approved invoice that was NOT voided (it changed since the card) is reported', async () => {
+    const report = await run(voidedWithCredit([], 1));
+    expect(report.skipped).toContainEqual({ kind: 'invoice', id: 'inv-1', reason: 'not_voided_changed_since_card' });
+  });
+
+  it('an approved invoice another worker already voided (absent from the sweep) counts as done, not as changed', async () => {
+    mockInvoiceStatusRows = [{ id: 'inv-1', status: 'void' }];
+    const report = await run(voidedWithCredit([], 1));
+    expect(report.skipped).toEqual([]);
+  });
+
+  it('an approved invoice that is still open (or paid) after the sweep skipped it is still reported', async () => {
+    mockInvoiceStatusRows = [{ id: 'inv-1', status: 'paid' }];
+    const report = await run(voidedWithCredit([], 1));
+    expect(report.skipped).toContainEqual({ kind: 'invoice', id: 'inv-1', reason: 'not_voided_changed_since_card' });
+  });
+
+  it('an approved credit offer already reopened by another worker counts as reversed', async () => {
+    mockOfferRows = [{ id: 'offer-1', status: 'offered', redeemed_scheduled_service_id: null }];
+    const report = await run(voidedWithCredit(['inv-1'], 0));
+    expect(report.skipped).toEqual([]);
+  });
+
+  it('an approved credit offer rebound to another booking is NOT counted as reversed', async () => {
+    mockOfferRows = [{ id: 'offer-1', status: 'redeemed', redeemed_scheduled_service_id: 'svc-other' }];
+    const report = await run(voidedWithCredit(['inv-1'], 0));
+    expect(report.skipped).toContainEqual({ kind: 'inspection_credit', reason: 'not_reversed' });
+  });
+
+  it('a failed re-read settles nothing: the effect is reported', async () => {
+    const db = require('../models/db');
+    // The first db call of the code under test is the invoices re-read: make it reject.
+    db.mockImplementationOnce(() => ({ whereIn: () => ({ select: async () => { throw new Error('db down'); } }) }));
     const report = await run(voidedWithCredit([], 1));
     expect(report.skipped).toContainEqual({ kind: 'invoice', id: 'inv-1', reason: 'not_voided_changed_since_card' });
   });

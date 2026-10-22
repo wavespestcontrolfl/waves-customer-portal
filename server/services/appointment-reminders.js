@@ -2839,9 +2839,13 @@ async function sendCancellationNotice({ record, scheduledServiceId, options, not
     const approvedNotice = options.approvedNotice
       ? new Map(options.approvedNotice.map((entry) => [entry.recipient_key, entry.body]))
       : null;
-    const noticeSent = await safeSendAppointment(customer, prefs || {}, async (contact) => renderCancellationBody({
-      customer, contact, record, scheduledServiceId, approvedNotice,
-    }), 'appointment_cancelled', 'appointment_cancellation', { scheduled_service_id: scheduledServiceId, templateKey: 'appointment_cancelled' }, {
+    // Which recipients the fan-out actually reached for: a carded contact removed from the appointment contacts since the
+    // last preview check is simply never iterated, and must not read as a full success.
+    const attemptedKeys = new Set();
+    const noticeSent = await safeSendAppointment(customer, prefs || {}, async (contact) => {
+      attemptedKeys.add(noticeRecipientKey(contact.phone));
+      return renderCancellationBody({ customer, contact, record, scheduledServiceId, approvedNotice });
+    }, 'appointment_cancelled', 'appointment_cancellation', { scheduled_service_id: scheduledServiceId, templateKey: 'appointment_cancelled' }, {
       sendOutcome,
       preDispatchCheck: makeCancellationPreDispatchCheck({ record, scheduledServiceId, claimStatesWithSent, noticeToken, sendOutcome }),
     });
@@ -2858,8 +2862,13 @@ async function sendCancellationNotice({ record, scheduledServiceId, options, not
     // One recipient accepted and another failed WITHOUT throwing (provider failure, opt-out, landline block): the
     // fan-out still returns true and the claim stays 'sent' (a retry would re-text those reached), so say it was partial.
     const failedRecipients = noticeSent ? (sendOutcome.failedRecipients || []) : [];
-    if (failedRecipients.length) {
-      reportOutcome(true, `The text went to some recipients, but not to the ${[...new Set(failedRecipients)].join(' and the ')} (blocked, opted out or failed). Do not resend to those already reached.`, { partial: true });
+    const vanishedCount = noticeSent && approvedNotice ? [...approvedNotice.keys()].filter((key) => !attemptedKeys.has(key)).length : 0;
+    if (failedRecipients.length || vanishedCount) {
+      const gaps = [
+        ...(failedRecipients.length ? [`not to the ${[...new Set(failedRecipients)].join(' and the ')} (blocked, opted out or failed)`] : []),
+        ...(vanishedCount ? [`not to ${vanishedCount} approved recipient(s) no longer on the appointment contacts`] : []),
+      ];
+      reportOutcome(true, `The text went to some recipients, but ${gaps.join(' and ')}. Do not resend to those already reached.`, { partial: true });
       return;
     }
     reportOutcome(noticeSent, noticeSent

@@ -338,6 +338,8 @@ async function transitionJobStatus({
   // The Intelligence Bar cancel card approved the customer text (opt-in, with notifyCustomer 'caller'): the durable
   // claim is minted 'pending_approved', a state NO sweep adopts, so a crash before the approved send finalizes it
   // can never let the sweep text the live template to the current recipients (the receipt says it was not confirmed).
+  // Also set when the card explicitly chose NO text (notifyCustomer 'caller_suppress'): the terminal 'suppressed' marker
+  // is then written whatever GATE_CANCEL_NOTICE_HOOK says, so no pod can late-claim the row and text it.
   cancelNoticeApproved = false,
   // A caller transitioning a BATCH of rows passes one Set and refreshes the
   // affected routes once after its loop (dispatch-assignment.js
@@ -622,7 +624,8 @@ async function transitionJobStatus({
     if (String(toStatus || '') === 'cancelled') {
       try {
         const { isEnabled } = require('../config/feature-gates');
-        // The card-approved text's 'pending_approved' marker is minted whatever GATE_CANCEL_NOTICE_HOOK says: the approved
+        // The card's notice disposition is persisted whatever GATE_CANCEL_NOTICE_HOOK says: the approved text's
+        // 'pending_approved' marker, or the terminal 'suppressed' of a card that chose no text. The approved
         // send (handleCancellation with approvedNotice) does not depend on the hook, and in a rolling deploy a pod with the
         // hook off could otherwise commit a markerless approved cancel that a newer pod's late claim would text from the
         // live template. Everything else this gate controls (hook-owned claims, the outbox) stays gated.

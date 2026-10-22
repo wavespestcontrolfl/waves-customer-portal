@@ -3153,7 +3153,9 @@ async function serviceStatusHandler(req, res, next) {
           // reversal on the card's effects, so the shared writer's unpinned money seam stands down.
           ...(req.ibApprovedMoney ? { moneySeam: 'caller' } : {}),
           // The card approved the text: the durable claim is minted in a state no sweep adopts (see job-status.js).
-          ...(req.ibApprovedCancelNotice ? { cancelNoticeApproved: true } : {}),
+          // A card that explicitly said NO text is a disposition too: its terminal 'suppressed' marker is persisted in
+          // this transaction whatever GATE_CANCEL_NOTICE_HOOK says, so no pod can late-claim the row and text it.
+          ...(req.ibApprovedCancelNotice || req.ibApprovedNoText ? { cancelNoticeApproved: true } : {}),
           // This route runs the OFFICE version of the activation itself
           // (below) — the shared writer must not fire its lazy one too.
           legacyOutboundActivation: isOfficeReviewConfirm ? 'caller' : undefined,
@@ -3523,6 +3525,8 @@ function cancelServiceFromBar({ serviceId, notifyCustomer, notes, actor, beforeC
       // The card's approvals: the text per recipient ([{ recipient_key, body }]) and the linked visits
       // ([{ id, status, scheduled_date, service_type }]). The handler's cascade cancels only those.
       ibApprovedCancelNotice: approvedNotice || null,
+      // The card explicitly chose no customer text (notifyCustomer false): that choice must be durable too.
+      ibApprovedNoText: notifyCustomer === false,
       ibApprovedLinkedChildren: Array.isArray(linkedChildren) ? linkedChildren : null,
       ibLinkedChildReport: Array.isArray(linkedChildren) ? { skipped: [] } : null,
       // The card's money effects ({ invoices, creditReversalOfferIds }); anything that changed is skipped and reported.

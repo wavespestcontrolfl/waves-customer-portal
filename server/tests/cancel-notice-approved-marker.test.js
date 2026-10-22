@@ -34,6 +34,14 @@ describe('pending_approved is minted only for the approved send and read only by
     expect(jobStatus).toContain("if (claimedRows && targetState === 'pending' && notifyCustomer !== 'caller') cancelNoticeClaimTs = claimTs;");
   });
 
+  test('a no-text card writes its terminal suppressed marker through the same gate: caller_suppress -> suppressed, no outbox, abort when an older claim holds the row', () => {
+    expect(jobStatus).toContain("let targetState = (notifyCustomer === false || notifyCustomer === 'caller_suppress')");
+    expect(jobStatus).toContain("? 'suppressed'");
+    // The outbox is only for 'caller' without an approval; caller_suppress never writes one.
+    expect(jobStatus).toContain("if (notifyCustomer === 'caller' && !cancelNoticeApproved) {");
+    expect(jobStatus).toContain('if (cancelNoticeApproved && !claimedRows) {');
+  });
+
   test('the approved send does not read the hook gate: the only gate read in its code path is the sweep-retention branch an approved send never takes', () => {
     const start = reminders.indexOf('function makeCancellationFinalizer(');
     const end = reminders.indexOf('function makeCancellationPreDispatchCheck(');
@@ -56,7 +64,10 @@ describe('pending_approved is minted only for the approved send and read only by
   });
 
   test('the Dispatch handler passes cancelNoticeApproved only for the bar\'s approved text', () => {
-    expect(dispatch).toContain("...(req.ibApprovedCancelNotice ? { cancelNoticeApproved: true } : {}),");
+    expect(dispatch).toContain("...(req.ibApprovedCancelNotice || req.ibApprovedNoText ? { cancelNoticeApproved: true } : {}),");
+    // ibApprovedNoText is set only by the bar replay, and only for an explicit no-text choice.
+    expect(dispatch).toContain('ibApprovedNoText: notifyCustomer === false,');
+    expect(dispatch.split('\n').filter((l) => !l.trim().startsWith('//') && l.includes('ibApprovedNoText'))).toHaveLength(2);
   });
 
   // The approved send is handleCancellation plus the claim/finalize helpers it was split into (Codex #6377 r4 P2):

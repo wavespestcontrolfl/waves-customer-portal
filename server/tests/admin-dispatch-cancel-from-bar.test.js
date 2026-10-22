@@ -216,6 +216,11 @@ describe('cancelServiceFromBar replays the Dispatch cancel handler with the card
     expect(mockHandleCancellation.mock.calls[0][1].outcome).toBeUndefined();
   });
 
+  test('a card that chose NO text persists its disposition: the writer is told cancelNoticeApproved with caller_suppress (terminal suppressed marker, whatever the hook gate says)', async () => {
+    await cancelServiceFromBar({ serviceId: 'svc-bar-1', notifyCustomer: false, actor: ACTOR });
+    expect(mockTransitionJobStatus.mock.calls[0][0]).toMatchObject({ notifyCustomer: 'caller_suppress', cancelNoticeApproved: true });
+  });
+
   test('beforeCommit runs under the visit lock, before the status transition', async () => {
     const order = [];
     mockTransitionJobStatus.mockImplementationOnce(async () => { order.push('transition'); return { ok: true, adminPayload: null }; });
