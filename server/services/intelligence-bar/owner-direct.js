@@ -111,8 +111,8 @@ const sameName = (a, b) => Boolean(a && b) && String(a).trim().toLowerCase().rep
 // card-free edit on a customer keeps its card when the message did not name that
 // customer and that customer is not the one on screen. "Named" is decided from
 // server facts only, never from the model's input: the customers the task
-// context resolved from a name, phone or email typed in THIS message
-// (typedCustomerIds, targets) and the customer the page shows (pageIds). A
+// context resolved from a name typed in THIS message (groundedCustomerIds, the simplest case
+// only) and the customer the page shows (pageIds). A
 // customer the model found itself (a call log, a search) is in neither set.
 // Not subject to it: lead tools (a lead is not a customer), create_customer
 // (the customer is the message's own content), create_restock_request and
@@ -124,27 +124,20 @@ const CUSTOMER_ID_EDIT_TOOLS = new Set(['update_customer', 'update_customer_prop
 function targetGrounding(taskContext) {
   if (!ibTargetRulesV2Live()) return null;
   const ids = new Set();
-  // Conflicting name and contact evidence (Codex #6369): a target resolved from
-  // the typed name is not trusted; an operator pick and the page still are.
-  const conflict = taskContext?.identityConflict === true;
-  // Direct (no-card) authority from typed evidence needs EXACTLY ONE typed customer
-  // (Codex #6369 r12): a reply that resolves two or more customers (a choice label
-  // whose customer-entered city holds another customer's name) grounds none of them,
-  // and a name-resolved target is dropped with them.
-  const typed = Array.isArray(taskContext?.typedCustomerIds) ? taskContext.typedCustomerIds : [];
-  const distrustLookup = conflict || typed.length > 1;
-  const addTarget = (target) => {
-    if (distrustLookup && target?.provenance === 'current_request_lookup') return;
-    if (target?.customer_id) ids.add(String(target.customer_id).toLowerCase());
-  };
-  for (const target of Array.isArray(taskContext?.targets) ? taskContext.targets : []) addTarget(target);
-  addTarget(taskContext?.target);
-  if (typed.length === 1) ids.add(String(typed[0]).toLowerCase());
+  const add = id => { if (id) ids.add(String(id).toLowerCase()); };
+  // Direct (no-card) authority from typed evidence comes ONLY from groundedCustomerIds: exactly
+  // one typed full name that resolves to exactly one customer, with no qualifier in the message
+  // (Codex #6369 r23). A target the name lookup resolved ('current_request_lookup') grants
+  // nothing on its own; an operator pick and the page still do.
+  for (const id of Array.isArray(taskContext?.groundedCustomerIds) ? taskContext.groundedCustomerIds : []) add(id);
+  const picked = target => (target?.provenance === 'current_request_lookup' ? null : target?.customer_id);
+  for (const target of Array.isArray(taskContext?.targets) ? taskContext.targets : []) add(picked(target));
+  add(picked(taskContext?.target));
   // The customer on screen: the page context's own customer, or the customer
   // record the page showed (pageIds, already validated by the task context).
   const page = taskContext?.page || {};
-  addTarget(page.customer);
-  if (page.ids?.customer_id) ids.add(String(page.ids.customer_id).toLowerCase());
+  add(picked(page.customer));
+  add(page.ids?.customer_id);
   return { ids };
 }
 
@@ -361,7 +354,7 @@ async function threadTaintVerdict(actorId, threadId, marker = null) {
 // `needed` is false when owner-direct is off, where the flag decides nothing.
 async function loadRequestTaint(args) {
   const taint = await loadUntrustedTaint(args);
-  if (args.needed !== false && await sameNameChoicePending(args.actorId, args.threadId)) taint.sameNameCandidates = true;
+  if (args.needed !== false && await sameNameChoicePending(args)) taint.sameNameCandidates = true;
   return taint;
 }
 
@@ -475,13 +468,28 @@ const sameNameMarkerNeeded = taint => Boolean(taint?.sameNameEmitted) && ibTarge
 
 // The marker check for a new request: a pending same-name choice cards every write in it.
 // An unreadable thread fails closed.
-async function sameNameChoicePending(actorId, threadId) {
-  if (!threadId || !actorId || !ibTargetRulesV2Live()) return false;
+async function sameNameChoicePending({ actorId, threadId, conversationHistory, prompt }) {
+  if (!ibTargetRulesV2Live()) return false;
+  if (!threadId || !actorId) return pendingFromHistory(conversationHistory, prompt);
   try {
     return (await IbThreads.hasSameNameChoicePending(actorId, threadId)) === true;
   } catch {
     return true;
   }
+}
+
+// No thread record to read (threads off, or the append failed): the round-tripped history is
+// the only evidence (Codex #6369 r23). A marker in any of the last 3 assistant turns counts as
+// pending (no clock is available). With no readable history, a message shaped like a choice
+// reply ("Full Name, City" / "First L., City") fails closed.
+const CHOICE_REPLY_RE = /^[\p{L}][\p{L}'. -]{1,38},\s*[\p{L}][\p{L}'. -]{1,38}$/u;
+const looksLikeChoiceReply = prompt => CHOICE_REPLY_RE.test(String(prompt ?? '').trim());
+const turnText = content => (Array.isArray(content) ? content.map(block => (typeof block === 'string' ? block : block?.text || '')).join('\n') : String(content ?? ''));
+
+function pendingFromHistory(conversationHistory, prompt) {
+  if (!Array.isArray(conversationHistory) || !conversationHistory.length) return looksLikeChoiceReply(prompt);
+  return conversationHistory.filter(message => message?.role === 'assistant').slice(-3)
+    .some(message => turnText(message.content).split('\n').some(line => line.trim() === IbThreads.SAME_NAME_CHOICE_MARKER));
 }
 
 const cardsEveryWrite = taint => Boolean(taint?.untrustedRead || taint?.sameNameCandidates);
@@ -683,4 +691,4 @@ You are talking to the owner. Do what they ask.
 - Never send the owner to another screen, never explain limitations, never apologize. If something truly cannot be done from here, say so in one sentence and offer the closest thing you can do.
 - Replies: 1–3 short lines. No preamble, no recap of the request, no "anything else?". Lists and numbers only when the owner asked for data.`;
 
-module.exports = { TRUSTED_READS, noteSameNameContext, markSameNameChoices, sameNameMarkerNeeded, ownerDirectPrompt, dynamicCapReached, targetGrounding, bulkLimitResult, OWNER_DIRECT_TARGET_RULES_PROMPT, DIRECT_EDITS_V2, loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };
+module.exports = { TRUSTED_READS, looksLikeChoiceReply, noteSameNameContext, markSameNameChoices, sameNameMarkerNeeded, ownerDirectPrompt, dynamicCapReached, targetGrounding, bulkLimitResult, OWNER_DIRECT_TARGET_RULES_PROMPT, DIRECT_EDITS_V2, loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };

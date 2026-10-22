@@ -460,10 +460,18 @@ function nameTail(customer, marked) {
   return phrase ? hay.slice(hay.indexOf(` ${phrase} `) + phrase.length + 2) : null;
 }
 
+// Words that may follow a city in a request ("... in Venice notes", "... in Venice and ..."). A city
+// counts as typed only as a WHOLE phrase: "in Palm Beach Gardens" is not "Palm Beach" (Codex #6369 r23).
+const CITY_FOLLOW_WORDS = new Set(['and', 'then', 'to', 'for', 'as', 'with', 'so', 'please', 'notes', 'note', 'phone', 'email', 'address', 'number', 'now', 'today', 'tomorrow', 'instead']);
 function cityIsTyped(customer, marked) {
   const tail = nameTail(customer, marked);
   const city = normalizeName(customer.city);
-  return Boolean(tail && city) && ['in', 'of', COMMA_TOKEN].some(lead => tail.startsWith(`${lead} ${city} `));
+  if (!tail || !city) return false;
+  return ['in', 'of', COMMA_TOKEN].some((lead) => {
+    if (!tail.startsWith(`${lead} ${city} `)) return false;
+    const next = tail.slice(`${lead} ${city} `.length).split(' ')[0];
+    return !next || CITY_FOLLOW_WORDS.has(next);
+  });
 }
 
 // Was a qualifier typed after a name: "in <place>", "of <place>" or ", <place>"? A
@@ -496,7 +504,6 @@ function contactLiteralsOf(clause) {
   return [...found.values()];
 }
 
-const identityConflict = () => Object.assign([], { identityConflict: true });
 const tenDigits = value => String(value || '').replace(/\D/g, '').slice(-10);
 
 // The ids a typed name (and, narrowed, a typed city) picks out. Fail closed: a name lookup
@@ -531,48 +538,56 @@ async function contactRows(literal) {
   return rows.filter(row => (literal.phone ? tenDigits(row.phone) === literal.phone : normalizeEmail(row.email) === literal.email));
 }
 
-// The customers the typed contacts name, and how many literals named nobody or several.
+// The customers the typed contacts name (a literal that names nobody or several names none).
 async function resolveContacts(literals) {
   const owners = new Map();
-  let unresolved = 0;
   for (const literal of literals) {
     const found = await contactRows(literal);
     if (found.length === 1) owners.set(String(found[0].id), found[0]);
-    else unresolved += 1;
   }
-  return { owners, unresolved };
+  return owners;
 }
 
-// Name and contact evidence must agree (Codex #6369 r18). With a name typed, a contact that
-// names nobody, names several, or names someone else is conflicting evidence: no typed
-// grounding for the request. The name list is capped (26 rows): past the cap, a contact
-// owner agrees with the name when the typed name names that owner (Codex #6369 r2).
-function contactsConflict({ namedResult, normalized, nameIds, owners, unresolved }) {
-  const nameMatched = new Set((namedResult.matches || []).map(customer => String(customer.id)));
-  if (!nameIds.size && !nameMatched.size) return false;
-  const agrees = id => nameMatched.has(id)
-    || (namedResult.complete === false && namesTargetCustomer(normalized, owners.get(id)));
-  const named = [...owners.keys()];
-  return unresolved > 0 || named.some(id => !agrees(id)) || (nameIds.size > 0 && named.some(id => !nameIds.has(id)));
-}
-
-// The customers THIS message names. See the block comment above MAX_CONTACT_LITERALS.
+// The customers THIS message points at, for PICKING a target (the clarification, the card): a
+// typed name, a city after it, a phone or email, a "First L., City" reply. It grants no direct
+// authority: that comes only from directGroundedIds below (Codex #6369 r23).
 async function typedCustomerIds(fullPrompt, namedResult) {
   const prompt = boundedPrompt(fullPrompt);
   const clause = targetClause(prompt);
   const normalized = normalizeName(withoutContacts(clause));
   const marked = normalizeName(withoutContacts(clause).replace(/,/g, ` ${COMMA_TOKEN} `));
-  const nameIds = nameGroundedIds(namedResult, normalized, marked);
+  const ids = nameGroundedIds(namedResult, normalized, marked);
   // Work budget (Codex #6369 security P2): a message that types more than MAX_CONTACT_LITERALS
-  // phones or emails names nobody by contact and runs no lookup at all. Fail closed (r3): the
-  // contact check never ran, so the name-derived ids cannot be shown to agree. Ground nobody.
+  // phones or emails runs no contact lookup at all.
   const literals = contactLiteralsOf(clause);
-  if (literals.length > MAX_CONTACT_LITERALS) return identityConflict();
-  const { owners, unresolved } = await resolveContacts(literals);
-  if (contactsConflict({ namedResult, normalized, nameIds, owners, unresolved })) return identityConflict();
-  const ids = new Set([...nameIds, ...owners.keys()]);
+  const owners = literals.length > MAX_CONTACT_LITERALS ? new Map() : await resolveContacts(literals);
+  for (const id of owners.keys()) ids.add(id);
   for (const id of await initialFormIds(prompt)) ids.add(id);
   return [...ids];
+}
+
+// Does the message carry ANY qualifier beside the name: a phone, an email, a record id, a
+// "First L., City" reply, or city syntax after the name?
+function qualifierPresent(bounded, clause, customer, marked) {
+  return contactLiteralsOf(clause).length > 0 || RECORD_ID_RE.test(clause) || INITIAL_FORM_RE.test(bounded)
+    || qualifierAfterName(customer, marked);
+}
+const RECORD_ID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
+// DIRECT (no-card) authority from typed evidence, in the simplest case only (Codex #6369 r23):
+// exactly one typed FULL name that resolves to exactly one customer, and nothing else in the
+// message that could be a qualifier. Any qualifier (a city, phone, email, record id or second
+// name), a name that resolves to nobody or to several customers, or a set quantifier grants
+// nothing, so the write is carded. Qualifiers still help PICK a target (typedCustomerIds).
+function directGroundedIds(fullPrompt, namedResult, cohort) {
+  const bounded = boundedPrompt(fullPrompt);
+  const clause = targetClause(bounded);
+  const [customer, ...others] = namedResult.matches || [];
+  if (cohort || namedResult.complete === false || namedResult.multiple || !customer || others.length) return [];
+  const full = fullNameKey(customer);
+  const typedFull = full.includes(' ') && ` ${normalizeName(withoutContacts(clause))} `.includes(` ${full} `);
+  const marked = normalizeName(withoutContacts(clause).replace(/,/g, ` ${COMMA_TOKEN} `));
+  return typedFull && !qualifierPresent(bounded, clause, customer, marked) ? [String(customer.id)] : [];
 }
 
 // A choice button the bar offers when "Full Name, City" is over the 40 characters a button
@@ -664,10 +679,11 @@ async function choiceLabels(customers) {
   return labels.map(label => (label && labels.filter(other => other && key(other) === key(label)).length === 1 ? label : null));
 }
 
-// The one customer a capped name's typed phone or email resolved to, or null.
-// typedIds is null outside the v2 scope.
-async function contactResolvedCustomer(typedIds) {
-  return typedIds?.length === 1 && !typedIds.identityConflict ? customerById(typedIds[0]) : null;
+// The one customer a capped name's typed phone or email resolved to, or null (a PICK for the
+// card; it grants no authority). The typed name must name that customer too.
+async function contactResolvedCustomer(typedIds, prompt) {
+  const customer = typedIds?.length === 1 ? await customerById(typedIds[0]) : null;
+  return customer && namesTargetCustomer(normalizeName(withoutContacts(targetClause(prompt))), customer) ? customer : null;
 }
 
 // Owner-direct scope only: same-name rows carry a button label and a last visit.
@@ -678,11 +694,12 @@ async function labelledCandidates(scope, candidates, named) {
   return (await withLastVisit(candidates)).map((candidate, index) => ({ ...candidate, choice_label: labels[index] }));
 }
 
-// Owner-direct scope only: the customers this message names. typedIds is null
-// outside the scope and `typed` is then empty.
-async function typedTarget(scope, prompt, namedResult) {
+// Owner-direct scope only: the customers this message points at (typedCustomerIds, for picking) and
+// the one it names in the simplest case (groundedCustomerIds, the only direct authority).
+// typedIds is null outside the scope and `typed` is then empty.
+async function typedTarget(scope, prompt, namedResult, cohort) {
   const typedIds = scope ? await typedCustomerIds(prompt, namedResult) : null;
-  return { typedIds, typed: scope ? { typedCustomerIds: [...typedIds], ...(typedIds.identityConflict ? { identityConflict: true } : {}) } : {} };
+  return { typedIds, typed: scope ? { typedCustomerIds: typedIds, groundedCustomerIds: directGroundedIds(prompt, namedResult, cohort) } : {} };
 }
 
 // resolve() is a short pipeline. `r` is the shared state; each stage owns one
@@ -715,18 +732,14 @@ const pageErrorStage = r => (r.page.error && PAGE_REFERENCE_RE.test(targetClause
 function sameNamePick(scope, r) {
   const viewed = r.page.customer;
   // Only duplicates of ONE typed name are a same-name ambiguity the page can settle; a bare name
-  // that matches different full names never selects the viewed customer (Codex #6369 r20).
-  if (!scope || !r.sameName || !viewed || r.typedIds.identityConflict) return null;
-  // A typed qualifier that resolved to exactly the viewed customer confirms the page.
-  if (r.typedIds.length === 1) return r.typedIds[0] === viewed.customer_id ? viewed : null;
-  return r.typedIds.length === 0 && !qualifierTyped(r.prompt, r.named) ? viewed : null;
+  // that matches different full names never selects the viewed customer (Codex #6369 r20). Any
+  // typed qualifier, resolved or not, leaves the clarification (r23: the qualifier-confirms branch
+  // is retired).
+  return scope && r.sameName && viewed && r.typedIds.length === 0 && !qualifierTyped(r.prompt, r.named) ? viewed : null;
 }
 
-// Candidates, whom this message names (GATE_IB_TARGET_RULES_V2) and the first
-// selection. The typed ids ride on the context so an owner-direct edit can tell a
-// named customer from one the model found. identityConflict: the typed name and a
-// typed phone or email point at different customers; owner-direct then trusts no
-// name-resolved target.
+// Candidates, whom this message points at (typedCustomerIds, for picking) and the one it names
+// in the simplest case (groundedCustomerIds, the only direct authority), and the first selection.
 // Are these rows duplicates of ONE typed name: two or more customers with the same
 // normalized full name, and no set quantifier or second named customer in the message?
 // Two DIFFERENT named customers ("Alice Example and Bob Sample") are a cohort, not a
@@ -741,7 +754,7 @@ async function candidatesStage(r) {
   r.cohort = setQuantified(r.prompt) || r.namedResult.multiple;
   r.sameName = scope && isSameNameGroup(r.named, r.cohort);
   r.candidates = await labelledCandidates(r.sameName, r.named.map(c => customerTarget(c, 'current_request_lookup')), r.named);
-  Object.assign(r, await typedTarget(scope, r.prompt, r.namedResult));
+  Object.assign(r, await typedTarget(scope, r.prompt, r.namedResult, r.cohort));
   r.selection = candidateSelection(r.candidates, r.prompt, r.page.customer, r.namedResult.complete, r.cohort, r.nameHint, sameNamePick(scope, r));
   return null;
 }
@@ -767,7 +780,7 @@ async function selectionStage(r) {
 // behind buttons that all conflict.
 async function cappedStage(r) {
   if (r.namedResult.complete || r.cohort || r.selectedId) return null;
-  const pick = await contactResolvedCustomer(r.typedIds);
+  const pick = await contactResolvedCustomer(r.typedIds, r.prompt);
   if (pick) { r.selection = singleTarget(pick, 'current_request_lookup'); return null; }
   return { page: r.page, candidates: [], target: null, targets: [], ambiguous: false,
     error: 'More customers share this name than one lookup can list, so none can be selected here. Identify the customer by phone or email, or start the request from their customer page.',
