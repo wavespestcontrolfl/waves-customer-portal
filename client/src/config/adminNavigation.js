@@ -11,6 +11,7 @@ import {
   ClipboardList,
   Clock,
   FileText,
+  Gavel,
   Gift,
   Home,
   KeyRound,
@@ -226,6 +227,17 @@ export const ADMIN_NAV_ITEMS = {
     flag: "agent_estimate",
     adminOnly: true,
   },
+  // Bid invites found in the email table (GATE_BID_DESK, dark). `bid_desk` comes from GET /admin/feature-flags, which
+  // only carries it while the gate is on, so the entry is hidden everywhere (and fails closed) otherwise.
+  bidDesk: {
+    id: "bidDesk",
+    keywords: ["bid", "bids", "rfp", "rfq", "invitation to bid", "buildingconnected", "procore", "proposal"],
+    path: "/admin/bid-desk",
+    label: "Bid Desk",
+    icon: Gavel,
+    flag: "bid_desk",
+    adminOnly: true,
+  },
   equipment: {
     id: "equipment",
     path: "/admin/equipment",
@@ -336,7 +348,7 @@ export const ADMIN_NAV_ITEMS = {
 const NAV_SECTION_DEFINITIONS = [
   { section: "Overview", itemIds: ["dashboard"] },
   { section: "Operations", itemIds: ["today", "schedule", "jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"] },
-  { section: "Sales", itemIds: ["customers", "gateCodes", "pipeline", "agentEstimate", "priceMatch", "contracts"] },
+  { section: "Sales", itemIds: ["customers", "gateCodes", "pipeline", "agentEstimate", "bidDesk", "priceMatch", "contracts"] },
   { section: "Communications", itemIds: ["communications"] },
   { section: "Finance", itemIds: ["invoices", "recovery", "payers", "banking", "taxes"] },
   { section: "People", itemIds: ["staff", "recruiting"] },
@@ -427,7 +439,7 @@ const WORKSPACE_GROUPS = [
   { id: "dashboard", label: "Dashboard", target: "dashboard", itemIds: ["dashboard"], section: "Daily" },
   { id: "schedule", label: "Schedule", target: "schedule", itemIds: ["today", "schedule"], section: "Daily" },
   { id: "customers", label: "Customers", target: "customers", itemIds: ["customers", "contracts", "gateCodes"], section: "Daily" },
-  { id: "sales", label: "Sales", target: "pipeline", itemIds: ["pipeline", "estimates", "priceMatch", "agentEstimate"], section: "Daily" },
+  { id: "sales", label: "Sales", target: "pipeline", itemIds: ["pipeline", "estimates", "priceMatch", "agentEstimate", "bidDesk"], section: "Daily" },
   { id: "communications", label: "Communications", target: "communications", itemIds: ["communications"], section: "Daily" },
   { id: "billing", label: "Billing", target: "invoices", itemIds: ["invoices", "recovery", "payers"], section: "Daily" },
   { id: "operations", label: "Operations", icon: Wrench, itemIds: ["jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"], section: "Manage" },
