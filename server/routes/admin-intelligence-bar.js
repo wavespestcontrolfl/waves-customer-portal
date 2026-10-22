@@ -939,6 +939,10 @@ const PINNED_DISPLAY_BUILDERS = {
   send_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'send_invoice'
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount_due: preview.amount_due, send_by: preview.channels, sent_before: preview.send_note }
     : null),
+  // record_payment: the card names the invoice, the customer, the money and that no receipt is sent; the lines ride the contract.
+  record_payment: (params, preview) => (preview?.preview === true && preview.tool === 'record_payment'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name, amount: preview.amount, method: preview.method, receipt: preview.receipt }
+    : null),
   // convert_lead: the card names the lead, the customer and the figures; the lines ride the contract.
   convert_lead: (params, preview) => (preview?.preview === true && preview.tool === 'convert_lead'
     ? { lead: preview.lead_name, customer: preview.customer_name, phone_email_match: preview.matched_on, sends_to_customer: 'nothing' }
@@ -986,6 +990,8 @@ const VERIFIED_VERSION_PARAMS = {
   // send_invoice binds the invoice state, the recipients and the total the card
   // showed (invoice-action-tools.js _version).
   send_invoice: '_verified_invoice_send_version',
+  // record_payment binds the invoice state, the amount due and the method the card showed.
+  record_payment: '_verified_record_payment_version',
   // convert_lead binds the lead, the customer and the request body the card showed.
   convert_lead: '_verified_lead_convert_version',
   // void_invoice binds the invoice state, credit, pay-page session and links the card showed.
@@ -2122,7 +2128,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   }
   // send_invoice: the stored approval names the invoice the preview resolved,
   // never the number the model sent.
-  if (toolUse.name === 'send_invoice' && preview?.preview === true && preview.invoice_id) {
+  if (['send_invoice', 'record_payment'].includes(toolUse.name) && preview?.preview === true && preview.invoice_id) {
     params.invoice_id = String(preview.invoice_id);
     delete params.invoice_number;
   }

@@ -85,6 +85,7 @@ beforeAll(() => {
   process.env.GATE_IB_VOID_INVOICE = 'true';
   // send_invoice is dark behind GATE_IB_INVOICE_ACTIONS; off, its preview refuses.
   process.env.GATE_IB_INVOICE_ACTIONS = 'true';
+  process.env.GATE_IB_RECORD_PAYMENT = 'true';
   process.env.GATE_IB_DELETE_CUSTOMER = 'true';
   // propose_admin_edit is dark behind GATE_IB_GENERAL_EDIT (and owner login only); off, its preview refuses.
   process.env.GATE_IB_GENERAL_EDIT = 'true';
@@ -92,6 +93,7 @@ beforeAll(() => {
 afterAll(() => {
   delete process.env.GATE_IB_GENERAL_EDIT;
   delete process.env.GATE_IB_INVOICE_ACTIONS;
+  delete process.env.GATE_IB_RECORD_PAYMENT;
   delete process.env.GATE_IB_MERGE_CUSTOMERS;
   delete process.env.GATE_IB_ACCEPT_ESTIMATE;
   delete process.env.GATE_IB_LEAD_CONVERT;
@@ -110,7 +112,7 @@ afterAll(() => {
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'model-failure.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'invoice-action-effects.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'billing-mode-change.js', 'tier-upgrade-email.js', 'name-match.js', 'booking-service-match.js', 'tool-search.js', 'multi-card.js', 'ib-openai-backup.js', 'openai-tool-adapter.js', 'admin-write-snapshots.js', 'model-context.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'model-failure.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'invoice-action-effects.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'billing-mode-change.js', 'tier-upgrade-email.js', 'name-match.js', 'booking-service-match.js', 'tool-search.js', 'multi-card.js', 'ib-openai-backup.js', 'openai-tool-adapter.js', 'admin-write-snapshots.js', 'record-payment-fences.js', 'model-context.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -182,6 +184,7 @@ const WRITE_TWO_STEP = [
   'correct_invoice_address',
   'accept_estimate',
   'send_invoice',
+  'record_payment',
   'void_invoice',
   'update_lead_contact',
   // propose_admin_edit (owner ruling 2026-10-12, GATE_IB_GENERAL_EDIT): one reviewed small internal
@@ -749,6 +752,12 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       invoices: [{ id: '00000000-0000-0000-0000-00000000f101', invoice_number: 'WPC-2099-0101', status: 'sent', customer_id: 'cust-1', payer_id: null, total: '129.00', credit_applied: '0', line_items: [{ description: 'Pest Control', amount: 129 }] }],
       customers: [{ id: 'cust-1', first_name: 'Pat', last_name: 'Tester' }],
     }],
+    // record_payment reads the invoice, the customer, the payer ownership, the annual-plan check and the closeout
+    // probe (spied below; intelligence-bar-record-payment.test.js covers the card itself). Its preview writes nothing.
+    ['record-payment-tools', 'executeRecordPaymentTool', 'record_payment', { invoice_id: '00000000-0000-0000-0000-00000000f102', amount: 129, method: 'check' }, {
+      invoices: [{ id: '00000000-0000-0000-0000-00000000f102', invoice_number: 'WPC-2099-0102', status: 'sent', customer_id: 'cust-1', payer_id: null, total: '129.00', credit_applied: '0', updated_at: '2026-10-01T00:00:00Z' }],
+      customers: [{ id: 'cust-1', first_name: 'Pat', last_name: 'Tester' }],
+    }],
     // propose_admin_edit validates the body against a reviewed catalog row (a template's wording here,
     // which needs no seeded record) and writes nothing until confirmed; the full allow-list behavior is
     // covered by ib-admin-write-tools.test.js. It runs for the owner login with a bearer on the context.
@@ -973,6 +982,12 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
         jest.spyOn(require('../services/invoice-followups'), 'planFollowupSequence').mockResolvedValue({ arms: false, state: 'not_schedulable', cadence: [3, 7, 14, 30] }),
         jest.spyOn(require('../services/lead-estimate-link'), 'invoiceSentConversionTargets').mockResolvedValue({ leadIds: [] }),
       ] : [];
+    const recordPaymentSpies = toolName === 'record_payment'
+      ? [
+        jest.spyOn(require('../services/open-balance'), 'rowIsSelfPayDue').mockResolvedValue(true),
+        jest.spyOn(require('../services/invoice-prepay'), 'resolveInvoiceTermId').mockResolvedValue(null),
+        jest.spyOn(require('../services/invoice-issued-closeout'), 'issuedCloseoutTarget').mockResolvedValue(null),
+      ] : [];
     const repriceCoverage = toolName === 'reprice_future_visits'
       ? jest.spyOn(require('../routes/admin-schedule'), 'findBillingCoveredVisits').mockResolvedValue(new Map()) : null;
     // accept_estimate's card is the accept run as a dry run (rolled back in its
@@ -1044,6 +1059,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       receiptResolvers.forEach((spy) => spy.mockRestore());
       autopayPreflight?.mockRestore();
       invoiceActionSpies.forEach((spy) => spy.mockRestore());
+      recordPaymentSpies.forEach((spy) => spy.mockRestore());
       dedupeReaders.forEach((spy) => spy.mockRestore());
       repriceCoverage?.mockRestore();
       acceptDryRun?.mockRestore();
@@ -1189,9 +1205,10 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
     // explicitly opts out of live smoke; its preview is exercised above. So does
     // resend_receipt (_sideEffects): its confirmed run emails/texts the customer.
     const explicitlySkipped = WRITE_TWO_STEP.filter(name => ib.get(name)?.sideEffects === true);
-    // send_invoice (_sideEffects): its confirmed run texts/emails the customer.
+    // send_invoice (_sideEffects): its confirmed run texts/emails the customer. record_payment (_sideEffects): its
+    // confirmed run settles an invoice (it sends no receipt).
     // propose_admin_edit (_sideEffects): its confirmed run replays a PUT or PATCH to a reviewed admin endpoint.
     // void_invoice (_sideEffects): its confirmed run voids an invoice (live smoke must not).
-    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice', 'void_invoice', 'propose_admin_edit']);
+    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice', 'record_payment', 'void_invoice', 'propose_admin_edit']);
   });
 });
