@@ -219,6 +219,24 @@ const POLICY = require('./action-policy.json');
 // property_gate_code, garage_code, lockbox_code). Only those named code fields:
 // zip_code and other *_code fields stay untainted.
 const NOTE_FIELD = /(?:^|_)(?:notes?|instructions?|details?|comments?|messages?|body|text|transcript|summary|access|plan|gate_code|garage_code|lockbox_code|access_code)$|(?:Notes?|Instructions?|Details?|Comments?|Messages?|Body|Text|Transcript|Summary|Access|Plan|[Gg]ateCode|[Gg]arageCode|[Ll]ockboxCode|[Aa]ccessCode)$/;
+// Identity fields a public form lets a visitor type (a quote visitor's name or
+// address). They taint only when the value is NOT a plain identity value, so
+// "Mary-Ann O'Neil" and "123 Main St. #4, Unit B" stay card-free while a short
+// sentence in a name field taints. Matched field names, snake or camel case:
+//   name, first_name, last_name, full_name, customer_name, company_name,
+//   business_name, contact_name, display_name, reviewer_name, sender_name,
+//   from_name, account_name, lead_name;
+//   address, address1, address2, address_line1, address_line2, street, city,
+//   unit and the customer_, service_, billing_, property_, mailing_ forms.
+const NAME_FIELD = /^(?:(?:first|last|full|customer|company|business|contact|display|reviewer|sender|from|account|lead)_?name|name)$/i;
+const ADDRESS_FIELD = /^(?:(?:customer|service|billing|property|mailing|street)_?)?(?:address(?:_?line_?[12]|_?[12])?|street|city|unit)$/i;
+const PLAIN_NAME = /^[\p{L}\p{M}\d .,'\u2019&-]*$/u;
+const PLAIN_ADDRESS = /^[\p{L}\p{M}\d .,#'\u2019/-]*$/u;
+function plainIdentityValue(key, value) {
+  const text = value.trim();
+  if (NAME_FIELD.test(key)) return text.length <= 60 && text.split(/\s+/).filter(Boolean).length <= 5 && PLAIN_NAME.test(text);
+  return text.length <= 120 && PLAIN_ADDRESS.test(text);
+}
 // Any string this long in an answer is prose, whatever its field is called.
 const PROSE_LENGTH = 80;
 const SCAN_NODE_LIMIT = 20000;
@@ -231,7 +249,12 @@ function holdsNoteText(result) {
     if (++nodes > SCAN_NODE_LIMIT || depth > 8) return true;
     if (Array.isArray(value)) return value.some(item => walk(item, depth + 1));
     if (!value || typeof value !== 'object') return false;
-    return Object.entries(value).some(([key, item]) => (typeof item === 'string' ? (NOTE_FIELD.test(key) && Boolean(item.trim())) || item.length >= PROSE_LENGTH : walk(item, depth + 1)));
+    return Object.entries(value).some(([key, item]) => {
+      if (typeof item !== 'string') return walk(item, depth + 1);
+      if (NOTE_FIELD.test(key)) return Boolean(item.trim()) || item.length >= PROSE_LENGTH;
+      if ((NAME_FIELD.test(key) || ADDRESS_FIELD.test(key)) && !plainIdentityValue(key, item)) return true;
+      return item.length >= PROSE_LENGTH;
+    });
   };
   return walk(result, 0);
 }
@@ -496,6 +519,18 @@ You are talking to the owner. Do what they ask.
 - Never send the owner to another screen, never explain limitations, never apologize. If something truly cannot be done from here, say so in one sentence and offer the closest thing you can do.
 - Replies: 1–3 short lines. No preamble, no recap of the request, no "anything else?". Lists and numbers only when the owner asked for data.`;
 
+// With GATE_IB_OWNER_DIRECT_TAINT_ALL_READS on, a phone change always shows a
+// card and so does every edit after a read of message, email, call, lead or
+// note text. Gate off: OWNER_DIRECT_PROMPT, unchanged.
+const OWNER_DIRECT_PROMPT_TAINT_ALL_READS = OWNER_DIRECT_PROMPT
+  .replace('executes directly for name, phone, lead source, and notes', 'executes directly for name, lead source, and notes')
+  .replace('an email, tier, rate, active or pipeline-stage change still shows a card', 'a phone, email, tier, rate, active or pipeline-stage change still shows a card')
+  .replace('Never tell the owner to confirm these.', 'Never tell the owner to confirm these. Exception: after you read customer texts, emails, calls, lead or review text or notes, every edit in that request shows a card; then say "tap Confirm".');
+
+function ownerDirectPrompt() {
+  return ibOwnerDirectTaintAllReadsLive() ? OWNER_DIRECT_PROMPT_TAINT_ALL_READS : OWNER_DIRECT_PROMPT;
+}
+
 // The owner login with the gate on but GATE_IB_PLATFORM off: nothing commits
 // directly (see the header), so the prompt must stay card-aware — the same
 // voice and target rules, but every write is a one-tap card (Codex r2 P1).
@@ -510,4 +545,4 @@ You are talking to the owner. Do what they ask.
 - Never send the owner to another screen, never explain limitations, never apologize. If something truly cannot be done from here, say so in one sentence and offer the closest thing you can do.
 - Replies: 1–3 short lines. No preamble, no recap of the request, no "anything else?". Lists and numbers only when the owner asked for data.`;
 
-module.exports = { SENDER_TEXT_READ_TOOLS, loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };
+module.exports = { SENDER_TEXT_READ_TOOLS, loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT, ownerDirectPrompt };
