@@ -1009,7 +1009,7 @@ function replyFulfillment(evidence, commitment, { eventOnly = false } = {}) {
 
 // The event page's scan watermark and attempt stamp are bookkeeping, not obligation content.
 function fulfillmentFingerprint(commitment, evidence, { eventOnly = false } = {}) {
-  const { fulfillment_check: _previous, event_seen_at: _seen, event_seen_customer_id: _seenFor, event_attempted_at: _tried,
+  const { fulfillment_check: _previous, thread_check: _thread, event_seen_at: _seen, event_seen_customer_id: _seenFor, event_attempted_at: _tried,
     event_attempted_through: _triedThrough, ...sms_context } = commitment.sms_context || {};
   const obligation = { party: commitment.party, kind: commitment.kind, description: commitment.description,
     evidence: commitment.evidence, due_at: commitment.due_at, sms_context };
@@ -1066,6 +1066,9 @@ async function holdsPaymentProperty(trx, invoiceId) {
 // The provider runs outside the transaction. Lock its actual witness and
 // re-read the same evidence before allowing a delayed verdict to close work.
 async function revalidateSmsFulfillment(trx, commitment, message, verdict, now) {
+  // A close from the customer's later thread (sms-commitment-thread-close.js)
+  // cites a text, not a witness record the evidence loader returns.
+  if (verdict.basis === 'thread_confirmation') return require('./sms-commitment-thread-close').revalidateThreadCompletion(trx, commitment, message, verdict, now);
   const tables = { sms: 'sms_log', call: 'call_log', email_delivery: 'email_messages',
     // A person's Gmail SENT row (D1's new evidence type) — locked here so a
     // fulfilled verdict citing it can actually commit; without this entry

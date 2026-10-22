@@ -20,6 +20,7 @@ const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation'
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
 const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
+const { verifyThreadCompletion, BASIS: THREAD_BASIS } = require('./sms-commitment-thread-close');
 const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL, PAYMENT_WITNESS_KINDS, paymentEvidenceRow } = require('./sms-commitment-fulfillment');
 
 const { hashSensitiveValue } = require('./data-hygiene/sensitive-vault');
@@ -853,17 +854,18 @@ async function applySmsCommitmentUpdate(conn, id, { customerId, action, note, re
     await recordAuditEvent({ trx, critical: true, actor_type: 'technician', actor_id: reviewedBy,
       action: `${initial.sms_log_id ? 'sms' : 'email'}.commitment.${action}`, resource_type: 'call_commitment', resource_id: id,
       metadata: { sms_log_id: initial.sms_log_id || null, email_id: initial.email_id || null, customer_id: customerId } });
-    await trx('notifications').where({ recipient_type: 'admin' })
-      .whereRaw("metadata->>'dedupeKey' = ?", [initial.sms_log_id ? `sms-commitment:${id}` : `email-commitment:${id}`])
-      // Staff settled the promise (dismiss / fulfill): its bell is done, by that
-      // person. Any other staff update (an edit, a snooze) leaves the promise
-      // open, so the bell is only read.
-      .update(['dismiss', 'fulfill'].includes(action)
-        // done_by names the workflow and the person (`sms-commitments:<id>`),
-        // never a bare person id: the follow-up itself is closed, so the bell
-        // Done is not a person's to Reopen (PERSON_DONE_BY_SQL refuses it).
-        ? require('./notification-service')._private.doneColumns({ by: `${initial.sms_log_id ? 'sms' : 'email'}-commitments:${reviewedBy}`, resolution: `Follow-up ${action === 'dismiss' ? 'dismissed' : 'marked done'} by staff`, keepExisting: true, conn: trx })
-        : { read_at: trx.fn.now() });
+    const settled = ['dismiss', 'fulfill'].includes(action);
+    // Staff settled the promise (dismiss / fulfill): its bell is done, by that
+    // person. Any other staff update (an edit, a snooze) leaves the promise
+    // open, so the bell is only read.
+    // done_by names the workflow and the person (`sms-commitments:<id>`),
+    // never a bare person id: the follow-up itself is closed, so the bell
+    // Done is not a person's to Reopen (PERSON_DONE_BY_SQL refuses it).
+    const alertUpdate = settled
+      ? require('./notification-service')._private.doneColumns({ by: `${initial.sms_log_id ? 'sms' : 'email'}-commitments:${reviewedBy}`, resolution: `Follow-up ${action === 'dismiss' ? 'dismissed' : 'marked done'} by staff`, keepExisting: true, conn: trx })
+      : { read_at: trx.fn.now() };
+    if (initial.sms_log_id) await closeSmsCommitmentAlerts(trx, { commitmentId: id, smsLogId: initial.sms_log_id, settled }, alertUpdate);
+    else await trx('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [`email-commitment:${id}`]).update(alertUpdate);
     return updated;
   });
 }
@@ -1030,36 +1032,69 @@ function headlineWords(quote, rawQuote, description, redact) {
 // verification runs only after both (Codex #5248 r3), the late record rings
 // the bell first and closes the row on a later tick.
 function keptLate(row, verdict) {
-  return verdict.verdict === 'fulfilled' && row.sms_context?.basis === 'promise' && row.due_at != null
+  // A close from the later text thread (the customer said they got it, or a
+  // person said it was sent) is not a late record: nothing is left to ring.
+  return verdict.verdict === 'fulfilled' && verdict.basis !== THREAD_BASIS && row.sms_context?.basis === 'promise' && row.due_at != null
     && new Date(verdict.matched_at) > new Date(row.due_at);
+}
+
+// One open admin alert per source text (owner 2026-10-22): a single staff
+// text such as "Adam will be out there and he'll look into it" yields several
+// commitments, and each used to ring its own alert. The alert is keyed on the
+// source sms_log row and lists every open promise from that text. Alerts an
+// older build keyed on one commitment (`sms-commitment:<id>`) are still found
+// and closed by every path below.
+const smsSourceAlertKey = (smsLogId) => `sms-commitment-source:${smsLogId}`;
+const legacyCommitmentAlertKey = (commitmentId) => `sms-commitment:${commitmentId}`;
+const openSourceCommitments = (conn, smsLogId) => conn('call_commitments')
+  .where({ sms_log_id: smsLogId, status: 'open', party: 'waves' }).whereNull('human_state')
+  .orderBy('created_at').orderBy('id');
+
+// Close the alert for a finished commitment. The shared source alert stays
+// open while another promise from the same text is still open.
+async function closeSmsCommitmentAlerts(trx, { commitmentId, smsLogId, settled = true }, update) {
+  const stillOpen = !settled || await openSourceCommitments(trx, smsLogId).whereNot('id', commitmentId).first('id');
+  const keys = [legacyCommitmentAlertKey(commitmentId), ...(stillOpen ? [] : [smsSourceAlertKey(smsLogId)])];
+  await trx('notifications').where({ recipient_type: 'admin' })
+    .whereIn(trx.raw("metadata->>'dedupeKey'"), keys).update(update);
 }
 
 // The bell's words (owner audit 2026-10-01): the customer's name and what is owed in the
 // headline, their quoted words in the why, the whole story in `detail`.
-function overdueBellCopy({ row, message, verdict, customerName, channelWord }) {
+function overdueBellCopy({ row, message, verdict, customerName, channelWord, promises = null }) {
   const names = require('./admin-alert-names');
   const when = new Date(message.created_at).toLocaleString('en-US', {
     timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
   });
   const state = verdict.late ? 'late' : verdict.verdict;
-  const alert = KIND_ALERT[row.kind] || KIND_ALERT.other;
-  const promised = row.sms_context?.basis === 'promise';
+  // One text with several promises: one alert that names all of them. Same
+  // kind keeps the kind's wording; mixed kinds fall back to a general follow-up.
+  const group = Array.isArray(promises) && promises.length > 1 ? promises : null;
+  const kinds = new Set((group || [row]).map((item) => item.kind));
+  const alert = KIND_ALERT[kinds.size === 1 ? row.kind : 'other'] || KIND_ALERT.other;
+  const promised = (group || [row]).every((item) => item.sms_context?.basis === 'promise');
   const rawQuote = obligationWords(row, message);
   const quote = names.redactedWords(rawQuote);
   const status = state === 'late' ? 'done only after the promised time'
-    : (state === 'uncertain' ? "can't tell if it was done" : alert.open);
+    : (state === 'uncertain' ? "can't tell if it was done" : (group ? 'nothing on record shows them done' : alert.open));
   const day = names.shortDateET(message.created_at);
+  // The words each promise is quoted by; promises that quote alike show once.
+  const groupWords = group ? [...new Set(group.map((item) => {
+    const raw = obligationWords(item, message);
+    return headlineWords(names.redactedWords(raw), raw, item.description, names.redactedWords);
+  }).filter(Boolean))] : [];
   const detail = [
-    `${customerName || 'A customer'}: ${promised ? `we promised this by ${channelWord}` : `asked by ${channelWord}`} on ${when} ET.`,
-    quote ? `“${quote.slice(0, 600)}”` : null,
-    (OVERDUE_BELL_DETAIL[state] || OVERDUE_BELL_DETAIL.open)(when, channelWord),
+    `${customerName || 'A customer'}: ${promised ? `we promised ${group ? 'these' : 'this'} by ${channelWord}` : `asked by ${channelWord}`} on ${when} ET.`,
+    group ? groupWords.map((words) => `• “${words.slice(0, 300)}”`).join('\n') : (quote ? `“${quote.slice(0, 600)}”` : null),
+    group ? `${group.length} follow-ups from this one ${channelWord} are still open. ${(OVERDUE_BELL_DETAIL[state] || OVERDUE_BELL_DETAIL.open)(when, channelWord)}` : (OVERDUE_BELL_DETAIL[state] || OVERDUE_BELL_DETAIL.open)(when, channelWord),
   ].filter(Boolean).join('\n');
+  const headline = group ? groupWords.join('” and “') : (quote && headlineWords(quote, rawQuote, row.description, names.redactedWords));
   return {
     detail,
     spec: {
       area: alert.area,
       action: names.fitAction(alert.area, customerName || 'the customer', [alert.action]),
-      why: names.whyWithQuote({ lead: promised ? 'We said ' : '', quote: quote && headlineWords(quote, rawQuote, row.description, names.redactedWords),
+      why: names.whyWithQuote({ lead: promised ? 'We said ' : '', quote: headline,
         tail: `${day ? ` (${day})` : ''} — ${status}.` }),
       severity: 'needs-you',
       link: `/admin/customers?customerId=${encodeURIComponent(message.customer_id)}&tab=comms`,
@@ -1080,13 +1115,14 @@ function overdueBellCopy({ row, message, verdict, customerName, channelWord }) {
 // the title is not the dedupe key (dedupeKey is), so the wording may change.
 // Every existing SMS caller omits the overrides, so the SMS bell keeps its
 // dedupe, link and metadata shape.
-async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceIdField = 'sms_log_id', triggerKey = 'sms_operational_followup' }) {
+async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceIdField = 'sms_log_id', triggerKey = 'sms_operational_followup', promises = null }) {
   const customerName = await require('./admin-alert-names').lookupCustomerName(trx, message.customer_id);
-  const { spec, detail } = overdueBellCopy({ row, message, verdict, customerName, channelWord: sourceIdField === 'email_id' ? 'email' : 'text' });
+  const { spec, detail } = overdueBellCopy({ row, message, verdict, customerName, channelWord: sourceIdField === 'email_id' ? 'email' : 'text', promises });
   const ringOpts = {
     trx, bell: true, dedupeKey, dedupeWindowMs: 24 * 60 * 60 * 1000, refreshOnDedupe: true, detail,
     metadata: { triggerKey, customerId: message.customer_id,
-      [sourceIdField]: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.late ? 'kept_late' : verdict.verdict } };
+      [sourceIdField]: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.late ? 'kept_late' : verdict.verdict,
+      ...(promises?.length > 1 ? { commitment_ids: promises.map((item) => item.id) } : {}) } };
   const { raiseAdminAlert } = require('./admin-alert-compose');
   // GATE_ALERT_RING_ONCE (owner 2026-10-14): a promise rings once. The probe
   // looks only at OPEN rows, at any age: an open row is refreshed without a
@@ -1116,9 +1152,26 @@ async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceId
   return notification;
 }
 
+// The overdue alert for a text commitment: one open alert per source text,
+// listing every open promise from it. An alert an older build keyed on one
+// commitment is closed in its favor. `row` is the commitment that triggered the
+// ring; it leads the list.
+async function ringSmsSourceBell(trx, { row, message, verdict }) {
+  const open = await openSourceCommitments(trx, message.id);
+  const promises = [row, ...open.filter((item) => item.id !== row.id)];
+  const notification = await ringOverdueBell(trx, { row, message, verdict, dedupeKey: smsSourceAlertKey(message.id), promises });
+  if (notification?.id) {
+    const { doneColumns, openToCloser } = require('./notification-service')._private;
+    await openToCloser(trx('notifications').where({ recipient_type: 'admin' })
+      .whereIn(trx.raw("metadata->>'dedupeKey'"), promises.map((item) => legacyCommitmentAlertKey(item.id))), 'supersede')
+      .update(doneColumns({ by: 'supersede', resolution: 'Replaced by one alert for this text', keepExisting: true, conn: trx }));
+  }
+  return notification;
+}
+
 // One open row: skip, verify, and close or bell. Returns what happened so
 // the caller can count it.
-async function refreshSmsCommitment(conn, row, now, verify) {
+async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verifyThreadCompletion) {
   const message = await scheduledSourceMessage(conn, await conn('sms_log').where({ id: row.sms_log_id }).first(...SOURCE_COLUMNS));
   // A later delivery failure cannot erase already-recorded staff work.
   // Intake still refuses failed sources; captured promises stay actionable.
@@ -1152,7 +1205,24 @@ async function refreshSmsCommitment(conn, row, now, verify) {
   const eventWitness = evidence.records.some((record) => SYSTEM_EVENT_TYPES.includes(record.type)
     && admissibleWitness(record, current, evidence.records));
   if (!eventWitness && inWindow) return { outcome: settle('not_due') };
-  const verdict = await verify(current, evidence, { now, eventOnly: inWindow });
+  let verdict = await verify(current, evidence, { now, eventOnly: inWindow });
+  // The record checks above never read what the customer said next. When they
+  // cannot settle the row, read the later thread: the customer confirming they
+  // got it, or a person's text saying it was sent, closes it (and so the alert
+  // never rings again for finished work). A failed thread read changes nothing.
+  if (verdict.verdict !== 'fulfilled' && !verdict.retry_after) {
+    try {
+      const thread = await verifyThread(conn, current, message, now);
+      if (thread) {
+        current.sms_context = { ...current.sms_context, thread_check: thread };
+        if (thread.verdict === 'fulfilled') verdict = thread;
+        else await conn('call_commitments').where({ id: row.id, status: 'open' }).whereNull('human_state')
+          .update({ sms_context: conn.raw("COALESCE(sms_context, '{}'::jsonb) || jsonb_build_object('thread_check', ?::jsonb)", [JSON.stringify(thread)]) });
+      }
+    } catch (err) {
+      logger.warn(`[sms-operations] thread check failed for commitment ${row.id}: ${err.message}`);
+    }
+  }
   let closed = false;
   // Only a verdict this transaction actually persisted counts as handled.
   // Every early exit — a relinked or changed source, the gate turning off, a
@@ -1165,12 +1235,12 @@ async function refreshSmsCommitment(conn, row, now, verify) {
     const { source, live } = locked;
     const latest = { ...live, sms_context: { ...live.sms_context, customer_id: source.customer_id } };
     if (verdict.verdict === 'fulfilled' && !await revalidateSmsFulfillment(trx, latest, source, verdict, now)) return;
-    const dedupeKey = `sms-commitment:${row.id}`;
+    const alertKeys = [legacyCommitmentAlertKey(row.id), smsSourceAlertKey(source.id)];
     if (live.sms_context.customer_id !== source.customer_id) {
       // Rolling dedupe only refreshes recent rows. Older bells must also
       // follow a merge or undo instead of opening the retired account.
       await trx('notifications').where({ recipient_type: 'admin' })
-        .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).update({
+        .whereIn(trx.raw("metadata->>'dedupeKey'"), alertKeys).update({
           link: `/admin/customers?customerId=${encodeURIComponent(source.customer_id)}&tab=comms`,
           metadata: trx.raw("jsonb_set(metadata, '{customerId}', to_jsonb(?::text), true)", [source.customer_id]),
         });
@@ -1180,17 +1250,19 @@ async function refreshSmsCommitment(conn, row, now, verify) {
     });
     persisted = true;
     if (keptLate(live, verdict) && !await trx('notifications').where({ recipient_type: 'admin' })
-      .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).first('id')) {
+      .whereIn(trx.raw("metadata->>'dedupeKey'"), alertKeys).first('id')) {
       // A suppressed bell leaves no row to find next tick: close now instead.
-      const bell = await ringOverdueBell(trx, { row, message, verdict: { ...verdict, late: true }, dedupeKey });
+      const bell = await ringSmsSourceBell(trx, { row, message, verdict: { ...verdict, late: true } });
       if (!bell.suppressed) return;
     }
     if (verdict.verdict === 'fulfilled') {
       await trx('call_commitments').where({ id: row.id }).update({
         status: 'fulfilled', fulfillment: verdict, fulfilled_at: now, updated_at: now,
       });
-      await trx('notifications').where({ recipient_type: 'admin' })
-        .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).update(require('./notification-service')._private.doneColumns({ by: 'sms-commitments', resolution: 'The text follow-up was done', at: now, keepExisting: true, conn: trx }));
+      await closeSmsCommitmentAlerts(trx, { commitmentId: row.id, smsLogId: source.id },
+        require('./notification-service')._private.doneColumns({ by: 'sms-commitments',
+          resolution: verdict.basis === THREAD_BASIS ? `The text follow-up was done (${verdict.note})` : 'The text follow-up was done',
+          at: now, keepExisting: true, conn: trx }));
       closed = true;
       return;
     }
@@ -1198,7 +1270,7 @@ async function refreshSmsCommitment(conn, row, now, verify) {
     // never rings a bell on its own (there is no stated deadline to have
     // passed). The fulfillment_check above is still stored so a later
     // pass with new evidence does not repeat the same model call for free.
-    if (deadlinePassed) await ringOverdueBell(trx, { row, message, verdict, dedupeKey });
+    if (deadlinePassed) await ringSmsSourceBell(trx, { row, message, verdict });
   });
   // A provider or schema failure is persisted with retry_after, but no model
   // judged the event: keep it pending (verify reuses the stored failure until
@@ -1206,7 +1278,7 @@ async function refreshSmsCommitment(conn, row, now, verify) {
   return { outcome: persisted && !verdict.retry_after ? settle('verified') : 'deferred', verdict, closed };
 }
 
-async function refreshSmsCommitments({ now = new Date(), conn = db, verify = verifySmsFulfillment } = {}) {
+async function refreshSmsCommitments({ now = new Date(), conn = db, verify = verifySmsFulfillment, verifyThread = verifyThreadCompletion } = {}) {
   if (!smsCommitmentsEnabled()) return { skipped: 'gate_off' };
   if (!gateEnvTimestamp('GATE_SMS_OPERATIONAL_ACTIONS_SINCE')) return { skipped: 'activation_time_required' };
   const counts = { scanned: 0, fulfilled: 0, unverified: 0, skipped_no_witness: 0, skipped_not_due: 0 };
@@ -1276,7 +1348,7 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
   for (const row of rows) {
     if (!smsCommitmentsEnabled()) return { ...counts, skipped: 'gate_off' };
     counts.scanned += 1;
-    const result = await refreshSmsCommitment(conn, row, now, verify);
+    const result = await refreshSmsCommitment(conn, row, now, verify, verifyThread);
     if (result.outcome === 'no_witness') counts.skipped_no_witness += 1;
     if (result.outcome === 'not_due') counts.skipped_not_due += 1;
     if (result.verdict?.verdict === 'uncertain') counts.unverified += 1;
