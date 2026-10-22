@@ -38,11 +38,10 @@ afterEach(() => {
   }
 });
 
-// A "home" ~25 miles south of the office; stops near home and near the office.
+// A "home" ~25 miles south of the office; two stops near it.
 const HOME = { lat: 27.0998, lng: -82.4543 };
 const NEAR_HOME_A = { lat: 27.11, lng: -82.45 };
 const NEAR_HOME_B = { lat: 27.12, lng: -82.46 };
-const NEAR_OFFICE = { lat: 27.38, lng: -82.4 };
 
 const stop = (id, geo, startMin) => ({
   id, geo, startMin, window_start: `${String(Math.floor(startMin / 60)).padStart(2, '0')}:00`, estimated_duration_minutes: 60,
