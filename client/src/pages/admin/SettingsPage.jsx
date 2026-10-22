@@ -132,10 +132,6 @@ export default function SettingsPage() {
   const [health, setHealth] = useState(null);
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
-  // Live gate list for Advanced → Features and System (owner-only route; the
-  // public /api/health reply stopped carrying gates in #2853).
-  const [gateList, setGateList] = useState(null);
-  const [gateListError, setGateListError] = useState(null);
   // ?tab=X deep-links from the mobile Settings surface land on the right tab.
   const initialTab = VALID_TABS.includes(searchParams.get("tab"))
     ? searchParams.get("tab")
@@ -217,17 +213,6 @@ export default function SettingsPage() {
     ]).then(() => setLoading(false));
   }, []);
 
-  const needsGates = user?.role === "admin" && (tab === "gates" || tab === "system");
-  useEffect(() => {
-    if (!needsGates || gateList) return;
-    let cancelled = false;
-    setGateListError(null);
-    adminFetch("/admin/settings/gates")
-      .then((d) => { if (!cancelled) setGateList(Array.isArray(d?.gates) ? d.gates : []); })
-      .catch((e) => { if (!cancelled) setGateListError(e.message || "Could not load gates"); });
-    return () => { cancelled = true; };
-  }, [needsGates, gateList]);
-
   // A ?tab= deep link into an owner-only group resolves to General once the
   // server-verified profile arrives. Declared ABOVE the early returns —
   // hooks must run on every render path or React throws "Rendered more
@@ -257,8 +242,6 @@ export default function SettingsPage() {
     );
   }
 
-  const gateByEnv = new Map((gateList || []).filter((g) => g.envName).map((g) => [g.envName, g]));
-  const gatesOn = (gateList || []).filter((g) => g.enabled).length;
 
   // Service Reports (coverage config) and Scheduling (blackout days) are
   // requireAdmin end to end server-side — hide the whole groups from
@@ -396,95 +379,148 @@ export default function SettingsPage() {
       )}
       {tab === "link-library" && <LinkLibraryTab />}
       {tab === "integrations" && <IntegrationsTab canAdmin={user?.role === "admin"} />}
-      {tab === "gates" && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Feature gates</CardTitle>
-            <p className="mt-1 text-ui-body text-ink-secondary">
-              Live state of every gate, as the server read it at its last start.
-              {gateList && ` ${gatesOn} of ${gateList.length} on.`}
-            </p>
-          </CardHeader>
-          <CardBody>
-            {gateListError && <ActionFeedback>Could not load gates: {gateListError}</ActionFeedback>}
-            {!gateList && !gateListError && <ActionFeedback>Loading gates...</ActionFeedback>}
-            {gateList && (
-              <div className="divide-y divide-zinc-200">
-                {gateList.map((g) => (
-                  <div key={g.key} className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-3">
-                    <div className="min-w-0 flex-1">
-                      <div className="break-all font-medium text-zinc-900 u-nums">{g.envName || g.key}</div>
-                      {g.description && <div className="mt-1 text-ui-caption text-ink-secondary">{g.description}</div>}
-                      {g.requires?.length > 0 && (
-                        <div className="mt-1 break-all text-ui-caption text-ink-secondary u-nums">Also needs {g.requires.join(", ")}</div>
-                      )}
-                    </div>
-                    <Badge tone={g.enabled ? "strong" : "neutral"} dot>{g.enabled ? "Enabled" : "Disabled"}</Badge>
-                  </div>
-                ))}
-              </div>
-            )}
-            <p className="mt-4 rounded-md bg-zinc-50 p-3 text-ui-body text-ink-secondary">
-              Gates are controlled via Railway environment variables. To change:
-              Railway Dashboard → Variables → set GATE_NAME=true or remove the variable.
-              A change restarts the server.
-            </p>
-          </CardBody>
-        </Card>
-      )}
+      {tab === "gates" && isAdminRole && <FeatureGatesTab />}
       {tab === "service-reports" && <ServiceCoverageSettingsTab />}
       {tab === "blackout-days" && <BlackoutDaysTab />}
       {tab === "kpi-targets" && <KpiTargetsSettingsTab canAdmin={user?.role === "admin"} />}
       {tab === "operating-costs" && isAdminRole && <OperatingCostsSettingsTab canAdmin={user?.role === "admin"} />}
-      {tab === "system" && (
-        <div className="space-y-5">
-          <Card>
-            <CardHeader><CardTitle>System info</CardTitle></CardHeader>
-            <CardBody>
-              <dl className="grid gap-3 sm:grid-cols-2">
-                {[
-                  { label: "Environment", value: health?.environment || "—" },
-                  { label: "Status", value: health?.status || "—" },
-                  { label: "Database", value: health?.database || "—" },
-                  { label: "Server time", value: health?.timestamp ? new Date(health.timestamp).toLocaleString() : "—" },
-                ].map((field) => (
-                  <div key={field.label} className="rounded-md bg-zinc-50 p-3">
-                    <dt className="text-ui-caption text-ink-secondary">{field.label}</dt>
-                    <dd className="mt-1 break-words font-medium text-zinc-900 u-nums">{field.value}</dd>
-                  </div>
-                ))}
-              </dl>
-            </CardBody>
-          </Card>
-          <Card>
-            <CardHeader><CardTitle>Scheduled jobs</CardTitle></CardHeader>
-            <CardBody className="divide-y divide-zinc-200">
-              {gateListError && <ActionFeedback>Could not load gates: {gateListError}</ActionFeedback>}
-              {[
-                { env: "GATE_CRON_JOBS", label: "Scheduled jobs" },
-                { env: "GATE_SEO_INTELLIGENCE", label: "SEO jobs" },
-              ].map(({ env, label }) => {
-                const g = gateByEnv.get(env);
-                return (
-                  <div key={env} className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-3">
-                    <div className="min-w-0">
-                      <div className="font-medium text-zinc-900">{label}</div>
-                      <div className="break-all text-ui-caption text-ink-secondary u-nums">{env}</div>
-                    </div>
-                    {g ? (
-                      <Badge tone={g.enabled ? "strong" : "alert"} dot>{g.enabled ? "Enabled" : "Disabled"}</Badge>
-                    ) : (
-                      <Badge tone="neutral">{gateListError ? "Unknown" : "Loading"}</Badge>
-                    )}
-                  </div>
-                );
-              })}
-            </CardBody>
-          </Card>
-        </div>
-      )}
+      {tab === "system" && isAdminRole && <SystemTab health={health} />}
       {tab === "usage" && <PortalUsageTab canAdmin={user?.role === "admin"} />}
     </UiSurface>
+  );
+}
+
+// Live gate list for Advanced → Features and System. Owner-only route: the
+// public /api/health reply stopped carrying gates in #2853.
+function useGateList() {
+  const [gates, setGates] = useState(null);
+  const [error, setError] = useState(null);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    setError(null);
+    adminFetch("/admin/settings/gates")
+      .then((d) => { if (!cancelled) setGates(Array.isArray(d?.gates) ? d.gates : []); })
+      .catch((e) => { if (!cancelled) setError(e.message || "Could not load gates"); });
+    return () => { cancelled = true; };
+  }, [attempt]);
+  return { gates, error, retry: () => setAttempt((n) => n + 1) };
+}
+
+function GateListError({ error, onRetry }) {
+  return (
+    <ActionFeedback className="flex flex-wrap items-center justify-between gap-3">
+      <span>Could not load gates: {error}</span>
+      <Button variant="secondary" onClick={onRetry}>Retry</Button>
+    </ActionFeedback>
+  );
+}
+
+function gateNote(g) {
+  if (g.inverted) return "Setting this to true turns the feature off.";
+  if (g.kind === "mode") return "May take a mode value (shadow, auto or a date). Check docs/gates-and-env.md before you set it.";
+  return null;
+}
+
+function FeatureGatesTab() {
+  const { gates, error, retry } = useGateList();
+  const onCount = (gates || []).filter((g) => g.enabled).length;
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Feature gates</CardTitle>
+        <p className="mt-1 text-ui-body text-ink-secondary">
+          Live state of every gate, as the server read it at its last start.
+          {gates && ` ${onCount} of ${gates.length} on.`}
+        </p>
+      </CardHeader>
+      <CardBody>
+        {error && <GateListError error={error} onRetry={retry} />}
+        {!gates && !error && <ActionFeedback>Loading gates...</ActionFeedback>}
+        {gates && (
+          <div className="divide-y divide-zinc-200">
+            {gates.map((g) => (
+              <div key={g.key} className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-3">
+                <div className="min-w-0 flex-1">
+                  <div className="break-all font-medium text-zinc-900 u-nums">{g.envName || g.key}</div>
+                  {g.description && <div className="mt-1 text-ui-caption text-ink-secondary">{g.description}</div>}
+                  {gateNote(g) && <div className="mt-1 text-ui-caption text-ink-secondary">{gateNote(g)}</div>}
+                  {g.requires?.length > 0 && (
+                    <div className="mt-1 break-all text-ui-caption text-ink-secondary u-nums">Also needs {g.requires.join(", ")}</div>
+                  )}
+                </div>
+                <Badge tone={g.enabled ? "strong" : "neutral"} dot>{g.enabled ? "Enabled" : "Disabled"}</Badge>
+              </div>
+            ))}
+          </div>
+        )}
+        <p className="mt-4 rounded-md bg-zinc-50 p-3 text-ui-body text-ink-secondary">
+          Gates are controlled via Railway environment variables. To change one:
+          Railway Dashboard → Variables. Most gates turn on with true; check the note
+          on a gate before you set it. A change restarts the server.
+        </p>
+      </CardBody>
+    </Card>
+  );
+}
+
+// The SEO jobs register only inside the master scheduler, so they run only
+// when both gates are on (server/services/scheduler.js initScheduledJobs).
+const SCHEDULING_GATES = [
+  { env: "GATE_CRON_JOBS", label: "Scheduled jobs" },
+  { env: "GATE_SEO_INTELLIGENCE", label: "SEO jobs", needs: "GATE_CRON_JOBS" },
+];
+
+function schedulingStatus(row, byEnv) {
+  const g = byEnv.get(row.env);
+  if (!g) return { tone: "neutral", text: "Unknown" };
+  if (!g.enabled) return { tone: "alert", text: "Disabled" };
+  if (row.needs && !byEnv.get(row.needs)?.enabled) return { tone: "alert", text: `Blocked: ${row.needs} is off` };
+  return { tone: "strong", text: "Enabled" };
+}
+
+function SystemTab({ health }) {
+  const { gates, error, retry } = useGateList();
+  const byEnv = new Map((gates || []).filter((g) => g.envName).map((g) => [g.envName, g]));
+  return (
+    <div className="space-y-5">
+      <Card>
+        <CardHeader><CardTitle>System info</CardTitle></CardHeader>
+        <CardBody>
+          <dl className="grid gap-3 sm:grid-cols-2">
+            {[
+              { label: "Environment", value: health?.environment || "—" },
+              { label: "Status", value: health?.status || "—" },
+              { label: "Database", value: health?.database || "—" },
+              { label: "Server time", value: health?.timestamp ? new Date(health.timestamp).toLocaleString() : "—" },
+            ].map((field) => (
+              <div key={field.label} className="rounded-md bg-zinc-50 p-3">
+                <dt className="text-ui-caption text-ink-secondary">{field.label}</dt>
+                <dd className="mt-1 break-words font-medium text-zinc-900 u-nums">{field.value}</dd>
+              </div>
+            ))}
+          </dl>
+        </CardBody>
+      </Card>
+      <Card>
+        <CardHeader><CardTitle>Scheduled jobs</CardTitle></CardHeader>
+        <CardBody className="divide-y divide-zinc-200">
+          {error && <GateListError error={error} onRetry={retry} />}
+          {SCHEDULING_GATES.map((row) => {
+            const status = gates ? schedulingStatus(row, byEnv) : { tone: "neutral", text: error ? "Unknown" : "Loading" };
+            return (
+              <div key={row.env} className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-3">
+                <div className="min-w-0">
+                  <div className="font-medium text-zinc-900">{row.label}</div>
+                  <div className="break-all text-ui-caption text-ink-secondary u-nums">{row.env}</div>
+                </div>
+                <Badge tone={status.tone} dot>{status.text}</Badge>
+              </div>
+            );
+          })}
+        </CardBody>
+      </Card>
+    </div>
   );
 }
 

@@ -65,11 +65,28 @@ describe('listGates variable names', () => {
     expect(byKey.get('seoIntelligence')).toMatchObject({ envName: 'GATE_SEO_INTELLIGENCE', requires: [] });
   });
 
-  test('a compound entry names its own variable last and lists prerequisites', () => {
+  test('a compound entry names the variable that spells its key, wherever it sits', () => {
+    // Own variable last: typedDecisionsClef reads GATE_TYPED_DECISIONS first.
     expect(byKey.get('typedDecisionsClef')).toMatchObject({
       envName: 'GATE_TYPED_DECISIONS_CLEF',
       requires: ['GATE_TYPED_DECISIONS'],
     });
+    // Own variable first: callIncidents reads its prerequisite second.
+    expect(byKey.get('callIncidents')).toMatchObject({
+      envName: 'GATE_CALL_INCIDENTS',
+      requires: ['GATE_CALL_SELF_AUDIT'],
+    });
+  });
+
+  test('a getter entry is parsed and does not bleed into the entry above it', () => {
+    expect(byKey.get('visitGroups')).toMatchObject({ envName: 'GATE_VISIT_GROUPS', requires: [] });
+    expect(byKey.get('visitCloseout')).toMatchObject({ envName: 'GATE_VISIT_CLOSEOUT', requires: [] });
+  });
+
+  test('mode and inverted gates carry their catalogue semantics', () => {
+    expect(byKey.get('reviewAutoReply')).toMatchObject({ envName: 'GATE_REVIEW_AUTO_REPLY', kind: 'mode' });
+    expect(listGates().find((g) => g.envName === 'GATE_LATE_PAYMENT_CHECKER_OFF')).toMatchObject({ inverted: true });
+    expect(byKey.get('cronJobs')).toMatchObject({ kind: 'boolean', inverted: false });
   });
 
   test('a GATE_ named only in a comment above an entry is not taken', () => {

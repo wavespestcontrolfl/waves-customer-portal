@@ -7,11 +7,12 @@
 //
 // State comes from the `gates` map (what the running code computed at boot,
 // including non-production defaults). The Railway variable name and the
-// plain-English line come from feature-gates.js itself: the variable is the
-// LAST GATE_ token in each map entry's value expression (compound entries name
-// their prerequisites first: an entry reading the typed-decisions variable and
-// then the Clef variable is the Clef gate, which requires the first), and the description is the header
-// catalogue entry for that variable, when it has one.
+// plain-English line come from feature-gates.js itself. An entry's own
+// variable is the GATE_ token in its value expression that spells its key
+// (callIncidents → GATE_CALL_INCIDENTS); with no such token, a lone token is
+// the variable and a compound one takes its last token. Every other token is a
+// prerequisite. The description, kind (boolean or mode) and inversion come
+// from the header catalogue entry for that variable, when it has one.
 
 const fs = require('fs');
 const featureGates = require('../config/feature-gates');
@@ -35,7 +36,7 @@ function gateEnvNames() {
   for (const line of src.slice(start, end).split('\n').slice(1)) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) continue;
-    const entry = line.match(/^\s+([A-Za-z0-9_]+):\s*(.*)$/);
+    const entry = line.match(/^\s+([A-Za-z0-9_]+):\s*(.*)$/) || line.match(/^\s+get\s+([A-Za-z0-9_]+)\(\)\s*(.*)$/);
     const code = entry ? entry[2] : trimmed;
     if (entry) currentKey = entry[1];
     if (!currentKey) continue;
@@ -46,6 +47,13 @@ function gateEnvNames() {
   }
   envNameCache = names;
   return names;
+}
+
+const ownName = (key) => `GATE_${key.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toUpperCase()}`;
+
+function pickOwn(key, vars) {
+  if (vars.includes(ownName(key))) return ownName(key);
+  return vars.length ? vars[vars.length - 1] : null;
 }
 
 function listGates() {
@@ -59,17 +67,19 @@ function listGates() {
   return Object.entries(featureGates.gates)
     .map(([key, value]) => {
       const vars = envNames.get(key) || [];
-      const envName = vars.length ? vars[vars.length - 1] : null;
+      const envName = pickOwn(key, vars);
       const doc = envName ? catalog.get(envName) : null;
       return {
         key,
         envName,
-        requires: vars.slice(0, -1),
+        requires: vars.filter((v) => v !== envName),
         enabled: value === true,
+        kind: doc?.kind === 'mode' ? 'mode' : 'boolean',
+        inverted: doc?.inverted === true,
         description: doc?.description || null,
       };
     })
     .sort((a, b) => (a.envName || a.key).localeCompare(b.envName || b.key));
 }
 
-module.exports = { listGates, gateEnvNames };
+module.exports = { listGates, gateEnvNames, pickOwn };
