@@ -175,15 +175,23 @@ async function resolveEmailPrefs(customer, scheduledServiceId) {
 
 async function resolveRecipients(customer, { scheduledServiceId = null, eventType = null } = {}) {
   const prefs = await resolveEmailPrefs(customer, scheduledServiceId);
-  const seen = new Set();
   const recipients = [];
-  const add = (email, name) => {
+  // Each recipient carries WHOSE mailbox it is: `holder` for the account
+  // holder's own address (as themselves, or as a slot's fallback), false
+  // for a contact's own. The dispatch-boundary re-read of the contact
+  // declines (sendTemplate onQueued) applies to a contact's mailbox only —
+  // a contact whose address happens to equal the holder's must not silence
+  // the holder's notice (codex #6363 r23 security P2); an address both
+  // added is the holder's.
+  const add = (email, name, { holder = false } = {}) => {
     const value = clean(email);
-    const key = value.toLowerCase();
-    if (isEmailLike(value) && !seen.has(key)) {
-      seen.add(key);
-      recipients.push({ email: value, name });
+    if (!isEmailLike(value)) return;
+    const existing = recipients.find((r) => r.email.toLowerCase() === value.toLowerCase());
+    if (existing) {
+      if (holder) existing.holder = true;
+      return;
     }
+    recipients.push({ email: value, name, holder });
   };
   // The SMS appointment recipients first (service contacts and/or primary).
   // A service contact's email inside getAppointmentContacts falls back to the
@@ -206,8 +214,8 @@ async function resolveRecipients(customer, { scheduledServiceId = null, eventTyp
   for (const c of getAppointmentContacts(customer, prefs || {}, { skipConsentGate: true })) {
     if (declinedSlotRoles.has(c.role)) { declinedByContact = true; continue; }
     const ownEmail = slotEmailByRole.has(c.role) ? slotEmailByRole.get(c.role) : c.email;
-    if (ownEmail) add(ownEmail, c.name);
-    else add(primary.email, primary.name);
+    if (ownEmail) add(ownEmail, c.name, { holder: c.role === 'primary' });
+    else add(primary.email, primary.name, { holder: true });
   }
   // A service-contact slot can carry an email WITHOUT a phone, so it never appears
   // in the SMS contact list above — include those addresses too so an email-only
@@ -221,7 +229,7 @@ async function resolveRecipients(customer, { scheduledServiceId = null, eventTyp
   // emptied the list: that would reroute the notice to a holder who turned
   // their appointment notices off (codex #6363 r2 P2).
   if (!recipients.length && !declinedByContact) {
-    add(primary.email, primary.name);
+    add(primary.email, primary.name, { holder: true });
   }
   return recipients;
 }
@@ -403,10 +411,12 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
         // P2): a decline that lands during those awaits aborts THIS
         // recipient, as the review email's dispatch claim does; an
         // unreadable table holds the notice (fail closed, like the
-        // recipient resolution above).
+        // recipient resolution above). The holder's own mailbox is never
+        // subject to a contact's decline (codex r23 security P2).
         onQueued: async () => {
           if (holdVisitId && await require('./street-level-hold').isStreetLevelHoldVisit(holdVisitId)) { abortedBy = 'street_level_hold'; return false; }
           if (moveHoldServiceId && await moveHoldLive(moveHoldServiceId, renderedSlotMs)) { abortedBy = 'move_hold'; return false; }
+          if (recipient.holder) return true;
           let declinedNow;
           try {
             declinedNow = await require('./contact-notification-prefs').declinedEmailAddresses(customer, eventType);

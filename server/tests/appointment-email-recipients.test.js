@@ -164,8 +164,40 @@ describe('appointment email recipient resolution (fan-out to appointment contact
     } finally {
       mockDeclinedEmails.clear();
     }
-    // Unreadable at the handoff: the notice is held, not sent.
+    // The holder's OWN mailbox is never subject to a contact's decline
+    // (codex r23 security P2): a contact whose address equals the holder's
+    // turning email off must not silence the holder's notice — the shared
+    // address resolves as the holder's and the handoff lets it through, and
+    // the contact declines are not even read for it.
     EmailTemplates.sendTemplate.mockClear();
+    ContactPrefs.declinedEmailAddresses.mockClear();
+    mockDb({
+      customer: {
+        id: 'c1', first_name: 'Pat', email: 'shared@example.com', phone: '+19415551234',
+        service_contact_name: 'Sue', service_contact_phone: '+19415557777', service_contact_email: 'shared@example.com',
+      },
+      prefs: { appointment_notify_primary: true },
+    });
+    mockDeclinedEmails.add('shared@example.com');
+    try {
+      const shared = await AppointmentEmail.sendAppointmentConfirmationEmail({
+        customerId: 'c1', scheduledServiceId: 'ss1', appointmentTime: '2026-06-22T14:00:00.000Z', serviceLabel: 'Quarterly Pest Control',
+      });
+      expect(shared.ok).toBe(true);
+      expect(EmailTemplates.sendTemplate.mock.calls.map(([c]) => c.to)).toEqual(['shared@example.com']);
+      expect(ContactPrefs.declinedEmailAddresses).not.toHaveBeenCalled();
+    } finally {
+      mockDeclinedEmails.clear();
+    }
+    // Unreadable at the handoff for a CONTACT's mailbox: the notice is held, not sent.
+    EmailTemplates.sendTemplate.mockClear();
+    mockDb({
+      customer: {
+        id: 'c1', first_name: 'Pat', email: 'primary@example.com', phone: '+19415551234',
+        service_contact_name: 'Sue', service_contact_phone: '+19415557777', service_contact_email: 'sue@service.com',
+      },
+      prefs: { appointment_notify_primary: false },
+    });
     ContactPrefs.declinedEmailAddresses.mockRejectedValueOnce(new Error('timeout'));
     const held = await AppointmentEmail.sendAppointmentConfirmationEmail({
       customerId: 'c1', scheduledServiceId: 'ss1', appointmentTime: '2026-06-22T14:00:00.000Z', serviceLabel: 'Quarterly Pest Control',
