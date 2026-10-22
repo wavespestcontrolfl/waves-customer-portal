@@ -76,7 +76,7 @@ describe('gate on', () => {
     const all = COMPANY_FACTS.join('\n');
     for (const needle of [
       'inside spray', 'lanai and the pool cage', 'mud daubers', 'honeybees', 'rodent trapping only',
-      'Sundays and holidays', 'dry and bond', 'No mowing', 'watering days', 'do not take payment at the visit',
+      'Sundays and holidays', 'dry and bond', 'No mowing', 'watering days', 'check or cash through the office',
       WAVES_ADDRESS_LINE,
     ]) expect(all).toContain(needle);
   });
@@ -115,7 +115,7 @@ describe('service knowledge (owner-approved 2026-10-03)', () => {
       'Arrival windows are two hours and start on the hour.',
       'WaveGuard tiers (Bronze, Silver, Gold, Platinum) depend on how many qualifying recurring services a customer has.',
     ]) expect(section).toContain(`\n- ${line}\n`);
-    expect(COMPANY_FACTS).toHaveLength(27);
+    expect(COMPANY_FACTS).toHaveLength(26);
   });
   test('aftercare lines (owner-delegated 2026-10-09) are in the section, word for word, and promise no visit', () => {
     const section = renderCompanyFactsSection();
@@ -152,13 +152,12 @@ describe('answer-book facts (owner 2026-10-21/22)', () => {
   const { RETIRED_COMPANY_FACT_LINES } = require('../services/sms-company-facts');
   const NEW_LINES = [
     'The first pest visit includes an inside spray. After that, the inside is up to the customer: we treat it whenever they ask.',
-    'Rodent trapping includes the setup visit and one trap check. More trap checks cost extra.',
-    'There is no long-term contract. A customer can cancel any time.',
+    'Rodent trapping includes the setup visit and at least one trap check. For more trap checks, the office confirms what the job includes.',
+    'Residential plans have no long-term contract, and a residential customer can cancel any time. Commercial accounts follow their service agreement.',
     'A customer who prepays the year and cancels within 90 days gets a refund for the visits not yet done. After 90 days, prepaid visits are not refunded.',
     'We serve Manatee and Sarasota counties and Charlotte County except Punta Gorda, plus Ruskin, Apollo Beach, Sun City Center, Wimauma, Gibsonton and Riverview. We do not serve Punta Gorda, DeSoto County, Tampa, St. Petersburg or Lee County.',
-    'A WDO (termite) inspection report is emailed the same business day as the inspection.',
+    'A WDO (termite) inspection report is emailed after the licensed inspector signs it, normally the same business day as the inspection. The office can check on a late report.',
     'We do not tent for termites. For drywood termites we treat the infested wood directly with spot treatment, a borate wood treatment or injected foam.',
-    'After a lawn visit, the visit card says when to mow.',
     'Product labels: every service report lists each product applied, and the office can email a product label or Safety Data Sheet on request.',
   ];
   test('every new or changed line is in the section, word for word', () => {
@@ -166,7 +165,7 @@ describe('answer-book facts (owner 2026-10-21/22)', () => {
   });
   test('the payment line replaces the old card-only wording and keeps the mailing address', () => {
     const pay = COMPANY_FACTS.find((f) => f.startsWith('Paying:'));
-    expect(pay).toContain('technicians do not take payment at the visit');
+    expect(pay).not.toMatch(/technicians? (?:do not|don't) take payment/i);
     expect(pay).toContain('card or bank account on file, or by check or cash through the office');
     expect(pay).toContain(`Checks are mailed to`);
     expect(pay).toContain(WAVES_ADDRESS_LINE);
@@ -201,7 +200,7 @@ describe('fact lines pass the drafter\'s own compliance screens', () => {
     for (const reply of [
       'Yes, we work Sundays and holidays, same as any other day.',
       'Rain is fine once the treatment has dried and bonded to surfaces; after that it holds up to weather.',
-      'Our techs do not take payment at the visit. You can pay by the card on file, or mail a check to Waves Pest Control, 13649 Luxe Ave #110, Bradenton, FL 34211.',
+      'You can pay by the card on file, or by check or cash through the office, or mail a check to Waves Pest Control, 13649 Luxe Ave #110, Bradenton, FL 34211.',
       'You and the friend you refer each get a $25 credit.',
     ]) expect(hasBannedCustomerCopy(reply)).toBe(false);
   });
@@ -454,7 +453,7 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
   const { isReserviceOfferPromise } = require('../services/sms-shadow-drafter');
   const { retiredCompanyFactBlock } = require('../services/agent-decision-send-checks');
   const { RETIRED_COMPANY_FACT_LINES } = require('../services/sms-company-facts');
-  const PAY = 'Technicians do not take payment at the visit.';
+  const PAY = 'Customers pay by the card or bank account on file, or by check or cash through the office.';
   const REFUND = 'A customer who prepays the year and cancels within 90 days gets a refund for the visits not yet done.';
   const payOk = (reply, inboundText) => paymentStatus.checkPaymentStatusReply({ reply, sentences: [], inboundText }).ok;
 

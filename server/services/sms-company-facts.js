@@ -26,7 +26,7 @@ const COMPANY_FACTS = Object.freeze([
   'Rain: a treatment needs to dry and bond to surfaces; after that it holds up to weather.',
   'Lawn program: fertilizer, weed control and insect control only. No mowing. Treatments follow a seasonal rotation. Never name product brands.',
   'Watering advice you may give: follow the county\'s watering days, water early in the morning, and water deeply and less often.',
-  `Paying: technicians do not take payment at the visit. Customers pay by the card or bank account on file, or by check or cash through the office. Checks are mailed to ${WAVES_BRAND_NAME}, ${WAVES_ADDRESS_LINE}.`,
+  `Paying: customers pay by the card or bank account on file, or by check or cash through the office. Checks are mailed to ${WAVES_BRAND_NAME}, ${WAVES_ADDRESS_LINE}.`,
   // Service knowledge (owner-approved 2026-10-03; each line restates an earlier ruling).
   // Scoped to what holds for EVERY customer the line could reach (Codex #5723 r1): the
   // German roach cleanout runs 2-4 visits by severity; pay-after-first-visit is the
@@ -57,16 +57,19 @@ const COMPANY_FACTS = Object.freeze([
   // Owner rulings 2026-10-21/22 (Waves AI answer book). Plain customer wording, no prices, no
   // product brands. NOT here: the German roach cleanout re-treat after visit two (owner R1) - it promises a return visit, which is the
   // FREE RE-SERVICE fact's job (Codex #6447 r2: its restatements read as a re-service offer); the agent hands it to the office.
+  // Also NOT here (Codex #6447 r3): when to mow (some lawn visit cards carry no mow timing), and whether technicians take payment
+  // (the technician checkout still offers card, cash and check; the owner's "techs don't take payment" waits on that product path).
+  // Scoped to what holds for every customer: no contract = residential; rodent checks past the first = the office (pre-2026-09-27
+  // jobs keep them included); WDO report = after the signature, normally same day (a payment hold can delay it).
   // Rain that washes off a treatment before it dries is deliberately NOT here:
   // the owner ruled it earns no free return visit, and a return visit is the FREE RE-SERVICE
   // fact's job, so no line promises one.
-  'Rodent trapping includes the setup visit and one trap check. More trap checks cost extra.',
-  'There is no long-term contract. A customer can cancel any time.',
+  'Rodent trapping includes the setup visit and at least one trap check. For more trap checks, the office confirms what the job includes.',
+  'Residential plans have no long-term contract, and a residential customer can cancel any time. Commercial accounts follow their service agreement.',
   'A customer who prepays the year and cancels within 90 days gets a refund for the visits not yet done. After 90 days, prepaid visits are not refunded.',
   'We serve Manatee and Sarasota counties and Charlotte County except Punta Gorda, plus Ruskin, Apollo Beach, Sun City Center, Wimauma, Gibsonton and Riverview. We do not serve Punta Gorda, DeSoto County, Tampa, St. Petersburg or Lee County.',
-  'A WDO (termite) inspection report is emailed the same business day as the inspection.',
+  'A WDO (termite) inspection report is emailed after the licensed inspector signs it, normally the same business day as the inspection. The office can check on a late report.',
   'We do not tent for termites. For drywood termites we treat the infested wood directly with spot treatment, a borate wood treatment or injected foam.',
-  'After a lawn visit, the visit card says when to mow.',
   'Product labels: every service report lists each product applied, and the office can email a product label or Safety Data Sheet on request.',
 ]);
 

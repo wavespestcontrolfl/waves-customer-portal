@@ -32,10 +32,10 @@ const MODELS = require('../config/models');
 // "Payment status sentences" line (owner ruling 2026-10-01 - payment-status-contract.js; the deterministic reply guard
 // enforces the same rule, this keeps the verifier from passing a paraphrase).
 // Codex round-18 P1: the gate-on facts block ALSO carries the owner-approved COMPANY FACTS "Paying:"
-// policy (sms-company-facts.js — technicians take no payment at the visit; checks are mailed to the office; cash goes
-// through the office, owner 2026-10-22), so a correct "You can mail us a check" is grounded there and must not be flagged.
+// policy (sms-company-facts.js — customers pay by the card or bank account on file, or by check or cash through the
+// office; checks are mailed to the office, owner 2026-10-22), so a correct "You can mail us a check" is grounded there and must not be flagged.
 const PAYMENT_METHOD_BULLET = `
-- a payment method or contact for HOW TO PAY (a Zelle phone/email, a specific "we take card/ACH" claim) — grounded ONLY if it matches the Payment options line in BILLING exactly OR the owner-approved COMPANY FACTS payment policy (the "Paying:" fact: which methods are accepted or declined — e.g. technicians take no payment at the visit, and customers pay by check or cash through the office — and where a check goes); a contact or method that matches one of those two sources is fine, one that appears in NEITHER is a fabrication (an unlisted method — Venmo, PayPal, a phone number, a made-up address — stays a fabrication)
+- a payment method or contact for HOW TO PAY (a Zelle phone/email, a specific "we take card/ACH" claim) — grounded ONLY if it matches the Payment options line in BILLING exactly OR the owner-approved COMPANY FACTS payment policy (the "Paying:" fact: which methods are accepted or declined — e.g. customers pay by the card or bank account on file, or by check or cash through the office — and where a check goes); a contact or method that matches one of those two sources is fine, one that appears in NEITHER is a fabrication (an unlisted method — Venmo, PayPal, a phone number, a made-up address — stays a fabrication)
 - a payment, invoice, refund or balance STATUS ("we received your $120 payment", "your invoice is paid", "it was refunded", "you're all paid up", "nothing is owed") — grounded ONLY if it is a word-for-word copy of one "Payment status sentences" line in BILLING (the whole sentence, unchanged); a status said in any other words, or one that adds a method, date, amount or reason the sentence does not state, is a fabrication`;
 
 function buildVerifierSystemPrompt({ realAnswers = false } = {}) {
