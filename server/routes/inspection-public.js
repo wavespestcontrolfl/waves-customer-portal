@@ -197,6 +197,7 @@ const { geocodeAddressWithStatus } = require('../services/geocoder');
 const { reverseGeocodeCounty, reverseGeocodeLocality } = require('../services/address-validation');
 const { isInServiceAreaCounty } = require('../services/call-triage-flags');
 const { isInServiceAreaBox, isInServiceAreaCoarseBox, servedSouthHillsborough, isExcludedLocality, isExcludedZip } = require('../services/service-area');
+const { isPuntaGordaSharedZip } = require('../services/excluded-localities');
 const { isAssessmentBooking, scopeToAssessmentBookings, ASSESSMENT_SERVICE_KEY } = require('../services/assessment-booking');
 const { isOpenLeadRow } = require('../services/lead-statuses');
 // The Waves Assessment's catalog identity for travel-gap padding — shared by
@@ -715,6 +716,8 @@ async function checkServiceArea(location, address = null) {
       }
       if (!place) return { ok: false, county: null, unavailable: true };
       if (isExcludedLocality(place.city) || isExcludedZip(place.zip)) return { ok: false, county: null };
+      // No locality on a ZIP Punta Gorda shares with a served town: unknowable.
+      if (!place.city && isPuntaGordaSharedZip(place.zip)) return { ok: false, county: null, unavailable: true };
     }
     return { ok: true, county };
   }

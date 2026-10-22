@@ -110,6 +110,9 @@ async function reverseGeocodeLocality(location, key, signal = null) {
       }
       if (city && zip) break;
     }
+    // Nothing usable (ZERO_RESULTS, or no locality and no ZIP) is unknown,
+    // not "not Punta Gorda": callers fail closed on null.
+    if (!city && !zip) return null;
     return { city, zip };
   } catch {
     return null;

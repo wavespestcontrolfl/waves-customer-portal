@@ -3306,6 +3306,8 @@ describe('checkServiceArea unit coverage (P1 :355)', () => {
       mockCounty.mockImplementation(async () => 'Charlotte');
       mockLocality.mockImplementation(async () => null);
       expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St' })).toEqual({ ok: false, county: null, unavailable: true });
+      mockLocality.mockImplementation(async () => ({ city: null, zip: '33983' }));
+      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St' })).toEqual({ ok: false, county: null, unavailable: true });
       mockLocality.mockImplementation(async () => { throw new Error('boom'); });
       expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St' })).toEqual({ ok: false, county: null, unavailable: true });
     });

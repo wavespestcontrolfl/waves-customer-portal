@@ -32,6 +32,8 @@ const PUNTA_GORDA_LOCALITIES = Object.freeze(new Set(['punta gorda', 'punta gord
 // Ranch (served), so they are NOT here:
 // the city name decides for those, and the ZIP alone keeps current behavior.
 const PUNTA_GORDA_ZIPS = Object.freeze(new Set(['33950', '33951', '33955']));
+// ZIPs shared between Punta Gorda and a served town: only the city decides.
+const PUNTA_GORDA_SHARED_ZIPS = Object.freeze(new Set(['33980', '33982', '33983']));
 
 function normalizeLocality(value) {
   return String(value || '')
@@ -56,6 +58,9 @@ function isPuntaGordaLocality(city) {
 function isPuntaGordaZip(zip) {
   return PUNTA_GORDA_ZIPS.has(zip5(zip));
 }
+function isPuntaGordaSharedZip(zip) {
+  return PUNTA_GORDA_SHARED_ZIPS.has(zip5(zip));
+}
 
 // Any excluded place, by city name or by a ZIP that belongs only to one.
 function isExcludedLocality(city) {
@@ -66,8 +71,8 @@ function isExcludedZip(zip) {
 }
 
 module.exports = {
-  DESOTO_LOCALITIES, DESOTO_ZIPS, PUNTA_GORDA_LOCALITIES, PUNTA_GORDA_ZIPS,
+  DESOTO_LOCALITIES, DESOTO_ZIPS, PUNTA_GORDA_LOCALITIES, PUNTA_GORDA_ZIPS, PUNTA_GORDA_SHARED_ZIPS,
   normalizeLocality,
-  isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip,
+  isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip, isPuntaGordaSharedZip,
   isExcludedLocality, isExcludedZip,
 };

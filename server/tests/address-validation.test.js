@@ -194,3 +194,32 @@ describe('buildAddressLines — spoken raw_text with conversational state-code w
     })).toEqual(['123 Main St', 'Portland OR 97201']);
   });
 });
+
+describe('reverseGeocodeLocality', () => {
+  const { reverseGeocodeLocality } = require('../services/address-validation');
+  const realFetch = global.fetch;
+  afterEach(() => { global.fetch = realFetch; });
+  const reply = (body) => { global.fetch = jest.fn(async () => ({ ok: true, json: async () => body })); };
+  const PIN = { latitude: 26.97, longitude: -82.09 };
+
+  test('reads locality and ZIP', async () => {
+    reply({ status: 'OK', results: [{ address_components: [
+      { types: ['locality'], long_name: 'Punta Gorda' }, { types: ['postal_code'], long_name: '33950' },
+    ] }] });
+    expect(await reverseGeocodeLocality(PIN, 'k')).toEqual({ city: 'Punta Gorda', zip: '33950' });
+  });
+
+  test('ZERO_RESULTS or no locality and no ZIP is null (unknown)', async () => {
+    reply({ status: 'ZERO_RESULTS', results: [] });
+    expect(await reverseGeocodeLocality(PIN, 'k')).toBeNull();
+    reply({ status: 'OK', results: [{ address_components: [{ types: ['route'], long_name: 'Main St' }] }] });
+    expect(await reverseGeocodeLocality(PIN, 'k')).toBeNull();
+  });
+
+  test('a provider error status or HTTP failure is null', async () => {
+    reply({ status: 'REQUEST_DENIED', results: [] });
+    expect(await reverseGeocodeLocality(PIN, 'k')).toBeNull();
+    global.fetch = jest.fn(async () => ({ ok: false }));
+    expect(await reverseGeocodeLocality(PIN, 'k')).toBeNull();
+  });
+});
