@@ -7,7 +7,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
 const db = require('../models/db');
-const { insertHealthAlert, MAX_MERGE_HOPS } = require('../services/health-alert-insert');
+const { insertHealthAlert, lockAlertCustomers, MAX_MERGE_HOPS } = require('../services/health-alert-insert');
 
 // live: set of live customer ids. missing: ids with no customers row. Any
 // other id is a retired (soft-deleted) row. merges: loser id -> winner id.
@@ -113,6 +113,22 @@ test('without a trx it runs in its own transaction', async () => {
   await insertHealthAlert(ROW);
   expect(db.transaction).toHaveBeenCalledTimes(1);
   expect(calls.inserts).toHaveLength(1);
+});
+
+test('lockAlertCustomers share-locks the distinct ids in sorted order, and skips an empty list', async () => {
+  const seen = [];
+  const trx = jest.fn(() => {
+    const c = {};
+    c.whereIn = jest.fn((col, ids) => { seen.push(ids); return c; });
+    c.orderBy = jest.fn(() => c);
+    c.forShare = jest.fn(() => c);
+    c.select = jest.fn(async () => []);
+    return c;
+  });
+  await lockAlertCustomers(trx, ['b', null, 'a', 'b', undefined]);
+  expect(seen).toEqual([['a', 'b']]);
+  await lockAlertCustomers(trx, [null]);
+  expect(trx).toHaveBeenCalledTimes(1);
 });
 
 test('no server file inserts into customer_health_alerts directly, outside the fenced writers', () => {

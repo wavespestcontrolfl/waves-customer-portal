@@ -6,7 +6,7 @@ const router = express.Router();
 const Stripe = require('stripe');
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { insertHealthAlert } = require('../services/health-alert-insert');
+const { insertHealthAlert, lockAlertCustomers } = require('../services/health-alert-insert');
 const { isBankMethodType } = require('../services/autopay-eligibility');
 const stripeConfig = require('../config/stripe-config');
 const {
@@ -1861,6 +1861,12 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   // flip back so Stripe's redelivery repeats the whole check, instead of a
   // swallowed read leaving the invoice paid with no alert (audit P1).
   const updated = await db.transaction(async (trx) => {
+    // Merge fence first: the payer-billed alert below may insert under this
+    // transaction, and its customer lock must come before the payment and
+    // invoice locks, in the order executeMerge takes them.
+    if (invoiceForTenderGuard?.id) {
+      await lockAlertCustomers(trx, [invoiceForTenderGuard.customer_id, paymentIntent.metadata?.waves_customer_id]);
+    }
     const flipped = await trx('payments')
       .where({ stripe_payment_intent_id: piId, status: 'processing' })
       .update(paymentUpdates);
