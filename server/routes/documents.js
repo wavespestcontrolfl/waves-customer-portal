@@ -582,170 +582,218 @@ const {
   contactSessionReportsWithheld: contactReportsWithheld, contactSafeReportCustomer, contactRecordScope, scopeContactRecords,
 } = require('../services/contact-session-projection');
 
+// Pagination — caps total result size to prevent runaway payloads for
+// long-tenured customers with years of service history.
+function documentPageBounds(query) {
+  return {
+    limit: Math.min(Math.max(parseInt(query.limit, 10) || 100, 1), 200),
+    offset: Math.max(parseInt(query.offset, 10) || 0, 0),
+  };
+}
+
+// Completed service records whose visit report the customer may list — the
+// list and its cross-page count read the same predicate. Project-backed
+// completions use the Project report itself as the customer artifact, so do
+// not create a second generic service-report document for the same work.
+// `scope` (a contact session): the primary property's visits only (codex
+// #6363 r16 P1) — the holder's other saved homes are not theirs to read.
+function completedServiceReportsQuery(customerId, serviceRecordCols, scope = null) {
+  let query = db('service_records')
+    .where({ 'service_records.customer_id': customerId, 'service_records.status': 'completed' });
+  if (scope) {
+    query = scopeContactRecords(
+      query.leftJoin('scheduled_services', 'service_records.scheduled_service_id', 'scheduled_services.id'),
+      scope,
+    );
+  }
+  if (serviceRecordCols.completion_source) {
+    query = query.where(function visibleServiceReports() {
+      this.whereNull('service_records.completion_source')
+        .orWhereNot('service_records.completion_source', 'project_completion');
+    });
+  }
+  return query;
+}
+
+function selectServiceReportPage(query, { limit, offset }) {
+  return query
+    .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
+    .select(
+      'service_records.id',
+      'service_records.service_date',
+      'service_records.service_type',
+      'service_records.report_view_token',
+      'service_records.report_template_version',
+      'service_records.structured_notes',
+      'technicians.name as technician_name',
+    )
+    .orderBy('service_records.service_date', 'desc')
+    .limit(limit)
+    .offset(offset);
+}
+
+// First service photo per visit — the Documents tab renders service reports
+// as a visual slider (owner 2026-07-09), so each entry carries a preview
+// image when the tech captured photos. Fail-open: any error just means no
+// image, never a broken documents list.
+async function previewPhotosFor(serviceIds) {
+  const previewPhotoByServiceId = new Map();
+  if (!serviceIds.length) return previewPhotoByServiceId;
+  try {
+    const photoRows = await db('service_photos')
+      .whereIn('service_record_id', serviceIds)
+      .orderBy('sort_order')
+      .orderBy('created_at');
+    for (const photo of photoRows) {
+      if (!previewPhotoByServiceId.has(photo.service_record_id)) {
+        previewPhotoByServiceId.set(photo.service_record_id, photo);
+      }
+    }
+  } catch (err) {
+    if (err?.code !== '42P01') logger.warn(`[documents] preview photo lookup failed: ${err.message}`);
+  }
+  return previewPhotoByServiceId;
+}
+
+async function previewImageUrl(photo) {
+  if (!photo) return null;
+  // Presign from s3_key FIRST — stored s3_url values expire/go stale;
+  // legacy fallback only (same order as the report photo resolver).
+  if (photo.s3_key) {
+    try {
+      const PhotoService = require('../services/photos');
+      return await PhotoService.getViewUrl(photo.s3_key, PhotoService.CUSTOMER_DWELL_TTL_SECONDS);
+    } catch {
+      /* fall through to the legacy stored URL */
+    }
+  }
+  return photo.s3_url || null;
+}
+
+// internal_only typed completions (Phase-1b shadow) store a report for admin
+// review only — no auto-generated "Visit Report" document entry.
+function serviceReportListed(svc) {
+  let svcNotes = {};
+  try {
+    svcNotes = typeof svc.structured_notes === 'string'
+      ? JSON.parse(svc.structured_notes)
+      : (svc.structured_notes || {});
+  } catch { svcNotes = {}; }
+  return !svcNotes.typedReportDelivery || svcNotes.typedReportDelivery === 'auto_send';
+}
+
+// The auto-generated "Visit Report" entries for a page of completed
+// services — the holder's list and a contact's share this. `docs` (the
+// holder's stored documents): a visit whose report the holder keeps a stored
+// copy of is not listed twice. `contactOnly`: a contact session lists every
+// completed visit (a holder's linked stored copy is not theirs to read) and
+// reaches the report ONLY through the authenticated, contact-safe PDF
+// route — the public /report and /api/reports bearers render the holder's
+// identity (codex #6363 r4 P1).
+async function serviceReportEntries(services, { docs = [], contactOnly = false } = {}) {
+  const linkedServiceIds = new Set(docs.filter(d => d.linked_service_record_id).map(d => d.linked_service_record_id));
+  const deliveryByServiceId = new Map();
+  const serviceIds = services.map((svc) => svc.id);
+  if (serviceIds.length) {
+    const deliveries = await db('service_report_deliveries')
+      .whereIn('service_record_id', serviceIds)
+      .where({ channel: 'email', report_template_version: 'service_report_v1' })
+      .select('service_record_id', 'status', 'updated_at', 'sent_at')
+      .catch((err) => {
+        if (err?.code === '42P01') return [];
+        throw err;
+      });
+    for (const delivery of deliveries) deliveryByServiceId.set(delivery.service_record_id, delivery);
+  }
+  const previewPhotoByServiceId = await previewPhotosFor(serviceIds);
+
+  const entries = [];
+  for (const svc of services) {
+    if (!serviceReportListed(svc)) continue;
+    if (!contactOnly && linkedServiceIds.has(svc.id) && docs.find(d => d.linked_service_record_id === svc.id && d.document_type === 'service_report')) continue;
+    const reportToken = contactOnly ? null : (svc.report_view_token || null);
+    const viewUrl = reportToken ? `/report/${reportToken}` : null;
+    const pdfUrl = reportToken ? `/api/reports/${reportToken}` : `/api/documents/service-report/${svc.id}`;
+    const isServiceReportV1 = svc.report_template_version === 'service_report_v1';
+    const delivery = isServiceReportV1 ? deliveryByServiceId.get(svc.id) : null;
+    entries.push({
+      id: `auto_report_${svc.id}`,
+      documentType: 'service_report',
+      previewImage: await previewImageUrl(previewPhotoByServiceId.get(svc.id)),
+      title: `Visit Report — ${svc.service_type}`,
+      description: isServiceReportV1
+        ? `Infographic service report for ${formatDate(svc.service_date)}`
+        : `Full service summary for ${formatDate(svc.service_date)}`,
+      fileName: `Service_Report_${svc.service_date}.pdf`,
+      uploadedBy: 'auto_generated',
+      linkedServiceRecordId: svc.id,
+      serviceDate: svc.service_date,
+      createdAt: svc.service_date,
+      isAutoGenerated: true,
+      isServiceReportV1,
+      reportToken,
+      viewUrl,
+      pdfUrl,
+      downloadUrl: viewUrl || pdfUrl,
+      deliveryStatus: delivery
+        ? { email: delivery.status, sentAt: delivery.sent_at, updatedAt: delivery.updated_at }
+        : null,
+    });
+  }
+  return entries;
+}
+
+function groupDocumentsByType(allDocs) {
+  const grouped = {};
+  for (const d of allDocs) {
+    if (!grouped[d.documentType]) grouped[d.documentType] = [];
+    grouped[d.documentType].push(d);
+  }
+  return grouped;
+}
+
+// GET /api/documents for a CONTACT session (GATE_CONTACT_LOGIN): the primary
+// property's completed visit reports only — no stored documents (agreements,
+// invoices), no inspection or compliance reports, and no project reports
+// either (those live only behind their public /report/project bearer, which
+// renders the holder's name, email, phone and a pay link; codex #6363 r4 P1)
+// — and nothing at all when the report rule withholds from this contact. The
+// total counts the same scoped reports (codex r18 P2): the holder's other
+// homes' reports are neither listed nor counted.
+async function listContactServiceReports(req, res) {
+  if (await contactReportsWithheld(req)) return res.json({ documents: {}, total: 0 });
+  const page = documentPageBounds(req.query);
+  const serviceRecordCols = await db('service_records').columnInfo().catch(() => ({}));
+  const scope = await contactRecordScope(req);
+  const services = await selectServiceReportPage(completedServiceReportsQuery(req.customerId, serviceRecordCols, scope), page);
+  const reports = await serviceReportEntries(services, { contactOnly: true });
+  const [{ count }] = await completedServiceReportsQuery(req.customerId, serviceRecordCols, scope).count('service_records.id as count');
+  return res.json({ documents: groupDocumentsByType(reports), total: parseInt(count, 10) });
+}
+
 // =========================================================================
 // GET /api/documents — all documents for authenticated customer
 // =========================================================================
 router.get('/', authenticate, async (req, res, next) => {
   try {
-    // A contact session lists SERVICE REPORTS only — no stored documents
-    // (agreements, invoices), no inspection or compliance reports — and
-    // nothing at all when the report rule withholds from this contact.
-    const contactOnly = !!req.contactSession;
-    if (contactOnly && await contactReportsWithheld(req)) {
-      return res.json({ documents: {}, total: 0 });
-    }
-    // Pagination — caps total result size to prevent runaway payloads for
-    // long-tenured customers with years of service history.
-    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 200);
-    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+    if (req.contactSession) return await listContactServiceReports(req, res);
+    const page = documentPageBounds(req.query);
 
     // Get uploaded/static documents
     const docs = await db('customer_documents')
       .where({ customer_id: req.customerId })
       .orderBy('created_at', 'desc')
-      .limit(limit)
-      .offset(offset);
+      .limit(page.limit)
+      .offset(page.offset);
 
     const [serviceRecordCols, projectCols] = await Promise.all([
       db('service_records').columnInfo().catch(() => ({})),
       db('projects').columnInfo().catch(() => ({})),
     ]);
 
-    // Get completed service records for auto-generated docs. Project-backed
-    // completions use the Project report itself as the customer artifact, so
-    // do not create a second generic service-report document for the same work.
-    let servicesQuery = db('service_records')
-      .where({ 'service_records.customer_id': req.customerId, 'service_records.status': 'completed' })
-      .leftJoin('technicians', 'service_records.technician_id', 'technicians.id');
-    // A contact lists the primary property's reports only (codex #6363 r16
-    // P1): the holder's other saved homes are not theirs to read.
-    if (contactOnly) {
-      servicesQuery = scopeContactRecords(
-        servicesQuery.leftJoin('scheduled_services', 'service_records.scheduled_service_id', 'scheduled_services.id'),
-        await contactRecordScope(req),
-      );
-    }
-    if (serviceRecordCols.completion_source) {
-      servicesQuery = servicesQuery.where(function visibleServiceReports() {
-        this.whereNull('service_records.completion_source')
-          .orWhereNot('service_records.completion_source', 'project_completion');
-      });
-    }
-    const services = await servicesQuery
-        .select(
-          'service_records.id',
-          'service_records.service_date',
-          'service_records.service_type',
-          'service_records.report_view_token',
-          'service_records.report_template_version',
-          'service_records.structured_notes',
-          'technicians.name as technician_name',
-        )
-        .orderBy('service_records.service_date', 'desc')
-        .limit(limit)
-        .offset(offset);
-
-    // Auto-generate service_report entries for completed services
-    const linkedServiceIds = new Set(docs.filter(d => d.linked_service_record_id).map(d => d.linked_service_record_id));
-    const deliveryByServiceId = new Map();
-    const serviceIds = services.map((svc) => svc.id);
-    if (serviceIds.length) {
-      const deliveries = await db('service_report_deliveries')
-        .whereIn('service_record_id', serviceIds)
-        .where({ channel: 'email', report_template_version: 'service_report_v1' })
-        .select('service_record_id', 'status', 'updated_at', 'sent_at')
-        .catch((err) => {
-          if (err?.code === '42P01') return [];
-          throw err;
-        });
-      for (const delivery of deliveries) deliveryByServiceId.set(delivery.service_record_id, delivery);
-    }
-
-    // First service photo per visit — the Documents tab renders service
-    // reports as a visual slider (owner 2026-07-09), so each entry carries a
-    // preview image when the tech captured photos. Fail-open: any error just
-    // means no image, never a broken documents list.
-    const previewPhotoByServiceId = new Map();
-    if (serviceIds.length) {
-      try {
-        const photoRows = await db('service_photos')
-          .whereIn('service_record_id', serviceIds)
-          .orderBy('sort_order')
-          .orderBy('created_at');
-        for (const photo of photoRows) {
-          if (!previewPhotoByServiceId.has(photo.service_record_id)) {
-            previewPhotoByServiceId.set(photo.service_record_id, photo);
-          }
-        }
-      } catch (err) {
-        if (err?.code !== '42P01') logger.warn(`[documents] preview photo lookup failed: ${err.message}`);
-      }
-    }
-    const previewImageFor = async (serviceRecordId) => {
-      const photo = previewPhotoByServiceId.get(serviceRecordId);
-      if (!photo) return null;
-      // Presign from s3_key FIRST — stored s3_url values expire/go stale;
-      // legacy fallback only (same order as the report photo resolver).
-      if (photo.s3_key) {
-        try {
-          const PhotoService = require('../services/photos');
-          return await PhotoService.getViewUrl(photo.s3_key, PhotoService.CUSTOMER_DWELL_TTL_SECONDS);
-        } catch {
-          /* fall through to the legacy stored URL */
-        }
-      }
-      return photo.s3_url || null;
-    };
-
-    const autoGenDocs = [];
-    for (const svc of services) {
-      // internal_only typed completions (Phase-1b shadow) store a report for
-      // admin review only — no auto-generated "Visit Report" document entry.
-      let svcNotes = {};
-      try {
-        svcNotes = typeof svc.structured_notes === 'string'
-          ? JSON.parse(svc.structured_notes)
-          : (svc.structured_notes || {});
-      } catch { svcNotes = {}; }
-      if (svcNotes.typedReportDelivery && svcNotes.typedReportDelivery !== 'auto_send') continue;
-      // Service Report. A contact session lists every completed visit here
-      // (a holder's linked stored copy is not theirs to read) and reaches
-      // the report ONLY through the authenticated, contact-safe PDF route:
-      // the public /report and /api/reports bearers render the holder's
-      // identity (codex #6363 r4 P1).
-      if (contactOnly || !linkedServiceIds.has(svc.id) || !docs.find(d => d.linked_service_record_id === svc.id && d.document_type === 'service_report')) {
-        const viewUrl = svc.report_view_token && !contactOnly ? `/report/${svc.report_view_token}` : null;
-        const pdfUrl = svc.report_view_token && !contactOnly ? `/api/reports/${svc.report_view_token}` : `/api/documents/service-report/${svc.id}`;
-        const isServiceReportV1 = svc.report_template_version === 'service_report_v1';
-        autoGenDocs.push({
-          id: `auto_report_${svc.id}`,
-          documentType: 'service_report',
-          previewImage: await previewImageFor(svc.id),
-          title: `Visit Report — ${svc.service_type}`,
-          description: isServiceReportV1
-            ? `Infographic service report for ${formatDate(svc.service_date)}`
-            : `Full service summary for ${formatDate(svc.service_date)}`,
-          fileName: `Service_Report_${svc.service_date}.pdf`,
-          uploadedBy: 'auto_generated',
-          linkedServiceRecordId: svc.id,
-          serviceDate: svc.service_date,
-          createdAt: svc.service_date,
-          isAutoGenerated: true,
-          isServiceReportV1,
-          reportToken: contactOnly ? null : (svc.report_view_token || null),
-          viewUrl,
-          pdfUrl,
-          downloadUrl: viewUrl || pdfUrl,
-          deliveryStatus: isServiceReportV1 && deliveryByServiceId.has(svc.id)
-            ? {
-              email: deliveryByServiceId.get(svc.id).status,
-              sentAt: deliveryByServiceId.get(svc.id).sent_at,
-              updatedAt: deliveryByServiceId.get(svc.id).updated_at,
-            }
-            : null,
-        });
-      }
-    }
+    // Auto-generated service_report entries for completed services
+    const services = await selectServiceReportPage(completedServiceReportsQuery(req.customerId, serviceRecordCols), page);
+    const autoGenDocs = await serviceReportEntries(services, { docs });
 
     // Format uploaded docs
     const formattedDocs = docs.map(d => ({
@@ -861,42 +909,13 @@ router.get('/', authenticate, async (req, res, next) => {
     const [{ count: storedDocCount }] = await db('customer_documents')
       .where({ customer_id: req.customerId })
       .count('id as count');
-    let serviceCountQuery = db('service_records')
-      .where({ 'service_records.customer_id': req.customerId, 'service_records.status': 'completed' });
-    // The contact's total counts the primary property's reports only, like
-    // the list above (codex #6363 r18 P2): the holder's other homes' reports
-    // are neither listed nor counted.
-    if (contactOnly) {
-      serviceCountQuery = scopeContactRecords(
-        serviceCountQuery.leftJoin('scheduled_services', 'service_records.scheduled_service_id', 'scheduled_services.id'),
-        await contactRecordScope(req),
-      );
-    }
-    if (serviceRecordCols.completion_source) {
-      serviceCountQuery = serviceCountQuery.where(function visibleServiceReports() {
-        this.whereNull('service_records.completion_source')
-          .orWhereNot('service_records.completion_source', 'project_completion');
-      });
-    }
-    const [{ count: serviceReportCount }] = await serviceCountQuery.count('service_records.id as count');
+    const [{ count: serviceReportCount }] = await completedServiceReportsQuery(req.customerId, serviceRecordCols)
+      .count('service_records.id as count');
 
-    // A contact session: visit reports only, through the authenticated PDF
-    // route (above). No stored documents, and no project reports either —
-    // those live only behind their public /report/project bearer, which
-    // renders the holder's name, email, phone and a pay link (codex r4 P1).
-    const allDocs = contactOnly
-      ? autoGenDocs
-      : [...formattedDocs, ...autoGenDocs, ...projectDocs];
-    const totalOnFile = contactOnly
-      ? parseInt(serviceReportCount, 10)
-      : parseInt(storedDocCount, 10) + parseInt(serviceReportCount, 10) + projectDocs.length;
-    const grouped = {};
-    for (const d of allDocs) {
-      if (!grouped[d.documentType]) grouped[d.documentType] = [];
-      grouped[d.documentType].push(d);
-    }
+    const allDocs = [...formattedDocs, ...autoGenDocs, ...projectDocs];
+    const totalOnFile = parseInt(storedDocCount, 10) + parseInt(serviceReportCount, 10) + projectDocs.length;
 
-    res.json({ documents: grouped, total: totalOnFile });
+    res.json({ documents: groupDocumentsByType(allDocs), total: totalOnFile });
   } catch (err) {
     next(err);
   }
