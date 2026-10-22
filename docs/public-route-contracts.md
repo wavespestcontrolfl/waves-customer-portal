@@ -140,10 +140,16 @@ payload (`/api/reports/:token/data` and the renders that share
 blog post the technician or the office picked at completion, frozen on the
 record (`structured_notes.blogPost`) with its live URL and re-checked at read
 to be on the marketing site's own host
-(`server/services/service-report/report-blog-post.js`). The web report
-renders it in live mode only, above the footer. Off, or nothing frozen, the
-field is `null` (the switch hides frozen posts too). Auth, headers and routes
-are unchanged.
+(`server/services/service-report/report-blog-post.js`). Owner 2026-10-22: the
+object may also carry `imageUrl`, the post's main image, read when the
+report loads from the content registry row the pick froze (its deployed
+frontmatter `hero_image.src`, else `og_image`), made absolute on the
+marketing site's host and kept only when it is on that host. A pick with no
+registry id, a row with no image, an off-host image or a failed read leaves
+`imageUrl` out; the rest of the object is unchanged. The web report renders
+it in live mode only, right under the status card, with the image and
+without the raw URL. Off, or nothing frozen, the field is `null` (the switch
+hides frozen posts too). Auth, headers and routes are unchanged.
 
 Pest Pressure technician direct score (owner ruling 2026-09-24): on the
 service-report payload (`/api/reports/:token/data` and the renders that share
