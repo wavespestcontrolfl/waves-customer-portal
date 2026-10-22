@@ -673,6 +673,21 @@ describe('the card’s channels, text and recipients', () => {
     }
   });
 
+  test('an email address changed between the drift check and the email leg’s own read sends no email to it', async () => {
+    const contact = require('../services/customer-contact');
+    // First read (approvalDrift) sees the card's address; the email leg's own read sees a new one.
+    contact.getInvoiceEmailRecipients
+      .mockReturnValueOnce([{ email: 'billing@example.com', name: 'Taylor' }])
+      .mockReturnValue([{ email: 'new.address@example.com', name: 'Taylor' }]);
+    try {
+      const result = await sendNow({ approved: APPROVED, report: true });
+      expect(result.report.legs.email).toEqual({ state: 'skipped', reason: 'email_recipient_changed' });
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    } finally {
+      contact.getInvoiceEmailRecipients.mockReturnValue([{ email: 'billing@example.com', name: 'Taylor' }]);
+    }
+  });
+
   test('the page’s call (no approval) resolves the template itself and is not limited to a channel set', async () => {
     tables.customers[0].phone = '+19415550199';
     await sendNow();

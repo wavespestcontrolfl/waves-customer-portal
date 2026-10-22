@@ -388,7 +388,9 @@ async function emailDriftRefusal(templateKey, payload, expectedEmailDigest) {
 // expectedContentHash (the Intelligence Bar's send-now card only): the email template content hash the card showed
 // (email-template-library templateContentHash: subject, preview, every block, text body, wrapper, sender). sendTemplate refuses
 // a different one before anything is sent.
-async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference = true, expectedContentHash = null, expectedEmailDigest = null, honorDisputeHold = false }) {
+// expectedRecipientDigest (the bar's card only): the approved address's digest, checked against the address resolved HERE, the one
+// the email goes to. approvalDrift checked it earlier on its own read; a billing email changed between the two reads sends nothing.
+async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference = true, expectedContentHash = null, expectedEmailDigest = null, expectedRecipientDigest = null, honorDisputeHold = false }) {
   const templateKey = FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID[step.id];
   if (!templateKey) return { ok: false, skipped: true, reason: 'no_email_template_mapping' };
 
@@ -417,6 +419,9 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
     ? await billingEmailRecipient(authorityInput, 'invoice-followups')
     : await operatorEmailRecipient(customer, 'invoice-followups');
   if (refusal) return refusal;
+  if (expectedRecipientDigest && approvalDigest(emailKey(to)) !== expectedRecipientDigest) {
+    return { ok: false, skipped: true, reason: 'email_recipient_changed' };
+  }
 
   const payload = followupEmailPayload({
     recipient, customer, invoice: latestInvoice,
@@ -2124,7 +2129,7 @@ async function fireTouchBody(row, { operatorInitiated = false, claimStamp = null
               touchKey: step.id, // one branded verification email per follow-up step (same cadence as the SMS)
               enforceBillingPreference: !operatorInitiated,
             })
-          : await sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference: !operatorInitiated, expectedContentHash: bar ? bar.emailContentHash : expectedContentHash, expectedEmailDigest: bar ? bar.emailRenderedDigest : null, honorDisputeHold: Boolean(bar) });
+          : await sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference: !operatorInitiated, expectedContentHash: bar ? bar.emailContentHash : expectedContentHash, expectedEmailDigest: bar ? bar.emailRenderedDigest : null, expectedRecipientDigest: bar ? approved.emailDigest : null, honorDisputeHold: Boolean(bar) });
         const attemptHeld = await settleFollowupEmailLedger(
           ContactLedger, emailLedger, emailResult, selectedChannels !== null, originalDeliveryTimes,
         );

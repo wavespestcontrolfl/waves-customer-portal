@@ -606,6 +606,7 @@ const LEG_REASONS = {
   invoice_not_eligible: 'the invoice is no longer eligible',
   invoice_payer_billed: 'the invoice is billed to a payer',
   email_content_changed: 'the email changed after the card was shown',
+  email_recipient_changed: 'the email address changed after the card was shown',
 };
 function legSentence(label, leg) {
   const why = leg?.reason ? (LEG_REASONS[leg.reason] || String(leg.reason).replace(/_/g, ' ')) : null;
