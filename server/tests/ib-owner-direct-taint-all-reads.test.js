@@ -67,6 +67,10 @@ describe('gate on: taint after each listed read', () => {
     expect(taintAfter('get_stop_details', { customer: { name: 'A B', notes: '' }, todays_service: { notes: null }, service_history: [{ notes: 'x' }] })).toBe(true);
     expect(taintAfter('get_stop_details', { property: { access_notes: 'call before entering' } })).toBe(true);
     expect(taintAfter('get_stop_details', { customer: { name: 'A B', notes: '  ' }, todays_service: { notes: null } })).toBe(false);
+    expect(taintAfter('get_stop_details', { property: { special_instructions: 'Text 555 before arriving', notes: null } })).toBe(true);
+    expect(taintAfter('get_stop_details', { property: { pet_details: 'dog named x', special_instructions: '' } })).toBe(true);
+    expect(taintAfter('get_stop_details', { property: { side_gate_access: 'left latch', pet_details: null } })).toBe(true);
+    expect(taintAfter('get_stop_details', { property: { special_instructions: null, pet_details: '', side_gate_access: ' ' } })).toBe(false);
     // A write tool's answer is never scanned.
     expect(taintAfter('update_customer', { notes: 'x' })).toBe(false);
     expect(OwnerDirect.untrustedReadInHistory([asked('t1', 'get_stop_details'), answered('t1', { customer: { notes: 'x' } })])).toBe(true);

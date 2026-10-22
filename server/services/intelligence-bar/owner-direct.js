@@ -190,7 +190,7 @@ function isDataAnswer(result) {
 // write (a phone-only update_customer changes the portal login key). With the
 // gate on, every tool in this one list sets the same per-request flag.
 // Every OTHER read tool (action-policy.json kind 'read') taints only when its
-// answer holds a free-text note field (NOTE_FIELD below): the call processor
+// answer holds a free-text field (NOTE_FIELD below): the call processor
 // writes caller-derived text into crm_notes and booking notes are
 // customer-typed, and several readers return them (get_customer_detail,
 // get_schedule_view, check_customer_status, get_stop_details, ...). Scanning
@@ -213,7 +213,8 @@ const SENDER_TEXT_READ_TOOLS = new Set([
 ]);
 
 const POLICY = require('./action-policy.json');
-const NOTE_FIELD = /^(?:[a-z]+_)*notes?$/i;
+// Free-text field names: notes, special_instructions, pet_details, side_gate_access, message bodies.
+const NOTE_FIELD = /(?:^|_)(?:notes?|instructions?|details?|comments?|messages?|body|text|transcript|summary|access)$/i;
 const SCAN_NODE_LIMIT = 20000;
 
 // Does the answer hold a non-empty note string anywhere? Past the node limit
