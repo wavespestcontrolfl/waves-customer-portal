@@ -551,6 +551,14 @@
     "approval": "ui_confirm",
     "scope": "record"
   },
+  "create_invoice": {
+    "module": "create-invoice-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "remove_saved_payment_method": {
     "module": "billing-write-tools.js",
     "domain": "customers",

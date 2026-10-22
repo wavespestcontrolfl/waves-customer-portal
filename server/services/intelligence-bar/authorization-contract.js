@@ -142,6 +142,8 @@ CURATED_PREVIEW_TOOL_NAMES.add('convert_lead');
 CURATED_PREVIEW_TOOL_NAMES.add('void_invoice');
 // The invoice edit cards: card lines come from their own previews (invoice-edit-tools.js cardLines). None sends anything.
 for (const name of ['edit_invoice', 'apply_invoice_credit', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice']) CURATED_PREVIEW_TOOL_NAMES.add(name);
+// create_invoice: its card lines come from its own preview (create-invoice-tools.js cardLines). A draft only; it sends nothing.
+CURATED_PREVIEW_TOOL_NAMES.add('create_invoice');
 
 // Legacy-bare jobs with no mutation-free preview: what the launch does is
 // fixed and known, so the card states it explicitly (job launch, external
@@ -216,6 +218,7 @@ const ACTION_LABELS = {
   archive_invoice: 'Archive a voided invoice (sends nothing)',
   unarchive_invoice: 'Unarchive an invoice (sends nothing)',
   unvoid_invoice: 'Restore a voided invoice to a draft (sends nothing)',
+  create_invoice: 'Create a draft invoice (sends nothing)',
   block_sender: 'Block a sender',
   create_pending_estimate: 'Create an estimate',
   create_agent_estimate_draft: 'Save an estimate draft',
@@ -856,6 +859,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // The invoice edit cards: the invoice, each change before -> after, what it does and that nothing is sent.
   if (['edit_invoice', 'apply_invoice_credit', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice'].includes(toolName) && preview?.preview === true) {
     for (const line of require('./invoice-edit-tools').cardLines(toolName, preview)) push(line.kind, line.text, line.before !== undefined ? { before: line.before, after: line.after } : {});
+  }
+  // create_invoice: the customer, every line, the totals, and that the draft is not sent.
+  if (toolName === 'create_invoice' && preview?.preview === true) {
+    for (const line of require('./create-invoice-tools').cardLines(toolName, preview)) push(line.kind, line.text);
   }
   // send_invoice: invoice, money and who is contacted.
   if (toolName === 'send_invoice' && preview?.preview === true) {

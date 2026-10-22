@@ -84,6 +84,7 @@ beforeAll(() => {
   process.env.GATE_IB_LEAD_CONVERT = 'true';
   process.env.GATE_IB_VOID_INVOICE = 'true';
   process.env.GATE_IB_INVOICE_EDITS = 'true';
+  process.env.GATE_IB_CREATE_INVOICE = 'true';
   // send_invoice is dark behind GATE_IB_INVOICE_ACTIONS; off, its preview refuses.
   process.env.GATE_IB_INVOICE_ACTIONS = 'true';
   process.env.GATE_IB_RECORD_PAYMENT = 'true';
@@ -100,6 +101,7 @@ afterAll(() => {
   delete process.env.GATE_IB_LEAD_CONVERT;
   delete process.env.GATE_IB_VOID_INVOICE;
   delete process.env.GATE_IB_INVOICE_EDITS;
+  delete process.env.GATE_IB_CREATE_INVOICE;
   delete process.env.GATE_IB_DELETE_CUSTOMER;
   if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;
   else process.env.GATE_IB_PLATFORM = ORIGINAL_PLATFORM_GATE;
@@ -193,6 +195,7 @@ const WRITE_TWO_STEP = [
   'archive_invoice',
   'unarchive_invoice',
   'unvoid_invoice',
+  'create_invoice',
   'update_lead_contact',
   // propose_admin_edit (owner ruling 2026-10-12, GATE_IB_GENERAL_EDIT): one reviewed small internal
   // edit, owner login only (FULL_ACCESS_TWO_STEP_TOOL_NAMES), replayed through the screen's own
@@ -803,6 +806,13 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       customers: [{ id: 'cust-1', first_name: 'Pat', last_name: 'Tester' }],
       payments: [], payment_plans: [], payer_statements: [], stripe_invoice_charge_attempts: [], annual_prepay_terms: [], scheduled_services: [], projects: [], customer_credit_ledger: [],
     }]),
+    // create_invoice's preview reads the customer and the service's own totals mirror (spied below); it may not write
+    // without confirmed (intelligence-bar-create-invoice.test.js covers the card itself).
+    ['create-invoice-tools', 'executeCreateInvoiceTool', 'create_invoice', {
+      customer_id: '00000000-0000-0000-0000-00000000f401', title: 'Extra visit', line_items: [{ description: 'Extra visit', quantity: 1, unit_price: 85 }],
+    }, {
+      customers: [{ id: '00000000-0000-0000-0000-00000000f401', first_name: 'Pat', last_name: 'Tester', city: 'Sampleton', property_type: 'residential', payer_id: null }],
+    }],
     // Outside-service writes (IB scope expansion item 1) build their preview
     // from a live third-party API call, never the DB — OUTSIDE_WRITE_FIXTURES
     // below supplies the token env vars + mocked fetch responses these rows
@@ -1018,6 +1028,13 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     // model; its own cases run against the real function in invoice-bar-expected-version.test.js.
     const unvoidObligation = toolName === 'unvoid_invoice'
       ? jest.spyOn(require('../services/invoice'), '_unvoidObligationReason').mockResolvedValue(null) : null;
+    // create_invoice's totals come from the invoice service's mirror of create() and its payer lookup; both are covered by
+    // their own suites, so this recorder (no tax or payer tables) answers a residential self-pay customer.
+    const createInvoiceSpies = toolName === 'create_invoice'
+      ? [
+        jest.spyOn(require('../services/invoice'), 'previewInvoiceTotals').mockResolvedValue({ subtotal: 85, tax_rate: 0, tax_amount: 0, total: 85 }),
+        jest.spyOn(require('../services/payer'), 'resolveForInvoice').mockResolvedValue({ payerId: null }),
+      ] : [];
     const repriceCoverage = toolName === 'reprice_future_visits'
       ? jest.spyOn(require('../routes/admin-schedule'), 'findBillingCoveredVisits').mockResolvedValue(new Map()) : null;
     // accept_estimate's card is the accept run as a dry run (rolled back in its
@@ -1092,6 +1109,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       recordPaymentSpies.forEach((spy) => spy.mockRestore());
       invoiceCreditSpies.forEach((spy) => spy.mockRestore());
       unvoidObligation?.mockRestore();
+      createInvoiceSpies.forEach((spy) => spy.mockRestore());
       dedupeReaders.forEach((spy) => spy.mockRestore());
       repriceCoverage?.mockRestore();
       acceptDryRun?.mockRestore();
@@ -1242,6 +1260,7 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
     // propose_admin_edit (_sideEffects): its confirmed run replays a PUT or PATCH to a reviewed admin endpoint.
     // void_invoice (_sideEffects): its confirmed run voids an invoice (live smoke must not).
     // The invoice edit cards (_sideEffects): their confirmed runs edit, pay from credit, archive or unvoid an invoice.
-    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice', 'record_payment', 'void_invoice', 'edit_invoice', 'apply_invoice_credit', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'propose_admin_edit']);
+    // create_invoice (_sideEffects): its confirmed run creates a draft invoice (live smoke must not).
+    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice', 'record_payment', 'void_invoice', 'edit_invoice', 'apply_invoice_credit', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'create_invoice', 'propose_admin_edit']);
   });
 });

@@ -363,6 +363,8 @@ const SCOPE_SNAPSHOT = {
     'void_invoice',
     // The invoice edit cards carry invoice_id (or invoice_number, bound like send_invoice's).
     'edit_invoice', 'apply_invoice_credit', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice',
+    // create_invoice carries customer_id: the draft invoice is that customer's own.
+    'create_invoice',
     'add_customer_property', 'assign_technician', 'block_sender', 'bulk_update_customers', 'bulk_update_leads', 'cancel_appointment', 'cancel_plan',
     'create_agent_estimate_draft',
     // reprice_future_visits carries customer_id; every visit it changes is that customer's own.
