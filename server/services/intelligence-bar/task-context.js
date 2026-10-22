@@ -592,6 +592,11 @@ function qualifierPresent(bounded, clause, customer) {
 }
 const RECORD_ID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 
+// More than one operation in the message ("update A's phone to X and update B's phone to Y")?
+// targetClause cuts everything from a replacement field on, so the later operations' targets are
+// invisible to it; a compound request grants no direct authority (Codex #6369 pre-push audit, r26).
+const isCompound = bounded => bounded.split(ACTION_CLAUSE_SPLIT).length > 1;
+
 // DIRECT (no-card) authority from typed evidence, in two simple cases only (Codex #6369 r23,
 // owner ruling 2026-10-22):
 //  1. exactly one typed FULL name that resolves to exactly one customer, and nothing else in the
@@ -605,7 +610,7 @@ async function directGroundedIds(fullPrompt, namedResult, cohort, nameHint) {
   const bounded = boundedPrompt(fullPrompt);
   const clause = targetClause(bounded);
   const [customer, ...others] = namedResult.matches || [];
-  if (cohort || namedResult.complete === false || namedResult.multiple) return [];
+  if (cohort || namedResult.complete === false || namedResult.multiple || isCompound(bounded)) return [];
   if (!customer) return contactOnlyGroundedIds(bounded, clause, nameHint);
   const full = fullNameKey(customer);
   const typedFull = !others.length && full.includes(' ') && ` ${normalizeName(withoutContacts(clause))} `.includes(` ${full} `);
@@ -725,12 +730,31 @@ async function labelledCandidates(scope, candidates, named) {
   return (await withLastVisit(candidates)).map((candidate, index) => ({ ...candidate, choice_label: labels[index] }));
 }
 
+// Typed identity evidence that FAILED takes the on-screen customer's direct authority too (Codex
+// #6369 r26). Page grounding stands when the message names nobody, or names exactly the page
+// customer (one name resolving to the page customer, no contact, no place phrase, one operation).
+// A name that resolves nowhere or elsewhere, a contact, or a place phrase blocks it.
+function pageGroundingBlocked(fullPrompt, namedResult, cohort, nameHint, pageCustomerId) {
+  const bounded = boundedPrompt(fullPrompt);
+  const clause = targetClause(bounded);
+  const matches = namedResult.matches || [];
+  const contacts = contactLiteralsOf(clause).length > 0;
+  const place = placeQualifierPresent(clause, matches);
+  if (!nameHint && !contacts && !place) return false;
+  const exact = !cohort && namedResult.complete !== false && !namedResult.multiple && matches.length === 1
+    && String(matches[0].id) === String(pageCustomerId) && !contacts && !place && !isCompound(bounded);
+  return !exact;
+}
+
 // Owner-direct scope only: the customers this message points at (typedCustomerIds, for picking) and
 // the one it names in the simplest case (groundedCustomerIds, the only direct authority).
 // typedIds is null outside the scope and `typed` is then empty.
-async function typedTarget(scope, prompt, namedResult, cohort, nameHint) {
-  const typedIds = scope ? await typedCustomerIds(prompt, namedResult) : null;
-  return { typedIds, typed: scope ? { typedCustomerIds: typedIds, groundedCustomerIds: await directGroundedIds(prompt, namedResult, cohort, nameHint) } : {} };
+async function typedTarget(scope, prompt, namedResult, cohort, nameHint, pageCustomerId) {
+  if (!scope) return { typedIds: null, typed: {} };
+  const typedIds = await typedCustomerIds(prompt, namedResult);
+  const blocked = pageGroundingBlocked(prompt, namedResult, cohort, nameHint, pageCustomerId);
+  return { typedIds, typed: { typedCustomerIds: typedIds, groundedCustomerIds: await directGroundedIds(prompt, namedResult, cohort, nameHint),
+    ...(blocked ? { pageGroundingBlocked: true } : {}) } };
 }
 
 // resolve() is a short pipeline. `r` is the shared state; each stage owns one
@@ -785,7 +809,7 @@ async function candidatesStage(r) {
   r.cohort = setQuantified(r.prompt) || r.namedResult.multiple;
   r.sameName = scope && isSameNameGroup(r.named, r.cohort);
   r.candidates = await labelledCandidates(r.sameName, r.named.map(c => customerTarget(c, 'current_request_lookup')), r.named);
-  Object.assign(r, await typedTarget(scope, r.prompt, r.namedResult, r.cohort, r.nameHint));
+  Object.assign(r, await typedTarget(scope, r.prompt, r.namedResult, r.cohort, r.nameHint, r.page.customer?.customer_id || r.page.ids?.customer_id));
   r.selection = candidateSelection(r.candidates, r.prompt, r.page.customer, r.namedResult.complete, r.cohort, r.nameHint, sameNamePick(scope, r));
   return null;
 }

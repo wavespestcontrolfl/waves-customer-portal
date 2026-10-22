@@ -130,14 +130,17 @@ function targetGrounding(taskContext) {
   // (Codex #6369 r23). A target the name lookup resolved ('current_request_lookup') grants
   // nothing on its own; an operator pick and the page still do.
   for (const id of Array.isArray(taskContext?.groundedCustomerIds) ? taskContext.groundedCustomerIds : []) add(id);
-  const picked = target => (target?.provenance === 'current_request_lookup' ? null : target?.customer_id);
+  // The customer on screen keeps its authority only when the message names nobody, or names exactly
+  // that customer; failed identity evidence takes it too (Codex #6369 r26).
+  const blocked = taskContext?.pageGroundingBlocked === true;
+  const picked = target => (target?.provenance === 'current_request_lookup' || (blocked && target?.provenance === 'viewed_record') ? null : target?.customer_id);
   for (const target of Array.isArray(taskContext?.targets) ? taskContext.targets : []) add(picked(target));
   add(picked(taskContext?.target));
   // The customer on screen: the page context's own customer, or the customer
   // record the page showed (pageIds, already validated by the task context).
   const page = taskContext?.page || {};
   add(picked(page.customer));
-  add(page.ids?.customer_id);
+  if (!blocked) add(page.ids?.customer_id);
   return { ids };
 }
 
@@ -521,30 +524,19 @@ async function seedDirectCounts(task, dbh = null) {
   return counts;
 }
 
-// GATE_IB_TARGET_RULES_V2: these tools learn whose visit they touch only from the
-// proposal's preview, so a plan made before the previews cannot tell which calls
-// will run direct. They are left out of the plan and counted as they commit
-// (dynamicCapReached): six calls where five name an unknown customer and one a
-// named customer still run that one direct.
-const PREVIEW_CUSTOMER_TOOLS = new Set(['reschedule_appointment', 'assign_technician']);
-
-// Is this call's direct decision made from its preview (gate on)? The scheduling tools always
-// are; update_customer only when it writes notes.
-function previewDecides(toolUse) {
-  if (!ibTargetRulesV2Live()) return false;
-  if (PREVIEW_CUSTOMER_TOOLS.has(toolUse?.name)) return true;
-  return toolUse?.name === 'update_customer' && Object.keys(toolUse.input?.updates || {}).includes('notes');
-}
+// GATE_IB_TARGET_RULES_V2 (Codex #6369 r19, r21, r26): every grounded customer tool (the customer
+// edits, reschedule_appointment, assign_technician) is counted SEQUENTIALLY, as it commits
+// (dynamicCapReached), never from a whole-message plan made before the calls run. A plan would
+// refuse all six of six grounded phone edits, and both of two proposed beside four committed;
+// counting as they commit lets five run and refuses only the sixth (four committed + two
+// proposed: one runs, one is refused). Carded calls never use the allowance.
+const countsAsTheyCommit = toolName => ibTargetRulesV2Live() && isGroundedCapTool(toolName);
 
 function messageDirectPlan(toolUses, isValid = () => true, taint = null, grounding = null) {
   const plan = new Map();
   for (const toolUse of toolUses || []) {
-    // GATE_IB_TARGET_RULES_V2 (Codex #6369 r19, r21): whether a call runs direct is only known
-    // from its finished preview for the scheduling tools and for an update_customer that
-    // writes notes (direct only over empty notes). Counting those up front would let carded
-    // calls (1 eligible + 5 carded) use up the allowance, so they never join the up-front
-    // plan; each is counted as it commits (dynamicCapReached), in order.
-    if (previewDecides(toolUse)) continue;
+    // Grounded customer tools join no up-front plan; each is counted as it commits (see above).
+    if (countsAsTheyCommit(toolUse?.name)) continue;
     if (mayExecuteWithoutCard(toolUse?.name, toolUse?.input, taint, grounding) && isValid(toolUse)) plan.set(toolUse.name, (plan.get(toolUse.name) || 0) + 1);
   }
   return plan;
@@ -563,7 +555,7 @@ function cappedTools(committed, plan) {
 // The preview-time half of the cap for the preview-decided tools (gate on): refuse
 // once this request has already made its 5 direct edits with the tool.
 function dynamicCapReached(committed, toolName) {
-  if (!ibTargetRulesV2Live() || !(PREVIEW_CUSTOMER_TOOLS.has(toolName) || toolName === 'update_customer')) return false;
+  if (!countsAsTheyCommit(toolName)) return false;
   return committed.has(SEED_FAILED) || (committed.get(toolName) || 0) >= DIRECT_EDITS_V2;
 }
 

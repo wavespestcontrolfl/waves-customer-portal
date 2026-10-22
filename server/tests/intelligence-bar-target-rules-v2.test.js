@@ -117,7 +117,8 @@ describe('rule 1: a card when the customer is neither named nor on screen', () =
       const found = { name: 'update_customer', input: phoneEdit(FOUND) };
       const named = { name: 'update_customer', input: phoneEdit(NAMED) };
       expect(OwnerDirect.mayExecuteWithoutCard('update_customer', found.input, null, grounding)).toBe(false);
-      expect(OwnerDirect.messageDirectPlan([found, found, found, found, found, found, named], () => true, null, grounding).get('update_customer')).toBe(1);
+      // Grounded customer tools join no up-front plan: each is counted as it commits, so carded calls use nothing.
+      expect(OwnerDirect.messageDirectPlan([found, found, found, found, found, found, named], () => true, null, grounding).has('update_customer')).toBe(false);
     });
 
     test('the untrusted-read flag still wins', () => {
@@ -146,16 +147,21 @@ describe('rule 3: five direct edits per tool', () => {
     const CUSTOMER = id(1);
     const grounding = OwnerDirect.targetGrounding({ targets: [], groundedCustomerIds: [CUSTOMER], page: { ids: {} } });
     const edit = n => ({ type: 'tool_use', name: 'update_customer', input: { customer_id: CUSTOMER, updates: { phone: `941-555-01${String(n).padStart(2, '0')}` } } });
-    const cappedCustomer = (done, calls) => {
-      const committed = new Map();
-      for (let i = 0; i < done; i++) OwnerDirect.recordDirectCommit(committed, 'update_customer');
-      return OwnerDirect.cappedTools(committed, OwnerDirect.messageDirectPlan(calls, () => true, null, grounding)).has('update_customer');
-    };
-    expect(cappedCustomer(3, [edit(1)])).toBe(false); // the 4th
-    expect(cappedCustomer(4, [edit(1)])).toBe(false); // the 5th
-    expect(cappedCustomer(5, [edit(1)])).toBe(true); // the 6th
-    expect(cappedCustomer(0, [1, 2, 3, 4, 5].map(edit))).toBe(false);
-    expect(cappedCustomer(0, [1, 2, 3, 4, 5, 6].map(edit))).toBe(true);
+    // Counted sequentially as they commit (Codex #6369 r26): no whole-message plan for grounded customer tools.
+    const committed = new Map();
+    const run = (calls) => calls.map(() => {
+      if (!OwnerDirect.executesWithoutCard('update_customer', edit(1).input, null, null, grounding)) return 'card';
+      if (OwnerDirect.dynamicCapReached(committed, 'update_customer')) return 'refused';
+      OwnerDirect.recordDirectCommit(committed, 'update_customer');
+      return 'direct';
+    });
+    expect(OwnerDirect.messageDirectPlan([1, 2, 3, 4, 5, 6].map(edit), () => true, null, grounding).size).toBe(0);
+    // 6 grounded phone edits: five run, only the sixth is refused.
+    expect(run([1, 2, 3, 4, 5, 6])).toEqual(['direct', 'direct', 'direct', 'direct', 'direct', 'refused']);
+    // 4 committed + 2 proposed: one runs, one is refused.
+    committed.clear();
+    for (let i = 0; i < 4; i++) OwnerDirect.recordDirectCommit(committed, 'update_customer');
+    expect(run([1, 2])).toEqual(['direct', 'refused']);
     // Lead edits: the 3rd is refused, as with the gate off.
     expect(capped(1, [lead(id(1))])).toBe(false);
     expect(capped(2, [lead(id(1))])).toBe(true);
@@ -390,10 +396,13 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
         expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id, updates: { phone: '941-555-0100' } }, null, null, OwnerDirect.targetGrounding(owner))).toBe(false);
       }
     }
-    // The customer on screen still counts.
-    const owner = Context.ownerDirectContext(await ask('update Pat Example 941-777-0000 notes'));
-    const onScreen = OwnerDirect.targetGrounding({ ...owner, page: { ids: { customer_id: id(100) } } });
-    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(100), updates: { phone: '941-555-0100' } }, null, null, onScreen)).toBe(true);
+    // Failed identity evidence takes the on-screen customer's authority too (Codex #6369 r26)...
+    const failed = Context.ownerDirectContext(await Context.resolve({ prompt: 'update Pat Example 941-777-0000 notes', pageData: { customer_id: id(100) }, selectedTarget: null, ownerDirectScope: true }));
+    expect(failed.pageGroundingBlocked).toBe(true);
+    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(100), updates: { phone: '941-555-0100' } }, null, null, OwnerDirect.targetGrounding(failed))).toBe(false);
+    // ...and the page stands when the message names nobody.
+    const quiet = Context.ownerDirectContext(await Context.resolve({ prompt: 'update this customer phone', pageData: { customer_id: id(100) }, selectedTarget: null, ownerDirectScope: true }));
+    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(100), updates: { phone: '941-555-0100' } }, null, null, OwnerDirect.targetGrounding(quiet))).toBe(true);
   });
 
   test('gate on: a city that picks one customer and a phone that belongs to the other is a conflict (pre-push audit)', async () => {
@@ -513,7 +522,8 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(second.ambiguous).toBe(false);
     expect(Context.ownerDirectContext(second).sameNameNote).toBeUndefined();
     const grounding = OwnerDirect.targetGrounding(Context.ownerDirectContext(second));
-    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(101), updates: { phone: '941-555-0100' } }, null, null, grounding)).toBe(true);
+    // Two rows share the typed name, so the name is not exactly the page customer: neither account runs direct.
+    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(101), updates: { phone: '941-555-0100' } }, null, null, grounding)).toBe(false);
     expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(100), updates: { phone: '941-555-0100' } }, null, null, grounding)).toBe(false);
     // A viewed customer who is not among the matches changes nothing: the choices flow stays.
     const third = await withPage(id(200));
@@ -575,7 +585,8 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     const taint = OwnerDirect.newRequestTaint([]);
     const grounding = OwnerDirect.targetGrounding(owner);
     const edit = { customer_id: id(101), updates: { phone: '941-555-0100' } };
-    expect(OwnerDirect.executesWithoutCard('update_customer', edit, null, taint, grounding)).toBe(true);
+    // Even before the same-name flag, the page grounding is blocked: two rows share the typed name.
+    expect(OwnerDirect.executesWithoutCard('update_customer', edit, null, taint, grounding)).toBe(false);
     OwnerDirect.noteSameNameContext(taint, owner);
     expect(taint.sameNameCandidates).toBe(true);
     expect(taint.untrustedRead).toBe(false);
@@ -633,6 +644,38 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     ]) {
       expect([prompt, await grounded(prompt)]).toEqual([prompt, []]);
     }
+  });
+
+  test('gate on: a compound request grants no direct authority (pre-push audit, Codex #6369 r26)', async () => {
+    process.env[ON] = 'true';
+    customers = [
+      { id: id(100), first_name: 'Pat', last_name: 'Example', city: 'Venice', phone: '9415550100', email: 'pat@example.test', updated_at: new Date('2026-01-01'), version: '2026-01-01' },
+      { id: id(101), first_name: 'Sam', last_name: 'Sample', city: 'Osprey', phone: '9415550101', email: 'sam@example.test', updated_at: new Date('2026-01-01'), version: '2026-01-01', hiddenFromName: true },
+    ];
+    const grounded = async prompt => (await ask(prompt)).groundedCustomerIds;
+    expect(await grounded("update Pat Example's phone to 941-555-0100 and update Sam Sample's phone to 941-555-0101")).toEqual([]);
+    expect(await grounded("update Pat Example's notes and then update Sam Sample's notes")).toEqual([]);
+    // One operation: direct, as before.
+    expect(await grounded("update Pat Example's phone to 941-555-0100")).toEqual([id(100)]);
+  });
+
+  test('gate on: failed identity evidence takes the on-screen customer\'s authority too; the page stands when the message names nobody or exactly the page customer (Codex #6369 r26)', async () => {
+    process.env[ON] = 'true';
+    customers = [{ id: id(100), first_name: 'Bob', last_name: 'Example', city: 'Venice', phone: '9415550100', email: 'bob@example.test', updated_at: new Date('2026-01-01'), version: '2026-01-01' }];
+    const edit = { customer_id: id(100), updates: { phone: '941-555-0150' } };
+    const viewingBob = async prompt => {
+      const owner = Context.ownerDirectContext(await Context.resolve({ prompt, pageData: { customer_id: id(100) }, selectedTarget: null, ownerDirectScope: true }));
+      return OwnerDirect.executesWithoutCard('update_customer', edit, null, null, OwnerDirect.targetGrounding(owner));
+    };
+    // A name that resolves to nobody, a contact, a place phrase, a compound request: Bob is carded too.
+    expect(await viewingBob("update Jhon Smith's phone")).toBe(false);
+    expect(await viewingBob('update the notes at 941-555-9999')).toBe(false);
+    expect(await viewingBob('update Bob Example in Tampa')).toBe(false);
+    expect(await viewingBob("update Bob Example's phone and update Sam Sample's phone")).toBe(false);
+    // The message names exactly the page customer, or nobody: direct.
+    expect(await viewingBob("update Bob Example's phone")).toBe(true);
+    expect(await viewingBob('update the phone to 941-555-9999')).toBe(true);
+    expect(await viewingBob('update this customer phone')).toBe(true);
   });
 
   test('gate on: ONE place-qualifier test: at / from / near / by / around anywhere in the message removes direct grounding; times, weekdays and determiners do not (Codex #6369 r26)', async () => {
@@ -1025,9 +1068,9 @@ describe('update_customer notes edits are preview-decided and count as they comm
     process.env[ON] = 'true';
     const grounding = OwnerDirect.targetGrounding({ targets: [], groundedCustomerIds: [NAMED], page: { ids: {} } });
     const calls = [phoneEdit, ...[1, 2, 3, 4, 5].map(notesEdit)];
-    // Notes edits join no up-front plan; only the phone edit does.
+    // Grounded customer tools join no up-front plan; each is counted as it commits.
     const plan = OwnerDirect.messageDirectPlan(calls, () => true, null, grounding);
-    expect(plan.get('update_customer')).toBe(1);
+    expect(plan.has('update_customer')).toBe(false);
     expect(OwnerDirect.cappedTools(new Map(), plan).size).toBe(0);
     // Each notes edit is judged on its own preview: over existing notes it cards and uses no allowance.
     const covered = { notes_replaced: { before: 'old text' } };
