@@ -843,13 +843,35 @@ const StripeService = {
 
       const stripeCustomerId = stripeCustomer.id;
 
-      await database('customers')
+      // Guarded compare-and-set: the Stripe call above runs outside any lock,
+      // so a duplicate merge can retire this row (deleted_at) or another
+      // request can link a profile in between. An unguarded UPDATE would write
+      // the id onto the archived loser and let payment setup continue on a
+      // retired identity.
+      const linked = await database('customers')
         .where({ id: customerId })
+        .whereNull('deleted_at')
+        .whereNull('stripe_customer_id')
         .update({ stripe_customer_id: stripeCustomerId });
+
+      if (!linked) {
+        const current = await database('customers').where({ id: customerId }).first('stripe_customer_id', 'deleted_at');
+        if (current && !current.deleted_at && current.stripe_customer_id) {
+          // Another request linked a live profile first: use it, leave the
+          // one just created unused (ids only in the log).
+          logger.warn(`[stripe] Customer ${customerId} was linked to ${current.stripe_customer_id} while ${stripeCustomerId} was being created; the new Stripe customer is unused`);
+          return current.stripe_customer_id;
+        }
+        const retired = new Error('this customer record was merged — reload and retry');
+        retired.code = 'CUSTOMER_RETIRED';
+        logger.warn(`[stripe] Customer ${customerId} was retired while Stripe customer ${stripeCustomerId} was being created; not linked`);
+        throw retired;
+      }
 
       logger.info(`[stripe] Customer created: ${stripeCustomerId} for ${customerId}`);
       return stripeCustomerId;
     } catch (err) {
+      if (err && err.code === 'CUSTOMER_RETIRED') throw err;
       logger.error(`[stripe] Customer creation failed: ${err.message}`);
       throw new Error('Failed to create Stripe customer');
     }
