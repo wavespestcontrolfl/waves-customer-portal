@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { useOutletContext } from "react-router-dom";
 import { Ban, Clock, Inbox, Mail, Plus, Send } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
@@ -31,6 +32,8 @@ export default function EmailPage({ navigation, active }) {
     ? [EMAIL_SECTIONS[0], { key: "scheduled", label: scheduled.tabLabel, Icon: Clock }, EMAIL_SECTIONS[1]]
     : EMAIL_SECTIONS;
   const showScheduled = tab === "scheduled" && scheduled.enabled;
+  const { reload: reloadScheduled } = scheduled;
+  useEffect(() => { if (showScheduled) reloadScheduled(); }, [showScheduled, reloadScheduled]);
   const mailEditor = { ...editor, scheduleEnabled: scheduled.enabled, onScheduled: scheduled.reload };
   const action = connected ? {
     key: "compose",

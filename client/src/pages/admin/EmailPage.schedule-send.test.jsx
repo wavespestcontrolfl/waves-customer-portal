@@ -86,6 +86,27 @@ describe("Email schedule send", () => {
     expect(await screen.findByRole("button", { name: "Scheduled (1)" })).toBeInTheDocument();
   });
 
+  it("a retry after a lost answer reuses the same client key", async () => {
+    let failNext = true;
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation((input, options = {}) => {
+      if (String(input).endsWith("/email/schedule") && failNext) { failNext = false; return Promise.reject(new TypeError("network")); }
+      return base(input, options);
+    });
+    mount();
+    await writeEmail();
+    const pickTomorrow = async () => {
+      fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
+      fireEvent.click(screen.getByRole("button", { name: /^Tomorrow morning/ }));
+    };
+    await pickTomorrow();
+    expect((await screen.findAllByText(/trying again will not queue it twice/)).length).toBeGreaterThan(0);
+    await pickTomorrow();
+    await waitFor(() => expect(posts("/email/schedule")).toHaveLength(2));
+    const [first, second] = posts("/email/schedule").map(([, options]) => JSON.parse(options.body).clientKey);
+    expect(second).toBe(first);
+  });
+
   it("Cancel send brings the email back into the composer", async () => {
     scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "scheduled" }];
     mount();

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   loadEmailDrafts,
   setEmailSending,
@@ -47,6 +47,9 @@ export default function useEmailEditor(userId) {
   const [draftResult, setDraftResult] = useState(null);
   const [sendFeedback, setSendFeedback] = useState({});
   const [scheduling, setScheduling] = useState(null);
+  // Per draft slot, the key of a schedule request whose answer never came:
+  // the same email at the same time reuses it, so the server keeps one row.
+  const uncertainSchedule = useRef({});
   const setShowCompose = (visible) => {
     if (visible) setSendFeedback((current) => ({ ...current, compose: null }));
     setComposeOpen(visible);
@@ -196,30 +199,39 @@ export default function useEmailEditor(userId) {
   };
 
   // Schedule send (GATE_EMAIL_SEND_LATER). The server queues the email; the
-  // draft clears only if it still holds the text that was queued. Each request
-  // carries its own clientKey, so a duplicated delivery of it queues one row;
-  // an unconfirmed request tells the operator to look under Scheduled first.
+  // draft clears only if it still holds the text that was queued. A request
+  // whose answer was lost keeps its clientKey (uncertainSchedule), and the
+  // Scheduled list reloads after every attempt.
   const scheduleEmail = async (kind, payload, replyId, sendAt, clearQueued, onScheduled) => {
     if (scheduling || draftSession.sending[kind]) return;
     setScheduling(kind);
     setSendFeedback((current) => ({ ...current, [kind]: null }));
+    const slot = replyId ? `reply:${replyId}` : "compose";
+    const request = JSON.stringify({ ...payload, sendAt });
+    const prior = uncertainSchedule.current[slot];
+    const clientKey = prior?.request === request ? prior.clientKey : crypto.randomUUID();
     try {
       const response = await adminFetch("/api/admin/email/schedule", {
         method: "POST",
-        body: JSON.stringify({ ...payload, body: encodeEmailBody(payload.body), draftText: payload.body, sendAt, clientKey: crypto.randomUUID() }),
+        body: JSON.stringify({ ...payload, body: encodeEmailBody(payload.body), draftText: payload.body, sendAt, clientKey }),
       });
       const result = await response.json().catch(() => ({}));
       if (!response.ok || !result.success) {
+        // 5xx may hide a committed insert: keep the key for the retry.
+        if (response.status >= 500) uncertainSchedule.current[slot] = { request, clientKey };
+        else delete uncertainSchedule.current[slot];
         setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: result.error || "The email was not scheduled. Your draft is still here." } }));
         return;
       }
+      delete uncertainSchedule.current[slot];
       clearQueued();
       setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, message: `Scheduled for ${formatSendAt(sendAt)}. Find it under Scheduled.` } }));
-      await onScheduled?.();
     } catch {
-      setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: "Scheduling was not confirmed. Look under Scheduled before you try again." } }));
+      uncertainSchedule.current[slot] = { request, clientKey };
+      setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: "Scheduling was not confirmed. Look under Scheduled; trying again will not queue it twice." } }));
     } finally {
       setScheduling(null);
+      await onScheduled?.();
     }
   };
 
