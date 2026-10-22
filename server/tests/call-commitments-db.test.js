@@ -691,23 +691,110 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     }
   });
 
-  test('an estimate linked only by customer_phone fulfills an UNLINKED caller\'s promise; a linked estimate on a shared number does not (codex #3738 P1)', async () => {
-    const call = await db('call_log').where({ id: callId }).first(); // unlinked (customer_id NULL), from_phone = PHONE
+  // An unlinked call on its OWN number: earlier tests in this file leave
+  // customers on PHONE until afterAll, and "is this number one person's"
+  // reads every live record carrying it.
+  let ownCalls = 0;
+  async function ownNumberCall() {
+    ownCalls += 1;
+    const phone = `+1555555015${ownCalls}`;
+    const [row] = await db('call_log').insert({
+      twilio_call_sid: 'CA' + '8'.repeat(30) + `o${ownCalls}`, direction: 'inbound', from_phone: phone, to_phone: OUR_NUMBER, status: 'completed',
+      duration_seconds: 90, processing_status: 'processed', metadata: JSON.stringify({ fixture: 'commitments-db-own-number' }),
+      created_at: new Date(Date.now() - 60 * 60 * 1000),
+    }).returning('id');
+    cleanup.callIds.push(row.id);
+    return { call: await db('call_log').where({ id: row.id }).first(), phone };
+  }
+
+  test('an estimate linked only by customer_phone fulfills an UNLINKED caller\'s promise; a linked estimate on a number shared by DIFFERENT names does not (codex #3738 P1)', async () => {
+    const { call, phone: PHONE } = await ownNumberCall(); // unlinked (customer_id NULL) on a number no other test's customers carry
     const [est] = await db('estimates').insert({ status: 'sent', sent_at: new Date(Date.now() - 60 * 1000), created_at: new Date(Date.now() - 120 * 1000), customer_phone: PHONE, estimate_data: handedOff() }).returning('id');
-    let otherId = null;
+    const made = [];
     try {
       // An UNLINKED estimate whose phone matches the caller keeps the promise
       // (commercial proposals store the phone with a NULL customer_id).
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'association', basis: expect.stringContaining('caller_phone') });
-      // A LINKED estimate on the same (shared) number must NOT clear an
-      // unlinked caller's promise — mirrors the watcher's shared-number rule.
-      const [other] = await db('customers').insert({ first_name: 'Housemate', phone: PHONE }).returning('id');
-      otherId = other.id;
-      await db('estimates').where({ id: est.id }).update({ customer_id: otherId });
+      // Two different people share the number; the estimate belongs to one of
+      // them: it must NOT clear an unlinked caller's promise.
+      const [a1] = await db('customers').insert({ first_name: 'Housemate', last_name: 'Alpha', phone: PHONE }).returning('id');
+      const [b1] = await db('customers').insert({ first_name: 'Housemate', last_name: 'Bravo', phone: PHONE }).returning('id');
+      made.push(a1.id, b1.id);
+      await db('estimates').where({ id: est.id }).update({ customer_id: a1.id });
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
     } finally {
       await db('estimates').where({ id: est.id }).del();
-      if (otherId) await db('customers').where({ id: otherId }).del();
+      if (made.length) await db('customers').whereIn('id', made).del();
+    }
+  });
+
+  test('SAME-NAME duplicate customer records on the number: a linked estimate clears an unlinked caller\'s promise, by its phone or only by its owner\'s (owner 2026-10-21)', async () => {
+    const { call, phone: PHONE } = await ownNumberCall();
+    const [est] = await db('estimates').insert({ status: 'sent', sent_at: new Date(Date.now() - 60 * 1000), created_at: new Date(Date.now() - 120 * 1000), customer_phone: PHONE, estimate_data: handedOff() }).returning('id');
+    const made = [];
+    try {
+      const [d1] = await db('customers').insert({ first_name: 'Martin', last_name: 'Fixtureson', phone: PHONE }).returning('id');
+      const [d2] = await db('customers').insert({ first_name: ' martin', last_name: 'FIXTURESON ', phone: PHONE }).returning('id');
+      made.push(d1.id, d2.id);
+      await db('estimates').where({ id: est.id }).update({ customer_id: d2.id });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'association' });
+      // Even when the estimate row carries no phone of its own.
+      await db('estimates').where({ id: est.id }).update({ customer_phone: null });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ record_id: est.id });
+      // A third record with a different name makes the number truly shared.
+      const [d3] = await db('customers').insert({ first_name: 'Someone', last_name: 'Else', phone: PHONE }).returning('id');
+      made.push(d3.id);
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
+      // A deleted different-name record does not count.
+      await db('customers').where({ id: d3.id }).update({ deleted_at: new Date() });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ record_id: est.id });
+      // An owner on another number keeps nothing; neither does an estimate handed off before the call.
+      await db('customers').where({ id: d2.id }).update({ phone: '+15555550188' });
+      await db('estimates').where({ id: est.id }).update({ customer_phone: '+15555550188' });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
+      await db('customers').where({ id: d2.id }).update({ phone: PHONE });
+      await db('estimates').where({ id: est.id }).update({ estimate_data: handedOff(7200) });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
+    } finally {
+      await db('estimates').where({ id: est.id }).del();
+      if (made.length) await db('customers').whereIn('id', made).del();
+    }
+  });
+
+  test('a blank or PLACEHOLDER name on any live record means the number is not corroborated: a linked estimate clears nothing (codex #6417 r1 P1)', async () => {
+    const { call, phone: PHONE } = await ownNumberCall();
+    const [est] = await db('estimates').insert({ status: 'sent', sent_at: new Date(Date.now() - 60 * 1000), created_at: new Date(Date.now() - 120 * 1000), customer_phone: PHONE, estimate_data: handedOff() }).returning('id');
+    const made = [];
+    try {
+      const [owner] = await db('customers').insert({ first_name: 'Martin', last_name: 'Fixtureson', phone: PHONE }).returning('id');
+      made.push(owner.id);
+      await db('estimates').where({ id: est.id }).update({ customer_id: owner.id });
+      // The lone real-named record: cleared (control).
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ record_id: est.id });
+      // Another live record on the number named "Unknown": could be anyone.
+      const [ph] = await db('customers').insert({ first_name: 'Unknown', last_name: null, phone: PHONE }).returning('id');
+      made.push(ph.id);
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
+      // Placeholder-named duplicates only ("same name", but no identity at all).
+      await db('customers').where({ id: owner.id }).update({ first_name: 'unknown', last_name: null });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
+      await db('customers').where({ id: owner.id }).update({ first_name: 'Caller', last_name: '' });
+      await db('customers').where({ id: ph.id }).update({ first_name: 'Caller', last_name: '' });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
+      // The shared list is what callers read.
+      expect(cc.isMissingName('  No Name ')).toBe(true);
+      // Placeholders call/text-created records carry (outbound-voicemail-sms.js).
+      for (const p of ['Unknown Caller', 'N/A', 'NA', 'None', 'Test', '-', '?', 'Unknown Unknown']) {
+        expect(cc.isMissingName(p)).toBe(true);
+      }
+      await db('customers').whereIn('id', [owner.id, ph.id]).update({ first_name: 'Unknown', last_name: 'Caller' });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
+      await db('customers').whereIn('id', [owner.id, ph.id]).update({ first_name: 'N/A', last_name: null });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
+      expect(cc.isMissingName('Martin Fixtureson')).toBe(false);
+    } finally {
+      await db('estimates').where({ id: est.id }).del();
+      if (made.length) await db('customers').whereIn('id', made).del();
     }
   });
 

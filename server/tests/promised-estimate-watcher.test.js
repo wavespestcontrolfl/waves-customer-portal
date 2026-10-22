@@ -49,7 +49,7 @@ test('the unfulfilled-promise query has no lower date bound that would clear age
   const agedPromise = row(45);
   db.raw = jest.fn(async () => ({ rows: [agedPromise] }));
   try {
-    await expect(loadUnkeptPromises()).resolves.toEqual([agedPromise]);
+    await expect(loadUnkeptPromises()).resolves.toEqual([expect.objectContaining({ id: agedPromise.id, total_count: 1, all_ids: [agedPromise.id] })]);
     const [sql, bindings] = db.raw.mock.calls[0];
     expect(sql).toContain('WHERE c.created_at < now()');
     expect(sql).not.toMatch(/c\.created_at\s*>=/);
