@@ -93,13 +93,31 @@ describe('resolveCardLaneAfterVisit (billing lane the accept left on the custome
   const args = { recurringCardLaneActive: true, treatAsOneTime: false, customerId: 'c1' };
 
   test('per_application customer: after-visit copy applies', async () => {
-    const db = fakeDb({ customers: { billing_mode: 'per_application', waveguard_tier: 'Bronze', monthly_rate: 49 } });
+    const db = fakeDb({ customers: { billing_mode: 'per_application', waveguard_tier: 'Bronze', monthly_rate: 49, per_application_fee: 49 } });
     await expect(resolveCardLaneAfterVisit(args, db)).resolves.toBe(true);
   });
 
-  test('monthly_membership accept (pinned legacy rodent-only plan, or a monthly member adding a service): no after-visit copy', async () => {
-    const db = fakeDb({ customers: { billing_mode: 'monthly_membership', waveguard_tier: 'Bronze', monthly_rate: 49 } });
+  test('per_application with nothing collectible (no fee, no priced first visit, no attached invoice): generic copy, which still asks a person to follow up', async () => {
+    const db = fakeDb({ customers: { billing_mode: 'per_application', waveguard_tier: 'Bronze', monthly_rate: 49, per_application_fee: null } });
     await expect(resolveCardLaneAfterVisit(args, db)).resolves.toBe(false);
+    await expect(resolveCardLaneAfterVisit({ ...args, attachedInvoiceTotal: 0, firstVisitPriced: false }, db)).resolves.toBe(false);
+    const fallthrough = buildAcceptNotificationPayload({ customerName: 'Pat Tester', waveguardTier: 'Bronze', monthlyTotal: 49, cardLaneAfterVisit: false });
+    expect(fallthrough.adminDoneWhen).toBe('invoice_followed_up');
+  });
+
+  test('each piece of collection evidence is enough on its own', async () => {
+    const noFee = fakeDb({ customers: { billing_mode: 'per_application', per_application_fee: null } });
+    await expect(resolveCardLaneAfterVisit({ ...args, attachedInvoiceTotal: 49 }, noFee)).resolves.toBe(true);
+    await expect(resolveCardLaneAfterVisit({ ...args, firstVisitPriced: true }, noFee)).resolves.toBe(true);
+    const zeroFee = fakeDb({ customers: { billing_mode: 'per_visit', per_application_fee: '0.00' } });
+    await expect(resolveCardLaneAfterVisit(args, zeroFee)).resolves.toBe(false);
+    const fee = fakeDb({ customers: { billing_mode: 'per_visit', per_application_fee: '65.00' } });
+    await expect(resolveCardLaneAfterVisit(args, fee)).resolves.toBe(true);
+  });
+
+  test('monthly_membership accept (pinned legacy rodent-only plan, or a monthly member adding a service): no after-visit copy', async () => {
+    const db = fakeDb({ customers: { billing_mode: 'monthly_membership', waveguard_tier: 'Bronze', monthly_rate: 49, per_application_fee: 49 } });
+    await expect(resolveCardLaneAfterVisit({ ...args, attachedInvoiceTotal: 49, firstVisitPriced: true }, db)).resolves.toBe(false);
   });
 
   test('an unstamped legacy member (NULL mode, real tier, monthly rate) resolves to monthly dues: no after-visit copy', async () => {
@@ -111,7 +129,7 @@ describe('resolveCardLaneAfterVisit (billing lane the accept left on the custome
     await expect(resolveCardLaneAfterVisit(args, fakeDb({ customers: { billing_mode: 'annual_prepay' } }))).resolves.toBe(false);
     await expect(resolveCardLaneAfterVisit(args, fakeDb({ customers: undefined }))).resolves.toBe(false);
     await expect(resolveCardLaneAfterVisit(args, fakeDb({ customers: new Error('boom') }))).resolves.toBe(false);
-    const ok = fakeDb({ customers: { billing_mode: 'per_application' } });
+    const ok = fakeDb({ customers: { billing_mode: 'per_application', per_application_fee: 49 } });
     await expect(resolveCardLaneAfterVisit({ ...args, recurringCardLaneActive: false }, ok)).resolves.toBe(false);
     await expect(resolveCardLaneAfterVisit({ ...args, treatAsOneTime: true }, ok)).resolves.toBe(false);
     await expect(resolveCardLaneAfterVisit({ ...args, customerId: null }, ok)).resolves.toBe(false);
@@ -124,14 +142,14 @@ describe('resolveAcceptedFirstVisit (converter-created visits count)', () => {
       acceptedAppointments: [{ scheduled_date: '2026-10-30' }, { scheduled_date: new Date('2026-10-24T00:00:00Z') }],
       conversionVisitId: 'ss1',
     }, fakeDb({}));
-    expect(out).toEqual({ firstVisitDate: '2026-10-24', firstVisitBooked: true });
+    expect(out).toEqual({ firstVisitDate: '2026-10-24', firstVisitBooked: true, firstVisitPriced: false });
   });
 
   test('no reservation: the converter-scheduled visit supplies the date', async () => {
     const out = await resolveAcceptedFirstVisit({
       acceptedAppointments: [], conversionVisitId: 'ss1',
     }, fakeDb({ scheduled_services: { scheduled_date: new Date('2026-11-03T00:00:00Z') } }));
-    expect(out).toEqual({ firstVisitDate: '2026-11-03', firstVisitBooked: true });
+    expect(out).toEqual({ firstVisitDate: '2026-11-03', firstVisitBooked: true, firstVisitPriced: false });
     const payload = buildAcceptNotificationPayload({
       customerName: 'Pat Tester', waveguardTier: 'Bronze', monthlyTotal: 49, cardLaneAfterVisit: true, ...out,
     });
@@ -144,7 +162,7 @@ describe('resolveAcceptedFirstVisit (converter-created visits count)', () => {
     const out = await resolveAcceptedFirstVisit({
       acceptedAppointments: [], conversionVisitId: 'ss1',
     }, fakeDb({ scheduled_services: new Error('boom') }));
-    expect(out).toEqual({ firstVisitDate: null, firstVisitBooked: true });
+    expect(out).toEqual({ firstVisitDate: null, firstVisitBooked: true, firstVisitPriced: false });
     const payload = buildAcceptNotificationPayload({
       customerName: 'Pat Tester', waveguardTier: 'Bronze', monthlyTotal: 49, cardLaneAfterVisit: true, ...out,
     });
@@ -154,8 +172,47 @@ describe('resolveAcceptedFirstVisit (converter-created visits count)', () => {
 
   test('converter visit cancelled / gone, or no visit at all: not booked', async () => {
     expect(await resolveAcceptedFirstVisit({ acceptedAppointments: [], conversionVisitId: 'ss1' }, fakeDb({ scheduled_services: undefined })))
-      .toEqual({ firstVisitDate: null, firstVisitBooked: false });
+      .toEqual({ firstVisitDate: null, firstVisitBooked: false, firstVisitPriced: false });
     expect(await resolveAcceptedFirstVisit({ acceptedAppointments: undefined, conversionVisitId: null }, fakeDb({})))
-      .toEqual({ firstVisitDate: null, firstVisitBooked: false });
+      .toEqual({ firstVisitDate: null, firstVisitBooked: false, firstVisitPriced: false });
+  });
+});
+
+describe('resolveAcceptedFirstVisit (earliest converter unit, priced flag)', () => {
+  test('two units, the first inserted rolls later: the label shows the earlier date', async () => {
+    // firstScheduledServiceId points at the seasonal unit inserted first (Feb);
+    // the converter reports the earliest inserted unit date (Oct 29).
+    const out = await resolveAcceptedFirstVisit({
+      acceptedAppointments: [],
+      conversionVisitId: 'ss-seasonal',
+      conversionEarliestDate: '2026-10-29',
+    }, fakeDb({ scheduled_services: { scheduled_date: '2027-02-08', estimated_price: 40 } }));
+    expect(out.firstVisitDate).toBe('2026-10-29');
+    expect(out.firstVisitBooked).toBe(true);
+    const payload = buildAcceptNotificationPayload({
+      customerName: 'Pat Tester', waveguardTier: 'Bronze', monthlyTotal: 49, cardLaneAfterVisit: true, ...out,
+    });
+    expect(payload.adminBody).toMatch(/First visit: Oct 29\.$/);
+    expect(payload.adminBody).not.toMatch(/Feb/);
+  });
+
+  test('earliest date as a Date, and with the id row unreadable, still wins', async () => {
+    const out = await resolveAcceptedFirstVisit({
+      acceptedAppointments: [], conversionVisitId: 'ss1', conversionEarliestDate: new Date('2026-11-03T00:00:00Z'),
+    }, fakeDb({ scheduled_services: new Error('boom') }));
+    expect(out).toEqual({ firstVisitDate: '2026-11-03', firstVisitBooked: true, firstVisitPriced: false });
+  });
+
+  test('without the earliest date the id row date is the fallback', async () => {
+    const out = await resolveAcceptedFirstVisit({
+      acceptedAppointments: [], conversionVisitId: 'ss1',
+    }, fakeDb({ scheduled_services: { scheduled_date: '2026-11-05', estimated_price: '49.00' } }));
+    expect(out).toEqual({ firstVisitDate: '2026-11-05', firstVisitBooked: true, firstVisitPriced: true });
+  });
+
+  test('priced flag follows the committed appointment or the converter row', async () => {
+    expect((await resolveAcceptedFirstVisit({ acceptedAppointments: [{ scheduled_date: '2026-10-24', estimated_price: 49 }] }, fakeDb({}))).firstVisitPriced).toBe(true);
+    expect((await resolveAcceptedFirstVisit({ acceptedAppointments: [{ scheduled_date: '2026-10-24', estimated_price: null }] }, fakeDb({}))).firstVisitPriced).toBe(false);
+    expect((await resolveAcceptedFirstVisit({ acceptedAppointments: [], conversionVisitId: 'ss1' }, fakeDb({ scheduled_services: { scheduled_date: '2026-11-05', estimated_price: null } }))).firstVisitPriced).toBe(false);
   });
 });

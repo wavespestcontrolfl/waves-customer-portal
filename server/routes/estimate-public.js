@@ -1054,22 +1054,31 @@ function confirmationServiceLabel(oneTimeList, estimate, fallbackLabel) {
   return String(specific).replace(/\s+/g, ' ').trim() || String(fallbackLabel || '').trim();
 }
 
-// "Billed after the first visit" is true only when the customer the accept
-// landed on is billed per visit / per application. The accept's recurring-card
-// lane is broader than that: a pinned legacy rodent-only plan enters it while
-// the converter stamps billing_mode 'monthly_membership' (the monthly cron
-// collects dues), and a current monthly member adding a service keeps their
-// mode. The source of truth is the billing lane the accept left on the customer
-// row (billing-lane resolveBillingLane), read after the conversion commits.
-// Fails closed: no customer, a read error or any other lane keeps the generic
-// copy.
-async function resolveCardLaneAfterVisit({ recurringCardLaneActive, treatAsOneTime, customerId }, database = db) {
+// "Billed after the first visit" is true only when (1) the customer the accept
+// landed on is billed per visit / per application and (2) there is evidence
+// something collectible will be billed. The accept's recurring-card lane is
+// broader than that: a pinned legacy rodent-only plan enters it while the
+// converter stamps billing_mode 'monthly_membership' (the monthly cron collects
+// dues), and a current monthly member adding a service keeps their mode. The
+// lane comes from the billing lane the accept left on the customer row
+// (billing-lane resolveBillingLane), read after the conversion commits. A
+// per_application customer with no fee on file, no priced first visit and no
+// attached first-application invoice bills NOTHING at completion (the converter
+// raises a manual-billing alert), so that keeps the generic copy, which still
+// asks a person to follow up. Fails closed: no customer, a read error or any
+// other lane keeps the generic copy.
+async function resolveCardLaneAfterVisit({
+  recurringCardLaneActive, treatAsOneTime, customerId, attachedInvoiceTotal = 0, firstVisitPriced = false,
+}, database = db) {
   if (recurringCardLaneActive !== true || treatAsOneTime || !customerId) return false;
   try {
-    const row = await database('customers').where({ id: customerId }).first('billing_mode', 'waveguard_tier', 'monthly_rate');
+    const row = await database('customers').where({ id: customerId }).first('billing_mode', 'waveguard_tier', 'monthly_rate', 'per_application_fee');
     if (!row) return false;
     const { resolveBillingLane } = require('../services/billing-lane');
-    return ['per_application', 'per_visit'].includes(resolveBillingLane(row).mode);
+    if (!['per_application', 'per_visit'].includes(resolveBillingLane(row).mode)) return false;
+    return Number(attachedInvoiceTotal) > 0
+      || firstVisitPriced === true
+      || (row.per_application_fee != null && Number(row.per_application_fee) > 0);
   } catch (err) {
     logger.warn(`[estimate-accept] billing lane read for accept copy failed (customer ${customerId}): ${err.message}`);
     return false;
@@ -1077,29 +1086,44 @@ async function resolveCardLaneAfterVisit({ recurringCardLaneActive, treatAsOneTi
 }
 
 // The first visit this accept leaves on the books: the earliest committed or
-// adopted appointment, else the visit the converter auto-scheduled
-// (standardConversion.firstScheduledServiceId — acceptedAppointmentsToRegister
-// stays empty for it). Returns { firstVisitDate: 'YYYY-MM-DD'|null, firstVisitBooked }.
+// adopted appointment, else the earliest visit the converter auto-scheduled.
+// The converter's firstScheduledServiceId is the first INSERTED unit, not the
+// earliest (a seasonal unit inserted first can roll to February), so its
+// earliestScheduledUnitDate wins when exposed; the id row is the fallback and
+// also reports whether that visit is priced. Returns
+// { firstVisitDate: 'YYYY-MM-DD'|null, firstVisitBooked, firstVisitPriced }.
 // A converter visit whose row cannot be read still counts as booked (no date).
-async function resolveAcceptedFirstVisit({ acceptedAppointments, conversionVisitId }, database = db) {
+async function resolveAcceptedFirstVisit({ acceptedAppointments, conversionVisitId, conversionEarliestDate = null }, database = db) {
   const isDay = (day) => /^\d{4}-\d{2}-\d{2}$/.test(day);
-  const days = (Array.isArray(acceptedAppointments) ? acceptedAppointments : [])
-    .map((appt) => dateOnly(appt?.scheduled_date))
-    .filter(isDay)
-    .sort();
-  if (days[0]) return { firstVisitDate: days[0], firstVisitBooked: true };
-  if (!conversionVisitId) return { firstVisitDate: null, firstVisitBooked: false };
+  const appts = Array.isArray(acceptedAppointments) ? acceptedAppointments : [];
+  const apptPriced = appts.some((appt) => appt?.estimated_price != null && Number(appt.estimated_price) > 0);
+  const days = appts.map((appt) => dateOnly(appt?.scheduled_date)).filter(isDay).sort();
+  if (days[0]) return { firstVisitDate: days[0], firstVisitBooked: true, firstVisitPriced: apptPriced };
+  const earliest = dateOnly(conversionEarliestDate);
+  if (!conversionVisitId) {
+    return isDay(earliest)
+      ? { firstVisitDate: earliest, firstVisitBooked: true, firstVisitPriced: false }
+      : { firstVisitDate: null, firstVisitBooked: false, firstVisitPriced: false };
+  }
   try {
     const row = await database('scheduled_services')
       .where({ id: conversionVisitId })
       .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
-      .first('scheduled_date');
-    if (!row) return { firstVisitDate: null, firstVisitBooked: false };
-    const day = dateOnly(row.scheduled_date);
-    return { firstVisitDate: isDay(day) ? day : null, firstVisitBooked: true };
+      .first('scheduled_date', 'estimated_price');
+    if (!row) {
+      return isDay(earliest)
+        ? { firstVisitDate: earliest, firstVisitBooked: true, firstVisitPriced: false }
+        : { firstVisitDate: null, firstVisitBooked: false, firstVisitPriced: false };
+    }
+    const rowDay = dateOnly(row.scheduled_date);
+    return {
+      firstVisitDate: isDay(earliest) ? earliest : (isDay(rowDay) ? rowDay : null),
+      firstVisitBooked: true,
+      firstVisitPriced: row.estimated_price != null && Number(row.estimated_price) > 0,
+    };
   } catch (err) {
     logger.warn(`[estimate-accept] converter visit read for accept copy failed (${conversionVisitId}): ${err.message}`);
-    return { firstVisitDate: null, firstVisitBooked: true };
+    return { firstVisitDate: isDay(earliest) ? earliest : null, firstVisitBooked: true, firstVisitPriced: false };
   }
 }
 
@@ -16377,6 +16401,21 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           acceptTierLabel = 'Commercial';
         }
       } catch { /* fall back to the estimate tier */ }
+      const acceptedFirstVisit = await resolveAcceptedFirstVisit({
+        acceptedAppointments: acceptedAppointmentsToRegister,
+        conversionVisitId: txResult.standardConversion?.firstScheduledServiceId || null,
+        conversionEarliestDate: txResult.standardConversion?.earliestScheduledUnitDate || null,
+      });
+      acceptedFirstVisit.cardLaneAfterVisit = await resolveCardLaneAfterVisit({
+        recurringCardLaneActive,
+        treatAsOneTime,
+        customerId,
+        // A collectible amount, judged below next to the billing lane: the
+        // attached first-application invoice (not paid at accept) or a priced
+        // first visit. The customer's per-application fee is read there.
+        attachedInvoiceTotal: txResult.standardInvoiceAttached === true ? Number(txResult.invoiceAmount) || 0 : 0,
+        firstVisitPriced: acceptedFirstVisit.firstVisitPriced,
+      });
       const notificationPayload = buildAcceptNotificationPayload({
         customerName: estimate.customer_name,
         waveguardTier: acceptTierLabel,
@@ -16421,13 +16460,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // Card-on-file lane accept with nothing collected at accept (the
         // payable-invoice, payer, credit, prepay and one-time branches all sit
         // ahead of this flag in the builder): bills after the first visit.
-        cardLaneAfterVisit: await resolveCardLaneAfterVisit({
-          recurringCardLaneActive, treatAsOneTime, customerId,
-        }),
-        ...(await resolveAcceptedFirstVisit({
-          acceptedAppointments: acceptedAppointmentsToRegister,
-          conversionVisitId: txResult.standardConversion?.firstScheduledServiceId || null,
-        })),
+        cardLaneAfterVisit: acceptedFirstVisit.cardLaneAfterVisit,
+        firstVisitDate: acceptedFirstVisit.firstVisitDate,
+        firstVisitBooked: acceptedFirstVisit.firstVisitBooked,
       });
       // bell: true \u2014 accepted estimates must ring the admin bell even under
       // GATE_ADMIN_BELL_POLICY (category 'estimate' is otherwise silenced).
