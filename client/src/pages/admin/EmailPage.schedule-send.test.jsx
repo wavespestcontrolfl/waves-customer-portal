@@ -159,6 +159,32 @@ describe("Email schedule send", () => {
     expect(screen.queryByText(/A schedule request for this email was not confirmed/)).not.toBeInTheDocument();
   });
 
+  it("after a lost answer, a changed email waits until the operator checked Scheduled", async () => {
+    let calls = 0;
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation((input, options = {}) => {
+      if (String(input).endsWith("/email/schedule") && (calls += 1) === 1) return Promise.reject(new TypeError("network"));
+      return base(input, options);
+    });
+    mount();
+    await writeEmail();
+    const pickTomorrow = async () => {
+      fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
+      fireEvent.click(screen.getByRole("button", { name: /^Tomorrow morning/ }));
+    };
+    await pickTomorrow();
+    expect(await screen.findByText(/A schedule request for this email was not confirmed/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/^Message/), { target: { value: "Changed text" } });
+    await pickTomorrow();
+    expect((await screen.findAllByText(/An earlier schedule request for this email was not confirmed/)).length).toBeGreaterThan(0);
+    expect(posts("/email/schedule")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "I checked: it is not there" }));
+    await pickTomorrow();
+    await waitFor(() => expect(posts("/email/schedule")).toHaveLength(2));
+    const [first, second] = posts("/email/schedule").map(([, options]) => JSON.parse(options.body).clientKey);
+    expect(second).not.toBe(first);
+  });
+
   it("leaving the page while a schedule request runs keeps plain Send blocked on return", async () => {
     let finish;
     const base = fetch.getMockImplementation();

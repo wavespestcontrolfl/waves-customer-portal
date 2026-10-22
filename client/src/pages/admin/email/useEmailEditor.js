@@ -271,12 +271,19 @@ export default function useEmailEditor(userId) {
   // Scheduled list reloads after every attempt.
   const scheduleEmail = async (kind, payload, replyId, sendAt, clearQueued, onScheduled) => {
     if (scheduling || draftSession.sending[kind]) return;
-    setScheduling(kind);
-    setSendFeedback((current) => ({ ...current, [kind]: null }));
     const slot = slotOf(replyId);
     // Only a fingerprint is kept (sessionStorage must never hold the email).
     const request = fingerprint(JSON.stringify({ ...payload, sendAt }));
     const prior = uncertainSchedule.current[slot];
+    // While an earlier request has no definite answer, only the same email at
+    // the same time may go (it reuses that key). A changed one would get a new
+    // key and could queue a second copy beside the first.
+    if (prior && prior.request !== request) {
+      setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: "An earlier schedule request for this email was not confirmed. Look under Scheduled, then tap I checked before you change it." } }));
+      return;
+    }
+    setScheduling(kind);
+    setSendFeedback((current) => ({ ...current, [kind]: null }));
     const submit = async (clientKey) => {
       // Saved before the request: a reload while it is in flight still finds
       // the key. Cleared only on a definite answer.
@@ -291,7 +298,7 @@ export default function useEmailEditor(userId) {
       return { response, result };
     };
     try {
-      let { response, result } = await submit(prior?.request === request ? prior.clientKey : crypto.randomUUID());
+      let { response, result } = await submit(prior?.clientKey || crypto.randomUUID());
       // A remembered key can name an email that was cancelled since: that is
       // not this request, so queue it again under a fresh key.
       if (response.ok && result.scheduled?.status === "cancelled") ({ response, result } = await submit(crypto.randomUUID()));
