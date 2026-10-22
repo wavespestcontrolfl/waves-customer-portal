@@ -885,6 +885,10 @@ function initScheduledJobs() {
           // proofreader's own gate is off.
           const moveCheckClosed = await require('./auto-dispatch/proofreader/nightly').closeNotices(new Date(), { enabled: getAutoDispatchConfig().proofreaderEnabled === true });
           if (!moveCheckClosed) failures.push(new Error('move-check notice close failed'));
+          // The move-check-down notice by the same rule: it closes when its
+          // gate or the check is off; with no run, nothing else changes it.
+          const checkDown = await require('./auto-dispatch/check-down-notice').noteRun(null, { enabled: getAutoDispatchConfig().proofreaderEnabled === true, nowDate: new Date() });
+          if (checkDown.action === 'error') failures.push(new Error('move-check-down notice upkeep failed'));
           if (failures.length) throw failures[0];
           return;
         }

@@ -307,6 +307,20 @@ describe('checkMove', () => {
     expect(run.proofreader).toMatchObject({ broke: 2, answered: 2 });
   });
 
+  test('an allow whose follow-up read fails is no usable answer: the check-down notice must still see the night as broken (Codex #6465 r1)', async () => {
+    const run = runOf();
+    const failing = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
+    failing.proofreadMove.mockImplementation(async () => { doneNotice = new Error('db down'); return { verdict: 'allow', why: 'nothing_breaks' }; });
+    await check(run, failing);
+    expect(run.proofreader).toMatchObject({ broke: 1, brokeCause: 'check_failed', answered: 0 });
+    // A person's done read after an allow: the model did answer.
+    doneNotice = null;
+    const held = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
+    held.proofreadMove.mockImplementation(async () => { doneNotice = PERSON_DONE; return { verdict: 'allow', why: 'nothing_breaks' }; });
+    await check(run, held);
+    expect(run.proofreader).toMatchObject({ personHeld: 1, answered: 1 });
+  });
+
   test('a broken read names check_failed; a record too long or the deadline is not an answer', async () => {
     const run = runOf();
     const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });

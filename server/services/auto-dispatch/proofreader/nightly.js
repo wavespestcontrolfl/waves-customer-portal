@@ -321,13 +321,14 @@ async function checkMove({ service, best, run }, deps = {}) {
     state.notAsked += 1;
     return stopped('not_asked', answer);
   }
-  if (!NOT_ANSWERED.has(answer.why)) state.answered += 1;
   const heldNow = answer.verdict === 'allow' ? await heldSinceAsked(conn, service) : false;
   if (heldNow === null) {
     state.unsure += 1;
     noteBroke(state, 'check_failed');
     return stopped('unknown', { ...answer, verdict: 'unknown', why: 'check_failed' });
   }
+  // Counted only once every read the answer needs has worked (Codex #6465 r1).
+  if (!NOT_ANSWERED.has(answer.why)) state.answered += 1;
   if (heldNow) {
     state.personHeld += 1;
     return stopped('person', { ...answer, verdict: 'unknown', why: 'person_held' });

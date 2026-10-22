@@ -14,13 +14,17 @@
  *     broken run only rewrites it, and a person's done stays done.
  *   - up: at least one usable answer → the notice closes itself; a later
  *     outage rings again.
- *   - nothing asked: no change.
+ *   - nothing asked, or a dry run (the check runs in apply mode only): no
+ *     change — only a usable answer proves the check works again.
  * One ring per outage, counted in the shared auto-dispatch allowance
  * (audit.js BUDGET_LANE_KEYS) but never held back by it: a stopped tool is
  * the notice that must reach a person.
  *
  * Behind GATE_AUTO_DISPATCH_CHECK_DOWN_NOTICE, read at call time. Off, or the
- * check itself off: a standing notice closes, so a rollback leaves none.
+ * check itself off: a standing notice closes, so a rollback leaves none —
+ * also on the nights auto-dispatch does not run (scheduler.js upkeep path).
+ * Raised through admin-alert-episodes.raiseAdminAlertWithReopen, which reads
+ * and reopens the row under the key's lock (Codex #6465 r1).
  */
 const logger = require('../logger');
 const { gateEnvValue } = require('../../config/feature-gates');
@@ -69,14 +73,12 @@ async function closeNotice(episodes, db, nowDate, reason, resolution) {
   return episodes.closeAdminAlertKeys(db, [KEY], reason, { now: nowDate, resolution });
 }
 
-async function raiseNotice(state, { db, episodes, raiseAdminAlert, nowDate }) {
-  const { cutAtWord, MAX_WHY_CHARS } = require('../admin-alert-compose');
+async function raiseNotice(state, { episodes }) {
+  const { composeAdminAlert, cutAtWord, MAX_WHY_CHARS } = require('../admin-alert-compose');
   const cause = String(state.brokeCause || 'error');
   const broke = Number(state.broke) || 0;
-  // Standing = raised and not closed by a working night: rewritten quietly.
-  // Absent or closed: this call carries a new version, so it rings (again).
-  const standing = (await episodes.openAdminAlertKeys(db, KEY)).includes(KEY);
-  return raiseAdminAlert('system', {
+  // Throws on a rule violation (caught by noteRun): a malformed notice never goes out.
+  const composed = composeAdminAlert({
     area: 'System',
     action: 'restore the auto-dispatch move check',
     why: cutAtWord(`${plural(broke, 'planned move')} stayed put: every move check failed (${shortCause(cause)}).`, MAX_WHY_CHARS),
@@ -85,20 +87,22 @@ async function raiseNotice(state, { db, episodes, raiseAdminAlert, nowDate }) {
     subject: { type: 'check', id: 'auto-dispatch-move-check' },
     doneWhen: 'check_answers',
     who: 'person',
-  }, {
+  });
+  // One row per outage: a standing notice is rewritten without a ring (a
+  // person's done stays done); one a working night closed is reopened and
+  // rings — the helper decides both under the key's lock.
+  return episodes.raiseAdminAlertWithReopen('system', composed.headline, composed.why, {
+    link: composed.link,
     dedupeKey: KEY,
     refreshOnDedupe: true,
-    // The one refresh that rings: a notice a working night closed, and the
-    // check is down again.
-    ringOnRefresh: (_existing, meta) => meta?.autoCleared === true,
+    ringOnRefresh: () => false,
     // Rings unless the owner turned the System category off (admin bell policy).
     bellDefault: true,
-    ...(standing ? {} : { dedupeVersion: `run:${nowDate.toISOString()}` }),
-    detail: `The 4:10 AM auto-dispatch run asks an AI model before each move. Tonight every check failed: ${causeText(cause)} (${cause}). `
+    detail: `The 4:10 AM auto-dispatch run asks an AI model before each move. Tonight every check failed (${cause}): ${causeText(cause)}. `
       + `The tool never moves a visit it could not check, so ${plural(broke, 'planned move')} stayed put, double-booking fixes included. `
       + 'Check the AI provider account (spend limit, API key) and the key in Railway → Variables. '
       + 'The run asks again every night; this notice closes itself the first night a check answers.',
-    metadata: { autoCleared: false, cause, broke },
+    metadata: { ...composed.metadata, cause, broke },
   });
 }
 
@@ -115,17 +119,19 @@ async function noteRun(state, { enabled = true, nowDate = new Date(), deps = {} 
       await closeNotice(episodes, db, nowDate, 'gate_off', 'The move-check-down notice is turned off');
       return { action: 'off' };
     }
-    if (!enabled || !state) {
+    if (!enabled) {
       await closeNotice(episodes, db, nowDate, 'check_off', 'The move check is turned off');
       return { action: 'check_off' };
     }
+    // A dry run, or a night the tool did not run: the check was not asked,
+    // so nothing proves it works again (Codex #6465 r1).
+    if (!state) return { action: 'none' };
     if ((Number(state.answered) || 0) > 0) {
       const closed = await closeNotice(episodes, db, nowDate, 'check_answers', 'The move check answered again');
       return { action: closed ? 'closed' : 'up' };
     }
     if (!(Number(state.broke) > 0)) return { action: 'none' };
-    const raiseAdminAlert = deps.raiseAdminAlert || require('../admin-alert-compose').raiseAdminAlert;
-    await raiseNotice(state, { db, episodes, raiseAdminAlert, nowDate });
+    await raiseNotice(state, { episodes });
     return { action: 'down' };
   } catch (err) {
     logger.error(`[auto-dispatch] move-check-down notice failed: ${err.code || err.name || 'error'}`);
