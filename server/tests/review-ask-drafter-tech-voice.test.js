@@ -302,8 +302,21 @@ describe('GATE_REVIEW_ASK_FIXED_DAY0 — the same-day text is one fixed line', (
       "Hi Marta, it's Adam from Waves. Thanks for having us out. A Google review would really help: {review_url}",
       "Hi, it's Waves Pest Control. Thanks for having us out today. A Google review would really help: {review_url}",
     ]) expect(Drafter.isFixedDay0Line(b)).toBe(true);
+    // Every output of the fixed line is recognized, odd names included.
+    for (const [firstName, techName] of [['Marta', 'A.J. Smith'], ['Mary, Jo', 'Adam'], ['', null], ['María', 'Andrés Núñez']]) {
+      for (const stepKind of ['day0', 'day_after']) {
+        expect(Drafter.isFixedDay0Line(Drafter.__private.fixedDay0Line({ firstName, techName, stepKind }))).toBe(true);
+      }
+    }
     expect(Drafter.isFixedDay0Line(GOOD.body)).toBe(false);
     expect(Drafter.isFixedDay0Line(null)).toBe(false);
+  });
+
+  test('names outside the GSM table are folded so the line stays GSM-7 (two segments at most)', () => {
+    const { countSegments } = require('../services/messaging/segment-counter');
+    const body = Drafter.__private.fixedDay0Line({ firstName: 'Álvaro', techName: 'Zoë Ćirić', stepKind: 'day0' });
+    expect(body.startsWith("Hi Alvaro, it's Zoe from Waves.")).toBe(true);
+    expect(countSegments(body.replace('{review_url}', 'portal.wavespestcontrol.com/l/abcdefghij'))).toMatchObject({ encoding: 'GSM_7' });
   });
 
   test('gate off: day 0 still goes to the writer', async () => {
