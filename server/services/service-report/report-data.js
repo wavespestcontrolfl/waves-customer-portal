@@ -4446,13 +4446,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // geometry read is not proof of default zones, so nothing is frozen. The
   // render never reads it.
   let coverageReadFailed = false;
-  // GATE_REPORT_WEB_PEOPLE: a failed findings read is not proof of a clean visit (see webPeopleReadsOk).
-  let findingsReadFailed = false;
   const [rawProducts, geometryRow, dbZones, dbFindings, photos, scheduledService, approvedVisualMoments, stationRows, stationCheckRows] = await Promise.all([
     knex('service_products').where({ service_record_id: service.id }).orderBy('created_at').catch(() => { productsLoadFailed = true; return []; }),
     knex('property_geometries').where({ customer_id: service.customer_id }).orderBy('version', 'desc').first().catch(() => { coverageReadFailed = true; return null; }),
     knex('property_zones').where({ customer_id: service.customer_id, is_active: true }).orderBy('letter').catch(() => { coverageReadFailed = true; return []; }),
-    knex('service_findings').where({ service_record_id: service.id }).orderBy('created_at').catch(() => { findingsReadFailed = true; return []; }),
+    knex('service_findings').where({ service_record_id: service.id }).orderBy('created_at').catch(() => []),
     knex('service_photos').where({ service_record_id: service.id }).orderBy('sort_order').orderBy('created_at').catch(() => []),
     scheduledServicePromise,
     loadApprovedVisualServiceMomentsForReport(service, knex).catch(() => []),
@@ -5664,7 +5662,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   const hideDefaultLawnCoverage = serviceLine === 'lawn'
     && featureGates.lawnCoverageHideDefaultZonesLive()
     && frozenCoverageDefaultsOnly(structured);
-  const coverageInput = {
+  const serviceCoverage = hideDefaultLawnCoverage ? { enabled: false } : normalizeServiceCoverage({
     serviceReportId: service.id,
     serviceLine,
     serviceType: service.service_type,
@@ -5678,18 +5676,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     serviceAreas: areaLabels,
     serviceLocations,
     zones: publicZones,
-  };
-  const serviceCoverage = hideDefaultLawnCoverage ? { enabled: false } : normalizeServiceCoverage(coverageInput, serviceCoverageConfig || {});
-  // GATE_REPORT_WEB_PEOPLE: the clean-visit check reads the recorded coverage evidence, not the display. The display can be
-  // switched off (config, hidden lawn defaults) and then shows no items; this runs the same normalizer with the display forced on.
-  // null = the evidence could not be read, and the review link fails closed.
-  let webPeopleCoverage = null;
-  if (opts.webPeopleNext === true) {
-    try {
-      const raw = normalizeServiceCoverage(coverageInput, { enabled: true, showOnCustomerReports: true });
-      webPeopleCoverage = (Array.isArray(raw.items) ? raw.items : []).map((item) => ({ status: item.status, needsFollowUp: item.needsFollowUp === true }));
-    } catch { /* evidence stays null */ }
-  }
+  }, serviceCoverageConfig || {});
 
   // WaveGuard membership tier for THIS visit (null for non-members). Prefer the tier
   // frozen at completion (service_records.service_tier — admin-dispatch snapshots the
@@ -6766,19 +6753,14 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // every customer question was paying for this scan nobody reads, under
   // the general report limiter, repeatedly.
   let upcomingVisitsCard = null;
-  // GATE_REPORT_WEB_PEOPLE (owner 2026-10-20): the simple web view is built in 'pdf' mode, so the card above never ran
-  // for it. opts.webPeopleNext asks for the same property-scoped visits (never a reschedule link) in that build; the route
-  // moves them into webPeople.nextVisit. The gate itself is read by the route, which is the only caller that sets it.
-  const webPeopleNext = opts.webPeopleNext === true;
-  if (webPeopleNext || (opts.mode === 'live' && opts.upcomingVisitsCard === true
-    && process.env.GATE_REPORT_UPCOMING_VISITS === 'true')) {
+  if (opts.mode === 'live' && opts.upcomingVisitsCard === true
+    && process.env.GATE_REPORT_UPCOMING_VISITS === 'true') {
     // GATE_LAWN_REPORT_CLARITY (owner 2026-10-08): a LAWN report's card shows one
     // visit, the next upcoming LAWN visit at this property (never another
     // line's). The card then starts EMPTY and stays empty when there is none (or
     // a read fails), so the plan section falls back to no visit line rather than
     // naming another line's visit in its place. Other lines are untouched.
-    // The people card's next visit is the next visit at the property on any line, so it skips the lawn-only filter.
-    const lawnOnly = !webPeopleNext && serviceLine === 'lawn' && lawnReportClarityLive();
+    const lawnOnly = serviceLine === 'lawn' && lawnReportClarityLive();
     const visitCap = lawnOnly ? 1 : 6;
     if (lawnOnly) upcomingVisitsCard = reportPlanRescheduleLive() ? { visits: [], merged: true } : { visits: [] };
     try {
@@ -6980,8 +6962,6 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           for (const row of candidates) {
             if (matched.length >= visitCap) break;
             if (lawnOnly && !isSameLineVisit(row, { serviceLine: 'lawn' })) continue;
-            // The people card names the next SCHEDULED visit: a visit already under way (en_route / on_site) is skipped.
-            if (webPeopleNext && !['pending', 'confirmed'].includes(String(row.status || '').toLowerCase())) continue;
             // Bounded (PAGE_SIZE rows/page, MAX_PAGES pages), and the
             // property_id/source_estimate_id lookups below are cache hits
             // after the batched reads above.
@@ -7011,8 +6991,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           // short-link row each time. null when no link applies (too close
           // to the visit, dispatch-owned pending, grouped visit, ...) and on
           // ANY failure: the report never breaks.
-          // The web-people build never carries a reschedule link: it is a bearer credential and that card links to the signed-in portal.
-          const planReschedule = reportPlanRescheduleLive() && !webPeopleNext;
+          const planReschedule = reportPlanRescheduleLive();
           const buildRescheduleLink = planReschedule ? require('../reschedule-link').buildRescheduleLink : null;
           const visits = await Promise.all(matched.map(async (row) => {
             let rescheduleUrl = null;
@@ -7633,10 +7612,6 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // opted in (codex round-5 P2, e.g. the Q&A endpoint) — same
     // opts.upcomingVisitsCard check the work above already gated on.
     ...(process.env.GATE_REPORT_UPCOMING_VISITS === 'true' && opts.upcomingVisitsCard === true ? { upcomingVisitsCard } : {}),
-    // GATE_REPORT_WEB_PEOPLE: the visits for webPeople.nextVisit. The route deletes this key after it reads it.
-    // webPeopleReadsOk: false when the findings or zones read failed, so the review card fails closed. The route deletes both keys.
-    ...(webPeopleNext ? { webPeopleReadsOk: !findingsReadFailed && !coverageReadFailed, webPeopleCoverage } : {}),
-    ...(webPeopleNext ? { webPeopleNext: (Array.isArray(upcomingVisitsCard?.visits) ? upcomingVisitsCard.visits : []).map(({ serviceType, scheduledDate, windowStart }) => ({ serviceType, scheduledDate, windowStart })) } : {}),
     // "Your plan" section data (owner ask 2026-09-28): omitted entirely when
     // the gate is off, there's no customer, or there's nothing to show —
     // stripLiveOnlyScheduleFields deletes it for every non-live render, same
