@@ -91,8 +91,15 @@ async function verifiedSelfPay(row, conn) {
 
 // A bar retotal also may not land on an annual-plan anchor linked only through its visit (a schedule refresh stamps the visit,
 // never the invoice): the visit row is held FOR SHARE for the rest of the save, then the strict resolver runs. Unverifiable refuses.
+// The visit lock for a bar retotal, taken BEFORE the invoice row lock (visit -> invoice, the schedule's Bill-To order). Returns
+// the visit id it holds (null: no visit link, or not a bar retotal).
+async function lockBarRetotalVisit(conn, existing, expected) {
+  if (!expected?.selfPayLive || !existing?.scheduled_service_id) return null;
+  await conn('scheduled_services').where({ id: existing.scheduled_service_id }).forShare().first('id');
+  return existing.scheduled_service_id;
+}
+
 async function annualPlanLive(row, conn) {
-  if (row.scheduled_service_id) await conn('scheduled_services').where({ id: row.scheduled_service_id }).forShare().first('id');
   try {
     return Boolean(await require('./invoice-prepay').resolveInvoiceTermId(row, conn, { strict: true }));
   } catch {
@@ -100,8 +107,12 @@ async function annualPlanLive(row, conn) {
   }
 }
 
-async function assertSelfPayLive(row, expected, conn) {
+async function assertSelfPayLive(row, expected, conn, heldVisitId = null) {
   if (!expected?.selfPayLive) return;
+  // The visit held before the invoice lock must still be the invoice's visit.
+  if (String(row.scheduled_service_id || '') !== String(heldVisitId || '')) {
+    throw previewChangedError('Invoice changed while editing — its visit link moved; re-check and retry');
+  }
   if (await annualPlanLive(row, conn)) {
     throw previewChangedError('Invoice changed while editing — it is now (or may be) part of an annual plan; re-check and retry');
   }
@@ -112,4 +123,4 @@ async function assertSelfPayLive(row, expected, conn) {
   }
 }
 
-module.exports = { verifiedSelfPay, assertSelfPayLive, invoiceVersionChanged, assertInvoiceVersion, assertExpectedNewTotal, applyInvoiceVersion };
+module.exports = { lockBarRetotalVisit, verifiedSelfPay, assertSelfPayLive, invoiceVersionChanged, assertInvoiceVersion, assertExpectedNewTotal, applyInvoiceVersion };

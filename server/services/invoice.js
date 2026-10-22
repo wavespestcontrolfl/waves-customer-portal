@@ -10975,6 +10975,10 @@ const InvoiceService = {
       // then the claim re-check below runs on a fresh statement that can
       // see the winner's commit (the pre-check alone could read a snapshot
       // taken before a concurrent claim committed).
+      // The bar's retotal (expected.selfPayLive) holds its visit FOR SHARE BEFORE the invoice row: the schedule's Bill-To save
+      // writes the visit and then locks its invoices, so visit -> invoice is the order both sides take. The annual-plan and
+      // owner checks below then run on the locked rows; an invoice whose visit link moved since is refused there.
+      const barVisitId = await require("./invoice-bar-expected").lockBarRetotalVisit(client, existing, expected);
       const lockedRow = await client("invoices")
         .where({ id })
         .forUpdate()
@@ -10985,7 +10989,7 @@ const InvoiceService = {
         );
       }
       require("./invoice-bar-expected").assertInvoiceVersion(lockedRow, expected, "editing");
-      await require("./invoice-bar-expected").assertSelfPayLive(lockedRow, expected, client);
+      await require("./invoice-bar-expected").assertSelfPayLive(lockedRow, expected, client, barVisitId);
       // The locked row is the only authority for the dues stamp. A stamp whose
       // month this edit did not lock (never expected: see above) is a stale
       // edit, refused rather than run unlocked.

@@ -82,9 +82,14 @@ describe('invoiceVersionChanged / assertInvoiceVersion / applyInvoiceVersion', (
     const conn = (table) => { const q = { where: () => q, forShare: () => { locks.push(table); return q; }, first: async () => ({ id: 'x' }) }; return q; };
     try {
       // An annual term that appeared through the visit refuses, with the visit row held FOR SHARE first; unverifiable too.
-      term.mockResolvedValueOnce('term-1');
-      await expect(assertSelfPayLive(row({ scheduled_service_id: 'ss-1' }), { selfPayLive: true }, conn)).rejects.toMatchObject({ code: 'PREVIEW_CHANGED' });
+      // The visit is locked BEFORE the invoice (lockBarRetotalVisit), and must still be the invoice's visit under the lock.
+      const { lockBarRetotalVisit } = require('../services/invoice-bar-expected');
+      expect(await lockBarRetotalVisit(conn, { scheduled_service_id: 'ss-1' }, { selfPayLive: true })).toBe('ss-1');
+      expect(await lockBarRetotalVisit(conn, { scheduled_service_id: 'ss-1' }, { status: 'sent' })).toBeNull();
       expect(locks).toEqual(['scheduled_services']);
+      await expect(assertSelfPayLive(row({ scheduled_service_id: 'ss-2' }), { selfPayLive: true }, conn, 'ss-1')).rejects.toMatchObject({ code: 'PREVIEW_CHANGED' });
+      term.mockResolvedValueOnce('term-1');
+      await expect(assertSelfPayLive(row({ scheduled_service_id: 'ss-1' }), { selfPayLive: true }, conn, 'ss-1')).rejects.toMatchObject({ code: 'PREVIEW_CHANGED' });
       term.mockRejectedValueOnce(new Error('db down'));
       await expect(assertSelfPayLive(row(), { selfPayLive: true }, conn)).rejects.toMatchObject({ code: 'PREVIEW_CHANGED' });
       await expect(assertSelfPayLive(row(), { status: 'sent' }, {})).resolves.toBeUndefined();
