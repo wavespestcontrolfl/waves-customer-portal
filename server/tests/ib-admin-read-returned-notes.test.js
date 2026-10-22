@@ -302,8 +302,8 @@ describe('Codex #6375 r3: Basic casing, cut marker, secret-shaped keys', () => {
   test('a card number stored as a number inside a structured note is masked; ordinary numbers stay', async () => {
     const result = await read(ENTRY, { id: 1, notes: { details: { card_number: 4242424242424242, dogs: 2, gate: 1234 } } });
     expect(JSON.stringify(result)).not.toContain('4242424242424242');
-    // The masked number is no longer valid JSON, so the scrubbed text is the note; ordinary numbers stay in it.
-    expect(result.data.notes).toBe('{"details":{"card_number":[card ending 4242],"dogs":2,"gate":1234}}');
+    // The leaf is scrubbed before the whole-note pass, so the shape survives; ordinary numbers stay.
+    expect(result.data.notes.details).toEqual({ card_number: '[card number removed]', dogs: 2, gate: 1234 });
   });
 
   test('a 19-digit card number rounded by JSON parsing is still removed (r4)', async () => {
@@ -804,6 +804,16 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     const bearer = await read(ENTRY, { id: 1, notes: { header: 'Bearer\nabc123xyz', gate: 'west' } });
     expect(JSON.stringify(bearer)).not.toContain('abc123xyz');
     expect(bearer.data.notes.gate).toBe('west');
+  });
+
+  test('credential keys and leaves are scrubbed before the card check and before an unparseable result (r24 audit P0)', async () => {
+    const withCard = await read(ENTRY, { id: 1, notes: { auth_code: 'synthetic-secret', card: ['4242', '4242', '4242', '4242'] } });
+    expect(JSON.stringify(withCard)).not.toMatch(/synthetic-secret|4242.*4242/);
+    expect(JSON.stringify(withCard)).toContain('[card ending 4242]');
+    const withPassword = await read(ENTRY, { id: 1, notes: { auth_code: 'synthetic-secret', password: 'hidden', gate: 'west' } });
+    expect(JSON.stringify(withPassword)).not.toMatch(/synthetic-secret|hidden/);
+    const bearerAndCard = await read(ENTRY, { id: 1, notes: { header: 'Bearer\nabc123xyz', card: [4242, 4242, 4242, 4242] } });
+    expect(JSON.stringify(bearerAndCard)).not.toMatch(/abc123xyz|4242.*4242/);
   });
 
   test('a split card number inside a long structured note is also found after the budget is applied', async () => {

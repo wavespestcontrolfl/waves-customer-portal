@@ -557,9 +557,7 @@ function returnNoteEntries(item, state, depth) {
 // redaction, then the note scrubber), so a card number split across array items or a credential key
 // is judged on the text the model would read. The result is parsed back; when it no longer parses
 // (the credential rule removed the tail, or the text was cut) the scrubbed string is the note. The
-// parsed structure is then walked as before: every key and string leaf is scrubbed on its own (a value
-// the serialized text hides, such as a line break inside "Bearer\nabc", and credential-named keys), and
-// the budget and the [cut] markers apply (Codex #6375 r24).
+// parsed structure is then walked again for the budget and the [cut] markers (Codex #6375 r24).
 // The scalar values of a structured note in document order, as text (keys are not included).
 function noteLeaves(value, out = [], depth = 0) {
   if (depth > MAX_DEPTH || out.length > 5000) return out;
@@ -570,8 +568,11 @@ function noteLeaves(value, out = [], depth = 0) {
 }
 
 function returnStructuredNote(item, state) {
+  // First every key and string leaf is scrubbed on its own (credential-named keys, a "Bearer\nabc" the
+  // serialized text hides), with no budget yet; the whole-note checks then read the scrubbed copy.
+  const prescrubbed = returnNote(item, state, 1);
   let serialized;
-  try { serialized = JSON.stringify(item); } catch { serialized = String(item); }
+  try { serialized = JSON.stringify(prescrubbed); } catch { serialized = String(prescrubbed); }
   const cutAtScan = serialized.length > SCAN_LIMIT;
   const { text, removed } = scrubNoteText(redactNoteLinks(trimToScanLimit(serialized), state));
   state.noteSecrets += removed;
