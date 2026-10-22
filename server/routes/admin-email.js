@@ -481,23 +481,29 @@ router.get('/scheduled', async (req, res) => {
 });
 
 // Closes the scheduled email's admin alert (dedupeKey scheduled-email:<id>)
-// through the shared Done writer. Best effort: a failure leaves the alert for
-// the office to close by hand.
+// through the shared Done writer. Returns false when it could not; the
+// caller decides whether that matters.
 async function closeScheduledAlert(id, req, resolution) {
   try {
     const ids = (await db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
       .whereRaw("metadata->>'dedupeKey' = ?", [`scheduled-email:${id}`]).select('id')).map((n) => n.id);
     if (ids.length) await require('../services/notification-service').markAdminDone(ids, { by: req.technicianId || 'scheduled-email', resolution, role: req.techRole });
+    return true;
   } catch (err) {
     logger.warn(`[email] scheduled alert close failed (${err.code || 'error'})`);
+    return false;
   }
 }
 
 // POST /scheduled/:id/sent-checked — the office checked the Gmail Sent
 // folder for an email that may have gone out ("I checked"): its alert is
-// done. Sends nothing, so it answers with the gate off too.
+// done. 500 when that could not be recorded, so the browser keeps its guard
+// and the check can be repeated. Sends nothing, so it answers with the gate
+// off too.
 router.post('/scheduled/:id/sent-checked', async (req, res) => {
-  await closeScheduledAlert(req.params.id, req, 'The office checked the Gmail Sent folder.');
+  if (!(await closeScheduledAlert(req.params.id, req, 'The office checked the Gmail Sent folder.'))) {
+    return res.status(500).json({ error: 'Could not record the check. Try again.' });
+  }
   res.json({ success: true });
 });
 

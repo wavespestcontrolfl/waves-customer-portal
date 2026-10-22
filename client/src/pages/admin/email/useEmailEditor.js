@@ -156,10 +156,13 @@ export default function useEmailEditor(userId) {
     const entry = uncertainSchedule.current[slot];
     if (scheduling || !entry) return;
     // A guard with no key is the operator's call. For an email that may have
-    // gone out, that check is also its alert's job done: the server closes it
-    // (best effort; the office can still close it in the bell).
+    // gone out, that check is also its alert's job done: the guard clears only
+    // once the server closed the alert, so a failed request can be repeated.
     if (!entry.clientKey) {
-      if (entry.rowId) adminFetch(`/api/admin/email/scheduled/${encodeURIComponent(entry.rowId)}/sent-checked`, { method: "POST" }).catch(() => {});
+      if (entry.rowId && !(await alertClosed(entry.rowId))) {
+        setSendFeedback((current) => ({ ...current, [replyId ? "reply" : "compose"]: { messageId: replyId, error: true, message: "Could not record the check. Try again in a moment." } }));
+        return;
+      }
       rememberUncertain(slot, null);
       return;
     }
@@ -182,6 +185,12 @@ export default function useEmailEditor(userId) {
     rememberUncertain(slot, outcome.next);
     const kept = outcome.withdraw && !withdrawIfQueued(replyId, row);
     say(kept ? `${outcome.message} Your newer edits were not scheduled and are still in the draft.` : outcome.message, Boolean(outcome.next));
+  };
+  const alertClosed = async (rowId) => {
+    try {
+      const response = await adminFetch(`/api/admin/email/scheduled/${encodeURIComponent(rowId)}/sent-checked`, { method: "POST" });
+      return response.ok;
+    } catch { return false; }
   };
   // Removes a draft whose email the server already holds (queued or sent),
   // but only while it is still that email's text: newer edits stay. Returns

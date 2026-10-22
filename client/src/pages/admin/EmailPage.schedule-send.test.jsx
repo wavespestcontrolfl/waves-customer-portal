@@ -487,10 +487,19 @@ describe("Email schedule send", () => {
     expect(screen.getByText(/Gmail may already have sent this email/)).toBeInTheDocument();
     const send = () => screen.getAllByRole("button", { name: "Send", exact: true }).at(-1);
     expect(send()).toBeDisabled();
+    // The Sent check is also the alert's job done: the guard clears only
+    // once the server recorded it.
+    const base = fetch.getMockImplementation();
+    let checkFails = true;
+    fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/sent-checked") && checkFails
+      ? response({ error: "down" }, 500) : base(input, options)));
+    fireEvent.click(screen.getByRole("button", { name: "I checked: it is in neither" }));
+    expect((await screen.findAllByText("Could not record the check. Try again in a moment.")).length).toBeGreaterThan(0);
+    expect(send()).toBeDisabled();
+    checkFails = false;
     fireEvent.click(screen.getByRole("button", { name: "I checked: it is in neither" }));
     await waitFor(() => expect(send()).not.toBeDisabled());
-    // The Sent check is also the alert's job done.
-    await waitFor(() => expect(posts("/queued-1/sent-checked")).toHaveLength(1));
+    expect(posts("/queued-1/sent-checked")).toHaveLength(2);
   });
 
   it("does not open a may-have-sent draft when the tab cannot save the Sent-check guard", async () => {
