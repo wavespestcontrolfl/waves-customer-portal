@@ -346,7 +346,7 @@ function bundleAverageScenario() {
   };
 }
 
-// GATE_ESTIMATE_APPLICATION_MONTHS fixture (owner 2026-10-21, EST-2026-1185
+// Application-months fixture (owner 2026-10-21, EST-2026-1185
 // shape, synthetic customer): quarterly pest $115.20 + monthly mosquito $74.70
 // per application, Silver 10%, stored monthly $113.10. Months with pest bill
 // $189.90, the other 8 bill $74.70.
@@ -1175,8 +1175,6 @@ window.fetch = async (input, init) => {
       glassDefault: true,
       // The harness runs with GATE_ESTIMATE_MONTHLY_AVERAGE on (as dev does).
       monthlyAverageEnabled: true,
-      // GATE_ESTIMATE_APPLICATION_MONTHS on in the harness (as dev does).
-      applicationMonthsEnabled: true,
       ...returnVisit,
       lawnCalendar: { programs: { standard: { visitsPerYear: 9 } } },
       ...referral,

@@ -84,6 +84,8 @@ const ADMIN_TECH_RESPONSE_FIELDS = [
   'fl_applicator_license', 'license_expiry', 'license_categories',
   'applicator_printed_name',
   'bouncie_imei', 'bouncie_vin', 'vehicle_name',
+  // Start-of-day point (home address is staff PII: admin-only, never logged).
+  'start_address', 'start_lat', 'start_lng',
 ];
 
 function pickTechResponseFields(tech, fields) {
@@ -100,7 +102,32 @@ function sanitizeTechForNonAdmin(tech) {
 }
 
 function sanitizeTechForAdmin(tech) {
-  return pickTechResponseFields(tech, ADMIN_TECH_RESPONSE_FIELDS);
+  const out = pickTechResponseFields(tech, ADMIN_TECH_RESPONSE_FIELDS);
+  // pg returns decimal columns as strings; the API hands back numbers.
+  for (const f of ['start_lat', 'start_lng']) {
+    if (out && out[f] != null) out[f] = Number(out[f]);
+  }
+  return out;
+}
+
+const START_ADDRESS_MAX = 300;
+const START_POINT_ERROR = 'startPoint must be null (office) or { address, lat, lng } with a real address and coordinates';
+
+// `startPoint` on PUT /technicians/:id. undefined = leave alone; null = back to
+// the office (all three columns cleared); otherwise address + lat + lng, all
+// required. Lat/lng are never accepted without each other, so the engine can
+// trust "start_lat set" to mean a usable point.
+function normalizeStartPoint(value) {
+  if (value === undefined) return { patch: {} };
+  if (value === null) return { patch: { start_address: null, start_lat: null, start_lng: null } };
+  if (typeof value !== 'object' || Array.isArray(value)) return { error: START_POINT_ERROR };
+  const address = typeof value.address === 'string' ? value.address.trim() : '';
+  if (!address || address.length > START_ADDRESS_MAX) return { error: START_POINT_ERROR };
+  const { lat, lng } = value;
+  const okLat = typeof lat === 'number' && Number.isFinite(lat) && lat >= -90 && lat <= 90;
+  const okLng = typeof lng === 'number' && Number.isFinite(lng) && lng >= -180 && lng <= 180;
+  if (!okLat || !okLng) return { error: START_POINT_ERROR };
+  return { patch: { start_address: address, start_lat: lat, start_lng: lng } };
 }
 
 // Authoritative admin check — reads from req.technician.role (the
@@ -906,6 +933,8 @@ async function updateTechnician(req, res, next) {
     if (normalizedEmail.error) return res.status(400).json({ error: normalizedEmail.error });
     const techLine = normalizeTechLine(body.twilioNumber);
     if (techLine.error) return res.status(400).json({ error: techLine.error });
+    const startPoint = normalizeStartPoint(body.startPoint);
+    if (startPoint.error) return res.status(400).json({ error: startPoint.error });
 
     const outcome = await db.transaction(async (trx) => {
       // Every Staff identity writer takes the table lock before a row lock.
@@ -953,6 +982,7 @@ async function updateTechnician(req, res, next) {
       if (requestedStatus !== undefined) Object.assign(updates, employmentPatch(requestedStatus));
       if (fieldDispatchable !== undefined) updates.field_dispatchable = fieldDispatchable;
       Object.assign(updates, techLine.patch);
+      Object.assign(updates, startPoint.patch);
 
       // Any transition that leaves `active` (→ inactive OR → prospective)
       // revokes sessions; entering active from prospective also rotates so a

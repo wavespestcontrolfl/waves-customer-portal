@@ -2804,10 +2804,10 @@ describe('monthly average beside per-application prices', () => {
     expect(container.textContent).not.toMatch(/Plan total/i);
   });
 
-  // GATE_ESTIMATE_APPLICATION_MONTHS (EST-2026-1185, codex #6399 r2): with the
-  // breakdown on, the cards drop their "$X a month" slices; the summary card
+  // Application months (EST-2026-1185, codex #6399 r2): with the monthly
+  // average on, the cards drop their "$X a month" slices; the summary card
   // carries per-application prices, both month amounts and the average.
-  it('pest quarterly + mosquito monthly, both gates on: no per-card slices, the breakdown card instead', async () => {
+  it('pest quarterly + mosquito monthly: no per-card slices, the breakdown card instead', async () => {
     const mosquito = {
       key: 'mosquito', label: 'Mosquito', isRecurring: true, isPest: false, waveGuardTierEligible: true,
       defaultFrequencyKey: 'monthly12', copy: { priceWording: {} },
@@ -2821,7 +2821,6 @@ describe('monthly average beside per-application prices', () => {
     const payload = {
       ...base,
       monthlyAverageEnabled: true,
-      applicationMonthsEnabled: true,
       pricing: {
         services: [pestSection(115.2, 4, 38.4), mosquito],
         frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 113.1, annual: 1357.2 }],
@@ -2977,7 +2976,7 @@ describe('monthly average beside per-application prices', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  // GATE_ESTIMATE_APPLICATION_MONTHS (EST-2026-1185): the customer sees what
+  // Application months (EST-2026-1185): the customer sees what
   // each application costs, what each kind of month bills, then the average.
   it('MonthlyAverageSummary with a breakdown: per-application prices, the two month amounts, then the average', () => {
     const model = {

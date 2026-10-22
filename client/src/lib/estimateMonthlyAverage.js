@@ -148,6 +148,6 @@ export function singleServiceAverageContext(monthlyAverage, hasOneTime) {
   return `${CONTEXT_LINE}${hasOneTime ? ONE_TIME_NOTICE : ''}`;
 }
 
-// GATE_ESTIMATE_APPLICATION_MONTHS: the breakdown is one pure function shared with the PDF
+// The application-months breakdown is one pure function shared with the PDF
 // document and the emails (shared/estimate-monthly-average.cjs).
 export { cadenceText, applicationMonthsBreakdown };

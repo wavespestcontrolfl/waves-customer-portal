@@ -22,6 +22,7 @@
  *   GATE_IB_TIER_UPGRADE_EMAIL=true (an Intelligence Bar update_customer card that raises a customer's WaveGuard tier AND changes the monthly rate they are billed emails that customer the membership.tier_upgraded notice after the card is confirmed and the update is saved; the card names the email before Confirm. Never on a bulk card, a first tier, a downgrade, a tier change with no price change, a rate the customer is not billed monthly, an auto-derived tier label, or an inactive or churned customer. Read at call time via ibTierUpgradeEmailLive(), strict 'true', dark by default; off = no pin, no card line and no email, exactly as before.)
  *   GATE_IB_REPRICE_VISITS=true (the Intelligence Bar's reprice_future_visits write tool, owner ruling 2026-10-07: one confirm card changes the per-visit price of one customer's future visits for one service, listing each visit's old -> new price; each visit is saved through the Schedule screen's own visit edit (updateVisitDetails over PUT /admin/schedule/:id/update-details), so the re-price block, validation and CAS are the screen's. Never a completed, in-progress, invoiced, prepaid, annual-prepay-covered or otherwise money-committed visit; a monthly-membership customer is refused (their price is the monthly rate). No customer message is sent. Read at call time via ibRepriceVisitsLive(), strict 'true', dark by default; off = the tool is not offered and refuses every call, changing nothing.)
  *   GATE_IB_GENERAL_READ=true (needs GATE_IB_PLATFORM; the Intelligence Bar's find_admin_reads and read_admin_data read tools, owner ruling 2026-10-12: on the owner login only, the bar may read what an admin screen reads. read_admin_data calls one reviewed admin GET endpoint from the generated catalog (server/services/intelligence-bar/admin-read-catalog.json) on this server as the logged-in owner and returns the JSON, capped. No write, no outside call, no file or stream. Read at call time via ibGeneralReadLive(), strict 'true', dark by default; off = the tools are not offered and refuse every call.)
+ *   GATE_IB_READ_NOTES=true (needs GATE_IB_GENERAL_READ; owner ruling 2026-10-13: the Intelligence Bar's general read RETURNS free-text notes and access instructions (gate codes, lockbox instructions) instead of the `[note withheld: N characters]` marker, on the owner login only. Each returned note passes the structural link redaction (signed and private links) and ONE fixed-format secret scrubber (API key and token shapes, Bearer tokens, JWTs, PEM blocks, long base64/hex runs, credential query parameters in URLs, card numbers, SSN pattern), is cut at 1,000 characters, and the read keeps its untrusted-data marker so later writes show confirm cards. Labelled credentials (a credential key followed by ':' or '=') lose everything after the separator to the end of the note string. No other prose rules: a code or password written as plain words comes back as written. Read at call time via ibReadNotesLive(), strict 'true', dark by default; off = notes are withheld exactly as before.)
  *   GATE_IB_GENERAL_EDIT=true (needs GATE_IB_PLATFORM; the Intelligence Bar's find_admin_edits and propose_admin_edit tools, owner ruling 2026-10-12: a general EDIT tool for a reviewed allow-list of small internal edits only, on the owner login only, ALWAYS a confirm card, never owner-direct. propose_admin_edit takes one method and endpoint pattern from the generated catalog (server/services/intelligence-bar/admin-write-catalog.json), the path parameters and a body limited to the fields the reviewed row lists (any other field is refused), shows each field's new value (and the current one when a reviewed read supplies it), and on Confirm sends that exact body as a PUT or PATCH to this server as the logged-in owner, so the screen's own checks apply. Never a customer message, money, price, delete, bulk change, setting, user or credential; address text shows an ADDRESS CHANGE card. Read at call time via ibGeneralEditLive(), strict 'true', dark by default; off = the tools are not offered and refuse every call.)
  *   GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT=true (an estimate sent to a customer after their Waves Assessment closes that assessment visit quietly — no report, text, review ask or invoice; a sweep every ten minutes, owner ruling 2026-10-04; off = nothing runs)
  *   GATE_NEIGHBORHOOD_ACCESS=true (a neighborhood gate code saved by the office, the customer's portal, a call or a customer text is also filed under that property's neighborhood in the shared directory, and a code that conflicts with the one on file is flagged needs_confirm and listed on the Gate codes page, with no bell (owner ruling 2026-10-03); read at call time via neighborhoodAccessLive(), dark by default; off = the save is byte-identical to before)
@@ -205,6 +206,7 @@
  *   GATE_LAWN_DELIVERY_RECOVERY=true (resume a confirmed lawn visit's interrupted customer delivery; FAILS CLOSED everywhere — off = the sweep shadow-logs candidates and sends nothing)
  *   GATE_LAWN_WATERING_RULE=true (lawn report watering instruction: frozen per-product watering rules drive the aftercare writer, the top-of-report banner payload and the weekly-plan "not before" overlay; sets evidenceSource product_instruction so the existing verdict table finally resolves hold / credit; ships DARK, read at call time via lawnWateringRuleLive(); off = byte-identical report payload)
  *   GATE_LAWN_WATERING_FORECAST=true (lawn watering banner forecast + rain close-out, needs GATE_LAWN_WATERING_RULE: at completion a water-in instruction whose property forecast says at least the water-in amount of rain falls inside its window freezes ONE conditional sentence (instruction.forecast, in INCHES, never a probability) that the LIVE web banner shows beside the unchanged lines; on the live view only, radar-measured (MRMS) rain on whole days inside the window that reaches the water-in amount closes the banner with a measured-inches line. Holds never get either. The PDF, email, watering text, hero and assistant never change; ships DARK, read at call time via lawnWateringForecastLive(); off = byte-identical payload)
+ *   GATE_LAWN_WATERING_TEXT_FORECAST=true (lawn watering forecast from two sources, needs GATE_LAWN_WATERING_FORECAST: the water-in rain sentence is frozen only when Open-Meteo's amount AND an NWS hourly "rain likely" hour agree in the window; a timed hold then a water-in gets the sentence for rain after the hold ends; the watering text carries the frozen sentence. Off = today: Open-Meteo alone, plain water-in only, live banner only)
  *   GATE_LAWN_EXPECTATIONS=true (lawn report monthly program line: snapshot.seasonalNote carries one calendar-based, tier-neutral sentence about what the lawn program v13 focuses on this month (lawn-program-line.js PROGRAM_LINES_V13, claims proven against server/config/lawn-protocol-v13.json), in place of the peak/shoulder/dormant season note, and the lead layout renders it once beside the trends; recurring lawn plan visits only (one-time jobs, callbacks and unresolved service identities keep the old note), and only a visit whose plan resolved the staged v13 version with GATE_LAWN_V13 on: a visit with no recorded version or an older one keeps the old note (the retired per-grass sentences were removed, so no past report is rewritten); null in Jun-Sep when a nitrogen product may have been applied (any unresolved product counts), then the old note stays; lawn only; ships DARK, read at call time via lawnExpectationsLive(); off = byte-identical report payload and render)
  *   GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES=true (lawn report: no Lawn Coverage section when the visit's coverage zones were only the schematic defaults (no technician-marked zone) AT COMPLETION; owner 2026-10-06; the verdict is frozen once at completion by the lawn write gate into service_records.structured_notes.lawnCoverageVerdict { v: 1, defaultsOnly, frozenAt }, first writer wins, only while the gate is live and the zone / geometry reads succeeded; a render and the PDF key (':covhide=1' only for a frozen defaultsOnly true) read that frozen value and never the live zone rows; a visit with no frozen verdict, such as an older visit, renders exactly as with the gate off; ships DARK, read at call time via lawnCoverageHideDefaultZonesLive(); off = byte-identical payload)
  *   GATE_LAWN_PROGRAM_DETAIL=true (lawn report: under the v13 month sentence, the month's "Why now" line from lawn-program-line.js PROGRAM_DETAIL_V13: seasonal facts and the step by category, no product names, rates, watering advice or outcome timing; needs GATE_LAWN_EXPECTATIONS; strict 'true' only; owner 2026-10-06; ships DARK, read at call time via lawnProgramDetailLive(); off = byte-identical payload)
@@ -711,6 +713,11 @@ const gates = {
   // and the response carries no estimate URL. Quote-mode (CTA) taps keep the
   // request flow at ANY setting.
   reportClickToEstimate: process.env.GATE_REPORT_CLICK_TO_ESTIMATE === 'true',
+  // Pre-treatment certificate renders as the paper Notice of Termite
+  // Protection label with its blanks filled, plus a details block for the
+  // certificate fields the label has no blank for. Off = the field-grid
+  // Certificate of Compliance. Look only; no data or send change.
+  pretreatStickerReport: process.env.GATE_PRETREAT_STICKER_REPORT === 'true',
 
   // "Your plan" section on the LIVE report (owner ask 2026-09-28): an active
   // plan member's completed-visit + re-service COUNTS for this calendar year
@@ -2237,6 +2244,16 @@ const gates = {
   // before. See services/call-reschedule-apply.js.
   // Automatic moves also require GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS.
   callRescheduleApply: process.env.GATE_CALL_RESCHEDULE_APPLY === 'true',
+  // Make-up move (owner 2026-10-22): a recurring visit that was MISSED (its
+  // 6 PM missed-appointment check left an open customer_noshow row) and the
+  // customer then calls, the agent agrees a new time and the caller accepts.
+  // The pipeline moves THAT visit (series default policy) instead of
+  // inserting a new general-service visit beside it. Runs before the booking
+  // branch; a candidate that cannot be moved holds the booking for review,
+  // never falls back to a new visit. NO customer communication. Off → today's
+  // booking behavior. See services/call-reschedule-apply.js applyCallMakeupMove.
+  // Automatic moves also require GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS.
+  callMakeupMove: process.env.GATE_CALL_MAKEUP_MOVE === 'true',
   rescheduleProposalCard: gateEnvValue('GATE_RESCHEDULE_PROPOSAL_CARD'),
   callbackCard: gateEnvValue('GATE_CALLBACK_CARD'),
   smsAdditionalProperty: gateEnvValue('GATE_SMS_ADDITIONAL_PROPERTY'),
@@ -3045,16 +3062,6 @@ const gates = {
   // Kill switch: unset GATE_ESTIMATE_FOLLOWUP_MONTHLY_AVERAGE (read at boot; the Railway restart applies it).
   estimateFollowupMonthlyAverage: isProd ? process.env.GATE_ESTIMATE_FOLLOWUP_MONTHLY_AVERAGE === 'true' : true,
 
-  // Application-month breakdown (owner 2026-10-21, EST-2026-1185: "Which is
-  // it? $113 a month or $189 a month?"). With the monthly average on, a plan
-  // of one non-monthly service plus monthly services shows each service's
-  // per-application price and cadence, what the customer pays in the months
-  // that service is applied and in the other months, then the average. The
-  // payment preview's "Per application" row reads "First application". The
-  // page only; email and PDF unchanged. Needs GATE_ESTIMATE_MONTHLY_AVERAGE.
-  // Kill switch: unset GATE_ESTIMATE_APPLICATION_MONTHS (read at boot; the Railway restart applies it).
-  estimateApplicationMonths: isProd ? process.env.GATE_ESTIMATE_APPLICATION_MONTHS === 'true' : true,
-
   // Estimate acceptance terms (owner ruling 2026-08-28): the public estimate
   // renders a one-line authorization + inline "View terms" drawer directly
   // above Accept (same steps, no extra page) and the accept route records
@@ -3677,6 +3684,17 @@ const gates = {
   // environment; scheduling/find-time-hints.js reads it through
   // gateEnvValue() at call time. Kill switch: unset — drive-only order.
   bookingRainRank: gateEnvValue('GATE_BOOKING_RAIN_RANK'),
+
+  // Technician start points (owner 2026-10-22): a tech with a start address
+  // (Team tab, technicians.start_lat/lng) starts and ends the day there, not
+  // at the office, for STAFF callers that opt in (never public booking or a
+  // commit-time check), in the staff picker's open-gap search and the arrival-
+  // window route check (scheduling/tech-start-point.js). Auto-dispatch, route
+  // reorder and the estimate slot list follow in later PRs; flip only after
+  // they merge, so every engine prices the same day the same way. OFF in
+  // every environment; read through gateEnvValue() at call time. Kill switch:
+  // unset — every route starts and ends at the office, as before.
+  techStartPoints: gateEnvValue('GATE_TECH_START_POINTS'),
 
   // Best-times chip stop names (owner 2026-10-21): each best-times chip in
   // the admin availability strip names the stop it would follow ("after
@@ -4526,6 +4544,12 @@ const gates = {
   // lawnWateringForecastLive().
   lawnWateringForecast: gateEnvValue('GATE_LAWN_WATERING_FORECAST'),
 
+  // Lawn watering forecast from two sources, in the watering text (owner
+  // 2026-10-22). Ships DARK. This entry is for logGateStatus only: the write
+  // gate and lawn-watering-sms.js read GATE_LAWN_WATERING_TEXT_FORECAST at call
+  // time via lawnWateringTextForecastLive().
+  lawnWateringTextForecast: gateEnvValue('GATE_LAWN_WATERING_TEXT_FORECAST'),
+
   // Lawn report monthly program line (lawn report rebuild P9): snapshot.seasonalNote
   // becomes the month's lawn program v13 sentence (v13 visits only). Ships DARK. This
   // entry is for logGateStatus only: lawn-report-v2.js reads GATE_LAWN_EXPECTATIONS
@@ -5110,6 +5134,15 @@ function ibCreateInvoiceLive() {
 // this reader is false then, everywhere. Kill: unset either variable.
 function ibGeneralReadLive() {
   return process.env.GATE_IB_GENERAL_READ === 'true' && gateEnvValue('GATE_IB_PLATFORM');
+}
+
+// GATE_IB_READ_NOTES read at CALL time — strict `=== 'true'`, dark, and it needs
+// GATE_IB_GENERAL_READ (so GATE_IB_PLATFORM too). With it on, the general read
+// (admin-read-tools.js) returns free-text notes through one fixed-format secret
+// scrubber, cut at 1,000 characters, instead of the withheld marker. Off = the
+// marker, as before. Kill: unset the variable.
+function ibReadNotesLive() {
+  return process.env.GATE_IB_READ_NOTES === 'true' && ibGeneralReadLive();
 }
 
 // GATE_IB_GENERAL_EDIT read at CALL time — strict `=== 'true'`, dark, and it
@@ -5707,6 +5740,15 @@ function lawnWateringRuleLive() {
 // reads no forecast, the payload and PDF are byte-identical.
 function lawnWateringForecastLive() {
   return gateEnvValue('GATE_LAWN_WATERING_FORECAST');
+}
+
+// GATE_LAWN_WATERING_TEXT_FORECAST read at CALL time (same 1/true/on convention
+// as gateEnvValue). Owner 2026-10-22: the forecast sentence needs both sources
+// (Open-Meteo amount + NWS "rain likely"), a timed hold then a water-in gets it
+// for rain after the hold, and the watering text carries it. Needs
+// GATE_LAWN_WATERING_FORECAST. Off = today's forecast sentence, byte for byte.
+function lawnWateringTextForecastLive() {
+  return gateEnvValue('GATE_LAWN_WATERING_TEXT_FORECAST');
 }
 
 // GATE_LAWN_EXPECTATIONS read at CALL time (same 1/true/on convention as
@@ -6687,6 +6729,7 @@ module.exports.callLeadFormAddressStreetLevelLive = callLeadFormAddressStreetLev
 module.exports.bookPreferredTimeLive = bookPreferredTimeLive;
 module.exports.lawnWateringRuleLive = lawnWateringRuleLive;
 module.exports.lawnWateringForecastLive = lawnWateringForecastLive;
+module.exports.lawnWateringTextForecastLive = lawnWateringTextForecastLive;
 module.exports.lawnExpectationsLive = lawnExpectationsLive;
 module.exports.lawnCoverageHideDefaultZonesLive = lawnCoverageHideDefaultZonesLive;
 module.exports.lawnProgramDetailLive = lawnProgramDetailLive;
@@ -6900,6 +6943,8 @@ module.exports.ibPaymentPlanLive = ibPaymentPlanLive;
 module.exports.ibCreateInvoiceLive = ibCreateInvoiceLive;
 // GATE_IB_GENERAL_READ reader, on its own line so gate PRs never conflict.
 module.exports.ibGeneralReadLive = ibGeneralReadLive;
+// GATE_IB_READ_NOTES reader, on its own line so gate PRs never conflict.
+module.exports.ibReadNotesLive = ibReadNotesLive;
 // GATE_IB_GENERAL_EDIT reader, on its own line so gate PRs never conflict.
 module.exports.ibGeneralEditLive = ibGeneralEditLive;
 // GATE_IB_TOOL_SEARCH reader, on its own line so gate PRs never conflict.
@@ -7074,5 +7119,14 @@ function bidDeskLive() {
 }
 // GATE_BID_DESK reader, on its own line so gate PRs never conflict.
 module.exports.bidDeskLive = bidDeskLive;
+// GATE_CALL_LEAD_LAZY_STRIPE read at CALL time, strict `=== 'true'`, dark in every environment.
+// services/call-recording-processor.js: a customer created from a call no longer gets a Stripe profile at once
+// (every card-save and payment path creates it on demand), so a lead that never pays leaves no empty profile to
+// block a later duplicate merge. Sends nothing. Off = today's behavior, byte for byte.
+function callLeadLazyStripeLive() {
+  return process.env.GATE_CALL_LEAD_LAZY_STRIPE === 'true';
+}
+// GATE_CALL_LEAD_LAZY_STRIPE reader, on its own line so gate PRs never conflict.
+module.exports.callLeadLazyStripeLive = callLeadLazyStripeLive;
 // Retired gate names, for the admin gate list (services/gate-list.js), on its own line.
 module.exports.RETIRED_GATES = RETIRED;

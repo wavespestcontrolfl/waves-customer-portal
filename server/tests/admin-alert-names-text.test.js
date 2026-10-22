@@ -96,6 +96,22 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     expect(sentUpdates[0].bindings).toContain('n-standing');
   });
 
+  test('one text with two promises: one alert, naming the customer and both promises (owner 2026-10-22)', async () => {
+    const quote = "Adam will be out there and he'll look into how we can resolve it";
+    const promise = (id, description) => row({ id, kind: 'other', description, evidence: [{ quote, matched: true }], sms_context: { basis: 'promise' } });
+    const first = promise('commit-1', 'will be out there');
+    await ring({ row: first, args: { dedupeKey: 'sms-commitment-source:sms-1', promises: [first, promise('commit-2', "he'll look into how we can resolve it")] } });
+    const [, title, body, opts] = lastCall();
+    expect(title).toBe('Comms — follow up with Albert Clark');
+    expect(body).toMatch(/^We said “will be out there” and “he'll look into/);
+    expect(body.length).toBeLessThanOrEqual(MAX_WHY_CHARS);
+    expect(opts.dedupeKey).toBe('sms-commitment-source:sms-1');
+    expect(opts.detail).toContain('Albert Clark');
+    expect(opts.detail).toContain('• “will be out there”');
+    expect(opts.detail).toContain("• “he'll look into how we can resolve it”");
+    expect(opts.metadata.commitment_ids).toEqual(['commit-1', 'commit-2']);
+  });
+
   test('a suppressed ring has no row to keep, so nothing is closed', async () => {
     NotificationService.notifyAdmin.mockResolvedValueOnce({ id: null, suppressed: true });
     await ring();

@@ -483,7 +483,8 @@ function useLastTrace({ serviceId, request, wanted }) {
 }
 
 // The copy itself: one tap saves the last trace onto this visit and reads the
-// visit's trace again, so the hold clears as after a hand trace. The server
+// visit's trace again, as after a hand trace; while it runs, the sheet holds its
+// send and its way back (`reusing`). The server
 // picks the trace and runs the tracer's own save checks (the property this
 // sheet loaded, a visit still open); a refusal goes to `setError` and the
 // Trace button stays usable. `plain` is a plain pest visit that can be traced
@@ -509,7 +510,7 @@ export function useTraceReuse({ serviceId, request, propertyId, trace, mode, tra
           openVisitOnly: true,
         }),
       });
-      // The answer IS the saved trace, as after a hand trace: the hold clears
+      // The answer IS the saved trace, as after a hand trace: the trace shows
       // and the button goes at once, whatever a later read does (a second tap
       // would only meet trace_exists; Codex P2 on #6175).
       if (data?.treatmentZone) trace.saved(data.treatmentZone);
@@ -539,19 +540,36 @@ export function perimeterFeetOf(zone) {
   return Number.isFinite(feet) && feet > 0 ? feet : null;
 }
 
-export function TraceSection({ trace, locked, onTrace }) {
-  const feet = perimeterFeetOf(trace.zone);
+// `optional` (the visit step, owner 2026-10-22): says "Optional" until a trace is saved; a trace never holds the send.
+// `tracer`: the inline tracer, open under the button. `busy` (a report being written): the button waits, so the
+// tracer never opens just before the sheet moves to the report step. No trace offered: nothing renders, except an
+// open tracer, which stays mounted in the same place when the offer goes (a product changed while tracing), so its
+// points and a save in flight stay and its Done or × still closes it.
+export function TraceSection({ trace, locked, busy = false, onTrace, optional = false, tracer = null }) {
+  if (!trace && !tracer) return null;
   return (
     <section className="tech-visit-choice-section">
+      {trace && <TraceOffer trace={trace} locked={locked || busy} onTrace={onTrace} optional={optional} />}
+      {tracer}
+    </section>
+  );
+}
+
+function TraceOffer({ trace, locked, onTrace, optional }) {
+  const feet = perimeterFeetOf(trace.zone);
+  return (
+    <>
       <div className="tech-visit-section-head">
         <h3 className="tech-visit-section-title">Trace where we sprayed</h3>
-        {trace.zone && <span className="tech-visit-muted">{feet ? `Perimeter traced · ${feet} ft` : 'Traced'}</span>}
+        {trace.zone
+          ? <span className="tech-visit-muted">{feet ? `Perimeter traced · ${feet} ft` : 'Traced'}</span>
+          : optional && <span className="tech-visit-muted">Optional</span>}
       </div>
       <p className="tech-visit-muted">Drag along where you sprayed on the satellite photo of the home. The line shows on the customer’s report.</p>
       <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={locked} onClick={onTrace}>
         {trace.zone ? 'Trace again' : 'Trace where we sprayed'}
       </Button>
-    </section>
+    </>
   );
 }
 

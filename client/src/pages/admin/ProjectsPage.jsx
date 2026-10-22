@@ -20,7 +20,12 @@ import ProjectFindingFieldInput, {
   hasCatalogBackedProjectFields,
   normalizeApplicationRows,
 } from "../../components/tech/ProjectFindingFieldInput";
-import { parseSections, TERMITE_COMPLIANCE_SECTIONS } from "../ProjectReportViewPage";
+import {
+  parseSections,
+  TERMITE_COMPLIANCE_SECTIONS,
+  TermiteNoticeSticker,
+  CertificateOfCompliance,
+} from "../ProjectReportViewPage";
 import PoisonControlCopy, { applicatorIdLine } from "../../components/report/PoisonControlCopy";
 import termiteTreatmentMethods from "../../../../shared/termite-treatment-methods.json";
 
@@ -875,6 +880,49 @@ function ProjectPreviewPhotoTile({ photo, projectId }) {
   );
 }
 
+// GATE_PRETREAT_STICKER_REPORT (detail endpoint's pretreat_sticker_report):
+// the certificate previews as the same notice + details block the public
+// page renders, so staff approve what the customer gets.
+function isStickerCertificate(project) {
+  return project.project_type === CERTIFICATE_TYPE && Boolean(project.pretreat_sticker_report);
+}
+
+// The public page blanks a stored final-exterior value the copy screen
+// fails (detail payload's final_exterior_screened_keys); the preview blanks
+// the same keys while the editor still holds that stored value. A new value
+// typed here cannot be saved with a banned claim (the write guard 422s).
+export function screenedPreviewFindings(project, findings) {
+  const keys = Array.isArray(project.final_exterior_screened_keys) ? project.final_exterior_screened_keys : [];
+  if (!keys.length) return findings;
+  let stored = project.findings;
+  if (typeof stored === "string") {
+    try { stored = JSON.parse(stored); } catch { stored = {}; }
+  }
+  const out = { ...(findings || {}) };
+  for (const key of keys) {
+    if (out[key] === stored?.[key]) out[key] = "";
+  }
+  return out;
+}
+
+function StickerCertificatePreview({ project, findings: rawFindings, projectDate }) {
+  const findings = screenedPreviewFindings(project, rawFindings);
+  const technicianName = project.applicator_name || project.tech_name;
+  const projectDateLabel = projectDate ? fmtDate(projectDate) : "";
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <TermiteNoticeSticker findings={findings} technicianName={technicianName} projectDateLabel={projectDateLabel} />
+      <CertificateOfCompliance
+        findings={findings}
+        customerName={project.customer_name}
+        technicianName={technicianName}
+        projectDateLabel={projectDateLabel}
+        detailsOnly
+      />
+    </div>
+  );
+}
+
 function CustomerProjectReportPreview({
   project,
   projectId,
@@ -946,7 +994,10 @@ function CustomerProjectReportPreview({
     : null;
   const suppressFindingsForNarrative = Boolean(aiNarrativeSections)
     && (project.project_type !== WDO_TYPE || Boolean(project.fdacs_pdf_available));
-  const findingsEntries = suppressFindingsForNarrative ? [] : Object.entries(findings || {}).filter(
+  // GATE_PRETREAT_STICKER_REPORT: the certificate renders as the notice +
+  // details block below, exactly like the public page, so the raw list hides.
+  const stickerCertificate = isStickerCertificate(project);
+  const findingsEntries = (suppressFindingsForNarrative || stickerCertificate) ? [] : Object.entries(findings || {}).filter(
     ([k, v]) => !INTERNAL_FINDING_KEYS.has(k) && hasMeaningfulValue(formatProjectPreviewValue(v)),
   );
   // Same compliance-block rule as the public page (preview == final,
@@ -1032,6 +1083,10 @@ function CustomerProjectReportPreview({
           >
             Open live customer report
           </a>
+        )}
+
+        {stickerCertificate && (
+          <StickerCertificatePreview project={project} findings={findings} projectDate={projectDate} />
         )}
 
         <div

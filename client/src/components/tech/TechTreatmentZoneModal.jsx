@@ -79,23 +79,8 @@ const API = import.meta.env.VITE_API_URL || '';
 const MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
 const CLOSE_TAP_CSS_PX = 22;
 
-// `autoTrace`: one outline read as soon as the photo is ready. Never over
-// points already there or a trace already saved, and never a second time
-// (a failed read leaves the tech to tap Auto-trace or trace by hand).
-function useAutoTraceOnce(conditions, run) {
-  const ran = useRef(false);
-  useEffect(() => {
-    if (ran.current || !conditions.every(Boolean)) return;
-    ran.current = true;
-    run();
-  });
-}
-
 export default function TechTreatmentZoneModal({
   serviceId, customerName, address, lat, lng, onClose, onSaved,
-  // Opened from the Fast Complete footer's "Auto-trace the house": the outline
-  // read starts once the photo is ready (one time, and only on an empty trace).
-  autoTrace,
   // Optional: the property the caller loaded the visit at. Sent with the
   // save so the server refuses a visit moved to another property since, even
   // a save that waited behind the move (Codex #5538). Absent, nothing changes.
@@ -113,6 +98,11 @@ export default function TechTreatmentZoneModal({
   // turf-only highlight mask (it would exclude the beds the treatment
   // covers), and saves captureMode 'yard'.
   yardMode = false,
+  // `inline` (owner 2026-10-22, "should be on the same page"): the tracer draws
+  // in the page as a card, with no full-screen cover, focus trap, Escape or
+  // page scroll lock.
+  // Its close and Done buttons call onClose, which folds it away.
+  inline = false,
 }) {
   const T = LIGHT;
   // The M-theme pills (44px, rounded-full, UPPERCASE 500).
@@ -358,7 +348,6 @@ export default function TechTreatmentZoneModal({
       setSuggesting(false);
     }
   };
-  useAutoTraceOnce([autoTrace, mapState.status === 'ready', step === 'trace', !points.length, !existing], handleAutoTrace);
 
   // Step the map zoom in place. The Static Map re-centers on the same
   // lat/lng, so dropped points re-project exactly (pure 2× scale per step) —
@@ -603,8 +592,8 @@ export default function TechTreatmentZoneModal({
     if (!saving) onClose();
   };
 
-  const dialogRef = useModalFocus(true, guardedClose);
-  useLockBodyScroll();
+  const dialogRef = useModalFocus(!inline, guardedClose);
+  useLockBodyScroll(!inline);
 
   const mapFrame = (children, extraStyle) => (
     <div
@@ -634,23 +623,20 @@ export default function TechTreatmentZoneModal({
     </div>
   );
 
-  return (
-    <div
-      onClick={(event) => { event.stopPropagation(); guardedClose(); }}
-      style={{
-        position: 'fixed', inset: 0, background: T.scrim,
-        display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
-        zIndex: 1000,
-      }}
-    >
+  const card = (
       <div
         ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
+        role={inline ? 'region' : 'dialog'}
+        aria-modal={inline ? undefined : 'true'}
         aria-label="Treatment Zone"
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
-        style={{
+        style={inline ? {
+          background: T.bg, width: '100%', borderRadius: 12,
+          boxSizing: 'border-box', padding: 12,
+          border: `1px solid ${T.border}`,
+          fontFamily: T.font,
+        } : {
           background: T.bg, width: '100%', maxWidth: 560,
           borderTopLeftRadius: 16, borderTopRightRadius: 16,
           boxSizing: 'border-box', padding: 16, paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))', maxHeight: '92vh', overflowY: 'auto',
@@ -930,6 +916,18 @@ export default function TechTreatmentZoneModal({
           </>
         )}
       </div>
+  );
+  if (inline) return card;
+  return (
+    <div
+      onClick={(event) => { event.stopPropagation(); guardedClose(); }}
+      style={{
+        position: 'fixed', inset: 0, background: T.scrim,
+        display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
+        zIndex: 1000,
+      }}
+    >
+      {card}
     </div>
   );
 }
