@@ -1623,31 +1623,53 @@ async function repointRowwiseDropCollisions(trx, table, column, winnerId, loserI
 // customer_health_alerts: at most one OPEN rule alert per (customer_id,
 // alert_type) — customer_health_alerts_active_rule_uniq (migration
 // 20260626000012), which covers only the rule types below. Both duplicates
-// holding the same open rule alert is the same signal twice: the winner's
-// stays open and the loser's moves across DISMISSED, the index migration's own
-// dedupe, so its history is kept (ops 2026-10-22: a shared alert aborted a
-// merge with "repoint failed on customer_health_alerts.customer_id").
+// holding an open rule alert of the same type is one signal twice, scored at
+// different times: the NEWER open row stays open (the index migration's own
+// keep-the-most-recent dedupe) and the older one is DISMISSED, never deleted,
+// so its history and executed actions stay on the merged account. Both rows
+// are re-read under FOR UPDATE after the collision: the alert status route
+// takes no merge lock, so a row closed in between is no longer a collision
+// (ops 2026-10-22: a shared alert aborted a merge with "repoint failed on
+// customer_health_alerts.customer_id"; Codex #6431 r1).
 const HEALTH_ALERT_UNIQUE_RULE_TYPES = ['score_drop', 'critical_risk', 'service_gap', 'payment_issue',
   'low_engagement', 'satisfaction_drop', 'new_customer_risk'];
 const HEALTH_ALERT_OPEN_STATUSES = ['new', 'acknowledged'];
 
 async function repointHealthAlertsDismissCollisions(trx, table, column, winnerId, loserId) {
   const rows = await trx(table).where(column, loserId).select('id');
+  const move = (id, patch = {}) => trx.transaction(async (sp) => {
+    await sp(table).where({ id }).update({ [column]: winnerId, ...patch });
+  });
   let moved = 0;
   let dismissed = 0;
   for (const { id } of rows) {
     try {
-      await trx.transaction(async (sp) => {
-        await sp(table).where({ id }).update({ [column]: winnerId });
-      });
+      await move(id);
       moved += 1;
+      continue;
     } catch (e) {
       if (!(e && e.code === '23505')) throw e;
-      await trx(table).where({ id }).update({ [column]: winnerId, status: 'dismissed', updated_at: trx.fn.now() });
+    }
+    const loserRow = await trx(table).where({ id }).forUpdate().first('id', 'alert_type', 'status', 'created_at');
+    const winnerRow = loserRow && await trx(table)
+      .where({ [column]: winnerId, alert_type: loserRow.alert_type })
+      .whereIn('status', HEALTH_ALERT_OPEN_STATUSES)
+      .forUpdate()
+      .first('id', 'created_at');
+    if (!loserRow || !winnerRow || !HEALTH_ALERT_OPEN_STATUSES.includes(loserRow.status)) {
+      // Closed in between: nothing collides now, so the row moves as-is.
+      await move(id);
+      moved += 1;
+    } else if (new Date(loserRow.created_at) > new Date(winnerRow.created_at)) {
+      await trx(table).where({ id: winnerRow.id }).update({ status: 'dismissed', updated_at: trx.fn.now() });
+      await move(id);
+      dismissed += 1;
+    } else {
+      await move(id, { status: 'dismissed', updated_at: trx.fn.now() });
       dismissed += 1;
     }
   }
-  return `moved ${moved}, dismissed ${dismissed} duplicate open alert(s) (winner already has them)`;
+  return `moved ${moved}, dismissed ${dismissed} older duplicate open alert(s) (the newer one stays open)`;
 }
 
 // irrigation_week_plans: UNIQUE(customer_id, week_ending). The row that

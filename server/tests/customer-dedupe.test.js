@@ -2820,30 +2820,88 @@ describe('customer_health_alerts merge (ops 2026-10-22)', () => {
     expect(UNIQUE_COLLISION_HANDLERS.customer_health_alerts).toBe(repointHealthAlertsDismissCollisions);
   });
 
-  it('moves the alert the winner lacks and moves the colliding one across DISMISSED (history kept, never deleted)', async () => {
-    const { repointHealthAlertsDismissCollisions } = dedupe._test;
-    const state = { updated: [], deleted: 0 };
+  // rows: the loser's alerts; winnerOpen: the winner's open alert of the same type
+  // (null = closed in between); collide: loser ids whose FIRST plain move collides.
+  function alertTrx({ rows, winnerOpen, collide }) {
+    const writes = [];
+    const locks = [];
+    let deleted = 0;
+    const collided = new Set();
     const trx = jest.fn((table) => makeChain(table, (q) => {
-      if (q.called('select')) return [{ id: 'a1' }, { id: 'a2' }];
-      if (q.called('del')) { state.deleted += 1; return 1; }
+      if (q.called('first')) {
+        const where = q.args('where')[0];
+        locks.push(q.called('forUpdate'));
+        if (where.id) return rows.find((r) => r.id === where.id);
+        return winnerOpen;
+      }
+      if (q.called('select')) return rows.map(({ id }) => ({ id }));
+      if (q.called('del')) { deleted += 1; return 1; }
       if (q.called('update')) {
         const rowId = q.args('where')[0].id;
         const patch = q.args('update')[0];
-        if (rowId === 'a2' && patch.status !== 'dismissed') { const e = new Error('duplicate key'); e.code = '23505'; throw e; }
-        state.updated.push({ rowId, patch });
+        if (collide.includes(rowId) && patch.customer_id && !patch.status && !collided.has(rowId) && winnerOpen) {
+          collided.add(rowId);
+          const e = new Error('duplicate key'); e.code = '23505'; throw e;
+        }
+        writes.push({ rowId, patch });
         return 1;
       }
       return [];
     }));
     trx.transaction = jest.fn(async (fn) => fn(trx));
-    trx.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
-    const result = await repointHealthAlertsDismissCollisions(trx, 'customer_health_alerts', 'customer_id', 'W', 'L');
-    expect(state.updated).toEqual([
+    trx.fn = { now: jest.fn(() => 'NOW') };
+    return { trx, writes, locks, deletedCount: () => deleted };
+  }
+  const run = (trx) => dedupe._test.repointHealthAlertsDismissCollisions(trx, 'customer_health_alerts', 'customer_id', 'W', 'L');
+
+  it('moves an alert the winner lacks; a colliding OLDER loser alert moves across dismissed (never deleted)', async () => {
+    const t = alertTrx({
+      rows: [{ id: 'a1' }, { id: 'a2', alert_type: 'low_engagement', status: 'new', created_at: '2026-10-01T00:00:00Z' }],
+      winnerOpen: { id: 'w1', created_at: '2026-10-10T00:00:00Z' },
+      collide: ['a2'],
+    });
+    const result = await run(t.trx);
+    expect(t.writes).toEqual([
       { rowId: 'a1', patch: { customer_id: 'W' } },
-      { rowId: 'a2', patch: { customer_id: 'W', status: 'dismissed', updated_at: 'CURRENT_TIMESTAMP' } },
+      { rowId: 'a2', patch: { customer_id: 'W', status: 'dismissed', updated_at: 'NOW' } },
     ]);
-    expect(state.deleted).toBe(0);
+    expect(t.locks).toEqual([true, true]);
+    expect(t.deletedCount()).toBe(0);
     expect(result).toMatch(/moved 1, dismissed 1/);
+  });
+
+  it('a NEWER loser alert stays open: the winner\'s older open alert is dismissed instead (Codex #6431 r1 P1)', async () => {
+    const t = alertTrx({
+      rows: [{ id: 'a2', alert_type: 'critical_risk', status: 'new', created_at: '2026-10-20T00:00:00Z' }],
+      winnerOpen: { id: 'w1', created_at: '2026-09-01T00:00:00Z' },
+      collide: ['a2'],
+    });
+    await run(t.trx);
+    expect(t.writes).toEqual([
+      { rowId: 'w1', patch: { status: 'dismissed', updated_at: 'NOW' } },
+      { rowId: 'a2', patch: { customer_id: 'W' } },
+    ]);
+  });
+
+  it('when the winner\'s alert closed after the collision, the loser alert moves across still open (Codex #6431 r1 P2)', async () => {
+    const t = alertTrx({
+      rows: [{ id: 'a2', alert_type: 'low_engagement', status: 'new', created_at: '2026-10-01T00:00:00Z' }],
+      winnerOpen: { id: 'w1', created_at: '2026-10-10T00:00:00Z' },
+      collide: ['a2'],
+    });
+    // The winner row is gone from the open set by the time it is re-read.
+    const first = t.trx;
+    let reads = 0;
+    const trx = jest.fn((table) => {
+      const chain = first(table);
+      const orig = chain.first;
+      chain.first = async (...a) => { reads += 1; const r = await orig.apply(chain, a); return reads === 2 ? undefined : r; };
+      return chain;
+    });
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = first.fn;
+    await run(trx);
+    expect(t.writes).toEqual([{ rowId: 'a2', patch: { customer_id: 'W' } }]);
   });
 
   it('a non-unique error still aborts the merge', async () => {
