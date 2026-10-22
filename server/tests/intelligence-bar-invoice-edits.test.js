@@ -267,6 +267,31 @@ describe('edit_invoice card', () => {
     expect(Invoices.editInvoiceFromBar).not.toHaveBeenCalled();
   });
 
+  test('an untouched legacy amount-only line (no unit_price) keeps its amount in the resubmitted lines, never $0', async () => {
+    setInvoice({ line_items: [
+      { client_id: 'li_a', description: 'Quarterly Pest Control', quantity: 1, amount: 99, category: 'service' },
+      { client_id: 'li_b', description: 'Interior add-on', quantity: 1, unit_price: 30, amount: 30 },
+    ] });
+    const card = await run('edit_invoice', { line_changes: [{ line_number: 2, unit_price: 50 }] });
+    // InvoiceService.update prices a line as quantity * (unit_price || 0): the untouched line carries its unit price now.
+    expect(card._body.line_items[0]).toMatchObject({ client_id: 'li_a', quantity: 1, unit_price: 99, amount: 99 });
+    expect(card.new_total).toBe('$149.00');
+    // An amount that does not split evenly over its quantity cannot be resaved unchanged: the page edits that invoice.
+    setInvoice({ line_items: [
+      { client_id: 'li_a', description: 'Quarterly Pest Control', quantity: 3, amount: 100, category: 'service' },
+      { client_id: 'li_b', description: 'Interior add-on', quantity: 1, unit_price: 30, amount: 30 },
+    ] });
+    expect(await run('edit_invoice', { line_changes: [{ line_number: 2, unit_price: 50 }] })).toMatchObject({ code: 'line_not_editable' });
+  });
+
+  test('an invoice tied to an accepted estimate discloses the setup-fee alert re-check; an untied one does not', async () => {
+    const untied = await run('edit_invoice', { line_changes: [{ line_number: 2, unit_price: 50 }] });
+    expect(untied.effects.map((e) => e.text).join(' ')).not.toMatch(/setup fee/);
+    state.scheduled_services[0].source_estimate_id = 'est-1';
+    const tied = await run('edit_invoice', { line_changes: [{ line_number: 2, unit_price: 50 }] });
+    expect(tied.effects).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'operational', text: expect.stringMatching(/setup fee: that alert may close, reopen or change/) })]));
+  });
+
   test('title, notes and due date: before -> after per field; a delivered invoice is NOT resent and the card says so', async () => {
     const card = await run('edit_invoice', { title: 'Spring service', notes: 'Gate code on file', due_date: '2099-02-01' });
     expect(card.changes).toEqual([

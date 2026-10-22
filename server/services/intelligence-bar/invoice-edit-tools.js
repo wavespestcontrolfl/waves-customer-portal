@@ -394,8 +394,25 @@ function plainLineRefusal(li, number) {
   return null;
 }
 
+// A stored line with an amount but no unit price (a legacy amount-only line), written so it keeps its amount when the bar resubmits
+// every line: InvoiceService.update prices each line as quantity * (unit_price || 0), so an untouched amount-only line would be
+// saved as $0. Returns null when the amount does not split evenly over its quantity (the bar then refuses; the page edits it).
+function canonicalLine(li) {
+  const hasUnit = li.unit_price !== undefined && li.unit_price !== null && li.unit_price !== '' && Number.isFinite(Number(li.unit_price));
+  if (hasUnit) return { ...li };
+  const qty = Number(li.quantity) || 1;
+  const amount = lineAmount(li);
+  const unit = round2(amount / qty);
+  if (round2(qty * unit) !== round2(amount)) return null;
+  return { ...li, quantity: qty, unit_price: unit, amount: round2(amount) };
+}
+
 function applyLineChanges(stored, changes, invoiceId) {
-  const next = stored.map((li) => ({ ...li }));
+  const next = stored.map(canonicalLine);
+  const uneven = next.findIndex((li) => li === null);
+  if (uneven !== -1) {
+    return refusal(`Line ${uneven + 1} has an amount that does not split evenly over its quantity, so the bar cannot resave it unchanged. Edit this invoice on the Invoices page.`, 'line_not_editable', { lines: numbered(stored) });
+  }
   const dropped = new Set();
   const touched = []; // { kind, number, before, after }
   const added = [];
@@ -497,7 +514,26 @@ function fieldChange(field, before, after) {
   return { field, before: before === null || before === undefined || before === '' ? '(empty)' : String(before), after: after === null || after === undefined || after === '' ? '(empty)' : String(after) };
 }
 
-function editEffects({ invoice, status, dueChanged, totalChanged, oldTotal, newTotal, statement }) {
+// Whether saving runs the setup-fee alert reconciliation (the update handler runs it for the edited row and the pre-edit row):
+// the invoice, before or after the edit, is stamped for an accepted estimate or linked to an estimate-sourced visit. Mirrors
+// reconcileSetupFeeAlertForInvoice's own lookup; an unreadable link counts as tied (the card discloses rather than hides).
+async function setupFeeAlertTied(invoice, nextNotes) {
+  const { acceptedEstimateIdFromNotes } = require('../setup-fee-alert-reconcile');
+  if (acceptedEstimateIdFromNotes(invoice.notes) || (nextNotes !== undefined && acceptedEstimateIdFromNotes(nextNotes))) return true;
+  try {
+    let visitId = invoice.scheduled_service_id || null;
+    if (!visitId && invoice.service_record_id) {
+      visitId = (await db('service_records').where({ id: invoice.service_record_id }).first('scheduled_service_id'))?.scheduled_service_id || null;
+    }
+    if (!visitId) return false;
+    return Boolean((await db('scheduled_services').where({ id: visitId }).first('source_estimate_id'))?.source_estimate_id);
+  } catch {
+    return true;
+  }
+}
+const SETUP_FEE_EFFECT = { kind: 'operational', text: 'This invoice belongs to an accepted estimate. Saving re-checks the staff alert that asks the office to bill its setup fee: that alert may close, reopen or change (and show as unread again). Nothing is sent to the customer.' };
+
+function editEffects({ invoice, status, dueChanged, totalChanged, oldTotal, newTotal, statement, setupFeeTied = false }) {
   const effects = [];
   if (totalChanged) effects.push({ kind: 'billing', text: `The invoice total changes from ${money(oldTotal)} to ${money(newTotal)}.` });
   if (DELIVERED_STATUSES.has(status)) {
@@ -512,6 +548,7 @@ function editEffects({ invoice, status, dueChanged, totalChanged, oldTotal, newT
       : 'Its payment reminder dates move with the new due date.' });
   }
   if (statement && totalChanged) effects.push({ kind: 'billing', text: 'Its payer’s open monthly statement is recalculated with the new amount.' });
+  if (setupFeeTied) effects.push(SETUP_FEE_EFFECT);
   effects.push(NOTHING_SENT);
   return effects;
 }
@@ -652,7 +689,8 @@ async function buildEditPlan(input) {
     new_total: money(newTotal),
     changes,
     lines_after: numbered(nextLines).slice(0, 30),
-    effects: editEffects({ invoice, status: String(invoice.status || '').toLowerCase(), dueChanged, totalChanged, oldTotal, newTotal, statement }),
+    effects: editEffects({ invoice, status: String(invoice.status || '').toLowerCase(), dueChanged, totalChanged, oldTotal, newTotal, statement,
+      setupFeeTied: await setupFeeAlertTied(invoice, body.notes) }),
     sends_to_customer: false,
     ...editPins({ invoice, stored, body, newTotal, financials }),
     _body: body,

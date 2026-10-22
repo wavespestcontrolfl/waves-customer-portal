@@ -2856,6 +2856,113 @@ async function assertBarCreditFences(trx, locked, expected) {
   }
 }
 
+// ── Apply-credit decisions (POST /:id/apply-credit, also the Intelligence Bar's apply_invoice_credit card) ──
+
+const applyCreditOperationalError = (message, statusCode, code) => Object.assign(new Error(message), { statusCode, isOperational: true, ...(code ? { code } : {}) });
+
+// Why this invoice cannot take account credit right now, before any lock or Stripe call ({ status, body }), or null.
+// expectedCredit (the bar's card only) is checked first: an invoice that is no longer the one the card showed stops here.
+async function applyCreditPreRefusal(invoice, expectedCredit, assertInvoiceVersion) {
+  if (!invoice) return { status: 404, body: { error: 'Invoice not found' } };
+  try {
+    assertInvoiceVersion(invoice, expectedCredit, 'applying credit');
+  } catch (err) {
+    return { status: 409, body: { error: err.message, code: err.code } };
+  }
+  // Third-party Bill-To: account credit belongs to the homeowner. A
+  // payer-billed invoice is owed by the payer, not the homeowner — drawing
+  // down the service customer's credit to mark the AP invoice prepaid would
+  // consume the wrong party's money. Reject it before any state change (a
+  // payer-facing credit flow is Phase 2).
+  if (invoice.payer_id) {
+    return { status: 400, body: { error: 'Invoice is billed to a third-party payer — account credit cannot be applied to payer invoices' } };
+  }
+  try {
+    assertInvoiceCollectible(invoice);
+  } catch (err) {
+    return { status: invoice.status === 'processing' ? 409 : 400, body: { error: err.message } };
+  }
+  const total = CustomerCredit.round2(invoice.total || 0);
+  if (total <= 0) return { status: 400, body: { error: 'Invoice has no amount to collect (total is $0)' } };
+  const amountDue = CustomerCredit.round2(total - CustomerCredit.round2(invoice.credit_applied || 0));
+  if (amountDue <= 0) return { status: 400, body: { error: 'Invoice is already fully covered by credit' } };
+  const balance = (await CustomerCredit.getBalance(invoice.customer_id)) || 0;
+  if (balance + 0.005 < amountDue) {
+    return { status: 400, body: { error: `Insufficient account credit — balance is $${balance.toFixed(2)}, `
+      + `invoice needs $${amountDue.toFixed(2)}. Issue more credit first, or lower the invoice.` } };
+  }
+  return null;
+}
+
+// The bar's card, on the locked invoice row (a no-op for the page's own call): the version it showed, its fences, and no
+// project link. An invoice linked to ANY project stays on the page: paying it nudges the report-release sweep, and a report
+// hold is written without touching the invoice (so the card's pin cannot see it). The project read runs with the invoice row
+// held FOR UPDATE; the only writer of projects.invoice_id (admin-projects persistProjectInvoiceLink) locks the project and then
+// this invoice row FOR SHARE before linking, so a new link waits for this transaction to commit and cannot appear between this
+// read and the commit. (A plain read on purpose: locking the project rows here would invert the project -> invoice lock order.)
+async function assertBarCreditUnderLock(trx, locked, expectedCredit, assertInvoiceVersion) {
+  if (!expectedCredit) return;
+  assertInvoiceVersion(locked, expectedCredit, 'applying credit');
+  await assertBarCreditFences(trx, locked, expectedCredit);
+  if (await trx('projects').where({ invoice_id: locked.id }).first('id')) {
+    throw applyCreditOperationalError('Cannot apply credit from the bar — this invoice is linked to a project whose report may wait on its payment; apply the credit from the Invoices page', 409, 'NEEDS_INVOICES_PAGE');
+  }
+}
+
+function assertCollectibleUnderLock(locked) {
+  try {
+    assertInvoiceCollectible(locked);
+  } catch (err) {
+    err.statusCode = locked.status === 'processing' ? 409 : 400; err.isOperational = true; throw err;
+  }
+}
+
+// The account credit left afterwards, against the card's (the bar only): a balance that moved since refuses (rolls back).
+function assertBarBalanceAfter(expectedCredit, balanceAfter) {
+  if (expectedCredit?.balanceAfterCents === undefined) return;
+  if (Math.round((Number(balanceAfter) || 0) * 100) !== expectedCredit.balanceAfterCents) {
+    throw applyCreditOperationalError('Invoice changed while applying credit — the account credit balance is no longer what the card showed; re-check and retry', 409, 'PREVIEW_CHANGED');
+  }
+}
+
+const applyCreditErrorBody = (err) => ({ error: err.message, ...(['PREVIEW_CHANGED', 'NEEDS_INVOICES_PAGE'].includes(err.code) ? { code: err.code } : {}) });
+
+// The paid-invoice follow-ons of a full credit settlement (post-commit, best-effort each), mirroring the manual and Stripe
+// paid paths.
+async function afterCreditSettled(id, covered) {
+  // Stop reminders + activate any linked annual-prepay term, mirroring the
+  // manual/Stripe paid paths (term activation keys on paid_at, now stamped).
+  try {
+    const FollowUps = require('../services/invoice-followups');
+    await FollowUps.stopOnPayment(id);
+  } catch (err) {
+    logger.warn(`[admin-invoices:apply-credit] stopOnPayment failed: ${err.message}`);
+  }
+
+  // Full-credit settlement is a payment event too: a completion invoice
+  // delivered unpaid deferred its review ask to payment, and this path
+  // reaches neither the Stripe webhook nor record-payment — enroll here or
+  // the requested ask is permanently lost (Codex P2, PR #3104 r3). Guards
+  // (completion opt-out, visit outcome, dedupe) live in the helper;
+  // standalone invoices no-op.
+  try {
+    const ReviewService = require('../services/review-request');
+    await ReviewService.enrollForPaidInvoice(covered, { source: 'apply_credit' });
+  } catch (err) {
+    logger.warn(`[admin-invoices:apply-credit] review enrollment failed: ${err.message}`);
+  }
+
+  // Fire-and-forget: a credit-covered (prepaid) invoice may be gating a
+  // payment-held WDO report — nudge the release sweep.
+  require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 1500 });
+  try {
+    const final = await db('invoices').where({ id }).first();
+    await AnnualPrepayRenewals.syncTermForInvoicePayment(final);
+  } catch (err) {
+    logger.warn(`[admin-invoices:apply-credit] annual prepay activation failed: ${err.message}`);
+  }
+}
+
 const invoiceApplyCreditHandler = async (req, res, next) => {
   try {
     const { assertInvoiceVersion } = require('../services/invoice-bar-expected');
@@ -2867,41 +2974,8 @@ const invoiceApplyCreditHandler = async (req, res, next) => {
 
     // ── Pre-checks (no lock): status, amount due, sufficient balance ──
     const invoice = await db('invoices').where({ id }).first();
-    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
-    // The bar's card: an invoice that is no longer the one it showed stops here, before any balance read or Stripe call.
-    try {
-      assertInvoiceVersion(invoice, expectedCredit, 'applying credit');
-    } catch (err) {
-      return res.status(409).json({ error: err.message, code: err.code });
-    }
-    // Third-party Bill-To: account credit belongs to the homeowner. A
-    // payer-billed invoice is owed by the payer, not the homeowner — drawing
-    // down the service customer's credit to mark the AP invoice prepaid would
-    // consume the wrong party's money. Reject it before any state change (a
-    // payer-facing credit flow is Phase 2).
-    if (invoice.payer_id) {
-      return res.status(400).json({ error: 'Invoice is billed to a third-party payer — account credit cannot be applied to payer invoices' });
-    }
-    try {
-      assertInvoiceCollectible(invoice);
-    } catch (err) {
-      return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
-    }
-    const total = CustomerCredit.round2(invoice.total || 0);
-    if (total <= 0) {
-      return res.status(400).json({ error: 'Invoice has no amount to collect (total is $0)' });
-    }
-    const amountDue = CustomerCredit.round2(total - CustomerCredit.round2(invoice.credit_applied || 0));
-    if (amountDue <= 0) {
-      return res.status(400).json({ error: 'Invoice is already fully covered by credit' });
-    }
-    const balance = (await CustomerCredit.getBalance(invoice.customer_id)) || 0;
-    if (balance + 0.005 < amountDue) {
-      return res.status(400).json({
-        error: `Insufficient account credit — balance is $${balance.toFixed(2)}, `
-          + `invoice needs $${amountDue.toFixed(2)}. Issue more credit first, or lower the invoice.`,
-      });
-    }
+    const preRefusal = await applyCreditPreRefusal(invoice, expectedCredit, assertInvoiceVersion);
+    if (preRefusal) return res.status(preRefusal.status).json(preRefusal.body);
 
     // ── Cancel any open collection session (pre-lock Stripe triage) ──
     // openPiId is re-checked under the row lock below (a PI stamped between
@@ -2941,22 +3015,8 @@ const invoiceApplyCreditHandler = async (req, res, next) => {
           err.statusCode = 409; err.isOperational = true; throw err;
         }
         // The bar's card, on the locked row: nothing can change the invoice between this check and the draw-down below.
-        assertInvoiceVersion(locked, expectedCredit, 'applying credit');
-        await assertBarCreditFences(trx, locked, expectedCredit);
-        // The bar only: an invoice linked to ANY project stays on the page. Paying it nudges the report-release sweep, and a report
-        // hold is written without touching the invoice (so the card's pin cannot see it). This read runs with the invoice row held
-        // FOR UPDATE; the only writer of projects.invoice_id (admin-projects persistProjectInvoiceLink) locks that invoice row FOR
-        // SHARE before linking, so a new link waits for this transaction to commit and cannot appear between this read and the
-        // commit. (A plain read on purpose: locking the project rows here would invert the project -> invoice lock order.)
-        if (expectedCredit && await trx('projects').where({ invoice_id: id }).first('id')) {
-          const err = new Error('Cannot apply credit from the bar — this invoice is linked to a project whose report may wait on its payment; apply the credit from the Invoices page');
-          err.statusCode = 409; err.isOperational = true; err.code = 'NEEDS_INVOICES_PAGE'; throw err;
-        }
-        try {
-          assertInvoiceCollectible(locked);
-        } catch (err) {
-          err.statusCode = locked.status === 'processing' ? 409 : 400; err.isOperational = true; throw err;
-        }
+        await assertBarCreditUnderLock(trx, locked, expectedCredit, assertInvoiceVersion);
+        assertCollectibleUnderLock(locked);
         // Saved-card claim fence (ADMIN-BUG-R20, mirrors recordManualPayment):
         // a card charge whose process died right after the Stripe call
         // leaves this invoice 'sent' with its stripe_invoice_charge_attempts
@@ -3026,11 +3086,7 @@ const invoiceApplyCreditHandler = async (req, res, next) => {
           createdBy: recordedBy,
         }, trx);
         // The bar's card also showed the account credit left afterwards: a balance that moved since refuses (rolls back).
-        if (expectedCredit && expectedCredit.balanceAfterCents !== undefined
-          && Math.round((Number(balanceAfter) || 0) * 100) !== expectedCredit.balanceAfterCents) {
-          const err = new Error('Invoice changed while applying credit — the account credit balance is no longer what the card showed; re-check and retry');
-          err.statusCode = 409; err.isOperational = true; err.code = 'PREVIEW_CHANGED'; throw err;
-        }
+        assertBarBalanceAfter(expectedCredit, balanceAfter);
 
         const updates = {
           credit_applied: CustomerCredit.round2(CustomerCredit.round2(locked.credit_applied || 0) + lockedDue),
@@ -3060,7 +3116,7 @@ const invoiceApplyCreditHandler = async (req, res, next) => {
         return { invoice: locked, cover: lockedDue, balanceAfter };
       });
     } catch (err) {
-      if (err.statusCode) return res.status(err.statusCode).json({ error: err.message, ...(['PREVIEW_CHANGED', 'NEEDS_INVOICES_PAGE'].includes(err.code) ? { code: err.code } : {}) });
+      if (err.statusCode) return res.status(err.statusCode).json(applyCreditErrorBody(err));
       throw err;
     }
 
@@ -3070,37 +3126,7 @@ const invoiceApplyCreditHandler = async (req, res, next) => {
 
     const { invoice: covered, cover, balanceAfter } = outcome;
 
-    // Stop reminders + activate any linked annual-prepay term, mirroring the
-    // manual/Stripe paid paths (term activation keys on paid_at, now stamped).
-    try {
-      const FollowUps = require('../services/invoice-followups');
-      await FollowUps.stopOnPayment(id);
-    } catch (err) {
-      logger.warn(`[admin-invoices:apply-credit] stopOnPayment failed: ${err.message}`);
-    }
-
-    // Full-credit settlement is a payment event too: a completion invoice
-    // delivered unpaid deferred its review ask to payment, and this path
-    // reaches neither the Stripe webhook nor record-payment — enroll here or
-    // the requested ask is permanently lost (Codex P2, PR #3104 r3). Guards
-    // (completion opt-out, visit outcome, dedupe) live in the helper;
-    // standalone invoices no-op.
-    try {
-      const ReviewService = require('../services/review-request');
-      await ReviewService.enrollForPaidInvoice(covered, { source: 'apply_credit' });
-    } catch (err) {
-      logger.warn(`[admin-invoices:apply-credit] review enrollment failed: ${err.message}`);
-    }
-
-    // Fire-and-forget: a credit-covered (prepaid) invoice may be gating a
-    // payment-held WDO report — nudge the release sweep.
-    require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 1500 });
-    try {
-      const final = await db('invoices').where({ id }).first();
-      await AnnualPrepayRenewals.syncTermForInvoicePayment(final);
-    } catch (err) {
-      logger.warn(`[admin-invoices:apply-credit] annual prepay activation failed: ${err.message}`);
-    }
+    await afterCreditSettled(id, covered);
 
     await db('activity_log').insert({
       customer_id: covered.customer_id,
