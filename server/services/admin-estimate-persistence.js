@@ -907,57 +907,39 @@ function isApprovedDethatchingManagerRow(row = {}) {
     moneyValue(row.price) !== null;
 }
 
-// A one-time row that IS the WaveGuard setup fee (an explicit setup line some
-// legacy and fallback payloads store instead of oneTime.membershipFee).
-function isWaveGuardSetupRow(row) {
-  if (!row || typeof row !== 'object') return false;
-  if (String(row.service || '').toLowerCase() === 'waveguard_setup') return true;
-  return /^waveguard(\s+membership)?\s+setup\b/i.test(String(row.name || row.label || '').trim());
-}
-
-// A one-time row's billed amount, in the order estimate-public's
-// normalizeOneTimeBreakdown reads it: a net amount first (a row sold at a
-// net amount bills that amount, estimate-manual-acceptance-effects), then
-// the gross aliases.
-const ONE_TIME_ROW_BILLED_AMOUNT_KEYS = ['priceAfterDiscount', 'totalAfterDiscount', 'price', 'amount', 'total', 'estimatedPrice', 'baseEstimatePrice'];
-
-// The part of a one-time total that is a WaveGuard setup fee the plan is not
-// billed. The fee belongs only to a solo pest or solo mosquito plan (owner
-// 2026-07-10, restated 2026-10-21: "waived if they do multiple services";
-// estimate-converter's recurringPlanCarriesSetupFee, which also counts a
-// standalone rodent bait supplement as a bundle). The builder still caches it
-// for a bundle, so EST-2026-1185 (pest + mosquito) stored onetime_total $99
-// that no page shows and no accept bills. Only the stored totals use this:
-// the estimate data keeps its cached figures, and the public page reconciles
-// the fee from them as before. Per-customer waivers are left out on purpose:
-// the save can drop their evidence (codex #6438 r3).
-function excludedSetupFeeAmount(result, estimateData, grossOneTimeTotal, oneTimeRows) {
-  if (!(grossOneTimeTotal > 0)) return 0;
-  const recurringRows = [
-    ...(Array.isArray(result?.recurring?.services) ? result.recurring.services : []),
-    ...(Array.isArray(result?.results?.recurring?.services) ? result.results.recurring.services : []),
-  ];
-  // No recurring rows at all is a one-time estimate, not a bundle.
-  if (recurringRows.length === 0) return 0;
-  if (require('./estimate-converter').recurringPlanCarriesSetupFee({ recurringServices: recurringRows, estimateData })) return 0;
-  const setupRows = oneTimeRows.filter(isWaveGuardSetupRow);
-  const feeAmount = setupRows.length > 0
-    ? sumSignedAmounts(setupRows, ONE_TIME_ROW_BILLED_AMOUNT_KEYS)
-    : (positiveMoney(result?.oneTime?.membershipFee) ?? 0);
+// The part of a stored one-time total that is a WaveGuard setup fee the
+// plan is not billed. The fee belongs only to a solo pest or solo mosquito
+// plan (owner 2026-07-10, restated 2026-10-21: "waived if they do multiple
+// services"), but the builder still caches it for a bundle, so EST-2026-1185
+// (pest + mosquito) stored onetime_total $99. The estimate data keeps its
+// gross figures; only the stored totals leave the fee out.
+//
+// The rows come from the public one-time breakdown, which already reads
+// every layout (nested containers, row and label aliases, discount rows,
+// the pooled manual discount), so this has no row reader of its own
+// (codex #6438 r1-r5). The fee is what the breakdown suppressed, plus a
+// setup row it kept for a plan the converter bills no fee (a standalone
+// rodent bait supplement makes a bundle). It never comes out below the
+// billable work rows, so a total that already left it out keeps its work.
+function excludedSetupFeeAmount(estimateData, grossOneTimeTotal) {
+  if (!(grossOneTimeTotal > 0) || !estimateData || typeof estimateData !== 'object') return 0;
+  const converter = require('./estimate-converter');
+  const recurringServices = converter.recurringServicesFromEstimateData(estimateData);
+  // No recurring service at all is a one-time estimate, not a bundle.
+  if (recurringServices.length === 0) return 0;
+  const breakdown = require('../routes/estimate-public').normalizeOneTimeBreakdown(estimateData);
+  const rows = Array.isArray(breakdown?.items) ? breakdown.items : [];
+  const isSetupRow = (row) => row?.service === 'waveguard_setup';
+  const planBillsNoFee = !converter.recurringPlanCarriesSetupFee({ recurringServices, estimateData });
+  const keptSetupFee = planBillsNoFee
+    ? rows.filter(isSetupRow).reduce((sum, row) => sum + (Number(row.amount) || 0), 0)
+    : 0;
+  const feeAmount = roundMoney((Number(breakdown?.suppressedSetupFee) || 0) + keptSetupFee);
   if (!(feeAmount > 0)) return 0;
-  // Never below the billable itemized work: a total that already left the
-  // fee out keeps its real charges (codex #6438 r3). Rows count at their net
-  // amount, less the pooled one-time slice of a manual discount, which the
-  // mapper takes off oneTime.total and not off the rows (estimate-public
-  // reads the same three places).
-  const pooledOneTimeDiscount = [result?.manualDiscount, result?.totals?.manualDiscount, result?.summary?.manualDiscount]
-    .map((discount) => positiveMoney(discount?.oneTimeAmount))
-    .find((amount) => amount !== null) ?? 0;
-  const itemizedWork = Math.max(0, sumSignedAmounts(
-    oneTimeRows.filter((row) => !isWaveGuardSetupRow(row)),
-    ONE_TIME_ROW_BILLED_AMOUNT_KEYS,
-  ) - pooledOneTimeDiscount);
-  const net = Math.min(grossOneTimeTotal, Math.max(grossOneTimeTotal - feeAmount, itemizedWork));
+  const billableWork = Math.max(0, rows
+    .filter((row) => !isSetupRow(row) && row?.service !== 'one_time_adjustment')
+    .reduce((sum, row) => sum + (Number(row.amount) || 0), 0));
+  const net = Math.min(grossOneTimeTotal, Math.max(grossOneTimeTotal - feeAmount, billableWork));
   return roundMoney(Math.max(0, grossOneTimeTotal - net));
 }
 
@@ -1024,7 +1006,7 @@ function deriveTotalsFromEstimateData(estimateData) {
     positiveMoney(recurring.annualAfterDiscount) ??
     positiveMoney(nestedRecurring.annualAfterDiscount);
 
-  const setupFeeExcluded = excludedSetupFeeAmount(result, estimateData, oneTimeTotal, oneTimeRows);
+  const setupFeeExcluded = excludedSetupFeeAmount(estimateData, oneTimeTotal);
   return {
     monthlyTotal,
     annualTotal,
@@ -1040,10 +1022,15 @@ function resolveBillableTotals(body, estimateData, quoteRequired) {
   }
   const derived = deriveTotalsFromEstimateData(estimateData);
   const monthlyTotal = derived.monthlyTotal ?? fallbackMoney(body.monthlyTotal);
-  const onetimeTotal = derived.onetimeTotal ?? fallbackMoney(body.onetimeTotal);
+  // A one-time total from the posted body (no container the derive reads)
+  // takes the same exclusion as a derived one (codex #6438 r5).
+  const bodyOneTimeTotal = fallbackMoney(body.onetimeTotal);
+  const onetimeSetupFeeExcluded = derived.onetimeTotal !== null
+    ? derived.onetimeSetupFeeExcluded
+    : excludedSetupFeeAmount(estimateData, bodyOneTimeTotal);
+  const onetimeTotal = derived.onetimeTotal ?? roundMoney(bodyOneTimeTotal - onetimeSetupFeeExcluded);
   const annualTotal = derived.annualTotal ??
     (monthlyTotal > 0 ? roundMoney(monthlyTotal * 12) : fallbackMoney(body.annualTotal));
-  const onetimeSetupFeeExcluded = derived.onetimeTotal !== null ? derived.onetimeSetupFeeExcluded : 0;
   return { monthlyTotal, annualTotal, onetimeTotal, onetimeSetupFeeExcluded };
 }
 

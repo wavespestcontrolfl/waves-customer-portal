@@ -574,6 +574,68 @@ describe('admin estimate persistence', () => {
     }
   });
 
+  // codex #6438 r5: the rows come from the public one-time breakdown, so
+  // every layout it reads is covered.
+  const bundleServices = [{ service: 'pest_control', name: 'Pest Control', mo: 38.4 }, { service: 'mosquito', name: 'Mosquito', mo: 74.7 }];
+  test('recurring services in the top-level container still make a bundle', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      estimateData: {
+        recurring: { services: bundleServices },
+        result: { oneTime: { items: [{ service: 'flea', name: 'Flea Treatment', price: 150 }], total: 249, membershipFee: 99 } },
+      },
+    });
+    expect(fields.onetime_total).toBe(150);
+  });
+
+  test('a setup row named only by displayName comes out of a bundle total', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      onetimeTotal: 0,
+      estimateData: {
+        result: {
+          oneTime: { items: [{ displayName: 'WaveGuard Membership Setup', price: 99 }, { service: 'flea', name: 'Flea Treatment', price: 150 }] },
+          recurring: { grandTotal: 113.1, services: bundleServices },
+        },
+      },
+    });
+    expect(fields.onetime_total).toBe(150);
+  });
+
+  test('a nested one-time container falls back to the posted total, less the fee', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      onetimeTotal: 249,
+      estimateData: {
+        result: {
+          results: { oneTime: { items: [{ service: 'flea', name: 'Flea Treatment', price: 150 }], total: 249, membershipFee: 99 } },
+          recurring: { grandTotal: 113.1, services: bundleServices },
+        },
+      },
+    });
+    expect(fields.onetime_total).toBe(150);
+  });
+
+  test('a negative row whose discounted alias is zero still counts as a discount', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      estimateData: {
+        result: {
+          oneTime: {
+            items: [
+              { service: 'flea', name: 'Flea Treatment', price: 150 },
+              { service: 'promo', name: 'Promo', price: -50, priceAfterDiscount: 0 },
+            ],
+            total: 199,
+            membershipFee: 99,
+          },
+          recurring: { grandTotal: 113.1, services: bundleServices },
+        },
+      },
+    });
+    expect(fields.onetime_total).toBe(100);
+  });
+
   test('a pooled one-time discount lowers the itemized-work floor', () => {
     const fields = buildEstimatePersistenceFields({
       ...baseBody,
