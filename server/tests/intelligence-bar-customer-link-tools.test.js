@@ -250,6 +250,14 @@ describe('send_autopay_setup_link', () => {
     expect(autopay.setupLinkIneligibility).not.toHaveBeenCalled();
   });
 
+  test('a link-only request is its own capability code, which the gap list records (Codex #6371 r21)', async () => {
+    const { _private: { recordableRefusalCode } } = require('../services/agent-gap-reports');
+    const refused = await run({ delivery: 'link' });
+    expect(refused).toMatchObject({ code: 'autopay_link_only_unsupported' });
+    expect(recordableRefusalCode(refused)).toBe('autopay_link_only_unsupported');
+    expect(autopay.setupLinkIneligibility).not.toHaveBeenCalled();
+  });
+
   test.each([
     ['autopay_already_active', 'This customer is already on Auto Pay'],
     ['autopay_paused', /already set up but paused/],

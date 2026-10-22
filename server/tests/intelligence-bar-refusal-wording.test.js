@@ -246,8 +246,11 @@ describe('proposal-time frozen check (Codex #6371 r4)', () => {
 describe('batch move unreadable checks stay faults (Codex #6371 r4 audit)', () => {
   test('the batch preview and commit keep unreadable group checks uncoded', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/intelligence-bar/schedule-tools.js'), 'utf8');
-    expect(src).toContain("code: null,");
-    expect(src).toContain("if (skipped.some((g) => g.unreadable))");
+    // The all-skipped refusal reads the unreadable flag first and sets no code.
+    const refusal = require('../services/intelligence-bar/schedule-tools')._private.allSkippedRefusal({
+      skippedGrouped: [{ id: 'x', kind: 'unreadable', unreadable: true }], skippedCollective: [], skippedUnchanged: [], skippedElapsed: [],
+    });
+    expect(refusal).toEqual({ error: expect.stringMatching(/could not check/) });
     expect(src).toContain("err.reason === 'unreadable') throw err");
   });
 });
@@ -278,24 +281,48 @@ describe('Codex #6371 r5 audit findings', () => {
     expect(src.slice(at, at + 400)).toContain("code: 'cancel_gate_off'");
   });
 
-  test('a batch move keeps grouped and frozen skips apart', () => {
-    const { _private: { batchMoveGroupRefusal } } = require('../services/intelligence-bar/schedule-tools');
+  test('a batch move keeps grouped, frozen, busy and series skips apart (Codex #6371 r21)', () => {
+    const { _private: { allSkippedRefusal } } = require('../services/intelligence-bar/schedule-tools');
+    const refuse = (skippedGrouped, skippedCollective = []) => allSkippedRefusal({ skippedGrouped, skippedCollective, skippedUnchanged: [], skippedElapsed: [] });
     const grouped = { id: 'a', kind: 'grouped' };
     const frozen = { id: 'b', kind: 'frozen', reason: 'has_records' };
-    const onlyFrozen = batchMoveGroupRefusal([frozen]);
+    const busy = { id: 'd', kind: 'busy', reason: 'completion_in_flight' };
+    const series = { id: 'e', reason: 'collective_move_required' };
+    const onlyFrozen = refuse([frozen]);
     expect(onlyFrozen.code).toBe('frozen_visit_move_unsupported');
     expect(onlyFrozen.error).toContain('has_records');
-    expect(onlyFrozen.error).not.toMatch(/grouped/);
-    expect(batchMoveGroupRefusal([grouped]).code).toBe('grouped_visit_move_unsupported');
-    const mixed = batchMoveGroupRefusal([grouped, frozen]);
+    expect(onlyFrozen.error).not.toMatch(/grouped|busy/);
+    expect(refuse([grouped]).code).toBe('grouped_visit_move_unsupported');
+    const mixed = refuse([grouped, frozen]);
+    expect(mixed.code).toBe('grouped_visit_move_unsupported');
     expect(mixed.error).toMatch(/grouped/);
     expect(mixed.error).toMatch(/issued link, records or a payment in progress/);
-    for (const r of [onlyFrozen, mixed, batchMoveGroupRefusal([grouped])]) {
+    // Busy beside frozen: both named, the structural code wins, the retry hint shows.
+    const busyFrozen = refuse([busy, frozen]);
+    expect(busyFrozen.code).toBe('frozen_visit_move_unsupported');
+    expect(busyFrozen.error).toMatch(/issued link, records or a payment in progress/);
+    expect(busyFrozen.error).toMatch(/busy right now/);
+    expect(busyFrozen.error).toMatch(/Try again in a moment/);
+    // Busy beside grouped: the grouped code, and the busy stop is not called grouped.
+    const groupedBusy = refuse([grouped, busy]);
+    expect(groupedBusy.code).toBe('grouped_visit_move_unsupported');
+    expect(groupedBusy.error).toMatch(/grouped visit/);
+    expect(groupedBusy.error).toMatch(/busy right now/);
+    // Only waits: the wait code, which files no gap, and no capability_gaps.
+    const onlyBusy = refuse([busy]);
+    expect(onlyBusy.code).toBe('visit_busy_move');
+    expect(onlyBusy).not.toHaveProperty('capability_gaps');
+    expect(recordableRefusalCode({ error: onlyBusy.error, code: onlyBusy.code })).toBeNull();
+    // A series beside a wait: the series code.
+    expect(refuse([busy], [series]).code).toBe('collective_move_unsupported');
+    expect(refuse([], [series]).code).toBe('collective_move_unsupported');
+    for (const r of [onlyFrozen, mixed, busyFrozen, groupedBusy, refuse([grouped])]) {
       expect(recordableRefusalCode({ error: r.error, code: r.code })).toBe(r.code);
     }
     // An unreadable check stays a fault, even beside frozen and grouped skips.
-    const fault = batchMoveGroupRefusal([grouped, frozen, { id: 'c', kind: 'unreadable', unreadable: true }]);
-    expect(fault.code).toBeNull();
+    const fault = refuse([grouped, frozen, { id: 'c', kind: 'unreadable', unreadable: true }]);
+    expect(fault.code).toBeUndefined();
+    expect(fault).not.toHaveProperty('capability_gaps');
     expect(recordableRefusalCode({ error: fault.error })).toBeNull();
   });
 });
@@ -310,13 +337,14 @@ describe('a switched-off gate is not a gap (Codex #6371 r6)', () => {
 });
 
 describe('mixed batch refusals with an unreadable check stay faults (Codex #6371 r7)', () => {
-  test('the unreadable check runs before the collective and grouped codes', () => {
-    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/intelligence-bar/schedule-tools.js'), 'utf8');
-    const block = src.slice(src.indexOf('function allSkippedRefusal('));
-    expect(block.indexOf('if (anyUnreadable) {')).toBeGreaterThan(-1);
-    expect(block.indexOf('if (anyUnreadable) {')).toBeLessThan(block.indexOf("code: 'collective_move_unsupported'"));
-    // The unreadable branch sets no code.
-    expect(block.slice(block.indexOf('if (anyUnreadable) {'), block.indexOf('} else if')).includes('code:')).toBe(false);
+  test('the unreadable check outranks the collective and grouped codes', () => {
+    const { _private: { allSkippedRefusal } } = require('../services/intelligence-bar/schedule-tools');
+    const refusal = allSkippedRefusal({
+      skippedGrouped: [{ id: 'g', kind: 'grouped' }, { id: 'u', kind: 'unreadable', unreadable: true }],
+      skippedCollective: [{ id: 's' }], skippedUnchanged: [], skippedElapsed: [],
+    });
+    expect(refusal).not.toHaveProperty('code');
+    expect(refusal).not.toHaveProperty('capability_gaps');
   });
 });
 

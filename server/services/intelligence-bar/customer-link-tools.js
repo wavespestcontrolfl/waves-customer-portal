@@ -228,6 +228,8 @@ async function buildLink(input) {
 // ── send_autopay_setup_link ─────────────────────────────────────
 
 const AUTOPAY_DELIVERIES = ['sms', 'email'];
+// A link-only Auto Pay link is a missing capability; any other bad value is plain bad input (Codex #6371 r21).
+const LINK_ONLY_CODE = 'autopay_link_only_unsupported';
 const SAVED_CARD_REFUSAL = 'This customer has a saved card on file. Enrolling it turns Auto Pay on for the account, a billing change the bar does not make. That enrollment stays on the Customers page by the owner\'s rule.';
 const CHECK_LATER = ' — try again in a moment';
 // The operator's words for the reasons the service's own checks return (the
@@ -293,7 +295,7 @@ async function autopayLinkPlan(autopay, customerId) {
 // the saved card (the bar never enrolls one), then the channel preflight.
 async function autopayPlan(input) {
   const delivery = input.delivery === undefined || input.delivery === null ? 'sms' : String(input.delivery);
-  if (!AUTOPAY_DELIVERIES.includes(delivery)) return { error: `delivery must be one of ${AUTOPAY_DELIVERIES.join(', ')}. The bar can't make a link-only Auto Pay link from here yet.`, code: 'invalid_target' };
+  if (!AUTOPAY_DELIVERIES.includes(delivery)) return { error: `delivery must be one of ${AUTOPAY_DELIVERIES.join(', ')}. The bar can't make a link-only Auto Pay link from here yet.`, code: delivery === 'link' ? LINK_ONLY_CODE : 'invalid_target' };
   const id = String(input.customer_id || '').trim().toLowerCase();
   if (!UUID_RE.test(id)) return { error: 'A valid customer_id is required', code: 'invalid_target' };
   const autopay = require('../autopay-setup-link');

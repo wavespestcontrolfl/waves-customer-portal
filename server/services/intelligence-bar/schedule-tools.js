@@ -1086,45 +1086,6 @@ const LIVE_MOVE_STATUSES = new Set(['en_route', 'on_site']);
 // A frozen verdict's skip kind: a wait ('busy') or a structural freeze ('frozen').
 const frozenStopKind = (reason) => (TRANSIENT_FROZEN_REASONS.has(reason) ? 'busy' : 'frozen');
 
-// The refusal for a batch move where every selected stop was skipped as grouped,
-// frozen, busy or unreadable. A grouped visit and a frozen single visit are different
-// reasons, so each entry keeps its kind; a mixed set names both. A stop whose
-// state could not be READ is an outage: no refusal code, so it counts as a fault
-// and files no gap (Codex #6371 r4 audit).
-function batchMoveGroupRefusal(skipped) {
-  if (skipped.some((g) => g.unreadable)) {
-    return {
-      error: 'The grouped-visit state of a selected stop could not be read just now, so nothing was proposed. Try again in a moment.',
-      code: null,
-    };
-  }
-  const frozen = skipped.filter((g) => g.kind === 'frozen');
-  const busy = skipped.filter((g) => g.kind === 'busy');
-  const grouped = skipped.length - frozen.length - busy.length;
-  // Only waits (a visit being finalized or completed): a plain answer that files no gap (Codex #6371 r19).
-  if (busy.length && !frozen.length && !grouped) {
-    return { error: 'Every selected stop is a visit that is busy right now (being finalized, completed, or sending a reminder), so nothing was moved. Try again in a moment.', code: 'visit_busy_move' };
-  }
-  const reasons = [...new Set(frozen.map((g) => g.reason).filter(Boolean))].join(', ');
-  const frozenText = `has an issued link, records or a payment in progress${reasons ? ` (${reasons})` : ''}`;
-  if (frozen.length && !grouped) {
-    return {
-      error: `Every selected stop is a visit that ${frozenText}, and the bar can't move it from here`,
-      code: 'frozen_visit_move_unsupported',
-    };
-  }
-  if (frozen.length) {
-    return {
-      error: `Every selected stop is either part of a grouped visit, which moves as a whole, or a visit that ${frozenText}, and the bar can't move either from here yet`,
-      code: 'grouped_visit_move_unsupported',
-    };
-  }
-  return {
-    error: 'Every selected stop is part of a grouped visit, which moves as a whole, and the bar can\'t move grouped visits from here yet',
-    code: 'grouped_visit_move_unsupported',
-  };
-}
-
 // A batch move that goes ahead without some of its stops is a success, so the
 // gap collector cannot see the refusals; it reads this note instead (Codex #6371 r12, r13).
 // One code per kind of skipped stop: grouped, frozen, and collective (series) moves.
@@ -1160,147 +1121,151 @@ async function groupStateSkip(s) {
   }
 }
 
-// The refusal when no stop is left to move: the code of the one reason that
-// emptied the batch, plus every kind of capability gap among the skips
-// (Codex #6371 r15). An unreadable group check anywhere keeps the whole
-// refusal an uncoded fault (Tool Health), never a capability gap (r7).
-function allSkippedRefusal({ skippedGrouped, skippedCollective, skippedUnchanged, skippedElapsed }) {
-  const anyUnreadable = skippedGrouped.some((entry) => entry.unreadable);
-  const onlyGroupedOrCollective = !skippedUnchanged.length && !skippedElapsed.length;
-  let refusal = { error: 'Every movable stop\'s window has already passed today — pick a later window or a future date' };
-  if (anyUnreadable) {
-    refusal = { error: 'The bar could not check whether some selected stops belong to a grouped or frozen visit, so nothing was moved. Try again.' };
-  } else if (skippedGrouped.length && !skippedCollective.length && onlyGroupedOrCollective) {
-    refusal = batchMoveGroupRefusal(skippedGrouped);
-  } else if (skippedCollective.length && onlyGroupedOrCollective) {
-    refusal = {
-      error: 'Every selected stop is a recurring-plan visit; with collective moves on, its later visits move with it, and the bar can\'t move a series from here yet',
-      code: 'collective_move_unsupported',
-    };
-  } else if (skippedUnchanged.length && !skippedElapsed.length) {
-    refusal = { error: 'Every selected stop is already on that date — nothing to move' };
-  }
-  return { error: refusal.error, ...(refusal.code ? { code: refusal.code } : {}), ...skippedMoveGaps(skippedGrouped, skippedCollective, anyUnreadable) };
+// Every kind of skipped stop, in the order a refusal names them. `structural`
+// kinds are missing capabilities and carry their own code; `busy` is a wait.
+const SKIP_KINDS = {
+  grouped: {
+    code: 'grouped_visit_move_unsupported',
+    sentence: () => 'part of a grouped visit, which moves as a whole',
+  },
+  frozen: {
+    code: 'frozen_visit_move_unsupported',
+    sentence: (stops) => {
+      const reasons = [...new Set(stops.map((g) => g.reason).filter(Boolean))].join(', ');
+      return `a visit that has an issued link, records or a payment in progress${reasons ? ` (${reasons})` : ''}`;
+    },
+  },
+  busy: {
+    code: null,
+    sentence: () => 'a visit that is busy right now (being finalized, completed, or sending a reminder)',
+  },
+  collective: {
+    code: 'collective_move_unsupported',
+    sentence: () => 'a recurring-plan visit, whose later visits move with it under collective moves',
+  },
+};
+
+// The refusal for a batch where every selected stop was skipped for a group,
+// freeze, wait or series reason: one sentence per kind present, the retry
+// hint when any is a wait, and the code of the first structural kind (the
+// wait code only when ALL are waits). Table-driven over SKIP_KINDS.
+function skippedKindsRefusal(byKind) {
+  const kinds = Object.keys(SKIP_KINDS).filter((kind) => byKind[kind].length);
+  const structural = kinds.find((kind) => SKIP_KINDS[kind].code);
+  const intro = `Every selected stop is ${kinds.map((kind) => SKIP_KINDS[kind].sentence(byKind[kind])).join(', or ')}`;
+  const retry = byKind.busy.length ? ' Try again in a moment for the busy ones.' : '';
+  return structural
+    ? { error: `${intro}, and the bar can't move ${kinds.length > 1 ? 'those' : 'it'} from here yet.${retry}`, code: SKIP_KINDS[structural].code }
+    : { error: `${intro}, so nothing was moved. Try again in a moment.`, code: 'visit_busy_move' };
 }
 
-// The skipped lists that hold a stop, named as the card and the result show
-// them: exactly what stays behind.
-const nonEmptySkipLists = (lists) => Object.fromEntries(Object.entries(lists).filter(([, stops]) => stops.length));
+// The refusal when no stop is left to move, plus every kind of capability gap
+// among the skips (Codex #6371 r15, r21). An unreadable group check anywhere
+// keeps the whole refusal an uncoded fault (Tool Health), never a gap (r7).
+function allSkippedRefusal({ skippedGrouped, skippedCollective, skippedUnchanged, skippedElapsed }) {
+  if (skippedGrouped.some((entry) => entry.unreadable)) {
+    return { error: 'The bar could not check whether some selected stops belong to a grouped or frozen visit, so nothing was moved. Try again.' };
+  }
+  const byKind = {
+    grouped: skippedGrouped.filter((g) => g.kind === 'grouped'),
+    frozen: skippedGrouped.filter((g) => g.kind === 'frozen'),
+    busy: skippedGrouped.filter((g) => g.kind === 'busy'),
+    collective: skippedCollective,
+  };
+  const anyKind = Object.values(byKind).some((stops) => stops.length);
+  const plain = skippedUnchanged.length && !skippedElapsed.length
+    ? { error: 'Every selected stop is already on that date — nothing to move' }
+    : { error: 'Every movable stop\'s window has already passed today — pick a later window or a future date' };
+  const refusal = anyKind && !skippedUnchanged.length && !skippedElapsed.length ? skippedKindsRefusal(byKind) : plain;
+  return { ...refusal, ...skippedMoveGaps(skippedGrouped, skippedCollective) };
+}
 
-async function moveStopsToDay(input, actionContext = {}) {
-  const { service_ids: serviceIds, new_date: newDate, reason, confirmed } = input;
-  const notifyCustomers = input.notify_customers === true;
 
+
+const stopDateOnly = (v) => (v instanceof Date ? v.toISOString().slice(0, 10) : (v ? String(v).slice(0, 10) : null));
+
+// Stage 1: the date and the rows. A refusal here ends the move: a bad date,
+// no such stops, or every stop already in a terminal status (one-way — they
+// stay behind and are reported).
+async function selectMoveCandidates({ service_ids: serviceIds, new_date: newDate }) {
   // scheduled_date is a plain DATE column holding ET calendar dates — a
   // garbage, impossible (2099-02-31), or past target moves stops where no
-  // upcoming query finds them, or throws a raw PG cast error. Shared strict
-  // validator: a shape-only regex let impossible dates reach the DATE update.
+  // upcoming query finds them, or throws a raw PG cast error.
   const dateStr = validScheduleDate(newDate);
-  if (!dateStr) {
-    return { error: `new_date must be a valid YYYY-MM-DD date that is not in the past (got "${newDate}")` };
-  }
-
+  if (!dateStr) return { refusal: { error: `new_date must be a valid YYYY-MM-DD date that is not in the past (got "${newDate}")` } };
   const services = await db('scheduled_services')
     .whereIn('scheduled_services.id', serviceIds)
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-    .select(
-      'scheduled_services.*',
-      'customers.first_name', 'customers.last_name', 'customers.city',
-    );
-
-  if (!services.length) return { error: 'No services found for the given IDs' };
-
-  // Terminal rows are one-way — refuse to move them, and report them so the
-  // operator sees exactly what stays behind.
-  const nonTerminal = services.filter((s) => !TERMINAL_MOVE_STATUSES.has(String(s.status)));
-  const skippedTerminal = services
-    .filter((s) => TERMINAL_MOVE_STATUSES.has(String(s.status)))
-    .map((s) => ({ id: s.id, status: s.status }));
+    .select('scheduled_services.*', 'customers.first_name', 'customers.last_name', 'customers.city');
+  if (!services.length) return { refusal: { error: 'No services found for the given IDs' } };
+  const isTerminal = (s) => TERMINAL_MOVE_STATUSES.has(String(s.status));
+  const nonTerminal = services.filter((s) => !isTerminal(s));
   if (!nonTerminal.length) {
-    return { error: 'All matching stops are in a terminal status (completed/cancelled/skipped/no_show) — nothing to move' };
+    return { refusal: { error: 'All matching stops are in a terminal status (completed/cancelled/skipped/no_show) — nothing to move' } };
   }
+  return { dateStr, nonTerminal, skippedTerminal: services.filter(isTerminal).map((s) => ({ id: s.id, status: s.status })) };
+}
 
-  // A move TO today whose stop window already elapsed in ET would land the
-  // stop in a past window no route can serve — reject those per-stop with the
-  // rebooker's shared cutoff logic (window_end preferred, else window_start),
-  // and report them so the operator sees what stayed behind. A stop with a
-  // still-future window today, or any move to a future date, is unaffected.
-  const movableAnyDate = nonTerminal.filter((s) => !sameDayWindowElapsed(dateStr, s.window_end || s.window_start));
-  const skippedElapsed = nonTerminal
-    .filter((s) => sameDayWindowElapsed(dateStr, s.window_end || s.window_start))
-    .map((s) => ({ id: s.id, status: s.status }));
-  // A stop already on the target date has nothing to move — drop it here so
-  // neither the preview nor the commit rewrites it or texts its customer
-  // about an "unchanged" appointment (and never closes its reminder windows
-  // as if a real reschedule notice replaced them).
-  const stopDateOnly = (v) => (v instanceof Date ? v.toISOString().slice(0, 10) : (v ? String(v).slice(0, 10) : null));
-  const movableByDate = movableAnyDate.filter((s) => stopDateOnly(s.scheduled_date) !== dateStr);
-  const skippedUnchanged = movableAnyDate
-    .filter((s) => stopDateOnly(s.scheduled_date) === dateStr)
-    .map((s) => ({ id: s.id }));
-  // Collective series moves (GATE_ADMIN_COLLECTIVE_MOVE): this batch mover
-  // writes ONE row per stop and cannot shift a cadence visit's sister
-  // visits, so with the gate on a recurring stop moving to another date is
-  // refused — reported as skipped_collective — on BOTH passes, so the
-  // proposal promises exactly the set the confirmed pass moves (hook r17
-  // P1: the refusal used to live only in the commit loop, and an operator
-  // could confirm a proposal that then moved nothing). Refuse-don't-drop,
-  // same as reschedule_appointment. Gate off: the move is a this-visit-only
-  // date exception (rebooker.dateExceptionStamp). The gate read is the
-  // rebooker's own (lazy — only when a recurring stop is in the set).
-  const collectiveGateOn = movableByDate.some((s) => s.is_recurring === true)
-    && require('../rebooker').collectiveMoveGateOn();
-  const skippedCollective = collectiveGateOn
-    ? movableByDate.filter((s) => s.is_recurring === true).map((s) => ({ id: s.id, status: s.status, reason: 'collective_move_required' }))
-    : [];
-  const movableUngated = collectiveGateOn ? movableByDate.filter((s) => s.is_recurring !== true) : movableByDate;
-  // Grouped/frozen eligibility at PROPOSAL time too (GH r8 P1): the commit's
-  // per-stop assert (under locks) stays authoritative, but a stop already
-  // known unmovable must never ride the card's approved set only to be
-  // skipped silently after Confirm. Read-only check (no locks — the CAS pins
-  // visit_id, so a stop grouped AFTER this read drifts/misses instead);
-  // fail CLOSED per stop on an unverifiable group state.
+// Stage 2: what the date itself rules out. A move TO today whose stop window
+// already elapsed in ET would land in a past window no route can serve; a
+// stop already on the target date has nothing to move (neither the preview
+// nor the commit rewrites it or texts its customer). With collective series
+// moves on (GATE_ADMIN_COLLECTIVE_MOVE) a recurring stop is refused on BOTH
+// passes — this batch mover writes one row per stop and cannot shift a
+// cadence visit's sister visits (hook r17 P1). Each skip is reported.
+function splitMoveByDate(nonTerminal, dateStr) {
+  const elapsed = (s) => sameDayWindowElapsed(dateStr, s.window_end || s.window_start);
+  const onTarget = (s) => stopDateOnly(s.scheduled_date) === dateStr;
+  const movableAnyDate = nonTerminal.filter((s) => !elapsed(s));
+  const movableByDate = movableAnyDate.filter((s) => !onTarget(s));
+  // The gate read is the rebooker's own (lazy — only when a recurring stop is in the set).
+  const collectiveGateOn = movableByDate.some((s) => s.is_recurring === true) && require('../rebooker').collectiveMoveGateOn();
+  const isSeries = (s) => collectiveGateOn && s.is_recurring === true;
+  return {
+    skippedElapsed: nonTerminal.filter(elapsed).map((s) => ({ id: s.id, status: s.status })),
+    skippedUnchanged: movableAnyDate.filter(onTarget).map((s) => ({ id: s.id })),
+    skippedCollective: movableByDate.filter(isSeries).map((s) => ({ id: s.id, status: s.status, reason: 'collective_move_required' })),
+    movableUngated: movableByDate.filter((s) => !isSeries(s)),
+  };
+}
+
+// Stage 3: grouped/frozen eligibility at PROPOSAL time too (GH r8 P1): a stop
+// already known unmovable must never ride the card's approved set only to be
+// skipped silently after Confirm.
+async function classifyMoveStops(stops) {
   const skippedGrouped = [];
   const movable = [];
-  for (const s of movableUngated) {
+  for (const s of stops) {
     const skip = await groupStateSkip(s);
     (skip ? skippedGrouped : movable).push(skip || s);
   }
-  const skipLists = {
-    skipped_grouped: skippedGrouped, skipped_collective: skippedCollective, skipped_unchanged: skippedUnchanged,
-    skipped_elapsed: skippedElapsed, skipped_terminal: skippedTerminal,
-  };
-  if (!movable.length) {
-    return {
-      ...allSkippedRefusal({ skippedGrouped, skippedCollective, skippedUnchanged, skippedElapsed }),
-      ...nonEmptySkipLists(skipLists),
-    };
-  }
+  return { movable, skippedGrouped };
+}
 
-  // Evidence-only tracker rewinds ride the preview too (GH r8 P1): a
-  // non-live stop with stale tracker evidence gets its tracker fields
-  // cleared + post-commit cleanup on move (needsLifecycleRewind) — derived
-  // here so the card can disclose it and the two-step fingerprint binds it
-  // (evidence appearing during the pending window is drift, not a silent
-  // tracker release).
-  const { needsLifecycleRewind: previewNeedsRewind } = require('../rebooker');
-  // Pinned SMS recipients (GH r18 P1): with notify_customers the commit
-  // texts each stop's resolved service-contact recipient, re-resolved from
-  // a fresh customer load at send time — so the phone the operator
-  // approves must ride the preview (full number binds the fingerprint,
-  // last4 renders on the card) and be enforced at the sender's final
-  // recipient read (sendRescheduleNoticeForVisit expectedPhone).
-  const notifyPhoneByCustomer = new Map();
-  if (notifyCustomers) {
-    const contactApi = require('../customer-contact');
-    for (const s of movable) {
-      if (!s.customer_id || notifyPhoneByCustomer.has(String(s.customer_id))) continue;
-      const customerRow = await db('customers').where('id', s.customer_id).first();
-      notifyPhoneByCustomer.set(String(s.customer_id),
-        customerRow ? (contactApi.getServiceContactSmsRecipient(customerRow).phone || null) : null);
-    }
+// Pinned SMS recipients (GH r18 P1): with notify_customers the commit texts
+// each stop's resolved service-contact recipient, re-resolved from a fresh
+// customer load at send time — so the phone the operator approves must ride
+// the preview (full number binds the fingerprint, last4 renders on the card)
+// and be enforced at the sender's final recipient read.
+async function loadNotifyPhones(movable, notifyCustomers) {
+  const phones = new Map();
+  if (!notifyCustomers) return phones;
+  const contactApi = require('../customer-contact');
+  for (const s of movable) {
+    if (!s.customer_id || phones.has(String(s.customer_id))) continue;
+    const customerRow = await db('customers').where('id', s.customer_id).first();
+    phones.set(String(s.customer_id), customerRow ? (contactApi.getServiceContactSmsRecipient(customerRow).phone || null) : null);
   }
-  const stops = movable.map(s => ({
+  return phones;
+}
+
+// One stop as the card shows it (and the confirmed pass re-derives it).
+function previewStop(s, { dateStr, notifyCustomers, notifyPhoneByCustomer }) {
+  // Evidence-only tracker rewinds ride the preview too (GH r8 P1): the card
+  // discloses them and the two-step fingerprint binds them.
+  const { needsLifecycleRewind } = require('../rebooker');
+  const phone = notifyPhoneByCustomer.get(String(s.customer_id)) || null;
+  return {
     id: s.id,
     customer: `${s.first_name || ''} ${s.last_name || ''}`.trim(),
     city: s.city,
@@ -1308,103 +1273,96 @@ async function moveStopsToDay(input, actionContext = {}) {
     // Lifecycle state rides in the preview (codex r7 on #3648): a live
     // (en_route/on_site) stop is more than a date move — the commit resets
     // it to confirmed and releases tech/tracker state — so the card must
-    // disclose it, and the two-step fingerprint must bind it (a stop going
-    // live during the pending window is drift, not a silent workflow kill).
+    // disclose it, and the two-step fingerprint must bind it.
     status: s.status,
-    ...(!LIVE_MOVE_STATUSES.has(String(s.status)) && previewNeedsRewind(s) ? { track_rewind: true } : {}),
-    // Grouped-visit membership (GH r18 P1): a sole-open-member grouped
-    // stop passes eligibility, and the post-commit seam then detaches it
-    // and dissolves the empty group — the card must disclose that, and a
-    // membership change during the pending window must drift.
+    ...(!LIVE_MOVE_STATUSES.has(String(s.status)) && needsLifecycleRewind(s) ? { track_rewind: true } : {}),
+    // Grouped-visit membership (GH r18 P1): a sole-open-member grouped stop
+    // is detached and its empty group dissolved after commit — the card
+    // must disclose that, and a membership change must drift.
     ...(s.visit_id ? { grouped_visit_id: String(s.visit_id) } : {}),
-    ...(notifyCustomers ? {
-      notify_phone: notifyPhoneByCustomer.get(String(s.customer_id)) || null,
-      notify_phone_last4: String(notifyPhoneByCustomer.get(String(s.customer_id)) || '').replace(/\D/g, '').slice(-4) || null,
-    } : {}),
+    ...(notifyCustomers ? { notify_phone: phone, notify_phone_last4: String(phone || '').replace(/\D/g, '').slice(-4) || null } : {}),
     old_date: s.scheduled_date,
     new_date: dateStr,
-  }));
+  };
+}
 
-  if (confirmed !== true) {
-    return {
-      proposal: true,
-      would_move_to: dateStr,
-      stop_count: stops.length,
-      reason: reason || null,
-      // Surfaced on the confirmation card — the operator must see whether
-      // committing will text the customers.
-      will_text_customers: notifyCustomers,
-      stops,
-      ...skippedMoveGaps(skippedGrouped, skippedCollective),
-      ...nonEmptySkipLists(skipLists),
-      note: `Would move ${stops.length} stop(s) to ${dateStr}${notifyCustomers ? ' and TEXT each customer the new arrival window' : ' silently (no customer texts)'}. Re-call with confirmed:true to apply.`,
-    };
+// Stages 1-3 plus the preview stops: a refusal, or everything a card or a
+// commit needs. `skipped` holds the skip lists and the capability-gap note,
+// the same on the proposal and the committed result.
+async function planMove(input) {
+  const picked = await selectMoveCandidates(input);
+  if (picked.refusal) return picked;
+  const { dateStr, nonTerminal, skippedTerminal } = picked;
+  const split = splitMoveByDate(nonTerminal, dateStr);
+  const { movable, skippedGrouped } = await classifyMoveStops(split.movableUngated);
+  const { skippedCollective, skippedUnchanged, skippedElapsed } = split;
+  const lists = {
+    skipped_grouped: skippedGrouped, skipped_collective: skippedCollective, skipped_unchanged: skippedUnchanged,
+    skipped_elapsed: skippedElapsed, skipped_terminal: skippedTerminal,
+  };
+  if (!movable.length) {
+    return { refusal: { ...allSkippedRefusal({ skippedGrouped, skippedCollective, skippedUnchanged, skippedElapsed }), ...nonEmptySkipLists(lists) } };
   }
+  const notifyCustomers = input.notify_customers === true;
+  const notifyPhoneByCustomer = await loadNotifyPhones(movable, notifyCustomers);
+  const context = { dateStr, notifyCustomers, notifyPhoneByCustomer };
+  return {
+    ...context,
+    reason: input.reason,
+    movable,
+    stops: movable.map((s) => previewStop(s, context)),
+    skipped: { ...nonEmptySkipLists(lists), ...skippedMoveGaps(skippedGrouped, skippedCollective) },
+  };
+}
 
-  // The stop set + lifecycle states the operator approved
-  // (`_verified_stops`, the route's fingerprint-verified re-preview) must
-  // match what this confirmed pass just re-read (pre-push r11 P1): the
-  // fingerprint bound the CARD, but this run's movable/status/rewind
-  // classification comes from its own fresh unlocked read — a stop that
-  // went en_route, gained rewind evidence, or moved during the pending
-  // window would otherwise get a workflow reset or tracker release the
-  // card never disclosed. Same consume-the-pin contract as
-  // assign_technician / swap_tech_assignments; the per-stop CAS below
-  // stays the read→write authority.
-  const approvedMoveStops = Array.isArray(input._verified_stops) ? input._verified_stops : null;
-  if (approvedMoveStops) {
-    const approvedById = new Map(approvedMoveStops.map((a) => [String(a.id), a]));
-    const drifted = approvedMoveStops.length !== stops.length
-      || stops.some((s) => {
-        const a = approvedById.get(String(s.id));
-        return !a
-          || String(a.status) !== String(s.status)
-          || (a.track_rewind === true) !== (s.track_rewind === true)
-          || stopDateOnly(a.old_date) !== stopDateOnly(s.old_date)
-          // Grouped membership + pinned SMS recipient bind too (GH r18
-          // P1): a stop that joined/left/switched groups, or whose
-          // resolved recipient phone changed, gets effects the card never
-          // showed. `s` here is THIS confirmed pass's re-derived stop
-          // (same builder), so both sides carry the fields.
-          || String(a.grouped_visit_id || '') !== String(s.grouped_visit_id || '')
-          || (notifyCustomers && String(a.notify_phone || '') !== String(s.notify_phone || ''));
-      });
-    if (drifted) {
-      return {
-        error: 'The stops changed after the card was shown (status, tracker evidence, or date) — nothing was moved. Ask again for a fresh confirmation card.',
-        preview_changed: true,
-      };
-    }
-  }
+function moveProposal(plan) {
+  const { stops, dateStr, notifyCustomers } = plan;
+  return {
+    proposal: true,
+    would_move_to: dateStr,
+    stop_count: stops.length,
+    reason: plan.reason || null,
+    // Surfaced on the confirmation card — the operator must see whether
+    // committing will text the customers.
+    will_text_customers: notifyCustomers,
+    stops,
+    ...plan.skipped,
+    note: `Would move ${stops.length} stop(s) to ${dateStr}${notifyCustomers ? ' and TEXT each customer the new arrival window' : ' silently (no customer texts)'}. Re-call with confirmed:true to apply.`,
+  };
+}
 
-  // Lazy require: rebooker is heavy (sockets, comms) — only needed on commit.
-  const {
-    LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects, applyLiveMovePostCommitEffects,
-    needsLifecycleRewind, applyTrackLifecycleCas, dateExceptionStamp,
-  } = require('../rebooker');
-  const movedIds = new Set();
-  // Committed stops whose landing block overlaps another appointment on the
-  // target date (advisory — the moves stand; the result warns).
-  const overlapMovedIds = [];
-  // Moved rows whose requested customer text did NOT go out — reported so
-  // the operator learns the move committed but someone wasn't notified.
-  const notificationFailures = [];
-  // Moved rows whose promised tech/tracker release or cleanup failed
-  // post-commit (GH r9 P1) — the card disclosed that release, so a failure
-  // surfaces as a warning, never a bare Done.
-  const lifecycleCleanupFailures = [];
-  // Moved rows whose reschedule_log audit append failed (GH r19 P2).
-  const auditFailures = [];
-  let textedCount = 0;
-  // ── Phase A: the COMPLETE approved set moves in ONE transaction
-  // (pre-push r21 P1): the exact-effects card promised one frozen effect
-  // set, so a CAS miss, a grouped/frozen refusal, or any target drift
-  // aborts EVERY move (same all-or-none contract as bulk_update_leads)
-  // instead of leaving a partially applied batch behind a Done. Per-stop
-  // lifecycle classification derives from the same read the CAS pins; the
-  // CAS rationale (status + observed schedule fields + visit_id + tracker
-  // snapshot, no FOR UPDATE) is unchanged from the per-stop version.
-  const classified = movable.map((s) => {
+// Whether one approved stop differs from this pass's re-derived stop (status,
+// tracker evidence, date, and — GH r18 P1 — grouped membership and the pinned
+// SMS recipient, which bind too: a stop that joined/left/switched groups, or
+// whose resolved phone changed, gets effects the card never showed).
+function stopDrifted(approved, s, notifyCustomers) {
+  return !approved
+    || String(approved.status) !== String(s.status)
+    || (approved.track_rewind === true) !== (s.track_rewind === true)
+    || stopDateOnly(approved.old_date) !== stopDateOnly(s.old_date)
+    || String(approved.grouped_visit_id || '') !== String(s.grouped_visit_id || '')
+    || (notifyCustomers && String(approved.notify_phone || '') !== String(s.notify_phone || ''));
+}
+
+// The stop set + lifecycle states the operator approved (`_verified_stops`,
+// the route's fingerprint-verified re-preview) must match what this confirmed
+// pass just re-read (pre-push r11 P1): a stop that went en_route, gained
+// rewind evidence, or moved during the pending window would otherwise get a
+// workflow reset or tracker release the card never disclosed.
+function approvedStopsDrift(input, plan) {
+  if (!Array.isArray(input._verified_stops)) return null;
+  const byId = new Map(input._verified_stops.map((a) => [String(a.id), a]));
+  const drifted = input._verified_stops.length !== plan.stops.length
+    || plan.stops.some((s) => stopDrifted(byId.get(String(s.id)), s, plan.notifyCustomers));
+  return drifted
+    ? { error: 'The stops changed after the card was shown (status, tracker evidence, or date) — nothing was moved. Ask again for a fresh confirmation card.', preview_changed: true }
+    : null;
+}
+
+// Per-stop lifecycle classification, derived from the same read the CAS pins.
+function classifyForCommit(movable) {
+  const { LIVE_LIFECYCLE_RESET, needsLifecycleRewind } = require('../rebooker');
+  return movable.map((s) => {
     const wasLive = LIVE_MOVE_STATUSES.has(String(s.status));
     const trackRewound = !wasLive && needsLifecycleRewind(s);
     return {
@@ -1413,333 +1371,362 @@ async function moveStopsToDay(input, actionContext = {}) {
       wasLive,
       trackRewound,
       liveReset: wasLive || trackRewound ? LIVE_LIFECYCLE_RESET : {},
-      observedDate: s.scheduled_date instanceof Date
-        ? s.scheduled_date.toISOString().slice(0, 10)
-        : (s.scheduled_date ? String(s.scheduled_date).slice(0, 10) : null),
+      observedDate: stopDateOnly(s.scheduled_date),
     };
   });
-  // A package visit 1 with a live visit 2: the card lists only the stops,
-  // so the bar does not move it (same rule as the single reschedule).
-  if (await require('../package-followup-booking').hasLivePackageChild(db, classified.map((c) => c.s.id))) {
-    return { error: 'One of these stops has a linked second treatment (a two-treatment package visit 2) that this card does not show. The bar can\'t move that stop from here yet. Nothing was moved.', code: 'package_visit_two_linked' };
-  }
-  const { lockTechDays } = require('../scheduling/tech-day-lock');
-  const runBatchTrx = async () => db.transaction(async (trx) => {
-    const overlappedIds = [];
-    // Rung 1 + tech-blind probes FIRST (occupancy.js ORDERING CONTRACT: the
-    // date-wide lock precedes the tech-day fence). Advisory only — a hit
-    // warns, never blocks (owner ruling 2026-08-25).
-    for (const c of classified) {
-      const s = c.s;
-      const probeStart = s.window_start ? String(s.window_start).slice(0, 5) : null;
-      let probeEnd = s.window_end ? String(s.window_end).slice(0, 5) : null;
-      if (probeStart && (!probeEnd || probeEnd <= probeStart)) {
-        const [h, m] = probeStart.split(':').map(Number);
-        const endMin = Math.min(h * 60 + m + (parseInt(s.estimated_duration_minutes, 10) || 60), 23 * 60 + 59);
-        probeEnd = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
-      }
-      if (probeStart && probeEnd) {
-        const overlap = await probeSlotOverlap({
-          trx, date: dateStr, windowStart: probeStart, windowEnd: probeEnd, excludeServiceIds: [String(s.id)],
-        });
-        if (overlap.length) overlappedIds.push(s.id);
-      }
-    }
-    // ONE tech-day fence over every day this batch touches (each stop's
-    // leaving day + the joining day).
-    await lockTechDays(trx, classified.flatMap((c) => [
-      { techId: c.s.technician_id, date: c.observedDate },
-      { techId: c.s.technician_id, date: dateStr },
-    ]));
-    for (const c of classified) {
-      const s = c.s;
-      // Grouped/frozen refusal under the stop lock, AFTER the tech-day
-      // fence (lock order; codex #3609 r29 P1) — here it ABORTS the batch.
-      await require('../visit-groups').assertRowMovableAlone(trx, s.id, s.visit_id);
-      // Package visit 2 recheck, atomic with this stop's write; aborts the batch.
-      await require('../package-followup-booking').assertNoLivePackageChildLocked(trx, [s.id],
-        'One of these stops has a linked second treatment (a two-treatment package visit 2) that this card does not show. The bar can\'t move that stop from here yet. Nothing was moved.');
-      // A stop carrying a limited area add-on is judged for the new day at its place; a limit reached aborts the batch, nothing moves.
-      await require('../area-addon-limits').assertMovedVisitLimitsOpen(trx, { visitId: s.id, visit: s, scheduledDate: dateStr, staff: true });
-      const committedRows = await applyTrackLifecycleCas(
-        trx('scheduled_services')
-          .where('id', s.id)
-          .where('status', String(s.status))
-          .where({
-            scheduled_date: c.observedDate,
-            window_start: s.window_start ?? null,
-            window_end: s.window_end ?? null,
-            // Observed membership joins the CAS (codex r29): grouped-since ⇒ miss.
-            visit_id: s.visit_id ?? null,
-          }),
-        // Full observed tracker/lifecycle snapshot in the CAS — any
-        // concurrent lifecycle or SMS-guard write must make this miss.
-        s,
-      )
-        .update({
-          scheduled_date: dateStr,
-          ...recurringDispatchDuePatch(s, { scheduled_date: dateStr }),
-          ...(c.observedDate !== dateStr ? dateExceptionStamp(s, 'admin_ib') : {}),
-          // Old day's sequence number is meaningless on the new date — NULL
-          // appends the stop after the target day's ordered run.
-          route_order: null,
-          notes: reason ? `${s.notes || ''}\nMoved from ${c.oldDate}: ${reason}`.trim() : s.notes,
-          track_token_expires_at: scheduledServiceTrackTokenExpiry(db, dateStr, s.window_end),
-          // LIVE_LIFECYCLE_RESET clears the tracker fields but not status —
-          // land a moved live stop back on 'confirmed', matching the
-          // rebooker's own path.
-          ...(c.wasLive ? { status: 'confirmed' } : {}),
-          ...c.liveReset,
-          updated_at: new Date(),
-        })
-        // The technician on the COMMITTED row: the CAS does not pin
-        // technician_id, so the move notice goes to whoever holds the stop
-        // now, not the unlocked pre-read (Codex r4 P1).
-        .returning(['id', 'technician_id']);
-      if (committedRows.length === 0) {
-        throw Object.assign(new Error('move_set_changed'), { code: 'MOVE_SET_CHANGED', stopId: s.id });
-      }
-      c.committedTechId = committedRows[0]?.technician_id || null;
-    }
-    return overlappedIds;
-  });
-  try {
-    // Deadlock retry (codex #3609 r31 P2) around the WHOLE batch — locks
-    // re-acquired fresh on 40P01.
-    for (let attempt = 0; ; attempt++) {
-      try {
-        overlapMovedIds.push(...await runBatchTrx());
-        break;
-      } catch (err) {
-        if (err && err.code === '40P01' && attempt < 2) {
-          overlapMovedIds.length = 0;
-          continue;
-        }
-        throw err;
-      }
-    }
-  } catch (err) {
-    if (err && err.code === 'PACKAGE_CHILD_PRESENT') return { error: err.message, code: 'package_visit_two_linked' };
-    if (err && err.code === 'VISIT_FROZEN_MOVE_UNSUPPORTED' && err.reason === 'unreadable') throw err; // an outage stays a fault
-    if (err && (err.code === 'MOVE_SET_CHANGED' || err.code === 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' || err.code === 'VISIT_FROZEN_MOVE_UNSUPPORTED')) {
-      return {
-        error: 'One of the approved stops changed (status, schedule, or grouped-visit state) while the move was pending — NOTHING was moved. Ask again for a fresh confirmation card.',
-        preview_changed: true,
-        code: 'preview_changed',
-      };
-    }
-    throw err;
-  }
-  for (const c of classified) movedIds.add(c.s.id);
+}
 
-
-  // Tech-facing notices (tech-visit-notifications.js): this writer changes
-  // scheduled_date itself, so it tells the holder itself. Post-commit,
-  // best-effort, NOT awaited; the operator's own move stays silent.
-  {
-    const { notifyVisitRescheduled } = require('../tech-visit-notifications');
-    for (const c of classified) {
-      if (!c.committedTechId) continue;
-      void notifyVisitRescheduled({
-        visitId: c.s.id,
-        technicianId: c.committedTechId,
-        actorId: actionContext.technicianId || null,
-        previous: { date: c.oldDate, windowStart: c.s.window_start, windowEnd: c.s.window_end },
-        snapshot: { date: dateStr, windowStart: c.s.window_start, windowEnd: c.s.window_end },
-      });
-    }
+// The advisory overlap probe window of a stop: its own window, or its start
+// plus the visit's duration when the end is missing or not after the start.
+function probeWindowOf(s) {
+  const start = s.window_start ? String(s.window_start).slice(0, 5) : null;
+  let end = s.window_end ? String(s.window_end).slice(0, 5) : null;
+  if (start && (!end || end <= start)) {
+    const [h, m] = start.split(':').map(Number);
+    const endMin = Math.min(h * 60 + m + (parseInt(s.estimated_duration_minutes, 10) || 60), 23 * 60 + 59);
+    end = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
   }
+  return { start, end };
+}
 
-  // ── Phase B: post-commit side effects per moved stop — best-effort; the
-  // batch is committed, so failures surface as warnings, never unwind it.
-  for (const c of classified) {
-    const s = c.s;
-    if (c.wasLive) {
-      // Rebooker-parity effects of the live → confirmed flip:
-      // job_status_history audit, tech_status release, tracker refresh.
-      try {
-        await applyLiveMoveSideEffects(db, s);
-      } catch (err) {
-        logger.error(`[intelligence-bar:schedule] live-move side effects failed for ${s.id}: ${err.message}`);
-        lifecycleCleanupFailures.push(s.id);
-      }
-    } else if (c.trackRewound) {
-      // Tracker rewind without a status transition: cleanup only, no
-      // history row, refresh with the stop's unchanged status.
-      try {
-        await applyLiveMovePostCommitEffects(s, { toStatus: s.status });
-      } catch (err) {
-        logger.error(`[intelligence-bar:schedule] track-rewind side effects failed for ${s.id}: ${err.message}`);
-        lifecycleCleanupFailures.push(s.id);
-      }
-    }
-    // Audit row matching the rebooker's reschedule_log conventions.
+// Rung 1 + tech-blind probes FIRST (occupancy.js ORDERING CONTRACT: the
+// date-wide lock precedes the tech-day fence). Advisory only — a hit warns,
+// never blocks (owner ruling 2026-08-25). Returns the overlapping stop ids.
+async function probeMoveOverlaps(trx, classified, dateStr) {
+  const overlappedIds = [];
+  for (const { s } of classified) {
+    const { start, end } = probeWindowOf(s);
+    if (!start || !end) continue;
+    const overlap = await probeSlotOverlap({ trx, date: dateStr, windowStart: start, windowEnd: end, excludeServiceIds: [String(s.id)] });
+    if (overlap.length) overlappedIds.push(s.id);
+  }
+  return overlappedIds;
+}
+
+// One stop's write inside the batch transaction: the grouped/frozen refusal
+// under the stop lock (AFTER the tech-day fence — lock order; codex #3609 r29
+// P1), the package visit 2 recheck, the area add-on limit, then the CAS
+// update (status + observed schedule fields + visit_id + tracker snapshot, no
+// FOR UPDATE; a miss aborts the batch).
+async function writeMovedStop(trx, c, dateStr, reason) {
+  const { applyTrackLifecycleCas, dateExceptionStamp } = require('../rebooker');
+  const s = c.s;
+  await require('../visit-groups').assertRowMovableAlone(trx, s.id, s.visit_id);
+  // Package visit 2 recheck, atomic with this stop's write; aborts the batch.
+  await require('../package-followup-booking').assertNoLivePackageChildLocked(trx, [s.id],
+    'One of these stops has a linked second treatment (a two-treatment package visit 2) that this card does not show. The bar can\'t move that stop from here yet. Nothing was moved.');
+  // A stop carrying a limited area add-on is judged for the new day at its place; a limit reached aborts the batch, nothing moves.
+  await require('../area-addon-limits').assertMovedVisitLimitsOpen(trx, { visitId: s.id, visit: s, scheduledDate: dateStr, staff: true });
+  const committedRows = await applyTrackLifecycleCas(
+    trx('scheduled_services')
+      .where('id', s.id)
+      .where('status', String(s.status))
+      .where({
+        scheduled_date: c.observedDate,
+        window_start: s.window_start ?? null,
+        window_end: s.window_end ?? null,
+        // Observed membership joins the CAS (codex r29): grouped-since ⇒ miss.
+        visit_id: s.visit_id ?? null,
+      }),
+    // Full observed tracker/lifecycle snapshot in the CAS — any concurrent
+    // lifecycle or SMS-guard write must make this miss.
+    s,
+  )
+    .update({
+      scheduled_date: dateStr,
+      ...recurringDispatchDuePatch(s, { scheduled_date: dateStr }),
+      ...(c.observedDate !== dateStr ? dateExceptionStamp(s, 'admin_ib') : {}),
+      // Old day's sequence number is meaningless on the new date — NULL
+      // appends the stop after the target day's ordered run.
+      route_order: null,
+      notes: reason ? `${s.notes || ''}\nMoved from ${c.oldDate}: ${reason}`.trim() : s.notes,
+      track_token_expires_at: scheduledServiceTrackTokenExpiry(db, dateStr, s.window_end),
+      // LIVE_LIFECYCLE_RESET clears the tracker fields but not status — land a
+      // moved live stop back on 'confirmed', matching the rebooker's own path.
+      ...(c.wasLive ? { status: 'confirmed' } : {}),
+      ...c.liveReset,
+      updated_at: new Date(),
+    })
+    // The technician on the COMMITTED row: the CAS does not pin technician_id,
+    // so the move notice goes to whoever holds the stop now (Codex r4 P1).
+    .returning(['id', 'technician_id']);
+  if (committedRows.length === 0) throw Object.assign(new Error('move_set_changed'), { code: 'MOVE_SET_CHANGED', stopId: s.id });
+  c.committedTechId = committedRows[0]?.technician_id || null;
+}
+
+// Phase A: the COMPLETE approved set moves in ONE transaction (pre-push r21
+// P1): a CAS miss, a grouped/frozen refusal, or any target drift aborts EVERY
+// move (all-or-none, like bulk_update_leads).
+async function moveBatchTrx(trx, classified, dateStr, reason) {
+  const overlappedIds = await probeMoveOverlaps(trx, classified, dateStr);
+  // ONE tech-day fence over every day this batch touches (each stop's leaving day + the joining day).
+  await require('../scheduling/tech-day-lock').lockTechDays(trx, classified.flatMap((c) => [
+    { techId: c.s.technician_id, date: c.observedDate },
+    { techId: c.s.technician_id, date: dateStr },
+  ]));
+  for (const c of classified) await writeMovedStop(trx, c, dateStr, reason);
+  return overlappedIds;
+}
+
+// Deadlock retry (codex #3609 r31 P2) around the WHOLE batch — locks
+// re-acquired fresh on 40P01.
+async function runMoveBatch(classified, dateStr, reason) {
+  for (let attempt = 0; ; attempt++) {
     try {
-      await db('reschedule_log').insert({
-        scheduled_service_id: s.id,
-        customer_id: s.customer_id,
-        original_date: c.oldDate,
-        new_date: dateStr,
-        reason_code: 'admin',
-        initiated_by: 'admin_ib',
-        original_window: s.window_start ? `${s.window_start}-${s.window_end}` : null,
-        new_window: s.window_start ? `${s.window_start}-${s.window_end}` : null,
-        notes: reason || null,
-      });
+      return await db.transaction((trx) => moveBatchTrx(trx, classified, dateStr, reason));
     } catch (err) {
-      logger.error(`[intelligence-bar:schedule] reschedule_log insert failed for ${s.id}: ${err.message}`);
-      // The card discloses the audit append (GH r19 P2) — a failed insert
-      // surfaces in the combined warning, never a bare Done.
-      auditFailures.push(s.id);
+      if (!(err && err.code === '40P01' && attempt < 2)) throw err;
     }
   }
+}
 
-  // Notification phase — runs only after EVERY approved stop has been
-  // moved, released, and audited above, so one slow SMS provider can
-  // never delay or strand the rest of the confirmed batch. Best-effort
-  // per stop; failures land in notification_failures.
-  for (const s of movable) {
-    if (!movedIds.has(s.id)) continue;
-    // Activate a moved LEGACY outbound-review row regardless of the notify
-    // flag (Codex #3361 r3 P0 — same gap as the admin bulk path): this
-    // writer moves rows directly, and a legacy row has no reminder row, so
-    // the notify branch below would report "no reminder record" without
-    // ever reaching the notice sender's activation belt. No-op for every
-    // other row; best-effort by the helper's contract.
+// The result for a batch the transaction aborted, or a rethrow of a real fault.
+function moveBatchFailure(err) {
+  if (err && err.code === 'PACKAGE_CHILD_PRESENT') return { error: err.message, code: 'package_visit_two_linked' };
+  if (err && err.code === 'VISIT_FROZEN_MOVE_UNSUPPORTED' && err.reason === 'unreadable') throw err; // an outage stays a fault
+  if (err && ['MOVE_SET_CHANGED', 'VISIT_EDIT_SCHEDULE_UNSUPPORTED', 'VISIT_FROZEN_MOVE_UNSUPPORTED'].includes(err.code)) {
+    return {
+      error: 'One of the approved stops changed (status, schedule, or grouped-visit state) while the move was pending — NOTHING was moved. Ask again for a fresh confirmation card.',
+      preview_changed: true,
+      code: 'preview_changed',
+    };
+  }
+  throw err;
+}
+
+// Tech-facing notices (tech-visit-notifications.js): this writer changes
+// scheduled_date itself, so it tells the holder itself. Post-commit,
+// best-effort, NOT awaited; the operator's own move stays silent.
+function notifyTechsOfMove(classified, dateStr, actionContext) {
+  const { notifyVisitRescheduled } = require('../tech-visit-notifications');
+  for (const c of classified.filter((item) => item.committedTechId)) {
+    void notifyVisitRescheduled({
+      visitId: c.s.id,
+      technicianId: c.committedTechId,
+      actorId: actionContext.technicianId || null,
+      previous: { date: c.oldDate, windowStart: c.s.window_start, windowEnd: c.s.window_end },
+      snapshot: { date: dateStr, windowStart: c.s.window_start, windowEnd: c.s.window_end },
+    });
+  }
+}
+
+// Rebooker-parity release of a moved live stop (job_status_history audit,
+// tech_status release, tracker refresh) or, for a tracker rewind without a
+// status change, cleanup only. Best-effort; true when it failed.
+async function releaseMovedStop(c) {
+  if (!c.wasLive && !c.trackRewound) return false;
+  const { applyLiveMoveSideEffects, applyLiveMovePostCommitEffects } = require('../rebooker');
+  try {
+    if (c.wasLive) await applyLiveMoveSideEffects(db, c.s);
+    else await applyLiveMovePostCommitEffects(c.s, { toStatus: c.s.status });
+    return false;
+  } catch (err) {
+    logger.error(`[intelligence-bar:schedule] ${c.wasLive ? 'live-move' : 'track-rewind'} side effects failed for ${c.s.id}: ${err.message}`);
+    return true;
+  }
+}
+
+// The reschedule_log audit row, matching the rebooker's conventions. True
+// when the append failed (the card discloses it — GH r19 P2).
+async function auditMovedStop(c, dateStr, reason) {
+  const s = c.s;
+  const window = s.window_start ? `${s.window_start}-${s.window_end}` : null;
+  try {
+    await db('reschedule_log').insert({
+      scheduled_service_id: s.id,
+      customer_id: s.customer_id,
+      original_date: c.oldDate,
+      new_date: dateStr,
+      reason_code: 'admin',
+      initiated_by: 'admin_ib',
+      original_window: window,
+      new_window: window,
+      notes: reason || null,
+    });
+    return false;
+  } catch (err) {
+    logger.error(`[intelligence-bar:schedule] reschedule_log insert failed for ${s.id}: ${err.message}`);
+    return true;
+  }
+}
+
+// Phase B: post-commit side effects per moved stop — best-effort; the batch
+// is committed, so failures surface as warnings, never unwind it.
+async function applyPostCommit(classified, dateStr, reason) {
+  const lifecycleCleanupFailures = [];
+  const auditFailures = [];
+  for (const c of classified) {
+    if (await releaseMovedStop(c)) lifecycleCleanupFailures.push(c.s.id);
+    if (await auditMovedStop(c, dateStr, reason)) auditFailures.push(c.s.id);
+  }
+  return { lifecycleCleanupFailures, auditFailures };
+}
+
+// The opt-in reschedule text for one moved stop: { sent: true } or { reason }.
+// Same shared path as update-details and the bulk reschedule (arrival-window
+// copy, recipient routing, terminal/slot recheck, guarded reminder close/re-arm).
+async function sendMoveNotice(s, { dateStr, notifyPhoneByCustomer }) {
+  const start = s.window_start ? String(s.window_start).slice(0, 5) : null;
+  if (!start) return { reason: 'No arrival time is set for this visit, so no reschedule text was sent' };
+  const reminderRow = await db('appointment_reminders')
+    .where({ scheduled_service_id: s.id })
+    .first('suppressed_by_sibling')
+    .catch(() => null);
+  if (!reminderRow) return { reason: 'No reminder record for this visit — not texted' };
+  // The destination slot's reminder owner carries this customer's messaging
+  // and may not be part of this move — report it rather than let the operator
+  // assume the customer was told (codex #3102 r3).
+  if (reminderRow.suppressed_by_sibling) return { reason: 'Another visit that day carries this customer\'s reminders — no reschedule text was sent for this stop' };
+  // Cover any already-due reminder window before our text so the 15-min cron
+  // can't double-text in the send gap (sendRescheduleNoticeForVisit's contract).
+  const sync = await require('../appointment-reminders').handleReschedule(s.id, `${dateStr}T${start}`, {
+    sendNotification: false,
+    coverDueWindows: true,
+    // Stale-move guard (atomic in the service): the reminder rewrite misses if
+    // a newer reschedule already landed a different slot on the row.
+    expectSchedule: { date: dateStr, windowStart: start },
+  });
+  if (!sync || sync.skippedStale) {
+    // skippedStale: a newer move won and owns the customer messaging. Falsy:
+    // the guarded sync itself failed — a still-pending deferred confirmation
+    // would follow our text as a duplicate. Either way: report, don't send.
+    return {
+      reason: sync && sync.skippedStale
+        ? 'Appointment changed again before the text could be sent'
+        : 'Reminder sync failed — not texted (automated reminders still cover the new time)',
+    };
+  }
+  // The card-approved recipient phone rides to the sender's final recipient
+  // read (GH r18 P1), even when null (GH r19 P1): a card that showed "no SMS
+  // recipient" pins ABSENCE — a phone added after the confirm re-preview must
+  // refuse at the sender, never text a number the operator did not see.
+  const notice = await require('../../routes/admin-schedule').sendRescheduleNoticeForVisit(s.id, dateStr, start, {
+    expectedPhone: notifyPhoneByCustomer.get(String(s.customer_id)) ?? null,
+  });
+  return notice.sent ? { sent: true } : { reason: notice.error || 'reschedule text was not sent' };
+}
+
+// Best-effort per stop: a send failure is reported, never unwinds the committed move.
+async function textMovedStop(s, plan) {
+  try {
+    return await sendMoveNotice(s, plan);
+  } catch (err) {
+    logger.error(`[intelligence-bar:schedule] move notice failed for ${s.id}: ${err.message}`);
+    return { reason: err.message };
+  }
+}
+
+// Notification phase — runs only after EVERY approved stop has been moved,
+// released, and audited, so one slow SMS provider can never delay or strand
+// the rest of the confirmed batch. Activates a moved LEGACY outbound-review
+// row regardless of the notify flag (Codex #3361 r3 P0), then, when asked,
+// texts the customer LAST.
+async function notifyMovedCustomers(plan, movedIds) {
+  let textedCount = 0;
+  const notificationFailures = [];
+  for (const s of plan.movable.filter((stop) => movedIds.has(stop.id))) {
     try {
-      await require('../outbound-review-confirm')
-        .activateLegacyOutboundReviewRowIfNeeded(db, s.id, 'ib-bulk-move');
+      await require('../outbound-review-confirm').activateLegacyOutboundReviewRowIfNeeded(db, s.id, 'ib-bulk-move');
     } catch { /* helper is internally best-effort; never strand the batch */ }
-    // Opt-in customer text — LAST: after the live-job release and the
-    // reschedule_log audit, so a slow
-    // SMS provider can never hold tech_status/tracker on the moved job.
-    // Same shared path as update-details and the bulk
-    // reschedule (arrival-window copy, recipient routing, terminal/slot
-    // recheck, guarded reminder close/re-arm). Best-effort per stop: a send
-    // failure is reported, never unwinds the committed move.
-    if (notifyCustomers) {
-      try {
-        const start = s.window_start ? String(s.window_start).slice(0, 5) : null;
-        if (!start) {
-          notificationFailures.push({ id: s.id, reason: 'No arrival time is set for this visit, so no reschedule text was sent' });
-        } else {
-          const reminderRow = await db('appointment_reminders')
-            .where({ scheduled_service_id: s.id })
-            .first('suppressed_by_sibling')
-            .catch(() => null);
-          if (!reminderRow) {
-            notificationFailures.push({ id: s.id, reason: 'No reminder record for this visit — not texted' });
-          } else if (reminderRow.suppressed_by_sibling) {
-            // The destination slot's reminder owner carries this customer's
-            // messaging, and that owner may not be part of this move — so
-            // no reschedule text goes out here. Report it rather than let
-            // the operator assume the customer was told (codex #3102 r3).
-            notificationFailures.push({ id: s.id, reason: 'Another visit that day carries this customer\'s reminders — no reschedule text was sent for this stop' });
-          } else {
-            const AppointmentReminders = require('../appointment-reminders');
-            // Cover any already-due reminder window before our text so the
-            // 15-min cron can't double-text in the send gap (the caller-side
-            // contract of sendRescheduleNoticeForVisit).
-            const sync = await AppointmentReminders.handleReschedule(s.id, `${dateStr}T${start}`, {
-              sendNotification: false,
-              coverDueWindows: true,
-              // Stale-move guard (atomic in the service): the reminder
-              // rewrite misses if a newer reschedule already landed a
-              // different slot on the row.
-              expectSchedule: { date: dateStr, windowStart: start },
-            });
-            if (!sync || sync.skippedStale) {
-              // skippedStale: a newer move won and owns the customer
-              // messaging. Falsy: the guarded sync itself failed — a
-              // still-pending deferred confirmation would then follow our
-              // text as a duplicate. Either way: report, don't send (the
-              // cron's fallback reminders remain armed).
-              notificationFailures.push({
-                id: s.id,
-                reason: sync && sync.skippedStale
-                  ? 'Appointment changed again before the text could be sent'
-                  : 'Reminder sync failed — not texted (automated reminders still cover the new time)',
-              });
-            } else {
-              const { sendRescheduleNoticeForVisit } = require('../../routes/admin-schedule');
-              // The card-approved recipient phone rides to the sender's
-              // final recipient read (GH r18 P1) — a number changed after
-              // the card refuses there instead of texting an unapproved
-              // phone.
-              // The pinned value is passed even when it is null (GH r19
-              // P1): a card that showed "no SMS recipient" pins ABSENCE —
-              // a phone added after the confirm re-preview must refuse at
-              // the sender, never text a number the operator did not see.
-              const notice = await sendRescheduleNoticeForVisit(s.id, dateStr, start, {
-                expectedPhone: notifyPhoneByCustomer.get(String(s.customer_id)) ?? null,
-              });
-              if (notice.sent) textedCount++;
-              else notificationFailures.push({ id: s.id, reason: notice.error || 'reschedule text was not sent' });
-            }
-          }
-        }
-      } catch (err) {
-        notificationFailures.push({ id: s.id, reason: err.message });
-        logger.error(`[intelligence-bar:schedule] move notice failed for ${s.id}: ${err.message}`);
-      }
-    }
+    if (!plan.notifyCustomers) continue;
+    const outcome = await textMovedStop(s, plan);
+    if (outcome.sent) textedCount++;
+    else notificationFailures.push({ id: s.id, reason: outcome.reason });
   }
+  return { textedCount, notificationFailures };
+}
 
-  const movedStops = stops.filter((st) => movedIds.has(st.id));
-
-  // Visit-group seam (codex #3590 r9): this writer moves dates directly
-  // (not via the rebooker), so it repairs grouped membership itself — a
-  // moved child leaves a visit that stays on the old date. Runs LAST,
-  // after every query this tool issues for its own result (the helper is
-  // best-effort and self-contained). No-op for ungrouped rows.
-  let moveGroupWarning = null;
+// Visit-group seam (codex #3590 r9): this writer moves dates directly (not via
+// the rebooker), so it repairs grouped membership itself — a moved child
+// leaves a visit that stays on the old date. Runs LAST (best-effort). A failed
+// repair of a grouped moved stop surfaces as a warning (GH r18 P1).
+async function repairMovedGroups(movedIds, movable) {
+  let warning = null;
   for (const movedId of movedIds) {
     try {
       await require('../visit-groups').handleChildStopChanged(movedId);
     } catch (vgErr) {
       logger.warn(`[intelligence-bar:schedule] visit-group seam failed for moved ${movedId}: ${vgErr.message}`);
-      // The card disclosed the detach/dissolve for grouped moved stops —
-      // a failed repair must surface, never a bare Done (GH r18 P1).
       if (movable.some((s) => movedIds.has(s.id) && s.visit_id)) {
-        moveGroupWarning = 'Moved, but repairing grouped-visit membership failed — one or more grouped stops may still show the old visit; re-check the affected visits on the schedule.';
+        warning = 'Moved, but repairing grouped-visit membership failed — one or more grouped stops may still show the old visit; re-check the affected visits on the schedule.';
       }
     }
   }
+  return warning;
+}
 
-
-  logger.info(`[intelligence-bar:schedule] Moved ${movedStops.length} stops to ${dateStr}`);
-
-  // ONE `warning` key: the card renders body.result.warning only, so the
-  // overlap note and the texts-failed note must COMBINE, never overwrite
-  // each other (a later spread writing `warning` clobbered the overlap).
-  const overlapNote = overlapMovedIds.length
-    ? `${slotOverlapWarning(dateStr)} (${overlapMovedIds.length} moved stop${overlapMovedIds.length === 1 ? '' : 's'} overlap${overlapMovedIds.length === 1 ? 's' : ''} an existing appointment)`
+// ONE `warning` key: the card renders body.result.warning only, so the
+// overlap note, the texts-failed note and the rest must COMBINE.
+function moveWarning(plan, run, movedCount) {
+  const n = run.overlapMovedIds.length;
+  const overlapNote = n
+    ? `${slotOverlapWarning(plan.dateStr)} (${n} moved stop${n === 1 ? '' : 's'} overlap${n === 1 ? 's' : ''} an existing appointment)`
     : null;
   // Top-level partial-failure signal: /confirm-action reports success (the
-  // moves DID commit), so without this the card shows a bare "Done" and
-  // the operator assumes every customer was texted.
-  const notifyNote = notifyCustomers && notificationFailures.length
-    ? `Moved ${movedStops.length} stop(s), but ${notificationFailures.length} customer(s) were not texted: ${notificationFailures.map((f) => f.reason).slice(0, 3).join('; ')}${notificationFailures.length > 3 ? '…' : ''}`
+  // moves DID commit), so a bare "Done" would imply every customer was texted.
+  const failures = run.notificationFailures;
+  const notifyNote = plan.notifyCustomers && failures.length
+    ? `Moved ${movedCount} stop(s), but ${failures.length} customer(s) were not texted: ${failures.map((f) => f.reason).slice(0, 3).join('; ')}${failures.length > 3 ? '…' : ''}`
     : null;
-  const lifecycleNote = lifecycleCleanupFailures.length
-    ? `${lifecycleCleanupFailures.length} moved stop(s) committed but their technician/tracker release failed — check the tech pointer for those visits.`
+  const lifecycleNote = run.lifecycleCleanupFailures.length
+    ? `${run.lifecycleCleanupFailures.length} moved stop(s) committed but their technician/tracker release failed — check the tech pointer for those visits.`
     : null;
-  const auditNote = auditFailures.length
-    ? `${auditFailures.length} moved stop(s) are missing their reschedule audit entry (the moves stand; the history append failed).`
+  const auditNote = run.auditFailures.length
+    ? `${run.auditFailures.length} moved stop(s) are missing their reschedule audit entry (the moves stand; the history append failed).`
     : null;
-  const combinedWarning = [overlapNote, notifyNote, lifecycleNote, moveGroupWarning, auditNote].filter(Boolean).join(' ');
+  return [overlapNote, notifyNote, lifecycleNote, run.moveGroupWarning, auditNote].filter(Boolean).join(' ');
+}
 
+function moveResult(plan, run) {
+  const movedStops = plan.stops.filter((st) => run.movedIds.has(st.id));
+  logger.info(`[intelligence-bar:schedule] Moved ${movedStops.length} stops to ${plan.dateStr}`);
+  const warning = moveWarning(plan, run, movedStops.length);
   return {
     success: true,
     moved_count: movedStops.length,
-    new_date: dateStr,
+    new_date: plan.dateStr,
     stops: movedStops,
-    ...(combinedWarning ? { warning: combinedWarning } : {}),
-    ...(overlapMovedIds.length ? { overlap_ids: overlapMovedIds } : {}),
-    ...(notifyCustomers ? { texted_count: textedCount, notification_failures: notificationFailures } : {}),
-    ...nonEmptySkipLists(skipLists),
-    ...skippedMoveGaps(skippedGrouped, skippedCollective),
+    ...(warning ? { warning } : {}),
+    ...(run.overlapMovedIds.length ? { overlap_ids: run.overlapMovedIds } : {}),
+    ...(plan.notifyCustomers ? { texted_count: run.textedCount, notification_failures: run.notificationFailures } : {}),
+    ...plan.skipped,
   };
+}
+
+// The confirmed pass: classify, refuse a package visit 1 the card does not
+// show, run the one transaction, then the post-commit phases in order.
+async function commitMove(plan, actionContext) {
+  const classified = classifyForCommit(plan.movable);
+  // A package visit 1 with a live visit 2: the card lists only the stops, so
+  // the bar does not move it (same rule as the single reschedule).
+  if (await require('../package-followup-booking').hasLivePackageChild(db, classified.map((c) => c.s.id))) {
+    return { error: 'One of these stops has a linked second treatment (a two-treatment package visit 2) that this card does not show. The bar can\'t move that stop from here yet. Nothing was moved.', code: 'package_visit_two_linked' };
+  }
+  let overlapMovedIds;
+  try {
+    overlapMovedIds = await runMoveBatch(classified, plan.dateStr, plan.reason);
+  } catch (err) {
+    return moveBatchFailure(err);
+  }
+  const movedIds = new Set(classified.map((c) => c.s.id));
+  notifyTechsOfMove(classified, plan.dateStr, actionContext);
+  const post = await applyPostCommit(classified, plan.dateStr, plan.reason);
+  const notices = await notifyMovedCustomers(plan, movedIds);
+  const moveGroupWarning = await repairMovedGroups(movedIds, plan.movable);
+  return moveResult(plan, { movedIds, overlapMovedIds, moveGroupWarning, ...post, ...notices });
+}
+
+// The skipped lists that hold a stop, named as the card and the result show
+// them: exactly what stays behind.
+const nonEmptySkipLists = (lists) => Object.fromEntries(Object.entries(lists).filter(([, stops]) => stops.length));
+
+// Move stops to another day: validate and plan (select, split by date, classify
+// group state), answer the card, check the approved stops, then commit.
+async function moveStopsToDay(input, actionContext = {}) {
+  const plan = await planMove(input);
+  if (plan.refusal) return plan.refusal;
+  if (input.confirmed !== true) return moveProposal(plan);
+  return approvedStopsDrift(input, plan) || commitMove(plan, actionContext);
 }
 
 
@@ -2241,4 +2228,4 @@ async function cancelAndRescheduleFarOut(input) {
 }
 
 
-module.exports = { SCHEDULE_TOOLS, executeScheduleTool, _private: { batchMoveGroupRefusal } };
+module.exports = { SCHEDULE_TOOLS, executeScheduleTool, _private: { allSkippedRefusal } };
