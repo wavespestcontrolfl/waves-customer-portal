@@ -16,7 +16,7 @@ jest.mock('../config/twilio-numbers', () => ({
 
 const db = require('../models/db');
 const CallRecordingProcessor = require('../services/call-recording-processor');
-const { findCustomerViaCallbackSpokenNumber } = CallRecordingProcessor._test;
+const { findCustomerViaCallbackSpokenNumber, fileCallbackSpokenNumberCard } = CallRecordingProcessor._test;
 
 const DIALED = '+19415550199';
 const SPOKEN = '+19415558642';
@@ -202,5 +202,70 @@ describe('findCustomerViaCallbackSpokenNumber', () => {
   test('no customer owns the spoken number: null', async () => {
     mockDb({ call_log: [voicemail()], customers: [[]] });
     expect(await findCustomerViaCallbackSpokenNumber(callbackCall(), extractedJordan)).toBeNull();
+  });
+});
+
+// The pass keeps the call customer-less and files one suggest-only card (Codex #6419 r2): the
+// voicemail number is typed out by whoever left the message, so it proves nothing about the person
+// who answered the callback.
+describe('fileCallbackSpokenNumberCard', () => {
+  function captureInsert() {
+    const inserted = [];
+    const chain = {
+      insert: (row) => { inserted.push(row); return chain; },
+      onConflict: () => chain,
+      ignore: () => chain,
+      catch: () => Promise.resolve(),
+    };
+    const conn = Object.assign(jest.fn(() => chain), { raw: (sql) => sql });
+    return { conn, inserted };
+  }
+
+  test('files one blocking customer-field card that names the candidate, both numbers and the extracted name', async () => {
+    const { conn, inserted } = captureInsert();
+    await fileCallbackSpokenNumberCard({
+      call: callbackCall({ id: 'cb-9' }), extracted: extractedJordan, candidate: customer(), conn,
+    });
+    expect(conn).toHaveBeenCalledWith('triage_items');
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0]).toMatchObject({
+      call_log_id: 'cb-9', reason_code: 'callback_spoken_number_link', category: 'customer_field_conflict', severity: 'blocking', status: 'open',
+    });
+    expect(JSON.parse(inserted[0].payload)).toMatchObject({
+      flag: 'callback_spoken_number_link',
+      link_candidate: { id: 'cust-1', name: 'Jordan Rivers' },
+      spoken_number: SPOKEN,
+      dialed_number: DIALED,
+      extracted_name: 'Jordan Rivers',
+    });
+  });
+});
+
+// The Step 3 branch cannot run without a database, so pin its shape: the suggestion never becomes
+// the call's customer, never reaches a backfill, and the pass does not mint a customer around it.
+describe('Step 3 keeps a spoken-number match suggest-only', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+  const start = src.indexOf('} else if (spokenNumberCandidate) {');
+  const end = src.indexOf('} else if ((extracted.first_name || firstNameAdvisoryCreate)', start);
+  const branch = src.slice(start, end);
+
+  test('the branch exists, files the card and sits before customer creation', () => {
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    expect(branch).toContain('fileCallbackSpokenNumberCard');
+  });
+
+  test('no link, phone-match mark, backfill or customer write from the suggestion', () => {
+    expect(branch).not.toMatch(/customerId\s*=/);
+    expect(branch).not.toMatch(/phoneMatchedThisPass/);
+    expect(branch).not.toMatch(/backfillLinkedCustomerFromExtraction/);
+    expect(branch).not.toMatch(/db\('customers'\)/);
+    // The only assignment of the candidate is from the gated helper.
+    expect(src.match(/spokenNumberCandidate = /g)).toHaveLength(2);
+    expect(src).not.toMatch(/existing = await findCustomerViaCallbackSpokenNumber/);
+  });
+
+  test('the lead path treats the suggestion as an unclaimed-only phone', () => {
+    expect(src).toContain('unclaimedOnly: !!(sharedPhoneAmbiguity.candidates || spokenNumberCandidate)');
   });
 });
