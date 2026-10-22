@@ -1456,9 +1456,11 @@ function sendHolds({ active, draft, writing, perimeterFeet, traceRead, oneTap = 
   // "Same as last visit" still copying: the send waits for the trace it will carry.
   const copying = [reusing, 'Copying the last trace…'];
   // No trace and no typed feet are required on any visit (owner 2026-10-22, "trace should not be required for any
-  // service"). Feet that were typed must be a whole number above 0: a mistake is corrected, never dropped.
+  // service"). Feet typed in the box (shown beside a perimeter spray, feetFieldFor) must be a whole number above 0: a
+  // mistake is corrected, never dropped. A box the visit no longer shows holds nothing.
   if (oneTap && !traceRead.zone) {
-    return [...ready.report, copying, [String(typedFeetText).trim() !== '' && typedFeet == null, 'Type the feet as a whole number above 0, or leave the box empty.']];
+    const badFeet = String(typedFeetText).trim() !== '' && typedFeet == null && perimeterSprayRow(active, draft);
+    return [...ready.report, copying, [badFeet, 'Type the feet as a whole number above 0, or leave the box empty.']];
   }
   return [
     ...ready.report,
