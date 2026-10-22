@@ -712,7 +712,9 @@ const pageErrorStage = r => (r.page.error && PAGE_REFERENCE_RE.test(targetClause
 // is still typed: no on-screen pick either (Codex #6369 r15).
 function sameNamePick(scope, r) {
   const viewed = r.page.customer;
-  if (!scope || !viewed || r.typedIds.identityConflict) return null;
+  // Only duplicates of ONE typed name are a same-name ambiguity the page can settle; a bare name
+  // that matches different full names never selects the viewed customer (Codex #6369 r20).
+  if (!scope || !r.sameName || !viewed || r.typedIds.identityConflict) return null;
   // A typed qualifier that resolved to exactly the viewed customer confirms the page.
   if (r.typedIds.length === 1) return r.typedIds[0] === viewed.customer_id ? viewed : null;
   return r.typedIds.length === 0 && !qualifierTyped(r.prompt, r.named) ? viewed : null;
