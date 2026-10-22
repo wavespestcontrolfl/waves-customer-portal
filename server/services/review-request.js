@@ -1975,18 +1975,24 @@ const ReviewService = {
   // Anything unconfirmed — the App, no provider proof, cadences off, an
   // explicit or customer-requested timing, a decision another deferral
   // rewrote — leaves the smart window. Never throws.
-  // GATE_REVIEW_ASK_AFTER_REPORT: the next check time when an untouched Day-0
-  // post-service smart-window ask's own report is still queued by the send
-  // window (completionSmsStatus 'deferred'), else null. Bounded at 24 hours
-  // from enrollment, so a rail that never replays cannot hold an ask forever.
-  // A failed read never holds (the ask keeps today's behavior).
+  // GATE_REVIEW_ASK_AFTER_REPORT: when an untouched Day-0 post-service
+  // smart-window ask may go, given its own held report: still queued
+  // (completionSmsStatus 'deferred') -> re-check in 5 minutes; delivered under
+  // 10 minutes ago (completionSmsDeferredDeliveredAt, stamped by the replay's
+  // finalize) -> 10 minutes after that delivery. This is the 10-minute floor
+  // from the runner's side, so it holds even before (or without) the replay's
+  // pullAskAfterHeldReport. Null otherwise. Bounded at 24 hours from
+  // enrollment; a failed read never holds (the ask keeps today's behavior).
   async _heldReportQueuedRetryAt(seq) {
     if (!seq.service_record_id || seq.started_by !== "post_service" || Number(seq.current_step || 0) !== 0 || Number(seq.touches_sent || 0) !== 0) return null;
     if (parseDecision(seq.decision)?.reason !== "smart_window" || Date.now() - new Date(seq.started_at || 0).getTime() > 24 * 3600000) return null;
     try {
       if (!reviewAskAfterReportOn()) return null;
       const row = await db("service_records").where({ id: seq.service_record_id }).first("structured_notes");
-      return structuredNotesObject(row?.structured_notes).completionSmsStatus === "deferred" ? new Date(Date.now() + 5 * 60000) : null;
+      const notes = structuredNotesObject(row?.structured_notes);
+      if (notes.completionSmsStatus === "deferred") return new Date(Date.now() + 5 * 60000);
+      const readyMs = new Date(notes.completionSmsDeferredDeliveredAt || NaN).getTime() + REVIEW_AFTER_REPORT_DELAY_MINUTES * 60000;
+      return readyMs > Date.now() ? new Date(readyMs) : null;
     } catch (err) {
       logger.warn(`[review] held-report check failed (sequenceId=${seq.id}): ${err.message}`);
       return null;

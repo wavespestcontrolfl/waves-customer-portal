@@ -8106,8 +8106,20 @@ describe('GATE_REVIEW_ASK_AFTER_REPORT — Day-0 ask 10 minutes after the report
       expect(JSON.parse(row.decision)).toMatchObject({ reason: 'smart_window' });
     });
 
+    test('report delivered 3 minutes ago (the replay finalize, before its pull): held until 10 minutes after the delivery (codex #6471 pre-push P1)', async () => {
+      mockGates.reviewAskAfterReport = true;
+      const deliveredAt = new Date(Date.now() - 3 * 60000);
+      const mock = bookQ({ completionSmsStatus: 'sent', completionSmsDeferredTo: new Date(Date.now() - 3600000).toISOString(), completionSmsDeferredDeliveredAt: deliveredAt.toISOString() });
+      db.mockImplementation(mock);
+      const out = await ReviewService._runSequenceStep('seq-q');
+      expect(out).toMatchObject({ ran: false, deferred: true, reason: 'report_queued' });
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(new Date(mock.__state.rows.review_sequences[0].next_run_at).getTime()).toBe(deliveredAt.getTime() + 10 * 60000);
+    });
+
     test.each([
       ['the report went out', { completionSmsStatus: 'sent' }, {}],
+      ['the held report went out over 10 minutes ago', { completionSmsStatus: 'sent', completionSmsDeferredDeliveredAt: new Date(Date.now() - 11 * 60000).toISOString() }, {}],
       ['the gate is off', { completionSmsStatus: 'deferred' }, {}, false],
       ['enrolled over 24 hours ago', { completionSmsStatus: 'deferred' }, { started_at: new Date(Date.now() - 25 * 3600000) }],
       ['an operator timing', { completionSmsStatus: 'deferred' }, { decision: JSON.stringify({ reason: 'operator_timing' }) }],
