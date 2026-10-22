@@ -5,7 +5,7 @@
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import GeofenceArrivalPrompt from './GeofenceArrivalPrompt';
+import TechNoticeFeed from './TechNoticeFeed';
 
 const NUDGE = {
   id: 'n-open', type: 'tech_open_visit_nudge', created_at: '2026-09-28T23:00:00Z',
@@ -23,7 +23,7 @@ function stubFeed(notifications) {
   return calls;
 }
 
-describe('GeofenceArrivalPrompt — open visits card', () => {
+describe('TechNoticeFeed — open visits card', () => {
   beforeEach(() => {
     localStorage.setItem('waves_admin_token', 'tech-token');
     vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -37,7 +37,7 @@ describe('GeofenceArrivalPrompt — open visits card', () => {
 
   it('shows the headline and each open stop', async () => {
     stubFeed([NUDGE]);
-    render(<GeofenceArrivalPrompt />);
+    render(<TechNoticeFeed />);
     await act(async () => { await Promise.resolve(); });
     const card = await screen.findByTestId('tech-open-visits');
     expect(card).toHaveTextContent('2 visits from today still open');
@@ -47,7 +47,7 @@ describe('GeofenceArrivalPrompt — open visits card', () => {
 
   it('stays until "Got it" (dismiss); the reminder timer never marks it read', async () => {
     const calls = stubFeed([NUDGE]);
-    render(<GeofenceArrivalPrompt />);
+    render(<TechNoticeFeed />);
     await act(async () => { await Promise.resolve(); });
     expect(await screen.findByTestId('tech-open-visits')).toBeInTheDocument();
 

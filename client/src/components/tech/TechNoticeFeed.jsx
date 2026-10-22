@@ -1,10 +1,7 @@
 /**
- * GeofenceArrivalPrompt
+ * TechNoticeFeed
  *
  * Polls /api/tech/notifications every 10s and renders:
- *   - an arrival reminder card for `geofence_arrival_reminder` (tech confirms / dismisses)
- *   - an auto-started info card for `geofence_timer_started`
- *   - a stop toast (with Undo) for `geofence_timer_stopped`
  *   - a visit card for `visit_assigned` / `visit_unassigned` /
  *     `visit_rescheduled` / `visit_cancelled` (tech-visit-notifications.js) —
  *     no auto-dismiss: it waits until the tech taps "Got it"
@@ -25,9 +22,9 @@
  * (owner 2026-10-05, after phone screenshots of notices covering the screen):
  *   - 'page' (default; the Today overview): every card renders in the page
  *     flow at the top, so the tech scrolls past them. No overlay.
- *   - 'elsewhere' (Tools, More, an open visit): only the time-critical
- *     arrival cards float; every other card waits on Today, and one small
- *     line at the top says how many there are and links there.
+ *   - 'elsewhere' (Tools, More, an open visit): nothing floats; every card
+ *     waits on Today, and one small line at the top says how many there are
+ *     and links there.
  *
  * Audit focus:
  * - Polling cleanup: confirm the 10s interval is cleared on unmount and
@@ -36,38 +33,29 @@
  *   polls; verify the error path swallows quietly and resumes.
  * - Notification dedupe: if the same notification id arrives twice
  *   (server retry, late ack), do we render two cards?
- * - Auto-dismiss timers (REMINDER_AUTODISMISS_MS, STOP_TOAST_MS): they start
- *   only once the card has been seen (SeenOnScreen: visible on screen for
- *   SEEN_DWELL_MS, or tapped). An unseen card never expires on the clock and
- *   stays unread on the server. If the user confirms / dismisses manually
- *   before the timer fires, confirm we clear the pending timeout to avoid a
- *   late-firing dismiss racing with a fresh notification.
+ * - Auto-dismiss timer (REMINDER_AUTODISMISS_MS): it starts only once the card
+ *   has been seen (SeenOnScreen: visible on screen for SEEN_DWELL_MS, or
+ *   tapped). An unseen card never expires on the clock and stays unread on
+ *   the server. If the user dismisses manually before the timer fires,
+ *   confirm we clear the pending timeout to avoid a late-firing dismiss
+ *   racing with a fresh notification.
  * - Backgrounded tab behavior: when the tech's phone backgrounds the
  *   tab, polls pause. On resume, do we catch up correctly? Skipped
  *   notifications during the gap should still render once.
- * - Bouncie-mileage tie-in (if any): some installs have geofence
- *   timer events also drive mileage. Confirm a stop here doesn't
- *   double-write the mileage record.
  */
-import { TIME_TRACKING_CHANGED } from './timeTrackingEvents';
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { getAdminAuthToken } from '../../lib/adminAuth';
 import { useTechBasePath } from './techBasePath';
-import useIsMobile from '../../hooks/useIsMobile';
 import { formatETDateOnly } from '../../lib/timezone';
 
 const API = import.meta.env.VITE_API_URL || '';
 const POLL_MS = 10_000;
-// Timed cards (arrival, timer, storm) keep their clock, but it starts when the
+// Timed cards (storm) keep their clock, but it starts when the
 // tech has SEEN the card, not when it arrived (owner 2026-10-06, "keep
 // notices"): a card scrolled past or opened on a locked phone used to be
 // marked read after 5 minutes unseen.
 const REMINDER_AUTODISMISS_MS = 5 * 60 * 1000;
-const STOP_TOAST_MS = 15_000;
-// The server refuses Undo on a stop notice older than this (410), and stops
-// serving the notice then, so the toast offers no Undo past it either.
-const UNDO_WINDOW_MS = 30 * 60 * 1000;
 // Seen = at least half the card (or half the screen, for a tall card) in view
 // and not covered, continuously for this long on a visible page, or a tap.
 const SEEN_VISIBLE_RATIO = 0.5;
@@ -75,8 +63,8 @@ const SEEN_DWELL_MS = 1500;
 const SEEN_SAMPLE_MS = 250;
 const MAX_STORM_CARDS = 2;
 // Visit cards never auto-dismiss, so a bulk assign or day swap could stack
-// dozens over the actionable geofence prompts: same cap + summary line as
-// storms, newest first, and prompts always render above them.
+// dozens over the storm warnings: same cap + summary line as storms, newest
+// first, and storm warnings always render above them.
 const MAX_VISIT_CARDS = 2;
 
 // Visit cards are the tech's record of a schedule change; they never
@@ -96,14 +84,12 @@ const NUDGE_TYPES = new Set(['tech_open_visit_nudge']);
 // kept until "Got it" the same way, so it isn't lost to the 5-min auto-
 // dismiss timer before the tech has opened the stop.
 const PHOTO_TYPES = new Set(['customer_visit_photos']);
-// Time-critical: these still float over Tools, More and an open visit.
-const FLOATING_TYPES = new Set(['geofence_arrival_reminder', 'geofence_arrival_select', 'geofence_timer_started', 'geofence_timer_stopped']);
 // Types this component has a card for. Anything else in the feed (e.g. the
 // legacy `new_appointment` from admin-schedule "Notify technician") has no
 // card: it is never shown, so it can never be seen. It keeps the pre-seen
 // behaviour (marked read on the 5-minute clock) so it cannot sit unread
 // and eat the 20-row feed. Only rendered cards wait to be seen.
-const TIMED_RENDERED_TYPES = new Set([...FLOATING_TYPES, 'storm_watch_alert']);
+const TIMED_RENDERED_TYPES = new Set(['storm_watch_alert']);
 const KEPT_TYPES = new Set([...VISIT_TYPES, ...TEXT_TYPES, ...TRACKING_TYPES, ...NUDGE_TYPES, ...PHOTO_TYPES]);
 // Waves Admin look: ink and stone, amber for a warning, red only where the
 // notice is a genuine alert (a cancelled visit, a late arrival check).
@@ -150,20 +136,8 @@ async function apiGet(path) {
   return res.ok ? res.json() : Promise.reject(new Error(`${res.status}`));
 }
 
-function getPosition() {
-  return new Promise((resolve) => {
-    if (!navigator.geolocation) return resolve({});
-    navigator.geolocation.getCurrentPosition(
-      (p) => resolve({ lat: p.coords.latitude, lng: p.coords.longitude }),
-      () => resolve({}),
-      { enableHighAccuracy: true, timeout: 5000 }
-    );
-  });
-}
-
-export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleChanges = false, placement = 'page', navigationBusy = false }) {
+export default function TechNoticeFeed({ onStormReview, inlineScheduleChanges = false, placement = 'page', navigationBusy = false }) {
   const elsewhere = placement === 'elsewhere';
-  const isMobile = useIsMobile();
   const [active, setActive] = useState([]);
   const seenIds = useRef(new Set());
   // When the tech first saw each card (id → ms). A card with no entry has not
@@ -181,16 +155,10 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
       const { notifications = [] } = await apiGet('/api/tech/notifications');
       const fresh = notifications.filter((n) => !seenIds.current.has(n.id));
       fresh.forEach((n) => seenIds.current.add(n.id));
-      // Automatic geofence mode starts and stops job timers server-side and
-      // only posts these notices: the time clock reloads on them too (Codex #5786).
-      if (fresh.some((n) => n.type === 'geofence_timer_started' || n.type === 'geofence_timer_stopped')) {
-        window.dispatchEvent(new Event(TIME_TRACKING_CHANGED));
-      }
       // The server feed is the source of truth for what is still open: a
       // card the feed no longer lists leaves this screen too (tapped "Got it"
       // on the tech's other device, pushed out of the feed window by a burst,
-      // or aged out by the server: an arrival prompt at ET midnight, a stop
-      // toast after its 30-minute Undo window, a storm nudge after 6 hours).
+      // or aged out by the server: a storm nudge after 6 hours).
       // It is forgotten, so it can come back if the feed lists it again. No
       // /read post: the server already stopped serving it, or another device
       // handled it.
@@ -245,11 +213,11 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
     const stormAlerts = [...stormByJob.values()].sort(
       (a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0),
     );
-    // Away from Today only the arrival cards render; everything else is
-    // counted for the "notices on Today" line and left unread.
+    // Away from Today nothing renders; every card is counted for the
+    // "notices on Today" line and left unread.
     if (elsewhere) {
       return {
-        cards: otherCards.filter((n) => FLOATING_TYPES.has(n.type)),
+        cards: [],
         hiddenStormCount: 0, hiddenVisitCount: 0,
         waitingCount: visitCards.length + stormAlerts.length,
       };
@@ -267,9 +235,9 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
       return new Date(b.created_at || 0) - new Date(a.created_at || 0);
     });
     const shownVisits = visitsRanked.slice(0, MAX_VISIT_CARDS);
-    // Order: actionable prompts, then storm warnings (both on a timer that
-    // marks them read), then the persistent visit cards — nothing that can
-    // expire unseen ever sits below something that waits for a tap.
+    // Order: storm warnings (on a timer that marks them read), then the
+    // persistent visit cards — nothing that can expire unseen ever sits below
+    // something that waits for a tap.
     return {
       cards: [...otherCards, ...shownStorms, ...shownVisits],
       hiddenStormCount: stormAlerts.length - shownStorms.length,
@@ -314,8 +282,7 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
         return seenAt.current.has(n.id);
       })
       .map((n) => {
-        const ms = n.type === 'geofence_timer_stopped' ? STOP_TOAST_MS : REMINDER_AUTODISMISS_MS;
-        const left = Math.max(0, ms - (Date.now() - seenAt.current.get(n.id)));
+        const left = Math.max(0, REMINDER_AUTODISMISS_MS - (Date.now() - seenAt.current.get(n.id)));
         return setTimeout(() => removeCard(n.id, { silent: true }), left);
       });
     return () => timers.forEach(clearTimeout);
@@ -339,31 +306,6 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
     apiPost(`/api/tech/notifications/${id}/dismiss`).catch(() => { seenIds.current.delete(id); });
   }
 
-  async function handleStart(n, pick) {
-    const pos = await getPosition();
-    const body = pick
-      ? { ...pos, customer_id: pick.customer_id, job_id: pick.job_id }
-      : pos;
-    try {
-      await apiPost(`/api/tech/notifications/${n.id}/confirm-start`, body);
-      removeCard(n.id, { silent: true });
-      // The Today page's time clock reloads (TechTimeTrackingCard).
-      window.dispatchEvent(new Event(TIME_TRACKING_CHANGED));
-    } catch (err) {
-      alert('Could not start timer: ' + String(err).slice(0, 140));
-    }
-  }
-
-  async function handleUndo(n) {
-    try {
-      await apiPost(`/api/tech/notifications/${n.id}/undo-stop`);
-      removeCard(n.id, { silent: true });
-      window.dispatchEvent(new Event(TIME_TRACKING_CHANGED));
-    } catch (err) {
-      alert('Undo failed: ' + String(err).slice(0, 140));
-    }
-  }
-
   // Only types with a card render (and wait to be seen); the rest ride the timer above.
   const shownCards = cards.filter((n) => TIMED_RENDERED_TYPES.has(n.type) || KEPT_TYPES.has(n.type));
   const showStack = shownCards.length > 0 || hiddenVisitCount > 0 || hiddenStormCount > 0;
@@ -372,27 +314,9 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
   return (
     <>
     {elsewhere && waitingCount > 0 && <NoticesOnToday count={waitingCount} busy={navigationBusy} />}
-    {showStack && <div data-testid="notice-stack" data-placement={elsewhere ? 'float' : 'page'} style={elsewhere ? {
-      // On a phone the floating arrival cards sit below the admin top bar (52px), so the bar stays reachable.
-      position: 'fixed', top: isMobile ? 'calc(60px + env(safe-area-inset-top, 0px))' : 12, left: 12, right: 12, zIndex: 10_000,
-      display: 'flex', flexDirection: 'column', gap: 10, pointerEvents: 'none',
-      // Arrival cards are few; a cap keeps even a burst from covering the page.
-      maxHeight: '50dvh', overflowY: 'auto',
-    } : { display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 12 }}>
+    {showStack && <div data-testid="notice-stack" data-placement="page" style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 12 }}>
       {shownCards.map((n) => (
-        <SeenOnScreen key={n.id} id={n.id} onSeen={markSeen} style={elsewhere ? { pointerEvents: 'auto', filter: 'drop-shadow(0 6px 14px rgba(28,25,23,0.18))' } : undefined}>
-          {n.type === 'geofence_arrival_reminder' && (
-            <ReminderCard n={n} onStart={() => handleStart(n)} onDismiss={() => removeCard(n.id)} />
-          )}
-          {n.type === 'geofence_arrival_select' && (
-            <SelectorCard n={n} onPick={(pick) => handleStart(n, pick)} onDismiss={() => removeCard(n.id)} />
-          )}
-          {n.type === 'geofence_timer_started' && (
-            <InfoCard n={n} onDismiss={() => removeCard(n.id, { silent: true })} />
-          )}
-          {n.type === 'geofence_timer_stopped' && (
-            <StopToast n={n} onUndo={() => handleUndo(n)} onDismiss={() => removeCard(n.id, { silent: true })} />
-          )}
+        <SeenOnScreen key={n.id} id={n.id} onSeen={markSeen}>
           {VISIT_TYPES.has(n.type) && (
             <VisitCard n={n} onDismiss={() => dismissVisitCard(n.id)} />
           )}
@@ -451,7 +375,7 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
 // when the card leaves the viewport or the page is hidden. A tap on the card
 // counts too. A browser without IntersectionObserver samples on the same
 // schedule.
-function SeenOnScreen({ id, onSeen, style, children }) {
+function SeenOnScreen({ id, onSeen, children }) {
   const ref = useRef(null);
   useEffect(() => {
     const el = ref.current;
@@ -498,7 +422,7 @@ function SeenOnScreen({ id, onSeen, style, children }) {
       if (observer) observer.disconnect();
     };
   }, [id, onSeen]);
-  return <div ref={ref} style={style} onClickCapture={() => onSeen(id)}>{children}</div>;
+  return <div ref={ref} onClickCapture={() => onSeen(id)}>{children}</div>;
 }
 
 // Fresh measurement: the part of the card inside the viewport covers at least
@@ -562,59 +486,6 @@ function StormCard({ n, onReview, onDismiss }) {
         <button onClick={onReview} style={btnPrimary}>Review options</button>
         <button onClick={onDismiss} style={btnSecondary}>Working through it</button>
       </div>
-    </div>
-  );
-}
-
-function ReminderCard({ n, onStart, onDismiss }) {
-  const p = n.payload || {};
-  return (
-    <div style={cardStyle(p.unscheduled ? COLORS.amber : COLORS.ink)}>
-      <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>
-        {p.unscheduled ? '⚠️ Unscheduled visit' : '📍 Arrived'}
-      </div>
-      <div style={{ fontSize: 16, fontWeight: 500, color: COLORS.text, marginBottom: 4 }}>
-        {p.customer_name || 'Customer'}
-      </div>
-      {p.service_type && (
-        <div style={{ fontSize: 13, color: COLORS.muted, marginBottom: 12 }}>{p.service_type}</div>
-      )}
-      {p.unscheduled && (
-        <div style={{ fontSize: 12, color: COLORS.muted, marginBottom: 12 }}>
-          No job scheduled for today. Starting a timer logs this as an unscheduled visit.
-        </div>
-      )}
-      <div style={{ display: 'flex', gap: 8 }}>
-        <button onClick={onStart} style={btnPrimary}>Start Timer</button>
-        <button onClick={onDismiss} style={btnSecondary}>Not here yet</button>
-      </div>
-    </div>
-  );
-}
-
-function SelectorCard({ n, onPick, onDismiss }) {
-  const p = n.payload || {};
-  const candidates = p.candidates || [];
-  return (
-    <div style={cardStyle(COLORS.ink)}>
-      <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>📍 Near multiple customers</div>
-      <div style={{ fontSize: 13, color: COLORS.text, marginBottom: 12 }}>
-        Pick the one you're at:
-      </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
-        {candidates.map((c, i) => (
-          <button key={i} onClick={() => onPick(c)} style={{
-            textAlign: 'left', padding: 12, borderRadius: 4,
-            border: `0.5px solid ${COLORS.borderStrong}`, background: 'transparent',
-            color: COLORS.text, cursor: 'pointer', fontSize: 13,
-          }}>
-            <div style={{ fontWeight: 500 }}>{c.customer_name}</div>
-            {c.address && <div style={{ color: COLORS.muted, fontSize: 12 }}>{c.address}</div>}
-            {c.service_type && <div style={{ color: COLORS.muted, fontSize: 11, marginTop: 2 }}>{c.service_type}</div>}
-          </button>
-        ))}
-      </div>
-      <button onClick={onDismiss} style={btnSecondary}>Not here yet</button>
     </div>
   );
 }
@@ -751,36 +622,6 @@ function TrackingCard({ n, onDismiss }) {
   );
 }
 
-function InfoCard({ n, onDismiss }) {
-  return (
-    <div style={cardStyle(COLORS.ink)}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
-        <div>
-          <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>✅ Timer auto-started</div>
-          <div style={{ fontSize: 15, fontWeight: 500, color: COLORS.text }}>{n.message}</div>
-        </div>
-        <button onClick={onDismiss} style={closeX}>✕</button>
-      </div>
-    </div>
-  );
-}
-
-function StopToast({ n, onUndo, onDismiss }) {
-  const createdMs = new Date(n.created_at || 0).getTime();
-  const undoOpen = !Number.isFinite(createdMs) || !n.created_at || Date.now() - createdMs <= UNDO_WINDOW_MS;
-  return (
-    <div style={cardStyle(COLORS.amber)}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <div style={{ fontSize: 14, color: COLORS.text }}>⏱️ {n.message}</div>
-        <div style={{ display: 'flex', gap: 6 }}>
-          {undoOpen && <button onClick={onUndo} style={btnSecondary}>Undo</button>}
-          <button onClick={onDismiss} style={closeX}>✕</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function cardStyle(accent) {
   return {
     background: COLORS.bg,
@@ -800,9 +641,4 @@ const btnPrimary = {
 const btnSecondary = {
   padding: '10px 12px', borderRadius: 4, border: `0.5px solid ${COLORS.borderStrong}`,
   background: 'transparent', color: COLORS.text, fontWeight: 500, fontSize: 14, cursor: 'pointer',
-};
-
-const closeX = {
-  background: 'transparent', border: 'none', color: COLORS.muted,
-  fontSize: 16, cursor: 'pointer', padding: '4px 8px',
 };
