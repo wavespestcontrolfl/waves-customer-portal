@@ -457,6 +457,11 @@ const ALLOWLIST = [
     reason: 'metadata key (entry_point IN (…deferred entry points…)) is exclusive to this deferred-dispatch SMS claim — a review-ask/reply reservation never sets it, regardless of any status/direction overlap.',
   },
   {
+    file: 'services/invoice.js',
+    snippet: 'if (await conn("sms_log")',
+    reason: 'unvoidObligationReason (the bar\'s unvoid refusal): a yes/no existence check keyed on metadata invoice_id that DELIBERATELY counts scheduled / sending / finalize-pending rows, a reservation included, so the card refuses while anything is queued or in flight for the invoice; it presents no row to a person or model, so there is nothing to mislead.',
+  },
+  {
     file: 'services/lawn-intelligence.js',
     snippet: 'const existing = await trx(\'sms_log\').where({ customer_id: customer.id })',
     reason: 'metadata key (entry_point = \'lawn_assessment_notification_deferred\') is exclusive to this deferred lawn-notification claim — a review-ask/reply reservation never sets it, regardless of any status/direction overlap.',
