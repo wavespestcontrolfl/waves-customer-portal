@@ -53,6 +53,8 @@ let cardSeq = 0;
 const cardRows = [];
 // The lease cutoff the last bundle sweep read claims against.
 let bundleLeaseCutoff = null;
+// How many bundle clears (payload - 'push_bundle') fail before one succeeds.
+let mockClearFailures = 0;
 function cardsTable() {
   let runFilter = null;
   let idFilter = null;
@@ -103,6 +105,10 @@ function cardsTable() {
             if (token) r.payload.push_claim = token;
           }
           return claimed.map((r) => ({ id: r.id, technician_id: r.technician_id, payload: { ...r.payload }, created_at: r.created_at }));
+        }
+        if (sql.includes("- 'push_bundle'") && mockClearFailures > 0) {
+          mockClearFailures -= 1;
+          throw new Error('write refused');
         }
         let rows = idFilter
           ? cardRows.filter((r) => idFilter.includes(String(r.id)))
@@ -714,6 +720,7 @@ describe('bundled pushes for any other mover (GATE_TECH_PUSH_BUNDLE, owner 2026-
     mockLegs = null;
     mockLegsSent = [];
     bundleLeaseCutoff = null;
+    mockClearFailures = 0;
     prime({ techs, visits: visitRows });
   });
   afterAll(() => {
@@ -1047,6 +1054,25 @@ describe('bundled pushes for any other mover (GATE_TECH_PUSH_BUNDLE, owner 2026-
       expect(r.payload).not.toHaveProperty('push_bundle');
       expect(r.payload).not.toHaveProperty('push_claim');
     }
+  });
+
+  test('a push the provider accepted is never reopened when its clear fails (Codex #6459 r2 P2)', async () => {
+    await officeMove('v-1');
+    await officeMove('v-2');
+    // The clear fails once; the second try clears.
+    mockClearFailures = 1;
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    for (const r of cardRows) expect(r.payload).not.toHaveProperty('push_bundle');
+    // Both tries fail: the cards stay claimed (never released), so the next tick sends nothing.
+    mockSendToAdminUser.mockClear();
+    await officeMove('v-3');
+    await officeMove('v-4');
+    mockClearFailures = 2;
+    const now = quiet();
+    expect(await notices.flushBundledPushes({ now })).toEqual({ pushed: 1 });
+    expect(cardRows[2].payload).toMatchObject({ push_bundle: expect.anything(), push_claim: expect.any(String) });
+    expect(await notices.flushBundledPushes({ now })).toEqual({ pushed: 0 });
+    expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
   });
 
   test('a sweep read failure never throws to the scheduler', async () => {

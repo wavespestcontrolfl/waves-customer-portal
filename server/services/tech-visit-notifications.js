@@ -1020,9 +1020,9 @@ async function flushBundledPushes({ now = new Date() } = {}) {
       }
       if (!rows.length) continue;
       const ids = rows.map((row) => row.id);
+      let sent;
       try {
-        if (await sendBundle(technicianId, rows, token)) pushed += 1;
-        await settleOwned(ids, token, CLEAR_SQL);
+        sent = await sendBundle(technicianId, rows, token);
       } catch (err) {
         if (err instanceof BundleLost) {
           logger.info(`[tech-visit-notifications] bundle for tech ${technicianId} was taken over by a later sweep`);
@@ -1036,7 +1036,17 @@ async function flushBundledPushes({ now = new Date() } = {}) {
           .catch((clearErr) => logger.warn(`[tech-visit-notifications] bundle drop failed (${errorTag(clearErr)}); retried next tick`));
         await settleOwned(retry, token, RELEASE_SQL)
           .catch((releaseErr) => logger.warn(`[tech-visit-notifications] bundle claim release failed (${errorTag(releaseErr)}); it expires on its own`));
+        continue;
       }
+      if (sent) pushed += 1;
+      // Sent, or nothing left to say: clear. A failed clear is never a failed
+      // send — the cards are not released for another try (Codex #6459 r2);
+      // it is tried once more. Should that fail too, the claim runs out after
+      // BUNDLE_CLAIM_LEASE_MS and a later sweep may push once more: the
+      // database was refusing writes, and a second push beats a lost one.
+      await settleOwned(ids, token, CLEAR_SQL)
+        .catch(() => settleOwned(ids, token, CLEAR_SQL))
+        .catch((clearErr) => logger.error(`[tech-visit-notifications] bundle clear failed for tech ${technicianId} (${errorTag(clearErr)}) after its push`));
     }
     return { pushed };
   } catch (err) {
