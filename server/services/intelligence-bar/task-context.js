@@ -150,7 +150,8 @@ function explicitSingleNames(prompt, filterWords = null) {
   const otherEvidence = new Set([
     ...references.filter(m => !FOR_SELECTOR_RE.test(m[1])).map(m => m[2]),
     ...[...clause.matchAll(/\b([\p{L}-]+)[’']s\b/giu)].map(m => normalizeName(m[1])),
-    ...(normalized.match(/^([\p{L}'-]+)\s+(?:needs|wants|has|is|should|would|asked)\b/u)?.slice(1, 2) || []),
+    // The leading subject, one or two words: "Jhon needs", "Jhon Smith needs" (Codex #6369 r35).
+    ...(normalized.match(/^([\p{L}'-]+)(?:\s+([\p{L}'-]+))?\s+(?:needs|wants|has|is|should|would|asked)\b/u)?.slice(1, 3).filter(Boolean) || []),
   ]);
   return [...new Set([...references.map(m => m[2]), ...otherEvidence])]
     .filter(word => !NON_PERSON_NAMES.has(word) && !dated.has(word) && !(filterWords?.has(word) && !otherEvidence.has(word)));

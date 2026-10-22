@@ -741,6 +741,10 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     };
     expect(await viewingBob('Alice Jones needs a new phone')).toBe(false);
     expect(await viewingBob('Bob Example needs a new phone')).toBe(true);
+    // An unresolved two-word subject is a name too (Codex #6369 r35); "the customer" is not.
+    expect(await viewingBob('Jhon Smith needs a new phone')).toBe(false);
+    expect(await viewingBob('Jhon needs a new phone')).toBe(false);
+    expect(await viewingBob('this customer needs a new phone')).toBe(true);
     // A quoted or cut-off name takes the page too; a field's own colon or quoted value does not.
     expect(await viewingBob('update "Jhon Smith" phone')).toBe(false);
     expect(await viewingBob('update this customer phone: Jhon Smith')).toBe(true);
