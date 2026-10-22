@@ -37,6 +37,7 @@ const roadCheck = require('./road-check');
 const moveLimit = require('./move-limit');
 const needsPerson = require('./needs-person-notice');
 const moveCheck = require('./proofreader/nightly');
+const checkDown = require('./check-down-notice');
 
 // Self-heal MISSING_GEO: geocode the customer (fills customers.latitude/longitude
 // from their address) and re-check eligibility, so a not-yet-geocoded recurring
@@ -1503,6 +1504,9 @@ async function runAutoDispatch(opts = {}) {
   await settleConflicts(run);
   await needsPerson.raiseNotices(run.needsPerson, { nowDate: run.nowDate, clearedIds: run.clearedIds });
   await moveCheck.raiseNotices(run.proofreader);
+  // Every check of the night broke: one notice that the tool is stopped, and
+  // why (owner audit 2026-10-22, finding 1). Best-effort; never throws.
+  await checkDown.noteRun(run.proofreader, { enabled: config.proofreaderEnabled === true, nowDate: run.nowDate });
   runStatus = moveCheck.statusAfterNotices(run.proofreader, runStatus, noticesClosed);
   try {
     await audit.completeRun(runId, { status: runStatus, totals, error: runError });
