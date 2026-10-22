@@ -374,6 +374,18 @@ function scheduleTimeError(sendAt, now = Date.now()) {
   return { when };
 }
 
+// A retry whose first request ended 'failed' keeps its draft in the composer,
+// so the row's own recovery copy is used up in the same step: it leaves the
+// list (cancelled + restored), and Back to draft cannot hand the same text
+// out again after the kept draft is sent. The answer still says 'failed'.
+// A row another tab already took back is returned as it is.
+async function consumeFailedRetry(known) {
+  if (known.status !== 'failed') return known;
+  const [consumed] = await db('scheduled_emails').where({ id: known.id, status: 'failed' })
+    .update({ status: 'cancelled', cancelled_at: db.fn.now(), restored_at: db.fn.now(), updated_at: db.fn.now() }).returning('id');
+  return consumed ? known : db('scheduled_emails').where({ id: known.id }).first();
+}
+
 // POST /schedule — queue an email for a later send. `sendAt` is ET wall clock
 // (YYYY-MM-DDTHH:MM, like the SMS composer's scheduledFor); `body` is the
 // composer's encoded HTML (as on /send) and `draftText` its plain text, which
@@ -387,7 +399,7 @@ router.post('/schedule', async (req, res) => {
     // A retried request finds its first row before any time check: by the
     // retry the chosen time may be under a minute away, or already sent.
     const known = await db('scheduled_emails').where({ client_key: clientKey }).first();
-    if (known) return res.json({ success: true, scheduled: scheduledView(known) });
+    if (known) return res.json({ success: true, scheduled: scheduledView(await consumeFailedRetry(known)) });
     const { when, error } = scheduleTimeError(sendAt);
     // keyChecked: this refusal came after the clientKey lookup, so the
     // browser may drop the key (no row exists under it).

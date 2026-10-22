@@ -18,6 +18,7 @@ const mail = { id: "mail-a", gmail_thread_id: "thread-a", from_address: "a@examp
 const response = (body, status = 200) => Promise.resolve({ ok: status >= 200 && status < 300, status, json: async () => body });
 let scheduledRows;
 let enabled;
+let gmailConnected;
 const posts = (suffix) => fetch.mock.calls.filter(([url, options = {}]) => options.method === "POST" && new URL(url, "https://fixture.invalid").pathname.endsWith(suffix));
 
 function mount() {
@@ -31,11 +32,12 @@ beforeEach(() => {
   localStorage.setItem("waves_admin_token", "fixture-token");
   window.history.replaceState({}, "", "/admin/communications#tab=email");
   enabled = true;
+  gmailConnected = true;
   scheduledRows = [];
   vi.stubGlobal("fetch", vi.fn((input, options = {}) => {
     const url = new URL(input, "https://fixture.invalid");
     const path = url.pathname;
-    if (path.endsWith("/oauth/status")) return response({ connected: true });
+    if (path.endsWith("/oauth/status")) return response({ connected: gmailConnected });
     if (path.endsWith("/inbox")) return response({ emails: [mail], total: 1 });
     if (path.endsWith("/stats")) return response({ total: 1, unread: 0, today: 1, starred: 0, vendor: 0 });
     if (path.endsWith("/daily-digest")) return response({ total_received: 0 });
@@ -501,6 +503,15 @@ describe("Email schedule send", () => {
     sessionStorage.setItem("unrelated_fixture_key", "kept");
     clearEmailDrafts();
     expect(Object.keys(sessionStorage)).toEqual(["unrelated_fixture_key"]);
+  });
+
+  it("with Gmail disconnected, scheduled emails stay listed and can be cancelled", async () => {
+    gmailConnected = false;
+    scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "scheduled" }];
+    mount();
+    expect(await screen.findByRole("button", { name: "Connect Gmail account" })).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel send" }));
+    await waitFor(() => expect(posts("/queued-1/cancel")).toHaveLength(1));
   });
 
   it("never cancels over a new email in progress", async () => {

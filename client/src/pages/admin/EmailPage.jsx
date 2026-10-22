@@ -17,6 +17,16 @@ const EMAIL_SECTIONS = [
 ];
 const NAV_GRID = { 2: "grid-cols-2", 3: "grid-cols-3" };
 
+// With Gmail disconnected, emails already scheduled stay reachable: Cancel
+// send and Back to draft need no Gmail. Composing and sending still do.
+function ScheduledWhileDisconnected({ scheduled, editor, mailbox }) {
+  if (!scheduled.enabled || scheduled.emails.length === 0) return null;
+  return <div className="mt-6 text-left">
+    <h3 className="mb-2 font-medium">Scheduled emails</h3>
+    <ScheduledEmails scheduled={scheduled} editor={editor} mailbox={mailbox} />
+  </div>;
+}
+
 export default function EmailPage({ navigation, active }) {
   const { user } = useOutletContext();
   const editor = useEmailEditor(user.id);
@@ -25,8 +35,9 @@ export default function EmailPage({ navigation, active }) {
   const { setShowCompose, hasDrafts, hasComposeDraft, storageError, recoveryNotice } = editor;
   const connected = !statusState.error && Boolean(status?.connected);
   // Schedule send (GATE_EMAIL_SEND_LATER): the arrow menu and the Scheduled
-  // tab appear only once the server reports the gate on.
-  const { scheduled, sections, pane, mailEditor } = useScheduledSection({ active, connected, tab, editor, baseSections: EMAIL_SECTIONS, userId: user.id });
+  // tab appear only once the server reports the gate on. The list loads even
+  // with Gmail disconnected, so queued emails can still be cancelled.
+  const { scheduled, sections, pane, mailEditor } = useScheduledSection({ active, tab, editor, baseSections: EMAIL_SECTIONS, userId: user.id });
   const action = connected ? {
     key: "compose",
     label: hasComposeDraft ? "Resume draft" : "New email",
@@ -58,6 +69,7 @@ export default function EmailPage({ navigation, active }) {
         <h2 className="mb-2 text-18 leading-[1.35] font-medium">Connect Gmail</h2>
         <p className="mb-5 text-ink-secondary">Connect your contact@wavespestcontrol.com inbox to view, reply, and manage emails directly from the portal.</p>
         <Button onClick={handleConnectGmail} loading={connecting}>Connect Gmail account</Button>
+        <ScheduledWhileDisconnected scheduled={scheduled} editor={editor} mailbox={mailbox} />
       </div> : <>
         {(hasDrafts || storageError) && <ActionFeedback error={storageError} className="mb-4">{recoveryNotice}</ActionFeedback>}
         <details open className="group mb-5 rounded-md border-hairline border-zinc-200 bg-white">

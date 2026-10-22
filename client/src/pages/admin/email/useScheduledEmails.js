@@ -146,8 +146,8 @@ export default function useScheduledEmails(active, userId) {
 // The Email page's view of schedule send: its tab (between Inbox and Blocked,
 // only with the gate on), which pane shows, a fresh list on entering
 // Scheduled, and the editor extended with the arrow menu's two inputs.
-export function useScheduledSection({ active, connected, tab, editor, baseSections, userId }) {
-  const scheduled = useScheduledEmails(active && connected, userId);
+export function useScheduledSection({ active, tab, editor, baseSections, userId }) {
+  const scheduled = useScheduledEmails(active, userId);
   const showScheduled = tab === "scheduled" && scheduled.enabled;
   // Scheduled with the gate off falls back to Inbox.
   const pane = tab === "blocked" ? "blocked" : showScheduled ? "scheduled" : "inbox";

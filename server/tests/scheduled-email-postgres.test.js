@@ -293,6 +293,18 @@ jest.setTimeout(30000);
     await database('job_health').del();
   });
 
+  test('a retry that finds its email failed uses up the row, so Back to draft cannot return it again', async () => {
+    const clientKey = randomUUID();
+    const { body } = await queue({ clientKey });
+    await database('scheduled_emails').where({ id: body.scheduled.id }).update({ status: 'failed' });
+    const retry = await queue({ clientKey });
+    expect(retry.body.scheduled).toMatchObject({ id: body.scheduled.id, status: 'failed' });
+    expect(await row(body.scheduled.id)).toMatchObject({ status: 'cancelled' });
+    expect((await row(body.scheduled.id)).restored_at).not.toBeNull();
+    expect((await call('GET', '/scheduled')).body.emails).toEqual([]);
+    expect((await cancel(body.scheduled.id)).status).toBe(409);
+  });
+
   test('a refused email waits a minute before any replica tries it again', async () => {
     const { body } = await queue();
     await makeDue(body.scheduled.id);
