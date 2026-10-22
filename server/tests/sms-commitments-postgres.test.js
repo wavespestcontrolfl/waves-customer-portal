@@ -3588,6 +3588,18 @@ postgres('SMS commitments on PostgreSQL', () => {
         fulfillment: expect.objectContaining({ basis: 'thread_confirmation' }) });
     });
 
+    test('a staff text queued before the source text, delivered after it, never closes the follow-up', async () => {
+      const ask = await addCommitment();
+      const queued = await text('We sent it out this morning to the email on file', { direction: 'outbound', ms: -3600000, status: 'scheduled' });
+      const sent = await text('We sent it out this morning to the email on file', { direction: 'outbound', ms: DAY,
+        metadata: JSON.stringify({ scheduled_sms_log_id: queued }) });
+      answer({ verdict: 'completed', record_ref: `sms:${sent}`, quote: 'We sent it out this morning' });
+      await refreshSmsCommitments({ conn: mockPg, now: now() });
+      // The queued text is not in the thread, so nothing grounds a close.
+      expect(threadCalls().every(([, request]) => !request.text.includes(sent))).toBe(true);
+      expect((await mockPg('call_commitments').where({ id: ask.id }).first()).status).toBe('open');
+    });
+
     test('a person\'s later text saying it was sent closes the follow-up too', async () => {
       const ask = await addCommitment();
       const sent = await text('We sent it out this morning to the email on file', { direction: 'outbound', ms: DAY });

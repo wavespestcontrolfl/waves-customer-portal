@@ -76,7 +76,12 @@ async function loadThreadMessages(conn, message, now) {
   const inbound = base().where({ direction: 'inbound' }).whereRaw(phoneOf('from_phone'), [peer])
     .where((q) => q.whereNull('message_type').orWhereNotIn('message_type', NOT_CONVERSATION));
   const outbound = excludeUnresolvedSendReservations(base().where({ direction: 'outbound' }).whereRaw(phoneOf('to_phone'), [peer]))
-    .whereIn('status', ['sent', 'delivered']).whereRaw(operatorReplySql('sms_log'));
+    .whereIn('status', ['sent', 'delivered']).whereRaw(operatorReplySql('sms_log'))
+    // A scheduled text is stamped at handoff; one QUEUED before the source
+    // text never answers it, like writtenAfterAsk in the record check.
+    .whereRaw(`CASE WHEN sms_log.metadata->>'scheduled_sms_log_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      THEN NOT EXISTS (SELECT 1 FROM sms_log q WHERE q.id = (sms_log.metadata->>'scheduled_sms_log_id')::uuid AND q.created_at <= ?)
+      ELSE TRUE END`, [after]);
   const [customerRows, staffRows] = await Promise.all([inbound, outbound]);
   const tag = (rows, who) => rows.filter((row) => typeof row.message_body === 'string' && row.message_body.trim())
     .map((row) => ({ ref: `sms:${row.id}`, id: row.id, who, created_at: row.created_at, text: row.message_body.slice(0, TEXT_LIMIT) }));
