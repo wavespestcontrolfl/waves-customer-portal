@@ -34,7 +34,7 @@ maybeDescribe('GATE_MERGE_LEAD_DEFAULTS (real executeMerge)', () => {
       await best(() => db('customer_merge_journal').where((q) => q.whereIn('winner_customer_id', made).orWhereIn('loser_customer_id', made)).del());
       await best(() => db('customer_duplicate_dismissals').where((q) => q.whereIn('customer_id_a', made).orWhereIn('customer_id_b', made)).del());
       await best(() => db('audit_log').where({ resource_type: 'customer' }).whereIn('resource_id', made).del());
-      for (const table of ['autopay_log', 'payment_methods']) {
+      for (const table of ['scheduled_services', 'service_records', 'invoices', 'customer_credit_ledger', 'autopay_log', 'payment_methods']) {
         await best(() => db(table).whereIn('customer_id', made).del());
       }
       await best(() => db('customers').whereIn('id', made).del());
@@ -127,6 +127,21 @@ maybeDescribe('GATE_MERGE_LEAD_DEFAULTS (real executeMerge)', () => {
       expect((await row(winnerId)).autopay_enabled).toBe(false);
     });
 
+    test.each([
+      ['a scheduled visit (any status)', async (id) => db('scheduled_services').insert({
+        customer_id: id, scheduled_date: '2026-11-01', service_type: 'pest', status: 'cancelled',
+      })],
+      ['a service record', async (id) => db('service_records').insert({ customer_id: id, service_date: '2026-10-01', service_type: 'pest' })],
+      ['an invoice', async (id) => db('invoices').insert({
+        token: `tok${randomUUID().replace(/-/g, '')}`, invoice_number: `SYN-${uniq()}${uniq()}`, customer_id: id, total: 10, status: 'draft',
+      })],
+    ])('a new_lead row with %s (booked customers can sit at new_lead)', async (_label, addHistory) => {
+      const { winnerId, loserId } = await leadPair();
+      await addHistory(loserId);
+      await merge(winnerId, loserId);
+      expect((await row(winnerId)).autopay_enabled).toBe(false);
+    });
+
     test('a lead stage row with a member_since date or completed services', async () => {
       const a = await leadPair();
       await db('customers').where({ id: a.loserId }).update({ member_since: '2025-06-01' });
@@ -137,6 +152,19 @@ maybeDescribe('GATE_MERGE_LEAD_DEFAULTS (real executeMerge)', () => {
       await merge(b.winnerId, b.loserId);
       expect((await row(b.winnerId)).autopay_enabled).toBe(false);
     });
+  });
+
+  test('credit default: a plain call lead\'s auto_apply_account_credit=false is not inherited (gate on), inherited (gate off)', async () => {
+    process.env.GATE_MERGE_LEAD_DEFAULTS = 'true';
+    const on = await leadPair();
+    await db('customers').where({ id: on.winnerId }).update({ auto_apply_account_credit: true });
+    await merge(on.winnerId, on.loserId);
+    expect((await row(on.winnerId)).auto_apply_account_credit).toBe(true);
+    delete process.env.GATE_MERGE_LEAD_DEFAULTS;
+    const off = await leadPair();
+    await db('customers').where({ id: off.winnerId }).update({ auto_apply_account_credit: true });
+    await merge(off.winnerId, off.loserId);
+    expect((await row(off.winnerId)).auto_apply_account_credit).toBe(false);
   });
 
   test('gate on: the undo still works after an autopay-skipping merge', async () => {

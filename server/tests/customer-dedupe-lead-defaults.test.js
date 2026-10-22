@@ -70,13 +70,17 @@ describe('inheritedAutopayRestrictions with an intake-lead loser', () => {
   it('intake-lead loser: autopay=false is NOT inherited', () => {
     expect(dedupe.inheritedAutopayRestrictions(winner, { autopay_enabled: false }, NOW, { loserIntakeLead: true })).toEqual({});
   });
-  it('intake-lead loser: a live pause and the credit opt-out are still inherited', () => {
+  it('intake-lead loser: auto_apply_account_credit=false (the column default) is NOT inherited either', () => {
+    expect(dedupe.inheritedAutopayRestrictions(winner, { auto_apply_account_credit: false }, NOW)).toEqual({ auto_apply_account_credit: false });
+    expect(dedupe.inheritedAutopayRestrictions(winner, { auto_apply_account_credit: false }, NOW, { loserIntakeLead: true })).toEqual({});
+  });
+  it('intake-lead loser: a live pause is still inherited', () => {
     expect(dedupe.inheritedAutopayRestrictions(
       winner,
       { autopay_enabled: false, auto_apply_account_credit: false, autopay_paused_until: '2026-12-01T00:00:00Z', autopay_pause_reason: 'asked' },
       NOW,
       { loserIntakeLead: true },
-    )).toEqual({ auto_apply_account_credit: false, autopay_paused_until: '2026-12-01T00:00:00Z', autopay_pause_reason: 'asked' });
+    )).toEqual({ autopay_paused_until: '2026-12-01T00:00:00Z', autopay_pause_reason: 'asked' });
   });
 });
 
@@ -128,6 +132,10 @@ describe('loserIsIntakeLead', () => {
       ['a restore audit row (a restored customer with disarmed autopay and no billing rows)', { audit_log: { id: 'a2' } }],
       ['a saved card', { payment_methods: { id: 'pm1' } }],
       ['an autopay log row', { autopay_log: { id: 'log1' } }],
+      ['a scheduled visit (any status, new_lead stage)', { scheduled_services: { id: 'v1' } }],
+      ['a service record', { service_records: { id: 'sr1' } }],
+      ['an invoice', { invoices: { id: 'inv1' } }],
+      ['a credit ledger row', { customer_credit_ledger: { id: 'cl1' } }],
     ])('%s: not an intake lead', async (_label, over) => {
       expect(await dedupe.loserIsIntakeLead(fakeDb({ ...plainLead, ...over }), lead)).toBe(false);
     });
@@ -136,6 +144,8 @@ describe('loserIsIntakeLead', () => {
       ['a missing customer row', { customers: null }],
       ['an unreadable audit log', { audit_log: new Error('boom') }],
       ['an unreadable autopay log', { autopay_log: new Error('boom') }],
+      ['an unreadable visit table', { scheduled_services: new Error('boom') }],
+      ['an unreadable invoice table', { invoices: new Error('boom') }],
       ['an unreadable customers read', { customers: new Error('boom') }],
     ])('%s: fails closed', async (_label, over) => {
       expect(await dedupe.loserIsIntakeLead(fakeDb({ ...plainLead, ...over }), lead)).toBe(false);

@@ -1888,7 +1888,8 @@ const REFERRAL_FOLD_COUNTERS = ['referral_balance_cents', 'total_earned_cents',
 // either. So ALL of these must hold:
 //   - a pre-customer pipeline stage (not a live, former or lost one)
 //   - no lifecycle evidence: no churned_at, churn_episode_id or member_since,
-//     and no completed services (total_services)
+//     no total_services, and no real history: no scheduled_services
+//     row in any status, no service_records row, no invoice, no credit ledger row
 //   - no archive/restore evidence: the customer.archive / customer.restore
 //     audit_log rows the admin archive and restore routes write
 //   - never billed: no designated autopay card, no payment_methods row, no
@@ -1900,6 +1901,7 @@ const INTAKE_LEAD_STAGES = new Set(ALL_PIPELINE_STAGES.filter((stage) => (
   !CUSTOMER_STAGES.includes(stage) && !FORMER_CUSTOMER_STAGES.includes(stage) && stage !== 'lost'
 )));
 const ARCHIVE_RESTORE_AUDIT_ACTIONS = ['customer.archive', 'customer.restore'];
+const INTAKE_LEAD_HISTORY_TABLES = ['scheduled_services', 'service_records', 'invoices', 'customer_credit_ledger'];
 
 async function loserIsIntakeLead(database, loser) {
   if (require('../config/feature-gates').mergeLeadDefaultsLive?.() !== true) return false;
@@ -1909,6 +1911,13 @@ async function loserIsIntakeLead(database, loser) {
     if (!row || !INTAKE_LEAD_STAGES.has(row.pipeline_stage)) return false;
     if (row.churned_at || row.churn_episode_id || row.member_since || row.autopay_payment_method_id) return false;
     if (Number(row.total_services || 0) !== 0) return false;
+    // total_services has no production writer and booked customers can sit at
+    // new_lead (customer-stages.js), so real history decides: a visit in ANY
+    // status (cancelled counts, strict reading), a service record or an invoice
+    // means this was a customer.
+    for (const historyTable of INTAKE_LEAD_HISTORY_TABLES) {
+      if (await database(historyTable).where({ customer_id: loser.id }).first('id')) return false;
+    }
     if (await database('audit_log')
       .where({ resource_type: 'customer', resource_id: loser.id })
       .whereIn('action', ARCHIVE_RESTORE_AUDIT_ACTIONS)
@@ -1936,14 +1945,15 @@ async function loserIsIntakeLead(database, loser) {
 //
 // `loserIntakeLead` (GATE_MERGE_LEAD_DEFAULTS, from loserIsIntakeLead()): the
 // retired row is positively an intake lead, so its autopay_enabled=false is an
-// intake default and is not inherited. Pauses and the credit opt-out keep the
-// rule above.
+// intake default and is not inherited; the same goes for its
+// auto_apply_account_credit=false (column default false, never set by a call
+// lead). A live pause keeps the rule above.
 function inheritedAutopayRestrictions(winner, loser, now = Date.now(), { loserIntakeLead: intakeLead = false } = {}) {
   const restrictions = {};
   if (loser.autopay_enabled === false && winner.autopay_enabled !== false && !intakeLead) {
     restrictions.autopay_enabled = false;
   }
-  if (loser.auto_apply_account_credit === false && winner.auto_apply_account_credit === true) {
+  if (loser.auto_apply_account_credit === false && winner.auto_apply_account_credit === true && !intakeLead) {
     restrictions.auto_apply_account_credit = false;
   }
   const pauseTs = (v) => (v ? new Date(v).getTime() : null);
