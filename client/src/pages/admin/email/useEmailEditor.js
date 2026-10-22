@@ -393,6 +393,18 @@ export default function useEmailEditor(userId) {
     return { saved: draftSession.saved };
   };
 
+  // Takes a just-restored draft back out of the composer (its restore could
+  // not be made durable). Only text that is still exactly the restored text.
+  const withdrawScheduledDraft = (draft) => {
+    if (draft.replyEmailId) {
+      if (draftSession.drafts.replies[draft.replyEmailId] === draft.draftText) setReplyDraft(draft.replyEmailId, "");
+      return;
+    }
+    if (draftSession.drafts.compose.body !== draft.draftText) return;
+    setComposeForm(() => ({ to: "", subject: "", body: "" }));
+    setShowCompose(false);
+  };
+
   const reconcileSend = (key, outcome) => {
     const attempt = draftSession.attempts[key];
     if (!attempt || draftSession.sending[key === "compose" ? "compose" : "reply"]) return;
@@ -469,6 +481,7 @@ export default function useEmailEditor(userId) {
     handleComposeSchedule,
     handleReplySchedule,
     restoreScheduledDraft,
+    withdrawScheduledDraft,
     scheduledDraftBlocked,
   };
 }

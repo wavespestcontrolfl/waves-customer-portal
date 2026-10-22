@@ -16,8 +16,12 @@ function readPending(userId) {
     return new Set(Array.isArray(ids) ? ids.filter((id) => typeof id === "string") : []);
   } catch { return new Set(); }
 }
+// Returns false when the tab could not save the set.
 function savePending(userId, ids) {
-  try { sessionStorage.setItem(pendingKey(userId), JSON.stringify([...ids])); } catch { /* memory copy still hides them */ }
+  try {
+    sessionStorage.setItem(pendingKey(userId), JSON.stringify([...ids]));
+    return true;
+  } catch { return false; }
 }
 async function sendRestoredMark(id) {
   try {
@@ -120,10 +124,19 @@ export default function useScheduledEmails(active, userId) {
   // The cancelled email is back in the composer: hide it at once and tell the
   // server, which drops it from the list. An unconfirmed mark is retried on
   // every reload (see PENDING_KEY).
+  // Resolves true once the mark is durable: saved in this tab (retried on
+  // every reload) or confirmed by the server. Neither means a reload could
+  // offer the same text again, so the caller takes the draft back.
   const markRestored = async (id) => {
-    pendingRestored.current.add(id);
-    savePending(userId, pendingRestored.current);
-    await reload();
+    const pending = pendingRestored.current;
+    pending.add(id);
+    let durable = savePending(userId, pending);
+    if (!durable) {
+      durable = await sendRestoredMark(id);
+      if (!durable) pending.delete(id);
+    }
+    reload();
+    return durable;
   };
 
   const queued = state.emails.filter((row) => row.status === "scheduled").length;

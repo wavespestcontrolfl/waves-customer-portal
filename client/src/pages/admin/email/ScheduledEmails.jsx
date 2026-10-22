@@ -39,7 +39,11 @@ export default function ScheduledEmails({ scheduled, editor, mailbox }) {
     }
     // Only a draft the tab saved may leave the list: an unsaved one would be
     // lost on a reload, and the listed row is its only way back.
-    if (restored.saved) scheduled.markRestored(draft.id);
+    if (restored.saved && !(await scheduled.markRestored(draft.id))) {
+      editor.withdrawScheduledDraft(draft);
+      setFeedback({ error: true, retry: row, message: "Cancelled, but this browser could not save its safety mark, so the draft closed again. Tap Try again." });
+      return;
+    }
     if (draft.replyEmailId) mailbox.showEmailById(draft.replyEmailId);
     setFeedback({ message: draft.replyEmailId ? "Cancelled. The reply is back in its conversation as a draft." : "Cancelled. The email is open as a draft." });
   };

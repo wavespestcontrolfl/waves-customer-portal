@@ -476,6 +476,24 @@ describe("Email schedule send", () => {
     expect(posts("/queued-1/restored")).toHaveLength(0);
   });
 
+  it("takes the draft back when neither the browser nor the server can record the restore", async () => {
+    scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "scheduled" }];
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/queued-1/restored")
+      ? response({ error: "down" }, 500) : base(input, options)));
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Scheduled (1)" }, { timeout: 3000 }));
+    const setItem = Storage.prototype.setItem;
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function failPending(key, value) {
+      if (/restored_pending/.test(key)) throw new Error("Quota");
+      return setItem.call(this, key, value);
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel send" }));
+    expect(await screen.findByText(/could not save its safety mark, so the draft closed again/)).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("Saved text")).not.toBeInTheDocument();
+    expect(posts("/queued-1/restored")).toHaveLength(1);
+  });
+
   it("sign-out removes the schedule-send state with the drafts", () => {
     sessionStorage.setItem("waves_email_restored_pending:fixture-schedule-owner", "[\"queued-1\"]");
     sessionStorage.setItem("waves_email_restore_keys:fixture-schedule-owner", "{}");
