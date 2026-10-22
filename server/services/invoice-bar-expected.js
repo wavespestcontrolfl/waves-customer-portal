@@ -89,8 +89,22 @@ async function verifiedSelfPay(row, conn) {
   return !await require('./visit-linked-invoice-withdrawal').liveVisitPayerOf(conn, row);
 }
 
+// A bar retotal also may not land on an annual-plan anchor linked only through its visit (a schedule refresh stamps the visit,
+// never the invoice): the visit row is held FOR SHARE for the rest of the save, then the strict resolver runs. Unverifiable refuses.
+async function annualPlanLive(row, conn) {
+  if (row.scheduled_service_id) await conn('scheduled_services').where({ id: row.scheduled_service_id }).forShare().first('id');
+  try {
+    return Boolean(await require('./invoice-prepay').resolveInvoiceTermId(row, conn, { strict: true }));
+  } catch {
+    return true;
+  }
+}
+
 async function assertSelfPayLive(row, expected, conn) {
   if (!expected?.selfPayLive) return;
+  if (await annualPlanLive(row, conn)) {
+    throw previewChangedError('Invoice changed while editing — it is now (or may be) part of an annual plan; re-check and retry');
+  }
   let selfPay = false;
   try { selfPay = await verifiedSelfPay(row, conn); } catch { selfPay = false; }
   if (!selfPay) {

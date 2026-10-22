@@ -550,6 +550,11 @@ describe('edit_invoice card', () => {
       expect(await run('edit_invoice', { tax_rate_percent: 6 })).toMatchObject({ reason: 'tax_exempt' });
       exempt.mockRejectedValueOnce(new Error('db down'));
       expect(await run('edit_invoice', { tax_rate_percent: 6 })).toMatchObject({ reason: 'tax_exempt' });
+      // A line-only change on an invoice taxed at a stored rate asks too.
+      setInvoice({ tax_rate: '0.0700', tax_amount: '9.03', total: '138.03' });
+      exempt.mockResolvedValueOnce({ id: 'cert-1' });
+      expect(await run('edit_invoice', { line_changes: [{ line_number: 2, unit_price: 50 }] })).toMatchObject({ reason: 'tax_exempt' });
+      setInvoice({ tax_rate: '0.0000', tax_amount: '0.00', total: '129.00' });
       exempt.mockResolvedValueOnce(null);
       const card = await run('edit_invoice', { tax_rate_percent: 6 });
       expect(card).toMatchObject({ preview: true });

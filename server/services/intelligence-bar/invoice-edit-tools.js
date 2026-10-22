@@ -627,10 +627,11 @@ async function retotalOwnerRefusal(invoice) {
   return toPage(`Invoice ${invoice.invoice_number} is billed to a third-party payer (or who owes it could not be verified), so its amounts are changed on the Invoices page.`, 'payer_owned', invoice.id);
 }
 
-// A tax rate is never set for a customer with a verified tax exemption (invoice creation zeroes their tax; the update calculator
-// does not ask), and an unverifiable answer refuses.
+// A retotal that would carry tax (a new positive rate, or the stored rate on a line-only change) is never offered for a customer
+// with a verified tax exemption: invoice creation zeroes their tax and the update calculator does not ask. Unverifiable refuses.
 async function taxExemptRefusal(invoice, read) {
-  if (read.taxRate === undefined || read.taxRate === 0) return null;
+  const rate = read.taxRate !== undefined ? read.taxRate : Number(invoice.tax_rate || 0);
+  if (!(rate > 0)) return null;
   try {
     if (!await require('../tax-calculator').findVerifiedExemption(invoice.customer_id, { database: db })) return null;
   } catch { /* unverifiable: refused below */ }

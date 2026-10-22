@@ -77,7 +77,16 @@ describe('invoiceVersionChanged / assertInvoiceVersion / applyInvoiceVersion', (
     const { assertSelfPayLive } = require('../services/invoice-bar-expected');
     const ownership = require('../services/invoice-payer-ownership');
     const spy = jest.spyOn(ownership, 'invoicePayerOwnership');
+    const term = jest.spyOn(require('../services/invoice-prepay'), 'resolveInvoiceTermId').mockResolvedValue(null);
+    const locks = [];
+    const conn = (table) => { const q = { where: () => q, forShare: () => { locks.push(table); return q; }, first: async () => ({ id: 'x' }) }; return q; };
     try {
+      // An annual term that appeared through the visit refuses, with the visit row held FOR SHARE first; unverifiable too.
+      term.mockResolvedValueOnce('term-1');
+      await expect(assertSelfPayLive(row({ scheduled_service_id: 'ss-1' }), { selfPayLive: true }, conn)).rejects.toMatchObject({ code: 'PREVIEW_CHANGED' });
+      expect(locks).toEqual(['scheduled_services']);
+      term.mockRejectedValueOnce(new Error('db down'));
+      await expect(assertSelfPayLive(row(), { selfPayLive: true }, conn)).rejects.toMatchObject({ code: 'PREVIEW_CHANGED' });
       await expect(assertSelfPayLive(row(), { status: 'sent' }, {})).resolves.toBeUndefined();
       expect(spy).not.toHaveBeenCalled();
       spy.mockResolvedValueOnce(null);
@@ -93,6 +102,7 @@ describe('invoiceVersionChanged / assertInvoiceVersion / applyInvoiceVersion', (
       visitPayer.mockRestore();
     } finally {
       spy.mockRestore();
+      term.mockRestore();
     }
   });
 
