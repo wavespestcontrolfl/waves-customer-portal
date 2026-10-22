@@ -633,7 +633,9 @@ function valueEnd(tail) {
 // character that is not a letter, digit, space or an in-value mark (' . - @ #), at a spaced hyphen, at a
 // (parentheses end it too, r44: a phone's "(941)" is removed later as a contact)
 // sentence break, or at and/then/also. A period inside a phone or email does not end it.
-const VALUE_FIRST_SEPARATOR_RE = /[^\p{L}\p{N}\s'’.\-@#]|\s-\s|[.!?](?:\s|$)|\b(?:and|then|also)\b/iu;
+// A small word that can introduce the record a value is for ("phone to 941-555-0100 for Alice Example")
+// ends it too, so that target is read (r46).
+const VALUE_FIRST_SEPARATOR_RE = /[^\p{L}\p{N}\s'’.\-@#]|\s-\s|[.!?](?:\s|$)|\b(?:and|then|also|for|of|on|at|with|by|from|in|to|under|about|regarding)\b/iu;
 function withoutValues(text, strict = false) {
   let rest = text.replace(/“[^”]*”|"[^"]*"/g, ' ');
   let kept = '';

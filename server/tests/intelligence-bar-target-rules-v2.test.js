@@ -828,6 +828,10 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     // Parentheses end a value too (r44); a phone written with them still works.
     expect(await viewingBob("update the phone to 941-555-0100 (Sam Sample's notes to blank)")).toBe(false);
     expect(await viewingBob('update the phone to (941) 555-0150')).toBe(true);
+    // A target after the value is read (r46).
+    expect(await viewingBob('set the phone to 941-555-0100 for Alice Example')).toBe(false);
+    expect(await viewingBob('set the phone to 941-555-0100 for this customer')).toBe(true);
+    expect(await viewingBob('update the notes to call before arriving at the gate')).toBe(true);
     expect(await viewingBob('update the phone to 941.555.0150')).toBe(true);
     expect(await viewingBob('update the email to bob.example@example.test')).toBe(true);
     expect(await viewingBob('update the notes in 34285')).toBe(false);
