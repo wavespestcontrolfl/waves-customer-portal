@@ -216,15 +216,11 @@ async function findCapacitySlots(opts) {
   // (no credit) for the whole loop, not just the first candidate.
   if (opts.packEnds === true) await ensureCatalogLoaded(db);
   const candidates = [];
-  // The days actually searched (open, someone working), as findAvailableSlots reports them.
-  const searchedDates = [];
   for (const date of enumerateDates(dateFrom, dateTo, { includeWeekends: opts.includeWeekends })) {
     if (date < today || blackout.has(date)) continue;
-    let searched = false;
     for (const tech of techs) {
       if (inactiveTechs.has(tech.id)) continue;
       if (absentDays.has(`${tech.id}:${date}`)) continue;
-      if (!searched) { searched = true; searchedDates.push(date); }
       const context = await loadArrivalRouteContext({ date, technicianId: tech.id, now, travel,
         excludeServiceIds: opts.excludeServiceIds,
         // The requesting estimate's OWN uncommitted hold must not occupy the
@@ -360,6 +356,10 @@ async function findCapacitySlots(opts) {
   }) : slots;
   for (const slot of packed) delete slot._gap;
   packed.sort((a, b) => a.score - b.score || a.waiting_minutes - b.waiting_minutes || a.start_time.localeCompare(b.start_time));
+  // The days actually searched (open, someone working) — the loop's own skips — as findAvailableSlots reports them.
+  const searchedDates = enumerateDates(dateFrom, dateTo, { includeWeekends: opts.includeWeekends })
+    .filter((date) => date >= today && !blackout.has(date)
+      && techs.some((tech) => !inactiveTechs.has(tech.id) && !absentDays.has(`${tech.id}:${date}`)));
   return { slots: packed.slice(0, topN).map((slot, i) => ({ rank: i + 1, ...slot })),
     evaluated: candidates.length, total_feasible: packed.length, rejections, rejections_by_date: rejectionsByDate,
     searched_dates: searchedDates, travel: travel.diagnostics() };
