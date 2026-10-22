@@ -235,7 +235,7 @@ describe('legacyGeographicVeto: Punta Gorda', () => {
     })).toEqual(expect.objectContaining({ reason: 'punta_gorda_locality' }));
     expect(legacyGeographicVeto({
       extracted: {},
-      onFile: { city: 'Punta Gorda', zip: '33982' },
+      onFile: { city: 'Punta Gorda', zip: '33983' },
     })).toEqual(expect.objectContaining({ reason: 'punta_gorda_locality' }));
   });
 });

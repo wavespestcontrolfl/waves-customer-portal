@@ -99,7 +99,7 @@ const ZIP_TO_CITY = {
   '33947': 'Placida',
   '33948': 'Port Charlotte',
   '33949': 'Port Charlotte',
-  // 33950, 33951, 33955, 33982 are Punta Gorda-only ZIPs: Punta Gorda is NOT
+  // 33950, 33951, 33955 are Punta Gorda-only ZIPs: Punta Gorda is NOT
   // served (owner ruling 2026-10-22), so they are deliberately absent and
   // resolve to '' like any ZIP outside the service area. 33980 and 33983 are
   // shared with Port Charlotte-area addresses and stay; the city name decides
@@ -109,6 +109,7 @@ const ZIP_TO_CITY = {
   '33954': 'Port Charlotte',
   '33980': 'Port Charlotte', // Charlotte Harbor
   '33981': 'Port Charlotte', // Gulf Cove / El Jobean
+  '33982': 'Babcock Ranch', // shared with Punta Gorda; mapped to the served town so a ZIP-only lead is not refused as Punta Gorda
   '33983': 'Port Charlotte', // Deep Creek (USPS says Punta Gorda; mapped to the served city so a ZIP-only lead is not refused as Punta Gorda)
 
   // ── South Hillsborough (Parrish office's northern reach) ──

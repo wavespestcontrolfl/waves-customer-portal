@@ -48,7 +48,7 @@ describe('Punta Gorda excluded locality', () => {
   );
 
   test('Punta Gorda-only ZIPs are excluded, ZIP+4 included', () => {
-    for (const zip of ['33950', '33951', '33955', '33982', '33950-1234']) {
+    for (const zip of ['33950', '33951', '33955', '33950-1234']) {
       expect(isPuntaGordaZip(zip)).toBe(true);
       expect(isExcludedZip(zip)).toBe(true);
     }

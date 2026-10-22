@@ -127,8 +127,13 @@ describe('deriveStatus: Punta Gorda is not served (owner ruling 2026-10-22)', ()
     expect(r.inServiceArea).toBe(false);
   });
 
+  test('33982 is shared with Babcock Ranch: the city decides', () => {
+    expect(deriveStatus(pgResult('Babcock Ranch', '33982'), 'Charlotte County').inServiceArea).toBe(true);
+    expect(deriveStatus(pgResult('Punta Gorda', '33982'), 'Charlotte County').inServiceArea).toBe(false);
+  });
+
   test('a Punta Gorda-only ZIP is out even when the locality is missing', () => {
-    expect(deriveStatus(pgResult('', '33982'), 'Charlotte County').status).toBe(STATUSES.OUT_OF_SERVICE_AREA);
+    expect(deriveStatus(pgResult('', '33950'), 'Charlotte County').status).toBe(STATUSES.OUT_OF_SERVICE_AREA);
   });
 
   test('33983 with Punta Gorda is out; Port Charlotte 33980 / 33948 and Englewood stay served', () => {

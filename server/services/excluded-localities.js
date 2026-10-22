@@ -28,9 +28,10 @@ const DESOTO_ZIPS = Object.freeze(new Set(['34265', '34266', '34267', '34268', '
 
 const PUNTA_GORDA_LOCALITIES = Object.freeze(new Set(['punta gorda', 'punta gorda isles']));
 // ZIPs that are Punta Gorda only. 33980 (Charlotte Harbor) and 33983 (Deep
-// Creek) are shared with Port Charlotte-area addresses, so they are NOT here:
+// Creek) are shared with Port Charlotte-area addresses, and 33982 with Babcock
+// Ranch (served), so they are NOT here:
 // the city name decides for those, and the ZIP alone keeps current behavior.
-const PUNTA_GORDA_ZIPS = Object.freeze(new Set(['33950', '33951', '33955', '33982']));
+const PUNTA_GORDA_ZIPS = Object.freeze(new Set(['33950', '33951', '33955']));
 
 function normalizeLocality(value) {
   return String(value || '')
