@@ -18,6 +18,11 @@
  * No new lock is introduced: settlement must never be blocked into failure.
  */
 jest.mock('stripe', () => jest.fn(() => ({})));
+// The merge fence (health-alert-insert) has its own suite; here it passes the
+// row straight to the mocked db or trx so the insert assertions still hold.
+jest.mock('../services/health-alert-insert', () => ({
+  insertHealthAlert: (row, { trx } = {}) => (trx || require('../models/db'))('customer_health_alerts').insert(row),
+}));
 jest.mock('../services/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));
