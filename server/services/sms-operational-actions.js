@@ -1069,11 +1069,13 @@ async function refreshSharedSmsAlert(trx, smsLogId, remaining) {
   const dedupeKey = smsSourceAlertKey(smsLogId);
   const source = await trx('sms_log').where({ id: smsLogId }).first(...SOURCE_COLUMNS);
   const shared = source && await trx('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
-    .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).forUpdate().first('id', 'metadata');
+    .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).forUpdate().first('id');
   if (!shared) return;
-  const was = shared.metadata?.verification;
-  const verdict = { verdict: was === 'kept_late' ? 'open' : (was || 'open'), ...(was === 'kept_late' ? { late: true } : {}) };
-  await ringOverdueBell(trx, { row: remaining[0], message: source, verdict, dedupeKey, promises: remaining, refreshOnly: true });
+  // The state comes from the promises still open, never from the one that just
+  // settled (a settled promise's "kept late" must not stay on the alert).
+  const uncertain = remaining.some((item) => item.sms_context?.fulfillment_check?.verdict === 'uncertain');
+  await ringOverdueBell(trx, { row: remaining[0], message: source, verdict: { verdict: uncertain ? 'uncertain' : 'open' },
+    dedupeKey, promises: remaining, refreshOnly: true });
 }
 
 // The bell's words (owner audit 2026-10-01): the customer's name and what is owed in the
@@ -1199,34 +1201,24 @@ async function ringSmsSourceBell(trx, { row, message, verdict }) {
   return notification;
 }
 
-// Reconcile the record check with what the customer said next. Not settled by
-// the records: the thread may close it (customer got it, or a person said it
-// was sent). Settled by the records: a LATER customer text saying it did not
-// arrive overrides that, so a stale close never hides open work. A failed
-// thread read changes nothing.
+// Close-only reconciliation with the later text thread. A row the records have
+// not settled (open, uncertain, a failed check, or undated with no witness) may
+// close when a later text clearly confirms it: the customer got it, or a person
+// said it was sent. A close by the records stands exactly as before; the thread
+// never reopens or holds anything. A failed thread read changes nothing.
 async function reconcileWithThread({ conn, row, current, message, now, verdict, verifyThread }) {
-  // A record check that failed (provider or schema) still gets the thread: a
-  // later customer text may settle it. If the thread cannot, the failed
-  // verdict comes back unchanged, so its retry stays.
-  // A close the thread already overturned keeps the time of the record witness,
-  // so the next tick asks the same question and reuses the cached answer.
-  const recordsSaidDone = verdict.verdict === 'fulfilled' || verdict.reason === 'contradicted_by_thread';
+  if (verdict.verdict === 'fulfilled') return verdict;
   try {
-    const thread = await verifyThread(conn, current, message, now, recordsSaidDone ? { contradictAfter: verdict.matched_at || verdict.contradict_after } : {});
+    const thread = await verifyThread(conn, current, message, now);
     if (!thread) return verdict;
     current.sms_context = { ...current.sms_context, thread_check: thread };
-    if (recordsSaidDone && !thread.contradicted) return verdict;
     if (thread.verdict === 'fulfilled') return thread;
     await conn('call_commitments').where({ id: row.id, status: 'open' }).whereNull('human_state')
       .update({ sms_context: conn.raw("COALESCE(sms_context, '{}'::jsonb) || jsonb_build_object('thread_check', ?::jsonb)", [JSON.stringify(thread)]) });
-    // Keep the record check's hash so the next tick reuses it, not a new model call.
-    return verdict.verdict === 'fulfilled'
-      ? { verdict: 'open', reason: 'contradicted_by_thread', contradict_after: verdict.matched_at, evidence_hash: verdict.evidence_hash, retry_after: null }
-      : verdict;
   } catch (err) {
     logger.warn(`[sms-operations] thread check failed for commitment ${row.id}: ${err.message}`);
-    return verdict;
   }
+  return verdict;
 }
 
 // One open row: skip, verify, and close or bell. Returns what happened so
