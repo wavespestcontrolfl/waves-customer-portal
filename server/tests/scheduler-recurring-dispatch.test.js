@@ -19,6 +19,9 @@ jest.mock('../services/bouncie-mileage-crons', () => ({ initBouncieMileageCrons:
 jest.mock('../services/analytics/ga4-crons', () => ({ initGA4Crons: jest.fn() }));
 jest.mock('../services/intelligence-bar/threads', () => ({ purgeExpiredThreads: jest.fn().mockResolvedValue({ deleted: 0 }) }));
 jest.mock('../services/intelligence-bar/tasks', () => ({ purgeExpiredTasks: jest.fn().mockResolvedValue(1) }));
+// The move-check notices' upkeep on the gate-off path: closed by the same rules as in a run.
+jest.mock('../services/auto-dispatch/proofreader/nightly', () => ({ closeNotices: jest.fn(async () => true) }));
+jest.mock('../services/auto-dispatch/check-down-notice', () => ({ noteRun: jest.fn(async () => ({ action: 'none' })) }));
 
 const cron = require('../utils/scheduled-cron');
 const { isEnabled } = require('../config/feature-gates');
@@ -70,7 +73,8 @@ test.each([false, true])('handoff alerts stay registered with cronJobs off and a
   // maintenance) and the consultation-outcome reconcile sweep (#4710 — a
   // completeness guarantee, not a feature cron) are registered above the
   // cronJobs early return and survive.
-  expect(cron.schedule.mock.calls.map(([expression]) => expression).sort()).toEqual(['10 4 * * *', '27 * * * *', '3,18,33,48 * * * *']);
+  // '* * * * *': the bundled tech push sweep, which must send pushes held whether or not cron jobs run (Codex #6459 r2).
+  expect(cron.schedule.mock.calls.map(([expression]) => expression).sort()).toEqual(['* * * * *', '10 4 * * *', '27 * * * *', '3,18,33,48 * * * *']);
   expect(flagUnplacedVisits).toHaveBeenCalledTimes(1);
   expect(runAutoDispatch).not.toHaveBeenCalled();
 });
@@ -88,6 +92,17 @@ test('a gate-off alert failure reaches the job failure path', async () => {
   expect(logger.error).toHaveBeenCalledWith('Auto-Dispatch run failed: notification store unavailable');
   // The pin-notice upkeep still ran (Codex #6208 r18 P2).
   expect(maintainMissingGeoNotices).toHaveBeenCalledTimes(1);
+});
+
+test('a gate-off night keeps the move-check-down notice by the same rule as a run; its failure reaches the job failure path (Codex #6465 r1)', async () => {
+  const checkDown = require('../services/auto-dispatch/check-down-notice');
+  await tick();
+  // No run state: only the notice's own gate or the check being off closes it.
+  expect(checkDown.noteRun).toHaveBeenCalledWith(null, { enabled: expect.any(Boolean), nowDate: expect.any(Date) });
+  expect(logger.error).not.toHaveBeenCalled();
+  checkDown.noteRun.mockResolvedValueOnce({ action: 'error' });
+  await tick();
+  expect(logger.error).toHaveBeenCalledWith('Auto-Dispatch run failed: move-check-down notice upkeep failed');
 });
 
 test('a gate-off pin-notice upkeep failure reaches the job failure path after the alert pass ran', async () => {

@@ -585,6 +585,54 @@ describe('admin projects routes', () => {
     }
   });
 
+  test('certificate create judges the final exterior date against the linked visit date when the body omits project_date', async () => {
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    const projects = chain({ returning: jest.fn().mockResolvedValue([{ id: 'project-9' }]) });
+    const profilesChain = modeAwareProfilesChain({
+      flipped: [],
+      backed: [{ project_type: 'pre_treatment_termite_certificate' }],
+      first: {
+        service_key: 'termite_slab_pretreat', completion_mode: 'special_project',
+        project_type: 'pre_treatment_termite_certificate', active: true,
+      },
+    });
+    db.mockImplementation((table) => {
+      if (table === 'customers') return chain({ first: jest.fn().mockResolvedValue({ id: 'customer-1' }) });
+      if (table === 'scheduled_services') return chain({
+        first: jest.fn().mockResolvedValue({
+          id: 'svc-12', service_id: 'service-6', service_type: 'Termite Pre-Treatment',
+          customer_id: 'customer-1', scheduled_date: '2026-07-13',
+        }),
+      });
+      if (table === 'services') return chain({ first: jest.fn().mockResolvedValue({ service_key: 'termite_slab_pretreat', name: 'Termite Pre-Treatment', category: 'termite', billing_type: 'one_time' }) });
+      if (table === 'service_completion_profiles') return profilesChain;
+      if (table === 'projects') return projects;
+      if (table === 'activity_log') return chain();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/projects`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            customer_id: 'customer-1',
+            project_type: 'pre_treatment_termite_certificate',
+            scheduled_service_id: 'svc-12',
+            findings: { final_exterior_date: '2026-07-10' },
+          }),
+        });
+        const body = await res.json();
+        expect(res.status).toBe(422);
+        expect(body.code).toBe('final_exterior_date_invalid');
+      });
+      expect(projects.returning).not.toHaveBeenCalled();
+    } finally {
+      delete db.schema;
+    }
+  });
+
   test('linked-only gate accepts a legacy WDO visit that resolves no project-backed profile', async () => {
     // Legacy scheduled WDO rows (service_type text, no service_id) resolve
     // the DEFAULT generic profile — the gate requires the LINK, not a

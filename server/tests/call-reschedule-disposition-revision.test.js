@@ -152,6 +152,15 @@ describe('reviseDispositionAfterAppliedMove', () => {
     expect(store.disposition).toBe('existing_customer_routed');
   });
 
+  test('an applied make-up move revises the same way and records its own reason', async () => {
+    const { store } = mockStore({
+      callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: resolvedRescheduleExtraction },
+    });
+    await reviseDispositionAfterAppliedMove({ call: { id: CALL_ID }, callSid: 'CA_mk', reason: 'makeup_move_applied' });
+    expect(store.disposition).toBe('existing_customer_routed');
+    expect(logger.info.mock.calls.some(([msg]) => /existing_customer_routed \(makeup_move_applied\)/.test(msg))).toBe(true);
+  });
+
   test('a skipped move leaves the disposition untouched', async () => {
     const { store } = mockStore({ callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: resolvedRescheduleExtraction } });
     await applyRescheduleFollowUps({

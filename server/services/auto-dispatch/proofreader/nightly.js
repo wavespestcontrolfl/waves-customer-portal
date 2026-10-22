@@ -83,6 +83,19 @@ const firstName = (name) => String(name || '').trim().split(/\s+/)[0] || null;
 // answer's shape, a read): the run reports them, never a green run on a
 // night the model could not be asked (Codex #6313 r7).
 const CHECK_BROKE = new Set(['model_failed', 'bad_answer', 'check_failed']);
+// Answers that are not the model's: it was never asked (the deadline, a
+// record too long to send) or the check broke. Every other answer is a usable
+// one, the proof that the check works (check-down-notice.js reads `answered`).
+const NOT_ANSWERED = new Set([...CHECK_BROKE, 'deadline', 'record_too_long']);
+
+// A broken check, and the first cause the run saw: a failed call's reason
+// (`anthropic_400`, `anthropic_timeout`, …) or the check's own why, for the
+// move-check-down notice (check-down-notice.js).
+function noteBroke(state, cause) {
+  state.broke += 1;
+  if (!state.brokeCause) state.brokeCause = String(cause || 'error');
+}
+const causeOf = (answer) => (answer.why === 'model_failed' ? (answer.reason || 'error') : answer.why);
 
 // The run's own tally and the notices it will raise at its end. `deadlineAt`:
 // no call starts after it (config.proofreaderDeadlineSeconds from the run's
@@ -90,7 +103,7 @@ const CHECK_BROKE = new Set(['model_failed', 'bad_answer', 'check_failed']);
 // and one call can take two minutes (r7).
 function newRunState({ startedAt = Date.now(), deadlineSeconds = null } = {}) {
   return {
-    calls: 0, allowed: 0, held: 0, unsure: 0, notAsked: 0, grouped: 0, personHeld: 0, broke: 0, noticesFailed: 0, notices: new Map(), settled: new Set(),
+    calls: 0, allowed: 0, held: 0, unsure: 0, notAsked: 0, grouped: 0, personHeld: 0, broke: 0, answered: 0, brokeCause: null, noticesFailed: 0, notices: new Map(), settled: new Set(),
     deadlineAt: Number.isFinite(deadlineSeconds) ? startedAt + deadlineSeconds * 1000 : Infinity,
   };
 }
@@ -294,7 +307,7 @@ async function checkMove({ service, best, run }, deps = {}) {
   const grouped = await groupedStop(conn, service);
   if (grouped) {
     state[grouped.kind] += 1;
-    if (grouped.stop.broke) state.broke += 1;
+    if (grouped.stop.broke) noteBroke(state, 'check_failed');
     return grouped.stop;
   }
   const outOf = (state.calls >= run.config.proofreaderMaxCalls && 'call_limit') || (Date.now() >= state.deadlineAt && 'deadline');
@@ -311,9 +324,11 @@ async function checkMove({ service, best, run }, deps = {}) {
   const heldNow = answer.verdict === 'allow' ? await heldSinceAsked(conn, service) : false;
   if (heldNow === null) {
     state.unsure += 1;
-    state.broke += 1;
+    noteBroke(state, 'check_failed');
     return stopped('unknown', { ...answer, verdict: 'unknown', why: 'check_failed' });
   }
+  // Counted only once every read the answer needs has worked (Codex #6465 r1).
+  if (!NOT_ANSWERED.has(answer.why)) state.answered += 1;
   if (heldNow) {
     state.personHeld += 1;
     return stopped('person', { ...answer, verdict: 'unknown', why: 'person_held' });
@@ -334,7 +349,7 @@ async function checkMove({ service, best, run }, deps = {}) {
     return stopped('hold', answer);
   }
   state.unsure += 1;
-  if (CHECK_BROKE.has(answer.why)) state.broke += 1;
+  if (CHECK_BROKE.has(answer.why)) noteBroke(state, causeOf(answer));
   collectNotice(state, service, best, asked);
   return stopped('unknown', answer);
 }

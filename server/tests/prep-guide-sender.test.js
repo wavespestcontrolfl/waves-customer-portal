@@ -47,6 +47,13 @@ jest.mock('../services/project-email', () => ({
     name: customer.service_contact_name || customer.first_name || '',
     role: customer.service_contact_email ? 'service_contact' : 'primary',
   }),
+  // The send-aware twin the sender uses (contact email switch honored
+  // upstream); the same resolution here.
+  resolveProjectEmailRecipientForSend: async (customer) => ({
+    email: customer.service_contact_email || customer.email || '',
+    name: customer.service_contact_name || customer.first_name || '',
+    role: customer.service_contact_email ? 'service_contact' : 'primary',
+  }),
   // Real implementations (against the mocked db) so the tokened prep_url
   // and confirmed-delivery stamp paths are exercised end-to-end.
   ensureServicePrepToken: jest.requireActual('../services/project-email').ensureServicePrepToken,

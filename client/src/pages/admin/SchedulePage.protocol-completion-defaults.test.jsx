@@ -564,10 +564,10 @@ it('seeded Alpine WSG / Gentrol IGR carry the protocol\'s spot_treatment method 
   // — the lineMeta override matches it rather than disturbing it.
   expect(within(advionRow).getByDisplayValue('Bait')).toBeTruthy();
 
-  // 'perimeter_spray' is the ONLY method that demands linear footage,
+  // 'perimeter_spray' is the ONLY method that takes linear footage,
   // client-side (requiresLinearFt) and at server submit
-  // (requiresLinearFtForReportApplication) — none of these three rows may
-  // render that input.
+  // (requiresLinearFtForReportApplication; optional since 2026-10-22) — none
+  // of these three rows may render that input.
   expect(within(alpineRow).queryByPlaceholderText('Linear ft')).toBeNull();
   expect(within(gentrolRow).queryByPlaceholderText('Linear ft')).toBeNull();
   expect(within(advionRow).queryByPlaceholderText('Linear ft')).toBeNull();

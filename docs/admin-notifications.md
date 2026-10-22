@@ -94,6 +94,10 @@ customer's message by this rule.
    Exception (owner ruling 2026-10-01): time-critical field work, a visit due today or
    tomorrow with no time or technician (`server/services/combined-booking-check.js`), always
    rings; tomorrow it may be too late to act.
+   Exception (owner audit 2026-10-22, finding 1): the auto-dispatch move-check-down notice
+   (`server/services/auto-dispatch/check-down-notice.js`) rings once per outage and is never
+   held back by the allowance; it counts toward it. A tool that has stopped moving visits is
+   the notice that must reach a person.
 4. **Retention.** An `fyi` fact lives on its page for 7 days at most. A `needs-you` row
    unread for 14 days belongs in the Monday summary, not in the bell.
 5. **Read is not done.** A row has a `done` state (`notifications.done_at`, `done_by`,

@@ -533,7 +533,7 @@ function promisedWindowOrder(rows) {
  * stays: a visit_id day is left for the (dark, GATE_VISIT_GROUPS) group
  * path or a human, never silently mis-simulated here.
  */
-function computeChronologicalRepair(RouteOptimizer, stops) {
+function computeChronologicalRepair(RouteOptimizer, stops, home = RouteOptimizer.HQ) {
   if (stops.some(stop => {
     const duration = workDuration(stop, 0);
     return stop.visit_id || stop.auto_dispatch_locked || stop.auto_dispatch_excluded
@@ -559,7 +559,7 @@ function computeChronologicalRepair(RouteOptimizer, stops) {
   const rebuilt = backbone.some((stop, i) => i > 0
     && effectiveWindowRange(stop).startMin < effectiveWindowRange(backbone[i - 1]).startMin);
   if (!rebuilt && (!backbone.length || !additions.length)) return null;
-  if (simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, ordered)) return null;
+  if (simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, ordered, { origin: home, end: home })) return null;
   if (rebuilt) {
     additions = ordered;
     backbone = [];
@@ -585,7 +585,7 @@ function computeChronologicalRepair(RouteOptimizer, stops) {
     const index = candidate.findIndex(other => effectiveWindowRange(other).startMin > range.startMin);
     candidate.splice(index === -1 ? candidate.length : index, 0, stop);
   }
-  const simulation = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, candidate);
+  const simulation = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, candidate, { origin: home, end: home });
   return simulation ? { orderedStops: candidate, simulation, ...(rebuilt ? { rebuilt: true } : {}) } : null;
 }
 
@@ -637,7 +637,7 @@ function simulateArrivalRoute(RouteOptimizer, rangeForStop, seq, {
  *  WITHIN a group is explored (the guard permits any tie order, and a
  *  specific one can be the only feasible or the cheapest sequence —
  *  pre-push audit P1). */
-function exhaustiveSearch(RouteOptimizer, guards, groups, untimed, startMin = 8 * 60, origin = RouteOptimizer.HQ) {
+function exhaustiveSearch(RouteOptimizer, guards, groups, untimed, startMin = 8 * 60, origin = RouteOptimizer.HQ, end = RouteOptimizer.HQ) {
   let best = null;
   let bestMeters = Infinity;
   const total = groups.reduce((n, g) => n + g.length, 0) + untimed.length;
@@ -646,7 +646,7 @@ function exhaustiveSearch(RouteOptimizer, guards, groups, untimed, startMin = 8 
   const seq = [];
   const recurse = (groupIdx, groupRemaining, state) => {
     if (seq.length === total) {
-      const meters = guards.modelDistanceMeters(RouteOptimizer, seq, origin);
+      const meters = guards.modelDistanceMeters(RouteOptimizer, seq, origin, end);
       if (meters < bestMeters) {
         bestMeters = meters;
         best = [...seq];
@@ -687,17 +687,17 @@ function exhaustiveSearch(RouteOptimizer, guards, groups, untimed, startMin = 8 
 /** Greedy cheapest-feasible insertion for days above the exhaustive cap:
  *  start from the backbone (which must itself be feasible), then each round
  *  insert the globally cheapest feasible (untimed stop, position) pair. */
-function greedyInsertion(RouteOptimizer, guards, backbone, untimed, startMin = 8 * 60, origin = RouteOptimizer.HQ) {
+function greedyInsertion(RouteOptimizer, guards, backbone, untimed, startMin = 8 * 60, origin = RouteOptimizer.HQ, end = RouteOptimizer.HQ) {
   let seq = [...backbone];
-  if (simulateArrivalRoute(RouteOptimizer, guards.effectiveWindowRange, seq, { startMin, origin }) == null) return null;
+  if (simulateArrivalRoute(RouteOptimizer, guards.effectiveWindowRange, seq, { startMin, origin, end }) == null) return null;
   const remaining = [...untimed];
   while (remaining.length > 0) {
     let bestPick = null;
     for (let r = 0; r < remaining.length; r++) {
       for (let pos = 0; pos <= seq.length; pos++) {
         const candidate = [...seq.slice(0, pos), remaining[r], ...seq.slice(pos)];
-        if (simulateArrivalRoute(RouteOptimizer, guards.effectiveWindowRange, candidate, { startMin, origin }) == null) continue;
-        const meters = guards.modelDistanceMeters(RouteOptimizer, candidate, origin);
+        if (simulateArrivalRoute(RouteOptimizer, guards.effectiveWindowRange, candidate, { startMin, origin, end }) == null) continue;
+        const meters = guards.modelDistanceMeters(RouteOptimizer, candidate, origin, end);
         if (!bestPick || meters < bestPick.meters) bestPick = { r, candidate, meters };
       }
     }
@@ -726,7 +726,7 @@ function greedyInsertion(RouteOptimizer, guards, backbone, untimed, startMin = 8
  * simulating from 8am on a day that's really 15:30 already can accept a
  * repair that is no longer drivable in the time remaining.
  */
-function computeWindowFitOrder(RouteOptimizer, stops, guards, { startMin = 8 * 60, origin = RouteOptimizer.HQ } = {}) {
+function computeWindowFitOrder(RouteOptimizer, stops, guards, { startMin = 8 * 60, origin = RouteOptimizer.HQ, end = RouteOptimizer.HQ } = {}) {
   if (!Array.isArray(stops) || stops.length < 2) return null;
   const timed = [];
   const untimed = [];
@@ -757,7 +757,7 @@ function computeWindowFitOrder(RouteOptimizer, stops, guards, { startMin = 8 * 6
   const groupSizes = groupStops.map((g) => g.length);
   let winner;
   if (sequenceCount(stops.length, backbone.length, groupSizes) <= EXHAUSTIVE_SEQUENCE_CAP) {
-    winner = exhaustiveSearch(RouteOptimizer, guards, groupStops, untimed, startMin, origin);
+    winner = exhaustiveSearch(RouteOptimizer, guards, groupStops, untimed, startMin, origin, end);
   } else {
     // Greedy path: the stable tie order can be the ONE infeasible
     // permutation of an equal-start group (uncapped audit P1 — the exact
@@ -770,11 +770,11 @@ function computeWindowFitOrder(RouteOptimizer, stops, guards, { startMin = 8 * 6
     // keep the stable operator-visible order.
     let greedyBackbone = backbone;
     if (backbone.length > 0 && sequenceCount(backbone.length, backbone.length, groupSizes) <= EXHAUSTIVE_SEQUENCE_CAP) {
-      const feasibleBackbone = exhaustiveSearch(RouteOptimizer, guards, groupStops, [], startMin, origin);
+      const feasibleBackbone = exhaustiveSearch(RouteOptimizer, guards, groupStops, [], startMin, origin, end);
       if (!feasibleBackbone) return null;
       greedyBackbone = feasibleBackbone;
     }
-    winner = greedyInsertion(RouteOptimizer, guards, greedyBackbone, untimed, startMin, origin);
+    winner = greedyInsertion(RouteOptimizer, guards, greedyBackbone, untimed, startMin, origin, end);
   }
   if (!winner) return null;
 
@@ -795,11 +795,11 @@ function computeWindowFitOrder(RouteOptimizer, stops, guards, { startMin = 8 * 6
   if (guards.violatesWindowChronology(winner, stops)) return null;
   if (guards.violatesWindowFeasibility(RouteOptimizer, winner, stops, null, startMin, origin)) return null;
 
-  const simulation = simulateArrivalRoute(RouteOptimizer, guards.effectiveWindowRange, winner, { startMin, origin });
+  const simulation = simulateArrivalRoute(RouteOptimizer, guards.effectiveWindowRange, winner, { startMin, origin, end });
   if (!simulation) return null;
   return {
     orderedStops: winner,
-    afterMeters: guards.modelDistanceMeters(RouteOptimizer, winner, origin),
+    afterMeters: guards.modelDistanceMeters(RouteOptimizer, winner, origin, end),
     afterSeconds: Math.round(simulation.travelMin * 60),
   };
 }
