@@ -292,6 +292,7 @@ describe('GET /admin/estimates/:id/proposal.pdf billing context', () => {
 
   test.each([
     ['expired', { status: 'expired' }],
+    // a resend failed, but an earlier send delivered this bundle
     ['send_failed', { status: 'send_failed' }],
     ['archived', { status: 'sent', archived_at: '2026-10-01T00:00:00Z' }],
     // the expiry sweep has not run yet: still 'sent', but the public page refuses it
@@ -309,9 +310,10 @@ describe('GET /admin/estimates/:id/proposal.pdf billing context', () => {
   test.each([
     ['draft', { status: 'draft' }],
     ['scheduled', { status: 'scheduled' }],
-    // never sent, so there is no send snapshot to freeze to
     ['archived draft', { status: 'draft', archived_at: '2026-10-01T00:00:00Z' }],
-  ])('a %s row keeps the live billing lane (the editor preview)', async (_name, over) => {
+    // the first send failed on every channel, so no send bundle was written
+    ['never-delivered send_failed', { status: 'send_failed', estimate_data: {} }],
+  ])('a %s row keeps the live billing lane: no delivered offer to freeze to', async (_name, over) => {
     tableDb({ estimates: [], single: { estimates: base('e-draft', over) } });
     await withServer(async (baseUrl) => {
       expect((await fetch(`${baseUrl}/estimates/e-draft/proposal.pdf`)).status).toBe(200);

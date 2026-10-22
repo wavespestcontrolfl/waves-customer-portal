@@ -5035,13 +5035,16 @@ router.get('/:id/proposal.pdf', async (req, res, next) => {
     // operator's copy and the customer's copy stay byte-identical.
     const { resolveProposalBillingContext, resolveFrozenBillingContext } = require('../services/estimate-proposal-billing');
     const { acceptanceRecordForEstimate } = require('../services/estimate-acceptance-record');
-    // A sent quote the public page no longer serves (archived, expired by status
-    // or by date, send_failed) is viewed as the offer that was SENT:
-    // resolveProposalBillingContext would reprice it live (it only freezes
-    // accepted / declined / price-locked rows), so those rows use the frozen send
-    // snapshot instead. Unsent rows (draft, scheduled, archived or not) and live
-    // quotes keep the live lane (the editor preview, the customer's copy).
-    const sentOfferView = !publicViewable && !unsent;
+    // A delivered quote the public page no longer serves (archived, expired by
+    // status or by date, send_failed after an earlier delivery) is viewed as the
+    // offer that was SENT: resolveProposalBillingContext would reprice it live
+    // (it only freezes accepted / declined / price-locked rows), so those rows
+    // render from the frozen send bundle instead. Only a real handoff writes that
+    // bundle, so a row without one (a first send that failed on every channel)
+    // has nothing to freeze to and keeps the live lane, like unsent rows (draft,
+    // scheduled, archived or not) and live quotes.
+    const sentBundle = parseEstimateData(estimate.estimate_data)?.sendSnapshot?.pricingBundle;
+    const sentOfferView = !publicViewable && !unsent && Boolean(sentBundle) && typeof sentBundle === 'object';
     generateEstimateProposalPDF(estimate, res, {
       ...(await (sentOfferView ? resolveFrozenBillingContext : resolveProposalBillingContext)(estimate)),
       // Same recorded acceptance the customer's download carries (strict: an

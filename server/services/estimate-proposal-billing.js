@@ -505,7 +505,9 @@ async function resolveProposalBillingContext(estimate) {
  * today's price list: same lane answers as resolveProposalBillingContext, but
  * livePricing is never resolved, so the proposal reads the frozen send snapshot
  * (the way accepted / declined / price-locked rows already render). Used by the
- * staff PDF for expired, send_failed and archived rows.
+ * staff PDF for a delivered quote the public page no longer serves; the caller
+ * checks that the send bundle exists, since without it the document has no
+ * recurring price to show.
  */
 async function resolveFrozenBillingContext(estimate) {
   const [perApplication, prepaid] = await Promise.all([
