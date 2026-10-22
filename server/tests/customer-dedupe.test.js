@@ -1332,6 +1332,7 @@ describe('executeMerge', () => {
         return api;
       };
       trx.tables = tables;
+      trx.transaction = (fn) => fn(trx);
       return trx;
     };
     const live = (r) => !r.revoked_at;

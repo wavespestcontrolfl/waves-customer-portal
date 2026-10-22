@@ -4006,7 +4006,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
 });
 
 // PUT /api/admin/customers/:id
-router.put('/:id', requireAdmin, async (req, res, next) => {
+// Named so the Intelligence Bar's set_customer_bill_to card (setCustomerBillToFromBar, below) runs this very handler.
+const customerUpdateHandler = async (req, res, next) => {
   try {
     const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', profileLabel: 'profile_label', addressLine1: 'address_line1', addressLine2: 'address_line2', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email', serviceContact2Name: 'service_contact2_name', serviceContact2Phone: 'service_contact2_phone', serviceContact2Email: 'service_contact2_email', serviceContact3Name: 'service_contact3_name', serviceContact3Phone: 'service_contact3_phone', serviceContact3Email: 'service_contact3_email', hasLeftGoogleReview: 'has_left_google_review', payerId: 'payer_id', billingMode: 'billing_mode', contactRole: 'contact_role', smsPrimaryForSharedPhone: 'sms_primary_for_shared_phone' };
     const before = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
@@ -4270,6 +4271,18 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // moved, stranding them.
           const lockedBefore = await trx('customers').where({ id: req.params.id }).forUpdate().first() || before;
           contactAuditBefore = lockedBefore;
+          // req.ibExpectedPayerId is set only by setCustomerBillToFromBar (never an HTTP field): the Bill-To
+          // the bar card showed as current. Judged on the LOCKED row, so an edit that landed after the
+          // card's re-check still refuses here and nothing is written.
+          if (req.ibExpectedPayerId !== undefined && String(lockedBefore.payer_id ?? '') !== String(req.ibExpectedPayerId ?? '')) {
+            throw Object.assign(new Error('The Bill-To changed after the card was shown.'), {
+              statusCode: 409, isOperational: true, code: 'preview_changed',
+            });
+          }
+          // req.ibVerifyPlan is set only by setCustomerBillToFromBar (never an HTTP field): it re-derives the bar card
+          // inside this transaction over held rows (bill-to-tools.js lockedPlanCheck: every open invoice FOR UPDATE)
+          // and throws preview_changed on any difference, before any Bill-To step reads or clears a checkout stamp.
+          if (req.ibVerifyPlan) await req.ibVerifyPlan(trx);
           // REBUILD the shared-phone mark clear from the locked row (codex #6268
           // r4/r8): the pre-lock pass may have derived `false` from a stale
           // phone; a save that moved the number and marked it since keeps its
@@ -4398,7 +4411,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // — an unreleasable session aborts this transaction.
           if (updates.payer_id !== undefined && updates.payer_id) {
             const payerRelease = await require('../services/pay-combined')
-              .releaseUnconfirmedCombinedSessionsForCustomer(trx, req.params.id, { invalidateLinked: true, pending: customerPayerPending, deferApply: true });
+              .releaseUnconfirmedCombinedSessionsForCustomer(trx, req.params.id, {
+                invalidateLinked: true, pending: customerPayerPending, deferApply: true,
+                // The bar card promises no checkout is touched: pin the empty set, so any stamped session refuses
+                // (previewChanged) before a stamp is cleared or a Stripe call is made.
+                ...(req.ibExpectNoMove ? { expectedPaymentIntentIds: [] } : {}),
+              });
             // In-flight combined money DEFERS the payer edit (codex r30
             // P1, same contract as the merge fence): the eventual combined
             // settlement never re-resolves ownership, so committing now
@@ -4448,7 +4466,15 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             // The opposite transition (a payer assigned) withdraws every
             // self-pay combined-visit invoice this customer now owes to AP,
             // including one the homeowner already holds a pay link for.
-            if (updates.payer_id) await Packets.withdrawPacketInvoicesForOwner(trx, { customerId: req.params.id });
+            if (updates.payer_id) {
+              const withdrawn = await Packets.withdrawPacketInvoicesForOwner(trx, { customerId: req.params.id });
+              // req.ibExpectNoMove is set only by setCustomerBillToFromBar: the bar card is offered only when no
+              // invoice moves. Any withdrawal here means the customer's invoices changed after the card, so the
+              // whole edit rolls back (before any Stripe cancel: they run last).
+              if (req.ibExpectNoMove && withdrawn.length) {
+                throw Object.assign(new Error('An invoice would move to the payer, which the card did not show.'), { statusCode: 409, isOperational: true, code: 'preview_changed' });
+              }
+            }
           }
           // Coordinates cleared ATOMICALLY with the address (and the move
           // stamp the fan-out writes in this same transaction): a committed
@@ -4724,7 +4750,8 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     }
     next(err);
   }
-});
+};
+router.put('/:id', requireAdmin, customerUpdateHandler);
 
 // PUT /api/admin/customers/:id/notification-prefs
 //
@@ -4775,6 +4802,144 @@ router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
       .sort();
     logger.info(`[customers] notification_prefs updated for ${req.params.id}: ${JSON.stringify({ fields: loggedFields })}`);
     res.json({ success: true, notificationPrefs: prefs });
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
+// On-location contacts' OWN notification choices (contact login,
+// GATE_CONTACT_LOGIN; service_contact_notification_prefs). Customer 360 reads
+// every slot with its effective choices and may narrow them (turn a purpose
+// off, pick a delivery) exactly as the contact can in the app. The
+// contact's consent attestation is theirs alone: staff never stamp it, and —
+// as in the app — turning texts ON for a contact who has not attested is
+// refused. Gate off: rows are shown and saved but the senders ignore them
+// (`live: false`).
+// =========================================================================
+// The email on file for a contact PHONE: the first address among the slots
+// carrying that number (choices rows are keyed by phone, so two slots with
+// one number share one row). '' when none.
+function contactEmailOnFile(slots, phoneKey) {
+  if (!phoneKey) return '';
+  const { phoneKeyOf } = require('../services/customer-contact');
+  const slot = slots.find((s) => s.phone && phoneKeyOf(s.phone) === phoneKey && String(s.email || '').trim());
+  return slot ? String(slot.email).trim() : '';
+}
+
+async function contactNotificationChoices(customerId) {
+  const ContactPrefs = require('../services/contact-notification-prefs');
+  const { getServiceContactSlots, withAccountPrimaryContact, slotWithheldFromReports, phoneKeyOf } = require('../services/customer-contact');
+  const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
+  if (!customer) return null;
+  const [accountRow, rows, optins] = await Promise.all([
+    db('notification_prefs').where({ customer_id: customerId }).first().catch(() => null),
+    ContactPrefs.loadContactPrefRows(customerId),
+    db('recipient_optin').where({ customer_id: customerId }).select('phone_key', 'status').catch(() => []),
+  ]);
+  const optinByKey = new Map((optins || []).map((r) => [String(r.phone_key), r.status]));
+  const forReports = await withAccountPrimaryContact(customer);
+  const allSlots = getServiceContactSlots(customer);
+  const contacts = allSlots
+    .map((slot, i) => ({ ...slot, slot: i + 1 }))
+    .filter((slot) => slot.name || slot.phone || slot.email)
+    .map((slot) => {
+      const key = phoneKeyOf(slot.phone);
+      const own = key ? rows.get(key) || null : null;
+      // Choices are keyed by phone, so an address counts when ANY slot
+      // carrying this number has one — the rule the portal card and the
+      // holder's prune apply (codex #6364 r1 P2).
+      const emailAvailable = !!contactEmailOnFile(allSlots, key);
+      return {
+        slot: slot.slot,
+        name: slot.name,
+        phone: slot.phone,
+        email: slot.email,
+        contactRole: slot.contactRole,
+        ...ContactPrefs.effectiveContactPreferences(accountRow, own, { emailAvailable }),
+        hasOwnChoices: !!own,
+        emailAvailable,
+        reportsWithheld: slotWithheldFromReports(forReports, slot),
+        consentAttestedAt: own?.consent_attested_at || null,
+        smsOptin: key ? optinByKey.get(key) || 'none' : 'none',
+      };
+    });
+  return { contacts, live: ContactPrefs.contactPrefsLive() };
+}
+
+router.get('/:id/contact-notification-prefs', async (req, res, next) => {
+  try {
+    // Contact names, numbers and addresses: a technician reads them only
+    // for a customer with a visit assigned to them, as the profile and
+    // cards reads do (codex #6364 security r1).
+    if (!(await technicianServicesCustomer(req, req.params.id))) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
+    const payload = await contactNotificationChoices(req.params.id);
+    if (!payload) return res.status(404).json({ error: 'Customer not found' });
+    res.json(payload);
+  } catch (err) { next(err); }
+});
+
+router.put('/:id/contact-notification-prefs/:slot', requireAdmin, async (req, res, next) => {
+  try {
+    const ContactPrefs = require('../services/contact-notification-prefs');
+    const { getServiceContactSlots, phoneKeyOf } = require('../services/customer-contact');
+    const slotNo = Number(req.params.slot);
+    if (![1, 2, 3].includes(slotNo)) return res.status(400).json({ error: 'slot must be 1, 2 or 3' });
+
+    const schema = Joi.object({
+      ...Object.fromEntries(Object.values(ContactPrefs.CONTACT_PREF_KEY_BY_COLUMN).map((key) => [key, Joi.boolean()])),
+      ...Object.fromEntries(Object.values(ContactPrefs.CONTACT_CHANNEL_KEY_BY_COLUMN).map((key) => [key, Joi.string().valid(...ContactPrefs.CONTACT_CHANNEL_VALUES)])),
+      smsEnabled: Joi.boolean(),
+      emailEnabled: Joi.boolean(),
+    }).min(1);
+    const { value: updates, error } = schema.validate(req.body || {});
+    if (error) return res.status(400).json({ error: error.message });
+    const patch = ContactPrefs.contactPrefPatchFromBody(updates);
+    const asksEmailOnly = Object.values(patch).includes('email');
+    // Text-only report delivery exists only while the contact report text
+    // (GATE_CONTACT_REPORT_TEXT) does — the same refusal as the contact's own
+    // PUT (codex #6364 r2 P2): stored anyway, the choice would read as the
+    // default today and go live unseen at a later gate flip.
+    if (patch.service_complete_channel === 'sms' && !require('../config/feature-gates').contactReportTextLive()) {
+      return res.status(400).json({ error: 'Service reports are delivered by email for this property.', code: 'REPORT_TEXT_UNAVAILABLE' });
+    }
+    // Every input the save depends on is read under the comms lock, as the
+    // contact's own PUT reads it (codex #6364 r1 P2): the slot (a holder
+    // replacing it meanwhile must not have the pruned row recreated), the
+    // email on file, the existing row and the account row the consent
+    // decision reads.
+    const outcome = await withCustomerCommsLock(db, req.params.id, async (trx) => {
+      const customer = await trx('customers').where({ id: req.params.id }).whereNull('deleted_at').forUpdate().first();
+      if (!customer) return { code: 'not_found' };
+      const slots = getServiceContactSlots(customer);
+      const slot = slots[slotNo - 1];
+      if (!slot || !slot.phone) return { code: 'no_slot' };
+      if (asksEmailOnly && !contactEmailOnFile(slots, phoneKeyOf(slot.phone))) return { code: 'email_unavailable' };
+      const [existing, accountRow] = await Promise.all([
+        ContactPrefs.getContactPrefRow(req.params.id, slot.phone, { dbh: trx }),
+        trx('notification_prefs').where({ customer_id: req.params.id }).first().catch(() => null),
+      ]);
+      // Same rule as the contact's own save: only a change that OPENS a text
+      // path needs the contact's attestation.
+      if (ContactPrefs.textPathsOpened(accountRow, existing, patch) && !existing?.consent_attested_at) return { code: 'consent_required' };
+      await ContactPrefs.upsertContactNotificationPrefs(trx, req.params.id, slot.phone, patch);
+      await auditCustomerMutation(req, 'customer.contact_notification_prefs.update', req.params.id,
+        { slot: slotNo, fields: Object.keys(updates).sort() }, false, trx);
+      return { code: 'saved' };
+    });
+    if (outcome.code === 'not_found') return res.status(404).json({ error: 'Customer not found' });
+    if (outcome.code === 'no_slot') return res.status(404).json({ error: 'No contact with a phone number in that slot' });
+    if (outcome.code === 'email_unavailable') {
+      return res.status(400).json({ error: 'This contact has no email address on file, so email-only delivery cannot be chosen.' });
+    }
+    if (outcome.code === 'consent_required') {
+      return res.status(400).json({
+        error: 'This contact has not agreed to texts in the app yet. Staff can turn their notifications off, but only the contact can turn them on.',
+        code: 'CONSENT_REQUIRED',
+      });
+    }
+    logger.info(`[customers] contact notification prefs updated for ${req.params.id} slot ${slotNo}: ${JSON.stringify({ fields: Object.keys(updates).sort() })}`);
+    res.json({ success: true, ...(await contactNotificationChoices(req.params.id)) });
   } catch (err) { next(err); }
 });
 
@@ -6773,3 +6938,31 @@ router.findAccountByContact = findAccountByContact;
 router.hasMembership = hasMembership;
 
 module.exports = router;
+
+// The Intelligence Bar's set_customer_bill_to runs the SAME handler as PUT /:id with only { payerId } — exactly
+// what the customer page's Bill-To select sends — without an HTTP request (the admin-invoices.js adapter
+// pattern): the handler gets the request fields it reads and a capture response, and the promise resolves the
+// reply it would send, { status, json }. An error passed to next() rejects. expectedPayerId: the Bill-To the
+// card showed (null = the customer pays); verifyPlan(trx): re-checks the card inside the transaction and throws
+// preview_changed on any difference; the change refuses too if any invoice would move (the card promises none).
+function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, verifyPlan, actor }) {
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(json) { resolve({ status: this.statusCode, json }); return this; },
+    };
+    const req = {
+      params: { id: customerId },
+      body: { payerId: payerId == null ? '' : String(payerId) },
+      technicianId: actor?.technicianId || null,
+      ip: null,
+      get: () => null,
+      ibExpectedPayerId: expectedPayerId == null ? null : String(expectedPayerId),
+      ibVerifyPlan: typeof verifyPlan === 'function' ? verifyPlan : null,
+      ibExpectNoMove: true,
+    };
+    Promise.resolve(customerUpdateHandler(req, res, reject)).catch(reject);
+  });
+}
+module.exports.setCustomerBillToFromBar = setCustomerBillToFromBar;

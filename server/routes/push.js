@@ -21,7 +21,9 @@ router.get('/status', async (req, res, next) => {
     const { gateEnvValue } = require('../config/feature-gates');
     res.set('Cache-Control', 'no-store');
     if (!gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) return res.json({ available: false });
-    const status = await require('../services/push-notifications').customerStatus(req.customerId);
+    // A contact session (contact login) asks about ITS devices only.
+    const status = await require('../services/push-notifications')
+      .customerStatus(req.customerId, undefined, { contactKey: req.contactSession?.phoneKey || null });
     return res.json({ available: true, ...status });
   } catch (err) { next(err); }
 });
@@ -47,6 +49,11 @@ router.post('/native-subscribe', async (req, res, next) => {
       subscription_data: JSON.stringify({ token }),
       device_info: safeDeviceInfo.slice(0, 100),
       active: true,
+      // Whose device this is (contact login, GATE_CONTACT_LOGIN): the
+      // contact's phone key, or NULL for the account holder. Re-stamped on
+      // every registration (and in the merge below) so a device changing
+      // hands between a contact and the holder never keeps the old stamp.
+      contact_phone_key: req.contactSession ? req.contactSession.phoneKey : null,
     };
 
     // Upsert by device_token so re-launch re-registration (or a device changing
@@ -63,6 +70,7 @@ router.post('/native-subscribe', async (req, res, next) => {
         platform: row.platform,
         subscription_data: row.subscription_data,
         device_info: row.device_info,
+        contact_phone_key: row.contact_phone_key,
         active: true,
         // Heartbeat: registration re-fires on every app launch, so bumping
         // updated_at here makes it a "customer recently opened the app"
@@ -121,6 +129,9 @@ router.post('/native-unsubscribe', async (req, res, next) => {
     }
     const q = db('push_subscriptions').whereIn('customer_id', customerScope).whereIn('platform', ['ios', 'android']);
     if (token) q.andWhere({ device_token: token });
+    // A holder's release never touches a contact's device rows (a contact's
+    // own release is the exact-token form above).
+    q.whereNull('contact_phone_key');
     // deactivated count matters to the client: zero rows means this token
     // is not held by any profile the session may release — keep local
     // memory so a later re-point can supersede the row.
