@@ -521,8 +521,35 @@ describe('edit_invoice card', () => {
     state.payer_statements = [{ id: 'stmt-1', status: 'finalized' }];
     expect(await run('edit_invoice', { title: 'X' })).toMatchObject({ code: 'not_editable', reason: 'finalized_statement' });
     state.payer_statements = [{ id: 'stmt-1', status: 'open' }];
-    const open = await run('edit_invoice', { line_changes: [{ line_number: 2, unit_price: 50 }] });
-    expect(JSON.stringify(open.effects)).toMatch(/payer’s open monthly statement is recalculated/);
+    // An invoice on an open payer statement is payer-owned: its amounts change on the Invoices page; a title edit still carries.
+    expect(await run('edit_invoice', { line_changes: [{ line_number: 2, unit_price: 50 }] })).toMatchObject({ code: 'needs_invoices_page', reason: 'payer_owned' });
+    expect(await run('edit_invoice', { title: 'X' })).toMatchObject({ preview: true });
+  });
+
+  test('a retotal needs a verified self-pay owner now (customer-default or visit payer, or unverifiable, refuses); a tax-exempt customer gets no tax rate', async () => {
+    const ownership = require('../services/invoice-payer-ownership');
+    const spy = jest.spyOn(ownership, 'invoicePayerOwnership');
+    const tax = require('../services/tax-calculator');
+    const exempt = jest.spyOn(tax, 'findVerifiedExemption');
+    try {
+      spy.mockResolvedValueOnce('payer_owned');
+      expect(await run('edit_invoice', { line_changes: [{ line_number: 2, unit_price: 50 }] })).toMatchObject({ reason: 'payer_owned' });
+      spy.mockResolvedValueOnce('payer_unverifiable');
+      expect(await run('edit_invoice', { line_changes: [{ line_number: 2, unit_price: 50 }] })).toMatchObject({ reason: 'payer_owned' });
+      spy.mockResolvedValue(null);
+      state.customers[0].property_type = 'commercial';
+      exempt.mockResolvedValueOnce({ id: 'cert-1' });
+      expect(await run('edit_invoice', { tax_rate_percent: 6 })).toMatchObject({ reason: 'tax_exempt' });
+      exempt.mockRejectedValueOnce(new Error('db down'));
+      expect(await run('edit_invoice', { tax_rate_percent: 6 })).toMatchObject({ reason: 'tax_exempt' });
+      exempt.mockResolvedValueOnce(null);
+      const card = await run('edit_invoice', { tax_rate_percent: 6 });
+      expect(card).toMatchObject({ preview: true });
+      expect(card._expected).toMatchObject({ selfPayLive: true });
+    } finally {
+      spy.mockRestore();
+      exempt.mockRestore();
+    }
   });
 
   test.each([
@@ -575,7 +602,7 @@ describe('edit_invoice confirm', () => {
     expect(Invoices.editInvoiceFromBar).toHaveBeenCalledTimes(1);
     expect(Invoices.editInvoiceFromBar).toHaveBeenCalledWith({
       invoiceId: INV, body: card._body, actor: { technicianId: 'staff-1', name: 'Pat Admin', email: 'admin@example.com' },
-      expected: { status: 'sent', updatedAt: UPDATED.getTime(), total: 129, creditApplied: 0, paymentIntentId: null, payerId: null, newTotal: 149 },
+      expected: { status: 'sent', updatedAt: UPDATED.getTime(), total: 129, creditApplied: 0, paymentIntentId: null, payerId: null, newTotal: 149, selfPayLive: true },
     });
   });
 

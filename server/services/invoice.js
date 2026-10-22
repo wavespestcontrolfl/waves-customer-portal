@@ -10985,6 +10985,7 @@ const InvoiceService = {
         );
       }
       require("./invoice-bar-expected").assertInvoiceVersion(lockedRow, expected, "editing");
+      await require("./invoice-bar-expected").assertSelfPayLive(lockedRow, expected, client);
       // The locked row is the only authority for the dues stamp. A stamp whose
       // month this edit did not lock (never expected: see above) is a stale
       // edit, refused rather than run unlocked.

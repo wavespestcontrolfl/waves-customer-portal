@@ -62,7 +62,7 @@ const ACTOR = { technicianId: 'admin-1', name: 'Pat Admin', email: 'admin@exampl
 
 function makeRecorder(overrides = {}) {
   const qb = {};
-  ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'andWhere', 'whereExists', 'orderBy', 'limit', 'forUpdate', 'noWait'].forEach((m) => { qb[m] = jest.fn(() => qb); });
+  ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'andWhere', 'whereExists', 'orderBy', 'limit', 'forUpdate', 'forShare', 'noWait'].forEach((m) => { qb[m] = jest.fn(() => qb); });
   qb.first = jest.fn(async () => null);
   qb.insert = jest.fn(() => Promise.resolve(1));
   qb.update = jest.fn(async () => 1);
@@ -205,6 +205,23 @@ describe('apply-credit — the page and the bar', () => {
       expect(mockPostMovement).not.toHaveBeenCalled();
       // The page's own call is unchanged (the fence is the bar's).
       spy.mockClear();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('an annual-plan link that appeared through the visit is refused under the lock (visit row held FOR SHARE first); unverifiable too', async () => {
+    const prepay = require('../services/invoice-prepay');
+    const spy = jest.spyOn(prepay, 'resolveInvoiceTermId');
+    try {
+      spy.mockResolvedValueOnce('term-1');
+      const answer = await router.applyCreditFromBar({ invoiceId: 'inv-1', body: { waiveSetupFee: false }, actor: ACTOR, expected: EXPECTED });
+      expect(answer).toMatchObject({ status: 409, json: { code: 'NEEDS_INVOICES_PAGE', error: expect.stringMatching(/annual-plan/) } });
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ id: 'inv-1' }), expect.anything(), { strict: true });
+      spy.mockRejectedValueOnce(new Error('db down'));
+      expect(await router.applyCreditFromBar({ invoiceId: 'inv-1', body: { waiveSetupFee: false }, actor: ACTOR, expected: EXPECTED }))
+        .toMatchObject({ status: 409, json: { code: 'NEEDS_INVOICES_PAGE' } });
+      expect(mockPostMovement).not.toHaveBeenCalled();
     } finally {
       spy.mockRestore();
     }

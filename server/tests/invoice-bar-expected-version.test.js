@@ -73,6 +73,24 @@ describe('invoiceVersionChanged / assertInvoiceVersion / applyInvoiceVersion', (
     expect(calls).toEqual([['whereNull', 'payer_id'], ['where', 'payer_id', 'payer-1']]);
   });
 
+  test('assertSelfPayLive re-asks the live owner on the locked row only when the card computed a self-pay retotal', async () => {
+    const { assertSelfPayLive } = require('../services/invoice-bar-expected');
+    const ownership = require('../services/invoice-payer-ownership');
+    const spy = jest.spyOn(ownership, 'invoicePayerOwnership');
+    try {
+      await expect(assertSelfPayLive(row(), { status: 'sent' }, {})).resolves.toBeUndefined();
+      expect(spy).not.toHaveBeenCalled();
+      spy.mockResolvedValueOnce(null);
+      await expect(assertSelfPayLive(row(), { selfPayLive: true }, {})).resolves.toBeUndefined();
+      spy.mockResolvedValueOnce('payer_owned');
+      await expect(assertSelfPayLive(row(), { selfPayLive: true }, {})).rejects.toMatchObject({ code: 'PREVIEW_CHANGED', statusCode: 409 });
+      spy.mockResolvedValueOnce('payer_unverifiable');
+      await expect(assertSelfPayLive(row(), { selfPayLive: true }, {})).rejects.toMatchObject({ code: 'PREVIEW_CHANGED' });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('the drift error is a 409 PREVIEW_CHANGED operational error naming what was being done', () => {
     let error;
     try { assertInvoiceVersion(row({ total: '130.00' }), EXPECTED, 'unvoiding'); } catch (err) { error = err; }

@@ -2952,6 +2952,18 @@ async function applyCreditPreRefusal(invoice, expectedCredit, assertInvoiceVersi
 async function assertBarCreditUnderLock(trx, locked, expectedCredit, assertInvoiceVersion) {
   if (!expectedCredit) return;
   assertInvoiceVersion(locked, expectedCredit, 'applying credit');
+  // An annual-plan anchor can be linked through its visit by a schedule refresh that never touches the invoice row: the visit row
+  // is held FOR SHARE (a term stamp on it waits for this transaction) and the strict resolver runs again here. Unverifiable refuses.
+  if (locked.scheduled_service_id) await trx('scheduled_services').where({ id: locked.scheduled_service_id }).forShare().first('id');
+  let annualTerm;
+  try {
+    annualTerm = await require('../services/invoice-prepay').resolveInvoiceTermId(locked, trx, { strict: true });
+  } catch {
+    annualTerm = 'unverifiable';
+  }
+  if (annualTerm) {
+    throw applyCreditOperationalError('Cannot apply credit from the bar — this is (or may be) an annual-plan invoice; apply the credit from the Invoices page', 409, 'NEEDS_INVOICES_PAGE');
+  }
   // A legacy partially_paid invoice keeps its paid part in payment rows: total - credit_applied is not its balance.
   if (String(locked.status || '').toLowerCase() === 'partially_paid') {
     throw applyCreditOperationalError('Cannot apply credit from the bar — this invoice is partially paid; apply the credit from the Invoices page', 409, 'NEEDS_INVOICES_PAGE');

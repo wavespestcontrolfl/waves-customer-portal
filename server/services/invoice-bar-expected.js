@@ -79,4 +79,13 @@ function applyInvoiceVersion(query, expected) {
   return query;
 }
 
-module.exports = { invoiceVersionChanged, assertInvoiceVersion, assertExpectedNewTotal, applyInvoiceVersion };
+// The bar's edit retotal was computed for a verified self-pay owner (expected.selfPayLive): on the locked row, the canonical live
+// resolver must still say so (a payer assigned since through the customer default or the visit, or an unverifiable answer, refuses).
+async function assertSelfPayLive(row, expected, conn) {
+  if (!expected?.selfPayLive) return;
+  if (await require('./invoice-payer-ownership').invoicePayerOwnership(row, conn) !== null) {
+    throw previewChangedError('Invoice changed while editing — a payer now owns it (or who owes it could not be verified); re-check and retry');
+  }
+}
+
+module.exports = { assertSelfPayLive, invoiceVersionChanged, assertInvoiceVersion, assertExpectedNewTotal, applyInvoiceVersion };

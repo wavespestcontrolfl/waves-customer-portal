@@ -617,8 +617,30 @@ function editedLines({ invoice, stored, read, changes, body }) {
   return { nextLines: applied.lines };
 }
 
+// A retotal is offered only on an invoice that is verifiably the homeowner's right now: the update calculator reads only the
+// invoice's own payer_id, so a payer owning it through the customer default or the visit (tax-exempt or not) would get self-pay
+// figures. Unverifiable refuses. The same check runs again on the locked row at save (InvoiceService.update, expected.selfPayLive).
+async function retotalOwnerRefusal(invoice) {
+  try {
+    if (await require('../invoice-payer-ownership').invoicePayerOwnership(invoice, db) === null) return null;
+  } catch { /* unverifiable: refused below */ }
+  return toPage(`Invoice ${invoice.invoice_number} is billed to a third-party payer (or who owes it could not be verified), so its amounts are changed on the Invoices page.`, 'payer_owned', invoice.id);
+}
+
+// A tax rate is never set for a customer with a verified tax exemption (invoice creation zeroes their tax; the update calculator
+// does not ask), and an unverifiable answer refuses.
+async function taxExemptRefusal(invoice, read) {
+  if (read.taxRate === undefined || read.taxRate === 0) return null;
+  try {
+    if (!await require('../tax-calculator').findVerifiedExemption(invoice.customer_id, { database: db })) return null;
+  } catch { /* unverifiable: refused below */ }
+  return toPage('This customer has a verified tax exemption (or it could not be checked), so a tax rate is not set from the bar.', 'tax_exempt', invoice.id);
+}
+
 // The new totals, from the page's own arithmetic; a tax rate the customer is not taxed at is refused.
 async function editedFinancials({ invoice, customer, nextLines, read, changes, body }) {
+  const ownerRefused = await retotalOwnerRefusal(invoice) || await taxExemptRefusal(invoice, read);
+  if (ownerRefused) return ownerRefused;
   let financials;
   try {
     financials = await require('../invoice')._calculateUpdateFinancials({
@@ -678,7 +700,8 @@ function editPins({ invoice, stored, body, newTotal, financials, setupFeeTied })
       paymentIntentId: null,
       // The owner the financials were computed for: a payer stamped after the card (without an updated_at move) refuses.
       payerId: invoice.payer_id || null,
-      ...(financials ? { newTotal } : {}),
+      // A retotal was computed for a verified self-pay owner: the save re-asks the live resolver on the locked row.
+      ...(financials ? { newTotal, selfPayLive: true } : {}),
     },
   };
 }
