@@ -84,6 +84,8 @@ const CAPABILITY_GAP_CODES = new Set([
   'address_conflict', 'customer_link_composer_only',
 ]);
 const UNRECORDED_DECLINE_CODES = new Set([
+  // A read that failed while checking a send (Codex #6371 r16): an outage, not a gap.
+  'invoice_lookup_failed',
   'gate_off', 'autopay_off_not_enabled', 'no_rerunnable_checks', 'cancel_gate_off',
   // A page-size limit with a way forward (through_date) in reprice_future_visits (Codex #6371 r15).
   'reprice_page_limit',

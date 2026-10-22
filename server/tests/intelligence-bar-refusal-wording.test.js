@@ -422,3 +422,14 @@ describe('every code main recorded is classified once (pre-push audit on Codex #
     'awaiting_signature', 'signature_expired', 'visit_terminal', 'prefs_unreadable',
   ])('%s is the bar working as built', (code) => { expect(recordableRefusalCode(decline(code))).toBeNull(); });
 });
+
+describe('lookup outages carry their own unrecorded code (Codex #6371 r16)', () => {
+  test('invoice_lookup_failed is never a gap; the capability codes still are', () => {
+    expect(recordableRefusalCode({ success: false, code: 'invoice_lookup_failed', error: "The bar could not check how this customer gets invoices, so it can't offer a send from here." })).toBeNull();
+    expect(recordableRefusalCode({ success: false, code: 'annual_plan_invoice', error: "This is an annual-plan invoice, and the bar can't send those from here yet." })).toBe('annual_plan_invoice');
+    expect(recordableRefusalCode({ success: false, code: 'invoice_channel_unsupported', error: "The bar can't send by that channel from here yet." })).toBe('invoice_channel_unsupported');
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/intelligence-bar/invoice-action-tools.js'), 'utf8');
+    expect(src).toMatch(/planText === ANNUAL_PLAN_UNVERIFIED_TEXT \? 'invoice_lookup_failed' : 'annual_plan_invoice'/);
+    expect(src).toMatch(/gets invoices, so it can\\'t offer a send from here\.', 'invoice_lookup_failed'/);
+  });
+});
