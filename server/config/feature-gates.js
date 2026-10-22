@@ -5345,6 +5345,15 @@ function reportWriterRulesLive() {
   return process.env.GATE_REPORT_WRITER_RULES === 'true';
 }
 
+// GATE_PEST_REPORT_VOICE read at CALL time — strict `=== 'true'`, dark in
+// every environment. On (with GATE_REPORT_WRITER_RULES), the recurring pest
+// report writer gets one prompt in one voice (service-report/pest-report-voice.js)
+// in place of its stacked blocks; inputs and output screens are unchanged.
+// Off, the pest prompt is byte-identical to before.
+function pestReportVoiceLive() {
+  return process.env.GATE_PEST_REPORT_VOICE === 'true';
+}
+
 // GATE_REPORT_BLOG_POST read at CALL time — strict `=== 'true'`, dark in
 // every environment. Off, the blog search answers unavailable, a picked post
 // is ignored at completion and no report shows one (frozen picks included).
@@ -6746,6 +6755,7 @@ module.exports.seriesMoveCarriesVisitLive = seriesMoveCarriesVisitLive;
 // GATE_REPORT_WRITER_RULES reader, exported at the end of the file (after the
 // shared list) so gate PRs adding lines above never touch this one.
 module.exports.reportWriterRulesLive = reportWriterRulesLive;
+module.exports.pestReportVoiceLive = pestReportVoiceLive;
 // GATE_REPORT_BLOG_POST reader, on its own line beside the writer rules'.
 module.exports.reportBlogPostLive = reportBlogPostLive;
 module.exports.reportAskAiLive = reportAskAiLive;
