@@ -151,6 +151,8 @@ CURATED_PREVIEW_TOOL_NAMES.add('void_invoice');
 // The invoice reminder and payment-plan cards: their card lines come from their own previews (invoice-reminder-tools.js and
 // payment-plan-tools.js cardLines), never the generic dump.
 for (const name of ['pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan']) CURATED_PREVIEW_TOOL_NAMES.add(name);
+// create_invoice: its card lines come from its own preview (create-invoice-tools.js cardLines). A draft only; it sends nothing.
+CURATED_PREVIEW_TOOL_NAMES.add('create_invoice');
 
 // Legacy-bare jobs with no mutation-free preview: what the launch does is
 // fixed and known, so the card states it explicitly (job launch, external
@@ -229,6 +231,7 @@ const ACTION_LABELS = {
   schedule_invoice_send: 'Schedule an invoice to send later',
   create_payment_plan: 'Create a payment plan (no card charged; emails the customer)',
   cancel_payment_plan: 'Cancel a payment plan',
+  create_invoice: 'Create a draft invoice (sends nothing)',
   block_sender: 'Block a sender',
   create_pending_estimate: 'Create an estimate',
   create_agent_estimate_draft: 'Save an estimate draft',
@@ -879,6 +882,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       if (line.more) moreEffects.push({ kind: line.kind, label: line.text });
       else push(line.kind, line.text);
     }
+  }
+  // create_invoice: the customer, every line, the totals, and that the draft is not sent.
+  if (toolName === 'create_invoice' && preview?.preview === true) {
+    for (const line of require('./create-invoice-tools').cardLines(toolName, preview)) push(line.kind, line.text);
   }
   // send_invoice: invoice, money and who is contacted.
   if (toolName === 'send_invoice' && preview?.preview === true) {

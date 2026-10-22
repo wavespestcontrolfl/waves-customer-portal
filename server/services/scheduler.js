@@ -2080,6 +2080,30 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 15 MIN — Bid Desk intake (GATE_BID_DESK, dark): files bid invites found in new `emails` rows as
+  // bid opportunities and sends the 7-day and 2-day reminders for due dates the operator confirmed. No AI call; it
+  // posts admin notifications only and sends nothing to a buyer, contractor or customer. The gate is read per tick,
+  // so a flip or an unset needs no restart. runExclusive records the job health.
+  cron.schedule('0 3,18,33,48 * * * *', async () => {
+    if (!require('../config/feature-gates').bidDeskLive()) return;
+    try {
+      const lockRes = await runExclusive('bid-desk-intake', async () => {
+        const result = await require('./bid-desk').runBidDeskTick();
+        if (result.created > 0) logger.info(`[bid-desk] ${result.created} new bid(s)`);
+      });
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`bid-desk-intake tick skipped: ${lockRes.reason || 'no_connection'}`);
+        await recordJobStart('bid-desk-intake').catch(() => {});
+        await recordJobEnd('bid-desk-intake', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch (err) {
+      logger.error(`[bid-desk] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // SMS intake and its shared-ledger follow-up run every five minutes.
   cron.schedule('0 */5 * * * *', async () => {
     if (!gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS')) return;

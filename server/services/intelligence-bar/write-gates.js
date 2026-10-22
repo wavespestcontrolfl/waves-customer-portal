@@ -115,6 +115,9 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   'schedule_invoice_send',
   'create_payment_plan',
   'cancel_payment_plan',
+  // create_invoice (owner ruling 2026-10-12): the Invoices page's create handler, run in process behind a card;
+  // a draft only, sends nothing.
+  'create_invoice',
   'update_lead_contact',
   // propose_admin_edit (owner ruling 2026-10-12): one reviewed small internal
   // edit, replayed through the screen's own PUT or PATCH after a confirm card.
