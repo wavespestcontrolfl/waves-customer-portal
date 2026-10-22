@@ -107,6 +107,8 @@ export function normalizeAvailability(data, { date, scopedToTech }) {
       week: (data.summary.best.week || []).map((h) => summaryHour(h, scopedToTech)),
       weekCovered: data.summary.best.week_covered !== false,
     } : null,
+    // GATE_BEST_TIMES_CHIP_STOP_NAMES: the chips name the stop they follow.
+    chipStopNames: data.summary.chip_stop_names === true,
     picked: p ? {
       start: p.start,
       fits: p.fits === true ? true : (p.fits === false ? false : null),
