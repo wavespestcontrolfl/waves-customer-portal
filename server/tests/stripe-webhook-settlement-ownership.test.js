@@ -18,6 +18,12 @@
  * No new lock is introduced: settlement must never be blocked into failure.
  */
 jest.mock('stripe', () => jest.fn(() => ({})));
+// The merge fence (health-alert-insert) has its own suite; here it passes the
+// row straight to the mocked db or trx so the insert assertions still hold.
+jest.mock('../services/health-alert-insert', () => ({
+  insertHealthAlert: (row, { trx } = {}) => (trx || require('../models/db'))('customer_health_alerts').insert(row),
+  lockAlertCustomers: async (trx, ids) => { mockState.updates.push({ table: 'customers:share-lock', payload: ids }); },
+}));
 jest.mock('../services/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));
@@ -303,6 +309,13 @@ describe('the withdrawal is re-read under the settlement lock', () => {
     expect(alert.payload.alert_type).toBe('wh_payer_billed_settled');
     expect(alert.payload.alert_type.length).toBeLessThanOrEqual(30);
     expect(mockState.inserts.find((i) => i.table === 'stripe_orphan_charges')).toBeFalsy();
+    // Merge fence before the settlement locks, in executeMerge's order
+    // (customers, then payments), so the two cannot deadlock.
+    const lockAt = mockState.updates.findIndex((u) => u.table === 'customers:share-lock');
+    const flipAt = mockState.updates.findIndex((u) => u.table === 'payments');
+    expect(lockAt).toBeGreaterThanOrEqual(0);
+    expect(mockState.updates[lockAt].payload).toContain(WINNER);
+    expect(flipAt).toBeGreaterThan(lockAt);
   });
 });
 

@@ -2248,6 +2248,16 @@ const gates = {
   // before. See services/call-reschedule-apply.js.
   // Automatic moves also require GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS.
   callRescheduleApply: process.env.GATE_CALL_RESCHEDULE_APPLY === 'true',
+  // Make-up move (owner 2026-10-22): a recurring visit that was MISSED (its
+  // 6 PM missed-appointment check left an open customer_noshow row) and the
+  // customer then calls, the agent agrees a new time and the caller accepts.
+  // The pipeline moves THAT visit (series default policy) instead of
+  // inserting a new general-service visit beside it. Runs before the booking
+  // branch; a candidate that cannot be moved holds the booking for review,
+  // never falls back to a new visit. NO customer communication. Off → today's
+  // booking behavior. See services/call-reschedule-apply.js applyCallMakeupMove.
+  // Automatic moves also require GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS.
+  callMakeupMove: process.env.GATE_CALL_MAKEUP_MOVE === 'true',
   rescheduleProposalCard: gateEnvValue('GATE_RESCHEDULE_PROPOSAL_CARD'),
   callbackCard: gateEnvValue('GATE_CALLBACK_CARD'),
   smsAdditionalProperty: gateEnvValue('GATE_SMS_ADDITIONAL_PROPERTY'),
@@ -7084,5 +7094,14 @@ function bidDeskLive() {
 }
 // GATE_BID_DESK reader, on its own line so gate PRs never conflict.
 module.exports.bidDeskLive = bidDeskLive;
+// GATE_CALL_LEAD_LAZY_STRIPE read at CALL time, strict `=== 'true'`, dark in every environment.
+// services/call-recording-processor.js: a customer created from a call no longer gets a Stripe profile at once
+// (every card-save and payment path creates it on demand), so a lead that never pays leaves no empty profile to
+// block a later duplicate merge. Sends nothing. Off = today's behavior, byte for byte.
+function callLeadLazyStripeLive() {
+  return process.env.GATE_CALL_LEAD_LAZY_STRIPE === 'true';
+}
+// GATE_CALL_LEAD_LAZY_STRIPE reader, on its own line so gate PRs never conflict.
+module.exports.callLeadLazyStripeLive = callLeadLazyStripeLive;
 // Retired gate names, for the admin gate list (services/gate-list.js), on its own line.
 module.exports.RETIRED_GATES = RETIRED;

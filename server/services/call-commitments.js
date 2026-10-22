@@ -2694,9 +2694,11 @@ async function resolveScheduleVisit(ctx) {
   // changed time; it says nothing about a promised technician follow-up,
   // and closing that owed work on this evidence would drop it silently
   // (GH codex #4204 r7 P2).
-  const { ACTIVITY_ACTION: RESCHEDULE_APPLIED } = require("./call-reschedule-apply");
+  // A make-up move (a missed recurring visit moved from the call,
+  // GATE_CALL_MAKEUP_MOVE) is the same proof under its own action.
+  const { ACTIVITY_ACTION: RESCHEDULE_APPLIED, MAKEUP_ACTIVITY_ACTION: MAKEUP_APPLIED } = require("./call-reschedule-apply");
   const movedRow = commitment.kind !== "schedule_visit" ? null : await conn("activity_log")
-    .where({ action: RESCHEDULE_APPLIED })
+    .whereIn("action", [RESCHEDULE_APPLIED, MAKEUP_APPLIED])
     .whereRaw("metadata->>'call_log_id' = ?", [String(call.id)])
     .orderBy("created_at", "asc")
     .first("created_at", "metadata");

@@ -46,6 +46,8 @@ const { pairCustomersAtSameAddress } = require('./customer-address-match');
 const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
 const { isResidenceProperty } = require('./customer-properties');
 const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
+// The retire write's sentinel phone (merge-retired.js) marks a merged-away row.
+const { MERGE_RETIRED_PHONE_PREFIX } = require('./merge-retired');
 const { NEW_SOD_COLUMNS, NEW_SOD_DATE_COLUMNS, clearedNewSodColumns } = require('./lawn-sod-holds');
 const { dateOnlyString } = require('../utils/datetime-et');
 
@@ -3907,7 +3909,7 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // NOT NULL, so it gets an unmatchable sentinel; the journal snapshot keeps
     // the real values.
     await trx('customers').where({ id: loserId }).update({
-      phone: `merged-${String(loserId).slice(0, 8)}`,
+      phone: `${MERGE_RETIRED_PHONE_PREFIX}${String(loserId).slice(0, 8)}`,
       email: null,
       stripe_customer_id: null,
       payer_id: null,
