@@ -362,6 +362,10 @@ router.post('/schedule', async (req, res) => {
     const { to, subject, body, draftText, threadId, replyEmailId, sendAt, clientKey } = req.body || {};
     if (!to || !body || !draftText) return res.status(400).json({ error: 'to, body and draftText required' });
     if (typeof clientKey !== 'string' || !/^[\w-]{8,64}$/.test(clientKey)) return res.status(400).json({ error: 'clientKey required' });
+    // A retried request finds its first row before any time check: by the
+    // retry the chosen time may be under a minute away, or already sent.
+    const known = await db('scheduled_emails').where({ client_key: clientKey }).first();
+    if (known) return res.json({ success: true, scheduled: scheduledView(known) });
     if (typeof sendAt !== 'string' || !SCHEDULE_ET_RE.test(sendAt)) return res.status(400).json({ error: 'sendAt must be YYYY-MM-DDTHH:MM (Eastern)' });
     const when = parseETDateTime(sendAt);
     // The parsed instant must read back as the same Eastern wall clock (no

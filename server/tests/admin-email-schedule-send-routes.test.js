@@ -1,6 +1,8 @@
 // Schedule send routes (GATE_EMAIL_SEND_LATER) before any database write:
 // the gate, admin-only access, and the send-time checks. No network or DB.
-jest.mock('../models/db', () => jest.fn(() => { throw new Error('no DB in this suite'); }));
+// The only read allowed is the client-key lookup (no row); any write throws.
+const mockInsert = jest.fn(() => { throw new Error('no writes in this suite'); });
+jest.mock('../models/db', () => jest.fn(() => ({ where: () => ({ first: async () => undefined }), insert: mockInsert })));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     req.techRole = req.headers.authorization;
@@ -55,7 +57,7 @@ test.each([
   process.env.GATE_EMAIL_SEND_LATER = 'true';
   const res = await call('POST', '/schedule', { body: { ...valid(), ...change } });
   expect(res).toEqual({ status: 400, body: { error } });
-  expect(db).not.toHaveBeenCalled();
+  expect(mockInsert).not.toHaveBeenCalled();
 });
 
 test.each([[null, 401], ['technician', 403]])('role %s cannot schedule', async (role, status) => {

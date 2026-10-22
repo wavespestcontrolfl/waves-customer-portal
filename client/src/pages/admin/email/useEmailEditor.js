@@ -28,6 +28,12 @@ export function encodeEmailBody(text) {
 }
 
 const uncertainKey = (userId) => `waves_email_schedule_uncertain:${userId}`;
+// FNV-1a, enough to tell "the same email at the same time" from another one.
+function fingerprint(text) {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) hash = Math.imul(hash ^ text.charCodeAt(i), 0x01000193) >>> 0;
+  return `${text.length}:${hash.toString(16)}`;
+}
 function readUncertainSchedules(userId) {
   try {
     const saved = JSON.parse(sessionStorage.getItem(uncertainKey(userId)) || "{}");
@@ -224,7 +230,8 @@ export default function useEmailEditor(userId) {
     setScheduling(kind);
     setSendFeedback((current) => ({ ...current, [kind]: null }));
     const slot = replyId ? `reply:${replyId}` : "compose";
-    const request = JSON.stringify({ ...payload, sendAt });
+    // Only a fingerprint is kept (sessionStorage must never hold the email).
+    const request = fingerprint(JSON.stringify({ ...payload, sendAt }));
     const prior = uncertainSchedule.current[slot];
     const submit = async (clientKey) => {
       // Saved before the request: a reload while it is in flight still finds
