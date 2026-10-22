@@ -22,7 +22,7 @@ function makeFakeConn(resultsByQuery) {
       return q;
     };
     const q = {};
-    ['whereIn', 'where', 'andWhere', 'orWhere', 'whereNull', 'orWhereRaw', 'orderBy', 'limit', 'offset', 'leftJoin', 'select'].forEach((m) => {
+    ['whereIn', 'where', 'andWhere', 'orWhere', 'whereNull', 'orWhereRaw', 'whereRaw', 'orderBy', 'limit', 'offset', 'leftJoin', 'select'].forEach((m) => {
       q[m] = record(m);
     });
     q.first = async () => {
@@ -346,6 +346,23 @@ describe('findLinkedUpcomingAppointment — a Waves Assessment is never adopted'
       { database: conn },
     );
     expect(row).toBe(null);
+  });
+
+  it('the estimate-linked query filters assessments in SQL, so an earlier assessment cannot hide a later linked visit', async () => {
+    const conn = makeFakeConn([LAWN_ROW]);
+    const row = await findLinkedUpcomingAppointment(LAWN_ESTIMATE, null, { database: conn });
+    expect(row).toEqual(LAWN_ROW);
+    const raw = clauseArgs(conn.queries[0], 'whereRaw');
+    expect(raw).toHaveLength(1);
+    expect(raw[0][0]).toMatch(/^NOT \(CASE WHEN/);
+    expect(raw[0][1]).toEqual(expect.arrayContaining(['services.id', 'lawn_inspection', 'scheduled_services.service_type']));
+  });
+
+  it('a row repointed to a paid lawn service stays adoptable even with a stale Waves Assessment label', async () => {
+    const repointed = { ...LAWN_ROW, id: 'ss-repointed', service_type: 'Waves Assessment' };
+    const conn = makeFakeConn([null, [repointed]]);
+    const row = await findLinkedUpcomingAppointment(LAWN_ESTIMATE, null, { database: conn });
+    expect(row).toEqual(repointed);
   });
 
   it('pest family is unchanged: a quarterly pest visit still adopts', async () => {

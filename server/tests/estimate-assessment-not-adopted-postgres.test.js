@@ -265,6 +265,34 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
     expect((await getAcceptance(token)).mode).not.toBe('existing_appointment');
   });
 
+  test('/data: a row repointed to a paid lawn service keeps adopting despite a stale Waves Assessment label', async () => {
+    const { customerId, token } = await fixture(mockTransaction);
+    const repointedId = await visit(mockTransaction, {
+      customerId, key: 'lawn_care_monthly', type: 'Waves Assessment', date: CHOSEN_DATE,
+    });
+    const acceptance = await getAcceptance(token);
+    expect(acceptance.mode).toBe('existing_appointment');
+    expect(acceptance.appointment.id).toBe(repointedId);
+  });
+
+  test('/data: an EARLIER estimate-linked assessment does not hide a LATER estimate-linked paid visit', async () => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction);
+    await assessmentVisit(mockTransaction, customerId, { source_estimate_id: estimateId });
+    const lawnId = await visit(mockTransaction, {
+      customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+      extra: { source_estimate_id: estimateId },
+    });
+    const acceptance = await getAcceptance(token);
+    expect(acceptance.mode).toBe('existing_appointment');
+    expect(acceptance.appointment.id).toBe(lawnId);
+  });
+
+  test('/data: an estimate-linked assessment alone still falls through to the slot picker', async () => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction);
+    await assessmentVisit(mockTransaction, customerId, { source_estimate_id: estimateId });
+    expect((await getAcceptance(token)).mode).not.toBe('existing_appointment');
+  });
+
   test('accept: a stale page posting the assessment id is refused and the assessment is not restamped', async () => {
     const { customerId, estimateId, token } = await fixture(mockTransaction);
     const assessmentId = await assessmentVisit(mockTransaction, customerId, { estimated_price: 0 });
@@ -325,6 +353,20 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
       expect(assessment.recurring_parent_id).toBeNull();
       const childrenOfAssessment = await mockTransaction('scheduled_services').where({ recurring_parent_id: assessmentId });
       expect(childrenOfAssessment).toHaveLength(0);
+    });
+
+    test('a stamped row repointed to a paid service (stale Waves Assessment label) IS the plan start', async () => {
+      const { customerId, estimateId } = await fixture(mockTransaction);
+      const repointedId = await visit(mockTransaction, {
+        customerId, key: 'lawn_care_monthly', type: 'Waves Assessment', date: CHOSEN_DATE,
+        extra: { source_estimate_id: estimateId, estimated_price: 55 },
+      });
+      await mockTransaction('estimates').where({ id: estimateId }).update({ status: 'accepted', accepted_at: new Date() });
+
+      const result = await EstimateConverter().convertEstimate(estimateId, { database: mockTransaction, ...convertOpts });
+
+      expect(result.firstScheduledServiceId).toBe(repointedId);
+      expect(dateOnly(result.membershipEmail.effectiveDate)).toBe(CHOSEN_DATE);
     });
 
     test('an assessment stamped to the estimate is not "a reservation": the normal auto-schedule path runs', async () => {

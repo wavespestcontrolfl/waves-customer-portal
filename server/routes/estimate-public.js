@@ -22,7 +22,7 @@ const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-fo
 const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { groupLinkStillViewable } = require('../services/proposal-bid');
-const { isAssessmentVisit } = require('../services/assessment-booking');
+const { isAssessmentVisit, excludeAssessmentBookings } = require('../services/assessment-booking');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 const { UNISSUED_ESTIMATE, estimateNeverIssued, estimateHasBahiaLawn } = require('../services/estimate-bahia-review');
 const { storedEstimateContainer } = require('../services/estimate-result-container');
@@ -1692,7 +1692,11 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
     });
 
   if (requestedId) q.where('scheduled_services.id', requestedId);
-  let row = await q.first();
+  // Assessment visits never compete for the estimate-linked slot: filtered in
+  // the query so an earlier linked assessment cannot hide a later linked paid
+  // visit behind .first() (the customer-wide fallback only sees unclaimed
+  // rows, so it could never recover that one).
+  let row = await excludeAssessmentBookings(q).first();
 
   // The family/mode gate applies to ESTIMATE-LINKED rows too (codex #3228
   // r8 P1): a mixed estimate whose linked row is a recurring-family visit
@@ -1715,7 +1719,8 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
     row = null;
   }
   // Assessment visits are never adoptable, including under the legacy
-  // no-derivable-family exemption above.
+  // no-derivable-family exemption above (the query already filters them;
+  // this guards any caller connection that does not).
   if (row && isAssessmentVisit(row)) row = null;
 
   // Customer-wide fallback (gated): a customer who already has an upcoming
