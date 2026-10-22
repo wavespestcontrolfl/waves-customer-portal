@@ -103,6 +103,8 @@ async function applyOperatorCustomerEmail(trx, { customerId, email, source = 'op
   const emailSync = await require('./customer-email-fanout').propagateCustomerEmailChange(
     { before, after: { ...before, email: newEmail }, source }, trx,
   );
+  // Email provenance for the duplicate auto-merge (a staff-set email is not an unverified intake claim).
+  await require('./audit-log').auditCustomerEmailSetByStaff({ customerId, source, trx });
   return { outcome: 'changed', before, emailSync };
 }
 

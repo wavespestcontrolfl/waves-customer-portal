@@ -541,8 +541,32 @@ async function auditVendorOrder({ vendor_order_id, restock_request_id, vendor_id
   });
 }
 
+/**
+ * A staff member (or the Intelligence Bar / triage confirm on their behalf)
+ * set customers.email. The duplicate auto-merge reads this as email
+ * provenance: an intake row whose email staff later corrected is no longer an
+ * unverified anonymous email (customer-dedupe.js, GATE_DEDUPE_NO_UNVERIFIED_BACKFILL).
+ * The Customer 360 PUT writes its own 'customer.update_sensitive' row with
+ * 'email' in sensitiveFieldsChanged; this is the same fact for the other two
+ * operator writers.
+ */
+const STAFF_EMAIL_SET_ACTION = 'customer.email_set_by_staff';
+async function auditCustomerEmailSetByStaff({ customerId, source, trx = null }) {
+  return recordAuditEvent({
+    actor_type: 'technician',
+    actor_id: null,
+    action: STAFF_EMAIL_SET_ACTION,
+    resource_type: 'customer',
+    resource_id: customerId,
+    metadata: { source: source || null },
+    trx,
+  });
+}
+
 module.exports = {
   recordAuditEvent,
+  STAFF_EMAIL_SET_ACTION,
+  auditCustomerEmailSetByStaff,
   auditLawnSqftFromEstimate,
   auditVendorOrder,
   auditTerminalHandoffMint,

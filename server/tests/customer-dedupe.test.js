@@ -719,7 +719,7 @@ describe('executeMerge', () => {
   const WINNER = 'bbbbbbbb-0000-0000-0000-000000000001';
   const LOSER = 'bbbbbbbb-0000-0000-0000-000000000002';
 
-  function buildTrx({ winner, loser, fkRows, updates = {}, journalId = 'j1', prefsConflict = false, sessions = null, queueCustomers = null, propertyRows = [] }) {
+  function buildTrx({ winner, loser, fkRows, updates = {}, journalId = 'j1', prefsConflict = false, sessions = null, queueCustomers = null, propertyRows = [], auditRows = [] }) {
     // `events` is an ORDERED log (the stamped-session reads and every repoint
     // update) so a test can assert what the executor does before the sweep.
     const state = {
@@ -787,6 +787,7 @@ describe('executeMerge', () => {
         }
         return [];
       }
+      if (table === 'audit_log') { state.auditReads = (state.auditReads || 0) + 1; return auditRows; }
       if (table === 'customer_merge_journal') {
         state.journal = q.args('insert')[0];
         return [{ id: journalId }];
@@ -928,8 +929,8 @@ describe('executeMerge', () => {
       pipeline_stage: 'new_lead', lead_source: 'website_quote', last_contact_type: 'website_quote', lead_source_detail: 'quote-wizard',
     };
 
-    async function runAuto(winner, loser) {
-      const { trx, state } = buildTrx({ winner, loser, fkRows: FK_ROWS });
+    async function runAuto(winner, loser, auditRows = []) {
+      const { trx, state } = buildTrx({ winner, loser, fkRows: FK_ROWS, auditRows });
       db.transaction.mockImplementation(async (fn) => fn(trx));
       const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'auto:test', mode: 'auto' });
       return { result, state };
@@ -962,6 +963,14 @@ describe('executeMerge', () => {
       const staffEntered = { ...quoteShell, lead_source: 'referral', last_contact_type: 'call', pipeline_stage: 'new_lead' };
       const { state } = await runAuto(realCustomer, staffEntered);
       expect(state.backfilled.email).toBe('typed-by-visitor@example.test');
+    });
+
+    it('gate on: an intake row whose email staff edited or confirmed (audit_log) still backfills the email', async () => {
+      process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL = 'true';
+      const { result, state } = await runAuto(realCustomer, quoteShell, [{ id: 'audit-1' }]);
+      expect(state.auditReads).toBeGreaterThan(0);
+      expect(state.backfilled.email).toBe('typed-by-visitor@example.test');
+      expect(result.skippedBackfills).toEqual({});
     });
 
     it('gate on: a manual merge of the same shell still backfills the email', async () => {

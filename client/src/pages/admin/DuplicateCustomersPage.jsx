@@ -533,6 +533,11 @@ export default function DuplicateCustomersPage() {
                           merge.undoneAt ? `undone ${fmtDate(merge.undoneAt)}${merge.undoneBy ? ` by ${merge.undoneBy}` : ""}` : null,
                         ].filter(Boolean).join(" · ")}
                       </div>
+                      {merge.skipped_backfills?.email && (
+                        <div className="break-words text-ui-body text-ink-secondary" data-testid="merge-skipped-email">
+                          Email not copied (typed on an unverified web form): {merge.skipped_backfills.email}. Copy it by hand if it is right.
+                        </div>
+                      )}
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
                       {merge.undoneAt ? (
