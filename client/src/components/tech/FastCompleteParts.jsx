@@ -219,16 +219,33 @@ export function EmbeddedPartFrame({ dialogRef, titleId, hiddenProps, overlay, di
 // open, that opens the appointment details sheet (quick move, cancel,
 // reschedule, price edit) — the same one the full form's Details pill and the
 // lawn sheet open. Absent (the tech portal mounts no such sheet) = no pill.
-export function SheetHeader({ titleId, title, service, visit, done, locked, dictationPending, submitting, onFullForm, onViewDetails, onClose, fullFormOffered = true }) {
+// The customer's phone as (941) 555-0100; any other shape shows as stored.
+function phoneLabel(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  const ten = digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
+  return ten.length === 10 ? `(${ten.slice(0, 3)}) ${ten.slice(3, 6)}-${ten.slice(6)}` : String(phone || '').trim();
+}
+
+// `contact` (owner 2026-10-22): the customer's phone and email under the address, each a link
+// (call, email). Absent or empty = no line.
+export function SheetHeader({ titleId, title, service, visit, contact, done, locked, dictationPending, submitting, onFullForm, onViewDetails, onClose, fullFormOffered = true }) {
   const address = liveAddressLine(visit?.address);
+  const phone = String(contact?.phone || '').trim();
+  const email = String(contact?.email || '').trim();
   return (
     <header className="tech-visit-header">
       <div className="tech-visit-header-text">
         <h2 id={titleId} className="tech-visit-title">{title}</h2>
-        <p className="tech-visit-muted">
-          {customerNameOf(visit, service) || 'Customer'}{service?.serviceType ? ` · ${service.serviceType}` : ''}
-        </p>
+        {/* Name and service on their own lines (owner 2026-10-22). */}
+        <p className="tech-visit-muted">{customerNameOf(visit, service) || 'Customer'}</p>
+        {service?.serviceType && <p className="tech-visit-muted">{service.serviceType}</p>}
         {address && <p className="tech-visit-muted">{address}</p>}
+        {(phone || email) && (
+          <p className="tech-visit-muted tech-visit-contact">
+            {phone && <a href={`tel:${phone.replace(/[^\d+]/g, '')}`}>{phoneLabel(phone)}</a>}
+            {email && <a href={`mailto:${email}`}>{email}</a>}
+          </p>
+        )}
       </div>
       {/* Details and Full form share one group that wraps (stacks) on a narrow
           phone, so neither is clipped beside the title and the close button. */}
@@ -779,12 +796,18 @@ export function VisitNote({ note, onChange, onDictated, onDictationPending, serv
       </div>
       <div className={cn('tech-visit-note-row', micInside && 'tech-visit-note-row--inside')}>
         {micInside ? (
-          <>
-            {children ? <div className="tech-visit-note-box">{text}{children}</div> : text}
-            <span className="tech-visit-note-mic">
-              <DictationButton onAppend={onDictated} onPendingChange={onDictationPending} palette={MIC_PALETTE} size={40} title="Talk about the visit" disabled={locked} uploadServiceId={serviceId} clipHandler={onClip} />
-            </span>
-          </>
+          // The mic sits in the text area's own corner, so photos in the box (children) never run under it.
+          (() => {
+            const field = (
+              <div className="tech-visit-note-field">
+                {text}
+                <span className="tech-visit-note-mic">
+                  <DictationButton onAppend={onDictated} onPendingChange={onDictationPending} palette={MIC_PALETTE} size={40} title="Talk about the visit" disabled={locked} uploadServiceId={serviceId} clipHandler={onClip} />
+                </span>
+              </div>
+            );
+            return children ? <div className="tech-visit-note-box">{field}{children}</div> : field;
+          })()
         ) : (
           <>
             <DictationButton onAppend={onDictated} onPendingChange={onDictationPending} palette={MIC_PALETTE} size={48} title="Talk about the visit" disabled={locked} uploadServiceId={serviceId} clipHandler={onClip} />

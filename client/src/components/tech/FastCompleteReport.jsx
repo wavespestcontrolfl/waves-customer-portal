@@ -539,13 +539,16 @@ export function perimeterFeetOf(zone) {
   return Number.isFinite(feet) && feet > 0 ? feet : null;
 }
 
-export function TraceSection({ trace, locked, onTrace }) {
+// `optional` (the visit step, owner 2026-10-22): says "Optional" until a trace is saved; a trace never holds the send.
+export function TraceSection({ trace, locked, onTrace, optional = false }) {
   const feet = perimeterFeetOf(trace.zone);
   return (
     <section className="tech-visit-choice-section">
       <div className="tech-visit-section-head">
         <h3 className="tech-visit-section-title">Trace where we sprayed</h3>
-        {trace.zone && <span className="tech-visit-muted">{feet ? `Perimeter traced · ${feet} ft` : 'Traced'}</span>}
+        {trace.zone
+          ? <span className="tech-visit-muted">{feet ? `Perimeter traced · ${feet} ft` : 'Traced'}</span>
+          : optional && <span className="tech-visit-muted">Optional</span>}
       </div>
       <p className="tech-visit-muted">Drag along where you sprayed on the satellite photo of the home. The line shows on the customer’s report.</p>
       <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={locked} onClick={onTrace}>

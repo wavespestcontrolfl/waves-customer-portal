@@ -5,7 +5,7 @@
 //  - the note is not read for products (its facts are still read);
 //  - a product at 0 in stock still holds, as without the gate, unless the context also says stockAdvisory
 //    (GATE_PEST_STOCK_ADVISORY: FastCompleteSheet.report-flow.test.jsx);
-//  - the trace is optional: typed feet cover a perimeter spray with no saved trace;
+//  - the trace is optional (owner 2026-10-22: required for no service): an untraced perimeter spray holds nothing, and typed feet are optional;
 //  - the photo and trace reads hold nothing: a read still loading or failed sends with its field left out.
 // A re-service gets the same sheet (the server sends the key for a recurring series or
 // a re-service only). Every lane, typed, station and prepare path, a first cleanout that
@@ -269,26 +269,21 @@ describe('one-tap: the photo and trace reads hold nothing', () => {
 });
 
 describe('one-tap: the trace is optional', () => {
-  test('a perimeter spray with no saved trace asks for the feet, and they go on the record', async () => {
+  test('a perimeter spray with no saved trace holds nothing: the feet box is optional, and typed feet go on the record', async () => {
     const request = makeRequest({ facts: PERIMETER });
     await openSheet(request);
     writeNote();
     tapRating();
     await openReport();
-    expect(screen.getByText('Type the feet you sprayed, or trace it.')).toBeTruthy();
-    expect(completeButton().disabled).toBe(true);
+    // owner 2026-10-22: no trace, and no typed feet, is required
+    expect(screen.queryByText('Type the feet you sprayed, or trace it.')).toBeNull();
     expect(screen.queryByText(/Use the Full form/)).toBeNull();
+    expect(completeButton().disabled).toBe(false);
     // the trace stays offered
-    expect(screen.getByRole('button', { name: 'Auto-trace the house' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Trace where we sprayed' })).toBeTruthy();
     const feet = screen.getByLabelText('Feet sprayed');
     expect(feet.getAttribute('inputmode')).toBe('numeric');
-    for (const bad of ['0', '12.5', '-4', '']) {
-      fireEvent.change(feet, { target: { value: bad } });
-      expect(completeButton().disabled).toBe(true);
-    }
     fireEvent.change(feet, { target: { value: '180' } });
-    expect(screen.queryByText('Type the feet you sprayed, or trace it.')).toBeNull();
     // typed feet are not what the writer reads: the report is still current
     expect(screen.queryByRole('button', { name: 'Write it again' })).toBeNull();
     expect(reportCalls(request)).toHaveLength(1);
@@ -299,6 +294,22 @@ describe('one-tap: the trace is optional', () => {
     const perimeter = body.products.filter((product) => product.applicationMethod === 'perimeter_spray');
     expect(perimeter.length).toBeGreaterThan(0);
     for (const product of perimeter) expect([product.areaValue, product.areaUnit]).toEqual([180, 'linear_ft']);
+  });
+
+  test('a perimeter spray with no saved trace and no feet sends: the perimeter row goes with no length (areaValue null)', async () => {
+    const request = makeRequest({ facts: PERIMETER });
+    await openSheet(request);
+    writeNote();
+    tapRating();
+    await openReport();
+    expect(completeButton().disabled).toBe(false);
+    fireEvent.click(completeButton());
+    await screen.findByTestId('fast-complete-sent');
+    const [body] = request.bodies('/complete');
+    expect(body.traceSeen).toBeNull();
+    for (const product of body.products.filter((p) => p.applicationMethod === 'perimeter_spray')) {
+      expect(product.areaValue).toBeNull();
+    }
   });
 
   test('a saved trace gives the feet: no input, and the trace\'s feet are sent', async () => {
@@ -318,7 +329,7 @@ describe('one-tap: the trace is optional', () => {
     }
   });
 
-  test('a saved trace that gives no feet (an outline) keeps today\'s trace hold: no feet box', async () => {
+  test('a saved trace that gives no feet (an outline) keeps the saved-trace consistency hold: no feet box', async () => {
     const outline = { linear_ft: null, capture_mode: 'yard', updated_at: '2026-10-02T05:00:00.000Z' };
     const request = makeRequest({ facts: PERIMETER, trace: { enabled: true, treatmentZone: outline } });
     await openSheet(request);
@@ -327,33 +338,35 @@ describe('one-tap: the trace is optional', () => {
     await openReport();
     expect(screen.queryByLabelText('Feet sprayed')).toBeNull();
     expect(screen.queryByText('Type the feet you sprayed, or trace it.')).toBeNull();
-    expect(screen.getByText('Trace where you sprayed: Taurus SC is a perimeter spray.')).toBeTruthy();
-    expect(completeButton().disabled).toBe(true);
+    // the untraced-perimeter hold is gone; the saved outline is read, and the send follows the saved-trace rules
+    expect(screen.queryByText('Trace where you sprayed: Taurus SC is a perimeter spray.')).toBeNull();
   });
 
-  test('a visit that cannot be traced still takes typed feet, with no Full form hold', async () => {
+  test('a visit that cannot be traced still takes typed feet, with no Full form hold and no hold at all', async () => {
     const request = makeRequest({ facts: PERIMETER });
     render(<FastCompleteSheet service={{ ...SERVICE, traceEligible: false }} request={request} onClose={() => {}} onCompleted={() => {}} voiceFillEnabled />);
     await screen.findByText(/Taurus SC 4 fl oz/);
     writeNote();
     tapRating();
     await openReport();
-    expect(screen.getByText('Type the feet you sprayed, or trace it.')).toBeTruthy();
+    expect(screen.queryByText('Type the feet you sprayed, or trace it.')).toBeNull();
     expect(screen.queryByText(/can’t be traced here/)).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Auto-trace the house' })).toBeNull();
+    expect(completeButton().disabled).toBe(false);
     fireEvent.change(screen.getByLabelText('Feet sprayed'), { target: { value: '90' } });
     expect(completeButton().disabled).toBe(false);
   });
 
-  test('gate off: the trace hold stays and there is no feet input', async () => {
+  test('gate off: no trace hold either, and there is no feet input', async () => {
     const request = makeRequest({ facts: PERIMETER, context: {} });
     await openSheet(request, { voiceFillEnabled: false });
     writeNote();
     tapRating();
     await openReport();
-    expect(screen.getByText('Trace where you sprayed: Taurus SC is a perimeter spray.')).toBeTruthy();
+    // owner 2026-10-22: no untraced-perimeter hold on any visit, gate on or off
+    expect(screen.queryByText('Trace where you sprayed: Taurus SC is a perimeter spray.')).toBeNull();
     expect(screen.queryByLabelText('Feet sprayed')).toBeNull();
-    expect(completeButton().disabled).toBe(true);
+    expect(completeButton().disabled).toBe(false);
+    expect(screen.getByRole('button', { name: 'Trace where we sprayed' })).toBeTruthy();
   });
 });
 
@@ -387,7 +400,7 @@ describe('one-tap: a re-service', () => {
     await screen.findByText(/Taurus SC/);
   };
 
-  test('gets the one-tap sheet: the tap writes, the note is not read for products, typed feet cover an untraced spray', async () => {
+  test('gets the one-tap sheet: the tap writes, the note is not read for products, an untraced spray holds nothing and typed feet are optional', async () => {
     const request = makeRequest({ service: RESERVICE, facts: PERIMETER });
     await openReservice(request);
     writeNote();
@@ -396,8 +409,9 @@ describe('one-tap: a re-service', () => {
     await openReport();
     expect(reportCalls(request)).toHaveLength(1);
     expect(request.bodies('/voice-fill/products')).toEqual([]);
-    expect(screen.getByText('Type the feet you sprayed, or trace it.')).toBeTruthy();
+    expect(screen.queryByText('Type the feet you sprayed, or trace it.')).toBeNull();
     expect(screen.getByLabelText('Feet sprayed')).toBeTruthy();
+    expect(completeButton().disabled).toBe(false);
   });
 
   test('a context without the key keeps the re-service sheet as it was', async () => {

@@ -617,7 +617,7 @@ function LawnForm({ ctx, service, request, submission, locked, dictationPending,
         <WrapUpClock wrapUp={wrapUp} since={service.onSiteAt} />
         <fieldset className="tech-visit-form" disabled={locked}>
           <CustomerRequest request={ctx.customerRequest} />
-          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked || voice.filling} onClip={noteClip.onClip} />
+          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked || voice.filling} onClip={noteClip.onClip} micInside />
           {noteClip.error && <p className="tech-visit-muted tech-visit-status--warn" role="status">{noteClip.error}</p>}
           <NoteProductsFill voice={voice} note={form.note} locked={locked} busy={dictationPending} />
           <VoiceFillReview voice={voice} locked={locked} />

@@ -534,7 +534,7 @@ describe('FastCompleteSheet added product method', () => {
     expect(productIn(body, 'taurus').applicationMethod).toBe('spot_treatment');
   });
 
-  test('a perimeter spray picked for one product asks for its linear feet while the How row says spot', async () => {
+  test('a perimeter spray picked for one product offers its linear feet (optional) while the How row says spot', async () => {
     const request = await openSheet();
     const editor = addProduct('Gentrol IGR');
     enterAmount(editor, 1);
@@ -543,14 +543,27 @@ describe('FastCompleteSheet added product method', () => {
 
     fireEvent.click(howChoice(editor, 'Perimeter spray'));
     expect(within(visitHowRow()).getByRole('button', { name: 'Spot treatment' }).getAttribute('aria-pressed')).toBe('true');
-    expect(screen.getByText('Enter the linear feet you sprayed.')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Complete re-service' }).disabled).toBe(true);
+    // Linear feet are optional (owner 2026-10-22): the box shows, an empty one holds nothing.
+    expect(screen.queryByText('Enter the linear feet you sprayed.')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Complete re-service' }).disabled).toBe(false);
     fireEvent.change(screen.getByLabelText('Linear ft sprayed'), { target: { value: '120' } });
 
     const body = await completeBody(request);
     expect(productIn(body, 'gentrol')).toMatchObject({ applicationMethod: 'perimeter_spray', areaValue: 120, areaUnit: 'linear_ft' });
     expect(productIn(body, 'taurus').applicationMethod).toBe('spot_treatment');
     expect('areaValue' in productIn(body, 'taurus')).toBe(false);
+  });
+
+  test('an empty Linear ft box sends a perimeter spray with no length, never 0', async () => {
+    const request = await openSheet();
+    const editor = addProduct('Gentrol IGR');
+    enterAmount(editor, 1);
+    fillVisit();
+    fireEvent.click(howChoice(editor, 'Perimeter spray'));
+    expect(screen.getByLabelText('Linear ft sprayed').value).toBe('');
+
+    const body = await completeBody(request);
+    expect(productIn(body, 'gentrol')).toMatchObject({ applicationMethod: 'perimeter_spray', areaValue: null, areaUnit: 'linear_ft' });
   });
 
   test('a bait block or granule with no catalog method goes down by its form, not the visit\'s spray', async () => {

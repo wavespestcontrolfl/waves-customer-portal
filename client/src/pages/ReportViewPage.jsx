@@ -3425,9 +3425,18 @@ export function reportAskPrompts(data = {}, serviceLine = 'pest') {
   else if ((data.applications || []).length) add('Why were these products used?');
   if (hasPressure) add('What does Pest Pressure mean?');
   if (hasInaccessible) add('What should I do about the inaccessible area?');
-  add(serviceLine === 'lawn' ? 'How is my lawn trending?' : 'What should I watch for next?');
-  add('When is my next service?');
-  return prompts.slice(0, 5);
+  // Exactly three questions on every report (owner 2026-10-22). Visit-specific
+  // questions lead; this per-line set fills any gap so each line always has 3.
+  // Each fill question gets its own answer from the report's question router
+  // (report-assistant.js): mosquito reports never use the AI answer, so their
+  // fill holds only questions the fixed rules answer as asked.
+  const FILL_BY_LINE = {
+    lawn: ['How is my lawn trending?', 'Am I watering the right amount?', 'When is my next service?'],
+    mosquito: ['What can I do to cut down mosquitoes?', 'What did you find today?', 'When is my next service?'],
+    tree_shrub: ['How are my trees and shrubs doing?', 'What should I watch for next?', 'When is my next service?'],
+  };
+  (FILL_BY_LINE[serviceLine] || ['What should I watch for next?', 'What did you find today?', 'When is my next service?']).forEach(add);
+  return prompts.slice(0, 3);
 }
 
 // Floating Ask Waves — the report's AI helper as a slim bar pinned under the
@@ -8572,10 +8581,20 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .review-request-card-top {
           margin-bottom: 16px;
         }
+        /* Desktop (owner 2026-10-22, "renders funny on desktop"): one row,
+           headline left and button right. Phones keep the center stack. */
+        @media (min-width: 761px) {
+          .review-request-card {
+            grid-template-columns: 1fr auto;
+            justify-items: start;
+          }
+          .service-report-v1 .review-request-card.report-card h3 { text-align: left; margin: 0 !important; }
+        }
         .review-request-card h3 {
           margin-bottom: 0;
         }
         .review-request-card .review-cta {
+          box-sizing: border-box;
           display: inline-flex;
           align-items: center;
           justify-content: center;
