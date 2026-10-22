@@ -14,6 +14,7 @@ const areaAddOnRows = require('../services/area-addon-visit-rows');
 const areaAddOnGovernedRate = require('../services/area-addon-governed-rate');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
+const { pestReportVoiceLive } = require('../config/feature-gates');
 const { lawnReserviceFastCompleteLive, lawnFastCompleteLive, fastCompleteVoiceFillLive } = require('../config/feature-gates');
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
@@ -27028,7 +27029,7 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     const selectedSystemPrompt = selectReportCopyPrompt(
       systemPrompt,
       groundingServiceType,
-      writerRulesOn ? { ...reportPromptContext, writerRules: true } : reportPromptContext,
+      writerRulesOn ? { ...reportPromptContext, writerRules: true, pestVoice: pestReportVoiceLive() } : reportPromptContext,
     );
     // Palm-crown rule (GATE_TS_TECH_FINDINGS_COPY; owner 2026-10-02: the
     // instruction is THE guard, no word filter). In the system prompt so it

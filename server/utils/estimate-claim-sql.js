@@ -299,6 +299,39 @@ function callDraftVerdict(md, {
   return null;
 }
 
+// The columns of a call row the call-side verdict reads.
+const CALL_VERDICT_COLUMNS = ['metadata', 'processing_token', 'processing_status', 'extraction_attempts', 'created_at', 'twilio_call_sid'];
+
+// The call-side verdict for one engine draft up to the live-linkage step,
+// shared by callSideBlockForEstimateData and its batch form so the two can
+// never disagree. Returns { reason } when the call blocks the row, else
+// { md } (the parsed call metadata the linkage step reads). Unreadable
+// metadata throws: callers fail closed.
+function callRowVerdict(callRow, data, estimateStatus) {
+  // A MISSING call row fails closed (codex P1, PR #3304 GH r10) — the
+  // same verdict staleCallLinkageReason gives it: an engine draft whose
+  // call is gone has no provenance left to validate.
+  if (!callRow) return { reason: 'call_missing' };
+  const md = typeof callRow.metadata === 'string' ? JSON.parse(callRow.metadata) : (callRow.metadata || {});
+  const verdict = callDraftVerdict(md, { estimateData: data, estimateStatus });
+  if (verdict) return { reason: verdict.reason };
+  // An IN-FLIGHT call — a held claim token OR a queued retry lane — is
+  // mid-decision: its block marker may be milliseconds (or one sweep)
+  // away, and the marker read above ran before that write. The public
+  // surfaces this guard protects must fail closed until the call
+  // settles (local audit + pre-push P0s, PR #3304): the two markers
+  // alone cover only verdicts that already persisted, and a NULL token
+  // on a retryable row is a queue, not a settlement.
+  if (callReprocessInFlight(callRow)) return { reason: 'call_reprocessing' };
+  return { md };
+}
+
+// The lead a DURABLY linked draft (lead_linkage sid / stamp) names, else
+// null: only those drafts get the live-linkage comparison.
+function durablyLinkedLeadId(data) {
+  return data?.lead_id && ['sid', 'stamp'].includes(data?.lead_linkage) ? String(data.lead_id) : null;
+}
+
 // The DURABLE call-side verdict as seen from an ESTIMATE row: when a
 // quarantine could not write its estimate-side marker, the block lives on
 // the call, and the public surfaces — which only ever read the estimate —
@@ -313,31 +346,17 @@ async function callSideBlockForEstimateData(dbc, data, { estimateStatus = null }
   const callLogId = data?.estimatorEngine?.callLogId || null;
   if (!callLogId) return null;
   try {
-    const row = await dbc('call_log').where({ id: callLogId })
-      .first('metadata', 'processing_token', 'processing_status', 'extraction_attempts', 'created_at', 'twilio_call_sid');
-    // A MISSING call row fails closed (codex P1, PR #3304 GH r10) — the
-    // same verdict staleCallLinkageReason gives it: an engine draft whose
-    // call is gone has no provenance left to validate.
-    if (!row) return 'call_missing';
-    const md = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
-    const verdict = callDraftVerdict(md, { estimateData: data, estimateStatus });
-    if (verdict) return verdict.reason;
-    // An IN-FLIGHT call — a held claim token OR a queued retry lane — is
-    // mid-decision: its block marker may be milliseconds (or one sweep)
-    // away, and the marker read above ran before that write. The public
-    // surfaces this guard protects must fail closed until the call
-    // settles (local audit + pre-push P0s, PR #3304): the two markers
-    // alone cover only verdicts that already persisted, and a NULL token
-    // on a retryable row is a queue, not a settlement.
-    if (callReprocessInFlight(row)) return 'call_reprocessing';
+    const row = await dbc('call_log').where({ id: callLogId }).first(...CALL_VERDICT_COLUMNS);
+    const { reason, md } = callRowVerdict(row, data, estimateStatus);
+    if (reason) return reason;
     // Live-linkage comparison for durably linked drafts (same P0): a
     // repoint whose estimate-side marker AND call-side marker both failed
     // to persist leaves only the linkage itself as evidence. Mirrors
     // staleCallLinkageReason's resolution order exactly — sid-owned lead
     // (created_at DESC) first, then the metadata stamp — so the two
     // guards can never disagree about the call's live owner.
-    const linkedLeadId = data?.lead_id ? String(data.lead_id) : null;
-    if (linkedLeadId && ['sid', 'stamp'].includes(data?.lead_linkage)) {
+    const linkedLeadId = durablyLinkedLeadId(data);
+    if (linkedLeadId) {
       let resolvedLeadId = null;
       if (row.twilio_call_sid) {
         const sidLead = await dbc('leads')
@@ -364,6 +383,60 @@ async function callSideBlockForEstimateData(dbc, data, { estimateStatus = null }
     // or mutate exactly the wrong-lead estimate it exists to protect.
     return 'call_verdict_unavailable';
   }
+}
+
+// Batch form of callSideBlockForEstimateData for LIST views (the admin
+// Pipeline cards decide whether the staff preview can render a row).
+// `entries` are { id, status, data } with data the parsed estimate_data.
+// One call_log read for every engine-drafted entry, then each gets the
+// per-row verdict (callRowVerdict, then the live linkage). Returns
+// Map(id -> blocking reason) for blocked entries only. Fails closed like
+// the per-row guard: unreadable metadata blocks its own entry, a failed
+// read blocks every engine-drafted entry.
+async function callSideBlocksForEstimates(dbc, entries) {
+  const blocks = new Map();
+  const rows = entries.filter((r) => r.data?.estimatorEngine?.callLogId);
+  if (!rows.length) return blocks;
+  const callLogIdOf = (r) => String(r.data.estimatorEngine.callLogId);
+  try {
+    const calls = await dbc('call_log').whereIn('id', [...new Set(rows.map(callLogIdOf))]).select('id', ...CALL_VERDICT_COLUMNS);
+    const callById = new Map(calls.map((c) => [String(c.id), c]));
+    const linked = [];
+    for (const r of rows) {
+      const call = callById.get(callLogIdOf(r));
+      let verdict;
+      try { verdict = callRowVerdict(call, r.data, r.status); } catch { verdict = { reason: 'call_verdict_unavailable' }; }
+      const linkedLeadId = durablyLinkedLeadId(r.data);
+      if (verdict.reason) blocks.set(r.id, verdict.reason);
+      else if (linkedLeadId) linked.push({ id: r.id, call, md: verdict.md, linkedLeadId });
+    }
+    for (const id of await linkageChangedIds(dbc, linked)) blocks.set(id, 'call_linkage_changed');
+  } catch {
+    for (const r of rows) blocks.set(r.id, 'call_verdict_unavailable');
+  }
+  return blocks;
+}
+
+// The live-linkage step of callSideBlockForEstimateData, batched: each
+// call's live lead in staleCallLinkageReason's order (the newest live lead
+// owning the call sid, else the metadata stamp's lead while live), with two
+// leads reads at most. Returns the ids whose live lead is not the linked one.
+async function linkageChangedIds(dbc, linked) {
+  if (!linked.length) return [];
+  const sids = [...new Set(linked.map((l) => l.call.twilio_call_sid).filter(Boolean))];
+  const leadBySid = new Map();
+  if (sids.length) {
+    const sidLeads = await dbc('leads').whereIn('twilio_call_sid', sids).whereNull('deleted_at').orderBy('created_at', 'desc').select('id', 'twilio_call_sid');
+    for (const lead of sidLeads) if (!leadBySid.has(lead.twilio_call_sid)) leadBySid.set(lead.twilio_call_sid, String(lead.id));
+  }
+  const sidLeadOf = (l) => (l.call.twilio_call_sid && leadBySid.get(l.call.twilio_call_sid)) || null;
+  const metadataLeadIdOf = (l) => (l.md?.lead_id ? String(l.md.lead_id) : null);
+  const stampIds = [...new Set(linked.filter((l) => !sidLeadOf(l) && metadataLeadIdOf(l)).map(metadataLeadIdOf))];
+  const liveStamps = new Set(stampIds.length
+    ? (await dbc('leads').whereIn('id', stampIds).whereNull('deleted_at').select('id')).map((lead) => String(lead.id))
+    : []);
+  const liveLeadOf = (l) => sidLeadOf(l) || (liveStamps.has(metadataLeadIdOf(l)) ? metadataLeadIdOf(l) : null);
+  return linked.filter((l) => liveLeadOf(l) !== l.linkedLeadId).map((l) => l.id);
 }
 
 // ---------------------------------------------------------------------------
@@ -534,6 +607,7 @@ module.exports = {
   settledCallGeneration,
   callPassStillOwned,
   callSideBlockForEstimateData,
+  callSideBlocksForEstimates,
   callDraftVerdict,
   quarantineQueueEntries,
   quarantineQueueEntry,

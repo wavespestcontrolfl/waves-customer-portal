@@ -50,6 +50,40 @@ describe('cancel_plan tool schema', () => {
   });
 });
 
+describe('cancel_plan past the 90-day refund window (GATE_PREPAY_REFUND_90_DAY)', () => {
+  const PREPAY = { termId: 't1', termEnd: '2027-05-31', disposition: 'end_now_refund', refund: null, endNowAvailable: false, endNowUnavailableReason: 'past_90_day_window' };
+
+  test('an end-now preview with end-now unavailable is a tool failure, not a confirmation card', async () => {
+    mockPreview.mockResolvedValue({ ...PREVIEW, prepay: PREPAY });
+    const result = await executeTool('cancel_plan', { customer_id: CUSTOMER, effective_date: 'now' });
+    expect(result.code).toBe('end_now_past_refund_window');
+    expect(result.error).toMatch(/more than 90 days/);
+    expect(result.error).toMatch(/end_of_coverage/);
+    expect(result.preview).toBeUndefined();
+  });
+
+  test('the end-of-coverage preview for the same term is still a normal card', async () => {
+    mockPreview.mockResolvedValue({ ...PREVIEW, effectiveDate: 'end_of_coverage', prepay: { ...PREPAY, disposition: 'end_at_term' } });
+    const result = await executeTool('cancel_plan', { customer_id: CUSTOMER, effective_date: 'end_of_coverage' });
+    expect(result.preview).toBe(true);
+    expect(result.prepay).toEqual(expect.objectContaining({ disposition: 'end_at_term', endNowAvailable: false }));
+  });
+
+  test('a refused commit (409 from the service) comes back as a tool error with its code', async () => {
+    mockCommit.mockRejectedValue(Object.assign(new Error('Ending now is not offered'), { code: 'end_now_past_refund_window' }));
+    const result = await executeTool('cancel_plan', { customer_id: CUSTOMER, effective_date: 'now', confirmed: true }, { technicianId: 'admin-1', isAdmin: true, confirmed: true });
+    expect(result).toEqual(expect.objectContaining({ code: 'end_now_past_refund_window' }));
+  });
+
+  test('scoped_covers_prepaid under the rule does not promise a refund', async () => {
+    mockPreview.mockResolvedValue({ ...PREVIEW, wholeAccount: false, scopedSupported: false, scopeError: 'scoped_covers_prepaid', prepayRefund90Day: true });
+    const result = await executeTool('cancel_plan', { customer_id: CUSTOMER, families: ['pest_control'] });
+    expect(result.code).toBe('scoped_covers_prepaid');
+    expect(result.error).toMatch(/within 90 days/);
+    expect(result.error).toMatch(/no refund/);
+  });
+});
+
 describe('cancel_plan unconfirmed', () => {
   test('returns the server preview and never commits', async () => {
     const result = await executeTool('cancel_plan', {
