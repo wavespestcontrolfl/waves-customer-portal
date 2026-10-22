@@ -54,6 +54,9 @@ function reviewTimingHintDetails({ reviewTiming, reviewCustomAt, preview, bundle
   // the legacy path substitutes its 120-minute default (codex #4140 r19 P2).
   // Customer requested stores a zero delay, so it goes at the next tick.
   if (awaitsPayment && reviewTiming === "auto") {
+    if (preview?.afterReport === true) {
+      return `Review text waits for the invoice to be paid, then goes out about ${afterReportMinutes(preview)} minutes after payment${preview.smsSendWindowEnabled ? ", inside the 8 AM–8 PM window" : ""}.`;
+    }
     return preview?.reviewSequencesEnabled
       ? "Review text waits for the invoice to be paid, then goes out at the smart send window computed from the payment."
       : `Review text waits for the invoice to be paid, then goes out about 2 hours after payment, at the next scheduler tick${preview?.smsSendWindowEnabled ? " the 8 AM–8 PM window allows" : ""}.`;
@@ -64,6 +67,11 @@ function reviewTimingHintDetails({ reviewTiming, reviewCustomAt, preview, bundle
 }
 export function timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
   if (reviewTiming === "auto") {
+    // GATE_REVIEW_ASK_AFTER_REPORT: the server names the rule; the panel
+    // words it, never a client-side approximation of either rule.
+    if (preview?.afterReport === true) {
+      return `Review text goes out separately, about ${afterReportMinutes(preview)} minutes after the report text${preview.smsSendWindowEnabled ? ", inside the 8 AM–8 PM window" : ""}.`;
+    }
     if (!preview?.at) return "Review text goes out separately at the smart send window.";
     // In cadence mode `at` is a jitter-free eligibility time: enrollment
     // adds up to ±15 min (earliestAt..latestAt) and the worker sends on its
@@ -103,6 +111,7 @@ export function timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled
   if (reviewTiming === "custom") return customReviewTimingHint(reviewCustomAt, preview);
   return "";
 }
+const afterReportMinutes = (preview) => (Number(preview?.afterReportMinutes) > 0 ? Math.round(Number(preview.afterReportMinutes)) : 10);
 const fmtReviewTime = (d) => formatETDateTime(d, { weekday: "short", hour: "numeric", minute: "2-digit" });
 // The server's MAX_REVIEW_DELAY_MINUTES (complete-scheduled-service.js).
 export const MAX_REVIEW_DELAY_MS = 30 * 24 * 60 * 60000;
@@ -344,7 +353,7 @@ export function reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, failure
       noticed: true,
       dropShown: !!shown,
       message: reviewTiming === "auto" && shown
-        ? "The automatic review time could not be re-checked. The server will pick the smart send window — submit again to continue."
+        ? `The automatic review time could not be re-checked. The server will pick the ${shown.afterReport === true ? "time after the report text" : "smart send window"} — submit again to continue.`
         : "Whether automated review texts can send could not be checked. If the scheduler is off nothing sends; the choice is still recorded on this visit. Submit again to continue.",
     };
   }

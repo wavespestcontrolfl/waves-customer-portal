@@ -122,9 +122,18 @@ router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, async (r
     // below is only for the plan the panel previews (codex #4140 r17 P2).
     const reviewCadenceGate = isEnabled('reviewSequences');
     const reviewSequencesEnabled = reviewCadenceGate && schedulerEnabled;
-    const plan = reviewSequencesEnabled
-      ? ReviewService.__private.calculateReviewSendPlan(new Date(), serviceType, { jitter: false })
-      : null;
+    // GATE_REVIEW_ASK_AFTER_REPORT (owner 2026-10-22): Automatic = about
+    // REVIEW_AFTER_REPORT_DELAY_MINUTES after the report text, every service
+    // line — the same rule enrollPostService applies, so the panel previews
+    // the decision dispatch will make. Explicit timings never reach this.
+    const afterReport = require('../config/feature-gates').reviewAskAfterReportLive();
+    const afterReportMinutes = ReviewService.REVIEW_AFTER_REPORT_DELAY_MINUTES;
+    const afterReportAt = new Date(Date.now() + afterReportMinutes * 60000);
+    const plan = afterReport
+      ? { at: afterReportAt, bucket: `after_report:+${afterReportMinutes}m`, earliestAt: afterReportAt, latestAt: afterReportAt }
+      : reviewSequencesEnabled
+        ? ReviewService.__private.calculateReviewSendPlan(new Date(), serviceType, { jitter: false })
+        : null;
     const at = plan ? plan.at : new Date(Date.now() + ReviewService.LEGACY_REVIEW_DELAY_MINUTES * 60000);
     const serviceReportV1Delivery = await serviceRecordsHaveReportTemplateColumn();
     res.json({
@@ -132,10 +141,14 @@ router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, async (r
       // Names the rule behind `at`; the panel compares buckets, not instants
       // (a relative answer moves with every request) — codex #4140 r4 P1.
       bucket: plan ? plan.bucket : `legacy:+${ReviewService.LEGACY_REVIEW_DELAY_MINUTES}m`,
+      // GATE_REVIEW_ASK_AFTER_REPORT: the panel words Automatic as "about N
+      // minutes after the report text" instead of the smart send window.
+      afterReport,
+      afterReportMinutes: afterReport ? afterReportMinutes : null,
       // The eligibility range live enrollment's jitter can land in; the
       // panel names the cadence ticks either end reaches (codex #4140 r14 P2).
-      earliestAt: plan ? plan.earliestAt.toISOString() : null,
-      latestAt: plan ? plan.latestAt.toISOString() : null,
+      earliestAt: plan && (afterReport || reviewSequencesEnabled) ? plan.earliestAt.toISOString() : null,
+      latestAt: plan && (afterReport || reviewSequencesEnabled) ? plan.latestAt.toISOString() : null,
       reviewSequencesEnabled,
       schedulerEnabled,
       // The 8 AM–8 PM hold only exists while GATE_SMS_SEND_WINDOW is on; the
@@ -153,7 +166,11 @@ router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, async (r
       // processReviewSequences runs on fixed minutes of the hour (:14/:44);
       // the panel uses them to say when a custom time actually goes out
       // (codex #4140 r5 P2).
-      cadenceTickMinutesOfHour: ReviewService.__private.REVIEW_CADENCE_TICK_MINUTES,
+      // (While GATE_REVIEW_ASK_AFTER_REPORT is on the sender also runs on
+      // every fifth minute, so the table names those too.)
+      cadenceTickMinutesOfHour: afterReport
+        ? ReviewService.__private.REVIEW_AFTER_REPORT_TICK_MINUTES
+        : ReviewService.__private.REVIEW_CADENCE_TICK_MINUTES,
       // The legacy path's worker (processScheduled, the */15 cron) has ticks
       // of its own; with cadences off the panel names those, not the
       // requested eligibility minute (codex #4140 r18 P2).

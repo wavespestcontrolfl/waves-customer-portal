@@ -50,6 +50,20 @@ const TECH_FALLBACK_SMS = "Your tech";
 // Legacy (non-cadence) post-service ask: a separate text this long after
 // completion when the operator picks no timing.
 const LEGACY_REVIEW_DELAY_MINUTES = 120;
+// GATE_REVIEW_ASK_AFTER_REPORT (owner 2026-10-22): the Automatic Day-0 ask is
+// due this many minutes after enrollment (the report text, or the payment
+// that lifts the unpaid-invoice hold), for every service line.
+const REVIEW_AFTER_REPORT_DELAY_MINUTES = 10;
+// The gate reader, wrapped so a test double of feature-gates that predates it
+// reads as off.
+function reviewAskAfterReportOn() {
+  try {
+    const gates = require("../config/feature-gates");
+    return typeof gates.reviewAskAfterReportLive === "function" && gates.reviewAskAfterReportLive() === true;
+  } catch {
+    return false;
+  }
+}
 
 // First name from the technician row when an ask carries technician_id but no
 // tech_name (override callers, legacy rows). Null when unknown.
@@ -655,6 +669,13 @@ function calculateReviewSendPlan(completedAt, serviceType, { jitter: withJitter 
 // ELIGIBLE; the text goes out at the first tick on or after it. The Reviews
 // page shows that tick, not the eligibility instant (codex #4140 r4 P2).
 const REVIEW_CADENCE_TICK_MINUTES = [14, 44];
+// GATE_REVIEW_ASK_AFTER_REPORT adds a second registration of the same job on
+// `*/5` (scheduler.js), so while the gate is on the sender also runs on every
+// fifth minute. Kept in step by review-ask-after-report.test.js.
+const REVIEW_AFTER_REPORT_TICK_MINUTES = [0, 5, 10, 14, 15, 20, 25, 30, 35, 40, 44, 45, 50, 55];
+function cadenceTickMinutes() {
+  return reviewAskAfterReportOn() ? REVIEW_AFTER_REPORT_TICK_MINUTES : REVIEW_CADENCE_TICK_MINUTES;
+}
 // The legacy (cadences-off) path: processScheduled runs on the scheduler's
 // `*/15` cron (kept in step by review-sequences.test.js), and a legacy row's
 // scheduled_for is rebuilt from a later Date.now() after the target became a
@@ -703,11 +724,12 @@ function nextCadenceTickAt(from) {
   const tick = new Date(d.getTime());
   tick.setUTCSeconds(0, 0);
   // Minutes are zone-independent (every ET offset is a whole hour).
-  const next = REVIEW_CADENCE_TICK_MINUTES.find((m) => m > minute || (m === minute && !pastTheMinute));
+  const tickMinutes = cadenceTickMinutes();
+  const next = tickMinutes.find((m) => m > minute || (m === minute && !pastTheMinute));
   if (next != null) {
     tick.setUTCMinutes(next);
   } else {
-    tick.setUTCHours(tick.getUTCHours() + 1, REVIEW_CADENCE_TICK_MINUTES[0]);
+    tick.setUTCHours(tick.getUTCHours() + 1, tickMinutes[0]);
   }
   return tick;
 }
@@ -1193,6 +1215,8 @@ const ReviewService = {
     if (triggeredBy === "auto") {
       if (delayMinutes !== undefined && delayMinutes !== null) {
         scheduledFor = new Date(Date.now() + delayMinutes * 60000);
+      } else if (reviewAskAfterReportOn()) {
+        scheduledFor = new Date(Date.now() + REVIEW_AFTER_REPORT_DELAY_MINUTES * 60000);
       } else {
         scheduledFor = calculateReviewSendPlan(new Date(), serviceType).at;
       }
@@ -1782,7 +1806,11 @@ const ReviewService = {
         customerId,
         serviceRecordId,
         triggeredBy,
-        delayMinutes: delayMinutes !== undefined && delayMinutes !== null ? delayMinutes : legacyDelayMinutes,
+        // GATE_REVIEW_ASK_AFTER_REPORT: a caller's historical default (120)
+        // gives way to the 10-minute rule; an explicit operator delay stays.
+        delayMinutes: delayMinutes !== undefined && delayMinutes !== null
+          ? delayMinutes
+          : (reviewAskAfterReportOn() ? REVIEW_AFTER_REPORT_DELAY_MINUTES : legacyDelayMinutes),
         techName,
         serviceType,
         serviceDate,
@@ -1828,12 +1856,18 @@ const ReviewService = {
       // mode (Codex P2, r2). 0 = "Now" → first cron tick.
       const explicitDelay = Number(delayMinutes);
       const explicitTiming = delayMinutes !== undefined && delayMinutes !== null && Number.isFinite(explicitDelay);
+      // GATE_REVIEW_ASK_AFTER_REPORT: Automatic = enrollment time + 10 minutes
+      // for every service line (enrollment follows the report text; a paid
+      // invoice enrolls at payment). Explicit timing above still wins.
+      const afterReport = !explicitTiming && reviewAskAfterReportOn();
       const firstTouchAt = explicitTiming
         ? new Date(Date.now() + Math.max(0, explicitDelay) * 60000)
-        : calculateReviewSendPlan(
-          completedAt ? new Date(completedAt) : new Date(),
-          svcType,
-        ).at;
+        : afterReport
+          ? new Date(Date.now() + REVIEW_AFTER_REPORT_DELAY_MINUTES * 60000)
+          : calculateReviewSendPlan(
+            completedAt ? new Date(completedAt) : new Date(),
+            svcType,
+          ).at;
       const result = await this.startReviewSequence({
         customerId,
         serviceRecordId,
@@ -1858,7 +1892,7 @@ const ReviewService = {
           plan: resolved.plan,
         }),
         decision: sequenceDecision({
-          reason: customerRequested ? "customer_requested" : explicitTiming ? "operator_timing" : "smart_window",
+          reason: customerRequested ? "customer_requested" : explicitTiming ? "operator_timing" : afterReport ? "after_report" : "smart_window",
           plannedAt: firstTouchAt,
           nextEvalAt: firstTouchAt,
         }),
@@ -8082,6 +8116,8 @@ ReviewService.__private = {
   calculateReviewSendPlan,
   nextCadenceTickAt,
   REVIEW_CADENCE_TICK_MINUTES,
+  REVIEW_AFTER_REPORT_TICK_MINUTES,
+  cadenceTickMinutes,
   LEGACY_REVIEW_TICK_MINUTES,
   sequenceDecision,
   nextTouchRunAt,
@@ -8097,6 +8133,7 @@ ReviewService.__private = {
 ReviewService.unshortenedReviewUrl = unshortenedReviewUrl;
 ReviewService.REVIEW_TOKEN_RE = REVIEW_TOKEN_RE;
 ReviewService.LEGACY_REVIEW_DELAY_MINUTES = LEGACY_REVIEW_DELAY_MINUTES;
+ReviewService.REVIEW_AFTER_REPORT_DELAY_MINUTES = REVIEW_AFTER_REPORT_DELAY_MINUTES;
 ReviewService.supersedeQueuedAsks = supersedeQueuedAsks;
 ReviewService.reserveSendableReviewSms = reserveSendableReviewSms;
 

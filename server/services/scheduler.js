@@ -7995,8 +7995,7 @@ function initScheduledJobs() {
   // preview/dev env with live creds can't text/email real customers.
   // Suppression and per-customer prefs still apply at the send site.
   // =========================================================================
-  cron.schedule('14,44 * * * *', async () => {
-    if (!isEnabled('reviewSequences')) return;
+  const runReviewSequencesTick = async () => {
     try {
       await runExclusive('review-sequences', async () => {
         const ReviewService = require('./review-request');
@@ -8008,6 +8007,23 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Review sequence processing failed: ${err.message}`);
     }
+  };
+  cron.schedule('14,44 * * * *', async () => {
+    if (!isEnabled('reviewSequences')) return;
+    await runReviewSequencesTick();
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY 5 MIN — the same review-sequences job, GATE_REVIEW_ASK_AFTER_REPORT
+  // only (owner 2026-10-22: the Day-0 ask goes about 10 minutes after the
+  // report text, so a +10 minute touch must land within ~15 minutes). A no-op
+  // while the gate (read at call time) or GATE_REVIEW_SEQUENCES is off. Same
+  // `review-sequences` lock as the :14/:44 job, so ticks never overlap.
+  // =========================================================================
+  cron.schedule('*/5 * * * *', async () => {
+    if (!isEnabled('reviewSequences')) return;
+    if (!require('../config/feature-gates').reviewAskAfterReportLive()) return;
+    await runReviewSequencesTick();
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
