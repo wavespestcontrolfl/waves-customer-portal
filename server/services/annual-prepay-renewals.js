@@ -3890,14 +3890,16 @@ function coveredTermsAsOf(conn, coverageDate = null) {
             this.whereIn('t.status', DECIDED_COVERED_STATUSES)
               .orWhere(function lapsedRenewalStillInTerm() {
                 this.where('t.status', 'cancelled').andWhere('t.renewal_decision', 'cancel');
-                // GATE_PREPAY_REFUND_90_DAY (owner R7, 2026-10-22): a term ended NOW more than 90 days after its start gets
-                // no refund, so no refund ever revokes its coverage - the cancel itself ends it. A refunded end-now term
-                // keeps today's path (the refund revokes it). Gate off: unchanged.
+                // GATE_PREPAY_REFUND_90_DAY (owner R7, 2026-10-22): past day 90 of its term an ENDED-NOW term is owed no
+                // refund, so no refund ever revokes its coverage - the date does. Read against the coverage date (today, ET,
+                // for a date-less caller), never a stored decision date: a renewal declined on day 60 and ended now on day 100
+                // keeps its day-60 renewal_decision_at (pre-push P1). Every visit of an ended-now term was already pulled.
+                // Inside the window the refund path is unchanged. Gate off: unchanged.
                 const { prepayRefund90DayLive } = require('../config/feature-gates');
                 if (typeof prepayRefund90DayLive === 'function' && prepayRefund90DayLive()) {
                   this.andWhereRaw(
-                    "not (t.cancel_disposition is not distinct from 'end_now_refund' and t.renewal_decision_at is not null"
-                    + " and (t.renewal_decision_at at time zone 'America/New_York')::date > t.term_start + 90)",
+                    "not (t.cancel_disposition is not distinct from 'end_now_refund' and ?::date > t.term_start + 90)",
+                    [coverageDate || require('../utils/datetime-et').etDateString()],
                   );
                 }
               });
