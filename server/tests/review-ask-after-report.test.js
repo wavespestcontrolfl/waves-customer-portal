@@ -76,7 +76,9 @@ describe('GET /admin/reviews/send-time-preview with GATE_REVIEW_ASK_AFTER_REPORT
     expect(lawn.earliestAt).toBe(lawn.at);
     expect(lawn.latestAt).toBe(lawn.at);
     // The five-minute ticks are named so the panel's tick rounding matches the cron.
-    expect(lawn.cadenceTickMinutesOfHour).toEqual(expect.arrayContaining([0, 5, 10, 14, 44]));
+    // explicit choices keep :14/:44; the fast table is named separately
+    expect(lawn.cadenceTickMinutesOfHour).toEqual([14, 44]);
+    expect(lawn.afterReportTickMinutesOfHour).toEqual(expect.arrayContaining([0, 5, 10, 14, 44]));
   });
 
   test('gate on with cadences off: the legacy path ignores the gate (120 minutes, no after-report preview)', async () => {

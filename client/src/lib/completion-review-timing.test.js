@@ -64,7 +64,7 @@ describe('the Automatic hint while the ask goes out after the report text', () =
   const afterReport = {
     schedulerEnabled: true, reviewSequencesEnabled: true, afterReport: true, afterReportMinutes: 10,
     at: '2026-10-20T15:10:00.000Z', earliestAt: '2026-10-20T15:10:00.000Z', latestAt: '2026-10-20T15:10:00.000Z',
-    bucket: 'after_report:+10m', smsSendWindowEnabled: true, cadenceTickMinutesOfHour: [0, 5, 10, 14, 15, 20, 25, 30, 35, 40, 44, 45, 50, 55],
+    bucket: 'after_report:+10m', smsSendWindowEnabled: true, cadenceTickMinutesOfHour: [14, 44], afterReportTickMinutesOfHour: [0, 5, 10, 14, 15, 20, 25, 30, 35, 40, 44, 45, 50, 55],
   };
 
   test('names the 10 minutes after the report text and the send window, not the smart window', () => {

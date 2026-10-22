@@ -167,11 +167,11 @@ router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, async (r
       // processReviewSequences runs on fixed minutes of the hour (:14/:44);
       // the panel uses them to say when a custom time actually goes out
       // (codex #4140 r5 P2).
-      // (While GATE_REVIEW_ASK_AFTER_REPORT is on the sender also runs on
-      // every fifth minute, so the table names those too.)
-      cadenceTickMinutesOfHour: afterReport
-        ? ReviewService.__private.REVIEW_AFTER_REPORT_TICK_MINUTES
-        : ReviewService.__private.REVIEW_CADENCE_TICK_MINUTES,
+      // Explicit choices (custom, Tomorrow 8 AM) always run on these; the
+      // GATE_REVIEW_ASK_AFTER_REPORT */5 tick takes only the Automatic Day-0
+      // after-report rows, named separately.
+      cadenceTickMinutesOfHour: ReviewService.__private.REVIEW_CADENCE_TICK_MINUTES,
+      afterReportTickMinutesOfHour: afterReport ? ReviewService.__private.REVIEW_AFTER_REPORT_TICK_MINUTES : null,
       // The legacy path's worker (processScheduled, the */15 cron) has ticks
       // of its own; with cadences off the panel names those, not the
       // requested eligibility minute (codex #4140 r18 P2).
