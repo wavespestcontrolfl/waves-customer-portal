@@ -1063,8 +1063,12 @@ export function TermiteNoticeSticker({ findings, technicianName, projectDateLabe
         </div>
         <div style={{ fontSize: 16, fontWeight: 600, textAlign: 'right' }}>
           <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: 'inherit', textDecoration: 'none', whiteSpace: 'nowrap' }}>{WAVES_PHONE_DISPLAY}</a>
-          <br />
-          <a href="https://www.wavespestcontrol.com/register" target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none', whiteSpace: 'nowrap' }}>wavespestcontrol.com/register</a>
+          {!noWarranty && (
+            <>
+              <br />
+              <a href="https://www.wavespestcontrol.com/register" target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none', whiteSpace: 'nowrap' }}>wavespestcontrol.com/register</a>
+            </>
+          )}
         </div>
         {/* Form-ID stamp, same treatment as the certificate's WV-002. */}
         <div style={{ position: 'absolute', right: 10, bottom: 4, fontSize: FS.body, opacity: 0.8 }}>WV-001</div>
@@ -1240,7 +1244,6 @@ function certificateFields(f, { technicianName, projectDateLabel, detailsOnly })
     ]),
     ['Applicator', applicatorLine],
     ['Warranty / retreatment bond', warrantyLine],
-    ...(finalExteriorLine(f) ? [['Final exterior treatment', finalExteriorLine(f)]] : []),
   ];
   return { fields, applications, multiApplication };
 }
@@ -1340,7 +1343,7 @@ function CertificateWarrantyFooter() {
   );
 }
 
-function CertificateSignature({ f, technicianName, projectDateLabel }) {
+function CertificateSignature({ f, technicianName, projectDateLabel, detailsOnly }) {
   return (
     <div style={{
       margin: '16px 24px 0',
@@ -1379,7 +1382,7 @@ function CertificateSignature({ f, technicianName, projectDateLabel }) {
         ) : null}
         {/* The final exterior visit comes later, often by another
             applicator: this signature never vouches for it. */}
-        {finalExteriorLine(f) ? (
+        {detailsOnly && finalExteriorLine(f) ? (
           <>
             <br />
             <span style={{ color: ESTIMATE_BODY, fontSize: 14 }}>
@@ -1503,7 +1506,7 @@ export function CertificateOfCompliance({ findings, customerName, technicianName
           name + FDACS ID + treatment date together constitute an electronic
           signature accepted by Florida building departments. */}
       {f.applicator_attestation && (f.applicator_name || technicianName) && (
-        <CertificateSignature f={f} technicianName={technicianName} projectDateLabel={projectDateLabel} />
+        <CertificateSignature f={f} technicianName={technicianName} projectDateLabel={projectDateLabel} detailsOnly={detailsOnly} />
       )}
 
       {/* The sticker above already carries the warranty footer. */}

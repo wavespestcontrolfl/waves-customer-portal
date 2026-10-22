@@ -237,11 +237,18 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
     expect(sticker).toHaveTextContent('Activate your termite warranty');
   });
 
-  it('gate off: a recorded final exterior visit still prints on the certificate', async () => {
-    const { findByText } = renderProjectReport(payload('pre_treatment_termite_certificate', {
-      findings: { ...findings, final_exterior_date: '2026-09-14', final_exterior_product: 'Termidor SC' },
+  it('gate off: the certificate stays today\'s document even with final exterior values stored', async () => {
+    const { findAllByText, queryByText } = renderProjectReport(payload('pre_treatment_termite_certificate', {
+      findings: {
+        ...findings,
+        applicator_attestation: 'I am the licensed Florida applicator who performed the treatment described above.',
+        final_exterior_date: '2026-09-14',
+        final_exterior_product: 'Termidor SC',
+      },
     }));
-    expect(await findByText('09/14/2026 · Termidor SC')).toBeInTheDocument();
+    await findAllByText(/Pre-Construction Termite Protection/i);
+    expect(queryByText(/Final exterior treatment/i)).not.toBeInTheDocument();
+    expect(queryByText(/covers the initial treatment only/)).not.toBeInTheDocument();
   });
 
   it('gate on: "No warranty" drops the contract clause and the warranty call to action', async () => {
@@ -252,6 +259,7 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
     const sticker = await findByTestId('termite-notice-sticker');
     expect(sticker).not.toHaveTextContent('retreatment contract');
     expect(sticker).not.toHaveTextContent('Activate your termite warranty');
+    expect(sticker).not.toHaveTextContent('wavespestcontrol.com/register');
   });
 
   it('gate on: a later exterior visit gets its own record line and the signature is scoped to the initial treatment', async () => {

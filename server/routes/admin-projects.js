@@ -125,24 +125,27 @@ const LEGAL_DOC_DATE_TYPES = new Set(['wdo_inspection', 'pre_treatment_termite_c
 // screen at egress for rows written before this guard.
 const FINAL_EXTERIOR_TEXT_KEYS = ['final_exterior_product', 'final_exterior_active_ingredient', 'final_exterior_applicator_name'];
 // The final exterior date is a completed treatment on a legal document:
-// blank, or a real YYYY-MM-DD no later than today (ET), like project_date.
-function finalExteriorDateProblem(value) {
+// blank, or a real YYYY-MM-DD no later than today (ET), like project_date,
+// and never before the initial treatment (same day allowed).
+function finalExteriorDateProblem(value, initialDate) {
   const raw = String(value ?? '').trim();
   if (!raw) return false;
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
   if (!match) return true;
   const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
   if (date.toISOString().slice(0, 10) !== raw) return true;
-  return raw > etDateString();
+  if (raw > etDateString()) return true;
+  const initial = normalizeDateOnly(initialDate);
+  return Boolean(initial) && raw < initial;
 }
 
 // 422 body for a final-exterior field the certificate can't carry, or null.
-function finalExteriorRejection(projectType, rawFindings) {
+function finalExteriorRejection(projectType, rawFindings, projectDate) {
   if (projectType !== 'pre_treatment_termite_certificate') return null;
   const findings = normalizeFindings(rawFindings);
-  if (finalExteriorDateProblem(findings.final_exterior_date)) {
+  if (finalExteriorDateProblem(findings.final_exterior_date, findings.treatment_date || projectDate)) {
     return {
-      error: 'The final exterior treatment date must be a real date, no later than today — enter it after the visit is done.',
+      error: 'The final exterior treatment date must be a real date between the initial treatment and today — enter it after the visit is done.',
       code: 'final_exterior_date_invalid', field: 'final_exterior_date',
     };
   }
@@ -1687,7 +1690,7 @@ router.post('/', async (req, res, next) => {
 
     if (!customer_id) return res.status(400).json({ error: 'customer_id required' });
     if (!isValidProjectType(project_type)) return res.status(400).json({ error: 'Invalid project_type' });
-    const createFinalExteriorRejection = finalExteriorRejection(project_type, findings);
+    const createFinalExteriorRejection = finalExteriorRejection(project_type, findings, project_date);
     if (createFinalExteriorRejection) return res.status(422).json(createFinalExteriorRejection);
     // Types cut over to the typed service-report completion flow no longer
     // create project records — the appointment completion is the artifact.
@@ -2269,7 +2272,7 @@ router.put('/:id', async (req, res, next) => {
     for (const f of allowed) if (req.body[f] !== undefined) updates[f] = req.body[f];
     if (updates.project_date !== undefined) updates.project_date = normalizeDateOnly(updates.project_date);
     const updateFinalExteriorRejection = updates.findings !== undefined
-      ? finalExteriorRejection(project.project_type, updates.findings)
+      ? finalExteriorRejection(project.project_type, updates.findings, updates.project_date ?? project.project_date)
       : null;
     if (updateFinalExteriorRejection) return res.status(422).json(updateFinalExteriorRejection);
     // Mirror of the create-path clamp: a dated legal filing can't carry a

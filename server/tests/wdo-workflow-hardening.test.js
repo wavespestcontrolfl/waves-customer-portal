@@ -617,6 +617,7 @@ describe('pre-treat final exterior fields: customer copy screen (GATE_PRETREAT_S
     ['a future date', () => new Date(Date.now() + 30 * 24 * 3600e3).toISOString().slice(0, 10)],
     ['an impossible date', () => '2026-02-30'],
     ['a non-date', () => 'next week'],
+    ['a date before the initial treatment', () => '2026-06-09'],
   ])('PUT refuses %s as the final exterior date (422 final_exterior_date_invalid)', async (_label, value) => {
     const projects = chain({ first: jest.fn().mockResolvedValue(certificate()) });
     mockTables({ projects });
