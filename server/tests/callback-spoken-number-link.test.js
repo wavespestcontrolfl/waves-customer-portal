@@ -6,6 +6,8 @@
 //
 // Fixtures are fictitious: 555-01xx numbers, synthetic names and ids.
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../utils/triage-locks', () => ({ lockTriageCall: jest.fn(async () => {}), syncCallReviewStatus: jest.fn(async () => {}) }));
+jest.mock('../utils/known-caller-phone', () => ({ findKnownCallerCustomer: jest.fn(async () => null) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/twilio-numbers', () => ({
   isInternalNumber: jest.fn(() => false),
@@ -16,7 +18,8 @@ jest.mock('../config/twilio-numbers', () => ({
 
 const db = require('../models/db');
 const CallRecordingProcessor = require('../services/call-recording-processor');
-const { findCustomerViaCallbackSpokenNumber, fileCallbackSpokenNumberCard } = CallRecordingProcessor._test;
+const { findCustomerViaCallbackSpokenNumber } = CallRecordingProcessor._test;
+const familyLink = require('../services/call-family-name-link');
 
 const DIALED = '+19415550199';
 const SPOKEN = '+19415558642';
@@ -205,80 +208,116 @@ describe('findCustomerViaCallbackSpokenNumber', () => {
   });
 });
 
-// The pass keeps the call customer-less and files one suggest-only card (Codex #6419 r2): the
-// voicemail number is typed out by whoever left the message, so it proves nothing about the person
-// who answered the callback.
-describe('fileCallbackSpokenNumberCard', () => {
-  function captureInsert() {
+// Codex #6419 r3: the voicemail number's owner is fed to the EXISTING family-account card
+// (family_account_candidates) as the callback_spoken_number basis, so the card keeps that card's whole
+// lifecycle (refresh and retire on reprocess, admin-only, Resolve, review-status sync, evidence).
+describe('callback_spoken_number basis of the family-account card', () => {
+  function cardTrx({ customers = [], voicemailRow = voicemail() } = {}) {
     const inserted = [];
-    const chain = {
-      insert: (row) => { inserted.push(row); return chain; },
-      onConflict: () => chain,
-      ignore: () => chain,
-      catch: () => Promise.resolve(),
-    };
-    const conn = Object.assign(jest.fn(() => chain), { raw: (sql) => sql });
-    return { conn, inserted };
+    const trx = jest.fn((table) => {
+      const builder = {
+        where: () => builder,
+        whereNot: () => builder,
+        whereNull: () => builder,
+        whereIn: () => builder,
+        whereRaw: () => builder,
+        orderBy: () => builder,
+        limit: () => builder,
+        forUpdate: () => builder,
+        modify: () => builder,
+        insert: (row) => { inserted.push(row); return builder; },
+        onConflict: () => builder,
+        merge: () => builder,
+        update: () => Promise.resolve(0),
+        first: () => Promise.resolve(table === 'call_log' ? voicemailRow : null),
+        then: (resolve, reject) => Promise.resolve(table === 'customers' ? customers : []).then(resolve, reject),
+      };
+      return builder;
+    });
+    trx.raw = (sql) => sql;
+    const conn = { transaction: async (fn) => fn(trx) };
+    return { conn, trx, inserted };
   }
+  const args = (conn, over = {}) => ({
+    call: callbackCall({ id: 'cb-7' }), extracted: extractedJordan, v2CanonicalExtraction: null, statedAddress: null, phone: DIALED, isOutbound: true, conn, ...over,
+  });
 
-  test('files one blocking customer-field card that names the candidate, both numbers and the extracted name', async () => {
-    const { conn, inserted } = captureInsert();
-    await fileCallbackSpokenNumberCard({
-      call: callbackCall({ id: 'cb-9' }), extracted: extractedJordan, candidate: customer(), conn,
-    });
-    expect(conn).toHaveBeenCalledWith('triage_items');
+  test('files ONE advisory family-account card that names the account, the number said and the number dialed', async () => {
+    const { conn, inserted } = cardTrx({ customers: [customer()] });
+    const out = await familyLink.fileFamilyAccountCard(args(conn));
+    expect(out).toMatchObject({ basis: 'callback_spoken_number' });
     expect(inserted).toHaveLength(1);
-    expect(inserted[0]).toMatchObject({
-      call_log_id: 'cb-9', reason_code: 'callback_spoken_number_link', category: 'customer_field_conflict', severity: 'blocking', status: 'open',
+    expect(inserted[0]).toMatchObject({ call_log_id: 'cb-7', reason_code: 'family_account_candidates', severity: 'advisory', category: 'customer_field_conflict' });
+    const payload = JSON.parse(inserted[0].payload);
+    expect(payload).toMatchObject({
+      match_basis: 'callback_spoken_number',
+      caller_name: 'Jordan Rivers',
+      caller_phone: null,
+      caller_callback_phone: DIALED,
+      matched_contact_phones: [SPOKEN],
+      customer_ids: ['cust-1'],
     });
-    expect(JSON.parse(inserted[0].payload)).toMatchObject({
-      flag: 'callback_spoken_number_link',
-      link_candidate: { id: 'cust-1', name: 'Jordan Rivers' },
-      spoken_number: SPOKEN,
-      dialed_number: DIALED,
-      extracted_name: 'Jordan Rivers',
-    });
+    expect(payload.holder_candidates).toEqual([expect.objectContaining({ id: 'cust-1', name: 'Jordan Rivers', matched_phone: SPOKEN })]);
+    expect(payload.reason).toBe(familyLink.OWN_ACCOUNT_REASONS.callback_spoken_number);
+  });
+
+  test('gate off: no suggestion and no card', async () => {
+    delete process.env.GATE_CALLBACK_SPOKEN_NUMBER_LINK;
+    const { conn, inserted } = cardTrx({ customers: [customer()] });
+    expect(await familyLink.fileFamilyAccountCard(args(conn))).toBeNull();
+    expect(inserted).toHaveLength(0);
+  });
+
+  test('an ordinary inbound call (not an admin callback) never takes the new basis', async () => {
+    const { conn, inserted } = cardTrx({ customers: [customer()] });
+    const out = await familyLink.fileFamilyAccountCard(args(conn, { call: callbackCall({ direction: 'inbound', source: 'twilio-voice' }), isOutbound: false }));
+    expect(out).toBeNull();
+    expect(inserted).toHaveLength(0);
+  });
+
+  test('two accounts with the first name on the number: no suggestion', async () => {
+    const { conn, inserted } = cardTrx({ customers: [customer(), customer({ id: 'cust-2', last_name: 'Rivers-Hale' })] });
+    expect(await familyLink.fileFamilyAccountCard(args(conn))).toBeNull();
+    expect(inserted).toHaveLength(0);
+  });
+
+  test('an operator link override on the call: no suggestion', async () => {
+    const { conn } = cardTrx({ customers: [customer()] });
+    const call = callbackCall({ metadata: { relatedCallId: PARENT_ID, customer_link_override: { customer_id: null } } });
+    expect(await familyLink.matchCallbackSpokenNumberAccount({ call, extracted: extractedJordan, conn })).toBeNull();
   });
 });
 
-// The Step 3 branch cannot run without a database, so pin its shape: the suggestion never becomes
-// the call's customer, never reaches a backfill, and the pass does not mint a customer around it.
+// processRecording cannot run end to end in a test: pin the wiring. The suggestion never becomes the
+// call's customer, never reaches a backfill, and the pass mints no customer around it.
 describe('Step 3 keeps a spoken-number match suggest-only', () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
-  const start = src.indexOf('} else if (spokenNumberCandidate) {');
+  const start = src.indexOf('} else if (spokenNumberSuggested) {');
   const end = src.indexOf('} else if ((extracted.first_name || firstNameAdvisoryCreate)', start);
   const branch = src.slice(start, end);
 
-  test('the branch exists, files the card and sits before customer creation', () => {
+  test('the branch sits before customer creation and writes nothing', () => {
     expect(start).toBeGreaterThan(0);
     expect(end).toBeGreaterThan(start);
-    expect(branch).toContain('fileCallbackSpokenNumberCard');
-  });
-
-  test('no link, phone-match mark, backfill or customer write from the suggestion', () => {
     expect(branch).not.toMatch(/customerId\s*=/);
     expect(branch).not.toMatch(/phoneMatchedThisPass/);
     expect(branch).not.toMatch(/backfillLinkedCustomerFromExtraction/);
-    expect(branch).not.toMatch(/db\('customers'\)/);
-    // The only assignment of the candidate is from the gated helper.
-    expect(src.match(/spokenNumberCandidate = /g)).toHaveLength(2);
-    expect(src).not.toMatch(/existing = await findCustomerViaCallbackSpokenNumber/);
+    expect(branch).not.toMatch(/db\('(customers|triage_items)'\)/);
   });
 
-  test('a deliberate customer-less result is not a customer_creation_failed', () => {
-    expect(src).toMatch(/const customerExpected = [^\n]*&& !spokenNumberCandidate\);/);
+  test('the flag comes only from the family-account card suggestion', () => {
+    expect(src).toContain("const spokenNumberSuggested = familySuggestion?.basis === 'callback_spoken_number';");
+    expect(src).toMatch(/familySuggestion = await require\('\.\/call-family-name-link'\)\.fileFamilyAccountCard\(/);
   });
 
-  test('the lead path treats the suggestion as an unclaimed-only phone', () => {
-    expect(src).toContain('unclaimedOnly: !!(sharedPhoneAmbiguity.candidates || spokenNumberCandidate)');
+  test('a deliberate customer-less result is not a customer_creation_failed, and the lead path stays unclaimed-only', () => {
+    expect(src).toMatch(/const customerExpected = [^\n]*&& !spokenNumberSuggested\);/);
+    expect(src).toContain('unclaimedOnly: !!(sharedPhoneAmbiguity.candidates || spokenNumberSuggested)');
   });
-});
 
-describe('triage route keeps the suggestion out of call verdicts', () => {
-  const route = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-triage.js'), 'utf8');
-
-  test('a verdict on the card is refused with an instruction, and a sibling verdict does not sweep it', () => {
-    expect(route).toMatch(/NOT_A_VERDICT_MESSAGES = \{[\s\S]*callback_spoken_number_link:/);
-    expect(route).toMatch(/\.whereNotIn\('reason_code', \[[\s\S]*'callback_spoken_number_link'[\s\S]*\]\)/);
+  test('no bespoke card type is left behind', () => {
+    const routes = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-triage.js'), 'utf8');
+    const gates = require('fs').readFileSync(require('path').join(__dirname, '../services/call-routing-gates.js'), 'utf8');
+    for (const text of [src, routes, gates]) expect(text).not.toContain('callback_spoken_number_link');
   });
 });

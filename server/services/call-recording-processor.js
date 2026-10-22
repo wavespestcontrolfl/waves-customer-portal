@@ -4956,8 +4956,9 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
 // This looks the voicemail's spoken number up as a SECOND chance, only when the
 // normal lookup found no one: exactly one live customer has that number as their
 // PRIMARY phone and a first name that agrees with the callback's. Returns that
-// customer or null. It is a SUGGESTION: the caller passes it to
-// fileCallbackSpokenNumberCard and never links, backfills or texts from it (the
+// customer or null. It is a SUGGESTION: call-family-name-link files it as the
+// callback_spoken_number basis of the family-account card and nothing links,
+// backfills or texts from it (the
 // number was said by whoever left the voicemail, so it proves nothing about the
 // person who answered). Read-only; gate off: null, no query.
 async function findCustomerViaCallbackSpokenNumber(call = {}, extracted = {}, opts = {}) {
@@ -4996,33 +4997,6 @@ async function findCustomerViaCallbackSpokenNumber(call = {}, extracted = {}, op
     && normalizeNamePart(c.first_name)
     && sameSpokenFirstName(extractedFirst, normalizeNamePart(c.first_name)));
   return named.length === 1 ? named[0] : null;
-}
-
-// The suggest-only staff card for GATE_CALLBACK_SPOKEN_NUMBER_LINK: names the customer whose
-// primary phone the voicemail's spoken number is, the number and the dialed one. Links nothing,
-// writes nothing to the customer; staff confirm and relink the call (customer_link_override).
-// One open card per call (the partial unique index); a failed insert is a warn line, never a
-// failed pass.
-async function fileCallbackSpokenNumberCard({ call, extracted = {}, candidate, onFileAddress = null, extraction, conn = db }) {
-  return conn('triage_items')
-    .insert(buildTriageItem({
-      callLogId: call.id,
-      flag: 'callback_spoken_number_link',
-      onFileAddress,
-      extraction,
-      extraPayload: {
-        link_candidate: {
-          id: String(candidate.id),
-          name: [candidate.first_name, candidate.last_name].filter(Boolean).join(' ') || null,
-        },
-        spoken_number: candidate.phone || null,
-        dialed_number: call.to_phone || null,
-        extracted_name: [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null,
-      },
-    }))
-    .onConflict(conn.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-    .ignore()
-    .catch((triageErr) => logger.warn(`[call-proc] spoken-number triage insert failed for ${maskSid(call.twilio_call_sid)}: ${triageErr.code || triageErr.name || 'db_error'}`));
 }
 
 async function registerScheduleSideEffects({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType, closeReminderWindows = false, callbackNumberHoldActive = false, disclaimedPhone = null, callLogId = null }) {
@@ -14201,16 +14175,20 @@ const CallRecordingProcessor = {
     // A family member who named the account holder by full name: ONE advisory card listing the live
     // accounts with that name (suggest-only; the office links the call). Reads the state BEFORE this
     // pass creates a customer for the caller, writes nothing else.
+    // The callback_spoken_number basis (GATE_CALLBACK_SPOKEN_NUMBER_LINK) rides the same card: an office
+    // callback's voicemail named a number that is a customer's primary phone. The pass reads the
+    // returned suggestion only to NOT mint a duplicate customer around it.
+    let familySuggestion = null;
     if (!customerLinkOverride) {
-      await require('./call-family-name-link').fileFamilyAccountCard({
+      familySuggestion = await require('./call-family-name-link').fileFamilyAccountCard({
         call, procToken, extracted, v2CanonicalExtraction, statedAddress: v2StatedServiceAddressRaw, phone, isOutbound: isOutboundCall(call),
       });
     }
     const sharedPhoneAmbiguity = {};
-    // GATE_CALLBACK_SPOKEN_NUMBER_LINK: the customer an office callback's voicemail number points at.
-    // A SUGGESTION only (the number was typed out by a stranger on a voicemail, not proven by the
-    // line): the call stays customer-less, like the shared-phone case, and a staff card carries it.
-    let spokenNumberCandidate = null;
+    // True when the family-account card above suggested the owner of an office callback's voicemail
+    // number (suggest-only: that number was said by whoever left the voicemail, so nothing is linked).
+    // The call stays customer-less like the shared-phone case; the card carries the account.
+    const spokenNumberSuggested = familySuggestion?.basis === 'callback_spoken_number';
     let phoneMatchedThisPass = false;
     if (!customerId && phone && !explicitUnlink) {
       // Try to find an existing customer by the external contact phone.
@@ -14232,17 +14210,6 @@ const CallRecordingProcessor = {
         // duplicate customer (codex round-10 P2).
         avDecisive: ['validated_accept', 'corrected'].includes(effectiveAddressValidation?.status),
       });
-      // GATE_CALLBACK_SPOKEN_NUMBER_LINK: an office callback dialed the ANI, but the
-      // voicemail's spoken callback number may already be a customer's primary phone.
-      // Runs only when the dialed number found no one and was not an ambiguous share;
-      // gate off, findCustomerViaCallbackSpokenNumber returns null without a query.
-      if (!existing && !sharedPhoneAmbiguity.candidates) {
-        spokenNumberCandidate = await findCustomerViaCallbackSpokenNumber(call, extracted, { customerLinkOverride }).catch((e) => {
-          // Name and code only: a query error message can carry the bound phone and names.
-          logger.warn(`[call-proc] Callback spoken-number lookup failed for ${maskSid(callSid)}: ${e?.code || e?.name || 'error'}`);
-          return null;
-        });
-      }
       if (existing) {
         customerId = existing.id;
         phoneMatchedThisPass = true;
@@ -14273,15 +14240,12 @@ const CallRecordingProcessor = {
           .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
           .ignore()
           .catch((triageErr) => logger.warn(`[call-proc] shared-phone triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
-      } else if (spokenNumberCandidate) {
-        // The voicemail's spoken number belongs to a customer, but nothing on THIS call proves
-        // the person on the line owns it, so nothing is linked, written or sent from it
-        // (suggest-only, like family_account_candidates). Minting a second customer here is the
-        // duplicate this lane exists to stop. The call stays customer-less, the workable-lead
-        // path below still captures the prospect, and a blocking card carries the suggested
-        // account; staff confirm and use the call's relink action (customer_link_override).
-        logger.info(`[call-proc] ${maskSid(callSid)}: callback voicemail's spoken number matches customer ${spokenNumberCandidate.id} — suggest-only card, no link, no new customer`);
-        await fileCallbackSpokenNumberCard({ call, extracted, candidate: spokenNumberCandidate, onFileAddress, extraction: v2CanonicalExtraction || undefined });
+      } else if (spokenNumberSuggested) {
+        // Minting a second customer here is the duplicate this gate exists to stop. The call stays
+        // customer-less, the workable-lead path below still captures the prospect, and the
+        // family-account card (filed above, advisory) names the account for staff to confirm and
+        // relink (customer_link_override).
+        logger.info(`[call-proc] ${maskSid(callSid)}: callback voicemail's spoken number matches an account — suggest-only card, no link, no new customer`);
       } else if ((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !v2NonCustomerCallNature) {
         // Create new customer. NEVER from a voicemail — a one-sided message
         // transcription is too lossy to mint a customer record from (the Josh
@@ -16200,8 +16164,8 @@ const CallRecordingProcessor = {
     // An explicit operator unlink is an INTENTIONAL customer-less result,
     // never a creation failure to file a card for on every reprocess.
     // …and a spoken-number suggestion (GATE_CALLBACK_SPOKEN_NUMBER_LINK) is the same: the pass
-    // deliberately created nobody and filed its own callback_spoken_number_link card.
-    const customerExpected = !!((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature && !explicitUnlink && !spokenNumberCandidate);
+    // deliberately created nobody and the family-account card names the account.
+    const customerExpected = !!((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature && !explicitUnlink && !spokenNumberSuggested);
     const customerLanded = !!customerId;
     // Downgraded below if a customer-less recovery lead was expected but its
     // insert failed — that lead is the only durable record for this call, and
@@ -16443,7 +16407,7 @@ const CallRecordingProcessor = {
         const sameCallEligibility = {
           customerId,
           workableUnnamedLead,
-          unclaimedOnly: !!(sharedPhoneAmbiguity.candidates || spokenNumberCandidate),
+          unclaimedOnly: !!(sharedPhoneAmbiguity.candidates || spokenNumberSuggested),
         };
         const { lead: existingLead, matchedVia: existingLeadVia, phoneNameConflictLeadId } = await findReusableCallLead(db, {
           phone,
@@ -25390,7 +25354,6 @@ CallRecordingProcessor._test = {
   extractedNameMatchesCustomer,
   findCustomerForCallContact,
   findCustomerViaCallbackSpokenNumber,
-  fileCallbackSpokenNumberCard,
   firstNameAdvisoryAddressOk,
   normalizeCallExtraction,
   shouldCreateCallLeadForCustomer,
@@ -25552,6 +25515,8 @@ CallRecordingProcessor.recoveryMarkerPayload = recoveryMarkerPayload;
 // not from_phone). It lived only under `_test` — every real caller outside
 // this file got `undefined`.
 CallRecordingProcessor.resolveCallContactPhone = resolveCallContactPhone;
+// Read by call-family-name-link (lazy require) for the callback_spoken_number basis.
+CallRecordingProcessor.findCustomerViaCallbackSpokenNumber = findCustomerViaCallbackSpokenNumber;
 
 // Production contract for call-booking-link-text.js's own outbound-return
 // prior-contact check (codex r7 P1, pre-push): that lane's own

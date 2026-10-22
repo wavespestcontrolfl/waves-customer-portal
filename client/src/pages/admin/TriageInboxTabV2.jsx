@@ -72,7 +72,6 @@ const REASON_LABELS = {
   secondary_contact_captured: "Second contact named — confirm",
   missing_first_name: "First name missing — get it",
   family_account_candidates: "Caller may match an account — confirm, then link",
-  callback_spoken_number_link: "Voicemail number matches an account — confirm, then link",
   name_spelling_differs: "Caller spelled their name — check it",
   property_role_confirm: "Property roles",
   reschedule_link_promise: "Promised reschedule link",
@@ -175,11 +174,6 @@ export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = 
       value: p.candidates.map((c) => c.name || `Customer ${String(c.id).slice(0, 8)}`).join(" · ")
         + (Number(p.share_count) > p.candidates.length ? ` (+${Number(p.share_count) - p.candidates.length} more)` : ""),
     },
-    // callback_spoken_number_link (suggest-only): the number the caller said in the voicemail belongs to this
-    // account, but the callback dialed another number, so nothing was linked. Confirm, then relink the call.
-    p.link_candidate && { label: "Voicemail number belongs to", value: p.link_candidate.name || `Customer ${String(p.link_candidate.id).slice(0, 8)}` },
-    p.link_candidate && p.spoken_number && { label: "Number said in voicemail", value: p.spoken_number },
-    p.link_candidate && p.dialed_number && { label: "Callback dialed", value: p.dialed_number },
     ...textNumberRows(p, livePhone),
     // caller_phone_not_on_file: the mismatching caller number IS the card —
     // the header prefers the linked customer's on-file phone, so without
@@ -445,7 +439,7 @@ const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence, name_spe
 const NO_VERDICT_REASONS = new Set([
   "property_role_confirm", "reschedule_link_promise", "attached_booking_followup_unbooked",
   "missing_first_name", "family_account_candidates", "on_file_house_number_conflict",
-  "auto_booking_skipped_after_approval", "text_number_differs", "name_spelling_differs", "callback_spoken_number_link",
+  "auto_booking_skipped_after_approval", "text_number_differs", "name_spelling_differs",
 ]);
 // …of which these are an owed capture on the customer record or the office's link: Resolve is admin-only.
 const ADMIN_RESOLVE_REASONS = new Set(["missing_first_name", "family_account_candidates", "name_spelling_differs"]);

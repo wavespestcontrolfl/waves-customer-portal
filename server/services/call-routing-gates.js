@@ -1054,9 +1054,6 @@ function buildTriageItem({
     // to confirm and link the call to (call-family-name-link.js). Suggest-only.
     family_account_candidates: 'customer_field_conflict',
     shared_phone_ambiguous: 'customer_field_conflict',
-    // An office callback's voicemail named a number that is a customer's primary phone
-    // (GATE_CALLBACK_SPOKEN_NUMBER_LINK): suggest-only, staff confirm and relink the call.
-    callback_spoken_number_link: 'customer_field_conflict',
     // The call linked to an existing customer via something WEAKER than the
     // phone (pre-set call.customer_id, name/context) and the caller's number
     // is not on any of that customer's phone slots — the office confirms the

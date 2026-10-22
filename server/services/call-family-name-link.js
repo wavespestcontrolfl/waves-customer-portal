@@ -45,6 +45,12 @@
  * else. More than MAX_OWN_CANDIDATES accounts suggests nothing. This basis is tried before the
  * caller's-own-account bases: a spoken number is stronger evidence than a first name.
  *
+ * An office callback's voicemail number (GATE_CALLBACK_SPOKEN_NUMBER_LINK, dark; basis callback_spoken_number). The
+ * admin "Call back" dials the voicemail's caller ID, but the voicemail said another number to call, and exactly
+ * one live account has that number as its PRIMARY phone under the same first name (the rules are in
+ * call-recording-processor findCustomerViaCallbackSpokenNumber). Same suggest-only card; the pass also mints no
+ * customer around it. Anyone can name any number in a voicemail, so nothing is linked.
+ *
  * No card: the caller is not a family member, no full name was named, a voicemail
  * (a one-sided transcription never names an account), an outbound call, a call that
  * is already linked or was unlinked on purpose, a number some live account already
@@ -147,6 +153,7 @@ const OWN_ACCOUNT_REASONS = {
   caller_full_name: 'An account carries this caller\'s exact name under another phone number. Confirm it is the same person, then link the call. A customer record may exist under the caller: merge it on the Duplicates page.',
   caller_first_name_recent_visit: 'An account with this caller\'s first name has a visit on the calendar close to this call. Confirm it is the same household, then link the call.',
   contact_phone_on_account: 'The caller gave a phone number for another person, and an account carries that number. Confirm the caller is calling for this account, then link the call. A lead or customer record may exist under the caller: merge it on the Duplicates page.',
+  callback_spoken_number: 'The office called this voicemail back on the number it came from, but the caller had said another number to call. An account has that number as its main phone, under the same first name. Anyone can say any number in a voicemail, so nothing was linked or sent. Confirm it is the same person, then link the call.',
   caller_first_name_city_recent: 'The caller gave a first name only. An account created in the last two weeks has that first name in the same city. Confirm it is the same person, then link the call. A customer record may exist under the caller: merge it on the Duplicates page.',
 };
 
@@ -327,8 +334,34 @@ async function matchContactPhoneAccounts({ call, extracted, v2CanonicalExtractio
 
 // What the card suggests for this call: the family rule first, then a number the caller gave for
 // another person, else the caller's own account.
+/**
+ * An office callback's voicemail number (GATE_CALLBACK_SPOKEN_NUMBER_LINK): the OUTBOUND callback dialed
+ * the voicemail's caller ID, but the voicemail said another number to call, and exactly one live account
+ * has that number as its PRIMARY phone under the same first name. The rules live in
+ * findCustomerViaCallbackSpokenNumber (admin callback of an inbound voicemail from the dialed number,
+ * gate on, no operator link, number not a near miss of the dialed one). Read-only.
+ */
+async function matchCallbackSpokenNumberAccount({ call, extracted, statedAddress, conn = db }) {
+  let override = null;
+  try {
+    const meta = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
+    override = meta && meta.customer_link_override;
+  } catch { override = null; }
+  const customerLinkOverride = override && typeof override === 'object' && 'customer_id' in override ? override : null;
+  const found = await require('./call-recording-processor')
+    .findCustomerViaCallbackSpokenNumber(call, extracted, { db: conn, customerLinkOverride });
+  if (!found) return null;
+  return {
+    basis: 'callback_spoken_number',
+    more_accounts: false,
+    contact_phones: [found.phone],
+    candidates: [{ ...ownCandidate(found), address_matches: statedAddressCorroborates(statedAddress, found), matched_phone: found.phone }],
+  };
+}
+
 async function matchSuggestedAccounts(args) {
-  return (await matchFamilyAccounts(args)) || (await matchContactPhoneAccounts(args)) || matchCallerOwnAccounts(args);
+  return (await matchFamilyAccounts(args)) || (await matchContactPhoneAccounts(args))
+    || (await matchCallbackSpokenNumberAccount(args)) || matchCallerOwnAccounts(args);
 }
 
 /**
@@ -375,7 +408,8 @@ function cardPayload({ suggestion, extracted, call, phone }) {
     // Set only for contact_phone_on_account: the spoken number(s) an account carries.
     matched_contact_phones: suggestion.contact_phones || null,
     caller_name: [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null,
-    caller_phone: call.from_phone || null,
+    // On an office callback the call's own line is ours, not the caller's.
+    caller_phone: suggestion.basis === 'callback_spoken_number' ? null : call.from_phone || null,
     caller_callback_phone: phone && phone !== call.from_phone ? phone : null,
     holder_candidates: suggestion.candidates,
     more_accounts: suggestion.more_accounts,
@@ -467,6 +501,7 @@ module.exports = {
   matchFamilyAccounts,
   matchCallerOwnAccounts,
   matchContactPhoneAccounts,
+  matchCallbackSpokenNumberAccount,
   contactPhones,
   RECENT_DAYS,
   MAX_OWN_CANDIDATES,

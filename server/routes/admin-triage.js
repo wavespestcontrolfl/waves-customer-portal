@@ -40,7 +40,6 @@ const NOT_A_VERDICT_MESSAGES = {
   reschedule_link_promise: 'This card is a parked reschedule-link promise, not a call verdict — use Resolve or Dismiss instead.',
   attached_booking_followup_unbooked: 'This card is an owed follow-up visit, not a call verdict — book the follow-up and use Resolve instead.',
   missing_first_name: 'This card is an owed first-name capture, not a call verdict — enter the first name on the customer record, then use Resolve or Dismiss.',
-  callback_spoken_number_link: 'This card suggests the account whose number the caller said in the voicemail, not a call verdict — confirm the account, relink the call, then use Resolve or Dismiss.',
   family_account_candidates: 'This card suggests accounts for a family caller, not a call verdict — confirm the account, link the call, then use Resolve or Dismiss.',
   text_number_differs: 'This card is a no-text line to fix on the customer, not a call verdict — update the phones, then use Resolve (or Line can get texts).',
   name_spelling_differs: 'This card is a name-spelling check, not a call verdict — fix the name on the record if the spelling is theirs, then use Resolve or Dismiss.',
@@ -2471,8 +2470,6 @@ router.post('/:id/verdict', async (req, res) => {
           'email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise', 'attached_booking_followup_unbooked', 'missing_first_name',
           // …and a family-account suggestion, which only a link (or its own Resolve / Dismiss) settles.
           'family_account_candidates',
-          // …and a voicemail-number account suggestion, which only a relink (or its own Resolve / Dismiss) settles.
-          'callback_spoken_number_link',
           // …and a no-text line card (text_number_differs): settled by its own Resolve/Dismiss only.
           'text_number_differs',
           // …and a name-spelling check, settled by its own Resolve / Dismiss.
