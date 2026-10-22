@@ -5,8 +5,10 @@
 // dark lanes exist), so the page showed an empty list and every cron badge read
 // "Off". This builds the same list for an authenticated, admin-only route.
 //
-// State comes from the `gates` map (what the running code computed at boot,
-// including non-production defaults). The Railway variable name and the
+// Rows come from the `gates` map (state as the running code computed it at
+// boot, including non-production defaults), plus every catalogue gate no map
+// row names: those are read only at call time, so their state is the variable
+// as set now (see callTimeEnabled). The Railway variable name and the
 // plain-English line come from feature-gates.js itself. An entry's own
 // variable is the GATE_ token in its value expression that spells its key
 // (callIncidents → GATE_CALL_INCIDENTS); with no such token, a lone token is
@@ -81,6 +83,26 @@ function pickOwn(key, vars) {
   return vars.length ? vars[vars.length - 1] : null;
 }
 
+// State of a catalogue gate that has no gates-map entry. These are read only
+// at call time by their own reader, so the variable as set now is what the
+// next call sees. Mirrors the catalogue's reader kinds: strict readers accept
+// only 'true', loose ones gateEnvValue's 1/true/on; a mode gate is on when set
+// to anything but an off value. Only a boolean (or null) leaves this function.
+// A catalogue gate of kind 'unverified' has no reader the catalogue can see
+// (it is read in another file), so its state is unknown, not off.
+function callTimeEnabled(doc) {
+  if (doc.kind === 'unverified') return null;
+  const raw = String(process.env[doc.name] || '').trim();
+  if (doc.kind === 'mode') return raw !== '' && !['false', 'off', '0'].includes(raw.toLowerCase());
+  if (doc.reader === 'loose') return featureGates.gateEnvValue(doc.name);
+  return raw === 'true';
+}
+
+// Names the catalogue's token scan picks up that are not variables: the tail
+// of the INVERTED_GATE_RE constant and the doc placeholder `GATE_X=value`.
+// Built from parts so the gate-index scan does not list them as gates.
+const NOT_GATES = new Set(['RE', 'X'].map((suffix) => `GATE_${suffix}`));
+
 function listGates() {
   const envNames = gateEnvNames();
   let catalog = new Map();
@@ -89,21 +111,38 @@ function listGates() {
   } catch {
     catalog = new Map();
   }
-  return Object.entries(featureGates.gates)
-    .map(([key, value]) => {
-      const vars = envNames.get(key) || [];
-      const envName = pickOwn(key, vars);
-      const doc = envName ? catalog.get(envName) : null;
-      return {
-        key,
-        envName,
-        requires: vars.filter((v) => v !== envName),
-        enabled: value === true,
-        kind: doc?.kind === 'mode' ? 'mode' : 'boolean',
-        inverted: doc?.inverted === true,
-        description: doc?.description || null,
-      };
-    })
+  const semantics = (doc) => ({
+    kind: doc?.kind === 'mode' ? 'mode' : 'boolean',
+    inverted: doc?.inverted === true,
+    description: doc?.description || null,
+  });
+  // Rows from the gates map: state as the running code computed it at boot.
+  const mapRows = Object.entries(featureGates.gates).map(([key, value]) => {
+    const vars = envNames.get(key) || [];
+    const envName = pickOwn(key, vars);
+    return {
+      key,
+      envName,
+      requires: vars.filter((v) => v !== envName),
+      enabled: value === true,
+      readAt: 'boot',
+      ...semantics(envName ? catalog.get(envName) : null),
+    };
+  });
+  // Catalogue gates no map row names (as its own variable or a prerequisite):
+  // call-time-only gates such as GATE_ADMIN_MFA.
+  const named = new Set(mapRows.flatMap((r) => [r.envName, ...r.requires]));
+  const callTimeRows = [...catalog.values()]
+    .filter((doc) => !named.has(doc.name) && !NOT_GATES.has(doc.name))
+    .map((doc) => ({
+      key: doc.name,
+      envName: doc.name,
+      requires: [],
+      enabled: callTimeEnabled(doc),
+      readAt: 'call',
+      ...semantics(doc),
+    }));
+  return [...mapRows, ...callTimeRows]
     .sort((a, b) => (a.envName || a.key).localeCompare(b.envName || b.key));
 }
 

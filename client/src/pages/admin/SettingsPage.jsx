@@ -416,10 +416,18 @@ function GateListError({ error, onRetry }) {
   );
 }
 
-function gateNote(g) {
-  if (g.inverted) return "Setting this to true turns the feature off.";
-  if (g.kind === "mode") return "May take a mode value (shadow, auto or a date). Check docs/gates-and-env.md before you set it.";
-  return null;
+function gateNotes(g) {
+  return [
+    g.inverted && "Setting this to true turns the feature off.",
+    g.kind === "mode" && "May take a mode value (shadow, auto or a date). Check docs/gates-and-env.md before you set it.",
+    g.readAt === "call" && g.enabled !== null && "Read when the feature runs; shown as the variable is set now.",
+    g.enabled === null && "Read in another file; the state is not known here. See docs/gate-index.md.",
+  ].filter(Boolean);
+}
+
+function gateStateLabel(g) {
+  if (g.enabled === null) return "Unknown";
+  return g.enabled ? "Enabled" : "Disabled";
 }
 
 function FeatureGatesTab() {
@@ -430,7 +438,7 @@ function FeatureGatesTab() {
       <CardHeader>
         <CardTitle>Feature gates</CardTitle>
         <p className="mt-1 text-ui-body text-ink-secondary">
-          Live state of every gate, as the server read it at its last start.
+          Live state of every gate registered in the gate catalogue.
           {gates && ` ${onCount} of ${gates.length} on.`}
         </p>
       </CardHeader>
@@ -444,12 +452,12 @@ function FeatureGatesTab() {
                 <div className="min-w-0 flex-1">
                   <div className="break-all font-medium text-zinc-900 u-nums">{g.envName || g.key}</div>
                   {g.description && <div className="mt-1 text-ui-caption text-ink-secondary">{g.description}</div>}
-                  {gateNote(g) && <div className="mt-1 text-ui-caption text-ink-secondary">{gateNote(g)}</div>}
+                  {gateNotes(g).map((note) => <div key={note} className="mt-1 text-ui-caption text-ink-secondary">{note}</div>)}
                   {g.requires?.length > 0 && (
                     <div className="mt-1 break-all text-ui-caption text-ink-secondary u-nums">Also needs {g.requires.join(", ")}</div>
                   )}
                 </div>
-                <Badge tone={g.enabled ? "strong" : "neutral"} dot>{g.enabled ? "Enabled" : "Disabled"}</Badge>
+                <Badge tone={g.enabled ? "strong" : "neutral"} dot>{gateStateLabel(g)}</Badge>
               </div>
             ))}
           </div>

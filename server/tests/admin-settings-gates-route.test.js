@@ -50,8 +50,9 @@ describe('GET /api/admin/settings/gates', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('cache-control')).toBe('no-store');
     const body = await res.json();
-    expect(body.gates).toHaveLength(Object.keys(featureGates.gates).length);
-    for (const row of body.gates) {
+    const bootRows = body.gates.filter((row) => row.readAt === 'boot');
+    expect(bootRows.map((row) => row.key).sort()).toEqual(Object.keys(featureGates.gates).sort());
+    for (const row of bootRows) {
       expect(row.enabled).toBe(featureGates.gates[row.key] === true);
     }
   });
@@ -105,6 +106,32 @@ describe('listGates variable names', () => {
     // The comment above appPropertyTexts names GATE_APP_PROPERTY_SCOPE; the
     // entry must still resolve to the variable in its own value expression.
     expect(byKey.get('appPropertyTexts')).toMatchObject({ envName: 'GATE_APP_PROPERTY_TEXTS', requires: [] });
+  });
+
+  test('a call-time-only gate with no map entry is listed from the catalogue', () => {
+    const row = () => listGates().find((g) => g.envName === 'GATE_ADMIN_MFA');
+    const saved = process.env.GATE_ADMIN_MFA;
+    try {
+      delete process.env.GATE_ADMIN_MFA;
+      expect(row()).toMatchObject({ readAt: 'call', enabled: false, kind: 'boolean' });
+      process.env.GATE_ADMIN_MFA = 'true';
+      expect(row().enabled).toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env.GATE_ADMIN_MFA;
+      else process.env.GATE_ADMIN_MFA = saved;
+    }
+    // Every catalogue gate appears once, as a row or a map row's prerequisite,
+    // except the two scan artifacts that are not variables.
+    const rows = listGates();
+    const named = new Set(rows.flatMap((g) => [g.envName, ...g.requires]));
+    for (const name of featureGates.knownGateCatalog().keys()) {
+      expect(named.has(name)).toBe(!['GATE_RE', 'GATE_X'].includes(name));
+    }
+    // A gate the catalogue cannot see the reader for is unknown, never "off".
+    const unverified = [...featureGates.knownGateCatalog().values()].find((d) => d.kind === 'unverified' && !rows.some((g) => g.requires.includes(d.name)) && !['GATE_RE', 'GATE_X'].includes(d.name));
+    expect(rows.find((g) => g.envName === unverified.name).enabled).toBeNull();
+    const callNames = rows.filter((g) => g.readAt === 'call').map((g) => g.envName);
+    expect(new Set(callNames).size).toBe(callNames.length);
   });
 
   test('every entry resolves to a variable', () => {
