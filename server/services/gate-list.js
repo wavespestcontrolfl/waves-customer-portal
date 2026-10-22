@@ -188,11 +188,17 @@ function listGates() {
   const mapRows = Object.entries(featureGates.gates).map(([key, value]) => {
     const vars = envNames.get(key) || [];
     const envName = pickOwn(key, vars);
+    // Many map entries are a startup-log mirror of a compound live reader
+    // (visitPrepPestRead mirrors only its own variable; visitPrepPestReadLive()
+    // also needs GATE_VISIT_PREP_PHOTOS and GATE_VISIT_FACTS). Add the own
+    // reader's prerequisites and judge them as call-time rows are judged.
+    const mapRequires = vars.filter((v) => v !== envName);
+    const readerRequires = envName ? callTimePrerequisites(envName).filter((v) => !mapRequires.includes(v)) : [];
     return {
       key,
       envName,
-      requires: vars.filter((v) => v !== envName),
-      enabled: value === true,
+      requires: [...mapRequires, ...readerRequires],
+      enabled: withPrerequisites(value === true, readerRequires, catalog),
       readAt: 'boot',
       ...semantics(envName ? catalog.get(envName) : null),
     };
@@ -201,9 +207,10 @@ function listGates() {
   // (OPS_DIGEST_INGEST_TOKEN): offering it beside "turns on with true" would
   // invite a guessable secret. Retired gates are not offered as controls.
   }).filter((row) => /^GATE_/.test(row.envName || '') && !retired(row.envName));
-  // Catalogue gates no map row names (as its own variable or a prerequisite):
-  // call-time-only gates such as GATE_ADMIN_MFA.
-  const named = new Set(mapRows.flatMap((r) => [r.envName, ...r.requires]));
+  // Catalogue gates that are no map row's own variable get a row of their
+  // own: call-time-only gates such as GATE_ADMIN_MFA, including those that
+  // also appear as another row's prerequisite.
+  const named = new Set(mapRows.map((r) => r.envName));
   const callTimeRows = [...catalog.values()]
     .filter((doc) => !named.has(doc.name) && !NOT_GATES.has(doc.name))
     .map((doc) => {

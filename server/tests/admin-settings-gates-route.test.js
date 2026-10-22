@@ -57,7 +57,8 @@ describe('GET /api/admin/settings/gates', () => {
       .toEqual(Object.keys(featureGates.gates)
         .filter((key) => !['selfBookDayCap', 'opsDigestIngest', 'dunningCustomerScheduleAllowlist'].includes(key)).sort());
     for (const row of bootRows) {
-      expect(row.enabled).toBe(featureGates.gates[row.key] === true);
+      // Off in the map is off; on is on unless a reader prerequisite is not.
+      if (featureGates.gates[row.key] !== true) expect(row.enabled).toBe(false);
     }
   });
 });
@@ -136,15 +137,15 @@ describe('listGates variable names', () => {
       if (saved === undefined) delete process.env.GATE_ADMIN_MFA;
       else process.env.GATE_ADMIN_MFA = saved;
     }
-    // Every catalogue gate appears once, as a row or a map row's prerequisite,
-    // except the two scan artifacts that are not variables.
+    // Every catalogue gate has its own row, except the two scan artifacts
+    // that are not variables.
     const rows = listGates();
-    const named = new Set(rows.flatMap((g) => [g.envName, ...g.requires]));
+    const named = new Set(rows.map((g) => g.envName));
     for (const name of featureGates.knownGateCatalog().keys()) {
       expect(named.has(name)).toBe(!['GATE_RE', 'GATE_X'].includes(name));
     }
     // A gate the catalogue cannot see the reader for is unknown, never "off".
-    const unverified = [...featureGates.knownGateCatalog().values()].find((d) => d.kind === 'unverified' && !rows.some((g) => g.requires.includes(d.name)) && !['GATE_RE', 'GATE_X'].includes(d.name));
+    const unverified = [...featureGates.knownGateCatalog().values()].find((d) => d.kind === 'unverified' && !['GATE_RE', 'GATE_X'].includes(d.name));
     expect(rows.find((g) => g.envName === unverified.name).enabled).toBeNull();
     const callNames = rows.filter((g) => g.readAt === 'call').map((g) => g.envName);
     expect(new Set(callNames).size).toBe(callNames.length);
@@ -196,6 +197,13 @@ describe('listGates variable names', () => {
     expect(listGates().find((g) => g.envName === 'GATE_VISIT_FACTS').requires).toEqual([]);
     // The gate's own reader still supplies real prerequisites.
     expect(listGates().find((g) => g.envName === 'GATE_IB_VOID_INVOICE').requires).toEqual(['GATE_IB_PLATFORM']);
+  });
+
+  test('a map row mirroring a compound live reader carries its prerequisites', () => {
+    const row = listGates().find((g) => g.key === 'visitPrepPestRead');
+    expect(row.requires).toEqual(expect.arrayContaining(['GATE_VISIT_PREP_PHOTOS', 'GATE_VISIT_FACTS']));
+    // Own variable on at boot, prerequisites not on: not reported Enabled.
+    if (featureGates.gates.visitPrepPestRead === true) expect(row.enabled).not.toBe(true);
   });
 
   test('a gate the catalogue retired is not listed', () => {
