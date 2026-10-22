@@ -30,6 +30,7 @@ jest.mock('../services/review-ask-drafter', () => ({
   // The real verifiers: the send path re-checks a reused older draft with them.
   verifyDraftBody: jest.requireActual('../services/review-ask-drafter').verifyDraftBody,
   verifyEmailIntro: jest.requireActual('../services/review-ask-drafter').verifyEmailIntro,
+  isFixedDay0Line: jest.requireActual('../services/review-ask-drafter').isFixedDay0Line,
   draftAskBody: (...a) => mockDraftAskBody(...a),
   draftEmailIntro: (...a) => mockDraftEmailIntro(...a),
   draftTechVoice: (...a) => mockDraftTechVoice(...a),
@@ -198,6 +199,7 @@ beforeEach(() => {
   mockRenderSmsTemplate.mockReset().mockImplementation((...args) => jest.requireActual('../services/sms-template-renderer').renderSmsTemplate(...args));
   mockGates.reviewSequences = false;
   mockGates.reviewDirectLink = false;
+  mockGates.reviewAskFixedDay0 = false;
   mockGates.reviewAskAfterReport = false;
   mockDraftAskBody.mockReset().mockResolvedValue(null);
   mockDraftEmailIntro.mockReset().mockResolvedValue(null);
@@ -5625,6 +5627,54 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect((await ReviewService.processReviewSequences()).sent).toBe(1);
     expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
     expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('thanks again for Tuesday');
+  });
+
+  test('#6423 r1: under GATE_REVIEW_ASK_FIXED_DAY0 a same-day AI Day-0 draft saved before the flip is not reused', async () => {
+    mockGates.reviewAskTechVoice = true;
+    mockGates.reviewAskFixedDay0 = true;
+    const aiDraft = "Haley, I noted a moderate level of cockroach activity. A Google review would really help: {review_url}";
+    const fixed = "Hi Stan, it's Adam from Waves. Thanks for having us out today. A Google review would really help: {review_url}";
+    mockDraftTechVoice.mockResolvedValue(fixed);
+    const id = 'fx0-1';
+    const mock = makeMock({
+      customers: [{ id, first_name: 'Stan', last_name: 'P', phone: '+19410000061', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: `sr-${id}`, customer_id: id, technician_id: null, service_type: 'pest control', status: 'completed', service_date: new Date() }],
+      review_sequences: [{
+        id: `seq-${id}`, customer_id: id, status: 'active', current_step: 0, touches_sent: 0, service_type: 'pest control', tech_name: 'Adam', service_record_id: `sr-${id}`,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'day0_ask' }, { day: 4, channel: 'sms', templateKey: 'soft_reminder' }]),
+        started_at: new Date(), next_run_at: new Date(Date.now() - 60000),
+      }],
+      // A deferred same-day attempt persisted an AI draft before the gate flipped.
+      review_requests: [{ id: `rr-${id}`, sequence_id: `seq-${id}`, sequence_step: 0, customer_id: id, channel: 'sms', custom_body: aiDraft, status: 'deferred', created_at: new Date(), template_key: 'day0_ask_tech_voice', service_type: 'pest control', technician_id: null, service_record_id: `sr-${id}`, service_date: new Date() }],
+    });
+    db.mockImplementation(mock);
+    expect((await ReviewService.processReviewSequences()).sent).toBe(1);
+    expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+    const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
+    expect(sentBody).toContain("it's Adam from Waves. Thanks for having us out today.");
+    expect(sentBody).not.toContain('cockroach');
+  });
+
+  test('#6423 r2: after GATE_REVIEW_ASK_FIXED_DAY0 is rolled back, a saved fixed Day-0 line is not reused (the writer runs)', async () => {
+    mockGates.reviewAskTechVoice = true;
+    const fixed = "Hi Stan, it's Adam from Waves. Thanks for having us out today. A Google review would really help: {review_url}";
+    const drafted = "Hi Stan, it's Adam. Thanks for waiting on me before work. A Google review would really help: {review_url}";
+    mockDraftTechVoice.mockResolvedValue(drafted);
+    const id = 'fx0-2';
+    const mock = makeMock({
+      customers: [{ id, first_name: 'Stan', last_name: 'P', phone: '+19410000061', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: `sr-${id}`, customer_id: id, technician_id: null, service_type: 'pest control', status: 'completed', service_date: new Date() }],
+      review_sequences: [{
+        id: `seq-${id}`, customer_id: id, status: 'active', current_step: 0, touches_sent: 0, service_type: 'pest control', tech_name: 'Adam', service_record_id: `sr-${id}`,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'day0_ask' }, { day: 4, channel: 'sms', templateKey: 'soft_reminder' }]),
+        started_at: new Date(), next_run_at: new Date(Date.now() - 60000),
+      }],
+      review_requests: [{ id: `rr-${id}`, sequence_id: `seq-${id}`, sequence_step: 0, customer_id: id, channel: 'sms', custom_body: fixed, status: 'deferred', created_at: new Date(), template_key: 'day0_ask_tech_voice', service_type: 'pest control', technician_id: null, service_record_id: `sr-${id}`, service_date: new Date() }],
+    });
+    db.mockImplementation(mock);
+    expect((await ReviewService.processReviewSequences()).sent).toBe(1);
+    expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+    expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('waiting on me before work');
   });
 
   test('Fable P2: with tech voice OFF, a deferred tech-voice draft is never reused (it may say "today")', async () => {

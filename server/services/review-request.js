@@ -4908,7 +4908,10 @@ const ReviewService = {
       // Retry reuse: a deferred/transiently-failed step re-enters here with no
       // customBody — reuse the draft already persisted for this exact step so
       // one touch can never send two different drafts (Codex P2, r1).
-      if (recipientIsAccountHolder) {
+      // GATE_REVIEW_ASK_FIXED_DAY0: step 0 is always the fixed line, so an AI
+      // draft saved before the gate turned on is never reused (#6423 r1).
+      const fixedDay0 = techVoice && !(Number(sequenceStep) > 0) && require("../config/feature-gates").isEnabled("reviewAskFixedDay0");
+      if (recipientIsAccountHolder && !fixedDay0) {
         try {
           const prior = await db("review_requests")
             // Channel-scoped (codex #3235 r1 P2): a step that flipped
@@ -4940,7 +4943,10 @@ const ReviewService = {
             && (prior.service_type || null) === (serviceType || null)
             && (prior.service_record_id || null) === (serviceRecordId || null)
             && (prior.service_date ? etCalendarDayOf(prior.service_date) : null) === (serviceDate ? etCalendarDayOf(serviceDate) : null));
-          const reusable = prior?.custom_body && sameDay && sameAttribution && (priorTechVoice
+          // #6423 r2: a fixed Day-0 line saved while GATE_REVIEW_ASK_FIXED_DAY0
+          // was on is not reused after the gate is rolled back (the writer runs).
+          const priorFixedDay0 = require("./review-ask-drafter").isFixedDay0Line(prior?.custom_body);
+          const reusable = prior?.custom_body && !priorFixedDay0 && sameDay && sameAttribution && (priorTechVoice
             || require("./review-ask-drafter").verifyDraftBody(prior.custom_body,
               { firstName: firstNameFrom(contact.name) || customer.first_name || "" }) === null);
           if (reusable) persistedBody = prior.custom_body;

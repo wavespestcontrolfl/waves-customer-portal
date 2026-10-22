@@ -1160,6 +1160,16 @@ const gates = {
   // the fixed Day-0 ask. Customer-facing generated text → opt-in in EVERY env.
   reviewAskTechVoice: process.env.GATE_REVIEW_ASK_TECH_VOICE === 'true',
 
+  // Same-day review ask = one fixed line (owner 2026-10-22, "fixed line for
+  // all"): while GATE_REVIEW_ASK_TECH_VOICE is on, the SMS day0 / day_after
+  // touch sends "Hi <first>, it's <tech> from Waves. Thanks for having us out
+  // today. A Google review would really help: {review_url}" with no model
+  // call (the writer recited report findings and booking talk). Follow-up
+  // texts keep the tech-voice writer; emails stay fixed as before. Strict opt-in; off =
+  // today's writer. Customer-facing text, so opt-in in EVERY env.
+  // Rollback: unset.
+  reviewAskFixedDay0: process.env.GATE_REVIEW_ASK_FIXED_DAY0 === 'true',
+
   // Review ask texts/emails link STRAIGHT to the tracked /api/rate/:token/go
   // redirect (which 302s to the Google review form) instead of the /rate/<token>
   // thank-you page. Off = every ask body resolves {review_url} to /rate/<token>.
