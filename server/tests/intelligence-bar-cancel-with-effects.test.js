@@ -293,6 +293,17 @@ describe('cancel_appointment confirm WITH effects replays the Dispatch cancel', 
     expect(result.warning).not.toMatch(/send it by hand/);
   });
 
+  test('a step after the committed cancel failed: still a success receipt, with a check-the-records warning', async () => {
+    mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, postCommitFailure: 'connection terminated', moneySkipped: [{ kind: 'invoice', id: 'inv-1', reason: 'not_voided_changed_since_card' }] } });
+    const result = await executeTool('cancel_appointment', input(), ADMIN);
+    expect(result.success).toBe(true);
+    expect(result.error).toBeUndefined();
+    expect(result.ran_dispatch_cancel).toBe(true);
+    expect(result.warning).toMatch(/visit is cancelled, but a step after the cancel did not finish \(connection terminated\)/);
+    expect(result.warning).toMatch(/customer text may or may not have gone out/);
+    expect(result.warning).toMatch(/1 billing effect\(s\) changed since the card/);
+  });
+
   test('delivery uncertain (the provider may have accepted it) says check the history, never "send it by hand"', async () => {
     mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, notificationSent: false, notificationUncertain: true, notificationError: 'The text may have gone out (audit insert failed). Check the customer\'s message history before sending it again.' } });
     const result = await executeTool('cancel_appointment', input(), ADMIN);

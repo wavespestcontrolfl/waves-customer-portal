@@ -622,7 +622,11 @@ async function transitionJobStatus({
     if (String(toStatus || '') === 'cancelled') {
       try {
         const { isEnabled } = require('../config/feature-gates');
-        if (isEnabled('cancelNoticeHook')) {
+        // The card-approved text's 'pending_approved' marker is minted whatever GATE_CANCEL_NOTICE_HOOK says: the approved
+        // send (handleCancellation with approvedNotice) does not depend on the hook, and in a rolling deploy a pod with the
+        // hook off could otherwise commit a markerless approved cancel that a newer pod's late claim would text from the
+        // live template. Everything else this gate controls (hook-owned claims, the outbox) stays gated.
+        if (isEnabled('cancelNoticeHook') || cancelNoticeApproved) {
           await t.transaction(async (sp) => {
             // Series routes pass ONE shared token for every target so the
             // sweep sees a single group even if the process dies before

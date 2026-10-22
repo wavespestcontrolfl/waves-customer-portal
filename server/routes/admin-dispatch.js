@@ -3173,6 +3173,9 @@ async function serviceStatusHandler(req, res, next) {
       }
       throw err;
     }
+    // The status change is committed from here on. Only the Intelligence Bar replay (cancelServiceFromBar) reads this:
+    // a failure after this point must not make it record the action as failed (see there).
+    req.ibCommitted = true;
 
     // Office confirmation of a pending outbound-review booking from THIS route
     // must run the same side effects as the admin-schedule confirm path (arm
@@ -3337,6 +3340,7 @@ async function serviceStatusHandler(req, res, next) {
         // committed but the requested text didn't go out (missing reminder
         // row/phone, consent block, provider failure).
         cancelNoticeOutcome = notifyCustomer !== false ? {} : null;
+        req.ibCancelNoticeOutcome = cancelNoticeOutcome;
         await AppointmentReminders.handleCancellation(svc.id, {
           sendNotification: notifyCustomer !== false,
           ...(cancelNoticeOutcome ? { outcome: cancelNoticeOutcome } : {}),
@@ -3525,7 +3529,32 @@ function cancelServiceFromBar({ serviceId, notifyCustomer, notes, actor, beforeC
       ibApprovedMoney: approvedMoney || null,
       ibMoneyReport: approvedMoney ? { skipped: [] } : null,
     };
-    Promise.resolve(serviceStatusHandler(req, res, reject)).catch(reject);
+    // A failure AFTER the cancel committed (the activity log insert, a settlement step...) must not reject: the visit is
+    // cancelled, the text and the money settlement may already have run, and a rejection would make the caller record
+    // the action as failed and drop the receipt with its warnings. Resolve what is known, flagged postCommitFailure.
+    const fail = (err) => {
+      if (!req.ibCommitted) { reject(err); return; }
+      logger.error(`[admin-dispatch] bar cancel of ${serviceId} committed, then a later step failed: ${err && err.message}`);
+      const notice = req.ibCancelNoticeOutcome;
+      resolve({
+        status: 200,
+        json: {
+          success: true,
+          postCommitFailure: (err && err.message) || 'a step after the cancel failed',
+          ...(notice && notice.notificationSent !== undefined
+            ? {
+                notificationSent: notice.notificationSent,
+                notificationError: notice.notificationError || null,
+                ...(notice.notificationPartial ? { notificationPartial: true } : {}),
+                ...(notice.notificationUncertain ? { notificationUncertain: true } : {}),
+              }
+            : {}),
+          ...(req.ibLinkedChildReport ? { linkedVisitsSkipped: req.ibLinkedChildReport.skipped } : {}),
+          ...(req.ibMoneyReport ? { moneySkipped: req.ibMoneyReport.skipped } : {}),
+        },
+      });
+    };
+    Promise.resolve(serviceStatusHandler(req, res, fail)).catch(fail);
   });
 }
 

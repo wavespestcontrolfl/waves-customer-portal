@@ -74,6 +74,7 @@ jest.mock('../models/db', () => {
       },
       insert(r) {
         state.writes.push({ table, op: 'insert', r });
+        if (state.failInsert === table) return { returning: async () => { throw new Error('connection terminated'); }, then: (res, rej) => Promise.reject(new Error('connection terminated')).then(res, rej) };
         return { returning: async () => [{ id: 'x' }], then: (res, rej) => Promise.resolve([1]).then(res, rej) };
       },
       then(resolve, reject) {
@@ -110,7 +111,7 @@ beforeEach(() => {
   db.__state.rows = [
     { id: 'svc-bar-1', technician_id: 'tech-2', customer_id: 'cust-bar', status: 'confirmed', scheduled_date: future(3), service_type: 'Pest Control', is_recurring: true, recurring_pattern: 'quarterly', recurring_parent_id: null, recurring_ongoing: true, annual_prepay_term_id: null, prepaid_amount: null, source_action: null, customer_confirmed: true },
   ];
-  db.__state.writes = []; db.__state.reads = [];
+  db.__state.writes = []; db.__state.reads = []; db.__state.failInsert = null;
   jest.clearAllMocks();
 });
 
@@ -158,6 +159,28 @@ describe('cancelServiceFromBar hands the card\'s approvals to the handler', () =
     expect(Object.keys(mockRunFollowThrough.mock.calls[0][0])).not.toContain('moneyReport');
     expect(json.moneySkipped).toBeUndefined();
     expect(json.linkedVisitsSkipped).toBeUndefined();
+  });
+});
+
+describe('a failure AFTER the cancel committed does not reject the replay', () => {
+  test('the activity log insert failing resolves a committed success with the text outcome and the reports, flagged postCommitFailure', async () => {
+    db.__state.failInsert = 'activity_log';
+    const linkedChildren = [{ id: 'child-1', status: 'confirmed', scheduled_date: '2026-11-02', service_type: 'pest_control' }];
+    mockRunFollowThrough.mockImplementationOnce(async ({ linkedChildReport }) => { linkedChildReport.skipped.push({ id: 'child-1', reason: 'date_changed' }); });
+    const { status, json } = await cancelServiceFromBar({ serviceId: 'svc-bar-1', notifyCustomer: true, actor: ACTOR, linkedChildren });
+    expect(status).toBe(200);
+    expect(json).toMatchObject({ success: true, notificationSent: true, postCommitFailure: 'connection terminated' });
+    expect(json.linkedVisitsSkipped).toEqual([{ id: 'child-1', reason: 'date_changed' }]);
+    // The cancel, the text and the follow-through all ran before the failing step.
+    expect(mockTransitionJobStatus).toHaveBeenCalledTimes(1);
+    expect(mockHandleCancellation).toHaveBeenCalledTimes(1);
+    expect(mockRunFollowThrough).toHaveBeenCalledTimes(1);
+  });
+
+  test('a failure BEFORE the commit still rejects (nothing was cancelled)', async () => {
+    mockTransitionJobStatus.mockRejectedValueOnce(new Error('deadlock detected'));
+    await expect(cancelServiceFromBar({ serviceId: 'svc-bar-1', notifyCustomer: true, actor: ACTOR })).rejects.toThrow('deadlock detected');
+    expect(mockHandleCancellation).not.toHaveBeenCalled();
   });
 });
 

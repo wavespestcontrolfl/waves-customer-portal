@@ -4654,6 +4654,11 @@ async function cancelReceiptName(appt, frozen, appointment_id) {
 // What the Dispatch handler did NOT finish, in the operator's words (the receipt shows result.warning only).
 function cancelReplayWarnings(json, sendText) {
   const warnings = [];
+  // A step after the cancel committed failed (activity log, settlement bookkeeping...): the visit IS cancelled and the
+  // text / money steps before it may have run, so this is a success with a warning, never a failed action.
+  if (json.postCommitFailure) {
+    warnings.push(`The visit is cancelled, but a step after the cancel did not finish (${json.postCommitFailure}). Nothing was undone: check the visit's invoices and credit and the customer's message history${sendText && json.notificationSent === undefined ? ' (the customer text may or may not have gone out)' : ''} before doing anything again.`);
+  }
   // Delivery unproven (the provider may have accepted it): never advise a resend, whatever else is true.
   if (sendText && json.notificationUncertain === true) {
     warnings.push(`The visit is cancelled, but the customer text may have gone out (${json.notificationError || 'delivery could not be confirmed'}). Check the customer's message history before sending it again.`);

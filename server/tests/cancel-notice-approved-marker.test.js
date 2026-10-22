@@ -22,6 +22,31 @@ describe('pending_approved is minted only for the approved send and read only by
     expect(codeLines).toHaveLength(1);
   });
 
+  test('the approved marker is minted whatever GATE_CANCEL_NOTICE_HOOK says; every other claim stays behind the gate', () => {
+    // One gate expression guards the claim transaction, and it is open for an approved cancel.
+    const gates = jobStatus.split('\n').filter((line) => !line.trim().startsWith('//') && line.includes("isEnabled('cancelNoticeHook')"));
+    expect(gates.map((l) => l.trim())).toEqual([
+      "if (isEnabled('cancelNoticeHook') || cancelNoticeApproved) {",
+      "return isEnabled('cancelNoticeHook') ? 'may_send' : 'none';",
+    ]);
+    // Inside that gate, a non-approved claim is unchanged: hook-owned 'pending' / caller 'pending_notify' as before, and
+    // the immediate post-commit worker still runs only for non-caller paths.
+    expect(jobStatus).toContain("if (claimedRows && targetState === 'pending' && notifyCustomer !== 'caller') cancelNoticeClaimTs = claimTs;");
+  });
+
+  test('the approved send does not read the hook gate: the only gate read in its code path is the sweep-retention branch an approved send never takes', () => {
+    const start = reminders.indexOf('function makeCancellationFinalizer(');
+    const end = reminders.indexOf('function makeCancellationPreDispatchCheck(');
+    const finalizer = reminders.slice(start, end);
+    const reads = finalizer.split('\n').filter((l) => !l.trim().startsWith('//') && l.includes("isEnabled('cancelNoticeHook')"));
+    expect(reads).toHaveLength(1);
+    // That read sits inside `if (!accepted && retryable && !options.approvedNotice) {`.
+    expect(finalizer).toMatch(/if \(!accepted && retryable && !options\.approvedNotice\) \{[\s\S]*isEnabled\('cancelNoticeHook'\)/);
+    // And handleCancellation itself reads no gate.
+    const hc = reminders.slice(reminders.indexOf('  async handleCancellation('), reminders.indexOf('  async handleNoShow('));
+    expect(hc).not.toContain('cancelNoticeHook');
+  });
+
   test('the approved marker is mandatory: a failed claim aborts the cancellation instead of committing without it', () => {
     expect(jobStatus).toMatch(/\} catch \(claimErr\) \{\s*\n(?:\s*\/\/.*\n)*\s*if \(cancelNoticeApproved\) throw claimErr;/);
   });
