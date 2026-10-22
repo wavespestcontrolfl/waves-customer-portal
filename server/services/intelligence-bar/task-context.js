@@ -625,13 +625,15 @@ function withoutValues(text) {
   return kept + rest;
 }
 
-// Each typed customer's own name is stripped first ("Mark Smith" is not the verb "mark").
+// Each typed customer's own name is stripped first ("Mark Smith" is not the verb "mark"), but only the
+// ONE span that names them: the first full-name occurrence, else the first first-name or last-name
+// occurrence. A later "mark" is still a verb (Codex #6369 r34).
 function isCompound(bounded, customers = []) {
   let text = ` ${normalizeName(withoutValues(bounded).replace(/[;,\n]/g, ' qqsep '))} `;
   for (const customer of customers) {
-    for (const name of [fullNameKey(customer), normalizeName(customer.first_name), normalizeName(customer.last_name)]) {
-      if (name) text = text.split(` ${name} `).join(' qqname ');
-    }
+    const name = [fullNameKey(customer), normalizeName(customer.first_name), normalizeName(customer.last_name)]
+      .find(candidate => candidate && text.includes(` ${candidate} `));
+    if (name) text = text.replace(` ${name} `, ' qqname ');
   }
   const words = ['qqsep', ...text.trim().split(' ')];
   return words.filter((word, i) => STRONG_VERBS.includes(word) || (NOUNISH_VERBS.includes(word) && OPERATION_STARTS.has(words[i - 1]))).length > 1;
@@ -646,10 +648,23 @@ function isCompound(bounded, customers = []) {
 // Any other qualifier (a city, phone, email, record id or second name beside a name, two
 // contacts, a name that resolves to nobody or to several customers, a set quantifier) grants
 // nothing, so the write is carded. Qualifiers still help PICK a target (typedCustomerIds).
+// targetClause stops at a colon, semicolon, newline or quote, so the text after one is never read for
+// identity. Direct authority is therefore refused when the message has such a cut anywhere other than
+// a field's own colon ("notes: ..."): "941-555-0100: update Jhon Smith's notes" is carded (Codex #6369 r34).
+// A quoted value right after a field's value start ("notes to \"...\"", "notes: \"...\"") is data, not a cut.
+const FIELD_WORDS = ['name', 'address', 'email', 'phone', 'number', 'label', 'notes?', 'instructions', 'message', 'contact', 'comments?', 'text', 'body'].join('|');
+const FIELD_QUOTED_VALUE_RE = new RegExp(`(\\b(?:${FIELD_WORDS})\\s*(?:(?:to|as|is|=)\\s+|:\\s*))(?:“[^”]*”|"[^"]*")`, 'gi');
+const FIELD_COLON_RE = new RegExp(`\\b(?:${FIELD_WORDS})\\s*:`, 'gi');
+const hasUnreadTail = (bounded) => {
+  const text = bounded.replace(FIELD_QUOTED_VALUE_RE, '$1 ');
+  return /[;\n“”"]/.test(text) || /:/.test(text.replace(FIELD_COLON_RE, ' '));
+};
+
 async function directGroundedIds(fullPrompt, namedResult, cohort, nameHint) {
   const bounded = boundedPrompt(fullPrompt);
   const clause = targetClause(bounded);
   const [customer, ...others] = namedResult.matches || [];
+  if (hasUnreadTail(bounded)) return [];
   if (cohort || namedResult.complete === false || namedResult.multiple || isCompound(bounded, namedResult.matches)) return [];
   if (!customer) return contactOnlyGroundedIds(bounded, clause, nameHint);
   const full = fullNameKey(customer);
@@ -816,7 +831,9 @@ function pageGroundingBlocked(fullPrompt, namedResult, cohort, nameHint, page) {
   const place = placeQualifierPresent(clause, matches);
   // A compound request takes the page's authority whatever else it says (pre-push audit, r27).
   if (isCompound(bounded, matches) || !recordIdsAreOnPage(bounded, page)) return true;
-  if (!nameHint && !contacts && !place) return false;
+  // A name that resolved to a customer is identity evidence even when namesRequested missed its form
+  // ("Alice Jones needs notes cleared"): only the exact page customer keeps the page (Codex #6369 r34).
+  if (!nameHint && !contacts && !place && !matches.length) return false;
   const exact = !cohort && namedResult.complete !== false && !namedResult.multiple && matches.length === 1
     && String(matches[0].id) === String(pageCustomerId) && !contacts && !place;
   return !exact;

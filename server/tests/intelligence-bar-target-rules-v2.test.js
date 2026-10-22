@@ -720,6 +720,33 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(await viewingBob('update this customer phone and update this customer notes')).toBe(false);
   });
 
+  test('gate on: the three r34 holes in no-card authority are closed (Codex #6369 r34)', async () => {
+    process.env[ON] = 'true';
+    const row = (n, first, last, phone) => ({ id: id(n), first_name: first, last_name: last, city: 'Venice', phone, email: `${first.toLowerCase()}@example.test`, updated_at: new Date('2026-01-01'), version: '2026-01-01' });
+    // 1. A contact before a colon: the text after the cut is never read, so nothing is direct.
+    customers = [row(100, 'Bob', 'Example', '9415550100')];
+    const grounded = async prompt => (await ask(prompt)).groundedCustomerIds;
+    expect(await grounded("941-555-0100: update Jhon Smith's notes")).toEqual([]);
+    expect(await grounded("update Bob Example's phone; Jhon Smith")).toEqual([]);
+    expect(await grounded('update Bob Example "Jhon Smith" phone')).toEqual([]);
+    // A field's own colon or a quoted field value is still data: direct, as before.
+    expect(await grounded("update Bob Example's notes: call first")).toEqual([id(100)]);
+    expect(await grounded("update Bob Example's notes to \"call first\"")).toEqual([id(100)]);
+    // 2. Viewing Bob, a resolved name in a form namesRequested misses still takes the page's authority.
+    customers = [row(100, 'Bob', 'Example', '9415550100'), row(101, 'Alice', 'Jones', '9415550101')];
+    const edit = { customer_id: id(100), updates: { phone: '941-555-0150' } };
+    const viewingBob = async prompt => {
+      const owner = Context.ownerDirectContext(await Context.resolve({ prompt, pageData: { customer_id: id(100) }, selectedTarget: null, ownerDirectScope: true }));
+      return OwnerDirect.executesWithoutCard('update_customer', edit, null, null, OwnerDirect.targetGrounding(owner));
+    };
+    expect(await viewingBob('Alice Jones needs a new phone')).toBe(false);
+    expect(await viewingBob('Bob Example needs a new phone')).toBe(true);
+    // 3. A name that is also a verb is stripped once: a later "mark" is still a second operation.
+    customers = [row(102, 'Mark', 'Smith', '9415550102')];
+    expect(await grounded("update Mark Smith's phone to 941-555-0101 and mark his lead source as referral")).toEqual([]);
+    expect(await grounded("update Mark Smith's phone")).toEqual([id(102)]);
+  });
+
   test('gate on: an explicit record id keeps the page customer\'s authority only if every id is one the page already holds (Codex #6369 r29)', async () => {
     process.env[ON] = 'true';
     const row = (n, extra) => ({ id: n, first_name: 'Bob', last_name: 'Example', city: 'Venice', phone: '9415550100', email: 'bob@example.test', updated_at: new Date('2026-01-01'), version: '2026-01-01', ...extra });
