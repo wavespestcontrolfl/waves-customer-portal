@@ -41,7 +41,7 @@ jest.mock('../services/annual-prepay-renewals', () => ({
   acquireTermiteGateForStatement: async () => [],
 }));
 jest.mock('../services/lead-estimate-link', () => ({ convertLeadFromEvent: async () => null }));
-jest.mock('../config/feature-gates', () => ({ gateEnvTimestamp: () => null, isEnabled: () => false }));
+jest.mock('../config/feature-gates', () => ({ reviewAskAfterReportLive: () => false, gateEnvTimestamp: () => null, isEnabled: () => false }));
 jest.mock('../services/review-request', () => ({ enrollForPaidInvoice: jest.fn(async () => ({ enrolled: true })) }));
 const { randomUUID } = require('node:crypto');
 const Invoice = require('../services/invoice');

@@ -1,7 +1,7 @@
 /**
  * GATE_REVIEW_ASK_AFTER_REPORT (owner 2026-10-22): the completion panel's
- * send-time preview names the new Automatic timing, and the extra every-five-minutes
- * review-sequences registration in scheduler.js no-ops while the gate is off.
+ * send-time preview names the new Automatic timing, and the review sender keeps
+ * its :14/:44 schedule.
  * The enrollment arithmetic lives in review-sequences.test.js.
  */
 jest.mock('../models/db', () => {
@@ -75,10 +75,9 @@ describe('GET /admin/reviews/send-time-preview with GATE_REVIEW_ASK_AFTER_REPORT
     expect(delta).toBeLessThan(10 * 60000 + 5000);
     expect(lawn.earliestAt).toBe(lawn.at);
     expect(lawn.latestAt).toBe(lawn.at);
-    // The five-minute ticks are named so the panel's tick rounding matches the cron.
-    // explicit choices keep :14/:44; the fast table is named separately
+    // The ask goes at the :14/:44 sends; the panel names them.
     expect(lawn.cadenceTickMinutesOfHour).toEqual([14, 44]);
-    expect(lawn.afterReportTickMinutesOfHour).toEqual(expect.arrayContaining([0, 5, 10, 14, 44]));
+    expect(lawn).not.toHaveProperty('afterReportTickMinutesOfHour');
   });
 
   test('gate on with cadences off: the legacy path ignores the gate (120 minutes, no after-report preview)', async () => {
@@ -101,64 +100,9 @@ describe('GET /admin/reviews/send-time-preview with GATE_REVIEW_ASK_AFTER_REPORT
   });
 });
 
-describe('the */5 review-sequences registration in scheduler.js', () => {
-  const cron = require('../utils/scheduled-cron');
-  const { runExclusive } = require('../utils/cron-lock');
-  const ReviewService = require('../services/review-request');
-  const { initScheduledJobs } = require('../services/scheduler');
-
-  function registrations() {
-    cron.schedule.mockClear();
-    process.env.GATE_CRON_JOBS = 'true';
-    initScheduledJobs();
-    return {
-      main: cron.schedule.mock.calls.find(([e]) => e === '14,44 * * * *'),
-      fast: cron.schedule.mock.calls.find(([e, task]) => e === '*/5 * * * *' && String(task).includes('reviewAskAfterReportLive')),
-    };
-  }
-
-  beforeEach(() => {
-    jest.spyOn(ReviewService, 'processReviewSequences').mockResolvedValue({ sent: 0, completed: 0, stopped: 0 });
-    jest.spyOn(ReviewService, 'processAfterReportSequences').mockResolvedValue({ sent: 0, completed: 0, stopped: 0 });
-    runExclusive.mockClear();
-  });
-
-  test('is registered beside the untouched :14/:44 job, with the same timezone', () => {
-    const { main, fast } = registrations();
-    expect(main).toBeDefined();
-    expect(fast).toBeDefined();
-    expect(fast[2]).toEqual({ timezone: 'America/New_York' });
-    expect(main[2]).toEqual({ timezone: 'America/New_York' });
-  });
-
-  test('gate off: the 5-minute tick returns before taking the lock or reading a sequence', async () => {
-    process.env.GATE_REVIEW_SEQUENCES = 'true';
-    const { fast } = registrations();
-    await fast[1]();
-    expect(runExclusive).not.toHaveBeenCalled();
-    expect(ReviewService.processAfterReportSequences).not.toHaveBeenCalled();
-  });
-
-  test('gate on but cadences off: still a no-op', async () => {
-    process.env.GATE_REVIEW_ASK_AFTER_REPORT = 'true';
-    const { fast } = registrations();
-    await fast[1]();
-    expect(ReviewService.processAfterReportSequences).not.toHaveBeenCalled();
-  });
-
-  test('gate on and cadences on: runs the after-report rows under the shared review-sequences lock; the :14/:44 job runs every row', async () => {
-    process.env.GATE_REVIEW_ASK_AFTER_REPORT = 'true';
-    process.env.GATE_REVIEW_SEQUENCES = 'true';
-    const { main, fast } = registrations();
-    await fast[1]();
-    expect(runExclusive).toHaveBeenCalledWith('review-sequences', expect.any(Function));
-    expect(ReviewService.processAfterReportSequences).toHaveBeenCalledTimes(1);
-    expect(ReviewService.processReviewSequences).not.toHaveBeenCalled();
-    await main[1]();
-    expect(runExclusive).toHaveBeenNthCalledWith(2, 'review-sequences', expect.any(Function));
-    expect(ReviewService.processReviewSequences).toHaveBeenCalledTimes(1);
-    expect(ReviewService.processAfterReportSequences).toHaveBeenCalledTimes(1);
-  });
+test('the review sender keeps its one :14/:44 registration (no extra tick for this gate)', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../services/scheduler.js'), 'utf8');
+  expect(src).not.toMatch(/reviewAskAfterReportLive/);
 });
 
 describe('the report text anchor (completion enrollment + paid invoice share one reader)', () => {
@@ -210,6 +154,7 @@ describe('the combined-visit anchor (reportTextAnchorForVisit)', () => {
     ['missing', null],
     ['failed', { status: 'failed', sent_at: null }],
     ['unreadable', new Error('db down')],
+    ['held by quiet hours, then sent at 8 AM (codex #6434 r12 P2)', { status: 'sent', sent_at: new Date('2026-10-20T12:01:00Z'), scheduled_at: new Date('2026-10-20T12:00:00Z') }],
   ])('gate on, summary text %s: no anchor (smart window)', async (_label, effect) => {
     process.env.GATE_REVIEW_ASK_AFTER_REPORT = 'true';
     expect(await ReviewService.reportTextAnchorForVisit('v-1', fakeDatabase(effect))).toBeNull();

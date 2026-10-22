@@ -100,15 +100,8 @@ function structuredNotesObject(raw) {
   if (typeof raw !== "string") return raw || {};
   try { return JSON.parse(raw); } catch { return {}; }
 }
-// The gate reader, wrapped so a test double of feature-gates that predates it
-// reads as off.
 function reviewAskAfterReportOn() {
-  try {
-    const gates = require("../config/feature-gates");
-    return typeof gates.reviewAskAfterReportLive === "function" && gates.reviewAskAfterReportLive() === true;
-  } catch {
-    return false;
-  }
+  return require("../config/feature-gates").reviewAskAfterReportLive();
 }
 
 // First name from the technician row when an ask carries technician_id but no
@@ -715,23 +708,6 @@ function calculateReviewSendPlan(completedAt, serviceType, { jitter: withJitter 
 // ELIGIBLE; the text goes out at the first tick on or after it. The Reviews
 // page shows that tick, not the eligibility instant (codex #4140 r4 P2).
 const REVIEW_CADENCE_TICK_MINUTES = [14, 44];
-// GATE_REVIEW_ASK_AFTER_REPORT adds a second registration of the same job on
-// `*/5` (scheduler.js), so while the gate is on the sender also runs on every
-// fifth minute. Kept in step by review-ask-after-report.test.js.
-const REVIEW_AFTER_REPORT_TICK_MINUTES = [0, 5, 10, 14, 15, 20, 25, 30, 35, 40, 44, 45, 50, 55];
-// `fast` = an after-report Day-0 row (isAfterReportFastRow): only those ride
-// the */5 tick; every other row keeps :14/:44.
-function cadenceTickMinutes(fast = false) {
-  return fast && reviewAskAfterReportOn() ? REVIEW_AFTER_REPORT_TICK_MINUTES : REVIEW_CADENCE_TICK_MINUTES;
-}
-// The rows the */5 tick runs (processAfterReportSequences):
-// an untouched Day-0 post-service ask whose plan came from the report anchor.
-const AFTER_REPORT_FAST_REASONS = ["after_report"];
-function isAfterReportFastRow(r) {
-  if (!r || Number(r.current_step || 0) !== 0 || Number(r.touches_sent || 0) !== 0 || r.started_by !== "post_service") return false;
-  const d = parseDecision(r.decision);
-  return AFTER_REPORT_FAST_REASONS.includes(d?.reason);
-}
 // The legacy (cadences-off) path: processScheduled runs on the scheduler's
 // `*/15` cron (kept in step by review-sequences.test.js), and a legacy row's
 // scheduled_for is rebuilt from a later Date.now() after the target became a
@@ -745,17 +721,17 @@ const LEGACY_REVIEW_TICK_MINUTES = [0, 15, 30, 45];
 // reopens (codex #4140 r11 P2). Email steps are not windowed. A no-link
 // check-in labelled "email" is forced to SMS by sendOutreachTouch, so only
 // an ask step's own "email" channel is email here.
-function nextSendTickFor(step, from, fast = false) {
-  return isEmailAskStep(step) ? nextCadenceTickAt(from, fast) : windowedSmsTickAt(from, fast);
+function nextSendTickFor(step, from) {
+  return isEmailAskStep(step) ? nextCadenceTickAt(from) : windowedSmsTickAt(from);
 }
 // The tick an ask step lands on if it swaps to the OTHER channel at send
 // time ({ fallbackChannel, fallbackTickAt }); both null when the step is not
 // an ask (a check-in is always SMS) or the other channel's tick is the same.
-function fallbackTickFor(step, from, fast = false) {
+function fallbackTickFor(step, from) {
   const none = { fallbackChannel: null, plannedChannel: null, fallbackTickAt: null };
   if (!from || !OUTREACH.isAskTemplate(step?.templateKey)) return none;
-  const emailTick = nextCadenceTickAt(from, fast);
-  const smsTick = windowedSmsTickAt(from, fast);
+  const emailTick = nextCadenceTickAt(from);
+  const smsTick = windowedSmsTickAt(from);
   if (!emailTick || !smsTick || smsTick.getTime() === emailTick.getTime()) return none;
   // Both channel names are spelled here (text/email) so the page renders
   // them without deciding anything.
@@ -766,13 +742,13 @@ function fallbackTickFor(step, from, fast = false) {
 function isEmailAskStep(step) {
   return String(step?.channel || "sms").toLowerCase() === "email" && OUTREACH.isAskTemplate(step?.templateKey);
 }
-function windowedSmsTickAt(from, fast = false) {
-  const tick = nextCadenceTickAt(from, fast);
+function windowedSmsTickAt(from) {
+  const tick = nextCadenceTickAt(from);
   if (!tick || !require("../config/feature-gates").isEnabled("smsSendWindow")) return tick;
   const { isWithinSendWindowET, nextSendWindowOpenET } = require("./messaging/send-window");
-  return isWithinSendWindowET(tick) ? tick : nextCadenceTickAt(nextSendWindowOpenET(tick), fast);
+  return isWithinSendWindowET(tick) ? tick : nextCadenceTickAt(nextSendWindowOpenET(tick));
 }
-function nextCadenceTickAt(from, fast = false) {
+function nextCadenceTickAt(from) {
   const d = from instanceof Date ? from : new Date(from);
   if (Number.isNaN(d.getTime())) return null;
   const minute = d.getUTCMinutes();
@@ -780,12 +756,11 @@ function nextCadenceTickAt(from, fast = false) {
   const tick = new Date(d.getTime());
   tick.setUTCSeconds(0, 0);
   // Minutes are zone-independent (every ET offset is a whole hour).
-  const tickMinutes = cadenceTickMinutes(fast);
-  const next = tickMinutes.find((m) => m > minute || (m === minute && !pastTheMinute));
+  const next = REVIEW_CADENCE_TICK_MINUTES.find((m) => m > minute || (m === minute && !pastTheMinute));
   if (next != null) {
     tick.setUTCMinutes(next);
   } else {
-    tick.setUTCHours(tick.getUTCHours() + 1, tickMinutes[0]);
+    tick.setUTCHours(tick.getUTCHours() + 1, REVIEW_CADENCE_TICK_MINUTES[0]);
   }
   return tick;
 }
@@ -1990,12 +1965,14 @@ const ReviewService = {
   // The same anchor for a combined visit (visit-completion-packets): its
   // completion_sms effect. Enrollment there runs only once the delivery legs
   // are sent or suppressed, so a 'sent' effect anchors the ask to that text; a
-  // suppressed or missing one sends nothing confirmable (smart window).
+  // suppressed, missing or held one keeps the smart window.
   async reportTextAnchorForVisit(visitId, database = db) {
     if (!visitId || !reviewAskAfterReportOn()) return null;
     try {
-      const effect = await database("visit_effects").where({ visit_id: visitId, effect_type: "completion_sms" }).first("status", "sent_at");
-      return effect?.status === "sent" ? { status: "sent", at: effect.sent_at || new Date() } : null;
+      // A summary held by quiet hours (deferSummarySms sets scheduled_at, which
+      // its 8 AM replay keeps) keeps the smart window, like a held report.
+      const effect = await database("visit_effects").where({ visit_id: visitId, effect_type: "completion_sms" }).first("status", "sent_at", "scheduled_at");
+      return effect?.status === "sent" && !effect.scheduled_at ? { status: "sent", at: effect.sent_at || new Date() } : null;
     } catch (err) {
       logger.warn(`[review] visit report anchor lookup failed (visitId=${visitId}): ${err.message}`);
       return null;
@@ -7445,7 +7422,6 @@ const ReviewService = {
     return { redeemed };
   },
 
-  // The :14/:44 cadence tick: the deferred-enrollment sweep, then every due row.
   async processReviewSequences() {
     let redeemed = 0;
     try {
@@ -7453,28 +7429,10 @@ const ReviewService = {
     } catch (err) {
       logger.error(`[review] deferred-enrollment sweep failed (errType=${err?.name || "Error"})`);
     }
-    return this._runDueSequences(this._dueSequencesQuery(), redeemed);
-  },
-
-  // The GATE_REVIEW_ASK_AFTER_REPORT */5 tick: only the after-report Day-0 rows
-  // (isAfterReportFastRow, as SQL); every other row and the sweep stay on the
-  // :14/:44 cadence.
-  async processAfterReportSequences() {
-    const query = this._dueSequencesQuery()
-      .where({ current_step: 0, touches_sent: 0, started_by: "post_service" })
-      .whereIn(db.raw("decision ->> 'reason'"), AFTER_REPORT_FAST_REASONS);
-    return this._runDueSequences(query, 0);
-  },
-
-  _dueSequencesQuery() {
-    return db("review_sequences")
+    const due = await db("review_sequences")
       .where({ status: "active" })
       .whereNotNull("next_run_at")
-      .where("next_run_at", "<=", new Date());
-  },
-
-  async _runDueSequences(dueQuery, redeemed) {
-    const due = await dueQuery
+      .where("next_run_at", "<=", new Date())
       .orderBy("next_run_at", "asc")
       .limit(25);
     let sent = 0;
@@ -8026,12 +7984,12 @@ const ReviewService = {
         // runner holds the claim). An overdue row (missed tick, gate re-enabled
         // between ticks) is picked up at the next tick from NOW, not at a tick
         // that has already passed (codex #4140 r8).
-        nextSendTickAt: nextFrom && !staleRetire ? (parked ? nextCadenceTickAt(nextFrom) : nextSendTickFor(plan[r.current_step], nextFrom, isAfterReportFastRow(r))) : null,
+        nextSendTickAt: nextFrom && !staleRetire ? (parked ? nextCadenceTickAt(nextFrom) : nextSendTickFor(plan[r.current_step], nextFrom)) : null,
         // An ask step can swap channel at send time (sendOutreachTouch: the
         // intended channel unavailable, the other allowed) — email→SMS then
         // meets the send window, SMS→email escapes it — so the page shows the
         // other channel's tick when it differs (codex #4140 r14, r16 P2).
-        ...fallbackTickFor(plan[r.current_step], parked ? null : nextFrom, isAfterReportFastRow(r)),
+        ...fallbackTickFor(plan[r.current_step], parked ? null : nextFrom),
         // next_run_at NULL on an active row = the runner holds the send claim
         // right now (or an inline start is in progress). The claim stamps
         // updated_at; one older than the runner's own reconciliation horizon
@@ -8264,10 +8222,7 @@ ReviewService.__private = {
   calculateReviewSendPlan,
   nextCadenceTickAt,
   REVIEW_CADENCE_TICK_MINUTES,
-  REVIEW_AFTER_REPORT_TICK_MINUTES,
   reportTextAnchorFromNotes,
-  cadenceTickMinutes,
-  isAfterReportFastRow,
   LEGACY_REVIEW_TICK_MINUTES,
   sequenceDecision,
   nextTouchRunAt,

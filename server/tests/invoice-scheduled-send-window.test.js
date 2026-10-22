@@ -21,7 +21,7 @@ jest.mock('../services/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
 }));
-jest.mock('../config/feature-gates', () => ({
+jest.mock('../config/feature-gates', () => ({ reviewAskAfterReportLive: () => false,
   isEnabled: jest.fn(),
 }));
 jest.mock('../services/messaging/send-window', () => ({

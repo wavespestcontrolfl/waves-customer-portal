@@ -60,28 +60,28 @@ describe('the verdict on the send-time preview read at submit', () => {
 });
 
 // GATE_REVIEW_ASK_AFTER_REPORT (owner 2026-10-22): the server preview names the rule;
-// the Automatic hint words it as "about 10 minutes after the report text".
+// the Automatic hint words it as the first :14/:44 send at least 10 minutes after the report text.
 describe('the Automatic hint while the ask goes out after the report text', () => {
   const afterReport = {
     schedulerEnabled: true, reviewSequencesEnabled: true, afterReport: true, afterReportMinutes: 10,
     at: '2026-10-20T15:10:00.000Z', earliestAt: '2026-10-20T15:10:00.000Z', latestAt: '2026-10-20T15:10:00.000Z',
-    bucket: 'after_report:+10m', smsSendWindowEnabled: true, cadenceTickMinutesOfHour: [14, 44], afterReportTickMinutesOfHour: [0, 5, 10, 14, 15, 20, 25, 30, 35, 40, 44, 45, 50, 55],
+    bucket: 'after_report:+10m', smsSendWindowEnabled: true, cadenceTickMinutesOfHour: [14, 44],
   };
 
-  test('names the 10 minutes after the report text and the send window, not the smart window', () => {
+  test('names the first :14/:44 send at least 10 minutes after the report text, and the 8 PM limit (codex #6434 r12 P2)', () => {
     const text = timedReviewHint({ reviewTiming: 'auto', preview: afterReport });
-    expect(text).toBe('Review text goes out separately, about 10 minutes after the report text, inside the 8 AM–8 PM window. If the report does not go out as a text right away (held for the morning, sent by the Waves app, or texts turned off for this customer), it goes at the smart send window.');
+    expect(text).toBe('Review text goes out separately at the first review send (:14 and :44 each hour) at least 10 minutes after the report text. A target after 8 PM waits for the next morning. If the report does not go out as a text right away (held for the morning, sent by the Waves app, or texts turned off for this customer), it goes at the smart send window.');
     expect(text).not.toMatch(/cadence tick/i);
   });
 
   test('without the send window gate the window is not promised', () => {
     expect(timedReviewHint({ reviewTiming: 'auto', preview: { ...afterReport, smsSendWindowEnabled: false } }))
-      .toBe('Review text goes out separately, about 10 minutes after the report text. If the report does not go out as a text right away (held for the morning, sent by the Waves app, or texts turned off for this customer), it goes at the smart send window.');
+      .toBe('Review text goes out separately at the first review send (:14 and :44 each hour) at least 10 minutes after the report text. If the report does not go out as a text right away (held for the morning, sent by the Waves app, or texts turned off for this customer), it goes at the smart send window.');
   });
 
   test('an unpaid completion invoice: 10 minutes after payment', () => {
     const { text } = completionReviewHint({ willReview: true, effectiveSendSms: true, reviewTiming: 'auto', preview: afterReport, reviewAwaitsPayment: true });
-    expect(text).toMatch(/waits for the invoice to be paid, then goes out about 10 minutes after payment/);
+    expect(text).toMatch(/waits for the invoice to be paid, then goes out at the first review send \(:14 and :44 each hour\) at least 10 minutes after payment/);
     // Any report not texted right away keeps the smart window (codex #6434 r11 P2).
     expect(text).toMatch(/If the report did not go out as a text right away .*smart send window/);
   });

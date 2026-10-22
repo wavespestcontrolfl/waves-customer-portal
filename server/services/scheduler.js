@@ -885,6 +885,10 @@ function initScheduledJobs() {
           // proofreader's own gate is off.
           const moveCheckClosed = await require('./auto-dispatch/proofreader/nightly').closeNotices(new Date(), { enabled: getAutoDispatchConfig().proofreaderEnabled === true });
           if (!moveCheckClosed) failures.push(new Error('move-check notice close failed'));
+          // The move-check-down notice by the same rule: it closes when its
+          // gate or the check is off; with no run, nothing else changes it.
+          const checkDown = await require('./auto-dispatch/check-down-notice').noteRun(null, { enabled: getAutoDispatchConfig().proofreaderEnabled === true, nowDate: new Date() });
+          if (checkDown.action === 'error') failures.push(new Error('move-check-down notice upkeep failed'));
           if (failures.length) throw failures[0];
           return;
         }
@@ -8039,11 +8043,12 @@ function initScheduledJobs() {
   // preview/dev env with live creds can't text/email real customers.
   // Suppression and per-customer prefs still apply at the send site.
   // =========================================================================
-  const runReviewSequencesTick = async (method) => {
+  cron.schedule('14,44 * * * *', async () => {
+    if (!isEnabled('reviewSequences')) return;
     try {
       await runExclusive('review-sequences', async () => {
         const ReviewService = require('./review-request');
-        const result = await ReviewService[method]();
+        const result = await ReviewService.processReviewSequences();
         if (result.sent > 0 || result.completed > 0) {
           logger.info(`Review sequences: ${result.sent} sent, ${result.completed} completed, ${result.stopped} stopped`);
         }
@@ -8051,25 +8056,6 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Review sequence processing failed: ${err.message}`);
     }
-  };
-  cron.schedule('14,44 * * * *', async () => {
-    if (!isEnabled('reviewSequences')) return;
-    await runReviewSequencesTick('processReviewSequences');
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
-  // EVERY 5 MIN — the same review-sequences job, GATE_REVIEW_ASK_AFTER_REPORT
-  // only (owner 2026-10-22: the Day-0 ask goes about 10 minutes after the
-  // report text, so a +10 minute touch must land within ~15 minutes). Runs
-  // only the after-report Day-0 rows (processAfterReportSequences). A no-op
-  // while the gate (read at call time) or GATE_REVIEW_SEQUENCES is off. Same
-  // `review-sequences` lock as the :14/:44 job, so ticks never overlap.
-  // =========================================================================
-  cron.schedule('*/5 * * * *', async () => {
-    if (!isEnabled('reviewSequences')) return;
-    if (!require('../config/feature-gates').reviewAskAfterReportLive()) return;
-    // Only the after-report Day-0 rows; everything else keeps :14/:44.
-    await runReviewSequencesTick('processAfterReportSequences');
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
