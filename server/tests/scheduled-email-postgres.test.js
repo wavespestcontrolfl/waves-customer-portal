@@ -381,6 +381,21 @@ jest.setTimeout(30000);
     expect(await row(body.scheduled.id)).toMatchObject({ status: 'outcome_unknown' });
   });
 
+  test('the gate turned off mid-sweep stops the send and puts the row back', async () => {
+    const { body } = await queue();
+    await makeDue(body.scheduled.id);
+    let requested = false;
+    gmail.sendMessage.mockImplementation(async (...args) => {
+      delete process.env.GATE_EMAIL_SEND_LATER;
+      await args[5].beforeSend();
+      requested = true;
+      return { id: 'gmail-gate-off' };
+    });
+    expect((await sendDueScheduledEmails()).results).toEqual(['claim_lost']);
+    expect(requested).toBe(false);
+    expect(await row(body.scheduled.id)).toMatchObject({ status: 'scheduled', attempts: 0, claimed_at: null });
+  });
+
   test('due emails go to Gmail up to five at a time', async () => {
     for (let i = 0; i < 6; i += 1) {
       const { body } = await queue({ to: `batch${i}@example.invalid` });

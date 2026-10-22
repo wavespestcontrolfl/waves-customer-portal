@@ -132,6 +132,13 @@ async function sourceMessageId(row, conn) {
 // settleStaleClaims cannot turn it into outcome_unknown while the request
 // runs. A claim already settled stops the send.
 async function holdClaim(row, conn) {
+  // The gate turned off during this sweep: nothing goes out, and the row
+  // waits as 'scheduled' again (this attempt does not count).
+  if (!emailSendLaterLive()) {
+    await conn('scheduled_emails').where({ id: row.id, status: 'sending' })
+      .update({ status: 'scheduled', claimed_at: null, attempts: conn.raw('greatest(attempts - 1, 0)'), updated_at: conn.fn.now() });
+    throw Object.assign(new Error('send gate is off'), { code: 'claim_lost' });
+  }
   const held = await conn('scheduled_emails').where({ id: row.id, status: 'sending' })
     .update({ claimed_at: conn.fn.now(), updated_at: conn.fn.now() });
   if (!held) throw Object.assign(new Error('claim no longer held'), { code: 'claim_lost' });
