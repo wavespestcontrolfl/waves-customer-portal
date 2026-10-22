@@ -213,7 +213,7 @@ describe("Email schedule send", () => {
     const base = fetch.getMockImplementation();
     fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/email/schedule")
       ? Promise.reject(new TypeError("network")) : base(input, options)));
-    reconciledRow = { id: "late-unclear", status: "outcome_unknown", sendAt: "2026-10-23T12:00:00.000Z", draftText: "Line one\n<b>two</b>" };
+    reconciledRow = { id: "late-unclear", status: "outcome_unknown", sendAt: "2026-10-23T12:00:00.000Z", to: "customer@example.invalid", subject: "Guide", draftText: "Line one\n<b>two</b>" };
     mount();
     await writeEmail();
     fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
@@ -226,11 +226,28 @@ describe("Email schedule send", () => {
     expect(screen.getByLabelText(/^Message/)).toHaveValue("A follow-up");
   });
 
+  it("found in Sent keeps a draft whose subject was edited since", async () => {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/email/schedule")
+      ? Promise.reject(new TypeError("network")) : base(input, options)));
+    reconciledRow = { id: "late-unclear", status: "outcome_unknown", sendAt: "2026-10-23T12:00:00.000Z", to: "customer@example.invalid", subject: "Guide", draftText: "Line one\n<b>two</b>" };
+    mount();
+    await writeEmail();
+    fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Tomorrow morning/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "I checked: it is in neither" }));
+    await screen.findByRole("button", { name: "It is in Sent" });
+    fireEvent.change(screen.getByLabelText("Subject"), { target: { value: "Guide, part two" } });
+    fireEvent.click(screen.getByRole("button", { name: "It is in Sent" }));
+    expect((await screen.findAllByText(/Your newer edits stay in the draft/)).length).toBeGreaterThan(0);
+    expect(screen.getByLabelText("Subject")).toHaveValue("Guide, part two");
+  });
+
   it("a reconciled email found in Sent is recorded as sent and its draft removed", async () => {
     const base = fetch.getMockImplementation();
     fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/email/schedule")
       ? Promise.reject(new TypeError("network")) : base(input, options)));
-    reconciledRow = { id: "late-unclear", status: "outcome_unknown", sendAt: "2026-10-23T12:00:00.000Z", draftText: "Line one\n<b>two</b>" };
+    reconciledRow = { id: "late-unclear", status: "outcome_unknown", sendAt: "2026-10-23T12:00:00.000Z", to: "customer@example.invalid", subject: "Guide", draftText: "Line one\n<b>two</b>" };
     mount();
     await writeEmail();
     fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
