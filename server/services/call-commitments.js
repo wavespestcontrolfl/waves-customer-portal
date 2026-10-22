@@ -1892,10 +1892,34 @@ async function completedVisit(conn, { after, until, customerId }) {
   return row ? { id: row.id, at: row.completed_at } : null;
 }
 
+// The live customer records carrying each number, kept only where they are
+// ONE person (same normalized first+last name: duplicate records, not a
+// household): Map<phoneDigits, customerId[]>. A number with two different
+// names — or a record with no name to compare — is truly shared and absent
+// from the map, so a linked estimate on it proves nothing for an unlinked
+// caller. Matches customers.phone, the column every matcher here uses.
+const nameKey = (c) => `${c.first_name || ""} ${c.last_name || ""}`.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+async function sameNameNumberOwners(conn, phones) {
+  const out = new Map();
+  const keys = [...new Set((phones || []).map(phoneDigits).filter(Boolean))];
+  if (!keys.length) return out;
+  const rows = await phoneWhereAny(conn("customers"), "phone", keys).whereNull("deleted_at").select("id", "phone", "first_name", "last_name");
+  const byKey = new Map();
+  for (const r of rows) {
+    const k = phoneDigits(r.phone);
+    byKey.set(k, [...(byKey.get(k) || []), r]);
+  }
+  for (const [k, recs] of byKey) {
+    const names = new Set(recs.map(nameKey));
+    if (names.size === 1 && !names.has("")) out.set(k, recs.map((r) => String(r.id)));
+  }
+  return out;
+}
+
 // send_estimate's association lookup, shared with kind 'other': an estimate
 // handed off to the same customer after the call (or, for an unlinked call,
-// any estimate on the caller's phone: its customer_phone, or the phone of the
-// customer record that owns it).
+// an unlinked estimate on the caller's phone, or a linked one when the number
+// belongs to one person's duplicate records: sameNameNumberOwners).
 //
 // `accept(row)` (optional) vets a candidate for the promise being judged: the
 // first accepted estimate in handoff order wins, so a rejected one does not hide
@@ -1911,14 +1935,16 @@ async function estimateSentTo(conn, { after, until, phone, customerId }, accept 
     // Exclude NULL FK values so NOT IN does not reject unrelated rows.
     whereEstimateCustomerOwnership(estQ, customerId);
   } else if (phone) {
-    // An unlinked call is matched by its NUMBER alone (owner 2026-10-21): an
-    // estimate whose customer_phone is the caller's, or one owned by any
-    // customer record carrying that number. Duplicate customer records on one
-    // number are common; the estimate that went to the caller's phone still
-    // kept the promise whichever record it landed on.
+    // An unlinked call is matched by its NUMBER. An UNLINKED estimate on the
+    // caller's phone always counts (commercial proposals). A LINKED estimate
+    // counts only when the number is not truly shared (codex #3738 P1,
+    // narrowed 2026-10-21): every live customer record carrying it is one
+    // person's duplicate (same name), and the estimate's owner is one of them.
+    // Two different names on one number: a linked estimate clears nothing.
+    const safeOwners = (await sameNameNumberOwners(conn, [phone])).get(phoneDigits(phone)) || [];
     estQ.where((b) => {
-      phoneWhere(b, "customer_phone", phone);
-      b.orWhereIn("customer_id", conn("customers").modify((c) => phoneWhere(c, "phone", phone)).select("id"));
+      b.where((u) => { u.whereNull("customer_id"); phoneWhere(u, "customer_phone", phone); });
+      if (safeOwners.length) b.orWhereIn("customer_id", safeOwners);
     });
   } else {
     return null;
@@ -4228,6 +4254,7 @@ module.exports = {
   callEndedAt,
   phoneDigits,
   phoneWhereAny,
+  sameNameNumberOwners,
   whereEstimateCustomerOwnership,
   whereEstimateOwnedByAny,
   whereEstimateOnCustomerRecord,

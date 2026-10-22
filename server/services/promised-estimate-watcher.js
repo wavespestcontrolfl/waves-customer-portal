@@ -160,17 +160,44 @@ async function loadUnkeptPromises() {
                )
             OR (c.customer_id IS NOT NULL AND e.customer_id = c.customer_id)
             OR (e.customer_phone IS NOT NULL
-                -- Linked call -> same-customer estimate only (codex r12/r26/r31):
-                -- caller B's proposal must not clear linked caller A's
-                -- promise. Exact engine/lead provenance legs above are
-                -- unaffected.
-                -- Owner 2026-10-21: an UNLINKED call is cleared by any
-                -- estimate that went to the caller's number, whoever owns
-                -- it (two customer records on one number are common).
-                AND (c.customer_id IS NULL
+                -- Unlinked (or same-customer) estimates only (codex r12):
+                -- a shared household number must not let customer B's
+                -- estimate clear customer A's promise.
+                -- An UNLINKED call (shared number) is cleared only by an
+                -- UNLINKED estimate (codex r26): customer B's linked
+                -- estimate must not clear caller A's promise.
+                -- Linked call -> same-customer estimate only; unlinked
+                -- call -> unlinked estimate only (codex r26/r31):
+                -- commercial proposals store phone with customer_id NULL,
+                -- and caller B's proposal must not clear linked caller
+                -- A's promise. Exact engine/lead provenance legs above
+                -- are unaffected. (A linked estimate on a number that is
+                -- one person's duplicate records is the next OR leg.)
+                AND ((c.customer_id IS NULL AND e.customer_id IS NULL)
                   OR e.customer_id = c.customer_id)
                 AND RIGHT(REGEXP_REPLACE(e.customer_phone, '\\D', '', 'g'), 10)
                   = RIGHT(REGEXP_REPLACE(CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END, '\\D', '', 'g'), 10))
+            -- Owner 2026-10-21 (narrowing codex #3738 P1): an UNLINKED call is
+            -- also cleared by a LINKED estimate when the number is not truly
+            -- shared: the estimate's owner carries the caller's number, has a
+            -- name, and every live customer record on that number has the
+            -- same normalized first+last name (one person's duplicate
+            -- records). Two different names on one number clear nothing.
+            OR (c.customer_id IS NULL AND e.customer_id IS NOT NULL AND EXISTS (
+                 SELECT 1 FROM customers o
+                 WHERE o.id = e.customer_id AND o.deleted_at IS NULL
+                   AND RIGHT(REGEXP_REPLACE(COALESCE(o.phone, ''), '\\D', '', 'g'), 10)
+                     = RIGHT(REGEXP_REPLACE(CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END, '\\D', '', 'g'), 10)
+                   AND LENGTH(RIGHT(REGEXP_REPLACE(COALESCE(o.phone, ''), '\\D', '', 'g'), 10)) = 10
+                   AND BTRIM(REGEXP_REPLACE(LOWER(COALESCE(o.first_name, '') || ' ' || COALESCE(o.last_name, '')), '[^[:alnum:]]+', ' ', 'g')) <> ''
+                   AND NOT EXISTS (
+                     SELECT 1 FROM customers x
+                     WHERE x.deleted_at IS NULL
+                       AND RIGHT(REGEXP_REPLACE(COALESCE(x.phone, ''), '\\D', '', 'g'), 10)
+                         = RIGHT(REGEXP_REPLACE(COALESCE(o.phone, ''), '\\D', '', 'g'), 10)
+                       AND BTRIM(REGEXP_REPLACE(LOWER(COALESCE(x.first_name, '') || ' ' || COALESCE(x.last_name, '')), '[^[:alnum:]]+', ' ', 'g'))
+                         IS DISTINCT FROM BTRIM(REGEXP_REPLACE(LOWER(COALESCE(o.first_name, '') || ' ' || COALESCE(o.last_name, '')), '[^[:alnum:]]+', ' ', 'g'))
+                   )))
           )
       )
     -- Newest-first (codex r11): oldest-first pinned the same backlog ten

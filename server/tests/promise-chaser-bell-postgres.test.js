@@ -192,7 +192,7 @@ const OUR_NUMBER = '+19415550100';
     });
   });
 
-  describe('a quote promise closes on an estimate sent to the caller\'s number, whoever owns it (owner 2026-10-21)', () => {
+  describe('a quote promise closes on an estimate sent to the caller\'s number: unlinked, or linked when the number is one person\'s duplicate records (owner 2026-10-21)', () => {
     async function seedQuotePromise() {
       const earlier = callRow(240);
       const back = callRow(0);
@@ -231,6 +231,22 @@ const OUR_NUMBER = '+19415550100';
 
       expect(await sweepPromiseChasers()).toBe(0);
       expect(triggerNotification).not.toHaveBeenCalled();
+    });
+
+    test('a number shared by DIFFERENT names: the linked estimate does not close it (codex #3738 P1) — still rings', async () => {
+      await seedQuotePromise();
+      const alpha = randomUUID();
+      await mockConn('customers').insert([
+        { id: alpha, first_name: 'Alpha', last_name: 'Fixtureson', phone: PHONE },
+        { id: randomUUID(), first_name: 'Bravo', last_name: 'Samplewood', phone: PHONE },
+      ]);
+      await mockConn('estimates').insert({
+        id: randomUUID(), customer_id: alpha, customer_name: 'Alpha Fixtureson', customer_phone: PHONE, status: 'viewed',
+        sent_at: new Date(now - 200 * 60000), estimate_data: delivered(200), created_at: new Date(now - 210 * 60000), updated_at: new Date(now - 200 * 60000),
+      });
+
+      expect(await sweepPromiseChasers()).toBe(1);
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
     });
 
     test('an estimate to another number, or one handed off BEFORE the promise call, does not close it: still rings', async () => {

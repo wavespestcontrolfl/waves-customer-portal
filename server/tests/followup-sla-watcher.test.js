@@ -166,6 +166,7 @@ function mockDb({ activity = {}, call = null, standingRow = null, settled = [], 
         if (custs.length) return [...new Set(custs)].map((c) => ({ id: `est-${c}`, customer_id: c, owner_customer_id: c, customer_phone: null, ...base }));
         return [{ id: 'est-1', customer_id: null, customer_phone: phones[0] || null, ...base }];
       }
+      if (table === 'customers') return activity.customers || [];
       if (table === 'call_commitments' && cols.includes('fulfillment')) {
         const ids = entry.calls.filter(([m]) => m === 'whereIn').flatMap(([, , v]) => v);
         return ids.filter((id) => hints[id]).map((id) => ({ id, fulfillment: hints[id] }));
@@ -813,25 +814,29 @@ describe('an estimate sent to the customer keeps a quote promise; a callback onl
     expect(queriesOn('estimates')).toHaveLength(0);
   });
 
-  test('an unlinked caller is matched by an estimate on the same number, whoever owns it', async () => {
+  test('an unlinked caller is matched by an UNOWNED estimate on the same number; a linked one on a number shared by different names does not (codex #3738 P1)', async () => {
     mockDb({ activity: { estimates: { customer_phone: '(941) 555-0123' } } });
     listOpenCommitments.mockResolvedValue([row('a', { kind: 'send_estimate', customer_id: null, direction: 'inbound', from_phone: '+19415550123' })]);
     expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(0);
-    // The read is by number (the estimate's own phone OR the owning customer's), not by "no owner".
-    expect(argsOf('estimates', 'whereNull')).not.toContainEqual(['customer_id']);
-    expect(queriesOn('customers').length).toBeGreaterThan(0);
+    expect(argsOf('estimates', 'whereNull')).toContainEqual(['customer_id']);
     // Another number's estimate never clears it.
     mockDb({ activity: { estimates: { customer_phone: '(941) 555-0999' } } });
     expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+    // A linked estimate whose owner shares the number with a DIFFERENT name: not cleared.
+    mockDb({ activity: {
+      estimates: { customer_id: 'c-a', customer_phone: '(941) 555-0123' },
+      customers: [{ id: 'c-a', phone: '(941) 555-0123', first_name: 'Alpha', last_name: 'One' }, { id: 'c-b', phone: '(941) 555-0123', first_name: 'Bravo', last_name: 'Two' }],
+    } });
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
   });
 
-  test('an estimate sent to a customer record carrying the caller\'s number keeps an unlinked caller\'s quote promise (duplicate customer record)', async () => {
-    // The estimate has its own owner and no phone of its own; the owner's phone is the caller's.
-    mockDb({ activity: { estimates: { customer_id: 'dup-1', customer_phone: null, owner_phone: '(941) 555-0123' } } });
+  test('a linked estimate on a number whose live customer records are ONE person (same-name duplicates) keeps an unlinked caller\'s quote promise', async () => {
+    const dupes = [{ id: 'dup-1', phone: '(941) 555-0123', first_name: 'Martin', last_name: 'Fixtureson' }, { id: 'dup-2', phone: '+19415550123', first_name: 'martin', last_name: 'FIXTURESON' }];
+    mockDb({ activity: { estimates: { customer_id: 'dup-2', customer_phone: null }, customers: dupes } });
     listOpenCommitments.mockResolvedValue([row('a', { kind: 'send_estimate', customer_id: null, direction: 'inbound', from_phone: '+19415550123' })]);
     expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(0);
-    // An owner on a different number clears nothing.
-    mockDb({ activity: { estimates: { customer_id: 'dup-1', customer_phone: null, owner_phone: '(941) 555-0999' } } });
+    // An estimate owned by a customer who is not on the number clears nothing.
+    mockDb({ activity: { estimates: { customer_id: 'elsewhere', customer_phone: null }, customers: dupes } });
     expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
   });
 

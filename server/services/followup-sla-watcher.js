@@ -413,8 +413,8 @@ async function quoteAsks(conn, scoped) {
 // fence (whereEstimateCustomerOwnership: the customer's own rows plus live
 // lead-owned ones, never one another lead claims or a deleted lead's), so an
 // estimate parked on a lead and sent by email only still counts; an unlinked
-// caller matches an estimate on the caller's phone (its customer_phone, or
-// the phone of the customer record owning it), as estimateSentTo does. The canonical delivery witness (handedOffWithin /
+// caller matches an unlinked estimate on the caller's phone, or a linked one when
+// the number belongs to one person's duplicate records, as estimateSentTo does. The canonical delivery witness (handedOffWithin /
 // witnessAt: a real handoff or an acceptance, never a suppressed send's bare
 // sent_at) after the evidence boundary `since`.
 async function quoteEstimateIds(conn, scoped, asks = new Map()) {
@@ -437,19 +437,24 @@ async function quoteEstimateIds(conn, scoped, asks = new Map()) {
   const unlinked = quotes.filter((x) => x.phone);
   if (!unlinked.length) return done;
   const lowest = new Date(Math.min(...unlinked.map((x) => x.since.getTime())));
-  // The number alone matches (owner 2026-10-21): the estimate's own
-  // customer_phone, or the phone of the customer record that owns it (a
-  // duplicate record on the caller's number still got the quote).
+  // An UNLINKED estimate on the caller's phone counts. A LINKED one counts only
+  // when the number is not truly shared (codex #3738 P1, narrowed 2026-10-21):
+  // every live customer record carrying it is one person's duplicate (same
+  // name) and the estimate's owner is one of them (sameNameNumberOwners).
   const phones = [...new Set(unlinked.map((x) => x.phone))];
+  const safeByPhone = await commitments.sameNameNumberOwners(conn, phones);
+  const safeIds = [...new Set([...safeByPhone.values()].flat())];
   const sent = await commitments.handedOffWithin(conn('estimates'), lowest)
     .where((b) => {
-      commitments.phoneWhereAny(b, 'customer_phone', phones);
-      b.orWhereIn('customer_id', commitments.phoneWhereAny(conn('customers'), 'phone', phones).select('id'));
+      b.where((u) => { u.whereNull('customer_id'); commitments.phoneWhereAny(u, 'customer_phone', phones); });
+      if (safeIds.length) b.orWhereIn('customer_id', safeIds);
     })
-    .select(...commitments.HANDOFF_COLS(conn), 'customer_phone', 'service_interest', 'estimate_data',
-      conn.raw('(SELECT cu.phone FROM customers cu WHERE cu.id = estimates.customer_id) AS owner_phone'));
+    .select(...commitments.HANDOFF_COLS(conn), 'customer_id', 'customer_phone', 'service_interest', 'estimate_data');
+  const matches = (x, e) => (e.customer_id
+    ? (safeByPhone.get(x.phone) || []).includes(String(e.customer_id))
+    : phoneKey(e.customer_phone) === x.phone);
   for (const x of unlinked) {
-    if (sent.some((e) => (phoneKey(e.customer_phone) === x.phone || phoneKey(e.owner_phone) === x.phone) && commitments.witnessAt(e, x.since) && fits(x, e))) done.add(x.r.id);
+    if (sent.some((e) => matches(x, e) && commitments.witnessAt(e, x.since) && fits(x, e))) done.add(x.r.id);
   }
   return done;
 }
