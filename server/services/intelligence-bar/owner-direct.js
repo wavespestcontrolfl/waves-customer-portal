@@ -214,8 +214,11 @@ const SENDER_TEXT_READ_TOOLS = new Set([
 
 const POLICY = require('./action-policy.json');
 // Free-text field names: notes, special_instructions, pet_details,
-// pets_secured_plan (snake or camel case), side_gate_access, message bodies.
-const NOTE_FIELD = /(?:^|_)(?:notes?|instructions?|details?|comments?|messages?|body|text|transcript|summary|access|plan)$|(?:Notes?|Instructions?|Details?|Comments?|Messages?|Body|Text|Transcript|Summary|Access|Plan)$/;
+// pets_secured_plan (snake or camel case), side_gate_access, message bodies, and
+// the customer-entered access codes get_stop_details returns (neighborhood_gate_code,
+// property_gate_code, garage_code, lockbox_code). Only those named code fields:
+// zip_code and other *_code fields stay untainted.
+const NOTE_FIELD = /(?:^|_)(?:notes?|instructions?|details?|comments?|messages?|body|text|transcript|summary|access|plan|gate_code|garage_code|lockbox_code|access_code)$|(?:Notes?|Instructions?|Details?|Comments?|Messages?|Body|Text|Transcript|Summary|Access|Plan|[Gg]ateCode|[Gg]arageCode|[Ll]ockboxCode|[Aa]ccessCode)$/;
 // Any string this long in an answer is prose, whatever its field is called.
 const PROSE_LENGTH = 80;
 const SCAN_NODE_LIMIT = 20000;
