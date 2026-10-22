@@ -124,7 +124,18 @@ function isCareersInterviewPath(reqPath = '') {
   return /^\/careers\/interview\/[a-f0-9]{64}\/?$/.test(String(reqPath || ''));
 }
 
+// The portal home and login page are an app door, not a search result.
+// GSC audit 2026-10-22: Google indexed portal.wavespestcontrol.com/ and /login
+// (102 impressions in 90 days) beside the marketing site.
+function isPortalEntryPath(reqPath) {
+  return reqPath === '/' || reqPath === '/login' || reqPath === '/login/';
+}
+
 function applySensitiveSpaHeaders(reqPath, res) {
+  if (isPortalEntryPath(reqPath)) {
+    res.set('X-Robots-Tag', 'noindex');
+    return;
+  }
   if (isServiceOutlinePath(reqPath)) {
     res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
     res.set('Referrer-Policy', 'no-referrer');
@@ -138,6 +149,7 @@ function applySensitiveSpaHeaders(reqPath, res) {
 }
 
 module.exports = {
+  isPortalEntryPath,
   isCareersInterviewPath,
   applySensitiveSpaHeaders,
   isServiceOutlinePath,

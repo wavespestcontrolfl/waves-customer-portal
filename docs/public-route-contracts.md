@@ -2648,6 +2648,22 @@ email, the watering text (`lines` only), the hero task and Ask Waves are unchang
 When present on a live payload the displayed one (the note, else the forecast
 sentence) counts toward `reportV2.lead`'s 250-word budget (`leadWords`). No new
 route, query parameter or customer message.
+`GATE_LAWN_WATERING_TEXT_FORECAST` (dark, owner 2026-10-22; needs
+`GATE_LAWN_WATERING_FORECAST`; gate off leaves the payload unchanged, key for key)
+changes when `forecastLine` exists and where it may appear, with no new key: (1) it
+is frozen only when a second source agrees, the NWS hourly forecast giving at least
+one hour inside the same window a rain chance of 60% or more (the chance is never
+printed; the frozen block records `agreement`); (2) a `hold_then_water_in` banner
+whose hold has a printed end and whose `expiresAt` is set (never a hold that waits
+for drying, never a long window or a `later` phase) may carry it, worded for rain
+after the hold ("About ½ inch of rain is forecast between Wed 3 PM and Thu 9 AM. If
+at least ¼ inch falls in that time, it counts as watering in today's treatment. If
+it does not, run the watering above right away."; the frozen block records
+`afterHold: true` and is read only beside such a hold). The live page shows it under
+that hold-then-water-in (never under a plain hold), and `leadWords` counts it. It
+stays LIVE VIEW ONLY on this route; the lawn watering text, a customer message
+outside this route, carries the same frozen sentence after its steps, but only one
+frozen with the NWS agreement.
 Amount-only water-in (owner 2026-10-08, permanent and ungated since 2026-10-09;
 requires `GATE_LAWN_WATERING_RULE`): when a water-in is BUILT AT COMPLETION for a
 customer with no sprinkler head type or measured rate on file, its `lines` give
@@ -3704,7 +3720,19 @@ or that widens the hold beyond `missing_token`, is a P0),
 posts/by-slug/:slug, rss, quiz/:token/:quizId/:answer,
 feedback/:token/:reaction, e/:token/:eventId (event click-through:
 records one deduped analytics row then 302s to the DB-locked event
-URL; unknown token = untracked redirect, never blocks the reader)
+URL; unknown token = untracked redirect, never blocks the reader.
+With `GATE_NEWSLETTER_CLICK_BOUND=true` the event URL is honoured only
+when the token is a real delivery AND the event is in that send's
+`event_ids` or `alternate_event_ids`; the target is the URL the send
+carried (`newsletter_sends.event_url_snapshot`, written at send time),
+or the live `event_url` for a send made before snapshots existed. An
+unknown token, an event outside the lineup, a send whose snapshot lacks
+the event or its URL, or a membership lookup that fails goes to the homepage
+(`https://www.wavespestcontrol.com/`); a non-uuid token goes home before
+any query. A click-row write that fails AFTER membership was verified
+still sends the reader to the event. The per-IP over-budget path records
+nothing and applies the same rules. Gate off = the behaviour
+above this note, unchanged)
 — rate-limited, read-only for posts/rss,
 double-opt-in for subscribe (the response is unchanged and uniform; `source` is free text,
 and ONLY `source: "out_of_area_waitlist"` also reads the optional body `zip` / `city`
@@ -5309,8 +5337,6 @@ of reporting a taken slot.
 
 Monthly average beside per-application prices (owner ruling 2026-10-20, `GATE_ESTIMATE_MONTHLY_AVERAGE`, read through `featureGates.isEnabled('estimateMonthlyAverage')`; off unless exactly `true` in production). `GET /:token/data` adds two OPTIONAL fields, both ABSENT (not false, not null) with the gate off, so a gate-off response is byte-identical to before. (1) Top-level `monthlyAverageEnabled: true`: present on any `/data` response when the gate is on. It is a switch only; the estimate page derives the figures itself from the SELECTED cadences (`client/src/lib/estimateMonthlyAverage.js`) and shows nothing for commercial, quote-required, one-time, monthly-billed, annual-prepay, accepted or declined estimates, or when the per-service averages cannot be made to add up to the plan's monthly. (2) `proposal.monthlyAverage`: present ONLY on the document (PDF) pass (`?mode=pdf`, the signed-pin headless render, under `GATE_ESTIMATE_DOC_PDF`), only with the gate on, and only when the plan is a residential estimate billed per application whose recurring lines are ALL per-application lines, that is not an authored or commercial proposal and not quote-required, and whose lines reconcile to the stored `monthly_total` (rounding within $0.05, or a declared plan credit explaining the gap); otherwise the key is absent. Shape: `{ planMonthly: number (the stored monthly_total, dollars), credit: { label: string, monthly: number } | null (a declared plan-level credit, per month), bundleDiscountPct: number (fraction, 0.1 = 10%; 0 when none), oneTime: { amount: number, setup: boolean } | null (one-time charges, never part of the average; setup is true only when every one-time line reads as setup) }`. The document runs the shared builder (`shared/estimate-monthly-average.cjs`) over its own per-application lines and these inputs to print "$X a month" under each line, a plan line (two or more services, or one service with a credit) and "Averaged over the year. You pay after each application." Public contract: the plan average always equals `monthly_total`, the per-service averages add up to it (less any credit line) to the cent, and one-time charges never enter it. The delivery email (`estimate.delivery`) uses the same builder server-side and adds no public field.
 
-Application-month breakdown (owner 2026-10-21, `GATE_ESTIMATE_APPLICATION_MONTHS`, read through `featureGates.isEnabled('estimateApplicationMonths')`; off unless exactly `true` in production). `GET /:token/data` adds one OPTIONAL top-level field, `applicationMonthsEnabled: true`, present only when BOTH `estimateMonthlyAverage` and `estimateApplicationMonths` are on, and ABSENT (not false, not null) when either is off, so a response with either gate off is byte-identical to before. It is a switch only and carries no figures: the estimate page derives the per-application prices, the month amounts and the average from the same selected-cadence data it already uses for the monthly average (`applicationMonthsBreakdown` in `client/src/lib/estimateMonthlyAverage.js`), and renders exactly as before for any plan shape the breakdown does not cover. The PDF document pass reads the same switch (no new field: the document derives the month rows from `proposal.monthlyAverage` and the lines it already receives, through the shared `applicationMonthsBreakdown` in `shared/estimate-monthly-average.cjs`), and the delivery and follow-up emails build the same breakdown server-side. No other route and no other payload field changes.
-
 
 Appointment reminders registered by `/accept` derive their date and arrival
 from the committed service row. A server-owned `reservation_service_mix`
@@ -5448,6 +5474,41 @@ send runs only when the number matches an active customer), so a timing
 observer can still distinguish known numbers — do not widen the claim
 beyond the body, and do not add a second observable difference. `/me`, `/properties`, `/select-property`
 require the customer JWT.
+Contact login on the same routes (`GATE_CONTACT_LOGIN`, dark; strict
+`=== 'true'`, read at call time — `contactLoginLive()`): when live, send-code
+and verify-code also serve an ON-LOCATION CONTACT — a number stored in a
+customer's `service_contact*_phone` slot whose holder attestation
+(`service_contacts_consent_at`) covers it (`contactSlotMayLogIn`; the
+`DISABLE_CONTACT_CONSENT_GATE` SMS rollback switch never opens the login) —
+resolved ONLY when no active account-holder row carries the number
+(`resolveLoginIdentity`: the holder first; a contact on several rows lands
+on the primary profile, then the oldest). send-code then sends that contact
+the OTP under the same uniform body; verify-code mints a session whose
+access AND refresh tokens carry `contactKey` (the last-10 phone key, also
+`customer_refresh_tokens.contact_key`) and returns `actor { kind:
+'contact', slot, name, phone, email }` — a holder's response carries `actor
+{ kind: 'holder' }` — with the contact's own name, phone and email in
+`customer`, never the holder's identity, referral code, credits, prepay,
+rate or tier (the `/me` payload is projected the same way, its `address`
+the house the contact's reads are scoped to and `notificationPrefs: null`).
+The App Store reviewer bypass (`REVIEW_LOGIN_PHONE` + `REVIEW_LOGIN_CODE`)
+resolves the demo HOLDER row only — never a contact — and send-code skips
+Twilio only while the review number resolves to it. refresh rotates a
+contact family only while the gate is on, the row is `active` (the
+cancelled read-only allowance does not apply to contacts) and the number
+still occupies a slot; otherwise it answers the same 401
+`INVALID_REFRESH_TOKEN` and REVOKES the family (`contact_removed`), a
+profile switch is refused, and the holder's contact save revokes the
+families of the phones it removed — re-adding a number never revives a
+removed device's session. A contact bearer reaches only
+`CONTACT_SESSION_ROUTES` (`server/middleware/auth.js`: `/auth/me`,
+`/auth/properties`, schedule and visit-history reads, tracking, documents
+reads, activity beacons, GET/PUT `/notifications/contact-preferences`, the
+token-scoped push release); every other authenticated route answers 403
+`ACCOUNT_HOLDER_ONLY` (never a 401 the client would read as a dead session).
+Gate off: a contact number is unknown at send-code (uniform body, no OTP),
+refused at verify-code, and an existing contact bearer or refresh family is
+refused (401) — byte-identical to before.
 Staff authentication (`server/routes/admin-auth.js`, mounted at
 `/api/admin/auth`): `POST /login` sits behind the same `authLimiter` (10 per
 15 min) and answers every failure with a generic 401 `Invalid credentials`;
@@ -6032,11 +6093,20 @@ supplied one is tried), parsed with `parseRawAddress` and geocoded with
 street-level quality filtering but `requireInServiceArea:false` (the box
 alone is never grounds to discard a geocode as unresolvable); checked
 against the service area via `checkServiceArea`, applied uniformly to every
-resolved location including a customer's stored coordinates: county via
+resolved location including a customer's stored coordinates: first, the
+address's own city or a Punta Gorda-only ZIP (33950, 33951, 33955; 33982 is shared with Babcock Ranch, so the city decides) is out
+(Punta Gorda is not served per the 2026-10-22 owner ruling, although Charlotte
+County is; `services/excluded-localities.js`, city / ZIP only, no coordinate
+box); then county via
 `services/address-validation`'s `reverseGeocodeCounty` when a Google key is
 configured (a null county is NOT permission — 503
 `{ error: 'service_area_unavailable' }`, recoverable; a DeSoto county is out,
-DeSoto is not served per the 2026-09-30 owner ruling), else the explicit
+DeSoto is not served per the 2026-09-30 owner ruling; when that county is
+Charlotte, a second lookup, `reverseGeocodeLocality`, reads the locality and
+ZIP Google places on the coordinate: an excluded locality or Punta Gorda-only
+ZIP is out even when the submitted address names none, and a failed or empty
+lookup, or no locality on a shared ZIP 33980 / 33982 / 33983, is 503
+`{ error: 'service_area_unavailable' }`, recoverable), else the explicit
 no-key fallback: outside the coarse box is out; inside the DeSoto exclusion
 rectangle (`DESOTO_EXCLUSION`) the point is out unless the address's own ZIP
 is a served ZIP (`isInServiceAreaBox(lat, lng, { zip })`, which holds no
@@ -7255,3 +7325,5 @@ AGENTS.md P0 rule "Public route surface", not in this document. This
 document holds the per-route entries only.
 
 Report greeting first name (follow-up to #5559 / #5612): the service-report V1 payload (`/api/reports/:token/data`, and the PDF and report-email renders that share `buildReportV1Data`), the legacy-format service-report payload from the same route, and the project report payload (`/api/reports/project/:token/data`) now carry `customerFirstName` beside the unchanged `customerName`: the customer's own trimmed `first_name`, or `null` when it is blank (the call booker's last-name-only customers, where the composed `customerName` is only the surname). The report pages, the report email, and the visit recap greet by it and fall back to "there" when it is `null`; a payload without the key (cached or older frozen payloads) greets by the first token of `customerName` as before. On a service record that carries a completion-time identity snapshot the value comes from the snapshot's first name, the same source as `customerName`, so a frozen report keeps greeting the way it did at completion. It is the customer's own first name only, already shown inside `customerName`: no new exposure, token, eligibility, privacy or rate-limit change, and no display change to the full name. A report-email recipient's own contact name still greets by its first token.
+
+Pre-treat sticker report (GATE_PRETREAT_STICKER_REPORT, dark): the project report payload (`/api/reports/project/:token/data`) carries a new boolean `pretreatStickerReport`. It is `true` only when the project is a `pre_treatment_termite_certificate` AND the gate is on; every other type and gate-off return `false`. The client then renders the certificate as the Notice of Termite Protection label (form WV-001) with a details block under it; `false` or a missing key renders today's certificate. The certificate's `findings` may also carry four new optional keys, `final_exterior_date`, `final_exterior_product`, `final_exterior_active_ingredient` and `final_exterior_applicator_name`, entered by staff on the certificate form; they ride the same `findings` object, with the same token, hold and fee-scrub rules as every other certificate field. The three free-text keys also pass the customer copy screen (`customerCopyViolations` + `containsReportAccessCode`): the admin create/update routes refuse a failing value with 422 `final_exterior_copy`, and `/data` blanks one that is already stored. `final_exterior_date` must be blank or a real date no later than today (ET), else 422 `final_exterior_date_invalid`. No new route, token, eligibility, privacy or rate-limit change, and no send-readiness change.

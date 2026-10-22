@@ -14,6 +14,7 @@ const { isAssignable } = require('./technician-eligibility');
 const VisitCapacity = require('./combined-visit-capacity');
 const { serviceDurationMinutes } = require('./service-library');
 const AvailabilityEngine = require('./availability');
+const { withoutAssessmentVisits } = require('./assessment-booking');
 const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2, areaAddOnConfig } = require('./pricing-engine/constants');
 // Canonical service-key tier membership (aliased: this module's local
 // serviceCountsTowardWaveGuardTier is the svc-shaped, line-flag-aware form).
@@ -6147,6 +6148,11 @@ const EstimateConverter = {
     let scheduledCount = 0;
     let termStartDate = null;
     let firstScheduledServiceId = null;
+    // Earliest date actually inserted by the auto-schedule loop (a seasonal
+    // unit can roll to February while a later-inserted unit lands sooner).
+    // firstScheduledServiceId is the first INSERTED unit, not the earliest;
+    // callers that tell the customer or staff the first-visit date read this.
+    let earliestScheduledUnitDate = null;
     // Ids of same-trip top-level recurring parents this accept ACTUALLY
     // CREATED whose first-visit amount is covered by the combined
     // first-application invoice — never a same-day reconstruction that
@@ -6238,23 +6244,29 @@ const EstimateConverter = {
       .whereNull('reservation_expires_at')
       .count('id as count')
       .first();
-    const reservationRowsExist = Number(existingFromReservation?.count || 0) > 0;
+    const linkedVisitCount = Number(existingFromReservation?.count || 0);
     // The Intelligence Bar card promised no visit linked to this estimate
     // (opts.refuseLinkedVisits, set by markEstimateManuallyAccepted from the
     // card's pin): a row linked since — booking.js can link one outside the
     // accept's locks — rolls the whole accept back instead of taking the
-    // reservation path the card did not show.
-    if (opts.refuseLinkedVisits === true && reservationRowsExist) throw linkedVisitsAfterCardError();
+    // reservation path the card did not show. Counts EVERY stamped row,
+    // assessments included: the card's pin did.
+    if (opts.refuseLinkedVisits === true && linkedVisitCount > 0) throw linkedVisitsAfterCardError();
     // Loaded here rather than inside the reservation branch so the multi-unit
     // lock pre-pass below can read the reserved row's service identity before
-    // any seeding unit processes.
-    const reservedRows = reservationRowsExist
-      ? await database('scheduled_services')
+    // any seeding unit processes. A Waves Assessment stamped to this estimate
+    // (adopted by an older build) is a free consultation, never the plan's
+    // first paid application: it is dropped here so it cannot set the series
+    // start nor be priced as a plan visit, and the normal auto-schedule path
+    // runs when it was the only stamped row.
+    const reservedRows = linkedVisitCount > 0
+      ? await withoutAssessmentVisits(await database('scheduled_services')
         .where({ source_estimate_id: estimateId })
         .whereNotNull('customer_id')
         .whereNull('reservation_expires_at')
-        .orderBy('scheduled_date', 'asc')
+        .orderBy('scheduled_date', 'asc'), database)
       : [];
+    const reservationRowsExist = reservedRows.length > 0;
     const capacitySnapshot = VisitCapacity.capacityFromReservation(reservedRows[0]);
     const combinedCapacity = capacitySnapshot && !capacitySnapshot.allocatedServiceIds ? capacitySnapshot : null;
     if (combinedCapacity && !database.isTransaction) throw VisitCapacity.capacityUnavailable();
@@ -6449,14 +6461,14 @@ const EstimateConverter = {
     } else if (reservationRowsExist) {
       logger.info(
         `[estimate-converter] Skipping auto-schedule for estimate ${estimateId} — ` +
-        `reservation path already created ${existingFromReservation.count} scheduled_services row(s)`
+        `reservation path already created ${reservedRows.length} scheduled_services row(s)`
       );
       // reservedRows hoisted above the branch (lock pre-pass needs it).
       const reservedStart = reservedRows[0] || null;
       const capacityMembers = combinedCapacity ? [reservedStart] : [];
       termStartDate = reservedStart?.scheduled_date || null;
       firstScheduledServiceId = reservedStart?.id || null;
-      scheduledCount = Number(existingFromReservation?.count || 0);
+      scheduledCount = reservedRows.length;
 
       // Combined routing reaches reserved rows too: rewrite the slot row to
       // the combined service (type/service_id/duration — the customer's
@@ -7474,9 +7486,9 @@ const EstimateConverter = {
         serviceKey: multiTechTextTimesLive() ? funnelKeyForEstimate(recurringServicesForConversion, estimate) : '',
       });
       termStartDate = firstServiceDate;
-      // Earliest date actually inserted by the loop below — replaces the
-      // picked date when a seasonal roll moved the real first visit.
-      let earliestScheduledUnitDate = null;
+      // Earliest date actually inserted by the loop below (declared at the
+      // function top and returned) — replaces the picked date when a seasonal
+      // roll moved the real first visit.
       // The ANCHOR's own scheduled date — the exact date of whichever unit
       // becomes firstScheduledServiceId below (P1-B) — kept separate from
       // earliestScheduledUnitDate above (which tracks the MINIMUM across
@@ -8952,6 +8964,9 @@ const EstimateConverter = {
       recurringScheduleCheck,
       requiresManualRecurringScheduling: hasCommercialRecurring,
       firstScheduledServiceId,
+      // Additive (Codex r2 on #6412): the earliest date among the units this
+      // conversion auto-scheduled; null when none was inserted.
+      earliestScheduledUnitDate,
       // Additive (Codex round-12 P2, PR #5021): ids of same-trip sibling
       // parents actually promoted for THIS accept's reserved slot — empty
       // for every non-reservation or single-program accept. Callers that

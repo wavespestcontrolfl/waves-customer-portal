@@ -200,3 +200,27 @@ it("keeps the runs panel stable while a background refresh is pending", async ()
   expect(screen.queryByText("Loading runs…")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: /completed.*Apply/ })).toBeInTheDocument();
 });
+
+it("shows what a no-slot search saw: its window and each searched day's open starts (audit 2026-10-22, finding 6)", async () => {
+  detail = { run, logs: [{
+    ...decision, action: "no_change", reason_code: "NO_VALID_SLOT", reason_description: "No valid candidate slot found",
+    constraints_checked: { search: { date_from: "2026-11-03", date_to: "2026-11-06", open_starts_by_date: { "2026-11-03": 0, "2026-11-04": 2 } } },
+  }] };
+  mount();
+  await screen.findByText("No valid candidate slot found");
+  fireEvent.click(screen.getByText("Decision details and visit controls"));
+  expect(screen.getByText("Days searched")).toBeInTheDocument();
+  expect(screen.getByText("Tue, Nov 3 – Fri, Nov 6")).toBeInTheDocument();
+  expect(screen.getByText("Tue, Nov 3: 0 · Wed, Nov 4: 2")).toBeInTheDocument();
+});
+
+it("a search with no open working day in its window says so", async () => {
+  detail = { run, logs: [{
+    ...decision, action: "no_change", reason_code: "NO_VALID_SLOT", reason_description: "No valid candidate slot found",
+    constraints_checked: { search: { date_from: "2026-11-26", date_to: "2026-11-26", open_starts_by_date: {} } },
+  }] };
+  mount();
+  await screen.findByText("No valid candidate slot found");
+  fireEvent.click(screen.getByText("Decision details and visit controls"));
+  expect(screen.getByText("No open working day in the window")).toBeInTheDocument();
+});

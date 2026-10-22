@@ -25,6 +25,7 @@ const { scoreAppointmentPlacement } = require('./scoring');
 const {
   applyAutoDispatchMove, revalidatePlacement, unitMoveSize, previewGroupMove,
 } = require('./apply');
+const { startPointRefusal } = require('./start-point-fence');
 const { toDateStr, shiftDateStr } = require('./dates');
 const { stampedAddressDiverges } = require('../stamped-address');
 const { ensureCustomerGeocoded } = require('../geocoder');
@@ -36,6 +37,7 @@ const roadCheck = require('./road-check');
 const moveLimit = require('./move-limit');
 const needsPerson = require('./needs-person-notice');
 const moveCheck = require('./proofreader/nightly');
+const checkDown = require('./check-down-notice');
 
 // Self-heal MISSING_GEO: geocode the customer (fills customers.latitude/longitude
 // from their address) and re-check eligibility, so a not-yet-geocoded recurring
@@ -351,7 +353,7 @@ async function settleConflicts(run) {
 
 async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   const {
-    current, candidates, drops, skipped,
+    current, candidates, drops, skipped, search,
   } = await findSlotsOrSkip(service, prefs, ctx);
   const prefsSnapshot = prefs.raw_snapshot;
 
@@ -362,7 +364,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
       reason_code: reason.code,
       reason_description: reason.description,
       conflict: (current && current.conflict) || null,
-      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}), ...conflictOf(current) } },
+      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, ...(search ? { search } : {}), model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}), ...conflictOf(current) } },
     };
   }
 
@@ -1076,6 +1078,9 @@ async function evaluateServiceForRun(service, run) {
     lookaheadDays: config.lookaheadDays,
     dateToleranceDays: config.dateToleranceDays,
     capabilityFor: run.capabilityFor,
+    // GATE_TECH_START_POINTS: the run's technician start points, read once
+    // per technician (candidate-slots.js loadStartPoints); unused gate off.
+    startPoints: run.startPoints,
     topN: 60,
     // GATE_AUTO_DISPATCH_CONFLICT_MOVES: read the visit's current conflict.
     conflictMoves: config.conflictMovesEnabled === true,
@@ -1271,6 +1276,9 @@ async function applyPlannedMove(pm, run, attempt) {
     // The conflict that lifted the bar for this move; the move guard re-reads
     // it on the move transaction and refuses when it is gone.
     sourceConflict: (fresh.current && fresh.current.conflict) || null,
+    // The start points this move (and any SLOT_TAKEN fallback) was scored from:
+    // the run's cache. The move guard refuses when a Team-tab edit changed one.
+    startPointFor: (technicianId) => require('./candidate-slots')._internals.scoredStartPoint(pm.ctx, technicianId),
     ...moveCheck.writeOptions(checked, {
       alternateCandidates: fresh.rankedCandidates,
       rescore: () => evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary),
@@ -1320,14 +1328,20 @@ async function preferencesChanged(pm) {
   return moveCheck.preferencesPrint(now) !== moveCheck.preferencesPrint(pm.prefs);
 }
 
-// A proofread move that the write refused for an ordinary reason: the one
-// approved slot was taken (a proofread move has no fallback slot), or the
-// visit changed while the model read. Nothing moved; the next run tries again.
-async function logApprovedSlotTaken(pm, attempt, run, reason) {
+// A move that the write refused for an ordinary reason, not a failure: the one
+// approved slot was taken (a proofread move has no fallback slot), the visit
+// changed while the model read, or a technician's start address changed after
+// the move was scored. Nothing moved; the next run tries again.
+function ordinaryRefusal(attempt, err) {
+  return moveCheck.approvedSlotTaken(attempt.checked, err) || startPointRefusal(err);
+}
+
+async function logOrdinaryRefusal(pm, attempt, run, reason) {
   noteUnmoved(run, pm.service, reason.reason_code);
+  const { constraints } = attempt.fresh.audit;
   try {
     await audit.logDecision(run.runId, {
-      action: 'no_change', service: pm.service, ...reason, ...attempt.fresh.audit, constraints: { ...attempt.fresh.audit.constraints, proofreader: attempt.checked.audit },
+      action: 'no_change', service: pm.service, ...reason, ...attempt.fresh.audit, constraints: attempt.checked ? { ...constraints, proofreader: attempt.checked.audit } : constraints,
     });
   } catch (_) { /* swallow */ }
 }
@@ -1366,8 +1380,8 @@ async function runPassTwo(run) {
     try {
       await applyPlannedMove(pm, run, attempt);
     } catch (applyErr) {
-      const notAFailure = moveCheck.approvedSlotTaken(attempt.checked, applyErr);
-      if (notAFailure) await logApprovedSlotTaken(pm, attempt, run, notAFailure);
+      const notAFailure = ordinaryRefusal(attempt, applyErr);
+      if (notAFailure) await logOrdinaryRefusal(pm, attempt, run, notAFailure);
       else await recordApplyFailure(pm, attempt.fresh, applyErr, run);
     }
   }
@@ -1398,6 +1412,7 @@ async function runAutoDispatch(opts = {}) {
   const run = {
     runId,
     config,
+    startPoints: new Map(),
     guardMode: config.guardMode,
     nowDate,
     today,
@@ -1489,6 +1504,9 @@ async function runAutoDispatch(opts = {}) {
   await settleConflicts(run);
   await needsPerson.raiseNotices(run.needsPerson, { nowDate: run.nowDate, clearedIds: run.clearedIds });
   await moveCheck.raiseNotices(run.proofreader);
+  // Every check of the night broke: one notice that the tool is stopped, and
+  // why (owner audit 2026-10-22, finding 1). Best-effort; never throws.
+  await checkDown.noteRun(run.proofreader, { enabled: config.proofreaderEnabled === true, nowDate: run.nowDate });
   runStatus = moveCheck.statusAfterNotices(run.proofreader, runStatus, noticesClosed);
   try {
     await audit.completeRun(runId, { status: runStatus, totals, error: runError });

@@ -430,3 +430,27 @@ describe('applyLawnReportReconciliation lead tail', () => {
     expect(out.reportV2.snapshot.scoreExplanation).toMatch(/uneven sprinkler coverage/);
   });
 });
+
+describe('leadWords counts the forecast sentence the banner shows', () => {
+  const FORECAST = 'About ½ inch of rain is forecast between Wed 3 PM and Thu 9 AM.';
+  const RADAR = 'Radar measured about 0.5 inch of rain near your address since your visit.';
+  const count = (banner) => leadWords({ banner });
+  const words = (text) => text.split(/\s+/).length;
+  const lines = ['Skip your turf watering until Wed 3 PM.', 'After that, water in today’s treatment with about ¼ inch by Thu 3 PM.'];
+
+  test('a hold-then-water-in counts its forecast sentence and never a radar note', () => {
+    const plain = count({ state: 'hold_then_water_in', lines });
+    expect(count({ state: 'hold_then_water_in', lines, forecastLine: FORECAST, observedRain: { line: RADAR } })).toBe(plain + words(FORECAST));
+  });
+
+  test('a plain hold counts neither', () => {
+    const plain = count({ state: 'hold', lines });
+    expect(count({ state: 'hold', lines, forecastLine: FORECAST, observedRain: { line: RADAR } })).toBe(plain);
+  });
+
+  test('a water-in counts the radar note when it exists, else the forecast sentence', () => {
+    const plain = count({ state: 'water_in', lines });
+    expect(count({ state: 'water_in', lines, forecastLine: FORECAST })).toBe(plain + words(FORECAST));
+    expect(count({ state: 'water_in', lines, forecastLine: FORECAST, observedRain: { line: RADAR } })).toBe(plain + words(RADAR));
+  });
+});

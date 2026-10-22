@@ -113,13 +113,90 @@ async function sendSubscription(sub, notification, options) {
   }
 }
 
+// Told as each device accepts, so a caller's beforeHandoff can tell "no
+// device has it yet" from "a device already has this copy"
+// (tech-visit-notifications.js sendBundle). Its error never stops the fan-out.
+function tellDelivered(onDelivered, sub) {
+  if (typeof onDelivered !== 'function') return;
+  try {
+    onDelivered(sub);
+  } catch (err) {
+    logger.warn(`[push] onDelivered failed (${err.code || err.name || 'error'})`);
+  }
+}
+
+// Contact devices (contact login, GATE_CONTACT_LOGIN): push_subscriptions
+// rows stamped with contact_phone_key belong to an on-location contact's
+// phone. They are EXCLUDED from every customer push unless the purpose is
+// one a contact may receive (contact-notification-prefs.js
+// contactPushPurpose: appointment and report notices), and then only while
+// the key still occupies a contact slot on the row's customer and that
+// contact's own choices allow it. Fail closed: an unreadable choices table
+// or customer row drops the contact device, never the holder's.
+async function contactDevicesAllowed(subs, purpose, customerId, database = db) {
+  // A contact's device belongs to ONE profile's contact list: only a push
+  // addressed to that profile may reach it (codex r1 on #6364: the
+  // account-wide fan-out under GATE_CUSTOMER_APP_NOTIFICATIONS would have
+  // sent a sibling profile's visits to a contact listed on another house).
+  // Holder devices keep the account-wide fan-out.
+  const contactSubs = subs.filter((s) => s.contact_phone_key && String(s.customer_id) === String(customerId));
+  const holderSubs = subs.filter((s) => !s.contact_phone_key);
+  if (!contactSubs.length) return holderSubs;
+  const ContactPrefs = require('./contact-notification-prefs');
+  if (!purpose.allowed || !ContactPrefs.contactPrefsLive()) return holderSubs;
+  const {
+    findServiceContactSlotByPhoneKey, contactSlotMayLogIn, slotWithheldFromReports, withAccountPrimaryContact,
+    getServiceContactSlots, phoneKeyOf,
+  } = require('./customer-contact');
+  const kept = [];
+  const customers = new Map();
+  const prefRows = new Map();
+  for (const sub of contactSubs) {
+    const id = String(sub.customer_id);
+    try {
+      if (!customers.has(id)) {
+        // The whole row, with the account primary's role filled in: the
+        // consent attestation, the withheld-key list and the report rule
+        // below read more than the slot columns.
+        const row = await database('customers').where({ id: sub.customer_id }).first();
+        customers.set(id, row ? await withAccountPrimaryContact(row, { db: database }) : null);
+      }
+      if (!prefRows.has(id)) prefRows.set(id, await ContactPrefs.loadContactPrefRows(sub.customer_id, { dbh: database }));
+    } catch (err) {
+      logger.warn(`[push] contact device check failed for ${id}: ${err.code || err.message} — holding contact devices`);
+      continue;
+    }
+    const customer = customers.get(id);
+    if (!customer || !findServiceContactSlotByPhoneKey(customer, sub.contact_phone_key)) continue;
+    // The same authorization the login and the Documents tab apply (codex
+    // #6364 security r1): a number whose attestation no longer covers it
+    // may not be reached, and a contact the report rule withholds reports
+    // from (a tenant; a non-manager on a managed account) gets no report
+    // push — its body and link would hand them the report anyway. Deny
+    // wins across EVERY slot carrying the number (codex #6364 r1 P1), as
+    // contactSessionReportsWithheld decides it for the Documents tab.
+    if (!contactSlotMayLogIn(customer, sub.contact_phone_key)) continue;
+    const key = phoneKeyOf(sub.contact_phone_key);
+    const slots = getServiceContactSlots(customer).filter((s) => s.phone && phoneKeyOf(s.phone) === key);
+    if (purpose.column === 'service_completed' && slots.some((s) => slotWithheldFromReports(customer, s))) continue;
+    // Push rides the contact's TEXT choice: a purpose they declined, texts
+    // off, or an email-only delivery choice all hold the push too.
+    if (!ContactPrefs.contactAllows(prefRows.get(id).get(String(sub.contact_phone_key)) || null, purpose.column, 'sms')) continue;
+    kept.push(sub);
+  }
+  return [...holderSubs, ...kept];
+}
+
 class PushNotificationService {
-  async customerStatus(customerId, database = db) {
+  // opts.contactKey: a contact session's own status — only that contact's
+  // devices count; a holder's status never counts a contact device.
+  async customerStatus(customerId, database = db, { contactKey = null } = {}) {
     const context = await customerPushContext(customerId, database);
     if (!context) return { enabled: false, registered: false, fresh: false };
-    const rows = await database('push_subscriptions')
+    const rows = (await database('push_subscriptions')
       .whereIn('customer_id', context.ids).where({ active: true, role: 'customer' })
-      .whereIn('platform', ['ios', 'android']).select('platform', 'updated_at');
+      .whereIn('platform', ['ios', 'android']).select('platform', 'updated_at', 'contact_phone_key'))
+      .filter((row) => (contactKey ? String(row.contact_phone_key || '') === String(contactKey) : !row.contact_phone_key));
     const cutoff = Date.now() - PUSH_HEARTBEAT_HOURS * 3600000;
     const providers = { ios: apns.status().configured, android: fcm.status().configured };
     return {
@@ -185,11 +262,16 @@ class PushNotificationService {
     // boundary; letting this query's own exception escape would report a
     // never-attempted send as ambiguous instead of not_sent (codex P2).
     let subs;
+    // opts.messageType: what this push is about (the routed message type or
+    // the bell's preference key). Contact devices are included only for the
+    // appointment / report purposes contactPushPurpose names; an untyped
+    // push never reaches one.
+    const contactPurpose = require('./contact-notification-prefs').contactPushPurpose(opts.messageType);
     try {
       const query = db('push_subscriptions').whereIn('customer_id', context.ids).where({ active: true, role: 'customer' });
       if (opts.minUpdatedAt) query.where('updated_at', '>=', opts.minUpdatedAt);
       if (opts.nativeOnly) query.whereIn('platform', ['ios', 'android']);
-      subs = await query;
+      subs = await contactDevicesAllowed(await query, contactPurpose, customerId);
     } catch (err) {
       logger.warn(`[push] Subscription lookup failed for ${customerId}: ${err.code || err.message}`);
       return { ...summarize([], 0), reason: 'subscription_lookup_failed' };
@@ -262,9 +344,9 @@ class PushNotificationService {
       }
       const result = await sendSubscription(sub, notification, { shouldContinue: compositeShouldContinue })
         .catch(() => ({ sent: false, failed: true, reason: 'provider_failure' }));
-      results.push(result);
+      results.push({ ...result, contactDevice: Boolean(sub.contact_phone_key) });
       if (claimLost) break;
-      if (result.sent && opts.notificationId) {
+      if (acceptedHolderLeg(sub, result) && opts.notificationId) {
         // Persist the first acceptance before walking another device, so a
         // later provider crash does not erase an already accepted event.
         await db('notifications').where({ id: opts.notificationId })
@@ -273,7 +355,7 @@ class PushNotificationService {
           .catch((err) => logger.error(`[push] Acceptance persistence failed: ${err.code || 'db_error'}`));
       }
     }
-    const stats = summarize(results, subs.length);
+    const stats = summarizeFanOut(results);
     if (opts.notificationId && !claimLost) {
       const accepted = stats.sent > 0;
       // A failed outcome write never discards KNOWN provider acceptance.
@@ -310,7 +392,7 @@ class PushNotificationService {
   // false answer skips that device and every later one — the tech's lock
   // screen should end on the newer change's own push, not this one.
   async sendToAdminUsers(adminUserIds, notificationForUser, {
-    beforeDispatch = null, beforeHandoff = null, deliveredSubscriptionIds = null,
+    beforeDispatch = null, beforeHandoff = null, deliveredSubscriptionIds = null, onDelivered = null,
   } = {}) {
     const ids = [...new Set((adminUserIds || []).filter(Boolean))];
     if (ids.length === 0) return summarize([], 0);
@@ -358,7 +440,10 @@ class PushNotificationService {
       const result = await sendSubscription(sub, notification, stillCurrent ? { shouldContinue: stillCurrent } : undefined)
         .catch(() => ({ sent: false, failed: true, reason: 'provider_failure' }));
       results.push(result);
-      if (result.sent) delivered.add(sub.id);
+      if (result.sent) {
+        delivered.add(sub.id);
+        tellDelivered(onDelivered, sub);
+      }
     }
     return { ...summarize(results, subs.length),
       ...(superseded ? { superseded: true } : {}),
@@ -389,6 +474,24 @@ function staffMfaPushFilter(query) {
   const scoped = query.whereRaw('(t.mfa_enabled_at IS NULL OR ps.staff_mfa = true)');
   if (!adminMfaEnforceLive()) return scoped;
   return scoped.whereRaw("NOT (t.role = 'admin' AND t.mfa_enabled_at IS NULL)");
+}
+
+// A holder device's accepted leg — the only kind that marks a bell accepted.
+function acceptedHolderLeg(sub, result) {
+  return Boolean(result.sent) && !sub.contact_phone_key;
+}
+
+// The stats a caller reads (push_first's "delivered, skip the SMS"; the
+// bell's acceptance) describe the HOLDER's devices only (codex #6364 r1 P1):
+// a contact device's accepted push never stands in for a holder whose own
+// device failed. Contact legs are accounted apart, under `contactDevices`,
+// present only when a contact device was in the fan-out.
+function summarizeFanOut(results) {
+  const holder = results.filter((r) => !r.contactDevice);
+  const contact = results.filter((r) => r.contactDevice);
+  const stats = summarize(holder, holder.length);
+  if (contact.length) stats.contactDevices = summarize(contact, contact.length);
+  return stats;
 }
 
 function summarize(results, subscriptions) {

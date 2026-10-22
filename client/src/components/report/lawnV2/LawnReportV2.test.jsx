@@ -543,7 +543,7 @@ describe('LawnWateringBanner', () => {
     expect(screen.getByTestId('lawn-watering-banner')).not.toHaveTextContent(/%|chance/i);
   });
 
-  it('forecast sentence: never printed, never on an ended note, never on a hold', () => {
+  it('forecast sentence: never printed, never on an ended note, never on a plain hold', () => {
     renderBanner({ ...BANNERS.water_in, forecastLine: FORECAST_LINE }, { print: true });
     expect(screen.queryByTestId('lawn-watering-banner-forecast')).toBeNull();
     cleanup();
@@ -553,9 +553,16 @@ describe('LawnWateringBanner', () => {
     renderBanner({ ...BANNERS.hold, forecastLine: FORECAST_LINE });
     expect(screen.queryByTestId('lawn-watering-banner-forecast')).toBeNull();
     cleanup();
+  });
+
+  it('forecast sentence after a timed hold (GATE_LAWN_WATERING_TEXT_FORECAST): shown under a hold-then-water-in, never the radar note', () => {
     renderBanner({ ...BANNERS.hold_then_water_in, forecastLine: FORECAST_LINE, observedRain: CLOSE_OUT });
-    expect(screen.queryByTestId('lawn-watering-banner-forecast')).toBeNull();
+    expect(screen.getByTestId('lawn-watering-banner-forecast')).toHaveTextContent(FORECAST_LINE);
+    expect(screen.queryByTestId('lawn-watering-banner-observed')).toBeNull();
     expect(screen.getByTestId('lawn-watering-banner-heading')).toHaveTextContent(BANNERS.hold_then_water_in.lines[0]);
+    cleanup();
+    renderBanner({ ...BANNERS.hold_then_water_in, forecastLine: FORECAST_LINE }, { print: true });
+    expect(screen.queryByTestId('lawn-watering-banner-forecast')).toBeNull();
   });
 
   it('measured-rain note: sits under the unchanged instruction (which stays visible) and supersedes the forecast sentence', () => {

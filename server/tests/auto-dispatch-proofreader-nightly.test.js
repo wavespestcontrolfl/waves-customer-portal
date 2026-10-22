@@ -297,6 +297,43 @@ describe('checkMove', () => {
     expect(run.proofreader.broke).toBe(1);
   });
 
+  test('the run keeps the first cause of a broken check and counts usable answers, for the move-check-down notice', async () => {
+    const run = runOf();
+    await check(run, proofreaderOf({ verdict: 'unknown', why: 'model_failed', reason: 'anthropic_400' }));
+    await check(run, proofreaderOf({ verdict: 'unknown', why: 'model_failed', reason: 'anthropic_timeout' }));
+    expect(run.proofreader).toMatchObject({ broke: 2, brokeCause: 'anthropic_400', answered: 0 });
+    await check(run, proofreaderOf({ verdict: 'unknown', why: 'model_unsure' }));
+    await check(run, proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' }));
+    expect(run.proofreader).toMatchObject({ broke: 2, answered: 2 });
+  });
+
+  test('an allow whose follow-up read fails is no usable answer: the check-down notice must still see the night as broken (Codex #6465 r1)', async () => {
+    const run = runOf();
+    const failing = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
+    failing.proofreadMove.mockImplementation(async () => { doneNotice = new Error('db down'); return { verdict: 'allow', why: 'nothing_breaks' }; });
+    await check(run, failing);
+    expect(run.proofreader).toMatchObject({ broke: 1, brokeCause: 'check_failed', answered: 0 });
+    // A person's done read after an allow: the model did answer.
+    doneNotice = null;
+    const held = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
+    held.proofreadMove.mockImplementation(async () => { doneNotice = PERSON_DONE; return { verdict: 'allow', why: 'nothing_breaks' }; });
+    await check(run, held);
+    expect(run.proofreader).toMatchObject({ personHeld: 1, answered: 1 });
+  });
+
+  test('a broken read names check_failed; a record too long or the deadline is not an answer', async () => {
+    const run = runOf();
+    const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
+    proofreader.buildCustomerRecord.mockRejectedValue(new Error('db down'));
+    await check(run, proofreader);
+    expect(run.proofreader).toMatchObject({ broke: 1, brokeCause: 'check_failed', answered: 0 });
+    await check(run, proofreaderOf({ verdict: 'unknown', why: 'record_too_long' }, { ...RECORD, tooLong: true }));
+    expect(run.proofreader.answered).toBe(0);
+    const late = runOf({ proofreader: nightly.newRunState({ startedAt: Date.now() - 301000, deadlineSeconds: 300 }) });
+    await check(late, proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' }));
+    expect(late.proofreader.answered).toBe(0);
+  });
+
   test('a record with a source the database could not read is a broken check: no notice, the run is marked', async () => {
     const run = runOf();
     const partial = { ...RECORD, unread: [{ channel: 'call', reason: 'read_failed' }] };

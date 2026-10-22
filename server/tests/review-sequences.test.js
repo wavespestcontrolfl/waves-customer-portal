@@ -14,6 +14,8 @@ jest.mock('../services/visit-completion-packets', () => ({
 const mockGates = { reviewSequences: false, reviewDirectLink: false };
 jest.mock('../config/feature-gates', () => ({
   isEnabled: (g) => !!mockGates[g],
+  // GATE_REVIEW_ASK_AFTER_REPORT: the call-time reader, driven by the same flags object.
+  reviewAskAfterReportLive: () => mockGates.reviewAskAfterReport === true,
   gates: mockGates,
 }));
 // Personalized-ask drafter (own suite: review-ask-drafter.test.js). Default
@@ -85,6 +87,8 @@ jest.mock('../services/customer-contact', () => ({
     name: c.first_name || 'Stan',
   }),
   firstNameFrom: (v) => String(v == null ? '' : v).trim().split(/\s+/)[0] || '',
+  // The review text's trust level keys on the resolved recipient's role (codex #6363 r33).
+  isServiceContactRole: jest.requireActual('../services/customer-contact').isServiceContactRole,
 }));
 
 const db = require('../models/db');
@@ -196,6 +200,7 @@ beforeEach(() => {
   mockGates.reviewSequences = false;
   mockGates.reviewDirectLink = false;
   mockGates.reviewAskFixedDay0 = false;
+  mockGates.reviewAskAfterReport = false;
   mockDraftAskBody.mockReset().mockResolvedValue(null);
   mockDraftEmailIntro.mockReset().mockResolvedValue(null);
   mockDraftTechVoice.mockReset().mockResolvedValue(null);
@@ -7964,4 +7969,259 @@ describe('review-ask holds (GATE_REVIEW_ASK_TECH_VOICE, build plan PR 2)', () =>
       detail: { step: 1, heldBody: 'How are the ants? {review_url}', sentence: 'How are the ants?', earlierQuote: 'How are the ants doing', earlierStep: 0 },
     });
   });
+});
+
+
+// GATE_REVIEW_ASK_AFTER_REPORT (owner 2026-10-22): the Automatic Day-0 ask is
+// due 10 minutes after enrollment — the report text, or the payment — for
+// every service line. Off = the smart send window, untouched.
+describe('GATE_REVIEW_ASK_AFTER_REPORT — Day-0 ask 10 minutes after the report text', () => {
+  const MIN = 60000;
+  const DELAY = ReviewService.REVIEW_AFTER_REPORT_DELAY_MINUTES;
+  // Fake only Date: the mock db is promise based and must keep real microtasks/timers.
+  const freezeAt = (iso) => jest.useFakeTimers({
+    now: new Date(iso),
+    doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'queueMicrotask', 'performance', 'hrtime'],
+  });
+  const customer = (id) => ({ customers: [{ id, first_name: 'Test', last_name: 'Customer', phone: '+19410000990', nearest_location_id: 'sarasota' }] });
+  const decisionOf = (mock) => { const d = mock.__state.rows.review_sequences[0].decision; return typeof d === 'string' ? JSON.parse(d) : d; };
+
+  afterEach(() => { jest.useRealTimers(); });
+
+  test('the constant is ten minutes', () => {
+    expect(DELAY).toBe(10);
+  });
+
+  // 2026-10-20 is a Tuesday; 2026-10-24 a Saturday. ET is UTC-4 in October.
+  test.each([
+    ['pest control', 'Quarterly Pest Control', '2026-10-20T15:00:00Z'],
+    ['lawn care (smart window: 4:30 PM)', 'Lawn Care', '2026-10-20T14:00:00Z'],
+    ['mosquito (smart window: evening)', 'Mosquito Control', '2026-10-20T14:00:00Z'],
+    ['tree and shrub', 'Tree & Shrub Care', '2026-10-20T14:00:00Z'],
+    ['WDO inspection (smart window: +90 min)', 'WDO Inspection', '2026-10-20T14:00:00Z'],
+    ['a Saturday visit (smart window: Sunday 10:30 AM)', 'Quarterly Pest Control', '2026-10-24T15:00:00Z'],
+    ['a visit after 3 PM (smart window: next morning)', 'Quarterly Pest Control', '2026-10-20T20:30:00Z'],
+    ['lawn care after 3 PM (smart window: next morning)', 'Lawn Care', '2026-10-20T20:30:00Z'],
+  ])('gate on: %s is due exactly 10 minutes after enrollment', async (_label, serviceType, nowIso) => {
+    freezeAt(nowIso);
+    mockGates.reviewSequences = true;
+    mockGates.reviewAskAfterReport = true;
+    const mock = makeMock(customer('ar-1'));
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'ar-1', serviceType, completedAt: new Date(), legacyDelayMinutes: 120, reportTextAnchor: { status: 'sent', at: new Date().toISOString() } });
+
+    expect(result.started).toBe(true);
+    const seq = mock.__state.rows.review_sequences[0];
+    expect(new Date(seq.next_run_at).getTime()).toBe(Date.now() + DELAY * MIN);
+    expect(decisionOf(mock)).toMatchObject({ reason: 'after_report', ownerAction: 'none' });
+  });
+
+  test('gate off: the same enrollments keep the smart send window (lawn at 10 AM = 4:30 PM, not +10 min)', async () => {
+    freezeAt('2026-10-20T14:00:00Z'); // 10:00 AM ET Tuesday
+    mockGates.reviewSequences = true;
+    const mock = makeMock(customer('ar-2'));
+    db.mockImplementation(mock);
+
+    await ReviewService.enrollPostService({ customerId: 'ar-2', serviceType: 'Lawn Care', completedAt: new Date() });
+
+    const at = new Date(mock.__state.rows.review_sequences[0].next_run_at).getTime();
+    expect(at).not.toBe(Date.now() + DELAY * MIN);
+    // 4:30 PM ET anchored, +-15 min jitter inside the hour: 20:30Z +- 15 min, clamped to 20:00-20:59Z.
+    expect(at).toBeGreaterThanOrEqual(new Date('2026-10-20T20:00:00Z').getTime());
+    expect(at).toBeLessThanOrEqual(new Date('2026-10-20T20:59:00Z').getTime());
+    expect(decisionOf(mock)).toMatchObject({ reason: 'smart_window' });
+  });
+
+  test.each([
+    ['Now / customer asked for the link (0)', 0, 0],
+    ['an explicit 45 minutes', 45, 45],
+    ['Tomorrow 8 AM style long delay (600)', 600, 600],
+  ])('gate on: explicit operator timing still wins — %s', async (_label, delayMinutes, expectedMinutes) => {
+    freezeAt('2026-10-20T15:00:00Z');
+    mockGates.reviewSequences = true;
+    mockGates.reviewAskAfterReport = true;
+    const mock = makeMock(customer('ar-3'));
+    db.mockImplementation(mock);
+
+    await ReviewService.enrollPostService({ customerId: 'ar-3', serviceType: 'Lawn Care', completedAt: new Date(), delayMinutes });
+
+    expect(new Date(mock.__state.rows.review_sequences[0].next_run_at).getTime()).toBe(Date.now() + expectedMinutes * MIN);
+    expect(decisionOf(mock)).toMatchObject({ reason: 'operator_timing' });
+  });
+
+  test('gate on: an hours-old sent anchor still means 10 minutes from NOW (a late enrollment never lands in the past)', async () => {
+    freezeAt('2026-10-20T18:00:00Z');
+    mockGates.reviewSequences = true;
+    mockGates.reviewAskAfterReport = true;
+    const mock = makeMock(customer('ar-9'));
+    db.mockImplementation(mock);
+    await ReviewService.enrollPostService({ customerId: 'ar-9', serviceType: 'Lawn Care', reportTextAnchor: { status: 'sent', at: '2026-10-20T12:00:00Z' } });
+    expect(new Date(mock.__state.rows.review_sequences[0].next_run_at).getTime()).toBe(Date.now() + DELAY * MIN);
+  });
+
+  test('gate on: a "paid" anchor is payment time + 10 minutes', async () => {
+    freezeAt('2026-10-20T22:00:00Z');
+    mockGates.reviewSequences = true;
+    mockGates.reviewAskAfterReport = true;
+    const mock = makeMock(customer('ar-10'));
+    db.mockImplementation(mock);
+    await ReviewService.enrollPostService({ customerId: 'ar-10', serviceType: 'Quarterly Pest Control', reportTextAnchor: { status: 'paid', at: new Date() } });
+    expect(new Date(mock.__state.rows.review_sequences[0].next_run_at).getTime()).toBe(Date.now() + DELAY * MIN);
+    expect(decisionOf(mock)).toMatchObject({ reason: 'after_report' });
+  });
+
+  describe('the report text decides (quiet hours, failed, blocked)', () => {
+
+    test.each([
+      ['failed', { status: 'failed' }],
+      ['blocked', { status: 'blocked' }],
+      ['skipped', { status: 'skipped_recap_sms_already_sent' }],
+      ['no phone', { status: 'no_phone' }],
+      ['not requested', { status: 'not_requested' }],
+      ['unknown', { status: 'whatever' }],
+      ['a deferred text with no release time', { status: 'deferred' }],
+      ['a text held for the morning (9 PM completion)', { status: 'deferred', at: '2026-10-21T12:00:00.000Z' }],
+      ['no anchor at all', null],
+    ])('%s: the smart send window, reason smart_window', async (_label, anchor) => {
+      freezeAt('2026-10-20T14:00:00Z'); // 10 AM ET Tuesday; lawn smart window = 4:30 PM
+      mockGates.reviewSequences = true;
+      mockGates.reviewAskAfterReport = true;
+      const mock = makeMock(customer('ar-f1'));
+      db.mockImplementation(mock);
+
+      await ReviewService.enrollPostService({ customerId: 'ar-f1', serviceType: 'Lawn Care', completedAt: new Date(), reportTextAnchor: anchor });
+
+      const at = new Date(mock.__state.rows.review_sequences[0].next_run_at).getTime();
+      expect(at).toBeGreaterThanOrEqual(new Date('2026-10-20T20:00:00Z').getTime());
+      expect(at).toBeLessThanOrEqual(new Date('2026-10-20T20:59:00Z').getTime());
+      expect(decisionOf(mock)).toMatchObject({ reason: 'smart_window' });
+    });
+
+    test('the unpaid-invoice path: a report the send window held for the morning keeps the smart window, even when payment lands overnight', async () => {
+      freezeAt('2026-10-20T02:00:00Z'); // 10 PM ET, paid on the spot after an after-hours completion
+      mockGates.reviewSequences = true;
+      mockGates.reviewAskAfterReport = true;
+      const mock = makeMock(customer('ar-q2'));
+      mock.__state.rows.service_records = [{ id: 'sr-q2', customer_id: 'ar-q2', service_type: 'Quarterly Pest Control', status: 'completed', structured_notes: { completionSmsStatus: 'deferred', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z' } }];
+      db.mockImplementation(mock);
+
+      await ReviewService.enrollForPaidInvoice({ id: 'inv-q2', invoice_number: 'T-2', customer_id: 'ar-q2', service_record_id: 'sr-q2', visit_completion_packet_id: null });
+
+      expect(new Date(mock.__state.rows.review_sequences[0].next_run_at).toISOString()).not.toBe('2026-10-20T12:10:00.000Z');
+      expect(decisionOf(mock)).toMatchObject({ reason: 'smart_window' });
+    });
+
+    test.each([
+      ['failed', { completionSmsStatus: 'failed' }],
+      ['blocked', { completionSmsStatus: 'blocked' }],
+      ['skipped', { completionSmsStatus: 'skipped_recap_sms_already_sent' }],
+      ['missing', {}],
+      ['held for the morning, then delivered', { completionSmsStatus: 'sent', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z', completionSmsDeferredDeliveredAt: '2026-10-20T12:03:00.000Z' }],
+      ['sent by the customer App', { completionSmsStatus: 'sent', sentSmsAt: '2026-10-20T13:00:00.000Z', sentSmsChannel: 'push' }],
+    ])('the paid-invoice path: a %s report text earns no paid anchor and keeps the smart window', async (_label, notes) => {
+      freezeAt('2026-10-20T14:00:00Z'); // 10 AM ET Tuesday
+      mockGates.reviewSequences = true;
+      mockGates.reviewAskAfterReport = true;
+      const mock = makeMock(customer('ar-pf'));
+      mock.__state.rows.service_records = [{ id: 'sr-pf', customer_id: 'ar-pf', service_type: 'Quarterly Pest Control', status: 'completed', structured_notes: notes }];
+      db.mockImplementation(mock);
+
+      await ReviewService.enrollForPaidInvoice({ id: 'inv-pf', invoice_number: 'T-PF', customer_id: 'ar-pf', service_record_id: 'sr-pf', visit_completion_packet_id: null });
+
+      const at = new Date(mock.__state.rows.review_sequences[0].next_run_at).getTime();
+      expect(at).toBeGreaterThan(new Date('2026-10-20T14:30:00Z').getTime());
+      expect(decisionOf(mock)).toMatchObject({ reason: 'smart_window' });
+    });
+
+    test.each([
+      ['sent', { completionSmsStatus: 'sent', sentSmsAt: '2026-10-20T13:00:00.000Z' }],
+    ])('the paid-invoice path: a %s report text earns the paid anchor (payment + 10 minutes)', async (_label, notes) => {
+      freezeAt('2026-10-20T14:00:00Z');
+      mockGates.reviewSequences = true;
+      mockGates.reviewAskAfterReport = true;
+      const mock = makeMock(customer('ar-pd'));
+      mock.__state.rows.service_records = [{ id: 'sr-pd', customer_id: 'ar-pd', service_type: 'Quarterly Pest Control', status: 'completed', structured_notes: notes }];
+      db.mockImplementation(mock);
+
+      await ReviewService.enrollForPaidInvoice({ id: 'inv-pd', invoice_number: 'T-PD', customer_id: 'ar-pd', service_record_id: 'sr-pd', visit_completion_packet_id: null });
+
+      expect(new Date(mock.__state.rows.review_sequences[0].next_run_at).toISOString()).toBe('2026-10-20T14:10:00.000Z');
+      expect(decisionOf(mock)).toMatchObject({ reason: 'after_report' });
+    });
+
+  });
+
+  test('gate on: a customer-requested link still records customer_requested', async () => {
+    freezeAt('2026-10-20T15:00:00Z');
+    mockGates.reviewSequences = true;
+    mockGates.reviewAskAfterReport = true;
+    const mock = makeMock(customer('ar-4'));
+    db.mockImplementation(mock);
+
+    await ReviewService.enrollPostService({
+      customerId: 'ar-4', serviceType: 'Quarterly Pest Control', completedAt: new Date(), delayMinutes: 0,
+      customerRequested: { by: 'tech-1', at: new Date().toISOString(), source: 'completion_panel' },
+    });
+
+    expect(decisionOf(mock)).toMatchObject({ reason: 'customer_requested' });
+    expect(new Date(mock.__state.rows.review_sequences[0].next_run_at).getTime()).toBe(Date.now());
+  });
+
+  test('gate on: a packet-style call (old completedAt, sent summary text) is due 10 minutes from the send, not from the old completion', async () => {
+    freezeAt('2026-10-20T18:00:00Z');
+    mockGates.reviewSequences = true;
+    mockGates.reviewAskAfterReport = true;
+    const mock = makeMock(customer('ar-5'));
+    db.mockImplementation(mock);
+
+    await ReviewService.enrollPostService({
+      customerId: 'ar-5', serviceRecordId: 'sr-ar5', scheduledServiceId: 'ss-ar5', serviceType: 'Quarterly Pest Control',
+      technicianId: 'tech-1', completedAt: new Date('2026-10-20T13:00:00Z'), triggeredBy: 'auto',
+      reportTextAnchor: { status: 'sent', at: new Date('2026-10-20T13:02:00Z') },
+      delayMinutes: ReviewService.completionReviewDelay({}), legacyDelayMinutes: 120,
+    });
+
+    expect(new Date(mock.__state.rows.review_sequences[0].next_run_at).getTime()).toBe(Date.now() + DELAY * MIN);
+  });
+
+  test('unpaid invoice, then paid: the ask is due 10 minutes after the payment, not after the visit', async () => {
+    freezeAt('2026-10-20T13:00:00Z'); // the visit
+    mockGates.reviewSequences = true;
+    mockGates.reviewAskAfterReport = true;
+    const mock = makeMock(customer('ar-6'));
+    mock.__state.rows.service_records = [{ id: 'sr-ar6', customer_id: 'ar-6', service_type: 'Quarterly Pest Control', status: 'completed', structured_notes: { completionSmsStatus: 'sent', sentSmsAt: '2026-10-20T13:00:00.000Z' } }];
+    db.mockImplementation(mock);
+
+    jest.setSystemTime(new Date('2026-10-20T22:00:00Z')); // paid 9 hours later
+    const out = await ReviewService.enrollForPaidInvoice({ id: 'inv-ar6', invoice_number: 'T-1', customer_id: 'ar-6', service_record_id: 'sr-ar6', visit_completion_packet_id: null });
+
+    expect(out).toMatchObject({ enrolled: true });
+    expect(new Date(mock.__state.rows.review_sequences[0].next_run_at).getTime()).toBe(new Date('2026-10-20T22:10:00Z').getTime());
+  });
+
+  test('the legacy path (cadences off) ignores the gate: caller default and explicit delays exactly as before, anchor or not', async () => {
+    freezeAt('2026-10-20T01:00:00Z');
+    mockGates.reviewAskAfterReport = true; // reviewSequences stays off
+    const mock = makeMock(customer('ar-7'));
+    db.mockImplementation(mock);
+
+    await ReviewService.enrollPostService({ customerId: 'ar-7', serviceType: 'Quarterly Pest Control', legacyDelayMinutes: 120, reportTextAnchor: { status: 'sent', at: new Date().toISOString() } });
+    expect(new Date(mock.__state.rows.review_requests[0].scheduled_for).getTime()).toBe(Date.now() + 120 * MIN);
+
+    mock.__state.rows.review_requests.length = 0;
+    await ReviewService.enrollPostService({ customerId: 'ar-7', serviceType: 'Quarterly Pest Control', legacyDelayMinutes: 120, reportTextAnchor: { status: 'deferred', at: '2026-10-20T12:00:00.000Z' } });
+    expect(new Date(mock.__state.rows.review_requests[0].scheduled_for).getTime()).toBe(Date.now() + 120 * MIN);
+
+    mock.__state.rows.review_requests.length = 0;
+    await ReviewService.enrollPostService({ customerId: 'ar-7', serviceType: 'Quarterly Pest Control', delayMinutes: 45, legacyDelayMinutes: 120, reportTextAnchor: { status: 'sent', at: new Date().toISOString() } });
+    expect(new Date(mock.__state.rows.review_requests[0].scheduled_for).getTime()).toBe(Date.now() + 45 * MIN);
+
+    // No default and no anchor (the invoice-delivery caller): the smart window, as before.
+    mock.__state.rows.review_requests.length = 0;
+    freezeAt('2026-10-20T14:00:00Z');
+    await ReviewService.enrollPostService({ customerId: 'ar-7', serviceType: 'Lawn Care' });
+    expect(new Date(mock.__state.rows.review_requests[0].scheduled_for).getTime()).toBeGreaterThanOrEqual(new Date('2026-10-20T20:00:00Z').getTime());
+  });
+
 });

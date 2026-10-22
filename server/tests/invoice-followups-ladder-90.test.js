@@ -222,6 +222,7 @@ describe('runPending under the Day 90 ladder', () => {
     expect(seqUpdates[0].wheres).toEqual([
       [{ id: 'seq-1', status: 'active', step_index: 1 }],
       ['next_touch_at', tenAmET('2026-08-08')],
+      [expect.any(Function)], // the live-claim guard (cronSnapshotUpdate): a send-now mid-dispatch is never moved
     ]);
     expect(seqUpdates[0].patch.next_touch_at).toEqual(tenAmET('2026-08-05'));
     expect(transaction).not.toHaveBeenCalled();
@@ -283,6 +284,7 @@ describe('runPending under the Day 90 ladder', () => {
     expect(seqUpdates[0].wheres).toEqual([
       [{ id: 'seq-1', status: 'active', step_index: 1 }],
       ['next_touch_at', tenAmET('2026-08-05')],
+      [expect.any(Function)], // the live-claim guard (cronSnapshotUpdate): a send-now mid-dispatch is never moved
     ]);
     // Wed 07-29 + 10 days = Sat 08-08 at 10:00 ET (it fires the next Tuesday).
     expect(seqUpdates[0].patch.next_touch_at).toEqual(tenAmET('2026-08-08'));

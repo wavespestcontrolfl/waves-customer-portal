@@ -412,12 +412,9 @@ export default function EstimateProposalDocument({ data, token }) {
     if (!model) return null;
     return { model, byLine: new Map(lines.map((li, i) => [li, model.services[i]])), oneTime: inputs.oneTime || null };
   })();
-  // GATE_ESTIMATE_APPLICATION_MONTHS: the page's "What you pay" rows (the months with
-  // the spaced service and the other months), from the same shared function, only for
-  // the plan shape it covers. /data carries the switch on every pass, the PDF pass too.
-  const applicationMonths = data?.applicationMonthsEnabled === true && monthlyAverage
-    ? applicationMonthsBreakdown(monthlyAverage.model)
-    : null;
+  // The page's "What you pay" rows (the months with the spaced service and the other
+  // months), from the same shared function, only for the plan shape it covers.
+  const applicationMonths = monthlyAverage ? applicationMonthsBreakdown(monthlyAverage.model) : null;
   const showRecurringTotals = !suppressPlanTotals && Number(totals.annualRecurring) > 0;
   const showGrandTotal = !suppressPlanTotals || Number(totals.annualRecurring) <= 0;
   const grandTotalLabel = Number(totals.annualRecurring) > 0 ? 'First-year total' : 'Total';

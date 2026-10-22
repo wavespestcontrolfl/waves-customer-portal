@@ -135,9 +135,10 @@ export default function PaymentPreferenceButtons({
   serviceMode,
   setupFee,
   invoiceMode = false,
-  // GATE_ESTIMATE_APPLICATION_MONTHS: the preview row names the FIRST
-  // application's bill, so a multi-service first bill does not read as the
-  // price of every application (EST-2026-1185).
+  // With the monthly average on (GATE_ESTIMATE_MONTHLY_AVERAGE), the page
+  // states what each month bills, so this row names the FIRST application's
+  // bill rather than the price of every application (EST-2026-1185). Unset the
+  // average and the row reads "Per application" again.
   firstApplicationLabel = false,
   // Payment-only accept (guarantee-only renewal): invoice mode with NO visit
   // to book — the one-time copy must not say "Book".

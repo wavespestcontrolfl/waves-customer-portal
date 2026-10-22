@@ -3283,3 +3283,20 @@ flag button reads "Flag opportunity". Section labels (Access, Quoted, Money,
 Actions) are 14px / 500 sentence case like an admin card title, and amber
 stays only on a real warning (no card on file). The install hint card takes
 the admin palette. Visual only: same data, same actions.
+
+## 2026-10-22 — Complete Service screens and the web report: owner UI pass
+
+Owner 2026-10-22, reviewing both in Vite and Chrome DevTools. On the tech
+Complete Service screens: the note box's mic sits inside the box on every
+sheet; the header puts the customer's name and the service on their own lines,
+and the pest sheet adds the customer's phone and email as call and email
+links; "Trace where we sprayed" is offered on the visit step as Optional and
+the satellite tracer opens in the page under it, not over the sheet ("trace
+should not be required for any service and should be on the same page"); the
+linear-feet box is optional ("make feet optional"). On the customer web
+report: Ask Waves shows exactly three questions on every report; the pest
+pressure pill reads "1.4/5" as one unit; and the rating card ("How did we do
+today?") is one row on desktop, headline left and button right, because the
+centered stack "renders funny on desktop". This narrows the 2026-08-13
+center-stack ruling for that card to phones; the cross-sell and referral
+cards keep it everywhere.

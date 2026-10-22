@@ -1254,6 +1254,128 @@ describe('executeMerge', () => {
     expect(UNIQUE_COLLISION_HANDLERS.customer_alerts).toBe(repointRowwiseDropCollisions);
   });
 
+  describe("service_contact_notification_prefs (contact login): a shared contact's choices fold most-restrictively, never abort (codex #6363 r12)", () => {
+    const { UNIQUE_COLLISION_HANDLERS, foldContactNotificationPrefs } = dedupe._test;
+    // In-memory table keyed on (customer_id, phone_key).
+    const fakeTrx = (seed) => {
+      const rows = seed.map((r) => ({ ...r }));
+      const matches = (row, where) => Object.entries(where).every(([k, v]) => row[k] === v);
+      const qb = () => {
+        let where = {};
+        const api = {
+          where(a, b) { where = typeof a === 'object' ? { ...where, ...a } : { ...where, [a]: b }; return api; },
+          select() { return Promise.resolve(rows.filter((r) => matches(r, where)).map((r) => ({ ...r }))); },
+          first() { const r = rows.find((x) => matches(x, where)); return Promise.resolve(r ? { ...r } : undefined); },
+          update(patch) { const hit = rows.filter((r) => matches(r, where)); hit.forEach((r) => Object.assign(r, patch)); return Promise.resolve(hit.length); },
+          del() { const before = rows.length; for (let i = rows.length - 1; i >= 0; i -= 1) if (matches(rows[i], where)) rows.splice(i, 1); return Promise.resolve(before - rows.length); },
+        };
+        return api;
+      };
+      const trx = () => qb();
+      trx.fn = { now: () => 'NOW()' };
+      trx.rows = rows;
+      return trx;
+    };
+
+    it('is registered as the table\'s collision handler', () => {
+      expect(UNIQUE_COLLISION_HANDLERS.service_contact_notification_prefs).toBe(foldContactNotificationPrefs);
+    });
+
+    it('moves phones the winner lacks whole; folds a shared phone: off on either side stays off, a single channel beats both, two different single channels turn the purpose off, an attestation on either side stands', async () => {
+      const trx = fakeTrx([
+        { customer_id: WINNER, phone_key: '9415550202', tech_en_route: true, tech_arrived: true, appointment_confirmation: true, service_completed: null, sms_enabled: true, en_route_channel: 'both', tech_arrived_channel: 'sms', appointment_confirmation_channel: 'sms', service_complete_channel: null, consent_attested_at: null },
+        { customer_id: LOSER, phone_key: '9415550202', tech_en_route: false, tech_arrived: true, appointment_confirmation: true, service_completed: true, sms_enabled: false, en_route_channel: 'email', tech_arrived_channel: 'email', appointment_confirmation_channel: 'sms', service_complete_channel: 'email', consent_attested_at: '2026-10-01T00:00:00Z' },
+        { customer_id: LOSER, phone_key: '9415550303', tech_en_route: false },
+      ]);
+      const summary = await foldContactNotificationPrefs(trx, 'service_contact_notification_prefs', 'customer_id', WINNER, LOSER);
+      expect(summary).toBe("moved 1, folded 1 row(s) most-restrictively into the winner's");
+      expect(trx.rows.map((r) => [r.customer_id, r.phone_key])).toEqual([[WINNER, '9415550202'], [WINNER, '9415550303']]);
+      expect(trx.rows[0]).toMatchObject({
+        tech_en_route: false, service_completed: true, sms_enabled: false, email_enabled: null,
+        // sms on one side, email on the other: no channel both agreed to — the purpose is off (codex r13 P1).
+        tech_arrived: false, tech_arrived_channel: 'sms',
+        // The same single channel on both sides is simply kept.
+        appointment_confirmation: true, appointment_confirmation_channel: 'sms',
+        en_route_channel: 'email', service_complete_channel: 'email',
+        consent_attested_at: '2026-10-01T00:00:00Z', updated_at: 'NOW()',
+      });
+    });
+  });
+
+  describe('pruneDiscardedContactPrefs (contact login): rows the sweep brought over for contacts the winner did not keep are dropped, and their refresh families revoked (codex #6363 r25, r36)', () => {
+    const { pruneDiscardedContactPrefs } = dedupe._test;
+    // Three tables the reconciliation touches: the choices rows, the
+    // repointed refresh families (revoked by contact_key, the holder's own
+    // number never kept as a contact), and the winner row the revoker reads
+    // the holder phone from.
+    const fakeTrx = (seed) => {
+      const tables = Object.fromEntries(Object.entries(seed).map(([t, rows]) => [t, rows.map((r) => ({ ...r }))]));
+      const trx = (table) => {
+        const rows = (tables[table] ||= []);
+        const conds = [];
+        const hit = () => rows.filter((r) => conds.every((c) => c(r)));
+        const api = {
+          where(obj) { conds.push((r) => Object.entries(obj).every(([k, v]) => r[k] === v)); return api; },
+          whereNotIn(col, vals) { conds.push((r) => !vals.includes(r[col])); return api; },
+          whereIn(col, vals) { conds.push((r) => vals.includes(r[col])); return api; },
+          whereNull(col) { conds.push((r) => r[col] == null); return api; },
+          whereNotNull(col) { conds.push((r) => r[col] != null); return api; },
+          first() { return Promise.resolve(hit()[0] ? { ...hit()[0] } : null); },
+          select() { return Promise.resolve(hit().map((r) => ({ ...r }))); },
+          update(patch) { const h = hit(); h.forEach((r) => Object.assign(r, patch)); return Promise.resolve(h.length); },
+          del() {
+            const before = rows.length;
+            for (let i = rows.length - 1; i >= 0; i -= 1) if (conds.every((c) => c(rows[i]))) rows.splice(i, 1);
+            return Promise.resolve(before - rows.length);
+          },
+        };
+        return api;
+      };
+      trx.tables = tables;
+      trx.transaction = (fn) => fn(trx);
+      return trx;
+    };
+    const live = (r) => !r.revoked_at;
+
+    it('keeps the rows and families of the winner\'s final slots (own and backfilled) and drops/revokes the rest; the loser\'s rows and the holder\'s own families are untouched', async () => {
+      const trx = fakeTrx({
+        customers: [{ id: WINNER, phone: '+19415550101' }],
+        service_contact_notification_prefs: [
+          { customer_id: WINNER, phone_key: '9415550202' },   // winner's own slot 1
+          { customer_id: WINNER, phone_key: '9415550303' },   // backfilled from the loser into slot 2
+          { customer_id: WINNER, phone_key: '9415550404' },   // loser-only contact that found no free slot
+          { customer_id: LOSER, phone_key: '9415550505' },
+        ],
+        customer_refresh_tokens: [
+          { jti: 'h1', customer_id: WINNER, contact_key: null },
+          { jti: 'c1', customer_id: WINNER, contact_key: '9415550202' },
+          { jti: 'c2', customer_id: WINNER, contact_key: '9415550303' },     // repointed with the loser's slot
+          { jti: 'c3', customer_id: WINNER, contact_key: '9415550404' },     // repointed; no slot on the winner
+          { jti: 'c4', customer_id: WINNER, contact_key: '9415550404', revoked_at: '2026-10-01T00:00:00Z', revoke_reason: 'replay_detected' },
+          { jti: 'l1', customer_id: LOSER, contact_key: '9415550505' },
+        ],
+      });
+      const finalWinner = { service_contact_phone: '(941) 555-0202', service_contact2_phone: '+19415550303', service_contact3_phone: null };
+      expect(await pruneDiscardedContactPrefs(trx, WINNER, finalWinner)).toBe(1);
+      expect(trx.tables.service_contact_notification_prefs.map((r) => [r.customer_id, r.phone_key])).toEqual([[WINNER, '9415550202'], [WINNER, '9415550303'], [LOSER, '9415550505']]);
+      const byJti = Object.fromEntries(trx.tables.customer_refresh_tokens.map((r) => [r.jti, r]));
+      expect(['h1', 'c1', 'c2', 'l1'].map((j) => live(byJti[j]))).toEqual([true, true, true, true]);
+      expect(byJti.c3).toMatchObject({ revoked_at: expect.any(Date), revoke_reason: 'contact_removed' });
+      expect(byJti.c4.revoke_reason).toBe('replay_detected');
+    });
+
+    it('a winner with no slots at all keeps no contact rows and no contact family', async () => {
+      const trx = fakeTrx({
+        customers: [{ id: WINNER, phone: '+19415550101' }],
+        service_contact_notification_prefs: [{ customer_id: WINNER, phone_key: '9415550202' }],
+        customer_refresh_tokens: [{ jti: 'c1', customer_id: WINNER, contact_key: '9415550202' }, { jti: 'h1', customer_id: WINNER, contact_key: null }],
+      });
+      expect(await pruneDiscardedContactPrefs(trx, WINNER, {})).toBe(1);
+      expect(trx.tables.service_contact_notification_prefs).toEqual([]);
+      expect(trx.tables.customer_refresh_tokens.filter(live).map((r) => r.jti)).toEqual(['h1']);
+    });
+  });
+
   it('registers irrigation_week_plans with the keep-available handler (same-week snapshots fold, never abort — codex #3565 gh-r14)', () => {
     const { UNIQUE_COLLISION_HANDLERS, repointWeekPlansKeepAvailable } = dedupe._test;
     expect(UNIQUE_COLLISION_HANDLERS.irrigation_week_plans).toBe(repointWeekPlansKeepAvailable);
@@ -2814,6 +2936,109 @@ describe('runAutoMergeSweep', () => {
   });
 });
 
+describe('customer_health_alerts merge (ops 2026-10-22)', () => {
+  it('registers customer_health_alerts with the dismiss-collisions handler (a shared open alert folds, never aborts)', () => {
+    const { UNIQUE_COLLISION_HANDLERS, repointHealthAlertsDismissCollisions } = dedupe._test;
+    expect(UNIQUE_COLLISION_HANDLERS.customer_health_alerts).toBe(repointHealthAlertsDismissCollisions);
+  });
+
+  // rows: the loser's alerts; winnerOpen: the winner's open alert of the same type
+  // (null = closed in between); collide: loser ids whose FIRST plain move collides.
+  function alertTrx({ rows, winnerOpen, collide }) {
+    const writes = [];
+    const locks = [];
+    let deleted = 0;
+    const collided = new Set();
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (q.called('first')) {
+        const where = q.args('where')[0];
+        locks.push(q.called('forUpdate'));
+        if (where.id) return rows.find((r) => r.id === where.id);
+        return winnerOpen;
+      }
+      if (q.called('select')) return rows.map(({ id }) => ({ id }));
+      if (q.called('del')) { deleted += 1; return 1; }
+      if (q.called('update')) {
+        const rowId = q.args('where')[0].id;
+        const patch = q.args('update')[0];
+        if (collide.includes(rowId) && patch.customer_id && !patch.status && !collided.has(rowId) && winnerOpen) {
+          collided.add(rowId);
+          const e = new Error('duplicate key'); e.code = '23505'; throw e;
+        }
+        writes.push({ rowId, patch });
+        return 1;
+      }
+      return [];
+    }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: jest.fn(() => 'NOW') };
+    return { trx, writes, locks, deletedCount: () => deleted };
+  }
+  const run = (trx) => dedupe._test.repointHealthAlertsDismissCollisions(trx, 'customer_health_alerts', 'customer_id', 'W', 'L');
+
+  it('moves an alert the winner lacks; a colliding OLDER loser alert moves across dismissed (never deleted)', async () => {
+    const t = alertTrx({
+      rows: [{ id: 'a1' }, { id: 'a2', alert_type: 'low_engagement', status: 'new', created_at: '2026-10-01T00:00:00Z' }],
+      winnerOpen: { id: 'w1', created_at: '2026-10-10T00:00:00Z' },
+      collide: ['a2'],
+    });
+    const result = await run(t.trx);
+    expect(t.writes).toEqual([
+      { rowId: 'a1', patch: { customer_id: 'W' } },
+      { rowId: 'a2', patch: { customer_id: 'W', status: 'dismissed', updated_at: 'NOW' } },
+    ]);
+    expect(t.locks).toEqual([true, true]);
+    expect(t.deletedCount()).toBe(0);
+    expect(result).toMatch(/moved 1, dismissed 1/);
+  });
+
+  it('a NEWER loser alert stays open: the winner\'s older open alert is dismissed instead (Codex #6431 r1 P1)', async () => {
+    const t = alertTrx({
+      rows: [{ id: 'a2', alert_type: 'critical_risk', status: 'new', created_at: '2026-10-20T00:00:00Z' }],
+      winnerOpen: { id: 'w1', created_at: '2026-09-01T00:00:00Z' },
+      collide: ['a2'],
+    });
+    await run(t.trx);
+    expect(t.writes).toEqual([
+      { rowId: 'w1', patch: { status: 'dismissed', updated_at: 'NOW' } },
+      { rowId: 'a2', patch: { customer_id: 'W' } },
+    ]);
+  });
+
+  it('when the winner\'s alert closed after the collision, the loser alert moves across still open (Codex #6431 r1 P2)', async () => {
+    const t = alertTrx({
+      rows: [{ id: 'a2', alert_type: 'low_engagement', status: 'new', created_at: '2026-10-01T00:00:00Z' }],
+      winnerOpen: { id: 'w1', created_at: '2026-10-10T00:00:00Z' },
+      collide: ['a2'],
+    });
+    // The winner row is gone from the open set by the time it is re-read.
+    const first = t.trx;
+    let reads = 0;
+    const trx = jest.fn((table) => {
+      const chain = first(table);
+      const orig = chain.first;
+      chain.first = async (...a) => { reads += 1; const r = await orig.apply(chain, a); return reads === 2 ? undefined : r; };
+      return chain;
+    });
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = first.fn;
+    await run(trx);
+    expect(t.writes).toEqual([{ rowId: 'a2', patch: { customer_id: 'W' } }]);
+  });
+
+  it('a non-unique error still aborts the merge', async () => {
+    const { repointHealthAlertsDismissCollisions } = dedupe._test;
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (q.called('select')) return [{ id: 'a1' }];
+      if (q.called('update')) { const e = new Error('boom'); e.code = '57014'; throw e; }
+      return [];
+    }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
+    await expect(repointHealthAlertsDismissCollisions(trx, 'customer_health_alerts', 'customer_id', 'W', 'L')).rejects.toThrow('boom');
+  });
+});
+
 describe('collections_flags merge (codex 2026-08-15 r6)', () => {
   it('registers collections_flags with the release-collisions handler (shared active flags fold, never abort)', () => {
     const { UNIQUE_COLLISION_HANDLERS, repointFlagsReleaseCollisions } = dedupe._test;
@@ -3218,7 +3443,7 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
       if (table === 'referral_promoters') return null;
       // The collision-fold prediction reads both sides' rows of each
       // unique-keyed table (predictCollisionFolds).
-      if (['notification_prefs', 'property_preferences', 'customer_properties', 'customer_tags', 'conversations'].includes(table)) return collisions[table] || [];
+      if (['notification_prefs', 'property_preferences', 'customer_properties', 'customer_tags', 'conversations', 'customer_health_alerts'].includes(table)) return collisions[table] || [];
       if (table === 'payment_methods') {
         const owner = q.args('where')[0].customer_id;
         if (q.called('first')) return defaults[owner] ? { id: `${owner}-default` } : null;
@@ -3248,6 +3473,25 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
     expect(JSON.parse(out.fingerprint).financial_effects.predicted_collision_folds).toEqual(out.financial_effects.predicted_collision_folds);
     // A pref row on ONE side only, tags that do not overlap, threads on different endpoints: nothing folds.
     install({}, { collisions: { property_preferences: [{ customer_id: 'L' }], customer_tags: [{ customer_id: 'W', tag: 'a' }, { customer_id: 'L', tag: 'b' }], conversations: [{ customer_id: 'W', channel: 'sms', our_endpoint_id: 'ep1' }, { customer_id: 'L', channel: 'sms', our_endpoint_id: 'ep2' }] } });
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.predicted_collision_handlers).toEqual([]);
+  });
+
+  it('predicts a shared OPEN rule health alert as a fold; closed or non-rule alerts do not fold (ops 2026-10-22)', async () => {
+    install({}, { collisions: { customer_health_alerts: [
+      { customer_id: 'W', alert_type: 'low_engagement', status: 'new' },
+      { customer_id: 'L', alert_type: 'low_engagement', status: 'acknowledged' },
+      { customer_id: 'L', alert_type: 'score_drop', status: 'new' },
+    ] } });
+    const out = await dedupe.describeMergeEffects(db, winner, loser);
+    expect(out.financial_effects.predicted_collision_handlers).toEqual(['customer_health_alerts']);
+    expect(out.financial_effects.predicted_collision_folds.customer_health_alerts).toEqual({ shared_open_alerts: ['low_engagement'] });
+    expect(out.financial_effects.revertible_from_queue).toBe(false);
+    install({}, { collisions: { customer_health_alerts: [
+      { customer_id: 'W', alert_type: 'low_engagement', status: 'dismissed' },
+      { customer_id: 'L', alert_type: 'low_engagement', status: 'new' },
+      { customer_id: 'W', alert_type: 'payment_failed', status: 'new' },
+      { customer_id: 'L', alert_type: 'payment_failed', status: 'new' },
+    ] } });
     expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.predicted_collision_handlers).toEqual([]);
   });
 
@@ -3516,7 +3760,7 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
     const route = (counts) => (table, q) => {
       if (table === 'referral_promoters') return null;
       if (table === 'payment_methods') return q.called('first') ? null : [];
-      if (['notification_prefs', 'property_preferences', 'customer_properties', 'customer_tags', 'conversations'].includes(table)) return [];
+      if (['notification_prefs', 'property_preferences', 'customer_properties', 'customer_tags', 'conversations', 'customer_health_alerts'].includes(table)) return [];
       if (table === 'invoices' && !q.called('count')) return [];
       if (table === 'customer_plan_rates') return { n: 0 };
       return { n: counts[table] || 0 };
@@ -3642,7 +3886,7 @@ describe('previewCollectionCaseReconciliation (the executor\'s reconcile rule, d
     installDb((table, q) => {
       if (table === 'referral_promoters') return null;
       if (table === 'payment_methods') return [];
-      if (['notification_prefs', 'property_preferences', 'customer_properties', 'customer_tags', 'conversations'].includes(table)) return [];
+      if (['notification_prefs', 'property_preferences', 'customer_properties', 'customer_tags', 'conversations', 'customer_health_alerts'].includes(table)) return [];
       if (table === 'invoices' && !q.called('count')) return [];
       return { n: 0 };
     });
@@ -3999,5 +4243,138 @@ describe('duplicateWinnerFor', () => {
     expect(dedupe.decideWinner).toBeUndefined();
     expect(dedupe.loserAutoBlockers).toEqual(expect.any(Function));
     expect(dedupe.REPOINT_EXCLUDED_TABLES).toBeInstanceOf(Set);
+  });
+});
+
+describe('GATE_DEDUPE_NO_UNVERIFIED_BACKFILL: auto sweep leaves intake rows with an unverified email for the office', () => {
+  const OLD_GATE = process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL;
+  afterEach(() => {
+    if (OLD_GATE === undefined) delete process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL;
+    else process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL = OLD_GATE;
+  });
+
+  const WINNER_ID = 'dddddddd-0000-0000-0000-000000000001';
+  const LOSER_ID = 'dddddddd-0000-0000-0000-000000000002';
+  const winnerRow = {
+    id: WINNER_ID, first_name: 'Diana', last_name: 'Blowers', phone: '+15555550143', email: null,
+    address_line1: '1 Fixture Ln', zip: '00000', pipeline_stage: 'active_customer', created_at: '2026-07-08',
+  };
+  const shellRow = (extra = {}) => ({
+    id: LOSER_ID, first_name: 'Diana', last_name: null, phone: '5555550143', email: 'typed-by-visitor@example.test',
+    address_line1: null, zip: null, pipeline_stage: 'new_lead', lead_source: 'website_quote',
+    last_contact_type: 'website_quote', created_at: '2026-07-09', ...extra,
+  });
+
+  // Returns { results, backfilled } for one sweep over the winner + loser rows.
+  async function sweep(loserRow) {
+    installDb((table) => {
+      if (table === 'customers') return [winnerRow, loserRow];
+      return [];
+    });
+    const state = { backfilled: null };
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (table === 'customers') {
+        if (q.called('update')) {
+          const payload = q.args('update')[0];
+          if (!payload.deleted_at) state.backfilled = payload;
+          return 1;
+        }
+        return [winnerRow, loserRow];
+      }
+      if (table === 'customer_merge_journal') return [{ id: 'j1' }];
+      if (q.called('update')) return 1;
+      return [];
+    }));
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const results = await dedupe.runAutoMergeSweep({ performedBy: 'test' });
+    return { results, state };
+  }
+
+  it('gate on: a public-quote shell with an email is not auto-merged, and the pair stays listed for a manual merge', async () => {
+    process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL = 'true';
+    const { results } = await sweep(shellRow());
+    expect(results.merged).toEqual([]);
+    expect(results.skipped).toEqual([{ loserId: LOSER_ID, winnerId: WINNER_ID, tier: 'green', reasons: ['unverified_intake_email'] }]);
+    // Still on the Duplicates page (the queue read does not use the gate).
+    const groups = await dedupe.findDuplicateGroups();
+    expect(groups).toHaveLength(1);
+    expect(groups[0].winner.id).toBe(WINNER_ID);
+    expect(groups[0].candidates.map((c) => c.loser.id)).toEqual([LOSER_ID]);
+  });
+
+  it('gate on: a shell without an email is still auto-merged', async () => {
+    process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL = 'true';
+    const { results } = await sweep(shellRow({ email: null }));
+    expect(results.merged).toHaveLength(1);
+    expect(results.skipped).toEqual([]);
+  });
+
+  it('gate on: a shell whose email matches the kept customer is still auto-merged', async () => {
+    process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL = 'true';
+    installDb(() => []);
+    expect(dedupe.unverifiedIntakeEmailSkip({ email: 'Same@Example.test' }, shellRow({ email: ' same@example.test ' }))).toBeNull();
+  });
+
+  it('gate on: an intake shell kept as the WINNER with its own email also blocks the auto-merge', async () => {
+    process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL = 'true';
+    installDb(() => []);
+    const realLoser = { email: 'office-entered@example.test', pipeline_stage: 'new_lead', lead_source: 'referral', last_contact_type: 'call' };
+    expect(dedupe.unverifiedIntakeEmailSkip(shellRow(), realLoser)).toBe('unverified_intake_email');
+    expect(dedupe.unverifiedIntakeEmailSkip(shellRow(), { ...realLoser, email: null })).toBe('unverified_intake_email');
+    expect(dedupe.unverifiedIntakeEmailSkip(shellRow({ email: null }), realLoser)).toBeNull();
+  });
+
+  it('gate on: a loser that is not an intake shell (staff-entered lead) is still auto-merged and backfilled', async () => {
+    process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL = 'true';
+    const { results, state } = await sweep(shellRow({ lead_source: 'referral', last_contact_type: 'call' }));
+    expect(results.merged).toHaveLength(1);
+    expect(state.backfilled.email).toBe('typed-by-visitor@example.test');
+  });
+
+  it('gate off: the same shell is merged and its email backfilled as before', async () => {
+    delete process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL;
+    const { results, state } = await sweep(shellRow());
+    expect(results.merged).toHaveLength(1);
+    expect(results.skipped).toEqual([]);
+    expect(state.backfilled.email).toBe('typed-by-visitor@example.test');
+  });
+
+  it('gate on: a MANUAL merge of the same shell is unchanged', async () => {
+    process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL = 'true';
+    const loserRow = shellRow();
+    const state = { backfilled: null };
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (table === 'customers') {
+        if (q.called('update')) {
+          const payload = q.args('update')[0];
+          if (!payload.deleted_at) state.backfilled = payload;
+          return 1;
+        }
+        return [winnerRow, loserRow];
+      }
+      if (table === 'customer_merge_journal') return [{ id: 'j1' }];
+      if (q.called('update')) return 1;
+      return [];
+    }));
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await dedupe.executeMerge({ winnerId: WINNER_ID, loserId: LOSER_ID, performedBy: 'admin' });
+    expect(state.backfilled.email).toBe('typed-by-visitor@example.test');
+  });
+
+  it('isUnverifiedIntakeShell reads the columns the intake routes set', () => {
+    const { isUnverifiedIntakeShell } = dedupe;
+    expect(isUnverifiedIntakeShell({ pipeline_stage: 'new_lead', lead_source: 'website_quote' })).toBe(true);
+    expect(isUnverifiedIntakeShell({ pipeline_stage: 'new_lead', lead_source: 'google_ads', last_contact_type: 'form_submission' })).toBe(true);
+    expect(isUnverifiedIntakeShell({ pipeline_stage: 'new_lead', lead_source: 'google_ads', form_id: 'f-1' })).toBe(true);
+    expect(isUnverifiedIntakeShell({ pipeline_stage: 'new_lead', lead_source: 'lead_pipeline' })).toBe(true);
+    expect(isUnverifiedIntakeShell({ pipeline_stage: 'estimate_sent', lead_source: 'website_quote' })).toBe(false);
+    expect(isUnverifiedIntakeShell({ pipeline_stage: 'new_lead', lead_source: 'referral', last_contact_type: 'call' })).toBe(false);
+    expect(isUnverifiedIntakeShell(null)).toBe(false);
   });
 });

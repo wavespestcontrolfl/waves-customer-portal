@@ -414,6 +414,39 @@ describe('previewInvoiceTotals ↔ create parity', () => {
     );
   });
 
+  // The Intelligence Bar's create_invoice passes the operator's explicit taxRate; the preview resolves it as create() does.
+  describe('explicit taxRate (create_invoice)', () => {
+    const previewExplicit = (taxRate, customer = COMMERCIAL_CUSTOMER) => InvoiceService.previewInvoiceTotals({
+      customerId: 'cust-1', customer, amount: FEE, scheduledServiceId: 'sched-1', title: 'WDO Inspection', taxRate,
+    });
+
+    // A leftover once-value from an earlier case must not decide the exemption here.
+    beforeEach(() => TaxCalculator.findVerifiedExemption.mockReset().mockResolvedValue(null));
+
+    test('honors the rate without consulting the calculator, like create', async () => {
+      const inserted = mockCreateDb();
+      await InvoiceService.create({
+        customerId: 'cust-1', scheduledServiceId: 'sched-1', title: 'WDO Inspection', taxRate: 0.07, notes: 'parity test',
+        lineItems: [{ description: 'WDO inspection', quantity: 1, unit_price: FEE, amount: FEE }],
+      });
+      const stored = inserted[inserted.length - 1];
+      const preview = await previewExplicit(0.07);
+      expect(preview).toEqual({ subtotal: stored.subtotal, tax_rate: stored.tax_rate, tax_amount: stored.tax_amount, total: stored.total });
+      expect(TaxCalculator.calculateTax).not.toHaveBeenCalled();
+    });
+
+    test('a verified exemption zeroes it; a lookup failure keeps it; rate 0 skips the lookup; residential stays 0', async () => {
+      TaxCalculator.findVerifiedExemption.mockResolvedValueOnce({ id: 'ex-1' });
+      expect(await previewExplicit(0.07)).toMatchObject({ tax_rate: 0, tax_amount: 0, total: FEE });
+      TaxCalculator.findVerifiedExemption.mockRejectedValueOnce(new Error('boom'));
+      expect(await previewExplicit(0.07)).toMatchObject({ tax_rate: 0.07, tax_amount: Math.round(FEE * 0.07 * 100) / 100 });
+      TaxCalculator.findVerifiedExemption.mockClear();
+      expect(await previewExplicit(0)).toMatchObject({ tax_rate: 0, tax_amount: 0 });
+      expect(TaxCalculator.findVerifiedExemption).not.toHaveBeenCalled();
+      expect(await previewExplicit(0.07, { ...COMMERCIAL_CUSTOMER, property_type: 'residential' })).toMatchObject({ tax_rate: 0, tax_amount: 0, total: FEE });
+    });
+  });
+
   test('preview throws like create when the service record is not the customer\'s', async () => {
     db.mockImplementation((table) => {
       const q = {};

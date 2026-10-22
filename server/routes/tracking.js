@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
-const { applyPropertyPredicate, resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
+const { applyPropertyPredicate, resolvedScopePayload } = require('../services/account-properties');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
@@ -12,6 +12,12 @@ const {
 } = require('../services/customer-tracking-eta');
 const { resolveFreshTechPosition } = require('../services/tracking-vehicle-location');
 const { computeStopsAhead } = require('../services/stops-ahead');
+// Contact session (GATE_CONTACT_LOGIN): no public /track bearer, the
+// holder's primary property's visits only (whatever GATE_APP_PROPERTY_SCOPE
+// says — codex #6363 r16 security P1), and the scope echo the contact app
+// expects.
+const { withoutTrackBearers, sessionRecordScope: sessionScope, CONTACT_PROPERTY_SCOPE_ECHO } = require('../services/contact-session-projection');
+const scopeEcho = (req, scope) => (req.contactSession ? CONTACT_PROPERTY_SCOPE_ECHO : resolvedScopePayload(scope));
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 router.use(authenticate);
@@ -400,7 +406,7 @@ router.get('/maps-key', (req, res) => {
 // =========================================================================
 router.get('/active', async (req, res, next) => {
   try {
-    const scope = await resolveSessionScope(req);
+    const scope = await sessionScope(req);
     const canonical = await findCanonicalScheduledService(req.customerId, { activeOnly: true, scope });
     if (canonical) {
       const locationCustomer = scopedLocationCustomer(req.customer, scope, canonical);
@@ -463,10 +469,12 @@ router.get('/active', async (req, res, next) => {
           } catch { /* map is best-effort; the count renders without it */ }
         }
       }
-      return res.json({ tracker: formatted, propertyScope: resolvedScopePayload(scope) });
+      // A contact session (GATE_CONTACT_LOGIN) gets the tracker without the
+      // public /track bearer (services/contact-session-projection.js).
+      return res.json({ tracker: req.contactSession ? withoutTrackBearers(formatted) : formatted, propertyScope: scopeEcho(req, scope) });
     }
 
-    return res.json({ tracker: null, propertyScope: resolvedScopePayload(scope) });
+    return res.json({ tracker: null, propertyScope: scopeEcho(req, scope) });
   } catch (err) { next(err); }
 });
 
@@ -475,7 +483,7 @@ router.get('/active', async (req, res, next) => {
 // =========================================================================
 router.get('/today', async (req, res, next) => {
   try {
-    const scope = await resolveSessionScope(req);
+    const scope = await sessionScope(req);
     const canonical = await findCanonicalScheduledService(req.customerId, { todayOnly: true, scope });
     if (canonical) {
       const locationCustomer = scopedLocationCustomer(req.customer, scope, canonical);
@@ -538,10 +546,12 @@ router.get('/today', async (req, res, next) => {
           } catch { /* map is best-effort; the count renders without it */ }
         }
       }
-      return res.json({ tracker: formatted, propertyScope: resolvedScopePayload(scope) });
+      // A contact session (GATE_CONTACT_LOGIN) gets the tracker without the
+      // public /track bearer (services/contact-session-projection.js).
+      return res.json({ tracker: req.contactSession ? withoutTrackBearers(formatted) : formatted, propertyScope: scopeEcho(req, scope) });
     }
 
-    return res.json({ tracker: null, propertyScope: resolvedScopePayload(scope) });
+    return res.json({ tracker: null, propertyScope: scopeEcho(req, scope) });
   } catch (err) { next(err); }
 });
 

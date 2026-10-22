@@ -16,7 +16,17 @@ const { shortenOrPassthrough, existingShortUrlFor, allShortUrlsFor } = require("
 const INLINE_CLAIM_STALE_MS = 10 * 60 * 1000;
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { renderSmsTemplate } = require("./sms-template-renderer");
-const { firstNameFrom } = require("./customer-contact");
+const { firstNameFrom, isServiceContactRole } = require("./customer-contact");
+
+// The trust a review text's leg carries (codex #6363 r33 P2): the resolved
+// slot-1 contact's leg is 'service_contact_authorized', so sendCustomerMessage's
+// contact-choices boundary re-check (contactPhoneDeclinesText) holds a
+// contact who turned texts off — or whom the holder removed — between the
+// recipient's resolution and the provider handoff; the holder's own leg keeps
+// 'phone_matches_customer'.
+function reviewSmsTrust(contact) {
+  return isServiceContactRole(contact?.role) ? "service_contact_authorized" : "phone_matches_customer";
+}
 const TWILIO_NUMBERS = require("../config/twilio-numbers");
 const {
   reserveForRequest,
@@ -50,6 +60,49 @@ const TECH_FALLBACK_SMS = "Your tech";
 // Legacy (non-cadence) post-service ask: a separate text this long after
 // completion when the operator picks no timing.
 const LEGACY_REVIEW_DELAY_MINUTES = 120;
+// GATE_REVIEW_ASK_AFTER_REPORT (owner 2026-10-22): the Automatic Day-0 ask is
+// due this many minutes after enrollment (the report text, or the payment
+// that lifts the unpaid-invoice hold), for every service line.
+const REVIEW_AFTER_REPORT_DELAY_MINUTES = 10;
+
+/**
+ * GATE_REVIEW_ASK_AFTER_REPORT: when is the Automatic Day-0 ask due, given what
+ * is known about the report text? `anchor` = { status, at }:
+ *   sent  the completion text went out at `at` (default now)   -> max(now, at) + 10 min
+ *   paid  enrolled at payment; that text went out long before  -> now + 10 min
+ * Anything else (no anchor) returns null: the caller keeps the smart send
+ * window, so an ask never rides ahead of a report text nobody can confirm.
+ */
+function afterReportDueAt(anchor, nowMs = Date.now()) {
+  const delayMs = REVIEW_AFTER_REPORT_DELAY_MINUTES * 60000;
+  if (anchor?.status === "paid") return new Date(nowMs + delayMs);
+  if (anchor?.status !== "sent") return null;
+  const atMs = new Date(anchor.at || nowMs).getTime();
+  return new Date(Math.max(nowMs, Number.isFinite(atMs) ? atMs : nowMs) + delayMs);
+}
+// The report-text anchor read from a service record's structured_notes: only a
+// completion text that went out as a TEXT (SMS/MMS) at completion. A text the
+// send window held for the morning (completionSmsDeferredTo, whatever became of
+// its replay), one routed to the customer App (sentSmsChannel 'push',
+// GATE_CUSTOMER_APP_NOTIFICATIONS), and a failed, blocked, skipped or missing
+// text give null: the smart window, exactly as with the gate off. A missing
+// channel is the pre-App shape (always SMS/MMS).
+function reportTextAnchorFromNotes(notes, { atPayment = false } = {}) {
+  const n = notes && typeof notes === "object" ? notes : {};
+  if (n.completionSmsStatus !== "sent" || n.completionSmsDeferredTo) return null;
+  if (n.sentSmsChannel && n.sentSmsChannel !== "sms" && n.sentSmsChannel !== "mms") return null;
+  if (atPayment) return { status: "paid", at: new Date().toISOString() };
+  return { status: "sent", at: n.sentSmsAt || new Date().toISOString() };
+}
+// structured_notes as an object (a string column value is parsed; bad JSON
+// reads as empty).
+function structuredNotesObject(raw) {
+  if (typeof raw !== "string") return raw || {};
+  try { return JSON.parse(raw); } catch { return {}; }
+}
+function reviewAskAfterReportOn() {
+  return require("../config/feature-gates").reviewAskAfterReportLive();
+}
 
 // First name from the technician row when an ask carries technician_id but no
 // tech_name (override callers, legacy rows). Null when unknown.
@@ -1775,13 +1828,20 @@ const ReviewService = {
     // Completion panel "Customer asked for the link": { by, at, source }.
     // Recorded on the sequence; the ask still goes at the next cadence tick.
     customerRequested = null,
+    // GATE_REVIEW_ASK_AFTER_REPORT: what happened to the report text
+    // ({ status: 'sent'|'paid', at }). Gate off: ignored.
+    reportTextAnchor = null,
   }) {
     const { isEnabled } = require("../config/feature-gates");
     if (!isEnabled("reviewSequences")) {
+      // GATE_REVIEW_ASK_AFTER_REPORT is cadence mode only: this legacy path
+      // ignores it (no anchor, no +10), exactly as before.
       return this.create({
         customerId,
         serviceRecordId,
         triggeredBy,
+        // GATE_REVIEW_ASK_AFTER_REPORT: a caller's historical default (120)
+        // gives way to the 10-minute rule; an explicit operator delay stays.
         delayMinutes: delayMinutes !== undefined && delayMinutes !== null ? delayMinutes : legacyDelayMinutes,
         techName,
         serviceType,
@@ -1828,12 +1888,21 @@ const ReviewService = {
       // mode (Codex P2, r2). 0 = "Now" → first cron tick.
       const explicitDelay = Number(delayMinutes);
       const explicitTiming = delayMinutes !== undefined && delayMinutes !== null && Number.isFinite(explicitDelay);
+      // GATE_REVIEW_ASK_AFTER_REPORT: Automatic = 10 minutes after the report
+      // text for every service line (afterReportDueAt): sent -> after its send,
+      // paid -> after payment. Any other report (held for the morning, the App,
+      // failed, blocked, unknown) keeps the smart window. Explicit timing above
+      // still wins.
+      const reportDueAt = !explicitTiming && reviewAskAfterReportOn() ? afterReportDueAt(reportTextAnchor) : null;
+      const afterReport = reportDueAt !== null;
       const firstTouchAt = explicitTiming
         ? new Date(Date.now() + Math.max(0, explicitDelay) * 60000)
-        : calculateReviewSendPlan(
-          completedAt ? new Date(completedAt) : new Date(),
-          svcType,
-        ).at;
+        : afterReport
+          ? reportDueAt
+          : calculateReviewSendPlan(
+            completedAt ? new Date(completedAt) : new Date(),
+            svcType,
+          ).at;
       const result = await this.startReviewSequence({
         customerId,
         serviceRecordId,
@@ -1858,7 +1927,7 @@ const ReviewService = {
           plan: resolved.plan,
         }),
         decision: sequenceDecision({
-          reason: customerRequested ? "customer_requested" : explicitTiming ? "operator_timing" : "smart_window",
+          reason: customerRequested ? "customer_requested" : explicitTiming ? "operator_timing" : afterReport ? "after_report" : "smart_window",
           plannedAt: firstTouchAt,
           nextEvalAt: firstTouchAt,
         }),
@@ -1876,6 +1945,37 @@ const ReviewService = {
     } catch (err) {
       logger.error(`[review] Post-service cadence enroll failed (customerId=${customerId} errType=${err?.name || "Error"}): ${err.message}`);
       return { started: false, reason: "error" };
+    }
+  },
+
+  // GATE_REVIEW_ASK_AFTER_REPORT anchor for the completion enrollment: what
+  // became of the record's report text. Null when the gate is off, on a failed
+  // lookup, or when no confirmable text left (the smart window then applies).
+  async reportTextAnchorForRecord(serviceRecordId) {
+    if (!serviceRecordId || !reviewAskAfterReportOn()) return null;
+    try {
+      const row = await db("service_records").where({ id: serviceRecordId }).first("structured_notes");
+      return reportTextAnchorFromNotes(structuredNotesObject(row?.structured_notes));
+    } catch (err) {
+      logger.warn(`[review] report anchor lookup failed (serviceRecordId=${serviceRecordId}): ${err.message}`);
+      return null;
+    }
+  },
+
+  // The same anchor for a combined visit (visit-completion-packets): its
+  // completion_sms effect. Enrollment there runs only once the delivery legs
+  // are sent or suppressed, so a 'sent' effect anchors the ask to that text; a
+  // suppressed, missing or held one keeps the smart window.
+  async reportTextAnchorForVisit(visitId, database = db) {
+    if (!visitId || !reviewAskAfterReportOn()) return null;
+    try {
+      // A summary held by quiet hours (deferSummarySms sets scheduled_at, which
+      // its 8 AM replay keeps) keeps the smart window, like a held report.
+      const effect = await database("visit_effects").where({ visit_id: visitId, effect_type: "completion_sms" }).first("status", "sent_at", "scheduled_at");
+      return effect?.status === "sent" && !effect.scheduled_at ? { status: "sent", at: effect.sent_at || new Date() } : null;
+    } catch (err) {
+      logger.warn(`[review] visit report anchor lookup failed (visitId=${visitId}): ${err.message}`);
+      return null;
     }
   },
 
@@ -1918,6 +2018,10 @@ const ReviewService = {
         return { enrolled: false, reason: "visit_outcome" };
       }
       const delayMinutes = this.completionReviewDelay(notes);
+      // GATE_REVIEW_ASK_AFTER_REPORT: a report text that went out at completion
+      // went long before this payment, so the ask is due 10 minutes after it;
+      // any other report keeps the smart window from the payment.
+      const reportTextAnchor = reportTextAnchorFromNotes(notes, { atPayment: true });
       // Legacy create() dedupes by service_record_id; the cadence path
       // dedupes per service record too (startReviewSequence) on top of the
       // active-sequence + cap/cooldown guards — safe under webhook retries
@@ -1928,6 +2032,7 @@ const ReviewService = {
         triggeredBy: "auto",
         delayMinutes,
         legacyDelayMinutes: LEGACY_REVIEW_DELAY_MINUTES,
+        ...(reviewAskAfterReportOn() && reportTextAnchor ? { reportTextAnchor } : {}),
         customerRequested: notes.customerRequestedReview && typeof notes.customerRequestedReview === "object"
           ? notes.customerRequestedReview
           : null,
@@ -2370,6 +2475,7 @@ const ReviewService = {
           audience: "customer",
           purpose: "review_request",
           customerId: customer.id,
+          identityTrustLevel: reviewSmsTrust(contact),
           entryPoint: "review_request_send",
           metadata: {
             review_request_id: requestId,
@@ -2998,6 +3104,8 @@ const ReviewService = {
     const { getServiceContact } = require("./customer-contact");
     const contact = getServiceContact(customer);
     if (!contact.email) return { reason: "no_email" };
+    // The contact's OWN email master switch (contact login) holds the leg.
+    if (await require("./contact-notification-prefs").contactDeclinesChannel(customer.id, contact, "email")) return { reason: "email_off" };
     let prefs;
     try {
       prefs = await db("notification_prefs").where({ customer_id: customer.id }).first();
@@ -3015,14 +3123,18 @@ const ReviewService = {
    * cleared, or a failed write, returns false and the library aborts the
    * provider call (r9/r10 P2). True = this attempt owns the dispatch.
    */
-  async _claimInlineEmailDispatch(requestId) {
+  async _claimInlineEmailDispatch(requestId, { contact = null } = {}) {
     let cleared;
     try {
       // The final pre-provider claim re-applies the terminal predicates
       // (the customer may have answered, been stopped, reviewed or been
       // removed since the recipient check) so it fails closed (pre-push
       // Codex P1 on bd85be714).
-      cleared = await db("review_requests")
+      const { whereContactEmailAllowed } = require("./contact-notification-prefs");
+      // requireSlot (codex r27 P2): the contact must still occupy a slot of
+      // the customer row as of this same write — a contact the holder
+      // removed while the template resolved is a former contact, not emailed.
+      cleared = await whereContactEmailAllowed(db("review_requests"), "review_requests.customer_id", contact, { requireSlot: true })
         .where({ id: requestId })
         .whereNotNull("email_leg_owed_at")
         .whereNotIn("status", INLINE_RETRY_TERMINAL_STATUSES)
@@ -3041,7 +3153,9 @@ const ReviewService = {
         // still be emailed — this claim is the last fence before the
         // provider. Same predicate as _inlineEmailRecipient (a prefs row
         // must exist; review_request / email_enabled not false) so the two
-        // never disagree (GH Codex #3856 r23 P1).
+        // never disagree (GH Codex #3856 r23 P1) — and the contact's OWN
+        // email switch the recipient read applied, as of this write too
+        // (whereContactEmailAllowed above; codex #6363 r20 P2).
         .whereExists(function emailConsent() {
           this.select(db.raw("1")).from("notification_prefs")
             .whereRaw("notification_prefs.customer_id = review_requests.customer_id")
@@ -3119,7 +3233,7 @@ const ReviewService = {
         // addresses in logs); the sanitized catch below is the only log.
         suppressProviderErrorLog: true,
         onQueued: async () => {
-          dispatched = await this._claimInlineEmailDispatch(request.id);
+          dispatched = await this._claimInlineEmailDispatch(request.id, { contact });
           return dispatched;
         },
       });
@@ -4325,7 +4439,7 @@ const ReviewService = {
               audience: "customer",
               purpose: "review_request",
               customerId: customer.id,
-              identityTrustLevel: "phone_matches_customer",
+              identityTrustLevel: reviewSmsTrust(contact),
               entryPoint: "review_request_followup",
               metadata: {
                 original_message_type: "review_followup",
@@ -4601,7 +4715,11 @@ const ReviewService = {
     }
     const reviewBlocked = !!prefs && prefs.review_request === false;
     const smsBlocked = reviewBlocked || (!!prefs && prefs.sms_enabled === false);
-    const emailBlocked = reviewBlocked || (!!prefs && prefs.email_enabled === false);
+    // The email identity is the service contact as themselves; their OWN
+    // email master switch (contact login) blocks the leg like the holder's
+    // (the SMS identity already fell back to the holder in the resolver).
+    const emailBlocked = reviewBlocked || (!!prefs && prefs.email_enabled === false)
+      || await require("./contact-notification-prefs").contactDeclinesChannel(customer.id, emailContact, "email");
     // Hard suppression (DNC / wrong-number) on the phone — if the SMS block is
     // suppression-only, the cadence should fall back to email rather than stall.
     // sendCustomerMessage would also block it, but checking here lets the channel
@@ -5220,6 +5338,7 @@ const ReviewService = {
         audience: "customer",
         purpose: "review_request",
         customerId: customer.id,
+        identityTrustLevel: reviewSmsTrust(contact),
         entryPoint: "review_outreach_touch",
         metadata: {
           ...(request.sequence_id ? { review_sequence_id: request.sequence_id } : {}),
@@ -5573,6 +5692,11 @@ const ReviewService = {
     // MAY have reached SendGrid (GH Codex #3856 r9 P2).
     let dispatched = false;
     let summaryBlock = null;
+    // The contact's OWN email switch, re-read at the provider handoff (codex
+    // #6363 r22 P2): sendOutreachTouch read it before the template library's
+    // own awaits; a decline that lands in between still holds the email —
+    // the fence the inline copy's claim and the appointment email have.
+    let contactDeclinedAtDispatch = false;
     try {
       const EmailLib = require("./email-template-library");
       result = await EmailLib.sendTemplate({
@@ -5632,11 +5756,27 @@ const ReviewService = {
         // SendGrid body out of the transport log; the sanitized catch below
         // (request id + error class) is the only log.
         suppressProviderErrorLog: true,
-        onQueued: () => { dispatched = true; },
+        onQueued: async () => {
+          // Fail closed: an unreadable choices table reads as declined.
+          // requireSlot (codex r27 P2): a contact the holder removed from
+          // the slots since the recipient resolved is held too.
+          if (await require("./contact-notification-prefs").contactDeclinesChannel(customer.id, contact, "email", { requireSlot: true })) {
+            contactDeclinedAtDispatch = true;
+            return false;
+          }
+          dispatched = true;
+        },
       });
     } catch (err) {
       logger.error(`[review] outreach email send threw (requestId=${request.id} errType=${err?.name || "Error"} dispatched=${dispatched})`);
       return this._outreachEmailThrowOutcome({ request, manageRetryVia, dispatched, err });
+    }
+    if (contactDeclinedAtDispatch) {
+      // The same terminal opt-out sendOutreachTouch reports when the contact's
+      // switch was already off at its own read: nothing reached the provider.
+      await db("review_requests").where({ id: request.id }).update({ status: "suppressed" })
+        .catch((bookErr) => logger.error(`[review] post-decline email bookkeeping failed (requestId=${request.id} errType=${bookErr?.name || "Error"})`));
+      return { ok: false, blocked: true, terminal: true, channel: "email", requestId: request.id, reason: "opted_out" };
     }
 
     // Send returned — bookkeeping failures here must NOT requeue (the email
@@ -8088,6 +8228,7 @@ ReviewService.__private = {
   calculateReviewSendPlan,
   nextCadenceTickAt,
   REVIEW_CADENCE_TICK_MINUTES,
+  reportTextAnchorFromNotes,
   LEGACY_REVIEW_TICK_MINUTES,
   sequenceDecision,
   nextTouchRunAt,
@@ -8103,6 +8244,7 @@ ReviewService.__private = {
 ReviewService.unshortenedReviewUrl = unshortenedReviewUrl;
 ReviewService.REVIEW_TOKEN_RE = REVIEW_TOKEN_RE;
 ReviewService.LEGACY_REVIEW_DELAY_MINUTES = LEGACY_REVIEW_DELAY_MINUTES;
+ReviewService.REVIEW_AFTER_REPORT_DELAY_MINUTES = REVIEW_AFTER_REPORT_DELAY_MINUTES;
 ReviewService.supersedeQueuedAsks = supersedeQueuedAsks;
 ReviewService.reserveSendableReviewSms = reserveSendableReviewSms;
 

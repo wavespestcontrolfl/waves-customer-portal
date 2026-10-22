@@ -52,6 +52,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | PUT | `/api/admin/customers/:customerId/turf-profile` | admin-customer-turf-profile |
 | GET | `/api/admin/customers/:id` | admin-customers |
 | GET | `/api/admin/customers/:id/cards` | admin-customers |
+| GET | `/api/admin/customers/:id/contact-notification-prefs` | admin-customers |
 | GET | `/api/admin/customers/:id/estimates-summary` | admin-customers |
 | GET | `/api/admin/customers/:id/latest-scheduled-service` | admin-customers |
 | POST | `/api/admin/customers/at-address` | admin-customers |
@@ -291,10 +292,8 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/tech/line/call` | tech-line |
 | POST | `/api/tech/line/sms` | tech-line |
 | GET | `/api/tech/notifications` | tech-notifications |
-| POST | `/api/tech/notifications/:id/confirm-start` | tech-notifications |
 | POST | `/api/tech/notifications/:id/dismiss` | tech-notifications |
 | POST | `/api/tech/notifications/:id/read` | tech-notifications |
-| POST | `/api/tech/notifications/:id/undo-stop` | tech-notifications |
 | POST | `/api/tech/notifications/dismiss-batch` | tech-notifications |
 | GET | `/api/tech/notifications/schedule-changes` | tech-notifications |
 | GET | `/api/tech/pay-growth` | tech-pay-growth |
