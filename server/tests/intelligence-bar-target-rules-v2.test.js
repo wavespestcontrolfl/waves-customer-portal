@@ -805,6 +805,9 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(await grounded('reschedule Alice Sample and Pat2')).toEqual([]);
     expect(await grounded('reschedule Alice Sample to next Tuesday at 3pm')).toEqual([id(101)]);
     expect(await grounded("update Alice Sample's phone to 941-555-0150")).toEqual([id(101)]);
+    // A lead-source value is data, not a name (r44 P2).
+    expect(await grounded("set Alice Sample's lead source to referral")).toEqual([id(101)]);
+    expect(await grounded("set Alice Sample's lead source to Facebook Ads")).toEqual([id(101)]);
     expect(await viewingBob('update the phone and removing the notes')).toBe(false);
     // A replacement value ends at an inflected verb too, so the text after it is checked (r40).
     expect(await viewingBob("update Bob Example's phone to 941-555-0101 and removing Jhon Smith's notes")).toBe(false);
@@ -822,7 +825,9 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
       const prompt = `update the phone to 941-555-0100${sep}Sam Sample's notes to blank`;
       expect([prompt, await viewingBob(prompt)]).toEqual([prompt, false]);
     }
-    expect(await viewingBob('update the notes to gate code #5 (side gate)')).toBe(true);
+    // Parentheses end a value too (r44); a phone written with them still works.
+    expect(await viewingBob("update the phone to 941-555-0100 (Sam Sample's notes to blank)")).toBe(false);
+    expect(await viewingBob('update the phone to (941) 555-0150')).toBe(true);
     expect(await viewingBob('update the phone to 941.555.0150')).toBe(true);
     expect(await viewingBob('update the email to bob.example@example.test')).toBe(true);
     expect(await viewingBob('update the notes in 34285')).toBe(false);
@@ -830,6 +835,9 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     customers = [row(100, 'Bob', 'Example', '9415550100')];
     expect(await grounded('fix the notes for 941-555-0100 in 34285')).toEqual([]);
     expect(await grounded('fix the notes for 941-555-0100')).toEqual([id(100)]);
+    // A page reference beside a contact names two customers: not direct (r44).
+    expect(await grounded("update this customer and 941-555-0100's notes")).toEqual([]);
+    expect(await grounded('update his notes at 941-555-0100')).toEqual([]);
     customers = [row(100, 'Bob', 'Example', '9415550100'), row(101, 'Alice', 'Sample', '9415550101'), row(102, 'Carl', 'Other', '9415550102')];
   });
 

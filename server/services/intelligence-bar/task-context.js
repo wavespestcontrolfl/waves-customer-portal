@@ -616,7 +616,7 @@ function verbForm(word, verbs = ACTION_VERBS) {
   return stem !== word && (verbs.has(stem) || verbs.has(`${stem}e`) || verbs.has(stem.replace(/(.)\1$/, '$1')));
 }
 const OPERATION_STARTS = new Set(['qqsep', 'and', 'then', 'also', 'please', 'to']);
-const VALUE_START_RE = /\b(?:name|address|email(?:\s+address)?|phone(?:\s+number)?|mobile(?:\s+(?:phone|number))?|cell(?:\s+(?:phone|number))?|number|label|notes?|instructions|message|contact)\s+(?:to|as|is|=)\s+|:/i;
+const VALUE_START_RE = /\b(?:lead\s+source|source|stage|tier|name|address|email(?:\s+address)?|phone(?:\s+number)?|mobile(?:\s+(?:phone|number))?|cell(?:\s+(?:phone|number))?|number|label|notes?|instructions|message|contact)\s+(?:to|as|is|=)\s+|:/i;
 // A value ends at a separator followed by an action verb in ANY inflection ("and removing ..."),
 // the same verbForm the compound count uses (Codex #6369 r40).
 const VALUE_SEPARATOR_RE = /(?:[;\n,]|\b(?:and|then|also)\b)\s*(?:(?:please|also|then)\s+)*([\p{L}]+)/giu;
@@ -630,9 +630,10 @@ function valueEnd(tail) {
 // strict (the no-card check, Codex #6369 r41): a value ends at its FIRST separator, so a second
 // clause with no verb ("..., Sam Sample's notes to blank") is still read.
 // Allow-list, not a list of separators (r43, after "," r41, ". & + /" r42, "—" r43): the value ends at the first
-// character that is not a letter, digit, space or an in-value mark (' . - @ # ( )), at a spaced hyphen, at a
+// character that is not a letter, digit, space or an in-value mark (' . - @ #), at a spaced hyphen, at a
+// (parentheses end it too, r44: a phone's "(941)" is removed later as a contact)
 // sentence break, or at and/then/also. A period inside a phone or email does not end it.
-const VALUE_FIRST_SEPARATOR_RE = /[^\p{L}\p{N}\s'’.\-@#()]|\s-\s|[.!?](?:\s|$)|\b(?:and|then|also)\b/iu;
+const VALUE_FIRST_SEPARATOR_RE = /[^\p{L}\p{N}\s'’.\-@#]|\s-\s|[.!?](?:\s|$)|\b(?:and|then|also)\b/iu;
 function withoutValues(text, strict = false) {
   let rest = text.replace(/“[^”]*”|"[^"]*"/g, ' ');
   let kept = '';
@@ -727,8 +728,14 @@ function unknownWordsIn(bounded, customer = null) {
   return text.trim().split(' ').filter(Boolean).some(word => !knownRequestWord(word));
 }
 
+// A reference to the on-screen customer ("this customer", "his notes") beside a contact names two
+// customers, so the contact is not used alone (Codex #6369 r44).
+const PAGE_REFERENCE_WORDS = new Set(['this', 'that', 'current', 'selected', 'viewed', 'open', 'his', 'her', 'their', 'him', 'them']);
+const pageReferencePresent = bounded => normalizeName(withoutContacts(withoutValues(bounded, true))).split(' ').some(word => PAGE_REFERENCE_WORDS.has(word));
+
 async function contactOnlyGroundedIds(bounded, clause, nameHint) {
   const literals = contactLiteralsOf(clause);
+  if (pageReferencePresent(bounded)) return [];
   // An unknown leading subject is a typed name too (pre-push audit, r36), and so is any unknown word (r37).
   if (literals.length !== 1 || nameHint || unknownLeadingSubject(bounded) || unknownWordsIn(bounded) || RECORD_ID_RE.test(clause) || INITIAL_FORM_RE.test(bounded) || placeQualifierPresent(clause)) return [];
   const owners = await resolveContacts(literals);
