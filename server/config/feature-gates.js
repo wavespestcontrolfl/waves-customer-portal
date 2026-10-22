@@ -54,8 +54,6 @@
  *   GATE_SERIES_MOVE_TEXT_COALESCE=true (when staff move a recurring series from the board or the edit modal, the customer text waits 3 minutes and only the newest move's date is sent; an older move's text is dropped when a newer staff move covers the same visit; reminders and other move effects stay immediate; read at call time via seriesMoveTextCoalesceLive(), dark by default; customer-facing)
  *   GATE_MULTI_TECH_TEXT_TIMES=true (the lead reply agent's next-available check, the text drafter's open-times fallback and the estimate converter's first service day read the website booking engine (per technician, route-aware) instead of the old by-city engine; a lead with only a city is placed at that city's centre; read at call time via multiTechTextTimesLive(), dark by default; customer-facing; off = the old by-city engine, byte-identical)
  *   GATE_PACKAGE_FOLLOWUP_AUTOBOOK=true (booking visit 1 of a two-treatment package — catalog cockroach_control, flea_tick or bed_bug_treatment — also books visit 2 in the same transaction: 14 days later (the catalog row's follow-up interval), same technician and window, confirmed with no office confirm step, $0 included, linked to visit 1 so a date move of visit 1 shifts it by the same days until the customer confirms or moves it (its time of day is kept) and a cancel, skip or no-show of visit 1 always retires it; owner rulings 2026-10-04. Covers admin Schedule create, estimate acceptance, the Leads page, the call pipeline (its visit 2 is written confirmed too); voice-agent and outbound-callback bookings are not covered yet. Off = visit 2 is booked only from the closeout card or a call that discussed it. Read at call time via packageFollowupAutobookLive(), dark by default; kill = unset. No confirmation text for visit 2; reminders arm through the self-heal sweep; the customer can reschedule it.)
- *   GATE_PEST_RIDES_LAWN_AT_ACCEPT=true (accepting an estimate with lawn every 6 weeks or monthly + a QUARTERLY rider (pest, tree & shrub, termite bait; table RIDER_PAIRINGS in rider-series-preview.js) seeds the rider follow-ups on lawn visits — every 2nd 6-week visit / every 3rd monthly visit, same stop, so they group — and links the rider series to the lawn series through scheduled_services.rides_parent_id. A rider's series extension keeps riding the lawn (admin-schedule.js#rideLawnExtension, same gate). Owner ruling 2026-10-01. Off = byte-identical to today. Canonical CALL-TIME reader pestRidesLawnAtAcceptLive(). Kill switch: unset or any non-'true' value.)
- *   GATE_RIDER_PAIRS_MONTHLY_LAWN=true (second batch of ride pairs, owner ruling 2026-10-01: a MONTHLY lawn series also carries bi-monthly pest or tree & shrub (every 2nd lawn visit), monthly pest (every visit), semiannual pest (every 6th) and seasonal Feb-Oct mosquito (every in-season visit); each pairing has its own day gaps in RIDER_PAIRINGS, rider-series-preview.js. Needs GATE_PEST_RIDES_LAWN_AT_ACCEPT and GATE_VISIT_GROUPS on. 6-week lawn hosts are unchanged (quarterly riders only). Off = byte-identical: those series walk their own cadence, and a series linked while it was on stops riding at its next extension. Canonical CALL-TIME reader riderPairsMonthlyLawnLive(), strict 'true', dark by default. Kill switch: unset.)
  *   GATE_SHORTLINK_LEGACY_EXPIRE=true (retire the legacy 1-7 char short-link code space: /l/<legacy code> answers 410 and resolveShortCode returns null for it, so ~2k guessable codes that front never-expiring bearer-token URLs stop working; read at call time via shortlinkLegacyExpireLive(), dark by default; ungated either way, a re-send never reuses a legacy code)
  *   GATE_KB_SPECIES_QA=true (knowledge Q&A — texting assistant, tech field Q&A, lead agent — also reads the owner-approved species catalog; customer-facing callers get customer copy only, staff also get tech notes; read at call time via kbSpeciesQaLive(), dark by default)
  *   GATE_KB_CUSTOMER_AUDIENCE=true (knowledge Q&A — customer-facing callers such as the portal AI assistant and the lead agent — read only knowledge_base categories on the customer-safe allowlist, currently empty, instead of every active row; staff callers (tech_field, admin_manual) are unchanged; strict opt-in, read at call time via kbCustomerAudienceLive(), dark by default)
@@ -758,14 +756,6 @@ const gates = {
   // that bypass the resolver read directly, so a flip needs no redeploy.
   // Off = byte-identical to today on every path.
   stampedZeroFree: process.env.GATE_STAMPED_ZERO_FREE === 'true',
-  // Pest rides the lawn series from accept (owner ruling 2026-10-01). Map entry
-  // for logGateStatus only — the canonical CALL-TIME reader is
-  // pestRidesLawnAtAcceptLive() below (strict 'true'). Off = byte-identical.
-  pestRidesLawnAtAccept: process.env.GATE_PEST_RIDES_LAWN_AT_ACCEPT === 'true',
-  // Second batch of ride pairs on monthly lawn (owner ruling 2026-10-01). Map
-  // entry for logGateStatus only — the canonical CALL-TIME reader is
-  // riderPairsMonthlyLawnLive() below (strict 'true'). Off = byte-identical.
-  riderPairsMonthlyLawn: process.env.GATE_RIDER_PAIRS_MONTHLY_LAWN === 'true',
   // Pay-after-first-visit wording on the estimate page for customers on the
   // card-on-file rail (owner ruling 2026-09-30). This map entry is for
   // logGateStatus only — the canonical CALL-TIME reader is
@@ -5041,19 +5031,6 @@ function packageFollowupAutobookLive() {
   return process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK === 'true';
 }
 
-// GATE_PEST_RIDES_LAWN_AT_ACCEPT read at CALL time — strict `=== 'true'`. Gates
-// the estimate converter's rider seeding (quarterly riders on 6-week / monthly lawn).
-function pestRidesLawnAtAcceptLive() {
-  return process.env.GATE_PEST_RIDES_LAWN_AT_ACCEPT === 'true';
-}
-
-// GATE_RIDER_PAIRS_MONTHLY_LAWN read at CALL time — strict `=== 'true'`. Opens
-// the gated rows of RIDER_PAIRINGS (rider-series-preview.js): bi-monthly,
-// monthly, semiannual and seasonal riders on a monthly lawn host.
-function riderPairsMonthlyLawnLive() {
-  return process.env.GATE_RIDER_PAIRS_MONTHLY_LAWN === 'true';
-}
-
 // GATE_FAST_COMPLETE_REPORT read at CALL time — strict `=== 'true'`, dark in
 // every environment. The canonical reader for the schedule payload's
 // `fastCompleteReportEnabled` and the voice-facts route.
@@ -6845,9 +6822,7 @@ function smsCourtesyAfterTemplateLive() {
 
 module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
-module.exports.pestRidesLawnAtAcceptLive = pestRidesLawnAtAcceptLive;
 module.exports.packageFollowupAutobookLive = packageFollowupAutobookLive;
-module.exports.riderPairsMonthlyLawnLive = riderPairsMonthlyLawnLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.knownGateCatalog = knownGateCatalog;

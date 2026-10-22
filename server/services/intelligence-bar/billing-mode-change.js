@@ -360,8 +360,6 @@ async function ongoingRoots(dbh, customerId, { lock = false } = {}) {
       unverified: !!(verdict && verdict.unverified),
       // 'override' | 'discounted' | 'unpriced' | null (admin-schedule.js seriesNextOccurrencesPrice).
       zero: verdict ? verdict.zero || null : null,
-      // The lawn host dates a rider plan would ride: [{ date, price, linePrice }].
-      hosts: verdict ? verdict.hosts || [] : [],
       skipped: skipReason.get(String(r.id)) || null,
     });
   }
@@ -413,15 +411,10 @@ async function billingFacts(dbh, customerId, row, fields, { lock = false } = {})
 // the billing fields, every upcoming visit's billing columns and invoices, the
 // count of visits that carry billing (always 0 on a card that was shown), the
 // collection context, and the open membership-dues invoices.
-// A rider plan's lawn host dates with their price classes, as one pin string.
-function hostsPin(hosts = []) {
-  return hosts.map((h) => `${h.date}=${h.price}/${h.linePrice}`).join(',');
-}
-
 function cardPin(row, visits, fields = {}, charge = NO_CHARGE_CONTEXT, openDues = [], facts = NO_FACTS) {
   const dues = openDues.map((d) => [String(d.id), d.total == null ? null : String(d.total), d.status, d.credit_applied == null ? null : String(d.credit_applied)]);
   const method = [charge.family || '', charge.last4 || '', charge.methodId || '', charge.savedMethods || ''];
-  const roots = facts.roots.map((r) => [String(r.id), r.payer_id == null ? null : String(r.payer_id), String(r.price), r.unverified ? 'unverified' : 'verified', r.zero && r.zero !== 'unpriced' ? `${r.zero}:${r.linePrice}` : '', r.skipped || '', hostsPin(r.hosts), (r.addonLines || []).map((a) => `${a.name}=${a.gross}`).join(',')]);
+  const roots = facts.roots.map((r) => [String(r.id), r.payer_id == null ? null : String(r.payer_id), String(r.price), r.unverified ? 'unverified' : 'verified', r.zero && r.zero !== 'unpriced' ? `${r.zero}:${r.linePrice}` : '', r.skipped || '', (r.addonLines || []).map((a) => `${a.name}=${a.gross}`).join(',')]);
   const processing = facts.processing.map((p) => [String(p.id), String(p.amount), p.status, p.monthKey]);
   const gates = `${+charge.autopayActive}${+charge.gate}${+charge.stampedZero}`;
   return `${billingPin(row)}|${visitsPin(visits)}|${pricedVisitCount(visits)}|${gates}|${JSON.stringify(method)}|${JSON.stringify(dues)}|${JSON.stringify([roots, processing, +facts.scopeGate])}`;
@@ -558,10 +551,7 @@ function ongoingRootRefusal(roots) {
   }
   const pricedRoot = roots.find((r) => r.unverified || r.price > 0);
   if (pricedRoot) {
-    // A price that only a rider plan's lawn host date carries is named by that date.
-    const host = (pricedRoot.hosts || []).find((h) => h.price > 0 && h.price === pricedRoot.price);
     let what = `a price of ${money(pricedRoot.price)} on each visit it adds`;
-    if (host) what = `a price of ${money(host.price)} on the visit it adds on ${host.date}`;
     if (pricedRoot.unverified) what = 'a schedule too long to check';
     return refuse(`This customer's ongoing ${pricedRoot.service_type || 'recurring'} plan has ${what}. The bar changes the billing type only when no upcoming visit carries a price, so it can\'t do this from here. Nothing was changed.`, 'billing_visits_priced');
   }

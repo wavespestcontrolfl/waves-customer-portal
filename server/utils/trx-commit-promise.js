@@ -61,9 +61,8 @@ function watchRollbacks(trx) {
  * `isTransaction` / `executionPromise` off the scope they are handed. Its
  * executionPromise resolves only after keep() AND every enclosing transaction
  * (savepoints included) completes successfully (a pool caller's savepoint has already committed by keep()); drop()
- * rejects it, so nothing is filed for rows that were rolled back. Shared by
- * accept-time riders (rider-accept-seeding.seedWithRide) and the series
- * extension (admin-schedule.js#extendSeriesOnceLocked).
+ * rejects it, so nothing is filed for rows that were rolled back. Used by the
+ * series extension (admin-schedule.js#extendSeriesOnceLocked).
  */
 function deferredCommitScope(conn) {
   let keep;
