@@ -631,15 +631,67 @@ async function matchAcceptCustomerByPhone(estimate, database = db, { authoritati
     && await require('../services/recurring-card-on-file').resolveGroupedEstimateOwnerId(estimate, database, { throwOnError: true })) {
     contradicted = false;
   }
-  const verdict = {
+  const verdict = acceptVerdictFromCandidates(estimate, candidates, { typedPhone, contradicted });
+  if (cacheable) acceptPhoneVerdicts.set(estimate, verdict);
+  return verdict;
+}
+
+// The matcher's verdict once its candidates and the two flags are known (pure). Shared by
+// matchAcceptCustomerByPhone and the batch read below so the two can never pick differently.
+function acceptVerdictFromCandidates(estimate, candidates, { typedPhone, contradicted }) {
+  return {
     match: typedPhone && contradicted
       ? null
       : candidates.length === 1 && !contradicted ? candidates[0] : pickAcceptCustomerMatch(candidates, estimate),
     candidateCount: candidates.length,
     ...(contradicted ? { contradicted: true, rejectedCustomerId: candidates[0].id } : {}),
   };
-  if (cacheable) acceptPhoneVerdicts.set(estimate, verdict);
-  return verdict;
+}
+
+// READ-ONLY batch form of matchAcceptCustomerByPhone for LIST views (the admin Pipeline cards): the
+// candidates of every estimate come from one customers query per 500 phones instead of one per row, and
+// each row then gets the SAME verdict (same candidate rule, same typed-phone and contradiction rules,
+// same pickAcceptCustomerMatch) as the per-row matcher gives it.
+// Returns Map(estimate.id -> verdict) for rows it could judge. A row is left OUT (unresolved; callers
+// must treat its answer as unknown) when the per-row matcher would need a lookup this read does not
+// make: a phone-typed mark the row did not carry, or a contradicted lone candidate on a GROUPED
+// estimate (the matcher then asks the group-owner resolver). `database` must be the root handle.
+async function matchAcceptCustomersByPhoneBatch(estimates, database = db) {
+  const verdicts = new Map();
+  const rows = (Array.isArray(estimates) ? estimates : []).filter((e) => e && e.id);
+  const withPhone = rows.filter((e) => e.customer_phone);
+  for (const e of rows) if (!e.customer_phone) verdicts.set(e.id, { match: null, candidateCount: 0 });
+  const CHUNK = 500;
+  for (let i = 0; i < withPhone.length; i += CHUNK) {
+    const chunk = withPhone.slice(i, i + CHUNK);
+    const exact = [...new Set(chunk.map((e) => e.customer_phone))];
+    const digits = [...new Set(chunk.map((e) => phoneLast10(e.customer_phone)).filter(Boolean))];
+    const candidateRows = await database('customers')
+      .where((q) => {
+        q.whereIn('phone', exact);
+        // phoneLast10 yields digits only, so the alternation is safe to bind as one pattern.
+        if (digits.length) q.orWhereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') ~ ?", [`(${digits.join('|')})$`]);
+      })
+      .whereNull('deleted_at')
+      .select('id', 'phone', 'email', 'address_line1', 'address_line2', 'city', 'zip',
+        'pipeline_stage', 'monthly_rate', 'billing_mode', 'updated_at');
+    for (const e of chunk) {
+      const last10 = phoneLast10(e.customer_phone);
+      const candidates = candidateRows
+        .filter((c) => c.phone === e.customer_phone
+          || (last10 && String(c.phone || '').replace(/\D/g, '').endsWith(last10)))
+        .sort((a, b) => (Number(b.phone === e.customer_phone) - Number(a.phone === e.customer_phone))
+          || (new Date(b.updated_at || 0) - new Date(a.updated_at || 0)));
+      if (e.customer_phone_typed === undefined) continue;
+      const typedPhone = phoneTypedByCustomer({ customer_phone: e.customer_phone, customer_phone_typed: e.customer_phone_typed });
+      const contradicted = typedPhone
+        ? candidates.length > 0
+        : candidates.length === 1 && acceptLoneCandidateContradicted(candidates[0], e);
+      if (contradicted && !typedPhone && e.estimate_group_id) continue;
+      verdicts.set(e.id, acceptVerdictFromCandidates(e, candidates, { typedPhone, contradicted }));
+    }
+  }
+  return verdicts;
 }
 
 // The ids of these rows (null and id-less rows skipped).
@@ -31545,6 +31597,7 @@ module.exports.pricingBundleMissingRequiredSetupFee = pricingBundleMissingRequir
 module.exports.pricingBundleHasStaleTermiteRow = pricingBundleHasStaleTermiteRow;
 module.exports.cleanStoredName = cleanStoredName;
 module.exports.matchAcceptCustomerByPhone = matchAcceptCustomerByPhone;
+module.exports.matchAcceptCustomersByPhoneBatch = matchAcceptCustomersByPhoneBatch;
 module.exports.acceptPhoneParkedVerdict = acceptPhoneParkedVerdict;
 module.exports.estimatePublicBlockingState = estimatePublicBlockingState;
 module.exports.retireOrDenyDroppedCapture = retireOrDenyDroppedCapture;

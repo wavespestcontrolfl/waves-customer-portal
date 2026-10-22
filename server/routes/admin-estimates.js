@@ -3855,13 +3855,14 @@ async function perApplicationByEstimateId(estimates, parsedDataById) {
     logger.warn(`[admin-estimates] prepay lookup failed for the per-application card view: ${err.message}`);
     return out;
   }
-  // Billing lane, batched: ONE schema probe (cached in the billing module) and
-  // ONE customers query for every linked row, so a limit=all list costs a
-  // constant number of queries. A customer who keeps monthly membership bills
-  // monthly, so the card shows no per-application price for them. UNLINKED rows
-  // (no customer_id) keep today's display: estimateBillsPerApplication would
-  // phone-match them to a possible monthly member, and a per-row match is too
-  // costly for the list, so their lane is unknown here.
+  // Billing lane, batched: ONE schema probe (cached in the billing module), ONE customers query for the
+  // linked rows and ONE for the unlinked rows' phone candidates (500 phones per query), so a limit=all
+  // list costs a constant number of queries. This mirrors estimateBillsPerApplication: a customer who keeps
+  // monthly membership bills monthly, so the card shows no per-application price for them. A linked row
+  // reads its customer; an UNLINKED row reads the customer the accept would match by phone
+  // (matchAcceptCustomersByPhoneBatch, the same rules as matchAcceptCustomerByPhone). No match, or an
+  // ambiguous one, is per-application, exactly as the resolver answers. A row the batch cannot judge
+  // (unresolved) or a linked row whose customer could not be read is unknown: no price line.
   const todo = candidates.filter((c) => !prepaidIds.has(c.row.id));
   if (!todo.length) return out;
   const { customerPreservesMonthlyMembership } = require('../services/billing-cadence');
@@ -3872,11 +3873,21 @@ async function perApplicationByEstimateId(estimates, parsedDataById) {
       ? await db('customers').whereIn('id', customerIds).select('id', 'pipeline_stage', 'monthly_rate', 'billing_mode')
       : [];
     const byId = new Map(customers.map((c) => [c.id, c]));
+    const unlinked = todo.filter((c) => !c.row.customer_id).map((c) => c.row);
+    const verdicts = unlinked.length
+      ? await require('./estimate-public').matchAcceptCustomersByPhoneBatch(unlinked, db)
+      : new Map();
     for (const c of todo) {
-      // Unlinked, or linked to a customer that could not be read: lane unknown.
-      const customer = c.row.customer_id ? byId.get(c.row.customer_id) : null;
-      if (!customer) continue;
-      if (customerPreservesMonthlyMembership(customer)) continue;
+      let customer = null;
+      if (c.row.customer_id) {
+        customer = byId.get(c.row.customer_id);
+        if (!customer) continue;
+      } else {
+        const verdict = verdicts.get(c.row.id);
+        if (!verdict) continue;
+        customer = verdict.match || null;
+      }
+      if (customer && customerPreservesMonthlyMembership(customer)) continue;
       out.set(c.row.id, c.lines);
     }
   } catch (err) {
@@ -5004,8 +5015,9 @@ router.get('/:id/proposal.pdf', async (req, res, next) => {
     // the pdfkit generator, which reads the row directly. Any render failure
     // also falls through to pdfkit — the admin download must never 500 on a
     // browser hiccup.
-    const publicViewable = !estimate.archived_at
-      && !['draft', 'scheduled', 'expired', 'send_failed'].includes(estimate.status)
+    const unsent = ['draft', 'scheduled'].includes(estimate.status);
+    const publicViewable = !estimate.archived_at && !unsent
+      && !['expired', 'send_failed'].includes(estimate.status)
       && !(estimate.expires_at && new Date(estimate.expires_at) < new Date() && !['accepted', 'declined'].includes(estimate.status));
     if (publicViewable && require('../config/feature-gates').isEnabled('estimateDocPdf')) {
       try {
@@ -5021,10 +5033,17 @@ router.get('/:id/proposal.pdf', async (req, res, next) => {
     }
     // Same live billing lane the customer-facing download resolves, so the
     // operator's copy and the customer's copy stay byte-identical.
-    const { resolveProposalBillingContext } = require('../services/estimate-proposal-billing');
+    const { resolveProposalBillingContext, resolveFrozenBillingContext } = require('../services/estimate-proposal-billing');
     const { acceptanceRecordForEstimate } = require('../services/estimate-acceptance-record');
+    // A sent quote the public page no longer serves (archived, expired by status
+    // or by date, send_failed) is viewed as the offer that was SENT:
+    // resolveProposalBillingContext would reprice it live (it only freezes
+    // accepted / declined / price-locked rows), so those rows use the frozen send
+    // snapshot instead. Unsent rows (draft, scheduled, archived or not) and live
+    // quotes keep the live lane (the editor preview, the customer's copy).
+    const sentOfferView = !publicViewable && !unsent;
     generateEstimateProposalPDF(estimate, res, {
-      ...(await resolveProposalBillingContext(estimate)),
+      ...(await (sentOfferView ? resolveFrozenBillingContext : resolveProposalBillingContext)(estimate)),
       // Same recorded acceptance the customer's download carries (strict: an
       // accepted document is never produced without its record).
       acceptance: await acceptanceRecordForEstimate(estimate, { strict: true }),

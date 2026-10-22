@@ -876,19 +876,29 @@ function openStaffEstimatePdf(estimateId, onError) {
       onError?.(err.message || "Could not open the estimate PDF");
     });
 }
-// Menu item for the row's view action; `run` is how the row opens it.
-function estimateViewMenuItem(estimate, onPdfError) {
+// The row's view actions, shared by the desktop and mobile menus: the view
+// action, then "View acceptance record" on an accepted row that has one.
+function estimateViewMenuItems(estimate, { onPdfError, onViewAcceptance }) {
   const action = estimateViewAction(estimate);
-  if (!action) return null;
-  return {
-    key: action.kind === "preview" ? "preview" : "view-pdf",
-    label: action.label,
-    icon: <ExternalLink size={16} strokeWidth={1.75} />,
-    onClick: () =>
-      action.kind === "preview"
-        ? window.open(action.href, "_blank", "noopener,noreferrer")
-        : (onPdfError?.(""), openStaffEstimatePdf(estimate.id, onPdfError)),
-  };
+  return [
+    action && {
+      key: action.kind === "preview" ? "preview" : "view-pdf",
+      label: action.label,
+      icon: <ExternalLink size={16} strokeWidth={1.75} />,
+      onClick: () =>
+        action.kind === "preview"
+          ? window.open(action.href, "_blank", "noopener,noreferrer")
+          : (onPdfError?.(""), openStaffEstimatePdf(estimate.id, onPdfError)),
+    },
+    estimate.status === "accepted" &&
+      estimate.hasAcceptanceRecord &&
+      onViewAcceptance && {
+        key: "acceptance-record",
+        label: "View acceptance record",
+        icon: <FileText size={16} strokeWidth={1.75} />,
+        onClick: () => onViewAcceptance(estimate),
+      },
+  ];
 }
 function canSendEstimate(estimate) {
   // Rows without a share token (quote-wizard mirrors, legacy imports) have no
@@ -2908,19 +2918,14 @@ function EstimatePipelineViewV2({
                                   focus: "all",
                                 }),
                             },
-                            estimateViewMenuItem(e, (message) =>
-                              setViewErrors((prev) => ({
-                                ...prev,
-                                [e.id]: message,
-                              })),
-                            ),
-                            e.status === "accepted" &&
-                              e.hasAcceptanceRecord && {
-                                key: "acceptance-record",
-                                label: "View acceptance record",
-                                icon: <FileText size={16} strokeWidth={1.75} />,
-                                onClick: () => setAcceptanceTarget(e),
-                              },
+                            ...estimateViewMenuItems(e, {
+                              onPdfError: (message) =>
+                                setViewErrors((prev) => ({
+                                  ...prev,
+                                  [e.id]: message,
+                                })),
+                              onViewAcceptance: setAcceptanceTarget,
+                            }),
                             (e.status === "sent" || e.status === "viewed") && {
                               key: "mark-lost",
                               label: "Mark lost",
@@ -2967,14 +2972,10 @@ function EstimatePipelineViewV2({
                         />
                       </div>{" "}
                     </div>{" "}
-                    {viewErrors[e.id] && (
-                      <div
-                        role="alert"
-                        className="w-full text-ui-body text-alert-fg"
-                      >
-                        {viewErrors[e.id]}
-                      </div>
-                    )}
+                    <ViewErrorNote
+                      message={viewErrors[e.id]}
+                      className="w-full"
+                    />
                   </Card>
                 );
               })}
@@ -3233,6 +3234,30 @@ function canMarkEstimateAnnualPrepay(estimate) {
   return canMarkEstimateWon(estimate) && Number(estimate.monthlyTotal || 0) > 0;
 }
 
+// One-line price on the 64px mobile card: never wraps, full text in the title.
+function MobilePriceText({ text, className }) {
+  return (
+    <span
+      className={cn(
+        "u-nums min-w-0 max-w-full truncate whitespace-nowrap",
+        className,
+      )}
+      title={text}
+    >
+      {text}
+    </span>
+  );
+}
+// Inline failure note for the view-estimate PDF action, desktop and mobile.
+function ViewErrorNote({ message, className }) {
+  if (!message) return null;
+  return (
+    <p role="alert" className={cn("text-ui-body text-alert-fg", className)}>
+      {message}
+    </p>
+  );
+}
+
 // Row in the mobile list. The customer summary is one explicit button and the
 // communication/action controls are siblings. Keeping the card itself
 // non-interactive avoids nesting buttons and links inside a role="button" row.
@@ -3307,12 +3332,10 @@ export function MobileEstimateRow({
           {v3Flag ? (
             <div className="flex items-center gap-2 flex-wrap">
               {" "}
-              <span
-                className="u-nums min-w-0 max-w-full truncate whitespace-nowrap text-ui-body text-ink-tertiary"
-                title={amountInline}
-              >
-                {amountInline}
-              </span>{" "}
+              <MobilePriceText
+                text={amountInline}
+                className="text-ui-body text-ink-tertiary"
+              />{" "}
               <StatusPillV3 status={estimate.status} />
               {estimate.viewCount > 1 && (
                 <span
@@ -3377,12 +3400,10 @@ export function MobileEstimateRow({
           ) : (
             <div className="text-ui-body text-ink-tertiary truncate">
               {" "}
-              <span
-                className="u-nums inline-block min-w-0 max-w-full truncate whitespace-nowrap align-bottom"
-                title={amountInline}
-              >
-                {amountInline}
-              </span>{" "}
+              <MobilePriceText
+                text={amountInline}
+                className="inline-block align-bottom"
+              />{" "}
               <span
                 className={cn(
                   "ml-2 font-medium",
@@ -3627,15 +3648,10 @@ export function MobileEstimateRow({
               icon: <SlidersHorizontal size={16} strokeWidth={1.75} />,
               onClick: () => onAudit?.(estimate, "all"),
             },
-            estimateViewMenuItem(estimate, setViewError),
-            estimate.status === "accepted" &&
-              estimate.hasAcceptanceRecord &&
-              onViewAcceptance && {
-                key: "acceptance-record",
-                label: "View acceptance record",
-                icon: <FileText size={16} strokeWidth={1.75} />,
-                onClick: () => onViewAcceptance(estimate),
-              },
+            ...estimateViewMenuItems(estimate, {
+              onPdfError: setViewError,
+              onViewAcceptance,
+            }),
             Boolean(estimate.estimatorEngine) && {
               key: "engine-review",
               label: "AI draft review",
@@ -3684,11 +3700,7 @@ export function MobileEstimateRow({
           ]}
         />
       </Card>
-      {viewError && (
-        <p role="alert" className="px-3 pt-1 text-ui-body text-alert-fg">
-          {viewError}
-        </p>
-      )}
+      <ViewErrorNote message={viewError} className="px-3 pt-1" />
     </>
   );
 }

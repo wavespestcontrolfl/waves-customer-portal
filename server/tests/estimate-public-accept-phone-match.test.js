@@ -23,7 +23,7 @@ jest.mock('../models/db', () => {
       if (typeof arg === 'function') arg(c);
       return c;
     };
-    for (const m of ['orWhereRaw', 'whereRaw', 'whereNot', 'whereNotNull', 'whereNull', 'whereIn', 'orderBy', 'orderByRaw', 'forUpdate', 'forShare', 'noWait']) {
+    for (const m of ['orWhereRaw', 'whereRaw', 'whereNot', 'whereNotNull', 'whereNull', 'whereIn', 'select', 'orderBy', 'orderByRaw', 'forUpdate', 'forShare', 'noWait']) {
       c[m] = () => { mockChainCalls.push(`${table}.${m}`); return c; };
     }
     return c;
@@ -58,7 +58,7 @@ jest.mock('../services/payment-method-consents', () => ({
   findConsentedChargeableCard: (...a) => mockFindConsentedChargeableCard(...a),
 }));
 
-const { matchAcceptCustomerByPhone, acceptPhoneParkedVerdict } = require('../routes/estimate-public');
+const { matchAcceptCustomerByPhone, matchAcceptCustomersByPhoneBatch, acceptPhoneParkedVerdict } = require('../routes/estimate-public');
 
 const BOB = {
   id: 'cust-bob',
@@ -329,5 +329,61 @@ describe('a typed phone never joins an existing account at the account step', ()
     expect(src).toMatch(/const typedAcceptPhone = phoneTypedByCustomer\(estimate\);\s*\n\s*const account = await ensureCustomerAccount\(trx, \{\s*\n\s*\.\.\.\(typedAcceptPhone \? \{ forceNewAccount: true \} : \{\}\),/);
     expect(src).not.toMatch(/typedAcceptPhone[^\n]*ignorePhoneMatch/);
     expect(src).toMatch(/if \(typedAcceptPhone && accountErr\?\.code === 'PHONE_MATCH_CONFIRM'\)[\s\S]{0,900}code: ACCEPT_NEEDS_OFFICE_REVIEW/);
+  });
+});
+
+
+// The Pipeline card list reads the same verdict for many rows with one customers query. It must pick exactly
+// what the per-row matcher picks, and say "unresolved" (row left out) where the per-row matcher would need a lookup.
+describe('matchAcceptCustomersByPhoneBatch matches the per-row matcher', () => {
+  const rowOf = (over = {}) => ({ ...janeEstimate(), customer_phone_typed: null, ...over });
+  const MONTHLY = { ...BOB, id: 'cust-m', pipeline_stage: 'active_customer', monthly_rate: '50', billing_mode: null };
+
+  const cases = [
+    ['no candidate', [], {}],
+    ['lone candidate the estimate contradicts', [BOB], {}],
+    ['lone candidate, email agrees', [BOB], { customer_email: 'bob@example.com' }],
+    ['two candidates, unique email match', [BOB, { ...BOB, id: 'cust-2', email: 'x@example.com' }], { customer_email: 'bob@example.com' }],
+    ['two candidates, address match', [BOB, { ...BOB, id: 'cust-2', email: 'x@example.com', address_line1: '9 Other Rd' }], { address: '100 Palm Ave, Sarasota, FL 34236' }],
+    ['two candidates, ambiguous', [BOB, { ...BOB, id: 'cust-2' }], { customer_email: null, address: null }],
+    ['a phone the customer typed with any candidate', [BOB], { customer_phone_typed: 'typed' }],
+  ];
+  it.each(cases)('%s', async (_name, candidates, over) => {
+    mockDbFixtures['customers:list'] = candidates;
+    const row = rowOf(over);
+    const single = await matchAcceptCustomerByPhone({ ...row });
+    const batch = (await matchAcceptCustomersByPhoneBatch([row])).get(row.id);
+    expect({ match: batch.match?.id || null, count: batch.candidateCount, contradicted: batch.contradicted === true })
+      .toEqual({ match: single.match?.id || null, count: single.candidateCount, contradicted: single.contradicted === true });
+  });
+
+  it('answers a row with no phone as "no match" without a query', async () => {
+    const verdicts = await matchAcceptCustomersByPhoneBatch([rowOf({ customer_phone: null })]);
+    expect(verdicts.get('est-jane')).toEqual({ match: null, candidateCount: 0 });
+  });
+
+  it('reads many rows with ONE customers query and keeps each row to its own phone', async () => {
+    mockDbFixtures['customers:list'] = [MONTHLY];
+    const rows = [
+      rowOf({ id: 'a', customer_phone: '(941) 555-0142', customer_email: 'bob@example.com' }),
+      rowOf({ id: 'b', customer_phone: '9415559999' }),
+      rowOf({ id: 'c', customer_phone: '+19415550142', customer_email: 'bob@example.com' }),
+    ];
+    const verdicts = await matchAcceptCustomersByPhoneBatch(rows);
+    expect(verdicts.get('a').match.id).toBe('cust-m');
+    expect(verdicts.get('b').match).toBeNull();
+    expect(verdicts.get('c').match.id).toBe('cust-m');
+    const db = require('../models/db');
+    expect(db.mock.calls.filter(([t]) => t === 'customers')).toHaveLength(1);
+  });
+
+  it('leaves out a row it cannot judge: a contradicted grouped estimate, or one without its typed mark', async () => {
+    mockDbFixtures['customers:list'] = [BOB];
+    const verdicts = await matchAcceptCustomersByPhoneBatch([
+      rowOf({ id: 'grouped', estimate_group_id: 'g1' }),
+      { ...janeEstimate({ id: 'nomark' }) },
+    ]);
+    expect(verdicts.has('grouped')).toBe(false);
+    expect(verdicts.has('nomark')).toBe(false);
   });
 });

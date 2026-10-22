@@ -45,7 +45,10 @@ jest.mock('../services/admin-estimate-persistence', () => ({
   estimateExpiresAt: jest.fn(),
   estimateViewUrl: jest.fn(),
 }));
+const mockPhone = { verdicts: new Map() };
 jest.mock('../routes/estimate-public', () => ({
+  // the batch phone matcher is tested against the real per-row matcher in estimate-public-accept-phone-match.test.js
+  matchAcceptCustomersByPhoneBatch: jest.fn(async () => mockPhone.verdicts),
   acceptanceServiceLists: jest.fn(),
   buildPricingBundle: jest.fn(async () => ({})),
   bookingServiceFor: jest.fn(),
@@ -56,9 +59,13 @@ jest.mock('../services/automation-runner', () => ({ enrollCustomer: jest.fn() })
 jest.mock('../services/slot-reservation', () => ({ releaseReservation: jest.fn() }));
 jest.mock('../services/estimate-proposal-billing', () => ({
   perApplicationBillingColumnsExist: jest.fn(async () => true),
+  resolveFrozenBillingContext: jest.fn(async () => ({ billsPerApplication: true, livePricing: null })),
   estimateBillsPerApplication: jest.fn(async () => { throw new Error('per-row lane lookup must not run on the list'); }),
   resolveProposalBillingContext: jest.fn(async () => ({ billsPerApplication: true, livePricing: null })),
 }));
+
+const mockGeneratePdf = jest.fn((estimate, res) => res.status(200).end());
+jest.mock('../services/pdf/estimate-pdf', () => ({ generateEstimateProposalPDF: (...a) => mockGeneratePdf(...a) }));
 
 const express = require('express');
 const db = require('../models/db');
@@ -174,12 +181,18 @@ describe('GET /admin/estimates list shape', () => {
       base('e-sent', { customer_id: 'c-plain' }),
       base('e-acc', { status: 'accepted', terms_version: 'v1', customer_id: 'c-plain' }),
       base('e-unlinked'),
+      base('e-unlinked-member'),
+      base('e-unlinked-unknown'),
       base('e-won', { status: 'accepted', terms_version: null }),
       base('e-prepay'),
       base('e-monthly', { customer_id: 'c-member' }),
       base('e-linked', { customer_id: 'c-plain' }),
       base('e-bad', { estimate_data: '{not json' }),
     ];
+    mockPhone.verdicts = new Map([
+      ['e-unlinked', { match: null, candidateCount: 0 }],
+      ['e-unlinked-member', { match: { id: 'c-m', pipeline_stage: 'active_customer', monthly_rate: '50', billing_mode: null }, candidateCount: 1 }],
+    ]);
     const queries = tableDb({
       customers: [
         { id: 'c-member', pipeline_stage: 'active_customer', monthly_rate: '50', billing_mode: null },
@@ -204,10 +217,18 @@ describe('GET /admin/estimates list shape', () => {
       expect(byId['e-prepay'].perApplication).toBeNull();
       expect(byId['e-monthly'].perApplication).toBeNull();
       expect(byId['e-linked'].perApplication).toHaveLength(1);
-      // Unlinked: the billing lane is unknown without a phone match, so today's display.
-      expect(byId['e-unlinked'].perApplication).toBeNull();
+      // Unlinked, no phone match: the accept would bill per application, so the price shows.
+      expect(byId['e-unlinked'].perApplication).toHaveLength(1);
+      // Unlinked, phone-matches a monthly member: monthly billing, today's display.
+      expect(byId['e-unlinked-member'].perApplication).toBeNull();
+      // Unlinked and not judged by the batch matcher: unknown, today's display.
+      expect(byId['e-unlinked-unknown'].perApplication).toBeNull();
       expect(byId['e-bad'].perApplication).toBeNull();
     });
+    // one batch phone match for every unlinked row, not one call per row
+    const phoneBatch = require('../routes/estimate-public').matchAcceptCustomersByPhoneBatch;
+    expect(phoneBatch).toHaveBeenCalledTimes(1);
+    expect(phoneBatch.mock.calls[0][0].map((r) => r.id).sort()).toEqual(['e-unlinked', 'e-unlinked-member', 'e-unlinked-unknown', 'e-won'].sort());
     // constant queries: one customers read for every linked row, no per-row lane lookup
     expect(queries.filter((q) => q.table === 'customers' && q.m === 'whereIn')).toHaveLength(1);
     expect(queries.filter((q) => q.table === 'customers')).toHaveLength(2); // whereIn + select
@@ -262,5 +283,48 @@ describe('GET /admin/estimates/:id/acceptance', () => {
     await withServer(async (baseUrl) => {
       expect((await fetch(`${baseUrl}/estimates/e-acc/acceptance`)).status).toBe(403);
     });
+  });
+});
+
+describe('GET /admin/estimates/:id/proposal.pdf billing context', () => {
+  const billing = () => require('../services/estimate-proposal-billing');
+  beforeEach(() => { jest.clearAllMocks(); mockAuth.role = 'admin'; });
+
+  test.each([
+    ['expired', { status: 'expired' }],
+    ['send_failed', { status: 'send_failed' }],
+    ['archived', { status: 'sent', archived_at: '2026-10-01T00:00:00Z' }],
+    // the expiry sweep has not run yet: still 'sent', but the public page refuses it
+    ['date-expired', { status: 'sent', expires_at: '2026-01-01T00:00:00Z' }],
+  ])('a %s quote is rendered from the frozen send snapshot, never repriced live', async (_name, over) => {
+    tableDb({ estimates: [], single: { estimates: base('e-old', over) } });
+    await withServer(async (baseUrl) => {
+      expect((await fetch(`${baseUrl}/estimates/e-old/proposal.pdf`)).status).toBe(200);
+    });
+    expect(billing().resolveFrozenBillingContext).toHaveBeenCalledTimes(1);
+    expect(billing().resolveProposalBillingContext).not.toHaveBeenCalled();
+    expect(mockGeneratePdf.mock.calls[0][2]).toMatchObject({ billsPerApplication: true, livePricing: null });
+  });
+
+  test.each([
+    ['draft', { status: 'draft' }],
+    ['scheduled', { status: 'scheduled' }],
+    // never sent, so there is no send snapshot to freeze to
+    ['archived draft', { status: 'draft', archived_at: '2026-10-01T00:00:00Z' }],
+  ])('a %s row keeps the live billing lane (the editor preview)', async (_name, over) => {
+    tableDb({ estimates: [], single: { estimates: base('e-draft', over) } });
+    await withServer(async (baseUrl) => {
+      expect((await fetch(`${baseUrl}/estimates/e-draft/proposal.pdf`)).status).toBe(200);
+    });
+    expect(billing().resolveProposalBillingContext).toHaveBeenCalledTimes(1);
+    expect(billing().resolveFrozenBillingContext).not.toHaveBeenCalled();
+  });
+
+  test('an accepted quote is price-locked, so the live resolver never reprices it', async () => {
+    // resolveLivePricing returns null for a price-locked row (estimateIsPriceLocked), so the document
+    // describes the accepted plan; the acceptance record rides along.
+    const { estimateIsPriceLocked } = jest.requireActual('../services/estimate-proposal-billing');
+    expect(estimateIsPriceLocked({ status: 'accepted' })).toBe(true);
+    expect(estimateIsPriceLocked({ status: 'expired' })).toBe(false);
   });
 });
