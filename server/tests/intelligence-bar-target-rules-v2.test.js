@@ -675,6 +675,13 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     // Two contacts (phone + email, or two phones): carded, even when both name the same customer.
     expect(await direct('fix the notes on 941-555-0100 and pat@example.test')).toEqual([false, []]);
     expect(await direct('fix the notes on 941-555-0100 and 941-555-0777')).toEqual([false, []]);
+    // A city or place phrase beside the contact is a qualifier, even one that conflicts with the contact's customer.
+    for (const prompt of ['fix the notes on 941-555-0100 in Tampa', 'fix the notes on 941-555-0100 of Venice', 'fix the notes on 941-555-0100, Tampa', 'fix the notes on pat@example.test near Osprey']) {
+      expect([prompt, await direct(prompt)]).toEqual([prompt, [false, []]]);
+    }
+    // Plain words after "in", "at" or a comma are not a place.
+    expect(await direct('fix the notes on 941-555-0100 in the system')).toEqual([true, [id(100)]]);
+    expect(await direct('fix the notes on 941-555-0100, update the phone')).toEqual([true, [id(100)]]);
     // A contact beside a record id or a choice reply is a qualifier.
     expect(await direct('fix the notes on 941-555-0100 10000000-0000-4000-8000-000000000999')).toEqual([false, []]);
     // A replacement value is stripped first and never counts as the contact.

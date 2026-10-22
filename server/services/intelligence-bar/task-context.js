@@ -595,11 +595,20 @@ async function directGroundedIds(fullPrompt, namedResult, cohort, nameHint) {
   return typedFull && !qualifierPresent(bounded, clause, customer, marked) ? [String(customer.id)] : [];
 }
 
+// Is there a place phrase anywhere in a message that names no customer ("... in Tampa", "... of
+// Venice", "... near Osprey", ", Tampa")? A determiner or a command word after the lead word
+// ("in the morning", ", update ...") is not one (Codex #6369 pre-push audit, r24).
+function placeQualifierPresent(clause) {
+  const words = normalizeName(withoutContacts(clause).replace(/,/g, ` ${COMMA_TOKEN} `)).split(' ');
+  return words.some((word, i) => ['in', 'of', 'near', 'at', COMMA_TOKEN].includes(word)
+    && Boolean(words[i + 1]) && !NON_PLACE_WORDS.has(words[i + 1]) && !COMMAND_WORD_RE.test(words[i + 1]));
+}
+
 // The second simple case: one contact literal, no typed name (a name that was requested but
 // resolved to nobody is a typed name), and that contact names exactly one customer.
 async function contactOnlyGroundedIds(bounded, clause, nameHint) {
   const literals = contactLiteralsOf(clause);
-  if (literals.length !== 1 || nameHint || RECORD_ID_RE.test(clause) || INITIAL_FORM_RE.test(bounded)) return [];
+  if (literals.length !== 1 || nameHint || RECORD_ID_RE.test(clause) || INITIAL_FORM_RE.test(bounded) || placeQualifierPresent(clause)) return [];
   const owners = await resolveContacts(literals);
   return owners.size === 1 ? [...owners.keys()] : [];
 }
