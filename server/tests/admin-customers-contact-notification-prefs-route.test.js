@@ -25,7 +25,7 @@ jest.mock('../services/technician-visit-scope', () => ({
   technicianServicesCustomer: jest.fn(async () => true),
 }));
 
-const mockState = { customer: null, prefsRow: null, contactRows: [], optins: [] };
+const mockState = { customer: null, prefsRow: null, contactRows: [], optins: [], locked: [] };
 
 jest.mock('../models/db', () => {
   const table = (name) => {
@@ -43,6 +43,7 @@ jest.mock('../models/db', () => {
     q.whereNull = jest.fn(() => q);
     q.whereNotNull = jest.fn(() => q);
     q.whereNotIn = jest.fn(() => q);
+    q.forUpdate = jest.fn(() => { mockState.locked.push(name); if (mockState.onLock) mockState.onLock(name); return q; });
     q.first = jest.fn(async () => matching()[0] || null);
     q.select = jest.fn(async () => matching());
     q.update = jest.fn(async () => 0);
@@ -93,6 +94,8 @@ beforeEach(() => {
   mockState.prefsRow = { customer_id: 'cust-1', service_reminder_72h: false };
   mockState.contactRows = [];
   mockState.optins = [{ customer_id: 'cust-1', phone_key: '9415550303', status: 'pending' }];
+  mockState.locked = [];
+  mockState.onLock = null;
 });
 afterEach(() => { delete process.env.GATE_CONTACT_LOGIN; });
 
@@ -165,6 +168,37 @@ describe('PUT /:id/contact-notification-prefs/:slot', () => {
     expect((await put(1, {})).status).toBe(400);
     expect((await put(1, { consentAttested: true })).status).toBe(400);
     expect((await put(1, { enRouteChannel: 'push' })).status).toBe(400);
+    expect(mockState.contactRows).toEqual([]);
+  });
+
+  // Choices are keyed by phone (codex r1 P2): an address counts when ANY slot
+  // carrying the number has one, for the read-out and for the PUT alike.
+  test('a number in two slots shares one address: both cards read emailAvailable, and the address-less slot may still choose email delivery', async () => {
+    mockState.customer = { ...mockState.customer, service_contact3_name: 'Sam at work', service_contact3_phone: '(941) 555-0202', service_contact3_email: null, service_contact3_role: null };
+    const res = await get();
+    expect(res.body.contacts.map((c) => [c.slot, c.emailAvailable])).toEqual([[1, true], [2, false], [3, true]]);
+    expect((await put(3, { enRouteChannel: 'email' })).status).toBe(200);
+    expect(mockState.contactRows).toEqual([expect.objectContaining({ phone_key: '9415550202', en_route_channel: 'email' })]);
+  });
+
+  // Every input the save depends on is read under the comms lock (codex r1
+  // P2): a holder replacing the slot while this request waits must not have
+  // the pruned row recreated from the stale pre-lock read.
+  test('the slot is re-read under the lock: a number replaced meanwhile is a 404 and writes nothing', async () => {
+    mockState.onLock = (table) => {
+      if (table === 'customers') mockState.customer = { ...mockState.customer, service_contact_phone: '+19415550777' };
+    };
+    const res = await put(1, { techEnRoute: false });
+    expect(mockState.locked).toContain('customers');
+    // The slot still has a phone (the new one), so the save lands on THAT
+    // number's row, never the removed phone's.
+    expect(res.status).toBe(200);
+    expect(mockState.contactRows).toEqual([expect.objectContaining({ phone_key: '9415550777', tech_en_route: false })]);
+    mockState.contactRows = [];
+    mockState.onLock = (table) => {
+      if (table === 'customers') mockState.customer = { ...mockState.customer, service_contact_phone: null };
+    };
+    expect((await put(1, { techEnRoute: false })).status).toBe(404);
     expect(mockState.contactRows).toEqual([]);
   });
 });

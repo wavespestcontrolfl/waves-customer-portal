@@ -4557,8 +4557,87 @@ function ContactConsentStatement({ phone, smsOptin, checked, disabled, onChange 
   );
 }
 
+// The multi-property Visits header's second half: one chip per property with
+// its next visit, from the account-wide summary (accountNextRead). Choosing a
+// chip re-scopes the portal to that property.
+function NextVisitAtEachProperty({ properties, activePropertyId, nextById, accountNextFailed, onRetry, switchingPropertyId, onSelectProperty, compact, muted, subtle }) {
+  return (
+    <div style={{ display: 'grid', gap: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+        <span data-gt="eyebrow" style={{ fontSize: 14, fontWeight: 700, color: muted, textTransform: 'uppercase', letterSpacing: '0.11em' }}>Next visit at each property</span>
+        {accountNextFailed && (
+          <span role="alert" style={{ display: 'inline-flex', alignItems: 'center', gap: 10, fontSize: 14, color: muted }}>
+            Next visits couldn&rsquo;t be loaded.
+            <button type="button" onClick={onRetry} className="waves-focus-ring" style={{ border: 'none', background: 'none', color: B.wavesBlue, fontWeight: 700, fontSize: 14, cursor: 'pointer', padding: '8px 4px', fontFamily: 'inherit' }}>Try again</button>
+          </span>
+        )}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(auto-fit, minmax(240px, 1fr))', gap: 10 }}>
+        {properties.map((p) => {
+          const active = p.id === activePropertyId;
+          const n = nextById ? nextById[p.id] : undefined;
+          return (
+            <button
+              key={p.id}
+              type="button"
+              // The glass theme owns a chip's surface colour, so the
+              // current property uses the theme's gold accent surface
+              // instead of an inline background it would override.
+              {...(active ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' })}
+              aria-current={active ? 'true' : undefined}
+              disabled={!!switchingPropertyId}
+              onClick={() => !active && onSelectProperty && onSelectProperty(p.id)}
+              className="waves-focus-ring"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px', borderRadius: 12,
+                border: `1px solid ${active ? B.yellow : '#E7E2D7'}`, background: active ? B.yellow : subtle,
+                cursor: active ? 'default' : 'pointer', textAlign: 'left', color: B.glassNavy,
+              }}
+            >
+              <GlassTile name="calendar" />
+              <span style={{ minWidth: 0 }}>
+                <span style={{ display: 'block', fontSize: 15, fontWeight: 700, lineHeight: 1.25 }}>{p.profileLabel || (p.isPrimaryProfile ? 'Primary' : 'Property')}</span>
+                <span style={{ display: 'block', fontSize: 14, fontWeight: 600, color: n || active ? B.glassNavy : muted, marginTop: 4 }}>
+                  {n === undefined ? (accountNextFailed ? 'Next visit unavailable' : 'Checking…') : nextVisitLabel(n)}
+                </span>
+                {n?.serviceType && <span style={{ display: 'block', fontSize: 14, fontWeight: 400, color: active ? B.glassNavy : muted, marginTop: 2 }}>{n.serviceType}</span>}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// The one OS permission ask a contact's fresh native install needs before
+// /push/native-subscribe can ever run for them (useAppNotifications.enable →
+// requestNativePushPermission). Nothing while the state is still being read
+// or once granted; a denial points at the phone's settings.
+function ContactDeviceEnrollment({ app, muted }) {
+  if (app.deviceState === 'granted' || app.deviceState === 'checking') return null;
+  const denied = app.deviceState === 'denied';
+  return (
+    <div data-testid="contact-device-enroll" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', padding: '8px 0 12px', borderBottom: '1px solid #E7E2D7' }}>
+      <span style={{ fontSize: 14, lineHeight: 1.5, color: muted, flex: '1 1 200px' }}>
+        {denied ? 'App notifications are turned off for Waves in your phone’s settings.' : 'Allow app notifications on this phone to get these updates as alerts.'}
+      </span>
+      {!denied && (
+        <button type="button" data-glass-accent="" disabled={app.busy} onClick={app.enable} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>
+          {app.busy ? 'Connecting…' : 'Connect this device'}
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function ContactNotificationCard({ customer, card, sectionTitle, muted, subtle }) {
   const { data, failed, busy, consentChecked, attested, load, save, attest } = useContactNotificationPrefs();
+  // The contact's own device enrollment (codex #6364 r1 P2): a contact
+  // session mounts neither the bell nor the holder's app-notification rows,
+  // so this card carries the one OS permission ask a fresh install needs
+  // before /push/native-subscribe can ever run for them. Native app only.
+  const app = useAppNotifications(isNativeApp(), customer?.id);
 
   if (failed && !data) {
     return (
@@ -4608,6 +4687,7 @@ export function ContactNotificationCard({ customer, card, sectionTitle, muted, s
           icon="smartphone" label="Text messages" description="Off stops every text and app notification to your phone; email updates are unaffected. App notifications follow your Text choices below."
           on={prefs.smsEnabled !== false} disabled={busy} onChange={() => save({ smsEnabled: prefs.smsEnabled === false })}
         />
+        {isNativeApp() && <ContactDeviceEnrollment app={app} muted={muted} />}
 
         {data.emailAvailable && (
           <ContactMasterSwitch
@@ -5358,51 +5438,23 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                 compact={compact}
               />
             </div>
-            <div style={{ display: 'grid', gap: 8 }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-                <span data-gt="eyebrow" style={{ fontSize: 14, fontWeight: 700, color: muted, textTransform: 'uppercase', letterSpacing: '0.11em' }}>Next visit at each property</span>
-                {accountNextFailed && (
-                  <span role="alert" style={{ display: 'inline-flex', alignItems: 'center', gap: 10, fontSize: 14, color: muted }}>
-                    Next visits couldn&rsquo;t be loaded.
-                    <button type="button" onClick={accountNextRead.refresh} className="waves-focus-ring" style={{ border: 'none', background: 'none', color: B.wavesBlue, fontWeight: 700, fontSize: 14, cursor: 'pointer', padding: '8px 4px', fontFamily: 'inherit' }}>Try again</button>
-                  </span>
-                )}
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(auto-fit, minmax(240px, 1fr))', gap: 10 }}>
-                {properties.map((p) => {
-                  const active = p.id === activePropertyId;
-                  const n = nextById ? nextById[p.id] : undefined;
-                  return (
-                    <button
-                      key={p.id}
-                      type="button"
-                      // The glass theme owns a chip's surface colour, so the
-                      // current property uses the theme's gold accent surface
-                      // instead of an inline background it would override.
-                      {...(active ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' })}
-                      aria-current={active ? 'true' : undefined}
-                      disabled={!!switchingPropertyId}
-                      onClick={() => !active && onSelectProperty && onSelectProperty(p.id)}
-                      className="waves-focus-ring"
-                      style={{
-                        display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px', borderRadius: 12,
-                        border: `1px solid ${active ? B.yellow : '#E7E2D7'}`, background: active ? B.yellow : subtle,
-                        cursor: active ? 'default' : 'pointer', textAlign: 'left', color: B.glassNavy,
-                      }}
-                    >
-                      <GlassTile name="calendar" />
-                      <span style={{ minWidth: 0 }}>
-                        <span style={{ display: 'block', fontSize: 15, fontWeight: 700, lineHeight: 1.25 }}>{p.profileLabel || (p.isPrimaryProfile ? 'Primary' : 'Property')}</span>
-                        <span style={{ display: 'block', fontSize: 14, fontWeight: 600, color: n || active ? B.glassNavy : muted, marginTop: 4 }}>
-                          {n === undefined ? (accountNextFailed ? 'Next visit unavailable' : 'Checking…') : nextVisitLabel(n)}
-                        </span>
-                        {n?.serviceType && <span style={{ display: 'block', fontSize: 14, fontWeight: 400, color: active ? B.glassNavy : muted, marginTop: 2 }}>{n.serviceType}</span>}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
+            {/* A contact session reads no next-visit summary (its rows span
+                accounts; see accountNextRead), so the chips that would wait
+                on one forever are not rendered (codex #6364 r1 P2). */}
+            {!contactSession && (
+              <NextVisitAtEachProperty
+                properties={properties}
+                activePropertyId={activePropertyId}
+                nextById={nextById}
+                accountNextFailed={accountNextFailed}
+                onRetry={accountNextRead.refresh}
+                switchingPropertyId={switchingPropertyId}
+                onSelectProperty={onSelectProperty}
+                compact={compact}
+                muted={muted}
+                subtle={subtle}
+              />
+            )}
           </div>
         )}
       </section>

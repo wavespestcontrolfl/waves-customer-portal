@@ -144,4 +144,24 @@ describe('Customer 360 → contacts\' own notification choices', () => {
     expect([...select.options].map((o) => o.value)).toEqual(['both', 'sms']);
     expect(within(panel).queryByRole('switch', { name: 'Service reports for Terry Tenant' })).not.toBeInTheDocument();
   });
+
+  it('an email-only contact (no phone) is read-only: no Edit, a note instead (codex r1 P2)', async () => {
+    const fetchMock = stubFetch();
+    fetchMock.mockImplementation((url) => {
+      const path = String(url).split('?')[0];
+      if (path.endsWith('/contact-notification-prefs')) {
+        const base = choices();
+        return response({ ...base, contacts: [...base.contacts, { slot: 3, name: 'Morgan Mail', phone: '', email: 'morgan@example.com', contactRole: null, preferences: prefs(), accountOff, hasOwnChoices: false, emailAvailable: true, reportsWithheld: false, consentAttestedAt: null, smsOptin: 'none' }] });
+      }
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail());
+      return response({});
+    });
+    const panel = await openPanel();
+    expect(within(panel).getByText('Morgan Mail')).toBeInTheDocument();
+    expect(within(panel).queryByRole('button', { name: 'Edit notification choices for Morgan Mail' })).not.toBeInTheDocument();
+    expect(within(panel).getByText(/Email-only contact/)).toBeInTheDocument();
+    expect(within(panel).getByRole('button', { name: 'Edit notification choices for Sam Spouse' })).toBeInTheDocument();
+  });
 });

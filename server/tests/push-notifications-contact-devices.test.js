@@ -84,12 +84,33 @@ describe('sendToCustomer — contact devices', () => {
   });
 
   test.each(['tech_en_route', 'tech_arrived', 'appointment_reminder', 'reminder_72h', 'appointment_confirmation', 'service_complete', 'service_report_v1', 'appointment_cancelled', 'service_completed'])(
-    '%s reaches the contact device too', async (type) => {
+    '%s reaches the contact device too; the stats a caller reads count the holder\'s devices only', async (type) => {
       const result = await send(type);
-      expect(result.sent).toBe(2);
+      expect(result.sent).toBe(1);
+      expect(result.subscriptions).toBe(1);
+      expect(result.contactDevices).toMatchObject({ sent: 1, subscriptions: 1 });
       expect(sentTokens().sort()).toEqual(['tok-c', 'tok-h']);
     },
   );
+
+  // push_first reads stats.sent as "the holder got it, skip the SMS" (codex
+  // r1 P1): a contact device's accepted push must never stand in for the
+  // holder's failed one.
+  test('the holder\'s device failing while the contact\'s succeeds is NOT a delivery: sent 0, the contact leg accounted apart', async () => {
+    apns.send.mockImplementation(async (token) => (token === 'tok-h' ? { ok: false, failed: true, reason: 'bad_device_token' } : { ok: true }));
+    const result = await send('tech_en_route');
+    expect(result.sent).toBe(0);
+    expect(result.contactDevices.sent).toBe(1);
+  });
+
+  test('a number in two slots: the report push is held when ANY of them is withheld (deny wins), the en-route push still goes', async () => {
+    customerRow = { ...CUSTOMER, service_contact2_name: 'Sam again', service_contact2_phone: '+19415550202', service_contact2_role: 'tenant' };
+    await send('service_complete');
+    expect(sentTokens()).toEqual(['tok-h']);
+    apns.send.mockClear();
+    await send('tech_en_route');
+    expect(sentTokens().sort()).toEqual(['tok-c', 'tok-h']);
+  });
 
   test('the contact\'s own choice holds their device: purpose off, texts off, or email-only delivery', async () => {
     prefRows = [{ phone_key: CONTACT_KEY, tech_en_route: false }];

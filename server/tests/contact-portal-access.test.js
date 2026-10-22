@@ -603,6 +603,33 @@ describe('contact session — lifecycle', () => {
     expect(sibling.status).toBe(403);
   });
 
+  test('a contact switch locks both rows and re-reads the target under the lock: a removal that lands at the lock refuses the switch and mints nothing (codex r1 P1)', async () => {
+    tables.customers.push({ ...HOLDER, id: OTHER_ID, account_id: OTHER_ID, phone: '+19415550909', first_name: 'Robin', created_at: '2025-06-01',
+      service_contact2_name: null, service_contact2_phone: null, service_contact2_role: null });
+    tables.customer_accounts.push({ id: OTHER_ID });
+    const first = await login(CONTACT_PHONE);
+    const familiesBefore = tables.customer_refresh_tokens.length;
+    let locks = 0;
+    // Stands in for the target's holder removing Sam, committed between the
+    // request's lookup and the rotation's lock.
+    onCustomersLock = () => {
+      locks += 1;
+      const other = tables.customers.find((r) => r.id === OTHER_ID);
+      Object.assign(other, { service_contact_name: null, service_contact_phone: null, service_contact_email: null });
+    };
+    const switched = await call('POST', '/api/auth/select-property', bearerOf(first.body.token), { customerId: OTHER_ID, refreshToken: first.body.refreshToken });
+    onCustomersLock = null;
+    expect(locks).toBeGreaterThan(0);
+    // The route's own (unlocked) target check passed; the rotation, re-reading
+    // the target under the lock, refuses the exchange — no credentials.
+    expect(switched.status).toBe(401);
+    expect(switched.body.token).toBeUndefined();
+    expect(tables.customer_refresh_tokens.filter((r) => String(r.customer_id) === OTHER_ID)).toHaveLength(0);
+    expect(tables.customer_refresh_tokens.length).toBe(familiesBefore);
+    // The contact's own session on the first row is untouched.
+    expect((await call('GET', '/api/auth/me', bearerOf(first.body.token))).status).toBe(200);
+  });
+
   test('a forged contact claim on a non-contact number is refused', async () => {
     const forged = auth.generateToken('cust-holder', 'cust-holder', 'fam-x', { contactKey: '9415559999' });
     expect((await call('GET', '/api/auth/me', bearerOf(forged))).status).toBe(401);

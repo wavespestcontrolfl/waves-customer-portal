@@ -407,9 +407,21 @@ async function contactRotationRefusal(trx, customer, decoded, options) {
 // here followed by the refresh-row lock, against an editor holding the row
 // and waiting on that token, would deadlock one of them (codex #6363 r11
 // P2). Holder rotations keep the plain read.
-function rotationCustomerRead(trx, decoded) {
+async function rotationCustomerRead(trx, decoded, options = {}) {
   const query = trx('customers').where({ id: decoded.customerId }).whereNull('deleted_at');
-  return (decoded.contactKey ? query.forUpdate() : query).first();
+  if (!decoded.contactKey) return query.first();
+  // A contact's switch (options.contactSwitch) validates TWO rows — this one
+  // and the target — so both are locked up front, in id order (codex #6364
+  // r1 P1): the target's holder removing the contact, or deactivating the
+  // account, between an unlocked read and the family insert would leave a
+  // session their save could not revoke. Two opposite switches of the same
+  // contact lock the pair in the same order and queue instead of deadlocking.
+  if (options.targetCustomerId && String(options.targetCustomerId) !== String(decoded.customerId)) {
+    const ids = [String(decoded.customerId), String(options.targetCustomerId)].sort();
+    await trx('customers').whereIn('id', ids).orderBy('id').forUpdate().select('id');
+    return query.first();
+  }
+  return query.forUpdate().first();
 }
 
 // The customers row the NEXT token is minted for, with the account the family
@@ -418,7 +430,9 @@ function rotationCustomerRead(trx, decoded) {
 // /auth/select-property) instead targets another ACTIVE row that lists the
 // same number — possibly on another account, so the family moves to the
 // target's account; any other profile switch is not a contact's to make
-// (contactRotationRefusal). Null = the switch is refused.
+// (contactRotationRefusal). The contact's target row is already locked
+// (rotationCustomerRead), so this read is the revalidation under that lock.
+// Null = the switch is refused.
 async function rotationTarget(trx, customer, accountId, decoded, options) {
   if (!options.targetCustomerId || String(options.targetCustomerId) === String(customer.id)) return { customer, accountId };
   const target = await trx('customers')
@@ -512,7 +526,7 @@ async function rotateRefreshSession(refreshToken, options = {}) {
     // A cancelled customer's saved session keeps refreshing under the C4
     // read-only allowance (sessionCustomerAdmitted); every other inactive
     // row is rejected exactly as before.
-    const customer = await rotationCustomerRead(trx, decoded);
+    const customer = await rotationCustomerRead(trx, decoded, options);
     // Contact session (GATE_CONTACT_LOGIN): may this contact family rotate?
     // Decided BEFORE the generic admission below, so an inactive row ends
     // the contact family (revoked here) instead of merely refusing this

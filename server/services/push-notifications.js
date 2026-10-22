@@ -134,6 +134,7 @@ async function contactDevicesAllowed(subs, purpose, customerId, database = db) {
   if (!purpose.allowed || !ContactPrefs.contactPrefsLive()) return holderSubs;
   const {
     findServiceContactSlotByPhoneKey, contactSlotMayLogIn, slotWithheldFromReports, withAccountPrimaryContact,
+    getServiceContactSlots, phoneKeyOf,
   } = require('./customer-contact');
   const kept = [];
   const customers = new Map();
@@ -154,15 +155,18 @@ async function contactDevicesAllowed(subs, purpose, customerId, database = db) {
       continue;
     }
     const customer = customers.get(id);
-    const slot = customer ? findServiceContactSlotByPhoneKey(customer, sub.contact_phone_key) : null;
-    if (!slot) continue;
+    if (!customer || !findServiceContactSlotByPhoneKey(customer, sub.contact_phone_key)) continue;
     // The same authorization the login and the Documents tab apply (codex
     // #6364 security r1): a number whose attestation no longer covers it
     // may not be reached, and a contact the report rule withholds reports
     // from (a tenant; a non-manager on a managed account) gets no report
-    // push — its body and link would hand them the report anyway.
+    // push — its body and link would hand them the report anyway. Deny
+    // wins across EVERY slot carrying the number (codex #6364 r1 P1), as
+    // contactSessionReportsWithheld decides it for the Documents tab.
     if (!contactSlotMayLogIn(customer, sub.contact_phone_key)) continue;
-    if (purpose.column === 'service_completed' && slotWithheldFromReports(customer, slot)) continue;
+    const key = phoneKeyOf(sub.contact_phone_key);
+    const slots = getServiceContactSlots(customer).filter((s) => s.phone && phoneKeyOf(s.phone) === key);
+    if (purpose.column === 'service_completed' && slots.some((s) => slotWithheldFromReports(customer, s))) continue;
     // Push rides the contact's TEXT choice: a purpose they declined, texts
     // off, or an email-only delivery choice all hold the push too.
     if (!ContactPrefs.contactAllows(prefRows.get(id).get(String(sub.contact_phone_key)) || null, purpose.column, 'sms')) continue;
@@ -328,9 +332,9 @@ class PushNotificationService {
       }
       const result = await sendSubscription(sub, notification, { shouldContinue: compositeShouldContinue })
         .catch(() => ({ sent: false, failed: true, reason: 'provider_failure' }));
-      results.push(result);
+      results.push({ ...result, contactDevice: Boolean(sub.contact_phone_key) });
       if (claimLost) break;
-      if (result.sent && opts.notificationId) {
+      if (acceptedHolderLeg(sub, result) && opts.notificationId) {
         // Persist the first acceptance before walking another device, so a
         // later provider crash does not erase an already accepted event.
         await db('notifications').where({ id: opts.notificationId })
@@ -339,7 +343,7 @@ class PushNotificationService {
           .catch((err) => logger.error(`[push] Acceptance persistence failed: ${err.code || 'db_error'}`));
       }
     }
-    const stats = summarize(results, subs.length);
+    const stats = summarizeFanOut(results);
     if (opts.notificationId && !claimLost) {
       const accepted = stats.sent > 0;
       // A failed outcome write never discards KNOWN provider acceptance.
@@ -455,6 +459,24 @@ function staffMfaPushFilter(query) {
   const scoped = query.whereRaw('(t.mfa_enabled_at IS NULL OR ps.staff_mfa = true)');
   if (!adminMfaEnforceLive()) return scoped;
   return scoped.whereRaw("NOT (t.role = 'admin' AND t.mfa_enabled_at IS NULL)");
+}
+
+// A holder device's accepted leg — the only kind that marks a bell accepted.
+function acceptedHolderLeg(sub, result) {
+  return Boolean(result.sent) && !sub.contact_phone_key;
+}
+
+// The stats a caller reads (push_first's "delivered, skip the SMS"; the
+// bell's acceptance) describe the HOLDER's devices only (codex #6364 r1 P1):
+// a contact device's accepted push never stands in for a holder whose own
+// device failed. Contact legs are accounted apart, under `contactDevices`,
+// present only when a contact device was in the fan-out.
+function summarizeFanOut(results) {
+  const holder = results.filter((r) => !r.contactDevice);
+  const contact = results.filter((r) => r.contactDevice);
+  const stats = summarize(holder, holder.length);
+  if (contact.length) stats.contactDevices = summarize(contact, contact.length);
+  return stats;
 }
 
 function summarize(results, subscriptions) {

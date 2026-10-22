@@ -9253,6 +9253,9 @@ function CustomerContactNotificationChoices({ customerId, isAdmin }) {
     setState({ loading: true, error: "", data: null });
     setOpenSlot(null);
     setSaveErr("");
+    // A save still in flight for the previous customer skips its own reset
+    // (stale sequence), so the latch is released here (codex #6364 r1 P2).
+    setSaving(false);
     adminFetch(`/admin/customers/${customerId}/contact-notification-prefs`)
       .then((data) => { if (seqRef.current === seq) setState({ loading: false, error: "", data }); })
       .catch((err) => { if (seqRef.current === seq) setState({ loading: false, error: err.message || "Could not load contact notification choices", data: null }); });
@@ -9310,8 +9313,11 @@ function CustomerContactNotificationChoices({ customerId, isAdmin }) {
                 {contact.reportsWithheld && (
                   <div className="text-ui-label text-ink-secondary">Service reports are withheld from this contact (tenant or managed-account rule).</div>
                 )}
+                {!contact.phone && (
+                  <div className="text-ui-label text-ink-secondary">Email-only contact: choices are kept by phone number, so there is nothing to set here.</div>
+                )}
               </div>
-              {isAdmin && (
+              {isAdmin && contact.phone && (
                 <Button variant="ghost" onClick={() => { setSaveErr(""); setOpenSlot(open ? null : contact.slot); }} aria-label={`${open ? "Close" : "Edit"} notification choices for ${contact.name || `contact ${contact.slot}`}`}>
                   {open ? "Close" : "Edit"}
                 </Button>
