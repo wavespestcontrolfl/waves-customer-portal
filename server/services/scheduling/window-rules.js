@@ -163,8 +163,48 @@ async function probeSlotOverlap({
   }));
 }
 
+// The occupied block a row carries, derived exactly the way the parent move
+// probe derives it (window_end, else window_start + duration, default 60).
+// null for windowless rows — they carry no occupancy and skip the probe.
+// Moved here from routes/admin-schedule.js so every plan writer shares it
+// (the recurring seeder's taken-hour hand-off, plan-taken-hour.js).
+function occupancyBlockFor(row) {
+  const startMin = parseHHMM(row?.window_start);
+  if (startMin == null) return null;
+  let endMin = parseHHMM(row?.window_end);
+  if (endMin == null || endMin <= startMin) {
+    endMin = Math.min(startMin + (parseInt(row?.estimated_duration_minutes, 10) || 60), 23 * 60 + 59);
+  }
+  return { start: minutesToHHMM(startMin), end: minutesToHHMM(endMin) };
+}
+
+// Best-effort destination probe for the plan writers' candidate dates: the
+// rows `template`'s own block would overlap on `date`, through the shared
+// tech-blind occupancy check with the admin status set. Probe-only, no lock
+// (routes/admin-schedule.js walkExtensionCandidates: the date is known only
+// mid-trx, and taking rung 1 then would invert occupancy.js's ORDERING
+// CONTRACT). Options, both off for the existing callers:
+//   excludeCustomerId  the template customer's own rows are one stop with it;
+//   technicianId       scopes the probe once the schedule is technician-
+//                      scoped (occupancy.js techScopedConfirmActive).
+async function seriesCandidateDateClashRows(conn, template, date, { excludeCustomerId = null, technicianId = null } = {}) {
+  const block = occupancyBlockFor(template);
+  if (!block) return [];
+  return findConflictingVisits({
+    db: conn,
+    date,
+    windowStart: block.start,
+    windowEnd: block.end,
+    excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+    ...(excludeCustomerId ? { excludeCustomerId } : {}),
+    ...(technicianId ? { technicianId } : {}),
+  });
+}
+
 module.exports = {
   parseHHMM,
+  occupancyBlockFor,
+  seriesCandidateDateClashRows,
   minutesToHHMM,
   assertAdminAppointmentWindow,
   probeSlotOverlap,

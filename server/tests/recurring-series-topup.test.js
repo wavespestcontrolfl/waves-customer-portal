@@ -1438,6 +1438,65 @@ describe('topUpRecurringSeriesLocked — occupancy clashes are advisory only in 
   });
 });
 
+describe('topUpRecurringSeriesLocked — a taken hour hands the visit off without a time (GATE_PLAN_TAKEN_HOUR_HANDOFF; owner 2026-10-22, audit D4)', () => {
+  const fixtureArgs = {
+    parentOverrides: {
+      recurring_pattern: 'weekly', window_start: '09:00', window_end: '10:00',
+      estimated_duration_minutes: 60,
+    },
+    colsOverrides: { recurring_dispatch_due_date: {}, window_display: {}, route_order: {} },
+  };
+  afterEach(() => { delete process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF; });
+
+  test('gate on: a first candidate another customer holds goes in on its cadence date with no time, due that date', async () => {
+    findConflictingVisits.mockReset().mockResolvedValue([]);
+    const baseline = topupScenario(fixtureArgs);
+    await topUpRecurringSeriesLocked(baseline.conn, 10, { horizonDays: 14 });
+
+    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+    // The advisory probe, then the hand-off probe (own customer excluded):
+    // both see another customer's visit in the hour.
+    findConflictingVisits.mockReset()
+      .mockResolvedValueOnce([{ id: 'occupied-1', customer_id: 77 }])
+      .mockResolvedValueOnce([{ id: 'occupied-1', customer_id: 77 }])
+      .mockResolvedValue([]);
+    const handed = topupScenario(fixtureArgs);
+    const result = await topUpRecurringSeriesLocked(handed.conn, 10, { horizonDays: 14 });
+
+    // Same cadence dates: the visit is not skipped and not moved to another date.
+    expect(handed.inserted.map((r) => r.scheduled_date)).toEqual(baseline.inserted.map((r) => r.scheduled_date));
+    const [first, ...rest] = handed.inserted;
+    expect(first).toMatchObject({
+      window_start: null, window_end: null, time_window: null, window_display: null, route_order: null,
+      recurring_dispatch_due_date: first.scheduled_date,
+    });
+    for (const row of rest) expect(row.window_start).toBe('09:00');
+    // Its reminder registers as the windowless placeholder, never the plan's hour.
+    expect(result.spawnedVisits[0].windowStart).toBeNull();
+    expect(findConflictingVisits.mock.calls[1][0]).toMatchObject({ excludeCustomerId: 5, windowStart: '09:00', windowEnd: '10:00' });
+  });
+
+  test("gate on, only the customer's own stop in the hour: inserted with its time, as before", async () => {
+    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+    findConflictingVisits.mockReset()
+      .mockResolvedValueOnce([{ id: 'own-stop', customer_id: 5 }])
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([]);
+    const own = topupScenario(fixtureArgs);
+    await topUpRecurringSeriesLocked(own.conn, 10, { horizonDays: 14 });
+    expect(own.inserted[0].window_start).toBe('09:00');
+    expect(own.inserted[0].recurring_dispatch_due_date).toBeUndefined();
+  });
+
+  test('gate off: a clash inserts with the time and makes no second probe (unchanged)', async () => {
+    findConflictingVisits.mockReset().mockResolvedValueOnce([{ id: 'occupied-1', customer_id: 77 }]).mockResolvedValue([]);
+    const off = topupScenario(fixtureArgs);
+    await topUpRecurringSeriesLocked(off.conn, 10, { horizonDays: 14 });
+    expect(off.inserted[0].window_start).toBe('09:00');
+    expect(findConflictingVisits.mock.calls.filter((c) => c[0] && c[0].excludeCustomerId)).toHaveLength(0);
+  });
+});
+
 describe('topUpRecurringSeriesLocked — horizon fill', () => {
   test('fills a weekly series to the horizon and stops (no past-dated or duplicate inserts)', async () => {
     const { conn, inserted, seriesDates } = topupScenario({

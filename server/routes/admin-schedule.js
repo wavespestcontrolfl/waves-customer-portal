@@ -27,8 +27,9 @@ const { chooseWindowSafeOrder, inProgressStartMin, loadTechDayOrigins, assertTec
 const { loadTechStartPoints, homeFromMap, assertStartPointUnchanged } = require('../services/scheduling/tech-start-point');
 const {
   assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning, ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
-  parseHHMM, minutesToHHMM,
+  parseHHMM, minutesToHHMM, occupancyBlockFor, seriesCandidateDateClashRows,
 } = require('../services/scheduling/window-rules');
+const planTakenHour = require('../services/scheduling/plan-taken-hour');
 const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { openInvoiceFacts } = require('../services/visit-context/balance');
 const { previewText } = require('../utils/visit-notes');
@@ -1042,21 +1043,10 @@ function planSeriesExtendDates({ baseDateStr, pattern, rOpts, skip, dir, seen, n
   return dates;
 }
 
-// The occupied block a row carries, derived exactly the way the parent move
-// probe derives it (window_end, else window_start + duration, default 60).
-// null for windowless rows — they carry no occupancy and skip the probe.
-function occupancyBlockFor(row) {
-  const start = normalizeHHMM(row?.window_start);
-  if (!start) return null;
-  let end = normalizeHHMM(row?.window_end);
-  if (!end || end <= start) {
-    const [h, m] = start.split(':').map(Number);
-    const endMin = Math.min(h * 60 + m + (parseInt(row?.estimated_duration_minutes, 10) || 60), 23 * 60 + 59);
-    end = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
-  }
-  return { start, end };
-}
-
+// occupancyBlockFor and seriesCandidateDateClashRows live in
+// services/scheduling/window-rules.js (shared with the recurring seeder's
+// taken-hour hand-off, plan-taken-hour.js).
+//
 // Best-effort destination probe for the maintenance / alert-action series
 // extension walks: the blackout nudge can move a candidate onto an adjacent
 // day that already holds an overlapping visit, and those walks insert
@@ -1077,18 +1067,6 @@ function occupancyBlockFor(row) {
 // (pre-probe, these walks inserted with NO cross-series check at all), and a
 // same-instant booking commit is the accepted residual. The update-details
 // path keeps its full peek → rung-1 → guardRecurrenceDestination gate.
-async function seriesCandidateDateClashRows(conn, template, date) {
-  const block = occupancyBlockFor(template);
-  if (!block) return [];
-  return findConflictingVisits({
-    db: conn,
-    date,
-    windowStart: block.start,
-    windowEnd: block.end,
-    excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
-  });
-}
-
 async function seriesCandidateDateClashes(conn, template, date) {
   return (await seriesCandidateDateClashRows(conn, template, date)).length > 0;
 }
@@ -20603,6 +20581,9 @@ async function walkExtensionCandidates(ctx) {
   // still null AND hitMaxDate true because the horizon, not a busy
   // calendar, is why nothing more got booked (Codex GitHub r1 P2).
   let hitMaxDate = false;
+  // Set when the top-up lands on a taken hour and hands the visit off
+  // without a time (GATE_PLAN_TAKEN_HOUR_HANDOFF, below).
+  let handOff = false;
   while (attempt <= 12) {
     const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts);
     const candidate = seasonalSafeShift(rawNext, parent.recurring_pattern, skipParent, dirParent, autoExtendBlackoutDates);
@@ -20644,7 +20625,17 @@ async function walkExtensionCandidates(ctx) {
     // conflict. Insert on the cadence date and log the overlap instead.
     if (opts.overlapAdvisoryOnly) {
       if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) {
-        logger.warn(`[recurring-topup] parent=${parentId} candidate ${candidate} overlaps an existing visit on the calendar — inserting anyway (advisory only, same posture every other admin write already takes)`);
+        // Taken hour (GATE_PLAN_TAKEN_HOUR_HANDOFF; owner 2026-10-22, audit
+        // D4): another customer's live visit holds the plan's hour, so the
+        // visit goes in on the cadence date WITHOUT a time and auto-dispatch
+        // places it (scheduling/plan-taken-hour.js), instead of on top of it.
+        // Gate off, too near, or only the customer's own stop: as before.
+        if (await planTakenHour.takenHourHandoff(conn, clashProbeTemplate, { date: candidate })) {
+          handOff = true;
+          logger.info(`[recurring-topup] parent=${parentId} candidate ${candidate}: the plan's hour is taken — inserting without a time for auto-dispatch to place`);
+        } else {
+          logger.warn(`[recurring-topup] parent=${parentId} candidate ${candidate} overlaps an existing visit on the calendar — inserting anyway (advisory only, same posture every other admin write already takes)`);
+        }
       }
     } else {
       const clashRows = await seriesCandidateDateClashRows(conn, clashProbeTemplate, candidate);
@@ -20657,7 +20648,7 @@ async function walkExtensionCandidates(ctx) {
     nextStr = candidate;
     break;
   }
-  return { nextStr, hitMaxDate };
+  return { nextStr, hitMaxDate, handOff };
 }
 
 // Returns the spawned-visit payload (for the caller's post-commit reminder
@@ -20741,7 +20732,7 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       blackoutDates: autoExtendBlackoutDates, existingDates, clashProbeTemplate,
     });
     if (walked.joined) return walked.joined;
-    const { nextStr, hitMaxDate } = walked;
+    const { nextStr, hitMaxDate, handOff } = walked;
     // Re-check the ongoing flag immediately before inserting: it was
     // read once at the top of this block, and a cancellation (the
     // portal auto-processor or an admin churn) can stop the series
@@ -20792,6 +20783,14 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       copyBillToFields(nextData, parent, cols);
       copyStampedServiceAddressFields(nextData, parent, cols);
       await anchorSoleProperty(nextData, cols, conn);
+      // Taken hour (walkExtensionCandidates): no time on the new visit; its
+      // cadence date is the due date auto-dispatch places it by.
+      // The window fields are on nextData already; the rest where the column exists.
+      if (handOff) {
+        for (const [key, value] of Object.entries(planTakenHour.handoffFields(nextStr))) {
+          if (key in nextData || cols[key]) nextData[key] = value;
+        }
+      }
       // Required scope must be readable before creating any child.
       const parentAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: parentId });
       // Legacy-series root freeze (Codex round 2 P1) — see
@@ -20915,7 +20914,9 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
           scheduledServiceId: autoExtRow.id,
           customerId: parent.customer_id,
           scheduledDate: nextStr,
-          windowStart: parent.window_start,
+          // A handed-off visit has no time: its reminder registers as the
+          // non-delivering windowless placeholder, never the plan's hour.
+          windowStart: handOff ? null : parent.window_start,
           serviceType: childIdentity.service_type,
         };
       }
