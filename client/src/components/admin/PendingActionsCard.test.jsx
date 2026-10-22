@@ -2,7 +2,7 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { afterEach, expect, it, test, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import PendingActionsCard from './PendingActionsCard';
 
 const action = { id: '11111111-1111-4111-8111-111111111111', tool: 'create_restock_request', summary: 'Save synthetic restock request', expiresInMs: 600000 };
@@ -325,4 +325,50 @@ test('an expired card of any other tool keeps the ask-again line and offers no S
   render(<PendingActionsCard actions={[{ ...action, receipt: { outcome: 'expired', result: null } }]} variant="light" />);
   expect(screen.getByText('Expired — this proposal is no longer confirmable. Ask again to re-propose it.')).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Show again' })).toBeNull();
+});
+
+// GATE_IB_MULTI_CARD: several independent cards in one answer. Each card says
+// which one it is, has its own Confirm and Cancel, and deciding one never
+// touches another.
+const twoCards = [
+  { id: '22222222-2222-4222-8222-222222222222', tool: 'update_customer', summary: 'Update A', expiresInMs: 600000, contract: { action_label: 'Update customer A', effects: [] } },
+  { id: '33333333-3333-4333-8333-333333333333', tool: 'reschedule_appointment', summary: 'Move B', expiresInMs: 600000, contract: { action_label: 'Move visit B', effects: [] } },
+];
+const cardOf = (text) => within(screen.getByText(text).parentElement);
+
+it('shows two cards with their own Confirm and Cancel buttons; confirming one leaves the other awaiting', async () => {
+  const fetch = vi.fn().mockResolvedValue(response({ success: true, outcome: 'completed', result: {} }));
+  vi.stubGlobal('fetch', fetch);
+  render(<PendingActionsCard actions={twoCards} variant="light" />);
+  const first = cardOf('Awaiting your confirmation (card 1 of 2): Update customer A');
+  const second = cardOf('Awaiting your confirmation (card 2 of 2): Move visit B');
+  expect(screen.getAllByRole('button', { name: 'Confirm' })).toHaveLength(2);
+  expect(screen.getAllByRole('button', { name: 'Cancel' })).toHaveLength(2);
+  // Each button is described by its own card's title.
+  expect(first.getByRole('button', { name: 'Confirm' })).toHaveAccessibleDescription('Awaiting your confirmation (card 1 of 2): Update customer A');
+  expect(second.getByRole('button', { name: 'Cancel' })).toHaveAccessibleDescription('Awaiting your confirmation (card 2 of 2): Move visit B');
+  fireEvent.click(first.getByRole('button', { name: 'Confirm' }));
+  expect(await screen.findByText('✓ Done')).toBeInTheDocument();
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(JSON.parse(fetch.mock.calls[0][1].body).pending_action_id).toBe(twoCards[0].id);
+  // The second card is untouched: still awaiting, both buttons live.
+  expect(second.getByRole('button', { name: 'Confirm' })).toBeEnabled();
+  expect(second.getByRole('button', { name: 'Cancel' })).toBeEnabled();
+});
+
+it('cancelling one of two cards leaves the other confirmable', async () => {
+  const fetch = vi.fn().mockResolvedValue(response({ cancelled: true }));
+  vi.stubGlobal('fetch', fetch);
+  render(<PendingActionsCard actions={twoCards} variant="light" />);
+  const second = cardOf('Awaiting your confirmation (card 2 of 2): Move visit B');
+  fireEvent.click(second.getByRole('button', { name: 'Cancel' }));
+  expect(await screen.findByText('Cancelled')).toBeInTheDocument();
+  expect(JSON.parse(fetch.mock.calls[0][1].body).pending_action_id).toBe(twoCards[1].id);
+  expect(cardOf('Awaiting your confirmation (card 1 of 2): Update customer A').getByRole('button', { name: 'Confirm' })).toBeEnabled();
+});
+
+it('a single card keeps the plain title and no description link', () => {
+  render(<PendingActionsCard actions={[twoCards[0]]} variant="light" />);
+  expect(screen.getByRole('button', { name: 'Confirm' })).not.toHaveAttribute('aria-describedby');
+  expect(screen.getByText('Awaiting your confirmation: Update customer A')).toBeInTheDocument();
 });

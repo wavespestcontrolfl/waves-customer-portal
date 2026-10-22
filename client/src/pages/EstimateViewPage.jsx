@@ -47,8 +47,8 @@ import { useEffect, useLayoutEffect, useMemo, useState, useRef, useCallback } fr
 import { flushSync } from 'react-dom';
 import { useParams } from 'react-router-dom';
 import PriceCard, { RowInclusions } from '../components/estimate/PriceCard';
-import { CONTEXT_LINE as MONTHLY_AVERAGE_CONTEXT, aboutMonth, planLabel as monthlyAveragePlanLabel } from '@estimate-monthly-average';
-import { oneTimeBesidePlan, resolvePageMonthlyAverage, sectionAverageLine, singleServiceAverageContext } from '../lib/estimateMonthlyAverage';
+import { CONTEXT_LINE as MONTHLY_AVERAGE_CONTEXT, monthlyText, planLabel as monthlyAveragePlanLabel } from '@estimate-monthly-average';
+import { applicationMonthsBreakdown, oneTimeBesidePlan, resolvePageMonthlyAverage, sectionAverageLine, singleServiceAverageContext } from '../lib/estimateMonthlyAverage';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import OfferTierPicker from '../components/estimate/OfferTierPicker';
 import SlotPicker from '../components/estimate/SlotPicker';
@@ -2371,24 +2371,25 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
 }
 
 // GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20, option A): the per-service
-// "about $X a month" lines and the plan average for a multi-service plan, so the
+// "$X a month" lines and the plan average for a multi-service plan, so the
 // customer can see the arithmetic. The per-application prices on the cards stay
 // the prices; this is an average of the year ("$X/mo" as THE price stays
 // banned, and the combined "Plan total" ban below is untouched: nothing here is
 // a total the customer pays at once). `model` comes from pageMonthlyAverage and
 // its per-service lines add up to the plan line to the cent; a credit prints as
 // its own negative line.
-export function MonthlyAverageSummary({ model, hasOneTime = false }) {
+export function MonthlyAverageSummary({ model, hasOneTime = false, breakdown = null }) {
   if (!model || !(model.showPlan ?? model.multi)) return null;
   const row = { display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'baseline', fontSize: 16, color: ESTIMATE_TEXT };
   const num = { fontVariantNumeric: 'tabular-nums', textAlign: 'right' };
+  if (breakdown) return <ApplicationMonthsSummary model={model} breakdown={breakdown} hasOneTime={hasOneTime} row={row} num={num} />;
   return (
     <section data-monthly-average-summary="" style={estimateCard()}>
       <div style={{ display: 'grid', gap: 8 }}>
         {model.services.map((service) => (
           <div key={service.key} style={row}>
             <span>{service.label}</span>
-            <span style={num}>{aboutMonth(service.monthly)}</span>
+            <span style={num}>{monthlyText(service.monthly)}</span>
           </div>
         ))}
         {model.credit ? (
@@ -2399,7 +2400,53 @@ export function MonthlyAverageSummary({ model, hasOneTime = false }) {
         ) : null}
         <div data-monthly-average-plan="" style={{ ...row, fontWeight: 700, paddingTop: 8, borderTop: `1px solid ${W.offWhite}` }}>
           <span>{monthlyAveragePlanLabel(model)}</span>
-          <span style={num}>{aboutMonth(model.planMonthly)}</span>
+          <span style={num}>{monthlyText(model.planMonthly)}</span>
+        </div>
+      </div>
+      <div style={{ marginTop: 10, fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
+        {MONTHLY_AVERAGE_CONTEXT}
+        {hasOneTime ? ' One-time charges are not in the average.' : ''}
+      </div>
+    </section>
+  );
+}
+
+// Application months (owner 2026-10-21): the per-application
+// prices with their cadence, what the customer pays in the months the spaced
+// service is applied and in the other months, then the plan average. Every
+// amount is one the customer is actually billed except the average, which says
+// it is an average. `breakdown` comes from applicationMonthsBreakdown.
+function ApplicationMonthsSummary({ model, breakdown, hasOneTime, row, num }) {
+  const sub = { fontSize: 14, color: ESTIMATE_MUTED, fontWeight: 500 };
+  const heading = { fontSize: 14, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: ESTIMATE_MUTED };
+  const monthsRow = (group, attr) => (
+    <div {...{ [attr]: '' }} style={row}>
+      <span>
+        {group.label} ({group.count} a year)
+        <div style={sub}>{group.detail}</div>
+      </span>
+      <span style={num}>{fmtMoney(group.amount)}</span>
+    </div>
+  );
+  return (
+    <section data-monthly-average-summary="" data-application-months="" style={estimateCard()}>
+      <div style={{ display: 'grid', gap: 8 }}>
+        <div style={heading}>Your plan</div>
+        {breakdown.services.map((service) => (
+          <div key={service.key} style={row}>
+            <span>{service.label}</span>
+            <span style={num}>
+              {fmtMoney(service.perApplication)} per application
+              <div style={sub}>{service.cadence}</div>
+            </span>
+          </div>
+        ))}
+        <div style={{ ...heading, paddingTop: 8, borderTop: `1px solid ${W.offWhite}` }}>What you pay</div>
+        {monthsRow(breakdown.applicationMonths, 'data-application-months-applied')}
+        {monthsRow(breakdown.otherMonths, 'data-application-months-other')}
+        <div data-monthly-average-plan="" style={{ ...row, fontWeight: 700, paddingTop: 8, borderTop: `1px solid ${W.offWhite}` }}>
+          <span>{monthlyAveragePlanLabel(model)}</span>
+          <span style={num}>{monthlyText(model.planMonthly)}</span>
         </div>
       </div>
       <div style={{ marginTop: 10, fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
@@ -5257,7 +5304,7 @@ export function ServiceSection({
   // a current monthly member whose accept preserves membership billing. Either
   // way the bundle card keeps its combined total (codex #3128 r6).
   billsMonthly = false,
-  // GATE_ESTIMATE_MONTHLY_AVERAGE: the "about $X a month" line for this
+  // GATE_ESTIMATE_MONTHLY_AVERAGE: the "$X a month" line for this
   // service (and the one-time context sentence on a single-service page).
   // Null with the gate off, so the card is unchanged.
   monthlyAverageLine = null,
@@ -9070,6 +9117,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     data, serviceMode, estimate, billsMonthly, isCommercialEstimate, cta, paymentPreference,
     services, selected, selectedCombo, combinedFrequency, pricing, renderFlags,
   }, manualDiscountMonthlyAmount);
+  // Application months: computed once, whenever the monthly average applies. When the plan
+  // shape is covered, the summary card carries the per-application prices and month
+  // amounts, so the cards above drop their per-service "$X a month" slices (codex #6399 r2).
+  const applicationMonths = monthlyAverage ? applicationMonthsBreakdown(monthlyAverage.model) : null;
 
   // Service/price cards — shared by the live configurator (below) and the
   // read-only recap on an accepted estimate, so reopening an accepted link
@@ -9157,7 +9208,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 section={section}
                 servicesLength={services.length}
                 billsMonthly={billsMonthly}
-                monthlyAverageLine={sectionAverageLine(monthlyAverage, section.key)}
+                monthlyAverageLine={applicationMonths ? null : sectionAverageLine(monthlyAverage, section.key)}
                 monthlyAverageContext={singleServiceAverageContext(monthlyAverage, hasOneTimeBesidePlan)}
                 glassSetupBulletEligible={setupFees.some((fee) => fee?.waivedWithPrepay === true)}
                 ctaSlotMeta={glassContent ? selectedSlotMeta : null}
@@ -9404,6 +9455,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             <MonthlyAverageSummary
               model={monthlyAverage.model}
               hasOneTime={hasOneTimeBesidePlan}
+              breakdown={applicationMonths}
             />
           ) : null}
 
@@ -9798,6 +9850,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
                 paymentTiming={paymentTiming}
                 setupFeeAfterFirstVisit={setupFeePromiseEnabled}
+                firstApplicationLabel={data?.monthlyAverageEnabled === true}
               />
             </>
           ) : null}
@@ -10190,6 +10243,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
                 paymentTiming={paymentTiming}
                 setupFeeAfterFirstVisit={setupFeePromiseEnabled}
+                firstApplicationLabel={data?.monthlyAverageEnabled === true}
               />
             </div>
           ) : null

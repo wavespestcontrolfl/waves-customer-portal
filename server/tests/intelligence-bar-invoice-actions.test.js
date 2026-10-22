@@ -236,7 +236,7 @@ describe('send_invoice card', () => {
 
     test('a resolver that throws refuses with the unverified text and builds no card', async () => {
       jest.spyOn(Prepay, 'resolveInvoiceTermId').mockRejectedValue(new Error('lookup failed'));
-      await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'annual_plan_invoice', error: expect.stringMatching(/could not verify whether this is an annual-plan invoice/) });
+      await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'invoice_lookup_failed', error: expect.stringMatching(/could not verify whether this is an annual-plan invoice/) });
     });
 
     test('the send claim asks again on the claimed row: a plan that appeared after the card, or a lookup that fails, refuses', async () => {

@@ -15,7 +15,6 @@ import { useGlassSurface } from '../glass/glass-engine';
 import { WAVES_FDACS_LICENSE_NUMBER, WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
 import { INTERNAL_FINDING_KEYS } from '../lib/wdoReportFields';
 import { reportGreetingFirstName } from '../lib/reportGreeting';
-import ProjectReportDocument from './ProjectReportDocument';
 
 /**
  * Public project-report viewer (WDO, termite, pest, rodent, bed bug).
@@ -24,7 +23,7 @@ import ProjectReportDocument from './ProjectReportDocument';
  */
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-export const BOOK_URL = 'https://www.wavespestcontrol.com/book/';
+const BOOK_URL = 'https://www.wavespestcontrol.com/book/';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
 const WAVES_PHONE_TEL = '+19412975749';
 const FONT_BODY = DOC_FONT; // "'Inter', system-ui, sans-serif" — the one customer body stack
@@ -77,7 +76,7 @@ const secondaryButtonStyle = {
   border: `1px solid ${ESTIMATE_BORDER}`,
 };
 
-export const TYPE_LABELS = {
+const TYPE_LABELS = {
   wdo_inspection: 'WDO Inspection',
   termite_inspection: 'Termite Inspection',
   termite_treatment: 'Termite Treatment',
@@ -124,7 +123,7 @@ export const TERMITE_COMPLIANCE_SECTIONS = {
 // Mirrors the estimate hero's phone display (EstimateViewPage helper of the
 // same name): 10-digit US numbers get the (xxx) xxx-xxxx treatment, anything
 // else renders as stored.
-export function formatCustomerPhone(phone) {
+function formatCustomerPhone(phone) {
   const raw = String(phone || '').replace(/\D/g, '');
   const digits = raw.length === 11 && raw.startsWith('1') ? raw.slice(1) : raw;
   if (digits.length === 10) return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
@@ -140,7 +139,7 @@ function dateOnlyToNoonUtc(dateOnlyValue) {
   return new Date(Date.UTC(y, m - 1, d, 12));
 }
 
-export function formatReportDate(value) {
+function formatReportDate(value) {
   if (!value) return '';
   const raw = String(value);
   const dateOnlyValue = dateOnly(raw);
@@ -149,7 +148,7 @@ export function formatReportDate(value) {
   return date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
 }
 
-export function formatAppointmentDate(value) {
+function formatAppointmentDate(value) {
   if (!value) return '';
   const raw = String(value);
   const dateOnlyValue = dateOnly(raw);
@@ -170,7 +169,7 @@ function formatAppointmentTime(value) {
   return `${hour12}:${minute} ${suffix}`;
 }
 
-export function formatAppointmentWindow(appt) {
+function formatAppointmentWindow(appt) {
   if (!appt) return '';
   const date = formatAppointmentDate(appt.scheduledDate);
   const start = formatAppointmentTime(appt.windowStart);
@@ -304,11 +303,11 @@ const FIELD_LABELS = {
   renewal_due: 'Renewal due by',
 };
 
-export function humanizeKey(k) {
+function humanizeKey(k) {
   return FIELD_LABELS[k] || k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
-export function formatFindingValue(key, value) {
+function formatFindingValue(key, value) {
   const raw = String(value);
   if (key !== 'species') return raw;
   return raw.toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
@@ -325,7 +324,7 @@ const ROOF_RAT_LEARN_MORE = [
   'The Florida Department of Health associates rats and mice with illnesses such as leptospirosis, salmonella, typhus, and rat-bite fever, so droppings, urine, saliva, nesting material, and contaminated dust are part of the concern.',
 ].join(' ');
 
-export function getFindingInsight(key, value) {
+function getFindingInsight(key, value) {
   if (key === 'species' && includesAny(value, ['roof rat'])) return ROOF_RAT_SPECIES_NOTE;
   return '';
 }
@@ -334,14 +333,14 @@ function isRoofRatFinding(key, value) {
   return key === 'species' && includesAny(value, ['roof rat']);
 }
 
-export function includesAny(text, words) {
+function includesAny(text, words) {
   const value = String(text || '').toLowerCase();
   return words.some(word => value.includes(word));
 }
 
 // Service type prints the bare type label — the hero kicker already carries
 // the project's title (what it's for), so repeating it here would read twice.
-export function buildAtAGlance({ data, typeLabel }) {
+function buildAtAGlance({ data, typeLabel }) {
   const rows = [
     ['Service type', typeLabel],
   ];
@@ -369,53 +368,6 @@ function isPastReportDate(value) {
   return key < `${get('year')}-${get('month')}-${get('day')}`;
 }
 
-// The two project types that keep their own page when GATE_REPORT_SIMPLE_WEB is
-// live (owner 2026-10-17: "skip wdo, and pre treatment"): official paper
-// documents. The server and this page both check it.
-export const SIMPLE_WEB_EXCLUDED_TYPES = new Set(['wdo_inspection', 'pre_treatment_termite_certificate']);
-
-// Findings the page lists, whether the sectioned narrative stands in for them,
-// and the termite compliance answers that must survive that suppression. One
-// place, so the glass page and the simple work-order layout apply the same rule.
-export function projectFindingsView(data) {
-  const findings = data.findings || {};
-  const findingsEntries = Object.entries(findings)
-    .filter(([k, v]) => !INTERNAL_FINDING_KEYS.has(k) && v !== null && v !== undefined && v !== '');
-  // The structured findings feed the AI writer, so when the report carries
-  // the sectioned narrative (Customer Concern / What We Inspected / …) the
-  // raw findings list would repeat the same content — the narrative is the
-  // customer-facing rendering of it. Raw findings still show on reports
-  // without a drafted narrative, otherwise they'd have no body at all.
-  // WDO exception: a legacy/pre-archive WDO report has no filled FDACS PDF
-  // to link, so its structured findings (FDACS finding, live WDO, damage,
-  // inaccessible areas…) are the only formal record on the page — never
-  // suppress those unless the archived filled form is available.
-  const aiNarrativeSections = data.recommendations ? parseSections(String(data.recommendations)) : null;
-  const suppressFindingsForNarrative = Boolean(aiNarrativeSections)
-    && (data.projectType !== 'wdo_inspection' || Boolean(data.fdacsPdfAvailable));
-  // Statutory compliance answers survive the narrative suppression in their
-  // own block; when the raw findings list renders they're already in it.
-  const complianceSection = TERMITE_COMPLIANCE_SECTIONS[data.projectType] || null;
-  const complianceEntries = (suppressFindingsForNarrative && complianceSection)
-    ? complianceSection.fields
-      .map(([key, label]) => [label, findings[key]])
-      .filter(([, value]) => value !== null && value !== undefined && value !== '')
-    : [];
-  return { findings, findingsEntries, suppressFindingsForNarrative, complianceSection, complianceEntries };
-}
-
-// Identity block lines: name, email, phone, address, MIXED-CASE ("William
-// Carter", never "WILLIAM CARTER" — owner ruling 2026-07-16). ALL-CAPS records
-// title-case for display only, same rule as ReportViewPage's contact block.
-export function displayContactLine(raw) {
-  const s2 = String(raw || '').trim();
-  if (!s2 || s2 !== s2.toUpperCase()) return s2;
-  if (s2.includes('@')) return s2.toLowerCase();
-  return s2.toLowerCase()
-    .replace(/\b([a-z])(\w*)/g, (m, a, rest) => a.toUpperCase() + rest)
-    .replace(/\b([A-Za-z]{2}) (\d{5}(?:-\d{4})?)$/, (m, st, zip) => `${st.toUpperCase()} ${zip}`);
-}
-
 export default function ProjectReportViewPage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
@@ -435,11 +387,7 @@ export default function ProjectReportViewPage() {
   // The applicator is the tech who PERFORMED the linked visit, which can
   // differ from the project's creator (technicianName) — Codex r2 #5032.
   const applicatorLine = applicatorIdLine(data?.applicatorName || data?.technicianName, data?.applicatorFdacsId);
-  // GATE_REPORT_SIMPLE_WEB (owner 2026-10-17): the server sets simpleWebReport
-  // on every project type except the two paper documents; that layout is the
-  // plain work-order document, so it never mounts the glass scene.
-  const simpleWeb = data?.simpleWebReport === true && !SIMPLE_WEB_EXCLUDED_TYPES.has(data?.projectType);
-  const glassActive = !isPaperDocument && !simpleWeb;
+  const glassActive = !isPaperDocument;
   useGlassSurface(glassActive);
 
   useEffect(() => {
@@ -537,14 +485,34 @@ export default function ProjectReportViewPage() {
     </CustomerColumn>
   );
 
-  if (simpleWeb) return <ProjectReportDocument data={data} token={token} />;
-
   const typeLabel = TYPE_LABELS[data.projectType] || 'Project';
   const reportTitle = String(data.title || '').trim() || typeLabel;
-  const { findings, findingsEntries, suppressFindingsForNarrative, complianceSection, complianceEntries } = projectFindingsView(data);
+  const findings = data.findings || {};
+  const findingsEntries = Object.entries(findings)
+    .filter(([k, v]) => !INTERNAL_FINDING_KEYS.has(k) && v !== null && v !== undefined && v !== '');
   const primaryPhotos = (data.photos || []).filter(p => p.visit === 'primary');
   const followupPhotos = (data.photos || []).filter(p => p.visit === 'followup');
   const projectDateLabel = formatReportDate(data.projectDate || data.sentAt);
+  // The structured findings feed the AI writer, so when the report carries
+  // the sectioned narrative (Customer Concern / What We Inspected / …) the
+  // raw findings list would repeat the same content — the narrative is the
+  // customer-facing rendering of it. Raw findings still show on reports
+  // without a drafted narrative, otherwise they'd have no body at all.
+  // WDO exception: a legacy/pre-archive WDO report has no filled FDACS PDF
+  // to link, so its structured findings (FDACS finding, live WDO, damage,
+  // inaccessible areas…) are the only formal record on the page — never
+  // suppress those unless the archived filled form is available.
+  const aiNarrativeSections = data.recommendations ? parseSections(String(data.recommendations)) : null;
+  const suppressFindingsForNarrative = Boolean(aiNarrativeSections)
+    && (data.projectType !== 'wdo_inspection' || Boolean(data.fdacsPdfAvailable));
+  // Statutory compliance answers survive the narrative suppression in their
+  // own block; when the raw findings list renders they're already in it.
+  const complianceSection = TERMITE_COMPLIANCE_SECTIONS[data.projectType] || null;
+  const complianceEntries = (suppressFindingsForNarrative && complianceSection)
+    ? complianceSection.fields
+      .map(([key, label]) => [label, findings[key]])
+      .filter(([, value]) => value !== null && value !== undefined && value !== '')
+    : [];
   const atAGlanceRows = buildAtAGlance({ data, typeLabel });
   const firstName = reportGreetingFirstName(data) || 'there';
   // The certificate headline mirrors the full type label (owner directive
@@ -567,8 +535,18 @@ export default function ProjectReportViewPage() {
       ? (String(findings.property_address || '').trim() || data.customerAddress || data.cityState || '')
       : (data.customerAddress || data.cityState || '');
   // Identity block under the headline — owner ruling 2026-07-16: every
-  // report shows the same block in the same order and format (see
-  // displayContactLine).
+  // report shows the same block in the same order and format: name, email,
+  // phone, address, MIXED-CASE ("William Carter", never "WILLIAM CARTER" —
+  // supersedes the uppercase treatment). ALL-CAPS records title-case for
+  // display only, same rule as ReportViewPage's contact block.
+  const displayContactLine = (raw) => {
+    const s2 = String(raw || '').trim();
+    if (!s2 || s2 !== s2.toUpperCase()) return s2;
+    if (s2.includes('@')) return s2.toLowerCase();
+    return s2.toLowerCase()
+      .replace(/\b([a-z])(\w*)/g, (m, a, rest) => a.toUpperCase() + rest)
+      .replace(/\b([A-Za-z]{2}) (\d{5}(?:-\d{4})?)$/, (m, st, zip) => `${st.toUpperCase()} ${zip}`);
+  };
   const heroContactLines = [
     data.customerName,
     data.customerEmail,
@@ -771,12 +749,23 @@ export default function ProjectReportViewPage() {
           </div>
         )}
 
+        {/* GATE_PRETREAT_STICKER_REPORT: the certificate mirrors the paper
+            Notice of Termite Protection label, with the certificate fields
+            the label has no blank for in a details block under it. */}
+        {isCertificate && data.pretreatStickerReport && (
+          <TermiteNoticeSticker
+            findings={findings}
+            technicianName={data.technicianName}
+            projectDateLabel={projectDateLabel}
+          />
+        )}
         {isCertificate && (
           <CertificateOfCompliance
             findings={findings}
             customerName={data.customerName}
             technicianName={data.technicianName}
             projectDateLabel={projectDateLabel}
+            detailsOnly={Boolean(data.pretreatStickerReport)}
           />
         )}
 
@@ -864,6 +853,225 @@ function AtAGlance({ rows }) {
             <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.35 }}>{value}</div>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * TermiteNoticeSticker — the paper "Notice of Termite Protection" label
+ * (Sticker Mule 5.45″ × 4″, form WV-001) as a document: same blanks in the
+ * same order, filled from the certificate findings, set in the report's own
+ * navy and type (GATE_PRETREAT_STICKER_REPORT). An empty blank prints as an
+ * empty rule, as on paper. The label's "Date of WDO Inspection" blank is for
+ * a later inspector and is left off the web copy. The certificate fields the
+ * label has no blank for render under it (CertificateOfCompliance detailsOnly).
+ */
+function stickerDate(value) {
+  const day = dateOnly(String(value || ''));
+  if (!day) return '';
+  const [y, m, d] = day.split('-');
+  return `${m}/${d}/${y}`;
+}
+
+function stickerMaterials(product, activeIngredient) {
+  return [product, activeIngredient].filter(Boolean).join(' / ');
+}
+
+// "2450" → "2,450 sq ft"; a value the tech typed with its own unit stays as typed.
+function stickerAmount(value, unit) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (!/^\d+(\.\d+)?$/.test(raw)) return raw;
+  return `${Number(raw).toLocaleString('en-US')} ${unit}`;
+}
+
+function StickerBlank({ label, value }) {
+  return (
+    <div style={{ minWidth: 0 }}>
+      <div style={{
+        minHeight: 24,
+        borderBottom: `1px solid ${ESTIMATE_MUTED}`,
+        fontSize: 16,
+        fontWeight: 600,
+        color: ESTIMATE_TEXT,
+        padding: '0 0 4px',
+        wordBreak: 'break-word',
+        fontVariantNumeric: 'tabular-nums',
+      }}>
+        {value || ''}
+      </div>
+      <div style={{
+        fontSize: 14,
+        fontWeight: 600,
+        letterSpacing: 0.6,
+        textTransform: 'uppercase',
+        color: ESTIMATE_MUTED,
+        marginTop: 5,
+      }}>
+        {label}
+      </div>
+    </div>
+  );
+}
+
+export function TermiteNoticeSticker({ findings, technicianName, projectDateLabel }) {
+  const f = findings || {};
+  const extraApplications = certificateAdditionalApplications(f);
+  const product1 = f.product_name === 'Other' && f.product_name_other ? f.product_name_other : f.product_name;
+  // Line 1 is application 1. A combined job names the other products in the
+  // details block below, so the label says where to look.
+  const materials1 = [
+    stickerMaterials(product1, f.active_ingredient),
+    extraApplications.length ? `(+${extraApplications.length} more below)` : '',
+  ].filter(Boolean).join(' ');
+  const concentration = String(f.concentration_pct || '').trim().replace(/%$/, '');
+  const navy = ESTIMATE_BUTTON_BG;
+  // The label's renewable-contract clause prints only when the certificate
+  // records a renewable retreatment bond; blank, builder-only and "No
+  // warranty" certificates carry no annual contract. The warranty call to
+  // action needs some recorded warranty.
+  const warranty = String(f.warranty_type || '').trim();
+  const renewableContract = /renewable/i.test(warranty);
+  const noWarranty = !warranty || /^no warranty$/i.test(warranty);
+
+  return (
+    <div data-testid="termite-notice-sticker" style={{
+      marginTop: 16,
+      background: B.white,
+      border: `1px solid ${ESTIMATE_BORDER}`,
+      borderRadius: 16,
+      overflow: 'hidden',
+      fontFamily: FONT_BODY,
+      color: ESTIMATE_TEXT,
+    }}>
+      <style>{`
+        .termite-sticker-row { display: grid; gap: 18px 24px; }
+        .termite-sticker-r3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+        .termite-sticker-r12 { grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); }
+        .termite-sticker-r11 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .termite-sticker-r5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+        @media (max-width: 600px) {
+          .termite-sticker-r3, .termite-sticker-r12, .termite-sticker-r11 { grid-template-columns: minmax(0, 1fr); }
+          .termite-sticker-r5 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        }
+        @media print {
+          [data-testid="termite-notice-sticker"] { break-inside: avoid; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+        }
+      `}</style>
+
+      <div style={{
+        background: navy,
+        borderBottom: `4px solid ${B.wavesBlue}`,
+        color: B.white,
+        padding: '22px 24px 20px',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 16,
+      }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, letterSpacing: 1.4, textTransform: 'uppercase', opacity: 0.8 }}>
+            Waves Pest Control, LLC
+          </div>
+          <div style={{
+            fontFamily: FONTS.serif,
+            fontSize: 'clamp(22px, 4.6vw, 30px)',
+            fontWeight: 500,
+            lineHeight: 1.15,
+            marginTop: 6,
+          }}>
+            Notice of Termite Protection
+          </div>
+          <div style={{ fontSize: 14, opacity: 0.85, marginTop: 8, lineHeight: 1.4 }}>
+            FL Building Code 1816.1.7 • FL Statutes 482.226 • FDACS Lic. {WAVES_FDACS_LICENSE_NUMBER}
+          </div>
+        </div>
+        <img src="/waves-logo.png" alt="Waves" style={{ height: 52, flexShrink: 0 }} />
+      </div>
+
+      <div style={{ padding: '24px 24px 8px', display: 'flex', flexDirection: 'column', gap: 20 }}>
+        <div className="termite-sticker-row termite-sticker-r3">
+          <StickerBlank label="Lot #" value={[f.lot_block, f.subdivision].filter(Boolean).join(' · ')} />
+          <StickerBlank label="Permit #" value={f.permit_number} />
+          <StickerBlank label="Builder / Contractor" value={f.builder_contractor} />
+        </div>
+        <div className="termite-sticker-row termite-sticker-r12">
+          <StickerBlank
+            label="Date of Initial Treatment"
+            value={f.treatment_date ? stickerDate(f.treatment_date) : projectDateLabel}
+          />
+          <StickerBlank label="Materials Used / Active Ingredient" value={materials1} />
+        </div>
+        <div className="termite-sticker-row termite-sticker-r12">
+          <StickerBlank label="Date of Final Ext. Treatment" value={stickerDate(f.final_exterior_date)} />
+          <StickerBlank
+            label="Materials Used / Active Ingredient"
+            value={stickerMaterials(f.final_exterior_product, f.final_exterior_active_ingredient)}
+          />
+        </div>
+        <div className="termite-sticker-row termite-sticker-r11">
+          <StickerBlank label="Address" value={f.treatment_address} />
+          <StickerBlank label="Wood Destroying Organism Treated For" value={f.wdo_target} />
+        </div>
+        <div className="termite-sticker-row termite-sticker-r5">
+          <StickerBlank label="Sq. Ft. Treated" value={stickerAmount(f.square_footage, 'sq ft')} />
+          <StickerBlank label="Gallons Applied" value={stickerAmount(f.gallons_applied, 'gal')} />
+          <StickerBlank label="Concentration" value={concentration ? `${concentration}%` : ''} />
+          <StickerBlank label="Applicator's Name" value={f.applicator_name || technicianName} />
+          <StickerBlank label="Renewal Due By" value={f.renewal_due} />
+        </div>
+      </div>
+
+      <div style={{ padding: '12px 24px 22px' }}>
+        <div style={{
+          fontSize: 14,
+          lineHeight: 1.55,
+          color: ESTIMATE_BODY,
+          padding: '14px 16px',
+          borderRadius: 10,
+          background: ESTIMATE_INPUT_BG,
+          border: `1px solid ${ESTIMATE_INPUT_BORDER}`,
+        }}>
+          This property has been treated for the prevention of subterranean termites in accordance with Florida
+          Building Code 1816 and rules established by the Florida Department of Agriculture &amp; Consumer Services
+          {renewableContract ? ', placed under a retreatment contract renewable by payment of an annual fee.' : '.'}
+          {' '}The owner is hereby advised to have the property inspected annually by Waves Pest Control, LLC.
+        </div>
+        <div style={{ fontSize: 14, fontWeight: 600, color: B.red, marginTop: 10, lineHeight: 1.45 }}>
+          It is a violation of Florida Statutes 482.226 for anyone other than the property owner to remove this notice.
+        </div>
+      </div>
+
+      <div style={{
+        background: navy,
+        color: B.white,
+        padding: '16px 24px 24px',
+        position: 'relative',
+        display: 'flex',
+        flexWrap: 'wrap',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: '8px 20px',
+      }}>
+        <div>
+          <div style={{ fontSize: 16, fontWeight: 700 }}>
+            {noWarranty ? 'Questions about your termite protection' : 'Activate your termite warranty'}
+          </div>
+          <div style={{ fontSize: 14, opacity: 0.8, marginTop: 2 }}>
+            Waves Pest Control, LLC • 13649 Luxe Ave #110, Bradenton, FL 34211
+          </div>
+        </div>
+        <div style={{ fontSize: 16, fontWeight: 600, textAlign: 'right' }}>
+          <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: 'inherit', textDecoration: 'none', whiteSpace: 'nowrap' }}>{WAVES_PHONE_DISPLAY}</a>
+          {!noWarranty && (
+            <>
+              <br />
+              <a href="https://www.wavespestcontrol.com/register" target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none', whiteSpace: 'nowrap' }}>wavespestcontrol.com/register</a>
+            </>
+          )}
+        </div>
+        {/* Form-ID stamp, same treatment as the certificate's WV-002. */}
+        <div style={{ position: 'absolute', right: 10, bottom: 4, fontSize: FS.body, opacity: 0.8 }}>WV-001</div>
       </div>
     </div>
   );
@@ -959,8 +1167,23 @@ function CertificateFieldGrid({ fields, compact }) {
   );
 }
 
-function CertificateOfCompliance({ findings, customerName, technicianName, projectDateLabel }) {
-  const f = findings || {};
+// "09/14/2026 · Termidor SC / Fipronil · applied by <name>" — the later
+// exterior visit's own record, kept apart from the slab-day attestation.
+function finalExteriorLine(f) {
+  const materials = [f.final_exterior_product, f.final_exterior_active_ingredient].filter(Boolean).join(' / ');
+  const parts = [
+    stickerDate(f.final_exterior_date),
+    materials,
+    f.final_exterior_applicator_name ? `applied by ${f.final_exterior_applicator_name}` : '',
+  ].filter(Boolean);
+  return parts.join(' · ');
+}
+
+// The certificate's field grid. Under the sticker (detailsOnly) it keeps
+// only what the label has no blank for; the label already prints lot,
+// permit, builder, dates, address, organism, sq ft, gallons, concentration
+// and renewal date.
+function certificateFields(f, { technicianName, projectDateLabel, detailsOnly }) {
   const applications = [
     certificateApplicationLines(f),
     ...certificateAdditionalApplications(f).map(certificateApplicationLines),
@@ -996,7 +1219,17 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
   // Single-application certificates keep the original one-grid layout; a
   // combined job moves the per-product lines into the Application blocks
   // below so each product prints its own chemistry and coverage.
-  const fields = [
+  const fields = detailsOnly ? [
+    ['Time of treatment', formatAppointmentTime(f.treatment_time)],
+    ['Method of treatment', methodValue],
+    ...(multiApplication ? [] : [
+      ['Product used', productLine],
+      ['Coverage', coverageLine],
+    ]),
+    ['Applicator', applicatorLine],
+    ['Warranty / retreatment bond', f.warranty_type],
+    ...(finalExteriorLine(f) ? [['Final exterior treatment', finalExteriorLine(f)]] : []),
+  ] : [
     ['Treatment address', addressValue],
     ['Lot / Block / Subdivision', lotLine],
     ['Building permit #', f.permit_number],
@@ -1012,6 +1245,159 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
     ['Applicator', applicatorLine],
     ['Warranty / retreatment bond', warrantyLine],
   ];
+  return { fields, applications, multiApplication };
+}
+
+function CertificateHeader({ detailsOnly }) {
+  return (
+    <div style={{
+      background: B.white,
+      borderBottom: `1px solid ${ESTIMATE_BORDER}`,
+      padding: '24px 24px 20px',
+      position: 'relative',
+      display: 'flex',
+      alignItems: 'flex-start',
+      gap: 20,
+    }}>
+      <div style={{ flex: 1 }}>
+        <div style={{
+          ...eyebrowStyle,
+          fontWeight: 700,
+          marginBottom: 4,
+        }}>
+          Florida Certificate of Compliance
+        </div>
+        <div style={{
+          fontFamily: FONTS.serif,
+          fontSize: 28,
+          fontWeight: 500,
+          color: ESTIMATE_TEXT,
+          lineHeight: 1.2,
+          letterSpacing: 0,
+        }}>
+          {detailsOnly ? 'Treatment Record Details' : 'Pre-Construction Termite Protection'}
+        </div>
+        {!detailsOnly && (
+          <div style={{
+            fontSize: 14,
+            color: ESTIMATE_BODY,
+            marginTop: 8,
+            lineHeight: 1.35,
+          }}>
+            Required by FL Building Code 1816.1.7 • FL Statutes 482.226 • FDACS LIC. {WAVES_FDACS_LICENSE_NUMBER}
+          </div>
+        )}
+      </div>
+      {!detailsOnly && <img src="/waves-logo.png" alt="Waves" style={{ height: 32, flexShrink: 0 }} />}
+    </div>
+  );
+}
+
+function CertificateWarrantyFooter() {
+  return (
+    <div style={{
+      margin: '16px 24px 24px',
+      background: ESTIMATE_BUTTON_BG,
+      borderRadius: 12,
+      padding: '16px 16px',
+      textAlign: 'center',
+    }}>
+      <div style={{
+        fontFamily: FONT_BODY,
+        fontSize: 16,
+        fontWeight: 700,
+        color: B.white,
+        textTransform: 'uppercase',
+        letterSpacing: 0.5,
+      }}>
+        Activate Your Termite Warranty
+      </div>
+      <div style={{
+        fontSize: 14,
+        color: B.white,
+        opacity: 0.94,
+        marginTop: 4,
+        letterSpacing: 0.3,
+      }}>
+        <a href={`tel:${WAVES_PHONE_TEL}`} style={{
+          color: 'inherit',
+          textDecoration: 'none',
+          whiteSpace: 'nowrap',
+        }}>{WAVES_PHONE_DISPLAY}</a>
+        {' • '}
+        <a href="https://www.wavespestcontrol.com/register" target="_blank" rel="noopener noreferrer" style={{
+          color: 'inherit',
+          textDecoration: 'none',
+          whiteSpace: 'nowrap',
+        }}>wavespestcontrol.com/register</a>
+      </div>
+      <div style={{
+        fontSize: FS.body,
+        color: B.white,
+        opacity: 0.85,
+        marginTop: 8,
+      }}>
+        Waves Pest Control, LLC • 13649 Luxe Ave #110, Bradenton, FL 34211
+      </div>
+    </div>
+  );
+}
+
+function CertificateSignature({ f, technicianName, projectDateLabel, detailsOnly }) {
+  return (
+    <div style={{
+      margin: '16px 24px 0',
+      padding: '16px 16px',
+      borderRadius: 12,
+      background: '#F5F1E6',
+      border: `1px solid ${ESTIMATE_BORDER}`,
+    }}>
+      <div style={{
+        ...eyebrowStyle,
+        marginBottom: 8,
+      }}>
+        Signed electronically
+      </div>
+      <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
+        {f.applicator_attestation}
+      </div>
+      <div style={{
+        marginTop: 12,
+        paddingTop: 12,
+        borderTop: `1px solid ${ESTIMATE_BORDER}`,
+        fontSize: 14,
+        color: ESTIMATE_TEXT,
+        lineHeight: 1.5,
+      }}>
+        <span style={{ color: B.green, fontWeight: 700, marginRight: 6 }}>Signed by</span>
+        <span style={{ fontWeight: 700 }}>{f.applicator_name || technicianName}</span>
+        {f.applicator_fdacs_id ? ` · FDACS ID ${f.applicator_fdacs_id}` : ''}
+        {(f.treatment_date || projectDateLabel) ? (
+          <>
+            <br />
+            <span style={{ color: ESTIMATE_BODY, fontSize: 14 }}>
+              Attested on {f.treatment_date ? formatReportDate(f.treatment_date) : projectDateLabel}
+            </span>
+          </>
+        ) : null}
+        {/* The final exterior visit comes later, often by another
+            applicator: this signature never vouches for it. */}
+        {detailsOnly && finalExteriorLine(f) ? (
+          <>
+            <br />
+            <span style={{ color: ESTIMATE_BODY, fontSize: 14 }}>
+              This signature covers the initial treatment only. The final exterior treatment is recorded separately above.
+            </span>
+          </>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+export function CertificateOfCompliance({ findings, customerName, technicianName, projectDateLabel, detailsOnly = false }) {
+  const f = findings || {};
+  const { fields, applications, multiApplication } = certificateFields(f, { technicianName, projectDateLabel, detailsOnly });
 
   return (
     <div style={{
@@ -1022,44 +1408,7 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
       overflow: 'hidden',
       position: 'relative',
     }}>
-      <div style={{
-        background: B.white,
-        borderBottom: `1px solid ${ESTIMATE_BORDER}`,
-        padding: '24px 24px 20px',
-        position: 'relative',
-        display: 'flex',
-        alignItems: 'flex-start',
-        gap: 20,
-      }}>
-        <div style={{ flex: 1 }}>
-          <div style={{
-            ...eyebrowStyle,
-            fontWeight: 700,
-            marginBottom: 4,
-          }}>
-            Florida Certificate of Compliance
-          </div>
-          <div style={{
-            fontFamily: FONTS.serif,
-            fontSize: 28,
-            fontWeight: 500,
-            color: ESTIMATE_TEXT,
-            lineHeight: 1.2,
-            letterSpacing: 0,
-          }}>
-            Pre-Construction Termite Protection
-          </div>
-          <div style={{
-            fontSize: 14,
-            color: ESTIMATE_BODY,
-            marginTop: 8,
-            lineHeight: 1.35,
-          }}>
-            Required by FL Building Code 1816.1.7 • FL Statutes 482.226 • FDACS LIC. {WAVES_FDACS_LICENSE_NUMBER}
-          </div>
-        </div>
-        <img src="/waves-logo.png" alt="Waves" style={{ height: 32, flexShrink: 0 }} />
-      </div>
+      <CertificateHeader detailsOnly={detailsOnly} />
 
       {/* Property + customer header */}
       <div style={{ padding: '16px 24px 0', display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -1157,90 +1506,11 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
           name + FDACS ID + treatment date together constitute an electronic
           signature accepted by Florida building departments. */}
       {f.applicator_attestation && (f.applicator_name || technicianName) && (
-        <div style={{
-          margin: '16px 24px 0',
-          padding: '16px 16px',
-          borderRadius: 12,
-          background: '#F5F1E6',
-          border: `1px solid ${ESTIMATE_BORDER}`,
-        }}>
-          <div style={{
-            ...eyebrowStyle,
-            marginBottom: 8,
-          }}>
-            Signed electronically
-          </div>
-          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
-            {f.applicator_attestation}
-          </div>
-          <div style={{
-            marginTop: 12,
-            paddingTop: 12,
-            borderTop: `1px solid ${ESTIMATE_BORDER}`,
-            fontSize: 14,
-            color: ESTIMATE_TEXT,
-            lineHeight: 1.5,
-          }}>
-            <span style={{ color: B.green, fontWeight: 700, marginRight: 6 }}>Signed by</span>
-            <span style={{ fontWeight: 700 }}>{f.applicator_name || technicianName}</span>
-            {f.applicator_fdacs_id ? ` · FDACS ID ${f.applicator_fdacs_id}` : ''}
-            {(f.treatment_date || projectDateLabel) ? (
-              <>
-                <br />
-                <span style={{ color: ESTIMATE_BODY, fontSize: 14 }}>
-                  Attested on {f.treatment_date ? formatReportDate(f.treatment_date) : projectDateLabel}
-                </span>
-              </>
-            ) : null}
-          </div>
-        </div>
+        <CertificateSignature f={f} technicianName={technicianName} projectDateLabel={projectDateLabel} detailsOnly={detailsOnly} />
       )}
 
-      <div style={{
-        margin: '16px 24px 24px',
-        background: ESTIMATE_BUTTON_BG,
-        borderRadius: 12,
-        padding: '16px 16px',
-        textAlign: 'center',
-      }}>
-        <div style={{
-          fontFamily: FONT_BODY,
-          fontSize: 16,
-          fontWeight: 700,
-          color: B.white,
-          textTransform: 'uppercase',
-          letterSpacing: 0.5,
-        }}>
-          Activate Your Termite Warranty
-        </div>
-        <div style={{
-          fontSize: 14,
-          color: B.white,
-          opacity: 0.94,
-          marginTop: 4,
-          letterSpacing: 0.3,
-        }}>
-          <a href={`tel:${WAVES_PHONE_TEL}`} style={{
-            color: 'inherit',
-            textDecoration: 'none',
-            whiteSpace: 'nowrap',
-          }}>{WAVES_PHONE_DISPLAY}</a>
-          {' • '}
-          <a href="https://www.wavespestcontrol.com/register" target="_blank" rel="noopener noreferrer" style={{
-            color: 'inherit',
-            textDecoration: 'none',
-            whiteSpace: 'nowrap',
-          }}>wavespestcontrol.com/register</a>
-        </div>
-        <div style={{
-          fontSize: FS.body,
-          color: B.white,
-          opacity: 0.85,
-          marginTop: 8,
-        }}>
-          Waves Pest Control, LLC • 13649 Luxe Ave #110, Bradenton, FL 34211
-        </div>
-      </div>
+      {/* The sticker above already carries the warranty footer. */}
+      {detailsOnly ? <div style={{ height: 24 }} /> : <CertificateWarrantyFooter />}
 
       {/* Form-ID stamp — bottom right, matches v10 "WV-001" treatment */}
       <div style={{
@@ -1271,7 +1541,7 @@ function RoofRatPhoto() {
   );
 }
 
-export function getPhotoLabel(photo) {
+function getPhotoLabel(photo) {
   return photo.caption || (photo.category ? `${photo.category.replace(/_/g, ' ')} photo` : 'Service photo');
 }
 
@@ -1366,7 +1636,7 @@ export function parseSections(text) {
   return foundRequired ? sections : null;
 }
 
-export function titleCase(s) {
+function titleCase(s) {
   return s.split(' ').map(w => w[0] + w.slice(1).toLowerCase()).join(' ');
 }
 
@@ -1396,7 +1666,7 @@ function RecommendationsBlock({ text, upcomingAppointment }) {
   );
 }
 
-export function shouldShowBookingCta(text) {
+function shouldShowBookingCta(text) {
   const value = String(text || '');
   const negativeBeforeAction = /\b(no|not|none|without|unnecessary|isn'?t|not currently)\b.{0,55}\b(service|appointment|schedule|booking|treatment|treat|application|follow[-\s]?up|inspection|exclusion)\b/i.test(value);
   const actionBeforeNegative = /\b(service|appointment|booking|treatment|application|follow[-\s]?up|inspection|exclusion)\b.{0,55}\b(no|not|unnecessary|isn'?t)\b/i.test(value);

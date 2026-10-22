@@ -3,7 +3,7 @@
 // Tech portal home page (/tech). Mobile-first; the dashboard a tech
 // sees when they open the app on their phone in the field. Renders
 // the day's route, quick actions (start service, complete service,
-// mark en-route, geofence prompt acknowledge), and the
+// mark en-route, notice acknowledge), and the
 // TechIntelligenceBar (read-only Claude-powered Q&A scoped to
 // tech-tools).
 //
@@ -14,9 +14,9 @@
 //   PATCH /api/tech/services/:id/skip         (skip with reason)
 //   POST  /api/tech/services/:id/en-route     (begin drive)
 //   POST  /api/tech/services/:id/on-site      (arrive at property)
-//   GET   /api/tech/notifications             (geofence prompts;
+//   GET   /api/tech/notifications             (notice cards;
 //                                              polled every 10s by
-//                                              GeofenceArrivalPrompt)
+//                                              TechNoticeFeed)
 //   POST  /api/tech/notifications/:id/ack
 //   POST  /api/tech/projects                  (CreateProjectModal save)
 //
@@ -31,7 +31,7 @@
 // - State transitions: confirm a tech can't accidentally skip an
 //   appointment they're already on-site for, and can't complete one
 //   that hasn't been started.
-// - GeofenceArrivalPrompt polling: 10s interval. What happens on
+// - TechNoticeFeed polling: 10s interval. What happens on
 //   network loss / backgrounded tab? Does it stack toasts?
 // - CreateProjectModal save: photo uploads + draft save. Verify the
 //   photos make it to the server before "save as draft" returns
@@ -49,7 +49,7 @@ import TechHeldVisits from './TechHeldVisits';
 import TechScheduleChanges from './TechScheduleChanges';
 import TechFieldVisit from './TechFieldVisit';
 import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
-import GeofenceArrivalPrompt from '../../components/tech/GeofenceArrivalPrompt';
+import TechNoticeFeed from '../../components/tech/TechNoticeFeed';
 import { useTechBasePath } from '../../components/tech/techBasePath';
 import CreateProjectModal, { wdoFeeSeedFromVisit } from '../../components/tech/CreateProjectModal';
 import ServiceRecapModal from '../../components/ServiceRecapModal';
@@ -812,7 +812,7 @@ export default function TechHomePage({ section = 'today' }) {
   ];
   return (
     <div style={{ margin: '0 auto' }}>
-      <GeofenceArrivalPrompt
+      <TechNoticeFeed
         // The field workspace's Today overview shows schedule changes in the
         // page (TechScheduleChanges) once its feed has loaded; a feed that has
         // not loaded keeps the visit cards in the flow (pre-push audit P1,

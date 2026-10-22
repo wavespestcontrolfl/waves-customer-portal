@@ -8,7 +8,7 @@ import { getAdminAuthToken } from '../../lib/adminAuth';
 // The server marks `soon` (routes/tech-notifications.js /schedule-changes).
 
 const API = import.meta.env.VITE_API_URL || '';
-// Same cadence as the notification feed (GeofenceArrivalPrompt): with the
+// Same cadence as the notification feed (TechNoticeFeed): with the
 // floating cards off on Today, this read is how a new change shows up
 // (Codex #5786 P2).
 const POLL_MS = 10_000;

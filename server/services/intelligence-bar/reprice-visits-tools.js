@@ -264,6 +264,10 @@ function committedReason(row, invoice) {
   return null;
 }
 
+// The tail of every exclusion reason that is a missing capability, not a state
+// the operator must wait out (Codex #6371 r12).
+const CANNOT_REPRICE = "the bar can't reprice from here";
+
 // Why a visit is left alone, from its own row and the linked records — null
 // when it can be repriced.
 function exclusionReason(row, { invoice, hasAddons }) {
@@ -272,10 +276,31 @@ function exclusionReason(row, { invoice, hasAddons }) {
   if (row.is_callback) return 'a free re-service visit';
   // A series' template visit: the Schedule edit carries its price into the
   // visits the plan adds later, beyond what this card approves.
-  if (row.is_recurring && !row.recurring_parent_id) return "the plan's first visit (later visits copy its price), which the bar can't reprice from here";
-  if (row.estimated_price != null && Number(row.estimated_price) === 0) return 'a $0 visit, which the bar can\'t reprice from here';
-  if (hasAddons) return 'has add-on lines, which the bar can\'t reprice from here';
+  if (row.is_recurring && !row.recurring_parent_id) return `the plan's first visit (later visits copy its price), which ${CANNOT_REPRICE}`;
+  if (row.estimated_price != null && Number(row.estimated_price) === 0) return `a $0 visit, which ${CANNOT_REPRICE}`;
+  if (hasAddons) return `has add-on lines, which ${CANNOT_REPRICE}`;
   return null;
+}
+
+// The capability reasons among the exclusions, worded for a sentence (Codex #6371 r14).
+function capabilityExclusions(excluded) {
+  return [...new Set(excluded.map(({ reason }) => reason).filter((reason) => reason.endsWith(CANNOT_REPRICE)))]
+    .map((reason) => reason.replace(new RegExp(`,? which ${CANNOT_REPRICE}$`), ''));
+}
+
+// When exclusions took every visit that would change (a visit already at the
+// price does not count) and at least one is a missing capability (a recurring template, a $0 visit, add-on lines), the refusal is
+// a coded gap naming those reasons, not the generic nothing_to_reprice; the
+// per-visit list stays in left_alone (Codex #6371 r12). Null otherwise.
+function allExcludedRefusal({ label, customerName, newPrice, excluded, excludedOut, unchangedOut }) {
+  const gaps = capabilityExclusions(excluded);
+  if (!gaps.length) return null;
+  return {
+    error: `The bar can't change any upcoming ${label} visit for ${customerName} to ${money(newPrice)} from here yet: ${gaps.join('; ')}. Nothing was changed.`,
+    code: 'reprice_excluded_unsupported',
+    left_alone: excludedOut,
+    already_at_price: unchangedOut,
+  };
 }
 
 async function buildPlan(input) {
@@ -331,6 +356,8 @@ async function buildPlan(input) {
   const excludedOut = excluded.map(({ row, reason }) => ({ ...line(row), reason }));
   const unchangedOut = unchanged.map((row) => ({ ...line(row), price: money(newPrice) }));
   if (!candidates.length) {
+    const declined = allExcludedRefusal({ label: family.label, customerName, newPrice, excluded, excludedOut, unchangedOut });
+    if (declined) return declined;
     return {
       error: `No upcoming ${family.label} visit for ${customerName} can change to ${money(newPrice)}. Nothing was changed.`,
       code: 'nothing_to_reprice',
@@ -341,7 +368,8 @@ async function buildPlan(input) {
   if (candidates.length > MAX_VISITS) {
     return {
       error: `${candidates.length} upcoming ${family.label} visits would change; one card holds at most ${MAX_VISITS}. Pass through_date to do part of the schedule. Nothing was changed.`,
-      code: 'too_many_visits',
+      // A page-size limit with a way forward (through_date), not a missing capability; the billing-type change keeps too_many_visits (Codex #6371 r15).
+      code: 'reprice_page_limit',
     };
   }
   const pins = candidates.map(visitPin);
@@ -358,6 +386,8 @@ async function buildPlan(input) {
       ...(hasStoredDiscount(row) ? { discount_note: 'its discount stamp is replaced: the new price is the full visit price' } : {}),
     })),
     left_alone: excludedOut,
+    // A partial plan still leaves capability exclusions behind; the gap collector reads this (Codex #6371 r13).
+    ...(capabilityExclusions(excluded).length ? { capability_gaps: [{ code: 'reprice_excluded_unsupported' }] } : {}),
     already_at_price: unchangedOut,
     customer_message: NO_MESSAGE,
     _version: pinsVersion(pins, { customer_id: String(customer.id), new_price: Math.round(newPrice * 100), family: family.tag, lane: lane.mode, refreshable_prepay_term: false }),

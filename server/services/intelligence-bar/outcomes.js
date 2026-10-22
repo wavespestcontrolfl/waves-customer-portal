@@ -86,11 +86,24 @@ const THROWN_MOVE_REFUSALS = {
   },
 };
 
+// Frozen-visit reasons that are a wait, not a structural freeze: the visit is
+// being finalized, a completion is running, or a reminder send holds its lease.
+// A move retried in a moment works, so these are never a capability gap
+// (Codex #6371 r19). Structural reasons (an issued link, artifacts or records,
+// a packet, a payment attempt) keep frozen_visit_move_unsupported.
+const TRANSIENT_FROZEN_REASONS = new Set(['visit_not_open', 'completion_in_flight', 'reminder_in_flight']);
+
 // The bar refusal for a thrown move error, or null when it is not one of them.
 function moveRefusalFromThrown(err) {
   const mapped = err && THROWN_MOVE_REFUSALS[err.code];
   if (!mapped) return null;
+  // A frozen-state check that could not READ the visit fails closed with the
+  // same code; that is an outage, not a policy refusal, so it stays a fault.
+  if (err.reason === 'unreadable') return null;
+  if (mapped.code === 'frozen_visit_move_unsupported' && TRANSIENT_FROZEN_REASONS.has(err.reason)) {
+    return { error: 'This visit is busy right now (being finalized, completed, or sending a reminder), so nothing was moved. Try again in a moment.', code: 'visit_busy_move' };
+  }
   return { error: mapped.error || err.message, code: mapped.code };
 }
 
-module.exports = { isToolFailure, isPolicyRefusal, recordToolOutcome, executionOutcome, moveRefusalFromThrown };
+module.exports = { isToolFailure, isPolicyRefusal, recordToolOutcome, executionOutcome, moveRefusalFromThrown, TRANSIENT_FROZEN_REASONS };

@@ -83,6 +83,7 @@ Use for: "fix the closeout for this visit", "finish what's missing on the job we
 ];
 
 // Where each open fact gets fixed when this command will not touch it.
+const OUTAGE_REMEDY = 'Lookup outage — status is unverified, not missing; re-check before acting.';
 const MANUAL_REMEDY = {
   completion: 'Completion is not finished, and the bar can\'t finish it from here; every other fact waits on it.',
   application: 'Application log is field evidence — only the technician can record it; it is never generated.',
@@ -509,7 +510,7 @@ function manualItems(facts, steps, skipped) {
   for (const [name, f] of Object.entries(facts)) {
     if (!f || planned.has(name)) continue;
     if (f.state === 'unknown') {
-      manual.push({ fact: name, state: f.state, reason: f.reason, fix: 'Lookup outage — status is unverified, not missing; re-check before acting.' });
+      manual.push({ fact: name, state: f.state, reason: f.reason, fix: OUTAGE_REMEDY, blockedNow: true });
       continue;
     }
     if (!['pending', 'failed'].includes(f.state) || skippedFacts.has(name)) continue;
@@ -517,15 +518,37 @@ function manualItems(facts, steps, skipped) {
     if (name === 'reportDelivery' && f.reason === 'report_not_published' && planned.has('report')) continue;
     manual.push({ fact: name, state: f.state, reason: f.reason, fix: MANUAL_REMEDY[name] });
   }
-  for (const s of skipped) manual.push({ fact: s.fact, state: facts[s.fact].state, reason: s.reason, fix: `The bar can\'t repair this from here: ${s.why}.` });
+  // A skipped step is one the bar CAN run, blocked right now (a lookup that
+  // failed, a switch that is off, no contact on file): `blockedNow` keeps it out
+  // of the capability-gap text (Codex #6371 r8-r10).
+  for (const s of skipped) manual.push({ fact: s.fact, state: facts[s.fact].state, reason: s.reason, fix: `The bar can\'t repair this from here: ${s.why}.`, blockedNow: true });
   return manual;
+}
+
+// The open items a plan leaves for a person that the bar could be built to do:
+// not field evidence or technician data, and not blocked right now. A plan that
+// still has steps to run is a success, so the gap collector reads these from
+// `capability_gaps`, one `closeout_<fact>_unsupported` code per fact
+// (Codex #6371 r14).
+const FIELD_ONLY_FACTS = new Set(['application', 'photos', 'license']);
+function manualCapabilityGaps(manual) {
+  const facts = manual.filter((m) => !m.blockedNow && !FIELD_ONLY_FACTS.has(m.fact)).map((m) => m.fact);
+  const codes = [...new Set(facts)].map((fact) => `closeout_${fact.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`)}_unsupported`);
+  return codes.length ? { capability_gaps: codes.map((code) => ({ code })) } : {};
 }
 
 async function planCloseoutRepair(status, { knex = db } = {}) {
   const facts = status.facts || {};
   if (facts.completion?.state !== 'done') {
+    // An unreadable completion is an outage, not a missing capability: it is
+    // blockedNow with the outage wording, like every other unknown fact (Codex #6371 r14).
+    const unknown = facts.completion?.state === 'unknown';
     const manual = facts.completion
-      ? [{ fact: 'completion', state: facts.completion.state, reason: facts.completion.reason, fix: MANUAL_REMEDY.completion }]
+      ? [{
+        fact: 'completion', state: facts.completion.state, reason: facts.completion.reason,
+        fix: unknown ? OUTAGE_REMEDY : MANUAL_REMEDY.completion,
+        ...(unknown ? { blockedNow: true } : {}),
+      }]
       : [];
     return { steps: [], manual, skipped: [] };
   }
@@ -787,6 +810,7 @@ function previewFromPlan(serviceId, status, plan) {
       effect: stepEffect(s),
     })),
     manual: plan.manual,
+    ...manualCapabilityGaps(plan.manual),
     notifies_customer: plan.steps.some((s) => STEP_EFFECTS[s.step].kind === 'comms'),
     note_to_operator: 'PLAN ONLY — nothing was changed. Confirm runs exactly these steps; the open items under manual are not touched.',
   };
@@ -809,10 +833,16 @@ async function repairCloseout(input, actionContext = {}) {
     // An empty plan is a tool answer, not a card: a card that can only
     // no-op would consume a pending action for nothing.
     if (!plan.steps.length) {
+      // The manual fixes ride the top-level text too: the gap collector reads
+      // only `error`, so a capability decline that lives only under manual[]
+      // ("the bar can't bill this visit from here") would never reach the gap list.
+      // Only the open items no tool here supports reach the gap text: a step the
+      // bar can run but that is blocked right now (blockedNow) stays under manual[].
+      const manualFixes = [...new Set(plan.manual.filter((m) => !m.blockedNow).map((m) => m.fix).filter(Boolean))];
       return {
         error: status.summary?.closedOut
           ? 'This visit is fully closed out — nothing to repair.'
-          : 'Nothing here is repairable by this command — see manual for where each open item gets fixed.',
+          : `Nothing here is repairable by this command — see manual for where each open item gets fixed.${manualFixes.length ? ` ${manualFixes.join(' ')}` : ''}`,
         code: 'nothing_repairable',
         service_id: serviceId,
         manual: plan.manual,
@@ -845,6 +875,7 @@ async function repairCloseout(input, actionContext = {}) {
     service_id: serviceId,
     receipt,
     manual: plan.manual,
+    ...manualCapabilityGaps(plan.manual),
     note: allDone
       ? 'Every planned step completed. Items under manual still need a person.'
       : 'Some steps did not complete — this is NOT re-run automatically. Check the receipt, then ask again for a fresh plan.',

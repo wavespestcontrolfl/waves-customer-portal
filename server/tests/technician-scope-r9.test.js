@@ -40,10 +40,8 @@ describe('arrival transition', () => {
     expect(src).toMatch(/if \(opts\.expectTechnicianId\) flip\.where\('technician_id', opts\.expectTechnicianId\);/);
   });
 
-  test('both technician start paths bind the arrival to the acting technician; geofence does not', () => {
+  test('the technician start path binds the arrival to the acting technician', () => {
     expect(read('services/time-tracking.js')).toMatch(/isTechnicianRequest\(scopeReq\) \? \{ expectTechnicianId: technicianId \}/);
-    expect(read('routes/tech-notifications.js')).toMatch(/req\.techRole === 'technician' \? \{ expectTechnicianId: req\.technicianId \}/);
-    expect(read('services/geofence-handler.js')).not.toMatch(/expectTechnicianId/);
   });
 });
 

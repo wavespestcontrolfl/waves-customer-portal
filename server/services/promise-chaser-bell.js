@@ -323,6 +323,62 @@ async function findPromiseToRing(call, now) {
   return { promise, renewedAt: promise.__renewedAt, ...describePromise(promise) };
 }
 
+// Placeholder names (call-commitments' one list) read as no name at all.
+const fullName = (row, first = 'first_name', last = 'last_name') => {
+  const name = [row?.[first], row?.[last]].filter(Boolean).join(' ').trim();
+  return name && !commitments.isMissingName(name) ? name : null;
+};
+
+// The real names one source holds for a number, reduced to one person:
+// undefined = no real name here (try the next source); null = two or more
+// different people (stop: name nobody); else the newest spelling of the one name.
+const identityKey = (name) => String(name).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+function oneIdentity(names) {
+  const real = names.filter(Boolean);
+  if (!real.length) return undefined;
+  return new Set(real.map(identityKey)).size === 1 ? real[0] : null;
+}
+
+// Who is calling back, for the headline (owner 2026-10-21: "the headline
+// should have the customer name"). The call's own customer when it has one;
+// for a call with no customer link, the NUMBER: the customer records carrying
+// it, then estimates, then leads. At each step the real (non-placeholder)
+// names must agree on ONE person (duplicates of one person are common); two
+// different people on the number name nobody, and the lookup stops there —
+// an estimate or lead must not pick between them (Codex #6417 r4). Null when
+// nothing on the number names one person; the copy then falls back to the number.
+// A failed lookup never blocks the bell.
+async function resolveCallerName(call) {
+  try {
+    // A call WITH a customer is that customer's: their record is the only
+    // authority on the name. A missing or placeholder-named record gives no
+    // name (the headline falls back to the number) — never another record
+    // that merely shares the phone.
+    if (call.customer_id) {
+      const linked = await db('customers').where('id', call.customer_id).first('first_name', 'last_name');
+      return fullName(linked);
+    }
+    const key = commitments.phoneDigits(call.from_phone);
+    if (!key || key.length < 10) return null;
+    const phones = [call.from_phone];
+    const customers = await commitments.phoneWhereAny(db('customers'), 'phone', phones)
+      .whereNull('deleted_at').orderBy('created_at', 'desc').select('first_name', 'last_name');
+    const fromCustomers = oneIdentity(customers.map((c) => fullName(c)));
+    if (fromCustomers !== undefined) return fromCustomers;
+    const estimates = await commitments.phoneWhereAny(db('estimates'), 'customer_phone', phones)
+      .whereRaw("COALESCE(customer_name, '') <> ''").orderBy('created_at', 'desc').limit(50).select('customer_name');
+    const fromEstimates = oneIdentity(estimates.map((e) => fullName(e, 'customer_name', null)));
+    if (fromEstimates !== undefined) return fromEstimates;
+    const leads = await commitments.phoneWhereAny(db('leads'), 'phone', phones)
+      .whereNull('deleted_at').orderBy('created_at', 'desc').limit(50).select('first_name', 'last_name');
+    const fromLeads = oneIdentity(leads.map((l) => fullName(l)));
+    if (fromLeads !== undefined) return fromLeads;
+  } catch (err) {
+    logger.warn(`[promise-chaser-bell] caller name lookup failed for call ${call.id}: ${err.message}`);
+  }
+  return null;
+}
+
 // Dispatches the alert for one eligible call, if any open Waves promise
 // still applies and hasn't already rung today. This file owns no claim,
 // lease, or tracking state of its own — the bell row itself (checked by
@@ -397,9 +453,7 @@ async function ringForCall(call, now = new Date()) {
   const alreadyDelivered = await db('promise_chaser_deliveries').where({ dedupe_key: dedupeKey }).first('dedupe_key');
   if (alreadyDelivered) return false;
 
-  const customer = call.customer_id
-    ? await db('customers').where('id', call.customer_id).first('first_name', 'last_name')
-    : null;
+  const callerName = await resolveCallerName(call);
 
   // Re-checked immediately before dispatch: staff may dismiss, fulfill, or
   // close the commitment — or a manual text, a qualifying outbound call, or
@@ -523,7 +577,7 @@ async function ringForCall(call, now = new Date()) {
   const { triggerNotification } = require('./notification-triggers');
   const stats = await triggerNotification('promise_chaser', {
     customerId: call.customer_id || null,
-    name: [customer?.first_name, customer?.last_name].filter(Boolean).join(' ') || null,
+    name: callerName,
     phone: call.from_phone,
     callLogId: call.id,
     commitmentId: promise.id,

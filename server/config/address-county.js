@@ -43,7 +43,7 @@ const CITY_COUNTY = Object.freeze({
   venice: 'Sarasota', 'north port': 'Sarasota', nokomis: 'Sarasota',
   osprey: 'Sarasota', 'siesta key': 'Sarasota', 'laurel': 'Sarasota',
   'north venice': 'Sarasota', 'lake sarasota': 'Sarasota',
-  'port charlotte': 'Charlotte', 'punta gorda': 'Charlotte', 'rotonda west': 'Charlotte',
+  'port charlotte': 'Charlotte', 'babcock ranch': 'Charlotte', 'punta gorda': 'Charlotte', 'rotonda west': 'Charlotte',
 });
 
 /**

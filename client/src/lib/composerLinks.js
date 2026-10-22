@@ -1,3 +1,5 @@
+import { howToGuidePresent, howToGuideText } from "./howToGuides";
+
 export const STATIC_COMPOSER_LINKS = [
   {
     key: "portal_login",
@@ -22,16 +24,35 @@ export const STATIC_COMPOSER_LINKS = [
 // Append a static link clause to the composer body (empty body gets the
 // clause alone). Returns the body unchanged when the URL is already present
 // — a second click must not stack a duplicate link.
-export function appendStaticLinkClause(body, { url, clause }) {
+// A how-to guide row (`steps`) is matched on its title line instead: the
+// guides share deep links, so a URL match would refuse a second guide.
+export function appendStaticLinkClause(body, { url, clause, guide = null }) {
   const b = String(body || "");
-  if (b.includes(url)) return b;
+  if (staticLinkPresent(b, guide || { url })) return b;
   if (!b.trim()) return clause;
   return `${b.replace(/\s+$/, "")}\n\n${clause}`;
 }
 
+// Whether a static row is already in the draft (see appendStaticLinkClause).
+// A URL counts only as a whole link: the login link is a prefix of every
+// login?next= link, and a guide's deep link must not read as "Portal login".
+export function staticLinkPresent(body, link) {
+  if (Array.isArray(link.steps)) return howToGuidePresent(body, link);
+  const text = String(body || "");
+  const url = String(link.url || "");
+  if (!url) return false;
+  for (let at = text.indexOf(url); at !== -1; at = text.indexOf(url, at + 1)) {
+    // Sentence punctuation after the link still ends it ("...login.").
+    if (/^[.,!?;:)]*(\s|$)/.test(text.slice(at + url.length))) return true;
+  }
+  return false;
+}
+
 // The rendered insert text for a library row: "{clause}: {url}" with the
-// row's name standing in when no clause was authored (sitemap rows).
+// row's name standing in when no clause was authored (sitemap rows). A
+// how-to guide row renders its numbered steps.
 export function libraryLinkClause(link) {
+  if (Array.isArray(link.steps)) return howToGuideText(link);
   const prefix = String(link.clause || "").trim() || String(link.name || "").trim() || "More info";
   return `${prefix}: ${link.url}`;
 }

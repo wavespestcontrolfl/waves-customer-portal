@@ -350,7 +350,7 @@ describe('direct creators tell the tech (source order)', () => {
     // swap: both reassigning updates return the committed rows the snapshots use.
     expect(src).toContain("const swapRows = new Map(committedSwapRows.map((r) => [String(r.id), r]));");
     expect((src.match(/\.returning\(swapReturning\)/g) || []).length).toBe(2);
-    expect(src).toContain(".returning(['id', 'technician_id']);\n      if (committedRows.length === 0) {");
+    expect(src).toContain(".returning(['id', 'technician_id']);\n  if (committedRows.length === 0) throw");
     expect(src).toContain('technicianId: c.committedTechId,');
   });
 });

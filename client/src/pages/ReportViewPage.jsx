@@ -3425,9 +3425,19 @@ export function reportAskPrompts(data = {}, serviceLine = 'pest') {
   else if ((data.applications || []).length) add('Why were these products used?');
   if (hasPressure) add('What does Pest Pressure mean?');
   if (hasInaccessible) add('What should I do about the inaccessible area?');
-  add(serviceLine === 'lawn' ? 'How is my lawn trending?' : 'What should I watch for next?');
-  add('When is my next service?');
-  return prompts.slice(0, 5);
+  // Exactly three questions on every report (owner 2026-10-22). Visit-specific
+  // questions lead; this per-line set fills any gap so each line always has 3.
+  // Each fill question gets its own answer from the report's fixed-rule router
+  // (report-assistant.js) with no AI and no extra report data: that answer is
+  // what a mosquito report always gives, and what the others give when the AI
+  // is off or misses.
+  const FILL_BY_LINE = {
+    lawn: ['How is my lawn trending?', 'What should I watch for next?', 'When is my next service?'],
+    mosquito: ['What can I do to cut down mosquitoes?', 'What did you find today?', 'When is my next service?'],
+    tree_shrub: ['What did you find today?', 'What should I watch for next?', 'When is my next service?'],
+  };
+  (FILL_BY_LINE[serviceLine] || ['What should I watch for next?', 'What did you find today?', 'When is my next service?']).forEach(add);
+  return prompts.slice(0, 3);
 }
 
 // Floating Ask Waves — the report's AI helper as a slim bar pinned under the
@@ -8572,10 +8582,20 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .review-request-card-top {
           margin-bottom: 16px;
         }
+        /* Desktop (owner 2026-10-22, "renders funny on desktop"): one row,
+           headline left and button right. Phones keep the center stack. */
+        @media (min-width: 761px) {
+          .review-request-card {
+            grid-template-columns: 1fr auto;
+            justify-items: start;
+          }
+          .service-report-v1 .review-request-card.report-card h3 { text-align: left; margin: 0 !important; }
+        }
         .review-request-card h3 {
           margin-bottom: 0;
         }
         .review-request-card .review-cta {
+          box-sizing: border-box;
           display: inline-flex;
           align-items: center;
           justify-content: center;
@@ -10444,56 +10464,6 @@ function reportDataUrl(token, mode, pinnedAssessment) {
 // the map fields, silently, instead of leaving a dead map behind.
 const REPORT_MAP_STALE_MS = 90 * 60 * 1000;
 
-// GATE_REPORT_SIMPLE_WEB (owner 2026-10-17: "the simpler service reports,
-// that we modeled after trugreen and all u need"): the report link shows the
-// work-order document the PDF prints, with one Download PDF button over it.
-// The server builds this payload as it builds the PDF's (same compliance
-// strips), and sets data.simpleWebReport only while the gate is live.
-function SimpleWebReport({ data, token }) {
-  // GATE_REPORT_GLASS_WEB (owner 2026-10-20): the server sets glassWeb only
-  // while that gate is live. The page-level useGlassSurface already mounted
-  // the scene; this only drops the white sheet and dresses the cards.
-  const glass = data.glassWeb === true;
-  const pdfUrl = data.pdfUrl ? `${API_BASE}${data.pdfUrl.replace(/^\/api/, '')}` : null;
-  useEffect(() => {
-    trackReportEvent(token, 'service_report_viewed', { layout: 'simple' });
-  }, [token]);
-  return (
-    <div style={{ background: glass ? 'transparent' : '#fff', flex: 1 }}>
-      {pdfUrl ? (
-        <div style={{ maxWidth: 760, margin: '0 auto', padding: '16px 16px 0', display: 'flex', justifyContent: 'flex-end' }}>
-          <a
-            href={pdfUrl}
-            download
-            {...(glass ? { 'data-glass-accent': '' } : {})}
-            onClick={(e) => {
-              trackReportEvent(token, 'pdf_downloaded');
-              // In the Capacitor shell an <a download> dead-ends the webview —
-              // route through the native share sheet (same as ReportActionBar).
-              if (canSaveNative()) {
-                e.preventDefault();
-                saveUrlNative(pdfUrl, reportPdfDownloadName(data))
-                  .catch(() => showCustomerAlert('Could not save the PDF. Please try again.'));
-              }
-            }}
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: 8, minHeight: 44, padding: '0 16px',
-              borderRadius: 10, background: '#04395E', color: '#fff', fontWeight: 600, fontSize: 15, textDecoration: 'none',
-            }}
-          ><Download size={16} /> Download PDF</a>
-        </div>
-      ) : null}
-      {/* The recap texts link to #visit-recap, so the clip stays on this page. */}
-      {data.recap?.ready ? (
-        <div style={{ maxWidth: 760, margin: '0 auto', padding: '16px 16px 0' }}>
-          <RecapVideoCard recap={data.recap} token={token} />
-        </div>
-      ) : null}
-      <ServiceReportDocument data={data} token={token} web glass={glass} />
-    </div>
-  );
-}
-
 export default function ReportViewPage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
@@ -10735,9 +10705,6 @@ export default function ReportViewPage() {
     // the post-service email attachment all serve this capture. The glass
     // web report (live) and the unused static mode are unchanged.
     if (mode === 'pdf') return <ServiceReportDocument data={data} token={token} />;
-    // GATE_REPORT_SIMPLE_WEB (owner 2026-10-17): the server set this key, so
-    // the report link shows the same work-order document as the PDF.
-    if (mode === 'live' && data.simpleWebReport === true && !data.internalOnly) return <SimpleWebReport data={data} token={token} />;
     // GATE_LAWN_REPORT_STAGE1_FIXES: the web page leaves out an applied card that repeats Today's result (the PDF returns above).
     return <ServiceReportV1 data={withoutRepeatedAppliedCard(data)} token={token} mode={mode} />;
   }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { oneTimeBesidePlan, pageAverageEligible, pageMonthlyAverage, planCreditSource, resolvePageMonthlyAverage, sectionAverageLine, singleServiceAverageContext } from './estimateMonthlyAverage';
+import { applicationMonthsBreakdown, oneTimeBesidePlan, pageAverageEligible, pageMonthlyAverage, planCreditSource, resolvePageMonthlyAverage, sectionAverageLine, singleServiceAverageContext } from './estimateMonthlyAverage';
 
 // Real-shaped sections: net per-application price + application count + the
 // selected cadence's monthly, exactly what a ServiceSection card reads.
@@ -165,11 +165,44 @@ describe('page decision helpers', () => {
     expect(oneTimeBesidePlan({ feeList: [], estimate: { showOneTimeOption: true }, pricing: { oneTimeBreakdown: { items: [flea] } } })).toBe(false);
     expect(oneTimeBesidePlan({ feeList: [], estimate: {}, pricing: {} })).toBe(false);
     const average = resolvePageMonthlyAverage(base(), monthlyAmountOf);
-    expect(sectionAverageLine(average, 'pest_control')).toBe('about $30.00 a month');
+    expect(sectionAverageLine(average, 'pest_control')).toBe('$30.00 a month');
     expect(sectionAverageLine(null, 'pest_control')).toBeNull();
     expect(singleServiceAverageContext(average, true)).toBeNull(); // multi: the summary carries it
     const single = resolvePageMonthlyAverage({ ...base(), services: [pest()], combinedFrequency: null }, monthlyAmountOf);
     expect(singleServiceAverageContext(single, false)).toBe('Averaged over the year. You pay after each application.');
     expect(singleServiceAverageContext(single, true)).toBe('Averaged over the year. You pay after each application. One-time charges are not in the average.');
+  });
+});
+
+describe('applicationMonthsBreakdown (EST-2026-1185)', () => {
+  const svc = (key, label, perApplication, visits) => ({ key, label, perApplication, visits, monthly: (perApplication * visits) / 12 });
+  const model = (services, planMonthly, extra = {}) => ({ multi: services.length > 1, credit: null, services, planMonthly, ...extra });
+
+  it('quarterly pest + monthly mosquito: $189.90 in 4 months, $74.70 in 8, averaging $113.10', () => {
+    const result = applicationMonthsBreakdown(model([svc('pest_control', 'Pest Control', 115.2, 4), svc('mosquito', 'Mosquito', 74.7, 12)], 113.1));
+    expect(result.services).toEqual([
+      { key: 'pest_control', label: 'Pest Control', perApplication: 115.2, cadence: 'every 3 months' },
+      { key: 'mosquito', label: 'Mosquito', perApplication: 74.7, cadence: 'every month' },
+    ]);
+    expect(result.applicationMonths).toEqual({ label: 'Months with Pest Control', count: 4, amount: 189.9, detail: 'Pest Control + Mosquito' });
+    expect(result.otherMonths).toEqual({ label: 'Other months', count: 8, amount: 74.7, detail: 'Mosquito only' });
+  });
+
+  it('no breakdown when the months are not certain or nothing varies', () => {
+    // Two spaced services: their months may or may not coincide.
+    expect(applicationMonthsBreakdown(model([svc('pest_control', 'Pest Control', 115.2, 4), svc('lawn_care', 'Lawn Care', 60, 6)], 68.4))).toBeNull();
+    // A 9-application cadence has no fixed months.
+    expect(applicationMonthsBreakdown(model([svc('pest_control', 'Pest Control', 115.2, 4), svc('mosquito', 'Mosquito', 82.8, 9)], 100.5))).toBeNull();
+    // Every service monthly: every month is the same; the average says it.
+    expect(applicationMonthsBreakdown(model([svc('pest_control', 'Pest Control', 89.86, 12), svc('mosquito', 'Mosquito', 74.7, 12)], 164.56))).toBeNull();
+    // One service: the card already shows it.
+    expect(applicationMonthsBreakdown({ multi: false, credit: null, services: [svc('pest_control', 'Pest Control', 115.2, 4)], planMonthly: 38.4 })).toBeNull();
+  });
+
+  it('no breakdown with a plan credit or when the months do not reach the plan average', () => {
+    const services = [svc('pest_control', 'Pest Control', 115.2, 4), svc('mosquito', 'Mosquito', 74.7, 12)];
+    expect(applicationMonthsBreakdown(model(services, 103.1, { credit: { label: 'Referral Credit', monthly: 10 } }))).toBeNull();
+    expect(applicationMonthsBreakdown(model(services, 120))).toBeNull();
+    expect(applicationMonthsBreakdown(null)).toBeNull();
   });
 });

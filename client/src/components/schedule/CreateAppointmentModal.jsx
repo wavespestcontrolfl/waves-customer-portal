@@ -28,10 +28,11 @@ import { showScheduleSaveNotice } from './ScheduleSaveNotice';
 // - Tech assignment dropdown: confirm "any available tech" vs an
 //   explicit assignment doesn't get silently swapped if the
 //   availability API responds slowly.
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { Fragment, useState, useEffect, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import AddressAutocomplete from '../AddressAutocomplete';
 import EstimateProvenanceCard from './EstimateProvenanceCard';
+import DidYouMean, { isApproximateRow } from '../admin/DidYouMean';
 import useModalFocus from '../../hooks/useModalFocus';
 import { useCanAccessCalls } from '../../hooks/useStaffCallAccess';
 import SlotConflictNotice from './SlotConflictNotice';
@@ -1493,7 +1494,7 @@ export function lineIsRetiredSale(line) {
   return labelNamesRetiredSale(name) || labelNamesRetiredSale(`${name} ${cadence}`);
 }
 
-export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', requireTimeChoice = false, onClose, onCreated, onChange }) {
+export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', defaultQuickAddAddress = null, requireTimeChoice = false, onClose, onCreated, onChange }) {
   const dialogRef = useModalFocus(true, onClose);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
   const searchRef = useRef(null);
@@ -1586,8 +1587,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // usable lot size (catalog fallback applies); 'loading'/'error' must never
   // show a substitute amount or allow submission of an auto line.
   const [mosquitoQuote, setMosquitoQuote] = useState(null);
-  const [showQuickAdd, setShowQuickAdd] = useState(false);
-  const [quickAdd, setQuickAdd] = useState({ firstName: '', lastName: '', phone: '', email: '', address: '', city: '', state: 'FL', zip: '', profileLabel: '' });
+  // defaultQuickAddAddress (the Dispatch Find a time panel: a new caller, address first) opens
+  // the New customer block with the address filled. Nothing is created until staff press Add customer.
+  const [showQuickAdd, setShowQuickAdd] = useState(() => !!defaultQuickAddAddress?.address);
+  const [quickAdd, setQuickAdd] = useState(() => ({
+    firstName: '', lastName: '', phone: '', email: '', profileLabel: '',
+    address: defaultQuickAddAddress?.address || '',
+    city: defaultQuickAddAddress?.city || '',
+    state: defaultQuickAddAddress?.state || 'FL',
+    zip: defaultQuickAddAddress?.zip || '',
+  }));
   // 409 phone-match conflict from quick-add ({ code, match }) — the admin
   // picks attach / duplicate / separate account and we resubmit with the flag.
   const [quickAddConflict, setQuickAddConflict] = useState(null);
@@ -2895,7 +2904,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     if (val.length >= 2) {
       setCustomerLoading(true);
       try {
-        const r = await adminFetch(`/admin/customers?search=${encodeURIComponent(val)}&limit=8`);
+        const r = await adminFetch(`/admin/customers?search=${encodeURIComponent(val)}&limit=8&suggest=1`);
         setCustomerResults(r.customers || []);
       } catch { setCustomerResults([]); }
       finally { setCustomerLoading(false); }
@@ -5079,8 +5088,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 />
                 {customerSearch.trim().length >= 2 && (
                   <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: '0 0 10px 10px', maxHeight: 240, overflowY: 'auto', WebkitOverflowScrolling: 'touch', zIndex: 20 }}>
-                    {customerResults.map(c => (
-                      <button type="button" key={c.id} onClick={() => selectCustomer(c)} className="waves-sq-row u-focus-ring" style={{ width: '100%', textAlign: 'left', font: 'inherit', background: 'transparent', border: 'none', padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 58, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                    {customerResults.map((c, at) => (
+                      <Fragment key={c.id}>
+                      {isApproximateRow(c) && !isApproximateRow(customerResults[at - 1]) && <DidYouMean />}
+                      <button type="button" onClick={() => selectCustomer(c)} className="waves-sq-row u-focus-ring" style={{ width: '100%', textAlign: 'left', font: 'inherit', background: 'transparent', border: 'none', padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 58, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
                         <div style={{ minWidth: 0 }}>
                           <div style={{ fontWeight: 500 }}>
                             {c.firstName} {c.lastName}
@@ -5099,6 +5110,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                           {c.tier && <span style={{ fontSize: 11, padding: '2px 6px', borderRadius: 6, background: `${TIER_COLORS[c.tier] || D.teal}22`, color: TIER_COLORS[c.tier] || D.teal }}>{c.tier}</span>}
                         </div>
                       </button>
+                      </Fragment>
                     ))}
                     {!customerLoading && customerResults.length === 0 && (
                       <div style={{ padding: '14px', textAlign: 'center', color: D.muted, fontSize: 13 }}>
@@ -5131,7 +5143,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                         setQuickAddConflict(null);
                         setQuickAdd(q => ({
                           ...q,
-                          address: parts.line1 || parts.formatted || '',
+                          // Keep an apartment / unit (line2): quick-add has one street
+                          // line, and a re-geocode on blur must not drop it (Codex #6411 r1).
+                          address: [parts.line1 || parts.formatted || '', parts.line2].filter(Boolean).join(' '),
                           city: parts.city || q.city,
                           state: parts.state || q.state,
                           zip: parts.zip || q.zip,

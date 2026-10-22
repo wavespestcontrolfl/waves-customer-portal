@@ -221,7 +221,8 @@ async function sendRefusal(invoice, dueCents) {
   // An annual-plan invoice's send re-enters under the renewal gate, which does not
   // carry the bar's approved total or its no-credit rule: it stays on the Invoices page.
   const planText = await annualPlanRefusalText(invoice);
-  if (planText) return refusal(planText, 'annual_plan_invoice', at);
+  // A lookup that failed is an outage, not the annual-plan gap (Codex #6371 r16).
+  if (planText) return refusal(planText, planText === ANNUAL_PLAN_UNVERIFIED_TEXT ? 'invoice_lookup_failed' : 'annual_plan_invoice', at);
   // A linked visit that never ran: the route's own refusal text. (If it is cancelled
   // after this check, the send refuses under its claim and never voids for the bar.)
   const visitId = await require('../invoice').linkedScheduledServiceId(invoice, db);
@@ -285,7 +286,7 @@ async function deliverableText(invoice, customer, who) {
   try {
     channels = await billingChannelState(invoice.customer_id);
   } catch {
-    return refusal('The bar could not check how this customer gets invoices, so it can\'t offer a send from here.', 'invoice_channel_unsupported', at);
+    return refusal('The bar could not check how this customer gets invoices, so it can\'t offer a send from here.', 'invoice_lookup_failed', at);
   }
   if (!channels.supported) return refusal(CHANNEL_UNSUPPORTED_TEXT, 'invoice_channel_unsupported', at);
   const queued = await require('../invoice').queuedPayLinkText(invoice.id, { adoptsQueuedInvoiceSend: false });

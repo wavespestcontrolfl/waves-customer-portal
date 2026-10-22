@@ -75,6 +75,8 @@ const LANE_RUNTIME = {
   response_drafter_high_stakes: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'high_stakes_copy', maturity: 'M2' },
   estimate_followup: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M0' },
   'sms-commitment-fulfillment': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check', maturity: 'M3', workflow_id: 'sms-commitment-fulfillment', ...LONG_BATCH },
+  // Thread close runs inside SMS intake and the fulfillment revalidation, so it owns no job of its own (no workflow_id).
+  'sms-commitment-thread-close': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check', maturity: 'M3', ...LONG_BATCH },
   // PROMISE_CONTACT_CHECK: a 15-minute tick reads open Waves "other" call promises and, on a grounded model verdict, closes one in the ledger (internal_write; no customer message). Cadence stays 'event': a tick with no candidate makes no call.
   'call-commitment-contact-check': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check', maturity: 'M3', workflow_id: 'call-commitment-contact-check', ...LONG_BATCH },
   'sms-operational-actions': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M3', workflow_id: 'sms-operational-actions', ...LONG_BATCH },
@@ -396,6 +398,10 @@ const LANE_RUNTIME = {
   // chart_builder_image + knowledge_qa are offline: no deadline on the Gemini leg / background enrichment that returns null on a miss.
   // offline: the /query handler runs every tool-loop round on one Anthropic client — 503 without a key, error path on failure, no second provider (Codex r13).
   ib_admin: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'sql_tool', expected_duration_ms: 120_000 },
+  // The OpenAI backup of the /query loop (GATE_IB_OPENAI_BACKUP): the same tools and writes as ib_admin, run on a Claude provider error.
+  ib_admin_backup: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'sql_tool', expected_duration_ms: 120_000 },
+  // The technician bar's OpenAI backup (same gate): tech tools only, ledgered apart from the admin backup.
+  ib_tech_backup: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'sql_tool' },
   // internal_write: every tech IB request logs an intelligence_bar_queries row and tool use a tool_health_events row — Codex r10.
   ib_tech: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'sql_tool' },
   // M2 (Codex r21): the email tool returns a marked draft and procurement research inserts pending price-approval rows — nothing acts without the later approval.

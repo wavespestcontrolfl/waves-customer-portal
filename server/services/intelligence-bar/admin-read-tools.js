@@ -28,7 +28,9 @@ const config = require('../../config');
 const logger = require('../logger');
 const rules = require('../../utils/admin-read-rules');
 const { ADMIN_READ_HEADER, adminReadMarkerValue } = require('../../utils/redact-request-url');
+const { NOTE_CAP } = require('../../utils/note-secret-scrubber');
 const { newState, redactSecrets, redactString, withholdNotes } = require('../../utils/signed-link-redaction');
+const { omitPaths, omittedKeyNames, keepPaths } = require('../../utils/response-projection');
 const catalog = require('./admin-read-catalog.json');
 
 const LOOPBACK_HOST = '127.0.0.1';
@@ -92,6 +94,13 @@ function adminReadLive() {
   return require('../../config/feature-gates').ibGeneralReadLive() === true;
 }
 
+// GATE_IB_READ_NOTES (needs the general read): free-text notes come back scrubbed
+// instead of withheld. Read at call time. The caller has already checked the
+// owner login, so a non-owner login never reaches it.
+function readNotesLive() {
+  return require('../../config/feature-gates').ibReadNotesLive() === true;
+}
+
 function refusal(error, code, extra = {}) {
   return { error, code, ...extra };
 }
@@ -111,13 +120,15 @@ function wordsOf(text) {
 const SEARCH_INDEX = ENTRIES.map((entry) => {
   const pathWords = new Set(rules.splitPath(entry.endpoint).filter(s => !rules.isParam(s)).flatMap(wordsOf).map(stem));
   const otherWords = new Set([...entry.screens, ...entry.handlers, entry.label].flatMap(wordsOf).map(stem));
-  return { entry, pathWords, otherWords };
+  // Reviewed plain-language phrases (admin-read-reviewed.json `keywords`) weigh like path words.
+  const keywordWords = new Set((entry.keywords || []).flatMap(wordsOf).map(stem));
+  return { entry, pathWords, otherWords, keywordWords };
 });
 
-function scoreEntry({ pathWords, otherWords }, terms) {
+function scoreEntry({ pathWords, otherWords, keywordWords }, terms) {
   let score = 0;
   for (const term of terms) {
-    if (pathWords.has(term)) score += 3;
+    if (pathWords.has(term) || keywordWords.has(term)) score += 3;
     else if (otherWords.has(term)) score += 2;
     else if (term.length >= 4 && [...pathWords, ...otherWords].some(word => word.startsWith(term) || term.startsWith(word) && word.length >= 4)) score += 1;
   }
@@ -189,6 +200,13 @@ function buildRequestPath(endpoint, input) {
   }
   const paramIndexes = rules.splitPath(entry.endpoint).flatMap((segment, index) => (rules.isParam(segment) ? [index] : []));
   return { entry, path: filled.path, search: search.search, paramIndexes };
+}
+
+// Names this endpoint's own query keys, so the model narrows with filters that exist.
+function narrowHint(entry) {
+  return entry.query?.length
+    ? `Narrow with these "query" filters to see the rest: ${entry.query.join(', ')}.`
+    : 'To narrow it: this read takes no query filters; use the more specific endpoint for one record.';
 }
 
 function paginationHint(data) {
@@ -313,10 +331,36 @@ async function shapeResponse(response, entry, authorization) {
 // fields), then cut to the cap.
 const NOTES_WITHHELD_NOTE = 'Free-text notes are not read through this tool, because people paste passwords and links into them. Tell the operator the note exists and its length; they can read it on the record.';
 
+const NOTES_RETURNED_NOTE = `Free-text notes are returned as written, with secrets of fixed formats (keys, tokens, card numbers and the like) removed, and each is cut at ${NOTE_CAP} characters. A password or code written as plain words is not removed; do not repeat one back unless the operator asks.`;
+
+// Said when a row is in keep mode: the answer holds only the reviewed fields.
+const KEEP_NOTE_WITH_NOTES = 'This read returns a reviewed list of fields (ids, names, contact details, dates, numbers and statuses) plus the row\'s reviewed note fields, scrubbed of secrets. Titles, tags and any other field not on the list exist on the record but are not shown; say so if the operator asks for one.';
+const KEEP_NOTE = 'This read returns only a reviewed list of fields (ids, names, contact details, dates, numbers and statuses). Free text, notes, titles, tags and any field not on the list exist on the record but are not shown; say so if the operator asks for one.';
+
+// With GATE_IB_READ_NOTES on, a keep-mode row also keeps the note paths its review lists (keepNotes); the
+// returned-notes branch then scrubs them. Gate off: the projection is exactly `keep` (Codex #6375 r14).
+const keepNoteFor = (entry, returning) => {
+  if (!entry.keep) return null;
+  return returning && entry.keepNotes ? KEEP_NOTE_WITH_NOTES : KEEP_NOTE;
+};
+
+function projectRow(parsed, entry, withNotes = false) {
+  const omitted = entry.omit ? omitPaths(parsed, entry.omit) : parsed;
+  if (!entry.keep) return omitted;
+  return keepPaths(omitted, withNotes && entry.keepNotes ? [...entry.keep, ...entry.keepNotes] : entry.keep);
+}
+
 function answerFrom(parsed, status, entry) {
   const state = newState();
-  // Operator notes first: a key declared "note", or any key whose name looks like free text and is not declared "content", is never read.
-  const clean = redactSecrets(withholdNotes(parsed, entry.freeText || {}, state), state);
+  // Operator notes first: a key declared "note", or any key whose name looks like free text and is not declared "content", is never read,
+  // unless GATE_IB_READ_NOTES is on: then it is returned through the fixed-format scrubber only.
+  // The row's projection next: keys it omits never reach the model, and a row in keep mode (an allow-list) passes ONLY the
+  // keys it lists, so a column added later is dropped until a person reviews it. Then every string is scrubbed.
+  const returning = readNotesLive();
+  const projected = projectRow(parsed, entry, returning);
+  const clean = returning
+    ? redactSecrets(projected, state, 0, { freeText: entry.freeText || {} })
+    : redactSecrets(withholdNotes(projected, entry.freeText || {}, state), state);
   const fitted = fitToCap(clean);
   const removed = [
     state.links ? `${state.links} signed file link(s)` : null,
@@ -326,9 +370,12 @@ function answerFrom(parsed, status, entry) {
   const notes = [
     UNTRUSTED_NOTE,
     state.notes ? NOTES_WITHHELD_NOTE : null,
+    state.notesReturned ? NOTES_RETURNED_NOTE : null,
+    entry.omit ? `Left out of this read by design, never shown: ${omittedKeyNames(entry.omit).join(', ')}.` : null,
+    keepNoteFor(entry, returning),
     removed.length ? `Removed ${removed.join(', ')} (shown as "[signed link removed]", "[private link removed]" or "[removed]"); the bar never holds a credential or a link that carries one.` : null,
     fitted.truncated
-      ? `Cut to fit ${MAX_RESULT_CHARS} characters: lists show their first items (see total_items or *_total_items). Narrow with "query" filters (a date range, status, id or limit) to see the rest.${paginationHint(clean)}`
+      ? `Cut to fit ${MAX_RESULT_CHARS} characters: lists show their first items (see total_items or *_total_items). ${narrowHint(entry)}${paginationHint(clean)}`
       : null,
   ].filter(Boolean);
   return {
@@ -337,6 +384,7 @@ function answerFrom(parsed, status, entry) {
     ...(state.links + state.privateLinks ? { signed_links_removed: state.links + state.privateLinks } : {}),
     ...(state.fields ? { credential_fields_removed: state.fields } : {}),
     ...(state.notes ? { notes_withheld: state.notes } : {}),
+    ...(state.notesReturned ? { notes_returned: state.notesReturned } : {}),
     note: notes.length ? notes.join(' ') : null,
   };
 }
@@ -395,6 +443,6 @@ async function executeAdminReadTool(name, input, actionContext = {}) {
 }
 
 module.exports = {
-  ADMIN_READ_TOOLS, executeAdminReadTool, adminReadLive, scopeBinding,
+  ADMIN_READ_TOOLS, executeAdminReadTool, adminReadLive, scopeBinding, wordsOf, stem, STOPWORDS,
   ADMIN_READ_FIND_TOOL, ADMIN_READ_DATA_TOOL, MAX_RESULT_CHARS, READ_TIMEOUT_MS,
 };

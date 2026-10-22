@@ -70,8 +70,9 @@ describe('tool definitions', () => {
     expect(Object.keys(byName)).toEqual(['create_customer_link', 'send_autopay_setup_link']);
     expect(byName.create_customer_link._sideEffects).toBe(true);
     expect(byName.send_autopay_setup_link._sideEffects).toBe(true);
-    // No link-only mode from the bar: sms or email, and the description says where a link-only link lives.
-    expect(byName.send_autopay_setup_link.input_schema.properties.delivery.enum).toEqual(['sms', 'email']);
+    // No link-only mode from the bar: sms or email. "link" is accepted only so the call reaches its coded
+    // refusal (Codex #6371 r23); the description says where a link-only link lives.
+    expect(byName.send_autopay_setup_link.input_schema.properties.delivery.enum).toEqual(['sms', 'email', 'link']);
     expect(byName.send_autopay_setup_link.description).toMatch(/can't make a link-only Auto Pay link .* from here yet/);
     expect(byName.send_autopay_setup_link.description).toMatch(/saved card .* billing change/);
     expect(byName.create_customer_link.input_schema.properties.kind.enum).toEqual([
@@ -247,6 +248,14 @@ describe('send_autopay_setup_link', () => {
       expect(await run({ delivery })).toMatchObject({ code: 'invalid_target' });
     }
     expect(await run({ customer_id: 'not-a-uuid' })).toMatchObject({ code: 'invalid_target' });
+    expect(autopay.setupLinkIneligibility).not.toHaveBeenCalled();
+  });
+
+  test('a link-only request is its own capability code, which the gap list records (Codex #6371 r21)', async () => {
+    const { _private: { recordableRefusalCode } } = require('../services/agent-gap-reports');
+    const refused = await run({ delivery: 'link' });
+    expect(refused).toMatchObject({ code: 'autopay_link_only_unsupported' });
+    expect(recordableRefusalCode(refused)).toBe('autopay_link_only_unsupported');
     expect(autopay.setupLinkIneligibility).not.toHaveBeenCalled();
   });
 
@@ -519,7 +528,7 @@ describe('customerLinkSendRefusal (comms-tools)', () => {
       const { renderedTextForLinkCheck } = require('../services/intelligence-bar/email-tools');
       expect(renderedTextForLinkCheck(body).split(/\s+/)).toContain(`portal.wavespestcontrol.com/pay/${TOKEN}`);
       links.composerOnlyLinkPresence.mockResolvedValue({ present: true, kinds: ['portal_link'] });
-      expect(await customerLinkSendRefusal(renderedTextForLinkCheck(body), '', null, { phase: 'email' })).toMatchObject({ blocked: true, code: 'customer_link_composer_only' });
+      expect(await customerLinkSendRefusal(renderedTextForLinkCheck(body), '', null, { phase: 'email' })).toMatchObject({ blocked: true, code: 'email_link_identity_refused' });
     });
 
     test('a raw tab or newline left in an HTML reply body is dropped like the URL parser does, so the email path still surfaces the link', () => {
@@ -749,7 +758,7 @@ describe('send_email_reply carries the same guard', () => {
     links.autopayLinkSendCheck.mockResolvedValue({ present: false });
     links.composerOnlyLinkPresence.mockResolvedValue({ present: true, kinds: ['appointment'] });
     const refused = await executeEmailTool('send_email_reply', { email_id: 'em-1', body: 'Your visit: portal.wavespestcontrol.com/appointment/abc' });
-    expect(refused).toMatchObject({ blocked: true, code: 'customer_link_composer_only' });
+    expect(refused).toMatchObject({ blocked: true, code: 'email_link_identity_refused' });
     expect(refused.error).toMatch(/email reply cannot carry a portal link/);
     expect(links.composerOnlyLinkPresence).toHaveBeenCalledWith(expect.stringContaining('portal.wavespestcontrol.com/appointment/abc'), { includeVerifyOnly: true });
     expect(links.bearerLinkSendCheck).not.toHaveBeenCalled();
@@ -807,7 +816,7 @@ describe('send_email_reply carries the same guard', () => {
     links.composerOnlyLinkPresence.mockClear();
     links.composerOnlyLinkPresence.mockResolvedValue({ present: true, kinds: ['receipt'] });
     const refused = await sendEmailReplyProposalRefusal({ email_id: 'em-1', body: `Receipt: https://evil.example/?next=https%3A%2F%2Fportal.wavespestcontrol.com%2Freceipt%2F${TOKEN}` });
-    expect(refused).toMatchObject({ blocked: true, code: 'customer_link_composer_only' });
+    expect(refused).toMatchObject({ blocked: true, code: 'email_link_identity_refused' });
     expect(links.composerOnlyLinkPresence).toHaveBeenCalledWith(expect.stringContaining(NESTED), { includeVerifyOnly: true });
     expect(links.bearerLinkSendCheck).not.toHaveBeenCalled();
 
@@ -933,7 +942,7 @@ describe('send_email_reply carries the same guard', () => {
     links.composerOnlyLinkPresence.mockClear();
     links.composerOnlyLinkPresence.mockResolvedValue({ present: true, kinds: ['receipt'] });
     const refused = await executeEmailTool('send_email_reply', { email_id: 'em-2', body: `Receipt: https://evil.example/?next=https%3A%2F%2Fportal.wavespestcontrol.com%2Freceipt%2F${TOKEN}` });
-    expect(refused).toMatchObject({ blocked: true, code: 'customer_link_composer_only' });
+    expect(refused).toMatchObject({ blocked: true, code: 'email_link_identity_refused' });
     expect(links.composerOnlyLinkPresence).toHaveBeenCalledWith(expect.stringMatching(new RegExp(` ${NESTED}(?: |$)`)), { includeVerifyOnly: true });
     expect(gmail.sendMessage).not.toHaveBeenCalled();
 

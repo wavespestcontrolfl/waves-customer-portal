@@ -22,6 +22,7 @@ const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-fo
 const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { groupLinkStillViewable } = require('../services/proposal-bid');
+const { isAssessmentVisit, excludeAssessmentBookings } = require('../services/assessment-booking');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 const { UNISSUED_ESTIMATE, estimateNeverIssued, estimateHasBahiaLawn } = require('../services/estimate-bahia-review');
 const { storedEstimateContainer } = require('../services/estimate-result-container');
@@ -1054,6 +1055,120 @@ function confirmationServiceLabel(oneTimeList, estimate, fallbackLabel) {
   return String(specific).replace(/\s+/g, ' ').trim() || String(fallbackLabel || '').trim();
 }
 
+// Did the accept leave the card protection it promised? A fresh capture or a
+// saved method must have enrolled Auto Pay; a failed or refused enrollment
+// raises an office exception (the visits would invoice unprotected), so the
+// notification must stay actionable. Exempt, because no enrollment is owed:
+// an already-active Auto Pay method (autopay_already_active), a paused or
+// opted-out customer (the hold is intentional), and a fresh capture whose
+// enrollment was deliberately skipped (autopay_opt_out_kept).
+function cardEnrollmentSettled({ policy, enrollmentResult } = {}) {
+  if (!policy) return false;
+  if (policy.exemptReason === 'autopay_already_active') return true;
+  if (policy.autopayPaused === true || policy.autopayDisabled === true) return true;
+  if (enrollmentResult?.enrolled === true) return true;
+  return enrollmentResult?.reason === 'autopay_opt_out_kept';
+}
+
+// "Billed after the first visit" is true only when (1) the customer the accept
+// landed on is billed per visit / per application and (2) there is evidence
+// something collectible will be billed. The accept's recurring-card lane is
+// broader than that: a pinned legacy rodent-only plan enters it while the
+// converter stamps billing_mode 'monthly_membership' (the monthly cron collects
+// dues), and a current monthly member adding a service keeps their mode. The
+// lane comes from the billing lane the accept left on the customer row
+// (billing-lane resolveBillingLane), read after the conversion commits. A
+// per_application customer with no fee on file, no priced first visit and no
+// attached first-application invoice bills NOTHING at completion (the converter
+// raises a manual-billing alert), so that keeps the generic copy, which still
+// asks a person to follow up. Fails closed: no customer, a read error or any
+// other lane keeps the generic copy.
+async function resolveCardLaneAfterVisit({
+  recurringCardLaneActive, treatAsOneTime, customerId, attachedInvoiceTotal = 0, firstVisitPriced = false,
+  enrollmentSettled = false,
+}, database = db) {
+  if (recurringCardLaneActive !== true || treatAsOneTime || !customerId || enrollmentSettled !== true) return false;
+  try {
+    const row = await database('customers').where({ id: customerId }).first('billing_mode', 'waveguard_tier', 'monthly_rate', 'per_application_fee');
+    if (!row) return false;
+    const { resolveBillingLane } = require('../services/billing-lane');
+    if (!['per_application', 'per_visit'].includes(resolveBillingLane(row).mode)) return false;
+    return Number(attachedInvoiceTotal) > 0
+      || firstVisitPriced === true
+      || (row.per_application_fee != null && Number(row.per_application_fee) > 0);
+  } catch (err) {
+    logger.warn(`[estimate-accept] billing lane read for accept copy failed (customer ${customerId}): ${err.message}`);
+    return false;
+  }
+}
+
+// The first visit this accept leaves on the books: the earliest committed or
+// adopted appointment, else the earliest visit the converter auto-scheduled.
+// The converter's firstScheduledServiceId is the first INSERTED unit, not the
+// earliest (a seasonal unit inserted first can roll to February), so its
+// earliestScheduledUnitDate wins when exposed; the id row is the fallback and
+// also reports whether that visit is priced. Returns
+// { firstVisitDate: 'YYYY-MM-DD'|null, firstVisitBooked, firstVisitPriced }.
+// A converter visit whose row cannot be read still counts as booked (no date).
+async function resolveAcceptedFirstVisit({ acceptedAppointments, conversionVisitId, conversionEarliestDate = null }, database = db) {
+  const isDay = (day) => /^\d{4}-\d{2}-\d{2}$/.test(day);
+  const appts = Array.isArray(acceptedAppointments) ? acceptedAppointments : [];
+  const apptPriced = appts.some((appt) => appt?.estimated_price != null && Number(appt.estimated_price) > 0);
+  const days = appts.map((appt) => dateOnly(appt?.scheduled_date)).filter(isDay).sort();
+  if (days[0]) return { firstVisitDate: days[0], firstVisitBooked: true, firstVisitPriced: apptPriced };
+  const earliest = dateOnly(conversionEarliestDate);
+  if (!conversionVisitId) {
+    return isDay(earliest)
+      ? { firstVisitDate: earliest, firstVisitBooked: true, firstVisitPriced: false }
+      : { firstVisitDate: null, firstVisitBooked: false, firstVisitPriced: false };
+  }
+  try {
+    const row = await database('scheduled_services')
+      .where({ id: conversionVisitId })
+      .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
+      .first('scheduled_date', 'estimated_price');
+    if (!row) {
+      return isDay(earliest)
+        ? { firstVisitDate: earliest, firstVisitBooked: true, firstVisitPriced: false }
+        : { firstVisitDate: null, firstVisitBooked: false, firstVisitPriced: false };
+    }
+    const rowDay = dateOnly(row.scheduled_date);
+    return {
+      firstVisitDate: isDay(earliest) ? earliest : (isDay(rowDay) ? rowDay : null),
+      firstVisitBooked: true,
+      firstVisitPriced: row.estimated_price != null && Number(row.estimated_price) > 0,
+    };
+  } catch (err) {
+    logger.warn(`[estimate-accept] converter visit read for accept copy failed (${conversionVisitId}): ${err.message}`);
+    return { firstVisitDate: isDay(earliest) ? earliest : null, firstVisitBooked: true, firstVisitPriced: false };
+  }
+}
+
+// The date of the visit collection waits for. With a first-application invoice
+// attached (billingVisitId = the visit it hangs on) that is THAT visit, which in
+// a mixed auto-scheduled plan can be a later seasonal unit rather than the
+// earliest; with no attached invoice (the per-application fee is billed at each
+// visit) it is the earliest visit (fallbackDate). An attached visit whose date
+// cannot be read is unknown (null), never the earlier unit's date.
+async function resolveBillingVisitDate({ billingVisitId = null, acceptedAppointments = [], fallbackDate = null }, database = db) {
+  const isDay = (day) => /^\d{4}-\d{2}-\d{2}$/.test(day);
+  if (!billingVisitId) return isDay(dateOnly(fallbackDate)) ? dateOnly(fallbackDate) : null;
+  const known = (Array.isArray(acceptedAppointments) ? acceptedAppointments : [])
+    .find((appt) => appt?.id != null && String(appt.id) === String(billingVisitId));
+  if (known && isDay(dateOnly(known.scheduled_date))) return dateOnly(known.scheduled_date);
+  try {
+    const row = await database('scheduled_services')
+      .where({ id: billingVisitId })
+      .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
+      .first('scheduled_date');
+    const day = dateOnly(row?.scheduled_date);
+    return isDay(day) ? day : null;
+  } catch (err) {
+    logger.warn(`[estimate-accept] billing visit read for accept copy failed (${billingVisitId}): ${err.message}`);
+    return null;
+  }
+}
+
 function dateOnly(value) {
   if (!value) return '';
   if (value instanceof Date) return value.toISOString().split('T')[0];
@@ -1460,6 +1575,12 @@ function estimateFamilyKeysForAdoption(estimate, estData, { serviceMode, service
 // (generic assessment shells, blank types) never match — adopting them would
 // re-create the cross-family clobber this guard exists to prevent.
 function appointmentMatchesEstimateFamily(row = {}, familyKeys = new Set()) {
+  // A Waves Assessment is a free consultation, never an estimate's first paid
+  // application. Its catalog key (lawn_inspection) classifies into the lawn
+  // family, so without this a lawn plan adopted it: no slot picker, the
+  // assessment restamped with the plan price, the series dated on its day
+  // (owner case 2026-10-21). Checked BEFORE the catalog-first classification.
+  if (isAssessmentVisit(row)) return false;
   // Catalog identity first (codex #3228 r5): a stale service_type label
   // ("Tree & Shrub Care" on a row whose service_id links palm_injection)
   // must classify by what the row actually IS — the same catalog-first rule
@@ -1685,7 +1806,11 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
     });
 
   if (requestedId) q.where('scheduled_services.id', requestedId);
-  let row = await q.first();
+  // Assessment visits never compete for the estimate-linked slot: filtered in
+  // the query so an earlier linked assessment cannot hide a later linked paid
+  // visit behind .first() (the customer-wide fallback only sees unclaimed
+  // rows, so it could never recover that one).
+  let row = await excludeAssessmentBookings(q).first();
 
   // The family/mode gate applies to ESTIMATE-LINKED rows too (codex #3228
   // r8 P1): a mixed estimate whose linked row is a recurring-family visit
@@ -1707,6 +1832,10 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   if (row && anyModeFamilyKeys.size > 0 && !appointmentMatchesEstimateFamily(row, familyKeys)) {
     row = null;
   }
+  // Assessment visits are never adoptable, including under the legacy
+  // no-derivable-family exemption above (the query already filters them;
+  // this guards any caller connection that does not).
+  if (row && isAssessmentVisit(row)) row = null;
 
   // Customer-wide fallback (gated): a customer who already has an upcoming
   // appointment for the SAME service family shouldn't be pushed through the
@@ -4957,6 +5086,21 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
     : nearWaterPresence === 'no' ? 'No'
     : null;
 
+  // The tile each present service is guaranteed on the card (owner 2026-10-20: a
+  // pest + lawn + tree & shrub + mosquito estimate lost Treatable lawn behind the
+  // property facts). The first label present wins; mosquito's own area, program and
+  // pressure tiles exist only on a mosquito-only estimate, so in a mix its tile is
+  // Near water.
+  const primaryMetricLabels = [
+    hasPest && ['Pool/Lanai'],
+    hasLawn && ['Treatable lawn'],
+    hasMosquito && ['Mosquito treatment area', 'Near water'],
+    hasTreeShrub && ['Ornamental beds'],
+    hasTermiteBait && ['Termite perimeter'],
+  ].filter(Boolean);
+  // One or two services keep today's six tiles exactly (their lists never exceed
+  // it); three or more may show eight, which holds every fact the card can carry.
+  const metricCap = primaryMetricLabels.length >= 3 ? 8 : 6;
   const dedupeMetrics = (items) => {
     const seen = new Set();
     const result = [];
@@ -4966,7 +5110,20 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
       seen.add(key);
       result.push(metric);
     }
-    return result.slice(0, 6);
+    if (result.length <= metricCap) return result;
+    // Over the cap: keep each present service's primary tile first, then fill the
+    // remaining slots in today's order, and show them in today's order.
+    const guaranteed = new Set();
+    for (const labels of primaryMetricLabels) {
+      const found = labels.find((label) => result.some((metric) => metric.label === label));
+      if (found) guaranteed.add(found);
+    }
+    const keep = new Set(result.filter((metric) => guaranteed.has(metric.label)));
+    for (const metric of result) {
+      if (keep.size >= metricCap) break;
+      keep.add(metric);
+    }
+    return result.filter((metric) => keep.has(metric)).slice(0, metricCap);
   };
 
   const metrics = dedupeMetrics([
@@ -6286,7 +6443,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // result of its own, so it reads stored evidence only (no second arg).
   const treeShrubPalmCount = treeShrubPalmCountForEstData(estData);
   // GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): the legacy page (use_v2_view
-  // = false rows, the GrowthBook control) prints the same "about $X a month"
+  // = false rows, the GrowthBook control) prints the same "$X a month"
   // line under each per-application card, the plan summary for two or more
   // services (or a credited one) and the context sentence, from the SAME shared
   // builder as the email, the PDF and the React page. Withheld (null) with the
@@ -6309,7 +6466,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   })();
   const ssrAvgAttrs = `data-monthly-average data-avg-pref-off="${Number(prefMonthlyOff || 0)}"`;
   const ssrAvgLineHtml = (index) => (ssrMonthlyAverage
-    ? `<div class="day-price" ${ssrAvgAttrs}>${escapeHtml(monthlyAverageShared.aboutMonth(ssrMonthlyAverage.services[index].monthly))}</div>`
+    ? `<div class="day-price" ${ssrAvgAttrs}>${escapeHtml(monthlyAverageShared.monthlyText(ssrMonthlyAverage.services[index].monthly))}</div>`
     : '');
   // One-time charges beside the plan: a setup / bait-station fee, or an ADDITIVE
   // one-time row (same exclusions as the "billed separately" list: the WaveGuard
@@ -6326,9 +6483,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const ssrAvgContext = `${monthlyAverageShared.CONTEXT_LINE}${ssrAvgOneTime ? ' One-time charges are not in the average.' : ''}`;
   const ssrAvgSummaryHtml = !ssrMonthlyAverage ? '' : (ssrMonthlyAverage.showPlan ? `
       <div ${ssrAvgAttrs} data-mode-only="recurring" style="margin-top:16px;padding:14px 16px;border:1px solid #D9D3C4;border-radius:12px;background:#F2EEE0;font-size:16px;color:#1B2C5B;max-width:900px">
-        ${ssrMonthlyAverage.services.map((svc) => `<div style="display:flex;justify-content:space-between;gap:12px;padding:4px 0"><span>${escapeHtml(svc.label)}</span><span style="white-space:nowrap;font-variant-numeric:tabular-nums">${escapeHtml(monthlyAverageShared.aboutMonth(svc.monthly))}</span></div>`).join('')}
+        ${ssrMonthlyAverage.services.map((svc) => `<div style="display:flex;justify-content:space-between;gap:12px;padding:4px 0"><span>${escapeHtml(svc.label)}</span><span style="white-space:nowrap;font-variant-numeric:tabular-nums">${escapeHtml(monthlyAverageShared.monthlyText(svc.monthly))}</span></div>`).join('')}
         ${ssrMonthlyAverage.credit ? `<div style="display:flex;justify-content:space-between;gap:12px;padding:4px 0"><span>${escapeHtml(ssrMonthlyAverage.credit.label)}</span><span style="white-space:nowrap;font-variant-numeric:tabular-nums">&minus;${fmtMoney(ssrMonthlyAverage.credit.monthly)} a month</span></div>` : ''}
-        <div data-monthly-average-plan style="display:flex;justify-content:space-between;gap:12px;padding:8px 0 4px;margin-top:4px;border-top:1px solid #1B2C5B;font-weight:700"><span>${escapeHtml(monthlyAverageShared.planLabel(ssrMonthlyAverage))}</span><span style="white-space:nowrap;font-variant-numeric:tabular-nums">${escapeHtml(monthlyAverageShared.aboutMonth(ssrMonthlyAverage.planMonthly))}</span></div>
+        <div data-monthly-average-plan style="display:flex;justify-content:space-between;gap:12px;padding:8px 0 4px;margin-top:4px;border-top:1px solid #1B2C5B;font-weight:700"><span>${escapeHtml(monthlyAverageShared.planLabel(ssrMonthlyAverage))}</span><span style="white-space:nowrap;font-variant-numeric:tabular-nums">${escapeHtml(monthlyAverageShared.monthlyText(ssrMonthlyAverage.planMonthly))}</span></div>
         <div style="margin-top:8px;font-size:14px;color:#475569;line-height:1.5">${escapeHtml(ssrAvgContext)}</div>
       </div>` : `
       <div class="day-price" ${ssrAvgAttrs} data-mode-only="recurring">${escapeHtml(ssrAvgContext)}</div>`);
@@ -12967,8 +13124,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           const lockedFamilyKeys = estimateFamilyKeysForAdoption(estimate, estData, {
             serviceModes: adoptionServiceModesForContract(estimate, estData),
           });
-          const lockedFamilyOk = lockedAnyModeKeys.size === 0
-            || appointmentMatchesEstimateFamily(lockedAdoptRow || {}, lockedFamilyKeys);
+          const lockedFamilyOk = !isAssessmentVisit(lockedAdoptRow)
+            && (lockedAnyModeKeys.size === 0
+              || appointmentMatchesEstimateFamily(lockedAdoptRow || {}, lockedFamilyKeys));
           // Property scope under lock, mirroring the preflight's coverage
           // exactly (owner ruling 2026-08-15: the under-lock recheck must
           // never reject a row the preflight admitted). The preflight
@@ -16300,6 +16458,32 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           acceptTierLabel = 'Commercial';
         }
       } catch { /* fall back to the estimate tier */ }
+      const acceptedFirstVisit = await resolveAcceptedFirstVisit({
+        acceptedAppointments: acceptedAppointmentsToRegister,
+        conversionVisitId: txResult.standardConversion?.firstScheduledServiceId || null,
+        conversionEarliestDate: txResult.standardConversion?.earliestScheduledUnitDate || null,
+      });
+      acceptedFirstVisit.billingVisitDate = await resolveBillingVisitDate({
+        billingVisitId: txResult.standardInvoiceAttached === true
+          ? (txResult.standardConversion?.firstScheduledServiceId || null)
+          : null,
+        acceptedAppointments: acceptedAppointmentsToRegister,
+        fallbackDate: acceptedFirstVisit.firstVisitDate,
+      });
+      acceptedFirstVisit.cardLaneAfterVisit = await resolveCardLaneAfterVisit({
+        recurringCardLaneActive,
+        treatAsOneTime,
+        customerId,
+        // A collectible amount, judged below next to the billing lane: the
+        // attached first-application invoice (not paid at accept) or a priced
+        // first visit. The customer's per-application fee is read there.
+        attachedInvoiceTotal: txResult.standardInvoiceAttached === true ? Number(txResult.invoiceAmount) || 0 : 0,
+        firstVisitPriced: acceptedFirstVisit.firstVisitPriced,
+        enrollmentSettled: cardEnrollmentSettled({
+          policy: recurringCardPolicy,
+          enrollmentResult: recurringCardPayerFallback ? null : recurringCardEnrollmentResult,
+        }),
+      });
       const notificationPayload = buildAcceptNotificationPayload({
         customerName: estimate.customer_name,
         waveguardTier: acceptTierLabel,
@@ -16341,6 +16525,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         afterVisitPaused: recurringCardPolicy.autopayPaused === true,
         afterVisitDisabled: recurringCardPolicy.autopayDisabled === true,
         setupFeeDeferred: txResult.setupFeeDeferredToFirstVisit === true,
+        // Card-on-file lane accept with nothing collected at accept (the
+        // payable-invoice, payer, credit, prepay and one-time branches all sit
+        // ahead of this flag in the builder): bills after the first visit.
+        cardLaneAfterVisit: acceptedFirstVisit.cardLaneAfterVisit,
+        firstVisitDate: acceptedFirstVisit.firstVisitDate,
+        firstVisitBooked: acceptedFirstVisit.firstVisitBooked,
+        billingVisitDate: acceptedFirstVisit.billingVisitDate,
       });
       // bell: true \u2014 accepted estimates must ring the admin bell even under
       // GATE_ADMIN_BELL_POLICY (category 'estimate' is otherwise silenced).
@@ -22243,6 +22434,15 @@ function buildAcceptNotificationPayload(args = {}) {
   return { ...copy, adminAction, adminWhy };
 }
 
+// 'YYYY-MM-DD' -> 'Oct 24' (calendar day, no timezone shift). '' when absent or malformed.
+function firstVisitDateLabel(value) {
+  const day = dateOnly(value);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return '';
+  const d = new Date(`${day}T12:00:00Z`);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+
 function buildAcceptNotificationCopy({
   customerName = '',
   waveguardTier = 'Bronze',
@@ -22301,6 +22501,21 @@ function buildAcceptNotificationCopy({
   // GATE_PAF_TERMITE: the agreement being issued charges after the station
   // installation, not at signature.
   annualChargeAfterInstallation = false,
+  // New-customer pay-after-first-visit: the accept rode the card-on-file lane
+  // (a card was captured, or one is already enrolled), the standard
+  // setup / first-application invoice was attached to the first visit with no
+  // pay link (or none was minted yet), and completion charges it. Nothing is
+  // owed until the first visit is performed. Unlike afterVisitBilling this is
+  // not limited to existing customers. Omitted/false = today's copy.
+  cardLaneAfterVisit = false,
+  // 'YYYY-MM-DD' of the first booked visit when this accept booked one.
+  firstVisitDate = null,
+  // A first visit exists (committed, adopted or converter-scheduled) even if its date is unknown.
+  firstVisitBooked = false,
+  // 'YYYY-MM-DD' of the visit collection waits for: the visit the first-
+  // application invoice is attached to, else (fee billed at each visit) the
+  // earliest visit. Null = unknown, and the copy says "the first visit".
+  billingVisitDate = null,
 } = {}) {
   // Sign-before-pay (codex round-3 P2 on #4819): the durable notifications
   // must send the customer to the signature, never read as "approved,
@@ -22640,6 +22855,25 @@ function buildAcceptNotificationCopy({
       adminNext: 'Billed after the first visit; nothing to do now',
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${waveguardTier} WaveGuard plan is confirmed. Nothing is charged today — your saved payment method is billed after your first visit.`,
+      customerLink: '/?tab=billing',
+    };
+  }
+
+  // A new customer on the card rail: the first-application invoice is a draft
+  // attached to the first visit (or not minted yet) and bills after that visit,
+  // so "invoice follow-up needed" below would send staff to bill something that
+  // is collected by the visit's completion. Only an unbooked first visit is work.
+  if (cardLaneAfterVisit) {
+    const visitDay = firstVisitDateLabel(firstVisitDate);
+    const booked = !!(reservationCommitted || firstVisitBooked || visitDay);
+    const billingDay = firstVisitDateLabel(billingVisitDate);
+    return {
+      adminTitle: `Estimate accepted: ${customerName}`,
+      adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Billed after the ${billingDay ? `${billingDay} visit` : 'first visit'}; nothing is charged today.${booked ? '' : ' No first visit is booked yet.'}`,
+      adminNext: booked ? 'Billed after the first visit; nothing to do' : 'Next: book the first visit',
+      adminDoneWhen: booked ? null : 'visit_booked',
+      customerTitle: 'Estimate accepted',
+      customerBody: `Your ${waveguardTier} WaveGuard plan is confirmed. Nothing is charged today — you pay after your ${billingDay ? `${billingDay} visit` : 'first visit'}.`,
       customerLink: '/?tab=billing',
     };
   }
@@ -25387,8 +25621,12 @@ function nonPestTierBaseMap(resultStats = {}, programMinMonthly, { lawnCostFloor
           pa = v ? roundMonthly(ann / v) : pa;
         }
       }
+      const name = typeof (row.n ?? row.name) === 'string' && String(row.n ?? row.name).trim()
+        ? String(row.n ?? row.name).trim()
+        : null;
       tiers[tierKey] = {
         mo, ann, pa, v,
+        ...(name ? { name } : {}),
         ...(serviceKey === 'lawn_care' && lawnRowFloorMonthly(row) != null
           ? { floorMonthly: lawnRowFloorMonthly(row) }
           : {}),
@@ -25404,9 +25642,21 @@ function nonPestTierBaseMap(resultStats = {}, programMinMonthly, { lawnCostFloor
 // Swap a non-pest service row's prices/visits to the selected tier's values so
 // shapeFromV1 sums the chosen cadence. (shapeFromV1 reads svc.mo for the total;
 // the others keep the per-service treatment detail consistent.)
-function applySelectedTierToServiceRow(svc, tier) {
+function applySelectedTierToServiceRow(svc, tier, tierNames = []) {
   if (!tier) return svc;
   const next = { ...svc };
+  // The engine names the row after its DEFAULT tier ("Monthly Mosquito
+  // Program (12 visits)"). Swap in the selected tier's name, but only when
+  // the row's name is one of this service's tier names — a custom or
+  // presentation name stays as written. Without it the Seasonal combo row
+  // showed the Monthly name beside 9-visit prices (EST-2026-1185).
+  if (tier.name) {
+    for (const field of ['name', 'displayName', 'label']) {
+      if (typeof next[field] === 'string' && tierNames.includes(next[field].trim())) {
+        next[field] = tier.name;
+      }
+    }
+  }
   if (tier.mo != null) { next.mo = tier.mo; next.monthly = tier.mo; }
   if (tier.ann != null) { next.ann = tier.ann; next.annual = tier.ann; }
   if (tier.pa != null) { next.perTreatment = tier.pa; next.perApp = tier.pa; next.perVisit = tier.pa; }
@@ -25442,7 +25692,10 @@ function comboPricingEntry(v1, ladder, pestTier, prefs, tierBaseMap, selection =
   const overridden = (Array.isArray(v1.services) ? v1.services : []).map((svc) => {
     const key = recurringServiceKey(svc);
     const tier = key && selection[key] ? tierBaseMap?.[key]?.[selection[key]] : null;
-    return tier ? applySelectedTierToServiceRow(svc, tier) : svc;
+    const tierNames = tier
+      ? Object.values(tierBaseMap[key]).map((t) => t?.name).filter(Boolean)
+      : [];
+    return tier ? applySelectedTierToServiceRow(svc, tier, tierNames) : svc;
   });
   return shapeFromV1({ ...v1, services: overridden }, ladder, pestTier, prefs, options);
 }
@@ -30210,7 +30463,7 @@ async function composeEstimateDataPayload(estimate, {
         });
         const proposalNoGuaranteeClaims = proposalMakesNoGuaranteeClaim(proposalForView, estimate.id);
         // GATE_ESTIMATE_MONTHLY_AVERAGE: the inputs the document needs to print
-        // "about $X a month" under each per-application line. Null (key absent)
+        // "$X a month" under each per-application line. Null (key absent)
         // with the gate off, for any plan that is not purely per application, and
         // whenever the lines do not reconcile to the stored monthly total, so the
         // document is byte-identical to today in all of those cases.
@@ -30572,7 +30825,7 @@ async function composeEstimateDataPayload(estimate, {
       ...(acceptanceTermsServed ? { acceptanceTerms: acceptanceTerms.acceptanceTermsPayload(acceptanceTermsScope) } : {}),
       ...(acceptanceRecord ? { acceptance: acceptanceRecord } : {}),
       ...(showYourWorkEnabled ? { showYourWork } : {}),
-      // GATE_ESTIMATE_MONTHLY_AVERAGE: the page may print "about $X a month"
+      // GATE_ESTIMATE_MONTHLY_AVERAGE: the page may print "$X a month"
       // under its per-application prices (it derives the figures from the
       // selected cadence itself, so only the switch rides here). Absent, not
       // false, with the gate off ⇒ response byte-identical to today.
@@ -31571,6 +31824,10 @@ module.exports.resolveProspectiveOwnerId = resolveProspectiveOwnerId;
 module.exports.collectServiceCategories = collectServiceCategories;
 module.exports.hasOnlyLawnCareServiceMix = hasOnlyLawnCareServiceMix;
 module.exports.isLawnCareOneTimeItem = isLawnCareOneTimeItem;
+module.exports.resolveCardLaneAfterVisit = resolveCardLaneAfterVisit;
+module.exports.cardEnrollmentSettled = cardEnrollmentSettled;
+module.exports.resolveBillingVisitDate = resolveBillingVisitDate;
+module.exports.resolveAcceptedFirstVisit = resolveAcceptedFirstVisit;
 module.exports.oneTimeItemsForRender = oneTimeItemsForRender;
 module.exports.oneTimeItemFamilyKeys = oneTimeItemFamilyKeys;
 module.exports.preservedOneTimeAddOnRowsFromBreakdown = preservedOneTimeAddOnRowsFromBreakdown;

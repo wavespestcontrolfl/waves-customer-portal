@@ -1522,7 +1522,7 @@ describe('caller wiring (source)', () => {
     expect(disp).toContain("jsonb_array_length(COALESCE(result->'rewoundIds', '[]'::jsonb)) > 0");
     expect(read('../services/rebooker.js')).toContain('await markSeriesCleanupDone(seriesMoveId, cleanupOk);');
     expect(fs.existsSync(path.join(__dirname, '../models/migrations/20260828000032_series_moves_cleanup_done_at.js'))).toBe(true);
-    expect(disp).toContain("const RECONCILE_SURFACES = ['dispatch_board', 'edit_modal', 'sms_reply', 'customer_web', 'quick_move', 'call_reschedule'];");
+    expect(disp).toContain("const RECONCILE_SURFACES = ['dispatch_board', 'edit_modal', 'sms_reply', 'customer_web', 'quick_move', 'call_reschedule', 'call_makeup'];");
     expect(fx).not.toContain('operatorInitiated: true');
     expect(fx).toContain("if (cardOnly) return { notificationSent: false, notificationError: 'superseded', conflicts: dueConflicts, seriesMoveId };");
     const reb = read('../services/rebooker.js');

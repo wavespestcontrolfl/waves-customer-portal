@@ -11,8 +11,8 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { IDBFactory } from 'fake-indexeddb';
 
 vi.mock('./TechTreatmentZoneModal', () => ({
-  default: ({ onSaved, onClose, expectedPropertyId, openVisitOnly, autoTrace }) => (
-    <div role="dialog" aria-label="Tracer" data-expected-property={String(expectedPropertyId)} data-open-visit-only={String(!!openVisitOnly)} data-auto-trace={String(!!autoTrace)}>
+  default: ({ onSaved, onClose, expectedPropertyId, openVisitOnly, inline }) => (
+    <div role={inline ? 'region' : 'dialog'} aria-label="Tracer" data-inline={String(!!inline)} data-expected-property={String(expectedPropertyId)} data-open-visit-only={String(!!openVisitOnly)}>
       <button type="button" onClick={() => onSaved({ linear_ft: 182, capture_mode: 'perimeter' })}>Save trace</button>
       <button type="button" onClick={onClose}>Close tracer</button>
     </div>
@@ -820,28 +820,29 @@ describe('complete and send', () => {
     expect(body.expectedVisit).toMatchObject({ isCallback: true });
   });
 
-  test('a perimeter heard in the note waits for the trace, which gives the sprays their length', async () => {
+  test('a perimeter heard in the note does not wait for the trace: the send goes, and a trace given in the page sets the sprays\' length', async () => {
     const request = makeRequest({ facts: { ...FACTS, spray: 'perimeter' } });
     await openSheet(request);
     await generate();
     expect(request.bodies('/generate-report')[0].products[0].applicationMethod).toBe('perimeter_spray');
     expect(screen.getByTestId('fast-complete-heard').textContent).toBe('Heard from you: treated inside and outside · perimeter spray · for ghost ants');
-    expect(screen.getByText('Trace where you sprayed: Taurus SC is a perimeter spray.')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
-    // The hold's fix sits in the footer beside Complete & send (owner
-    // 2026-10-09): it opens the tracer with the outline read started.
-    fireEvent.click(screen.getByRole('button', { name: 'Auto-trace the house' }));
-    expect((await screen.findByRole('dialog', { name: 'Tracer' })).getAttribute('data-auto-trace')).toBe('true');
-    fireEvent.click(screen.getByRole('button', { name: 'Close tracer' }));
+    // owner 2026-10-22: no trace is required for any service, so nothing holds the send.
+    expect(screen.queryByText('Trace where you sprayed: Taurus SC is a perimeter spray.')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false);
+    // The tracer opens in the page, under the trace section, not over the sheet.
+    expect(screen.queryByRole('region', { name: 'Tracer' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Trace where we sprayed' }));
+    const tracer = await screen.findByRole('region', { name: 'Tracer' });
+    expect(screen.queryByRole('dialog', { name: 'Tracer' })).toBeNull();
+    expect(tracer.getAttribute('data-inline')).toBe('true');
     // The tracer saves bound to the property this sheet loaded (Codex #5538).
-    expect((await screen.findByRole('dialog', { name: 'Tracer' })).getAttribute('data-expected-property')).toBe('prop-1');
-    expect(screen.getByRole('dialog', { name: 'Tracer' }).getAttribute('data-auto-trace')).toBe('false');
+    expect(tracer.getAttribute('data-expected-property')).toBe('prop-1');
     // The report flow's trace is judged with the report: its save is refused
     // once the visit is completed (Codex #5538).
-    expect(screen.getByRole('dialog', { name: 'Tracer' }).getAttribute('data-open-visit-only')).toBe('true');
+    expect(tracer.getAttribute('data-open-visit-only')).toBe('true');
     fireEvent.click(await screen.findByRole('button', { name: 'Save trace' }));
     fireEvent.click(screen.getByRole('button', { name: 'Close tracer' }));
+    expect(screen.queryByRole('region', { name: 'Tracer' })).toBeNull();
     expect(await screen.findByText('Perimeter traced · 182 ft')).toBeTruthy();
     // The trace gives the length only: the report is not stale.
     expect(screen.queryByText(/You changed the visit/)).toBeNull();
@@ -851,6 +852,82 @@ describe('complete and send', () => {
     expect(body.products.map((product) => [product.applicationMethod, product.areaValue, product.areaUnit])).toEqual([
       ['perimeter_spray', 182, 'linear_ft'], ['perimeter_spray', 182, 'linear_ft'], ['perimeter_spray', 182, 'linear_ft'],
     ]);
+  });
+
+  test('a perimeter heard in the note sends with no trace at all: no length, traceSeen null', async () => {
+    const request = makeRequest({ facts: { ...FACTS, spray: 'perimeter' } });
+    await openSheet(request);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    const [body] = request.bodies('/complete');
+    expect(body.traceSeen).toBeNull();
+    expect(body.products.every((product) => product.applicationMethod === 'perimeter_spray' && product.areaValue == null)).toBe(true);
+  });
+
+  // The tracer sits inside each step with no cover over the sheet (Codex #6452): a step change would remount it and
+  // drop its points (or a save in flight), and a completion would leave a save to meet a completed visit.
+  test('an open tracer holds the send, Back and Close until it closes', async () => {
+    const request = makeRequest({ facts: { ...FACTS, spray: 'perimeter' } });
+    await openSheet(request);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Trace where we sprayed' }));
+    await screen.findByRole('region', { name: 'Tracer' });
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+    expect(screen.getByText('Finish the trace first.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Back to the visit' }).disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'Close' }).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Close tracer' }));
+    expect(screen.queryByText('Finish the trace first.')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false);
+    expect(screen.getByRole('button', { name: 'Back to the visit' }).disabled).toBe(false);
+    expect(screen.getByRole('button', { name: 'Close' }).disabled).toBe(false);
+  });
+
+  test('back on the visit step with a current report, an open tracer holds Back to the report', async () => {
+    const request = makeRequest({ facts: { ...FACTS, spray: 'perimeter' } });
+    await openSheet(request);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the visit' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Trace where we sprayed' }));
+    await screen.findByRole('region', { name: 'Tracer' });
+    expect(screen.getByRole('button', { name: 'Back to the report' }).disabled).toBe(true);
+    expect(screen.getByText('Finish the trace first.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Save trace' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Close tracer' }));
+    expect(screen.getByRole('button', { name: 'Back to the report' }).disabled).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the report' }));
+    expect(await screen.findByText('Perimeter traced · 182 ft')).toBeTruthy();
+  });
+
+  // Codex #6452: the trace is offered only beside a perimeter spray, on the visit step too, so the sheet never invites
+  // a perimeter trace on a visit whose report sprays only spots.
+  test('a spot visit is offered no trace on either step', async () => {
+    const request = makeRequest({ facts: { ...FACTS, spray: 'spot' } });
+    await openSheet(request);
+    expect(screen.queryByRole('button', { name: 'Trace where we sprayed' })).toBeNull();
+    await generate();
+    expect(screen.queryByRole('button', { name: 'Trace where we sprayed' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the visit' }));
+    expect(screen.queryByRole('button', { name: 'Trace where we sprayed' })).toBeNull();
+  });
+
+  test('the visit step offers the trace as optional once a perimeter spray is known, and the tracer opens in the same page', async () => {
+    const request = makeRequest({ facts: { ...FACTS, spray: 'perimeter' } });
+    await openSheet(request);
+    // Before the report is written the spray's method is unknown: no trace yet.
+    expect(screen.queryByRole('button', { name: 'Trace where we sprayed' })).toBeNull();
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the visit' }));
+    const traceButton = await screen.findByRole('button', { name: 'Trace where we sprayed' });
+    expect(within(traceButton.closest('section')).getByText('Optional')).toBeTruthy();
+    fireEvent.click(traceButton);
+    expect((await screen.findByRole('region', { name: 'Tracer' })).getAttribute('data-inline')).toBe('true');
+    expect(screen.queryByRole('dialog', { name: 'Tracer' })).toBeNull();
+    // Still on the visit step, with its fields in reach.
+    expect(screen.getByLabelText('Tell me about the visit')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Close tracer' }));
+    expect(screen.queryByRole('region', { name: 'Tracer' })).toBeNull();
   });
 
   describe('Same as last visit (GATE_TRACE_REUSE)', () => {
@@ -870,6 +947,30 @@ describe('complete and send', () => {
 
     // The app runs under React.StrictMode, whose mount is setup, cleanup, setup:
     // the read's answer must still land (pre-push P1).
+    // Codex local audit: with no trace required, nothing else holds the send while the copy is in flight, and a
+    // completion first would make the copy meet a completed visit (or the copy first, a stale traceSeen).
+    test('a copy in flight holds the send until it lands', async () => {
+      let zone = null;
+      let land;
+      const request = makeRequest({
+        facts: { ...FACTS, spray: 'perimeter' },
+        last: LAST,
+        trace: () => ({ enabled: true, treatmentZone: zone }),
+        reuse: () => new Promise((resolve) => {
+          land = () => { zone = { linear_ft: 220, capture_mode: 'perimeter', updated_at: '2026-10-02T05:00:00.000Z' }; resolve({ treatmentZone: zone }); };
+        }),
+      });
+      await openSheet(request);
+      await generate();
+      fireEvent.click(await screen.findByRole('button', { name: 'Same as last visit · 220 ft' }));
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true));
+      expect(screen.getByText('Copying the last trace…')).toBeTruthy();
+      land();
+      expect(await screen.findByText('Perimeter traced · 220 ft')).toBeTruthy();
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false));
+      expect(screen.queryByText('Copying the last trace…')).toBeNull();
+    });
+
     test('the button shows under React.StrictMode', async () => {
       const request = reusableRequest();
       render(<React.StrictMode><FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onCompleted={() => {}} /></React.StrictMode>);
@@ -878,19 +979,20 @@ describe('complete and send', () => {
       expect(await screen.findByRole('button', { name: 'Same as last visit · 220 ft' })).toBeTruthy();
     });
 
-    test('one tap copies the last trace with the tracer\'s fence fields, the hold clears and the send goes', async () => {
+    test('one tap copies the last trace with the tracer\'s fence fields, and the send goes (it could go before, too)', async () => {
       const request = reusableRequest();
       await openSheet(request);
       await generate();
-      expect(screen.getByText('Trace where you sprayed: Taurus SC is a perimeter spray.')).toBeTruthy();
-      expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+      // owner 2026-10-22: no trace is required, so the send is open before the copy
+      expect(screen.queryByText('Trace where you sprayed: Taurus SC is a perimeter spray.')).toBeNull();
+      expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false);
       // Nothing is applied by the read: the visit still has no trace.
       expect(request.calls.filter((call) => call.path.endsWith('/treatment-zone/reuse'))).toHaveLength(0);
       fireEvent.click(screen.getByRole('button', { name: 'Same as last visit · 220 ft' }));
       expect(await screen.findByText('Perimeter traced · 220 ft')).toBeTruthy();
       expect(request.calls.filter((call) => call.path.endsWith('/treatment-zone/reuse')).map((call) => [call.path, call.options.method, call.body]))
         .toEqual([['/tech/services/svc-1/treatment-zone/reuse', 'POST', { expectedPropertyId: 'prop-1', openVisitOnly: true }]]);
-      await waitFor(() => expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false));
+      expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false);
       expect(screen.queryByRole('button', { name: /Same as last visit/ })).toBeNull();
       fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
       await screen.findByTestId('fast-complete-sent');
@@ -918,7 +1020,8 @@ describe('complete and send', () => {
       await generate();
       await waitFor(() => expect(request.calls.some((call) => call.path.endsWith('/treatment-zone/last'))).toBe(true));
       expect(screen.queryByRole('button', { name: /Same as last visit/ })).toBeNull();
-      expect(screen.getByText('Trace where you sprayed: Taurus SC is a perimeter spray.')).toBeTruthy();
+      expect(screen.queryByText('Trace where you sprayed: Taurus SC is a perimeter spray.')).toBeNull();
+      expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false);
       expect(screen.getByRole('button', { name: 'Trace where we sprayed' }).disabled).toBe(false);
     });
 
@@ -954,11 +1057,12 @@ describe('complete and send', () => {
       await generate();
       fireEvent.click(await screen.findByRole('button', { name: 'Same as last visit · 220 ft' }));
       expect(await screen.findByText('This visit moved to another property. Close it and reopen it from the schedule.')).toBeTruthy();
-      expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+      // a refused copy never held the send (no trace is required)
+      expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false);
       const trace = screen.getByRole('button', { name: 'Trace where we sprayed' });
       expect(trace.disabled).toBe(false);
       fireEvent.click(trace);
-      expect(await screen.findByRole('dialog', { name: 'Tracer' })).toBeTruthy();
+      expect(await screen.findByRole('region', { name: 'Tracer' })).toBeTruthy();
     });
 
     // Codex P3 r4 on #6175: a failed copy's message goes once the visit has a trace by another path.
@@ -1118,7 +1222,7 @@ describe('complete and send', () => {
     expect(screen.queryByTestId('fast-complete-sent')).toBeNull();
   });
 
-  test('a product set to Perimeter spray by hand gets the trace step even when the note says spots', async () => {
+  test('a product set to Perimeter spray by hand gets the optional trace step even when the note says spots', async () => {
     const products = [...CATALOG, { id: 'gentrol', name: 'Gentrol IGR', category: 'Insecticide' }];
     await openSheet(makeRequest({ products }));
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
@@ -1130,7 +1234,9 @@ describe('complete and send', () => {
     fireEvent.change(within(editor).getByLabelText('How much?'), { target: { value: '1' } });
     await generate();
     expect(screen.getByRole('button', { name: 'Trace where we sprayed' })).toBeTruthy();
-    expect(screen.getByText('Trace where you sprayed: Gentrol IGR is a perimeter spray.')).toBeTruthy();
+    // offered, never required (owner 2026-10-22)
+    expect(screen.queryByText('Trace where you sprayed: Gentrol IGR is a perimeter spray.')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false);
   });
 
   test('a trace read that failed holds the send until it reads (a saved perimeter would still show)', async () => {
@@ -1207,13 +1313,17 @@ describe('complete and send', () => {
     expect(request.bodies('/complete')[0].products[0]).toMatchObject({ applicationMethod: 'perimeter_spray', areaValue: 140, areaUnit: 'linear_ft' });
   });
 
-  test('a perimeter on a visit that cannot be traced here points to the Full form', async () => {
-    await openSheet(makeRequest({ facts: { ...FACTS, spray: 'perimeter' }, trace: { enabled: false, treatmentZone: null } }));
+  test('a perimeter on a visit that cannot be traced here holds nothing: no Full form hold, no trace offered, the send goes', async () => {
+    const request = makeRequest({ facts: { ...FACTS, spray: 'perimeter' }, trace: { enabled: false, treatmentZone: null } });
+    await openSheet(request);
     await generate();
-    expect(screen.getByText('Taurus SC is a perimeter spray and this visit can’t be traced here. Use the Full form.')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
-    // The hold names the full form, so the header offers it.
-    expect((await screen.findByRole('button', { name: 'Full form' })).disabled).toBe(false);
+    expect(screen.queryByText(/is a perimeter spray and this visit can’t be traced here/)).toBeNull();
+    expect(screen.queryByText(/Use the Full form/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Trace where we sprayed' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    expect(request.bodies('/complete')[0].traceSeen).toBeNull();
   });
 
   test('the trace step is left out when the map is off or the visit takes no trace', async () => {

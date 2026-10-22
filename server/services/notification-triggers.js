@@ -501,7 +501,10 @@ const TRIGGER_REGISTRY = {
     allowContactDetails: true,
     build: (p) => ({
       title: `Missed call — ${p.name || 'a customer'}`,
-      body: `${p.phone || 'unknown number'} called and did not leave a voicemail.`,
+      // GATE_MISSED_CALL_ALERT_DETAIL: the producer adds line / duration /
+      // next visit to the payload only with the gate on; without them this is
+      // the original sentence, character for character.
+      body: require('./missed-call-alert-detail').formatMissedCallBody(p),
       // Calls live under the hash-routed Calls tab; ?thread= would open the
       // SMS conversation instead (same destination as the voicemail bell).
       link: callLink(p),
@@ -531,12 +534,17 @@ const TRIGGER_REGISTRY = {
     allowContactDetails: true,
     build: (p) => {
       const who = p.name || p.phone || 'A lead';
+      // The headline leads with WHO (owner 2026-10-21): the name, else the
+      // number in its usual form, else a plain "A lead".
+      const digits = String(p.phone || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+      const shownPhone = digits.length === 10 ? `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}` : p.phone;
+      const headlineWho = p.name || shownPhone || 'A lead';
       // Dispatched only by the durable sweep now (no more live /voice call
       // site) — the call has always already ended by the time this fires,
       // so the copy always states when they called, never "is calling in
       // now".
       return {
-        title: `Calling back — still owe them a ${p.what || 'follow-up'}`,
+        title: `${headlineWho} called back — we still owe a ${p.what || 'follow-up'}`,
         body: `${who} called at ${p.calledAtLabel || 'earlier'}. We still owe them a ${p.what || 'follow-up'} promised ${p.when || 'earlier'}.`,
         link: callLink(p),
       };
@@ -1134,7 +1142,7 @@ function pushTagFor(triggerKey, payload = {}) {
  * @param {string} triggerKey — must match a key in TRIGGER_REGISTRY
  * @param {object} payload — trigger-specific data, see each build() for shape
  */
-async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null } = {}) {
+async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null, pushOnly = false } = {}) {
   try {
     const trigger = TRIGGER_REGISTRY[triggerKey];
     if (!trigger) {
@@ -1229,7 +1237,8 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     for (const user of activeAdmins) {
       const userPref = prefsByUser.get(user.id) || defaultPreference(trigger);
 
-      if (userPref.bell_enabled && !bellWritten) {
+      // pushOnly (missed-call push retry): the bell row already exists; only the push is re-sent.
+      if (!pushOnly && userPref.bell_enabled && !bellWritten) {
         // Write a single bell entry for "admin" recipients (existing model is shared)
         try {
           // NotificationService.create catches insert errors and returns null
@@ -1444,6 +1453,7 @@ module.exports = {
     maskEmail,
     maskPhone,
     pushTagFor,
+    PRIORITY_VIBRATE,
     redactSensitiveText,
     sanitizeBuiltNotification,
     sanitizeNotificationPayload,

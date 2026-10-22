@@ -628,7 +628,8 @@ describe('W0B cancel_appointment WITH effects (GATE_IB_CANCEL_WITH_EFFECTS)', ()
     delete process.env.GATE_IB_CANCEL_APPOINTMENT;
     const result = await propose({ reason: 'x' });
     expect(mockComputeCancelImpact).not.toHaveBeenCalled();
-    expect(result.code).toBe('cancel_with_effects_unsupported');
+    // The base gate off is main's coded gate-off refusal (#6371), not a capability gap.
+    expect(result.code).toBe('cancel_gate_off');
   });
 
   test('GATE_IB_CANCEL_WITH_EFFECTS off: an explicit "cancel without a text" is refused at proposal, not silently ignored', async () => {

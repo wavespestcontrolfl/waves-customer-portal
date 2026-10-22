@@ -366,13 +366,12 @@ describe('codex #5568 r16', () => {
       expect(calls.some(([k, t]) => (k === 'insert' || k === 'update') && t === 'time_entries')).toBe(false);
     });
 
-    test('the unscoped (geofence/admin) start without a job id still works', async () => {
+    test('the unscoped (admin) start without a job id still works', async () => {
       await expect(timeTracking.startJob('tech-A', null, {})).resolves.toMatchObject({ job_id: null });
       await expect(timeTracking.startJob('tech-A', null, { scopeReq: { techRole: 'admin', technicianId: 'a' } })).resolves.toMatchObject({ job_id: null });
     });
 
-    test('both routes map job_not_assigned to 404', () => {
-      expect(src('routes/tech-notifications.js')).toMatch(/err\.code === 'job_not_assigned'\) return res\.status\(404\)/);
+    test('the start route maps job_not_assigned to 404', () => {
       expect(src('routes/tech-timetracking.js')).toMatch(/err\.code === 'job_not_assigned'\) return res\.status\(404\)/);
     });
   });

@@ -20,6 +20,7 @@
     "gates:index": "node scripts/generate-gate-index.js",
     "check:ib-coverage": "node scripts/check-ib-coverage.js",
     "ib:read-catalog": "node scripts/build-ib-admin-read-catalog.js",
+    "ib:write-catalog": "node scripts/build-ib-admin-write-catalog.js",
     "check:technician-routes": "node scripts/staff-route-census.js --check",
     "prestart": "npm run verify:blog-schema && npm run verify:affiliate-registry",
     "start": "node server/index.js",

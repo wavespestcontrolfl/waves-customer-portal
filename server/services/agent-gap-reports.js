@@ -51,12 +51,48 @@ const RECORDED_REFUSAL_CODES = new Set([
 const BY_DESIGN_REFUSAL_CODES = new Set([
   'permission_denied', 'approval_required', 'invalid_input', 'owner_direct_bulk_limit',
   'write_access_required', 'execution_interrupted', 'verify_failed', 'by_owner_rule',
+  // An email reply never carries an owned portal link: a recipient-identity safety rule (Codex #6371 r14).
+  'email_link_identity_refused',
+  // The operator switched writes off (IB_WRITES_DISABLED): an operator state, not a missing capability (Codex #6371 r23).
+  'writes_disabled',
 ]);
 // Coded refusals whose text says the bar cannot do something, but that were
 // never gap rows (a switch that is off, a provider-side limit, a gate flip that
 // is the owner's). Skipped by the text rule below so it adds no new build work.
+const GATE_OFF_CODE_RE = /(?:^|_)(?:not_enabled|gate_off)$/;
+// The coded refusals that ARE missing capabilities when their text declines: a
+// `*_unsupported` code, or one listed here. Any other code (an outage, a safety
+// check, a send already queued, a money fence, a switched-off template) is the
+// bar working as built, whatever its wording says (Codex #6371 r10: wording
+// alone kept turning ordinary refusals into build work).
+const UNSUPPORTED_CODE_RE = /_unsupported$/;
+// The listed code whose refusal is a gap only when its text declines.
+const TEXT_CHECKED_CODE = 'nothing_repairable';
+// Every coded refusal main recorded through its "use the X screen" text was
+// classified once here (10-21): a case the bar could be built to handle is a
+// gap; a wait, a fence, an outage, a safety check, data the operator must fix
+// first, or an owner ruling is not.
+const CAPABILITY_GAP_CODES = new Set([
+  // Estimate accept cases the card cannot show yet.
+  'commercial_proposal', 'commercial_recurring', 'existing_service_extension', 'grouped_estimate', 'termite_program',
+  'termite_annual_requires_prepay', 'booked_from_estimate', 'recurring_unnamed', 'side_effect', 'side_effect_outside_plan',
+  // Billing-type changes the card cannot confirm yet.
+  'annual_prepay_lane', 'bill_to_payer', 'billing_visits_payer_owned', 'billing_visits_priced', 'too_many_visits',
+  // Billing-type, visit, invoice and closeout cases.
+  'billing_mode_clear', 'annual_prepay_customer', 'annual_plan_invoice', 'package_visit_two_linked', 'nothing_repairable',
+  'needs_invoices_page', 'invoice_copy_too_long',
+  // Two records with different service addresses (the admin duplicate flow can keep the second) and links only the
+  // composer can send (Codex #6371 r12).
+  'address_conflict', 'customer_link_composer_only',
+]);
 const UNRECORDED_DECLINE_CODES = new Set([
-  'gate_off', 'autopay_off_not_enabled', 'no_rerunnable_checks',
+  // A read that failed while checking a send (Codex #6371 r16): an outage, not a gap.
+  'invoice_lookup_failed',
+  'gate_off', 'autopay_off_not_enabled', 'no_rerunnable_checks', 'cancel_gate_off',
+  // A page-size limit with a way forward (through_date) in reprice_future_visits (Codex #6371 r15).
+  'reprice_page_limit',
+  // A move refused for a wait (a visit being finalized or completed): retry in a moment (Codex #6371 r19).
+  'visit_busy_move',
 ]);
 // A tool's own refusal that sends the operator to another screen. Only used to
 // classify; the text itself is never stored (it can hold customer data).
@@ -302,7 +338,7 @@ async function ringGapBell(trx, event) {
 // sightings: only the inserter rings). The bell row and the belled_at stamp
 // are written in a savepoint of the same transaction (ringGapBell), so they
 // commit with the sighting or not at all.
-async function upsertGapRow(row, database = db) {
+async function upsertGapRow(row, database = db, { quiet = false } = {}) {
   const now = new Date();
   return database.transaction(async (trx) => {
     const prior = await trx('agent_gap_reports')
@@ -334,7 +370,11 @@ async function upsertGapRow(row, database = db) {
       && (prior?.status === 'new' || prior?.status === 'building');
     const rang = inserted || reopened || neverRang;
     const id = Number(result.id);
-    const belled = rang
+    // quiet: the caller rings its own bell for this event (the model-failure
+    // notice), so the gap's "build gap N" bell must not ring beside it. The row
+    // is stamped as rung so a later ordinary sighting never rings it either.
+    if (quiet && rang) await trx('agent_gap_reports').where('id', id).whereNull('belled_at').update({ belled_at: now });
+    const belled = rang && !quiet
       ? await ringGapBell(trx, { id, source: row.source, domain: result.domain || null, reopened, at: now })
       : false;
     // bigint ids come back from pg as strings; "gap #<id>" wants a number.
@@ -367,7 +407,7 @@ async function recordGap({ source, summary, attempted, closestTool } = {}, datab
  * throws; a failed write is logged with the error code only — the error text
  * can carry a compiled query with the summary in it.
  */
-async function writeGapRows(signals, database = db) {
+async function writeGapRows(signals, database = db, options = {}) {
   if (!gapReportsEnabled()) return [];
   const seen = new Set();
   const saved = [];
@@ -376,7 +416,7 @@ async function writeGapRows(signals, database = db) {
       const row = prepareGapRow(signal);
       if (!row || seen.has(row.fingerprint)) continue;
       seen.add(row.fingerprint);
-      const result = await upsertGapRow(row, database);
+      const result = await upsertGapRow(row, database, options);
       if (result) saved.push(result);
     } catch (err) {
       logger.warn(`[agent-gap-reports] record failed (${err.code || err.name || 'error'})`);
@@ -430,6 +470,19 @@ async function setGapStatus(gapId, status) {
 // The refusal code worth a gap row for one failed tool result, or null: a
 // by-design code, an unknown business code, a fault and a plain error record
 // nothing. Reads only; the result's text is classified and never kept.
+// The separate asks inside one search query, split on "and", "then", "also",
+// commas and semicolons.
+function askParts(query) {
+  return String(query || '').toLowerCase().split(/\s*(?:[,;]|\band\b|\bthen\b|\balso\b)\s*/).filter((part) => /[a-z]/.test(part));
+}
+// Plural and trailing-e forms share a stem ("invoice", "invoices" -> "invoic"; "sends", "sending" -> "send").
+const stemWord = (word) => word.replace(/(?:ing|es|s|e)$/, '');
+// An ask names a tool when every word of the tool's name is in the ask.
+function askNamesTool(part, tool) {
+  const words = new Set(part.split(/[^a-z0-9]+/).filter(Boolean).map(stemWord));
+  return String(tool).split('_').filter(Boolean).every((word) => words.has(stemWord(word)));
+}
+
 function recordableRefusalCode(result) {
   // Only a policy refusal (the shared predicate: a coded refusal or a
   // refused/refusal marker). An uncoded failure is a fault, whatever its text
@@ -438,12 +491,34 @@ function recordableRefusalCode(result) {
   const code = typeof result.code === 'string' ? result.code.trim() : '';
   if (BY_DESIGN_REFUSAL_CODES.has(code)) return null;
   if (RECORDED_REFUSAL_CODES.has(code)) return code;
+  // A feature that is built but switched off is not a missing capability:
+  // every *_not_enabled / *gate_off code stays out of the gap list (Codex #6371 r6).
+  if (UNRECORDED_DECLINE_CODES.has(code) || GATE_OFF_CODE_RE.test(code)) return null;
+  const coded = CODE_RE.test(code);
+  // A coded refusal is classified by its code alone: the code lists are the
+  // reviewed classification, and wording no longer decides (Codex #6371 r13).
+  // `nothing_repairable` is the one code that is a gap only when the text
+  // declines (field evidence alone is not).
+  if (coded && code !== TEXT_CHECKED_CODE) return capabilityGapCode(code);
   const text = [result.error, result.refused].filter((value) => typeof value === 'string').join(' ');
-  if (UNRECORDED_DECLINE_CODES.has(code)) return null;
   // A refusal that sends the operator to another screen, or that says plainly
   // the bar cannot do this from here (the wording every tool refusal uses).
   if (!OTHER_SCREEN_RE.test(text) && !BAR_DECLINE_RE.test(text)) return null;
-  return CODE_RE.test(code) ? code : OTHER_SCREEN_CODE;
+  return coded ? capabilityGapCode(code) : OTHER_SCREEN_CODE;
+}
+
+// The one rule for a code that is a missing capability: `*_unsupported` or listed.
+function capabilityGapCode(code) {
+  return UNSUPPORTED_CODE_RE.test(code) || CAPABILITY_GAP_CODES.has(code) ? code : null;
+}
+
+// A successful result can carry the gaps it worked around (a batch move that
+// left its grouped stops behind): `capability_gaps: [{ code }]`. Each code goes
+// through the same rule as a top-level refusal (Codex #6371 r12).
+function nestedGapCodes(result) {
+  const entries = Array.isArray(result?.capability_gaps) ? result.capability_gaps : [];
+  const codes = entries.map((entry) => (typeof entry?.code === 'string' ? entry.code.trim() : ''));
+  return [...new Set(codes.filter((code) => CODE_RE.test(code) && capabilityGapCode(code)))];
 }
 
 // Fixed text only: the tool name and code, never the tool's input or message.
@@ -512,15 +587,58 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
     });
   }
 
+  const persistentGaps = new Map(); // `${tool}|${code}` -> { tool, code }: gaps a partial success worked around
   function trackTail(name, result, failed, meta = {}) {
     lastTool = cleanTool(name) || lastTool;
     if (meta.round !== tail.round) tail = { round: meta.round, refusals: new Map(), wroteTools: new Set() };
     if (meta.wrote === true) tail.wroteTools.add(name);
-    const code = failed ? recordableRefusalCode(result) : null;
-    if (code) tail.refusals.set(`${name}|${code}`, { tool: name, code });
+    // A nested gap on a SUCCESSFUL result is a partial success (the same call
+    // also proposed or wrote): it stands whatever the model does next, so it
+    // goes to the per-request list, not the per-round tail (Codex #6371 r22).
+    if (!failed) {
+      for (const code of nestedGapCodes(result)) persistentGaps.set(`${name}|${code}`, { tool: name, code });
+      return;
+    }
+    // A FAILED result's top-level refusal keeps the tail logic. Its nested list
+    // (an all-skipped batch lists every kind it skipped) rides with it; a code
+    // shared with the top-level one is stored once.
+    const top = recordableRefusalCode(result);
+    if (top) tail.refusals.set(`${name}|${top}`, { tool: name, code: top, nested: false });
+    for (const code of nestedGapCodes(result)) tail.refusals.set(`${name}|${code}`, { tool: name, code, nested: true });
   }
 
+  // The request's last tool round ended on a coded refusal that is NOT a gap
+  // (by design, switched off, unrecorded, unlisted): a capability search tied
+  // to that refusing tool must not turn its answer into a missing-capability
+  // row. Searches about anything else in the request stay (Codex #6371 r14).
+  let terminal = { round: null, nonGap: false, tools: new Set() };
+  function trackTerminal(name, result, failed, meta = {}) {
+    // A capability search is not where the request ended: it neither resets nor
+    // sets the last tool round, so a refusal followed by a search still stands
+    // (Codex #6371 r23).
+    if (name === DISCOVERY_TOOL_NAME) return;
+    if (meta.round !== terminal.round) terminal = { round: meta.round, nonGap: false, tools: new Set() };
+    if (!failed) return;
+    const code = typeof result?.code === 'string' ? result.code.trim() : '';
+    if (isPolicyRefusal(result) && CODE_RE.test(code) && recordableRefusalCode(result) === null) {
+      terminal.nonGap = true;
+      terminal.tools.add(name);
+    }
+  }
+  // A search is tied to a by-design refusal when the refusing tool was surfaced
+  // (or ranked first) for it and EVERY separate ask in its query belongs to a
+  // refusing tool. A one-ask search is tied by the surfaced tool alone, wherever
+  // the ranker put it (r18); a multi-part search keeps its row while any part
+  // ("export payroll hours" beside "send the invoice") is unrelated (r17).
+  const tiedToTerminalRefusal = (search) => {
+    const tools = [...terminal.tools].filter((tool) => search.surfaced.has(tool) || search.closestTool === tool);
+    if (!tools.length) return false;
+    const parts = askParts(search.query);
+    return parts.length <= 1 || parts.every((part) => tools.some((tool) => askNamesTool(part, tool)));
+  };
+
   function toolResult(name, result, failed, meta) {
+    trackTerminal(name, result, failed, meta);
     // A capability search is a tool round too: the model moving on to it
     // after a refusal means the refusal was not where the request ended.
     if (recordBlocked) trackTail(name, result, failed, meta);
@@ -563,8 +681,8 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
     // the same request is about the same thing (the prompt sends the model on to
     // discover after an empty tool search). An unrelated tool-search miss stays.
     const discovered = searches.filter((search) => !search.fromToolSearch);
-    const kept = searches.filter((search) => !search.fromToolSearch
-      || !discovered.some((other) => sameAsk(other.query, search.query)));
+    const kept = searches.filter((search) => !tiedToTerminalRefusal(search)
+      && (!search.fromToolSearch || !discovered.some((other) => sameAsk(other.query, search.query))));
     const signals = kept.map((search) => ({
       source, kind: 'missing_capability', summary: search.query, domain: search.domain,
       closestTool: search.closestTool, attempted: searchAttempt(search),
@@ -587,9 +705,13 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
     if (!recordBlocked) return [];
     if (stepLimitReached === true && noReply === true) return [blockedSignal({ source, code: LOOP_EXHAUSTED_CODE, lastTool })];
     const signals = [];
-    for (const { tool, code } of tail.refusals.values()) {
-      if (tail.wroteTools.has(tool)) continue;
+    for (const { tool, code, nested } of tail.refusals.values()) {
+      if (!nested && tail.wroteTools.has(tool)) continue;
       signals.push(code === 'capability_unimplemented' ? capabilitySignal(tool) : blockedSignal({ source, tool, code }));
+    }
+    // Gaps a successful call worked around, once each per request (tool + code).
+    for (const [key, { tool, code }] of persistentGaps) {
+      if (!tail.refusals.has(key)) signals.push(blockedSignal({ source, tool, code }));
     }
     return signals;
   }
@@ -604,7 +726,7 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
     if (signals.length) return signals;
     // A decline after a tool broke is an outage talking, not a missing
     // feature — the failure is already in tool_health_events.
-    if (toolBroke || !BAR_DECLINE_RE.test(String(reply || ''))) return [];
+    if (toolBroke || terminal.nonGap || !BAR_DECLINE_RE.test(String(reply || ''))) return [];
     const asked = cleanText(ask);
     return asked ? [{ source, kind: 'missing_capability', summary: asked,
       attempted: 'The bar declined; no capability search ran' }] : [];

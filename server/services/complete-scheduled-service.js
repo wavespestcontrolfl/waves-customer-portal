@@ -6461,7 +6461,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // invoice re-resolves it on its new day.
           if (issuedInvoiceCloseout) {
             const lockedDay = serviceDateOnly(lockedSvcRow?.scheduled_date);
-            const { issuedCloseoutVisitRefusal, issuedDayForInvoice, visitJobTimerRunning } = require('../services/invoice-issued-closeout');
+            const { issuedCloseoutVisitRefusal, issuedDayForInvoice, visitJobTimerRunning, approvedVisitChanged } = require('../services/invoice-issued-closeout');
+            // A closeout approved on a card (record_payment) carries the visit's facts as the card showed them: the LOCKED row must still
+            // match (service type, scheduled date, status, edit time), or the visit is left open for a person (the payment stays recorded).
+            if (issuedInvoiceCloseout.expectedVisit && approvedVisitChanged(lockedSvcRow, issuedInvoiceCloseout.expectedVisit)) {
+              throw Object.assign(new Error('visit changed since the approved card during the issued-invoice closeout'), { code: 'approved_visit_changed' });
+            }
             // The prepayment proof, from the invoice row LOCKED above (and its
             // statement's delivery stamp, for a statement child).
             const lockedIssuedDay = await issuedDayForInvoice(trx, lockedIssuedInvoice, issuedInvoiceCloseout.trigger);
@@ -8185,15 +8190,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
             const applicationMethod = inferServiceReportApplicationMethod(product, p, reportServiceLine);
             const areaValue = p.areaValue != null && p.areaValue !== '' ? Number(p.areaValue) : null;
             const areaUnit = p.areaUnit || null;
+            // Linear feet are optional on a perimeter spray (owner 2026-10-22, "make feet optional"): a spray
+            // with no trace and no typed feet is recorded with no length (area_value null). A length that is
+            // sent must still be a positive number of linear feet.
             if (
               !isIncompleteVisit
-              &&
-              requiresLinearFtForReportApplication(applicationMethod)
+              && requiresLinearFtForReportApplication(applicationMethod)
+              && areaValue != null
               && (!Number.isFinite(areaValue) || areaValue <= 0 || areaUnit !== 'linear_ft')
             ) {
-              const err = new Error(`Linear feet are required for ${product.name}`);
+              const err = new Error(`Linear feet must be a positive number for ${product.name}`);
               err.isOperational = true; err.statusCode = 400;
-              err.code = 'linear_ft_required';
+              err.code = 'linear_ft_invalid';
               throw err;
             }
             if (
@@ -8830,6 +8838,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
           return ({ status: 409, body: {
             error: 'This visit was started by its technician while its invoice was being issued — the technician completes it.',
             code: 'issued_visit_in_progress',
+          } });
+        }
+        if (err && err.code === 'approved_visit_changed') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 409, body: {
+            error: 'This visit changed after the approving card was shown — the visit stays open.',
+            code: 'approved_visit_changed',
           } });
         }
         if (err && err.code === 'issued_visit_identity_changed') {
