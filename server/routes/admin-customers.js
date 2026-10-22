@@ -4414,10 +4414,11 @@ const customerUpdateHandler = async (req, res, next) => {
           // name and terms it showed: the payer row is held FOR SHARE so an edit or a deactivation waits for this
           // one, and an inactive, missing or changed payer refuses, rolling everything back before any Stripe cancel.
           if (req.ibExpectedPayer && updates.payer_id) {
-            const target = await trx('payers').where({ id: updates.payer_id }).forShare().first('active', 'display_name', 'company_name', 'payment_terms');
+            const target = await trx('payers').where({ id: updates.payer_id }).forShare().first('active', 'display_name', 'company_name', 'payment_terms', 'tax_exempt');
             const shown = req.ibExpectedPayer;
             if (!target || target.active === false || (target.display_name ?? null) !== shown.display_name
-              || (target.company_name ?? null) !== shown.company_name || (target.payment_terms ?? null) !== shown.payment_terms) {
+              || (target.company_name ?? null) !== shown.company_name || (target.payment_terms ?? null) !== shown.payment_terms
+              || (target.tax_exempt === true) !== shown.tax_exempt) {
               throw Object.assign(new Error('The payer changed after the card was shown.'), { statusCode: 409, isOperational: true, code: 'preview_changed' });
             }
           }
@@ -4447,20 +4448,26 @@ const customerUpdateHandler = async (req, res, next) => {
               // stay locked through the withdrawal. Every other Bill-To writer for this customer already waits on
               // the customer row; a money path that holds an invoice first can deadlock with this, which
               // PostgreSQL aborts and the operator retries (lock order there is out of scope, owner 2026-10-03).
+              // Every invoice the card listed (moving and staying) is compared; a moving one must be stamped for
+              // the payer the card named for it.
               const expected = req.ibExpectedInvoices;
+              const drift = (message) => Object.assign(new Error(message), { statusCode: 409, isOperational: true, code: 'preview_changed' });
               if (expected) {
                 const rows = expected.length ? await trx('invoices').whereIn('id', expected.map((e) => e.id)).orderBy('id').forUpdate().select('id', 'status', 'total', 'credit_applied') : [];
                 const cents = (v) => Math.round((Number(v) || 0) * 100);
                 const same = rows.length === expected.length && expected.every((e) => rows.some((r) => String(r.id) === e.id
                   && r.status === e.status && cents(r.total) === cents(e.total) && cents(r.credit_applied) === cents(e.credit_applied)));
-                if (!same) throw Object.assign(new Error('The invoices changed after the card was shown.'), { statusCode: 409, isOperational: true, code: 'preview_changed' });
+                if (!same) throw drift('The invoices changed after the card was shown.');
               }
               const withdrawn = await Packets.withdrawPacketInvoicesForOwner(trx, { customerId: req.params.id });
               if (expected) {
+                const moving = expected.filter((e) => e.to_payer_id);
                 const moved = [...new Set(withdrawn.map(String))].sort();
-                if (JSON.stringify(moved) !== JSON.stringify(expected.map((e) => e.id).sort())) {
-                  throw Object.assign(new Error('Different invoices would move than the card showed.'), { statusCode: 409, isOperational: true, code: 'preview_changed' });
-                }
+                if (JSON.stringify(moved) !== JSON.stringify(moving.map((e) => e.id).sort())) throw drift('Different invoices would move than the card showed.');
+                const stamps = moving.length ? await trx('invoices').whereIn('id', moving.map((e) => e.id)).select('id', 'scheduled_send_error') : [];
+                const toNamed = moving.every((e) => stamps.some((r) => String(r.id) === e.id
+                  && new RegExp(`^payer_billed:${String(e.to_payer_id).replace(/[^0-9A-Za-z-]/g, '')}(:|$)`).test(String(r.scheduled_send_error || ''))));
+                if (!toNamed) throw drift('An invoice would move to a different payer than the card showed.');
               }
             }
           }
@@ -6793,9 +6800,9 @@ module.exports = router;
 // what the customer page's Bill-To select sends — without an HTTP request (the admin-invoices.js adapter
 // pattern): the handler gets the request fields it reads and a capture response, and the promise resolves the
 // reply it would send, { status, json }. An error passed to next() rejects. expectedPayerId: the Bill-To the
-// card showed (null = the customer pays); expectedInvoices: the invoices the card said move ({ id, status, total,
-// credit_applied }), re-checked inside the transaction; expectedPayer: the payer's display_name, company_name and
-// payment_terms the card showed, re-checked on the locked payer row.
+// card showed (null = the customer pays); expectedInvoices: every invoice the card listed ({ id, status, total,
+// credit_applied, to_payer_id }; to_payer_id null = stays), re-checked inside the transaction; expectedPayer: the
+// payer's display_name, company_name, payment_terms and tax_exempt the card showed, re-checked on the locked payer row.
 function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, expectedInvoices, expectedPayer, actor }) {
   return new Promise((resolve, reject) => {
     const res = {
@@ -6814,8 +6821,9 @@ function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, expect
         display_name: expectedPayer?.display_name ?? null,
         company_name: expectedPayer?.company_name ?? null,
         payment_terms: expectedPayer?.payment_terms ?? null,
+        tax_exempt: expectedPayer?.tax_exempt === true,
       },
-      ibExpectedInvoices: (expectedInvoices || []).map((e) => ({ id: String(e.id), status: e.status, total: e.total, credit_applied: e.credit_applied })),
+      ibExpectedInvoices: (expectedInvoices || []).map((e) => ({ id: String(e.id), status: e.status, total: e.total, credit_applied: e.credit_applied, to_payer_id: e.to_payer_id == null ? null : String(e.to_payer_id) })),
     };
     Promise.resolve(customerUpdateHandler(req, res, reject)).catch(reject);
   });

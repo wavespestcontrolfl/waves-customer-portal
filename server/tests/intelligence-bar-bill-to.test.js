@@ -155,7 +155,8 @@ describe('the preview', () => {
     const text = card.effects.map((e) => e.text).join('\n');
     expect(text).toMatch(/New invoices for Robin Sample bill to Synthetic Property Co \(terms: net 30\)/);
     expect(text).toMatch(/1 unpaid invoice moves to Synthetic Property Co now/);
-    expect(text).toMatch(/Moves: WPC-2099-0001 \$90\.00 \(sent\)/);
+    expect(text).toMatch(/Moves to Synthetic Property Co: WPC-2099-0001 \$90\.00 \(sent\)/);
+    expect(text).not.toMatch(/tax-exempt/);
     expect(text).toMatch(/\$10\.00 of account credit applied to those invoices goes back/);
     expect(text).toMatch(/1 unpaid invoice stays billed to the customer \(no visit, or a visit pinned to the customer\): WPC-2099-0002/);
     expect(text).toMatch(/Nothing is sent/);
@@ -190,6 +191,23 @@ describe('the preview', () => {
     // One billed visit resolves to the payer: it moves.
     mockVisitOwners.mockResolvedValue([{ visitId: 'visit-a', afterOwner: null }, { visitId: 'visit-b', afterOwner: '7' }]);
     expect((await preview()).invoices_moving).toEqual(['WPC-2099-0001', 'WPC-2099-0003']);
+    // The first billed visit that resolves to a payer decides, in billed order: visit-a's own payer 9 here.
+    mockVisitOwners.mockResolvedValue([{ visitId: 'visit-b', afterOwner: '7' }, { visitId: 'visit-a', afterOwner: '9' }]);
+    mockGetPayer.mockImplementation(async (id) => (String(id) === '7' ? PAYER : { id: 9, display_name: 'Other Payer Co', active: true }));
+    const card = await preview();
+    const text = card.effects.map((e) => e.text).join('\n');
+    expect(text).toMatch(/2 unpaid invoices move to a payer \(named on each line\) now/);
+    expect(text).toMatch(/Moves to Other Payer Co: WPC-2099-0003/);
+    expect(text).toMatch(/Moves to Synthetic Property Co: WPC-2099-0001/);
+    expect(card._invoices.find((i) => i.id === PACKET).to_payer_id).toBe('9');
+  });
+
+  test('a tax-exempt payer is shown and pinned', async () => {
+    mockGetPayer.mockImplementation(async (id) => (String(id) === '7' ? { ...PAYER, tax_exempt: true } : null));
+    const card = await preview();
+    expect(card.effects.map((e) => e.text).join('\n')).toMatch(/Synthetic Property Co is tax-exempt: invoices billed to it carry no sales tax/);
+    mockGetPayer.mockImplementation(async (id) => (String(id) === '7' ? PAYER : null));
+    expect(await confirm(card)).toMatchObject({ code: 'preview_changed' });
   });
 
   test('a customer who already has a payer goes to the customer page; the same payer is a no-op', async () => {
@@ -228,8 +246,11 @@ describe('the confirmed run', () => {
     expect(Customers.setCustomerBillToFromBar).toHaveBeenCalledTimes(1);
     expect(Customers.setCustomerBillToFromBar).toHaveBeenCalledWith({
       customerId: CUST, payerId: '7', expectedPayerId: null, actor: { technicianId: 'staff-1' },
-      expectedInvoices: [{ id: LINKED, status: 'sent', total: '90.00', credit_applied: '10.00' }],
-      expectedPayer: { display_name: 'Synthetic Property Co', company_name: null, payment_terms: 'net_30' },
+      expectedInvoices: [
+        { id: LINKED, status: 'sent', total: '90.00', credit_applied: '10.00', to_payer_id: '7' },
+        { id: MANUAL, status: 'sent', total: '40.00', credit_applied: undefined, to_payer_id: null },
+      ],
+      expectedPayer: { display_name: 'Synthetic Property Co', company_name: null, payment_terms: 'net_30', tax_exempt: false },
     });
   });
 

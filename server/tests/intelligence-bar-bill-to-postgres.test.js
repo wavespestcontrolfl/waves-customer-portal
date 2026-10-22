@@ -114,6 +114,19 @@ const ADMIN = { isAdmin: true, technicianId: null };
     expect(await db('invoices').where({ id: linkedId }).first()).toMatchObject({ scheduled_send_error: null });
   });
 
+  test('a staying invoice changed after the card refuses inside the transaction', async () => {
+    const payerId = await payer();
+    const { customerId, linkedId, manualId } = await selfPayCustomer();
+    jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({});
+    jest.spyOn(StripeService, 'retrievePaymentIntent').mockImplementation(async (id) => ({ id, status: 'requires_payment_method', metadata: {} }));
+    const card = await executeBillToTool('set_customer_bill_to', { customer_id: customerId, payer_id: String(payerId) }, ADMIN);
+    await db('invoices').where({ id: manualId }).update({ total: 55 });
+    await expect(setCustomerBillToFromBar({ customerId, payerId, expectedPayerId: null, expectedInvoices: card._invoices, expectedPayer: card._payer, actor: {} }))
+      .rejects.toMatchObject({ code: 'preview_changed' });
+    expect(await db('customers').where({ id: customerId }).first('payer_id')).toMatchObject({ payer_id: null });
+    expect(await db('invoices').where({ id: linkedId }).first()).toMatchObject({ scheduled_send_error: null });
+  });
+
   test('a payer deactivated after the card refuses inside the transaction', async () => {
     const payerId = await payer();
     const { customerId } = await selfPayCustomer();
