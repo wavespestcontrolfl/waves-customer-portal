@@ -1962,6 +1962,33 @@ const ReviewService = {
     }
   },
 
+  // GATE_REVIEW_ASK_AFTER_REPORT for a report the send window held for the
+  // morning: enrollment kept the smart window (no confirmable text yet). When
+  // the held report's replay is accepted as a TEXT (SMS/MMS), the untouched
+  // Day-0 ask still planned on that window moves up to 10 minutes from now. It
+  // only ever moves an ask EARLIER, in one conditional write (a row the runner
+  // has claimed has next_run_at NULL and is skipped). Anything unconfirmed — the
+  // App, an unknown channel, a finalize-only retry, an explicit or customer-
+  // requested timing, a decision another deferral rewrote — leaves the smart
+  // window. Never throws.
+  async pullAskAfterHeldReport(serviceRecordId, channel) {
+    if (!serviceRecordId || !["sms", "mms"].includes(channel)) return { pulled: 0 };
+    try {
+      if (!reviewAskAfterReportOn()) return { pulled: 0 };
+      const dueAt = new Date(Date.now() + REVIEW_AFTER_REPORT_DELAY_MINUTES * 60000);
+      const pulled = await db("review_sequences")
+        .where({ service_record_id: serviceRecordId, status: "active", current_step: 0, touches_sent: 0, started_by: "post_service" })
+        .whereNull("customer_requested")
+        .whereRaw("decision ->> 'reason' = 'smart_window'")
+        .where("next_run_at", ">", dueAt)
+        .update({ next_run_at: dueAt, decision: sequenceDecision({ reason: "after_report", plannedAt: dueAt, nextEvalAt: dueAt }), updated_at: new Date() });
+      return { pulled: Number(pulled) || 0 };
+    } catch (err) {
+      logger.warn(`[review] held-report pull failed (serviceRecordId=${serviceRecordId}): ${err.message}`);
+      return { pulled: 0 };
+    }
+  },
+
   // The same anchor for a combined visit (visit-completion-packets): its
   // completion_sms effect. Enrollment there runs only once the delivery legs
   // are sent or suppressed, so a 'sent' effect anchors the ask to that text; a

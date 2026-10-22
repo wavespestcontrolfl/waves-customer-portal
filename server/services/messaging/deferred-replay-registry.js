@@ -677,7 +677,13 @@ const REGISTRY = {
     },
     async finalize(meta, ctx = {}) {
       const { finalizeDeferredCompletionSend } = require('../dispatch-completion-deferred');
-      return finalizeDeferredCompletionSend(meta, { retry: ctx.retry === true });
+      const result = await finalizeDeferredCompletionSend(meta, { retry: ctx.retry === true });
+      // GATE_REVIEW_ASK_AFTER_REPORT: the held report just went out; when it
+      // went as a TEXT (the first pass knows the channel; a finalize-only retry
+      // does not, and changes nothing), its review ask moves up to 10 minutes
+      // after it. Never throws, never changes this finalize's outcome.
+      if (ctx.retry !== true) await require('../review-request').pullAskAfterHeldReport(meta.service_record_id, ctx.channel);
+      return result;
     },
     async onTerminal(meta) {
       // Reset the record's 'deferred' status to 'failed' FIRST — the

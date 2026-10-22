@@ -137,7 +137,7 @@ jest.mock('../services/sms-auto-send', () => ({
   isRealProviderSend: jest.fn(() => false),
   isAmbiguousProviderOutcome: jest.fn(() => false),
 }));
-jest.mock('../services/review-request', () => ({
+jest.mock('../services/review-request', () => ({ pullAskAfterHeldReport: jest.fn(async () => ({ pulled: 0 })),
   claimInlineForSend: jest.fn(async () => null),
   inlineClaimStillHeld: jest.fn(async () => true),
   releaseInlineClaim: jest.fn(async () => {}),

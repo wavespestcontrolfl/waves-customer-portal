@@ -166,3 +166,75 @@ describe('the combined-visit anchor (reportTextAnchorForVisit)', () => {
     expect(database).not.toHaveBeenCalled();
   });
 });
+
+describe('a report held for the morning pulls its review ask when it goes out as a text (pullAskAfterHeldReport)', () => {
+  const ReviewService = require('../services/review-request');
+  const db = require('../models/db');
+  function chain(updated = 1) {
+    const calls = { where: [], whereNull: [], whereRaw: [], update: null };
+    const q = {
+      where(...a) { calls.where.push(a); return q; },
+      whereNull(c) { calls.whereNull.push(c); return q; },
+      whereRaw(sql) { calls.whereRaw.push(sql); return q; },
+      update: async (patch) => { calls.update = patch; return updated; },
+    };
+    return { q, calls };
+  }
+  let restore;
+  beforeEach(() => { restore = db.getMockImplementation(); jest.spyOn(Date, 'now').mockReturnValue(new Date('2026-10-21T12:03:00Z').getTime()); });
+  afterEach(() => { db.mockImplementation(restore); Date.now.mockRestore(); });
+
+  test('gate on, sent as SMS/MMS: one conditional write moves an untouched smart-window Day-0 ask to 10 minutes from now', async () => {
+    process.env.GATE_REVIEW_ASK_AFTER_REPORT = 'true';
+    for (const channel of ['sms', 'mms']) {
+      const { q, calls } = chain();
+      db.mockImplementation(() => q);
+      expect(await ReviewService.pullAskAfterHeldReport('sr-1', channel)).toEqual({ pulled: 1 });
+      expect(calls.where[0][0]).toEqual({ service_record_id: 'sr-1', status: 'active', current_step: 0, touches_sent: 0, started_by: 'post_service' });
+      expect(calls.whereNull).toEqual(['customer_requested']);
+      expect(calls.whereRaw).toEqual(["decision ->> 'reason' = 'smart_window'"]);
+      // only ever earlier: rows already due sooner (or claimed, next_run_at NULL) are skipped
+      expect(calls.where[1][0]).toBe('next_run_at');
+      expect(calls.where[1][1]).toBe('>');
+      expect(calls.where[1][2].toISOString()).toBe('2026-10-21T12:13:00.000Z');
+      expect(calls.update.next_run_at.toISOString()).toBe('2026-10-21T12:13:00.000Z');
+      expect(JSON.parse(calls.update.decision)).toMatchObject({ reason: 'after_report' });
+    }
+  });
+
+  test.each([
+    ['the App', 'push'],
+    ['an unknown channel (finalize-only retry)', undefined],
+    ['email', 'email'],
+  ])('%s: nothing moves, no write', async (_label, channel) => {
+    process.env.GATE_REVIEW_ASK_AFTER_REPORT = 'true';
+    const { q, calls } = chain();
+    db.mockImplementation(() => q);
+    expect(await ReviewService.pullAskAfterHeldReport('sr-1', channel)).toEqual({ pulled: 0 });
+    expect(calls.update).toBeNull();
+  });
+
+  test('gate off, or no record: nothing moves', async () => {
+    const { q, calls } = chain();
+    db.mockImplementation(() => q);
+    expect(await ReviewService.pullAskAfterHeldReport('sr-1', 'sms')).toEqual({ pulled: 0 });
+    process.env.GATE_REVIEW_ASK_AFTER_REPORT = 'true';
+    expect(await ReviewService.pullAskAfterHeldReport(null, 'sms')).toEqual({ pulled: 0 });
+    expect(calls.update).toBeNull();
+  });
+
+  test('a failed write never throws', async () => {
+    process.env.GATE_REVIEW_ASK_AFTER_REPORT = 'true';
+    const { q } = chain();
+    q.update = async () => { throw new Error('db down'); };
+    db.mockImplementation(() => q);
+    expect(await ReviewService.pullAskAfterHeldReport('sr-1', 'sms')).toEqual({ pulled: 0 });
+  });
+
+  test('the completion replay finalize passes the first pass channel; a retry pulls nothing', async () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/messaging/deferred-replay-registry.js'), 'utf8');
+    expect(src).toContain("if (ctx.retry !== true) await require('../review-request').pullAskAfterHeldReport(meta.service_record_id, ctx.channel);");
+    const scheduler = require('fs').readFileSync(require('path').join(__dirname, '../services/scheduler.js'), 'utf8');
+    expect(scheduler).toContain('{ providerMessageId: smsResult.providerMessageId, customerId: msg.customer_id || null, channel: smsResult.channel || null });');
+  });
+});
