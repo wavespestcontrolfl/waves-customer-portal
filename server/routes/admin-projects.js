@@ -1692,8 +1692,6 @@ router.post('/', async (req, res, next) => {
 
     if (!customer_id) return res.status(400).json({ error: 'customer_id required' });
     if (!isValidProjectType(project_type)) return res.status(400).json({ error: 'Invalid project_type' });
-    const createFinalExteriorRejection = finalExteriorRejection(project_type, findings, project_date);
-    if (createFinalExteriorRejection) return res.status(422).json(createFinalExteriorRejection);
     // Types cut over to the typed service-report completion flow no longer
     // create project records — the appointment completion is the artifact.
     // Server-side guard so stale clients can't recreate the dual-entry path.
@@ -1814,6 +1812,10 @@ router.post('/', async (req, res, next) => {
         code: 'project_date_in_future',
       });
     }
+    // Judged against the date actually stored (resolved from the linked
+    // visit when the body omits it).
+    const createFinalExteriorRejection = finalExteriorRejection(project_type, findings, projectDate);
+    if (createFinalExteriorRejection) return res.status(422).json(createFinalExteriorRejection);
 
     // One visit, one report (#2717 server hardening): stale client caches
     // (week rows, continue snapshots) repeatedly re-offered the create
