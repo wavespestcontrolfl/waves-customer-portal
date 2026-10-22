@@ -92,8 +92,8 @@ describe('gate on', () => {
 
   test('prompt version is bumped, distinguishable, and fits the column', () => {
     // '_cf' = COMPANY FACTS, '_cfl' = + LABEL FACTS (PR #5416), '_cflv' = + VISIT STATUS & OPEN LOOPS (PR #5499), 'cflvp' = + PAYMENT FACTS (PR #5331), numeric token 5 = FREE RE-SERVICE (PR #5336) + a fresh identity above PR #5334's 3 (LIVE ETA) and #5416's 3_cfl (4 was the pre-contract claim checker, never merged); '7_m' (#5610) = the compact scheme: number 6 + one cumulative key 'm' (+ MISSED VISIT).
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers15_n');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers15_n');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers17_n');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers17_n');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers_cf');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers2');
@@ -157,7 +157,7 @@ describe('answer-book facts (owner 2026-10-21/22)', () => {
     'A customer who prepays the year and cancels within 90 days gets a refund for the visits not yet done.',
     'We serve Manatee and Sarasota counties and Charlotte County except Punta Gorda, plus Ruskin, Apollo Beach, Sun City Center, Wimauma, Gibsonton and Riverview. We do not serve Punta Gorda, DeSoto County, Tampa, St. Petersburg or Lee County.',
     'A WDO (termite) inspection report is emailed after the licensed inspector signs it, normally the same business day as the inspection. The office can check on a late report.',
-    'We do not tent for termites. For drywood termites we treat the infested wood directly with spot treatment, a borate wood treatment or injected foam.',
+    'We do not tent for termites. For drywood termites we treat the infested wood directly with spot treatment, a borate wood treatment or injected foam. When the activity is too widespread for that, we refer the customer to a fumigation company.',
     'Product labels: the office can tell a customer which products were applied at a visit and can email a product label or Safety Data Sheet on request.',
   ];
   test('every new or changed line is in the section, word for word', () => {
