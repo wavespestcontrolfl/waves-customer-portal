@@ -1076,6 +1076,9 @@ async function evaluateServiceForRun(service, run) {
     lookaheadDays: config.lookaheadDays,
     dateToleranceDays: config.dateToleranceDays,
     capabilityFor: run.capabilityFor,
+    // GATE_TECH_START_POINTS: the run's technician start points, read once
+    // per technician (candidate-slots.js loadStartPoints); unused gate off.
+    startPoints: run.startPoints,
     topN: 60,
     // GATE_AUTO_DISPATCH_CONFLICT_MOVES: read the visit's current conflict.
     conflictMoves: config.conflictMovesEnabled === true,
@@ -1398,6 +1401,7 @@ async function runAutoDispatch(opts = {}) {
   const run = {
     runId,
     config,
+    startPoints: new Map(),
     guardMode: config.guardMode,
     nowDate,
     today,
