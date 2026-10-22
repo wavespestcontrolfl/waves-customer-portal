@@ -232,8 +232,6 @@ export default function BrandFooter({ borderColor, variant, appBadges = true }) 
   // socials, app CTA, badges, wordmark block, contact, cities. No copyright
   // line here; the legal line lives in WavesShell's TrustFooter.
   const sep = <span aria-hidden="true" style={{ margin: '0 6px', color: mutedColor }}>·</span>;
-  // Small bullet between contact items (flex child, so no extra margins).
-  const dot = <span aria-hidden="true" style={{ fontSize: 14, color: mutedColor, lineHeight: 1 }}>•</span>;
   const contactLink = { color: headingColor, textDecoration: 'none', fontWeight: 500, whiteSpace: 'nowrap' };
 
   return (
@@ -254,22 +252,15 @@ export default function BrandFooter({ borderColor, variant, appBadges = true }) 
         <div style={{ fontSize: 15, fontWeight: 700, color: headingColor, fontFamily: FONTS.heading, lineHeight: 1.4 }}>Waves Pest Control</div>
         {/* Tagline + cities match the contact links: same ink, weight 500. */}
         <div style={{ fontSize: 14, fontWeight: 500, color: headingColor, lineHeight: 1.4 }}>Family-owned pest control &amp; lawn care</div>
-        {/* Contact row: one horizontal line — email • phone • site with small
-            bullet separators, no underlines. Bullet + item form one nowrap
-            unit so a wrap never strands a bullet at the end of a line. */}
+        {/* Contact: email, phone, site stacked one per line, centered, no
+            bullets (owner 2026-10-22, "make this vertical stacked"). */}
         <div style={{
-          display: 'flex', flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center',
-          columnGap: 10, rowGap: 4, fontSize: 14, color: bodyColor, lineHeight: 1.4, fontFamily: FONTS.body,
+          display: 'flex', flexDirection: 'column', alignItems: 'center',
+          rowGap: 4, fontSize: 14, color: bodyColor, lineHeight: 1.4, fontFamily: FONTS.body,
         }}>
           <a href={`mailto:${CONTACT_EMAIL}`} style={contactLink}>{CONTACT_EMAIL}</a>
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 10, whiteSpace: 'nowrap' }}>
-            {dot}
-            <a href={`tel:${CONTACT_PHONE_TEL}`} style={contactLink}>{CONTACT_PHONE_DISPLAY}</a>
-          </span>
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 10, whiteSpace: 'nowrap' }}>
-            {dot}
-            <a href="https://www.wavespestcontrol.com" target="_blank" rel="noopener noreferrer" style={contactLink}>wavespestcontrol.com</a>
-          </span>
+          <a href={`tel:${CONTACT_PHONE_TEL}`} style={contactLink}>{CONTACT_PHONE_DISPLAY}</a>
+          <a href="https://www.wavespestcontrol.com" target="_blank" rel="noopener noreferrer" style={contactLink}>wavespestcontrol.com</a>
           {/* Products & Safety intentionally NOT in the footer (owner
               2026-07-23) — the estimate's in-content safety link (#2890)
               is the one sanctioned surface for it. */}

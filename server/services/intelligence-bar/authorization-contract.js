@@ -148,6 +148,8 @@ CURATED_PREVIEW_TOOL_NAMES.add('propose_admin_edit');
 CURATED_PREVIEW_TOOL_NAMES.add('convert_lead');
 // void_invoice: its card lines come from its own preview (void-invoice-tools.js cardLines). It sends nothing.
 CURATED_PREVIEW_TOOL_NAMES.add('void_invoice');
+// The invoice edit cards: card lines come from their own previews (invoice-edit-tools.js cardLines). None sends anything.
+for (const name of ['edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice']) CURATED_PREVIEW_TOOL_NAMES.add(name);
 // The invoice reminder and payment-plan cards: their card lines come from their own previews (invoice-reminder-tools.js and
 // payment-plan-tools.js cardLines), never the generic dump.
 for (const name of ['pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan']) CURATED_PREVIEW_TOOL_NAMES.add(name);
@@ -226,6 +228,10 @@ const ACTION_LABELS = {
   propose_admin_edit: 'Edit an admin record',
   convert_lead: 'Convert a lead to a customer (sends nothing)',
   void_invoice: 'Void an invoice (sends nothing)',
+  edit_invoice: 'Edit an invoice’s title, notes or due date (sends nothing)',
+  archive_invoice: 'Archive a voided invoice (sends nothing)',
+  unarchive_invoice: 'Unarchive an invoice (sends nothing)',
+  unvoid_invoice: 'Restore a voided invoice to a draft (sends nothing)',
   pause_invoice_reminders: 'Pause an invoice’s reminders (sends nothing)',
   resume_invoice_reminders: 'Resume an invoice’s reminders',
   stop_invoice_reminders: 'Stop an invoice’s reminders (sends nothing)',
@@ -871,6 +877,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // void_invoice: the invoice, what the void does and that nothing is sent.
   if (toolName === 'void_invoice' && preview?.preview === true) {
     for (const line of require('./void-invoice-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
+  // The invoice edit cards: the invoice, each change before -> after, what it does and that nothing is sent.
+  if (['edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice'].includes(toolName) && preview?.preview === true) {
+    for (const line of require('./invoice-edit-tools').cardLines(toolName, preview)) push(line.kind, line.text, line.before !== undefined ? { before: line.before, after: line.after } : {});
   }
   // The invoice reminder cards: what each does, and for send-now and schedule the channel, the masked recipient and the message.
   if (['pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send'].includes(toolName) && preview?.preview === true) {

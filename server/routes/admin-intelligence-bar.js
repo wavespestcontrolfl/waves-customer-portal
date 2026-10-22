@@ -954,6 +954,19 @@ const PINNED_DISPLAY_BUILDERS = {
   void_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'void_invoice'
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount: preview.amount, status: preview.status, sends_to_customer: 'nothing' }
     : null),
+  // The invoice edit cards (GATE_IB_INVOICE_EDITS): the invoice, the customer and the headline; the lines ride the contract.
+  edit_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'edit_invoice'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name, total: `${preview.amount} (unchanged)`, changes: (preview.changes || []).map((c) => `${c.field}: ${c.before} -> ${c.after}`), sends_to_customer: 'nothing' }
+    : null),
+  archive_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'archive_invoice'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name, status: preview.status, sends_to_customer: 'nothing' }
+    : null),
+  unarchive_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'unarchive_invoice'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name, status: preview.status, sends_to_customer: 'nothing' }
+    : null),
+  unvoid_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'unvoid_invoice'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name, amount: preview.amount, becomes: preview.becomes, reminders_restart: 'only when it is sent again', sends_to_customer: 'nothing' }
+    : null),
   // The invoice reminder and payment-plan cards: each names the invoice and the customer; the lines ride the contract.
   pause_invoice_reminders: (params, preview) => (preview?.preview === true && preview.tool === 'pause_invoice_reminders'
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, reminders: `${preview.reminder_status} -> paused`, sends_to_customer: 'nothing' }
@@ -1029,6 +1042,11 @@ const VERIFIED_VERSION_PARAMS = {
   convert_lead: '_verified_lead_convert_version',
   // void_invoice binds the invoice state, credit, pay-page session and links the card showed.
   void_invoice: '_verified_invoice_void_version',
+  // The invoice edit cards bind the invoice version (and, per card, the body, credit balance or visit) they showed.
+  edit_invoice: '_verified_invoice_edit_version',
+  archive_invoice: '_verified_invoice_archive_version',
+  unarchive_invoice: '_verified_invoice_unarchive_version',
+  unvoid_invoice: '_verified_invoice_unvoid_version',
   // The reminder cards bind the invoice, its reminder row, the recipients and the message the card showed; the payment-plan
   // cards bind the invoice, the plan terms (every installment) and the reminder row.
   pause_invoice_reminders: '_verified_invoice_reminder_version',
@@ -2203,7 +2221,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   }
   // send_invoice: the stored approval names the invoice the preview resolved,
   // never the number the model sent.
-  if (['send_invoice', 'record_payment', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan'].includes(toolUse.name) && preview?.preview === true && preview.invoice_id) {
+  if (['send_invoice', 'record_payment', 'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan'].includes(toolUse.name) && preview?.preview === true && preview.invoice_id) {
     params.invoice_id = String(preview.invoice_id);
     delete params.invoice_number;
   }
@@ -3461,7 +3479,8 @@ RULES:
 - Follow next_offset / has_more when a complete list is requested. Report coverage and returned_count separately from total_matching.
 - En-route is not by itself a blanket prohibition on edits. Explain actual tool restrictions, and mention navigation coordination separately without inventing another approval requirement.
 - For write operations, prepare the required confirmation card; only the operator's approval can execute the proposed effects
-- Invoices: send_invoice (when it is in your tools) acts only on an EXISTING invoice — it texts the customer one pay-link text (no email). void_invoice (when it is in your tools) voids ONE invoice that has collected nothing and never deletes it; "delete" or "cancel" an invoice means void. create_invoice (when it is in your tools) creates ONE new DRAFT invoice for a named customer and never sends it; the operator uses send_invoice to send. Never change an amount on an existing invoice, charge a card or refund from the bar; for those, say so and point the operator to that invoice on the Invoices page.
+- Invoices: send_invoice (when it is in your tools) acts only on an EXISTING invoice — it texts the customer one pay-link text (no email). void_invoice (when it is in your tools) voids ONE invoice that has collected nothing and never deletes it; "delete" or "cancel" an invoice means void. create_invoice (when it is in your tools) creates ONE new DRAFT invoice for a named customer and never sends it; the operator uses send_invoice to send. Never change an amount on an existing invoice, apply account credit, charge a card or refund from the bar; for those, say so and point the operator to that invoice on the Invoices page.
+- Invoice edits (each only when it is in your tools, each its own confirmation card; none sends a message, charges a card or refunds): edit_invoice changes an unpaid invoice's title, notes or due date only (never a line item, the tax rate or the total: those stay on the Invoices page; it does not resend the invoice); archive_invoice / unarchive_invoice hide or restore a voided invoice in the list; unvoid_invoice turns a voided invoice back into a draft. Anything else on an invoice stays on the Invoices page.
 - Bill-To: set_customer_bill_to (when it is in your tools) sets the Bill-To payer for FUTURE billing on a customer who pays for themselves today and has no open unpaid invoice or checkout; no existing invoice moves. A customer with open invoices, moving existing invoices to a payer, changing or removing an existing payer, or adding a new payer stays on the customer page. There is no per-invoice Bill-To: the payer is set on the account.
 - Invoice reminders and payment plans (when they are in your tools): pause_invoice_reminders, resume_invoice_reminders and stop_invoice_reminders change one invoice's automatic reminders and send nothing; send_invoice_reminder_now texts and emails the customer the next reminder, and schedule_invoice_send sends the invoice later at a set Eastern time (give send_at_et as YYYY-MM-DDTHH:MM); create_payment_plan records a plan of equal installments and emails the customer the plan confirmation but never charges a card; cancel_payment_plan cancels the active plan. Each shows a confirmation card first. Never promise a plan collects money on its own.
 - When showing customer lists, include: name, city, tier, relevant dates, and the specific data point the query is about

@@ -7400,13 +7400,14 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       : null,
     // "From the Waves blog" (GATE_REPORT_BLOG_POST, live report only: the
     // client renders it above the footer): the post the record froze, its
-    // title and live URL checked again against the site's own host
-    // (report-blog-post.js). Null unless the gate is on; the switch hides
+    // title and live URL checked again against the site's own host, plus
+    // the post's main image from the content registry (report-blog-post.js).
+    // Null unless the gate is on; the switch hides
     // frozen posts too. Read here only, never onto the protocol object the
     // payload also returns, so this gated field is the post's one way out
     // (pre-push P0 on #5547).
     blogPost: featureGates.reportBlogPostLive?.() === true
-      ? require('./report-blog-post').frozenBlogPost(structured.blogPost)
+      ? await require('./report-blog-post').frozenBlogPostWithImage(knex, structured.blogPost)
       : null,
     // Owner directive 2026-07-05: the report mirrors the estimate document and
     // shows the customer's own email/phone with the service address. Like the
