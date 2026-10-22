@@ -2411,7 +2411,7 @@ export function MonthlyAverageSummary({ model, hasOneTime = false, breakdown = n
   );
 }
 
-// GATE_ESTIMATE_APPLICATION_MONTHS (owner 2026-10-21): the per-application
+// Application months (owner 2026-10-21): the per-application
 // prices with their cadence, what the customer pays in the months the spaced
 // service is applied and in the other months, then the plan average. Every
 // amount is one the customer is actually billed except the average, which says
@@ -9117,12 +9117,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     data, serviceMode, estimate, billsMonthly, isCommercialEstimate, cta, paymentPreference,
     services, selected, selectedCombo, combinedFrequency, pricing, renderFlags,
   }, manualDiscountMonthlyAmount);
-  // GATE_ESTIMATE_APPLICATION_MONTHS: computed once. When it applies, the
-  // summary card carries the per-application prices and month amounts, so the
-  // cards above drop their per-service "$X a month" slices (codex #6399 r2).
-  const applicationMonths = data?.applicationMonthsEnabled === true && monthlyAverage
-    ? applicationMonthsBreakdown(monthlyAverage.model)
-    : null;
+  // Application months: computed once, whenever the monthly average applies. When the plan
+  // shape is covered, the summary card carries the per-application prices and month
+  // amounts, so the cards above drop their per-service "$X a month" slices (codex #6399 r2).
+  const applicationMonths = monthlyAverage ? applicationMonthsBreakdown(monthlyAverage.model) : null;
 
   // Service/price cards — shared by the live configurator (below) and the
   // read-only recap on an accepted estimate, so reopening an accepted link
@@ -9852,7 +9850,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
                 paymentTiming={paymentTiming}
                 setupFeeAfterFirstVisit={setupFeePromiseEnabled}
-                firstApplicationLabel={data?.applicationMonthsEnabled === true}
               />
             </>
           ) : null}
@@ -10245,7 +10242,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
                 paymentTiming={paymentTiming}
                 setupFeeAfterFirstVisit={setupFeePromiseEnabled}
-                firstApplicationLabel={data?.applicationMonthsEnabled === true}
               />
             </div>
           ) : null

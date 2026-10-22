@@ -30814,8 +30814,6 @@ async function composeEstimateDataPayload(estimate, {
       // selected cadence itself, so only the switch rides here). Absent, not
       // false, with the gate off ⇒ response byte-identical to today.
       ...(featureGates.isEnabled('estimateMonthlyAverage') ? { monthlyAverageEnabled: true } : {}),
-      ...(featureGates.isEnabled('estimateMonthlyAverage') && featureGates.isEnabled('estimateApplicationMonths')
-        ? { applicationMonthsEnabled: true } : {}),
       // "Does the lawn size look off?" challenge sheet — the link renders
       // only when this is true, so gate-off responses stay byte-identical
       // (absent, not false). Draft previews never offer it (a request row
