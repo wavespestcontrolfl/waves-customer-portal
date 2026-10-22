@@ -259,8 +259,8 @@ function isDataAnswer(result) {
 // Message bodies, lead and web-form text, call transcripts, emails, reviews and
 // outside notes are all reads that can carry a stranger's instructions, and a new
 // read tool is untrusted until someone reads its result shape and lists it here.
-// A write tool's result is not a read, so it never taints (known write kinds only;
-// a tool the policy does not know taints). Gate off: only `read_admin_data` taints.
+// A write tool's result is not a read, so it taints only when it shows a prior value as text (r45;
+// known write kinds only; a tool the policy does not know taints). Gate off: only `read_admin_data` taints.
 //
 // TRUSTED_READS lists only tools whose results carry NO customer-entered string:
 // pure numbers and aggregates by service line or period, the pricing config the team
@@ -290,7 +290,24 @@ const readTaints = toolName => (toolName === GENERAL_READ_TOOL
 // A read that returned rows: an object without an error or a refusal code.
 const isReadAnswer = result => Boolean(result) && typeof result === 'object' && !result.error && !result.code;
 
+// A write result that shows a prior value as text (a card preview's notes_replaced.before, a field's
+// before / previous / existing value) hands customer-entered text to the model like a read does
+// (Codex #6369 r45). Numbers (stock_before) and on/off flags carry no instructions.
+const PRIOR_VALUE_KEY_RE = /(?:^|_)(?:before|previous|prior|old|existing|replaced|current)(?:_|$)/i;
+function carriesPriorText(value, depth = 0, underPriorKey = false) {
+  if (depth > 6 || value == null) return false;
+  if (typeof value === 'string') return underPriorKey && /\p{L}{2,}/u.test(value);
+  if (Array.isArray(value)) return value.some(item => carriesPriorText(item, depth + 1, underPriorKey));
+  if (typeof value !== 'object') return false;
+  return Object.entries(value).some(([key, inner]) => carriesPriorText(inner, depth + 1, underPriorKey || PRIOR_VALUE_KEY_RE.test(key)));
+}
+
 function noteUntrustedRead(taint, toolName, result) {
+  if (taint && ibTargetRulesV2Live() && !isReadTool(toolName) && isReadAnswer(result) && carriesPriorText(result)) {
+    taint.untrustedRead = true;
+    taint.untrustedV2 = true;
+    return;
+  }
   if (!taint || !readTaints(toolName)) return;
   if (!(toolName === GENERAL_READ_TOOL ? isDataAnswer(result) : isReadAnswer(result))) return;
   taint.untrustedRead = true;
@@ -313,7 +330,14 @@ function untrustedReadKindsInHistory(messages) {
     try { return (read.name === GENERAL_READ_TOOL ? isDataAnswer : isReadAnswer)(JSON.parse(answer.content)); } catch { return true; }
   };
   const returnedReads = reads.filter(returned);
-  return { general: returnedReads.some(read => read.name === GENERAL_READ_TOOL), v2: returnedReads.some(read => read.name !== GENERAL_READ_TOOL) };
+  // A write whose saved result showed prior text taints a resume the same way (r45).
+  const priorTextWrite = ibTargetRulesV2Live() && blocks.some((block) => {
+    if (block?.type !== 'tool_use' || isReadTool(block.name)) return false;
+    const answer = answers.get(block.id);
+    if (!answer) return false;
+    try { const parsed = JSON.parse(answer.content); return isReadAnswer(parsed) && carriesPriorText(parsed); } catch { return false; }
+  });
+  return { general: returnedReads.some(read => read.name === GENERAL_READ_TOOL), v2: priorTextWrite || returnedReads.some(read => read.name !== GENERAL_READ_TOOL) };
 }
 
 const untrustedReadInHistory = messages => Object.values(untrustedReadKindsInHistory(messages)).some(Boolean);
