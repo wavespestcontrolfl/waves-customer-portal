@@ -51,7 +51,7 @@ function reconcileOutcome(row) {
   // the operator's own check decides, so the guard stays without a key. One
   // Gmail may have sent carries its row, for the Sent check's answer.
   const mayHaveSent = row.status === "outcome_unknown" || row.mayHaveSent === true;
-  return { next: mayHaveSent ? { ...MAY_HAVE_SENT, rowId: row.id } : KEY_SETTLED, message: row.status === "cancelled"
+  return { next: mayHaveSent ? { ...MAY_HAVE_SENT, rowId: row.id, textPrint: fingerprint(row.draftText || "") } : KEY_SETTLED, message: row.status === "cancelled"
     ? "That email was cancelled and may be open as a draft in another tab. Look there, then tap I checked."
     : "That email may have gone out. Look in the Gmail Sent folder, then tap I checked." };
 }
@@ -199,6 +199,10 @@ export default function useEmailEditor(userId) {
     if (uncertainSchedule.current[slot]?.rowId !== entry.rowId) return;
     rememberUncertain(slot, null);
     if (!inSent) return;
+    // Removed only while it is still that email's text (compared by a
+    // fingerprint: storage never holds the email); newer edits stay.
+    const current = replyId ? draftSession.drafts.replies[replyId] || "" : draftSession.drafts.compose.body;
+    if (fingerprint(current) !== entry.textPrint) { say("Marked as sent. Your newer edits stay in the draft."); return; }
     if (replyId) setReplyDraft(replyId, "");
     else { setComposeForm(() => ({ to: "", subject: "", body: "" })); setShowCompose(false); }
     say("Marked as sent. The draft was removed so it is not sent twice.");
@@ -473,7 +477,7 @@ export default function useEmailEditor(userId) {
     // Gmail may already have this email: plain Send waits for the same
     // Sent-folder check as an unconfirmed schedule request. A guard that
     // cannot survive a reload is no guard, so the draft does not open.
-    if (draft.mayHaveSent && !rememberUncertain(slotOf(draft.replyEmailId), { ...MAY_HAVE_SENT, rowId: draft.id })) return { opened: false };
+    if (draft.mayHaveSent && !rememberUncertain(slotOf(draft.replyEmailId), { ...MAY_HAVE_SENT, rowId: draft.id, textPrint: fingerprint(draft.draftText || "") })) return { opened: false };
     if (draft.replyEmailId) return { opened: true, saved: setReplyDraft(draft.replyEmailId, draft.draftText)?.saved === true };
     const written = setComposeForm(() => ({ to: draft.to, subject: draft.subject === "(no subject)" ? "" : draft.subject, body: draft.draftText }));
     setShowCompose(true);

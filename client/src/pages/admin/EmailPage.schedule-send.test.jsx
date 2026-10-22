@@ -209,11 +209,28 @@ describe("Email schedule send", () => {
     expect(screen.queryByDisplayValue("Line one\n<b>two</b>")).not.toBeInTheDocument();
   });
 
+  it("found in Sent keeps a draft edited since", async () => {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/email/schedule")
+      ? Promise.reject(new TypeError("network")) : base(input, options)));
+    reconciledRow = { id: "late-unclear", status: "outcome_unknown", sendAt: "2026-10-23T12:00:00.000Z", draftText: "Line one\n<b>two</b>" };
+    mount();
+    await writeEmail();
+    fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Tomorrow morning/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "I checked: it is in neither" }));
+    await screen.findByRole("button", { name: "It is in Sent" });
+    fireEvent.change(screen.getByLabelText(/^Message/), { target: { value: "A follow-up" } });
+    fireEvent.click(screen.getByRole("button", { name: "It is in Sent" }));
+    expect((await screen.findAllByText(/Your newer edits stay in the draft/)).length).toBeGreaterThan(0);
+    expect(screen.getByLabelText(/^Message/)).toHaveValue("A follow-up");
+  });
+
   it("a reconciled email found in Sent is recorded as sent and its draft removed", async () => {
     const base = fetch.getMockImplementation();
     fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/email/schedule")
       ? Promise.reject(new TypeError("network")) : base(input, options)));
-    reconciledRow = { id: "late-unclear", status: "outcome_unknown", sendAt: "2026-10-23T12:00:00.000Z" };
+    reconciledRow = { id: "late-unclear", status: "outcome_unknown", sendAt: "2026-10-23T12:00:00.000Z", draftText: "Line one\n<b>two</b>" };
     mount();
     await writeEmail();
     fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
