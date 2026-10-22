@@ -44,6 +44,7 @@ jest.mock('../services/email-template-library', () => ({
 jest.mock('../services/customer-contact', () => ({
   getInvoiceEmailRecipients: jest.fn(() => [{ email: 'billing@example.com', name: 'Taylor' }]),
 }));
+jest.mock('../services/pay-combined', () => ({ lockCombinedCustomers: jest.fn(async () => undefined) }));
 jest.mock('../services/stripe', () => ({ isInvoiceAwaitingMicrodepositVerification: jest.fn(async () => false) }));
 
 const db = require('../models/db');
@@ -60,6 +61,7 @@ const APPROVED = { sequenceId: SEQ, status: 'active', stepIndex: 0, invoiceUpdat
 let tables;
 let hooks;
 let writes;
+let locks;
 
 function fresh() {
   tables = {
@@ -76,6 +78,7 @@ function fresh() {
   };
   hooks = {};
   writes = [];
+  locks = [];
 }
 
 // A small knex stand-in: where(object) filters; update applies (and is recorded); a function-where is ignored (the claim's
@@ -103,6 +106,8 @@ function makeDb() {
       }
       if (q.op === 'insert') { (tables[table] = tables[table] || []).push(q.patch); return [1]; }
       if (q.single) {
+        if (q.forUpdate) locks.push(table);
+        if (q.forUpdate && table === 'invoice_followup_sequences' && hooks.onSeqLock) hooks.onSeqLock();
         if (q.forUpdate && table === 'invoices' && hooks.onInvoiceLock) hooks.onInvoiceLock(tables.invoices[0]);
         const row = matching()[0];
         return row ? compose(row) : undefined;
@@ -297,5 +302,92 @@ describe('without the pin and the report, the call is what the page always made'
     seqRow().next_touch_at = null;
     await sendNow();
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+});
+
+// The reminder controls (pause / resume / stop) take the same card pin: the reminder id, status and step the card showed.
+// Resume and stop judge it on the reminder row locked FOR UPDATE; pause is one conditional UPDATE. A stop (or any other
+// change) after the card changes nothing; without the pin the calls are what the page always made.
+describe('the reminder controls take the card pin', () => {
+  const PIN = { sequenceId: SEQ, status: 'paused', stepIndex: 0 };
+  const stoppedBySomeoneElse = () => Object.assign(seqRow(), { status: 'stopped', stopped_reason: 'customer disputed', stopped_by_admin_id: 'admin-2', next_touch_at: null });
+  const sequenceWrites = () => writes.filter((w) => w.table === 'invoice_followup_sequences');
+
+  beforeEach(() => Object.assign(seqRow(), { status: 'paused', paused_reason: 'paying Friday', next_touch_at: null }));
+
+  test('resume after a stop that landed since the card: nothing is written, the stop stays', async () => {
+    stoppedBySomeoneElse();
+    const result = await Followups.resumeSequence(INV, undefined, { approved: PIN });
+    expect(result).toEqual({ previewChanged: true });
+    expect(sequenceWrites()).toEqual([]);
+    expect(seqRow()).toMatchObject({ status: 'stopped', stopped_reason: 'customer disputed', stopped_by_admin_id: 'admin-2' });
+  });
+
+  test('resume with a matching pin runs in one transaction on the reminder row locked FOR UPDATE', async () => {
+    const result = await Followups.resumeSequence(INV, undefined, { approved: PIN });
+    expect(result).toBeUndefined();
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(locks).toContain('invoice_followup_sequences');
+    expect(seqRow()).toMatchObject({ status: 'active', paused_reason: null, stopped_reason: null });
+    expect(seqRow().next_touch_at).toBeInstanceOf(Date);
+  });
+
+  test.each([
+    ['the step moved', () => { seqRow().step_index = 1; }],
+    ['the reminder was replaced', () => { seqRow().id = 'seq-other'; }],
+    ['the reminder is already active', () => { seqRow().status = 'active'; }],
+    ['there is no reminder', () => { tables.invoice_followup_sequences = []; }],
+  ])('resume: %s — nothing is written', async (_label, mutate) => {
+    mutate();
+    expect(await Followups.resumeSequence(INV, undefined, { approved: PIN })).toEqual({ previewChanged: true });
+    expect(sequenceWrites()).toEqual([]);
+  });
+
+  test('resume without the pin is the page’s call: no transaction, no lock, and it still lifts a stop', async () => {
+    stoppedBySomeoneElse();
+    expect(await Followups.resumeSequence(INV)).toBeUndefined();
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(locks).toEqual([]);
+    expect(seqRow().status).toBe('active');
+  });
+
+  test('pause is a conditional UPDATE on the approved state', async () => {
+    const active = { sequenceId: SEQ, status: 'active', stepIndex: 0 };
+    seqRow().status = 'active';
+    expect(await Followups.pauseSequence(INV, { reason: 'x', adminId: 'admin-1', approved: active })).toBeUndefined();
+    expect(seqRow()).toMatchObject({ status: 'paused', paused_reason: 'x' });
+    // A stop landed since the card: not overwritten.
+    stoppedBySomeoneElse();
+    expect(await Followups.pauseSequence(INV, { reason: 'y', approved: active })).toEqual({ previewChanged: true });
+    expect(seqRow()).toMatchObject({ status: 'stopped', stopped_reason: 'customer disputed' });
+  });
+
+  test('pause without the pin is the page’s call and returns nothing', async () => {
+    seqRow().status = 'active';
+    expect(await Followups.pauseSequence(INV, { reason: 'x', adminId: 'admin-1' })).toBeUndefined();
+    expect(seqRow().status).toBe('paused');
+  });
+
+  test('stop judges the pin first and again on the locked row; a mismatch stops nothing', async () => {
+    seqRow().status = 'active';
+    const active = { sequenceId: SEQ, status: 'active', stepIndex: 0 };
+    Object.assign(seqRow(), { status: 'paused' });
+    expect(await Followups.stopSequence(INV, { reason: 'waived', adminId: 'admin-1', approved: active })).toEqual({ previewChanged: true });
+    expect(sequenceWrites()).toEqual([]);
+    // The pin changes between the first look and the locked read (a race inside the transaction).
+    seqRow().status = 'active';
+    hooks.onSeqLock = () => { seqRow().status = 'paused'; };
+    expect(await Followups.stopSequence(INV, { reason: 'waived', adminId: 'admin-1', approved: active })).toEqual({ previewChanged: true });
+    expect(seqRow().status).toBe('paused');
+    expect(sequenceWrites()).toEqual([]);
+  });
+
+  test('stop with a matching pin stops; without the pin it is the page’s call', async () => {
+    seqRow().status = 'active';
+    expect(await Followups.stopSequence(INV, { reason: 'waived', adminId: 'admin-1', approved: { sequenceId: SEQ, status: 'active', stepIndex: 0 } })).toBeUndefined();
+    expect(seqRow()).toMatchObject({ status: 'stopped', stopped_reason: 'waived', stopped_by_admin_id: 'admin-1' });
+    seqRow().status = 'paused';
+    expect(await Followups.stopSequence(INV, { reason: 'again', adminId: 'admin-1' })).toBeUndefined();
+    expect(seqRow().status).toBe('stopped');
   });
 });

@@ -3718,6 +3718,7 @@ router.get('/:id/followup', async (req, res, next) => {
 // POST /:id/followup/pause
 // The four follow-up control handlers are named so the Intelligence Bar's reminder cards (followupControlFromBar,
 // sendReminderNowFromBar, below) run these very handlers.
+const REMINDER_CHANGED_ANSWER = { error: 'The invoice reminders changed after the card was shown, so nothing was changed.', code: 'PREVIEW_CHANGED' };
 const invoiceFollowupPauseHandler = async (req, res, next) => {
   try {
     const { reason, until } = req.body || {};
@@ -3726,9 +3727,13 @@ const invoiceFollowupPauseHandler = async (req, res, next) => {
     // blank-reason pause with no durable admin fingerprint for the
     // void-stop re-arm to preserve (Codex #3493 r7; same bug the stop
     // route had).
-    await FollowUps.pauseSequence(req.params.id, {
+    // req.ibApprovedControl is set only by followupControlFromBar (never an HTTP field): the reminder id, status and step
+    // the card showed, enforced by the service under the reminder row (409 PREVIEW_CHANGED). The page passes none.
+    const changed = await FollowUps.pauseSequence(req.params.id, {
       reason, until, adminId: req.technicianId || null,
+      ...(req.ibApprovedControl ? { approved: req.ibApprovedControl } : {}),
     });
+    if (changed?.previewChanged) return res.status(409).json(REMINDER_CHANGED_ANSWER);
     res.json({ ok: true });
   } catch (err) { next(err); }
 };
@@ -3737,7 +3742,10 @@ router.post('/:id/followup/pause', requireAdmin, invoiceFollowupPauseHandler);
 // POST /:id/followup/resume
 const invoiceFollowupResumeHandler = async (req, res, next) => {
   try {
-    await FollowUps.resumeSequence(req.params.id);
+    const changed = req.ibApprovedControl
+      ? await FollowUps.resumeSequence(req.params.id, undefined, { approved: req.ibApprovedControl })
+      : await FollowUps.resumeSequence(req.params.id);
+    if (changed?.previewChanged) return res.status(409).json(REMINDER_CHANGED_ANSWER);
     res.json({ ok: true });
   } catch (err) { next(err); }
 };
@@ -3751,9 +3759,11 @@ const invoiceFollowupStopHandler = async (req, res, next) => {
     // old req.user?.id recorded every admin stop with a NULL admin id,
     // erasing the attribution the void-stop preservation keys on
     // (Codex #3493 r5).
-    await FollowUps.stopSequence(req.params.id, {
+    const changed = await FollowUps.stopSequence(req.params.id, {
       reason, adminId: req.technicianId || null,
+      ...(req.ibApprovedControl ? { approved: req.ibApprovedControl } : {}),
     });
+    if (changed?.previewChanged) return res.status(409).json(REMINDER_CHANGED_ANSWER);
     res.json({ ok: true });
   } catch (err) { next(err); }
 };
@@ -3865,10 +3875,11 @@ const FOLLOWUP_CONTROL_HANDLERS = {
   resume: invoiceFollowupResumeHandler,
   stop: invoiceFollowupStopHandler,
 };
-function followupControlFromBar({ invoiceId, control, body, actor }) {
+// approved: { sequenceId, status, stepIndex } — the reminder state the card showed; the service enforces it on the reminder row.
+function followupControlFromBar({ invoiceId, control, body, actor, approved }) {
   const handler = FOLLOWUP_CONTROL_HANDLERS[control];
   if (!handler) return Promise.reject(new Error(`Unknown follow-up control: ${control}`));
-  return runInvoiceHandler(handler, barRequest(invoiceId, body, actor));
+  return runInvoiceHandler(handler, barRequest(invoiceId, body, actor, { ibApprovedControl: approved }));
 }
 // approvedReminder: { invoiceUpdatedAtMs, sequenceId, status, stepIndex } — what the send-now card showed. The body is the
 // panel's own (no combined confirmation: the bar never sends a combined step).

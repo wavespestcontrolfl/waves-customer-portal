@@ -2593,8 +2593,16 @@ async function handleAutopayFailure(customerId) {
 /**
  * Admin controls — called from the invoice detail UI.
  */
-async function pauseSequence(invoiceId, { reason, until, adminId } = {}) {
-  await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).update({
+// approved (the Intelligence Bar's card pin only; the page passes none): { sequenceId, status, stepIndex }. The write is one
+// conditional UPDATE on exactly that reminder state, so a stop, resume or cron advance after the card changes nothing
+// ({ previewChanged: true }). The same pin is judged by resumeSequence and stopSequence under their row locks.
+const matchesApprovedReminder = (seq, approved) => Boolean(seq) && String(seq.id) === String(approved.sequenceId)
+  && seq.status === approved.status && seq.step_index === approved.stepIndex;
+
+async function pauseSequence(invoiceId, { reason, until, adminId, approved } = {}) {
+  const query = db('invoice_followup_sequences').where({ invoice_id: invoiceId });
+  if (approved) query.where({ id: approved.sequenceId, status: approved.status, step_index: approved.stepIndex });
+  const changed = await query.update({
     updated_at: db.fn.now(),
     status: 'paused',
     paused_reason: reason || null,
@@ -2602,6 +2610,8 @@ async function pauseSequence(invoiceId, { reason, until, adminId } = {}) {
     paused_by_admin_id: adminId || null,
     next_touch_at: null,
   });
+  if (approved && !Number(changed)) return { previewChanged: true };
+  return undefined;
 }
 
 // System settlement stops that resumeSequence's two AUTOMATIC re-arm
@@ -2681,8 +2691,15 @@ async function resumeSequenceIfSystemResumable(invoiceId) {
   });
 }
 
-async function resumeSequence(invoiceId, dbc = db) {
-  const seq = await dbc('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
+async function resumeSequence(invoiceId, dbc = db, { approved = null } = {}) {
+  // With the card's pin the whole resume runs in one transaction on the reminder row locked FOR UPDATE: a stop (or any other
+  // change) that committed after the card is seen and nothing is written ({ previewChanged: true }); a stop that arrives later
+  // waits for this commit. Every other caller keeps the unlocked read it always had.
+  if (approved && !dbc.isTransaction) return dbc.transaction((trx) => resumeSequence(invoiceId, trx, { approved }));
+  const seqQuery = dbc('invoice_followup_sequences').where({ invoice_id: invoiceId });
+  if (approved) seqQuery.forUpdate();
+  const seq = await seqQuery.first();
+  if (approved && !matchesApprovedReminder(seq, approved)) return { previewChanged: true };
   if (!seq) return;
   const invoice = await dbc('invoices').where({ id: invoiceId }).first();
   if (!invoice || isTerminalInvoice(invoice)) return;
@@ -2850,7 +2867,7 @@ function shiftAnchorNYCalendarDays(anchorDate, days) {
   return base;
 }
 
-async function stopSequence(invoiceId, { reason, adminId } = {}) {
+async function stopSequence(invoiceId, { reason, adminId, approved } = {}) {
   // "Stop dunning" also means "don't force-collect on the pay page"
   // (payIncludeBalance): if this invoice rides another invoice's combined
   // PaymentIntent as a SIBLING, release that session — cancel the PI while
@@ -2876,6 +2893,12 @@ async function stopSequence(invoiceId, { reason, adminId } = {}) {
   // newly stopped invoice. Under the shared lock the stop and any setup are
   // strictly ordered: setup first → the release below cancels its PI; stop
   // first → setup's in-lock stopped-dunning re-check excludes the invoice.
+  // The card's pin (approved: { sequenceId, status, stepIndex }; the page passes none): checked first, before anything is
+  // released at Stripe, and again on the reminder row this transaction locks FOR UPDATE, before the stop is written.
+  if (approved && !matchesApprovedReminder(await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).first('id', 'status', 'step_index'), approved)) {
+    return { previewChanged: true };
+  }
+  let previewChanged = false;
   const invoice = await db('invoices').where({ id: invoiceId }).first('id', 'customer_id', 'stripe_payment_intent_id', 'invoice_number');
   await db.transaction(async (trx) => {
     const PayCombined = require('./pay-combined');
@@ -2963,7 +2986,8 @@ async function stopSequence(invoiceId, { reason, adminId } = {}) {
     const priorSeq = await trx('invoice_followup_sequences')
       .where({ invoice_id: invoiceId })
       .forUpdate()
-      .first('status', 'stopped_reason', 'stopped_by_admin_id');
+      .first('id', 'step_index', 'status', 'stopped_reason', 'stopped_by_admin_id');
+    if (approved && !matchesApprovedReminder(priorSeq, approved)) { previewChanged = true; return; }
     // A PLAN-owned stop is NOT preserved under a system stop (Codex #3493
     // r10): voidInvoice cancels the active plan in the same transaction, so
     // the plan-owned reason would be an orphan nothing can lift — the
@@ -3000,6 +3024,7 @@ async function stopSequence(invoiceId, { reason, adminId } = {}) {
       }),
     });
   });
+  return previewChanged ? { previewChanged: true } : undefined;
 }
 
 // An operator send-now with nothing to send never answers as a success (the panel would toast "Done" over

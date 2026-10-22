@@ -209,7 +209,7 @@ describe('pause, resume and stop', () => {
     const result = await confirm('pause_invoice_reminders', card, { reason: '  customer   says Friday ' });
     expect(result).toMatchObject({ success: true, reminder_status: 'paused', sent_to_customer: false });
     expect(Invoices.followupControlFromBar).toHaveBeenCalledTimes(1);
-    expect(Invoices.followupControlFromBar).toHaveBeenCalledWith({ invoiceId: INV, control: 'pause', body: { reason: 'customer says Friday' }, actor: { technicianId: 'staff-1' } });
+    expect(Invoices.followupControlFromBar).toHaveBeenCalledWith({ invoiceId: INV, control: 'pause', body: { reason: 'customer says Friday' }, actor: { technicianId: 'staff-1' }, approved: { sequenceId: SEQ, status: 'active', stepIndex: 0 } });
   });
 
   test('resume: names the next reminder and warns when it is already due; only a paused sequence resumes', async () => {
@@ -223,7 +223,7 @@ describe('pause, resume and stop', () => {
     expect(effectText(card)).toMatch(/Nothing is sent right now/);
     const result = await confirm('resume_invoice_reminders', card);
     expect(result).toMatchObject({ success: true, reminder_status: 'active' });
-    expect(Invoices.followupControlFromBar).toHaveBeenCalledWith({ invoiceId: INV, control: 'resume', body: {}, actor: { technicianId: 'staff-1' } });
+    expect(Invoices.followupControlFromBar).toHaveBeenCalledWith({ invoiceId: INV, control: 'resume', body: {}, actor: { technicianId: 'staff-1' }, approved: { sequenceId: SEQ, status: 'paused', stepIndex: 0 } });
   });
 
   test('resume on a future-due reminder does not promise an early send', async () => {
@@ -290,6 +290,22 @@ describe('pause, resume and stop', () => {
     expect(await confirm('pause_invoice_reminders', card)).toMatchObject({ preview_changed: true });
     expect(await confirm('pause_invoice_reminders', card, { reason: 'a different reason' })).toMatchObject({ preview_changed: true });
     expect(Invoices.followupControlFromBar).not.toHaveBeenCalled();
+  });
+
+  test('resume after a stop that landed since the card: the handler refuses the pin (409 PREVIEW_CHANGED) and the card reports nothing changed', async () => {
+    state.invoice_followup_sequences[0].status = 'paused';
+    const card = await call('resume_invoice_reminders');
+    // Another operator stops the reminders after the card was shown but before the service runs: the service sees the stop.
+    Invoices.followupControlFromBar.mockImplementationOnce(async ({ approved }) => {
+      state.invoice_followup_sequences[0].status = 'stopped';
+      expect(approved).toEqual({ sequenceId: SEQ, status: 'paused', stepIndex: 0 });
+      return { status: 409, json: { error: 'The invoice reminders changed after the card was shown, so nothing was changed.', code: 'PREVIEW_CHANGED' } };
+    });
+    const result = await confirm('resume_invoice_reminders', card);
+    expect(result).toMatchObject({ failed: true, code: 'preview_changed', preview_changed: true });
+    expect(result.error).toMatch(/^Nothing was changed:/);
+    expect(result.success).toBeUndefined();
+    expect(state.invoice_followup_sequences[0].status).toBe('stopped');
   });
 
   test('a card for one tool cannot approve another', async () => {

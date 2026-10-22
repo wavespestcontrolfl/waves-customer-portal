@@ -256,6 +256,7 @@ async function buildControlPlan(toolName, input) {
     effects,
     sends_to_customer: false,
     _body: reason ? { reason } : {},
+    _approved: { sequenceId: seq.id, status: seq.status, stepIndex: seq.step_index },
     _version: {
       tool: toolName,
       invoice_id: invoice.id,
@@ -297,6 +298,7 @@ async function commitControl(toolName, input, actionContext) {
   try {
     result = await require('../../routes/admin-invoices').followupControlFromBar({
       invoiceId: plan.invoice_id, control: spec.control, body: plan._body, actor: { technicianId: actionContext?.technicianId || null },
+      approved: plan._approved,
     });
   } catch (err) {
     // The handler threw. Read the reminder back: only a visible new state is reported as done.
@@ -310,6 +312,9 @@ async function commitControl(toolName, input, actionContext) {
       error: `The ${spec.verb} was interrupted — it may or may not have happened. Check the invoice’s reminders before trying again.` };
   }
   const { status, json } = result;
+  if (status === 409 && json?.code === 'PREVIEW_CHANGED') {
+    return { ...base, failed: true, code: 'preview_changed', preview_changed: true, error: `Nothing was changed: ${json.error}` };
+  }
   if (status !== 200) {
     return { ...base, failed: true, code: status === 404 ? 'not_found' : 'reminder_refused', error: `The reminders were not changed: ${json?.error || 'the Invoices page refused it'}` };
   }

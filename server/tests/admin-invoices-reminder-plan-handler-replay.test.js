@@ -102,6 +102,34 @@ describe('follow-up controls: the page and the bar reach the same service calls'
     expect(FollowUps.pauseSequence.mock.calls[0]).toEqual([INV, { reason: undefined, until: undefined, adminId: 'staff-1' }]);
   });
 
+  describe('with the card’s pin (reminder id, status, step)', () => {
+    const approved = { sequenceId: 'seq-1', status: 'paused', stepIndex: 0 };
+
+    test('the bar hands the pin to the service; the page passes none and the body cannot add one', async () => {
+      await page('/followup/pause', { reason: 'x', approved, ibApprovedControl: approved });
+      await page('/followup/resume', { approved, ibApprovedControl: approved });
+      await page('/followup/stop', { reason: 'x', approved, ibApprovedControl: approved });
+      expect(FollowUps.pauseSequence.mock.calls[0]).toEqual([INV, { reason: 'x', until: undefined, adminId: 'admin-1' }]);
+      expect(FollowUps.resumeSequence.mock.calls[0]).toEqual([INV]);
+      expect(FollowUps.stopSequence.mock.calls[0]).toEqual([INV, { reason: 'x', adminId: 'admin-1' }]);
+      await router.followupControlFromBar({ invoiceId: INV, control: 'pause', body: { reason: 'x' }, actor: BAR_ACTOR, approved });
+      await router.followupControlFromBar({ invoiceId: INV, control: 'resume', body: {}, actor: BAR_ACTOR, approved });
+      await router.followupControlFromBar({ invoiceId: INV, control: 'stop', body: { reason: 'x' }, actor: BAR_ACTOR, approved });
+      expect(FollowUps.pauseSequence.mock.calls[1]).toEqual([INV, { reason: 'x', until: undefined, adminId: 'staff-1', approved }]);
+      expect(FollowUps.resumeSequence.mock.calls[1]).toEqual([INV, undefined, { approved }]);
+      expect(FollowUps.stopSequence.mock.calls[1]).toEqual([INV, { reason: 'x', adminId: 'staff-1', approved }]);
+    });
+
+    test.each(['pause', 'resume', 'stop'])('%s: a service refusal of the pin is a 409 PREVIEW_CHANGED and the page-shaped answer is untouched', async (control) => {
+      const service = { pause: 'pauseSequence', resume: 'resumeSequence', stop: 'stopSequence' }[control];
+      FollowUps[service].mockResolvedValueOnce({ previewChanged: true });
+      const result = await router.followupControlFromBar({ invoiceId: INV, control, body: {}, actor: BAR_ACTOR, approved });
+      expect(result).toEqual({ status: 409, json: { error: 'The invoice reminders changed after the card was shown, so nothing was changed.', code: 'PREVIEW_CHANGED' } });
+      FollowUps[service].mockResolvedValueOnce(undefined);
+      expect(await router.followupControlFromBar({ invoiceId: INV, control, body: {}, actor: BAR_ACTOR, approved })).toEqual({ status: 200, json: { ok: true } });
+    });
+  });
+
   test('an unknown control is refused before any handler runs', async () => {
     await expect(router.followupControlFromBar({ invoiceId: INV, control: 'send-now', body: {}, actor: BAR_ACTOR })).rejects.toThrow('Unknown follow-up control');
     expect(FollowUps.sendNextTouchNow).not.toHaveBeenCalled();
