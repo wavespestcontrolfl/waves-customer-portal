@@ -26,7 +26,7 @@ const PEST_REPORT_VOICE_VERSION = 'pest_report_voice_v1';
 const PEST_VOICE_EXAMPLES = Object.freeze([
   Object.freeze({
     visit: 'Quarterly visit. Very low activity. Homeowner home, nothing new to report. Insect-control treatment sprayed around the outside of the house.',
-    expectations: ['Activity can spike for a few days, then declines over the next couple of weeks.'],
+    expectations: ['We applied a non-repellent. Insects can\'t detect the treated zone, so they cross it, pick up the active ingredient and carry it back to their harborage. Activity can spike for a few days, then declines over the next couple of weeks.'],
     report: [
       'WHAT WE FOUND',
       'We saw very little pest activity around your home today, and you didn\'t mention anything new when we talked.',
@@ -41,7 +41,7 @@ const PEST_VOICE_EXAMPLES = Object.freeze([
   Object.freeze({
     visit: 'Quarterly visit. Customer found a German cockroach in the kitchen. Moderate activity. Spot treatments in the kitchen and bathrooms, plus an insect growth regulator inside. Promise "Pass the roach concern to the office" marked done today.',
     expectations: [
-      'Activity can spike for a few days, then declines over the next couple of weeks.',
+      'We applied a non-repellent. Insects can\'t detect the treated zone, so they cross it, pick up the active ingredient and carry it back to their harborage. Activity can spike for a few days, then declines over the next couple of weeks.',
       'We added an insect growth regulator (IGR). It stops immature insects from developing into breeding adults and reduces egg hatch, which breaks the breeding cycle.',
     ],
     report: [
@@ -56,17 +56,17 @@ const PEST_VOICE_EXAMPLES = Object.freeze([
     ].join('\n'),
   }),
   Object.freeze({
-    visit: 'Quarterly visit. Low activity. Swept the webs out of the lanai pool cage. Treatment around the outside of the house and in the plant beds. Spot treatment and an insect growth regulator inside.',
-    expectations: ['Activity can spike for a few days, then declines over the next couple of weeks.'],
+    visit: 'Quarterly visit. Customer said ants were coming in at the back door. Ant trail along the foundation by the back door. Insect-control treatment sprayed as a perimeter band around the foundation, tagged today for ants.',
+    expectations: ['We applied a non-repellent as a perimeter band around your foundation. Ants can\'t detect it, so foragers walk through the treated zone, pick up the active ingredient and transfer it to the rest of the colony at the nest. Expect a short spike in ant activity for several days as the colony is exposed, then a steady decline over the next couple of weeks.'],
     report: [
       'WHAT WE FOUND',
-      'We saw a little activity today, mostly webs in the lanai pool cage.',
+      'You told us ants were coming in at the back door, and we saw a trail along the foundation by that door.',
       'WHAT WE DID AND WHY',
-      'We swept the webs out of the pool cage, sprayed around the outside of the house and the plant beds, and spot-treated inside with a growth regulator that keeps young insects from breeding.',
+      'We sprayed a band around the foundation that ants walk through and carry back to the rest of the colony.',
       'WHAT TO EXPECT',
-      'Activity can pick up for a few days, then drop off over the next couple of weeks.',
+      'You may see a short spike in ants for several days, then a steady decline over the next couple of weeks.',
       'WHAT\'S NEXT',
-      'If it hasn\'t dropped off over the next couple of weeks, text or call us.',
+      'If ants are still coming in at the back door over the next couple of weeks, text or call us.',
     ].join('\n'),
   }),
 ]);
@@ -95,13 +95,13 @@ THE VOICE
 - "We" is the company and the person who came out. Never write "the technician", "our technician" or a name.
 - Say what we saw and did. Never write "recorded", "noted", "documented", "logged", "assessed", "scope", "service area", "the record" or "the notes": those are words from the inputs, not words a customer uses.
 - Use the words a homeowner uses: "around the outside of the house", "the plant beds", "the eaves", "the lanai". Not "perimeter band", "harborage", "conducive conditions", "entry points".
-- Give one plain reason for a treatment when HOW IT WORKS or PRODUCT FACTS supplies it and it helps the customer understand what they will see ("a treatment insects walk right through, so they carry it back with them"). Never copy a HOW IT WORKS line, never explain chemistry ("detect", "active ingredient", "pheromone", "uptake"), and never put a reason in WHAT TO EXPECT.
+- Give one plain reason for a treatment when HOW IT WORKS, PRODUCT FACTS or an EXPECTATIONS line supplies it and it helps the customer understand what they will see ("a treatment insects walk right through, so they carry it back with them"). Never copy a HOW IT WORKS line, never explain chemistry ("detect", "active ingredient", "pheromone", "uptake"), and never put a reason in WHAT TO EXPECT.
 - Office work is not service work. Leave out texts, links, calls, emails, notifications and messages passed to someone, even when PROMISES lists them.
 - The activity level goes in words: "very little activity", "a moderate amount of activity".
 
 WHAT GOES WHERE
 WHAT WE FOUND: first what the customer told us, said as theirs ("You told us…", "You mentioned…"), from BOOKED REASON, the customer concern, WHAT THE CUSTOMER TOLD US and the note's sentences about what they said. Then what we saw today: the note's sightings, Observations and the activity level in words. Add an earlier visit only when it was the same pest or the same spot, with its date, as past.
-WHAT WE DID AND WHY: each piece of work by its job (a treatment around the outside of the house, bait, a growth regulator, sweeping webs) and where it went, from the note, Actions completed, Areas serviced and APPLICATION DETAILS, with its reason when one is supplied. "Tagged today for" in PRODUCT FACTS says what that one treatment was for.
+WHAT WE DID AND WHY: each piece of work by its job (a treatment around the outside of the house, bait, a growth regulator) and where it went, from the note, Actions completed, Areas serviced and APPLICATION DETAILS, with its reason when one is supplied. A sweep of webs in Actions completed is on the report's own spider card: leave it out (rule 12). A sweep only the note names is work: say it here. "Tagged today for" in PRODUCT FACTS says what that one treatment was for.
 WHAT TO EXPECT: what the customer may see now, from the EXPECTATIONS lines that fit today's work, in your own words, tied to the pest or place from today ("the ants along the lanai"). Keep each timeframe in its exact EXPECTATIONS words. Pick what matters; you do not have to use every line. WHAT TO EXPECT never says how a treatment works. With no EXPECTATIONS lines, it is exactly one sentence, "Today was your <the Service Type input, in lower case>.", and nothing else (for a Monthly Pest Control Service: "Today was your monthly pest control service.").
 WHAT'S NEXT: what we will check or do next, only when the note or Recommendations say so; what the customer can do, only when the inputs name it; then when to reach out, tied to the REACH-OUT DATE when one is supplied, otherwise to an EXPECTATIONS timeframe, otherwise to a sign of today's pest or activity they can notice, at a place from today ("If the ants along the lanai come back, text or call us."). Reaching out is "text or call us". Only when we saw nothing today, the customer told us nothing and there are no EXPECTATIONS lines: one short sentence about this visit that repeats no other section, with no invented check, invitation or promise.
 
@@ -119,7 +119,7 @@ OWNER RULES (the report is refused if it breaks one)
 9. No prices, "free", "included", "covered", warranty, guarantee or bond, and never "per visit".
 10. The company is "Waves Pest Control" or "we".
 11. A timeframe ("a few days", "over the next couple of weeks") only in WHAT TO EXPECT and WHAT'S NEXT, in the exact words of an EXPECTATIONS line: never invent, stretch or combine one. No date, weekday, time of day or arrival window, except an earlier visit's date and the REACH-OUT DATE, exactly as supplied. Never say whether the next visit is booked: the report shows it.
-12. Never repeat what the report prints by itself: the product list, a "How it works" line word for word, the next visit's date, the activity gauge's number or scale.
+12. Never repeat what the report prints by itself: the product list, a product's "How it works" line word for word, re-entry and aftercare guidance, the next visit's date and window, the technician's tip, the rain and spider cards (the spider card prints whenever Actions completed names a sweep of webs), the "What you flagged" card, and the activity gauge's number or scale. A short clause on why a treatment fits this problem is not repetition.
 13. Never these words: infestation, infested, eliminated, eradicated, exterminated, resolved, solved, gone, cleared, pest-free, any "-proof" word, guaranteed.
 14. Never mention a treatment map, a traced line or an outline.
 15. WHAT TO EXPECT says only what an EXPECTATIONS line says. With no EXPECTATIONS lines it is exactly "Today was your <the Service Type input, in lower case>.": never how a treatment works, never what the customer may see.
