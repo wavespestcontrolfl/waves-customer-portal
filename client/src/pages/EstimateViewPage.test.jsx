@@ -7,6 +7,7 @@ import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import { setGlassDefault } from '../lib/estimate-glass-copy';
 import WavesShell from '../components/brand/WavesShell';
 import TrustFooter from '../components/brand/TrustFooter';
+import { applicationMonthsBreakdown } from '../lib/estimateMonthlyAverage';
 import EstimateViewPage, { CombinedRecurringPriceCard, ContactGapFields, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, MonthlyAverageSummary, PlanTotalSummary, ReviewPhase, SectionOneTimeBlock, ServiceSection, SuccessCard, estimateAddServiceOffer, estimateHasRegulatedCertificateSurface, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimeLawnGuideOffered, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
 import oneTimeCopyModule from '../../../server/services/estimate-one-time-copy.js';
 
@@ -2934,5 +2935,31 @@ describe('monthly average beside per-application prices', () => {
     // A single service has no summary.
     rerender(<MonthlyAverageSummary model={{ ...model, multi: false }} />);
     expect(container).toBeEmptyDOMElement();
+  });
+
+  // GATE_ESTIMATE_APPLICATION_MONTHS (EST-2026-1185): the customer sees what
+  // each application costs, what each kind of month bills, then the average.
+  it('MonthlyAverageSummary with a breakdown: per-application prices, the two month amounts, then the average', () => {
+    const model = {
+      multi: true, planMonthly: 113.1, bundlePct: 10, credit: null,
+      services: [
+        { key: 'pest_control', label: 'Pest Control', perApplication: 115.2, visits: 4, monthly: 38.4 },
+        { key: 'mosquito', label: 'Mosquito', perApplication: 74.7, visits: 12, monthly: 74.7 },
+      ],
+    };
+    const breakdown = applicationMonthsBreakdown(model);
+    const { container } = render(<MonthlyAverageSummary model={model} breakdown={breakdown} />);
+    const text = container.textContent;
+    expect(text).toContain('$115.20 per application');
+    expect(text).toContain('every 3 months');
+    expect(text).toContain('$74.70 per application');
+    expect(container.querySelector('[data-application-months-applied]').textContent).toContain('Months with Pest Control (4 a year)');
+    expect(container.querySelector('[data-application-months-applied]').textContent).toContain('$189.90');
+    expect(container.querySelector('[data-application-months-other]').textContent).toContain('Other months (8 a year)');
+    expect(container.querySelector('[data-application-months-other]').textContent).toContain('Mosquito only');
+    expect(container.querySelector('[data-monthly-average-plan]').textContent).toContain('$113.10 a month');
+    // The per-service monthly slices are not printed in this layout.
+    expect(text).not.toContain('$38.40');
+    expect(text).not.toMatch(/per visit|\/mo\b/);
   });
 });

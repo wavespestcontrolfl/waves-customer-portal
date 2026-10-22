@@ -147,3 +147,52 @@ export function singleServiceAverageContext(monthlyAverage, hasOneTime) {
   if (!monthlyAverage || monthlyAverage.model.showPlan) return null;
   return `${CONTEXT_LINE}${hasOneTime ? ONE_TIME_NOTICE : ''}`;
 }
+
+// GATE_ESTIMATE_APPLICATION_MONTHS (owner 2026-10-21, EST-2026-1185: "Which is
+// it? $113 a month or $189 a month?"): what the customer pays in the months a
+// service is applied, beside the average. Only for the one shape whose months
+// are certain without a schedule: exactly ONE service on an even cadence that
+// divides the year (every 2, 3, 4 or 6 months, or once a year) plus services
+// applied every month. Two non-monthly services could land in the same month
+// or not, and a 9-application cadence has no fixed months, so those plans keep
+// today's summary. A plan credit has no fixed month either. The two amounts,
+// weighted by their month counts, must land on the plan average to the cent
+// band the average itself allows, or nothing new shows.
+const CADENCE_TEXT = { 1: 'once a year', 2: 'every 6 months', 3: 'every 4 months', 4: 'every 3 months', 6: 'every 2 months', 12: 'every month' };
+
+export function cadenceText(visits) {
+  return CADENCE_TEXT[visits] || null;
+}
+
+export function applicationMonthsBreakdown(model) {
+  if (!model || !model.multi || model.credit) return null;
+  const services = Array.isArray(model.services) ? model.services : [];
+  if (services.length < 2 || services.some((s) => !cadenceText(s.visits))) return null;
+  const spaced = services.filter((s) => s.visits !== 12);
+  const monthly = services.filter((s) => s.visits === 12);
+  if (spaced.length !== 1 || monthly.length === 0) return null;
+  const anchor = spaced[0];
+  const cents = (n) => Math.round(Number(n) * 100);
+  const monthlyCents = monthly.reduce((sum, s) => sum + cents(s.perApplication), 0);
+  const applicationCents = monthlyCents + cents(anchor.perApplication);
+  const appliedMonths = anchor.visits;
+  const otherMonths = 12 - appliedMonths;
+  const averageCents = (applicationCents * appliedMonths + monthlyCents * otherMonths) / 12;
+  if (Math.abs(averageCents - cents(model.planMonthly)) > 5) return null;
+  return {
+    services: services.map((s) => ({ key: s.key, label: s.label, perApplication: s.perApplication, cadence: cadenceText(s.visits) })),
+    applicationMonths: {
+      label: `Months with ${anchor.label}`,
+      count: appliedMonths,
+      amount: applicationCents / 100,
+      detail: services.map((s) => s.label).join(' + '),
+    },
+    otherMonths: {
+      label: 'Other months',
+      count: otherMonths,
+      amount: monthlyCents / 100,
+      detail: `${monthly.map((s) => s.label).join(' + ')} only`,
+    },
+    planMonthly: model.planMonthly,
+  };
+}
