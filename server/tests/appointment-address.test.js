@@ -318,3 +318,53 @@ test('combined-payment locking precedes address customer and stop locks on payer
   expect(handler.slice(comms, combined)).toContain("Object.prototype.hasOwnProperty.call(updates, 'payer_id')");
   expect(handler.slice(comms, combined)).toContain("Object.prototype.hasOwnProperty.call(updates, 'self_pay_override')");
 });
+
+describe('one-visit move of a series template row keeps future visits at the old address', () => {
+  const overrideWrite = (conn) => conn.calls.find((call) => call.patch?.recurring_template_overrides);
+  const templateRow = { ...row, status: 'confirmed', lat: 27.1, lng: -82.4, zone: 'south',
+    service_address_line1: null, service_address_line2: null, service_address_city: null,
+    service_address_state: null, service_address_zip: null, recurring_template_overrides: null };
+
+  test('writes the pre-move address as the template default', async () => {
+    const conn = connection({ rows: [templateRow] });
+    const plan = await planAppointmentAddress(conn, row.id, property.id, 'visit');
+    expect(await applyAppointmentAddress(conn, plan, 'admin-a')).toEqual([row.id]);
+    const write = overrideWrite(conn);
+    expect(write.filters).toContainEqual(['where', { id: row.id, customer_id: row.customer_id }]);
+    expect(JSON.parse(write.patch.recurring_template_overrides.bindings[0]).appointment_address).toEqual({
+      property_id: 'old', service_address_line1: null, service_address_line2: null, service_address_city: null,
+      service_address_state: null, service_address_zip: null, lat: 27.1, lng: -82.4, zone: 'south',
+    });
+    const addressWrite = conn.calls.find((call) => call.patch?.service_address_line1);
+    expect(addressWrite.patch.property_id).toBe(property.id);
+  });
+
+  test.each([
+    ['an existing future-address override', { recurring_template_overrides: { appointment_address: { property_id: 'other' } } }],
+    ['an existing override stored as text', { recurring_template_overrides: JSON.stringify({ appointment_address: { property_id: 'other' } }) }],
+    ['a template already at the destination', { property_id: property.id }],
+    ['a non-recurring visit', { is_recurring: false }],
+  ])('leaves the template default alone for %s', async (_label, changes) => {
+    const conn = connection({ rows: [{ ...templateRow, ...changes }] });
+    const plan = await planAppointmentAddress(conn, row.id, property.id, 'visit');
+    await applyAppointmentAddress(conn, plan, 'admin-a');
+    expect(overrideWrite(conn)).toBeUndefined();
+  });
+
+  test('a one-visit move of a child never writes a template default', async () => {
+    const child = { ...templateRow, id: 'child', recurring_parent_id: row.id, is_recurring: false };
+    const conn = connection({ rows: [templateRow, child] });
+    const plan = await planAppointmentAddress(conn, child.id, property.id, 'visit');
+    expect(await applyAppointmentAddress(conn, plan, 'admin-a')).toEqual(['child']);
+    expect(overrideWrite(conn)).toBeUndefined();
+  });
+
+  test('a series move still writes the destination as the default, once', async () => {
+    const conn = connection({ rows: [templateRow] });
+    const plan = await planAppointmentAddress(conn, row.id, property.id);
+    await applyAppointmentAddress(conn, plan, 'admin-a');
+    const writes = conn.calls.filter((call) => call.patch?.recurring_template_overrides);
+    expect(writes).toHaveLength(1);
+    expect(JSON.parse(writes[0].patch.recurring_template_overrides.bindings[0]).appointment_address.property_id).toBe(property.id);
+  });
+});
