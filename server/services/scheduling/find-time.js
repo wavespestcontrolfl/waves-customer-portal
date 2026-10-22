@@ -32,7 +32,7 @@ const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service
 const { occupiedRows, allocationKey } = require('./visit-capacity');
 const { stopCreditResolver } = require('./occupancy');
 const { packedBounds } = require('./packing-geometry');
-const { customerWindowAdmits, overlapsLunch } = require('./customer-windows');
+const { customerWindowAdmits, overlapsLunch, pastCustomerLastStart } = require('./customer-windows');
 const { findSlideOffers } = require('./slide-offer');
 
 // customerWindowAdmits (scheduling/customer-windows.js) is the ONE grid /
@@ -747,6 +747,13 @@ function buildDayStops(services, {
   // are computed from each member's own raw span, same as the resolver's
   // own commit-side callers.
   const creditResolver = wantsExpectedMinutesCredit ? stopCreditResolver(filtered) : null;
+  // Grouped visits (several rows sharing visit_id) move as one unit on the
+  // canonical move paths — a slide must never split one, so every member of
+  // a multi-row visit is unslidable.
+  const visitMembers = new Map();
+  if (slideShadow) {
+    for (const s of filtered) if (s.visit_id != null) visitMembers.set(s.visit_id, (visitMembers.get(s.visit_id) || 0) + 1);
+  }
   return occupiedRows(filtered)
     .map((s) => {
       // s.startMin/s.endMin are occupiedRows' own (allocation-expanded for
@@ -769,7 +776,7 @@ function buildDayStops(services, {
         ...(creditResolver ? {
           expectedMinutes: creditResolver(s, endMin - startMin),
         } : {}),
-        ...(slideShadow ? { movable: isSlidable(s) } : {}),
+        ...(slideShadow ? { movable: isSlidable(s) && !(visitMembers.get(s.visit_id) > 1) } : {}),
       };
     })
     .sort((a, b) => a.startMin - b.startMin);
@@ -796,12 +803,15 @@ function isSlidable(row) {
 // what a slide could offer on this tech-day and LOGS it — ids and minutes
 // only, never names. Nothing it finds reaches the offer list. Fail-soft: a
 // throw here must never cost the customer their real slots. Bounded to the
-// next SLIDE_SHADOW_MAX_DAYS_OUT days (~2-4 ms per open day; the estimate
-// picker searches up to 90).
+// next SLIDE_SHADOW_MAX_DAYS_OUT days and one SLIDE_SHADOW_REQUEST_EVALUATIONS
+// budget shared by every tech-day of the request (this runs synchronously on
+// the booking path; the estimate picker searches up to 90 days).
 const SLIDE_SHADOW_MAX_DAYS_OUT = 14;
+const SLIDE_SHADOW_REQUEST_EVALUATIONS = 60000;
 function logSlideShadow(date, tech, dayStops, params) {
   const daysOut = (new Date(`${date}T12:00:00Z`) - new Date(`${params.geo.todayEt}T12:00:00Z`)) / 86400000;
-  if (daysOut > SLIDE_SHADOW_MAX_DAYS_OUT) return;
+  if (daysOut > SLIDE_SHADOW_MAX_DAYS_OUT || params.slideBudget.remaining <= 0) return;
+  const { geo } = params;
   try {
     const home = params.techStartPoints ? techStartPoint(tech) : HQ;
     const result = findSlideOffers({
@@ -811,9 +821,17 @@ function logSlideShadow(date, tech, dayStops, params) {
       home,
       dayOpen: params.dayOpen,
       dayClose: params.dayClose,
+      // The same floors the plain candidates honour: nothing changed may
+      // start before "now + lead" today; the new stop also keeps the
+      // caller's earliest-start preference.
+      startFloorMin: date === geo.todayEt ? geo.todayFloorMin : 0,
+      newStartFloorMin: startFloorFor(date, geo.earliestStartMin, geo.startFloorByDate),
+      budget: params.slideBudget,
+      // Off-hour stops (assessments, re-services) skip only the hour-grid
+      // test — lunch block and the last-start rule still apply.
       admits: ({ startMin, endMin, isNew }) => (isNew || startMin % 60 === 0
         ? customerWindowAdmits({ startMin, endMin })
-        : !overlapsLunch(startMin, endMin)),
+        : !overlapsLunch(startMin, endMin) && !pastCustomerLastStart(startMin)),
     });
     if (!result.offers.length) return;
     const best = result.offers[0];
@@ -1280,6 +1298,7 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
         'scheduled_services.reservation_expires_at',
         'scheduled_services.auto_dispatch_locked',
         'scheduled_services.auto_dispatch_excluded',
+        'scheduled_services.visit_id',
       ] : []),
     );
 
@@ -1348,7 +1367,8 @@ async function findAvailableSlots(opts) {
   const dayClose = dayEndHour * 60;
 
   // Slide offers (owner request 2026-10-22) — customer-facing (packed-ends)
-  // callers only, shadow-logged in phase 1. Read at CALL time; kill switch:
+  // callers on THIS legacy path only (capacity mode returned above), shadow-
+  // logged in phase 1. Read at CALL time; kill switch:
   // unset GATE_SLOT_SLIDE_OFFER.
   const slideShadow = wantsPackedEnds && gateEnvValue('GATE_SLOT_SLIDE_OFFER');
   const { techs, services, dates, absentDays } = await loadFindTimeContext({
@@ -1387,6 +1407,7 @@ async function findAvailableSlots(opts) {
     slotStepMinutes, durationMinutes, dayOpen, dayClose, everyStepStart,
     techStartPoints: opts.techStartPoints === true,
     slideShadow,
+    slideBudget: { remaining: SLIDE_SHADOW_REQUEST_EVALUATIONS },
   };
   for (const date of dates) {
     for (const tech of techs) {

@@ -185,3 +185,37 @@ test('a plain single-service reservation_service_mix (estimate-booked visit) can
   const payload = JSON.parse(shadowLines()[0].replace('[slot-slide] shadow ', ''));
   expect(payload.slides).toEqual([{ id: 'd', from: '11:00', to: '13:00' }]);
 });
+
+test('members of a grouped visit (shared visit_id) are never slid', async () => {
+  const grouped = [...STOPS.map((s) => (s.id === 'd' ? { ...s, visit_id: 'v1' } : s)),
+    { ...row('d2', 27.42, 11), visit_id: 'v1' }];
+  db.mockImplementation((table) => {
+    if (table === 'technicians') return chain([{ id: 't1', name: 'Tech' }], table);
+    if (table === 'scheduled_services') return chain(grouped, table);
+    if (table === 'services') return chain(CATALOG, table);
+    return chain([], table);
+  });
+  process.env.GATE_SLOT_SLIDE_OFFER = 'true';
+  await findAvailableSlots(CALL);
+  const svcSelect = selects.find((s) => s.table === 'scheduled_services');
+  expect(svcSelect.cols).toContain('scheduled_services.visit_id');
+  for (const line of shadowLines()) {
+    const ids = JSON.parse(line.replace('[slot-slide] shadow ', '')).slides.map((s) => s.id);
+    expect(ids).not.toContain('d');
+    expect(ids).not.toContain('d2');
+  }
+});
+
+test('a single-row visit_id does not block a slide', async () => {
+  const single = STOPS.map((s) => (s.id === 'd' ? { ...s, visit_id: 'v-solo' } : s));
+  db.mockImplementation((table) => {
+    if (table === 'technicians') return chain([{ id: 't1', name: 'Tech' }], table);
+    if (table === 'scheduled_services') return chain(single, table);
+    if (table === 'services') return chain(CATALOG, table);
+    return chain([], table);
+  });
+  process.env.GATE_SLOT_SLIDE_OFFER = 'true';
+  await findAvailableSlots(CALL);
+  const payload = JSON.parse(shadowLines()[0].replace('[slot-slide] shadow ', ''));
+  expect(payload.slides).toEqual([{ id: 'd', from: '11:00', to: '13:00' }]);
+});

@@ -81,18 +81,25 @@ function originalPairs(stops) {
 }
 
 // A whole arrangement is feasible when every consecutive pair that is NEW to
-// this arrangement clears travel-gap.js's rule, every stop fits the day, and
-// a new/moved stop that becomes the day's first stop is reachable from home
-// by its start.
-function arrangementFeasible(stops, { home, dayOpen, dayClose, grandfathered, changedIds, admits }) {
+// this arrangement clears travel-gap.js's rule, every changed stop fits the
+// day and its start floors, and a changed stop that becomes the day's first
+// (last) stop can be reached from (can return to) home — the same HQ legs
+// find-time's leading/trailing gaps reserve.
+function changedStopFits(s, { dayOpen, dayClose, admits, startFloorMin, newStartFloorMin }) {
+  const isNew = s.id === NEW_ID;
+  if (s.startMin < dayOpen || s.endMin > dayClose) return false;
+  if (s.startMin < startFloorMin || (isNew && s.startMin < newStartFloorMin)) return false;
+  return admits({ startMin: s.startMin, endMin: s.endMin, isNew });
+}
+
+function arrangementFeasible(stops, day) {
+  const { home, dayOpen, dayClose, grandfathered, changedIds } = day;
   const ordered = [...stops].sort((a, b) => a.startMin - b.startMin);
-  for (const s of ordered) {
-    if (!changedIds.has(s.id)) continue;
-    if (s.startMin < dayOpen || s.endMin > dayClose) return false;
-    if (!admits({ startMin: s.startMin, endMin: s.endMin, isNew: s.id === NEW_ID })) return false;
-  }
+  if (ordered.some((s) => changedIds.has(s.id) && !changedStopFits(s, day))) return false;
   const first = ordered[0];
   if (first && changedIds.has(first.id) && first.startMin < dayOpen + driveMin(home, first)) return false;
+  const last = ordered[ordered.length - 1];
+  if (last && changedIds.has(last.id) && last.endMin + driveMin(last, home) > dayClose) return false;
   for (let i = 0; i < ordered.length - 1; i++) {
     const a = ordered[i];
     const b = ordered[i + 1];
@@ -159,24 +166,37 @@ function candidateStarts(durationMinutes, dayOpen, dayClose) {
  * @param {Function} [p.admits]       ({startMin, endMin, isNew}) → boolean: the
  *   caller's booking-window rule (hour grid, lunch block, last start) for the
  *   new stop and for each slid stop's NEW window. Default admits everything.
+ * @param {number} [p.startFloorMin=0]    No changed stop (new or slid) may start
+ *   before this — "now + lead" on today. A stop already starting before it is
+ *   never slid.
+ * @param {number} [p.newStartFloorMin=0] The new stop's own lower bound (the
+ *   caller's earliest-start preference); slid stops ignore it.
+ * @param {{remaining: number}} [p.budget] Shared evaluation budget across a
+ *   caller's tech-days; decremented in place. Each day also stops at
+ *   MAX_EVALUATIONS.
  * @returns {{ reason: string|null, baseline: Object|null, offers: Array, truncated?: true }}
  *   offers: one per new-stop start (best saving for that start), sorted by
  *   saving desc: { startMin, endMin, slides: [{id, fromStartMin, toStartMin}],
  *   driveMinutes, miles, savedMinutes, savedMiles }.
  */
-function findSlideOffers({ stops, newStop, durationMinutes, home, dayOpen, dayClose, admits = ADMIT_ALL }) {
+function findSlideOffers({
+  stops, newStop, durationMinutes, home, dayOpen, dayClose, admits = ADMIT_ALL,
+  startFloorMin = 0, newStartFloorMin = 0, budget = { remaining: MAX_EVALUATIONS },
+}) {
   const none = (reason, baseline = null) => ({ reason, baseline, offers: [] });
   if (!hasCoords(newStop) || !hasCoords(home)) return none('NEW_STOP_COORDLESS');
   if (!Array.isArray(stops) || stops.length === 0) return none('EMPTY_DAY');
   if (stops.some((s) => !hasCoords(s))) return none('COORDLESS_STOPS');
 
-  const base = stops.map((s) => ({ ...s, movable: s.movable === true }));
+  const base = stops.map((s) => ({ ...s, movable: s.movable === true && s.startMin >= startFloorMin }));
   const day = {
     base,
     home,
     dayOpen,
     dayClose,
     admits,
+    startFloorMin,
+    newStartFloorMin,
     grandfathered: originalPairs(base),
     starts: candidateStarts(durationMinutes, dayOpen, dayClose),
     makeNew: (startMin) => ({
@@ -189,12 +209,12 @@ function findSlideOffers({ stops, newStop, durationMinutes, home, dayOpen, dayCl
     }),
   };
 
-  const baseline = bestPlainInsertion(day);
+  const { baseline, plainStarts } = bestPlainInsertion(day);
   if (!baseline) return none('NO_PLAIN_SLOT');
   const movable = base.filter((s) => s.movable);
   if (movable.length === 0) return none('NOTHING_MOVABLE', baseline);
 
-  const { bestByStart, truncated } = bestSlidesByStart(day, baseline, movable);
+  const { bestByStart, truncated } = bestSlidesByStart(day, baseline, movable, { plainStarts, budget });
   const offers = [...bestByStart.values()]
     .sort((a, b) => b.savedMinutes - a.savedMinutes || a.startMin - b.startMin);
   return {
@@ -209,17 +229,22 @@ function costWithNewStop(day, stops, startMin, changedIds) {
   return routeCost(arrangement, day.home);
 }
 
-// Best plain insertion — the cheapest slot the customer can already book.
+// Best plain insertion — the cheapest slot the customer can already book —
+// plus every start that is bookable without a slide (never a slide offer:
+// that hour needs no one moved).
 function bestPlainInsertion(day) {
   const changedIds = new Set([NEW_ID]);
+  const plainStarts = new Set();
   let baseline = null;
   for (const startMin of day.starts) {
     const cost = costWithNewStop(day, day.base, startMin, changedIds);
-    if (cost && (!baseline || cost.minutes < baseline.driveMinutes)) {
+    if (!cost) continue;
+    plainStarts.add(startMin);
+    if (!baseline || cost.minutes < baseline.driveMinutes) {
       baseline = { startMin, driveMinutes: cost.minutes, miles: cost.miles };
     }
   }
-  return baseline;
+  return { baseline, plainStarts };
 }
 
 // Bigger saving wins; on a tie, fewer slides.
@@ -229,9 +254,11 @@ function beats(offer, prior) {
   return offer.slides.length < prior.slides.length;
 }
 
-// For each new-stop start, the best slide arrangement that clears the
-// saving floor against the plain baseline.
-function bestSlidesByStart(day, baseline, movable) {
+// For each new-stop start that is NOT already plainly bookable, the best
+// slide arrangement that clears the saving floor against the plain baseline.
+function bestSlidesByStart(day, baseline, movable, { plainStarts, budget }) {
+  const slideStarts = day.starts.filter((startMin) => !plainStarts.has(startMin));
+  const limit = Math.min(MAX_EVALUATIONS, Math.max(0, budget.remaining));
   const groups = [];
   for (let k = 1; k <= Math.min(MAX_SLIDES, movable.length); k++) groups.push(...combinations(movable, k));
 
@@ -239,14 +266,17 @@ function bestSlidesByStart(day, baseline, movable) {
   let evaluations = 0;
   for (const group of groups) {
     for (const assignment of shiftAssignments(group)) {
-      if (evaluations >= MAX_EVALUATIONS) return { bestByStart, truncated: true };
-      evaluations += day.starts.length;
+      if (evaluations >= limit) {
+        budget.remaining -= evaluations;
+        return { bestByStart, truncated: true };
+      }
+      evaluations += slideStarts.length;
       const movedById = new Map(assignment.map(({ stop, delta }) => [stop.id, {
         ...stop, startMin: stop.startMin + delta, endMin: stop.endMin + delta,
       }]));
       const slid = day.base.map((s) => movedById.get(s.id) || s);
       const changedIds = new Set([NEW_ID, ...movedById.keys()]);
-      for (const startMin of day.starts) {
+      for (const startMin of slideStarts) {
         const cost = costWithNewStop(day, slid, startMin, changedIds);
         if (!cost) continue;
         const offer = {
@@ -265,6 +295,7 @@ function bestSlidesByStart(day, baseline, movable) {
       }
     }
   }
+  budget.remaining -= evaluations;
   return { bestByStart, truncated: false };
 }
 

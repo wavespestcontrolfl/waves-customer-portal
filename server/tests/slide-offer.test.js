@@ -100,19 +100,20 @@ describe('findSlideOffers', () => {
   });
 
   test('slides may go earlier', () => {
-    // The new stop sits near home. Plainly it lands at 11 between two south
-    // stops and the day backtracks; sliding the 4 PM south stop to 2 PM lets
-    // the new stop take 3 PM, the day's last stop before home.
+    // The noon stop is far north between two south stops; the new stop is
+    // south. Sliding the noon stop to 10 AM (next to the 8 AM north stop)
+    // frees noon for the new stop beside its 1 PM neighbour.
     const stops = [
-      stop('s8', 27.32, 8, { movable: false }),
-      stop('s9', 27.05, 9, { movable: false }),
-      stop('s10', 27.18, 10, { movable: false }),
-      stop('s16', 27.18, 16),
+      stop('s8', 27.42, 8, { movable: false }),
+      stop('s12', 27.42, 12),
+      stop('s13', 27.05, 13, { movable: false }),
+      stop('s14', 27.42, 14, { movable: false }),
+      stop('s16', 27.05, 16, { movable: false }),
     ];
-    const result = findSlideOffers({ ...base, newStop: { ...at(27.32), expectedMinutes: 30 }, stops });
-    const three = result.offers.find((o) => o.startMin === H(15));
-    expect(three.slides).toEqual([{ id: 's16', fromStartMin: H(16), toStartMin: H(14) }]);
-    expect(three.savedMinutes).toBeGreaterThanOrEqual(6);
+    const result = findSlideOffers({ ...base, stops });
+    const noon = result.offers.find((o) => o.startMin === H(12));
+    expect(noon.slides).toEqual([{ id: 's12', fromStartMin: H(12), toStartMin: H(10) }]);
+    expect(noon.savedMinutes).toBeGreaterThanOrEqual(6);
   });
 
   test('no offer when the saving is under the floor', () => {
@@ -146,5 +147,50 @@ describe('evaluation budget', () => {
     expect(result.truncated).toBe(true);
     expect(Date.now() - t0).toBeLessThan(2000);
     expect(MAX_EVALUATIONS).toBe(20000);
+  });
+});
+
+describe('Codex r1 guards', () => {
+  test('an hour that is already plainly bookable is never a slide offer', () => {
+    const result = findSlideOffers({ ...base, stops: day() });
+    expect(result.offers.length).toBeGreaterThan(0);
+    for (const offer of result.offers) expect(offer.startMin).not.toBe(result.baseline.startMin);
+  });
+
+  test('start floor: nothing changed may start before it, and stops already past it are not slid', () => {
+    const result = findSlideOffers({ ...base, stops: day(), startFloorMin: H(12) });
+    expect(result.offers.find((o) => o.startMin === H(11))).toBeUndefined();
+    for (const offer of result.offers) {
+      expect(offer.startMin).toBeGreaterThanOrEqual(H(12));
+      for (const s of offer.slides) {
+        expect(s.fromStartMin).toBeGreaterThanOrEqual(H(12));
+        expect(s.toStartMin).toBeGreaterThanOrEqual(H(12));
+      }
+    }
+  });
+
+  test('newStartFloorMin binds the new stop only', () => {
+    const result = findSlideOffers({ ...base, stops: day(), newStartFloorMin: H(12) });
+    for (const offer of result.offers) expect(offer.startMin).toBeGreaterThanOrEqual(H(12));
+  });
+
+  test('a changed last stop must be able to drive home by close', () => {
+    // Every hour 8–3 is taken (unmovable); the 3 PM stop sits with the new
+    // stop, far from home. 4–5 PM ends at close with a 40+ min drive home
+    // still ahead, so there is no plain slot at all.
+    const stops = [8, 9, 10, 11, 12, 13, 14].map((h) => stop(`n${h}`, 27.30, h, { movable: false }));
+    stops.push(stop('far', 27.05, 15, { movable: false }));
+    const result = findSlideOffers({ ...base, newStop: { ...at(27.05), expectedMinutes: 30 }, stops });
+    expect(result.reason).toBe('NO_PLAIN_SLOT');
+  });
+
+  test('one budget is shared across calls and stops the later ones', () => {
+    const budget = { remaining: 50 };
+    const first = findSlideOffers({ ...base, stops: day(), budget });
+    expect(first.truncated).toBe(true);
+    expect(budget.remaining).toBeLessThanOrEqual(0);
+    const second = findSlideOffers({ ...base, stops: day(), budget });
+    expect(second.truncated).toBe(true);
+    expect(second.offers).toEqual([]);
   });
 });
