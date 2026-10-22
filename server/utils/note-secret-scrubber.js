@@ -284,6 +284,26 @@ function scrubEnvAssignments(text) {
   return { text: out + text.slice(last), count };
 }
 
+// The end of a serialized list or object value that starts at `start` ("[" or "{"): a linear scan that
+// counts brackets and skips quoted strings (plain or backslash-escaped quotes), so {"password":["a]b"]}
+// is removed whole. An unbalanced value fails closed to the end of the text (Codex #6375 r18 audit).
+function structuredValueEnd(text, start) {
+  let depth = 0;
+  let quote = null;
+  for (let i = start; i < text.length; i += 1) {
+    const c = text[i];
+    if (quote === '"') {
+      if (c === '\\') i += 1; else if (c === '"') quote = null;
+    } else if (quote) {
+      if (c === '\\' && text[i + 1] === '"') { quote = null; i += 1; } else if (c === '\\') i += 1;
+    } else if (c === '"') quote = '"';
+    else if (c === '\\' && text[i + 1] === '"') { quote = '\\"'; i += 1; }
+    else if (c === '[' || c === '{') depth += 1;
+    else if ((c === ']' || c === '}') && (depth -= 1) === 0) return i + 1;
+  }
+  return text.length;
+}
+
 // A structural credential assignment (db.password: x, X-API-Key: x). A quoted value ends at its
 // closing quote. An unquoted value that is followed by a space is a passphrase: it is extended by the
 // same linear scan as the env-style values, to the end of the line or an inline " #" comment, stopping
@@ -301,7 +321,8 @@ function scrubKeyAssignments(text) {
     if (isAlreadyRemoved(value) || !isAssignmentSecretKey(key)) continue;
     const valueQuote = (value.match(/^\\?["']/) || [''])[0];
     let end = match.index + whole.length;
-    if (!valueQuote && /[ \t]/.test(text[end] || '')) end = envValueEnd(text, end);
+    if (!valueQuote && /^[[{]/.test(value) && !value.startsWith(REMOVED)) end = structuredValueEnd(text, end - value.length);
+    else if (!valueQuote && /[ \t]/.test(text[end] || '')) end = envValueEnd(text, end);
     count += 1;
     out += `${text.slice(last, match.index)}${quote}${key}${quote}${sep}${valueQuote}${REMOVED}${valueQuote}`;
     last = end;

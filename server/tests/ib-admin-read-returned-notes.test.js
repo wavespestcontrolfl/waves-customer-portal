@@ -646,6 +646,19 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     expect(scrubNote(note).text).toBe(expected);
   });
 
+  test.each([
+    ['{"password":["hunter22"]}', '{"password":[removed]}'],
+    ['{"api_key":{"value":"abc123xyz"}}', '{"api_key":[removed]}'],
+    ['{"password":["a]b","c"],"x":1}', '{"password":[removed],"x":1}'],
+    ['{"token":{"a":{"b":[1,2,"}"]}},"keep":"yes"}', '{"token":[removed],"keep":"yes"}'],
+    ['{\\"password\\":[\\"a]b\\",\\"c\\"],\\"x\\":1}', '{\\"password\\":[removed],\\"x\\":1}'],
+    ['password: ["unterminated", "more', 'password: [removed]'],
+  ])('a serialized list or object under a credential key is removed whole: %s (r18 audit)', (note, expected) => {
+    const { text } = scrubNote(note);
+    expect(text).toBe(expected);
+    expect(scrubNote(text).text).toBe(text);
+  });
+
   test('owner-ruled prose and access words stay (r18)', () => {
     const note = 'the password is in the lockbox. PIN: 8842. lockbox passcode: 4321. gate code: 1234.';
     expect(scrubNote(note)).toEqual({ text: note, removed: 0 });
@@ -676,6 +689,8 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
       `password: ${'abcd, '.repeat(1500)}`,
       `token: ${'word '.repeat(4000)}, a: b`,
       'password: abcd\n'.repeat(1300),
+      `{"password":[${'"a]",'.repeat(3000)}"z"]}`,
+      'password: ['.repeat(3000),
     ];
     for (const input of inputs) {
       const started = Date.now();
