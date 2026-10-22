@@ -10,6 +10,9 @@ const mockSendOpts = [];
 // Runs inside the sender right before beforeHandoff: a change that lands
 // between composing a push and handing it to the provider.
 let mockBeforeLeg = null;
+// A multi-device fan-out, one entry per device ({ sent }), like the real
+// sender: a recheck before each leg, onDelivered for each device that has it.
+let mockLegs = null;
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -19,6 +22,18 @@ jest.mock('../services/push-notifications', () => ({
   // device's final boundary; false sends nothing.
   sendToAdminUser: async (id, notification, opts) => {
     mockSendOpts.push(opts);
+    if (mockLegs) {
+      let sent = 0;
+      for (const leg of mockLegs) {
+        if (mockBeforeLeg) await mockBeforeLeg(leg);
+        if (opts && typeof opts.beforeHandoff === 'function' && (await opts.beforeHandoff()) === false) {
+          return { subscriptions: mockLegs.length, sent, superseded: true };
+        }
+        if (leg.sent) { sent += 1; if (opts.onDelivered) opts.onDelivered({ id: leg.id }); }
+      }
+      if (!sent) return { subscriptions: mockLegs.length, sent: 0, failed: mockLegs.length };
+      return mockSendToAdminUser(id, notification);
+    }
     if (mockBeforeLeg) await mockBeforeLeg();
     if (opts && typeof opts.beforeHandoff === 'function' && (await opts.beforeHandoff()) === false) return { superseded: true };
     return mockSendToAdminUser(id, notification);
@@ -676,6 +691,7 @@ describe('bundled pushes for any other mover (GATE_TECH_PUSH_BUNDLE, owner 2026-
     visitRows = {};
     newerFromRows = true;
     mockBeforeLeg = null;
+    mockLegs = null;
     bundleLeaseCutoff = null;
     prime({ techs, visits: visitRows });
   });
@@ -884,11 +900,37 @@ describe('bundled pushes for any other mover (GATE_TECH_PUSH_BUNDLE, owner 2026-
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ tag: 'visit-v-2' }));
   });
 
+  test('a first device that FAILED does not count: a change before the second device composes the push again (pre-push audit P1)', async () => {
+    await officeMove('v-1', { kind: 'assigned' });
+    await officeMove('v-2', { kind: 'assigned' });
+    mockLegs = [{ id: 'd1', sent: false }, { id: 'd2', sent: true }];
+    // The first leg fails at the provider; v-1 is cancelled before the second leg.
+    mockBeforeLeg = async (leg) => { if (leg.id === 'd2') visitRows['v-1'].status = 'cancelled'; };
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 0 });
+    expect(mockSendToAdminUser).not.toHaveBeenCalled();
+    expect(cardRows[0].payload.push_bundle).toBeTruthy();
+    mockLegs = null;
+    mockBeforeLeg = null;
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: 'You have a new visit on your route', tag: 'visit-v-2' }));
+  });
+
+  test('once a device has it, a change before the next device keeps that copy (no second push to the first device)', async () => {
+    await officeMove('v-1');
+    await officeMove('v-2');
+    mockLegs = [{ id: 'd1', sent: true }, { id: 'd2', sent: true }];
+    mockBeforeLeg = async (leg) => { if (leg.id === 'd2') visitRows['v-1'].status = 'completed'; };
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: '2 visits on your route moved' }));
+    for (const r of cardRows) expect(r.payload).not.toHaveProperty('push_bundle');
+  });
+
   test('after the first device got the push, a later device is skipped only once nothing stands (no second push to the first)', async () => {
     await officeMove('v-1');
     await officeMove('v-2');
     await notices.flushBundledPushes({ now: quiet() });
-    const { beforeHandoff } = mockSendOpts[mockSendOpts.length - 1];
+    const { beforeHandoff, onDelivered } = mockSendOpts[mockSendOpts.length - 1];
+    onDelivered({ id: 'd1' });
     visitRows['v-1'].status = 'completed';
     expect(await beforeHandoff()).toBe(true);
     visitRows['v-2'].status = 'completed';

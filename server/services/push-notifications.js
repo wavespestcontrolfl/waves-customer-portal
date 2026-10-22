@@ -113,6 +113,18 @@ async function sendSubscription(sub, notification, options) {
   }
 }
 
+// Told as each device accepts, so a caller's beforeHandoff can tell "no
+// device has it yet" from "a device already has this copy"
+// (tech-visit-notifications.js sendBundle). Its error never stops the fan-out.
+function tellDelivered(onDelivered, sub) {
+  if (typeof onDelivered !== 'function') return;
+  try {
+    onDelivered(sub);
+  } catch (err) {
+    logger.warn(`[push] onDelivered failed (${err.code || err.name || 'error'})`);
+  }
+}
+
 class PushNotificationService {
   async customerStatus(customerId, database = db) {
     const context = await customerPushContext(customerId, database);
@@ -310,7 +322,7 @@ class PushNotificationService {
   // false answer skips that device and every later one — the tech's lock
   // screen should end on the newer change's own push, not this one.
   async sendToAdminUsers(adminUserIds, notificationForUser, {
-    beforeDispatch = null, beforeHandoff = null, deliveredSubscriptionIds = null,
+    beforeDispatch = null, beforeHandoff = null, deliveredSubscriptionIds = null, onDelivered = null,
   } = {}) {
     const ids = [...new Set((adminUserIds || []).filter(Boolean))];
     if (ids.length === 0) return summarize([], 0);
@@ -358,7 +370,10 @@ class PushNotificationService {
       const result = await sendSubscription(sub, notification, stillCurrent ? { shouldContinue: stillCurrent } : undefined)
         .catch(() => ({ sent: false, failed: true, reason: 'provider_failure' }));
       results.push(result);
-      if (result.sent) delivered.add(sub.id);
+      if (result.sent) {
+        delivered.add(sub.id);
+        tellDelivered(onDelivered, sub);
+      }
     }
     return { ...summarize(results, subs.length),
       ...(superseded ? { superseded: true } : {}),

@@ -918,21 +918,21 @@ class BundleChanged extends Error {}
 // ONE push for one tech's claimed cards. Resolves true when a device got it,
 // false when nothing is left to say (the bundle closes). Throws when it must
 // be tried again: the provider failed, every device refused (the run
-// summary's rule), or the bundle changed between composing the push and its
-// first handoff — a visit went stale or was cleared, so the count or the
-// kind it names is no longer right (Codex #6459 r1). After the first device
-// got it, a later device is skipped only once nothing at all still stands,
-// as for any per-visit push: a retry would push the first device twice.
+// summary's rule), or the bundle changed before ANY device accepted the push
+// — a visit went stale or was cleared, so the count or the kind it names is
+// no longer right (Codex #6459 r1 and its pre-push audit: a device that
+// failed does not count as one that has it). Once a device has it, a later
+// device is skipped only when nothing at all still stands, as for any
+// per-visit push: a retry would push the first device twice.
 async function sendBundle(technicianId, rows) {
   const plan = await bundlePlan(technicianId, rows, db);
   if (!plan.length) return false;
-  let legs = 0;
+  let delivered = 0;
   let changed = false;
   const beforeHandoff = async () => {
-    legs += 1;
     try {
       const now = await bundlePlan(technicianId, rows, db);
-      if (legs === 1 && planSignature(now) !== planSignature(plan)) {
+      if (delivered === 0 && planSignature(now) !== planSignature(plan)) {
         changed = true;
         return false;
       }
@@ -943,8 +943,11 @@ async function sendBundle(technicianId, rows) {
     }
   };
   const PushService = require('./push-notifications');
-  const result = await PushService.sendToAdminUser(technicianId, bundlePush(plan), { beforeHandoff });
-  if (changed) throw new BundleChanged('the bundle changed before its first handoff');
+  const result = await PushService.sendToAdminUser(technicianId, bundlePush(plan), {
+    beforeHandoff,
+    onDelivered: () => { delivered += 1; },
+  });
+  if (changed) throw new BundleChanged('the bundle changed before any device had it');
   if (result?.superseded) return false;
   const total = Number(result?.subscriptions) || 0;
   if (total > 0 && !(Number(result?.sent) > 0)) throw new Error(`no device accepted the push (${total} tried)`);
