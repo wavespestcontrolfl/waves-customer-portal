@@ -184,6 +184,16 @@ describe('listGates variable names', () => {
     }
   });
 
+  test('a helper that merely consumes a gate does not make it a prerequisite', () => {
+    // lawnLightingLive() reads GATE_LAWN_VISIT_ASSESSMENT as its own
+    // prerequisite; the assessment gate itself does not need lighting.
+    const row = listGates().find((g) => g.envName === 'GATE_LAWN_VISIT_ASSESSMENT');
+    expect(row.requires).toEqual([]);
+    expect(listGates().find((g) => g.envName === 'GATE_VISIT_FACTS').requires).toEqual([]);
+    // The gate's own reader still supplies real prerequisites.
+    expect(listGates().find((g) => g.envName === 'GATE_IB_VOID_INVOICE').requires).toEqual(['GATE_IB_PLATFORM']);
+  });
+
   test('a gate the catalogue retired is not listed', () => {
     expect(listGates().some((g) => g.envName === 'GATE_SELF_BOOK_DAY_CAP')).toBe(false);
   });

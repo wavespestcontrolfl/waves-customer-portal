@@ -99,16 +99,22 @@ function gateEnvNames() {
   return names;
 }
 
-// The canonical call-time reader of a gate: the smallest helper that reads
-// it. Its other variables are the gate's prerequisites
-// (GATE_ADMIN_MFA_ENFORCE → adminMfaEnforceLive() → needs GATE_ADMIN_MFA).
+// The gate's own call-time reader is the helper named after it
+// (GATE_ADMIN_MFA_ENFORCE → adminMfaEnforceLive / …Enabled / …Mode). Its other
+// variables are the gate's prerequisites. A helper that merely mentions the
+// gate is not used: it may consume it as its own prerequisite
+// (lawnLightingLive() reads GATE_LAWN_VISIT_ASSESSMENT, not the reverse).
+// No own reader → no prerequisites are claimed.
+const OWN_READER_SUFFIXES = ['Live', 'Enabled', 'Mode', 'On', ''];
+
 function callTimePrerequisites(name) {
   gateEnvNames();
-  let best = null;
-  for (const tokens of helperCache.values()) {
-    if (tokens.includes(name) && (!best || tokens.length < best.length)) best = tokens;
+  const base = name.replace(/^GATE_/, '').toLowerCase().replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase());
+  for (const suffix of OWN_READER_SUFFIXES) {
+    const tokens = helperCache.get(`${base}${suffix}`);
+    if (tokens && tokens.includes(name)) return tokens.filter((t) => t !== name);
   }
-  return (best || []).filter((t) => t !== name);
+  return [];
 }
 
 const ownName = (key) => `GATE_${key.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toUpperCase()}`;
