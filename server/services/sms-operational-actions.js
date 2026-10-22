@@ -10,6 +10,7 @@ const numbers = require('../config/twilio-numbers');
 const { runExclusive } = require('../utils/cron-lock');
 const { recordAuditEvent } = require('./audit-log');
 const NotificationService = require('./notification-service');
+const { raiseAdminAlert, cutAtWord, breaksAlertRules, MAX_WHY_CHARS } = require('./admin-alert-compose');
 const { validate: isUuid } = require('uuid');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { hashExtractionSource, recordExtractionAttempt, shouldSkipExtraction, TERMINAL_STATUSES } = require('./data-hygiene/source-extraction-store');
@@ -548,24 +549,43 @@ const REVIEW_REASONS = Object.freeze({
   contact_authority: 'the sender is not the main contact on the account',
   conflicting_facts: 'the text gives two different values for it',
   mixed_topics: 'the text mixes several topics',
-  pet_needs_review: 'a pet report with "no" or "not sure" needs a person to read it',
-  irrigation_needs_review: 'an irrigation report with "no" or "not sure" needs a person to read it',
+  pet_needs_review: 'a "no" or "not sure" pet report needs a person to read it',
+  irrigation_needs_review: 'a "no" or "not sure" report needs a person to read it',
   preference_uncertain: 'the contact preference is not clear',
   code_uncertain: 'the code does not clearly match this property',
   value_too_long: 'the value is too long to save',
   changed_during_extraction: 'the profile changed while the text was read',
 });
 
+// Why the reader stopped. The verdict code temporary_instruction is also what
+// factVerdict returns for any duration that is not 'durable', so an 'uncertain'
+// label gets its own words (Codex #6414 r3).
+const UNCERTAIN_DURATION_REASON = 'it is not clear if this is lasting or just for one visit';
+function reviewReason(f) {
+  if (f.outcome === 'temporary_instruction' && f.duration === 'uncertain') return UNCERTAIN_DURATION_REASON;
+  return REVIEW_REASONS[f.outcome] || 'it needs a person to check it';
+}
+
+// The admin-alert spec parts (docs/admin-notifications.md): a "Comms — ..."
+// headline inside 60 characters, a one-sentence why inside 110, and the full
+// reason lines in `detail`.
 function reviewBellCopy({ customer, exceptions }) {
-  const name = [customer.first_name, customer.last_name].map((part) => String(part || '').trim()).filter(Boolean).join(' ');
-  const title = name ? `SMS note to check — ${name}` : 'SMS note to check';
+  const { fitAction, fullName } = require('./admin-alert-names');
+  const name = fullName(customer);
+  const action = name
+    ? fitAction('Comms', name, [(n) => `check ${n}'s text note`, (n) => `check ${n}'s note`])
+    : 'check a customer text note';
   const lines = exceptions.map((f, i) => {
     const label = REVIEW_FIELD_LABELS[f.field] || String(f.field).replaceAll('_', ' ');
-    const reason = REVIEW_REASONS[f.outcome] || 'it needs a person to check it';
-    return `${i === 0 ? 'Wanted' : 'Also wanted'} to save as ${label}; ${reason}.`;
+    return `${i === 0 ? 'Wanted' : 'Also wanted'} to save as ${label}; ${reviewReason(f)}.`;
   });
-  lines.push('Open the conversation to check.');
-  return { title, body: lines.join('\n') };
+  const more = lines.length > 1 ? ` (+${lines.length - 1} more)` : '';
+  const first = lines[0].replace(/\.$/, '');
+  const room = MAX_WHY_CHARS - more.length - 1;
+  const lead = first.length <= room ? `${first}.` : cutAtWord(first, room + 1);
+  let why = `${lead}${more}`;
+  if (breaksAlertRules(why)) why = 'Part of a customer text needs a person to check it.';
+  return { action, why, detail: [...lines, 'Open the conversation to check.'].join('\n') };
 }
 
 async function recordMessageOperations(conn, message, extracted, matchedContext) {
@@ -677,12 +697,14 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     // fire for a real exception, in that bell's `unverified_count`.
     if (exceptions.length) {
       const copy = reviewBellCopy({ customer, exceptions });
-      const notif = await NotificationService.notifyAdmin('alert', copy.title, copy.body,
-        { trx, bell: true, dedupeKey: `sms-property-instructions:${message.id}`,
-          link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}&tab=comms`,
-          metadata: { triggerKey: 'sms_operational_exception', customerId: customer.id, sms_log_id: message.id,
-            fields: exceptions.map((f) => f.field), unverified_count: extracted.dropped + temporaryFacts.length,
-            reasons: [...new Set(exceptions.map((f) => f.outcome))] } });
+      const notif = await raiseAdminAlert('alert', {
+        area: 'Comms', action: copy.action, why: copy.why, severity: 'needs-you',
+        link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}&tab=comms`,
+        subject: { type: 'customer', id: String(customer.id) }, doneWhen: 'text_note_checked', who: 'person',
+      }, { trx, bell: true, dedupeKey: `sms-property-instructions:${message.id}`, detail: copy.detail,
+        metadata: { triggerKey: 'sms_operational_exception', customerId: customer.id, sms_log_id: message.id,
+          fields: exceptions.map((f) => f.field), unverified_count: extracted.dropped + temporaryFacts.length,
+          reasons: [...new Set(exceptions.map((f) => f.outcome))] } });
       if (!notif.id) throw new Error('sms_operations_bell_not_persisted');
       notification = notif.deduped
         ? { action: 'preserve_notification', notification_id: notif.id }
@@ -1142,7 +1164,6 @@ async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceId
     trx, bell: true, dedupeKey, dedupeWindowMs: 24 * 60 * 60 * 1000, refreshOnDedupe: true, detail,
     metadata: { triggerKey, customerId: message.customer_id,
       [sourceIdField]: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.late ? 'kept_late' : verdict.verdict } };
-  const { raiseAdminAlert } = require('./admin-alert-compose');
   // GATE_ALERT_RING_ONCE (owner 2026-10-14): a promise rings once. The probe
   // looks only at OPEN rows, at any age: an open row is refreshed without a
   // ring (read state, done state and push stay), so a later check never makes
