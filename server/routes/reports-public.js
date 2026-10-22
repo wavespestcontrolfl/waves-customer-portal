@@ -2547,21 +2547,10 @@ router.get('/:token/data', async (req, res, next) => {
       const pinnedLawnAssessmentId = requestedAssessment;
       const pinnedLawnHistoryIdentity = requestedAssessment ? require('../services/service-report/assessment-pin').assessmentPinHistory(req.query.asig) : null;
       const pinnedWeekPlanAvailableAt = requestedAssessment && requestedPlan ? (requestedPlan === 'none' ? null : requestedPlan) : undefined;
-      // GATE_REPORT_SIMPLE_WEB (owner 2026-10-17): a live view shows the
-      // work-order document the PDF prints, so it is BUILT as the PDF is
-      // (mode 'pdf'): the same compliance strips (no fixed re-entry figures)
-      // and no live-only fields. View tracking above already ran on the live
-      // mode. Gate read at call time; a partial gates module reads as off.
-      const reportGates = require('../config/feature-gates');
-      // A suppressed (internal-only) report keeps the old page and its
-      // "Not sent to the customer" review bar.
-      const simpleWeb = mode === 'live' && !suppressedTypedReport(service)
-        && typeof reportGates.reportSimpleWebLive === 'function' && reportGates.reportSimpleWebLive();
-      const buildMode = simpleWeb ? 'pdf' : mode;
       const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, {
         // The render path is the only consumer of the cross-sell/referral
         // keys, so it is the only caller that pays to compose them.
-        mode: buildMode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true, planSummary: true, upcomingVisitsCard: true, nearYou: true, lawnPhotoFindings: true,
+        mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true, planSummary: true, upcomingVisitsCard: true, nearYou: true, lawnPhotoFindings: true,
         lawnLighting: true,
         lawnWateringCloseOut: true,
         lawnRainfastWatch: true,
@@ -2575,8 +2564,6 @@ router.get('/:token/data', async (req, res, next) => {
       // /reports/:token/recap/video, meaningless in pdf/static renders.
       // Best-effort — never blocks.
       if (
-        // Keyed on the REQUEST mode: the simple web view shows the recap too,
-        // so recap texts and old /recap links (#visit-recap) still play.
         mode === 'live' && service.scheduled_service_id && !v1Data.internalOnly
         && v1Data.serviceLine === 'pest'
         // Cockroach-family typed reports dropped the V2 perimeter story —
@@ -2599,12 +2586,9 @@ router.get('/:token/data', async (req, res, next) => {
       // Glass is the unconditional report theme now (GATE_REPORT_GLASS retired).
       // Live views only — pdf/static/sms_preview renders never mount the scene,
       // so the print pipeline stays byte-identical.
-      if (buildMode === 'live') {
+      if (mode === 'live') {
         v1Data.glassDefault = true;
       }
-      // The key the page reads to render the work-order document. Absent =
-      // byte-identical payload.
-      if (simpleWeb) v1Data.simpleWebReport = true;
       return res.json(v1Data);
     }
 
