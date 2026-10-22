@@ -343,31 +343,51 @@ function moneySummary(est = {}) {
 // sentence, so those emails stay byte-identical. A template the migration skipped
 // (custom plain-text body, price block removed, publish race) would otherwise print
 // the average price row without its note.
-async function templateShowsAverageNote(templateKey) {
+// Returns the id of the ACTIVE version it validated, or null. The send is then pinned
+// to that exact version (sendDualChannel passes it as versionId), so an admin publish
+// between this check and the send cannot put the average copy into a version without
+// the tokens. sendTemplate with a versionId sends that version as long as its template
+// is active, even if a newer version has since become the active one.
+async function averageNoteVersionId(templateKey) {
   const loaded = await EmailTemplateLibrary.loadTemplateByKey(templateKey);
   const version = loaded?.activeVersion;
-  if (!version) return false;
+  if (!version?.id) return null;
   // Both tokens: the average price row replaces {{price_summary}} and the note rides
   // in {{estimate_average_note}}; a version missing either would print half of the copy.
   const tokens = ["{{price_summary}}", "{{estimate_average_note}}"];
   const blocks = typeof version.blocks === "string" ? version.blocks : JSON.stringify(version.blocks || []);
-  if (!tokens.every((token) => blocks.includes(token))) return false;
+  if (!tokens.every((token) => blocks.includes(token))) return null;
   const text = version.text_body;
-  return text == null || !String(text).trim() || tokens.every((token) => String(text).includes(token));
+  const supported = text == null || !String(text).trim() || tokens.every((token) => String(text).includes(token));
+  return supported ? version.id : null;
+}
+
+// { payload, versionId }: versionId is set only when the average was applied.
+async function applyMonthlyAverage(payload, est, templateKey) {
+  const unchanged = { payload, versionId: null };
+  if (!isEnabled("estimateFollowupMonthlyAverage")) return unchanged;
+  try {
+    const versionId = await averageNoteVersionId(templateKey);
+    if (!versionId) return unchanged;
+    const fresh = (await db("estimates").where({ id: est.id }).first()) || est;
+    const parts = await require("./estimate-monthly-average").emailAverageParts(fresh);
+    if (!parts) return unchanged;
+    return { payload: { ...payload, price_summary: parts.priceLine, estimate_average_note: parts.note }, versionId };
+  } catch (err) {
+    logger.warn(`[est-followup] monthly average skipped for estimate ${est?.id}: ${err.message}`);
+    return unchanged;
+  }
 }
 
 async function withMonthlyAverage(payload, est, templateKey) {
-  if (!isEnabled("estimateFollowupMonthlyAverage")) return payload;
-  try {
-    if (!(await templateShowsAverageNote(templateKey))) return payload;
-    const fresh = (await db("estimates").where({ id: est.id }).first()) || est;
-    const parts = await require("./estimate-monthly-average").emailAverageParts(fresh);
-    if (!parts) return payload;
-    return { ...payload, price_summary: parts.priceLine, estimate_average_note: parts.note };
-  } catch (err) {
-    logger.warn(`[est-followup] monthly average skipped for estimate ${est?.id}: ${err.message}`);
-    return payload;
-  }
+  return (await applyMonthlyAverage(payload, est, templateKey)).payload;
+}
+
+// The email spec for sendDualChannel: carries `versionId` only when the average is in
+// the payload; otherwise the very same spec object comes back.
+async function withAverageEmail(email, est) {
+  const { payload, versionId } = await applyMonthlyAverage(email.payload, est, email.templateKey);
+  return versionId ? { ...email, payload, versionId } : email;
 }
 
 function estimateEmailPayload(est, firstName, estimateUrl, extra = {}) {
@@ -592,6 +612,9 @@ async function sendDualChannel(est, { sms, email }) {
       const pdfCopy = await openEstimateEmailPdf({ estimateId: est.id, templateKey: email.templateKey, recipient: est.customer_email });
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: email.templateKey,
+        // Set only with the monthly average: pins the send to the template version
+        // whose tokens were checked (see averageNoteVersionId).
+        ...(email.versionId ? { versionId: email.versionId } : {}),
         to: est.customer_email,
         payload: await withFollowupPropertyRow(est, { ...(email.payload || {}), ...pdfCopy.payload }),
         ...(pdfCopy.attachments.length ? { attachments: pdfCopy.attachments } : {}),
@@ -1313,11 +1336,11 @@ const EstimateFollowUp = {
           }
           const ok = await sendDualChannel(est, {
             sms: smsBody,
-            email: delivery.unviewed.emailEnabled ? {
+            email: delivery.unviewed.emailEnabled ? await withAverageEmail({
               templateKey: "estimate.unviewed_followup",
               stage: "unviewed",
-              payload: await withMonthlyAverage(estimateEmailPayload(est, firstName, emailUrl), est, "estimate.unviewed_followup"),
-            } : null,
+              payload: estimateEmailPayload(est, firstName, emailUrl),
+            }, est) : null,
           });
           if (ok) {
             await db("estimates")
@@ -1398,11 +1421,11 @@ const EstimateFollowUp = {
           }
           const ok = await sendDualChannel(est, {
             sms: smsBody,
-            email: delivery.viewed.emailEnabled ? {
+            email: delivery.viewed.emailEnabled ? await withAverageEmail({
               templateKey: "estimate.viewed_followup",
               stage: "viewed",
-              payload: await withMonthlyAverage(estimateEmailPayload(est, firstName, emailUrl), est, "estimate.viewed_followup"),
-            } : null,
+              payload: estimateEmailPayload(est, firstName, emailUrl),
+            }, est) : null,
           });
           if (ok) {
             await db("estimates")
@@ -1484,11 +1507,11 @@ const EstimateFollowUp = {
           }
           const ok = await sendDualChannel(est, {
             sms: smsBody,
-            email: delivery.final.emailEnabled ? {
+            email: delivery.final.emailEnabled ? await withAverageEmail({
               templateKey: "estimate.followup_final",
               stage: "final",
-              payload: await withMonthlyAverage(estimateEmailPayload(est, firstName, emailUrl), est, "estimate.followup_final"),
-            } : null,
+              payload: estimateEmailPayload(est, firstName, emailUrl),
+            }, est) : null,
           });
           if (ok) {
             await db("estimates")
@@ -1601,14 +1624,14 @@ const EstimateFollowUp = {
           }
           const ok = await sendDualChannel(est, {
             sms: smsBody,
-            email: delivery.expiring.emailEnabled ? {
+            email: delivery.expiring.emailEnabled ? await withAverageEmail({
               templateKey: "estimate.expiring_notice",
               stage: "expiring",
-              payload: await withMonthlyAverage({
+              payload: {
                 ...estimateEmailPayload(est, firstName, emailUrl),
                 expires_at: expDate,
-              }, est, "estimate.expiring_notice"),
-            } : null,
+              },
+            }, est) : null,
           });
           if (ok) {
             await db("estimates")
@@ -1665,6 +1688,7 @@ module.exports._private = {
   sendDualChannel,
   estimateEmailPayload,
   withMonthlyAverage,
+  withAverageEmail,
   renderTemplate,
   deferredFollowupStillEligible,
   checkDepositAbandoned,

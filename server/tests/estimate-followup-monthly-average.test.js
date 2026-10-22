@@ -118,7 +118,7 @@ beforeEach(() => {
   mockGates.followup = true;
   mockGates.base = true;
   mockBilling.ctx = { billsPerApplication: true, livePricing: null };
-  mockTemplate.activeVersion = { blocks: NOTE_BLOCKS, text_body: null };
+  mockTemplate.activeVersion = { id: 'ver-1', blocks: NOTE_BLOCKS, text_body: null };
   candidate = row();
   freshOverride = undefined;
   stageWanted = 'unviewed';
@@ -216,43 +216,43 @@ describe('withMonthlyAverage: only a template whose active version can show the 
   };
 
   test('a template the migration skipped (no note block) keeps the original payload', async () => {
-    mockTemplate.activeVersion = { blocks: [NOTE_BLOCKS[0]], text_body: null };
+    mockTemplate.activeVersion = { id: 'ver-1', blocks: [NOTE_BLOCKS[0]], text_body: null };
     const { payload, out } = await apply();
     expect(out).toBe(payload);
     expect(out.price_summary).toBe('Priced per application — full breakdown inside');
   });
 
   test('a custom plain-text body that lacks the variable keeps the original payload', async () => {
-    mockTemplate.activeVersion = { blocks: NOTE_BLOCKS, text_body: 'Custom text. {{price_summary}}' };
+    mockTemplate.activeVersion = { id: 'ver-1', blocks: NOTE_BLOCKS, text_body: 'Custom text. {{price_summary}}' };
     const { payload, out } = await apply();
     expect(out).toBe(payload);
   });
 
   test('a custom plain-text body that also carries the variable gets the average', async () => {
-    mockTemplate.activeVersion = { blocks: NOTE_BLOCKS, text_body: 'Custom text. {{price_summary}} {{estimate_average_note}}' };
+    mockTemplate.activeVersion = { id: 'ver-1', blocks: NOTE_BLOCKS, text_body: 'Custom text. {{price_summary}} {{estimate_average_note}}' };
     const { out } = await apply();
     expect(out.estimate_average_note).toBe('Averaged over the year. You pay after each application.');
   });
 
   test('a custom plain-text body that carries only one of the two tokens keeps the original payload', async () => {
     for (const text_body of ['Custom text. {{estimate_average_note}}', 'Custom text. {{price_summary}}']) {
-      mockTemplate.activeVersion = { blocks: NOTE_BLOCKS, text_body };
+      mockTemplate.activeVersion = { id: 'ver-1', blocks: NOTE_BLOCKS, text_body };
       const { payload, out } = await apply();
       expect(out).toBe(payload);
     }
   });
 
   test('a version whose blocks lack the price row (note only) or the note (price only) keeps the original payload', async () => {
-    mockTemplate.activeVersion = { blocks: [NOTE_BLOCKS[1]], text_body: null };
+    mockTemplate.activeVersion = { id: 'ver-1', blocks: [NOTE_BLOCKS[1]], text_body: null };
     let r = await apply();
     expect(r.out).toBe(r.payload);
-    mockTemplate.activeVersion = { blocks: [NOTE_BLOCKS[0]], text_body: null };
+    mockTemplate.activeVersion = { id: 'ver-1', blocks: [NOTE_BLOCKS[0]], text_body: null };
     r = await apply();
     expect(r.out).toBe(r.payload);
   });
 
   test('a blank text body and blocks stored as a JSON string still count as supported', async () => {
-    mockTemplate.activeVersion = { blocks: JSON.stringify(NOTE_BLOCKS), text_body: '  ' };
+    mockTemplate.activeVersion = { id: 'ver-1', blocks: JSON.stringify(NOTE_BLOCKS), text_body: '  ' };
     const { out } = await apply();
     expect(out.price_summary).toBe('$94.00 per application · $31.33 a month');
   });
@@ -270,9 +270,53 @@ describe('withMonthlyAverage: only a template whose active version can show the 
   });
 
   test('through checkAll: a skipped expiring template sends the original price row', async () => {
-    mockTemplate.activeVersion = { blocks: [NOTE_BLOCKS[0]], text_body: null };
+    mockTemplate.activeVersion = { id: 'ver-1', blocks: [NOTE_BLOCKS[0]], text_body: null };
     const sent = await runStage('expiring', (r) => r);
     expect(sent.payload.price_summary).toBe('Priced per application — full breakdown inside');
     expect(sent.payload).not.toHaveProperty('estimate_average_note');
+  });
+});
+
+describe('the send is pinned to the template version whose tokens were checked', () => {
+  const pinnedSend = (calls) => calls.map((c) => c[0]).find((a) => a.templateKey);
+
+  test.each(STAGES)('%s: versionId rides to sendTemplate when the average is applied', async (stage, templateKey, mutate) => {
+    await runStage(stage, mutate);
+    expect(pinnedSend(EmailTemplates.sendTemplate.mock.calls)).toMatchObject({ templateKey, versionId: 'ver-1' });
+  });
+
+  test.each(STAGES)('%s: no versionId key without the average (gate off)', async (stage, templateKey, mutate) => {
+    mockGates.followup = false;
+    await runStage(stage, mutate);
+    expect(pinnedSend(EmailTemplates.sendTemplate.mock.calls)).not.toHaveProperty('versionId');
+  });
+
+  test('no versionId key when the template cannot show the note, or the plan gets no average', async () => {
+    mockTemplate.activeVersion = { id: 'ver-1', blocks: [NOTE_BLOCKS[0]], text_body: null };
+    await runStage('unviewed', (r) => r);
+    expect(pinnedSend(EmailTemplates.sendTemplate.mock.calls)).not.toHaveProperty('versionId');
+    mockTemplate.activeVersion = { id: 'ver-1', blocks: NOTE_BLOCKS, text_body: null };
+    await runStage('unviewed', (r) => ({ ...r, category: 'COMMERCIAL' }));
+    expect(pinnedSend(EmailTemplates.sendTemplate.mock.calls)).not.toHaveProperty('versionId');
+  });
+
+  test('withAverageEmail: the same spec object comes back unpinned; a supported one carries the id', async () => {
+    freshOverride = row();
+    const plain = { templateKey: 'estimate.unviewed_followup', stage: 'unviewed', payload: _private.estimateEmailPayload(row(), 'Taylor', 'https://x.test') };
+    const pinned = await _private.withAverageEmail(plain, row());
+    expect(pinned).toMatchObject({ versionId: 'ver-1', stage: 'unviewed' });
+    expect(pinned.payload.estimate_average_note).toBeTruthy();
+    mockTemplate.activeVersion = null;
+    expect(await _private.withAverageEmail(plain, row())).toBe(plain);
+  });
+
+  test('an admin publish after the check does not change the pinned id (the loader now answers ver-2)', async () => {
+    freshOverride = row();
+    const plain = { templateKey: 'estimate.unviewed_followup', stage: 'unviewed', payload: _private.estimateEmailPayload(row(), 'Taylor', 'https://x.test') };
+    const pinned = await _private.withAverageEmail(plain, row());
+    mockTemplate.activeVersion = { id: 'ver-2', blocks: [], text_body: null }; // published afterwards, no tokens
+    EmailTemplates.sendTemplate.mockClear();
+    await _private.sendDualChannel(row(), { sms: null, email: pinned });
+    expect(pinnedSend(EmailTemplates.sendTemplate.mock.calls)).toMatchObject({ versionId: 'ver-1' });
   });
 });
