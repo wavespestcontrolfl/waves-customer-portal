@@ -116,6 +116,14 @@ describe('listGates variable names', () => {
       expect(row()).toMatchObject({ readAt: 'call', enabled: false, kind: 'boolean' });
       process.env.GATE_ADMIN_MFA = 'true';
       expect(row().enabled).toBe(true);
+      // 'on' and '1' turn a gateEnvValue reader on but not a strict one; the
+      // catalogue cannot prove which reader this gate uses, so: unknown.
+      for (const value of ['on', '1']) {
+        process.env.GATE_ADMIN_MFA = value;
+        expect(row().enabled).toBeNull();
+      }
+      process.env.GATE_ADMIN_MFA = 'false';
+      expect(row().enabled).toBe(false);
     } finally {
       if (saved === undefined) delete process.env.GATE_ADMIN_MFA;
       else process.env.GATE_ADMIN_MFA = saved;

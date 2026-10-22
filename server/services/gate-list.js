@@ -84,18 +84,21 @@ function pickOwn(key, vars) {
 }
 
 // State of a catalogue gate that has no gates-map entry. These are read only
-// at call time by their own reader, so the variable as set now is what the
-// next call sees. Mirrors the catalogue's reader kinds: strict readers accept
-// only 'true', loose ones gateEnvValue's 1/true/on; a mode gate is on when set
-// to anything but an off value. Only a boolean (or null) leaves this function.
-// A catalogue gate of kind 'unverified' has no reader the catalogue can see
-// (it is read in another file), so its state is unknown, not off.
+// at call time, so the variable as set now is what the next call sees. A mode
+// gate is on when set to anything but an off value. For a boolean gate the two
+// reader styles (strict 'true'; gateEnvValue's 1/true/on) agree on most values;
+// where they differ ('on', '1', 'TRUE') the answer is the loose one only when
+// the catalogue saw a gateEnvValue reader, else unknown: the catalogue defaults
+// a gate read in another file to 'strict' without seeing its reader. A gate of
+// kind 'unverified' is unknown too. Only a boolean or null leaves here.
 function callTimeEnabled(doc) {
   if (doc.kind === 'unverified') return null;
   const raw = String(process.env[doc.name] || '').trim();
   if (doc.kind === 'mode') return raw !== '' && !['false', 'off', '0'].includes(raw.toLowerCase());
-  if (doc.reader === 'loose') return featureGates.gateEnvValue(doc.name);
-  return raw === 'true';
+  const strict = raw === 'true';
+  const loose = featureGates.gateEnvValue(doc.name);
+  if (strict === loose) return strict;
+  return doc.reader === 'loose' ? loose : null;
 }
 
 // Names the catalogue's token scan picks up that are not variables: the tail
