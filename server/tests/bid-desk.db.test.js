@@ -253,6 +253,17 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect((await bidRow(bid.id)).notified_at).not.toBeNull();
     });
 
+    test('an owed addendum bell after the date was confirmed is dropped without ringing', async () => {
+      const first = await storeEmail();
+      const { bidId } = await service.ingestEmail(first);
+      raiseAdminAlert.mockRejectedValue(new Error('bell down'));
+      await service.ingestEmail(await storeEmail({ gmail_thread_id: first.gmail_thread_id, subject: 'Addendum 1', received_at: new Date(NOW.getTime() - 30000) }));
+      await mockPg('bid_opportunities').where({ id: bidId }).update({ due_confirmed: true, needs_date_confirmation: false });
+      raiseAdminAlert.mockReset();
+      expect(await service.deliverOwedAlerts()).toBe(0);
+      expect(raiseAdminAlert).not.toHaveBeenCalled();
+    });
+
     test('an owed bell on a bid decided meanwhile is dropped without ringing', async () => {
       raiseAdminAlert.mockRejectedValue(new Error('bell down'));
       const { bidId } = await service.ingestEmail(await storeEmail());
@@ -384,6 +395,15 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect(await open()).toEqual([`bid-desk:new:${bidId}`]);
       expect((await call('PATCH', `/${bidId}`, { status: 'no_bid' })).status).toBe(200);
       expect(await open()).toEqual([]);
+    });
+
+    test('a changed date closes the reminders sent for the old one', async () => {
+      const { bidId } = await service.ingestEmail(await storeEmail());
+      const key = `bid-desk:remind:${bidId}:7d:2026-10-21T03:59:00.000Z`;
+      await mockPg('notifications').insert({ recipient_type: 'admin', category: 'lead', title: 't', body: 'b', metadata: JSON.stringify({ dedupeKey: key }) });
+      expect((await call('PATCH', `/${bidId}`, { due_at: '2026-10-28T14:00', expected_updated_at: await version(bidId) })).status).toBe(200);
+      const row = await mockPg('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key]).first('metadata');
+      expect(row.metadata.autoCleared).toBe(true);
     });
 
     test('the backfill attaching an old addendum to a live open bid rings nothing', async () => {

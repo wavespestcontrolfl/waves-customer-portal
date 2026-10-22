@@ -63,6 +63,12 @@ async function closeDoneAlerts(bidId, before, after) {
     prefixes.push(`bid-desk:addendum:${bidId}:`);
     reason.push('due_date_confirmed');
   }
+  // A changed or cleared date retires the reminders sent for the old one.
+  const dateOf = (row) => (row.due_at ? new Date(row.due_at).getTime() : null);
+  if (dateOf(before) !== dateOf(after)) {
+    prefixes.push(`bid-desk:remind:${bidId}:`);
+    reason.push('due_date_changed');
+  }
   if (before.status === 'new' && after.status !== 'new') {
     prefixes.push(`bid-desk:new:${bidId}`);
     reason.push('bid_decided');

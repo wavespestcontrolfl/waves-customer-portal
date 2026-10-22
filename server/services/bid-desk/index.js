@@ -176,7 +176,11 @@ async function deliverOwedAlert(linkId) {
     if (!link || !link.alert_kind || link.alerted_at) return false;
     const bid = await trx('bid_opportunities').where({ id: link.bid_id }).forUpdate().first();
     const email = await trx('emails').where({ id: link.email_id }).first(['id', 'subject', 'from_name', 'from_address']);
-    const moot = !bid || bid.historical || !OPEN_STATUSES.includes(bid.status);
+    // Moot: the bid is gone, history or closed, or the bell's own job is already done (a new-bid bell after the
+    // decision; an addendum bell after the date was confirmed).
+    const moot = !bid || bid.historical || !OPEN_STATUSES.includes(bid.status)
+      || (link.alert_kind === 'new' && bid.status !== 'new')
+      || (link.alert_kind === 'addendum' && !bid.needs_date_confirmation);
     if (!moot) {
       if (link.alert_kind === 'new') {
         await alerts.raise(alerts.newBidSpec(bid, email), `bid-desk:new:${bid.id}`, trx);
