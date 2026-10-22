@@ -241,3 +241,18 @@ describe('Codex r3 guards', () => {
     for (const startMin of seen) expect(startMin % 60).toBe(0);
   });
 });
+
+describe('Codex r4 guards', () => {
+  test('equal-minute plain slots tie-break on miles', () => {
+    // Noon (between the stops) and 2 PM (after the last) both model 55
+    // drive minutes; 2 PM is ~0.5 mi shorter, so it is the baseline.
+    const stops = [
+      { id: 'a', lat: 27.344, lng: -82.404, startMin: H(10), endMin: H(11), expectedMinutes: 30 },
+      { id: 'b', lat: 27.288, lng: -82.424, startMin: H(13), endMin: H(14), expectedMinutes: 30 },
+    ];
+    const result = findSlideOffers({
+      ...base, stops, newStop: { lat: 27.239, lng: -82.421, expectedMinutes: 30 },
+    });
+    expect(result.baseline).toMatchObject({ startMin: H(14), driveMinutes: 55 });
+  });
+});

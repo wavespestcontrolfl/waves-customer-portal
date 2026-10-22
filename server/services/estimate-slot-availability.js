@@ -2206,6 +2206,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       // customer grid (09:00-17:00, docs/public-route-contracts.md) — never
       // an 08:00 start (Codex r3 P0 on #4663).
       customerFacing: true,
+      // Slide shadow (GATE_SLOT_SLIDE_OFFER): the daypart filterTimeOfDay
+      // applies below, so a logged slide matches what this picker shows.
+      slideTimeOfDay: opts.timeOfDay,
       dateFrom: segFrom,
       dateTo: segTo,
       topN: Number.MAX_SAFE_INTEGER,

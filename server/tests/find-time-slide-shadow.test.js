@@ -297,3 +297,21 @@ test('a committed visit with a stray reservation_expires_at can still slide', as
     ? { ...x, reservation_expires_at: new Date(Date.now() + 3600000) } : x)));
   expect(ids[0]).toEqual(['d']);
 });
+
+test('the requested daypart binds the logged slide start', async () => {
+  process.env.GATE_SLOT_SLIDE_OFFER = 'true';
+  const startsFor = async (slideTimeOfDay) => {
+    _resetSlideShadowSample();
+    logger.info.mockClear();
+    wireDb();
+    await findAvailableSlots({ ...CALL, slideTimeOfDay });
+    return shadowLines().map((l) => JSON.parse(l.replace('[slot-slide] shadow ', '')).slideStart);
+  };
+  // Positive control: no daypart → the 11 AM slide.
+  expect(await startsFor(undefined)).toEqual(['11:00']);
+  // Afternoon request: the morning slide is never logged.
+  for (const start of await startsFor('afternoon')) expect(Number(start.slice(0, 2))).toBeGreaterThanOrEqual(12);
+  // Morning request: every morning hour is taken, so there is no plain
+  // morning slot to beat — no slide is logged (no-baseline rule).
+  expect(await startsFor('morning')).toEqual([]);
+});

@@ -865,6 +865,13 @@ function claimSlideShadowSample(now = Date.now()) {
   return true;
 }
 const overlapsOnly = (a, b) => a.startMin < b.endMin && b.startMin < a.endMin;
+// The caller's requested daypart, applied to the NEW stop's start the way
+// booking.js inTimeOfDay / estimate-slot-availability filterTimeOfDay apply
+// it after find-time returns (morning = before noon, else noon on).
+function inSlideTimeOfDay(startMin, timeOfDay) {
+  if (!timeOfDay || timeOfDay === 'any') return true;
+  return timeOfDay === 'morning' ? startMin < 12 * 60 : startMin >= 12 * 60;
+}
 function logSlideShadow(date, tech, dayStops, params) {
   const daysOut = (new Date(`${date}T12:00:00Z`) - new Date(`${params.geo.todayEt}T12:00:00Z`)) / 86400000;
   const { slideBudget } = params;
@@ -894,9 +901,12 @@ function logSlideShadow(date, tech, dayStops, params) {
       pairViolates: travelGapEnabled() ? undefined : overlapsOnly,
       // Off-hour stops (assessments, re-services) skip only the hour-grid
       // test — lunch block and the last-start rule still apply.
-      admits: ({ startMin, endMin, isNew, offHour }) => (isNew || !offHour
-        ? customerWindowAdmits({ startMin, endMin })
-        : !overlapsLunch(startMin, endMin) && !pastCustomerLastStart(startMin)),
+      admits: ({ startMin, endMin, isNew, offHour }) => {
+        if (isNew && !inSlideTimeOfDay(startMin, params.slideTimeOfDay)) return false;
+        return isNew || !offHour
+          ? customerWindowAdmits({ startMin, endMin })
+          : !overlapsLunch(startMin, endMin) && !pastCustomerLastStart(startMin);
+      },
     });
     if (!result.offers.length) return;
     const best = result.offers[0];
@@ -1468,6 +1478,7 @@ async function findAvailableSlots(opts) {
     techStartPoints: opts.techStartPoints === true,
     slideShadow: slideMeta != null,
     slideMeta,
+    slideTimeOfDay: opts.slideTimeOfDay || null,
     slideBudget: { remaining: SLIDE_SHADOW_REQUEST_EVALUATIONS, spentMs: 0, deadline: null },
   };
   for (const date of dates) {

@@ -259,7 +259,11 @@ function bestPlainInsertion(day) {
     const cost = costWithNewStop(day, day.base, startMin, changedIds);
     if (!cost) continue;
     plainStarts.add(startMin);
-    if (!baseline || cost.minutes < baseline.driveMinutes) {
+    // driveMin rounds each leg to whole minutes, so equal-minute plain
+    // routes are common — break the tie on miles so both saving floors are
+    // measured against the real best plain alternative.
+    if (!baseline || cost.minutes < baseline.driveMinutes
+      || (cost.minutes === baseline.driveMinutes && cost.miles < baseline.miles)) {
       baseline = { startMin, driveMinutes: cost.minutes, miles: cost.miles };
     }
   }
