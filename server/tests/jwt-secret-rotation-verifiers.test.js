@@ -106,26 +106,45 @@ describe('staff auth middleware', () => {
     expect(next).not.toHaveBeenCalled();
   });
 
-  it('accepts a retired-secret token when listed and keeps the token_version check', async () => {
+  it('REJECTS a retired-secret staff token even when it is listed (staff never rotate)', async () => {
     process.env.JWT_SECRET_PREVIOUS = OLD;
     mockTech();
-    const req = { headers: { authorization: `Bearer ${staffToken(OLD)}` }, method: 'GET', path: '/x' };
+    const forged = jwt.sign({ technicianId: 7, type: 'access', tokenVersion: 1, mfa: true }, OLD, { expiresIn: '1h' });
+    const out = res(); const next = jest.fn();
+    await adminAuthenticate({ headers: { authorization: `Bearer ${forged}` }, method: 'GET', path: '/x' }, out, next);
+    expect(out.status).toHaveBeenCalledWith(401);
+    expect(out.json).toHaveBeenCalledWith({ error: 'Invalid token' });
+    expect(next).not.toHaveBeenCalled();
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  it('still accepts a current-secret staff token while previous is listed', async () => {
+    process.env.JWT_SECRET_PREVIOUS = OLD;
+    mockTech();
+    const req = { headers: { authorization: `Bearer ${staffToken(CURRENT)}` }, method: 'GET', path: '/x' };
     const next = jest.fn();
     await adminAuthenticate(req, res(), next);
     expect(next).toHaveBeenCalledTimes(1);
     expect(req.technicianId).toBe(7);
-
-    const stale = { headers: { authorization: `Bearer ${staffToken(OLD, { tokenVersion: 2 })}` }, method: 'GET', path: '/x' };
-    const out = res(); const next2 = jest.fn();
-    await adminAuthenticate(stale, out, next2);
-    expect(out.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'TOKEN_REVOKED' }));
-    expect(next2).not.toHaveBeenCalled();
   });
 
-  it('keeps its type and scope checks for a retired-secret token', async () => {
+  it('verifyStaffBearer, the staff socket decoder and the rate-limit key refuse a retired-secret staff token', async () => {
     process.env.JWT_SECRET_PREVIOUS = OLD;
     mockTech();
-    const refresh = jwt.sign({ technicianId: 7, type: 'refresh' }, OLD);
+    const { verifyStaffBearer } = require('../middleware/admin-auth');
+    const forged = staffToken(OLD);
+    await expect(verifyStaffBearer({ headers: { authorization: `Bearer ${forged}` } })).resolves.toBeNull();
+    const { rateLimitKey } = require('../middleware/rate-limit-key');
+    expect(rateLimitKey({ headers: { authorization: `Bearer ${forged}` }, ip: '203.0.113.5' })).toBe('203.0.113.5');
+    expect(rateLimitKey({ headers: { authorization: `Bearer ${staffToken(CURRENT)}` }, ip: '203.0.113.5' })).toBe('tech:7:v1');
+    const customer = jwt.sign({ customerId: 'prop-1' }, OLD, { expiresIn: '15m' });
+    expect(rateLimitKey({ headers: { authorization: `Bearer ${customer}` }, ip: '203.0.113.5' })).toBe('cust:prop-1');
+  });
+
+  it('keeps its type check while previous is listed', async () => {
+    process.env.JWT_SECRET_PREVIOUS = OLD;
+    mockTech();
+    const refresh = jwt.sign({ technicianId: 7, type: 'refresh' }, CURRENT);
     const out = res(); const next = jest.fn();
     await adminAuthenticate({ headers: { authorization: `Bearer ${refresh}` }, method: 'GET', path: '/x' }, out, next);
     expect(out.json).toHaveBeenCalledWith({ error: 'Invalid token type' });

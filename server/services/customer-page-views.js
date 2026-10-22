@@ -39,7 +39,7 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const config = require('../config');
-const { verifyJwtWithRotation } = require('../utils/jwt-secrets');
+const { verifyStaffJwt } = require('../utils/jwt-secrets');
 const logger = require('./logger');
 const { isBotUserAgent } = require('../utils/bot-ua');
 
@@ -71,7 +71,7 @@ function hasAdminMarker(req) {
   const token = readCookie(req, 'waves_admin');
   if (!token) return false;
   try {
-    const payload = verifyJwtWithRotation(token, config.jwt.secret);
+    const payload = verifyStaffJwt(token, config.jwt.secret);
     return !!payload && payload.kind === 'admin_marker';
   } catch { return false; }
 }

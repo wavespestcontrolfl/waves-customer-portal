@@ -43,7 +43,7 @@ const { applyReportIdentitySnapshot } = require('../services/service-report/repo
 const ASSESSMENT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const { verifyAssessmentPin } = require('../services/service-report/assessment-pin');
 const config = require('../config');
-const { verifyJwtWithRotation } = require('../utils/jwt-secrets');
+const { verifyStaffJwt } = require('../utils/jwt-secrets');
 const { isStaffAccessToken, staffTokenVersionMatches } = require('../middleware/admin-auth');
 const { sessionMfaBlock } = require('../services/staff-mfa');
 
@@ -83,7 +83,7 @@ async function staffCanViewSuppressed(req) {
   try {
     const header = String(req.headers.authorization || '');
     if (!header.startsWith('Bearer ')) return false;
-    const decoded = verifyJwtWithRotation(header.slice(7), config.jwt.secret);
+    const decoded = verifyStaffJwt(header.slice(7), config.jwt.secret);
     if (!isStaffAccessToken(decoded) || !decoded.technicianId || decoded.scope === 'terminal') return false;
     const tech = await db('technicians')
       .where({ id: decoded.technicianId })

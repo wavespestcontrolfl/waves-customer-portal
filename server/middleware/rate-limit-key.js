@@ -14,7 +14,7 @@
  */
 const { isIP } = require('node:net');
 const config = require('../config');
-const { verifyJwtWithRotation } = require('../utils/jwt-secrets');
+const { verifyCustomerJwt } = require('../utils/jwt-secrets');
 
 function ipFallbackKey(ip) {
   if (!ip) return ip;
@@ -38,7 +38,7 @@ function rateLimitKey(req) {
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ') && config.jwt.secret) {
     try {
-      const decoded = verifyJwtWithRotation(authHeader.split(' ')[1], config.jwt.secret);
+      const decoded = verifyCustomerJwt(authHeader.split(' ')[1], config.jwt.secret);
       if (decoded.technicianId) {
         if (
           decoded.type !== 'access'

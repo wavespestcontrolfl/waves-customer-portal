@@ -59,7 +59,7 @@
  * "your token expired, refresh it" from "the server is down."
  */
 const config = require('../config');
-const { verifyJwtWithRotation } = require('../utils/jwt-secrets');
+const { verifyCustomerJwt } = require('../utils/jwt-secrets');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const {
@@ -158,7 +158,7 @@ async function socketAuth(socket, next) {
 
   let decoded;
   try {
-    decoded = verifyJwtWithRotation(jwtToken, config.jwt.secret);
+    decoded = verifyCustomerJwt(jwtToken, config.jwt.secret);
   } catch (err) {
     if (err.name === 'TokenExpiredError') {
       return next(rejectionError('Token expired', 'TOKEN_EXPIRED'));

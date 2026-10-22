@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
-const { verifyJwtWithRotation, verifyJwtWithKeys, jwtVerifySecrets, jwtVerifySecretsOr } = require('../utils/jwt-secrets');
+const { verifyStaffJwt, verifyJwtWithKeys, jwtVerifySecrets, jwtVerifySecretsOr } = require('../utils/jwt-secrets');
 const config = require('../config');
 const db = require('../models/db');
 const { createDefaultCustomerRows } = require('../services/customer-default-rows');
@@ -921,7 +921,7 @@ function hasAdminMarker(req) {
   const token = readCookie(req, 'waves_admin');
   if (!token) return false;
   try {
-    const payload = verifyJwtWithRotation(token, config.jwt.secret);
+    const payload = verifyStaffJwt(token, config.jwt.secret);
     return payload && payload.kind === 'admin_marker';
   } catch { return false; }
 }
