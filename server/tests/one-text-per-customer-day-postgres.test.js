@@ -873,6 +873,18 @@ postgres('one text per customer, address and day', () => {
         expect(texted(TwilioService.sendTechEnRoute)).toBe(2);
       });
 
+      test('on the way by text AND email, the text bounces: the email still covers (no duplicate email)', async () => {
+        gateOn();
+        const f = await twoVisits();
+        const sid = 'SM' + 'd'.repeat(31) + '1';
+        TwilioService.sendTechEnRoute.mockImplementationOnce(async () => ({ success: true, emailSent: true, results: [{ sent: true, providerMessageId: sid }] }));
+        await enRoute(f.rows[0].id);
+        expect((await proofsFor(f.rows[0].id))[0].metadata.email_delivered).toBe(true);
+        await markUndelivered(f, sid);
+        await enRoute(f.rows[1].id);
+        expect(texted(TwilioService.sendTechEnRoute)).toBe(1);
+      });
+
       test('a delivered status on sms_log keeps the cover', async () => {
         gateOn();
         const f = await twoVisits();

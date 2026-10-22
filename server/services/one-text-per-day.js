@@ -129,10 +129,12 @@ async function deliveredSibling(conn, ref, kind, technicianId) {
       this.whereNull('sib.status').orWhereNotIn('sib.status', RETAINED_HISTORY_STATUSES);
     })
     // A delivered text told the customer only through a provider id that was NOT reported undelivered: the proof
-    // covers while at least one of its ids (one per contact) has no bounce. Decided at READ time from the recorded
+    // covers while at least one of its ids (one per contact) has no bounce, or while its on-the-way email landed
+    // (an email leg has no bounce callback here; the SMS bouncing does not untell the email). Decided at READ time from the recorded
     // bounce row and from the failed status the callback stores on sms_log and the conversation message first, so
     // neither the bounce/proof order nor a bounce row that could not be written matters.
     .whereRaw(`(jsonb_array_length(COALESCE(al.metadata->'provider_message_ids', '[]'::jsonb)) = 0
+      OR al.metadata->>'email_delivered' = 'true'
       OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(al.metadata->'provider_message_ids') AS p(sid)
         WHERE NOT EXISTS (SELECT 1 FROM audit_log b WHERE b.action = ? AND b.metadata->>'sid' = p.sid)
           AND NOT EXISTS (SELECT 1 FROM sms_log s WHERE s.twilio_sid = p.sid AND s.status IN ('failed', 'undelivered'))
@@ -145,7 +147,7 @@ async function deliveredSibling(conn, ref, kind, technicianId) {
   return rows.find((r) => sameTextDay(ref, r) && String(r.delivered_technician_id || '') === String(technicianId || '')) || null;
 }
 
-async function recordTrackOutcome(ref, kind, covering, technicianId, { critical = false, providerIds = [], namedIds = [] } = {}) {
+async function recordTrackOutcome(ref, kind, covering, technicianId, { critical = false, providerIds = [], namedIds = [], emailDelivered = false } = {}) {
   await auditLog.recordAuditEvent({
     critical,
     actor_type: 'system',
@@ -157,17 +159,18 @@ async function recordTrackOutcome(ref, kind, covering, technicianId, { critical 
       technician_id: technicianId || null,
       ...(providerIds.length ? { provider_message_ids: providerIds } : {}),
       ...(namedIds.length ? { named_service_ids: namedIds } : {}),
+      ...(emailDelivered ? { email_delivered: true } : {}),
       ...(covering ? { covered_by_scheduled_service_id: covering.id } : {}),
     },
   });
 }
 
 // The delivered proof: a critical write, retried once. Never throws: the text is already out.
-async function recordDeliveryProof(ref, kind, technicianId, { providerIds, namedIds }) {
+async function recordDeliveryProof(ref, kind, technicianId, { providerIds, namedIds, emailDelivered = false }) {
   let last = null;
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
-      await recordTrackOutcome(ref, kind, null, technicianId, { critical: true, providerIds, namedIds });
+      await recordTrackOutcome(ref, kind, null, technicianId, { critical: true, providerIds, namedIds, emailDelivered });
       return true;
     } catch (err) {
       last = err;
@@ -246,6 +249,12 @@ function acceptedProviderIds(result) {
   return sent.map((r) => String(r.providerMessageId));
 }
 
+// Did an email leg tell the customer what the whole scope's text would have? Only the on-the-way email: it names
+// no service, so it stands for every covered visit. The arrived email names the sender's own visit only.
+function emailCovers(kind, result) {
+  return kind === 'en_route' && !!(result && result.emailSent);
+}
+
 // The proof is written only if the visit STILL matches the attempt's complete fence after the provider
 // call: a visit force-rescheduled or re-armed meanwhile sent a text about an abandoned snapshot, which
 // must not stand down another visit (the text went out and records no proof: the fail-open direction).
@@ -256,7 +265,7 @@ async function proveIfCurrent(svc, fence, ref, kind, named, result, namedIds) {
   } catch (err) {
     logger.error(`[one-text-per-day] ${kind} post-send fence read failed for ${svc.id} (no proof recorded): ${err.message}`);
   }
-  if (current) await recordDeliveryProof(ref, kind, named, { providerIds: acceptedProviderIds(result), namedIds });
+  if (current) await recordDeliveryProof(ref, kind, named, { providerIds: acceptedProviderIds(result), namedIds, emailDelivered: emailCovers(kind, result) });
 }
 
 // Join distinct service labels list-style ("A, B & C"), the shape the reminder labels use.
