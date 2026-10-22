@@ -10466,10 +10466,10 @@ async function applyRescheduleFollowUps({ call, callSid, result, procGeneration 
 // exists but could not be moved, so the booking is HELD. An unexpected throw
 // cannot say whether a missed visit exists: it holds too, since booking
 // anyway is the very duplicate this step prevents.
-async function applyCallMakeupMoveStep({ call, callSid, customerId, procToken, procGeneration }) {
+async function applyCallMakeupMoveStep({ call, callSid, customerId, procToken, procGeneration, bookingSlot }) {
   try {
     const result = await require('./call-reschedule-apply').applyCallMakeupMove({
-      conn: db, call: { ...call, customer_id: customerId }, procToken, procGeneration,
+      conn: db, call: { ...call, customer_id: customerId }, procToken, procGeneration, bookingSlot,
     });
     logger.info(`[call-proc] makeup-move for ${maskSid(callSid)}: ${result.outcome}${result.reason ? ` (${result.reason})` : ''}${result.visitId ? ` visit=${result.visitId}` : ''}`);
     return result;
@@ -18997,7 +18997,9 @@ const CallRecordingProcessor = {
     if (isEnabled('callMakeupMove') && !v2RoutingBlocked && !legacyGeoVeto && !extracted.is_spam
       && v2Result?.status === 'valid' && extracted.appointment_confirmed && extracted.preferred_date_time
       && customerId && hasSpecificTime && canCreateAppointmentFromCall) {
-      const step = await applyCallMakeupMoveStep({ call, callSid, customerId, procToken, procGeneration });
+      const step = await applyCallMakeupMoveStep({
+        call, callSid, customerId, procToken, procGeneration, bookingSlot: extracted.preferred_date_time,
+      });
       if (step.outcome !== 'skipped') makeupMove = step;
     }
     if (v2RoutingBlocked) {

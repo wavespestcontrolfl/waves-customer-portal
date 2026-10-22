@@ -82,7 +82,7 @@ const { lockTriageCall } = require('../utils/triage-locks');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 const { confirmedStartOnTheHour, etWallClockOfConfirmedStart, statesNewAddress } = require('./call-triage-flags');
-const { groundRescheduleAgreement, groundMakeupAgreement } = require('./call-reschedule-agreement');
+const { groundRescheduleAgreement } = require('./call-reschedule-agreement');
 const { lineOfV2Category, lineOfServiceName, linesOfServiceName } = require('./call-estimate-service-match');
 const { addressKey } = require('./customer-properties');
 const { phoneMatchDigits } = require('../utils/phone');
@@ -877,8 +877,12 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
 //     file, future on-the-hour confirmed_start_at, trusted speaker labels);
 //   - scheduling.status 'confirmed', service_intent follow_up_existing_service
 //     or call_nature existing_customer_scheduling, no secondary categories;
-//   - groundMakeupAgreement: the agent's own turn states the slot and the
-//     caller's turn accepts it (agent_committed_booking may be null);
+//   - the booking step itself accepted this call's slot (bookingSlot: the
+//     ET wall clock the booking would have inserted) and confirmed_start_at
+//     is that same slot. The move REPLACES that booking, so it uses the
+//     booking's own agreement bar, never a stricter one: a stricter bar
+//     (word-for-word slot quotes) failed the incident call ("I'll get there
+//     around five") and let the duplicate booking through;
 //   - exactly ONE recurring, ungrouped, non-dispatch-owned visit of the
 //     customer at the identified property, pending/confirmed, dated within the
 //     last MAKEUP_LOOKBACK_DAYS and before today, whose OWN missed slot has an
@@ -911,7 +915,7 @@ function openNoShowForSlot(visit, logs) {
     && (!log.original_window || log.original_window === windowText(visit))) || null;
 }
 
-function planMakeupMoveFromCall({ v2, call, customer, properties = [], candidates = [], noshowLogs = [], now = new Date(), transcriptLabelsTrusted = false } = {}) {
+function planMakeupMoveFromCall({ v2, call, customer, properties = [], candidates = [], noshowLogs = [], now = new Date(), transcriptLabelsTrusted = false, bookingSlot = null } = {}) {
   if (!v2 || typeof v2 !== 'object') return skip('no_v2_extraction');
   if (v2.meta?.is_spam === true) return skip('spam');
   if (v2.meta?.is_voicemail === true) return skip('voicemail');
@@ -941,11 +945,10 @@ function planMakeupMoveFromCall({ v2, call, customer, properties = [], candidate
   const newStart = `${pad2(parts.hour)}:${pad2(parts.minute)}`;
   if (etWallClockOfConfirmedStart(scheduling.confirmed_start_at) !== `${newDate}T${newStart}`) return skip('inconsistent_start_offset');
 
-  // Everything above fails closed to today's behavior. The grounding is next
-  // because it is the costliest check; a candidate is not looked up for a call
-  // whose agreement cannot be grounded.
-  const agreement = groundMakeupAgreement({ v2, transcript: call.transcription, callStartedAt: callStartedAt(call) || call.created_at });
-  if (!agreement.ok) return skip('makeup_not_agreed', { agreementReason: agreement.reason });
+  // Everything above fails closed to today's behavior. The slot must be the
+  // one the booking step accepted and would have inserted: the move only ever
+  // stands in for that booking.
+  if (typeof bookingSlot !== 'string' || bookingSlot.slice(0, 16) !== `${newDate}T${newStart}`) return skip('not_the_booking_slot');
 
   const scope = callPropertyScope(v2, customer, properties);
   if (!scope.targetKey) return skip('property_needs_review');
@@ -1037,7 +1040,7 @@ function loadOpenNoShows(conn, customerId, visitIds) {
  *   needs_review a missed-visit candidate exists but cannot be moved; the
  *                processor HOLDS the booking, never inserts a new visit
  */
-async function applyCallMakeupMove({ conn, call, procToken = null, procGeneration = null, now = new Date(), rebooker = null } = {}) {
+async function applyCallMakeupMove({ conn, call, procToken = null, procGeneration = null, now = new Date(), rebooker = null, bookingSlot = null } = {}) {
   if (!conn || !call?.id) return { outcome: 'skipped', reason: 'missing_context' };
   const settled = await conn('call_log').where({ id: call.id }).modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b)).first();
   if (!settled || (procToken && settled.processing_token !== procToken)
@@ -1080,7 +1083,7 @@ async function applyCallMakeupMove({ conn, call, procToken = null, procGeneratio
   const candidates = await loadMakeupCandidates(conn, settled.customer_id, now);
   const noshowLogs = await loadOpenNoShows(conn, settled.customer_id, candidates.map((r) => r.id));
   const trusted = isEnabled('callAgentCommitTrustedLabels');
-  const plan = planMakeupMoveFromCall({ v2, call: settled, customer, properties, candidates, noshowLogs, now, transcriptLabelsTrusted: trusted });
+  const plan = planMakeupMoveFromCall({ v2, call: settled, customer, properties, candidates, noshowLogs, now, transcriptLabelsTrusted: trusted, bookingSlot });
   if (plan.action === 'needs_review') return { outcome: 'needs_review', reason: plan.reason, candidateIds: plan.candidateIds || [] };
   if (plan.action === 'skip') return { outcome: 'skipped', reason: plan.reason, visitId: plan.visitId || null };
   const visit = candidates.find((r) => r.id === plan.visitId);
@@ -1108,7 +1111,7 @@ async function applyCallMakeupMove({ conn, call, procToken = null, procGeneratio
     const latestCandidates = await loadMakeupCandidates(trx, settled.customer_id, now);
     const latestNoShows = await loadOpenNoShows(trx, settled.customer_id, latestCandidates.map((r) => r.id));
     const checked = planMakeupMoveFromCall({ v2, call: current, customer: latestCustomer, properties: latestProperties,
-      candidates: latestCandidates.map((row) => row.id === visit.id ? { ...row, ...service } : row), noshowLogs: latestNoShows, now, transcriptLabelsTrusted: trusted });
+      candidates: latestCandidates.map((row) => row.id === visit.id ? { ...row, ...service } : row), noshowLogs: latestNoShows, now, transcriptLabelsTrusted: trusted, bookingSlot });
     const unchanged = service && dateOnly(service.scheduled_date) === dateOnly(visit.scheduled_date)
       && ['customer_id', 'property_id', 'service_id', 'service_type', 'status', 'source_action', 'visit_id', 'is_recurring', 'window_start', 'window_end', 'estimated_duration_minutes']
         .every((key) => (service[key] ?? null) === (visit[key] ?? null));

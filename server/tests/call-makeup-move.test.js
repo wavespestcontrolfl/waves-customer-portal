@@ -24,7 +24,6 @@ const {
   MAKEUP_REASON_CODE,
   INITIATED_BY,
 } = require('../services/call-reschedule-apply');
-const { groundMakeupAgreement } = require('../services/call-reschedule-agreement');
 const { lineOfV2Category, linesOfServiceName } = require('../services/call-estimate-service-match');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
@@ -47,6 +46,8 @@ const AGENT_SLOT = 'We will come by on Tuesday October 20 at 5 PM.';
 const ACCEPT = 'Yes, that works.';
 const TRANSCRIPT = `Caller: Nobody came on the 13th.\nAgent: No, I need to come by. ${AGENT_SLOT}\nCaller: ${ACCEPT}`;
 const WORDS = { day: 'Tuesday October 20', hour: '5', period: 'PM' };
+// The ET wall clock the booking step would have inserted (V1 preferred_date_time).
+const BOOKING_SLOT = '2026-10-20T17:00';
 
 function deepMerge(a, b) {
   const out = { ...a };
@@ -109,7 +110,7 @@ const visit = (overrides = {}) => {
 const noshow = (overrides = {}) => ({
   id: NOSHOW_ID, scheduled_service_id: VISIT_ID, original_date: '2026-10-13', original_window: '09:00:00-10:00:00', resolved_at: null, ...overrides,
 });
-const baseArgs = (over = {}) => ({ v2: v2(), call: call(), customer: customer(), candidates: [visit()], noshowLogs: [noshow()], now: NOW, ...over });
+const baseArgs = (over = {}) => ({ v2: v2(), call: call(), customer: customer(), candidates: [visit()], noshowLogs: [noshow()], now: NOW, bookingSlot: BOOKING_SLOT, ...over });
 
 describe('planMakeupMoveFromCall', () => {
   test('the incident: a missed confirmed quarterly visit with an open no-show moves to the agreed slot', () => {
@@ -261,9 +262,11 @@ describe('planMakeupMoveFromCall', () => {
     expect(planMakeup(baseArgs({ v2: null }))).toMatchObject({ reason: 'no_v2_extraction' });
   });
 
-  test('an ungrounded agreement is skipped (the caller never accepted in the transcript)', () => {
-    const plan = planMakeup(baseArgs({ call: call({ transcription: `Agent: ${AGENT_SLOT}\nCaller: Hmm, I will think about it.` }) }));
-    expect(plan).toMatchObject({ action: 'skip', reason: 'makeup_not_agreed', agreementReason: expect.stringContaining('caller_acceptance') });
+  test('the move stands in for the booking only: no booking slot, or a different one, is skipped', () => {
+    expect(planMakeup(baseArgs({ bookingSlot: null }))).toMatchObject({ action: 'skip', reason: 'not_the_booking_slot' });
+    expect(planMakeup(baseArgs({ bookingSlot: '2026-10-20T18:00' }))).toMatchObject({ action: 'skip', reason: 'not_the_booking_slot' });
+    expect(planMakeup(baseArgs({ bookingSlot: '2026-10-21T17:00' }))).toMatchObject({ action: 'skip', reason: 'not_the_booking_slot' });
+    expect(planMakeup(baseArgs({ bookingSlot: '2026-10-20T17:00:00-04:00' }))).toMatchObject({ action: 'apply', visitId: VISIT_ID });
   });
 
   test('a visit at another saved property is not a candidate when the call is about the primary one', () => {
@@ -273,67 +276,35 @@ describe('planMakeupMoveFromCall', () => {
   });
 });
 
-describe('groundMakeupAgreement', () => {
-  const ground = (extraction, transcript = TRANSCRIPT) => groundMakeupAgreement({ v2: extraction, transcript, callStartedAt: CALL_START });
-
-  test('grounds the incident shape: agent_committed_booking null, definite_commitment false', () => {
-    expect(ground(v2())).toMatchObject({ ok: true, reason: 'agreement_grounded' });
+describe('the incident wording', () => {
+  // The real call's shape (synthetic names): the day and the hour are in two
+  // agent turns, the hour is "around five", nobody says "reschedule". The
+  // booking step accepted this call and booked Tuesday 5 PM, so the make-up
+  // move must accept it too, or the duplicate booking goes through again.
+  const REAL = [
+    'Caller: Did you spray the other day?',
+    'Agent: No, I need to come by. How\'s tomorrow look?',
+    'Caller: It is raining today.',
+    'Agent: Tomorrow looks better, and then we have a little bit of rain on Monday. You want me to do, like, for Tuesday?',
+    'Caller: Yeah, we have to wait until the rain stops.',
+    'Agent: I\'ll plan on coming out there on Tuesday. Are you home on Tuesday?',
+    'Caller: I\'m at work all day.',
+    'Agent: What time do you get home?',
+    'Caller: About five.',
+    'Agent: Let\'s plan on getting there. I\'ll get there around five.',
+    'Caller: Okay.',
+  ].join('\n');
+  const realV2 = () => v2({
+    scheduling: { agreed_slot_words: { day: null, hour: 'five', period: null } },
+    evidence: [
+      { field_path: '/scheduling/confirmed_start_at', speaker: 'agent', quote: 'I\'ll get there around five.' },
+      { field_path: '/scheduling/caller_accepted_slot', speaker: 'caller', quote: 'Okay.' },
+    ],
   });
 
-  test('an explicit agent_committed_booking false fails closed', () => {
-    expect(ground(v2({ scheduling: { agent_committed_booking: false } }))).toMatchObject({ ok: false, reason: 'agent_did_not_commit' });
-  });
-
-  test('the caller must have accepted', () => {
-    expect(ground(v2({ scheduling: { caller_accepted_slot: false } }))).toMatchObject({ ok: false, reason: 'caller_did_not_accept' });
-  });
-
-  test('the agent\'s own turn must state the slot: a caller-only mention does not ground', () => {
-    const extraction = v2({ evidence: [
-      { field_path: '/scheduling/confirmed_start_at', speaker: 'caller', quote: AGENT_SLOT },
-      { field_path: '/scheduling/caller_accepted_slot', speaker: 'caller', quote: ACCEPT },
-    ] });
-    const transcript = `Caller: ${AGENT_SLOT}\nAgent: Let me see.\nCaller: ${ACCEPT}`;
-    expect(ground(extraction, transcript)).toMatchObject({ ok: false, reason: 'agent_commitment_ungrounded' });
-  });
-
-  test('a hedged, conditional or approximate agent slot never grounds', () => {
-    const hedged = 'We might come by on Tuesday October 20 at 5 PM.';
-    expect(ground(v2({ evidence: [
-      { field_path: '/scheduling/confirmed_start_at', speaker: 'agent', quote: hedged },
-      { field_path: '/scheduling/caller_accepted_slot', speaker: 'caller', quote: ACCEPT },
-    ] }), `Agent: ${hedged}\nCaller: ${ACCEPT}`).ok).toBe(false);
-    const conditional = 'If the tech is free we will come by on Tuesday October 20 at 5 PM.';
-    expect(ground(v2({ evidence: [
-      { field_path: '/scheduling/confirmed_start_at', speaker: 'agent', quote: conditional },
-      { field_path: '/scheduling/caller_accepted_slot', speaker: 'caller', quote: ACCEPT },
-    ] }), `Agent: ${conditional}\nCaller: ${ACCEPT}`).ok).toBe(false);
-    const approximate = 'We will come by on Tuesday October 20 around 5 PM or 6 PM.';
-    expect(ground(v2({ evidence: [
-      { field_path: '/scheduling/confirmed_start_at', speaker: 'agent', quote: approximate },
-      { field_path: '/scheduling/caller_accepted_slot', speaker: 'caller', quote: ACCEPT },
-    ] }), `Agent: ${approximate}\nCaller: ${ACCEPT}`).ok).toBe(false);
-  });
-
-  test('an agent slot that is a question does not ground', () => {
-    const asked = 'Could we come by on Tuesday October 20 at 5 PM?';
-    expect(ground(v2({ evidence: [
-      { field_path: '/scheduling/confirmed_start_at', speaker: 'agent', quote: asked },
-      { field_path: '/scheduling/caller_accepted_slot', speaker: 'caller', quote: ACCEPT },
-    ] }), `Agent: ${asked}\nCaller: ${ACCEPT}`).ok).toBe(false);
-  });
-
-  test('a slot quote for another hour than the recorded one does not ground', () => {
-    const wrong = 'We will come by on Tuesday October 20 at 3 PM.';
-    expect(ground(v2({ evidence: [
-      { field_path: '/scheduling/confirmed_start_at', speaker: 'agent', quote: wrong },
-      { field_path: '/scheduling/caller_accepted_slot', speaker: 'caller', quote: ACCEPT },
-    ] }), `Agent: ${wrong}\nCaller: ${ACCEPT}`).ok).toBe(false);
-  });
-
-  test('unlabeled lines, or a missing relative-date judgement, fail closed', () => {
-    expect(ground(v2(), 'We will come by on Tuesday October 20 at 5 PM. Yes.')).toMatchObject({ ok: false, reason: 'unparseable_transcript' });
-    expect(ground(v2({ scheduling: { relative_date_used: null } }))).toMatchObject({ ok: false, reason: 'relative_date_unjudged' });
+  test('moves the missed quarterly visit to the slot the booking step accepted', () => {
+    const plan = planMakeup(baseArgs({ v2: realV2(), call: call({ transcription: REAL }) }));
+    expect(plan).toMatchObject({ action: 'apply', visitId: VISIT_ID });
   });
 });
 
@@ -412,7 +383,7 @@ const guardedRebooker = (conn, result = { success: true }) => ({
     return result;
   }),
 });
-const applyArgs = (conn, rebooker, over = {}) => ({ conn, call: call(), procToken: 'tok-1', procGeneration: 3, now: NOW, rebooker, ...over });
+const applyArgs = (conn, rebooker, over = {}) => ({ conn, call: call(), procToken: 'tok-1', procGeneration: 3, now: NOW, rebooker, bookingSlot: BOOKING_SLOT, ...over });
 
 describe('applyCallMakeupMove', () => {
   beforeEach(() => {
