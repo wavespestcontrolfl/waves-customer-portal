@@ -660,7 +660,8 @@ function remainderHasMoney(remainder) {
   try { return !!require('./sms-suggest-mode').hasPriceQuote(text); } catch { return true; }
 }
 
-// COMPANY FACTS money policy (owner 2026-10-22, Codex #6447 r1/r2): the paying and prepay-refund lines are fixed policy for every
+// COMPANY FACTS money policy (owner 2026-10-22, Codex #6447 r1/r2/r9): the paying and prepay-refund lines (an explicit list,
+// sms-company-facts.moneyPolicyFacts) are fixed policy for every
 // customer, not an account status. A complete, stand-alone copy of one of their sentences (a lead label such as "Paying:" may be
 // dropped) is allowed ONLY with inert text around it (a greeting, thanks, a sign-off) and verbatim status copies: anything else
 // could apply the rule to this customer ("That includes your cancellation."), so that reply is judged as if no policy was copied.
@@ -669,9 +670,9 @@ let companyPolicySentenceCache = null;
 function companyPolicySentences() {
   if (!companyPolicySentenceCache) {
     const out = new Set();
-    for (const fact of require('./sms-company-facts').COMPANY_FACTS) {
+    for (const fact of require('./sms-company-facts').moneyPolicyFacts()) {
       for (const sentence of fact.split(/(?<=[.!?])\s+/)) {
-        if (!TOPIC_RE.test(sentence) || MONEY_FIGURE_RE.test(sentence) || ZELLE_WORD_RE.test(sentence)) continue;
+        if (MONEY_FIGURE_RE.test(sentence) || ZELLE_WORD_RE.test(sentence)) continue;
         out.add(sentence);
         const text = /^[A-Z][^:.]{0,40}:\s+(.+)$/.exec(sentence);
         if (text) out.add(text[1]);

@@ -16,7 +16,7 @@ const { WAVES_BRAND_NAME, WAVES_ADDRESS_LINE } = require('../constants/business'
 const COMPANY_FACTS_HEADER = 'COMPANY FACTS (owner-approved; state these plainly):';
 
 const COMPANY_FACTS = Object.freeze([
-  'The first pest visit includes an inside spray, unless the customer chose exterior-only service. After that, the inside is up to the customer: we treat it whenever they ask.',
+  'On a general pest plan (not mosquito service), the first visit includes an inside spray, unless the customer chose exterior-only service. After that, the inside is up to the customer: we treat it whenever they ask.',
   'The customer does not need to be home for the exterior treatment. For the inside spray, someone needs to be home, or the customer leaves us access.',
   'Regular pest visits include the lanai and the pool cage.',
   'Wasps, mud daubers and hornet nests on the house are included on regular pest visits.',
@@ -74,6 +74,12 @@ const COMPANY_FACTS = Object.freeze([
   'We do not tent for termites. For drywood termites we treat the infested wood directly with spot treatment, a borate wood treatment or injected foam. When the activity is too widespread for that, we refer the customer to a fumigation company.',
   'Product labels: the office can tell a customer which products were applied at a visit and can email a product label or Safety Data Sheet on request.',
 ]);
+
+// The fixed money policy lines (paying, prepay refund): the payment-status contract treats a verbatim copy of one of their
+// sentences as policy, not an account status (payment-status-contract.withoutCompanyPolicyCopies). An explicit list, never
+// "every line that mentions money" (Codex #6447 r9).
+const MONEY_POLICY_FACT_PREFIXES = Object.freeze(['Paying:', 'A customer who prepays']);
+const moneyPolicyFacts = () => COMPANY_FACTS.filter((f) => MONEY_POLICY_FACT_PREFIXES.some((p) => f.startsWith(p)));
 
 // Lines retired by a wording change (owner 2026-10-22), keyed by their index in COMPANY_FACTS.
 // A stored facts_block keeps the render it was drafted with, so the text each retired line had
@@ -189,6 +195,7 @@ module.exports = {
   exactLabelFactsSection,
   COMPANY_FACTS,
   RETIRED_COMPANY_FACT_LINES,
+  moneyPolicyFacts,
   COMPANY_FACTS_HEADER,
   renderCompanyFactsSection,
   PRIOR_COMPANY_FACTS_RENDERS,

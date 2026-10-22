@@ -151,7 +151,7 @@ describe('answer-book facts (owner 2026-10-21/22)', () => {
   const section = () => renderCompanyFactsSection();
   const { RETIRED_COMPANY_FACT_LINES } = require('../services/sms-company-facts');
   const NEW_LINES = [
-    'The first pest visit includes an inside spray, unless the customer chose exterior-only service. After that, the inside is up to the customer: we treat it whenever they ask.',
+    'On a general pest plan (not mosquito service), the first visit includes an inside spray, unless the customer chose exterior-only service. After that, the inside is up to the customer: we treat it whenever they ask.',
     'Rodent trapping includes the setup visit and at least one trap check. For more trap checks, the office confirms what the job includes.',
     'Residential pest and lawn plans have no long-term contract, and those customers can cancel any time. Termite plans and commercial accounts follow their signed agreement.',
     'A customer who prepays a year of pest or lawn service and cancels within 90 days gets a refund for the visits not yet done.',
@@ -472,6 +472,13 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
       expect(payOk(PAY, inbound)).toBe(true);
       expect(payOk(REFUND, inbound)).toBe(true);
       expect(payOk(`Hi! ${REFUND} Let us know if you have questions.`, inbound)).toBe(true);
+    }
+  });
+  test('only the paying and refund lines are exempt: another fact copied into a payment reply is still judged', () => {
+    expect(require('../services/sms-company-facts').moneyPolicyFacts()).toHaveLength(2);
+    const inbound = 'Did my payment go through?';
+    for (const fact of ['The office can check on a late report.', 'Termite plans and commercial accounts follow their signed agreement.']) {
+      expect(paymentStatus.autoSendScopeBlock({ reply: fact, inboundText: inbound, snapshot: null })).toBe('payment_status_not_auto_sendable');
     }
   });
   test('the technician payment sentence, copied verbatim, passes the money check', () => {
