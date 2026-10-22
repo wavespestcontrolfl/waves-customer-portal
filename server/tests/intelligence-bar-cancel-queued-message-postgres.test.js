@@ -92,7 +92,7 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL, SMS-onl
     expect(out.messages[0].masked_recipient).toBe('…0100');
   });
 
-  test('a channel of "email" is rejected by the tool — there is no scheduled-email store to check', async () => {
+  test('a channel of "email" is rejected by the tool — Schedule send emails are cancelled in Email > Scheduled', async () => {
     const custId = await customer();
     await scheduledSms(custId);
     const out = await executeCommsTool('cancel_queued_message', {
