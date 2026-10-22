@@ -64,102 +64,41 @@ const LEGACY_REVIEW_DELAY_MINUTES = 120;
 // due this many minutes after enrollment (the report text, or the payment
 // that lifts the unpaid-invoice hold), for every service line.
 const REVIEW_AFTER_REPORT_DELAY_MINUTES = 10;
-// The scheduled-SMS rail (scheduler.js, `*/5 * * * *`) claims a queued report
-// once its scheduled_for has passed, so a report held to 8:00 AM leaves at the
-// 8:00-8:05 tick. The ask is due 10 minutes after the release time, which
-// covers one full rail tick (<= 5 min) plus the provider handoff. A failed
-// attempt on that rail retries later than +10, so the sender's own check
-// (report_pending hold) is what keeps the ask behind a retried report.
-const REPORT_PENDING_RECHECK_MINUTES = 5;
-const REPORT_PENDING_MAX_HOLD_MS = 24 * 3600000;
 
 /**
  * GATE_REVIEW_ASK_AFTER_REPORT: when is the Automatic Day-0 ask due, given what
  * is known about the report text? `anchor` = { status, at }:
- *   sent     the completion text went out at `at` (default now)  -> max(now, at) + 10 min
- *   deferred the text is queued for `at` (quiet-hours hold)       -> max(now, at) + 10 min
- *   paid     enrolled at payment; the report went out long before  -> now + 10 min
- * Anything else (failed, blocked, skipped, no phone, unknown, no anchor) returns
- * null: the caller falls back to the smart send window, so an ask never rides
- * ahead of a report text nobody can confirm.
+ *   sent  the completion text went out at `at` (default now)   -> max(now, at) + 10 min
+ *   paid  enrolled at payment; that text went out long before  -> now + 10 min
+ * Anything else (no anchor) returns null: the caller keeps the smart send
+ * window, so an ask never rides ahead of a report text nobody can confirm.
  */
 function afterReportDueAt(anchor, nowMs = Date.now()) {
-  if (!anchor || typeof anchor !== "object") return null;
-  const status = String(anchor.status || "");
   const delayMs = REVIEW_AFTER_REPORT_DELAY_MINUTES * 60000;
-  const atMs = anchor.at ? new Date(anchor.at).getTime() : NaN;
-  if (status === "paid") return new Date(nowMs + delayMs);
-  if (status === "sent") return new Date(Math.max(nowMs, Number.isFinite(atMs) ? atMs : nowMs) + delayMs);
-  if (status === "deferred") {
-    if (!Number.isFinite(atMs)) return null;
-    return new Date(Math.max(nowMs, atMs) + delayMs);
-  }
-  return null;
+  if (anchor?.status === "paid") return new Date(nowMs + delayMs);
+  if (anchor?.status !== "sent") return null;
+  const atMs = new Date(anchor.at || nowMs).getTime();
+  return new Date(Math.max(nowMs, Number.isFinite(atMs) ? atMs : nowMs) + delayMs);
 }
-// The report-text anchor read from a service record's structured_notes. A text
-// the send window still holds anchors to its release; a delivered text anchors
-// to its delivery (or to the payment, on the paid-invoice path, which runs long
-// after). A failed, blocked, skipped or missing text gives null.
+// The report-text anchor read from a service record's structured_notes: only a
+// completion text that went out as a TEXT (SMS/MMS) at completion. A text the
+// send window held for the morning (completionSmsDeferredTo, whatever became of
+// its replay), one routed to the customer App (sentSmsChannel 'push',
+// GATE_CUSTOMER_APP_NOTIFICATIONS), and a failed, blocked, skipped or missing
+// text give null: the smart window, exactly as with the gate off. A missing
+// channel is the pre-App shape (always SMS/MMS).
 function reportTextAnchorFromNotes(notes, { atPayment = false } = {}) {
   const n = notes && typeof notes === "object" ? notes : {};
-  if (n.completionSmsStatus === "deferred" && !n.completionSmsDeferredDeliveredAt) {
-    return n.completionSmsDeferredTo ? { status: "deferred", at: n.completionSmsDeferredTo } : null;
-  }
-  const text = reportTextDelivery(n);
-  if (!text) return null;
+  if (n.completionSmsStatus !== "sent" || n.completionSmsDeferredTo) return null;
+  if (n.sentSmsChannel && n.sentSmsChannel !== "sms" && n.sentSmsChannel !== "mms") return null;
   if (atPayment) return { status: "paid", at: new Date().toISOString() };
-  return { status: "sent", at: text.at || new Date().toISOString() };
-}
-// The report TEXT's confirmed delivery as { at } (at null when the record names
-// no time), or null when no text is confirmed. A held notice's replay counts
-// only when its delivery stamped an SMS/MMS channel: one delivered before
-// replays stamped a channel may have gone to the App, so it is not confirmed.
-// An immediate send (or a re-completion after a dead replay) is 'sent' with
-// sentSmsAt.
-function reportTextDelivery(n) {
-  if (appRoutedNotice(n)) return null;
-  if (n.completionSmsDeferredDeliveredAt) return n.sentSmsChannel ? { at: n.completionSmsDeferredDeliveredAt } : null;
-  return n.completionSmsStatus === "sent" ? { at: n.sentSmsAt || null } : null;
-}
-// A completion notice routed to the customer App (sentSmsChannel 'push',
-// GATE_CUSTOMER_APP_NOTIFICATIONS; a held notice's replay stamps it at
-// delivery) is not a report TEXT. A missing channel is the pre-App shape
-// (always SMS/MMS).
-function appRoutedNotice(notes) {
-  return !!notes.sentSmsChannel && notes.sentSmsChannel !== "sms" && notes.sentSmsChannel !== "mms";
+  return { status: "sent", at: n.sentSmsAt || new Date().toISOString() };
 }
 // structured_notes as an object (a string column value is parsed; bad JSON
 // reads as empty).
 function structuredNotesObject(raw) {
   if (typeof raw !== "string") return raw || {};
   try { return JSON.parse(raw); } catch { return {}; }
-}
-// The report_pending hold applies to facts fixed at enrollment: a post-service
-// Day-0 that has sent nothing, tied to its service record, not
-// customer-requested, and no older than REPORT_PENDING_MAX_HOLD_MS.
-function reportPendingEligible(seq, nowMs = Date.now()) {
-  if (!seq?.service_record_id || seq.started_by !== "post_service" || seq.customer_requested) return false;
-  if (Number(seq.current_step || 0) !== 0 || Number(seq.touches_sent || 0) !== 0) return false;
-  return !(nowMs - new Date(seq.started_at || NaN).getTime() > REPORT_PENDING_MAX_HOLD_MS);
-}
-// When a held Automatic ask may go, from the record's report text, as
-// { ms, reason } (the caller holds only while ms is in the future), or null:
-//   a confirmed report text (reportTextDelivery)  -> its delivery + 10 min (report_pending)
-//   still queued                                  -> recheck in 5 min (report_pending)
-//   held, then no confirmed text (the replay died: terminalDeferredCompletionSend
-//     writes 'failed' and keeps completionSmsDeferredTo; it went to the App; or its
-//     channel is unknown)                         -> the smart window from the release
-//     time, jitter off so every recheck names one instant (smart_window: the
-//     :14/:44 cadence sends it, not the */5 after-report tick)
-function reportPendingPlan(notes, serviceType, nowMs) {
-  const text = reportTextDelivery(notes);
-  if (text) return { ms: new Date(text.at || NaN).getTime() + REVIEW_AFTER_REPORT_DELAY_MINUTES * 60000, reason: "report_pending" };
-  if (notes.completionSmsStatus === "deferred" && !notes.completionSmsDeferredDeliveredAt) {
-    return { ms: nowMs + REPORT_PENDING_RECHECK_MINUTES * 60000, reason: "report_pending" };
-  }
-  const releasedAt = new Date(notes.completionSmsDeferredTo || NaN);
-  if (Number.isNaN(releasedAt.getTime())) return null;
-  return { ms: calculateReviewSendPlan(releasedAt, serviceType, { jitter: false }).at?.getTime() ?? NaN, reason: "smart_window" };
 }
 // The gate reader, wrapped so a test double of feature-gates that predates it
 // reads as off.
@@ -787,7 +726,7 @@ function cadenceTickMinutes(fast = false) {
 }
 // The rows the */5 tick runs (processAfterReportSequences):
 // an untouched Day-0 post-service ask whose plan came from the report anchor.
-const AFTER_REPORT_FAST_REASONS = ["after_report", "report_pending"];
+const AFTER_REPORT_FAST_REASONS = ["after_report"];
 function isAfterReportFastRow(r) {
   if (!r || Number(r.current_step || 0) !== 0 || Number(r.touches_sent || 0) !== 0 || r.started_by !== "post_service") return false;
   const d = parseDecision(r.decision);
@@ -1915,7 +1854,7 @@ const ReviewService = {
     // Recorded on the sequence; the ask still goes at the next cadence tick.
     customerRequested = null,
     // GATE_REVIEW_ASK_AFTER_REPORT: what happened to the report text
-    // ({ status: 'sent'|'deferred'|'paid'|…, at }). Gate off: ignored.
+    // ({ status: 'sent'|'paid', at }). Gate off: ignored.
     reportTextAnchor = null,
   }) {
     const { isEnabled } = require("../config/feature-gates");
@@ -1975,11 +1914,10 @@ const ReviewService = {
       const explicitDelay = Number(delayMinutes);
       const explicitTiming = delayMinutes !== undefined && delayMinutes !== null && Number.isFinite(explicitDelay);
       // GATE_REVIEW_ASK_AFTER_REPORT: Automatic = 10 minutes after the report
-      // text for every service line, anchored to what is known about that text
-      // (afterReportDueAt): sent -> after its send, queued by the send window ->
-      // after its release, paid -> after payment. A text nobody can confirm
-      // (failed, blocked, skipped, unknown) keeps the smart window. Explicit
-      // timing above still wins.
+      // text for every service line (afterReportDueAt): sent -> after its send,
+      // paid -> after payment. Any other report (held for the morning, the App,
+      // failed, blocked, unknown) keeps the smart window. Explicit timing above
+      // still wins.
       const reportDueAt = !explicitTiming && reviewAskAfterReportOn() ? afterReportDueAt(reportTextAnchor) : null;
       const afterReport = reportDueAt !== null;
       const firstTouchAt = explicitTiming
@@ -2035,23 +1973,6 @@ const ReviewService = {
     }
   },
 
-  /**
-   * GATE_REVIEW_ASK_AFTER_REPORT (cadence mode): should this Day-0 ask keep
-   * waiting for its report text? Returns { retryAt } while the visit's
-   * completion text is still queued behind the send window (completionSmsStatus
-   * 'deferred', not yet delivered), or until 10 minutes after the queued text
-   * was delivered; null otherwise (delivered long enough ago, failed, never
-   * queued, not Day 0). A failed lookup holds (fail closed). Bounded at 24 h
-   * from enrollment.
-   *
-   * The rule keys off facts fixed at enrollment — a post-service Day-0 that has
-   * sent nothing, tied to its service record, not customer-requested — and off
-   * the record's own text status. It never reads `decision`, which every
-   * deferral (cap/spacing lookup failures, send window, holds) rewrites, so no
-   * earlier tick can switch the check off. An Automatic ask is never sent past
-   * a report that is still queued; an explicit timing stored on the record
-   * keeps its own time.
-   */
   // GATE_REVIEW_ASK_AFTER_REPORT anchor for the completion enrollment: what
   // became of the record's report text. Null when the gate is off, on a failed
   // lookup, or when no confirmable text left (the smart window then applies).
@@ -2077,42 +1998,6 @@ const ReviewService = {
       return effect?.status === "sent" ? { status: "sent", at: effect.sent_at || new Date() } : null;
     } catch (err) {
       logger.warn(`[review] visit report anchor lookup failed (visitId=${visitId}): ${err.message}`);
-      return null;
-    }
-  },
-
-  // GATE_REVIEW_ASK_AFTER_REPORT timing for an ask about to send. On: the
-  // report_pending hold. Off: a row the gate planned (isAfterReportFastRow)
-  // goes back to the smart window from its enrollment (completion, or the
-  // payment that lifted the invoice hold), so turning the gate off restores
-  // the old timing for asks already queued, not only for new ones.
-  async _afterReportTimingHold(seq) {
-    if (reviewAskAfterReportOn()) return this._reportPendingHold(seq);
-    if (!isAfterReportFastRow(seq) || !seq.started_at) return null;
-    const smartAt = calculateReviewSendPlan(new Date(seq.started_at), seq.service_type, { jitter: false }).at;
-    return smartAt && Date.now() < smartAt.getTime() ? { retryAt: smartAt, reason: "smart_window" } : null;
-  },
-
-  async _reportPendingHold(seq) {
-    if (!reportPendingEligible(seq)) return null;
-    const nowMs = Date.now();
-    let row;
-    try {
-      row = await db("service_records").where({ id: seq.service_record_id }).first("structured_notes");
-    } catch (err) {
-      logger.warn(`[review] report-pending lookup failed (sequenceId=${seq.id}): ${err.message}`);
-      return { retryAt: new Date(nowMs + REPORT_PENDING_RECHECK_MINUTES * 60000), reason: "report_pending" };
-    }
-    try {
-      const notes = structuredNotesObject(row?.structured_notes);
-      // An explicit operator timing (Tomorrow 8 AM, custom, a stored delay) is
-      // persisted on the record and keeps its own time: the hold is only for
-      // the Automatic ask.
-      if (this.completionReviewDelay(notes) !== undefined) return null;
-      const plan = reportPendingPlan(notes, seq.service_type, nowMs);
-      return plan && Number.isFinite(plan.ms) && nowMs < plan.ms ? { retryAt: new Date(plan.ms), reason: plan.reason } : null;
-    } catch (err) {
-      logger.warn(`[review] report-pending check failed (sequenceId=${seq.id}): ${err.message}`);
       return null;
     }
   },
@@ -2156,11 +2041,9 @@ const ReviewService = {
         return { enrolled: false, reason: "visit_outcome" };
       }
       const delayMinutes = this.completionReviewDelay(notes);
-      // GATE_REVIEW_ASK_AFTER_REPORT: the report went out at completion, long
-      // before this payment — unless the send window still holds it, in which
-      // case the ask waits for its release. Only a confirmed delivery earns the
-      // paid anchor; a failed, blocked, skipped or missing text keeps the
-      // smart window.
+      // GATE_REVIEW_ASK_AFTER_REPORT: a report text that went out at completion
+      // went long before this payment, so the ask is due 10 minutes after it;
+      // any other report keeps the smart window from the payment.
       const reportTextAnchor = reportTextAnchorFromNotes(notes, { atPayment: true });
       // Legacy create() dedupes by service_record_id; the cadence path
       // dedupes per service record too (startReviewSequence) on top of the
@@ -7303,21 +7186,6 @@ const ReviewService = {
         .update({ next_run_at: spacedAt, decision: sequenceDecision({ reason: "spacing", plannedAt: spacedAt, nextEvalAt: spacedAt }), updated_at: new Date() });
       return { ran: false, deferred: true, reason: "spacing", retryAt: spacedAt };
     }
-    // GATE_REVIEW_ASK_AFTER_REPORT: a Day-0 ask anchored to a report text the
-    // send window queued for the morning waits until the scheduled-SMS rail has
-    // actually delivered that text (and 10 minutes after it), however late a
-    // retry runs. Keyed on enrollment facts and the record, never on `decision`.
-    // With the gate off, a row it planned returns to the smart window.
-    if (stepIsAsk) {
-      const pending = await this._afterReportTimingHold(seq);
-      if (pending) {
-        await db("review_sequences")
-          .where({ id: seq.id, status: "active" })
-          .update({ next_run_at: pending.retryAt, decision: sequenceDecision({ reason: pending.reason, plannedAt: pending.retryAt, nextEvalAt: pending.retryAt }), updated_at: new Date() });
-        return { ran: false, deferred: true, reason: pending.reason, retryAt: pending.retryAt };
-      }
-    }
-
     // Review-ask holds (GATE_REVIEW_ASK_TECH_VOICE, owner rulings
     // 2026-10-01), read for an ask after every other check
     // (review-ask-holds.js askHold decides; this applies it). Every hold is

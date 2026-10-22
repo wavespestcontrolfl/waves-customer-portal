@@ -677,7 +677,7 @@ const REGISTRY = {
     },
     async finalize(meta, ctx = {}) {
       const { finalizeDeferredCompletionSend } = require('../dispatch-completion-deferred');
-      return finalizeDeferredCompletionSend(meta, { retry: ctx.retry === true, channel: ctx.channel || undefined });
+      return finalizeDeferredCompletionSend(meta, { retry: ctx.retry === true });
     },
     async onTerminal(meta) {
       // Reset the record's 'deferred' status to 'failed' FIRST — the

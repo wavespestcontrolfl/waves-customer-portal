@@ -4918,7 +4918,7 @@ function initScheduledJobs() {
             // finalizers that settle once-ever claims key on the accepted
             // SID, and retrying without it would release a claim for a
             // message Twilio already delivered.
-            const fin = (await finalizeDeferredReplay(claimMeta.entry_point, claimMeta, { retry: true, customerId: msg.customer_id, providerMessageId: claimMeta.provider_message_id || null, channel: claimMeta.delivered_channel || null })) || { ok: true };
+            const fin = (await finalizeDeferredReplay(claimMeta.entry_point, claimMeta, { retry: true, customerId: msg.customer_id, providerMessageId: claimMeta.provider_message_id || null })) || { ok: true };
             if (fin.ok || finalizeAttempts >= SCHEDULED_SMS_MAX_ATTEMPTS) {
               // finalize_pending clears on BOTH outcomes or the stranded-
               // finalization sweep would convert this row forever.
@@ -5782,7 +5782,7 @@ function initScheduledJobs() {
             // settlement above) convert failures into bounded
             // finalize_only retries that never resend.
             {
-              const fin = await finalizeReplay(claimMeta.entry_point, { ...claimMeta, ...await readFreshMeta(), customer_id: msg.customer_id || claimMeta.customer_id || null }, { providerMessageId: smsResult.providerMessageId, customerId: msg.customer_id || null, channel: smsResult.channel || null });
+              const fin = await finalizeReplay(claimMeta.entry_point, { ...claimMeta, ...await readFreshMeta(), customer_id: msg.customer_id || claimMeta.customer_id || null }, { providerMessageId: smsResult.providerMessageId, customerId: msg.customer_id || null });
               if (fin && owesFinalization) {
                 if (fin.ok) {
                   await db('sms_log').where({ id: msg.id }).update({
@@ -5794,9 +5794,7 @@ function initScheduledJobs() {
                       status: 'scheduled',
                       scheduled_for: new Date(Date.now() + 15 * 60 * 1000),
                       updated_at: new Date(),
-                      // delivered_channel: the retry stamps the channel the
-                      // first pass would have (an App push is not a report text).
-                      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('finalize_only', true, 'finalize_attempts', 1, 'customer_id', ?::text, 'delivered_channel', ?::text)", [msg.customer_id || null, smsResult.channel || null]),
+                      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('finalize_only', true, 'finalize_attempts', 1, 'customer_id', ?::text)", [msg.customer_id || null]),
                     });
                     logger.warn(`[scheduled-sms] deferred-replay finalization incomplete for ${msg.id} — converted to finalize-only retry`);
                   } catch (convErr) {

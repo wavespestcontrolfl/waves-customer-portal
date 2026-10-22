@@ -71,12 +71,13 @@ function afterReportHint(preview, reportTextExpected, { afterPayment = false } =
   if (preview?.afterReport !== true) return null;
   const lead = afterPayment ? "Review text waits for the invoice to be paid, then goes out" : "Review text goes out separately";
   if (reportTextExpected === false) return `${lead} at the smart send window, because no report text goes out to follow.`;
-  // A report text the send window still queues for the morning comes first:
-  // enrollForPaidInvoice keeps that anchor, so the ask follows its release.
-  const after = afterPayment ? "payment, or after the report text if that is still queued for the morning" : "the report text";
+  // Only a report texted at completion anchors the ask; the server keeps the smart window for
+  // any other (held for the morning, the Waves app, opted out, failed), which the panel cannot
+  // know ahead of time, so it says so.
+  const after = afterPayment ? "payment" : "the report text";
   const windowNote = preview.smsSendWindowEnabled ? ", inside the 8 AM–8 PM window" : "";
-  const app = afterPayment ? "went" : "goes";
-  return `${afterPayment ? lead : `${lead},`} about ${afterReportMinutes(preview)} minutes after ${after}${windowNote}. If the report ${app} by the Waves app instead of a text, it goes at the smart send window.`;
+  const report = afterPayment ? "the report did not go out" : "the report does not go out";
+  return `${afterPayment ? lead : `${lead},`} about ${afterReportMinutes(preview)} minutes after ${after}${windowNote}. If ${report} as a text right away (held for the morning, sent by the Waves app, or texts turned off for this customer), it goes at the smart send window.`;
 }
 export function timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled, reportTextExpected }) {
   // GATE_REVIEW_ASK_AFTER_REPORT: the server names the rule; the panel

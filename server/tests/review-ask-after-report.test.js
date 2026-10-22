@@ -169,22 +169,20 @@ describe('the report text anchor (completion enrollment + paid invoice share one
     expect(src).toContain('reportTextAnchor: await ReviewService.reportTextAnchorForRecord(record.id),');
   });
 
-  test('a sent text anchors to its send time; a delivered held text to its delivery', () => {
+  test('a text sent at completion anchors to its send time', () => {
     expect(reportTextAnchorFromNotes({ completionSmsStatus: 'sent', sentSmsAt: '2026-10-20T14:00:00.000Z' })).toEqual({ status: 'sent', at: '2026-10-20T14:00:00.000Z' });
-    expect(reportTextAnchorFromNotes({ completionSmsStatus: 'deferred', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z', completionSmsDeferredDeliveredAt: '2026-10-20T12:03:00.000Z', sentSmsChannel: 'sms' })).toEqual({ status: 'sent', at: '2026-10-20T12:03:00.000Z' });
-    // A held replay delivered before the channel stamp may have gone to the App (codex #6434 r9 P2).
-    expect(reportTextAnchorFromNotes({ completionSmsStatus: 'sent', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z', completionSmsDeferredDeliveredAt: '2026-10-20T12:03:00.000Z' }, { atPayment: true })).toBeNull();
+    expect(reportTextAnchorFromNotes({ completionSmsStatus: 'sent', sentSmsChannel: 'mms', sentSmsAt: '2026-10-20T14:00:00.000Z' })).toEqual({ status: 'sent', at: '2026-10-20T14:00:00.000Z' });
   });
 
   test('a completion notice routed to the customer App is not a report text', () => {
     expect(reportTextAnchorFromNotes({ completionSmsStatus: 'sent', sentSmsChannel: 'push' })).toBeNull();
     expect(reportTextAnchorFromNotes({ completionSmsStatus: 'sent', sentSmsChannel: 'push' }, { atPayment: true })).toBeNull();
-    expect(reportTextAnchorFromNotes({ completionSmsStatus: 'sent', sentSmsChannel: 'mms', sentSmsAt: '2026-10-20T14:00:00.000Z' })).toEqual({ status: 'sent', at: '2026-10-20T14:00:00.000Z' });
   });
 
-  test('a text the send window still holds anchors to its release', () => {
-    expect(reportTextAnchorFromNotes({ completionSmsStatus: 'deferred', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z' })).toEqual({ status: 'deferred', at: '2026-10-20T12:00:00.000Z' });
-    expect(reportTextAnchorFromNotes({ completionSmsStatus: 'deferred' })).toBeNull();
+  test('a text the send window held for the morning keeps the smart window, queued or delivered', () => {
+    expect(reportTextAnchorFromNotes({ completionSmsStatus: 'deferred', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z' })).toBeNull();
+    expect(reportTextAnchorFromNotes({ completionSmsStatus: 'sent', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z', completionSmsDeferredDeliveredAt: '2026-10-20T12:03:00.000Z' })).toBeNull();
+    expect(reportTextAnchorFromNotes({ completionSmsStatus: 'sent', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z' }, { atPayment: true })).toBeNull();
   });
 
   test.each([['failed'], ['blocked'], ['skipped_recap_sms_already_sent'], ['no_phone'], [undefined]])('a %s text gives no anchor', (status) => {
@@ -192,9 +190,8 @@ describe('the report text anchor (completion enrollment + paid invoice share one
     expect(reportTextAnchorFromNotes(status ? { completionSmsStatus: status } : {}, { atPayment: true })).toBeNull();
   });
 
-  test('at payment, only a delivered text earns the paid anchor', () => {
+  test('at payment, a text sent at completion earns the paid anchor', () => {
     expect(reportTextAnchorFromNotes({ completionSmsStatus: 'sent' }, { atPayment: true })).toMatchObject({ status: 'paid' });
-    expect(reportTextAnchorFromNotes({ completionSmsStatus: 'deferred', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z' }, { atPayment: true })).toEqual({ status: 'deferred', at: '2026-10-20T12:00:00.000Z' });
   });
 });
 

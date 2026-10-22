@@ -8022,23 +8022,6 @@ describe('GATE_REVIEW_ASK_AFTER_REPORT — Day-0 ask 10 minutes after the report
   });
 
   describe('the report text decides (quiet hours, failed, blocked)', () => {
-    test('a 9 PM completion: the report is queued for 8 AM, the ask is due 8:10 AM next day — never before the report leaves', async () => {
-      freezeAt('2026-10-20T01:00:00Z'); // 9:00 PM ET Monday
-      mockGates.reviewSequences = true;
-      mockGates.reviewAskAfterReport = true;
-      const mock = makeMock(customer('ar-q1'));
-      db.mockImplementation(mock);
-
-      await ReviewService.enrollPostService({
-        customerId: 'ar-q1', serviceType: 'Quarterly Pest Control', completedAt: new Date(),
-        reportTextAnchor: { status: 'deferred', at: '2026-10-20T12:00:00.000Z' }, // 8:00 AM ET Tuesday
-      });
-
-      const due = new Date(mock.__state.rows.review_sequences[0].next_run_at);
-      expect(due.toISOString()).toBe('2026-10-20T12:10:00.000Z'); // 8:10 AM ET
-      expect(due.getTime()).toBeGreaterThan(new Date('2026-10-20T12:00:00.000Z').getTime());
-      expect(decisionOf(mock)).toMatchObject({ reason: 'after_report' });
-    });
 
     test.each([
       ['failed', { status: 'failed' }],
@@ -8048,6 +8031,7 @@ describe('GATE_REVIEW_ASK_AFTER_REPORT — Day-0 ask 10 minutes after the report
       ['not requested', { status: 'not_requested' }],
       ['unknown', { status: 'whatever' }],
       ['a deferred text with no release time', { status: 'deferred' }],
+      ['a text held for the morning (9 PM completion)', { status: 'deferred', at: '2026-10-21T12:00:00.000Z' }],
       ['no anchor at all', null],
     ])('%s: the smart send window, reason smart_window', async (_label, anchor) => {
       freezeAt('2026-10-20T14:00:00Z'); // 10 AM ET Tuesday; lawn smart window = 4:30 PM
@@ -8064,7 +8048,7 @@ describe('GATE_REVIEW_ASK_AFTER_REPORT — Day-0 ask 10 minutes after the report
       expect(decisionOf(mock)).toMatchObject({ reason: 'smart_window' });
     });
 
-    test('the unpaid-invoice path: a report still held by the send window keeps the ask behind its release, even when payment lands overnight', async () => {
+    test('the unpaid-invoice path: a report the send window held for the morning keeps the smart window, even when payment lands overnight', async () => {
       freezeAt('2026-10-20T02:00:00Z'); // 10 PM ET, paid on the spot after an after-hours completion
       mockGates.reviewSequences = true;
       mockGates.reviewAskAfterReport = true;
@@ -8074,7 +8058,8 @@ describe('GATE_REVIEW_ASK_AFTER_REPORT — Day-0 ask 10 minutes after the report
 
       await ReviewService.enrollForPaidInvoice({ id: 'inv-q2', invoice_number: 'T-2', customer_id: 'ar-q2', service_record_id: 'sr-q2', visit_completion_packet_id: null });
 
-      expect(new Date(mock.__state.rows.review_sequences[0].next_run_at).toISOString()).toBe('2026-10-20T12:10:00.000Z');
+      expect(new Date(mock.__state.rows.review_sequences[0].next_run_at).toISOString()).not.toBe('2026-10-20T12:10:00.000Z');
+      expect(decisionOf(mock)).toMatchObject({ reason: 'smart_window' });
     });
 
     test.each([
@@ -8082,6 +8067,8 @@ describe('GATE_REVIEW_ASK_AFTER_REPORT — Day-0 ask 10 minutes after the report
       ['blocked', { completionSmsStatus: 'blocked' }],
       ['skipped', { completionSmsStatus: 'skipped_recap_sms_already_sent' }],
       ['missing', {}],
+      ['held for the morning, then delivered', { completionSmsStatus: 'sent', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z', completionSmsDeferredDeliveredAt: '2026-10-20T12:03:00.000Z' }],
+      ['sent by the customer App', { completionSmsStatus: 'sent', sentSmsAt: '2026-10-20T13:00:00.000Z', sentSmsChannel: 'push' }],
     ])('the paid-invoice path: a %s report text earns no paid anchor and keeps the smart window', async (_label, notes) => {
       freezeAt('2026-10-20T14:00:00Z'); // 10 AM ET Tuesday
       mockGates.reviewSequences = true;
@@ -8099,7 +8086,6 @@ describe('GATE_REVIEW_ASK_AFTER_REPORT — Day-0 ask 10 minutes after the report
 
     test.each([
       ['sent', { completionSmsStatus: 'sent', sentSmsAt: '2026-10-20T13:00:00.000Z' }],
-      ['deferred then delivered', { completionSmsStatus: 'deferred', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z', sentSmsChannel: 'sms', completionSmsDeferredDeliveredAt: '2026-10-20T12:03:00.000Z' }],
     ])('the paid-invoice path: a %s report text earns the paid anchor (payment + 10 minutes)', async (_label, notes) => {
       freezeAt('2026-10-20T14:00:00Z');
       mockGates.reviewSequences = true;
@@ -8114,225 +8100,6 @@ describe('GATE_REVIEW_ASK_AFTER_REPORT — Day-0 ask 10 minutes after the report
       expect(decisionOf(mock)).toMatchObject({ reason: 'after_report' });
     });
 
-    describe('the sender keeps the ask behind a queued report (retries included)', () => {
-      const seqFor = (overrides = {}) => ({
-        id: 'seq-rp', customer_id: 'ar-rp', status: 'active', current_step: 0, touches_sent: 0, service_record_id: 'sr-rp', started_by: 'post_service',
-        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
-        started_at: new Date(Date.now() - 600000), next_run_at: new Date(Date.now() - 1000),
-        decision: JSON.stringify({ reason: 'after_report' }), ...overrides,
-      });
-      const book = (notes, seqOver) => makeMock({
-        ...customer('ar-rp'),
-        review_sequences: [seqFor(seqOver)],
-        service_records: [{ id: 'sr-rp', customer_id: 'ar-rp', service_type: 'Quarterly Pest Control', status: 'completed', structured_notes: notes }],
-      });
-
-      test('report still deferred (first attempt failed, retry pending): nothing sends, recheck in 5 minutes', async () => {
-        freezeAt('2026-10-20T12:11:00Z');
-        mockGates.reviewAskAfterReport = true;
-        const mock = book({ completionSmsStatus: 'deferred', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z' }, { started_at: new Date('2026-10-20T01:00:00Z') });
-        db.mockImplementation(mock);
-
-        const out = await ReviewService._runSequenceStep('seq-rp');
-
-        expect(out).toMatchObject({ ran: false, deferred: true, reason: 'report_pending' });
-        expect(mockSendCustomerMessage).not.toHaveBeenCalled();
-        expect(new Date(mock.__state.rows.review_sequences[0].next_run_at).getTime()).toBe(Date.now() + 5 * MIN);
-        expect(JSON.parse(mock.__state.rows.review_sequences[0].decision)).toMatchObject({ reason: 'report_pending' });
-      });
-
-      test.each([
-        ['Tomorrow 8 AM / custom time', { reviewScheduledFor: '2026-10-20T08:00' }],
-        ['a stored delay', { reviewDelayMinutes: 0 }],
-      ])('an explicit operator timing (%s) keeps its own time while the report is still queued', async (_label, timing) => {
-        freezeAt('2026-10-20T12:11:00Z');
-        mockGates.reviewAskAfterReport = true;
-        const mock = book({ completionSmsStatus: 'deferred', completionSmsDeferredTo: '2026-10-20T12:30:00.000Z', ...timing }, { started_at: new Date('2026-10-20T01:00:00Z') });
-        db.mockImplementation(mock);
-
-        const out = await ReviewService._runSequenceStep('seq-rp');
-
-        expect(out?.reason).not.toBe('report_pending');
-        expect(JSON.parse(mock.__state.rows.review_sequences[0].decision || '{}').reason).not.toBe('report_pending');
-      });
-
-      test('a held report whose replay then failed moves the ask to the smart window from its release', async () => {
-        freezeAt('2026-10-20T12:11:00Z'); // 8:11 AM ET, the 8:00 replay died
-        mockGates.reviewAskAfterReport = true;
-        const mock = book({ completionSmsStatus: 'failed', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z', completionSmsError: 'deferred replay terminally blocked' }, { started_at: new Date('2026-10-20T01:00:00Z'), service_type: 'Quarterly Pest Control' });
-        db.mockImplementation(mock);
-
-        const out = await ReviewService._runSequenceStep('seq-rp');
-
-        expect(out).toMatchObject({ ran: false, deferred: true, reason: 'smart_window' });
-        expect(mockSendCustomerMessage).not.toHaveBeenCalled();
-        const smart = ReviewService.__private.calculateReviewSendPlan(new Date('2026-10-20T12:00:00.000Z'), 'Quarterly Pest Control', { jitter: false }).at;
-        expect(new Date(mock.__state.rows.review_sequences[0].next_run_at).getTime()).toBe(smart.getTime());
-        expect(smart.getTime()).toBeGreaterThan(Date.now());
-      });
-
-      test('a held report whose replay went to the customer App moves the ask to the smart window from its release (codex #6434 r8 P2)', async () => {
-        freezeAt('2026-10-20T12:21:00Z');
-        mockGates.reviewAskAfterReport = true;
-        const mock = book({ completionSmsStatus: 'sent', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z', completionSmsDeferredDeliveredAt: '2026-10-20T12:10:00.000Z', sentSmsChannel: 'push' }, { started_at: new Date('2026-10-20T01:00:00Z'), service_type: 'Quarterly Pest Control' });
-        db.mockImplementation(mock);
-
-        const out = await ReviewService._runSequenceStep('seq-rp');
-
-        expect(out).toMatchObject({ reason: 'smart_window' });
-        expect(mockSendCustomerMessage).not.toHaveBeenCalled();
-        const smart = ReviewService.__private.calculateReviewSendPlan(new Date('2026-10-20T12:00:00.000Z'), 'Quarterly Pest Control', { jitter: false }).at;
-        expect(new Date(mock.__state.rows.review_sequences[0].next_run_at).getTime()).toBe(smart.getTime());
-      });
-
-      test('a held report delivered before replays stamped a channel is not a confirmed text: smart window (codex #6434 r9 P2)', async () => {
-        freezeAt('2026-10-20T12:21:00Z');
-        mockGates.reviewAskAfterReport = true;
-        const mock = book({ completionSmsStatus: 'sent', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z', completionSmsDeferredDeliveredAt: '2026-10-20T12:10:00.000Z' }, { started_at: new Date('2026-10-20T01:00:00Z'), service_type: 'Quarterly Pest Control' });
-        db.mockImplementation(mock);
-
-        const out = await ReviewService._runSequenceStep('seq-rp');
-
-        expect(out).toMatchObject({ reason: 'smart_window' });
-        expect(mockSendCustomerMessage).not.toHaveBeenCalled();
-      });
-
-      test('a re-completion after a dead replay sends the report now: the ask waits 10 minutes after that text (codex #6434 r9 P2)', async () => {
-        freezeAt('2026-10-20T14:05:00Z');
-        mockGates.reviewAskAfterReport = true;
-        const mock = book({ completionSmsStatus: 'sent', sentSmsAt: '2026-10-20T14:00:00.000Z', sentSmsChannel: 'sms', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z' }, { started_at: new Date('2026-10-20T01:00:00Z') });
-        db.mockImplementation(mock);
-
-        const out = await ReviewService._runSequenceStep('seq-rp');
-
-        expect(out).toMatchObject({ reason: 'report_pending' });
-        expect(new Date(mock.__state.rows.review_sequences[0].next_run_at).toISOString()).toBe('2026-10-20T14:10:00.000Z');
-        expect(mockSendCustomerMessage).not.toHaveBeenCalled();
-      });
-
-      test('gate turned off after enrollment: a queued after-report ask goes back to the smart window (codex #6434 r10 P2)', async () => {
-        freezeAt('2026-10-20T14:10:00Z');
-        mockGates.reviewAskAfterReport = false;
-        const mock = book({ completionSmsStatus: 'sent', sentSmsAt: '2026-10-20T14:00:00.000Z', sentSmsChannel: 'sms' }, { started_at: new Date('2026-10-20T14:00:00Z'), service_type: 'Quarterly Pest Control', decision: JSON.stringify({ reason: 'after_report' }) });
-        db.mockImplementation(mock);
-
-        const out = await ReviewService._runSequenceStep('seq-rp');
-
-        const smart = ReviewService.__private.calculateReviewSendPlan(new Date('2026-10-20T14:00:00Z'), 'Quarterly Pest Control', { jitter: false }).at;
-        expect(smart.getTime()).toBeGreaterThan(Date.now());
-        expect(out).toMatchObject({ ran: false, deferred: true, reason: 'smart_window' });
-        expect(new Date(mock.__state.rows.review_sequences[0].next_run_at).getTime()).toBe(smart.getTime());
-        expect(mockSendCustomerMessage).not.toHaveBeenCalled();
-      });
-
-      test('a smart-window fallback row leaves the */5 after-report tick', () => {
-        const { isAfterReportFastRow } = ReviewService.__private;
-        expect(isAfterReportFastRow({ current_step: 0, touches_sent: 0, started_by: 'post_service', decision: { reason: 'smart_window' } })).toBe(false);
-      });
-
-      test('report delivered 3 minutes ago: waits until 10 minutes after its delivery', async () => {
-        freezeAt('2026-10-20T12:13:00Z');
-        mockGates.reviewAskAfterReport = true;
-        const mock = book({ completionSmsStatus: 'sent', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z', sentSmsChannel: 'sms', completionSmsDeferredDeliveredAt: '2026-10-20T12:10:00.000Z' }, { started_at: new Date('2026-10-20T01:00:00Z') });
-        db.mockImplementation(mock);
-
-        const out = await ReviewService._runSequenceStep('seq-rp');
-
-        expect(out).toMatchObject({ reason: 'report_pending' });
-        expect(new Date(mock.__state.rows.review_sequences[0].next_run_at).toISOString()).toBe('2026-10-20T12:20:00.000Z');
-        expect(mockSendCustomerMessage).not.toHaveBeenCalled();
-      });
-
-      test('report delivered 11 minutes ago: the ask goes', async () => {
-        freezeAt('2026-10-20T12:21:00Z');
-        mockGates.reviewAskAfterReport = true;
-        const mock = book({ completionSmsStatus: 'sent', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z', sentSmsChannel: 'sms', completionSmsDeferredDeliveredAt: '2026-10-20T12:10:00.000Z' }, { started_at: new Date('2026-10-20T01:00:00Z') });
-        db.mockImplementation(mock);
-
-        const out = await ReviewService._runSequenceStep('seq-rp');
-
-        expect(out?.reason).not.toBe('report_pending');
-        expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
-      });
-
-      test('gate off, a customer-requested link, or an operator-started sequence: no check', async () => {
-        freezeAt('2026-10-20T12:11:00Z');
-        const deferred = { completionSmsStatus: 'deferred', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z' };
-        mockGates.reviewAskAfterReport = false;
-        db.mockImplementation(book(deferred));
-        expect((await ReviewService._runSequenceStep('seq-rp'))?.reason).not.toBe('report_pending');
-
-        mockGates.reviewAskAfterReport = true;
-        mockSendCustomerMessage.mockClear();
-        db.mockImplementation(book(deferred, { customer_requested: JSON.stringify({ by: 'tech-1', source: 'completion_panel' }) }));
-        expect((await ReviewService._runSequenceStep('seq-rp'))?.reason).not.toBe('report_pending');
-
-        mockSendCustomerMessage.mockClear();
-        db.mockImplementation(book(deferred, { started_by: 'admin-1' }));
-        expect((await ReviewService._runSequenceStep('seq-rp'))?.reason).not.toBe('report_pending');
-      });
-
-      test('the hold does not read the decision: any decision reason (or none) is still held', async () => {
-        freezeAt('2026-10-20T12:11:00Z');
-        mockGates.reviewAskAfterReport = true;
-        for (const decision of [JSON.stringify({ reason: 'cap_stats_unavailable' }), JSON.stringify({ reason: 'spacing_lookup_unavailable' }), JSON.stringify({ reason: 'operator_timing' }), null]) {
-          mockSendCustomerMessage.mockClear();
-          db.mockImplementation(book({ completionSmsStatus: 'deferred', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z' }, { decision, started_at: new Date('2026-10-20T01:00:00Z') }));
-          expect(await ReviewService._runSequenceStep('seq-rp')).toMatchObject({ reason: 'report_pending' });
-          expect(mockSendCustomerMessage).not.toHaveBeenCalled();
-        }
-      });
-
-      test('a transient spacing-lookup failure tick, then recovery while the report is still queued: still held; after delivery + 10 it sends', async () => {
-        freezeAt('2026-10-20T12:11:00Z');
-        mockGates.reviewAskAfterReport = true;
-        const notes = { completionSmsStatus: 'deferred', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z' };
-        let failLookups = true;
-        const mock = makeMock({
-          ...customer('ar-rp'),
-          review_sequences: [seqFor({ started_at: new Date('2026-10-20T01:00:00Z') })],
-          service_records: [{ id: 'sr-rp', customer_id: 'ar-rp', service_type: 'Quarterly Pest Control', status: 'completed', structured_notes: notes }],
-        }, { throwSelectWhen: (q) => failLookups && q.table === 'review_requests' });
-        db.mockImplementation(mock);
-
-        // Tick 1: the ask-history lookup fails; the runner rewrites the decision.
-        const first = await ReviewService._runSequenceStep('seq-rp');
-        expect(first).toMatchObject({ ran: false, deferred: true });
-        expect(first.reason).not.toBe('report_pending');
-        expect(JSON.parse(mock.__state.rows.review_sequences[0].decision).reason).toBe(first.reason);
-        expect(mockSendCustomerMessage).not.toHaveBeenCalled();
-
-        // Tick 2: lookups recover; the report is STILL queued; the overwritten decision must not matter.
-        failLookups = false;
-        jest.setSystemTime(new Date('2026-10-20T12:42:00Z'));
-        mock.__state.rows.review_sequences[0].next_run_at = new Date(Date.now() - 1000);
-        const second = await ReviewService._runSequenceStep('seq-rp');
-        expect(second).toMatchObject({ ran: false, deferred: true, reason: 'report_pending' });
-        expect(mockSendCustomerMessage).not.toHaveBeenCalled();
-
-        // Tick 3: the report was delivered at 12:45; at 12:50 it is only 5 minutes ago.
-        mock.__state.rows.service_records[0].structured_notes = { ...notes, completionSmsStatus: 'sent', sentSmsChannel: 'sms', completionSmsDeferredDeliveredAt: '2026-10-20T12:45:00.000Z' };
-        jest.setSystemTime(new Date('2026-10-20T12:50:00Z'));
-        mock.__state.rows.review_sequences[0].next_run_at = new Date(Date.now() - 1000);
-        expect(await ReviewService._runSequenceStep('seq-rp')).toMatchObject({ reason: 'report_pending' });
-        expect(new Date(mock.__state.rows.review_sequences[0].next_run_at).toISOString()).toBe('2026-10-20T12:55:00.000Z');
-        expect(mockSendCustomerMessage).not.toHaveBeenCalled();
-
-        // Tick 4: delivery + 10 has passed; the ask goes.
-        jest.setSystemTime(new Date('2026-10-20T12:56:00Z'));
-        mock.__state.rows.review_sequences[0].next_run_at = new Date(Date.now() - 1000);
-        const last = await ReviewService._runSequenceStep('seq-rp');
-        expect(last?.reason).not.toBe('report_pending');
-        expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
-      });
-
-      test('failed report text: the ask is not held forever behind it (past its smart window it runs)', async () => {
-        freezeAt('2026-10-20T19:00:00Z'); // 3 PM ET, well past the smart window from the 8 AM release
-        mockGates.reviewAskAfterReport = true;
-        db.mockImplementation(book({ completionSmsStatus: 'failed', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z' }));
-        expect((await ReviewService._runSequenceStep('seq-rp'))?.reason).not.toBe('report_pending');
-      });
-    });
   });
 
   test('gate on: a customer-requested link still records customer_requested', async () => {
@@ -8425,7 +8192,7 @@ describe('GATE_REVIEW_ASK_AFTER_REPORT — Day-0 ask 10 minutes after the report
       const { isAfterReportFastRow } = ReviewService.__private;
       const row = { current_step: 0, touches_sent: 0, started_by: 'post_service', decision: { reason: 'after_report' } };
       expect(isAfterReportFastRow(row)).toBe(true);
-      expect(isAfterReportFastRow({ ...row, decision: JSON.stringify({ reason: 'report_pending' }) })).toBe(true);
+      expect(isAfterReportFastRow({ ...row, decision: JSON.stringify({ reason: 'smart_window' }) })).toBe(false);
       expect(isAfterReportFastRow({ ...row, decision: { reason: 'operator_timing' } })).toBe(false);
       expect(isAfterReportFastRow({ ...row, current_step: 1 })).toBe(false);
       expect(isAfterReportFastRow({ ...row, touches_sent: 1 })).toBe(false);

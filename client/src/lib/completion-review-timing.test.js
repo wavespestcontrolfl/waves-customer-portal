@@ -70,20 +70,20 @@ describe('the Automatic hint while the ask goes out after the report text', () =
 
   test('names the 10 minutes after the report text and the send window, not the smart window', () => {
     const text = timedReviewHint({ reviewTiming: 'auto', preview: afterReport });
-    expect(text).toBe('Review text goes out separately, about 10 minutes after the report text, inside the 8 AM–8 PM window. If the report goes by the Waves app instead of a text, it goes at the smart send window.');
+    expect(text).toBe('Review text goes out separately, about 10 minutes after the report text, inside the 8 AM–8 PM window. If the report does not go out as a text right away (held for the morning, sent by the Waves app, or texts turned off for this customer), it goes at the smart send window.');
     expect(text).not.toMatch(/cadence tick/i);
   });
 
   test('without the send window gate the window is not promised', () => {
     expect(timedReviewHint({ reviewTiming: 'auto', preview: { ...afterReport, smsSendWindowEnabled: false } }))
-      .toBe('Review text goes out separately, about 10 minutes after the report text. If the report goes by the Waves app instead of a text, it goes at the smart send window.');
+      .toBe('Review text goes out separately, about 10 minutes after the report text. If the report does not go out as a text right away (held for the morning, sent by the Waves app, or texts turned off for this customer), it goes at the smart send window.');
   });
 
   test('an unpaid completion invoice: 10 minutes after payment', () => {
     const { text } = completionReviewHint({ willReview: true, effectiveSendSms: true, reviewTiming: 'auto', preview: afterReport, reviewAwaitsPayment: true });
     expect(text).toMatch(/waits for the invoice to be paid, then goes out about 10 minutes after payment/);
-    // A report still queued for the morning comes first (codex #6434 r9 P2).
-    expect(text).toMatch(/or after the report text if that is still queued for the morning/);
+    // Any report not texted right away keeps the smart window (codex #6434 r11 P2).
+    expect(text).toMatch(/If the report did not go out as a text right away .*smart send window/);
   });
 
   test.each([
