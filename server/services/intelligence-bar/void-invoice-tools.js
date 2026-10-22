@@ -46,7 +46,7 @@ const VOID_INVOICE_TOOLS = [
     name: 'void_invoice',
     description: `Void ONE existing invoice that has collected nothing: the Invoices page "Void" button. Voiding cancels the invoice (it is kept, marked void); it never deletes it. The first call returns a PREVIEW and writes nothing: the invoice, the customer, the amount, its status, and exactly what voiding does. The operator approves on the confirmation card; the confirmed run re-checks all of it and refuses if anything changed.
 Effects: the invoice becomes void, its payment reminders stop, any account credit applied to it goes back to the customer's balance, and a payer's still-open statement drops it from its total. An unpaid pay-page session (a PaymentIntent nobody has tried to pay) is cancelled. The linked visit is not changed. Nothing is sent to the customer or anyone (no text, email or call). The Invoices page can restore a voided invoice to a draft.
-Refused with the reason: invoice not found, already void, canceled, a send in progress, and every invoice with money received or in flight (paid, partly paid, a payment recorded, a payment or charge on file, an open or processing card payment, a refund, a deposit already collected, a finalized payer statement, a payment plan). Those are by_owner_rule: refunds and card charges stay on the Invoices page. Annual-plan, membership-dues, bait-station-setup and queued-text invoices are also left to the Invoices page. Admin only.
+Refused with the reason: invoice not found, already void, canceled, a send in progress, and every invoice with money received or in flight (paid, partly paid, a payment recorded, a payment or charge on file, an open or processing card payment, a refund, a deposit already collected, a finalized payer statement, a payment plan). Those are by_owner_rule: refunds and card charges stay on the Invoices page. Annual-plan, membership-dues, bait-station-setup and queued-text invoices are refused with needs_invoices_page: the bar can't void them from here yet. Admin only.
 Takes invoice_id OR invoice_number, exactly one.
 Use for: "void this invoice", "void invoice WPC-2026-0534", "cancel this invoice", "cancel the invoice", "delete the invoice" (an invoice is voided, never deleted), "get rid of this invoice", "kill that invoice".`,
     input_schema: {
@@ -65,8 +65,8 @@ const cents = (value) => Math.round((Number(value) || 0) * 100);
 const msOf = (value) => (value ? new Date(value).getTime() : null);
 const digest = (value) => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 32);
 const refusal = (error, code, extra = {}) => ({ error, code, ...extra });
-const ownerRule = (error, reason, invoiceId) => refusal(`${error} Refunds and card charges stay on the Invoices page.`, 'by_owner_rule', { reason, invoice_id: invoiceId });
-const toPage = (error, reason, invoiceId) => refusal(`${error} Void it from the Invoices page.`, 'needs_invoices_page', { reason, invoice_id: invoiceId });
+const ownerRule = (error, reason, invoiceId) => refusal(`${error} Refunds and card charges stay on the Invoices page by the owner's rule.`, 'by_owner_rule', { reason, invoice_id: invoiceId });
+const toPage = (error, reason, invoiceId) => refusal(`${error} The bar can't void this invoice from here yet. Nothing was changed.`, 'needs_invoices_page', { reason, invoice_id: invoiceId });
 
 // Statuses that read as collected or moving money (the screen shows no Void button for them either).
 const MONEY_STATUSES = new Set(['paid', 'processing', 'refunded', 'partially_refunded', 'partial', 'disputed']);
@@ -151,7 +151,7 @@ async function moneyRefusal(invoice) {
     if (err?.reconciliationRequired || /^STRIPE_/.test(String(err?.code || ''))) {
       return ownerRule(`Invoice ${invoice.invoice_number} has a saved-card charge in progress or unresolved.`, 'charge_in_progress', at);
     }
-    return refusal('The bar could not check for a card charge in progress, so nothing was offered. Void it from the Invoices page.', 'unverified', { invoice_id: at });
+    return refusal('The bar could not check for a card charge in progress, so nothing was offered. Nothing was changed. Try again in a moment.', 'unverified', { invoice_id: at });
   }
   return null;
 }
@@ -185,7 +185,7 @@ async function pageOnlyRefusal(invoice) {
     }
   } catch (err) {
     logger.warn(`[intelligence-bar:void-invoice] link check failed (${err.code || err.name || 'error'})`);
-    return refusal('The bar could not check what else this invoice is tied to, so nothing was offered. Void it from the Invoices page.', 'unverified', { invoice_id: at });
+    return refusal('The bar could not check what else this invoice is tied to, so nothing was offered. Nothing was changed. Try again in a moment.', 'unverified', { invoice_id: at });
   }
   return null;
 }
@@ -201,7 +201,7 @@ async function paymentIntentState(invoice) {
   } catch {
     pi = null;
   }
-  if (!pi?.status) return refusal('The bar could not read this invoice’s open card-payment session from Stripe, so nothing was offered. Void it from the Invoices page.', 'unverified', { invoice_id: invoice.id });
+  if (!pi?.status) return refusal('The bar could not read this invoice’s open card-payment session from Stripe, so nothing was offered. Nothing was changed. Try again in a moment.', 'unverified', { invoice_id: invoice.id });
   if (pi.status === 'canceled') return { pi: { id: piId, status: 'canceled' } };
   if (!UNCONFIRMED_PI.has(pi.status)) {
     return ownerRule(`Invoice ${invoice.invoice_number} has a card payment session in state ${pi.status}: a payment may be in progress or made.`, `payment_intent_${pi.status}`, invoice.id);
@@ -332,7 +332,7 @@ async function commitVoid(input) {
     const now = await db('invoices').where({ id: plan.invoice_id }).first('status').catch(() => null);
     if (now?.status === 'void') {
       return { ...base, success: true, status: 'void', sent_to_customer: false, warning: true,
-        note: `Invoice ${plan.invoice_number} is void, but a follow-up step reported a problem. Check the invoice on the Invoices page.` };
+        note: `Invoice ${plan.invoice_number} is void, but a follow-up step reported a problem. Check the invoice before trying again.` };
     }
     logger.error(`[intelligence-bar:void-invoice] handler failed (${err.code || err.name || 'error'})`);
     return { ...base, outcome_unknown: true, code: 'execution_interrupted',

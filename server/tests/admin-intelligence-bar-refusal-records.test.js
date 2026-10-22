@@ -253,3 +253,53 @@ describe('refusal gap rows on /query (platform mode)', () => {
     expect(mockGapRows).toHaveLength(0);
   });
 });
+
+describe('refusal gap rows on /confirm-action (Codex #6371 r19)', () => {
+  const PENDING_ID = '00000000-0000-0000-0000-0000000000f1';
+  const PendingActions = require('../services/intelligence-bar/pending-actions');
+  const confirm = (baseUrl) => fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
+    method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' }, body: JSON.stringify({ pending_action_id: PENDING_ID }),
+  });
+  const claim = () => PendingActions.claimForConfirm.mockResolvedValue({
+    action: { id: PENDING_ID, tool_name: 'reschedule_appointment', params: { appointment_id: '00000000-0000-0000-0000-0000000000a1', new_date: '2099-01-05' } },
+  });
+
+  test('a confirmed move refused for a linked package visit 2 writes one blocked row with that code', async () => {
+    claim();
+    mockExecuteTool.mockResolvedValue({ error: "The bar can't move this package visit from here yet. Nothing was changed.", code: 'package_visit_two_linked' });
+    await withServer(async (baseUrl) => { await confirm(baseUrl); });
+    expect(mockGapRows).toHaveLength(1);
+    expect(mockGapRows[0]).toMatchObject({ kind: 'blocked', closest_tool: 'reschedule_appointment', source: 'intelligence-bar' });
+    expect(mockGapRows[0].summary).toContain('package_visit_two_linked');
+  });
+
+  test.each(['permission_denied', 'visit_busy_move', 'invoice_send_queued'])('a %s refusal at confirm records nothing', async (code) => {
+    claim();
+    mockExecuteTool.mockResolvedValue({ error: "The bar can't move this from here yet.", code });
+    await withServer(async (baseUrl) => { await confirm(baseUrl); });
+    expect(mockGapRows).toHaveLength(0);
+  });
+
+  test('a confirmed move that skipped grouped stops records nothing new: the preview already counted them', async () => {
+    claim();
+    mockExecuteTool.mockResolvedValue({ success: true, moved_count: 1, skipped_grouped: [{ id: 's2', kind: 'grouped' }], capability_gaps: [{ code: 'grouped_visit_move_unsupported' }] });
+    await withServer(async (baseUrl) => { await confirm(baseUrl); });
+    expect(mockGapRows).toHaveLength(0);
+  });
+
+  test('a failed confirm lists no nested gaps either, only its own top-level code', async () => {
+    claim();
+    mockExecuteTool.mockResolvedValue({ error: "The bar can't move these from here yet.", code: 'grouped_visit_move_unsupported', capability_gaps: [{ code: 'frozen_visit_move_unsupported' }] });
+    await withServer(async (baseUrl) => { await confirm(baseUrl); });
+    expect(mockGapRows).toHaveLength(1);
+    expect(mockGapRows[0].summary).toContain('grouped_visit_move_unsupported');
+  });
+
+  test('a successful confirm records nothing', async () => {
+    claim();
+    mockExecuteTool.mockResolvedValue({ success: true });
+    await withServer(async (baseUrl) => { await confirm(baseUrl); });
+    expect(mockGapRows).toHaveLength(0);
+  });
+});
+

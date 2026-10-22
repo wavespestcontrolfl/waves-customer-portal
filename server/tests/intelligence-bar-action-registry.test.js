@@ -42,6 +42,15 @@ test('a proposal-pinned customer id validates for reply_via_sms while a forged o
   expect(registry.validateInput('reply_via_sms', { ...pinned, customer_id: 'not-a-uuid' }, scope)).toMatchObject({ code: 'invalid_input' });
 });
 
+test('send_autopay_setup_link validates delivery "link" so its coded refusal is reachable (Codex #6371 r23)', async () => {
+  const scope = { role: 'admin', context: 'platform' };
+  const input = { customer_id: '10000000-0000-4000-8000-000000000002', delivery: 'link' };
+  expect(registry.validateInput('send_autopay_setup_link', input, scope)).toBeNull();
+  expect(registry.validateInput('send_autopay_setup_link', { ...input, delivery: 'carrier pigeon' }, scope)).toMatchObject({ code: 'invalid_input' });
+  const refused = await require('../services/intelligence-bar/customer-link-tools').executeCustomerLinkTool('send_autopay_setup_link', input, { isAdmin: true });
+  expect(refused).toMatchObject({ code: 'autopay_link_only_unsupported' });
+});
+
 test('every existing tool has an explicit valid policy and a concrete executor', () => {
   expect(registry.policyErrors).toEqual([]);
   expect(registry.actions.size).toBe(Object.keys(require('../services/intelligence-bar/action-policy.json')).length);
