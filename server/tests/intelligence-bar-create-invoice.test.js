@@ -47,7 +47,7 @@ function makeDb() {
   function builder(table) {
     const q = { wheres: [], nulls: [], notIns: [], single: false };
     const rows = () => {
-      const found = (state[table] || []).filter((row) => q.wheres.every((w) => Object.entries(w).every(([k, v]) => String(row[k]) === String(v)))
+      const found = (state[table] || []).filter((row) => q.wheres.every((group) => group.some((w) => Object.entries(w).every(([k, v]) => String(row[k]) === String(v))))
         && q.nulls.every((k) => row[k] == null)
         && q.notIns.every(([k, list]) => !list.includes(row[k])));
       return q.single ? found[0] : found;
@@ -55,7 +55,17 @@ function makeDb() {
     const b = new Proxy({}, {
       get(_t, prop) {
         if (prop === 'then') return (res, rej) => Promise.resolve().then(rows).then(res, rej);
-        if (prop === 'where') return (arg) => { if (arg && typeof arg === 'object') q.wheres.push(arg); return b; };
+        // An object is one condition; a function is an OR-group of the conditions it adds (this.where / this.orWhere).
+        if (prop === 'where') {
+          return (arg) => {
+            if (typeof arg === 'function') {
+              const group = [];
+              arg.call({ where: (o) => { group.push(o); }, orWhere: (o) => { group.push(o); } });
+              q.wheres.push(group);
+            } else if (arg && typeof arg === 'object') q.wheres.push([arg]);
+            return b;
+          };
+        }
         if (prop === 'whereNull') return (k) => { q.nulls.push(k); return b; };
         if (prop === 'whereNotIn') return (k, list) => { q.notIns.push([k, list]); return b; };
         if (prop === 'first') return () => { q.single = true; return b; };
@@ -407,6 +417,16 @@ describe('recheckApprovedScope (inside the create transaction)', () => {
     mockResolvePayer.mockResolvedValue({ payerId: 'payer-1', taxExempt: false, snapshot: {}, paymentTerms: 'net30' });
     await expect(recheck(approved)).rejects.toMatchObject({ statusCode: 409, code: 'IB_SCOPE_CHANGED', isOperational: true, message: expect.stringMatching(/third-party payer.*changed after the card was shown/) });
     mockResolvePayer.mockRejectedValue(new Error('db down'));
+    await expect(recheck(approved)).rejects.toMatchObject({ code: 'IB_SCOPE_CHANGED' });
+  });
+
+  test('an invoice linked to the visit only through its scheduled visit counts too, on the card and at the recheck', async () => {
+    state.invoices.push({ id: INV, service_record_id: null, scheduled_service_id: VISIT, invoice_number: 'WPC-2099-0008', status: 'sent', total: '70.00' });
+    const card = await preview(lineInput({ service_record_id: REC }));
+    expect(card.effects.map((e) => e.text).join('\n')).toMatch(/WPC-2099-0008 \(sent, \$70\.00\) already bills this visit/);
+    state.invoices.length = 0;
+    const approved = await approvedOf();
+    state.invoices.push({ id: INV, service_record_id: null, scheduled_service_id: VISIT, invoice_number: 'WPC-2099-0008', status: 'draft', total: '70.00' });
     await expect(recheck(approved)).rejects.toMatchObject({ code: 'IB_SCOPE_CHANGED' });
   });
 

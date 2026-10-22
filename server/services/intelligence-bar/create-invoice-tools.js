@@ -187,8 +187,14 @@ async function loadCustomer(customerId) {
 }
 
 // The completed visit the invoice links or bills: it must be this customer's own.
-async function liveInvoicesOnVisit(conn, serviceRecordId) {
-  const existing = await conn('invoices').where({ service_record_id: serviceRecordId })
+// Invoices that bill the visit: those stamped with its service record AND those linked only through its scheduled visit
+// (scheduled-visit mints write scheduled_service_id alone).
+async function liveInvoicesOnVisit(conn, serviceRecordId, scheduledServiceId) {
+  const existing = await conn('invoices')
+    .where(function billsThisVisit() {
+      this.where({ service_record_id: serviceRecordId });
+      if (scheduledServiceId) this.orWhere({ scheduled_service_id: scheduledServiceId });
+    })
     .whereNotIn('status', ['void', 'canceled', 'cancelled'])
     .select('id', 'invoice_number', 'status', 'total');
   return existing.map((r) => ({ id: r.id, number: r.invoice_number, status: r.status, total: cents(r.total) })).sort((a, b) => String(a.id).localeCompare(String(b.id)));
@@ -202,7 +208,7 @@ async function loadVisit(customerId, serviceRecordId) {
   return {
     visit: {
       id: sr.id, service_type: sr.service_type || null, date: dayOf(sr.service_date), scheduled_service_id: sr.scheduled_service_id || null,
-      invoices: await liveInvoicesOnVisit(db, serviceRecordId),
+      invoices: await liveInvoicesOnVisit(db, serviceRecordId, sr.scheduled_service_id || null),
     },
   };
 }
@@ -367,7 +373,7 @@ async function recheckApprovedScope(conn, approved) {
   if (approved.serviceRecordId) {
     const sr = await conn('service_records').where({ id: approved.serviceRecordId, customer_id: approved.customerId }).first('scheduled_service_id');
     if (!sr || (sr.scheduled_service_id || null) !== (approved.scheduledServiceId || null)) throw scopeChanged('The visit changed after the card was shown');
-    const live = (await liveInvoicesOnVisit(conn, approved.serviceRecordId)).map(invoicePin);
+    const live = (await liveInvoicesOnVisit(conn, approved.serviceRecordId, approved.scheduledServiceId || null)).map(invoicePin);
     if (JSON.stringify(live) !== JSON.stringify(approved.visitInvoices)) throw scopeChanged('An invoice on this visit changed after the card was shown');
   }
   const refused = await pageOnlyRefusal(customer, { scheduled_service_id: approved.scheduledServiceId || null }, approved.mode, conn);
