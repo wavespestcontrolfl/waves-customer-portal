@@ -321,10 +321,12 @@ describe('needs-a-person notice: far double bookings are listed quietly until 14
       await notice.raiseNotices(bucket, { nowDate: NOW, scanComplete: true });
       const digest = deliverOpsDigest.mock.calls[0][0];
       expect(digest.count).toBe(4);
-      expect(digest.itemKeys).toEqual(['f20:2026-11-20', 'f21:2026-11-21']);
       expect(digest.text).toContain('And 2 more after the last date above.');
-      // The set the next run re-reads is every one, past the cap.
-      expect(digest.metadata.farVisits).toEqual(['f20:2026-11-20', 'f21:2026-11-21', 'f22:2026-11-22', 'f23:2026-11-23']);
+      expect(digest.text).not.toContain('Nov 22');
+      // Every one past the cap: in the change fingerprint (itemKeys -> itemSetHash) and in the re-read set.
+      const every = ['f20:2026-11-20', 'f21:2026-11-21', 'f22:2026-11-22', 'f23:2026-11-23'];
+      expect(digest.itemKeys).toEqual(every);
+      expect(digest.metadata.farVisits).toEqual(every);
     } finally {
       mockDigest.MAX_ITEM_KEYS = 500;
     }

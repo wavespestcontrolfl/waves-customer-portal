@@ -268,10 +268,13 @@ async function reportFarConflicts(farItems, { enabled, scanComplete }) {
     const audit = require('./audit');
     const { shortDateET } = require('../admin-alert-names');
     const all = [...farItems].sort((a, b) => (a.date < b.date ? -1 : (a.date > b.date ? 1 : 0)));
-    // The text and ops-digest's own itemKeys stop at its item-key cap (past it
-    // ops-digest stores no keys at all); the full set the next run re-reads is
-    // the list's own metadata.farVisits, uncapped.
+    // The text stops at ops-digest's item-key cap. The full set goes in twice:
+    // as itemKeys, whose itemSetHash ops-digest computes over every key (past
+    // the cap it stores no keys, but the hash still changes with the set, so
+    // the standing row refreshes), and as the list's own metadata.farVisits,
+    // uncapped, which the next run re-reads (farListedVisitIds).
     const sorted = all.slice(0, require('../ops-digest').MAX_ITEM_KEYS);
+    const allKeys = all.map((item) => `${item.id}:${item.date}`);
     const names = [];
     for (const item of sorted) names.push(await audit.namedVisitAction(item.customer_id, [(who) => `${who}'s visit`], 'A visit'));
     const lines = farLines(sorted, names, shortDateET);
@@ -289,8 +292,8 @@ async function reportFarConflicts(farItems, { enabled, scanComplete }) {
       text: [summary, '', ...lines].join('\n'),
       html: `<p>${escapeHtml(summary)}</p><ul>${lines.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>`,
       count: n,
-      itemKeys: sorted.map((item) => `${item.id}:${item.date}`),
-      metadata: { farVisits: all.map((item) => `${item.id}:${item.date}`) },
+      itemKeys: allKeys,
+      metadata: { farVisits: allKeys },
       link: '/admin/dispatch?tab=schedule',
       dedupeKey: `ops-digest:${FAR_DIGEST_KEY}`,
       refreshOnDedupe: true,
