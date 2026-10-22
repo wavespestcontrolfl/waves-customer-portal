@@ -413,6 +413,53 @@ function canonicalLine(li) {
   return { ...li, quantity: qty, unit_price: unit, amount: round2(amount) };
 }
 
+// Why one existing line cannot take this change (a refusal), or null.
+function lineChangeRefusal(stored, li, change) {
+  if (!li) return refusal(`The invoice has ${stored.length} line${stored.length === 1 ? '' : 's'}; there is no line ${change.line}.`, 'line_not_found', { lines: numbered(stored) });
+  const why = plainLineRefusal(li, change.line);
+  if (why) return refusal(why, 'line_not_editable', { lines: numbered(stored) });
+  if (change.remove && stored.some((other) => other.discount_for && li.client_id && String(other.discount_for) === String(li.client_id))) {
+    return refusal(`Line ${change.line} has a discount attached. Remove it from the Invoices page.`, 'line_not_editable', { lines: numbered(stored) });
+  }
+  return null;
+}
+
+// An existing line after a quantity / price / description change. A rename clears the catalog scope (service_key /
+// service_category), as the Invoices page editor does: the server trusts those fields for service-scoped document discounts, so
+// a renamed line must not keep its old service's discount.
+function changedLine(li, change) {
+  const qty = change.quantity !== undefined ? change.quantity : (Number(li.quantity) || 1);
+  const unit = change.unit_price !== undefined ? change.unit_price : (Number(li.unit_price) || lineAmount(li) / qty);
+  const renamed = change.description !== undefined && change.description !== li.description;
+  return {
+    ...li,
+    ...(change.description !== undefined ? { description: change.description } : {}),
+    ...(renamed && (li.service_key != null || li.service_category != null) ? { service_key: null, service_category: null } : {}),
+    quantity: qty,
+    unit_price: unit,
+    amount: round2(qty * unit),
+  };
+}
+
+// The new lines, each with an id unique on the invoice. Every id already on the invoice (even a line this edit removes) stays
+// unique: a new line's id is derived from the invoice, the line and a salt, and the salt moves on until the id is free. The stored
+// lines are part of the card's pinned version, so the same request gives the same ids at preview and at Confirm; an identical line
+// added by a later edit gets the next free id.
+function newLines(stored, changes, invoiceId) {
+  const taken = new Set(stored.map((li) => li.client_id).filter(Boolean).map(String));
+  return changes.filter((change) => !change.line).map((change, i) => {
+    const qty = change.quantity !== undefined ? change.quantity : 1;
+    let salt = 0;
+    let clientId;
+    do {
+      clientId = `li_bar_${digest([invoiceId, i + 1, change.description, qty, change.unit_price, salt]).slice(0, 12)}`;
+      salt += 1;
+    } while (taken.has(clientId));
+    taken.add(clientId);
+    return { client_id: clientId, description: change.description, quantity: qty, unit_price: change.unit_price, amount: round2(qty * change.unit_price) };
+  });
+}
+
 function applyLineChanges(stored, changes, invoiceId) {
   const next = stored.map(canonicalLine);
   const uneven = next.findIndex((li) => li === null);
@@ -421,65 +468,19 @@ function applyLineChanges(stored, changes, invoiceId) {
   }
   const dropped = new Set();
   const touched = []; // { kind, number, before, after }
-  const added = [];
-  for (const change of changes) {
-    if (!change.line) continue;
+  for (const change of changes.filter((c) => c.line)) {
     const idx = change.line - 1;
-    const li = next[idx];
-    if (!li) return refusal(`The invoice has ${stored.length} line${stored.length === 1 ? '' : 's'}; there is no line ${change.line}.`, 'line_not_found', { lines: numbered(stored) });
-    const why = plainLineRefusal(li, change.line);
-    if (why) return refusal(why, 'line_not_editable', { lines: numbered(stored) });
-    if (change.remove) {
-      if (stored.some((other) => other.discount_for && li.client_id && String(other.discount_for) === String(li.client_id))) {
-        return refusal(`Line ${change.line} has a discount attached. Remove it from the Invoices page.`, 'line_not_editable', { lines: numbered(stored) });
-      }
-      dropped.add(idx);
-      touched.push({ kind: 'removed', number: change.line, before: lineText(stored[idx]), after: '(removed)' });
-      continue;
-    }
-    const qty = change.quantity !== undefined ? change.quantity : (Number(li.quantity) || 1);
-    const unit = change.unit_price !== undefined ? change.unit_price : (Number(li.unit_price) || lineAmount(li) / qty);
-    // A rename clears the catalog scope (service_key / service_category), as the Invoices page editor does: the server trusts
-    // those fields for service-scoped document discounts, so a renamed line must not keep its old service's discount.
-    const renamed = change.description !== undefined && change.description !== li.description;
-    next[idx] = {
-      ...li,
-      ...(change.description !== undefined ? { description: change.description } : {}),
-      ...(renamed && (li.service_key != null || li.service_category != null) ? { service_key: null, service_category: null } : {}),
-      quantity: qty,
-      unit_price: unit,
-      amount: round2(qty * unit),
-    };
-    touched.push({ kind: 'changed', number: change.line, before: lineText(stored[idx]), after: lineText(next[idx]) });
+    const refused = lineChangeRefusal(stored, next[idx], change);
+    if (refused) return refused;
+    if (change.remove) dropped.add(idx);
+    else next[idx] = changedLine(next[idx], change);
+    touched.push(change.remove
+      ? { kind: 'removed', number: change.line, before: lineText(stored[idx]), after: '(removed)' }
+      : { kind: 'changed', number: change.line, before: lineText(stored[idx]), after: lineText(next[idx]) });
   }
-  let out = next.filter((_li, idx) => !dropped.has(idx));
-  let n = 0;
-  // Every id already on the invoice (even a line this edit removes) stays unique: a new line's id is derived from the invoice, the
-  // line and a salt, and the salt moves on until the id is free. The stored lines are part of the card's pinned version, so the
-  // same request gives the same ids at preview and at Confirm; an identical line added by a later edit gets the next free id.
-  const taken = new Set(stored.map((li) => li.client_id).filter(Boolean).map(String));
-  for (const change of changes) {
-    if (change.line) continue;
-    n += 1;
-    const qty = change.quantity !== undefined ? change.quantity : 1;
-    let salt = 0;
-    let clientId;
-    do {
-      clientId = `li_bar_${digest([invoiceId, n, change.description, qty, change.unit_price, salt]).slice(0, 12)}`;
-      salt += 1;
-    } while (taken.has(clientId));
-    taken.add(clientId);
-    const li = {
-      client_id: clientId,
-      description: change.description,
-      quantity: qty,
-      unit_price: change.unit_price,
-      amount: round2(qty * change.unit_price),
-    };
-    out.push(li);
-    added.push(li);
-    touched.push({ kind: 'added', number: null, before: '(new line)', after: lineText(li) });
-  }
+  const added = newLines(stored, changes, invoiceId);
+  for (const li of added) touched.push({ kind: 'added', number: null, before: '(new line)', after: lineText(li) });
+  const out = [...next.filter((_li, idx) => !dropped.has(idx)), ...added];
   if (!out.some((li) => lineAmount(li) > 0)) {
     return refusal('That would leave the invoice with no billable line. Void the invoice instead.', 'invoice_empty', { lines: numbered(stored) });
   }
@@ -675,6 +676,8 @@ function editPins({ invoice, stored, body, newTotal, financials, setupFeeTied })
       total: Number(invoice.total) || 0,
       creditApplied: Number(invoice.credit_applied) || 0,
       paymentIntentId: null,
+      // The owner the financials were computed for: a payer stamped after the card (without an updated_at move) refuses.
+      payerId: invoice.payer_id || null,
       ...(financials ? { newTotal } : {}),
     },
   };

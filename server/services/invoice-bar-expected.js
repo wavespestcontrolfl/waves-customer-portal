@@ -6,7 +6,8 @@
  *
  * expected keys (each compared only when present):
  *   status, updatedAt (ms or null), total, creditApplied (dollars), paymentIntentId (null = none),
- *   archived (boolean).
+ *   archived (boolean), payerId (null = self-pay; a payer stamped on the row without moving updated_at, e.g.
+ *   reverseCreditAndStampPayer, would otherwise leave the card's figures computed for the wrong owner).
  * updated_at moves on every write to the invoice, so it is the version; the other keys name what the card relied on.
  */
 const ms = (value) => (value ? new Date(value).getTime() : null);
@@ -22,6 +23,7 @@ function invoiceVersionChanged(row, expected) {
   if (has(expected, 'creditApplied') && cents(row.credit_applied) !== cents(expected.creditApplied)) return true;
   if (has(expected, 'paymentIntentId') && (row.stripe_payment_intent_id || null) !== (expected.paymentIntentId || null)) return true;
   if (has(expected, 'archived') && Boolean(row.archived_at) !== Boolean(expected.archived)) return true;
+  if (has(expected, 'payerId') && String(row.payer_id || '') !== String(expected.payerId || '')) return true;
   return false;
 }
 
@@ -65,6 +67,10 @@ function applyInvoiceVersion(query, expected) {
   if (has(expected, 'archived')) {
     if (expected.archived) query.whereNotNull('archived_at');
     else query.whereNull('archived_at');
+  }
+  if (has(expected, 'payerId')) {
+    if (expected.payerId) query.where('payer_id', expected.payerId);
+    else query.whereNull('payer_id');
   }
   return query;
 }

@@ -61,6 +61,18 @@ describe('invoiceVersionChanged / assertInvoiceVersion / applyInvoiceVersion', (
     expect(invoiceVersionChanged(row(), { status: undefined, updatedAt: undefined })).toBe(false);
   });
 
+  test('a payer stamped on the row after the card (updated_at unmoved) is drift; the write requires the same owner', () => {
+    expect(invoiceVersionChanged(row({ payer_id: 'payer-1' }), { payerId: null })).toBe(true);
+    expect(invoiceVersionChanged(row({ payer_id: null }), { payerId: null })).toBe(false);
+    expect(invoiceVersionChanged(row({ payer_id: 'payer-1' }), { payerId: 'payer-1' })).toBe(false);
+    const calls = [];
+    const q = {};
+    for (const name of ['where', 'whereRaw', 'whereNull', 'whereNotNull']) q[name] = jest.fn((...a) => { calls.push([name, ...a]); return q; });
+    applyInvoiceVersion(q, { payerId: null });
+    applyInvoiceVersion(q, { payerId: 'payer-1' });
+    expect(calls).toEqual([['whereNull', 'payer_id'], ['where', 'payer_id', 'payer-1']]);
+  });
+
   test('the drift error is a 409 PREVIEW_CHANGED operational error naming what was being done', () => {
     let error;
     try { assertInvoiceVersion(row({ total: '130.00' }), EXPECTED, 'unvoiding'); } catch (err) { error = err; }

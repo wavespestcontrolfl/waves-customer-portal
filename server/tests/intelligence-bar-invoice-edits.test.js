@@ -575,7 +575,7 @@ describe('edit_invoice confirm', () => {
     expect(Invoices.editInvoiceFromBar).toHaveBeenCalledTimes(1);
     expect(Invoices.editInvoiceFromBar).toHaveBeenCalledWith({
       invoiceId: INV, body: card._body, actor: { technicianId: 'staff-1', name: 'Pat Admin', email: 'admin@example.com' },
-      expected: { status: 'sent', updatedAt: UPDATED.getTime(), total: 129, creditApplied: 0, paymentIntentId: null, newTotal: 149 },
+      expected: { status: 'sent', updatedAt: UPDATED.getTime(), total: 129, creditApplied: 0, paymentIntentId: null, payerId: null, newTotal: 149 },
     });
   });
 
