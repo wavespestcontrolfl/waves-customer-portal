@@ -29,6 +29,10 @@ export default function ScheduledEmails({ scheduled, editor, mailbox }) {
     // A draft started while the cancel was in flight takes the slot: keep a
     // way back (the server repeats the cancel and returns the same draft).
     const restored = editor.restoreScheduledDraft(draft);
+    if (restored?.guardUnsaved) {
+      setFeedback({ error: true, retry: row, message: "Cancelled, but this browser could not save its safety check, so the draft did not open. Tap Try again." });
+      return;
+    }
     if (!restored) {
       setFeedback({ error: true, retry: row, message: "Cancelled, but another draft is open. Send or discard it, then tap Try again to get this email back." });
       return;

@@ -426,6 +426,21 @@ describe("Email schedule send", () => {
     await waitFor(() => expect(send()).not.toBeDisabled());
   });
 
+  it("does not open a may-have-sent draft when the tab cannot save the Sent-check guard", async () => {
+    scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "outcome_unknown", mayHaveSent: true }];
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Scheduled" }, { timeout: 3000 }));
+    const setItem = Storage.prototype.setItem;
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function failGuard(key, value) {
+      if (/schedule_uncertain/.test(key)) throw new Error("Quota");
+      return setItem.call(this, key, value);
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Back to draft" }));
+    expect(await screen.findByText(/could not save its safety check/)).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("Saved text")).not.toBeInTheDocument();
+    expect(posts("/queued-1/restored")).toHaveLength(0);
+  });
+
   it("sign-out removes the schedule-send state with the drafts", () => {
     sessionStorage.setItem("waves_email_restored_pending:fixture-schedule-owner", "[\"queued-1\"]");
     sessionStorage.setItem("waves_email_restore_keys:fixture-schedule-owner", "{}");

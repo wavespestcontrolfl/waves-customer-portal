@@ -374,16 +374,15 @@ export default function useEmailEditor(userId) {
   const scheduledDraftBlocked = (draft) => (draft.replyEmailId
     ? Boolean((draftSession.drafts.replies[draft.replyEmailId] || "").trim())
     : Object.values(draftSession.drafts.compose).some(Boolean));
-  // Returns false when blocked, else { saved }: whether the tab stored the
-  // draft, so a reload would still find it.
+  // Returns false when blocked, { guardUnsaved } when the tab could not save
+  // the Sent-check guard, else { saved }: whether the tab stored the draft,
+  // so a reload would still find it.
   const restoreScheduledDraft = (draft) => {
     if (scheduledDraftBlocked(draft)) return false;
     // Gmail may already have this email: plain Send waits for the same
-    // Sent-folder check as an unconfirmed schedule request.
-    if (draft.mayHaveSent) {
-      const slot = slotOf(draft.replyEmailId);
-      if (!rememberUncertain(slot, MAY_HAVE_SENT)) { uncertainSchedule.current[slot] = MAY_HAVE_SENT; notifyDrafts(); }
-    }
+    // Sent-folder check as an unconfirmed schedule request. A guard that
+    // cannot survive a reload is no guard, so the draft does not come back.
+    if (draft.mayHaveSent && !rememberUncertain(slotOf(draft.replyEmailId), MAY_HAVE_SENT)) return { guardUnsaved: true };
     if (draft.replyEmailId) {
       setReplyDraft(draft.replyEmailId, draft.draftText);
       return { saved: draftSession.saved };
