@@ -409,8 +409,9 @@ async function processVendorInvoice(email, classification) {
     const { domainFromAddress } = require('./spam-blocker');
     if (!hasAlignedAuth(email.authentication_results, domainFromAddress(email.from_address))) {
       // A reclassified email that already booked an expense keeps its booking
-      // outcome (expense_id / expense_created marker): do not overwrite it.
-      if (email.expense_id) {
+      // outcome: do not overwrite it. The expense row must still exist; an admin-
+      // deleted one leaves a stale id and the email is unbooked.
+      if (email.expense_id && await db('expenses').where({ id: email.expense_id }).first('id')) {
         logger.warn(`[invoice-processor] Email ${email.id} already booked expense ${email.expense_id} but its sender did not authenticate as the From domain — booking left as is`);
         return;
       }

@@ -1,14 +1,10 @@
-// A vendor_invoice email only "counts" (daily digest) and reads "Expense
-// logged" (mailbox row) when the invoice processor did not stop short of
-// booking. `invoice_detected:*` is its stop-short marker: not_paid, no_amount,
-// expense_failed, and unauthenticated (GATE_EMAIL_AUTH_STRICT: the sender did
-// not authenticate as its From domain, so a person must review it).
-function invoiceNotLogged(autoAction, expenseId) {
-  return !expenseId && /^invoice_detected:/.test(String(autoAction || ''));
-}
-
+// A vendor_invoice email counts as processed (daily digest) and reads
+// "Expense logged" (mailbox row) only with positive evidence: it links to an
+// expense (expense_id). No link means not booked: not paid, no amount, failed,
+// skipped (operational_sender_skipped), still processing, or an unauthenticated
+// sender (GATE_EMAIL_AUTH_STRICT: invoice_detected:unauthenticated, for review).
 function countProcessedInvoices(emails) {
-  return (emails || []).filter((e) => e.classification === 'vendor_invoice' && !invoiceNotLogged(e.auto_action, e.expense_id)).length;
+  return (emails || []).filter((e) => e.classification === 'vendor_invoice' && e.expense_id).length;
 }
 
-module.exports = { invoiceNotLogged, countProcessedInvoices };
+module.exports = { countProcessedInvoices };

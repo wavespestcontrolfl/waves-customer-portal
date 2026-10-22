@@ -7,11 +7,12 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/email/gmail-client', () => ({ getAttachment: jest.fn(async () => Buffer.from('%PDF-1.7 test')) }));
 
 const mockWrites = [];
+let mockExpenseExists = false;
 jest.mock('../models/db', () => {
   const chain = (table) => {
     const q = {
       where: () => q, whereILike: () => q, whereIn: () => q, whereRaw: () => q, forUpdate: () => q,
-      first: async () => null,
+      first: async () => (table === 'expenses' && mockExpenseExists ? { id: 'exp-9' } : null),
       update: async (row) => { mockWrites.push([table, 'update', row]); return 1; },
       insert: (row) => { mockWrites.push([table, 'insert', row]); return { returning: async () => [{ id: 'exp-1' }] }; },
       then: (resolve) => resolve([]),
@@ -74,7 +75,7 @@ describe('processVendorInvoice authentication', () => {
   const email = (auth) => ({ id: 'email-1', gmail_id: 'gm-1', from_address: 'billing@victim.example', subject: 'Invoice', authentication_results: auth });
   const inserted = () => mockWrites.find(([t, op]) => t === 'expenses' && op === 'insert');
 
-  beforeEach(() => { mockWrites.length = 0; mockCreate.mockReset(); });
+  beforeEach(() => { mockWrites.length = 0; mockCreate.mockReset(); mockExpenseExists = false; });
 
   test('gate off: an unauthenticated sender still books (unchanged)', async () => {
     await processVendorInvoice(email(FORGED), CLASSIFICATION);
@@ -95,11 +96,20 @@ describe('processVendorInvoice authentication', () => {
     expect(inserted()).toBeUndefined();
   });
 
-  test('gate on: an already-booked email keeps its outcome when reprocessed unauthenticated', async () => {
+  test('gate on: an email whose expense still exists keeps its outcome when reprocessed unauthenticated', async () => {
     process.env[GATE] = 'true';
+    mockExpenseExists = true;
     await processVendorInvoice({ ...email(null), expense_id: 'exp-9' }, CLASSIFICATION);
     expect(inserted()).toBeUndefined();
     expect(mockWrites.find(([t, op]) => t === 'emails' && op === 'update')).toBeUndefined();
+  });
+
+  test('gate on: a stale expense_id (expense deleted) is treated as unbooked and marked unauthenticated', async () => {
+    process.env[GATE] = 'true';
+    mockExpenseExists = false;
+    await processVendorInvoice({ ...email(null), expense_id: 'exp-gone' }, CLASSIFICATION);
+    expect(inserted()).toBeUndefined();
+    expect(mockWrites).toContainEqual(['emails', 'update', expect.objectContaining({ auto_action: 'invoice_detected:unauthenticated' })]);
   });
 
   test('gate on: a sender that authenticated as its From domain still books', async () => {
