@@ -122,7 +122,8 @@ OWNER RULES (the report is refused if it breaks one)
 12. Never repeat what the report prints by itself: the product list, a "How it works" line word for word, the next visit's date, the activity gauge's number or scale.
 13. Never these words: infestation, infested, eliminated, eradicated, exterminated, resolved, solved, gone, cleared, pest-free, any "-proof" word, guaranteed.
 14. Never mention a treatment map, a traced line or an outline.
-15. PROMISES: mention a promise only when it is work at the home, and only as marked. "Done today": say the work in WHAT WE DID AND WHY ("We checked the gap under the garage door you asked about"). "Partly done today": what we did, with what is left in WHAT'S NEXT. "Not done yet": in WHAT'S NEXT as still on our list, with no date.
+15. WHAT TO EXPECT says only what an EXPECTATIONS line says. With no EXPECTATIONS lines it only names today's service ("Today was your regular quarterly service.").
+16. PROMISES: mention a promise only when it is work at the home, and only as marked. "Done today": say the work in WHAT WE DID AND WHY ("We checked the gap under the garage door you asked about"). "Partly done today": what we did, with what is left in WHAT'S NEXT. "Not done yet": in WHAT'S NEXT as still on our list, with no date.
 
 STYLE (the owner's prose rules; they never override the rules above)
 ${HUMAN_PROSE_RULES}
