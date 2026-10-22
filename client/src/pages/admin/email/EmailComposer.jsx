@@ -38,8 +38,10 @@ export default function EmailComposer({ active, editor, onSent }) {
   const [toSearching, setToSearching] = useState(false);
   const [toDropdownOpen, setToDropdownOpen] = useState(false);
   const toFieldRef = useRef(null);
+  // Sending or scheduling: the draft must not change under the request.
+  const composeBusy = composeSending || editor.scheduling === "compose";
   const sendDisabled =
-    composeSending || editor.scheduling === "compose" || Boolean(editor.sendAttempts.compose) || !composeForm.to.trim() || !composeForm.body.trim();
+    composeBusy || Boolean(editor.sendAttempts.compose) || !composeForm.to.trim() || !composeForm.body.trim();
 
   // Debounced customer lookup for the "To" field. Searches by name or
   // partial email via the customers list endpoint and keeps only matches
@@ -142,11 +144,11 @@ export default function EmailComposer({ active, editor, onSent }) {
         </div>
         <div className="flex shrink-0 flex-wrap justify-end gap-2 border-t-hairline border-zinc-200 px-4 py-3">
           <Button variant="secondary" onClick={close} disabled={composeSending}>Close</Button>
-          <Button variant="ghost" disabled={composeSending || editor.scheduling === "compose"} onClick={() => {
+          <Button variant="ghost" disabled={composeBusy} onClick={() => {
             setComposeForm(() => ({ to: "", subject: "", body: "" })); setShowCompose(false);
           }}>Discard draft</Button>
           <div className="flex gap-px">
-            <Button onClick={() => handleComposeSend(onSent)} loading={composeSending || editor.scheduling === "compose"} disabled={sendDisabled}>Send</Button>
+            <Button onClick={() => handleComposeSend(onSent)} loading={composeBusy} disabled={sendDisabled}>Send</Button>
             {editor.scheduleEnabled && <ScheduleSendMenu disabled={sendDisabled}
               onSchedule={(sendAt) => editor.handleComposeSchedule(sendAt, editor.onScheduled)} />}
           </div>
