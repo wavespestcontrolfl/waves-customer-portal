@@ -8171,6 +8171,20 @@ describe('GATE_REVIEW_ASK_AFTER_REPORT — Day-0 ask 10 minutes after the report
         expect(smart.getTime()).toBeGreaterThan(Date.now());
       });
 
+      test('a held report whose replay went to the customer App moves the ask to the smart window from its release (codex #6434 r8 P2)', async () => {
+        freezeAt('2026-10-20T12:21:00Z');
+        mockGates.reviewAskAfterReport = true;
+        const mock = book({ completionSmsStatus: 'sent', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z', completionSmsDeferredDeliveredAt: '2026-10-20T12:10:00.000Z', sentSmsChannel: 'push' }, { started_at: new Date('2026-10-20T01:00:00Z'), service_type: 'Quarterly Pest Control' });
+        db.mockImplementation(mock);
+
+        const out = await ReviewService._runSequenceStep('seq-rp');
+
+        expect(out).toMatchObject({ reason: 'report_pending' });
+        expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+        const smart = ReviewService.__private.calculateReviewSendPlan(new Date('2026-10-20T12:00:00.000Z'), 'Quarterly Pest Control', { jitter: false }).at;
+        expect(new Date(mock.__state.rows.review_sequences[0].next_run_at).getTime()).toBe(smart.getTime());
+      });
+
       test('report delivered 3 minutes ago: waits until 10 minutes after its delivery', async () => {
         freezeAt('2026-10-20T12:13:00Z');
         mockGates.reviewAskAfterReport = true;

@@ -143,7 +143,7 @@ function stripPayLinkLineFromBody(body, payUrl) {
   return stripped || null;
 }
 
-async function finalizeDeferredCompletionSend(claimMeta = {}, { retry = false } = {}) {
+async function finalizeDeferredCompletionSend(claimMeta = {}, { retry = false, channel } = {}) {
   const recordId = claimMeta.service_record_id || null;
   const sentAtIso = new Date().toISOString();
   // ok covers the STATE steps (invoice flip, review mark, receipt claim).
@@ -209,10 +209,13 @@ async function finalizeDeferredCompletionSend(claimMeta = {}, { retry = false } 
         // this merge with a fresh sentAtIso, but the provider accepted the
         // text on the first pass — overwriting would move the report into a
         // later send cohort and make real opens between delivery and the
-        // retry look pre-send (codex #3847 P2).
+        // retry look pre-send (codex #3847 P2). The delivery channel rides in
+        // the same once-only stamp, as the immediate path's sentSmsChannel:
+        // a replay routed to the customer App ('push') is not a report text,
+        // and the after-report review hold reads it (no channel = no key).
         structured_notes: db.raw(
           "COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb || CASE WHEN COALESCE(structured_notes::jsonb, '{}'::jsonb) ->> 'completionSmsDeferredDeliveredAt' IS NULL THEN ?::jsonb ELSE '{}'::jsonb END",
-          [JSON.stringify({ completionSmsStatus: 'sent' }), JSON.stringify({ completionSmsDeferredDeliveredAt: sentAtIso })],
+          [JSON.stringify({ completionSmsStatus: 'sent' }), JSON.stringify({ completionSmsDeferredDeliveredAt: sentAtIso, sentSmsChannel: channel })],
         ),
       });
     } catch (err) {

@@ -108,12 +108,16 @@ function reportTextAnchorFromNotes(notes, { atPayment = false } = {}) {
   const delivered = n.completionSmsStatus === "sent"
     || (n.completionSmsStatus === "deferred" && !!n.completionSmsDeferredDeliveredAt);
   if (!delivered) return null;
-  // A completion notice routed to the customer App (sentSmsChannel 'push',
-  // GATE_CUSTOMER_APP_NOTIFICATIONS) is not a report TEXT: no anchor, smart
-  // window. A missing channel is the pre-App shape (always SMS/MMS).
-  if (n.sentSmsChannel && n.sentSmsChannel !== "sms" && n.sentSmsChannel !== "mms") return null;
+  if (appRoutedNotice(n)) return null;
   if (atPayment) return { status: "paid", at: new Date().toISOString() };
   return { status: "sent", at: n.completionSmsDeferredDeliveredAt || n.sentSmsAt || new Date().toISOString() };
+}
+// A completion notice routed to the customer App (sentSmsChannel 'push',
+// GATE_CUSTOMER_APP_NOTIFICATIONS; a held notice's replay stamps it at
+// delivery) is not a report TEXT. A missing channel is the pre-App shape
+// (always SMS/MMS).
+function appRoutedNotice(notes) {
+  return !!notes.sentSmsChannel && notes.sentSmsChannel !== "sms" && notes.sentSmsChannel !== "mms";
 }
 // structured_notes as an object (a string column value is parsed; bad JSON
 // reads as empty).
@@ -131,18 +135,20 @@ function reportPendingEligible(seq, nowMs = Date.now()) {
 }
 // When a held Automatic ask may go, from the record's report text (ms; the
 // caller holds only while this is in the future):
-//   delivered by the scheduled-SMS rail -> delivery + 10 min
-//   still queued                        -> recheck in 5 min
-//   held, then the replay died          -> the smart window from the release
-//     time (terminalDeferredCompletionSend writes 'failed' and keeps
-//     completionSmsDeferredTo; jitter off, so every recheck names one instant)
+//   delivered as a text by the scheduled-SMS rail -> delivery + 10 min
+//   still queued                                  -> recheck in 5 min
+//   held, then no text reached the phone (the replay died: terminalDeferredCompletionSend
+//     writes 'failed' and keeps completionSmsDeferredTo; or it went to the customer
+//     App)                                        -> the smart window from the release
+//     time (jitter off, so every recheck names one instant)
 // Anything else gives NaN: no hold.
 function reportPendingReadyMs(notes, serviceType, nowMs) {
-  if (notes.completionSmsDeferredDeliveredAt) {
+  const delivered = !!notes.completionSmsDeferredDeliveredAt;
+  if (delivered && !appRoutedNotice(notes)) {
     return new Date(notes.completionSmsDeferredDeliveredAt).getTime() + REVIEW_AFTER_REPORT_DELAY_MINUTES * 60000;
   }
-  if (notes.completionSmsStatus === "deferred") return nowMs + REPORT_PENDING_RECHECK_MINUTES * 60000;
-  if (notes.completionSmsStatus !== "failed" || !notes.completionSmsDeferredTo) return NaN;
+  if (!delivered && notes.completionSmsStatus === "deferred") return nowMs + REPORT_PENDING_RECHECK_MINUTES * 60000;
+  if (!(delivered || notes.completionSmsStatus === "failed") || !notes.completionSmsDeferredTo) return NaN;
   const releasedAt = new Date(notes.completionSmsDeferredTo);
   if (Number.isNaN(releasedAt.getTime())) return NaN;
   return calculateReviewSendPlan(releasedAt, serviceType, { jitter: false }).at?.getTime() ?? NaN;
