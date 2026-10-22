@@ -178,7 +178,7 @@ export const INVITATIONS = Object.freeze({
 // SLOT_CLASS: every slot the page hands the layout, named in exactly one place: an instruction source, an
 // invitation, or information (a fact, not a task). lawnLayoutCoverage.test.js fails when a slot is in none.
 export const SLOT_CLASS = Object.freeze({
-  status: 'information', recap: 'information', nearYou: 'information', recordedFindings: 'information',
+  status: 'information', blog: 'information', recap: 'information', nearYou: 'information', recordedFindings: 'information',
   visitSummary: 'information', products: 'information', productsKind: 'information', poisonNote: 'information',
   tracedMap: 'information', markedPhotos: 'information', highlights: 'information', newSod: 'information',
   yourPart: 'instruction', recommendations: 'instruction', techNote: 'instruction',
