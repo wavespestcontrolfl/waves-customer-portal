@@ -27,8 +27,11 @@
  *                  notes, dates, the tax rate, the server-computed subtotal, tax and total, the linked visit and
  *                  the invoices that already bill it).
  *   confirmed   -> re-derives the preview and refuses with preview_changed on any drift, then runs the handler with
- *                  exactly the carded body (the due date included) and the card's total. The handler creates the
- *                  invoice in one transaction and rolls it back if the total it computed differs from the card's.
+ *                  exactly the carded body (the due date included) and the approved scope (the total, the customer,
+ *                  the visit link, the invoices already on the visit, no payer, no retention offer). The handler
+ *                  creates the invoice in one transaction; under the visit's mint lock and a share lock on the
+ *                  customer row it re-checks that scope (recheckApprovedScope) before it mints, and rolls back if
+ *                  the scope or the total it computed differs from the card's (409).
  */
 const crypto = require('crypto');
 const db = require('../../models/db');
@@ -97,6 +100,8 @@ const refusal = (error, code, extra = {}) => ({ error, code, ...extra });
 const toPage = (error, reason) => refusal(`${error} Create it from the Invoices page.`, 'needs_invoices_page', { reason });
 const clean = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
 const personName = (c) => [c?.first_name, c?.last_name].filter(Boolean).join(' ') || c?.company_name || null;
+const customerPin = (customer, name) => `${name || ''}|${customer.city || ''}`;
+const invoicePin = (i) => `${i.id}:${i.status}:${i.total}`;
 
 // A real calendar day written YYYY-MM-DD.
 function validDay(value) {
@@ -182,30 +187,34 @@ async function loadCustomer(customerId) {
 }
 
 // The completed visit the invoice links or bills: it must be this customer's own.
+async function liveInvoicesOnVisit(conn, serviceRecordId) {
+  const existing = await conn('invoices').where({ service_record_id: serviceRecordId })
+    .whereNotIn('status', ['void', 'canceled', 'cancelled'])
+    .select('id', 'invoice_number', 'status', 'total');
+  return existing.map((r) => ({ id: r.id, number: r.invoice_number, status: r.status, total: cents(r.total) })).sort((a, b) => String(a.id).localeCompare(String(b.id)));
+}
+
 async function loadVisit(customerId, serviceRecordId) {
   if (!serviceRecordId) return { visit: null };
   const sr = await db('service_records').where({ id: serviceRecordId, customer_id: customerId })
     .first('id', 'customer_id', 'service_type', 'service_date', 'scheduled_service_id');
   if (!sr) return { refusal: refusal('That visit is not one of this customer’s service records, so nothing was offered.', 'record_unavailable') };
-  const existing = await db('invoices').where({ service_record_id: serviceRecordId })
-    .whereNotIn('status', ['void', 'canceled', 'cancelled'])
-    .select('id', 'invoice_number', 'status', 'total');
   return {
     visit: {
       id: sr.id, service_type: sr.service_type || null, date: dayOf(sr.service_date), scheduled_service_id: sr.scheduled_service_id || null,
-      invoices: existing.map((r) => ({ id: r.id, number: r.invoice_number, status: r.status, total: cents(r.total) })).sort((a, b) => String(a.id).localeCompare(String(b.id))),
+      invoices: await liveInvoicesOnVisit(db, serviceRecordId),
     },
   };
 }
 
 // Invoices the page would address to a third-party payer, and what a visit invoice would consume beyond the card.
-async function pageOnlyRefusal(customer, visit, mode) {
+async function pageOnlyRefusal(customer, visit, mode, conn = db) {
   try {
     const resolved = await require('../payer').resolveForInvoice({
-      database: db, customerId: customer.id, customer, scheduledServiceId: visit?.scheduled_service_id || null, throwOnError: true,
+      database: conn, customerId: customer.id, customer, scheduledServiceId: visit?.scheduled_service_id || null, throwOnError: true,
     });
     if (resolved.payerId) return toPage('This customer’s invoices go to a third-party payer (Bill-To), so the invoice would be addressed to the payer.', 'payer_billed');
-    if (mode === 'from_visit' && await db('retention_offers').where({ customer_id: customer.id, status: 'granted' }).first('id')) {
+    if (mode === 'from_visit' && await conn('retention_offers').where({ customer_id: customer.id, status: 'granted' }).first('id')) {
       return toPage('A retention offer is granted for this customer and could discount this visit invoice, which the card cannot show.', 'retention_offer');
     }
   } catch (err) {
@@ -248,10 +257,10 @@ function versionOf({ customer, name, mode, body, visit, totals }) {
   return {
     mode,
     customer_id: customer.id,
-    customer: `${name || ''}|${customer.city || ''}`,
+    customer: customerPin(customer, name),
     body: digest(body),
     visit: visit ? `${visit.id}:${visit.service_type}:${visit.date}:${visit.scheduled_service_id || ''}` : null,
-    visit_invoices: visit ? visit.invoices.map((i) => `${i.id}:${i.status}:${i.total}`) : [],
+    visit_invoices: visit ? visit.invoices.map(invoicePin) : [],
     subtotal: cents(totals.subtotal),
     tax_rate: totals.tax_rate === undefined || totals.tax_rate === null ? null : Number(totals.tax_rate),
     tax: cents(totals.tax_amount),
@@ -317,6 +326,16 @@ async function buildPlan(input) {
     _version: versionOf({ customer, name, mode: read.mode, body, visit, totals }),
     _body: body,
     _expectedTotalCents: cents(totals.total),
+    // What the handler re-checks inside the create transaction, under the visit's mint lock (recheckApprovedScope). Never shown.
+    _approved: {
+      expectedTotalCents: cents(totals.total),
+      customerId: customer.id,
+      customerPin: customerPin(customer, name),
+      mode: read.mode,
+      serviceRecordId: visit ? visit.id : null,
+      scheduledServiceId: visit ? visit.scheduled_service_id : null,
+      visitInvoices: visit ? visit.invoices.map(invoicePin) : [],
+    },
     note: 'PREVIEW ONLY — nothing was created. Confirm creates exactly this draft; if anything changed it refuses. The draft is not sent: use send_invoice to send it.',
   };
 }
@@ -332,6 +351,29 @@ async function verifiedPlan(input, pinned) {
   return { plan };
 }
 
+const scopeChanged = (why) => Object.assign(new Error(`${why}, so nothing was created. Ask again for a fresh confirmation card.`),
+  { isOperational: true, statusCode: 409, code: 'IB_SCOPE_CHANGED' });
+
+// Run by the create handler INSIDE the create transaction, after it holds the visit's mint lock and before it mints: the
+// scope the card was approved under must still hold. A payer assigned, an invoice committed on the visit, a retention offer
+// granted, or the customer or visit link changed while the create waited for the lock is a 409 (IB_SCOPE_CHANGED) and the
+// transaction rolls back. The customer row is taken FOR SHARE (a payer assignment updates it and waits for this commit).
+async function recheckApprovedScope(conn, approved) {
+  if (approved.scheduledServiceId) {
+    await require('../scheduled-invoice-mint').acquireScheduledInvoiceMintLock(conn, approved.scheduledServiceId);
+  }
+  const customer = await conn('customers').where({ id: approved.customerId }).whereNull('deleted_at').forShare().first();
+  if (!customer || customerPin(customer, personName(customer) || customer.id) !== approved.customerPin) throw scopeChanged('The customer changed after the card was shown');
+  if (approved.serviceRecordId) {
+    const sr = await conn('service_records').where({ id: approved.serviceRecordId, customer_id: approved.customerId }).first('scheduled_service_id');
+    if (!sr || (sr.scheduled_service_id || null) !== (approved.scheduledServiceId || null)) throw scopeChanged('The visit changed after the card was shown');
+    const live = (await liveInvoicesOnVisit(conn, approved.serviceRecordId)).map(invoicePin);
+    if (JSON.stringify(live) !== JSON.stringify(approved.visitInvoices)) throw scopeChanged('An invoice on this visit changed after the card was shown');
+  }
+  const refused = await pageOnlyRefusal(customer, { scheduled_service_id: approved.scheduledServiceId || null }, approved.mode, conn);
+  if (refused) throw scopeChanged(`${refused.error.replace(/ Create it from the Invoices page\.$/, '')} (it changed after the card was shown)`);
+}
+
 async function commitCreate(input) {
   const { plan, refusal: refused } = await verifiedPlan(input, input._verified_invoice_create_version);
   if (refused) return refused;
@@ -340,7 +382,7 @@ async function commitCreate(input) {
   const run = plan.mode === 'from_visit' ? invoices.createInvoiceFromServiceFromBar : invoices.createInvoiceFromBar;
   let result;
   try {
-    result = await run({ body: plan._body, expectedTotalCents: plan._expectedTotalCents });
+    result = await run({ body: plan._body, approved: plan._approved });
   } catch (err) {
     // A 409 from the visit route (a deposit would apply, the price moved) is thrown before anything is created.
     if (err?.status === 409) {
@@ -354,7 +396,7 @@ async function commitCreate(input) {
   const { status, json } = result;
   if (status !== 201) {
     const message = String(json?.error || 'the Invoices page refused it');
-    const drift = json?.code === 'IB_TOTAL_MISMATCH';
+    const drift = ['IB_TOTAL_MISMATCH', 'IB_SCOPE_CHANGED'].includes(json?.code);
     return { ...base, failed: true, code: drift ? 'preview_changed' : status === 404 ? 'not_found' : 'create_refused',
       error: `The invoice was not created: ${message}`, ...(drift ? { preview_changed: true } : {}) };
   }
@@ -377,6 +419,7 @@ function cardLines(toolName, preview) {
   return [
     { kind: 'billing', text: `Create a draft invoice for ${preview.customer_name}${preview.customer_city ? ` (${preview.customer_city})` : ''}: ${preview.total}${preview.title ? `, "${preview.title}"` : ''}` },
     ...(preview.lines || []).map((text) => ({ kind: 'billing', text: `Line: ${text}` })),
+    ...(preview.notes ? [{ kind: 'billing', text: `Notes on the invoice: ${preview.notes}` }] : []),
     { kind: 'billing', text: `Subtotal ${preview.subtotal}, tax ${preview.tax}, total ${preview.total}` },
     { kind: 'billing', text: `Due: ${preview.due_date || '30 days after it is created'}${preview.service_date ? `; service date ${preview.service_date}` : ''}` },
     ...(preview.effects || []).map(({ kind, text }) => ({ kind, text })),
@@ -405,6 +448,7 @@ async function executeCreateInvoiceTool(toolName, input = {}, actionContext = {}
 module.exports = {
   CREATE_INVOICE_TOOLS,
   executeCreateInvoiceTool,
+  recheckApprovedScope,
   createInvoiceLive,
   cardLines,
 };

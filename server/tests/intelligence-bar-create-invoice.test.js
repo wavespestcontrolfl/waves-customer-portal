@@ -10,6 +10,8 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../routes/admin-invoices', () => ({ createInvoiceFromBar: jest.fn(), createInvoiceFromServiceFromBar: jest.fn() }));
+const mockMintLock = jest.fn(async () => {});
+jest.mock('../services/scheduled-invoice-mint', () => ({ acquireScheduledInvoiceMintLock: (...a) => mockMintLock(...a) }));
 const mockPreviewTotals = jest.fn();
 jest.mock('../services/invoice', () => ({ previewInvoiceTotals: (...a) => mockPreviewTotals(...a) }));
 const mockResolvePayer = jest.fn();
@@ -175,6 +177,7 @@ describe('the preview (lines)', () => {
       ],
     });
     expect(card._expectedTotalCents).toBe(12600);
+    expect(card._approved).toEqual({ expectedTotalCents: 12600, customerId: CUST, customerPin: 'Robin Sample|Sampleton', mode: 'lines', serviceRecordId: null, scheduledServiceId: null, visitInvoices: [] });
     expect(Invoices.createInvoiceFromBar).not.toHaveBeenCalled();
     const lines = cardLines('create_invoice', card).map((l) => l.text).join('\n');
     expect(lines).toMatch(/Create a draft invoice for Robin Sample \(Sampleton\): \$126\.00, "Extra work"/);
@@ -184,6 +187,18 @@ describe('the preview (lines)', () => {
     const contract = buildContract({ toolName: 'create_invoice', params: lineInput(), displayParams: {}, preview: card, summary: 'x' });
     expect(JSON.stringify(contract)).toMatch(/use send_invoice afterwards/);
     expect(JSON.stringify(contract)).not.toMatch(/Customer will be contacted/);
+  });
+
+  test('the full notes are on the card, the pinned display and the contract; they are part of the pin', async () => {
+    const notes = 'Customer asked to bill the gate repair separately.\nPO 4471.';
+    const card = await preview(lineInput({ notes }));
+    expect(card.notes).toBe(notes);
+    expect(cardLines('create_invoice', card).map((l) => l.text)).toContain(`Notes on the invoice: ${notes}`);
+    const contract = buildContract({ toolName: 'create_invoice', params: lineInput({ notes }), displayParams: {}, preview: card, summary: 'x' });
+    expect(JSON.stringify(contract)).toContain('Customer asked to bill the gate repair separately.');
+    expect(JSON.stringify(contract)).toContain('PO 4471.');
+    const none = await preview();
+    expect(cardLines('create_invoice', none).map((l) => l.text).join('\n')).not.toMatch(/Notes on the invoice/);
   });
 
   test('uses the server-computed tax and total, not the model’s', async () => {
@@ -299,7 +314,7 @@ describe('the confirmed run', () => {
     const card = await preview();
     const result = await confirm(card);
     expect(Invoices.createInvoiceFromBar).toHaveBeenCalledTimes(1);
-    expect(Invoices.createInvoiceFromBar).toHaveBeenCalledWith({ body: card._body, expectedTotalCents: 12600 });
+    expect(Invoices.createInvoiceFromBar).toHaveBeenCalledWith({ body: card._body, approved: card._approved });
     expect(Invoices.createInvoiceFromServiceFromBar).not.toHaveBeenCalled();
     expect(result).toMatchObject({
       success: true, status: 'draft', invoice_id: INV, invoice_number: 'WPC-2099-0042', amount: '$126.00', due_date: '2099-02-01',
@@ -311,7 +326,7 @@ describe('the confirmed run', () => {
   test('a visit invoice runs the visit route with the visit body', async () => {
     const card = await preview(visitInput());
     const result = await confirm(card, visitInput());
-    expect(Invoices.createInvoiceFromServiceFromBar).toHaveBeenCalledWith({ body: { serviceRecordId: REC, amount: 120 }, expectedTotalCents: 12000 });
+    expect(Invoices.createInvoiceFromServiceFromBar).toHaveBeenCalledWith({ body: { serviceRecordId: REC, amount: 120 }, approved: card._approved });
     expect(Invoices.createInvoiceFromBar).not.toHaveBeenCalled();
     expect(result).toMatchObject({ success: true, invoice_number: 'WPC-2099-0043', amount: '$120.00' });
   });
@@ -369,5 +384,62 @@ describe('the confirmed run', () => {
     const card = await preview();
     Invoices.createInvoiceFromBar.mockResolvedValueOnce({ status: 201, json: { id: INV, status: 'sent', total: '126.00' } });
     expect(await confirm(card)).toMatchObject({ outcome_unknown: true, code: 'create_unverified' });
+  });
+});
+
+describe('recheckApprovedScope (inside the create transaction)', () => {
+  const approvedOf = async (input = lineInput({ service_record_id: REC })) => (await preview(input))._approved;
+  const recheck = (approved) => tools.recheckApprovedScope(db, approved);
+
+  test('passes while nothing changed, taking the visit’s mint lock first', async () => {
+    const approved = await approvedOf();
+    expect(approved).toMatchObject({ scheduledServiceId: VISIT, serviceRecordId: REC, visitInvoices: [] });
+    await expect(recheck(approved)).resolves.toBeUndefined();
+    expect(mockMintLock).toHaveBeenCalledWith(db, VISIT);
+    const unlinked = await approvedOf(lineInput());
+    mockMintLock.mockClear();
+    await expect(recheck(unlinked)).resolves.toBeUndefined();
+    expect(mockMintLock).not.toHaveBeenCalled();
+  });
+
+  test('a payer assigned after the card is a 409 IB_SCOPE_CHANGED', async () => {
+    const approved = await approvedOf();
+    mockResolvePayer.mockResolvedValue({ payerId: 'payer-1', taxExempt: false, snapshot: {}, paymentTerms: 'net30' });
+    await expect(recheck(approved)).rejects.toMatchObject({ statusCode: 409, code: 'IB_SCOPE_CHANGED', isOperational: true, message: expect.stringMatching(/third-party payer.*changed after the card was shown/) });
+    mockResolvePayer.mockRejectedValue(new Error('db down'));
+    await expect(recheck(approved)).rejects.toMatchObject({ code: 'IB_SCOPE_CHANGED' });
+  });
+
+  test('an invoice that committed on the visit while the create waited is a 409', async () => {
+    const approved = await approvedOf();
+    state.invoices.push({ id: INV, service_record_id: REC, invoice_number: 'WPC-2099-0009', status: 'draft', total: '60.00' });
+    await expect(recheck(approved)).rejects.toMatchObject({ code: 'IB_SCOPE_CHANGED', message: expect.stringMatching(/invoice on this visit changed/) });
+    // A card that already named that invoice still passes while it is unchanged.
+    const named = await approvedOf();
+    await expect(recheck(named)).resolves.toBeUndefined();
+    state.invoices[0].status = 'sent';
+    await expect(recheck(named)).rejects.toMatchObject({ code: 'IB_SCOPE_CHANGED' });
+  });
+
+  test('a changed or deleted customer, a moved visit link, or a granted retention offer is a 409', async () => {
+    const approved = await approvedOf();
+    state.customers[0].city = 'Elsewhere';
+    await expect(recheck(approved)).rejects.toMatchObject({ code: 'IB_SCOPE_CHANGED' });
+    state.customers[0].city = 'Sampleton';
+    state.service_records[0].scheduled_service_id = OTHER;
+    await expect(recheck(approved)).rejects.toMatchObject({ code: 'IB_SCOPE_CHANGED', message: expect.stringMatching(/visit changed/) });
+    state.service_records[0].scheduled_service_id = VISIT;
+    state.customers[0].deleted_at = new Date();
+    await expect(recheck(approved)).rejects.toMatchObject({ code: 'IB_SCOPE_CHANGED' });
+    state.customers[0].deleted_at = null;
+    const visitApproved = await approvedOf(visitInput());
+    state.retention_offers.push({ id: 'r1', customer_id: CUST, status: 'granted' });
+    await expect(recheck(visitApproved)).rejects.toMatchObject({ code: 'IB_SCOPE_CHANGED', message: expect.stringMatching(/retention offer/) });
+  });
+
+  test('the confirmed run reports a scope 409 from the handler as preview_changed', async () => {
+    const card = await preview();
+    Invoices.createInvoiceFromBar.mockResolvedValueOnce({ status: 409, json: { error: 'x', code: 'IB_SCOPE_CHANGED' } });
+    expect(await confirm(card)).toMatchObject({ failed: true, code: 'preview_changed', preview_changed: true });
   });
 });

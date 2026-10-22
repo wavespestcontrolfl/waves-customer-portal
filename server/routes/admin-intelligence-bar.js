@@ -952,7 +952,7 @@ const PINNED_DISPLAY_BUILDERS = {
     : null),
   // create_invoice: the card names the customer, the total and the lines; the details ride the contract.
   create_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'create_invoice'
-    ? { customer: preview.customer_name || preview.customer_id, total: preview.total, lines: (preview.lines || []).length, due_date: preview.due_date || 'in 30 days', status: 'draft', sends_to_customer: 'nothing' }
+    ? { customer: preview.customer_name || preview.customer_id, total: preview.total, lines: (preview.lines || []).length, notes: preview.notes || 'none', due_date: preview.due_date || 'in 30 days', status: 'draft', sends_to_customer: 'nothing' }
     : null),
   // Feature switches (Codex r1 on #5489): the card must show the live facts
   // the preview read — current → new, what it means, the target and the
