@@ -4,13 +4,6 @@ function getGoogle() {
   if (!_googleapis) { try { _googleapis = require('googleapis').google; } catch { _googleapis = null; } }
   return _googleapis;
 }
-// google_reviews rows that are NOT a Places fallback copy of a review another
-// row holds under its GBP id (see _preferGbpHolder).
-const PLACES_COPY_OF_GBP_ROW_SQL = `NOT (google_reviews.google_review_id LIKE 'places\\_%' AND EXISTS (
-  SELECT 1 FROM google_reviews gbp_row
-  WHERE gbp_row.google_review_id = google_reviews.gbp_review_name AND gbp_row.id <> google_reviews.id
-    AND gbp_row.missing_since IS NULL))`;
-
 const logger = require('./logger');
 const { scrubSentryText } = require('../utils/sentry-scrub');
 const {
@@ -959,33 +952,8 @@ class GoogleBusinessService {
     return true;
   }
 
-  // A Places-fallback row (google_review_id `places_<placeId>_<time>`) and a
-  // GBP row for the SAME review can coexist: the Places sample stored the
-  // review during a GBP outage, then the GBP pull stored it under its real id.
-  // `_resolveGbpResourceNames` stamps the GBP resource name on the places row,
-  // so _findExistingReview (gbp_review_name first) returns it, and upgrading
-  // its google_review_id would hit google_reviews_google_review_id_unique
-  // against the row that already holds that id. When another row holds the
-  // incoming GBP id, that row is the review's real record: update it exactly
-  // as if the lookup had found it first. The places row keeps its id and state
-  // (no delete, no state copy); it is only marked superseded (missing_since).
-  async _preferGbpHolder(existing, normalized) {
-    if (!existing || !normalized.google_review_id || existing.google_review_id === normalized.google_review_id) return existing;
-    if (!String(existing.google_review_id || '').startsWith('places_')) return existing;
-    const holder = await db('google_reviews').where({ google_review_id: normalized.google_review_id }).first();
-    if (!holder || holder.id === existing.id) return existing;
-    // Mark the copy superseded so every live-review reader (payout scans,
-    // public reviews, graphic candidates: all whereNull('missing_since'))
-    // counts the review once. One column, only while NULL, no notification: the
-    // removal alert is raised by the reconcile, which skips stamped rows.
-    const stamped = await db('google_reviews').where({ id: existing.id }).whereNull('missing_since')
-      .update({ missing_since: new Date().toISOString() }, ['id']);
-    logger.info(`[gbp] Places fallback row ${existing.id} shares ${normalized.gbp_review_name || normalized.google_review_id} with GBP row ${holder.id}: updating the GBP row, ${(stamped || []).length > 0 ? 'fallback copy marked superseded' : 'fallback copy already marked'}`);
-    return holder;
-  }
-
   async _upsertGbpReview(normalized, syncStart = null, pendingUnlinkedNotifications = null, pendingRestoredNotifications = null) {
-    const existing = await this._preferGbpHolder(await this._findExistingReview(normalized), normalized);
+    const existing = await this._findExistingReview(normalized);
     const customerId = await this._findCustomerIdByReviewerName(normalized.reviewer_name);
     // Reply fields from the feed snapshot — deferred under a live publish
     // claim, replacing a local draft when Google has an owner reply, and
@@ -2310,11 +2278,7 @@ class GoogleBusinessService {
         .where('reviewer_name', '!=', '_stats')
         .whereNotNull('gbp_review_name')
         .whereNull('missing_since')
-        .where('synced_at', '<', syncStart)
-        // A stale Places fallback copy of a review whose GBP row exists: the
-        // upsert updates the GBP row and leaves the copy alone, so the copy's
-        // old synced_at is not removal evidence (the review is on Google).
-        .whereRaw(PLACES_COPY_OF_GBP_ROW_SQL, []);
+        .where('synced_at', '<', syncStart);
       // Rows whose upsert failed THIS run are present in the feed — their
       // stale synced_at is a storage failure, not removal evidence.
       if (excludeReviewNames.length) candidateQuery = candidateQuery.whereNotIn('gbp_review_name', excludeReviewNames);

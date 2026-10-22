@@ -76,10 +76,6 @@ function createDbMock(initialRows = {}) {
       const covering = JSON.parse(bindings[0]);
       return row => Array.isArray(meta(row).reviewIds) && meta(row).reviewIds.every(id => covering.includes(id));
     }
-    if (sql.includes('gbp_row.google_review_id = google_reviews.gbp_review_name')) {
-      return row => !(String(row.google_review_id || '').startsWith('places_')
-        && state.rows.google_reviews.some(o => o.id !== row.id && o.google_review_id === row.gbp_review_name && o.missing_since == null));
-    }
     if (sql.includes('publish_claimed_until IS NULL OR publish_claimed_until <')) {
       const cutoff = new Date(bindings[0]);
       return row => row.publish_claimed_until == null || new Date(row.publish_claimed_until) < cutoff;
@@ -176,15 +172,6 @@ function createDbMock(initialRows = {}) {
         // A snapshot, as knex returns: a later UPDATE must not mutate the
         // row a caller read earlier (the edit reconcile compares the two).
         return hit ? { ...hit } : null;
-      },
-      async del() {
-        const rows = state.rows[this._table] || [];
-        const doomed = rows
-          .filter(row => matchesWhere(row, this._where))
-          .filter(row => this._rawFilters.every(fn => fn(row)));
-        state.rows[this._table] = rows.filter(row => !doomed.includes(row));
-        state.deletes = (state.deletes || []).concat(doomed.map(row => ({ table: this._table, id: row.id })));
-        return doomed.length;
       },
       insert(record) {
         // created_at mirrors the DB column default — the degraded-sync
@@ -517,6 +504,23 @@ describe('Google Business review sync', () => {
     upsert.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); places.mockRestore();
   });
 
+  test('the "rows did not save" alert: stable title (24h dedupe key), plain body, raw error only in detail', async () => {
+    const NotificationService = require('../services/notification-service');
+    const notify = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue(null);
+    const loc = { id: 'bradenton', name: 'Parrish' };
+    const cause = n => `review upsert failed: ${n} of 39 review row(s) failed to store (${39 - n} stored) — first: x: boom`;
+    await service._notifyDegradedSync(loc, cause(1));
+    db.__state.rows.notifications = [];
+    await service._notifyDegradedSync(loc, cause(3));
+    expect(notify.mock.calls[0][1]).toBe('Google reviews: some rows did not save at Parrish');
+    expect(notify.mock.calls[1][1]).toBe(notify.mock.calls[0][1]);
+    expect(notify.mock.calls[0][2]).toBe('The reviews on Google are fine. 1 stored copy did not save; Claude can check.');
+    expect(notify.mock.calls[1][2]).toBe('The reviews on Google are fine. 3 stored copies did not save; Claude can check.');
+    expect(notify.mock.calls[0][3].detail).toMatch(/boom/);
+    expect(notify.mock.calls[0][2]).not.toMatch(/boom/);
+    notify.mockRestore();
+  });
+
   test('a breaker-trip alert says no Places fallback runs when GOOGLE_MAPS_API_KEY is unset (codex r10 P2)', async () => {
     const NotificationService = require('../services/notification-service');
     const notify = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue(null);
@@ -834,157 +838,6 @@ describe('Google Business review sync', () => {
       gbp_review_name: 'accounts/1/locations/2/reviews/rev-1',
       review_text: 'Updated text',
     });
-  });
-
-  describe('Places fallback row and GBP row for the same review (prod 2026-10-21, Parrish)', () => {
-    const GBP_ID = 'accounts/1/locations/2/reviews/rev-dup';
-    const feed = () => jest.fn(async (url) => {
-      if (String(url).includes('maps.googleapis.com')) {
-        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
-      }
-      return jsonResponse({ reviews: [{
-        name: GBP_ID,
-        reviewer: { displayName: 'Reviewer Gamma' },
-        starRating: 'FIVE',
-        comment: 'Lovely service (edited)',
-        createTime: '2026-05-25T12:00:00Z',
-      }] });
-    });
-    const seed = () => {
-      // Row A: stored by the Places fallback during an outage; the resource
-      // name resolver later stamped the GBP name on it. Stale synced_at.
-      db.__state.rows.google_reviews.push({
-        id: 'places-row', google_review_id: 'places_place-1_1779710400', gbp_review_name: GBP_ID,
-        location_id: 'bradenton', reviewer_name: 'Reviewer Gamma', star_rating: 5, review_text: 'Lovely service',
-        review_created_at: '2026-05-25T12:00:00Z', customer_id: 'cust-1', review_reply: null,
-        synced_at: '2026-06-01T00:00:00Z',
-      });
-      // Row B: the same review under its real GBP id.
-      db.__state.rows.google_reviews.push({
-        id: 'gbp-row', google_review_id: GBP_ID, gbp_review_name: GBP_ID,
-        location_id: 'bradenton', reviewer_name: 'Reviewer Gamma', star_rating: 5, review_text: 'Lovely service',
-        review_created_at: '2026-05-25T12:00:00.400Z', customer_id: null, review_reply: null,
-        synced_at: '2026-06-01T00:00:00Z',
-      });
-    };
-
-    test('updates the GBP row that holds the id; the Places row is left untouched, not removed, no error', async () => {
-      seed();
-      const placesBefore = JSON.parse(JSON.stringify(db.__state.rows.google_reviews.find(r => r.id === 'places-row')));
-      global.fetch = feed();
-      const NotificationService = require('../services/notification-service');
-      const notify = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue({ id: 'n' });
-
-      const result = await service.syncAllReviews();
-
-      expect(result.errors).toEqual([]);
-      expect(result.synced).toBe(1);
-      const rows = db.__state.rows.google_reviews;
-      expect(rows.find(r => r.id === 'gbp-row')).toMatchObject({ google_review_id: GBP_ID, review_text: 'Lovely service (edited)' });
-      // The copy keeps everything it had; the one change is the superseded stamp.
-      const { missing_since: stampedAt, ...placesAfter } = rows.find(r => r.id === 'places-row');
-      expect(placesAfter).toEqual(placesBefore);
-      expect(stampedAt).toEqual(expect.any(String));
-      expect(db.__state.updates.filter(u => u.id === 'places-row').map(u => Object.keys(u.record))).toEqual([['missing_since']]);
-      // The holder stays live.
-      expect(rows.find(r => r.id === 'gbp-row').missing_since ?? null).toBeNull();
-      expect(db.__state.deletes || []).toEqual([]);
-      // The stale copy is not reported as a removed review.
-      expect(notify.mock.calls.filter(c => /removed|no longer|missing/i.test(String(c[1])))).toEqual([]);
-      expect(notify.mock.calls.filter(c => c[3]?.metadata?.reason === 'reviews_missing')).toEqual([]);
-      notify.mockRestore();
-    });
-
-    test('a second sync leaves the superseded copy stamped as first written and raises no removal alert', async () => {
-      seed();
-      global.fetch = feed();
-      const NotificationService = require('../services/notification-service');
-      const notify = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue({ id: 'n' });
-      await service.syncAllReviews();
-      const first = db.__state.rows.google_reviews.find(r => r.id === 'places-row').missing_since;
-      global.fetch = feed();
-      await service.syncAllReviews();
-      expect(db.__state.rows.google_reviews.find(r => r.id === 'places-row').missing_since).toBe(first);
-      expect(notify.mock.calls.filter(c => c[3]?.metadata?.reason === 'reviews_missing')).toEqual([]);
-      notify.mockRestore();
-    });
-
-    test('payout scans only read live rows, so the superseded copy is not scanned (review-incentives whereNull missing_since)', async () => {
-      const calls = [];
-      const conn = (table) => {
-        const q = new Proxy({}, {
-          get: (_t, name) => {
-            if (name === 'then') return (res) => res([]);
-            return (...args) => { calls.push([table, name, ...args]); return q; };
-          },
-        });
-        return q;
-      };
-      const incentives = require('../services/review-incentives');
-      await incentives.syncReviewIncentives({ conn, policy: { enabled: true } });
-      expect(calls).toEqual(expect.arrayContaining([['google_reviews', 'whereNull', 'missing_since']]));
-    });
-
-    test('a places row with no GBP holder still upgrades to the GBP identity (unchanged)', async () => {
-      seed();
-      db.__state.rows.google_reviews.splice(db.__state.rows.google_reviews.findIndex(r => r.id === 'gbp-row'), 1);
-      global.fetch = feed();
-
-      const result = await service.syncAllReviews();
-
-      expect(result.errors).toEqual([]);
-      expect(db.__state.rows.google_reviews.find(r => r.id === 'places-row')).toMatchObject({ google_review_id: GBP_ID, review_text: 'Lovely service (edited)' });
-    });
-
-    test('once the GBP holder is stamped missing, its Places copy becomes a removal candidate too', async () => {
-      seed();
-      db.__state.rows.google_reviews.find(r => r.id === 'gbp-row').missing_since = '2026-06-02T00:00:00Z';
-      global.fetch = jest.fn(async (url) => {
-        if (String(url).includes('maps.googleapis.com')) return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
-        return jsonResponse({ reviews: [{ name: 'accounts/1/locations/2/reviews/other', reviewer: { displayName: 'Reviewer Delta' }, starRating: 'FIVE', comment: 'Fine', createTime: '2026-05-26T12:00:00Z' }] });
-      });
-      const NotificationService = require('../services/notification-service');
-      const notify = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue({ id: 'n' });
-
-      await service.syncAllReviews();
-
-      expect(db.__state.rows.google_reviews.find(r => r.id === 'places-row').missing_since).toBeTruthy();
-      notify.mockRestore();
-    });
-
-    test('a Places copy whose GBP name is NOT held by another row can still be stamped as removed', async () => {
-      seed();
-      db.__state.rows.google_reviews.splice(db.__state.rows.google_reviews.findIndex(r => r.id === 'gbp-row'), 1);
-      db.__state.rows.google_reviews.find(r => r.id === 'places-row').gbp_review_name = 'accounts/1/locations/2/reviews/gone';
-      global.fetch = jest.fn(async (url) => {
-        if (String(url).includes('maps.googleapis.com')) return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
-        return jsonResponse({ reviews: [{ name: 'accounts/1/locations/2/reviews/other', reviewer: { displayName: 'Reviewer Delta' }, starRating: 'FIVE', comment: 'Fine', createTime: '2026-05-26T12:00:00Z' }] });
-      });
-      const NotificationService = require('../services/notification-service');
-      const notify = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue({ id: 'n' });
-
-      await service.syncAllReviews();
-
-      expect(db.__state.rows.google_reviews.find(r => r.id === 'places-row').missing_since).toBeTruthy();
-      notify.mockRestore();
-    });
-  });
-
-  test('the "rows did not save" alert title is stable across counts (24h dedupe key); count and raw error are not in the title', async () => {
-    const NotificationService = require('../services/notification-service');
-    const notify = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue(null);
-    const loc = { id: 'bradenton', name: 'Parrish' };
-    const cause = n => `review upsert failed: ${n} of 39 review row(s) failed to store (${39 - n} stored) — first: x: boom`;
-    await service._notifyDegradedSync(loc, cause(1));
-    db.__state.rows.notifications = [];
-    await service._notifyDegradedSync(loc, cause(3));
-    expect(notify.mock.calls[0][1]).toBe('Google reviews: some rows did not save at Parrish');
-    expect(notify.mock.calls[1][1]).toBe(notify.mock.calls[0][1]);
-    expect(notify.mock.calls[0][2]).toBe('The reviews on Google are fine. 1 stored copy did not save; Claude can check.');
-    expect(notify.mock.calls[1][2]).toBe('The reviews on Google are fine. 3 stored copies did not save; Claude can check.');
-    expect(notify.mock.calls[0][3].detail).toMatch(/boom/);
-    expect(notify.mock.calls[0][2]).not.toMatch(/boom/);
-    notify.mockRestore();
   });
 
   test('clears a stale local reply when Google no longer has a reply', async () => {
