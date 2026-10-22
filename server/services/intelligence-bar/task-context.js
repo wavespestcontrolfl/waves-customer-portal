@@ -687,6 +687,7 @@ const actionVerbForm = word => ACTION_VERBS.has(word) || [/(?:ed|d|ing|s|es)$/].
   return stem !== word && (ACTION_VERBS.has(stem) || ACTION_VERBS.has(`${stem}e`) || ACTION_VERBS.has(stem.replace(/(.)\1$/, '$1')));
 });
 function onlyKnownWordsBesideContact(clause) {
+  if (possessiveNamesSomeone(withoutContacts(clause))) return false;
   return normalizeName(withoutContacts(clause)).split(' ').filter(Boolean)
     .every(word => actionVerbForm(word) || NON_PERSON_NAMES.has(word) || SUBJECT_FILLER.has(word) || SUBJECT_END.has(word)
       || CONTACT_CLAUSE_WORDS.has(word) || WEEKDAY_OR_TIME_RE.test(word));
@@ -844,13 +845,23 @@ function recordIdsAreOnPage(bounded, page) {
 // record nouns, and the NON_PERSON_NAMES vocabulary. Every other leading word is treated as a
 // possible name, so the page customer keeps direct authority only when the subject is plainly
 // "this customer", "the account", "his phone"... (Codex #6369 r36: allow-list, not one more name pattern).
-const SUBJECT_FILLER = new Set(['please', 'can', 'could', 'would', 'will', 'you', 'hey', 'ok', 'okay', 'now', 'also', 'then', 'and', 'so', 'just', 'go', 'ahead', 'i', 'we', 'lets', 'let', 'us', 'to',
-  'account', 'profile', 'record', 'file', 'card', 'property', 'appointment', 'visit', 'service', 'invoice', 'estimate', 'number', 'cell', 'mobile', 'info', 'information', 'contact', 'gate', 'code', 's']);
+const SUBJECT_RECORD_WORDS = new Set(['account', 'profile', 'record', 'file', 'card', 'property', 'appointment', 'visit', 'service', 'invoice', 'estimate', 'number', 'cell', 'mobile', 'info', 'information', 'contact', 'gate', 'code']);
+const SUBJECT_FILLER = new Set(['please', 'can', 'could', 'would', 'will', 'you', 'hey', 'ok', 'okay', 'now', 'also', 'then', 'and', 'so', 'just', 'go', 'ahead', 'i', 'we', 'lets', 'let', 'us', 'to', 's', ...SUBJECT_RECORD_WORDS]);
 const SUBJECT_END = new Set(['needs', 'need', 'wants', 'want', 'has', 'have', 'is', 'are', 'should', 'would', 'asked', 'asks', 'must', 'got', 'gets']);
+// The words that may own a possession or be the subject of "needs/has/is" without naming anyone.
+// A filler word in that place is a name ("Will's account", "Will needs ..."): Codex #6369 r38.
+const SUBJECT_PRONOUNS = new Set(['i', 'we', 'you', 'he', 'she', 'they', 'it']);
+const plainSubjectWord = word => NON_PERSON_NAMES.has(word) || SUBJECT_RECORD_WORDS.has(word) || SUBJECT_PRONOUNS.has(word);
+// normalizeName drops "'s", so possession is read from the raw text.
+const possessiveNamesSomeone = text => [...String(text).matchAll(/([\p{L}\p{N}-]+)[’']s\b/gu)]
+  .some(match => !plainSubjectWord(normalizeName(match[1])));
 function unknownLeadingSubject(bounded) {
-  const words = normalizeName(withoutContacts(targetClause(bounded))).split(' ').filter(Boolean);
-  for (const word of words) {
-    if (ACTION_VERBS.has(word) || SUBJECT_END.has(word)) return false;
+  const clause = withoutContacts(targetClause(bounded));
+  if (possessiveNamesSomeone(clause)) return true;
+  const words = normalizeName(clause).split(' ').filter(Boolean);
+  for (const [i, word] of words.entries()) {
+    if (SUBJECT_END.has(word)) return i > 0 && !plainSubjectWord(words[i - 1]);
+    if (ACTION_VERBS.has(word)) return false;
     if (!NON_PERSON_NAMES.has(word) && !SUBJECT_FILLER.has(word)) return true;
   }
   return false;

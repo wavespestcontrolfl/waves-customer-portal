@@ -752,6 +752,13 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     for (const prompt of ['update the phone to 941-555-0150', 'please update this customer phone', 'the account needs a new phone', 'his phone needs an update', 'can you update the phone']) {
       expect([prompt, await viewingBob(prompt)]).toEqual([prompt, true]);
     }
+    // A name that is also a filler word, as an owner or a subject, is a name (r38).
+    for (const prompt of ["Will's account needs notes cleared", 'Will needs a new phone', "update Will's phone", "Grant's phone needs an update"]) {
+      expect([prompt, await viewingBob(prompt)]).toEqual([prompt, false]);
+    }
+    for (const prompt of ["the customer's phone needs an update", "this account's phone needs an update", 'I need to update the phone', 'it needs a new phone']) {
+      expect([prompt, await viewingBob(prompt)]).toEqual([prompt, true]);
+    }
     // The page customer's own name in subject position still resolves to the page: direct.
     expect(await viewingBob('Bob Example account needs a new phone')).toBe(true);
     // The contact-only path takes the same check: a typed unknown subject beside a phone grants nothing.
@@ -760,7 +767,7 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(await contactGrounded('fix the notes on 941-555-0100')).toEqual([id(100)]);
     expect(await contactGrounded('941-555-0100 needs the notes fixed')).toEqual([id(100)]);
     // Any unknown word beside the contact may be a name the grammar misses: carded (r37).
-    for (const prompt of ['update notes for Pat2 Missing phone 941-555-0100', 'update notes for Jhon phone 941-555-0100', 'update notes 941-555-0100 Smith']) {
+    for (const prompt of ["update Will's notes at 941-555-0100", 'update notes for Pat2 Missing phone 941-555-0100', 'update notes for Jhon phone 941-555-0100', 'update notes 941-555-0100 Smith']) {
       expect([prompt, await contactGrounded(prompt)]).toEqual([prompt, []]);
     }
     for (const prompt of ['update the notes for the customer with phone 941-555-0100', 'change the notes on 941-555-0100', 'update the account notes for 941-555-0100']) {
