@@ -126,7 +126,8 @@ router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, async (r
     // REVIEW_AFTER_REPORT_DELAY_MINUTES after the report text, every service
     // line — the same rule enrollPostService applies, so the panel previews
     // the decision dispatch will make. Explicit timings never reach this.
-    const afterReport = require('../config/feature-gates').reviewAskAfterReportLive();
+    // Cadence mode only: the legacy path ignores the gate.
+    const afterReport = reviewSequencesEnabled && require('../config/feature-gates').reviewAskAfterReportLive();
     const afterReportMinutes = ReviewService.REVIEW_AFTER_REPORT_DELAY_MINUTES;
     const afterReportAt = new Date(Date.now() + afterReportMinutes * 60000);
     const plan = afterReport
@@ -147,8 +148,8 @@ router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, async (r
       afterReportMinutes: afterReport ? afterReportMinutes : null,
       // The eligibility range live enrollment's jitter can land in; the
       // panel names the cadence ticks either end reaches (codex #4140 r14 P2).
-      earliestAt: plan && (afterReport || reviewSequencesEnabled) ? plan.earliestAt.toISOString() : null,
-      latestAt: plan && (afterReport || reviewSequencesEnabled) ? plan.latestAt.toISOString() : null,
+      earliestAt: plan ? plan.earliestAt.toISOString() : null,
+      latestAt: plan ? plan.latestAt.toISOString() : null,
       reviewSequencesEnabled,
       schedulerEnabled,
       // The 8 AM–8 PM hold only exists while GATE_SMS_SEND_WINDOW is on; the

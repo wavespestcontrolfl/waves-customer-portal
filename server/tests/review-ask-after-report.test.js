@@ -79,11 +79,11 @@ describe('GET /admin/reviews/send-time-preview with GATE_REVIEW_ASK_AFTER_REPORT
     expect(lawn.cadenceTickMinutesOfHour).toEqual(expect.arrayContaining([0, 5, 10, 14, 44]));
   });
 
-  test('gate on with cadences off: the legacy path also previews 10 minutes', async () => {
+  test('gate on with cadences off: the legacy path ignores the gate (120 minutes, no after-report preview)', async () => {
     process.env.GATE_REVIEW_ASK_AFTER_REPORT = 'true';
     process.env.GATE_CRON_JOBS = 'true';
     const out = await preview();
-    expect(out).toMatchObject({ afterReport: true, reviewSequencesEnabled: false, bucket: 'after_report:+10m' });
+    expect(out).toMatchObject({ afterReport: false, afterReportMinutes: null, reviewSequencesEnabled: false, bucket: 'legacy:+120m', earliestAt: null, latestAt: null });
   });
 
   test('gate off: the smart window (or the legacy 120 minutes) exactly as before', async () => {
