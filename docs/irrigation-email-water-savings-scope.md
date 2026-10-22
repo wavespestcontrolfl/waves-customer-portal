@@ -38,34 +38,35 @@ Status: proposal only. Nothing in this document is built.
 
 ## The math
 
+**Owner default (2026-10-22):** every customer is assumed to run the sprinklers
+twice a week, 20 minutes a zone, and 20 minutes puts down ½ inch. That is 1 inch
+a week. A customer's own schedule on file (minutes, days, head type, or typed
+weekly inches) replaces the default when it is there; the default fills in for
+the rest of the recurring-lawn book, so the line prints for everyone with a lawn
+area on file.
+
 Depth to gallons: 1 inch over 1,000 sq ft is about 623 gallons (UF/IFAS AE220).
 
-Owner's scenario, 20 minutes a zone, two watering days, on a 5,000 sq ft lawn
-(owner rate table):
-
-| Head type | Depth per run | Gallons per run | Gallons per week (2 runs) |
-|---|---|---|---|
-| Spray (1.0 in/hr) | 0.33" | ~1,040 | ~2,080 |
-| Rotor (0.375 in/hr) | 0.125" | ~390 | ~780 |
-
-On the package table the spray figure is ~1,560 gal per run and rotor ~520.
-Scale linearly with lawn area: a 3,000 sq ft lawn is 60% of these, an 8,000 sq ft
-lawn is 160%.
+| Lawn area | Gallons per skipped run (½") | Gallons per skipped week (2 runs) |
+|---|---|---|
+| 3,000 sq ft | ~930 | ~1,870 |
+| 5,000 sq ft | ~1,560 (printed "about 1,550") | ~3,100 |
+| 8,000 sq ft | ~2,490 | ~4,980 |
 
 Cross-check by zone flow: a typical residential zone runs 8–12 gpm, so 20 minutes
 is 160–240 gal a zone. Six zones is roughly 1,000–1,400 gal per run. Same order of
-magnitude as the depth method, so the estimate is defensible.
+magnitude, so the default is defensible as a "typical" figure.
 
 ## What the gallons are worth
 
 Marginal per-1,000-gallon prices, from the counties' published schedules:
 
-| Situation | Marginal $/1,000 gal | A skipped week, spray 5,000 sq ft (~2,080 gal) | Same, rotor (~780 gal) |
+| Situation | Marginal $/1,000 gal | One skipped run, 5,000 sq ft (~1,550 gal) | A skipped week (~3,100 gal) |
 |---|---|---|---|
-| Manatee, irrigation on the house meter (water $3.89 tier + sewer $6.89) | ~$10.78 | ~$22 | ~$8 |
-| Manatee, dedicated irrigation meter (no sewer), $3.11 to $9.36 tiers | $3.11–9.36 | ~$6–19 | ~$2–7 |
-| Sarasota County potable, FY2024 tiers $3.70–6.42 before the FY2026 rises, plus wastewater if on the house meter | ~$4–13 | ~$8–27 | ~$3–10 |
-| Reclaimed water | ~$1 | ~$2 | ~$1 |
+| Manatee, irrigation on the house meter (water $3.89 tier + sewer $6.89) | ~$10.78 | ~$17 | ~$33 |
+| Manatee, dedicated irrigation meter (no sewer), $3.11 to $9.36 tiers | $3.11–9.36 | ~$5–15 | ~$10–29 |
+| Sarasota County potable, FY2024 tiers $3.70–6.42 before the FY2026 rises, plus wastewater if on the house meter | ~$4–13 | ~$6–20 | ~$12–40 |
+| Reclaimed water | ~$1 | ~$1.50 | ~$3 |
 | Private well | pump electricity only | well under $1 | well under $1 |
 
 Manatee rates are from the county's own notices (2025 usage report card and the
@@ -76,9 +77,10 @@ FY2026 and proposed another 6.4% for FY2027, so treat them as a floor.
 
 **Per year.** The engine holds or skips in roughly 12–16 wet-season weeks and
 every other week in the cool season (`SEASONAL_MAX_EVENTS.cool` = 1). Call it
-15 skipped weeks a customer actually acts on. A potable spray lawn on the house
-meter saves on the order of $250–330 a year. A rotor lawn, $100–130. Reclaimed,
-$20–30. Well, effectively nothing in dollars, though still 10,000–30,000 gallons.
+15 skipped weeks a customer actually acts on, about 46,000 gallons on a 5,000
+sq ft lawn. On the house meter in Manatee that is on the order of $500 a year; on
+a dedicated irrigation meter $150–430; reclaimed about $45; a well, effectively
+nothing in dollars.
 
 Sources: [Manatee rates effective June 1, 2026](https://www.mymanatee.org/connect/news-and-information/news-and-information/article-detail/utilities-water-division-blog/2026/05/07/rates-for-water-and-sewer---effective-june-1--2026), [Manatee 2025 water usage report card](https://www.mymanatee.org/media/docs/default-source/utilities-documents/water-division-documents/2025-water-usage-report-carde07b30247ccd4f08b370bd2a68d7921f.pdf), [Sarasota County FY2026 rate increase](https://sarasotanewsleader.com/2025/08/page/3/), [Sarasota County FY2024 ACFR tiers](https://cms6ftp.visioninternet.com/sarasotaclerkfl/2024ComprehensiveFinancialReport/342/), [UF/IFAS AE220 application rates](https://ask.ifas.ufl.edu/AE220).
 
@@ -103,12 +105,14 @@ Sources: [Manatee rates effective June 1, 2026](https://www.mymanatee.org/connec
 
 1. **Gallons line on skip plans.** In `renderWeekPlanEmail` / the app plan notes,
    when `plan.action === 'hold'` or the plan is forecast-conditional, add one
-   sentence: "Each run you skip is about N gallons on your lawn." N = run minutes
-   × head rate (the plan's frozen rate table) × `lawn_sqft` × 0.623 / 1,000,
-   rounded to the nearest 50. Printed only when run minutes, exactly one turf head
-   type, and `lawn_sqft` are all on file; otherwise nothing (the engine's existing
-   never-impute rule). Unconditional `run` plans that carry the ½"-rain skip rule
-   get the same sentence after that rule.
+   sentence: "Each 20-minute run you skip is about N gallons on your lawn." N =
+   depth per run × `lawn_sqft` × 0.623 / 1,000, rounded to the nearest 50. Depth
+   per run is the customer's own schedule when on file (minutes × the plan's frozen
+   head rate, or typed weekly inches ÷ days), else the owner default of ½" (20
+   minutes, twice a week). The footer small note names which was used and invites
+   the customer to enter their own minutes and days. Printed only when `lawn_sqft`
+   is on file (open question below). Unconditional `run` plans that carry the
+   ½"-rain skip rule get the same sentence after that rule.
 2. **Water-source field, optional, phase 2.** Add `irrigation_water_source`
    (`county` | `reclaimed` | `well` | null) to `property_preferences` and the
    portal Irrigation section. When `county`, append a dollar range from a small
@@ -134,9 +138,15 @@ portal pill row, and the rate table.
 ## Owner decisions needed
 
 1. Ship phase 1 (gallons only) alone, or hold for phase 2?
-2. Rounding and wording of the gallons sentence (above is a draft).
-3. Whether to ask customers the water-source question at all. It is one more
+2. Lawn area with nothing on file: print nothing, or assume a default (5,000
+   sq ft is the median SWFL irrigated turf figure we use elsewhere)?
+3. Rounding and wording of the gallons sentence (above is a draft).
+4. Whether to ask customers the water-source question at all. It is one more
    portal field, and the dollar line is only as good as the answer.
+
+Decided 2026-10-22 (owner): default schedule is twice a week, 20 minutes a zone,
+½ inch per run. The default stands in for a missing schedule; it never overrides
+one on file.
 
 Note: no Gmail connector was attached to this session, so the sent emails in the
 inbox were not reviewed; the scope is from the code and the public rate tables.
