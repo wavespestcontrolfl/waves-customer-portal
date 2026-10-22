@@ -153,7 +153,9 @@ function FindTimeDrawer({ onClose, onBook }) {
             value={addressText}
             onChange={(val) => { setAddressText(val); setTarget(null); }}
             onSelect={(parts) => {
-              const line1 = parts.line1 || parts.formatted || '';
+              // Keep an apartment / unit (line2) on the street line: New customer's
+              // quick-add has one address line, and a lost unit is a wrong address.
+              const line1 = [parts.line1 || parts.formatted || '', parts.line2].filter(Boolean).join(' ');
               setAddressText(line1);
               setTarget({
                 formatted: parts.formatted || [line1, parts.city, parts.state, parts.zip].filter(Boolean).join(', '),

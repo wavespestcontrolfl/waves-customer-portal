@@ -24,6 +24,21 @@ vi.mock('../AddressAutocomplete', () => ({
       >
         pick suggestion
       </button>
+      <button
+        type="button"
+        onClick={() => onSelect({
+          formatted: '200 Example Way Apt 4, Bradenton, FL 34200, USA',
+          line1: '200 Example Way',
+          line2: 'Apt 4',
+          city: 'Bradenton',
+          state: 'FL',
+          zip: '34200',
+          lat: 27.5,
+          lng: -82.5,
+        })}
+      >
+        pick unit suggestion
+      </button>
     </div>
   ),
 }));
@@ -161,6 +176,19 @@ describe('FindTimePanel', () => {
     fireEvent.click(book);
     expect(onBook).not.toHaveBeenCalled();
     release?.({ ok: true, status: 200, json: async () => answer(today) });
+  });
+
+  it('keeps an apartment unit on the address it hands to New customer', async () => {
+    const today = etDateString();
+    stubFetch(answer(today));
+    const onBook = vi.fn();
+    render(<FindTimePanel enabled onBook={onBook} />);
+    fireEvent.click(screen.getByTestId('find-time-open'));
+    fireEvent.click(screen.getByText('pick unit suggestion'));
+    await screen.findByTestId('find-time-results');
+    fireEvent.click(screen.getAllByTestId('availability-hour')[0]);
+    fireEvent.click(screen.getByTestId('find-time-book'));
+    expect(onBook.mock.calls[0][0].quickAddAddress).toEqual({ address: '200 Example Way Apt 4', city: 'Bradenton', state: 'FL', zip: '34200' });
   });
 
   it('a week-row chip books its own date', async () => {
