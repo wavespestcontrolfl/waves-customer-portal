@@ -902,7 +902,7 @@ function StickerBlank({ label, value }) {
         {value || ''}
       </div>
       <div style={{
-        fontSize: 11,
+        fontSize: 14,
         fontWeight: 600,
         letterSpacing: 0.6,
         textTransform: 'uppercase',
@@ -963,7 +963,7 @@ function TermiteNoticeSticker({ findings, technicianName, projectDateLabel }) {
         gap: 16,
       }}>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: 1.4, textTransform: 'uppercase', opacity: 0.8 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, letterSpacing: 1.4, textTransform: 'uppercase', opacity: 0.8 }}>
             Waves Pest Control, LLC
           </div>
           <div style={{
@@ -975,7 +975,7 @@ function TermiteNoticeSticker({ findings, technicianName, projectDateLabel }) {
           }}>
             Notice of Termite Protection
           </div>
-          <div style={{ fontSize: 13, opacity: 0.85, marginTop: 8, lineHeight: 1.4 }}>
+          <div style={{ fontSize: 14, opacity: 0.85, marginTop: 8, lineHeight: 1.4 }}>
             FL Building Code 1816.1.7 • FL Statutes 482.226 • FDACS Lic. {WAVES_FDACS_LICENSE_NUMBER}
           </div>
         </div>
@@ -1030,7 +1030,7 @@ function TermiteNoticeSticker({ findings, technicianName, projectDateLabel }) {
           placed under a retreatment contract renewable by payment of an annual fee. The owner is hereby advised to
           have the property inspected annually by Waves Pest Control, LLC.
         </div>
-        <div style={{ fontSize: 13, fontWeight: 600, color: B.red, marginTop: 10, lineHeight: 1.45 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: B.red, marginTop: 10, lineHeight: 1.45 }}>
           It is a violation of Florida Statutes 482.226 for anyone other than the property owner to remove this notice.
         </div>
       </div>
@@ -1047,7 +1047,7 @@ function TermiteNoticeSticker({ findings, technicianName, projectDateLabel }) {
       }}>
         <div>
           <div style={{ fontSize: 15, fontWeight: 700 }}>Activate your termite warranty</div>
-          <div style={{ fontSize: 13, opacity: 0.8, marginTop: 2 }}>
+          <div style={{ fontSize: 14, opacity: 0.8, marginTop: 2 }}>
             Waves Pest Control, LLC • 13649 Luxe Ave #110, Bradenton, FL 34211
           </div>
         </div>
