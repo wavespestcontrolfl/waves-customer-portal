@@ -13,7 +13,7 @@
 // (FastCompleteSheet.report-flow.test.jsx).
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
 vi.mock('./TechTreatmentZoneModal', () => ({ default: () => null }));
 vi.mock('./TechServicePhotosModal', () => ({ default: () => null }));
@@ -269,6 +269,20 @@ describe('one-tap: the photo and trace reads hold nothing', () => {
 });
 
 describe('one-tap: the trace is optional', () => {
+  // Codex #6452: the trace is offered beside a perimeter spray only, which the rating tap's write makes known, so the
+  // visit step offers it on the same page right after that write.
+  test('the rating tap\'s write shows the perimeter, and the visit step then offers the trace as optional', async () => {
+    const request = makeRequest({ facts: PERIMETER });
+    await openSheet(request);
+    expect(screen.queryByRole('button', { name: 'Trace where we sprayed' })).toBeNull();
+    writeNote();
+    tapRating();
+    const traceButton = await screen.findByRole('button', { name: 'Trace where we sprayed' }, { timeout: 10000 });
+    expect(within(traceButton.closest('section')).getByText('Optional')).toBeTruthy();
+    // still the visit step
+    expect(screen.getByLabelText('Tell me about the visit')).toBeTruthy();
+  });
+
   test('a perimeter spray with no saved trace holds nothing: the feet box is optional, and typed feet go on the record', async () => {
     const request = makeRequest({ facts: PERIMETER });
     await openSheet(request);

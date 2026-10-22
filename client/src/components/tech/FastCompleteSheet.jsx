@@ -1467,7 +1467,7 @@ function sendHolds({ active, draft, writing, perimeterFeet, traceRead, oneTap = 
     ...ready.trace,
     // A saved outline (a lawn or yard capture, no perimeter length) beside a perimeter spray would show on the report
     // as the place sprayed: the tech removes it, or traces the perimeter (the check the required trace used to make).
-    // With no perimeter spray, a saved trace holds nothing (owner 2026-10-10); the report never shows it (traceShown).
+    // With no perimeter spray, a saved trace holds nothing (owner 2026-10-10).
     [traceRead.zone && !perimeterFeet && perimeterSprayRow(active, draft), 'Your saved trace is an outline, not the perimeter you sprayed. Remove the trace, or trace the perimeter.', null, 'remove_trace'],
   ];
 }
@@ -2067,10 +2067,7 @@ function ReportFlowForm({
   const buildBody = () => reportCompletionBody({
     form, rows, draft, perimeterFeet: oneTap && !trace.zone ? typedFeetValue : perimeterFeet, trace, visitIdentity: ctx.visitIdentity, ratingAllowed, tipsAvailable, customerText: wrapUp.fields(reportCustomerText(isReservice)), promiseMarks,
     recordFields: recordState.inputs(record, draft?.facts),
-    // A plain pest visit's report shows a saved trace only beside a perimeter spray: the trace is offered on the visit
-    // step before the spray's method is known, and a stray one never holds the send (owner 2026-10-10), so it goes as
-    // a trace the report never shows. A lane or typed visit keeps its own trace rules (its holds).
-    traceOnReport: ctx.traceOnReport && (!!mode || !!perimeterSprayRow(active, draft)),
+    traceOnReport: ctx.traceOnReport,
     visitPhotos,
   });
   // Prepare mode: a part is prepared only while it could be prepared right now. Exactly when the Complete button is
@@ -2104,10 +2101,9 @@ function ReportFlowForm({
     />
   );
   const tracer = tracerOpen ? renderTracer() : null;
-  // The trace is offered (never required) on any visit the sheet can trace: on the visit step at once, since the
-  // spray's method is known only once the report is written (the send holds a saved trace no perimeter spray backs),
-  // and on the report step beside a perimeter spray.
-  const offeredTrace = traceAvailable ? trace : null;
+  // The trace is offered (never required), on both steps, beside a perimeter spray the sheet can trace. The spray's
+  // method is known once the report is written: on the visit step, that is after the one-tap rating's write.
+  const stepTrace = traceAvailable && perimeterSprayRow(active, draft) ? trace : null;
 
   // "Remove the trace": a saved trace the note no longer backs comes off,
   // then the trace is read again. A refusal (the visit moved, or was
@@ -2139,7 +2135,6 @@ function ReportFlowForm({
     );
   }
   if (step === 'report') {
-    const stepTrace = perimeterSprayRow(active, draft) ? offeredTrace : null;
     return (
       <ReportStep
         wrapUp={wrapUp}
@@ -2223,7 +2218,7 @@ function ReportFlowForm({
       noteClipEnabled={voiceFill}
       onRate={backgroundWrite.request}
       stockNotices={stockNotices}
-      trace={offeredTrace}
+      trace={stepTrace}
       tracer={tracer}
       onTrace={() => openTracer()}
       footer={action

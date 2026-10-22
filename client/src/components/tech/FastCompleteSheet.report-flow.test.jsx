@@ -900,36 +900,26 @@ describe('complete and send', () => {
     expect(await screen.findByText('Perimeter traced · 182 ft')).toBeTruthy();
   });
 
-  // The visit step offers the trace before the spray's method is known (Codex #6452): a saved trace no perimeter spray
-  // backs never holds the send (owner 2026-10-10), and goes as one the customer's report never shows.
-  test('a saved trace with no perimeter spray sends as a trace the report never shows', async () => {
-    const zone = { linear_ft: 150, capture_mode: 'perimeter', updated_at: '2026-10-02T05:00:00.000Z' };
-    const request = makeRequest({ facts: { ...FACTS, spray: 'spot' }, trace: { enabled: true, treatmentZone: zone } });
+  // Codex #6452: the trace is offered only beside a perimeter spray, on the visit step too, so the sheet never invites
+  // a perimeter trace on a visit whose report sprays only spots.
+  test('a spot visit is offered no trace on either step', async () => {
+    const request = makeRequest({ facts: { ...FACTS, spray: 'spot' } });
     await openSheet(request);
+    expect(screen.queryByRole('button', { name: 'Trace where we sprayed' })).toBeNull();
     await generate();
-    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false);
-    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
-    await screen.findByTestId('fast-complete-sent');
-    const [body] = request.bodies('/complete');
-    expect(body.traceSeen).toBe('2026-10-02T05:00:00.000Z');
-    expect(body.traceShown).toBe(false);
+    expect(screen.queryByRole('button', { name: 'Trace where we sprayed' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the visit' }));
+    expect(screen.queryByRole('button', { name: 'Trace where we sprayed' })).toBeNull();
   });
 
-  test('a saved perimeter trace beside a perimeter spray still goes as the trace the report shows', async () => {
-    const zone = { linear_ft: 150, capture_mode: 'perimeter', updated_at: '2026-10-02T05:00:00.000Z' };
-    const request = makeRequest({ facts: { ...FACTS, spray: 'perimeter' }, trace: { enabled: true, treatmentZone: zone } });
-    await openSheet(request);
-    await generate();
-    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
-    await screen.findByTestId('fast-complete-sent');
-    expect(request.bodies('/complete')[0]).not.toHaveProperty('traceShown');
-  });
-
-  test('the visit step offers the trace as optional, and the tracer opens in the same page', async () => {
+  test('the visit step offers the trace as optional once a perimeter spray is known, and the tracer opens in the same page', async () => {
     const request = makeRequest({ facts: { ...FACTS, spray: 'perimeter' } });
     await openSheet(request);
-    // A product is on the visit and the visit can be traced: the trace is offered before the report is written.
-    const traceButton = screen.getByRole('button', { name: 'Trace where we sprayed' });
+    // Before the report is written the spray's method is unknown: no trace yet.
+    expect(screen.queryByRole('button', { name: 'Trace where we sprayed' })).toBeNull();
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the visit' }));
+    const traceButton = await screen.findByRole('button', { name: 'Trace where we sprayed' });
     expect(within(traceButton.closest('section')).getByText('Optional')).toBeTruthy();
     fireEvent.click(traceButton);
     expect((await screen.findByRole('region', { name: 'Tracer' })).getAttribute('data-inline')).toBe('true');
