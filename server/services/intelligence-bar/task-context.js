@@ -771,21 +771,25 @@ function pageGroundingBlocked(fullPrompt, namedResult, cohort, nameHint, pageCus
   const matches = namedResult.matches || [];
   const contacts = contactLiteralsOf(clause).length > 0;
   const place = placeQualifierPresent(clause, matches);
+  // A compound request takes the page's authority whatever else it says (pre-push audit, r27).
+  if (isCompound(bounded, matches)) return true;
   if (!nameHint && !contacts && !place) return false;
   const exact = !cohort && namedResult.complete !== false && !namedResult.multiple && matches.length === 1
-    && String(matches[0].id) === String(pageCustomerId) && !contacts && !place && !isCompound(bounded, matches);
+    && String(matches[0].id) === String(pageCustomerId) && !contacts && !place;
   return !exact;
 }
 
 // Owner-direct scope only: the customers this message points at (typedCustomerIds, for picking) and
 // the one it names in the simplest case (groundedCustomerIds, the only direct authority).
 // typedIds is null outside the scope and `typed` is then empty.
-async function typedTarget(scope, prompt, namedResult, cohort, nameHint, pageCustomerId) {
+async function typedTarget(scope, prompt, namedResult, cohort, nameHint, pageCustomerId, truncated = false) {
   if (!scope) return { typedIds: null, typed: {} };
   const typedIds = await typedCustomerIds(prompt, namedResult);
-  const blocked = pageGroundingBlocked(prompt, namedResult, cohort, nameHint, pageCustomerId);
-  return { typedIds, typed: { typedCustomerIds: typedIds, groundedCustomerIds: await directGroundedIds(prompt, namedResult, cohort, nameHint),
-    ...(blocked ? { pageGroundingBlocked: true } : {}) } };
+  // A request longer than the scan budget is only partly read, but the model sees all of it: fail
+  // closed, no typed and no page direct authority (pre-push audit, r27).
+  const blocked = truncated || pageGroundingBlocked(prompt, namedResult, cohort, nameHint, pageCustomerId);
+  const grounded = truncated ? [] : await directGroundedIds(prompt, namedResult, cohort, nameHint);
+  return { typedIds, typed: { typedCustomerIds: typedIds, groundedCustomerIds: grounded, ...(blocked ? { pageGroundingBlocked: true } : {}) } };
 }
 
 // resolve() is a short pipeline. `r` is the shared state; each stage owns one
@@ -797,7 +801,8 @@ async function resolveBase({ prompt: fullPrompt, pageData, selectedTarget, owner
   // Candidate ids come from PostgreSQL in lowercase; a selection may not.
   const selectedId = String(Object(selectedTarget).customer_id || '').toLowerCase() || null;
   const [page, namedResult, filterWords] = await Promise.all([loadPage(pageData, prompt), namedCustomers(prompt, ownerDirectScope), verifiedFilterWords(prompt)]);
-  return { prompt, ownerDirectScope, selectedId, page, namedResult, named: namedResult.matches, nameHint: namesRequested(prompt, filterWords) };
+  return { prompt, ownerDirectScope, selectedId, page, namedResult, named: namedResult.matches, nameHint: namesRequested(prompt, filterWords),
+    truncated: prompt.length < String(fullPrompt).length };
 }
 
 const singleTarget = (customer, provenance) => {
@@ -840,7 +845,7 @@ async function candidatesStage(r) {
   r.cohort = setQuantified(r.prompt) || r.namedResult.multiple;
   r.sameName = scope && isSameNameGroup(r.named, r.cohort);
   r.candidates = await labelledCandidates(r.sameName, r.named.map(c => customerTarget(c, 'current_request_lookup')), r.named);
-  Object.assign(r, await typedTarget(scope, r.prompt, r.namedResult, r.cohort, r.nameHint, r.page.customer?.customer_id || r.page.ids?.customer_id));
+  Object.assign(r, await typedTarget(scope, r.prompt, r.namedResult, r.cohort, r.nameHint, r.page.customer?.customer_id || r.page.ids?.customer_id, r.truncated));
   r.selection = candidateSelection(r.candidates, r.prompt, r.page.customer, r.namedResult.complete, r.cohort, r.nameHint, sameNamePick(scope, r));
   return null;
 }

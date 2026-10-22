@@ -489,6 +489,12 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(resolvedBig.target.customer_id).toBe(id(100));
     // Stuffing after the scan window is never read: the name at the start still grounds.
     expect(await Context.typedCustomerIds(`update Pat Example notes ${'a'.repeat(4000)} ${phones}`, named)).toEqual([id(100)]);
+    // A request longer than the scan budget grants nothing, typed or on-screen: the model sees all of it (r27).
+    const long = `update Pat Example's phone ${'x'.repeat(4100)}; change Sam Sample phone`;
+    const longResolved = await Context.resolve({ prompt: long, pageData: { customer_id: id(100) }, selectedTarget: null, ownerDirectScope: true });
+    expect(longResolved.groundedCustomerIds).toEqual([]);
+    expect(longResolved.pageGroundingBlocked).toBe(true);
+    expect((await Context.resolve({ prompt: "update Pat Example's phone", pageData: { customer_id: id(100) }, selectedTarget: null, ownerDirectScope: true })).groundedCustomerIds).toEqual([id(100)]);
     // Gate off: the whole prompt is read, as today.
     delete process.env[ON];
     expect(Context.targetClause(`${'a'.repeat(5000)} tail`)).toContain('tail');
@@ -696,6 +702,9 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(await viewingBob("update Bob Example's phone")).toBe(true);
     expect(await viewingBob('update the phone to 941-555-9999')).toBe(true);
     expect(await viewingBob('update this customer phone')).toBe(true);
+    // A compound request takes the page's authority too, even with no name in the first clause (r27).
+    expect(await viewingBob('update this customer phone to 941-555-0100; change Jhon Smith notes')).toBe(false);
+    expect(await viewingBob('update this customer phone and update this customer notes')).toBe(false);
   });
 
   test('gate on: ONE place-qualifier test: at / from / near / by / around anywhere in the message removes direct grounding; times, weekdays and determiners do not (Codex #6369 r26)', async () => {
