@@ -2038,10 +2038,14 @@ const ReviewService = {
       const delayMinutes = this.completionReviewDelay(notes);
       // GATE_REVIEW_ASK_AFTER_REPORT: the report went out at completion, long
       // before this payment — unless the send window still holds it, in which
-      // case the ask waits for its release (afterReportDueAt).
+      // case the ask waits for its release (afterReportDueAt). Only a
+      // confirmed delivery earns the paid anchor: a failed, blocked, skipped
+      // or missing report text passes none and keeps the smart window.
+      const reportDelivered = notes.completionSmsStatus === "sent"
+        || (notes.completionSmsStatus === "deferred" && !!notes.completionSmsDeferredDeliveredAt);
       const reportTextAnchor = notes.completionSmsStatus === "deferred" && !notes.completionSmsDeferredDeliveredAt && notes.completionSmsDeferredTo
         ? { status: "deferred", at: notes.completionSmsDeferredTo }
-        : { status: "paid", at: new Date() };
+        : (reportDelivered ? { status: "paid", at: new Date() } : null);
       // Legacy create() dedupes by service_record_id; the cadence path
       // dedupes per service record too (startReviewSequence) on top of the
       // active-sequence + cap/cooldown guards — safe under webhook retries
@@ -2052,7 +2056,7 @@ const ReviewService = {
         triggeredBy: "auto",
         delayMinutes,
         legacyDelayMinutes: LEGACY_REVIEW_DELAY_MINUTES,
-        ...(reviewAskAfterReportOn() ? { reportTextAnchor } : {}),
+        ...(reviewAskAfterReportOn() && reportTextAnchor ? { reportTextAnchor } : {}),
         customerRequested: notes.customerRequestedReview && typeof notes.customerRequestedReview === "object"
           ? notes.customerRequestedReview
           : null,

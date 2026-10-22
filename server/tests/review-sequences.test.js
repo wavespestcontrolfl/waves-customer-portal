@@ -8075,6 +8075,43 @@ describe('GATE_REVIEW_ASK_AFTER_REPORT — Day-0 ask 10 minutes after the report
       expect(new Date(mock.__state.rows.review_sequences[0].next_run_at).toISOString()).toBe('2026-10-20T12:10:00.000Z');
     });
 
+    test.each([
+      ['failed', { completionSmsStatus: 'failed' }],
+      ['blocked', { completionSmsStatus: 'blocked' }],
+      ['skipped', { completionSmsStatus: 'skipped_recap_sms_already_sent' }],
+      ['missing', {}],
+    ])('the paid-invoice path: a %s report text earns no paid anchor and keeps the smart window', async (_label, notes) => {
+      freezeAt('2026-10-20T14:00:00Z'); // 10 AM ET Tuesday
+      mockGates.reviewSequences = true;
+      mockGates.reviewAskAfterReport = true;
+      const mock = makeMock(customer('ar-pf'));
+      mock.__state.rows.service_records = [{ id: 'sr-pf', customer_id: 'ar-pf', service_type: 'Quarterly Pest Control', status: 'completed', structured_notes: notes }];
+      db.mockImplementation(mock);
+
+      await ReviewService.enrollForPaidInvoice({ id: 'inv-pf', invoice_number: 'T-PF', customer_id: 'ar-pf', service_record_id: 'sr-pf', visit_completion_packet_id: null });
+
+      const at = new Date(mock.__state.rows.review_sequences[0].next_run_at).getTime();
+      expect(at).toBeGreaterThan(new Date('2026-10-20T14:30:00Z').getTime());
+      expect(decisionOf(mock)).toMatchObject({ reason: 'smart_window' });
+    });
+
+    test.each([
+      ['sent', { completionSmsStatus: 'sent', sentSmsAt: '2026-10-20T13:00:00.000Z' }],
+      ['deferred then delivered', { completionSmsStatus: 'deferred', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z', completionSmsDeferredDeliveredAt: '2026-10-20T12:03:00.000Z' }],
+    ])('the paid-invoice path: a %s report text earns the paid anchor (payment + 10 minutes)', async (_label, notes) => {
+      freezeAt('2026-10-20T14:00:00Z');
+      mockGates.reviewSequences = true;
+      mockGates.reviewAskAfterReport = true;
+      const mock = makeMock(customer('ar-pd'));
+      mock.__state.rows.service_records = [{ id: 'sr-pd', customer_id: 'ar-pd', service_type: 'Quarterly Pest Control', status: 'completed', structured_notes: notes }];
+      db.mockImplementation(mock);
+
+      await ReviewService.enrollForPaidInvoice({ id: 'inv-pd', invoice_number: 'T-PD', customer_id: 'ar-pd', service_record_id: 'sr-pd', visit_completion_packet_id: null });
+
+      expect(new Date(mock.__state.rows.review_sequences[0].next_run_at).toISOString()).toBe('2026-10-20T14:10:00.000Z');
+      expect(decisionOf(mock)).toMatchObject({ reason: 'after_report' });
+    });
+
     describe('the sender keeps the ask behind a queued report (retries included)', () => {
       const seqFor = (overrides = {}) => ({
         id: 'seq-rp', customer_id: 'ar-rp', status: 'active', current_step: 0, touches_sent: 0, service_record_id: 'sr-rp', started_by: 'post_service',
@@ -8245,7 +8282,7 @@ describe('GATE_REVIEW_ASK_AFTER_REPORT — Day-0 ask 10 minutes after the report
     mockGates.reviewSequences = true;
     mockGates.reviewAskAfterReport = true;
     const mock = makeMock(customer('ar-6'));
-    mock.__state.rows.service_records = [{ id: 'sr-ar6', customer_id: 'ar-6', service_type: 'Quarterly Pest Control', status: 'completed', structured_notes: {} }];
+    mock.__state.rows.service_records = [{ id: 'sr-ar6', customer_id: 'ar-6', service_type: 'Quarterly Pest Control', status: 'completed', structured_notes: { completionSmsStatus: 'sent', sentSmsAt: '2026-10-20T13:00:00.000Z' } }];
     db.mockImplementation(mock);
 
     jest.setSystemTime(new Date('2026-10-20T22:00:00Z')); // paid 9 hours later
