@@ -313,7 +313,7 @@ postgres('SMS operations on PostgreSQL', () => {
     await recordMessageOperations(mockPg, nextMessage, withException, context);
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     expect(NotificationService.notifyAdmin.mock.calls[0]).toMatchObject([
-      'alert', 'SMS instructions need review', expect.any(String),
+      'alert', 'SMS note to check — Synthetic Fixture', expect.any(String),
       { metadata: expect.objectContaining({ unverified_count: 2 }) },
     ]);
   });
@@ -940,7 +940,7 @@ postgres('SMS operations on PostgreSQL', () => {
     // The visit-only note alone would be silent; the durable code, held back
     // only by "tomorrow's", is not — staff see it.
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
-    expect(NotificationService.notifyAdmin.mock.calls[0][1]).toBe('SMS instructions need review');
+    expect(NotificationService.notifyAdmin.mock.calls[0][1]).toBe('SMS note to check — Synthetic Fixture');
   });
 
   test('R4 owner ruling 2026-09-24: a fact the extractor labels visit_only is silent even with temporary wording in the text', async () => {
@@ -975,7 +975,7 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(await mockPg('property_preferences')).toHaveLength(0);
     expect((await mockPg('sms_log').first()).operational_analysis.facts[0].outcome).toBe('pet_needs_review');
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
-    expect(NotificationService.notifyAdmin.mock.calls[0][1]).toBe('SMS instructions need review');
+    expect(NotificationService.notifyAdmin.mock.calls[0][1]).toBe('SMS note to check — Synthetic Fixture');
   });
 
   test('Codex #4816 r10: an uncertain-duration fact is not known-temporary — it still rings the review bell', async () => {
@@ -983,7 +983,45 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(await mockPg('property_preferences')).toHaveLength(0);
     expect((await mockPg('sms_log').first()).operational_analysis.facts[0].outcome).toBe('temporary_instruction');
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
-    expect(NotificationService.notifyAdmin.mock.calls[0][1]).toBe('SMS instructions need review');
+    expect(NotificationService.notifyAdmin.mock.calls[0][1]).toBe('SMS note to check — Synthetic Fixture');
+  });
+
+  // Owner ruling 2026-10-21: live rows that rang for nothing.
+  test.each([
+    ['uncertain', "It's the door up the sidewalk."],
+    ['uncertain', 'You are welcome to come earlier..I am here. Anytime'],
+    ['durable', "It's the door up the sidewalk, for tomorrow's visit."],
+  ])('owner ruling 2026-10-21: a %s access note held back as a temporary instruction stays silent: %s', async (duration, text) => {
+    message.message_body = text;
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: text });
+    const note = { field: 'access_notes', value: text, quote: text, duration, property_id: context.properties[0].id };
+    await recordMessageOperations(mockPg, message, { ...result, facts: [note] }, context);
+    expect(await mockPg('property_preferences')).toHaveLength(0);
+    expect((await mockPg('sms_log').first()).operational_analysis.facts[0].outcome).toBe('temporary_instruction');
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('owner ruling 2026-10-21: a durable pet report held back by temporary wording still rings, in plain words', async () => {
+    message.message_body = 'The millipedes are bad during the day. Our cat gets sick if we let her out on the lanai';
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
+    const pet = { field: 'pet_details', value: message.message_body, quote: message.message_body, duration: 'durable',
+      property_id: context.properties[0].id };
+    await recordMessageOperations(mockPg, message, { ...result, facts: [pet] }, context);
+    const [, title, body, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(title).toBe('SMS note to check — Synthetic Fixture');
+    expect(body).toBe(`Wanted to save as pet note; the text sounds like a one-time instruction.\nCustomer wrote: "${message.message_body}"`);
+    expect(opts.dedupeKey).toBe(`sms-property-instructions:${message.id}`);
+    expect(opts.metadata).toMatchObject({ triggerKey: 'sms_operational_exception', fields: ['pet_details'], reasons: ['temporary_instruction'] });
+  });
+
+  test('owner ruling 2026-10-21: a bell for a text with an access code never quotes the text', async () => {
+    message.message_body = "For tomorrow's visit use the side gate. My lockbox code is 4821";
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
+    const code = { field: 'lockbox_code', value: '4821', quote: message.message_body, duration: 'durable', property_id: context.properties[0].id };
+    await recordMessageOperations(mockPg, message, { ...result, facts: [code] }, context);
+    const body = NotificationService.notifyAdmin.mock.calls[0][2];
+    expect(body).toContain('Wanted to save as lockbox code;');
+    expect(body).not.toContain('4821');
   });
 
   test('R4 owner ruling 2026-09-24: an existing-value conflict still rings the review bell', async () => {
@@ -993,7 +1031,7 @@ postgres('SMS operations on PostgreSQL', () => {
     expect((await mockPg('sms_log').first()).operational_analysis.facts[0].outcome).toBe('existing_value_conflict');
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     expect(NotificationService.notifyAdmin.mock.calls[0]).toMatchObject([
-      'alert', 'SMS instructions need review', expect.any(String),
+      'alert', 'SMS note to check — Synthetic Fixture', expect.any(String),
       { metadata: expect.objectContaining({ reasons: ['existing_value_conflict'] }) },
     ]);
   });

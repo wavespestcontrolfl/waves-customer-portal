@@ -11,7 +11,7 @@ jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((name, work) => w
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 
 const { groundExtraction, extractSmsOperations, buildPrompt, stringifySmsEvidence, statesClock } = require('../services/sms-operational-extractor');
-const { eligibleMessage, factVerdict, runSmsOperationalActions, resolveDueDeadline, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS } = require('../services/sms-operational-actions');
+const { eligibleMessage, factVerdict, isQuietTemporaryFact, reviewBellCopy, runSmsOperationalActions, resolveDueDeadline, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS } = require('../services/sms-operational-actions');
 const { groundFulfillment, admissibleWitness, verifySmsFulfillment, fulfillmentFingerprint } = require('../services/sms-commitment-fulfillment');
 const { dispatchWithFallback } = require('../services/llm/call');
 const numbers = require('../config/twilio-numbers');
@@ -1799,5 +1799,51 @@ describe('listSmsCommitments lane option', () => {
     const none = fakeConn();
     await listSmsCommitments(none, { customerId: 'c1' });
     for (const ops of none.parts) expect(rawsOf(ops).some((sql) => /basis/.test(sql))).toBe(false);
+  });
+});
+
+describe('SMS review bell (owner ruling 2026-10-21)', () => {
+  const held = (extra) => ({ field: 'access_notes', duration: 'uncertain', outcome: 'temporary_instruction', ...extra });
+
+  test('a held-back access note is quiet at any duration; safety and code facts are not', () => {
+    expect(isQuietTemporaryFact(held())).toBe(true);
+    expect(isQuietTemporaryFact(held({ duration: 'durable' }))).toBe(true);
+    expect(isQuietTemporaryFact(held({ duration: 'visit_only' }))).toBe(true);
+    expect(isQuietTemporaryFact(held({ outcome: 'existing_value_conflict', duration: 'durable' }))).toBe(false);
+    expect(isQuietTemporaryFact(held({ field: 'pet_details', duration: 'durable' }))).toBe(false);
+    expect(isQuietTemporaryFact(held({ field: 'lockbox_code', duration: 'durable' }))).toBe(false);
+    expect(isQuietTemporaryFact(held({ field: 'irrigation_controller_location' }))).toBe(false);
+    expect(isQuietTemporaryFact(held({ field: 'pet_details', duration: 'visit_only', outcome: 'pet_needs_review' }))).toBe(false);
+  });
+
+  test('copy names the customer, says what was wanted and why it stopped, and quotes the text', () => {
+    const exception = { field: 'access_notes', outcome: 'existing_value_conflict' };
+    const copy = reviewBellCopy({ customer: { first_name: 'Synthetic', last_name: 'Fixture' }, facts: [exception],
+      exceptions: [exception], messageBody: "Ok I'm the last house on the left" });
+    expect(copy).toEqual({ title: 'SMS note to check — Synthetic Fixture',
+      body: 'Wanted to save as access note; it conflicts with the note on file.\nCustomer wrote: "Ok I\'m the last house on the left"' });
+    expect(copy.body.split('\n')[0].length).toBeLessThan(110);
+  });
+
+  test('long text is cut near 140 characters, phone numbers are masked, extra exceptions get a line each', () => {
+    const exceptions = [{ field: 'pet_details', outcome: 'pet_needs_review' }, { field: 'irrigation_controller_location', outcome: 'mixed_topics' }];
+    const copy = reviewBellCopy({ customer: { first_name: 'Synthetic', last_name: '' }, facts: exceptions, exceptions,
+      messageBody: `Call me at 202-555-0143 ${'word '.repeat(60)}` });
+    const lines = copy.body.split('\n');
+    expect(copy.title).toBe('SMS note to check — Synthetic');
+    expect(lines[0]).toMatch(/^Wanted to save as pet note; .*needs a person to read it\.$/);
+    expect(lines[1]).toBe('Also wanted to save as irrigation controller location; the text mixes several topics.');
+    expect(lines[2]).toMatch(/^Customer wrote: "Call me at \*\*\*0143 word/);
+    expect(lines[2]).not.toContain('202-555');
+    expect(lines[2].length).toBeLessThanOrEqual('Customer wrote: ""'.length + 140);
+    expect(lines[2].endsWith('…"')).toBe(true);
+  });
+
+  test('a text with an access code is not quoted', () => {
+    const code = { field: 'lockbox_code', outcome: 'temporary_instruction' };
+    const copy = reviewBellCopy({ customer: {}, facts: [code], exceptions: [code], messageBody: 'My lockbox code is 4821' });
+    expect(copy.title).toBe('SMS note to check');
+    expect(copy.body).not.toContain('4821');
+    expect(copy.body).toContain('not quoted');
   });
 });
