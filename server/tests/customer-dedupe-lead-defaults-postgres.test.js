@@ -80,6 +80,14 @@ maybeDescribe('GATE_MERGE_LEAD_DEFAULTS (real executeMerge)', () => {
     expect((await row(winnerId)).autopay_enabled).toBe(false);
   });
 
+  test('gate on: an assessment-only lead (a Waves Assessment booking is an open lead, not a conversion) is still an intake lead', async () => {
+    process.env.GATE_MERGE_LEAD_DEFAULTS = 'true';
+    const { winnerId, loserId } = await leadPair();
+    await db('scheduled_services').insert({ customer_id: loserId, scheduled_date: '2026-11-01', service_type: 'Waves Assessment', status: 'pending' });
+    await merge(winnerId, loserId);
+    expect((await row(winnerId)).autopay_enabled).toBe(true);
+  });
+
   test('gate on: a loser with a saved card and autopay=false still passes its opt-out on', async () => {
     process.env.GATE_MERGE_LEAD_DEFAULTS = 'true';
     const { winnerId, loserId } = await leadPair();
@@ -138,6 +146,26 @@ maybeDescribe('GATE_MERGE_LEAD_DEFAULTS (real executeMerge)', () => {
     ])('a new_lead row with %s (booked customers can sit at new_lead)', async (_label, addHistory) => {
       const { winnerId, loserId } = await leadPair();
       await addHistory(loserId);
+      await merge(winnerId, loserId);
+      expect((await row(winnerId)).autopay_enabled).toBe(false);
+    });
+
+    test('an assessment plus a regular visit', async () => {
+      const { winnerId, loserId } = await leadPair();
+      await db('scheduled_services').insert([
+        { customer_id: loserId, scheduled_date: '2026-11-01', service_type: 'Waves Assessment', status: 'pending' },
+        { customer_id: loserId, scheduled_date: '2026-11-08', service_type: 'Pest Control', status: 'pending' },
+      ]);
+      await merge(winnerId, loserId);
+      expect((await row(winnerId)).autopay_enabled).toBe(false);
+    });
+
+    test('an assessment that produced an invoice', async () => {
+      const { winnerId, loserId } = await leadPair();
+      await db('scheduled_services').insert({ customer_id: loserId, scheduled_date: '2026-11-01', service_type: 'Waves Assessment', status: 'completed' });
+      await db('invoices').insert({
+        token: `tok${randomUUID().replace(/-/g, '')}`, invoice_number: `SYN-${uniq()}${uniq()}`, customer_id: loserId, total: 10, status: 'draft',
+      });
       await merge(winnerId, loserId);
       expect((await row(winnerId)).autopay_enabled).toBe(false);
     });

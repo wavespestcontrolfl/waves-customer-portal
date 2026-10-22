@@ -81,9 +81,11 @@ describe('StripeService.ensureStripeCustomer link-back', () => {
     expect(state.row.stripe_customer_id).toBeNull();
   });
 
-  test('already retired at the first read: also throws instead of linking', async () => {
-    const { StripeService, database, state } = load({ row: { deleted_at: new Date() } });
+  test('already retired at the first read: throws before Stripe is ever called, nothing written', async () => {
+    const { StripeService, database, state, updates } = load({ row: { deleted_at: new Date() } });
     await expect(StripeService.ensureStripeCustomer('cust-1', { database })).rejects.toMatchObject({ code: 'CUSTOMER_RETIRED' });
+    expect(stripeClient.customers.create).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
     expect(state.row.stripe_customer_id).toBeNull();
   });
 

@@ -817,6 +817,15 @@ const StripeService = {
       return customer.stripe_customer_id;
     }
 
+    // A merged-away (retired) row gets no new Stripe customer: refuse before
+    // calling Stripe. The guarded link-back below still covers a retire that
+    // lands after this read.
+    if (customer.deleted_at) {
+      const retired = new Error('this customer record was merged — reload and retry');
+      retired.code = 'CUSTOMER_RETIRED';
+      throw retired;
+    }
+
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 

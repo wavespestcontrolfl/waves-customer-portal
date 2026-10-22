@@ -107,6 +107,18 @@ describe('loserIsIntakeLead', () => {
         expect(await dedupe.loserIsIntakeLead(fakeDb(withRow({ pipeline_stage: stage })), lead)).toBe(true);
       },
     );
+    it('an assessment-only lead (by name, in any case/spacing) is still an intake lead', async () => {
+      const visits = [{ id: 'v1', service_type: 'Waves Assessment' }, { id: 'v2', service_type: '  waves assessment ' }];
+      expect(await dedupe.loserIsIntakeLead(fakeDb({ ...plainLead, scheduled_services: visits }), lead)).toBe(true);
+    });
+    it('an assessment identified only by its catalog row (lawn_inspection) is still an intake lead', async () => {
+      const database = fakeDb({
+        ...plainLead,
+        scheduled_services: [{ id: 'v1', service_type: 'Visit', service_id: 's1' }],
+        services: { id: 's1', service_key: 'lawn_inspection', name: 'Something' },
+      });
+      expect(await dedupe.loserIsIntakeLead(database, lead)).toBe(true);
+    });
     it('a total_services of null counts as none', async () => {
       expect(await dedupe.loserIsIntakeLead(fakeDb(withRow({ total_services: null })), lead)).toBe(true);
     });
@@ -132,7 +144,10 @@ describe('loserIsIntakeLead', () => {
       ['a restore audit row (a restored customer with disarmed autopay and no billing rows)', { audit_log: { id: 'a2' } }],
       ['a saved card', { payment_methods: { id: 'pm1' } }],
       ['an autopay log row', { autopay_log: { id: 'log1' } }],
-      ['a scheduled visit (any status, new_lead stage)', { scheduled_services: { id: 'v1' } }],
+      ['a regular scheduled visit (any status, new_lead stage)', { scheduled_services: [{ id: 'v1', service_type: 'Pest Control', service_id: null }] }],
+      ['an assessment plus a regular visit', { scheduled_services: [{ id: 'v1', service_type: 'Waves Assessment' }, { id: 'v2', service_type: 'Lawn Care' }] }],
+      ['an assessment that produced an invoice', { scheduled_services: [{ id: 'v1', service_type: 'Waves Assessment' }], invoices: { id: 'inv1' } }],
+      ['a visit whose catalog row is not the assessment', { scheduled_services: [{ id: 'v1', service_type: 'Visit', service_id: 's1' }], services: { id: 's1', service_key: 'pest_quarterly', name: 'Quarterly Pest' } }],
       ['a service record', { service_records: { id: 'sr1' } }],
       ['an invoice', { invoices: { id: 'inv1' } }],
       ['a credit ledger row', { customer_credit_ledger: { id: 'cl1' } }],
