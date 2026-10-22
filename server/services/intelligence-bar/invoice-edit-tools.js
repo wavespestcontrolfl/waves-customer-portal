@@ -882,6 +882,9 @@ async function unvoidRefusal(invoice) {
   try {
     const obligation = await require('../invoice')._unvoidObligationReason(db, invoice);
     if (obligation === 'membership_dues') return toPage(`Invoice ${invoice.invoice_number} is a membership-dues invoice: restoring it re-claims a month of coverage.`, 'membership_dues', at);
+    if (obligation === 'packet_invoice' || obligation === 'payer_billed') {
+      return toPage(`Invoice ${invoice.invoice_number} is a combined-visit or payer-billed invoice: restoring it re-checks who owes it, and for every withdrawn combined-visit invoice of the customer that can release it to the send queue (an invoice text).`, obligation, at);
+    }
     if (obligation) return toPage(`Invoice ${invoice.invoice_number} carries a bait-station setup fee: restoring it can also retire a sibling setup invoice, clear a visit's pending setup fee or close an office billing alert.`, 'setup_fee', at);
   } catch (err) {
     logger.warn(`[intelligence-bar:invoice-edit] unvoid obligation check failed (${err.code || err.name || 'error'})`);

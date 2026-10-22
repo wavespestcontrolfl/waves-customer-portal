@@ -791,7 +791,16 @@ function applyVoidExpected(q, expected) {
 // an office handoff alert or void a replacement draft). Detected from the same provenance that helper reads: the setup line, the
 // durable claim, a handoff alert naming the invoice, and a live rebill marker. Returns a reason or null; read-only. The card runs
 // it at preview and at confirm, and the bar's restore runs it again on the row its UPDATE holds.
+//
+// Also Bill-To: for a PACKET invoice the restore calls reconcileWithdrawnPacketInvoices and withdrawPacketInvoicesForOwner for the
+// whole CUSTOMER, and the release helper can return any withdrawn packet invoice of that customer to the send queue (an invoice
+// text). That customer-wide pass runs only when the restored invoice itself carries visit_completion_packet_id (invoice.js unvoid,
+// `if (updated.visit_completion_packet_id)`), so refusing every packet invoice, every payer-billed invoice and every invoice with a
+// payer_billed stamp keeps the pass from ever running on the bar's path; other invoices of the customer are not touched (a plain
+// linked invoice's reconcile is scoped to itself). Reasons: packet_invoice, payer_billed, membership_dues, setup_fee.
 async function unvoidObligationReason(conn, invoice) {
+  if (invoice.visit_completion_packet_id) return "packet_invoice";
+  if (invoice.payer_id || /^payer_billed:/.test(String(invoice.scheduled_send_error || ""))) return "payer_billed";
   const lines = parseInvoiceLineItems(invoice.line_items);
   if (lines.some((li) => li && li[MEMBERSHIP_DUES_LINE_KEY])) return "membership_dues";
   if (lines.some((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()))) return "setup_fee";
@@ -11430,7 +11439,7 @@ const InvoiceService = {
       // The bar only: a setup-fee or dues obligation that exists by the time the restore holds the invoice row refuses it
       // (rolls back); the page restores those with its own handling.
       if (expected && await unvoidObligationReason(trx, updated)) {
-        throw new Error("Cannot unvoid from the bar — this invoice carries a bait-station setup fee or a membership-dues month, which the restore also changes elsewhere; restore it from the Invoices page");
+        throw new Error("Cannot unvoid from the bar — the restore would also change other records (a bait-station setup fee, a membership-dues month, or a packet / payer-billed invoice and the customer's withdrawn invoices); restore it from the Invoices page");
       }
       // The customer is judged again once the invoice itself is held: a merge that committed between the
       // fresh read above and this lock moved the invoice to another customer, whose rows were never taken.

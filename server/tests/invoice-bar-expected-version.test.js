@@ -262,6 +262,21 @@ describe('unvoid: setup-fee and dues invoices are left to the Invoices page (Inv
     await expect(reason(row({ status: 'void' }))).resolves.toBe('setup_fee');
   });
 
+  test.each([
+    ['a packet invoice', { visit_completion_packet_id: 'packet-1' }, 'packet_invoice'],
+    ['a payer-billed invoice', { payer_id: 'payer-1' }, 'payer_billed'],
+    ['a withdrawn stamp left after the payer was removed', { payer_id: null, scheduled_send_error: 'payer_billed:payer-1' }, 'payer_billed'],
+    ['a withdrawn stamp with flags', { scheduled_send_error: 'payer_billed:payer-1:park:hold' }, 'payer_billed'],
+  ])('%s is found from the row, with no read', async (_label, change, expectedReason) => {
+    await expect(reason(row({ status: 'void', ...change }))).resolves.toBe(expectedReason);
+    expect(calls).toEqual([]);
+  });
+
+  test('a send error that is not a withdrawal stamp does not refuse; other open invoices of the customer are not read (the customer-wide reconcile only runs for a packet invoice, which is refused)', async () => {
+    await expect(reason(row({ status: 'void', scheduled_send_error: 'SUMMARY_TEXT_PLANNED' }))).resolves.toBeNull();
+    expect(calls.every((c) => !c.ops.some(([name, col]) => name === 'where' && col && col.customer_id))).toBe(true);
+  });
+
   test('a live replacement draft carrying the rebill marker for this invoice', async () => {
     cfg.reads.invoices = [{ id: 'inv-rebill' }];
     await expect(reason(row({ status: 'void' }))).resolves.toBe('setup_fee');
@@ -286,3 +301,23 @@ describe('unvoid: setup-fee and dues invoices are left to the Invoices page (Inv
     await expect(InvoiceService.unvoidInvoice('inv-1')).resolves.toMatchObject({ id: 'inv-1' });
   });
 });
+
+describe('unvoid: a packet / payer-billed invoice never reaches the customer-wide Bill-To reconcile from the bar', () => {
+  test.each([
+    ['a packet invoice', { visit_completion_packet_id: 'packet-1' }],
+    ['a payer-billed invoice', { payer_id: 'payer-1' }],
+    ['a withdrawn stamp whose payer was removed', { scheduled_send_error: 'payer_billed:payer-1' }],
+  ])('%s: the restore’s UPDATE row is refused under the lock before any reconcile work, and nothing is queued', async (_label, change) => {
+    const voided = row({ status: 'void', ...change });
+    cfg.reads.invoices = [voided];
+    cfg.updateReturning.invoices = [voided];
+    await expect(InvoiceService.unvoidInvoice('inv-1', { expected: { status: 'void', updatedAt: UPDATED.getTime() } })).rejects.toThrow(/^Cannot unvoid from the bar/);
+    // The only tables read are the restore's own pre-UPDATE ownership locks; none of the reconcile / withdrawal / queue work ran, and the
+    // UPDATE row was the last statement.
+    const touched = calls.map((c) => c.table);
+    for (const table of ['sms_log', 'invoice_followup_sequences', 'payer_statements', 'payers', 'dispatch_alerts']) expect(touched).not.toContain(table);
+    expect(touched[touched.length - 1]).toBe('invoices');
+    expect(calls[calls.length - 1].isUpdate).toBe(true);
+  });
+});
+

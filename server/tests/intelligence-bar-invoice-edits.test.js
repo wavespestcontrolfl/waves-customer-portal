@@ -148,6 +148,8 @@ beforeEach(() => {
   // invoice-bar-expected-version.test.js), run on this file's fake database.
   mockObligation.mockImplementation(async (conn, invoice) => {
     const lines = Array.isArray(invoice.line_items) ? invoice.line_items : [];
+    if (invoice.visit_completion_packet_id) return 'packet_invoice';
+    if (invoice.payer_id || /^payer_billed:/.test(String(invoice.scheduled_send_error || ''))) return 'payer_billed';
     if (lines.some((li) => li && li.membership_dues_month)) return 'membership_dues';
     if (lines.some((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || '').trim()))) return 'setup_fee';
     if (await conn('setup_fee_claims').where({ invoice_id: invoice.id }).first()) return 'setup_fee';
@@ -818,6 +820,24 @@ describe('unvoid_invoice', () => {
     state.dispatch_alerts = [];
     state.invoices.push({ id: 'inv-rebill', status: 'draft', notes: `Re-billed after invoice ${INV} was voided [rodent-setup-rebill:${INV}]` });
     expect(await run('unvoid_invoice')).toMatchObject({ code: 'needs_invoices_page', reason: 'setup_fee' });
+  });
+
+  test.each([
+    ['a combined-visit (packet) invoice', { visit_completion_packet_id: 'packet-1' }, 'packet_invoice'],
+    ['a payer-billed invoice', { payer_id: 'payer-1' }, 'payer_billed'],
+    ['a withdrawn invoice whose payer was removed (the stamp stays)', { scheduled_send_error: 'payer_billed:payer-1' }, 'payer_billed'],
+    ['a withdrawn invoice with a hold / park flag', { scheduled_send_error: 'payer_billed:payer-1:park:hold' }, 'payer_billed'],
+  ])('%s is left to the Invoices page: the restore re-checks Bill-To and can release it to the send queue', async (_label, change, reason) => {
+    setInvoice(change);
+    expect(await run('unvoid_invoice')).toMatchObject({ code: 'needs_invoices_page', reason });
+    expect(Invoices.unvoidInvoiceFromBar).not.toHaveBeenCalled();
+  });
+
+  test('a stamp that appears after the card refuses at Confirm, before the handler', async () => {
+    const card = await run('unvoid_invoice');
+    setInvoice({ scheduled_send_error: 'payer_billed:payer-1', payer_id: null });
+    expect(await confirm('unvoid_invoice', card)).toMatchObject({ code: 'needs_invoices_page', preview_changed: true });
+    expect(Invoices.unvoidInvoiceFromBar).not.toHaveBeenCalled();
   });
 
   test('an unreadable obligation check fails closed', async () => {
