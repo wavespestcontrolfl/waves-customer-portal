@@ -435,6 +435,10 @@ describe('r15: a page-size limit is not a gap; the billing-type hard limit is', 
 });
 
 describe('r19: a wait is not a freeze', () => {
+  test('customer_busy_cancel records nothing (a locked customer record is a retry, not a gap)', () => {
+    expect(recordableRefusalCode({ success: false, code: 'customer_busy_cancel', error: "This customer's record is busy right now (being edited or merged), so nothing was cancelled. Try again in a moment." })).toBeNull();
+  });
+
   test('visit_busy_move records nothing, and the thrown-move mapper turns a transient frozen reason into it', () => {
     expect(recordableRefusalCode({ success: false, code: 'visit_busy_move', error: "The bar can't move this right now. Try again in a moment." })).toBeNull();
     const { moveRefusalFromThrown } = require('../services/intelligence-bar/outcomes');
