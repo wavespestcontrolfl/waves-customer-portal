@@ -69,7 +69,8 @@ function wire({ insertChain, fenceOwner = 'cust-1' }) {
       // r41: the comp path re-reads the alert's owner UNDER the comms fence
       // before inserting — an owner that moved (merge-undo) aborts.
       chain({ first: jest.fn().mockResolvedValue(fenceOwner === null ? undefined : { customer_id: fenceOwner }) }),
-      chain(), // status update
+      chain(), // action record update
+      chain(), // acknowledge, only while still new (Codex #6431 r3)
     ],
     customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) })],
     scheduled_services: [insertChain],
@@ -181,4 +182,21 @@ test('an alert whose owner moved under the comms fence (merge-undo) aborts — n
   expect(actionResult.success).toBe(false);
   expect(actionResult.message).toMatch(/ownership changed/i);
   expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('Complimentary service insert failed'));
+});
+
+test('the action acknowledges the alert only while it is still new — a merge-folded (dismissed) alert is not re-opened (Codex #6431 r3)', async () => {
+  const insertChain = compInsertChain();
+  wire({ insertChain });
+  const alertChains = [];
+  const original = db.getMockImplementation();
+  db.mockImplementation((table) => {
+    const c = original(table);
+    if (table === 'customer_health_alerts') alertChains.push(c);
+    return c;
+  });
+  await HealthAlerts.executeAction('alert-1', 0);
+  const [, , record, ack] = alertChains;
+  expect(record.update.mock.calls[0][0]).not.toHaveProperty('status');
+  expect(ack.where.mock.calls).toEqual([['id', 'alert-1'], ['status', 'new']]);
+  expect(ack.update).toHaveBeenCalledWith({ status: 'acknowledged' });
 });

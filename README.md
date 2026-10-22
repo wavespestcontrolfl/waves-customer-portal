@@ -21,7 +21,7 @@ One monorepo serves three surfaces plus the automation that runs the business:
 | SMS/Voice | Twilio (messaging, voice recording + transcription, Lookup) |
 | AI | Anthropic Claude (+ routed OpenAI/Gemini for specific features) — model tiers in `server/config/models.js`, never hardcode model IDs |
 | Storage | AWS S3 (service photos, report assets) |
-| Hosting | Railway (`railway.toml`, plus `railway.seo-worker.toml`) |
+| Hosting | Railway (service settings in the dashboard; `nixpacks.toml` adds ffmpeg) |
 
 The marketing/SEO site (hub + spoke fleet) is a **separate repo**
 (`wavespestcontrolfl/wavespestcontrol-astro`) deployed to Cloudflare Pages;
@@ -67,8 +67,9 @@ Key commands:
 
 ## Deployment
 
-Railway only — project `waves-pest-control`. Config-as-code in `railway.toml`
-(health check, pre-deploy migrations). See `docs/DEPLOYMENT.md` for the full
+Railway only — project `waves-pest-control`. Build, start, health check and
+pre-deploy migrations are Railway service settings (Railway drops Config as
+Code on 2026-12-01). See `docs/DEPLOYMENT.md` for the full
 runbook. User-visible features ship dark behind `GATE_*` env switches
 (see `.env.example`).
 
