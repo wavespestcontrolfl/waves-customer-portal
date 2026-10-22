@@ -818,6 +818,17 @@ const StripeService = {
       return customer.stripe_customer_id;
     }
 
+    // A merged-away (retired) row gets no new Stripe customer: refuse before
+    // calling Stripe. The guarded link-back below still covers a retire that
+    // lands after this read. An ARCHIVED customer (deleted_at alone, no merge)
+    // is not refused: it may still pay an open invoice and save the card.
+    const { isMergeRetiredRow, MERGE_RETIRED_PHONE_PREFIX } = require('./merge-retired');
+    if (isMergeRetiredRow(customer)) {
+      const retired = new Error('this customer record was merged — reload and retry');
+      retired.code = 'CUSTOMER_RETIRED';
+      throw retired;
+    }
+
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -844,13 +855,38 @@ const StripeService = {
 
       const stripeCustomerId = stripeCustomer.id;
 
-      await database('customers')
+      // Guarded compare-and-set: the Stripe call above runs outside any lock,
+      // so a duplicate merge can retire this row or another request can link a
+      // profile in between. An unguarded UPDATE would write the id onto the
+      // merged-away loser and let payment setup continue on a retired identity.
+      // The guard is on the row itself (the merge's retire UPDATE writes the
+      // sentinel phone with deleted_at), so a merge that commits while this
+      // write waits on the row lock is seen on the re-check. An archive is not
+      // a merge: an archived row still links, as before.
+      const linked = await database('customers')
         .where({ id: customerId })
+        .whereNull('stripe_customer_id')
+        .whereRaw("NOT (deleted_at IS NOT NULL AND phone LIKE ? || '%')", [MERGE_RETIRED_PHONE_PREFIX])
         .update({ stripe_customer_id: stripeCustomerId });
+
+      if (!linked) {
+        const current = await database('customers').where({ id: customerId }).first('stripe_customer_id', 'deleted_at', 'phone');
+        if (current && !isMergeRetiredRow(current) && current.stripe_customer_id) {
+          // Another request linked a live profile first: use it, leave the
+          // one just created unused (ids only in the log).
+          logger.warn(`[stripe] Customer ${customerId} was linked to ${current.stripe_customer_id} while ${stripeCustomerId} was being created; the new Stripe customer is unused`);
+          return current.stripe_customer_id;
+        }
+        const retired = new Error('this customer record was merged — reload and retry');
+        retired.code = 'CUSTOMER_RETIRED';
+        logger.warn(`[stripe] Customer ${customerId} was retired while Stripe customer ${stripeCustomerId} was being created; not linked`);
+        throw retired;
+      }
 
       logger.info(`[stripe] Customer created: ${stripeCustomerId} for ${customerId}`);
       return stripeCustomerId;
     } catch (err) {
+      if (err && err.code === 'CUSTOMER_RETIRED') throw err;
       logger.error(`[stripe] Customer creation failed: ${err.message}`);
       throw new Error('Failed to create Stripe customer');
     }
