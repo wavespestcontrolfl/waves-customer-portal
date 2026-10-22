@@ -26,8 +26,12 @@
  *    then '=' or ':' and 4+ characters ("db.password: x", "X-API-Key: x"); and an
  *    "Authorization:" header with any scheme word ("Token x", "Digest x")
  *  - any other run of 32 or more base64/hex characters
+ *  - a Luhn-valid card number inside a digit run longer than 120 digits
+ *  - backstop: any other 20+ character token that mixes letters and digits and
+ *    looks random (10+ distinct characters, no repeat run over 4); UUIDs, ISO
+ *    dates and links are kept
  */
-const { scrubPans } = require('./pan-scrub');
+const { scrubPans, luhnValid } = require('./pan-scrub');
 const { isCredentialName, nameWords } = require('./credential-fields');
 
 const REMOVED = '[removed]';
@@ -36,6 +40,18 @@ const CUT = '[cut]';
 // A note longer than this is cut before scrubbing: only NOTE_CAP characters are
 // ever returned, and the scan stays cheap on a huge value.
 const SCAN_LIMIT = 20000;
+
+// Cut a long note at SCAN_LIMIT without leaving half a secret: back off to the
+// last whitespace or delimiter within the last 200 characters, or drop those 200
+// when there is none, so a key cut in two never reaches the rules (Codex #6375 r10).
+const BACKOFF = 200;
+function trimToScanLimit(input) {
+  const text = String(input);
+  if (text.length <= SCAN_LIMIT) return text;
+  const tail = text.slice(SCAN_LIMIT - BACKOFF, SCAN_LIMIT);
+  const at = tail.search(/[\s,;"'(){}[\]<>][^\s,;"'(){}[\]<>]*$/);
+  return text.slice(0, at >= 0 ? SCAN_LIMIT - BACKOFF + at : SCAN_LIMIT - BACKOFF);
+}
 
 const PEM_RE = /-----BEGIN [A-Z0-9 ]+-----[\s\S]*?(?:-----END [A-Z0-9 ]+-----|$)/g;
 const PREFIXED_RES = [
@@ -101,11 +117,13 @@ const REMOVED_OPEN = REMOVED.replace(/\]$/, '');
 const isAlreadyRemoved = value => value.replace(/^["']/, '').startsWith(REMOVED_OPEN);
 
 const JWT_RE = /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*/g;
-const URL_RE = /https?:\/\/[^\s"'<>\\]+/gi;
+// A JSON-escaped link (https:\/\/user:pw@host\/path) is a link too: the scheme slashes
+// and the path may carry a backslash before each slash (Codex #6375 r10).
+const URL_RE = /https?:(?:\\?\/){2}(?:[^\s"'<>\\]|\\\/)+/gi;
 // user:password@ in a link of ANY scheme (postgresql://, redis://, ftp://,
 // smb://, ...); the http(s) links above also go through scrubUrl (Codex #6375).
-const ANY_SCHEME_USERINFO_RE = /\b([a-z][a-z0-9+.-]*:\/\/)[^\s\/@:"'<>]*:[^\s\/@"'<>]+@/gi;
-const URL_USERINFO_RE = /^(https?:\/\/[^\s/:@?#]*:)[^\s/@?#]+@/i;
+const ANY_SCHEME_USERINFO_RE = /\b([a-z][a-z0-9+.-]*:(?:\\?\/){2})[^\s\/@:"'<>\\]*:[^\s\/@"'<>\\]+@/gi;
+const URL_USERINFO_RE = /^(https?:(?:\\?\/){2}[^\s/:@?#\\]*:)[^\s/@?#\\]+@/i;
 const QUERY_PARAM_RE = /([?&#;])([A-Za-z0-9_.%+[\]-]+)=([^&#\s"'<>\\]*)/g;
 // Credential names that are not credential words as a field name but are as a
 // query key (the same short list signed-link-redaction.js keeps for links).
@@ -129,11 +147,81 @@ function scrubUrl(url) {
     .replace(QUERY_PARAM_RE, (match, lead, key, value) => (value && isCredentialQueryKey(key) ? `${lead}${key}=${REMOVED}` : match));
 }
 
+// scrubPans gives up on a run of more than 120 digits (bulk dumps). For a returned
+// note such a run is scanned for a Luhn-valid 13-19 digit window made of whole
+// separator-delimited groups, so a card inside a long grouped run is masked too
+// (Codex #6375 r10).
+const LONG_DIGIT_RUN_RE = /\d+(?:[\s,./-]{1,40}\d+)*/g;
+const PAN_LENGTHS = [16, 15, 19, 14, 13, 18, 17];
+function maskPansInRun(run) {
+  const groups = [];
+  for (const m of run.matchAll(/\d+/g)) groups.push({ digits: m[0], start: m.index, end: m.index + m[0].length });
+  let out = '';
+  let cursor = 0;
+  let count = 0;
+  for (let i = 0; i < groups.length; i += 1) {
+    if (groups[i].start < cursor) continue;
+    let sum = 0;
+    const endByLength = new Map();
+    for (let j = i; j < groups.length && sum <= 19; j += 1) {
+      sum += groups[j].digits.length;
+      if (sum >= 13 && sum <= 19 && !endByLength.has(sum)) endByLength.set(sum, j);
+    }
+    for (const len of PAN_LENGTHS) {
+      if (!endByLength.has(len)) continue;
+      const j = endByLength.get(len);
+      const digits = groups.slice(i, j + 1).map(group => group.digits).join('');
+      if (!/^[2-6]/.test(digits) || !luhnValid(digits)) continue;
+      out += `${run.slice(cursor, groups[i].start)}[card ending ${digits.slice(-4)}]`;
+      cursor = groups[j].end;
+      count += 1;
+      break;
+    }
+  }
+  return { text: out + run.slice(cursor), count };
+}
+function scrubLongDigitRuns(text) {
+  let count = 0;
+  const out = text.replace(LONG_DIGIT_RUN_RE, (run) => {
+    if ((run.match(/\d/g) || []).length <= 120) return run;
+    const masked = maskPansInRun(run);
+    count += masked.count;
+    return masked.text;
+  });
+  return { text: out, count };
+}
+
+// Structural backstop for secret formats no rule names (Codex #6375 r10): a token
+// of 20+ characters that mixes letters and digits and looks random (10+ distinct
+// characters, no run of one character longer than 4) is removed. Record ids stay:
+// UUIDs, ISO dates and timestamps, the redaction markers, and anything inside a link
+// the link rules already judged.
+const BACKSTOP_TOKEN_RE = /[^\s,;:="'{}[\]()]+/g;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}(?::?\d{2}(?::?\d{2}(?:\.\d+)?)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/i;
+function looksLikeRandomToken(token) {
+  if (token.length < 20 || !/[A-Za-z]/.test(token) || !/\d/.test(token)) return false;
+  if (UUID_RE.test(token) || ISO_DATE_RE.test(token)) return false;
+  if (new Set(token).size < 10) return false;
+  return !/(.)\1{4}/.test(token);
+}
+function scrubRandomTokens(text) {
+  const links = [];
+  for (const m of text.matchAll(URL_RE)) links.push([m.index, m.index + m[0].length]);
+  let count = 0;
+  const out = text.replace(BACKSTOP_TOKEN_RE, (token, at) => {
+    if (!looksLikeRandomToken(token) || links.some(([from, to]) => at >= from && at < to)) return token;
+    count += 1;
+    return REMOVED;
+  });
+  return { text: out, count };
+}
+
 // Returns { text, removed }. `removed` counts the replacements.
 function scrubNoteText(input) {
   let removed = 0;
   const swap = () => { removed += 1; return REMOVED; };
-  let text = String(input).slice(0, SCAN_LIMIT);
+  let text = trimToScanLimit(input);
   text = text.replace(PEM_RE, swap);
   text = text.replace(ANY_SCHEME_USERINFO_RE, (match, scheme) => { removed += 1; return `${scheme}${REMOVED}@`; });
   text = text.replace(URL_RE, (url) => {
@@ -155,9 +243,14 @@ function scrubNoteText(input) {
   for (const pattern of PREFIXED_RES) text = text.replace(pattern, swap);
   const noPans = scrubPans(text);
   if (noPans !== text) removed += 1;
-  text = noPans.replace(SSN_RE, swap);
-  // A rule line ("--------", "======") is not a secret: the run needs 16 letters or digits.
-  text = text.replace(LONG_RUN_RE, run => ((run.match(/[A-Za-z0-9]/g) || []).length >= 16 ? swap() : run));
+  const longRuns = scrubLongDigitRuns(noPans);
+  removed += longRuns.count;
+  text = longRuns.text.replace(SSN_RE, swap);
+  // A rule line ("--------", "======") is not a secret: the run needs 16 letters or digits. A UUID is a record id and stays.
+  text = text.replace(LONG_RUN_RE, run => (!UUID_RE.test(run) && (run.match(/[A-Za-z0-9]/g) || []).length >= 16 ? swap() : run));
+  const backstop = scrubRandomTokens(text);
+  removed += backstop.count;
+  text = backstop.text;
   return { text, removed };
 }
 
@@ -170,4 +263,4 @@ function scrubNote(input, { truncated = false } = {}) {
   return { text: cut ? `${text.slice(0, NOTE_CAP)}${CUT}` : text, removed };
 }
 
-module.exports = { scrubNote, scrubNoteText, NOTE_CAP, SCAN_LIMIT, CUT, REMOVED };
+module.exports = { scrubNote, scrubNoteText, trimToScanLimit, NOTE_CAP, SCAN_LIMIT, CUT, REMOVED };

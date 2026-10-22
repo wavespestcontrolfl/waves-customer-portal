@@ -37,7 +37,7 @@
  */
 const { isCredentialField, isCredentialName, nameWords } = require('./credential-fields');
 const { scrubSecretText } = require('./secret-text-scrubber');
-const { scrubNote, SCAN_LIMIT, NOTE_CAP, CUT } = require('./note-secret-scrubber');
+const { scrubNote, trimToScanLimit, SCAN_LIMIT, NOTE_CAP, CUT } = require('./note-secret-scrubber');
 
 const REDACTED_LINK = '[signed link removed]';
 const REDACTED_PRIVATE_LINK = '[private link removed]';
@@ -391,7 +391,7 @@ const leastLeafCost = entry => {
 };
 
 function returnNoteString(item, state) {
-  const { text, removed } = scrubNote(redactString(item.slice(0, SCAN_LIMIT), state), { truncated: item.length > SCAN_LIMIT });
+  const { text, removed } = scrubNote(redactString(trimToScanLimit(item), state), { truncated: item.length > SCAN_LIMIT });
   state.noteSecrets += removed;
   if (state.noteBudget === undefined) return text;
   const room = Math.max(state.noteBudget - 2, 0);

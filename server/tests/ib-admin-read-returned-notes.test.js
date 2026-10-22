@@ -373,3 +373,76 @@ describe('Codex #6375 r3: Basic casing, cut marker, secret-shaped keys', () => {
     expect(SCAN_LIMIT).toBeGreaterThan(1000);
   });
 });
+
+describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, random-token backstop', () => {
+  const { scrubNote, trimToScanLimit, SCAN_LIMIT, REMOVED } = require('../utils/note-secret-scrubber');
+
+  test('a key crossing the scan limit is dropped whole, not kept as a prefix', async () => {
+    const key = 'sk-' + 'proj-' + 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    const head = 'gate side. '.repeat(Math.ceil((SCAN_LIMIT - 15) / 11)).slice(0, SCAN_LIMIT - 15);
+    const note = `${head} ${key} tail`;
+    expect(note.indexOf(key)).toBeLessThan(SCAN_LIMIT);
+    expect(note.indexOf(key) + key.length).toBeGreaterThan(SCAN_LIMIT);
+    expect(trimToScanLimit(note)).not.toContain('sk-proj');
+    const result = await read(ENTRY, { id: 1, notes: note });
+    expect(JSON.stringify(result)).not.toMatch(/sk-proj|ABCDEFG/);
+  });
+
+  test('a long signed URL crossing the scan limit loses its last 200 characters, with no partial credential', () => {
+    const url = `https://files.example.test/doc?name=a&X-Amz-Signature=${'0123456789abcdef'.repeat(30)}`;
+    const note = `${'a'.repeat(SCAN_LIMIT - 120)}${url}`;
+    const kept = trimToScanLimit(note);
+    expect(kept.length).toBeLessThanOrEqual(SCAN_LIMIT - 200);
+    expect(scrubNote(note).text).not.toContain('0123456789abcdef');
+  });
+
+  test('a text under the scan limit is not trimmed', () => {
+    expect(trimToScanLimit('short note')).toBe('short note');
+  });
+
+  test.each([
+    ['https:\\/\\/admin:hunter22@host.example/x', 'hunter22'],
+    ['{"link":"https:\\/\\/admin:hunter22@host.example\\/x"}', 'hunter22'],
+    ['{"u":"ftp:\\/\\/svc:Winter2026@files.example.test\\/share"}', 'Winter2026'],
+    ['{"u":"https:\\/\\/host.example\\/p?token=abc12345"}', 'abc12345'],
+  ])('JSON-escaped link %s loses its credential', (note, secret) => {
+    const { text, removed } = scrubNote(note);
+    expect(text).not.toContain(secret);
+    expect(removed).toBeGreaterThan(0);
+  });
+
+  test('a card number inside a long grouped digit run is masked', () => {
+    const note = `ref 4242 4242 4242 4242${' 1111'.repeat(27)} end`;
+    const { text, removed } = scrubNote(note);
+    expect(text).not.toContain('4242 4242');
+    expect(text).toContain('[card ending 4242]');
+    expect(removed).toBeGreaterThan(0);
+    expect(text.endsWith('end')).toBe(true);
+  });
+
+  test('a long run of non-card digit groups is left alone', () => {
+    const note = Array.from({ length: 40 }, () => '1234').join(' ');
+    expect(scrubNote(note).text).toBe(note);
+  });
+
+  test('a random 32-character key in prose is removed', () => {
+    const { text, removed } = scrubNote('The vendor portal key is Zq8rT2vX9mKp4LwB7nYd3HsE5cGa1UjF so keep it quiet');
+    expect(text).toBe(`The vendor portal key is ${REMOVED} so keep it quiet`);
+    expect(removed).toBe(1);
+  });
+
+  test('a random 24-character token inside JSON is removed, the key stays', () => {
+    const { text } = scrubNote('{"ref":"k3J9x2LmQ8vN4pR7tY1wZ5aB"}');
+    expect(text).toBe(`{"ref":"${REMOVED}"}`);
+  });
+
+  test('UUIDs, long words, dates and invoice numbers stay', () => {
+    const note = 'visit 123e4567-e89b-12d3-a456-426614174000 on 2026-10-21T10:30:00Z, invoice WPC-2026-0001, treatment internationalization approach, ref 2026-10-21';
+    expect(scrubNote(note)).toEqual({ text: note, removed: 0 });
+  });
+
+  test('a low-variety or link token is kept', () => {
+    const note = 'ids 1111111111aaaaaaaaaa22 and https://portal.example.test/f/report-2026-q3-v2';
+    expect(scrubNote(note).text).toBe(note);
+  });
+});
