@@ -1363,10 +1363,9 @@ describe('topUpRecurringSeriesLocked — a taken hour hands the visit off withou
     await topUpRecurringSeriesLocked(baseline.conn, 10, { horizonDays: 14 });
 
     process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
-    // The advisory probe, then the hand-off probe (own customer excluded):
-    // both see another customer's visit in the hour.
+    // The hand-off probe runs first on every candidate (gate on); the first
+    // candidate's sees another customer's visit in the hour.
     findConflictingVisits.mockReset()
-      .mockResolvedValueOnce([{ id: 'occupied-1', customer_id: 77 }])
       .mockResolvedValueOnce([{ id: 'occupied-1', customer_id: 77 }])
       .mockResolvedValue([]);
     const handed = topupScenario(fixtureArgs);
@@ -1382,14 +1381,23 @@ describe('topUpRecurringSeriesLocked — a taken hour hands the visit off withou
     for (const row of rest) expect(row.window_start).toBe('09:00');
     // Its reminder registers as the windowless placeholder, never the plan's hour.
     expect(result.spawnedVisits[0].windowStart).toBeNull();
-    expect(findConflictingVisits.mock.calls[1][0]).toMatchObject({ windowStart: '09:00', windowEnd: '10:00' });
-    expect(findConflictingVisits.mock.calls[1][0].excludeCustomerId).toBeUndefined();
+    expect(findConflictingVisits.mock.calls[0][0]).toMatchObject({ windowStart: '09:00', windowEnd: '10:00', includeInterviews: true });
+    expect(findConflictingVisits.mock.calls[0][0].excludeCustomerId).toBeUndefined();
+  });
+
+  test('gate on: an hour only a booked interview holds is taken too (the advisory probe never sees it)', async () => {
+    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+    // Interviews come back only to a probe that asks for them.
+    findConflictingVisits.mockReset().mockImplementation(async ({ includeInterviews }) => (includeInterviews
+      ? [{ id: 'interview:app-1', customer_id: null, conflict_reason: 'interview' }] : []));
+    const scenario = topupScenario(fixtureArgs);
+    await topUpRecurringSeriesLocked(scenario.conn, 10, { horizonDays: 14 });
+    expect(scenario.inserted[0]).toMatchObject({ window_start: null, recurring_dispatch_due_date: scenario.inserted[0].scheduled_date });
   });
 
   test('gate on: the hand-off probe carries the technician the insert uses, not the parent row\'s', async () => {
     process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
     findConflictingVisits.mockReset()
-      .mockResolvedValueOnce([{ id: 'occupied-1', customer_id: 77 }])
       .mockResolvedValueOnce([{ id: 'occupied-1', customer_id: 77 }])
       .mockResolvedValue([]);
     // The parent's technician cannot take the visit (no assignable row), so
@@ -1397,15 +1405,12 @@ describe('topUpRecurringSeriesLocked — a taken hour hands the visit off withou
     const scenario = topupScenario({ ...fixtureArgs, parentOverrides: { ...fixtureArgs.parentOverrides, technician_id: 'tech-gone' } });
     await topUpRecurringSeriesLocked(scenario.conn, 10, { horizonDays: 14 });
     expect(scenario.inserted[0].technician_id).toBeNull();
-    expect(findConflictingVisits.mock.calls[1][0].technicianId).toBeUndefined();
+    expect(findConflictingVisits.mock.calls[0][0].technicianId).toBeUndefined();
   });
 
   test('gate on: the insert reuses the technician the hand-off probe read (one lookup, Codex #6476 r1)', async () => {
     process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
-    findConflictingVisits.mockReset()
-      .mockResolvedValueOnce([{ id: 'occupied-1', customer_id: 77 }])
-      .mockResolvedValueOnce([])
-      .mockResolvedValue([]);
+    findConflictingVisits.mockReset().mockResolvedValue([]);
     // The technician is free at the probe; an absence lands right after it.
     let absenceReads = 0;
     const otherTable = ({ table, op }) => {
@@ -1415,10 +1420,10 @@ describe('topUpRecurringSeriesLocked — a taken hour hands the visit off withou
     };
     const scenario = topupScenario({ ...fixtureArgs, parentOverrides: { ...fixtureArgs.parentOverrides, technician_id: 'tech-1' }, otherTable });
     await topUpRecurringSeriesLocked(scenario.conn, 10, { horizonDays: 14 });
-    expect(findConflictingVisits.mock.calls[1][0]).toMatchObject({ windowStart: '09:00' });
+    expect(findConflictingVisits.mock.calls[0][0]).toMatchObject({ windowStart: '09:00', technicianId: 'tech-1' });
     // The probed date keeps the technician its probe read; a second lookup
     // would have seen the absence and inserted it unassigned. The next date
-    // is read on its own (no clash, no probe) and sees the absence.
+    // is read once too, and sees the absence.
     expect(scenario.inserted[0]).toMatchObject({ technician_id: 'tech-1', window_start: '09:00' });
     expect(scenario.inserted.length).toBeGreaterThan(1);
     expect(scenario.inserted[1].technician_id).toBeNull();

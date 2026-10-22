@@ -20399,26 +20399,26 @@ async function walkExtensionCandidates(ctx) {
     // series can lose most of a year's candidates to one recurring
     // conflict. Insert on the cadence date and log the overlap instead.
     if (opts.overlapAdvisoryOnly) {
-      if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) {
-        // Taken hour (GATE_PLAN_TAKEN_HOUR_HANDOFF; owner 2026-10-22, audit
-        // D4): another customer's live visit holds the plan's hour, so the
-        // visit goes in on the cadence date WITHOUT a time and auto-dispatch
-        // places it (scheduling/plan-taken-hour.js), instead of on top of it.
+      // Taken hour (GATE_PLAN_TAKEN_HOUR_HANDOFF; owner 2026-10-22, audit
+      // D4): when another stop holds the plan's hour (the night tool's own
+      // rule, scheduling/plan-taken-hour.js — booked interviews included, so
+      // it runs on every candidate, not only after the advisory probe below
+      // finds a visit), the visit goes in on the cadence date WITHOUT a time
+      // and auto-dispatch places it, instead of on top of it. The probe
+      // carries the technician the insert will use on this date (the
+      // template tech, or none when that tech cannot take it:
+      // assignableRecurringTemplateTechnicianId), read once and reused by the
+      // insert (Codex #6476 r1); the place is the parent's.
+      if (planTakenHour.handoffEnabled()) {
+        technicianId = await assignableRecurringTemplateTechnicianId(conn, parent, candidate);
+        handOff = await planTakenHour.takenHourHandoff(conn, { ...clashProbeTemplate, technician_id: technicianId }, { date: candidate, placeId: parentId });
+      }
+      if (handOff) {
+        logger.info(`[recurring-topup] parent=${parentId} candidate ${candidate}: the plan's hour is taken — inserting without a time for auto-dispatch to place`);
+      } else if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) {
         // Gate off, too near, or only the customer's own stop at the same
         // place: as before.
-        // The hand-off probe carries the technician the insert will use on
-        // this date (the template tech, or none when that tech cannot take
-        // it: assignableRecurringTemplateTechnicianId), read once and reused
-        // by the insert (Codex #6476 r1); the place is the parent's.
-        if (planTakenHour.handoffEnabled()) {
-          technicianId = await assignableRecurringTemplateTechnicianId(conn, parent, candidate);
-          handOff = await planTakenHour.takenHourHandoff(conn, { ...clashProbeTemplate, technician_id: technicianId }, { date: candidate, placeId: parentId });
-        }
-        if (handOff) {
-          logger.info(`[recurring-topup] parent=${parentId} candidate ${candidate}: the plan's hour is taken — inserting without a time for auto-dispatch to place`);
-        } else {
-          logger.warn(`[recurring-topup] parent=${parentId} candidate ${candidate} overlaps an existing visit on the calendar — inserting anyway (advisory only, same posture every other admin write already takes)`);
-        }
+        logger.warn(`[recurring-topup] parent=${parentId} candidate ${candidate} overlaps an existing visit on the calendar — inserting anyway (advisory only, same posture every other admin write already takes)`);
       }
     } else if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) {
       attempt++; continue;
