@@ -404,6 +404,48 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect((await bidRow(out.bidId)).group_key.length).toBeLessThan(400);
     });
 
+    test('old mail the backfill attaches to a live bid changes no date state', async () => {
+      const first = await storeEmail();
+      const { bidId } = await service.ingestEmail(first);
+      await mockPg('bid_opportunities').where({ id: bidId }).update({ due_confirmed: true });
+      raiseAdminAlert.mockClear();
+      await service.ingestEmail(await storeEmail({ gmail_thread_id: first.gmail_thread_id, subject: 'Addendum 1', body_text: BC_BODY('Sample Ridge Residences', 'October 30, 2026'), received_at: new Date(NOW.getTime() - 90 * DAY) }), { historical: true });
+      expect(await bidRow(bidId)).toMatchObject({ needs_date_confirmation: false, due_confirmed: true, historical: false });
+      expect(raiseAdminAlert).not.toHaveBeenCalled();
+    });
+
+    test('a date changed and changed back gets its reminder again', async () => {
+      const { bidId } = await service.ingestEmail(await storeEmail({ body_text: 'x', gmail_thread_id: `t-${randomUUID()}`, subject: `RFP ${randomUUID()}` }));
+      const dateA = new Date(NOW.getTime() + 6 * DAY);
+      await mockPg('bid_opportunities').where({ id: bidId }).update({ due_at: dateA, due_confirmed: true });
+      raiseAdminAlert.mockReset();
+      // A real row per ring, so the second ring finds the first one auto-closed.
+      raiseAdminAlert.mockImplementation(async (_category, spec, opts) => {
+        composeAdminAlert(spec);
+        await mockPg('notifications').insert({ recipient_type: 'admin', category: 'lead', title: 't', body: 'b', metadata: JSON.stringify({ dedupeKey: opts.dedupeKey }) });
+        return { id: randomUUID(), deduped: false };
+      });
+      expect(await service.sendDueReminders({ now: NOW })).toBe(1);
+      // The operator moves the date to B (closing A's reminder), then back to A.
+      const iso = (d) => d.toISOString();
+      const etWall = (d) => new Date(d.getTime() - 4 * 60 * 60000).toISOString().slice(0, 16); // EDT in October
+      const dateB = new Date(NOW.getTime() + 5 * DAY);
+      expect((await call('PATCH', `/${bidId}`, { due_at: etWall(dateB), expected_updated_at: await version(bidId) })).status).toBe(200);
+      expect((await call('PATCH', `/${bidId}`, { due_at: etWall(dateA), expected_updated_at: await version(bidId) })).status).toBe(200);
+      expect(await service.sendDueReminders({ now: NOW })).toBe(1);
+      const keys = raiseAdminAlert.mock.calls.map(([, , opts]) => opts.dedupeKey);
+      expect(keys).toHaveLength(2);
+      expect(keys[1]).toBe(`${keys[0].replace(/:r\d+$/, '')}:r1`);
+      expect(iso((await bidRow(bidId)).due_at)).toBe(iso(new Date(Math.floor(dateA.getTime() / 60000) * 60000)));
+    });
+
+    test('a stranger using a GC display name does not attach an addendum to its bid', async () => {
+      const { bidId } = await service.ingestEmail(await storeEmail({ from_address: 'bids@fixture-gc.example', from_name: 'Fixture Build Co', subject: 'RFP: Sample Clinic pest control', body_text: 'x' }));
+      const spoof = await service.ingestEmail(await storeEmail({ from_address: 'someone@elsewhere.example', from_name: 'Fixture Build Co', subject: 'Addendum: RFP: Sample Clinic pest control', body_text: 'x' }));
+      expect(spoof.bidId).not.toBe(bidId);
+      expect(await bidRow(bidId)).toMatchObject({ needs_date_confirmation: false });
+    });
+
     test('reminded bids do not fill the candidate list', async () => {
       const { bidId } = await service.ingestEmail(await storeEmail({ body_text: 'x', gmail_thread_id: `t-${randomUUID()}`, subject: `RFP ${randomUUID()}` }));
       await mockPg('bid_opportunities').where({ id: bidId }).update({ due_at: new Date(NOW.getTime() + 6 * DAY), due_confirmed: true, reminder_7d_sent_at: NOW });

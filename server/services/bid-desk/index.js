@@ -113,6 +113,13 @@ async function ingestEmail(email, { historical = false, manual = false } = {}) {
       const live = promote ? { ...existing, historical: false } : existing;
       const { patch, notifyAddendum } = attachPatch(live, parsed, kind);
       if (promote) patch.historical = false;
+      // The backfill attaching OLD mail to a live bid records it but changes no date state: an old invite or
+      // addendum must not flag a live bid (and pause its reminders) without anyone being told.
+      if (historical && !existing.historical) {
+        delete patch.due_at;
+        delete patch.due_source_line;
+        delete patch.needs_date_confirmation;
+      }
       const open = OPEN_STATUSES.includes(live.status);
       let alertKind = null;
       if (!quiet && notifyAddendum) alertKind = 'addendum';
@@ -313,6 +320,20 @@ async function runBidDeskTick({ now = new Date(), limit = BATCH_LIMIT } = {}) {
 
 // ---------- reminders ----------
 
+/**
+ * The reminder's dedupe key. A date that comes back after a change (A, then B, then A again) finds its old reminder
+ * auto-closed under the same key, and the forever dedupe would swallow the new one: each closed earlier episode
+ * gives the next one its own suffix.
+ */
+async function reminderKey(trx, bid, window) {
+  const base = `bid-desk:remind:${bid.id}:${window}:${new Date(bid.due_at).toISOString()}`;
+  const rows = await trx('notifications').where({ recipient_type: 'admin' })
+    .whereRaw("(metadata->>'dedupeKey' = ? OR starts_with(metadata->>'dedupeKey', ?))", [base, `${base}:r`])
+    .select(trx.raw("metadata->>'dedupeKey' AS key"), trx.raw("metadata->>'autoCleared' AS cleared"));
+  if (!rows.length || rows.some((row) => row.cleared !== 'true')) return base;
+  return `${base}:r${rows.length}`;
+}
+
 /** One reminder per bid per window, only for a confirmed due date on an open, non-historical bid. */
 async function sendDueReminders({ now = new Date() } = {}) {
   if (!bidDeskLive()) return 0;
@@ -336,7 +357,7 @@ async function sendDueReminders({ now = new Date() } = {}) {
         const window = reminderDue(bid, now);
         if (!window) return false;
         // The due date is in the key: a changed date (PATCH clears the stamps) gets its own reminders.
-        await alerts.raise(alerts.reminderSpec(bid, window, now), `bid-desk:remind:${bid.id}:${window}:${new Date(bid.due_at).toISOString()}`, trx);
+        await alerts.raise(alerts.reminderSpec(bid, window, now), await reminderKey(trx, bid, window), trx);
         // Inside 2 days the 7-day reminder is moot: stamp both so it can never fire late.
         await trx('bid_opportunities').where({ id }).update({
           reminder_2d_sent_at: window === '2d' ? trx.fn.now() : bid.reminder_2d_sent_at,

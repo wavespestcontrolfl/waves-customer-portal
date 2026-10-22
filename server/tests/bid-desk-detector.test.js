@@ -279,3 +279,19 @@ describe('parseDateET: AM/PM in any case', () => {
   });
 });
 
+describe('grouping keys stay bounded and distinct', () => {
+  test('two long project names that share a long head get different keys', () => {
+    const head = 'Sample Regional Facilities Improvement Program '.repeat(6);
+    const one = parseBidEmail(email({ from_address: 'bids@sample-gc.example', subject: `RFP ${head} Phase One`, body_text: 'x' }));
+    const two = parseBidEmail(email({ from_address: 'bids@sample-gc.example', subject: `RFP ${head} Phase Two`, body_text: 'x' }));
+    expect(one.group_key).not.toBe(two.group_key);
+    expect(one.group_key.length).toBeLessThan(400);
+  });
+
+  test('outside a provider template the sender org is the mail domain, not the display name', () => {
+    const real = parseBidEmail(email({ from_address: 'bids@fixture-gc.example', from_name: 'Fixture Build Co', subject: 'RFP: Sample Clinic', body_text: 'x' }));
+    const spoof = parseBidEmail(email({ from_address: 'x@elsewhere.example', from_name: 'Fixture Build Co', subject: 'RFP: Sample Clinic', body_text: 'x' }));
+    expect(real.group_key).not.toBe(spoof.group_key);
+  });
+});
+

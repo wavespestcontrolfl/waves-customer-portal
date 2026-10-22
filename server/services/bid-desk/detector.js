@@ -38,6 +38,14 @@ const NUMERIC_DATE = new RegExp(`\\b(\\d{1,2})/(\\d{1,2})/(\\d{4})\\b${TIME_TAIL
 
 const pad = (n) => String(n).padStart(2, '0');
 const KEY_PART_MAX = 160;
+// A long key part keeps a readable head plus a hash of the WHOLE part, so two long names that share a head stay
+// two keys and the indexed key stays far below PostgreSQL's B-tree entry limit.
+function keyPart(text) {
+  const value = String(text || '');
+  if (value.length <= KEY_PART_MAX) return value;
+  const hash = require('crypto').createHash('sha256').update(value).digest('hex').slice(0, 16);
+  return `${value.slice(0, KEY_PART_MAX - 18)}~${hash}`;
+}
 
 // "Friday, September 25, 2026 at 12:00 pm" -> { at: Date, hasTime }. null when no complete, real date is in the text.
 function parseDateET(text, { defaultTime = '23:59' } = {}) {
@@ -264,9 +272,11 @@ function subjectForGrouping(subject) {
     .replace(/\breminder\s*[:\-–]?/ig, ' ');
 }
 
+// The sender org that groups mail across threads. The GC name is trusted only from a provider template (the
+// template is read only when the sender is the provider's own domain); otherwise the sender's mail DOMAIN, never the
+// From display name, which anyone can set ("Fixture Build Co" <x@elsewhere.example> must not join that GC's bid).
 function senderOrg(email, gc) {
-  const named = gc || String(email.from_name || '').replace(/\s+via\s+.*$/i, '').replace(/["']/g, '').trim();
-  return normalizeTitle(named || domainOf(email.from_address));
+  return normalizeTitle(gc || domainOf(email.from_address));
 }
 
 /**
@@ -309,9 +319,9 @@ function parseBidEmail(email = {}) {
     // join the project's only bid.
     // Each part is capped so the indexed key stays far below PostgreSQL's B-tree entry limit; the full names stay
     // in their own columns.
-    group_base: org && groupTitle ? `${org.slice(0, KEY_PART_MAX)}|${groupTitle.slice(0, KEY_PART_MAX)}` : null,
+    group_base: org && groupTitle ? `${keyPart(org)}|${keyPart(groupTitle)}` : null,
     group_key: org && groupTitle
-      ? `${org.slice(0, KEY_PART_MAX)}|${groupTitle.slice(0, KEY_PART_MAX)}${fields.package_name ? `#${normalizeTitle(fields.package_name).slice(0, KEY_PART_MAX)}` : ''}` : null,
+      ? `${keyPart(org)}|${keyPart(groupTitle)}${fields.package_name ? `#${keyPart(normalizeTitle(fields.package_name))}` : ''}` : null,
   };
 }
 
