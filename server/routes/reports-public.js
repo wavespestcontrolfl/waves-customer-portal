@@ -37,7 +37,6 @@ const { storedRevisionMatches, writeOrRefreshCtaRequest } = require('../services
 
 const { buildReportV1Data, attachLawnWateringCloseOut, stripLiveOnlyScheduleFields, stripLiveOnlyReportProductCopy, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectApplicatorTechnician, resolveProjectReportPreviewFields, completedProtocolActionLabels, completedProtocolActionEntries } = require('../services/service-report/report-data');
 const { applyReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
-const webShareService = require('../services/service-report/web-share');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
 // before it reaches a query (#3168).
@@ -333,34 +332,16 @@ async function reportAskBudgetFor(service, req, deps = {}) {
 // suppression DB read) ahead of both this and the limiter, and a param-gate
 // 404 would then go out without these headers.
 const REPORT_ASK_PATH_RE = /^\/(?:project\/)?[^/]+\/ask\/?$/i;
-// The lawn card's photo (GATE_REPORT_WEB_SHARE) carries the same headers on every outcome, 404 and 429 included.
-// ANY token segment matches (a malformed one too), so no probe of the path can skip the headers or the guard below.
-const REPORT_SHARE_PHOTO_PATH_RE = /^\/([^/]+)\/share-photo\/?$/i;
-const REPORT_SHARE_PHOTO_TOKEN_RE = /^[a-f0-9]{32}$/i;
 function reportsAskPrivacyHeaders(req, res, next) {
-  const path = req.path || '';
-  if (REPORT_ASK_PATH_RE.test(path) || REPORT_SHARE_PHOTO_PATH_RE.test(path)) {
+  if (REPORT_ASK_PATH_RE.test(req.path || '')) {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Robots-Tag', 'noindex, nofollow');
   }
   next();
 }
-// Dark lawn-card photo (GATE_REPORT_WEB_SHARE): a generic 404 BEFORE every limiter (the global /api one,
-// reportLimiter, sharePhotoLimiter) and before the token param read, so a dark probe spends no budget and
-// reads no row. GET and HEAD, any token segment. While live, a malformed token (not 32 hex) gets the same
-// 404 here, so it spends no limiter budget and reads no row either. Mounted app-level too (server/index.js),
-// like the estimate map-image guard.
-function reportSharePhotoPreGuard(req, res, next) {
-  const match = (req.method === 'GET' || req.method === 'HEAD') ? REPORT_SHARE_PHOTO_PATH_RE.exec(req.path || '') : null;
-  if (match && (!webShareService.webShareEnabled() || !REPORT_SHARE_PHOTO_TOKEN_RE.test(match[1]))) {
-    return res.status(404).json({ error: 'Report not found' });
-  }
-  return next();
-}
 // Also mounted app-level ahead of the global /api limiter and JSON parser
 // (server/index.js); kept here so the router is self-contained.
 router.use(reportsAskPrivacyHeaders);
-router.use(reportSharePhotoPreGuard);
 
 router.use(reportLimiter);
 
@@ -1361,12 +1342,6 @@ router.get('/project/:token/fdacs-pdf', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Without the cross-sell gate the only referral card that can ask is the lawn card (GATE_REPORT_WEB_SHARE):
-// both gates live AND this visit is one /data offers the card for. Used by the referral tap and its event.
-async function referralViaLawnCard(service) {
-  return webShareService.webShareEnabled() && Boolean(await webShareService.resolveShareEligibility(service));
-}
-
 // POST /api/reports/:token/events — token-scoped report interaction events.
 router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '')) {
@@ -1375,7 +1350,7 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
   try {
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
-      .select('id', 'customer_id', 'scheduled_service_id', 'service_type', 'service_line', 'report_template_version', 'structured_notes', 'is_callback')
+      .select('id', 'customer_id', 'report_template_version', 'structured_notes')
       .first();
     if (!service || service.report_template_version !== 'service_report_v1') {
       return res.status(404).json({ error: 'Report not found' });
@@ -1395,10 +1370,7 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
     // a token holder must not mint events/notifications for a dark gate).
     // Same copy as an unknown event — the gate state is not probeable.
     if ((eventName === 'cross_sell_requested' || eventName === 'referral_cta_clicked')
-      && !require('../config/feature-gates').isEnabled('reportCrossSell')
-      // The lawn card's tap (GATE_REPORT_WEB_SHARE) records the same referral click, for a visit
-      // /data offers the card for (the same eligibility function) and no other.
-      && !(eventName === 'referral_cta_clicked' && await referralViaLawnCard(service))) {
+      && !require('../config/feature-gates').isEnabled('reportCrossSell')) {
       return res.status(400).json({ error: 'Unknown report event' });
     }
     if (!ALLOWED_REPORT_EVENT_CHANNELS.has(channel)) {
@@ -1783,7 +1755,7 @@ router.post('/:token/referral-link', reportEventLimiter, crossSellActionLimiter,
   try {
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
-      .select('id', 'customer_id', 'scheduled_service_id', 'service_type', 'service_line', 'report_template_version', 'structured_notes', 'is_callback')
+      .select('id', 'customer_id', 'report_template_version', 'structured_notes', 'is_callback')
       .first();
     if (!service || service.report_template_version !== 'service_report_v1' || !service.customer_id) {
       return res.status(404).json({ error: 'Report not found' });
@@ -1797,10 +1769,7 @@ router.post('/:token/referral-link', reportEventLimiter, crossSellActionLimiter,
     if (reserviceReportCopyGateOn() && service.is_callback === true) {
       return res.status(404).json({ error: 'Report not found' });
     }
-    // The lawn card (GATE_REPORT_WEB_SHARE) takes the same tap without the cross-sell gate.
-    // Without the cross-sell gate the only card that can ask is the lawn card, so the visit must be one
-    // /data offers it for: the same eligibility function, re-run before any promoter enrollment.
-    if (!require('../config/feature-gates').isEnabled('reportCrossSell') && !(await referralViaLawnCard(service))) {
+    if (!require('../config/feature-gates').isEnabled('reportCrossSell')) {
       return res.status(404).json({ error: 'Report not found' });
     }
     // Enrollment + share copy live in ONE composer shared with the estimate
@@ -1822,50 +1791,6 @@ router.post('/:token/referral-link', reportEventLimiter, crossSellActionLimiter,
     // phone number in the logs (AGENTS.md PII-in-logs rule).
     logger.warn(`[reports-public] referral-link failed (code=${err?.code || 'none'}, token=${req.params.token.slice(0, 8)}…)`);
     return res.status(503).json({ error: 'Referral link unavailable — please try again' });
-  }
-});
-
-// Token-keyed cap for the lawn card's photo read (an S3 read plus a resize per hit).
-const sharePhotoLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => `sharephoto:${req.params.token || 'anon'}`,
-  message: { error: 'Too many requests. Please try again in a minute.' },
-});
-
-// GET /api/reports/:token/share-photo — the front-yard photo for the shareable lawn card
-// (GATE_REPORT_WEB_SHARE). Same-origin on purpose: the photo bucket sets no CORS headers, so a
-// browser canvas could not export an image that drew a signed S3 URL. Resized, upright, with the
-// file metadata (GPS) removed. Dark gate, unknown token, suppressed or callback report, an ineligible
-// visit (not lawn, score under 85, no front photo) or an assessment that is not this visit's = the same generic 404.
-router.get('/:token/share-photo', sharePhotoLimiter, async (req, res, next) => {
-  const assessmentId = typeof req.query.assessment === 'string' ? req.query.assessment.trim() : '';
-  if (!FULL_TOKEN_RE.test(req.params.token || '') || !webShareService.webShareEnabled() || !assessmentId || assessmentId.length > 64) {
-    return res.status(404).json({ error: 'Report not found' });
-  }
-  try {
-    const service = await db('service_records')
-      .where({ report_view_token: req.params.token })
-      .select('id', 'customer_id', 'scheduled_service_id', 'service_type', 'service_line', 'report_template_version', 'structured_notes', 'is_callback')
-      .first();
-    if (!service || service.report_template_version !== 'service_report_v1' || suppressedTypedReport(service)) {
-      return res.status(404).json({ error: 'Report not found' });
-    }
-    // The assessment /data scored must be this visit's own, and the visit must be eligible (same rule as the offer).
-    const eligible = await webShareService.resolveShareEligibility(service, { requestedAssessmentId: assessmentId });
-    if (!eligible) return res.status(404).json({ error: 'Report not found' });
-    const photo = eligible.photo;
-    const bytes = await webShareService.readSharePhoto(photo);
-    res.setHeader('Content-Type', 'image/jpeg');
-    res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('X-Robots-Tag', 'noindex');
-    res.setHeader('Referrer-Policy', 'no-referrer');
-    return res.send(bytes);
-  } catch (err) {
-    logger.warn(`[reports-public] share-photo failed (code=${err?.code || 'none'})`);
-    return next(err);
   }
 });
 
@@ -2779,8 +2704,6 @@ router.get('/:token/data', async (req, res, next) => {
       // glass look. Only beside simpleWebReport (the page reads both); a partial
       // gates module reads as off. Absent key = byte-identical payload.
       if (glassWebLive(simpleWeb, reportGates)) v1Data.glassWeb = true;
-      // GATE_REPORT_WEB_SHARE (owner 2026-10-20, idea 8): the shareable lawn card offer, live simple-web views only.
-      if (simpleWeb) await webShareService.attachWebShare(v1Data, service, reportGates);
       // GATE_REPORT_WEB_PROGRAM / GATE_REPORT_WEB_LIVE_CHIP (owner 2026-10-20): live simple-web view only, each its own
       // key. Absent key = byte-identical payload; the PDF build never reaches here.
       if (programLive) await attachProgramPromise(v1Data, service);
@@ -2975,7 +2898,6 @@ module.exports = router;
 module.exports.ensureReportToken = ensureReportToken;
 module.exports.reportLimiter = reportLimiter;
 module.exports.reportsAskPrivacyHeaders = reportsAskPrivacyHeaders;
-module.exports.reportSharePhotoPreGuard = reportSharePhotoPreGuard;
 module.exports.storedRevisionMatches = storedRevisionMatches;
 module.exports.suppressedTypedReport = suppressedTypedReport;
 module.exports.buildServiceReportV1ResponseData = buildServiceReportV1ResponseData;
