@@ -1,12 +1,13 @@
 /**
- * GATE_REVIEW_ASK_AFTER_REPORT on the combined-visit packet path: the ask is
- * anchored to the packet's own completion_sms effect. Only a 'sent' text
- * anchors it; a suppressed or missing one keeps the smart window (no anchor).
+ * GATE_REVIEW_ASK_AFTER_REPORT on the combined-visit packet path: the enrollment
+ * passes the anchor review-request reads from the packet's own completion_sms
+ * effect (reportTextAnchorForVisit, covered in review-ask-after-report.test.js).
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/review-request', () => ({
   enrollPostService: jest.fn(async () => ({ started: true })),
   completionReviewDelay: jest.fn(() => undefined),
+  reportTextAnchorForVisit: jest.fn(async () => null),
 }));
 jest.mock('../services/visit-completion-summary', () => ({ resumeVisitReviewOutreach: jest.fn(async () => null) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -38,37 +39,22 @@ function fakeDatabase({ smsEffect, legs }) {
   };
 }
 
-const ENV = 'GATE_REVIEW_ASK_AFTER_REPORT';
-let saved;
-beforeEach(() => { saved = process.env[ENV]; ReviewService.enrollPostService.mockClear(); });
-afterEach(() => { if (saved === undefined) delete process.env[ENV]; else process.env[ENV] = saved; });
+beforeEach(() => { ReviewService.enrollPostService.mockClear(); ReviewService.reportTextAnchorForVisit.mockClear(); });
 
 const sentLegs = [{ status: 'sent' }, { status: 'sent' }];
 
-test('gate on, summary text sent: the enrollment carries a sent anchor at the effect send time', async () => {
-  process.env[ENV] = 'true';
-  const sentAt = new Date('2026-10-20T13:05:00.000Z');
-  const out = await enrollVisitCompletionReview('pk-1', fakeDatabase({ smsEffect: { status: 'sent', sent_at: sentAt }, legs: sentLegs }));
+test('the enrollment carries the visit anchor, read with the same database handle', async () => {
+  const anchor = { status: 'sent', at: new Date('2026-10-20T13:05:00.000Z') };
+  ReviewService.reportTextAnchorForVisit.mockResolvedValueOnce(anchor);
+  const database = fakeDatabase({ smsEffect: { status: 'sent' }, legs: sentLegs });
+  const out = await enrollVisitCompletionReview('pk-1', database);
   expect(out).toMatchObject({ enrolled: true });
-  expect(ReviewService.enrollPostService).toHaveBeenCalledTimes(1);
-  expect(ReviewService.enrollPostService.mock.calls[0][0].reportTextAnchor).toEqual({ status: 'sent', at: sentAt });
+  expect(ReviewService.reportTextAnchorForVisit).toHaveBeenCalledWith('v-1', database);
+  expect(ReviewService.enrollPostService.mock.calls[0][0].reportTextAnchor).toEqual(anchor);
 });
 
-test.each([
-  ['suppressed', { status: 'suppressed', sent_at: null }],
-  ['missing', null],
-  ['failed', { status: 'failed', sent_at: null }],
-])('gate on, summary text %s: no anchor, so enrollment keeps the smart window', async (_label, smsEffect) => {
-  process.env[ENV] = 'true';
-  await enrollVisitCompletionReview('pk-1', fakeDatabase({ smsEffect, legs: [{ status: 'suppressed' }, { status: 'suppressed' }] }));
+test('no anchor (gate off, or no sent summary text): enrollment keeps the smart window', async () => {
+  await enrollVisitCompletionReview('pk-1', fakeDatabase({ smsEffect: null, legs: sentLegs }));
   expect(ReviewService.enrollPostService).toHaveBeenCalledTimes(1);
-  expect(ReviewService.enrollPostService.mock.calls[0][0]).not.toHaveProperty('reportTextAnchor');
-});
-
-test('gate off: the enrollment arguments are exactly as before (no anchor key, no effect read)', async () => {
-  delete process.env[ENV];
-  const database = jest.fn(fakeDatabase({ smsEffect: { status: 'sent', sent_at: new Date() }, legs: sentLegs }));
-  await enrollVisitCompletionReview('pk-1', database);
-  expect(ReviewService.enrollPostService.mock.calls[0][0]).not.toHaveProperty('reportTextAnchor');
-  expect(database.mock.calls.filter(([t]) => t === 'visit_effects')).toHaveLength(1); // the delivery-legs read only
+  expect(ReviewService.enrollPostService.mock.calls[0][0].reportTextAnchor).toBeNull();
 });

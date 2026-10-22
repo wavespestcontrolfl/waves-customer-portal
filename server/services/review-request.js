@@ -761,7 +761,7 @@ const REVIEW_AFTER_REPORT_TICK_MINUTES = [0, 5, 10, 14, 15, 20, 25, 30, 35, 40, 
 function cadenceTickMinutes(fast = false) {
   return fast && reviewAskAfterReportOn() ? REVIEW_AFTER_REPORT_TICK_MINUTES : REVIEW_CADENCE_TICK_MINUTES;
 }
-// The rows the */5 tick runs (processReviewSequences({ afterReportOnly })):
+// The rows the */5 tick runs (processAfterReportSequences):
 // an untouched Day-0 post-service ask whose plan came from the report anchor.
 const AFTER_REPORT_FAST_REASONS = ["after_report", "report_pending"];
 function isAfterReportFastRow(r) {
@@ -2038,6 +2038,21 @@ const ReviewService = {
       return reportTextAnchorFromNotes(structuredNotesObject(row?.structured_notes));
     } catch (err) {
       logger.warn(`[review] report anchor lookup failed (serviceRecordId=${serviceRecordId}): ${err.message}`);
+      return null;
+    }
+  },
+
+  // The same anchor for a combined visit (visit-completion-packets): its
+  // completion_sms effect. Enrollment there runs only once the delivery legs
+  // are sent or suppressed, so a 'sent' effect anchors the ask to that text; a
+  // suppressed or missing one sends nothing confirmable (smart window).
+  async reportTextAnchorForVisit(visitId, database = db) {
+    if (!visitId || !reviewAskAfterReportOn()) return null;
+    try {
+      const effect = await database("visit_effects").where({ visit_id: visitId, effect_type: "completion_sms" }).first("status", "sent_at");
+      return effect?.status === "sent" ? { status: "sent", at: effect.sent_at || new Date() } : null;
+    } catch (err) {
+      logger.warn(`[review] visit report anchor lookup failed (visitId=${visitId}): ${err.message}`);
       return null;
     }
   },
@@ -7490,27 +7505,35 @@ const ReviewService = {
     return { redeemed };
   },
 
-  // afterReportOnly: the GATE_REVIEW_ASK_AFTER_REPORT */5 tick runs only the
-  // after-report Day-0 rows; every other row (and the deferred-enrollment
-  // sweep) stays on the :14/:44 cadence.
-  async processReviewSequences({ afterReportOnly = false } = {}) {
+  // The :14/:44 cadence tick: the deferred-enrollment sweep, then every due row.
+  async processReviewSequences() {
     let redeemed = 0;
-    if (!afterReportOnly) {
-      try {
-        ({ redeemed } = await this._sweepDeferredEnrollments());
-      } catch (err) {
-        logger.error(`[review] deferred-enrollment sweep failed (errType=${err?.name || "Error"})`);
-      }
+    try {
+      ({ redeemed } = await this._sweepDeferredEnrollments());
+    } catch (err) {
+      logger.error(`[review] deferred-enrollment sweep failed (errType=${err?.name || "Error"})`);
     }
-    let dueQuery = db("review_sequences")
+    return this._runDueSequences(this._dueSequencesQuery(), redeemed);
+  },
+
+  // The GATE_REVIEW_ASK_AFTER_REPORT */5 tick: only the after-report Day-0 rows
+  // (isAfterReportFastRow, as SQL); every other row and the sweep stay on the
+  // :14/:44 cadence.
+  async processAfterReportSequences() {
+    const query = this._dueSequencesQuery()
+      .where({ current_step: 0, touches_sent: 0, started_by: "post_service" })
+      .whereIn(db.raw("decision ->> 'reason'"), AFTER_REPORT_FAST_REASONS);
+    return this._runDueSequences(query, 0);
+  },
+
+  _dueSequencesQuery() {
+    return db("review_sequences")
       .where({ status: "active" })
       .whereNotNull("next_run_at")
       .where("next_run_at", "<=", new Date());
-    if (afterReportOnly) {
-      dueQuery = dueQuery
-        .where({ current_step: 0, touches_sent: 0, started_by: "post_service" })
-        .whereIn(db.raw("decision ->> 'reason'"), AFTER_REPORT_FAST_REASONS);
-    }
+  },
+
+  async _runDueSequences(dueQuery, redeemed) {
     const due = await dueQuery
       .orderBy("next_run_at", "asc")
       .limit(25);

@@ -8019,11 +8019,11 @@ function initScheduledJobs() {
   // preview/dev env with live creds can't text/email real customers.
   // Suppression and per-customer prefs still apply at the send site.
   // =========================================================================
-  const runReviewSequencesTick = async (opts) => {
+  const runReviewSequencesTick = async (method) => {
     try {
       await runExclusive('review-sequences', async () => {
         const ReviewService = require('./review-request');
-        const result = await ReviewService.processReviewSequences(opts);
+        const result = await ReviewService[method]();
         if (result.sent > 0 || result.completed > 0) {
           logger.info(`Review sequences: ${result.sent} sent, ${result.completed} completed, ${result.stopped} stopped`);
         }
@@ -8034,14 +8034,14 @@ function initScheduledJobs() {
   };
   cron.schedule('14,44 * * * *', async () => {
     if (!isEnabled('reviewSequences')) return;
-    await runReviewSequencesTick();
+    await runReviewSequencesTick('processReviewSequences');
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
   // EVERY 5 MIN — the same review-sequences job, GATE_REVIEW_ASK_AFTER_REPORT
   // only (owner 2026-10-22: the Day-0 ask goes about 10 minutes after the
   // report text, so a +10 minute touch must land within ~15 minutes). Runs
-  // only the after-report Day-0 rows (afterReportOnly). A no-op
+  // only the after-report Day-0 rows (processAfterReportSequences). A no-op
   // while the gate (read at call time) or GATE_REVIEW_SEQUENCES is off. Same
   // `review-sequences` lock as the :14/:44 job, so ticks never overlap.
   // =========================================================================
@@ -8049,7 +8049,7 @@ function initScheduledJobs() {
     if (!isEnabled('reviewSequences')) return;
     if (!require('../config/feature-gates').reviewAskAfterReportLive()) return;
     // Only the after-report Day-0 rows; everything else keeps :14/:44.
-    await runReviewSequencesTick({ afterReportOnly: true });
+    await runReviewSequencesTick('processAfterReportSequences');
   }, { timezone: 'America/New_York' });
 
   // =========================================================================

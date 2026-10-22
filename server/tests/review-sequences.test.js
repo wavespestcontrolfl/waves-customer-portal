@@ -8393,7 +8393,7 @@ describe('GATE_REVIEW_ASK_AFTER_REPORT — Day-0 ask 10 minutes after the report
       const scheduler = require('fs').readFileSync(require('path').join(__dirname, '../services/scheduler.js'), 'utf8');
       expect(scheduler).toContain(`cron.schedule('${REVIEW_CADENCE_TICK_MINUTES.join(',')} * * * *'`);
       expect(scheduler).toMatch(/cron\.schedule\('\*\/5 \* \* \* \*', async \(\) => \{\s*if \(!isEnabled\('reviewSequences'\)\) return;\s*if \(!require\('\.\.\/config\/feature-gates'\)\.reviewAskAfterReportLive\(\)\) return;/);
-      expect(scheduler).toContain('await runReviewSequencesTick({ afterReportOnly: true });');
+      expect(scheduler).toContain("await runReviewSequencesTick('processAfterReportSequences');");
     });
   });
 });

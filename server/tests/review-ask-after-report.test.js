@@ -119,6 +119,7 @@ describe('the */5 review-sequences registration in scheduler.js', () => {
 
   beforeEach(() => {
     jest.spyOn(ReviewService, 'processReviewSequences').mockResolvedValue({ sent: 0, completed: 0, stopped: 0 });
+    jest.spyOn(ReviewService, 'processAfterReportSequences').mockResolvedValue({ sent: 0, completed: 0, stopped: 0 });
     runExclusive.mockClear();
   });
 
@@ -135,26 +136,28 @@ describe('the */5 review-sequences registration in scheduler.js', () => {
     const { fast } = registrations();
     await fast[1]();
     expect(runExclusive).not.toHaveBeenCalled();
-    expect(ReviewService.processReviewSequences).not.toHaveBeenCalled();
+    expect(ReviewService.processAfterReportSequences).not.toHaveBeenCalled();
   });
 
   test('gate on but cadences off: still a no-op', async () => {
     process.env.GATE_REVIEW_ASK_AFTER_REPORT = 'true';
     const { fast } = registrations();
     await fast[1]();
-    expect(ReviewService.processReviewSequences).not.toHaveBeenCalled();
+    expect(ReviewService.processAfterReportSequences).not.toHaveBeenCalled();
   });
 
-  test('gate on and cadences on: runs the same job under the shared review-sequences lock; the :14/:44 job does too', async () => {
+  test('gate on and cadences on: runs the after-report rows under the shared review-sequences lock; the :14/:44 job runs every row', async () => {
     process.env.GATE_REVIEW_ASK_AFTER_REPORT = 'true';
     process.env.GATE_REVIEW_SEQUENCES = 'true';
     const { main, fast } = registrations();
     await fast[1]();
     expect(runExclusive).toHaveBeenCalledWith('review-sequences', expect.any(Function));
-    expect(ReviewService.processReviewSequences).toHaveBeenCalledTimes(1);
+    expect(ReviewService.processAfterReportSequences).toHaveBeenCalledTimes(1);
+    expect(ReviewService.processReviewSequences).not.toHaveBeenCalled();
     await main[1]();
     expect(runExclusive).toHaveBeenNthCalledWith(2, 'review-sequences', expect.any(Function));
-    expect(ReviewService.processReviewSequences).toHaveBeenCalledTimes(2);
+    expect(ReviewService.processReviewSequences).toHaveBeenCalledTimes(1);
+    expect(ReviewService.processAfterReportSequences).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -190,5 +193,32 @@ describe('the report text anchor (completion enrollment + paid invoice share one
   test('at payment, only a delivered text earns the paid anchor', () => {
     expect(reportTextAnchorFromNotes({ completionSmsStatus: 'sent' }, { atPayment: true })).toMatchObject({ status: 'paid' });
     expect(reportTextAnchorFromNotes({ completionSmsStatus: 'deferred', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z' }, { atPayment: true })).toEqual({ status: 'deferred', at: '2026-10-20T12:00:00.000Z' });
+  });
+});
+
+describe('the combined-visit anchor (reportTextAnchorForVisit)', () => {
+  const ReviewService = require('../services/review-request');
+  const fakeDatabase = (effect) => jest.fn(() => ({ where() { return this; }, first: async () => (effect instanceof Error ? Promise.reject(effect) : effect) }));
+
+  test('gate on, summary text sent: anchors to the effect send time', async () => {
+    process.env.GATE_REVIEW_ASK_AFTER_REPORT = 'true';
+    const sentAt = new Date('2026-10-20T13:05:00.000Z');
+    expect(await ReviewService.reportTextAnchorForVisit('v-1', fakeDatabase({ status: 'sent', sent_at: sentAt }))).toEqual({ status: 'sent', at: sentAt });
+  });
+
+  test.each([
+    ['suppressed', { status: 'suppressed', sent_at: null }],
+    ['missing', null],
+    ['failed', { status: 'failed', sent_at: null }],
+    ['unreadable', new Error('db down')],
+  ])('gate on, summary text %s: no anchor (smart window)', async (_label, effect) => {
+    process.env.GATE_REVIEW_ASK_AFTER_REPORT = 'true';
+    expect(await ReviewService.reportTextAnchorForVisit('v-1', fakeDatabase(effect))).toBeNull();
+  });
+
+  test('gate off: no anchor and no read', async () => {
+    const database = fakeDatabase({ status: 'sent', sent_at: new Date() });
+    expect(await ReviewService.reportTextAnchorForVisit('v-1', database)).toBeNull();
+    expect(database).not.toHaveBeenCalled();
   });
 });
