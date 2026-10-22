@@ -3,7 +3,9 @@ const db = require('../../models/db');
 const gmailClient = require('./gmail-client');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
-const { emailAuthStrictLive } = require('../../config/feature-gates');
+const featureGates = require('../../config/feature-gates');
+// Tolerates a test that partially mocks feature-gates (reader missing = gate off).
+const emailAuthStrictLive = () => typeof featureGates.emailAuthStrictLive === 'function' && featureGates.emailAuthStrictLive();
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-wire');
 // First TEXT block of a Message — a thinking block leads the content on
 // always-thinking models (Opus 5.5, Fable), so content[0] is not the answer.

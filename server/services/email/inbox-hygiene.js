@@ -29,7 +29,9 @@ const psl = require('psl');
 const db = require('../../models/db');
 const logger = require('../logger');
 const gmailClient = require('./gmail-client');
-const { emailAuthStrictLive } = require('../../config/feature-gates');
+const featureGates = require('../../config/feature-gates');
+// Tolerates a test that partially mocks feature-gates (reader missing = gate off).
+const emailAuthStrictLive = () => typeof featureGates.emailAuthStrictLive === 'function' && featureGates.emailAuthStrictLive();
 const { isOperationalDomain, domainFromAddress, normalizeAddress } = require('./spam-blocker');
 
 const QUARANTINE_LABEL = 'Quarantine';
