@@ -87,6 +87,22 @@ describe('the one-voice prompt', () => {
     }
   });
 
+  // Codex #6466 r3: the stacked writer's v4 hard constraint 1 (minus "sweep", 2026-10-09)
+  // carries over, so a HOW IT WORKS line's "crawling invaders" never reaches the report.
+  test('bans the military language the v4 hard constraints banned', () => {
+    for (const word of ['mission', 'tactical', 'deployment', 'fortification', 'fortress', 'sentries', 'invaders', 'infiltration', 'neutralize', 'annihilation', 'defensive perimeter', 'chemical barrier', 'vectors', 'recon', 'staging', 'advancement', 'threat', 'lockdown', 'intercept']) {
+      expect(PEST_REPORT_VOICE_PROMPT).toContain(word);
+    }
+  });
+
+  // Codex #6466 r3: the request body's Service Type is not checked by the server, so the
+  // no-EXPECTATIONS sentence comes from the SERVICE TYPE record the server builds.
+  test('the no-EXPECTATIONS sentence comes from the server SERVICE TYPE record, never the Service Type input', () => {
+    expect(PEST_REPORT_VOICE_PROMPT).toContain('one sentence from the SERVICE TYPE record');
+    expect(PEST_REPORT_VOICE_PROMPT).toContain('never the Service Type input');
+    expect(PEST_REPORT_VOICE_PROMPT).not.toContain('<the Service Type input');
+  });
+
   // noteAbsenceHint tells the writer to follow "OWNER RULES rule 4" under the note.
   test('rule 4 is still the absence rule the note hint names', () => {
     expect(noteAbsenceHint('Customer says no issues inside')).toContain('OWNER RULES rule 4');
