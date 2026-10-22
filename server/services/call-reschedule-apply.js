@@ -1072,6 +1072,16 @@ async function applyCallMakeupMove({ conn, call, procToken = null, procGeneratio
     const proof = typeof prior.metadata === 'string' ? JSON.parse(prior.metadata) : prior.metadata;
     return { outcome: 'noop', reason: 'already_applied', visitId: proof?.scheduled_service_id || null };
   }
+  // A visit this call already booked (an earlier pass, e.g. with the gate
+  // off), live or cancelled by staff, belongs to the booking step's own
+  // guards: it reuses a live row and holds a cancelled one. Moving the missed
+  // visit as well would sit beside that row or undo the staff cancel.
+  const priorCallBooking = (trx, exceptId = null) => {
+    const q = trx('scheduled_services').where({ source_call_log_id: call.id });
+    if (exceptId) q.whereNot({ id: exceptId });
+    return q.first('id');
+  };
+  if (await priorCallBooking(conn)) return { outcome: 'skipped', reason: 'call_already_booked' };
   // A move of THE CANDIDATE made by anyone after the call, other than the
   // missed-appointment check's own customer_noshow row (that row is the
   // EVIDENCE for this move). Scoped to the candidate: a move of an unrelated
@@ -1105,12 +1115,13 @@ async function applyCallMakeupMove({ conn, call, procToken = null, procGeneratio
     if (await markerFor(trx)) throw Object.assign(new Error('This call was already applied'), { code: 'CALL_MAKEUP_ALREADY_APPLIED' });
     const handled = await humanHandledRescheduleCard(trx, call.id);
     const moved = await newerMove(trx, visit.id);
+    const booked = await priorCallBooking(trx, visit.id);
     // Under the visit's own row lock (as applyCallReschedule): a portal
     // request filed meanwhile is either seen here or starts after the move.
     await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('id');
     const portalRequest = await openPortalRequest(trx, settled.customer_id, visit.id);
     const smsOffer = await pendingSmsOffer(trx, settled.customer_id, visit.id, now);
-    if (handled || moved || portalRequest || smsOffer) throw Object.assign(new Error('The request was handled after this call'), { code: 'CALL_MAKEUP_HANDLED' });
+    if (handled || moved || booked || portalRequest || smsOffer) throw Object.assign(new Error('The request was handled after this call'), { code: 'CALL_MAKEUP_HANDLED' });
     const latestCustomer = await trx('customers').where({ id: settled.customer_id }).forShare().first();
     const latestProperties = await trx('customer_properties').where({ customer_id: settled.customer_id, active: true }).forShare().select('*');
     const latestCandidates = await loadMakeupCandidates(trx, settled.customer_id, now);
