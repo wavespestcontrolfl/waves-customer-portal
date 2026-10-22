@@ -1054,13 +1054,53 @@ function confirmationServiceLabel(oneTimeList, estimate, fallbackLabel) {
   return String(specific).replace(/\s+/g, ' ').trim() || String(fallbackLabel || '').trim();
 }
 
-// Earliest scheduled_date among the visits this accept booked ('YYYY-MM-DD'), else null.
-function earliestAcceptedVisitDate(appointments) {
-  const days = (Array.isArray(appointments) ? appointments : [])
+// "Billed after the first visit" is true only when the customer the accept
+// landed on is billed per visit / per application. The accept's recurring-card
+// lane is broader than that: a pinned legacy rodent-only plan enters it while
+// the converter stamps billing_mode 'monthly_membership' (the monthly cron
+// collects dues), and a current monthly member adding a service keeps their
+// mode. The source of truth is the billing lane the accept left on the customer
+// row (billing-lane resolveBillingLane), read after the conversion commits.
+// Fails closed: no customer, a read error or any other lane keeps the generic
+// copy.
+async function resolveCardLaneAfterVisit({ recurringCardLaneActive, treatAsOneTime, customerId }, database = db) {
+  if (recurringCardLaneActive !== true || treatAsOneTime || !customerId) return false;
+  try {
+    const row = await database('customers').where({ id: customerId }).first('billing_mode', 'waveguard_tier', 'monthly_rate');
+    if (!row) return false;
+    const { resolveBillingLane } = require('../services/billing-lane');
+    return ['per_application', 'per_visit'].includes(resolveBillingLane(row).mode);
+  } catch (err) {
+    logger.warn(`[estimate-accept] billing lane read for accept copy failed (customer ${customerId}): ${err.message}`);
+    return false;
+  }
+}
+
+// The first visit this accept leaves on the books: the earliest committed or
+// adopted appointment, else the visit the converter auto-scheduled
+// (standardConversion.firstScheduledServiceId — acceptedAppointmentsToRegister
+// stays empty for it). Returns { firstVisitDate: 'YYYY-MM-DD'|null, firstVisitBooked }.
+// A converter visit whose row cannot be read still counts as booked (no date).
+async function resolveAcceptedFirstVisit({ acceptedAppointments, conversionVisitId }, database = db) {
+  const isDay = (day) => /^\d{4}-\d{2}-\d{2}$/.test(day);
+  const days = (Array.isArray(acceptedAppointments) ? acceptedAppointments : [])
     .map((appt) => dateOnly(appt?.scheduled_date))
-    .filter((day) => /^\d{4}-\d{2}-\d{2}$/.test(day))
+    .filter(isDay)
     .sort();
-  return days[0] || null;
+  if (days[0]) return { firstVisitDate: days[0], firstVisitBooked: true };
+  if (!conversionVisitId) return { firstVisitDate: null, firstVisitBooked: false };
+  try {
+    const row = await database('scheduled_services')
+      .where({ id: conversionVisitId })
+      .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
+      .first('scheduled_date');
+    if (!row) return { firstVisitDate: null, firstVisitBooked: false };
+    const day = dateOnly(row.scheduled_date);
+    return { firstVisitDate: isDay(day) ? day : null, firstVisitBooked: true };
+  } catch (err) {
+    logger.warn(`[estimate-accept] converter visit read for accept copy failed (${conversionVisitId}): ${err.message}`);
+    return { firstVisitDate: null, firstVisitBooked: true };
+  }
 }
 
 function dateOnly(value) {
@@ -16381,8 +16421,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // Card-on-file lane accept with nothing collected at accept (the
         // payable-invoice, payer, credit, prepay and one-time branches all sit
         // ahead of this flag in the builder): bills after the first visit.
-        cardLaneAfterVisit: recurringCardLaneActive === true && !treatAsOneTime,
-        firstVisitDate: earliestAcceptedVisitDate(acceptedAppointmentsToRegister),
+        cardLaneAfterVisit: await resolveCardLaneAfterVisit({
+          recurringCardLaneActive, treatAsOneTime, customerId,
+        }),
+        ...(await resolveAcceptedFirstVisit({
+          acceptedAppointments: acceptedAppointmentsToRegister,
+          conversionVisitId: txResult.standardConversion?.firstScheduledServiceId || null,
+        })),
       });
       // bell: true \u2014 accepted estimates must ring the admin bell even under
       // GATE_ADMIN_BELL_POLICY (category 'estimate' is otherwise silenced).
@@ -22361,6 +22406,8 @@ function buildAcceptNotificationCopy({
   cardLaneAfterVisit = false,
   // 'YYYY-MM-DD' of the first booked visit when this accept booked one.
   firstVisitDate = null,
+  // A first visit exists (committed, adopted or converter-scheduled) even if its date is unknown.
+  firstVisitBooked = false,
 } = {}) {
   // Sign-before-pay (codex round-3 P2 on #4819): the durable notifications
   // must send the customer to the signature, never read as "approved,
@@ -22710,7 +22757,7 @@ function buildAcceptNotificationCopy({
   // is collected by the visit's completion. Only an unbooked first visit is work.
   if (cardLaneAfterVisit) {
     const visitDay = firstVisitDateLabel(firstVisitDate);
-    const booked = !!(reservationCommitted || visitDay);
+    const booked = !!(reservationCommitted || firstVisitBooked || visitDay);
     return {
       adminTitle: `Estimate accepted: ${customerName}`,
       adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Billed after the first visit; nothing is charged today.${visitDay ? ` First visit: ${visitDay}.` : (booked ? '' : ' No first visit is booked yet.')}`,
@@ -31670,6 +31717,8 @@ module.exports.resolveProspectiveOwnerId = resolveProspectiveOwnerId;
 module.exports.collectServiceCategories = collectServiceCategories;
 module.exports.hasOnlyLawnCareServiceMix = hasOnlyLawnCareServiceMix;
 module.exports.isLawnCareOneTimeItem = isLawnCareOneTimeItem;
+module.exports.resolveCardLaneAfterVisit = resolveCardLaneAfterVisit;
+module.exports.resolveAcceptedFirstVisit = resolveAcceptedFirstVisit;
 module.exports.oneTimeItemsForRender = oneTimeItemsForRender;
 module.exports.oneTimeItemFamilyKeys = oneTimeItemFamilyKeys;
 module.exports.preservedOneTimeAddOnRowsFromBreakdown = preservedOneTimeAddOnRowsFromBreakdown;
