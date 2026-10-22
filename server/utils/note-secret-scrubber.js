@@ -347,6 +347,26 @@ function quotedValueEnd(text, valueStart, opener) {
 const openerOf = value => (value.match(/^\\?["']/) || [''])[0];
 const isDanglingQuote = value => Boolean(openerOf(value)) && !COMPLETE_QUOTED_RE.test(value);
 
+// A YAML literal or folded block under a credential key ("password: |" then indented lines) is the
+// value: the indented lines that follow (and blank lines between them) are removed with it
+// (Codex #6375 r18 audit). `keyIndent` is the indentation of the line that holds the key.
+const YAML_BLOCK_INDICATOR_RE = /^[|>][+-]?\d?[+-]?$/;
+function yamlBlockEnd(text, from, keyIndent) {
+  let lineStart = text.indexOf('\n', from);
+  if (lineStart < 0 || !/^[ \t]*(?:#.*)?$/.test(text.slice(from, lineStart))) return null;
+  let end = from;
+  while (lineStart >= 0 && lineStart < text.length) {
+    const start = lineStart + 1;
+    const next = text.indexOf('\n', start);
+    const line = text.slice(start, next < 0 ? text.length : next);
+    const indent = line.length - line.trimStart().length;
+    if (line.trim() !== '' && indent <= keyIndent) break;
+    if (line.trim() !== '') end = next < 0 ? text.length : next;
+    lineStart = next;
+  }
+  return end;
+}
+
 // A structural credential assignment (db.password: x, X-API-Key: x). A quoted value ends at its
 // closing quote. An unquoted value that is followed by a space is a passphrase: it is extended by the
 // same linear scan as the env-style values, to the end of the line or an inline " #" comment, stopping
@@ -364,7 +384,11 @@ function scrubKeyAssignments(text) {
     if (isAlreadyRemoved(value) || !isAssignmentSecretKey(key)) continue;
     const valueQuote = (value.match(/^\\?["']/) || [''])[0];
     let end = match.index + whole.length;
-    if (isDanglingQuote(value)) end = quotedValueEnd(text, end - value.length, valueQuote);
+    const lineStart = text.lastIndexOf('\n', match.index) + 1;
+    const keyIndent = text.slice(lineStart).match(/^[ \t]*/)[0].length;
+    const block = YAML_BLOCK_INDICATOR_RE.test(value) ? yamlBlockEnd(text, end, keyIndent) : null;
+    if (block !== null) end = block;
+    else if (isDanglingQuote(value)) end = quotedValueEnd(text, end - value.length, valueQuote);
     else if (!valueQuote && /^[[{]/.test(value) && !value.startsWith(REMOVED)) end = structuredValueEnd(text, end - value.length);
     else if (!valueQuote && /[ \t]/.test(text[end] || '')) end = envValueEnd(text, end);
     count += 1;

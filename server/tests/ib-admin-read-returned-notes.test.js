@@ -676,6 +676,16 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     expect(result.data.notes).toBe(expected);
   });
 
+  test.each([
+    ['password: |\n  correct horse battery staple\nnext: line', 'password: [removed]\nnext: line'],
+    ['db:\n  password: >-\n    folded text\n    more words\n\n    after blank\n  host: x', 'db:\n  password: [removed]\n  host: x'],
+    ['password: |  # note\n  hidden\nafter: 1', 'password: [removed]\nafter: 1'],
+  ])('a YAML block under a credential key is removed with its indented lines: %j (r18 audit P0)', async (note, expected) => {
+    expect(scrubNote(note).text).toBe(expected);
+    const result = await read(ENTRY, { id: 1, notes: note });
+    expect(result.data.notes).toBe(expected);
+  });
+
   test('owner-ruled prose and access words stay (r18)', () => {
     const note = 'the password is in the lockbox. PIN: 8842. lockbox passcode: 4321. gate code: 1234.';
     expect(scrubNote(note)).toEqual({ text: note, removed: 0 });
