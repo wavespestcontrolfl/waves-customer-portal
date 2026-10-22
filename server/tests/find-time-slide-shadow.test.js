@@ -107,13 +107,44 @@ test('gate on: logs the 11 AM slide and leaves the offered slots untouched', asy
   expect(lines[0]).not.toMatch(/Existing|Stop|Sarasota/);
 });
 
-test('gate off: no extra columns selected and no shadow line', async () => {
+const svcSelects = () => selects.filter((x) => x.table === 'scheduled_services');
+
+test('the main find-time read is identical with the gate on; movability comes from its own read', async () => {
   wireDb();
   await findAvailableSlots(CALL);
-  const svcSelect = selects.find((s) => s.table === 'scheduled_services');
-  expect(svcSelect.cols).not.toContain('scheduled_services.status');
-  expect(svcSelect.cols).not.toContain('scheduled_services.auto_dispatch_locked');
+  const offReads = svcSelects().map((x) => x.cols);
+  expect(offReads).toHaveLength(1);
   expect(shadowLines()).toHaveLength(0);
+
+  wireDb();
+  process.env.GATE_SLOT_SLIDE_OFFER = 'true';
+  await findAvailableSlots(CALL);
+  const onReads = svcSelects().map((x) => x.cols);
+  expect(onReads[0]).toEqual(offReads[0]);
+  expect(onReads[1]).toEqual(expect.arrayContaining(['status', 'track_state', 'visit_id', 'auto_dispatch_locked']));
+});
+
+test('a failed movability read only switches the shadow off — real slots are unchanged', async () => {
+  wireDb();
+  const baseline = await findAvailableSlots(CALL);
+  let svcCalls = 0;
+  db.mockImplementation((table) => {
+    if (table === 'technicians') return chain([{ id: 't1', name: 'Tech' }], table);
+    if (table === 'services') return chain(CATALOG, table);
+    if (table === 'scheduled_services') {
+      svcCalls += 1;
+      if (svcCalls === 1) return chain(STOPS, table);
+      const c = chain([], table);
+      c.select = async () => { throw new Error('column "track_sms_sent_at" does not exist'); };
+      return c;
+    }
+    return chain([], table);
+  });
+  process.env.GATE_SLOT_SLIDE_OFFER = 'true';
+  const result = await findAvailableSlots(CALL);
+  expect(result.slots).toEqual(baseline.slots);
+  expect(shadowLines()).toHaveLength(0);
+  expect(logger.warn.mock.calls.map(([m]) => m).join('\n')).toMatch(/\[slot-slide\] shadow off/);
 });
 
 test('gate on but a staff (non-packEnds) caller: no shadow pass', async () => {
@@ -199,8 +230,7 @@ test('members of a grouped visit (shared visit_id) are never slid', async () => 
   });
   process.env.GATE_SLOT_SLIDE_OFFER = 'true';
   await findAvailableSlots(CALL);
-  const svcSelect = selects.find((s) => s.table === 'scheduled_services');
-  expect(svcSelect.cols).toContain('scheduled_services.visit_id');
+  expect(svcSelects()[1].cols).toContain('visit_id');
   for (const line of shadowLines()) {
     const ids = JSON.parse(line.replace('[slot-slide] shadow ', '')).slides.map((s) => s.id);
     expect(ids).not.toContain('d');
@@ -227,8 +257,7 @@ test('a packEnds caller that is not explicitly customerFacing (voice agent) gets
   process.env.GATE_SLOT_SLIDE_OFFER = 'true';
   await findAvailableSlots({ ...CALL, customerFacing: false });
   expect(shadowLines()).toHaveLength(0);
-  const svcSelect = selects.find((x) => x.table === 'scheduled_services');
-  expect(svcSelect.cols).not.toContain('scheduled_services.status');
+  expect(svcSelects()).toHaveLength(1);
 });
 
 test('sampled: a second request inside the interval runs no shadow pass', async () => {
@@ -260,9 +289,7 @@ test('tracker evidence of a visit under way blocks a slide even when status stil
     const ids = await runWith(STOPS.map((x) => (x.id === 'd' ? { ...x, ...evidence } : x)));
     for (const slid of ids) expect(slid).not.toContain('d');
   }
-  const svcSelect = selects.find((x) => x.table === 'scheduled_services');
-  expect(svcSelect.cols).toContain('scheduled_services.track_state');
-  expect(svcSelect.cols).toContain('scheduled_services.en_route_at');
+  expect(svcSelects().some((x) => x.cols.includes('track_state') && x.cols.includes('en_route_at'))).toBe(true);
 });
 
 test('a committed visit with a stray reservation_expires_at can still slide', async () => {

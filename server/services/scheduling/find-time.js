@@ -721,7 +721,7 @@ async function resolveCandidateExpectedMinutes({
 // findAvailableSlots' own branching stays in the loop that drives it, not
 // the row-shaping itself.
 function buildDayStops(services, {
-  tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit, slideShadow = false, needsLifecycleRewind = null,
+  tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit, slideMeta = null,
 }) {
   const filtered = services.filter((s) => {
     if (excludeSet.has(String(s.id))) return false;
@@ -751,8 +751,11 @@ function buildDayStops(services, {
   // canonical move paths — a slide must never split one, so every member of
   // a multi-row visit is unslidable.
   const visitMembers = new Map();
-  if (slideShadow) {
-    for (const s of filtered) if (s.visit_id != null) visitMembers.set(s.visit_id, (visitMembers.get(s.visit_id) || 0) + 1);
+  if (slideMeta) {
+    for (const s of filtered) {
+      const visitId = slideMeta.rows.get(String(s.id))?.visit_id;
+      if (visitId != null) visitMembers.set(visitId, (visitMembers.get(visitId) || 0) + 1);
+    }
   }
   return occupiedRows(filtered)
     .map((s) => {
@@ -776,9 +779,7 @@ function buildDayStops(services, {
         ...(creditResolver ? {
           expectedMinutes: creditResolver(s, endMin - startMin),
         } : {}),
-        ...(slideShadow ? {
-          movable: isSlidable(s, needsLifecycleRewind) && !(visitMembers.get(s.visit_id) > 1),
-        } : {}),
+        ...(slideMeta ? { movable: slidableStop(s, slideMeta, visitMembers) } : {}),
       };
     })
     .sort((a, b) => a.startMin - b.startMin);
@@ -800,6 +801,39 @@ const SLIDE_LIFECYCLE_COLUMNS = [
   'track_state', 'en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time',
   'track_sms_sent_at', 'arrival_sms_sent_at',
 ];
+// Movability facts for the slide shadow, read in their OWN query so the main
+// find-time read stays byte-identical at every gate setting and a missing
+// column or a failed read only switches the shadow off — never the
+// customer's real slots (pre-push audit P1). Also resolves rebooker's
+// predicate (lazy: rebooker.js pulls in the scheduling modules this file
+// sits beside) before any shadow time is counted. null = no shadow.
+async function loadSlideMeta(services) {
+  try {
+    const { needsLifecycleRewind } = require('../rebooker');
+    const ids = services.map((row) => row.id);
+    const rows = ids.length ? await db('scheduled_services').whereIn('id', ids).select(
+      'id', 'status', 'customer_id', 'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id',
+      ...SLIDE_LIFECYCLE_COLUMNS,
+    ) : [];
+    return { needsLifecycleRewind, rows: new Map(rows.map((row) => [String(row.id), row])) };
+  } catch (err) {
+    logger.warn(`[slot-slide] shadow off for this request: ${err.message}`);
+    return null;
+  }
+}
+
+// One stop's movability; any surprise reads as "not movable".
+function slidableStop(stop, slideMeta, visitMembers) {
+  try {
+    const meta = slideMeta.rows.get(String(stop.id));
+    if (!meta) return false;
+    return isSlidable({ ...stop, ...meta }, slideMeta.needsLifecycleRewind)
+      && !(visitMembers.get(meta.visit_id) > 1);
+  } catch {
+    return false;
+  }
+}
+
 function isSlidable(row, needsLifecycleRewind) {
   return row.customer_id != null
     && row.status !== 'completed'
@@ -1089,8 +1123,7 @@ function candidatesForDay(date, tech, params) {
     durationMinutes, dayOpen, dayClose,
   } = params;
   const dayStops = buildDayStops(services, {
-    tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
-    slideShadow: params.slideShadow, needsLifecycleRewind: params.needsLifecycleRewind,
+    tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit, slideMeta: params.slideMeta,
   });
   if (params.slideShadow && dayStops.length) logSlideShadow(date, tech, dayStops, params);
   // Build virtual stop list: HQ ... stops ... HQ
@@ -1268,7 +1301,7 @@ function startFloorFor(date, earliestStartMin, startFloorByDate) {
 // empty techs array short-circuits (no services/dates query) — the caller
 // still owns the "no assignable technicians" early return, since that
 // shape is a findAvailableSlots response contract, not a loading concern.
-async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates, strictBlackout, techStartPoints = false, slideShadow = false }) {
+async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates, strictBlackout, techStartPoints = false }) {
   // Only assignable techs (active employment AND field-dispatchable). Every
   // slot consumer (booking, estimate availability, reschedule, re-service,
   // voice relay, auto-dispatch) inherits this filter, so a prospective
@@ -1324,16 +1357,6 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
       // coordless stop degrades to no-drive-time instead.
       db.raw(`CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END as cust_lat`),
       db.raw(`CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END as cust_lng`),
-      // Slide-offer movability (isSlidable) — only read with the gate on so
-      // the gate-off query is byte-identical.
-      ...(slideShadow ? [
-        'scheduled_services.status',
-        'scheduled_services.customer_id',
-        'scheduled_services.auto_dispatch_locked',
-        'scheduled_services.auto_dispatch_excluded',
-        'scheduled_services.visit_id',
-        ...SLIDE_LIFECYCLE_COLUMNS.map((col) => `scheduled_services.${col}`),
-      ] : []),
     );
 
   // Owner blackout days (admin Settings → Scheduling → Blackout days) are
@@ -1409,8 +1432,9 @@ async function findAvailableSlots(opts) {
     && gateEnvValue('GATE_SLOT_SLIDE_OFFER') && claimSlideShadowSample();
   const { techs, services, dates, absentDays } = await loadFindTimeContext({
     dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates: opts.includeBlackoutDates, strictBlackout: opts.strictBlackout,
-    techStartPoints: opts.techStartPoints === true, slideShadow,
+    techStartPoints: opts.techStartPoints === true,
   });
+  const slideMeta = slideShadow ? await loadSlideMeta(services) : null;
   if (!techs.length) return { slots: [], evaluated: 0, note: 'No assignable technicians found' };
 
   const candidates = [];
@@ -1442,11 +1466,9 @@ async function findAvailableSlots(opts) {
     services, geo, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
     slotStepMinutes, durationMinutes, dayOpen, dayClose, everyStepStart,
     techStartPoints: opts.techStartPoints === true,
-    slideShadow,
+    slideShadow: slideMeta != null,
+    slideMeta,
     slideBudget: { remaining: SLIDE_SHADOW_REQUEST_EVALUATIONS, spentMs: 0, deadline: null },
-    // Lazy (rebooker.js pulls in the scheduling modules this file sits
-    // beside), resolved here — before any shadow time is counted.
-    needsLifecycleRewind: slideShadow ? require('../rebooker').needsLifecycleRewind : null,
   };
   for (const date of dates) {
     for (const tech of techs) {
