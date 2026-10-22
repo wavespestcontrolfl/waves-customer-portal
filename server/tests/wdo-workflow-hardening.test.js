@@ -613,6 +613,26 @@ describe('pre-treat final exterior fields: customer copy screen (GATE_PRETREAT_S
     expect(projects.update).not.toHaveBeenCalled();
   });
 
+  test.each([
+    ['a future date', () => new Date(Date.now() + 30 * 24 * 3600e3).toISOString().slice(0, 10)],
+    ['an impossible date', () => '2026-02-30'],
+    ['a non-date', () => 'next week'],
+  ])('PUT refuses %s as the final exterior date (422 final_exterior_date_invalid)', async (_label, value) => {
+    const projects = chain({ first: jest.fn().mockResolvedValue(certificate()) });
+    mockTables({ projects });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ findings: { treatment_date: '2026-06-10', final_exterior_date: value() } }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(422);
+      expect(body.code).toBe('final_exterior_date_invalid');
+    });
+    expect(projects.update).not.toHaveBeenCalled();
+  });
+
   test('PUT accepts plain product, ingredient and applicator values', async () => {
     const projects = chain({ first: jest.fn().mockResolvedValue(certificate()) });
     mockTables({ projects });
