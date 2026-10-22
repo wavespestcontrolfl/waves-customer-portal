@@ -105,6 +105,13 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   // void_invoice (owner ruling 2026-10-12): the Invoices page's Void handler, run in process behind a card;
   // an invoice with nothing collected only, sends nothing.
   'void_invoice',
+  // The Invoices page's edit-type handlers (owner ruling 2026-10-12), each run in process behind its own card: edit an unpaid
+  // invoice, apply the customer's account credit (never a card), archive / unarchive a voided invoice, unvoid. None sends.
+  'edit_invoice',
+  'apply_invoice_credit',
+  'archive_invoice',
+  'unarchive_invoice',
+  'unvoid_invoice',
   'update_lead_contact',
   // propose_admin_edit (owner ruling 2026-10-12): one reviewed small internal
   // edit, replayed through the screen's own PUT or PATCH after a confirm card.

@@ -10331,7 +10331,9 @@ const InvoiceService = {
     };
   },
 
-  async update(id, updates) {
+  // `expected` (third argument) is set only by the Intelligence Bar's edit_invoice shim (routes/admin-invoices.js): the invoice
+  // version and the new total the card showed (services/invoice-bar-expected.js). The Invoices page calls update(id, body).
+  async update(id, updates, { expected } = {}) {
     // `status` deliberately omitted — admins must use the explicit
     // /void, /charge-card, /record-payment, /archive, /unarchive routes
     // to transition state. Allowing a free-form `status` write here
@@ -10360,6 +10362,8 @@ const InvoiceService = {
     // (line-item path) for their own ledger reasons.
     const existing = await db("invoices").where({ id }).first();
     if (!existing) return null;
+    // The bar's card: an invoice that is no longer the one it showed stops here, before any other read.
+    require("./invoice-bar-expected").assertInvoiceVersion(existing, expected, "editing");
     // Phase 2: a draft invoice ACCRUED to a payer statement may be edited only
     // while that statement is still OPEN. Once it is finalized/sent the invoice is
     // a billed line — editing it would change the document under the frozen total.
@@ -10711,6 +10715,14 @@ const InvoiceService = {
       );
     }
 
+    // The bar's card also showed the new total: a retotal that now computes to another figure (a discount rule or a
+    // customer type changed since) is refused rather than saved under an approval for a different number.
+    if (expected && expected.newTotal !== undefined && data.total !== undefined
+      && Math.round((Number(data.total) || 0) * 100) !== Math.round((Number(expected.newTotal) || 0) * 100)) {
+      const err = new Error("Invoice changed while editing — the new total is no longer what the card showed; re-check and retry");
+      err.statusCode = 409; err.status = 409; err.isOperational = true; err.code = "PREVIEW_CHANGED";
+      throw err;
+    }
     // Apply the editability predicates ATOMICALLY on the write so a worker
     // that mutates the same invoice between the guard read above and this write
     // cannot be clobbered. Column predicates cover a worker stamping
@@ -10773,6 +10785,7 @@ const InvoiceService = {
           "Only unpaid invoices can be edited — its status or payment state changed while you were editing",
         );
       }
+      require("./invoice-bar-expected").assertInvoiceVersion(lockedRow, expected, "editing");
       // The locked row is the only authority for the dues stamp. A stamp whose
       // month this edit did not lock (never expected: see above) is a stale
       // edit, refused rather than run unlocked.
@@ -10924,7 +10937,7 @@ const InvoiceService = {
               ]);
           });
       }
-      const [edited] = await editQuery.update(data).returning("*");
+      const [edited] = await require("./invoice-bar-expected").applyInvoiceVersion(editQuery, expected).update(data).returning("*");
       if (!edited) {
         throw new Error(
           "Only unpaid invoices can be edited — its status or payment state changed while you were editing",
@@ -11205,9 +11218,12 @@ const InvoiceService = {
    * the operator can re-apply credit deliberately. A payment plan cancelled
    * at void time stays cancelled — recreate it on the restored invoice.
    */
-  async unvoidInvoice(id) {
+  async unvoidInvoice(id, { expected } = {}) {
     const current = await db("invoices").where({ id }).first();
     if (!current) throw new Error("Invoice not found");
+    // The bar's unvoid card pins the invoice version it showed (services/invoice-bar-expected.js; the page passes none):
+    // checked on this read and again as extra predicates on the restore's own UPDATE.
+    require("./invoice-bar-expected").assertInvoiceVersion(current, expected, "unvoiding");
     if (current.status !== "void") {
       throw new Error(
         `Only a voided invoice can be unvoided (current status: ${current.status})`,
@@ -11374,8 +11390,8 @@ const InvoiceService = {
           );
         }
       }
-      const [updated] = await trx("invoices")
-        .where({ id, status: "void" })
+      const [updated] = await require("./invoice-bar-expected").applyInvoiceVersion(trx("invoices")
+        .where({ id, status: "void" }), expected)
         .update({
           status: "draft",
           send_claim_token: null,
@@ -13922,6 +13938,9 @@ module.exports.withPayLinkSendClaim = withPayLinkSendClaim;
 // gate's on/off behavior (incl. the combined-packet member check and the
 // service_record_id-only fallback) can be pinned with a minimal conn mock.
 module.exports._assertUnvoidableLinkedVisit = assertUnvoidableLinkedVisit;
+// The Intelligence Bar's edit_invoice card computes the new totals with the edit's own arithmetic (read-only).
+module.exports._calculateUpdateFinancials = calculateUpdateFinancials;
+module.exports._invoiceHasUnbackedDocumentDiscount = invoiceHasUnbackedDocumentDiscount;
 // Test-only seam (#5424 r14): the pending-channel replay queue row, to pin the persisted trusted
 // dispute-hold exemption (metadata.hold_exempt) that the replay's eligibility and boundary re-apply.
 module.exports._queuePendingChannelReplay = queuePendingChannelReplay;

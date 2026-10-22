@@ -1602,7 +1602,8 @@ router.post('/batch/send-receipts', requireAdmin, async (req, res, next) => {
 });
 
 // PUT /:id — update invoice
-router.put('/:id', requireAdmin, async (req, res, next) => {
+// Named so the Intelligence Bar's edit_invoice card (editInvoiceFromBar, below) runs this very handler.
+const invoiceUpdateHandler = async (req, res, next) => {
   try {
     // Pre-edit provenance FIRST (Codex PR r12 P2): an edit can strip the
     // "accepted estimate #" note along with a tracked line — the post-edit
@@ -1614,7 +1615,11 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         .where({ id: req.params.id })
         .first('id', 'notes', 'scheduled_service_id', 'customer_id');
     } catch { preEditRow = null; /* provenance capture is best-effort */ }
-    const invoice = await InvoiceService.update(req.params.id, req.body);
+    // req.ibExpectedEdit is set only by editInvoiceFromBar (never an HTTP field): the invoice version and new total the
+    // card showed, enforced inside InvoiceService.update. The page's call is unchanged.
+    const invoice = req.ibExpectedEdit
+      ? await InvoiceService.update(req.params.id, req.body, { expected: req.ibExpectedEdit })
+      : await InvoiceService.update(req.params.id, req.body);
     // Coverage-changing transition (PR #3476): a line-item edit can add or
     // remove the charge the setup-fee alert tracks — reconcile post-commit.
     const reconcile = require('../services/setup-fee-alert-reconcile');
@@ -1649,7 +1654,8 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     }
     next(err);
   }
-});
+};
+router.put('/:id', requireAdmin, invoiceUpdateHandler);
 
 // POST /:id/send — send invoice via SMS + email
 // SMS fires via InvoiceService.sendViaSMS (the invoice_sent template);
@@ -2011,20 +2017,28 @@ router.post('/:id/void', requireAdmin, invoiceVoidHandler);
 // statement, live/unverifiable payment session) — those refusals are
 // operator-actionable conflicts, surfaced as 409 so the UI toasts the
 // reason (mirrors the /void mapper).
-router.post('/:id/unvoid', requireAdmin, async (req, res, next) => {
+// Named so the Intelligence Bar's unvoid_invoice card (unvoidInvoiceFromBar, below) runs this very handler.
+const invoiceUnvoidHandler = async (req, res, next) => {
   try {
-    const invoice = await InvoiceService.unvoidInvoice(req.params.id);
+    // req.ibExpectedUnvoid is set only by unvoidInvoiceFromBar (never an HTTP field): the invoice version the card showed.
+    const invoice = req.ibExpectedUnvoid
+      ? await InvoiceService.unvoidInvoice(req.params.id, { expected: req.ibExpectedUnvoid })
+      : await InvoiceService.unvoidInvoice(req.params.id);
     res.json(invoice);
   } catch (err) {
     if (/Invoice not found/i.test(err.message)) {
       return res.status(404).json({ error: err.message });
+    }
+    if (err?.code === 'PREVIEW_CHANGED' && err.statusCode) {
+      return res.status(409).json({ error: err.message, code: err.code });
     }
     if (/^Cannot unvoid|^Only a voided invoice|finalized payer statement|resolve it before unvoiding|live payment session|re-check and retry|could not verify the|saved-card charge|unresolved charge attempt|unresolved Stripe charge/i.test(err.message)) {
       return res.status(409).json({ error: err.message });
     }
     next(err);
   }
-});
+};
+router.post('/:id/unvoid', requireAdmin, invoiceUnvoidHandler);
 
 // POST /:id/annual-prepay — flag an existing invoice as an annual prepayment.
 // Creates (or re-activates) the linked annual_prepay_terms row and stamps
@@ -2525,21 +2539,31 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
 // Void-only precondition: refusing paid/sent/draft because "archive" is
 // meaningful only as a final shelving step on a row that has no activity
 // left. Returns the updated row so the UI can update in place.
-router.post('/:id/archive', requireAdmin, async (req, res, next) => {
+// Named so the Intelligence Bar's archive_invoice card (archiveInvoiceFromBar, below) runs this very handler.
+// req.ibExpectedArchive is set only by that shim (never an HTTP field): the invoice version the card showed.
+const invoiceArchiveHandler = async (req, res, next) => {
   try {
+    const { invoiceVersionChanged, applyInvoiceVersion } = require('../services/invoice-bar-expected');
+    const expected = req.ibExpectedArchive || null;
     const invoice = await db('invoices').where({ id: req.params.id }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    if (invoiceVersionChanged(invoice, expected)) {
+      return res.status(409).json({ error: 'Invoice changed while archiving — re-check and retry', code: 'PREVIEW_CHANGED' });
+    }
     if (invoice.status !== 'void') {
       return res.status(400).json({ error: `Only voided invoices can be archived (current status: ${invoice.status})` });
     }
     if (invoice.archived_at) return res.json(invoice);  // idempotent
-    const [updated] = await db('invoices')
-      .where({ id: req.params.id })
+    const [updated] = await applyInvoiceVersion(db('invoices').where({ id: req.params.id }), expected)
       .update({ archived_at: db.fn.now(), updated_at: db.fn.now() })
       .returning('*');
+    if (!updated && expected) {
+      return res.status(409).json({ error: 'Invoice changed while archiving — re-check and retry', code: 'PREVIEW_CHANGED' });
+    }
     res.json(updated);
   } catch (err) { next(err); }
-});
+};
+router.post('/:id/archive', requireAdmin, invoiceArchiveHandler);
 
 // GET /:id/receipt-address — the address this invoice's documents display
 // (receipt page, PDF, billing emails): its frozen snapshot, else the live
@@ -2576,18 +2600,28 @@ router.put('/:id/receipt-address', async (req, res, next) => {
 });
 
 // POST /:id/unarchive — pulls an archived invoice back into the default view.
-router.post('/:id/unarchive', requireAdmin, async (req, res, next) => {
+// Named so the Intelligence Bar's unarchive_invoice card (unarchiveInvoiceFromBar, below) runs this very handler.
+// req.ibExpectedUnarchive is set only by that shim (never an HTTP field): the invoice version the card showed.
+const invoiceUnarchiveHandler = async (req, res, next) => {
   try {
+    const { invoiceVersionChanged, applyInvoiceVersion } = require('../services/invoice-bar-expected');
+    const expected = req.ibExpectedUnarchive || null;
     const invoice = await db('invoices').where({ id: req.params.id }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    if (invoiceVersionChanged(invoice, expected)) {
+      return res.status(409).json({ error: 'Invoice changed while unarchiving — re-check and retry', code: 'PREVIEW_CHANGED' });
+    }
     if (!invoice.archived_at) return res.json(invoice);  // idempotent
-    const [updated] = await db('invoices')
-      .where({ id: req.params.id })
+    const [updated] = await applyInvoiceVersion(db('invoices').where({ id: req.params.id }), expected)
       .update({ archived_at: null, updated_at: db.fn.now() })
       .returning('*');
+    if (!updated && expected) {
+      return res.status(409).json({ error: 'Invoice changed while unarchiving — re-check and retry', code: 'PREVIEW_CHANGED' });
+    }
     res.json(updated);
   } catch (err) { next(err); }
-});
+};
+router.post('/:id/unarchive', requireAdmin, invoiceUnarchiveHandler);
 
 // POST /:id/send-receipt — operator-triggered receipt delivery for a paid
 // invoice. Hits the branded email + the invoice_receipt SMS template, then
@@ -2760,8 +2794,13 @@ router.get('/:id/credit-context', async (req, res, next) => {
 // session can't charge the card after the credit is consumed; if that PI has
 // money in flight the request is refused for manual review.
 
-router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
+// Named so the Intelligence Bar's apply_invoice_credit card (applyCreditFromBar, below) runs this very handler.
+// req.ibExpectedCredit is set only by that shim (never an HTTP field): the invoice version and the account credit left
+// after the draw-down, as the card showed them. The Invoices page sends none of it.
+const invoiceApplyCreditHandler = async (req, res, next) => {
   try {
+    const { assertInvoiceVersion } = require('../services/invoice-bar-expected');
+    const expectedCredit = req.ibExpectedCredit || null;
     const { id } = req.params;
     const { waiveSetupFee = false, note } = req.body || {};
     const trimmedNote = typeof note === 'string' ? note.trim().slice(0, 400) : '';
@@ -2770,6 +2809,12 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
     // ── Pre-checks (no lock): status, amount due, sufficient balance ──
     const invoice = await db('invoices').where({ id }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    // The bar's card: an invoice that is no longer the one it showed stops here, before any balance read or Stripe call.
+    try {
+      assertInvoiceVersion(invoice, expectedCredit, 'applying credit');
+    } catch (err) {
+      return res.status(409).json({ error: err.message, code: err.code });
+    }
     // Third-party Bill-To: account credit belongs to the homeowner. A
     // payer-billed invoice is owed by the payer, not the homeowner — drawing
     // down the service customer's credit to mark the AP invoice prepaid would
@@ -2836,6 +2881,8 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
           const err = new Error('This invoice\'s owner changed — retry applying credit');
           err.statusCode = 409; err.isOperational = true; throw err;
         }
+        // The bar's card, on the locked row: nothing can change the invoice between this check and the draw-down below.
+        assertInvoiceVersion(locked, expectedCredit, 'applying credit');
         try {
           assertInvoiceCollectible(locked);
         } catch (err) {
@@ -2909,6 +2956,12 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
           note: trimmedNote || null,
           createdBy: recordedBy,
         }, trx);
+        // The bar's card also showed the account credit left afterwards: a balance that moved since refuses (rolls back).
+        if (expectedCredit && expectedCredit.balanceAfterCents !== undefined
+          && Math.round((Number(balanceAfter) || 0) * 100) !== expectedCredit.balanceAfterCents) {
+          const err = new Error('Invoice changed while applying credit — the account credit balance is no longer what the card showed; re-check and retry');
+          err.statusCode = 409; err.isOperational = true; err.code = 'PREVIEW_CHANGED'; throw err;
+        }
 
         const updates = {
           credit_applied: CustomerCredit.round2(CustomerCredit.round2(locked.credit_applied || 0) + lockedDue),
@@ -2938,7 +2991,7 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
         return { invoice: locked, cover: lockedDue, balanceAfter };
       });
     } catch (err) {
-      if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+      if (err.statusCode) return res.status(err.statusCode).json({ error: err.message, ...(err.code === 'PREVIEW_CHANGED' ? { code: err.code } : {}) });
       throw err;
     }
 
@@ -3000,7 +3053,8 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
     logger.error(`[admin-invoices] apply-credit failed: ${err.message}`);
     next(err);
   }
-});
+};
+router.post('/:id/apply-credit', requireAdmin, invoiceApplyCreditHandler);
 
 // POST /:id/reverse-prepaid — undo a prepaid invoice: restore the consumed
 // account credit to the customer and reopen the invoice for collection. This
@@ -3820,7 +3874,38 @@ function voidInvoiceFromBar({ invoiceId, expected }) {
   return runInvoiceHandler(invoiceVoidHandler, { params: { id: invoiceId }, body: {}, ibExpectedVoid: expected });
 }
 
+// The Intelligence Bar's invoice edit cards (services/intelligence-bar/invoice-edit-tools.js) run the SAME handlers as the
+// Invoices page. `expected` is the invoice version the card showed (services/invoice-bar-expected.js); the page passes none.
+// body: only the fields the card showed. The actor is the staff member's name as the page path reads it from the login.
+function barActorRequest(actor, extra) {
+  return {
+    technician: actor?.name || actor?.email ? { name: actor.name || null, email: actor.email || null } : undefined,
+    ...extra,
+  };
+}
+function editInvoiceFromBar({ invoiceId, body, actor, expected }) {
+  return runInvoiceHandler(invoiceUpdateHandler, barRequest(invoiceId, body, actor, barActorRequest(actor, { ibExpectedEdit: expected })));
+}
+// body: { waiveSetupFee: false, note? } (the card never waives the setup fee).
+function applyCreditFromBar({ invoiceId, body, actor, expected }) {
+  return runInvoiceHandler(invoiceApplyCreditHandler, barRequest(invoiceId, body, actor, barActorRequest(actor, { ibExpectedCredit: expected })));
+}
+function archiveInvoiceFromBar({ invoiceId, expected }) {
+  return runInvoiceHandler(invoiceArchiveHandler, { params: { id: invoiceId }, body: {}, ibExpectedArchive: expected });
+}
+function unarchiveInvoiceFromBar({ invoiceId, expected }) {
+  return runInvoiceHandler(invoiceUnarchiveHandler, { params: { id: invoiceId }, body: {}, ibExpectedUnarchive: expected });
+}
+function unvoidInvoiceFromBar({ invoiceId, expected }) {
+  return runInvoiceHandler(invoiceUnvoidHandler, { params: { id: invoiceId }, body: {}, ibExpectedUnvoid: expected });
+}
+
 module.exports = router;
+module.exports.editInvoiceFromBar = editInvoiceFromBar;
+module.exports.applyCreditFromBar = applyCreditFromBar;
+module.exports.archiveInvoiceFromBar = archiveInvoiceFromBar;
+module.exports.unarchiveInvoiceFromBar = unarchiveInvoiceFromBar;
+module.exports.unvoidInvoiceFromBar = unvoidInvoiceFromBar;
 module.exports.sendInvoiceFromBar = sendInvoiceFromBar;
 module.exports.recordPaymentFromBar = recordPaymentFromBar;
 module.exports.voidInvoiceFromBar = voidInvoiceFromBar;

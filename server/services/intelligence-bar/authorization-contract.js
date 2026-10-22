@@ -140,6 +140,8 @@ CURATED_PREVIEW_TOOL_NAMES.add('propose_admin_edit');
 CURATED_PREVIEW_TOOL_NAMES.add('convert_lead');
 // void_invoice: its card lines come from its own preview (void-invoice-tools.js cardLines). It sends nothing.
 CURATED_PREVIEW_TOOL_NAMES.add('void_invoice');
+// The invoice edit cards: card lines come from their own previews (invoice-edit-tools.js cardLines). None sends anything.
+for (const name of ['edit_invoice', 'apply_invoice_credit', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice']) CURATED_PREVIEW_TOOL_NAMES.add(name);
 
 // Legacy-bare jobs with no mutation-free preview: what the launch does is
 // fixed and known, so the card states it explicitly (job launch, external
@@ -209,6 +211,11 @@ const ACTION_LABELS = {
   propose_admin_edit: 'Edit an admin record',
   convert_lead: 'Convert a lead to a customer (sends nothing)',
   void_invoice: 'Void an invoice (sends nothing)',
+  edit_invoice: 'Edit an invoice (sends nothing)',
+  apply_invoice_credit: 'Pay an invoice from account credit (no card, sends nothing)',
+  archive_invoice: 'Archive a voided invoice (sends nothing)',
+  unarchive_invoice: 'Unarchive an invoice (sends nothing)',
+  unvoid_invoice: 'Restore a voided invoice to a draft (sends nothing)',
   block_sender: 'Block a sender',
   create_pending_estimate: 'Create an estimate',
   create_agent_estimate_draft: 'Save an estimate draft',
@@ -845,6 +852,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // void_invoice: the invoice, what the void does and that nothing is sent.
   if (toolName === 'void_invoice' && preview?.preview === true) {
     for (const line of require('./void-invoice-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
+  // The invoice edit cards: the invoice, each change before -> after, what it does and that nothing is sent.
+  if (['edit_invoice', 'apply_invoice_credit', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice'].includes(toolName) && preview?.preview === true) {
+    for (const line of require('./invoice-edit-tools').cardLines(toolName, preview)) push(line.kind, line.text, line.before !== undefined ? { before: line.before, after: line.after } : {});
   }
   // send_invoice: invoice, money and who is contacted.
   if (toolName === 'send_invoice' && preview?.preview === true) {

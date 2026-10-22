@@ -950,6 +950,22 @@ const PINNED_DISPLAY_BUILDERS = {
   void_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'void_invoice'
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount: preview.amount, status: preview.status, sends_to_customer: 'nothing' }
     : null),
+  // The invoice edit cards (GATE_IB_INVOICE_EDITS): the invoice, the customer and the headline; the lines ride the contract.
+  edit_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'edit_invoice'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name, total: `${preview.old_total} -> ${preview.new_total}`, changes: (preview.changes || []).map((c) => `${c.field}: ${c.before} -> ${c.after}`), sends_to_customer: 'nothing' }
+    : null),
+  apply_invoice_credit: (params, preview) => (preview?.preview === true && preview.tool === 'apply_invoice_credit'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name, credit_available: preview.credit_available, amount_applied: preview.amount_applied, balance_due_after: preview.balance_due_after, sends_to_customer: 'nothing' }
+    : null),
+  archive_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'archive_invoice'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name, status: preview.status, sends_to_customer: 'nothing' }
+    : null),
+  unarchive_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'unarchive_invoice'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name, status: preview.status, sends_to_customer: 'nothing' }
+    : null),
+  unvoid_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'unvoid_invoice'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name, amount: preview.amount, becomes: preview.becomes, reminders_restart: 'only when it is sent again', sends_to_customer: 'nothing' }
+    : null),
   // Feature switches (Codex r1 on #5489): the card must show the live facts
   // the preview read — current → new, what it means, the target and the
   // restart — not just the raw gate name / value the model sent.
@@ -995,6 +1011,12 @@ const VERIFIED_VERSION_PARAMS = {
   convert_lead: '_verified_lead_convert_version',
   // void_invoice binds the invoice state, credit, pay-page session and links the card showed.
   void_invoice: '_verified_invoice_void_version',
+  // The invoice edit cards bind the invoice version (and, per card, the body, credit balance or visit) they showed.
+  edit_invoice: '_verified_invoice_edit_version',
+  apply_invoice_credit: '_verified_invoice_credit_version',
+  archive_invoice: '_verified_invoice_archive_version',
+  unarchive_invoice: '_verified_invoice_unarchive_version',
+  unvoid_invoice: '_verified_invoice_unvoid_version',
   cancel_queued_message: '_verified_message_version',
   // resend_receipt binds the invoice, channels, recipients, amount, memo and the receipt
   // state the card showed — a receipt sent in between is refused, never doubled.
@@ -2127,7 +2149,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   }
   // send_invoice: the stored approval names the invoice the preview resolved,
   // never the number the model sent.
-  if (['send_invoice', 'record_payment'].includes(toolUse.name) && preview?.preview === true && preview.invoice_id) {
+  if (['send_invoice', 'record_payment', 'edit_invoice', 'apply_invoice_credit', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice'].includes(toolUse.name) && preview?.preview === true && preview.invoice_id) {
     params.invoice_id = String(preview.invoice_id);
     delete params.invoice_number;
   }
@@ -3386,6 +3408,7 @@ RULES:
 - En-route is not by itself a blanket prohibition on edits. Explain actual tool restrictions, and mention navigation coordination separately without inventing another approval requirement.
 - For write operations, prepare the required confirmation card; only the operator's approval can execute the proposed effects
 - Invoices: send_invoice (when it is in your tools) acts only on an EXISTING invoice — it texts the customer one pay-link text (no email). void_invoice (when it is in your tools) voids ONE invoice that has collected nothing and never deletes it; "delete" or "cancel" an invoice means void. Never create an invoice, change an amount, charge a card or refund from the bar; for those, say so and point the operator to that invoice on the Invoices page.
+- Invoice edits (each only when it is in your tools, each its own confirmation card; none sends a message, charges a card or refunds): edit_invoice changes an unpaid invoice's title, line items, notes, due date or tax rate (it is the one way to change an amount here, and it does not resend the invoice); apply_invoice_credit pays an invoice in full from the customer's ACCOUNT CREDIT, never a card; archive_invoice / unarchive_invoice hide or restore a voided invoice in the list; unvoid_invoice turns a voided invoice back into a draft. Anything else on an invoice stays on the Invoices page.
 - When showing customer lists, include: name, city, tier, relevant dates, and the specific data point the query is about
 - Look up stored customer, property, service and product facts before asking the operator to retype them. If consequential identity or write scope remains ambiguous, ask one concise clarification. Never guess a write target.
 - Lead with the actual outcome or pending approval and a record link. Normally use at most 80 words; expand only when the operator asks or the effects need explanation.
