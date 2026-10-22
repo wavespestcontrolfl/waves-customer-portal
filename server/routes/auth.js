@@ -152,10 +152,21 @@ async function contactCustomerByPhone(phone) {
 // the account holder. Used by BOTH send-code and verify-code so a contact's
 // code is actually sent and then accepted.
 async function resolveLoginIdentity(phone) {
-  const holder = await activeCustomerByPhone(phone);
-  if (holder) return { customer: holder, contact: null };
+  const holder = await holderLoginIdentity(phone);
+  if (holder) return holder;
   if (!require('../config/feature-gates').contactLoginLive()) return null;
   return contactCustomerByPhone(phone);
+}
+
+// The account holder's row alone — the App Store reviewer bypass's only
+// identity (codex #6363 r29 security P2): with the fixed REVIEW_LOGIN_CODE
+// standing in for the OTP, a contact identity must never be minted through
+// it, or a reviewer (or anyone holding the code) with the demo row absent
+// would reach a real customer's address, visits and reports as that
+// customer's contact. null when no active holder row carries the number.
+async function holderLoginIdentity(phone) {
+  const holder = await activeCustomerByPhone(phone);
+  return holder ? { customer: holder, contact: null } : null;
 }
 
 // What /auth/me and verify-code tell the client about WHO is signed in.
@@ -449,7 +460,9 @@ router.post('/verify-code', verifyCodeLimiter, async (req, res, next) => {
     }
     if (reviewBypass) logger.info('[auth] review-login verify-code bypass used');
 
-    const identity = await resolveLoginIdentity(phone);
+    // The bypass maps to the demo HOLDER row only — never a contact identity
+    // (holderLoginIdentity); every real OTP resolves as usual.
+    const identity = reviewBypass ? await holderLoginIdentity(phone) : await resolveLoginIdentity(phone);
     const customer = identity?.customer || null;
 
     if (!customer) {

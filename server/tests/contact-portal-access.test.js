@@ -333,6 +333,32 @@ describe('contact login — who a number signs in as', () => {
     expect((await call('GET', '/api/auth/me', bearerOf(body.token))).status).toBe(401);
   });
 
+  // The App Store reviewer bypass (REVIEW_LOGIN_PHONE + the fixed code) maps
+  // to the demo HOLDER row only (codex r29 security P2): with the fixed code
+  // standing in for the OTP it must never mint a contact session, or anyone
+  // holding the code could reach a real customer's data as that contact once
+  // the demo row is gone. A real OTP for the same number still logs the
+  // contact in.
+  test('the reviewer bypass never mints a contact session: a contact number configured as the demo phone is refused; the holder\'s is accepted', async () => {
+    process.env.REVIEW_LOGIN_PHONE = CONTACT_PHONE;
+    process.env.REVIEW_LOGIN_CODE = '654321';
+    try {
+      TwilioService.checkVerificationCode.mockClear();
+      const bypass = await call('POST', '/api/auth/verify-code', {}, { phone: CONTACT_PHONE, code: '654321' });
+      expect(bypass.status).toBe(401);
+      expect(TwilioService.checkVerificationCode).not.toHaveBeenCalled();
+      // The same contact number with a real OTP still signs in as the contact.
+      expect((await login(CONTACT_PHONE)).body.actor).toMatchObject({ kind: 'contact' });
+      process.env.REVIEW_LOGIN_PHONE = HOLDER_PHONE;
+      const holder = await call('POST', '/api/auth/verify-code', {}, { phone: HOLDER_PHONE, code: '654321' });
+      expect(holder.status).toBe(200);
+      expect(holder.body.actor).toEqual({ kind: 'holder' });
+    } finally {
+      delete process.env.REVIEW_LOGIN_PHONE;
+      delete process.env.REVIEW_LOGIN_CODE;
+    }
+  });
+
   test('gate off: a contact number is unknown at send-code and refused at verify-code; the holder still logs in', async () => {
     delete process.env.GATE_CONTACT_LOGIN;
     await call('POST', '/api/auth/send-code', {}, { phone: CONTACT_PHONE });
