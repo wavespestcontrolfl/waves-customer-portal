@@ -6,8 +6,7 @@
 // Lawn renders a clean pulsing outline of the treated lawn instead.
 import { useEffect, useRef, useState } from 'react';
 
-// onImageError: the owner of the card hears that the snapshot failed to load and can fall back.
-export default function TracedTreatmentZoneMap({ traced, live = true, variant = 'spray', onImageError }) {
+export default function TracedTreatmentZoneMap({ traced, live = true, variant = 'spray' }) {
   // Spray replay (owner 2026-07-21): the tech-side mapper animates a
   // spray-mist "applying" the barrier along the traced line — the customer
   // report replays it over the saved snapshot. Mounts ONLY after the map
@@ -88,7 +87,6 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
         <img
           className="traced-zone-image"
           src={traced.snapshotUrl}
-          onError={onImageError}
           alt={outline
             ? (highlightCapture
               ? 'Satellite photo of the property with the treated lawn areas highlighted'

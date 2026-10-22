@@ -35,83 +35,17 @@ const { findReportFollowupAppointment } = require('../services/report-followup-a
 // re-exported below so existing consumers/tests keep their import path.
 const { storedRevisionMatches, writeOrRefreshCtaRequest } = require('../services/cta-service-request');
 
-const { buildReportV1Data, attachLawnWateringCloseOut, stripLiveOnlyScheduleFields, stripLiveOnlyReportProductCopy, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectApplicatorTechnician, resolveProjectReportPreviewFields, completedProtocolActionLabels, completedProtocolActionEntries } = require('../services/service-report/report-data');
+const { buildReportV1Data, attachLawnWateringCloseOut, stripLiveOnlyScheduleFields, stripLiveOnlyReportProductCopy, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectReportPreviewFields, completedProtocolActionLabels, completedProtocolActionEntries } = require('../services/service-report/report-data');
 const { applyReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
-const webShareService = require('../services/service-report/web-share');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
 // before it reaches a query (#3168).
 const ASSESSMENT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const { verifyAssessmentPin } = require('../services/service-report/assessment-pin');
-const { buildWebPeople } = require('../services/service-report/report-web-people');
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const { isStaffAccessToken, staffTokenVersionMatches } = require('../middleware/admin-auth');
 const { sessionMfaBlock } = require('../services/staff-mfa');
-
-// GATE_REPORT_GLASS_WEB (owner 2026-10-20): the simple web report wears the glass
-// look. Only beside the simple web switch; a partial gates module reads as off.
-function glassWebLive(simpleWeb, gates) {
-  return simpleWeb === true && typeof gates.reportGlassWebLive === 'function' && gates.reportGlassWebLive();
-}
-
-// GATE_REPORT_WEB_PEOPLE (owner 2026-10-20): people cards on the simple web report. Same rule.
-function webPeopleLive(simpleWeb, gates) {
-  return simpleWeb === true && typeof gates.reportWebPeopleLive === 'function' && gates.reportWebPeopleLive();
-}
-
-// GATE_REPORT_WEB_PROGRAM / GATE_REPORT_WEB_LIVE_CHIP (owner 2026-10-20): each key rides only a live simple-web view
-// of a lawn record; a partial gates module reads as off.
-function webExtraLive(simpleWeb, gates, reader) {
-  return simpleWeb === true && typeof gates[reader] === 'function' && gates[reader]();
-}
-
-// Program line (idea 9). Recurring lawn plan visits only, judged from the frozen completion identity. The month is
-// counted from the first row of the PROPERTY-scoped history (lawn-assessment-history, with move resets), never from the
-// payload's trend: with GATE_LAWN_PROPERTY_HISTORY off that trend is customer-wide, so a moved customer's new home
-// would read months into the program. No verified property history = no line. Best-effort.
-async function attachProgramPromise(v1Data, service) {
-  try {
-    const assessment = v1Data.lawnAssessment;
-    if (v1Data.serviceLine !== 'lawn' || service.is_callback || !assessment || assessment.assessmentId == null) return;
-    const { isRecurringLawnPlanKey } = require('../services/service-report/lawn-program-line');
-    let serviceData = service.service_data;
-    if (typeof serviceData === 'string') serviceData = JSON.parse(serviceData);
-    if (!isRecurringLawnPlanKey(serviceData && serviceData.completedServiceKey)) return;
-    const row = await db('lawn_assessments').where({ id: assessment.assessmentId }).first();
-    if (!row) return;
-    const history = await require('../services/lawn-assessment-history').historyForAssessment(row, { knex: db });
-    if (!history || !history.scope || !history.scope.propertyId || !history.current || !history.rows.length) return;
-    // The scores are photo reads: the same confidence the progress engine uses decides whether they can be judged.
-    const photos = await db('lawn_assessment_photos').where({ assessment_id: row.id, customer_visible: true });
-    const { deriveAssessmentConfidence, photoQualityForConfidence } = require('../services/service-report/lawn-progress');
-    let divergenceFlags = row.divergence_flags;
-    if (typeof divergenceFlags === 'string') {
-      try { divergenceFlags = JSON.parse(divergenceFlags); } catch { divergenceFlags = []; }
-    }
-    const promise = require('../services/service-report/lawn-program-promise').buildProgramPromise({
-      scores: assessment.scores,
-      firstDate: history.rows[0].visit_date,
-      visitDate: history.current.visit_date,
-      confidence: deriveAssessmentConfidence({
-        photos: photos.map(photoQualityForConfidence),
-        divergenceFlags,
-      }),
-    });
-    if (promise) v1Data.programPromise = { monthLine: promise.monthLine, items: promise.items.map(({ key, label, state, sentence }) => ({ key, label, state, sentence })) };
-  } catch { /* best-effort: the report renders without the line */ }
-}
-
-// Live chip (idea 10). Built from this request's own rain read, never stored; only the sentence and a state word leave.
-async function attachLiveChip(v1Data, chipInputs) {
-  try {
-    if (v1Data.serviceLine !== 'lawn' || !chipInputs || !chipInputs.completedAt) return;
-    const chip = await require('../services/service-report/lawn-live-chip').resolveLiveChip({
-      ...chipInputs, fetchForecast: require('../services/service-report/application-conditions').fetchPropertyForecast,
-    });
-    if (chip) v1Data.liveChip = { state: chip.state, text: chip.text };
-  } catch { /* best-effort: no chip */ }
-}
 
 // internal_only / disabled typed completions (Phase-1b shadow, kill switch)
 // store a report for STAFF review only. These public token routes serve them
@@ -339,34 +273,16 @@ async function reportAskBudgetFor(service, req, deps = {}) {
 // suppression DB read) ahead of both this and the limiter, and a param-gate
 // 404 would then go out without these headers.
 const REPORT_ASK_PATH_RE = /^\/(?:project\/)?[^/]+\/ask\/?$/i;
-// The lawn card's photo (GATE_REPORT_WEB_SHARE) carries the same headers on every outcome, 404 and 429 included.
-// ANY token segment matches (a malformed one too), so no probe of the path can skip the headers or the guard below.
-const REPORT_SHARE_PHOTO_PATH_RE = /^\/([^/]+)\/share-photo\/?$/i;
-const REPORT_SHARE_PHOTO_TOKEN_RE = /^[a-f0-9]{32}$/i;
 function reportsAskPrivacyHeaders(req, res, next) {
-  const path = req.path || '';
-  if (REPORT_ASK_PATH_RE.test(path) || REPORT_SHARE_PHOTO_PATH_RE.test(path)) {
+  if (REPORT_ASK_PATH_RE.test(req.path || '')) {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Robots-Tag', 'noindex, nofollow');
   }
   next();
 }
-// Dark lawn-card photo (GATE_REPORT_WEB_SHARE): a generic 404 BEFORE every limiter (the global /api one,
-// reportLimiter, sharePhotoLimiter) and before the token param read, so a dark probe spends no budget and
-// reads no row. GET and HEAD, any token segment. While live, a malformed token (not 32 hex) gets the same
-// 404 here, so it spends no limiter budget and reads no row either. Mounted app-level too (server/index.js),
-// like the estimate map-image guard.
-function reportSharePhotoPreGuard(req, res, next) {
-  const match = (req.method === 'GET' || req.method === 'HEAD') ? REPORT_SHARE_PHOTO_PATH_RE.exec(req.path || '') : null;
-  if (match && (!webShareService.webShareEnabled() || !REPORT_SHARE_PHOTO_TOKEN_RE.test(match[1]))) {
-    return res.status(404).json({ error: 'Report not found' });
-  }
-  return next();
-}
 // Also mounted app-level ahead of the global /api limiter and JSON parser
 // (server/index.js); kept here so the router is self-contained.
 router.use(reportsAskPrivacyHeaders);
-router.use(reportSharePhotoPreGuard);
 
 router.use(reportLimiter);
 
@@ -549,13 +465,6 @@ async function buildServiceReportV1ResponseData(service, token, {
   // OPT-IN on the same terms (GATE_LAWN_WATER_IN_RAIN): only the /data render and the PDF render print the
   // lawn watering banner, so only they pay for the rain lookup. /ask and /map.svg never do.
   lawnWaterInRain = false,
-  // GATE_REPORT_WEB_PEOPLE: the simple web view asks the build for the next visit and its reschedule link.
-  webPeopleNext = false,
-  // GATE_REPORT_WEB_LIVE_CHIP: an out-param the lawn report build fills with the chip's inputs (completion time,
-  // coordinates, products, frozen watering instruction). Internal; never reaches the payload.
-  liveChipOut,
-  // OPT-IN on the same terms (GATE_REPORT_WEB_SLIDER): only the live simple-web /data render shows the then-and-now slider.
-  lawnSlider = false,
 } = {}) {
   // staffViewer gates internal_only companion sections (combined-service
   // completions): report-data omits them from customer payloads entirely.
@@ -578,9 +487,6 @@ async function buildServiceReportV1ResponseData(service, token, {
     lawnPhotoFindings,
     lawnRainfastWatch,
     lawnWaterInRain,
-    webPeopleNext,
-    liveChipOut,
-    lawnSlider,
   });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
@@ -978,23 +884,6 @@ async function heldReportPaymentContext(project) {
   return { payUrl, invoiceNumber, paymentProcessing, payerBilled };
 }
 
-// GATE_REPORT_SIMPLE_WEB (owner 2026-10-17: "skip wdo, and pre treatment, but
-// for everything else the simple layout"): the payload keys that switch the
-// page to the work-order document, for every project type except the two
-// official paper documents (the WDO inspection and the pre-construction
-// termite certificate). Read at call time; a partial gates module reads as
-// off, and off adds nothing. The layout prints a Technician row: it names the
-// technician who PERFORMED the linked visit (the applicator resolver), whether
-// or not that visit applied product, never technician_name, the staffer who
-// created the project record (codex P1 #6353).
-async function simpleWebProjectFields(project) {
-  if (project.project_type === 'wdo_inspection' || project.project_type === 'pre_treatment_termite_certificate') return {};
-  const gates = require('../config/feature-gates');
-  if (typeof gates.reportSimpleWebLive !== 'function' || !gates.reportSimpleWebLive()) return {};
-  const technician = await resolveProjectApplicatorTechnician(project, db);
-  return { simpleWebReport: true, performingTechnicianName: String(technician?.name || '').trim() || null };
-}
-
 // GET /api/reports/project/:token/data — project report JSON for the viewer page
 router.get('/project/:token/data', async (req, res, next) => {
   // Same privacy headers as the sibling /fdacs-pdf route, set before ANY
@@ -1145,7 +1034,6 @@ router.get('/project/:token/data', async (req, res, next) => {
     // the internal-key/fee strip below (structured treatment fields, never
     // free text, so nothing here needs scrubbing).
     const { applicatorFdacsId, applicatorName, poisonControl } = await resolveProjectReportPreviewFields(project, viewerProjectDate, db);
-    const simpleWebFields = await simpleWebProjectFields(project);
 
     // Internal/office-only finding keys must never ride the public JSON — the
     // client registry hides them visually, but any token holder can read the
@@ -1231,9 +1119,6 @@ router.get('/project/:token/data', async (req, res, next) => {
         status: upcomingAppointment.status,
       } : null,
       photos: photosWithUrls,
-      // GATE_REPORT_SIMPLE_WEB: simpleWebReport + performingTechnicianName
-      // while live (simpleWebProjectFields); nothing when off.
-      ...simpleWebFields,
     });
   } catch (err) { next(err); }
 });
@@ -1370,12 +1255,6 @@ router.get('/project/:token/fdacs-pdf', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Without the cross-sell gate the only referral card that can ask is the lawn card (GATE_REPORT_WEB_SHARE):
-// both gates live AND this visit is one /data offers the card for. Used by the referral tap and its event.
-async function referralViaLawnCard(service) {
-  return webShareService.webShareEnabled() && Boolean(await webShareService.resolveShareEligibility(service));
-}
-
 // POST /api/reports/:token/events — token-scoped report interaction events.
 router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '')) {
@@ -1384,7 +1263,7 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
   try {
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
-      .select('id', 'customer_id', 'scheduled_service_id', 'service_type', 'service_line', 'report_template_version', 'structured_notes', 'is_callback')
+      .select('id', 'customer_id', 'report_template_version', 'structured_notes')
       .first();
     if (!service || service.report_template_version !== 'service_report_v1') {
       return res.status(404).json({ error: 'Report not found' });
@@ -1404,10 +1283,7 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
     // a token holder must not mint events/notifications for a dark gate).
     // Same copy as an unknown event — the gate state is not probeable.
     if ((eventName === 'cross_sell_requested' || eventName === 'referral_cta_clicked')
-      && !require('../config/feature-gates').isEnabled('reportCrossSell')
-      // The lawn card's tap (GATE_REPORT_WEB_SHARE) records the same referral click, for a visit
-      // /data offers the card for (the same eligibility function) and no other.
-      && !(eventName === 'referral_cta_clicked' && await referralViaLawnCard(service))) {
+      && !require('../config/feature-gates').isEnabled('reportCrossSell')) {
       return res.status(400).json({ error: 'Unknown report event' });
     }
     if (!ALLOWED_REPORT_EVENT_CHANNELS.has(channel)) {
@@ -1792,7 +1668,7 @@ router.post('/:token/referral-link', reportEventLimiter, crossSellActionLimiter,
   try {
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
-      .select('id', 'customer_id', 'scheduled_service_id', 'service_type', 'service_line', 'report_template_version', 'structured_notes', 'is_callback')
+      .select('id', 'customer_id', 'report_template_version', 'structured_notes', 'is_callback')
       .first();
     if (!service || service.report_template_version !== 'service_report_v1' || !service.customer_id) {
       return res.status(404).json({ error: 'Report not found' });
@@ -1806,10 +1682,7 @@ router.post('/:token/referral-link', reportEventLimiter, crossSellActionLimiter,
     if (reserviceReportCopyGateOn() && service.is_callback === true) {
       return res.status(404).json({ error: 'Report not found' });
     }
-    // The lawn card (GATE_REPORT_WEB_SHARE) takes the same tap without the cross-sell gate.
-    // Without the cross-sell gate the only card that can ask is the lawn card, so the visit must be one
-    // /data offers it for: the same eligibility function, re-run before any promoter enrollment.
-    if (!require('../config/feature-gates').isEnabled('reportCrossSell') && !(await referralViaLawnCard(service))) {
+    if (!require('../config/feature-gates').isEnabled('reportCrossSell')) {
       return res.status(404).json({ error: 'Report not found' });
     }
     // Enrollment + share copy live in ONE composer shared with the estimate
@@ -1831,50 +1704,6 @@ router.post('/:token/referral-link', reportEventLimiter, crossSellActionLimiter,
     // phone number in the logs (AGENTS.md PII-in-logs rule).
     logger.warn(`[reports-public] referral-link failed (code=${err?.code || 'none'}, token=${req.params.token.slice(0, 8)}…)`);
     return res.status(503).json({ error: 'Referral link unavailable — please try again' });
-  }
-});
-
-// Token-keyed cap for the lawn card's photo read (an S3 read plus a resize per hit).
-const sharePhotoLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => `sharephoto:${req.params.token || 'anon'}`,
-  message: { error: 'Too many requests. Please try again in a minute.' },
-});
-
-// GET /api/reports/:token/share-photo — the front-yard photo for the shareable lawn card
-// (GATE_REPORT_WEB_SHARE). Same-origin on purpose: the photo bucket sets no CORS headers, so a
-// browser canvas could not export an image that drew a signed S3 URL. Resized, upright, with the
-// file metadata (GPS) removed. Dark gate, unknown token, suppressed or callback report, an ineligible
-// visit (not lawn, score under 85, no front photo) or an assessment that is not this visit's = the same generic 404.
-router.get('/:token/share-photo', sharePhotoLimiter, async (req, res, next) => {
-  const assessmentId = typeof req.query.assessment === 'string' ? req.query.assessment.trim() : '';
-  if (!FULL_TOKEN_RE.test(req.params.token || '') || !webShareService.webShareEnabled() || !assessmentId || assessmentId.length > 64) {
-    return res.status(404).json({ error: 'Report not found' });
-  }
-  try {
-    const service = await db('service_records')
-      .where({ report_view_token: req.params.token })
-      .select('id', 'customer_id', 'scheduled_service_id', 'service_type', 'service_line', 'report_template_version', 'structured_notes', 'is_callback')
-      .first();
-    if (!service || service.report_template_version !== 'service_report_v1' || suppressedTypedReport(service)) {
-      return res.status(404).json({ error: 'Report not found' });
-    }
-    // The assessment /data scored must be this visit's own, and the visit must be eligible (same rule as the offer).
-    const eligible = await webShareService.resolveShareEligibility(service, { requestedAssessmentId: assessmentId });
-    if (!eligible) return res.status(404).json({ error: 'Report not found' });
-    const photo = eligible.photo;
-    const bytes = await webShareService.readSharePhoto(photo);
-    res.setHeader('Content-Type', 'image/jpeg');
-    res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('X-Robots-Tag', 'noindex');
-    res.setHeader('Referrer-Policy', 'no-referrer');
-    return res.send(bytes);
-  } catch (err) {
-    logger.warn(`[reports-public] share-photo failed (code=${err?.code || 'none'})`);
-    return next(err);
   }
 });
 
@@ -2718,42 +2547,15 @@ router.get('/:token/data', async (req, res, next) => {
       const pinnedLawnAssessmentId = requestedAssessment;
       const pinnedLawnHistoryIdentity = requestedAssessment ? require('../services/service-report/assessment-pin').assessmentPinHistory(req.query.asig) : null;
       const pinnedWeekPlanAvailableAt = requestedAssessment && requestedPlan ? (requestedPlan === 'none' ? null : requestedPlan) : undefined;
-      // GATE_REPORT_SIMPLE_WEB (owner 2026-10-17): a live view shows the
-      // work-order document the PDF prints, so it is BUILT as the PDF is
-      // (mode 'pdf'): the same compliance strips (no fixed re-entry figures)
-      // and no live-only fields. View tracking above already ran on the live
-      // mode. Gate read at call time; a partial gates module reads as off.
-      const reportGates = require('../config/feature-gates');
-      // A suppressed (internal-only) report keeps the old page and its
-      // "Not sent to the customer" review bar.
-      const simpleWeb = mode === 'live' && !suppressedTypedReport(service)
-        && typeof reportGates.reportSimpleWebLive === 'function' && reportGates.reportSimpleWebLive();
-      const buildMode = simpleWeb ? 'pdf' : mode;
-      const programLive = webExtraLive(simpleWeb, reportGates, 'reportWebProgramLive');
-      // The out-param also carries the view's one shared weather read (the banner's water-in coverage and the chip use it).
-      const liveChipOut = webExtraLive(simpleWeb, reportGates, 'reportWebLiveChipLive')
-        ? { series: require('../services/service-report/lawn-live-chip').createSharedSeries(require('../services/service-report/application-conditions').fetchPropertyForecast) }
-        : undefined;
       const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, {
         // The render path is the only consumer of the cross-sell/referral
         // keys, so it is the only caller that pays to compose them.
-        mode: buildMode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true, planSummary: true, upcomingVisitsCard: true, nearYou: true, lawnPhotoFindings: true,
+        mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true, planSummary: true, upcomingVisitsCard: true, nearYou: true, lawnPhotoFindings: true,
         lawnLighting: true,
         lawnWateringCloseOut: true,
         lawnRainfastWatch: true,
         lawnWaterInRain: true,
-        webPeopleNext: simpleWeb && webPeopleLive(simpleWeb, reportGates),
-        liveChipOut,
-        // GATE_REPORT_WEB_SLIDER: asked for only on a live simple-web view.
-        lawnSlider: simpleWeb && typeof reportGates.reportWebSliderLive === 'function' && reportGates.reportWebSliderLive(),
       });
-      // The next-visit rows are for webPeople only; the key never leaves the server.
-      const webPeopleVisits = v1Data.webPeopleNext;
-      const webPeopleReadsOk = v1Data.webPeopleReadsOk === true;
-      delete v1Data.webPeopleNext;
-      const webPeopleCoverage = v1Data.webPeopleCoverage;
-      delete v1Data.webPeopleReadsOk;
-      delete v1Data.webPeopleCoverage;
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was
       // retired 2026-07-09 — the report is now the only surface). Pest reports
@@ -2762,8 +2564,6 @@ router.get('/:token/data', async (req, res, next) => {
       // /reports/:token/recap/video, meaningless in pdf/static renders.
       // Best-effort — never blocks.
       if (
-        // Keyed on the REQUEST mode: the simple web view shows the recap too,
-        // so recap texts and old /recap links (#visit-recap) still play.
         mode === 'live' && service.scheduled_service_id && !v1Data.internalOnly
         && v1Data.serviceLine === 'pest'
         // Cockroach-family typed reports dropped the V2 perimeter story —
@@ -2786,28 +2586,9 @@ router.get('/:token/data', async (req, res, next) => {
       // Glass is the unconditional report theme now (GATE_REPORT_GLASS retired).
       // Live views only — pdf/static/sms_preview renders never mount the scene,
       // so the print pipeline stays byte-identical.
-      if (buildMode === 'live') {
+      if (mode === 'live') {
         v1Data.glassDefault = true;
       }
-      // The key the page reads to render the work-order document. Absent =
-      // byte-identical payload.
-      if (simpleWeb) v1Data.simpleWebReport = true;
-      // GATE_REPORT_GLASS_WEB (owner 2026-10-20): the simple web report wears the
-      // glass look. Only beside simpleWebReport (the page reads both); a partial
-      // gates module reads as off. Absent key = byte-identical payload.
-      if (glassWebLive(simpleWeb, reportGates)) v1Data.glassWeb = true;
-      // GATE_REPORT_WEB_PEOPLE (owner 2026-10-20): the people cards. The key is absent when the gate is off or nothing shows.
-      if (webPeopleLive(simpleWeb, reportGates)) {
-        const webPeople = await buildWebPeople({ data: v1Data, service, knex: db, nextVisits: webPeopleVisits, readsOk: webPeopleReadsOk, coverageEvidence: webPeopleCoverage })
-          .catch((err) => { logger.warn(`[reports-public] webPeople skipped: ${err.message}`); return null; });
-        if (webPeople) v1Data.webPeople = webPeople;
-      }
-      // GATE_REPORT_WEB_SHARE (owner 2026-10-20, idea 8): the shareable lawn card offer, live simple-web views only.
-      if (simpleWeb) await webShareService.attachWebShare(v1Data, service, reportGates);
-      // GATE_REPORT_WEB_PROGRAM / GATE_REPORT_WEB_LIVE_CHIP (owner 2026-10-20): live simple-web view only, each its own
-      // key. Absent key = byte-identical payload; the PDF build never reaches here.
-      if (programLive) await attachProgramPromise(v1Data, service);
-      if (liveChipOut) await attachLiveChip(v1Data, liveChipOut);
       return res.json(v1Data);
     }
 
@@ -2998,7 +2779,6 @@ module.exports = router;
 module.exports.ensureReportToken = ensureReportToken;
 module.exports.reportLimiter = reportLimiter;
 module.exports.reportsAskPrivacyHeaders = reportsAskPrivacyHeaders;
-module.exports.reportSharePhotoPreGuard = reportSharePhotoPreGuard;
 module.exports.storedRevisionMatches = storedRevisionMatches;
 module.exports.suppressedTypedReport = suppressedTypedReport;
 module.exports.buildServiceReportV1ResponseData = buildServiceReportV1ResponseData;

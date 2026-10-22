@@ -323,9 +323,6 @@ function sliceForecast(entry, cached, {
       // just past a label limit (10.04 mph vs a 10 mph max) is not rounded
       // onto it and passed by a strict comparison.
       ...(exactReadings ? { temperature_f_exact: temperature_raw_f, wind_mph_exact: wind_raw_mph } : {}),
-      // Opt-in (exactTotal): the hour's unrounded rain, so a caller can sum any sub-window of these rows exactly
-      // (the live status chip reuses one series for the dry test and the water-in coverage).
-      ...(exactTotal ? { precipitation_exact_in: precipitation_raw_in ?? rest.precipitation_in } : {}),
       at: new Date(ms).toISOString(),
     })),  
     precipitationInTotal: complete ? roundedNumber(total, 2) : null,
