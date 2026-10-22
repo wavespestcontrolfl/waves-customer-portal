@@ -86,6 +86,11 @@ describe('invoiceVersionChanged / assertInvoiceVersion / applyInvoiceVersion', (
       await expect(assertSelfPayLive(row(), { selfPayLive: true }, {})).rejects.toMatchObject({ code: 'PREVIEW_CHANGED', statusCode: 409 });
       spy.mockResolvedValueOnce('payer_unverifiable');
       await expect(assertSelfPayLive(row(), { selfPayLive: true }, {})).rejects.toMatchObject({ code: 'PREVIEW_CHANGED' });
+      // A service-record-only link whose visit a payer owns is not self-pay.
+      const visitPayer = jest.spyOn(require('../services/visit-linked-invoice-withdrawal'), 'liveVisitPayerOf').mockResolvedValueOnce('payer-1');
+      spy.mockResolvedValueOnce(null);
+      await expect(assertSelfPayLive(row({ scheduled_service_id: null, service_record_id: 'sr-1' }), { selfPayLive: true }, {})).rejects.toMatchObject({ code: 'PREVIEW_CHANGED' });
+      visitPayer.mockRestore();
     } finally {
       spy.mockRestore();
     }

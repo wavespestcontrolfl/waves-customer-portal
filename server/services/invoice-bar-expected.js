@@ -81,11 +81,21 @@ function applyInvoiceVersion(query, expected) {
 
 // The bar's edit retotal was computed for a verified self-pay owner (expected.selfPayLive): on the locked row, the canonical live
 // resolver must still say so (a payer assigned since through the customer default or the visit, or an unverifiable answer, refuses).
+// Verifiably the homeowner's right now: the canonical resolver (stamped payer, customer default, scheduled service) says self-pay
+// AND no payer owns the visit (also reached through a service record, which the resolver does not follow). Throws when unverifiable.
+async function verifiedSelfPay(row, conn) {
+  if (await require('./invoice-payer-ownership').invoicePayerOwnership(row, conn) !== null) return false;
+  if (!(row.scheduled_service_id || row.service_record_id)) return true;
+  return !await require('./visit-linked-invoice-withdrawal').liveVisitPayerOf(conn, row);
+}
+
 async function assertSelfPayLive(row, expected, conn) {
   if (!expected?.selfPayLive) return;
-  if (await require('./invoice-payer-ownership').invoicePayerOwnership(row, conn) !== null) {
+  let selfPay = false;
+  try { selfPay = await verifiedSelfPay(row, conn); } catch { selfPay = false; }
+  if (!selfPay) {
     throw previewChangedError('Invoice changed while editing — a payer now owns it (or who owes it could not be verified); re-check and retry');
   }
 }
 
-module.exports = { assertSelfPayLive, invoiceVersionChanged, assertInvoiceVersion, assertExpectedNewTotal, applyInvoiceVersion };
+module.exports = { verifiedSelfPay, assertSelfPayLive, invoiceVersionChanged, assertInvoiceVersion, assertExpectedNewTotal, applyInvoiceVersion };

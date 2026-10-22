@@ -622,7 +622,7 @@ function editedLines({ invoice, stored, read, changes, body }) {
 // figures. Unverifiable refuses. The same check runs again on the locked row at save (InvoiceService.update, expected.selfPayLive).
 async function retotalOwnerRefusal(invoice) {
   try {
-    if (await require('../invoice-payer-ownership').invoicePayerOwnership(invoice, db) === null) return null;
+    if (await require('../invoice-bar-expected').verifiedSelfPay(invoice, db)) return null;
   } catch { /* unverifiable: refused below */ }
   return toPage(`Invoice ${invoice.invoice_number} is billed to a third-party payer (or who owes it could not be verified), so its amounts are changed on the Invoices page.`, 'payer_owned', invoice.id);
 }

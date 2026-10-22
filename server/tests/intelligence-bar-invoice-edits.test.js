@@ -537,6 +537,14 @@ describe('edit_invoice card', () => {
       spy.mockResolvedValueOnce('payer_unverifiable');
       expect(await run('edit_invoice', { line_changes: [{ line_number: 2, unit_price: 50 }] })).toMatchObject({ reason: 'payer_owned' });
       spy.mockResolvedValue(null);
+      // Linked only through a service record whose visit a payer owns (the resolver does not follow service records).
+      const withdrawal = require('../services/visit-linked-invoice-withdrawal');
+      const visitPayer = jest.spyOn(withdrawal, 'liveVisitPayerOf').mockResolvedValueOnce('payer-1');
+      setInvoice({ scheduled_service_id: null, service_record_id: 'sr-1' });
+      expect(await run('edit_invoice', { line_changes: [{ line_number: 2, unit_price: 50 }] })).toMatchObject({ reason: 'payer_owned' });
+      expect(visitPayer).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ service_record_id: 'sr-1' }));
+      visitPayer.mockRestore();
+      setInvoice({ scheduled_service_id: VISIT, service_record_id: null });
       state.customers[0].property_type = 'commercial';
       exempt.mockResolvedValueOnce({ id: 'cert-1' });
       expect(await run('edit_invoice', { tax_rate_percent: 6 })).toMatchObject({ reason: 'tax_exempt' });
