@@ -87,9 +87,6 @@ function gateEnvNames() {
       ...(expr.match(GATE_TOKEN) || []),
       ...[...expr.matchAll(/([A-Za-z0-9_]+)\(/g)].flatMap(([, fn]) => helpers.get(fn) || []),
     ];
-    // A few entries read a plain variable (an allowlist, a token); name it so
-    // the row still says what to set. Only the name is returned, never a value.
-    if (!tokens.length) tokens.push(...[...expr.matchAll(/process\.env\.([A-Z][A-Z0-9_]*)/g)].map(([, v]) => v));
     const list = names.get(currentKey) || [];
     for (const token of tokens) if (!list.includes(token)) list.push(token);
     if (list.length) names.set(currentKey, list);
@@ -199,7 +196,11 @@ function listGates() {
       readAt: 'boot',
       ...semantics(envName ? catalog.get(envName) : null),
     };
-  }).filter((row) => !retired(row.envName));
+  // Only GATE_ switches are listed. The two map entries that read a plain
+  // variable are configuration, not switches, and one is a bearer credential
+  // (OPS_DIGEST_INGEST_TOKEN): offering it beside "turns on with true" would
+  // invite a guessable secret. Retired gates are not offered as controls.
+  }).filter((row) => /^GATE_/.test(row.envName || '') && !retired(row.envName));
   // Catalogue gates no map row names (as its own variable or a prerequisite):
   // call-time-only gates such as GATE_ADMIN_MFA.
   const named = new Set(mapRows.flatMap((r) => [r.envName, ...r.requires]));

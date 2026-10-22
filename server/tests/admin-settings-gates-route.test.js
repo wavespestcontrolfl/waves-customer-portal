@@ -51,9 +51,11 @@ describe('GET /api/admin/settings/gates', () => {
     expect(res.headers.get('cache-control')).toBe('no-store');
     const body = await res.json();
     const bootRows = body.gates.filter((row) => row.readAt === 'boot');
-    // Every map entry except the retired selfBookDayCap (GATE_SELF_BOOK_DAY_CAP).
+    // Every map entry except the retired selfBookDayCap and the two that read
+    // a plain (non-GATE_) variable.
     expect(bootRows.map((row) => row.key).sort())
-      .toEqual(Object.keys(featureGates.gates).filter((key) => key !== 'selfBookDayCap').sort());
+      .toEqual(Object.keys(featureGates.gates)
+        .filter((key) => !['selfBookDayCap', 'opsDigestIngest', 'dunningCustomerScheduleAllowlist'].includes(key)).sort());
     for (const row of bootRows) {
       expect(row.enabled).toBe(featureGates.gates[row.key] === true);
     }
@@ -94,8 +96,10 @@ describe('listGates variable names', () => {
     expect(byKey.get('emailTemplateAutomations')).toMatchObject({ envName: 'GATE_EMAIL_TEMPLATE_AUTOMATIONS', kind: 'mode' });
   });
 
-  test('an entry with no GATE_ variable names the plain variable it reads', () => {
-    expect(byKey.get('dunningCustomerScheduleAllowlist')).toMatchObject({ envName: 'DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST' });
+  test('no row is a non-GATE variable such as a credential', () => {
+    const rows = listGates();
+    expect(rows.every((g) => /^GATE_/.test(g.envName))).toBe(true);
+    expect(rows.some((g) => g.key === 'opsDigestIngest' || g.key === 'dunningCustomerScheduleAllowlist')).toBe(false);
   });
 
   test('mode gates carry their catalogue kind; no row claims inversion', () => {
