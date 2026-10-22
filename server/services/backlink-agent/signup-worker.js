@@ -150,6 +150,53 @@ const USER_AGENTS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0',
 ];
 
+// GATE_BACKLINK_SIGNUP_URL_GUARD (security audit run 2, 2026-10-22): the
+// queued URL and the model's signup_url are third-party-steered, so the
+// browser only opens an http(s) URL whose host resolves to public IPv4
+// (the citation filler's resolvePublicIps), and the signup_url must stay on
+// the queued site's host or a sub/parent domain of it. A route guard also
+// aborts any request to a blocked hostname or a literal non-public IP
+// (redirects included). Gate off = navigation exactly as before.
+function signupUrlGuardOn() {
+  const { backlinkSignupUrlGuardLive } = require('../../config/feature-gates');
+  return backlinkSignupUrlGuardLive();
+}
+
+function sameSiteHost(host, baseHost) {
+  return !!host && !!baseHost
+    && (host === baseHost || host.endsWith(`.${baseHost}`) || baseHost.endsWith(`.${host}`));
+}
+
+async function signupUrlAllowed(rawUrl, { baseUrl = null } = {}) {
+  const { _internals: filler } = require('../seo/browser-form-filler');
+  const { _internals: ssrf } = require('../seo/contact-finder');
+  let u;
+  try { u = new URL(String(rawUrl || '')); } catch { return false; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+  const host = u.hostname.toLowerCase();
+  if (!host || ssrf.isBlockedHostname(host)) return false;
+  if (baseUrl) {
+    let baseHost = '';
+    try { baseHost = new URL(baseUrl).hostname.toLowerCase(); } catch { return false; }
+    if (!sameSiteHost(host, baseHost)) return false;
+  }
+  const ips = await filler.resolvePublicIps(host);
+  return ips.length > 0;
+}
+
+function requestHostBlocked(rawUrl) {
+  const net = require('net');
+  const { _internals: ssrf } = require('../seo/contact-finder');
+  let u;
+  try { u = new URL(rawUrl); } catch { return true; }
+  if (u.protocol === 'data:' || u.protocol === 'blob:') return false;
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return true;
+  const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host || ssrf.isBlockedHostname(host)) return true;
+  if (net.isIP(host)) return net.isIPv6(host) || ssrf.isPrivateIp(host);
+  return false;
+}
+
 async function processSignup(queueItem) {
   const browser = await chromium.launch({
     headless: true,
@@ -163,8 +210,20 @@ async function processSignup(queueItem) {
   });
 
   const page = await context.newPage();
+  const urlGuard = signupUrlGuardOn();
+  if (urlGuard) {
+    await page.route('**/*', (route) => (
+      requestHostBlocked(route.request().url()) ? route.abort('blockedbyclient') : route.continue()
+    ));
+  }
 
   try {
+    if (urlGuard && !(await signupUrlAllowed(queueItem.url))) {
+      await db('backlink_agent_queue').where({ id: queueItem.id }).update({ status: 'failed', error_message: 'URL not allowed (not a public http(s) site)', updated_at: new Date() });
+      await browser.close();
+      return { success: false, reason: 'url_not_allowed' };
+    }
+
     await db('backlink_agent_queue').where({ id: queueItem.id }).update({ status: 'processing', updated_at: new Date() });
 
     // Step 1: Navigate to the site
@@ -195,6 +254,11 @@ I need to create an account/profile on this site. Find the signup, register, or 
 
     // Step 3: Navigate to signup page
     if (signupInfo.signup_url) {
+      if (urlGuard && !(await signupUrlAllowed(signupInfo.signup_url, { baseUrl: queueItem.url }))) {
+        await db('backlink_agent_queue').where({ id: queueItem.id }).update({ status: 'failed', error_message: 'Signup URL not allowed (off-site or not public)', updated_at: new Date() });
+        await browser.close();
+        return { success: false, reason: 'signup_url_not_allowed' };
+      }
       await page.goto(signupInfo.signup_url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     } else if (signupInfo.signup_selector) {
       try {
@@ -378,3 +442,4 @@ async function processQueue(limit = 5) {
 }
 
 module.exports = { processSignup, processQueue, PROFILE };
+module.exports._internals = { signupUrlAllowed, requestHostBlocked, sameSiteHost };
