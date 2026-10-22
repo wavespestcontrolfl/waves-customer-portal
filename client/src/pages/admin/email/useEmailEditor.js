@@ -28,6 +28,17 @@ export function encodeEmailBody(text) {
 }
 
 const uncertainKey = (userId) => `waves_email_schedule_uncertain:${userId}`;
+// The answer to a schedule request that queued (or had already sent) the
+// email. `cleared` is false when edits made while the request ran are still
+// in the draft: those were not scheduled.
+function queuedMessage(status, sendAt, cleared) {
+  // The first request's email already went out: say so, never "Scheduled".
+  const done = status === "sent"
+    ? "This email already went out. It is in the Gmail Sent folder."
+    : `Scheduled for ${formatSendAt(sendAt)}. Find it under Scheduled.`;
+  return cleared ? done : `${done} Your newer edits were not scheduled and are still in the draft.`;
+}
+
 // FNV-1a, enough to tell "the same email at the same time" from another one.
 function fingerprint(text) {
   let hash = 0x811c9dc5;
@@ -261,7 +272,9 @@ export default function useEmailEditor(userId) {
       // not this request, so queue it again under a fresh key.
       if (response.ok && result.scheduled?.status === "cancelled") ({ response, result } = await submit(crypto.randomUUID()));
       if (!response.ok) {
-        if (response.status < 500) rememberUncertain(slot, null);
+        // A gate-off answer (enabled:false) never looked the key up: keep it,
+        // so a retry after the gate returns finds the first row.
+        if (response.status < 500 && result.enabled !== false) rememberUncertain(slot, null);
         setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: result.error || "The email was not scheduled. Your draft is still here." } }));
         return;
       }
@@ -273,14 +286,8 @@ export default function useEmailEditor(userId) {
         setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: settled } }));
         return;
       }
-      const cleared = clearQueued();
-      // Edits made while the request ran were not scheduled: say so.
-      const newer = cleared ? "" : " Your newer edits were not scheduled and are still in the draft.";
-      // The first request's email already went out: say so, never "Scheduled".
-      const done = result.scheduled?.status === "sent"
-        ? "This email already went out. It is in the Gmail Sent folder."
-        : `Scheduled for ${formatSendAt(sendAt)}. Find it under Scheduled.`;
-      setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, message: done + newer } }));
+      const message = queuedMessage(result.scheduled?.status, sendAt, clearQueued());
+      setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, message } }));
     } catch (err) {
       if (err?.notStarted) {
         setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: "Scheduling did not start: this browser could not save its safety key. Your draft is still here." } }));

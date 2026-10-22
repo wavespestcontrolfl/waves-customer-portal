@@ -112,6 +112,33 @@ describe("Email schedule send", () => {
     expect(second).toBe(first);
   });
 
+  it("keeps the client key through a gate-off answer, so a later retry finds the first row", async () => {
+    let calls = 0;
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation((input, options = {}) => {
+      if (String(input).endsWith("/email/schedule")) {
+        calls += 1;
+        if (calls === 1) return Promise.reject(new TypeError("network"));
+        if (calls === 2) return response({ enabled: false, error: "Schedule send is off." }, 404);
+      }
+      return base(input, options);
+    });
+    mount();
+    await writeEmail();
+    const pickTomorrow = async () => {
+      fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
+      fireEvent.click(screen.getByRole("button", { name: /^Tomorrow morning/ }));
+    };
+    await pickTomorrow();
+    expect((await screen.findAllByText(/Look under Scheduled before you schedule or send it again/)).length).toBeGreaterThan(0);
+    await pickTomorrow();
+    expect((await screen.findAllByText("Schedule send is off.")).length).toBeGreaterThan(0);
+    await pickTomorrow();
+    await waitFor(() => expect(posts("/email/schedule")).toHaveLength(3));
+    const keys = posts("/email/schedule").map(([, options]) => JSON.parse(options.body).clientKey);
+    expect(new Set(keys).size).toBe(1);
+  });
+
   it("queues again under a fresh key when the server answers with an email cancelled earlier", async () => {
     let first = true;
     const base = fetch.getMockImplementation();
