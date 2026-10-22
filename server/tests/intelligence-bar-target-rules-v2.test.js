@@ -754,6 +754,11 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     }
     // The page customer's own name in subject position still resolves to the page: direct.
     expect(await viewingBob('Bob Example account needs a new phone')).toBe(true);
+    // The contact-only path takes the same check: a typed unknown subject beside a phone grants nothing.
+    const contactGrounded = async prompt => (await ask(prompt)).groundedCustomerIds;
+    expect(await contactGrounded('Jhon A Smith needs notes updated at 941-555-0100')).toEqual([]);
+    expect(await contactGrounded('fix the notes on 941-555-0100')).toEqual([id(100)]);
+    expect(await contactGrounded('941-555-0100 needs the notes fixed')).toEqual([id(100)]);
     // A quoted or cut-off name takes the page too; a field's own colon or quoted value does not.
     expect(await viewingBob('update "Jhon Smith" phone')).toBe(false);
     expect(await viewingBob('update this customer phone: Jhon Smith')).toBe(true);

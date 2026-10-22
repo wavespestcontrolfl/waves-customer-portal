@@ -677,7 +677,8 @@ async function directGroundedIds(fullPrompt, namedResult, cohort, nameHint) {
 // resolved to nobody is a typed name), and that contact names exactly one customer.
 async function contactOnlyGroundedIds(bounded, clause, nameHint) {
   const literals = contactLiteralsOf(clause);
-  if (literals.length !== 1 || nameHint || RECORD_ID_RE.test(clause) || INITIAL_FORM_RE.test(bounded) || placeQualifierPresent(clause)) return [];
+  // An unknown leading subject is a typed name too (pre-push audit, r36).
+  if (literals.length !== 1 || nameHint || unknownLeadingSubject(bounded) || RECORD_ID_RE.test(clause) || INITIAL_FORM_RE.test(bounded) || placeQualifierPresent(clause)) return [];
   const owners = await resolveContacts(literals);
   return owners.size === 1 ? [...owners.keys()] : [];
 }
@@ -830,7 +831,7 @@ const SUBJECT_FILLER = new Set(['please', 'can', 'could', 'would', 'will', 'you'
   'account', 'profile', 'record', 'file', 'card', 'property', 'appointment', 'visit', 'service', 'invoice', 'estimate', 'number', 'cell', 'mobile', 'info', 'information', 'contact', 'gate', 'code', 's']);
 const SUBJECT_END = new Set(['needs', 'need', 'wants', 'want', 'has', 'have', 'is', 'are', 'should', 'would', 'asked', 'asks', 'must', 'got', 'gets']);
 function unknownLeadingSubject(bounded) {
-  const words = normalizeName(targetClause(bounded)).split(' ').filter(Boolean);
+  const words = normalizeName(withoutContacts(targetClause(bounded))).split(' ').filter(Boolean);
   for (const word of words) {
     if (ACTION_VERBS.has(word) || SUBJECT_END.has(word)) return false;
     if (!NON_PERSON_NAMES.has(word) && !SUBJECT_FILLER.has(word)) return true;
