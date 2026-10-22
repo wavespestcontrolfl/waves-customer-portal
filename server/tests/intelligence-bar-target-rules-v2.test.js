@@ -741,6 +741,12 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     };
     expect(await viewingBob('Alice Jones needs a new phone')).toBe(false);
     expect(await viewingBob('Bob Example needs a new phone')).toBe(true);
+    // A quoted or cut-off name takes the page too; a field's own colon or quoted value does not.
+    expect(await viewingBob('update "Jhon Smith" phone')).toBe(false);
+    expect(await viewingBob('update this customer phone: Jhon Smith')).toBe(true);
+    expect(await viewingBob('update the phone; Jhon Smith')).toBe(false);
+    expect(await viewingBob('update this customer notes: call first')).toBe(true);
+    expect(await viewingBob('update this customer notes to "call first"')).toBe(true);
     // 3. A name that is also a verb is stripped once: a later "mark" is still a second operation.
     customers = [row(102, 'Mark', 'Smith', '9415550102')];
     expect(await grounded("update Mark Smith's phone to 941-555-0101 and mark his lead source as referral")).toEqual([]);

@@ -830,7 +830,8 @@ function pageGroundingBlocked(fullPrompt, namedResult, cohort, nameHint, page) {
   const contacts = contactLiteralsOf(clause).length > 0;
   const place = placeQualifierPresent(clause, matches);
   // A compound request takes the page's authority whatever else it says (pre-push audit, r27).
-  if (isCompound(bounded, matches) || !recordIdsAreOnPage(bounded, page)) return true;
+  // Text after a cut is never read for identity, so it takes the page's authority too (pre-push audit, r34).
+  if (isCompound(bounded, matches) || !recordIdsAreOnPage(bounded, page) || hasUnreadTail(bounded)) return true;
   // A name that resolved to a customer is identity evidence even when namesRequested missed its form
   // ("Alice Jones needs notes cleared"): only the exact page customer keeps the page (Codex #6369 r34).
   if (!nameHint && !contacts && !place && !matches.length) return false;
