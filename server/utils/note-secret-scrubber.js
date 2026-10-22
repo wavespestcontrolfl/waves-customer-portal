@@ -121,15 +121,16 @@ const isAlreadyRemoved = value => value.replace(/^\\?["']/, '').startsWith(REMOV
 const JWT_RE = /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*/g;
 // A JSON-escaped link (https:\/\/user:pw@host\/path) is a link too: the scheme slashes
 // and the path may carry a backslash before each slash (Codex #6375 r10).
-const URL_RE = /https?:(?:\\?\/){2}(?:[^\s"'<>\\]|\\\/)+/gi;
+// Any scheme: postgresql://, redis://, ftp:// links carry credential query names too (Codex #6375 r12).
+const URL_RE = /(?<![A-Za-z0-9+.-])[a-z][a-z0-9+.-]*:(?:\\?\/){2}(?:[^\s"'<>\\]|\\\/)+/gi;
 // user:password@ in a link of ANY scheme (postgresql://, redis://, ftp://,
 // smb://, ...); the http(s) links above also go through scrubUrl (Codex #6375).
 const ANY_SCHEME_USERINFO_RE = /\b([a-z][a-z0-9+.-]*:(?:\\?\/){2})[^\s\/@:"'<>\\]*:[^\s\/@"'<>\\]+@/gi;
-const URL_USERINFO_RE = /^(https?:(?:\\?\/){2}[^\s/:@?#\\]*:)[^\s/@?#\\]+@/i;
+const URL_USERINFO_RE = /^([a-z][a-z0-9+.-]*:(?:\\?\/){2}[^\s/:@?#\\]*:)[^\s/@?#\\]+@/i;
 const QUERY_PARAM_RE = /([?&#;])([A-Za-z0-9_.%+[\]-]+)=([^&#\s"'<>\\]*)/g;
 // Credential names that are not credential words as a field name but are as a
 // query key (the same short list signed-link-redaction.js keeps for links).
-const EXTRA_QUERY_KEYS = new Set(['key', 'auth', 'sid', 'ticket', 'pwd', 'sessionid', 'authtoken', 'accesstoken', 'idtoken', 'apikey', 'awsaccesskeyid', 'key-pair-id']);
+const EXTRA_QUERY_KEYS = new Set(['key', 'auth', 'sid', 'ticket', 'pwd', 'pass', 'sessionid', 'authtoken', 'accesstoken', 'idtoken', 'apikey', 'awsaccesskeyid', 'key-pair-id']);
 const SSN_RE = /(?<![\d-])(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}(?![\d-])/g;
 const LONG_RUN_RE = /[A-Za-z0-9+/_-]{32,}={0,2}/g;
 
@@ -254,8 +255,8 @@ function scrubNoteText(input) {
   const longRuns = scrubLongDigitRuns(noPans);
   removed += longRuns.count;
   text = longRuns.text.replace(SSN_RE, swap);
-  // A rule line ("--------", "======") is not a secret: the run needs 16 letters or digits. A UUID is a record id and stays.
-  text = text.replace(LONG_RUN_RE, run => (!UUID_RE.test(run) && (run.match(/[A-Za-z0-9]/g) || []).length >= 16 ? swap() : run));
+  // A rule line ("--------", "======") is not a secret: the run needs 16 letters or digits. A UUID is a record id and a readable run (words and short numbers) stays, as in the backstop below.
+  text = text.replace(LONG_RUN_RE, run => (!UUID_RE.test(run) && !isReadableToken(run) && (run.match(/[A-Za-z0-9]/g) || []).length >= 16 ? swap() : run));
   const backstop = scrubRandomTokens(text);
   removed += backstop.count;
   text = backstop.text;

@@ -467,6 +467,33 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     expect(text).toBe(`keys ${REMOVED} and ${REMOVED} done`);
   });
 
+  test('readable 32+ character runs stay; a random 40-character run still goes (r12)', () => {
+    const readable = 'door-code-is-1234-west-side-entrance and invoice_2026_10_service_report_final_copy.pdf';
+    expect(scrubNote(readable)).toEqual({ text: readable, removed: 0 });
+    const random = 'Qx7Lm2Vb9Tn4Rk8Zc1Wd5Hf3Jg6Ps0Yu2Ae4Io9K';
+    expect(random).toHaveLength(40);
+    expect(scrubNote(`key ${random} end`).text).toBe(`key ${REMOVED} end`);
+  });
+
+  test.each([
+    ['postgresql://db.example/prod?pwd=hunter22', 'hunter22'],
+    ['redis://cache.example/0?sid=abc123xyz', 'abc123xyz'],
+    ['ftp://files.example/archive?key=hunter22', 'hunter22'],
+    ['s3://bucket.example/k?access_token=abc12345&api_key=zz99aa', 'abc12345'],
+    ['mongodb://db.example/x?pass=hunter22&sig=ab12cd', 'hunter22'],
+    ['{"u":"redis:\\/\\/cache.example\\/0?secret=hunter22"}', 'hunter22'],
+  ])('credential query on a non-HTTP link is scrubbed: %s', (note, secret) => {
+    const { text, removed } = scrubNote(note);
+    expect(text).not.toContain(secret);
+    expect(text).toContain('=[removed]');
+    expect(removed).toBeGreaterThan(0);
+  });
+
+  test('a plain non-HTTP link with an ordinary query stays', () => {
+    const note = 'db at postgresql://db.example/prod?sslmode=require and mailto:office@example.test';
+    expect(scrubNote(note)).toEqual({ text: note, removed: 0 });
+  });
+
   test('a card number inside a long grouped digit run is masked', () => {
     const note = `ref 4242 4242 4242 4242${' 1111'.repeat(27)} end`;
     const { text, removed } = scrubNote(note);
