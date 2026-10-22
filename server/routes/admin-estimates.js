@@ -7,7 +7,7 @@ const { estimateNeverIssued, estimateHasBahiaLawn } = require('../services/estim
 const { legacyAutofillPriceReasons, rowHeldForLegacyAutofillPrice } = require('../services/estimate-legacy-autofill-hold');
 const router = express.Router();
 const db = require('../models/db');
-const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData, REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
+const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData, callSideBlocksForEstimates, REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
@@ -3905,6 +3905,18 @@ async function perApplicationByEstimateId(estimates, parsedDataById) {
   return out;
 }
 
+// Rows the staff preview (?adminPreview=1) renders, judged as the /data gate
+// judges them: its row verdicts (the staff draft preview, or a row the
+// customer page shows), then the call-side verdict for engine-drafted rows
+// (callSideBlocksForEstimates, one batched read; it fails closed). A held,
+// invalidated, expired, archived or call-blocked row 404s there even for
+// staff, so the card opens the staff PDF instead.
+async function staffPreviewableIdSet(estimates, parsedDataById) {
+  const byRow = estimates.filter((e) => adminDraftPreviewEligible(e, '1') || isEstimateCustomerViewable(e));
+  const blocked = await callSideBlocksForEstimates(db, byRow.map((e) => ({ id: e.id, status: e.status, data: parsedDataById.get(e.id) })));
+  return new Set(byRow.filter((e) => !blocked.has(e.id)).map((e) => e.id));
+}
+
 // Accepted rows that have a recorded acceptance (terms_version set AND a
 // estimate_acceptances row), the same condition the record helper uses.
 async function acceptanceRecordIdSet(estimates) {
@@ -4131,6 +4143,7 @@ router.get('/', async (req, res, next) => {
     const parsedDataById = new Map(estimates.map((e) => [e.id, parseEstimateData(e.estimate_data)]));
     const perApplicationById = await perApplicationByEstimateId(estimates, parsedDataById);
     const acceptanceRecordIds = await acceptanceRecordIdSet(estimates);
+    const staffPreviewableIds = await staffPreviewableIdSet(estimates, parsedDataById);
 
     res.json({
       estimates: estimates.map(e => {
@@ -4178,10 +4191,8 @@ router.get('/', async (req, res, next) => {
           // Per-application price lines for the card, or null (see perApplicationLinesForRow).
           perApplication: perApplicationById.get(e.id) || null,
           hasAcceptanceRecord: acceptanceRecordIds.has(e.id),
-          // Whether the staff preview (?adminPreview=1) renders this row: the /data gate's verdicts that
-          // need only the row, the staff draft preview or the customer page itself. A held, invalidated,
-          // expired or archived row 404s there even for staff, so the card opens the staff PDF instead.
-          staffPreviewable: adminDraftPreviewEligible(e, '1') || isEstimateCustomerViewable(e),
+          // Whether the staff preview renders this row (see staffPreviewableIdSet).
+          staffPreviewable: staffPreviewableIds.has(e.id),
           tier: e.waveguard_tier, createdBy: e.created_by_name,
           sentAt: e.sent_at,
           viewedAt: hasBeenSent ? e.viewed_at : null,
@@ -5020,13 +5031,16 @@ router.get('/:id/proposal.pdf', async (req, res, next) => {
     // Browser-rendered document (GATE_ESTIMATE_DOC_PDF) — same renderer as
     // the customer download so the operator's copy matches the customer's.
     // Only for rows the public /data route will serve (the headless page
-    // fetches it), judged by the public page's own predicate: drafts,
-    // scheduled, expired, send_failed, archived, held and invalidated rows
-    // keep the pdfkit generator, which reads the row directly. Any render
-    // failure also falls through to pdfkit — the admin download must never
-    // 500 on a browser hiccup.
+    // fetches it), judged as that route judges them: the public page's own
+    // predicate, then the call-side verdict. Drafts, scheduled, expired,
+    // send_failed, archived, held, invalidated and call-blocked rows keep the
+    // pdfkit generator, which reads the row directly. Any render failure also
+    // falls through to pdfkit — the admin download must never 500 on a
+    // browser hiccup.
+    const data = parseEstimateData(estimate.estimate_data);
     const unsent = ['draft', 'scheduled'].includes(estimate.status);
-    const publicViewable = isEstimateCustomerViewable(estimate);
+    const publicViewable = isEstimateCustomerViewable(estimate)
+      && !(await callSideBlockForEstimateData(db, data, { estimateStatus: estimate.status }));
     if (publicViewable && require('../config/feature-gates').isEnabled('estimateDocPdf')) {
       try {
         const { renderEstimateDocumentPdf } = require('../services/pdf/estimate-doc-pdf');
@@ -5045,14 +5059,14 @@ router.get('/:id/proposal.pdf', async (req, res, next) => {
     const { acceptanceRecordForEstimate } = require('../services/estimate-acceptance-record');
     // A delivered quote the public page no longer serves (archived, expired by
     // status or by date, send_failed after an earlier delivery, held for a
-    // re-price, invalidated) is viewed as the offer that was SENT:
-    // resolveProposalBillingContext would reprice it live
-    // (it only freezes accepted / declined / price-locked rows), so those rows
-    // render from the frozen send bundle instead. Only a real handoff writes that
+    // re-price, invalidated, call-blocked) is viewed as the offer that was
+    // SENT: resolveProposalBillingContext would reprice it live (it only
+    // freezes accepted / declined / price-locked rows), so those rows render
+    // from the frozen send bundle instead. Only a real handoff writes that
     // bundle, so a row without one (a first send that failed on every channel)
-    // has nothing to freeze to and keeps the live lane, like unsent rows (draft,
-    // scheduled, archived or not) and live quotes.
-    const sentBundle = parseEstimateData(estimate.estimate_data)?.sendSnapshot?.pricingBundle;
+    // has nothing to freeze to and keeps the live lane, like unsent rows
+    // (draft, scheduled, archived or not) and live quotes.
+    const sentBundle = data?.sendSnapshot?.pricingBundle;
     const sentOfferView = !publicViewable && !unsent && Boolean(sentBundle) && typeof sentBundle === 'object';
     generateEstimateProposalPDF(estimate, res, {
       ...(await (sentOfferView ? resolveFrozenBillingContext : resolveProposalBillingContext)(estimate)),

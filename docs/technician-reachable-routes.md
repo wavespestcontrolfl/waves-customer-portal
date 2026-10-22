@@ -427,6 +427,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | DELETE | `/api/admin/estimates/:id` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | PATCH | `/api/admin/estimates/:id` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | PUT | `/api/admin/estimates/:id` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
+| GET | `/api/admin/estimates/:id/acceptance` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/estimates/:id/archive` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/estimates/:id/edit-source` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/estimates/:id/extend` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |

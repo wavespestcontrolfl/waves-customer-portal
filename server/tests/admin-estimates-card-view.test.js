@@ -289,10 +289,16 @@ describe('GET /admin/estimates list shape', () => {
     expect(phoneBatch.mock.calls[0][0].map((r) => r.id)).toEqual(['e-lone']);
   });
 
-  test('staffPreviewable is the /data gate verdict: the staff draft preview or the customer page', async () => {
+  test('staffPreviewable is the /data gate verdict: the row verdicts, then the call-side verdict', async () => {
     mockView.draftPreview = new Set(['e-draft']);
-    mockView.customerViewable = new Set(['e-open']);
-    tableDb({ estimates: [base('e-open'), base('e-held'), base('e-draft', { status: 'draft' })] });
+    mockView.customerViewable = new Set(['e-open', 'e-call']);
+    const queries = tableDb({
+      estimates: [
+        base('e-open'), base('e-held'), base('e-draft', { status: 'draft' }),
+        // drafted from a call that is gone: the call-side verdict blocks it (call_missing)
+        base('e-call', { estimate_data: { sendSnapshot: { pricingBundle: pestBundle }, estimatorEngine: { callLogId: 'call-gone' } } }),
+      ],
+    });
     await withServer(async (baseUrl) => {
       const { estimates } = await (await fetch(`${baseUrl}/estimates?limit=all`)).json();
       const byId = Object.fromEntries(estimates.map((e) => [e.id, e]));
@@ -300,7 +306,10 @@ describe('GET /admin/estimates list shape', () => {
       // e.g. held for a re-price: the public page 404s it even for staff
       expect(byId['e-held'].staffPreviewable).toBe(false);
       expect(byId['e-draft'].staffPreviewable).toBe(true);
+      expect(byId['e-call'].staffPreviewable).toBe(false);
     });
+    // one batched call_log read for the page (callSideBlocksForEstimates), not one per row
+    expect(queries.filter((q) => q.table === 'call_log' && q.m === 'whereIn')).toHaveLength(1);
   });
 });
 
@@ -408,6 +417,21 @@ describe('GET /admin/estimates/:id/proposal.pdf billing context', () => {
     });
     expect(billing().resolveProposalBillingContext).toHaveBeenCalledTimes(1);
     expect(billing().resolveFrozenBillingContext).not.toHaveBeenCalled();
+  });
+
+  test('a call-blocked quote the public page refuses is rendered frozen too', async () => {
+    mockView.customerViewable = new Set(['e-call']);
+    tableDb({
+      estimates: [],
+      // single.call_log is absent: the linked call is gone (call_missing)
+      single: { estimates: base('e-call', { estimate_data: { sendSnapshot: { pricingBundle: pestBundle }, estimatorEngine: { callLogId: 'call-gone' } } }) },
+    });
+    await withServer(async (baseUrl) => {
+      expect((await fetch(`${baseUrl}/estimates/e-call/proposal.pdf`)).status).toBe(200);
+    });
+    expect(mockRenderDocPdf).not.toHaveBeenCalled();
+    expect(billing().resolveFrozenBillingContext).toHaveBeenCalledTimes(1);
+    expect(billing().resolveProposalBillingContext).not.toHaveBeenCalled();
   });
 
   test('a quote the public page serves keeps the live lane (the customer\'s copy)', async () => {
