@@ -14189,7 +14189,8 @@ const CallRecordingProcessor = {
       // gate off, findCustomerViaCallbackSpokenNumber returns null without a query.
       if (!existing && !sharedPhoneAmbiguity.candidates) {
         existing = await findCustomerViaCallbackSpokenNumber(call, extracted, { customerLinkOverride }).catch((e) => {
-          logger.warn(`[call-proc] Callback spoken-number lookup failed for ${maskSid(callSid)}: ${e.message}`);
+          // Name and code only: a query error message can carry the bound phone and names.
+          logger.warn(`[call-proc] Callback spoken-number lookup failed for ${maskSid(callSid)}: ${e?.code || e?.name || 'error'}`);
           return null;
         });
         if (existing) logger.info(`[call-proc] Callback ${maskSid(callSid)} linked to customer ${existing.id} via the voicemail's spoken number`);
