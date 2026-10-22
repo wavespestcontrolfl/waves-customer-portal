@@ -1273,21 +1273,6 @@ describe('r15: a verbatim COMPANY FACTS sentence answers a watering question; it
       }
     }
   });
-  // owner 2026-10-22: the lawn mow / water / weed-timing lines carry figures the clause rules read as label claims
-  test('a verbatim lawn-timing COMPANY FACTS sentence is not a label claim, but a spliced or altered one still is', () => {
-    const MOW = 'After a lawn visit, wait 24 hours to mow.';
-    const WEEDS = 'Weed control takes about 10 to 14 days to show, and some weeds need a second round.';
-    expect(COMPANY_FACTS.join(' ')).toContain(MOW);
-    expect(COMPANY_FACTS.join(' ')).toContain(WEEDS);
-    for (const inbound of ['When can I mow?', Q2, 'hello']) {
-      expect(guard(MOW, inbound)).toBe(false);
-      expect(guard(WEEDS, inbound)).toBe(false);
-    }
-    expect(guard('After a lawn visit, wait 25 hours to mow.', Q2)).toBe(true);
-    expect(guard(`${MOW} Pets can go out in 20 minutes.`, Q2)).toBe(true);
-    expect(guard('After a lawn visit, wait 24 hours to mow and then pets can go out in 10 minutes.', Q2)).toBe(true);
-    expect(guard('Wait 24 hours before pets go out.', Q2)).toBe(true);
-  });
   test('an answer-shaped add-on, a paraphrase or a modified copy is still held', () => {
     for (const reply of [
       'Yes, water whenever.', `Sure! ${WATERING}`, `Yes! ${WATERING}`, `${WATERING} Go for it.`, `${WATERING} Yes, they can.`, `Go for it. ${WATERING}`,

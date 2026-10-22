@@ -65,8 +65,7 @@ const COMPANY_FACTS = Object.freeze([
   'We serve Manatee and Sarasota counties and Charlotte County except Punta Gorda, plus Ruskin, Apollo Beach, Sun City Center, Wimauma, Gibsonton and Riverview. We do not serve Punta Gorda, DeSoto County, Tampa, St. Petersburg or Lee County.',
   'A WDO (termite) inspection report is emailed the same business day as the inspection.',
   'We do not tent for termites. For drywood termites we treat the infested wood directly with spot treatment, a borate wood treatment or injected foam.',
-  'After a lawn visit, wait 24 hours to mow. Do not water for 24 hours unless the visit card says to water it in.',
-  'Weed control takes about 10 to 14 days to show, and some weeds need a second round. If there is no change after two weeks, tell us.',
+  'After a lawn visit, the visit card says when to mow.',
   'Product labels: every service report lists each product applied, and the office can email a product label or Safety Data Sheet on request.',
 ]);
 

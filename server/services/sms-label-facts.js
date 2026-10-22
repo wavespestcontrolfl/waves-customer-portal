@@ -901,10 +901,7 @@ function clauseIsLabelClaim(input) {
  */
 function hasUngroundedLabelClaim(strippedText) {
   if (overCap(strippedText, MAX_REPLY_CHARS)) return true;
-  // A verbatim, complete-sentence copy of a COMPANY FACTS sentence is owner-approved wording, so it is
-  // not a label claim even when it carries a figure ("wait 24 hours to mow", owner 2026-10-22): it is
-  // marked out before the clause rules read the text. The reply's other sentences are still judged.
-  const text = markCompanySentences(canonText(strippedText)).toLowerCase();
+  const text = canonText(strippedText).toLowerCase();
   // The clause rules are English: another language's timing words are held outright.
   // (a verbatim COMPANY FACTS sentence is owner-approved English, however few function words it has)
   if (nonEnglishTimingWords(text) || hasUnsupportedLanguage(markCompanySentences(canonText(strippedText)))) return true;
