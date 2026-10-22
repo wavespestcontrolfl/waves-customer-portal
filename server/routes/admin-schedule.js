@@ -20331,13 +20331,28 @@ function normalizeTopUpWindow(windowStart, durationMinutes, windowEnd) {
   return { start: validated.window_start, end: validated.window_end };
 }
 
+// The place an extension child of `parent` is inserted at, resolved as the
+// insert resolves it: the plan's stamped address (template override applied,
+// copyStampedServiceAddressFields), then the series' agreed or sole property
+// when that leaves none (anchorSoleProperty). Read once for the taken-hour
+// probe and reused by the insert.
+async function seriesChildPlace(conn, parent, parentId, cols) {
+  const place = { customer_id: parent.customer_id, recurring_parent_id: parentId };
+  copyStampedServiceAddressFields(place, parent, cols);
+  await anchorSoleProperty(place, cols, conn);
+  delete place.customer_id;
+  delete place.recurring_parent_id;
+  return place;
+}
+
 // The next-date search of extendSeriesOnceLocked: the cadence walk. Returns
-// { nextStr, hitMaxDate, handOff, technicianId } for the caller to insert
-// (handOff: the top-up's taken hour, inserted without a time; technicianId:
-// the technician its probe read for nextStr, when it read one).
+// { nextStr, hitMaxDate, handOff, technicianId, childPlace } for the caller
+// to insert (handOff: the top-up's taken hour, inserted without a time;
+// technicianId / childPlace: the technician and place its probe read for
+// nextStr, when it read them).
 async function walkExtensionCandidates(ctx) {
   const {
-    conn, parent, parentId, opts, latestStr, rOpts, skipParent, dirParent,
+    conn, parent, parentId, cols, opts, latestStr, rOpts, skipParent, dirParent,
     blackoutDates: autoExtendBlackoutDates, existingDates, clashProbeTemplate,
   } = ctx;
   const { maxDate = null } = opts;
@@ -20356,9 +20371,11 @@ async function walkExtensionCandidates(ctx) {
   // Set when the top-up lands on a taken hour and hands the visit off
   // without a time (GATE_PLAN_TAKEN_HOUR_HANDOFF, below).
   let handOff = false;
-  // The technician the hand-off probe read for the chosen date; the insert
-  // reuses it, so the probe and the row never disagree (undefined = not read).
+  // The technician and place the hand-off probe read for the chosen date; the
+  // insert reuses both, so the probe and the row never disagree (undefined =
+  // not read).
   let technicianId;
+  let childPlace;
   while (attempt <= 12) {
     const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts);
     const candidate = seasonalSafeShift(rawNext, parent.recurring_pattern, skipParent, dirParent, autoExtendBlackoutDates);
@@ -20407,12 +20424,13 @@ async function walkExtensionCandidates(ctx) {
       // and auto-dispatch places it, instead of on top of it. The probe
       // carries the technician the insert will use on this date (the
       // template tech, or none when that tech cannot take it:
-      // assignableRecurringTemplateTechnicianId), read once and reused by the
-      // insert (Codex #6476 r1), and the template's place, which the insert
-      // copies (copyStampedServiceAddressFields).
+      // assignableRecurringTemplateTechnicianId) and the place the child
+      // gets (seriesChildPlace), each read once and reused by the insert
+      // (Codex #6476 r1 and its pre-push audits).
       if (planTakenHour.handoffEnabled()) {
         technicianId = await assignableRecurringTemplateTechnicianId(conn, parent, candidate);
-        handOff = await planTakenHour.takenHourHandoff(conn, { ...clashProbeTemplate, technician_id: technicianId }, { date: candidate });
+        if (!childPlace) childPlace = await seriesChildPlace(conn, parent, parentId, cols);
+        handOff = await planTakenHour.takenHourHandoff(conn, { ...clashProbeTemplate, ...childPlace, technician_id: technicianId }, { date: candidate });
       }
       if (handOff) {
         logger.info(`[recurring-topup] parent=${parentId} candidate ${candidate}: the plan's hour is taken — inserting without a time for auto-dispatch to place`);
@@ -20427,7 +20445,7 @@ async function walkExtensionCandidates(ctx) {
     nextStr = candidate;
     break;
   }
-  return { nextStr, hitMaxDate, handOff, technicianId };
+  return { nextStr, hitMaxDate, handOff, technicianId, childPlace };
 }
 
 // Returns the spawned-visit payload (for the caller's post-commit reminder
@@ -20500,8 +20518,10 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
     // (booster double-book rationale on the helper).
     const existingDates = await loadActiveSeriesDates(conn, parentId);
     const autoExtendBlackoutDates = await loadSeriesBlackoutDates(conn, latestStr);
-    const { nextStr, hitMaxDate, handOff, technicianId } = await walkExtensionCandidates({
-      conn, parent, parentId, opts, latestStr, rOpts, skipParent, dirParent,
+    const {
+      nextStr, hitMaxDate, handOff, technicianId, childPlace,
+    } = await walkExtensionCandidates({
+      conn, parent, parentId, cols, opts, latestStr, rOpts, skipParent, dirParent,
       blackoutDates: autoExtendBlackoutDates, existingDates, clashProbeTemplate,
     });
     // Re-check the ongoing flag immediately before inserting: it was
@@ -20552,8 +20572,14 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       if (cols.service_key_snapshot && childIdentity.service_key) nextData.service_key_snapshot = childIdentity.service_key;
       copyAppointmentDiscountFields(nextData, parent, cols);
       copyBillToFields(nextData, parent, cols);
-      copyStampedServiceAddressFields(nextData, parent, cols);
-      await anchorSoleProperty(nextData, cols, conn);
+      // The place the taken-hour probe read, when it read one (one resolution
+      // for the probe and the insert); else resolved here, as before.
+      if (childPlace) {
+        Object.assign(nextData, childPlace);
+      } else {
+        copyStampedServiceAddressFields(nextData, parent, cols);
+        await anchorSoleProperty(nextData, cols, conn);
+      }
       // Taken hour (walkExtensionCandidates): no time on the new visit; its
       // cadence date is the due date auto-dispatch places it by.
       // The window fields are on nextData already; the rest where the column exists.

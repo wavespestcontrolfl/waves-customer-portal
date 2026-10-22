@@ -25,6 +25,11 @@ jest.mock('../services/service-completion-profiles', () => ({
   ...jest.requireActual('../services/service-completion-profiles'),
   resolveCompletionProfileForScheduledService: jest.fn(async () => ({ synthesized: true, billingType: null })),
 }));
+// The child's property anchor, passed through unless a test overrides it.
+jest.mock('../services/customer-properties', () => {
+  const actual = jest.requireActual('../services/customer-properties');
+  return { ...actual, anchorSoleProperty: jest.fn(actual.anchorSoleProperty) };
+});
 jest.mock('../services/appointment-reminders', () => ({
   registerAppointment: jest.fn().mockResolvedValue(undefined),
   resolveCommittedVisitTime: jest.fn(async () => null),
@@ -1428,6 +1433,29 @@ describe('topUpRecurringSeriesLocked — a taken hour hands the visit off withou
     expect(scenario.inserted.length).toBeGreaterThan(1);
     expect(scenario.inserted[1].technician_id).toBeNull();
     expect(absenceReads).toBe(scenario.inserted.length);
+  });
+
+  test('gate on: the probe measures the place the child is inserted at, resolved once (the series property the anchor adopts)', async () => {
+    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+    const { anchorSoleProperty } = require('../services/customer-properties');
+    const currentConflict = require('../services/auto-dispatch/current-conflict');
+    anchorSoleProperty.mockClear();
+    // An unstamped legacy parent: the anchor adopts the house the series is already at.
+    anchorSoleProperty.mockImplementationOnce(async (target) => { target.property_id = 'prop-series'; target.service_address_line1 = '200 Sample Road'; });
+    findConflictingVisits.mockReset()
+      .mockResolvedValueOnce([{ id: 'own-stop', customer_id: 5 }])
+      .mockResolvedValue([]);
+    const samePlaceSpy = jest.spyOn(currentConflict, 'samePlaceIdsAt').mockResolvedValue(new Set());
+    try {
+      const scenario = topupScenario(fixtureArgs);
+      await topUpRecurringSeriesLocked(scenario.conn, 10, { horizonDays: 14 });
+      expect(samePlaceSpy.mock.calls[0][1]).toMatchObject({ property_id: 'prop-series', service_address_line1: '200 Sample Road' });
+      // The insert carries that same place, from the one anchor read (no second one for it).
+      expect(scenario.inserted[0]).toMatchObject({ property_id: 'prop-series', service_address_line1: '200 Sample Road' });
+      expect(anchorSoleProperty).toHaveBeenCalledTimes(scenario.inserted.length);
+    } finally {
+      samePlaceSpy.mockRestore();
+    }
   });
 
   describe("gate on, the customer's own stop in the hour", () => {
