@@ -67,6 +67,17 @@ describe('cancelCallFollowUpsForParentCancel with approvedChildren', () => {
     expect(transitionJobStatus.mock.calls[0][0].notifyCustomer).toBe(false);
   });
 
+  test('an approved cascade hands the money seam to the caller, so money that lands after the lock check is never voided or reversed unpinned', async () => {
+    await run();
+    expect(transitionJobStatus.mock.calls[0][0].moneySeam).toBe('caller');
+  });
+
+  test('without approvedChildren the child keeps the ordinary money seam (no moneySeam key)', async () => {
+    const { conn } = fakeConn({ children: [CHILD], locked: {} });
+    await cancelCallFollowUpsForParentCancel({ conn, parentServiceId: 'svc-parent' });
+    expect(Object.keys(transitionJobStatus.mock.calls[0][0])).not.toContain('moneySeam');
+  });
+
   test('without approvedChildren a call-booked child keeps its own notice behavior (unchanged)', async () => {
     const call = { id: 'child-1', status: 'pending', source_action: 'ai_call_pipeline_followup' };
     const { conn } = fakeConn({ children: [call], locked: {} });

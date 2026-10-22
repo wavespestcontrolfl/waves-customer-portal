@@ -960,6 +960,10 @@ async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actor
           // An approved cascade (the Intelligence Bar cancel card, which promises no text for a linked visit) texts
           // no child either, call-booked or package.
           ...(child.source_action === PACKAGE_FOLLOWUP_SOURCE_ACTION || approved ? { notifyCustomer: false } : {}),
+          // An approved child was checked money-free under its own lock, and the card promised nothing about its money.
+          // An invoice or inspection credit that lands between that check and the post-commit hook must not reach the
+          // ordinary unpinned void/reversal seam (it never appeared on the card or in moneyReport); it is left for office review.
+          ...(approved ? { moneySeam: 'caller' } : {}),
           trx,
         });
         await trx('scheduled_services')
