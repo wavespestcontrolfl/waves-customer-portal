@@ -858,7 +858,7 @@ describe('Google Business review sync', () => {
       db.__state.rows.google_reviews.push({
         id: 'gbp-row', google_review_id: GBP_ID, gbp_review_name: GBP_ID,
         location_id: 'bradenton', reviewer_name: 'Reviewer Gamma', star_rating: 5, review_text: 'Lovely service',
-        review_created_at: '2026-05-25T12:00:01Z', customer_id: null, review_reply: null,
+        review_created_at: '2026-05-25T12:00:00.400Z', customer_id: null, review_reply: null,
       });
     };
 
@@ -905,16 +905,35 @@ describe('Google Business review sync', () => {
       expect(db.__state.rows.google_reviews.filter(r => r.reviewer_name === 'Reviewer Gamma').map(r => r.id)).toEqual(['gbp-row']);
     });
 
-    test('a holder of the id that is a different reviewer is never merged (old behavior stands)', async () => {
+    describe('not corroborated as one review: no merge, the pair stays for manual review', () => {
+      const incoming = { google_review_id: GBP_ID, gbp_review_name: GBP_ID, reviewer_name: 'Reviewer Gamma' };
+      const attempt = async (mutate, normalized = incoming) => {
+        seed();
+        const byId = id => db.__state.rows.google_reviews.find(r => r.id === id);
+        mutate(byId('places-row'), byId('gbp-row'));
+        const merged = await service._mergePlacesRowIntoGbpRow({ ...byId('places-row') }, normalized);
+        expect(merged).toBeNull();
+        expect(db.__state.rows.google_reviews.map(r => r.id)).toEqual(expect.arrayContaining(['places-row', 'gbp-row']));
+        expect(db.__state.deletes || []).toEqual([]);
+      };
+
+      test('holder is a different reviewer', () => attempt((a, b) => { b.reviewer_name = 'Someone Else'; }));
+      test('incoming GBP reviewer name differs from both rows', () => attempt(() => {}, { ...incoming, reviewer_name: 'Someone Else' }));
+      test('different review text', () => attempt((a) => { a.review_text = 'A different review entirely'; }));
+      test('empty text on both rows is not corroboration', () => attempt((a, b) => { a.review_text = ''; b.review_text = null; }));
+      test('different star rating', () => attempt((a) => { a.star_rating = 4; }));
+      test('one hour apart', () => attempt((a) => { a.review_created_at = '2026-05-25T11:00:00Z'; }));
+      test('different location', () => attempt((a) => { a.location_id = 'sarasota'; }));
+    });
+
+    test('whitespace differences in the text still corroborate (and a 2 s gap is allowed)', async () => {
       seed();
-      db.__state.rows.google_reviews.find(r => r.id === 'gbp-row').reviewer_name = 'Someone Else';
-      const merged = await service._mergePlacesRowIntoGbpRow(
-        db.__state.rows.google_reviews.find(r => r.id === 'places-row'),
-        { google_review_id: GBP_ID, gbp_review_name: GBP_ID },
-      );
-      expect(merged).toBeNull();
-      expect(db.__state.rows.google_reviews.map(r => r.id)).toEqual(expect.arrayContaining(['places-row', 'gbp-row']));
-      expect(db.__state.deletes || []).toEqual([]);
+      const byId = id => db.__state.rows.google_reviews.find(r => r.id === id);
+      byId('gbp-row').review_text = '  Lovely   service\n';
+      byId('gbp-row').review_created_at = '2026-05-25T12:00:02Z';
+      const merged = await service._mergePlacesRowIntoGbpRow({ ...byId('places-row') }, { google_review_id: GBP_ID, gbp_review_name: GBP_ID, reviewer_name: ' reviewer gamma ' });
+      expect(merged).toMatchObject({ id: 'gbp-row' });
+      expect(db.__state.deletes).toEqual([{ table: 'google_reviews', id: 'places-row' }]);
     });
   });
 

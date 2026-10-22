@@ -967,13 +967,29 @@ class GoogleBusinessService {
     return db.transaction(async (trx) => {
       const holder = await trx('google_reviews').where({ google_review_id: normalized.google_review_id }).forUpdate().first();
       if (!holder || holder.id === placesRow.id) return null;
-      if (holder.location_id !== placesRow.location_id
-        || String(holder.reviewer_name || '').trim().toLowerCase() !== String(placesRow.reviewer_name || '').trim().toLowerCase()) {
-        return null;
-      }
       const places = await trx('google_reviews').where({ id: placesRow.id }).forUpdate().first();
       // Another runner merged it first: the GBP row is the answer.
       if (!places) return holder;
+      // Display names are not unique across Google accounts, so the pair must
+      // be corroborated as ONE review before anything is deleted: same
+      // location, the incoming GBP review's reviewer is both rows' reviewer,
+      // same stars, same non-empty text, and the same moment (the Places time
+      // is truncated to whole seconds). Anything else stays a manual review:
+      // null here leaves the old failure and its alert in place.
+      const nameKey = v => String(v || '').trim().toLowerCase();
+      const textKey = v => String(v || '').replace(/\s+/g, ' ').trim();
+      const placesAt = new Date(places.review_created_at).getTime();
+      const holderAt = new Date(holder.review_created_at).getTime();
+      const sameReview = holder.location_id === places.location_id
+        && nameKey(normalized.reviewer_name) !== ''
+        && nameKey(normalized.reviewer_name) === nameKey(holder.reviewer_name)
+        && nameKey(normalized.reviewer_name) === nameKey(places.reviewer_name)
+        && Number(holder.star_rating) === Number(places.star_rating)
+        && textKey(places.review_text) !== ''
+        && textKey(places.review_text) === textKey(holder.review_text)
+        && Number.isFinite(placesAt) && Number.isFinite(holderAt)
+        && Math.abs(placesAt - holderAt) <= 2000;
+      if (!sameReview) return null;
 
       const carry = {};
       if (!holder.customer_id && places.customer_id) {
