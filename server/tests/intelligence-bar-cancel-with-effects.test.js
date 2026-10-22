@@ -282,6 +282,17 @@ describe('cancel_appointment confirm WITH effects replays the Dispatch cancel', 
     expect(result.warning).toMatch(/customer text did not go out/);
   });
 
+  test('one recipient reached and another blocked without a throw: partial warning names the recipient kind, no resend advice', async () => {
+    mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, notificationSent: true, notificationPartial: true, notificationError: 'The text went to some recipients, but not to the service contact (blocked, opted out or failed). Do not resend to those already reached.' } });
+    const result = await executeTool('cancel_appointment', input(), ADMIN);
+    expect(result.customer_text_sent).toBe(true);
+    expect(result.customer_text_partial).toBe(true);
+    expect(result.warning).toMatch(/went to some recipients, but not all/);
+    expect(result.warning).toMatch(/not to the service contact/);
+    expect(result.warning).toMatch(/Do not send it again to those already reached/);
+    expect(result.warning).not.toMatch(/send it by hand/);
+  });
+
   test('delivery uncertain (the provider may have accepted it) says check the history, never "send it by hand"', async () => {
     mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, notificationSent: false, notificationUncertain: true, notificationError: 'The text may have gone out (audit insert failed). Check the customer\'s message history before sending it again.' } });
     const result = await executeTool('cancel_appointment', input(), ADMIN);

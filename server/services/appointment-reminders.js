@@ -1781,6 +1781,14 @@ async function resolveNoticeContacts(customer, prefs, messageType, purpose = 'ap
   return { contacts, allowedContacts };
 }
 
+// Notes a fan-out contact nobody reached (see sharedOutcome.failedRecipients in safeSendAppointment). A contact held for
+// a later send (the quiet-hours queue) has its own rail and is not a failure.
+function recordFailedRecipient(sharedOutcome, contact, sent) {
+  if (sent) return;
+  if (sharedOutcome.lastCode === 'QUIET_HOURS_HOLD' && sharedOutcome.lastDeferred && sharedOutcome.lastNextAllowedAt) return;
+  sharedOutcome.failedRecipients.push(isServiceContactRole(contact.role) ? 'service contact' : 'account holder');
+}
+
 async function safeSendAppointment(customer, prefs, renderBody, messageType = 'appointment_reminder', purpose = 'appointment', metaExtra = {}, sendOptions = {}) {
   // An UNREADABLE preferences row (a failed notification_prefs read, or a
   // saved property whose toggles could not be read under
@@ -1882,6 +1890,11 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
     : {};
   const heldContacts = [];
   const moveHeldRoles = [];
+  // Recipients this fan-out reached nobody at (provider failure, opt-out, landline block...) while the call as a whole
+  // may still return true because ANOTHER contact was accepted. Out-param only, never part of the boolean return:
+  // a caller that finalizes on acceptance (handleCancellation) reads it to report a partial delivery. Contacts held
+  // for a later send (quiet hours queue, move-hold office hand-off) have their own rail and are not listed.
+  sharedOutcome.failedRecipients = [];
   // Only the holder can use App. Resolve that leg before accepting any
   // contact text, so a pending push can leave the whole reminder open.
   const primaryPhone = lastTenDigits(customer.phone);
@@ -1927,6 +1940,7 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
       moveHeldRoles.push(contact.role || 'service');
       continue;
     }
+    recordFailedRecipient(sharedOutcome, contact, sent);
     sentAny = sentAny || sent;
   }
   if (sentAny && moveHeldRoles.length) {
@@ -2840,6 +2854,13 @@ async function sendCancellationNotice({ record, scheduledServiceId, options, not
       // provider layer catches 429/5xx/timeouts, so they arrive
       // here as sent:false + retryable, never as a throw).
       await finalizeClaim(false, { retryable: sendOutcome.retryable === true });
+    }
+    // One recipient accepted and another failed WITHOUT throwing (provider failure, opt-out, landline block): the
+    // fan-out still returns true and the claim stays 'sent' (a retry would re-text those reached), so say it was partial.
+    const failedRecipients = noticeSent ? (sendOutcome.failedRecipients || []) : [];
+    if (failedRecipients.length) {
+      reportOutcome(true, `The text went to some recipients, but not to the ${[...new Set(failedRecipients)].join(' and the ')} (blocked, opted out or failed). Do not resend to those already reached.`, { partial: true });
+      return;
     }
     reportOutcome(noticeSent, noticeSent
       ? null

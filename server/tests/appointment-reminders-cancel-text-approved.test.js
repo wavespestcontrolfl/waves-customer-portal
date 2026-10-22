@@ -178,6 +178,44 @@ describe('handleCancellation sends the approved text', () => {
     expect(outcome.notificationPartial).toBeUndefined();
   });
 
+  test('one recipient reached and another BLOCKED without a throw is reported partial (claim stays sent, no retry)', async () => {
+    mockState.customer = {
+      ...mockState.customer, service_contact_name: 'Sam', service_contact_phone: '+19415550202', service_contacts_consent_at: '2026-07-23T00:00:00Z',
+    };
+    const preview = await AppointmentReminders.previewCancellationText('svc-1');
+    expect(preview.recipients).toHaveLength(2);
+    // The primary is texted first; the service contact is refused by the provider layer (opt-out / landline block).
+    mockSendCustomerMessage
+      .mockResolvedValueOnce({ sent: true, blocked: false })
+      .mockResolvedValueOnce({ sent: false, blocked: true, code: 'RECIPIENT_OPTED_OUT' });
+    const outcome = {};
+    await AppointmentReminders.handleCancellation('svc-1', {
+      outcome, approvedNotice: preview.recipients.map(({ recipient_key, body }) => ({ recipient_key, body })),
+    });
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(2);
+    expect(outcome.notificationSent).toBe(true);
+    expect(outcome.notificationPartial).toBe(true);
+    expect(outcome.notificationError).toMatch(/not to the service contact/);
+    expect(outcome.notificationError).toMatch(/Do not resend to those already reached/);
+    expect(outcome.notificationError).not.toMatch(/\d{10}/); // no phone numbers
+    const states = mockState.updates.filter((p) => typeof p.cancellation_notice_state === 'string').map((p) => p.cancellation_notice_state);
+    expect(states[states.length - 1]).toBe('sent');
+  });
+
+  test('every recipient reached is a clean success (no partial flag)', async () => {
+    mockState.customer = {
+      ...mockState.customer, service_contact_name: 'Sam', service_contact_phone: '+19415550202', service_contacts_consent_at: '2026-07-23T00:00:00Z',
+    };
+    const preview = await AppointmentReminders.previewCancellationText('svc-1');
+    const outcome = {};
+    await AppointmentReminders.handleCancellation('svc-1', {
+      outcome, approvedNotice: preview.recipients.map(({ recipient_key, body }) => ({ recipient_key, body })),
+    });
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(2);
+    expect(outcome).toMatchObject({ notificationSent: true, notificationError: null });
+    expect(outcome.notificationPartial).toBeUndefined();
+  });
+
   test('a recipient reached before a later recipient failed is reported as a PARTIAL delivery, never as not-sent', async () => {
     const preview = await AppointmentReminders.previewCancellationText('svc-1');
     // The service contact was added after the card: the primary is approved and sends, the new contact is refused.
