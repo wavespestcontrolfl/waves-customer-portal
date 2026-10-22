@@ -520,5 +520,6 @@ module.exports = {
   MAX_OWN_CANDIDATES,
   OWN_ACCOUNT_REASONS,
   suggestFamilyAccounts,
+  operatorClosedCard,
   fileFamilyAccountCard,
 };

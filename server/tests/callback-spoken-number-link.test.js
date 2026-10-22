@@ -212,6 +212,17 @@ describe('findCustomerViaCallbackSpokenNumber', () => {
 // (family_account_candidates) as the callback_spoken_number basis, so the card keeps that card's whole
 // lifecycle (refresh and retire on reprocess, admin-only, Resolve, review-status sync, evidence).
 describe('callback_spoken_number basis of the family-account card', () => {
+  test('operatorClosedCard is true only for a card a person closed (resolution_source human)', async () => {
+    const rows = [];
+    const db2 = () => {
+      const b = { where: () => b, whereIn: () => b, first: async () => rows.shift() || null };
+      return b;
+    };
+    rows.push({ id: 'closed' });
+    await expect(familyLink.operatorClosedCard(db2, 'cb-1')).resolves.toBe(true);
+    await expect(familyLink.operatorClosedCard(db2, 'cb-1')).resolves.toBe(false);
+  });
+
   // customers: one result array per customers query, in call order. One match = the voicemail-number
   // lookup, then the pass's normal lookup on the contact number (its name query and its phone query;
   // empty = nobody there). A NEW card runs the match twice (suggestFamilyAccounts re-checks it).
@@ -363,6 +374,12 @@ describe('Step 3 keeps a spoken-number match suggest-only', () => {
     expect(set).toBeGreaterThan(src.indexOf('const existing = await findCustomerForCallContact(phone, extracted, {'));
     expect(src.slice(set - 120, set)).toContain('if (!existing && !sharedPhoneAmbiguity.candidates) {');
     expect(src).toMatch(/await require\('\.\/call-family-name-link'\)\.fileFamilyAccountCard\(/);
+  });
+
+  test('a card an operator closed by hand ends the suppression; a failed read keeps it', () => {
+    const set = src.indexOf('spokenNumberSuggested = !!(await findCustomerViaCallbackSpokenNumber(');
+    const tail = src.slice(set, set + 1400);
+    expect(tail).toMatch(/operatorClosedCard\(db, call\.id\)\.catch\(\(\) => false\)\) \{\s*spokenNumberSuggested = false;/);
   });
 
   test('a deliberate customer-less result is not a customer_creation_failed, and the lead path stays unclaimed-only', () => {

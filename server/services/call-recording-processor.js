@@ -14214,6 +14214,12 @@ const CallRecordingProcessor = {
           logger.warn(`[call-proc] Callback spoken-number lookup failed for ${maskSid(callSid)}: ${e?.code || e?.name || 'error'}`);
           return null;
         }));
+        // A person who closed the account suggestion by hand ("not them") has decided: the pass goes
+        // back to what it did before this gate. A failed read keeps the suppression (no duplicate).
+        if (spokenNumberSuggested
+          && await require('./call-family-name-link').operatorClosedCard(db, call.id).catch(() => false)) {
+          spokenNumberSuggested = false;
+        }
       }
       if (existing) {
         customerId = existing.id;
