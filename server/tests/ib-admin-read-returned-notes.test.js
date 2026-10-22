@@ -532,6 +532,65 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     expect(scrubNote(note).text).toBe(expected);
   });
 
+  test('a credential query value with a JSON-escaped slash is removed whole (r15)', () => {
+    const { text } = scrubNote('ftp:\\/\\/host.example\\/x?token=abc\\/hunter22 and ftp://h.example/y?key=ab/cd12');
+    expect(text).not.toMatch(/hunter22|cd12/);
+    expect(text).toContain('token=[removed]');
+  });
+
+  test.each([
+    ['SECRETARY_NAME=Alice Smith'],
+    ['TOKENIZER_MODEL=bert base'],
+    ['SECRETION_RATE=normal'],
+    ['PASSIVE_MODE=on and off'],
+  ])('a name that only contains a stem as part of a word stays: %s (r15)', (note) => {
+    expect(scrubNote(note).text).toBe(note);
+  });
+
+  test.each([
+    ['DB_PASSWORD=hunter 22', 'DB_PASSWORD=[removed]'],
+    ['STRIPE_SECRET_KEY=abcd efg', 'STRIPE_SECRET_KEY=[removed]'],
+    ['API_TOKEN=abc def', 'API_TOKEN=[removed]'],
+    ['GITHUB_TOKEN=ghx12', 'GITHUB_TOKEN=[removed]'],
+    ['PRIVATE_KEY=abc def', 'PRIVATE_KEY=[removed]'],
+    ['db.credentials=one two', 'db.credentials=[removed]'],
+  ])('a stem as a whole name segment still matches: %s (r15)', (note, expected) => {
+    expect(scrubNote(note).text).toBe(expected);
+  });
+
+  test.each([
+    ['PASSWORD=[removed]hunter22', 'PASSWORD=[removed]'],
+    ['db.password: [removed]hunter22', 'db.password: [removed]'],
+    ['{"password":"[removed]hunter22"}', '{"password":"[removed]"}'],
+    ['{\\"password\\":\\"[removed]hunter22\\"}', '{\\"password\\":\\"[removed]\\"}'],
+  ])('a marker with a secret glued to it is not "already removed": %s (r15)', (note, expected) => {
+    const { text } = scrubNote(note);
+    expect(text).toBe(expected);
+    expect(scrubNote(text).text).toBe(text);
+  });
+
+  test('a second pass over clean output changes nothing (r15)', () => {
+    const once = scrubNote('DB_PASSWORD=hunter 22; api key: abc12345; {"token":"abcd1234"} https://h.example/x?sig=zz99 PASSWORD=[removed] tail').text;
+    expect(scrubNote(once).text).toBe(once);
+  });
+
+  test('a tracker URL wrapping a live short link is removed, encoded once or twice or in a fragment (r15)', async () => {
+    const inner = 'https://portal.wavespestcontrol.com/l/abc234def5';
+    const wrapped = [
+      `https://track.example.test/c?u=${encodeURIComponent(inner)}&id=1`,
+      `https://track.example.test/c?u=${encodeURIComponent(encodeURIComponent(inner))}`,
+      `https://track.example.test/r#${inner}`,
+      `https://track.example.test/redirect/${encodeURIComponent(inner)}`,
+    ];
+    for (const link of wrapped) {
+      const result = await read(ENTRY, { id: 1, notes: `open ${link} now` });
+      expect(result.data.notes).toBe('open [private link removed] now');
+    }
+    const harmless = `see https://track.example.test/c?u=${encodeURIComponent('https://www.example.test/maps?q=1')}`;
+    const kept = await read(ENTRY, { id: 1, notes: harmless });
+    expect(kept.data.notes).toBe(harmless);
+  });
+
   test('a card number inside a long grouped digit run is masked', () => {
     const note = `ref 4242 4242 4242 4242${' 1111'.repeat(27)} end`;
     const { text, removed } = scrubNote(note);

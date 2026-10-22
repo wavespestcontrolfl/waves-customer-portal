@@ -223,12 +223,37 @@ function isOwnPrivateLink(url) {
   return !(PUBLIC_CONTENT_SEGMENTS.has(segments[0].toLowerCase()) && !url.search);
 }
 
+// WRAPPED LINKS. A tracker or redirect URL can carry a live customer link as a
+// query value, a fragment or a path part, percent-encoded once or twice
+// (https://track.example.test/c?u=https%3A%2F%2Fportal.../l/abc234def5). Only the
+// outer URL was judged, and a 10-character short code is under the random-run
+// heuristic. Every value is decoded (up to two levels) and each link inside is judged by the
+// same rules, including our own hosts at any token length (Codex #6375 r15).
+const MAX_WRAP_DEPTH = 2;
+function decodeOnce(text) {
+  try { return decodeURIComponent(text); } catch { return text; }
+}
+function wrappedLinkVerdict(url, depth) {
+  if (depth >= MAX_WRAP_DEPTH) return null;
+  const parts = [...url.searchParams.values(), url.hash.replace(/^#/, ''), decodeOnce(url.pathname)];
+  for (const part of parts) {
+    for (const text of [part, decodeOnce(part)]) {
+      for (const match of text.match(URL_IN_TEXT_RE) || []) {
+        const verdict = absoluteLinkVerdict(splitTail(match).link, depth + 1);
+        if (verdict) return verdict;
+      }
+    }
+  }
+  return null;
+}
+
 // The verdict for an absolute link (href with a scheme), or null to leave it.
-function absoluteLinkVerdict(href) {
+function absoluteLinkVerdict(href, depth = 0) {
   if (isSignedLink(href)) return REDACTED_LINK;
   let url;
   try { url = new URL(href); } catch { return REDACTED_LINK; }
-  return isOwnPrivateLink(url) || isPrivateLink(href) ? REDACTED_PRIVATE_LINK : null;
+  if (isOwnPrivateLink(url) || isPrivateLink(href)) return REDACTED_PRIVATE_LINK;
+  return wrappedLinkVerdict(url, depth);
 }
 
 function redactString(text, state) {

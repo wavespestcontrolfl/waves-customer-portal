@@ -86,12 +86,13 @@ function looksLikeBasicCredential(header, token) {
 }
 // An environment-style assignment whose NAME says it is a secret (DB_PASSWORD=x,
 // STRIPE_SECRET_KEY=x, API_TOKEN=x). A fixed config format, not a prose label:
-// name in any case (api_token=x), '=' (spaces around it allowed); the bare stem PASS counts only as a
-// whole name segment, so compass=, bypass= and passenger= are ordinary words (Codex #6375 r14). An unquoted value runs to the end of the line or an inline
+// name in any case (api_token=x), '=' (spaces around it allowed); a stem (PASS, SECRET, TOKEN, PASSWORD, ...)
+// counts only as a whole name segment, so compass=, bypass=, SECRETARY_NAME= and TOKENIZER_MODEL= are
+// ordinary words (Codex #6375 r14, r15). An unquoted value runs to the end of the line or an inline
 // comment (" #"), as dotenv reads it: DB_PASSWORD=hunter 22 (Codex #6375 r2, r13). It stops before a
 // field delimiter (", " or "; ") and gives up the extra words when another assignment follows on the
 // line ("x=hunter22 and api key: y"): that one is taken by the rules after this.
-const ENV_SECRET_RE = /\b((?:[A-Z][A-Z0-9_]*)?(?:PASSWORD|PASSWD|(?<![A-Z0-9])PASS(?![A-Z0-9])|SECRET|TOKEN|API_?KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]*)([ \t]*=[ \t]*)(\\"(?:[^\\\n]|\\(?!"))*\\"|\\'(?:[^\\\n]|\\(?!'))*\\'|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S*[^\s,;}\]](?:[ \t]+(?!#)[^\s=:]*[^\s,;}\]=:])*(?![^\n#]*[=:])|\S*[^\s,;}\]])/gi;
+const ENV_SECRET_RE = /\b((?:[A-Z][A-Z0-9_]*)?(?<![A-Z0-9])(?:PASSWORD|PASSWD|PASS|SECRET|TOKEN|API_?KEY|PRIVATE_KEY|CREDENTIALS?)(?![A-Z0-9])[A-Z0-9_]*)([ \t]*=[ \t]*)(\\"(?:[^\\\n]|\\(?!"))*\\"|\\'(?:[^\\\n]|\\(?!'))*\\'|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[removed\](?![^\s,;}\]])|(?:\[removed\]|\S)*(?:\[removed\]|[^\s,;}\]])(?:[ \t]+(?!#)(?:\[removed\]|[^\s=:])*(?:\[removed\]|[^\s,;}\]=:]))*(?![^\n#]*[=:])|(?:\[removed\]|\S)*(?:\[removed\]|[^\s,;}\]]))/gi;
 // Structural credential assignments in a config or header format (Codex #6375 r7):
 // "db.password: hunter22", "DB_PASSWORD = hunter22", "X-API-Key: abc123xyz",
 // "Authorization: Token abc123xyz". The KEY must end in a credential word (names
@@ -110,7 +111,7 @@ const AUTH_HEADER_RE = /(\bauthorization[ \t]*[:=][ \t]*)([A-Za-z][A-Za-z0-9_-]*
 // ("id":1,"password":"x") cannot swallow the next one (pre-push audit, r9).
 // A double-serialized blob keeps its quotes escaped ({\"password\":\"hunter22\"}); the key and
 // value quotes may be a backslash plus a quote, and the output keeps that shape (Codex #6375 r11).
-const KEY_ASSIGN_RE = /(?<![A-Za-z0-9_.-])(\\?["']?)((?:api[ \t]+)?[A-Za-z][A-Za-z0-9_.-]*)\1([ \t]*[=:][ \t]*)(\\"(?:[^\\\n]|\\(?!"))*\\"|\\'(?:[^\\\n]|\\(?!'))*\\'|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|[^\s,;}\]"']{4,})/gi;
+const KEY_ASSIGN_RE = /(?<![A-Za-z0-9_.-])(\\?["']?)((?:api[ \t]+)?[A-Za-z][A-Za-z0-9_.-]*)\1([ \t]*[=:][ \t]*)(\\"(?:[^\\\n]|\\(?!"))*\\"|\\'(?:[^\\\n]|\\(?!'))*\\'|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|(?=[^\s,;}\]"']{4}|\[removed\])(?:\[removed\]|[^\s,;}\]"'])+)/gi;
 const ASSIGN_KEY_WORDS = new Set(['password', 'passwd', 'secret', 'token', 'apikey', 'credential', 'credentials', 'auth', 'authorization']);
 function isAssignmentSecretKey(key) {
   const words = nameWords(key);
@@ -118,9 +119,10 @@ function isAssignmentSecretKey(key) {
   if (ASSIGN_KEY_WORDS.has(last)) return true;
   return last === 'key' && words[words.length - 2] === 'api';
 }
-// Matched by the marker's opening (an unquoted value now stops before ']').
-const REMOVED_OPEN = REMOVED.replace(/\]$/, '');
-const isAlreadyRemoved = value => value.replace(/^\\?["']/, '').startsWith(REMOVED_OPEN);
+// Only the exact marker (bare, or inside matching quotes or escaped quotes) counts as already removed:
+// "[removed]hunter22" still has its secret (Codex #6375 r15).
+const ALREADY_REMOVED_RE = /^(?:\[removed\]|(["']|\\["'])\[removed\]\1)$/;
+const isAlreadyRemoved = value => ALREADY_REMOVED_RE.test(value);
 
 const JWT_RE = /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*/g;
 // A JSON-escaped link (https:\/\/user:pw@host\/path) is a link too: the scheme slashes
@@ -131,7 +133,8 @@ const URL_RE = /(?<![A-Za-z0-9+.-])[a-z][a-z0-9+.-]*:(?:\\?\/){2}(?:[^\s"'<>\\]|
 // smb://, ...); the http(s) links above also go through scrubUrl (Codex #6375).
 const ANY_SCHEME_USERINFO_RE = /\b([a-z][a-z0-9+.-]*:(?:\\?\/){2})[^\s\/@:"'<>\\]*:[^\s\/@"'<>\\]+@/gi;
 const URL_USERINFO_RE = /^([a-z][a-z0-9+.-]*:(?:\\?\/){2}[^\s/:@?#\\]*:)[^\s/@?#\\]+@/i;
-const QUERY_PARAM_RE = /([?&#;])([A-Za-z0-9_.%+[\]-]+)=([^&#\s"'<>\\]*)/g;
+// A value may hold a JSON-escaped slash (token=abc\/hunter22): it is part of the value (Codex #6375 r15).
+const QUERY_PARAM_RE = /([?&#;])([A-Za-z0-9_.%+[\]-]+)=((?:[^&#\s"'<>\\]|\\\/)*)/g;
 // Credential names that are not credential words as a field name but are as a
 // query key (the same short list signed-link-redaction.js keeps for links).
 const EXTRA_QUERY_KEYS = new Set(['key', 'auth', 'sid', 'ticket', 'pwd', 'pass', 'sessionid', 'authtoken', 'accesstoken', 'idtoken', 'apikey', 'awsaccesskeyid', 'key-pair-id']);
