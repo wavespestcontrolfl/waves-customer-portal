@@ -13,6 +13,7 @@
  *   GATE_EMAIL_AUTH_STRICT=true (inbound email trust: hasAlignedAuth parses only real Authentication-Results method results, and a vendor invoice books an expense only when the sender authenticated as its From domain; strict `=== 'true'`, read at call time by emailAuthStrictLive(); dark by default; sends nothing to a customer)
  *   GATE_DEDUPE_NO_UNVERIFIED_BACKFILL=true (the nightly duplicate auto-merge does not merge an untouched anonymous web-intake row whose typed email is not the kept customer's email; the pair stays on the Duplicates page for a manual merge; manual merges unchanged; strict opt-in read at call time by customer-dedupe.js; dark by default; sends nothing to a customer)
  *   GATE_NEWSLETTER_CLICK_BOUND=true (security audit run 2, 2026-10-22: the newsletter event link /api/public/newsletter/e/:token/:eventId redirects to the event's URL only when the token is a real delivery and the event is in that send's lineup (locked or alternate ids); any other pair goes to the homepage, so the portal host is not an open redirect; the target is the URL the send carried (newsletter_sends.event_url_snapshot, written at send time). Read at call time via newsletterClickBoundLive(), strict 'true', dark by default; off = redirect exactly as before. Sends nothing.)
+ *   GATE_PREPAY_REFUND_90_DAY=true (owner 2026-10-22, R7: no prepay refund after 90 days, so the customer keeps the paid coverage. "End now" is not offered, and a commit for it is refused 409 end_now_past_refund_window, when the cancel date (ET) is more than 90 days after the annual-prepay term's term_start (day 90 still refunds); a run accepted inside the window keeps its refund on repair. Read at call time via prepayRefund90DayLive(), strict 'true', dark by default; off = refund math exactly as before. Refunds nothing automatically and sends nothing.)
  *   GATE_SMS_ANY_LANGUAGE_TRIAL=true (test answers to customer texts in another language: the text is translated to English, the normal SMS drafter answers it with every English check, and the reply is translated back and double-checked (numbers, times, prices, links unchanged; a back-translation must say the same thing). Stored in sms_translation_trials for the owner to read; NOTHING is sent and the real reply path for these texts is unchanged. Strict opt-in via gateEnvValue, read at call time by server/services/sms-translation.js; dark by default. Sends nothing to a customer.)
  *   GATE_SMS_ANY_LANGUAGE_INBOX=true (inbox assist for a customer text in another language: when GATE_SMS_ANY_LANGUAGE_TRIAL has stored a test answer for the customer's latest text and nobody has answered it, the Communications composer shows the English translation of their text and the checked reply in their language beside its English, with a Use button that fills the message box. Staff press Send through the ordinary composer; nothing sends on its own and no reply path changes. Strict opt-in via gateEnvValue, read at call time by server/services/sms-translation.js inboxAssistFor(); dark by default; off = GET /admin/communications/agent-draft returns translation: null.)
  *   GATE_SMS_SHARED_PHONE_LINK=true (owner 2026-10-10, "link text": when two or more customer rows share the sender's phone, an inbound text attaches to ONE account instead of being filed as an unknown sender. Only when staff marked exactly one of them customers.sms_primary_for_shared_phone (admin PUT smsPrimaryForSharedPhone); no mark or two marks = left unlinked, no guessing (a guessed link would let one person on a shared phone reply for the other account). Strict opt-in via gateEnvValue, read at call time by server/routes/twilio-webhook.js findSingleCustomerByPhone(); SMS only (the voice webhook is unchanged); dark by default; off = a shared phone is not auto-linked, as before. Links a text to an account; sends nothing.)
@@ -53,12 +54,11 @@
  *   GATE_SERIES_MOVE_TEXT_COALESCE=true (when staff move a recurring series from the board or the edit modal, the customer text waits 3 minutes and only the newest move's date is sent; an older move's text is dropped when a newer staff move covers the same visit; reminders and other move effects stay immediate; read at call time via seriesMoveTextCoalesceLive(), dark by default; customer-facing)
  *   GATE_MULTI_TECH_TEXT_TIMES=true (the lead reply agent's next-available check, the text drafter's open-times fallback and the estimate converter's first service day read the website booking engine (per technician, route-aware) instead of the old by-city engine; a lead with only a city is placed at that city's centre; read at call time via multiTechTextTimesLive(), dark by default; customer-facing; off = the old by-city engine, byte-identical)
  *   GATE_PACKAGE_FOLLOWUP_AUTOBOOK=true (booking visit 1 of a two-treatment package — catalog cockroach_control, flea_tick or bed_bug_treatment — also books visit 2 in the same transaction: 14 days later (the catalog row's follow-up interval), same technician and window, confirmed with no office confirm step, $0 included, linked to visit 1 so a date move of visit 1 shifts it by the same days until the customer confirms or moves it (its time of day is kept) and a cancel, skip or no-show of visit 1 always retires it; owner rulings 2026-10-04. Covers admin Schedule create, estimate acceptance, the Leads page, the call pipeline (its visit 2 is written confirmed too); voice-agent and outbound-callback bookings are not covered yet. Off = visit 2 is booked only from the closeout card or a call that discussed it. Read at call time via packageFollowupAutobookLive(), dark by default; kill = unset. No confirmation text for visit 2; reminders arm through the self-heal sweep; the customer can reschedule it.)
- *   GATE_PEST_RIDES_LAWN_AT_ACCEPT=true (accepting an estimate with lawn every 6 weeks or monthly + a QUARTERLY rider (pest, tree & shrub, termite bait; table RIDER_PAIRINGS in rider-series-preview.js) seeds the rider follow-ups on lawn visits — every 2nd 6-week visit / every 3rd monthly visit, same stop, so they group — and links the rider series to the lawn series through scheduled_services.rides_parent_id. A rider's series extension keeps riding the lawn (admin-schedule.js#rideLawnExtension, same gate). Owner ruling 2026-10-01. Off = byte-identical to today. Canonical CALL-TIME reader pestRidesLawnAtAcceptLive(). Kill switch: unset or any non-'true' value.)
- *   GATE_RIDER_PAIRS_MONTHLY_LAWN=true (second batch of ride pairs, owner ruling 2026-10-01: a MONTHLY lawn series also carries bi-monthly pest or tree & shrub (every 2nd lawn visit), monthly pest (every visit), semiannual pest (every 6th) and seasonal Feb-Oct mosquito (every in-season visit); each pairing has its own day gaps in RIDER_PAIRINGS, rider-series-preview.js. Needs GATE_PEST_RIDES_LAWN_AT_ACCEPT and GATE_VISIT_GROUPS on. 6-week lawn hosts are unchanged (quarterly riders only). Off = byte-identical: those series walk their own cadence, and a series linked while it was on stops riding at its next extension. Canonical CALL-TIME reader riderPairsMonthlyLawnLive(), strict 'true', dark by default. Kill switch: unset.)
  *   GATE_SHORTLINK_LEGACY_EXPIRE=true (retire the legacy 1-7 char short-link code space: /l/<legacy code> answers 410 and resolveShortCode returns null for it, so ~2k guessable codes that front never-expiring bearer-token URLs stop working; read at call time via shortlinkLegacyExpireLive(), dark by default; ungated either way, a re-send never reuses a legacy code)
  *   GATE_KB_SPECIES_QA=true (knowledge Q&A — texting assistant, tech field Q&A, lead agent — also reads the owner-approved species catalog; customer-facing callers get customer copy only, staff also get tech notes; read at call time via kbSpeciesQaLive(), dark by default)
  *   GATE_KB_CUSTOMER_AUDIENCE=true (knowledge Q&A — customer-facing callers such as the portal AI assistant and the lead agent — read only knowledge_base categories on the customer-safe allowlist, currently empty, instead of every active row; staff callers (tech_field, admin_manual) are unchanged; strict opt-in, read at call time via kbCustomerAudienceLive(), dark by default)
  *   GATE_PORTAL_ACTIVITY=true (customer activity in the logged-in portal and mobile app — strict opt-in, read at call time via portalActivityLive(), dark in dev AND prod: stamps customers.last_seen_at (throttled, 5 min) ONLY from the three foreground beacons — never from ordinary authenticated API traffic or background polling — and accepts POST /api/customer/activity/page-view + /push-open beacons that record portal tab views (`portal:<tab>`) and app opens from a push notification (`push:open`) into customer_page_views, plus POST /heartbeat (visible + recently-interacted sessions, at most every 5 minutes) which only stamps last_seen_at and writes no row. Staff browsers and bots are never recorded. Off = no stamp, no row, and the endpoints answer {enabled:false} so the client stops beaconing for the session. Sends nothing to a customer.)
+ *   GATE_EMAIL_SEND_LATER=true (Gmail-style Schedule send in the admin email composer and reply box — strict opt-in, read at call time via emailSendLaterLive(), dark: the Send arrow menu and the Email > Scheduled tab appear, POST /api/admin/email/schedule queues a row in scheduled_emails, and a once-a-minute job sends due rows through the same Gmail path as Send, at most once. Off = no menu, no tab, the schedule route answers 404 {enabled:false}, and the job sends nothing; rows already queued stay queued, unsent, until it is on again. Sends customer email only at a time an office user picked.)
  *   GATE_BILLING_NOTIFICATION_CHANNELS=true (portal Email/Text/App billing-channel arrays; strict opt-in, stored choices remain enforced while dark)
  *   GATE_AGENT_SESSION_GUARD=true (Managed Agents cost guards, strict opt-in, read at call time via agentSessionGuardLive(): each blog, backlink, briefing and lead agent session is created with a hard spend cap, and a session its runner gave up on gets a user.interrupt. Off = sessions are created and left as before. Sends nothing to a customer.)
  *   GATE_TWILIO_SMS=true        (enable real SMS sending)
@@ -385,6 +385,7 @@ const gates = {
   // Registered for logGateStatus only; consumers read portalActivityLive() at
   // call time below so a flip needs no redeploy.
   portalActivity: process.env.GATE_PORTAL_ACTIVITY === 'true',
+  emailSendLater: process.env.GATE_EMAIL_SEND_LATER === 'true',
   // Managed Agents session spend cap + interrupt of abandoned sessions (dark).
   // Registered for logGateStatus only; services/agent-control/session-guard.js
   // reads agentSessionGuardLive() at call time below.
@@ -755,14 +756,6 @@ const gates = {
   // that bypass the resolver read directly, so a flip needs no redeploy.
   // Off = byte-identical to today on every path.
   stampedZeroFree: process.env.GATE_STAMPED_ZERO_FREE === 'true',
-  // Pest rides the lawn series from accept (owner ruling 2026-10-01). Map entry
-  // for logGateStatus only — the canonical CALL-TIME reader is
-  // pestRidesLawnAtAcceptLive() below (strict 'true'). Off = byte-identical.
-  pestRidesLawnAtAccept: process.env.GATE_PEST_RIDES_LAWN_AT_ACCEPT === 'true',
-  // Second batch of ride pairs on monthly lawn (owner ruling 2026-10-01). Map
-  // entry for logGateStatus only — the canonical CALL-TIME reader is
-  // riderPairsMonthlyLawnLive() below (strict 'true'). Off = byte-identical.
-  riderPairsMonthlyLawn: process.env.GATE_RIDER_PAIRS_MONTHLY_LAWN === 'true',
   // Pay-after-first-visit wording on the estimate page for customers on the
   // card-on-file rail (owner ruling 2026-09-30). This map entry is for
   // logGateStatus only — the canonical CALL-TIME reader is
@@ -4837,6 +4830,13 @@ function portalActivityLive() {
   return process.env.GATE_PORTAL_ACTIVITY === 'true';
 }
 
+// GATE_EMAIL_SEND_LATER read at CALL time — strict `=== 'true'`, dark.
+// Owner 2026-10-22: "build it like Gmail has it". Read by routes/admin-email.js
+// (schedule / list / cancel) and services/email/scheduled-email-sender.js.
+function emailSendLaterLive() {
+  return process.env.GATE_EMAIL_SEND_LATER === 'true';
+}
+
 // GATE_SERIES_MOVE_CARRIES_VISIT read at CALL time — strict `=== 'true'`.
 // Owner ruling 2026-10-01: a pest visit riding a lawn visit is ONE appointment;
 // when either moves, both move. Unset = a staff series move that sweeps an
@@ -5029,19 +5029,6 @@ function llmCostTrackingLive() {
 // follow-up plan and child shape, and the office-confirm hook in job-status.
 function packageFollowupAutobookLive() {
   return process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK === 'true';
-}
-
-// GATE_PEST_RIDES_LAWN_AT_ACCEPT read at CALL time — strict `=== 'true'`. Gates
-// the estimate converter's rider seeding (quarterly riders on 6-week / monthly lawn).
-function pestRidesLawnAtAcceptLive() {
-  return process.env.GATE_PEST_RIDES_LAWN_AT_ACCEPT === 'true';
-}
-
-// GATE_RIDER_PAIRS_MONTHLY_LAWN read at CALL time — strict `=== 'true'`. Opens
-// the gated rows of RIDER_PAIRINGS (rider-series-preview.js): bi-monthly,
-// monthly, semiannual and seasonal riders on a monthly lawn host.
-function riderPairsMonthlyLawnLive() {
-  return process.env.GATE_RIDER_PAIRS_MONTHLY_LAWN === 'true';
 }
 
 // GATE_FAST_COMPLETE_REPORT read at CALL time — strict `=== 'true'`, dark in
@@ -5352,6 +5339,15 @@ function newsletterClickBoundLive() {
   return process.env.GATE_NEWSLETTER_CLICK_BOUND === 'true';
 }
 
+// GATE_PREPAY_REFUND_90_DAY read at CALL time — strict `=== 'true'`, dark by
+// default (owner 2026-10-22, R7). services/admin-cancellation.js: once the
+// cancel date (ET) is more than 90 days past an annual-prepay term's start, no
+// refund is owed, so "end now" is not offered (the customer keeps the paid
+// coverage) and a commit for it is refused. Refunds nothing automatically.
+function prepayRefund90DayLive() {
+  return process.env.GATE_PREPAY_REFUND_90_DAY === 'true';
+}
+
 function pestInsiderProofLive() {
   return process.env.GATE_PEST_INSIDER_PROOF === 'true';
 }
@@ -5465,6 +5461,15 @@ function prepayMintPriceHoldMode() {
 // inputs and screens are byte-identical to before this lane.
 function reportWriterRulesLive() {
   return process.env.GATE_REPORT_WRITER_RULES === 'true';
+}
+
+// GATE_PEST_REPORT_VOICE read at CALL time — strict `=== 'true'`, dark in
+// every environment. On (with GATE_REPORT_WRITER_RULES), the recurring pest
+// report writer gets one prompt in one voice (service-report/pest-report-voice.js)
+// in place of its stacked blocks; inputs and output screens are unchanged.
+// Off, the pest prompt is byte-identical to before.
+function pestReportVoiceLive() {
+  return process.env.GATE_PEST_REPORT_VOICE === 'true';
 }
 
 // GATE_COMPLETION_TEXT_PLAIN read at CALL time — off unless exactly 'true'.
@@ -6817,9 +6822,7 @@ function smsCourtesyAfterTemplateLive() {
 
 module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
-module.exports.pestRidesLawnAtAcceptLive = pestRidesLawnAtAcceptLive;
 module.exports.packageFollowupAutobookLive = packageFollowupAutobookLive;
-module.exports.riderPairsMonthlyLawnLive = riderPairsMonthlyLawnLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.knownGateCatalog = knownGateCatalog;
@@ -6835,6 +6838,7 @@ module.exports.homeLineLive = homeLineLive;
 // Exported on its own line (not in the shared list above) so concurrent
 // gate PRs appending to that one-line list never conflict with this one.
 module.exports.portalActivityLive = portalActivityLive;
+module.exports.emailSendLaterLive = emailSendLaterLive;
 module.exports.customerActivityTimelineLive = customerActivityTimelineLive;
 module.exports.signupSingleEmailLive = signupSingleEmailLive;
 module.exports.leadEmailLinksLive = leadEmailLinksLive;
@@ -6887,6 +6891,7 @@ module.exports.seriesMoveCarriesVisitLive = seriesMoveCarriesVisitLive;
 // GATE_REPORT_WRITER_RULES reader, exported at the end of the file (after the
 // shared list) so gate PRs adding lines above never touch this one.
 module.exports.reportWriterRulesLive = reportWriterRulesLive;
+module.exports.pestReportVoiceLive = pestReportVoiceLive;
 module.exports.completionTextPlainLive = completionTextPlainLive;
 // GATE_REPORT_BLOG_POST reader, on its own line beside the writer rules'.
 module.exports.reportBlogPostLive = reportBlogPostLive;
@@ -7267,3 +7272,5 @@ module.exports.RETIRED_GATES = RETIRED;
 module.exports.callEnrichCodesRequireAniLive = callEnrichCodesRequireAniLive;
 module.exports.backlinkSignupUrlGuardLive = backlinkSignupUrlGuardLive;
 module.exports.newsletterClickBoundLive = newsletterClickBoundLive;
+// GATE_PREPAY_REFUND_90_DAY reader, on its own line so gate PRs never conflict.
+module.exports.prepayRefund90DayLive = prepayRefund90DayLive;

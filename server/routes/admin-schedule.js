@@ -14,6 +14,7 @@ const areaAddOnRows = require('../services/area-addon-visit-rows');
 const areaAddOnGovernedRate = require('../services/area-addon-governed-rate');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
+const { pestReportVoiceLive } = require('../config/feature-gates');
 const { lawnReserviceFastCompleteLive, lawnFastCompleteLive, fastCompleteVoiceFillLive } = require('../config/feature-gates');
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
@@ -6089,35 +6090,6 @@ const SERIES_VERDICT_UNVERIFIED = {
 // takes the minimum over the dates it is given, so the verdict is the same one
 // the per-date walk would give. Read-only (the legacy cap freeze the extension
 // writes is skipped). Null when the series has nothing to extend or bills.
-// A rider series (rides_parent_id, GATE_PEST_RIDES_LAWN_AT_ACCEPT + visit groups) seeds
-// its next visit on a lawn host date before it walks its own cadence
-// (walkExtensionCandidates -> rideLawnExtension), and an add-on can price one date and
-// not the other. So the host date the top-up would ride, from the top-up's own candidate
-// function (rideLawnCandidate, read-only), is validated too; when that answer is
-// unknown the verdict is unverified.
-async function seriesWalkWithRide(conn, walk, latest, horizonEnd) {
-  const { parent, cols } = walk;
-  if (!(cols.rides_parent_id && parent.rides_parent_id)) return walk;
-  // Every host date the top-up would ride in one run, not only the first: it re-selects a host
-  // after each insert (up to TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN), and each insert becomes the
-  // latest visit and an occupied date for the next pick. The same read-only selector is asked
-  // for each, with the inserts it would have made so far.
-  const existingDates = new Set(await loadActiveSeriesDates(conn, parent.id));
-  let anchor = latest;
-  const rideDates = [];
-  for (;;) {
-    const ride = await rideLawnCandidate({
-      conn, parent, parentId: parent.id, cols, latest: anchor, opts: { maxDate: horizonEnd }, existingDates,
-    });
-    if (!ride) break;
-    if (ride.unanswered || rideDates.length >= TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN) return SERIES_VERDICT_UNVERIFIED;
-    rideDates.push(ride.date);
-    existingDates.add(ride.date);
-    anchor = { ...anchor, scheduled_date: ride.date };
-  }
-  return rideDates.length ? { ...walk, dates: [...new Set([...walk.dates, ...rideDates])], rideDates } : walk;
-}
-
 async function seriesVerdictWalk(conn, parentId) {
   const cols = await conn('scheduled_services').columnInfo();
   let parent = await conn('scheduled_services').where({ id: parentId }).first();
@@ -6149,7 +6121,7 @@ async function seriesVerdictWalk(conn, parentId) {
     const key = filterAddonLinesForDate(parentAddons, parent.scheduled_date, candidate, blackoutDates, skipParent)
       .map((addon) => parentAddons.indexOf(addon)).join(',');
     if (!(past && byPricing.size)) byPricing.set(key, byPricing.get(key) ?? candidate);
-    if (past) return seriesWalkWithRide(conn, { parent, dates: [...byPricing.values()], cols, parentAddons, blackoutDates, skipParent }, latest, horizonEnd);
+    if (past) return { parent, dates: [...byPricing.values()], cols, parentAddons, blackoutDates, skipParent };
   }
   // The attempt cap ended the walk before the horizon: unverified, never passed.
   return SERIES_VERDICT_UNVERIFIED;
@@ -6174,7 +6146,7 @@ async function seriesNextOccurrencesUnbillable(conn, parentId, { customerOverrid
 async function seriesNextOccurrencesPrice(conn, parentId) {
   const walk = await seriesVerdictWalk(conn, parentId);
   if (!walk) return null;
-  if (walk === SERIES_VERDICT_UNVERIFIED) return { unverified: true, price: 0, linePrice: 0, zero: null, explicitZero: false, hosts: [], parentLinePrice: 0, addonLines: [] };
+  if (walk === SERIES_VERDICT_UNVERIFIED) return { unverified: true, price: 0, linePrice: 0, zero: null, explicitZero: false, parentLinePrice: 0, addonLines: [] };
   const { parent, parentAddons } = walk;
   const verdicts = await seriesExtensionDateVerdicts(conn, {
     ...walk, storedDiscountScope: await loadStoredDiscountScope(conn, parent, parentAddons),
@@ -6184,12 +6156,6 @@ async function seriesNextOccurrencesPrice(conn, parentId) {
   const parentLinePrice = Math.max(0, ...verdicts.map((v) => v.parentLinePrice));
   // The add-on lines (name, gross) due on any walked date, once each.
   const addonLines = [...new Map(verdicts.flatMap((v) => v.addonLines).map((a) => [`${a.name}=${a.gross}`, a])).values()];
-  // The lawn host dates a rider series would ride (seriesWalkWithRide), each with its own price
-  // and zero kind, so the caller can name the date and pin the list.
-  const hosts = (walk.rideDates || []).map((date) => {
-    const v = verdicts[walk.dates.indexOf(date)];
-    return { date, price: v.price, linePrice: v.linePrice };
-  });
   // An explicit $0 template override (written only by the price/service scope lane) stays an
   // authoritative $0 on every visit the top-up mints (applyStoredVisitFinancials, same gate and
   // same condition: the lines price to nothing and the override is exactly 0), so those visits
@@ -6199,7 +6165,7 @@ async function seriesNextOccurrencesPrice(conn, parentId) {
   // Which kind of zero: the override above, a known line price discounted away, or no price at all.
   let zero = null;
   if (price === 0) zero = explicitZero ? 'override' : (linePrice > 0 ? 'discounted' : 'unpriced');
-  return { unverified: false, price, linePrice, parentLinePrice, addonLines, zero, explicitZero, hosts };
+  return { unverified: false, price, linePrice, parentLinePrice, addonLines, zero, explicitZero };
 }
 
 
@@ -20485,67 +20451,6 @@ async function placeGroupedExtension(ctx, dateStr, mustShare, stop) {
   }
 }
 
-// GATE_PEST_RIDES_LAWN_AT_ACCEPT: a rider series (rides_parent_id) puts its
-// next visit on a lawn occurrence, at that occurrence's CURRENT window and
-// technician (dispatch may have moved it), ending by the rider's own duration.
-// The candidate is not derived here: it is the next date the read-only pair
-// preview (rider-series-preview.previewRiderPair) says the plan still wants to
-// insert — the real anchor, the today+8 plan floor, override-aware property
-// scope, lawn-service identity of the host and of each occurrence, blackouts and
-// weekend opt-out are all its rules (RIDE_BLOCKING_REASONS lists the reasons
-// that rule a ride out). null = no ride: the caller walks its normal cadence.
-// The read-only half of the ride: the lawn occurrence the rider's next visit would
-// join, with no write. null = no ride (gate off, not a rider, a blocking reason, or no
-// date the plan still wants); { unanswered: true } = the pair preview failed, so the
-// answer is not known (rideLawnExtension then walks the cadence, as the top-up does;
-// the Intelligence Bar's verdict refuses as unverified instead). Also the one function
-// the billing-type verdict (seriesVerdictWalk) asks which date a rider series seeds on.
-const RIDE_PREVIEW_ERROR_REASONS = new Set(['blackout_check_error', 'series_check_error', 'error']);
-async function rideLawnCandidate(ctx) {
-  const {
-    conn, parent, parentId, cols, opts, latest, existingDates,
-  } = ctx;
-  const fg = require('../config/feature-gates');
-  if (!fg.pestRidesLawnAtAcceptLive?.() || !fg.gates?.visitGroups || !cols.rides_parent_id || !parent.rides_parent_id) return null;
-  const Preview = require('../services/rider-series-preview');
-  let plan;
-  try {
-    // Savepoint: the preview swallows its own read failures, which would leave
-    // the caller's transaction aborted (25P02) without it.
-    plan = await conn.transaction((sp) => Preview.previewRiderPair(sp, { riderParentId: parentId }));
-  } catch (err) {
-    logger.warn(`[recurring] rider preview failed for parent=${parentId} (walking the normal cadence): ${err.message}`);
-    return { unanswered: true };
-  }
-  // A read failure the preview swallowed into a reason is not a rule ruling the ride out: the
-  // answer is unknown (the top-up walks its cadence either way; the billing verdict refuses).
-  if (plan.reasons.some((r) => RIDE_PREVIEW_ERROR_REASONS.has(r))) return { unanswered: true };
-  if (plan.reasons.some((r) => Preview.RIDE_BLOCKING_REASONS.has(r))) return null;
-  // The preview's insert list assumes its proposed MOVES happen too; this
-  // extension only appends. So spacing is enforced against the latest rider
-  // visit that is actually still booked: at least the rule's minimum gap after
-  // it (never, say, D168 next to a kept off-cadence D160).
-  const after = dateOnly(latest.scheduled_date);
-  const gapFloor = Preview._internals.addDaysStr(after, Preview.riderGapsFor(parent.recurring_pattern).min);
-  const date = plan.insert.find((d) => d >= plan.planFloor && d >= gapFloor && !existingDates.has(d) && (!opts.maxDate || d <= opts.maxDate));
-  // No lawn occurrence on the date (the rule's own +84 fallback) is not a ride.
-  const host = date && plan.hostRows.find((r) => dateOnly(r.scheduled_date) === date);
-  return host ? { date, host } : null;
-}
-
-async function rideLawnExtension(ctx) {
-  const { parent } = ctx;
-  const ride = await rideLawnCandidate(ctx);
-  if (!ride || ride.unanswered) return null;
-  const { date, host } = ride;
-  const window = normalizeTopUpWindow(normalizeHHMM(host.window_start), parent.estimated_duration_minutes, null);
-  if (!window || window.unplaceable) return null;
-  return placeGroupedExtension(ctx, date, [host.id], {
-    technicianId: host.technician_id || null,
-    window: { window_start: window.start, window_end: window.end },
-  });
-}
-
 // The customer's OWN visit at the candidate's stop (their lawn visit) is not a
 // clash if the new row joins it. Anyone else's visit, a hold, own rows on two
 // technicians (not one stop), or an own visit the row cannot join
@@ -20558,17 +20463,15 @@ async function joinOwnStopExtension(ctx, candidate, clashRows) {
   return placeGroupedExtension(ctx, candidate, clashRows.map((r) => r.id), { technicianId: stopTechs[0] });
 }
 
-// The next-date search of extendSeriesOnceLocked: a ride on the lawn first
-// (rideLawnExtension), else the cadence walk. Returns { joined } (a grouped
-// placement already made), or { nextStr, hitMaxDate } for the caller to insert.
+// The next-date search of extendSeriesOnceLocked: the cadence walk. Returns
+// { joined } (a grouped placement already made), or { nextStr, hitMaxDate } for
+// the caller to insert.
 async function walkExtensionCandidates(ctx) {
   const {
     conn, parent, parentId, opts, latestStr, rOpts, skipParent, dirParent,
     blackoutDates: autoExtendBlackoutDates, existingDates, clashProbeTemplate,
   } = ctx;
   const { maxDate = null } = opts;
-  const ridden = await rideLawnExtension(ctx);
-  if (ridden) return { joined: ridden };
   // Advance until we find an open date or give up. Each step
   // moves one cadence interval forward from latestStr; capped to
   // avoid runaway loops on degenerate patterns.
@@ -20725,10 +20628,10 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
     // (booster double-book rationale on the helper).
     const existingDates = await loadActiveSeriesDates(conn, parentId);
     const autoExtendBlackoutDates = await loadSeriesBlackoutDates(conn, latestStr);
-    // Grouped riding, then the cadence walk (walkExtensionCandidates); a
-    // forced date (a grouped attempt re-entering this function) has neither.
+    // The cadence walk (walkExtensionCandidates); a forced date (a grouped
+    // attempt re-entering this function) skips it.
     const walked = opts.forceDate ? { nextStr: opts.forceDate } : await walkExtensionCandidates({
-      conn, parent, parentId, cols, svcLike, opts, latest, latestStr, rOpts, skipParent, dirParent,
+      conn, parent, parentId, cols, svcLike, opts, latestStr, rOpts, skipParent, dirParent,
       blackoutDates: autoExtendBlackoutDates, existingDates, clashProbeTemplate,
     });
     if (walked.joined) return walked.joined;
@@ -21312,19 +21215,6 @@ async function topupSeriesSkipReason(conn, parent, parentId, cols) {
     if (await test(conn, parent, parentId, cols)) return reason;
   }
   return null;
-}
-
-// All-hits variant for the pest-rides-lawn preview (Codex P2 round on PR
-// #5290): topupSeriesSkipReason itself stays first-hit and byte-identical
-// (the nightly top-up only ever needs ONE reason to skip a write), but the
-// preview's `reasons` array documents that it lists EVERY applicable gate.
-// Same table, same sequential DB-read order, just never short-circuited.
-async function topupAllSeriesSkipReasons(conn, parent, parentId, cols) {
-  const hits = [];
-  for (const [reason, test] of TOPUP_SERIES_INELIGIBILITY_RULES) {
-    if (await test(conn, parent, parentId, cols)) hits.push(reason);
-  }
-  return hits;
 }
 
 // Which of a customer's ongoing roots (eligibleSeriesParentIds, the coarse recurring_ongoing
@@ -27140,7 +27030,7 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     const selectedSystemPrompt = selectReportCopyPrompt(
       systemPrompt,
       groundingServiceType,
-      writerRulesOn ? { ...reportPromptContext, writerRules: true } : reportPromptContext,
+      writerRulesOn ? { ...reportPromptContext, writerRules: true, pestVoice: pestReportVoiceLive() } : reportPromptContext,
     );
     // Palm-crown rule (GATE_TS_TECH_FINDINGS_COPY; owner 2026-10-02: the
     // instruction is THE guard, no word filter). In the system prompt so it
@@ -28967,7 +28857,6 @@ router._test = {
   topUpRecurringSeries,
   topUpRecurringSeriesWithLocks,
   topUpRecurringSeriesLocked,
-  topupSeriesSkipReason,
   isAnnualPrepaySeries,
   isCustomerPrepayLive,
   isFamilyOnPlanHold,
@@ -29063,26 +28952,6 @@ module.exports.cancelSpawnedReminderIfVisitTerminal = cancelSpawnedReminderIfVis
 module.exports.typedFindingsPromptSections = typedFindingsPromptSections;
 // Parity-test surface (series-move incident): see tests/recurring-date-parity.test.js.
 module.exports.nextRecurringDate = nextRecurringDate;
-// Read-only reuse for the pest-rides-the-lawn-rhythm READ-ONLY PREVIEW
-// (services/rider-series-preview.js — the write engine itself is #5268,
-// paused): the SAME series-eligibility table the nightly top-up already
-// applies (annual prepay / family plan hold / duplicate active series),
-// consumed with NO lock taken — the preview never writes, so it skips the
-// per-customer annual-prepay advisory try-lock this file's own cancel-reseed
-// path takes (above, inline) before calling this same function on that
-// path; a lock is meaningless (and misleading — it would silently no-op)
-// for a read that commits nothing. Lazy require only, same avoid-a-route-
-// load-cycle reason as every other export in this block.
-module.exports.topupSeriesSkipReason = topupSeriesSkipReason;
-// All-hits twin of the above, same read-only posture — see its own comment.
-module.exports.topupAllSeriesSkipReasons = topupAllSeriesSkipReasons;
-// The override-aware address resolver the duplicate-series guard scopes on
-// (see its own header comment above topUpScopeInput): read-only reuse for
-// the preview's AND the ops report script's own property-scope resolution
-// (resolveSeriesPropertyScope, services/rider-series-preview.js) — one
-// address resolver, so "same property" can never mean something different
-// in the duplicate guard than it does in the pest-rides-lawn preview.
-module.exports.topUpScopeInput = topUpScopeInput;
 module.exports.seriesNextOccurrencesUnbillable = seriesNextOccurrencesUnbillable;
 module.exports.seriesNextOccurrencesPrice = seriesNextOccurrencesPrice;
 module.exports.splitRootsByTopupSkip = splitRootsByTopupSkip;

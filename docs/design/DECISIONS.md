@@ -3300,3 +3300,14 @@ today?") is one row on desktop, headline left and button right, because the
 centered stack "renders funny on desktop". This narrows the 2026-08-13
 center-stack ruling for that card to phones; the cross-sell and referral
 cards keep it everywhere.
+
+## 2026-10-22 — Riders retired with appointment grouping
+
+Owner ruling 2026-10-22: appointments are no longer grouped ("we are not
+grouping appts anymore"), and accepting an estimate adds no rider services.
+Riders only worked through visit grouping, so the rider code is removed:
+accept-time seeding, the series-extension ride, the read-only preview, its
+candidate finder, both rider scripts, and `GATE_PEST_RIDES_LAWN_AT_ACCEPT` /
+`GATE_RIDER_PAIRS_MONTHLY_LAWN`. Every series walks its own cadence.
+`scheduled_services.rides_parent_id` stays in the schema, unread. This
+supersedes the 2026-09-28 rider entries above.

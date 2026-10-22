@@ -1,5 +1,10 @@
 # Rider-series scheduling — read-only preview
 
+> **Retired 2026-10-22.** Owner ruling: appointments are no longer grouped,
+> and accepting an estimate adds no rider services. The rider code this
+> document describes was removed (`docs/design/DECISIONS.md`, 2026-10-22).
+> Kept for history only.
+
 Owner GO 2026-09-28 (scope doc `~/lawn-pest-rhythm-scope-20260928.md`): for
 customers with lawn every 6 weeks plus quarterly pest, pest should ride every
 other lawn visit (every ~12 weeks) instead of running its own independent

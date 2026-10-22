@@ -732,7 +732,7 @@ async function resolveOpsDigest({ key, source, resolvedBy = 'ops-crons', lockKey
 }
 
 module.exports = {
-  deliverOpsDigest, resolveOpsDigest, readCleanWatermark, cleanWatermarkKey, inAppEnabled, htmlToText, CATEGORY,
+  MAX_ITEM_KEYS, deliverOpsDigest, resolveOpsDigest, readCleanWatermark, cleanWatermarkKey, inAppEnabled, htmlToText, CATEGORY,
   deriveKind, defaultAudienceFor, fallbackHeadline, truncateAtWord, digestRowFields,
   alertClassFor, ringDecision, findPriorRungRow, decideRingForNewRow, ringOnRefreshFrom, setKeyFor,
   normalizeItemKeys, hasNewItemKeys, fullSetItemKeys, itemSetHashFor, itemKeysMetaFor,

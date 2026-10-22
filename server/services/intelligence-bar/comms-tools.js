@@ -224,13 +224,13 @@ Use for: "what happened today?", "today's comms summary", "morning inbox briefin
   },
   {
     name: 'list_queued_messages',
-    description: `List a customer's outbound TEXTS that are still SCHEDULED — not yet sent (e.g. a text held past 8PM-8AM quiet hours). Only texts a staff member scheduled from the inbox are cancelable; automated texts, anything a send worker already picked up, and replies tied to an Agent Review suggestion are left out (counted in excluded_count) — the office handles those. Use before cancel_queued_message to resolve the exact message_id; a cancel preview always names one message from this list. Soonest first, capped at 25 — pass next_cursor as cursor for more. SCHEDULED EMAILS DO NOT EXIST: an email is rendered and handed to the delivery provider within seconds of being queued, so by the time anyone could ask about it, it has already sent — there is nothing to list or cancel.
+    description: `List a customer's outbound TEXTS that are still SCHEDULED — not yet sent (e.g. a text held past 8PM-8AM quiet hours). Only texts a staff member scheduled from the inbox are cancelable; automated texts, anything a send worker already picked up, and replies tied to an Agent Review suggestion are left out (counted in excluded_count) — the office handles those. Use before cancel_queued_message to resolve the exact message_id; a cancel preview always names one message from this list. Soonest first, capped at 25 — pass next_cursor as cursor for more. Emails are not listed here: automated emails go to the delivery provider within seconds of being queued. An email an office user scheduled with Schedule send (when that feature is on) is listed and cancelled in Communications > Email > Scheduled — point the user there; this tool cannot see or cancel it.
 Use for: "what's queued to send Henderson?", "is there a text scheduled for this customer?"`,
     input_schema: {
       type: 'object',
       properties: {
         customer_id: { type: 'string', format: 'uuid', description: 'The customer to check' },
-        channel: { type: 'string', enum: ['sms'], description: 'Scheduled texts only — there is no scheduled-email store to check.' },
+        channel: { type: 'string', enum: ['sms'], description: 'Scheduled texts only; scheduled emails live in Communications > Email > Scheduled.' },
         cursor: { type: 'string', description: 'Continue from next_cursor in the previous result' },
         limit: { type: 'number', description: 'Max results (default 25, max 100)' },
       },
@@ -239,7 +239,7 @@ Use for: "what's queued to send Henderson?", "is there a text scheduled for this
   },
   {
     name: 'cancel_queued_message',
-    description: `Cancel ONE customer text that is still SCHEDULED — before it sends. Resolve message_id with list_queued_messages first. A text that has already started sending, was already sent, or is managed by another workflow (an invoice send, a recruiting reply, a completion report, …) can never be recalled here and this refuses it. Cancelling sends nothing to the customer — it only stops a text that has not gone out yet. EMAILS CANNOT BE CANCELLED THIS WAY OR ANY WAY: sendTemplate hands a queued email to the delivery provider within seconds, so by the time this tool could act, it has already sent.
+    description: `Cancel ONE customer text that is still SCHEDULED — before it sends. Resolve message_id with list_queued_messages first. A text that has already started sending, was already sent, or is managed by another workflow (an invoice send, a recruiting reply, a completion report, …) can never be recalled here and this refuses it. Cancelling sends nothing to the customer — it only stops a text that has not gone out yet. EMAILS CANNOT BE CANCELLED HERE: an automated email goes to the delivery provider within seconds. An email an office user scheduled with Schedule send is cancelled in Communications > Email > Scheduled (Cancel send) — point the user there.
 Use for: "cancel that scheduled text", "stop the reminder we just queued for them"`,
     input_schema: {
       type: 'object',
@@ -801,7 +801,7 @@ async function cancelQueuedMessage(input, actionContext = {}) {
   }
   const channel = String(input.channel || '').toLowerCase();
   if (channel !== 'sms') {
-    return { error: 'channel must be "sms". Scheduled texts are the only cancelable message — emails send within seconds and cannot be recalled.' };
+    return { error: 'channel must be "sms". This tool cancels scheduled texts only. An email scheduled with Schedule send is cancelled in Communications > Email > Scheduled.' };
   }
 
   let preview;
