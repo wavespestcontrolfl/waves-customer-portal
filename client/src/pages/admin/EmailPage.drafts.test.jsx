@@ -270,7 +270,7 @@ describe("Email draft and navigation preservation", () => {
 
   it.each(["object", "json", "malformed"])("renders %s classification data without losing the message or reply", async (format) => {
     const details = { urgency: "high", person_name: "Fixture sender", phone: "9415550101", service_interest: "Synthetic service", invoice_amount: 42, vendor_name: "Fixture vendor" };
-    const message = { ...a, classification: "vendor_invoice", extracted_data: format === "object" ? details : format === "json" ? JSON.stringify(details) : "{invalid fixture json" };
+    const message = { ...a, classification: "vendor_invoice", expense_id: "fixture-expense", extracted_data: format === "object" ? details : format === "json" ? JSON.stringify(details) : "{invalid fixture json" };
     inbox = [message];
     mount(); await open(message);
     expect(await screen.findByText(a.body_text)).toBeInTheDocument();

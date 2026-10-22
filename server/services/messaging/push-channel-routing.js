@@ -234,6 +234,8 @@ async function hasFreshPushDevice(customerId, knex = db) {
   }
   const row = await knex('push_subscriptions')
     .where({ customer_id: customerId, active: true })
+    // A contact's device (contact login) is never proof the HOLDER has the app.
+    .whereNull('contact_phone_key')
     .where('updated_at', '>=', heartbeatCutoff())
     .first('id')
     .catch(() => null);
@@ -404,7 +406,7 @@ async function sendPush(customerId, messageType, body, { shouldContinue, minUpda
     // The visit this message is about — the push sink resolves its saved
     // property so the app opens that house (GATE_APP_PROPERTY_SCOPE).
     ...(appointmentId ? { appointmentId } : {}),
-  }, { shouldContinue, minUpdatedAt });
+  }, { shouldContinue, minUpdatedAt, messageType });
   return { stats, delivered: Number(stats && stats.sent) > 0 };
 }
 
@@ -598,7 +600,13 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       appNotification = await require('../notification-service').notifyCustomer(customerId, category, title, body, {
         link, dedupeKey: notificationEventKey, awaitPush: true, appointmentId,
         ...(appointmentId ? { metadata: { proof_scope: proofScope } } : {}),
-        pushOptions: { shouldContinue: windowGuardFrom(preSendCheck), minUpdatedAt: heartbeatCutoff(), nativeOnly: true },
+        // The routed message type rides along for the contact-device rule
+        // (contact login): this explicit-App bell carries no preference key,
+        // so without it an appointment or report notice the holder chose App
+        // delivery for would never reach a contact's device (codex #6364 r2
+        // P2). Holder devices are unaffected; billing types stay refused by
+        // contactPushPurpose's allow-list.
+        pushOptions: { shouldContinue: windowGuardFrom(preSendCheck), minUpdatedAt: heartbeatCutoff(), nativeOnly: true, messageType },
       });
       bell = bellReachedThisAttempt(appNotification) ? { bellPersisted: true } : {};
       // The event's original copy is already visible even if its commit
