@@ -125,6 +125,9 @@ export default function CancelPlanDialog({ customer, onClose, onDone, layer }) {
         // The server decides whether "end of paid coverage" is even a
         // choice; snap back to "now" if it stopped being one.
         if (!r.prepay && effectiveDate !== "now") setEffectiveDate("now");
+        // Owner rule (90 days): past day 90 "end now" is not offered — no
+        // refund is owed and the paid visits stay. Default to the one choice.
+        if (r.prepay && r.prepay.endNowAvailable === false && effectiveDate !== "end_of_coverage") setEffectiveDate("end_of_coverage");
       })
       .catch((e) => {
         if (cancelled) return;
@@ -250,7 +253,9 @@ export default function CancelPlanDialog({ customer, onClose, onDone, layer }) {
                       {preview.scopeError === "scope_not_owned"
                         ? "That service is not on the plan any more."
                         : preview.scopeError === "scoped_covers_prepaid"
-                          ? "Upcoming visits in that selection are covered by the annual prepay term — cancel the whole plan (which disposes of the term and records the refund), or leave the covered service in place."
+                          ? (preview.prepayRefund90Day
+                            ? "Upcoming visits in that selection are covered by the annual prepay term — cancel the whole plan instead (a prepaid plan is refunded only within 90 days of its start; after that it ends at the end of paid coverage, no refund), or leave the covered service in place."
+                            : "Upcoming visits in that selection are covered by the annual prepay term — cancel the whole plan (which disposes of the term and records the refund), or leave the covered service in place.")
                           : "The services that would stay cannot be priced from the plan-rate ledger — cancel the whole plan, or repair the ledger first."}
                     </div>
                   )}
@@ -294,21 +299,23 @@ export default function CancelPlanDialog({ customer, onClose, onDone, layer }) {
                   onChange={() => setEffectiveDate("end_of_coverage")}
                   disabled={running}
                 />
-                <Radio
-                  id="cancel-plan-effective-now"
-                  name="cancel-plan-effective"
-                  label={prepay.refundWindowPassed || (prepay.refund && prepay.refund.reason === "past_90_day_window")
-                    ? "Now — pull every visit (no refund: prepaid more than 90 days ago)"
-                    : "Now — pull every visit and record a refund of the unused prepaid value"}
-                  checked={effectiveDate === "now"}
-                  onChange={() => setEffectiveDate("now")}
-                  disabled={running}
-                />
+                {prepay.endNowAvailable === false ? (
+                  <div className="ml-6 text-14 text-ink-secondary">
+                    Ending now is not offered: this plan started more than 90 days ago, so no refund is owed and the paid visits stay (owner rule).
+                  </div>
+                ) : (
+                  <Radio
+                    id="cancel-plan-effective-now"
+                    name="cancel-plan-effective"
+                    label="Now — pull every visit and record a refund of the unused prepaid value"
+                    checked={effectiveDate === "now"}
+                    onChange={() => setEffectiveDate("now")}
+                    disabled={running}
+                  />
+                )}
                 {effectiveDate === "now" && prepay.refund && (
                   <div className="ml-6 text-14 text-ink-secondary">
-                    {prepay.refund.reason === "past_90_day_window"
-                      ? "No refund — this plan started more than 90 days ago (owner rule: prepaid visits are refunded only within 90 days)."
-                      : prepay.refund.needsManualCalc
+                    {prepay.refund.needsManualCalc
                       ? "Refund amount needs a manual calculation (the term has no included-visit count). An office task will say so."
                       : `${money(prepay.refund.amount)} = ${money(prepay.refund.prepaidAmount)} ÷ ${prepay.refund.includedVisits} visits × ${prepay.refund.remainingVisits} remaining. Recorded on the case and opened as an office task — not refunded automatically.`}
                   </div>
@@ -438,7 +445,7 @@ export default function CancelPlanDialog({ customer, onClose, onDone, layer }) {
               )}
               {result.lateFeeWaived && <Fact label="Scheduled-visit fee">waived</Fact>}
               {result.refund && (
-                <Fact label="Refund recorded">{result.refund.reason === "past_90_day_window" ? "none — more than 90 days after the plan started" : result.refund.needsManualCalc ? "needs manual calculation (office task)" : `${money(result.refund.amount)} (office task; not refunded automatically)`}</Fact>
+                <Fact label="Refund recorded">{result.refund.needsManualCalc ? "needs manual calculation (office task)" : `${money(result.refund.amount)} (office task; not refunded automatically)`}</Fact>
               )}
               <Fact label="Customer told">
                 {result.confirmationRequested

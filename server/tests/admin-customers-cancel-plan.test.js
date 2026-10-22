@@ -2921,12 +2921,15 @@ describe('POST /:id/cancel-plan', () => {
 });
 
 // Owner ruling R7 (2026-10-22): no prepay refund after 90 days, behind
-// GATE_PREPAY_REFUND_90_DAY. The suite clock is frozen at 2026-08-31 (ET), so
-// day 90 after a term start is 2026-06-02 and day 91 is 2026-06-01.
-describe('GATE_PREPAY_REFUND_90_DAY (owner R7: no prepay refund after 90 days)', () => {
-  const { computePrepayRefund, prepayRefundWindowPassed } = require('../services/admin-cancellation');
+// GATE_PREPAY_REFUND_90_DAY. With no refund the customer keeps the paid
+// coverage, so "end now" is not offered past day 90. The suite clock is frozen
+// at 2026-08-31 (ET): day 90 after a term start is 2026-06-02, day 91 is 2026-06-01.
+describe('GATE_PREPAY_REFUND_90_DAY (owner R7: no end-now, no refund after 90 days)', () => {
+  const { prepayRefundWindowPassed } = require('../services/admin-cancellation');
   const DAY_90_START = '2026-06-02';
   const DAY_91_START = '2026-06-01';
+  const TODAY = new Date('2026-08-31T12:00:00-04:00');
+  const NEXT_DAY = new Date('2026-09-01T12:00:00-04:00');
   const seedTerm = (termStart) => {
     mockState.annual_prepay_terms = [{
       id: 'term-1', customer_id: 'cust-1', term_start: termStart, term_end: '2027-05-31', plan_label: 'Annual Pest',
@@ -2939,127 +2942,204 @@ describe('GATE_PREPAY_REFUND_90_DAY (owner R7: no prepay refund after 90 days)',
       { id: 'g4', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2027-02-01' },
     ];
   };
-  const termRow = () => ({ ...mockState.annual_prepay_terms[0], customer_id: 'cust-1' });
+  const previewOf = async (baseUrl, body = { effectiveDate: 'now' }) => (await post(baseUrl, '/cancel-plan/preview', body)).json();
   const refundTasks = () => NotificationService.notifyAdmin.mock.calls.filter((c) => c[0] === 'billing');
+  const gateOn = () => { process.env.GATE_PREPAY_REFUND_90_DAY = 'true'; };
 
-  afterEach(() => { delete process.env.GATE_PREPAY_REFUND_90_DAY; });
+  afterEach(() => {
+    delete process.env.GATE_PREPAY_REFUND_90_DAY;
+    jest.setSystemTime(TODAY);
+  });
 
   test('the window boundary: day 90 is inside, day 91 is past (ET calendar days)', () => {
-    const now = new Date('2026-08-31T12:00:00-04:00');
-    expect(prepayRefundWindowPassed({ term_start: DAY_90_START }, now)).toBe(false);
-    expect(prepayRefundWindowPassed({ term_start: DAY_91_START }, now)).toBe(true);
-    expect(prepayRefundWindowPassed({ term_start: '2026-08-31' }, now)).toBe(false);
+    expect(prepayRefundWindowPassed({ term_start: DAY_90_START }, TODAY)).toBe(false);
+    expect(prepayRefundWindowPassed({ term_start: DAY_91_START }, TODAY)).toBe(true);
+    expect(prepayRefundWindowPassed({ term_start: '2026-08-31' }, TODAY)).toBe(false);
     // A pg DATE hydrates as a Date at UTC midnight.
-    expect(prepayRefundWindowPassed({ term_start: new Date('2026-06-01T00:00:00Z') }, now)).toBe(true);
+    expect(prepayRefundWindowPassed({ term_start: new Date('2026-06-01T00:00:00Z') }, TODAY)).toBe(true);
     // 23:30 ET on day 90 is still day 90 even though UTC has rolled to day 91.
     expect(prepayRefundWindowPassed({ term_start: DAY_90_START }, new Date('2026-08-31T23:30:00-04:00'))).toBe(false);
     expect(prepayRefundWindowPassed({ term_start: DAY_90_START }, new Date('2026-09-01T00:30:00-04:00'))).toBe(true);
     // No readable start: never invent a window.
-    expect(prepayRefundWindowPassed({ term_start: null }, now)).toBe(false);
-    expect(prepayRefundWindowPassed(null, now)).toBe(false);
+    expect(prepayRefundWindowPassed({ term_start: null }, TODAY)).toBe(false);
+    expect(prepayRefundWindowPassed(null, TODAY)).toBe(false);
   });
 
-  test('gate OFF: a 183-day-old term refunds exactly as before', async () => {
-    seedTerm('2026-03-01');
-    expect(await computePrepayRefund(termRow())).toEqual(expect.objectContaining({
-      amount: 360, needsManualCalc: false, reason: null, includedVisits: 4, completedVisits: 1, remainingVisits: 3,
-    }));
-  });
-
-  test('gate ON: day 90 still refunds (480 / 4 x 3 = 360)', async () => {
-    process.env.GATE_PREPAY_REFUND_90_DAY = 'true';
-    seedTerm(DAY_90_START);
-    expect(await computePrepayRefund(termRow())).toEqual(expect.objectContaining({ amount: 360, needsManualCalc: false, reason: null, remainingVisits: 3 }));
-  });
-
-  test('gate ON: day 91 = $0, reason past_90_day_window, visit counts still reported', async () => {
-    process.env.GATE_PREPAY_REFUND_90_DAY = 'true';
-    seedTerm(DAY_91_START);
-    expect(await computePrepayRefund(termRow())).toEqual({
-      prepaidAmount: 480, includedVisits: 4, completedVisits: 1, remainingVisits: 3,
-      amount: 0, needsManualCalc: false, reason: 'past_90_day_window',
+  test('gate OFF: a 183-day-old term still previews and commits an end-now refund, byte for byte', async () => {
+    await withServer(async (baseUrl) => {
+      seedTerm('2026-03-01');
+      const preview = await previewOf(baseUrl);
+      expect(preview.prepay).not.toHaveProperty('endNowAvailable');
+      expect(preview).not.toHaveProperty('prepayRefund90Day');
+      expect(preview.prepay.refund).toEqual(expect.objectContaining({ amount: 360, reason: null }));
+      expect((await postCancel(baseUrl, { effectiveDate: 'now' })).status).toBe(200);
+      expect(refundTasks()).toHaveLength(1);
+      expect(refundTasks()[0][2]).toContain('$360.00');
     });
   });
 
-  test('gate gating is strict: anything but "true" leaves the math alone', async () => {
-    process.env.GATE_PREPAY_REFUND_90_DAY = '1';
-    seedTerm(DAY_91_START);
-    expect((await computePrepayRefund(termRow())).amount).toBe(360);
-  });
-
-  test('preview: day 91 shows the zero refund + reason; the fingerprint differs from the day-90 and gate-off previews', async () => {
+  test('gate OFF: the fingerprint does not move with the date', async () => {
     await withServer(async (baseUrl) => {
-      const previewOf = async () => (await (await post(baseUrl, '/cancel-plan/preview', { effectiveDate: 'now' })).json());
-      seedTerm(DAY_91_START);
-      const off = await previewOf();
-      expect(off.prepay.refund).toEqual(expect.objectContaining({ amount: 360, reason: null }));
-      expect(off.prepay).not.toHaveProperty('refundWindowPassed');
-
-      process.env.GATE_PREPAY_REFUND_90_DAY = 'true';
-      const past = await previewOf();
-      expect(past.prepay.refund).toEqual(expect.objectContaining({ amount: 0, needsManualCalc: false, reason: 'past_90_day_window', remainingVisits: 3 }));
-      expect(past.prepay.refundWindowPassed).toBe(true);
-      expect(past.previewFingerprint).not.toBe(off.previewFingerprint);
-
       seedTerm(DAY_90_START);
-      const inside = await previewOf();
-      expect(inside.prepay.refund).toEqual(expect.objectContaining({ amount: 360, reason: null }));
-      expect(inside.prepay.refundWindowPassed).toBe(false);
-      expect(inside.previewFingerprint).not.toBe(past.previewFingerprint);
+      const today = (await previewOf(baseUrl)).previewFingerprint;
+      jest.setSystemTime(NEXT_DAY);
+      expect((await previewOf(baseUrl)).previewFingerprint).toBe(today);
     });
   });
 
-  test('a preview approved inside the window cannot commit after it closes — 409 preview_changed', async () => {
+  test('gate ON, day 90: end-now is offered and commits the $360 refund task', async () => {
     await withServer(async (baseUrl) => {
-      process.env.GATE_PREPAY_REFUND_90_DAY = 'true';
+      gateOn();
       seedTerm(DAY_90_START);
-      const approved = (await (await post(baseUrl, '/cancel-plan/preview', { effectiveDate: 'now' })).json()).previewFingerprint;
-      // The next ET day: the same term is now on day 91.
-      jest.setSystemTime(new Date('2026-09-01T12:00:00-04:00'));
-      try {
-        const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'now', previewFingerprint: approved });
-        expect(res.status).toBe(409);
-        expect((await res.json()).code).toBe('preview_changed');
-        expect(mockProcess).not.toHaveBeenCalled();
-        expect(refundTasks()).toEqual([]);
-      } finally {
-        jest.setSystemTime(new Date('2026-08-31T12:00:00-04:00'));
-      }
+      const preview = await previewOf(baseUrl);
+      expect(preview.prepay.endNowAvailable).toBe(true);
+      expect(preview.prepay.refund).toEqual(expect.objectContaining({ amount: 360, needsManualCalc: false, reason: null }));
+      expect((await postCancel(baseUrl, { effectiveDate: 'now' })).status).toBe(200);
+      expect(refundTasks()).toHaveLength(1);
+      expect(refundTasks()[0][2]).toContain('$360.00');
     });
   });
 
-  test('commit day 91: term ended, case records $0 + reason, NO refund office task, note says no refund', async () => {
+  test('gate ON, day 91: the preview reports end-now unavailable (no refund shown), for either effective date', async () => {
     await withServer(async (baseUrl) => {
-      process.env.GATE_PREPAY_REFUND_90_DAY = 'true';
+      gateOn();
       seedTerm(DAY_91_START);
-      const res = await postCancel(baseUrl, { effectiveDate: 'now' });
+      const now = await previewOf(baseUrl);
+      expect(now.prepay).toEqual(expect.objectContaining({ endNowAvailable: false, endNowUnavailableReason: 'past_90_day_window', refund: null }));
+      expect(now.prepayRefund90Day).toBe(true);
+      const keep = await previewOf(baseUrl, { effectiveDate: 'end_of_coverage' });
+      expect(keep.prepay).toEqual(expect.objectContaining({ endNowAvailable: false, disposition: 'end_at_term', termEnd: '2027-05-31', refund: null }));
+    });
+  });
+
+  test('gate ON, day 91: a commit asking for end-now is refused 409 end_now_past_refund_window with NO side effects (UI and hand-built calls alike)', async () => {
+    await withServer(async (baseUrl) => {
+      gateOn();
+      seedTerm(DAY_91_START);
+      const viaDialog = await postCancel(baseUrl, { effectiveDate: 'now' });
+      expect(viaDialog.status).toBe(409);
+      expect((await viaDialog.json()).code).toBe('end_now_past_refund_window');
+      const handBuilt = await post(baseUrl, '/cancel-plan', { effectiveDate: 'now', prepayDisposition: 'end_now_refund' });
+      expect(handBuilt.status).toBe(409);
+      expect((await handBuilt.json()).code).toBe('end_now_past_refund_window');
+      expect(mockState.inserted).toBeUndefined();
+      expect(mockProcess).not.toHaveBeenCalled();
+      expect(mockRecordDecision).not.toHaveBeenCalled();
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+      expect(sendCancellationConfirmations).not.toHaveBeenCalled();
+    });
+  });
+
+  test('gate ON, day 91: End of paid coverage still works, with no refund and no billing task', async () => {
+    await withServer(async (baseUrl) => {
+      gateOn();
+      seedTerm(DAY_91_START);
+      mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-05-31' });
+      const res = await postCancel(baseUrl, { effectiveDate: 'end_of_coverage' });
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body.prepayTermOutcome).toBe('ended_now');
-      expect(body.errors).toEqual([]);
-      expect(body.refund).toEqual(expect.objectContaining({ amount: 0, needsManualCalc: false, reason: 'past_90_day_window' }));
-      expect(mockOpenCase.mock.calls[0][0].snapshot.refund).toEqual(expect.objectContaining({ amount: 0, reason: 'past_90_day_window' }));
-      expect(mockRecordDecision).toHaveBeenCalledWith(expect.objectContaining({ termId: 'term-1', action: 'cancel', disposition: 'end_now_refund' }));
-      expect(mockRecordDecision.mock.calls[0][0].notes).toMatch(/no prepay refund/);
-      expect(mockRecordDecision.mock.calls[0][0].notes).not.toMatch(/refund owed/);
+      expect(body).toEqual(expect.objectContaining({ prepayDisposition: 'end_at_term', keptThrough: '2027-05-31' }));
+      expect(body.refund).toBeUndefined();
       expect(refundTasks()).toEqual([]);
     });
   });
 
-  test('commit day 90 (gate on) and day 91 with the gate OFF still open the $360 refund task', async () => {
+  test('gate ON: the approved facts change between day 90 and day 91 — a day-90 preview cannot commit a day-91 end-now', async () => {
     await withServer(async (baseUrl) => {
-      process.env.GATE_PREPAY_REFUND_90_DAY = 'true';
+      gateOn();
       seedTerm(DAY_90_START);
-      expect((await postCancel(baseUrl, { effectiveDate: 'now' })).status).toBe(200);
+      const day90 = (await previewOf(baseUrl)).previewFingerprint;
+      jest.setSystemTime(NEXT_DAY);
+      const day91 = (await previewOf(baseUrl)).previewFingerprint;
+      expect(day91).not.toBe(day90);
+      const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'now', previewFingerprint: day90 });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('end_now_past_refund_window');
+      expect(mockProcess).not.toHaveBeenCalled();
+      expect(refundTasks()).toEqual([]);
+    });
+  });
+
+  test('accepted on day 90, refund task lost, repaired on day 91: the ORIGINAL refund is raised (open acceptance + case)', async () => {
+    await withServer(async (baseUrl) => {
+      gateOn();
+      seedTerm(DAY_90_START);
+      Object.assign(mockState.annual_prepay_terms[0], { renewal_decision: 'cancel', status: 'cancelled' });
+      const accepted = new Date('2026-08-31T12:00:00-04:00');
+      mockState.service_requests = [{
+        id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+        subject: 'Cancel plan (Admin (user admin-1))', description: '',
+        metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true } }),
+        created_at: accepted,
+      }];
+      mockState.cancellation_cases = [{
+        id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed', created_at: accepted,
+        snapshot: JSON.stringify({
+          prepayTermId: 'term-1', effectiveDate: 'now', prepayDisposition: 'end_now_refund', refund: null,
+          proposedRefund: { prepaidAmount: 480, includedVisits: 4, completedVisits: 1, remainingVisits: 3, amount: 360, needsManualCalc: false },
+          outcome: { visitsPulled: 3, scope: [], confirmationRequested: true, confirmation: 'sms', confirmationChannels: ['sms'], errors: ['prepay_term_disposition'] },
+        }),
+      }];
+      jest.setSystemTime(NEXT_DAY);
+      const res = await postCancel(baseUrl, { effectiveDate: 'now' });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toEqual(expect.objectContaining({ duplicate: true, caseId: 'case-9', errors: [] }));
+      expect(body.refund).toEqual(expect.objectContaining({ amount: 360, needsManualCalc: false }));
       expect(refundTasks()).toHaveLength(1);
       expect(refundTasks()[0][2]).toContain('$360.00');
+      expect(mockProcess).not.toHaveBeenCalled();
+    });
+  });
 
-      NotificationService.notifyAdmin.mockClear();
-      mockState.service_requests = [];
-      mockState.cancellation_cases = [];
-      delete process.env.GATE_PREPAY_REFUND_90_DAY;
-      seedTerm(DAY_91_START);
-      expect((await postCancel(baseUrl, { effectiveDate: 'now' })).status).toBe(200);
+  test('accepted on day 90, run RESOLVED with its refund task still missing, repeated on day 91: the duplicate latch repairs the task (the window never applies to it)', async () => {
+    await withServer(async (baseUrl) => {
+      gateOn();
+      seedTerm(DAY_90_START);
+      Object.assign(mockState.annual_prepay_terms[0], { renewal_decision: 'cancel', status: 'cancelled' });
+      mockState.customers[0].pipeline_stage = 'churned';
+      const accepted = new Date('2026-08-31T12:00:00-04:00');
+      mockState.service_requests = [{
+        id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'resolved',
+        subject: 'Cancel plan (Admin (user admin-1))', description: '',
+        metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true } }),
+        created_at: accepted,
+      }];
+      mockState.cancellation_cases = [{
+        id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed', created_at: accepted,
+        snapshot: JSON.stringify({
+          prepayTermId: 'term-1', effectiveDate: 'now', prepayDisposition: 'end_now_refund', refund: null,
+          proposedRefund: { prepaidAmount: 480, includedVisits: 4, completedVisits: 1, remainingVisits: 3, amount: 360, needsManualCalc: false },
+          outcome: { visitsPulled: 3, scope: [], confirmationRequested: true, confirmation: 'sms', confirmationChannels: ['sms'], errors: [] },
+        }),
+      }];
+      jest.setSystemTime(NEXT_DAY);
+      const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'now', prepayDisposition: 'end_now_refund' });
+      expect(res.status).toBe(200);
+      expect((await res.json()).refund).toEqual(expect.objectContaining({ amount: 360 }));
+      expect(refundTasks()).toHaveLength(1);
+      expect(mockProcess).not.toHaveBeenCalled();
+    });
+  });
+
+  test('accepted on day 90, run left open, retried on day 91: the retry keeps its end-now refund (open acceptance)', async () => {
+    await withServer(async (baseUrl) => {
+      gateOn();
+      seedTerm(DAY_90_START);
+      mockState.service_requests = [{
+        id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+        subject: 'Cancel plan (Admin (user admin-1))', description: '',
+        metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: false, effectiveDate: 'now', prepayDisposition: 'end_now_refund' } }),
+        created_at: new Date('2026-08-31T12:00:00-04:00'),
+      }];
+      jest.setSystemTime(NEXT_DAY);
+      const preview = await previewOf(baseUrl);
+      expect(preview.repairRetry).toBe(true);
+      expect(preview.prepay).toEqual(expect.objectContaining({ endNowAvailable: true, disposition: 'end_now_refund' }));
+      expect(preview.prepay.refund).toEqual(expect.objectContaining({ amount: 360 }));
+      const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'now', previewFingerprint: preview.previewFingerprint });
+      expect(res.status).toBe(200);
+      expect((await res.json()).refund).toEqual(expect.objectContaining({ amount: 360 }));
       expect(refundTasks()).toHaveLength(1);
       expect(refundTasks()[0][2]).toContain('$360.00');
     });

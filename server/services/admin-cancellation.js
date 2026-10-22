@@ -305,7 +305,7 @@ const termCoverageResolvable = (term) => !!(term
 // approved-facts fingerprint.
 const { previewVisitFees } = require('./cancellation-resolution/visit-fees');
 
-function cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact, visitFees, scope, wholeAccount }) {
+function cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact, visitFees, scope, wholeAccount, endNowBlocked = false }) {
   const crypto = require('crypto');
   const facts = {
     // The fee-or-waive exposure the operator approved (id, lane, amount,
@@ -327,10 +327,10 @@ function cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact, visitFee
     refundIncluded: refund ? refund.includedVisits : null,
     refundCompleted: refund ? refund.completedVisits : null,
     refundRemaining: refund ? refund.remainingVisits : null,
-    // GATE_PREPAY_REFUND_90_DAY: the reason rides the facts only while the
-    // gate is on (off = the same hash as before), so a preview approved
-    // inside the 90-day window can never commit past it.
-    ...(prepayRefund90DayLive() ? { refundReason: refund ? (refund.reason || null) : null } : {}),
+    // GATE_PREPAY_REFUND_90_DAY: whether ending now is still offered rides
+    // the facts only while the gate is on (off = the same hash as before),
+    // so a day-90 approval can never carry a day-91 end-now.
+    ...(prepayRefund90DayLive() ? { endNowBlocked: endNowBlocked === true } : {}),
     // The dialog shows the open balance beside the cancel — a payment or
     // new invoice during the window changes what the operator approved.
     openBalance: impact ? (impact.openBalance ?? null) : null,
@@ -362,9 +362,12 @@ function cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact, visitFee
 
 const PAST_90_DAY_WINDOW = 'past_90_day_window';
 const PREPAY_REFUND_WINDOW_DAYS = 90;
+const END_NOW_PAST_WINDOW_MESSAGE = 'Ending now is not offered: this plan started more than 90 days ago, so no refund is owed and the paid visits stay (owner rule). Use End of paid coverage instead.';
 
 // Whole ET calendar days from the term's start date to `now`'s ET date.
 // Day 90 is still inside the window (refund allowed); day 91 is past it.
+// `now` is the instant the cancellation was ACCEPTED: a retry or repair of
+// an accepted end-now passes the acceptance instant, never the retry's.
 function prepayRefundWindowPassed(term, now = new Date()) {
   const start = term && term.term_start ? dateOnlyString(term.term_start) : null;
   if (!start || !/^\d{4}-\d{2}-\d{2}$/.test(start)) return false;
@@ -372,8 +375,24 @@ function prepayRefundWindowPassed(term, now = new Date()) {
   return Number.isFinite(days) && days > PREPAY_REFUND_WINDOW_DAYS;
 }
 
-// A refund the 90-day rule zeroed: recorded on the case, but no office task.
-const refundPastWindow = (refund) => !!refund && refund.reason === PAST_90_DAY_WINDOW;
+// GATE_PREPAY_REFUND_90_DAY (owner R7): with no refund owed after day 90 the
+// customer keeps the paid coverage, so a FRESH end-now of such a term is not
+// offered. `at` = the first-approval instant of an accepted run (repairs keep
+// their refund), else now.
+function endNowBlockedForTerm(term, wholeAccount, disposition, at) {
+  return prepayRefund90DayLive() && !!term && wholeAccount === true
+    && disposition === 'end_now_refund' && prepayRefundWindowPassed(term, at || new Date());
+}
+
+// The instant an accepted cancel request was first approved: the durable
+// fee-evaluation stamp, else the request row's own creation time.
+function acceptedAtOf(requestRow) {
+  if (!requestRow) return null;
+  const stamped = acceptedFeeEvaluationAt(requestRow);
+  if (stamped) return stamped;
+  const created = requestRow.created_at ? new Date(requestRow.created_at) : null;
+  return created && !Number.isNaN(created.getTime()) ? created : null;
+}
 
 /**
  * Ruling C-6: prepaid amount ÷ included visits × remaining visits. Included
@@ -383,18 +402,7 @@ const refundPastWindow = (refund) => !!refund && refund.reason === PAST_90_DAY_W
  * count is not on the term the refund is recorded as needing a manual
  * calculation — never invented.
  */
-async function computePrepayRefund(term, opts = {}) {
-  const result = await computePrepayRefundByVisits(term, opts);
-  // Owner R7 (2026-10-22): no prepay refund after 90 days. Gate off = the
-  // visit-based math above, untouched. The counts it found stay on the
-  // result for the record; only the dollars and the reason change.
-  if (prepayRefund90DayLive() && prepayRefundWindowPassed(term)) {
-    return { ...result, amount: 0, needsManualCalc: false, reason: PAST_90_DAY_WINDOW };
-  }
-  return result;
-}
-
-async function computePrepayRefundByVisits(term, { coveredIds = null } = {}) {
+async function computePrepayRefund(term, { coveredIds = null } = {}) {
   const prepaidAmount = term && term.prepay_amount != null ? Number(term.prepay_amount) : null;
   const includedVisits = Number.parseInt(term && term.coverage_visit_count, 10);
   const base = {
@@ -617,7 +625,9 @@ function scopeErrorToHttp(scopeError) {
   }
   if (scopeError === 'scoped_covers_prepaid') {
     return new CancelPlanError(409, 'scoped_covers_prepaid',
-      'Upcoming visits in that selection are covered by the annual prepay term. Cancel the whole plan (which disposes of the term and records the refund), or leave the covered service in place.');
+      prepayRefund90DayLive()
+        ? 'Upcoming visits in that selection are covered by the annual prepay term. Cancel the whole plan instead (a prepaid plan is refunded only within 90 days of its start; after that it ends at the end of paid coverage with no refund), or leave the covered service in place.'
+        : 'Upcoming visits in that selection are covered by the annual prepay term. Cancel the whole plan (which disposes of the term and records the refund), or leave the covered service in place.');
   }
   return new CancelPlanError(409, 'scoped_cancellation_unattributed',
     'The services that would stay cannot be priced from the ledger. Cancel the whole plan, or repair the plan-rate ledger first.');
@@ -1042,7 +1052,13 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
     // approved-facts view passes, so the fingerprint matches on retry.
     buildCancellationImpact(customerId, wholeAccount ? [] : scope, { after: prepayPlan.keepThrough, keepVisitIds, keepScoped: scopedRetry }),
   ]);
-  const refund = term && prepayPlan.prepayDisposition === 'end_now_refund'
+  // GATE_PREPAY_REFUND_90_DAY: past day 90 "end now" is not offered (no refund
+  // is owed, the customer keeps the paid coverage). Judged at the accepted
+  // instant for a repair retry of an accepted run, else now.
+  const endNowUnavailable = prepayRefund90DayLive() && !!term && wholeAccount
+    && prepayRefundWindowPassed(term, acceptedAtOf(acceptance) || new Date());
+  const endNowBlocked = endNowUnavailable && prepayPlan.prepayDisposition === 'end_now_refund';
+  const refund = term && prepayPlan.prepayDisposition === 'end_now_refund' && !endNowBlocked
     ? await computePrepayRefund({ ...term, customer_id: customerId })
     : null;
   // Fee exposure = the live pull set PLUS the visits run 1 already
@@ -1074,7 +1090,7 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
   }
   const today = etDateString();
   return {
-    previewFingerprint: cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact, visitFees, scope, wholeAccount }),
+    previewFingerprint: cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact, visitFees, scope, wholeAccount, endNowBlocked }),
     enabled: true,
     customer: customerSummary(customer),
     eligible: eligible || repairRetry,
@@ -1089,6 +1105,8 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
     impact,
     effectiveDate: prepayPlan.effectiveDate,
     effectiveOn: prepayPlan.keepThrough || today,
+    // GATE_PREPAY_REFUND_90_DAY on: the dialog words its prepay copy for the rule.
+    ...(prepayRefund90DayLive() ? { prepayRefund90Day: true } : {}),
     prepay: term ? {
       termId: term.id,
       planLabel: term.plan_label || null,
@@ -1098,9 +1116,11 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
       includedVisits: term.coverage_visit_count == null ? null : Number(term.coverage_visit_count),
       disposition: prepayPlan.prepayDisposition,
       refund,
-      // GATE_PREPAY_REFUND_90_DAY on: lets the dialog label the "Now" option
-      // honestly before it is chosen (the refund itself rides only that option).
-      ...(prepayRefund90DayLive() ? { refundWindowPassed: prepayRefundWindowPassed(term) } : {}),
+      // GATE_PREPAY_REFUND_90_DAY on: whether "end now" is offered at all.
+      ...(prepayRefund90DayLive() ? {
+        endNowAvailable: !endNowUnavailable,
+        ...(endNowUnavailable ? { endNowUnavailableReason: PAST_90_DAY_WINDOW } : {}),
+      } : {}),
     } : null,
     waiveLateFee: input.waiveLateFee,
     visitFees,
@@ -1295,6 +1315,13 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
 
   const term = await resolveLiveTerm(customerId, wholeAccount);
   const prepayPlan = resolvePrepay(input, term, wholeAccount);
+  // GATE_PREPAY_REFUND_90_DAY: a FRESH end-now of a term past day 90 is
+  // refused below (no refund is owed; the customer keeps the paid coverage).
+  // A run already ACCEPTED inside the window is judged at its acceptance
+  // instant (open acceptance), so a repair or retry after day 90 keeps its
+  // refund. The duplicate latch below answers a tied accepted run before the
+  // refusal is reached, so its repair never meets the window either.
+  const endNowBlocked = endNowBlockedForTerm(term, wholeAccount, prepayPlan.prepayDisposition, acceptedAtOf(openAcceptance));
   const refund = term && prepayPlan.prepayDisposition === 'end_now_refund'
     ? await computePrepayRefund({ ...term, customer_id: customerId })
     : null;
@@ -1320,7 +1347,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       [...new Set([...(liveImpact && Array.isArray(liveImpact.pulledVisitKeys) ? liveImpact.pulledVisitKeys : []), ...repairFeeKeys].map(String))], feeNow);
     return {
       liveImpact,
-      fingerprint: cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact: liveImpact, visitFees: liveVisitFees, scope, wholeAccount }),
+      fingerprint: cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact: liveImpact, visitFees: liveVisitFees, scope, wholeAccount, endNowBlocked }),
     };
   };
 
@@ -1484,11 +1511,9 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
           repairErrors.push('refund_facts_changed');
           logger.error(`[admin-cancellation] refund repair for case ${prior.id} refused — the live refund matches neither the recorded proposal nor an approved preview`);
         } else try {
-          if (!refundPastWindow(refund)) {
-            await raisePrepayRefundTask({
-              customer, request: { id: prior.service_request_id }, term, refund, actorLabel,
-            });
-          }
+          await raisePrepayRefundTask({
+            customer, request: { id: prior.service_request_id }, term, refund, actorLabel,
+          });
           repairedRefund = refund;
           refundRepairedNow = true;
           try {
@@ -1688,6 +1713,13 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         errors: [...(outcome && Array.isArray(outcome.errors) ? outcome.errors : []), ...repairErrors],
       };
     }
+  }
+
+  // GATE_PREPAY_REFUND_90_DAY (owner R7): a fresh end-now of a term past day
+  // 90 is refused before any write — no refund is owed and the paid visits
+  // stay. Server-side, so the dialog, a hand-built call and the IB all stop here.
+  if (endNowBlocked) {
+    throw new CancelPlanError(409, 'end_now_past_refund_window', END_NOW_PAST_WINDOW_MESSAGE, { reason: PAST_90_DAY_WINDOW });
   }
 
   // Approved-facts check (409 preview_changed): when the caller carries the
@@ -2037,9 +2069,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
           // note says OWED, never "recorded": a lost task/case write leaves
           // refundRecorded false and bells the office, and a durable
           // renewal note claiming the record exists would contradict it.
-          refundPastWindow(refund)
-            ? `Cancel plan (${actorLabel}) — ended now; no prepay refund (more than 90 days after the term start; owner rule).`
-            : `Cancel plan (${actorLabel}) — ended now; unused-value refund owed to the customer (office refund task + cancellation case follow).`,
+          `Cancel plan (${actorLabel}) — ended now; unused-value refund owed to the customer (office refund task + cancellation case follow).`,
           'end_now_refund');
         if (!decision.verified) {
           // A racing renew/switch_plan decision means the term is NOT
@@ -2078,9 +2108,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             errors.push('refund_facts_changed');
             logger.error(`[admin-cancellation] refund for request ${request.id} drifted from the recorded proposal ($${priorProposedRefund.amount} → ${recount.needsManualCalc ? 'manual' : `$${recount.amount}`}) — task NOT raised without a fresh approved preview`);
           } else {
-            // Past the 90-day window nothing is owed: no office task, the
-            // case still records the facts (amount 0 + reason).
-            if (!refundPastWindow(recount)) await raisePrepayRefundTask({ customer, request, term, refund: recount, actorLabel });
+            await raisePrepayRefundTask({ customer, request, term, refund: recount, actorLabel });
             refundRecorded = true;
           }
         }
