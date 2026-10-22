@@ -15,7 +15,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { bidDeskLive } = require('../../config/feature-gates');
-const { detectBidEmail, parseBidEmail } = require('./detector');
+const { detectBidEmail, parseBidEmail, classifyKind } = require('./detector');
 const { attachPatch, reminderDue } = require('./rules');
 const alerts = require('./alerts');
 
@@ -54,13 +54,23 @@ async function findBid(trx, email, groupKey) {
  * Files one stored email. Idempotent (an email already linked is skipped). `manual` skips detection and rings no bell.
  * @returns {Promise<{ skipped?: string, bidId?: string, created?: boolean, kind?: string }>}
  */
+// A later email in a thread that already belongs to a bid joins it even with no bid words ("Reminder: <project>",
+// a GC's follow-up). Our own mail and internal ops mail never do.
+const THREAD_JOIN_REASONS = new Set(['not_bid', 'provider_not_bid']);
+async function detectWithThread(email) {
+  const detected = detectBidEmail(email);
+  if (detected.bid || !THREAD_JOIN_REASONS.has(detected.reason) || !email.gmail_thread_id) return detected;
+  const inThread = await findBid(db, email, null);
+  return inThread ? { bid: true, source: inThread.source, kind: classifyKind(email), reason: 'thread' } : detected;
+}
+
 async function ingestEmail(email, { historical = false, manual = false } = {}) {
   // A person marking an email by hand is already looking at it: no bell for that.
   const quiet = manual;
-  const detected = manual ? { bid: true, source: 'manual' } : detectBidEmail(email);
+  const detected = manual ? { bid: true, source: 'manual' } : await detectWithThread(email);
   if (!detected.bid) return { skipped: detected.reason };
   const parsed = parseBidEmail(email);
-  const kind = parsed.kind;
+  const kind = detected.reason === 'thread' ? detected.kind : parsed.kind;
 
   return db.transaction(async (trx) => {
     // One writer at a time: two emails of one thread must not both create the bid. Volume is a few a month.
@@ -223,7 +233,7 @@ async function runBackfill({ days = BACKFILL_DAYS, dryRun = true, now = new Date
     for (const email of rows) {
       result.read += 1;
       cursor = { at: new Date(email.received_at).toISOString(), id: email.id };
-      if (!detectBidEmail(email).bid) continue;
+      if (!(await detectWithThread(email)).bid) continue;
       result.matched += 1;
       if (dryRun) continue;
       try {

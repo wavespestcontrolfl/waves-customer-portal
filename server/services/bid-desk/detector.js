@@ -22,9 +22,10 @@ const PROCORE_DOMAIN = 'procoretech.com';
 const PORTAL_DOMAINS = ['bonfirehub.com', 'opengov.com', 'demandstar.com', 'bidnetdirect.com'];
 const GOV_SUFFIXES = ['.gov', '.fl.us'];
 const INTERNAL_SUBJECT = /^\s*(?:FIX|ACT|FYI|OK)\s*:/;
-const BID_WORDS = /\b(?:RFP|RFQ|ITB|IFB|ITN)\b|invitation to bid|bid invite|request for (?:proposal|quote|qualifications)|addendum|pre-?bid/i;
+const BID_WORDS = /\b(?:RFP|RFQ|ITB|IFB|ITN)\b|invitation to bid|bid invite|request for (?:proposal|quote|qualifications)|addend(?:um|ums|a)\b|pre-?bid/i;
 // Subject patterns for the kind of message once an email is known to be about a bid.
-const ADDENDUM_WORDS = /\baddend(?:um|a)\b|\bdate change\b|\b(?:due date|deadline|bid date|bid due)\b.{0,40}\b(?:change[sd]?|extended|extension|revised|moved|postponed)\b|\b(?:extended|extension|revised|postponed)\b.{0,40}\b(?:due|deadline|bid)\b/i;
+const ADDENDUM_WORDS = /\baddend(?:um|ums|a)\b|\bdate change\b|\b(?:due date|deadline|bid date|bid due)\b.{0,40}\b(?:change[sd]?|extended|extension|revised|moved|postponed)\b|\b(?:extended|extension|revised|postponed)\b.{0,40}\b(?:due|deadline|bid)\b/i;
+const PROVIDER_BID_BODY = /^\s*Bid Due\s*:|has invited you to bid on|sent your company a message about|invitation to bid/im;
 const REMINDER_WORDS = /\breminder\b|\bdue (?:soon|tomorrow|today)\b|\bclosing soon\b|\blast chance\b/i;
 
 const MONTH_INDEX = {
@@ -87,6 +88,10 @@ function htmlToText(html) {
     });
 }
 
+function bodyText(email) {
+  return String(email.body_text || '').trim() ? String(email.body_text) : htmlToText(email.body_html);
+}
+
 function bodyLines(email) {
   const text = String(email.body_text || '').trim() ? String(email.body_text) : htmlToText(email.body_html);
   return text.split(/\r?\n/).map((line) => line.replace(/[ \t ]+/g, ' ').trim()).filter(Boolean);
@@ -130,7 +135,11 @@ function detectBidEmail(email = {}) {
   const sender = senderKind(email);
   const bidWords = BID_WORDS.test(subject);
   let source = null;
-  if (sender === 'buildingconnected' || sender === 'procore') source = sender;
+  // BuildingConnected / Procore also send account and marketing mail: a bid needs a bid line in the body or bid
+  // words in the subject.
+  if ((sender === 'buildingconnected' || sender === 'procore') && (bidWords || PROVIDER_BID_BODY.test(subject) || PROVIDER_BID_BODY.test(bodyText(email)))) {
+    source = sender;
+  } else if (sender === 'buildingconnected' || sender === 'procore') return { bid: false, reason: 'provider_not_bid' };
   else if (sender === 'gov_email' && bidWords) source = 'gov_email';
   else if (bidWords) source = 'email_subject';
   if (!source) return { bid: false, reason: 'not_bid' };
@@ -164,32 +173,82 @@ function firstDate(matches, defaultTime) {
   return null;
 }
 
+// "<Person> from <GC> has invited you to bid on <Project>: <Package>" or "<Person> of <GC> sent your company a message
+// about <Project>: <Package>". The project often sits on the NEXT line (the template breaks after "bid on").
+const BC_INVITE = /^(.{1,200}?)\s+has invited you to bid on:?\s*(.*)$/i;
+const BC_MESSAGE = /^(.{1,200}?)\s+sent your company a message about:?\s*(.*)$/i;
+const BC_PERSON_ORG = /^(.{1,80}?)\s+(?:from|of)\s+(.{2,160})$/i;
+const EMAIL_IN_LINE = /([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})/i;
+
+function splitProjectPackage(text) {
+  const rest = String(text || '').trim().replace(/\.$/, '');
+  if (!rest) return { project_title: null, package_name: null };
+  const split = rest.lastIndexOf(': ');
+  return {
+    project_title: (split > 0 ? rest.slice(0, split) : rest).trim() || null,
+    package_name: split > 0 ? rest.slice(split + 2).trim() || null : null,
+  };
+}
+
 function parseBuildingConnected(lines) {
   const out = {};
-  const invite = lines.map((line) => /^(.{1,200}?)\s+has invited you to bid on\s+(.+)$/i.exec(line)).find(Boolean);
-  if (invite) {
-    out.gc_or_agency = invite[1].trim();
-    const rest = invite[2].trim().replace(/\.$/, '');
-    const split = rest.lastIndexOf(': ');
-    out.project_title = (split > 0 ? rest.slice(0, split) : rest).trim() || null;
-    out.package_name = split > 0 ? rest.slice(split + 2).trim() || null : null;
+  let index = -1;
+  let match = null;
+  for (const re of [BC_INVITE, BC_MESSAGE]) {
+    index = lines.findIndex((line) => re.test(line));
+    if (index !== -1) { match = re.exec(lines[index]); break; }
+  }
+  if (match) {
+    const who = BC_PERSON_ORG.exec(match[1].trim());
+    if (who) {
+      out.buyer_name = who[1].trim();
+      out.gc_or_agency = who[2].trim();
+    } else {
+      out.gc_or_agency = match[1].trim();
+    }
+    const projectText = match[2].trim() || lines[index + 1] || '';
+    Object.assign(out, splitProjectPackage(projectText));
   }
   const location = labelledValues(lines, 'Location')[0];
   if (location) out.location = location.value;
-  const lead = lines.map((line) => /^Lead\s*:\s*(.+?)\s*\|\s*([^\s|]+@[^\s|]+)\s*$/i.exec(line)).find(Boolean);
-  if (lead) {
-    out.buyer_name = lead[1].trim();
-    out.buyer_email = lead[2].trim().toLowerCase();
+  // "Lead: <name> | <email>" on one line, or "Lead: <name>" with the email on the next line
+  // ("Estimator • name@gc.com"). The "Sender Details" block of a message names the person, then the email.
+  const leadIndex = lines.findIndex((line) => /^Lead\s*:/i.test(line));
+  if (leadIndex !== -1) {
+    const sameLine = /^Lead\s*:\s*(.+?)(?:\s*\|\s*(\S+@\S+))?\s*$/i.exec(lines[leadIndex]);
+    if (sameLine) out.buyer_name = sameLine[1].replace(EMAIL_IN_LINE, '').replace(/[|•]\s*$/, '').trim() || out.buyer_name;
+    const emailMatch = EMAIL_IN_LINE.exec(lines[leadIndex]) || EMAIL_IN_LINE.exec(lines[leadIndex + 1] || '');
+    if (emailMatch) out.buyer_email = emailMatch[1].toLowerCase();
+  } else {
+    const sender = lines.findIndex((line) => /^Sender Details$/i.test(line));
+    if (sender !== -1) {
+      const emailMatch = lines.slice(sender + 1, sender + 4).map((line) => EMAIL_IN_LINE.exec(line)).find(Boolean);
+      if (emailMatch) out.buyer_email = emailMatch[1].toLowerCase();
+    }
   }
   return out;
 }
 
+// "<Person> from <GC> has invited you to bid on project <Project> (<Package>)."
+const PROCORE_INVITE = /^(.{1,80}?)\s+from\s+(.{2,160}?)\s+has invited you to bid on project\b/i;
+
 function parseProcore(lines) {
   const out = {};
+  const invite = lines.map((line) => PROCORE_INVITE.exec(line)).find(Boolean);
+  if (invite) {
+    out.buyer_name = invite[1].trim();
+    out.gc_or_agency = invite[2].trim();
+  }
   const project = labelledValue(lines, 'Project Name');
   if (project) out.project_title = project;
   const form = labelledValue(lines, 'Bid Form Name');
   if (form) out.package_name = form;
+  // "Client Details" then "<Person> - <email>".
+  const client = lines.findIndex((line) => /^Client Details$/i.test(line));
+  if (client !== -1) {
+    const emailMatch = EMAIL_IN_LINE.exec(lines[client + 1] || '');
+    if (emailMatch) out.buyer_email = emailMatch[1].toLowerCase();
+  }
   return out;
 }
 
@@ -200,7 +259,7 @@ const normalizeTitle = (title) => String(title || '')
 function subjectForGrouping(subject) {
   return String(subject || '')
     .replace(/^\s*(?:(?:re|fwd?)\s*:\s*)+/i, '')
-    .replace(/\b(?:addendum|addenda)\s*(?:no\.?|#)?\s*\d*\s*[:\-–]?/ig, ' ')
+    .replace(/\b(?:addendum|addendums|addenda)\s*(?:no\.?|#)?\s*\d*\s*[:\-–]?/ig, ' ')
     .replace(/\breminder\s*[:\-–]?/ig, ' ');
 }
 

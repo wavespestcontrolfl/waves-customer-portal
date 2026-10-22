@@ -35,10 +35,15 @@ const procoreInvite = (over = {}) => email({
 });
 
 describe('detectBidEmail', () => {
-  test('BuildingConnected and Procore senders are bids by domain', () => {
+  test('BuildingConnected and Procore mail is a bid only with a bid line in the body or bid words in the subject', () => {
     expect(detectBidEmail(bcInvite())).toMatchObject({ bid: true, source: 'buildingconnected', kind: 'invite' });
     expect(detectBidEmail(procoreInvite())).toMatchObject({ bid: true, source: 'procore', kind: 'invite' });
+    // A subdomain sender with a bid line in the body still counts.
     expect(detectBidEmail(bcInvite({ from_address: 'x@mail.buildingconnected.com', subject: 'Welcome' })).bid).toBe(true);
+    // Account and marketing mail from the same providers is not a bid.
+    expect(detectBidEmail(email({ from_address: 'team@buildingconnected.com', subject: 'Manage all your bids in one place', body_text: 'Start now. More subs choose Bid Board every day.' })))
+      .toMatchObject({ bid: false, reason: 'provider_not_bid' });
+    expect(detectBidEmail(email({ from_address: 'noreply@procoretech.com', subject: 'Your Procore password was changed', body_text: 'If this was not you, contact support.' })).bid).toBe(false);
   });
 
   test('a government or bid-portal sender needs bid words in the subject', () => {
@@ -189,5 +194,79 @@ describe('grouping keys', () => {
   test('different projects from one GC do not share a key', () => {
     const other = bcInvite({ body_text: BC_BODY.replace('Sample Ridge Residences', 'Other Fixture Plaza') });
     expect(parseBidEmail(other).group_key).not.toBe(parseBidEmail(bcInvite()).group_key);
+  });
+});
+
+// The live templates break lines differently from the one-line shape above: the project sits on the line after
+// "has invited you to bid on", the lead's email on the line after "Lead:", and a GC message names the bid package
+// on the line after "sent your company a message about". Names below are invented.
+describe('parseBidEmail: template line breaks as delivered', () => {
+  const BC_SPLIT_INVITE = [
+    'Download',
+    'Pat Sample from Fixture Build Co, Inc. has invited you to bid on',
+    'Sampleville Public Works Shed (PEMB): General Requirements',
+    'View this RFP',
+    'Bidding Not Bidding Not Sure',
+    'Project Details',
+    'Location: 100 Fixture Way, Sampleville, FL 34000, United States of America',
+    'Job Walk: September 1, 2026',
+    'Bid Due: September 28, 2026',
+    'Client Details',
+    'Lead: Pat Sample',
+    'Senior Estimator • pat.sample@fixture-gc.example',
+    'Fixture Build Co, Inc.',
+  ].join('\n');
+  const BC_SPLIT_MESSAGE = [
+    'Pat Sample of Fixture Build Co, Inc. sent your company a message about',
+    'Sampleville Public Works Shed (PEMB): General Requirements',
+    'Addendums #1, #2 and #3',
+    'Addendum 2 was a date change.',
+    'Project Details',
+    'Location: 100 Fixture Way, Sampleville, FL 34000, United States of America',
+    'Bid Due: October 5, 2026',
+    'Sender Details',
+    'Pat Sample',
+    'Senior Estimator • pat.sample@fixture-gc.example',
+  ].join('\n');
+  const invite = email({ from_address: 'team@buildingconnected.com', subject: 'Bid Invite: Sampleville Public Works Sh...', body_text: BC_SPLIT_INVITE });
+  const message = email({ gmail_thread_id: 't-2', from_address: 'team@buildingconnected.com', subject: 'Addendums #1, #2 and #3 - Sampleville Public Works...', body_text: BC_SPLIT_MESSAGE });
+
+  test('reads the person, the GC and the project from the next line', () => {
+    expect(parseBidEmail(invite)).toMatchObject({
+      buyer_name: 'Pat Sample',
+      buyer_email: 'pat.sample@fixture-gc.example',
+      gc_or_agency: 'Fixture Build Co, Inc.',
+      project_title: 'Sampleville Public Works Shed (PEMB)',
+      package_name: 'General Requirements',
+      due_source_line: 'Bid Due: September 28, 2026',
+    });
+  });
+
+  test('a GC message about the same package is an addendum with the same grouping key', () => {
+    expect(detectBidEmail(message)).toMatchObject({ bid: true, source: 'buildingconnected', kind: 'addendum' });
+    const parsedMessage = parseBidEmail(message);
+    expect(parsedMessage).toMatchObject({ gc_or_agency: 'Fixture Build Co, Inc.', buyer_email: 'pat.sample@fixture-gc.example' });
+    expect(parsedMessage.group_key).toBe(parseBidEmail(invite).group_key);
+  });
+
+  test('a Procore invite names the person and the GC, and the buyer email under Client Details', () => {
+    const body = [
+      'Bid Due: Friday, September 25, 2026 at 12:00 pm',
+      'Invitation to Bid',
+      'Sam Example from Sample Developers has invited you to bid on project Sample Tower (Termite Treatment).',
+      'Project Name',
+      'Sample Tower',
+      'Bid Form Name',
+      'Termite Treatment',
+      'Client Details',
+      'Sam Example - sam.example@sample-dev.example',
+    ].join('\n');
+    expect(parseBidEmail(email({ from_address: 'Sample_notifications@procoretech.com', subject: 'Sample Tower: Invitation to bid on GMP (Termite Treatment)', body_text: body })))
+      .toMatchObject({ buyer_name: 'Sam Example', gc_or_agency: 'Sample Developers', buyer_email: 'sam.example@sample-dev.example', project_title: 'Sample Tower', package_name: 'Termite Treatment' });
+  });
+
+  test('"Addendums" in a subject is an addendum and a bid word', () => {
+    expect(detectBidEmail(email({ from_address: 'gc@sample-gc.example', subject: 'Addendums 1 and 2 - Sample Clinic' })))
+      .toMatchObject({ bid: true, source: 'email_subject', kind: 'addendum' });
   });
 });
