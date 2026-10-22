@@ -24,7 +24,10 @@ router.get('/', async (req, res, next) => {
       .where(function stormFreshness() {
         this.whereNot({ type: 'storm_watch_alert' })
           .orWhereRaw("created_at >= now() - interval '6 hours'");
-      });
+      })
+      // The geofence notice types are retired (no card renders them): an old
+      // unread row must not take a slot under the feed limit.
+      .whereRaw("type NOT LIKE 'geofence\\_%'");
     // GATE_NOSHOW_DETECTOR is the feature's kill switch, and turning it off
     // stops the sweep — which is the only thing that dismisses a tracking
     // notice when its visit completes, moves or is reassigned. Undismissed

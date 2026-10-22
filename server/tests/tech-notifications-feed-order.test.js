@@ -65,7 +65,7 @@ test('tracking notices are served only while GATE_NOSHOW_DETECTOR is on', async 
   const run = async () => {
     const notCalls = [];
     const chain = {};
-    for (const m of ['where', 'whereNull', 'orWhereRaw', 'whereNotIn', 'orWhere']) {
+    for (const m of ['where', 'whereNull', 'orWhereRaw', 'whereRaw', 'whereNotIn', 'orWhere']) {
       chain[m] = jest.fn(function (arg) { if (typeof arg === 'function') arg.call(chain, chain); return chain; });
     }
     chain.whereNot = jest.fn((arg) => { notCalls.push(arg); return chain; });
@@ -153,6 +153,12 @@ describe('feed age rules', () => {
     expect(chain.orWhere).not.toHaveBeenCalled();
     expect(chain.whereNot).not.toHaveBeenCalledWith({ type: 'geofence_timer_stopped' });
     expect(chain.orWhereRaw).not.toHaveBeenCalledWith("created_at >= now() - interval '30 minutes'");
+  });
+
+  test('retired geofence notices never take a feed slot', async () => {
+    await run();
+    const chain = db.mock.results[db.mock.results.length - 1].value;
+    expect(chain.whereRaw).toHaveBeenCalledWith("type NOT LIKE 'geofence\\_%'");
   });
 
   test('storm nudges keep their 6-hour cap', async () => {
