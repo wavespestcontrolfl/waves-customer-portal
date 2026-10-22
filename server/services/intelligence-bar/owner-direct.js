@@ -213,8 +213,11 @@ const SENDER_TEXT_READ_TOOLS = new Set([
 ]);
 
 const POLICY = require('./action-policy.json');
-// Free-text field names: notes, special_instructions, pet_details, side_gate_access, message bodies.
-const NOTE_FIELD = /(?:^|_)(?:notes?|instructions?|details?|comments?|messages?|body|text|transcript|summary|access)$/i;
+// Free-text field names: notes, special_instructions, pet_details,
+// pets_secured_plan (snake or camel case), side_gate_access, message bodies.
+const NOTE_FIELD = /(?:^|_)(?:notes?|instructions?|details?|comments?|messages?|body|text|transcript|summary|access|plan)$|(?:Notes?|Instructions?|Details?|Comments?|Messages?|Body|Text|Transcript|Summary|Access|Plan)$/;
+// Any string this long in an answer is prose, whatever its field is called.
+const PROSE_LENGTH = 80;
 const SCAN_NODE_LIMIT = 20000;
 
 // Does the answer hold a non-empty note string anywhere? Past the node limit
@@ -225,7 +228,7 @@ function holdsNoteText(result) {
     if (++nodes > SCAN_NODE_LIMIT || depth > 8) return true;
     if (Array.isArray(value)) return value.some(item => walk(item, depth + 1));
     if (!value || typeof value !== 'object') return false;
-    return Object.entries(value).some(([key, item]) => (typeof item === 'string' && NOTE_FIELD.test(key) ? Boolean(item.trim()) : walk(item, depth + 1)));
+    return Object.entries(value).some(([key, item]) => (typeof item === 'string' ? (NOTE_FIELD.test(key) && Boolean(item.trim())) || item.length >= PROSE_LENGTH : walk(item, depth + 1)));
   };
   return walk(result, 0);
 }

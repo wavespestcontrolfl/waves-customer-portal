@@ -73,6 +73,12 @@ describe('gate on: taint after each listed read', () => {
     expect(taintAfter('get_stop_details', { property: { pet_details: 'dog named x', special_instructions: '' } })).toBe(true);
     expect(taintAfter('get_stop_details', { property: { side_gate_access: 'left latch', pet_details: null } })).toBe(true);
     expect(taintAfter('get_stop_details', { property: { special_instructions: null, pet_details: '', side_gate_access: ' ' } })).toBe(false);
+    expect(taintAfter('get_stop_details', { property: { pets_secured_plan: 'Dog is crated; text 555 first', notes: null } })).toBe(true);
+    expect(taintAfter('get_stop_details', { property: { petsSecuredPlan: 'Dog is crated', notes: '' } })).toBe(true);
+    expect(taintAfter('get_stop_details', { property: { pets_secured_plan: '' } })).toBe(false);
+    // Prose under an unexpected field name still taints; short structured values do not.
+    expect(taintAfter('get_stop_details', { property: { gate_hint: 'x'.repeat(80) } })).toBe(true);
+    expect(taintAfter('get_stop_details', { property: { address: '123 Main St, Bradenton, FL 34202', tier: 'Gold' } })).toBe(false);
     // A write tool's answer is never scanned.
     expect(taintAfter('update_customer', { notes: 'x' })).toBe(false);
     expect(OwnerDirect.untrustedReadInHistory([asked('t1', 'get_stop_details'), answered('t1', { customer: { notes: 'x' } })])).toBe(true);
