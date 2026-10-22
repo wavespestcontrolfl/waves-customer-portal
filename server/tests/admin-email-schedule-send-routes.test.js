@@ -56,7 +56,9 @@ test.each([
 ])('refuses %s before any write', async (_label, change, error) => {
   process.env.GATE_EMAIL_SEND_LATER = 'true';
   const res = await call('POST', '/schedule', { body: { ...valid(), ...change } });
-  expect(res).toEqual({ status: 400, body: { error } });
+  // Only a refusal made after the clientKey lookup lets the browser drop it.
+  const afterLookup = !/required$/.test(error);
+  expect(res).toEqual({ status: 400, body: { error, ...(afterLookup ? { keyChecked: true } : {}) } });
   expect(mockInsert).not.toHaveBeenCalled();
 });
 
