@@ -16,6 +16,14 @@ describe('trace saves bound to the loaded property', () => {
     expect(read('./FastCompleteSheet.jsx')).toMatch(/expectedPropertyId=\{loadedPropertyId\}\s+openVisitOnly\b/);
   });
 
+  test('the modal reports a save in flight to its host, and the report flow holds on it', () => {
+    const modal = read('./TechTreatmentZoneModal.jsx');
+    // Started with the upload, settled in a finally (a failed save releases the host too).
+    expect(modal).toMatch(/setSaveState\('saving'\);\s+onSavingChange\?\.\(true\);/);
+    expect(modal).toMatch(/finally \{\s+onSavingChange\?\.\(false\);\s+\}/);
+    expect(read('./FastCompleteSheet.jsx')).toContain('onSavingChange={setTraceSaving}');
+  });
+
   test('the schedule forms and the Zone action pass the property their visit row was loaded at', () => {
     const binding = (row) => `expectedPropertyId={'propertyId' in ${row} ? (${row}.propertyId ?? null) : undefined}`;
     expect(read('../../pages/admin/SchedulePage.jsx').split(binding('service')).length - 1).toBe(2);

@@ -639,8 +639,11 @@ export default function FastCompleteSheet({ service, request: plainRequest, oper
   const [voiceBusy, setVoiceBusy] = useState(false);
   // The Wrap-up's submit-time check of the review send time is reading: the sheet is locked like a submit.
   const [wrapChecking, setWrapChecking] = useState(false);
+  // A trace save in flight in the inline tracer (owner 2026-10-22: the tracer sits in the page, with no cover over
+  // the sheet): Full form and Close wait for it, as the tracer's own close does.
+  const [traceSaving, setTraceSaving] = useState(false);
   // The form's own word that this visit needs the full form (see the header).
-  usePartBusy('pest', [submitting, voiceBusy, wrapChecking, dictationPending, photoBusy].some(Boolean));
+  usePartBusy('pest', [submitting, voiceBusy, wrapChecking, dictationPending, photoBusy, traceSaving].some(Boolean));
   const [fullFormNeeded, setFullFormNeeded] = useState(false);
   const fullFormOffered = fullFormOfferedFor({ reportFlow, fullFormNeeded, ctx, stationsFlow: routedStationsOf(service) });
 
@@ -653,12 +656,12 @@ export default function FastCompleteSheet({ service, request: plainRequest, oper
   const close = useCallback(() => {
     // Voice still recording, transcribing or filling: closing (×, backdrop or
     // Escape all come through here) would drop those words and the sheet's edits.
-    if ([submitting, voiceBusy, wrapChecking].some(Boolean)) return;
+    if ([submitting, voiceBusy, wrapChecking, traceSaving].some(Boolean)) return;
     // The completion response rides along: admin Dispatch reads its invoice
     // fields to stage the payment handoff.
     if (done) onCompleted?.(done.response || null);
     else onClose?.(ctx.blockedReason || submission.failure ? { refresh: true } : undefined);
-  }, [submitting, voiceBusy, wrapChecking, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
+  }, [submitting, voiceBusy, wrapChecking, traceSaving, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
   closeRef.current = close;
   // Nothing is editable while a save is in flight, unresolved, or refused
   // for good; the recap modal (Full form) can't resume a /complete attempt,
@@ -678,13 +681,13 @@ export default function FastCompleteSheet({ service, request: plainRequest, oper
         <TechServicePhotosModal serviceId={service?.id} customerName={customerNameOf(ctx.visit, service)} onClose={photoManager.close} />
       )) || sheetOverlay}
     >
-      <SheetHeader titleId={titleId} title={sheetTitle(reportFlow, ctx.visit, done)} service={service} visit={ctx.visit} contact={ctx.contact} done={!!done} locked={locked} dictationPending={dictationPending || photoBusy || voiceBusy} submitting={[submitting, voiceBusy, wrapChecking].some(Boolean)} onFullForm={onFullForm} onViewDetails={detailsHandler(ctx, onViewDetails)} onClose={close} fullFormOffered={fullFormOffered} />
-      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} onOverlay={setSheetOverlay} dictationPending={dictationPending} onDictationPending={setDictationPending} onPhotoBusy={setPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} onFullFormNeeded={setFullFormNeeded} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled === true} onVoiceBusy={setVoiceBusy} sharedNote={sharedNote} onWrapChecking={setWrapChecking} />
+      <SheetHeader titleId={titleId} title={sheetTitle(reportFlow, ctx.visit, done)} service={service} visit={ctx.visit} contact={ctx.contact} done={!!done} locked={locked} dictationPending={dictationPending || photoBusy || voiceBusy || traceSaving} submitting={[submitting, voiceBusy, wrapChecking, traceSaving].some(Boolean)} onFullForm={onFullForm} onViewDetails={detailsHandler(ctx, onViewDetails)} onClose={close} fullFormOffered={fullFormOffered} />
+      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} onOverlay={setSheetOverlay} dictationPending={dictationPending} onDictationPending={setDictationPending} onPhotoBusy={setPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} onFullFormNeeded={setFullFormNeeded} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled === true} onVoiceBusy={setVoiceBusy} sharedNote={sharedNote} onWrapChecking={setWrapChecking} onTraceSaving={setTraceSaving} />
     </Frame>
   );
 }
 
-function SheetBody({ service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending, onPhotoBusy, onCompleted, onFullForm, onFullFormNeeded, isMobile, voiceFillEnabled, onVoiceBusy, sharedNote, onWrapChecking }) {
+function SheetBody({ service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending, onPhotoBusy, onCompleted, onFullForm, onFullFormNeeded, isMobile, voiceFillEnabled, onVoiceBusy, sharedNote, onWrapChecking, onTraceSaving }) {
   const reportFlow = service?.reportFlow === true;
   // The report flow keeps its form mounted through the saved view: what the
   // tech marked shows there.
@@ -706,7 +709,7 @@ function SheetBody({ service, request, ctx, submission, locked, photos, onOverla
   const stop = ctx.loadError || ctx.blockedReason;
   if (stop) return <ActionFeedback error={!!ctx.loadError} className="tech-visit-feedback tech-visit-loading">{stop}</ActionFeedback>;
   if (reportFlow) {
-    return <ReportFlowForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} onOverlay={onOverlay} dictationPending={dictationPending} onDictationPending={onDictationPending} onPhotoBusy={onPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} onFullFormNeeded={onFullFormNeeded} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} sharedNote={sharedNote} onWrapChecking={onWrapChecking} />;
+    return <ReportFlowForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} onOverlay={onOverlay} dictationPending={dictationPending} onDictationPending={onDictationPending} onPhotoBusy={onPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} onFullFormNeeded={onFullFormNeeded} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} sharedNote={sharedNote} onWrapChecking={onWrapChecking} onTraceSaving={onTraceSaving} />;
   }
   return <FastCompleteForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} onVoiceBusy={onVoiceBusy} onWrapChecking={onWrapChecking} />;
 }
@@ -1192,7 +1195,7 @@ const noProductHold = (mode) => (mode in NO_PRODUCT_HOLDS ? NO_PRODUCT_HOLDS[mod
 // lists every such product for the sheet to name.
 // `oneTap` (GATE_ONE_TAP_REPORT, owner 2026-10-17): the photo read holds nothing (photos are optional, shown when
 // saved; the body then omits photoCaptionsSeen until the read answers). A photo change still being saved still holds.
-function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, photosLoaded, photosFailed, promisesLoaded, stage, mode, voiceHolds, productsFromNote, stationHold, stockAdvisory, oneTap, ...sendInputs }) {
+function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, traceSaving, photosLoaded, photosFailed, promisesLoaded, stage, mode, voiceHolds, productsFromNote, stationHold, stockAdvisory, oneTap, ...sendInputs }) {
   const outOfStock = active.find(isOutOfStockRow);
   const unread = stage === 'generate' && productsFromNote;
   const missingAmount = unread ? null : active.find((row) => !hasAmount(row));
@@ -1200,6 +1203,7 @@ function reportFlowMissing({ form, active, ratingAllowed, dictationPending, phot
   const [, reason = '', stockRow = null, fix = null] = [
     [dictationPending, 'Finish dictating first.'],
     [photoHold, photoHold],
+    [traceSaving, 'Saving the trace…'],
     [!oneTap && !photosLoaded, 'Loading photos…'],
     [!oneTap && photosFailed, 'Read the photos again first.'],
     [!promisesLoaded, 'Loading promises…'],
@@ -1852,7 +1856,7 @@ function productLaneOf(service) {
 
 function ReportFlowForm({
   service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending,
-  onPhotoBusy, onCompleted, onFullForm, onFullFormNeeded, isMobile, voiceFillEnabled, sharedNote, onWrapChecking,
+  onPhotoBusy, onCompleted, onFullForm, onFullFormNeeded, isMobile, voiceFillEnabled, sharedNote, onWrapChecking, onTraceSaving,
 }) {
   // Only opened for a visit in the report flow (service.reportFlow), so the
   // service is always there.
@@ -1886,6 +1890,11 @@ function ReportFlowForm({
   // The sheet's header (Full form) waits on the same photo change in hand.
   useEffect(() => { onPhotoBusy?.(!!photoHold); }, [photoHold, onPhotoBusy]);
   useEffect(() => () => onPhotoBusy?.(false), [onPhotoBusy]);
+  // A trace save in flight in the inline tracer: the report and the send hold until it settles (so the completion
+  // carries the trace the tech saw, and a save never meets a completed visit), Back waits, and so does the header.
+  const [traceSaving, setTraceSaving] = useState(false);
+  useEffect(() => { onTraceSaving?.(traceSaving); }, [traceSaving, onTraceSaving]);
+  useEffect(() => () => onTraceSaving?.(false), [onTraceSaving]);
   const noteBoxPhotos = service.noteBoxPhotosEnabled === true;
   const visitPhotos = useVisitPhotos({ serviceId: service.id, request, version: photos.version + photoReloads, keepOnFailure: noteBoxPhotos });
   const trace = useVisitTrace({ serviceId: service.id, request });
@@ -1942,7 +1951,7 @@ function ReportFlowForm({
   const ratingAllowed = ctx.rating.allowed;
   const action = writeAction(draft, stale, report.writeError);
   const holdInputs = {
-    form, active, ratingAllowed, dictationPending, photoHold, photosLoaded: visitPhotos.loaded, photosFailed: visitPhotos.failed, promisesLoaded: visitPromises.loaded, mode,
+    form, active, ratingAllowed, dictationPending, photoHold, traceSaving, photosLoaded: visitPhotos.loaded, photosFailed: visitPhotos.failed, promisesLoaded: visitPromises.loaded, mode,
     stationHold: recordState.stationGate.generate,
     stockAdvisory: ctx.stockAdvisory,
     oneTap,
@@ -2075,6 +2084,7 @@ function ReportFlowForm({
       lng={service.lng}
       onClose={() => setTracerOpen(false)}
       onSaved={trace.saved}
+      onSavingChange={setTraceSaving}
     />
   ) : null;
   // The trace on the visit step: offered (never required) on a perimeter spray the sheet can trace.
@@ -2123,7 +2133,7 @@ function ReportFlowForm({
         report={report}
         stale={stale}
         action={action}
-        locked={locked}
+        locked={locked || traceSaving}
         submission={submission}
         generateMissing={generateMissing}
         completeMissing={completeMissing}

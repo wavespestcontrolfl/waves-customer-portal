@@ -11,9 +11,12 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { IDBFactory } from 'fake-indexeddb';
 
 vi.mock('./TechTreatmentZoneModal', () => ({
-  default: ({ onSaved, onClose, expectedPropertyId, openVisitOnly, inline }) => (
+  default: ({ onSaved, onSavingChange, onClose, expectedPropertyId, openVisitOnly, inline }) => (
     <div role={inline ? 'region' : 'dialog'} aria-label="Tracer" data-inline={String(!!inline)} data-expected-property={String(expectedPropertyId)} data-open-visit-only={String(!!openVisitOnly)}>
       <button type="button" onClick={() => onSaved({ linear_ft: 182, capture_mode: 'perimeter' })}>Save trace</button>
+      {/* A save in flight: the real tracer reports when its upload starts and when it settles. */}
+      <button type="button" onClick={() => onSavingChange?.(true)}>Start saving</button>
+      <button type="button" onClick={() => { onSaved({ linear_ft: 182, capture_mode: 'perimeter' }); onSavingChange?.(false); }}>Finish saving</button>
       <button type="button" onClick={onClose}>Close tracer</button>
     </div>
   ),
@@ -863,6 +866,27 @@ describe('complete and send', () => {
     const [body] = request.bodies('/complete');
     expect(body.traceSeen).toBeNull();
     expect(body.products.every((product) => product.applicationMethod === 'perimeter_spray' && product.areaValue == null)).toBe(true);
+  });
+
+  // The inline tracer has no cover over the sheet (Codex local audit on this change): a completion before the
+  // save lands would meet the save's open-visit check, and Back or Close would drop the upload mid-flight.
+  test('an inline trace save in flight holds the send, Back and Close until it settles', async () => {
+    const request = makeRequest({ facts: { ...FACTS, spray: 'perimeter' } });
+    await openSheet(request);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Trace where we sprayed' }));
+    const tracer = await screen.findByRole('region', { name: 'Tracer' });
+    fireEvent.click(within(tracer).getByRole('button', { name: 'Start saving' }));
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+    expect(screen.getByText('Saving the trace…')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Back to the visit' }).disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'Close' }).disabled).toBe(true);
+    fireEvent.click(within(tracer).getByRole('button', { name: 'Finish saving' }));
+    expect(await screen.findByText('Perimeter traced · 182 ft')).toBeTruthy();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false));
+    expect(screen.queryByText('Saving the trace…')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Back to the visit' }).disabled).toBe(false);
+    expect(screen.getByRole('button', { name: 'Close' }).disabled).toBe(false);
   });
 
   test('the visit step offers the trace as optional, and the tracer opens in the same page', async () => {
