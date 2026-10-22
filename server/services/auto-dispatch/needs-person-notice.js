@@ -31,9 +31,20 @@
  * the run has PROOF the conflict is gone:
  * it read the visit with the conflict read on and found none (closeResolved).
  * A run that could not look at the visit closes nothing.
+ *
+ * FAR CONFLICTS (GATE_AUTO_DISPATCH_FAR_CONFLICT_QUIET; owner 2026-10-22,
+ * audit decision D1: "note double bookings more than 2 weeks away quietly;
+ * alert when they are 2 weeks out"). Gate on, a conflict dated more than
+ * FAR_DAYS ahead is a quiet Activity row under its own key (FAR_KEY_PREFIX):
+ * off the bell list and outside the ring allowance, so it never takes a slot
+ * from a near one. Within FAR_DAYS the ordinary notice rings as above, and
+ * the quiet row closes once that notice stands. A quiet row closes on the
+ * same proof as a notice; gate off, any still standing close.
  */
 const logger = require('../logger');
 const { toDateStr } = require('./dates');
+const { gateEnvValue } = require('../../config/feature-gates');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 const RESOLVED_TITLE = 'Visit placement alert resolved';
 const KEY_PREFIX = 'auto-dispatch-needs-person:';
@@ -49,6 +60,17 @@ const REASON_KIND = {
 };
 
 const noticeKey = (id, date) => `${KEY_PREFIX}${id}:${date}`;
+
+// Far conflicts (D1, header): their own key, so a quiet row is never the row
+// the ordinary notice would refresh (a refresh that does not ring keeps a row
+// hidden behind feed:'activity', notification-service mergeRefreshMetadata).
+const FAR_GATE = 'GATE_AUTO_DISPATCH_FAR_CONFLICT_QUIET';
+const FAR_KEY_PREFIX = 'auto-dispatch-needs-person-far:';
+const FAR_DAYS = 14;
+const farNoticeKey = (id, date) => `${FAR_KEY_PREFIX}${id}:${date}`;
+const farEnabled = () => !!gateEnvValue(FAR_GATE);
+// The last date that rings; a conflict after it is far.
+const farCutoff = (nowDate) => etDateString(addETDays(nowDate, FAR_DAYS));
 
 // What is wrong with the visit, in the words of the notice: [now, still].
 const PROBLEM = {
@@ -99,9 +121,9 @@ function actionFor(item) {
   return [[(who) => `place ${who}'s visit; it overlaps a stop`, (who) => `place ${who}'s visit`], 'place a visit that overlaps another stop'];
 }
 
-async function raiseOne(item, raiseAdminAlert, shortDateET) {
+async function noticeSpec(item, shortDateET) {
   const [templates, generic] = actionFor(item);
-  return raiseAdminAlert('schedule_conflict', {
+  return {
     area: 'Schedule',
     action: await require('./audit').namedVisitAction(item.customer_id, templates, generic),
     why: whyFor(item, shortDateET(`${item.date}T12:00:00Z`)),
@@ -110,14 +132,48 @@ async function raiseOne(item, raiseAdminAlert, shortDateET) {
     subject: { type: 'visit', id: item.id },
     doneWhen: 'visit_moved_or_done',
     who: 'person',
-  }, {
+  };
+}
+
+function noticeMetadata(item) {
+  return { scheduledServiceId: item.id, customerId: item.customer_id, scheduledDate: item.date, kind: item.kind, problem: item.problem };
+}
+
+async function raiseOne(item, raiseAdminAlert, shortDateET) {
+  return raiseAdminAlert('schedule_conflict', await noticeSpec(item, shortDateET), {
     bell: true,
     dedupeKey: item.key,
     refreshOnDedupe: true,
-    metadata: {
-      scheduledServiceId: item.id, customerId: item.customer_id, scheduledDate: item.date, kind: item.kind, problem: item.problem,
-    },
+    metadata: noticeMetadata(item),
   });
+}
+
+// A far conflict's quiet row (D1). bell: true only so the row is written (a
+// bell:false notice inserts nothing under GATE_ADMIN_BELL_POLICY); feed
+// 'activity' keeps it off the bell list, its unread count and the ring
+// allowance (audit.recentBudgetKeys), as apply.js flagReminderSyncOverflow
+// does. No refreshOnDedupe: written once, never rewritten, so it never rings.
+async function raiseFarOne(item, raiseAdminAlert, shortDateET) {
+  return raiseAdminAlert('schedule_conflict', await noticeSpec(item, shortDateET), {
+    bell: true,
+    dedupeKey: farNoticeKey(item.id, item.date),
+    metadata: { ...noticeMetadata(item), feed: 'activity' },
+  });
+}
+
+// Close the quiet rows named by `keys` (exact keys, LIKE-escaped): their
+// visit is within FAR_DAYS now and its ordinary notice stands.
+async function retireFarRows(keys, nowDate) {
+  const audit = require('./audit');
+  for (const key of keys) {
+    await audit.retireResolvedNotices({
+      keyPattern: String(key).replace(/[\\%_]/g, '\\$&'),
+      stillOpen: (q) => q.whereRaw('false'),
+      resolvedTitle: RESOLVED_TITLE,
+      resolution: 'The visit is within two weeks; its dispatch alert took over',
+      body: 'This visit is now within two weeks; the dispatch alert covers it.',
+    }, nowDate);
+  }
 }
 
 // Close the notices that no longer apply. A notice stays open while its visit
@@ -127,19 +183,26 @@ async function raiseOne(item, raiseAdminAlert, shortDateET) {
 // (index.js settleConflicts), so a person's same-day fix closes the notice.
 // A visit whose read failed keeps its notice, and so does every visit of a
 // run whose guard reads failed (Codex #6253 r1 P2).
+// The "visit still matches" conditions for a notice or quiet row of this
+// lane: still live on the notice's date with an arrival time, and not among
+// the visits the run proved clear.
+function stillOpenFor(bucket, clearedIds) {
+  const cleared = [...clearedIds].filter((id) => ![...bucket.values()].some((item) => item.id === id));
+  return (q) => {
+    // No arrival time any more: nothing to overlap, and that visit is the
+    // recurring-placement alert's (Codex #6253 r6).
+    q.whereRaw("s.scheduled_date::text = notifications.metadata->>'scheduledDate'").whereIn('s.status', ['pending', 'confirmed'])
+      .whereRaw('s.window_start IS NOT NULL');
+    if (cleared.length) q.whereNotIn('s.id', cleared);
+  };
+}
+
 async function closeResolved(bucket, { nowDate, clearedIds }) {
   try {
     const audit = require('./audit');
-    const cleared = [...clearedIds].filter((id) => ![...bucket.values()].some((item) => item.id === id));
     await audit.retireResolvedNotices({
       keyPattern: `${KEY_PREFIX}%`,
-      stillOpen: (q) => {
-        // No arrival time any more: nothing to overlap, and that visit is the
-        // recurring-placement alert's (Codex #6253 r6).
-        q.whereRaw("s.scheduled_date::text = notifications.metadata->>'scheduledDate'").whereIn('s.status', ['pending', 'confirmed'])
-          .whereRaw('s.window_start IS NOT NULL');
-        if (cleared.length) q.whereNotIn('s.id', cleared);
-      },
+      stillOpen: stillOpenFor(bucket, clearedIds),
       resolvedTitle: RESOLVED_TITLE,
       resolution: 'The visit no longer needs a person to place it',
       body: 'This visit moved, was fixed or is no longer on that date.',
@@ -149,12 +212,58 @@ async function closeResolved(bucket, { nowDate, clearedIds }) {
   }
 }
 
+// Quiet far rows still standing (D1). The prefix filter guards the LIKE.
+async function standingFarKeys(audit) {
+  const keys = await audit.standingNoticeKeys(`${FAR_KEY_PREFIX}%`, RESOLVED_TITLE);
+  return new Set([...keys].filter((key) => String(key).startsWith(FAR_KEY_PREFIX)));
+}
+
+// Gate on: close the quiet rows on the same proof as a notice (stillOpenFor).
+// Gate off: close every one still standing, so the ordinary notice covers each
+// conflict again (one read; nothing written when none stands). Never throws.
+async function settleFarNotices(bucket, { nowDate, clearedIds, enabled }) {
+  try {
+    const audit = require('./audit');
+    if (!enabled && !(await standingFarKeys(audit)).size) return;
+    await audit.retireResolvedNotices({
+      keyPattern: `${FAR_KEY_PREFIX}%`,
+      stillOpen: enabled ? stillOpenFor(bucket, clearedIds) : (q) => q.whereRaw('false'),
+      resolvedTitle: RESOLVED_TITLE,
+      resolution: enabled ? 'The visit no longer needs a person to place it' : 'Quiet notes for far double bookings are off',
+      body: enabled ? 'This visit moved, was fixed or is no longer on that date.' : 'The dispatch alert covers this visit again.',
+    }, nowDate);
+  } catch (err) {
+    logger.error(`[auto-dispatch] far double-booking notes close failed: ${err.message}`);
+  }
+}
+
+// Write the quiet row of each far conflict that has none standing (D1).
+// Outside the ring allowance; a failure is logged and the rest still go.
+async function raiseFarNotices(farItems, farStanding, raiseAdminAlert, shortDateET) {
+  for (const item of farItems) {
+    if (farStanding.has(farNoticeKey(item.id, item.date))) continue;
+    try {
+      await raiseFarOne(item, raiseAdminAlert, shortDateET);
+    } catch (err) {
+      logger.error(`[auto-dispatch] far double-booking note failed for ${item.id}: ${err.message}`);
+    }
+  }
+}
+
 // The visits of every notice still open (key = prefix + visit id + ':' + date).
 // index.js settleConflicts reads each one's conflict again. Never throws.
 async function standingVisitIds() {
   try {
-    const keys = await require('./audit').standingNoticeKeys(`${KEY_PREFIX}%`, RESOLVED_TITLE);
-    return [...new Set([...keys].map((key) => String(key).slice(KEY_PREFIX.length).split(':')[0]).filter(Boolean))];
+    const audit = require('./audit');
+    const ids = new Set();
+    for (const prefix of [KEY_PREFIX, FAR_KEY_PREFIX]) {
+      const keys = await audit.standingNoticeKeys(`${prefix}%`, RESOLVED_TITLE);
+      for (const key of keys) {
+        const id = String(key).startsWith(prefix) ? String(key).slice(prefix.length).split(':')[0] : '';
+        if (id) ids.add(id);
+      }
+    }
+    return [...ids];
   } catch (err) {
     logger.warn(`[auto-dispatch] open needs-a-person notices could not be read: ${err.message}`);
     return [];
@@ -166,12 +275,19 @@ async function standingVisitIds() {
 async function raiseNotices(bucket, { nowDate = new Date(), clearedIds = new Set() } = {}) {
   if (!bucket) return 0;
   await closeResolved(bucket, { nowDate, clearedIds });
+  const far = farEnabled();
+  await settleFarNotices(bucket, { nowDate, clearedIds, enabled: far });
   if (bucket.size === 0) return 0;
+  const cutoff = farCutoff(nowDate);
+  const items = [...bucket.values()];
+  const nearItems = far ? items.filter((item) => item.date <= cutoff) : items;
   let rang = 0;
   try {
     const audit = require('./audit');
     const { raiseAdminAlert } = require('../admin-alert-compose');
     const { shortDateET } = require('../admin-alert-names');
+    const farStanding = far ? await standingFarKeys(audit) : new Set();
+    if (far) await raiseFarNotices(items.filter((item) => item.date > cutoff), farStanding, raiseAdminAlert, shortDateET);
     const standing = await audit.standingNoticeKeys(`${KEY_PREFIX}%`, RESOLVED_TITLE);
     // The allowance counts a key once (audit.recentBudgetKeys), so a key may
     // ring once in 24 hours: one that already rang is not written again,
@@ -179,7 +295,9 @@ async function raiseNotices(bucket, { nowDate = new Date(), clearedIds = new Set
     // when open, stays as it is.
     const rung = await audit.recentBudgetKeys();
     let left = await audit.ringsLeft();
-    const due = [...bucket.values()].filter((item) => !rung.has(item.key));
+    const due = nearItems.filter((item) => !rung.has(item.key));
+    // The near items whose ordinary notice stands after this run: their quiet row closes (D1).
+    const covered = new Set(nearItems.filter((item) => standing.has(item.key) || rung.has(item.key)).map((item) => item.key));
     for (const item of audit.withinRingBudget(due, standing, Infinity, (row) => row.key)) {
       // Allowance spent: nothing more is written, a standing notice included.
       // Its refresh is free only when it does not ring, and a refresh whose
@@ -188,11 +306,17 @@ async function raiseNotices(bucket, { nowDate = new Date(), clearedIds = new Set
       // raiseMissingGeoNotices, Codex #6208 r13 to r16).
       if (left <= 0) break;
       try {
+        const written = await raiseOne(item, raiseAdminAlert, shortDateET);
+        if (written) covered.add(item.key);
         // Only a write that rang spends a slot.
-        if (audit.noticeRang(await raiseOne(item, raiseAdminAlert, shortDateET))) { left -= 1; rang += 1; }
+        if (audit.noticeRang(written)) { left -= 1; rang += 1; }
       } catch (err) {
         logger.error(`[auto-dispatch] needs-a-person notice failed for ${item.id}: ${err.message}`);
       }
+    }
+    if (far) {
+      await retireFarRows(nearItems.filter((item) => covered.has(item.key) && farStanding.has(farNoticeKey(item.id, item.date)))
+        .map((item) => farNoticeKey(item.id, item.date)), nowDate);
     }
   } catch (err) {
     logger.error(`[auto-dispatch] needs-a-person notices failed: ${err.message}`);
@@ -201,5 +325,5 @@ async function raiseNotices(bucket, { nowDate = new Date(), clearedIds = new Set
 }
 
 module.exports = {
-  RESOLVED_TITLE, noticeKey, collect, collectUnmoved, raiseNotices, standingVisitIds,
+  RESOLVED_TITLE, noticeKey, farNoticeKey, FAR_DAYS, collect, collectUnmoved, raiseNotices, standingVisitIds,
 };

@@ -228,3 +228,116 @@ describe('needs-a-person notice', () => {
   });
 
 });
+
+// D1 (GATE_AUTO_DISPATCH_FAR_CONFLICT_QUIET; owner 2026-10-22): a conflict
+// more than 14 days out is a quiet Activity row under its own key, outside the
+// ring allowance; within 14 days the ordinary notice rings and the quiet row closes.
+describe('needs-a-person notice: far double bookings are quiet until 14 days out', () => {
+  const NOW = new Date('2026-11-01T12:00:00Z'); // cutoff 2026-11-15
+  const visit = (id, date) => ({ id, customer_id: `c-${id}`, scheduled_date: date });
+  const FAR = 'auto-dispatch-needs-person-far:';
+  let nearStanding;
+  let farStanding;
+  beforeEach(() => {
+    process.env.GATE_AUTO_DISPATCH_FAR_CONFLICT_QUIET = 'true';
+    raiseAdminAlert.mockClear();
+    raiseAdminAlert.mockImplementation(async () => ({ id: 1 }));
+    audit.ringsLeft.mockResolvedValue(10);
+    audit.recentBudgetKeys.mockResolvedValue(new Set());
+    audit.retireResolvedNotices.mockClear();
+    nearStanding = new Set();
+    farStanding = new Set();
+    audit.standingNoticeKeys.mockImplementation(async (pattern) => (String(pattern).startsWith(FAR) ? farStanding : nearStanding));
+  });
+  afterEach(() => {
+    delete process.env.GATE_AUTO_DISPATCH_FAR_CONFLICT_QUIET;
+    audit.standingNoticeKeys.mockReset().mockResolvedValue(new Set());
+  });
+  const callsFor = (prefix) => raiseAdminAlert.mock.calls.filter(([, , opts]) => opts.dedupeKey.startsWith(prefix));
+
+  test('a far conflict is one quiet Activity row (never rewritten); a near one rings as before', async () => {
+    const bucket = new Map();
+    notice.collect(bucket, visit('near', '2026-11-10'), 'no_slot', { kind: 'overlap' });
+    notice.collect(bucket, visit('edge', '2026-11-15'), 'no_slot', { kind: 'overlap' });
+    notice.collect(bucket, visit('far', '2026-11-20'), 'no_slot', { kind: 'overlap' });
+    expect(await notice.raiseNotices(bucket, { nowDate: NOW })).toBe(2);
+    const [farCall] = callsFor(FAR);
+    expect(farCall[2]).toMatchObject({ bell: true, dedupeKey: `${FAR}far:2026-11-20`, metadata: { feed: 'activity', scheduledDate: '2026-11-20' } });
+    expect(farCall[2].refreshOnDedupe).toBeUndefined();
+    expect(() => composeAdminAlert(farCall[1])).not.toThrow();
+    expect(callsFor('auto-dispatch-needs-person:').map(([, , opts]) => opts.dedupeKey))
+      .toEqual(['auto-dispatch-needs-person:near:2026-11-10', 'auto-dispatch-needs-person:edge:2026-11-15']);
+  });
+
+  test('far rows are outside the allowance: none left still writes them, and they spend nothing', async () => {
+    audit.ringsLeft.mockResolvedValue(0);
+    const bucket = new Map();
+    notice.collect(bucket, visit('near', '2026-11-03'), 'no_slot', { kind: 'overlap' });
+    for (let d = 20; d <= 25; d++) notice.collect(bucket, visit(`f${d}`, `2026-11-${d}`), 'no_slot', { kind: 'overlap' });
+    expect(await notice.raiseNotices(bucket, { nowDate: NOW })).toBe(0);
+    expect(callsFor(FAR)).toHaveLength(6);
+    expect(callsFor('auto-dispatch-needs-person:')).toHaveLength(0);
+  });
+
+  test('a standing quiet row is not written again', async () => {
+    farStanding = new Set([`${FAR}far:2026-11-20`]);
+    const bucket = new Map();
+    notice.collect(bucket, visit('far', '2026-11-20'), 'no_slot', { kind: 'overlap' });
+    await notice.raiseNotices(bucket, { nowDate: NOW });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test('once the visit is within 14 days, its ordinary notice rings and the quiet row closes', async () => {
+    farStanding = new Set([`${FAR}soon:2026-11-12`]);
+    const bucket = new Map();
+    notice.collect(bucket, visit('soon', '2026-11-12'), 'no_slot', { kind: 'overlap' });
+    expect(await notice.raiseNotices(bucket, { nowDate: NOW })).toBe(1);
+    const closes = audit.retireResolvedNotices.mock.calls.map(([args]) => args.keyPattern);
+    expect(closes).toContain(`${FAR}soon:2026-11-12`);
+  });
+
+  test('a quiet row stays while its ordinary notice cannot ring yet (allowance spent)', async () => {
+    audit.ringsLeft.mockResolvedValue(0);
+    farStanding = new Set([`${FAR}soon:2026-11-12`]);
+    const bucket = new Map();
+    notice.collect(bucket, visit('soon', '2026-11-12'), 'no_slot', { kind: 'overlap' });
+    await notice.raiseNotices(bucket, { nowDate: NOW });
+    expect(audit.retireResolvedNotices.mock.calls.map(([args]) => args.keyPattern)).not.toContain(`${FAR}soon:2026-11-12`);
+  });
+
+  test('quiet rows close on the same proof as a notice', async () => {
+    await notice.raiseNotices(new Map(), { nowDate: NOW, clearedIds: new Set(['fixed']) });
+    const farClose = audit.retireResolvedNotices.mock.calls.find(([args]) => args.keyPattern === `${FAR}%`)[0];
+    const q = { whereRaw: jest.fn(() => q), whereIn: jest.fn(() => q), whereNotIn: jest.fn(() => q) };
+    farClose.stillOpen(q);
+    expect(q.whereNotIn.mock.calls).toEqual([['s.id', ['fixed']]]);
+  });
+
+  test('gate off: every standing quiet row closes; with none standing nothing more is written', async () => {
+    delete process.env.GATE_AUTO_DISPATCH_FAR_CONFLICT_QUIET;
+    farStanding = new Set([`${FAR}far:2026-11-20`]);
+    await notice.raiseNotices(new Map(), { nowDate: NOW });
+    const farClose = audit.retireResolvedNotices.mock.calls.find(([args]) => args.keyPattern === `${FAR}%`)[0];
+    const q = { whereRaw: jest.fn(() => q) };
+    farClose.stillOpen(q);
+    expect(q.whereRaw).toHaveBeenCalledWith('false');
+    audit.retireResolvedNotices.mockClear();
+    farStanding = new Set();
+    await notice.raiseNotices(new Map(), { nowDate: NOW });
+    expect(audit.retireResolvedNotices.mock.calls.map(([args]) => args.keyPattern)).toEqual(['auto-dispatch-needs-person:%']);
+  });
+
+  test('gate off: a far conflict rings as an ordinary notice (unchanged)', async () => {
+    delete process.env.GATE_AUTO_DISPATCH_FAR_CONFLICT_QUIET;
+    const bucket = new Map();
+    notice.collect(bucket, visit('far', '2026-11-20'), 'no_slot', { kind: 'overlap' });
+    expect(await notice.raiseNotices(bucket, { nowDate: NOW })).toBe(1);
+    expect(raiseAdminAlert.mock.calls[0][2].dedupeKey).toBe('auto-dispatch-needs-person:far:2026-11-20');
+  });
+
+  test('the visits of standing quiet rows are re-read for the close proof too', async () => {
+    nearStanding = new Set(['auto-dispatch-needs-person:a:2026-11-03']);
+    farStanding = new Set([`${FAR}b:2026-11-20`]);
+    expect((await notice.standingVisitIds()).sort()).toEqual(['a', 'b']);
+  });
+});

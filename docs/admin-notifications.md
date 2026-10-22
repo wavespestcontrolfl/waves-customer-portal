@@ -98,6 +98,11 @@ customer's message by this rule.
    (`server/services/auto-dispatch/check-down-notice.js`) rings once per outage and is never
    held back by the allowance; it counts toward it. A tool that has stopped moving visits is
    the notice that must reach a person.
+   Far double bookings (owner audit 2026-10-22, decision D1; `GATE_AUTO_DISPATCH_FAR_CONFLICT_QUIET`):
+   a visit auto-dispatch leaves in conflict more than 14 days out is a quiet Activity row
+   (`server/services/auto-dispatch/needs-person-notice.js`, key prefix
+   `auto-dispatch-needs-person-far:`), outside the allowance and off the bell; it rings as the
+   ordinary needs-a-person notice once it is within 14 days.
 4. **Retention.** An `fyi` fact lives on its page for 7 days at most. A `needs-you` row
    unread for 14 days belongs in the Monday summary, not in the bell.
 5. **Read is not done.** A row has a `done` state (`notifications.done_at`, `done_by`,
