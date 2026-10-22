@@ -126,7 +126,45 @@ describe('handleCancellation sends the approved text', () => {
     });
     expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(mockSendCustomerMessage.mock.calls[0][0].body).toBe(`${preview.body} (approved)`);
-    expect(mockGetTemplate).not.toHaveBeenCalled();
+    // The approved body is sent as shown; the template is read only to confirm it is still live (unaudited, no variant roll).
+    expect(mockGetTemplate).toHaveBeenCalledTimes(1);
+    expect(mockGetTemplate.mock.calls[0][3]).toEqual({ audit: false, noVariants: true });
+  });
+
+  test('a template disabled or removed after the card was built stops the approved send (the kill switch still applies)', async () => {
+    const preview = await AppointmentReminders.previewCancellationText('svc-1');
+    mockGetTemplate.mockResolvedValue(null); // the appointment_cancelled row is now inactive or gone
+    const outcome = {};
+    await AppointmentReminders.handleCancellation('svc-1', {
+      outcome, approvedNotice: preview.recipients.map(({ recipient_key, body }) => ({ recipient_key, body })),
+    });
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(outcome.notificationSent).toBe(false);
+    expect(outcome.notificationError).toMatch(/missing or inactive/);
+    // Terminal for an approved send: the sweep never re-sends it.
+    const states = mockState.updates.filter((p) => typeof p.cancellation_notice_state === 'string').map((p) => p.cancellation_notice_state);
+    expect(states[states.length - 1]).toBe('suppressed');
+  });
+
+  test('a recipient reached before a later recipient failed is reported as a PARTIAL delivery, never as not-sent', async () => {
+    const preview = await AppointmentReminders.previewCancellationText('svc-1');
+    // The service contact was added after the card: the primary is approved and sends, the new contact is refused.
+    mockState.customer = {
+      ...mockState.customer, service_contact_name: 'Sam', service_contact_phone: '+19415550202', service_contacts_consent_at: '2026-07-23T00:00:00Z',
+    };
+    const outcome = {};
+    await AppointmentReminders.handleCancellation('svc-1', {
+      outcome, approvedNotice: preview.recipients.map(({ recipient_key, body }) => ({ recipient_key, body })),
+    });
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendCustomerMessage.mock.calls[0][0].to).toBe('+19415550101');
+    expect(outcome.notificationSent).toBe(true);
+    expect(outcome.notificationPartial).toBe(true);
+    expect(outcome.notificationError).toMatch(/Do not resend/);
+    expect(outcome.notificationError).toMatch(/approved for other recipients/);
+    // The claim is finalized as sent (the accepted recipient is never re-texted by a retry).
+    const states = mockState.updates.filter((p) => typeof p.cancellation_notice_state === 'string').map((p) => p.cancellation_notice_state);
+    expect(states[states.length - 1]).toBe('sent');
   });
 
   test('a recipient the card did not approve is NOT texted (the send stops before any provider call)', async () => {

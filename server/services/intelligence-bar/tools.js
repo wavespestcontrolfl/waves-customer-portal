@@ -4615,6 +4615,12 @@ async function cancelWithEffects(input, actionContext, appt) {
       beforeCommit: async (trx) => {
         let inLock;
         try {
+          // A legacy visit with no stamped service address shows (and fingerprints) the customer's primary address.
+          // That address lives on the customers row, which the visit lock does not cover, so hold it FOR SHARE (as the
+          // bare cancel does) BEFORE the recheck reads it: a concurrent address edit then waits for this cancel to commit.
+          if (frozen.legacy_address_fingerprint && appt.customer_id) {
+            await trx('customers').where('id', appt.customer_id).forShare().first('id');
+          }
           await lockLinkedFollowUps(trx, appointment_id);
           // conn: the handler's cancel transaction, so the estimate deposit ledger lock is held to the commit.
           inLock = await recompute({ piCacheOnly: true, conn: trx });
@@ -4633,18 +4639,27 @@ async function cancelWithEffects(input, actionContext, appt) {
   return cancelReplayResult(replay, { appointment_id, appt, frozen, changed, sendText });
 }
 
-// The bar's reply for the Dispatch handler's reply: a refusal passes through (a 409 is a stale card), a success names
-// the customer and says honestly whether the cancellation text went out.
-async function cancelReplayResult({ status, json = {} }, { appointment_id, appt, frozen, changed, sendText }) {
-  if (status >= 400 || json.success !== true) {
-    if (json.code === 'preview_changed') return changed;
-    return { error: json.error || 'The Dispatch cancel was refused — nothing was changed.', ...(json.code ? { code: json.code } : {}), ...(status === 409 ? { preview_changed: true } : {}) };
+// The receipt name is decoration: the visit is already cancelled, so a failed lookup must never turn that success into
+// a failed action (the operator would lose the receipt and its warnings). Falls back to the name the card carried.
+async function cancelReceiptName(appt, frozen, appointment_id) {
+  try {
+    const customer = await db('customers').where('id', appt.customer_id).first('first_name', 'last_name');
+    if (customer) return `${customer.first_name} ${customer.last_name}`;
+  } catch (err) {
+    logger.warn(`[intelligence-bar] cancel receipt name lookup failed for ${appointment_id}: ${err.message}`);
   }
-  const customer = await db('customers').where('id', appt.customer_id).first();
-  logger.info(`[intelligence-bar] Cancelled appointment ${appointment_id} via the Dispatch cancel handler`);
+  return frozen?.appointment?.customer_name || 'Unknown';
+}
+
+// What the Dispatch handler did NOT finish, in the operator's words (the receipt shows result.warning only).
+function cancelReplayWarnings(json, sendText) {
   const warnings = [];
   if (sendText && json.notificationSent === false) {
     warnings.push(`The visit is cancelled, but the customer text did not go out (${json.notificationError || 'no reason given'}) and will not be retried automatically — send it by hand.`);
+  }
+  // Some recipients got the text and another did not: say so, and say NOT to resend to those already reached.
+  if (sendText && json.notificationSent === true && json.notificationPartial === true) {
+    warnings.push(`The visit is cancelled and the customer text went to some recipients, but not all (${json.notificationError || 'no reason given'}). Do not send it again to those already reached.`);
   }
   // A money effect that changed since the card (an invoice, a payment attempt, a credit) was NOT acted on.
   const moneySkipped = json.moneySkipped || [];
@@ -4656,14 +4671,30 @@ async function cancelReplayResult({ status, json = {} }, { appointment_id, appt,
   if (skipped.length) {
     warnings.push(`${skipped.length} linked visit(s) were NOT cancelled because they changed since the card (${skipped.map((v) => `${v.id}: ${v.reason}`).join('; ')}) — check them.`);
   }
+  return warnings;
+}
+
+// The bar's reply for the Dispatch handler's reply: a refusal passes through (a 409 is a stale card), a success names
+// the customer and says honestly whether the cancellation text went out.
+async function cancelReplayResult({ status, json = {} }, { appointment_id, appt, frozen, changed, sendText }) {
+  if (status >= 400 || json.success !== true) {
+    if (json.code === 'preview_changed') return changed;
+    return { error: json.error || 'The Dispatch cancel was refused — nothing was changed.', ...(json.code ? { code: json.code } : {}), ...(status === 409 ? { preview_changed: true } : {}) };
+  }
+  const customerName = await cancelReceiptName(appt, frozen, appointment_id);
+  logger.info(`[intelligence-bar] Cancelled appointment ${appointment_id} via the Dispatch cancel handler`);
+  const warnings = cancelReplayWarnings(json, sendText);
+  const moneySkipped = json.moneySkipped || [];
+  const skipped = json.linkedVisitsSkipped || [];
   return {
     success: true,
     appointment_id,
-    customer_name: customer ? `${customer.first_name} ${customer.last_name}` : 'Unknown',
+    customer_name: customerName,
     date: appt.scheduled_date,
     service_type: appt.service_type,
     ran_dispatch_cancel: true,
     customer_text_sent: sendText && json.notificationSent === true,
+    ...(sendText && json.notificationPartial === true ? { customer_text_partial: true } : {}),
     ...(skipped.length ? { linked_visits_skipped: skipped } : {}),
     ...(moneySkipped.length ? { money_skipped: moneySkipped } : {}),
     ...(warnings.length ? { warning: warnings.join(' ') } : {}),

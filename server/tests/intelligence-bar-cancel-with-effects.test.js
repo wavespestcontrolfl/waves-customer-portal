@@ -11,6 +11,8 @@ let mockApptRow = null;
 // service_address_line1 AND a customer_id — the default DEFAULT_APPT_ROW
 // below has neither, so most tests never touch this).
 let mockCustomerRow = { first_name: 'Synthia', last_name: 'Tester' };
+// Set by the receipt-name test: the customer lookup rejects (a transient database failure after the cancel committed).
+let mockCustomerLookupError = null;
 // The visit's card-fee rail rows (Codex round 7 P1), read under the lock.
 let mockCardRailRows = { estimate_card_holds: [], appointment_card_requests: [] };
 jest.mock('../models/db', () => {
@@ -35,7 +37,7 @@ jest.mock('../models/db', () => {
       // .forShare() is the round-5 P2 address recheck (tools.js
       // cancelAppointment, inside the SAME mutation trx) — chainable no-op
       // here, same shape as scheduled_services' .forUpdate() above.
-      const reader = { first: async () => mockCustomerRow };
+      const reader = { first: async () => { if (mockCustomerLookupError) throw mockCustomerLookupError; return mockCustomerRow; } };
       return { where: () => ({ ...reader, forShare: () => reader }) };
     }
     if (table in mockCardRailRows) {
@@ -153,6 +155,7 @@ beforeEach(() => {
   process.env.GATE_IB_CANCEL_WITH_EFFECTS = 'true';
   mockApptRow = { id: 'svc-synthetic-1', status: 'confirmed', scheduled_date: '2026-10-02', service_type: 'pest_control', customer_id: 'cust-1' };
   mockCustomerRow = { first_name: 'Synthia', last_name: 'Tester' };
+  mockCustomerLookupError = null;
   mockComputeImpact.mockResolvedValue(FROZEN);
   mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, notificationSent: true } });
 });
@@ -240,6 +243,54 @@ describe('cancel_appointment confirm WITH effects replays the Dispatch cancel', 
     expect(before.conn).toBeUndefined();
     expect(inLock.piCache).toBe(before.piCache);
     expect(inLock.approvedText).toBe(FROZEN.customer_text);
+  });
+
+  test('a legacy visit (no stamped address) holds the customer row FOR SHARE BEFORE the lock-time recheck reads the address', async () => {
+    const legacy = { ...FROZEN, legacy_address_fingerprint: 'legacy-fp-1' };
+    mockComputeImpact.mockResolvedValue(legacy);
+    const order = [];
+    const trx = jest.fn((table) => ({
+      where: (col, val) => ({ forShare: () => ({ first: async () => { order.push(`share:${table}:${col}=${val}`); return { id: val }; } }) }),
+    }));
+    mockComputeImpact.mockImplementation(async (_id, opts) => { if (opts && opts.conn) order.push('recheck'); return legacy; });
+    mockCancelFromBar.mockImplementation(async ({ beforeCommit }) => {
+      await beforeCommit(trx);
+      return { status: 200, json: { success: true, notificationSent: true } };
+    });
+    const result = await executeTool('cancel_appointment', input({ _frozen_cancellation_impact: legacy }), ADMIN);
+    expect(result.success).toBe(true);
+    expect(order).toEqual(['share:customers:id=cust-1', 'recheck']);
+  });
+
+  test('a visit with a stamped address (no legacy fingerprint) takes no customer lock', async () => {
+    const trx = jest.fn(() => { throw new Error('no customer lock expected'); });
+    mockCancelFromBar.mockImplementation(async ({ beforeCommit }) => {
+      await beforeCommit(trx);
+      return { status: 200, json: { success: true, notificationSent: true } };
+    });
+    const result = await executeTool('cancel_appointment', input(), ADMIN);
+    expect(result.success).toBe(true);
+    expect(trx).not.toHaveBeenCalled();
+  });
+
+  test('a failed customer-name lookup AFTER the cancel committed keeps the success receipt and its warnings', async () => {
+    mockCustomerLookupError = new Error('connection terminated');
+    mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, notificationSent: false, notificationError: 'customer opted out' } });
+    const result = await executeTool('cancel_appointment', input(), ADMIN);
+    expect(result.success).toBe(true);
+    expect(result.customer_name).toBe('Synthia Tester'); // the name the card carried
+    expect(result.warning).toMatch(/customer text did not go out/);
+  });
+
+  test('a text that reached some recipients but not all is reported as partial with a do-not-resend warning', async () => {
+    mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, notificationSent: true, notificationPartial: true, notificationError: 'another recipient was NOT texted' } });
+    const result = await executeTool('cancel_appointment', input(), ADMIN);
+    expect(result.success).toBe(true);
+    expect(result.customer_text_sent).toBe(true);
+    expect(result.customer_text_partial).toBe(true);
+    expect(result.warning).toMatch(/went to some recipients, but not all/);
+    expect(result.warning).toMatch(/Do not send it again to those already reached/);
+    expect(result.warning).not.toMatch(/send it by hand/);
   });
 
   test('a lock-time check that cannot be completed (a payment attempt appeared) is a change: preview_changed, never a raw error', async () => {
