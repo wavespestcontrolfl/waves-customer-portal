@@ -5409,9 +5409,12 @@ const AppointmentReminders = {
           // the in-trx and post-commit classifications — a plain pending
           // could still send on prior-reminder evidence (or ride a shared
           // group's callerNotify) despite the live sibling visit.
-          cancellation_notice_state: db.raw("CASE WHEN NOT (NOT EXISTS (SELECT 1 FROM appointment_reminders sib3 WHERE sib3.customer_id = appointment_reminders.customer_id AND sib3.appointment_time = appointment_reminders.appointment_time AND sib3.cancelled = false AND sib3.id <> appointment_reminders.id)) THEN 'suppressed' WHEN EXISTS (SELECT 1 FROM ops_email_send_state ok WHERE ok.email_key = 'cn-ci-' || appointment_reminders.scheduled_service_id::text AND ok.last_sent_at >= now() - interval '72 hours') THEN 'pending_notify' ELSE 'pending' END"),
+          cancellation_notice_state: db.raw("CASE WHEN NOT (NOT EXISTS (SELECT 1 FROM appointment_reminders sib3 WHERE sib3.customer_id = appointment_reminders.customer_id AND sib3.appointment_time = appointment_reminders.appointment_time AND sib3.cancelled = false AND sib3.id <> appointment_reminders.id)) THEN 'suppressed' WHEN EXISTS (SELECT 1 FROM ops_email_send_state sup WHERE sup.email_key = 'cn-sup-' || appointment_reminders.scheduled_service_id::text AND sup.last_sent_at >= now() - interval '72 hours') THEN 'suppressed' WHEN EXISTS (SELECT 1 FROM ops_email_send_state ok WHERE ok.email_key = 'cn-ci-' || appointment_reminders.scheduled_service_id::text AND ok.last_sent_at >= now() - interval '72 hours') THEN 'pending_notify' ELSE 'pending' END"),
           updated_at: new Date(),
         });
+      // Approved-cancel suppress tombstones (job-status.js, written when a card-approved cancel found no reminder row):
+      // the late claim above has just finalized any row inserted since as 'suppressed'; age them out after the horizon.
+      await db.raw("DELETE FROM ops_email_send_state WHERE email_key LIKE 'cn-sup-%' AND last_sent_at < now() - interval '72 hours'").catch(() => {});
       // Consume outbox rows only once their intent is APPLIED — marker
       // present and no longer plain 'pending' (codex r8/r9) — and age out
       // anything past the 72h horizon.

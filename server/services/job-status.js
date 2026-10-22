@@ -616,6 +616,10 @@ async function transitionJobStatus({
           await sp('ops_email_send_state')
             .where({ email_key: `cn-ci-${jobId}` })
             .del();
+          // Likewise the approved-cancel suppress tombstone: a later real cancellation must notice normally.
+          await sp('ops_email_send_state')
+            .where({ email_key: `cn-sup-${jobId}` })
+            .del();
         });
       } catch (clearErr) {
         logger.warn(`[job-status] cancellation-marker clear failed for ${jobId}: ${clearErr.message}`);
@@ -695,6 +699,17 @@ async function transitionJobStatus({
               if (existing) {
                 throw new Error('approved cancellation text: an older notice claim holds this reminder, so the approved marker could not be written');
               }
+              // No reminder row yet: nothing can be marked, but one can still be inserted right after this check (a
+              // booking registration, the reminder self-heal), and the cancel-notice sweep would then late-claim that
+              // markerless row and send the live template. Leave a durable suppress tombstone in THIS transaction (the
+              // sweep's late claim reads it and finalizes the new row 'suppressed'). Written for the approved text and
+              // the no-text choice alike, and for approved linked visits (they take this same path). The reminder
+              // table has no verified unique key on scheduled_service_id, so the tombstone lives on the outbox table
+              // (unique email_key), next to the caller-intent outbox row 'cn-ci-<id>'. A failure here aborts the cancel.
+              await sp('ops_email_send_state')
+                .insert({ email_key: `cn-sup-${jobId}`, last_sent_at: claimTs, updated_at: sp.fn.now() })
+                .onConflict('email_key')
+                .merge(['last_sent_at', 'updated_at']);
             }
             // The immediate post-commit worker runs only for hook-owned
             // paths; 'caller' claims are settled by the route (or sweep).

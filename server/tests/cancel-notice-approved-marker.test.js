@@ -42,6 +42,30 @@ describe('pending_approved is minted only for the approved send and read only by
     expect(jobStatus).toContain('if (cancelNoticeApproved && !claimedRows) {');
   });
 
+  // A card-approved cancel that finds NO reminder row leaves a durable suppress tombstone, so a row inserted right after
+  // (a booking registration, the self-heal) is finalized 'suppressed' by the sweep's late claim, not texted from the live
+  // template. Source guards: the cancel transaction and the sweep have no harness here (the PG suites run in CI).
+  test('no reminder row at the approved claim: a cn-sup tombstone is written in the same transaction, and a failure aborts the cancel', () => {
+    expect(jobStatus).toMatch(/throw new Error\('approved cancellation text: an older notice claim holds this reminder[^\n]*\n\s*\}\n(?:\s*\/\/.*\n)+\s*await sp\('ops_email_send_state'\)\s*\n\s*\.insert\(\{ email_key: `cn-sup-\$\{jobId\}`, last_sent_at: claimTs, updated_at: sp\.fn\.now\(\) \}\)\s*\n\s*\.onConflict\('email_key'\)/);
+    // Same savepoint as the marker, whose catch rethrows for an approved cancel.
+    expect(jobStatus).toMatch(/\} catch \(claimErr\) \{\s*\n(?:\s*\/\/.*\n)*\s*if \(cancelNoticeApproved\) throw claimErr;/);
+    // Written only for approved cancels (inside the `cancelNoticeApproved && !claimedRows` block).
+    expect(jobStatus.split('\n').filter((l) => !l.trim().startsWith('//') && l.includes('cn-sup-'))).toHaveLength(2);
+  });
+
+  test('a restoration to a live status removes the tombstone with the other outbox row', () => {
+    expect(jobStatus).toMatch(/\.where\(\{ email_key: `cn-ci-\$\{jobId\}` \}\)\s*\n\s*\.del\(\);[\s\S]{0,260}\.where\(\{ email_key: `cn-sup-\$\{jobId\}` \}\)\s*\n\s*\.del\(\);/);
+  });
+
+  test('the sweep late claim finalizes a fresh tombstone visit as suppressed, and ages the tombstones out', () => {
+    expect(reminders).toContain("WHEN EXISTS (SELECT 1 FROM ops_email_send_state sup WHERE sup.email_key = 'cn-sup-' || appointment_reminders.scheduled_service_id::text AND sup.last_sent_at >= now() - interval '72 hours') THEN 'suppressed'");
+    // It sits BEFORE the cn-ci (notify) upgrade in the CASE, so suppression wins over a notify intent.
+    const caseSql = reminders.slice(reminders.indexOf("cancellation_notice_state: db.raw(\"CASE WHEN NOT (NOT EXISTS"));
+    expect(caseSql.indexOf("'cn-sup-'")).toBeGreaterThan(-1);
+    expect(caseSql.indexOf("'cn-sup-'")).toBeLessThan(caseSql.indexOf("'cn-ci-'"));
+    expect(reminders).toContain("DELETE FROM ops_email_send_state WHERE email_key LIKE 'cn-sup-%' AND last_sent_at < now() - interval '72 hours'");
+  });
+
   test('the approved send does not read the hook gate: the only gate read in its code path is the sweep-retention branch an approved send never takes', () => {
     const start = reminders.indexOf('function makeCancellationFinalizer(');
     const end = reminders.indexOf('function makeCancellationPreDispatchCheck(');
