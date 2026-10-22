@@ -1038,6 +1038,7 @@ const UNCONFIRMED_CALLS = [
         jest.spyOn(require('../routes/admin-sms-templates'), 'getTemplate').mockResolvedValue('Hi Pat, a reminder about your invoice: [pay link]'),
         jest.spyOn(require('../services/billing-email-sender'), 'operatorEmailRecipient').mockResolvedValue({ recipient: { name: 'Pat Tester', email: 'pat@example.com' }, to: 'pat@example.com' }),
         jest.spyOn(require('../services/email-template-library'), 'loadTemplateByKey').mockResolvedValue({ template: { template_key: 'invoice.followup_3_day', name: 'Reminder' }, activeVersion: { id: 'v1' } }),
+        jest.spyOn(require('../services/email-template-library'), 'templateContentHash').mockReturnValue('hash-1'),
         jest.spyOn(require('../services/email-template-library'), 'renderTemplate').mockReturnValue({ subject: 'A reminder about your invoice', text: 'Hi Pat, a reminder about your invoice.' }),
       ] : [];
     const repriceCoverage = toolName === 'reprice_future_visits'

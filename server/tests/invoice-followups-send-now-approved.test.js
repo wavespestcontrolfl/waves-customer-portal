@@ -40,6 +40,8 @@ jest.mock('../services/messaging/send-customer-message', () => ({
 }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(async () => ({ sent: true, message: { provider_message_id: 'sg-1', sent_at: '2099-01-05T14:00:00.000Z' } })),
+  loadTemplateByKey: jest.fn(async () => ({ template: { template_key: 'invoice.followup_3_day' }, activeVersion: { id: 'v1' } })),
+  templateContentHash: jest.fn(() => 'hash-1'),
 }));
 jest.mock('../services/customer-contact', () => ({
   getInvoiceEmailRecipients: jest.fn(() => [{ email: 'billing@example.com', name: 'Taylor' }]),
@@ -528,5 +530,42 @@ describe('a control racing a send in flight', () => {
       expect(seqRow()).toMatchObject({ status: 'active', step_index: 1, touches_sent: 1 });
       expect(seqRow().next_touch_at).toBeInstanceOf(Date);
     });
+  });
+});
+
+// The card pins the whole email (templateContentHash: every HTML block, wrapper, sender, subject, text body), not only its
+// rendered subject and text. The service checks it against the live template before the claim and hands it to sendTemplate.
+describe('the card’s email content hash', () => {
+  const HASHED = { ...APPROVED, emailContentHash: 'hash-1' };
+
+  test('a matching hash sends, and sendTemplate is handed the hash to enforce at the email send', async () => {
+    const result = await sendNow({ approved: HASHED, report: true });
+    expect(result.report.legs.email).toEqual({ state: 'sent' });
+    expect(EmailTemplates.sendTemplate.mock.calls[0][0]).toMatchObject({ templateKey: 'invoice.followup_3_day', expectedContentHash: 'hash-1' });
+  });
+
+  test('an HTML-block edit (the live template hash differs) sends neither channel and puts the reminder time back', async () => {
+    EmailTemplates.templateContentHash.mockReturnValueOnce('hash-2');
+    const result = await sendNow({ approved: HASHED, report: true });
+    expect(result).toMatchObject({ ok: false, reason: 'preview_changed' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(seqRow().next_touch_at).toEqual(NEXT);
+  });
+
+  test('a template that is gone, or an edit that lands after the early check: the email leg is refused by sendTemplate and reported as skipped', async () => {
+    EmailTemplates.sendTemplate.mockRejectedValue(new Error('The reviewed email content changed. Review the message again before sending.'));
+    const result = await sendNow({ approved: HASHED, report: true });
+    expect(result.report.legs.email).toEqual({ state: 'skipped', reason: 'email_content_changed' });
+    EmailTemplates.loadTemplateByKey.mockResolvedValueOnce(null);
+    fresh();
+    install();
+    expect(await sendNow({ approved: HASHED, report: true })).toMatchObject({ ok: false, reason: 'preview_changed' });
+  });
+
+  test('a pin with no hash (no email leg planned) does not look at the template, and the page’s call passes none', async () => {
+    await sendNow({ approved: APPROVED, report: true });
+    expect(EmailTemplates.loadTemplateByKey).not.toHaveBeenCalled();
+    expect(EmailTemplates.sendTemplate.mock.calls[0][0]).not.toHaveProperty('expectedContentHash');
   });
 });

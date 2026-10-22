@@ -108,6 +108,7 @@ beforeEach(() => {
     jest.spyOn(BillingEmailSender, 'operatorEmailRecipient').mockResolvedValue({ recipient: { name: 'Robin Sample', email: 'robin.sample@example.com' }, to: 'robin.sample@example.com' }),
     jest.spyOn(EmailLibrary, 'loadTemplateByKey').mockResolvedValue({ template: { template_key: 'invoice.followup_3_day', name: 'Reminder' }, activeVersion: { id: 'v1' } }),
     jest.spyOn(EmailLibrary, 'renderTemplate').mockReturnValue({ subject: 'A friendly reminder about your invoice', text: 'Hi Robin, your invoice WPC-2099-0002 has a balance of $129.00.' }),
+    jest.spyOn(EmailLibrary, 'templateContentHash').mockReturnValue('hash-1'),
     jest.spyOn(PayerOwnership, 'invoicePayerOwnership').mockResolvedValue(null),
   ];
   Invoices.getInvoiceDeliveryRecipients.mockResolvedValue({ customerName: 'Robin Sample', primaryContact: { phone: '+19415550142' }, emailRecipient: { email: 'robin.sample@example.com' } });
@@ -424,7 +425,7 @@ describe('send_invoice_reminder_now', () => {
     expect(Invoices.sendReminderNowFromBar).toHaveBeenCalledTimes(1);
     expect(Invoices.sendReminderNowFromBar).toHaveBeenCalledWith({
       invoiceId: INV, actor: { technicianId: 'staff-1' },
-      approvedReminder: { invoiceUpdatedAtMs: new Date('2099-01-01T12:00:00.123Z').getTime(), sequenceId: SEQ, status: 'active', stepIndex: 0 },
+      approvedReminder: { invoiceUpdatedAtMs: new Date('2099-01-01T12:00:00.123Z').getTime(), sequenceId: SEQ, status: 'active', stepIndex: 0, emailContentHash: 'hash-1' },
     });
   });
 
@@ -511,6 +512,25 @@ describe('send_invoice_reminder_now', () => {
     state.invoices[0].updated_at = new Date('2099-01-03T00:00:00Z');
     expect(await confirm('send_invoice_reminder_now', card)).toMatchObject({ preview_changed: true });
     expect(Invoices.sendReminderNowFromBar).not.toHaveBeenCalled();
+  });
+
+  test('an HTML-block edit with the subject and plain text unchanged still refuses: the pin carries the whole email’s content hash', async () => {
+    const card = await call('send_invoice_reminder_now');
+    expect(card._approved.emailContentHash).toBe('hash-1');
+    // The same rendered subject and text (renderTemplate is unchanged), a different template content hash.
+    EmailLibrary.templateContentHash.mockReturnValue('hash-2');
+    expect(await confirm('send_invoice_reminder_now', card)).toMatchObject({ code: 'preview_changed', preview_changed: true });
+    expect(Invoices.sendReminderNowFromBar).not.toHaveBeenCalled();
+    // Back to the reviewed content: it sends, handing the service the hash to enforce at the email send.
+    EmailLibrary.templateContentHash.mockReturnValue('hash-1');
+    await confirm('send_invoice_reminder_now', card);
+    expect(Invoices.sendReminderNowFromBar.mock.calls[0][0].approvedReminder.emailContentHash).toBe('hash-1');
+  });
+
+  test('a card with no email leg carries no hash', async () => {
+    BillingEmailSender.operatorEmailRecipient.mockResolvedValue({ refusal: { reason: 'missing_email' } });
+    const card = await call('send_invoice_reminder_now');
+    expect(card._approved.emailContentHash).toBeNull();
   });
 
   test('a bank-verification invoice stays on the page, and an unreadable check refuses', async () => {

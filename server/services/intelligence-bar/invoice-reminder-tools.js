@@ -371,7 +371,10 @@ async function reminderEmail(step, customer, invoice) {
     customer_portal_url: `${publicPortalUrl()}/?tab=billing`,
   };
   const rendered = require('../email-template-library').renderTemplate({ template: loaded.template, version: loaded.activeVersion, payload });
-  return { to, templateKey, subject: flat(rendered.subject), text: String(rendered.text || '').trim() };
+  // The whole email, not just its subject and plain text: the template content hash covers every HTML block, the call to
+  // action, the wrapper and the sender. The send refuses a different hash (sendTemplate expectedContentHash).
+  const contentHash = require('../email-template-library').templateContentHash(loaded.template, loaded.activeVersion);
+  return { to, templateKey, subject: flat(rendered.subject), text: String(rendered.text || '').trim(), contentHash };
 }
 
 async function buildSendNowPlan(input) {
@@ -457,7 +460,7 @@ async function buildSendNowPlan(input) {
     email_body: email.none ? null : email.text,
     effects,
     sends_to_customer: true,
-    _approved: { invoiceUpdatedAtMs: msOf(invoice.updated_at), sequenceId: seq.id, status: seq.status, stepIndex: seq.step_index },
+    _approved: { invoiceUpdatedAtMs: msOf(invoice.updated_at), sequenceId: seq.id, status: seq.status, stepIndex: seq.step_index, emailContentHash: email.none ? null : email.contentHash },
     _version: {
       tool: 'send_invoice_reminder_now',
       invoice_id: invoice.id,
@@ -469,7 +472,7 @@ async function buildSendNowPlan(input) {
       step: step.id,
       recipients: digest({ phone: sms ? sms.phone.replace(/\D/g, '') : null, email: email.none ? null : String(email.to).toLowerCase() }),
       sms_text: sms ? digest(sms.body) : null,
-      email_text: email.none ? null : digest([email.templateKey, email.subject, email.text]),
+      email_text: email.none ? null : digest([email.templateKey, email.subject, email.text, email.contentHash]),
     },
     note: 'PREVIEW ONLY — nothing was sent. Confirm sends exactly this; if anything changed it refuses.',
   };
@@ -514,6 +517,7 @@ const LEG_REASONS = {
   send_window: 'it waits for the 8 AM text window',
   invoice_not_eligible: 'the invoice is no longer eligible',
   invoice_payer_billed: 'the invoice is billed to a payer',
+  email_content_changed: 'the email changed after the card was shown',
 };
 function legSentence(label, leg) {
   const why = leg?.reason ? (LEG_REASONS[leg.reason] || String(leg.reason).replace(/_/g, ' ')) : null;

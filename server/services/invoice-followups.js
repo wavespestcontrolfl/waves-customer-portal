@@ -304,7 +304,10 @@ async function logFollowupEmailAttempt({
   }
 }
 
-async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference = true }) {
+// expectedContentHash (the Intelligence Bar's send-now card only): the email template content hash the card showed
+// (email-template-library templateContentHash: subject, preview, every block, text body, wrapper, sender). sendTemplate refuses
+// a different one before anything is sent.
+async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference = true, expectedContentHash = null }) {
   const templateKey = FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID[step.id];
   if (!templateKey) return { ok: false, skipped: true, reason: 'no_email_template_mapping' };
 
@@ -353,6 +356,7 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey,
+      ...(expectedContentHash ? { expectedContentHash } : {}),
       to,
       payload,
       recipientType: 'customer',
@@ -372,6 +376,10 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
     });
     return await billingEmailSendOutcome(result, state, log);
   } catch (err) {
+    // The card's pinned email content changed: refused before the provider, nothing sent on this leg.
+    if (expectedContentHash && /reviewed email content changed/i.test(err?.message || '')) {
+      return { ok: false, skipped: true, reason: 'email_content_changed' };
+    }
     return billingEmailSendFailure(err, state.handoffStarted, log, {
       logTag: 'invoice-followups', label: `${step.id} for invoice ${row.invoice_id}`,
     });
@@ -1660,7 +1668,7 @@ async function fireStep(row, { operatorInitiated = false, ownedMicrodeposit = fa
   row.invoice_status = claimedInvoice.status;
   row.token = claimedInvoice.token;
   try {
-    await fireTouch(row, { operatorInitiated, claimStamp, verificationOnly: !!ownedBy, report });
+    await fireTouch(row, { operatorInitiated, claimStamp, verificationOnly: !!ownedBy, report, expectedContentHash: approved?.emailContentHash || null });
   } finally {
     await db('invoice_followup_sequences')
       .where({ id: row.id, touch_claimed_at: claimStamp })
@@ -1692,7 +1700,7 @@ function emailLegReport(result, permitted) {
   return { state: 'unknown', reason: 'email_outcome_unconfirmed' };
 }
 
-async function fireTouch(row, { operatorInitiated = false, claimStamp = null, verificationOnly = false, report = null } = {}) {
+async function fireTouch(row, { operatorInitiated = false, claimStamp = null, verificationOnly = false, report = null, expectedContentHash = null } = {}) {
   // A row of a customer on a combined schedule (fireStep's ownedMicrodeposit):
   // re-judged now, after the claim committed and outside any lock. No longer
   // waiting on verification -> the invoice is the schedule's: nothing is sent
@@ -1968,7 +1976,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
               touchKey: step.id, // one branded verification email per follow-up step (same cadence as the SMS)
               enforceBillingPreference: !operatorInitiated,
             })
-          : await sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference: !operatorInitiated });
+          : await sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference: !operatorInitiated, expectedContentHash });
         const attemptHeld = await settleFollowupEmailLedger(
           ContactLedger, emailLedger, emailResult, selectedChannels !== null, originalDeliveryTimes,
         );
@@ -3177,6 +3185,21 @@ async function sendNextTouchNow(invoiceId, { operatorInitiated = false, combined
   // A promotion that committed after the re-arm above: fireStep refused under
   // the key (nothing was claimed or sent), so the click needs the schedule's
   // step confirmed.
+  // The card's email content hash, checked against the live template before the claim so a changed email sends neither leg
+  // (sendTemplate enforces the same hash again at the email send itself).
+  if (approved?.emailContentHash) {
+    let liveHash = null;
+    try {
+      const Library = require('./email-template-library');
+      const templateKey = FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID[followupSteps()[row.step_index]?.id];
+      const loaded = templateKey ? await Library.loadTemplateByKey(templateKey) : null;
+      liveHash = loaded?.template && loaded.activeVersion ? Library.templateContentHash(loaded.template, loaded.activeVersion) : null;
+    } catch { liveHash = null; }
+    if (liveHash !== approved.emailContentHash) {
+      await restoreAfterRefusal();
+      return SEND_NOW_PREVIEW_CHANGED;
+    }
+  }
   const reportOut = report ? {} : null;
   const fired = await fireStep(row, { operatorInitiated, approved, report: reportOut });
   if (fired?.ownedBy) return Wiring().sendNowForInvoiceOnSchedule(fired.ownedBy, seq.customer_id, null);
