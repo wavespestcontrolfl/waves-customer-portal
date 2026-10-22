@@ -32,6 +32,13 @@
  *     anywhere → the current scheduled_date IS the anchor (never moved).
  *     change_count > 0 with no dated evidence, or an unreadable evidence
  *     query → anchor UNKNOWN → NO MOVE (fail closed — never guess a budget).
+ *     Re-dated by anything else (GATE_AUTO_DISPATCH_REDATE_ANCHOR, owner
+ *     2026-10-22, auto-dispatch audit D2: "the new date becomes the planned
+ *     date"): a person, a script or another automatic mover that put the
+ *     visit on a new date after an auto move restarts the budget at that
+ *     date (redateRestart), instead of leaving it measured from a date the
+ *     visit no longer keeps — which blocks every day move (DRIFT_ANCHOR_STALE)
+ *     or pulls the visit back toward the old date. Read from source 1 alone.
  *   - Destination legality: no move may LAND a visit under
  *     MIN_DESTINATION_DAYS_OUT (5) days from today. Moving later is always
  *     fine; moving earlier only while the destination stays >= 5 days away.
@@ -50,6 +57,12 @@
  *   (migration 20260720000000 invariant), so one predicate covers both.
  */
 const { toDateStr, shiftDateStr } = require('./dates');
+const { gateEnvValue } = require('../../config/feature-gates');
+
+const REDATE_ANCHOR_GATE = 'GATE_AUTO_DISPATCH_REDATE_ANCHOR';
+// An audit 'changed' row and its move's atomic reschedule_log row land
+// seconds apart (prod 2026-10-22: 347 of 347 pairs within 3 s).
+const MOVE_PAIR_WINDOW_MS = 10 * 60 * 1000;
 
 // Tier ladder (owner-ruled constants — not env-tunable on purpose; the gate is
 // the kill switch, the ladder itself is the approved policy).
@@ -118,7 +131,8 @@ function tierMoveWindow({ origDate, anchorDate, today, radius }) {
  * budget). Returns Map<serviceId, earliest 'YYYY-MM-DD' pre-move date>; a
  * service ABSENT from the map has no recorded auto-move. On query failure
  * returns null (callers must treat EVERY visit as anchor-unknown → no move;
- * fail closed).
+ * fail closed). With GATE_AUTO_DISPATCH_REDATE_ANCHOR on at load, the map
+ * also carries `redates` (toolMoveChains), which resolveAnchor reads.
  */
 async function loadAnchorMap(db, serviceIds) {
   const map = new Map();
@@ -136,7 +150,7 @@ async function loadAnchorMap(db, serviceIds) {
       .where('reason_code', 'auto_dispatch')
       .where('initiated_by', 'auto_dispatch')
       .orderBy('created_at', 'asc')
-      .select('scheduled_service_id', 'original_date', 'created_at');
+      .select('scheduled_service_id', 'original_date', 'new_date', 'created_at');
     const auditRows = await db('auto_dispatch_audit_logs')
       .whereIn('scheduled_service_id', serviceIds)
       .where('action', 'changed')
@@ -156,17 +170,74 @@ async function loadAnchorMap(db, serviceIds) {
     };
     for (const r of moveRows) consider(r.scheduled_service_id, r.original_date, r.created_at);
     for (const r of auditRows) consider(r.scheduled_service_id, r.old_scheduled_date, r.created_at);
+    if (gateEnvValue(REDATE_ANCHOR_GATE)) map.redates = toolMoveChains(moveRows, auditRows);
     return map;
   } catch (_) {
     return null; // fail closed upstream
   }
 }
 
+/**
+ * Each visit's chain of auto moves (D2), from source 1 alone: the rebooker
+ * writes that row inside every auto-dispatch move's own transaction, so the
+ * chain has no gap; the audit trail is best-effort (a row can be lost) and
+ * must never make a gap look like a re-date. Per service id:
+ *   lastTo  — the date the newest auto move left the visit on;
+ *   restart — the origin of the newest auto move that did not start where
+ *             the move before it left the visit (re-dated in between), else null;
+ *   unknown — a row without a readable date, or an audit move with no
+ *             source-1 row beside it: the chain is incomplete, so no restart
+ *             (resolveAnchor keeps the earliest date — never guess a budget).
+ */
+function toolMoveChains(moveRows, auditRows) {
+  const chains = new Map();
+  const movesAt = new Map(); // sid -> source-1 timestamps
+  for (const r of moveRows) {
+    const sid = r.scheduled_service_id;
+    if (!sid) continue;
+    const at = new Date(r.created_at || 0).getTime();
+    movesAt.set(sid, [...(movesAt.get(sid) || []), at]);
+    const chain = chains.get(sid);
+    if (chain && chain.unknown) continue;
+    const from = toDateStr(r.original_date);
+    const to = toDateStr(r.new_date);
+    if (!from || !to) chains.set(sid, { unknown: true });
+    else if (!chain) chains.set(sid, { restart: null, lastTo: to });
+    else {
+      if (from !== chain.lastTo) chain.restart = from;
+      chain.lastTo = to;
+    }
+  }
+  for (const r of auditRows) {
+    const sid = r.scheduled_service_id;
+    const at = new Date(r.created_at || 0).getTime();
+    const paired = (movesAt.get(sid) || []).some((t) => Math.abs(t - at) <= MOVE_PAIR_WINDOW_MS);
+    if (sid && !paired) chains.set(sid, { unknown: true });
+  }
+  return chains;
+}
+
+/**
+ * The date a re-date auto-dispatch did not make restarted the drift budget
+ * at (D2), or null: the visit's current date when it is no longer where the
+ * newest auto move left it, else the chain's own restart. Null with the gate
+ * off at load (no `redates`), for a visit no auto move touched, or for an
+ * incomplete chain. A person's re-date is still the person's: eligibility.js
+ * isPersonPlacedVisit keeps such a visit out of every move first.
+ */
+function redateRestart(service, anchorMap) {
+  const chain = anchorMap.redates && anchorMap.redates.get(service.id);
+  if (!chain || chain.unknown) return null;
+  const current = toDateStr(service.scheduled_date);
+  if (current && current !== chain.lastTo) return current;
+  return chain.restart;
+}
+
 /** Resolve one visit's anchor date, or null when unknown (→ no move). */
 function resolveAnchor(service, anchorMap) {
   if (!anchorMap) return null; // bulk load failed — unknown for everyone, fail closed
   const evidenced = anchorMap.get(service.id);
-  if (evidenced) return evidenced; // earliest durable pre-move date
+  if (evidenced) return redateRestart(service, anchorMap) || evidenced; // earliest durable pre-move date, or D2's restart
   // change_count says moved but no durable record carries the original date —
   // inconsistent history, never guess a budget.
   if ((service.auto_dispatch_change_count || 0) > 0) return null;

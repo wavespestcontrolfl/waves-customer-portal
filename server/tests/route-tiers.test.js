@@ -195,6 +195,95 @@ describe('anchor derivation', () => {
   });
 });
 
+// ── D2: a re-date auto-dispatch did not make restarts the budget ───────────
+// GATE_AUTO_DISPATCH_REDATE_ANCHOR (owner 2026-10-22, auto-dispatch audit D2:
+// "the new date becomes the planned date"). Prod 10-22: five visits the tool
+// had moved once were later re-dated by a script, far from their pre-move
+// date, and every night skipped them as DRIFT_ANCHOR_STALE.
+describe('anchor derivation: a re-date the tool did not make restarts the budget (D2)', () => {
+  const { flexTierMoveWindow } = require('../services/auto-dispatch/flex-tier');
+  // One auto move, Dec 16 -> Dec 14, both durable records (seconds apart, as in prod).
+  const oneMove = {
+    moveRows: [{ scheduled_service_id: 's1', original_date: '2026-12-16', new_date: '2026-12-14', created_at: '2026-09-19T08:10:00Z' }],
+    auditRows: [{ scheduled_service_id: 's1', old_scheduled_date: '2026-12-16', created_at: '2026-09-19T08:10:01Z' }],
+  };
+  afterEach(() => { delete process.env.GATE_AUTO_DISPATCH_REDATE_ANCHOR; });
+
+  test('gate off: a re-dated visit keeps its earliest pre-move date (unchanged)', async () => {
+    const map = await loadAnchorMap(anchorDbStub(oneMove), ['s1']);
+    expect(map.redates).toBeUndefined();
+    expect(resolveAnchor({ id: 's1', scheduled_date: '2026-12-28', auto_dispatch_change_count: 1 }, map)).toBe('2026-12-16');
+  });
+
+  test('gate on: re-dated after the last auto move — the current date is the anchor, and day moves open around it', async () => {
+    process.env.GATE_AUTO_DISPATCH_REDATE_ANCHOR = 'true';
+    const map = await loadAnchorMap(anchorDbStub(oneMove), ['s1']);
+    const svc = { id: 's1', scheduled_date: '2026-12-28', auto_dispatch_change_count: 1 };
+    expect(resolveAnchor(svc, map)).toBe('2026-12-28');
+    // The old anchor collapses the flex window to the visit's own day (DRIFT_ANCHOR_STALE);
+    // the restarted one spans the ±5 days around the new date.
+    const today = '2026-10-22';
+    expect(flexTierMoveWindow({ origDate: '2026-12-28', anchorDate: '2026-12-16', today, neighbors: {} }))
+      .toEqual({ dateFrom: '2026-12-28', dateTo: '2026-12-28' });
+    expect(flexTierMoveWindow({ origDate: '2026-12-28', anchorDate: resolveAnchor(svc, map), today, neighbors: {} }))
+      .toEqual({ dateFrom: '2026-12-23', dateTo: '2027-01-02' });
+  });
+
+  test('gate on: still where the last auto move left it — the earliest date stays (the budget is cumulative)', async () => {
+    process.env.GATE_AUTO_DISPATCH_REDATE_ANCHOR = 'true';
+    const map = await loadAnchorMap(anchorDbStub({
+      moveRows: [
+        { scheduled_service_id: 's1', original_date: '2026-11-03', new_date: '2026-11-05', created_at: '2026-09-01T08:10:00Z' },
+        { scheduled_service_id: 's1', original_date: '2026-11-05', new_date: '2026-11-07', created_at: '2026-09-08T08:10:00Z' },
+      ],
+    }), ['s1']);
+    expect(resolveAnchor({ id: 's1', scheduled_date: '2026-11-07', auto_dispatch_change_count: 2 }, map)).toBe('2026-11-03');
+  });
+
+  test('gate on: re-dated between two auto moves — the later move\'s origin is the anchor', async () => {
+    process.env.GATE_AUTO_DISPATCH_REDATE_ANCHOR = 'true';
+    const map = await loadAnchorMap(anchorDbStub({
+      moveRows: [
+        { scheduled_service_id: 's1', original_date: '2026-11-03', new_date: '2026-11-05', created_at: '2026-09-01T08:10:00Z' },
+        // Something else moved it to Nov 20 before this second auto move.
+        { scheduled_service_id: 's1', original_date: '2026-11-20', new_date: '2026-11-22', created_at: '2026-09-15T08:10:00Z' },
+      ],
+    }), ['s1']);
+    expect(resolveAnchor({ id: 's1', scheduled_date: '2026-11-22', auto_dispatch_change_count: 2 }, map)).toBe('2026-11-20');
+  });
+
+  test('gate on: an audit move with no atomic row beside it (an incomplete chain) restarts nothing', async () => {
+    process.env.GATE_AUTO_DISPATCH_REDATE_ANCHOR = 'true';
+    const map = await loadAnchorMap(anchorDbStub({
+      moveRows: oneMove.moveRows,
+      auditRows: [...oneMove.auditRows, { scheduled_service_id: 's1', old_scheduled_date: '2026-12-14', created_at: '2026-10-01T08:10:00Z' }],
+    }), ['s1']);
+    expect(resolveAnchor({ id: 's1', scheduled_date: '2026-12-28', auto_dispatch_change_count: 2 }, map)).toBe('2026-12-16');
+  });
+
+  test('gate on: a lost audit row is not a re-date', async () => {
+    process.env.GATE_AUTO_DISPATCH_REDATE_ANCHOR = 'true';
+    const map = await loadAnchorMap(anchorDbStub({ moveRows: oneMove.moveRows }), ['s1']);
+    expect(resolveAnchor({ id: 's1', scheduled_date: '2026-12-14', auto_dispatch_change_count: 1 }, map)).toBe('2026-12-16');
+  });
+
+  test('gate on: a move row without a readable date restarts nothing', async () => {
+    process.env.GATE_AUTO_DISPATCH_REDATE_ANCHOR = 'true';
+    const map = await loadAnchorMap(anchorDbStub({
+      moveRows: [{ scheduled_service_id: 's1', original_date: '2026-12-16', new_date: null, created_at: '2026-09-19T08:10:00Z' }],
+    }), ['s1']);
+    expect(resolveAnchor({ id: 's1', scheduled_date: '2026-12-28', auto_dispatch_change_count: 1 }, map)).toBe('2026-12-16');
+  });
+
+  test('gate on: a visit no auto move touched, and an unreadable history, are unchanged', async () => {
+    process.env.GATE_AUTO_DISPATCH_REDATE_ANCHOR = 'true';
+    const map = await loadAnchorMap(anchorDbStub(oneMove), ['s1', 's2']);
+    expect(resolveAnchor({ id: 's2', scheduled_date: '2026-12-01', auto_dispatch_change_count: 0 }, map)).toBe('2026-12-01');
+    expect(resolveAnchor({ id: 's2', scheduled_date: '2026-12-01', auto_dispatch_change_count: 1 }, map)).toBeNull();
+    expect(await loadAnchorMap(anchorDbStub({ throwOn: 'reschedule_log' }), ['s1'])).toBeNull();
+  });
+});
+
 // ── Reminder-sent freeze ───────────────────────────────────────────────────
 function reminderDbStub({ rows = [], owners = [], throwOnFirstQuery = false, throwOnOwnerQuery = false } = {}) {
   let call = 0;
