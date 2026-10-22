@@ -1,10 +1,11 @@
 /**
  * Pipeline > Estimates card view (owner-approved scope "A", 2026-10-22):
  *  - GET /admin/estimates rows carry `perApplication` (recurring per-application
- *    lines from the same normalizeProposal authority the PDF reads) and
- *    `hasAcceptanceRecord` (one batched estimate_acceptances query).
+ *    lines from the same normalizeProposal authority the PDF reads),
+ *    `hasAcceptanceRecord` (one batched estimate_acceptances query) and
+ *    `staffPreviewable` (whether the staff preview renders the row).
  *  - GET /admin/estimates/:id/acceptance serves the recorded acceptance to the
- *    owner only, 404 when there is none.
+ *    owner only, 404 when there is none, 500 when the read fails.
  * Synthetic data only.
  */
 jest.mock('../models/db', () => {
@@ -46,12 +47,21 @@ jest.mock('../services/admin-estimate-persistence', () => ({
   estimateViewUrl: jest.fn(),
 }));
 const mockPhone = { verdicts: new Map() };
+const mockView = { draftPreview: new Set(), customerViewable: new Set() };
 jest.mock('../routes/estimate-public', () => ({
   // the batch phone matcher is tested against the real per-row matcher in estimate-public-accept-phone-match.test.js
   matchAcceptCustomersByPhoneBatch: jest.fn(async () => mockPhone.verdicts),
+  // the /data gate's row verdicts (their rules: estimate-public-viewability.test.js)
+  adminDraftPreviewEligible: jest.fn((row, param) => param === '1' && mockView.draftPreview.has(row.id)),
+  isEstimateCustomerViewable: jest.fn((row) => mockView.customerViewable.has(row.id)),
   acceptanceServiceLists: jest.fn(),
   buildPricingBundle: jest.fn(async () => ({})),
   bookingServiceFor: jest.fn(),
+}));
+const mockGroup = { owners: new Map() };
+jest.mock('../services/recurring-card-on-file', () => ({
+  // the batch owner pick is tested in estimate-public-accept-phone-match.test.js
+  resolveGroupedEstimateOwnerIds: jest.fn(async () => mockGroup.owners),
 }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn() }));
 jest.mock('../services/sendgrid-mail', () => ({ isConfigured: jest.fn(() => true) }));
@@ -174,7 +184,13 @@ describe('perApplicationLinesForRow', () => {
 });
 
 describe('GET /admin/estimates list shape', () => {
-  beforeEach(() => { jest.clearAllMocks(); mockAuth.role = 'admin'; });
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockAuth.role = 'admin';
+    mockGroup.owners = new Map();
+    mockView.draftPreview = new Set();
+    mockView.customerViewable = new Set();
+  });
 
   test('adds perApplication and hasAcceptanceRecord; isolates each row', async () => {
     const rows = [
@@ -236,6 +252,50 @@ describe('GET /admin/estimates list shape', () => {
     // one batched acceptance query, not one per row
     expect(queries.filter((q) => q.table === 'estimate_acceptances' && q.m === 'whereIn')).toHaveLength(1);
   });
+
+  test('an unlinked grouped row takes its sibling owner\'s lane before any phone match', async () => {
+    // the accept resolves a grouped estimate through its linked sibling first (resolveProspectiveAcceptCustomer)
+    mockGroup.owners = new Map([['e-group-member', 'c-member'], ['e-group-plain', 'c-plain']]);
+    mockPhone.verdicts = new Map([['e-lone', { match: null, candidateCount: 0 }]]);
+    tableDb({
+      customers: [
+        { id: 'c-member', pipeline_stage: 'active_customer', monthly_rate: '50', billing_mode: null },
+        { id: 'c-plain', pipeline_stage: 'lead', monthly_rate: '0', billing_mode: 'per_application' },
+      ],
+      estimates: [
+        base('e-group-member', { estimate_group_id: 'g1' }),
+        base('e-group-plain', { estimate_group_id: 'g2' }),
+        base('e-lone'),
+      ],
+    });
+    await withServer(async (baseUrl) => {
+      const { estimates } = await (await fetch(`${baseUrl}/estimates?limit=all`)).json();
+      const byId = Object.fromEntries(estimates.map((e) => [e.id, e]));
+      // the sibling's owner keeps monthly membership, so accepting keeps monthly billing
+      expect(byId['e-group-member'].perApplication).toBeNull();
+      expect(byId['e-group-plain'].perApplication).toHaveLength(1);
+      expect(byId['e-lone'].perApplication).toHaveLength(1);
+    });
+    const ownerBatch = require('../services/recurring-card-on-file').resolveGroupedEstimateOwnerIds;
+    expect(ownerBatch).toHaveBeenCalledTimes(1);
+    // only the row without a sibling owner is phone-matched
+    const phoneBatch = require('../routes/estimate-public').matchAcceptCustomersByPhoneBatch;
+    expect(phoneBatch.mock.calls[0][0].map((r) => r.id)).toEqual(['e-lone']);
+  });
+
+  test('staffPreviewable is the /data gate verdict: the staff draft preview or the customer page', async () => {
+    mockView.draftPreview = new Set(['e-draft']);
+    mockView.customerViewable = new Set(['e-open']);
+    tableDb({ estimates: [base('e-open'), base('e-held'), base('e-draft', { status: 'draft' })] });
+    await withServer(async (baseUrl) => {
+      const { estimates } = await (await fetch(`${baseUrl}/estimates?limit=all`)).json();
+      const byId = Object.fromEntries(estimates.map((e) => [e.id, e]));
+      expect(byId['e-open'].staffPreviewable).toBe(true);
+      // e.g. held for a re-price: the public page 404s it even for staff
+      expect(byId['e-held'].staffPreviewable).toBe(false);
+      expect(byId['e-draft'].staffPreviewable).toBe(true);
+    });
+  });
 });
 
 describe('GET /admin/estimates/:id/acceptance', () => {
@@ -267,6 +327,19 @@ describe('GET /admin/estimates/:id/acceptance', () => {
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/estimates/e-won/acceptance`);
       expect(res.status).toBe(404);
+    });
+  });
+
+  test('a failed record read is a server error, not a missing record', async () => {
+    tableDb({ estimates: [], single: { estimates: { id: 'e-acc', status: 'accepted', terms_version: 'v1' } } });
+    const tables = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const b = tables(table);
+      if (table === 'estimate_acceptances') b.first = jest.fn(async () => { throw new Error('connection reset'); });
+      return b;
+    });
+    await withServer(async (baseUrl) => {
+      expect((await fetch(`${baseUrl}/estimates/e-acc/acceptance`)).status).toBe(500);
     });
   });
 

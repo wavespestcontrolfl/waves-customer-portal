@@ -387,3 +387,36 @@ describe('matchAcceptCustomersByPhoneBatch matches the per-row matcher', () => {
     expect(verdicts.has('nomark')).toBe(false);
   });
 });
+
+// The Pipeline card list resolves an unlinked GROUPED row through its linked sibling's customer before any phone
+// match, as the accept does. The batch must pick what resolveGroupedEstimateOwnerId picks for each row: the first
+// linked sibling other than itself (accepted_at order), and only while that customer is live.
+describe('resolveGroupedEstimateOwnerIds, the list form of resolveGroupedEstimateOwnerId', () => {
+  const { resolveGroupedEstimateOwnerIds } = require('../services/recurring-card-on-file');
+
+  it('takes each row\'s first linked sibling other than itself, kept only while that customer is live', async () => {
+    // accepted_at order, as the query returns it
+    mockDbFixtures['estimates:list'] = [
+      { id: 'a', estimate_group_id: 'g1', customer_id: 'cust-1' },
+      { id: 'x', estimate_group_id: 'g2', customer_id: 'cust-deleted' },
+      { id: 'y', estimate_group_id: 'g1', customer_id: 'cust-2' },
+    ];
+    mockDbFixtures['customers:list'] = [{ id: 'cust-1' }, { id: 'cust-2' }];
+    const db = require('../models/db');
+    const owners = await resolveGroupedEstimateOwnerIds([
+      { id: 'a', estimate_group_id: 'g1' },
+      { id: 'b', estimate_group_id: 'g1' },
+      { id: 'c', estimate_group_id: 'g2' },
+      { id: 'd' },
+    ]);
+    expect(Object.fromEntries(owners)).toEqual({ a: 'cust-2', b: 'cust-1' });
+    // one estimates query and one customers query for the whole page
+    expect(db.mock.calls.map(([table]) => table)).toEqual(['estimates', 'customers']);
+  });
+
+  it('makes no query when no row is grouped', async () => {
+    const db = require('../models/db');
+    expect((await resolveGroupedEstimateOwnerIds([{ id: 'd' }])).size).toBe(0);
+    expect(db).not.toHaveBeenCalled();
+  });
+});

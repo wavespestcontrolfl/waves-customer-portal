@@ -70,8 +70,10 @@ const { publishedGroupLinks, publishedOfferExpiry, extendPublishedGroupLinks } =
 const { generateEstimateProposalPDF } = require('../services/pdf/estimate-pdf');
 const {
   acceptanceServiceLists,
+  adminDraftPreviewEligible,
   buildPricingBundle,
   bookingServiceFor,
+  isEstimateCustomerViewable,
 } = require('./estimate-public');
 const {
   leadEstimateAutoSendConfigFromEnv,
@@ -3855,32 +3857,38 @@ async function perApplicationByEstimateId(estimates, parsedDataById) {
     logger.warn(`[admin-estimates] prepay lookup failed for the per-application card view: ${err.message}`);
     return out;
   }
-  // Billing lane, batched: ONE schema probe (cached in the billing module), ONE customers query for the
-  // linked rows and ONE for the unlinked rows' phone candidates (500 phones per query), so a limit=all
-  // list costs a constant number of queries. This mirrors estimateBillsPerApplication: a customer who keeps
-  // monthly membership bills monthly, so the card shows no per-application price for them. A linked row
-  // reads its customer; an UNLINKED row reads the customer the accept would match by phone
-  // (matchAcceptCustomersByPhoneBatch, the same rules as matchAcceptCustomerByPhone). No match, or an
-  // ambiguous one, is per-application, exactly as the resolver answers. A row the batch cannot judge
-  // (unresolved) or a linked row whose customer could not be read is unknown: no price line.
+  // Billing lane, batched: ONE schema probe (cached in the billing module), then the customer each row's
+  // accept lands on, in the accept's own order (resolveProspectiveAcceptCustomer): the linked customer; for
+  // an UNLINKED grouped row, the owner of its linked sibling (resolveGroupedEstimateOwnerIds); otherwise
+  // the phone match (matchAcceptCustomersByPhoneBatch, the same rules as matchAcceptCustomerByPhone). Each
+  // step is one query (phones: one per 500), so a limit=all list costs a constant number of queries. A
+  // customer who keeps monthly membership bills monthly, so the card shows no per-application price for
+  // them; no match, or an ambiguous one, is per-application, as the resolver answers. A row the phone batch
+  // cannot judge (unresolved) or whose customer could not be read is unknown: no price line.
   const todo = candidates.filter((c) => !prepaidIds.has(c.row.id));
   if (!todo.length) return out;
   const { customerPreservesMonthlyMembership } = require('../services/billing-cadence');
   try {
     if (!(await billing.perApplicationBillingColumnsExist())) return out;
-    const customerIds = [...new Set(todo.map((c) => c.row.customer_id).filter(Boolean))];
+    const unlinked = todo.filter((c) => !c.row.customer_id).map((c) => c.row);
+    const ownerIds = unlinked.length
+      ? await require('../services/recurring-card-on-file').resolveGroupedEstimateOwnerIds(unlinked, db)
+      : new Map();
+    const customerIdOf = (row) => row.customer_id || ownerIds.get(row.id) || null;
+    const customerIds = [...new Set(todo.map((c) => customerIdOf(c.row)).filter(Boolean))];
     const customers = customerIds.length
       ? await db('customers').whereIn('id', customerIds).select('id', 'pipeline_stage', 'monthly_rate', 'billing_mode')
       : [];
     const byId = new Map(customers.map((c) => [c.id, c]));
-    const unlinked = todo.filter((c) => !c.row.customer_id).map((c) => c.row);
-    const verdicts = unlinked.length
-      ? await require('./estimate-public').matchAcceptCustomersByPhoneBatch(unlinked, db)
+    const phoneRows = unlinked.filter((row) => !ownerIds.has(row.id));
+    const verdicts = phoneRows.length
+      ? await require('./estimate-public').matchAcceptCustomersByPhoneBatch(phoneRows, db)
       : new Map();
     for (const c of todo) {
+      const customerId = customerIdOf(c.row);
       let customer = null;
-      if (c.row.customer_id) {
-        customer = byId.get(c.row.customer_id);
+      if (customerId) {
+        customer = byId.get(customerId);
         if (!customer) continue;
       } else {
         const verdict = verdicts.get(c.row.id);
@@ -4119,19 +4127,14 @@ router.get('/', async (req, res, next) => {
       }
     }
 
-    const parsedDataById = new Map();
-    for (const e of estimates) {
-      let data = e.estimate_data;
-      if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
-      parsedDataById.set(e.id, data);
-    }
+    // Parsed once: the per-application lines and the row payload read the same data.
+    const parsedDataById = new Map(estimates.map((e) => [e.id, parseEstimateData(e.estimate_data)]));
     const perApplicationById = await perApplicationByEstimateId(estimates, parsedDataById);
     const acceptanceRecordIds = await acceptanceRecordIdSet(estimates);
 
     res.json({
       estimates: estimates.map(e => {
-        let estData = e.estimate_data;
-        if (typeof estData === 'string') { try { estData = JSON.parse(estData); } catch { estData = null; } }
+        const estData = parsedDataById.get(e.id);
         const monthlyTotal = parseFloat(e.monthly_total || 0);
         const onetimeTotal = parseFloat(e.onetime_total || 0);
         const hasBeenSent = !!e.sent_at;
@@ -4175,6 +4178,10 @@ router.get('/', async (req, res, next) => {
           // Per-application price lines for the card, or null (see perApplicationLinesForRow).
           perApplication: perApplicationById.get(e.id) || null,
           hasAcceptanceRecord: acceptanceRecordIds.has(e.id),
+          // Whether the staff preview (?adminPreview=1) renders this row: the /data gate's verdicts that
+          // need only the row, the staff draft preview or the customer page itself. A held, invalidated,
+          // expired or archived row 404s there even for staff, so the card opens the staff PDF instead.
+          staffPreviewable: adminDraftPreviewEligible(e, '1') || isEstimateCustomerViewable(e),
           tier: e.waveguard_tier, createdBy: e.created_by_name,
           sentAt: e.sent_at,
           viewedAt: hasBeenSent ? e.viewed_at : null,
@@ -4278,7 +4285,9 @@ router.get('/:id/acceptance', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
-    const record = await require('../services/estimate-acceptance-record').acceptanceRecordForEstimate(estimate);
+    // Strict: a failed read (or a record terms_version promises but the table lacks) is a server
+    // error, never the 404 that means no acceptance record was ever committed.
+    const record = await require('../services/estimate-acceptance-record').acceptanceRecordForEstimate(estimate, { strict: true });
     if (!record) return res.status(404).json({ error: 'No acceptance record for this estimate' });
     res.json({ acceptance: record });
   } catch (err) { next(err); }

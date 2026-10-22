@@ -803,37 +803,24 @@ function estimatePriceInline(display) {
   return [`${display.lead}${display.suffix}`, ...display.secondary].join(" · ");
 }
 // Which "view" action a row gets.
-//  - Open, customer-viewable rows (draft/scheduled/sent/viewed/declined, not
-//    archived, not past expiry): the staff preview of the customer page
-//    (?adminPreview=1, never counts a view).
+//  - Rows the staff preview renders (`staffPreviewable`, the server's verdict:
+//    an unpublished draft, or a row the customer page shows): the staff preview
+//    of the customer page (?adminPreview=1, never counts a view).
 //  - Accepted rows: the customer page shows only the booking step, so the full
 //    accepted document is the PDF.
-//  - Everything else (expired, send_failed, archived, any other status): the
-//    public routes 404, so the staff PDF route is the only way to see it.
+//  - Everything else (expired, send_failed, archived, held for a re-price,
+//    invalidated): the public routes 404, so the staff PDF route is the only
+//    way to see it.
 // Both PDF kinds come from GET /admin/estimates/:id/proposal.pdf (staff auth,
 // browser document renderer where the row is viewable, pdfkit otherwise, the
 // acceptance record included, never counts a view).
-const PREVIEWABLE_STATUSES = [
-  "draft",
-  "scheduled",
-  "sent",
-  "viewed",
-  "declined",
-];
 function estimateViewAction(estimate) {
   if (!estimate?.id) return null;
   if (estimate.status === "accepted") {
     return { kind: "pdf", label: "View accepted estimate" };
   }
-  const expired =
-    estimate.expiresAt && new Date(estimate.expiresAt) < new Date();
   const href = estimatePreviewHref(estimate);
-  if (
-    href &&
-    !estimate.archivedAt &&
-    !expired &&
-    PREVIEWABLE_STATUSES.includes(estimate.status)
-  ) {
+  if (href && estimate.staffPreviewable) {
     return { kind: "preview", label: "View estimate", href };
   }
   return { kind: "pdf", label: "View estimate (PDF)" };

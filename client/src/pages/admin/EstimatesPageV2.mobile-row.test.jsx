@@ -17,6 +17,8 @@ const ESTIMATE = {
   id: "estimate-1",
   token: "customer-link-token",
   status: "sent",
+  // the server's verdict for an open sent row (GET /admin/estimates)
+  staffPreviewable: true,
   customerId: "customer-1",
   customerName: "Ada Lovelace",
   customerPhone: "+19415550100",
@@ -157,11 +159,10 @@ describe("MobileEstimateRow per-application price and view actions", () => {
   });
 
   it.each([
-    ["expired", { status: "expired" }],
-    ["send_failed", { status: "send_failed" }],
-    ["archived", { archivedAt: "2026-10-01T00:00:00Z" }],
-    ["past its expiry date", { expiresAt: "2020-01-01T00:00:00Z" }],
-  ])("uses the staff PDF (not the public preview) for a %s row", (_name, over) => {
+    // the server's verdict: held for a re-price, invalidated, expired, send_failed or archived
+    ["the staff preview cannot render it", { staffPreviewable: false }],
+    ["it has no customer link", { token: null }],
+  ])("uses the staff PDF (not the public preview) when %s", (_name, over) => {
     vi.spyOn(window, "open").mockImplementation(() => null);
     renderRow({ estimate: { ...ESTIMATE, ...over } });
     openActions();
@@ -174,7 +175,7 @@ describe("MobileEstimateRow per-application price and view actions", () => {
     vi.spyOn(window, "open").mockImplementation(() => win);
     const alert = vi.spyOn(window, "alert").mockImplementation(() => {});
     fetch.mockResolvedValue({ ok: false, status: 500 });
-    renderRow({ estimate: { ...ESTIMATE, status: "expired" } });
+    renderRow({ estimate: { ...ESTIMATE, status: "expired", staffPreviewable: false } });
     openActions();
     fireEvent.click(screen.getByRole("button", { name: /View estimate \(PDF\)/ }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Could not open the estimate PDF (500)");

@@ -184,6 +184,39 @@ async function resolveGroupedEstimateOwnerId(estimate, database = db, { throwOnE
   }
 }
 
+// Batch form of resolveGroupedEstimateOwnerId for LIST views (the admin
+// Pipeline cards): one estimates query for every group's linked siblings and
+// one customers query for their liveness, then each row gets the per-row
+// pick: the first linked sibling other than itself in accepted_at order,
+// kept only while that customer is live. Returns Map(estimate.id -> owner
+// customer id); a row with no group or no live owner is absent (the caller
+// phone-matches it, like the accept). A failed read throws (callers decide).
+async function resolveGroupedEstimateOwnerIds(estimates, database = db) {
+  const owners = new Map();
+  const grouped = (Array.isArray(estimates) ? estimates : []).filter((e) => e?.id && e.estimate_group_id);
+  if (!grouped.length) return owners;
+  const siblings = await database('estimates')
+    .whereIn('estimate_group_id', [...new Set(grouped.map((e) => e.estimate_group_id))])
+    .whereNotNull('customer_id')
+    .orderBy('accepted_at', 'asc')
+    .select('id', 'estimate_group_id', 'customer_id');
+  const picks = new Map();
+  for (const e of grouped) {
+    const sibling = siblings.find((s) => s.estimate_group_id === e.estimate_group_id && s.id !== e.id);
+    if (sibling) picks.set(e.id, sibling.customer_id);
+  }
+  if (!picks.size) return owners;
+  const live = await database('customers')
+    .whereIn('id', [...new Set(picks.values())])
+    .whereNull('deleted_at')
+    .select('id');
+  const liveIds = new Set(live.map((c) => c.id));
+  for (const [estimateId, customerId] of picks) {
+    if (liveIds.has(customerId)) owners.set(estimateId, customerId);
+  }
+  return owners;
+}
+
 // What a recurring accept requires. Exempt lanes:
 //  - one-time accepts (the card-hold lane owns those),
 //  - invoice-mode (admin opted into manual/auto invoicing — its own billing
@@ -2316,6 +2349,7 @@ module.exports = {
   applyCommercialManualBillingExemption,
   resolveRecurringCardPolicyForEstimate,
   resolveGroupedEstimateOwnerId,
+  resolveGroupedEstimateOwnerIds,
   resolveProspectiveAcceptCustomer,
   resolvePrepayChargeMethod,
   prepayChargeMethodKey,
