@@ -87,7 +87,20 @@ describe('adopting a draft WDO invoice does not wait on its own invoice lock', (
     expect(project.invoice_id).toBe(INV);
     // Order inside the transaction: project lock, invoice read, THEN the link's invoice share lock and the project update.
     const order = events.filter((e) => /^(projects:lock update|invoices:lock share|projects:update)/.test(e));
-    expect(order).toEqual(['projects:lock update', 'invoices:lock share', 'projects:update invoice_id,updated_at']);
+    expect(order).toEqual(['projects:lock update', 'projects:lock update', 'invoices:lock share', 'projects:update invoice_id,updated_at']);
+  });
+
+  test('the explicit-invoice path (no project lock of its own) locks the project BEFORE the invoice: never invoice -> project', async () => {
+    // A concurrent automatic resolution holds the project FOR UPDATE while it awaits a reprice that needs this invoice; an explicit
+    // link that took the invoice first and then waited on the project would close a cycle Postgres cannot see (the await).
+    db.mockImplementation((table) => ({ where: () => ({ first: async () => (table === 'invoices' ? { ...STALE_DRAFT } : undefined) }) }));
+    const project = PROJECT();
+    await resolveOrCreateProjectInvoice({ project, customer: { id: 'cust-1' }, invoiceId: INV });
+    const locks = events.filter((e) => /lock/.test(e));
+    expect(locks).toEqual(['projects:lock update', 'invoices:lock share']);
+    expect(project.invoice_id).toBe(INV);
+    // Committed (its own short transaction) before the reprice runs, so the reprice never waits on this link's share lock.
+    expect(mockUpdateCalls).toEqual([{ id: INV, heldAtCall: [] }]);
   });
 
   test('the harness would catch the old order: a reprice issued after the link on the same outer transaction fails', async () => {

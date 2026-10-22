@@ -1,7 +1,7 @@
 /**
  * projects.invoice_id has ONE writer (admin-projects.js persistProjectInvoiceLink). The Intelligence Bar's apply_invoice_credit
  * refuses an invoice linked to any project, reading projects.invoice_id under the invoice row's FOR UPDATE; so the link must take
- * that invoice row (FOR SHARE) in the same transaction first, and a new link then waits for the credit transaction to commit instead
+ * that invoice row (FOR SHARE) in the same transaction before it writes (after the project row: lock order is project -> invoice), and a new link then waits for the credit transaction to commit instead
  * of appearing between the credit's read and its commit. Synthetic data only.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
@@ -23,10 +23,11 @@ function makeRunner({ gate = null, failLock = false } = {}) {
     const b = {
       where: () => b,
       forShare: () => { q.locked = 'share'; return b; },
+      forUpdate: () => { q.locked = 'update'; return b; },
       first: async () => {
         log.push(`${table}:${q.locked ? `lock ${q.locked}` : 'read'}`);
-        if (q.locked && failLock) throw new Error('deadlock detected');
-        if (q.locked && gate) await gate;
+        if (q.locked === 'share' && failLock) throw new Error('deadlock detected');
+        if (q.locked === 'share' && gate) await gate;
         return { id: 'inv-1' };
       },
       update: async (values) => { log.push(`${table}:update ${JSON.stringify(Object.keys(values))}`); return 1; },
@@ -41,13 +42,13 @@ function makeRunner({ gate = null, failLock = false } = {}) {
 
 beforeEach(() => jest.clearAllMocks());
 
-describe('persistProjectInvoiceLink takes the invoice row first', () => {
-  test('the invoice is locked FOR SHARE, then the project is linked, in one transaction (a savepoint when the caller already holds one)', async () => {
+describe('persistProjectInvoiceLink takes the project row, then the invoice row', () => {
+  test('the project is locked, then the invoice FOR SHARE, then the project is linked, in one transaction (a savepoint when the caller already holds one)', async () => {
     const runner = makeRunner();
     const project = { id: 'proj-1', invoice_id: null };
     await persistProjectInvoiceLink(project, 'inv-1', runner);
     expect(runner.transaction).toHaveBeenCalledTimes(1);
-    expect(runner.log).toEqual(['invoices:lock share', 'projects:update ["invoice_id","updated_at"]']);
+    expect(runner.log).toEqual(['projects:lock update', 'invoices:lock share', 'projects:update ["invoice_id","updated_at"]']);
     expect(project.invoice_id).toBe('inv-1');
   });
 
@@ -58,26 +59,26 @@ describe('persistProjectInvoiceLink takes the invoice row first', () => {
     const project = { id: 'proj-1', invoice_id: null };
     const pending = persistProjectInvoiceLink(project, 'inv-1', runner);
     await new Promise((r) => setImmediate(r));
-    expect(runner.log).toEqual(['invoices:lock share']);
+    expect(runner.log).toEqual(['projects:lock update', 'invoices:lock share']);
     expect(project.invoice_id).toBeNull();
     release();
     await pending;
-    expect(runner.log).toEqual(['invoices:lock share', 'projects:update ["invoice_id","updated_at"]']);
+    expect(runner.log).toEqual(['projects:lock update', 'invoices:lock share', 'projects:update ["invoice_id","updated_at"]']);
     expect(project.invoice_id).toBe('inv-1');
   });
 
-  test('a runner that is a plain handle (no transaction method) still locks the invoice first', async () => {
+  test('a runner that is a plain handle (no transaction method) still locks the project, then the invoice', async () => {
     const runner = makeRunner();
     delete runner.transaction;
     await persistProjectInvoiceLink({ id: 'proj-1', invoice_id: null }, 'inv-1', runner);
-    expect(runner.log).toEqual(['invoices:lock share', 'projects:update ["invoice_id","updated_at"]']);
+    expect(runner.log).toEqual(['projects:lock update', 'invoices:lock share', 'projects:update ["invoice_id","updated_at"]']);
   });
 
   test('a failed lock (deadlock victim) links nothing and is logged, never thrown; an already-linked project is a no-op', async () => {
     const failing = makeRunner({ failLock: true });
     const project = { id: 'proj-1', invoice_id: null };
     await expect(persistProjectInvoiceLink(project, 'inv-1', failing)).resolves.toBeUndefined();
-    expect(failing.log).toEqual(['invoices:lock share']);
+    expect(failing.log).toEqual(['projects:lock update', 'invoices:lock share']);
     expect(project.invoice_id).toBeNull();
     expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/could not persist invoice link for proj-1/));
     const idle = makeRunner();

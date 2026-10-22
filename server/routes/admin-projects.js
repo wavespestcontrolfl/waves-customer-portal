@@ -2883,13 +2883,17 @@ async function maybeRepriceWdoDraft(invoice, project) {
 // The invoice row is locked FOR SHARE first, in the same transaction as the link (a savepoint when `runner` is already a transaction),
 // because this is the ONLY writer of projects.invoice_id: a payment path that must not run while a report waits on the invoice (the
 // Intelligence Bar's apply_invoice_credit) holds the invoice row FOR UPDATE and reads projects.invoice_id under it, so a link cannot
-// appear between its read and its commit. Lock order is project (held by the callers that lock it) -> invoice, never the reverse.
+// appear between its read and its commit. Lock order is project -> invoice, never the reverse (the link takes the project lock itself).
 // Called with a transaction, the share lock lasts until the OUTER transaction commits: a caller must not write the same invoice on
 // another connection (InvoiceService.update, maybeRepriceWdoDraft) after this call inside that transaction, or it waits on its own lock.
 async function persistProjectInvoiceLink(project, invoiceId, runner = db) {
   if (!invoiceId || project.invoice_id === invoiceId) return;
   try {
     const link = async (t) => {
+      // Project FIRST, then the invoice, on every path (a no-op re-lock when the caller's transaction already holds the project). The
+      // explicit-invoice path has no project lock of its own: taking the invoice first there could wait on a project whose holder is
+      // awaiting a reprice (another connection) that needs this invoice, a cycle Postgres cannot see through the JavaScript await.
+      await t('projects').where({ id: project.id }).forUpdate().first('id');
       await t('invoices').where({ id: invoiceId }).forShare().first('id');
       await t('projects').where({ id: project.id }).update({ invoice_id: invoiceId, updated_at: db.fn.now() });
     };
