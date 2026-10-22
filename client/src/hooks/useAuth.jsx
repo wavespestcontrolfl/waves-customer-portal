@@ -5,6 +5,20 @@ import { clearNativeBadge } from '../native/nativeBadge';
 
 const AuthContext = createContext(null);
 
+// Contact session (GATE_CONTACT_LOGIN): /auth/me names an on-location contact
+// signed in with their own number as actor.kind 'contact'. One reader for the
+// loader's effects and the context's `isContact`.
+export function isContactSession(customer) {
+  return customer?.actor?.kind === 'contact';
+}
+
+// Which sessions mount the notification bell: not a cancelled account, not a
+// contact (the bell rows carry the holder's billing). The loader clears the
+// native badge for the sessions that do not.
+export function sessionMountsBell(customer) {
+  return customer?.cancelled !== true && !isContactSession(customer);
+}
+
 // Server auth routes send intentional customer copy in the JSON `error`
 // field ("Invalid code", rate-limit sentences) — show those verbatim. But
 // api.js also throws raw non-JSON bodies (proxy HTML error pages) and
@@ -20,6 +34,23 @@ export function tokenCustomerId(token) {
     const b64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
     const payload = JSON.parse(atob(b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), '=')));
     return payload.customerId ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// Who the token acts as on that customer row (contact login,
+// GATE_CONTACT_LOGIN): the `contactKey` claim names an on-location contact's
+// session, absent for the account holder's. A holder tab adopting a contact
+// token for the SAME row (or the reverse) is an identity change — the
+// holder's loaded customer and its surface must not stay rendered under the
+// contact's token while /auth/me loads the contact projection, or at all
+// when that load fails and retries (codex #6363 r16 P1).
+export function tokenContactKey(token) {
+  try {
+    const b64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const payload = JSON.parse(atob(b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), '=')));
+    return payload.contactKey == null ? null : String(payload.contactKey);
   } catch {
     return null;
   }
@@ -244,8 +275,10 @@ export function AuthProvider({ children }) {
       // property switch, cross-tab adoption) — a load for the NEW epoch is
       // already running; applying this one would paint a stale identity.
       if (sessionEpochRef.current !== epoch) return;
-      // Cancelled accounts never mount the bell, including on a fresh launch.
-      if (data?.cancelled === true) void clearNativeBadge();
+      // Cancelled accounts and contact sessions never mount the bell,
+      // including on a fresh launch (sessionMountsBell).
+      const contact = isContactSession(data);
+      if (!sessionMountsBell(data)) void clearNativeBadge();
       customerRef.current = data;
       setCustomer(data);
       const propertyReadSeq = ++propertyReadSeqRef.current;
@@ -277,8 +310,13 @@ export function AuthProvider({ children }) {
       }
       setError(null);
       // Now authenticated — flush any APNs token captured before login (native
-      // app only; no-op on web). See native/nativePush.js.
-      flushNativePushToken();
+      // app only; no-op on web). See native/nativePush.js. Never for a
+      // contact session: push rows are keyed by customer, so the device
+      // would receive the holder's billing pushes. A device that still holds
+      // a holder's registration (a logout whose release failed) is released
+      // instead, token-scoped (codex #6363 r4 P1).
+      if (contact) void deactivateNativePushToken();
+      else flushNativePushToken();
     } catch (err) {
       // A stale failure must act on NOTHING: in particular, a 401 for a
       // token that has since been replaced would clear the NEW session's
@@ -350,7 +388,10 @@ export function AuthProvider({ children }) {
         return;
       }
       const nextId = tokenCustomerId(token);
-      const identityChanged = nextId === null || nextId !== tokenCustomerId(api.token);
+      // A different customer row, OR a different actor on the same row (a
+      // contact token replacing the holder's, or the reverse).
+      const identityChanged = nextId === null || nextId !== tokenCustomerId(api.token)
+        || tokenContactKey(token) !== tokenContactKey(api.token);
       // Bump the epoch on any SESSION-FAMILY change — a different customer
       // OR a fresh login's new sessionId for the same customer — so
       // in-flight responses from the old family are discarded (a stale
@@ -577,6 +618,9 @@ export function AuthProvider({ children }) {
       loading,
       error,
       isAuthenticated: !!customer,
+      // Contact session (GATE_CONTACT_LOGIN): an on-location contact signed
+      // in with their own number — the shell narrows to Visits + Documents.
+      isContact: isContactSession(customer),
       sendCode,
       verifyCode,
       switchProperty,

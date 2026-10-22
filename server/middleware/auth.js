@@ -104,10 +104,123 @@ const CANCELLED_READ_ROUTES = [
   ['POST', '/api/customer/activity/heartbeat'],
 ];
 
-function cancelledReadRoute(req) {
+function routeListed(req, list) {
   const full = `${req.baseUrl || ''}${req.path || ''}`.replace(/\/+$/, '') || '/';
-  return CANCELLED_READ_ROUTES.some(([method, path]) => method === req.method
+  return list.some(([method, path]) => method === req.method
     && (path instanceof RegExp ? path.test(full) : path === full));
+}
+
+function cancelledReadRoute(req) {
+  return routeListed(req, CANCELLED_READ_ROUTES);
+}
+
+// Contact login (GATE_CONTACT_LOGIN): an on-location contact signed in with
+// their own number holds a CONTACT session on the account holder's row. The
+// ONLY routes it may reach — every one a read the Visits / Documents tabs
+// render from, plus the contact's own notification choices and the activity
+// beacons. Owner ruling 2026-10-20: view only — no confirm, no reschedule,
+// no requests. Nothing here reads billing, cards, credits, referrals, the
+// holder's preferences or contacts, or subscribes a device (push rows are
+// keyed by customer, so a contact device would get the holder's billing
+// pushes). Anything not listed answers 403 ACCOUNT_HOLDER_ONLY (not 401, so
+// the client never reads it as a dead session). Extend deliberately.
+const CONTACT_SESSION_ROUTES = [
+  ['GET', '/api/auth/me'],
+  ['GET', '/api/auth/properties'],
+  ['GET', '/api/schedule'],
+  ['GET', '/api/schedule/next'],
+  // NOT /account-next or /properties-next: those list the account's OTHER
+  // profiles and saved houses; a contact session lists one entry, so the
+  // client never asks.
+  ['GET', '/api/services'],
+  ['GET', '/api/services/stats/summary'],
+  ['GET', /^\/api\/services\/[^/]+$/],
+  // The documents handlers narrow a contact session to service reports and
+  // answer nothing at all for a contact the report rule withholds from.
+  ['GET', '/api/documents'],
+  ['GET', /^\/api\/documents\/service-report\/[^/]+$/],
+  ['GET', /^\/api\/documents\/[^/]+\/download$/],
+  ['GET', '/api/tracking/active'],
+  ['GET', '/api/tracking/today'],
+  ['GET', '/api/tracking/maps-key'],
+  // Token-scoped release of THIS device's native push registration: a
+  // device a holder signed out of (release failed) that a contact now signs
+  // into must stop receiving the holder's pushes (codex #6363 r4 P1). The
+  // route deactivates only the token presented; subscribe stays holder-only
+  // here (contact app devices are the follow-up PR).
+  ['POST', '/api/push/native-unsubscribe'],
+  ['GET', '/api/notifications/contact-preferences'],
+  ['PUT', '/api/notifications/contact-preferences'],
+  ['POST', '/api/customer/activity/page-view'],
+  ['POST', '/api/customer/activity/push-open'],
+  ['POST', '/api/customer/activity/heartbeat'],
+];
+
+function contactSessionRoute(req) {
+  return routeListed(req, CONTACT_SESSION_ROUTES);
+}
+
+function contactLoginLive() {
+  try {
+    return require('../config/feature-gates').contactLoginLive();
+  } catch {
+    return false;
+  }
+}
+
+// The contact slot a session claim names on this customer row, or null when
+// the claim no longer holds (gate off, contact removed or replaced, the
+// number now the holder's own). Pure apart from the gate read.
+function contactSessionFor(customer, contactKey) {
+  if (!contactKey || !contactLoginLive()) return null;
+  const { findServiceContactSlotByPhoneKey, contactSlotMayLogIn } = require('../services/customer-contact');
+  // The holder's attestation covers this number (customer-contact.js
+  // contactSlotMayLogIn): an inferred, still-unconsented slot phone is no
+  // session, and a session dies if its number becomes one.
+  if (!contactSlotMayLogIn(customer, contactKey)) return null;
+  return findServiceContactSlotByPhoneKey(customer, contactKey);
+}
+
+// A contact ACCESS token outlives the holder's removal by up to its 15-minute
+// expiry; the removal revoked the refresh FAMILY the token was minted in
+// (revokeRemovedContactRefreshSessions), so re-adding the number must not let
+// that bearer back in (codex #6363 r8 P2). Null = admitted; otherwise the
+// response to send. Fail closed: an unreadable table is a retryable 503, not
+// a session the client reads as dead and not an admission.
+async function contactFamilyRevocation(familyId) {
+  if (!familyId) return null;
+  // A family is alive while it has an unrevoked row: a rotation consumes the
+  // old row (a profile switch also revokes it) and inserts the live one; the
+  // contact's removal (or a replay) revokes every row, so none is left.
+  let live;
+  try {
+    live = await db(REFRESH_TABLE).where({ family_id: familyId }).whereNull('revoked_at').first('family_id');
+  } catch (err) {
+    logger.warn(`[auth] contact family check failed: ${err.message}`);
+    return { status: 503, body: { error: 'Sign-in is temporarily unavailable. Please try again.', code: 'CONTACT_SESSION_UNAVAILABLE' } };
+  }
+  return live ? null : { status: 401, body: { error: 'Customer not found or inactive' } };
+}
+
+// The slot admission plus the family check, for the access-token path.
+async function admitContactAccessToken(req, customer, decoded) {
+  const admission = admitContactSession(req, customer, decoded.contactKey);
+  if (!admission.contact) return admission;
+  return (await contactFamilyRevocation(decoded.sessionId)) || admission;
+}
+
+// Admission of a CONTACT access token on this request. Fail closed on every
+// request: gate off, an inactive row (no cancelled allowance), or a number
+// that no longer occupies a contact slot all end the session (401); a route
+// outside CONTACT_SESSION_ROUTES answers 403 so the client keeps the session
+// and simply never shows that surface. Returns { contact } or { status, body }.
+function admitContactSession(req, customer, contactKey) {
+  const contact = customer.active === true ? contactSessionFor(customer, contactKey) : null;
+  if (!contact) return { status: 401, body: { error: 'Customer not found or inactive' } };
+  if (!contactSessionRoute(req)) {
+    return { status: 403, body: { error: 'This part of the portal is for the account holder.', code: 'ACCOUNT_HOLDER_ONLY' } };
+  }
+  return { contact };
 }
 
 function refreshExpiryDate(token) {
@@ -136,8 +249,9 @@ async function insertRefreshRecord(
   jti = crypto.randomUUID(),
   parentJti = null,
   propertyId = null,
+  contactKey = null,
 ) {
-  const refreshToken = generateRefreshToken(customerId, accountId, { jti, familyId, propertyId });
+  const refreshToken = generateRefreshToken(customerId, accountId, { jti, familyId, propertyId, contactKey });
   const expiresAt = refreshExpiryDate(refreshToken);
   await executor(REFRESH_TABLE).insert({
     jti,
@@ -147,8 +261,45 @@ async function insertRefreshRecord(
     token_hash: hashRefreshToken(refreshToken),
     parent_jti: parentJti,
     expires_at: expiresAt,
+    // The contact phone a CONTACT family was minted for (GATE_CONTACT_LOGIN):
+    // the holder's contact save revokes the families of phones it removed
+    // (revokeRemovedContactRefreshSessions), so re-adding the number later
+    // never revives a removed device's session (codex #6363 r6 P2).
+    contact_key: contactKey || null,
   });
   return { refreshToken, familyId, jti, expiresAt };
+}
+
+// The holder rewrote this row's contact slots: every contact refresh family
+// on the row whose phone no longer occupies a slot ends now. Inside the
+// save's transaction. Phones are keyed as the session claim keys them.
+// The account is being deactivated (cancellation-processor.js
+// disarmCustomerBillingFields): every CONTACT family on the row ends now,
+// so a device that never refreshes while the account is inactive cannot
+// rotate its kept token once the account is reactivated (codex #6363 r12
+// P2). The holder's own families are untouched, as before.
+async function revokeContactRefreshFamilies(dbh, customerId, reason = 'account_inactive') {
+  const now = new Date();
+  return dbh(REFRESH_TABLE)
+    .where({ customer_id: customerId })
+    .whereNotNull('contact_key')
+    .whereNull('revoked_at')
+    .update({ revoked_at: now, revoke_reason: reason, updated_at: now });
+}
+
+async function revokeRemovedContactRefreshSessions(trx, customerId, keepPhones = []) {
+  const { phoneKeyOf } = require('../services/customer-contact');
+  // A number the HOLDER now owns (customers.phone) is no contact's, whatever
+  // slot still lists it — contactSessionFor refuses it — so its family ends
+  // here too; otherwise a later change of the holder's number would revive
+  // the kept family without a new OTP (codex #6363 r14 P2).
+  const holder = await trx('customers').where({ id: customerId }).first('phone');
+  const holderKey = phoneKeyOf(holder?.phone);
+  const keep = [...new Set(keepPhones.map(phoneKeyOf).filter((k) => k && k !== holderKey))];
+  const now = new Date();
+  const q = trx(REFRESH_TABLE).where({ customer_id: customerId }).whereNotNull('contact_key').whereNull('revoked_at');
+  if (keep.length) q.whereNotIn('contact_key', keep);
+  return q.update({ revoked_at: now, revoke_reason: 'contact_removed', updated_at: now });
 }
 
 /**
@@ -190,12 +341,130 @@ async function ensureSelfAccountRow(trx, customerId, accountId) {
 }
 
 /** Create a durable, revocable refresh-token family for a login session. */
-async function createRefreshSession(customerId, accountId = null) {
+async function createRefreshSession(customerId, accountId = null, { contactKey = null } = {}) {
   return db.transaction(async (trx) => {
     const resolvedAccountId = accountId || customerId;
     await ensureSelfAccountRow(trx, customerId, resolvedAccountId);
-    return insertRefreshRecord(trx, customerId, resolvedAccountId);
+    return insertRefreshRecord(trx, customerId, resolvedAccountId, undefined, undefined, null, null, contactKey);
   });
+}
+
+// The first family of a CONTACT session (GATE_CONTACT_LOGIN). The slot check
+// verify-code ran on its lookup is re-run on the customers row under its
+// lock, in the transaction that inserts the family: the holder's contact
+// save locks the same row before it revokes the removed phones' families,
+// so a login either lands first and is revoked by that save, or finds the
+// number gone and mints nothing (codex #6363 r10 P2). Null = the claim no
+// longer holds.
+async function createContactRefreshSession(customerId, accountId, contactKey) {
+  return db.transaction(async (trx) => {
+    const fresh = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first();
+    if (!fresh || fresh.active !== true || !contactSessionFor(fresh, contactKey)) return null;
+    const resolvedAccountId = accountId || customerId;
+    await ensureSelfAccountRow(trx, customerId, resolvedAccountId);
+    return insertRefreshRecord(trx, customerId, resolvedAccountId, undefined, undefined, null, null, contactKey);
+  });
+}
+
+// A CONTACT family (GATE_CONTACT_LOGIN) stays bound to the phone it was
+// minted for. It rotates only while the gate is on, the row is ACTIVE (no
+// cancelled allowance: a churned account's contacts have nothing to see) and
+// the number still occupies a contact slot; a profile switch is never a
+// contact's to make. The number gone from the row (or the row inactive) ends
+// the FAMILY, not just this exchange — a later re-add of the same phone must
+// not revive it (codex #6363 r6 P2); a gate flip only refuses, so sessions
+// survive it. Returns the refusal, or null when the rotation may proceed.
+async function contactRotationRefusal(trx, customer, decoded, options) {
+  if (!decoded.contactKey) return null;
+  const refused = { ok: false, code: 'INVALID_REFRESH_TOKEN' };
+  if (!contactLoginLive()) return refused;
+  if (!customer || customer.active !== true || !contactSessionFor(customer, decoded.contactKey)) {
+    if (decoded.familyId) {
+      const now = new Date();
+      await trx(REFRESH_TABLE)
+        .where({ family_id: decoded.familyId })
+        .whereNull('revoked_at')
+        .update({ revoked_at: now, revoke_reason: 'contact_removed', updated_at: now });
+    }
+    return refused;
+  }
+  if (options.targetCustomerId && String(options.targetCustomerId) !== String(customer.id)) return refused;
+  return null;
+}
+
+// The customers row a rotation validates against. A CONTACT family's
+// rotation takes that row's lock FIRST — the order the holder's contact save
+// takes (the row, then the refresh families it revokes): an unlocked read
+// here followed by the refresh-row lock, against an editor holding the row
+// and waiting on that token, would deadlock one of them (codex #6363 r11
+// P2). Holder rotations keep the plain read.
+function rotationCustomerRead(trx, decoded) {
+  const query = trx('customers').where({ id: decoded.customerId }).whereNull('deleted_at');
+  return (decoded.contactKey ? query.forUpdate() : query).first();
+}
+
+// The customers row the NEXT token is minted for: the current one, or the
+// requested profile when it is an active sibling on the same account. Null =
+// the switch is refused.
+async function rotationTargetCustomer(trx, customer, accountId, options) {
+  if (!options.targetCustomerId || String(options.targetCustomerId) === String(customer.id)) return customer;
+  const target = await trx('customers')
+    .where({ id: options.targetCustomerId, active: true })
+    .whereNull('deleted_at')
+    .first();
+  return target && String(accountIdForCustomer(target)) === String(accountId) ? target : null;
+}
+
+// The refresh row this exchange consumes, locked. A legacy signed token (no
+// jti/family) gets one compatible exchange: its SHA-256 hash becomes the
+// durable row, so a second exchange reads that row back consumed and is
+// detected as replay instead of starting a new family.
+async function lockRotationRow(trx, decoded, suppliedHash, accountId) {
+  if (decoded.jti && decoded.familyId) {
+    return trx(REFRESH_TABLE).where({ jti: decoded.jti, family_id: decoded.familyId }).forUpdate().first();
+  }
+  const [inserted] = await trx(REFRESH_TABLE).insert({
+    jti: suppliedHash,
+    family_id: crypto.randomUUID(),
+    customer_id: decoded.customerId,
+    account_id: accountId,
+    token_hash: suppliedHash,
+    expires_at: new Date(decoded.exp * 1000),
+  }).onConflict('token_hash').ignore().returning('*');
+  return inserted || trx(REFRESH_TABLE).where({ token_hash: suppliedHash }).forUpdate().first();
+}
+
+// A row the supplied token may not consume: missing, a hash that does not
+// match it, or one minted for another customer or account.
+function rotationRowMismatch(row, suppliedHash, decoded, accountId) {
+  return !row || !tokenHashMatches(row.token_hash, suppliedHash)
+    || String(row.customer_id) !== String(decoded.customerId)
+    || (row.account_id && String(row.account_id) !== String(accountId));
+}
+
+// Verdict on an ALREADY-CONSUMED row. Two same-origin tabs can submit the same
+// token before the first tab publishes its replacement to shared storage: the
+// second caller gets no credential, but a brief signal to adopt the pair the
+// winner published. Any later reuse is theft-like and revokes the whole
+// family — rows may already carry revoked_at from a prior replay or property
+// switch, and replay must still revoke the descendants.
+async function consumedRowVerdict(trx, row, now) {
+  const consumedAgoMs = now.getTime() - new Date(row.consumed_at).getTime();
+  if (consumedAgoMs >= 0 && consumedAgoMs <= CONCURRENT_ROTATION_GRACE_MS && row.replaced_by_jti) {
+    const liveReplacement = await trx(REFRESH_TABLE)
+      .where({ jti: row.replaced_by_jti, family_id: row.family_id })
+      .whereNull('consumed_at')
+      .whereNull('revoked_at')
+      .first();
+    if (liveReplacement && new Date(liveReplacement.expires_at) > now) {
+      return { ok: false, code: 'REFRESH_TOKEN_ALREADY_ROTATED', familyId: row.family_id };
+    }
+  }
+  await trx(REFRESH_TABLE)
+    .where({ family_id: row.family_id })
+    .whereNull('revoked_at')
+    .update({ revoked_at: now, revoke_reason: 'replay_detected', updated_at: now });
+  return { ok: false, code: 'REFRESH_TOKEN_REUSED', familyId: row.family_id };
 }
 
 /**
@@ -223,10 +492,15 @@ async function rotateRefreshSession(refreshToken, options = {}) {
     // A cancelled customer's saved session keeps refreshing under the C4
     // read-only allowance (sessionCustomerAdmitted); every other inactive
     // row is rejected exactly as before.
-    const customer = await trx('customers')
-      .where({ id: decoded.customerId })
-      .whereNull('deleted_at')
-      .first();
+    const customer = await rotationCustomerRead(trx, decoded);
+    // Contact session (GATE_CONTACT_LOGIN): may this contact family rotate?
+    // Decided BEFORE the generic admission below, so an inactive row ends
+    // the contact family (revoked here) instead of merely refusing this
+    // exchange — a token kept through a deactivation must not rotate again
+    // once the account is reactivated (codex #6363 r12 P2).
+    const contactKey = decoded.contactKey || null;
+    const contactRefusal = await contactRotationRefusal(trx, customer, decoded, options);
+    if (contactRefusal) return contactRefusal;
     if (!sessionCustomerAdmitted(customer)) return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
 
     const accountId = decoded.accountId || accountIdForCustomer(customer);
@@ -237,16 +511,8 @@ async function rotateRefreshSession(refreshToken, options = {}) {
       return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
     }
 
-    let nextCustomer = customer;
-    if (options.targetCustomerId && String(options.targetCustomerId) !== String(customer.id)) {
-      nextCustomer = await trx('customers')
-        .where({ id: options.targetCustomerId, active: true })
-        .whereNull('deleted_at')
-        .first();
-      if (!nextCustomer || String(accountIdForCustomer(nextCustomer)) !== String(accountId)) {
-        return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
-      }
-    }
+    const nextCustomer = await rotationTargetCustomer(trx, customer, accountId, options);
+    if (!nextCustomer) return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
     // Selected saved property (GATE_APP_PROPERTY_SCOPE). A same-profile
     // rotation forwards the claim the family was minted with; a profile
     // switch drops it unless the switch names a target property. Never
@@ -257,68 +523,15 @@ async function rotateRefreshSession(refreshToken, options = {}) {
       ? (options.targetPropertyId || null)
       : (String(nextCustomer.id) === String(customer.id) ? (decoded.propertyId || null) : null);
 
-    let row;
-    if (decoded.jti && decoded.familyId) {
-      row = await trx(REFRESH_TABLE)
-        .where({ jti: decoded.jti, family_id: decoded.familyId })
-        .forUpdate()
-        .first();
-    } else {
-      const legacyFamilyId = crypto.randomUUID();
-      const [inserted] = await trx(REFRESH_TABLE).insert({
-        jti: suppliedHash,
-        family_id: legacyFamilyId,
-        customer_id: decoded.customerId,
-        account_id: accountId,
-        token_hash: suppliedHash,
-        expires_at: new Date(decoded.exp * 1000),
-      }).onConflict('token_hash').ignore().returning('*');
-      row = inserted || await trx(REFRESH_TABLE)
-        .where({ token_hash: suppliedHash })
-        .forUpdate()
-        .first();
-    }
-
-    if (!row || !tokenHashMatches(row.token_hash, suppliedHash)) {
-      return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
-    }
-    if (String(row.customer_id) !== String(decoded.customerId)
-      || (row.account_id && String(row.account_id) !== String(accountId))) {
+    const row = await lockRotationRow(trx, decoded, suppliedHash, accountId);
+    if (rotationRowMismatch(row, suppliedHash, decoded, accountId)) {
       return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
     }
 
     const now = new Date();
-    // Check consumption first: rows may already carry revoked_at from a prior
-    // replay or property switch, but replay must still revoke descendants.
-    if (row.consumed_at) {
-      // Two same-origin tabs can submit the same token before the first tab
-      // publishes its replacement to shared storage. Do not hand the second
-      // caller any credential, but give it a brief signal to adopt the pair
-      // published by the winner. A later reuse remains theft-like and revokes
-      // the entire family below.
-      const consumedAgoMs = now.getTime() - new Date(row.consumed_at).getTime();
-      if (consumedAgoMs >= 0
-        && consumedAgoMs <= CONCURRENT_ROTATION_GRACE_MS
-        && row.replaced_by_jti) {
-        const liveReplacement = await trx(REFRESH_TABLE)
-          .where({ jti: row.replaced_by_jti, family_id: row.family_id })
-          .whereNull('consumed_at')
-          .whereNull('revoked_at')
-          .first();
-        if (liveReplacement && new Date(liveReplacement.expires_at) > now) {
-          return {
-            ok: false,
-            code: 'REFRESH_TOKEN_ALREADY_ROTATED',
-            familyId: row.family_id,
-          };
-        }
-      }
-      await trx(REFRESH_TABLE)
-        .where({ family_id: row.family_id })
-        .whereNull('revoked_at')
-        .update({ revoked_at: now, revoke_reason: 'replay_detected', updated_at: now });
-      return { ok: false, code: 'REFRESH_TOKEN_REUSED', familyId: row.family_id };
-    }
+    // Consumption is checked before revocation: replay must still revoke the
+    // descendants of a row a prior replay or property switch already revoked.
+    if (row.consumed_at) return consumedRowVerdict(trx, row, now);
     if (row.revoked_at || new Date(row.expires_at) <= now) {
       return { ok: false, code: 'REFRESH_SESSION_REVOKED' };
     }
@@ -352,8 +565,9 @@ async function rotateRefreshSession(refreshToken, options = {}) {
       nextJti,
       row.jti,
       nextPropertyId,
+      contactKey,
     );
-    return { ok: true, ...next, customer: nextCustomer, accountId, propertyId: nextPropertyId };
+    return { ok: true, ...next, customer: nextCustomer, accountId, propertyId: nextPropertyId, contactKey };
   });
 
   if (result.code === 'REFRESH_TOKEN_REUSED') {
@@ -521,6 +735,14 @@ async function authenticateCore(req, res, next, { allowInactive = false, allowCa
       return res.status(401).json({ error: 'Invalid token account' });
     }
 
+    // Contact session (GATE_CONTACT_LOGIN) — see admitContactSession.
+    req.contactSession = null;
+    if (decoded.contactKey) {
+      const admission = await admitContactAccessToken(req, customer, decoded);
+      if (!admission.contact) return res.status(admission.status).json(admission.body);
+      req.contactSession = admission.contact;
+    }
+
     req.customer = customer;
     req.customerId = customer.id;
     // Anything other than active === true counts as inactive (the column is
@@ -591,7 +813,7 @@ function authenticateAllowInactive(req, res, next) {
 /**
  * Generate JWT for a customer
  */
-function generateToken(customerId, accountId = null, sessionId = null, { propertyId = null } = {}) {
+function generateToken(customerId, accountId = null, sessionId = null, { propertyId = null, contactKey = null } = {}) {
   return jwt.sign(
     {
       customerId,
@@ -599,6 +821,9 @@ function generateToken(customerId, accountId = null, sessionId = null, { propert
       sessionId: sessionId || undefined,
       // Selected saved property (customer_properties.id) — absent = primary.
       propertyId: propertyId || undefined,
+      // Contact session (GATE_CONTACT_LOGIN): the last-10 phone key of the
+      // on-location contact this session belongs to — absent = the holder.
+      contactKey: contactKey || undefined,
     },
     config.jwt.secret,
     // Customer access tokens are deliberately short-lived. Existing signed
@@ -619,6 +844,7 @@ function generateRefreshToken(customerId, accountId = null, options = {}) {
       jti,
       familyId,
       propertyId: options.propertyId || undefined,
+      contactKey: options.contactKey || undefined,
     },
     config.jwt.secret,
     { expiresIn: config.jwt.refreshExpiry }
@@ -645,6 +871,9 @@ async function resolveBearerCustomer(req) {
   try {
     const decoded = jwt.verify(authHeader.split(' ')[1], config.jwt.secret);
     if (decoded.type === 'refresh' || !decoded.customerId) return null;
+    // A contact session is never "the verified customer" for a public
+    // booking or confirm flow — only the holder books.
+    if (decoded.contactKey) return null;
     const customer = await db('customers')
       .where({ id: decoded.customerId, active: true })
       .whereNull('deleted_at')
@@ -666,12 +895,15 @@ module.exports = {
   sessionCustomerAdmitted,
   resolveBearerCustomer,
   createRefreshSession,
+  createContactRefreshSession,
   generateToken,
   generateRefreshToken,
   reissueRefreshSessionForProperty,
   revokeCustomerRefreshSessions,
+  revokeRemovedContactRefreshSessions,
+  revokeContactRefreshFamilies,
   revokeRefreshSession,
   rotateRefreshSession,
   verifyRefreshCredential,
-  _test: { CONCURRENT_ROTATION_GRACE_MS, CANCELLED_READ_ROUTES, cancelledReadRoute },
+  _test: { CONCURRENT_ROTATION_GRACE_MS, CANCELLED_READ_ROUTES, cancelledReadRoute, CONTACT_SESSION_ROUTES, contactSessionRoute },
 };
