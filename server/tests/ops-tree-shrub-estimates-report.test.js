@@ -23,6 +23,15 @@ describe('tree-shrub-estimates-report extraction', () => {
     const ts = extractTreeShrub(data);
     expect(ts).toMatchObject({ shape: 'raw', bedSource: 'lot_based', treeSource: 'density_estimate', tier: 'enhanced', monthly: 68.5, marginTarget: 0.45 });
     expect(regimeOf(ts)).toBe('before_2026_10_21');
+    // The mapped revision's stamp and provenance win over the retained raw
+    // line (Codex #6398 r3): a revision that typed the same count the table
+    // inferred, under the repriced engine, is an explicit / after quote.
+    const revised = extractTreeShrub({
+      ...data,
+      result: { results: { tsMeta: { eb: 1800, et: 6, bedAreaIsEstimated: true, treeCountSource: 'explicit', pricingKnobs: { marginTarget: 0.40 } }, ts: [{ tier: 'enhanced', mo: 68.5, selected: true }] } },
+    });
+    expect(revised).toMatchObject({ shape: 'raw', treeSource: 'explicit', marginTarget: 0.40 });
+    expect(regimeOf(revised)).toBe('after_2026_10_21');
     expect(regimeOf({ marginTarget: 0.40 })).toBe('after_2026_10_21');
     expect(regimeOf({ marginTarget: null })).toBe('before_2026_10_21');
   });

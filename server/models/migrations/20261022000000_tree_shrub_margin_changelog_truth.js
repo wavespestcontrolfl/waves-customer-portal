@@ -13,7 +13,8 @@
  *   - if the 20261021010000 audit row exists, the live value moved and the
  *     changelog is already true — nothing to do;
  *   - otherwise rewrite that changelog row to say the admin-tuned value
- *     (read live) was preserved and still governs pricing.
+ *     (read live — even when it already reads 0.40) was preserved and still
+ *     governs pricing; without the audit row no cut happened here.
  * down() restores the original wording only on the row it rewrote.
  */
 const PREV_TAG = 'migration:20261021010000_tree_shrub_margin_target_40';
@@ -39,8 +40,12 @@ exports.up = async function (knex) {
       .first('id');
     if (moved) return; // the row moved; the changelog is already true
   }
+  // No audit row means 20261021010000 did NOT move the row — including an
+  // admin-tuned row that already read 0.40 (Codex #6398 r3): the changelog
+  // still claims a cut that never happened here, so it is rewritten to the
+  // live value whatever that value is.
   const current = await liveValue(knex);
-  if (current === null || current === 0.40) return; // nothing preserved to report
+  if (current === null) return; // no row at all: nothing to describe
   await knex('pricing_changelog')
     .where({ version_from: 'v4.9', version_to: 'v4.9', category: 'cost', summary: ORIGINAL_SUMMARY })
     .update({

@@ -113,7 +113,11 @@ function extractTreeShrub(estimateData) {
         bedSqFt: positive(raw.bedAreaUsed ?? raw.bedArea),
         bedSource: bedSource || 'unknown',
         treeCount: count(raw.treeCount),
-        treeSource: enumOf(raw.treeCountSource) || 'unknown',
+        // The mapped revision's provenance wins (v1-legacy-mapper persists
+        // tsMeta.treeCountSource): a revision that typed the same count the
+        // density table inferred keeps `agrees` true but is no longer a
+        // density-tree quote (Codex #6398 r3).
+        treeSource: enumOf(tsMeta?.treeCountSource) || enumOf(raw.treeCountSource) || 'unknown',
         palmCount: count(raw.palmCount),
         // Tier and price: the MAPPED selection wins whenever it exists — a
         // tier-only revision keeps bed/tree counts (so the raw line still
@@ -122,7 +126,9 @@ function extractTreeShrub(estimateData) {
         tier: enumOf(mappedSelected?.tier) || enumOf(raw.tier),
         monthly: mappedMonthly ?? positive(raw.monthly),
         reviewReasons: Array.isArray(raw.manualReviewReasons) ? raw.manualReviewReasons : [],
-        marginTarget: num(raw.pricingKnobs?.marginTarget) ?? num(raw.marginTarget),
+        // Same rule for the margin stamp: the mapped revision's stamp wins
+        // over a retained raw line's (Codex #6398 r3).
+        marginTarget: num(tsMeta?.pricingKnobs?.marginTarget) ?? num(raw.pricingKnobs?.marginTarget) ?? num(raw.marginTarget),
       };
     }
   }
@@ -134,7 +140,7 @@ function extractTreeShrub(estimateData) {
       bedSqFt: positive(tsMeta.eb),
       bedSource: typeof tsMeta.bedAreaIsEstimated === 'boolean' ? (tsMeta.bedAreaIsEstimated ? 'inferred' : 'measured') : 'unknown',
       treeCount: count(tsMeta.et),
-      treeSource: 'unknown',
+      treeSource: enumOf(tsMeta.treeCountSource) || 'unknown',
       palmCount: null,
       tier: enumOf(mappedSelected?.tier),
       monthly: mappedMonthly ?? positive(mappedLine?.monthly),

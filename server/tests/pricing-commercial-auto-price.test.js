@@ -156,6 +156,28 @@ describe('priceCommercialTreeShrub — cost-buildup auto-pricer', () => {
   });
 });
 
+describe('priceCommercialTreeShrub — open-parcel coverage guard (Codex #6398 r3)', () => {
+  test('a lot-based bed on a parcel whose footprint + hardscape exceed half the lot parks for review; plausible and explicit beds do not', () => {
+    // The profile's lot-based bed arrives with bedAreaSource 'lot_based'.
+    const inflated = priceCommercialTreeShrub(
+      { lotSqFt: 40000, footprint: 30000, hardscape: 6000, bedArea: 720, bedAreaSource: 'lot_based' }, { treeCount: 4 },
+    );
+    expect(inflated.requiresManualReview).toBe(true);
+    expect(inflated.manualReviewReasons).toContain('open_parcel_basis_footprint_over_half_lot');
+    expect(inflated.warnings.join(' ')).toMatch(/more than half the 40,000 sq ft lot/);
+    expect(inflated.annual).toBeGreaterThan(0); // priced as entered, not clamped
+    const plausible = priceCommercialTreeShrub(
+      { lotSqFt: 40000, footprint: 8000, hardscape: 6000, bedArea: 4680, bedAreaSource: 'lot_based' }, { treeCount: 4 },
+    );
+    expect(plausible.requiresManualReview).toBe(false);
+    expect(plausible.manualReviewReasons).toBeUndefined();
+    const explicit = priceCommercialTreeShrub(
+      { lotSqFt: 40000, footprint: 30000, hardscape: 6000, bedArea: 720, bedAreaSource: 'explicit' }, { treeCount: 4 },
+    );
+    expect(explicit.requiresManualReview).toBe(false);
+  });
+});
+
 describe('priceCommercialPest — cost-buildup auto-pricer', () => {
   test('golden anchors by building footprint + perimeter (monthly cadence)', () => {
     expect(priceCommercialPest({ footprint: 3000, perimeter: 220 })).toMatchObject({

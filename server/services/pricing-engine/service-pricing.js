@@ -2681,6 +2681,25 @@ function treeShrubDensityCountsFor(knobs) {
   return { ...(TREE_SHRUB.treeDensityCounts || {}) };
 }
 
+// Open-parcel coverage guard shared by the residential and commercial T&S
+// pricers (Codex #6398 security P2 / r3): the public quote takes homeSqFt
+// from an unauthenticated body, so an inflated footprint shrinks a lot-based
+// bed and the price. Footprint + hardscape above half the lot is implausible
+// for a parcel — the caller prices what the inputs say but parks the line.
+function openParcelCoverageOverHalfLot(property = {}) {
+  const lot = Number(property.lotSqFt) || 0;
+  const fp = Number(property.footprint ?? property.footprintSqFt);
+  const hs = Number(property.hardscape);
+  const covered = (Number.isFinite(fp) && fp > 0 ? fp : 0) + (Number.isFinite(hs) && hs > 0 ? hs : 0);
+  return lot > 0 && covered > lot * 0.5 ? { lot, covered } : null;
+}
+const OPEN_PARCEL_COVERAGE_REASON = 'open_parcel_basis_footprint_over_half_lot';
+function openParcelCoverageWarning({ lot, covered }) {
+  const sq = (v) => `${Math.round(Number(v)).toLocaleString()} sq ft`;
+  return `Building footprint + hardscape (${sq(covered)}) cover more than half the ${sq(lot)} lot;`
+    + ' the lot-based bed area was priced on the remaining open parcel — confirm the home and lot sizes.';
+}
+
 function treeShrubFallbackWarning(sqft) {
   return `Tree & Shrub bed area was not provided; fallback ${Math.round(sqft).toLocaleString('en-US')} sqft was used.`;
 }
@@ -3078,16 +3097,10 @@ function priceTreeShrub(property, options = {}) {
   // half the lot is implausible for a residential parcel — price it as
   // entered but park the line for review so it never auto-sends.
   if (bedAreaInfo.bedAreaSource === 'lot_based') {
-    const lotForBasis = Number(property.lotSqFt) || 0;
-    const fp = Number(property.footprint ?? property.footprintSqFt);
-    const hs = Number(property.hardscape);
-    const covered = (Number.isFinite(fp) && fp > 0 ? fp : 0) + (Number.isFinite(hs) && hs > 0 ? hs : 0);
-    if (lotForBasis > 0 && covered > lotForBasis * 0.5) {
-      manualReviewReasonsSet.add('open_parcel_basis_footprint_over_half_lot');
-      warnings.push(
-        `Building footprint + hardscape (${bedSqFtText(covered)}) cover more than half the ${bedSqFtText(lotForBasis)} lot;`
-        + ' the lot-based bed area was priced on the remaining open parcel — confirm the home and lot sizes.',
-      );
+    const coverage = openParcelCoverageOverHalfLot(property);
+    if (coverage) {
+      manualReviewReasonsSet.add(OPEN_PARCEL_COVERAGE_REASON);
+      warnings.push(openParcelCoverageWarning(coverage));
     }
   }
   // Plant-count review gate. Unarmed: trees plus SERVICE-LINE palms only —
@@ -4104,6 +4117,10 @@ function priceCommercialTreeShrub(property = {}, options = {}) {
   const perApp = roundMoney(annual / visits);
   const margin = annual > 0 ? roundRatio((annual - annualCost) / annual) : 0;
   const pricingConfidence = (bedArea > cfg.lowConfidenceBedSf || estimated) ? 'LOW' : 'MEDIUM';
+  // Same implausible-coverage guard as the residential pricer (Codex #6398
+  // r3): a lot-based bed on a parcel whose footprint + hardscape exceed half
+  // the lot prices as entered but parks for review instead of auto-publishing.
+  const coverage = bedBasis === 'lot_based' ? openParcelCoverageOverHalfLot(property) : null;
 
   return {
     service: 'commercial_tree_shrub',
@@ -4120,7 +4137,8 @@ function priceCommercialTreeShrub(property = {}, options = {}) {
     discountable: false,
     excludeFromPctDiscount: true,
     quoteRequired: false,
-    requiresManualReview: false,
+    requiresManualReview: !!coverage,
+    ...(coverage ? { manualReviewReasons: [OPEN_PARCEL_COVERAGE_REASON], warnings: [openParcelCoverageWarning(coverage)] } : {}),
     detail: 'Commercial ornamental program (shrub/tree fertilization + insect + bed weed control). Estimated from property data — final price confirmed on site.',
     disclaimer: 'Estimated from property data — final price confirmed on site.',
     bedArea,
