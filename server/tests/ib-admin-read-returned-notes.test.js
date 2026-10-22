@@ -840,6 +840,22 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     }
   });
 
+  test('a leaf cut at the read limit loses its partial token, and a cut note carries the marker (r26 audit P1)', async () => {
+    const { redactSecrets, newState } = require('../utils/signed-link-redaction');
+    const signedUrl = `https://files.example.test/doc?X-Amz-Signature=${'0123456789abcdef'.repeat(1)}&pad=${'a'.repeat(19900)}`;
+    const note = { first: signedUrl.slice(0, 19980), second: 'sk-proj-ABCdef1234567890SECRET tail' };
+    const out = redactSecrets({ notes: note }, newState(), 0, { freeText: {} });
+    const text = typeof out.notes === 'string' ? out.notes : JSON.stringify(out.notes);
+    expect(text).not.toMatch(/sk-proj|ABCdef/);
+    expect(text).toContain('[cut]');
+  });
+
+  test('a note read in part keeps the marker even when what was read fits the budget', () => {
+    const { redactSecrets, newState } = require('../utils/signed-link-redaction');
+    const out = redactSecrets({ notes: Array.from({ length: 3000 }, () => true) }, newState(), 0, { freeText: {} });
+    expect(out.notes[out.notes.length - 1]).toBe('[cut]');
+  });
+
   test.each([
     ['--password=hunter22 --verbose', '--password=[removed]'],
     ['run it with --api-key=abc123 now', 'run it with --api-key=[removed]'],

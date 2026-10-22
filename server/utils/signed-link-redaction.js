@@ -570,6 +570,16 @@ function noteLeaves(value, out = [], depth = 0) {
   return out;
 }
 
+// A note that was read only in part always carries the [cut] marker, even when what was read, after
+// redaction, fits the budget (Codex #6375 r26 audit).
+function markNoteCut(result, cut) {
+  if (!cut) return result;
+  if (typeof result === 'string') return result.endsWith(CUT) ? result : `${result}${CUT}`;
+  if (Array.isArray(result)) return result.includes(CUT) ? result : [...result, CUT];
+  if (result && typeof result === 'object') return Object.hasOwn(result, CUT) ? result : { ...result, [CUT]: true };
+  return result;
+}
+
 // The part of a structured note that is read at all: nodes (keys, leaves, containers) are copied in document
 // order until the copied text passes SCAN_LIMIT characters or MAX_NOTE_NODES nodes, and the rest is skipped,
 // so a huge array or object costs the same as a small one (Codex #6375 r26). `cut` says something was left out.
@@ -581,9 +591,12 @@ function boundedNoteCopy(value) {
     seen.nodes += 1;
     if (typeof node === 'string') {
       const room = Math.max(SCAN_LIMIT - seen.chars, 0);
-      if (node.length > room) seen.cut = true;
-      seen.chars += Math.min(node.length, room);
-      return node.slice(0, room);
+      if (node.length <= room) { seen.chars += node.length; return node; }
+      // A leaf cut at the limit loses its last partial token, so half a secret never reaches the scrubber.
+      seen.cut = true;
+      const kept = trimToScanLimit(node.slice(0, room + 1), room);
+      seen.chars += kept.length;
+      return kept;
     }
     if (!node || typeof node !== 'object') { seen.chars += String(node).length; return node; }
     if (Array.isArray(node)) {
@@ -631,13 +644,13 @@ function returnStructuredNote(item, state) {
   const masked = maskCardNumbers(joined);
   if (masked !== null) {
     state.noteSecrets += 1;
-    return masked.length > NOTE_CAP ? `${masked.slice(0, NOTE_CAP)}${CUT}` : masked;
+    return markNoteCut(masked.length > NOTE_CAP ? `${masked.slice(0, NOTE_CAP)}${CUT}` : masked, bounded.cut);
   }
   if (parsed === undefined || parsed === null || typeof parsed !== 'object') {
-    return cutAtScan || text.length > NOTE_CAP ? `${text.slice(0, NOTE_CAP)}${CUT}` : text;
+    return markNoteCut(cutAtScan || text.length > NOTE_CAP ? `${text.slice(0, NOTE_CAP)}${CUT}` : text, bounded.cut);
   }
   state.noteBudget = NOTE_CAP;
-  try { return returnNote(parsed, state, 1); } finally { delete state.noteBudget; }
+  try { return markNoteCut(returnNote(parsed, state, 1), bounded.cut); } finally { delete state.noteBudget; }
 }
 
 function returnNote(item, state, depth = 0) {

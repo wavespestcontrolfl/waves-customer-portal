@@ -46,12 +46,13 @@ const SCAN_LIMIT = 20000;
 // last whitespace or delimiter within the last 200 characters, or drop those 200
 // when there is none, so a key cut in two never reaches the rules (Codex #6375 r10).
 const BACKOFF = 200;
-function trimToScanLimit(input) {
+function trimToScanLimit(input, limit = SCAN_LIMIT) {
   const text = String(input);
-  if (text.length <= SCAN_LIMIT) return text;
-  const tail = text.slice(SCAN_LIMIT - BACKOFF, SCAN_LIMIT);
+  if (text.length <= limit) return text;
+  const start = Math.max(limit - BACKOFF, 0);
+  const tail = text.slice(start, limit);
   const at = tail.search(/[\s,;"'(){}[\]<>][^\s,;"'(){}[\]<>]*$/);
-  return text.slice(0, at >= 0 ? SCAN_LIMIT - BACKOFF + at : SCAN_LIMIT - BACKOFF);
+  return text.slice(0, at >= 0 ? start + at : start);
 }
 
 const PEM_RE = /-----BEGIN [A-Z0-9 ]+-----[\s\S]*?(?:-----END [A-Z0-9 ]+-----|$)/g;
