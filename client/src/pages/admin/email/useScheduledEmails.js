@@ -35,7 +35,9 @@ export default function useScheduledEmails(active) {
       if (!response.ok || !data.draft) return { draft: null, error: data.error || "The scheduled email was not cancelled. Try again." };
       return { draft: data.draft };
     } catch {
-      return { draft: null, error: "The cancel was not confirmed. Reload Scheduled before you try again." };
+      // The server may have cancelled it; a repeated cancel returns the same
+      // draft, so the caller offers Try again on this row.
+      return { draft: null, retryable: true, error: "The cancel was not confirmed. Tap Try again to get the draft back." };
     } finally {
       setPendingId(null);
       reload();

@@ -374,7 +374,7 @@ router.post('/schedule', async (req, res) => {
     const saved = row || await db('scheduled_emails').where({ client_key: clientKey }).first();
     res.json({ success: true, scheduled: scheduledView(saved) });
   } catch (err) {
-    logger.error(`[email] schedule failed: ${err.message}`);
+    logger.error(`[email] schedule failed (${err.code || 'error'})`);
     res.status(500).json({ error: 'The email was not scheduled. Try again.' });
   }
 });
@@ -388,23 +388,25 @@ router.get('/scheduled', async (req, res) => {
     const rows = await db('scheduled_emails').whereIn('status', ['scheduled', 'sending', ...CANCELLABLE.slice(1)]).orderBy('send_at', 'asc').limit(200);
     res.json({ enabled: true, emails: rows.map(scheduledView) });
   } catch (err) {
-    logger.error(`[email] scheduled list failed: ${err.message}`);
+    logger.error(`[email] scheduled list failed (${err.code || 'error'})`);
     res.status(500).json({ error: 'Scheduled emails are unavailable.' });
   }
 });
 
 // POST /scheduled/:id/cancel — Gmail's "Cancel send": the row stops and its
-// text comes back for the composer. A row Gmail is sending or has sent
-// cannot be cancelled (409).
+// text comes back for the composer. Repeating it on a cancelled row returns
+// the same draft, so a cancel whose response was lost can be retried. A row
+// Gmail is sending or has sent cannot be cancelled (409).
 router.post('/scheduled/:id/cancel', async (req, res) => {
   if (!emailSendLaterLive()) return res.status(404).json({ enabled: false, error: 'Schedule send is off.' });
   try {
     const [row] = await db('scheduled_emails').where({ id: req.params.id }).whereIn('status', CANCELLABLE)
       .update({ status: 'cancelled', cancelled_at: db.fn.now(), updated_at: db.fn.now() }).returning('*');
-    if (!row) return res.status(409).json({ error: 'This email is already sending or sent, so it cannot be cancelled.' });
-    res.json({ success: true, draft: scheduledView(row) });
+    const done = row || await db('scheduled_emails').where({ id: req.params.id, status: 'cancelled' }).first();
+    if (!done) return res.status(409).json({ error: 'This email is already sending or sent, so it cannot be cancelled.' });
+    res.json({ success: true, draft: scheduledView(done) });
   } catch (err) {
-    logger.error(`[email] scheduled cancel failed: ${err.message}`);
+    logger.error(`[email] scheduled cancel failed (${err.code || 'error'})`);
     res.status(500).json({ error: 'The scheduled email was not cancelled. Try again.' });
   }
 });

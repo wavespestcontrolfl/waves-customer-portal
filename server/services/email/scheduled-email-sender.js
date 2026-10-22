@@ -72,21 +72,11 @@ async function claimDue(conn = db) {
 
 async function sendOne(row, { conn = db, gmail = require('./gmail-client') } = {}) {
   const fence = { id: row.id, status: 'sending' };
+  let result;
   try {
-    const result = await gmail.sendMessage(row.to_address, row.subject, row.body_html, row.thread_id || null);
-    if (!result?.id) throw Object.assign(new Error('Gmail returned no message identifier'), { providerOutcome: { outcomeUnknown: true } });
-    await conn('scheduled_emails').where(fence)
-      .update({ status: 'sent', gmail_message_id: result.id, sent_at: conn.fn.now(), last_error: null, updated_at: conn.fn.now() });
-    logger.info(`[scheduled-email] sent ${row.id}: ${result.id}`);
-    return 'sent';
+    result = await gmail.sendMessage(row.to_address, row.subject, row.body_html, row.thread_id || null);
   } catch (err) {
-    if (err.providerOutcome?.outcomeUnknown === true) {
-      await conn('scheduled_emails').where(fence)
-        .update({ status: 'outcome_unknown', last_error: 'Gmail did not confirm the send', updated_at: conn.fn.now() });
-      await alertOffice(row, 'outcome_unknown');
-      logger.error(`[scheduled-email] outcome unknown for ${row.id}`);
-      return 'outcome_unknown';
-    }
+    if (err.providerOutcome?.outcomeUnknown === true) return settleUnknown(row, conn);
     const last = row.attempts >= MAX_ATTEMPTS;
     await conn('scheduled_emails').where(fence).update({
       status: last ? 'failed' : 'scheduled', claimed_at: null,
@@ -96,6 +86,27 @@ async function sendOne(row, { conn = db, gmail = require('./gmail-client') } = {
     logger.error(`[scheduled-email] ${last ? 'failed' : 'will retry'} ${row.id} (attempt ${row.attempts})`);
     return last ? 'failed' : 'retry';
   }
+  if (!result?.id) return settleUnknown(row, conn);
+  // Gmail accepted it: from here nothing may requeue the row. If this write
+  // fails, the row stays 'sending' and settleStaleClaims later marks it
+  // outcome_unknown with an alert; it is never sent again.
+  try {
+    await conn('scheduled_emails').where(fence)
+      .update({ status: 'sent', gmail_message_id: result.id, sent_at: conn.fn.now(), last_error: null, updated_at: conn.fn.now() });
+  } catch (err) {
+    logger.error(`[scheduled-email] sent ${row.id} but could not record it (${err.code || 'db_error'})`);
+    return 'sent_unrecorded';
+  }
+  logger.info(`[scheduled-email] sent ${row.id}: ${result.id}`);
+  return 'sent';
+}
+
+async function settleUnknown(row, conn) {
+  await conn('scheduled_emails').where({ id: row.id, status: 'sending' })
+    .update({ status: 'outcome_unknown', last_error: 'Gmail did not confirm the send', updated_at: conn.fn.now() });
+  await alertOffice(row, 'outcome_unknown');
+  logger.error(`[scheduled-email] outcome unknown for ${row.id}`);
+  return 'outcome_unknown';
 }
 
 async function sendDueScheduledEmails({ conn = db, gmail } = {}) {

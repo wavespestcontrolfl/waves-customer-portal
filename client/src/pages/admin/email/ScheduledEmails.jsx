@@ -22,15 +22,15 @@ export default function ScheduledEmails({ scheduled, editor, mailbox }) {
         : "You have a new email in progress. Send or discard it first, then try again." });
       return;
     }
-    const { draft, error } = await scheduled.cancel(row.id);
-    if (!draft) { setFeedback({ error: true, message: error }); return; }
+    const { draft, error, retryable } = await scheduled.cancel(row.id);
+    if (!draft) { setFeedback({ error: true, message: error, retry: retryable ? row : null }); return; }
     editor.restoreScheduledDraft(draft);
     if (draft.replyEmailId) mailbox.showEmailById(draft.replyEmailId);
     setFeedback({ message: draft.replyEmailId ? "Cancelled. The reply is back in its conversation as a draft." : "Cancelled. The email is open as a draft." });
   };
 
   return <section aria-label="Scheduled emails" className="space-y-4">
-    {feedback && <ActionFeedback error={feedback.error}>{feedback.message}</ActionFeedback>}
+    {feedback && <ActionFeedback error={feedback.error} onRetry={feedback.retry ? () => takeBack(feedback.retry) : undefined}>{feedback.message}</ActionFeedback>}
     <div className="overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
       {scheduled.loading && scheduled.emails.length === 0 ? <p className="m-0 min-h-40 p-6 text-ink-secondary" role="status">Loading scheduled emails…</p>
         : scheduled.error ? <ActionFeedback error onRetry={scheduled.reload} className="min-h-40 p-6">Scheduled emails are unavailable.</ActionFeedback>

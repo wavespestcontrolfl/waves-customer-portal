@@ -103,14 +103,19 @@ jest.setTimeout(30000);
     expect(gmail.sendMessage).toHaveBeenCalledWith('fixture@example.invalid', 'Fixture', 'Hi<br>there', 'thread-fixture');
   });
 
-  test('Cancel send returns the draft and stops the send; a sent email cannot be cancelled', async () => {
+  test('Cancel send returns the draft, stops the send, and repeats safely; a sent email cannot be cancelled', async () => {
     const { body } = await queue();
     const cancelled = await call('POST', `/scheduled/${body.scheduled.id}/cancel`);
     expect(cancelled.body.draft).toMatchObject({ to: 'fixture@example.invalid', subject: 'Fixture', draftText: 'Hi\nthere', status: 'cancelled' });
     await makeDue(body.scheduled.id, { status: 'cancelled' });
     await sendDueScheduledEmails();
     expect(gmail.sendMessage).not.toHaveBeenCalled();
-    expect((await call('POST', `/scheduled/${body.scheduled.id}/cancel`)).status).toBe(409);
+    const repeated = await call('POST', `/scheduled/${body.scheduled.id}/cancel`);
+    expect(repeated).toMatchObject({ status: 200, body: { draft: { draftText: 'Hi\nthere' } } });
+
+    const sent = await queue();
+    await makeDue(sent.body.scheduled.id, { status: 'sent' });
+    expect((await call('POST', `/scheduled/${sent.body.scheduled.id}/cancel`)).status).toBe(409);
   });
 
   test('a possible Gmail acceptance is never retried and rings one alert', async () => {
