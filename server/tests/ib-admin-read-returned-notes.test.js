@@ -644,6 +644,35 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     }
   });
 
+  test('the RETURNED-NOTE path is linear on long unbroken runs (r20): each under 200 ms', async () => {
+    const shapes = {
+      letters: 'a'.repeat(20000),
+      'dotted pairs': 'a.'.repeat(10000),
+      slashes: '/x'.repeat(10000),
+      'dashed pairs': 'a-'.repeat(10000),
+      'host-like labels': 'ab.cd/ef?g=h#i '.repeat(1300).slice(0, 20000),
+      'scheme-like pairs': 'ab:'.repeat(6600),
+      'labelled run': `password: ${'a'.repeat(19990)}`,
+      'labelled dotted run': `token=${'a.'.repeat(9990)}`,
+    };
+    for (const [label, note] of Object.entries(shapes)) {
+      const started = process.hrtime.bigint();
+      await read(ENTRY, { id: 1, notes: note });
+      const ms = Number(process.hrtime.bigint() - started) / 1e6;
+      expect({ label, fast: ms < 200 }).toEqual({ label, fast: true });
+    }
+  });
+
+  test('a double-serialized value with an embedded quote loses everything after the separator (r20)', async () => {
+    const blob = JSON.stringify(JSON.stringify({ id: 1, password: 'abc"def hunter22', after: 'x' }));
+    const inner = blob.slice(1, -1);
+    const { text } = scrubNote(inner);
+    expect(text).toBe('{\\"id\\":1,\\"password\\":[removed]');
+    expect(text).not.toMatch(/def|hunter22/);
+    const result = await read(ENTRY, { id: 1, notes: inner });
+    expect(result.data.notes).toBe(text);
+  });
+
   test('20,000-character notes finish fast whatever follows a credential key', () => {
     const { redactSecrets, newState } = require('../utils/signed-link-redaction');
     const inputs = [

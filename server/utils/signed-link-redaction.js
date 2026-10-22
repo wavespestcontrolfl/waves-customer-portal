@@ -464,7 +464,7 @@ const leastLeafCost = entry => {
 // judged on an unescaped copy, but only a span that is really redacted is replaced:
 // text that is not a redacted link keeps its backslashes, so a regex or an escaped
 // path (foo\/bar) comes back as written (Codex #6375 r10 audit P0, r13).
-const ESCAPED_LINK_RE = /[a-z][a-z0-9+.-]*:(?:\\?\/){2}(?:[^\s"'<>\\]|\\\/)+/gi;
+const ESCAPED_LINK_RE = /(?<![A-Za-z0-9+.-])[a-z][a-z0-9+.-]*:(?:\\?\/){2}(?:[^\s"'<>\\]|\\\/)+/gi;
 const unescapeSlashes = text => text.replace(/\\\//g, '/');
 function redactNoteLinks(text, state) {
   const spans = text.replace(ESCAPED_LINK_RE, (span) => {

@@ -137,7 +137,8 @@ const JWT_RE = /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*/g;
 const URL_RE = /(?<![A-Za-z0-9+.-])[a-z][a-z0-9+.-]*:(?:\\?\/){2}(?:[^\s"'<>\\]|\\\/)+/gi;
 // user:password@ in a link of ANY scheme (postgresql://, redis://, ftp://,
 // smb://, ...); the http(s) links above also go through scrubUrl (Codex #6375).
-const ANY_SCHEME_USERINFO_RE = /\b([a-z][a-z0-9+.-]*:(?:\\?\/){2})[^\s\/@:"'<>\\]*:[^\s\/@"'<>\\]+@/gi;
+// A scheme starts after a non-scheme character, so a long run of letters, dots or dashes is scanned once, not from every offset (Codex #6375 r20).
+const ANY_SCHEME_USERINFO_RE = /(?<![A-Za-z0-9+.-])([a-z][a-z0-9+.-]*:(?:\\?\/){2})[^\s\/@:"'<>\\]*:[^\s\/@"'<>\\]+@/gi;
 const URL_USERINFO_RE = /^([a-z][a-z0-9+.-]*:(?:\\?\/){2}[^\s/:@?#\\]*:)[^\s/@?#\\]+@/i;
 // A value may hold a JSON-escaped slash (token=abc\/hunter22): it is part of the value (Codex #6375 r15).
 const QUERY_PARAM_RE = /([?&#;])([A-Za-z0-9_.%+[\]-]+)=((?:[^&#\s"'<>\\]|\\\/)*)/g;
