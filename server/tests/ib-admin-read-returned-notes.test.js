@@ -574,6 +574,16 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     expect(scrubNote(once).text).toBe(once);
   });
 
+  test('a long unquoted env passphrase is removed to the end of the line, comment or next assignment (r15 follow-up)', () => {
+    const words = Array.from({ length: 30 }, (_, i) => `word${i % 7}`).join(' ');
+    expect(scrubNote(`DB_PASSWORD=${words}`).text).toBe('DB_PASSWORD=[removed]');
+    expect(scrubNote(`DB_PASSWORD=${words} # note: kept`).text).toBe('DB_PASSWORD=[removed] # note: kept');
+    expect(scrubNote(`DB_PASSWORD=${words}, mode=fast`).text).toBe('DB_PASSWORD=[removed], mode=fast');
+    expect(scrubNote(`DB_PASSWORD=${words}; other: 1 tail`).text).toBe('DB_PASSWORD=[removed]; other: 1 tail');
+    expect(scrubNote(`DB_PASSWORD=${words}\nnext line ok`).text).toBe('DB_PASSWORD=[removed]\nnext line ok');
+    expect(scrubNote('DB_PASSWORD=hunter 22, mode=fast').text).toBe('DB_PASSWORD=[removed], mode=fast');
+  });
+
   test('repeated markers and long word runs after an env-style name finish fast (r15 audit P1)', () => {
     const { redactSecrets, newState } = require('../utils/signed-link-redaction');
     const inputs = [
@@ -581,6 +591,8 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
       `password: ${'[removed]'.repeat(2000)} x=y`,
       `API_TOKEN=${'ab '.repeat(6000)}q=1`,
       `PASS=x y `.repeat(2000),
+      `DB_PASSWORD=${'word '.repeat(4000)}`,
+      `DB_PASSWORD=${'word '.repeat(4000)}, a=b`,
     ];
     for (const input of inputs) {
       const started = Date.now();

@@ -91,8 +91,8 @@ function looksLikeBasicCredential(header, token) {
 // ordinary words (Codex #6375 r14, r15). An unquoted value runs to the end of the line or an inline
 // comment (" #"), as dotenv reads it: DB_PASSWORD=hunter 22 (Codex #6375 r2, r13). It is read as at most 13 words (a passphrase), stops before a
 // field delimiter (", " or "; ") and gives up the extra words when another assignment follows on the
-// line ("x=hunter22 and api key: y"): that one is taken by the rules after this.
-const ENV_SECRET_RE = /\b((?:[A-Z][A-Z0-9_]*)?(?<![A-Z0-9])(?:PASSWORD|PASSWD|PASS|SECRET|TOKEN|API_?KEY|PRIVATE_KEY|CREDENTIALS?)(?![A-Z0-9])[A-Z0-9_]*)([ \t]*=[ \t]*)(\\"(?:[^\\\n]|\\(?!"))*\\"|\\'(?:[^\\\n]|\\(?!'))*\\'|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[removed\](?![^\s,;}\]])|\S*[^\s,;}\]](?:[ \t]+(?!#)[^\s=:]*[^\s,;}\]=:]){0,12}(?![^\n#]{0,200}[=:])|\S*[^\s,;}\]])/gi;
+// line with no delimiter between ("x=hunter22 and api key: y"): that one is taken by the rules after this.
+const ENV_SECRET_RE = /\b((?:[A-Z][A-Z0-9_]*)?(?<![A-Z0-9])(?:PASSWORD|PASSWD|PASS|SECRET|TOKEN|API_?KEY|PRIVATE_KEY|CREDENTIALS?)(?![A-Z0-9])[A-Z0-9_]*)([ \t]*=[ \t]*)(\\"(?:[^\\\n]|\\(?!"))*\\"|\\'(?:[^\\\n]|\\(?!'))*\\'|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[removed\](?![^\s,;}\]])|\S*[^\s,;}\]](?:[ \t]+(?!#)[^\s=:]*[^\s,;}\]=:]){0,12}(?![^\n#,;]{0,200}[=:])|\S*[^\s,;}\]])/gi;
 // Structural credential assignments in a config or header format (Codex #6375 r7):
 // "db.password: hunter22", "DB_PASSWORD = hunter22", "X-API-Key: abc123xyz",
 // "Authorization: Token abc123xyz". The KEY must end in a credential word (names
@@ -235,6 +235,45 @@ function scrubRandomTokens(text) {
   return { text: out, count };
 }
 
+// The env-style value regex reads at most ENV_MAX_WORDS words (bounded matching). When a value
+// reaches that cap, the rest of the passphrase is removed here by a linear scan: to the end of the
+// line or an inline " #" comment, stopping early only at ", " or "; " followed by another
+// name= / name: assignment (Codex #6375 r15).
+const ENV_MAX_WORDS = 13;
+const ENV_NEXT_ASSIGNMENT_RE = /[,;][ \t]+[A-Za-z_][\w.-]*[ \t]*[=:]/;
+function envValueEnd(text, from) {
+  const newline = text.indexOf('\n', from);
+  const lineEnd = newline < 0 ? text.length : newline;
+  let end = lineEnd;
+  const line = text.slice(from, lineEnd);
+  const comment = line.search(/[ \t]#/);
+  const limited = comment < 0 ? line : line.slice(0, comment);
+  const next = limited.search(ENV_NEXT_ASSIGNMENT_RE);
+  if (next >= 0) end = from + next;
+  else if (comment >= 0) end = from + comment;
+  while (end > from && (text[end - 1] === ' ' || text[end - 1] === '\t')) end -= 1;
+  return end;
+}
+function scrubEnvAssignments(text) {
+  let count = 0;
+  let out = '';
+  let last = 0;
+  const pattern = new RegExp(ENV_SECRET_RE.source, ENV_SECRET_RE.flags);
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    const [whole, name, sep, value] = match;
+    if (whole === '') { pattern.lastIndex += 1; continue; }
+    if (isAlreadyRemoved(value)) continue;
+    let end = match.index + whole.length;
+    if (!/^["'\\]/.test(value) && value.split(/[ \t]+/).length >= ENV_MAX_WORDS) end = Math.max(end, envValueEnd(text, end));
+    count += 1;
+    out += `${text.slice(last, match.index)}${name}${sep}${REMOVED}`;
+    last = end;
+    pattern.lastIndex = end;
+  }
+  return { text: out + text.slice(last), count };
+}
+
 // Returns { text, removed }. `removed` counts the replacements.
 function scrubNoteText(input) {
   let removed = 0;
@@ -250,11 +289,9 @@ function scrubNoteText(input) {
   text = text.replace(JWT_RE, swap)
     .replace(BEARER_RE, (match, header, token) => (looksLikeBearerToken(header, token) ? `${header || ''}${swap()}` : match))
     .replace(BASIC_RE, (match, header, scheme, token) => (looksLikeBasicCredential(header, token) ? `${header || ''}${swap()}` : match));
-  text = text.replace(ENV_SECRET_RE, (match, name, sep, value) => {
-    if (isAlreadyRemoved(value)) return match;
-    removed += 1;
-    return `${name}${sep}${REMOVED}`;
-  });
+  const env = scrubEnvAssignments(text);
+  removed += env.count;
+  text = env.text;
   text = text.replace(AUTH_HEADER_RE, (match, head, scheme, value) => (isAlreadyRemoved(scheme) || isAlreadyRemoved(value) ? match : `${head}${swap()}`));
   text = text.replace(KEY_ASSIGN_RE, (match, quote, key, sep, value) => {
     if (isAlreadyRemoved(value) || !isAssignmentSecretKey(key)) return match;
