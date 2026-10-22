@@ -423,6 +423,7 @@ function GateSettingBadge({ gate }) {
   if (!gate) return <Badge tone="neutral">Unknown</Badge>;
   if (!gate.set) return <Badge tone="neutral" dot>Not set</Badge>;
   if (gate.value === null) return <Badge tone="strong" dot>Set (value hidden)</Badge>;
+  if (gate.value === "") return <Badge tone="neutral" dot>Set, empty</Badge>;
   // Stray spaces are shown in quotes: readers that do not trim see another value.
   if (gate.value !== gate.value.trim()) return <Badge tone="alert" dot>{`"${gate.value}"`}</Badge>;
   const off = /^(false|off|0|no)$/i.test(gate.value);

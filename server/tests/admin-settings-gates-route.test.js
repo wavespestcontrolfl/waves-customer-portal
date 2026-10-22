@@ -106,6 +106,10 @@ describe('listGates', () => {
     });
   });
 
+  test('an empty value is a setting, not an absent variable', () => {
+    withEnv({ GATE_CRON_JOBS: '' }, () => expect(row('GATE_CRON_JOBS')).toMatchObject({ set: true, value: '' }));
+  });
+
   test('keeps stray spaces so a malformed setting is visible', () => {
     withEnv({ GATE_CRON_JOBS: ' true ' }, () => expect(row('GATE_CRON_JOBS')).toMatchObject({ set: true, value: ' true ' }));
   });

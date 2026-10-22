@@ -38,7 +38,8 @@ const SHOWN_TIMESTAMP = /^\d{4}-\d{2}-\d{2}(T[\d:.]+(Z|[+-]\d{2}:\d{2})?)?$/;
 
 function gateSetting(name) {
   const raw = process.env[name];
-  if (raw === undefined || raw === '') return { set: false, value: null };
+  // Only an absent variable is "not set"; GATE_X= (empty) is a setting too.
+  if (raw === undefined) return { set: false, value: null };
   const trimmed = raw.trim();
   if (trimmed === '' || SHOWN_WORD.test(trimmed) || SHOWN_TIMESTAMP.test(trimmed)) return { set: true, value: raw };
   return { set: true, value: null };
