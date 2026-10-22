@@ -272,6 +272,32 @@ function scrubEnvAssignments(text) {
   return { text: out + text.slice(last), count };
 }
 
+// A structural credential assignment (db.password: x, X-API-Key: x). A quoted value ends at its
+// closing quote. An unquoted value that is followed by a space is a passphrase: it is extended by the
+// same linear scan as the env-style values, to the end of the line or an inline " #" comment, stopping
+// early only at ", " / "; " followed by another name= / name: assignment (Codex #6375 r16). A value
+// followed by a delimiter (, ; } ]) ends there, as in serialized objects.
+function scrubKeyAssignments(text) {
+  let count = 0;
+  let out = '';
+  let last = 0;
+  const pattern = new RegExp(KEY_ASSIGN_RE.source, KEY_ASSIGN_RE.flags);
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    const [whole, quote, key, sep, value] = match;
+    if (whole === '') { pattern.lastIndex += 1; continue; }
+    if (isAlreadyRemoved(value) || !isAssignmentSecretKey(key)) continue;
+    const valueQuote = (value.match(/^\\?["']/) || [''])[0];
+    let end = match.index + whole.length;
+    if (!valueQuote && /[ \t]/.test(text[end] || '')) end = envValueEnd(text, end);
+    count += 1;
+    out += `${text.slice(last, match.index)}${quote}${key}${quote}${sep}${valueQuote}${REMOVED}${valueQuote}`;
+    last = end;
+    pattern.lastIndex = end;
+  }
+  return { text: out + text.slice(last), count };
+}
+
 // Returns { text, removed }. `removed` counts the replacements.
 function scrubNoteText(input) {
   let removed = 0;
@@ -291,12 +317,9 @@ function scrubNoteText(input) {
   removed += env.count;
   text = env.text;
   text = text.replace(AUTH_HEADER_RE, (match, head, scheme, value) => (isAlreadyRemoved(scheme) || isAlreadyRemoved(value) ? match : `${head}${swap()}`));
-  text = text.replace(KEY_ASSIGN_RE, (match, quote, key, sep, value) => {
-    if (isAlreadyRemoved(value) || !isAssignmentSecretKey(key)) return match;
-    removed += 1;
-    const valueQuote = (value.match(/^\\?["']/) || [''])[0];
-    return `${quote}${key}${quote}${sep}${valueQuote}${REMOVED}${valueQuote}`;
-  });
+  const assigned = scrubKeyAssignments(text);
+  removed += assigned.count;
+  text = assigned.text;
   for (const pattern of PREFIXED_RES) text = text.replace(pattern, swap);
   const noPans = scrubPans(text);
   if (noPans !== text) removed += 1;

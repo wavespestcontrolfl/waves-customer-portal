@@ -233,15 +233,41 @@ const MAX_WRAP_DEPTH = 2;
 function decodeOnce(text) {
   try { return decodeURIComponent(text); } catch { return text; }
 }
+// A decoded wrapper part is judged by the same four link shapes the top level uses:
+// absolute, protocol-relative ("//host/l/code"), scheme-less host ("host/l/code") and
+// relative ("/l/code"), each with the same verdict function (Codex #6375 r16).
+function linkInTextVerdict(text, depth) {
+  for (const match of text.match(URL_IN_TEXT_RE) || []) {
+    const verdict = absoluteLinkVerdict(splitTail(match).link, depth);
+    if (verdict) return verdict;
+  }
+  for (const match of text.match(PROTOCOL_RELATIVE_RE) || []) {
+    const verdict = absoluteLinkVerdict(`https:${splitTail(match).link}`, depth);
+    if (verdict) return verdict;
+  }
+  for (const match of text.match(HOST_LINK_RE) || []) {
+    const { link } = splitTail(match);
+    if (!/[/?#]/.test(link) && !/^www\./i.test(link)) continue;
+    let candidate;
+    try { candidate = new URL(`https://${link}`); } catch { continue; }
+    const verdict = absoluteLinkVerdict(candidate.href, depth);
+    if (verdict) return verdict;
+  }
+  for (const match of text.match(RELATIVE_LINK_RE) || []) {
+    const { link } = splitTail(match);
+    const verdict = link.length > 1 ? relativeLinkVerdict(link) : null;
+    if (verdict) return verdict;
+  }
+  return null;
+}
+
 function wrappedLinkVerdict(url, depth) {
   if (depth >= MAX_WRAP_DEPTH) return null;
   const parts = [...url.searchParams.values(), url.hash.replace(/^#/, ''), decodeOnce(url.pathname)];
   for (const part of parts) {
     for (const text of [part, decodeOnce(part)]) {
-      for (const match of text.match(URL_IN_TEXT_RE) || []) {
-        const verdict = absoluteLinkVerdict(splitTail(match).link, depth + 1);
-        if (verdict) return verdict;
-      }
+      const verdict = linkInTextVerdict(text, depth + 1);
+      if (verdict) return verdict;
     }
   }
   return null;

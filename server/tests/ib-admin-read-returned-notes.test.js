@@ -228,7 +228,8 @@ describe('Codex #6375 r7: spaced and punctuated credential assignments, any Auth
     ['X-API-Key: abc123xyz', 'abc123xyz', 'X-API-Key: [removed]'],
     ['Authorization: Token abc123xyz', 'abc123xyz', 'Authorization: [removed]'],
     ['Authorization: Digest nonce77abcd', 'nonce77abcd', 'Authorization: [removed]'],
-    ['dbPassword=hunter22 and api key: abc12345', 'abc12345', 'dbPassword=[removed] and api key: [removed]'],
+    ['dbPassword=hunter22 and api key: abc12345', 'abc12345', 'dbPassword=[removed]'],
+    ['dbPassword=hunter22, api key: abc12345', 'abc12345', 'dbPassword=[removed], api key: [removed]'],
   ])('%s is scrubbed and the key stays', (note, secret, expected) => {
     const { text, removed } = scrubNote(note);
     expect(text).not.toContain(secret);
@@ -584,6 +585,36 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     expect(scrubNote('DB_PASSWORD=hunter 22, mode=fast').text).toBe('DB_PASSWORD=[removed], mode=fast');
   });
 
+  test('a structural credential value with several words is removed through the line (r16)', () => {
+    expect(scrubNote('db.password: correct horse battery staple').text).toBe('db.password: [removed]');
+    expect(scrubNote('db.password: correct horse # keep: this').text).toBe('db.password: [removed] # keep: this');
+    expect(scrubNote('api key: abcd efgh, mode: fast').text).toBe('api key: [removed], mode: fast');
+    expect(scrubNote('retries=3; db.secret=hunter22 x, mode=fast').text).toBe('retries=3; db.secret=[removed], mode=fast');
+    // quoted and serialized forms end where they did before
+    expect(scrubNote('{"password": "a b c", "x": 1}').text).toBe('{"password": "[removed]", "x": 1}');
+    expect(scrubNote('{password: hunter22, x: 1}').text).toBe('{password: [removed], x: 1}');
+    expect(scrubNote('{"password":"hunter22","note":"gate code is 1234"}').text).toBe('{"password":"[removed]","note":"gate code is 1234"}');
+    // prose is not a credential label
+    expect(scrubNote('the password is in the lockbox, gate code: 1234 west side').text).toBe('the password is in the lockbox, gate code: 1234 west side');
+  });
+
+  test('a tracker wrapping a relative, protocol-relative or scheme-less customer link is removed (r16)', async () => {
+    const wrapped = [
+      'https://track.example.test/c?u=%2Fl%2Fabc234def5',
+      'https://track.example.test/c?u=%2F%2Fportal.wavespestcontrol.com%2Fl%2Fabc234def5',
+      'https://track.example.test/c?u=portal.wavespestcontrol.com%2Fl%2Fabc234def5',
+      'https://track.example.test/c?u=%252Fl%252Fabc234def5',
+    ];
+    for (const link of wrapped) {
+      const result = await read(ENTRY, { id: 1, notes: `open ${link} now` });
+      expect(result.data.notes).toBe('open [private link removed] now');
+    }
+    for (const link of ['https://track.example.test/c?u=%2Fblog%2Fpost', 'https://track.example.test/c?page=2&d=12%2F10%2F2026']) {
+      const kept = await read(ENTRY, { id: 1, notes: `see ${link}` });
+      expect(kept.data.notes).toBe(`see ${link}`);
+    }
+  });
+
   test('an unquoted env value with an equals sign or colon inside runs through the line (audit P0)', () => {
     expect(scrubNote('DB_PASSWORD=correct horse battery staple q=1').text).toBe('DB_PASSWORD=[removed]');
     expect(scrubNote('DB_PASSWORD=correct horse: battery staple # keep this').text).toBe('DB_PASSWORD=[removed] # keep this');
@@ -599,6 +630,9 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
       `PASS=x y `.repeat(2000),
       `DB_PASSWORD=${'word '.repeat(4000)}`,
       `DB_PASSWORD=${'word '.repeat(4000)}, a=b`,
+      `password: ${'abcd, '.repeat(1500)}`,
+      `token: ${'word '.repeat(4000)}, a: b`,
+      'password: abcd\n'.repeat(1300),
     ];
     for (const input of inputs) {
       const started = Date.now();
