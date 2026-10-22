@@ -1106,6 +1106,36 @@ describe('update-details wiring (source guards)', () => {
     expect(blackoutDateString(null)).toBeNull();
   });
 
+  test('the holiday closures PUT locks, validates the keys and refreshes only toggled holidays (owner 2026-10-22)', () => {
+    const start = src.indexOf("router.put('/blackout-dates/holidays'");
+    expect(start).toBeGreaterThan(-1);
+    const put = src.slice(start, src.indexOf('\n});', start));
+    expect(put).toContain("if (raw.some((key) => !HOLIDAY_KEYS.has(key)))");
+    const lock = put.indexOf('await lockClosureState(trx, { exclusive: true });');
+    const read = put.indexOf('previous = [...(await getClosedHolidays(trx))];');
+    const write = put.indexOf("await trx('system_settings')");
+    expect(lock).toBeGreaterThan(-1);
+    expect(read).toBeGreaterThan(lock);
+    expect(write).toBeGreaterThan(read);
+    expect(put).toContain('flushEstimateSlotCaches();');
+    expect(put).toContain('refreshQualityForBlackoutChange(holidayBlackoutRefreshDates(previous, closed))');
+    // The settings list reads strictly: a failed read must not show every
+    // holiday open, or the next whole-list save would reopen the closed ones.
+    const getStart = src.indexOf("router.get('/blackout-dates'");
+    expect(src.slice(getStart, src.indexOf('\n});', getStart))).toContain('getClosedHolidays(db, { strict: true })');
+  });
+
+  test('a holiday closure change refreshes only the toggled holidays inside the 30-day horizon', () => {
+    const { holidayBlackoutRefreshDates } = adminScheduleRouter._test;
+    // Tuesday 2026-11-10 08:00 ET: horizon = 2026-11-11 .. 2026-12-10.
+    const now = new Date('2026-11-10T13:00:00Z');
+    expect(holidayBlackoutRefreshDates([], ['thanksgiving', 'black_friday'], now)).toEqual(['2026-11-26', '2026-11-27']);
+    expect(holidayBlackoutRefreshDates(['veterans_day', 'christmas'], ['christmas'], now)).toEqual(['2026-11-11']);
+    expect(holidayBlackoutRefreshDates([], ['christmas'], now)).toEqual([]); // outside the horizon
+    expect(holidayBlackoutRefreshDates(['thanksgiving'], ['thanksgiving'], now)).toEqual([]);
+    expect(holidayBlackoutRefreshDates(null, [], now)).toEqual([]);
+  });
+
   test('a count-only series edit still enters the broadcast-and-flush block (codex #4295 r3 P2)', () => {
     expect(src).toContain('if (assignmentChanged || detailsChanged || addonsReplaced || addressUpdatedIds.length || recurringUpdatedJobIds.length) {');
   });

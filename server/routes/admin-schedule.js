@@ -28546,8 +28546,12 @@ router.get('/blackout-dates', requireAdmin, async (req, res, next) => {
       .where('date', '>=', db.raw("(now() AT TIME ZONE 'America/New_York')::date - interval '30 days'"))
       .orderBy('date', 'asc')
       .select('id', 'date', 'reason', 'created_at');
-    const { getWeeklyDaysOff } = require('../services/scheduling/blackout-dates');
+    const { getWeeklyDaysOff, getClosedHolidays } = require('../services/scheduling/blackout-dates');
+    const { upcomingHolidays } = require('../services/scheduling/holidays');
     const weekly = await getWeeklyDaysOff();
+    // Strict: a failed read must not show every holiday as open, or the next
+    // whole-list save would silently reopen the closed ones.
+    const closedHolidays = await getClosedHolidays(db, { strict: true });
     res.json({
       blackouts: rows.map((r) => ({
         id: r.id,
@@ -28556,6 +28560,9 @@ router.get('/blackout-dates', requireAdmin, async (req, res, next) => {
         createdAt: r.created_at,
       })),
       weeklyDaysOff: [...weekly].sort((a, b) => a - b),
+      // The 14 holidays, each open until the owner closes it (owner 2026-10-22).
+      holidays: upcomingHolidays(etDateString(new Date()))
+        .map((holiday) => ({ ...holiday, closed: closedHolidays.has(holiday.key) })),
     });
   } catch (err) { next(err); }
 });
@@ -28596,6 +28603,47 @@ router.put('/blackout-dates/weekly', requireAdmin, async (req, res, next) => {
     flushEstimateSlotCaches();
     await refreshQualityForBlackoutChange(weeklyBlackoutRefreshDates(previousDays, days));
     res.json({ success: true, weeklyDaysOff: days });
+  } catch (err) { next(err); }
+});
+
+// Holiday closures (owner 2026-10-22: "add 14 for now, and make them all open
+// as default"): the 14 days Google lists for Florida (scheduling/holidays.js),
+// each open until the owner closes it. Stored like weekly days off — a
+// system_settings key holding the closed keys — and enforced through the same
+// blackout-dates helpers, every year. Whole-array PUT, like the weekly chips.
+router.put('/blackout-dates/holidays', requireAdmin, async (req, res, next) => {
+  try {
+    const raw = Array.isArray(req.body?.closed) ? req.body.closed : null;
+    if (!raw) return res.status(400).json({ error: 'closed (array of holiday keys) required' });
+    const { HOLIDAYS, HOLIDAY_KEYS, HOLIDAY_CLOSURES_KEY } = require('../services/scheduling/holidays');
+    if (raw.some((key) => !HOLIDAY_KEYS.has(key))) {
+      return res.status(400).json({ error: 'closed lists a key that is not one of the 14 holidays' });
+    }
+    // Calendar order, no duplicates.
+    const closed = HOLIDAYS.map((holiday) => holiday.key).filter((key) => raw.includes(key));
+    const { getClosedHolidays, lockClosureState } = require('../services/scheduling/blackout-dates');
+    // Exclusive closure-state lock before the write — see the weekly-days-off
+    // handler above / blackout-dates.js for why and the lock order.
+    let previous = [];
+    await db.transaction(async (trx) => {
+      await lockClosureState(trx, { exclusive: true });
+      // Read under the lock, before the write: only the holidays that toggle
+      // need a route-quality refresh.
+      previous = [...(await getClosedHolidays(trx))];
+      await trx('system_settings')
+        .insert({
+          key: HOLIDAY_CLOSURES_KEY,
+          value: JSON.stringify(closed),
+          category: 'scheduling',
+          description: 'Holiday keys (services/scheduling/holidays.js) removed from every customer-facing offer surface; missing or empty = every holiday open',
+        })
+        .onConflict('key')
+        .merge({ value: JSON.stringify(closed), updated_at: trx.fn.now() });
+    });
+    logger.info(`[schedule] holiday closures set to [${closed.join(',')}]`);
+    flushEstimateSlotCaches();
+    await refreshQualityForBlackoutChange(holidayBlackoutRefreshDates(previous, closed));
+    res.json({ success: true, closedHolidays: closed });
   } catch (err) { next(err); }
 });
 
@@ -28686,6 +28734,20 @@ function weeklyBlackoutRefreshDates(previousDays, nextDays, now = new Date()) {
   const next = new Set((nextDays || []).map(Number));
   const toggled = new Set([...previous, ...next].filter((day) => previous.has(day) !== next.has(day)));
   return expandWeeklyDaysOff(etDateString(addETDays(now, 1)), etDateString(addETDays(now, 30)), toggled);
+}
+
+// A holiday closure change touches the days of the holidays that toggled —
+// bounded to the reconciler's 30-day horizon, tomorrow onward, like the
+// weekly helper above. Pure; exported for tests.
+function holidayBlackoutRefreshDates(previousKeys, nextKeys, now = new Date()) {
+  const { etDateString, addETDays } = require('../utils/datetime-et');
+  const { holidaysBetween } = require('../services/scheduling/holidays');
+  const previous = new Set(previousKeys || []);
+  const next = new Set(nextKeys || []);
+  const toggled = [...new Set([...previous, ...next])].filter((key) => previous.has(key) !== next.has(key));
+  if (!toggled.length) return [];
+  return holidaysBetween(etDateString(addETDays(now, 1)), etDateString(addETDays(now, 30)), toggled)
+    .map((day) => day.date);
 }
 
 // schedule_blackout_dates.date is a DATE column: pg hands it back as a
@@ -28781,6 +28843,7 @@ router._test = {
   DISCOUNT_PROVENANCE_PROJECTION_KEYS,
   resetDiscountProvenanceColumnCache,
   weeklyBlackoutRefreshDates,
+  holidayBlackoutRefreshDates,
   blackoutDateString,
   registerSpawnedVisitReminder,
   adminMoveProbeExcludeIds,
