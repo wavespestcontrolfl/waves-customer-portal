@@ -1909,15 +1909,21 @@ const ARCHIVE_RESTORE_AUDIT_ACTIONS = ['customer.archive', 'customer.restore'];
 // Real history = every table the auto-merge already treats as business history (AUTO_BLOCKER_TABLES:
 // payments, invoices, contracts, deposits, saved cards, credits and the rest), one list so the two can
 // never drift. scheduled_services is read separately so an assessment-only booking stays a lead.
-const INTAKE_LEAD_HISTORY_TABLES = AUTO_BLOCKER_TABLES.filter((table) => table !== 'scheduled_services');
+// payment_method_consents is added: the durable consent ledger survives a removed card (Codex #6421 r11).
+const INTAKE_LEAD_HISTORY_TABLES = [
+  ...AUTO_BLOCKER_TABLES.filter((table) => table !== 'scheduled_services'),
+  'payment_method_consents',
+];
 
 async function loserIsIntakeLead(database, loser) {
   if (require('../config/feature-gates').mergeLeadDefaultsLive?.() !== true) return false;
   try {
     const row = await database('customers').where({ id: loser.id })
-      .first('pipeline_stage', 'churned_at', 'churn_episode_id', 'member_since', 'total_services', 'autopay_payment_method_id');
+      .first('pipeline_stage', 'churned_at', 'churn_episode_id', 'member_since', 'total_services', 'autopay_payment_method_id', 'ach_status');
     if (!row || !INTAKE_LEAD_STAGES.has(row.pipeline_stage)) return false;
     if (row.churned_at || row.churn_episode_id || row.member_since || row.autopay_payment_method_id) return false;
+    // An ACH status other than the column default (needs_verification, suspended) is billing state.
+    if (row.ach_status != null && row.ach_status !== 'active') return false;
     if (Number(row.total_services || 0) !== 0) return false;
     // total_services has no production writer and booked customers can sit at
     // new_lead (customer-stages.js), so real history decides: a visit in ANY

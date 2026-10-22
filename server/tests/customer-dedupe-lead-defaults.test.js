@@ -119,6 +119,10 @@ describe('loserIsIntakeLead', () => {
       });
       expect(await dedupe.loserIsIntakeLead(database, lead)).toBe(true);
     });
+    it('the default ACH status (active, or unset) is no signal', async () => {
+      expect(await dedupe.loserIsIntakeLead(fakeDb(withRow({ ach_status: 'active' })), lead)).toBe(true);
+      expect(await dedupe.loserIsIntakeLead(fakeDb(withRow({ ach_status: null })), lead)).toBe(true);
+    });
     it('a total_services of null counts as none', async () => {
       expect(await dedupe.loserIsIntakeLead(fakeDb(withRow({ total_services: null })), lead)).toBe(true);
     });
@@ -135,6 +139,8 @@ describe('loserIsIntakeLead', () => {
       ['member_since', { member_since: '2025-06-01' }],
       ['completed services', { total_services: 3 }],
       ['a designated autopay card', { autopay_payment_method_id: 'pm1' }],
+      ['an ACH status of needs_verification', { ach_status: 'needs_verification' }],
+      ['an ACH status of suspended', { ach_status: 'suspended' }],
     ])('a lead row with %s: not an intake lead', async (_label, over) => {
       expect(await dedupe.loserIsIntakeLead(fakeDb(withRow(over)), lead)).toBe(false);
     });
@@ -154,6 +160,8 @@ describe('loserIsIntakeLead', () => {
       ['a standalone payment with no invoice', { payments: { customer_id: 'lead-1' } }],
       ['a contract', { customer_contracts: { customer_id: 'lead-1' } }],
       ['an estimate deposit', { estimate_deposits: { customer_id: 'lead-1' } }],
+      // Codex #6421 r11: durable billing state that outlives a removed card.
+      ['a payment-method consent row (survives card removal)', { payment_method_consents: { customer_id: 'lead-1' } }],
       ['a credit ledger row', { customer_credit_ledger: { id: 'cl1' } }],
     ])('%s: not an intake lead', async (_label, over) => {
       expect(await dedupe.loserIsIntakeLead(fakeDb({ ...plainLead, ...over }), lead)).toBe(false);
