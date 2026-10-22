@@ -555,6 +555,14 @@ const REVIEW_REASONS = Object.freeze({
 });
 const REVIEW_QUOTE_CHARS = 140;
 
+const CREDENTIAL_WORDS = /\b(?:code|lock ?box|gate|pin|password|passcode|combo(?:nation)?|key ?box|alarm)s?\b/i;
+const factsHoldCode = (facts) => facts.some((f) => String(f.field).endsWith('_code'));
+// Takes text already run through redactSensitiveText: a masked phone ("***0143")
+// or address ("[address]") is not a credential, any other run of 3+ digits is.
+function textMayHoldCredential(redacted) {
+  return CREDENTIAL_WORDS.test(redacted) || /\d{3,}/.test(redacted.replace(/\*\*\*\d{4}/g, '').replace(/\[address\]/g, ''));
+}
+
 function reviewBellCopy({ customer, facts, exceptions, messageBody }) {
   const name = [customer.first_name, customer.last_name].map((part) => String(part || '').trim()).filter(Boolean).join(' ');
   const title = name ? `SMS note to check — ${name}` : 'SMS note to check';
@@ -563,15 +571,18 @@ function reviewBellCopy({ customer, facts, exceptions, messageBody }) {
     const reason = REVIEW_REASONS[f.outcome] || 'it needs a person to check it';
     return `${i === 0 ? 'Wanted' : 'Also wanted'} to save as ${label}; ${reason}.`;
   });
-  // A text that carries an access code stays out of the bell: the code lives in
-  // the vault and the conversation, and a bell row is plain text.
-  const hasCode = facts.some((f) => String(f.field).endsWith('_code'));
+  // A text that may carry an access credential stays out of the bell: the code
+  // lives in the vault and the conversation, and a bell row is plain text. The
+  // decision reads the message itself, not the surviving facts: grounding can
+  // drop a code fact and keep a pet exception from the same text (Codex #6414 r1).
   let quote = null;
-  if (!hasCode) {
+  if (!factsHoldCode(facts)) {
     try {
       const { redactSensitiveText } = require('./notification-triggers').__private;
       const flat = redactSensitiveText(String(messageBody || '').replace(/\s+/g, ' ').trim());
-      if (flat) quote = flat.length > REVIEW_QUOTE_CHARS ? `${flat.slice(0, REVIEW_QUOTE_CHARS - 1).trimEnd()}…` : flat;
+      if (flat && !textMayHoldCredential(flat)) {
+        quote = flat.length > REVIEW_QUOTE_CHARS ? `${flat.slice(0, REVIEW_QUOTE_CHARS - 1).trimEnd()}…` : flat;
+      }
     } catch (err) {
       logger.warn(`[sms-operational-actions] review bell quote skipped: ${err.message}`);
     }

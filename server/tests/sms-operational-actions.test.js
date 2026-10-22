@@ -1846,4 +1846,19 @@ describe('SMS review bell (owner ruling 2026-10-21)', () => {
     expect(copy.body).not.toContain('4821');
     expect(copy.body).toContain('not quoted');
   });
+
+  test('Codex #6414 r1: the quote decision reads the text, even when the code fact was dropped', () => {
+    const pet = { field: 'pet_details', outcome: 'pet_needs_review' };
+    const mixed = reviewBellCopy({ customer: { first_name: 'Synthetic', last_name: 'Fixture' }, facts: [pet], exceptions: [pet],
+      messageBody: 'My lockbox code is 4821. Not sure whether the cat will be out.' });
+    expect(JSON.stringify(mixed)).not.toContain('4821');
+    expect(mixed.body).toContain('not quoted');
+    const gate = reviewBellCopy({ customer: {}, facts: [pet], exceptions: [pet], messageBody: 'gate 1234#' });
+    expect(gate.body).not.toContain('1234');
+    expect(gate.body).toContain('not quoted');
+    const bareDigits = reviewBellCopy({ customer: {}, facts: [pet], exceptions: [pet], messageBody: 'Not sure about the cat, it is 4821' });
+    expect(bareDigits.body).toContain('not quoted');
+    const plain = reviewBellCopy({ customer: {}, facts: [pet], exceptions: [pet], messageBody: 'Not sure whether the cat will be out.' });
+    expect(plain.body).toContain('Customer wrote: "Not sure whether the cat will be out."');
+  });
 });

@@ -1024,6 +1024,18 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(body).not.toContain('4821');
   });
 
+  test('Codex #6414 r1: a code in the text is not quoted when only the pet exception survives', async () => {
+    message.message_body = 'My lockbox code is 4821. Not sure whether the cat will be out.';
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
+    const pet = { field: 'pet_details', value: message.message_body, quote: message.message_body, duration: 'durable',
+      property_id: context.properties[0].id };
+    await recordMessageOperations(mockPg, message, { ...result, facts: [pet] }, context);
+    const [, title, body, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(JSON.stringify([title, body, opts.detail, opts.metadata])).not.toContain('4821');
+    expect(body).toContain('Wanted to save as pet note;');
+    expect(body).toContain('not quoted');
+  });
+
   test('R4 owner ruling 2026-09-24: an existing-value conflict still rings the review bell', async () => {
     await mockPg('property_preferences').insert({ customer_id: message.customer_id, irrigation_controller_location: 'Behind the shed' });
     context = await loadMessageContext(mockPg, message);
