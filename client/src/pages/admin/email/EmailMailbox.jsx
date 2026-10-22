@@ -1,11 +1,12 @@
 import { useEffect, useRef } from "react";
-import { Archive, ArrowLeft, Check, Mail, Paperclip, Sparkles, Star, Trash2 } from "lucide-react";
+import { AlertTriangle, Archive, ArrowLeft, Check, Mail, Paperclip, Sparkles, Star, Trash2 } from "lucide-react";
 import { Button, buttonStyles } from "../../../components/ui/Button";
 import { Field } from "../../../components/ui/Field";
 import { ActionFeedback } from "../../../components/ui/ActionFeedback";
 import { Input } from "../../../components/ui/Input";
 import { cn } from "../../../components/ui/cn";
 import EmailReply from "./EmailReply";
+import { autoActionNote } from "./emailAutoAction";
 
 function buildSandboxedEmailHtml(html) {
   return `<!doctype html>
@@ -25,10 +26,6 @@ const CATEGORY_LABELS = {
   lead_inquiry: "Lead", customer_request: "Customer", complaint: "Complaint", vendor_invoice: "Invoice",
   vendor_communication: "Vendor", scheduling: "Scheduling", review_notification: "Review", regulatory: "Regulatory",
   marketing_newsletter: "Newsletter", internal: "Internal", spam: "Spam", other: "Other",
-};
-const AUTO_ACTION_LABELS = {
-  lead_inquiry: "Lead created", spam: "Blocked & trashed", marketing_newsletter: "Unsubscribed",
-  vendor_invoice: "Expense logged", complaint: "Flagged urgent",
 };
 
 function timeAgo(dateStr) {
@@ -104,7 +101,7 @@ function EmailMessageRow({ email, mailbox, editor, onOpen, conversationOpen }) {
   // retained selection whose refresh failed shows the recovery panel instead.
   const expanded = isSelected && conversationOpen;
   const extractedData = emailDetails(email);
-  const categoryLabel = CATEGORY_LABELS[email.classification], autoActionLabel = AUTO_ACTION_LABELS[email.classification];
+  const categoryLabel = CATEGORY_LABELS[email.classification], autoAction = autoActionNote(email);
   const sender = email.from_name || email.from_address;
   return (
     <div className={cn("flex border-b-hairline border-zinc-200 last:border-b-0", isSelected ? "bg-zinc-100" : "bg-white hover:bg-zinc-50")}>
@@ -131,7 +128,7 @@ function EmailMessageRow({ email, mailbox, editor, onOpen, conversationOpen }) {
           <span className="min-w-0 flex-1 truncate">{email.snippet}</span>
           {extractedData?.vendor_name && <span>{extractedData.vendor_name}</span>}
         </span>
-        {autoActionLabel && <span className="mt-1 flex items-center gap-1 text-ui-caption text-ink-secondary"><Check size={14} aria-hidden />{autoActionLabel}</span>}
+        {autoAction && <span className="mt-1 flex items-center gap-1 text-ui-caption text-ink-secondary">{autoAction.needsReview ? <AlertTriangle size={14} aria-hidden /> : <Check size={14} aria-hidden />}{autoAction.text}</span>}
       </button>
     </div>
   );
