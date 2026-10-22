@@ -889,6 +889,22 @@ describe('complete and send', () => {
     expect(screen.getByRole('button', { name: 'Close' }).disabled).toBe(false);
   });
 
+  test('back on the visit step with a current report, a trace save in flight holds Back to the report', async () => {
+    const request = makeRequest({ facts: { ...FACTS, spray: 'perimeter' } });
+    await openSheet(request);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the visit' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Trace where we sprayed' }));
+    const tracer = await screen.findByRole('region', { name: 'Tracer' });
+    fireEvent.click(within(tracer).getByRole('button', { name: 'Start saving' }));
+    expect(screen.getByRole('button', { name: 'Back to the report' }).disabled).toBe(true);
+    expect(screen.getByText('Saving the trace…')).toBeTruthy();
+    fireEvent.click(within(tracer).getByRole('button', { name: 'Finish saving' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Back to the report' }).disabled).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the report' }));
+    expect(await screen.findByText('Perimeter traced · 182 ft')).toBeTruthy();
+  });
+
   test('the visit step offers the trace as optional, and the tracer opens in the same page', async () => {
     const request = makeRequest({ facts: { ...FACTS, spray: 'perimeter' } });
     await openSheet(request);

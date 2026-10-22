@@ -21,7 +21,7 @@ describe('trace saves bound to the loaded property', () => {
     // Started with the upload, settled in a finally (a failed save releases the host too).
     expect(modal).toMatch(/setSaveState\('saving'\);\s+onSavingChange\?\.\(true\);/);
     expect(modal).toMatch(/finally \{\s+onSavingChange\?\.\(false\);\s+\}/);
-    expect(read('./FastCompleteSheet.jsx')).toContain('onSavingChange={setTraceSaving}');
+    expect(read('./FastCompleteSheet.jsx')).toContain('onSavingChange={onTraceSavingChange}');
   });
 
   test('the schedule forms and the Zone action pass the property their visit row was loaded at', () => {

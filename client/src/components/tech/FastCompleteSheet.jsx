@@ -1893,6 +1893,12 @@ function ReportFlowForm({
   // A trace save in flight in the inline tracer: the report and the send hold until it settles (so the completion
   // carries the trace the tech saw, and a save never meets a completed visit), Back waits, and so does the header.
   const [traceSaving, setTraceSaving] = useState(false);
+  // Read by the step guard below, which an awaited write can reach after the render that started it.
+  const traceSavingRef = useRef(false);
+  const onTraceSavingChange = useCallback((saving) => {
+    traceSavingRef.current = saving;
+    setTraceSaving(saving);
+  }, []);
   useEffect(() => { onTraceSaving?.(traceSaving); }, [traceSaving, onTraceSaving]);
   useEffect(() => () => onTraceSaving?.(false), [onTraceSaving]);
   const noteBoxPhotos = service.noteBoxPhotosEnabled === true;
@@ -1914,7 +1920,19 @@ function ReportFlowForm({
   // `reviewTiming` before, so the key stays absent while the timing is Automatic. A part of a grouped stop
   // (prepare mode) and a re-service (not in ctx.wrapUp) keep their fixed text.
   const wrapUp = useWrapUp({ gate: ctx.wrapUp, submission, sharedNote, service, request, base, applicationsRecorded: pestSprayEvidence(active, draft), omitAutoTiming: true, noPayLink: isReservice, reviewMarker: isReservice, onChecking: onWrapChecking });
-  const [step, setStep] = useState('visit');
+  // A step change waits for a trace save in flight: the tracer sits inside each step, so a change would remount it
+  // mid-upload and let a second save overlap the first (Codex local audit). The change lands once the save settles.
+  const [step, setStepNow] = useState('visit');
+  const pendingStep = useRef(null);
+  const setStep = useCallback((next) => {
+    if (traceSavingRef.current) { pendingStep.current = next; return; }
+    setStepNow(next);
+  }, []);
+  useEffect(() => {
+    if (traceSaving || pendingStep.current == null) return;
+    setStepNow(pendingStep.current);
+    pendingStep.current = null;
+  }, [traceSaving]);
   // Voice fill (GATE_FAST_COMPLETE_VOICE_FILL): the products the note names are
   // read when the report is written and land as rows the tech confirms. On a
   // plain pest visit a spray's way is the note's own read; on a lane or typed
@@ -2084,7 +2102,7 @@ function ReportFlowForm({
       lng={service.lng}
       onClose={() => setTracerOpen(false)}
       onSaved={trace.saved}
-      onSavingChange={setTraceSaving}
+      onSavingChange={onTraceSavingChange}
     />
   ) : null;
   // The trace on the visit step: offered (never required) on a perimeter spray the sheet can trace.
@@ -2216,8 +2234,9 @@ function ReportFlowForm({
         // One-tap: while the rating tap's write runs, the button only opens the report step; it never starts a second write.
         ? { reason: generateMissing.reason, label: action.label, onAction: () => (backgroundWrite.running ? setStep('report') : write(action.fresh)) }
         // A photo change in hand (a description open, a change saving, a
-        // removal to answer) holds the way back too (codex local r2).
-        : { reason: photoHold, label: 'Back to the report', onAction: () => setStep('report') }}
+        // removal to answer) holds the way back too (codex local r2), and so
+        // does a trace save in flight.
+        : { reason: photoHold || (traceSaving ? 'Saving the trace…' : ''), label: 'Back to the report', onAction: () => setStep('report') }}
       writing={backgroundWrite.foreground || preReading}
       warn={!!generateMissing.stockRow}
       stockButton={stockButton}
