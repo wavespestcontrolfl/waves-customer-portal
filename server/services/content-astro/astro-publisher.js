@@ -2115,7 +2115,8 @@ async function resolveAutonomousHero({ frontmatter, slug, existingFile, imageAvo
 // rule never depends on prompt compliance:
 //   - each image is generated from one H2 section (heading = subject, first
 //     prose paragraph = context) and inserted at the END of that section's
-//     prose — the shape the reference post (quarterly-pest-control.mdx) uses;
+//     prose — the shape the former reference post quarterly-pest-control.mdx
+//     used (merged into what-to-expect-pest-control-visit.mdx 2026-10-22);
 //   - files commit beside the hero as /images/blog/<slug>/body-N.webp in the
 //     same atomic commit; an update run reuses a body-N.webp already on main
 //     (with the alt the live body carries) instead of regenerating;
