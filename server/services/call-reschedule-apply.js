@@ -192,13 +192,17 @@ function openPortalRequest(conn, customerId, serviceId) {
     .first('id');
 }
 
+// A person owns or closed the card: claimed (in progress), or resolved or
+// dismissed by a human.
+const humanHandledCardStatus = (q) => q.where('status', 'in_progress').orWhere((closed) => closed
+  .where('resolution_source', 'human').whereIn('status', ['resolved', 'dismissed']));
+
 // Excluding the proposal under review lets staff apply a claimed card while
 // another claimed or human-closed card still proves the request was handled.
 function humanHandledRescheduleCard(conn, callLogId, { excludeId = null } = {}) {
   const query = conn('triage_items').where({ call_log_id: callLogId })
     .whereIn('reason_code', CARD_REASON_CODES)
-    .where((q) => q.where('status', 'in_progress').orWhere((closed) => closed
-      .where('resolution_source', 'human').whereIn('status', ['resolved', 'dismissed'])));
+    .where(humanHandledCardStatus);
   if (excludeId) query.whereNot('id', excludeId);
   return query.first('id');
 }
@@ -1141,12 +1145,15 @@ const newerMove = (conn, visitId, since) => conn('reschedule_log')
 // What makes a found missed visit unsafe to move now, checked in the booking
 // transaction and again in the move's own (there under the visit's row lock):
 // this call already booked a visit (an earlier pass; live, or cancelled by
-// staff), staff handled the call's card, someone moved the visit after the
-// call, or a staff-owned request or a live reply-1/2 offer is open on it.
+// staff), staff handled the call's reschedule card or an earlier pass's
+// make-up hold card (the skipped-booking card), someone moved the visit after
+// the call, or a staff-owned request or a live reply-1/2 offer is open on it.
 async function makeupConflict(conn, { settled, visitId, now }) {
   const checks = [
     ['call_already_booked', () => conn('scheduled_services').where({ source_call_log_id: settled.id }).whereNot({ id: visitId }).first('id')],
     ['handled_by_staff', () => humanHandledRescheduleCard(conn, settled.id)],
+    ['handled_by_staff', () => conn('triage_items').where({ call_log_id: settled.id, reason_code: 'auto_booking_skipped_after_approval' })
+      .whereRaw("payload->>'skipped_reason' = ?", ['missed_visit_makeup_needs_review']).where(humanHandledCardStatus).first('id')],
     ['handled_after_call', () => newerMove(conn, visitId, settled.created_at)],
     ['portal_request_open', () => openPortalRequest(conn, settled.customer_id, visitId)],
     ['pending_sms_offer', () => pendingSmsOffer(conn, settled.customer_id, visitId, now)],

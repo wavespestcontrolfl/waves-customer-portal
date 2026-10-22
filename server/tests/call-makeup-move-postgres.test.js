@@ -111,6 +111,20 @@ maybeDescribe('make-up move (live Postgres)', () => {
     expect(await plan(w)).toMatchObject({ action: 'needs_review', reason: 'handled_after_call', visitId: w.visit.id });
   });
 
+  test('an earlier pass\'s make-up hold card a person claimed or closed stands; an auto-closed one does not', async () => {
+    const { buildTriageItem } = require('../services/call-routing-gates');
+    const card = (w, over) => db('triage_items').insert({ ...buildTriageItem({ callLogId: w.call.id, flag: 'auto_booking_skipped_after_approval',
+      extraPayload: { skipped_reason: 'missed_visit_makeup_needs_review' } }), ...over });
+    const auto = await world();
+    await card(auto, { status: 'resolved', resolution_source: 'auto', resolved_at: new Date() });
+    expect(await plan(auto)).toMatchObject({ action: 'apply' });
+    for (const over of [{ status: 'in_progress' }, { status: 'dismissed', resolution_source: 'human', resolved_at: new Date() }]) {
+      const w = await world();
+      await card(w, over);
+      expect(await plan(w)).toMatchObject({ action: 'needs_review', reason: 'handled_by_staff', visitId: w.visit.id });
+    }
+  });
+
   test('the move\'s own guard runs in a real transaction: it stamps the call and writes the marker; a reprocess then reads it', async () => {
     const w = await world();
     const applyPlan = await plan(w);

@@ -416,7 +416,7 @@ describe('service lines', () => {
 
 // ── the database steps against a mocked connection ──────────────────────
 function makeConn({ prior = null, cust = customer(), visits = [visit()], logs = [noshow()], properties = [], extraction = v2(),
-  settledCall = {}, handled = false, moved = false, movedAfter = [], portalRequest = null, smsOffer = false, callBooking = null, dayTaken = null } = {}) {
+  settledCall = {}, handled = false, makeupCardHandled = false, moved = false, movedAfter = [], portalRequest = null, smsOffer = false, callBooking = null, dayTaken = null } = {}) {
   const writes = { updates: [], inserts: [] };
   const offerRows = smsOffer ? [{ id: 'pending-offer', notes: JSON.stringify({ option1: { date: '2026-10-24', window: { start: '08:00', end: '09:00' } } }) }] : [];
   const builder = (table) => {
@@ -446,6 +446,8 @@ function makeConn({ prior = null, cust = customer(), visits = [visit()], logs = 
         }
         if (table === 'activity_log') return Promise.resolve(prior);
         if (table === 'customers') return Promise.resolve(cust);
+        // The make-up hold card is the only triage read keyed on reason_code by equality.
+        if (table === 'triage_items' && whereHas('reason_code')) return Promise.resolve(makeupCardHandled ? { id: 'makeup-card' } : undefined);
         if (table === 'triage_items') return Promise.resolve(state.counted ? { n: 0 } : (handled ? { id: 'handled-card' } : undefined));
         if (table === 'reschedule_log') return Promise.resolve(moved ? { id: 'later-move' } : undefined);
         if (table === 'service_requests') return Promise.resolve(portalRequest || undefined);
@@ -515,6 +517,7 @@ describe('planCallMakeupForBooking (the booking transaction, at its insert)', ()
   test.each([
     ['this call\'s own earlier booking (live, or cancelled by staff)', { callBooking: { id: 'earlier-booking' } }, 'call_already_booked'],
     ['a staff-handled card', { handled: true }, 'handled_by_staff'],
+    ['an earlier pass\'s make-up hold card claimed or closed by staff', { makeupCardHandled: true }, 'handled_by_staff'],
     ['a move of the visit after the call', { moved: true }, 'handled_after_call'],
     ['an open portal reschedule request', { portalRequest: { id: 'req-1' } }, 'portal_request_open'],
     ['an outstanding reschedule-options text', { smsOffer: true }, 'pending_sms_offer'],
