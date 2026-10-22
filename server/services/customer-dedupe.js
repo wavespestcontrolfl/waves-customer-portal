@@ -1878,7 +1878,15 @@ async function foldContactNotificationPrefs(trx, table, column, winnerId, loserI
 // winner's FINAL slots (the row as backfilled). Returns the count; a non-zero
 // count makes the merge non-replayable, like a fold.
 async function pruneDiscardedContactPrefs(trx, winnerId, finalWinner) {
-  const keep = require('./customer-contact').getServiceContactSlots(finalWinner).map((s) => phone10(s.phone)).filter(Boolean);
+  const slotPhones = require('./customer-contact').getServiceContactSlots(finalWinner).map((s) => s.phone);
+  // The contact families the sweep repointed onto the winner go the same way
+  // as the choices rows (codex #6363 r36 P2): a loser-only contact the winner
+  // had no free slot for would otherwise keep a live family on the winner,
+  // refused only while its number is absent and valid again without a new
+  // code the day the holder adds that number to a slot. Not journaled — the
+  // undo cannot un-revoke a session; a re-login is the cost.
+  await require('../middleware/auth').revokeRemovedContactRefreshSessions(trx, winnerId, slotPhones);
+  const keep = slotPhones.map(phone10).filter(Boolean);
   const table = 'service_contact_notification_prefs';
   let discarded;
   try {

@@ -1302,17 +1302,27 @@ describe('executeMerge', () => {
     });
   });
 
-  describe('pruneDiscardedContactPrefs (contact login): rows the sweep brought over for contacts the winner did not keep are dropped (codex #6363 r25)', () => {
+  describe('pruneDiscardedContactPrefs (contact login): rows the sweep brought over for contacts the winner did not keep are dropped, and their refresh families revoked (codex #6363 r25, r36)', () => {
     const { pruneDiscardedContactPrefs } = dedupe._test;
+    // Three tables the reconciliation touches: the choices rows, the
+    // repointed refresh families (revoked by contact_key, the holder's own
+    // number never kept as a contact), and the winner row the revoker reads
+    // the holder phone from.
     const fakeTrx = (seed) => {
-      const rows = seed.map((r) => ({ ...r }));
-      const trx = () => {
+      const tables = Object.fromEntries(Object.entries(seed).map(([t, rows]) => [t, rows.map((r) => ({ ...r }))]));
+      const trx = (table) => {
+        const rows = (tables[table] ||= []);
         const conds = [];
+        const hit = () => rows.filter((r) => conds.every((c) => c(r)));
         const api = {
           where(obj) { conds.push((r) => Object.entries(obj).every(([k, v]) => r[k] === v)); return api; },
           whereNotIn(col, vals) { conds.push((r) => !vals.includes(r[col])); return api; },
           whereIn(col, vals) { conds.push((r) => vals.includes(r[col])); return api; },
-          select() { return Promise.resolve(rows.filter((r) => conds.every((c) => c(r))).map((r) => ({ ...r }))); },
+          whereNull(col) { conds.push((r) => r[col] == null); return api; },
+          whereNotNull(col) { conds.push((r) => r[col] != null); return api; },
+          first() { return Promise.resolve(hit()[0] ? { ...hit()[0] } : null); },
+          select() { return Promise.resolve(hit().map((r) => ({ ...r }))); },
+          update(patch) { const h = hit(); h.forEach((r) => Object.assign(r, patch)); return Promise.resolve(h.length); },
           del() {
             const before = rows.length;
             for (let i = rows.length - 1; i >= 0; i -= 1) if (conds.every((c) => c(rows[i]))) rows.splice(i, 1);
@@ -1321,26 +1331,47 @@ describe('executeMerge', () => {
         };
         return api;
       };
-      trx.rows = rows;
+      trx.tables = tables;
       return trx;
     };
+    const live = (r) => !r.revoked_at;
 
-    it('keeps the rows of the winner\'s final slots (own and backfilled) and drops the rest; the loser\'s rows are untouched', async () => {
-      const trx = fakeTrx([
-        { customer_id: WINNER, phone_key: '9415550202' },   // winner's own slot 1
-        { customer_id: WINNER, phone_key: '9415550303' },   // backfilled from the loser into slot 2
-        { customer_id: WINNER, phone_key: '9415550404' },   // loser-only contact that found no free slot
-        { customer_id: LOSER, phone_key: '9415550505' },
-      ]);
+    it('keeps the rows and families of the winner\'s final slots (own and backfilled) and drops/revokes the rest; the loser\'s rows and the holder\'s own families are untouched', async () => {
+      const trx = fakeTrx({
+        customers: [{ id: WINNER, phone: '+19415550101' }],
+        service_contact_notification_prefs: [
+          { customer_id: WINNER, phone_key: '9415550202' },   // winner's own slot 1
+          { customer_id: WINNER, phone_key: '9415550303' },   // backfilled from the loser into slot 2
+          { customer_id: WINNER, phone_key: '9415550404' },   // loser-only contact that found no free slot
+          { customer_id: LOSER, phone_key: '9415550505' },
+        ],
+        customer_refresh_tokens: [
+          { jti: 'h1', customer_id: WINNER, contact_key: null },
+          { jti: 'c1', customer_id: WINNER, contact_key: '9415550202' },
+          { jti: 'c2', customer_id: WINNER, contact_key: '9415550303' },     // repointed with the loser's slot
+          { jti: 'c3', customer_id: WINNER, contact_key: '9415550404' },     // repointed; no slot on the winner
+          { jti: 'c4', customer_id: WINNER, contact_key: '9415550404', revoked_at: '2026-10-01T00:00:00Z', revoke_reason: 'replay_detected' },
+          { jti: 'l1', customer_id: LOSER, contact_key: '9415550505' },
+        ],
+      });
       const finalWinner = { service_contact_phone: '(941) 555-0202', service_contact2_phone: '+19415550303', service_contact3_phone: null };
       expect(await pruneDiscardedContactPrefs(trx, WINNER, finalWinner)).toBe(1);
-      expect(trx.rows.map((r) => [r.customer_id, r.phone_key])).toEqual([[WINNER, '9415550202'], [WINNER, '9415550303'], [LOSER, '9415550505']]);
+      expect(trx.tables.service_contact_notification_prefs.map((r) => [r.customer_id, r.phone_key])).toEqual([[WINNER, '9415550202'], [WINNER, '9415550303'], [LOSER, '9415550505']]);
+      const byJti = Object.fromEntries(trx.tables.customer_refresh_tokens.map((r) => [r.jti, r]));
+      expect(['h1', 'c1', 'c2', 'l1'].map((j) => live(byJti[j]))).toEqual([true, true, true, true]);
+      expect(byJti.c3).toMatchObject({ revoked_at: expect.any(Date), revoke_reason: 'contact_removed' });
+      expect(byJti.c4.revoke_reason).toBe('replay_detected');
     });
 
-    it('a winner with no slots at all keeps no contact rows', async () => {
-      const trx = fakeTrx([{ customer_id: WINNER, phone_key: '9415550202' }]);
+    it('a winner with no slots at all keeps no contact rows and no contact family', async () => {
+      const trx = fakeTrx({
+        customers: [{ id: WINNER, phone: '+19415550101' }],
+        service_contact_notification_prefs: [{ customer_id: WINNER, phone_key: '9415550202' }],
+        customer_refresh_tokens: [{ jti: 'c1', customer_id: WINNER, contact_key: '9415550202' }, { jti: 'h1', customer_id: WINNER, contact_key: null }],
+      });
       expect(await pruneDiscardedContactPrefs(trx, WINNER, {})).toBe(1);
-      expect(trx.rows).toEqual([]);
+      expect(trx.tables.service_contact_notification_prefs).toEqual([]);
+      expect(trx.tables.customer_refresh_tokens.filter(live).map((r) => r.jti)).toEqual(['h1']);
     });
   });
 
