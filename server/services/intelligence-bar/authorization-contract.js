@@ -153,6 +153,8 @@ CURATED_PREVIEW_TOOL_NAMES.add('void_invoice');
 for (const name of ['pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan']) CURATED_PREVIEW_TOOL_NAMES.add(name);
 // create_invoice: its card lines come from its own preview (create-invoice-tools.js cardLines). A draft only; it sends nothing.
 CURATED_PREVIEW_TOOL_NAMES.add('create_invoice');
+// set_customer_bill_to: its card lines come from its own preview (bill-to-tools.js cardLines). It sends nothing.
+CURATED_PREVIEW_TOOL_NAMES.add('set_customer_bill_to');
 
 // Legacy-bare jobs with no mutation-free preview: what the launch does is
 // fixed and known, so the card states it explicitly (job launch, external
@@ -232,6 +234,7 @@ const ACTION_LABELS = {
   create_payment_plan: 'Create a payment plan (no card charged; emails the customer)',
   cancel_payment_plan: 'Cancel a payment plan',
   create_invoice: 'Create a draft invoice (sends nothing)',
+  set_customer_bill_to: 'Set a customer\'s Bill-To payer (sends nothing)',
   block_sender: 'Block a sender',
   create_pending_estimate: 'Create an estimate',
   create_agent_estimate_draft: 'Save an estimate draft',
@@ -886,6 +889,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // create_invoice: the customer, every line, the totals, and that the draft is not sent.
   if (toolName === 'create_invoice' && preview?.preview === true) {
     for (const line of require('./create-invoice-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
+  // set_customer_bill_to: the customer, the payer, the invoices that move and stay, and that nothing is sent.
+  if (toolName === 'set_customer_bill_to' && preview?.preview === true) {
+    for (const line of require('./bill-to-tools').cardLines(toolName, preview)) push(line.kind, line.text);
   }
   // send_invoice: invoice, money and who is contacted.
   if (toolName === 'send_invoice' && preview?.preview === true) {

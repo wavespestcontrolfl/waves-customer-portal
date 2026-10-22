@@ -980,6 +980,10 @@ const PINNED_DISPLAY_BUILDERS = {
   create_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'create_invoice'
     ? { customer: preview.customer_name || preview.customer_id, total: preview.total, lines: (preview.lines || []).length, notes: preview.notes || 'none', due_date: preview.due_date || 'in 30 days', status: 'draft', sends_to_customer: 'nothing' }
     : null),
+  // set_customer_bill_to: the card names the customer and the payer; the lines ride the contract.
+  set_customer_bill_to: (params, preview) => (preview?.preview === true && preview.tool === 'set_customer_bill_to'
+    ? { customer: preview.customer_name || preview.customer_id, bill_to_now: preview.bill_to_now, new_bill_to: preview.payer_name, invoices_moving: 'none', sends_to_customer: 'nothing' }
+    : null),
   // Feature switches (Codex r1 on #5489): the card must show the live facts
   // the preview read — current → new, what it means, the target and the
   // restart — not just the raw gate name / value the model sent.
@@ -1036,6 +1040,8 @@ const VERIFIED_VERSION_PARAMS = {
   cancel_payment_plan: '_verified_payment_plan_version',
   // create_invoice binds the customer, every line, the dates, the tax and the server-computed total the card showed.
   create_invoice: '_verified_invoice_create_version',
+  // set_customer_bill_to binds the current Bill-To, the payer and the invoices that move and stay.
+  set_customer_bill_to: '_verified_bill_to_version',
   cancel_queued_message: '_verified_message_version',
   // resend_receipt binds the invoice, channels, recipients, amount, memo and the receipt
   // state the card showed — a receipt sent in between is refused, never doubled.
@@ -3456,6 +3462,7 @@ RULES:
 - En-route is not by itself a blanket prohibition on edits. Explain actual tool restrictions, and mention navigation coordination separately without inventing another approval requirement.
 - For write operations, prepare the required confirmation card; only the operator's approval can execute the proposed effects
 - Invoices: send_invoice (when it is in your tools) acts only on an EXISTING invoice — it texts the customer one pay-link text (no email). void_invoice (when it is in your tools) voids ONE invoice that has collected nothing and never deletes it; "delete" or "cancel" an invoice means void. create_invoice (when it is in your tools) creates ONE new DRAFT invoice for a named customer and never sends it; the operator uses send_invoice to send. Never change an amount on an existing invoice, charge a card or refund from the bar; for those, say so and point the operator to that invoice on the Invoices page.
+- Bill-To: set_customer_bill_to (when it is in your tools) sets the Bill-To payer for FUTURE billing on a customer who pays for themselves today and has no open unpaid invoice or checkout; no existing invoice moves. A customer with open invoices, moving existing invoices to a payer, changing or removing an existing payer, or adding a new payer stays on the customer page. There is no per-invoice Bill-To: the payer is set on the account.
 - Invoice reminders and payment plans (when they are in your tools): pause_invoice_reminders, resume_invoice_reminders and stop_invoice_reminders change one invoice's automatic reminders and send nothing; send_invoice_reminder_now texts and emails the customer the next reminder, and schedule_invoice_send sends the invoice later at a set Eastern time (give send_at_et as YYYY-MM-DDTHH:MM); create_payment_plan records a plan of equal installments and emails the customer the plan confirmation but never charges a card; cancel_payment_plan cancels the active plan. Each shows a confirmation card first. Never promise a plan collects money on its own.
 - When showing customer lists, include: name, city, tier, relevant dates, and the specific data point the query is about
 - Look up stored customer, property, service and product facts before asking the operator to retype them. If consequential identity or write scope remains ambiguous, ask one concise clarification. Never guess a write target.
