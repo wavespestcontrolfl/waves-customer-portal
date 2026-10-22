@@ -651,29 +651,6 @@ const WRITER_RULE_SCREENS = Object.freeze([
 // …", "booked for …") is never a reach-out date: the report shows the next
 // visit itself (Codex #5500).
 const REACH_OUT_DATE_MISUSE_RE = new RegExp(`${VISIT_CUE_RE.source}|\\bbook(?:ed|ing)?\\b|\\bvisits?\\b`, 'i');
-// A reach-out sentence names the place where the customer may still see the
-// pest, and a window is one of the commonest: "If ants are still trailing by
-// the kitchen window … on Thursday, October 22, text or call us." was refused
-// on every try in a 2026-10-22 replay (the "window" visit cue), and the report
-// fell back to the fixed copy. So a window named as a location, the object of
-// a place preposition and qualified by a place (a PLACE_NOUNS word or a
-// window-only modifier before it, or a part of the window after it: "by the
-// kitchen window", "around the window frames"), is masked before main's visit
-// test, and nothing else is. A window that is not a location ("your office
-// window should be …", "an arrival window") stays a visit cue, as on main.
-const WINDOW_PLACE_WORDS = [
-  ...PLACE_NOUNS.filter((noun) => noun !== 'windows?'),
-  'front', 'back', 'side', 'rear', 'bay', 'corner', 'sliding', 'screen(?:ed)?', 'storm', 'upstairs', 'downstairs',
-];
-const REACH_OUT_PLACE_WINDOW_RE = new RegExp(
-  '\\b(?:by|at|near|around|along|on|in|under|beside|behind|below|above|over|across|outside|inside|from|past|through)\\s+'
-  + '(?:(?:the|a|an|your|our|this|that|these|those|each|every|some|any)\\s+)?'
-  + `(?:(?:${WINDOW_PLACE_WORDS.join('|')})\\s+windows?|windows?\\s+(?:sills?|frames?|screens?|tracks?|ledges?|wells?|seals?|casings?|trim|panes?))\\b`,
-  'gi',
-);
-function reachOutDateMisused(sentence) {
-  return REACH_OUT_DATE_MISUSE_RE.test(String(sentence || '').replace(REACH_OUT_PLACE_WINDOW_RE, 'near the place'));
-}
 // The reach-out date is the day to get in touch: its sentence must ask the
 // customer to contact us, and the date never ends a period ("keeps working
 // until Wednesday, October 14" would make it a residual claim; Codex #5500).
@@ -734,7 +711,7 @@ function writerRulesRejectionDetail(text, { activeIngredients = [], allowedPhras
     const datePattern = new RegExp(`(?<![\\w-])${allowedPhrasePattern(date)}(?![\\w-])`, 'i');
     const durationEnd = new RegExp(`${DURATION_END_BEFORE_DATE}${allowedPhrasePattern(date)}(?![\\w-])`, 'i');
     if (sentences.some((sentence) => datePattern.test(sentence)
-      && (reachOutDateMisused(sentence) || !REACH_OUT_CONTACT_RE.test(sentence) || durationEnd.test(sentence)))) {
+      && (REACH_OUT_DATE_MISUSE_RE.test(sentence) || !REACH_OUT_CONTACT_RE.test(sentence) || durationEnd.test(sentence)))) {
       return { reason: 'date', match: String(date).trim() };
     }
   }

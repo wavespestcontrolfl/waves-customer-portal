@@ -559,37 +559,6 @@ describe('four-section report: the reach-out date asks the customer to get in to
     expect(writerRulesRejection(text, { allowedDates })).toBeNull();
   });
 
-  // 2026-10-22 replay: a window qualified by a place is a place in a reach-out
-  // sentence, not an arrival window. Every other visit cue stays as on main.
-  test.each([
-    ["WHAT'S NEXT\nIf ants are still trailing by the kitchen window or back door on Wednesday, October 14, text or call us."],
-    ["WHAT'S NEXT\nIf you still see spiders around the window frames on Wednesday, October 14, text or call us."],
-    ["WHAT'S NEXT\nIf ants are still trailing by the office window on Wednesday, October 14, call us."],
-    ["WHAT'S NEXT\nIf you see spiders by the front window on Wednesday, October 14, text or call us."],
-    ["WHAT'S NEXT\nIf you see ants around your windows on Wednesday, October 14, text or call us."],
-    ["WHAT'S NEXT\nWe returned to the kitchen today; if ants remain by Wednesday, October 14, call us."],
-    ["WHAT'S NEXT\nCall us on Wednesday, October 14 to follow up if ants remain."],
-  ])('a window as a place passes: %s', (text) => {
-    expect(writerRulesRejection(text, { allowedDates })).toBeNull();
-  });
-
-  test.each([
-    ["WHAT'S NEXT\nWe'll come back on Wednesday, October 14, so text or call us if anything changes."],
-    ["WHAT'S NEXT\nOur technician will return on Wednesday, October 14, so let us know before then."],
-    ["WHAT'S NEXT\nOur technician is returning on Wednesday, October 14; call us if anything changes."],
-    ["WHAT'S NEXT\nText or call us before your arrival window on Wednesday, October 14."],
-    ["WHAT'S NEXT\nYour window is Wednesday, October 14, so call us if anything changes."],
-    ["WHAT'S NEXT\nYour window falls on Wednesday, October 14, so call us if anything changes."],
-    ["WHAT'S NEXT\nYour office window is Wednesday, October 14; call us if anything changes."],
-    ["WHAT'S NEXT\nYour office window should be Wednesday, October 14, so call us if anything changes."],
-    ["WHAT'S NEXT\nThe kitchen window, as always, is Wednesday, October 14; call us with questions."],
-    ["WHAT'S NEXT\nIf the kitchen window is open when we come back on Wednesday, October 14, call us."],
-    ["WHAT'S NEXT\nYour next few treatments begin Wednesday, October 14; call us if anything changes."],
-    ["WHAT'S NEXT\nText or call us to book a visit for Wednesday, October 14."],
-  ])('a visit, our return or a time window is still refused: %s', (text) => {
-    expect(writerRulesRejection(text, { allowedDates })).toBe('date');
-  });
-
   test.each([
     ['WHAT TO EXPECT\nThe treatment keeps working until Wednesday, October 14.'],
     ['WHAT TO EXPECT\nThe treatment keeps working until Wednesday, October 14, so let us know.'],
