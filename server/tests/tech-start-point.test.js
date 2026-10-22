@@ -44,7 +44,8 @@ describe('techStartPoint', () => {
     expect(techStartPoint({ start_lat: '27.1', start_lng: null })).toBe(RouteOptimizer.HQ);
     expect(techStartPoint({ start_lat: 'x', start_lng: '-82.4' })).toBe(RouteOptimizer.HQ);
     expect(techStartPoint(null)).toBe(RouteOptimizer.HQ);
-    expect(techColumns(['id', 'name'])).toEqual(['id', 'name', 'start_lat', 'start_lng']);
+    expect(techColumns(['id', 'name'], true)).toEqual(['id', 'name', 'start_lat', 'start_lng']);
+    expect(techColumns(['id', 'name'])).toEqual(['id', 'name']);
     const first = jest.fn(async () => HOME);
     const conn = jest.fn(() => ({ where: () => ({ first }) }));
     expect(await loadTechStartPoint(conn, 't1')).toEqual({ lat: 27.0998, lng: -82.4543 });
@@ -54,7 +55,7 @@ describe('techStartPoint', () => {
 
 describe('open-gap search anchors the day at the start point', () => {
   const { _internals: { candidatesForDay } } = require('../services/scheduling/find-time');
-  const firstOffer = () => {
+  const firstOffer = (techStartPoints = true) => {
     const found = candidatesForDay('2035-01-02', { id: 't1', name: 'Tech One', ...HOME }, {
       services: [],
       geo: {
@@ -62,7 +63,7 @@ describe('open-gap search anchors the day at the start point', () => {
         durationMinutes: 60, dayOpen: 8 * 60, earliestStartMin: 0, startFloorByDate: {}, todayEt: '2026-01-01', todayFloorMin: 0,
       },
       excludeSet: new Set(), wantsPackedEnds: false, wantsExpectedMinutesCredit: false,
-      durationMinutes: 60, dayOpen: 8 * 60, dayClose: 17 * 60, slotStepMinutes: 60, everyStepStart: false,
+      durationMinutes: 60, dayOpen: 8 * 60, dayClose: 17 * 60, slotStepMinutes: 60, everyStepStart: false, techStartPoints,
     });
     return found.candidates[0];
   };
@@ -75,6 +76,14 @@ describe('open-gap search anchors the day at the start point', () => {
     expect(office).toBeTruthy();
     expect(home).toBeTruthy();
     expect(home.detour_minutes).toBeLessThan(office.detour_minutes);
+  });
+
+  test('a caller that does not opt in (public booking, estimates) keeps the office even with the gate on (Codex #6435 r1)', () => {
+    delete process.env.GATE_TECH_START_POINTS;
+    const office = firstOffer(true);
+    process.env.GATE_TECH_START_POINTS = 'true';
+    expect(firstOffer(false).detour_minutes).toBe(office.detour_minutes);
+    expect(techColumns(['id', 'name'], false)).toEqual(['id', 'name']);
   });
 });
 

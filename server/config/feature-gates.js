@@ -3674,7 +3674,8 @@ const gates = {
 
   // Technician start points (owner 2026-10-22): a tech with a start address
   // (Team tab, technicians.start_lat/lng) starts and ends the day there, not
-  // at the office, in the staff picker's open-gap search and the arrival-
+  // at the office, for STAFF callers that opt in (never public booking or a
+  // commit-time check), in the staff picker's open-gap search and the arrival-
   // window route check (scheduling/tech-start-point.js). Auto-dispatch, route
   // reorder and the estimate slot list follow in later PRs; flip only after
   // they merge, so every engine prices the same day the same way. OFF in

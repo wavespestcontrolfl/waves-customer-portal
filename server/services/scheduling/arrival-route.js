@@ -146,6 +146,9 @@ async function resolveSeparatedTarget(conn, target, serviceId) {
 async function loadArrivalRouteContext({
   conn = db, serviceId, prospective, date, technicianId, excludeServiceIds = [], excludeEstimateId,
   changes = {}, now = new Date(), travel, preserveCapacity = false, unit = false, alone = false,
+  // Staff callers only: start the day at the tech's start point
+  // (GATE_TECH_START_POINTS). Public and commit-time callers keep the office.
+  startPoints = false,
 }) {
   const stored = prospective ? { id: '__candidate__', route_order: null, created_at: now.toISOString(), ...prospective }
     : await conn('scheduled_services')
@@ -226,7 +229,7 @@ async function loadArrivalRouteContext({
     || (changes.window_start && String(changes.window_start).slice(0, 5) !== String(stored.window_start).slice(0, 5)),
   travel, preserveCapacity, blocks,
   // Where this tech's day starts and ends (GATE_TECH_START_POINTS; off = HQ).
-  home: await loadTechStartPoint(conn, techId) };
+  home: startPoints ? await loadTechStartPoint(conn, techId) : RouteOptimizer.HQ };
 }
 
 // A visit consumes the sum of its members' work, with one journey to the
