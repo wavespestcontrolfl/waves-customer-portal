@@ -433,6 +433,11 @@ function gateStateLabel(g) {
 function FeatureGatesTab() {
   const { gates, error, retry } = useGateList();
   const onCount = (gates || []).filter((g) => g.enabled).length;
+  // A few variables feed two runtime keys (GATE_ESTIMATE_ACCEPTANCE_TERMS =
+  // estimateAcceptanceTerms + estimateAcceptanceTermsRequired); name the key
+  // on those rows so two badges under one variable can be told apart.
+  const envCounts = new Map();
+  for (const g of gates || []) envCounts.set(g.envName, (envCounts.get(g.envName) || 0) + 1);
   return (
     <Card>
       <CardHeader>
@@ -451,6 +456,9 @@ function FeatureGatesTab() {
               <div key={g.key} className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-3">
                 <div className="min-w-0 flex-1">
                   <div className="break-all font-medium text-zinc-900 u-nums">{g.envName || g.key}</div>
+                  {envCounts.get(g.envName) > 1 && (
+                    <div className="mt-1 break-all text-ui-caption text-ink-secondary u-nums">Runtime key: {g.key}</div>
+                  )}
                   {g.description && <div className="mt-1 text-ui-caption text-ink-secondary">{g.description}</div>}
                   {gateNotes(g).map((note) => <div key={note} className="mt-1 text-ui-caption text-ink-secondary">{note}</div>)}
                   {g.requires?.length > 0 && (
