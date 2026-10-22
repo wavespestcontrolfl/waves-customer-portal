@@ -658,7 +658,7 @@ describe('pest writer adapter, rejection detail and repair note', () => {
     const allowedDates = ['Thursday, October 22', 'October 22'];
     const draft = "WHAT WE FOUND\nAnts.\nWHAT WE DID AND WHY\nWe sprayed.\nWHAT TO EXPECT\nFewer ants.\nWHAT'S NEXT\nIf ants are still trailing by the kitchen window or back door threshold on Thursday, October 22, text or call us.";
     const detail = writerRulesRejectionDetail(draft, { allowedDates });
-    expect(detail).toEqual({ reason: 'date', match: 'Thursday, October 22', dateUse: { why: 'visit_word', visitWord: 'window' } });
+    expect(detail).toEqual({ reason: 'date', match: 'Thursday, October 22', sentence: 'If ants are still trailing by the kitchen window or back door threshold on Thursday, October 22, text or call us.' });
     const note = rejectedDraftRepairNote({ draft, rejection: 'date', detail, includeDraft: false });
     expect(note).toContain('also says "window", which reads as a visit or an arrival window');
     expect(note).toContain('"If you still see them on Thursday, October 22, text or call us."');
@@ -670,10 +670,8 @@ describe('pest writer adapter, rejection detail and repair note', () => {
   test('a REACH-OUT DATE with no contact request, or ending a period, says so', () => {
     const allowedDates = ['Thursday, October 22', 'October 22'];
     const noContact = writerRulesRejectionDetail("WHAT'S NEXT\nAnts may still trail on Thursday, October 22.", { allowedDates });
-    expect(noContact.dateUse).toEqual({ why: 'no_contact', visitWord: null });
     expect(rejectedDraftRepairNote({ draft: 'D', rejection: 'date', detail: noContact })).toContain('may appear only in a sentence that asks the customer to text or call us');
     const period = writerRulesRejectionDetail("WHAT'S NEXT\nProtection lasts through October 22, so call us after that.", { allowedDates });
-    expect(period.dateUse.why).toBe('ends_a_period');
     expect(rejectedDraftRepairNote({ draft: 'D', rejection: 'date', detail: period })).toContain('never the end of a period');
   });
 });

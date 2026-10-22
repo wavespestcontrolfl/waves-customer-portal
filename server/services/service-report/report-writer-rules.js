@@ -712,14 +712,9 @@ function writerRulesRejectionDetail(text, { activeIngredients = [], allowedPhras
     const durationEnd = new RegExp(`${DURATION_END_BEFORE_DATE}${allowedPhrasePattern(date)}(?![\\w-])`, 'i');
     const misused = sentences.find((sentence) => datePattern.test(sentence)
       && (REACH_OUT_DATE_MISUSE_RE.test(sentence) || !REACH_OUT_CONTACT_RE.test(sentence) || durationEnd.test(sentence)));
-    if (misused) {
-      // Why the supplied date was refused, for the repair note: a word in its
-      // sentence that reads as a visit ("by the kitchen window" trips the
-      // arrival-window cue), no request to contact us, or a period it ends.
-      const visitWord = REACH_OUT_DATE_MISUSE_RE.exec(misused)?.[0] || null;
-      const why = visitWord ? 'visit_word' : (durationEnd.test(misused) ? 'ends_a_period' : 'no_contact');
-      return { reason: 'date', match: String(date).trim(), dateUse: { why, visitWord } };
-    }
+    // The refused sentence rides along so the repair note can say what in it
+    // was wrong (reachOutDateRepair).
+    if (misused) return { reason: 'date', match: String(date).trim(), sentence: misused };
   }
   // An allowed phrase passes only where it belongs: inside WHAT TO EXPECT
   // and WHAT'S NEXT; the same words elsewhere (a residual period in WHAT WE
@@ -789,11 +784,12 @@ const REPAIR_DRAFT_MAX = 4000;
 // tries ("window" reads as an arrival window), and the report fell back to the
 // fixed copy. The note now names what was wrong with the date's sentence and
 // how to write it.
-function reachOutDateRepair({ match, dateUse }) {
-  if (dateUse.why === 'visit_word') {
-    return ` The sentence with the REACH-OUT DATE (${match}) also says "${dateUse.visitWord}", which reads as a visit or an arrival window. Put that date in its own short sentence that only asks the customer to text or call us, with no place in it (for example "If you still see them on ${match}, text or call us."), and name the place in the sentence before it.`;
+function reachOutDateRepair({ match, sentence }) {
+  const visitWord = REACH_OUT_DATE_MISUSE_RE.exec(sentence)?.[0];
+  if (visitWord) {
+    return ` The sentence with the REACH-OUT DATE (${match}) also says "${visitWord}", which reads as a visit or an arrival window. Put that date in its own short sentence that only asks the customer to text or call us, with no place in it (for example "If you still see them on ${match}, text or call us."), and name the place in the sentence before it.`;
   }
-  if (dateUse.why === 'ends_a_period') {
+  if (new RegExp(`${DURATION_END_BEFORE_DATE}${allowedPhrasePattern(match)}(?![\\w-])`, 'i').test(sentence)) {
     return ` The REACH-OUT DATE (${match}) is the day to get in touch, never the end of a period ("until …", "through …").`;
   }
   return ` The REACH-OUT DATE (${match}) may appear only in a sentence that asks the customer to text or call us.`;
@@ -807,7 +803,7 @@ function rejectedDraftRepairNote({ draft, rejection, detail = null, includeDraft
   const why = bannedWords.length
     ? `it uses words the report refuses (${bannedWords.map((word) => `"${word}"`).join(', ')})`
     : (REPAIR_REASONS[code] || 'it broke one of the OWNER RULES');
-  const words = code === 'date' && detail?.reason === 'date' && detail.dateUse
+  const words = code === 'date' && detail?.reason === 'date' && detail.sentence
     ? reachOutDateRepair(detail)
     : (detail && detail.reason === code && detail.match ? ` The words that tripped it: "${detail.match}".` : '');
   const shown = includeDraft && code !== 'access_code' && draft
