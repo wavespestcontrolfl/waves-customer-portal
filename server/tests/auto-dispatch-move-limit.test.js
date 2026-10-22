@@ -297,6 +297,23 @@ describe('needs-a-person notice: far double bookings are listed quietly until 14
     const digest = deliverOpsDigest.mock.calls[0][0];
     expect(digest.count).toBe(7);
     expect(digest.itemKeys).toContain('near:2026-11-03');
+    // The copy says which ones ring when: the near one is not "more than 2 weeks out".
+    expect(digest.headline).toBe('Schedule — 7 double bookings not alerted yet');
+    expect(digest.summary).toBe('1 within 2 weeks rings on a later dispatch run. 6 ring once they are 2 weeks out.');
+    expect(digest.summary.length).toBeLessThanOrEqual(110);
+  });
+
+  test("an internal test customer's conflict is never listed, far or waiting for a notice", async () => {
+    const { INTERNAL_TEST_CUSTOMER_IDS } = require('../services/internal-test-customers');
+    const demo = (id, date) => ({ id, customer_id: INTERNAL_TEST_CUSTOMER_IDS[0], scheduled_date: date });
+    const bucket = new Map();
+    // The allowance skips the demo account's near conflict, so its notice is never written.
+    notice.collect(bucket, demo('demo-near', '2026-11-03'), 'no_slot', { kind: 'overlap' });
+    notice.collect(bucket, demo('demo-far', '2026-11-20'), 'no_slot', { kind: 'overlap' });
+    await notice.raiseNotices(bucket, { nowDate: NOW, scanComplete: true });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    expect(deliverOpsDigest).not.toHaveBeenCalled();
+    expect(retireIfClean).toHaveBeenCalledTimes(1);
   });
 
   test('a near conflict whose notice stands is not listed; one whose write failed is', async () => {
@@ -310,7 +327,11 @@ describe('needs-a-person notice: far double bookings are listed quietly until 14
     notice.collect(bucket, visit('fails', '2026-11-04'), 'no_slot', { kind: 'overlap' });
     notice.collect(bucket, visit('far', '2026-11-20'), 'no_slot', { kind: 'overlap' });
     await notice.raiseNotices(bucket, { nowDate: NOW, scanComplete: true });
-    expect(deliverOpsDigest.mock.calls[0][0].itemKeys).toEqual(['fails:2026-11-04', 'far:2026-11-20']);
+    expect(deliverOpsDigest.mock.calls[0][0]).toMatchObject({
+      itemKeys: ['fails:2026-11-04', 'far:2026-11-20'],
+      headline: 'Schedule — 2 double bookings not alerted yet',
+      summary: '1 within 2 weeks rings on a later dispatch run. 1 rings once it is 2 weeks out.',
+    });
   });
 
   test('the list keeps at most the digest key cap, soonest first, and says how many more', async () => {
@@ -406,12 +427,32 @@ describe('needs-a-person notice: far double bookings are listed quietly until 14
       const bucket = new Map();
       notice.collect(bucket, visit('held', '2026-11-20'), 'no_slot', { kind: 'overlap' });
       expect(await notice.raiseNotices(bucket, { nowDate: NOW, scanComplete: true })).toBe(0);
-      expect(deliverOpsDigest.mock.calls[0][0].itemKeys).toEqual(['held:2026-11-20']);
+      // Gate off, every conflict rings when the allowance allows: none is "2 weeks out".
+      expect(deliverOpsDigest.mock.calls[0][0]).toMatchObject({
+        itemKeys: ['held:2026-11-20'],
+        headline: 'Schedule — 1 double booking not alerted yet',
+        summary: 'Each one rings as a dispatch alert on a later dispatch run.',
+      });
       expect(retireIfClean).not.toHaveBeenCalled();
       // The next run's notice is written: the list retires.
       deliverOpsDigest.mockClear();
       audit.ringsLeft.mockResolvedValue(10);
       expect(await notice.raiseNotices(bucket, { nowDate: NOW, scanComplete: true })).toBe(1);
+      expect(deliverOpsDigest).not.toHaveBeenCalled();
+      expect(retireIfClean).toHaveBeenCalledTimes(1);
+    } finally {
+      listSpy.mockRestore();
+    }
+  });
+
+  test('gate off with a list standing: an internal test customer\'s conflict does not keep it standing', async () => {
+    delete process.env.GATE_AUTO_DISPATCH_FAR_CONFLICT_QUIET;
+    const { INTERNAL_TEST_CUSTOMER_IDS } = require('../services/internal-test-customers');
+    const listSpy = jest.spyOn(notice, 'farListedVisitIds').mockResolvedValue(['demo']);
+    try {
+      const bucket = new Map();
+      notice.collect(bucket, { id: 'demo', customer_id: INTERNAL_TEST_CUSTOMER_IDS[0], scheduled_date: '2026-11-20' }, 'no_slot', { kind: 'overlap' });
+      await notice.raiseNotices(bucket, { nowDate: NOW, scanComplete: true });
       expect(deliverOpsDigest).not.toHaveBeenCalled();
       expect(retireIfClean).toHaveBeenCalledTimes(1);
     } finally {

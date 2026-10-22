@@ -193,11 +193,30 @@ function splitFar(bucket, nowDate) {
   }
   if (!farOn) return { nearItems: items, farItems: [], farOn };
   const cutoff = farCutoff(nowDate);
-  // notifyAdmin writes nothing for an internal test customer, so its visit is
-  // never listed either (it would wait on the list for a notice forever).
-  const { isInternalTestCustomerId } = require('../internal-test-customers');
-  const real = items.filter((item) => !isInternalTestCustomerId(item.customer_id));
-  return { nearItems: items.filter((item) => item.date <= cutoff), farItems: real.filter((item) => item.date > cutoff), farOn };
+  return { nearItems: items.filter((item) => item.date <= cutoff), farItems: items.filter((item) => item.date > cutoff && listable(item)), farOn };
+}
+
+// notifyAdmin writes nothing for an internal test customer (and the ring
+// allowance skips one, audit.withinRingBudget), so its visit is never listed
+// either: far, or near with no notice, it would wait on the list forever.
+function listable(item) {
+  return !require('../internal-test-customers').isInternalTestCustomerId(item.customer_id);
+}
+
+// The list's title and first line. A far conflict rings at FAR_DAYS; a near
+// one is listed only while its notice waits (allowance spent, a failed
+// write) and rings on a later run, so the copy says which ones ring when.
+function farListCopy(farCount, waitingCount) {
+  const n = farCount + waitingCount;
+  const bookings = `${n} double booking${n === 1 ? '' : 's'}`;
+  if (!waitingCount) {
+    return { headline: `Schedule — ${bookings} more than 2 weeks out`, summary: 'Each one rings as a dispatch alert once it is 2 weeks out.' };
+  }
+  const headline = `Schedule — ${bookings} not alerted yet`;
+  if (!farCount) return { headline, summary: 'Each one rings as a dispatch alert on a later dispatch run.' };
+  const soon = `${waitingCount} within 2 weeks ${waitingCount === 1 ? 'rings' : 'ring'} on a later dispatch run.`;
+  const later = `${farCount} ${farCount === 1 ? 'rings once it is' : 'ring once they are'} 2 weeks out.`;
+  return { headline, summary: `${soon} ${later}` };
 }
 
 function farLines(sorted, names, shortDateET) {
@@ -249,25 +268,26 @@ async function farListedVisitIds(conn = require('../../models/db')) {
 // failed); otherwise it stays as it is, the way a notice closes only on
 // proof. In-app only: a missing Activity feed sends no email (splitFar rings
 // every conflict in that case). Never throws.
-async function reportFarConflicts(farItems, { enabled, scanComplete }) {
+async function reportFarConflicts({ far, waiting }, { enabled, scanComplete }) {
+  const listed = [...far, ...waiting];
   try {
     if (!scanComplete) {
-      logger.info(`[auto-dispatch] far double-booking list left as it is: this run's conflict scan was incomplete (${farItems.length} to list)`);
+      logger.info(`[auto-dispatch] far double-booking list left as it is: this run's conflict scan was incomplete (${listed.length} to list)`);
       return;
     }
-    if (!farItems.length) {
+    if (!listed.length) {
       await require('../ops-digest-fall-off').retireIfClean(FAR_DIGEST_KEY, { lockKey: `ops-digest:${FAR_DIGEST_KEY}` });
       return;
     }
     // Gate off (or no Activity feed): never start a list; keep one that still
     // stands, with the conflicts whose notice is not written yet.
     if (!enabled) {
-      const listed = await module.exports.farListedVisitIds();
-      if (!Array.isArray(listed) || !listed.length) return;
+      const standing = await module.exports.farListedVisitIds();
+      if (!Array.isArray(standing) || !standing.length) return;
     }
     const audit = require('./audit');
     const { shortDateET } = require('../admin-alert-names');
-    const all = [...farItems].sort((a, b) => (a.date < b.date ? -1 : (a.date > b.date ? 1 : 0)));
+    const all = [...listed].sort((a, b) => (a.date < b.date ? -1 : (a.date > b.date ? 1 : 0)));
     // The text stops at ops-digest's item-key cap. The full set goes in twice:
     // as itemKeys, whose itemSetHash ops-digest computes over every key (past
     // the cap it stores no keys, but the hash still changes with the set, so
@@ -280,8 +300,7 @@ async function reportFarConflicts(farItems, { enabled, scanComplete }) {
     const lines = farLines(sorted, names, shortDateET);
     if (all.length > sorted.length) lines.push(`And ${all.length - sorted.length} more after the last date above.`);
     const n = all.length;
-    const headline = `Schedule — ${n} double booking${n === 1 ? '' : 's'} more than 2 weeks out`;
-    const summary = 'Each one rings as a dispatch alert once it is 2 weeks out.';
+    const { headline, summary } = farListCopy(far.length, waiting.length);
     await require('../ops-digest').deliverOpsDigest({
       fallOff: true,
       key: FAR_DIGEST_KEY,
@@ -317,8 +336,8 @@ async function raiseNotices(bucket, { nowDate = new Date(), clearedIds = new Set
   // when the scan no longer loads its visit.
   // Gate off, a list still standing keeps the same ones until their notice
   // stands too, then retires (reportFarConflicts never starts a list then).
-  const waiting = nearItems.filter((item) => !persisted.has(item.key));
-  await reportFarConflicts(farOn ? [...farItems, ...waiting] : waiting, { enabled: farOn, scanComplete });
+  const waiting = nearItems.filter((item) => !persisted.has(item.key) && listable(item));
+  await reportFarConflicts({ far: farItems, waiting }, { enabled: farOn, scanComplete });
   return rang;
 }
 
