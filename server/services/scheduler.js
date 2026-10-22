@@ -5332,11 +5332,13 @@ function initScheduledJobs() {
             // visit today, or a changed label blocks it. Same fail-closed
             // block+retire path, no new mechanism.
             let labelStale = false;
+            // the same check also refuses an unedited draft written before the 2026-10-22 company facts (#6447): its own reason and note
+            let companyFactRetired = false;
             if (!anchorStale && !amountsStale && !openTimesStale && !slaStale) {
               try {
                 const labelDecision = await db('agent_decisions')
                   .where({ id: claimMeta.agent_decision_id })
-                  .first('input_snapshot', 'prompt_version');
+                  .first('input_snapshot', 'prompt_version', 'suggested_message');
                 // The reply guard runs on the final body of every real-answers
                 // decision (an edit may not add label timing); the visit recheck
                 // only for a body that still copies a snapshotted sentence.
@@ -5349,6 +5351,7 @@ function initScheduledJobs() {
                   logger.warn(`[scheduled-sms] ${msg.id} label-facts recheck unreadable; deferring to the provider-boundary check`);
                 } else {
                   labelStale = Boolean(labelReason);
+                  companyFactRetired = require('./agent-decision-send-checks').blockReasonIsRetiredCompanyFact(labelReason);
                 }
               } catch (err) {
                 logger.warn(`[scheduler] label-facts revalidation failed for scheduled sms ${msg.id}: ${err.message}; deferring to the provider-boundary check`);
@@ -5424,7 +5427,7 @@ function initScheduledJobs() {
                     : slaStale
                       ? 'stale_sla_agent_decision'
                       : labelStale
-                        ? 'stale_label_facts_agent_decision'
+                        ? (companyFactRetired ? 'stale_company_facts_agent_decision' : 'stale_label_facts_agent_decision')
                         : reserviceStale
                           ? 'stale_reservice_agent_decision'
                           : openLoopsStale
@@ -5467,7 +5470,9 @@ function initScheduledJobs() {
                         : slaStale
                           ? 'This scheduled reply’s follow-up timing no longer matches the current window — review the thread.'
                           : labelStale
-                            ? 'This scheduled reply quoted product label timing that is no longer current for the customer’s latest visit — review the thread.'
+                            ? (companyFactRetired
+                              ? 'This scheduled reply was drafted before the current company facts (payment and inside-spray policy) — rewrite it, then send.'
+                              : 'This scheduled reply quoted product label timing that is no longer current for the customer’s latest visit — review the thread.')
                             : reserviceStale
                               ? `This scheduled reply promises a free re-service that could not be revalidated (${reserviceReason}) — review the thread.`
                               : openLoopsStale

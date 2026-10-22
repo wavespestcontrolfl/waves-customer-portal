@@ -137,7 +137,7 @@ describe('GATE_SMS_REAL_ANSWERS off — byte-identical to v11', () => {
 
   test('PROMPT_VERSION export stays house_voice_v11 (the live/default cohort identity)', () => {
     expect(PROMPT_VERSION).toBe('house_voice_v11');
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers13_n');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers25_n');
     expect(REAL_ANSWERS_PROMPT_VERSION).not.toBe(PROMPT_VERSION);
   });
 
@@ -966,7 +966,7 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
     });
 
     expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-1' });
-    expect(result.promptVersion).toBe('house_voice_v12_real_answers13_n');
+    expect(result.promptVersion).toBe('house_voice_v12_real_answers25_n');
     expect(result.factsBlock).toContain('OPEN TIMES (real, bookable slots, ET');
     // the 2-hour customer-facing arrival window, never the raw 1-hour slot
     expect(result.factsBlock).toContain('Tuesday, September 29: 9:00 AM - 11:00 AM');
@@ -1460,7 +1460,7 @@ describe('draftShadowReply — customer.city flows to OPEN TIMES; prompt_version
     const { insertedRows, getAvailableSlots } = await runDraft({ gateOn: true, city: 'Venice' });
     expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'customer-1' });
     expect(insertedRows).toHaveLength(1);
-    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers13_n');
+    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers25_n');
     expect(insertedRows[0].facts_block).toContain('OPEN TIMES (real, bookable slots, ET');
     expect(insertedRows[0].facts_block).toContain('Tuesday, September 29: 9:00 AM - 11:00 AM');
   });
@@ -1469,7 +1469,7 @@ describe('draftShadowReply — customer.city flows to OPEN TIMES; prompt_version
     const { insertedRows, getAvailableSlots } = await runDraft({ gateOn: true, schedulingIntent: false });
     expect(getAvailableSlots).not.toHaveBeenCalled();
     expect(insertedRows[0].facts_block).not.toContain('OPEN TIMES');
-    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers13_n'); // the prompt rewrite still applies; only the section is withheld
+    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers25_n'); // the prompt rewrite still applies; only the section is withheld
   });
 });
 
@@ -2842,7 +2842,7 @@ describe('free re-service is an entitlement resolved through the existing mechan
       test('through the real immediate-send check; a decision WITHOUT the action and a non-promise body is untouched', async () => {
         loadWith({ lanes: [], booked: [] });
         const { agentDecisionSendBlockReason } = require('../services/agent-decision-send-checks');
-        const withAction = { id: 'd1', customer_id: 'cust-1', suggested_message: missed, input_snapshot: JSON.stringify({ reservice_lanes_snapshot: ['pest'], intended_actions: meta.intendedActions }), prompt_version: 'house_voice_v12_real_answers2' };
+        const withAction = { id: 'd1', customer_id: 'cust-1', suggested_message: missed, input_snapshot: JSON.stringify({ reservice_lanes_snapshot: ['pest'], intended_actions: meta.intendedActions }), prompt_version: 'house_voice_v12_real_answers25_n' };
         await expect(agentDecisionSendBlockReason({ decision: withAction, outgoingBody: missed })).resolves.toMatch(/re-service promise unsendable/);
         await expect(agentDecisionSendBlockReason({ decision: { ...withAction, input_snapshot: JSON.stringify({ intended_actions: [] }) }, outgoingBody: missed })).resolves.toBeNull();
       });
@@ -2989,7 +2989,7 @@ describe('free re-service is an entitlement resolved through the existing mechan
         loadWith({ lanes: ['pest'] });
         const { agentDecisionSendBlockReason } = require('../services/agent-decision-send-checks');
         await expect(agentDecisionSendBlockReason({
-          decision: { id: 'd1', customer_id: 'cust-1', suggested_message: missed, input_snapshot: JSON.stringify({ reservice_lanes_snapshot: out.promisedLanes, intended_actions: sendLink }), prompt_version: 'house_voice_v12_real_answers2' },
+          decision: { id: 'd1', customer_id: 'cust-1', suggested_message: missed, input_snapshot: JSON.stringify({ reservice_lanes_snapshot: out.promisedLanes, intended_actions: sendLink }), prompt_version: 'house_voice_v12_real_answers25_n' },
           outgoingBody: missed,
         })).resolves.toBeNull();
       });
@@ -4593,7 +4593,8 @@ describe('free re-service is an entitlement resolved through the existing mechan
         const { drafter } = loadWith({ lanes: ['pest'] });
         await expect(drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers', draftId: null, intendedActions: sendLinkAction } })).resolves.toBeNull();
         const { agentDecisionSendBlockReason } = require('../services/agent-decision-send-checks');
-        await expect(agentDecisionSendBlockReason({ decision: predeploy, outgoingBody: body })).resolves.toBeNull();
+        // the re-service leg passes (eligible); the unedited pre-25 draft is then refused by the retired-company-fact check (#6447)
+        await expect(agentDecisionSendBlockReason({ decision: predeploy, outgoingBody: body })).resolves.toMatch(/company fact retired/);
         const ineligible = loadWith({ lanes: [] });
         await expect(ineligible.drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v11', draftId: null, intendedActions: sendLinkAction } })).resolves.toMatch(/no longer eligible/);
         const { agentDecisionSendBlockReason: blockAgain } = require('../services/agent-decision-send-checks');
