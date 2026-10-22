@@ -1262,8 +1262,11 @@ function mapV1ToLegacyShape(v1Result) {
   // page, the invoice and the accept use). The engine still prices it on the
   // pest line of a bundle, so a pest + mosquito estimate cached a $99 nobody
   // bills and stored it in onetime_total (EST-2026-1185). The writer leaves
-  // it out, so no reader has to take it back out (#6438).
-  const membershipFee = require('../estimate-converter').recurringMixHasMembershipFeeService(services)
+  // it out, so no reader has to take it back out (#6438). Palm injection
+  // rides outside services[] (recurring.palmInjectionMo); the public page's
+  // recurringServicesWithSupplements counts it as a line, so it counts here.
+  const feeMixServices = palmMonthlyAfterCredits > 0 ? [...services, { service: 'palm_injection' }] : services;
+  const membershipFee = require('../estimate-converter').recurringMixHasMembershipFeeService(feeMixServices)
     ? (pestLI?.initialFee || 0)
     : 0;
 

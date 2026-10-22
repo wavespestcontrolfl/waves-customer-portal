@@ -25,4 +25,13 @@ describe('v1 legacy mapper setup fee by plan mix', () => {
     expect(bundle.oneTime.total).toBe(Math.round((solo.oneTime.total - solo.oneTime.membershipFee) * 100) / 100);
     expect(bundle.totals.year1).toBe(Math.round((bundle.totals.year2 + bundle.oneTime.total) * 100) / 100);
   });
+
+  test('pest + palm injection is a multi-service plan: no cached setup fee (codex #6438 r7)', () => {
+    const mapped = mapV1ToLegacyShape(generateEstimate({
+      ...property,
+      services: { pest: { frequency: 'quarterly' }, palm: { palmCount: 3, treatmentType: 'combo', palmSize: 'medium' } },
+    }));
+    expect(mapped.recurring.palmInjectionMo).toBeGreaterThan(0);
+    expect(mapped.oneTime.membershipFee).toBe(0);
+  });
 });
