@@ -366,8 +366,6 @@ const END_NOW_PAST_WINDOW_MESSAGE = 'Ending now is not offered: this plan starte
 
 // Whole ET calendar days from the term's start date to `now`'s ET date.
 // Day 90 is still inside the window (refund allowed); day 91 is past it.
-// `now` is the instant the cancellation was ACCEPTED: a retry or repair of
-// an accepted end-now passes the acceptance instant, never the retry's.
 function prepayRefundWindowPassed(term, now = new Date()) {
   const start = term && term.term_start ? dateOnlyString(term.term_start) : null;
   if (!start || !/^\d{4}-\d{2}-\d{2}$/.test(start)) return false;
@@ -377,21 +375,18 @@ function prepayRefundWindowPassed(term, now = new Date()) {
 
 // GATE_PREPAY_REFUND_90_DAY (owner R7): with no refund owed after day 90 the
 // customer keeps the paid coverage, so a FRESH end-now of such a term is not
-// offered. `at` = the first-approval instant of an accepted run (repairs keep
-// their refund), else now.
-function endNowBlockedForTerm(term, wholeAccount, disposition, at) {
-  return prepayRefund90DayLive() && !!term && wholeAccount === true
-    && disposition === 'end_now_refund' && prepayRefundWindowPassed(term, at || new Date());
+// offered. Fresh = no open acceptance and no tied recorded run (`hasRun`):
+// any existing run finishes under what was accepted, whatever the gate and
+// the dates were when it was accepted.
+// Gate on and the window passed: guidance must not point at "cancel effective
+// now", which a fresh cancel of this term would be refused.
+function endNowPastRefundWindow(term) {
+  return prepayRefund90DayLive() && prepayRefundWindowPassed(term);
 }
 
-// The instant an accepted cancel request was first approved: the durable
-// fee-evaluation stamp, else the request row's own creation time.
-function acceptedAtOf(requestRow) {
-  if (!requestRow) return null;
-  const stamped = acceptedFeeEvaluationAt(requestRow);
-  if (stamped) return stamped;
-  const created = requestRow.created_at ? new Date(requestRow.created_at) : null;
-  return created && !Number.isNaN(created.getTime()) ? created : null;
+function endNowBlockedForTerm(term, wholeAccount, disposition, hasRun) {
+  return prepayRefund90DayLive() && !!term && wholeAccount === true
+    && disposition === 'end_now_refund' && !hasRun && prepayRefundWindowPassed(term);
 }
 
 /**
@@ -514,7 +509,9 @@ async function refundCoveredIds(term, customerId) {
 async function liveCoveredKeepIds(term, customerId) {
   if (!termCoverageResolvable(term)) {
     throw new CancelPlanError(409, 'prepay_coverage_unresolvable',
-      'The annual-prepay term does not carry a readable coverage identity (service type / visit count), so the visits it covers cannot be resolved. Repair the term from the invoice tools, or cancel effective now.');
+      endNowPastRefundWindow(term)
+        ? 'The annual-prepay term does not carry a readable coverage identity (service type / visit count), so the visits it covers cannot be resolved. Ending now is not offered after 90 days (no refund is owed), so the office must repair the term from the invoice tools before it can be cancelled at the end of paid coverage.'
+        : 'The annual-prepay term does not carry a readable coverage identity (service type / visit count), so the visits it covers cannot be resolved. Repair the term from the invoice tools, or cancel effective now.');
   }
   let rows;
   try {
@@ -534,7 +531,9 @@ async function liveCoveredKeepIds(term, customerId) {
   // account always passes.
   if (ids.length < Number.parseInt(term.coverage_visit_count, 10)) {
     throw new CancelPlanError(409, 'coverage_rows_incomplete',
-      `The prepay term's covered visits are not fully on the calendar right now (${ids.length} of ${term.coverage_visit_count} — a skipped visit's replacement may still be reseeding). Nothing was cancelled — retry shortly, or cancel effective now with the refund.`);
+      endNowPastRefundWindow(term)
+        ? `The prepay term's covered visits are not fully on the calendar right now (${ids.length} of ${term.coverage_visit_count} — a skipped visit's replacement may still be reseeding). Nothing was cancelled — retry shortly. Ending now is not offered after 90 days (no refund is owed), so if the visits stay short the office must repair the plan's covered-visit records before it can be cancelled at the end of paid coverage.`
+        : `The prepay term's covered visits are not fully on the calendar right now (${ids.length} of ${term.coverage_visit_count} — a skipped visit's replacement may still be reseeding). Nothing was cancelled — retry shortly, or cancel effective now with the refund.`);
   }
   return ids;
 }
@@ -967,6 +966,22 @@ function customerSummary(customer) {
   };
 }
 
+// GATE_PREPAY_REFUND_90_DAY, preview side: is "end now" unavailable for this
+// term? A run already accepted (the open acceptance, or the tied recorded run
+// the commit's duplicate latch would repair — the same lookup) finishes under
+// what was accepted, so only a fresh end-now is unavailable.
+async function endNowUnavailableForTerm({ customerId, term, wholeAccount, prepayPlan, acceptance }) {
+  if (!prepayRefund90DayLive() || !term || !wholeAccount || !prepayRefundWindowPassed(term)) return false;
+  if (acceptance) return false;
+  if (term.renewal_decision !== 'cancel' || prepayPlan.prepayDisposition !== 'end_now_refund') return true;
+  try {
+    return !(await findTiedPriorCase(customerId, term, prepayPlan)).priorReq;
+  } catch (tieErr) {
+    logger.warn(`[admin-cancellation] preview prior-run lookup failed for ${customerId}: ${tieErr.message}`);
+    return true;
+  }
+}
+
 async function previewCancelPlan({ customerId, ...raw } = {}) {
   if (!CancellationResolution.cancelFlowV2Enabled()) {
     throw new CancelPlanError(404, 'cancel_flow_v2_off', 'Cancel flow V2 is not enabled');
@@ -1053,21 +1068,8 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
     buildCancellationImpact(customerId, wholeAccount ? [] : scope, { after: prepayPlan.keepThrough, keepVisitIds, keepScoped: scopedRetry }),
   ]);
   // GATE_PREPAY_REFUND_90_DAY: past day 90 "end now" is not offered (no refund
-  // is owed, the customer keeps the paid coverage). Judged at the accepted
-  // instant for a repair retry of an accepted run, else now.
-  // The window anchor: the open acceptance, else the tied recorded run the
-  // commit's duplicate latch would repair (same lookup), else now.
-  let windowAnchor = acceptedAtOf(acceptance);
-  if (prepayRefund90DayLive() && !windowAnchor && term && wholeAccount
-    && term.renewal_decision === 'cancel' && prepayPlan.prepayDisposition === 'end_now_refund') {
-    try {
-      windowAnchor = acceptedAtOf((await findTiedPriorCase(customerId, term, prepayPlan)).priorReq);
-    } catch (tieErr) {
-      logger.warn(`[admin-cancellation] preview prior-run lookup failed for ${customerId}: ${tieErr.message}`);
-    }
-  }
-  const endNowUnavailable = prepayRefund90DayLive() && !!term && wholeAccount
-    && prepayRefundWindowPassed(term, windowAnchor || new Date());
+  // is owed, the customer keeps the paid coverage).
+  const endNowUnavailable = await endNowUnavailableForTerm({ customerId, term, wholeAccount, prepayPlan, acceptance });
   const endNowBlocked = endNowUnavailable && prepayPlan.prepayDisposition === 'end_now_refund';
   const refund = term && prepayPlan.prepayDisposition === 'end_now_refund' && !endNowBlocked
     ? await computePrepayRefund({ ...term, customer_id: customerId })
@@ -1182,107 +1184,148 @@ async function raisePrepayRefundTask({ customer, request, term, refund, actorLab
 // disposition, kept only while it is a retry of that run (its acceptance is
 // still open, or resolved with the same identity inside 24h). Returns
 // { prior, priorSnap, priorEndNow, priorReq }; priorReq is the tied run's
-// request row (the acceptance whose instant anchors the 90-day window).
+// request row (a non-null priorReq = an existing run, not a fresh cancel).
 // Throws the fail-closed 503 when a retry cannot be told from a new cancel.
-async function findTiedPriorCase(customerId, term, prepayPlan) {
-  let prior = null;
-  let priorSnap = null;
-  let priorEndNow = false;
-  let tiedReq = null;
+const caseSnapshotOf = (c) => (typeof c.snapshot === 'string' ? JSON.parse(c.snapshot) : (c.snapshot || {}));
+
+// The term's recent cases. End-now history scans INDEPENDENTLY of the
+// disposition match: find() short-circuits at the first matching case, so an
+// end_now_refund case sitting after the match in the window would never set
+// the flag — and the inverse refusal must outrank any echo of an older
+// end_at_term case.
+async function recentTermCases(customerId, term, prepayPlan) {
   const recent = await db('cancellation_cases')
     .where({ customer_id: customerId })
     .orderBy('created_at', 'desc')
     .limit(10)
     .select('id', 'service_request_id', 'status', 'snapshot');
-  // End-now history scans INDEPENDENTLY of the disposition match:
-  // find() short-circuits at the first matching case, so an
-  // end_now_refund case sitting after the match in the window would
-  // never set the flag — and the inverse refusal below must outrank
-  // any echo of an older end_at_term case.
-  const parsed = (recent || []).map((c) => ({
-    c,
-    snap: typeof c.snapshot === 'string' ? JSON.parse(c.snapshot) : (c.snapshot || {}),
-  }));
-  priorEndNow = parsed.some(({ snap }) => String(snap.prepayTermId || '') === String(term.id)
-    && String(snap.prepayDisposition || '') === 'end_now_refund');
-  const hit = parsed.find(({ snap }) => String(snap.prepayTermId || '') === String(term.id)
-    && String(snap.prepayDisposition || '') === String(prepayPlan.prepayDisposition || '')) || null;
-  prior = hit ? hit.c : null;
-  if (hit) priorSnap = hit.snap;
-  // The echo is only for RETRIES of that run — proven by its acceptance
-  // being still OPEN (the run owes follow-ups; its repair identity is
-  // the request's own stamp + snapshot boundary), or RESOLVED with the
-  // SAME IDENTITY: the customer is still churned, in the churn episode
-  // that run recorded, and the coverage boundary it told the customer
-  // still stands. A historical case, a won-back account cancelling the
-  // same still-current term (even inside a day — the live account would
-  // otherwise stay billable behind the echo), or an office correction
-  // of term_end (the customer must be re-told the new date; the dated
-  // task carries it in its key and #3767 retires the stale one) is a
-  // NEW cancellation: fall through and process fresh (the decided term
-  // reads 'decision_already_recorded'; the refund recounts from the
-  // live rows). The echo also stays BOUNDED to the 24h lost-response
-  // window: identity narrows it, never extends it — staff can add
-  // visits or a recurrence to a still-churned account, and a later
-  // cancellation on the same term must reach the processor for them,
-  // not a days-old echo. A resolved run with no episode stamp
-  // (pre-episode, or a stamp that failed) has only the window + the
-  // churned row as its identity.
-  if (prior) {
-    let tied = false;
-    let openTie = false;
-    try {
-      const priorReq = prior.service_request_id
-        ? await db('service_requests').where({ id: prior.service_request_id }).first('id', 'status', 'created_at', 'metadata')
-        : null;
-      openTie = !!priorReq && priorReq.status === 'new';
-      let resolvedTie = false;
-      if (!openTie && priorReq && priorReq.status === 'resolved'
-        && new Date(priorReq.created_at).getTime() >= Date.now() - 24 * 60 * 60 * 1000) {
-        const live = await db('customers').where({ id: customerId }).first('pipeline_stage', 'churn_episode_id');
-        const stillChurned = !!live && live.pipeline_stage === 'churned';
-        const stamped = (requestCancelPlanMeta(priorReq) || {}).churnEpisodeId || null;
-        const sameEpisode = !stamped || String((live && live.churn_episode_id) || '') === String(stamped);
-        // Boundary compared only when both sides carry one (a legacy
-        // snapshot without effectiveOn has no date to contradict).
-        const priorBoundary = priorSnap && priorSnap.effectiveOn ? String(priorSnap.effectiveOn) : null;
-        const sameBoundary = !prepayPlan.keepThrough || !priorBoundary || priorBoundary === prepayPlan.keepThrough;
-        resolvedTie = stillChurned && sameEpisode && sameBoundary;
-        if (!resolvedTie) {
-          logger.info(`[admin-cancellation] resolved case ${prior.id} is not this run's identity (churned=${stillChurned} episode=${sameEpisode} boundary=${sameBoundary})`);
-        }
+  const parsed = (recent || []).map((c) => ({ c, snap: caseSnapshotOf(c) }));
+  const ofTerm = ({ snap }) => String(snap.prepayTermId || '') === String(term.id);
+  return {
+    priorEndNow: parsed.some((e) => ofTerm(e) && String(e.snap.prepayDisposition || '') === 'end_now_refund'),
+    hit: parsed.find((e) => ofTerm(e) && String(e.snap.prepayDisposition || '') === String(prepayPlan.prepayDisposition || '')) || null,
+  };
+}
+
+// RESOLVED with the SAME IDENTITY: the customer is still churned, in the
+// churn episode that run recorded, and the coverage boundary it told the
+// customer still stands — inside the 24h lost-response window. A historical
+// case, a won-back account cancelling the same still-current term, or an
+// office correction of term_end is a NEW cancellation.
+async function resolvedRunTie(priorReq, prior, priorSnap, customerId, prepayPlan) {
+  if (!priorReq || priorReq.status !== 'resolved'
+    || new Date(priorReq.created_at).getTime() < Date.now() - 24 * 60 * 60 * 1000) return false;
+  const live = await db('customers').where({ id: customerId }).first('pipeline_stage', 'churn_episode_id');
+  const stillChurned = !!live && live.pipeline_stage === 'churned';
+  const stamped = (requestCancelPlanMeta(priorReq) || {}).churnEpisodeId || null;
+  const sameEpisode = !stamped || String((live && live.churn_episode_id) || '') === String(stamped);
+  // Boundary compared only when both sides carry one (a legacy snapshot
+  // without effectiveOn has no date to contradict).
+  const priorBoundary = priorSnap && priorSnap.effectiveOn ? String(priorSnap.effectiveOn) : null;
+  const sameBoundary = !prepayPlan.keepThrough || !priorBoundary || priorBoundary === prepayPlan.keepThrough;
+  const tied = stillChurned && sameEpisode && sameBoundary;
+  if (!tied) {
+    logger.info(`[admin-cancellation] resolved case ${prior.id} is not this run's identity (churned=${stillChurned} episode=${sameEpisode} boundary=${sameBoundary})`);
+  }
+  return tied;
+}
+
+// The echo is only for RETRIES of that run — proven by its acceptance being
+// still OPEN (the run owes follow-ups) or RESOLVED with the same identity.
+// Fail CLOSED: unable to tell a retry from a new cancellation, the run must
+// not open a second request/case and re-run the processor on a guess — same
+// posture as the acceptance lookup.
+async function tieOfRun(prior, priorSnap, customerId, prepayPlan) {
+  try {
+    const priorReq = prior.service_request_id
+      ? await db('service_requests').where({ id: prior.service_request_id }).first('id', 'status', 'created_at', 'metadata')
+      : null;
+    const openTie = !!priorReq && priorReq.status === 'new';
+    const tied = openTie || await resolvedRunTie(priorReq, prior, priorSnap, customerId, prepayPlan);
+    return { tied, openTie, priorReq };
+  } catch (tieErr) {
+    logger.warn(`[admin-cancellation] latch acceptance check failed for case ${prior.id}: ${tieErr.message}`);
+    throw new CancelPlanError(503, 'acceptance_check_unavailable',
+      'Could not confirm whether this cancellation was already processed. Try again in a moment.');
+  }
+}
+
+async function findTiedPriorCase(customerId, term, prepayPlan) {
+  const { priorEndNow, hit } = await recentTermCases(customerId, term, prepayPlan);
+  const none = { prior: null, priorSnap: null, priorEndNow, priorReq: null };
+  if (!hit) return none;
+  const { tied, openTie, priorReq } = await tieOfRun(hit.c, hit.snap, customerId, prepayPlan);
+  if (!tied) {
+    logger.info(`[admin-cancellation] case ${hit.c.id} has no live acceptance — treating this as a NEW cancellation, not a retry`);
+    return none;
+  }
+  if (openTie && !(hit.snap && hit.snap.outcome)) {
+    // An OPEN acceptance whose case carries NO outcome is a LOST STAMP (the
+    // first run pushed outcome_record_failed and kept the acceptance open),
+    // not a finished run to echo: every repair in the latch keys on the
+    // recorded outcome. Fall through instead — the open acceptance carries
+    // the retry into the processor's repair pass, the decided term reads
+    // decision_already_recorded, the refund task dedupes by term, and the
+    // run re-stamps the outcome.
+    logger.info(`[admin-cancellation] case ${hit.c.id} has an open acceptance but no recorded outcome (lost stamp) — running the repair retry instead of echoing`);
+    return none;
+  }
+  return { prior: hit.c, priorSnap: hit.snap, priorEndNow, priorReq };
+}
+
+// Repair a lost refund task before answering a retry (see the latch): raise it
+// only on facts somebody APPROVED. Returns { repairedRefund, refundRepairedNow,
+// repairErrors }; never throws.
+async function repairLostRefundTask({
+  prior, priorSnap, prepayPlan, refund, term, customer, actorLabel, suppliedFingerprint, liveApprovedFacts,
+}) {
+  let repairedRefund = priorSnap && priorSnap.refund ? priorSnap.refund : null;
+  let refundRepairedNow = false;
+  const repairErrors = [];
+  if (prepayPlan.prepayDisposition === 'end_now_refund' && !repairedRefund) {
+    // The repaired task must carry facts somebody APPROVED (codex r8
+    // P1): this latch answers before any fingerprint check, so a
+    // coverage / term / payment-refund change between attempts could
+    // otherwise mint an actionable billing task for numbers nobody saw.
+    // Approved = the live recount still matches the FIRST run's recorded
+    // proposal, OR the caller carries a fingerprint matching the live
+    // facts (the operator just re-approved them from a fresh preview).
+    // Neither → refund_facts_changed; a fresh preview → commit is the
+    // approval path.
+    const proposed = priorSnap && priorSnap.proposedRefund ? priorSnap.proposedRefund : null;
+    let approved = refundFactsMatch(proposed, refund);
+    if (!approved && suppliedFingerprint) {
+      try {
+        approved = (await liveApprovedFacts()).fingerprint === suppliedFingerprint;
+      } catch (factsErr) {
+        logger.warn(`[admin-cancellation] live-facts check failed during repair for case ${prior.id}: ${factsErr.message}`);
       }
-      tied = openTie || resolvedTie;
-      tiedReq = priorReq;
-    } catch (tieErr) {
-      // Fail CLOSED: unable to tell a retry from a new cancellation, the
-      // run must not open a second request/case and re-run the
-      // processor on a guess — same posture as the acceptance lookup.
-      logger.warn(`[admin-cancellation] latch acceptance check failed for case ${prior.id}: ${tieErr.message}`);
-      throw new CancelPlanError(503, 'acceptance_check_unavailable',
-        'Could not confirm whether this cancellation was already processed. Try again in a moment.');
     }
-    if (!tied) {
-      logger.info(`[admin-cancellation] case ${prior.id} has no live acceptance — treating this as a NEW cancellation, not a retry`);
-      prior = null;
-      priorSnap = null;
-    } else if (openTie && !(priorSnap && priorSnap.outcome)) {
-      // An OPEN acceptance whose case carries NO outcome is a LOST
-      // STAMP (the first run pushed outcome_record_failed and kept the
-      // acceptance open), not a finished run to echo: every repair in
-      // this latch keys on the recorded outcome, so echoing would
-      // answer "processed, 0 pulled, no errors" on every retry while
-      // the acceptance never resolves. Fall through instead — the open
-      // acceptance carries the retry into the processor's repair pass
-      // (which reconstructs the pull set from run 1's cancelled rows),
-      // the decided term reads decision_already_recorded, the refund
-      // task dedupes by term, and the run re-stamps the outcome.
-      logger.info(`[admin-cancellation] case ${prior.id} has an open acceptance but no recorded outcome (lost stamp) — running the repair retry instead of echoing`);
-      prior = null;
-      priorSnap = null;
+    if (!approved) {
+      repairErrors.push('refund_facts_changed');
+      logger.error(`[admin-cancellation] refund repair for case ${prior.id} refused — the live refund matches neither the recorded proposal nor an approved preview`);
+    } else try {
+      await raisePrepayRefundTask({
+        customer, request: { id: prior.service_request_id }, term, refund, actorLabel,
+      });
+      repairedRefund = refund;
+      refundRepairedNow = true;
+      try {
+        const snap = { ...priorSnap, refund };
+        delete snap.proposedRefund;
+        await db('cancellation_cases').where({ id: prior.id })
+          .update({ snapshot: JSON.stringify(snap), updated_at: new Date() });
+      } catch (snapErr) {
+        // Task persisted (term-deduped) — a lost snapshot stamp only
+        // means the next retry re-raises into the dedupe.
+        logger.warn(`[admin-cancellation] refund repair stamp failed for case ${prior.id}: ${snapErr.message}`);
+      }
+    } catch (repairErr) {
+      repairErrors.push('prepay_refund_task_missing');
+      logger.error(`[admin-cancellation] refund task repair failed for case ${prior.id}: ${repairErr.message}`);
     }
   }
-  return { prior, priorSnap, priorEndNow, priorReq: prior ? tiedReq : null };
+  return { repairedRefund, refundRepairedNow, repairErrors };
 }
 
 async function commitCancelPlan({ customerId, actor = null, ...raw } = {}) {
@@ -1436,10 +1479,10 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   const prepayPlan = resolvePrepay(input, term, wholeAccount);
   // GATE_PREPAY_REFUND_90_DAY: a FRESH end-now of a term past day 90 is
   // refused below (no refund is owed; the customer keeps the paid coverage).
-  // A run already ACCEPTED inside the window is judged at its acceptance
-  // instant (open acceptance), so a repair or retry after day 90 keeps its
-  // refund. The duplicate latch below re-anchors on a tied recorded run.
-  let endNowBlocked = endNowBlockedForTerm(term, wholeAccount, prepayPlan.prepayDisposition, acceptedAtOf(openAcceptance));
+  // Only a FRESH end-now is refused: an open acceptance, or a tied recorded
+  // run the duplicate latch below finds, always finishes under what was
+  // accepted (end-now allowed, refund as computed).
+  let endNowBlocked = endNowBlockedForTerm(term, wholeAccount, prepayPlan.prepayDisposition, !!openAcceptance);
   const refund = term && prepayPlan.prepayDisposition === 'end_now_refund'
     ? await computePrepayRefund({ ...term, customer_id: customerId })
     : null;
@@ -1484,12 +1527,9 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     try {
       const tiedCase = await findTiedPriorCase(customerId, term, prepayPlan);
       ({ prior, priorSnap, priorEndNow } = tiedCase);
-      // A tied accepted end-now is judged at ITS acceptance instant (90-day
-      // rule), so the approved facts a repair is checked against match the
-      // preview's, which anchors on the same run.
-      if (tiedCase.priorReq) {
-        endNowBlocked = endNowBlockedForTerm(term, wholeAccount, prepayPlan.prepayDisposition, acceptedAtOf(tiedCase.priorReq));
-      }
+      // A tied recorded run is not fresh (90-day rule): it finishes under what
+      // was accepted, and the preview, which sees the same run, agrees.
+      if (tiedCase.priorReq) endNowBlocked = false;
     } catch (dupErr) {
       // The latch's own fail-closed verdict (acceptance_check_unavailable)
       // must surface, not degrade into a guessed fresh run.
@@ -1519,52 +1559,9 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       // The task is deduped by TERM, so raising it here is idempotent when
       // it actually exists; `refund` is computed above from the now-terminal
       // covered rows, so the recorded amount is the post-sweep truth.
-      let repairedRefund = priorSnap && priorSnap.refund ? priorSnap.refund : null;
-      let refundRepairedNow = false;
-      const repairErrors = [];
-      if (prepayPlan.prepayDisposition === 'end_now_refund' && !repairedRefund) {
-        // The repaired task must carry facts somebody APPROVED (codex r8
-        // P1): this latch answers before any fingerprint check, so a
-        // coverage / term / payment-refund change between attempts could
-        // otherwise mint an actionable billing task for numbers nobody saw.
-        // Approved = the live recount still matches the FIRST run's recorded
-        // proposal, OR the caller carries a fingerprint matching the live
-        // facts (the operator just re-approved them from a fresh preview).
-        // Neither → refund_facts_changed; a fresh preview → commit is the
-        // approval path.
-        const proposed = priorSnap && priorSnap.proposedRefund ? priorSnap.proposedRefund : null;
-        let approved = refundFactsMatch(proposed, refund);
-        if (!approved && suppliedFingerprint) {
-          try {
-            approved = (await liveApprovedFacts()).fingerprint === suppliedFingerprint;
-          } catch (factsErr) {
-            logger.warn(`[admin-cancellation] live-facts check failed during repair for case ${prior.id}: ${factsErr.message}`);
-          }
-        }
-        if (!approved) {
-          repairErrors.push('refund_facts_changed');
-          logger.error(`[admin-cancellation] refund repair for case ${prior.id} refused — the live refund matches neither the recorded proposal nor an approved preview`);
-        } else try {
-          await raisePrepayRefundTask({
-            customer, request: { id: prior.service_request_id }, term, refund, actorLabel,
-          });
-          repairedRefund = refund;
-          refundRepairedNow = true;
-          try {
-            const snap = { ...priorSnap, refund };
-            delete snap.proposedRefund;
-            await db('cancellation_cases').where({ id: prior.id })
-              .update({ snapshot: JSON.stringify(snap), updated_at: new Date() });
-          } catch (snapErr) {
-            // Task persisted (term-deduped) — a lost snapshot stamp only
-            // means the next retry re-raises into the dedupe.
-            logger.warn(`[admin-cancellation] refund repair stamp failed for case ${prior.id}: ${snapErr.message}`);
-          }
-        } catch (repairErr) {
-          repairErrors.push('prepay_refund_task_missing');
-          logger.error(`[admin-cancellation] refund task repair failed for case ${prior.id}: ${repairErr.message}`);
-        }
-      }
+      const { repairedRefund, refundRepairedNow, repairErrors } = await repairLostRefundTask({
+        prior, priorSnap, prepayPlan, refund, term, customer, actorLabel, suppliedFingerprint, liveApprovedFacts,
+      });
       // Failed follow-ups REPAIR on retry, stamp-first (codex r14/r15 P2):
       // a prior run whose SMS/email did not accept — or whose refund task
       // was just repaired above — must not echo its stale partial outcome
