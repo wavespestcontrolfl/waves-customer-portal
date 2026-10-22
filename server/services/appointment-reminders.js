@@ -2823,6 +2823,17 @@ function makeCancellationPreDispatchCheck({ record, scheduledServiceId, claimSta
 }
 
 
+// Who a successful cancellation fan-out did NOT reach, in role words (never phone numbers): contacts that failed without
+// a throw, and approved recipients that were never iterated because they left the appointment contacts after the preview.
+function cancellationDeliveryGaps(sendOutcome, approvedNotice, attemptedKeys) {
+  const failed = [...new Set(sendOutcome.failedRecipients || [])];
+  const vanished = approvedNotice ? [...approvedNotice.keys()].filter((key) => !attemptedKeys.has(key)).length : 0;
+  return [
+    ...(failed.length ? [`not to the ${failed.join(' and the ')} (blocked, opted out or failed)`] : []),
+    ...(vanished ? [`not to ${vanished} approved recipient(s) no longer on the appointment contacts`] : []),
+  ];
+}
+
 // handleCancellation's send step: fans the notice out to the contacts and settles the claim.
 async function sendCancellationNotice({ record, scheduledServiceId, options, noticeToken, claimStatesWithSent, finalizeClaim, reportOutcome }) {
   const sendOutcome = {};
@@ -2861,13 +2872,8 @@ async function sendCancellationNotice({ record, scheduledServiceId, options, not
     }
     // One recipient accepted and another failed WITHOUT throwing (provider failure, opt-out, landline block): the
     // fan-out still returns true and the claim stays 'sent' (a retry would re-text those reached), so say it was partial.
-    const failedRecipients = noticeSent ? (sendOutcome.failedRecipients || []) : [];
-    const vanishedCount = noticeSent && approvedNotice ? [...approvedNotice.keys()].filter((key) => !attemptedKeys.has(key)).length : 0;
-    if (failedRecipients.length || vanishedCount) {
-      const gaps = [
-        ...(failedRecipients.length ? [`not to the ${[...new Set(failedRecipients)].join(' and the ')} (blocked, opted out or failed)`] : []),
-        ...(vanishedCount ? [`not to ${vanishedCount} approved recipient(s) no longer on the appointment contacts`] : []),
-      ];
+    const gaps = noticeSent ? cancellationDeliveryGaps(sendOutcome, approvedNotice, attemptedKeys) : [];
+    if (gaps.length) {
       reportOutcome(true, `The text went to some recipients, but ${gaps.join(' and ')}. Do not resend to those already reached.`, { partial: true });
       return;
     }
