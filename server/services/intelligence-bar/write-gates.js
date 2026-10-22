@@ -105,6 +105,9 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   // void_invoice (owner ruling 2026-10-12): the Invoices page's Void handler, run in process behind a card;
   // an invoice with nothing collected only, sends nothing.
   'void_invoice',
+  // create_invoice (owner ruling 2026-10-12): the Invoices page's create handler, run in process behind a card;
+  // a draft only, sends nothing.
+  'create_invoice',
   // set_customer_bill_to (owner ruling 2026-10-21, IB gap #9): the customer page's Bill-To save, run in
   // process behind a card; a self-pay customer only, sends nothing.
   'set_customer_bill_to',

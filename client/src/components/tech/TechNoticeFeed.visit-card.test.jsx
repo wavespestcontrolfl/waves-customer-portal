@@ -5,7 +5,7 @@
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import GeofenceArrivalPrompt from './GeofenceArrivalPrompt';
+import TechNoticeFeed from './TechNoticeFeed';
 
 function notification(type, payload, id = `n-${type}`) {
   return { id, type, message: 'server message', payload, created_at: '2026-09-08T18:41:00Z' };
@@ -50,7 +50,7 @@ function stubFeed(notifications, { failPosts = false } = {}) {
   return calls;
 }
 
-describe('GeofenceArrivalPrompt — visit cards', () => {
+describe('TechNoticeFeed — visit cards', () => {
   beforeEach(() => {
     localStorage.setItem('waves_admin_token', 'tech-token');
     // shouldAdvanceTime keeps findBy* polling alive while the 5-min timer is faked.
@@ -72,7 +72,7 @@ describe('GeofenceArrivalPrompt — visit cards', () => {
     ['cancelled', GONE, ['Visit cancelled', 'Cancelled by the office']],
   ])('renders the %s card with its headline, customer, details, and who acted', async (_kind, fixture, expected) => {
     stubFeed([fixture]);
-    render(<GeofenceArrivalPrompt />);
+    render(<TechNoticeFeed />);
     await act(async () => { await Promise.resolve(); });
 
     const card = await screen.findByTestId('visit-notice');
@@ -82,15 +82,14 @@ describe('GeofenceArrivalPrompt — visit cards', () => {
     expect(screen.getByRole('button', { name: 'Got it' })).toBeInTheDocument();
   });
 
-  it('caps the stack at two visit cards (newest first) behind any geofence prompt, and summarizes the rest', async () => {
-    const prompt = notification('geofence_arrival_reminder', { customer_name: 'Okafor' }, 'n-prompt');
+  it('caps the stack at two visit cards (newest first) behind any storm warning, and summarizes the rest', async () => {
     const storm = { ...notification('storm_watch_alert', { job_id: 'j-storm', city: 'Venice' }, 'n-storm'), created_at: new Date().toISOString() };
     const many = [1, 2, 3, 4, 5].map((i) => ({
       ...notification('visit_assigned', { headline: 'New visit on your route', customer_name: `Customer ${i}` }, `n-v${i}`),
       created_at: `2026-09-08T18:4${i}:00Z`,
     }));
-    stubFeed([...many, prompt, storm]);
-    render(<GeofenceArrivalPrompt />);
+    stubFeed([...many, storm]);
+    render(<TechNoticeFeed />);
     await act(async () => { await Promise.resolve(); });
 
     const cards = await screen.findAllByTestId('visit-notice');
@@ -98,11 +97,9 @@ describe('GeofenceArrivalPrompt — visit cards', () => {
     expect(cards[0]).toHaveTextContent('Customer 5');
     expect(cards[1]).toHaveTextContent('Customer 4');
     expect(screen.getByTestId('visit-notice-more')).toHaveTextContent('3 more notices');
-    // Anything on an auto-dismiss timer (arrival prompt, storm warning)
-    // renders ABOVE the persistent visit cards so it cannot expire unseen.
-    const promptCard = screen.getByText('Okafor');
+    // Anything on an auto-dismiss timer (a storm warning) renders ABOVE the
+    // persistent visit cards so it cannot expire unseen.
     const stormCard = screen.getByText(/Storm watch/);
-    expect(promptCard.compareDocumentPosition(cards[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(stormCard.compareDocumentPosition(cards[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     // Clearing one promotes the next unread card; held-back cards were never marked read.
@@ -118,7 +115,7 @@ describe('GeofenceArrivalPrompt — visit cards', () => {
       if (poll === 3) return { error: 503 }; // a bad poll is not an empty feed
       return [ASSIGNED, MOVED]; // poll 4: the feed lists it again (it had only been pushed out of the window)
     });
-    render(<GeofenceArrivalPrompt />);
+    render(<TechNoticeFeed />);
     await act(async () => { await Promise.resolve(); });
     expect(await screen.findAllByTestId('visit-notice')).toHaveLength(2);
 
@@ -137,7 +134,7 @@ describe('GeofenceArrivalPrompt — visit cards', () => {
 
   it('a "Got it" the network lost brings the card back on the next poll instead of hiding it for the session', async () => {
     const calls = stubFeed([ASSIGNED], { failPosts: true });
-    render(<GeofenceArrivalPrompt />);
+    render(<TechNoticeFeed />);
     await act(async () => { await Promise.resolve(); });
     expect(await screen.findByTestId('visit-notice')).toBeInTheDocument();
 
@@ -152,7 +149,7 @@ describe('GeofenceArrivalPrompt — visit cards', () => {
 
   it('stays until "Got it" (dismiss) — the 5-minute reminder timer never marks it read', async () => {
     const calls = stubFeed([ASSIGNED]);
-    render(<GeofenceArrivalPrompt />);
+    render(<TechNoticeFeed />);
     await act(async () => { await Promise.resolve(); });
     expect(await screen.findByTestId('visit-notice')).toBeInTheDocument();
 
@@ -166,45 +163,14 @@ describe('GeofenceArrivalPrompt — visit cards', () => {
     expect(calls.some((c) => c.method === 'POST' && c.url.endsWith('/n-visit_assigned/dismiss'))).toBe(true);
   });
 
-  it('on the admin Today page (inlineScheduleChanges) schedule changes stay in the page, never float; other prompts still do', async () => {
-    const prompt = notification('geofence_arrival_reminder', { customer_name: 'Okafor' }, 'n-prompt');
-    stubFeed([ASSIGNED, MOVED, OFF, GONE, prompt].map((n) => ({ ...n, created_at: new Date().toISOString() })));
-    render(<GeofenceArrivalPrompt inlineScheduleChanges />);
+  it('on the admin Today page (inlineScheduleChanges) schedule changes stay in the page, never float; storm warnings still show', async () => {
+    const storm = notification('storm_watch_alert', { job_id: 'j-storm', city: 'Venice' }, 'n-storm');
+    stubFeed([ASSIGNED, MOVED, OFF, GONE, storm].map((n) => ({ ...n, created_at: new Date().toISOString() })));
+    render(<TechNoticeFeed inlineScheduleChanges />);
     await act(async () => { await Promise.resolve(); });
 
-    expect(await screen.findByText(/Okafor/)).toBeInTheDocument();
+    expect(await screen.findByText(/Storm watch/)).toBeInTheDocument();
     expect(screen.queryByTestId('visit-notice')).not.toBeInTheDocument();
     expect(screen.queryByText(/more notice/)).not.toBeInTheDocument();
-  });
-
-  it('a confirmed Start Timer tells the time clock to reload', async () => {
-    vi.stubGlobal('navigator', { ...navigator, geolocation: undefined });
-    const prompt = { ...notification('geofence_arrival_reminder', { customer_name: 'Okafor' }, 'n-prompt'), created_at: new Date().toISOString() };
-    stubFeed([prompt]);
-    const heard = vi.fn();
-    window.addEventListener('waves:time-tracking-changed', heard);
-    try {
-      render(<GeofenceArrivalPrompt />);
-      await act(async () => { await Promise.resolve(); });
-      fireEvent.click(await screen.findByRole('button', { name: 'Start Timer' }));
-      await act(async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); });
-      expect(heard).toHaveBeenCalledTimes(1);
-    } finally {
-      window.removeEventListener('waves:time-tracking-changed', heard);
-    }
-  });
-
-  it('an automatic-mode timer notice (geofence_timer_started) also tells the time clock to reload', async () => {
-    const started = { ...notification('geofence_timer_started', { customer_name: 'Okafor' }, 'n-started'), created_at: new Date().toISOString() };
-    stubFeed([started]);
-    const heard = vi.fn();
-    window.addEventListener('waves:time-tracking-changed', heard);
-    try {
-      render(<GeofenceArrivalPrompt />);
-      await act(async () => { await Promise.resolve(); await Promise.resolve(); });
-      expect(heard).toHaveBeenCalledTimes(1);
-    } finally {
-      window.removeEventListener('waves:time-tracking-changed', heard);
-    }
   });
 });

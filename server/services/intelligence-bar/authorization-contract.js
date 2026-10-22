@@ -140,6 +140,8 @@ CURATED_PREVIEW_TOOL_NAMES.add('propose_admin_edit');
 CURATED_PREVIEW_TOOL_NAMES.add('convert_lead');
 // void_invoice: its card lines come from its own preview (void-invoice-tools.js cardLines). It sends nothing.
 CURATED_PREVIEW_TOOL_NAMES.add('void_invoice');
+// create_invoice: its card lines come from its own preview (create-invoice-tools.js cardLines). A draft only; it sends nothing.
+CURATED_PREVIEW_TOOL_NAMES.add('create_invoice');
 // set_customer_bill_to: its card lines come from its own preview (bill-to-tools.js cardLines). It sends nothing.
 CURATED_PREVIEW_TOOL_NAMES.add('set_customer_bill_to');
 
@@ -211,6 +213,7 @@ const ACTION_LABELS = {
   propose_admin_edit: 'Edit an admin record',
   convert_lead: 'Convert a lead to a customer (sends nothing)',
   void_invoice: 'Void an invoice (sends nothing)',
+  create_invoice: 'Create a draft invoice (sends nothing)',
   set_customer_bill_to: 'Set a customer\'s Bill-To payer (sends nothing)',
   block_sender: 'Block a sender',
   create_pending_estimate: 'Create an estimate',
@@ -848,6 +851,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // void_invoice: the invoice, what the void does and that nothing is sent.
   if (toolName === 'void_invoice' && preview?.preview === true) {
     for (const line of require('./void-invoice-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
+  // create_invoice: the customer, every line, the totals, and that the draft is not sent.
+  if (toolName === 'create_invoice' && preview?.preview === true) {
+    for (const line of require('./create-invoice-tools').cardLines(toolName, preview)) push(line.kind, line.text);
   }
   // set_customer_bill_to: the customer, the payer, the invoices that move and stay, and that nothing is sent.
   if (toolName === 'set_customer_bill_to' && preview?.preview === true) {

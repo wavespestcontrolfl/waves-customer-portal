@@ -46,6 +46,7 @@ export default function MorePage() {
   const outletContext = useOutletContext();
   const currentRole = outletContext?.user?.role || null;
   const agentEstimateEnabled = useFeatureFlag("agent_estimate", false);
+  const bidDeskEnabled = useFeatureFlag("bid_desk", false);
   const navigation = useAdminNavigation();
 
   if (!isMobile) return <Navigate to="/admin" replace />;
@@ -83,7 +84,9 @@ export default function MorePage() {
       </UiSurface> : ADMIN_MOBILE_MORE_SECTIONS.map(({ section, items }) => {
         const visibleItems = items
           .filter((item) => !item.adminOnly || currentRole === "admin")
-          .filter((item) => !item.flag || (item.flag === "agent_estimate" && agentEstimateEnabled));
+          .filter((item) => !item.flag
+            || (item.flag === "agent_estimate" && agentEstimateEnabled)
+            || (item.flag === "bid_desk" && bidDeskEnabled));
         // Role/flag filtering can empty a whole section (e.g. Marketing for
         // a technician) — skip the orphaned heading.
         if (visibleItems.length === 0) return null;

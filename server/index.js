@@ -998,6 +998,8 @@ app.use('/api/admin/banking', require('./routes/admin-banking'));
 app.use('/api/admin/dashboard-ops', require('./routes/admin-dashboard-ops'));
 app.use('/api/admin/sms-templates', require('./routes/admin-sms-templates'));
 app.use('/api/admin/email', require('./routes/admin-email'));
+// Bid Desk (GATE_BID_DESK, dark): the router answers 404 for every path while the gate is off.
+app.use('/api/admin/bid-desk', require('./routes/admin-bid-desk'));
 app.use('/api/admin/pricing-config', require('./routes/admin-pricing-config'));
 app.use('/api/admin/pest-pressure', require('./routes/admin-pest-pressure'));
 app.use('/api/admin/pricing-proposals', require('./routes/admin-pricing-proposals'));
@@ -1014,7 +1016,8 @@ app.use('/api/tech/notifications', require('./routes/tech-notifications'));
 app.use('/api/tech/line', require('./routes/tech-line'));
 app.use('/api/tech/services', require('./routes/tech-track'));
 app.use('/api/tech/dictation', require('./routes/tech-dictation'));
-app.use('/api/admin/geofence', require('./routes/admin-geofence'));
+const adminVehiclesRouter = require('./routes/admin-vehicles');
+app.use('/api/admin/vehicles', adminVehiclesRouter);
 app.use('/api/admin', require('./routes/admin-billing-health'));
 
 // Health check. Public and unauthenticated (Railway probes it), so it must

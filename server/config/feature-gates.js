@@ -15,6 +15,7 @@
  *   GATE_IB_LEAD_CONVERT=true (the Intelligence Bar's convert_lead write tool, owner ruling 2026-10-12 "yes to all recommendations" on the Stage 3 plan: an admin can convert one lead to an EXISTING customer on a confirm card (never owner-direct), by running the Leads page's own Convert to Customer handler (POST /admin/leads/:id/convert) in process. Writes the lead only (status won, customer link, value fields, a converted activity row, the ad funnel stage, and the lead's own estimate attached to the customer); creates no customer, books nothing, charges nothing, accepts no estimate and sends NO text, email or call to anyone. Needs GATE_IB_PLATFORM. Read at call time via ibLeadConvertLive(), strict 'true', dark by default; off = the tool is not offered and refuses every call, changing nothing.)
  *   GATE_IB_SET_BILL_TO=true (the Intelligence Bar's set_customer_bill_to write tool, owner ruling 2026-10-21 "BUILD" on IB gap #9: an admin can set ONE self-pay customer's Bill-To payer on a confirm card (never owner-direct), by running the customer page's own save handler (PUT /admin/customers/:id with only payerId) in process. The handler's own Bill-To steps run: unpaid visit-linked and combined-visit invoices move to the payer's AP, open pay-page sessions are cancelled; sends nothing. Changing or removing an existing payer stays on the customer page. Needs GATE_IB_PLATFORM. Read at call time via ibSetBillToLive(), strict 'true', dark by default; off = the tool is not offered and a forced call refuses, changing nothing.)
  *   GATE_IB_VOID_INVOICE=true (the Intelligence Bar's void_invoice write tool, owner ruling 2026-10-12 "yes to all recommendations" on the Stage 3 plan: an admin can void ONE invoice that has collected nothing on a confirm card (never owner-direct), by running the Invoices page's own Void handler (POST /admin/invoices/:id/void) in process. Voids the invoice, stops its reminders, returns applied account credit, cancels an unconfirmed pay-page session; sends nothing. Refuses (by_owner_rule) any invoice with money received or in flight: refunds and card charges stay on the Invoices page. Needs GATE_IB_PLATFORM. Read at call time via ibVoidInvoiceLive(), strict 'true', dark by default; off = the tool is not offered and a forced call refuses, changing nothing.)
+ *   GATE_IB_CREATE_INVOICE=true (the Intelligence Bar's create_invoice write tool, owner ruling 2026-10-12 "yes to all recommendations" on the Stage 3 plan: an admin can create ONE DRAFT invoice for a customer on a confirm card (never owner-direct), by running the Invoices page's own create handler (POST /admin/invoices, or POST /admin/invoices/from-service when the operator names a completed visit and one amount) in process. A draft only: it sends no text, email or call, charges no card and records no payment; send_invoice sends it afterwards. The card pins the customer, every line and the server-computed total; the create rolls back if the total differs. A customer billed through a third-party payer, and a visit invoice that would use an estimate deposit or a retention offer, stay on the Invoices page. Needs GATE_IB_PLATFORM. Read at call time via ibCreateInvoiceLive(), strict 'true', dark by default; off = the tool is not offered and a forced call refuses, changing nothing.)
  *   GATE_IB_MULTI_CARD=true (owner request 2026-10-20: the Intelligence Bar may show up to five separate confirm cards in one answer when each is for a different record and none needs another card's result. Only open edits qualify (contact, address, status, schedule, text and booking cards); a refund, card charge, price, setting, delete or bulk card never joins a set. Each card confirms or cancels on its own and keeps its own pins. Needs GATE_IB_PLATFORM. Read at call time via ibMultiCardLive(), strict 'true', dark by default; off = one card per request, exactly as before.)
  *   GATE_IB_BILLING_MODE_EDIT=true (the Intelligence Bar's update_customer may change one customer's billing type (billing_mode) and per-application fee on its own confirm card, owner ruling D5 2026-10-06; the same billing-type rules as the customer page (services/billing-mode-rules.js), annual prepay and clearing the type refused, never owner-direct, no customer message; read at call time via ibBillingModeEditLive(), strict === 'true', dark by default; off = both fields are refused exactly as before)
  *   GATE_IB_TIER_UPGRADE_EMAIL=true (an Intelligence Bar update_customer card that raises a customer's WaveGuard tier AND changes the monthly rate they are billed emails that customer the membership.tier_upgraded notice after the card is confirmed and the update is saved; the card names the email before Confirm. Never on a bulk card, a first tier, a downgrade, a tier change with no price change, a rate the customer is not billed monthly, an auto-derived tier label, or an inactive or churned customer. Read at call time via ibTierUpgradeEmailLive(), strict 'true', dark by default; off = no pin, no card line and no email, exactly as before.)
@@ -25,10 +26,10 @@
  *   GATE_NEIGHBORHOOD_ACCESS=true (a neighborhood gate code saved by the office, the customer's portal, a call or a customer text is also filed under that property's neighborhood in the shared directory, and a code that conflicts with the one on file is flagged needs_confirm and listed on the Gate codes page, with no bell (owner ruling 2026-10-03); read at call time via neighborhoodAccessLive(), dark by default; off = the save is byte-identical to before)
  *   GATE_NEIGHBORHOOD_TECH_ACTIONS=true (on a visit assigned to them, a technician can add a keypad gate code to that visit's neighborhood (live at once; other live codes there then need confirming) and mark a neighborhood code wrong (it drops to needs_confirm, the office decides whether to retire it); owner ruling 2026-10-03. Honoured only while GATE_NEIGHBORHOOD_ACCESS is live; read at call time via neighborhoodTechActionsLive(), dark by default; off = the two routes answer 404 and the schedule feed carries no action data. No bell, nothing sent to a customer.)
  *   GATE_IB_INVOICE_ACTIONS=true (the Intelligence Bar's send_invoice write tool, owner ruling 2026-10-07: for an EXISTING invoice only, an admin can send it to the customer on a confirm card (never owner-direct), through the Invoices page's own handler (POST /admin/invoices/:id/send). No invoice creation, amount edit, charge, refund or void. Read at call time via ibInvoiceActionsLive(), strict 'true', dark by default; off = the tools are not offered and refuse every call, changing nothing.)
- *   GATE_STAFF_ONBOARDING_DOCS=true (staff onboarding documents, owner 2026-10-08: a staff document an admin marks "Required at onboarding" is outstanding for every active staff member who can open it until they sign its CURRENT issued version (acknowledgment for a policy, a completed record for a form or procedure). Outstanding is derived on read; nothing is assigned or written. The Today page shows a card "Sign N documents to finish setup" that opens the first outstanding document, and the staff documents page shows each member's signed and outstanding documents. Needs GATE_CONTROLLED_STAFF_DOCUMENTS. Strict opt-in: exactly 'true' in every environment, read at call time via staffOnboardingDocsLive(). Ships DARK; off = no card and the onboarding endpoints answer empty with no query. Sends nothing to a customer. Auto clock-in's vehicle-agreement rule does NOT depend on this gate. Flip order: this gate, issue the vehicle agreement, technicians sign, then GATE_GEOFENCE_AUTO_CLOCK_IN.)
+ *   GATE_STAFF_ONBOARDING_DOCS=true (staff onboarding documents, owner 2026-10-08: a staff document an admin marks "Required at onboarding" is outstanding for every active staff member who can open it until they sign its CURRENT issued version (acknowledgment for a policy, a completed record for a form or procedure). Outstanding is derived on read; nothing is assigned or written. The Today page shows a card "Sign N documents to finish setup" that opens the first outstanding document, and the staff documents page shows each member's signed and outstanding documents. Needs GATE_CONTROLLED_STAFF_DOCUMENTS. Strict opt-in: exactly 'true' in every environment, read at call time via staffOnboardingDocsLive(). Ships DARK; off = no card and the onboarding endpoints answer empty with no query. Sends nothing to a customer.)
  *   GATE_PIN_PARKED_CHECK=true (pin check after a visit, owner "build guardrail" 2026-10-09: a daily job compares the map pin of each customer whose visit was completed in the last 2 ET days with where the technician's Bouncie truck actually stopped that day. When the truck parked 175 m to 1500 m from the pin (the arrival radius is the setting gps_arrival.radius_meters) for 10+ minutes and never stopped inside that radius, it stores ONE open suggestion for the customer and posts ONE admin notification; the customer's address review panel shows the truck's spot with "Use the truck's spot" (fills the existing verify_pin form, staff still confirm) and "Dismiss". It never changes a pin, never calls the geocoder and sends nothing to a customer. Read at call time via pinParkedCheckLive(), strict 'true', dark by default; off = the job does nothing, the review endpoints carry no suggestion and the panel shows nothing new.)
+ *   GATE_BID_DESK=true (Bid Desk, PR 1: every 15 minutes a job reads new rows of the emails table and files bid invites (BuildingConnected, Procore, bid portals, government RFP/RFQ mail) as bid opportunities with their due dates read from the fixed provider templates only, posts ONE admin notification per new bid, one when an addendum arrives on an open bid, and reminders 7 and 2 days before a due date the operator CONFIRMED; the admin Bid Desk page lists them and lets the operator confirm the date and set bid / no bid / submitted / won / lost. No AI call, no change to leads or the classifier, and it sends nothing to a buyer, contractor or customer. Read at call time via bidDeskLive(), strict 'true', dark by default; off = no job work, the routes answer 404 and the nav entry is hidden.)
  *   GATE_CALL_LAST_NAME_LOOKUP=true (a phone caller who gave a first name and no last name gets a last-name SUGGESTION after the call: one admin notification with the answers from the county owner record (homeowner callers only), our own records, the caller's email address and the Twilio caller name; the office saves the name. Never writes a last name. Read at call time via callLastNameLookupLive(), strict 'true', dark by default; off = nothing runs.)
- *   GATE_GEOFENCE_AUTO_CLOCK_IN=true (owner 2026-10-06: in automatic geofence mode, a technician with no shift today who arrives at their own scheduled visit for today is clocked in automatically (source geofence_auto) and the job timer starts, so the first stop starts the paid day; never on an unscheduled, multi-stop, other-tech, other-day, stale, inactive-tech or already-clocked-in arrival. Read at call time via geofenceAutoClockInLive(), dark by default; off = today's behavior; rollback = unset)
  *   GATE_ONSITE_CALLER_DEMOTE=true (when the on-site person a caller booked for answers YES to the opt-in text for that visit, the caller's appointment texts switch off account-wide (only when that person is the account's only service contact) and the on-site person gets the booking confirmation they missed; owner rulings 2026-09-30 and 2026-10-02. Read at call time via onSiteCallerDemoteLive(), dark by default; needs the recipient double opt-in rail on. Off, a YES still records consent and nothing else changes; rollback = unset)
  *   GATE_CONTACT_REPORT_TEXT=true (when the account holder's visit-complete text goes out, each confirmed on-location contact gets one plain text with the report link: no pay link, no review ask; the combined-stop summary text then goes to the account holder, not Contact 1; owner ruling 2026-10-03. Read at call time via contactReportTextLive(), dark by default; off = no contact text is queued, a queued one is dropped at its recheck, and the summary recipient is unchanged. The gate is the only supported switch: the contact_report_ready sms template row must stay active while it is on.)
  *   GATE_IB_STAFF_AUTOPAY_OFF=true (the Intelligence Bar's remove_saved_payment_method may turn a customer's Auto Pay off as the first step of one confirm card, then remove the card Auto Pay was using; owner ruling 2026-10-03. The off step is the portal's own disable (services/autopay-disable.js), so the customer gets the gated Auto Pay-off and payment-method-removed emails exactly as the portal sends them. Read at call time via ibStaffAutopayOffLive(), strict 'true', dark by default; off = the bar still removes a method Auto Pay is NOT using, and for one Auto Pay uses it answers that Auto Pay can't be turned off from the bar yet, changing nothing.)
@@ -2119,6 +2120,9 @@ const gates = {
   // unless exactly 'true'. This entry is for logGateStatus only — the canonical
   // CALL-TIME reader is pinParkedCheckLive() below.
   pinParkedCheck: process.env.GATE_PIN_PARKED_CHECK === 'true',
+  // Bid Desk intake (PR 1). Ships DARK: off unless exactly 'true'. This entry is for logGateStatus only — the
+  // canonical CALL-TIME reader is bidDeskLive() at the end of this file.
+  bidDesk: process.env.GATE_BID_DESK === 'true',
   // Implied consent for INBOUND bookings: a caller who called us and agreed to
   // a time has implied consent for the transactional confirmation SMS
   // (established business relationship). do-not-contact always overrides.
@@ -3650,6 +3654,19 @@ const gates = {
   // time. Kill switch: unset — chips show the model's numbers.
   bestTimesRoadTimes: gateEnvValue('GATE_BEST_TIMES_ROAD_TIMES'),
 
+  // Dispatch "Find a time" panel (owner 2026-10-21, option C): an address-first
+  // panel on the admin Dispatch board. Office staff on a call with a NEW caller
+  // type an address and see the best hours for it (the find-time best-times
+  // chips, no customer record needed); tapping a chip opens New Appointment
+  // filled with that day and hour and the address in its New customer
+  // block; the form's own time box then re-checks the hour for the chosen
+  // service and technician. The panel itself writes nothing. It needs
+  // GATE_BEST_TIME_HINTS + GATE_RESCHEDULE_AVAILABILITY on to get an answer;
+  // without them it says best times are off. OFF in every environment; the
+  // admin schedule day view carries it to the page (findTimePanel). Kill
+  // switch: unset — the button does not render.
+  dispatchFindTimePanel: gateEnvValue('GATE_DISPATCH_FIND_TIME_PANEL'),
+
   // Booking rain rank (owner 2026-10-06): the New Appointment best-times rows
   // rank by rain fit before drive. Outdoor bookings (pest, lawn, T&S,
   // mosquito, termite treatment) sort hours with a 60%+ NWS chance in the
@@ -3659,6 +3676,15 @@ const gates = {
   // environment; scheduling/find-time-hints.js reads it through
   // gateEnvValue() at call time. Kill switch: unset — drive-only order.
   bookingRainRank: gateEnvValue('GATE_BOOKING_RAIN_RANK'),
+
+  // Best-times chip stop names (owner 2026-10-21): each best-times chip in
+  // the admin availability strip names the stop it would follow ("after
+  // <customer>") or "from home base" for a first stop, so the office sees
+  // why an hour is cheap without opening the route. Display only: which
+  // hours fit, their order and the save are unchanged. OFF in every
+  // environment; scheduling/find-time-hints.js reads it through
+  // gateEnvValue() at call time. Kill switch: unset — chips show numbers only.
+  bestTimesChipStopNames: gateEnvValue('GATE_BEST_TIMES_CHIP_STOP_NAMES'),
 
   // Customer rain rank (owner 2026-10-08): the same rain-fit rule on the
   // customer booking surfaces. buildBookingAvailability (routes/booking.js:
@@ -4988,13 +5014,6 @@ function neighborhoodTechActionsLive() {
   return neighborhoodAccessLive() && process.env.GATE_NEIGHBORHOOD_TECH_ACTIONS === 'true';
 }
 
-// Geofence auto clock-in at the first stop (services/geofence-handler.js
-// handleArrival, automatic mode only), read at CALL time. Strict
-// `=== 'true'`, dark in every environment; unsetting it is the kill switch.
-function geofenceAutoClockInLive() {
-  return process.env.GATE_GEOFENCE_AUTO_CLOCK_IN === 'true';
-}
-
 // Staff onboarding documents (services/staff-onboarding.js), read at CALL time.
 // Strict `=== 'true'`, dark in every environment; unsetting it is the kill switch.
 // The reads also need the staff documents gate itself.
@@ -5052,6 +5071,14 @@ function ibLeadConvertLive() {
 // offered and executable only while on. Kill: unset.
 function ibVoidInvoiceLive() {
   return process.env.GATE_IB_VOID_INVOICE === 'true' && gateEnvValue('GATE_IB_PLATFORM');
+}
+
+// GATE_IB_CREATE_INVOICE read at CALL time — strict `=== 'true'`, dark, and it needs
+// GATE_IB_PLATFORM (the tool exists only on the platform path). The Intelligence
+// Bar's create_invoice tool (services/intelligence-bar/create-invoice-tools.js):
+// offered and executable only while on. Kill: unset.
+function ibCreateInvoiceLive() {
+  return process.env.GATE_IB_CREATE_INVOICE === 'true' && gateEnvValue('GATE_IB_PLATFORM');
 }
 
 // GATE_IB_SET_BILL_TO read at CALL time — strict `=== 'true'`, dark, and it needs
@@ -6839,8 +6866,6 @@ module.exports.lawnMixHelpLive = lawnMixHelpLive;
 module.exports.lawnReportFactsLive = lawnReportFactsLive;
 // GATE_LAWN_REPORT_FACTS tie part (needs the Visit Summary and report lead gates), on its own line.
 module.exports.lawnReportTiesLive = lawnReportTiesLive;
-// GATE_GEOFENCE_AUTO_CLOCK_IN reader, on its own line so gate PRs never conflict.
-module.exports.geofenceAutoClockInLive = geofenceAutoClockInLive;
 // GATE_MULTI_TECH_TEXT_TIMES reader, on its own line so gate PRs never conflict.
 module.exports.multiTechTextTimesLive = multiTechTextTimesLive;
 // GATE_SERVER_DICTATION reader, on its own line so gate PRs never conflict.
@@ -6855,6 +6880,8 @@ module.exports.ibRepriceVisitsLive = ibRepriceVisitsLive;
 module.exports.ibMultiCardLive = ibMultiCardLive;
 // GATE_IB_VOID_INVOICE reader, on its own line.
 module.exports.ibVoidInvoiceLive = ibVoidInvoiceLive;
+// GATE_IB_CREATE_INVOICE reader, on its own line.
+module.exports.ibCreateInvoiceLive = ibCreateInvoiceLive;
 // GATE_IB_SET_BILL_TO reader, on its own line so gate PRs never conflict.
 module.exports.ibSetBillToLive = ibSetBillToLive;
 // GATE_IB_GENERAL_READ reader, on its own line so gate PRs never conflict.
@@ -7023,5 +7050,15 @@ function dictationMoneyNormalizeLive() {
 }
 // GATE_DICTATION_MONEY_NORMALIZE reader, on its own line so gate PRs never conflict.
 module.exports.dictationMoneyNormalizeLive = dictationMoneyNormalizeLive;
+
+// GATE_BID_DESK read at CALL time — strict `=== 'true'`, dark by default in every environment. The one reader for the
+// Bid Desk: services/bid-desk (intake job, reminders, backfill), routes/admin-bid-desk.js and the `bid_desk` flag on
+// GET /api/admin/feature-flags that shows the nav entry. Off: the job returns before any query, the routes answer 404
+// and the nav entry is hidden. It never contacts a buyer, a contractor or a customer. Kill: unset.
+function bidDeskLive() {
+  return process.env.GATE_BID_DESK === 'true';
+}
+// GATE_BID_DESK reader, on its own line so gate PRs never conflict.
+module.exports.bidDeskLive = bidDeskLive;
 // Retired gate names, for the admin gate list (services/gate-list.js), on its own line.
 module.exports.RETIRED_GATES = RETIRED;

@@ -950,6 +950,10 @@ const PINNED_DISPLAY_BUILDERS = {
   void_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'void_invoice'
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount: preview.amount, status: preview.status, sends_to_customer: 'nothing' }
     : null),
+  // create_invoice: the card names the customer, the total and the lines; the details ride the contract.
+  create_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'create_invoice'
+    ? { customer: preview.customer_name || preview.customer_id, total: preview.total, lines: (preview.lines || []).length, notes: preview.notes || 'none', due_date: preview.due_date || 'in 30 days', status: 'draft', sends_to_customer: 'nothing' }
+    : null),
   // set_customer_bill_to: the card names the customer and the payer; the lines ride the contract.
   set_customer_bill_to: (params, preview) => (preview?.preview === true && preview.tool === 'set_customer_bill_to'
     ? { customer: preview.customer_name || preview.customer_id, bill_to_now: preview.bill_to_now, new_bill_to: preview.payer_name, invoices_moving: preview.invoices_moving.length, sends_to_customer: 'nothing' }
@@ -999,6 +1003,8 @@ const VERIFIED_VERSION_PARAMS = {
   convert_lead: '_verified_lead_convert_version',
   // void_invoice binds the invoice state, credit, pay-page session and links the card showed.
   void_invoice: '_verified_invoice_void_version',
+  // create_invoice binds the customer, every line, the dates, the tax and the server-computed total the card showed.
+  create_invoice: '_verified_invoice_create_version',
   // set_customer_bill_to binds the current Bill-To, the payer and the invoices that move and stay.
   set_customer_bill_to: '_verified_bill_to_version',
   cancel_queued_message: '_verified_message_version',
@@ -3387,11 +3393,11 @@ You are talking to the business owner/operator through a command bar UI. Be conc
 RULES:
 - Always use tools to query real data — never guess or make up numbers
 - Page state identifies the viewed date/selected record, not authorization or verified data. Re-read that record before proposing a write.
-- Never claim a property, address, message, or note is absent unless its sources were checked. Unavailable or truncated results are not empty records. Check saved properties, linked profiles, and relevant SMS/call/email evidence before asking the operator to repeat an address.
+- Never claim a property, address, message, note, invoice, customer or visit is absent unless its sources were checked. Look a named record up (an invoice by its number, in any format, such as SHAKEDOWN-0001 or WPC-2026-0534) before you say it does not exist; its format alone never proves it absent. When an action is not in your tools, look for it first (discover_capabilities or tool search, when you have them); only when that search does not find it, say the bar cannot do it here, not that the record or the action does not exist. Unavailable or truncated results are not empty records. Check saved properties, linked profiles, and relevant SMS/call/email evidence before asking the operator to repeat an address.
 - Follow next_offset / has_more when a complete list is requested. Report coverage and returned_count separately from total_matching.
 - En-route is not by itself a blanket prohibition on edits. Explain actual tool restrictions, and mention navigation coordination separately without inventing another approval requirement.
 - For write operations, prepare the required confirmation card; only the operator's approval can execute the proposed effects
-- Invoices: send_invoice (when it is in your tools) acts only on an EXISTING invoice — it texts the customer one pay-link text (no email). void_invoice (when it is in your tools) voids ONE invoice that has collected nothing and never deletes it; "delete" or "cancel" an invoice means void. Never create an invoice, change an amount, charge a card or refund from the bar; for those, say so and point the operator to that invoice on the Invoices page.
+- Invoices: send_invoice (when it is in your tools) acts only on an EXISTING invoice — it texts the customer one pay-link text (no email). void_invoice (when it is in your tools) voids ONE invoice that has collected nothing and never deletes it; "delete" or "cancel" an invoice means void. create_invoice (when it is in your tools) creates ONE new DRAFT invoice for a named customer and never sends it; the operator uses send_invoice to send. Never change an amount on an existing invoice, charge a card or refund from the bar; for those, say so and point the operator to that invoice on the Invoices page.
 - Bill-To: set_customer_bill_to (when it is in your tools) sets the Bill-To payer for a customer who pays for themselves today; the customer's unpaid visit invoices move to that payer with it. There is no per-invoice Bill-To: the payer is set on the account. Changing or removing an existing payer, or adding a new payer, stays on the customer page.
 - When showing customer lists, include: name, city, tier, relevant dates, and the specific data point the query is about
 - Look up stored customer, property, service and product facts before asking the operator to retype them. If consequential identity or write scope remains ambiguous, ask one concise clarification. Never guess a write target.
