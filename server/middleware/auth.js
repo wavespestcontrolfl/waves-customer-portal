@@ -119,14 +119,16 @@ function cancelledReadRoute(req) {
 // ONLY routes it may reach — every one a read the Visits / Documents tabs
 // render from, plus the contact's own notification choices and the activity
 // beacons. Owner ruling 2026-10-20: view only — no confirm, no reschedule,
-// no requests. Nothing here reads billing, cards, credits, referrals, the
-// holder's preferences or contacts, or subscribes a device (push rows are
-// keyed by customer, so a contact device would get the holder's billing
-// pushes). Anything not listed answers 403 ACCOUNT_HOLDER_ONLY (not 401, so
-// the client never reads it as a dead session). Extend deliberately.
+// no requests. Nothing here reads billing, cards, credits, referrals, or the
+// holder's preferences or contacts. Anything not listed answers 403
+// ACCOUNT_HOLDER_ONLY (not 401, so the client never reads it as a dead
+// session). Extend deliberately.
 const CONTACT_SESSION_ROUTES = [
   ['GET', '/api/auth/me'],
   ['GET', '/api/auth/properties'],
+  // Switching between the rows the number is a contact on (the handler
+  // re-checks the target lists the contact).
+  ['POST', '/api/auth/select-property'],
   ['GET', '/api/schedule'],
   ['GET', '/api/schedule/next'],
   // NOT /account-next or /properties-next: those list the account's OTHER
@@ -151,6 +153,12 @@ const CONTACT_SESSION_ROUTES = [
   ['POST', '/api/push/native-unsubscribe'],
   ['GET', '/api/notifications/contact-preferences'],
   ['PUT', '/api/notifications/contact-preferences'],
+  // The contact's own app device: rows are stamped with the contact's phone
+  // key (routes/push.js) and the sender includes them only for appointment
+  // and report purposes, so the holder's billing never reaches them.
+  ['GET', '/api/push/status'],
+  ['POST', '/api/push/native-subscribe'],
+  ['POST', '/api/push/native-unsubscribe'],
   ['POST', '/api/customer/activity/page-view'],
   ['POST', '/api/customer/activity/push-open'],
   ['POST', '/api/customer/activity/heartbeat'],
@@ -388,7 +396,8 @@ async function contactRotationRefusal(trx, customer, decoded, options) {
     }
     return refused;
   }
-  if (options.targetCustomerId && String(options.targetCustomerId) !== String(customer.id)) return refused;
+  // A profile switch is a contact's only as the contact switch (/auth/select-property, options.contactSwitch).
+  if (options.targetCustomerId && String(options.targetCustomerId) !== String(customer.id) && !options.contactSwitch) return refused;
   return null;
 }
 
@@ -398,21 +407,46 @@ async function contactRotationRefusal(trx, customer, decoded, options) {
 // here followed by the refresh-row lock, against an editor holding the row
 // and waiting on that token, would deadlock one of them (codex #6363 r11
 // P2). Holder rotations keep the plain read.
-function rotationCustomerRead(trx, decoded) {
+async function rotationCustomerRead(trx, decoded, options = {}) {
   const query = trx('customers').where({ id: decoded.customerId }).whereNull('deleted_at');
-  return (decoded.contactKey ? query.forUpdate() : query).first();
+  if (!decoded.contactKey) return query.first();
+  // A contact's switch (options.contactSwitch) validates TWO rows — this one
+  // and the target — so both are locked up front, in id order (codex #6364
+  // r1 P1): the target's holder removing the contact, or deactivating the
+  // account, between an unlocked read and the family insert would leave a
+  // session their save could not revoke. Two opposite switches of the same
+  // contact lock the pair in the same order and queue instead of deadlocking.
+  if (options.targetCustomerId && String(options.targetCustomerId) !== String(decoded.customerId)) {
+    const ids = [String(decoded.customerId), String(options.targetCustomerId)].sort();
+    await trx('customers').whereIn('id', ids).orderBy('id').forUpdate().select('id');
+    return query.first();
+  }
+  return query.forUpdate().first();
 }
 
-// The customers row the NEXT token is minted for: the current one, or the
-// requested profile when it is an active sibling on the same account. Null =
-// the switch is refused.
-async function rotationTargetCustomer(trx, customer, accountId, options) {
-  if (!options.targetCustomerId || String(options.targetCustomerId) === String(customer.id)) return customer;
+// The customers row the NEXT token is minted for, with the account the family
+// lands on: the current row, or the requested profile when it is an active
+// sibling on the same account. A contact's switch (options.contactSwitch,
+// /auth/select-property) instead targets another ACTIVE row that lists the
+// same number — possibly on another account, so the family moves to the
+// target's account; any other profile switch is not a contact's to make
+// (contactRotationRefusal). The contact's target row is already locked
+// (rotationCustomerRead), so this read is the revalidation under that lock.
+// Null = the switch is refused.
+async function rotationTarget(trx, customer, accountId, decoded, options) {
+  if (!options.targetCustomerId || String(options.targetCustomerId) === String(customer.id)) return { customer, accountId };
   const target = await trx('customers')
     .where({ id: options.targetCustomerId, active: true })
     .whereNull('deleted_at')
     .first();
-  return target && String(accountIdForCustomer(target)) === String(accountId) ? target : null;
+  if (!target) return null;
+  if (decoded.contactKey) {
+    if (!contactSessionFor(target, decoded.contactKey)) return null;
+    const targetAccountId = accountIdForCustomer(target);
+    await ensureSelfAccountRow(trx, target.id, targetAccountId);
+    return { customer: target, accountId: targetAccountId };
+  }
+  return String(accountIdForCustomer(target)) === String(accountId) ? { customer: target, accountId } : null;
 }
 
 // The refresh row this exchange consumes, locked. A legacy signed token (no
@@ -492,7 +526,7 @@ async function rotateRefreshSession(refreshToken, options = {}) {
     // A cancelled customer's saved session keeps refreshing under the C4
     // read-only allowance (sessionCustomerAdmitted); every other inactive
     // row is rejected exactly as before.
-    const customer = await rotationCustomerRead(trx, decoded);
+    const customer = await rotationCustomerRead(trx, decoded, options);
     // Contact session (GATE_CONTACT_LOGIN): may this contact family rotate?
     // Decided BEFORE the generic admission below, so an inactive row ends
     // the contact family (revoked here) instead of merely refusing this
@@ -511,8 +545,10 @@ async function rotateRefreshSession(refreshToken, options = {}) {
       return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
     }
 
-    const nextCustomer = await rotationTargetCustomer(trx, customer, accountId, options);
-    if (!nextCustomer) return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
+    const target = await rotationTarget(trx, customer, accountId, decoded, options);
+    if (!target) return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
+    const nextCustomer = target.customer;
+    const nextAccountId = target.accountId;
     // Selected saved property (GATE_APP_PROPERTY_SCOPE). A same-profile
     // rotation forwards the claim the family was minted with; a profile
     // switch drops it unless the switch names a target property. Never
@@ -560,14 +596,14 @@ async function rotateRefreshSession(refreshToken, options = {}) {
     const next = await insertRefreshRecord(
       trx,
       nextCustomer.id,
-      accountId,
+      nextAccountId,
       row.family_id,
       nextJti,
       row.jti,
       nextPropertyId,
       contactKey,
     );
-    return { ok: true, ...next, customer: nextCustomer, accountId, propertyId: nextPropertyId, contactKey };
+    return { ok: true, ...next, customer: nextCustomer, accountId: nextAccountId, propertyId: nextPropertyId, contactKey };
   });
 
   if (result.code === 'REFRESH_TOKEN_REUSED') {
