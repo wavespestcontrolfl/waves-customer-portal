@@ -29,8 +29,8 @@
  *   confirmed   -> re-derives the preview and refuses with preview_changed on any drift, then runs the handler with
  *                  exactly the carded body (the due date included) and the approved scope (the total, the customer,
  *                  the visit link, the invoices already on the visit, no payer, no retention offer). The handler
- *                  creates the invoice in one transaction; under the visit's mint lock and a share lock on the
- *                  customer row it re-checks that scope (recheckApprovedScope) before it mints, and rolls back if
+ *                  creates the invoice in one transaction; under the visit's mint lock and share locks on the
+ *                  customer row and the payer rows it re-checks that scope (recheckApprovedScope) before it mints, and rolls back if
  *                  the scope or the total it computed differs from the card's (409).
  */
 const crypto = require('crypto');
@@ -376,6 +376,14 @@ async function recheckApprovedScope(conn, approved) {
     const live = (await liveInvoicesOnVisit(conn, approved.serviceRecordId, approved.scheduledServiceId || null)).map(invoicePin);
     if (JSON.stringify(live) !== JSON.stringify(approved.visitInvoices)) throw scopeChanged('An invoice on this visit changed after the card was shown');
   }
+  // Hold the payer rows this Bill-To resolves through (the visit's own and the customer default, active or not) FOR SHARE
+  // before reading them, as create() does for a linked create: a payer activation locks the payer row FOR UPDATE and waits for
+  // this commit, so the self-pay answer below is still true when create() resolves the payer again to insert the invoice.
+  const visitPayer = approved.scheduledServiceId
+    ? await conn('scheduled_services').where({ id: approved.scheduledServiceId, customer_id: approved.customerId }).first('payer_id')
+    : null;
+  const payerIds = [...new Set([visitPayer?.payer_id, customer.payer_id].filter(Boolean).map(String))].sort();
+  if (payerIds.length) await conn('payers').whereIn('id', payerIds).orderBy('id').forShare().select('id');
   const refused = await pageOnlyRefusal(customer, { scheduled_service_id: approved.scheduledServiceId || null }, approved.mode, conn);
   if (refused) throw scopeChanged(`${refused.error.replace(/ Create it from the Invoices page\.$/, '')} (it changed after the card was shown)`);
 }

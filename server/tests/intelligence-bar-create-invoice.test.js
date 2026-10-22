@@ -39,6 +39,9 @@ function freshState() {
     service_records: [{ id: REC, customer_id: CUST, service_type: 'Quarterly Pest Control', service_date: '2099-01-05', scheduled_service_id: VISIT }],
     invoices: [],
     retention_offers: [],
+    scheduled_services: [{ id: VISIT, customer_id: CUST, payer_id: null }],
+    payers: [{ id: 'payer-1' }],
+    locks: [],
   };
 }
 
@@ -69,6 +72,8 @@ function makeDb() {
         if (prop === 'whereNull') return (k) => { q.nulls.push(k); return b; };
         if (prop === 'whereNotIn') return (k, list) => { q.notIns.push([k, list]); return b; };
         if (prop === 'first') return () => { q.single = true; return b; };
+        if (prop === 'forShare') return () => { state.locks.push(table); return b; };
+        if (prop === 'whereIn') return (k, list) => { q.wheres.push([{ [k]: list[0] }]); return b; };
         if (['insert', 'update', 'del', 'delete', 'upsert', 'transaction'].includes(prop)) throw new Error(`unexpected ${String(prop)} on ${table}`);
         return () => b;
       },
@@ -410,6 +415,23 @@ describe('recheckApprovedScope (inside the create transaction)', () => {
     mockMintLock.mockClear();
     await expect(recheck(unlinked)).resolves.toBeUndefined();
     expect(mockMintLock).not.toHaveBeenCalled();
+  });
+
+  test('the customer and the payer rows are held FOR SHARE before the payer is read, so a payer activation waits for the commit', async () => {
+    const approved = await approvedOf();
+    state.customers[0].payer_id = 'payer-1';
+    state.locks.length = 0;
+    const order = [];
+    mockResolvePayer.mockImplementation(async () => { order.push(`resolve after ${state.locks.join(',')}`); return { payerId: null }; });
+    await recheck(approved);
+    expect(state.locks).toEqual(['customers', 'payers']);
+    expect(order).toEqual(['resolve after customers,payers']);
+    // A visit payer override is held too.
+    state.scheduled_services[0].payer_id = 'payer-2';
+    state.payers.push({ id: 'payer-2' });
+    state.locks.length = 0;
+    await recheck(approved);
+    expect(state.locks).toEqual(['customers', 'payers']);
   });
 
   test('a payer assigned after the card is a 409 IB_SCOPE_CHANGED', async () => {
