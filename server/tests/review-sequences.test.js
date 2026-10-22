@@ -8119,6 +8119,7 @@ describe('GATE_REVIEW_ASK_AFTER_REPORT — Day-0 ask 10 minutes after the report
 
     test.each([
       ['the report went out', { completionSmsStatus: 'sent' }, {}],
+      ['the held report went to the customer App (codex #6471 r4 P2)', { completionSmsStatus: 'sent', sentSmsChannel: 'push', completionSmsDeferredDeliveredAt: new Date(Date.now() - 3 * 60000).toISOString() }, {}],
       ['the held report went out over 10 minutes ago', { completionSmsStatus: 'sent', completionSmsDeferredDeliveredAt: new Date(Date.now() - 11 * 60000).toISOString() }, {}],
       ['the gate is off', { completionSmsStatus: 'deferred' }, {}, false],
       ['enrolled over 24 hours ago', { completionSmsStatus: 'deferred' }, { started_at: new Date(Date.now() - 25 * 3600000) }],

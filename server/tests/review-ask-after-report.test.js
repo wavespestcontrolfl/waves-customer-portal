@@ -194,7 +194,7 @@ describe('a report held for the morning pulls its review ask when it goes out as
   test('gates on, sent as SMS/MMS (or proved by a Twilio SID): one conditional write re-plans an untouched smart-window Day-0 ask to 10 minutes from now', async () => {
     process.env.GATE_REVIEW_ASK_AFTER_REPORT = 'true';
     process.env.GATE_REVIEW_SEQUENCES = 'true';
-    for (const proof of [{ channel: 'sms' }, { channel: 'mms' }, { providerMessageId: 'SM0123456789abcdef0123456789abcdef' }, { providerMessageId: 'MM0123456789abcdef0123456789abcdef' }]) {
+    for (const proof of [{ channel: 'sms' }, { channel: 'mms' }]) {
       const { q, calls } = chain();
       db.mockImplementation(() => q);
       const { runExclusive } = require('../utils/cron-lock');
@@ -214,9 +214,8 @@ describe('a report held for the morning pulls its review ask when it goes out as
   });
 
   test.each([
-    ['the App (no provider SID)', { channel: 'push' }],
-    ['no channel and no provider proof', {}],
-    ['a provider id that is not a Twilio SID', { providerMessageId: 'push-abc' }],
+    ['the App', { channel: 'push' }],
+    ['an unknown channel', {}],
     ['email', { channel: 'email' }],
   ])('%s: nothing moves, no write', async (_label, proof) => {
     process.env.GATE_REVIEW_ASK_AFTER_REPORT = 'true';
@@ -249,9 +248,20 @@ describe('a report held for the morning pulls its review ask when it goes out as
     expect(await ReviewService.pullAskAfterHeldReport('sr-1', { channel: 'sms' })).toEqual({ pulled: 0 });
   });
 
-  test('the completion replay finalize passes the channel and the provider id (a finalize-only retry still applies it)', async () => {
+  test('the replay channel: the first pass knows it; a finalize-only retry reads a Twilio SID as a text; an App push has none', () => {
+    expect(ReviewService.heldReportReplayChannel({ channel: 'push' })).toBe('push');
+    expect(ReviewService.heldReportReplayChannel({ channel: 'mms', providerMessageId: 'SM0123456789abcdef0123456789abcdef' })).toBe('mms');
+    expect(ReviewService.heldReportReplayChannel({ providerMessageId: 'SM0123456789abcdef0123456789abcdef' })).toBe('sms');
+    expect(ReviewService.heldReportReplayChannel({ providerMessageId: 'MM0123456789abcdef0123456789abcdef' })).toBe('sms');
+    expect(ReviewService.heldReportReplayChannel({ providerMessageId: 'push-abc' })).toBeUndefined();
+    expect(ReviewService.heldReportReplayChannel({})).toBeUndefined();
+  });
+
+  test('the completion replay finalize stamps the channel and pulls with it (a finalize-only retry too)', async () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/messaging/deferred-replay-registry.js'), 'utf8');
-    expect(src).toContain("await require('../review-request').pullAskAfterHeldReport(meta.service_record_id, { channel: ctx.channel, providerMessageId: ctx.providerMessageId || meta.provider_message_id });");
+    expect(src).toContain("const channel = ReviewService.heldReportReplayChannel({ channel: ctx.channel, providerMessageId: ctx.providerMessageId || meta.provider_message_id });");
+    expect(src).toContain("await finalizeDeferredCompletionSend(meta, { retry: ctx.retry === true, channel });");
+    expect(src).toContain("await ReviewService.pullAskAfterHeldReport(meta.service_record_id, { channel });");
     const scheduler = require('fs').readFileSync(require('path').join(__dirname, '../services/scheduler.js'), 'utf8');
     expect(scheduler).toContain('{ providerMessageId: smsResult.providerMessageId, customerId: msg.customer_id || null, channel: smsResult.channel || null });');
   });

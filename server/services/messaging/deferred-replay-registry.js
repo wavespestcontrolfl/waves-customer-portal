@@ -677,13 +677,15 @@ const REGISTRY = {
     },
     async finalize(meta, ctx = {}) {
       const { finalizeDeferredCompletionSend } = require('../dispatch-completion-deferred');
-      const result = await finalizeDeferredCompletionSend(meta, { retry: ctx.retry === true });
-      // GATE_REVIEW_ASK_AFTER_REPORT: the held report just went out; when it
-      // went as a TEXT (the first pass knows the channel; a finalize-only retry
-      // reads it from the accepted provider id), its review ask is re-planned
-      // to 10 minutes after it. Idempotent; never throws, never changes this
-      // finalize's outcome.
-      await require('../review-request').pullAskAfterHeldReport(meta.service_record_id, { channel: ctx.channel, providerMessageId: ctx.providerMessageId || meta.provider_message_id });
+      const ReviewService = require('../review-request');
+      // The replay's channel: the first pass knows it; a finalize-only retry
+      // reads it from the accepted provider id (a Twilio SID = a text).
+      const channel = ReviewService.heldReportReplayChannel({ channel: ctx.channel, providerMessageId: ctx.providerMessageId || meta.provider_message_id });
+      const result = await finalizeDeferredCompletionSend(meta, { retry: ctx.retry === true, channel });
+      // GATE_REVIEW_ASK_AFTER_REPORT: when the held report went out as a TEXT,
+      // its review ask is re-planned to 10 minutes after it. Idempotent; never
+      // throws, never changes this finalize's outcome.
+      await ReviewService.pullAskAfterHeldReport(meta.service_record_id, { channel });
       return result;
     },
     async onTerminal(meta) {

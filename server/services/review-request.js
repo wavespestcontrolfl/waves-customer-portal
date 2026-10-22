@@ -1991,6 +1991,9 @@ const ReviewService = {
       const row = await db("service_records").where({ id: seq.service_record_id }).first("structured_notes");
       const notes = structuredNotesObject(row?.structured_notes);
       if (notes.completionSmsStatus === "deferred") return new Date(Date.now() + 5 * 60000);
+      // An App replay (sentSmsChannel 'push') is not a report text: the ask
+      // keeps its smart window. An unknown channel keeps the floor.
+      if (notes.sentSmsChannel === "push") return null;
       const readyMs = new Date(notes.completionSmsDeferredDeliveredAt || NaN).getTime() + REVIEW_AFTER_REPORT_DELAY_MINUTES * 60000;
       return readyMs > Date.now() ? new Date(readyMs) : null;
     } catch (err) {
@@ -1999,9 +2002,16 @@ const ReviewService = {
     }
   },
 
-  async pullAskAfterHeldReport(serviceRecordId, { channel = null, providerMessageId = null } = {}) {
-    const texted = ["sms", "mms"].includes(channel) || /^(SM|MM)[0-9a-f]{32}$/i.test(String(providerMessageId || ""));
-    if (!serviceRecordId || !texted) return { pulled: 0 };
+  // The channel a held report's replay went out on: the replay's own (first
+  // pass), else 'sms' when the accepted provider id is a Twilio SMS/MMS SID (an
+  // App push has none), else undefined (unknown).
+  heldReportReplayChannel({ channel = null, providerMessageId = null } = {}) {
+    if (channel) return channel;
+    return /^(SM|MM)[0-9a-f]{32}$/i.test(String(providerMessageId || "")) ? "sms" : undefined;
+  },
+
+  async pullAskAfterHeldReport(serviceRecordId, { channel = null } = {}) {
+    if (!serviceRecordId || !["sms", "mms"].includes(channel)) return { pulled: 0 };
     try {
       if (!reviewAskAfterReportOn() || !require("../config/feature-gates").isEnabled("reviewSequences")) return { pulled: 0 };
       const pending = () => db("review_sequences")
