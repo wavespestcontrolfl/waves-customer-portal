@@ -27,6 +27,16 @@ export function encodeEmailBody(text) {
     .replace(/\n/g, "<br>");
 }
 
+const uncertainKey = (userId) => `waves_email_schedule_uncertain:${userId}`;
+function readUncertainSchedules(userId) {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(uncertainKey(userId)) || "{}");
+    return saved && typeof saved === "object" ? saved : {};
+  } catch {
+    return {};
+  }
+}
+
 export default function useEmailEditor(userId) {
   const [draftSession] = useState(() => loadEmailDrafts(userId));
   const snapshot = () => ({
@@ -49,7 +59,14 @@ export default function useEmailEditor(userId) {
   const [scheduling, setScheduling] = useState(null);
   // Per draft slot, the key of a schedule request whose answer never came:
   // the same email at the same time reuses it, so the server keeps one row.
-  const uncertainSchedule = useRef({});
+  // Kept in this tab's sessionStorage, like the drafts, so a reload keeps it.
+  const uncertainSchedule = useRef(null);
+  if (uncertainSchedule.current === null) uncertainSchedule.current = readUncertainSchedules(userId);
+  const rememberUncertain = (slot, entry) => {
+    if (entry) uncertainSchedule.current[slot] = entry;
+    else delete uncertainSchedule.current[slot];
+    try { sessionStorage.setItem(uncertainKey(userId), JSON.stringify(uncertainSchedule.current)); } catch { /* memory copy still holds */ }
+  };
   const setShowCompose = (visible) => {
     if (visible) setSendFeedback((current) => ({ ...current, compose: null }));
     setComposeOpen(visible);
@@ -215,19 +232,19 @@ export default function useEmailEditor(userId) {
         method: "POST",
         body: JSON.stringify({ ...payload, body: encodeEmailBody(payload.body), draftText: payload.body, sendAt, clientKey }),
       });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok || !result.success) {
-        // 5xx may hide a committed insert: keep the key for the retry.
-        if (response.status >= 500) uncertainSchedule.current[slot] = { request, clientKey };
-        else delete uncertainSchedule.current[slot];
+      const result = await response.json().catch(() => null);
+      // A 2xx or 5xx without a readable answer may hide a committed insert.
+      if (!result || (response.ok && !result.success)) throw new Error("Schedule outcome unknown");
+      if (!response.ok) {
+        rememberUncertain(slot, response.status >= 500 ? { request, clientKey } : null);
         setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: result.error || "The email was not scheduled. Your draft is still here." } }));
         return;
       }
-      delete uncertainSchedule.current[slot];
+      rememberUncertain(slot, null);
       clearQueued();
       setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, message: `Scheduled for ${formatSendAt(sendAt)}. Find it under Scheduled.` } }));
     } catch {
-      uncertainSchedule.current[slot] = { request, clientKey };
+      rememberUncertain(slot, { request, clientKey });
       setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: "Scheduling was not confirmed. Look under Scheduled; trying again will not queue it twice." } }));
     } finally {
       setScheduling(null);

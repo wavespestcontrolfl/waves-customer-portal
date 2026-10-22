@@ -86,11 +86,15 @@ describe("Email schedule send", () => {
     expect(await screen.findByRole("button", { name: "Scheduled (1)" })).toBeInTheDocument();
   });
 
-  it("a retry after a lost answer reuses the same client key", async () => {
+  it.each(["network", "unreadable"])("a retry after a lost answer (%s) reuses the same client key", async (mode) => {
     let failNext = true;
     const base = fetch.getMockImplementation();
     fetch.mockImplementation((input, options = {}) => {
-      if (String(input).endsWith("/email/schedule") && failNext) { failNext = false; return Promise.reject(new TypeError("network")); }
+      if (String(input).endsWith("/email/schedule") && failNext) {
+        failNext = false;
+        return mode === "network" ? Promise.reject(new TypeError("network"))
+          : Promise.resolve({ ok: true, status: 200, json: async () => { throw new SyntaxError("truncated"); } });
+      }
       return base(input, options);
     });
     mount();
