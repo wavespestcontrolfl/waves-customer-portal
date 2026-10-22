@@ -4969,18 +4969,30 @@ async function findCustomerViaCallbackSpokenNumber(call = {}, extracted = {}, op
   const extractedFirst = normalizeNamePart(extracted?.first_name);
   if (!extractedFirst) return null;
   const conn = opts.db || db;
-  const related = await conn('call_log').where({ id: String(relatedId) }).first('id', 'direction', 'ai_extraction');
+  const related = await conn('call_log').where({ id: String(relatedId) })
+    .first('id', 'direction', 'from_phone', 'call_outcome', 'answered_by', 'processing_status', 'ai_extraction');
+  // Any inbound call's "Call back" is also an admin-callback: only the voicemail
+  // this callback was dialed to (its ANI is the number dialed) counts.
   if (!related || !String(related.direction || '').toLowerCase().startsWith('inbound')) return null;
+  if (!isVoicemailParent(related) || !samePhone(related.from_phone, call.to_phone)) return null;
   const spoken = firstExternalPhone(parseLooseJson(related.ai_extraction).phone);
   if (!spoken || samePhone(spoken, call.to_phone)) return null;
   // One or two digits off the dialed number is a misheard digit, not another line
   // (the same rule resolveCallContactPhone applies to a dictated number).
   if (phoneNearMissOfAni(spoken, call.to_phone)) return null;
-  const candidate = await findCustomerForCallContact(spoken, extracted, { db: conn });
-  if (!candidate || candidate.deleted_at || !customerPhoneMatches(spoken, candidate)) return null;
-  const candidateFirst = normalizeNamePart(candidate.first_name);
-  if (!candidateFirst || !sameSpokenFirstName(extractedFirst, candidateFirst)) return null;
-  return candidate;
+  // Direct lookup, first name only: a transcriber misspells a last name, and a
+  // household number can hold several people. Link only when exactly one live
+  // customer has the spoken number as their PRIMARY phone and the first name agrees.
+  const spokenKey = phoneKey(spoken);
+  const owners = await conn('customers')
+    .whereNull('deleted_at')
+    .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [spokenKey.slice(-10)])
+    .orderBy('updated_at', 'desc')
+    .limit(25);
+  const named = (owners || []).filter((c) => customerPhoneMatches(spoken, c)
+    && normalizeNamePart(c.first_name)
+    && sameSpokenFirstName(extractedFirst, normalizeNamePart(c.first_name)));
+  return named.length === 1 ? named[0] : null;
 }
 
 async function registerScheduleSideEffects({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType, closeReminderWindows = false, callbackNumberHoldActive = false, disclaimedPhone = null, callLogId = null }) {

@@ -60,6 +60,8 @@ const callbackCall = (over = {}) => ({
 const voicemail = (over = {}) => ({
   id: PARENT_ID,
   direction: 'inbound',
+  from_phone: DIALED,
+  call_outcome: 'voicemail',
   ai_extraction: { phone: SPOKEN },
   ...over,
 });
@@ -137,31 +139,62 @@ describe('findCustomerViaCallbackSpokenNumber', () => {
   });
 
   test('the voicemail extraction may arrive as a JSON string; a misspelled last name does not block', async () => {
-    // The name fast path rejects the last-name mismatch; the single primary-phone owner still links.
-    mockDb({ call_log: [voicemail({ ai_extraction: JSON.stringify({ phone: SPOKEN }) })], customers: [[customer()], [customer()]] });
+    mockDb({ call_log: [voicemail({ ai_extraction: JSON.stringify({ phone: SPOKEN }) })], customers: [[customer()]] });
     const out = await findCustomerViaCallbackSpokenNumber(callbackCall(), { first_name: 'Jordan', last_name: 'Reevas' });
     expect(out?.id).toBe('cust-1');
   });
 
+  test('the parent is an ordinary inbound call, not a voicemail: null', async () => {
+    mockDb({ call_log: [voicemail({ call_outcome: 'answered', answered_by: 'human' })], customers: [[customer()]] });
+    expect(await findCustomerViaCallbackSpokenNumber(callbackCall(), extractedJordan)).toBeNull();
+    expect(tablesRead.filter((t) => t === 'customers')).toEqual([]);
+  });
+
+  test('the parent voicemail came from a different number than the one dialed: null', async () => {
+    mockDb({ call_log: [voicemail({ from_phone: '+19415550177' })], customers: [[customer()]] });
+    expect(await findCustomerViaCallbackSpokenNumber(callbackCall(), extractedJordan)).toBeNull();
+    expect(tablesRead.filter((t) => t === 'customers')).toEqual([]);
+  });
+
+  test('answered_by voicemail marks a voicemail parent too', async () => {
+    mockDb({ call_log: [voicemail({ call_outcome: null, answered_by: 'voicemail' })], customers: [[customer()]] });
+    expect((await findCustomerViaCallbackSpokenNumber(callbackCall(), extractedJordan))?.id).toBe('cust-1');
+  });
+
+  test('shared household number: links the member whose first name agrees, whatever the last name', async () => {
+    const wife = customer({ id: 'cust-wife', first_name: 'Morgan', last_name: 'Rivers' });
+    const husband = customer({ id: 'cust-husband', first_name: 'Jordan', last_name: 'Rivers' });
+    mockDb({ call_log: [voicemail()], customers: [[wife, husband]] });
+    const out = await findCustomerViaCallbackSpokenNumber(callbackCall(), { first_name: 'Jordan', last_name: 'Reevas' });
+    expect(out?.id).toBe('cust-husband');
+  });
+
+  test('two household members share the first name: null (no tiebreak)', async () => {
+    const a = customer({ id: 'cust-a', first_name: 'Jordan', last_name: 'Rivers' });
+    const b = customer({ id: 'cust-b', first_name: 'Jordan', last_name: 'Rivers-Hale' });
+    mockDb({ call_log: [voicemail()], customers: [[a, b]] });
+    expect(await findCustomerViaCallbackSpokenNumber(callbackCall(), extractedJordan)).toBeNull();
+  });
+
   test('the number is only a secondary/slot phone on the customer: null', async () => {
     const slotOnly = customer({ phone: '+19415550177', secondary_phone: SPOKEN });
-    mockDb({ call_log: [voicemail()], customers: [[slotOnly], [slotOnly], [slotOnly]] });
+    mockDb({ call_log: [voicemail()], customers: [[slotOnly]] });
     expect(await findCustomerViaCallbackSpokenNumber(callbackCall(), extractedJordan)).toBeNull();
   });
 
   test('first name disagrees: null', async () => {
-    mockDb({ call_log: [voicemail()], customers: [[customer({ first_name: 'Casey' })], [customer({ first_name: 'Casey' })]] });
+    mockDb({ call_log: [voicemail()], customers: [[customer({ first_name: 'Casey' })]] });
     expect(await findCustomerViaCallbackSpokenNumber(callbackCall(), extractedJordan)).toBeNull();
   });
 
   test('the callback extraction has no first name: null (nothing to agree with)', async () => {
-    mockDb({ call_log: [voicemail()], customers: [[customer()], [customer()]] });
+    mockDb({ call_log: [voicemail()], customers: [[customer()]] });
     expect(await findCustomerViaCallbackSpokenNumber(callbackCall(), { last_name: 'Rivers' })).toBeNull();
     expect(tablesRead).toEqual([]);
   });
 
   test('no customer owns the spoken number: null', async () => {
-    mockDb({ call_log: [voicemail()], customers: [[], []] });
+    mockDb({ call_log: [voicemail()], customers: [[]] });
     expect(await findCustomerViaCallbackSpokenNumber(callbackCall(), extractedJordan)).toBeNull();
   });
 });
