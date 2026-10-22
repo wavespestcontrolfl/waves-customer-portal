@@ -384,15 +384,6 @@ function endNowPastRefundWindow(term) {
   return prepayRefund90DayLive() && prepayRefundWindowPassed(term);
 }
 
-// An open acceptance grandfathers an end-now only for the term it was made under (Codex #6477 r3): acceptances are keyed
-// by customer + scope, so a stale request from an earlier term (a reactivated customer) must not unlock a later term.
-// Proof = the request was created on or after this term's start (ET date). No readable date = not proven.
-function acceptanceBelongsToTerm(acceptance, term) {
-  const created = acceptance && acceptance.created_at ? etDateString(new Date(acceptance.created_at)) : null;
-  const start = term && term.term_start ? dateOnlyString(term.term_start) : null;
-  return !!created && !!start && created >= start;
-}
-
 function endNowBlockedForTerm(term, wholeAccount, disposition, hasRun) {
   return prepayRefund90DayLive() && !!term && wholeAccount === true
     && disposition === 'end_now_refund' && !hasRun && prepayRefundWindowPassed(term);
@@ -981,7 +972,7 @@ function customerSummary(customer) {
 // what was accepted, so only a fresh end-now is unavailable.
 async function endNowUnavailableForTerm({ customerId, term, wholeAccount, prepayPlan, acceptance }) {
   if (!prepayRefund90DayLive() || !term || !wholeAccount || !prepayRefundWindowPassed(term)) return false;
-  if (acceptance && acceptanceBelongsToTerm(acceptance, term)) return false;
+  if (acceptance) return false;
   if (term.renewal_decision !== 'cancel' || prepayPlan.prepayDisposition !== 'end_now_refund') return true;
   try {
     return !(await findTiedPriorCase(customerId, term, prepayPlan)).priorReq;
@@ -1491,7 +1482,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // Only a FRESH end-now is refused: an open acceptance, or a tied recorded
   // run the duplicate latch below finds, always finishes under what was
   // accepted (end-now allowed, refund as computed).
-  let endNowBlocked = endNowBlockedForTerm(term, wholeAccount, prepayPlan.prepayDisposition, !!openAcceptance && acceptanceBelongsToTerm(openAcceptance, term));
+  let endNowBlocked = endNowBlockedForTerm(term, wholeAccount, prepayPlan.prepayDisposition, !!openAcceptance);
   const refund = term && prepayPlan.prepayDisposition === 'end_now_refund'
     ? await computePrepayRefund({ ...term, customer_id: customerId })
     : null;
@@ -2457,7 +2448,6 @@ module.exports = {
   commitCancelPlan,
   computePrepayRefund,
   prepayRefundWindowPassed,
-  acceptanceBelongsToTerm,
   // Shared with the renew-decision route (admin-schedule): every writer of
   // a term's renewal decision serializes on this lock so a renew can never
   // land between the cancel's destructive wind-down and its term decision.
