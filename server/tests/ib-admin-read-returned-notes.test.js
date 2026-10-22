@@ -475,6 +475,11 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     expect(scrubNote(`key ${random} end`).text).toBe(`key ${REMOVED} end`);
   });
 
+  test('a random mixed-case run without digits is not a readable word and goes (r12 audit)', () => {
+    const { text } = scrubNote('secret QxLmVbTnRkZcWdHfJgPsYuAeIoKqMwEz end');
+    expect(text).toBe(`secret ${REMOVED} end`);
+  });
+
   test.each([
     ['postgresql://db.example/prod?pwd=hunter22', 'hunter22'],
     ['redis://cache.example/0?sid=abc123xyz', 'abc123xyz'],

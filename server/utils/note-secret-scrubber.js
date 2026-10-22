@@ -205,7 +205,9 @@ const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}(?::?\d{2}(?::?\d{2}(?:\.\d+)
 // Readable text is not random: an e-mail address, or a token that splits on - _ . /
 // into plain words and short numbers ("door-code-is-1234-west-side",
 // "invoice_2026_10_service_report.pdf"), stays (Codex #6375 r11).
-const PLAIN_PART_RE = /^(?:[A-Za-z]+|\d{1,6})$/;
+// A plain word is lower-case, UPPER-case or Capitalized and at most 24 letters: random
+// mixed-case letters ("QxLmVbTnRk...") are not a word (Codex #6375 r12 audit P1).
+const PLAIN_PART_RE = /^(?:[a-z]{1,24}|[A-Z]{1,24}|[A-Z][a-z]{1,23}|\d{1,6})$/;
 const isReadableToken = token => token.includes('@') || token.split(/[-_./]/).filter(Boolean).every(part => PLAIN_PART_RE.test(part));
 const letterDigitTransitions = token => (token.match(/[A-Za-z]\d|\d[A-Za-z]/g) || []).length;
 function looksLikeRandomToken(token) {
