@@ -281,53 +281,53 @@ async function runBeforeSend(gmail, options) {
   await options.beforeSend();
 }
 
-async function sendMessage(to, subject, body, threadId = null, inReplyTo = null, options) {
-  const gmail = await getGmail();
-  const fromEmail = ownAddress();
+// The base64url MIME message: our From, the recipient, an encoded subject,
+// HTML body, and In-Reply-To / References when it answers a message.
+function buildRawMessage(to, subject, body, inReplyTo) {
   const safeTo = sanitizeHeaderValue(to);
-  const safeSubject = encodeHeaderUtf8(subject);
-  const safeInReplyTo = sanitizeHeaderValue(inReplyTo);
-
   if (!safeTo) throw new Error('Recipient (to) is required');
-
+  const safeInReplyTo = sanitizeHeaderValue(inReplyTo);
   const headers = [
-    `From: Waves Pest Control <${fromEmail}>`,
+    `From: Waves Pest Control <${ownAddress()}>`,
     `To: ${safeTo}`,
-    `Subject: ${safeSubject}`,
+    `Subject: ${encodeHeaderUtf8(subject)}`,
     'MIME-Version: 1.0',
     'Content-Type: text/html; charset=utf-8',
+    ...(safeInReplyTo ? [`In-Reply-To: ${safeInReplyTo}`, `References: ${safeInReplyTo}`] : []),
   ];
-  if (safeInReplyTo) {
-    headers.push(`In-Reply-To: ${safeInReplyTo}`);
-    headers.push(`References: ${safeInReplyTo}`);
-  }
+  return Buffer.from(headers.join('\r\n') + '\r\n\r\n' + body).toString('base64url');
+}
 
-  const raw = Buffer.from(headers.join('\r\n') + '\r\n\r\n' + body).toString('base64url');
+// Marks a messages.send failure that may hide an accepted email
+// (providerOutcome.outcomeUnknown). OAuth refresh can fail inside
+// messages.send before any message POST: its token endpoint must never be
+// mistaken for an uncertain delivery, nor a pre-send transport failure or a
+// definite 4xx (408 excepted).
+function markUncertainSendFailure(err) {
+  const failedUrl = String(err.config?.url || err.response?.config?.url || '');
+  const messagePost = /\/gmail\/v1\/users\/[^/]+\/messages\/send(?:\?|$)/.test(failedUrl);
+  const status = Number(err.response?.status || err.status || err.code);
+  const definite = require('../../utils/provider-transport').isPreSendFailure(err) || (status >= 400 && status < 500 && status !== 408);
+  if (messagePost && !definite) err.providerOutcome = { outcomeUnknown: true };
+  return err;
+}
 
-  const params = { userId: 'me', requestBody: { raw } };
-  if (threadId) params.requestBody.threadId = threadId;
+async function sendMessage(to, subject, body, threadId = null, inReplyTo = null, options) {
+  const gmail = await getGmail();
+  const raw = buildRawMessage(to, subject, body, inReplyTo);
+  const params = { userId: 'me', requestBody: { raw, ...(threadId ? { threadId } : {}) } };
 
   await runBeforeSend(gmail, options);
+  let res;
   try {
-    const res = await gmail.users.messages.send(params, sendRequestOptions(options));
-    if (!res.data?.id) {
-      const err = new Error('Gmail returned no message identifier; reconcile the send before retrying');
-      err.providerOutcome = { outcomeUnknown: true };
-      throw err;
-    }
-    return res.data;
+    res = await gmail.users.messages.send(params, sendRequestOptions(options));
   } catch (err) {
-    // OAuth refresh can fail inside messages.send before any message POST.
-    // Its token endpoint must never be mistaken for an uncertain delivery.
-    const failedUrl = String(err.config?.url || err.response?.config?.url || '');
-    const messagePost = /\/gmail\/v1\/users\/[^/]+\/messages\/send(?:\?|$)/.test(failedUrl);
-    const status = Number(err.response?.status || err.status || err.code);
-    if (messagePost && !require('../../utils/provider-transport').isPreSendFailure(err)
-      && !(status >= 400 && status < 500 && status !== 408)) {
-      err.providerOutcome = { outcomeUnknown: true };
-    }
-    throw err;
+    throw markUncertainSendFailure(err);
   }
+  if (!res.data?.id) {
+    throw Object.assign(new Error('Gmail returned no message identifier; reconcile the send before retrying'), { providerOutcome: { outcomeUnknown: true } });
+  }
+  return res.data;
 }
 
 async function modifyLabels(messageId, addLabels = [], removeLabels = []) {
