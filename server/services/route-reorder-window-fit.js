@@ -148,7 +148,7 @@ function workDuration(stop, fallback = 60) {
  * PHANTOM-HOUR FIX (prod, Sat 2026-09-12): two customers each had TWO
  * scheduled_services rows (pest + lawn) promised the
  * SAME arrival window at the SAME property — one physical stop, `visit_id`
- * NULL (GATE_VISIT_GROUPS is dark in prod, so these rows never went through
+ * NULL (grouping was dark in prod, so these rows never went through
  * visit-groups.js's proper grouping — see the veto note on
  * computeChronologicalRepair below). Simulated as two independent stops each
  * charged their own workDuration, the pair cost 2 hours of on-site time for
@@ -530,8 +530,8 @@ function promisedWindowOrder(rows) {
  * work and is out of scope for a phantom-hour fix — this module has no
  * visit_id-aware pre-grouping step (sum durations, union/offset windows,
  * shared technician) to replicate arrival-route.js's contract, so the veto
- * stays: a visit_id day is left for the (dark, GATE_VISIT_GROUPS) group
- * path or a human, never silently mis-simulated here.
+ * stays: a visit_id day is left for the visit-group path or a human, never
+ * silently mis-simulated here.
  */
 function computeChronologicalRepair(RouteOptimizer, stops, home = RouteOptimizer.HQ) {
   if (stops.some(stop => {

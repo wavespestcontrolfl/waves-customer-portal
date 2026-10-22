@@ -1069,7 +1069,7 @@ function UnassignedRail({ services, onEdit, onProtocol, onTreatmentPlan, onViewA
   );
 }
 
-function BulkActionBar({ count, defaultDate, selectedServices, onMove, onUnassign, onClear, busy, combine, onCombine, separate, onSeparate }) {
+function BulkActionBar({ count, defaultDate, selectedServices, onMove, onUnassign, onClear, busy, separate, onSeparate }) {
   const [targetDate, setTargetDate] = useState(defaultDate);
   useEffect(() => { setTargetDate(defaultDate); }, [defaultDate]);
   // Advisory overlap summary for the picked landing date — each selected
@@ -1116,25 +1116,8 @@ function BulkActionBar({ count, defaultDate, selectedServices, onMove, onUnassig
       >
         Unassign all
       </button>
-      {/* Visit group office actions (visit-group-scope.md §3): Combine
-          groups the selected same-customer rows into one stop — a later
-          row moves to abut the earlier one when their windows are apart
-          (no customer text); Separate splits a grouped row back out. */}
-      {combine && (
-        <>
-          <span className="mx-1 text-zinc-500">·</span>
-          <button
-            type="button"
-            onClick={onCombine}
-            disabled={busy}
-            className="px-3 py-1 rounded-sm text-11 text-white disabled:opacity-40"
-            style={{ border: '1px solid #52525B' }}
-            title="Group the selected services into one stop"
-          >
-            Combine
-          </button>
-        </>
-      )}
+      {/* Visit group office action (visit-group-scope.md §3): Separate
+          splits a grouped row back out. */}
       {separate && (
         <>
           <span className="mx-1 text-zinc-500">·</span>
@@ -1185,10 +1168,6 @@ export default function TimeGridDay({
   onCreateSlot,
   onDateChange,
   hideUnassignedRail = false,
-  // GATE_VISIT_GROUPS as the day list reports it: Combine is hidden while
-  // grouping is off (the group route 404s); Separate stays available on
-  // visits that already exist.
-  canGroup = false,
   // Open-hour blocks are a booking prompt: only for staff who can create
   // appointments (POST /admin/schedule is admin-only).
   showOpenHours = true,
@@ -1558,40 +1537,10 @@ export default function TimeGridDay({
     () => allServices.filter((s) => selection.has(s.id)),
     [allServices, selection],
   );
-  const customerOf = (s) => s.customerId || s.customer_id || null;
-  // Combine: two or more rows of ONE customer, none terminal. The server
-  // owns every other rule (family, tech, autopay, artifacts, windows) and
-  // answers with its 409 text.
-  const canCombine = canGroup
-    && selectedRows.length >= 2
-    && !!customerOf(selectedRows[0])
-    && selectedRows.every((s) => customerOf(s) === customerOf(selectedRows[0]))
-    && selectedRows.every((s) => !['completed', 'cancelled', 'skipped', 'no_show'].includes(s.status));
   // Separate: exactly one grouped row.
   const separable = selectedRows.length === 1 && selectedRows[0].visit
     && Number(selectedRows[0].visit.serviceCount) > 1 && selectedRows[0].visit.id
     ? selectedRows[0] : null;
-
-  const handleCombine = useCallback(async () => {
-    if (!canCombine) return;
-    setBusy(true);
-    try {
-      const result = await adminFetch('/admin/visits/group', {
-        method: 'POST',
-        body: JSON.stringify({ serviceIds: selectedRows.map((s) => s.id) }),
-      });
-      const moved = Array.isArray(result?.moved) ? result.moved : [];
-      if (moved.length) {
-        alert(`Combined into one stop. Moved ${moved.length} service${moved.length === 1 ? '' : 's'} to follow the earlier one: ${moved.map((m) => `${minutesToLabel(parseHHMM(m.start))}–${minutesToLabel(parseHHMM(m.end))}`).join(', ')}. No text was sent; the standing reminders use the new time.`);
-      }
-      clearSelection();
-    } catch (err) {
-      alert('Combine failed: ' + friendlyServerError(err));
-    } finally {
-      setBusy(false);
-      onChange?.();
-    }
-  }, [canCombine, selectedRows, onChange, clearSelection]);
 
   const handleSeparate = useCallback(async () => {
     if (!separable) return;
@@ -1635,8 +1584,6 @@ export default function TimeGridDay({
         <BulkActionBar
           count={selection.size}
           defaultDate={date}
-          combine={canCombine}
-          onCombine={handleCombine}
           separate={!!separable}
           onSeparate={handleSeparate}
           selectedServices={allServices

@@ -1290,7 +1290,7 @@ async function applySeededPrepayCoverage(conn, parent, columns, coverageDates = 
     // one with 25P02, so catching in JS is NOT enough to keep this
     // best-effort. The WHOLE attempt, every read included, runs inside a
     // SAVEPOINT (knex nested transaction) and the catch swallows the
-    // rolled-back savepoint. Same shape as visit-groups.maybeGroupRow.
+    // rolled-back savepoint.
     if (conn.isTransaction) await conn.transaction(run);
     else await run(conn);
   } catch (e) {
@@ -1472,24 +1472,6 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
     conn, parent, columns,
     insertedRows.map((r) => dateOnly(r.scheduled_date)).filter(Boolean),
   );
-  // Visit-group seam (visit-group-scope.md §2) in the CANONICAL seeder —
-  // every caller (estimate converter, admin-schedule, customer booking)
-  // gets grouping for follow-ups landing on an existing groupable stop.
-  // Gate-checked + best-effort inside maybeGroupRow (savepoint on a trx
-  // caller), so a grouping failure never fails a seed.
-  try {
-    const { maybeGroupRow } = require('./visit-groups');
-    // A caller that normalizes conflicts AFTER seeding (booking wizard
-    // occupancy sweep) opts out and groups post-sweep itself (codex r5).
-    const seededForGrouping = opts.visitGrouping === false ? [] : insertedRows;
-    for (const seededRow of seededForGrouping) {
-      if (seededRow && seededRow.id) {
-        await maybeGroupRow(seededRow.id, { database: conn, createdBy: 'seeder' });
-      }
-    }
-  } catch (vgErr) {
-    require('./logger').warn(`[recurring-seeder] visit-group seam failed for parent ${parent.id}: ${vgErr.message}`);
-  }
   await syncCustomerTierAfterSeeding(conn, parent.customer_id);
   notifyShortfallAfterCommit();
   return {

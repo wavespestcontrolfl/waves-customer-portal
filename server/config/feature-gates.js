@@ -642,15 +642,8 @@ const gates = {
   // non-'true' value.
   payPageFaq: process.env.GATE_PAY_PAGE_FAQ === 'true',
 
-  // Visit groups (docs/design/visit-group-scope.md rev 5): parent
-  // service_visits rows grouping same-stop scheduled_services. CREATION
-  // gate only — off means no new groups are stamped; existing visits keep
-  // the behaviour they were created under (behavior_version frozen at
-  // creation) and issued /visit/:token links keep resolving. Fail-closed
-  // ==='true' in EVERY environment; kill switch: unset.
-  visitGroups: process.env.GATE_VISIT_GROUPS === 'true',
   // Creation only. Saved packets and issued summary links survive the kill
-  // switch. Read at call time so grouping and closeout share one decision.
+  // switch. Read at call time.
   get visitCloseout() { return process.env.GATE_VISIT_CLOSEOUT === 'true'; },
 
   // Creation only: stamped reservations retain their full service capacity
