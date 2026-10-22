@@ -15434,9 +15434,32 @@ async function completeScheduledService(completionInput, packetContext = null) {
     if (effectiveRequestReview && (svc.cust_phone || reviewCadenceEnabled) && !bundledReviewUrl) {
       try {
         const ReviewService = require('../services/review-request');
+        // GATE_REVIEW_ASK_AFTER_REPORT: tell enrollment what became of the
+        // report text so an Automatic ask follows a text that really left (sent),
+        // or the release of one the send window queued (deferred). Failed,
+        // blocked, skipped, no-phone and email-only completions send no
+        // confirmable text, so they carry no anchor and keep the smart window
+        // (the report email is queued with a delay and has no sent stamp here).
+        // The record is re-read: the delivery leg stamped it in the database.
+        let reportTextAnchor = null;
+        const afterReportReader = require('../config/feature-gates').reviewAskAfterReportLive;
+        if (typeof afterReportReader === 'function' && afterReportReader()) {
+          try {
+            const anchorRow = await db('service_records').where({ id: record.id }).first('structured_notes');
+            const anchorNotes = parseJsonObject(anchorRow?.structured_notes);
+            if (anchorNotes.completionSmsStatus === 'sent') {
+              reportTextAnchor = { status: 'sent', at: anchorNotes.completionSmsDeferredDeliveredAt || anchorNotes.sentSmsAt || new Date().toISOString() };
+            } else if (anchorNotes.completionSmsStatus === 'deferred' && anchorNotes.completionSmsDeferredTo) {
+              reportTextAnchor = { status: 'deferred', at: anchorNotes.completionSmsDeferredTo };
+            }
+          } catch (anchorErr) {
+            logger.warn(`[dispatch] Review anchor lookup failed for ${record.id}: ${anchorErr.message}`);
+          }
+        }
         await ReviewService.enrollPostService({
           customerId: svc.customer_id,
           serviceRecordId: record.id,
+          ...(reportTextAnchor ? { reportTextAnchor } : {}),
           // Direct visit identity for plan resolution (codex #3235 r5 P1).
           scheduledServiceId: svc.id || null,
           serviceType: svc.service_type || null,

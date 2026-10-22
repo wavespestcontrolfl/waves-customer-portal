@@ -1730,7 +1730,20 @@ async function enrollVisitCompletionReviewOnce(packetId, database = db, { delive
   const resumed = await require('./visit-completion-summary').resumeVisitReviewOutreach(packet.id, database);
   if (resumed) return { enrolled: true, resumed };
   const first = members[0];
+  // GATE_REVIEW_ASK_AFTER_REPORT: the combined summary text. This enrollment
+  // only runs once the delivery legs are sent or suppressed, so a 'sent'
+  // completion_sms effect anchors the ask to that text; a suppressed or missing
+  // one sends nothing confirmable and keeps the smart window.
+  let reportTextAnchor = null;
+  const afterReportReader = require('../config/feature-gates').reviewAskAfterReportLive;
+  if (typeof afterReportReader === 'function' && afterReportReader()) {
+    try {
+      const smsEffect = await database('visit_effects').where({ visit_id: packet.visit_id, effect_type: 'completion_sms' }).first('status', 'sent_at');
+      if (smsEffect?.status === 'sent') reportTextAnchor = { status: 'sent', at: smsEffect.sent_at || new Date() };
+    } catch { reportTextAnchor = null; }
+  }
   const result = await require('./review-request').enrollPostService({
+    ...(reportTextAnchor ? { reportTextAnchor } : {}),
     customerId: visit.customer_id, serviceRecordId: first.record_id, scheduledServiceId: first.id,
     serviceType: first.service_type, technicianId: visit.technician_id,
     completedAt: visit.completion_submitted_at, triggeredBy: 'auto',

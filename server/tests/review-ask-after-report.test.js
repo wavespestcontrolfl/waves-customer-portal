@@ -155,3 +155,17 @@ describe('the */5 review-sequences registration in scheduler.js', () => {
     expect(ReviewService.processReviewSequences).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('the completion enrollment site hands over the report text anchor', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+  const site = src.slice(src.indexOf('// GATE_REVIEW_ASK_AFTER_REPORT: tell enrollment what became of the'), src.indexOf('legacyDelayMinutes: ReviewService.LEGACY_REVIEW_DELAY_MINUTES'));
+
+  test('reads the persisted record notes, anchors only a sent or deferred text, and adds the key only when there is one', () => {
+    expect(site).toContain("db('service_records').where({ id: record.id }).first('structured_notes')");
+    expect(site).toContain("anchorNotes.completionSmsStatus === 'sent'");
+    expect(site).toContain("anchorNotes.completionSmsStatus === 'deferred' && anchorNotes.completionSmsDeferredTo");
+    expect(site).toContain('...(reportTextAnchor ? { reportTextAnchor } : {})');
+    // failed / blocked / skipped / no phone / not requested set no anchor
+    expect(site).not.toMatch(/status: '(failed|blocked|skipped)/);
+  });
+});
