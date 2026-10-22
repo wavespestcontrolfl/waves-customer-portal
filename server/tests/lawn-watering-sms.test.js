@@ -524,6 +524,12 @@ describe('GATE_LAWN_WATERING_TEXT_FORECAST: the rain sentence closes the text', 
     expect(await run()).toBe("Water in today's treatment with about 1/4 inch by Thu 2 PM. Run it even if it is not your usual day. About 1/2 inch of rain is forecast by Thu 8 AM. If at least 1/4 inch has fallen by then, it counts as watering in today's treatment. If it has not, run the watering above right away.");
   });
 
+  test('a short water-in beside a long one (instruction.later) never carries the sentence', () => {
+    const { textForecastLine } = require('../services/service-report/lawn-watering-forecast');
+    expect(textForecastLine(frozen())).toBe(LINE);
+    expect(textForecastLine({ ...frozen(), later: { waterInInches: 0.5, waterInBy: new Date(Date.now() + 7 * 86400000).toISOString() } })).toBeNull();
+  });
+
   test('a sentence frozen from Open-Meteo alone (no NWS agreement) never reaches the text', async () => {
     const steps = "Water in today's treatment with about 1/4 inch by Thu 2 PM. Run it even if it is not your usual day.";
     for (const agreement of [undefined, { source: 'nws', peakChance: 50, hours: 2 }, { source: 'open_meteo', peakChance: 90, hours: 2 }]) {

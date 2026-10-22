@@ -239,6 +239,9 @@ function frozenForecastLine(instruction) {
 // only one frozen with the NWS agreement. A visit frozen while only Open-Meteo
 // was read keeps its sentence on the live banner, never in a text.
 function textForecastLine(instruction) {
+  // A short water-in beside a long one (instruction.later) gets no sentence:
+  // rain that covers today's short amount does not cover the later one.
+  if (instruction && instruction.later) return null;
   const agreement = instruction && instruction.forecast && instruction.forecast.agreement;
   if (!agreement || agreement.source !== 'nws' || !(Number(agreement.peakChance) >= NWS_LIKELY_CHANCE)) return null;
   return frozenForecastLine(instruction);
