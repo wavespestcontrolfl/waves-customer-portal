@@ -3439,8 +3439,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // Visit-group guard (visit-group-scope.md §5 Gates, rev 5c): a row
     // attached to a non-dissolved visit must complete through the visit
     // sheet — legacy per-row completion alongside the packet worker would
-    // double records and side effects. Inert until GATE_VISIT_GROUPS
-    // stamping ships (no row carries a visit_id today). The check reads
+    // double records and side effects. Only visits created before grouping
+    // was retired (2026-10-22) carry a visit_id. The check reads
     // the CURRENT visit status, so an admin "Separate these services"
     // (dissolve) restores per-row completion immediately.
     // This endpoint can mint reports, invoices, inventory deductions, and
@@ -4539,8 +4539,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
       || `legacy_${Date.now()}_${crypto.randomBytes(8).toString('hex')}`;
     const idempotencyKey = String(rawIdempotencyKey).trim().slice(0, 120);
     // The claim commits while THIS request holds the row's stop advisory
-    // lock (codex #3590 r12 P1): stamping (visit-groups.createOrJoinVisit)
-    // checks for live claims and stamps under the same lock, so the claim
+    // lock (codex #3590 r12 P1): stamping (the grouping writer, retired
+    // 2026-10-22) checked for live claims under the same lock, so the claim
     // can no longer land between stamping's READ COMMITTED snapshot and its
     // commit. The claim runs ON the lock transaction's connection (r13: a
     // nested root-pool checkout under a burst could exhaust the pool) —
@@ -4587,7 +4587,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             } };
           }
           // Invoice-issued closeout: the grouped-stop refusal ran unlocked
-          // in invoice-issued-closeout.js; a createOrJoinVisit that grouped
+          // in invoice-issued-closeout.js; a grouping write that grouped
           // this row since would otherwise let a packet-less open group
           // complete this member alone and dissolve (pre-push r8 P1). The
           // whole stop closes together — re-checked HERE under the stop
@@ -4675,7 +4675,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       const visitRecheck = async (trx) => {
         // Lock ORDER matches stamping (codex #3590 r2 P1): stop advisory
         // lock FIRST, then the row lock — with the peek → lock → verify →
-        // retry pattern from createOrJoinVisit (r3 P1: the svc snapshot is
+        // retry pattern (r3 P1: the svc snapshot is
         // thousands of lines stale; a concurrent reschedule can have moved
         // the row under another stop key).
         const { stopBaseKey } = require('../services/visit-groups');

@@ -380,7 +380,7 @@ describe('createVisitPrepSubmission', () => {
     expect(inserted[0]).toMatchObject({ customer_id: 'cust-RECHECKED', property_id: 'prop-RECHECKED', visit_id: 'visit-RECHECKED' });
   });
 
-  test('the customer row is locked FOR SHARE before the stop lock (createOrJoinVisit order, Codex #5306 r2 P2)', async () => {
+  test('the customer row is locked FOR SHARE before the stop lock (Codex #5306 r2 P2)', async () => {
     queries.length = 0;
     const order = [];
     mockLockStopForRow.mockImplementationOnce(async (trx, id) => { order.push('stop'); return id; });
