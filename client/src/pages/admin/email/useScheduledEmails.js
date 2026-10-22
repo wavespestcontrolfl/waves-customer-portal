@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Clock } from "lucide-react";
 import { adminFetch } from "./emailApi";
 
@@ -8,15 +8,20 @@ import { adminFetch } from "./emailApi";
 export default function useScheduledEmails(active) {
   const [state, setState] = useState({ enabled: false, emails: [], loading: false, error: false });
   const [pendingId, setPendingId] = useState(null);
+  // Reloads can finish out of order: only the newest one publishes.
+  const latest = useRef(0);
 
   const reload = useCallback(async () => {
+    const seq = ++latest.current;
     setState((current) => ({ ...current, loading: true, error: false }));
     try {
       const response = await adminFetch("/api/admin/email/scheduled");
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
+      if (seq !== latest.current) return;
       setState({ enabled: data.enabled === true, emails: Array.isArray(data.emails) ? data.emails : [], loading: false, error: false });
     } catch {
+      if (seq !== latest.current) return;
       // Fail closed: an unverifiable gate hides the arrow and the tab.
       setState((current) => ({ ...current, enabled: false, loading: false, error: true }));
     }

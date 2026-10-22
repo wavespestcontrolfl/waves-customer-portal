@@ -142,7 +142,7 @@ export default function EmailComposer({ active, editor, onSent }) {
         </div>
         <div className="flex shrink-0 flex-wrap justify-end gap-2 border-t-hairline border-zinc-200 px-4 py-3">
           <Button variant="secondary" onClick={close} disabled={composeSending}>Close</Button>
-          <Button variant="ghost" disabled={composeSending} onClick={() => {
+          <Button variant="ghost" disabled={composeSending || editor.scheduling === "compose"} onClick={() => {
             setComposeForm(() => ({ to: "", subject: "", body: "" })); setShowCompose(false);
           }}>Discard draft</Button>
           <div className="flex gap-px">

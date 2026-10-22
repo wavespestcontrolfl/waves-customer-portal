@@ -29,7 +29,7 @@ export default function EmailReply({ active, sender, mailbox, editor }) {
     {editor.sendFeedback.reply?.messageId === selectedEmail.id && <ActionFeedback error={editor.sendFeedback.reply.error} className="mt-2">{editor.sendFeedback.reply.message}</ActionFeedback>}
     {draftResult && <ActionFeedback className="mt-2">AI draft loaded — review and edit before sending</ActionFeedback>}
     <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
-      {replyText && <Button variant="ghost" onClick={() => setReplyDraft(selectedEmail.id, "")} disabled={sending} className="mr-auto">Discard reply</Button>}
+      {replyText && <Button variant="ghost" onClick={() => setReplyDraft(selectedEmail.id, "")} disabled={sending || editor.scheduling === "reply"} className="mr-auto">Discard reply</Button>}
       <EmailQuickLinks key={selectedEmail.id} active={active} recipient={effectiveRecipient} disabled={sending}
         onInsert={(link) => setReplyDraft(selectedEmail.id, appendStaticLinkClause(replyText, link))} />
       <Button variant="secondary" onClick={() => editor.handleAiDraft(selectedEmail, mailbox.isSelected)} loading={drafting} disabled={sending} className="gap-2">

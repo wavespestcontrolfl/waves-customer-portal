@@ -257,6 +257,13 @@ export default function useEmailEditor(userId) {
         return;
       }
       rememberUncertain(slot, null);
+      // A retried key can return a row the sender already settled: nothing
+      // is queued, so the draft stays and the outcome shows.
+      const settled = { failed: "Gmail refused this email. Your draft is still here.", outcome_unknown: "This email may have gone out. Look in the Gmail Sent folder before you send it again." }[result.scheduled?.status];
+      if (settled) {
+        setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: settled } }));
+        return;
+      }
       clearQueued();
       setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, message: `Scheduled for ${formatSendAt(sendAt)}. Find it under Scheduled.` } }));
     } catch {

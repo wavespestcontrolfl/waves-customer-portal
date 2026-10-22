@@ -131,6 +131,45 @@ describe("Email schedule send", () => {
     expect((await screen.findAllByText(/^Scheduled for /)).length).toBeGreaterThan(0);
   });
 
+  it("a retry that returns a row the sender already refused keeps the draft and says so", async () => {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/email/schedule")
+      ? response({ success: true, scheduled: { id: "old", status: "failed" } }) : base(input, options)));
+    mount();
+    await writeEmail();
+    fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Tomorrow morning/ }));
+    expect((await screen.findAllByText("Gmail refused this email. Your draft is still here.")).length).toBeGreaterThan(0);
+    expect(screen.getByLabelText(/^Message/)).toHaveValue("Line one\n<b>two</b>");
+    expect(screen.queryByText(/^Scheduled for /)).not.toBeInTheDocument();
+  });
+
+  it("an older list answer that arrives last does not replace the newer one", async () => {
+    scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "scheduled" }];
+    const base = fetch.getMockImplementation();
+    const held = [];
+    let hold = false;
+    fetch.mockImplementation((input, options = {}) => {
+      if (hold && String(input).endsWith("/email/scheduled") && !held.length) {
+        const stale = { enabled: true, emails: scheduledRows };
+        return new Promise((resolve) => held.push(() => resolve({ ok: true, status: 200, json: async () => stale })));
+      }
+      return base(input, options);
+    });
+    mount();
+    expect(await screen.findByRole("button", { name: "Scheduled (1)" })).toBeInTheDocument();
+    hold = true;
+    fireEvent.click(screen.getByRole("button", { name: "Scheduled (1)" }));
+    await waitFor(() => expect(held).toHaveLength(1));
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel send" }));
+    expect(await screen.findByText("Cancelled. The email is open as a draft.")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Scheduled" })).toBeInTheDocument());
+    held[0]();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.getByRole("button", { name: "Scheduled" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Scheduled (1)" })).not.toBeInTheDocument();
+  });
+
   it("Cancel send brings the email back into the composer", async () => {
     scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "scheduled" }];
     mount();
