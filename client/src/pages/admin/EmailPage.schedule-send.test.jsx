@@ -592,6 +592,28 @@ describe("Email schedule send", () => {
     expect(screen.getAllByRole("button", { name: "Send", exact: true }).at(-1)).toBeDisabled();
   });
 
+  it("a restored new email opens only after its restore mark is durable", async () => {
+    scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "scheduled" }];
+    let finishMark;
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/queued-1/restored")
+      ? new Promise((resolve) => { finishMark = () => resolve(response({ success: true })); }) : base(input, options)));
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Scheduled (1)" }, { timeout: 3000 }));
+    const setItem = Storage.prototype.setItem;
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function failPending(key, value) {
+      if (/restored_pending/.test(key)) throw new Error("Quota");
+      return setItem.call(this, key, value);
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel send" }));
+    await waitFor(() => expect(finishMark).toBeTypeOf("function"));
+    // The mark is still on its way: the composer has not opened.
+    expect(screen.queryByRole("dialog", { name: "New email" })).not.toBeInTheDocument();
+    finishMark();
+    expect(await screen.findByText("Cancelled. The email is open as a draft.")).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Message/)).toHaveValue("Saved text");
+  });
+
   it("sign-out keeps the restore key, so a cancel whose answer was lost can still be taken back", () => {
     sessionStorage.setItem("waves_email_restored_pending:fixture-schedule-owner", "[\"queued-1\"]");
     sessionStorage.setItem("waves_email_restore_keys:fixture-schedule-owner", "{}");

@@ -24,7 +24,7 @@ export default function EmailReply({ active, sender, mailbox, editor }) {
     : `Reply to ${sender}`;
   return <section aria-label="Email reply" className="rounded-md border-hairline border-zinc-200 bg-white p-4">
     <Field label={replyLabel}>
-      <Textarea value={replyText} aria-label="Reply" onChange={(event) => setReplyDraft(selectedEmail.id, event.target.value)} placeholder="Type your reply..." rows={4} />
+      <Textarea value={replyText} aria-label="Reply" readOnly={editor.isRestoring(selectedEmail.id)} onChange={(event) => setReplyDraft(selectedEmail.id, event.target.value)} placeholder="Type your reply..." rows={4} />
     </Field>
     {!sending && <EmailSendOutcome attempt={attempt} onResolve={outcome => editor.reconcileSend(attemptKey, outcome)} />}
     {editor.sendFeedback.reply?.messageId === selectedEmail.id && <ActionFeedback error={editor.sendFeedback.reply.error} className="mt-2">{editor.sendFeedback.reply.message}</ActionFeedback>}
