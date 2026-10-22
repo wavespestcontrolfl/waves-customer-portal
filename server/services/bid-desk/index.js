@@ -165,7 +165,8 @@ async function runBidDeskTick({ now = new Date(), limit = BATCH_LIMIT } = {}) {
     .whereRaw('(created_at, id) > (?::timestamptz, ?::uuid)', [state.at, state.id])
     .orderBy([{ column: 'created_at' }, { column: 'id' }])
     .limit(limit)
-    .select([...EMAIL_COLUMNS, 'created_at']);
+    // The cursor keeps PostgreSQL's microseconds: a JS Date would cut them and re-read the last row.
+    .select([...EMAIL_COLUMNS, db.raw('created_at::text AS cursor_at')]);
   const result = { read: rows.length, filed: 0, created: 0, failed: 0 };
   for (const email of rows) {
     try {
@@ -174,7 +175,7 @@ async function runBidDeskTick({ now = new Date(), limit = BATCH_LIMIT } = {}) {
         result.filed += 1;
         if (outcome.created) result.created += 1;
       }
-      state = { at: new Date(email.created_at).toISOString(), id: email.id };
+      state = { at: email.cursor_at, id: email.id };
     } catch (err) {
       const attempts = state.retry?.id === email.id ? state.retry.count + 1 : 1;
       logger.error(`${LOG} email ${email.id} failed (attempt ${attempts}): ${err.message}`);
@@ -183,14 +184,14 @@ async function runBidDeskTick({ now = new Date(), limit = BATCH_LIMIT } = {}) {
         state = { ...state, retry: { id: email.id, count: attempts } };
         break;
       }
-      state = { at: new Date(email.created_at).toISOString(), id: email.id };
+      state = { at: email.cursor_at, id: email.id };
     }
   }
   // Concurrent inserts can commit out of created_at order. Re-read the last RECHECK_WINDOW behind the cursor for
   // rows not yet filed; ingestEmail is idempotent, so a row seen twice is skipped.
-  const recheckFrom = new Date(new Date(state.at).getTime() - RECHECK_WINDOW_MS).toISOString();
   const late = await db('emails as e')
-    .where('e.created_at', '>', recheckFrom).where('e.created_at', '<=', state.at)
+    .whereRaw('e.created_at > ?::timestamptz - make_interval(secs => ?)', [state.at, RECHECK_WINDOW_MS / 1000])
+    .whereRaw('e.created_at <= ?::timestamptz', [state.at])
     .whereNotExists(db('bid_opportunity_emails as l').whereRaw('l.email_id = e.id'))
     .orderBy([{ column: 'e.created_at' }, { column: 'e.id' }])
     .limit(limit)

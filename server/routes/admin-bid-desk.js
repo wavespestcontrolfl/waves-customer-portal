@@ -24,7 +24,7 @@ const etWallTime = Joi.string().pattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/).allow
 const patchSchema = Joi.object({
   due_at: etWallTime,
   confirm_due: Joi.boolean().strict().valid(true),
-  expected_due_at: Joi.string().isoDate(),
+  expected_updated_at: Joi.string().isoDate(),
   job_walk_at: etWallTime,
   questions_due_at: etWallTime,
   status: Joi.string().valid(...STATUSES),
@@ -120,13 +120,10 @@ router.patch('/:id', async (req, res, next) => {
       });
     } else if (value.confirm_due) {
       if (!bid.due_at) return res.status(400).json({ error: 'There is no date to confirm' });
-      // Confirm only the date the operator looked at: an addendum may have changed the bid since the page loaded.
-      if (!value.expected_due_at || new Date(value.expected_due_at).getTime() !== new Date(bid.due_at).getTime()) {
-        return res.status(409).json({ error: DATE_CHANGED });
-      }
-      // The write itself is fenced too: an addendum filed between this read and the update (it moves updated_at)
-      // wins. Compared at millisecond precision, the precision the row was read at.
-      fence = (q) => q.whereRaw("date_trunc('milliseconds', updated_at) = ?", [bid.updated_at]);
+      // Confirm only the bid version the operator looked at: an addendum filed since the page loaded moves
+      // updated_at, and the write below is refused. Compared at millisecond precision, the precision the page has.
+      if (!value.expected_updated_at) return res.status(409).json({ error: DATE_CHANGED });
+      fence = (q) => q.whereRaw("date_trunc('milliseconds', updated_at) = ?::timestamptz", [value.expected_updated_at]);
       Object.assign(patch, { due_confirmed: true, needs_date_confirmation: false });
     }
     if (value.status !== undefined) patch.status = value.status;

@@ -16,7 +16,7 @@ const bid = (over = {}) => ({
   id: "b1", source: "buildingconnected", status: "new", historical: false, project_title: "Sample Ridge Residences",
   gc_or_agency: "Fixture Build Co", buyer_name: "Pat Sample", buyer_email: "pat.sample@fixture-gc.example", location: "100 Fixture Way",
   due_at: "2026-10-21T03:59:00.000Z", due_source_line: "Bid Due: October 20, 2026", due_confirmed: false, needs_date_confirmation: false,
-  job_walk_at: null, decision_note: null, days_left: 19, email_count: 1, first_subject: "Invite", ...over,
+  job_walk_at: null, decision_note: null, days_left: 19, email_count: 1, first_subject: "Invite", updated_at: "2026-10-02T12:00:00.000Z", ...over,
 });
 const LIST = [
   bid(),
@@ -97,7 +97,7 @@ it("confirms a date as read and saves a decision with a note", async () => {
   renderPage("/?bid=b1");
   fireEvent.click(await screen.findByRole("button", { name: "Confirm date as read" }));
   await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
-  expect(patch.mock.calls[0][0].body).toEqual({ confirm_due: true, expected_due_at: detail.bid.due_at });
+  expect(patch.mock.calls[0][0].body).toEqual({ confirm_due: true, expected_updated_at: detail.bid.updated_at });
   fireEvent.change(screen.getByLabelText("Decision"), { target: { value: "no_bid" } });
   fireEvent.change(screen.getByLabelText("Note"), { target: { value: "Out of area" } });
   fireEvent.click(screen.getByRole("button", { name: "Save decision" }));

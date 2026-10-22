@@ -378,12 +378,12 @@ describeDb('Bid Desk (PostgreSQL)', () => {
 
     test('confirm_due confirms the date as read; with no date it is refused', async () => {
       const { bidId } = await filed();
-      const seen = (await bidRow(bidId)).due_at.toISOString();
-      // The date the operator looked at must still be the bid's date.
-      expect((await call('PATCH', `/${bidId}`, { confirm_due: true, expected_due_at: '2026-10-01T03:59:00.000Z' })).status).toBe(409);
+      // The page sends the version it showed; a bid changed since then (an addendum filed) is refused.
+      const seen = (await call('GET', `/${bidId}`)).body.bid.updated_at;
       expect((await call('PATCH', `/${bidId}`, { confirm_due: true })).status).toBe(409);
+      expect((await call('PATCH', `/${bidId}`, { confirm_due: true, expected_updated_at: '2026-01-01T00:00:00.000Z' })).status).toBe(409);
       expect(await bidRow(bidId)).toMatchObject({ due_confirmed: false });
-      expect((await call('PATCH', `/${bidId}`, { confirm_due: true, expected_due_at: seen })).status).toBe(200);
+      expect((await call('PATCH', `/${bidId}`, { confirm_due: true, expected_updated_at: seen })).status).toBe(200);
       expect(await bidRow(bidId)).toMatchObject({ due_confirmed: true, needs_date_confirmation: false });
       await mockPg('bid_opportunities').where({ id: bidId }).update({ due_at: null, due_confirmed: false });
       expect((await call('PATCH', `/${bidId}`, { confirm_due: true })).status).toBe(400);
