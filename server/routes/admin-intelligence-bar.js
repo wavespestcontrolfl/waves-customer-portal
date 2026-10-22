@@ -955,7 +955,7 @@ const PINNED_DISPLAY_BUILDERS = {
     ? { invoice: preview.invoice_number, customer: preview.customer_name, total: `${preview.old_total} -> ${preview.new_total}`, changes: (preview.changes || []).map((c) => `${c.field}: ${c.before} -> ${c.after}`), sends_to_customer: 'nothing' }
     : null),
   apply_invoice_credit: (params, preview) => (preview?.preview === true && preview.tool === 'apply_invoice_credit'
-    ? { invoice: preview.invoice_number, customer: preview.customer_name, credit_available: preview.credit_available, amount_applied: preview.amount_applied, balance_due_after: preview.balance_due_after, sends_to_customer: 'nothing' }
+    ? { invoice: preview.invoice_number, customer: preview.customer_name, credit_available: preview.credit_available, amount_applied: preview.amount_applied, balance_due_after: preview.balance_due_after, note: preview.office_note || 'none', sends_to_customer: 'nothing' }
     : null),
   archive_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'archive_invoice'
     ? { invoice: preview.invoice_number, customer: preview.customer_name, status: preview.status, sends_to_customer: 'nothing' }

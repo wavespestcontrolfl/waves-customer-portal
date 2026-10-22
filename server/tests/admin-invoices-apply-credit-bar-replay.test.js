@@ -87,7 +87,7 @@ async function viaPage(body = {}) {
   }
 }
 
-let trx; let trxInvoices; let trxPlans; let trxCustomers; let preInvoices;
+let trx; let trxInvoices; let trxPlans; let trxCustomers; let preInvoices; let trxProjects;
 beforeEach(() => {
   jest.clearAllMocks();
   mockGetBalance.mockResolvedValue(500);
@@ -100,7 +100,9 @@ beforeEach(() => {
   });
   trxPlans = makeRecorder();
   trxCustomers = makeRecorder({ first: jest.fn(async () => ({ id: INVOICE.customer_id })) });
+  trxProjects = makeRecorder();
   trx = jest.fn((table) => {
+    if (table === 'projects') return trxProjects;
     if (table === 'invoices') return trxInvoices;
     if (table === 'payment_plans') return trxPlans;
     if (table === 'customers') return trxCustomers;
@@ -188,6 +190,22 @@ describe('apply-credit — the page and the bar', () => {
     await expect(router.applyCreditFromBar({ invoiceId: 'inv-1', body: { waiveSetupFee: false }, actor: ACTOR, expected: EXPECTED })).resolves
       .toMatchObject({ status: 400, json: { error: expect.stringMatching(/Insufficient account credit/) } });
     expect(mockPostMovement).not.toHaveBeenCalled();
+  });
+
+  test('an invoice linked to ANY project is refused for the bar under the invoice lock (project rows locked), before any credit moves; the page is untouched', async () => {
+    trxProjects.first.mockImplementation(async () => ({ id: 'proj-1' }));
+    const answer = await router.applyCreditFromBar({ invoiceId: 'inv-1', body: { waiveSetupFee: false }, actor: ACTOR, expected: EXPECTED });
+    expect(answer).toMatchObject({ status: 409, json: { code: 'NEEDS_INVOICES_PAGE', error: expect.stringMatching(/linked to a project/) } });
+    expect(trxProjects.where).toHaveBeenCalledWith({ invoice_id: 'inv-1' });
+    expect(trxProjects.forUpdate).toHaveBeenCalled();
+    expect(mockPostMovement).not.toHaveBeenCalled();
+    expect(trxInvoices.update).not.toHaveBeenCalled();
+    expect(mockStopOnPayment).not.toHaveBeenCalled();
+    // The page does not read projects here at all.
+    trx.mockClear();
+    const page = await viaPage({});
+    expect(page.status).toBe(200);
+    expect(trx).not.toHaveBeenCalledWith('projects');
   });
 
   test('applying credit sends nothing and charges no card: no Stripe charge call exists on this path', async () => {

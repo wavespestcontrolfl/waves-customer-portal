@@ -2883,6 +2883,13 @@ const invoiceApplyCreditHandler = async (req, res, next) => {
         }
         // The bar's card, on the locked row: nothing can change the invoice between this check and the draw-down below.
         assertInvoiceVersion(locked, expectedCredit, 'applying credit');
+        // The bar only: an invoice linked to ANY project stays on the page. Paying it nudges the report-release sweep, a report
+        // hold is written without touching the invoice (so the card's pin cannot see it), and the project rows are read here
+        // under lock, after the invoice row is held, so an in-flight hold write is waited for and seen.
+        if (expectedCredit && await trx('projects').where({ invoice_id: id }).forUpdate().first('id')) {
+          const err = new Error('Cannot apply credit from the bar — this invoice is linked to a project whose report may wait on its payment; apply the credit from the Invoices page');
+          err.statusCode = 409; err.isOperational = true; err.code = 'NEEDS_INVOICES_PAGE'; throw err;
+        }
         try {
           assertInvoiceCollectible(locked);
         } catch (err) {
@@ -2991,7 +2998,7 @@ const invoiceApplyCreditHandler = async (req, res, next) => {
         return { invoice: locked, cover: lockedDue, balanceAfter };
       });
     } catch (err) {
-      if (err.statusCode) return res.status(err.statusCode).json({ error: err.message, ...(err.code === 'PREVIEW_CHANGED' ? { code: err.code } : {}) });
+      if (err.statusCode) return res.status(err.statusCode).json({ error: err.message, ...(['PREVIEW_CHANGED', 'NEEDS_INVOICES_PAGE'].includes(err.code) ? { code: err.code } : {}) });
       throw err;
     }
 

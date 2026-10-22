@@ -612,8 +612,11 @@ describe('apply_invoice_credit card', () => {
     expect(await run('apply_invoice_credit')).toMatchObject({ code: 'needs_invoices_page', reason: 'annual_plan' });
     mockResolveTerm.mockRejectedValueOnce(new Error('boom'));
     expect(await run('apply_invoice_credit')).toMatchObject({ code: 'unverified' });
-    state.projects = [{ id: 'proj-1', invoice_id: INV, report_hold_status: 'held' }];
-    expect(await run('apply_invoice_credit')).toMatchObject({ code: 'payment_releases_report_unsupported' });
+    // Any linked project refuses, held or not: a report hold is written without moving the invoice, so the card cannot pin it.
+    for (const hold of ['held', 'releasing', null, 'released']) {
+      state.projects = [{ id: 'proj-1', invoice_id: INV, report_hold_status: hold }];
+      expect(await run('apply_invoice_credit')).toMatchObject({ code: 'needs_invoices_page', reason: 'report_project' });
+    }
     state.projects = [];
     state.scheduled_services[0].status = 'cancelled';
     expect(await run('apply_invoice_credit')).toMatchObject({ code: 'visit_terminal' });
@@ -632,6 +635,32 @@ describe('apply_invoice_credit card', () => {
     expect(card._body).toEqual({ waiveSetupFee: false, note: 'Goodwill from the March visit' });
     expect(await run('apply_invoice_credit', { note: 'x'.repeat(401) })).toMatchObject({ code: 'note_too_long' });
     expect((await run('apply_invoice_credit'))._body).toEqual({ waiveSetupFee: false });
+  });
+
+  test('the exact note is on the card (effect line and the confirmation display) and in the pinned version', async () => {
+    const note = 'Goodwill from the March visit';
+    const card = await run('apply_invoice_credit', { note: `  ${note}  ` });
+    expect(card.effects).toEqual(expect.arrayContaining([{ kind: 'operational', text: `Note saved with the credit entry: "${note}"` }]));
+    expect(cardLines('apply_invoice_credit', card).map((l) => l.text)).toContain(`Note saved with the credit entry: "${note}"`);
+    expect(JSON.stringify(buildContract({ toolName: 'apply_invoice_credit', params: { invoice_id: INV }, displayParams: {}, preview: card, summary: '' }))).toContain(note);
+    const { confirmationDisplayParams } = require('../routes/admin-intelligence-bar');
+    expect(confirmationDisplayParams('apply_invoice_credit', { invoice_id: INV, note }, card)).toMatchObject({ invoice: 'WPC-2099-0001', note, amount_applied: '$129.00' });
+    // A different note is a different approval: the pin changes.
+    expect((await run('apply_invoice_credit', { note: 'Another note' }))._version).not.toEqual(card._version);
+    // No note: the display says so and the card has no note line.
+    const bare = await run('apply_invoice_credit');
+    expect(confirmationDisplayParams('apply_invoice_credit', { invoice_id: INV }, bare)).toMatchObject({ note: 'none' });
+    expect(JSON.stringify(bare.effects)).not.toMatch(/Note saved/);
+  });
+
+  test('a project that gets linked after the card refuses at Confirm, before the handler', async () => {
+    const card = await run('apply_invoice_credit');
+    state.projects = [{ id: 'proj-1', invoice_id: INV, report_hold_status: null }];
+    expect(await confirm('apply_invoice_credit', card)).toMatchObject({ code: 'needs_invoices_page', preview_changed: true });
+    expect(Invoices.applyCreditFromBar).not.toHaveBeenCalled();
+    state.projects = [];
+    Invoices.applyCreditFromBar.mockResolvedValueOnce({ status: 409, json: { error: 'Cannot apply credit from the bar — …', code: 'NEEDS_INVOICES_PAGE' } });
+    expect(await confirm('apply_invoice_credit', card)).toMatchObject({ failed: true, code: 'needs_invoices_page' });
   });
 
   test('a visit-completion invoice discloses the review follow-up; an active plan discloses its completion', async () => {

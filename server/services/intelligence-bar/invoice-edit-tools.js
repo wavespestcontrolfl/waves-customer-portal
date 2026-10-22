@@ -88,7 +88,7 @@ Use for: "change the due date on this invoice", "edit invoice WPC-2026-0534", "u
     name: 'apply_invoice_credit',
     description: `Pay ONE existing unpaid invoice from the customer's ACCOUNT CREDIT: the Invoices page "Apply credit". Money moves only from account credit already on the customer's balance, never a card. The first call returns a PREVIEW and writes nothing: the credit available, the amount applied (the WHOLE balance due; a partial application is not offered), the balance due after ($0.00, the invoice becomes prepaid) and the credit left. The operator approves on the confirmation card; the confirmed run re-checks all of it and refuses if anything changed.
 Effects: the customer's credit goes down by the balance due, the invoice is marked prepaid, its payment reminders stop and any active payment plan on it is completed. Nothing is sent to the customer (no text, email or call), no card is charged and nothing is refunded.
-Refused: not enough credit (the card shows the shortfall), an invoice billed to a payer, an invoice that is not collectible (paid, prepaid, void, refunded), one with an open card-payment session, an annual-plan invoice, an invoice whose payment would release a held report to the customer, an invoice with a saved-card charge in progress. Admin only.
+Refused: not enough credit (the card shows the shortfall), an invoice billed to a payer, an invoice that is not collectible (paid, prepaid, void, refunded), one with an open card-payment session, an annual-plan invoice, an invoice linked to any project (a report may wait on its payment), an invoice with a saved-card charge in progress. Admin only.
 Optional amount must equal the balance due (the Invoices page applies the whole balance). Optional note (up to ${NOTE_LIMIT} characters) goes on the credit entry. Takes invoice_id OR invoice_number, exactly one.
 Use for: "apply the customer's credit to this invoice", "use his account credit on invoice WPC-2026-0534", "pay this invoice from credit", "cover this invoice with the credit balance".`,
     input_schema: {
@@ -264,7 +264,8 @@ function handlerFailure(plan, result, what, { moneyWords } = {}) {
   const message = String(json?.error || 'the Invoices page refused it');
   const drift = isDrift(status, json);
   const code = status === 404 ? 'not_found'
-    : drift ? 'preview_changed'
+    : json?.code === 'NEEDS_INVOICES_PAGE' ? 'needs_invoices_page'
+      : drift ? 'preview_changed'
       : moneyWords && status === 409 && moneyWords.test(message) ? 'by_owner_rule'
         : 'refused_by_page';
   return { ...baseOf(plan), failed: true, code, error: `${what}: ${message}`, ...(drift || status === 404 ? { preview_changed: true } : {}) };
@@ -624,7 +625,7 @@ async function commitEdit(input, actionContext) {
 // apply_invoice_credit
 // ═════════════════════════════════════════════════════════════════
 
-const HELD_REPORT_TEXT = 'Paying this invoice releases a held report to the customer, which the bar can’t do from here; apply the credit on the Invoices page.';
+const REPORT_PROJECT_TEXT = 'This invoice is linked to a project (a report may wait on its payment). Paying it nudges the report-release sweep, which can send the report to the customer, and a report hold is written without touching the invoice, so the bar cannot pin it. Apply the credit on the Invoices page.';
 
 async function creditRefusal(invoice, amountCents) {
   const at = invoice.id;
@@ -654,11 +655,13 @@ async function creditRefusal(invoice, amountCents) {
   } catch {
     return refusal('The bar could not verify whether this is an annual-plan invoice, so it was not offered. Apply the credit from the Invoices page.', 'unverified', { invoice_id: at });
   }
+  // Any project linked to the invoice, not only one held right now: the hold is written without moving invoices.updated_at, so
+  // the card's pin cannot see it. The credit handler repeats this read inside its transaction on the locked project rows.
   try {
-    const held = await db('projects').where({ invoice_id: invoice.id }).whereIn('report_hold_status', ['held', 'releasing']).first('id');
-    if (held) return refusal(HELD_REPORT_TEXT, 'payment_releases_report_unsupported', { invoice_id: at });
+    const project = await db('projects').where({ invoice_id: invoice.id }).first('id');
+    if (project) return toPage(REPORT_PROJECT_TEXT, 'report_project', at);
   } catch {
-    return refusal('The bar could not check whether this releases a held report to the customer, so it was not offered; apply the credit on the Invoices page.', 'payment_releases_report_unsupported', { invoice_id: at });
+    return refusal('The bar could not check whether this invoice is linked to a report project, so it was not offered; apply the credit on the Invoices page.', 'unverified', { invoice_id: at });
   }
   if (invoice.scheduled_service_id) {
     const visit = await db('scheduled_services').where({ id: invoice.scheduled_service_id }).first('status');
@@ -671,12 +674,14 @@ async function creditRefusal(invoice, amountCents) {
   return null;
 }
 
-function creditEffects({ invoice, dueCents, balanceCents, plan, fromVisit }) {
+function creditEffects({ invoice, dueCents, balanceCents, plan, fromVisit, noteText }) {
   const effects = [
     { kind: 'billing', text: `${money(dueCents / 100)} of the customer’s account credit pays invoice ${invoice.invoice_number} in full. The invoice is marked prepaid; its balance due goes from ${money(dueCents / 100)} to $0.00.` },
     { kind: 'billing', text: `The customer’s account credit goes from ${money(balanceCents / 100)} to ${money((balanceCents - dueCents) / 100)}.` },
     { kind: 'operational', text: 'Its payment reminders stop.' },
     ...(plan ? [{ kind: 'operational', text: 'Its payment plan is completed.' }] : []),
+    // The exact note, as it will be saved on the credit entry and the invoice's activity entry (trimmed to what the page keeps).
+    ...(noteText ? [{ kind: 'operational', text: `Note saved with the credit entry: "${noteText}"` }] : []),
     ...(fromVisit ? [{ kind: 'operational', text: 'This invoice came from a completed visit: the customer may be enrolled in the review-request follow-up under the standing review rules (no review text goes out from this step itself).' }] : []),
     NOTHING_SENT,
     { kind: 'billing', text: 'Money moves only from account credit already on the customer’s balance. No card is used.' },
@@ -722,7 +727,7 @@ async function buildCreditPlan(input) {
     balance_due_after: '$0.00',
     credit_after: money((balanceCents - dueCents) / 100),
     office_note: noteText || null,
-    effects: creditEffects({ invoice, dueCents, balanceCents, plan, fromVisit }),
+    effects: creditEffects({ invoice, dueCents, balanceCents, plan, fromVisit, noteText }),
     sends_to_customer: false,
     _version: {
       invoice_id: invoice.id,
