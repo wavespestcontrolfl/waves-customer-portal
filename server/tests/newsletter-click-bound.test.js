@@ -99,6 +99,9 @@ describe('gate on', () => {
   test('a token that is not a uuid goes home with no query at all', async () => {
     const knex = jest.fn(() => { throw new Error('no query expected'); });
     await expect(eventRedirectWithoutRecording({ engagementToken: 'junk', eventId: LOCKED }, knex)).resolves.toBe(HOME);
+    await expect(recordEventClick({ engagementToken: 'junk', eventId: LOCKED, userAgent: 'Mozilla/5.0' }, knex))
+      .resolves.toEqual({ redirectUrl: HOME, recorded: false });
+    expect(knex).not.toHaveBeenCalled();
   });
 
   test('over-budget path applies the same binding', async () => {

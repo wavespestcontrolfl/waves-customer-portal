@@ -189,6 +189,10 @@ async function eventRedirectWithoutRecording({ engagementToken, eventId }, knex 
  * the send's lineup redirects to the homepage instead).
  */
 async function recordEventClick({ engagementToken, eventId, userAgent }, knex = db) {
+  // Gate on: a token that cannot be a delivery goes home before any read.
+  if (newsletterClickBound() && !UUID_SHAPE_RE.test(String(engagementToken || ''))) {
+    return { redirectUrl: CLICK_FALLBACK_URL, recorded: false };
+  }
   const event = await knex('events_raw').where({ id: eventId }).first('id', 'event_url');
   const fallback = CLICK_FALLBACK_URL;
   const destination = event?.event_url || fallback;
