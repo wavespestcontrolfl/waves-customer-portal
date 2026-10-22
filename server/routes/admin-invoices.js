@@ -2947,6 +2947,10 @@ async function applyCreditPreRefusal(invoice, expectedCredit, assertInvoiceVersi
 async function assertBarCreditUnderLock(trx, locked, expectedCredit, assertInvoiceVersion) {
   if (!expectedCredit) return;
   assertInvoiceVersion(locked, expectedCredit, 'applying credit');
+  // A legacy partially_paid invoice keeps its paid part in payment rows: total - credit_applied is not its balance.
+  if (String(locked.status || '').toLowerCase() === 'partially_paid') {
+    throw applyCreditOperationalError('Cannot apply credit from the bar — this invoice is partially paid; apply the credit from the Invoices page', 409, 'NEEDS_INVOICES_PAGE');
+  }
   await assertBarCreditFences(trx, locked, expectedCredit);
   if (await trx('projects').where({ invoice_id: locked.id }).first('id')) {
     throw applyCreditOperationalError('Cannot apply credit from the bar — this invoice is linked to a project whose report may wait on its payment; apply the credit from the Invoices page', 409, 'NEEDS_INVOICES_PAGE');

@@ -168,7 +168,7 @@ async function resolveInvoice(input) {
 }
 
 // Statuses that read as collected or moving money (the Invoices page shows no Edit for them either).
-const MONEY_STATUSES = new Set(['paid', 'prepaid', 'processing', 'refunded', 'partially_refunded', 'partial', 'disputed']);
+const MONEY_STATUSES = new Set(['paid', 'prepaid', 'processing', 'refunded', 'partially_refunded', 'partial', 'partially_paid', 'disputed']);
 const EDITABLE_STATUSES = new Set(['draft', 'scheduled', 'sent', 'viewed', 'overdue']);
 const DELIVERED_STATUSES = new Set(['sent', 'viewed', 'overdue']);
 
@@ -439,9 +439,13 @@ function applyLineChanges(stored, changes, invoiceId) {
     }
     const qty = change.quantity !== undefined ? change.quantity : (Number(li.quantity) || 1);
     const unit = change.unit_price !== undefined ? change.unit_price : (Number(li.unit_price) || lineAmount(li) / qty);
+    // A rename clears the catalog scope (service_key / service_category), as the Invoices page editor does: the server trusts
+    // those fields for service-scoped document discounts, so a renamed line must not keep its old service's discount.
+    const renamed = change.description !== undefined && change.description !== li.description;
     next[idx] = {
       ...li,
       ...(change.description !== undefined ? { description: change.description } : {}),
+      ...(renamed && (li.service_key != null || li.service_category != null) ? { service_key: null, service_category: null } : {}),
       quantity: qty,
       unit_price: unit,
       amount: round2(qty * unit),
@@ -494,6 +498,15 @@ async function editRefusal(invoice, retotal) {
     return refusal('A customer has already started paying this invoice. Void it and create a replacement instead of editing it.', 'not_editable', { reason: 'payment_session_open', invoice_id: at });
   }
   if (invoice.annual_prepay_term_id) return toPage(`Invoice ${invoice.invoice_number} is part of an annual prepay term; edit the term (Annual prepay).`, 'annual_plan', at);
+  // An annual-prepay anchor can be linked only through its scheduled visit until payment syncs the term (invoice-prepay.js):
+  // the strict resolver finds it, and an answer it cannot give refuses (the term's recorded price must match the invoice).
+  try {
+    if (await require('../invoice-prepay').resolveInvoiceTermId(invoice, db, { strict: true })) {
+      return toPage(`Invoice ${invoice.invoice_number} is part of an annual prepay term; edit the term (Annual prepay).`, 'annual_plan', at);
+    }
+  } catch {
+    return refusal('The bar could not verify whether this is an annual-plan invoice, so it was not offered. Edit it from the Invoices page.', 'unverified', { invoice_id: at });
+  }
   if (await paymentPlanOf(invoice, { activeOnly: true })) return refusal('This invoice has an active payment plan. Cancel the plan before editing the invoice.', 'not_editable', { reason: 'payment_plan', invoice_id: at });
   const statement = await statementOf(invoice);
   if (statement && statement.status !== 'open') return refusal('This invoice is on a finalized payer statement. Adjust it with a credit on the next statement.', 'not_editable', { reason: 'finalized_statement', invoice_id: at });
@@ -837,8 +850,15 @@ async function creditVisitRefusal(invoice) {
 }
 
 // In the order the page's checks run; the first refusal wins.
+// A legacy partially_paid invoice passes assertInvoiceCollectible, but its paid part lives in payment rows, not on the invoice:
+// total - credit_applied would draw the gross amount from account credit. The page's handler re-checks it under the lock too.
+function creditPartiallyPaidRefusal(invoice) {
+  if (String(invoice.status || '').toLowerCase() !== 'partially_paid') return null;
+  return toPage(`Invoice ${invoice.invoice_number} is partially paid, so its balance is not the invoice total.`, 'partially_paid', invoice.id);
+}
+
 const CREDIT_REFUSALS = [
-  creditPayerRefusal, creditCollectibleRefusal, creditAmountRefusal, creditSessionRefusal, creditProjectRefusal, creditVisitRefusal,
+  creditPartiallyPaidRefusal, creditPayerRefusal, creditCollectibleRefusal, creditAmountRefusal, creditSessionRefusal, creditProjectRefusal, creditVisitRefusal,
   (invoice) => chargeFenceRefusal(invoice, 'Apply the credit from the Invoices page.'),
 ];
 

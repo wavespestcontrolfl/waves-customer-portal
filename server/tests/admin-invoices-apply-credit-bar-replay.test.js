@@ -196,6 +196,15 @@ describe('apply-credit — the page and the bar', () => {
     expect(mockPostMovement).not.toHaveBeenCalled();
   });
 
+  test('a partially_paid invoice is refused for the bar under the invoice lock, before any credit moves', async () => {
+    preInvoices.first.mockImplementation(async () => ({ ...INVOICE, status: 'partially_paid' }));
+    trxInvoices.first.mockImplementation(async () => ({ ...INVOICE, status: 'partially_paid' }));
+    const answer = await router.applyCreditFromBar({ invoiceId: 'inv-1', body: { waiveSetupFee: false }, actor: ACTOR, expected: { ...EXPECTED, status: 'partially_paid' } });
+    expect(answer).toMatchObject({ status: 409, json: { code: 'NEEDS_INVOICES_PAGE', error: expect.stringMatching(/partially paid/) } });
+    expect(mockPostMovement).not.toHaveBeenCalled();
+    expect(trxInvoices.update).not.toHaveBeenCalled();
+  });
+
   test('an invoice linked to ANY project is refused for the bar under the invoice lock, before any credit moves; the page is untouched', async () => {
     trxProjects.first.mockImplementation(async () => ({ id: 'proj-1' }));
     const answer = await router.applyCreditFromBar({ invoiceId: 'inv-1', body: { waiveSetupFee: false }, actor: ACTOR, expected: EXPECTED });

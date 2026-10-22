@@ -298,6 +298,26 @@ describe('edit_invoice card', () => {
     expect(await run('edit_invoice', { title: 'Quarterly Pest Control (Oct)' })).toMatchObject({ preview: true });
   });
 
+  test('renaming a catalog-picked line clears its service scope (as the page editor does); a price-only change keeps it', async () => {
+    setInvoice({ line_items: [
+      { client_id: 'li_a', description: 'Quarterly Pest Control', quantity: 1, unit_price: 99, amount: 99, category: 'service', service_key: 'pest_quarterly', service_category: 'pest' },
+      { client_id: 'li_b', description: 'Interior add-on', quantity: 1, unit_price: 30, amount: 30 },
+    ] });
+    const renamed = await run('edit_invoice', { line_changes: [{ line_number: 1, description: 'Wasp nest removal' }] });
+    expect(renamed._body.line_items[0]).toMatchObject({ client_id: 'li_a', description: 'Wasp nest removal', service_key: null, service_category: null });
+    expect(mockCalc.mock.calls.pop()[0].lineItems[0]).toMatchObject({ service_key: null, service_category: null });
+    const repriced = await run('edit_invoice', { line_changes: [{ line_number: 1, unit_price: 109 }] });
+    expect(repriced._body.line_items[0]).toMatchObject({ service_key: 'pest_quarterly', service_category: 'pest' });
+  });
+
+  test('an annual-plan anchor linked only through its visit (no term id on the row yet) is refused; an unverifiable check refuses too', async () => {
+    mockResolveTerm.mockResolvedValueOnce('term-1');
+    expect(await run('edit_invoice', { title: 'New title' })).toMatchObject({ code: 'needs_invoices_page', reason: 'annual_plan' });
+    expect(mockResolveTerm).toHaveBeenCalledWith(expect.objectContaining({ id: INV }), expect.anything(), { strict: true });
+    mockResolveTerm.mockRejectedValueOnce(new Error('db down'));
+    expect(await run('edit_invoice', { title: 'New title' })).toMatchObject({ code: 'unverified' });
+  });
+
   test('an invoice tied to an accepted estimate discloses the setup-fee alert re-check; an untied one does not', async () => {
     const untied = await run('edit_invoice', { line_changes: [{ line_number: 2, unit_price: 50 }] });
     expect(untied.effects.map((e) => e.text).join(' ')).not.toMatch(/re-checks the staff alert/);
@@ -695,6 +715,14 @@ describe('apply_invoice_credit card', () => {
     expect(await run('apply_invoice_credit', { amount: 200 })).toMatchObject({ code: 'amount_exceeds_balance' });
     expect(await run('apply_invoice_credit', { amount: -1 })).toMatchObject({ code: 'invalid_amount' });
     expect(await run('apply_invoice_credit', { amount: 12.345 })).toMatchObject({ code: 'invalid_amount' });
+  });
+
+  test('a legacy partially_paid invoice is refused (its paid part is in payment rows, not on the invoice)', async () => {
+    setInvoice({ status: 'partially_paid' });
+    expect(await run('apply_invoice_credit')).toMatchObject({ code: 'needs_invoices_page', reason: 'partially_paid' });
+    expect(Invoices.applyCreditFromBar).not.toHaveBeenCalled();
+    setInvoice({ status: 'partially_paid' });
+    expect(await run('edit_invoice', { title: 'x' })).toMatchObject({ reason: 'status_partially_paid' });
   });
 
   test('not enough credit: refused with the shortfall, nothing applied', async () => {
