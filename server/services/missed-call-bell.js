@@ -573,6 +573,23 @@ async function finishDelivery({ row, stats, fenced, settle, pushRetry, firstPass
   if (!held) await settle().catch(() => {});
 }
 
+// Wording the retire sweep and the post-delivery check give a bell closed because the customer's visit moved.
+const VISIT_UNDERWAY_RESOLUTION = "The customer's visit went ahead after the call";
+
+// Post-check after a bell was delivered: close it when the call stopped being
+// the missed-call lane's. With GATE_MISSED_CALL_VISIT_UNDERWAY on, a call that
+// stays missed on every other test and was closed only by the visit gets the
+// visit wording; every other close keeps the default wording.
+async function retireAfterDelivery(callLogId, stillMissedFinal, stillMissedIgnoringVisit) {
+  if (await stillMissedFinal().catch(() => true)) return;
+  const visitOnly = visitUnderwaySql() ? await stillMissedIgnoringVisit().catch(() => false) : false;
+  const NotificationService = require('./notification-service');
+  await NotificationService.supersedeMissedCallAdmin({
+    callLogId,
+    ...(visitOnly ? { resolution: VISIT_UNDERWAY_RESOLUTION } : {}),
+  }).catch(() => {});
+}
+
 async function ringMissedCallIfUnanswered(callSid) {
   if (!callSid) return false;
   try {
@@ -634,15 +651,17 @@ async function ringMissedCallIfUnanswered(callSid) {
     // Is this call still the missed-call lane's? False once a recording
     // persisted or the voicemail lane claimed it.
     // False too once a later call got through (calledBackSql).
-    const stillMissedWith = (calledBackClause) => async () => Boolean(await db('call_log').where({ id: row.id }).modify(whereNotBlockedCall)
+    const stillMissedWith = (calledBackClause, visitCheck = whereNoVisitUnderway) => async () => Boolean(await db('call_log').where({ id: row.id }).modify(whereNotBlockedCall)
       .modify(recording).whereNull('voicemail_callback_alerted_at')
       .whereRaw(calledBackClause)
-      .modify(whereNoVisitUnderway)
+      .modify(visitCheck)
       .first('id'));
     const stillMissed = stillMissedWith(calledBack);
     // The post-check below retires the bell for good, so it needs proof of an
     // answered callback, not a callback that may still be ringing.
     const stillMissedFinal = stillMissedWith(calledBackSql({ retire: true }));
+    // The same check without the visit clause: tells the post-check below whether the visit is the only reason.
+    const stillMissedIgnoringVisit = stillMissedWith(calledBackSql({ retire: true }), () => {});
     const deferredOnly = deferredOnlyCheck(stillMissed, stillMissedFinal);
     let stats = null;
     let rowWritten = false; // set by the trigger before the push
@@ -675,10 +694,7 @@ async function ringMissedCallIfUnanswered(callSid) {
     // and here makes this call the voicemail lane's — retire the bell just
     // written. The voicemail path runs the same supersede when IT claims, so
     // both orderings converge on one alert per call.
-    if (!(await stillMissedFinal().catch(() => true))) {
-      const NotificationService = require('./notification-service');
-      await NotificationService.supersedeMissedCallAdmin({ callLogId: row.id }).catch(() => {});
-    }
+    await retireAfterDelivery(row.id, stillMissedFinal, stillMissedIgnoringVisit);
     return true;
   } catch (err) {
     logger.warn(`[missed-call-bell] failed for call ${String(callSid).slice(-6)}: ${err.message}`);
@@ -781,7 +797,7 @@ async function retireCalledBackMissedCalls({ limit = 100 } = {}) {
   if (!underway) return retired;
   return retired + await retireOpenMissedCalls({
     clause: underway,
-    resolution: "The customer's visit went ahead after the call",
+    resolution: VISIT_UNDERWAY_RESOLUTION,
     limit,
   });
 }

@@ -238,6 +238,47 @@ jest.setTimeout(30000);
       expect(await ringMissedCallIfUnanswered(call.twilio_call_sid)).toBe(true);
     });
 
+    // The bell write lands, then the visit moves before the post-delivery check.
+    function bellThenVisitMoves(call, cols) {
+      triggerNotification.mockImplementation(async () => {
+        await bell(call);
+        await visit(cols);
+        return { bellWritten: true };
+      });
+    }
+
+    test('a visit that moves after the bell is written closes it with the visit wording', async () => {
+      const call = await missedCall();
+      bellThenVisitMoves(call, { en_route_at: at('13:46') });
+      expect(await ringMissedCallIfUnanswered(call.twilio_call_sid)).toBe(true);
+      const after = await database('notifications').where({ category: 'missed_call' }).first();
+      expect(after.done_at).not.toBeNull();
+      expect(JSON.stringify(after)).toContain(RETIRE_REASON);
+    });
+
+    test('a voicemail that also landed keeps the default wording at the post-check', async () => {
+      const call = await missedCall();
+      triggerNotification.mockImplementation(async () => {
+        await bell(call);
+        await visit({ en_route_at: at('13:46') });
+        await database('call_log').where({ id: call.id }).update({ recording_sid: 'RE_synthetic', recording_duration_seconds: 20 });
+        return { bellWritten: true };
+      });
+      expect(await ringMissedCallIfUnanswered(call.twilio_call_sid)).toBe(true);
+      const after = await database('notifications').where({ category: 'missed_call' }).first();
+      expect(after.done_at).not.toBeNull();
+      expect(JSON.stringify(after)).not.toContain(RETIRE_REASON);
+    });
+
+    test('gate off: a visit that moves after the bell is written leaves it open', async () => {
+      setGates([]);
+      const call = await missedCall();
+      bellThenVisitMoves(call, { en_route_at: at('13:46') });
+      expect(await ringMissedCallIfUnanswered(call.twilio_call_sid)).toBe(true);
+      const after = await database('notifications').where({ category: 'missed_call' }).first();
+      expect(after.done_at).toBeNull();
+    });
+
     test('an unknown caller rings as before', async () => {
       gates.missedCallUnknownCallers = true;
       const call = await missedCall({ customer_id: null, duration_seconds: 30 });
