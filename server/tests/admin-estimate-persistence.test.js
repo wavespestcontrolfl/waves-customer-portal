@@ -447,6 +447,120 @@ describe('admin estimate persistence', () => {
     expect(fields.onetime_total).toBe(49);
   });
 
+  // EST-2026-1185: the setup fee is waived on a multi-service plan (owner
+  // 2026-10-21), but the builder caches it in oneTime for a bundle too.
+  test('a pest + mosquito bundle stores no setup fee in its one-time and first-year totals', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      monthlyTotal: 113.1,
+      annualTotal: 1357.2,
+      onetimeTotal: 99,
+      estimateData: {
+        result: {
+          oneTime: { items: [], total: 99, otSubtotal: 99, tmInstall: 0, membershipFee: 99 },
+          recurring: {
+            grandTotal: 113.1,
+            services: [
+              { service: 'pest_control', name: 'Pest Control', mo: 38.4 },
+              { service: 'mosquito', name: 'Mosquito', mo: 74.7 },
+            ],
+          },
+          totals: { year1: 1456.2, year2: 1357.2, year2mo: 113.1 },
+        },
+      },
+    });
+    expect(fields.onetime_total).toBe(0);
+    const stored = JSON.parse(fields.estimate_data);
+    expect(stored.result.oneTime.total).toBe(0);
+    expect(stored.result.oneTime.otSubtotal).toBe(0);
+    expect(stored.result.totals.year1).toBe(1357.2);
+  });
+
+  test('a bundle keeps its real one-time charges and drops only the setup fee', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      estimateData: {
+        result: {
+          oneTime: { items: [{ service: 'flea', name: 'Flea Treatment', price: 150 }], total: 249, membershipFee: 99 },
+          recurring: { grandTotal: 113.1, services: [{ service: 'pest_control', mo: 38.4 }, { service: 'mosquito', mo: 74.7 }] },
+        },
+      },
+    });
+    expect(fields.onetime_total).toBe(150);
+  });
+
+  // Pre-push audit P0: the save path derives totals twice (apply, then build);
+  // the fee must come off exactly once.
+  test('a repeated derive of the same bundle does not take the setup fee off twice', () => {
+    const body = {
+      ...baseBody,
+      estimateData: {
+        result: {
+          oneTime: { items: [{ service: 'flea', name: 'Flea Treatment', price: 150 }], total: 249, membershipFee: 99 },
+          recurring: { grandTotal: 113.1, services: [{ service: 'pest_control', mo: 38.4 }, { service: 'mosquito', mo: 74.7 }] },
+        },
+      },
+    };
+    const first = buildEstimatePersistenceFields(body);
+    expect(first.onetime_total).toBe(150);
+    const second = buildEstimatePersistenceFields({ ...body, estimateData: JSON.parse(first.estimate_data) });
+    expect(second.onetime_total).toBe(150);
+    const third = buildEstimatePersistenceFields({ ...body, estimateData: JSON.parse(second.estimate_data) });
+    expect(third.onetime_total).toBe(150);
+  });
+
+  test('a marked bundle cut to pest only takes the setup fee back, once', () => {
+    const bundle = buildEstimatePersistenceFields({
+      ...baseBody,
+      estimateData: {
+        result: {
+          oneTime: { items: [], total: 99, membershipFee: 99 },
+          recurring: { grandTotal: 113.1, services: [{ service: 'pest_control', mo: 38.4 }, { service: 'mosquito', mo: 74.7 }] },
+        },
+      },
+    });
+    expect(bundle.onetime_total).toBe(0);
+    const data = JSON.parse(bundle.estimate_data);
+    data.result.recurring = { grandTotal: 38.4, services: [{ service: 'pest_control', mo: 38.4 }] };
+    const pestOnly = buildEstimatePersistenceFields({ ...baseBody, estimateData: data });
+    expect(pestOnly.onetime_total).toBe(99);
+    const again = buildEstimatePersistenceFields({ ...baseBody, estimateData: JSON.parse(pestOnly.estimate_data) });
+    expect(again.onetime_total).toBe(99);
+  });
+
+  test('the full create path stores the bundle one-time total once reduced', async () => {
+    const fixture = makeDatabase({});
+    const { estimate } = await createOrReuseAdminEstimate({
+      database: fixture.database,
+      body: {
+        ...baseBody,
+        leadId: null,
+        estimateData: {
+          result: {
+            oneTime: { items: [{ service: 'flea', name: 'Flea Treatment', price: 150 }], total: 249, membershipFee: 99 },
+            recurring: { grandTotal: 113.1, services: [{ service: 'pest_control', mo: 38.4 }, { service: 'mosquito', mo: 74.7 }] },
+          },
+        },
+      },
+      technicianId: 'qa-admin',
+      recompute: async () => ({ recomputed: false, reason: 'NO_INPUTS' }),
+    });
+    expect(Number(estimate.onetime_total)).toBe(150);
+  });
+
+  test('pest only keeps the setup fee', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      estimateData: {
+        result: {
+          oneTime: { items: [], total: 99, membershipFee: 99 },
+          recurring: { grandTotal: 38.4, services: [{ service: 'pest_control', name: 'Pest Control', mo: 38.4 }] },
+        },
+      },
+    });
+    expect(fields.onetime_total).toBe(99);
+  });
+
   test('zeros persisted totals when estimate data contains quote-required lines', () => {
     const fields = buildEstimatePersistenceFields({
       ...baseBody,
