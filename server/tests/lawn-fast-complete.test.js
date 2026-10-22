@@ -1507,7 +1507,9 @@ describe('buildLawnFastWateringPreview', () => {
   test('GATE_LAWN_WATERING_EVERY_VISIT: the targets the completion will log pick the same direction as the report', async () => {
     process.env.GATE_LAWN_WATERING_RULE = 'true';
     const savedEvery = process.env.GATE_LAWN_WATERING_EVERY_VISIT;
+    const savedSms = process.env.GATE_LAWN_WATERING_SMS;
     process.env.GATE_LAWN_WATERING_EVERY_VISIT = 'true';
+    process.env.GATE_LAWN_WATERING_SMS = 'true'; // a prerequisite of the gate
     try {
       const split = {
         ...herbicide,
@@ -1535,6 +1537,7 @@ describe('buildLawnFastWateringPreview', () => {
         .toEqual({ ok: false, reason: 'invalid_targets' });
     } finally {
       if (savedEvery === undefined) delete process.env.GATE_LAWN_WATERING_EVERY_VISIT; else process.env.GATE_LAWN_WATERING_EVERY_VISIT = savedEvery;
+      if (savedSms === undefined) delete process.env.GATE_LAWN_WATERING_SMS; else process.env.GATE_LAWN_WATERING_SMS = savedSms;
     }
   });
 

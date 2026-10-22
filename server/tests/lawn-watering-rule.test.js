@@ -297,20 +297,28 @@ describe('target rules, label minimums and second steps', () => {
     expect(checked.errors.join('; ')).toMatch(error);
   });
 
-  test('the logged targets pick the target rules; each picked rule is a valid rule of its own', () => {
+  test('logged targets that point one way pick that target rule; each picked rule is a valid rule of its own', () => {
     const rule = valid(ACELEPRYN);
     expect(rulesForTargets(rule, ['White grubs']).map((r) => r.mode)).toEqual(['water_in']);
-    expect(rulesForTargets(rule, ['Tropical sod webworms', 'White grubs']).map((r) => r.mode)).toEqual(['hold', 'water_in']);
-    for (const picked of rulesForTargets(rule, ['Tropical sod webworms', 'White grubs'])) expect(validateRule(picked).valid).toBe(true);
+    expect(rulesForTargets(rule, ['Tropical sod webworms']).map((r) => r.mode)).toEqual(['hold']);
+    for (const picked of [...rulesForTargets(rule, ['White grubs']), ...rulesForTargets(rule, ['Tropical sod webworms'])]) expect(validateRule(picked).valid).toBe(true);
     expect(rulesForTargets(rule, ['White grubs'])[0]).toMatchObject({ source: 'owner', label_note: 'grubs' });
+  });
+
+  test('a mixed target list (the completion form prefills the label targets) reads the product\'s main use', () => {
+    // Acelepryn prefill: webworms + armyworms + grubs -> the caterpillar hold, never hold-then-water-in.
+    expect(rulesForTargets(valid(ACELEPRYN), ['Tropical sod webworms', 'Fall armyworms', 'White grubs'])).toEqual([expect.objectContaining({ mode: 'hold', hold_hours: 24 })]);
+    // Acelepryn Xtra-style prefill with a target no entry names: still the main use, not no rule.
+    expect(rulesForTargets(valid(ACELEPRYN), ['Southern chinch bugs', 'Tropical sod webworms', 'White grubs'])).toEqual([expect.objectContaining({ mode: 'hold', hold_hours: 24 })]);
+    expect(rulesForTargets(valid(ACELEPRYN), ['Billbugs', 'White grubs'])).toEqual([expect.objectContaining({ mode: 'hold', hold_hours: 24 })]);
+    expect(rulesForTargets(valid(HEADWAY), ['Large patch', 'Spring dead spot'])).toEqual([expect.objectContaining({ mode: 'hold', hold_until: 'dry' })]);
+    expect(rulesForTargets(valid(HEADWAY), ['Large patch', 'Spring dead spot'])[0].by_target).toBeUndefined();
   });
 
   test('no target logged: the product-wide rule, or for a target-only rule its first entry (the main use)', () => {
     expect(rulesForTargets(valid(ACELEPRYN), [])).toEqual([expect.objectContaining({ mode: 'hold', hold_hours: 24 })]);
     expect(rulesForTargets(valid(ACELEPRYN), ['  '])).toEqual([expect.objectContaining({ mode: 'hold', hold_hours: 24 })]);
     expect(rulesForTargets(valid(HEADWAY), null)).toEqual([expect.objectContaining({ mode: 'hold', hold_until: 'dry' })]);
-    expect(rulesForTargets(valid(HEADWAY), ['Large patch', 'Spring dead spot']).map((r) => r.mode)).toEqual(['water_in', 'hold']);
-    expect(rulesForTargets(valid(HEADWAY), ['Large patch', 'Spring dead spot'])[1].by_target).toBeUndefined();
   });
 
   test('a hold with a second step carries its own rain-counting water-in', () => {
@@ -325,9 +333,9 @@ describe('target rules, label minimums and second steps', () => {
     expect(rulesForTargets(null, ['White grubs'])).toEqual([]);
   });
 
-  test('a logged target the label gives no line for: no rule on a target-only product, never another target\'s direction', () => {
+  test('only targets the label gives no line for: no rule on a target-only product, never another target\'s direction', () => {
     expect(rulesForTargets(valid(ACELEPRYN), ['Southern chinch bugs'])).toEqual([]);
-    expect(rulesForTargets(valid(ACELEPRYN), ['Billbugs', 'White grubs'])).toEqual([]);
+    expect(rulesForTargets(valid(ACELEPRYN), ['Southern chinch bugs', 'Billbugs'])).toEqual([]);
     // A product-wide rule covers a target no entry names.
     expect(rulesForTargets(valid(HEADWAY), ['Gray leaf spot']).map((r) => r.mode)).toEqual(['hold']);
   });

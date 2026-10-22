@@ -187,8 +187,16 @@ describe('the completion path freezes independently of completion-text delivery'
 // watering text's office alert; it writes nothing for it.
 describe('why no instruction froze', () => {
   const saved = process.env.GATE_LAWN_WATERING_EVERY_VISIT;
+  const savedPrereqs = { sms: process.env.GATE_LAWN_WATERING_SMS, rule: process.env.GATE_LAWN_WATERING_RULE };
+  // The gate reads as on only with both prerequisites on (feature-gates.js).
+  beforeEach(() => {
+    process.env.GATE_LAWN_WATERING_SMS = 'true';
+    process.env.GATE_LAWN_WATERING_RULE = 'true';
+  });
   afterEach(() => {
     if (saved === undefined) delete process.env.GATE_LAWN_WATERING_EVERY_VISIT; else process.env.GATE_LAWN_WATERING_EVERY_VISIT = saved;
+    if (savedPrereqs.sms === undefined) delete process.env.GATE_LAWN_WATERING_SMS; else process.env.GATE_LAWN_WATERING_SMS = savedPrereqs.sms;
+    if (savedPrereqs.rule === undefined) delete process.env.GATE_LAWN_WATERING_RULE; else process.env.GATE_LAWN_WATERING_RULE = savedPrereqs.rule;
   });
   function noClaimInstruction() {
     const instruction = { ...INSTRUCTION(40), state: null, lines: [] };

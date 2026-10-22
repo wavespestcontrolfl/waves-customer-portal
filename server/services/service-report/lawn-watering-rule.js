@@ -385,14 +385,16 @@ function withThenStep(rule) {
 }
 
 // rulesForTargets(rule, targets) -> rule[] : the rules ONE logged use of a
-// product carries. A rule with no by_target is itself. Otherwise each target
-// rule whose words a logged target contains, plus the top-level rule when a
-// logged target is named by no entry. No target logged reads the top-level
-// rule, or for a product with no top-level rule its FIRST entry (its main
-// use). A logged target that no entry names, on a product with no top-level
-// rule, is a use the label gives no watering line for: no rule (no claim),
-// never another target's direction. A hold's then_water_in step becomes a
-// rule of its own. [] = no rule (no claim).
+// product carries. A rule with no by_target is itself. The logged targets are
+// usually the completion form's label prefill (the catalog's first targets),
+// not the use (codex #6449), so they pick a target rule only when they point
+// ONE way: every logged target named by an entry, and every named entry the
+// same mode. A mixed list (the prefill, or a real mix) reads the product's
+// main use: the top-level rule, or for a target-only rule its FIRST entry. So
+// does no target logged. Targets that no entry names read the top-level rule;
+// on a target-only rule that is a use the label gives no watering line for:
+// no rule (no claim). A hold's then_water_in step becomes a rule of its own.
+// [] = no rule (no claim).
 function rulesForTargets(rule, targets) {
   return pickTargetRules(rule, targets).flatMap(withThenStep);
 }
@@ -418,13 +420,14 @@ function pickTargetRules(rule, targets) {
   const names = targetList(targets)
     .map((target) => (typeof target === 'string' ? target.trim().toLowerCase() : ''))
     .filter(Boolean);
-  if (!names.length) return [base || targetRuleOf(entries[0], rule)];
+  const main = base || targetRuleOf(entries[0], rule);
+  if (!names.length) return [main];
   const covers = (entry, name) => entry.match.some((word) => name.includes(word));
+  const picked = entries.filter((entry) => names.some((name) => covers(entry, name)));
+  if (!picked.length) return base ? [base] : [];
   const unnamed = names.some((name) => !entries.some((entry) => covers(entry, name)));
-  if (unnamed && !base) return [];
-  const out = entries.filter((entry) => names.some((name) => covers(entry, name))).map((entry) => targetRuleOf(entry, rule));
-  if (unnamed) out.push(base);
-  return out;
+  const oneWay = !unnamed && new Set(picked.map((entry) => entry.mode)).size === 1;
+  return oneWay ? picked.map((entry) => targetRuleOf(entry, rule)) : [main];
 }
 
 module.exports = {

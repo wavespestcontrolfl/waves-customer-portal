@@ -572,6 +572,46 @@ function finishInstruction(out, { hold, holdLabel, short, long }) {
   return out;
 }
 
+// The products whose resolved rule passes `test`, by name (a no-claim's list).
+function namesWhere(list, resolved, test) {
+  return list.filter((entry, i) => test(resolved[i])).map(nameOf);
+}
+
+// C and E: the short water-in and the hold beside it. Returns { hold, short },
+// or { noClaim, products } when no honest deadline exists (C, see
+// waterInDeadline). E: a same-day water-in the label requires wins over a hold
+// that can wait less (see the header), only when C left no deadline.
+function decideShortWaterIn(out, { holds, waterIns, list, resolved, runtime, plainWhenNoSetup, at, labelFirst }) {
+  let hold = holds.length ? holdWindow(holds, at) : null;
+  if (!waterIns.length) return { hold, short: null };
+  const apply = (window) => applyWaterIn(out, { waterIns, runtime, plainWhenNoSetup, at, holdEnd: window && window.effectiveEnd, timedEnd: window && window.timedEnd });
+  let short = apply(hold);
+  if (!short && labelFirst && hold && waterIns.some((r) => r.water_in_same_day === true)) {
+    const shortened = holdWindow(holds.map(toLabelMinimum), at, SAME_DAY_DRY_HOURS);
+    const retry = apply(shortened);
+    if (retry) {
+      hold = shortened;
+      short = retry;
+    }
+  }
+  if (short) return { hold, short };
+  // With no hold, only a same-day water-in fails: too late in the day to fit a run.
+  const products = namesWhere(list, resolved, (r) => r.mode === 'hold' || waterIns.includes(r));
+  return { noClaim: hold ? 'water_in_conflict' : 'same_day_too_late', products };
+}
+
+// A long water-in whose deadline falls inside the hold cannot be followed (a
+// 7-day hold beside a 7-day "if no rain, irrigate" step).
+const longInsideHold = (long, hold) => !!(long && hold && hold.effectiveEnd && long.by.getTime() <= hold.effectiveEnd.getTime());
+
+// The per-product summary the instruction carries.
+function productSummaries(list, resolved) {
+  return list.map((entry, index) => {
+    const rule = resolved[index];
+    return { name: nameOf(entry), mode: rule ? rule.mode : null, source: rule ? (rule.source || null) : null };
+  });
+}
+
 function buildWateringInstruction({ rules, completedAt, runtime = null, plainWhenNoSetup, labelFirst = false } = {}) {
   const out = emptyInstruction();
   const list = Array.isArray(rules) ? rules : [];
@@ -582,11 +622,7 @@ function buildWateringInstruction({ rules, completedAt, runtime = null, plainWhe
   // The visit's completion instant the lines are anchored to ("today",
   // "tonight"): the watering text checks freshness against it.
   out.completedAt = at.toISOString();
-
-  out.products = list.map((entry, index) => {
-    const rule = resolved[index];
-    return { name: nameOf(entry), mode: rule ? rule.mode : null, source: rule ? (rule.source || null) : null };
-  });
+  out.products = productSummaries(list, resolved);
 
   // The mow hold is decided before any watering early return below.
   out.mowHold = buildMowHold(list, at);
@@ -594,7 +630,7 @@ function buildWateringInstruction({ rules, completedAt, runtime = null, plainWhe
   // A. Any applied product with no rule: no claim, the legacy fail-closed path.
   // No other product may force a direction over a product we know nothing about.
   if (resolved.some((r) => !r)) {
-    return withNoClaim(out, 'unruled_product', list.map((entry, i) => (resolved[i] ? null : nameOf(entry))));
+    return withNoClaim(out, 'unruled_product', namesWhere(list, resolved, (r) => !r));
   }
 
   const { holds, waterIns, longs, nones } = groupRules(resolved);
@@ -603,34 +639,13 @@ function buildWateringInstruction({ rules, completedAt, runtime = null, plainWhe
     return none.state ? none : withNoClaim(none, 'unchecked_rules', list.map(nameOf));
   }
 
-  let hold = holds.length ? holdWindow(holds, at) : null;
-  let short = waterIns.length
-    ? applyWaterIn(out, { waterIns, runtime, plainWhenNoSetup, at, holdEnd: hold && hold.effectiveEnd, timedEnd: hold && hold.timedEnd })
-    : null;
-  // E. A same-day water-in the label requires wins over a hold that can wait
-  // less (see the header). Only when C left no deadline.
-  if (labelFirst && waterIns.length && !short && hold && waterIns.some((r) => r.water_in_same_day === true)) {
-    const shortened = holdWindow(holds.map(toLabelMinimum), at, SAME_DAY_DRY_HOURS);
-    const retry = applyWaterIn(out, { waterIns, runtime, plainWhenNoSetup, at, holdEnd: shortened.effectiveEnd, timedEnd: shortened.timedEnd });
-    if (retry) {
-      hold = shortened;
-      short = retry;
-    }
-  }
-  // C. A short water-in with no honest deadline: no claim (see waterInDeadline).
-  if (waterIns.length && !short) {
-    // With no hold, only a same-day water-in fails: too late in the day to fit a run.
-    const clash = list.filter((entry, i) => resolved[i].mode === 'hold' || waterIns.includes(resolved[i])).map(nameOf);
-    return withNoClaim(out, hold ? 'water_in_conflict' : 'same_day_too_late', clash);
-  }
-
+  const decided = decideShortWaterIn(out, { holds, waterIns, list, resolved, runtime, plainWhenNoSetup, at, labelFirst });
+  if (decided.noClaim) return withNoClaim(out, decided.noClaim, decided.products);
+  const { hold, short } = decided;
   const long = longs.length ? longWaterIn(longs, at) : null;
-  // A long water-in whose deadline falls inside the hold cannot be followed
-  // (a 7-day hold beside a 7-day "if no rain, irrigate" step): no claim, the
-  // office hears of the clash. Gate off: as before.
-  if (labelFirst && long && hold && hold.effectiveEnd && long.by.getTime() <= hold.effectiveEnd.getTime()) {
-    const clash = list.filter((entry, i) => resolved[i].mode === 'hold' || longs.includes(resolved[i])).map(nameOf);
-    return withNoClaim(out, 'water_in_conflict', clash);
+  // The office hears of a long water-in inside the hold. Gate off: as before.
+  if (labelFirst && longInsideHold(long, hold)) {
+    return withNoClaim(out, 'water_in_conflict', namesWhere(list, resolved, (r) => r.mode === 'hold' || longs.includes(r)));
   }
   out.ruleSource = ruleSourceOf([...holds, ...waterIns, ...longs]);
   if (long && !short) applyLongOnly(out, long);

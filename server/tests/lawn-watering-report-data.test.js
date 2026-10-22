@@ -419,6 +419,8 @@ describe('GATE_LAWN_WATERING_RULE on the report payload', () => {
         return (await resolveCanonicalLawnRender({ id: row.id, customer_id: row.customer_id, service_line: 'lawn' }, knex)).signature;
       };
       process.env.GATE_LAWN_WATERING_EVERY_VISIT = 'true';
+      const savedSms = process.env.GATE_LAWN_WATERING_SMS;
+      process.env.GATE_LAWN_WATERING_SMS = 'true'; // a prerequisite of the gate
       try {
         const grubs = await withTargets(['White grubs']);
         expect(grubs).not.toBe(off);
@@ -426,6 +428,7 @@ describe('GATE_LAWN_WATERING_RULE on the report payload', () => {
         expect(await withTargets(['Tropical sod webworms'])).not.toBe(grubs);
       } finally {
         if (saved === undefined) delete process.env.GATE_LAWN_WATERING_EVERY_VISIT; else process.env.GATE_LAWN_WATERING_EVERY_VISIT = saved;
+        if (savedSms === undefined) delete process.env.GATE_LAWN_WATERING_SMS; else process.env.GATE_LAWN_WATERING_SMS = savedSms;
       }
       expect(await signatureFor(record(), 24)).toBe(off);
     });
