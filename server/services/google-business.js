@@ -2570,10 +2570,14 @@ class GoogleBusinessService {
       // different remediation and both mean removals go undetected.
       const reconcileFailure = String(cause || '').startsWith('removal reconcile failed');
       const upsertFailure = String(cause || '').startsWith('review upsert failed');
+      // The count goes in the body only: the title is the 24h dedupe key, so
+      // a changed count must not read as a new alert. A breaker trip carries
+      // no count.
+      const failedRows = Number((String(cause || '').match(/^review upsert failed: (\d+) of \d+ review row/) || [])[1]) || null;
       const title = reconcileFailure
         ? `Google review removal reconcile failing for ${loc.name}`
         : upsertFailure
-          ? `Google review rows failing to store for ${loc.name}`
+          ? `Google reviews: some rows did not save at ${loc.name}`
           : `Google review sync degraded for ${loc.name}`;
       // The advisory lock serializes the check-then-insert across the hourly
       // job, the manual admin sync, and overlapping deploy instances — a
@@ -2607,11 +2611,16 @@ class GoogleBusinessService {
           : upsertFailure
             ? `Review sync for ${loc.name} pulled the GBP feed, but ${cause.replace(/^review upsert failed: /, '')}. ${/\(0 stored[;)]/.test(cause) ? 'NO review from this pull was stored' : 'The stored reviews are current'}; ${breakerTrip ? `the location aborted before its removal reconcile, so nothing is misreported as removed; ${process.env.GOOGLE_MAPS_API_KEY ? 'the sync will attempt the Places sample fallback' : 'no Places fallback is available (GOOGLE_MAPS_API_KEY is not set)'}` : `the failed rows were excluded from this run's removal reconcile so they are not misreported as removed${reconcileFailed ? ' (and that reconcile FAILED — see its own alert)' : ' (the rest of the location reconciled normally)'}`}. This is a database write error, not a credentials problem — read the error and the code.`
             : `Review tracking for ${loc.name} ${fallbackState} because ${detail}. Removed reviews and most new reviews will NOT be detected until the GBP connection works.`;
+        // The owner line is plain; the technical text (with the raw database
+        // error) goes behind "Show full text".
+        const ownerBody = upsertFailure
+          ? `The reviews on Google are fine. ${failedRows ? `${failedRows} stored cop${failedRows === 1 ? 'y' : 'ies'}` : 'Stored copies'} did not save; Claude can check.`
+          : body;
         await NotificationService.notifyAdmin(
           'review',
           title,
-          body,
-          { bell: true, link: '/admin/reviews', metadata: { locationId: loc.id, reason: 'gbp_sync_degraded', cause } },
+          ownerBody,
+          { bell: true, link: '/admin/reviews', ...(upsertFailure ? { detail: body } : {}), metadata: { locationId: loc.id, reason: 'gbp_sync_degraded', cause } },
         );
         logger.warn(`[gbp] Review sync degraded for ${loc.name} (${cause === 'no_client' ? 'no client' : 'pull failed'}) — admin notified`);
       }, { recordHealth: false });
