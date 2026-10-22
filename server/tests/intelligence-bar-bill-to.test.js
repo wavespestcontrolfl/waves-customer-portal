@@ -251,6 +251,9 @@ describe('the confirmed run', () => {
     const card = await preview();
     Customers.setCustomerBillToFromBar.mockRejectedValueOnce(Object.assign(new Error('The Bill-To changed after the card was shown.'), { code: 'preview_changed' }));
     expect(await confirm(card)).toMatchObject({ failed: true, code: 'preview_changed' });
+    // The checkout-session release's own pin refusal (pay-combined.js) is the same: nothing was changed.
+    Customers.setCustomerBillToFromBar.mockRejectedValueOnce(Object.assign(new Error('sessions changed'), { previewChanged: true }));
+    expect(await confirm(card)).toMatchObject({ failed: true, code: 'preview_changed' });
     Customers.setCustomerBillToFromBar.mockRejectedValueOnce(Object.assign(new Error('A combined-visit invoice for this customer is being delivered.'), { code: 'invoice_send_in_flight' }));
     expect(await confirm(card)).toMatchObject({ failed: true, code: 'bill_to_refused' });
     Customers.setCustomerBillToFromBar.mockResolvedValueOnce({ status: 409, json: { error: 'contact_exists_on_another_account' } });

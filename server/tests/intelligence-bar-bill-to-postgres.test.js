@@ -166,6 +166,19 @@ const ADMIN = { isAdmin: true, technicianId: null };
     expect(await db('invoices').where({ id: linkedId }).first()).toMatchObject({ scheduled_send_error: null });
   });
 
+  test('without the re-check, the empty session pin still refuses a checkout before any stamp clear or Stripe call', async () => {
+    const payerId = await payer();
+    const customerId = await customer();
+    const openId = await invoice(customerId, { status: 'sent', payer_id: await payer(), stripe_payment_intent_id: 'pi_fixture_pinned' });
+    const cancel = jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({});
+    const retrieve = jest.spyOn(StripeService, 'retrievePaymentIntent').mockImplementation(async (id) => ({ id, status: 'requires_payment_method', metadata: { combined: 'true' } }));
+    await expect(setCustomerBillToFromBar({ customerId, payerId, expectedPayerId: null, actor: {} })).rejects.toMatchObject({ previewChanged: true });
+    expect(cancel).not.toHaveBeenCalled();
+    expect(retrieve).not.toHaveBeenCalled();
+    expect(await db('customers').where({ id: customerId }).first('payer_id')).toMatchObject({ payer_id: null });
+    expect(await db('invoices').where({ id: openId }).first()).toMatchObject({ stripe_payment_intent_id: 'pi_fixture_pinned' });
+  });
+
   test('a Bill-To that changed after the card refuses on the locked row and writes nothing', async () => {
     const payerId = await payer();
     const other = await payer();

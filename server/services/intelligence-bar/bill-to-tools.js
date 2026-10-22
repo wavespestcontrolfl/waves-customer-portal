@@ -111,12 +111,14 @@ async function hasPayerRefusal(customer, payer, name, ctx) {
 
 // What a payer change would act on NOW: an open invoice with no payer on it (the withdrawal's whole candidate set,
 // statement-held and processing ones included), or an open invoice with a checkout (the session release's whole
-// candidate set). Under the handler's transaction the rows are held FOR UPDATE.
-function openInvoices(customerId, { database = db, lock = false } = {}) {
-  const q = database('invoices').where({ customer_id: customerId }).whereNotIn('status', CLOSED)
-    .where((w) => w.whereNull('payer_id').orWhereNotNull('stripe_payment_intent_id'))
-    .orderBy('id');
-  return (lock ? q.forUpdate() : q).select('id', 'invoice_number', 'total', 'status');
+// candidate set).
+async function openInvoices(customerId, { database = db, lock = false } = {}) {
+  // Under the lock EVERY open invoice row is held (a payer-owned one too), so no checkout can be stamped on one
+  // between this check and the handler's Bill-To steps.
+  const rows = await (lock ? database('invoices').where({ customer_id: customerId }).whereNotIn('status', CLOSED).orderBy('id').forUpdate()
+    : database('invoices').where({ customer_id: customerId }).whereNotIn('status', CLOSED).orderBy('id'))
+    .select('id', 'invoice_number', 'total', 'status', 'payer_id', 'stripe_payment_intent_id');
+  return rows.filter((r) => r.payer_id == null || r.stripe_payment_intent_id != null);
 }
 
 // Visits that can still bill and keep their own Bill-To (their own payer, or pinned to the customer), overdue ones
@@ -223,7 +225,8 @@ async function readBack(customerId) {
 
 // The handler threw: its own refusals rolled everything back; anything else is judged by reading the Bill-To back.
 async function handlerErrorResult(err, plan, base) {
-  if (err?.code === 'preview_changed') {
+  // previewChanged: the checkout-session release found a session after the card promised none (pay-combined.js).
+  if (err?.code === 'preview_changed' || err?.previewChanged === true) {
     return { ...base, failed: true, code: 'preview_changed', preview_changed: true, error: 'The customer, the payer or their invoices changed after the card was shown, so nothing was changed. Ask again for a fresh confirmation card.' };
   }
   // The handler's own refusals (a send or a bank payment in flight, a credit that cannot be returned)

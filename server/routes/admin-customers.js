@@ -4270,6 +4270,10 @@ const customerUpdateHandler = async (req, res, next) => {
               statusCode: 409, isOperational: true, code: 'preview_changed',
             });
           }
+          // req.ibVerifyPlan is set only by setCustomerBillToFromBar (never an HTTP field): it re-derives the bar card
+          // inside this transaction over held rows (bill-to-tools.js lockedPlanCheck: every open invoice FOR UPDATE)
+          // and throws preview_changed on any difference, before any Bill-To step reads or clears a checkout stamp.
+          if (req.ibVerifyPlan) await req.ibVerifyPlan(trx);
           // REBUILD the shared-phone mark clear from the locked row (codex #6268
           // r4/r8): the pre-lock pass may have derived `false` from a stale
           // phone; a save that moved the number and marked it since keeps its
@@ -4398,7 +4402,12 @@ const customerUpdateHandler = async (req, res, next) => {
           // — an unreleasable session aborts this transaction.
           if (updates.payer_id !== undefined && updates.payer_id) {
             const payerRelease = await require('../services/pay-combined')
-              .releaseUnconfirmedCombinedSessionsForCustomer(trx, req.params.id, { invalidateLinked: true, pending: customerPayerPending, deferApply: true });
+              .releaseUnconfirmedCombinedSessionsForCustomer(trx, req.params.id, {
+                invalidateLinked: true, pending: customerPayerPending, deferApply: true,
+                // The bar card promises no checkout is touched: pin the empty set, so any stamped session refuses
+                // (previewChanged) before a stamp is cleared or a Stripe call is made.
+                ...(req.ibExpectNoMove ? { expectedPaymentIntentIds: [] } : {}),
+              });
             // In-flight combined money DEFERS the payer edit (codex r30
             // P1, same contract as the merge fence): the eventual combined
             // settlement never re-resolves ownership, so committing now
@@ -4410,10 +4419,6 @@ const customerUpdateHandler = async (req, res, next) => {
             // Planned and refused here; the Stripe cancels run as the LAST step of this transaction.
             applySessionRelease = payerRelease.apply || null;
           }
-          // req.ibVerifyPlan is set only by setCustomerBillToFromBar (never an HTTP field): it re-derives the whole bar
-          // card inside this transaction over held rows (bill-to-tools.js lockedPlanCheck) and throws preview_changed
-          // on any difference, before the write and before any Stripe cancel (they run last).
-          if (req.ibVerifyPlan) await req.ibVerifyPlan(trx);
           await trx('customers').where({ id: req.params.id }).update(updates);
           // An edited property type also lands on the primary property row,
           // in this transaction, so property-scoped readers agree with the
