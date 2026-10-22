@@ -182,16 +182,6 @@ const ALLOWLIST = [
     reason: 'same one-off historical backfill script as the total-count query above (the paged batch read).',
   },
   {
-    file: 'services/completion-comms-guard.js',
-    snippet: 'const inboundRows = await knex(\'sms_log\')',
-    reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
-  },
-  {
-    file: 'services/completion-comms-guard.js',
-    snippet: 'const outboundRows = await knex(\'sms_log\')',
-    reason: 'filtered to CONFIRMED_OUTBOUND_STATUS, which excludes \'sending\' — an unresolved reservation cannot match this status filter.',
-  },
-  {
     file: 'services/customer-intelligence/signal-detector.js',
     snippet: 'const recentInbound = await db(\'sms_log\')',
     reason: 'inbound-only count (direction: \'inbound\') — a send reservation is always an outbound row; the outbound-count query a few lines below already uses the helper.',
