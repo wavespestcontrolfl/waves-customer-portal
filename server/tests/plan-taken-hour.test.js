@@ -32,6 +32,11 @@ describe('occupancyBlockFor (moved from admin-schedule.js, same results)', () =>
 describe('seriesCandidateDateClashRows', () => {
   afterEach(() => findConflictingVisits.mockReset().mockImplementation(async () => []));
 
+  test('a caller may pass its own statuses (the hand-off passes the night tool\'s)', async () => {
+    await seriesCandidateDateClashRows('conn', { window_start: '09:00', window_end: '10:00' }, '2026-11-03', { excludeStatuses: ['x'] });
+    expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({ excludeStatuses: ['x'] }));
+  });
+
   test('existing callers (no options): the same tech-blind probe as before', async () => {
     await seriesCandidateDateClashRows('conn', { window_start: '09:00', window_end: '10:00' }, '2026-11-03');
     expect(findConflictingVisits).toHaveBeenCalledWith({
@@ -65,13 +70,60 @@ describe('plan-taken-hour', () => {
     expect(findConflictingVisits).not.toHaveBeenCalled();
   });
 
-  test('gate on: taken from four days out, with the customer excluded and the technician carried', async () => {
+  test('gate on: taken from four days out, with the technician carried and the night tool\'s statuses', async () => {
     process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
-    findConflictingVisits.mockResolvedValue([{ id: 'x' }]);
+    findConflictingVisits.mockResolvedValue([{ id: 'x', customer_id: 'c2' }]);
     expect(await planTakenHour.takenHourHandoff('conn', { ...row, scheduled_date: day(3) })).toBe(false);
     expect(findConflictingVisits).not.toHaveBeenCalled();
     expect(await planTakenHour.takenHourHandoff('conn', { ...row, scheduled_date: day(4) })).toBe(true);
-    expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({ date: day(4), excludeCustomerId: 'c1', technicianId: 't1' }));
+    const probe = findConflictingVisits.mock.calls[0][0];
+    expect(probe).toMatchObject({ date: day(4), technicianId: 't1' });
+    // No customer is excluded wholesale (Codex #6476 r1 P1); a rescheduled or completed row is no stop (r1 P2).
+    expect(probe.excludeCustomerId).toBeUndefined();
+    expect(probe.excludeStatuses).toEqual(expect.arrayContaining(['cancelled', 'skipped', 'no_show', 'rescheduled', 'completed']));
+  });
+
+  // The same customer is one stop only at the same place: the night tool's
+  // own rule (auto-dispatch/current-conflict.js samePlaceIds), measured from
+  // the plan's stored parent row (Codex #6476 r1 P1).
+  describe('the same customer', () => {
+    // A knex-shaped read of the place rows samePlaceIds asks for.
+    const placeConn = (places) => {
+      const q = { leftJoin: () => q, whereIn: () => q, select: async () => places };
+      return jest.fn(() => q);
+    };
+    const sameCustomerRow = { ...row, recurring_parent_id: 'parent-1', scheduled_date: day(30) };
+    beforeEach(() => { process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true'; });
+
+    test('at the same property: one stop, not taken', async () => {
+      findConflictingVisits.mockResolvedValue([{ id: 'own', customer_id: 'c1' }]);
+      const conn = placeConn([{ id: 'parent-1', property_id: 'prop-a' }, { id: 'own', property_id: 'prop-a' }]);
+      expect(await planTakenHour.takenHourHandoff(conn, sameCustomerRow)).toBe(false);
+    });
+
+    test('at another property: taken', async () => {
+      findConflictingVisits.mockResolvedValue([{ id: 'own', customer_id: 'c1' }]);
+      const conn = placeConn([{ id: 'parent-1', property_id: 'prop-a' }, { id: 'own', property_id: 'prop-b' }]);
+      expect(await planTakenHour.takenHourHandoff(conn, sameCustomerRow)).toBe(true);
+    });
+
+    test('a place that cannot be read, or no parent to measure from: taken', async () => {
+      findConflictingVisits.mockResolvedValue([{ id: 'own', customer_id: 'c1' }]);
+      expect(await planTakenHour.takenHourHandoff(placeConn([]), sameCustomerRow)).toBe(true);
+      expect(await planTakenHour.takenHourHandoff(placeConn([]), { ...sameCustomerRow, recurring_parent_id: null })).toBe(true);
+    });
+
+    test('its own stop beside another customer\'s: taken', async () => {
+      findConflictingVisits.mockResolvedValue([{ id: 'own', customer_id: 'c1' }, { id: 'other', customer_id: 'c2' }]);
+      const conn = placeConn([{ id: 'parent-1', property_id: 'prop-a' }, { id: 'own', property_id: 'prop-a' }]);
+      expect(await planTakenHour.takenHourHandoff(conn, sameCustomerRow)).toBe(true);
+    });
+
+    test('an explicit place wins over the row\'s own parent (the top-up passes its parent)', async () => {
+      findConflictingVisits.mockResolvedValue([{ id: 'own', customer_id: 'c1' }]);
+      const conn = placeConn([{ id: 'parent-2', property_id: 'prop-a' }, { id: 'own', property_id: 'prop-a' }]);
+      expect(await planTakenHour.takenHourHandoff(conn, { ...row, scheduled_date: day(30) }, { placeId: 'parent-2' })).toBe(false);
+    });
   });
 
   test('gate on: a free hour is not taken; a windowless row is never probed', async () => {
@@ -83,7 +135,7 @@ describe('plan-taken-hour', () => {
 
   test('handOffTakenHours keeps the input array and counts the hand-offs', async () => {
     process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
-    findConflictingVisits.mockImplementation(async ({ date }) => (date === day(40) ? [{ id: 'x' }] : []));
+    findConflictingVisits.mockImplementation(async ({ date }) => (date === day(40) ? [{ id: 'x', customer_id: 'c2' }] : []));
     const rows = [{ ...row, scheduled_date: day(20) }, { ...row, scheduled_date: day(40) }];
     const out = await planTakenHour.handOffTakenHours('conn', rows);
     expect(out.handedOff).toBe(1);

@@ -20332,8 +20332,9 @@ function normalizeTopUpWindow(windowStart, durationMinutes, windowEnd) {
 }
 
 // The next-date search of extendSeriesOnceLocked: the cadence walk. Returns
-// { nextStr, hitMaxDate, handOff } for the caller to insert (handOff: the
-// top-up's taken hour, inserted without a time).
+// { nextStr, hitMaxDate, handOff, technicianId } for the caller to insert
+// (handOff: the top-up's taken hour, inserted without a time; technicianId:
+// the technician its probe read for nextStr, when it read one).
 async function walkExtensionCandidates(ctx) {
   const {
     conn, parent, parentId, opts, latestStr, rOpts, skipParent, dirParent,
@@ -20355,6 +20356,9 @@ async function walkExtensionCandidates(ctx) {
   // Set when the top-up lands on a taken hour and hands the visit off
   // without a time (GATE_PLAN_TAKEN_HOUR_HANDOFF, below).
   let handOff = false;
+  // The technician the hand-off probe read for the chosen date; the insert
+  // reuses it, so the probe and the row never disagree (undefined = not read).
+  let technicianId;
   while (attempt <= 12) {
     const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts);
     const candidate = seasonalSafeShift(rawNext, parent.recurring_pattern, skipParent, dirParent, autoExtendBlackoutDates);
@@ -20400,15 +20404,17 @@ async function walkExtensionCandidates(ctx) {
         // D4): another customer's live visit holds the plan's hour, so the
         // visit goes in on the cadence date WITHOUT a time and auto-dispatch
         // places it (scheduling/plan-taken-hour.js), instead of on top of it.
-        // Gate off, too near, or only the customer's own stop: as before.
+        // Gate off, too near, or only the customer's own stop at the same
+        // place: as before.
         // The hand-off probe carries the technician the insert will use on
         // this date (the template tech, or none when that tech cannot take
-        // it: assignableRecurringTemplateTechnicianId), not the parent row's.
-        const handoffRow = planTakenHour.handoffEnabled()
-          ? { ...clashProbeTemplate, technician_id: await assignableRecurringTemplateTechnicianId(conn, parent, candidate) }
-          : null;
-        if (handoffRow && await planTakenHour.takenHourHandoff(conn, handoffRow, { date: candidate })) {
-          handOff = true;
+        // it: assignableRecurringTemplateTechnicianId), read once and reused
+        // by the insert (Codex #6476 r1); the place is the parent's.
+        if (planTakenHour.handoffEnabled()) {
+          technicianId = await assignableRecurringTemplateTechnicianId(conn, parent, candidate);
+          handOff = await planTakenHour.takenHourHandoff(conn, { ...clashProbeTemplate, technician_id: technicianId }, { date: candidate, placeId: parentId });
+        }
+        if (handOff) {
           logger.info(`[recurring-topup] parent=${parentId} candidate ${candidate}: the plan's hour is taken — inserting without a time for auto-dispatch to place`);
         } else {
           logger.warn(`[recurring-topup] parent=${parentId} candidate ${candidate} overlaps an existing visit on the calendar — inserting anyway (advisory only, same posture every other admin write already takes)`);
@@ -20420,7 +20426,7 @@ async function walkExtensionCandidates(ctx) {
     nextStr = candidate;
     break;
   }
-  return { nextStr, hitMaxDate, handOff };
+  return { nextStr, hitMaxDate, handOff, technicianId };
 }
 
 // Returns the spawned-visit payload (for the caller's post-commit reminder
@@ -20493,7 +20499,7 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
     // (booster double-book rationale on the helper).
     const existingDates = await loadActiveSeriesDates(conn, parentId);
     const autoExtendBlackoutDates = await loadSeriesBlackoutDates(conn, latestStr);
-    const { nextStr, hitMaxDate, handOff } = await walkExtensionCandidates({
+    const { nextStr, hitMaxDate, handOff, technicianId } = await walkExtensionCandidates({
       conn, parent, parentId, opts, latestStr, rOpts, skipParent, dirParent,
       blackoutDates: autoExtendBlackoutDates, existingDates, clashProbeTemplate,
     });
@@ -20526,7 +20532,7 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       const childIdentity = await resolveSeriesChildIdentity(conn, parent);
       const nextData = {
         customer_id: parent.customer_id,
-        technician_id: await assignableRecurringTemplateTechnicianId(conn, parent, nextStr),
+        technician_id: technicianId !== undefined ? technicianId : await assignableRecurringTemplateTechnicianId(conn, parent, nextStr),
         scheduled_date: nextStr,
         window_start: nextWindowStart, window_end: nextWindowEnd,
         service_type: childIdentity.service_type, status: 'pending',

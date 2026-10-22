@@ -19,13 +19,18 @@
  * three days of that date (gap-candidates.js) and its due-date notice tells a
  * person if it cannot (auto-dispatch/audit.js flagUnplacedVisits).
  *
- * "Taken" is the shared plan-writer probe (window-rules.js
- * seriesCandidateDateClashRows): tech-blind until the schedule is
- * technician-scoped, the same rule the night tool's own double-booking read
- * uses, minus the visit's own customer (two services of one customer in one
- * hour are one stop). Probe-only, no lock, like every plan-writer probe; a
- * same-instant booking can still overlap, and the night tool's conflict read
- * catches that one.
+ * "Taken" is the night tool's own double-booking rule
+ * (auto-dispatch/current-conflict.js), read through the shared plan-writer
+ * probe (window-rules.js seriesCandidateDateClashRows): a live stop in the
+ * hour — tech-blind until the schedule is technician-scoped, with the
+ * writer's own statuses (rebooker.js probeMoveConflicts: no cancelled,
+ * skipped, no-show or rescheduled row, nor a completed one). The same
+ * customer at the same place is one stop with the new visit, not a conflict
+ * (samePlaceIds, measured from the plan's stored parent row); the same
+ * customer at another property, or at a place that cannot be read, is a
+ * conflict (Codex #6476 r1). Probe-only, no lock, like every plan-writer
+ * probe; a same-instant booking can still overlap, and the night tool's
+ * conflict read catches that one.
  *
  * Only from HANDOFF_MIN_DAYS_OUT days ahead: the night tool never moves a
  * visit inside its 73-hour freeze, so a nearer visit keeps its hour and the
@@ -36,9 +41,13 @@ const { gateEnvValue } = require('../../config/feature-gates');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { toDateStr } = require('../auto-dispatch/dates');
 const { seriesCandidateDateClashRows } = require('./window-rules');
+const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 
 const GATE = 'GATE_PLAN_TAKEN_HOUR_HANDOFF';
 const HANDOFF_MIN_DAYS_OUT = 4;
+// The rows that are no stop in the hour: the night tool's own
+// (rebooker.js probeMoveConflicts).
+const TAKEN_EXCLUDE_STATUSES = [...NOT_A_ROUTE_STOP_STATUSES, 'completed'];
 
 function handoffEnabled() {
   return !!gateEnvValue(GATE);
@@ -65,18 +74,24 @@ function handoffFields(date) {
 }
 
 // Whether `row` (a new plan visit: customer, technician, date, window) would
-// land on an hour another customer's live visit holds, and is far enough out
-// for the night tool to place it. False with the gate off, without a window,
-// or inside HANDOFF_MIN_DAYS_OUT — nothing is read then.
-async function takenHourHandoff(conn, row, { date = row?.scheduled_date, now = new Date() } = {}) {
+// land on an hour another stop holds, and is far enough out for the night
+// tool to place it. `placeId` is the stored row whose place the new visit
+// shares (its plan's parent; a follow-up row names it as
+// recurring_parent_id). False with the gate off, without a window, or inside
+// HANDOFF_MIN_DAYS_OUT — nothing is read then.
+async function takenHourHandoff(conn, row, { date = row?.scheduled_date, now = new Date(), placeId = row?.recurring_parent_id || null } = {}) {
   if (!handoffEnabled() || !row || !row.window_start) return false;
   const day = toDateStr(date);
   if (!day || day < firstHandoffDate(now)) return false;
   const clash = await seriesCandidateDateClashRows(conn, row, day, {
-    excludeCustomerId: row.customer_id || null,
     technicianId: row.technician_id || null,
+    excludeStatuses: TAKEN_EXCLUDE_STATUSES,
   });
-  return clash.length > 0;
+  if (!clash.length) return false;
+  const samePlace = placeId && row.customer_id
+    ? await require('../auto-dispatch/current-conflict').samePlaceIds(conn, { id: placeId, customer_id: row.customer_id }, clash)
+    : new Set();
+  return clash.some((r) => !samePlace.has(String(r.id)));
 }
 
 // The seeder's batch: each row whose hour is taken comes back handed off.
@@ -97,5 +112,5 @@ async function handOffTakenHours(conn, rows, { now = new Date() } = {}) {
 }
 
 module.exports = {
-  GATE, HANDOFF_MIN_DAYS_OUT, handoffEnabled, firstHandoffDate, handoffFields, takenHourHandoff, handOffTakenHours,
+  GATE, HANDOFF_MIN_DAYS_OUT, TAKEN_EXCLUDE_STATUSES, handoffEnabled, firstHandoffDate, handoffFields, takenHourHandoff, handOffTakenHours,
 };

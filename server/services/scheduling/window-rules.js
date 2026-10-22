@@ -187,7 +187,9 @@ function occupancyBlockFor(row) {
 //   excludeCustomerId  the template customer's own rows are one stop with it;
 //   technicianId       scopes the probe once the schedule is technician-
 //                      scoped (occupancy.js techScopedConfirmActive).
-async function seriesCandidateDateClashRows(conn, template, date, { excludeCustomerId = null, technicianId = null } = {}) {
+async function seriesCandidateDateClashRows(conn, template, date, {
+  excludeCustomerId = null, technicianId = null, excludeStatuses = ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+} = {}) {
   const block = occupancyBlockFor(template);
   if (!block) return [];
   return findConflictingVisits({
@@ -195,7 +197,7 @@ async function seriesCandidateDateClashRows(conn, template, date, { excludeCusto
     date,
     windowStart: block.start,
     windowEnd: block.end,
-    excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+    excludeStatuses,
     ...(excludeCustomerId ? { excludeCustomerId } : {}),
     ...(technicianId ? { technicianId } : {}),
   });

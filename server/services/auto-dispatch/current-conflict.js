@@ -149,4 +149,5 @@ async function currentConflict(service, ctx, excludeIds) {
   return ids.length ? { kind: 'overlap', date: dateStr, with: ids } : null;
 }
 
-module.exports = { currentConflict, _internals: { isOtherStop, samePlace, samePlaceIds, overlappingStopIds } };
+// samePlaceIds is also the plan writers' same-stop rule (scheduling/plan-taken-hour.js).
+module.exports = { currentConflict, samePlaceIds, _internals: { isOtherStop, samePlace, samePlaceIds, overlappingStopIds } };

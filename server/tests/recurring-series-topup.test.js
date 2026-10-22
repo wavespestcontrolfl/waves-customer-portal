@@ -228,7 +228,7 @@ function topupScenario({
   parentOverrides = {}, customerOverrides = {}, seriesDates: initialDates = [daysOut(0)],
   colsOverrides = {}, stampedAnnualTermId = false, stampedPrepaidMethod = null,
   customerCoveredTerm = false, customerPendingUnresolvedTerm = false,
-  captureCustomerCalls = null, activeHold = false, addons = [],
+  captureCustomerCalls = null, activeHold = false, addons = [], otherTable = null,
 } = {}) {
   // isCustomerPrepayLive's two customer-wide probes (Codex GitHub r7 P1):
   // (a) coveredTermsAsOf(conn, null) — a still-validly-paid term (active/
@@ -368,6 +368,11 @@ function topupScenario({
     }
     if (table === 'system_settings') return null;
     if (table === 'schedule_blackout_dates') return [];
+    // A table the scenario does not model, answered by the test (undefined = not handled).
+    if (otherTable) {
+      const answer = otherTable({ table, op, calls });
+      if (answer !== undefined) return answer;
+    }
     return null;
   };
   return { conn: makeConn(handler), inserted, parent, customer, seriesDates };
@@ -1377,7 +1382,8 @@ describe('topUpRecurringSeriesLocked — a taken hour hands the visit off withou
     for (const row of rest) expect(row.window_start).toBe('09:00');
     // Its reminder registers as the windowless placeholder, never the plan's hour.
     expect(result.spawnedVisits[0].windowStart).toBeNull();
-    expect(findConflictingVisits.mock.calls[1][0]).toMatchObject({ excludeCustomerId: 5, windowStart: '09:00', windowEnd: '10:00' });
+    expect(findConflictingVisits.mock.calls[1][0]).toMatchObject({ windowStart: '09:00', windowEnd: '10:00' });
+    expect(findConflictingVisits.mock.calls[1][0].excludeCustomerId).toBeUndefined();
   });
 
   test('gate on: the hand-off probe carries the technician the insert uses, not the parent row\'s', async () => {
@@ -1391,20 +1397,61 @@ describe('topUpRecurringSeriesLocked — a taken hour hands the visit off withou
     const scenario = topupScenario({ ...fixtureArgs, parentOverrides: { ...fixtureArgs.parentOverrides, technician_id: 'tech-gone' } });
     await topUpRecurringSeriesLocked(scenario.conn, 10, { horizonDays: 14 });
     expect(scenario.inserted[0].technician_id).toBeNull();
-    expect(findConflictingVisits.mock.calls[1][0]).toMatchObject({ excludeCustomerId: 5 });
     expect(findConflictingVisits.mock.calls[1][0].technicianId).toBeUndefined();
   });
 
-  test("gate on, only the customer's own stop in the hour: inserted with its time, as before", async () => {
+  test('gate on: the insert reuses the technician the hand-off probe read (one lookup, Codex #6476 r1)', async () => {
     process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
     findConflictingVisits.mockReset()
-      .mockResolvedValueOnce([{ id: 'own-stop', customer_id: 5 }])
+      .mockResolvedValueOnce([{ id: 'occupied-1', customer_id: 77 }])
       .mockResolvedValueOnce([])
       .mockResolvedValue([]);
-    const own = topupScenario(fixtureArgs);
-    await topUpRecurringSeriesLocked(own.conn, 10, { horizonDays: 14 });
-    expect(own.inserted[0].window_start).toBe('09:00');
-    expect(own.inserted[0].recurring_dispatch_due_date).toBeUndefined();
+    // The technician is free at the probe; an absence lands right after it.
+    let absenceReads = 0;
+    const otherTable = ({ table, op }) => {
+      if (table === 'technicians' && op === 'first') return { id: 'tech-1', employment_status: 'active', field_dispatchable: true };
+      if (table === 'technician_absences' && op === 'first') { absenceReads += 1; return absenceReads === 1 ? undefined : { id: 'absence-1' }; }
+      return undefined;
+    };
+    const scenario = topupScenario({ ...fixtureArgs, parentOverrides: { ...fixtureArgs.parentOverrides, technician_id: 'tech-1' }, otherTable });
+    await topUpRecurringSeriesLocked(scenario.conn, 10, { horizonDays: 14 });
+    expect(findConflictingVisits.mock.calls[1][0]).toMatchObject({ windowStart: '09:00' });
+    // The probed date keeps the technician its probe read; a second lookup
+    // would have seen the absence and inserted it unassigned. The next date
+    // is read on its own (no clash, no probe) and sees the absence.
+    expect(scenario.inserted[0]).toMatchObject({ technician_id: 'tech-1', window_start: '09:00' });
+    expect(scenario.inserted.length).toBeGreaterThan(1);
+    expect(scenario.inserted[1].technician_id).toBeNull();
+    expect(absenceReads).toBe(scenario.inserted.length);
+  });
+
+  describe("gate on, the customer's own stop in the hour", () => {
+    const currentConflict = require('../services/auto-dispatch/current-conflict');
+    let samePlaceSpy;
+    beforeEach(() => {
+      process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+      findConflictingVisits.mockReset()
+        .mockResolvedValueOnce([{ id: 'own-stop', customer_id: 5 }])
+        .mockResolvedValueOnce([{ id: 'own-stop', customer_id: 5 }])
+        .mockResolvedValue([]);
+    });
+    afterEach(() => samePlaceSpy.mockRestore());
+
+    test('at the same place (measured from the parent): one stop, inserted with its time, as before', async () => {
+      samePlaceSpy = jest.spyOn(currentConflict, 'samePlaceIds').mockResolvedValue(new Set(['own-stop']));
+      const own = topupScenario(fixtureArgs);
+      await topUpRecurringSeriesLocked(own.conn, 10, { horizonDays: 14 });
+      expect(samePlaceSpy).toHaveBeenCalledWith(expect.anything(), { id: 10, customer_id: 5 }, [{ id: 'own-stop', customer_id: 5 }]);
+      expect(own.inserted[0].window_start).toBe('09:00');
+      expect(own.inserted[0].recurring_dispatch_due_date).toBeUndefined();
+    });
+
+    test('at another place: taken, handed off (Codex #6476 r1 P1)', async () => {
+      samePlaceSpy = jest.spyOn(currentConflict, 'samePlaceIds').mockResolvedValue(new Set());
+      const other = topupScenario(fixtureArgs);
+      await topUpRecurringSeriesLocked(other.conn, 10, { horizonDays: 14 });
+      expect(other.inserted[0]).toMatchObject({ window_start: null, recurring_dispatch_due_date: other.inserted[0].scheduled_date });
+    });
   });
 
   test('gate off: a clash inserts with the time and makes no second probe (unchanged)', async () => {
