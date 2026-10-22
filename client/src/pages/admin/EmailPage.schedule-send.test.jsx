@@ -549,13 +549,14 @@ describe("Email schedule send", () => {
     expect(posts("/queued-1/restored")).toHaveLength(1);
   });
 
-  it("sign-out removes the schedule-send state with the drafts", () => {
+  it("sign-out keeps the restore key, so a cancel whose answer was lost can still be taken back", () => {
     sessionStorage.setItem("waves_email_restored_pending:fixture-schedule-owner", "[\"queued-1\"]");
     sessionStorage.setItem("waves_email_restore_keys:fixture-schedule-owner", "{}");
     sessionStorage.setItem("waves_email_schedule_uncertain:fixture-schedule-owner", "{}");
     sessionStorage.setItem("unrelated_fixture_key", "kept");
     clearEmailDrafts();
-    expect(Object.keys(sessionStorage)).toEqual(["unrelated_fixture_key"]);
+    // Restore keys stay: a claimed cancel can still come back after sign-in.
+    expect(Object.keys(sessionStorage).sort()).toEqual(["unrelated_fixture_key", "waves_email_restore_keys:fixture-schedule-owner"]);
   });
 
   it("with Gmail disconnected, scheduled emails stay listed and can be cancelled", async () => {
