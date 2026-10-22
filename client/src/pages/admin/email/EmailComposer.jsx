@@ -16,6 +16,7 @@ import { appendStaticLinkClause } from "../../../lib/composerLinks";
 
 import EmailSendOutcome from "./EmailSendOutcome";
 import ScheduleSendMenu from "./ScheduleSendMenu";
+import ScheduleUnconfirmed from "./ScheduleUnconfirmed";
 
 export default function EmailComposer({ active, editor, onSent }) {
   const {
@@ -40,8 +41,11 @@ export default function EmailComposer({ active, editor, onSent }) {
   const toFieldRef = useRef(null);
   // Sending or scheduling: the draft must not change under the request.
   const composeBusy = composeSending || editor.scheduling === "compose";
-  const sendDisabled =
+  const scheduleDisabled =
     composeBusy || Boolean(editor.sendAttempts.compose) || !composeForm.to.trim() || !composeForm.body.trim();
+  // An unconfirmed schedule request blocks plain Send only; scheduling the
+  // same email again reuses its key, so the server keeps one row.
+  const sendDisabled = scheduleDisabled || editor.scheduleUnconfirmed();
 
   // Debounced customer lookup for the "To" field. Searches by name or
   // partial email via the customers list endpoint and keeps only matches
@@ -139,6 +143,7 @@ export default function EmailComposer({ active, editor, onSent }) {
           {!composeSending && <EmailSendOutcome attempt={editor.sendAttempts.compose} onResolve={outcome => editor.reconcileSend("compose", outcome)} />}
           {editor.sendFeedback.compose && <ActionFeedback error={editor.sendFeedback.compose.error}>{editor.sendFeedback.compose.message}</ActionFeedback>}
           <ActionFeedback error={storageError}>{recoveryNotice}</ActionFeedback>
+          <ScheduleUnconfirmed editor={editor} />
           <EmailQuickLinks active={visible} recipient={composeForm.to} disabled={composeSending}
             onInsert={(link) => setComposeForm((form) => ({ ...form, subject: form.subject.trim() || !link.subject ? form.subject : link.subject, body: appendStaticLinkClause(form.body, link) }))} />
         </div>
@@ -149,7 +154,7 @@ export default function EmailComposer({ active, editor, onSent }) {
           }}>Discard draft</Button>
           <div className="flex gap-px">
             <Button onClick={() => handleComposeSend(onSent)} loading={composeBusy} disabled={sendDisabled}>Send</Button>
-            {editor.scheduleEnabled && <ScheduleSendMenu disabled={sendDisabled}
+            {editor.scheduleEnabled && <ScheduleSendMenu disabled={scheduleDisabled}
               onSchedule={(sendAt) => editor.handleComposeSchedule(sendAt, editor.onScheduled)} />}
           </div>
         </div>

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   loadEmailDrafts,
   setEmailSending,
@@ -81,25 +81,41 @@ export default function useEmailEditor(userId) {
   const [drafting, setDrafting] = useState(false);
   const [draftResult, setDraftResult] = useState(null);
   const [sendFeedback, setSendFeedback] = useState({});
-  const [scheduling, setScheduling] = useState(null);
-  // Per draft slot, the key of a schedule request whose answer never came:
-  // the same email at the same time reuses it, so the server keeps one row.
-  // Kept in this tab's sessionStorage, like the drafts, so a reload keeps it.
-  const uncertainSchedule = useRef(null);
-  if (uncertainSchedule.current === null) uncertainSchedule.current = readUncertainSchedules(userId);
+  // Schedule state lives on the shared draft session, not in this hook, so
+  // leaving Communications and coming back keeps it. `uncertain` holds, per
+  // draft slot, the key of a schedule request with no definite answer yet
+  // (saved before the request, so in flight counts too): the same email at
+  // the same time reuses it, and plain Send waits until the operator checked
+  // the Scheduled list. It is in this tab's sessionStorage, so a reload keeps it.
+  if (!draftSession.schedule) draftSession.schedule = { scheduling: null, uncertain: readUncertainSchedules(userId) };
+  const shared = draftSession.schedule;
+  const notifyDrafts = () => draftSession.listeners.forEach((notify) => notify());
+  const { scheduling } = shared;
+  const setScheduling = (kind) => { shared.scheduling = kind; notifyDrafts(); };
+  const uncertainSchedule = { current: shared.uncertain };
   // Returns false when the tab could not save it. A key that cannot survive
   // a reload cannot stop a second row, so the caller must not send.
   const rememberUncertain = (slot, entry) => {
     const before = uncertainSchedule.current[slot];
     if (entry) uncertainSchedule.current[slot] = entry;
     else delete uncertainSchedule.current[slot];
+    let saved = true;
     try {
       sessionStorage.setItem(uncertainKey(userId), JSON.stringify(uncertainSchedule.current));
-      return true;
     } catch {
       if (entry) uncertainSchedule.current[slot] = before;
-      return false;
+      saved = false;
     }
+    notifyDrafts();
+    return saved;
+  };
+  const slotOf = (replyId) => (replyId ? `reply:${replyId}` : "compose");
+  // A schedule request for this draft slot has no definite answer: plain Send
+  // could deliver a copy now while the queued one still sends later.
+  const scheduleUnconfirmed = (replyId = null) => Boolean(uncertainSchedule.current[slotOf(replyId)]);
+  // The operator looked under Scheduled and the email is not there.
+  const confirmScheduleChecked = (replyId = null) => {
+    if (!scheduling) rememberUncertain(slotOf(replyId), null);
   };
   const setShowCompose = (visible) => {
     if (visible) setSendFeedback((current) => ({ ...current, compose: null }));
@@ -191,7 +207,7 @@ export default function useEmailEditor(userId) {
 
   const handleReply = async (email, onSent) => {
     const text = drafts.replies[email?.id] || "";
-    if (!email || !text.trim()) return;
+    if (!email || !text.trim() || scheduleUnconfirmed(email.id)) return;
     const revision = draftSession.replyRevisions[email.id] || 0;
     await sendEmail(
       "reply",
@@ -225,7 +241,7 @@ export default function useEmailEditor(userId) {
   };
 
   const handleComposeSend = async (onSent) => {
-    if (!composeForm.to.trim() || !composeForm.body.trim()) return;
+    if (!composeForm.to.trim() || !composeForm.body.trim() || scheduleUnconfirmed()) return;
     await sendEmail(
       "compose",
       {
@@ -257,7 +273,7 @@ export default function useEmailEditor(userId) {
     if (scheduling || draftSession.sending[kind]) return;
     setScheduling(kind);
     setSendFeedback((current) => ({ ...current, [kind]: null }));
-    const slot = replyId ? `reply:${replyId}` : "compose";
+    const slot = slotOf(replyId);
     // Only a fingerprint is kept (sessionStorage must never hold the email).
     const request = fingerprint(JSON.stringify({ ...payload, sendAt }));
     const prior = uncertainSchedule.current[slot];
@@ -420,6 +436,8 @@ export default function useEmailEditor(userId) {
     handleComposeSend,
     handleAiDraft,
     scheduling,
+    scheduleUnconfirmed,
+    confirmScheduleChecked,
     handleComposeSchedule,
     handleReplySchedule,
     restoreScheduledDraft,

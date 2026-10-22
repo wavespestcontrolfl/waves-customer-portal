@@ -143,6 +143,41 @@ describe("Email schedule send", () => {
     expect(new Set(keys).size).toBe(1);
   });
 
+  it("after a lost answer, plain Send waits until the operator checked Scheduled", async () => {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/email/schedule")
+      ? Promise.reject(new TypeError("network")) : base(input, options)));
+    mount();
+    await writeEmail();
+    fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Tomorrow morning/ }));
+    expect(await screen.findByText(/A schedule request for this email was not confirmed/)).toBeInTheDocument();
+    const send = () => screen.getAllByRole("button", { name: "Send", exact: true }).at(-1);
+    expect(send()).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "I checked: it is not there" }));
+    await waitFor(() => expect(send()).not.toBeDisabled());
+    expect(screen.queryByText(/A schedule request for this email was not confirmed/)).not.toBeInTheDocument();
+  });
+
+  it("leaving the page while a schedule request runs keeps plain Send blocked on return", async () => {
+    let finish;
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/email/schedule")
+      ? new Promise((resolve) => { finish = () => resolve(base(input, options)); }) : base(input, options)));
+    const view = mount();
+    await writeEmail();
+    fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Tomorrow morning/ }));
+    await waitFor(() => expect(finish).toBeTypeOf("function"));
+    view.unmount();
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Resume draft" }));
+    const send = () => screen.getAllByRole("button", { name: "Send", exact: true }).at(-1);
+    expect(send()).toBeDisabled();
+    finish();
+    await waitFor(() => expect(posts("/email/schedule")).toHaveLength(1));
+  });
+
   it("drops the key after a refusal the schedule route made past its key lookup", async () => {
     let calls = 0;
     const base = fetch.getMockImplementation();
