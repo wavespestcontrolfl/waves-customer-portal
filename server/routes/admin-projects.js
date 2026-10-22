@@ -119,11 +119,11 @@ const PHOTO_PREFIX = 'project-photos/';
 const LEGAL_DOC_DATE_TYPES = new Set(['wdo_inspection', 'pre_treatment_termite_certificate']);
 
 // The pre-treat certificate's final-exterior fields are free text that the
-// customer notice prints (GATE_PRETREAT_STICKER_REPORT). Run the customer
-// copy screen on them at write time: a claim ("pet-safe", "EPA-approved") or
-// an access code is refused, not stored. reports-public applies the same
-// screen at egress for rows written before this guard.
-const FINAL_EXTERIOR_TEXT_KEYS = ['final_exterior_product', 'final_exterior_active_ingredient', 'final_exterior_applicator_name'];
+// customer notice prints (GATE_PRETREAT_STICKER_REPORT). The shared copy
+// screen runs here at write time: a claim ("pet-safe", "EPA-approved") or an
+// access code is refused, not stored. reports-public blanks the same keys at
+// egress, and the detail payload names them for the staff preview.
+const { failingFinalExteriorKeys } = require('../services/final-exterior-screen');
 // The final exterior date is a completed treatment on a legal document:
 // blank, or a real YYYY-MM-DD no later than today (ET), like project_date,
 // and never before the initial treatment (same day allowed).
@@ -149,15 +149,12 @@ function finalExteriorRejection(projectType, rawFindings, projectDate) {
       code: 'final_exterior_date_invalid', field: 'final_exterior_date',
     };
   }
-  const { customerCopyViolations, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
-  for (const key of FINAL_EXTERIOR_TEXT_KEYS) {
-    const value = String(findings[key] ?? '').trim();
-    if (value && (customerCopyViolations(value).length || containsReportAccessCode(value))) {
-      return {
-        error: 'The final exterior treatment fields print on the customer notice — remove the claim or code and save again.',
-        code: 'final_exterior_copy', field: key,
-      };
-    }
+  const [failingKey] = failingFinalExteriorKeys(findings);
+  if (failingKey) {
+    return {
+      error: 'The final exterior treatment fields print on the customer notice — remove the claim or code and save again.',
+      code: 'final_exterior_copy', field: failingKey,
+    };
   }
   return null;
 }
@@ -1625,6 +1622,11 @@ router.get('/:id', async (req, res, next) => {
         // does when GATE_PRETREAT_STICKER_REPORT is on (preview == public).
         pretreat_sticker_report: project.project_type === 'pre_treatment_termite_certificate'
           && isEnabled('pretreatStickerReport'),
+        // Stored final-exterior keys the public page blanks (shared screen),
+        // so the preview blanks them too.
+        final_exterior_screened_keys: project.project_type === 'pre_treatment_termite_certificate'
+          ? failingFinalExteriorKeys(project.findings)
+          : [],
         property_profile: propertyProfile,
         wdo_history: wdoHistory,
         wdo_applicator: wdoApplicator,

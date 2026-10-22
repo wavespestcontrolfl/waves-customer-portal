@@ -887,7 +887,26 @@ function isStickerCertificate(project) {
   return project.project_type === CERTIFICATE_TYPE && Boolean(project.pretreat_sticker_report);
 }
 
-function StickerCertificatePreview({ project, findings, projectDate }) {
+// The public page blanks a stored final-exterior value the copy screen
+// fails (detail payload's final_exterior_screened_keys); the preview blanks
+// the same keys while the editor still holds that stored value. A new value
+// typed here cannot be saved with a banned claim (the write guard 422s).
+export function screenedPreviewFindings(project, findings) {
+  const keys = Array.isArray(project.final_exterior_screened_keys) ? project.final_exterior_screened_keys : [];
+  if (!keys.length) return findings;
+  let stored = project.findings;
+  if (typeof stored === "string") {
+    try { stored = JSON.parse(stored); } catch { stored = {}; }
+  }
+  const out = { ...(findings || {}) };
+  for (const key of keys) {
+    if (out[key] === stored?.[key]) out[key] = "";
+  }
+  return out;
+}
+
+function StickerCertificatePreview({ project, findings: rawFindings, projectDate }) {
+  const findings = screenedPreviewFindings(project, rawFindings);
   const technicianName = project.applicator_name || project.tech_name;
   const projectDateLabel = projectDate ? fmtDate(projectDate) : "";
   return (

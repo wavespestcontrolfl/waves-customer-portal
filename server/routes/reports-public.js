@@ -1097,7 +1097,7 @@ router.get('/project/:token/data', async (req, res, next) => {
       projectDate: viewerProjectDate,
       sentAt: project.sent_at,
       findings: project.project_type === 'pre_treatment_termite_certificate'
-        ? screenFinalExteriorFindings(viewerFindings)
+        ? require('../services/final-exterior-screen').screenFinalExteriorFindings(viewerFindings)
         : viewerFindings,
       pretreatStickerReport: project.project_type === 'pre_treatment_termite_certificate'
         && require('../config/feature-gates').isEnabled('pretreatStickerReport'),
@@ -1126,23 +1126,6 @@ router.get('/project/:token/data', async (req, res, next) => {
     });
   } catch (err) { next(err); }
 });
-
-// Egress twin of admin-projects' write-time screen: a pre-treat
-// certificate's free-text final-exterior fields print on the customer
-// notice, so a value carrying a banned claim or an access code (a row
-// saved before the write guard) is blanked, never served.
-function screenFinalExteriorFindings(findings) {
-  let parsed = findings;
-  if (typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch { return findings; } }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return findings;
-  const { customerCopyViolations, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
-  const out = { ...parsed };
-  for (const key of ['final_exterior_product', 'final_exterior_active_ingredient', 'final_exterior_applicator_name']) {
-    const value = String(out[key] ?? '').trim();
-    if (value && (customerCopyViolations(value).length || containsReportAccessCode(value))) out[key] = '';
-  }
-  return out;
-}
 
 // GET /api/reports/project/:token/fdacs-pdf — the filled, signed FDACS-13645
 // PDF for a WDO report, so the public report page can show the official form
