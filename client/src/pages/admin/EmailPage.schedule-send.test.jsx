@@ -265,6 +265,19 @@ describe("Email schedule send", () => {
     expect(screen.queryByText(/^Scheduled for /)).not.toBeInTheDocument();
   });
 
+  it("a retry that returns an email that may have gone out keeps plain Send blocked", async () => {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/email/schedule")
+      ? response({ success: true, scheduled: { id: "old", status: "outcome_unknown" } }) : base(input, options)));
+    mount();
+    await writeEmail();
+    fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Tomorrow morning/ }));
+    expect((await screen.findAllByText(/This email may have gone out/)).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("button", { name: "Send", exact: true }).at(-1)).toBeDisabled();
+    expect(screen.getByRole("button", { name: "I checked: it is in neither" })).toBeInTheDocument();
+  });
+
   it("a retry that returns an email already sent says it went out, not Scheduled", async () => {
     const base = fetch.getMockImplementation();
     fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/email/schedule")

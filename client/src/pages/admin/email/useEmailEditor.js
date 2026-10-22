@@ -36,6 +36,13 @@ function keyLookedUp(result) {
   return result.keyChecked === true;
 }
 
+// A retried key can return a row the sender already settled: nothing is
+// queued, so the draft stays and the outcome shows.
+const SETTLED_MESSAGES = {
+  failed: "Gmail refused this email. Your draft is still here.",
+  outcome_unknown: "This email may have gone out. Look in the Gmail Sent folder before you send it again.",
+};
+
 // The answer to a schedule request that queued (or had already sent) the
 // email. `cleared` is false when edits made while the request ran are still
 // in the draft: those were not scheduled.
@@ -307,15 +314,16 @@ export default function useEmailEditor(userId) {
         setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: result.error || "The email was not scheduled. Your draft is still here." } }));
         return;
       }
-      rememberUncertain(slot, null);
-      // A retried key can return a row the sender already settled: nothing
-      // is queued, so the draft stays and the outcome shows.
-      const settled = { failed: "Gmail refused this email. Your draft is still here.", outcome_unknown: "This email may have gone out. Look in the Gmail Sent folder before you send it again." }[result.scheduled?.status];
+      const status = result.scheduled?.status;
+      // A row that may have gone out keeps the key, so plain Send waits for
+      // the operator's check of Sent; every other answer is definite.
+      if (status !== "outcome_unknown") rememberUncertain(slot, null);
+      const settled = SETTLED_MESSAGES[status];
       if (settled) {
         setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: settled } }));
         return;
       }
-      const message = queuedMessage(result.scheduled?.status, sendAt, clearQueued());
+      const message = queuedMessage(status, sendAt, clearQueued());
       setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, message } }));
     } catch (err) {
       if (err?.notStarted) {
