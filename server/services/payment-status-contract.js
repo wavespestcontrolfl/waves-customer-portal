@@ -666,25 +666,35 @@ function remainderHasMoney(remainder) {
 // dropped) is allowed ONLY with inert text around it (a greeting, thanks, a sign-off) and verbatim status copies: anything else
 // could apply the rule to this customer ("That includes your cancellation."), so that reply is judged as if no policy was copied.
 // A paraphrase is never removed, so it is still held.
+// Each policy sentence answers one kind of question (Codex #6447 r10): a Paying sentence only a how-to-pay question, a refund
+// sentence only a refund / cancel question. With no customer message, or one that asks something else ("Did my payment go
+// through?"), nothing is removed and the detectors judge the whole reply.
+const PAYING_QUESTION_RE = /\b(?:how\s+(?:do|can|should|would)\s+(?:i|we)\s+pay|ways?\s+to\s+pay|pay(?:ment)?\s+(?:options?|methods?)|pay\s+(?:the\s+|your\s+)?(?:tech|technician)|(?:pay|paying)\s+(?:with|by|in)\s+(?:cash|checks?|cheques?|cards?|credit|debit)|(?:take|takes|accept|accepts)\s+(?:cash|checks?|cheques?|cards?|credit|debit)|(?:send|mail)\s+(?:you\s+)?(?:a\s+)?(?:check|cheque|payment))\b/i;
+const REFUND_QUESTION_RE = /\b(?:refund\w*|cancel\w*|prepa(?:y|id|ying))\b/i;
 let companyPolicySentenceCache = null;
 function companyPolicySentences() {
   if (!companyPolicySentenceCache) {
-    const out = new Set();
+    const out = new Map();
     for (const fact of require('./sms-company-facts').moneyPolicyFacts()) {
+      const question = fact.startsWith('Paying:') ? PAYING_QUESTION_RE : REFUND_QUESTION_RE;
       for (const sentence of fact.split(/(?<=[.!?])\s+/)) {
         if (MONEY_FIGURE_RE.test(sentence) || ZELLE_WORD_RE.test(sentence)) continue;
-        out.add(sentence);
+        out.set(sentence, question);
         const text = /^[A-Z][^:.]{0,40}:\s+(.+)$/.exec(sentence);
-        if (text) out.add(text[1]);
+        if (text) out.set(text[1], question);
       }
     }
-    companyPolicySentenceCache = [...out].sort((a, b) => b.length - a.length);
+    companyPolicySentenceCache = [...out].sort((a, b) => b[0].length - a[0].length);
   }
   return companyPolicySentenceCache;
 }
-// `remainder` (copies already removed) with its policy copies removed too, when what is left is inert; else unchanged.
-function withoutCompanyPolicyCopies(remainder) {
-  const stripped = withoutCopies(remainder, companyPolicySentences());
+// `remainder` (copies already removed) with the policy copies that answer `inboundText` removed too, when what is left is inert;
+// else unchanged.
+function withoutCompanyPolicyCopies(remainder, inboundText = null) {
+  const inbound = String(inboundText ?? '');
+  const answering = inbound ? companyPolicySentences().filter(([, question]) => question.test(inbound)).map(([text]) => text) : [];
+  if (!answering.length) return remainder;
+  const stripped = withoutCopies(remainder, answering);
   return stripped !== canonText(remainder) && remainderIsInert(stripped) ? stripped : remainder;
 }
 
@@ -693,7 +703,7 @@ function checkPaymentStatusReply({ reply, sentences, inboundText = null, scopeTe
   const text = String(reply ?? '');
   if (text.length > MAX_REPLY_CHARS) return { ok: false, copied: [], remainder: canonText(text) };
   const copied = copiedSentences(text, texts);
-  const remainder = withoutCompanyPolicyCopies(withoutCopies(text, copied));
+  const remainder = withoutCompanyPolicyCopies(withoutCopies(text, copied), inboundText);
   const ok = !copiesOffTarget(copied, inboundText) && !remainderHasMoney(remainder) && !assertsPaymentStatus(remainder, { inboundText, scopeTexts, scoped });
   return { ok, copied, remainder };
 }
@@ -743,7 +753,7 @@ function autoSendScopeBlock({ reply, inboundText = null, snapshot = null }) {
   if (!scoped) return null;
   const copied = copiedSentences(reply, sentences);
   if (copiesAmbiguousFamily(copied, snapshot) || copiesAnswerNamedSpecifics(copied, inboundText)) return 'payment_status_ambiguous';
-  return remainderIsInert(withoutCompanyPolicyCopies(withoutCopies(reply, copied))) ? null : 'payment_status_not_auto_sendable';
+  return remainderIsInert(withoutCompanyPolicyCopies(withoutCopies(reply, copied), inboundText)) ? null : 'payment_status_not_auto_sendable';
 }
 // HOLD WHEN AMBIGUOUS (owner 2026-10-02, after round 66): code does not guess which record the customer means. A copied receipt or invoice
 // status line auto-sends only when the draft rendered exactly ONE line of that family; with 2+ candidates (or a snapshot that never

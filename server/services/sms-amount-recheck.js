@@ -207,7 +207,7 @@ async function paymentStatusVerdict({ customerId, body, snapshot = null, inbound
   const authorized = Array.isArray(snapshot?.sentences) ? snapshot.sentences.filter((s) => typeof s === 'string') : [];
   const copied = paymentStatus.copiedSentences(text, authorized);
   // (a verbatim COMPANY FACTS money-policy sentence is fixed policy, not a status: removed like a copy - Codex #6447 r1)
-  const remainder = text.length > paymentStatus.MAX_REPLY_CHARS ? text : paymentStatus.withoutCompanyPolicyCopies(paymentStatus.withoutCopies(text, copied));
+  const remainder = text.length > paymentStatus.MAX_REPLY_CHARS ? text : paymentStatus.withoutCompanyPolicyCopies(paymentStatus.withoutCopies(text, copied), inboundMessage);
   const inboundText = inboundMessage == null ? null : String(inboundMessage);
   const scoped = snapshot?.scoped === true || authorized.length > 0;
   if (paymentStatus.remainderHasMoney(remainder) || paymentStatus.assertsPaymentStatus(remainder, { inboundText, scoped })) {

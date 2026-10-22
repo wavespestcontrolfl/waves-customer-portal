@@ -92,8 +92,8 @@ describe('gate on', () => {
 
   test('prompt version is bumped, distinguishable, and fits the column', () => {
     // '_cf' = COMPANY FACTS, '_cfl' = + LABEL FACTS (PR #5416), '_cflv' = + VISIT STATUS & OPEN LOOPS (PR #5499), 'cflvp' = + PAYMENT FACTS (PR #5331), numeric token 5 = FREE RE-SERVICE (PR #5336) + a fresh identity above PR #5334's 3 (LIVE ETA) and #5416's 3_cfl (4 was the pre-contract claim checker, never merged); '7_m' (#5610) = the compact scheme: number 6 + one cumulative key 'm' (+ MISSED VISIT).
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers17_n');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers17_n');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers19_n');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers19_n');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers_cf');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers2');
@@ -468,11 +468,20 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
     for (const f of COMPANY_FACTS) expect(f).not.toMatch(/zelle/i);
   });
   test('a verbatim paying or prepay-refund sentence with only inert text is policy, not a payment status', () => {
-    for (const inbound of ['how do I pay?', 'Do I get a refund if I cancel?', null]) {
-      expect(payOk(PAY, inbound)).toBe(true);
+    expect(payOk(PAY, 'how do I pay?')).toBe(true);
+    expect(payOk('The technician can take a card, check or cash at the visit.', 'Can I pay the tech with cash?')).toBe(true);
+    for (const inbound of ['Do I get a refund if I cancel?', 'What if I cancel my prepaid plan?']) {
       expect(payOk(REFUND, inbound)).toBe(true);
       expect(payOk(`Hi! ${REFUND} Let us know if you have questions.`, inbound)).toBe(true);
     }
+  });
+  test('a policy sentence counts only for the question it answers (Codex #6447 r10)', () => {
+    const status = 'Did my payment go through?';
+    expect(paymentStatus.autoSendScopeBlock({ reply: REFUND, inboundText: status, snapshot: null })).toBe('payment_status_not_auto_sendable');
+    expect(paymentStatus.autoSendScopeBlock({ reply: 'The technician can take a card, check or cash at the visit.', inboundText: 'Can I get a refund if I cancel?', snapshot: null }))
+      .toBe('payment_status_not_auto_sendable');
+    expect(payOk(REFUND, status)).toBe(false);
+    expect(payOk(REFUND, null)).toBe(false);
   });
   test('only the paying and refund lines are exempt: another fact copied into a payment reply is still judged', () => {
     expect(require('../services/sms-company-facts').moneyPolicyFacts()).toHaveLength(2);
@@ -503,14 +512,14 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
   });
   test('an unedited draft from a prompt before the answer-book facts is refused, whatever its words', () => {
     const old = (v, body) => ({ prompt_version: `house_voice_v12_real_answers${v}`, suggested_message: body });
-    for (const v of ['13_n', '14_n', '15_n', '16_n+c', '13_n+bc', '7_m', '']) {
+    for (const v of ['13_n', '14_n', '15_n', '16_n+c', '17_n', '18_n', '13_n+bc', '7_m', '']) {
       for (const body of [
         RETIRED_COMPANY_FACT_LINES[0], RETIRED_COMPANY_FACT_LINES[10], 'Every recurring service treats the home as well as the yard unless you opt out.',
         'The technician accepts plastic at the appointment, never currency.', 'See you Tuesday between 8 and 10!',
       ]) expect(retiredCompanyFactBlock({ decision: old(v, body), outgoingBody: body })).toMatch(/company fact retired/);
     }
   });
-  test('the provider-boundary checks refuse an unedited pre-15 draft too', async () => {
+  test('the provider-boundary checks refuse an unedited pre-19 draft too', async () => {
     const sc = require('../services/agent-decision-send-checks');
     const body = RETIRED_COMPANY_FACT_LINES[10];
     const row = { input_snapshot: '{}', prompt_version: 'house_voice_v12_real_answers14_n', suggested_message: body };
@@ -520,7 +529,7 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
     expect(verdict.reason).toMatch(/company fact retired/);
     const snap = await sc.labelFactsSnapshotProviderPreSendCheck({ promptVersion: 'house_voice_v12_real_answers14_n', getBody: () => body })({});
     expect(snap.ok).toBe(false);
-    const fresh = await sc.labelFactsSnapshotProviderPreSendCheck({ promptVersion: 'house_voice_v12_real_answers17_n', getBody: () => 'See you Tuesday!' })({});
+    const fresh = await sc.labelFactsSnapshotProviderPreSendCheck({ promptVersion: 'house_voice_v12_real_answers19_n', getBody: () => 'See you Tuesday!' })({});
     expect(fresh.ok).toBe(true);
   });
   test('a staff rewrite of an old draft goes out; the unedited old draft does not', () => {
@@ -529,7 +538,7 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
     expect(retiredCompanyFactBlock({ decision, outgoingBody: RETIRED_COMPANY_FACT_LINES[10] })).toMatch(/company fact retired/);
   });
   test('a draft from the answer-book prompts, or not a real-answers draft, is never refused by it', () => {
-    for (const prompt_version of ['house_voice_v12_real_answers17_n', 'house_voice_v12_real_answers18_n+c', 'house_voice_v11', null]) {
+    for (const prompt_version of ['house_voice_v12_real_answers19_n', 'house_voice_v12_real_answers20_n+c', 'house_voice_v11', null]) {
       for (const body of [COMPANY_FACTS[10], 'We don’t take cash during your visit; please pay cash through the office.', COMPANY_FACTS[0]]) {
         expect(retiredCompanyFactBlock({ decision: { prompt_version }, outgoingBody: body })).toBeNull();
       }
