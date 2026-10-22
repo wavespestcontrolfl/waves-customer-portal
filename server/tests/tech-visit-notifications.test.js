@@ -7,6 +7,9 @@
 const mockWriteCard = jest.fn().mockResolvedValue(undefined);
 const mockSendToAdminUser = jest.fn().mockResolvedValue({ subscriptions: 1, sent: 1 });
 const mockSendOpts = [];
+// Runs inside the sender right before beforeHandoff: a change that lands
+// between composing a push and handing it to the provider.
+let mockBeforeLeg = null;
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -16,6 +19,7 @@ jest.mock('../services/push-notifications', () => ({
   // device's final boundary; false sends nothing.
   sendToAdminUser: async (id, notification, opts) => {
     mockSendOpts.push(opts);
+    if (mockBeforeLeg) await mockBeforeLeg();
     if (opts && typeof opts.beforeHandoff === 'function' && (await opts.beforeHandoff()) === false) return { superseded: true };
     return mockSendToAdminUser(id, notification);
   },
@@ -30,6 +34,8 @@ let cardSeq = 0;
 // Every written card, as stored, so the summary's claim (an UPDATE … RETURNING
 // over held cards) runs against what deliver() wrote.
 const cardRows = [];
+// The lease cutoff the last bundle sweep read claims against.
+let bundleLeaseCutoff = null;
 function cardsTable() {
   let runFilter = null;
   let idFilter = null;
@@ -42,11 +48,15 @@ function cardsTable() {
     whereRaw: jest.fn((sql, bindings) => {
       if (/push_held_run' = \?/.test(sql)) runFilter = String(bindings[0]);
       if (/push_bundle' IS NOT NULL/.test(sql)) bundleFilter = true;
+      if (bundleFilter && /push_claimed_at'\)::timestamptz < \?/.test(sql)) bundleLeaseCutoff = bindings[0];
       return chain;
     }),
-    // The sweep's read of held, unclaimed, uncleared bundle cards.
-    select: jest.fn(async () => cardRows.filter((r) => held(r) && !r.payload.push_claimed_at && !r.dismissed_at)
-      .map((r) => ({ id: r.id, technician_id: r.technician_id, created_at: r.created_at }))),
+    // By ids: the bundle's read of which of its cards are still uncleared.
+    // Otherwise the sweep's read of held, unclaimed, uncleared bundle cards.
+    select: jest.fn(async () => (idFilter
+      ? cardRows.filter((r) => idFilter.includes(String(r.id)) && !r.dismissed_at).map((r) => ({ id: r.id }))
+      : cardRows.filter((r) => held(r) && !r.payload.push_claimed_at && !r.dismissed_at)
+        .map((r) => ({ id: r.id, technician_id: r.technician_id, created_at: r.created_at })))),
     modify: jest.fn((fn) => { fn(chain); return chain; }),
     // The summary's three writes, told apart by their payload expression:
     // claim (stamp push_claimed_at, RETURNING), confirm (drop both marks) and
@@ -101,11 +111,19 @@ function newerCardsQuery() {
   const c = {};
   const asked = {};
   for (const m of ['whereIn']) c[m] = jest.fn(() => c);
+  // The bundle's read: not one of its own cards, and written after them.
+  c.whereNotIn = jest.fn((col, vals) => { if (col === 'n.id') asked.notIn = vals.map(String); return c; });
   c.where = jest.fn((col, val) => { if (col === 'n.technician_id') asked.tech = String(val); return c; });
   c.whereRaw = jest.fn((sql, bindings) => { if (/visit_id' = \?/.test(sql)) asked.visit = String(bindings[0]); return c; });
   c.whereNot = jest.fn((col, val) => { if (col === 'n.id') asked.card = String(val); return c; });
   c.first = jest.fn(async () => {
     if (newerCard || !newerFromRows) return newerCard;
+    if (asked.notIn) {
+      const lastOwn = Math.max(...asked.notIn.map((id) => cardRows.findIndex((r) => String(r.id) === id)));
+      const later = cardRows.slice(lastOwn + 1).find((r) => !asked.notIn.includes(String(r.id))
+        && String(r.technician_id) === asked.tech && String(r.payload.visit_id) === asked.visit);
+      return later ? { id: later.id } : null;
+    }
     const at = cardRows.findIndex((r) => String(r.id) === asked.card);
     const later = cardRows.slice(at + 1).find((r) => String(r.technician_id) === asked.tech && String(r.payload.visit_id) === asked.visit);
     return later ? { id: later.id } : null;
@@ -153,6 +171,11 @@ function prime({ techs = { 'tech-1': TECH, [ADAM_ID]: ADAM }, visit = VISIT, vis
     if (table === 'scheduled_services as s') return visits ? visitsChain(visits) : chain(visit);
     if (table === 'tech_notifications') return cardsTable();
     if (table === 'tech_notifications as n') return newerCardsQuery();
+    if (table === 'tech_notifications as o') {
+      const c = {};
+      for (const m of ['whereIn', 'max']) c[m] = jest.fn(() => c);
+      return c;
+    }
     throw new Error(`unexpected table ${table}`);
   });
 }
@@ -652,6 +675,8 @@ describe('bundled pushes for any other mover (GATE_TECH_PUSH_BUNDLE, owner 2026-
     notices._test.setCurrentAutoDispatchRun(null);
     visitRows = {};
     newerFromRows = true;
+    mockBeforeLeg = null;
+    bundleLeaseCutoff = null;
     prime({ techs, visits: visitRows });
   });
   afterAll(() => {
@@ -823,19 +848,43 @@ describe('bundled pushes for any other mover (GATE_TECH_PUSH_BUNDLE, owner 2026-
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ tag: 'visit-v-2' }));
   });
 
-  test('two cards for one visit in the same millisecond: the database order picks the newest and its push goes out (Codex pre-push P1)', async () => {
+  test('two cards of one visit with the same timestamp: the push never depends on their order (Codex #6459 r1 P1)', async () => {
+    await officeMove('v-1', { kind: 'assigned' });
     await officeMove('v-1');
-    await officeMove('v-1');
-    // Same Date, ids that sort the other way round: a JS sort would pick the older card.
+    // Same time, ids that sort the other way round: either card order gives the same push.
     cardRows[1].created_at = cardRows[0].created_at;
     cardRows[0].id = 'card-z';
     cardRows[1].id = 'card-a';
     await notices.flushBundledPushes({ now: quiet() });
     expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
-    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ tag: 'visit-v-1' }));
+    // Both still stand: the new visit is the one the tech must hear.
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: 'You have a new visit on your route', tag: 'visit-v-1' }));
   });
 
-  test('a count push is re-checked at the provider boundary: none still standing skips it', async () => {
+  test('a visit gone stale between composing and the first handoff: nothing is sent, and the next tick sends the right push (Codex #6459 r1 P2)', async () => {
+    await officeMove('v-1', { kind: 'assigned' });
+    await officeMove('v-2', { kind: 'assigned' });
+    mockBeforeLeg = async () => { visitRows['v-1'].status = 'cancelled'; mockBeforeLeg = null; };
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 0 });
+    expect(mockSendToAdminUser).not.toHaveBeenCalled();
+    expect(cardRows[0].payload.push_bundle).toBeTruthy();
+    expect(cardRows[0].payload).not.toHaveProperty('push_claimed_at');
+    // Composed again: one new visit left, so its own push, not "2 new visits".
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: 'You have a new visit on your route', tag: 'visit-v-2' }));
+  });
+
+  test('a card the tech clears after the claim, before the handoff, is not pushed (Codex #6459 r1 P2)', async () => {
+    await officeMove('v-1');
+    await officeMove('v-2');
+    mockBeforeLeg = async () => { cardRows[0].dismissed_at = new Date(); mockBeforeLeg = null; };
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 0 });
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ tag: 'visit-v-2' }));
+  });
+
+  test('after the first device got the push, a later device is skipped only once nothing stands (no second push to the first)', async () => {
     await officeMove('v-1');
     await officeMove('v-2');
     await notices.flushBundledPushes({ now: quiet() });
@@ -844,6 +893,34 @@ describe('bundled pushes for any other mover (GATE_TECH_PUSH_BUNDLE, owner 2026-
     expect(await beforeHandoff()).toBe(true);
     visitRows['v-2'].status = 'completed';
     expect(await beforeHandoff()).toBe(false);
+  });
+
+  test('with the run summary off, an auto-dispatch move still pushes on its own and is never bundled (Codex #6459 r1 P2)', async () => {
+    notices._test.setCurrentAutoDispatchRun('run-1');
+    await officeMove('v-1', { actorId: 'auto_dispatch' });
+    expect(cardRows[0].payload).not.toHaveProperty('push_bundle');
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ tag: 'visit-v-1' }));
+  });
+
+  test('a claim a dead sweep left is taken again within the five-minute bound (Codex #6459 r1 P2)', async () => {
+    await officeMove('v-1');
+    const now = quiet();
+    await notices.flushBundledPushes({ now });
+    expect(bundleLeaseCutoff).toEqual(new Date(now.getTime() - notices.BUNDLE_CLAIM_LEASE_MS));
+    expect(notices.BUNDLE_CLAIM_LEASE_MS).toBeLessThanOrEqual(notices.BUNDLE_MAX_WAIT_MS);
+  });
+
+  test('after an hour of failures only the old cards are dropped; a newer change in the same bundle keeps its retries (Codex #6459 r1 P1)', async () => {
+    await officeMove('v-1');
+    await officeMove('v-2');
+    cardRows[0].created_at = new Date(Date.now() - notices.BUNDLE_GIVE_UP_MS - 1000);
+    mockSendToAdminUser.mockRejectedValueOnce(new Error('provider down'));
+    expect(await notices.flushBundledPushes({ now: new Date() })).toEqual({ pushed: 0 });
+    expect(cardRows[0].payload).not.toHaveProperty('push_bundle');
+    expect(cardRows[1].payload.push_bundle).toBeTruthy();
+    expect(cardRows[1].payload).not.toHaveProperty('push_claimed_at');
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    expect(mockSendToAdminUser).toHaveBeenLastCalledWith('tech-1', expect.objectContaining({ tag: 'visit-v-2' }));
   });
 
   test('a bundle of one whose push threw, or every device refused, is kept and sent on the next tick (Codex pre-push P1)', async () => {

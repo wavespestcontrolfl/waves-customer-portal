@@ -70,6 +70,10 @@ const BUNDLE_MAX_WAIT_MS = 5 * 60 * 1000;
 // its oldest card is this old: a device that never accepts must not make the
 // sweep retry forever.
 const BUNDLE_GIVE_UP_MS = 60 * 60 * 1000;
+// A claim a sweep took and never finished (the process died mid-send) is
+// taken again after this long. Shorter than the run summary's lease, so a
+// crash adds at most this to a change's wait; a send takes seconds.
+const BUNDLE_CLAIM_LEASE_MS = 3 * 60 * 1000;
 
 const KINDS = Object.freeze(['assigned', 'unassigned', 'rescheduled', 'cancelled']);
 // Lifecycle states with nothing left to announce for an assignment/move card.
@@ -494,7 +498,7 @@ async function pushCard(notice, { checkCurrent = null } = {}) {
       }
       return !stale;
     };
-    const result = await PushService.sendToAdminUser(notice.technicianId, {
+    await PushService.sendToAdminUser(notice.technicianId, {
       title: notice.pushTitle,
       body: '',
       url: '/tech',
@@ -502,11 +506,8 @@ async function pushCard(notice, { checkCurrent = null } = {}) {
       priority: 'high',
     }, { beforeHandoff });
     if (stale) logger.info(`[tech-visit-notifications] stale ${notice.kind || 'tracking'} push skipped for visit ${notice.visitId} (newer state)`);
-    // The outcome, for a caller that retries (a bundled push); others ignore it.
-    return { stale, result };
   } catch (pushErr) {
     logger.warn(`[tech-visit-notifications] push failed for tech ${notice.technicianId} (card already written): ${pushErr.message}`);
-    return { error: pushErr };
   }
 }
 
@@ -530,7 +531,9 @@ async function deliver(notices) {
   for (const raw of notices.filter((x) => x && x.ok)) {
     let n = raw;
     if (holdRun && raw.actorText === AUTO_DISPATCH_ACTOR_TEXT) n = { ...raw, holdForRun: holdRun };
-    else if (bundle) n = { ...raw, holdForBundle: true };
+    // An auto-dispatch move is never bundled: its run summary covers it, and
+    // with that summary off it pushes on its own, as before (Codex #6459 r1).
+    else if (bundle && raw.actorText !== AUTO_DISPATCH_ACTOR_TEXT) n = { ...raw, holdForBundle: true };
     try {
       const card = await writeCard(n);
       if (card) written.push({ ...n, cardId: card.id || null });
@@ -790,11 +793,11 @@ const CLAIM_OPEN_SQL = "(payload->>'push_claimed_at' IS NULL OR (payload->>'push
 
 // The held cards of every tech whose bundle is due — no new card for
 // BUNDLE_QUIET_MS, or the oldest waiting BUNDLE_MAX_WAIT_MS — claimed in ONE
-// update with the run summary's lease, so two instances never push the same
-// cards. Resolves to the claimed rows, payload parsed.
+// update, so two instances never push the same cards. Resolves to the
+// claimed rows, payload parsed.
 async function claimDueBundles(now) {
   const types = Object.values(TYPE_BY_KIND);
-  const leaseCutoff = new Date(now.getTime() - HELD_CLAIM_LEASE_MS);
+  const leaseCutoff = new Date(now.getTime() - BUNDLE_CLAIM_LEASE_MS);
   const held = await db('tech_notifications')
     .whereIn('type', types)
     .whereNull('dismissed_at')
@@ -838,78 +841,124 @@ function bundledNotice(technicianId, row) {
   };
 }
 
-// Would this card's own push still go out? Only when no newer card for the
-// tech and visit has overtaken it — compared as (created_at, id) in SQL
-// (newerCardExists), the database's own order, never a millisecond Date — and
-// the visit row still stands behind it (pushStillCurrent).
-async function stillAnnounces(notice, conn) {
-  if (await newerCardExists(notice, conn)) return false;
-  return pushStillCurrent(notice, conn);
+// When two cards of one visit both still stand (a new visit, then a time
+// change on it), the push names the one that matters most to the tech.
+const KIND_RANK = Object.freeze({ assigned: 0, unassigned: 1, cancelled: 2, rescheduled: 3 });
+
+// What a bundle may still say about ONE visit, read fresh each time it is
+// asked (when the push is composed, and again at each device's provider
+// boundary). Nothing when a card for this tech and visit was written after
+// the bundle's own (it speaks for itself: its own push, or the next bundle),
+// or when none of the bundle's cards is still uncleared and still stands
+// (pushStillCurrent). Otherwise the notice to announce. It never depends on
+// the order of the bundle's own cards: a tie on created_at cannot pick the
+// wrong one (Codex #6459 r1).
+async function visitNotice(technicianId, visitId, cards, conn) {
+  const ids = cards.map((card) => card.id);
+  const later = await conn('tech_notifications as n')
+    .where('n.technician_id', technicianId)
+    .whereIn('n.type', VISIT_TAG_CARD_TYPES)
+    .whereRaw("n.payload->>'visit_id' = ?", [String(visitId)])
+    .whereNotIn('n.id', ids)
+    .where('n.created_at', '>', conn('tech_notifications as o').whereIn('o.id', ids).max('o.created_at'))
+    .first('n.id');
+  if (later) return null;
+  const open = new Set((await conn('tech_notifications').whereIn('id', ids).whereNull('dismissed_at').select('id')).map((row) => String(row.id)));
+  const standing = [];
+  for (const card of cards) {
+    if (!open.has(String(card.id))) continue;
+    const notice = bundledNotice(technicianId, card);
+    if (await pushStillCurrent(notice, conn)) standing.push(notice);
+  }
+  standing.sort((a, b) => (KIND_RANK[a.kind] ?? 9) - (KIND_RANK[b.kind] ?? 9));
+  return standing[0] || null;
 }
 
-// A held push's outcome, the run summary's rule: skipped as stale = done;
-// every device refused = throw, so the bundle is kept for a retry; no devices
-// at all = done (a retry could never land). True when a device got it.
-function settleHeldPush(result) {
-  if (result?.superseded) return false;
-  const total = Number(result?.subscriptions) || 0;
-  if (total > 0 && !(Number(result?.sent) > 0)) throw new Error(`no device accepted the push (${total} tried)`);
-  return total > 0;
-}
-
-// ONE push for one tech's claimed cards: per visit only its newest card that
-// still stands, so a visit moved twice is one change and a visit completed
-// during the hold drops out. One left: exactly its own push, re-checked at the
-// provider boundary. More: one count, re-checked there too. Resolves true
-// when the push went out; throws when it failed (settleHeldPush), so the
-// bundle is kept for a retry. A recheck ERROR keeps or sends (owner steer: a
-// missed alert is worse than a rare stale one).
-async function sendBundle(technicianId, rows) {
-  const notices = [];
+// The bundle as it stands now: one notice per visit still worth a push. A
+// visit whose recheck ERRORS stays in (owner steer: a missed alert is worse
+// than a rare stale one).
+async function bundlePlan(technicianId, rows, conn) {
+  const byVisit = new Map();
   for (const row of rows) {
-    const notice = bundledNotice(technicianId, row);
-    let keep = true;
+    const key = String(row.payload.visit_id);
+    byVisit.set(key, [...(byVisit.get(key) || []), row]);
+  }
+  const plan = [];
+  for (const [visitId, cards] of byVisit) {
     try {
-      keep = await stillAnnounces(notice, db);
+      const notice = await visitNotice(technicianId, visitId, cards, conn);
+      if (notice) plan.push(notice);
     } catch (err) {
-      logger.warn(`[tech-visit-notifications] bundle recheck failed for visit ${notice.visitId} (${errorTag(err)}); keeping it`);
+      logger.warn(`[tech-visit-notifications] bundle recheck failed for visit ${visitId} (${errorTag(err)}); keeping it`);
+      plan.push(bundledNotice(technicianId, cards[cards.length - 1]));
     }
-    if (keep) notices.push(notice);
   }
-  if (!notices.length) return false;
-  if (notices.length === 1) {
-    const outcome = await pushCard(notices[0], { checkCurrent: (conn) => pushStillCurrent(notices[0], conn) });
-    if (outcome.error) throw outcome.error;
-    return outcome.stale ? false : settleHeldPush(outcome.result);
+  return plan;
+}
+
+const planSignature = (plan) => plan.map((notice) => `${notice.visitId}:${notice.kind}`).sort().join('|');
+
+// The push for a plan: one visit = exactly its own per-visit push; more = one count.
+function bundlePush(plan) {
+  if (plan.length === 1) {
+    return { title: plan[0].pushTitle, body: '', url: '/tech', tag: `visit-${plan[0].visitId}`, priority: 'high' };
   }
+  return {
+    title: bundleTitle(plan.map((notice) => notice.kind)),
+    body: '',
+    url: '/admin/today',
+    tag: `route-changes-${[...plan].map((notice) => String(notice.cardId)).sort()[0]}`,
+    priority: 'high',
+  };
+}
+
+// A held push to send again on the next tick, composed afresh.
+class BundleChanged extends Error {}
+
+// ONE push for one tech's claimed cards. Resolves true when a device got it,
+// false when nothing is left to say (the bundle closes). Throws when it must
+// be tried again: the provider failed, every device refused (the run
+// summary's rule), or the bundle changed between composing the push and its
+// first handoff — a visit went stale or was cleared, so the count or the
+// kind it names is no longer right (Codex #6459 r1). After the first device
+// got it, a later device is skipped only once nothing at all still stands,
+// as for any per-visit push: a retry would push the first device twice.
+async function sendBundle(technicianId, rows) {
+  const plan = await bundlePlan(technicianId, rows, db);
+  if (!plan.length) return false;
+  let legs = 0;
+  let changed = false;
   const beforeHandoff = async () => {
+    legs += 1;
     try {
-      for (const notice of notices) {
-        if (await stillAnnounces(notice, db)) return true;
+      const now = await bundlePlan(technicianId, rows, db);
+      if (legs === 1 && planSignature(now) !== planSignature(plan)) {
+        changed = true;
+        return false;
       }
-      return false;
+      return now.length > 0;
     } catch (err) {
       logger.warn(`[tech-visit-notifications] bundle push recheck failed for tech ${technicianId} (${errorTag(err)}); sending`);
       return true;
     }
   };
   const PushService = require('./push-notifications');
-  const result = await PushService.sendToAdminUser(technicianId, {
-    title: bundleTitle(notices.map((notice) => notice.kind)),
-    body: '',
-    url: '/admin/today',
-    tag: `route-changes-${notices[0].cardId}`,
-    priority: 'high',
-  }, { beforeHandoff });
-  return settleHeldPush(result);
+  const result = await PushService.sendToAdminUser(technicianId, bundlePush(plan), { beforeHandoff });
+  if (changed) throw new BundleChanged('the bundle changed before its first handoff');
+  if (result?.superseded) return false;
+  const total = Number(result?.subscriptions) || 0;
+  if (total > 0 && !(Number(result?.sent) > 0)) throw new Error(`no device accepted the push (${total} tried)`);
+  return total > 0;
 }
 
 /**
  * The every-minute sweep (scheduler.js) for bundled pushes: each tech whose
  * held cards are due gets ONE push (sendBundle). No lock is held across a
- * push (owner ruling 2026-09-30, #5421); a failed push releases the claim
- * for the next tick. It runs with the gate off too, so cards held before a
- * flip still go out; only the notifications kill switch drops them.
+ * push (owner ruling 2026-09-30, #5421). A push to try again releases the
+ * claim for the next tick; a card that has waited BUNDLE_GIVE_UP_MS is
+ * dropped instead, alone — a newer card in the same bundle keeps its
+ * retries (Codex #6459 r1). It runs with the gate off too, so cards held
+ * before a flip still go out; only the notifications kill switch drops them.
  * Best-effort; never throws.
  */
 async function flushBundledPushes({ now = new Date() } = {}) {
@@ -928,18 +977,22 @@ async function flushBundledPushes({ now = new Date() } = {}) {
     }
     let pushed = 0;
     for (const [technicianId, rows] of byTech) {
-      const cardIds = rows.map((row) => row.id);
       try {
         if (await sendBundle(technicianId, rows)) pushed += 1;
-        await db('tech_notifications').whereIn('id', cardIds)
+        await db('tech_notifications').whereIn('id', rows.map((row) => row.id))
           .update({ payload: db.raw("payload - 'push_bundle' - 'push_claimed_at'"), updated_at: new Date() });
       } catch (err) {
-        const oldest = Math.min(...rows.map((row) => new Date(row.created_at).getTime()));
-        const giveUp = now.getTime() - oldest >= BUNDLE_GIVE_UP_MS;
-        logger.warn(`[tech-visit-notifications] bundled push failed for tech ${technicianId}: ${err.message}${giveUp ? '; dropped after an hour of retries' : '; retrying next tick'}`);
-        await db('tech_notifications').whereIn('id', cardIds)
-          .update({ payload: db.raw(giveUp ? "payload - 'push_bundle' - 'push_claimed_at'" : "payload - 'push_claimed_at'"), updated_at: new Date() })
-          .catch((releaseErr) => logger.warn(`[tech-visit-notifications] bundle claim release failed (${errorTag(releaseErr)}); it expires on its own`));
+        const expired = rows.filter((row) => now.getTime() - new Date(row.created_at).getTime() >= BUNDLE_GIVE_UP_MS).map((row) => row.id);
+        const retry = rows.map((row) => row.id).filter((id) => !expired.includes(id));
+        if (err instanceof BundleChanged) logger.info(`[tech-visit-notifications] bundle for tech ${technicianId} changed before sending; composing again next tick`);
+        else logger.warn(`[tech-visit-notifications] bundled push failed for tech ${technicianId}: ${err.message}; ${retry.length} retried next tick, ${expired.length} dropped after an hour`);
+        const release = async (ids, expr) => {
+          if (!ids.length) return;
+          await db('tech_notifications').whereIn('id', ids).update({ payload: db.raw(expr), updated_at: new Date() })
+            .catch((releaseErr) => logger.warn(`[tech-visit-notifications] bundle claim release failed (${errorTag(releaseErr)}); it expires on its own`));
+        };
+        await release(expired, "payload - 'push_bundle' - 'push_claimed_at'");
+        await release(retry, "payload - 'push_claimed_at'");
       }
     }
     return { pushed };
@@ -1032,5 +1085,6 @@ module.exports = {
   BUNDLE_QUIET_MS,
   BUNDLE_MAX_WAIT_MS,
   BUNDLE_GIVE_UP_MS,
+  BUNDLE_CLAIM_LEASE_MS,
   _test: { setCurrentAutoDispatchRun: (id) => { currentAutoDispatchRun = id; }, formatWhen, composeCard, describeActor, visitQueues, pushStillCurrent, newerCardExists },
 };
