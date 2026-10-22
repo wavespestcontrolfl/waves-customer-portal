@@ -15,6 +15,7 @@ jest.mock('../routes/admin-invoices', () => ({
   getInvoiceDeliveryRecipients: jest.fn(),
 }));
 
+const { approvalDigest } = require('../utils/approval-digest');
 const db = require('../models/db');
 const Invoices = require('../routes/admin-invoices');
 const tools = require('../services/intelligence-bar/payment-plan-tools');
@@ -249,6 +250,7 @@ describe('create_payment_plan preview', () => {
     ['no first payment date', () => {}, { next_payment_date: undefined }, 'invalid_plan'],
     ['a made-up first payment date', () => {}, { next_payment_date: '2099-02-30' }, 'invalid_plan'],
     ['a first payment in the past', () => {}, { next_payment_date: '2020-01-01' }, 'invalid_plan'],
+    ['a start date in the past with a future first payment', () => {}, { plan_start_date: '2020-01-01' }, 'invalid_plan'],
     ['a first payment before the start', () => {}, { plan_start_date: '2099-03-01' }, 'invalid_plan'],
     ['a made-up start date', () => {}, { plan_start_date: '2099-13-01' }, 'invalid_plan'],
     ['more than 60 installments', (s) => { s.invoices[0].total = '5000.00'; }, { payment_amount: 50 }, 'too_many_installments'],
@@ -274,7 +276,7 @@ describe('create_payment_plan Confirm', () => {
     expect(Invoices.createPaymentPlanFromBar).toHaveBeenCalledWith({
       invoiceId: INV, body: card._body,
       actor: { technicianId: 'staff-1', name: 'Pat Staff', email: 'pat.staff@example.com' },
-      approvedPlan: { updatedAtMs: new Date('2099-01-01T12:00:00.123Z').getTime() },
+      approvedPlan: { updatedAtMs: new Date('2099-01-01T12:00:00.123Z').getTime(), emailRecipientDigest: approvalDigest('robin.sample@example.com') },
     });
     // The body is the page dialog's shape and never carries a payment method.
     expect(Object.keys(Invoices.createPaymentPlanFromBar.mock.calls[0][0].body)).not.toContain('paymentMethodId');

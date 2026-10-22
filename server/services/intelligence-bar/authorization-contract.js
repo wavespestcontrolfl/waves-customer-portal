@@ -102,6 +102,8 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   // A reminder text and email cannot be unsent; the plan confirmation email cannot be unsent either.
   'send_invoice_reminder_now',
   'create_payment_plan',
+  // A stopped reminder sequence has no undo in the portal (the panel offers Resume only for paused or Auto Pay-held ones).
+  'stop_invoice_reminders',
 ]);
 
 // Tools whose card lines are curated below from their own preview, not the

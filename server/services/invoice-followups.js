@@ -44,6 +44,7 @@ const { publicPortalUrl } = require('../utils/portal-url');
 const EmailTemplateLibrary = require('./email-template-library');
 const { currency } = require('./email-template');
 const { formatDateOnly } = require('../utils/date-only');
+const { approvalDigest, phoneKey, emailKey } = require('../utils/approval-digest');
 const { etDateString } = require('../utils/datetime-et');
 const { explicitBillingChannels } = require('./billing-delivery-channels');
 const { dispatchUnderBillingEmailAuthority } = require('./billing-channel-email-authority');
@@ -268,6 +269,40 @@ async function resolveBody(step, ctx) {
     entity_type: 'invoice',
     entity_id: ctx.invoiceId || null,
   });
+}
+
+// ── The Intelligence Bar's send-now approval (card pin) ──────────────────────
+// The card shows the reminder text with the pay link as a token and the recipients as masked values; the service pins the
+// phone, the email recipient and the text's digest and refuses at dispatch (right after the claim, before either leg) when
+// any of them differs from what is live.
+const APPROVAL_PAY_LINK_TOKEN = '[pay link]';
+
+// The base wording of the step's text (no alternate wordings, no audit row), the pay link as a token: what the card shows.
+async function renderApprovalSmsBody(step, ctx) {
+  if (!step.template_key || typeof smsTemplatesRouter.getTemplate !== 'function') return null;
+  return smsTemplatesRouter.getTemplate(step.template_key, {
+    first_name: ctx.name || 'there',
+    invoice_title: ctx.invoiceTitle || 'your service',
+    amount: ctx.amount || '0.00',
+    pay_url: APPROVAL_PAY_LINK_TOKEN,
+    receipt_url: APPROVAL_PAY_LINK_TOKEN,
+    service_date: ctx.serviceDate || '',
+    service_date_clause: ctx.serviceDate ? ` completed on ${ctx.serviceDate}` : '',
+  }, { workflow: 'invoice_followup', entity_type: 'invoice', entity_id: ctx.invoiceId || null }, { noVariants: true, audit: false });
+}
+
+// Why the live recipients or text differ from the card's pin, or null. Only when the pin carries them.
+async function approvalDrift(approved, { row, customer, step }) {
+  if (!approved || !('phoneDigest' in approved)) return null;
+  const phone = phoneKey(customer.phone);
+  if (approvalDigest(phone) !== approved.phoneDigest) return 'recipient_changed';
+  const { to } = await operatorEmailRecipient(customer, 'invoice-followups');
+  if (approvalDigest(emailKey(to)) !== approved.emailDigest) return 'recipient_changed';
+  const body = phone ? await renderApprovalSmsBody(step, {
+    name: customer.first_name, invoiceTitle: row.title, amount: invoiceAmountDue(row).toFixed(2),
+    serviceDate: formatDateOnly(row.service_date, { fallback: '' }), invoiceId: row.invoice_id,
+  }) : null;
+  return (body ? approvalDigest(body) : null) === approved.smsDigest ? null : 'message_changed';
 }
 
 async function logFollowupEmailAttempt({
@@ -1668,7 +1703,7 @@ async function fireStep(row, { operatorInitiated = false, ownedMicrodeposit = fa
   row.invoice_status = claimedInvoice.status;
   row.token = claimedInvoice.token;
   try {
-    await fireTouch(row, { operatorInitiated, claimStamp, verificationOnly: !!ownedBy, report, expectedContentHash: approved?.emailContentHash || null });
+    await fireTouch(row, { operatorInitiated, claimStamp, verificationOnly: !!ownedBy, report, approved, expectedContentHash: approved?.emailContentHash || null });
   } finally {
     await db('invoice_followup_sequences')
       .where({ id: row.id, touch_claimed_at: claimStamp })
@@ -1679,6 +1714,7 @@ async function fireStep(row, { operatorInitiated = false, ownedMicrodeposit = fa
         `[invoice-followups] could not clear touch claim for ${row.invoice_id}: ${err.message}`,
       ));
   }
+  if (report?.previewChanged) return { previewChanged: true };
   return report ? { legs: report.legs || null } : undefined;
 }
 
@@ -1700,7 +1736,7 @@ function emailLegReport(result, permitted) {
   return { state: 'unknown', reason: 'email_outcome_unconfirmed' };
 }
 
-async function fireTouch(row, { operatorInitiated = false, claimStamp = null, verificationOnly = false, report = null, expectedContentHash = null } = {}) {
+async function fireTouch(row, { operatorInitiated = false, claimStamp = null, verificationOnly = false, report = null, approved = null, expectedContentHash = null } = {}) {
   // A row of a customer on a combined schedule (fireStep's ownedMicrodeposit):
   // re-judged now, after the claim committed and outside any lock. No longer
   // waiting on verification -> the invoice is the schedule's: nothing is sent
@@ -1774,6 +1810,13 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
   }
   if (!customer) {
     logger.warn(`[invoice-followups] skipped sequence ${row.id} — customer ${row.customer_id} is missing`);
+    return;
+  }
+  // The card's recipients and text, against what is live right now: a change sends neither leg (the caller restores the time).
+  const drift = await approvalDrift(approved, { row, customer, step });
+  if (drift) {
+    logger.warn(`[invoice-followups] send-now on sequence ${row.id} refused: ${drift} since the card was shown`);
+    if (report) report.previewChanged = true;
     return;
   }
   const mdPending = verificationOnly || (gates.divertMicrodepositDunning
@@ -3350,6 +3393,9 @@ module.exports = {
   markAtRiskForLongOverdue,
   latePaymentCheckerRetiredLive,
   adoptOrphanInvoicesLive,
+  // The Intelligence Bar's send-now card: the same text rendering and digest the service pins at dispatch.
+  approvalDigest,
+  renderApprovalSmsBody,
   // Exported for tests only (fireStep + the batch ownership predicate: the
   // customer-dunning PostgreSQL concurrency suite drives them directly).
   _test: {

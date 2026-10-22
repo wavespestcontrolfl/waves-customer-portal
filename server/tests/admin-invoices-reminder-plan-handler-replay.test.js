@@ -287,6 +287,14 @@ describe('payment plans: the real create and cancel handlers', () => {
     expect(PaymentLifecycleEmail.sendPaymentPlanConfirmed).toHaveBeenCalledTimes(2);
   });
 
+  test('create: the bar hands its recipient digest to the confirmation email; the page hands none', async () => {
+    await page('/payment-plan', BODY);
+    await router.createPaymentPlanFromBar({ invoiceId: INV, body: BODY, actor: BAR_ACTOR, approvedPlan: { updatedAtMs: UPDATED_MS, emailRecipientDigest: 'digest-1' } });
+    const [pageCall, barCall] = PaymentLifecycleEmail.sendPaymentPlanConfirmed.mock.calls.map(([arg]) => arg);
+    expect(pageCall).not.toHaveProperty('expectedRecipientDigest');
+    expect(barCall.expectedRecipientDigest).toBe('digest-1');
+  });
+
   test('create: the bar’s pin is checked on the LOCKED invoice row; a changed invoice is 409 PREVIEW_CHANGED with no plan and no email', async () => {
     lockedInvoice = { ...INVOICE, updated_at: new Date('2099-01-05T00:00:00Z') };
     const result = await router.createPaymentPlanFromBar({ invoiceId: INV, body: BODY, actor: BAR_ACTOR, approvedPlan: { updatedAtMs: UPDATED_MS } });

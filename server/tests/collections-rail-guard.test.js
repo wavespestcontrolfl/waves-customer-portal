@@ -288,6 +288,6 @@ describe('invoice-followups passes the operator exemption for "send now" only', 
     expect(src).toMatch(/\.\.\.\(holdExempt \? \{ holdExempt \} : \{\}\)/);
     // the operator flag is set by sendNextTouchNow's caller and threads fireStep -> fireTouch
     expect(src).toMatch(/await fireStep\(row, \{ operatorInitiated, approved, report: reportOut \}\)/);
-    expect(src).toMatch(/await fireTouch\(row, \{ operatorInitiated(, claimStamp)?(, verificationOnly: !!ownedBy)?(, report)?(, expectedContentHash: [^}]+)? \}\)/);
+    expect(src).toMatch(/await fireTouch\(row, \{ operatorInitiated(, claimStamp)?(, verificationOnly: !!ownedBy)?(, report)?(, approved)?(, expectedContentHash: [^}]+)? \}\)/);
   });
 });

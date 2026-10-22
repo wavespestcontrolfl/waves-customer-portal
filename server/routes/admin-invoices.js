@@ -3474,6 +3474,8 @@ const paymentPlanCreateHandler = async (req, res, next) => {
         paymentPlanId: paymentPlan.id,
         paymentMethodId,
         plan: paymentPlan,
+        // The bar's card: the recipient it showed (or none). A different live recipient is sent nothing. The page passes none.
+        ...(req.ibApprovedPlan ? { expectedRecipientDigest: req.ibApprovedPlan.emailRecipientDigest } : {}),
         idempotencyKey: `payment.plan_confirmed:${paymentPlan.id}:${planCustomerId}`,
       }).catch((err) => ({ ok: false, error: err.message }))
       : { ok: false, skipped: true, error: 'Plan is no longer active — confirmation email suppressed' };

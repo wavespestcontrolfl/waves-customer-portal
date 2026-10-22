@@ -784,6 +784,25 @@ describe('payment lifecycle email sender', () => {
     }));
   });
 
+  test('a plan confirmation pinned to a recipient digest sends only to that recipient', async () => {
+    const { approvalDigest } = require('../utils/approval-digest');
+    const args = { customerId: 'cust-1', paymentPlanId: 'plan-1', paymentMethodId: 'pm-1',
+      plan: { total_balance: '390.00', payment_amount: '130.00', payment_frequency: 'monthly', next_payment_date: '2026-06-20' } };
+    setDbQueues({ payment_methods: [chain({ first: paymentMethod() })], ...lifecycleQueues() });
+    await PaymentLifecycleEmail.sendPaymentPlanConfirmed({ ...args, expectedRecipientDigest: approvalDigest('billing@example.com') });
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
+
+    EmailTemplates.sendTemplate.mockClear();
+    setDbQueues({ payment_methods: [chain({ first: paymentMethod() })], ...lifecycleQueues() });
+    // The card said no email goes out (digest of null), but an address has since been added.
+    const added = await PaymentLifecycleEmail.sendPaymentPlanConfirmed({ ...args, expectedRecipientDigest: approvalDigest(null) });
+    expect(added).toMatchObject({ ok: false, skipped: true, reason: 'recipient_changed', deliveryOutcome: 'not_sent' });
+    setDbQueues({ payment_methods: [chain({ first: paymentMethod() })], ...lifecycleQueues() });
+    const changed = await PaymentLifecycleEmail.sendPaymentPlanConfirmed({ ...args, expectedRecipientDigest: approvalDigest('old.address@example.com') });
+    expect(changed).toMatchObject({ ok: false, skipped: true, reason: 'recipient_changed' });
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
   test('sends refund issued notice without exposing processor identifiers', async () => {
     setDbQueues({
       payments: [chain({ first: payment({ stripe_refund_id: 're_sensitive', refund_amount: '49.00' }) })],

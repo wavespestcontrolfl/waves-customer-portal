@@ -16,6 +16,7 @@ jest.mock('../routes/admin-invoices', () => ({
   getInvoiceDeliveryRecipients: jest.fn(),
 }));
 
+const { approvalDigest } = require('../utils/approval-digest');
 const db = require('../models/db');
 const Invoices = require('../routes/admin-invoices');
 const Wiring = require('../services/customer-dunning/wiring');
@@ -227,6 +228,23 @@ describe('pause, resume and stop', () => {
     expect(Invoices.followupControlFromBar).toHaveBeenCalledWith({ invoiceId: INV, control: 'resume', body: {}, actor: { technicianId: 'staff-1' }, approved: { sequenceId: SEQ, status: 'paused', stepIndex: 0 } });
   });
 
+  test('resume is refused for reminders held for a payer (Bill-To withdrawal), however they are marked', async () => {
+    state.invoice_followup_sequences[0].status = 'paused';
+    state.invoice_followup_sequences[0].paused_reason = 'payer_billed';
+    expect(await call('resume_invoice_reminders')).toMatchObject({ code: 'payer_owned' });
+    state.invoice_followup_sequences[0].paused_reason = null;
+    state.invoices[0].payer_id = 'payer-1';
+    expect(await call('resume_invoice_reminders')).toMatchObject({ code: 'payer_owned' });
+    expect(Invoices.followupControlFromBar).not.toHaveBeenCalled();
+  });
+
+  test('stop is marked irreversible on its card; pause is not', async () => {
+    const stop = await call('stop_invoice_reminders');
+    expect(buildContract({ toolName: 'stop_invoice_reminders', params: { invoice_id: INV }, displayParams: {}, preview: stop, summary: 'x' }).irreversible).toBe(true);
+    const pause = await call('pause_invoice_reminders');
+    expect(buildContract({ toolName: 'pause_invoice_reminders', params: { invoice_id: INV }, displayParams: {}, preview: pause, summary: 'x' }).irreversible).toBeFalsy();
+  });
+
   test('resume on a future-due reminder does not promise an early send', async () => {
     state.invoice_followup_sequences[0].status = 'paused';
     state.invoice_followup_sequences[0].anchor_at = new Date('2099-06-01T12:00:00Z');
@@ -425,7 +443,11 @@ describe('send_invoice_reminder_now', () => {
     expect(Invoices.sendReminderNowFromBar).toHaveBeenCalledTimes(1);
     expect(Invoices.sendReminderNowFromBar).toHaveBeenCalledWith({
       invoiceId: INV, actor: { technicianId: 'staff-1' },
-      approvedReminder: { invoiceUpdatedAtMs: new Date('2099-01-01T12:00:00.123Z').getTime(), sequenceId: SEQ, status: 'active', stepIndex: 0, emailContentHash: 'hash-1' },
+      approvedReminder: {
+        invoiceUpdatedAtMs: new Date('2099-01-01T12:00:00.123Z').getTime(), sequenceId: SEQ, status: 'active', stepIndex: 0, emailContentHash: 'hash-1',
+        // Digests only: the pin never carries the phone, the address or the text itself.
+        phoneDigest: approvalDigest('19415550142'), emailDigest: approvalDigest('robin.sample@example.com'), smsDigest: approvalDigest(card.text_line.match(/"(.*)" Not sent/)[1]),
+      },
     });
   });
 
@@ -583,6 +605,8 @@ describe('schedule_invoice_send', () => {
     ['a time with a zone', () => {}, { send_at_et: '2099-01-15T09:30:00Z' }, 'invalid_time'],
     ['a made-up date', () => {}, { send_at_et: '2099-13-45T09:30' }, 'invalid_time'],
     ['a time in the past', () => {}, { send_at_et: '2020-01-15T09:30' }, 'time_not_future'],
+    ['a time the clocks fall back over (1:30 AM happens twice)', () => {}, { send_at_et: '2099-11-01T01:30' }, 'invalid_time'],
+    ['a time the clocks spring forward over (2:30 AM never happens)', () => {}, { send_at_et: '2099-03-08T02:30' }, 'invalid_time'],
     ['a payer statement', () => { state.invoices[0].payer_statement_id = 'stmt-1'; }, { send_at_et: FUTURE }, 'payer_statement'],
     ['a payer-billed invoice', () => { state.invoices[0].payer_id = 'payer-1'; }, { send_at_et: FUTURE }, 'payer_owned'],
     ['a payer found by the live resolver', () => PayerOwnership.invoicePayerOwnership.mockResolvedValue('payer_owned'), { send_at_et: FUTURE }, 'payer_owned'],

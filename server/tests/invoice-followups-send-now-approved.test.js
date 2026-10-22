@@ -569,3 +569,49 @@ describe('the card’s email content hash', () => {
     expect(EmailTemplates.sendTemplate.mock.calls[0][0]).not.toHaveProperty('expectedContentHash');
   });
 });
+
+// The card pins the recipients (phone and email, as digests) and the text digest. The service re-reads the customer after the
+// claim and sends neither leg when any of them differs; the reminder time goes back.
+describe('the card’s recipients and text', () => {
+  const { approvalDigest } = require('../utils/approval-digest');
+  const PINNED = {
+    ...APPROVED,
+    phoneDigest: approvalDigest('19415550101'),
+    emailDigest: approvalDigest('billing@example.com'),
+    smsDigest: approvalDigest('invoice follow-up sms'),
+  };
+
+  test('unchanged recipients and text send both channels', async () => {
+    const result = await sendNow({ approved: PINNED, report: true });
+    expect(result.report.legs).toEqual({ sms: { state: 'sent' }, email: { state: 'sent' } });
+  });
+
+  test('a phone changed after the card was shown sends nothing and puts the reminder time back', async () => {
+    tables.customers[0].phone = '+19415550199';
+    expect(await sendNow({ approved: PINNED, report: true })).toMatchObject({ ok: false, reason: 'preview_changed' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(seqRow().next_touch_at).toEqual(NEXT);
+    expect(seqRow().touch_claimed_at).toBeNull();
+  });
+
+  test('an email address changed after the card was shown sends nothing', async () => {
+    require('../services/customer-contact').getInvoiceEmailRecipients.mockReturnValue([{ email: 'new.address@example.com', name: 'Taylor' }]);
+    expect(await sendNow({ approved: PINNED, report: true })).toMatchObject({ ok: false, reason: 'preview_changed' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('a changed text template sends nothing', async () => {
+    require('../routes/admin-sms-templates').getTemplate.mockResolvedValue('a different wording');
+    expect(await sendNow({ approved: PINNED, report: true })).toMatchObject({ ok: false, reason: 'preview_changed' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('a pin with no recipients (the page) is not checked', async () => {
+    tables.customers[0].phone = '+19415550199';
+    const result = await sendNow({ approved: APPROVED, report: true });
+    expect(result.report.legs.sms).toEqual({ state: 'sent' });
+  });
+});

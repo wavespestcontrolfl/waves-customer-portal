@@ -3,6 +3,7 @@ const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { getInvoiceEmailRecipients } = require('./customer-contact');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { approvalDigest } = require('../utils/approval-digest');
 const { formatDisplayDate, dateOnlyString } = require('../utils/date-only');
 const { currency } = require('./email-template');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
@@ -217,6 +218,9 @@ async function sendLifecycleTemplate({
   // billing follow-up and the dispute hold does not withhold it (the same exemption the
   // Text/App boundary applies to a customerInitiated payment_failure).
   customerInitiated = false,
+  // The Intelligence Bar's plan card only: the digest of the recipient it showed (utils/approval-digest.js; the digest of null =
+  // it said no email goes out). A different live recipient sends nothing. Undefined = every other caller.
+  expectedRecipientDigest = undefined,
 }) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found',
@@ -271,6 +275,13 @@ async function sendLifecycleTemplate({
     return { ok: false, skipped: true, reason: 'missing_email',
       ...(billingDeliveryCategory ? { deliveryOutcome: 'not_sent' } : {}),
     };
+  }
+  if (expectedRecipientDigest !== undefined && approvalDigest(cleanEmail(recipient.email) || null) !== expectedRecipientDigest) {
+    await logPaymentLifecycleEmailAttempt({
+      customerId: customer.id, invoiceId, paymentId, paymentMethodId, refundId, paymentPlanId, templateKey, eventType,
+      status: 'skipped', failureReason: 'recipient_changed',
+    });
+    return { ok: false, skipped: true, reason: 'recipient_changed', deliveryOutcome: 'not_sent' };
   }
 
   const firstName = firstToken(recipient.name) || firstToken(customer.first_name) || 'there';
@@ -1041,6 +1052,7 @@ async function sendAchProcessing({
 async function sendPaymentPlanConfirmed({
   customerId,
   paymentPlanId,
+  expectedRecipientDigest,
   paymentMethodId = null,
   plan = {},
   invoiceId = null,
@@ -1069,6 +1081,7 @@ async function sendPaymentPlanConfirmed({
     payload,
     paymentMethodId,
     paymentPlanId: paymentPlanId || null,
+    ...(expectedRecipientDigest !== undefined ? { expectedRecipientDigest } : {}),
     idempotencyKey: idempotencyKey || `payment.plan_confirmed:${paymentPlanId || 'manual'}:${customerId}`,
   });
 }

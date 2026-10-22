@@ -30,6 +30,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { UUID_RE } = require('./task-context');
 const { maskEmail } = require('./closeout-repair-tools');
+const { approvalDigest } = require('../../utils/approval-digest');
 
 function paymentPlanLive() {
   return require('../../config/feature-gates').ibPaymentPlanLive() === true;
@@ -156,13 +157,10 @@ const seqVersion = (seq) => (seq ? {
 
 // ── create_payment_plan ────────────────────────────────────────
 
-async function buildCreatePlan(input) {
-  const target = await resolveInvoice(input);
-  if (target.error) return target;
-  const { invoice } = target;
+// The invoice-side refusals, in the route's order (then the bar's own), or null.
+async function createInvoiceRefusal(invoice) {
   const at = invoice.id;
-  const { assertInvoiceCollectible, invoiceAmountDue } = require('../invoice-helpers');
-  // The route's own refusals, in its order.
+  const { assertInvoiceCollectible } = require('../invoice-helpers');
   if (invoice.payer_id) return refusal('Invoice is billed to a third-party payer — payment plans are not supported for payer invoices', 'payer_owned', { invoice_id: at });
   try {
     assertInvoiceCollectible(invoice);
@@ -176,41 +174,47 @@ async function buildCreatePlan(input) {
   const activePlan = await db('payment_plans').where({ invoice_id: invoice.id, status: 'active' }).first('id');
   if (activePlan) return refusal('Invoice already has an active payment plan', 'plan_exists', { invoice_id: at });
   if (!invoice.updated_at) return refusal('This invoice cannot be pinned for approval, so nothing was offered. Use the Invoices page for this one.', 'unverified', { invoice_id: at });
+  return null;
+}
 
+// The installment amount and frequency against the balance: { frequency, dueCents, paymentCents } or a refusal.
+function planAmounts(input, invoice) {
+  const at = invoice.id;
   const frequency = String(input?.payment_frequency || '').trim();
   if (!FREQUENCIES.includes(frequency)) return refusal(`payment_frequency must be one of: ${FREQUENCIES.join(', ')}`, 'invalid_plan', { invoice_id: at });
-  const dueCents = cents(invoiceAmountDue(invoice));
+  const dueCents = cents(require('../invoice-helpers').invoiceAmountDue(invoice));
   if (dueCents <= 0) return refusal('Invoice has no remaining balance after applied account credit — no payment plan needed', 'nothing_due', { invoice_id: at });
   const paymentRaw = Number(input?.payment_amount);
   if (!Number.isFinite(paymentRaw) || paymentRaw <= 0) return refusal('payment_amount must be a positive amount', 'invalid_plan', { invoice_id: at });
   const paymentCents = cents(paymentRaw);
   if (paymentCents <= 0) return refusal('payment_amount must be at least one cent', 'invalid_plan', { invoice_id: at });
   if (paymentCents > dueCents) return refusal(`payment_amount cannot exceed the amount due (${money(dueCents / 100)})`, 'invalid_plan', { invoice_id: at });
+  return { frequency, dueCents, paymentCents };
+}
+
+// The start and first-payment dates: { startYmd, nextYmd } or a refusal. Neither date may be in the past, and the first
+// payment cannot come before the start.
+function planDates(input, invoiceId) {
+  const bad = (error) => refusal(error, 'invalid_plan', { invoice_id: invoiceId });
   const today = require('../../utils/datetime-et').etDateString();
   const startYmd = String(input?.plan_start_date || today).trim();
   const nextYmd = String(input?.next_payment_date || '').trim();
-  if (!validYmd(startYmd)) return refusal('plan_start_date must be a valid YYYY-MM-DD date', 'invalid_plan', { invoice_id: at });
-  if (!validYmd(nextYmd)) return refusal('next_payment_date must be a valid YYYY-MM-DD date', 'invalid_plan', { invoice_id: at });
-  if (nextYmd < today) return refusal('next_payment_date cannot be in the past', 'invalid_plan', { invoice_id: at });
-  if (nextYmd < startYmd) return refusal('next_payment_date cannot be before plan_start_date', 'invalid_plan', { invoice_id: at });
-  const notes = flat(input?.notes).slice(0, 500) || null;
+  if (!validYmd(startYmd)) return bad('plan_start_date must be a valid YYYY-MM-DD date');
+  if (!validYmd(nextYmd)) return bad('next_payment_date must be a valid YYYY-MM-DD date');
+  if (startYmd < today) return bad('plan_start_date cannot be in the past');
+  if (nextYmd < today) return bad('next_payment_date cannot be in the past');
+  if (nextYmd < startYmd) return bad('next_payment_date cannot be before plan_start_date');
+  return { startYmd, nextYmd };
+}
 
-  const installments = installmentsFor({ totalCents: dueCents, paymentCents, frequency, firstYmd: nextYmd });
-  if (installments.length > MAX_INSTALLMENTS) {
-    return refusal(`That plan needs more than ${MAX_INSTALLMENTS} installments. Use a larger payment_amount or a shorter schedule.`, 'too_many_installments', { invoice_id: at });
-  }
-
-  const who = await require('../../routes/admin-invoices').getInvoiceDeliveryRecipients(invoice.id);
-  if (!who) return refusal('Invoice not found', 'invoice_not_found');
-  const email = who.emailRecipient?.email ? String(who.emailRecipient.email) : null;
-  const seq = await db('invoice_followup_sequences').where({ invoice_id: invoice.id }).first();
-  const name = who.customerName || await customerName(invoice.customer_id);
-  const lines = installments.map((row, index) => `${index + 1}. ${prettyYmd(row.date)} — ${money(row.cents / 100)}`);
+function createEffects({ invoice, seq, frequency, dueCents, paymentCents, nextYmd, installments, email }) {
   const credit = cents(invoice.credit_applied);
-  const effects = [
-    { kind: 'billing', text: `Records a ${frequency} payment plan on invoice ${invoice.invoice_number}: ${installments.length} installment${installments.length === 1 ? '' : 's'} totaling ${money(dueCents / 100)} (the amount due${credit > 0 ? `: ${money(cents(invoice.total) / 100)} total less ${money(credit / 100)} account credit` : ''}).` },
+  const creditText = credit > 0 ? `: ${money(cents(invoice.total) / 100)} total less ${money(credit / 100)} account credit` : '';
+  const remindersOn = seq && ['active', 'paused', 'autopay_hold', 'completed'].includes(seq.status);
+  return [
+    { kind: 'billing', text: `Records a ${frequency} payment plan on invoice ${invoice.invoice_number}: ${installments.length} installment${installments.length === 1 ? '' : 's'} totaling ${money(dueCents / 100)} (the amount due${creditText}).` },
     { kind: 'billing', text: 'NO card is charged. The plan attaches no saved card, and nothing collects the installments automatically: staff record each payment when it arrives.' },
-    { kind: 'operational', text: seq && ['active', 'paused', 'autopay_hold', 'completed'].includes(seq.status)
+    { kind: 'operational', text: remindersOn
       ? 'Its automatic payment reminders stop while the plan is active (cancelling the plan re-arms them).'
       : 'Reminders already off for this invoice stay off while the plan is active.' },
     { kind: 'operational', text: 'The invoice is locked against edits and account-credit changes while the plan is active.' },
@@ -218,13 +222,36 @@ async function buildCreatePlan(input) {
       ? `Emails the customer (${maskEmail(email)}) the payment plan confirmation: total ${money(dueCents / 100)}, ${money(paymentCents / 100)} ${frequency}, next payment ${prettyYmd(nextYmd)}. It is sent once; no text is sent.`
       : 'No usable email is on file, so no confirmation is sent; no text is sent either.' },
   ];
+}
+
+async function buildCreatePlan(input) {
+  const target = await resolveInvoice(input);
+  if (target.error) return target;
+  const { invoice } = target;
+  const refused = await createInvoiceRefusal(invoice);
+  if (refused) return refused;
+  const amounts = planAmounts(input, invoice);
+  if (amounts.error) return amounts;
+  const dates = planDates(input, invoice.id);
+  if (dates.error) return dates;
+  const { frequency, dueCents, paymentCents } = amounts;
+  const { startYmd, nextYmd } = dates;
+  const notes = flat(input?.notes).slice(0, 500) || null;
+  const installments = installmentsFor({ totalCents: dueCents, paymentCents, frequency, firstYmd: nextYmd });
+  if (installments.length > MAX_INSTALLMENTS) {
+    return refusal(`That plan needs more than ${MAX_INSTALLMENTS} installments. Use a larger payment_amount or a shorter schedule.`, 'too_many_installments', { invoice_id: invoice.id });
+  }
+  const who = await require('../../routes/admin-invoices').getInvoiceDeliveryRecipients(invoice.id);
+  if (!who) return refusal('Invoice not found', 'invoice_not_found');
+  const email = who.emailRecipient?.email ? String(who.emailRecipient.email) : null;
+  const seq = await db('invoice_followup_sequences').where({ invoice_id: invoice.id }).first();
   return {
     preview: true,
     tool: 'create_payment_plan',
     invoice_id: invoice.id,
     invoice_number: invoice.invoice_number,
     customer_id: invoice.customer_id,
-    customer_name: name,
+    customer_name: who.customerName || await customerName(invoice.customer_id),
     status: invoice.status,
     amount_due: money(dueCents / 100),
     total: money(cents(invoice.total) / 100),
@@ -232,12 +259,14 @@ async function buildCreatePlan(input) {
     plan_start_date: startYmd,
     next_payment_date: nextYmd,
     installment_count: installments.length,
-    installments: lines,
+    installments: installments.map((row, index) => `${index + 1}. ${prettyYmd(row.date)} — ${money(row.cents / 100)}`),
     charges_card: false,
     emails_customer: Boolean(email),
     notes,
-    effects,
+    effects: createEffects({ invoice, seq, frequency, dueCents, paymentCents, nextYmd, installments, email }),
     sends_to_customer: Boolean(email),
+    // The address the confirmation email may go to (or none): handed to the handler, which sends nothing to any other.
+    _email_recipient_digest: approvalDigest(email ? email.trim().toLowerCase() : null),
     _body: {
       totalBalance: dueCents / 100,
       paymentAmount: paymentCents / 100,
@@ -252,7 +281,7 @@ async function buildCreatePlan(input) {
       status: invoice.status,
       updated_at: msOf(invoice.updated_at),
       total: cents(invoice.total),
-      credit_applied: credit,
+      credit_applied: cents(invoice.credit_applied),
       due_cents: dueCents,
       customer_id: invoice.customer_id || null,
       payer_id: invoice.payer_id || null,
@@ -376,7 +405,8 @@ async function commitCreate(input, actionContext) {
   let result;
   try {
     result = await require('../../routes/admin-invoices').createPaymentPlanFromBar({
-      invoiceId: plan.invoice_id, body: plan._body, actor: await actorOf(actionContext), approvedPlan: { updatedAtMs: plan._version.updated_at },
+      invoiceId: plan.invoice_id, body: plan._body, actor: await actorOf(actionContext),
+      approvedPlan: { updatedAtMs: plan._version.updated_at, emailRecipientDigest: plan._email_recipient_digest },
     });
   } catch (err) {
     logger.error(`[intelligence-bar:payment-plan] create handler failed (${err.code || err.name || 'error'})`);
