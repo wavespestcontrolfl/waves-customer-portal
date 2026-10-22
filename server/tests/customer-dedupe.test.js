@@ -915,6 +915,76 @@ describe('executeMerge', () => {
     expect(StripeService.cancelPaymentIntent).toHaveBeenCalledWith('pi_loser');
   });
 
+  describe('GATE_DEDUPE_NO_UNVERIFIED_BACKFILL', () => {
+    const OLD_GATE = process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL;
+    afterEach(() => {
+      if (OLD_GATE === undefined) delete process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL;
+      else process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL = OLD_GATE;
+    });
+
+    const realCustomer = { id: WINNER, first_name: 'Diana', last_name: 'Blowers', phone: '+19995550003', email: null, pipeline_stage: 'active_customer' };
+    const quoteShell = {
+      id: LOSER, first_name: 'Diana', last_name: null, phone: '9995550003', email: 'typed-by-visitor@example.test',
+      pipeline_stage: 'new_lead', lead_source: 'website_quote', last_contact_type: 'website_quote', lead_source_detail: 'quote-wizard',
+    };
+
+    async function runAuto(winner, loser) {
+      const { trx, state } = buildTrx({ winner, loser, fkRows: FK_ROWS });
+      db.transaction.mockImplementation(async (fn) => fn(trx));
+      const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'auto:test', mode: 'auto' });
+      return { result, state };
+    }
+
+    it('gate on: an auto merge does not copy a public-quote shell email onto the real customer, and keeps it in the journal', async () => {
+      process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL = 'true';
+      const { result, state } = await runAuto(realCustomer, quoteShell);
+      expect(state.backfilled).not.toHaveProperty('email');
+      // Other empty fields still fill (the merge itself is unchanged).
+      expect(state.backfilled).toMatchObject({ lead_source: 'website_quote' });
+      expect(result.backfills).not.toHaveProperty('email');
+      expect(result.skippedBackfills).toEqual({ email: 'typed-by-visitor@example.test' });
+      expect(JSON.parse(state.journal.winner_backfills)).not.toHaveProperty('email');
+      expect(JSON.parse(state.journal.loser_snapshot).email).toBe('typed-by-visitor@example.test');
+      expect(JSON.parse(state.journal.evidence).unverified_shell_backfills_skipped).toEqual({ email: 'typed-by-visitor@example.test' });
+    });
+
+    it('gate off: the same auto merge copies the email as before', async () => {
+      delete process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL;
+      const { result, state } = await runAuto(realCustomer, quoteShell);
+      expect(state.backfilled.email).toBe('typed-by-visitor@example.test');
+      expect(result.backfills.email).toBe('typed-by-visitor@example.test');
+      expect(result.skippedBackfills).toEqual({});
+      expect(JSON.parse(state.journal.evidence)).not.toHaveProperty('unverified_shell_backfills_skipped');
+    });
+
+    it('gate on: a loser that is not an intake shell still backfills the email', async () => {
+      process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL = 'true';
+      const staffEntered = { ...quoteShell, lead_source: 'referral', last_contact_type: 'call', pipeline_stage: 'new_lead' };
+      const { state } = await runAuto(realCustomer, staffEntered);
+      expect(state.backfilled.email).toBe('typed-by-visitor@example.test');
+    });
+
+    it('gate on: a manual merge of the same shell still backfills the email', async () => {
+      process.env.GATE_DEDUPE_NO_UNVERIFIED_BACKFILL = 'true';
+      const { trx, state } = buildTrx({ winner: realCustomer, loser: quoteShell, fkRows: FK_ROWS });
+      db.transaction.mockImplementation(async (fn) => fn(trx));
+      await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'admin' });
+      expect(state.backfilled.email).toBe('typed-by-visitor@example.test');
+    });
+
+    it('isUnverifiedIntakeShell reads the columns the intake routes set', () => {
+      const { isUnverifiedIntakeShell } = dedupe;
+      expect(isUnverifiedIntakeShell({ pipeline_stage: 'new_lead', lead_source: 'website_quote' })).toBe(true);
+      expect(isUnverifiedIntakeShell({ pipeline_stage: 'new_lead', lead_source: 'google_ads', last_contact_type: 'form_submission' })).toBe(true);
+      expect(isUnverifiedIntakeShell({ pipeline_stage: 'new_lead', lead_source: 'google_ads', form_id: 'f-1' })).toBe(true);
+      expect(isUnverifiedIntakeShell({ pipeline_stage: 'new_lead', lead_source: 'lead_pipeline' })).toBe(true);
+      // Worked past new_lead, or no intake mark: not a shell.
+      expect(isUnverifiedIntakeShell({ pipeline_stage: 'estimate_sent', lead_source: 'website_quote' })).toBe(false);
+      expect(isUnverifiedIntakeShell({ pipeline_stage: 'new_lead', lead_source: 'referral', last_contact_type: 'call' })).toBe(false);
+      expect(isUnverifiedIntakeShell(null)).toBe(false);
+    });
+  });
+
   it('a prefs row moved whole to the kept profile has a legacy receipts-off cleared (owner ruling 2026-09-26)', async () => {
     const winner = { id: WINNER, first_name: 'Diana', last_name: 'Blowers', phone: '+19995550003' };
     const loser = { id: LOSER, first_name: 'Diana', last_name: null, phone: '9995550003' };

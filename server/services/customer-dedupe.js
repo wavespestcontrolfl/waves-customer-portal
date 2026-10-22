@@ -50,6 +50,7 @@ const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
 const { MERGE_RETIRED_PHONE_PREFIX } = require('./merge-retired');
 const { NEW_SOD_COLUMNS, NEW_SOD_DATE_COLUMNS, clearedNewSodColumns } = require('./lawn-sod-holds');
 const { dateOnlyString } = require('../utils/datetime-et');
+const { dedupeNoUnverifiedBackfillLive } = require('../config/feature-gates');
 
 // ---------------------------------------------------------------------------
 // Normalization
@@ -1991,6 +1992,40 @@ function timestampMs(value) {
   return Number.isFinite(ms) ? ms : null;
 }
 
+// An UNVERIFIED anonymous intake shell: a row an anonymous web visitor's own
+// typed contact details created and nobody has worked since. The intake routes
+// stamp it: pipeline_stage stays 'new_lead' (public-quote.js, lead-webhook.js,
+// inspection-public.js all insert it), plus lead_source 'website_quote'
+// (public quote) or 'lead_pipeline' (inspection lead), last_contact_type
+// 'website_quote' / 'form_submission', or a form_id (lead webhook). Any row
+// that moved past new_lead is not this case. Wrong guesses fail SAFE: a loser
+// misread as a shell only loses the email backfill, which the journal keeps.
+const UNVERIFIED_INTAKE_LEAD_SOURCES = new Set(['website_quote', 'lead_pipeline']);
+const UNVERIFIED_INTAKE_CONTACT_TYPES = new Set(['website_quote', 'form_submission']);
+function isUnverifiedIntakeShell(row) {
+  if (!row || row.pipeline_stage !== 'new_lead') return false;
+  return UNVERIFIED_INTAKE_LEAD_SOURCES.has(row.lead_source)
+    || UNVERIFIED_INTAKE_CONTACT_TYPES.has(row.last_contact_type)
+    || !isEmptyValue(row.form_id);
+}
+
+// GATE_DEDUPE_NO_UNVERIFIED_BACKFILL: which loser columns an AUTO merge must
+// not copy onto the surviving customer. Only email: invoice and report mail go
+// to customers.email, and the visitor typed it unverified (the intake routes
+// themselves refuse to apply a submitted email to an existing profile). Not
+// phone: the auto sweep only pairs rows that already share a phone, so there is
+// nothing to carry. Not the service-contact slots: the intake routes never set
+// them. Names and the address stay: the auto tier requires them to be
+// compatible with the winner, they only fill blanks, and none is a
+// message-delivery target.
+function unverifiedShellSkippedBackfills(winner, loser, mode) {
+  if (mode !== 'auto' || !dedupeNoUnverifiedBackfillLive() || !isUnverifiedIntakeShell(loser)) return {};
+  const skipped = {};
+  if (!isEmptyValue(winner.email) || isEmptyValue(loser.email)) return skipped;
+  skipped.email = loser.email;
+  return skipped;
+}
+
 function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null } = {}) {
   const winnerPriorValues = {};
   const backfills = {};
@@ -3921,7 +3956,14 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       updated_at: trx.fn.now(),
     });
 
-    const predictedBackfills = predictWinnerBackfills(winner, loser, { derivedStripeCustomerId });
+    // GATE_DEDUPE_NO_UNVERIFIED_BACKFILL: the merge proceeds, but an anonymous
+    // intake shell's typed email is not copied onto the surviving customer.
+    const skippedBackfills = unverifiedShellSkippedBackfills(winner, loser, mode);
+    const predictedBackfills = predictWinnerBackfills(
+      winner,
+      'email' in skippedBackfills ? { ...loser, email: null } : loser,
+      { derivedStripeCustomerId },
+    );
     const backfills = predictedBackfills.backfills;
     Object.assign(winnerPriorValues, predictedBackfills.winnerPriorValues);
     // Combined-session fence, UNCONDITIONAL (codex #3427 r13/r14 P1,
@@ -4165,14 +4207,16 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       }),
       winner_backfills: JSON.stringify(backfills),
       tier: mode === 'auto' ? 'green' : 'manual',
-      evidence: JSON.stringify(evidence),
+      // The skipped values also sit in loser_snapshot; listed here so the
+      // office can find the email to copy by hand.
+      evidence: JSON.stringify(Object.keys(skippedBackfills).length ? { ...evidence, unverified_shell_backfills_skipped: skippedBackfills } : evidence),
       performed_by: performedBy || 'unknown',
     }).returning('id');
 
     logger.info(`[customer-dedupe] merged ${loserId} -> ${winnerId} (${mode}, journal ${journal?.id || journal})`);
     // loserSnapshot lets callers act on the retired row post-commit (e.g. the
     // link-as-property route preserves the loser's address on the winner).
-    return { journalId: journal?.id || journal, repointed, backfills, loserSnapshot: loser, phoneCarry: predictedBackfills.phoneCarry };
+    return { journalId: journal?.id || journal, repointed, backfills, loserSnapshot: loser, phoneCarry: predictedBackfills.phoneCarry, skippedBackfills };
   });
   // Released combined reminder schedules: the log line and any past-final
   // office alert, post-commit (never on the merge's transaction; never throws).
@@ -7297,6 +7341,8 @@ module.exports = {
   previewCollectionCaseReconciliation,
   surplusApprovedCollectionCases,
   predictWinnerBackfills,
+  isUnverifiedIntakeShell,
+  unverifiedShellSkippedBackfills,
   deriveSavedCardStripeCustomer,
   predictSavedCardDemotions,
   predictLoserStateDiscarded,
