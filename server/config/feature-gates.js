@@ -3228,6 +3228,15 @@ const gates = {
   // so a flip needs no redeploy; kill switch: unset GATE_SLOT_TRAVEL_GAP.
   slotTravelGap: gateEnvValue('GATE_SLOT_TRAVEL_GAP'),
 
+  // Slide offers (owner rulings 2026-10-22) — a new customer-facing booking
+  // may take an occupied hour when sliding one or two existing same-day
+  // stops (earlier or later, ≤2h) cuts the day's drive by ≥6 min AND ≥0.5
+  // mi versus the best plain slot (services/scheduling/slide-offer.js).
+  // PHASE 1 = shadow only: find-time logs `[slot-slide] shadow` lines and
+  // offers nothing new. Read at CALL time by find-time.js; kill switch:
+  // unset GATE_SLOT_SLIDE_OFFER.
+  slotSlideOffer: gateEnvValue('GATE_SLOT_SLIDE_OFFER'),
+
   // Booking lunch block (owner ruling 2026-09-23) — restores the
   // 12:00-13:00 reserved window on every customer-facing offer + commit
   // surface (routes/booking.js, routes/reschedule-public.js and

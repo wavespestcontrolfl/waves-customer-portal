@@ -23,7 +23,7 @@ const { stampedDivergesSql } = require('../stamped-address');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, enumerateArrivalPlacements, evaluateArrivalPlacement } = require('./arrival-route');
 const { SHIFT, capacityEnabled, placementFitsShift, customerMaxDetourMinutes, selfServeArrivalGraceMinutes } = require('./policy');
-const { zoneRouteDaysLive } = require('../../config/feature-gates');
+const { zoneRouteDaysLive, gateEnvValue } = require('../../config/feature-gates');
 const { readZoneRouteDays } = require('./zone-route-days');
 const { serviceFamilyPreference } = require('../auto-dispatch/service-category');
 const { travelGapEnabled, violatesTravelGap, travelGapConflicts, isHoldStop } = require('./travel-gap');
@@ -32,7 +32,8 @@ const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service
 const { occupiedRows } = require('./visit-capacity');
 const { stopCreditResolver } = require('./occupancy');
 const { packedBounds } = require('./packing-geometry');
-const { customerWindowAdmits } = require('./customer-windows');
+const { customerWindowAdmits, overlapsLunch } = require('./customer-windows');
+const { findSlideOffers } = require('./slide-offer');
 
 // customerWindowAdmits (scheduling/customer-windows.js) is the ONE grid /
 // day-end / lunch admission rule for customer-facing callers — the
@@ -720,7 +721,7 @@ async function resolveCandidateExpectedMinutes({
 // findAvailableSlots' own branching stays in the loop that drives it, not
 // the row-shaping itself.
 function buildDayStops(services, {
-  tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
+  tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit, slideShadow = false,
 }) {
   const filtered = services.filter((s) => {
     if (excludeSet.has(String(s.id))) return false;
@@ -768,9 +769,65 @@ function buildDayStops(services, {
         ...(creditResolver ? {
           expectedMinutes: creditResolver(s, endMin - startMin),
         } : {}),
+        ...(slideShadow ? { movable: isSlidable(s) } : {}),
       };
     })
     .sort((a, b) => a.startMin - b.startMin);
+}
+
+// Whether a committed stop may be slid to another time the same day to make
+// room for a better-routed booking (GATE_SLOT_SLIDE_OFFER, owner rulings
+// 2026-10-22: any appointment type may slide). Never a live estimate hold
+// (it may lapse), a visit already under way, a staff-locked or excluded
+// visit, or one member of a combined allocation (its span is shared).
+const UNDER_WAY_STATUSES = new Set(['en_route', 'on_site', 'completed']);
+function isSlidable(row) {
+  return row.customer_id != null
+    && row.reservation_expires_at == null
+    && !UNDER_WAY_STATUSES.has(row.status)
+    && row.auto_dispatch_locked !== true
+    && row.auto_dispatch_excluded !== true
+    && row.reservation_service_mix == null;
+}
+
+// Shadow pass for slide offers (GATE_SLOT_SLIDE_OFFER phase 1): computes
+// what a slide could offer on this tech-day and LOGS it — ids and minutes
+// only, never names. Nothing it finds reaches the offer list. Fail-soft: a
+// throw here must never cost the customer their real slots. Bounded to the
+// next SLIDE_SHADOW_MAX_DAYS_OUT days (~2-4 ms per open day; the estimate
+// picker searches up to 90).
+const SLIDE_SHADOW_MAX_DAYS_OUT = 14;
+function logSlideShadow(date, tech, dayStops, params) {
+  const daysOut = (new Date(`${date}T12:00:00Z`) - new Date(`${params.geo.todayEt}T12:00:00Z`)) / 86400000;
+  if (daysOut > SLIDE_SHADOW_MAX_DAYS_OUT) return;
+  try {
+    const home = params.techStartPoints ? techStartPoint(tech) : HQ;
+    const result = findSlideOffers({
+      stops: dayStops,
+      newStop: { ...params.geo.newStop, expectedMinutes: params.geo.candidateExpectedMinutes },
+      durationMinutes: params.durationMinutes,
+      home,
+      dayOpen: params.dayOpen,
+      dayClose: params.dayClose,
+      admits: ({ startMin, endMin, isNew }) => (isNew || startMin % 60 === 0
+        ? customerWindowAdmits({ startMin, endMin })
+        : !overlapsLunch(startMin, endMin)),
+    });
+    if (!result.offers.length) return;
+    const best = result.offers[0];
+    logger.info(`[slot-slide] shadow ${JSON.stringify({
+      date,
+      techId: tech.id,
+      plainStart: minutesToTime(result.baseline.startMin),
+      slideStart: minutesToTime(best.startMin),
+      savedMinutes: best.savedMinutes,
+      savedMiles: Math.round(best.savedMiles * 10) / 10,
+      slides: best.slides.map((x) => ({ id: x.id, from: minutesToTime(x.fromStartMin), to: minutesToTime(x.toStartMin) })),
+      offers: result.offers.length,
+    })}`);
+  } catch (err) {
+    logger.warn(`[slot-slide] shadow failed: ${err.message}`);
+  }
 }
 
 // Adapts a dayStops row ({startMin, endMin, expectedMinutes?}) to the
@@ -978,8 +1035,9 @@ function candidatesForDay(date, tech, params) {
     durationMinutes, dayOpen, dayClose,
   } = params;
   const dayStops = buildDayStops(services, {
-    tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
+    tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit, slideShadow: params.slideShadow,
   });
+  if (params.slideShadow && dayStops.length) logSlideShadow(date, tech, dayStops, params);
   // Build virtual stop list: HQ ... stops ... HQ
   // "Stops" include timing. For gaps we evaluate between consecutive anchors.
   // HQ is this tech's start point for an opted-in staff caller: home under
@@ -1155,7 +1213,7 @@ function startFloorFor(date, earliestStartMin, startFloorByDate) {
 // empty techs array short-circuits (no services/dates query) — the caller
 // still owns the "no assignable technicians" early return, since that
 // shape is a findAvailableSlots response contract, not a loading concern.
-async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates, strictBlackout, techStartPoints = false }) {
+async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates, strictBlackout, techStartPoints = false, slideShadow = false }) {
   // Only assignable techs (active employment AND field-dispatchable). Every
   // slot consumer (booking, estimate availability, reschedule, re-service,
   // voice relay, auto-dispatch) inherits this filter, so a prospective
@@ -1211,6 +1269,15 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
       // coordless stop degrades to no-drive-time instead.
       db.raw(`CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END as cust_lat`),
       db.raw(`CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END as cust_lng`),
+      // Slide-offer movability (isSlidable) — only read with the gate on so
+      // the gate-off query is byte-identical.
+      ...(slideShadow ? [
+        'scheduled_services.status',
+        'scheduled_services.customer_id',
+        'scheduled_services.reservation_expires_at',
+        'scheduled_services.auto_dispatch_locked',
+        'scheduled_services.auto_dispatch_excluded',
+      ] : []),
     );
 
   // Owner blackout days (admin Settings → Scheduling → Blackout days) are
@@ -1277,9 +1344,13 @@ async function findAvailableSlots(opts) {
   const dayOpen = dayStartHour * 60;
   const dayClose = dayEndHour * 60;
 
+  // Slide offers (owner request 2026-10-22) — customer-facing (packed-ends)
+  // callers only, shadow-logged in phase 1. Read at CALL time; kill switch:
+  // unset GATE_SLOT_SLIDE_OFFER.
+  const slideShadow = wantsPackedEnds && gateEnvValue('GATE_SLOT_SLIDE_OFFER');
   const { techs, services, dates, absentDays } = await loadFindTimeContext({
     dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates: opts.includeBlackoutDates, strictBlackout: opts.strictBlackout,
-    techStartPoints: opts.techStartPoints === true,
+    techStartPoints: opts.techStartPoints === true, slideShadow,
   });
   if (!techs.length) return { slots: [], evaluated: 0, note: 'No assignable technicians found' };
 
@@ -1312,6 +1383,7 @@ async function findAvailableSlots(opts) {
     services, geo, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
     slotStepMinutes, durationMinutes, dayOpen, dayClose, everyStepStart,
     techStartPoints: opts.techStartPoints === true,
+    slideShadow,
   };
   for (const date of dates) {
     for (const tech of techs) {
