@@ -10,12 +10,23 @@
 // files (Codex rounds 1-7 on #6402 each found a new one). The setting is what
 // the owner changes in Railway → Variables and can be shown exactly.
 //
-// The variables are every GATE_ name in the gate catalogue
-// (knownGateCatalog(), which already leaves retired gates out). A value is
-// shown only when it is a plain switch word or a timestamp; anything else (an
-// allowlist of ids, say) shows as set, with the value withheld.
+// The variables are every GATE_ name the code reads, from the generated
+// docs/gate-index.md (`npm run gates:index`; check:domain-rules fails a PR
+// that leaves it stale), plus any GATE_ variable set in the environment that
+// the code no longer reads (shown as such, so stale settings can be found).
+// Retired gates stay out. If the index cannot be read, the gate catalogue
+// (knownGateCatalog(), feature-gates.js only) is the fallback.
+//
+// The value is the raw string, never trimmed: " true " is not "true" to any
+// reader, and that is exactly the setting this page must expose. It is shown
+// only when its trimmed form is a plain switch word or a timestamp; anything
+// else (an allowlist of ids, say) shows as set, with the value withheld.
 
+const fs = require('fs');
+const path = require('path');
 const featureGates = require('../config/feature-gates');
+
+const GATE_INDEX = path.join(__dirname, '..', '..', 'docs', 'gate-index.md');
 
 // Names the catalogue's token scan picks up that are not variables: the tail
 // of the INVERTED_GATE_RE constant and the doc placeholder `GATE_X=value`.
@@ -26,10 +37,29 @@ const SHOWN_WORD = /^(true|false|on|off|1|0|yes|no|shadow|auto|live|required)$/i
 const SHOWN_TIMESTAMP = /^\d{4}-\d{2}-\d{2}(T[\d:.]+(Z|[+-]\d{2}:\d{2})?)?$/;
 
 function gateSetting(name) {
-  const raw = String(process.env[name] ?? '').trim();
-  if (!raw) return { set: false, value: null };
-  if (SHOWN_WORD.test(raw) || SHOWN_TIMESTAMP.test(raw)) return { set: true, value: raw };
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return { set: false, value: null };
+  const trimmed = raw.trim();
+  if (trimmed === '' || SHOWN_WORD.test(trimmed) || SHOWN_TIMESTAMP.test(trimmed)) return { set: true, value: raw };
   return { set: true, value: null };
+}
+
+let indexCache = null;
+
+// docs/gate-index.md lines: "- `GATE_X` — `file`, `file` — description".
+function readGateIndex() {
+  if (indexCache) return indexCache;
+  const names = new Map();
+  try {
+    for (const line of fs.readFileSync(GATE_INDEX, 'utf8').split('\n')) {
+      const m = line.match(/^- `(GATE_[A-Z0-9_]+)` — (?:`[^`]+`(?:, )?)+(?: — (.*))?$/);
+      if (m) names.set(m[1], m[2] || null);
+    }
+  } catch {
+    // unreadable index → catalogue fallback below
+  }
+  indexCache = names;
+  return names;
 }
 
 function listGates() {
@@ -39,9 +69,18 @@ function listGates() {
   } catch {
     catalog = new Map();
   }
-  return [...catalog.values()]
-    .filter((doc) => !NOT_GATES.has(doc.name))
-    .map((doc) => ({ name: doc.name, ...gateSetting(doc.name), description: doc.description || null }))
+  const retired = featureGates.RETIRED_GATES || new Set();
+  const index = readGateIndex();
+  const read = index.size ? index : new Map([...catalog.keys()].map((name) => [name, null]));
+  const names = new Set([...read.keys(), ...Object.keys(process.env).filter((n) => /^GATE_[A-Z0-9_]+$/.test(n))]);
+  return [...names]
+    .filter((name) => !NOT_GATES.has(name) && !retired.has(name))
+    .map((name) => ({
+      name,
+      ...gateSetting(name),
+      readByCode: read.has(name),
+      description: catalog.get(name)?.description || read.get(name) || null,
+    }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 

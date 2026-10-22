@@ -69,16 +69,26 @@ describe('GET /api/admin/settings/gates', () => {
     expect(res.headers.get('cache-control')).toBe('no-store');
     const body = await res.json();
     expect(body.gates.length).toBe(listGates().length);
-    expect(Object.keys(body.gates[0]).sort()).toEqual(['description', 'name', 'set', 'value']);
+    expect(Object.keys(body.gates[0]).sort()).toEqual(['description', 'name', 'readByCode', 'set', 'value']);
   });
 });
 
 describe('listGates', () => {
-  test('lists every catalogue gate except the two scan artifacts, once each', () => {
+  test('lists every gate the code reads (docs/gate-index.md), once each', () => {
     const names = listGates().map((g) => g.name);
     expect(new Set(names).size).toBe(names.length);
-    const expected = [...featureGates.knownGateCatalog().keys()].filter((n) => !['GATE_RE', 'GATE_X'].includes(n));
-    expect(names.sort()).toEqual(expected.sort());
+    const indexed = [...require('fs').readFileSync(require('path').join(__dirname, '..', '..', 'docs', 'gate-index.md'), 'utf8')
+      .matchAll(/^- `(GATE_[A-Z0-9_]+)`/gm)].map((m) => m[1]);
+    const retired = featureGates.RETIRED_GATES;
+    for (const name of indexed) expect(names.includes(name)).toBe(!retired.has(name));
+    // Readers outside feature-gates.js are included.
+    for (const name of ['GATE_PREVISIT_BRIEF', 'GATE_SOCIAL_INBOX']) expect(row(name)).toMatchObject({ readByCode: true });
+  });
+
+  test('a GATE_ variable set in the environment but read by no code is listed as such', () => {
+    withEnv({ GATE_ZZ_NOT_READ_ANYWHERE: 'true' }, () => {
+      expect(row('GATE_ZZ_NOT_READ_ANYWHERE')).toMatchObject({ set: true, value: 'true', readByCode: false });
+    });
   });
 
   test('call-time-only gates are listed; retired gates and non-GATE variables are not', () => {
@@ -94,6 +104,10 @@ describe('listGates', () => {
     withEnv({ GATE_SMS_OPERATIONAL_ACTIONS_SINCE: '2026-10-01T00:00:00Z' }, () => {
       expect(row('GATE_SMS_OPERATIONAL_ACTIONS_SINCE').value).toBe('2026-10-01T00:00:00Z');
     });
+  });
+
+  test('keeps stray spaces so a malformed setting is visible', () => {
+    withEnv({ GATE_CRON_JOBS: ' true ' }, () => expect(row('GATE_CRON_JOBS')).toMatchObject({ set: true, value: ' true ' }));
   });
 
   test('withholds any other value', () => {

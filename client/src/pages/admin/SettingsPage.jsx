@@ -422,8 +422,11 @@ function GateListError({ error, onRetry }) {
 function GateSettingBadge({ gate }) {
   if (!gate) return <Badge tone="neutral">Unknown</Badge>;
   if (!gate.set) return <Badge tone="neutral" dot>Not set</Badge>;
-  const off = gate.value !== null && /^(false|off|0|no)$/i.test(gate.value);
-  return <Badge tone={off ? "neutral" : "strong"} dot>{gate.value ?? "Set (value hidden)"}</Badge>;
+  if (gate.value === null) return <Badge tone="strong" dot>Set (value hidden)</Badge>;
+  // Stray spaces are shown in quotes: no reader treats " true " as true.
+  if (gate.value !== gate.value.trim()) return <Badge tone="alert" dot>{`"${gate.value}"`}</Badge>;
+  const off = /^(false|off|0|no)$/i.test(gate.value);
+  return <Badge tone={off ? "neutral" : "strong"} dot>{gate.value}</Badge>;
 }
 
 function FeatureGatesTab() {
@@ -448,6 +451,10 @@ function FeatureGatesTab() {
                 <div className="min-w-0 flex-1">
                   <div className="break-all font-medium text-zinc-900 u-nums">{g.name}</div>
                   {g.description && <div className="mt-1 text-ui-caption text-ink-secondary">{g.description}</div>}
+                  {!g.readByCode && <div className="mt-1 text-ui-caption text-ink-secondary">Set in Railway, but no code reads it.</div>}
+                  {g.value !== null && g.value !== g.value.trim() && (
+                    <div className="mt-1 text-ui-caption text-ink-secondary">The value has extra spaces, so no reader treats it as set.</div>
+                  )}
                 </div>
                 <GateSettingBadge gate={g} />
               </div>

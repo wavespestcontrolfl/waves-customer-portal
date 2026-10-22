@@ -6979,3 +6979,5 @@ function dictationMoneyNormalizeLive() {
 }
 // GATE_DICTATION_MONEY_NORMALIZE reader, on its own line so gate PRs never conflict.
 module.exports.dictationMoneyNormalizeLive = dictationMoneyNormalizeLive;
+// Retired gate names, for the admin gate list (services/gate-list.js), on its own line.
+module.exports.RETIRED_GATES = RETIRED;
