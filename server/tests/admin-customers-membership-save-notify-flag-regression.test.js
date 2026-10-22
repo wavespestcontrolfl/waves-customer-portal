@@ -24,18 +24,23 @@ const mockMembershipEmail = {
 };
 jest.mock('../services/account-membership-email', () => mockMembershipEmail);
 
-const mockState = { initial: null, locked: null, patches: [] };
+// `patches` are the customers-row writes; `otherWrites` every other table's
+// (the contact refresh-family revocation a deactivation makes).
+const mockState = { initial: null, locked: null, patches: [], otherWrites: [] };
 
 jest.mock('../models/db', () => {
   const build = (table, inTransaction = false) => {
     const query = { lockedRead: false };
-    for (const method of ['where', 'whereNull', 'whereNot', 'whereRaw', 'select']) query[method] = () => query;
+    for (const method of ['where', 'whereNull', 'whereNotNull', 'whereNot', 'whereRaw', 'select']) query[method] = () => query;
     query.forUpdate = () => { query.lockedRead = true; return query; };
     query.first = async () => {
       if (table !== 'customers') return null;
       return inTransaction && query.lockedRead ? { ...mockState.locked } : { ...mockState.initial };
     };
-    query.update = async (patch) => { mockState.patches.push({ ...patch }); Object.assign(mockState.locked, patch); return 1; };
+    query.update = async (patch) => {
+      if (table !== 'customers') { mockState.otherWrites.push({ table, patch: { ...patch } }); return 0; }
+      mockState.patches.push({ ...patch }); Object.assign(mockState.locked, patch); return 1;
+    };
     return query;
   };
   const db = jest.fn((table) => build(table));
@@ -68,7 +73,9 @@ async function saveCustomer(body) {
   return result;
 }
 
-beforeEach(() => { jest.clearAllMocks(); mockState.initial = { ...MEMBER }; mockState.locked = { ...MEMBER }; mockState.patches = []; });
+beforeEach(() => { jest.clearAllMocks(); mockState.initial = { ...MEMBER }; mockState.locked = { ...MEMBER }; mockState.patches = []; mockState.otherWrites = []; });
+
+const contactRevocations = () => mockState.otherWrites.filter((w) => w.table === 'customer_refresh_tokens' && w.patch.revoked_at);
 
 test('a monthly-rate typo fix alone sends nothing with no notify flag; notifyCustomer:true fires membership.updated (real monthly lane)', async () => {
   const silent = await saveCustomer({ monthlyRate: 98 });
@@ -129,10 +136,22 @@ test('deactivating a member record (active=false) sends nothing with no notify f
   const silent = await saveCustomer({ active: false });
   expect(silent.status).toBe(200);
   expect(mockMembershipEmail.sendMembershipCanceled).not.toHaveBeenCalled();
+  // The deactivation ends every contact login family on the row (contact
+  // login, codex #6363 r16 P2) — in the save's transaction, notify flag or not.
+  expect(contactRevocations()).toHaveLength(1);
+  expect(contactRevocations()[0].patch).toMatchObject({ revoke_reason: 'account_inactive' });
 
   mockState.initial = { ...mockState.locked, active: true };
   mockState.locked = { ...mockState.locked, active: true };
   await saveCustomer({ active: false, notifyCustomer: true });
   expect(mockMembershipEmail.sendMembershipCanceled).toHaveBeenCalledTimes(1);
   expect(mockMembershipEmail.sendMembershipCanceled.mock.calls[0][0]).toMatchObject({ customerId: 'customer-1', reason: 'Account deactivated' });
+  expect(contactRevocations()).toHaveLength(2);
+
+  // A re-save of an already inactive row, and a save that leaves `active`
+  // alone, revoke nothing.
+  mockState.otherWrites = [];
+  await saveCustomer({ active: false });
+  await saveCustomer({ monthlyRate: 98 });
+  expect(contactRevocations()).toHaveLength(0);
 });

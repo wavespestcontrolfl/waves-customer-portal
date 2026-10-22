@@ -25,6 +25,7 @@ const { scoreAppointmentPlacement } = require('./scoring');
 const {
   applyAutoDispatchMove, revalidatePlacement, unitMoveSize, previewGroupMove,
 } = require('./apply');
+const { startPointRefusal } = require('./start-point-fence');
 const { toDateStr, shiftDateStr } = require('./dates');
 const { stampedAddressDiverges } = require('../stamped-address');
 const { ensureCustomerGeocoded } = require('../geocoder');
@@ -1077,6 +1078,9 @@ async function evaluateServiceForRun(service, run) {
     lookaheadDays: config.lookaheadDays,
     dateToleranceDays: config.dateToleranceDays,
     capabilityFor: run.capabilityFor,
+    // GATE_TECH_START_POINTS: the run's technician start points, read once
+    // per technician (candidate-slots.js loadStartPoints); unused gate off.
+    startPoints: run.startPoints,
     topN: 60,
     // GATE_AUTO_DISPATCH_CONFLICT_MOVES: read the visit's current conflict.
     conflictMoves: config.conflictMovesEnabled === true,
@@ -1272,6 +1276,9 @@ async function applyPlannedMove(pm, run, attempt) {
     // The conflict that lifted the bar for this move; the move guard re-reads
     // it on the move transaction and refuses when it is gone.
     sourceConflict: (fresh.current && fresh.current.conflict) || null,
+    // The start points this move (and any SLOT_TAKEN fallback) was scored from:
+    // the run's cache. The move guard refuses when a Team-tab edit changed one.
+    startPointFor: (technicianId) => require('./candidate-slots')._internals.scoredStartPoint(pm.ctx, technicianId),
     ...moveCheck.writeOptions(checked, {
       alternateCandidates: fresh.rankedCandidates,
       rescore: () => evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary),
@@ -1321,14 +1328,20 @@ async function preferencesChanged(pm) {
   return moveCheck.preferencesPrint(now) !== moveCheck.preferencesPrint(pm.prefs);
 }
 
-// A proofread move that the write refused for an ordinary reason: the one
-// approved slot was taken (a proofread move has no fallback slot), or the
-// visit changed while the model read. Nothing moved; the next run tries again.
-async function logApprovedSlotTaken(pm, attempt, run, reason) {
+// A move that the write refused for an ordinary reason, not a failure: the one
+// approved slot was taken (a proofread move has no fallback slot), the visit
+// changed while the model read, or a technician's start address changed after
+// the move was scored. Nothing moved; the next run tries again.
+function ordinaryRefusal(attempt, err) {
+  return moveCheck.approvedSlotTaken(attempt.checked, err) || startPointRefusal(err);
+}
+
+async function logOrdinaryRefusal(pm, attempt, run, reason) {
   noteUnmoved(run, pm.service, reason.reason_code);
+  const { constraints } = attempt.fresh.audit;
   try {
     await audit.logDecision(run.runId, {
-      action: 'no_change', service: pm.service, ...reason, ...attempt.fresh.audit, constraints: { ...attempt.fresh.audit.constraints, proofreader: attempt.checked.audit },
+      action: 'no_change', service: pm.service, ...reason, ...attempt.fresh.audit, constraints: attempt.checked ? { ...constraints, proofreader: attempt.checked.audit } : constraints,
     });
   } catch (_) { /* swallow */ }
 }
@@ -1367,8 +1380,8 @@ async function runPassTwo(run) {
     try {
       await applyPlannedMove(pm, run, attempt);
     } catch (applyErr) {
-      const notAFailure = moveCheck.approvedSlotTaken(attempt.checked, applyErr);
-      if (notAFailure) await logApprovedSlotTaken(pm, attempt, run, notAFailure);
+      const notAFailure = ordinaryRefusal(attempt, applyErr);
+      if (notAFailure) await logOrdinaryRefusal(pm, attempt, run, notAFailure);
       else await recordApplyFailure(pm, attempt.fresh, applyErr, run);
     }
   }
@@ -1399,6 +1412,7 @@ async function runAutoDispatch(opts = {}) {
   const run = {
     runId,
     config,
+    startPoints: new Map(),
     guardMode: config.guardMode,
     nowDate,
     today,

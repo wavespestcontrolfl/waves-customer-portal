@@ -158,4 +158,4 @@ async function listPortalServiceHistory(customerId, {
   return { services: enriched, total: parseInt(total.count) };
 }
 
-module.exports = { listPortalServiceHistory, parseJsonObject, suppressesCustomerArtifacts };
+module.exports = { listPortalServiceHistory, parseJsonObject, suppressesCustomerArtifacts, scopeRecordsToProperty };

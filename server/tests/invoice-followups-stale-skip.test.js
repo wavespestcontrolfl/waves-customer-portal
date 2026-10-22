@@ -225,6 +225,32 @@ describe('skipStaleTouches', () => {
     expect(result.updated).toBe(false);
   });
 
+  test('a sequence a live touch claim holds (the bar\'s approved send-now mid-dispatch) is not skipped past', async () => {
+    const row = seqRow({ next_touch_at: touchAt('2026-07-29') });
+    setupDb({ batchRows: [] });
+    // Capture the guarded UPDATE's claim predicate and run it against a recorder.
+    const seqQuery = db('invoice_followup_sequences');
+    db.mockImplementation(() => seqQuery);
+    await skipStaleTouches(row, NOW);
+    const claimGuard = seqQuery.where.mock.calls.map(([arg]) => arg).find((arg) => typeof arg === 'function');
+    expect(claimGuard).toBeDefined();
+    const calls = [];
+    const rec = { whereNull: (...a) => { calls.push(['whereNull', ...a]); return rec; }, orWhere: (...a) => { calls.push(['orWhere', ...a]); return rec; } };
+    claimGuard.call(rec);
+    expect(calls[0]).toEqual(['whereNull', 'touch_claimed_at']);
+    expect(calls[1].slice(0, 3)).toEqual(['orWhere', 'touch_claimed_at', '<']);
+    // Only a claim older than the TTL (a crashed sender) lets the skip through.
+    expect(calls[1][3].getTime()).toBe(NOW.getTime() - 10 * 60 * 1000);
+  });
+
+  test('every cron move on the batch snapshot (stale skip, Day 90 ladder both ways) goes through the claim guard', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'invoice-followups.js'), 'utf8');
+    for (const name of ['restoreLegacyDay', 'deferToLadderDay', 'skipStaleTouches']) {
+      const body = src.slice(src.indexOf(`async function ${name}(`), src.indexOf('\n}\n', src.indexOf(`async function ${name}(`)));
+      expect([name, /await cronSnapshotUpdate\(row, /.test(body)]).toEqual([name, true]);
+    }
+  });
+
   test('an admin-shifted anchor (anchor_at) drives the walk, not the send date', async () => {
     // Anchor moved to 08-01: d3 due 08-04 (stale by 1 day at 20h grace? 24h —
     // stale), d7 due 08-08 (future). The invoice_sent_at fallback (07-26)
