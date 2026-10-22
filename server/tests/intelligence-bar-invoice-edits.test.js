@@ -64,8 +64,8 @@ function freshState() {
       ],
     }],
     customers: [{ id: CUST, first_name: 'Robin', last_name: 'Sample', property_type: 'residential' }],
-    payments: [], payer_statements: [], payment_plans: [], stripe_invoice_charge_attempts: [], annual_prepay_terms: [], projects: [], setup_fee_claims: [], dispatch_alerts: [],
-    scheduled_services: [{ id: VISIT, status: 'completed', scheduled_date: '2099-01-01', window_start: '09:00:00', window_end: '11:00:00' }],
+    payments: [], payer_statements: [], payment_plans: [], stripe_invoice_charge_attempts: [], annual_prepay_terms: [], projects: [], setup_fee_claims: [], dispatch_alerts: [], payers: [],
+    scheduled_services: [{ id: VISIT, customer_id: CUST, payer_id: null, self_pay_override: false, status: 'completed', scheduled_date: '2099-01-01', window_start: '09:00:00', window_end: '11:00:00' }],
     technicians: [{ id: 'staff-1', name: 'Pat Admin', email: 'admin@example.com' }],
     writes: [],
   };
@@ -570,13 +570,48 @@ describe('apply_invoice_credit card', () => {
     const lines = cardLines('apply_invoice_credit', card);
     expect(lines[0].text).toBe('Apply account credit to invoice WPC-2099-0001 for Robin Sample: $129.00 of $500.00 available');
     expect(lines[1].text).toBe('Balance due: $129.00 -> $0.00; account credit: $500.00 -> $371.00');
-    expect(card._expected).toEqual({ status: 'sent', updatedAt: UPDATED.getTime(), total: 129, creditApplied: 0, paymentIntentId: null, balanceAfterCents: 37100 });
+    expect(card._expected).toEqual({ status: 'sent', updatedAt: UPDATED.getTime(), total: 129, creditApplied: 0, paymentIntentId: null, activePlan: false, balanceAfterCents: 37100 });
     expect(Invoices.applyCreditFromBar).not.toHaveBeenCalled();
   });
 
   test('partial credit already applied: the amount is the balance still due', async () => {
     setInvoice({ credit_applied: '29.00' });
     expect(await run('apply_invoice_credit')).toMatchObject({ amount_applied: '$100.00', credit_after: '$400.00' });
+  });
+
+  test('the plan state the card showed is pinned for the handler (activePlan), and disclosed when a plan is active', async () => {
+    expect((await run('apply_invoice_credit'))._expected.activePlan).toBe(false);
+    state.payment_plans = [{ id: 'plan-1', invoice_id: INV, status: 'active' }];
+    const card = await run('apply_invoice_credit');
+    expect(card._expected.activePlan).toBe(true);
+    expect(JSON.stringify(card.effects)).toMatch(/payment plan is completed/);
+    // A plan created after the card changes the pinned version too.
+    state.payment_plans = [];
+    expect(await confirm('apply_invoice_credit', card)).toMatchObject({ preview_changed: true });
+    expect(Invoices.applyCreditFromBar).not.toHaveBeenCalled();
+  });
+
+  test('a payer who owns the invoice’s visit NOW (no payer_id on the row) leaves it to the Invoices page; so does an unreadable owner check', async () => {
+    state.scheduled_services[0].payer_id = 'payer-1';
+    state.payers = [{ id: 'payer-1', active: true }];
+    expect(await run('apply_invoice_credit')).toMatchObject({ code: 'payer_invoice' });
+    state.payers = [{ id: 'payer-1', active: false }];
+    expect(await run('apply_invoice_credit')).toMatchObject({ preview: true });
+    const spy = jest.spyOn(require('../services/visit-linked-invoice-withdrawal'), 'liveVisitPayerOf').mockRejectedValueOnce(new Error('db down'));
+    try {
+      expect(await run('apply_invoice_credit')).toMatchObject({ code: 'unverified' });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(Invoices.applyCreditFromBar).not.toHaveBeenCalled();
+  });
+
+  test('a payer assigned after the card refuses at Confirm, before the handler', async () => {
+    const card = await run('apply_invoice_credit');
+    state.scheduled_services[0].payer_id = 'payer-1';
+    state.payers = [{ id: 'payer-1', active: true }];
+    expect(await confirm('apply_invoice_credit', card)).toMatchObject({ code: 'payer_invoice', preview_changed: true });
+    expect(Invoices.applyCreditFromBar).not.toHaveBeenCalled();
   });
 
   test('an optional amount must equal the balance due', async () => {

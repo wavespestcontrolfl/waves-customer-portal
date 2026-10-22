@@ -2835,6 +2835,27 @@ router.get('/:id/credit-context', async (req, res, next) => {
 // Named so the Intelligence Bar's apply_invoice_credit card (applyCreditFromBar, below) runs this very handler.
 // req.ibExpectedCredit is set only by that shim (never an HTTP field): the invoice version and the account credit left
 // after the draw-down, as the card showed them. The Invoices page sends none of it.
+// The bar's apply_invoice_credit, on the LOCKED invoice row, for facts that can change without moving invoices.updated_at: who owes
+// the invoice (a payer set by the credit-reversal / Bill-To writers, or a visit a payer now owns) and whether an active payment plan
+// exists (the handler completes any active plan, so the card must have shown it). A mismatch is a 409 PREVIEW_CHANGED: nothing moves.
+async function assertBarCreditFences(trx, locked, expected) {
+  if (!expected) return;
+  const drift = (why) => {
+    const err = new Error(`Invoice changed while applying credit — ${why}; re-check and retry`);
+    err.statusCode = 409; err.isOperational = true; err.code = 'PREVIEW_CHANGED';
+    return err;
+  };
+  if (locked.payer_id || locked.payer_statement_id) throw drift('it is now billed to a payer');
+  if ((locked.scheduled_service_id || locked.service_record_id)
+    && await require('../services/visit-linked-invoice-withdrawal').liveVisitPayerOf(trx, locked)) {
+    throw drift('a payer now owns its visit');
+  }
+  if (expected.activePlan !== undefined) {
+    const plan = await trx('payment_plans').where({ invoice_id: locked.id, status: 'active' }).first('id');
+    if (Boolean(plan) !== Boolean(expected.activePlan)) throw drift('its payment plan changed');
+  }
+}
+
 const invoiceApplyCreditHandler = async (req, res, next) => {
   try {
     const { assertInvoiceVersion } = require('../services/invoice-bar-expected');
@@ -2921,6 +2942,7 @@ const invoiceApplyCreditHandler = async (req, res, next) => {
         }
         // The bar's card, on the locked row: nothing can change the invoice between this check and the draw-down below.
         assertInvoiceVersion(locked, expectedCredit, 'applying credit');
+        await assertBarCreditFences(trx, locked, expectedCredit);
         // The bar only: an invoice linked to ANY project stays on the page. Paying it nudges the report-release sweep, and a report
         // hold is written without touching the invoice (so the card's pin cannot see it). This read runs with the invoice row held
         // FOR UPDATE; the only writer of projects.invoice_id (admin-projects persistProjectInvoiceLink) locks that invoice row FOR

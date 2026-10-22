@@ -57,7 +57,7 @@ const INVOICE = {
   id: 'inv-1', customer_id: 'cust-1', status: 'sent', total: '100.00', credit_applied: 0, invoice_number: 'WPC-2099-0001',
   payer_id: null, payer_statement_id: null, stripe_payment_intent_id: null, notes: null, updated_at: UPDATED, scheduled_service_id: null,
 };
-const EXPECTED = { status: 'sent', updatedAt: UPDATED.getTime(), total: 100, creditApplied: 0, paymentIntentId: null, balanceAfterCents: 40000 };
+const EXPECTED = { status: 'sent', updatedAt: UPDATED.getTime(), total: 100, creditApplied: 0, paymentIntentId: null, activePlan: false, balanceAfterCents: 40000 };
 const ACTOR = { technicianId: 'admin-1', name: 'Pat Admin', email: 'admin@example.com' };
 
 function makeRecorder(overrides = {}) {
@@ -87,7 +87,7 @@ async function viaPage(body = {}) {
   }
 }
 
-let trx; let trxInvoices; let trxPlans; let trxCustomers; let preInvoices; let trxProjects;
+let trx; let trxInvoices; let trxPlans; let trxCustomers; let preInvoices; let trxProjects; let trxVisits;
 beforeEach(() => {
   jest.clearAllMocks();
   mockGetBalance.mockResolvedValue(500);
@@ -101,8 +101,10 @@ beforeEach(() => {
   trxPlans = makeRecorder();
   trxCustomers = makeRecorder({ first: jest.fn(async () => ({ id: INVOICE.customer_id })) });
   trxProjects = makeRecorder();
+  trxVisits = makeRecorder();
   trx = jest.fn((table) => {
     if (table === 'projects') return trxProjects;
+    if (table === 'scheduled_services') return trxVisits;
     if (table === 'invoices') return trxInvoices;
     if (table === 'payment_plans') return trxPlans;
     if (table === 'customers') return trxCustomers;
@@ -209,6 +211,52 @@ describe('apply-credit — the page and the bar', () => {
     const page = await viaPage({});
     expect(page.status).toBe(200);
     expect(trx).not.toHaveBeenCalledWith('projects');
+  });
+
+  test('a payer set on the LOCKED row without moving updated_at (the credit-reversal / Bill-To writers) refuses the bar before any credit moves; the page keeps its own checks', async () => {
+    trxInvoices.first.mockImplementation(async () => ({ ...INVOICE, payer_id: 'payer-1' }));
+    const answer = await router.applyCreditFromBar({ invoiceId: 'inv-1', body: { waiveSetupFee: false }, actor: ACTOR, expected: EXPECTED });
+    expect(answer).toMatchObject({ status: 409, json: { code: 'PREVIEW_CHANGED', error: expect.stringMatching(/now billed to a payer/) } });
+    expect(mockPostMovement).not.toHaveBeenCalled();
+    expect(trxInvoices.update).not.toHaveBeenCalled();
+  });
+
+  test('a payer that owns the invoice’s visit now (the live resolver, on the locked row) refuses the bar; no owner means the credit goes through', async () => {
+    const Linked = require('../services/visit-linked-invoice-withdrawal');
+    const spy = jest.spyOn(Linked, 'liveVisitPayerOf');
+    try {
+      trxInvoices.first.mockImplementation(async () => ({ ...INVOICE, scheduled_service_id: 'visit-1' }));
+      spy.mockResolvedValueOnce('payer-1');
+      await expect(router.applyCreditFromBar({ invoiceId: 'inv-1', body: { waiveSetupFee: false }, actor: ACTOR, expected: EXPECTED })).resolves
+        .toMatchObject({ status: 409, json: { code: 'PREVIEW_CHANGED', error: expect.stringMatching(/payer now owns its visit/) } });
+      expect(spy).toHaveBeenCalledWith(trx, expect.objectContaining({ id: 'inv-1', scheduled_service_id: 'visit-1' }));
+      expect(mockPostMovement).not.toHaveBeenCalled();
+      spy.mockResolvedValueOnce(null);
+      trxVisits.first.mockImplementation(async () => ({ id: 'visit-1', status: 'confirmed' }));
+      const ok = await router.applyCreditFromBar({ invoiceId: 'inv-1', body: { waiveSetupFee: false }, actor: ACTOR, expected: EXPECTED });
+      expect(ok.status).toBe(200);
+      expect(mockPostMovement).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('a payment plan created after the card (an active plan the card did not show) refuses on the locked row, before the handler would silently complete it; a shown plan is fine', async () => {
+    trxPlans.first.mockImplementation(async () => ({ id: 'plan-1' }));
+    const answer = await router.applyCreditFromBar({ invoiceId: 'inv-1', body: { waiveSetupFee: false }, actor: ACTOR, expected: EXPECTED });
+    expect(answer).toMatchObject({ status: 409, json: { code: 'PREVIEW_CHANGED', error: expect.stringMatching(/payment plan changed/) } });
+    expect(trxPlans.where).toHaveBeenCalledWith({ invoice_id: 'inv-1', status: 'active' });
+    expect(mockPostMovement).not.toHaveBeenCalled();
+    expect(trxPlans.update).not.toHaveBeenCalled();
+    // The card showed the plan: the credit completes it, as disclosed.
+    const shown = await router.applyCreditFromBar({ invoiceId: 'inv-1', body: { waiveSetupFee: false }, actor: ACTOR, expected: { ...EXPECTED, activePlan: true } });
+    expect(shown.status).toBe(200);
+    // The reverse: the card showed a plan that is gone.
+    trxPlans.first.mockImplementation(async () => null);
+    mockPostMovement.mockClear();
+    const gone = await router.applyCreditFromBar({ invoiceId: 'inv-1', body: { waiveSetupFee: false }, actor: ACTOR, expected: { ...EXPECTED, activePlan: true } });
+    expect(gone).toMatchObject({ status: 409, json: { code: 'PREVIEW_CHANGED' } });
+    expect(mockPostMovement).not.toHaveBeenCalled();
   });
 
   test('applying credit sends nothing and charges no card: no Stripe charge call exists on this path', async () => {

@@ -706,8 +706,17 @@ async function chargeFenceRefusal(invoice, where) {
 
 const creditBalanceDue = (invoice) => cents(invoice.total) - cents(invoice.credit_applied);
 
-function creditPayerRefusal(invoice) {
-  if (!invoice.payer_id && !invoice.payer_statement_id) return null;
+// Billed to a payer by the row, or owed by one now: the live Bill-To owner of its visit (the credit handler re-checks it under the lock).
+async function creditPayerRefusal(invoice) {
+  let payerOwned = Boolean(invoice.payer_id || invoice.payer_statement_id);
+  if (!payerOwned && (invoice.scheduled_service_id || invoice.service_record_id)) {
+    try {
+      payerOwned = Boolean(await require('../visit-linked-invoice-withdrawal').liveVisitPayerOf(db, invoice));
+    } catch {
+      return refusal('The bar could not check who owes this invoice, so it was not offered. Apply the credit from the Invoices page.', 'unverified', { invoice_id: invoice.id });
+    }
+  }
+  if (!payerOwned) return null;
   return refusal('This invoice is billed to a third-party payer, and account credit belongs to the homeowner. Account credit cannot be applied to payer invoices.', 'payer_invoice', { invoice_id: invoice.id });
 }
 
@@ -831,6 +840,8 @@ function creditPins({ invoice, dueCents, balanceCents, plan, fromVisit, noteText
       total: Number(invoice.total) || 0,
       creditApplied: Number(invoice.credit_applied) || 0,
       paymentIntentId: null,
+      // The plan state the card showed (the handler completes any active plan): enforced on the locked invoice row.
+      activePlan: Boolean(plan),
       balanceAfterCents: balanceCents - dueCents,
     },
   };
