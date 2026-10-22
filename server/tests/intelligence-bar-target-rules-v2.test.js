@@ -663,9 +663,22 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     // Every phone or email form is a qualifier: carded, whatever it resolves to.
     for (const prompt of ['update the notes for Pat Example at 941-555-9999', 'update the notes for Pat Example at 941-555-0777',
       'update the notes for Pat Example at nobody@example.test', 'update the notes for Pat Example at 941-555-0100',
-      'update the notes for Pat Example at pat@example.test', 'fix the notes on 941-555-0100', 'fix the notes on 941-555-9999']) {
+      'update the notes for Pat Example at pat@example.test', 'fix the notes on 941-555-9999']) {
       expect([prompt, await direct(prompt)]).toEqual([prompt, [false, []]]);
     }
+    // Owner ruling 2026-10-22: one contact literal and no name, naming exactly one customer, is direct too.
+    expect(await direct('fix the notes on 941-555-0100')).toEqual([true, [id(100)]]);
+    expect(await direct('fix the notes on pat@example.test')).toEqual([true, [id(100)]]);
+    expect(await direct('fix the notes on (941) 555-0100')).toEqual([true, [id(100)]]);
+    // A contact shared by two customers, or by nobody: carded.
+    expect(await direct('fix the notes on 941-555-0777')).toEqual([false, []]);
+    // Two contacts (phone + email, or two phones): carded, even when both name the same customer.
+    expect(await direct('fix the notes on 941-555-0100 and pat@example.test')).toEqual([false, []]);
+    expect(await direct('fix the notes on 941-555-0100 and 941-555-0777')).toEqual([false, []]);
+    // A contact beside a record id or a choice reply is a qualifier.
+    expect(await direct('fix the notes on 941-555-0100 10000000-0000-4000-8000-000000000999')).toEqual([false, []]);
+    // A replacement value is stripped first and never counts as the contact.
+    expect(await direct("update the notes and change the cell to 941-555-0100")).toEqual([false, []]);
     // A name that resolves nowhere beside a unique phone: carded (the phone may still pick the target for the card).
     const nowhere = await ask('update Jhon Smith at 941-555-0100');
     expect(nowhere.groundedCustomerIds).toEqual([]);
