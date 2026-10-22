@@ -39,12 +39,41 @@ describe('scheduled-cron replay guard', () => {
     expect(spy.mock.calls.at(-1)[2]).toEqual({ recoverMissedExecutions: true, timezone: TZ });
   });
 
-  test('an on-time tick and a replay a few seconds late both run', () => {
+  test('a replay a few seconds late runs', () => {
     const matched = new Date('2026-10-31T03:50:00.000Z'); // 23:50 ET
-    jest.setSystemTime(new Date(matched.getTime() + 300));
-    tick(zoneWallClock(matched, TZ));
     jest.setSystemTime(new Date(matched.getTime() + 8000));
     tick(zoneWallClock(matched, TZ));
+    expect(body).toHaveBeenCalledTimes(1);
+  });
+
+  test('a repeat of a matched second that already ran is skipped; the next occurrence runs', () => {
+    // node-cron 3.0.3 hands the same occurrence over twice (milliseconds
+    // differ); production ran every cron twice from 2026-10-21.
+    const matched = new Date('2026-10-31T03:50:00.000Z');
+    jest.setSystemTime(new Date(matched.getTime() + 300));
+    tick(zoneWallClock(new Date(matched.getTime() + 300), TZ));
+    jest.setSystemTime(new Date(matched.getTime() + 1300));
+    tick(zoneWallClock(new Date(matched.getTime() + 700), TZ));
+    expect(body).toHaveBeenCalledTimes(1);
+    const nextDay = new Date(matched.getTime() + 24 * 3600 * 1000);
+    jest.setSystemTime(new Date(nextDay.getTime() + 300));
+    tick(zoneWallClock(nextDay, TZ));
+    expect(body).toHaveBeenCalledTimes(2);
+  });
+
+  test('a skipped stale replay does not block the next occurrence', () => {
+    const matched = new Date('2026-10-31T03:50:00.000Z');
+    jest.setSystemTime(new Date(matched.getTime() + scheduledCron.REPLAY_MAX_LATE_MS + 1000));
+    tick(zoneWallClock(matched, TZ));
+    const nextDay = new Date(matched.getTime() + 24 * 3600 * 1000);
+    jest.setSystemTime(new Date(nextDay.getTime() + 300));
+    tick(zoneWallClock(nextDay, TZ));
+    expect(body).toHaveBeenCalledTimes(1);
+  });
+
+  test('a manual run (no matched time) always runs', () => {
+    tick('manual');
+    tick('manual');
     expect(body).toHaveBeenCalledTimes(2);
   });
 
@@ -112,5 +141,20 @@ describe('scheduled-cron recovery with real node-cron', () => {
 
   test('the wrapper fires that tick late, exactly once', async () => {
     expect(await firesAcrossBlockedSecond(scheduledCron.schedule)).toBe(1);
+  });
+});
+
+describe('scheduled-cron with the real node-cron scheduler', () => {
+  afterEach(() => jest.useRealTimers());
+
+  test('an hourly task runs once per occurrence, not twice', () => {
+    // Without the repeat guard node-cron 3.0.3 fires this occurrence twice.
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+    jest.setSystemTime(new Date('2026-10-22T10:59:59.300Z'));
+    const body = jest.fn();
+    const task = scheduledCron.schedule('0 * * * *', body, { timezone: 'UTC' });
+    for (let i = 0; i < 5; i += 1) jest.advanceTimersByTime(1000);
+    task.stop();
+    expect(body).toHaveBeenCalledTimes(1);
   });
 });
