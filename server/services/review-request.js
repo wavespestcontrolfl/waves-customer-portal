@@ -105,6 +105,38 @@ function reportTextAnchorFromNotes(notes, { atPayment = false } = {}) {
   if (atPayment) return { status: "paid", at: new Date().toISOString() };
   return { status: "sent", at: n.completionSmsDeferredDeliveredAt || n.sentSmsAt || new Date().toISOString() };
 }
+// structured_notes as an object (a string column value is parsed; bad JSON
+// reads as empty).
+function structuredNotesObject(raw) {
+  if (typeof raw !== "string") return raw || {};
+  try { return JSON.parse(raw); } catch { return {}; }
+}
+// The report_pending hold applies to facts fixed at enrollment: a post-service
+// Day-0 that has sent nothing, tied to its service record, not
+// customer-requested, and no older than REPORT_PENDING_MAX_HOLD_MS.
+function reportPendingEligible(seq, nowMs = Date.now()) {
+  if (!seq?.service_record_id || seq.started_by !== "post_service" || seq.customer_requested) return false;
+  if (Number(seq.current_step || 0) !== 0 || Number(seq.touches_sent || 0) !== 0) return false;
+  return !(nowMs - new Date(seq.started_at || NaN).getTime() > REPORT_PENDING_MAX_HOLD_MS);
+}
+// When a held Automatic ask may go, from the record's report text (ms; the
+// caller holds only while this is in the future):
+//   delivered by the scheduled-SMS rail -> delivery + 10 min
+//   still queued                        -> recheck in 5 min
+//   held, then the replay died          -> the smart window from the release
+//     time (terminalDeferredCompletionSend writes 'failed' and keeps
+//     completionSmsDeferredTo; jitter off, so every recheck names one instant)
+// Anything else gives NaN: no hold.
+function reportPendingReadyMs(notes, serviceType, nowMs) {
+  if (notes.completionSmsDeferredDeliveredAt) {
+    return new Date(notes.completionSmsDeferredDeliveredAt).getTime() + REVIEW_AFTER_REPORT_DELAY_MINUTES * 60000;
+  }
+  if (notes.completionSmsStatus === "deferred") return nowMs + REPORT_PENDING_RECHECK_MINUTES * 60000;
+  if (notes.completionSmsStatus !== "failed" || !notes.completionSmsDeferredTo) return NaN;
+  const releasedAt = new Date(notes.completionSmsDeferredTo);
+  if (Number.isNaN(releasedAt.getTime())) return NaN;
+  return calculateReviewSendPlan(releasedAt, serviceType, { jitter: false }).at?.getTime() ?? NaN;
+}
 // The gate reader, wrapped so a test double of feature-gates that predates it
 // reads as off.
 function reviewAskAfterReportOn() {
@@ -2003,11 +2035,7 @@ const ReviewService = {
     if (!serviceRecordId || !reviewAskAfterReportOn()) return null;
     try {
       const row = await db("service_records").where({ id: serviceRecordId }).first("structured_notes");
-      let notes = row?.structured_notes || {};
-      if (typeof notes === "string") {
-        try { notes = JSON.parse(notes); } catch { notes = {}; }
-      }
-      return reportTextAnchorFromNotes(notes);
+      return reportTextAnchorFromNotes(structuredNotesObject(row?.structured_notes));
     } catch (err) {
       logger.warn(`[review] report anchor lookup failed (serviceRecordId=${serviceRecordId}): ${err.message}`);
       return null;
@@ -2015,49 +2043,25 @@ const ReviewService = {
   },
 
   async _reportPendingHold(seq) {
+    if (!reportPendingEligible(seq)) return null;
+    const nowMs = Date.now();
+    let row;
     try {
-      if (!seq?.service_record_id || seq.started_by !== "post_service" || seq.customer_requested) return null;
-      if (Number(seq.current_step || 0) !== 0 || Number(seq.touches_sent || 0) !== 0) return null;
-      const startedMs = seq.started_at ? new Date(seq.started_at).getTime() : NaN;
-      if (Number.isFinite(startedMs) && Date.now() - startedMs > REPORT_PENDING_MAX_HOLD_MS) return null;
-      const retryAt = new Date(Date.now() + REPORT_PENDING_RECHECK_MINUTES * 60000);
-      let row;
-      try {
-        row = await db("service_records").where({ id: seq.service_record_id }).first("structured_notes");
-      } catch (err) {
-        logger.warn(`[review] report-pending lookup failed (sequenceId=${seq.id}): ${err.message}`);
-        return { retryAt };
-      }
-      let notes = row?.structured_notes || {};
-      if (typeof notes === "string") {
-        try { notes = JSON.parse(notes); } catch { notes = {}; }
-      }
+      row = await db("service_records").where({ id: seq.service_record_id }).first("structured_notes");
+    } catch (err) {
+      logger.warn(`[review] report-pending lookup failed (sequenceId=${seq.id}): ${err.message}`);
+      return { retryAt: new Date(nowMs + REPORT_PENDING_RECHECK_MINUTES * 60000) };
+    }
+    try {
+      const notes = structuredNotesObject(row?.structured_notes);
       // An explicit operator timing (Tomorrow 8 AM, custom, a stored delay) is
       // persisted on the record and keeps its own time: the hold is only for
       // the Automatic ask.
       if (this.completionReviewDelay(notes) !== undefined) return null;
-      if (notes.completionSmsStatus === "deferred" && !notes.completionSmsDeferredDeliveredAt) return { retryAt };
-      // A held report whose replay then died (terminalDeferredCompletionSend
-      // writes 'failed' and keeps completionSmsDeferredTo): the ask was planned
-      // for its release + 10 min, so move it to the smart window a failed text
-      // gets, computed from the release time (jitter off, so every recheck
-      // names the same instant).
-      if (notes.completionSmsStatus === "failed" && notes.completionSmsDeferredTo && !notes.completionSmsDeferredDeliveredAt) {
-        const releasedAt = new Date(notes.completionSmsDeferredTo);
-        if (!Number.isNaN(releasedAt.getTime())) {
-          const smartAt = calculateReviewSendPlan(releasedAt, seq.service_type, { jitter: false }).at;
-          if (smartAt && Date.now() < smartAt.getTime()) return { retryAt: smartAt };
-        }
-        return null;
-      }
-      if (notes.completionSmsDeferredDeliveredAt) {
-        const deliveredMs = new Date(notes.completionSmsDeferredDeliveredAt).getTime();
-        const readyMs = deliveredMs + REVIEW_AFTER_REPORT_DELAY_MINUTES * 60000;
-        if (Number.isFinite(deliveredMs) && Date.now() < readyMs) return { retryAt: new Date(readyMs) };
-      }
-      return null;
+      const readyMs = reportPendingReadyMs(notes, seq.service_type, nowMs);
+      return Number.isFinite(readyMs) && nowMs < readyMs ? { retryAt: new Date(readyMs) } : null;
     } catch (err) {
-      logger.warn(`[review] report-pending check failed (sequenceId=${seq?.id}): ${err.message}`);
+      logger.warn(`[review] report-pending check failed (sequenceId=${seq.id}): ${err.message}`);
       return null;
     }
   },
@@ -8064,7 +8068,7 @@ const ReviewService = {
         // intended channel unavailable, the other allowed) — email→SMS then
         // meets the send window, SMS→email escapes it — so the page shows the
         // other channel's tick when it differs (codex #4140 r14, r16 P2).
-        ...fallbackTickFor(plan[r.current_step], parked ? null : nextFrom),
+        ...fallbackTickFor(plan[r.current_step], parked ? null : nextFrom, isAfterReportFastRow(r)),
         // next_run_at NULL on an active row = the runner holds the send claim
         // right now (or an inline start is in progress). The claim stamps
         // updated_at; one older than the runner's own reconciliation horizon

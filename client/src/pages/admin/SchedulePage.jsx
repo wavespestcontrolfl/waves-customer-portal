@@ -70,6 +70,7 @@ import {
   MAX_REVIEW_DELAY_MS,
   REVIEW_TIMING_DEFAULT,
   REVIEW_TIMING_OPTIONS,
+  completionReportTextExpected,
   completionReviewHint,
   completionReviewSuppressionReason,
   completionTimeOnSiteBody,
@@ -18162,7 +18163,7 @@ export function CompletionPanel({
       // still carry a later tick range after a tick boundary (codex #4140
       // r15 P2); only a bucket change needs the operator's confirmation.
       if (fresh) setReviewSendPreview(fresh);
-      const verdict = reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, failureNoticed: previewFailureNoticedRef.current });
+      const verdict = reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, failureNoticed: previewFailureNoticedRef.current, reportTextExpected: completionReportTextExpected({ effectiveSendSms, customerPhone: service?.customerPhone }) });
       if (verdict) {
         if (verdict.noticed) previewFailureNoticedRef.current = true;
         if (verdict.dropShown) setReviewSendPreview(null);

@@ -3,6 +3,7 @@ import {
   customReviewTimeProblem,
   reviewDelayMinutesOf,
   reviewPreviewSubmitVerdict,
+  completionReportTextExpected,
   reviewScheduledForOf,
   reviewSendPreviewPath,
   timedReviewHint,
@@ -111,5 +112,14 @@ describe('the Automatic hint while the ask goes out after the report text', () =
     expect(reviewPreviewSubmitVerdict({ reviewTiming: 'auto', fresh, shown })).toBeNull();
     expect(reviewPreviewSubmitVerdict({ reviewTiming: 'auto', fresh: null, shown, failureNoticed: false }).message)
       .toMatch(/time after the report text/);
+  });
+
+  test('a failed re-check without a report text names the smart send window', () => {
+    const shown = { ...afterReport };
+    expect(reviewPreviewSubmitVerdict({ reviewTiming: 'auto', fresh: null, shown, failureNoticed: false, reportTextExpected: false }).message)
+      .toMatch(/smart send window/);
+    expect(completionReportTextExpected({ effectiveSendSms: false, customerPhone: '+19415550100' })).toBe(false);
+    expect(completionReportTextExpected({ effectiveSendSms: true, customerPhone: '' })).toBe(false);
+    expect(completionReportTextExpected({ effectiveSendSms: true, customerPhone: undefined })).toBe(true);
   });
 });

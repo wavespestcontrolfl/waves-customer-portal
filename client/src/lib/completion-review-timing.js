@@ -350,7 +350,9 @@ export function customReviewTimeProblem(reviewCustomAt) {
 // (`shown`): null to go on, else { message, noticed, dropShown }. A bucket change of an Automatic
 // time needs the operator's second look; a failed re-check stops ONCE (`failureNoticed`), after
 // which the submit proceeds and the server computes the window itself (codex #4140 r3, r13, r18).
-export function reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, failureNoticed }) {
+// `reportTextExpected` false (texting off, no phone): no report text anchors the ask, so the
+// server uses the smart window even when the preview offered the after-report time.
+export function reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, failureNoticed, reportTextExpected = true }) {
   if (reviewTiming === "auto" && fresh && shown && reviewPreviewBucket(fresh) !== reviewPreviewBucket(shown)) {
     return { message: `The automatic review time changed to ${formatETDateTime(fresh.at, { weekday: "short", hour: "numeric", minute: "2-digit" })}. Submit again to confirm.` };
   }
@@ -359,11 +361,17 @@ export function reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, failure
       noticed: true,
       dropShown: !!shown,
       message: reviewTiming === "auto" && shown
-        ? `The automatic review time could not be re-checked. The server will pick the ${shown.afterReport === true ? "time after the report text" : "smart send window"} — submit again to continue.`
+        ? `The automatic review time could not be re-checked. The server will pick the ${shown.afterReport === true && reportTextExpected ? "time after the report text" : "smart send window"} — submit again to continue.`
         : "Whether automated review texts can send could not be checked. If the scheduler is off nothing sends; the choice is still recorded on this visit. Submit again to continue.",
     };
   }
   return null;
+}
+
+// Whether the completion can send a report text at all: texting on and a phone that is not
+// known to be missing (undefined reads as yes).
+export function completionReportTextExpected({ effectiveSendSms, customerPhone }) {
+  return !!effectiveSendSms && customerPhone !== "" && customerPhone !== null;
 }
 
 // The hint under the review timing, and whether the review link rides inside the completion
@@ -381,7 +389,7 @@ export function completionReviewHint({ willReview, oneTimeRecapOnly = false, eff
         && preview?.bundlesImmediateAsk === true
         && !reviewAwaitsPayment));
   const text = willReview && !oneTimeRecapOnly
-    ? reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled, awaitsPayment: reviewAwaitsPayment, reportTextExpected: !!effectiveSendSms && customerPhone !== "" && customerPhone !== null })
+    ? reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled, awaitsPayment: reviewAwaitsPayment, reportTextExpected: completionReportTextExpected({ effectiveSendSms, customerPhone }) })
     : "";
   return { text, bundled };
 }

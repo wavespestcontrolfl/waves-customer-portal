@@ -8371,6 +8371,22 @@ describe('GATE_REVIEW_ASK_AFTER_REPORT — Day-0 ask 10 minutes after the report
       expect(isAfterReportFastRow({ ...row, started_by: 'admin' })).toBe(false);
     });
 
+    test('a fast row shows its email fallback on the */5 tick too, not :14/:44 (codex #6434 r6 P2)', async () => {
+      mockGates.reviewAskAfterReport = true;
+      mockGates.smsSendWindow = true;
+      // 9:05 PM EDT = 01:05Z: the text waits for the 8 AM window; the email fallback goes at 9:10 PM.
+      const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(new Date('2026-10-21T01:05:00Z').getTime());
+      db.mockImplementation(makeMock({ review_sequences: [{ id: 'fast-night', customer_id: 'fast-c', status: 'active', current_step: 0, touches_sent: 0,
+        started_by: 'post_service', decision: JSON.stringify({ reason: 'after_report' }),
+        plan: '[{"day":0,"channel":"sms","templateKey":"day0_ask"}]', next_run_at: new Date('2026-10-21T01:06:00Z') }] }));
+      try {
+        const map = await ReviewService.getActiveSequencesForCustomers(['fast-c']);
+        expect(map['fast-c']).toMatchObject({ fallbackChannel: 'email', plannedChannel: 'text' });
+        expect(map['fast-c'].fallbackTickAt.toISOString()).toBe('2026-10-21T01:10:00.000Z');
+        expect(map['fast-c'].nextSendTickAt.toISOString()).toBe('2026-10-21T12:00:00.000Z');
+      } finally { nowSpy.mockRestore(); mockGates.smsSendWindow = false; }
+    });
+
     test('the tick table is the union of the two cron registrations in scheduler.js', () => {
       const union = [...new Set([...REVIEW_CADENCE_TICK_MINUTES, ...Array.from({ length: 12 }, (_, i) => i * 5)])].sort((a, b) => a - b);
       expect(REVIEW_AFTER_REPORT_TICK_MINUTES).toEqual(union);

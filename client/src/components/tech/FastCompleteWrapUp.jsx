@@ -17,6 +17,7 @@ import {
   REVIEW_TIMING_DEFAULT,
   REVIEW_TIMING_OPTIONS,
   MAX_REVIEW_DELAY_MS,
+  completionReportTextExpected,
   completionReviewHint,
   completionReviewSuppressionReason,
   completionWillReview,
@@ -95,7 +96,7 @@ export function useWrapUp({ gate, submission, sharedNote, service, request, base
     if (early) return early;
     const schedulerStateKnown = typeof review.previewRef.current?.schedulerEnabled === 'boolean';
     if (previewRecheckWanted({ ...latest.current, schedulerStateKnown })) {
-      const verdict = await review.recheck(latest.current.reviewTiming);
+      const verdict = await review.recheck(latest.current.reviewTiming, { reportTextExpected: completionReportTextExpected({ effectiveSendSms: latest.current.sendSms, customerPhone: service?.customerPhone }) });
       if (verdict) return verdict.message;
     }
     return customTimeProblem(latest.current);
