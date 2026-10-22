@@ -3,7 +3,8 @@ const { plannedCity } = require('../scripts/backfill-blank-city-from-zip');
 describe('backfill plannedCity', () => {
   test('fills a blank city from an in-service-area ZIP', () => {
     expect(plannedCity({ city: null, zip: '34219' })).toBe('Parrish');
-    expect(plannedCity({ city: '', zip: '33950' })).toBe('Punta Gorda');
+    expect(plannedCity({ city: '', zip: '33952' })).toBe('Port Charlotte');
+    expect(plannedCity({ city: '', zip: '33950' })).toBe(''); // Punta Gorda is not served
     expect(plannedCity({ city: '   ', zip: '34221' })).toBe('Palmetto'); // whitespace-only counts as blank
   });
 

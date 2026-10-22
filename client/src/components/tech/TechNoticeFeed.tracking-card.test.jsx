@@ -6,7 +6,7 @@
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import GeofenceArrivalPrompt from './GeofenceArrivalPrompt';
+import TechNoticeFeed from './TechNoticeFeed';
 
 function notification(type, payload, id = `n-${type}`) {
   return { id, type, message: 'server message', payload, created_at: '2026-09-08T18:41:00Z' };
@@ -28,7 +28,7 @@ function stubFeed(notifications, { failPosts = false } = {}) {
   return calls;
 }
 
-describe('GeofenceArrivalPrompt — missing-tracking cards', () => {
+describe('TechNoticeFeed — missing-tracking cards', () => {
   beforeEach(() => {
     localStorage.setItem('waves_admin_token', 'tech-token');
     vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -43,7 +43,7 @@ describe('GeofenceArrivalPrompt — missing-tracking cards', () => {
 
   it('renders a stage-1 tracking card with the server message and a Got it dismiss', async () => {
     stubFeed([STAGE1]);
-    render(<GeofenceArrivalPrompt />);
+    render(<TechNoticeFeed />);
     await act(async () => { await Promise.resolve(); });
 
     const card = await screen.findByTestId('tracking-notice');
@@ -57,7 +57,7 @@ describe('GeofenceArrivalPrompt — missing-tracking cards', () => {
 
   it('does not auto-dismiss a stage-2 card after the 5-minute reminder timer', async () => {
     stubFeed([STAGE2]);
-    render(<GeofenceArrivalPrompt />);
+    render(<TechNoticeFeed />);
     await act(async () => { await Promise.resolve(); });
     await screen.findByTestId('tracking-notice');
 
@@ -67,7 +67,7 @@ describe('GeofenceArrivalPrompt — missing-tracking cards', () => {
 
   it('"Got it" dismisses it and posts the dismiss endpoint', async () => {
     const calls = stubFeed([STAGE1], { failPosts: false });
-    render(<GeofenceArrivalPrompt />);
+    render(<TechNoticeFeed />);
     await act(async () => { await Promise.resolve(); });
     await screen.findByTestId('tracking-notice');
 
@@ -94,7 +94,7 @@ describe('GeofenceArrivalPrompt — missing-tracking cards', () => {
     newerVisitB.created_at = '2026-09-08T18:40:00Z';
 
     stubFeed([trackingStage2, newerVisitA, newerVisitB]);
-    render(<GeofenceArrivalPrompt />);
+    render(<TechNoticeFeed />);
     await act(async () => { await Promise.resolve(); });
 
     const card = await screen.findByTestId('tracking-notice');

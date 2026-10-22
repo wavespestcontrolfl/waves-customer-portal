@@ -147,6 +147,8 @@ export default function AdminLayoutV2() {
   // Per verified account, like the field-workspace read below: an account
   // switch in another tab refetches flags (Codex #5573 r8).
   const agentEstimateEnabled = useFeatureFlag("agent_estimate", false, userId);
+  // Bid Desk (GATE_BID_DESK): the server only sends this flag while the gate is on.
+  const bidDeskEnabled = useFeatureFlag("bid_desk", false, userId);
   const navigationEnabled = useFeatureFlag("admin-navigation", false, userId);
   const paletteRef = useRef(null);
   // Global Messages badge: conversations needing a reply. Polled
@@ -248,7 +250,7 @@ export default function AdminLayoutV2() {
 
   return (
     <IntelligenceBarPageDataProvider open={openPalette}>
-    <AdminNavigationProvider key={user?.id || 'unverified'} user={user} enabled={navigationEnabled && sessionReady} agentEstimateEnabled={agentEstimateEnabled}>
+    <AdminNavigationProvider key={user?.id || 'unverified'} user={user} enabled={navigationEnabled && sessionReady} agentEstimateEnabled={agentEstimateEnabled} bidDeskEnabled={bidDeskEnabled}>
     <div
       className="admin-shell-v2"
       style={{
@@ -490,7 +492,7 @@ export default function AdminLayoutV2() {
           {ADMIN_DESKTOP_NAV_SECTIONS.map(({ section, items }) => {
             const visibleItems = items
               .filter((item) => !item.adminOnly || user?.role === "admin")
-              .filter((item) => !item.flag || (item.flag === "agent_estimate" && agentEstimateEnabled));
+              .filter((item) => !item.flag || (item.flag === "agent_estimate" && agentEstimateEnabled) || (item.flag === "bid_desk" && bidDeskEnabled));
             // Role/flag filtering can empty a whole section (e.g. Marketing
             // for a technician) — an orphaned heading reads as a bug.
             if (visibleItems.length === 0) return null;

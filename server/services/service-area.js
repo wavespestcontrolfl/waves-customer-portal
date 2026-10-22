@@ -3,7 +3,9 @@
  * plausibly a Waves service address".
  *
  * Waves serves Manatee, Sarasota and Charlotte counties plus the south-
- * Hillsborough towns; DeSoto is not served (owner ruling 2026-09-30). The
+ * Hillsborough towns; DeSoto County is not served (owner ruling 2026-09-30)
+ * and neither is the city of Punta Gorda inside Charlotte County (owner ruling
+ * 2026-10-22; city / ZIP evidence only, see excluded-localities.js). The
  * authoritative membership test is the county name
  * (SERVICE_AREA_COUNTIES in services/call-triage-flags.js), which needs a
  * reverse-geocode; this box is the cheap arithmetic backstop for paths that
@@ -35,7 +37,8 @@ const SERVICE_AREA_BOUNDS = Object.freeze({
  * northern edge is ~27.40 (Manatee line), its southern edge ~27.03 (Charlotte
  * line), its western edge ~-82.06 (Sarasota/Manatee line) and its eastern edge
  * ~-81.55. Served neighbours stay outside it: North Port (27.04, -82.20),
- * Myakka City (27.35, -82.15) and Punta Gorda (26.93, -82.05). It is a
+ * Myakka City (27.35, -82.15) and the Charlotte County line (Punta Gorda, 26.93,
+ * -82.05, is excluded by city name, not by this box). It is a
  * rectangle, so it can clip a sliver of a neighbouring county at a corner; the
  * county name therefore wins over it wherever county evidence exists (see
  * isInServiceAreaBox), and the rectangle only decides when no county is known.
@@ -47,34 +50,11 @@ const DESOTO_EXCLUSION = Object.freeze({
   lngMax: -81.55,
 });
 
-// DeSoto County localities and ZIPs (owner ruling 2026-09-30: not served).
-// The one list every text-evidence check reads, so a caller naming a DeSoto
-// place without a ZIP or county still fails closed. Keys are normalized by
-// normalizeDesotoLocality (lower-case, "ft"/"ft." -> "fort", single spaces).
-const DESOTO_LOCALITIES = Object.freeze(new Set([
-  'arcadia', 'southeast arcadia', 'se arcadia', 'nocatee', 'fort ogden',
-  'lake suzy', 'brownville', 'pine level', 'hull', 'fort winder', 'owens',
-  'joshua', 'liverpool', 'sunnybreeze', 'desoto', 'de soto', 'desoto county',
-  'de soto county',
-]));
-const DESOTO_ZIPS = Object.freeze(new Set(['34265', '34266', '34267', '34268', '34269']));
-
-function normalizeDesotoLocality(value) {
-  return String(value || '')
-    .toLowerCase()
-    .replace(/[.,]/g, ' ')
-    .replace(/\bft\b/g, 'fort')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function isDesotoLocality(city) {
-  return DESOTO_LOCALITIES.has(normalizeDesotoLocality(city));
-}
-
-function isDesotoZip(zip) {
-  return DESOTO_ZIPS.has(String(zip || '').trim().slice(0, 5));
-}
+// Excluded localities (DeSoto County, owner ruling 2026-09-30; Punta Gorda,
+// owner ruling 2026-10-22) live in services/excluded-localities.js, the one
+// list every text-evidence check reads; callers import it directly. This file
+// keeps only the coordinate tests. Punta Gorda has no coordinate rectangle:
+// city / ZIP text evidence only.
 
 // Pull a 5-digit ZIP out of free address text ("..., FL 34240, USA",
 // "... Sarasota FL 34240-1234", "... 34240"). The ZIP after the state wins;
@@ -159,7 +139,7 @@ function servedSouthHillsborough(county, address) {
 
 module.exports = {
   isServedSouthHillsboroughTown, servedSouthHillsborough,
-  SERVICE_AREA_BOUNDS, DESOTO_EXCLUSION, DESOTO_LOCALITIES, DESOTO_ZIPS,
-  isInServiceAreaBox, isInServiceAreaCoarseBox, isInDesotoExclusion, isDesotoLocality, isDesotoZip,
+  SERVICE_AREA_BOUNDS, DESOTO_EXCLUSION,
+  isInServiceAreaBox, isInServiceAreaCoarseBox, isInDesotoExclusion,
   zipFromAddressText,
 };

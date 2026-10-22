@@ -40,11 +40,11 @@ const CASE_SQL = 'CASE WHEN technicians.bouncie_imei IS DISTINCT FROM ?::varchar
 async function put(body) {
   const app = express();
   app.use(express.json());
-  app.use('/', require('../routes/admin-geofence'));
+  app.use('/', require('../routes/admin-vehicles'));
   const server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, resolve));
   try {
-    const res = await fetch(`http://127.0.0.1:${server.address().port}/vehicles/tech-1`, {
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/tech-1`, {
       method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
     });
     return res.status;

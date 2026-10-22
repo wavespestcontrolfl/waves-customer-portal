@@ -169,6 +169,12 @@ describe('the report text anchor (completion enrollment + paid invoice share one
     expect(reportTextAnchorFromNotes({ completionSmsStatus: 'deferred', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z', completionSmsDeferredDeliveredAt: '2026-10-20T12:03:00.000Z' })).toEqual({ status: 'sent', at: '2026-10-20T12:03:00.000Z' });
   });
 
+  test('a completion notice routed to the customer App is not a report text', () => {
+    expect(reportTextAnchorFromNotes({ completionSmsStatus: 'sent', sentSmsChannel: 'push' })).toBeNull();
+    expect(reportTextAnchorFromNotes({ completionSmsStatus: 'sent', sentSmsChannel: 'push' }, { atPayment: true })).toBeNull();
+    expect(reportTextAnchorFromNotes({ completionSmsStatus: 'sent', sentSmsChannel: 'mms', sentSmsAt: '2026-10-20T14:00:00.000Z' })).toEqual({ status: 'sent', at: '2026-10-20T14:00:00.000Z' });
+  });
+
   test('a text the send window still holds anchors to its release', () => {
     expect(reportTextAnchorFromNotes({ completionSmsStatus: 'deferred', completionSmsDeferredTo: '2026-10-20T12:00:00.000Z' })).toEqual({ status: 'deferred', at: '2026-10-20T12:00:00.000Z' });
     expect(reportTextAnchorFromNotes({ completionSmsStatus: 'deferred' })).toBeNull();

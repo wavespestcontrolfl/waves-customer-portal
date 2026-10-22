@@ -98,6 +98,10 @@ function reportTextAnchorFromNotes(notes, { atPayment = false } = {}) {
   const delivered = n.completionSmsStatus === "sent"
     || (n.completionSmsStatus === "deferred" && !!n.completionSmsDeferredDeliveredAt);
   if (!delivered) return null;
+  // A completion notice routed to the customer App (sentSmsChannel 'push',
+  // GATE_CUSTOMER_APP_NOTIFICATIONS) is not a report TEXT: no anchor, smart
+  // window. A missing channel is the pre-App shape (always SMS/MMS).
+  if (n.sentSmsChannel && n.sentSmsChannel !== "sms" && n.sentSmsChannel !== "mms") return null;
   if (atPayment) return { status: "paid", at: new Date().toISOString() };
   return { status: "sent", at: n.completionSmsDeferredDeliveredAt || n.sentSmsAt || new Date().toISOString() };
 }
