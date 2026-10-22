@@ -174,6 +174,8 @@ function draftedBeforeAnswerBook(decision) {
   const m = /^house_voice_v12_real_answers(\d*)/.exec(String(decision?.prompt_version || ''));
   return !!m && (!m[1] || Number(m[1]) < ANSWER_BOOK_PROMPT_NUMBER);
 }
+const RETIRED_COMPANY_FACT_REASON_PREFIX = 'company fact retired';
+const blockReasonIsRetiredCompanyFact = (reason) => typeof reason === 'string' && reason.startsWith(RETIRED_COMPANY_FACT_REASON_PREFIX);
 function retiredCompanyFactBlock({ decision, outgoingBody }) {
   if (!draftedBeforeAnswerBook(decision) || bodyIsStaffEdited(decision.suggested_message, outgoingBody)) return null;
   return 'company fact retired (an unedited draft from before the 2026-10-22 company facts)';
@@ -681,4 +683,4 @@ async function scheduledReserviceBlockReason({ agentDecisionId, outgoingBody, fa
   }
 }
 
-module.exports = { bodyIsStaffEdited, agentDecisionSendBlockReason, scheduledReserviceBlockReason, scheduledOpenLoopsBlockReason, openLoopsBlockReason, openLoopsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, gratitudeOpenLoopsProviderPreSendCheck, parseInputSnapshot, labelFactsBlock, scheduledLabelFactsBlock, retiredCompanyFactBlock, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, amountsProviderPreSendCheck, billingFingerprintForSend, composeProviderPreSendChecks, markRepeatable, isLabelRecheckInfrastructureFailure, blockReasonIsLabelInfrastructure, blockReasonIsBillingInfrastructure, blockReasonIsRecheckInfrastructure };
+module.exports = { bodyIsStaffEdited, agentDecisionSendBlockReason, scheduledReserviceBlockReason, scheduledOpenLoopsBlockReason, openLoopsBlockReason, openLoopsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, gratitudeOpenLoopsProviderPreSendCheck, parseInputSnapshot, labelFactsBlock, scheduledLabelFactsBlock, retiredCompanyFactBlock, blockReasonIsRetiredCompanyFact, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, amountsProviderPreSendCheck, billingFingerprintForSend, composeProviderPreSendChecks, markRepeatable, isLabelRecheckInfrastructureFailure, blockReasonIsLabelInfrastructure, blockReasonIsBillingInfrastructure, blockReasonIsRecheckInfrastructure };

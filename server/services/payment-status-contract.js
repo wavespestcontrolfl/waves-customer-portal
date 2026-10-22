@@ -670,9 +670,10 @@ function remainderHasMoney(remainder) {
 // sentence only a refund / cancel question. With no customer message, or one that asks something else ("Did my payment go
 // through?"), nothing is removed and the detectors judge the whole reply.
 const PAYING_QUESTION_RE = /\b(?:how\s+(?:do|can|should|would)\s+(?:i|we)\s+pay|ways?\s+to\s+pay|pay(?:ment)?\s+(?:options?|methods?)|pay\s+(?:the\s+|your\s+)?(?:tech|technician)|(?:pay|paying)\s+(?:with|by|in)\s+(?:cash|checks?|cheques?|cards?|credit|debit)|(?:take|takes|accept|accepts)\s+(?:cash|checks?|cheques?|cards?|credit|debit)|(?:send|mail)\s+(?:you\s+)?(?:a\s+)?(?:check|cheque|payment))\b/i;
-// a refund ("money back"), or a cancel that is not about a visit / day, or prepaying a year - never "cancel tomorrow's visit" or
+// a refund ("money back"), a cancel of a plan / service (checked first: "cancel my lawn plan before the next visit"), or another
+// cancel that is not about a visit / day, or prepaying a year - never "cancel tomorrow's visit" or
 // "a prepaid debit card" (Codex #6447 r11/r12). A miss only holds the reply for a person.
-const REFUND_QUESTION_RE = /\b(?:refund\w*|money\s+back|reimburs\w*)\b|\bcancel\w*\b(?![^.?!]{0,40}\b(?:visits?|appointments?|appts?|tomorrow|today|tonight|this\s+week|next\s+week|(?:mon|tues|wednes|thurs|fri|satur|sun)day))|\bprepa(?:y|id|ying)\s+(?:for\s+)?(?:the\s+|a\s+|my\s+)?(?:year|plan|service|annual)/i;
+const REFUND_QUESTION_RE = /\b(?:refund\w*|money\s+back|reimburs\w*)\b|\bcancel\w*\s+(?:my\s+|the\s+|our\s+|this\s+|your\s+)?(?:[a-z-]+\s+){0,3}?(?:plan|service|subscription|contract|membership|program|account)\b|\bcancel\w*\b(?![^.?!]{0,40}\b(?:visits?|appointments?|appts?|tomorrow|today|tonight|this\s+week|next\s+week|(?:mon|tues|wednes|thurs|fri|satur|sun)day))|\bprepa(?:y|id|ying)\s+(?:for\s+)?(?:the\s+|a\s+|my\s+)?(?:year|plan|service|annual)/i;
 let companyPolicySentenceCache = null;
 function companyPolicySentences() {
   if (!companyPolicySentenceCache) {

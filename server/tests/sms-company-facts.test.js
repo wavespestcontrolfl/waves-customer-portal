@@ -470,7 +470,7 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
   test('a verbatim paying or prepay-refund sentence with only inert text is policy, not a payment status', () => {
     expect(payOk(PAY, 'how do I pay?')).toBe(true);
     expect(payOk('The technician can take a card, check or cash at the visit.', 'Can I pay the tech with cash?')).toBe(true);
-    for (const inbound of ['Do I get a refund if I cancel?', 'What if I cancel my prepaid plan?', 'Can I get my money back if I cancel my pest control service?']) {
+    for (const inbound of ['Do I get a refund if I cancel?', 'What if I cancel my prepaid plan?', 'Can I get my money back if I cancel my pest control service?', 'Can I cancel my lawn plan before the next visit?']) {
       expect(payOk(REFUND, inbound)).toBe(true);
       expect(payOk(`Hi! ${REFUND} Let us know if you have questions.`, inbound)).toBe(true);
     }
@@ -534,6 +534,15 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
     expect(snap.ok).toBe(false);
     const fresh = await sc.labelFactsSnapshotProviderPreSendCheck({ promptVersion: 'house_voice_v12_real_answers23_n', getBody: () => 'See you Tuesday!' })({});
     expect(fresh.ok).toBe(true);
+  });
+  test('a scheduled refusal carries its own reason, not the label-timing one', async () => {
+    const sc = require('../services/agent-decision-send-checks');
+    const body = RETIRED_COMPANY_FACT_LINES[10];
+    const reason = await sc.scheduledLabelFactsBlock({ decision: { prompt_version: 'house_voice_v12_real_answers14_n', input_snapshot: '{}', suggested_message: body }, outgoingBody: body });
+    expect(sc.blockReasonIsRetiredCompanyFact(reason)).toBe(true);
+    expect(sc.blockReasonIsRetiredCompanyFact('label timing no longer current (x)')).toBe(false);
+    const src = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
+    expect(src).toContain("companyFactRetired ? 'stale_company_facts_agent_decision' : 'stale_label_facts_agent_decision'");
   });
   test('a staff rewrite of an old draft goes out; the unedited old draft does not', () => {
     const decision = { prompt_version: 'house_voice_v12_real_answers13_n', suggested_message: RETIRED_COMPANY_FACT_LINES[10] };
