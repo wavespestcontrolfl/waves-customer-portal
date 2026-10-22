@@ -483,7 +483,8 @@ function useLastTrace({ serviceId, request, wanted }) {
 }
 
 // The copy itself: one tap saves the last trace onto this visit and reads the
-// visit's trace again, so the hold clears as after a hand trace. The server
+// visit's trace again, as after a hand trace; while it runs, the sheet holds its
+// send and its way back (`reusing`). The server
 // picks the trace and runs the tracer's own save checks (the property this
 // sheet loaded, a visit still open); a refusal goes to `setError` and the
 // Trace button stays usable. `plain` is a plain pest visit that can be traced
@@ -509,7 +510,7 @@ export function useTraceReuse({ serviceId, request, propertyId, trace, mode, tra
           openVisitOnly: true,
         }),
       });
-      // The answer IS the saved trace, as after a hand trace: the hold clears
+      // The answer IS the saved trace, as after a hand trace: the trace shows
       // and the button goes at once, whatever a later read does (a second tap
       // would only meet trace_exists; Codex P2 on #6175).
       if (data?.treatmentZone) trace.saved(data.treatmentZone);

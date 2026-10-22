@@ -1441,17 +1441,13 @@ function typedSendHolds({ active, draft, writing, perimeterFeet, traceRead, reco
   ];
 }
 
-// Complete & send on a pest visit waits only on the report, the trace check
-// and a perimeter spray's traced length. What the note's read heard (places,
-// pests, how the sprays went down) shows in "Heard from you" but never holds
-// the send: rewriting the note for it took too long in the field (owner
-// 2026-10-10), so the record goes as it was heard.
-// The one-tap report (`oneTap`, owner 2026-10-17): the trace is optional. A perimeter spray with no saved trace is
-// covered by the feet the tech types (`typedFeet`, a whole number above 0), so the trace still can be done but
-// never has to be, and "can't be traced here" never sends the tech to the Full form. Its read holds nothing either:
-// still loading or failed, the typed feet cover the spray and the body omits traceSeen (a saved trace the sheet
-// could not read still shows on the report). A saved trace that gives no feet (an outline, an old trace) keeps the
-// rules below: the record would show it beside the typed feet.
+// Complete & send on a pest visit waits only on the report and the trace check. What the note's read heard
+// (places, pests, how the sprays went down) shows in "Heard from you" but never holds the send: rewriting the note
+// for it took too long in the field (owner 2026-10-10), so the record goes as it was heard.
+// No visit needs a trace or typed feet (owner 2026-10-22). The one-tap report (`oneTap`, owner 2026-10-17) offers a
+// "Feet sprayed" box for a perimeter spray with no saved trace, and its trace read holds nothing: still loading or
+// failed, the body omits traceSeen (a saved trace the sheet could not read still shows on the report). A saved trace
+// that gives no feet (an outline, an old trace) keeps the rules below.
 function sendHolds({ draft, writing, traceRead, oneTap = false }) {
   const ready = reportReadyHolds({ draft, writing, traceRead });
   // No trace and no typed feet are required on any visit (owner 2026-10-22, "trace should not be required for any
@@ -1890,8 +1886,7 @@ function ReportFlowForm({
   // The sheet's header (Full form) waits on the same photo change in hand.
   useEffect(() => { onPhotoBusy?.(!!photoHold); }, [photoHold, onPhotoBusy]);
   useEffect(() => () => onPhotoBusy?.(false), [onPhotoBusy]);
-  // A trace save in flight in the inline tracer: the report and the send hold until it settles (so the completion
-  // carries the trace the tech saw, and a save never meets a completed visit), Back waits, and so does the header.
+  // A trace save in flight in the inline tracer (see traceBusy below).
   const [traceSaving, setTraceSaving] = useState(false);
   // Read by the step guard below, which an awaited write can reach after the render that started it.
   const traceSavingRef = useRef(false);
@@ -1899,8 +1894,6 @@ function ReportFlowForm({
     traceSavingRef.current = saving;
     setTraceSaving(saving);
   }, []);
-  useEffect(() => { onTraceSaving?.(traceSaving); }, [traceSaving, onTraceSaving]);
-  useEffect(() => () => onTraceSaving?.(false), [onTraceSaving]);
   const noteBoxPhotos = service.noteBoxPhotosEnabled === true;
   const visitPhotos = useVisitPhotos({ serviceId: service.id, request, version: photos.version + photoReloads, keepOnFailure: noteBoxPhotos });
   const trace = useVisitTrace({ serviceId: service.id, request });
@@ -1963,13 +1956,24 @@ function ReportFlowForm({
   // The property this sheet loaded: a trace saved or removed here is refused
   // if the office has moved the visit to another one since.
   const loadedPropertyId = ctx.visit?.propertyId;
+  const [traceError, setTraceError] = useState('');
+  // "Same as last visit" (GATE_TRACE_REUSE), for a plain pest visit with no trace of its own.
+  const reuse = useTraceReuse({
+    serviceId: service.id, request, propertyId: loadedPropertyId, trace, mode, traceAvailable, writing, setError: setTraceError,
+  });
+  // A trace on its way to this visit (a hand trace saving in the inline tracer, or the last visit's being copied):
+  // the report and the send hold until it lands, so the completion carries the trace the tech saw and never meets
+  // the save mid-flight; Back waits, and so do the header's Full form and Close.
+  const traceBusy = traceSaving || reuse.reusing;
+  useEffect(() => { onTraceSaving?.(traceBusy); }, [traceBusy, onTraceSaving]);
+  useEffect(() => () => onTraceSaving?.(false), [onTraceSaving]);
   const promiseMarks = visitPromises.available ? promiseMarksPayload(form.promiseMarks, visitPromises.promises) : [];
   const signature = writerSignature(form, rows, promiseMarks, visitPhotos.photos, recordState.signaturePart(record));
   const stale = !!draft && draft.signature !== signature;
   const ratingAllowed = ctx.rating.allowed;
   const action = writeAction(draft, stale, report.writeError);
   const holdInputs = {
-    form, active, ratingAllowed, dictationPending, photoHold, traceSaving, photosLoaded: visitPhotos.loaded, photosFailed: visitPhotos.failed, promisesLoaded: visitPromises.loaded, mode,
+    form, active, ratingAllowed, dictationPending, photoHold, traceSaving: traceBusy, photosLoaded: visitPhotos.loaded, photosFailed: visitPhotos.failed, promisesLoaded: visitPromises.loaded, mode,
     stationHold: recordState.stationGate.generate,
     stockAdvisory: ctx.stockAdvisory,
     oneTap,
@@ -2112,11 +2116,6 @@ function ReportFlowForm({
   // then the trace is read again. A refusal (the visit moved, or was
   // completed elsewhere) is shown and the hold stays.
   const [removingTrace, setRemovingTrace] = useState(false);
-  const [traceError, setTraceError] = useState('');
-  // "Same as last visit" (GATE_TRACE_REUSE), for a plain pest visit with no trace of its own.
-  const reuse = useTraceReuse({
-    serviceId: service.id, request, propertyId: loadedPropertyId, trace, mode, traceAvailable, writing, setError: setTraceError,
-  });
   const removeTrace = async () => {
     setRemovingTrace(true);
     setTraceError('');
@@ -2151,7 +2150,7 @@ function ReportFlowForm({
         report={report}
         stale={stale}
         action={action}
-        locked={locked || traceSaving}
+        locked={locked || traceBusy}
         submission={submission}
         generateMissing={generateMissing}
         completeMissing={completeMissing}
@@ -2236,7 +2235,7 @@ function ReportFlowForm({
         // A photo change in hand (a description open, a change saving, a
         // removal to answer) holds the way back too (codex local r2), and so
         // does a trace save in flight.
-        : { reason: photoHold || (traceSaving ? 'Saving the trace…' : ''), label: 'Back to the report', onAction: () => setStep('report') }}
+        : { reason: photoHold || (traceBusy ? 'Saving the trace…' : ''), label: 'Back to the report', onAction: () => setStep('report') }}
       writing={backgroundWrite.foreground || preReading}
       warn={!!generateMissing.stockRow}
       stockButton={stockButton}

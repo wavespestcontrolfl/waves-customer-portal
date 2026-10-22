@@ -937,6 +937,33 @@ describe('complete and send', () => {
 
     // The app runs under React.StrictMode, whose mount is setup, cleanup, setup:
     // the read's answer must still land (pre-push P1).
+    // Codex local audit: with no trace required, nothing else holds the send while the copy is in flight, and a
+    // completion first would make the copy meet a completed visit (or the copy first, a stale traceSeen).
+    test('a copy in flight holds the send, Back and Close until it lands', async () => {
+      let zone = null;
+      let land;
+      const request = makeRequest({
+        facts: { ...FACTS, spray: 'perimeter' },
+        last: LAST,
+        trace: () => ({ enabled: true, treatmentZone: zone }),
+        reuse: () => new Promise((resolve) => {
+          land = () => { zone = { linear_ft: 220, capture_mode: 'perimeter', updated_at: '2026-10-02T05:00:00.000Z' }; resolve({ treatmentZone: zone }); };
+        }),
+      });
+      await openSheet(request);
+      await generate();
+      fireEvent.click(await screen.findByRole('button', { name: 'Same as last visit · 220 ft' }));
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true));
+      expect(screen.getByText('Saving the trace…')).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Back to the visit' }).disabled).toBe(true);
+      expect(screen.getByRole('button', { name: 'Close' }).disabled).toBe(true);
+      land();
+      expect(await screen.findByText('Perimeter traced · 220 ft')).toBeTruthy();
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false));
+      expect(screen.getByRole('button', { name: 'Back to the visit' }).disabled).toBe(false);
+      expect(screen.getByRole('button', { name: 'Close' }).disabled).toBe(false);
+    });
+
     test('the button shows under React.StrictMode', async () => {
       const request = reusableRequest();
       render(<React.StrictMode><FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onCompleted={() => {}} /></React.StrictMode>);
