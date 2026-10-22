@@ -3638,6 +3638,18 @@ const gates = {
   // time. Kill switch: unset — chips show the model's numbers.
   bestTimesRoadTimes: gateEnvValue('GATE_BEST_TIMES_ROAD_TIMES'),
 
+  // Dispatch "Find a time" panel (owner 2026-10-21, option C): an address-first
+  // panel on the admin Dispatch board. Office staff on a call with a NEW caller
+  // type an address and see the best hours for it (the find-time best-times
+  // chips, no customer record needed); tapping a chip opens New Appointment
+  // filled with that day, hour and technician and the address in its New
+  // customer block. The panel itself writes nothing. It needs
+  // GATE_BEST_TIME_HINTS + GATE_RESCHEDULE_AVAILABILITY on to get an answer;
+  // without them it says best times are off. OFF in every environment; the
+  // admin schedule day view carries it to the page (findTimePanel). Kill
+  // switch: unset — the button does not render.
+  dispatchFindTimePanel: gateEnvValue('GATE_DISPATCH_FIND_TIME_PANEL'),
+
   // Booking rain rank (owner 2026-10-06): the New Appointment best-times rows
   // rank by rain fit before drive. Outdoor bookings (pest, lawn, T&S,
   // mosquito, termite treatment) sort hours with a 60%+ NWS chance in the

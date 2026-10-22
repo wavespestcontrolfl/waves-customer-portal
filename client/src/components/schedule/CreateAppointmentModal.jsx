@@ -1494,7 +1494,7 @@ export function lineIsRetiredSale(line) {
   return labelNamesRetiredSale(name) || labelNamesRetiredSale(`${name} ${cadence}`);
 }
 
-export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', requireTimeChoice = false, onClose, onCreated, onChange }) {
+export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', defaultQuickAddAddress = null, requireTimeChoice = false, onClose, onCreated, onChange }) {
   const dialogRef = useModalFocus(true, onClose);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
   const searchRef = useRef(null);
@@ -1587,8 +1587,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // usable lot size (catalog fallback applies); 'loading'/'error' must never
   // show a substitute amount or allow submission of an auto line.
   const [mosquitoQuote, setMosquitoQuote] = useState(null);
-  const [showQuickAdd, setShowQuickAdd] = useState(false);
-  const [quickAdd, setQuickAdd] = useState({ firstName: '', lastName: '', phone: '', email: '', address: '', city: '', state: 'FL', zip: '', profileLabel: '' });
+  // defaultQuickAddAddress (the Dispatch Find a time panel: a new caller, address first) opens
+  // the New customer block with the address filled. Nothing is created until staff press Add customer.
+  const [showQuickAdd, setShowQuickAdd] = useState(() => !!defaultQuickAddAddress?.address);
+  const [quickAdd, setQuickAdd] = useState(() => ({
+    firstName: '', lastName: '', phone: '', email: '', profileLabel: '',
+    address: defaultQuickAddAddress?.address || '',
+    city: defaultQuickAddAddress?.city || '',
+    state: defaultQuickAddAddress?.state || 'FL',
+    zip: defaultQuickAddAddress?.zip || '',
+  }));
   // 409 phone-match conflict from quick-add ({ code, match }) — the admin
   // picks attach / duplicate / separate account and we resubmit with the flag.
   const [quickAddConflict, setQuickAddConflict] = useState(null);

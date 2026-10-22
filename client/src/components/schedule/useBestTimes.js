@@ -57,6 +57,11 @@ let hintsGatedUntil = 0;
 // Test seam: forget that the server declined a summary or gated the hint.
 export function resetSummaryAvailability() { summaryUnavailableUntil = 0; hintsGatedUntil = 0; }
 
+// What a search can stand on: a customer, a visit, or (addressOnly) a bare address.
+function hasSearchSubject({ customerId, serviceId, addressOnly, address, lat, lng }) {
+  return !!customerId || !!serviceId || (addressOnly && (!!address || (lat != null && lng != null)));
+}
+
 function addDays(ymd, days) {
   const d = new Date(`${ymd}T12:00:00Z`);
   d.setUTCDate(d.getUTCDate() + days);
@@ -281,6 +286,9 @@ export function useBestTimes({
   // Edit appointment's choice on a shared stop ('together' | 'separate'):
   // the route check answers for the move the save will make.
   moveScope,
+  // The Dispatch "Find a time" panel (a new caller, no record yet): a search
+  // may stand on `address` / `lat` / `lng` alone, with no customer or visit.
+  addressOnly = false,
 }) {
   const [bestTimes, setBestTimes] = useState([]);
   const [picked, setPicked] = useState(null);
@@ -290,6 +298,9 @@ export function useBestTimes({
   const [answer, setAnswer] = useState(null);
   const setAvailability = (data, keys) => setAnswer(data ? { data, ...keys } : null);
   const [checking, setChecking] = useState(false);
+  // The server declined to answer (hints or the summary are off), as opposed
+  // to a search that failed or found nothing.
+  const [gated, setGated] = useState(false);
   // Stable dep for the (usually tiny) id array.
   const excludeKey = (excludeServiceIds || []).map(String).join(',');
   // Only a complete value is worth scoring; a half-typed field would 400
@@ -322,7 +333,7 @@ export function useBestTimes({
   const subjectKey = [serviceId, customerId, propertyId, address, lat, lng].map((v) => v ?? '').join('|');
   const requestKey = [
     enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows,
-    address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary, moveScope, compareKey, serviceTypesKey, serviceKeysKey, bestRows,
+    address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary, moveScope, compareKey, serviceTypesKey, serviceKeysKey, bestRows, addressOnly,
   ].map((v) => v ?? '').join('|');
   const availability = useMemo(() => {
     if (!answer || !enabled) return null;
@@ -334,9 +345,12 @@ export function useBestTimes({
     setPicked(null);
     setPickedByTech([]);
     setBestInRange(null);
-    if (!enabled || (!customerId && !serviceId) || !YMD.test(String(date || '')) || Date.now() < hintsGatedUntil) {
+    const hasSubject = hasSearchSubject({ customerId, serviceId, addressOnly, address, lat, lng });
+    const gatedNow = () => Date.now() < hintsGatedUntil || (summary && Date.now() < summaryUnavailableUntil);
+    if (!enabled || !hasSubject || !YMD.test(String(date || '')) || Date.now() < hintsGatedUntil) {
       setAvailability(null);
       setChecking(false);
+      setGated(enabled && hasSubject && Date.now() < hintsGatedUntil);
       return undefined;
     }
     // A held answer survives only while a summary is about to replace it.
@@ -381,6 +395,7 @@ export function useBestTimes({
           if (summarized) {
             setPickedByTech(normalizePickedByTech(data?.pickedByTech));
             setAvailability(summarized, { requestKey, subjectKey });
+            setGated(false);
             setChecking(false);
             return;
           }
@@ -390,7 +405,7 @@ export function useBestTimes({
           // No summary this time: a held (stale) one must not outlive it.
           setAvailability(null);
           // Hints gated altogether: the fallbacks would be gated too.
-          if (Date.now() < hintsGatedUntil) { setChecking(false); return; }
+          if (Date.now() < hintsGatedUntil) { setGated(true); setChecking(false); return; }
         }
         const plain = await searchPlainHint(search, { date, rangeKey, pickedArgs, scopedToTech });
         if (controller.signal.aborted) return;
@@ -398,6 +413,7 @@ export function useBestTimes({
         setPicked(plain.picked);
         setPickedByTech(plain.pickedByTech);
         setBestInRange(plain.bestInRange);
+        setGated(gatedNow());
       } catch {
         // Advisory only — a failed search just shows no hint (and drops a
         // held summary, unless a newer pick already owns the state).
@@ -406,6 +422,6 @@ export function useBestTimes({
       if (!controller.signal.aborted) setChecking(false);
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows, address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary, moveScope, compareKey, serviceTypesKey, serviceKeysKey, bestRows]);
-  return { bestTimes, picked, pickedByTech, bestInRange, availability, checking };
+  }, [enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows, address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary, moveScope, compareKey, serviceTypesKey, serviceKeysKey, bestRows, addressOnly]);
+  return { bestTimes, picked, pickedByTech, bestInRange, availability, checking, gated };
 }
