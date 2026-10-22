@@ -920,6 +920,7 @@ async function assertCommitmentOpen(trx, initial, id, sourceId) {
 async function settleCommitmentAlert(trx, initial, id, { action, reviewedBy }) {
   const settled = ['dismiss', 'fulfill'].includes(action);
   const channel = initial.sms_log_id ? 'sms' : 'email';
+  // Any other staff update leaves the promise open, so its bell is only read.
   const update = settled
     ? require('./notification-service')._private.doneColumns({ by: `${channel}-commitments:${reviewedBy}`, resolution: `Follow-up ${action === 'dismiss' ? 'dismissed' : 'marked done'} by staff`, keepExisting: true, conn: trx })
     : { read_at: trx.fn.now() };
