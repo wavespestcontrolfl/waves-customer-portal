@@ -956,7 +956,7 @@ const PINNED_DISPLAY_BUILDERS = {
     : null),
   // set_customer_bill_to: the card names the customer and the payer; the lines ride the contract.
   set_customer_bill_to: (params, preview) => (preview?.preview === true && preview.tool === 'set_customer_bill_to'
-    ? { customer: preview.customer_name || preview.customer_id, bill_to_now: preview.bill_to_now, new_bill_to: preview.payer_name, invoices_moving: preview.invoices_moving.length, sends_to_customer: 'nothing' }
+    ? { customer: preview.customer_name || preview.customer_id, bill_to_now: preview.bill_to_now, new_bill_to: preview.payer_name, invoices_moving: 'none', sends_to_customer: 'nothing' }
     : null),
   // Feature switches (Codex r1 on #5489): the card must show the live facts
   // the preview read — current → new, what it means, the target and the

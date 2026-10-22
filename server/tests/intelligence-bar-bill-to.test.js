@@ -145,6 +145,13 @@ describe('the preview', () => {
     expect(contract.irreversible).toBe(false);
   });
 
+  test('the route builds the confirmation card from this preview', async () => {
+    const { confirmationDisplayParams } = jest.requireActual('../routes/admin-intelligence-bar');
+    expect(confirmationDisplayParams('set_customer_bill_to', { customer_id: CUST }, await preview())).toEqual({
+      customer: 'Robin Sample', bill_to_now: 'The customer (self-pay)', new_bill_to: 'Synthetic Property Co', invoices_moving: 'none', sends_to_customer: 'nothing',
+    });
+  });
+
   test('upcoming visits with their own Bill-To are named and pinned', async () => {
     state.pinnedVisits = 2;
     const card = await preview();
