@@ -100,6 +100,33 @@ describe('the one-voice prompt', () => {
     expect(PEST_REPORT_VOICE_PROMPT).toContain('is what the work aimed at, not a sighting: it goes here only when the note, Observations or a "Findings observed" line says we saw it');
   });
 
+  // Codex #6466 r5: the stacked prompt's PRODUCT FACTS, re-service, zero-rating and empty-section
+  // rules carry over; no output screen can check any of them.
+  test('a treatment\'s reason today comes from its own tag or the note, never from "mainly used for"', () => {
+    expect(PEST_REPORT_VOICE_PROMPT).toContain('Say what it was for today only from its own "tagged today for" in PRODUCT FACTS or from the note.');
+    expect(PEST_REPORT_VOICE_PROMPT).toContain('"Mainly used for" is what the treatment is generally used for, never why we used it today, and a treatment "not tagged today" gets no reason unless the note gives one.');
+  });
+
+  test('a re-service never blames the customer, waves off the activity or clears the earlier visit', () => {
+    for (const phrase of ['Never blame the customer', 'never wave off the activity they reported as normal after treatment', 'never insist the earlier visit could not have played a part', 'never invent a change to sound responsive', 'keep what is still unresolved']) {
+      expect(PEST_REPORT_VOICE_PROMPT).toContain(phrase);
+    }
+  });
+
+  test('a zero rating with no place we checked is left out', () => {
+    expect(PEST_REPORT_VOICE_PROMPT).toContain('A zero activity rating is an absence: say it only for a place we checked, named in the same clause (rule 4), and when the inputs name no place we checked, leave it out.');
+  });
+
+  test('the empty WHAT\'S NEXT sentence is used only with no next step, open promise or reach-out date', () => {
+    expect(PEST_REPORT_VOICE_PROMPT).toContain('Only when the inputs hold no next step from the note or Recommendations, no promise still open in PROMISES, no REACH-OUT DATE, nothing we saw today, nothing the customer told us and no EXPECTATIONS lines');
+  });
+
+  // The owner's v4 rewrite (2026-10-09) dropped the stock pressure line; the new prompt must not bring it back.
+  test('no stock phrases about pressure or long-term control', () => {
+    expect(PEST_REPORT_VOICE_PROMPT).toContain('use no stock phrases about pressure or long-term control');
+    expect(PEST_REPORT_VOICE_PROMPT).not.toMatch(/keeps? pressure down|manage pressure|support long-term control/);
+  });
+
   // Codex #6466 r3: the stacked writer's v4 hard constraint 1 (minus "sweep", 2026-10-09)
   // carries over, so a HOW IT WORKS line's "crawling invaders" never reaches the report.
   test('bans the military language the v4 hard constraints banned', () => {
