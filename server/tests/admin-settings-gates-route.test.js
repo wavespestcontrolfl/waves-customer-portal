@@ -125,17 +125,29 @@ describe('listGates variable names', () => {
       expect(row()).toMatchObject({ readAt: 'call', enabled: false, kind: 'boolean' });
       process.env.GATE_ADMIN_MFA = 'true';
       expect(row().enabled).toBe(true);
-      // 'on' and '1' turn a gateEnvValue reader on but not a strict one; the
-      // catalogue cannot prove which reader this gate uses, so: unknown.
-      for (const value of ['on', '1']) {
-        process.env.GATE_ADMIN_MFA = value;
-        expect(row().enabled).toBeNull();
-      }
+      // Its exported reader adminMfaLive() is strict, and decides: 'on' is off.
+      process.env.GATE_ADMIN_MFA = 'on';
+      expect(row()).toMatchObject({ stateFrom: 'reader', enabled: false });
       process.env.GATE_ADMIN_MFA = 'false';
       expect(row().enabled).toBe(false);
     } finally {
       if (saved === undefined) delete process.env.GATE_ADMIN_MFA;
       else process.env.GATE_ADMIN_MFA = saved;
+    }
+    // With no exported reader, 'on' and '1' (on for a gateEnvValue reader,
+    // off for a strict one) read unknown: the catalogue cannot prove which.
+    const inferred = () => listGates().find((g) => g.envName === 'GATE_CUSTOMER_APP_NOTIFICATIONS');
+    const savedApp = process.env.GATE_CUSTOMER_APP_NOTIFICATIONS;
+    try {
+      for (const value of ['on', '1']) {
+        process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = value;
+        expect(inferred()).toMatchObject({ stateFrom: 'inferred', enabled: null });
+      }
+      process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
+      expect(inferred().enabled).toBe(true);
+    } finally {
+      if (savedApp === undefined) delete process.env.GATE_CUSTOMER_APP_NOTIFICATIONS;
+      else process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = savedApp;
     }
     // Every catalogue gate has its own row, except the two scan artifacts
     // that are not variables.
@@ -176,7 +188,7 @@ describe('listGates variable names', () => {
     try {
       process.env.GATE_ADMIN_MFA_ENFORCE = 'true';
       delete process.env.GATE_ADMIN_MFA;
-      expect(row()).toMatchObject({ requires: ['GATE_ADMIN_MFA'], enabled: null });
+      expect(row()).toMatchObject({ requires: ['GATE_ADMIN_MFA'], stateFrom: 'reader', enabled: false });
       process.env.GATE_ADMIN_MFA = 'true';
       expect(row().enabled).toBe(true);
       delete process.env.GATE_ADMIN_MFA_ENFORCE;
@@ -204,6 +216,25 @@ describe('listGates variable names', () => {
     expect(row.requires).toEqual(expect.arrayContaining(['GATE_VISIT_PREP_PHOTOS', 'GATE_VISIT_FACTS']));
     // Own variable on at boot, prerequisites not on: not reported Enabled.
     if (featureGates.gates.visitPrepPestRead === true) expect(row.enabled).not.toBe(true);
+  });
+
+  test("a gate's exported reader decides its state, gates-map prerequisites included", () => {
+    const names = ['GATE_DUNNING_CUSTOMER_SCHEDULE', 'GATE_DUNNING_LADDER_90', 'GATE_PAY_INCLUDE_BALANCE'];
+    const saved = Object.fromEntries(names.map((n) => [n, process.env[n]]));
+    try {
+      process.env.GATE_DUNNING_CUSTOMER_SCHEDULE = 'true';
+      process.env.GATE_DUNNING_LADDER_90 = 'true';
+      process.env.GATE_PAY_INCLUDE_BALANCE = 'false';
+      const row = listGates().find((g) => g.envName === 'GATE_DUNNING_CUSTOMER_SCHEDULE');
+      expect(row.stateFrom).toBe('reader');
+      expect(row.enabled).toBe(featureGates.dunningCustomerScheduleLive());
+      expect(row.enabled).not.toBe(true);
+    } finally {
+      for (const n of names) {
+        if (saved[n] === undefined) delete process.env[n];
+        else process.env[n] = saved[n];
+      }
+    }
   });
 
   test('a gate the catalogue retired is not listed', () => {

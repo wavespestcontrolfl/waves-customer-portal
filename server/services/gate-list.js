@@ -104,9 +104,34 @@ function gateEnvNames() {
 // No own reader → no prerequisites are claimed.
 const OWN_READER_SUFFIXES = ['Live', 'Enabled', 'Mode', 'On', ''];
 
+const readerBase = (name) => name.replace(/^GATE_/, '').toLowerCase().replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase());
+
+// When feature-gates.js EXPORTS the gate's own zero-argument reader, its answer
+// is the effective state, every prerequisite included (gates-map lookups such
+// as dunningCustomerScheduleLive's gates.payIncludeBalance too), so it wins
+// over anything inferred here. A boolean is the state; a mode reader's string
+// is 'off' = off, else on in that mode. Anything else (no export, arguments,
+// a throw, another type) → undefined, and the inferred state stands.
+function ownReaderState(name) {
+  for (const suffix of OWN_READER_SUFFIXES) {
+    const fn = featureGates[`${readerBase(name)}${suffix}`];
+    if (typeof fn !== 'function') continue;
+    if (fn.length > 0) return undefined;
+    try {
+      const value = fn();
+      if (typeof value === 'boolean') return { enabled: value };
+      if (typeof value === 'string') return { enabled: value !== 'off', modeValue: value };
+    } catch {
+      // fall through to the inferred state
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
 function callTimePrerequisites(name) {
   gateEnvNames();
-  const base = name.replace(/^GATE_/, '').toLowerCase().replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase());
+  const base = readerBase(name);
   for (const suffix of OWN_READER_SUFFIXES) {
     const tokens = helperCache.get(`${base}${suffix}`);
     if (tokens && tokens.includes(name)) return tokens.filter((t) => t !== name);
@@ -224,7 +249,12 @@ function listGates() {
         ...semantics(doc),
       };
     });
-  return [...mapRows, ...callTimeRows]
+  // The gate's own exported reader, when there is one, is authoritative.
+  const rows = [...mapRows, ...callTimeRows].map((row) => {
+    const own = ownReaderState(row.envName);
+    return own ? { ...row, ...own, stateFrom: 'reader' } : { ...row, stateFrom: 'inferred' };
+  });
+  return rows
     .sort((a, b) => (a.envName || a.key).localeCompare(b.envName || b.key));
 }
 
