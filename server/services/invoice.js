@@ -567,15 +567,19 @@ async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = 
       }
     }
   }
-  if (!invoiceRow.scheduled_service_id) return;
+  if (!invoiceRow.scheduled_service_id && !invoiceRow.service_record_id) return;
   let svc = null;
   try {
+    // The visit, also when the invoice reaches it only through its service record (a post-completion invoice voided by a
+    // cancellation, voidOpenInvoicesForCancelledService): every visit guard below applies to it. A failed read refuses.
+    const visitId = await linkedScheduledServiceId(invoiceRow, conn);
+    if (!visitId) return;
     // The in-transaction pass takes the visit row lock (Codex #3493 r8): a
     // concurrent writer holding the row (coverage stamping, cancellation)
     // is uncommitted-invisible to a plain MVCC read, so a lockless second
     // read could pass on the stale version while both commit. FOR UPDATE
     // waits for the in-flight writer and reads the committed result.
-    let q = conn("scheduled_services").where({ id: invoiceRow.scheduled_service_id });
+    let q = conn("scheduled_services").where({ id: visitId });
     if (lock) q = q.forUpdate();
     svc = await q.first();
   } catch (err) {
