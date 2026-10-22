@@ -376,6 +376,15 @@ describe('Codex #6375 r3: Basic casing, cut marker, secret-shaped keys', () => {
 
 describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, random-token backstop', () => {
   const { scrubNote, trimToScanLimit, SCAN_LIMIT, REMOVED } = require('../utils/note-secret-scrubber');
+  const gates = ['GATE_IB_GENERAL_READ', 'GATE_IB_PLATFORM', 'GATE_IB_READ_NOTES'];
+  let saved;
+  beforeEach(() => {
+    saved = gates.map(name => process.env[name]);
+    for (const name of gates) process.env[name] = 'true';
+  });
+  afterEach(() => {
+    gates.forEach((name, i) => { if (saved[i] === undefined) delete process.env[name]; else process.env[name] = saved[i]; });
+  });
 
   test('a key crossing the scan limit is dropped whole, not kept as a prefix', async () => {
     const key = 'sk-' + 'proj-' + 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -385,6 +394,7 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     expect(note.indexOf(key) + key.length).toBeGreaterThan(SCAN_LIMIT);
     expect(trimToScanLimit(note)).not.toContain('sk-proj');
     const result = await read(ENTRY, { id: 1, notes: note });
+    expect(typeof result.data.notes).toBe('string');
     expect(JSON.stringify(result)).not.toMatch(/sk-proj|ABCDEFG/);
   });
 
@@ -409,6 +419,14 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     const { text, removed } = scrubNote(note);
     expect(text).not.toContain(secret);
     expect(removed).toBeGreaterThan(0);
+  });
+
+  test('a JSON-escaped private link in a note or a note key is removed like its plain form', async () => {
+    const escaped = 'https:\\/\\/portal.wavespestcontrol.com\\/l\\/abc234def5';
+    const result = await read(ENTRY, { id: 1, notes: `call back via ${escaped} today`, details: { [escaped]: 'reference', ok: 'fine' } });
+    expect(JSON.stringify(result)).not.toContain('abc234def5');
+    expect(result.data.notes).toContain('[private link removed]');
+    expect(result.data.details.ok).toBe('fine');
   });
 
   test('a card number inside a long grouped digit run is masked', () => {

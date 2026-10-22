@@ -390,8 +390,13 @@ const leastLeafCost = entry => {
   return serialLength(entry);
 };
 
+// A JSON-escaped slash ("https:\/\/host\/l\/token") is a slash to every link rule:
+// unescape it before the structural link rules run, in notes and in note keys
+// (Codex #6375 r10 pre-push audit P0).
+const unescapeSlashes = text => text.replace(/\\\//g, '/');
+
 function returnNoteString(item, state) {
-  const { text, removed } = scrubNote(redactString(trimToScanLimit(item), state), { truncated: item.length > SCAN_LIMIT });
+  const { text, removed } = scrubNote(redactString(unescapeSlashes(trimToScanLimit(item)), state), { truncated: item.length > SCAN_LIMIT });
   state.noteSecrets += removed;
   if (state.noteBudget === undefined) return text;
   const room = Math.max(state.noteBudget - 2, 0);
@@ -422,8 +427,9 @@ function returnNoteEntries(item, state, depth) {
   let hiddenKeys = 0;
   for (const [rawKey, entry] of Object.entries(item)) {
     // A key is text the model reads too: a secret-shaped key is replaced (Codex #6375 r3).
-    const scrubbedKey = scrubNote(redactString(rawKey, state)).text;
-    const key = scrubbedKey === rawKey ? rawKey : `[removed key ${hiddenKeys += 1}]`;
+    const plainKey = unescapeSlashes(rawKey);
+    const scrubbedKey = scrubNote(redactString(plainKey, state)).text;
+    const key = scrubbedKey === plainKey ? rawKey : `[removed key ${hiddenKeys += 1}]`;
     const keyCost = serialLength(key) + 2;
     if (!noteFits(state, keyCost + leastLeafCost(entry))) { out[CUT] = true; break; }
     if (key !== rawKey) state.noteSecrets += 1;
