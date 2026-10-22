@@ -189,7 +189,8 @@ describe('EstimateProposalDocument', () => {
     expect(text).toContain(`${GLASS_COPY.ctaMicro} · ${RATE_REVIEW_TERMS_LINE}`);
     // Residential pest inclusions stack rides along.
     expect(text).toContain('Protected 4× a year — full perimeter, entry points, eaves & harborage zones, every visit');
-    expect(text).toContain('approve online');
+    expect(text).toContain('Accept & pick a start date');
+    expect(text).toContain('Price valid through');
     expect(text).not.toContain('What your commercial pest service includes');
   });
 
@@ -240,7 +241,36 @@ describe('EstimateProposalDocument', () => {
     const { container } = render(<EstimateProposalDocument data={accepted} token="tok-123" />);
     const text = container.textContent;
     expect(text).toContain('has been approved');
-    expect(text).not.toContain('approve online');
+    expect(text).not.toContain('Accept & pick a start date');
+    expect(text).not.toContain('Price valid through');
+    expect(container.querySelector('[data-testid="doc-action-online"]').textContent).toBe('See your visit details');
+  });
+
+  // Owner 2026-10-19: the emailed PDF must be clickable for a customer who
+  // cannot open the estimate link — every action is a real anchor, which
+  // Chromium's page.pdf keeps as a PDF link annotation.
+  it('renders tappable accept, call and email actions as real links', () => {
+    const { container } = render(<EstimateProposalDocument data={BASE_DATA} token="tok-123" />);
+    const href = (id) => container.querySelector(`[data-testid="${id}"]`).getAttribute('href');
+    expect(href('doc-action-online')).toBe('https://portal.wavespestcontrol.com/estimate/tok-123');
+    expect(href('doc-action-call')).toBe('tel:+19412975749');
+    expect(href('doc-action-email')).toBe('mailto:contact@wavespestcontrol.com?subject=Estimate%20EST-2099-0001');
+  });
+
+  it('offers no accept button where the customer cannot self-book', () => {
+    const declined = { ...BASE_DATA, cta: { ...BASE_DATA.cta, terminalState: 'declined' } };
+    const { container: d } = render(<EstimateProposalDocument data={declined} token="tok-123" />);
+    expect(d.querySelector('[data-testid="doc-action-online"]')).toBeNull();
+    expect(d.querySelector('[data-testid="doc-action-call"]')).not.toBeNull();
+    const expired = { ...BASE_DATA, cta: { ...BASE_DATA.cta, terminalState: 'expired' } };
+    const { container: e } = render(<EstimateProposalDocument data={expired} token="tok-123" />);
+    expect(e.querySelector('[data-testid="doc-action-online"]')).toBeNull();
+    expect(e.textContent).not.toContain('Price valid through');
+    expect(e.textContent).toContain('This estimate has expired');
+    expect(e.textContent).not.toContain('tap Accept');
+    const review = { ...BASE_DATA, cta: { ...BASE_DATA.cta, reviewBeforeBooking: true } };
+    const { container: r } = render(<EstimateProposalDocument data={review} token="tok-123" />);
+    expect(r.querySelector('[data-testid="doc-action-online"]').textContent).toBe('View estimate online');
   });
 
   it('resolves residential terms from the line services — lawn never claims pest callbacks', () => {
@@ -738,5 +768,290 @@ describe('EstimateProposalDocument', () => {
     expect(text).toContain('$120.00 *');
     expect(text).toContain('* Taxable line.');
     expect(text).not.toContain('(NaN');
+  });
+});
+
+// codex #6343 r5: the document follows the server's acceptance contract
+// (data.estimate.acceptance.mode), using EstimateViewPage's own wording, and
+// never advertises an online action the page does not offer.
+describe('acceptance mode', () => {
+  const RESIDENTIAL = {
+    ...BASE_DATA,
+    estimate: { ...BASE_DATA.estimate, category: 'RESIDENTIAL' },
+    proposal: {
+      ...BASE_DATA.proposal,
+      enabled: false,
+      synthesized: true,
+      title: 'Service Proposal',
+      buildings: [{ name: '123 Palm Way', note: null, lineItems: [{ description: 'Quarterly Pest Control', quantity: 1, unitPrice: 150, amount: 150, frequency: 'quarterly', frequencyLabel: 'Quarterly', taxable: false }] }],
+      totals: { annualRecurring: 600, monthlyEquivalent: 50, oneTime: 0, totalTax: 0, firstYearTotal: 600, hasTax: false, isMultiBuilding: false },
+    },
+    cta: { commercialProposal: false, commercialAutoPriced: false },
+  };
+  const withMode = (acceptance, cta = {}) => ({
+    ...RESIDENTIAL,
+    estimate: { ...RESIDENTIAL.estimate, ...(acceptance === undefined ? {} : { acceptance }) },
+    cta: { ...RESIDENTIAL.cta, ...cta },
+  });
+  const view = (data) => {
+    const { container } = render(<EstimateProposalDocument data={data} token="tok-123" />);
+    return {
+      container,
+      text: container.textContent,
+      button: container.querySelector('[data-testid="doc-action-online"]'),
+      nextSteps: [...container.querySelectorAll('p')].find((p) => /go ahead|Call .*renewal|Our team will confirm/.test(p.textContent)),
+    };
+  };
+
+  it('standard (or no contract at all): Accept & pick a start date, with the start-date promise', () => {
+    for (const acceptance of [undefined, { mode: 'standard_slot_pick', ctaLabel: 'Pick appointment' }]) {
+      const v = view(withMode(acceptance));
+      expect(v.button.textContent).toBe('Accept & pick a start date');
+      expect(v.nextSteps.textContent).toContain('tap Accept & pick a start date above');
+      expect(v.nextSteps.textContent).toContain('pick a start date with you');
+    }
+  });
+
+  it('existing_appointment: Confirm appointment, and no start-date promise', () => {
+    const v = view(withMode({ mode: 'existing_appointment', ctaLabel: 'Confirm invoice option' }));
+    expect(v.button.textContent).toBe('Confirm appointment');
+    expect(v.text).not.toContain('Accept & pick a start date');
+    expect(v.nextSteps.textContent).toContain('tap Confirm appointment above');
+    expect(v.nextSteps.textContent).toContain('your appointment stays as scheduled');
+    expect(v.nextSteps.textContent).not.toMatch(/start date/);
+  });
+
+  it('invoice_only: Accept + send invoice, no appointment and no start-date promise', () => {
+    const v = view(withMode({ mode: 'invoice_only', ctaLabel: 'Accept estimate' }));
+    expect(v.button.textContent).toBe('Accept + send invoice');
+    expect(v.nextSteps.textContent).toContain('tap Accept + send invoice above');
+    expect(v.nextSteps.textContent).toContain('no appointment is needed');
+    expect(v.nextSteps.textContent).toContain('send your invoice by text and email');
+    expect(v.nextSteps.textContent).not.toMatch(/start date/);
+  });
+
+  it('commercial_site_confirmation: Approve estimate, and the team schedules after approval', () => {
+    const v = view(withMode({ mode: 'commercial_site_confirmation', ctaLabel: 'Approve estimate' }));
+    expect(v.button.textContent).toBe('Approve estimate');
+    expect(v.nextSteps.textContent).toContain('tap Approve estimate above');
+    expect(v.nextSteps.textContent).toContain('a Waves team member reaches out to schedule your service');
+    expect(v.nextSteps.textContent).toContain('confirms the exact price on a quick site visit');
+    expect(v.nextSteps.textContent).not.toMatch(/pick a start date/);
+  });
+
+  it('contact_office: no online button, call and email only, in the page\'s wording', () => {
+    const v = view(withMode({ mode: 'contact_office', ctaLabel: 'Call Waves' }));
+    expect(v.button).toBeNull();
+    expect(v.container.querySelector('[data-testid="doc-action-call"]')).not.toBeNull();
+    expect(v.container.querySelector('[data-testid="doc-action-email"]')).not.toBeNull();
+    expect(v.text).not.toContain('Accept');
+    expect(v.text).not.toContain('tap ');
+    expect(v.nextSteps.textContent).toContain('to finish this renewal');
+    expect(v.nextSteps.textContent).toContain('no appointment is needed');
+    expect(v.nextSteps.textContent).toContain('set up your invoice and activate your coverage');
+  });
+
+  it.each(['quote_required', 'inspection_request', 'some_future_mode'])('%s: no online accept either (never advertise what the page does not offer)', (mode) => {
+    const v = view(withMode({ mode, ctaLabel: 'Call Waves' }));
+    expect(v.button).toBeNull();
+    expect(v.text).not.toContain('Accept & pick a start date');
+    expect(v.nextSteps.textContent).toContain('Our team will confirm the final details');
+  });
+
+  it('terminal states and review/quote gating still outrank the mode', () => {
+    const accepted = view(withMode({ mode: 'invoice_only' }, { terminalState: 'accepted' }));
+    expect(accepted.button.textContent).toBe('View your estimate');
+    expect(accepted.text).toContain('has been approved');
+    const expired = view(withMode({ mode: 'existing_appointment' }, { terminalState: 'expired' }));
+    expect(expired.button).toBeNull();
+    const review = view(withMode({ mode: 'invoice_only' }, { reviewBeforeBooking: true }));
+    expect(review.button.textContent).toBe('View estimate online');
+  });
+
+  // The accepted-estimate record uses data.acceptance (the recorded terms),
+  // a different object from estimate.acceptance (the contract): do not confuse them.
+  it('reads the contract from estimate.acceptance, not from the accepted-terms record', () => {
+    const v = view({ ...withMode(undefined), acceptance: { mode: 'contact_office' } });
+    expect(v.button.textContent).toBe('Accept & pick a start date');
+  });
+});
+
+describe('accepted wording follows the acceptance mode (codex #6343 r7)', () => {
+  const accepted = (acceptance) => {
+    const data = {
+      ...BASE_DATA,
+      estimate: { ...BASE_DATA.estimate, ...(acceptance ? { acceptance } : {}) },
+      proposal: { ...BASE_DATA.proposal, enabled: false, synthesized: true },
+      cta: { terminalState: 'accepted' },
+    };
+    const { container } = render(<EstimateProposalDocument data={data} token="tok-123" />);
+    const next = [...container.querySelectorAll('p')].find((p) => /has been approved/.test(p.textContent));
+    return { button: container.querySelector('[data-testid="doc-action-online"]').textContent, next: next.textContent, text: container.textContent };
+  };
+
+  it.each([undefined, { mode: 'standard_slot_pick' }, { mode: 'existing_appointment' }])('%j keeps the visit-details wording', (acceptance) => {
+    const v = accepted(acceptance);
+    expect(v.button).toBe('See your visit details');
+    expect(v.next).toContain('has your visit details');
+  });
+
+  it.each(['invoice_only', 'contact_office', 'commercial_site_confirmation', 'quote_required', 'some_future_mode'])('%s: acceptance-neutral wording, no visit promise', (mode) => {
+    const v = accepted({ mode });
+    expect(v.button).toBe('View your estimate');
+    expect(v.next).toContain('This estimate has been approved.');
+    expect(v.next).toContain('has the details.');
+    expect(v.next).toContain('Questions? Call');
+    expect(v.text).not.toMatch(/visit details/);
+  });
+});
+
+describe('Next steps text size', () => {
+  const sizes = (data) => {
+    const { container } = render(<EstimateProposalDocument data={data} token="tok-123" />);
+    const header = [...container.querySelectorAll('div')].find((d) => d.textContent === 'Next steps');
+    const paragraphs = [...header.parentElement.querySelectorAll('p')];
+    return paragraphs.map((p) => p.style.fontSize);
+  };
+  const open = { ...BASE_DATA, cta: { commercialProposal: false }, proposal: { ...BASE_DATA.proposal, enabled: false } };
+
+  it('every Next steps paragraph is 14px in every branch, including the valid-through and expired lines', () => {
+    const branches = [
+      open,
+      { ...open, cta: { terminalState: 'accepted' } },
+      { ...open, cta: { terminalState: 'declined' } },
+      { ...open, cta: { terminalState: 'expired' } },
+      BASE_DATA, // authored proposal
+      { ...open, cta: { quoteRequired: true } },
+      { ...open, estimate: { ...open.estimate, acceptance: { mode: 'contact_office' } } },
+      { ...open, estimate: { ...open.estimate, acceptance: { mode: 'invoice_only' } } },
+    ];
+    for (const data of branches) {
+      const found = sizes(data);
+      expect(found.length).toBeGreaterThan(0);
+      expect(found.every((size) => size === '14px')).toBe(true);
+    }
+    // The open branch carries the valid-through line as a second paragraph.
+    expect(sizes(open)).toHaveLength(2);
+  });
+});
+
+// GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): "$X a month" under each
+// per-application line, one plan line for two or more services. The server ships
+// proposal.monthlyAverage only with the gate on and a reconciling plan, so an
+// absent key is the gate-off document.
+describe('EstimateProposalDocument — monthly average beside per-application prices', () => {
+  const perAppLine = (description, unitPrice, visitsPerYear) => ({
+    description, quantity: 1, unitPrice, amount: unitPrice, frequency: 'per_application',
+    frequencyLabel: 'Per application', visitsPerYear, taxable: false,
+  });
+  const docData = ({ lines, monthlyAverage, oneTime = 0 }) => ({
+    ...BASE_DATA,
+    estimate: { ...BASE_DATA.estimate, category: 'RESIDENTIAL' },
+    proposal: {
+      ...BASE_DATA.proposal,
+      enabled: false,
+      synthesized: true,
+      title: 'Service Proposal',
+      buildings: [{
+        name: '123 Palm Way',
+        note: null,
+        lineItems: [
+          ...lines,
+          ...(oneTime ? [{ description: 'WaveGuard setup', quantity: 1, unitPrice: oneTime, amount: oneTime, frequency: 'one_time', frequencyLabel: 'One-time', taxable: false }] : []),
+        ],
+      }],
+      totals: { annualRecurring: 0, monthlyEquivalent: 0, oneTime, totalTax: 0, firstYearTotal: oneTime, hasTax: false, isMultiBuilding: false },
+      ...(monthlyAverage ? { monthlyAverage } : {}),
+    },
+    cta: { commercialProposal: false, commercialAutoPriced: false },
+  });
+  const single = { lines: [perAppLine('Pest Control — 4 applications/yr', 94, 4)], monthlyAverage: { planMonthly: 31.33, credit: null, bundleDiscountPct: 0, oneTime: null } };
+  const bundle = {
+    lines: [perAppLine('Lawn Care — 9 applications/yr', 56.4, 9), perAppLine('Pest Control — 4 applications/yr', 90, 4)],
+    monthlyAverage: { planMonthly: 72.3, credit: null, bundleDiscountPct: 0.1, oneTime: { amount: 99, setup: true } },
+    oneTime: 99,
+  };
+  const render1 = (data) => render(<EstimateProposalDocument data={data} token="tok-123" />).container.textContent;
+
+  it('single service: the average sits under the line, the context line prints once, no plan line', () => {
+    const { container } = render(<EstimateProposalDocument data={docData(single)} token="tok-123" />);
+    const text = container.textContent;
+    expect(text).toContain('Pest Control — 4 applications/yr');
+    expect(text).toContain('$94.00');
+    expect(text).toContain('$31.33 a month');
+    expect(text.match(/Averaged over the year\. You pay after each application\./g)).toHaveLength(1);
+    expect(text).not.toContain('Your plan averages');
+  });
+
+  it('multi service: per-service lines add up to the plan line, which is the stored monthly total', () => {
+    const { container } = render(<EstimateProposalDocument data={docData(bundle)} token="tok-123" />);
+    const text = container.textContent;
+    const perLine = [...container.querySelectorAll('[data-monthly-average-line]')].map((el) => el.textContent);
+    expect(perLine).toEqual(['$42.30 a month', '$30.00 a month']);
+    expect(text).toContain('Your plan averages (10% bundle savings included)');
+    expect(container.querySelector('[data-monthly-average-plan]').textContent).toContain('$72.30 a month');
+    const cents = (s) => Math.round(parseFloat(s.match(/\$([\d.,]+)/)[1].replace(/,/g, '')) * 100);
+    expect(perLine.reduce((sum, s) => sum + cents(s), 0)).toBe(7230);
+    // One-time charges stay out of the average and are said so; the combined
+    // roll-ups stay suppressed (AGENTS.md price copy).
+    expect(text).toContain('One-time charges are not in the average.');
+    expect(text).not.toContain('Recurring service (per year)');
+    expect(text).not.toContain('/mo');
+  });
+
+  it('rounding remainder: lines that do not divide evenly still sum to the plan to the cent', () => {
+    const data = docData({
+      lines: [
+        perAppLine('Lawn Care — 9 applications/yr', 47.33, 9),
+        perAppLine('Pest Control — 4 applications/yr', 33.17, 4),
+        perAppLine('Tree & Shrub — 9 applications/yr', 58.37, 9),
+      ],
+      monthlyAverage: { planMonthly: 90.33, credit: null, bundleDiscountPct: 0.15, oneTime: null },
+    });
+    const { container } = render(<EstimateProposalDocument data={data} token="tok-123" />);
+    const perLine = [...container.querySelectorAll('[data-monthly-average-line]')].map((el) => el.textContent);
+    expect(perLine).toEqual(['$35.50 a month', '$11.06 a month', '$43.77 a month']);
+    expect(container.querySelector('[data-monthly-average-plan]').textContent).toContain('$90.33 a month');
+  });
+
+  it('a plan credit prints as its own negative line', () => {
+    const data = docData({
+      lines: bundle.lines,
+      monthlyAverage: { planMonthly: 62.3, credit: { label: 'Referral Credit', monthly: 10 }, bundleDiscountPct: 0.1, oneTime: null },
+    });
+    const text = render1(data);
+    expect(text).toContain('Referral Credit');
+    expect(text).toContain('−$10.00 a month');
+    expect(text).toContain('$62.30 a month');
+  });
+
+  it('single service with a plan credit: the credit and plan lines make the arithmetic visible', () => {
+    const data = docData({
+      lines: single.lines,
+      monthlyAverage: { planMonthly: 21.33, credit: { label: 'Referral Credit', monthly: 10 }, bundleDiscountPct: 0, oneTime: null },
+    });
+    const { container } = render(<EstimateProposalDocument data={data} token="tok-123" />);
+    const text = container.textContent;
+    expect(container.querySelector('[data-monthly-average-line]').textContent).toBe('$31.33 a month');
+    expect(text).toContain('−$10.00 a month');
+    expect(container.querySelector('[data-monthly-average-plan]').textContent).toContain('$21.33 a month');
+  });
+
+  it('gate off (no monthlyAverage from the server): the document is exactly as before', () => {
+    for (const fixture of [{ ...single, monthlyAverage: null }, { ...bundle, monthlyAverage: null }]) {
+      const text = render1(docData(fixture));
+      expect(text).not.toMatch(/a month|Averaged over the year|Your plan averages/);
+    }
+  });
+
+  it('withholds the average when the inputs do not reconcile to the lines', () => {
+    const text = render1(docData({ ...single, monthlyAverage: { planMonthly: 99, credit: null, bundleDiscountPct: 0, oneTime: null } }));
+    expect(text).not.toMatch(/a month|Averaged over the year/);
+  });
+
+  it('a commercial proposal never carries it', () => {
+    const data = docData(single);
+    const text = render1({ ...data, proposal: { ...data.proposal, enabled: true }, cta: { commercialProposal: true } });
+    expect(text).not.toMatch(/Averaged over the year/);
   });
 });

@@ -369,7 +369,13 @@ const TRIGGER_REGISTRY = {
       // One bell row per conversation: a known sender's later texts rewrite the
       // row while it is still open, so a count leads the title ("3 texts from
       // Name") and the body is always the latest text.
-      title: `${Number(p.textCount) > 1 ? `${Math.floor(Number(p.textCount))} texts from` : 'SMS from'} ${p.fromName || (p.fromPhone ? maskPhone(p.fromPhone) : 'unknown')}`,
+      // A lead's bare CALL / TEXT reply (GATE_LEAD_CALL_TEXT_PREFERENCE) leads
+      // with the choice so the owner calls the CALL leads first. Only the text
+      // that carried it has it: the next text's payload replaces the row's, and
+      // an older late text never changes the title (the row keeps its content).
+      title: (p.leadPreference === 'call' || p.leadPreference === 'text')
+        ? `${p.leadPreference === 'call' ? 'Wants a call:' : 'Prefers text:'} ${p.fromName || (p.fromPhone ? maskPhone(p.fromPhone) : 'unknown')}${Number(p.textCount) > 1 ? ` (${Math.floor(Number(p.textCount))} texts)` : ''}`
+        : `${Number(p.textCount) > 1 ? `${Math.floor(Number(p.textCount))} texts from` : 'SMS from'} ${p.fromName || (p.fromPhone ? maskPhone(p.fromPhone) : 'unknown')}`,
       body: redactSensitiveText(p.message || '').slice(0, 140),
       // The whole text, for the bell's "Show full text": the 140-character
       // body above (also the push text) used to be all the bell ever kept.
@@ -495,7 +501,10 @@ const TRIGGER_REGISTRY = {
     allowContactDetails: true,
     build: (p) => ({
       title: `Missed call — ${p.name || 'a customer'}`,
-      body: `${p.phone || 'unknown number'} called and did not leave a voicemail.`,
+      // GATE_MISSED_CALL_ALERT_DETAIL: the producer adds line / duration /
+      // next visit to the payload only with the gate on; without them this is
+      // the original sentence, character for character.
+      body: require('./missed-call-alert-detail').formatMissedCallBody(p),
       // Calls live under the hash-routed Calls tab; ?thread= would open the
       // SMS conversation instead (same destination as the voicemail bell).
       link: callLink(p),
@@ -1128,7 +1137,7 @@ function pushTagFor(triggerKey, payload = {}) {
  * @param {string} triggerKey — must match a key in TRIGGER_REGISTRY
  * @param {object} payload — trigger-specific data, see each build() for shape
  */
-async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null } = {}) {
+async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null, pushOnly = false } = {}) {
   try {
     const trigger = TRIGGER_REGISTRY[triggerKey];
     if (!trigger) {
@@ -1223,7 +1232,8 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     for (const user of activeAdmins) {
       const userPref = prefsByUser.get(user.id) || defaultPreference(trigger);
 
-      if (userPref.bell_enabled && !bellWritten) {
+      // pushOnly (missed-call push retry): the bell row already exists; only the push is re-sent.
+      if (!pushOnly && userPref.bell_enabled && !bellWritten) {
         // Write a single bell entry for "admin" recipients (existing model is shared)
         try {
           // NotificationService.create catches insert errors and returns null
@@ -1438,6 +1448,7 @@ module.exports = {
     maskEmail,
     maskPhone,
     pushTagFor,
+    PRIORITY_VIBRATE,
     redactSensitiveText,
     sanitizeBuiltNotification,
     sanitizeNotificationPayload,

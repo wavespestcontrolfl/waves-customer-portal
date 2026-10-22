@@ -1033,3 +1033,46 @@ describe('on-site flags through the V1/V2 resolution', () => {
     expect(normalizeSecondaryContactV2(entry({ wants_appointment_texts: 'true', on_site: 1 }))).toMatchObject({ wants_appointment_texts: false, on_site: false });
   });
 });
+
+describe('withoutAnsweringStaffName', () => {
+  const { withoutAnsweringStaffName } = _test;
+  const answered = (csr, over = {}) => ({ direction: 'inbound', metadata: { forward_acceptance: { accepted: true, csr_name: csr } }, ...over });
+  const spouse = (over = {}) => ({ first_name: 'Robin', last_name: 'Sample', email: 'household@example.com', role: 'spouse_partner', ...over });
+
+  test('drops the name when it is the answering staff member, and keeps the email and role', () => {
+    expect(withoutAnsweringStaffName([spouse()], answered('Robin'))).toEqual([
+      { first_name: null, last_name: null, email: 'household@example.com', role: 'spouse_partner' },
+    ]);
+    expect(withoutAnsweringStaffName([spouse({ first_name: ' robin ' })], answered('Robin Staffer'))[0].first_name).toBeNull();
+  });
+
+  test('drops a contact that was only that name', () => {
+    expect(withoutAnsweringStaffName([{ first_name: 'Robin', role: 'spouse_partner' }], answered('Robin'))).toEqual([]);
+  });
+
+  test('leaves every other contact alone', () => {
+    const list = [spouse({ first_name: 'Jordan' }), spouse({ first_name: 'Robin', phone: '+15005550006' })];
+    const out = withoutAnsweringStaffName(list, answered('Robin'));
+    expect(out[0]).toEqual(list[0]);
+    expect(out[1]).toMatchObject({ first_name: null, phone: '+15005550006' });
+  });
+
+  test('does nothing without an accepted inbound answer', () => {
+    const list = [spouse()];
+    expect(withoutAnsweringStaffName(list, { direction: 'inbound', metadata: {} })).toBe(list);
+    expect(withoutAnsweringStaffName(list, answered('Robin', { direction: 'outbound-api' }))).toBe(list);
+    expect(withoutAnsweringStaffName(list, { direction: 'inbound', metadata: { forward_acceptance: { accepted: false, csr_name: 'Robin' } } })).toBe(list);
+    expect(withoutAnsweringStaffName(list, answered(''))).toBe(list);
+  });
+
+  test('a role label is not a name: nothing is filtered', () => {
+    const list = [spouse({ first_name: 'Office' }), spouse({ first_name: 'Waves' })];
+    expect(withoutAnsweringStaffName(list, answered('Office Manager'))).toBe(list);
+    expect(withoutAnsweringStaffName(list, answered('Waves'))).toBe(list);
+  });
+
+  test('reads metadata stored as a JSON string', () => {
+    const call = { direction: 'inbound', metadata: JSON.stringify({ forward_acceptance: { accepted: true, csr_name: 'Robin' } }) };
+    expect(withoutAnsweringStaffName([spouse()], call)[0].first_name).toBeNull();
+  });
+});

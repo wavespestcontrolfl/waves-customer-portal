@@ -473,6 +473,7 @@ module.exports = {
   SERVICE_LINE_LABELS,
   inferEstimateServiceInterest,
   inferEstimateServiceLines,
+  oneTimeServicesFromData,
   parseEstimateData,
   serviceKeysFromText,
 };

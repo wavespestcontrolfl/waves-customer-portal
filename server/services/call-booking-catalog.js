@@ -298,7 +298,10 @@ const KEYWORD_SERVICE_RULES = [
   { serviceKey: 'rodent_general_one_time', matches: (h) => hasAffirmativeRodentMention(h) },
 ];
 
-async function loadBookableCallServices(conn) {
+// `strict`: a caller that must tell "the read failed" from "nothing is bookable" (the
+// day-agreement shadow, which records a decision from the list) gets the error instead
+// of the legacy empty list.
+async function loadBookableCallServices(conn, { strict = false } = {}) {
   try {
     // Stable order matters beyond display: these rows render the prompt's
     // catalog block AND feed extractionPromptVersion's order-sensitive hash,
@@ -317,6 +320,7 @@ async function loadBookableCallServices(conn) {
       .select(BOOKABLE_SERVICE_COLUMNS);
     return Array.isArray(rows) ? rows : [];
   } catch (err) {
+    if (strict) throw err;
     logger.warn(`[call-booking-catalog] Failed to load bookable services (falling back to legacy labels): ${err.message}`);
     return [];
   }
@@ -939,6 +943,7 @@ async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actor
 
 module.exports = {
   loadBookableCallServices,
+  isGenericCallCatalogRow,
   loadCallReServiceRows,
   hasCallReServiceIntent,
   isReServiceCatalogRow,

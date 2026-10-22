@@ -608,6 +608,7 @@ module.exports = {
   OVERALL_BAND,
   RECHECK_SOURCES,
   CONFIDENCE_LEVELS,
+  COMPARABLE_LEVELS,
   deriveAssessmentConfidence,
   scoresFromAssessmentRow,
   buildLawnProgress,

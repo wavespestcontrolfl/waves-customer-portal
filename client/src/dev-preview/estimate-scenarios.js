@@ -9,4 +9,5 @@ export const ESTIMATE_SCENARIOS = [
   ['long_content', 'Long customer and address'], ['proposal', 'Commercial proposal'],
   ['proposal_terms', 'Proposal with terms'], ['proposal_structured', 'Structured proposal'],
   ['proposal_programs', 'Proposal programs'], ['preslab', 'Pre-slab termite'],
+  ['pest_average', 'Pest, monthly average'], ['bundle_average', 'Bundle, monthly average'],
 ];

@@ -47,7 +47,12 @@ const OUTSIDE_WRITE_TOOL_NAMES = new Set([
 // Every outside write is full-access-only. Named separately from
 // WRITE_TWO_STEP_TOOL_NAMES (rather than inferred) so a future two-step tool
 // that is NOT an outside write does not silently inherit the restriction.
-const FULL_ACCESS_TWO_STEP_TOOL_NAMES = new Set([...OUTSIDE_WRITE_TOOL_NAMES]);
+const FULL_ACCESS_TWO_STEP_TOOL_NAMES = new Set([
+  ...OUTSIDE_WRITE_TOOL_NAMES,
+  // The general admin edit (owner ruling 2026-10-12, GATE_IB_GENERAL_EDIT): a
+  // reviewed list of small internal edits, owner login only, always a card.
+  'propose_admin_edit',
+]);
 
 // General admin reads (owner ruling 2026-10-12, GATE_IB_GENERAL_READ):
 // find_admin_reads and read_admin_data read what an admin screen reads, on the
@@ -55,7 +60,7 @@ const FULL_ACCESS_TWO_STEP_TOOL_NAMES = new Set([...OUTSIDE_WRITE_TOOL_NAMES]);
 // named here beside FULL_ACCESS_TWO_STEP_TOOL_NAMES because they use the same
 // one predicate (ibFullAccess). action-registry.js allowed() refuses them
 // without fullAccess, so no tool list offers them to another login.
-const FULL_ACCESS_READ_TOOL_NAMES = new Set(['find_admin_reads', 'read_admin_data']);
+const FULL_ACCESS_READ_TOOL_NAMES = new Set(['find_admin_reads', 'read_admin_data', 'find_admin_edits']);
 
 // Writes with a structural preview→confirmed two-step in their executor.
 // Their no-confirmed call produces the rich preview shown to the operator.
@@ -94,7 +99,19 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   // send_invoice (owner ruling 2026-10-07): an existing invoice only,
   // through the Invoices page's own send handler.
   'send_invoice',
+  // record_payment (owner ruling 2026-10-12): the Invoices page's Record payment handler, run in process behind a
+  // card; records money already received, never charges a card.
+  'record_payment',
+  // void_invoice (owner ruling 2026-10-12): the Invoices page's Void handler, run in process behind a card;
+  // an invoice with nothing collected only, sends nothing.
+  'void_invoice',
   'update_lead_contact',
+  // propose_admin_edit (owner ruling 2026-10-12): one reviewed small internal
+  // edit, replayed through the screen's own PUT or PATCH after a confirm card.
+  'propose_admin_edit',
+  // convert_lead (owner ruling 2026-10-12): the Leads page's Convert to Customer handler, run in
+  // process behind a card; links the lead to an existing customer and sends nothing.
+  'convert_lead',
   ...OUTSIDE_WRITE_TOOL_NAMES,
   'cancel_queued_message',
 ]);

@@ -93,7 +93,7 @@ describe('Tech field workspace uses the existing route workflow', () => {
     const heldReads = () => fetchMock.mock.calls.filter(([path]) => String(path).includes('/held-visits'));
     mount('/admin/today', { role: 'admin', techRole: 'admin' });
     expect(await screen.findByText('11:00 AM · Riley Example')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Book in Dispatch' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open in Dispatch' })).toBeInTheDocument();
     cleanup();
     fetchMock.mockClear();
     mount('/admin/today', { role: 'technician', techRole: 'technician' });

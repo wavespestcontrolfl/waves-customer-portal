@@ -309,6 +309,50 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
   });
 });
 
+describe('GATE_ALERT_RING_ONCE: a promise rings once (owner 2026-10-14)', () => {
+  // The open-row probe itself lives in notifyAdmin (dedupeOpenOnly; see
+  // notification-admin-dedupe-window.test.js). Here: what ringOverdueBell asks for.
+  beforeEach(() => { process.env.GATE_ALERT_RING_ONCE = 'true'; });
+  afterEach(() => { delete process.env.GATE_ALERT_RING_ONCE; });
+
+  test('gate off: the 24-hour rolling dedupe, no open-only probe, no quiet refresh', async () => {
+    delete process.env.GATE_ALERT_RING_ONCE;
+    await ring();
+    const opts = lastCall()[3];
+    expect(opts).toMatchObject({ dedupeWindowMs: 24 * 3600 * 1000, refreshOnDedupe: true, bell: true });
+    expect(opts.dedupeOpenOnly).toBeUndefined();
+    expect(opts.ringOnRefresh).toBeUndefined();
+  });
+
+  test('gate on: only an open row is the standing one, at any age, and a refresh never rings', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'n-open', deduped: true });
+    await ring();
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    const opts = lastCall()[3];
+    expect(opts).toMatchObject({ dedupeOpenOnly: true, refreshOnDedupe: true, bell: true, dedupeKey: 'sms-commitment:commit-1' });
+    expect(opts.dedupeWindowMs).toBeUndefined();
+    expect(opts.ringOnRefresh()).toBe(false);
+    // Strays of the same key still close, as before.
+    expect(sentUpdates).toHaveLength(1);
+    expect(sentUpdates[0].bindings).toContain('n-open');
+  });
+
+  test('gate on: a fresh row (first time, or a person closed the old one) carries the same bell and metadata', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'n-fresh', deduped: false });
+    await ring();
+    const opts = lastCall()[3];
+    expect(opts).toMatchObject({ bell: true, dedupeOpenOnly: true, link: `/admin/customers?customerId=${CUSTOMER_ID}&tab=comms` });
+    expect(opts.metadata).toMatchObject({ triggerKey: 'sms_operational_followup', commitment_id: 'commit-1', doneWhen: 'promise_fulfilled' });
+    expect(sentUpdates[0].bindings).toContain('n-fresh');
+  });
+
+  test('gate on, email promise: same rule through the shared bell', async () => {
+    await ring({ args: { sourceIdField: 'email_id', triggerKey: 'email_operational_followup' } });
+    expect(lastCall()[3]).toMatchObject({ dedupeOpenOnly: true });
+    expect(lastCall()[3].metadata).toMatchObject({ triggerKey: 'email_operational_followup' });
+  });
+});
+
 describe('fitAction name shortening', () => {
   const { fitAction } = require('../services/admin-alert-names');
   const send = [(n) => `send ${n} the estimate`];

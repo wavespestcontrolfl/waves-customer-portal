@@ -1018,6 +1018,50 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     expect((await row(w.commitment.id)).fulfillment).toMatchObject({ record_id: booked.id, basis: 'estimate_sent_to_same_customer_within_14_days' });
   });
 
+  test('a reprocessed call (generation differs from the promise) or a non-valid extraction keeps the old association rule (Codex #6344 r1)', async () => {
+    const w = await world({ kind: 'send_estimate' });
+    await db('call_commitments').where({ id: w.commitment.id }).update({ processing_generation: 2 });
+    await db('call_log').where({ id: w.call.id }).update({
+      processing_generation: 3,
+      v2_extraction_status: 'valid',
+      ai_extraction_enriched: JSON.stringify({ meta: { schema_version: '1' }, service_request: { primary_service_category: 'lawn_care' } }),
+    });
+    const at = later(10);
+    const [est] = await db('estimates').insert({
+      status: 'sent', customer_id: w.customerId, customer_phone: w.phone, sent_at: at, created_at: at, service_interest: 'Pest Control',
+      estimate_data: JSON.stringify({ deliveryState: { firstDeliveredAt: at.toISOString(), lastDeliveredAt: at.toISOString() } }),
+    }).returning('id');
+    made.estimateIds.push(est.id);
+    expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 1 });
+  });
+
+  test('an estimate for a DIFFERENT service line never keeps the promise by association, and a later estimate for the asked line still does (audit 2026-10-19: lawn quote asked, pest estimate sent)', async () => {
+    const w = await world({ kind: 'send_estimate' });
+    // The ask is read from the extraction that filed the promise: same generation on both rows.
+    await db('call_commitments').where({ id: w.commitment.id }).update({ processing_generation: 3 });
+    await db('call_log').where({ id: w.call.id }).update({
+      processing_generation: 3,
+      v2_extraction_status: 'valid',
+      ai_extraction_enriched: JSON.stringify({ meta: { schema_version: '1' }, service_request: { primary_service_category: 'lawn_care', secondary_categories: ['pest_general'], specific_service_name: 'Lawn Insect Control' } }),
+    });
+    const sentEstimate = async (minutes, service_interest) => {
+      const at = later(minutes);
+      const [r] = await db('estimates').insert({
+        status: 'sent', customer_id: w.customerId, customer_phone: w.phone, sent_at: at, created_at: at, service_interest,
+        estimate_data: JSON.stringify({ deliveryState: { firstDeliveredAt: at.toISOString(), lastDeliveredAt: at.toISOString() } }),
+      }).returning('id');
+      made.estimateIds.push(r.id);
+      return r;
+    };
+    await sentEstimate(10, 'Pest Control');
+    expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 0 });
+    expect(await row(w.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
+    // The pest estimate is skipped, not fatal: the lawn one, sent later, closes it.
+    const lawn = await sentEstimate(20, 'Lawn Care');
+    expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 1 });
+    expect((await row(w.commitment.id)).fulfillment).toMatchObject({ record_id: lawn.id, basis: 'estimate_sent_to_same_customer_within_14_days' });
+  });
+
   test('the lapse scan never lists a DIRECT call proof: an unlinked promise returned by a staff call to a linked customer stays closed without flapping', async () => {
     // The promise call has no customer, so the direct lookup matches the
     // callback by phone; the staff call back itself is linked to a customer.

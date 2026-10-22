@@ -13,6 +13,8 @@ const {
   completionOwnershipError,
   techTipsGateOn,
   backfillCompletionPlan,
+  isPestStockAdvisoryCompletion,
+  isLawnTsStockAdvisoryCompletion,
 } = require('../services/complete-scheduled-service');
 const express = require('express');
 const crypto = require('crypto');
@@ -3876,7 +3878,21 @@ router.get('/:serviceId/pest-recap/context', async (req, res, next) => {
     });
     if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason });
     // GATE_FAST_COMPLETE_WRAP_UP: the pest Fast Complete sheet shows its Wrap-up section. The key exists only while the gate is live.
-    res.json(require('../config/feature-gates').fastCompleteWrapUpLive() ? { ...ctx, wrapUp: true } : ctx);
+    const gates = require('../config/feature-gates');
+    // GATE_ONE_TAP_REPORT: the pest report sheet runs the one-tap flow. The key exists only while the gate is live, and
+    // only for a visit of a recurring series or a re-service (the pest re-service, or a free callback booked under a
+    // regular key: the sheet's own isReserviceVisit); a one-time visit keeps today's sheet.
+    // GATE_PEST_STOCK_ADVISORY: /complete takes this visit's stock below zero instead of refusing (the same rule), so
+    // the sheet lets a 0-in-stock product through. The key exists only while it does.
+    const stockAdvisory = isPestStockAdvisoryCompletion({ service_type: ctx.service?.serviceType });
+    res.json({
+      ...ctx,
+      ...(gates.fastCompleteWrapUpLive() ? { wrapUp: true } : {}),
+      ...(gates.oneTapReportLive()
+        && (ctx.service?.isRecurring === true || ctx.service?.isCallback === true || ctx.service?.serviceKey === 'pest_re_service')
+        ? { oneTap: true } : {}),
+      ...(stockAdvisory ? { stockAdvisory: true } : {}),
+    });
   } catch (err) { next(err); }
 });
 
@@ -4678,7 +4694,9 @@ router.get('/:serviceId/tree-shrub/fast-context', async (req, res, next) => {
     const ctx = await require('../services/tree-shrub-fast-context').buildTreeShrubFastContext(req.params.serviceId);
     if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason });
     const { ok, ...body } = ctx;
-    res.json({ enabled: true, ...body });
+    // GATE_LAWN_TS_STOCK_ADVISORY: /complete takes this tree & shrub visit's stock below zero instead of refusing (the
+    // same rule), so the sheet lets a 0-in-stock product through. The key exists only while it does.
+    res.json({ enabled: true, ...body, ...(isLawnTsStockAdvisoryCompletion({ service_type: body.service?.serviceType }) ? { stockAdvisory: true } : {}) });
   } catch (err) { next(err); }
 });
 
@@ -4755,7 +4773,10 @@ router.get('/:lawnFastServiceId/lawn-fast/context', async (req, res, next) => {
     const ctx = await require('../services/lawn-fast-complete').buildLawnFastContext(serviceId, { technicianId: req.technicianId, ...(sodAwareRequest(req) ? { sodAware: true } : {}), ...lawnFastGroupedAsk(req), ...(productIds ? { productIds } : {}) });
     if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason, code: ctx.reason });
     const { ok, ...body } = ctx;
-    res.json({ enabled: true, ...body });
+    // GATE_LAWN_TS_STOCK_ADVISORY: /complete takes this lawn visit's stock below zero instead of refusing (the same rule),
+    // so the sheet lets a 0-in-stock product through. The key exists only while it does; absent, the sheet keeps its
+    // WaveGuard-tier rule (a WaveGuard lawn completion is always advisory).
+    res.json({ enabled: true, ...body, ...(isLawnTsStockAdvisoryCompletion({ service_type: body.service?.serviceType }) ? { stockAdvisory: true } : {}) });
   } catch (err) { next(err); }
 });
 

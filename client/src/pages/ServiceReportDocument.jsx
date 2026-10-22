@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useState } from 'react';
 import { WAVES_FL_LICENSE_LINE, WAVES_PRODUCTS_SAFETY_URL, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 import { cleanVisitSummary, hidesTreatedAreas, reserviceCardView } from './ReportViewPage';
 import { epaReg, isProductApplication, reportHasRodenticide } from '../lib/product-application';
@@ -9,6 +9,8 @@ import {
 } from '../components/report/markedPhotoCopy';
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
 import ReportText, { reportSectionsForText } from '../components/report/ReportSections';
+import LawnBeforeAfterSlider from '../components/report/LawnBeforeAfterSlider';
+import { isTroubleSpotPhoto, rateWithBasis, sameSentence, techTextBeyondSummary } from './serviceReportCleanup';
 
 // Work-order style service report document (owner direction 2026-08-03,
 // modeled on the TruGreen WO / All U Need service-notification formats):
@@ -136,6 +138,22 @@ function fmtAmount(value) {
   if (!Number.isFinite(num)) return String(value || '').trim();
   return String(parseFloat(num.toFixed(3)));
 }
+
+// The rate cell. GATE_REPORT_CLEANUP_1020 adds what the rate is per when the record says.
+function rateLabel(app, cleanup) {
+  if (!(app.rate && app.rateUnit)) return '—';
+  const amount = fmtAmount(app.rate);
+  return (cleanup && rateWithBasis(app, amount)) || `${amount} ${fmtUnit(app.rateUnit)}`;
+}
+
+// GATE_REPORT_CLEANUP_1020: a photo card as tall as its photo. The old card was a fixed 190px box,
+// so a wide photo sat in a tall gray frame. The image now keeps its own shape at the cell width;
+// only a photo taller than 190px at that width is capped (and letterboxed at the sides), so a
+// portrait photo still never runs past a page break.
+const PHOTO_FIT_STYLE = {
+  display: 'block', width: '100%', height: 'auto', maxHeight: 190, objectFit: 'contain',
+  background: '#F7F8F9', borderRadius: 10, border: `1px solid ${HAIR}`,
+};
 
 function fmtUnit(unit) {
   return String(unit || '').replace(/_/g, ' ').trim();
@@ -338,9 +356,38 @@ function DocPoisonControl({ data, listsProducts = false, titled = false, showApp
   );
 }
 
+// GATE_REPORT_GLASS_WEB (owner 2026-10-20): true only inside the web view the
+// server dressed in glass. Every glass attribute below reads this, so with it
+// false (the PDF, gate off) the markup is exactly the plain paper document.
+const GlassDressing = createContext(false);
+
+// Everything the glass dressing changes, in one place so the component body
+// stays flat. Off (the PDF, gate off) returns the paper document's own values.
+function glassView(web, glass) {
+  const on = web && glass === true;
+  return {
+    on,
+    gc: on ? { 'data-glass': 'card' } : {},
+    footer: on ? { className: 'doc-keep doc-footer', 'data-glass': 'card' } : { className: 'doc-keep' },
+    rootClass: on ? ' is-glass' : '',
+    rootBackground: on ? 'transparent' : '#fff',
+  };
+}
+
+// One glass card around a run of blocks; renders the children bare when the
+// dressing is off, so the paper document gains no wrapper element.
+function GlassBlock({ children }) {
+  const glass = useContext(GlassDressing);
+  return glass ? <div data-glass="card">{children}</div> : children;
+}
+
+// A level-2 heading for screen readers (role, not an <h2>: the glass theme
+// forces every h1/h2 to its own size with !important, which would change
+// the PDF). The look is unchanged.
 function SectionHeader({ children }) {
+  const glass = useContext(GlassDressing);
   return (
-    <div className="doc-keep-with-next" style={{
+    <div role="heading" aria-level={2} className="doc-keep-with-next" {...(glass ? { 'data-gt': 'eyebrow' } : {})} style={{
       borderBottom: `1.5px solid ${NAVY}`, margin: '14px 0 6px', paddingBottom: 3,
       color: NAVY, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase',
     }}>{children}</div>
@@ -356,7 +403,13 @@ function Bullet({ children }) {
   );
 }
 
-export default function ServiceReportDocument({ data, token }) {
+// `web` (GATE_REPORT_SIMPLE_WEB, owner 2026-10-17): the same document is the
+// page a customer sees at the report link. It then IS the online report, so
+// the lines that point "to your online report" read as plain facts instead.
+export default function ServiceReportDocument({ data, token, web = false, glass = false }) {
+  // GATE_REPORT_GLASS_WEB: glass dressing for the web view only; the PDF never
+  // gets it, whatever the payload says.
+  const { on: glassOn, gc, footer: footerProps, rootClass: glassClass, rootBackground } = glassView(web, glass);
   // Remote images (the traced S3 snapshot, photos) can fail during the
   // headless capture. A heading with no image under it is a broken-looking
   // claim in a permanent record, so a failed image drops itself and its
@@ -720,8 +773,14 @@ export default function ServiceReportDocument({ data, token }) {
   // GATE_LAWN_TECH_PARAGRAPH / GATE_TS_TECH_PARAGRAPH: the frozen "From your technician"
   // paragraph. Lawn carries it in the lead; tree & shrub has no lead and carries it
   // as reportV2.techParagraph. Absent key prints nothing.
-  const techParagraph = v2Lead?.techParagraph
+  // GATE_REPORT_CLEANUP_1020 (data.reportCleanup): it prints only the text the summary above
+  // does not already say, and not at all when the summary says all of it.
+  const reportCleanup = data.reportCleanup === true;
+  const techParagraphFrozen = v2Lead?.techParagraph
     || (data.serviceLine === 'tree_shrub' && typeof v2?.techParagraph === 'string' && v2.techParagraph.trim() ? v2.techParagraph : null);
+  const techParagraph = reportCleanup && techParagraphFrozen
+    ? (techTextBeyondSummary(techParagraphFrozen, summaryParagraphs) || null)
+    : techParagraphFrozen;
   // The lawn V2 payload's reconciled watering lines are the only watering
   // instruction the report prints (see the Re-entry block below).
   const lawnV2Watering = data.serviceLine === 'lawn' && Boolean(v2);
@@ -1002,9 +1061,10 @@ export default function ServiceReportDocument({ data, token }) {
   const interaction = interactionLabel(data.customerInteraction);
 
   return (
+    <GlassDressing.Provider value={glassOn}>
     <div
-      className="service-report-v1 service-report-document"
-      style={{ background: '#fff', color: INK, fontFamily: FONT, minHeight: '100vh' }}
+      className={`service-report-v1 service-report-document${web ? ' is-web' : ''}${glassClass}`}
+      style={{ background: rootBackground, color: INK, fontFamily: FONT, minHeight: '100vh' }}
     >
       <style>{`
         .service-report-document { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
@@ -1034,11 +1094,47 @@ export default function ServiceReportDocument({ data, token }) {
         .service-report-document .doc-station-pin.is-ok { background: #0F7B54; }
         .service-report-document .doc-station-pin.is-serviced { background: #B7791F; }
         .service-report-document .doc-station-pin.is-inaccessible { background: ${MUTED}; }
+        /* GATE_REPORT_SIMPLE_WEB: the sizes are set for a letter-size page,
+           too small for a screen. On the web the whole page is scaled up so the
+           smallest text (9.5px labels) reads at 14px, the customer screen floor
+           (owner sheet 2026-09-03), and body text at about 17px.
+           ServiceReportDocument.web-text-floor.test.js holds the floor. is-web
+           only, so the PDF is unchanged. */
+        .service-report-document.is-web .doc-page { zoom: 1.48; }
+        /* GATE_REPORT_GLASS_WEB: the glass look over the same document. Cards
+           carry the theme's own surface (data-glass="card"); these rules only
+           space them, keep dark ink on the translucent card and hold the
+           section label at the 14px screen floor under the zoom. */
+        html[data-glass-theme] .service-report-document.is-glass [data-glass="card"] { margin-top: 12px; padding: 12px 14px; box-sizing: border-box; min-width: 0; }
+        html[data-glass-theme] .service-report-document.is-glass [data-glass="card"]:hover { transform: none !important; }
+        html[data-glass-theme] .service-report-document.is-glass .doc-info-grid { gap: 0 12px; }
+        html[data-glass-theme] .service-report-document.is-glass .doc-info-grid > [data-glass="card"] { margin-top: 12px; }
+        html[data-glass-theme] .service-report-document.is-glass .doc-page [data-gt="eyebrow"] { font-size: 9.5px !important; letter-spacing: 0.08em !important; color: #04395E !important; border-bottom: 1px solid rgba(4, 57, 94, 0.16) !important; margin-top: 0 !important; }
+        html[data-glass-theme] .service-report-document.is-glass .doc-footer { border-top: 0 !important; margin-top: 16px !important; padding-top: 12px !important; }
+        html[data-glass-theme] .service-report-document.is-glass .doc-title-row { border-top-color: rgba(4, 57, 94, 0.16) !important; }
+        /* A long link (the products-and-safety URL) wraps instead of running
+           past a 320px phone at that scale. */
+        .service-report-document.is-web a { overflow-wrap: anywhere; }
+        /* GATE_REPORT_SIMPLE_WEB: on a phone or a narrow tablet the web view
+           stacks what the letter-size page sets side by side. A media query
+           sees the unzoomed viewport, so the breakpoint is 640px of page width
+           times the 1.48 zoom (947px). is-web only, so the PDF is unchanged. */
+        @media (max-width: 947px) {
+          .service-report-document.is-web .doc-info-grid { grid-template-columns: minmax(0, 1fr) !important; }
+          .service-report-document.is-web .doc-letterhead,
+          .service-report-document.is-web .doc-title-row { flex-direction: column; align-items: flex-start !important; gap: 8px !important; }
+          .service-report-document.is-web .doc-letterhead > div { text-align: left !important; }
+          .service-report-document.is-web .doc-photo-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+          .service-report-document.is-web .doc-products th,
+          .service-report-document.is-web .doc-products td { white-space: normal !important; }
+        }
       `}</style>
       <div className="doc-page">
 
+        {/* Letterhead and title: one glass card on the web view, plain otherwise */}
+        <GlassBlock>
         {/* Letterhead */}
-        <div className="doc-keep" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
+        <div className="doc-keep doc-letterhead" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
           <img src="/waves-logo.png" alt="Waves Pest Control" style={{ height: 64, display: 'block' }} />
           <div style={{ textAlign: 'right', fontSize: 10.5, lineHeight: 1.5, color: MUTED }}>
             <div style={{ color: NAVY, fontSize: 12.5, fontWeight: 700 }}>Waves Pest Control, LLC</div>
@@ -1049,28 +1145,29 @@ export default function ServiceReportDocument({ data, token }) {
         </div>
 
         {/* Title row */}
-        <div className="doc-keep" style={{
+        <div className="doc-keep doc-title-row" style={{
           display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
           borderTop: `2.5px solid ${NAVY}`, marginTop: 12, paddingTop: 8,
         }}>
-          <div style={{ color: NAVY, fontSize: 21, fontWeight: 700, letterSpacing: '0.02em' }}>SERVICE REPORT</div>
+          <div role="heading" aria-level={1} style={{ color: NAVY, fontSize: 21, fontWeight: 700, letterSpacing: '0.02em' }}>SERVICE REPORT</div>
           <div style={{ fontSize: 11, color: MUTED }}>
             Report #{reportNumber} · {fmtServiceDate(data.serviceDate)}
           </div>
         </div>
+        </GlassBlock>
 
         {/* Info grid */}
-        <div className="doc-keep" style={{ display: 'grid', gridTemplateColumns: '1.2fr 1.1fr 0.9fr', gap: '4px 22px', marginTop: 10 }}>
+        <div className="doc-keep doc-info-grid" style={{ display: 'grid', gridTemplateColumns: '1.2fr 1.1fr 0.9fr', gap: '4px 22px', marginTop: 10 }}>
           {/* minWidth:0 on each column: grid otherwise honours a long unbroken
               email's min-content width and squeezes the other two columns. */}
-          <div style={{ minWidth: 0 }}>
+          <div style={{ minWidth: 0 }} {...gc}>
             <SectionHeader>Customer</SectionHeader>
             <InfoRow label="Name">{data.customerName}</InfoRow>
             <InfoRow label="Address">{data.serviceAddress || data.propertyAddress}</InfoRow>
             <InfoRow label="Phone">{fmtPhone(data.customerPhone)}</InfoRow>
             <InfoRow label="Email">{data.customerEmail}</InfoRow>
           </div>
-          <div>
+          <div {...gc}>
             <SectionHeader>Service</SectionHeader>
             <InfoRow label="Service">{data.serviceDisplayName || data.serviceType}</InfoRow>
             {/* Member callbacks: the completion panel tells the tech this
@@ -1084,7 +1181,7 @@ export default function ServiceReportDocument({ data, token }) {
             <InfoRow label="Time out">{fmtTime(data.visitTiming?.exitedAt)}</InfoRow>
             <InfoRow label="Contact">{interaction}</InfoRow>
           </div>
-          <div>
+          <div {...gc}>
             <SectionHeader>Conditions</SectionHeader>
             {conditions ? (
               <>
@@ -1102,7 +1199,7 @@ export default function ServiceReportDocument({ data, token }) {
 
         {/* Summary */}
         {summaryParagraphs.length > 0 && (
-          <div className="doc-keep">
+          <div className="doc-keep" {...gc}>
             <SectionHeader>Summary of today&apos;s service</SectionHeader>
             {/* The four-section report prints with its titles; any other
                 paragraph prints as before. */}
@@ -1123,7 +1220,7 @@ export default function ServiceReportDocument({ data, token }) {
             (lead.techParagraph for lawn, reportV2.techParagraph for tree & shrub).
             Absent key prints nothing. */}
         {techParagraph ? (
-          <div className="doc-keep">
+          <div className="doc-keep" {...gc}>
             <SectionHeader>From your technician</SectionHeader>
             <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{techParagraph}</p>
           </div>
@@ -1134,7 +1231,7 @@ export default function ServiceReportDocument({ data, token }) {
             performed-visit summary. The web page's "Still seeing…" button has
             no print equivalent. */}
         {reserviceCard?.showTold && (
-          <div className="doc-keep">
+          <div className="doc-keep" {...gc}>
             <SectionHeader>You told us</SectionHeader>
             {reserviceCard.toldLine && (
               <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{reserviceCard.toldLine}</p>
@@ -1145,7 +1242,7 @@ export default function ServiceReportDocument({ data, token }) {
           </div>
         )}
         {reserviceCard?.showDid && (
-          <div className="doc-keep">
+          <div className="doc-keep" {...gc}>
             <SectionHeader>What we did</SectionHeader>
             {reserviceCard.rows.map(([label, value]) => (
               <InfoRow key={label} label={label}>{value}</InfoRow>
@@ -1161,7 +1258,7 @@ export default function ServiceReportDocument({ data, token }) {
             top-level card. Losing it makes the report read as if the
             concern was ignored. */}
         {concern && (concern.concern || concern.body) && (
-          <div className="doc-keep">
+          <div className="doc-keep" {...gc}>
             {/* buildCustomerConcernCard returns { headline, concern, body,
                 nextStep } — an earlier guess at customerConcern/acknowledgement
                 meant this section never mounted at all (codex P2 r6). */}
@@ -1182,7 +1279,7 @@ export default function ServiceReportDocument({ data, token }) {
             pestV2.expectations is built server-side (pest-report-v2.js) and
             is already PDF-safe as delivered. */}
         {pestV2?.expectations?.spiders?.expectation && (
-          <div className="doc-keep">
+          <div className="doc-keep" {...gc}>
             <SectionHeader>{pestV2.expectations.spiders.headline || 'Spiders'}</SectionHeader>
             {pestV2.expectations.spiders.whatWeDid && (
               <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{pestV2.expectations.spiders.whatWeDid}</p>
@@ -1194,7 +1291,7 @@ export default function ServiceReportDocument({ data, token }) {
           </div>
         )}
         {pestV2?.expectations?.whatToExpect?.lines?.length > 0 && !summarySectionsShown && (
-          <div className="doc-keep">
+          <div className="doc-keep" {...gc}>
             <SectionHeader>What to expect</SectionHeader>
             {pestV2.expectations.whatToExpect.lines.map((line) => (
               <Bullet key={line}>{line}</Bullet>
@@ -1205,7 +1302,7 @@ export default function ServiceReportDocument({ data, token }) {
         {/* A promised revisit is a commitment — dropping it from the permanent
             artifact leaves the customer with no record of it. */}
         {v2?.followUp && (v2.followUp.headline || v2.followUp.reason) && (
-          <div className="doc-keep">
+          <div className="doc-keep" {...gc}>
             <SectionHeader>{v2.followUp.headline || 'Follow-up already planned'}</SectionHeader>
             {v2.followUp.reason && (
               <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{v2.followUp.reason}</p>
@@ -1217,7 +1314,7 @@ export default function ServiceReportDocument({ data, token }) {
         {(findings.length > 0 || recordFindings.length > 0 || activity || lawnObservations
           || mowing?.heightIn != null || v2StatusLine || v2Insights.length > 0 || v2Diagnosis.length > 0 || pestBugFiles.length > 0
           || defenseItems.length > 0 || termiteStatusLine || termiteDefenseItems.length > 0 || pressure || legacyLawnScores?.overallScore != null) && (
-          <div className="doc-keep">
+          <div className="doc-keep" {...gc}>
             <SectionHeader>What we found</SectionHeader>
             {pressure && (
               <Bullet>
@@ -1253,7 +1350,7 @@ export default function ServiceReportDocument({ data, token }) {
                   : [insight.whatWeSaw, insight.whyItMatters, insight.wavesAction]).filter(Boolean).join(' ')}
               </Bullet>
             ))}
-            {defenseBlock?.summary && <Bullet>{defenseBlock.summary}</Bullet>}
+            {defenseBlock?.summary && !(reportCleanup && sameSentence(defenseBlock.summary, v2StatusLine?.detail)) && <Bullet>{defenseBlock.summary}</Bullet>}
             {defenseItems.map((item) => (
               <Bullet key={item.key || item.label}>
                 <strong>{item.label}{item.status ? ` (${item.status})` : ''}:</strong> {item.detail}
@@ -1265,7 +1362,7 @@ export default function ServiceReportDocument({ data, token }) {
                 {termiteStatusLine.detail ? ` — ${termiteStatusLine.detail}` : ''}
               </Bullet>
             )}
-            {termiteDefenseBlock?.summary && <Bullet>{termiteDefenseBlock.summary}</Bullet>}
+            {termiteDefenseBlock?.summary && !(reportCleanup && sameSentence(termiteDefenseBlock.summary, termiteStatusLine?.detail)) && <Bullet>{termiteDefenseBlock.summary}</Bullet>}
             {termiteDefenseItems.map((item) => (
               <Bullet key={`termite-${item.key || item.label}`}>
                 <strong>{item.label}{item.status ? ` (${item.status})` : ''}:</strong> {item.detail}
@@ -1352,7 +1449,7 @@ export default function ServiceReportDocument({ data, token }) {
             renders when something was actually applied. A real re-entry
             context is itself evidence of treatment and always renders. */}
         {(reentry || (data.advisory?.pet_advisory && hasActualTreatment)) && (
-          <div className="doc-keep">
+          <div className="doc-keep" {...gc}>
             <SectionHeader>Re-entry &amp; precautions</SectionHeader>
             {/* buildReentrySummary emits "<area> ready at 7:03 PM" while the
                 window is still open (reentry.js:39-44) — the same fixed
@@ -1385,7 +1482,7 @@ export default function ServiceReportDocument({ data, token }) {
 
         {/* Recommendations */}
         {recommendations.length > 0 && (
-          <div className="doc-keep">
+          <div className="doc-keep" {...gc}>
             <SectionHeader>What we recommend</SectionHeader>
             {recommendations.map((rec) => <Bullet key={rec}>{rec}</Bullet>)}
           </div>
@@ -1396,7 +1493,7 @@ export default function ServiceReportDocument({ data, token }) {
             are composed for pdf/static too — only the live appointment date
             is stripped — so the document prints them. */}
         {cockroachV2?.whatsNext && (
-          <div className="doc-keep">
+          <div className="doc-keep" {...gc}>
             <SectionHeader>Your cockroach treatment program</SectionHeader>
             <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}><strong>{cockroachV2.whatsNext.title}</strong>{cockroachV2.whatsNext.badge ? ` — ${cockroachV2.whatsNext.badge === 'COMPLETE' ? 'program complete' : 'program in progress'}` : ''}</p>
             {(cockroachV2.whatsNext.lines || []).filter((line) => line && line.text).map((line) => (
@@ -1408,9 +1505,9 @@ export default function ServiceReportDocument({ data, token }) {
         )}
 
         {appliedProducts.length > 0 && (
-          <div>
+          <div {...gc}>
             <SectionHeader>Products applied</SectionHeader>
-            <table style={{ fontSize: 11 }}>
+            <table className="doc-products" style={{ fontSize: 11 }}>
               <thead className="doc-keep-with-next">
                 <tr>
                   {['Product', 'EPA Reg. No.', 'Rate', 'Total applied'].map((heading, i) => (
@@ -1434,7 +1531,7 @@ export default function ServiceReportDocument({ data, token }) {
                           {/* both halves or neither: a bare "5" can't be read
                               as ounces, gallons or grams in a pesticide
                               record, which is worse than showing nothing. */}
-                          {app.rate && app.rateUnit ? `${fmtAmount(app.rate)} ${fmtUnit(app.rateUnit)}` : '—'}
+                          {rateLabel(app, reportCleanup)}
                         </td>
                         <td style={{ padding: '6px 0 1px 10px', textAlign: 'right', whiteSpace: 'nowrap' }}>
                           {app.totalAmount && app.amountUnit ? `${fmtAmount(app.totalAmount)} ${fmtUnit(app.amountUnit)}` : '—'}
@@ -1495,7 +1592,7 @@ export default function ServiceReportDocument({ data, token }) {
             Control prints on its own, mirroring the web report. The
             applicator is named only on real application evidence. */}
         {appliedProducts.length === 0 && (data.applicationMade === true || data.applicationMade === null || reportHasRodenticide(data)) && (
-          <div className="doc-keep">
+          <div className="doc-keep" {...gc}>
             <SectionHeader>Poison Control</SectionHeader>
             <DocPoisonControl data={data} titled showApplicator={data.applicationMade === true} />
           </div>
@@ -1506,7 +1603,7 @@ export default function ServiceReportDocument({ data, token }) {
             satellite basemap never prints (provider ToS — long-standing
             rule), which these two Waves-owned renderings don't involve. */}
         {coverageItems.length > 0 && (
-          <div className="doc-keep">
+          <div className="doc-keep" {...gc}>
             <SectionHeader>Areas serviced</SectionHeader>
             {coverageItems.map((item) => {
               const reason = coverageReasonText(item, data.coverageServiceType);
@@ -1533,8 +1630,9 @@ export default function ServiceReportDocument({ data, token }) {
           </div>
         )}
 
-        {(tracedMapUrl || (schematicSrc && hasRenderableTreatment)) && (
-          <div className="doc-keep">
+        {/* GATE_REPORT_WEB_PEOPLE: the web view shows the traced map as its own card at the top (WebPeopleCards). */}
+        {!(web && tracedMapUrl && data.webPeople?.treatedMap === true) && (tracedMapUrl || (schematicSrc && hasRenderableTreatment)) && (
+          <div className="doc-keep" {...gc}>
             <SectionHeader>Where we treated</SectionHeader>
             <div className="doc-map-frame" style={{ border: `1px solid ${HAIR}`, borderRadius: 10, overflow: 'hidden' }}>
               {tracedMapUrl
@@ -1556,7 +1654,7 @@ export default function ServiceReportDocument({ data, token }) {
             frame. The Google satellite image in the payload must NOT print
             (provider ToS); the online report carries the satellite view. */}
         {stationMap && (
-          <div className="doc-keep">
+          <div className="doc-keep" {...gc}>
             <SectionHeader>{stationMap.program === 'trapping' ? 'Trap placement' : 'Bait station placement'}</SectionHeader>
             <div style={{
               position: 'relative', width: '100%', aspectRatio: '32 / 17',
@@ -1598,7 +1696,7 @@ export default function ServiceReportDocument({ data, token }) {
                   stationMap.summary.activity ? `${stationMap.summary.activity} ${STATION_ACTIVITY_SUMMARY[stationMap.program] || 'with activity'}` : null,
                   stationMap.summary.inaccessible ? `${stationMap.summary.inaccessible} inaccessible` : null,
                 ].filter(Boolean).join(' · ')}
-                {' '}· positions to scale — satellite view in your online report
+                {' '}· positions to scale{web ? '' : ' — satellite view in your online report'}
               </div>
             )}
           </div>
@@ -1619,7 +1717,7 @@ export default function ServiceReportDocument({ data, token }) {
             CACHING — the malformed document would still be served on each
             download. Nothing marked is better than pins over nothing. */}
         {(data.markedPhotos || []).filter((m) => !failedImages.has(m.url)).map((marked) => (
-          <div key={marked.photoId} className="doc-keep">
+          <div key={marked.photoId} className="doc-keep" {...gc}>
             <SectionHeader>Where we treated</SectionHeader>
             <p style={{ margin: '0 0 8px', fontSize: 11, lineHeight: 1.5, color: INK }}>
               {MARKED_PHOTO_INTRO}
@@ -1695,10 +1793,15 @@ export default function ServiceReportDocument({ data, token }) {
           </div>
         ))}
 
+        {/* GATE_REPORT_WEB_SLIDER: last visit's photo against this visit's, web view only (the key rides live simple-web payloads). */}
+        {web && data.lawnSlider && (
+          <LawnBeforeAfterSlider slider={data.lawnSlider} cardProps={gc} header={<SectionHeader>Then and now</SectionHeader>} />
+        )}
+
         {/* Service photos — embedded (owner 2026-08-03, supersedes the
             portal-link-only call earlier the same day). */}
         {photos.length > 0 && (
-          <div>
+          <div {...gc}>
             <SectionHeader>Service photos</SectionHeader>
             {/* ONE consolidated, guarded summary — the V2 rule for photo copy. */}
             {(data.reportV2?.photoSummary || data.typedReport?.photoSummary) && (
@@ -1706,7 +1809,8 @@ export default function ServiceReportDocument({ data, token }) {
                 {data.reportV2?.photoSummary || data.typedReport?.photoSummary}
               </p>
             )}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10 }}>
+            {/* GATE_REPORT_CLEANUP_1020: each card sizes to its own photo; a taller neighbor no longer stretches it. */}
+            <div className="doc-photo-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10, ...(reportCleanup ? { alignItems: 'start' } : {}) }}>
               {photos.map((photo) => (
                 <figure key={photo.id || photo.url} className="doc-keep" style={{ margin: 0 }}>
                   {/* fixed-height contain thumbnails: a portrait field photo
@@ -1718,7 +1822,7 @@ export default function ServiceReportDocument({ data, token }) {
                       width: '100%', height: 190, background: '#F7F8F9', borderRadius: 10,
                       border: `1px dashed ${LINE}`, color: MUTED, fontSize: 9.5, padding: 8, boxSizing: 'border-box',
                     }}>
-                      Photo unavailable in this document — view it in your online report
+                      {web ? 'Photo unavailable right now' : 'Photo unavailable in this document — view it in your online report'}
                     </div>
                   ) : (
                   <img
@@ -1729,7 +1833,7 @@ export default function ServiceReportDocument({ data, token }) {
                        readers and the PDF accessibility layer (codex P1). */
                     alt={(!suppressPhotoCaption(photo) && photo.caption) || 'Service photo'}
                     onError={() => markImageFailed(photo.url)}
-                    style={{ display: 'block', width: '100%', height: 190, objectFit: 'contain', background: '#F7F8F9', borderRadius: 10, border: `1px solid ${HAIR}` }}
+                    style={reportCleanup ? PHOTO_FIT_STYLE : { display: 'block', width: '100%', height: 190, objectFit: 'contain', background: '#F7F8F9', borderRadius: 10, border: `1px solid ${HAIR}` }}
                   />
                   )}
                   {!suppressPhotoCaption(photo) && (photo.caption || photo.stateBadge) && (
@@ -1740,11 +1844,18 @@ export default function ServiceReportDocument({ data, token }) {
                 </figure>
               ))}
             </div>
+            {/* GATE_REPORT_CLEANUP_1020: the server's one fixed line for a trouble-spot photo
+                (what the spot is, what Waves does next). Only beside that photo. */}
+            {reportCleanup && typeof data.troubleSpotNote === 'string' && data.troubleSpotNote.trim() && photos.some(isTroubleSpotPhoto) && (
+              <p data-testid="doc-trouble-spot-note" style={{ margin: '8px 0 0', fontSize: 11, lineHeight: 1.5, color: INK }}>
+                <strong>Trouble spot:</strong> {data.troubleSpotNote.trim()}
+              </p>
+            )}
           </div>
         )}
 
         {photoFindings.length > 0 && (
-          <div className="doc-keep" data-testid="doc-photo-findings">
+          <div className="doc-keep" data-testid="doc-photo-findings" {...gc}>
             <SectionHeader>What the photos showed</SectionHeader>
             {photoFindings.map((finding, i) => (
               <div key={i} style={{ margin: '0 0 8px' }}>
@@ -1771,7 +1882,7 @@ export default function ServiceReportDocument({ data, token }) {
         )}
 
         {visitHistory.length > 0 && (
-          <div className="doc-keep">
+          <div className="doc-keep" {...gc}>
             <SectionHeader>{data.typedVisitTimeline.label ? `${data.typedVisitTimeline.label} — visit history` : 'Visit history'}</SectionHeader>
             {visitHistory.map((visit) => (
               <Bullet key={visit.serviceRecordId || visit.serviceDate}>
@@ -1786,7 +1897,7 @@ export default function ServiceReportDocument({ data, token }) {
             visit gets its own findings block (staff-only ones filtered out
             above, never printed). */}
         {companions.map((companion) => (
-          <div key={companion.type} className="doc-keep">
+          <div key={companion.type} className="doc-keep" {...gc}>
             <SectionHeader>{companion.reportTypeLabel || companion.typeLabel || 'Additional service'}</SectionHeader>
             {/* Bait-station companion owned by the termite dashboard: its
                 result prints in the Station protection row above, so the
@@ -1869,7 +1980,7 @@ export default function ServiceReportDocument({ data, token }) {
         ))}
 
         {/* Record footer */}
-        <div className="doc-keep" style={{ borderTop: `1px solid ${LINE}`, marginTop: 18, paddingTop: 8, textAlign: 'center' }}>
+        <div {...footerProps} style={{ borderTop: `1px solid ${LINE}`, marginTop: 18, paddingTop: 8, textAlign: 'center' }}>
           <div style={{ fontSize: 10, color: MUTED, lineHeight: 1.6 }}>
             {/* No next-service line: stripLiveOnlyScheduleFields deletes
                 nextAppointment (and reportV2.snapshot.nextVisit) from EVERY
@@ -1879,14 +1990,20 @@ export default function ServiceReportDocument({ data, token }) {
             {/* GATE_LAWN_REPORT_COPY_FIXES (server sets lawnCopyFixes on a lawn report): this sentence is
                 the pest program's re-service wording, so a lawn report prints nothing here. */}
             {isWaveGuard && data.lawnCopyFixes !== true ? <>WaveGuard members receive free re-service when covered activity continues after the treatment window.<br /></> : null}
-            Questions about today&apos;s service? Ask Waves in your online report or call {WAVES_SUPPORT_PHONE_DISPLAY}.
-            <br />
-            Full interactive report:{' '}
-            {/* a real <a> so the PDF carries a link annotation — viewer URL
-                autodetection is optional, and this is the only route to the
-                analysis this record intentionally omits */}
-            <a href={reportUrl} style={{ color: NAVY, textDecoration: 'underline' }}>{reportUrl}</a>
-            <br />
+            {web
+              ? <>Questions about today&apos;s service? Call {WAVES_SUPPORT_PHONE_DISPLAY}.<br /></>
+              : (
+                <>
+                  Questions about today&apos;s service? Ask Waves in your online report or call {WAVES_SUPPORT_PHONE_DISPLAY}.
+                  <br />
+                  Full interactive report:{' '}
+                  {/* a real <a> so the PDF carries a link annotation — viewer URL
+                      autodetection is optional, and this is the only route to the
+                      analysis this record intentionally omits */}
+                  <a href={reportUrl} style={{ color: NAVY, textDecoration: 'underline' }}>{reportUrl}</a>
+                  <br />
+                </>
+              )}
             {/* Owner ask 2026-09-28: every record of service links to the
                 public Products & Safety page. The footer prints on every
                 record, product rows or not; the URL shows in full so a
@@ -1922,5 +2039,6 @@ export default function ServiceReportDocument({ data, token }) {
 
       </div>
     </div>
+    </GlassDressing.Provider>
   );
 }

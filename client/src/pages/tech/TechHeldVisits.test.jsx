@@ -36,7 +36,7 @@ describe('TechHeldVisits', () => {
     expect(screen.getByText('Time not set · asked for the morning · Morgan Example')).toBeInTheDocument();
     expect(screen.getByText('NOT CONFIRMED · not booked')).toBeInTheDocument();
     expect(screen.getByText('From the call: Can meet after 10:30.')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Book in Dispatch' })).toHaveAttribute('href', `/admin/dispatch?tab=schedule&date=${etDateString()}`);
+    expect(screen.getByRole('link', { name: 'Open in Dispatch' })).toHaveAttribute('href', `/admin/dispatch?tab=schedule&date=${etDateString()}`);
   });
 
   it.each([

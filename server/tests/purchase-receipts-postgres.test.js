@@ -182,6 +182,47 @@ jest.setTimeout(30000);
     await mockConn('products_catalog').where({ id: taurus.id }).update({ inventory_unit: 'fl_oz' });
     expect(await processReceiptLine(line())).toMatchObject({ status: 'logged' });
   });
+  // GATE_PEST_STOCK_ADVISORY: a pest visit that took a product below zero left one open office alert for it
+  // (complete-scheduled-service.js); a movement that brings the count back to zero or above closes it, and the next
+  // shortfall then rings a fresh row (dedupeOpenOnly skips the closed one).
+  describe('a count back to zero or above closes the pest stock shortfall alert', () => {
+    const { adjustStock, stockShortfallKey } = require('../services/inventory-operations');
+    const openAlert = () => notifications.notifyAdmin('inventory', 'Inventory — restock Taurus SC', 'Taurus SC went below zero in stock after a pest visit.', {
+      bell: true, dedupeKey: stockShortfallKey(taurus.id), dedupeOpenOnly: true,
+    });
+    const alertRows = () => mockConn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [stockShortfallKey(taurus.id)]).orderBy('created_at', 'asc');
+
+    test('a restock to zero or above closes it, and the next shortfall rings a fresh row', async () => {
+      await mockConn('products_catalog').where({ id: taurus.id }).update({ inventory_on_hand: -6 });
+      await openAlert();
+      await adjustStock(taurus.id, { movementType: 'restock', quantity: 78, unit: 'fl_oz' }, { source: 'test' });
+      expect(await stock()).toBe(72);
+      const [closed] = await alertRows();
+      expect(closed.done_at).not.toBeNull();
+      expect(closed.metadata).toMatchObject({ autoCleared: true, autoClearedReason: 'stock_restocked' });
+      await openAlert();
+      const rows = await alertRows();
+      expect(rows).toHaveLength(2);
+      expect(rows[1].done_at).toBeNull();
+    });
+
+    test('a count to zero closes it too', async () => {
+      await mockConn('products_catalog').where({ id: taurus.id }).update({ inventory_on_hand: -6 });
+      await openAlert();
+      await adjustStock(taurus.id, { movementType: 'correction', setTotal: 0, unit: 'fl_oz' }, { source: 'test' });
+      expect(await stock()).toBe(0);
+      expect((await alertRows())[0].done_at).not.toBeNull();
+    });
+
+    test('a restock that leaves the count below zero keeps it open', async () => {
+      await mockConn('products_catalog').where({ id: taurus.id }).update({ inventory_on_hand: -100 });
+      await openAlert();
+      await adjustStock(taurus.id, { movementType: 'restock', quantity: 78, unit: 'fl_oz' }, { source: 'test' });
+      expect(await stock()).toBe(-22);
+      expect((await alertRows())[0].done_at).toBeNull();
+    });
+  });
+
   describe('shipments whose Delivered email never came', () => {
     const NOW = new Date('2026-09-30T12:00:00Z').getTime();
     const shipped = (shipmentId, overrides = {}) => mockConn('emails').insert({

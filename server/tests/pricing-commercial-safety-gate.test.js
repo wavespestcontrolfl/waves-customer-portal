@@ -1458,7 +1458,8 @@ describe('codex #3594 r2 — public one-time accept stamp + display-only copy fl
   });
 
   test('scoped one-time commercial rows feed the COPY flag, never the approval-only classifier', () => {
-    const { isCommercialAutoAcceptEstimate, isCommercialOneTimePricedEstimate } = require('../routes/estimate-public');
+    const { isCommercialOneTimePricedEstimate } = require('../routes/estimate-public');
+    const { isCommercialAutoAcceptEstimate } = require('../services/estimate-commercial-identity');
     const priced = {
       estimate_data: JSON.stringify({
         result: {
