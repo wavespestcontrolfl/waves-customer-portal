@@ -38,6 +38,14 @@ describe("how-to guide rows", () => {
     expect(text.endsWith(`Open it here: ${guide("add_contact").url}`)).toBe(true);
   });
 
+  it("ends every guide with the reply-for-help line and marks every row active-plan only", () => {
+    for (const link of HOW_TO_GUIDE_LINKS) {
+      const lines = howToGuideText(link).split("\n");
+      expect(lines.at(-2)).toBe("Don't see one of these buttons? Reply here and we will help.");
+      expect(link.description).toMatch(/^Active plans only/);
+    }
+  });
+
   it("inserts two guides that share a deep link, but never the same guide twice", () => {
     const contact = guide("add_contact");
     const notifications = guide("notifications");

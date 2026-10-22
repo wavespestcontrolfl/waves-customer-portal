@@ -8,13 +8,17 @@ import { APP_STORE_URL, PLAY_STORE_URL } from "../components/estimate/AppShowcas
 // texts. Every step names a real button label in PortalPage.jsx; when a
 // label there changes, change it here too. A guide is static, so each step
 // must hold for every account shape (paused Auto Pay, several properties,
-// dark gates). Where it cannot, the step sends the customer to us instead.
+// dark gates). Where it cannot, the step sends the customer to us instead,
+// and every guide ends with HELP_LINE for the shapes no step can foresee
+// (no email on file, an unconnected referral profile, a gated control).
 
 // A cancelled account keeps only Plan, Visits history, Billing and Documents
 // (CANCELLED_TABS), so the caption tells staff the guides are for active plans.
 export const HOW_TO_CAPTION = "For customers with an active plan. Each guide gives steps and a link that opens the right app screen after sign-in.";
 
 const portalLink = (path) => `portal.wavespestcontrol.com/login?next=${encodeURIComponent(path)}`;
+
+const HELP_LINE = "Don't see one of these buttons? Reply here and we will help.";
 
 const SIGN_IN = "Sign in to the Waves app with your phone number.";
 
@@ -62,7 +66,7 @@ const GUIDES = [
       SIGN_IN,
       "Tap Visits.",
       "Scroll down to Service notifications.",
-      "Next to each alert, pick how you want it, such as text or email.",
+      "If you see a choice next to an alert, pick how you want it, such as text or email.",
       "To turn an alert on or off, use its switch. If you have more than one property, the switches are lower down, under Appointment notifications. Pick the property first.",
       "Changes save right away.",
     ],
@@ -91,8 +95,9 @@ const GUIDES = [
       SIGN_IN,
       "Open Documents. On a phone, tap More, then Documents.",
       "Your reports are under Service Reports. Tap one to open it.",
-      // Payment History lists payments only; open invoices are Pay now links.
-      "Anything you owe shows at the top of Billing with a Pay now link. Paid receipts are in Billing, under Payment History.",
+      // Payment History lists payments only; the Pay now link is gated
+      // (GATE_PORTAL_PAY_NOW), so the step names only the balance.
+      "Your balance shows at the top of Billing. Paid receipts are in Billing, under Payment History.",
     ],
   },
   {
@@ -159,7 +164,8 @@ export const HOW_TO_GUIDE_LINKS = GUIDES.map(({ path, ...guide }) => ({
   key: `howto:${guide.key}`,
   category: "howto",
   url: portalLink(path),
-  description: "Steps plus a link to the right app screen",
+  // On the row, not only the group caption: a search hides captions.
+  description: "Active plans only. Steps plus a link to the app screen",
 }));
 
 // The inserted text: title, numbered steps, optional closing line, then the
@@ -169,6 +175,7 @@ export function howToGuideText(link) {
   const lines = [`${link.title}:`];
   link.steps.forEach((step, index) => lines.push(`${index + 1}. ${step}`));
   if (link.after) lines.push(link.after);
+  lines.push(HELP_LINE);
   lines.push(`${link.linkLabel || "Open it here"}: ${link.url}`);
   return lines.join("\n");
 }
