@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
-import AvailabilityStrip, { availabilityVerdict, stripCoversRouteWarning, drivePhrase, driveHerePhrase, rainPhrase, fmtHour } from './AvailabilityStrip';
+import AvailabilityStrip, { availabilityVerdict, stripCoversRouteWarning, drivePhrase, driveHerePhrase, rainPhrase, fmtHour, stopPhrase } from './AvailabilityStrip';
 
 afterEach(cleanup);
 
@@ -235,6 +235,26 @@ describe('best-times rows', () => {
     expect(screen.getByText('~ = straight-line estimate, not a road time.')).toBeTruthy();
     fireEvent.click(rows[1].querySelector('button'));
     expect(onPick).toHaveBeenCalledWith(expect.objectContaining({ date: '2035-01-01', start: '10:00' }));
+  });
+
+  it('stop names (GATE_BEST_TIMES_CHIP_STOP_NAMES): "after <name>", "from home base", or nothing', () => {
+    expect(stopPhrase({ fromName: 'Stop A', fromHomeBase: false })).toBe('after Stop A');
+    expect(stopPhrase({ fromName: null, fromHomeBase: true })).toBe('from home base');
+    expect(stopPhrase({ fromName: null, fromHomeBase: null })).toBeNull();
+  });
+
+  it('names the previous stop on each best chip only when the server says so', () => {
+    const named = {
+      day: [chip('2035-01-02', '12:00', 34, 19, { driveSource: 'google', fromName: 'Stop A' })],
+      week: [chip('2035-01-01', '08:00', 9, 7, { driveSource: 'google', fromHomeBase: true })],
+    };
+    const { rerender } = render(<AvailabilityStrip bestRows availability={withBest(null, { best: named })} currentDate="2035-01-02" currentStart="09:00" onPick={() => {}} />);
+    let rows = screen.getAllByTestId('best-row');
+    expect(rows[0].querySelector('button').textContent).toBe('12 PM19 min here+34 min day');
+    rerender(<AvailabilityStrip bestRows availability={withBest(null, { best: named, chipStopNames: true })} currentDate="2035-01-02" currentStart="09:00" onPick={() => {}} />);
+    rows = screen.getAllByTestId('best-row');
+    expect(rows[0].querySelector('button').textContent).toBe('12 PM19 min here+34 min dayafter Stop A');
+    expect(rows[1].querySelector('button').textContent).toBe('Mon 18 AM7 min here+9 min dayfrom home base');
   });
 
   it('an empty picked day says why and keeps the week row', () => {

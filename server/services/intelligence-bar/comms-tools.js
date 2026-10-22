@@ -111,7 +111,8 @@ Use for: "how many texts did we send this month?", "SMS stats", "which phone num
   {
     name: 'get_call_log',
     description: `Get recent call log: inbound/outbound calls, durations, recording status, transcripts if available, matched customers.
-Use for: "what calls came in this morning?", "show me today's calls", "any missed calls?", "calls with recordings"`,
+Use for: "what calls came in this morning?", "show me today's calls", "any missed calls?", "calls with recordings"
+customer_id and customer_name only find calls linked to that customer. A caller who is not on the account (an owner, builder, property manager, family member) is not linked: find that call with search (words in the transcript, such as the customer's last name, street or the caller's name) or phone (the caller's number). Widen days_back when the call was not recent.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -123,6 +124,8 @@ Use for: "what calls came in this morning?", "show me today's calls", "any misse
         has_recording: { type: 'boolean', description: 'Only calls with recordings' },
         has_transcript: { type: 'boolean', description: 'Only calls with transcripts' },
         customer_name: { type: 'string' },
+        search: { type: 'string', description: 'Words in the transcript (case-insensitive), at least 3 characters. Finds calls not linked to any customer.' },
+        phone: { type: 'string', description: 'Caller or called number; matches the last 10 digits of from or to' },
         days_back: { type: 'number', description: 'Default 7' },
         limit: { type: 'number' },
       },
@@ -1157,6 +1160,15 @@ async function getOpenCommitments(input) {
   };
 }
 
+// The transcript text around the first search match, so the reader can tell
+// which call names the customer without opening every transcript.
+function searchExcerpt(transcript, search) {
+  const at = transcript.toLowerCase().indexOf(String(search).trim().toLowerCase());
+  if (at < 0) return null;
+  const start = Math.max(0, at - 150);
+  return transcript.slice(start, start + 300);
+}
+
 async function getCallLog(input) {
   const { direction, has_recording, has_transcript, customer_name, days_back = 7, limit: rawLimit } = input;
   const limit = Math.min(rawLimit || 20, 50);
@@ -1185,6 +1197,21 @@ async function getCallLog(input) {
     });
   }
 
+  if (input.search !== undefined) {
+    const search = String(input.search || '').trim();
+    if (search.length < 3) return { error: 'search needs at least 3 characters.' };
+    const { escapeLikePattern } = require('../customer-list-search');
+    query = query.whereRaw("call_log.transcription ILIKE ? ESCAPE '\\'", [`%${escapeLikePattern(search)}%`]);
+  }
+  if (input.phone !== undefined) {
+    const digits = String(input.phone || '').replace(/\D/g, '').slice(-10);
+    if (digits.length !== 10) return { error: 'phone needs a 10-digit number.' };
+    query = query.where(function () {
+      this.whereRaw("RIGHT(REGEXP_REPLACE(call_log.from_phone, '[^0-9]', '', 'g'), 10) = ?", [digits])
+        .orWhereRaw("RIGHT(REGEXP_REPLACE(call_log.to_phone, '[^0-9]', '', 'g'), 10) = ?", [digits]);
+    });
+  }
+
   const fetched = await query.limit(limit + 1).offset(offset);
   const calls = fetched.slice(0, limit).filter(c => !isAdminPhone(c.from_phone) || !isAdminPhone(c.to_phone));
 
@@ -1204,6 +1231,7 @@ async function getCallLog(input) {
       has_recording: !!(c.recording_url),
       has_transcript: !!(c.transcription),
       transcript_excerpt: c.transcription ? c.transcription.substring(0, 200) : null,
+      ...(input.search && c.transcription ? { match_excerpt: searchExcerpt(c.transcription, input.search) } : {}),
       ...(input.call_id ? {
         transcript: c.transcription ? c.transcription.slice(Math.max(0, input.transcript_offset || 0), Math.max(0, input.transcript_offset || 0) + 12000) : null,
         transcript_next_offset: c.transcription?.length > Math.max(0, input.transcript_offset || 0) + 12000 ? Math.max(0, input.transcript_offset || 0) + 12000 : null,

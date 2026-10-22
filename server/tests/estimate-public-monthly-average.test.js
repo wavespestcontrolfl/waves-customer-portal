@@ -148,6 +148,20 @@ describe('GET /:token/data — monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)',
     });
   });
 
+  // The PDF document reads the same switch from /data: the document pass (?mode=pdf) carries it
+  // beside proposal.monthlyAverage when both gates are on, and neither otherwise.
+  test('application months: the document pass carries the switch with both gates on and not otherwise', async () => {
+    const pdf = async () => (await (await fetch(`${baseUrl}/estimates/unitprojectiontoken/data?mode=pdf`)).json());
+    let baseUrl;
+    mockGate.months = true;
+    await withServer(async (url) => { baseUrl = url; const body = await pdf(); expect(body.documentRender).toBe(true); expect(body.applicationMonthsEnabled).toBe(true); expect(body.proposal).toHaveProperty('monthlyAverage'); });
+    mockGate.months = false;
+    await withServer(async (url) => { baseUrl = url; expect(await pdf()).not.toHaveProperty('applicationMonthsEnabled'); });
+    mockGate.months = true;
+    mockGate.on = false;
+    await withServer(async (url) => { baseUrl = url; const body = await pdf(); expect(body).not.toHaveProperty('applicationMonthsEnabled'); expect(body.proposal).not.toHaveProperty('monthlyAverage'); });
+  });
+
   test('gate off: neither key exists, the response is as before', async () => {
     mockGate.on = false;
     await withServer(async (baseUrl) => {

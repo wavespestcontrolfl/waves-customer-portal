@@ -137,7 +137,7 @@ export default function EmailComposer({ active, editor, onSent }) {
           {editor.sendFeedback.compose && <ActionFeedback error={editor.sendFeedback.compose.error}>{editor.sendFeedback.compose.message}</ActionFeedback>}
           <ActionFeedback error={storageError}>{recoveryNotice}</ActionFeedback>
           <EmailQuickLinks active={visible} recipient={composeForm.to} disabled={composeSending}
-            onInsert={(link) => setComposeForm((form) => ({ ...form, body: appendStaticLinkClause(form.body, link) }))} />
+            onInsert={(link) => setComposeForm((form) => ({ ...form, subject: form.subject.trim() || !link.subject ? form.subject : link.subject, body: appendStaticLinkClause(form.body, link) }))} />
         </div>
         <div className="flex shrink-0 flex-wrap justify-end gap-2 border-t-hairline border-zinc-200 px-4 py-3">
           <Button variant="secondary" onClick={close} disabled={composeSending}>Close</Button>

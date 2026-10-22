@@ -825,4 +825,30 @@ postgres('provider-block retries after a customer email correction (PostgreSQL)'
     expect(await rowOf(resolved.row.id)).toMatchObject({ status: 'failed', error_message: REASON });
     expect(await ledgerMetadata(resolved.ledgerId)).toMatchObject({ delivered: true, resolved: true });
   });
+
+  test('the claim query skips a follow-up carrying the monthly average; an unmarked row is claimed as before', async () => {
+    const marked = scheduled(randomUUID(), { categories: JSON.stringify(['email_template', 'estimate_followup', 'estimate_followup_monthly_average']) });
+    const plain = scheduled(randomUUID(), { categories: JSON.stringify(['email_template', 'estimate_followup']) });
+    const noCategories = scheduled(randomUUID(), { categories: null });
+    await mockDatabase('email_messages').insert([marked, plain, noCategories]);
+
+    const claimed = (await retry.claimDueRetries(50)).map((m) => m.id);
+
+    expect(claimed).toEqual(expect.arrayContaining([plain.id, noCategories.id]));
+    expect(claimed).not.toContain(marked.id);
+    expect(await rowOf(marked.id)).toMatchObject({ status: 'failed', provider_retry_count: 0 });
+    expect((await rowOf(marked.id)).provider_retry_next_at).toBeInstanceOf(Date); // untouched: nothing claimed it
+  });
+
+  test('a provider block on a marked follow-up schedules no retry (webhook path); an unmarked one still does', async () => {
+    const marked = scheduled(randomUUID(), { status: 'sent', provider_retry_next_at: null, categories: JSON.stringify(['estimate_followup_monthly_average']) });
+    const plain = scheduled(randomUUID(), { status: 'sent', provider_retry_next_at: null });
+    await mockDatabase('email_messages').insert([marked, plain]);
+
+    await webhook(await rowOf(marked.id));
+    await webhook(await rowOf(plain.id));
+
+    expect(await rowOf(marked.id)).toMatchObject({ status: 'failed', provider_retry_next_at: null });
+    expect((await rowOf(plain.id)).provider_retry_next_at).toBeInstanceOf(Date);
+  });
 });

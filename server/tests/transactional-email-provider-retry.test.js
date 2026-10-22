@@ -104,6 +104,42 @@ describe('transactional email provider retry classification', () => {
     if (final) expect(finals[0][3].metadata).toMatchObject({ cause: 'blocked', customer_id: 'c1' });
   });
 
+  describe('estimate follow-ups carrying the monthly average stay off the rail (their stored price line goes stale)', () => {
+    const marked = { template_key: 'estimate.unviewed_followup', categories: ['estimate_followup', 'estimate_followup_monthly_average'] };
+
+    test('not eligible, so a provider block schedules no retry and raises no exhaustion alert', () => {
+      expect(retry.isTransactionalRetryEligible(message(marked))).toBe(false);
+      const withPhase = retry.retryStateForProviderBlock(message({ ...marked, provider_handoff_phase: 'pending', send_attempt_token: 'a' }));
+      expect(withPhase).not.toHaveProperty('provider_retry_next_at');
+      expect(withPhase).toMatchObject({ provider_handoff_phase: 'rejected' });
+    });
+
+    test('a follow-up without the average keeps today\'s retry behaviour exactly', () => {
+      const plain = message({ template_key: 'estimate.unviewed_followup', categories: ['estimate_followup', 'estimate_followup_unviewed'] });
+      expect(retry.isTransactionalRetryEligible(plain)).toBe(true);
+      expect(retry.retryStateForProviderBlock(plain)).toMatchObject({ provider_retry_next_at: expect.any(Date), provider_retry_exhausted_at: null });
+    });
+
+    test('a marked row that is somehow scheduled settles as not sent without reaching the provider', async () => {
+      const chain = {};
+      chain.where = jest.fn(() => chain);
+      chain.update = jest.fn(() => chain);
+      chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'failed' }]);
+      db.mockReturnValue(chain);
+
+      const result = await retry.retryOne(message({ ...marked, send_attempt_token: 'attempt-2' }));
+
+      expect(result).toMatchObject({ sent: false, stopped: true });
+      expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', provider_retry_next_at: null }));
+      expect(emailTemplates.activeSuppressionFor).not.toHaveBeenCalled();
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    });
+
+    test('the category the rail reads is the one the follow-up sender stamps', () => {
+      expect(require('../constants/email-replay-exclusions').ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY).toBe('estimate_followup_monthly_average');
+    });
+  });
+
   test('other billing emails keep the retry rail', () => {
     expect(retry.isSenderRenderedEmail(message({ template_key: 'billing.notice' }))).toBe(false);
     expect(retry.isTransactionalRetryEligible(message({ template_key: 'billing.notice' }))).toBe(true);
