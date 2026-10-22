@@ -4947,6 +4947,39 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
   return null;
 }
 
+// GATE_CALLBACK_SPOKEN_NUMBER_LINK: an office callback ("Call back" on a
+// voicemail; call_log.source admin-callback + metadata.relatedCallId) dials the
+// voicemail's ANI, but the caller may have SPOKEN a different number to ring
+// ("call me back at ..."), and that number may already belong to a customer
+// (a quote form filed minutes after the voicemail). The pass keyed the callback
+// on the dialed number only, found nobody and minted a duplicate customer.
+// This looks the voicemail's spoken number up as a SECOND chance, only when the
+// normal lookup found no one, and only when the match is as strong as a live
+// phone match: the customer's PRIMARY phone is the spoken number and the first
+// name on the callback agrees (the last name is not required, transcribers
+// misspell it). Returns the customer or null. Read-only: it never writes the
+// dialed or the spoken number anywhere, and the contact phone the pass texts
+// and confirms stays the dialed one. Gate off: null, no query.
+async function findCustomerViaCallbackSpokenNumber(call = {}, extracted = {}, opts = {}) {
+  if (!require('../config/feature-gates').callbackSpokenNumberLinkLive()) return null;
+  if (opts.customerLinkOverride) return null;
+  if (!isOutboundCall(call) || call.source !== 'admin-callback') return null;
+  const relatedId = callMetadataObject(call).relatedCallId;
+  if (!relatedId || !CALLBACK_PARENT_UUID_RE.test(String(relatedId))) return null;
+  const extractedFirst = normalizeNamePart(extracted?.first_name);
+  if (!extractedFirst) return null;
+  const conn = opts.db || db;
+  const related = await conn('call_log').where({ id: String(relatedId) }).first('id', 'direction', 'ai_extraction');
+  if (!related || !String(related.direction || '').toLowerCase().startsWith('inbound')) return null;
+  const spoken = firstExternalPhone(parseLooseJson(related.ai_extraction).phone);
+  if (!spoken || samePhone(spoken, call.to_phone)) return null;
+  const candidate = await findCustomerForCallContact(spoken, extracted, { db: conn });
+  if (!candidate || candidate.deleted_at || !customerPhoneMatches(spoken, candidate)) return null;
+  const candidateFirst = normalizeNamePart(candidate.first_name);
+  if (!candidateFirst || !sameSpokenFirstName(extractedFirst, candidateFirst)) return null;
+  return candidate;
+}
+
 async function registerScheduleSideEffects({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType, closeReminderWindows = false, callbackNumberHoldActive = false, disclaimedPhone = null, callLogId = null }) {
   // Codex round-2 finding #4 (PR #4807), tightened round 3: the AUTHORITATIVE
   // stamp for the two main call-booking paths (fresh insert, idempotency-
@@ -14134,7 +14167,7 @@ const CallRecordingProcessor = {
       // Try to find an existing customer by the external contact phone.
       // Name match wins; phone-only matching needs a second deterministic
       // signal (single owner / AV-address / household) — see the cascade.
-      const existing = await findCustomerForCallContact(phone, extracted, {
+      let existing = await findCustomerForCallContact(phone, extracted, {
         multiMatchOut: sharedPhoneAmbiguity,
         callAddress: {
           address_line1: extracted.address_line1,
@@ -14150,6 +14183,17 @@ const CallRecordingProcessor = {
         // duplicate customer (codex round-10 P2).
         avDecisive: ['validated_accept', 'corrected'].includes(effectiveAddressValidation?.status),
       });
+      // GATE_CALLBACK_SPOKEN_NUMBER_LINK: an office callback dialed the ANI, but the
+      // voicemail's spoken callback number may already be a customer's primary phone.
+      // Runs only when the dialed number found no one and was not an ambiguous share;
+      // gate off, findCustomerViaCallbackSpokenNumber returns null without a query.
+      if (!existing && !sharedPhoneAmbiguity.candidates) {
+        existing = await findCustomerViaCallbackSpokenNumber(call, extracted, { customerLinkOverride }).catch((e) => {
+          logger.warn(`[call-proc] Callback spoken-number lookup failed for ${maskSid(callSid)}: ${e.message}`);
+          return null;
+        });
+        if (existing) logger.info(`[call-proc] Callback ${maskSid(callSid)} linked to customer ${existing.id} via the voicemail's spoken number`);
+      }
       if (existing) {
         customerId = existing.id;
         phoneMatchedThisPass = true;
@@ -25285,6 +25329,7 @@ CallRecordingProcessor._test = {
   slotOnlyLinkAllowed,
   extractedNameMatchesCustomer,
   findCustomerForCallContact,
+  findCustomerViaCallbackSpokenNumber,
   firstNameAdvisoryAddressOk,
   normalizeCallExtraction,
   shouldCreateCallLeadForCustomer,
