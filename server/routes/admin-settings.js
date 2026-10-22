@@ -27,6 +27,7 @@ const {
   mergeCallRoutingConfig,
 } = require('../services/call-routing-config');
 const { isEnabled } = require('../config/feature-gates');
+const { listGates } = require('../services/gate-list');
 const { decideVoiceRoute } = require('../services/voice-route-decision');
 
 // Each pending OAuth attempt is its own row keyed by `${PREFIX}${stateNonce}`,
@@ -192,6 +193,13 @@ router.get('/linkedin/status', adminAuthenticate, requireAdmin, async (req, res)
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// GET /api/admin/settings/gates — the live gate list for Settings → Advanced.
+// Owner-only: the public /api/health reply stopped carrying gates (#2853).
+router.get('/gates', adminAuthenticate, requireAdmin, (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ gates: listGates() });
 });
 
 // =========================================================================

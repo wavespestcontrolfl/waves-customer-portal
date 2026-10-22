@@ -1,0 +1,215 @@
+const express = require('express');
+const Joi = require('joi');
+const db = require('../models/db');
+const logger = require('../services/logger');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
+const { bidDeskLive } = require('../config/feature-gates');
+const { markEmailAsBid, BID_COLUMNS } = require('../services/bid-desk');
+const { daysLeft } = require('../services/bid-desk/rules');
+const { parseETDateTime, validCalendarDate, etParts, etWallClockOccurrences } = require('../utils/datetime-et');
+const { openAdminAlertKeys, closeAdminAlertKeys } = require('../services/admin-alert-episodes');
+const { OPEN_STATUSES } = require('../services/bid-desk/rules');
+
+// Bid Desk (GATE_BID_DESK, dark). Staff-only list, detail and decisions for bid invites found in the email table.
+// Nothing here sends a message to anyone; a due date only becomes "confirmed" when the operator types or confirms it.
+const router = express.Router();
+router.use(adminAuthenticate, requireAdmin);
+// Gate off = the whole surface answers 404, exactly as if it were not mounted.
+router.use((req, res, next) => (bidDeskLive() ? next() : res.status(404).json({ error: 'Not found' })));
+
+const STATUSES = ['new', 'bid', 'no_bid', 'submitted', 'won', 'lost'];
+const LIST_LIMIT = 500;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Operator-typed ET wall time: "2026-10-05T14:00" (what a datetime-local input sends), or null to clear.
+const etWallTime = Joi.string().pattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/).allow(null);
+
+const patchSchema = Joi.object({
+  due_at: etWallTime,
+  confirm_due: Joi.boolean().strict().valid(true),
+  expected_updated_at: Joi.string().isoDate(),
+  job_walk_at: etWallTime,
+  questions_due_at: etWallTime,
+  status: Joi.string().valid(...STATUSES),
+  decision_note: Joi.string().trim().max(2000).allow('', null),
+}).min(1).unknown(false);
+
+const DATE_CHANGED = 'The due date changed since you opened this bid. Reload and check it again.';
+
+const fromEmailSchema = Joi.object({ email_id: Joi.string().uuid().required() }).unknown(false);
+
+// An operator-typed ET wall time must be exactly one real Eastern clock reading: hours 00-23, minutes 00-59, a
+// real calendar day, not inside the spring-forward gap (parseETDateTime would roll it forward) and not the
+// repeated fall-back hour (two instants; the operator must pick another time).
+function toInstant(value) {
+  if (value === null) return { ok: true, at: null };
+  const [day, clock] = value.split('T');
+  const [hour, minute] = clock.split(':').map(Number);
+  if (!validCalendarDate(day) || !(hour >= 0 && hour <= 23) || !(minute >= 0 && minute <= 59)) return { ok: false };
+  const at = parseETDateTime(value);
+  if (Number.isNaN(at.getTime())) return { ok: false };
+  const p = etParts(at);
+  const pad = (n) => String(n).padStart(2, '0');
+  const roundTrip = `${p.year}-${pad(p.month)}-${pad(p.day)}T${pad(p.hour)}:${pad(p.minute)}`;
+  if (roundTrip !== value || etWallClockOccurrences(at) !== 1) return { ok: false };
+  return { ok: true, at };
+}
+
+// The column changes a PATCH asks for, or the refusal. A date save or confirmation is accepted only against the bid
+// version the operator looked at (`fenced`): an addendum filed since the page loaded moves updated_at and the write
+// is refused. Compared at millisecond precision, the precision the page has.
+function datePatch(bid, value) {
+  if (value.due_at !== undefined) {
+    const parsed = toInstant(value.due_at);
+    if (!parsed.ok) return { error: { status: 400, body: { error: 'due_at is not a real Eastern date and time' } } };
+    // A date a person typed is the confirmed date. Clearing it un-confirms. Reminders start over for the new date.
+    // The email line it was read from no longer describes it, unless the typed date is that same date.
+    const unchanged = parsed.at && bid.due_at && new Date(bid.due_at).getTime() === parsed.at.getTime();
+    return {
+      patch: {
+        due_at: parsed.at,
+        due_source_line: unchanged ? bid.due_source_line : null,
+        due_confirmed: parsed.at !== null,
+        needs_date_confirmation: false,
+        reminder_7d_sent_at: null,
+        reminder_2d_sent_at: null,
+      },
+    };
+  }
+  if (!value.confirm_due) return { patch: {} };
+  if (!bid.due_at) return { error: { status: 400, body: { error: 'There is no date to confirm' } } };
+  return { patch: { due_confirmed: true, needs_date_confirmation: false } };
+}
+
+function buildPatch(bid, value) {
+  const fenced = value.due_at !== undefined || value.confirm_due === true;
+  if (fenced && !value.expected_updated_at) return { error: { status: 409, body: { error: DATE_CHANGED } } };
+  const patch = {};
+  for (const key of ['job_walk_at', 'questions_due_at']) {
+    if (value[key] === undefined) continue;
+    const parsed = toInstant(value[key]);
+    if (!parsed.ok) return { error: { status: 400, body: { error: `${key} is not a real date` } } };
+    patch[key] = parsed.at;
+  }
+  const dates = datePatch(bid, value);
+  if (dates.error) return dates;
+  Object.assign(patch, dates.patch);
+  if (value.status !== undefined) patch.status = value.status;
+  if (value.decision_note !== undefined) patch.decision_note = value.decision_note || null;
+  return { patch, fenced };
+}
+
+// Notifications whose condition a successful save has met leave the bell (docs/admin-notifications.md 4.3).
+async function closeDoneAlerts(conn, bidId, before, after) {
+  const prefixes = [];
+  const reason = [];
+  if (after.due_confirmed && (before.needs_date_confirmation || !before.due_confirmed) && !after.needs_date_confirmation) {
+    prefixes.push(`bid-desk:addendum:${bidId}:`);
+    reason.push('due_date_confirmed');
+  }
+  // A changed or cleared date retires the reminders sent for the old one.
+  const dateOf = (row) => (row.due_at ? new Date(row.due_at).getTime() : null);
+  if (dateOf(before) !== dateOf(after)) {
+    prefixes.push(`bid-desk:remind:${bidId}:`);
+    reason.push('due_date_changed');
+  }
+  if (before.status === 'new' && after.status !== 'new') {
+    prefixes.push(`bid-desk:new:${bidId}`);
+    reason.push('bid_decided');
+  }
+  if (OPEN_STATUSES.includes(before.status) && !OPEN_STATUSES.includes(after.status)) {
+    prefixes.push(`bid-desk:new:${bidId}`, `bid-desk:addendum:${bidId}:`, `bid-desk:remind:${bidId}:`);
+    reason.push('bid_closed');
+  }
+  if (!prefixes.length) return 0;
+  const keys = (await Promise.all([...new Set(prefixes)].map((prefix) => openAdminAlertKeys(conn, prefix)))).flat();
+  return closeAdminAlertKeys(conn, keys, reason.join(','));
+}
+
+function present(row, extra = {}) {
+  return { ...row, days_left: daysLeft(row.due_at), ...extra };
+}
+
+router.get('/', async (req, res, next) => {
+  try {
+    const rows = await db('bid_opportunities as b')
+      .leftJoin('emails as fe', 'fe.id', 'b.first_email_id')
+      .select(BID_COLUMNS.map((column) => `b.${column}`))
+      .select('fe.subject as first_subject', 'fe.from_name as first_from_name', 'fe.from_address as first_from_address')
+      .select(db('bid_opportunity_emails as l').whereRaw('l.bid_id = b.id').count('*').as('email_count'))
+      // Open bids first by due date (undated last), then the decided ones, newest first.
+      .orderByRaw("(b.status IN ('new', 'bid')) DESC, CASE WHEN b.status IN ('new', 'bid') THEN b.due_at END ASC NULLS LAST, b.created_at DESC")
+      .limit(LIST_LIMIT);
+    res.json({ bids: rows.map((row) => present({ ...row, email_count: Number(row.email_count) })) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Registered before '/:id' so "from-email" is never read as an id.
+router.post('/from-email', async (req, res, next) => {
+  try {
+    const { error, value } = fromEmailSchema.validate(req.body || {});
+    if (error) return res.status(400).json({ error: 'email_id must be an email id' });
+    const outcome = await markEmailAsBid(value.email_id);
+    if (outcome.error === 'email_not_found') return res.status(404).json({ error: 'Email not found' });
+    return res.status(outcome.created ? 201 : 200).json({ ok: true, bid_id: outcome.bidId, created: !!outcome.created });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.get('/:id', async (req, res, next) => {
+  try {
+    if (!UUID.test(req.params.id)) return res.status(404).json({ error: 'Not found' });
+    const bid = await db('bid_opportunities').where({ id: req.params.id }).first(BID_COLUMNS);
+    if (!bid) return res.status(404).json({ error: 'Not found' });
+    const emails = await db('bid_opportunity_emails as l')
+      .join('emails as e', 'e.id', 'l.email_id')
+      .where('l.bid_id', bid.id)
+      .orderBy('l.received_at')
+      .select('l.email_id', 'l.kind', 'l.received_at', 'e.subject', 'e.from_name', 'e.from_address');
+    res.json({ bid: present(bid), emails });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.patch('/:id', async (req, res, next) => {
+  try {
+    if (!UUID.test(req.params.id)) return res.status(404).json({ error: 'Not found' });
+    const { error, value } = patchSchema.validate(req.body || {});
+    if (error) return res.status(400).json({ error: 'Invalid bid update' });
+    // The read, the write, the fresh read and the closing of done alerts run under one bid-row lock: intake and the
+    // owed-bell delivery lock the same row, so an addendum is either before this save (and the version fence refuses
+    // it) or after it (and its bell is never closed by this save).
+    const outcome = await db.transaction(async (trx) => {
+      const bid = await trx('bid_opportunities').where({ id: req.params.id }).forUpdate().first(BID_COLUMNS);
+      if (!bid) return { status: 404, body: { error: 'Not found' } };
+      const built = buildPatch(bid, value);
+      if (built.error) return built.error;
+      const { patch, fenced } = built;
+
+      const written = await trx('bid_opportunities').where({ id: bid.id })
+        .modify((q) => { if (fenced) q.whereRaw("date_trunc('milliseconds', updated_at) = ?::timestamptz", [value.expected_updated_at]); })
+        .update({ ...patch, updated_at: trx.raw('clock_timestamp()') });
+      if (!written) return { status: 409, body: { error: DATE_CHANGED } };
+      const updated = await trx('bid_opportunities').where({ id: bid.id }).first(BID_COLUMNS);
+      try {
+        await trx.raw('SAVEPOINT bid_desk_close_alerts');
+        await closeDoneAlerts(trx, bid.id, bid, updated);
+        await trx.raw('RELEASE SAVEPOINT bid_desk_close_alerts');
+      } catch (err) {
+        // The save stands; an alert left open is closed by hand. Class and code only (row values stay out of logs).
+        await trx.raw('ROLLBACK TO SAVEPOINT bid_desk_close_alerts').catch(() => {});
+        logger.warn(`[bid-desk] closing done alerts for ${bid.id} failed: ${err?.name || 'Error'}${err?.code ? ` ${err.code}` : ''}`);
+      }
+      return { status: 200, body: { ok: true, bid: present(updated) } };
+    });
+    res.status(outcome.status).json(outcome.body);
+  } catch (err) {
+    next(err);
+  }
+});
+
+module.exports = router;

@@ -1892,9 +1892,53 @@ async function completedVisit(conn, { after, until, customerId }) {
   return row ? { id: row.id, at: row.completed_at } : null;
 }
 
+// The live customer records carrying each number, kept only where they are
+// ONE person (same normalized first+last name: duplicate records, not a
+// household): Map<phoneDigits, customerId[]>. A number with two different
+// names — or a record with no name to compare — is truly shared and absent
+// from the map, so a linked estimate on it proves nothing for an unlinked
+// caller. Matches customers.phone, the column every matcher here uses.
+const nameKey = (c) => `${c.first_name || ""} ${c.last_name || ""}`.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+// Names intake writes when it has no real one. ONE list: the promise-chaser
+// bell's headline lookup and the shared-number rule both read it, and the
+// promised-estimate digest SQL builds its regex from it. Entries are in the
+// normalized form nameKey/isMissingName compare against (punctuation becomes a
+// space, so "N/A" is "n a"); it covers outbound-voicemail-sms.js's
+// PLACEHOLDER_NAMES too ("-" and "?" normalize to blank, already missing).
+const PLACEHOLDER_NAMES = Object.freeze([
+  "unknown", "unknown caller", "unknown unknown", "caller", "lead", "customer", "new",
+  "no name", "anonymous", "n a", "na", "none", "test",
+]);
+const PLACEHOLDER_NAME_SQL_RE = `^(${PLACEHOLDER_NAMES.join("|")})$`;
+// A name that tells us nothing about who this is: blank or a placeholder.
+const isMissingName = (text) => {
+  const key = String(text || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  return !key || PLACEHOLDER_NAMES.includes(key);
+};
+async function sameNameNumberOwners(conn, phones) {
+  const out = new Map();
+  const keys = [...new Set((phones || []).map(phoneDigits).filter(Boolean))];
+  if (!keys.length) return out;
+  const rows = await phoneWhereAny(conn("customers"), "phone", keys).whereNull("deleted_at").select("id", "phone", "first_name", "last_name");
+  const byKey = new Map();
+  for (const r of rows) {
+    const k = phoneDigits(r.phone);
+    byKey.set(k, [...(byKey.get(k) || []), r]);
+  }
+  for (const [k, recs] of byKey) {
+    const names = new Set(recs.map(nameKey));
+    // One real name only. A blank or placeholder name on ANY live record means
+    // the number is not corroborated as one person (it could be anyone), so a
+    // linked estimate on it proves nothing for an unlinked caller.
+    if (names.size === 1 && !recs.some((r) => isMissingName(nameKey(r)))) out.set(k, recs.map((r) => String(r.id)));
+  }
+  return out;
+}
+
 // send_estimate's association lookup, shared with kind 'other': an estimate
 // handed off to the same customer after the call (or, for an unlinked call,
-// an unlinked estimate on the caller's phone).
+// an unlinked estimate on the caller's phone, or a linked one when the number
+// belongs to one person's duplicate records: sameNameNumberOwners).
 //
 // `accept(row)` (optional) vets a candidate for the promise being judged: the
 // first accepted estimate in handoff order wins, so a rejected one does not hide
@@ -1910,7 +1954,17 @@ async function estimateSentTo(conn, { after, until, phone, customerId }, accept 
     // Exclude NULL FK values so NOT IN does not reject unrelated rows.
     whereEstimateCustomerOwnership(estQ, customerId);
   } else if (phone) {
-    estQ.whereNull("customer_id").modify((b) => phoneWhere(b, "customer_phone", phone));
+    // An unlinked call is matched by its NUMBER. An UNLINKED estimate on the
+    // caller's phone always counts (commercial proposals). A LINKED estimate
+    // counts only when the number is not truly shared (codex #3738 P1,
+    // narrowed 2026-10-21): every live customer record carrying it is one
+    // person's duplicate (same name), and the estimate's owner is one of them.
+    // Two different names on one number: a linked estimate clears nothing.
+    const safeOwners = (await sameNameNumberOwners(conn, [phone])).get(phoneDigits(phone)) || [];
+    estQ.where((b) => {
+      b.where((u) => { u.whereNull("customer_id"); phoneWhere(u, "customer_phone", phone); });
+      if (safeOwners.length) b.orWhereIn("customer_id", safeOwners);
+    });
   } else {
     return null;
   }
@@ -4219,6 +4273,10 @@ module.exports = {
   callEndedAt,
   phoneDigits,
   phoneWhereAny,
+  sameNameNumberOwners,
+  PLACEHOLDER_NAMES,
+  PLACEHOLDER_NAME_SQL_RE,
+  isMissingName,
   whereEstimateCustomerOwnership,
   whereEstimateOwnedByAny,
   whereEstimateOnCustomerRecord,

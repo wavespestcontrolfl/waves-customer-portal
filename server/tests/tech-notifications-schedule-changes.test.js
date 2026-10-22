@@ -6,8 +6,6 @@
 // schedule-change cards (Codex #5783 P2: past the 300-row cap too).
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/time-tracking', () => ({}));
-jest.mock('../services/geofence-matcher', () => ({ logEvent: jest.fn() }));
-jest.mock('../services/geofence-handler', () => ({ markOnPropertyFromGeofence: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (_req, _res, next) => next(),
   requireTechOrAdmin: (_req, _res, next) => next(),

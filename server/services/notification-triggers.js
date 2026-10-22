@@ -534,12 +534,17 @@ const TRIGGER_REGISTRY = {
     allowContactDetails: true,
     build: (p) => {
       const who = p.name || p.phone || 'A lead';
+      // The headline leads with WHO (owner 2026-10-21): the name, else the
+      // number in its usual form, else a plain "A lead".
+      const digits = String(p.phone || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+      const shownPhone = digits.length === 10 ? `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}` : p.phone;
+      const headlineWho = p.name || shownPhone || 'A lead';
       // Dispatched only by the durable sweep now (no more live /voice call
       // site) — the call has always already ended by the time this fires,
       // so the copy always states when they called, never "is calling in
       // now".
       return {
-        title: `Calling back — still owe them a ${p.what || 'follow-up'}`,
+        title: `${headlineWho} called back — we still owe a ${p.what || 'follow-up'}`,
         body: `${who} called at ${p.calledAtLabel || 'earlier'}. We still owe them a ${p.what || 'follow-up'} promised ${p.when || 'earlier'}.`,
         link: callLink(p),
       };

@@ -7,7 +7,7 @@
 import '@testing-library/jest-dom/vitest';
 import { act, waitFor, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import GeofenceArrivalPrompt from './GeofenceArrivalPrompt';
+import TechNoticeFeed from './TechNoticeFeed';
 
 function notification(type, payload, id = `n-${type}`) {
   return { id, type, message: 'A customer sent photos for a visit on your route', payload, created_at: '2026-09-28T18:41:00Z' };
@@ -32,7 +32,7 @@ function stubFeed(notifications, { failPosts = false } = {}) {
   return calls;
 }
 
-describe('GeofenceArrivalPrompt — visit-prep photo card', () => {
+describe('TechNoticeFeed — visit-prep photo card', () => {
   beforeEach(() => {
     localStorage.setItem('waves_admin_token', 'tech-token');
     vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -47,7 +47,7 @@ describe('GeofenceArrivalPrompt — visit-prep photo card', () => {
 
   it('renders the exact copy, no "Open visit" wording, and a "Got it" dismiss', async () => {
     stubFeed([PHOTOS]);
-    render(<GeofenceArrivalPrompt />);
+    render(<TechNoticeFeed />);
     await act(async () => { await Promise.resolve(); });
 
     const card = await screen.findByTestId('photo-notice');
@@ -60,7 +60,7 @@ describe('GeofenceArrivalPrompt — visit-prep photo card', () => {
 
   it('stays until "Got it" — the 5-minute reminder timer never marks it read', async () => {
     const calls = stubFeed([PHOTOS]);
-    render(<GeofenceArrivalPrompt />);
+    render(<TechNoticeFeed />);
     await act(async () => { await Promise.resolve(); });
     expect(await screen.findByTestId('photo-notice')).toBeInTheDocument();
 
@@ -76,7 +76,7 @@ describe('GeofenceArrivalPrompt — visit-prep photo card', () => {
 
   it('names the visit date and has exactly one action, "Got it" (no dead-end tap-through)', async () => {
     stubFeed([PHOTOS]);
-    render(<GeofenceArrivalPrompt />);
+    render(<TechNoticeFeed />);
     await act(async () => { await Promise.resolve(); });
 
     const card = await screen.findByTestId('photo-notice');
@@ -87,7 +87,7 @@ describe('GeofenceArrivalPrompt — visit-prep photo card', () => {
   it('a card already on screen takes the new date when its visit moves (same tech)', async () => {
     const moved = { ...PHOTOS, payload: { ...PHOTOS.payload, scheduled_date: '2026-10-09' } };
     stubFeed((poll) => (poll === 1 ? [PHOTOS] : [moved]));
-    render(<GeofenceArrivalPrompt />);
+    render(<TechNoticeFeed />);
     await act(async () => { await Promise.resolve(); });
     expect(await screen.findByTestId('photo-notice')).toHaveTextContent('Visit on Fri, Oct 2.');
     await act(async () => { vi.advanceTimersByTime(10_000); await Promise.resolve(); });
@@ -96,7 +96,7 @@ describe('GeofenceArrivalPrompt — visit-prep photo card', () => {
 
   it('an older card with no date still renders the copy and "Got it"', async () => {
     stubFeed([PHOTOS_UNGROUPED]);
-    render(<GeofenceArrivalPrompt />);
+    render(<TechNoticeFeed />);
     await act(async () => { await Promise.resolve(); });
 
     const card = await screen.findByTestId('photo-notice');
@@ -109,7 +109,7 @@ describe('GeofenceArrivalPrompt — visit-prep photo card', () => {
     const older = { ...PHOTOS, created_at: '2026-09-28T10:00:00Z' };
     const newer = { ...assigned, created_at: '2026-09-28T20:00:00Z' };
     stubFeed([older, newer]);
-    render(<GeofenceArrivalPrompt />);
+    render(<TechNoticeFeed />);
     await act(async () => { await Promise.resolve(); });
 
     expect(await screen.findByTestId('photo-notice')).toBeInTheDocument();
