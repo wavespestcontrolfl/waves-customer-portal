@@ -952,8 +952,71 @@ class GoogleBusinessService {
     return true;
   }
 
+  // A Places-fallback row (google_review_id `places_<placeId>_<time>`) and a
+  // GBP row for the SAME review can coexist: the Places sample stored the
+  // review during a GBP outage, then the GBP pull stored it under its real
+  // id. `_resolveGbpResourceNames` stamps the GBP resource name on the places
+  // row, so the next sync finds the places row by gbp_review_name and tries to
+  // upgrade its google_review_id to the id the GBP row already holds, which
+  // hits google_reviews_google_review_id_unique every day. Merge instead: keep
+  // the GBP row, carry over what only the places row knows, move the rows that
+  // reference it, delete it — one transaction. Returns the surviving GBP row,
+  // or null when there is nothing to merge (no holder, or it is not the same
+  // reviewer at the same location, so the old behavior stands).
+  async _mergePlacesRowIntoGbpRow(placesRow, normalized) {
+    return db.transaction(async (trx) => {
+      const holder = await trx('google_reviews').where({ google_review_id: normalized.google_review_id }).forUpdate().first();
+      if (!holder || holder.id === placesRow.id) return null;
+      if (holder.location_id !== placesRow.location_id
+        || String(holder.reviewer_name || '').trim().toLowerCase() !== String(placesRow.reviewer_name || '').trim().toLowerCase()) {
+        return null;
+      }
+      const places = await trx('google_reviews').where({ id: placesRow.id }).forUpdate().first();
+      // Another runner merged it first: the GBP row is the answer.
+      if (!places) return holder;
+
+      const carry = {};
+      if (!holder.customer_id && places.customer_id) {
+        carry.customer_id = places.customer_id;
+        if (places.link_source != null) carry.link_source = places.link_source;
+        if (places.auto_linked_at != null) carry.auto_linked_at = places.auto_linked_at;
+      }
+      if (places.dismissed && !holder.dismissed) carry.dismissed = true;
+      if (!holder.review_reply && places.review_reply) {
+        carry.review_reply = places.review_reply;
+        carry.reply_updated_at = places.reply_updated_at ?? null;
+      }
+      if (Object.keys(carry).length > 0) await trx('google_reviews').where({ id: holder.id }).update(carry);
+
+      // review_incentive_payouts: at most one payout per review (partial unique
+      // index) — move it unless the GBP row already has one; otherwise the
+      // delete below nulls the places row's link (ON DELETE SET NULL).
+      const holderPayout = await trx('review_incentive_payouts').where({ google_review_id: holder.id }).first();
+      if (!holderPayout) {
+        await trx('review_incentive_payouts').where({ google_review_id: places.id }).update({ google_review_id: holder.id });
+      }
+      // review_graphics: unique per (review, template) — move the templates the
+      // GBP row lacks; the rest cascade away with the places row.
+      const holderTemplates = new Set((await trx('review_graphics').where({ google_review_id: holder.id }).select('template_key')).map(g => g.template_key));
+      const placesGraphics = await trx('review_graphics').where({ google_review_id: places.id }).select('id', 'template_key');
+      for (const g of placesGraphics) {
+        if (holderTemplates.has(g.template_key)) continue;
+        holderTemplates.add(g.template_key);
+        await trx('review_graphics').where({ id: g.id }).update({ google_review_id: holder.id });
+      }
+      await trx('google_reviews').where({ id: places.id }).del();
+      logger.info(`[gbp] Merged Places fallback row ${places.id} into GBP row ${holder.id} (${normalized.gbp_review_name || normalized.google_review_id}) at ${places.location_id}`);
+      return (await trx('google_reviews').where({ id: holder.id }).first()) || holder;
+    });
+  }
+
   async _upsertGbpReview(normalized, syncStart = null, pendingUnlinkedNotifications = null, pendingRestoredNotifications = null) {
-    const existing = await this._findExistingReview(normalized);
+    let existing = await this._findExistingReview(normalized);
+    if (existing && normalized.google_review_id && existing.google_review_id !== normalized.google_review_id
+      && String(existing.google_review_id || '').startsWith('places_')) {
+      const merged = await this._mergePlacesRowIntoGbpRow(existing, normalized);
+      if (merged) existing = merged;
+    }
     const customerId = await this._findCustomerIdByReviewerName(normalized.reviewer_name);
     // Reply fields from the feed snapshot — deferred under a live publish
     // claim, replacing a local draft when Google has an owner reply, and
@@ -2570,10 +2633,13 @@ class GoogleBusinessService {
       // different remediation and both mean removals go undetected.
       const reconcileFailure = String(cause || '').startsWith('removal reconcile failed');
       const upsertFailure = String(cause || '').startsWith('review upsert failed');
+      // Count from the row-failure cause ("1 of 39 review row(s) failed to
+      // store"); a breaker trip carries no count.
+      const failedRows = Number((String(cause || '').match(/^review upsert failed: (\d+) of \d+ review row/) || [])[1]) || null;
       const title = reconcileFailure
         ? `Google review removal reconcile failing for ${loc.name}`
         : upsertFailure
-          ? `Google review rows failing to store for ${loc.name}`
+          ? (failedRows ? `Google reviews: ${failedRows} row${failedRows === 1 ? '' : 's'} did not save at ${loc.name}` : `Google reviews: rows did not save at ${loc.name}`)
           : `Google review sync degraded for ${loc.name}`;
       // The advisory lock serializes the check-then-insert across the hourly
       // job, the manual admin sync, and overlapping deploy instances — a
@@ -2607,11 +2673,16 @@ class GoogleBusinessService {
           : upsertFailure
             ? `Review sync for ${loc.name} pulled the GBP feed, but ${cause.replace(/^review upsert failed: /, '')}. ${/\(0 stored[;)]/.test(cause) ? 'NO review from this pull was stored' : 'The stored reviews are current'}; ${breakerTrip ? `the location aborted before its removal reconcile, so nothing is misreported as removed; ${process.env.GOOGLE_MAPS_API_KEY ? 'the sync will attempt the Places sample fallback' : 'no Places fallback is available (GOOGLE_MAPS_API_KEY is not set)'}` : `the failed rows were excluded from this run's removal reconcile so they are not misreported as removed${reconcileFailed ? ' (and that reconcile FAILED — see its own alert)' : ' (the rest of the location reconciled normally)'}`}. This is a database write error, not a credentials problem — read the error and the code.`
             : `Review tracking for ${loc.name} ${fallbackState} because ${detail}. Removed reviews and most new reviews will NOT be detected until the GBP connection works.`;
+        // The owner line is plain; the technical text (with the raw database
+        // error) goes behind "Show full text".
+        const ownerBody = upsertFailure
+          ? `The reviews on Google are fine. ${failedRows ? `${failedRows} stored cop${failedRows === 1 ? 'y' : 'ies'}` : 'Stored copies'} did not save; Claude can check.`
+          : body;
         await NotificationService.notifyAdmin(
           'review',
           title,
-          body,
-          { bell: true, link: '/admin/reviews', metadata: { locationId: loc.id, reason: 'gbp_sync_degraded', cause } },
+          ownerBody,
+          { bell: true, link: '/admin/reviews', ...(upsertFailure ? { detail: body } : {}), metadata: { locationId: loc.id, reason: 'gbp_sync_degraded', cause } },
         );
         logger.warn(`[gbp] Review sync degraded for ${loc.name} (${cause === 'no_client' ? 'no client' : 'pull failed'}) — admin notified`);
       }, { recordHealth: false });
