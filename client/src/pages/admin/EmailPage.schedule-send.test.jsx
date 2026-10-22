@@ -195,7 +195,7 @@ describe("Email schedule send", () => {
     const base = fetch.getMockImplementation();
     fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/email/schedule")
       ? Promise.reject(new TypeError("network")) : base(input, options)));
-    reconciledRow = { id: "late-1", status: "scheduled", sendAt: "2026-10-23T12:00:00.000Z" };
+    reconciledRow = { id: "late-1", status: "scheduled", sendAt: "2026-10-23T12:00:00.000Z", to: "customer@example.invalid", draftText: "Line one\n<b>two</b>" };
     mount();
     await writeEmail();
     fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
@@ -206,6 +206,22 @@ describe("Email schedule send", () => {
     expect(JSON.parse(posts("/email/schedule/reconcile")[0][1].body).clientKey).toBe(first);
     expect((await screen.findAllByText(/That email is scheduled after all/)).length).toBeGreaterThan(0);
     expect(screen.queryByDisplayValue("Line one\n<b>two</b>")).not.toBeInTheDocument();
+  });
+
+  it("I checked keeps newer edits when the late request did queue the older text", async () => {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/email/schedule")
+      ? Promise.reject(new TypeError("network")) : base(input, options)));
+    reconciledRow = { id: "late-1", status: "scheduled", sendAt: "2026-10-23T12:00:00.000Z", to: "customer@example.invalid", draftText: "Line one\n<b>two</b>" };
+    mount();
+    await writeEmail();
+    fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Tomorrow morning/ }));
+    await screen.findByRole("button", { name: "I checked: it is in neither" });
+    fireEvent.change(screen.getByLabelText(/^Message/), { target: { value: "Newer text" } });
+    fireEvent.click(screen.getByRole("button", { name: "I checked: it is in neither" }));
+    expect((await screen.findAllByText(/Your newer edits were not scheduled and are still in the draft/)).length).toBeGreaterThan(0);
+    expect(screen.getByLabelText(/^Message/)).toHaveValue("Newer text");
   });
 
   it("an edit changed back to the queued text is cleared like the queued draft", async () => {

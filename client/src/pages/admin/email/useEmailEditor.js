@@ -170,14 +170,23 @@ export default function useEmailEditor(userId) {
     }
     const outcome = reconcileOutcome(row);
     rememberUncertain(slot, outcome.next);
-    if (outcome.withdraw) withdrawDraftSlot(replyId);
-    say(outcome.message, Boolean(outcome.next));
+    const kept = outcome.withdraw && !withdrawIfQueued(replyId, row);
+    say(kept ? `${outcome.message} Your newer edits were not scheduled and are still in the draft.` : outcome.message, Boolean(outcome.next));
   };
-  // Removes a draft whose email the server already holds (queued or sent).
-  const withdrawDraftSlot = (replyId) => {
-    if (replyId) { setReplyDraft(replyId, ""); return; }
+  // Removes a draft whose email the server already holds (queued or sent),
+  // but only while it is still that email's text: newer edits stay. Returns
+  // whether it removed the draft.
+  const withdrawIfQueued = (replyId, row) => {
+    if (replyId) {
+      if ((draftSession.drafts.replies[replyId] || "") !== row.draftText) return false;
+      setReplyDraft(replyId, "");
+      return true;
+    }
+    const current = draftSession.drafts.compose;
+    if (current.body !== row.draftText || current.to.trim() !== row.to) return false;
     setComposeForm(() => ({ to: "", subject: "", body: "" }));
     setShowCompose(false);
+    return true;
   };
   const setShowCompose = (visible) => {
     if (visible) setSendFeedback((current) => ({ ...current, compose: null }));
