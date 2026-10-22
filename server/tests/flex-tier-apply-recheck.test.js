@@ -35,6 +35,8 @@ jest.mock('../services/appointment-reminders', () => ({
     return require('../utils/datetime-et').parseETDateTime(`${datePart}T${timePart}`);
   }),
 }));
+// The run-end move-check-down notice (check-down-notice.js) is upkeep this harness stubs, like audit.js's notices.
+jest.mock('../services/auto-dispatch/check-down-notice', () => ({ noteRun: jest.fn(async () => ({ action: 'none' })) }));
 jest.mock('../services/auto-dispatch/audit', () => ({
   startRun: jest.fn(async () => 'run1'),
   logDecision: jest.fn(async () => {}),
