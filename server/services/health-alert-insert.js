@@ -24,8 +24,14 @@ const MAX_MERGE_HOPS = 5;
 async function resolveLiveCustomerId(trx, customerId) {
   let id = customerId;
   for (let hop = 0; hop <= MAX_MERGE_HOPS; hop += 1) {
-    const live = await trx('customers').where({ id }).whereNull('deleted_at').forShare().first('id');
-    if (live) return live.id;
+    // Lock by id alone, then read deleted_at under the lock. A deleted_at
+    // filter in the WHERE skips a retired row without waiting on it, so a
+    // merge undo in flight would be missed (local Codex audit P1). Holding
+    // this share lock also keeps a later merge or undo of the row out until
+    // the insert commits, so the journal read below is stable.
+    const row = await trx('customers').where({ id }).forShare().first('id', 'deleted_at');
+    if (!row) return null;
+    if (!row.deleted_at) return row.id;
     const merge = await trx('customer_merge_journal')
       .where({ loser_customer_id: id })
       .whereNull('undone_at')

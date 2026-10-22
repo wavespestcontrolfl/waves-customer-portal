@@ -9,15 +9,19 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const db = require('../models/db');
 const { insertHealthAlert, MAX_MERGE_HOPS } = require('../services/health-alert-insert');
 
-// live: set of live customer ids. merges: loser id -> winner id (not undone).
-function makeTrx({ live, merges = {} }) {
+// live: set of live customer ids. missing: ids with no customers row. Any
+// other id is a retired (soft-deleted) row. merges: loser id -> winner id.
+function makeTrx({ live, merges = {}, missing = new Set() }) {
   const calls = { customers: [], journal: [], inserts: [] };
   const trx = (table) => {
     const c = { table, filters: {} };
     for (const m of ['whereNull', 'forShare', 'orderBy']) c[m] = jest.fn(() => c);
     c.where = jest.fn((f) => { Object.assign(c.filters, f); return c; });
     c.first = jest.fn(async () => {
-      if (table === 'customers') return live.has(c.filters.id) ? { id: c.filters.id } : undefined;
+      if (table === 'customers') {
+        if (missing.has(c.filters.id)) return undefined;
+        return { id: c.filters.id, deleted_at: live.has(c.filters.id) ? null : '2026-10-22T08:00:00Z' };
+      }
       if (table === 'customer_merge_journal') {
         const winner = merges[c.filters.loser_customer_id];
         return winner ? { winner_customer_id: winner } : undefined;
@@ -44,7 +48,7 @@ test('a live customer gets the alert as given, after a FOR SHARE read of its row
   const row = await insertHealthAlert(ROW, { trx });
   expect(row.customer_id).toBe('loser');
   expect(calls.customers[0].forShare).toHaveBeenCalled();
-  expect(calls.customers[0].whereNull).toHaveBeenCalledWith('deleted_at');
+  expect(calls.customers[0].whereNull).not.toHaveBeenCalled();
   expect(calls.journal).toHaveLength(0);
 });
 
@@ -57,6 +61,24 @@ test('a merged-away customer: the alert is filed on the live merge winner', asyn
   // The winner row is locked too, so a second merge in flight is waited on.
   expect(calls.customers.map((c) => c.filters.id)).toEqual(['loser', 'winner']);
   expect(calls.customers[1].forShare).toHaveBeenCalled();
+});
+
+test('a retired row is locked by id, so the read waits on a merge undo in flight', async () => {
+  // A deleted_at filter in the WHERE would skip the retired row without
+  // waiting for its lock; an undo committing meanwhile would be missed.
+  const { trx, calls } = makeTrx({ live: new Set(['winner']), merges: { loser: 'winner' } });
+  await insertHealthAlert(ROW, { trx });
+  for (const c of calls.customers) {
+    expect(c.forShare).toHaveBeenCalled();
+    expect(c.whereNull).not.toHaveBeenCalled();
+  }
+});
+
+test('a customer id with no row gets no alert', async () => {
+  const { trx, calls } = makeTrx({ live: new Set(), missing: new Set(['loser']) });
+  expect(await insertHealthAlert(ROW, { trx })).toBeNull();
+  expect(calls.journal).toHaveLength(0);
+  expect(calls.inserts).toHaveLength(0);
 });
 
 test('a chain of merges is followed to the live end', async () => {
