@@ -111,6 +111,12 @@ describe('decideRecoveryAction', () => {
     expect(recovery.decideRecoveryAction({ candidate: { confidence: 'high' }, suppressed: false, ownedByOther: false, hasAttachments: true, min: 'high' }))
       .toEqual({ action: 'skip', status: 'has_attachments' });
   });
+  test('skips an estimate follow-up carrying the monthly average (the stored price line may be stale)', () => {
+    expect(recovery.decideRecoveryAction({ candidate: { confidence: 'high' }, suppressed: false, averageCopy: true, min: 'high' }))
+      .toEqual({ action: 'skip', status: 'monthly_average_not_replayed' });
+    expect(recovery.decideRecoveryAction({ candidate: { confidence: 'high' }, suppressed: false, averageCopy: false, min: 'high' }))
+      .toEqual({ action: 'send', status: 'resent' });
+  });
   test('skips when the bounced address is no longer on file', () => {
     expect(recovery.decideRecoveryAction({ candidate: { confidence: 'high' }, suppressed: false, ownedByOther: false, addressOnFile: false, min: 'high' }))
       .toEqual({ action: 'skip', status: 'address_no_longer_on_file' });
@@ -293,6 +299,24 @@ describe('attemptRecovery codex-fix behaviors', () => {
       expect(mockDb._calls.some((c) => c.table === 'email_messages' && c.data.status === 'blocked')).toBe(true);
       expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
     }
+  });
+
+  test('a bounced estimate follow-up with the monthly average is not re-sent; staff get the suggested address', async () => {
+    const mockDb = orderedDb({
+      first: (table) => (table === 'customers' ? { id: 'c1', email: 'jane@gmial.com' } : null),
+      returning: (table) => (table === 'email_bounce_recoveries' ? [{ id: 'rec1' }] : []),
+    });
+    db.mockImplementation(mockDb);
+    const res = await recovery.attemptRecovery(
+      { id: 'orig1', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'jane@gmial.com', template_key: 'estimate.unviewed_followup', suppression_group_key_snapshot: 'service_operational', categories: ['estimate_followup', 'estimate_followup_monthly_average'] },
+      { event: 'bounce', type: 'bounce' },
+    );
+    expect(res).toEqual({ skipped: 'monthly_average_not_replayed' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(mockDb._calls.filter((c) => c.table === 'email_bounce_recoveries').pop().data)
+      .toMatchObject({ status: 'monthly_average_not_replayed', corrected_email: 'jane@gmail.com' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', expect.any(String), expect.stringContaining('Suggested correction: jane@gmail.com'),
+      expect.objectContaining({ metadata: expect.objectContaining({ status: 'monthly_average_not_replayed' }) }));
   });
 
   test.each(['billing_late_payment_30_day', 'invoice.followup_14_day', 'payment.microdeposit_verification', 'billing.previsit_balance'])(

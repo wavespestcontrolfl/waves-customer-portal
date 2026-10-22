@@ -9,6 +9,7 @@ const { acquireOccupancyLock, acquireOccupancyLocks, findConflictingVisits } = r
 const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+const { findSoundAlikeCustomers, shouldSearchSoundAlike } = require('../services/customer-name-search');
 const areaAddOnRows = require('../services/area-addon-visit-rows');
 const areaAddOnGovernedRate = require('../services/area-addon-governed-rate');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
@@ -6964,6 +6965,8 @@ router.get('/', async (req, res, next) => {
       // 404s (GH codex #3843 r1 P1). Split/Separate stay ungated.
       visitGroups: isEnabled('visitGroups'),
       visitCloseout: legacyCloseoutEnabled,
+      // GATE_DISPATCH_FIND_TIME_PANEL: shows the Dispatch board's "Find a time" button.
+      findTimePanel: isEnabled('dispatchFindTimePanel'),
       techSummary: Object.values(byTech),
       unassigned,
       technicians,
@@ -10334,6 +10337,9 @@ async function createScheduleBooking({ body, actor }) {
   });
 }
 
+// Most upcoming appointments the sound-alike customers add after the exact rows.
+const APPROXIMATE_APPOINTMENT_LIMIT = 25;
+
 // GET /api/admin/schedule/list — paginated list view with filters
 router.get('/list', async (req, res, next) => {
   try {
@@ -10394,6 +10400,9 @@ router.get('/list', async (req, res, next) => {
       });
     }
 
+    // Everything but the text search: the sound-alike rows below start from it.
+    const unsearchedQ = q.clone();
+
     // Search (customer name or service type)
     if (search) {
       const term = `%${search}%`;
@@ -10409,7 +10418,7 @@ router.get('/list', async (req, res, next) => {
     const total = parseInt(totalResult?.cnt || 0);
 
     // Select fields + paginate
-    const services = await q
+    const listColumns = (qb) => qb
       .select(
         'scheduled_services.id', 'scheduled_services.customer_id',
         'scheduled_services.scheduled_date', 'scheduled_services.service_type',
@@ -10447,11 +10456,46 @@ router.get('/list', async (req, res, next) => {
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         'technicians.name as tech_name'
-      )
+      );
+    const byDate = (qb) => qb
       .orderBy('scheduled_services.scheduled_date')
-      .orderByRaw('COALESCE(scheduled_services.route_order, 999)')
-      .limit(limit)
-      .offset(offset);
+      .orderByRaw('COALESCE(scheduled_services.route_order, 999)');
+    const exactServices = await byDate(listColumns(q)).limit(limit).offset(offset);
+
+    // Sound-alike appointments (GATE_CUSTOMER_SEARCH_FUZZY): when the exact search found
+    // fewer than 3 appointments and reads as a name, the upcoming appointments of customers
+    // with a similar name follow the exact rows on page 1. `total` and the paging stay exact;
+    // `approximateCount` says how many rows at the end carry `approximate: true`. Only customers
+    // with a matching appointment under the same filters (and a technician's own assignments)
+    // are considered, so the scope never widens.
+    // GATE_CUSTOMER_SEARCH_FUZZY reader, on its own line so gate PRs never conflict.
+    // Opt-in per caller (`suggest=1`): the schedule list view's bulk actions never see suggestions.
+    const customerSearchFuzzy = require('../config/feature-gates').customerSearchFuzzyLive() && req.query.suggest === '1';
+    let approximateServices = [];
+    // All exact rows on this page, so no exact match also comes back as a suggestion (Codex r3).
+    if (customerSearchFuzzy && page === 1 && exactServices.length >= total && shouldSearchSoundAlike(search, total, exactServices)) {
+      const ranked = await findSoundAlikeCustomers(db, search, {
+        // Projects the id only (every consumer clears and re-selects its own columns).
+        scopeQuery: db('customers').select('customers.id').whereNull('customers.deleted_at').whereIn(
+          'customers.id',
+          unsearchedQ.clone().clearSelect().clearOrder().select('scheduled_services.customer_id'),
+        ),
+        exactIds: [...new Set(exactServices.map((s) => s.customer_id))],
+      });
+      if (ranked.length) {
+        const rank = new Map(ranked.map((entry, at) => [entry.id, at]));
+        // The best-ranked customer's visits come first IN THE QUERY, so the row cap can
+        // never hide the best match behind a lower-ranked customer's many visits.
+        const rankedIds = ranked.map((entry) => entry.id);
+        const found = await byDate(listColumns(unsearchedQ.clone())
+          .whereIn('scheduled_services.customer_id', rankedIds)
+          .orderByRaw('array_position(?::uuid[], scheduled_services.customer_id)', [rankedIds]))
+          .limit(APPROXIMATE_APPOINTMENT_LIMIT);
+        approximateServices = found
+          .map((row) => ({ ...row, _approximate: true, _matchReasons: ranked[rank.get(row.customer_id)].reasons || [] }));
+      }
+    }
+    const services = approximateServices.length ? [...exactServices, ...approximateServices] : exactServices;
 
     // Add-on lines so the Edit appointment modal opened from the list view
     // knows the full visit composition (primary + add-ons) and edits totals
@@ -10506,10 +10550,12 @@ router.get('/list', async (req, res, next) => {
       payerId: s.payer_id || null,
       poNumber: s.po_number || null,
       selfPayOverride: s.self_pay_override === true,
+      ...(s._approximate ? { approximate: true, matchReasons: s._matchReasons } : {}),
     }));
 
     res.json({
       services: mapped,
+      ...(customerSearchFuzzy && search ? { approximateCount: approximateServices.length } : {}),
       total,
       page,
       pageSize: limit,
@@ -28502,8 +28548,12 @@ router.get('/blackout-dates', requireAdmin, async (req, res, next) => {
       .where('date', '>=', db.raw("(now() AT TIME ZONE 'America/New_York')::date - interval '30 days'"))
       .orderBy('date', 'asc')
       .select('id', 'date', 'reason', 'created_at');
-    const { getWeeklyDaysOff } = require('../services/scheduling/blackout-dates');
+    const { getWeeklyDaysOff, getClosedHolidays } = require('../services/scheduling/blackout-dates');
+    const { upcomingHolidays } = require('../services/scheduling/holidays');
     const weekly = await getWeeklyDaysOff();
+    // Strict: a failed read must not show every holiday as open, or the next
+    // whole-list save would silently reopen the closed ones.
+    const closedHolidays = await getClosedHolidays(db, { strict: true });
     res.json({
       blackouts: rows.map((r) => ({
         id: r.id,
@@ -28512,6 +28562,9 @@ router.get('/blackout-dates', requireAdmin, async (req, res, next) => {
         createdAt: r.created_at,
       })),
       weeklyDaysOff: [...weekly].sort((a, b) => a - b),
+      // The 14 holidays, each open until the owner closes it (owner 2026-10-22).
+      holidays: upcomingHolidays(etDateString(new Date()))
+        .map((holiday) => ({ ...holiday, closed: closedHolidays.has(holiday.key) })),
     });
   } catch (err) { next(err); }
 });
@@ -28552,6 +28605,47 @@ router.put('/blackout-dates/weekly', requireAdmin, async (req, res, next) => {
     flushEstimateSlotCaches();
     await refreshQualityForBlackoutChange(weeklyBlackoutRefreshDates(previousDays, days));
     res.json({ success: true, weeklyDaysOff: days });
+  } catch (err) { next(err); }
+});
+
+// Holiday closures (owner 2026-10-22: "add 14 for now, and make them all open
+// as default"): the 14 days Google lists for Florida (scheduling/holidays.js),
+// each open until the owner closes it. Stored like weekly days off — a
+// system_settings key holding the closed keys — and enforced through the same
+// blackout-dates helpers, every year. Whole-array PUT, like the weekly chips.
+router.put('/blackout-dates/holidays', requireAdmin, async (req, res, next) => {
+  try {
+    const raw = Array.isArray(req.body?.closed) ? req.body.closed : null;
+    if (!raw) return res.status(400).json({ error: 'closed (array of holiday keys) required' });
+    const { HOLIDAYS, HOLIDAY_KEYS, HOLIDAY_CLOSURES_KEY } = require('../services/scheduling/holidays');
+    if (raw.some((key) => !HOLIDAY_KEYS.has(key))) {
+      return res.status(400).json({ error: 'closed lists a key that is not one of the 14 holidays' });
+    }
+    // Calendar order, no duplicates.
+    const closed = HOLIDAYS.map((holiday) => holiday.key).filter((key) => raw.includes(key));
+    const { getClosedHolidays, lockClosureState } = require('../services/scheduling/blackout-dates');
+    // Exclusive closure-state lock before the write — see the weekly-days-off
+    // handler above / blackout-dates.js for why and the lock order.
+    let previous = [];
+    await db.transaction(async (trx) => {
+      await lockClosureState(trx, { exclusive: true });
+      // Read under the lock, before the write: only the holidays that toggle
+      // need a route-quality refresh.
+      previous = [...(await getClosedHolidays(trx))];
+      await trx('system_settings')
+        .insert({
+          key: HOLIDAY_CLOSURES_KEY,
+          value: JSON.stringify(closed),
+          category: 'scheduling',
+          description: 'Holiday keys (services/scheduling/holidays.js) removed from every customer-facing offer surface; missing or empty = every holiday open',
+        })
+        .onConflict('key')
+        .merge({ value: JSON.stringify(closed), updated_at: trx.fn.now() });
+    });
+    logger.info(`[schedule] holiday closures set to [${closed.join(',')}]`);
+    flushEstimateSlotCaches();
+    await refreshQualityForBlackoutChange(holidayBlackoutRefreshDates(previous, closed));
+    res.json({ success: true, closedHolidays: closed });
   } catch (err) { next(err); }
 });
 
@@ -28642,6 +28736,20 @@ function weeklyBlackoutRefreshDates(previousDays, nextDays, now = new Date()) {
   const next = new Set((nextDays || []).map(Number));
   const toggled = new Set([...previous, ...next].filter((day) => previous.has(day) !== next.has(day)));
   return expandWeeklyDaysOff(etDateString(addETDays(now, 1)), etDateString(addETDays(now, 30)), toggled);
+}
+
+// A holiday closure change touches the days of the holidays that toggled —
+// bounded to the reconciler's 30-day horizon, tomorrow onward, like the
+// weekly helper above. Pure; exported for tests.
+function holidayBlackoutRefreshDates(previousKeys, nextKeys, now = new Date()) {
+  const { etDateString, addETDays } = require('../utils/datetime-et');
+  const { holidaysBetween } = require('../services/scheduling/holidays');
+  const previous = new Set(previousKeys || []);
+  const next = new Set(nextKeys || []);
+  const toggled = [...new Set([...previous, ...next])].filter((key) => previous.has(key) !== next.has(key));
+  if (!toggled.length) return [];
+  return holidaysBetween(etDateString(addETDays(now, 1)), etDateString(addETDays(now, 30)), toggled)
+    .map((day) => day.date);
 }
 
 // schedule_blackout_dates.date is a DATE column: pg hands it back as a
@@ -28737,6 +28845,7 @@ router._test = {
   DISCOUNT_PROVENANCE_PROJECTION_KEYS,
   resetDiscountProvenanceColumnCache,
   weeklyBlackoutRefreshDates,
+  holidayBlackoutRefreshDates,
   blackoutDateString,
   registerSpawnedVisitReminder,
   adminMoveProbeExcludeIds,

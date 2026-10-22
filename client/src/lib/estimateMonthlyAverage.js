@@ -1,4 +1,4 @@
-import { CONTEXT_LINE, monthlyText, buildMonthlyAverage } from '@estimate-monthly-average';
+import { CONTEXT_LINE, monthlyText, buildMonthlyAverage, cadenceText, applicationMonthsBreakdown } from '@estimate-monthly-average';
 import { perApplicationBilledMonthly, perApplicationNetForFrequency, perApplicationVisitsForFrequency } from '../components/estimate/PriceCard';
 
 /**
@@ -147,3 +147,7 @@ export function singleServiceAverageContext(monthlyAverage, hasOneTime) {
   if (!monthlyAverage || monthlyAverage.model.showPlan) return null;
   return `${CONTEXT_LINE}${hasOneTime ? ONE_TIME_NOTICE : ''}`;
 }
+
+// GATE_ESTIMATE_APPLICATION_MONTHS: the breakdown is one pure function shared with the PDF
+// document and the emails (shared/estimate-monthly-average.cjs).
+export { cadenceText, applicationMonthsBreakdown };

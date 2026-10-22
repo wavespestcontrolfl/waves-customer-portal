@@ -46,7 +46,7 @@
     },
     {
       "endpoint": "/admin/customers",
-      "reviewed": "Handler (admin-customers.js GET /): customers select with a correlated-subquery projection, every row mapped by mapCustomerListRow to an explicit field list (names, contacts, address, tier, rate, pipeline stage, lead source, balance, last/next service, tags; no credential column), plus pipeline counts and filter lists; limit default 100, max 500 (truncation cuts the rest). The customers.* select is projected away by the mapper, so credential_table:customers is accepted. Free text: leadSourceDetail is declared a note; the default key-name rule withholds any other note-like key. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
+      "reviewed": "Handler (admin-customers.js GET /): customers select with a correlated-subquery projection, every row mapped by mapCustomerListRow to an explicit field list (names, contacts, address, tier, rate, pipeline stage, lead source, balance, last/next service, tags; no credential column), plus pipeline counts and filter lists; limit default 100, max 500 (truncation cuts the rest). The customers.* select is projected away by the mapper, so credential_table:customers is accepted. Free text: leadSourceDetail is declared a note; the default key-name rule withholds any other note-like key. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. Re-reviewed for #6378: with suggest=1 (which the bar never sends; it is not in this row's query list) and GATE_CUSTOMER_SEARCH_FUZZY on, sound-alike rows are appended after the exact rows, same mapped columns, flagged approximate; the name index reads customers id, first_name, last_name, company_name only.",
       "scope": "broad",
       "query": [
         "area",
@@ -139,9 +139,17 @@
       ],
       "unresolved": [
         "routes/admin-customers.js#customerHealthFilterSchema.validate",
-        "services/customer-list-search.js#this.method"
+        "routes/admin-customers.js#unsearched",
+        "routes/admin-customers.js#withListColumns",
+        "services/customer-list-search.js#this.method",
+        "services/intelligence-bar/name-match.js#callback load",
+        "services/intelligence-bar/name-match.js#indexCache.delete",
+        "services/intelligence-bar/name-match.js#indexCache.next",
+        "services/intelligence-bar/name-match.js#keyOf",
+        "services/intelligence-bar/name-match.js#simFn",
+        "services/intelligence-bar/name-match.js#soundsOf"
       ],
-      "hash": "5dfbc8077378e169c40db018b7a5b555"
+      "hash": "7b7b76ef25859d9c8e79d43e1de13a43"
     },
     {
       "endpoint": "/admin/customers/:id/autopay-state",
@@ -1588,7 +1596,7 @@
     },
     {
       "endpoint": "/admin/schedule/list",
-      "reviewed": "Handler (admin-schedule.js GET /list): scheduled_services joined to customers and technicians with an explicit column list, filters from, to, status, techId, serviceType, prepaid, search, page and limit (default 25, max 100), add-ons loaded for the page. A single day is from=to=that date; a week is a seven-day range. The list maps no notes column. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
+      "reviewed": "Handler (admin-schedule.js GET /list): scheduled_services joined to customers and technicians with an explicit column list, filters from, to, status, techId, serviceType, prepaid, search, page and limit (default 25, max 100), add-ons loaded for the page. A single day is from=to=that date; a week is a seven-day range. The list maps no notes column. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. Re-reviewed for #6378: with suggest=1 (which the bar never sends; it is not in this row's query list) and GATE_CUSTOMER_SEARCH_FUZZY on, sound-alike rows are appended after the exact rows, same mapped columns, flagged approximate; the name index reads customers id, first_name, last_name, company_name only.",
       "scope": "broad",
       "query": [
         "from",
@@ -1651,8 +1659,15 @@
       "signals": [
         "credential_table:scheduled_services"
       ],
-      "unresolved": [],
-      "hash": "07f6fc2a29fbf683c73eea9c26fa0cae"
+      "unresolved": [
+        "services/intelligence-bar/name-match.js#callback load",
+        "services/intelligence-bar/name-match.js#indexCache.delete",
+        "services/intelligence-bar/name-match.js#indexCache.next",
+        "services/intelligence-bar/name-match.js#keyOf",
+        "services/intelligence-bar/name-match.js#simFn",
+        "services/intelligence-bar/name-match.js#soundsOf"
+      ],
+      "hash": "0a56f68d2541d2cebdcd7b067873d180"
     },
     {
       "endpoint": "/admin/schedule/next-visit",

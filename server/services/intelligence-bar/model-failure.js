@@ -38,11 +38,15 @@ const SAVED_OUTCOMES = new Set(['completed', 'provider_accepted', 'partially_com
 const UNKNOWN_OUTCOME = 'outcome_unknown';
 const WAITING_OUTCOME = 'awaiting_approval';
 
-const tagged = new WeakSet();
+// error -> the provider whose call threw it ('anthropic' or 'openai').
+const tagged = new WeakMap();
 
-/** Marks an error thrown by the model call. Returns the same value. */
-function tagModelCallError(err) {
-  if (err && typeof err === 'object') tagged.add(err);
+/**
+ * Marks an error thrown by the model call, with the provider that failed.
+ * An error keeps its first tag. Returns the same value.
+ */
+function tagModelCallError(err, provider = 'anthropic') {
+  if (err && typeof err === 'object' && !tagged.has(err)) tagged.set(err, provider === 'openai' ? 'openai' : 'anthropic');
   return err;
 }
 
@@ -51,21 +55,26 @@ function isModelCallError(err) {
 }
 
 /**
- * The code the ledger records for this failure (`anthropic_400`,
- * `anthropic_529`, `anthropic_timeout`), or `anthropic_error` when the error
- * carries no status (a dropped connection).
+ * The code the ledger records for this failure, named for the provider that
+ * failed (`anthropic_400`, `anthropic_529`, `openai_timeout`, `openai_empty`),
+ * or `<provider>_error` when the error carries no status (a dropped connection).
  */
 function modelFailureCode(err) {
+  const provider = (err && typeof err === 'object' && tagged.get(err)) || 'anthropic';
+  // The backup adapter's own codes (openai_empty, openai_incomplete, ...).
+  if (provider === 'openai' && typeof err.code === 'string' && err.code.startsWith('openai_') && CODE_RE.test(err.code)) return err.code;
   try {
-    const reason = require('../llm/call').providerErrorReason('anthropic', err);
-    if (CODE_RE.test(reason) && reason.startsWith('anthropic_')) return reason;
+    const reason = require('../llm/call').providerErrorReason(provider, err);
+    if (CODE_RE.test(reason) && reason.startsWith(`${provider}_`)) return reason;
   } catch { /* fall through to the generic code */ }
-  return 'anthropic_error';
+  return `${provider}_error`;
 }
 
+const BUSY_STATUS_RE = /_(?:429|503|529)$/;
+
 function failureSentence(code) {
-  if (code === 'anthropic_timeout') return 'The AI model took too long to answer';
-  if (code === 'anthropic_429' || code === 'anthropic_529' || code === 'anthropic_503') return 'The AI model is too busy to answer right now';
+  if (/_timeout$/.test(code)) return 'The AI model took too long to answer';
+  if (BUSY_STATUS_RE.test(code)) return 'The AI model is too busy to answer right now';
   return 'The AI model did not answer this request';
 }
 

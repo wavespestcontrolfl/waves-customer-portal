@@ -48,11 +48,11 @@ function stripPossessives(lowered) {
 function tokenize(text, { v2 = false } = {}) {
   let lowered = foldNameLetters(text).toLowerCase();
   if (v2) lowered = stripPossessives(lowered);
-  let tokens = collapseSpelledLetters(lowered).split(/[^a-z0-9]+/).filter(Boolean);
+  let nameParts = collapseSpelledLetters(lowered).split(/[^a-z0-9]+/).filter(Boolean);
   // v2: a lone "s" is what dictation leaves of "Richard's" ("richard s dump").
-  if (v2) tokens = tokens.filter((t) => t !== 's');
-  const meaningful = tokens.filter((t) => !STOPWORDS.has(t));
-  return meaningful.length ? meaningful : tokens;
+  if (v2) nameParts = nameParts.filter((t) => t !== 's');
+  const meaningful = nameParts.filter((t) => !STOPWORDS.has(t));
+  return meaningful.length ? meaningful : nameParts;
 }
 
 // True when the text looks like a name, not a phone, email or address.
@@ -137,7 +137,7 @@ function prefixSimilarity(a, b) {
   return shared >= 3 ? 0.6 + 0.3 * (shared / shorter) : 0;
 }
 
-function customerTokens(candidate, options) {
+function customerNameWords(candidate, options) {
   return tokenize([candidate.first_name, candidate.last_name, candidate.company_name].filter(Boolean).join(' '), options);
 }
 
@@ -145,9 +145,9 @@ function customerTokens(candidate, options) {
 // short first name cannot also stand in for a longer last name that begins the
 // same way. Pairs are taken best first; any search word left unmatched fails
 // the customer.
-function scoreCandidate(searchTokens, tokens, keyOf) {
+function scoreCandidate(searchTokens, nameParts, keyOf) {
   const pairs = [];
-  searchTokens.forEach((word, i) => tokens.forEach((token, j) => {
+  searchTokens.forEach((word, i) => nameParts.forEach((token, j) => {
     const score = wordSimilarity(word, token, keyOf);
     if (score >= MIN_TOKEN_SCORE) pairs.push({ score, i, j });
   }));
@@ -225,10 +225,10 @@ function wordSimilarityV2(a, b, keyOf, soundsOf) {
 // together word carries the MERGED marker so it is compared as a whole word
 // (see mergedSimilarity), never by prefix: "richarddump" must not pass for "Rick".
 const MERGED = '~';
-function tokenVariants(tokens) {
-  const variants = [tokens];
-  for (let i = 0; i + 1 < tokens.length; i += 1) {
-    variants.push([...tokens.slice(0, i), MERGED + tokens[i].replace(MERGED, '') + tokens[i + 1].replace(MERGED, ''), ...tokens.slice(i + 2)]);
+function nameWordVariants(nameParts) {
+  const variants = [nameParts];
+  for (let i = 0; i + 1 < nameParts.length; i += 1) {
+    variants.push([...nameParts.slice(0, i), MERGED + nameParts[i].replace(MERGED, '') + nameParts[i + 1].replace(MERGED, ''), ...nameParts.slice(i + 2)]);
   }
   return variants;
 }
@@ -253,9 +253,9 @@ function mergedSimilarity(a, b, keyOf, soundsOf) {
 
 // Same one-to-one pairing as scoreCandidate. Also says whether the first
 // search word matched a customer word exactly.
-function scoreCandidateV2(searchTokens, tokens, simFn, minToken = MIN_TOKEN_SCORE) {
+function scoreCandidateV2(searchTokens, nameParts, simFn, minToken = MIN_TOKEN_SCORE) {
   const pairs = [];
-  searchTokens.forEach((word, i) => tokens.forEach((token, j) => {
+  searchTokens.forEach((word, i) => nameParts.forEach((token, j) => {
     const score = simFn(word, token);
     if (score >= minToken) pairs.push({ score, i, j });
   }));
@@ -296,7 +296,7 @@ const MAX_SEARCH_CHARS = 120;
 const MAX_SEARCH_TOKENS = 6;
 const MAX_CANDIDATE_TOKENS = 8;
 const MAX_WORD_CHARS = 32;
-const clipWords = (tokens, max) => tokens.slice(0, max).map((t) => t.slice(0, MAX_WORD_CHARS));
+const clipWords = (nameParts, max) => nameParts.slice(0, max).map((t) => t.slice(0, MAX_WORD_CHARS));
 
 // ─── Candidate index and prefilter (Codex #6367 perf) ────────────
 //
@@ -308,6 +308,7 @@ const clipWords = (tokens, max) => tokens.slice(0, max).map((t) => t.slice(0, MA
 const MAX_SURVIVORS = 500;
 const INDEX_CACHE_TTL_MS = 5 * 60 * 1000;
 const INDEX_CACHE_MAX_ENTRIES = 2;
+const INDEX_STALE_MAX_MS = 30 * 60 * 1000;
 
 // Sound keys of one word, as prefixed strings: exact word, first three
 // and last letters, spelling-sound key, Double Metaphone (both readings), tolerant key.
@@ -339,10 +340,10 @@ function wordKeys(word, memo) {
 }
 
 // Every word a candidate can be compared by: its words and each adjacent pair
-// run together (the same merged words tokenVariants makes).
-function indexWords(tokens) {
-  const words = tokens.slice();
-  for (let i = 0; i + 1 < tokens.length; i += 1) words.push(tokens[i] + tokens[i + 1]);
+// run together (the same merged words nameWordVariants makes).
+function indexWords(nameParts) {
+  const words = nameParts.slice();
+  for (let i = 0; i + 1 < nameParts.length; i += 1) words.push(nameParts[i] + nameParts[i + 1]);
   return words;
 }
 
@@ -353,12 +354,12 @@ function buildNameIndex(candidates) {
   const byId = new Map();
   const postings = new Map();
   for (const candidate of candidates) {
-    const tokens = clipWords(customerTokens(candidate, { v2: true }), MAX_CANDIDATE_TOKENS);
-    const entry = { id: candidate.id, tokens, at: entries.length };
+    const nameParts = clipWords(customerNameWords(candidate, { v2: true }), MAX_CANDIDATE_TOKENS);
+    const entry = { id: candidate.id, nameParts, at: entries.length };
     entries.push(entry);
     byId.set(candidate.id, entry);
     const seen = new Set();
-    for (const word of indexWords(tokens)) for (const key of wordKeys(word, memo)) seen.add(key);
+    for (const word of indexWords(nameParts)) for (const key of wordKeys(word, memo)) seen.add(key);
     for (const key of seen) {
       const list = postings.get(key);
       if (list) list.push(entry.at); else postings.set(key, [entry.at]);
@@ -372,7 +373,7 @@ function parseSearchV2(search) {
   if (typeof search !== 'string' || search.length > MAX_SEARCH_CHARS) return null;
   const searchTokens = tokenize(search, { v2: true });
   if (searchTokens.length > MAX_SEARCH_TOKENS) return null;
-  const variants = tokenVariants(clipWords(searchTokens, MAX_SEARCH_TOKENS));
+  const variants = nameWordVariants(clipWords(searchTokens, MAX_SEARCH_TOKENS));
   return variants[0].length ? variants : null;
 }
 
@@ -409,15 +410,36 @@ function prefilterNameIndex(search, index, { include = [], cap = MAX_SURVIVORS }
 // Small per-process cache of built indexes: key -> { at, promise }. The key
 // names the exact scoped query, so one scope never reads another's index.
 const indexCache = new Map();
+// An expired index that built fine keeps answering while its replacement builds
+// in the background (stale-while-revalidate), so only the first search after a
+// restart waits for a whole-book build (~1-3 s at 20,000 customers). Callers
+// rescore the rows' current names, so a few extra seconds of age change no name
+// shown. Past INDEX_STALE_MAX_MS (a refresh that keeps failing) a search waits
+// for a fresh build again.
 function cachedNameIndex(key, load, now = Date.now()) {
   const hit = indexCache.get(key);
   if (hit && now - hit.at < INDEX_CACHE_TTL_MS) return hit.promise;
+  if (hit && hit.ready && now - hit.at < INDEX_STALE_MAX_MS) {
+    if (!hit.refreshing) refreshNameIndex(key, load, hit, now);
+    return hit.promise;
+  }
   indexCache.delete(key);
-  const promise = Promise.resolve().then(load).then(buildNameIndex);
-  indexCache.set(key, { at: now, promise });
-  promise.catch(() => { if (indexCache.get(key) && indexCache.get(key).promise === promise) indexCache.delete(key); });
+  return startNameIndex(key, load, now).promise;
+}
+function startNameIndex(key, load, now) {
+  const entry = { at: now, ready: false, refreshing: false };
+  entry.promise = Promise.resolve().then(load).then(buildNameIndex);
+  entry.promise.then(() => { entry.ready = true; }, () => { if (indexCache.get(key) === entry) indexCache.delete(key); });
+  indexCache.set(key, entry);
   while (indexCache.size > INDEX_CACHE_MAX_ENTRIES) indexCache.delete(indexCache.keys().next().value);
-  return promise;
+  return entry;
+}
+function refreshNameIndex(key, load, stale, now) {
+  stale.refreshing = true;
+  Promise.resolve().then(load).then(buildNameIndex).then((index) => {
+    if (indexCache.get(key) !== stale) return;
+    indexCache.set(key, { at: now, ready: true, refreshing: false, promise: Promise.resolve(index) });
+  }, () => { stale.refreshing = false; });
 }
 function resetNameIndexCache() { indexCache.clear(); }
 
@@ -443,7 +465,7 @@ function bestBaseScore(searchVariants, candidateVariants, simFn, minScore) {
   return { base, firstExact };
 }
 
-// `candidates` is raw rows, or index entries ({ id, tokens }) already
+// `candidates` is raw rows, or index entries ({ id, nameParts }) already
 // prefiltered by the caller (`prefiltered: true`). Raw rows are indexed and
 // prefiltered here, so a caller never scores more than MAX_SURVIVORS rows.
 function rankNameMatchesV2(search, candidates, { limit, minScore, context, prefiltered = false }) {
@@ -477,7 +499,7 @@ function rankNameMatchesV2(search, candidates, { limit, minScore, context, prefi
   const floorFirstToken = Math.min(minScore, FIRST_TOKEN_FLOOR);
   const scored = [];
   for (const candidate of pool) {
-    const { base, firstExact } = bestBaseScore(searchVariants, tokenVariants(candidate.tokens), simFn, minScore);
+    const { base, firstExact } = bestBaseScore(searchVariants, nameWordVariants(candidate.nameParts), simFn, minScore);
     if (!base) continue;
     const reasons = contextReasons(context, candidate.id);
     const bonus = reasons.reduce((sum, r) => sum + CONTEXT_BONUS[r], 0);
@@ -514,7 +536,7 @@ function rankNameMatches(search, candidates, { limit, minScore = MIN_SCORE, v2 =
   };
   const scored = [];
   for (const candidate of candidates) {
-    const score = scoreCandidate(searchTokens, customerTokens(candidate), keyOf);
+    const score = scoreCandidate(searchTokens, customerNameWords(candidate), keyOf);
     if (score >= minScore) scored.push({ id: candidate.id, score: Math.round(score * 1000) / 1000 });
   }
   return scored.sort((a, b) => b.score - a.score || String(a.id).localeCompare(String(b.id))).slice(0, cap);

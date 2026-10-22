@@ -456,6 +456,42 @@ describe('mosquito as a per-service combo axis (pest + lawn + mosquito)', () => 
       expect(combo.selection.mosquito).toBeTruthy();
     }
   });
+  // EST-2026-1185: the engine names the mosquito row after its DEFAULT tier,
+  // so every Seasonal combo row read "Monthly Mosquito Program (12 visits)"
+  // beside 9-visit prices.
+  test('a combo row takes the SELECTED mosquito tier name when the row carries a tier name', () => {
+    const v1 = {
+      pestTiers: pestLawnMosquitoV1().pestTiers,
+      services: [
+        { name: 'Pest Control', service: 'pest_control', mo: 60, ann: 720, perTreatment: 180, visitsPerYear: 4 },
+        { name: 'Monthly Mosquito Program (12 visits)', displayName: 'Monthly Mosquito Program (12 visits)', service: 'mosquito', mo: 83, ann: 996, perTreatment: 83, visitsPerYear: 12 },
+      ],
+      discount: 0.10,
+      manualDiscount: null,
+    };
+    const stats = {
+      mq: [
+        { n: 'Seasonal Mosquito Program (9 visits)', v: 9, mo: 69, ann: 828, pv: 92, recommended: true },
+        { n: 'Monthly Mosquito Program (12 visits)', v: 12, mo: 83, ann: 996, pv: 83, selected: true },
+      ],
+    };
+    const combos = buildServiceCadenceCombos(v1, {}, stats);
+    const row = (key) => combos.find((c) => c.key === key).perServiceTreatments.find((r) => r.service === 'mosquito');
+    expect(row('mosquito:seasonal9|pest_control:quarterly')).toMatchObject({
+      label: 'Seasonal Mosquito Program (9 visits)', visitsPerYear: 9, perTreatment: 92,
+    });
+    expect(row('mosquito:monthly12|pest_control:quarterly')).toMatchObject({
+      label: 'Monthly Mosquito Program (12 visits)', visitsPerYear: 12,
+    });
+  });
+
+  test('a custom row name that is no tier name is left as written', () => {
+    const v1 = pestLawnMosquitoV1();
+    v1.services = v1.services.map((svc) => (svc.service === 'mosquito' ? { ...svc, displayName: 'Mosquito Control' } : svc));
+    const combos = buildServiceCadenceCombos(v1, {}, LAWN_MQ_RESULT_STATS);
+    const c = combos.find((x) => x.key === 'lawn_care:enhanced|mosquito:seasonal9|pest_control:monthly');
+    expect(c.perServiceTreatments.find((r) => r.service === 'mosquito').label).toBe('Mosquito Control');
+  });
 });
 
 describe('applySelectedMosquitoTierToEstimateData — accept re-stamps the picked mosquito cadence', () => {

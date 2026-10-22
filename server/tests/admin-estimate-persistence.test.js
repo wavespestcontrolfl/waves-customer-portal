@@ -85,6 +85,10 @@ function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = f
         whereNot() {
           return this;
         },
+        // The superseded lead-webhook draft retirement (EST-2026-1184).
+        whereNotExists() {
+          return this;
+        },
         select: async () => [],
         first: async () => {
           // The scheduled-group guard's member lookups (#3750).
@@ -1482,5 +1486,89 @@ describe('serverRecomputeFromEstimateData — retired Tree & Shrub tier on raw e
     await serverRecomputeFromEstimateData(inputs('light'), { ...d, replaySavedPricingKnobs: true });
     expect(d.generateEstimate).toHaveBeenCalledTimes(1);
     expect(d.generateEstimate.mock.calls[0][0].services.treeShrub.tier).toBe('light');
+  });
+});
+
+// EST-2026-1185 / 1184: a lead-form lead already owns a customer row, but the
+// Leads page's Create Estimate passes only the lead — the sent estimate kept
+// customer_id NULL and the lead-webhook draft stayed behind.
+describe('createOrReuseAdminEstimate — a lead that already has a customer', () => {
+  const recompute = async () => ({ recomputed: false, reason: 'NO_INPUTS' });
+  const leadWithCustomer = (overrides = {}) => ({
+    id: 'lead-1', status: 'new', phone: '(941) 555-0101', email: 'van@example.com', customer_id: 'cust-1', ...overrides,
+  });
+  const create = (fixture, body = {}) => createOrReuseAdminEstimate({
+    database: fixture.database, body: { ...baseBody, ...body }, technicianId: 'tech-1', recompute,
+  });
+  const retireUpdates = (fixture) => fixture.updates.filter((u) => u.table === 'estimates'
+    && u.clause?.source === 'lead_webhook' && u.patch?.archived_at);
+
+  test('links the new estimate to the lead\'s customer and archives the untouched webhook draft', async () => {
+    const fixture = makeDatabase({ lead: leadWithCustomer(), customer: { id: 'cust-1' } });
+    const { estimate } = await create(fixture);
+    expect(estimate.customer_id).toBe('cust-1');
+    const retired = retireUpdates(fixture);
+    expect(retired).toHaveLength(1);
+    expect(retired[0].clause).toMatchObject({ customer_id: 'cust-1', source: 'lead_webhook', status: 'draft' });
+  });
+
+  test('an explicit customerId from the builder is kept as sent', async () => {
+    const fixture = makeDatabase({ lead: leadWithCustomer(), customer: { id: 'cust-1' } });
+    const { estimate } = await create(fixture, { customerId: 'cust-1' });
+    expect(estimate.customer_id).toBe('cust-1');
+  });
+
+  test('an estimate saved without a lead inherits no customer and retires no draft', async () => {
+    const fixture = makeDatabase({ lead: leadWithCustomer(), customer: { id: 'cust-1' } });
+    const { estimate } = await create(fixture, { leadId: null, customerPhone: '(203) 555-0123', customerEmail: 'other@example.com' });
+    expect(estimate.customer_id).toBeNull();
+    expect(retireUpdates(fixture)).toHaveLength(0);
+  });
+
+  test('a contact mismatch on the linked lead links no customer', async () => {
+    const lead = leadWithCustomer({ phone: '(203) 555-0199', email: 'someone@example.com' });
+    const fixture = makeDatabase({ lead, customer: { id: 'cust-1' } });
+    // The attach itself refuses a mismatched contact; the customer was never
+    // inherited on the way there.
+    await expect(create(fixture)).rejects.toMatchObject({ statusCode: 409 });
+    expect(fixture.inserts.find((e) => e.table === 'estimates')?.row.customer_id ?? null).toBeNull();
+  });
+
+  test('a closed lead or a deleted customer links nothing', async () => {
+    const closed = makeDatabase({ lead: leadWithCustomer({ status: 'lost' }), customer: { id: 'cust-1' } });
+    await create(closed).catch(() => {});
+    expect(closed.inserts.find((e) => e.table === 'estimates')?.row.customer_id ?? null).toBeNull();
+
+    const gone = makeDatabase({ lead: leadWithCustomer(), customer: null });
+    const { estimate } = await create(gone);
+    expect(estimate.customer_id).toBeNull();
+    expect(retireUpdates(gone)).toHaveLength(0);
+  });
+});
+
+describe('createOrReuseAdminEstimate — the inherited customer is re-checked under the lead lock (codex #6394 r1)', () => {
+  const recompute = async () => ({ recomputed: false, reason: 'NO_INPUTS' });
+  test('a lead unlinked from its customer during pricing refuses the save for a retry', async () => {
+    const lead = { id: 'lead-1', status: 'new', phone: '(941) 555-0101', email: 'van@example.com', customer_id: 'cust-1' };
+    const fixture = makeDatabase({ lead, customer: { id: 'cust-1' } });
+    // Pricing runs after the unlocked read; the lead loses its customer then.
+    const slowRecompute = async () => { lead.customer_id = null; return recompute(); };
+    await expect(createOrReuseAdminEstimate({
+      database: fixture.database, body: { ...baseBody }, technicianId: 'tech-1', recompute: slowRecompute,
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(fixture.inserts.filter((e) => e.table === 'estimates')).toHaveLength(0);
+  });
+
+  test('a reused lead draft also retires the webhook draft', async () => {
+    const lead = { id: 'lead-1', status: 'new', phone: '(941) 555-0101', email: 'van@example.com', customer_id: 'cust-1', estimate_id: 'est-draft' };
+    const estimate = { id: 'est-draft', status: 'draft', customer_phone: '(941) 555-0101', customer_email: 'van@example.com', estimate_data: '{}' };
+    const fixture = makeDatabase({ lead, estimate, customer: { id: 'cust-1' } });
+    const { reused } = await createOrReuseAdminEstimate({
+      database: fixture.database, body: { ...baseBody }, technicianId: 'tech-1', recompute,
+    });
+    expect(reused).toBe(true);
+    const retired = fixture.updates.filter((u) => u.table === 'estimates' && u.clause?.source === 'lead_webhook' && u.patch?.archived_at);
+    expect(retired).toHaveLength(1);
+    expect(retired[0].clause).toMatchObject({ customer_id: 'cust-1' });
   });
 });

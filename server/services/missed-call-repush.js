@@ -25,6 +25,8 @@ const db = require('../models/db');
 const logger = require('./logger');
 
 const TRIGGER_KEY = 'customer_missed_call';
+// call_log.metadata.missed_call_spam_wave values the bell stamps on a call whose push it quieted.
+const QUIET_SPAM_WAVE = ['block_quiet', 'burst_quiet'];
 const REPUSH_AFTER_MS = 30 * 60 * 1000;
 // A bell older than this is the office's to close by hand; the window also
 // bounds the first sweep after the gate is turned on.
@@ -101,11 +103,16 @@ async function repushOne(row, { triggers, trigger, to, PushService, hours, clock
   // after this tick's retire never buzzes again (Codex #6383 r3).
   const callStillMissed = async () => {
     if (!payload.callLogId) return true;
-    const { calledBackSql } = require('./missed-call-bell');
+    const { calledBackSql, visitUnderwaySql } = require('./missed-call-bell');
     const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
+    // GATE_MISSED_CALL_VISIT_UNDERWAY: the customer's visit moved after the call, so no re-push.
+    // Gate off: visitUnderwaySql() is null and the select is exactly as before.
+    const underway = visitUnderwaySql();
     const call = await db('call_log').where('id', payload.callLogId)
       .modify((qb) => whereNotSandboxCall(qb))
-      .first('id', db.raw(`(${calledBackSql({ retire: true })}) AS still_missed`));
+      .first('id', db.raw(`(${calledBackSql({ retire: true })}${underway ? ` AND NOT ${underway}` : ''}) AS still_missed`), db.raw("metadata->>'missed_call_spam_wave' AS spam_wave"));
+    // A call whose push the bell deliberately quieted (a robodialer wave or burst) is never buzzed later.
+    if (QUIET_SPAM_WAVE.includes(call?.spam_wave)) return false;
     // No call row proves nothing either way: the bell stays eligible.
     return !call || call.still_missed === true;
   };
@@ -172,6 +179,9 @@ async function sweepMissedCallRepush({ now = new Date(), limit = 20, hours = und
       .whereRaw("metadata->>'triggerKey' = ?", [TRIGGER_KEY])
       .whereRaw(OPEN_UNREAD)
       .whereRaw("COALESCE(metadata->>'repushed_at', '') = ''")
+      // A quiet robodialer call never re-pushes; leaving it out here also keeps it from
+      // filling the oldest-first batch ahead of real bells. callStillMissed checks again.
+      .whereRaw("NOT EXISTS (SELECT 1 FROM call_log quiet WHERE quiet.id::text = notifications.metadata->'payload'->>'callLogId' AND COALESCE(quiet.source, '') <> ? AND quiet.metadata->>'missed_call_spam_wave' = ANY(?))", [require('./voice-agent/relay-protocol').VOICE_RELAY_SANDBOX_SOURCE, QUIET_SPAM_WAVE])
       .where('created_at', '<=', new Date(nowMs - REPUSH_AFTER_MS))
       .where('created_at', '>', new Date(nowMs - WINDOW_MS))
       .orderBy('created_at', 'asc')

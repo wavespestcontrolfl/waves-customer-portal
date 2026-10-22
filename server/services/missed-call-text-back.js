@@ -86,6 +86,7 @@ const { isEnabled } = require('../config/feature-gates');
 const { whereNotBlockedCall } = require('../middleware/spam-block');
 const {
   missedCallShapeEligible, isEmptyVoicemailRecording, UNKNOWN_CALLER_MIN_SECONDS,
+  classifySpamWave,
   UNANSWERED, UNANSWERED_STATUSES, TERMINAL_STATUSES, VOICEMAIL_GRACE_MS,
 } = require('./missed-call-bell');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
@@ -803,6 +804,22 @@ async function classifySendOutcome(result, phone, attempt, row, { releaseLease, 
   return { outcome: 'error', reason: result.sent ? 'send_suppressed' : (result.code || 'provider_failed') };
 }
 
+// Measurement only (Codex #6392 r1 and r2): a robodialer block wave or burst is
+// never a reason to withhold the text, because a caller can prime a number block
+// or a line and length so a genuine prospect matches. The bell's classifiers
+// stamp missed_call_text_spam_shadow 'block' | 'burst' so the pattern stays
+// measurable, whichever spam gates are on. The classifiers fail open inside;
+// any error here changes nothing and the text goes as today.
+async function stampSpamShadow(row, stampShadow) {
+  try {
+    const flags = await classifySpamWave(row);
+    const shadow = (flags.block && 'block') || (flags.burst && 'burst') || null;
+    if (shadow) await stampShadow(shadow);
+  } catch (e) {
+    logger.warn(`[missed-call-text-back] spam shadow failed — texting as today: ${e.code || e.name || 'error'}`);
+  }
+}
+
 /**
  * Attempt (or skip) a text-back for one call_log row. Shared core for both
  * the post-call hook and the durable sweep so the two paths can never
@@ -880,6 +897,10 @@ async function attemptForRow(inputRow, now = Date.now()) {
     .catch((e) => logger.warn(`[missed-call-text-back] lease release failed: ${e.code || e.name || 'db_error'}`));
   const stampBody = (body) => fenced().update({ metadata: db.raw("metadata || jsonb_build_object('missed_call_text_body', ?::text)", [body]) })
     .catch((e) => logger.warn(`[missed-call-text-back] body stamp failed: ${e.code || e.name || 'db_error'}`));
+
+  const stampShadow = (kind) => fenced().update({ metadata: db.raw("metadata || jsonb_build_object('missed_call_text_spam_shadow', ?::text)", [kind]) })
+    .catch((e) => logger.warn(`[missed-call-text-back] spam shadow stamp failed: ${e.code || e.name || 'db_error'}`));
+  await stampSpamShadow(row, stampShadow);
 
   return sendWithLease(row, pre, releaseLease, settleFenced, stampBody);
 }
@@ -988,6 +1009,7 @@ module.exports = {
   sweepMissedCallTextBacks,
   whereCompletedCall,
   _private: {
+    stampSpamShadow,
     textBackCoreEligible,
     emptyVoicemailOn,
     stampEmptyVoicemailSeen,

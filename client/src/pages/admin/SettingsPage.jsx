@@ -242,7 +242,6 @@ export default function SettingsPage() {
     );
   }
 
-  const gates = health?.gates || {};
 
   // Service Reports (coverage config) and Scheduling (blackout days) are
   // requireAdmin end to end server-side — hide the whole groups from
@@ -380,99 +379,145 @@ export default function SettingsPage() {
       )}
       {tab === "link-library" && <LinkLibraryTab />}
       {tab === "integrations" && <IntegrationsTab canAdmin={user?.role === "admin"} />}
-      {tab === "gates" && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Feature gates</CardTitle>
-            <p className="mt-1 text-ui-body text-ink-secondary">
-              Control which integrations are active. Set via Railway environment variables.
-            </p>
-          </CardHeader>
-          <CardBody>
-            {Object.keys(gates).length === 0 ? null : (
-              <div className="divide-y divide-zinc-200">
-                {Object.entries(gates).map(([key, enabled]) => (
-                  <div key={key} className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-3">
-                    <div className="min-w-0">
-                      <div className="break-words font-medium text-zinc-900">{key}</div>
-                      <div className="break-all text-ui-caption text-ink-secondary u-nums">
-                        GATE_{key.replace(/([A-Z])/g, "_$1").toUpperCase()}
-                      </div>
-                    </div>
-                    <Badge tone={enabled ? "strong" : "neutral"} dot>{enabled ? "Enabled" : "Disabled"}</Badge>
-                  </div>
-                ))}
-              </div>
-            )}
-            <p className="mt-4 rounded-md bg-zinc-50 p-3 text-ui-body text-ink-secondary">
-              Gates are controlled via Railway environment variables. To change:
-              Railway Dashboard → Variables → set GATE_NAME=true or remove the variable.
-            </p>
-          </CardBody>
-        </Card>
-      )}
+      {tab === "gates" && isAdminRole && <FeatureGatesTab />}
       {tab === "service-reports" && <ServiceCoverageSettingsTab />}
       {tab === "blackout-days" && <BlackoutDaysTab />}
       {tab === "kpi-targets" && <KpiTargetsSettingsTab canAdmin={user?.role === "admin"} />}
       {tab === "operating-costs" && isAdminRole && <OperatingCostsSettingsTab canAdmin={user?.role === "admin"} />}
-      {tab === "system" && (
-        <div className="space-y-5">
-          <Card>
-            <CardHeader><CardTitle>System info</CardTitle></CardHeader>
-            <CardBody>
-              <dl className="grid gap-3 sm:grid-cols-2">
-                {[
-                  { label: "Environment", value: health?.environment || "—" },
-                  { label: "Status", value: health?.status || "—" },
-                  { label: "Server time", value: health?.timestamp ? new Date(health.timestamp).toLocaleString() : "—" },
-                  { label: "Database", value: "PostgreSQL (Railway)" },
-                  { label: "Frontend", value: "React (Vite)" },
-                  { label: "Backend", value: "Express.js" },
-                  { label: "AI model", value: "Claude Sonnet 4" },
-                  { label: "Migrations", value: "50 migrations" },
-                ].map((field) => (
-                  <div key={field.label} className="rounded-md bg-zinc-50 p-3">
-                    <dt className="text-ui-caption text-ink-secondary">{field.label}</dt>
-                    <dd className="mt-1 break-words font-medium text-zinc-900 u-nums">{field.value}</dd>
-                  </div>
-                ))}
-              </dl>
-            </CardBody>
-          </Card>
-          <Card>
-            <CardHeader className="flex flex-wrap items-center justify-between gap-2">
-              <CardTitle>Cron jobs</CardTitle>
-              <Badge tone={gates.cronJobs ? "strong" : "alert"} dot>
-                {gates.cronJobs ? "Enabled" : "Disabled"}
-              </Badge>
-            </CardHeader>
-            <CardBody className="divide-y divide-zinc-200">
-              {[
-                { time: "1:30 AM Mon", job: "Site audit", gate: "seoIntelligence" },
-                { time: "2:00 AM", job: "Rank tracking", gate: "seoIntelligence" },
-                { time: "2:30 AM", job: "AI Overview check", gate: "seoIntelligence" },
-                { time: "3:00 AM", job: "Customer intelligence", gate: "cronJobs" },
-                { time: "3:30 AM Sun", job: "Backlink scan", gate: "seoIntelligence" },
-                { time: "5:00 AM", job: "Blog auto-generate", gate: "cronJobs" },
-                { time: "5:30 AM Mon", job: "Content decay check", gate: "seoIntelligence" },
-                { time: "6:00 AM", job: "GSC data sync", gate: "cronJobs" },
-                { time: "8:00 AM", job: "Campaign advisor", gate: "cronJobs" },
-                { time: "8:00 AM Fri", job: "CSR weekly rec", gate: "cronJobs" },
-                { time: "Every 2hr", job: "Ad budget adjust", gate: "cronJobs" },
-                { time: ":30 past hr", job: "Follow-up verify", gate: "cronJobs" },
-              ].map((cron) => (
-                <div key={`${cron.time}-${cron.job}`} className="grid grid-cols-[110px_minmax(0,1fr)_auto] items-center gap-3 py-3">
-                  <span className="text-ui-caption text-ink-secondary u-nums">{cron.time}</span>
-                  <span className="text-zinc-700">{cron.job}</span>
-                  <Badge tone={gates[cron.gate] ? "strong" : "neutral"}>{gates[cron.gate] ? "On" : "Off"}</Badge>
-                </div>
-              ))}
-            </CardBody>
-          </Card>
-        </div>
-      )}
+      {tab === "system" && isAdminRole && <SystemTab health={health} />}
       {tab === "usage" && <PortalUsageTab canAdmin={user?.role === "admin"} />}
     </UiSurface>
+  );
+}
+
+// Live gate list for Advanced → Features and System. Owner-only route: the
+// public /api/health reply stopped carrying gates in #2853.
+function useGateList() {
+  const [gates, setGates] = useState(null);
+  const [error, setError] = useState(null);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    setError(null);
+    adminFetch("/admin/settings/gates")
+      .then((d) => { if (!cancelled) setGates(Array.isArray(d?.gates) ? d.gates : []); })
+      .catch((e) => { if (!cancelled) setError(e.message || "Could not load gates"); });
+    return () => { cancelled = true; };
+  }, [attempt]);
+  return { gates, error, retry: () => setAttempt((n) => n + 1) };
+}
+
+function GateListError({ error, onRetry }) {
+  return (
+    <ActionFeedback className="flex flex-wrap items-center justify-between gap-3">
+      <span>Could not load gates: {error}</span>
+      <Button variant="secondary" onClick={onRetry}>Retry</Button>
+    </ActionFeedback>
+  );
+}
+
+// The badge shows the SETTING: what the variable holds in Railway now. It
+// does not claim the feature runs; that depends on its reader and often on
+// other gates (see gate-list.js).
+function GateSettingBadge({ gate }) {
+  if (!gate) return <Badge tone="neutral">Unknown</Badge>;
+  if (!gate.set) return <Badge tone="neutral" dot>Not set</Badge>;
+  if (gate.value === null) return <Badge tone="strong" dot>Set (value hidden)</Badge>;
+  if (gate.value === "") return <Badge tone="neutral" dot>Set, empty</Badge>;
+  // Stray spaces are shown in quotes: readers that do not trim see another value.
+  if (gate.value !== gate.value.trim()) return <Badge tone="alert" dot>{`"${gate.value}"`}</Badge>;
+  const off = /^(false|off|0|no)$/i.test(gate.value);
+  return <Badge tone={off ? "neutral" : "strong"} dot>{gate.value}</Badge>;
+}
+
+function FeatureGatesTab() {
+  const { gates, error, retry } = useGateList();
+  const setCount = (gates || []).filter((g) => g.set).length;
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Feature gates</CardTitle>
+        <p className="mt-1 text-ui-body text-ink-secondary">
+          What each GATE_ variable is set to in Railway now.
+          {gates && ` ${setCount} of ${gates.length} set.`}
+        </p>
+      </CardHeader>
+      <CardBody>
+        {error && <GateListError error={error} onRetry={retry} />}
+        {!gates && !error && <ActionFeedback>Loading gates...</ActionFeedback>}
+        {gates && (
+          <div className="divide-y divide-zinc-200">
+            {gates.map((g) => (
+              <div key={g.name} className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-3">
+                <div className="min-w-0 flex-1">
+                  <div className="break-all font-medium text-zinc-900 u-nums">{g.name}</div>
+                  {g.description && <div className="mt-1 text-ui-caption text-ink-secondary">{g.description}</div>}
+                  {!g.readByCode && <div className="mt-1 text-ui-caption text-ink-secondary">Set in Railway, but no code reads it.</div>}
+                  {g.value !== null && g.value !== g.value.trim() && (
+                    <div className="mt-1 text-ui-caption text-ink-secondary">The value has extra spaces. Some readers ignore them and some do not; remove them.</div>
+                  )}
+                </div>
+                <GateSettingBadge gate={g} />
+              </div>
+            ))}
+          </div>
+        )}
+        <p className="mt-4 rounded-md bg-zinc-50 p-3 text-ui-body text-ink-secondary">
+          This shows each setting, not whether its feature runs: many features also need
+          other gates or checks. Look a gate up in docs/gates-and-env.md before you change it.
+          To change one: Railway Dashboard → Variables. A change restarts the server.
+        </p>
+      </CardBody>
+    </Card>
+  );
+}
+
+// The SEO jobs register only inside the master scheduler, so they run only
+// when GATE_CRON_JOBS is on too (server/services/scheduler.js initScheduledJobs).
+const SCHEDULING_GATES = [
+  { env: "GATE_CRON_JOBS", label: "Scheduled jobs" },
+  { env: "GATE_SEO_INTELLIGENCE", label: "SEO jobs (run only while GATE_CRON_JOBS is on)" },
+];
+
+function SystemTab({ health }) {
+  const { gates, error, retry } = useGateList();
+  const byName = new Map((gates || []).map((g) => [g.name, g]));
+  return (
+    <div className="space-y-5">
+      <Card>
+        <CardHeader><CardTitle>System info</CardTitle></CardHeader>
+        <CardBody>
+          <dl className="grid gap-3 sm:grid-cols-2">
+            {[
+              { label: "Environment", value: health?.environment || "—" },
+              { label: "Status", value: health?.status || "—" },
+              { label: "Database", value: health?.database || "—" },
+              { label: "Server time", value: health?.timestamp ? new Date(health.timestamp).toLocaleString() : "—" },
+            ].map((field) => (
+              <div key={field.label} className="rounded-md bg-zinc-50 p-3">
+                <dt className="text-ui-caption text-ink-secondary">{field.label}</dt>
+                <dd className="mt-1 break-words font-medium text-zinc-900 u-nums">{field.value}</dd>
+              </div>
+            ))}
+          </dl>
+        </CardBody>
+      </Card>
+      <Card>
+        <CardHeader><CardTitle>Scheduled jobs</CardTitle></CardHeader>
+        <CardBody className="divide-y divide-zinc-200">
+          {error && <GateListError error={error} onRetry={retry} />}
+          {SCHEDULING_GATES.map((row) => (
+            <div key={row.env} className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-3">
+              <div className="min-w-0">
+                <div className="font-medium text-zinc-900">{row.label}</div>
+                <div className="break-all text-ui-caption text-ink-secondary u-nums">{row.env}</div>
+              </div>
+              {gates ? <GateSettingBadge gate={byName.get(row.env)} /> : <Badge tone="neutral">{error ? "Unknown" : "Loading"}</Badge>}
+            </div>
+          ))}
+        </CardBody>
+      </Card>
+    </div>
   );
 }
 
@@ -1184,6 +1229,8 @@ function BlackoutDaysTab() {
   const [blackouts, setBlackouts] = useState([]);
   const [weeklyDaysOff, setWeeklyDaysOff] = useState([]);
   const [weeklySaving, setWeeklySaving] = useState(false);
+  const [holidays, setHolidays] = useState([]);
+  const [holidaySaving, setHolidaySaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [date, setDate] = useState("");
   const [reason, setReason] = useState("");
@@ -1195,6 +1242,7 @@ function BlackoutDaysTab() {
       .then((d) => {
         setBlackouts(d.blackouts || []);
         setWeeklyDaysOff(d.weeklyDaysOff || []);
+        setHolidays(d.holidays || []);
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
@@ -1224,6 +1272,31 @@ function BlackoutDaysTab() {
       setError(e.message);
     } finally {
       setWeeklySaving(false);
+    }
+  };
+
+  const toggleHoliday = async (key) => {
+    // Whole-array PUT of the closed keys, like the weekly chips: buttons are
+    // disabled while a save is in flight so an older snapshot never wins.
+    if (holidaySaving) return;
+    const prev = holidays;
+    const next = prev.map((h) => (h.key === key ? { ...h, closed: !h.closed } : h));
+    setHolidaySaving(true);
+    setHolidays(next); // optimistic — reverted on failure
+    setError(null);
+    try {
+      const d = await adminFetch("/admin/schedule/blackout-dates/holidays", {
+        method: "PUT",
+        body: JSON.stringify({ closed: next.filter((h) => h.closed).map((h) => h.key) }),
+      });
+      if (d?.error) throw new Error(d.error);
+      const closed = new Set(d.closedHolidays || []);
+      setHolidays(next.map((h) => ({ ...h, closed: closed.has(h.key) })));
+    } catch (e) {
+      setHolidays(prev);
+      setError(e.message);
+    } finally {
+      setHolidaySaving(false);
     }
   };
 
@@ -1302,6 +1375,37 @@ function BlackoutDaysTab() {
             </Button>
           );
         })}
+      </div>
+
+      <h4 className="text-ui-body font-medium text-zinc-900">Holidays</h4>
+      <p className="mt-1 text-ui-body text-ink-secondary">
+        The days Google asks Florida businesses about. Each one stays open
+        until you close it here, and a closed holiday is closed every year.
+        Visits already booked on a day you close stay booked unless the
+        nightly auto-dispatch moves them.
+      </p>
+      <div className="mb-6 mt-2 divide-y divide-zinc-200">
+        {holidays.map((h) => (
+          <div key={h.key} className="flex min-h-12 flex-wrap items-center justify-between gap-3 py-2">
+            <div>
+              <div className="font-medium text-zinc-900">{h.name}</div>
+              <div className="text-ui-caption text-ink-secondary u-nums">
+                Next: {fmtDay(h.date)}
+                {h.observed ? " (observed)" : ""}
+                {h.observedDate ? ` · observed ${fmtDay(h.observedDate)}` : ""}
+              </div>
+            </div>
+            <Button
+              variant={h.closed ? "primary" : "secondary"}
+              onClick={() => toggleHoliday(h.key)}
+              disabled={holidaySaving}
+              aria-pressed={h.closed}
+              aria-label={`${h.name} ${h.closed ? "closed" : "open"}`}
+            >
+              {h.closed ? "Closed" : "Open"}
+            </Button>
+          </div>
+        ))}
       </div>
 
       <div className="mb-4 grid items-end gap-3 md:grid-cols-[minmax(180px,0.6fr)_minmax(240px,1fr)_auto]">
