@@ -29,7 +29,7 @@ const { serviceFamilyPreference } = require('../auto-dispatch/service-category')
 const { travelGapEnabled, violatesTravelGap, travelGapConflicts, isHoldStop } = require('./travel-gap');
 const { bookGapAdmits, delayWithinGrace } = require('./book-arrival-grace');
 const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service-minutes');
-const { occupiedRows } = require('./visit-capacity');
+const { occupiedRows, allocationKey } = require('./visit-capacity');
 const { stopCreditResolver } = require('./occupancy');
 const { packedBounds } = require('./packing-geometry');
 const { customerWindowAdmits, overlapsLunch } = require('./customer-windows');
@@ -779,7 +779,9 @@ function buildDayStops(services, {
 // room for a better-routed booking (GATE_SLOT_SLIDE_OFFER, owner rulings
 // 2026-10-22: any appointment type may slide). Never a live estimate hold
 // (it may lapse), a visit already under way, a staff-locked or excluded
-// visit, or one member of a combined allocation (its span is shared).
+// visit, or one member of a version-2 combined allocation (visit-capacity.js
+// allocationKey — its span is shared with its siblings). A plain single-
+// service reservation_service_mix (every estimate-booked visit) is fine.
 const UNDER_WAY_STATUSES = new Set(['en_route', 'on_site', 'completed']);
 function isSlidable(row) {
   return row.customer_id != null
@@ -787,7 +789,7 @@ function isSlidable(row) {
     && !UNDER_WAY_STATUSES.has(row.status)
     && row.auto_dispatch_locked !== true
     && row.auto_dispatch_excluded !== true
-    && row.reservation_service_mix == null;
+    && allocationKey(row) == null;
 }
 
 // Shadow pass for slide offers (GATE_SLOT_SLIDE_OFFER phase 1): computes
@@ -824,6 +826,7 @@ function logSlideShadow(date, tech, dayStops, params) {
       savedMiles: Math.round(best.savedMiles * 10) / 10,
       slides: best.slides.map((x) => ({ id: x.id, from: minutesToTime(x.fromStartMin), to: minutesToTime(x.toStartMin) })),
       offers: result.offers.length,
+      ...(result.truncated ? { truncated: true } : {}),
     })}`);
   } catch (err) {
     logger.warn(`[slot-slide] shadow failed: ${err.message}`);

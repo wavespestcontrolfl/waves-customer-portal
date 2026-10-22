@@ -128,3 +128,23 @@ describe('findSlideOffers', () => {
     expect(findSlideOffers({ ...base, stops }).reason).toBe('NO_PLAIN_SLOT');
   });
 });
+
+describe('evaluation budget', () => {
+  test('a dense off-hour day stops at MAX_EVALUATIONS and says so', () => {
+    const { MAX_EVALUATIONS } = require('../services/scheduling/slide-offer');
+    // Ten off-hour stops: 45 pairs × 16² shifts × ~9 starts ≫ the budget.
+    const stops = Array.from({ length: 10 }, (_, i) => stop(`o${i}`, 27.05 + i * 0.04, 8, {
+      startMin: H(8) + 15 + i * 45, endMin: H(8) + 45 + i * 45, expectedMinutes: 20,
+    }));
+    const t0 = Date.now();
+    // New stop beside the last stop, so a plain 4 PM slot exists and the
+    // slide search really runs.
+    const result = findSlideOffers({
+      ...base, stops, newStop: { ...at(27.41), expectedMinutes: 20 }, durationMinutes: 30,
+    });
+    expect(result.baseline).not.toBeNull();
+    expect(result.truncated).toBe(true);
+    expect(Date.now() - t0).toBeLessThan(2000);
+    expect(MAX_EVALUATIONS).toBe(20000);
+  });
+});

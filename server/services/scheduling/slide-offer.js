@@ -41,6 +41,11 @@ const HOUR_STEP_MINUTES = 60;
 const OFF_HOUR_STEP_MINUTES = 15;
 const MIN_SAVING_MINUTES = 6;
 const MIN_SAVING_MILES = 0.5;
+// Hard ceiling on arrangements scored per tech-day. This runs synchronously
+// on customer booking requests: an on-hour day costs a few thousand, but
+// off-hour stops (15-minute steps) multiply pairs ×16 each. Past the
+// budget the search stops and reports what it found so far (truncated).
+const MAX_EVALUATIONS = 20000;
 const NEW_ID = '__new__';
 const ADMIT_ALL = () => true;
 
@@ -154,7 +159,7 @@ function candidateStarts(durationMinutes, dayOpen, dayClose) {
  * @param {Function} [p.admits]       ({startMin, endMin, isNew}) → boolean: the
  *   caller's booking-window rule (hour grid, lunch block, last start) for the
  *   new stop and for each slid stop's NEW window. Default admits everything.
- * @returns {{ reason: string|null, baseline: Object|null, offers: Array }}
+ * @returns {{ reason: string|null, baseline: Object|null, offers: Array, truncated?: true }}
  *   offers: one per new-stop start (best saving for that start), sorted by
  *   saving desc: { startMin, endMin, slides: [{id, fromStartMin, toStartMin}],
  *   driveMinutes, miles, savedMinutes, savedMiles }.
@@ -189,9 +194,12 @@ function findSlideOffers({ stops, newStop, durationMinutes, home, dayOpen, dayCl
   const movable = base.filter((s) => s.movable);
   if (movable.length === 0) return none('NOTHING_MOVABLE', baseline);
 
-  const offers = [...bestSlidesByStart(day, baseline, movable).values()]
+  const { bestByStart, truncated } = bestSlidesByStart(day, baseline, movable);
+  const offers = [...bestByStart.values()]
     .sort((a, b) => b.savedMinutes - a.savedMinutes || a.startMin - b.startMin);
-  return { reason: offers.length ? null : 'NO_SAVING', baseline, offers };
+  return {
+    reason: offers.length ? null : 'NO_SAVING', baseline, offers, ...(truncated ? { truncated: true } : {}),
+  };
 }
 
 // Cost of `stops` plus the new stop at startMin, or null when infeasible.
@@ -228,8 +236,11 @@ function bestSlidesByStart(day, baseline, movable) {
   for (let k = 1; k <= Math.min(MAX_SLIDES, movable.length); k++) groups.push(...combinations(movable, k));
 
   const bestByStart = new Map();
+  let evaluations = 0;
   for (const group of groups) {
     for (const assignment of shiftAssignments(group)) {
+      if (evaluations >= MAX_EVALUATIONS) return { bestByStart, truncated: true };
+      evaluations += day.starts.length;
       const movedById = new Map(assignment.map(({ stop, delta }) => [stop.id, {
         ...stop, startMin: stop.startMin + delta, endMin: stop.endMin + delta,
       }]));
@@ -254,7 +265,7 @@ function bestSlidesByStart(day, baseline, movable) {
       }
     }
   }
-  return bestByStart;
+  return { bestByStart, truncated: false };
 }
 
 module.exports = {
@@ -263,4 +274,5 @@ module.exports = {
   MAX_SLIDE_MINUTES,
   MIN_SAVING_MINUTES,
   MIN_SAVING_MILES,
+  MAX_EVALUATIONS,
 };

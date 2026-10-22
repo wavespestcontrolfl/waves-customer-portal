@@ -152,3 +152,36 @@ test('days past the 14-day shadow bound are not searched', async () => {
   await findAvailableSlots({ ...CALL, dateFrom: far, dateTo: far });
   expect(shadowLines()).toHaveLength(0);
 });
+
+test('a member of a version-2 combined allocation is never named as a slide', async () => {
+  const mix = { version: 2, allocatedServiceIds: ['d', 'd2'] };
+  const grouped = [...STOPS.map((s) => (s.id === 'd' ? { ...s, reservation_service_mix: mix } : s)),
+    { ...row('d2', 27.42, 11), customer_id: 'c-d', reservation_service_mix: mix }];
+  db.mockImplementation((table) => {
+    if (table === 'technicians') return chain([{ id: 't1', name: 'Tech' }], table);
+    if (table === 'scheduled_services') return chain(grouped, table);
+    if (table === 'services') return chain(CATALOG, table);
+    return chain([], table);
+  });
+  process.env.GATE_SLOT_SLIDE_OFFER = 'true';
+  await findAvailableSlots(CALL);
+  for (const line of shadowLines()) {
+    const ids = JSON.parse(line.replace('[slot-slide] shadow ', '')).slides.map((s) => s.id);
+    expect(ids).not.toContain('d');
+    expect(ids).not.toContain('d2');
+  }
+});
+
+test('a plain single-service reservation_service_mix (estimate-booked visit) can still slide', async () => {
+  const single = STOPS.map((s) => (s.id === 'd' ? { ...s, reservation_service_mix: { version: 1, services: ['quarterly_pest'] } } : s));
+  db.mockImplementation((table) => {
+    if (table === 'technicians') return chain([{ id: 't1', name: 'Tech' }], table);
+    if (table === 'scheduled_services') return chain(single, table);
+    if (table === 'services') return chain(CATALOG, table);
+    return chain([], table);
+  });
+  process.env.GATE_SLOT_SLIDE_OFFER = 'true';
+  await findAvailableSlots(CALL);
+  const payload = JSON.parse(shadowLines()[0].replace('[slot-slide] shadow ', ''));
+  expect(payload.slides).toEqual([{ id: 'd', from: '11:00', to: '13:00' }]);
+});
