@@ -35,7 +35,9 @@
  *    send cannot cover another visit.
  *  - A text the provider reports undelivered is recorded by id (a `bounced` audit row written from the
  *    status callback, whether or not the proof exists yet); a proof any of whose ids has a bounced row
- *    no longer covers other visits (reconciled at read time). Nothing is re-sent retroactively.
+ *    no longer covers other visits (reconciled at read time). The failed status the callback stores on the
+ *    sms_log and message rows voids the proof the same way, so a bounce row that could not be written loses
+ *    nothing. Nothing is re-sent retroactively.
  *  - NAMED = COVERED. The delivered proof records the ids of the visits the text named
  *    (`named_service_ids`), and only a visit on that list is covered. The arrived text names the sender
  *    plus the other live same-customer, property, day and technician visits with no text of their own
@@ -130,6 +132,11 @@ async function deliveredSibling(conn, ref, kind, technicianId) {
     // from the recorded bounce, so it does not matter whether the bounce or the proof was written first.
     .whereRaw(`NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(COALESCE(al.metadata->'provider_message_ids', '[]'::jsonb)) AS p(sid)
       JOIN audit_log b ON b.action = ? AND b.metadata->>'sid' = p.sid)`, [BOUNCED_ACTION])
+    // The same, from the status the callback stores on the message rows before the bounce row is written (sms_log
+    // and the conversation message). A bounce whose own row could not be written still voids the proof.
+    .whereRaw(`NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(COALESCE(al.metadata->'provider_message_ids', '[]'::jsonb)) AS p(sid)
+      WHERE EXISTS (SELECT 1 FROM sms_log s WHERE s.twilio_sid = p.sid AND s.status IN ('failed', 'undelivered'))
+         OR EXISTS (SELECT 1 FROM messages m WHERE m.twilio_sid = p.sid AND m.delivery_status IN ('failed', 'undelivered')))`)
     .select('sib.id',
       conn.raw("al.metadata->>'customer_id' as customer_id"),
       conn.raw("al.metadata->>'property_id' as property_id"),
@@ -338,13 +345,9 @@ async function recordBouncedTrackText({ sid } = {}) {
     if (!sid || !oneTextPerCustomerDayLive() || !(await isTrackerText(sid))) return 0;
     const seen = await db('audit_log').where({ action: BOUNCED_ACTION }).whereRaw("metadata->>'sid' = ?", [String(sid)]).first('id');
     if (seen) return 0;
-    await auditLog.recordAuditEvent({
-      critical: true,
-      actor_type: 'system',
-      action: BOUNCED_ACTION,
-      resource_type: 'sms',
-      metadata: { sid: String(sid) },
-    });
+    const row = { critical: true, actor_type: 'system', action: BOUNCED_ACTION, resource_type: 'sms', metadata: { sid: String(sid) } };
+    // Retried once, as the delivery proof is. If both fail, the stored message status still voids the proof.
+    await auditLog.recordAuditEvent(row).catch(() => auditLog.recordAuditEvent(row));
     return 1;
   } catch (err) {
     logger.error(`[one-text-per-day] tracker bounce record failed: ${err.message}`);

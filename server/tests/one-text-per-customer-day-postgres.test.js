@@ -812,6 +812,30 @@ postgres('one text per customer, address and day', () => {
         expect(texted(TwilioService.sendTechEnRoute)).toBe(2); // ... and does not suppress the next visit
       });
 
+      test('the bounce row could not be written: the undelivered status on sms_log still lets a later sibling send', async () => {
+        gateOn();
+        const f = await twoVisits();
+        const sid = sidOf(8);
+        sendWithSid(sid);
+        await enRoute(f.rows[0].id);
+        // The status callback's bookkeeping wrote the status; no bounced row exists (its write failed).
+        await mockPg('sms_log').insert({ direction: 'outbound', from_phone: '+15550000001', to_phone: f.phone, twilio_sid: sid, message_type: 'tech_en_route', customer_id: f.customerId, status: 'undelivered' });
+        expect(await bouncedRows(sid)).toHaveLength(0);
+        await enRoute(f.rows[1].id);
+        expect(texted(TwilioService.sendTechEnRoute)).toBe(2);
+      });
+
+      test('a delivered status on sms_log keeps the cover', async () => {
+        gateOn();
+        const f = await twoVisits();
+        const sid = sidOf(9);
+        sendWithSid(sid);
+        await enRoute(f.rows[0].id);
+        await mockPg('sms_log').insert({ direction: 'outbound', from_phone: '+15550000001', to_phone: f.phone, twilio_sid: sid, message_type: 'tech_en_route', customer_id: f.customerId, status: 'delivered' });
+        await enRoute(f.rows[1].id);
+        expect(texted(TwilioService.sendTechEnRoute)).toBe(1);
+      });
+
       test('a callback for an unrelated SID changes nothing', async () => {
         gateOn();
         const f = await twoVisits();
