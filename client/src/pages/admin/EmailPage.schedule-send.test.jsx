@@ -495,13 +495,19 @@ describe("Email schedule send", () => {
   });
 
   it("a Sent check on an email taken back elsewhere keeps Send blocked, as a check of the other tab", async () => {
-    scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "outcome_unknown", mayHaveSent: true }];
     const base = fetch.getMockImplementation();
-    fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/sent-check")
-      ? response({ status: "cancelled", error: "This email was already settled elsewhere." }, 409) : base(input, options)));
+    fetch.mockImplementation((input, options = {}) => {
+      const url = String(input);
+      if (url.endsWith("/email/schedule")) return Promise.reject(new TypeError("network"));
+      if (url.endsWith("/sent-check")) return response({ status: "cancelled", error: "This email was already settled elsewhere." }, 409);
+      return base(input, options);
+    });
+    reconciledRow = { id: "late-unclear", status: "outcome_unknown", sendAt: "2026-10-23T12:00:00.000Z", to: "customer@example.invalid", subject: "Guide", draftText: "Line one\n<b>two</b>" };
     mount();
-    fireEvent.click(await screen.findByRole("button", { name: "Scheduled" }, { timeout: 3000 }));
-    fireEvent.click(await screen.findByRole("button", { name: "Back to draft" }));
+    await writeEmail();
+    fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Tomorrow morning/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "I checked: it is in neither" }));
     fireEvent.click(await screen.findByRole("button", { name: "Not in Sent" }));
     expect((await screen.findAllByText(/already taken back elsewhere/)).length).toBeGreaterThan(0);
     const send = () => screen.getAllByRole("button", { name: "Send", exact: true }).at(-1);
@@ -563,19 +569,11 @@ describe("Email schedule send", () => {
     expect(screen.getByText(/Gmail may already have sent this email/)).toBeInTheDocument();
     const send = () => screen.getAllByRole("button", { name: "Send", exact: true }).at(-1);
     expect(send()).toBeDisabled();
-    // The office's answer is recorded on the email first; only then does
-    // the guard clear.
-    const base = fetch.getMockImplementation();
-    let checkFails = true;
-    fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/sent-check") && checkFails
-      ? response({ error: "down" }, 500) : base(input, options)));
-    fireEvent.click(screen.getByRole("button", { name: "Not in Sent" }));
-    expect((await screen.findAllByText("Could not record the check. Try again in a moment.")).length).toBeGreaterThan(0);
-    expect(send()).toBeDisabled();
-    checkFails = false;
+    // This tab took it back itself, so it holds the only copy: the answer is
+    // local (the server already used the copy up; the sweep closes the alert).
     fireEvent.click(screen.getByRole("button", { name: "Not in Sent" }));
     await waitFor(() => expect(send()).not.toBeDisabled());
-    expect(JSON.parse(posts("/queued-1/sent-check").at(-1)[1].body)).toEqual({ inSent: false });
+    expect(posts("/sent-check")).toHaveLength(0);
     expect(screen.getByLabelText(/^Message/)).toHaveValue("Saved text");
   });
 

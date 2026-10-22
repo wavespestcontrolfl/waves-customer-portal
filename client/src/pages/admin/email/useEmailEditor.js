@@ -158,7 +158,7 @@ export default function useEmailEditor(userId) {
   // Why plain Send waits ("may_have_sent", ...), and whether the guard names
   // a row the Sent check can answer for.
   const guardKind = (replyId = null) => uncertainSchedule.current[slotOf(replyId)]?.request;
-  const guardHasRow = (replyId = null) => Boolean(uncertainSchedule.current[slotOf(replyId)]?.rowId);
+  const guardHasRow = (replyId = null) => uncertainSchedule.current[slotOf(replyId)]?.request === MAY_HAVE_SENT.request;
   // The operator looked under Scheduled and in Gmail Sent: the email is in
   // neither. A schedule request with a key is first settled on the server
   // (its row, or a void row that stops a late copy), and the guard follows
@@ -196,13 +196,18 @@ export default function useEmailEditor(userId) {
   const resolveSentCheck = async (replyId, inSent) => {
     const slot = slotOf(replyId);
     const entry = uncertainSchedule.current[slot];
-    if (scheduling || !entry?.rowId) return;
+    if (scheduling || entry?.request !== MAY_HAVE_SENT.request) return;
     const say = (message, error = false) => setSendFeedback((current) => ({ ...current, [replyId ? "reply" : "compose"]: { messageId: replyId, error, message } }));
-    let response = null;
-    try {
-      response = await adminFetch(`/api/admin/email/scheduled/${encodeURIComponent(entry.rowId)}/sent-check`, { method: "POST", body: JSON.stringify({ inSent }) });
-    } catch { response = null; }
-    if (uncertainSchedule.current[slot]?.rowId !== entry.rowId) return;
+    // A draft this tab took back itself already holds the only copy (the
+    // server used it up): the answer is local. One from a reconciled request
+    // (rowId) is recorded on the email first.
+    let response = { ok: true };
+    if (entry.rowId) {
+      try {
+        response = await adminFetch(`/api/admin/email/scheduled/${encodeURIComponent(entry.rowId)}/sent-check`, { method: "POST", body: JSON.stringify({ inSent }) });
+      } catch { response = null; }
+      if (uncertainSchedule.current[slot]?.rowId !== entry.rowId) return;
+    }
     // Settled elsewhere (taken back in another tab): that tab may hold the
     // same text, so the guard stays, now as the operator's own check of it.
     if (response?.status === 409) {
@@ -493,7 +498,7 @@ export default function useEmailEditor(userId) {
     // Gmail may already have this email: plain Send waits for the same
     // Sent-folder check as an unconfirmed schedule request. A guard that
     // cannot survive a reload is no guard, so the draft does not open.
-    if (draft.mayHaveSent && !rememberUncertain(slotOf(draft.replyEmailId), { ...MAY_HAVE_SENT, rowId: draft.id, textPrint: emailPrint(draft) })) return { opened: false };
+    if (draft.mayHaveSent && !rememberUncertain(slotOf(draft.replyEmailId), { ...MAY_HAVE_SENT, textPrint: emailPrint(draft) })) return { opened: false };
     if (draft.replyEmailId) return { opened: true, saved: setReplyDraft(draft.replyEmailId, draft.draftText)?.saved === true };
     const written = setComposeForm(() => ({ to: draft.to, subject: draft.subject === "(no subject)" ? "" : draft.subject, body: draft.draftText }));
     setShowCompose(true);
