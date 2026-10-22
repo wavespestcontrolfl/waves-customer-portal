@@ -34,7 +34,7 @@ export function reviewTimingHint(options) {
   }
   return hint;
 }
-function reviewTimingHintDetails({ reviewTiming, reviewCustomAt, preview, bundled, awaitsPayment = false, reportTextExpected = true }) {
+function reviewTimingHintDetails({ reviewTiming, reviewCustomAt, preview, bundled, awaitsPayment = false, reportTextExpected }) {
   // An unpaid completion invoice holds the ask until payment lands (the
   // server's invoiceBlocksReview; enrollForPaidInvoice then enrolls). A
   // relative timing is re-derived from the payment time; an absolute one is
@@ -54,10 +54,8 @@ function reviewTimingHintDetails({ reviewTiming, reviewCustomAt, preview, bundle
   // the legacy path substitutes its 120-minute default (codex #4140 r19 P2).
   // Customer requested stores a zero delay, so it goes at the next tick.
   if (awaitsPayment && reviewTiming === "auto") {
-    if (preview?.afterReport === true && reportTextExpected === false) return NO_REPORT_TEXT_AWAITS_PAYMENT_HINT;
-    if (preview?.afterReport === true) {
-      return `Review text waits for the invoice to be paid, then goes out about ${afterReportMinutes(preview)} minutes after payment${preview.smsSendWindowEnabled ? ", inside the 8 AM–8 PM window" : ""}. If the report went by the Waves app instead of a text, it goes at the smart send window.`;
-    }
+    const afterReport = afterReportHint(preview, reportTextExpected, { afterPayment: true });
+    if (afterReport) return afterReport;
     return preview?.reviewSequencesEnabled
       ? "Review text waits for the invoice to be paid, then goes out at the smart send window computed from the payment."
       : `Review text waits for the invoice to be paid, then goes out about 2 hours after payment, at the next scheduler tick${preview?.smsSendWindowEnabled ? " the 8 AM–8 PM window allows" : ""}.`;
@@ -68,34 +66,20 @@ function reviewTimingHintDetails({ reviewTiming, reviewCustomAt, preview, bundle
 }
 // GATE_REVIEW_ASK_AFTER_REPORT: with no completion text to follow (texting off,
 // no phone, email only) the server passes no anchor and keeps the smart window.
-const NO_REPORT_TEXT_HINT = "Review text goes out separately at the smart send window, because no report text goes out to follow.";
-const NO_REPORT_TEXT_AWAITS_PAYMENT_HINT = "Review text waits for the invoice to be paid, then goes out at the smart send window, because no report text goes out to follow.";
-export function timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled, reportTextExpected = true }) {
-  if (reviewTiming === "auto") {
-    // GATE_REVIEW_ASK_AFTER_REPORT: the server names the rule; the panel
-    // words it, never a client-side approximation of either rule.
-    if (preview?.afterReport === true && reportTextExpected === false) return NO_REPORT_TEXT_HINT;
-    if (preview?.afterReport === true) {
-      return `Review text goes out separately, about ${afterReportMinutes(preview)} minutes after the report text${preview.smsSendWindowEnabled ? ", inside the 8 AM–8 PM window" : ""}. If the report goes by the Waves app instead of a text, it goes at the smart send window.`;
-    }
-    if (!preview?.at) return "Review text goes out separately at the smart send window.";
-    // In cadence mode `at` is a jitter-free eligibility time: enrollment
-    // adds up to ±15 min (earliestAt..latestAt) and the worker sends on its
-    // ticks, so name the ticks either end lands on (codex #4140 r14 P2).
-    // The legacy path has no jitter but its own worker ticks (the */15
-    // scheduler): the row is eligible just after `at` and texts at the next
-    // tick, so name that tick too (codex #4140 r18 P2).
-    const lo = preview.reviewSequencesEnabled ? nextCadenceTickISO(preview.earliestAt || preview.at, workerTickMinutes(preview)) : null;
-    const hi = nextCadenceTickISO(preview.latestAt || preview.at, workerTickMinutes(preview), { after: true });
-    if (lo && hi && lo !== hi) return `Review text goes out separately at the cadence tick after about ${fmtReviewTime(preview.at)} — between about ${fmtReviewTime(lo)} and ${fmtReviewTime(hi)}.`;
-    // The legacy +120 lands wherever the completion did — an evening visit's
-    // 9:15 PM tick is refused by the send window and the row is re-queued for
-    // the next 8 AM (codex #4140 r19 P2). Cadence mode's plan is already
-    // fenced inside the window by the server.
-    const legacyHeld = !preview.reviewSequencesEnabled && preview.smsSendWindowEnabled === true ? heldToWindowOpenISO(hi || preview.at, preview) : null;
-    if (legacyHeld) return `Review text is held for the 8 AM–8 PM window — it goes out at the next 8 AM after about ${fmtReviewTime(preview.at)}, about ${fmtReviewTime(legacyHeld)}.`;
-    return `Review text goes out separately, about ${fmtReviewTime(hi || preview.at)}.`;
-  }
+// Null when the server did not name the after-report rule (the smart window wording applies).
+function afterReportHint(preview, reportTextExpected, { afterPayment = false } = {}) {
+  if (preview?.afterReport !== true) return null;
+  const lead = afterPayment ? "Review text waits for the invoice to be paid, then goes out" : "Review text goes out separately";
+  if (reportTextExpected === false) return `${lead} at the smart send window, because no report text goes out to follow.`;
+  const after = afterPayment ? "payment" : "the report text";
+  const windowNote = preview.smsSendWindowEnabled ? ", inside the 8 AM–8 PM window" : "";
+  const app = afterPayment ? "went" : "goes";
+  return `${afterPayment ? lead : `${lead},`} about ${afterReportMinutes(preview)} minutes after ${after}${windowNote}. If the report ${app} by the Waves app instead of a text, it goes at the smart send window.`;
+}
+export function timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled, reportTextExpected }) {
+  // GATE_REVIEW_ASK_AFTER_REPORT: the server names the rule; the panel
+  // words it, never a client-side approximation of either rule.
+  if (reviewTiming === "auto") return afterReportHint(preview, reportTextExpected) || smartWindowReviewHint(preview);
   if (reviewTiming === "customer_requested") {
     // `bundled` is the panel's own bundling condition (legacy path, completion
     // text going out) — the same shape as dispatch's shouldBundleReview. No
@@ -116,6 +100,26 @@ export function timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled
   }
   if (reviewTiming === "custom") return customReviewTimingHint(reviewCustomAt, preview);
   return "";
+}
+// Automatic outside the after-report rule: the smart send window as the server previewed it.
+function smartWindowReviewHint(preview) {
+  if (!preview?.at) return "Review text goes out separately at the smart send window.";
+  // In cadence mode `at` is a jitter-free eligibility time: enrollment
+  // adds up to ±15 min (earliestAt..latestAt) and the worker sends on its
+  // ticks, so name the ticks either end lands on (codex #4140 r14 P2).
+  // The legacy path has no jitter but its own worker ticks (the */15
+  // scheduler): the row is eligible just after `at` and texts at the next
+  // tick, so name that tick too (codex #4140 r18 P2).
+  const lo = preview.reviewSequencesEnabled ? nextCadenceTickISO(preview.earliestAt || preview.at, workerTickMinutes(preview)) : null;
+  const hi = nextCadenceTickISO(preview.latestAt || preview.at, workerTickMinutes(preview), { after: true });
+  if (lo && hi && lo !== hi) return `Review text goes out separately at the cadence tick after about ${fmtReviewTime(preview.at)} — between about ${fmtReviewTime(lo)} and ${fmtReviewTime(hi)}.`;
+  // The legacy +120 lands wherever the completion did — an evening visit's
+  // 9:15 PM tick is refused by the send window and the row is re-queued for
+  // the next 8 AM (codex #4140 r19 P2). Cadence mode's plan is already
+  // fenced inside the window by the server.
+  const legacyHeld = !preview.reviewSequencesEnabled && preview.smsSendWindowEnabled === true ? heldToWindowOpenISO(hi || preview.at, preview) : null;
+  if (legacyHeld) return `Review text is held for the 8 AM–8 PM window — it goes out at the next 8 AM after about ${fmtReviewTime(preview.at)}, about ${fmtReviewTime(legacyHeld)}.`;
+  return `Review text goes out separately, about ${fmtReviewTime(hi || preview.at)}.`;
 }
 const afterReportMinutes = (preview) => (Number(preview?.afterReportMinutes) > 0 ? Math.round(Number(preview.afterReportMinutes)) : 10);
 const fmtReviewTime = (d) => formatETDateTime(d, { weekday: "short", hour: "numeric", minute: "2-digit" });
