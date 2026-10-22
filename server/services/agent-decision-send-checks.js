@@ -165,11 +165,11 @@ async function labelFactsBlock({ decision, outgoingBody }) {
 }
 
 // RETIRED COMPANY FACTS (owner 2026-10-22, Codex #6447 r1-r6): a real-answers draft written before the answer-book facts
-// (prompt 23_n / 24_n; 15-22 were earlier wordings inside PR #6447, never in production) saw the old inside-spray policy (every visit unless declined) and the old payment policy (technicians take
+// (prompt 25_n / 26_n; 15-24 were earlier wordings inside PR #6447, never in production) saw the old inside-spray policy (every visit unless declined) and the old payment policy (technicians take
 // cards, never cash). No word list can tell a restated old policy from a correct answer, so an UNEDITED draft from those prompts
 // is refused at send whatever it says; a person rewrites it, and a staff-edited body (it differs from the stored draft) goes out.
-// Drafts from 23_n on are not affected. (Prod 2026-10-22: 107 such drafts pending review, 1 ever accepted.)
-const ANSWER_BOOK_PROMPT_NUMBER = 23;
+// Drafts from 25_n on are not affected. (Prod 2026-10-22: 107 such drafts pending review, 1 ever accepted.)
+const ANSWER_BOOK_PROMPT_NUMBER = 25;
 function draftedBeforeAnswerBook(decision) {
   const m = /^house_voice_v12_real_answers(\d*)/.exec(String(decision?.prompt_version || ''));
   return !!m && (!m[1] || Number(m[1]) < ANSWER_BOOK_PROMPT_NUMBER);

@@ -71,7 +71,7 @@ const COMPANY_FACTS = Object.freeze([
   'A customer who prepays a year of pest or lawn service and cancels within 90 days gets a refund for the visits not yet done.',
   'We serve Manatee and Sarasota counties and Charlotte County except Punta Gorda, plus Ruskin, Apollo Beach, Sun City Center, Wimauma, Gibsonton and Riverview. We do not serve Punta Gorda, DeSoto County, Tampa, St. Petersburg or Lee County.',
   'A WDO (termite) inspection report is emailed after the licensed inspector signs it, normally the same business day as the inspection. The office can check on a late report.',
-  'We do not tent for termites. For drywood termites we treat the infested wood directly with spot treatment, a borate wood treatment or injected foam. When the activity is too widespread for that, we refer the customer to a fumigation company.',
+  'We do not tent for termites. For drywood termites in wood we can reach, we treat the infested wood directly with spot treatment, a borate wood treatment or injected foam. When the activity is widespread or in wood we cannot reach, we refer the customer to a fumigation company.',
   'Product labels: the office can tell a customer which products were applied at a visit and can email a product label or Safety Data Sheet on request.',
 ]);
 
