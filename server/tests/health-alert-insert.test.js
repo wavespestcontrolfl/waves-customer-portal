@@ -115,6 +115,27 @@ test('without a trx it runs in its own transaction', async () => {
   expect(calls.inserts).toHaveLength(1);
 });
 
+test('a deadlock in its own transaction is retried, then thrown after the retries', async () => {
+  const { trx, calls } = makeTrx({ live: new Set(['loser']) });
+  const deadlock = Object.assign(new Error('deadlock detected'), { code: '40P01' });
+  db.transaction = jest.fn()
+    .mockRejectedValueOnce(deadlock)
+    .mockImplementationOnce(async (fn) => fn(trx));
+  const row = await insertHealthAlert(ROW);
+  expect(row.customer_id).toBe('loser');
+  expect(db.transaction).toHaveBeenCalledTimes(2);
+  expect(calls.inserts).toHaveLength(1);
+
+  db.transaction = jest.fn().mockRejectedValue(deadlock);
+  await expect(insertHealthAlert(ROW)).rejects.toBe(deadlock);
+  expect(db.transaction).toHaveBeenCalledTimes(3);
+
+  const other = Object.assign(new Error('boom'), { code: '23503' });
+  db.transaction = jest.fn().mockRejectedValue(other);
+  await expect(insertHealthAlert(ROW)).rejects.toBe(other);
+  expect(db.transaction).toHaveBeenCalledTimes(1);
+});
+
 test('lockAlertCustomers locks each distinct id in sorted order, and the merge winner of a retired one', async () => {
   const { trx, calls } = makeTrx({ live: new Set(['a', 'winner']), merges: { loser: 'winner' } });
   await lockAlertCustomers(trx, ['loser', null, 'a', 'loser', undefined]);

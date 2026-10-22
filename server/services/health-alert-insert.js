@@ -74,9 +74,24 @@ async function lockAlertCustomers(trx, customerIds) {
   for (const id of ids) await resolveLiveCustomerId(trx, id);
 }
 
+// Following a merge chain locks loser then winner, and a merge undo locks the
+// same pair FOR UPDATE in its own order, so the two can deadlock. Postgres
+// aborts one side (40P01). In its own transaction the insert retries, so a
+// billing alert is not lost to that abort. In a caller's transaction the
+// abort reaches the caller, whose rollback and retry rules apply (the Stripe
+// webhook rolls back and Stripe redelivers).
+const DEADLOCK_RETRIES = 2;
+
 async function insertHealthAlert(row, { trx } = {}) {
   if (trx) return insertFenced(trx, row);
-  return db.transaction((ownTrx) => insertFenced(ownTrx, row));
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await db.transaction((ownTrx) => insertFenced(ownTrx, row));
+    } catch (err) {
+      if (err.code !== '40P01' || attempt >= DEADLOCK_RETRIES) throw err;
+      logger.warn(`[health-alert] deadlock filing "${row.alert_type}" alert for customer ${row.customer_id}; retrying`);
+    }
+  }
 }
 
 module.exports = { insertHealthAlert, lockAlertCustomers, MAX_MERGE_HOPS };
