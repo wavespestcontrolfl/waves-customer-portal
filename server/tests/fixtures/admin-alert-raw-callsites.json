@@ -41,7 +41,6 @@
   "services/collections/outbound-voice/flags.js": 1,
   "services/collections/shadow-sweep.js": 1,
   "services/complete-scheduled-service.js": 9,
-  "services/completion-comms-guard.js": 1,
   "services/contact-correction.js": 2,
   "services/content-scheduler.js": 1,
   "services/content/email-approvals.js": 12,
