@@ -136,6 +136,10 @@ consultation-link read mints a link and stays out). Three row fields make that s
   the secret scrubber. The generator refuses a kept key that looks like free text (unless the row declares it `content`) and
   a fixed list of operator-entered fields (payment_reference, profileLabel, tags, competitorName, title, metadata ...).
   Every row added with the core screens and leads is in keep mode; the rows already on main are not.
+- `keepNotes` (keep-mode rows only): response key paths that hold free-text notes (`notes`, `line_items.*.description`). They are
+  kept ONLY while `GATE_IB_READ_NOTES` is on, and then pass the returned-notes scrubber like any other note; gate off, the
+  projection is exactly `keep`. Reviewed per row (invoice list and detail, visit, collection holds, estimate list); the
+  generator refuses a path that is never kept (`title`, `tags`, `metadata` ...). Rows without it return no notes in either state.
 - `keywords`: plain-language phrases `find_admin_reads` matches ("texts with this customer", "unpaid invoices"); they weigh
   like path words.
 Left out, with the reason: the Customer 360 payload (`GET /admin/customers/:id`: its chain reaches the estimate pricing

@@ -221,6 +221,9 @@
         "holds.*.created_at",
         "holds.*.stops_charges"
       ],
+      "keepNotes": [
+        "holds.*.reason"
+      ],
       "signals": [],
       "unresolved": [],
       "hash": "0be77fccf0cd3ad5308f1dd7ce4d9697"
@@ -620,6 +623,10 @@
         "updated_at",
         "visit_id"
       ],
+      "keepNotes": [
+        "notes",
+        "internal_notes"
+      ],
       "signals": [],
       "unresolved": [],
       "hash": "2d16c8af3e3b0c7175e9221a282674df"
@@ -781,6 +788,12 @@
         "estimates.*.agentDraftReview.createdAt",
         "truncated"
       ],
+      "keepNotes": [
+        "estimates.*.notes",
+        "estimates.*.declineReason",
+        "estimates.*.dispositionNote",
+        "estimates.*.reviewNotes"
+      ],
       "acceptSignals": [
         "credential_field:token",
         "credential_link:hasToken",
@@ -904,6 +917,9 @@
         "total",
         "page"
       ],
+      "keepNotes": [
+        "invoices.*.notes"
+      ],
       "acceptSignals": [
         "credential_table:invoices",
         "write:transaction"
@@ -1008,6 +1024,10 @@
         "annual_prepay_term.prepayAmount",
         "annual_prepay_term.termStart",
         "annual_prepay_term.termEnd"
+      ],
+      "keepNotes": [
+        "notes",
+        "line_items.*.description"
       ],
       "acceptSignals": [
         "credential_table:invoices",

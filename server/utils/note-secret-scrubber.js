@@ -86,9 +86,12 @@ function looksLikeBasicCredential(header, token) {
 }
 // An environment-style assignment whose NAME says it is a secret (DB_PASSWORD=x,
 // STRIPE_SECRET_KEY=x, API_TOKEN=x). A fixed config format, not a prose label:
-// upper-case name, '=' (spaces around it allowed). An unquoted value runs to the end of the line or an inline
-// comment (" #"), as dotenv reads it: DB_PASSWORD=hunter 22 (Codex #6375 r2, r13).
-const ENV_SECRET_RE = /\b((?:[A-Z][A-Z0-9_]*)?(?:PASSWORD|PASSWD|PASS|SECRET|TOKEN|API_?KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]*)([ \t]*=[ \t]*)(\\"(?:[^\\\n]|\\(?!"))*\\"|\\'(?:[^\\\n]|\\(?!'))*\\'|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+(?:[ \t]+(?!#)\S+)*)/g;
+// name in any case (api_token=x), '=' (spaces around it allowed); the bare stem PASS counts only as a
+// whole name segment, so compass=, bypass= and passenger= are ordinary words (Codex #6375 r14). An unquoted value runs to the end of the line or an inline
+// comment (" #"), as dotenv reads it: DB_PASSWORD=hunter 22 (Codex #6375 r2, r13). It stops before a
+// field delimiter (", " or "; ") and gives up the extra words when another assignment follows on the
+// line ("x=hunter22 and api key: y"): that one is taken by the rules after this.
+const ENV_SECRET_RE = /\b((?:[A-Z][A-Z0-9_]*)?(?:PASSWORD|PASSWD|(?<![A-Z0-9])PASS(?![A-Z0-9])|SECRET|TOKEN|API_?KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]*)([ \t]*=[ \t]*)(\\"(?:[^\\\n]|\\(?!"))*\\"|\\'(?:[^\\\n]|\\(?!'))*\\'|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S*[^\s,;}\]](?:[ \t]+(?!#)[^\s=:]*[^\s,;}\]=:])*(?![^\n#]*[=:])|\S*[^\s,;}\]])/gi;
 // Structural credential assignments in a config or header format (Codex #6375 r7):
 // "db.password: hunter22", "DB_PASSWORD = hunter22", "X-API-Key: abc123xyz",
 // "Authorization: Token abc123xyz". The KEY must end in a credential word (names

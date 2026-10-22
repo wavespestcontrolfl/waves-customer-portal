@@ -334,11 +334,20 @@ const NOTES_WITHHELD_NOTE = 'Free-text notes are not read through this tool, bec
 const NOTES_RETURNED_NOTE = `Free-text notes are returned as written, with secrets of fixed formats (keys, tokens, card numbers and the like) removed, and each is cut at ${NOTE_CAP} characters. A password or code written as plain words is not removed; do not repeat one back unless the operator asks.`;
 
 // Said when a row is in keep mode: the answer holds only the reviewed fields.
+const KEEP_NOTE_WITH_NOTES = 'This read returns a reviewed list of fields (ids, names, contact details, dates, numbers and statuses) plus the row\'s reviewed note fields, scrubbed of secrets. Titles, tags and any other field not on the list exist on the record but are not shown; say so if the operator asks for one.';
 const KEEP_NOTE = 'This read returns only a reviewed list of fields (ids, names, contact details, dates, numbers and statuses). Free text, notes, titles, tags and any field not on the list exist on the record but are not shown; say so if the operator asks for one.';
 
-function projectRow(parsed, entry) {
+// With GATE_IB_READ_NOTES on, a keep-mode row also keeps the note paths its review lists (keepNotes); the
+// returned-notes branch then scrubs them. Gate off: the projection is exactly `keep` (Codex #6375 r14).
+const keepNoteFor = (entry, returning) => {
+  if (!entry.keep) return null;
+  return returning && entry.keepNotes ? KEEP_NOTE_WITH_NOTES : KEEP_NOTE;
+};
+
+function projectRow(parsed, entry, withNotes = false) {
   const omitted = entry.omit ? omitPaths(parsed, entry.omit) : parsed;
-  return entry.keep ? keepPaths(omitted, entry.keep) : omitted;
+  if (!entry.keep) return omitted;
+  return keepPaths(omitted, withNotes && entry.keepNotes ? [...entry.keep, ...entry.keepNotes] : entry.keep);
 }
 
 function answerFrom(parsed, status, entry) {
@@ -347,8 +356,8 @@ function answerFrom(parsed, status, entry) {
   // unless GATE_IB_READ_NOTES is on: then it is returned through the fixed-format scrubber only.
   // The row's projection next: keys it omits never reach the model, and a row in keep mode (an allow-list) passes ONLY the
   // keys it lists, so a column added later is dropped until a person reviews it. Then every string is scrubbed.
-  const projected = projectRow(parsed, entry);
   const returning = readNotesLive();
+  const projected = projectRow(parsed, entry, returning);
   const clean = returning
     ? redactSecrets(projected, state, 0, { freeText: entry.freeText || {} })
     : redactSecrets(withholdNotes(projected, entry.freeText || {}, state), state);
@@ -363,7 +372,7 @@ function answerFrom(parsed, status, entry) {
     state.notes ? NOTES_WITHHELD_NOTE : null,
     state.notesReturned ? NOTES_RETURNED_NOTE : null,
     entry.omit ? `Left out of this read by design, never shown: ${omittedKeyNames(entry.omit).join(', ')}.` : null,
-    entry.keep ? KEEP_NOTE : null,
+    keepNoteFor(entry, returning),
     removed.length ? `Removed ${removed.join(', ')} (shown as "[signed link removed]", "[private link removed]" or "[removed]"); the bar never holds a credential or a link that carries one.` : null,
     fitted.truncated
       ? `Cut to fit ${MAX_RESULT_CHARS} characters: lists show their first items (see total_items or *_total_items). ${narrowHint(entry)}${paginationHint(clean)}`

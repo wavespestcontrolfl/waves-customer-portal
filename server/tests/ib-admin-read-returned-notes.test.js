@@ -521,6 +521,17 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     expect(scrubNote(note).text).toBe(expected);
   });
 
+  test.each([
+    ['api_token=abc def', 'api_token=[removed]'],
+    ['db_password=hunter 22', 'db_password=[removed]'],
+    ['Db_Pass=x y', 'Db_Pass=[removed]'],
+    ['compass=north', 'compass=north'],
+    ['bypass=gate 3', 'bypass=gate 3'],
+    ['passenger=2', 'passenger=2'],
+  ])('env-style name in any case, PASS only as a whole segment: %s (r14)', (note, expected) => {
+    expect(scrubNote(note).text).toBe(expected);
+  });
+
   test('a card number inside a long grouped digit run is masked', () => {
     const note = `ref 4242 4242 4242 4242${' 1111'.repeat(27)} end`;
     const { text, removed } = scrubNote(note);
@@ -554,5 +565,51 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
   test('a low-variety or link token is kept', () => {
     const note = 'ids 1111111111aaaaaaaaaa22 and https://portal.example.test/f/report-2026-q3-v2';
     expect(scrubNote(note).text).toBe(note);
+  });
+});
+
+describe('Codex #6375 r14: keep-mode rows return their reviewed note fields while GATE_IB_READ_NOTES is on', () => {
+  const INVOICE = catalog.entries.find(entry => entry.endpoint === '/admin/invoices/:id');
+  const INVOICE_ID = '20000000-0000-4000-8000-00000000000a';
+  const body = {
+    id: INVOICE_ID,
+    status: 'sent',
+    notes: 'Gate opens late. Wi-Fi key sk_' + 'live_' + 'abcdefghij0123456789 on the fridge.',
+    internal_secret_column: 'dropped',
+    line_items: [{ description: 'Quarterly pest service', quantity: 1, amount: 99, hidden_cost: 5 }],
+  };
+  const gates = ['GATE_IB_GENERAL_READ', 'GATE_IB_PLATFORM', 'GATE_IB_READ_NOTES'];
+  let saved;
+  beforeEach(() => { saved = gates.map(name => process.env[name]); process.env.GATE_IB_GENERAL_READ = 'true'; process.env.GATE_IB_PLATFORM = 'true'; });
+  afterEach(() => { gates.forEach((name, i) => { if (saved[i] === undefined) delete process.env[name]; else process.env[name] = saved[i]; }); });
+  const ask = () => {
+    global.fetch = jest.fn(async () => jsonResponse(body));
+    return executeAdminReadTool('read_admin_data', { endpoint: INVOICE.endpoint, params: { id: INVOICE_ID } }, READER);
+  };
+
+  test('the invoice row lists reviewed note paths', () => {
+    expect(INVOICE.keepNotes).toEqual(['notes', 'line_items.*.description']);
+    expect(INVOICE.keep).not.toContain('notes');
+  });
+
+  test('gate on: notes and line-item descriptions come back scrubbed, other columns stay dropped', async () => {
+    process.env.GATE_IB_READ_NOTES = 'true';
+    const result = await ask();
+    expect(result.data.notes).toContain('Gate opens late.');
+    expect(result.data.notes).toContain('[removed]');
+    expect(JSON.stringify(result)).not.toContain('sk_live');
+    expect(result.data.line_items[0]).toEqual({ description: 'Quarterly pest service', quantity: 1, amount: 99 });
+    expect(result.data).not.toHaveProperty('internal_secret_column');
+    expect(result.notes_returned).toBeGreaterThanOrEqual(2);
+    expect(result).not.toHaveProperty('notes_withheld');
+  });
+
+  test('gate off: the projection is exactly as before, notes and descriptions absent', async () => {
+    delete process.env.GATE_IB_READ_NOTES;
+    const result = await ask();
+    expect(result.data).not.toHaveProperty('notes');
+    expect(result.data.line_items[0]).toEqual({ quantity: 1, amount: 99 });
+    expect(result).not.toHaveProperty('notes_returned');
+    expect(result.note).not.toContain('reviewed note fields');
   });
 });
