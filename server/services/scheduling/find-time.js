@@ -16,7 +16,7 @@
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const db = require('../../models/db');
 const logger = require('../logger');
-const { HQ, driveMin } = require('../auto-dispatch/geo');
+const { driveMin } = require('../auto-dispatch/geo');
 const { techColumns, techStartPoint } = require('./tech-start-point');
 const { etParts, etDateString } = require('../../utils/datetime-et');
 const { stampedDivergesSql } = require('../stamped-address');
