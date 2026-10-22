@@ -50,14 +50,15 @@ describe('Tree & Shrub Pricing v4.4', () => {
 
     // materials = max(60, (15 + 4*0 + 0.055*2000) * 1) = 125
     // labor     = 35 * (25+10)/60 * 6 = 122.50
-    // annual    = (247.50 + 51) / 0.55 = 542.73/yr → 45.23/mo → 542.76
+    // annual    = (247.50 + 51) / 0.60 = 497.50/yr → 41.46/mo → 497.52
+    //             (÷ 0.55 → 45.23/mo until the 2026-10-21 owner audit)
     expect(quote.frequency).toBe(6);
     expect(quote.onSiteMin).toBe(25);
     expect(quote.costs.materialCost).toBeCloseTo(125, 2);
     expect(quote.costs.laborCost).toBeCloseTo(122.50, 2);
-    expect(quote.monthly).toBeCloseTo(45.23, 2);
-    expect(quote.annual).toBeCloseTo(542.76, 2);
-    expect(quote.baseMargin).toBeCloseTo(0.450, 3);
+    expect(quote.monthly).toBeCloseTo(41.46, 2);
+    expect(quote.annual).toBeCloseTo(497.52, 2);
+    expect(quote.baseMargin).toBeCloseTo(0.400, 3);
   });
 
   test('light 2,000 sqft worked example (v4.6)', () => {
@@ -68,20 +69,21 @@ describe('Tree & Shrub Pricing v4.4', () => {
 
     // materials = max(40, 125 * 0.75) = 93.75
     // labor     = 35 * (25+10)/60 * 4 = 81.67
-    // annual    = (175.42 + 51) / 0.55 = 411.67/yr → 34.31/mo → 411.72
+    // annual    = (175.42 + 51) / 0.60 = 377.36/yr → 31.45/mo → 377.40
     expect(quote.frequency).toBe(4);
     expect(quote.onSiteMin).toBe(25);
     expect(quote.costs.materialCost).toBeCloseTo(93.75, 2);
     expect(quote.costs.laborCost).toBeCloseTo(81.67, 2);
-    expect(quote.monthly).toBeCloseTo(34.31, 2);
-    expect(quote.annual).toBeCloseTo(411.72, 2);
-    expect(quote.baseMargin).toBeCloseTo(0.450, 3);
+    expect(quote.monthly).toBeCloseTo(31.45, 2);
+    expect(quote.annual).toBeCloseTo(377.40, 2);
+    expect(quote.baseMargin).toBeCloseTo(0.400, 3);
   });
 
-  test('audit reference quote: 350 sqft beds + 6 trees reprices from $100 to ~$76/application', () => {
+  test('audit reference quote: 350 sqft beds + 6 trees reprices from $100 to the $35/mo backstop ($70/application)', () => {
     // The June 2026 audit case (estimate token e9077c1f...): the v4.5 engine
-    // floored this property at $50/mo = $100/application. v4.6 prices it from
-    // the formula at a true 45% margin.
+    // floored this property at $50/mo = $100/application. v4.6 priced it from
+    // the formula at a true 45% margin (38.03/mo); at the 40% target (owner
+    // audit 2026-10-21) the formula lands under the $35 Standard backstop.
     const quote = priceTreeShrub(
       { bedArea: 350, treeCount: 6, lotSqFt: 10187 },
       { tier: 'standard' }
@@ -89,11 +91,13 @@ describe('Tree & Shrub Pricing v4.4', () => {
 
     // materials = max(60, 15 + 4*6 + 0.055*350 = 58.25) = 60
     // onSite    = max(25, 20 + 1 + 9) = 30 → labor 23.33/visit → 140/yr
-    // annual    = (200 + 51) / 0.55 = 456.36 → 38.03/mo → 76.06/application
-    expect(quote.monthly).toBeCloseTo(38.03, 2);
-    expect(quote.annual).toBeCloseTo(456.36, 2);
-    expect(quote.perApp).toBeCloseTo(76.06, 2);
-    expect(quote.baseMargin).toBeCloseTo(0.450, 3);
+    // annual    = (200 + 51) / 0.60 = 418.33 → 34.86/mo → backstop 35/mo
+    //             → 420/yr → 70/application; the binding floor lifts the
+    //             displayed margin a hair above the 40% target.
+    expect(quote.monthly).toBe(35);
+    expect(quote.annual).toBeCloseTo(420, 2);
+    expect(quote.perApp).toBeCloseTo(70, 2);
+    expect(quote.baseMargin).toBeCloseTo(0.402, 3);
   });
 
   test('treeCount adds a per-tree material term, not just labor minutes', () => {
@@ -176,18 +180,20 @@ describe('Tree & Shrub Pricing v4.4', () => {
     expect(quote.treeCountSource).toBe('explicit');
   });
 
-  test('unfloored quotes land exactly on the 45% admin-inclusive margin target', () => {
+  test('unfloored quotes land exactly on the 40% admin-inclusive margin target', () => {
+    // 350 sqft / 6 trees now sits on the $35 backstop (audit reference case
+    // above), so the smallest unfloored case here is 800 sqft.
     for (const input of [
-      { bedArea: 350, treeCount: 6 },
+      { bedArea: 800, treeCount: 6 },
       { bedArea: 2000, treeCount: 8 },
       { bedArea: 4000, treeCount: 10, access: 'moderate' },
     ]) {
       const quote = priceTreeShrub(input, { tier: 'standard' });
       const displayed = (quote.annual - quote.costs.directCost - quote.costs.adminCost) / quote.annual;
       // Rounding the monthly to cents moves the realized margin by <0.1pt.
-      expect(displayed).toBeGreaterThanOrEqual(0.449);
-      expect(displayed).toBeLessThanOrEqual(0.451);
-      expect(quote.marginTarget).toBe(0.45);
+      expect(displayed).toBeGreaterThanOrEqual(0.399);
+      expect(displayed).toBeLessThanOrEqual(0.401);
+      expect(quote.marginTarget).toBe(0.40);
     }
   });
 
@@ -229,8 +235,8 @@ describe('Tree & Shrub Pricing v4.4', () => {
     expect(treeShrub.marginGuardApplied).toBe(false);
     expect(treeShrub.discountCapped).toBe(false);
     expect(treeShrub.actualDiscountPct).toBeCloseTo(0.40, 3);
-    expect(treeShrub.finalAnnual).toBeCloseTo(325.80, 2); // $543 list × (1 − 0.40), uncapped
-    expect(treeShrub.finalMargin).toBeCloseTo(0.084, 3); // well below 35%, price stands
+    expect(treeShrub.finalAnnual).toBeCloseTo(298.80, 2); // $498 list × (1 − 0.40), uncapped
+    expect(treeShrub.finalMargin).toBeCloseTo(0.001, 3); // 40% off a 40% list margin collects ~0%; price stands
     expect(treeShrub.belowMarginFloor).toBe(true);
     // Auto WaveGuard discounts still never raise margin warnings; the
     // warn-only path for MANUAL discounts in estimate-engine is unchanged.
@@ -257,7 +263,7 @@ describe('Tree & Shrub Pricing v4.4', () => {
     expect(quote.bedAreaSource).toBe('fallback');
     expect(quote.pricingConfidence).toBe('low');
     expect(quote.requiresManualReview).toBe(true);
-    expect(quote.annual).toBeCloseTo(462.72, 2);
+    expect(quote.annual).toBeCloseTo(424.20, 2);
     expect(quote.warnings).toContain('Tree & Shrub bed area was not provided; fallback 1,200 sqft was used.');
   });
 
@@ -416,10 +422,11 @@ describe('Tree & Shrub estimator hardening', () => {
       const ts = estimate.lineItems.find(i => i.service === 'tree_shrub');
       const displayedMargin =
         (ts.finalAnnual - ts.costs.directCost - ts.costs.adminCost) / ts.finalAnnual;
-      // 40% off drives the collected margin to ~8.4%; the price stands and the
-      // shortfall is surfaced only via finalMargin / belowMarginFloor.
+      // 40% off a 40% list margin drives the collected margin to ~0%; the
+      // price stands and the shortfall is surfaced only via finalMargin /
+      // belowMarginFloor.
       expect(displayedMargin).toBeLessThan(constants.TREE_SHRUB.marginFloor);
-      expect(displayedMargin).toBeCloseTo(0.0838, 3);
+      expect(displayedMargin).toBeCloseTo(0.0010, 3);
       expect(ts.finalMargin).toBeCloseTo(displayedMargin, 3);
       expect(ts.belowMarginFloor).toBe(true);
     });
@@ -678,11 +685,16 @@ describe('Tree & Shrub estimator hardening', () => {
   describe('config parity (constants vs active DB migration)', () => {
     // Code constants stay authoritative; this test catches drift if anyone
     // edits one surface without the other. The active runtime config is the
-    // JSONB pricing_config updated by the v4.6 reprice migration.
+    // JSONB pricing_config updated by the v4.6 reprice migration (material
+    // model + floors) and the 2026-10-21 margin migration (target 0.40).
     const fs = require('fs');
     const path = require('path');
     const migrationSrc = fs.readFileSync(
       path.join(__dirname, '..', 'models', 'migrations', '20260612000025_tree_shrub_reprice_45_margin.js'),
+      'utf8'
+    );
+    const marginMigrationSrc = fs.readFileSync(
+      path.join(__dirname, '..', 'models', 'migrations', '20261021010000_tree_shrub_margin_target_40.js'),
       'utf8'
     );
     const legacySrc = fs.readFileSync(
@@ -718,7 +730,12 @@ describe('Tree & Shrub estimator hardening', () => {
     });
 
     test('margin target matches and carries the admin-inclusive semantics marker', () => {
-      expect(migrationNumber('value')).toBe(constants.TREE_SHRUB.marginTarget);
+      // The 2026-10-21 migration writes `writeValue(knex, loaded.data, 0.40, UP_REASON)`
+      // over the v4.6 row's 0.45 and re-stamps the semantics marker.
+      const m = marginMigrationSrc.match(/writeValue\(knex, loaded\.data, ([0-9.]+), UP_REASON\)/);
+      expect(m).not.toBeNull();
+      expect(Number(m[1])).toBe(constants.TREE_SHRUB.marginTarget);
+      expect(marginMigrationSrc).toContain("semantics: 'margin_admin_inclusive'");
       expect(migrationSrc).toContain("semantics: 'margin_admin_inclusive'");
     });
 
@@ -744,16 +761,18 @@ describe('Tree & Shrub estimator hardening', () => {
   });
 
   describe('monthly floor semantics (v4.6 backstops)', () => {
-    test('floors are backstops the formula minimum already clears', () => {
-      // Even the smallest possible job (minimum on-site labor + material
-      // floors) prices above the monthly floor from the formula, so the
-      // floor should never silently set the price.
+    test('floors are backstops: Standard binds on the bare-minimum job at the 40% target, Light clears', () => {
+      // At the 45% target the smallest job cleared the $35 Standard backstop
+      // (35.38). At 40% (owner audit 2026-10-21) the formula minimum is
+      // (60 material + 122.50 labor + 51) / 0.60 = 389.17 → 32.43/mo, so the
+      // backstop sets the price for beds under ~1,100 sq ft with no trees; a
+      // 1,200 sq ft bed prices from the formula again (35.35).
       const minimalStandard = priceTreeShrub({ bedArea: 1, treeCount: 0 }, { tier: 'standard' });
       const minimalLight = priceTreeShrub({ bedArea: 1, treeCount: 0 }, { tier: 'light' });
-      expect(minimalStandard.monthly).toBeGreaterThanOrEqual(constants.TREE_SHRUB.tiers.standard.monthlyFloor);
-      expect(minimalLight.monthly).toBeGreaterThanOrEqual(constants.TREE_SHRUB.tiers.light.monthlyFloor);
-      // And the price is the formula's, not the floor constant.
-      expect(minimalStandard.monthly).toBeCloseTo(35.38, 2);
+      expect(minimalStandard.monthly).toBe(constants.TREE_SHRUB.tiers.standard.monthlyFloor);
+      expect(minimalLight.monthly).toBeGreaterThan(constants.TREE_SHRUB.tiers.light.monthlyFloor);
+      expect(priceTreeShrub({ bedArea: 1200, treeCount: 0 }, { tier: 'standard' }).monthly)
+        .toBeGreaterThan(constants.TREE_SHRUB.tiers.standard.monthlyFloor);
     });
 
     test('light floor stays <= 2/3 of standard floor so a floored Light never exceeds Standard per month', () => {
@@ -762,7 +781,7 @@ describe('Tree & Shrub estimator hardening', () => {
     });
   });
 
-  describe('WaveGuard discount interaction at the 45% list margin', () => {
+  describe('WaveGuard discount interaction at the 40% list margin', () => {
     function estimateInput(services) {
       return {
         homeSqFt: 2000,
@@ -777,9 +796,10 @@ describe('Tree & Shrub estimator hardening', () => {
     }
 
     test('Platinum (20%) is no longer clamped — the 35% post-discount guard is report-only (owner ruling 2026-07-17)', () => {
-      // 1 - 0.55/0.80 = 31.25% collected margin — below the 35% floor. The
-      // old v4.6 policy clamped this; since the 2026-07-17 owner ruling the
-      // full 20% applies and the shortfall is only reported.
+      // 1 - 0.60/0.80 = 25% collected margin (31.25% at the pre-audit 45%
+      // target) — below the 35% floor. The old v4.6 policy clamped this;
+      // since the 2026-07-17 owner ruling the full 20% applies and the
+      // shortfall is only reported.
       const estimate = generateEstimate(estimateInput({
         pest: { frequency: 'quarterly' },
         lawn: { track: 'st_augustine', tier: 'enhanced' },
@@ -791,13 +811,15 @@ describe('Tree & Shrub estimator hardening', () => {
       expect(ts.discountCapped).toBe(false);
       expect(ts.marginGuardApplied).toBe(false);
       expect(ts.actualDiscountPct).toBeCloseTo(0.20, 3);
-      expect(ts.finalMargin).toBeCloseTo(0.313, 3);
+      expect(ts.finalMargin).toBeCloseTo(0.251, 3);
       expect(ts.finalMargin).toBeLessThan(0.35);
       expect(ts.belowMarginFloor).toBe(true);
     });
 
-    test('Gold (15%) survives the guard uncapped', () => {
-      // 1 - 0.55/0.85 = 35.3% collected margin — clears the 35% guard.
+    test('Gold (15%) applies uncapped and is now flagged below the 35% floor', () => {
+      // 1 - 0.60/0.85 = 29.4% collected margin at the 40% target (35.3% at
+      // the pre-audit 45% cleared the floor). Report-only: the full discount
+      // applies and belowMarginFloor surfaces the shortfall.
       const estimate = generateEstimate(estimateInput({
         pest: { frequency: 'quarterly' },
         lawn: { track: 'st_augustine', tier: 'enhanced' },
@@ -807,7 +829,8 @@ describe('Tree & Shrub estimator hardening', () => {
       expect(estimate.waveGuard.tier).toBe('gold');
       expect(ts.discountCapped).toBe(false);
       expect(ts.actualDiscountPct).toBeCloseTo(0.15, 3);
-      expect(ts.finalMargin).toBeGreaterThanOrEqual(0.35 - 1e-9);
+      expect(ts.finalMargin).toBeCloseTo(0.295, 3);
+      expect(ts.belowMarginFloor).toBe(true);
     });
   });
 });

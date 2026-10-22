@@ -2598,8 +2598,9 @@ export function calculateEstimate(inputs) {
     // v4.6 material model is ANNUAL and protocol-derived:
     //   (fixed $15 + $4/tree + $0.055/bed sqft) * tierFactor
     //   (Light 0.75, Enhanced 1.25)
-    // and price targets a 45% admin-INCLUSIVE margin:
-    //   annual = (materials + labor + $51 admin) / (1 - 0.45)
+    // and price targets a 40% admin-INCLUSIVE margin (owner audit
+    // 2026-10-21; 45% before):
+    //   annual = (materials + labor + $51 admin) / (1 - 0.40)
     // Floors are backstops only (Light $22/mo, Standard $35/mo, Enhanced
     // $48/mo) and Light's floor must stay <= 2/3 of Standard's.
     const TS_ADMIN_ANNUAL = 51;
@@ -2621,7 +2622,7 @@ export function calculateEstimate(inputs) {
       const mc = Math.max(t.v * 10, (15 + 4 * et + 0.055 * eb) * t.mf);
       const lc = lpv * t.v;
       // Mirror server rounding exactly: round monthly first, annual = mo*12.
-      const baseAnn = (mc + lc + TS_ADMIN_ANNUAL) / 0.55;
+      const baseAnn = (mc + lc + TS_ADMIN_ANNUAL) / 0.60;
       const mo = Math.max(t.f, Math.round(baseAnn / 12 * 100) / 100);
       const ann = Math.round(mo * 12 * 100) / 100;
       const pa = Math.round(ann / t.v * 100) / 100;

@@ -147,8 +147,8 @@ residential recurring lawn care only. Off, everything above is unchanged. On:
 `annualPrice = (annualDirectCost + ADMIN_ANNUAL) / (1 − marginTarget)`, subject
 to the tier's existing monthly list-price floor.
 
-The code-default `marginTarget` is 45%, measured after the annual admin
-allocation and before final discounts. Database pricing config can tune it.
+The code-default `marginTarget` is 40% (45% until the owner audit of 2026-10-21; lawn and pest price to the 35% floor and T&S was the outlier), measured after the annual admin
+allocation and before final discounts. Database pricing config (`global_margin_target_ts`) can tune it. The post-discount guard is report-only, so the cut reaches bundled customers in full; `belowMarginFloor` now flags more WaveGuard-discounted T&S lines (Silver collects ~33%, Gold ~29%, Platinum ~25%).
 
 | Tier (sold) | Freq | Floor (monthly, pre-discount) |
 |---|---|---|
