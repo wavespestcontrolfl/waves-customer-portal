@@ -89,6 +89,8 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       subject: 'Fixture Build Co has invited you to bid on Sample Ridge Residences', body_text: BC_BODY(), received_at: new Date(NOW.getTime() - 60000), ...over,
       // The job's cursor is the INSERT time. Unless a test says otherwise, a row is stored when it was received.
       created_at: over.created_at || over.received_at || new Date(NOW.getTime() - 60000),
+      // Already classified by the sync unless a test says otherwise (an unclassified row is held; see "settle").
+      classification: over.classification !== undefined ? over.classification : 'other',
       // Gmail's stored Authentication-Results: aligned DKIM for the sender's own domain unless a test says otherwise.
       authentication_results: over.authentication_results !== undefined ? over.authentication_results
         : `mx.google.com; dkim=pass header.i=@${String(over.from_address || 'invites@buildingconnected.com').split('@')[1]}`,
@@ -481,6 +483,61 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect(forged.bidId).not.toBe(bidId);
       expect(await bidRow(bidId)).toMatchObject({ needs_date_confirmation: false });
       expect(await bidRow(forged.bidId)).toMatchObject({ source: 'email_subject', gc_or_agency: null, due_at: null, group_key: null });
+    });
+
+    test('settle: a row the classifier has not seen yet is held, then filed once it is classified', async () => {
+      await mockPg('system_settings').where({ key: service.WATERMARK_KEY }).del();
+      const fresh = await storeEmail({ classification: null, created_at: new Date(NOW.getTime() - 2 * 60000), received_at: new Date(NOW.getTime() - 2 * 60000) });
+      expect(await service.runBidDeskTick({ now: NOW })).toMatchObject({ created: 0 });
+      await mockPg('emails').where({ id: fresh.id }).update({ classification: 'lead_inquiry' });
+      expect(await service.runBidDeskTick({ now: NOW })).toMatchObject({ created: 1 });
+    });
+
+    test('settle: a row the classifier marked spam meanwhile is never filed', async () => {
+      await mockPg('system_settings').where({ key: service.WATERMARK_KEY }).del();
+      const fresh = await storeEmail({ classification: null, created_at: new Date(NOW.getTime() - 2 * 60000), received_at: new Date(NOW.getTime() - 2 * 60000) });
+      await service.runBidDeskTick({ now: NOW });
+      await mockPg('emails').where({ id: fresh.id }).update({ classification: 'spam' });
+      expect(await service.runBidDeskTick({ now: NOW })).toMatchObject({ created: 0 });
+      expect(raiseAdminAlert).not.toHaveBeenCalled();
+    });
+
+    test('settle: an unclassified row older than the settle time is filed (a classifier outage does not stop the desk)', async () => {
+      await mockPg('system_settings').where({ key: service.WATERMARK_KEY }).del();
+      await storeEmail({ classification: null, created_at: new Date(NOW.getTime() - 20 * 60000), received_at: new Date(NOW.getTime() - 20 * 60000) });
+      expect(await service.runBidDeskTick({ now: NOW })).toMatchObject({ created: 1 });
+    });
+
+    test('a backfill run before the first tick leaves recent mail to the live intake, which files it with its bell', async () => {
+      await mockPg('system_settings').where({ key: service.WATERMARK_KEY }).del();
+      await storeEmail({ created_at: new Date(NOW.getTime() - 3 * DAY), received_at: new Date(NOW.getTime() - 3 * DAY), body_text: BC_BODY('Older Fixture Plaza') });
+      const recent = await storeEmail({ created_at: new Date(NOW.getTime() - 30 * 60000), received_at: new Date(NOW.getTime() - 30 * 60000) });
+      expect(await service.runBackfill({ days: 180, dryRun: false, now: NOW })).toMatchObject({ created: 1 });
+      expect(await mockPg('bid_opportunity_emails').where({ email_id: recent.id }).first()).toBeUndefined();
+      expect(await service.runBidDeskTick({ now: NOW })).toMatchObject({ created: 1 });
+      const live = await mockPg('bid_opportunities').where({ first_email_id: recent.id }).first();
+      expect(live).toMatchObject({ historical: false });
+      expect(rung('new')).toHaveLength(1);
+    });
+
+    test('the backfill dry run counts a later email that would join an earlier match by thread', async () => {
+      const first = await storeEmail({ created_at: new Date(NOW.getTime() - 3 * DAY), received_at: new Date(NOW.getTime() - 3 * DAY) });
+      await storeEmail({ gmail_thread_id: first.gmail_thread_id, subject: 'Quick question', body_text: 'Can you make the walk?', created_at: new Date(NOW.getTime() - 2 * DAY), received_at: new Date(NOW.getTime() - 2 * DAY) });
+      const dry = await service.runBackfill({ days: 180, dryRun: true, now: NOW });
+      const real = await service.runBackfill({ days: 180, dryRun: false, now: NOW });
+      expect(dry.matched).toBe(2);
+      expect(real).toMatchObject({ matched: 2, created: 1, attached: 1 });
+    });
+
+    test('a follow-up that supplies the first due date flags it and rings', async () => {
+      const first = await storeEmail({ body_text: BC_BODY().replace(/Bid Due: .*/, '') });
+      const { bidId } = await service.ingestEmail(first);
+      expect((await bidRow(bidId)).due_at).toBeNull();
+      await mockPg('bid_opportunities').where({ id: bidId }).update({ status: 'bid' });
+      raiseAdminAlert.mockClear();
+      await service.ingestEmail(await storeEmail({ gmail_thread_id: first.gmail_thread_id, subject: 'Reminder', received_at: new Date(NOW.getTime() - 30000) }));
+      expect(await bidRow(bidId)).toMatchObject({ needs_date_confirmation: true, due_confirmed: false });
+      expect(rung('addendum')).toHaveLength(1);
     });
 
     test('reminded bids do not fill the candidate list', async () => {

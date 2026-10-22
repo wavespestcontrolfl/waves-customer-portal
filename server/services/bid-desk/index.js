@@ -39,6 +39,15 @@ const REMINDER_LIMIT = 100;
 const RECHECK_WINDOW_MS = 30 * 60 * 1000;
 // Pages of `limit` rows the late pass may read per tick (bounds one tick; 30 minutes of mail is far below it).
 const LATE_MAX_PAGES = 10;
+// The sync stores a row first and classifies it a moment later (spam is marked then). A row that is still
+// unclassified is held this long before it can be filed, so spam is not filed (and rung) before the classifier
+// sees it. After that it is filed anyway (a classifier outage must not stop the desk); the Gmail SPAM label still
+// applies, and an owed bell re-checks the classification before it rings.
+const CLASSIFY_SETTLE_MS = 10 * 60 * 1000;
+const UNSETTLED = new Set(['', 'vendor']);
+function unsettled(email, now) {
+  return UNSETTLED.has(String(email.classification || '')) && new Date(email.cursor_at).getTime() > now.getTime() - CLASSIFY_SETTLE_MS;
+}
 const EMAIL_COLUMNS = ['id', 'gmail_thread_id', 'from_address', 'from_name', 'subject', 'body_text', 'body_html', 'received_at', 'classification', 'label_ids', 'authentication_results'];
 
 // Mail the sync stored as spam (a blocked sender, Gmail's SPAM label) never becomes a bid or a bell.
@@ -196,10 +205,10 @@ async function deliverOwedAlert(linkId) {
     const link = await trx('bid_opportunity_emails').where({ id: linkId }).forUpdate().first();
     if (!link || !link.alert_kind || link.alerted_at) return false;
     const bid = await trx('bid_opportunities').where({ id: link.bid_id }).forUpdate().first();
-    const email = await trx('emails').where({ id: link.email_id }).first(['id', 'subject', 'from_name', 'from_address']);
+    const email = await trx('emails').where({ id: link.email_id }).first(['id', 'subject', 'from_name', 'from_address', 'classification', 'label_ids']);
     // Moot: the bid is gone, history or closed, or the bell's own job is already done (a new-bid bell after the
     // decision; an addendum bell after the date was confirmed).
-    const moot = !bid || bid.historical || !OPEN_STATUSES.includes(bid.status)
+    const moot = !bid || bid.historical || !OPEN_STATUSES.includes(bid.status) || !email || isSpam(email)
       || (link.alert_kind === 'new' && bid.status !== 'new')
       || (link.alert_kind === 'addendum' && !bid.needs_date_confirmation);
     if (!moot) {
@@ -270,7 +279,7 @@ async function fileAndCount(email, result) {
 // not Gmail's receive time: a sync retry or a newest-first recovery can store an older message after newer ones.
 // It keeps PostgreSQL's microseconds (a JS Date would cut them and re-read the last row). An email that keeps
 // failing blocks the batch for MAX_ATTEMPTS ticks and is then passed.
-async function mainPass(state, limit, result) {
+async function mainPass(state, limit, result, now) {
   const rows = await db('emails')
     .whereRaw('(created_at, id) > (?::timestamptz, ?::uuid)', [state.at, state.id])
     .whereRaw(NOT_SPAM_SQL)
@@ -280,6 +289,8 @@ async function mainPass(state, limit, result) {
   result.read = rows.length;
   let next = state;
   for (const email of rows) {
+    // Not classified yet: stop here and pick it up on a later tick (the cursor does not pass it).
+    if (unsettled(email, now)) return { state: next, rows };
     const failure = await fileAndCount(email, result).then(() => null, (err) => err);
     const attempts = failure && next.retry?.id === email.id ? next.retry.count + 1 : 1;
     if (failure) {
@@ -295,7 +306,7 @@ async function mainPass(state, limit, result) {
 // Concurrent inserts can commit out of created_at order. Re-read the last RECHECK_WINDOW behind the cursor for rows
 // not yet filed; ingestEmail is idempotent, so a row seen twice is skipped. The pass pages through the whole
 // window, so non-bid mail (never filed, so never excluded) cannot hold a late bid row past the limit.
-async function latePass(state, limit, result) {
+async function latePass(state, limit, result, now) {
   let cursor = null;
   for (let page = 0; page < LATE_MAX_PAGES; page += 1) {
     const late = await db('emails as e')
@@ -307,7 +318,7 @@ async function latePass(state, limit, result) {
       .orderBy([{ column: 'e.created_at' }, { column: 'e.id' }])
       .limit(limit)
       .select([...EMAIL_COLUMNS.map((c) => `e.${c}`), db.raw('e.created_at::text AS cursor_at')]);
-    for (const email of late) {
+    for (const email of late.filter((row) => !unsettled(row, now))) {
       await fileAndCount(email, result).catch((err) => logger.error(`${LOG} late email ${email.id} failed: ${safeError(err)}`));
     }
     if (late.length < limit) return;
@@ -321,8 +332,8 @@ async function runBidDeskTick({ now = new Date(), limit = BATCH_LIMIT } = {}) {
   // First run: start an hour back (the backfill covers history). Nothing older is notified as new.
   const start = stored || { at: new Date(now.getTime() - FIRST_RUN_LOOKBACK_MS).toISOString(), id: '00000000-0000-0000-0000-000000000000' };
   const result = { read: 0, filed: 0, created: 0, failed: 0 };
-  const { state, rows } = await mainPass(start, limit, result);
-  await latePass(state, limit, result);
+  const { state, rows } = await mainPass(start, limit, result, now);
+  await latePass(state, limit, result, now);
   if (rows.length || !stored) await writeWatermark(state);
   result.owedAlerts = await deliverOwedAlerts();
   result.reminders = await sendDueReminders({ now });
@@ -377,14 +388,44 @@ async function sendDueReminders({ now = new Date() } = {}) {
  * Files the last `days` days of mail as historical rows, oldest first. `dryRun` counts and writes nothing.
  * Never notifies. Safe to re-run: filed emails are skipped.
  */
+async function backfillOne(email, { dryRun, previewThreads, result }) {
+  const detected = await detectWithThread(withProviderCheck(email));
+  const thread = email.gmail_thread_id;
+  const previewJoin = dryRun && !detected.bid && THREAD_JOIN_REASONS.has(detected.reason) && thread && previewThreads.has(thread);
+  if (!detected.bid && !previewJoin) return;
+  result.matched += 1;
+  if (dryRun) {
+    if (thread) previewThreads.add(thread);
+    return;
+  }
+  try {
+    const outcome = await ingestEmail(email, { historical: true });
+    if (outcome.created) result.created += 1;
+    else if (outcome.bidId) result.attached += 1;
+  } catch (err) {
+    result.failed += 1;
+    logger.error(`${LOG} backfill email ${email.id} failed: ${safeError(err)}`);
+  }
+}
+
+/**
+ * Files the last `days` of mail as history. It stops where the live intake starts: the stored cursor, or (before
+ * the first tick) an hour back, and then writes that cursor so the first tick starts exactly where the backfill
+ * stopped. Recent mail is therefore always filed live (with its bell), never as history.
+ */
 async function runBackfill({ days = BACKFILL_DAYS, dryRun = true, now = new Date() } = {}) {
   if (!bidDeskLive()) return { skipped: 'gate_off' };
   const since = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+  const stored = await readWatermark();
+  const until = stored ? stored.at : new Date(now.getTime() - FIRST_RUN_LOOKBACK_MS).toISOString();
   const result = { read: 0, matched: 0, created: 0, attached: 0, failed: 0 };
+  // The dry run files nothing, so a later email that would join an earlier match by thread is counted here.
+  const previewThreads = new Set();
   let cursor = { at: since.toISOString(), id: '00000000-0000-0000-0000-000000000000' };
   for (;;) {
     const rows = await db('emails')
       .whereRaw('(received_at, id) > (?::timestamptz, ?::uuid)', [cursor.at, cursor.id])
+      .whereRaw('created_at <= ?::timestamptz', [until])
       .whereRaw(NOT_SPAM_SQL)
       .orderBy([{ column: 'received_at' }, { column: 'id' }])
       .limit(BACKFILL_BATCH).select(EMAIL_COLUMNS);
@@ -392,19 +433,10 @@ async function runBackfill({ days = BACKFILL_DAYS, dryRun = true, now = new Date
     for (const email of rows) {
       result.read += 1;
       cursor = { at: new Date(email.received_at).toISOString(), id: email.id };
-      if (!(await detectWithThread(withProviderCheck(email))).bid) continue;
-      result.matched += 1;
-      if (dryRun) continue;
-      try {
-        const outcome = await ingestEmail(email, { historical: true });
-        if (outcome.created) result.created += 1;
-        else if (outcome.bidId) result.attached += 1;
-      } catch (err) {
-        result.failed += 1;
-        logger.error(`${LOG} backfill email ${email.id} failed: ${safeError(err)}`);
-      }
+      await backfillOne(email, { dryRun, previewThreads, result });
     }
   }
+  if (!dryRun && !stored) await writeWatermark({ at: until, id: '00000000-0000-0000-0000-000000000000' });
   return result;
 }
 

@@ -32,9 +32,12 @@ function attachPatch(bid, parsed, kind) {
   let needsConfirmation = kind === 'addendum';
   if (parsed.due_at) {
     if (bid.due_at == null) {
-      // Fills a due date that was never read; it stays unconfirmed (due_confirmed is untouched, false for a null date).
+      // Fills a due date that was never read; it stays unconfirmed (due_confirmed is untouched, false for a null date)
+      // and is flagged, so the office hears about a date that appeared after the first email (an unconfirmed date
+      // never reminds).
       patch.due_at = parsed.due_at;
       patch.due_source_line = parsed.due_source_line;
+      needsConfirmation = true;
     } else if (!sameInstant(bid.due_at, parsed.due_at)) {
       needsConfirmation = true;
     }
