@@ -1419,17 +1419,11 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
     }
   }
   // Taken hour (GATE_PLAN_TAKEN_HOUR_HANDOFF; owner 2026-10-22, audit D4): a
-  // follow-up whose hour another customer's live visit already holds is
-  // seeded WINDOWLESS with its date as recurring_dispatch_due_date, and
-  // auto-dispatch places it (scheduling/plan-taken-hour.js). Gate off: no
-  // read, rows unchanged. The insert lines below stay untouched.
-  {
-    const handed = await require('./scheduling/plan-taken-hour').handOffTakenHours(conn, rows);
-    if (handed.handedOff) {
-      rows = handed.rows.map((row) => filterByColumns(row, columns));
-      require('./logger').info(`[recurring-seeder] parent ${parent.id}: ${handed.handedOff} follow-up(s) seeded without a time (hour taken); auto-dispatch places them`);
-    }
-  }
+  // follow-up whose hour another stop already holds is seeded WINDOWLESS
+  // with its date as recurring_dispatch_due_date, and auto-dispatch places
+  // it (scheduling/plan-taken-hour.js). Gate off: no read, rows unchanged.
+  // The insert lines below stay untouched.
+  rows = await require('./scheduling/plan-taken-hour').handOffTakenHours(conn, rows, { cols: columns });
 
   if (!rows.length) {
     // Even with no NEW follow-up rows (series dates already exist), the parent

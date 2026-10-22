@@ -20331,25 +20331,10 @@ function normalizeTopUpWindow(windowStart, durationMinutes, windowEnd) {
   return { start: validated.window_start, end: validated.window_end };
 }
 
-// The place an extension child of `parent` is inserted at, resolved as the
-// insert resolves it: the plan's stamped address (template override applied,
-// copyStampedServiceAddressFields), then the series' agreed or sole property
-// when that leaves none (anchorSoleProperty). Read once for the taken-hour
-// probe and reused by the insert.
-async function seriesChildPlace(conn, parent, parentId, cols) {
-  const place = { customer_id: parent.customer_id, recurring_parent_id: parentId };
-  copyStampedServiceAddressFields(place, parent, cols);
-  await anchorSoleProperty(place, cols, conn);
-  delete place.customer_id;
-  delete place.recurring_parent_id;
-  return place;
-}
-
 // The next-date search of extendSeriesOnceLocked: the cadence walk. Returns
-// { nextStr, hitMaxDate, handOff, technicianId, childPlace } for the caller
-// to insert (handOff: the top-up's taken hour, inserted without a time;
-// technicianId / childPlace: the technician and place its probe read for
-// nextStr, when it read them).
+// { nextStr, hitMaxDate, placement } for the caller to insert: `placement` is
+// the technician, place and (on a top-up's taken hour) no-time hand-off the
+// child gets on nextStr, read once for the taken-hour probe and the insert.
 async function walkExtensionCandidates(ctx) {
   const {
     conn, parent, parentId, cols, opts, latestStr, rOpts, skipParent, dirParent,
@@ -20368,14 +20353,6 @@ async function walkExtensionCandidates(ctx) {
   // still null AND hitMaxDate true because the horizon, not a busy
   // calendar, is why nothing more got booked (Codex GitHub r1 P2).
   let hitMaxDate = false;
-  // Set when the top-up lands on a taken hour and hands the visit off
-  // without a time (GATE_PLAN_TAKEN_HOUR_HANDOFF, below).
-  let handOff = false;
-  // The technician and place the hand-off probe read for the chosen date; the
-  // insert reuses both, so the probe and the row never disagree (undefined =
-  // not read).
-  let technicianId;
-  let childPlace;
   while (attempt <= 12) {
     const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts);
     const candidate = seasonalSafeShift(rawNext, parent.recurring_pattern, skipParent, dirParent, autoExtendBlackoutDates);
@@ -20415,37 +20392,41 @@ async function walkExtensionCandidates(ctx) {
     // silently drops whole cadence slots on a busy calendar — a monthly
     // series can lose most of a year's candidates to one recurring
     // conflict. Insert on the cadence date and log the overlap instead.
-    if (opts.overlapAdvisoryOnly) {
-      // Taken hour (GATE_PLAN_TAKEN_HOUR_HANDOFF; owner 2026-10-22, audit
-      // D4): when another stop holds the plan's hour (the night tool's own
-      // rule, scheduling/plan-taken-hour.js — booked interviews included, so
-      // it runs on every candidate, not only after the advisory probe below
-      // finds a visit), the visit goes in on the cadence date WITHOUT a time
-      // and auto-dispatch places it, instead of on top of it. The probe
-      // carries the technician the insert will use on this date (the
-      // template tech, or none when that tech cannot take it:
-      // assignableRecurringTemplateTechnicianId) and the place the child
-      // gets (seriesChildPlace), each read once and reused by the insert
-      // (Codex #6476 r1 and its pre-push audits).
-      if (planTakenHour.handoffEnabled()) {
-        technicianId = await assignableRecurringTemplateTechnicianId(conn, parent, candidate);
-        if (!childPlace) childPlace = await seriesChildPlace(conn, parent, parentId, cols);
-        handOff = await planTakenHour.takenHourHandoff(conn, { ...clashProbeTemplate, ...childPlace, technician_id: technicianId }, { date: candidate });
-      }
-      if (handOff) {
-        logger.info(`[recurring-topup] parent=${parentId} candidate ${candidate}: the plan's hour is taken — inserting without a time for auto-dispatch to place`);
-      } else if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) {
-        // Gate off, too near, or only the customer's own stop at the same
-        // place: as before.
-        logger.warn(`[recurring-topup] parent=${parentId} candidate ${candidate} overlaps an existing visit on the calendar — inserting anyway (advisory only, same posture every other admin write already takes)`);
-      }
-    } else if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) {
+    if (!opts.overlapAdvisoryOnly && await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) {
       attempt++; continue;
     }
     nextStr = candidate;
     break;
   }
-  return { nextStr, hitMaxDate, handOff, technicianId, childPlace };
+  if (!nextStr) return { nextStr, hitMaxDate, placement: null };
+  // The technician (the template tech, or none when that tech cannot take
+  // the date) and the place (the plan's stamped address with its template
+  // override, then the series' agreed or sole property) the child gets,
+  // read once for the probe below and the insert (Codex #6476 r1 and its
+  // pre-push audits).
+  const placement = {
+    customer_id: parent.customer_id,
+    recurring_parent_id: parentId,
+    technician_id: await assignableRecurringTemplateTechnicianId(conn, parent, nextStr),
+  };
+  copyStampedServiceAddressFields(placement, parent, cols);
+  await anchorSoleProperty(placement, cols, conn);
+  if (opts.overlapAdvisoryOnly) {
+    // Taken hour (GATE_PLAN_TAKEN_HOUR_HANDOFF; owner 2026-10-22, audit D4):
+    // when another stop holds the plan's hour — the night tool's own rule
+    // (scheduling/plan-taken-hour.js), booked interviews included — the
+    // visit goes in on its cadence date WITHOUT a time and auto-dispatch
+    // places it, instead of on top of it. Otherwise (gate off, too near, or
+    // only the customer's own stop at the same place) a clash is logged and
+    // the visit inserted, as before.
+    if (await planTakenHour.takenHourHandoff(conn, { ...clashProbeTemplate, ...placement }, { date: nextStr })) {
+      Object.assign(placement, planTakenHour.handoffFields(nextStr, cols));
+      logger.info(`[recurring-topup] parent=${parentId} candidate ${nextStr}: the plan's hour is taken — inserting without a time for auto-dispatch to place`);
+    } else if (await seriesCandidateDateClashes(conn, clashProbeTemplate, nextStr)) {
+      logger.warn(`[recurring-topup] parent=${parentId} candidate ${nextStr} overlaps an existing visit on the calendar — inserting anyway (advisory only, same posture every other admin write already takes)`);
+    }
+  }
+  return { nextStr, hitMaxDate, placement };
 }
 
 // Returns the spawned-visit payload (for the caller's post-commit reminder
@@ -20518,9 +20499,7 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
     // (booster double-book rationale on the helper).
     const existingDates = await loadActiveSeriesDates(conn, parentId);
     const autoExtendBlackoutDates = await loadSeriesBlackoutDates(conn, latestStr);
-    const {
-      nextStr, hitMaxDate, handOff, technicianId, childPlace,
-    } = await walkExtensionCandidates({
+    const { nextStr, hitMaxDate, placement } = await walkExtensionCandidates({
       conn, parent, parentId, cols, opts, latestStr, rOpts, skipParent, dirParent,
       blackoutDates: autoExtendBlackoutDates, existingDates, clashProbeTemplate,
     });
@@ -20553,7 +20532,6 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       const childIdentity = await resolveSeriesChildIdentity(conn, parent);
       const nextData = {
         customer_id: parent.customer_id,
-        technician_id: technicianId !== undefined ? technicianId : await assignableRecurringTemplateTechnicianId(conn, parent, nextStr),
         scheduled_date: nextStr,
         window_start: nextWindowStart, window_end: nextWindowEnd,
         service_type: childIdentity.service_type, status: 'pending',
@@ -20572,22 +20550,9 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       if (cols.service_key_snapshot && childIdentity.service_key) nextData.service_key_snapshot = childIdentity.service_key;
       copyAppointmentDiscountFields(nextData, parent, cols);
       copyBillToFields(nextData, parent, cols);
-      // The place the taken-hour probe read, when it read one (one resolution
-      // for the probe and the insert); else resolved here, as before.
-      if (childPlace) {
-        Object.assign(nextData, childPlace);
-      } else {
-        copyStampedServiceAddressFields(nextData, parent, cols);
-        await anchorSoleProperty(nextData, cols, conn);
-      }
-      // Taken hour (walkExtensionCandidates): no time on the new visit; its
-      // cadence date is the due date auto-dispatch places it by.
-      // The window fields are on nextData already; the rest where the column exists.
-      if (handOff) {
-        for (const [key, value] of Object.entries(planTakenHour.handoffFields(nextStr))) {
-          if (key in nextData || cols[key]) nextData[key] = value;
-        }
-      }
+      // The technician, place and any no-time hand-off the walk resolved for
+      // this date (walkExtensionCandidates).
+      Object.assign(nextData, placement);
       // Required scope must be readable before creating any child.
       const parentAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: parentId });
       // Legacy-series root freeze (Codex round 2 P1) — see
@@ -20707,9 +20672,9 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
           scheduledServiceId: autoExtRow.id,
           customerId: parent.customer_id,
           scheduledDate: nextStr,
-          // A handed-off visit has no time: its reminder registers as the
-          // non-delivering windowless placeholder, never the plan's hour.
-          windowStart: handOff ? null : parent.window_start,
+          // The inserted start: a handed-off visit has none, so its reminder
+          // registers as the non-delivering windowless placeholder.
+          windowStart: nextData.window_start,
           serviceType: childIdentity.service_type,
         };
       }

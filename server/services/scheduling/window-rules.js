@@ -183,12 +183,14 @@ function occupancyBlockFor(row) {
 // tech-blind occupancy check with the admin status set. Probe-only, no lock
 // (routes/admin-schedule.js walkExtensionCandidates: the date is known only
 // mid-trx, and taking rung 1 then would invert occupancy.js's ORDERING
-// CONTRACT). Options, both off for the existing callers:
-//   excludeCustomerId  the template customer's own rows are one stop with it;
+// CONTRACT). Options, off for the existing callers (the taken-hour hand-off,
+// scheduling/plan-taken-hour.js, sets all three):
 //   technicianId       scopes the probe once the schedule is technician-
-//                      scoped (occupancy.js techScopedConfirmActive).
+//                      scoped (occupancy.js techScopedConfirmActive);
+//   excludeStatuses    the statuses that are no stop (default: the admin set);
+//   includeInterviews  the owner's booked interviews hold the hour too.
 async function seriesCandidateDateClashRows(conn, template, date, {
-  excludeCustomerId = null, technicianId = null, excludeStatuses = ADMIN_OCCUPANCY_EXCLUDE_STATUSES, includeInterviews = false,
+  technicianId = null, excludeStatuses = ADMIN_OCCUPANCY_EXCLUDE_STATUSES, includeInterviews = false,
 } = {}) {
   const block = occupancyBlockFor(template);
   if (!block) return [];
@@ -198,7 +200,6 @@ async function seriesCandidateDateClashRows(conn, template, date, {
     windowStart: block.start,
     windowEnd: block.end,
     excludeStatuses,
-    ...(excludeCustomerId ? { excludeCustomerId } : {}),
     ...(technicianId ? { technicianId } : {}),
     ...(includeInterviews ? { includeInterviews: true } : {}),
   });

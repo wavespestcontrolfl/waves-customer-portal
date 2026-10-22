@@ -61,12 +61,13 @@ function firstHandoffDate(now = new Date()) {
   return etDateString(addETDays(now, HANDOFF_MIN_DAYS_OUT));
 }
 
-// The columns a hand-off writes. The legacy presentation fields go too:
-// customer-facing context and route reorder fall back to window_display, then
-// time_window, when window_start is null (rebooker.js, deferred occurrence),
-// so a copied one would keep promising the taken hour.
-function handoffFields(date) {
-  return {
+// The columns a hand-off writes (with `cols`, those the table has). The
+// legacy presentation fields go too: customer-facing context and route
+// reorder fall back to window_display, then time_window, when window_start is
+// null (rebooker.js, deferred occurrence), so a copied one would keep
+// promising the taken hour.
+function handoffFields(date, cols = null) {
+  const fields = {
     window_start: null,
     window_end: null,
     time_window: null,
@@ -74,6 +75,7 @@ function handoffFields(date) {
     route_order: null,
     recurring_dispatch_due_date: toDateStr(date),
   };
+  return cols ? Object.fromEntries(Object.entries(fields).filter(([key]) => cols[key])) : fields;
 }
 
 // Whether `row` (a new plan visit: customer, technician, date, window, and
@@ -100,21 +102,19 @@ async function takenHourHandoff(conn, row, { date = row?.scheduled_date, now = n
   return clash.some((r) => !samePlace.has(String(r.id)));
 }
 
-// The seeder's batch: each row whose hour is taken comes back handed off.
-// Returns { rows, handedOff }; the input array is not changed.
-async function handOffTakenHours(conn, rows, { now = new Date() } = {}) {
-  if (!handoffEnabled() || !Array.isArray(rows) || !rows.length) return { rows, handedOff: 0 };
+// The seeder's batch: each row whose hour is taken comes back handed off
+// (the fields `cols` has). Returns the rows; the input array is not changed.
+async function handOffTakenHours(conn, rows, { now = new Date(), cols = null } = {}) {
+  if (!handoffEnabled() || !Array.isArray(rows) || !rows.length) return rows;
   const out = [];
-  let handedOff = 0;
   for (const row of rows) {
-    if (await takenHourHandoff(conn, row, { now })) {
-      out.push({ ...row, ...handoffFields(row.scheduled_date) });
-      handedOff += 1;
-    } else {
-      out.push(row);
-    }
+    out.push(await takenHourHandoff(conn, row, { now }) ? { ...row, ...handoffFields(row.scheduled_date, cols) } : row);
   }
-  return { rows: out, handedOff };
+  const handedOff = out.filter((row, i) => row !== rows[i]).length;
+  if (handedOff) {
+    require('../logger').info(`[plan-taken-hour] parent ${rows[0].recurring_parent_id}: ${handedOff} follow-up(s) seeded without a time (hour taken); auto-dispatch places them`);
+  }
+  return out;
 }
 
 module.exports = {

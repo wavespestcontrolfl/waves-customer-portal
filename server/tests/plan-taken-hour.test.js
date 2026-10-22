@@ -147,13 +147,23 @@ describe('plan-taken-hour', () => {
     });
   });
 
-  test('handOffTakenHours keeps the input array and counts the hand-offs', async () => {
+  test('handOffTakenHours hands off the taken rows and keeps the input array', async () => {
     process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
     findConflictingVisits.mockImplementation(async ({ date }) => (date === day(40) ? [{ id: 'x', customer_id: 'c2' }] : []));
     const rows = [{ ...row, scheduled_date: day(20) }, { ...row, scheduled_date: day(40) }];
     const out = await planTakenHour.handOffTakenHours('conn', rows);
-    expect(out.handedOff).toBe(1);
-    expect(out.rows[1]).toMatchObject({ window_start: null, recurring_dispatch_due_date: day(40) });
+    expect(out[0]).toBe(rows[0]);
+    expect(out[1]).toMatchObject({ window_start: null, recurring_dispatch_due_date: day(40) });
     expect(rows[1].window_start).toBe('09:00');
+    // Gate off: the same array back, nothing read.
+    delete process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF;
+    findConflictingVisits.mockClear();
+    expect(await planTakenHour.handOffTakenHours('conn', rows)).toBe(rows);
+    expect(findConflictingVisits).not.toHaveBeenCalled();
+  });
+
+  test('hand-off fields: only the columns the table has, when it says', () => {
+    expect(planTakenHour.handoffFields('2026-11-03', { window_start: {}, recurring_dispatch_due_date: {} }))
+      .toEqual({ window_start: null, recurring_dispatch_due_date: '2026-11-03' });
   });
 });

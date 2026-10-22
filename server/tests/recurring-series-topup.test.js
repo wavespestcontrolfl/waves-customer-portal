@@ -1358,7 +1358,9 @@ describe('topUpRecurringSeriesLocked — a taken hour hands the visit off withou
       recurring_pattern: 'weekly', window_start: '09:00', window_end: '10:00',
       estimated_duration_minutes: 60,
     },
-    colsOverrides: { recurring_dispatch_due_date: {}, window_display: {}, route_order: {} },
+    colsOverrides: {
+      window_start: {}, window_end: {}, time_window: {}, recurring_dispatch_due_date: {}, window_display: {}, route_order: {},
+    },
   };
   afterEach(() => { delete process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF; });
 
