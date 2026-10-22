@@ -15,7 +15,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, callEnrichCodesRequireAniLive } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
 
 // Pull a gate/lockbox/garage code out of free-form access notes when the model
@@ -87,19 +87,47 @@ function providerAlreadyNoted(existing, callDate, name) {
   });
 }
 
+// GATE_CALL_ENRICH_CODES_REQUIRE_ANI: the call's far-end number (caller ID on an
+// inbound call) must be a number on the customer's file — the primary phone or a
+// service-contact phone — before the call may write gate / garage / lockbox codes
+// or access notes. The customer id can come from a callback number the caller
+// SPOKE, and a spoken number proves nothing about who is on the line.
+const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+async function callerPhoneOnFile(customerId, callerPhone) {
+  const key = last10(callerPhone);
+  if (key.length !== 10) return false;
+  const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
+  const cust = await db('customers').where({ id: customerId }).first();
+  if (!cust) return false;
+  return [cust.phone, ...SERVICE_CONTACT_SLOTS.map((slot) => cust[slot.phone])]
+    .some((phone) => last10(phone) === key);
+}
+
 /**
  * Enrich a customer's profile from a processed call's extraction.
+ * `callerPhone` is the call's caller ID (ANI); it matters only with
+ * GATE_CALL_ENRICH_CODES_REQUIRE_ANI on.
  * @returns {{ applied: string[] }} which fields were written (for the audit log)
  */
-async function enrichFromCall({ customerId, extraction, legacy = null, callCreatedAt = new Date() }) {
+async function enrichFromCall({ customerId, extraction, legacy = null, callCreatedAt = new Date(), callerPhone = null }) {
   if (!isEnabled('callProfileEnrichment')) return { applied: [], skipped: 'gate_off' };
   if (!customerId || !extraction) return { applied: [] };
   const applied = [];
   const prop = extraction.property || {};
-  const accessNotes = prop.access_notes || null;
+  let accessNotes = prop.access_notes || null;
   const pets = prop.pets_on_property || null;
 
   try {
+    if (accessNotes && callEnrichCodesRequireAniLive()) {
+      // Codes and access notes reach the technician's job card with no office
+      // accept, so they are written only when the caller's own number is on the
+      // account. Otherwise skip them (pets and internal color are unchanged);
+      // the office still hears the call, and the SMS path files codes for accept.
+      if (!(await callerPhoneOnFile(customerId, callerPhone))) {
+        logger.warn(`[profile-enrichment] customer ${customerId}: caller ID not on file — access codes and notes not written`);
+        accessNotes = null;
+      }
+    }
     if (accessNotes || pets) {
       // Same customer preference lock every preference writer holds (portal
       // saves, merges, SMS capture): the row read below is then current, not

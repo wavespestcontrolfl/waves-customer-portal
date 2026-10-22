@@ -2,10 +2,10 @@
 // property_preferences + internal_notes, admin-edit-preserving.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn() }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(), callEnrichCodesRequireAniLive: jest.fn(() => false) }));
 
 const db = require('../models/db');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, callEnrichCodesRequireAniLive } = require('../config/feature-gates');
 const { enrichFromCall, _test } = require('../services/call-profile-enrichment');
 const { extractCodes, appendWithProvenance } = _test;
 // The preference write runs under the customer advisory lock inside a
@@ -102,6 +102,74 @@ describe('enrichFromCall', () => {
     db.mockImplementation(() => ({ where() { return this; }, forUpdate() { return this; }, first: async () => { throw new Error('boom'); } }));
     const res = await enrichFromCall({ customerId: 'c1', extraction: { property: { access_notes: 'gate code is 4545' } } });
     expect(res.applied).toEqual([]);
+  });
+});
+
+describe('GATE_CALL_ENRICH_CODES_REQUIRE_ANI', () => {
+  // A customer resolved from a SPOKEN callback number: the account's phones are
+  // given by `phones`; the property_preferences row is empty.
+  function setup(phones = {}) {
+    isEnabled.mockReturnValue(true);
+    const writes = [];
+    db.mockImplementation((table) => {
+      const builder = {
+        where: () => builder,
+        forUpdate: () => builder,
+        first: async () => (table === 'customers'
+          ? { id: 'c1', internal_notes: null, phone: '+19415550100', ...phones }
+          : { customer_id: 'c1', property_gate_code: null, access_notes: null, pet_details: null }),
+        update: async (u) => { writes.push({ table, op: 'update', u }); return 1; },
+        insert: async (u) => { writes.push({ table, op: 'insert', u }); },
+      };
+      return builder;
+    });
+    return writes;
+  }
+  const extraction = { property: { access_notes: 'front gate code is 4545', pets_on_property: { details: 'two dogs' } } };
+
+  afterEach(() => callEnrichCodesRequireAniLive.mockReturnValue(false));
+
+  test('gate on, caller ID not on file: no code and no access notes; pets still written', async () => {
+    callEnrichCodesRequireAniLive.mockReturnValue(true);
+    const writes = setup();
+    const res = await enrichFromCall({ customerId: 'c1', extraction, callerPhone: '+19415559999' });
+    const pref = writes.find((w) => w.table === 'property_preferences');
+    expect(pref.u.property_gate_code).toBeUndefined();
+    expect(pref.u.access_notes).toBeUndefined();
+    expect(pref.u.pet_details).toContain('two dogs');
+    expect(res.applied).not.toContain('property_gate_code');
+  });
+
+  test('gate on, no caller ID at all (withheld): codes and notes skipped', async () => {
+    callEnrichCodesRequireAniLive.mockReturnValue(true);
+    const writes = setup();
+    await enrichFromCall({ customerId: 'c1', extraction: { property: { access_notes: 'front gate code is 4545' } }, callerPhone: null });
+    expect(writes).toEqual([]);
+  });
+
+  test('gate on, caller ID is the primary phone (any format): codes and notes written', async () => {
+    callEnrichCodesRequireAniLive.mockReturnValue(true);
+    const writes = setup();
+    await enrichFromCall({ customerId: 'c1', extraction, callerPhone: '(941) 555-0100' });
+    const pref = writes.find((w) => w.table === 'property_preferences');
+    expect(pref.u.property_gate_code).toBe('4545');
+    expect(pref.u.access_notes).toContain('front gate code is 4545');
+  });
+
+  test('gate on, caller ID is a service-contact phone on the account: written', async () => {
+    callEnrichCodesRequireAniLive.mockReturnValue(true);
+    const writes = setup({ service_contact_phone: '+19415550177' });
+    await enrichFromCall({ customerId: 'c1', extraction, callerPhone: '+19415550177' });
+    expect(writes.find((w) => w.table === 'property_preferences').u.property_gate_code).toBe('4545');
+  });
+
+  test('gate off: written with no caller ID check, as before', async () => {
+    callEnrichCodesRequireAniLive.mockReturnValue(false);
+    const writes = setup();
+    await enrichFromCall({ customerId: 'c1', extraction, callerPhone: '+19415559999' });
+    const pref = writes.find((w) => w.table === 'property_preferences');
+    expect(pref.u.property_gate_code).toBe('4545');
+    expect(pref.u.access_notes).toContain('front gate code is 4545');
   });
 });
 
