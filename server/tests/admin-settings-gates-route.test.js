@@ -2,9 +2,9 @@
  * Settings → Advanced → Features reads GET /api/admin/settings/gates. The page
  * used to read gates from the public /api/health reply, which stopped carrying
  * them in #2853, so the tab sat empty and every cron badge read "Off". This
- * pins the replacement: owner-only, one row per gates-map entry, each tied to
- * the GATE_ variable its value expression reads (the last one; earlier ones are
- * prerequisites), never to a GATE_ named only in a comment.
+ * pins the replacement: owner-only, one row per catalogue GATE_ variable with
+ * what it is set to now, never a value that is not a plain switch word or a
+ * timestamp, and no claim about whether the feature runs.
  */
 const express = require('express');
 
@@ -39,209 +39,76 @@ afterAll(() => new Promise((resolve) => server.close(resolve)));
 
 const get = (role) => fetch(`${base}/api/admin/settings/gates`, role ? { headers: { Authorization: `Bearer ${role}` } } : {});
 
+function withEnv(values, fn) {
+  const saved = Object.fromEntries(Object.keys(values).map((k) => [k, process.env[k]]));
+  try {
+    for (const [k, v] of Object.entries(values)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    return fn();
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+const row = (name) => listGates().find((g) => g.name === name);
+
 describe('GET /api/admin/settings/gates', () => {
   test('refuses a signed-out caller and a non-admin role', async () => {
     expect((await get(null)).status).toBe(401);
     expect((await get('technician')).status).toBe(403);
   });
 
-  test('returns one row per gates-map entry with its live state', async () => {
+  test('returns one no-store row per catalogue gate', async () => {
     const res = await get('admin');
     expect(res.status).toBe(200);
     expect(res.headers.get('cache-control')).toBe('no-store');
     const body = await res.json();
-    const bootRows = body.gates.filter((row) => row.readAt === 'boot');
-    // Every map entry except the retired selfBookDayCap and the two that read
-    // a plain (non-GATE_) variable.
-    expect(bootRows.map((row) => row.key).sort())
-      .toEqual(Object.keys(featureGates.gates)
-        .filter((key) => !['selfBookDayCap', 'opsDigestIngest', 'dunningCustomerScheduleAllowlist'].includes(key)).sort());
-    for (const row of bootRows) {
-      // Off in the map is off; on is on unless a reader prerequisite is not.
-      if (featureGates.gates[row.key] !== true) expect(row.enabled).toBe(false);
-    }
+    expect(body.gates.length).toBe(listGates().length);
+    expect(Object.keys(body.gates[0]).sort()).toEqual(['description', 'name', 'set', 'value']);
   });
 });
 
-describe('listGates variable names', () => {
-  const byKey = new Map(listGates().map((g) => [g.key, g]));
-
-  test('a plain entry names its own variable', () => {
-    expect(byKey.get('cronJobs')).toMatchObject({ envName: 'GATE_CRON_JOBS', requires: [] });
-    expect(byKey.get('seoIntelligence')).toMatchObject({ envName: 'GATE_SEO_INTELLIGENCE', requires: [] });
+describe('listGates', () => {
+  test('lists every catalogue gate except the two scan artifacts, once each', () => {
+    const names = listGates().map((g) => g.name);
+    expect(new Set(names).size).toBe(names.length);
+    const expected = [...featureGates.knownGateCatalog().keys()].filter((n) => !['GATE_RE', 'GATE_X'].includes(n));
+    expect(names.sort()).toEqual(expected.sort());
   });
 
-  test('a compound entry names the variable that spells its key, wherever it sits', () => {
-    // Own variable last: typedDecisionsClef reads GATE_TYPED_DECISIONS first.
-    expect(byKey.get('typedDecisionsClef')).toMatchObject({
-      envName: 'GATE_TYPED_DECISIONS_CLEF',
-      requires: ['GATE_TYPED_DECISIONS'],
+  test('call-time-only gates are listed; retired gates and non-GATE variables are not', () => {
+    expect(row('GATE_ADMIN_MFA')).toBeDefined();
+    expect(row('GATE_SELF_BOOK_DAY_CAP')).toBeUndefined();
+    expect(listGates().every((g) => /^GATE_/.test(g.name))).toBe(true);
+  });
+
+  test('reports the setting exactly: unset, a switch word, a timestamp', () => {
+    withEnv({ GATE_CRON_JOBS: undefined }, () => expect(row('GATE_CRON_JOBS')).toMatchObject({ set: false, value: null }));
+    withEnv({ GATE_CRON_JOBS: 'true' }, () => expect(row('GATE_CRON_JOBS')).toMatchObject({ set: true, value: 'true' }));
+    withEnv({ GATE_REVIEW_AUTO_REPLY: 'shadow' }, () => expect(row('GATE_REVIEW_AUTO_REPLY').value).toBe('shadow'));
+    withEnv({ GATE_SMS_OPERATIONAL_ACTIONS_SINCE: '2026-10-01T00:00:00Z' }, () => {
+      expect(row('GATE_SMS_OPERATIONAL_ACTIONS_SINCE').value).toBe('2026-10-01T00:00:00Z');
     });
-    // Own variable first: callIncidents reads its prerequisite second.
-    expect(byKey.get('callIncidents')).toMatchObject({
-      envName: 'GATE_CALL_INCIDENTS',
-      requires: ['GATE_CALL_SELF_AUDIT'],
+  });
+
+  test('withholds any other value', () => {
+    withEnv({ GATE_ADMIN_MFA: '+19415550100,+19415550101' }, () => {
+      expect(row('GATE_ADMIN_MFA')).toMatchObject({ set: true, value: null });
     });
   });
 
-  test('a getter entry is parsed and does not bleed into the entry above it', () => {
-    expect(byKey.get('visitGroups')).toMatchObject({ envName: 'GATE_VISIT_GROUPS', requires: [] });
-    expect(byKey.get('visitCloseout')).toMatchObject({ envName: 'GATE_VISIT_CLOSEOUT', requires: [] });
-  });
-
-  test('a gate read through a helper function names its variable and prerequisite', () => {
-    expect(byKey.get('termiteAnnualPlan')).toMatchObject({
-      envName: 'GATE_TERMITE_ANNUAL_PLAN',
-      requires: ['GATE_CANCEL_FLOW_V2'],
+  test('makes no claim about whether a feature runs', () => {
+    // GATE_ADMIN_MFA_ENFORCE=true with GATE_ADMIN_MFA unset: the feature is off
+    // (adminMfaEnforceLive), and the row says only what the variable holds.
+    withEnv({ GATE_ADMIN_MFA_ENFORCE: 'true', GATE_ADMIN_MFA: undefined }, () => {
+      expect(featureGates.adminMfaEnforceLive()).toBe(false);
+      expect(row('GATE_ADMIN_MFA_ENFORCE')).toEqual(expect.objectContaining({ set: true, value: 'true' }));
+      expect(row('GATE_ADMIN_MFA_ENFORCE')).not.toHaveProperty('enabled');
     });
-    expect(byKey.get('emailTemplateAutomations')).toMatchObject({ envName: 'GATE_EMAIL_TEMPLATE_AUTOMATIONS', kind: 'mode' });
-  });
-
-  test('no row is a non-GATE variable such as a credential', () => {
-    const rows = listGates();
-    expect(rows.every((g) => /^GATE_/.test(g.envName))).toBe(true);
-    expect(rows.some((g) => g.key === 'opsDigestIngest' || g.key === 'dunningCustomerScheduleAllowlist')).toBe(false);
-  });
-
-  test('mode gates carry their catalogue kind; no row claims inversion', () => {
-    expect(byKey.get('reviewAutoReply')).toMatchObject({ envName: 'GATE_REVIEW_AUTO_REPLY', kind: 'mode' });
-    expect(byKey.get('cronJobs')).toMatchObject({ kind: 'boolean' });
-    // The catalogue's suffix-based inversion guess is wrong for this gate
-    // (true turns the action on), so no row carries an inversion claim.
-    expect(listGates().find((g) => g.envName === 'GATE_IB_STAFF_AUTOPAY_OFF')).not.toHaveProperty('inverted');
-  });
-
-  test('a GATE_ named only in a comment above an entry is not taken', () => {
-    // The comment above appPropertyTexts names GATE_APP_PROPERTY_SCOPE; the
-    // entry must still resolve to the variable in its own value expression.
-    expect(byKey.get('appPropertyTexts')).toMatchObject({ envName: 'GATE_APP_PROPERTY_TEXTS', requires: [] });
-  });
-
-  test('a call-time-only gate with no map entry is listed from the catalogue', () => {
-    const row = () => listGates().find((g) => g.envName === 'GATE_ADMIN_MFA');
-    const saved = process.env.GATE_ADMIN_MFA;
-    try {
-      delete process.env.GATE_ADMIN_MFA;
-      expect(row()).toMatchObject({ readAt: 'call', enabled: false, kind: 'boolean' });
-      process.env.GATE_ADMIN_MFA = 'true';
-      expect(row().enabled).toBe(true);
-      // Its exported reader adminMfaLive() is strict, and decides: 'on' is off.
-      process.env.GATE_ADMIN_MFA = 'on';
-      expect(row()).toMatchObject({ stateFrom: 'reader', enabled: false });
-      process.env.GATE_ADMIN_MFA = 'false';
-      expect(row().enabled).toBe(false);
-    } finally {
-      if (saved === undefined) delete process.env.GATE_ADMIN_MFA;
-      else process.env.GATE_ADMIN_MFA = saved;
-    }
-    // With no exported reader, 'on' and '1' (on for a gateEnvValue reader,
-    // off for a strict one) read unknown: the catalogue cannot prove which.
-    const inferred = () => listGates().find((g) => g.envName === 'GATE_CUSTOMER_APP_NOTIFICATIONS');
-    const savedApp = process.env.GATE_CUSTOMER_APP_NOTIFICATIONS;
-    try {
-      for (const value of ['on', '1']) {
-        process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = value;
-        expect(inferred()).toMatchObject({ stateFrom: 'inferred', enabled: null });
-      }
-      process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
-      expect(inferred().enabled).toBe(true);
-    } finally {
-      if (savedApp === undefined) delete process.env.GATE_CUSTOMER_APP_NOTIFICATIONS;
-      else process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = savedApp;
-    }
-    // Every catalogue gate has its own row, except the two scan artifacts
-    // that are not variables.
-    const rows = listGates();
-    const named = new Set(rows.map((g) => g.envName));
-    for (const name of featureGates.knownGateCatalog().keys()) {
-      expect(named.has(name)).toBe(!['GATE_RE', 'GATE_X'].includes(name));
-    }
-    // A gate the catalogue cannot see the reader for is unknown, never "off".
-    const unverified = [...featureGates.knownGateCatalog().values()].find((d) => d.kind === 'unverified' && !['GATE_RE', 'GATE_X'].includes(d.name));
-    expect(rows.find((g) => g.envName === unverified.name).enabled).toBeNull();
-    const callNames = rows.filter((g) => g.readAt === 'call').map((g) => g.envName);
-    expect(new Set(callNames).size).toBe(callNames.length);
-  });
-
-  test('a timestamp gate is on only for a valid past time', () => {
-    const name = 'GATE_SMS_OPERATIONAL_ACTIONS_SINCE';
-    const row = () => listGates().find((g) => g.envName === name);
-    const saved = process.env[name];
-    try {
-      delete process.env[name];
-      expect(row()).toMatchObject({ readAt: 'call', kind: 'mode', enabled: false });
-      process.env[name] = 'true';
-      expect(row().enabled).toBe(false);
-      process.env[name] = '2026-01-01T00:00:00Z';
-      expect(row().enabled).toBe(true);
-      process.env[name] = '2099-01-01T00:00:00Z';
-      expect(row().enabled).toBeNull();
-    } finally {
-      if (saved === undefined) delete process.env[name];
-      else process.env[name] = saved;
-    }
-  });
-
-  test('a call-time gate lists the prerequisites its reader checks', () => {
-    const row = () => listGates().find((g) => g.envName === 'GATE_ADMIN_MFA_ENFORCE');
-    const saved = { mfa: process.env.GATE_ADMIN_MFA, enforce: process.env.GATE_ADMIN_MFA_ENFORCE };
-    try {
-      process.env.GATE_ADMIN_MFA_ENFORCE = 'true';
-      delete process.env.GATE_ADMIN_MFA;
-      expect(row()).toMatchObject({ requires: ['GATE_ADMIN_MFA'], stateFrom: 'reader', enabled: false });
-      process.env.GATE_ADMIN_MFA = 'true';
-      expect(row().enabled).toBe(true);
-      delete process.env.GATE_ADMIN_MFA_ENFORCE;
-      expect(row().enabled).toBe(false);
-    } finally {
-      for (const [k, v] of [['GATE_ADMIN_MFA', saved.mfa], ['GATE_ADMIN_MFA_ENFORCE', saved.enforce]]) {
-        if (v === undefined) delete process.env[k];
-        else process.env[k] = v;
-      }
-    }
-  });
-
-  test('a helper that merely consumes a gate does not make it a prerequisite', () => {
-    // lawnLightingLive() reads GATE_LAWN_VISIT_ASSESSMENT as its own
-    // prerequisite; the assessment gate itself does not need lighting.
-    const row = listGates().find((g) => g.envName === 'GATE_LAWN_VISIT_ASSESSMENT');
-    expect(row.requires).toEqual([]);
-    expect(listGates().find((g) => g.envName === 'GATE_VISIT_FACTS').requires).toEqual([]);
-    // The gate's own reader still supplies real prerequisites.
-    expect(listGates().find((g) => g.envName === 'GATE_IB_VOID_INVOICE').requires).toEqual(['GATE_IB_PLATFORM']);
-  });
-
-  test('a map row mirroring a compound live reader carries its prerequisites', () => {
-    const row = listGates().find((g) => g.key === 'visitPrepPestRead');
-    expect(row.requires).toEqual(expect.arrayContaining(['GATE_VISIT_PREP_PHOTOS', 'GATE_VISIT_FACTS']));
-    // Own variable on at boot, prerequisites not on: not reported Enabled.
-    if (featureGates.gates.visitPrepPestRead === true) expect(row.enabled).not.toBe(true);
-  });
-
-  test("a gate's exported reader decides its state, gates-map prerequisites included", () => {
-    const names = ['GATE_DUNNING_CUSTOMER_SCHEDULE', 'GATE_DUNNING_LADDER_90', 'GATE_PAY_INCLUDE_BALANCE'];
-    const saved = Object.fromEntries(names.map((n) => [n, process.env[n]]));
-    try {
-      process.env.GATE_DUNNING_CUSTOMER_SCHEDULE = 'true';
-      process.env.GATE_DUNNING_LADDER_90 = 'true';
-      process.env.GATE_PAY_INCLUDE_BALANCE = 'false';
-      const row = listGates().find((g) => g.envName === 'GATE_DUNNING_CUSTOMER_SCHEDULE');
-      expect(row.stateFrom).toBe('reader');
-      expect(row.enabled).toBe(featureGates.dunningCustomerScheduleLive());
-      expect(row.enabled).not.toBe(true);
-    } finally {
-      for (const n of names) {
-        if (saved[n] === undefined) delete process.env[n];
-        else process.env[n] = saved[n];
-      }
-    }
-  });
-
-  test('a gate the catalogue retired is not listed', () => {
-    expect(listGates().some((g) => g.envName === 'GATE_SELF_BOOK_DAY_CAP')).toBe(false);
-  });
-
-  test('every entry resolves to a variable', () => {
-    expect(listGates().filter((g) => !g.envName).map((g) => g.key)).toEqual([]);
   });
 });

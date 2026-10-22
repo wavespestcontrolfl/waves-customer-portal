@@ -416,35 +416,26 @@ function GateListError({ error, onRetry }) {
   );
 }
 
-function gateNotes(g) {
-  return [
-    g.kind === "mode" && "May take a mode value (shadow, auto or a date). Check docs/gates-and-env.md before you set it.",
-    g.modeValue && `Mode now: ${g.modeValue}.`,
-    g.readAt === "call" && g.enabled !== null && g.stateFrom !== "reader" && "Read when the feature runs; shown as the variable is set now.",
-    g.enabled === null && "Read in another file; the state is not known here. See docs/gate-index.md.",
-  ].filter(Boolean);
-}
-
-function gateStateLabel(g) {
-  if (g.enabled === null) return "Unknown";
-  return g.enabled ? "Enabled" : "Disabled";
+// The badge shows the SETTING: what the variable holds in Railway now. It
+// does not claim the feature runs; that depends on its reader and often on
+// other gates (see gate-list.js).
+function GateSettingBadge({ gate }) {
+  if (!gate) return <Badge tone="neutral">Unknown</Badge>;
+  if (!gate.set) return <Badge tone="neutral" dot>Not set</Badge>;
+  const off = gate.value !== null && /^(false|off|0|no)$/i.test(gate.value);
+  return <Badge tone={off ? "neutral" : "strong"} dot>{gate.value ?? "Set (value hidden)"}</Badge>;
 }
 
 function FeatureGatesTab() {
   const { gates, error, retry } = useGateList();
-  const onCount = (gates || []).filter((g) => g.enabled).length;
-  // A few variables feed two runtime keys (GATE_ESTIMATE_ACCEPTANCE_TERMS =
-  // estimateAcceptanceTerms + estimateAcceptanceTermsRequired); name the key
-  // on those rows so two badges under one variable can be told apart.
-  const envCounts = new Map();
-  for (const g of gates || []) envCounts.set(g.envName, (envCounts.get(g.envName) || 0) + 1);
+  const setCount = (gates || []).filter((g) => g.set).length;
   return (
     <Card>
       <CardHeader>
         <CardTitle>Feature gates</CardTitle>
         <p className="mt-1 text-ui-body text-ink-secondary">
-          Live state of every gate registered in the gate catalogue.
-          {gates && ` ${onCount} of ${gates.length} on.`}
+          What each GATE_ variable is set to in Railway now.
+          {gates && ` ${setCount} of ${gates.length} set.`}
         </p>
       </CardHeader>
       <CardBody>
@@ -453,27 +444,20 @@ function FeatureGatesTab() {
         {gates && (
           <div className="divide-y divide-zinc-200">
             {gates.map((g) => (
-              <div key={g.key} className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-3">
+              <div key={g.name} className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-3">
                 <div className="min-w-0 flex-1">
-                  <div className="break-all font-medium text-zinc-900 u-nums">{g.envName || g.key}</div>
-                  {envCounts.get(g.envName) > 1 && (
-                    <div className="mt-1 break-all text-ui-caption text-ink-secondary u-nums">Runtime key: {g.key}</div>
-                  )}
+                  <div className="break-all font-medium text-zinc-900 u-nums">{g.name}</div>
                   {g.description && <div className="mt-1 text-ui-caption text-ink-secondary">{g.description}</div>}
-                  {gateNotes(g).map((note) => <div key={note} className="mt-1 text-ui-caption text-ink-secondary">{note}</div>)}
-                  {g.requires?.length > 0 && (
-                    <div className="mt-1 break-all text-ui-caption text-ink-secondary u-nums">Also needs {g.requires.join(", ")}</div>
-                  )}
                 </div>
-                <Badge tone={g.enabled ? "strong" : "neutral"} dot>{gateStateLabel(g)}</Badge>
+                <GateSettingBadge gate={g} />
               </div>
             ))}
           </div>
         )}
         <p className="mt-4 rounded-md bg-zinc-50 p-3 text-ui-body text-ink-secondary">
-          Gates are controlled via Railway environment variables. To change one:
-          Railway Dashboard → Variables. Most gates turn on with true; check the note
-          on a gate before you set it. A change restarts the server.
+          This shows each setting, not whether its feature runs: many features also need
+          other gates or checks. Look a gate up in docs/gates-and-env.md before you change it.
+          To change one: Railway Dashboard → Variables. A change restarts the server.
         </p>
       </CardBody>
     </Card>
@@ -481,23 +465,15 @@ function FeatureGatesTab() {
 }
 
 // The SEO jobs register only inside the master scheduler, so they run only
-// when both gates are on (server/services/scheduler.js initScheduledJobs).
+// when GATE_CRON_JOBS is on too (server/services/scheduler.js initScheduledJobs).
 const SCHEDULING_GATES = [
   { env: "GATE_CRON_JOBS", label: "Scheduled jobs" },
-  { env: "GATE_SEO_INTELLIGENCE", label: "SEO jobs", needs: "GATE_CRON_JOBS" },
+  { env: "GATE_SEO_INTELLIGENCE", label: "SEO jobs (run only while GATE_CRON_JOBS is on)" },
 ];
-
-function schedulingStatus(row, byEnv) {
-  const g = byEnv.get(row.env);
-  if (!g) return { tone: "neutral", text: "Unknown" };
-  if (!g.enabled) return { tone: "alert", text: "Disabled" };
-  if (row.needs && !byEnv.get(row.needs)?.enabled) return { tone: "alert", text: `Blocked: ${row.needs} is off` };
-  return { tone: "strong", text: "Enabled" };
-}
 
 function SystemTab({ health }) {
   const { gates, error, retry } = useGateList();
-  const byEnv = new Map((gates || []).filter((g) => g.envName).map((g) => [g.envName, g]));
+  const byName = new Map((gates || []).map((g) => [g.name, g]));
   return (
     <div className="space-y-5">
       <Card>
@@ -522,18 +498,15 @@ function SystemTab({ health }) {
         <CardHeader><CardTitle>Scheduled jobs</CardTitle></CardHeader>
         <CardBody className="divide-y divide-zinc-200">
           {error && <GateListError error={error} onRetry={retry} />}
-          {SCHEDULING_GATES.map((row) => {
-            const status = gates ? schedulingStatus(row, byEnv) : { tone: "neutral", text: error ? "Unknown" : "Loading" };
-            return (
-              <div key={row.env} className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-3">
-                <div className="min-w-0">
-                  <div className="font-medium text-zinc-900">{row.label}</div>
-                  <div className="break-all text-ui-caption text-ink-secondary u-nums">{row.env}</div>
-                </div>
-                <Badge tone={status.tone} dot>{status.text}</Badge>
+          {SCHEDULING_GATES.map((row) => (
+            <div key={row.env} className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-3">
+              <div className="min-w-0">
+                <div className="font-medium text-zinc-900">{row.label}</div>
+                <div className="break-all text-ui-caption text-ink-secondary u-nums">{row.env}</div>
               </div>
-            );
-          })}
+              {gates ? <GateSettingBadge gate={byName.get(row.env)} /> : <Badge tone="neutral">{error ? "Unknown" : "Loading"}</Badge>}
+            </div>
+          ))}
         </CardBody>
       </Card>
     </div>
