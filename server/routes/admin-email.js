@@ -413,7 +413,8 @@ router.get('/scheduled', async (req, res) => {
       db('scheduled_emails')
         .where((q) => q.whereIn('status', CANCELLABLE.slice(1))
           .orWhere((c) => c.where('status', 'cancelled').whereNull('restored_at').where('cancelled_at', '>', db.raw("now() - interval '1 day'"))))
-        .orderBy('send_at', 'desc').limit(SETTLED_LIST_CAP),
+        // Newest settlement first (cancel, failure), not send time.
+        .orderBy('updated_at', 'desc').limit(SETTLED_LIST_CAP),
     ]);
     const rows = [...live, ...settled].sort((a, b) => new Date(a.send_at) - new Date(b.send_at));
     res.json({ enabled: true, emails: rows.map(scheduledView) });

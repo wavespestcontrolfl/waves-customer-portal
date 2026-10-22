@@ -209,6 +209,19 @@ jest.setTimeout(30000);
     expect(await row(body.scheduled.id)).toMatchObject({ status: 'cancelled' });
   });
 
+  test('the capped history keeps the newest cancel, whatever its send time', async () => {
+    const far = Array.from({ length: 110 }, (_, i) => ({
+      to_address: `far${i}@example.invalid`, subject: 'Far', body_html: 'x', draft_text: 'x', status: 'cancelled',
+      send_at: database.raw(`now() + interval '${i + 30} days'`), cancelled_at: database.raw("now() - interval '1 hour'"),
+      updated_at: database.raw("now() - interval '1 hour'"), client_key: randomUUID(),
+    }));
+    await database('scheduled_emails').insert(far);
+    const { body } = await queue();
+    await call('POST', `/scheduled/${body.scheduled.id}/cancel`);
+    const listed = (await call('GET', '/scheduled')).body.emails;
+    expect(listed.some((e) => e.id === body.scheduled.id && e.status === 'cancelled')).toBe(true);
+  });
+
   test('old settled rows never hide a queued email from the list', async () => {
     const old = Array.from({ length: 120 }, (_, i) => ({
       to_address: `old${i}@example.invalid`, subject: 'Old', body_html: 'x', draft_text: 'x', status: 'failed',

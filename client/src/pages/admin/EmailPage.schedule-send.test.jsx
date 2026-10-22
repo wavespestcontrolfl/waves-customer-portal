@@ -194,6 +194,38 @@ describe("Email schedule send", () => {
     await waitFor(() => expect(posts("/queued-1/restored")).toHaveLength(1));
   });
 
+  it("an unconfirmed restored mark keeps the row hidden and is sent again on the next reload", async () => {
+    scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "scheduled" }];
+    const base = fetch.getMockImplementation();
+    let markFails = true;
+    fetch.mockImplementation((input, options = {}) => {
+      if (String(input).endsWith("/queued-1/cancel")) {
+        const draft = { ...scheduledRows[0], status: "cancelled" };
+        scheduledRows = [draft];
+        return response({ success: true, draft });
+      }
+      if (String(input).endsWith("/queued-1/restored")) {
+        if (markFails) return response({ error: "down" }, 500);
+        scheduledRows = [];
+        return response({ success: true });
+      }
+      return base(input, options);
+    });
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Scheduled (1)" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel send" }));
+    expect(await screen.findByText("Cancelled. The email is open as a draft.")).toBeInTheDocument();
+    await waitFor(() => expect(posts("/queued-1/restored").length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Open as draft" })).not.toBeInTheDocument());
+    const before = posts("/queued-1/restored").length;
+    markFails = false;
+    fireEvent.click(screen.getByRole("button", { name: "Inbox" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Scheduled" }));
+    await waitFor(() => expect(posts("/queued-1/restored").length).toBeGreaterThan(before));
+    expect(screen.queryByRole("button", { name: "Open as draft" })).not.toBeInTheDocument();
+    expect(JSON.parse(sessionStorage.getItem("waves_email_restored_pending"))).toEqual([]);
+  });
+
   it("keeps a cancelled email listed when the tab cannot save its restored draft", async () => {
     scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "scheduled" }];
     mount();

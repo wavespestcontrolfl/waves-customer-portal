@@ -2,6 +2,26 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Clock } from "lucide-react";
 import { adminFetch } from "./emailApi";
 
+// Cancelled emails already back in the composer whose "restored" mark the
+// server has not confirmed. They stay hidden here, and every reload sends the
+// mark again, so Open as draft can never bring the same text back twice.
+const PENDING_KEY = "waves_email_restored_pending";
+function readPending() {
+  try {
+    const ids = JSON.parse(sessionStorage.getItem(PENDING_KEY) || "[]");
+    return new Set(Array.isArray(ids) ? ids.filter((id) => typeof id === "string") : []);
+  } catch { return new Set(); }
+}
+function savePending(ids) {
+  try { sessionStorage.setItem(PENDING_KEY, JSON.stringify([...ids])); } catch { /* memory copy still hides them */ }
+}
+async function sendRestoredMark(id) {
+  try {
+    const response = await adminFetch(`/api/admin/email/scheduled/${encodeURIComponent(id)}/restored`, { method: "POST" });
+    return response.ok;
+  } catch { return false; }
+}
+
 // The Email > Scheduled list (GATE_EMAIL_SEND_LATER). `enabled` stays false
 // until the server says the gate is on, so the Send arrow and the tab stay
 // hidden with the gate off or the list unreadable.
@@ -10,22 +30,36 @@ export default function useScheduledEmails(active) {
   const [pendingId, setPendingId] = useState(null);
   // Reloads can finish out of order: only the newest one publishes.
   const latest = useRef(0);
+  const pendingRestored = useRef(null);
+  if (pendingRestored.current === null) pendingRestored.current = readPending();
+
+  // Sends every unconfirmed mark again; a confirmed one leaves the set.
+  const flushRestored = useCallback(async () => {
+    const pending = pendingRestored.current;
+    if (!pending.size) return;
+    const done = await Promise.all([...pending].map(async (id) => ((await sendRestoredMark(id)) ? id : null)));
+    done.filter(Boolean).forEach((id) => pending.delete(id));
+    savePending(pending);
+  }, []);
 
   const reload = useCallback(async () => {
     const seq = ++latest.current;
     setState((current) => ({ ...current, loading: true, error: false }));
+    await flushRestored();
     try {
       const response = await adminFetch("/api/admin/email/scheduled");
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
       if (seq !== latest.current) return;
-      setState({ enabled: data.enabled === true, emails: Array.isArray(data.emails) ? data.emails : [], loading: false, error: false });
+      const emails = (Array.isArray(data.emails) ? data.emails : [])
+        .filter((row) => !(row.status === "cancelled" && pendingRestored.current.has(row.id)));
+      setState({ enabled: data.enabled === true, emails, loading: false, error: false });
     } catch {
       if (seq !== latest.current) return;
       // Fail closed: an unverifiable gate hides the arrow and the tab.
       setState((current) => ({ ...current, enabled: false, loading: false, error: true }));
     }
-  }, []);
+  }, [flushRestored]);
 
   useEffect(() => {
     if (active) reload();
@@ -53,10 +87,12 @@ export default function useScheduledEmails(active) {
     }
   };
 
-  // The cancelled email is back in the composer: the server drops it from the
-  // list. A failed mark only leaves the row listed for the day.
+  // The cancelled email is back in the composer: hide it at once and tell the
+  // server, which drops it from the list. An unconfirmed mark is retried on
+  // every reload (see PENDING_KEY).
   const markRestored = async (id) => {
-    try { await adminFetch(`/api/admin/email/scheduled/${encodeURIComponent(id)}/restored`, { method: "POST" }); } catch { /* row stays listed */ }
+    pendingRestored.current.add(id);
+    savePending(pendingRestored.current);
     await reload();
   };
 
