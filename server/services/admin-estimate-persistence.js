@@ -925,6 +925,14 @@ function setupFeeExcludedByMix(oneTime, recurringRows) {
     && !require('./estimate-converter').recurringMixHasMembershipFeeService(recurringRows);
 }
 
+// True only when the recurring mix positively carries the fee (one solo pest
+// or mosquito plan). No recurring rows at all is NOT a fee mix: a marked total
+// keeps the fee out when every recurring service is removed (codex #6438 r1).
+function setupFeeCarriedByMix(recurringRows) {
+  return recurringRows.length > 0
+    && require('./estimate-converter').recurringMixHasMembershipFeeService(recurringRows);
+}
+
 function deriveTotalsFromEstimateData(estimateData) {
   const result = estimateResultRoot(estimateData);
   const recurring = result.recurring && typeof result.recurring === 'object'
@@ -982,7 +990,7 @@ function deriveTotalsFromEstimateData(estimateData) {
   let explicitOneTimeTotal = cachedOneTimeTotal;
   if (cachedOneTimeTotal !== null && membershipFeeExcluded && !totalAlreadyExcludesFee) {
     explicitOneTimeTotal = roundMoney(Math.max(0, cachedOneTimeTotal - cachedMembershipFee));
-  } else if (cachedOneTimeTotal !== null && !membershipFeeExcluded && totalAlreadyExcludesFee) {
+  } else if (cachedOneTimeTotal !== null && totalAlreadyExcludesFee && setupFeeCarriedByMix(recurringRows)) {
     explicitOneTimeTotal = roundMoney(cachedOneTimeTotal + cachedMembershipFee);
   }
   const hasOneTimeDerivedSource = oneTimeRows.length > 0 || oneTimeMembershipFee > 0;
@@ -1040,9 +1048,10 @@ function applyResolvedTotalsToEstimateData(estimateData, totals, quoteRequired) 
   if (result.oneTime && typeof result.oneTime === 'object' && (totals.onetimeTotal > 0 || staleCachedOneTime)) {
     // The stored total no longer carries an excluded fee: mark it so the
     // next derive keeps it as it is (the save path derives twice).
-    if (setupFeeExcludedByMix(result.oneTime, resultRecurringRows(result))) {
+    const rows = resultRecurringRows(result);
+    if (setupFeeExcludedByMix(result.oneTime, rows)) {
       result.oneTime.membershipFeeExcludedFromTotal = true;
-    } else {
+    } else if (setupFeeCarriedByMix(rows)) {
       delete result.oneTime.membershipFeeExcludedFromTotal;
     }
     result.oneTime.total = totals.onetimeTotal;

@@ -528,6 +528,25 @@ describe('admin estimate persistence', () => {
     expect(again.onetime_total).toBe(99);
   });
 
+  test('a marked bundle with every recurring service removed does not take the fee back (codex #6438 r1)', () => {
+    const bundle = buildEstimatePersistenceFields({
+      ...baseBody,
+      estimateData: {
+        result: {
+          oneTime: { items: [{ service: 'flea', name: 'Flea Treatment', price: 150 }], total: 249, membershipFee: 99 },
+          recurring: { grandTotal: 113.1, services: [{ service: 'pest_control', mo: 38.4 }, { service: 'mosquito', mo: 74.7 }] },
+        },
+      },
+    });
+    expect(bundle.onetime_total).toBe(150);
+    const data = JSON.parse(bundle.estimate_data);
+    data.result.recurring = { services: [] };
+    const oneTimeOnly = buildEstimatePersistenceFields({ ...baseBody, estimateData: data });
+    expect(oneTimeOnly.onetime_total).toBe(150);
+    const again = buildEstimatePersistenceFields({ ...baseBody, estimateData: JSON.parse(oneTimeOnly.estimate_data) });
+    expect(again.onetime_total).toBe(150);
+  });
+
   test('the full create path stores the bundle one-time total once reduced', async () => {
     const fixture = makeDatabase({});
     const { estimate } = await createOrReuseAdminEstimate({
