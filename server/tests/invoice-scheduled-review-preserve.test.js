@@ -23,7 +23,7 @@ jest.mock('../services/invoice-email', () => ({
 jest.mock('../services/estimate-deposits', () => ({
   assertInvoiceDepositSettlementReady: jest.fn(async () => {}),
 }));
-jest.mock('../services/review-request', () => ({
+jest.mock('../services/review-request', () => ({ reportTextAnchorForRecord: jest.fn(async () => null), reportTextAnchorForVisit: jest.fn(async () => null),
   enrollPostService: jest.fn(async () => ({ id: 'rr-1' })),
 }));
 jest.mock('../services/invoice-followups', () => ({

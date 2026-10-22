@@ -313,6 +313,7 @@ function calcScore(sentiment, daysAgo, revenue, stage, askCount, svcType) {
 // completion panel explains it: reason, planned/next time, owner action.
 const DECISION_LABELS = {
   smart_window: "Day-0 ask at the smart send window",
+  after_report: "Day-0 ask about 10 minutes after the report text",
   operator_timing: "Day-0 ask at the time chosen on the completion panel",
   customer_requested: "Customer asked for the link — next cadence tick",
   immediate: "First touch sending now",

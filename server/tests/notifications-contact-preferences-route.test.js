@@ -76,6 +76,8 @@ let trxTables;
 function installDb() {
   trxTables = [];
   const trx = Object.assign((table) => { trxTables.push(table); return builder(table); }, { isTransaction: true, raw: async () => {} });
+  // The prune's schema-tolerant statements run in savepoints of the save's transaction.
+  trx.transaction = async (fn) => fn(trx);
   db.mockImplementation((table) => builder(table));
   db.transaction = async (fn) => fn(trx);
   db.raw = async () => {};

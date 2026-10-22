@@ -277,7 +277,6 @@ export function AuthProvider({ children }) {
       if (sessionEpochRef.current !== epoch) return;
       // Cancelled accounts and contact sessions never mount the bell,
       // including on a fresh launch (sessionMountsBell).
-      const contact = isContactSession(data);
       if (!sessionMountsBell(data)) void clearNativeBadge();
       customerRef.current = data;
       setCustomer(data);
@@ -310,13 +309,11 @@ export function AuthProvider({ children }) {
       }
       setError(null);
       // Now authenticated — flush any APNs token captured before login (native
-      // app only; no-op on web). See native/nativePush.js. Never for a
-      // contact session: push rows are keyed by customer, so the device
-      // would receive the holder's billing pushes. A device that still holds
-      // a holder's registration (a logout whose release failed) is released
-      // instead, token-scoped (codex #6363 r4 P1).
-      if (contact) void deactivateNativePushToken();
-      else flushNativePushToken();
+      // app only; no-op on web). See native/nativePush.js. A contact
+      // session's device is stamped with the contact's phone key server-side
+      // (a holder's leftover registration on this device is re-stamped by
+      // the same post) and only ever receives appointment and report pushes.
+      flushNativePushToken();
     } catch (err) {
       // A stale failure must act on NOTHING: in particular, a 401 for a
       // token that has since been replaced would clear the NEW session's

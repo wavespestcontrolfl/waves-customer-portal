@@ -50,6 +50,7 @@ const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
 const { MERGE_RETIRED_PHONE_PREFIX } = require('./merge-retired');
 const { NEW_SOD_COLUMNS, NEW_SOD_DATE_COLUMNS, clearedNewSodColumns } = require('./lawn-sod-holds');
 const { dateOnlyString } = require('../utils/datetime-et');
+const { dedupeNoUnverifiedBackfillLive } = require('../config/feature-gates');
 
 // ---------------------------------------------------------------------------
 // Normalization
@@ -2074,6 +2075,40 @@ function timestampMs(value) {
   return Number.isFinite(ms) ? ms : null;
 }
 
+// An UNVERIFIED anonymous intake shell: a row an anonymous web visitor's own
+// typed contact details created and nobody has worked since. The intake routes
+// stamp it: pipeline_stage stays 'new_lead' (public-quote.js, lead-webhook.js,
+// inspection-public.js all insert it), plus lead_source 'website_quote'
+// (public quote) or 'lead_pipeline' (inspection lead), last_contact_type
+// 'website_quote' / 'form_submission', or a form_id (lead webhook).
+const UNVERIFIED_INTAKE_LEAD_SOURCES = new Set(['website_quote', 'lead_pipeline']);
+const UNVERIFIED_INTAKE_CONTACT_TYPES = new Set(['website_quote', 'form_submission']);
+function isUnverifiedIntakeShell(row) {
+  if (!row || row.pipeline_stage !== 'new_lead') return false;
+  return UNVERIFIED_INTAKE_LEAD_SOURCES.has(row.lead_source)
+    || UNVERIFIED_INTAKE_CONTACT_TYPES.has(row.last_contact_type)
+    || !isEmptyValue(row.form_id);
+}
+
+// GATE_DEDUPE_NO_UNVERIFIED_BACKFILL: the AUTOMATIC merge must not merge an
+// untouched anonymous intake row whose typed email would fill or differ from
+// the kept customer's email. Invoice and report mail go to customers.email, and
+// the visitor typed it unverified. Left for the office: the pair stays on the
+// Duplicates page for a manual merge. Returns the skip reason or null.
+const UNVERIFIED_INTAKE_EMAIL_REASON = 'unverified_intake_email';
+function unverifiedIntakeEmailSkip(winner, loser) {
+  if (!dedupeNoUnverifiedBackfillLive()) return null;
+  const sameEmail = String(winner.email || '').trim().toLowerCase()
+    === String(loser.email || '').trim().toLowerCase();
+  // Loser shell: its email would fill or differ from the kept customer's.
+  if (isUnverifiedIntakeShell(loser) && !isEmptyValue(loser.email) && !sameEmail) return UNVERIFIED_INTAKE_EMAIL_REASON;
+  // Winner shell (an older intake row kept over a newer real one): the
+  // survivor would carry the visitor-typed email forward. Both directions
+  // are left for the office.
+  if (isUnverifiedIntakeShell(winner) && !isEmptyValue(winner.email) && !sameEmail) return UNVERIFIED_INTAKE_EMAIL_REASON;
+  return null;
+}
+
 function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null } = {}) {
   const winnerPriorValues = {};
   const backfills = {};
@@ -3316,6 +3351,12 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     if (mode === 'auto') {
       const blockers = await loserAutoBlockers(trx, loser);
       if (blockers.length) throw new Error(`executeMerge(auto): loser is not a shell (${blockers.join(', ')})`);
+      const emailSkip = unverifiedIntakeEmailSkip(winner, loser);
+      if (emailSkip) {
+        const err = new Error(`executeMerge(auto): ${emailSkip}`);
+        err.skipReason = emailSkip;
+        throw err;
+      }
       if (!namesCompatible(winner, loser)) throw new Error('executeMerge(auto): names conflict');
       if (!ADDRESS_COMPATIBLE.has(addr.status)) throw new Error(`executeMerge(auto): address ${addr.status}`);
     }
@@ -4332,6 +4373,13 @@ async function runAutoMergeSweep({ performedBy = 'auto:dedupe-cron', onlyPair = 
       } catch (e) {
         // A failed green merge means the row changed under us — leave it for
         // the next sweep / the review queue rather than retrying in-loop.
+        // GATE_DEDUPE_NO_UNVERIFIED_BACKFILL: an intentional skip, not a failure.
+        // Ids only in the log; the pair stays on the Duplicates page.
+        if (e.skipReason) {
+          logger.info(`[customer-dedupe] auto-merge ${candidate.loser.id} -> ${group.winner.id} left for the office: ${e.skipReason}`);
+          results.skipped.push({ loserId: candidate.loser.id, winnerId: group.winner.id, tier: 'green', reasons: [e.skipReason] });
+          continue;
+        }
         logger.warn(`[customer-dedupe] auto-merge ${candidate.loser.id} -> ${group.winner.id} failed: ${e.message}`);
         results.skipped.push({ loserId: candidate.loser.id, tier: 'green', reasons: [`merge_failed: ${e.message}`] });
       }
@@ -7401,6 +7449,8 @@ module.exports = {
   previewCollectionCaseReconciliation,
   surplusApprovedCollectionCases,
   predictWinnerBackfills,
+  isUnverifiedIntakeShell,
+  unverifiedIntakeEmailSkip,
   deriveSavedCardStripeCustomer,
   predictSavedCardDemotions,
   predictLoserStateDiscarded,

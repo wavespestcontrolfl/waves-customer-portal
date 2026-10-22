@@ -54,6 +54,20 @@ function Placement({ title, date, start, end, technician, status }) {
   </div>;
 }
 
+// What a no-slot search saw (audit 2026-10-22, finding 6): its window and,
+// per day the slot finder searched, how many open starts it found before any
+// filter. A full week reads as full, not as a fault; a day that is closed or
+// that nobody works is not listed.
+function searchEvidence(search) {
+  if (!search || typeof search !== "object") return [];
+  const day = (d) => formatETDateOnly(d, { weekday: "short", month: "short", day: "numeric" });
+  const days = Object.entries(search.open_starts_by_date || {});
+  return [
+    ["Days searched", search.date_from && search.date_to ? `${day(search.date_from)} – ${day(search.date_to)}` : null],
+    ["Open starts by day", days.length ? days.map(([d, n]) => `${day(d)}: ${n}`).join(" · ") : "No open working day in the window"],
+  ];
+}
+
 function Decision({ log, onRefresh, onSavingChange }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -69,6 +83,7 @@ function Decision({ log, onRefresh, onSavingChange }) {
     ["Capability", constraints.capability_level],
     ["Preferred day", prefs.preferred_day], ["Preferred time", prefs.preferred_time],
     ["Blackout start", prefs.blackout_start], ["Blackout end", prefs.blackout_end],
+    ...searchEvidence(constraints.search),
   ].filter(([, value]) => value != null);
   const changeProtection = async (control, field, value) => {
     onSavingChange(true);
