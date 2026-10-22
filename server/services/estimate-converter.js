@@ -2900,6 +2900,17 @@ function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], es
   if (data.membershipSnapshot && data.membershipSnapshot.isExistingCustomer) return false;
   // Operator-stated waiver: removed from display and never invoiced.
   if (data?.operatorPriceAdjustment?.waiveSetupFee === true) return false;
+  return recurringPlanCarriesSetupFee({ recurringServices: recurring, estimateData: data });
+}
+
+// The plan-mix half of the setup-fee rule, without the per-customer waivers:
+// true only for a solo pest or solo mosquito plan with no standalone
+// supplement. Admin estimate totals use it to drop a fee the builder cached
+// for a bundle (#6438).
+function recurringPlanCarriesSetupFee({ recurringServices = [], estimateData = {} } = {}) {
+  const recurring = Array.isArray(recurringServices) ? recurringServices : [];
+  if (recurring.length === 0) return false;
+  const data = normalizeEstimateData(estimateData);
   // A standalone-scheduling supplement (rodent bait scalar after the
   // pest+rodent route removal) makes the plan a multi-service bundle even
   // with one recurring LINE — and the owner rule says bundles carry no
@@ -9051,6 +9062,7 @@ async function buildSeriesAddressScope(database, estimate, customerId) {
 
 module.exports = EstimateConverter;
 module.exports.reservedAcceptPerVisitSplit = reservedAcceptPerVisitSplit;
+module.exports.recurringPlanCarriesSetupFee = recurringPlanCarriesSetupFee;
 module.exports.autoScheduleUnitPerVisitAmounts = autoScheduleUnitPerVisitAmounts;
 module.exports.unpricedMultiUnitAlertPayload = unpricedMultiUnitAlertPayload;
 module.exports.sendAcceptBell = sendAcceptBell;

@@ -907,17 +907,6 @@ function isApprovedDethatchingManagerRow(row = {}) {
     moneyValue(row.price) !== null;
 }
 
-// The recurring rows a result carries (top level and nested), as the totals
-// derive reads them.
-function resultRecurringRows(result) {
-  const top = result?.recurring && typeof result.recurring === 'object' ? result.recurring : {};
-  const nested = result?.results?.recurring && typeof result.results.recurring === 'object' ? result.results.recurring : {};
-  return [
-    ...(Array.isArray(top.services) ? top.services : []),
-    ...(Array.isArray(nested.services) ? nested.services : []),
-  ];
-}
-
 // A one-time row that IS the WaveGuard setup fee (an explicit setup line some
 // legacy and fallback payloads store instead of oneTime.membershipFee).
 function isWaveGuardSetupRow(row) {
@@ -926,26 +915,43 @@ function isWaveGuardSetupRow(row) {
   return /^waveguard(\s+membership)?\s+setup\b/i.test(String(row.name || row.label || '').trim());
 }
 
-// The setup fee oneTime carries: the cached fee, else its explicit setup rows.
-function cachedSetupFeeAmount(oneTime, oneTimeRows) {
-  const cached = positiveMoney(oneTime?.membershipFee) ?? 0;
-  if (cached > 0) return cached;
-  return roundMoney(sumSignedAmounts(oneTimeRows.filter(isWaveGuardSetupRow), ['price', 'estimatedPrice', 'baseEstimatePrice']));
-}
+const ONE_TIME_ROW_AMOUNT_KEYS = ['price', 'estimatedPrice', 'baseEstimatePrice'];
+// An explicit setup row sold at a net amount bills that amount
+// (estimate-manual-acceptance-effects), so the net aliases come first.
+const SETUP_ROW_NET_AMOUNT_KEYS = ['priceAfterDiscount', 'totalAfterDiscount', 'amount', ...ONE_TIME_ROW_AMOUNT_KEYS];
 
-// True when the plan the rows describe is billed the setup fee: the
-// converter's own rule (shouldIncludeWaveGuardSetupFeeForRecurring), which
-// counts standalone supplements such as rodent bait as a bundle and honors
-// the existing-customer, operator and frozen-quote waivers (codex #6438 r2).
-// No recurring rows at all is NOT a fee plan.
-function setupFeeCarriedByMix(recurringRows, estimateData) {
-  return recurringRows.length > 0
-    && require('./estimate-converter').shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices: recurringRows, estimateData });
-}
-
-// True when oneTime carries a setup fee that the plan is not billed.
-function setupFeeExcludedByMix(feeAmount, recurringRows, estimateData) {
-  return feeAmount > 0 && recurringRows.length > 0 && !setupFeeCarriedByMix(recurringRows, estimateData);
+// The part of a one-time total that is a WaveGuard setup fee the plan is not
+// billed. The fee belongs only to a solo pest or solo mosquito plan (owner
+// 2026-07-10, restated 2026-10-21: "waived if they do multiple services";
+// estimate-converter's recurringPlanCarriesSetupFee, which also counts a
+// standalone rodent bait supplement as a bundle). The builder still caches it
+// for a bundle, so EST-2026-1185 (pest + mosquito) stored onetime_total $99
+// that no page shows and no accept bills. Only the stored totals use this:
+// the estimate data keeps its cached figures, and the public page reconciles
+// the fee from them as before. Per-customer waivers are left out on purpose:
+// the save can drop their evidence (codex #6438 r3).
+function excludedSetupFeeAmount(result, estimateData, grossOneTimeTotal, oneTimeRows) {
+  if (!(grossOneTimeTotal > 0)) return 0;
+  const recurringRows = [
+    ...(Array.isArray(result?.recurring?.services) ? result.recurring.services : []),
+    ...(Array.isArray(result?.results?.recurring?.services) ? result.results.recurring.services : []),
+  ];
+  // No recurring rows at all is a one-time estimate, not a bundle.
+  if (recurringRows.length === 0) return 0;
+  if (require('./estimate-converter').recurringPlanCarriesSetupFee({ recurringServices: recurringRows, estimateData })) return 0;
+  const setupRows = oneTimeRows.filter(isWaveGuardSetupRow);
+  const feeAmount = setupRows.length > 0
+    ? roundMoney(setupRows.reduce((sum, row) => {
+      const key = SETUP_ROW_NET_AMOUNT_KEYS.find((k) => moneyValue(row[k]) !== null);
+      return sum + (key ? moneyValue(row[key]) : 0);
+    }, 0))
+    : (positiveMoney(result?.oneTime?.membershipFee) ?? 0);
+  if (!(feeAmount > 0)) return 0;
+  // Never below the itemized work: a total that already left the fee out
+  // keeps its real charges (codex #6438 r3).
+  const itemizedWork = Math.max(0, sumSignedAmounts(oneTimeRows.filter((row) => !isWaveGuardSetupRow(row)), ONE_TIME_ROW_AMOUNT_KEYS));
+  const net = Math.min(grossOneTimeTotal, Math.max(grossOneTimeTotal - feeAmount, itemizedWork));
+  return roundMoney(Math.max(0, grossOneTimeTotal - net));
 }
 
 function deriveTotalsFromEstimateData(estimateData) {
@@ -974,23 +980,9 @@ function deriveTotalsFromEstimateData(estimateData) {
     ...(Array.isArray(oneTime.items) ? oneTime.items : []),
     ...(Array.isArray(oneTime.specItems) ? oneTime.specItems : []),
   ];
-  const cachedMembershipFee = positiveMoney(oneTime.membershipFee) ?? 0;
-  const setupFeeAmount = cachedSetupFeeAmount(oneTime, oneTimeRows);
-  // The WaveGuard setup fee belongs only to a single-service recurring plan
-  // (estimate-converter's recurringMixHasMembershipFeeService; owner
-  // 2026-07-10, restated 2026-10-21: "waived if they do multiple services").
-  // The builder still caches it in oneTime for a bundle, so a pest + mosquito
-  // estimate stored onetime_total $99 that no page shows and no accept bills
-  // (EST-2026-1185). A recurring mix the rule excludes contributes no fee.
-  const membershipFeeExcluded = setupFeeExcludedByMix(setupFeeAmount, recurringRows, estimateData);
-  // Once the write-back stored the reduced total it marks the row, and a
-  // second derive (the save path derives twice) must not subtract again.
-  const totalAlreadyExcludesFee = oneTime.membershipFeeExcludedFromTotal === true;
-  const oneTimeMembershipFee = membershipFeeExcluded ? 0 : cachedMembershipFee;
-  // An excluded fee stored as its own setup row comes out of the row sum too.
-  const countedOneTimeRows = membershipFeeExcluded ? oneTimeRows.filter((row) => !isWaveGuardSetupRow(row)) : oneTimeRows;
+  const oneTimeMembershipFee = positiveMoney(oneTime.membershipFee) ?? 0;
   const oneTimeRowsTotal = roundMoney(
-    sumSignedAmounts(countedOneTimeRows, ['price', 'estimatedPrice', 'baseEstimatePrice']) +
+    sumSignedAmounts(oneTimeRows, ['price', 'estimatedPrice', 'baseEstimatePrice']) +
     oneTimeMembershipFee
   );
   const topLevelSpecRows = Array.isArray(result.specItems)
@@ -1000,18 +992,8 @@ function deriveTotalsFromEstimateData(estimateData) {
     topLevelSpecRows,
     ['price', 'estimatedPrice', 'baseEstimatePrice']
   );
-  // oneTime.total already carries the cached fee; take it back out when the
-  // mix excludes it (never below zero).
-  const cachedOneTimeTotal = nonNegativeMoney(oneTime.total);
-  // A marked total whose mix now carries the fee again (a bundle cut to pest
-  // only) takes the fee back.
-  let explicitOneTimeTotal = cachedOneTimeTotal;
-  if (cachedOneTimeTotal !== null && membershipFeeExcluded && !totalAlreadyExcludesFee) {
-    explicitOneTimeTotal = roundMoney(Math.max(0, cachedOneTimeTotal - setupFeeAmount));
-  } else if (cachedOneTimeTotal !== null && totalAlreadyExcludesFee && setupFeeCarriedByMix(recurringRows, estimateData)) {
-    explicitOneTimeTotal = roundMoney(cachedOneTimeTotal + setupFeeAmount);
-  }
-  const hasOneTimeDerivedSource = countedOneTimeRows.length > 0 || oneTimeMembershipFee > 0 || (membershipFeeExcluded && oneTimeRows.length > 0);
+  const explicitOneTimeTotal = nonNegativeMoney(oneTime.total);
+  const hasOneTimeDerivedSource = oneTimeRows.length > 0 || oneTimeMembershipFee > 0;
   const derivedOneTimeTotal = (
     hasOneTimeDerivedSource ? nonNegativeMoney(oneTimeRowsTotal) : null
   ) ?? (
@@ -1035,10 +1017,13 @@ function deriveTotalsFromEstimateData(estimateData) {
     positiveMoney(recurring.annualAfterDiscount) ??
     positiveMoney(nestedRecurring.annualAfterDiscount);
 
+  const setupFeeExcluded = excludedSetupFeeAmount(result, estimateData, oneTimeTotal, oneTimeRows);
   return {
     monthlyTotal,
     annualTotal,
-    onetimeTotal: oneTimeTotal,
+    onetimeTotal: setupFeeExcluded > 0 ? roundMoney(oneTimeTotal - setupFeeExcluded) : oneTimeTotal,
+    // What the stored total left out; the estimate data keeps it.
+    onetimeSetupFeeExcluded: setupFeeExcluded,
   };
 }
 
@@ -1051,7 +1036,8 @@ function resolveBillableTotals(body, estimateData, quoteRequired) {
   const onetimeTotal = derived.onetimeTotal ?? fallbackMoney(body.onetimeTotal);
   const annualTotal = derived.annualTotal ??
     (monthlyTotal > 0 ? roundMoney(monthlyTotal * 12) : fallbackMoney(body.annualTotal));
-  return { monthlyTotal, annualTotal, onetimeTotal };
+  const onetimeSetupFeeExcluded = derived.onetimeTotal !== null ? derived.onetimeSetupFeeExcluded : 0;
+  return { monthlyTotal, annualTotal, onetimeTotal, onetimeSetupFeeExcluded };
 }
 
 function applyResolvedTotalsToEstimateData(estimateData, totals, quoteRequired) {
@@ -1059,27 +1045,14 @@ function applyResolvedTotalsToEstimateData(estimateData, totals, quoteRequired) 
   const result = estimateResultRoot(estimateData);
   if (!result || typeof result !== 'object') return;
 
-  // A zero total overwrites a cached positive one too: the only way the
-  // resolved total drops to zero under a positive oneTime.total is the
-  // multi-service setup-fee exclusion in deriveTotalsFromEstimateData.
-  const staleCachedOneTime = totals.onetimeTotal === 0 && Number(result.oneTime?.total) > 0;
-  if (result.oneTime && typeof result.oneTime === 'object' && (totals.onetimeTotal > 0 || staleCachedOneTime)) {
-    // The stored total no longer carries an excluded fee: mark it so the
-    // next derive keeps it as it is (the save path derives twice).
-    const rows = resultRecurringRows(result);
-    const oneTimeRowsForFee = [
-      ...(Array.isArray(result.oneTime.items) ? result.oneTime.items : []),
-      ...(Array.isArray(result.oneTime.specItems) ? result.oneTime.specItems : []),
-    ];
-    const feeAmount = cachedSetupFeeAmount(result.oneTime, oneTimeRowsForFee);
-    if (setupFeeExcludedByMix(feeAmount, rows, estimateData)) {
-      result.oneTime.membershipFeeExcludedFromTotal = true;
-    } else if (setupFeeCarriedByMix(rows, estimateData)) {
-      delete result.oneTime.membershipFeeExcludedFromTotal;
-    }
-    result.oneTime.total = totals.onetimeTotal;
+  // The estimate data keeps the gross one-time total: the public page and
+  // the accept reconcile a bundle's cached setup fee from it themselves.
+  // Only the stored onetime_total and year 1 leave an excluded fee out.
+  const grossOneTimeTotal = roundMoney(fallbackMoney(totals.onetimeTotal) + fallbackMoney(totals.onetimeSetupFeeExcluded));
+  if (result.oneTime && typeof result.oneTime === 'object' && grossOneTimeTotal > 0) {
+    result.oneTime.total = grossOneTimeTotal;
     if (Object.prototype.hasOwnProperty.call(result.oneTime, 'otSubtotal')) {
-      result.oneTime.otSubtotal = roundMoney(totals.onetimeTotal - fallbackMoney(result.oneTime.tmInstall));
+      result.oneTime.otSubtotal = roundMoney(grossOneTimeTotal - fallbackMoney(result.oneTime.tmInstall));
     }
   }
 

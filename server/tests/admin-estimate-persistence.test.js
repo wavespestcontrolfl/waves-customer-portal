@@ -471,8 +471,10 @@ describe('admin estimate persistence', () => {
     });
     expect(fields.onetime_total).toBe(0);
     const stored = JSON.parse(fields.estimate_data);
-    expect(stored.result.oneTime.total).toBe(0);
-    expect(stored.result.oneTime.otSubtotal).toBe(0);
+    // The estimate data keeps its gross figures; the public page reconciles
+    // the cached fee from them (codex #6438 r3: no second subtraction).
+    expect(stored.result.oneTime.total).toBe(99);
+    expect(stored.result.oneTime.otSubtotal).toBe(99);
     expect(stored.result.totals.year1).toBe(1357.2);
   });
 
@@ -509,7 +511,7 @@ describe('admin estimate persistence', () => {
     expect(third.onetime_total).toBe(150);
   });
 
-  test('a marked bundle cut to pest only takes the setup fee back, once', () => {
+  test('a bundle cut to pest only takes the setup fee back', () => {
     const bundle = buildEstimatePersistenceFields({
       ...baseBody,
       estimateData: {
@@ -528,26 +530,70 @@ describe('admin estimate persistence', () => {
     expect(again.onetime_total).toBe(99);
   });
 
-  test('a marked bundle with every recurring service removed does not take the fee back (codex #6438 r1)', () => {
-    const bundle = buildEstimatePersistenceFields({
+  // codex #6438 r3: the save never writes a net total into the estimate
+  // data, so a posted marker means nothing and nothing is subtracted twice.
+  test('a bundle saves the gross one-time total into its estimate data and ignores a posted marker', () => {
+    const fields = buildEstimatePersistenceFields({
       ...baseBody,
       estimateData: {
         result: {
-          oneTime: { items: [{ service: 'flea', name: 'Flea Treatment', price: 150 }], total: 249, membershipFee: 99 },
+          oneTime: { items: [{ service: 'flea', name: 'Flea Treatment', price: 150 }], total: 249, membershipFee: 99, membershipFeeExcludedFromTotal: true },
           recurring: { grandTotal: 113.1, services: [{ service: 'pest_control', mo: 38.4 }, { service: 'mosquito', mo: 74.7 }] },
         },
       },
     });
-    expect(bundle.onetime_total).toBe(150);
-    const data = JSON.parse(bundle.estimate_data);
-    data.result.recurring = { services: [] };
-    const oneTimeOnly = buildEstimatePersistenceFields({ ...baseBody, estimateData: data });
-    expect(oneTimeOnly.onetime_total).toBe(150);
-    const again = buildEstimatePersistenceFields({ ...baseBody, estimateData: JSON.parse(oneTimeOnly.estimate_data) });
-    expect(again.onetime_total).toBe(150);
+    expect(fields.onetime_total).toBe(150);
+    expect(JSON.parse(fields.estimate_data).result.oneTime.total).toBe(249);
   });
 
-  // codex #6438 r2: the converter's own rule decides, so a standalone rodent
+  test('a bundle total that already left the stale fee out keeps its itemized work', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      estimateData: {
+        result: {
+          oneTime: { items: [{ service: 'pest_initial_roach', name: 'Roach Treatment', price: 350 }], total: 350, membershipFee: 99 },
+          recurring: { grandTotal: 113.1, services: [{ service: 'pest_control', mo: 38.4 }, { service: 'mosquito', mo: 74.7 }] },
+        },
+      },
+    });
+    expect(fields.onetime_total).toBe(350);
+  });
+
+  test('an explicit setup row sold at a net amount comes out at that amount', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      estimateData: {
+        result: {
+          oneTime: {
+            items: [
+              { service: 'waveguard_setup', name: 'WaveGuard setup', price: 99, priceAfterDiscount: 49 },
+              { service: 'pest_initial_roach', name: 'Roach Treatment', price: 350 },
+            ],
+            total: 399,
+            membershipFee: 99,
+          },
+          recurring: { grandTotal: 113.1, services: [{ service: 'pest_control', mo: 38.4 }, { service: 'mosquito', mo: 74.7 }] },
+        },
+      },
+    });
+    expect(fields.onetime_total).toBe(350);
+  });
+
+  test('a solo pest plan keeps the fee in its stored total even with member evidence', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      estimateData: {
+        membershipSnapshot: { isExistingCustomer: true },
+        result: {
+          oneTime: { items: [], total: 99, membershipFee: 99 },
+          recurring: { grandTotal: 38.4, services: [{ service: 'pest_control', name: 'Pest Control', mo: 38.4 }] },
+        },
+      },
+    });
+    expect(fields.onetime_total).toBe(99);
+  });
+
+  // codex #6438 r2: the converter's plan rule decides, so a standalone rodent
   // bait supplement makes a one-line pest plan a bundle, and a setup fee stored
   // as its own row comes out too.
   test('pest plus a standalone rodent bait supplement stores no setup fee', () => {
