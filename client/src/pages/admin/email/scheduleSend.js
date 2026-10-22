@@ -24,7 +24,12 @@ export function formatSendAt(value) {
 // The earliest value the date-and-time picker offers: the next whole minute
 // plus two, so the server's one-minute floor still holds when the operator
 // takes a moment (a picker value has no seconds).
+// A wall-clock minute that happens twice (the fall-back hour) is refused by
+// the server, so the minimum moves past it.
 export function earliestPick(now = new Date()) {
-  const nextMinute = Math.ceil(now.getTime() / 60000) * 60000;
-  return etDatetimeLocalValue(new Date(nextMinute + 2 * 60 * 1000));
+  const hour = 60 * 60 * 1000;
+  const wall = (ms) => etDatetimeLocalValue(new Date(ms));
+  let pick = Math.ceil(now.getTime() / 60000) * 60000 + 2 * 60 * 1000;
+  while (wall(pick - hour) === wall(pick) || wall(pick + hour) === wall(pick)) pick += 60 * 1000;
+  return wall(pick);
 }

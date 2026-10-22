@@ -42,6 +42,7 @@ const gmail = require('../services/email/gmail-client');
 const { notifyAdmin } = require('../services/notification-service');
 const { sendDueScheduledEmails } = require('../services/email/scheduled-email-sender');
 const migration = require('../models/migrations/20261022130000_scheduled_emails');
+const restoredMigration = require('../models/migrations/20261022150000_scheduled_emails_restored_at');
 
 jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('scheduled emails on PostgreSQL', () => {
@@ -66,6 +67,7 @@ jest.setTimeout(30000);
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 3 } });
     await database.raw('CREATE SCHEMA ??', [schema]);
     await migration.up(database);
+    await restoredMigration.up(database);
     // Minimal stand-ins for the tables the sender reads beside its own.
     await database.schema.createTable('notifications', (t) => { t.increments('id'); t.string('recipient_type'); t.jsonb('metadata'); });
     await database.schema.createTable('emails', (t) => { t.uuid('id').primary(); t.string('message_id'); });
@@ -195,6 +197,16 @@ jest.setTimeout(30000);
     expect(result.settled).toBe(1);
     expect(gmail.sendMessage).not.toHaveBeenCalled();
     expect(await row(body.scheduled.id)).toMatchObject({ status: 'outcome_unknown' });
+  });
+
+  test('a cancelled email marked restored leaves the list, so its text cannot come back twice', async () => {
+    const { body } = await queue();
+    await call('POST', `/scheduled/${body.scheduled.id}/cancel`);
+    expect((await call('GET', '/scheduled')).body.emails).toEqual([expect.objectContaining({ id: body.scheduled.id, status: 'cancelled' })]);
+    expect((await call('POST', `/scheduled/${body.scheduled.id}/restored`)).status).toBe(200);
+    expect((await call('POST', `/scheduled/${body.scheduled.id}/restored`)).status).toBe(200);
+    expect((await call('GET', '/scheduled')).body.emails).toEqual([]);
+    expect(await row(body.scheduled.id)).toMatchObject({ status: 'cancelled' });
   });
 
   test('old settled rows never hide a queued email from the list', async () => {

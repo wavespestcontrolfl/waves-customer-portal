@@ -412,7 +412,7 @@ router.get('/scheduled', async (req, res) => {
       db('scheduled_emails').whereIn('status', ['scheduled', 'sending']),
       db('scheduled_emails')
         .where((q) => q.whereIn('status', CANCELLABLE.slice(1))
-          .orWhere((c) => c.where('status', 'cancelled').where('cancelled_at', '>', db.raw("now() - interval '1 day'"))))
+          .orWhere((c) => c.where('status', 'cancelled').whereNull('restored_at').where('cancelled_at', '>', db.raw("now() - interval '1 day'"))))
         .orderBy('send_at', 'desc').limit(SETTLED_LIST_CAP),
     ]);
     const rows = [...live, ...settled].sort((a, b) => new Date(a.send_at) - new Date(b.send_at));
@@ -438,6 +438,21 @@ router.post('/scheduled/:id/cancel', async (req, res) => {
   } catch (err) {
     logger.error(`[email] scheduled cancel failed (${err.code || 'error'})`);
     res.status(500).json({ error: 'The scheduled email was not cancelled. Try again.' });
+  }
+});
+
+// POST /scheduled/:id/restored — the browser put a cancelled email back in
+// the composer: drop it from the list so Open as draft cannot bring the same
+// text back a second time. Repeating it is harmless.
+router.post('/scheduled/:id/restored', async (req, res) => {
+  if (!emailSendLaterLive()) return res.status(404).json({ enabled: false, error: 'Schedule send is off.' });
+  try {
+    await db('scheduled_emails').where({ id: req.params.id, status: 'cancelled' }).whereNull('restored_at')
+      .update({ restored_at: db.fn.now(), updated_at: db.fn.now() });
+    res.json({ success: true });
+  } catch (err) {
+    logger.error(`[email] scheduled restore mark failed (${err.code || 'error'})`);
+    res.status(500).json({ error: 'Could not mark the draft as restored.' });
   }
 });
 

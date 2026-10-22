@@ -32,6 +32,7 @@ export default function ScheduledEmails({ scheduled, editor, mailbox }) {
       setFeedback({ error: true, retry: row, message: "Cancelled, but another draft is open. Send or discard it, then tap Try again to get this email back." });
       return;
     }
+    scheduled.markRestored(draft.id);
     if (draft.replyEmailId) mailbox.showEmailById(draft.replyEmailId);
     setFeedback({ message: draft.replyEmailId ? "Cancelled. The reply is back in its conversation as a draft." : "Cancelled. The email is open as a draft." });
   };

@@ -68,10 +68,19 @@ export default function useEmailEditor(userId) {
   // Kept in this tab's sessionStorage, like the drafts, so a reload keeps it.
   const uncertainSchedule = useRef(null);
   if (uncertainSchedule.current === null) uncertainSchedule.current = readUncertainSchedules(userId);
+  // Returns false when the tab could not save it. A key that cannot survive
+  // a reload cannot stop a second row, so the caller must not send.
   const rememberUncertain = (slot, entry) => {
+    const before = uncertainSchedule.current[slot];
     if (entry) uncertainSchedule.current[slot] = entry;
     else delete uncertainSchedule.current[slot];
-    try { sessionStorage.setItem(uncertainKey(userId), JSON.stringify(uncertainSchedule.current)); } catch { /* memory copy still holds */ }
+    try {
+      sessionStorage.setItem(uncertainKey(userId), JSON.stringify(uncertainSchedule.current));
+      return true;
+    } catch {
+      if (entry) uncertainSchedule.current[slot] = before;
+      return false;
+    }
   };
   const setShowCompose = (visible) => {
     if (visible) setSendFeedback((current) => ({ ...current, compose: null }));
@@ -236,7 +245,7 @@ export default function useEmailEditor(userId) {
     const submit = async (clientKey) => {
       // Saved before the request: a reload while it is in flight still finds
       // the key. Cleared only on a definite answer.
-      rememberUncertain(slot, { request, clientKey });
+      if (!rememberUncertain(slot, { request, clientKey })) throw Object.assign(new Error("Key not saved"), { notStarted: true });
       const response = await adminFetch("/api/admin/email/schedule", {
         method: "POST",
         body: JSON.stringify({ ...payload, body: encodeEmailBody(payload.body), draftText: payload.body, sendAt, clientKey }),
@@ -264,14 +273,19 @@ export default function useEmailEditor(userId) {
         setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: settled } }));
         return;
       }
-      clearQueued();
+      const cleared = clearQueued();
+      // Edits made while the request ran were not scheduled: say so.
+      const newer = cleared ? "" : " Your newer edits were not scheduled and are still in the draft.";
       // The first request's email already went out: say so, never "Scheduled".
-      if (result.scheduled?.status === "sent") {
-        setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, message: "This email already went out. It is in the Gmail Sent folder." } }));
+      const done = result.scheduled?.status === "sent"
+        ? "This email already went out. It is in the Gmail Sent folder."
+        : `Scheduled for ${formatSendAt(sendAt)}. Find it under Scheduled.`;
+      setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, message: done + newer } }));
+    } catch (err) {
+      if (err?.notStarted) {
+        setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: "Scheduling did not start: this browser could not save its safety key. Your draft is still here." } }));
         return;
       }
-      setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, message: `Scheduled for ${formatSendAt(sendAt)}. Find it under Scheduled.` } }));
-    } catch {
       setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: "Scheduling was not confirmed. Look under Scheduled before you schedule or send it again." } }));
     } finally {
       setScheduling(null);
@@ -283,9 +297,10 @@ export default function useEmailEditor(userId) {
     if (!composeForm.to.trim() || !composeForm.body.trim()) return undefined;
     const queued = composeForm;
     return scheduleEmail("compose", { to: queued.to.trim(), subject: queued.subject.trim(), body: queued.body }, null, sendAt, () => {
-      if (draftSession.drafts.compose !== queued) return;
+      if (draftSession.drafts.compose !== queued) return false;
       setComposeForm(() => ({ to: "", subject: "", body: "" }));
       setShowCompose(false);
+      return true;
     }, onScheduled);
   };
 
@@ -296,7 +311,9 @@ export default function useEmailEditor(userId) {
       to: email.reply_to || email.from_address, subject: `Re: ${email.subject || ""}`, body: text,
       threadId: email.gmail_thread_id, replyEmailId: email.id,
     }, email.id, sendAt, () => {
-      if (draftSession.drafts.replies[email.id] === text) setReplyDraft(email.id, "");
+      if (draftSession.drafts.replies[email.id] !== text) return false;
+      setReplyDraft(email.id, "");
+      return true;
     }, onScheduled);
   };
 

@@ -53,8 +53,15 @@ export default function useScheduledEmails(active) {
     }
   };
 
+  // The cancelled email is back in the composer: the server drops it from the
+  // list. A failed mark only leaves the row listed for the day.
+  const markRestored = async (id) => {
+    try { await adminFetch(`/api/admin/email/scheduled/${encodeURIComponent(id)}/restored`, { method: "POST" }); } catch { /* row stays listed */ }
+    await reload();
+  };
+
   const queued = state.emails.filter((row) => row.status === "scheduled").length;
-  return { ...state, reload, cancel, pendingId, tabLabel: queued ? `Scheduled (${queued})` : "Scheduled" };
+  return { ...state, reload, cancel, markRestored, pendingId, tabLabel: queued ? `Scheduled (${queued})` : "Scheduled" };
 }
 
 // The Email page's view of schedule send: its tab (between Inbox and Blocked,

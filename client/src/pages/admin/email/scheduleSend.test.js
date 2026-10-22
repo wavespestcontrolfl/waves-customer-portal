@@ -30,4 +30,8 @@ describe("formatSendAt and earliestPick", () => {
     expect(earliestPick(new Date("2026-10-23T13:00:00Z"))).toBe("2026-10-23T09:02");
     expect(earliestPick(new Date("2026-10-23T13:00:59Z"))).toBe("2026-10-23T09:03");
   });
+
+  it("moves the picker minimum past the repeated fall-back hour", () => {
+    expect(earliestPick(new Date("2026-11-01T04:59:00Z"))).toBe("2026-11-01T02:00");
+  });
 });

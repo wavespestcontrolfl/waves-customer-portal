@@ -45,6 +45,7 @@ beforeEach(() => {
       scheduledRows = [{ id: "queued-1", to: body.to, subject: body.subject, draftText: body.draftText, sendAt: "2026-10-23T13:00:00.000Z", status: "scheduled" }];
       return response({ success: true, scheduled: scheduledRows[0] });
     }
+    if (path.endsWith("/queued-1/restored")) return response({ success: true });
     if (path.endsWith("/queued-1/cancel")) {
       const draft = { ...scheduledRows[0], status: "cancelled" };
       scheduledRows = [];
@@ -190,6 +191,39 @@ describe("Email schedule send", () => {
     expect(await screen.findByText("Cancelled. The email is open as a draft.")).toBeInTheDocument();
     expect(screen.getByLabelText(/^Message/)).toHaveValue("Saved text");
     expect(screen.getByLabelText(/^To/)).toHaveValue("customer@example.invalid");
+    await waitFor(() => expect(posts("/queued-1/restored")).toHaveLength(1));
+  });
+
+  it("does not schedule when the tab cannot save the safety key", async () => {
+    mount();
+    await writeEmail();
+    // Fail only the schedule key write; the draft store keeps working.
+    const setItem = Storage.prototype.setItem;
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function failScheduleKey(key, value) {
+      if (/schedul/i.test(key)) throw new Error("Quota");
+      return setItem.call(this, key, value);
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Tomorrow morning/ }));
+    expect((await screen.findAllByText(/Scheduling did not start/)).length).toBeGreaterThan(0);
+    expect(posts("/email/schedule")).toHaveLength(0);
+    expect(screen.getByLabelText(/^Message/)).toHaveValue("Line one\n<b>two</b>");
+  });
+
+  it("says when edits made during the request were not scheduled", async () => {
+    let finish;
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/email/schedule")
+      ? new Promise((resolve) => { finish = () => resolve(base(input, options)); }) : base(input, options)));
+    mount();
+    await writeEmail();
+    fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Tomorrow morning/ }));
+    await waitFor(() => expect(finish).toBeTypeOf("function"));
+    fireEvent.change(screen.getByLabelText(/^Message/), { target: { value: "Edited later" } });
+    finish();
+    expect((await screen.findAllByText(/Your newer edits were not scheduled/)).length).toBeGreaterThan(0);
+    expect(screen.getByLabelText(/^Message/)).toHaveValue("Edited later");
   });
 
   it("never cancels over a new email in progress", async () => {
