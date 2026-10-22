@@ -474,20 +474,38 @@ function cityIsTyped(customer, marked) {
   });
 }
 
-// Was a qualifier typed after a name: "in <place>", "of <place>" or ", <place>"? A
-// determiner or a command word after it ("in the morning", ", update ...") is not one.
-// Presence is tracked apart from resolution: a qualifier that resolved to nobody ("in
-// Tampa") is still a qualifier (Codex #6369 r15).
-const NON_PLACE_WORDS = new Set(['the', 'a', 'an', 'my', 'our', 'this', 'that', 'his', 'her', 'their', 'to', 'and', 'please']);
-function qualifierAfterName(customer, marked) {
-  const [lead, next] = String(nameTail(customer, marked) ?? '').split(' ');
-  return ['in', 'of', COMMA_TOKEN].includes(lead) && Boolean(next) && !NON_PLACE_WORDS.has(next) && !COMMAND_WORD_RE.test(next);
+// ONE place-qualifier test, used for a name and for a contact alike (Codex #6369 r26). A place
+// phrase is a lead word (in / of / at / from / near / around / by / outside / off / on, or a
+// comma) followed by a word that could be a place. Not a place: a determiner, a command word, a
+// time, a weekday, a month, a number ("at 3pm", "on Tuesday", "in the morning", "from now on"),
+// or the typed customer's own name ("notes on Pat Example"). It counts ANYWHERE in the message,
+// and a qualifier that resolves to nobody ("in Tampa") is still a qualifier (r15).
+const PLACE_LEADS = new Set(['in', 'of', 'at', 'from', 'near', 'around', 'by', 'outside', 'off', 'on', COMMA_TOKEN]);
+const NOT_A_PLACE = new Set([
+  'the', 'a', 'an', 'my', 'our', 'this', 'that', 'his', 'her', 'their', 'its', 'your', 'these', 'those', 'to', 'and', 'please',
+  'now', 'once', 'least', 'most', 'all', 'any', 'each', 'every', 'some', 'no', 'time', 'night', 'noon', 'midnight', 'tonight',
+  'today', 'tomorrow', 'yesterday', 'am', 'pm', 'file', 'hold', 'record', 'account', 'screen', 'page', 'list', 'schedule',
+  'route', 'calendar', 'invoice', 'estimate', 'qqname',
+  'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday', 'mon', 'tue', 'tues', 'wed', 'thu', 'thur', 'thurs', 'fri', 'sat', 'sun',
+  'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december',
+  'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'sept', 'oct', 'nov', 'dec',
+]);
+const couldBeAPlace = word => Boolean(word) && /^\p{L}/u.test(word) && !NOT_A_PLACE.has(word) && !PLACE_LEADS.has(word) && !COMMAND_WORD_RE.test(word);
+
+function placeQualifierPresent(clause, customers = []) {
+  let text = ` ${normalizeName(withoutContacts(clause).replace(/,/g, ` ${COMMA_TOKEN} `))} `;
+  for (const customer of customers) {
+    for (const name of [fullNameKey(customer), normalizeName(customer.first_name), normalizeName(customer.last_name)]) {
+      if (name) text = text.split(` ${name} `).join(' qqname ');
+    }
+  }
+  const words = text.trim().split(' ');
+  return words.some((word, i) => PLACE_LEADS.has(word) && couldBeAPlace(words[i + 1]));
 }
 
 function qualifierTyped(prompt, named) {
   const clause = targetClause(prompt);
-  const marked = normalizeName(withoutContacts(clause).replace(/,/g, ` ${COMMA_TOKEN} `));
-  return [...clause.matchAll(CONTACT_LITERAL_RE)].length > 0 || named.some(customer => qualifierAfterName(customer, marked));
+  return [...clause.matchAll(CONTACT_LITERAL_RE)].length > 0 || placeQualifierPresent(clause, named);
 }
 
 // The distinct phones and emails a clause types, as lookup literals. Collection stops
@@ -568,9 +586,9 @@ async function typedCustomerIds(fullPrompt, namedResult) {
 
 // Does the message carry ANY qualifier beside the name: a phone, an email, a record id, a
 // "First L., City" reply, or city syntax after the name?
-function qualifierPresent(bounded, clause, customer, marked) {
+function qualifierPresent(bounded, clause, customer) {
   return contactLiteralsOf(clause).length > 0 || RECORD_ID_RE.test(clause) || INITIAL_FORM_RE.test(bounded)
-    || qualifierAfterName(customer, marked);
+    || placeQualifierPresent(clause, [customer]);
 }
 const RECORD_ID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 
@@ -591,17 +609,7 @@ async function directGroundedIds(fullPrompt, namedResult, cohort, nameHint) {
   if (!customer) return contactOnlyGroundedIds(bounded, clause, nameHint);
   const full = fullNameKey(customer);
   const typedFull = !others.length && full.includes(' ') && ` ${normalizeName(withoutContacts(clause))} `.includes(` ${full} `);
-  const marked = normalizeName(withoutContacts(clause).replace(/,/g, ` ${COMMA_TOKEN} `));
-  return typedFull && !qualifierPresent(bounded, clause, customer, marked) ? [String(customer.id)] : [];
-}
-
-// Is there a place phrase anywhere in a message that names no customer ("... in Tampa", "... of
-// Venice", "... near Osprey", ", Tampa")? A determiner or a command word after the lead word
-// ("in the morning", ", update ...") is not one (Codex #6369 pre-push audit, r24).
-function placeQualifierPresent(clause) {
-  const words = normalizeName(withoutContacts(clause).replace(/,/g, ` ${COMMA_TOKEN} `)).split(' ');
-  return words.some((word, i) => ['in', 'of', 'near', 'at', COMMA_TOKEN].includes(word)
-    && Boolean(words[i + 1]) && !NON_PLACE_WORDS.has(words[i + 1]) && !COMMAND_WORD_RE.test(words[i + 1]));
+  return typedFull && !qualifierPresent(bounded, clause, customer) ? [String(customer.id)] : [];
 }
 
 // The second simple case: one contact literal, no typed name (a name that was requested but

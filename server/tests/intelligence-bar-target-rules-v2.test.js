@@ -635,6 +635,32 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     }
   });
 
+  test('gate on: ONE place-qualifier test: at / from / near / by / around anywhere in the message removes direct grounding; times, weekdays and determiners do not (Codex #6369 r26)', async () => {
+    process.env[ON] = 'true';
+    customers = [{ id: id(100), first_name: 'Pat', last_name: 'Example', city: 'Venice', phone: '9415550100', email: 'pat@example.test', updated_at: new Date('2026-01-01'), version: '2026-01-01' }];
+    const grounded = async prompt => (await ask(prompt)).groundedCustomerIds;
+    for (const prompt of [
+      'update Pat Example at Tampa phone', 'update Pat Example from Tampa phone', 'update Pat Example near Osprey phone',
+      'update Pat Example by North Port notes', 'update Pat Example around Sarasota notes', 'update Pat Example outside Osprey notes',
+      'update Pat Example in tampa notes', 'update the notes for Pat Example when he is at Osprey', 'update Pat Example notes, then call at Tampa',
+    ]) {
+      expect([prompt, await grounded(prompt)]).toEqual([prompt, []]);
+    }
+    for (const prompt of [
+      'update Pat Example at 3pm', 'update Pat Example on Tuesday', 'update Pat Example in the morning', 'update Pat Example from now on',
+      'update the notes on file for Pat Example', 'update Pat Example in March', 'update Pat Example on the account', 'update Pat Example by tomorrow',
+    ]) {
+      expect([prompt, await grounded(prompt)]).toEqual([prompt, [id(100)]]);
+    }
+    // The same test serves the contact case.
+    customers[0].phone = '9415550100';
+    const direct = async prompt => (await ask(prompt)).groundedCustomerIds;
+    expect(await direct('fix the notes on 941-555-0100 at Tampa')).toEqual([]);
+    expect(await direct('fix the notes on 941-555-0100 from Tampa')).toEqual([]);
+    expect(await direct('fix the notes on 941-555-0100 at 3pm')).toEqual([id(100)]);
+    expect(await direct('fix the notes on 941-555-0100 on Tuesday')).toEqual([id(100)]);
+  });
+
   test('gate on: a city is matched as a WHOLE phrase: "Palm Beach Gardens" is not "Palm Beach" (Codex #6369 r23)', async () => {
     process.env[ON] = 'true';
     customers = sameName(2).map((c, i) => ({ ...c, city: i === 0 ? 'Palm Beach' : 'Venice' }));
