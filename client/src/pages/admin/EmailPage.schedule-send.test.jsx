@@ -614,6 +614,39 @@ describe("Email schedule send", () => {
     expect(screen.getByLabelText(/^Message/)).toHaveValue("Saved text");
   });
 
+  it.each([
+    ["the mark landed (probe says already back in a draft)", "landed"],
+    ["the mark stays unclear", "unclear"],
+  ])("an unclear restore mark keeps the draft when %s", async (_label, mode) => {
+    scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "scheduled" }];
+    const base = fetch.getMockImplementation();
+    let cancels = 0;
+    fetch.mockImplementation((input, options = {}) => {
+      const url = String(input);
+      if (url.endsWith("/queued-1/restored")) return Promise.reject(new TypeError("network"));
+      if (url.endsWith("/queued-1/cancel") && (cancels += 1) > 1) {
+        return mode === "landed" ? response({ error: "This email is already back in a draft.", restored: true }, 409) : Promise.reject(new TypeError("network"));
+      }
+      return base(input, options);
+    });
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Scheduled (1)" }, { timeout: 3000 }));
+    const setItem = Storage.prototype.setItem;
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function failPending(key, value) {
+      if (/restored_pending/.test(key)) throw new Error("Quota");
+      return setItem.call(this, key, value);
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel send" }));
+    expect(await screen.findByText("Cancelled. The email is open as a draft.")).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Message/)).toHaveValue("Saved text");
+    const send = screen.getAllByRole("button", { name: "Send", exact: true }).at(-1);
+    if (mode === "landed") expect(send).not.toBeDisabled();
+    else {
+      expect(send).toBeDisabled();
+      expect(screen.getByText(/The Scheduled list may still offer this email/)).toBeInTheDocument();
+    }
+  });
+
   it("sign-out keeps the restore key, so a cancel whose answer was lost can still be taken back", () => {
     sessionStorage.setItem("waves_email_restored_pending:fixture-schedule-owner", "[\"queued-1\"]");
     sessionStorage.setItem("waves_email_restore_keys:fixture-schedule-owner", "{}");

@@ -41,9 +41,9 @@ export default function ScheduledEmails({ scheduled, editor, mailbox }) {
     // its restore mark kept. Otherwise a reload could lose it, or the listed
     // row could hand the same text out again, so it closes and the row
     // (claimed by this tab) offers it again.
-    const durable = restored.saved && await scheduled.markRestored(draft.id);
-    editor.finishRestore(draft, durable);
-    if (!durable) {
+    const mark = restored.saved ? await scheduled.markRestored(draft.id) : "not_durable";
+    editor.finishRestore(draft, mark);
+    if (mark === "not_durable") {
       setFeedback({ error: true, retry: row, message: "Cancelled, but this browser could not save the draft safely, so it closed again. Tap Try again." });
       return;
     }

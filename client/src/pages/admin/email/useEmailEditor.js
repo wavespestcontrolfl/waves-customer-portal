@@ -58,6 +58,10 @@ function reconcileOutcome(row) {
 // fingerprint matches it, so scheduling it again also waits for the check.
 const MAY_HAVE_SENT = { request: "may_have_sent", clientKey: null };
 
+// The guard on a restored draft whose restore mark is unclear: the list may
+// still offer the same email.
+const RESTORE_UNCONFIRMED = { request: "restore_unconfirmed", clientKey: null };
+
 // The guard on a draft taken over from another tab, which may still hold it.
 const TAKEN_OVER = { request: "taken_over", clientKey: null };
 
@@ -467,11 +471,17 @@ export default function useEmailEditor(userId) {
     const written = setComposeForm(() => ({ to: draft.to, subject: draft.subject === "(no subject)" ? "" : draft.subject, body: draft.draftText }));
     return { saved: written?.saved === true };
   };
-  // Ends the freeze: a durable restore opens the draft for work, any other
-  // outcome takes it back out (it was not editable, so it is unchanged).
-  const finishRestore = (draft, durable) => {
+  // Ends the freeze. "durable" opens the draft for work; "not_durable" takes
+  // it back out (it was not editable, so it is unchanged, and the row still
+  // offers it); "unknown" keeps it, with plain Send waiting for the
+  // operator's check that the Scheduled list does not offer it again.
+  const finishRestore = (draft, mark) => {
     setRestoring(null);
-    if (!durable) { withdrawScheduledDraft(draft); return; }
+    if (mark === "not_durable") { withdrawScheduledDraft(draft); return; }
+    if (mark === "unknown") {
+      const slot = slotOf(draft.replyEmailId);
+      if (!rememberUncertain(slot, RESTORE_UNCONFIRMED)) { uncertainSchedule.current[slot] = RESTORE_UNCONFIRMED; notifyDrafts(); }
+    }
     if (!draft.replyEmailId) setShowCompose(true);
   };
 

@@ -30,6 +30,21 @@ async function sendRestoredMark(id) {
   } catch { return false; }
 }
 
+// After an unclear restore-mark answer, asks the server which side it is on
+// by repeating this tab's cancel: "durable" (409, already back in a draft:
+// the mark landed), "not_durable" (the draft comes back: no mark), else
+// "unknown".
+async function probeRestored(userId, id) {
+  const restoreKey = restoreKeyFor(userId, id);
+  if (!restoreKey) return "unknown";
+  try {
+    const response = await adminFetch(`/api/admin/email/scheduled/${encodeURIComponent(id)}/cancel`, { method: "POST", body: JSON.stringify({ restoreKey }) });
+    const data = await response.json().catch(() => null);
+    if (response.status === 409 && data?.restored === true) return "durable";
+    return response.ok && data?.draft ? "not_durable" : "unknown";
+  } catch { return "unknown"; }
+}
+
 // Per scheduled email, the key this tab claims its text with on Cancel send.
 // Kept in sessionStorage so a retry after a lost answer, even after a reload,
 // sends the same key and gets the draft; another tab's key gets 409.
@@ -142,16 +157,19 @@ export default function useScheduledEmails(active, userId) {
   // Resolves true once the mark is durable: saved in this tab (retried on
   // every reload) or confirmed by the server. Neither means a reload could
   // offer the same text again, so the caller takes the draft back.
+  // Resolves "durable", "not_durable" (the row still offers the text, so the
+  // caller may close the draft), or "unknown" (the server may hold the mark:
+  // closing the draft could lose the text, keeping it could leave a second
+  // copy, so the caller keeps it behind the operator's check).
   const markRestored = async (id) => {
     const pending = pendingRestored.current;
     pending.add(id);
-    let durable = savePending(userId, pending);
-    if (!durable) {
-      durable = await sendRestoredMark(id);
-      if (!durable) pending.delete(id);
-    }
+    if (savePending(userId, pending)) { reload(); return "durable"; }
+    let result = await sendRestoredMark(id) ? "durable" : await probeRestored(userId, id);
+    if (result === "unknown" && await sendRestoredMark(id)) result = "durable";
+    if (result !== "durable") pending.delete(id);
     reload();
-    return durable;
+    return result;
   };
 
   const queued = state.emails.filter((row) => row.status === "scheduled").length;

@@ -496,7 +496,7 @@ async function claimCancelled(id, restoreKey, takeover) {
   if (own) return { draft: own, takenOver: takeover === true };
   const current = await db('scheduled_emails').where({ id }).first('status', 'restored_at');
   if (current?.status !== 'cancelled') return { error: 'This email is already sending or sent, so it cannot be cancelled.' };
-  if (current.restored_at) return { error: 'This email is already back in a draft.' };
+  if (current.restored_at) return { error: 'This email is already back in a draft.', restored: true };
   return { error: 'This email is already open as a draft in another tab or window. Use that draft, or open it here if that tab is gone.', claimedElsewhere: true };
 }
 
@@ -505,8 +505,8 @@ router.post('/scheduled/:id/cancel', async (req, res) => {
   const restoreKey = req.body?.restoreKey;
   if (typeof restoreKey !== 'string' || !RESTORE_KEY_RE.test(restoreKey)) return res.status(400).json({ error: 'restoreKey is required.' });
   try {
-    const { draft, error, claimedElsewhere, takenOver } = await claimCancelled(req.params.id, restoreKey, req.body?.takeover === true);
-    if (error) return res.status(409).json({ error, ...(claimedElsewhere ? { claimedElsewhere } : {}) });
+    const { draft, error, claimedElsewhere, takenOver, restored } = await claimCancelled(req.params.id, restoreKey, req.body?.takeover === true);
+    if (error) return res.status(409).json({ error, ...(claimedElsewhere ? { claimedElsewhere } : {}), ...(restored ? { restored } : {}) });
     res.json({ success: true, draft: { ...scheduledView(draft), ...(takenOver ? { takenOver } : {}) } });
   } catch (err) {
     logger.error(`[email] scheduled cancel failed (${err.code || 'error'})`);
