@@ -3192,122 +3192,14 @@ function ToolLabel({ full, short }) {
   );
 }
 
-// Copies or shares the customer's report link (the glass report and the
-// simple web report both use it). Returns 'copied' when the clipboard fallback
-// ran so the action bar can show feedback. Canceling the native share sheet is
-// not an error and records no event.
-async function shareReportLink(token) {
-  const reportUrl = typeof window !== 'undefined' ? `${window.location.origin}/report/${token}` : `/report/${token}`;
-  try {
-    if (navigator.share) {
-      await navigator.share({ title: 'Waves service report', url: reportUrl });
-      trackReportEvent(token, 'share_link_copied', { method: 'native_share' });
-      return null;
-    }
-  } catch {
-    return null; // share sheet canceled
-  }
-  try {
-    // Optional chaining resolves undefined (no throw) when the Clipboard
-    // API is absent (in-app webviews, non-secure contexts) — never report
-    // "Link copied" without an actual write.
-    if (typeof navigator.clipboard?.writeText !== 'function') return null;
-    await navigator.clipboard.writeText(reportUrl);
-    trackReportEvent(token, 'share_link_copied', { method: 'clipboard' });
-    return 'copied';
-  } catch {
-    return null; // clipboard unavailable
-  }
-}
-
-// The Report Tools bar's own rules. ServiceReportV1 interpolates these same
-// strings at the same places in its sheet; the simple web report (which has no
-// .service-report-v1 sheet) prints them once through REPORT_TOOLS_SHEET.
-const REPORT_TOOLS_BASE_CSS = `
-        .report-action-bar {
-          display: block;
-          /* owner 2026-07-16: the tools card sits almost overlapping the
-             Waves AI strip below it */
-          margin: 0 0 2px;
-          padding: 20px 24px;
-          background: var(--paper, #fff);
-          border: 1px solid var(--line, rgba(4, 57, 94, 0.12));
-          border-radius: 12px;
-        }
-        .report-action-bar .section-eyebrow {
-          margin-bottom: 8px;
-        }
-        .report-action-buttons {
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 12px;
-          margin-top: 16px;
-        }
-        .report-action-buttons > a,
-        .report-action-buttons > button,
-        .report-action-buttons > span {
-          width: 100%;
-        }
-        .report-action-label-short { display: none; }
-`;
-// Very narrow phones (320-374px): even slimmed 2-up columns can't hold the
-// nowrap button labels, so they fall back to a single column there only. The
-// extra .report-action-bar specificity outranks the 760px block's 2-up rule
-// regardless of source order (codex P2 #3038).
-const REPORT_TOOLS_NARROW_CSS = `
-          .report-action-bar .report-action-buttons { grid-template-columns: 1fr; }
-`;
-// Phones show the tools as one row of short labels (owner pick B, 2026-10-03).
-// Column auto-flow keeps the row full when Print is hidden in the app. The
-// .report-action-bar prefix outranks the narrow single-column rule;
-// !important beats the buttons' inline docButton sizing. The tools keep the
-// 44px touch floor; the bar's padding gives it back.
-const REPORT_TOOLS_PHONE_CSS = `
-          .report-action-bar { padding: 16px; }
-          .report-action-buttons { grid-template-columns: 1fr 1fr; gap: 10px; }
-          .report-action-buttons > a,
-          .report-action-buttons > button { padding-left: 10px; padding-right: 10px; }
-          .report-action-bar[aria-label="Report tools"] { padding: 6px 8px; }
-          .report-action-bar .report-action-buttons {
-            grid-template-columns: none;
-            grid-auto-flow: column;
-            grid-auto-columns: minmax(0, 1fr);
-            gap: 6px;
-            margin-top: 0;
-          }
-          .report-action-bar .report-action-buttons > a,
-          .report-action-bar .report-action-buttons > button {
-            min-height: 44px !important;
-            padding: 0 4px !important;
-            font-size: 14px !important;
-          }
-          .report-action-bar .report-action-buttons svg { display: none; }
-          .report-action-label-full {
-            position: absolute;
-            width: 1px;
-            height: 1px;
-            margin: -1px;
-            overflow: hidden;
-            clip: rect(0 0 0 0);
-            white-space: nowrap;
-          }
-          .report-action-label-short { display: inline; }
-`;
-const REPORT_TOOLS_SHEET = `${REPORT_TOOLS_BASE_CSS}
-        @media (max-width: 374px) {${REPORT_TOOLS_NARROW_CSS}        }
-        @media (max-width: 760px) {${REPORT_TOOLS_PHONE_CSS}        }
-        @media print { .report-action-bar { display: none; } }
-`;
-
-function ReportActionBar({ pdfUrl, token, fileName = 'Waves-Service-Report.pdf' }) {
-
+function ReportActionBar({ pdfUrl, token, onShare, fileName = 'Waves-Service-Report.pdf' }) {
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef(null);
   // Clear the copied-feedback timer on unmount so it can't fire setState on
   // an unmounted component.
   useEffect(() => () => window.clearTimeout(copiedTimerRef.current), []);
   const handleShare = async () => {
-    const result = await shareReportLink(token);
+    const result = await onShare();
     if (result === 'copied') {
       setCopied(true);
       window.clearTimeout(copiedTimerRef.current);
@@ -6536,6 +6428,7 @@ function visualProofMomentIntro(moments = []) {
 
 function ServiceReportV1({ data, token, mode = 'live' }) {
   const pdfUrl = data.pdfUrl ? `${API_BASE}${data.pdfUrl.replace(/^\/api/, '')}` : null;
+  const reportUrl = typeof window !== 'undefined' ? `${window.location.origin}/report/${token}` : `/report/${token}`;
   const serviceCoverage = normalizeServiceCoverage(data);
   const hasApplications = (data.applications || []).length > 0;
   const dynamicContext = data.dynamicContext || {};
@@ -6713,6 +6606,32 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
       || data.serviceLine === 'pest')
       && !data.treatmentMap?.traced?.snapshotUrl);
 
+  // Returns 'copied' when the clipboard fallback ran so the action bar can
+  // show feedback. Canceling the native share sheet is not an error and
+  // records no event.
+  const share = async () => {
+    try {
+      if (navigator.share) {
+        await navigator.share({ title: 'Waves service report', url: reportUrl });
+        trackReportEvent(token, 'share_link_copied', { method: 'native_share' });
+        return null;
+      }
+    } catch {
+      return null; // share sheet canceled
+    }
+    try {
+      // Optional chaining resolves undefined (no throw) when the Clipboard
+      // API is absent (in-app webviews, non-secure contexts) — never report
+      // "Link copied" without an actual write.
+      if (typeof navigator.clipboard?.writeText !== 'function') return null;
+      await navigator.clipboard.writeText(reportUrl);
+      trackReportEvent(token, 'share_link_copied', { method: 'clipboard' });
+      return 'copied';
+    } catch {
+      return null; // clipboard unavailable
+    }
+  };
+
   if (mode === 'sms_preview') return <SmsReportPreview data={data} />;
 
   // The technician-traced map mount of the V2 lead layouts. A const so the lawn layout
@@ -6821,7 +6740,20 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
            (audit G-01, DECISIONS 2026-09-11 "R2a"). Only the print-only
            padding override below still targets this class name. */
         .sr-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
-${REPORT_TOOLS_BASE_CSS}        .report-action-title {
+        .report-action-bar {
+          display: block;
+          /* owner 2026-07-16: the tools card sits almost overlapping the
+             Waves AI strip below it */
+          margin: 0 0 2px;
+          padding: 20px 24px;
+          background: var(--paper);
+          border: 1px solid var(--line);
+          border-radius: 12px;
+        }
+        .report-action-bar .section-eyebrow {
+          margin-bottom: 8px;
+        }
+        .report-action-title {
           margin: 8px 0 4px;
           font-family: ${FONTS.serif};
           font-weight: 500;
@@ -6835,6 +6767,18 @@ ${REPORT_TOOLS_BASE_CSS}        .report-action-title {
           font-size: 14px;
           line-height: 1.5;
         }
+        .report-action-buttons {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 12px;
+          margin-top: 16px;
+        }
+        .report-action-buttons > a,
+        .report-action-buttons > button,
+        .report-action-buttons > span {
+          width: 100%;
+        }
+        .report-action-label-short { display: none; }
         .service-report-hero {
           padding: 8px 0 0;
         }
@@ -9521,12 +9465,58 @@ ${REPORT_TOOLS_BASE_CSS}        .report-action-title {
           transform: none;
           box-shadow: none;
         }
-        @media (max-width: 374px) {${REPORT_TOOLS_NARROW_CSS}        }
+        /* Very narrow phones (320-374px): even slimmed 2-up columns can't hold
+           the nowrap button labels — fall back to a single column there only.
+           The extra .report-action-bar specificity outranks the 760px block's
+           2-up rule regardless of source order (codex P2 #3038). */
+        @media (max-width: 374px) {
+          .report-action-bar .report-action-buttons { grid-template-columns: 1fr; }
+        }
         @media (max-width: 760px) {
           .sr-top-inner { align-items: center; flex-direction: row; }
           .sr-actions { width: 100%; justify-content: stretch; }
           .sr-actions a, .sr-actions button { flex: 1; }
-${REPORT_TOOLS_PHONE_CSS}          .service-status-main,
+          .report-action-bar { padding: 16px; }
+          /* Keep the 2×2 grid on phones — four stacked full-width buttons made
+             the utility bar a full screen tall (audit 2026-07-28). Slimmer
+             button padding so "Download PDF" / "Portal Login" fit a half-width
+             column (the doc buttons are nowrap — codex P2 #3038). */
+          .report-action-buttons { grid-template-columns: 1fr 1fr; gap: 10px; }
+          .report-action-buttons > a,
+          .report-action-buttons > button { padding-left: 10px; padding-right: 10px; }
+          /* Owner pick B (2026-10-03): on phones the tools are one row of
+             short labels — PDF / Share / Print / Login — so the greeting
+             and Today's result fit the first screen. Column
+             auto-flow keeps the row full when Print is hidden in the app.
+             The .report-action-bar prefix outranks the 374px single-column
+             rule; !important beats the buttons' inline docButton sizing. The
+             tools keep the 44px touch floor; the bar's padding gives it back. */
+          .report-action-bar[aria-label="Report tools"] { padding: 6px 8px; }
+          .report-action-bar .report-action-buttons {
+            grid-template-columns: none;
+            grid-auto-flow: column;
+            grid-auto-columns: minmax(0, 1fr);
+            gap: 6px;
+            margin-top: 0;
+          }
+          .report-action-bar .report-action-buttons > a,
+          .report-action-bar .report-action-buttons > button {
+            min-height: 44px !important;
+            padding: 0 4px !important;
+            font-size: 14px !important;
+          }
+          .report-action-bar .report-action-buttons svg { display: none; }
+          .report-action-label-full {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0 0 0 0);
+            white-space: nowrap;
+          }
+          .report-action-label-short { display: inline; }
+          .service-status-main,
           .readiness-card-header { flex-direction: column; }
           .sr-pressure { justify-self: stretch; }
           .sr-band { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -9774,7 +9764,7 @@ ${REPORT_TOOLS_PHONE_CSS}          .service-status-main,
             render at the TOP of EVERY service report, above the Waves AI
             bar. */}
         {mode === 'live' && !data.internalOnly && (
-          <ReportActionBar pdfUrl={pdfUrl} token={token} fileName={reportPdfDownloadName(data)} />
+          <ReportActionBar pdfUrl={pdfUrl} token={token} onShare={share} fileName={reportPdfDownloadName(data)} />
         )}
 
         {/* Ask Waves floats with the customer: sticky under the shell header for
@@ -10470,21 +10460,12 @@ function SimpleWebReport({ data, token }) {
   }, [token]);
   return (
     <div style={{ background: glass ? 'transparent' : '#fff', flex: 1 }}>
-      {glass ? (
-        // Owner 2026-10-20: the buttons the glass report had on top (Download
-        // PDF / Share / Print / Portal Login), then Ask Waves, as before. Same
-        // components, same order. Rides GATE_REPORT_GLASS_WEB; gate off keeps
-        // the lone Download PDF link below.
-        <div className="sr-shell" style={{ maxWidth: 760, margin: '0 auto', padding: '16px 16px 0' }}>
-          <style>{REPORT_TOOLS_SHEET}</style>
-          <ReportActionBar pdfUrl={pdfUrl} token={token} fileName={reportPdfDownloadName(data)} />
-          <FloatingAskWaves mode="live" token={token} serviceLine={data.serviceLine} data={data} />
-        </div>
-      ) : pdfUrl ? (
+      {pdfUrl ? (
         <div style={{ maxWidth: 760, margin: '0 auto', padding: '16px 16px 0', display: 'flex', justifyContent: 'flex-end' }}>
           <a
             href={pdfUrl}
             download
+            {...(glass ? { 'data-glass-accent': '' } : {})}
             onClick={(e) => {
               trackReportEvent(token, 'pdf_downloaded');
               // In the Capacitor shell an <a download> dead-ends the webview —
