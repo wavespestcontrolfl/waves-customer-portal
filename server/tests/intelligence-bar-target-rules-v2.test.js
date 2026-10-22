@@ -1339,3 +1339,17 @@ describe('same-name choice marker on the thread (Codex #6369 r16)', () => {
     expect(Context.safeChoiceCity('Fort Myers')).toBe('Fort Myers');
   });
 });
+
+describe('model-context slimming is owner-direct only (Codex #6369 r24)', () => {
+  test('a non-owner context with two candidates reaches the model unchanged', () => {
+    const ModelContext = require('../services/intelligence-bar/model-context');
+    process.env.GATE_IB_TARGET_RULES_V2 = 'true';
+    try {
+      const row = (id) => ({ customer_id: id, label: 'Pat Example', city: 'Venice', address: '1 Synthetic Way', version: 'v1' });
+      const admin = { candidates: [row('a'), row('b')], target: row('a'), targets: [row('a')], page: { ids: {}, records: { visit: { id: 'v' } } } };
+      expect(ModelContext.modelContext(admin)).toBe(admin);
+      const owner = { ...admin, ownerDirect: true };
+      expect(JSON.stringify(ModelContext.modelContext(owner))).not.toContain('1 Synthetic Way');
+    } finally { delete process.env.GATE_IB_TARGET_RULES_V2; }
+  });
+});

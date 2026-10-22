@@ -20,7 +20,8 @@ const slimCustomer = customer => (customer && typeof customer === 'object' ? {
 } : customer);
 
 function modelContext(taskContext) {
-  if (!ibTargetRulesV2Live() || !(taskContext?.candidates?.length > 1)) return taskContext;
+  // Owner-direct requests only: every other admin keeps the legacy context (Codex #6369 r24).
+  if (!ibTargetRulesV2Live() || taskContext?.ownerDirect !== true || !(taskContext?.candidates?.length > 1)) return taskContext;
   const { page = {} } = taskContext;
   return { ...taskContext, candidates: taskContext.candidates.map(slimCustomer),
     target: slimCustomer(taskContext.target), targets: (taskContext.targets || []).map(slimCustomer),
