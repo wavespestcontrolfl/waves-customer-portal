@@ -315,13 +315,27 @@ describe('chip stop names (GATE_BEST_TIMES_CHIP_STOP_NAMES, owner 2026-10-21)', 
     if (ENV === undefined) delete process.env.GATE_BEST_TIMES_CHIP_STOP_NAMES;
     else process.env.GATE_BEST_TIMES_CHIP_STOP_NAMES = ENV;
   });
-  const run = () => buildHintSummary(
-    { summary: true, from: '2026-10-08', to: '2026-10-08', verdictDate: '2026-10-08' },
-    [hour('2026-10-08', '12:00', 34, 19)],
-    {
-      startedAt: Date.now(), today: '2026-10-06', target: { lat: 1, lng: 2 }, picked: null, spanMin: 60, bestRows: true,
-    },
-  );
+  // No network: the road prices and the forecast are stubbed (Codex #6407 r1).
+  const run = async () => {
+    jest.resetModules();
+    jest.doMock('../services/scheduling/hint-road-times', () => ({ priceChipsOnRoads: async (chips) => chips }));
+    jest.doMock('../services/weather-forecast', () => ({ getHourlyRainOutlook: async () => [] }));
+    const hints = require('../services/scheduling/find-time-hints');
+    const { GAP_LEGS: LEGS } = require('../services/scheduling/find-time');
+    const slot = { ...hour('2026-10-08', '12:00', 34, 19), [LEGS]: hour('2026-10-08', '12:00', 34, 19)[GAP_LEGS] };
+    try {
+      return await hints.buildHintSummary(
+        { summary: true, from: '2026-10-08', to: '2026-10-08', verdictDate: '2026-10-08' },
+        [slot],
+        {
+          startedAt: Date.now(), today: '2026-10-06', target: { lat: 1, lng: 2 }, picked: null, spanMin: 60, bestRows: true,
+        },
+      );
+    } finally {
+      jest.dontMock('../services/scheduling/hint-road-times');
+      jest.dontMock('../services/weather-forecast');
+    }
+  };
 
   test('gate on: the summary tells the strip to show the names the chips already carry', async () => {
     process.env.GATE_BEST_TIMES_CHIP_STOP_NAMES = 'true';
