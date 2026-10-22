@@ -232,7 +232,7 @@ describe("Email schedule send", () => {
     expect(keys[2]).not.toBe(keys[1]);
   });
 
-  it("queues again under a fresh key when the server answers with an email cancelled earlier", async () => {
+  it("never re-queues by itself when a retry finds the email cancelled; the next schedule uses a fresh key", async () => {
     let first = true;
     const base = fetch.getMockImplementation();
     fetch.mockImplementation((input, options = {}) => {
@@ -244,12 +244,18 @@ describe("Email schedule send", () => {
     });
     mount();
     await writeEmail();
-    fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
-    fireEvent.click(screen.getByRole("button", { name: /^Tomorrow morning/ }));
+    const pickTomorrow = async () => {
+      fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
+      fireEvent.click(screen.getByRole("button", { name: /^Tomorrow morning/ }));
+    };
+    await pickTomorrow();
+    expect((await screen.findAllByText(/This email was cancelled after an earlier request/)).length).toBeGreaterThan(0);
+    expect(posts("/email/schedule")).toHaveLength(1);
+    expect(screen.getByLabelText(/^Message/)).toHaveValue("Line one\n<b>two</b>");
+    await pickTomorrow();
     await waitFor(() => expect(posts("/email/schedule")).toHaveLength(2));
     const [a, b] = posts("/email/schedule").map(([, options]) => JSON.parse(options.body).clientKey);
     expect(b).not.toBe(a);
-    expect((await screen.findAllByText(/^Scheduled for /)).length).toBeGreaterThan(0);
   });
 
   it("a retry that returns a row the sender already refused keeps the draft and says so", async () => {

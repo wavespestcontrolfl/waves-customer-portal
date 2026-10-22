@@ -41,6 +41,9 @@ function keyLookedUp(result) {
 const SETTLED_MESSAGES = {
   failed: "Gmail refused this email. Your draft is still here.",
   outcome_unknown: "This email may have gone out. Look in the Gmail Sent folder before you send it again.",
+  // Never queued again by itself: its text may already be back in a draft
+  // in another tab, and a second copy could go out.
+  cancelled: "This email was cancelled after an earlier request (look under Scheduled). Your draft is still here: schedule it again if you still want it.",
 };
 
 // The answer to a schedule request that queued (or had already sent) the
@@ -305,10 +308,7 @@ export default function useEmailEditor(userId) {
       return { response, result };
     };
     try {
-      let { response, result } = await submit(prior?.clientKey || crypto.randomUUID());
-      // A remembered key can name an email that was cancelled since: that is
-      // not this request, so queue it again under a fresh key.
-      if (response.ok && result.scheduled?.status === "cancelled") ({ response, result } = await submit(crypto.randomUUID()));
+      const { response, result } = await submit(prior?.clientKey || crypto.randomUUID());
       if (!response.ok) {
         if (keyLookedUp(result)) rememberUncertain(slot, null);
         setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: result.error || "The email was not scheduled. Your draft is still here." } }));
