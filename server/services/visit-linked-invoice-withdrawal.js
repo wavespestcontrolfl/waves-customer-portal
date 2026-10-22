@@ -31,8 +31,14 @@
 //   retryable. Reordering the money paths is deliberately out of scope here (owner ruling 2026-10-03).
 //
 // Not covered, on purpose: a visit-group packet (the packet path owns it), an annual-prepay
-// invoice (the renewal fence owns it), a statement-accrued invoice, and an invoice with no visit
-// linkage at all (a manual or project invoice): there is no visit to resolve a payer for.
+// invoice (the renewal fence owns it) and a statement-accrued invoice.
+//
+// An invoice with NO visit linkage at all (a manual or project invoice, or a record link whose record
+// names no visit) IS covered while GATE_BILL_TO_NO_VISIT_INVOICES is on (owner ruling 2026-10-22, "move"): the Bill-To resolver
+// gives it the customer's default payer (invoice-payer-ownership.js reads it as the payer's), so it
+// moves with the customer default exactly like a visit-linked invoice - withdrawn when a default payer
+// is set, released when it is cleared, fenced and its checkout invalidated on the way. A visit-scoped
+// change (a job's own Bill-To) never reaches it.
 const TERMINAL = ['void', 'refunded', 'canceled', 'cancelled', 'paid', 'prepaid'];
 const NOT_WITHDRAWABLE = [...TERMINAL, 'processing'];
 
@@ -40,15 +46,17 @@ function scopeIsEmpty({ customerId, scheduledServiceId, scheduledServiceIds, pay
   return !customerId && !scheduledServiceId && !(scheduledServiceIds && scheduledServiceIds.length) && !payerId && !invoiceId;
 }
 
-// Invoices that ride a visit with no packet, no statement and no annual-prepay term.
+// Invoices with no packet, no statement and no annual-prepay term: the ones that ride a visit, and (gate on)
+// the ones that ride none, judged through the customer default alone.
+const coversNoVisit = () => require('../config/feature-gates').billToNoVisitInvoicesLive() === true;
 function visitLinkedBase(trx, statusesExcluded) {
-  return trx('invoices').whereNotIn('status', statusesExcluded)
+  const query = trx('invoices').whereNotIn('status', statusesExcluded)
     .whereNull('payer_id').whereNull('payer_statement_id')
     .whereNull('visit_completion_packet_id').whereNull('annual_prepay_term_id')
     // An annual-prepay invoice is identified by the TERM's own link too: some carry a visit link and a NULL
     // annual_prepay_term_id (annual-prepay-renewals.js), and a visit's payer must never withdraw the year.
-    .whereNotIn('id', trx('annual_prepay_terms').whereNotNull('prepay_invoice_id').select('prepay_invoice_id'))
-    .where((q) => q.whereNotNull('scheduled_service_id').orWhereNotNull('service_record_id'));
+    .whereNotIn('id', trx('annual_prepay_terms').whereNotNull('prepay_invoice_id').select('prepay_invoice_id'));
+  return coversNoVisit() ? query : query.where((q) => q.whereNotNull('scheduled_service_id').orWhereNotNull('service_record_id'));
 }
 
 // A SUPERSET prefilter: the live resolver, run per invoice under held rows, is the authority.
@@ -117,10 +125,11 @@ function withPending(state, { visitId, customerId }, pending) {
 
 // The rows the resolver reads, in the packet path's lock order when `lock` (customer, visit, then
 // every payer row FOR SHARE), so a payer assignment serializes behind the decision instead of racing it.
+// visitId null: an invoice that rides no visit, owned through the customer default alone.
 async function readOwnerState(database, invoice, visitId, { lock, pending }) {
   if (lock) await database('customers').where({ id: invoice.customer_id }).forShare().first('id');
-  const visitRow = await (lock ? database('scheduled_services').where({ id: visitId }).forShare() : database('scheduled_services').where({ id: visitId }))
-    .first('id', 'customer_id', 'payer_id', 'self_pay_override');
+  const visitQuery = () => database('scheduled_services').where({ id: visitId });
+  const visitRow = visitId ? await (lock ? visitQuery().forShare() : visitQuery()).first('id', 'customer_id', 'payer_id', 'self_pay_override') : null;
   const customer = await database('customers').where({ id: invoice.customer_id }).first('payer_id');
   // A visit of another customer is ignored by the resolver.
   const visit = visitRow && String(visitRow.customer_id) === String(invoice.customer_id) ? visitRow : null;
@@ -171,7 +180,7 @@ async function ownerTransitions(database, scope = {}, { mode = 'post', pending =
   const out = [];
   for (const row of rows) {
     const visitId = await linkedVisitOf(row, database);
-    if (!visitId) continue;
+    if (!visitId && !coversNoVisit()) continue;
     const { state, activeBefore, activeAfter } = await readOwnerState(database, row, visitId, { lock, pending: mode === 'pre' ? pending : null });
     const ids = { visitId, customerId: row.customer_id };
     let beforeOwner;
@@ -226,9 +235,7 @@ async function recordOwnerPlan(trx, scope, pending = null, { lock = false } = {}
 // update an invoice row (unvoid) takes them first, so it is never holding the invoice while waiting on a
 // payer row that a payer writer holds and wants the invoice for.
 async function lockLinkedOwnershipRows(trx, invoice) {
-  const visitId = await linkedVisitOf(invoice, trx);
-  if (!visitId) return;
-  await readOwnerState(trx, invoice, visitId, { lock: true, pending: null });
+  await readOwnerState(trx, invoice, await linkedVisitOf(invoice, trx), { lock: true, pending: null });
 }
 
 // The visits the fence, withdrawal and release will lock for these customers: the visit every
@@ -307,16 +314,55 @@ async function reconcileLinkedInvoices(trx, scope = {}, { requeue: mayRequeue = 
   return released;
 }
 
-// The visit-linked invoices whose OWN checkout PaymentIntent this Bill-To change invalidates: the
-// invoice moves to a payer. Their client secrets must stop working, because a customer can confirm a
-// pre-issued secret straight with Stripe, past every pay-page check.
+// The invoices whose OWN checkout PaymentIntent this Bill-To change invalidates: the invoice moves to a
+// payer. Their client secrets must stop working, because a customer can confirm a pre-issued secret
+// straight with Stripe, past every pay-page check. Both kinds: the invoices this module withdraws (with
+// or without a visit), and the self-pay combined-visit invoices the packet path withdraws
+// (packetSessionInvoiceIds).
 async function linkedSessionInvoiceIds(database, scope = {}, { pending = null } = {}) {
   // Inside a writer transaction the ownership rows (the pending payer included) are held FOR SHARE
   // before the answer that cancels a checkout is read.
   const transitions = await ownerTransitions(database, scope, { mode: 'pre', pending, lock: database.isTransaction === true, stamped: 'unstamped' });
-  return new Set(transitions
-    .filter((t) => t.moved && t.stripePaymentIntentId && t.afterOwner !== null)
-    .map((t) => String(t.invoiceId)));
+  return new Set([
+    ...transitions.filter((t) => t.moved && t.stripePaymentIntentId && t.afterOwner !== null).map((t) => String(t.invoiceId)),
+    ...await packetSessionInvoiceIds(database, scope, pending),
+  ]);
+}
+
+// The self-pay combined-visit invoices with a checkout that this pending write hands to a payer. The packet
+// path withdraws such an invoice to the FIRST billed visit (in billed order) that resolves to a payer
+// (visit-completion-packets.js liveThirdPartyPayerForPacket); each billed visit is judged here by the same
+// owner answer as above, with the pending write laid over it. With no pending write nothing is predicted.
+async function packetSessionInvoiceIds(database, scope, pending) {
+  if (!pending || scopeIsEmpty(scope)) return [];
+  const { customerId, scheduledServiceId, scheduledServiceIds, payerId, invoiceId } = scope;
+  const visitIds = [scheduledServiceId, ...(scheduledServiceIds || [])].filter(Boolean);
+  const query = database('invoices').whereNotIn('status', TERMINAL).whereNull('payer_id').whereNull('payer_statement_id')
+    .whereNotNull('visit_completion_packet_id').whereNotNull('stripe_payment_intent_id')
+    .where((q) => q.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%'));
+  const itemsOf = (visits) => database('visit_completion_packet_items').whereIn('scheduled_service_id', visits).select('packet_id');
+  if (invoiceId) query.where({ id: invoiceId });
+  if (customerId) query.where({ customer_id: customerId });
+  if (visitIds.length) query.whereIn('visit_completion_packet_id', itemsOf(visitIds));
+  if (payerId) {
+    query.where((q) => q.whereIn('customer_id', database('customers').where({ payer_id: payerId }).select('id'))
+      .orWhereIn('visit_completion_packet_id', itemsOf(database('scheduled_services').where({ payer_id: payerId }).select('id'))));
+  }
+  const rows = await query.orderBy('id').select('id', 'visit_completion_packet_id');
+  const { packetPayload } = require('./visit-completion-packets');
+  const out = [];
+  for (const row of rows) {
+    const packet = await database('visit_completion_packets').where({ id: row.visit_completion_packet_id }).first('payload');
+    const payload = packet ? packetPayload(packet) : null;
+    const billed = Array.isArray(payload?.billingSnapshot?.billedServiceIds) ? payload.billingSnapshot.billedServiceIds
+      : await database('visit_completion_packet_items').where({ packet_id: row.visit_completion_packet_id }).pluck('scheduled_service_id');
+    const owners = new Map((await visitOwnerTransitions(database, billed, { pending, lock: database.isTransaction === true }))
+      .map((o) => [String(o.visitId), o]));
+    const first = (key) => billed.map((id) => owners.get(String(id))?.[key]).find(Boolean) || null;
+    const after = first('afterOwner');
+    if (after && after !== first('beforeOwner')) out.push(String(row.id));
+  }
+  return out;
 }
 
 // The refusal fence, run BEFORE the writer's first Stripe cancel: a visit-linked invoice this change

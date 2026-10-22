@@ -11365,11 +11365,10 @@ const InvoiceService = {
           await trx("scheduled_services").whereIn("id", billedMembers.filter(Boolean)).orderBy("id").forShare().select("id");
         }
       }
-      // A restored invoice that rides a visit WITHOUT a packet (a service-record or direct
-      // visit link) takes the same rows in the same order: the withdrawal below resolves its
-      // live owner under them.
-      if (!own.visit_completion_packet_id && own.customer_id
-        && (own.scheduled_service_id || own.service_record_id)) {
+      // A restored invoice WITHOUT a packet (a service-record or direct visit link, or no visit at
+      // all, owned through the customer default) takes the same rows in the same order: the
+      // withdrawal below resolves its live owner under them.
+      if (!own.visit_completion_packet_id && own.customer_id) {
         // customer -> visit -> every payer row the resolver reads (FOR SHARE), the order every Bill-To
         // writer takes, BEFORE the invoice row below is updated.
         await require("./visit-linked-invoice-withdrawal").lockLinkedOwnershipRows(trx, own);
@@ -11445,9 +11444,10 @@ const InvoiceService = {
         // …and a restored row whose live owner is a payer is withdrawn before
         // it can ever be collected.
         await Packets.withdrawPacketInvoicesForOwner(trx, { customerId: updated.customer_id, includeLinked: false });
-      } else if (updated.customer_id && (updated.scheduled_service_id || updated.service_record_id)) {
+      } else if (updated.customer_id) {
         // The same re-judgement for a restored invoice with no packet: a payer assigned to its
-        // visit while it sat void must not hand the homeowner a collectible link on restore.
+        // visit (or, for one with no visit, to the customer) while it sat void must not hand the
+        // homeowner a collectible link on restore.
         const Linked = require("./visit-linked-invoice-withdrawal");
         await Linked.reconcileLinkedInvoices(trx, { invoiceId: id }, { requeue: false });
         await Linked.withdrawLinkedInvoicesForOwner(trx, { invoiceId: id });
