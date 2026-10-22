@@ -170,7 +170,8 @@ async function sendMembershipFor(engagementToken, eventId, knex = db) {
 /**
  * The URL a send carried for an event, from newsletter_sends.event_url_snapshot
  * (written at send time with the gate on). undefined = no snapshot for this
- * send (sent before the gate), so the caller falls back to the live URL.
+ * send (sent before the gate), so the caller falls back to the live URL;
+ * null = the send has a snapshot but no usable URL for the event (homepage).
  */
 function snapshotUrlFor(snapshot, eventIdLower) {
   let map = snapshot;
@@ -178,7 +179,9 @@ function snapshotUrlFor(snapshot, eventIdLower) {
     try { map = JSON.parse(map); } catch { return undefined; }
   }
   if (!map || typeof map !== 'object' || Array.isArray(map)) return undefined;
-  if (!Object.prototype.hasOwnProperty.call(map, eventIdLower)) return undefined;
+  // A send WITH a snapshot that lacks this event never falls back to the
+  // live URL: that would let a feed re-point the link after all.
+  if (!Object.prototype.hasOwnProperty.call(map, eventIdLower)) return null;
   const url = map[eventIdLower];
   return typeof url === 'string' && /^https?:\/\//i.test(url) ? url : null;
 }
@@ -197,7 +200,16 @@ async function snapshotEventUrlsForSend(send, liveUrlById, knex = db) {
     let map = stored?.event_url_snapshot;
     if (typeof map === 'string') { try { map = JSON.parse(map); } catch { map = null; } }
     if (map && typeof map === 'object' && !Array.isArray(map)) {
-      return new Map(Object.entries(map).map(([k, v]) => [String(k).toLowerCase(), v || null]));
+      // Resumed send: keep every stored URL; an event added to the lineup
+      // since the first batch is added once with its URL as of now.
+      const merged = new Map(Object.entries(map).map(([k, v]) => [String(k).toLowerCase(), v || null]));
+      const added = [...liveUrlById].filter(([k]) => !merged.has(String(k).toLowerCase()));
+      if (added.length) {
+        for (const [k, v] of added) merged.set(String(k).toLowerCase(), v || null);
+        await knex('newsletter_sends').where({ id: send.id })
+          .update({ event_url_snapshot: JSON.stringify(Object.fromEntries(merged)) });
+      }
+      return merged;
     }
     const obj = Object.fromEntries([...liveUrlById].map(([k, v]) => [String(k).toLowerCase(), v || null]));
     await knex('newsletter_sends').where({ id: send.id }).whereNull('event_url_snapshot')

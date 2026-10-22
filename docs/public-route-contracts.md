@@ -3726,8 +3726,8 @@ when the token is a real delivery AND the event is in that send's
 `event_ids` or `alternate_event_ids`; the target is the URL the send
 carried (`newsletter_sends.event_url_snapshot`, written at send time),
 or the live `event_url` for a send made before snapshots existed. An
-unknown token, an event outside the lineup, a snapshot entry with no
-URL, or a membership lookup that fails goes to the homepage
+unknown token, an event outside the lineup, a send whose snapshot lacks
+the event or its URL, or a membership lookup that fails goes to the homepage
 (`https://www.wavespestcontrol.com/`); a non-uuid token goes home before
 any query. A click-row write that fails AFTER membership was verified
 still sends the reader to the event. The per-IP over-budget path records
