@@ -75,4 +75,27 @@ function homeFromMap(points, technicianId) {
   return (points && technicianId != null && points.get(String(technicianId).toLowerCase())) || RouteOptimizer.HQ;
 }
 
-module.exports = { techStartPointsLive, techColumns, techStartPoint, loadTechStartPoint, loadTechStartPoints, homeFromMap, START_COLUMNS };
+// Same point: the office object itself, or equal coordinates.
+function sameStartPoint(a, b) {
+  return a === b || (!!a && !!b && a.lat === b.lat && a.lng === b.lng);
+}
+
+// Commit-time fence for a route plan certified against `planned` (the point the
+// plan was built from). Call it INSIDE the write transaction, after the
+// tech-day locks: a Team-tab start-address edit that lands between the plan and
+// the write must not let a route certified against the old origin be written.
+// Gate on: re-reads the tech's coordinates FOR SHARE (an editor's UPDATE waits
+// for this transaction) and throws `makeError()` when they no longer match.
+// Gate off: no query; throws only if the plan used a non-office point (the gate
+// was flipped off mid-run). The coordinates are never put in the error.
+async function assertStartPointUnchanged(trx, technicianId, planned, makeError) {
+  if (!technicianId) return;
+  if (!techStartPointsLive()) {
+    if (!sameStartPoint(planned, RouteOptimizer.HQ)) throw makeError();
+    return;
+  }
+  const row = await trx('technicians').where({ id: technicianId }).forShare().first(START_COLUMNS);
+  if (!sameStartPoint(techStartPoint(row), planned)) throw makeError();
+}
+
+module.exports = { techStartPointsLive, sameStartPoint, assertStartPointUnchanged, techColumns, techStartPoint, loadTechStartPoint, loadTechStartPoints, homeFromMap, START_COLUMNS };

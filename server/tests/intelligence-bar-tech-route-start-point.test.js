@@ -15,6 +15,8 @@ jest.mock('../services/scheduling/day-stops', () => ({
   dayStopsQuery: jest.fn(),
   guardedCoordSelects: jest.fn(() => []),
 }));
+jest.mock('../services/scheduling/tech-day-lock', () => ({ lockTechDays: jest.fn().mockResolvedValue(undefined) }));
+jest.mock('../services/scheduling/quality-after-change', () => ({ refreshScheduleQualityAfterChange: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../services/route-optimizer', () => ({
   HQ: { lat: 0, lng: 0 },
   haversine: (lat1, lng1, lat2, lng2) => Math.abs(lat1 - lat2) + Math.abs(lng1 - lng2),
@@ -112,4 +114,57 @@ test('gate on: optimize_all_routes mixes every truck into one route and stays at
   process.env.GATE_TECH_START_POINTS = 'true';
   await run('optimize_all_routes');
   expect(startOf()).toEqual([0, 0]);
+});
+
+describe('confirmed card: the start point is fenced at commit', () => {
+  let commitRow;
+  let commitReads;
+  let updates;
+  beforeEach(() => {
+    commitReads = 0;
+    updates = [];
+    commitRow = { start_lat: '5', start_lng: '5' };
+    // dayStopsQuery is awaited directly (plan) and chained .forUpdate() (commit).
+    dayStopsQuery.mockImplementation(() => {
+      const rows = [stop('A', 1, { route_order: 2 }), stop('B', 2, { route_order: 1 })];
+      const builder = Promise.resolve(rows);
+      builder.forUpdate = () => Promise.resolve(rows);
+      return builder;
+    });
+    db.transaction.mockImplementation(async (cb) => cb((table) => {
+      const q = { where: () => q, modify: () => q };
+      if (table === 'technicians') {
+        q.forShare = () => q;
+        q.first = async () => { commitReads += 1; return commitRow; };
+      } else {
+        q.update = async (u) => { updates.push(u); return 1; };
+      }
+      return q;
+    }));
+  });
+  const confirm = () => run('optimize_tech_route', { confirmed: true, _verified_ordered_stops: ['A', 'B'] });
+
+  test('gate on, start point unchanged: the approved order is written after one FOR SHARE re-read', async () => {
+    process.env.GATE_TECH_START_POINTS = 'true';
+    const out = await confirm();
+    expect(out.success).toBe(true);
+    expect(commitReads).toBe(1);
+    expect(updates).toHaveLength(2);
+  });
+
+  test('gate on, address edited after the card: nothing is reordered and the card is stale', async () => {
+    process.env.GATE_TECH_START_POINTS = 'true';
+    commitRow = { start_lat: '6', start_lng: '6' };
+    const out = await confirm();
+    expect(out.preview_changed).toBe(true);
+    expect(updates).toEqual([]);
+    expect(JSON.stringify(out)).not.toMatch(/start_lat|start_lng/);
+  });
+
+  test('gate off: no re-read at commit', async () => {
+    delete process.env.GATE_TECH_START_POINTS;
+    const out = await confirm();
+    expect(out.success).toBe(true);
+    expect(commitReads).toBe(0);
+  });
 });

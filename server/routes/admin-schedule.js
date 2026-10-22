@@ -24,7 +24,7 @@ const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/d
 const { chooseWindowSafeOrder, inProgressStartMin, loadTechDayOrigins, assertTechDayOriginsFresh, driveableStop,
   resolveWindowSafeOrderByTechDay, windowSafeFigures,
   ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, routeWriteGuardSignature } = require('../services/route-reorder');
-const { loadTechStartPoints, homeFromMap } = require('../services/scheduling/tech-start-point');
+const { loadTechStartPoints, homeFromMap, assertStartPointUnchanged } = require('../services/scheduling/tech-start-point');
 const {
   assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning, ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
   parseHHMM, minutesToHHMM,
@@ -22971,6 +22971,9 @@ function assertStillFeasibleNow({ dateStr, RouteOptimizer, result, services, sta
   }
 }
 
+// The 409 every post-lock staleness fence on the optimize buttons raises.
+const staleOptimize = () => Object.assign(new Error('schedule changed while optimizing'), { code: 'STALE_OPTIMIZE' });
+
 /** Operator-facing copy for each refusal the shared decision can return. */
 function optimizeRefusalMessage(reason) {
   if (reason === 'WINDOW_FIT_GATE_OFF') return 'Google\'s route breaks a promised arrival window and the window-fit repair is off — nothing was changed.';
@@ -23120,6 +23123,8 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
       await db.transaction(async (trx) => {
         await lockTechDays(trx, services.map((s) => ({ techId: s.technician_id, date: dateStr })));
         await assertGuardInputsFresh(trx, dateStr, technicianId || null, guardSnapshot);
+        // The start point the route was certified against (one tech only).
+        await assertStartPointUnchanged(trx, technicianId || null, startPoint, staleOptimize);
         // The completed rows the origin came from are outside that fence.
         const freshOrigins = await assertTechDayOriginsFresh(trx, dateStr, techDayOrigins, { technicianId: technicianId || null, now });
         // And TIME has passed: the Routes API call and a contended tech-day
@@ -23328,6 +23333,8 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
         // 5 P2).
         await lockTechDays(trx, [{ techId: techKey, date: dateStr }]);
         await assertGuardInputsFresh(trx, dateStr, technicianId || null, guardSnapshot);
+        // The start point the route was certified against.
+        await assertStartPointUnchanged(trx, technicianId, startPoint, staleOptimize);
         // The completed rows the origin came from are outside that fence.
         const freshOrigins = await assertTechDayOriginsFresh(trx, dateStr, techDayOrigins, { technicianId: technicianId || null, now });
         // And TIME has passed: the Routes API call and a contended tech-day

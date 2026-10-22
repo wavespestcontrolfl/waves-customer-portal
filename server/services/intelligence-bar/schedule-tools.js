@@ -18,7 +18,7 @@ const { resolveWindowSafeOrderByTechDay, windowSafeFigures, inProgressStartMin, 
   assertTechDayOriginsFresh,
   ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, routeWriteGuardSignature } = require('../route-reorder');
 const { probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
-const { techStartPoint } = require('../scheduling/tech-start-point');
+const { techStartPoint, homeFromMap, assertStartPointUnchanged } = require('../scheduling/tech-start-point');
 
 const SCHEDULE_TOOLS = [
   {
@@ -344,6 +344,10 @@ async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, 
   try {
     await db.transaction(async (trx) => {
       await lockTechDays(trx, lockKeys);
+      // The start point the approved order was certified against (one tech
+      // only; a changed address means the card is stale).
+      await assertStartPointUnchanged(trx, technicianId, homeFromMap(techHomes, technicianId),
+        () => Object.assign(new Error('technician start point changed'), { code: 'STALE_OPTIMIZE_SET' }));
       // Newly ADDED stops refuse too (pre-push r15 P1): the approved plan
       // covers the complete eligible set the card showed — a geocoded stop
       // added since the confirm preflight would sit ungoverned beside (or

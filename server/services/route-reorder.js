@@ -49,7 +49,7 @@ const { computeWindowFitOrder, effectiveWindowRange, currentOrder, computeChrono
   simulateArrivalRoute, isCoVisitPair, advanceCoVisit, startCoVisitChain,
   staleOrderReasons, promisedWindowOrder } = require('./route-reorder-window-fit');
 
-const { loadTechStartPoints, homeFromMap } = require('./scheduling/tech-start-point');
+const { loadTechStartPoints, homeFromMap, assertStartPointUnchanged } = require('./scheduling/tech-start-point');
 
 const GOOGLE_WAYPOINT_CAP = 25;
 // The reorder pass models future days, where en_route/on_site can't occur;
@@ -1100,13 +1100,20 @@ function canonicalSourceLabel(repair, sourceField) {
  * swap/rebooker/manual reorder mid-run — the latter caught by the commit
  * guard's route_order re-check).
  */
-async function writeTechDayOrder(conn, { dateStr, techId, techStops, finalOrdered, repair, opts, now, repairGates }) {
+async function writeTechDayOrder(conn, { dateStr, techId, techStops, finalOrdered, repair, opts, now, repairGates, home }) {
   const stale = (msg) => Object.assign(new Error(msg), { code: 'STALE_TECH_DAY' });
   await conn.transaction(async (trx) => {
     await trx.raw(
       'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
       ['slot-reserve', `${techId}:${dateStr}`],
     );
+    // The start point the order was certified against must still be the
+    // tech's (GATE_TECH_START_POINTS; a caller with no plan point, such as the
+    // cleanup script's rollback, passes none and is not fenced).
+    if (home !== undefined) {
+      await assertStartPointUnchanged(trx, techId, home,
+        () => Object.assign(new Error('technician start point changed during the run'), { code: 'START_POINT_CHANGED' }));
+    }
     const live = await trx('scheduled_services')
       .where('scheduled_services.scheduled_date', dateStr)
       .where('scheduled_services.technician_id', techId)
@@ -1232,6 +1239,11 @@ function classifyWriteError(writeErr, { summary, entryBase }) {
     logger.warn(`[route-reorder] ${entryBase.date} tech ${entryBase.technician_id}: superseded during the run — rolled back (${writeErr.message})`);
     return false;
   }
+  if (writeErr.code === 'START_POINT_CHANGED') {
+    summary.skipped.push({ ...entryBase, reason: 'START_POINT_CHANGED', detail: writeErr.message });
+    logger.warn(`[route-reorder] ${entryBase.date} tech ${entryBase.technician_id}: start point changed during the run — rolled back`);
+    return false;
+  }
   if (writeErr.code === 'LOCKED_STOP') {
     summary.skipped.push({ ...entryBase, reason: 'LOCKED_STOP', detail: writeErr.message });
     logger.warn(`[route-reorder] ${entryBase.date} tech ${entryBase.technician_id}: staff-locked — rolled back`);
@@ -1275,7 +1287,7 @@ async function attemptCanonicalizeWrite({ conn, dateStr, techId, techStops, stal
     return { handled: true, failed: false };
   }
   try {
-    await writeTechDayOrder(conn, { dateStr, techId, techStops, finalOrdered: baseline.orderedStops, repair: null, opts, now, repairGates });
+    await writeTechDayOrder(conn, { dateStr, techId, techStops, finalOrdered: baseline.orderedStops, repair: null, opts, now, repairGates, home });
   } catch (writeErr) {
     return { handled: true, failed: classifyWriteError(writeErr, { summary, entryBase }) };
   }
@@ -1459,6 +1471,7 @@ async function runRouteReorder(opts = {}, conn = db) {
     failed: [],
   };
   const techIds = new Set();
+  let startPointsFailed = false;
   let techHomes = null; // start points, loaded once per run (see the per-date loop)
   const qualityEnabled = gateEnvValue('GATE_SCHEDULE_QUALITY_MEASUREMENTS');
   if (qualityEnabled) summary.measurements = [];
@@ -1562,13 +1575,21 @@ async function runRouteReorder(opts = {}, conn = db) {
       // Each technician's start point for this run: ONE query (none with the
       // gate off), read lazily, never logged. A tech missing from the map
       // starts and ends at the office.
-      if (techHomes == null) {
+      // A failed read is not "no points": with the gate on, writing now would
+      // route every tech from the office, so the whole run writes nothing.
+      // (A point that was read and is missing or invalid is the office.)
+      if (techHomes == null && !startPointsFailed) {
         try {
           techHomes = await loadTechStartPoints(conn);
         } catch (homeErr) {
-          techHomes = new Map();
-          logger.warn(`[route-reorder] technician start points unavailable, using the office: ${homeErr.message}`);
+          startPointsFailed = true;
+          logger.error(`[route-reorder] technician start points unavailable, run writes nothing: ${homeErr.message}`);
         }
+      }
+      if (startPointsFailed) {
+        summary.skipped.push({ date: dateStr, reason: 'START_POINTS_UNAVAILABLE', stops: stops.length });
+        status = 'completed_with_errors';
+        continue;
       }
       for (const [techId, techStops] of byTech) {
         techIds.add(techId);
@@ -1824,7 +1845,7 @@ async function runRouteReorder(opts = {}, conn = db) {
           // nothing.
           if (!opts.dryRun) {
             try {
-              await writeTechDayOrder(conn, { dateStr, techId, techStops, finalOrdered, repair, opts, now, repairGates });
+              await writeTechDayOrder(conn, { dateStr, techId, techStops, finalOrdered, repair, opts, now, repairGates, home });
             } catch (writeErr) {
               if (classifyWriteError(writeErr, { summary, entryBase })) status = 'completed_with_errors';
               continue;

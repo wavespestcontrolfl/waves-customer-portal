@@ -40,7 +40,7 @@ const db = require('../models/db');
 const { dayStopsQuery } = require('../services/scheduling/day-stops');
 const RouteOptimizer = require('../services/route-optimizer');
 const routeTiers = require('../services/auto-dispatch/route-tiers');
-const { loadTechStartPoints, homeFromMap } = require('../services/scheduling/tech-start-point');
+const { loadTechStartPoints, homeFromMap, sameStartPoint, assertStartPointUnchanged } = require('../services/scheduling/tech-start-point');
 const { runRouteReorder, chooseWindowSafeOrder, resolveWindowSafeOrderByTechDay, _internals } = require('../services/route-reorder');
 const { computeWindowFitOrder, computeChronologicalRepair } = require('../services/route-reorder-window-fit');
 
@@ -114,6 +114,56 @@ describe('loadTechStartPoints', () => {
     const none = connWith([]);
     expect((await loadTechStartPoints(none.conn, [])).size).toBe(0);
     expect(none.conn).not.toHaveBeenCalled();
+  });
+});
+
+describe('assertStartPointUnchanged (commit-time fence)', () => {
+  const stale = () => Object.assign(new Error('stale'), { code: 'STALE' });
+  function trxWith(row) {
+    const q = { where: jest.fn(() => q), forShare: jest.fn(() => q), first: jest.fn(async () => row) };
+    return { trx: jest.fn(() => q), q };
+  }
+
+  test('sameStartPoint: the office object, or equal coordinates', () => {
+    expect(sameStartPoint(HQ, HQ)).toBe(true);
+    expect(sameStartPoint({ lat: 1, lng: 2 }, { lat: 1, lng: 2 })).toBe(true);
+    expect(sameStartPoint({ lat: 1, lng: 2 }, HQ)).toBe(false);
+    expect(sameStartPoint(null, HQ)).toBe(false);
+  });
+
+  test('gate off: no query; passes for the office, refuses a plan made from a point', async () => {
+    delete process.env.GATE_TECH_START_POINTS;
+    const { trx } = trxWith(HOME_ROW);
+    await expect(assertStartPointUnchanged(trx, 't1', HQ, stale)).resolves.toBeUndefined();
+    await expect(assertStartPointUnchanged(trx, 't1', HOME, stale)).rejects.toMatchObject({ code: 'STALE' });
+    expect(trx).not.toHaveBeenCalled();
+  });
+
+  test('gate on: re-reads the row FOR SHARE; same point passes, an edit refuses', async () => {
+    process.env.GATE_TECH_START_POINTS = 'true';
+    const same = trxWith(HOME_ROW);
+    await expect(assertStartPointUnchanged(same.trx, 't1', HOME, stale)).resolves.toBeUndefined();
+    expect(same.trx).toHaveBeenCalledWith('technicians');
+    expect(same.q.forShare).toHaveBeenCalledTimes(1);
+    expect(same.q.first).toHaveBeenCalledWith(['start_lat', 'start_lng']);
+    const moved = trxWith({ start_lat: '2', start_lng: '3' });
+    await expect(assertStartPointUnchanged(moved.trx, 't1', HOME, stale)).rejects.toMatchObject({ code: 'STALE' });
+    // The planned point was set, then the address was cleared or made invalid.
+    await expect(assertStartPointUnchanged(trxWith({ start_lat: null, start_lng: null }).trx, 't1', HOME, stale)).rejects.toMatchObject({ code: 'STALE' });
+  });
+
+  test('gate on: office plan stays valid while the tech has no point; a newly set point refuses', async () => {
+    process.env.GATE_TECH_START_POINTS = 'true';
+    await expect(assertStartPointUnchanged(trxWith({ start_lat: null, start_lng: null }).trx, 't1', HQ, stale)).resolves.toBeUndefined();
+    await expect(assertStartPointUnchanged(trxWith(undefined).trx, 't1', HQ, stale)).resolves.toBeUndefined();
+    await expect(assertStartPointUnchanged(trxWith(HOME_ROW).trx, 't1', HQ, stale)).rejects.toMatchObject({ code: 'STALE' });
+  });
+
+  test('no technician (whole-board call): nothing to check', async () => {
+    process.env.GATE_TECH_START_POINTS = 'true';
+    const { trx } = trxWith(HOME_ROW);
+    await assertStartPointUnchanged(trx, null, HQ, stale);
+    expect(trx).not.toHaveBeenCalled();
   });
 });
 
@@ -224,8 +274,12 @@ describe('nightly pass starts and ends each tech at their start point', () => {
   let stopsByDate;
   let ledgerInserts;
   let technicianQueries;
+  let freshStart; // tech id -> row the in-transaction FOR SHARE re-read returns
+  let commitReads;
 
   beforeEach(() => {
+    freshStart = { t1: { start_lat: '1', start_lng: '20' }, t2: { start_lat: null, start_lng: null } };
+    commitReads = 0;
     jest.clearAllMocks();
     delete process.env.GATE_ROUTE_REORDER_WINDOW_FIT;
     delete process.env.GATE_DRIVE_TIME_CALIBRATION;
@@ -254,7 +308,12 @@ describe('nightly pass starts and ends each tech at their start point', () => {
       return c;
     });
     db.transaction.mockImplementation(async (cb) => {
-      const trx = () => {
+      const trx = (table) => {
+        if (table === 'technicians') {
+          let id;
+          const t = { where: (f) => { id = f.id; return t; }, forShare: () => t, first: async () => { commitReads += 1; return freshStart[id]; } };
+          return t;
+        }
         const filters = {};
         const c = {
           where: (a, b) => { if (typeof a === 'object') Object.assign(filters, a); else filters[String(a).replace('scheduled_services.', '')] = b; return c; },
@@ -302,7 +361,32 @@ describe('nightly pass starts and ends each tech at their start point', () => {
     expect(ledger().reorders.map((r) => [r.technician_id, r.before_distance_meters, r.after_distance_meters])).toEqual([['t2', 18000, 14000]]);
   });
 
-  test('gate on but the technician read fails: the run goes on from the office and never logs coordinates', async () => {
+  test('gate on, the commit finds the start point edited: that tech-day is skipped START_POINT_CHANGED and nothing is written for it', async () => {
+    process.env.GATE_TECH_START_POINTS = 'true';
+    freshStart.t1 = { start_lat: '1', start_lng: '30' }; // edited since the plan was certified
+    // Make t1's plan worth writing from home: stored A,C,B (40 miles) vs Google C,B,A (36).
+    stopsByDate[DAY] = [
+      stop('t1-A', { lng: 2, route_order: 1 }), stop('t1-C', { lng: 6, route_order: 2 }), stop('t1-B', { lng: 4, route_order: 3 }),
+      ...day('t2'),
+    ];
+    RouteOptimizer.optimizeRoute.mockImplementation(async (stops) => ({
+      orderedStops: [...stops].sort((x, y) => y.lng - x.lng), totalDistanceMeters: 1, totalDurationSeconds: 1, source: 'google_routes_api',
+    }));
+    const res = await runRouteReorder({ now: NOW });
+    expect(commitReads).toBeGreaterThanOrEqual(1);
+    expect(ledger().skips.find((x) => x.technician_id === 't1')).toMatchObject({ reason: 'START_POINT_CHANGED' });
+    expect(ledger().reorders.map((r) => r.technician_id)).toEqual(['t2']); // the untouched tech still writes
+    expect(res.applied).toBe(1);
+  });
+
+  test('gate off: the commit makes no technician read', async () => {
+    delete process.env.GATE_TECH_START_POINTS;
+    await runRouteReorder({ now: NOW });
+    expect(commitReads).toBe(0);
+    expect(technicianQueries).toBe(0);
+  });
+
+  test('gate on but the start-point read fails: the run writes nothing, records START_POINTS_UNAVAILABLE, and logs only the error text', async () => {
     process.env.GATE_TECH_START_POINTS = 'true';
     db.mockImplementation((table) => {
       if (table === 'technicians') throw new Error('boom');
@@ -313,11 +397,14 @@ describe('nightly pass starts and ends each tech at their start point', () => {
       c.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
       return c;
     });
-    await runRouteReorder({ now: NOW });
-    expect(RouteOptimizer.optimizeRoute.mock.calls.every(([, o]) => o.startLat === 0 && o.startLng === 0)).toBe(true);
+    const res = await runRouteReorder({ now: NOW });
+    expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(res.applied).toBe(0);
+    expect(ledger().skips).toContainEqual(expect.objectContaining({ date: DAY, reason: 'START_POINTS_UNAVAILABLE' }));
     const logger = require('../services/logger');
-    expect(logger.warn.mock.calls.map(([m]) => m)).toEqual([
-      '[route-reorder] technician start points unavailable, using the office: boom',
+    expect(logger.error.mock.calls.map(([m]) => m)).toEqual([
+      '[route-reorder] technician start points unavailable, run writes nothing: boom',
     ]);
   });
 });

@@ -1317,6 +1317,8 @@ test('a short leg list does not count as live evidence', async () => {
 // technician query. Staff-only: the point is never in the response.
 describe('technician start point (GATE_TECH_START_POINTS)', () => {
   let techQueries;
+  let commitRow;
+  let commitReads;
   const ENV = process.env.GATE_TECH_START_POINTS;
   beforeEach(() => {
     techQueries = [];
@@ -1331,6 +1333,14 @@ describe('technician start point (GATE_TECH_START_POINTS)', () => {
     });
     stopsByDate[DATE] = [stop('A', { lng: 1, route_order: 2 }), stop('B', { lng: 2, route_order: 1 })];
     mockOptimizerOrder(['A', 'B']);
+    // The commit re-reads the tech's point FOR SHARE inside the transaction.
+    commitRow = { start_lat: '5', start_lng: '5' };
+    commitReads = 0;
+    db.transaction.mockImplementation(async (cb) => cb((table) => {
+      if (table !== 'technicians') return trxTable(table);
+      const t = { where: () => t, forShare: () => t, first: async () => { commitReads += 1; return commitRow; } };
+      return t;
+    }));
   });
   afterEach(() => {
     if (ENV === undefined) delete process.env.GATE_TECH_START_POINTS;
@@ -1376,11 +1386,50 @@ describe('technician start point (GATE_TECH_START_POINTS)', () => {
 
   test('gate on, tech has no usable start point: the office', async () => {
     process.env.GATE_TECH_START_POINTS = 'true';
+    commitRow = { start_lat: 'x', start_lng: '5' }; // still unusable at commit
     const base = db.getMockImplementation();
     db.mockImplementation((table) => (table === 'technicians'
       ? { whereNotNull() { return this; }, whereIn() { return this; }, select: async () => [{ id: 't1', start_lat: 'x', start_lng: '5' }] }
       : base(table)));
     expect((await optimizeRoute({ technicianId: 't1', date: DATE })).status).toBe(200);
     expect(startOf()).toEqual([0, 0]);
+  });
+
+  test('gate on: the start point is unchanged at commit - written, after one FOR SHARE re-read', async () => {
+    process.env.GATE_TECH_START_POINTS = 'true';
+    expect((await optimizeRoute({ technicianId: 't1', date: DATE })).status).toBe(200);
+    expect(commitReads).toBe(1);
+    expect(trxUpdates).toHaveLength(2);
+  });
+
+  test('gate on: /optimize-route refuses (409 stale) when the start address was edited after the plan; nothing written', async () => {
+    process.env.GATE_TECH_START_POINTS = 'true';
+    commitRow = { start_lat: '6', start_lng: '6' };
+    const { status, body } = await optimizeRoute({ technicianId: 't1', date: DATE });
+    expect(status).toBe(409);
+    expect(body.error).toMatch(/Schedule changed while optimizing/);
+    expect(trxUpdates).toEqual([]);
+    expect(JSON.stringify(body)).not.toMatch(/[56]\.0|"6"|"5"/);
+  });
+
+  test('gate on: /optimize with a technician refuses the same way', async () => {
+    process.env.GATE_TECH_START_POINTS = 'true';
+    commitRow = { start_lat: null, start_lng: null }; // address cleared after the plan
+    const { status } = await optimizeAll({ technicianId: 't1', date: DATE });
+    expect(status).toBe(409);
+    expect(trxUpdates).toEqual([]);
+  });
+
+  test('gate on: the whole-board /optimize has no single start to fence and makes no re-read', async () => {
+    process.env.GATE_TECH_START_POINTS = 'true';
+    expect((await optimizeAll({ date: DATE })).status).toBe(200);
+    expect(commitReads).toBe(0);
+  });
+
+  test('gate off: no re-read at commit', async () => {
+    delete process.env.GATE_TECH_START_POINTS;
+    expect((await optimizeRoute({ technicianId: 't1', date: DATE })).status).toBe(200);
+    expect((await optimizeAll({ technicianId: 't1', date: DATE })).status).toBe(200);
+    expect(commitReads).toBe(0);
   });
 });
