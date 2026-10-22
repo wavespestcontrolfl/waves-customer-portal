@@ -9850,6 +9850,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
                 paymentTiming={paymentTiming}
                 setupFeeAfterFirstVisit={setupFeePromiseEnabled}
+                firstApplicationLabel={data?.monthlyAverageEnabled === true}
               />
             </>
           ) : null}
@@ -10242,6 +10243,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
                 paymentTiming={paymentTiming}
                 setupFeeAfterFirstVisit={setupFeePromiseEnabled}
+                firstApplicationLabel={data?.monthlyAverageEnabled === true}
               />
             </div>
           ) : null
