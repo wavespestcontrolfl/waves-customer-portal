@@ -13,7 +13,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { stripPersonalizationTokens } = require('../services/newsletter-draft');
 const {
-  resolveEvclickDirect, eventUrlMapForSend, recordEventClick,
+  resolveEvclickDirect, eventUrlMapForSend, recordEventClick, eventRedirectWithoutRecording,
 } = require('../services/newsletter-event-clicks');
 const logger = require('../services/logger');
 const { getPublishedPosts } = require('../services/newsletter-feed');
@@ -321,8 +321,10 @@ router.get('/e/:token/:eventId', async (req, res) => {
     let redirectUrl;
     if (overClickBudget(req.ip)) {
       // Attribution suppressed; redirect preserved.
-      const event = await db('events_raw').where({ id: req.params.eventId }).first('event_url');
-      redirectUrl = event?.event_url || fallback;
+      redirectUrl = await eventRedirectWithoutRecording({
+        engagementToken: String(req.params.token).slice(0, 64),
+        eventId: req.params.eventId,
+      });
     } else {
       ({ redirectUrl } = await recordEventClick({
         engagementToken: String(req.params.token).slice(0, 64),
