@@ -1873,10 +1873,6 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
         emailSync = await require('../customer-email-fanout').propagateCustomerEmailChange(
           { before: lockedBefore, after: lockedMerged, source: 'Intelligence Bar update_customer' }, trx
         );
-        // Email provenance for the duplicate auto-merge (staff-set, not an unverified intake claim).
-        if (String(lockedBefore.email ?? '').trim().toLowerCase() !== String(lockedMerged.email ?? '').trim().toLowerCase() && lockedMerged.email) {
-          await require('../audit-log').auditCustomerEmailSetByStaff({ customerId, source: 'Intelligence Bar update_customer', trx });
-        }
       }
       // Name and phone snapshots (leads, estimates, contracts, promoter,
       // booking recovery, automation greetings) sync too — diff-gated inside

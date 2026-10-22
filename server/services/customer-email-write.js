@@ -98,9 +98,6 @@ async function applyOperatorCustomerEmail(trx, { customerId, email, source = 'op
     customerId, accountId: before.account_id || before.id, email: newEmail,
   });
   if (conflict) return { outcome: 'email_in_use', conflict: { id: conflict.id, account_id: conflict.account_id || null } };
-  // Email provenance for the duplicate auto-merge: staff set OR confirmed this address (an unchanged
-  // confirmation counts too), so it is not an unverified intake claim.
-  await require('./audit-log').auditCustomerEmailSetByStaff({ customerId, source, trx });
   if (emailKeyOf(before.email) === emailKeyOf(newEmail)) return { outcome: 'unchanged', before, emailSync: null };
   await trx('customers').where({ id: customerId }).update({ email: newEmail, updated_at: new Date() });
   const emailSync = await require('./customer-email-fanout').propagateCustomerEmailChange(

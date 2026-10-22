@@ -590,10 +590,6 @@ router.get('/merges', async (req, res) => {
           createdAt: row.created_at,
           undoneAt: row.undone_at,
           undoneBy: row.undone_by,
-          // GATE_DEDUPE_NO_UNVERIFIED_BACKFILL: contact values the automatic
-          // merge left off the surviving customer (e.g. { email }) because an
-          // anonymous visitor typed them. Null when nothing was skipped.
-          skipped_backfills: parse(row.evidence)?.unverified_shell_backfills_skipped || null,
           // Pre-upgrade merges (no row-level repoint record) are not
           // auto-revertible; neither is a merge whose winner is gone/retired,
           // nor one revertMerge would refuse (collisions, missing pm flags,

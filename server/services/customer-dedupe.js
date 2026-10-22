@@ -1997,9 +1997,7 @@ function timestampMs(value) {
 // stamp it: pipeline_stage stays 'new_lead' (public-quote.js, lead-webhook.js,
 // inspection-public.js all insert it), plus lead_source 'website_quote'
 // (public quote) or 'lead_pipeline' (inspection lead), last_contact_type
-// 'website_quote' / 'form_submission', or a form_id (lead webhook). Any row
-// that moved past new_lead is not this case. Wrong guesses fail SAFE: a loser
-// misread as a shell only loses the email backfill, which the journal keeps.
+// 'website_quote' / 'form_submission', or a form_id (lead webhook).
 const UNVERIFIED_INTAKE_LEAD_SOURCES = new Set(['website_quote', 'lead_pipeline']);
 const UNVERIFIED_INTAKE_CONTACT_TYPES = new Set(['website_quote', 'form_submission']);
 function isUnverifiedIntakeShell(row) {
@@ -2009,48 +2007,16 @@ function isUnverifiedIntakeShell(row) {
     || !isEmptyValue(row.form_id);
 }
 
-// Email provenance: staff can correct or confirm a lead's email without moving
-// its stage, and that email is then not an anonymous claim. The audit_log rows
-// that say so: the Customer 360 save ('customer.update_sensitive' naming email
-// in the fields it changed) and the other operator writers (Intelligence Bar
-// update_customer, triage email confirm: 'customer.email_set_by_staff'). Read
-// inside a savepoint so an unreadable table cannot abort the merge; unreadable
-// counts as "not staff edited" (see the catch).
-async function staffEditedCustomerEmail(trx, customerId) {
-  try {
-    const rows = await ledgerReferenceRead(trx, (k) => k('audit_log')
-      .where({ resource_type: 'customer', resource_id: customerId })
-      .where((q) => q.where('action', 'customer.email_set_by_staff')
-        .orWhere((q2) => q2.where('action', 'customer.update_sensitive')
-          .whereRaw("jsonb_exists(metadata->'sensitiveFieldsChanged', 'email')")))
-      .select('id')
-      .limit(1));
-    return Array.isArray(rows) && rows.length > 0;
-  } catch (e) {
-    // Provenance unreadable: fail CLOSED. The gate is on, so an email we cannot
-    // vouch for is not copied; the journal keeps it for the office.
-    logger.warn(`[customer-dedupe] email provenance read failed for ${customerId}: ${e.message}`);
-    return false;
-  }
-}
-
-// GATE_DEDUPE_NO_UNVERIFIED_BACKFILL: which loser columns an AUTO merge must
-// not copy onto the surviving customer. Only email: invoice and report mail go
-// to customers.email, and the visitor typed it unverified (the intake routes
-// themselves refuse to apply a submitted email to an existing profile). Not
-// phone: the auto sweep only pairs rows that already share a phone, so there is
-// nothing to carry. Not the service-contact slots: the intake routes never set
-// them. Names and the address stay: the auto tier requires them to be
-// compatible with the winner, they only fill blanks, and none is a
-// message-delivery target. A loser whose email staff set or corrected is not
-// unverified, so it still backfills.
-async function unverifiedShellSkippedBackfills(trx, winner, loser, mode) {
-  if (mode !== 'auto' || !dedupeNoUnverifiedBackfillLive() || !isUnverifiedIntakeShell(loser)) return {};
-  const skipped = {};
-  if (!isEmptyValue(winner.email) || isEmptyValue(loser.email)) return skipped;
-  if (await staffEditedCustomerEmail(trx, loser.id)) return skipped;
-  skipped.email = loser.email;
-  return skipped;
+// GATE_DEDUPE_NO_UNVERIFIED_BACKFILL: the AUTOMATIC merge must not merge an
+// untouched anonymous intake row whose typed email would fill or differ from
+// the kept customer's email. Invoice and report mail go to customers.email, and
+// the visitor typed it unverified. Left for the office: the pair stays on the
+// Duplicates page for a manual merge. Returns the skip reason or null.
+const UNVERIFIED_INTAKE_EMAIL_REASON = 'unverified_intake_email';
+function unverifiedIntakeEmailSkip(winner, loser) {
+  if (!dedupeNoUnverifiedBackfillLive() || !isUnverifiedIntakeShell(loser) || isEmptyValue(loser.email)) return null;
+  const same = String(winner.email || '').trim().toLowerCase() === String(loser.email).trim().toLowerCase();
+  return same ? null : UNVERIFIED_INTAKE_EMAIL_REASON;
 }
 
 function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null } = {}) {
@@ -3295,6 +3261,12 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     if (mode === 'auto') {
       const blockers = await loserAutoBlockers(trx, loser);
       if (blockers.length) throw new Error(`executeMerge(auto): loser is not a shell (${blockers.join(', ')})`);
+      const emailSkip = unverifiedIntakeEmailSkip(winner, loser);
+      if (emailSkip) {
+        const err = new Error(`executeMerge(auto): ${emailSkip}`);
+        err.skipReason = emailSkip;
+        throw err;
+      }
       if (!namesCompatible(winner, loser)) throw new Error('executeMerge(auto): names conflict');
       if (!ADDRESS_COMPATIBLE.has(addr.status)) throw new Error(`executeMerge(auto): address ${addr.status}`);
     }
@@ -3983,14 +3955,7 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       updated_at: trx.fn.now(),
     });
 
-    // GATE_DEDUPE_NO_UNVERIFIED_BACKFILL: the merge proceeds, but an anonymous
-    // intake shell's typed email is not copied onto the surviving customer.
-    const skippedBackfills = await unverifiedShellSkippedBackfills(trx, winner, loser, mode);
-    const predictedBackfills = predictWinnerBackfills(
-      winner,
-      'email' in skippedBackfills ? { ...loser, email: null } : loser,
-      { derivedStripeCustomerId },
-    );
+    const predictedBackfills = predictWinnerBackfills(winner, loser, { derivedStripeCustomerId });
     const backfills = predictedBackfills.backfills;
     Object.assign(winnerPriorValues, predictedBackfills.winnerPriorValues);
     // Combined-session fence, UNCONDITIONAL (codex #3427 r13/r14 P1,
@@ -4234,16 +4199,14 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       }),
       winner_backfills: JSON.stringify(backfills),
       tier: mode === 'auto' ? 'green' : 'manual',
-      // The skipped values also sit in loser_snapshot; listed here so the
-      // office can find the email to copy by hand.
-      evidence: JSON.stringify(Object.keys(skippedBackfills).length ? { ...evidence, unverified_shell_backfills_skipped: skippedBackfills } : evidence),
+      evidence: JSON.stringify(evidence),
       performed_by: performedBy || 'unknown',
     }).returning('id');
 
     logger.info(`[customer-dedupe] merged ${loserId} -> ${winnerId} (${mode}, journal ${journal?.id || journal})`);
     // loserSnapshot lets callers act on the retired row post-commit (e.g. the
     // link-as-property route preserves the loser's address on the winner).
-    return { journalId: journal?.id || journal, repointed, backfills, loserSnapshot: loser, phoneCarry: predictedBackfills.phoneCarry, skippedBackfills };
+    return { journalId: journal?.id || journal, repointed, backfills, loserSnapshot: loser, phoneCarry: predictedBackfills.phoneCarry };
   });
   // Released combined reminder schedules: the log line and any past-final
   // office alert, post-commit (never on the merge's transaction; never throws).
@@ -4295,7 +4258,7 @@ async function runAutoMergeSweep({ performedBy = 'auto:dedupe-cron', onlyPair = 
         continue;
       }
       try {
-        const mergeResult = await executeMerge({
+        await executeMerge({
           winnerId: group.winner.id,
           loserId: candidate.loser.id,
           performedBy,
@@ -4309,14 +4272,17 @@ async function runAutoMergeSweep({ performedBy = 'auto:dedupe-cron', onlyPair = 
           requireQueueEligibility: true,
         });
         const name = [group.winner.first_name, group.winner.last_name].filter(Boolean).join(' ') || 'Unknown';
-        results.merged.push({
-          winnerId: group.winner.id, loserId: candidate.loser.id, winnerName: name,
-          ...(mergeResult && mergeResult.skippedBackfills && Object.keys(mergeResult.skippedBackfills).length
-            ? { skippedBackfills: mergeResult.skippedBackfills } : {}),
-        });
+        results.merged.push({ winnerId: group.winner.id, loserId: candidate.loser.id, winnerName: name });
       } catch (e) {
         // A failed green merge means the row changed under us — leave it for
         // the next sweep / the review queue rather than retrying in-loop.
+        // GATE_DEDUPE_NO_UNVERIFIED_BACKFILL: an intentional skip, not a failure.
+        // Ids only in the log; the pair stays on the Duplicates page.
+        if (e.skipReason) {
+          logger.info(`[customer-dedupe] auto-merge ${candidate.loser.id} -> ${group.winner.id} left for the office: ${e.skipReason}`);
+          results.skipped.push({ loserId: candidate.loser.id, winnerId: group.winner.id, tier: 'green', reasons: [e.skipReason] });
+          continue;
+        }
         logger.warn(`[customer-dedupe] auto-merge ${candidate.loser.id} -> ${group.winner.id} failed: ${e.message}`);
         results.skipped.push({ loserId: candidate.loser.id, tier: 'green', reasons: [`merge_failed: ${e.message}`] });
       }
@@ -4329,14 +4295,10 @@ async function runAutoMergeSweep({ performedBy = 'auto:dedupe-cron', onlyPair = 
     try {
       const names = results.merged.slice(0, 5).map((m) => m.winnerName).join(', ');
       const more = results.merged.length > 5 ? ` and ${results.merged.length - 5} more` : '';
-      const emailsLeftOff = results.merged.filter((m) => m.skippedBackfills && m.skippedBackfills.email).length;
-      const emailNote = emailsLeftOff
-        ? ` ${emailsLeftOff} email${emailsLeftOff === 1 ? ' was' : 's were'} typed on a web form and not copied to the kept customer; Recent merges shows each one.`
-        : '';
       await require('./notification-service').notifyAdmin(
         'customer',
         `${results.merged.length} duplicate customer${results.merged.length === 1 ? '' : 's'} auto-merged`,
-        `Merged into: ${names}${more}. Same phone, matching identity, no billing on the duplicates. Full snapshots in the merge journal — most merges can be undone from Recent merges, though an undo refuses once state has moved on.${emailNote}`,
+        `Merged into: ${names}${more}. Same phone, matching identity, no billing on the duplicates. Full snapshots in the merge journal — most merges can be undone from Recent merges, though an undo refuses once state has moved on.`,
         {
           // The SPA registers /admin/customers and opens Customer 360
           // via ?customerId= — a /admin/customers/<uuid> path 404s.
@@ -7377,7 +7339,7 @@ module.exports = {
   surplusApprovedCollectionCases,
   predictWinnerBackfills,
   isUnverifiedIntakeShell,
-  unverifiedShellSkippedBackfills,
+  unverifiedIntakeEmailSkip,
   deriveSavedCardStripeCustomer,
   predictSavedCardDemotions,
   predictLoserStateDiscarded,
