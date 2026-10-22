@@ -8139,6 +8139,21 @@ describe('GATE_REVIEW_ASK_AFTER_REPORT — Day-0 ask 10 minutes after the report
         expect(JSON.parse(mock.__state.rows.review_sequences[0].decision)).toMatchObject({ reason: 'report_pending' });
       });
 
+      test.each([
+        ['Tomorrow 8 AM / custom time', { reviewScheduledFor: '2026-10-20T08:00' }],
+        ['a stored delay', { reviewDelayMinutes: 0 }],
+      ])('an explicit operator timing (%s) keeps its own time while the report is still queued', async (_label, timing) => {
+        freezeAt('2026-10-20T12:11:00Z');
+        mockGates.reviewAskAfterReport = true;
+        const mock = book({ completionSmsStatus: 'deferred', completionSmsDeferredTo: '2026-10-20T12:30:00.000Z', ...timing }, { started_at: new Date('2026-10-20T01:00:00Z') });
+        db.mockImplementation(mock);
+
+        const out = await ReviewService._runSequenceStep('seq-rp');
+
+        expect(out?.reason).not.toBe('report_pending');
+        expect(JSON.parse(mock.__state.rows.review_sequences[0].decision || '{}').reason).not.toBe('report_pending');
+      });
+
       test('report delivered 3 minutes ago: waits until 10 minutes after its delivery', async () => {
         freezeAt('2026-10-20T12:13:00Z');
         mockGates.reviewAskAfterReport = true;

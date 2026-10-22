@@ -1963,8 +1963,9 @@ const ReviewService = {
    * sent nothing, tied to its service record, not customer-requested — and off
    * the record's own text status. It never reads `decision`, which every
    * deferral (cap/spacing lookup failures, send window, holds) rewrites, so no
-   * earlier tick can switch the check off. An ask is never sent past a report
-   * that is still queued, whatever timing enrolled it.
+   * earlier tick can switch the check off. An Automatic ask is never sent past
+   * a report that is still queued; an explicit timing stored on the record
+   * keeps its own time.
    */
   async _reportPendingHold(seq) {
     try {
@@ -1984,6 +1985,10 @@ const ReviewService = {
       if (typeof notes === "string") {
         try { notes = JSON.parse(notes); } catch { notes = {}; }
       }
+      // An explicit operator timing (Tomorrow 8 AM, custom, a stored delay) is
+      // persisted on the record and keeps its own time: the hold is only for
+      // the Automatic ask.
+      if (this.completionReviewDelay(notes) !== undefined) return null;
       if (notes.completionSmsStatus === "deferred" && !notes.completionSmsDeferredDeliveredAt) return { retryAt };
       if (notes.completionSmsDeferredDeliveredAt) {
         const deliveredMs = new Date(notes.completionSmsDeferredDeliveredAt).getTime();
