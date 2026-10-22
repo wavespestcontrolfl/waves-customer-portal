@@ -273,14 +273,16 @@ async function sendProjectTemplate({
       // #6363 r22 P2): the recipient resolved above, but a contact who turns
       // email off while the library resolves the template, idempotency and
       // suppression is not emailed. Address-wide, deny wins across the slots
-      // carrying the address; fails closed on an unreadable table. The
-      // holder's own address and the gate off never decline. A recipient
-      // RESOLVED as a service contact must still occupy a slot (codex r26
-      // security P2): one the holder removed in between is a former contact
-      // and is held; a report copy, payer or billing recipient is not slot-
-      // bound and keeps the address-wide check alone.
-      onQueued: async () => !(await require('./contact-notification-prefs')
-        .contactEmailDeclines(customerId, recipient.email, { requireSlot: isServiceContactRole(recipient.role) })),
+      // carrying the address; fails closed on an unreadable table; a
+      // recipient RESOLVED as a service contact must still occupy a slot
+      // (codex r26 security P2): one the holder removed in between is a
+      // former contact and is held. Only a recipient resolved AS a service
+      // contact is asked (codex r32 security P2): the holder's own address,
+      // a report copy, the payer and the billing contact are independently
+      // authorized recipients — a contact's switch must never veto the
+      // payer's invoice because the two share an address.
+      onQueued: async () => !isServiceContactRole(recipient.role)
+        || !(await require('./contact-notification-prefs').contactEmailDeclines(customerId, recipient.email, { requireSlot: true })),
     });
     if (result?.aborted) {
       logger.info(`[project-email] ${templateKey} for project ${project?.id || 'unknown'} held at the dispatch boundary — the contact declined email`);

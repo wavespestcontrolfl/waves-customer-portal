@@ -96,6 +96,20 @@ describe('project email service', () => {
     expect(await ProjectEmail.sendProjectReportReady({ project: project(), customer: withContact, reportUrl: 'https://x' })).toMatchObject({ ok: true, messageId: 'sg-2' });
   });
 
+  test('the handoff asks only for a recipient resolved AS a service contact: the payer\'s invoice email goes out even when a contact sharing the payer\'s address turned email off (codex r32 security P2)', async () => {
+    const withContact = customer({ service_contact_email: 'ap@payer.example', service_contact_name: 'Terry Tenant', service_contact_phone: '+19415550202' });
+    contactEmailDeclines.mockResolvedValue(true);
+    EmailTemplates.sendTemplate.mockImplementationOnce(async (opts) => {
+      expect(await opts.onQueued()).toBe(true);
+      return { sent: true, message: { provider_message_id: 'sg-payer' } };
+    });
+    const res = await ProjectEmail.sendProjectReportReady({
+      project: project(), customer: withContact, reportUrl: 'https://x', recipient: { email: 'ap@payer.example', name: 'AP', role: 'payer' },
+    });
+    expect(res).toMatchObject({ ok: true, messageId: 'sg-payer' });
+    expect(contactEmailDeclines).not.toHaveBeenCalled();
+  });
+
   test('sends project report ready through the template library', async () => {
     const result = await ProjectEmail.sendProjectReportReady({
       project: project(),
