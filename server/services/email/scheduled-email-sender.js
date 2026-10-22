@@ -67,14 +67,14 @@ async function alertOffice(row, kind) {
 }
 
 const alertKey = (id) => `scheduled-email:${id}`;
-const ALERT_LOOKBACK_DAYS = 7;
 
 // A failed or unclear email whose alert write failed has no notification row
-// yet: raise it now. The alert's dedupeKey lives in notifications.metadata.
+// yet: raise it now, however long the outage lasted (it stays failed or
+// outcome_unknown until the office takes it back). The alert's dedupeKey
+// lives in notifications.metadata.
 async function raiseMissedAlerts(conn = db) {
   const rows = await conn('scheduled_emails as s')
     .whereIn('s.status', ['failed', 'outcome_unknown'])
-    .where('s.updated_at', '>', conn.raw(`now() - interval '${ALERT_LOOKBACK_DAYS} days'`))
     .whereNotExists(conn('notifications').select(conn.raw('1'))
       .where('recipient_type', 'admin')
       .whereRaw("metadata->>'dedupeKey' = 'scheduled-email:' || s.id::text"))

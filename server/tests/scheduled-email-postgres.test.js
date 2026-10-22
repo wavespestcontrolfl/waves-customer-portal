@@ -305,6 +305,22 @@ jest.setTimeout(30000);
     expect((await cancel(body.scheduled.id)).status).toBe(409);
   });
 
+  test('reconcile voids an unknown key so a late request cannot queue, and returns a known row', async () => {
+    const clientKey = randomUUID();
+    expect((await call('POST', '/schedule/reconcile', { clientKey })).body).toEqual({ success: true, scheduled: null });
+    // The original request lands afterwards: it finds the void row.
+    const late = await queue({ clientKey });
+    expect(late.body.scheduled).toMatchObject({ status: 'cancelled' });
+    expect(await database('scheduled_emails').where({ client_key: clientKey })).toHaveLength(1);
+    expect((await call('GET', '/scheduled')).body.emails).toEqual([]);
+    await makeDue(late.body.scheduled.id, { status: 'cancelled' });
+    expect((await sendDueScheduledEmails()).results).toEqual([]);
+    const knownKey = randomUUID();
+    const known = await queue({ clientKey: knownKey });
+    expect((await call('POST', '/schedule/reconcile', { clientKey: knownKey })).body.scheduled)
+      .toMatchObject({ id: known.body.scheduled.id, status: 'scheduled' });
+  });
+
   test('a refused email waits a minute before any replica tries it again', async () => {
     const { body } = await queue();
     await makeDue(body.scheduled.id);

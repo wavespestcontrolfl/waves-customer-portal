@@ -416,6 +416,29 @@ router.post('/schedule', async (req, res) => {
   }
 });
 
+// POST /schedule/reconcile — settles a schedule request whose answer never
+// came, before the browser lets plain Send go. It returns the row stored
+// under `clientKey`; when there is none, it stores a void row under that key
+// (cancelled and restored: never listed, never sent), so the original
+// request, if it is still on its way, can no longer queue a copy.
+router.post('/schedule/reconcile', async (req, res) => {
+  if (!emailSendLaterLive()) return res.status(404).json({ enabled: false, error: 'Schedule send is off.' });
+  const clientKey = req.body?.clientKey;
+  if (typeof clientKey !== 'string' || !/^[\w-]{8,64}$/.test(clientKey)) return res.status(400).json({ error: 'clientKey required' });
+  try {
+    const [voided] = await db('scheduled_emails').insert({
+      to_address: '', subject: '(withdrawn)', body_html: '', draft_text: '', send_at: db.fn.now(), status: 'cancelled',
+      cancelled_at: db.fn.now(), restored_at: db.fn.now(), created_by: req.technicianId || null, client_key: clientKey,
+    }).onConflict('client_key').ignore().returning('id');
+    if (voided) return res.json({ success: true, scheduled: null });
+    const known = await db('scheduled_emails').where({ client_key: clientKey }).first();
+    res.json({ success: true, scheduled: scheduledView(await consumeFailedRetry(known)) });
+  } catch (err) {
+    logger.error(`[email] schedule reconcile failed (${err.code || 'error'})`);
+    res.status(500).json({ error: 'Could not check that request. Try again.' });
+  }
+});
+
 // GET /scheduled — what is still waiting or needs the office (sent rows drop
 // off; cancelled rows after a day). Answers {enabled:false} with the gate off so the
 // client hides the menu and the tab.

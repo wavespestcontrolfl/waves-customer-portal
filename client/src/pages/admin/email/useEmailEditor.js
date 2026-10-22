@@ -36,6 +36,24 @@ function keyLookedUp(result) {
   return result.keyChecked === true;
 }
 
+// What the server's settled answer for an unconfirmed schedule request means
+// for the draft: `next` is the guard that stays (null: none), `withdraw`
+// removes the draft because the server holds that email.
+const KEY_SETTLED = { request: "key_settled", clientKey: null };
+function reconcileOutcome(row) {
+  if (!row) return { next: null, message: "That request never queued an email. You can send or schedule this draft." };
+  if (row.status === "sent") return { next: null, withdraw: true, message: "That email already went out. It is in the Gmail Sent folder." };
+  if (["scheduled", "sending"].includes(row.status)) {
+    return { next: null, withdraw: true, message: `That email is scheduled after all (${formatSendAt(row.sendAt)}). Find it under Scheduled.` };
+  }
+  if (row.status === "failed") return { next: null, message: "Gmail refused that email. Your draft is still here." };
+  // outcome_unknown, or cancelled (its text may be a draft in another tab):
+  // the operator's own check decides, so the guard stays without a key.
+  return { next: KEY_SETTLED, message: row.status === "cancelled"
+    ? "That email was cancelled and may be open as a draft in another tab. Look there, then tap I checked."
+    : "That email may have gone out. Look in the Gmail Sent folder, then tap I checked." };
+}
+
 // The guard a restored email that Gmail may have sent carries: no request
 // fingerprint matches it, so scheduling it again also waits for the check.
 const MAY_HAVE_SENT = { request: "may_have_sent", clientKey: null };
@@ -129,9 +147,37 @@ export default function useEmailEditor(userId) {
   const scheduleUnconfirmed = (replyId = null) => Boolean(uncertainSchedule.current[slotOf(replyId)]);
   // Whether the block comes from a restored email Gmail may have sent.
   const restoredMayHaveSent = (replyId = null) => uncertainSchedule.current[slotOf(replyId)]?.request === MAY_HAVE_SENT.request;
-  // The operator looked under Scheduled and in Gmail Sent: the email is in neither.
-  const confirmScheduleChecked = (replyId = null) => {
-    if (!scheduling) rememberUncertain(slotOf(replyId), null);
+  // The operator looked under Scheduled and in Gmail Sent: the email is in
+  // neither. A schedule request with a key is first settled on the server
+  // (its row, or a void row that stops a late copy), and the guard follows
+  // what that answer says; only a guard with no key is the operator's call.
+  const confirmScheduleChecked = async (replyId = null) => {
+    const slot = slotOf(replyId);
+    const entry = uncertainSchedule.current[slot];
+    if (scheduling || !entry) return;
+    if (!entry.clientKey) { rememberUncertain(slot, null); return; }
+    const kind = replyId ? "reply" : "compose";
+    const say = (message, error = false) => setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error, message } }));
+    let row;
+    try {
+      const response = await adminFetch("/api/admin/email/schedule/reconcile", { method: "POST", body: JSON.stringify({ clientKey: entry.clientKey }) });
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !data?.success) throw new Error("reconcile");
+      row = data.scheduled;
+    } catch {
+      say("Could not check that request. Try again in a moment.", true);
+      return;
+    }
+    const outcome = reconcileOutcome(row);
+    rememberUncertain(slot, outcome.next);
+    if (outcome.withdraw) withdrawDraftSlot(replyId);
+    say(outcome.message, Boolean(outcome.next));
+  };
+  // Removes a draft whose email the server already holds (queued or sent).
+  const withdrawDraftSlot = (replyId) => {
+    if (replyId) { setReplyDraft(replyId, ""); return; }
+    setComposeForm(() => ({ to: "", subject: "", body: "" }));
+    setShowCompose(false);
   };
   const setShowCompose = (visible) => {
     if (visible) setSendFeedback((current) => ({ ...current, compose: null }));
@@ -346,9 +392,12 @@ export default function useEmailEditor(userId) {
 
   const handleComposeSchedule = (sendAt, onScheduled) => {
     if (!composeForm.to.trim() || !composeForm.body.trim()) return undefined;
-    const queued = composeForm;
-    return scheduleEmail("compose", { to: queued.to.trim(), subject: queued.subject.trim(), body: queued.body }, null, sendAt, () => {
-      if (draftSession.drafts.compose !== queued) return false;
+    const payload = { to: composeForm.to.trim(), subject: composeForm.subject.trim(), body: composeForm.body };
+    return scheduleEmail("compose", payload, null, sendAt, () => {
+      // Compared by value: an edit changed back to the queued text is still
+      // the queued email and must not stay behind as a sendable copy.
+      const current = draftSession.drafts.compose;
+      if (current.to.trim() !== payload.to || current.subject.trim() !== payload.subject || current.body !== payload.body) return false;
       setComposeForm(() => ({ to: "", subject: "", body: "" }));
       setShowCompose(false);
       return true;

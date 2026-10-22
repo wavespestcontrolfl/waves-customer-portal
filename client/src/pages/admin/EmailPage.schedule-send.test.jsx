@@ -19,6 +19,7 @@ const response = (body, status = 200) => Promise.resolve({ ok: status >= 200 && 
 let scheduledRows;
 let enabled;
 let gmailConnected;
+let reconciledRow;
 const posts = (suffix) => fetch.mock.calls.filter(([url, options = {}]) => options.method === "POST" && new URL(url, "https://fixture.invalid").pathname.endsWith(suffix));
 
 function mount() {
@@ -33,6 +34,7 @@ beforeEach(() => {
   window.history.replaceState({}, "", "/admin/communications#tab=email");
   enabled = true;
   gmailConnected = true;
+  reconciledRow = null;
   scheduledRows = [];
   vi.stubGlobal("fetch", vi.fn((input, options = {}) => {
     const url = new URL(input, "https://fixture.invalid");
@@ -48,6 +50,7 @@ beforeEach(() => {
       scheduledRows = [{ id: "queued-1", to: body.to, subject: body.subject, draftText: body.draftText, sendAt: "2026-10-23T13:00:00.000Z", status: "scheduled" }];
       return response({ success: true, scheduled: scheduledRows[0] });
     }
+    if (path.endsWith("/email/schedule/reconcile")) return response({ success: true, scheduled: reconciledRow });
     if (path.endsWith("/queued-1/restored")) return response({ success: true });
     if (path.endsWith("/queued-1/cancel")) {
       const draft = { ...scheduledRows[0], status: "cancelled" };
@@ -186,6 +189,40 @@ describe("Email schedule send", () => {
     await waitFor(() => expect(posts("/email/schedule")).toHaveLength(2));
     const [first, second] = posts("/email/schedule").map(([, options]) => JSON.parse(options.body).clientKey);
     expect(second).not.toBe(first);
+  });
+
+  it("I checked settles the lost request on the server first; a request that did queue removes the draft", async () => {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/email/schedule")
+      ? Promise.reject(new TypeError("network")) : base(input, options)));
+    reconciledRow = { id: "late-1", status: "scheduled", sendAt: "2026-10-23T12:00:00.000Z" };
+    mount();
+    await writeEmail();
+    fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Tomorrow morning/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "I checked: it is in neither" }));
+    await waitFor(() => expect(posts("/email/schedule/reconcile")).toHaveLength(1));
+    const [first] = posts("/email/schedule").map(([, options]) => JSON.parse(options.body).clientKey);
+    expect(JSON.parse(posts("/email/schedule/reconcile")[0][1].body).clientKey).toBe(first);
+    expect((await screen.findAllByText(/That email is scheduled after all/)).length).toBeGreaterThan(0);
+    expect(screen.queryByDisplayValue("Line one\n<b>two</b>")).not.toBeInTheDocument();
+  });
+
+  it("an edit changed back to the queued text is cleared like the queued draft", async () => {
+    let finish;
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation((input, options = {}) => (String(input).endsWith("/email/schedule")
+      ? new Promise((resolve) => { finish = () => resolve(base(input, options)); }) : base(input, options)));
+    mount();
+    await writeEmail();
+    fireEvent.click(await screen.findByRole("button", { name: "Schedule send options" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Tomorrow morning/ }));
+    await waitFor(() => expect(finish).toBeTypeOf("function"));
+    fireEvent.change(screen.getByLabelText(/^Message/), { target: { value: "Changed" } });
+    fireEvent.change(screen.getByLabelText(/^Message/), { target: { value: "Line one\n<b>two</b>" } });
+    finish();
+    expect((await screen.findAllByText(/^Scheduled for .*Find it under Scheduled\.$/)).length).toBeGreaterThan(0);
+    expect(screen.queryByDisplayValue("Line one\n<b>two</b>")).not.toBeInTheDocument();
   });
 
   it("leaving the page while a schedule request runs keeps plain Send blocked on return", async () => {
