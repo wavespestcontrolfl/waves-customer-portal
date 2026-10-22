@@ -4398,7 +4398,12 @@ const customerUpdateHandler = async (req, res, next) => {
           // — an unreleasable session aborts this transaction.
           if (updates.payer_id !== undefined && updates.payer_id) {
             const payerRelease = await require('../services/pay-combined')
-              .releaseUnconfirmedCombinedSessionsForCustomer(trx, req.params.id, { invalidateLinked: true, pending: customerPayerPending, deferApply: true });
+              .releaseUnconfirmedCombinedSessionsForCustomer(trx, req.params.id, {
+                invalidateLinked: true, pending: customerPayerPending, deferApply: true,
+                // The bar card's moving invoices (combined-visit ones included): their single-invoice checkouts are
+                // cancelled too. The after-withdrawal check below refuses unless exactly these moved.
+                invalidateInvoiceIds: req.ibExpectedInvoices ? req.ibExpectedInvoices.filter((e) => e.to_payer_id).map((e) => e.id) : null,
+              });
             // In-flight combined money DEFERS the payer edit (codex r30
             // P1, same contract as the merge fence): the eventual combined
             // settlement never re-resolves ownership, so committing now

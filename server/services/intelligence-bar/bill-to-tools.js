@@ -234,7 +234,7 @@ function planEffects({ name, payer, payerName, names, moving, staying, pinned, p
     staying.length
       ? { kind: 'billing', text: `${staying.length} unpaid ${plural(staying.length, 'invoice stays', 'invoices stay')} billed to the customer (no visit, or a visit pinned to the customer): ${staying.map(invoiceLine).join(', ')}.` }
       : null,
-    { kind: 'billing', text: 'Open pay-page sessions for the invoices that move, and any combined pay-page session on the customer\'s invoices, are cancelled in Stripe. That cannot be undone. Pay links on the invoices that stay keep working. Nothing is charged or refunded.' },
+    { kind: 'billing', text: 'Open pay-page sessions for the invoices that move (combined-visit invoices included), and any combined pay-page session on the customer\'s invoices, are cancelled in Stripe. That cannot be undone. Pay links on the invoices that stay keep working. Nothing is charged or refunded.' },
     { kind: 'comms', text: 'Nothing is sent: no text, email or call goes to the customer or the payer.' },
   ].filter(Boolean);
 }
@@ -274,6 +274,13 @@ async function buildPlan(input, ctx = {}) {
   if (!lock && await require('../visit-completion-packets').packetInvoiceSendInFlight({ customerId: customer.id }, database,
     { pending: { customerPatch: { customerId: customer.id, payer_id: String(payer.id) } } })) {
     return refusal('A combined-visit invoice for this customer is being sent or paid right now, so nothing was offered. Ask again in a moment.', 'invoice_send_in_flight');
+  }
+  // A combined-visit invoice in 'processing' with no claim the fence sees: the packet withdrawal would still move it,
+  // while the card leaves processing invoices out, so the card could never be confirmed. Refuse it here instead.
+  const processing = await database('invoices').where({ customer_id: customer.id, status: 'processing' })
+    .whereNull('payer_id').whereNotNull('visit_completion_packet_id').first('invoice_number');
+  if (processing) {
+    return refusal(`Combined-visit invoice ${processing.invoice_number} has a payment processing, so nothing was offered. Ask again once it settles or fails.`, 'invoice_payment_processing');
   }
   const { moving, staying } = await invoicePlan(customer.id, String(payer.id), ctx);
   const pinned = await pinnedVisits(customer.id, ctx);

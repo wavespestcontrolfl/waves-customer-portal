@@ -65,6 +65,7 @@ function makeDb() {
       if (table === 'visit_completion_packets' && q.ids) return q.ids.filter((id) => state.closedPackets.includes(id));
       if (table === 'visit_completion_packets') return { visit_id: 'sv-1', payload: { billingSnapshot: { billedServiceIds: ['visit-a', 'visit-b'] } } };
       if (table === 'invoices') {
+        if (q.processing) return state.processingPacket || undefined;
         if (q.ids) return q.ids.map((id) => state.invoices[id]).filter(Boolean);
         if (q.packet) return state.packetIds.map((id) => ({ id, visit_completion_packet_id: `packet-${id}` }));
         return state.staying.map((id) => state.invoices[id]);
@@ -76,7 +77,7 @@ function makeDb() {
         if (prop === 'then') return (res, rej) => Promise.resolve().then(rows).then(res, rej);
         if (prop === 'first') return () => { q.single = true; return b; };
         if (prop === 'whereNotNull') return (k) => { if (k === 'visit_completion_packet_id') q.packet = true; return b; };
-        if (prop === 'where') return (k) => { if (k && typeof k === 'object' && 'id' in k) q.whereId = k.id; return b; };
+        if (prop === 'where') return (k) => { if (k && typeof k === 'object' && 'id' in k) q.whereId = k.id; if (k && k.status === 'processing') q.processing = true; return b; };
         if (prop === 'whereIn') return (k, v) => { if (k === 'id' && Array.isArray(v)) q.ids = v; return b; };
         if (prop === 'raw') return () => 'RAW';
         if (['insert', 'update', 'del', 'delete', 'upsert'].includes(prop)) throw new Error(`unexpected ${String(prop)} on ${table}`);
@@ -183,6 +184,11 @@ describe('the preview', () => {
     mockInFlight.mockResolvedValue(true);
     expect(await preview()).toMatchObject({ code: 'invoice_send_in_flight' });
     expect(mockInFlight).toHaveBeenCalledWith({ customerId: CUST }, expect.anything(), { pending: { customerPatch: { customerId: CUST, payer_id: '7' } } });
+  });
+
+  test('a combined-visit invoice with a payment processing: no card is offered', async () => {
+    state.processingPacket = { invoice_number: 'WPC-2099-0009' };
+    expect(await preview()).toMatchObject({ code: 'invoice_payment_processing' });
   });
 
   test('the customer renamed after the card refuses', async () => {
