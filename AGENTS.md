@@ -110,7 +110,7 @@ execute the workflows they describe.
   route served with no session auth (unauthenticated or token-only;
   customer-JWT `authenticate` routes are not public) and the guards each
   one carries. A new public route not added to that document in the same
-  PR is P0; `public-route-gate-doc-ratchet.test.js` pins the gate half.
+  PR is P0.
   Every token route keeps a token format gate before any DB read, a
   generic 404 (unknown, malformed, dark-gated and ineligible rows
   indistinguishable), a rate limit, and privacy headers; a dark `GATE_*`
