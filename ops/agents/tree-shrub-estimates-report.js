@@ -202,9 +202,21 @@ function compactShape(line, ctx) {
 // line that still agrees with the mapped envelope (full source enums), else
 // the mapped envelope (coarse inferred/measured), else a compact line, else
 // null.
+// A current mapped envelope that carries NO T&S row at all is authoritative:
+// a revision that removed Tree & Shrub left the original engineResult behind,
+// and that stale raw line must not count as a sent or accepted T&S quote
+// (Codex #6398 r13).
+function mappedEnvelopeWithoutTreeShrub(estimateData, ctx) {
+  const result = estimateData.result;
+  const present = result && typeof result === 'object'
+    && (Array.isArray(result.lineItems) || (result.results && typeof result.results === 'object') || Array.isArray(result.recurring?.services));
+  return !!present && !ctx.tsMeta && !ctx.mappedLine && !ctx.mappedSelected && ctx.mappedReasons === null;
+}
+
 function extractTreeShrub(estimateData) {
   if (!estimateData || typeof estimateData !== 'object') return null;
   const ctx = mappedContext(estimateData);
+  if (mappedEnvelopeWithoutTreeShrub(estimateData, ctx)) return null;
   const raw = Array.isArray(estimateData.engineResult?.lineItems)
     ? estimateData.engineResult.lineItems.find((li) => li?.service === 'tree_shrub') : null;
   const fromRaw = raw && rawAgreesWithMapped(raw, ctx.tsMeta) ? rawShape(raw, ctx) : null;

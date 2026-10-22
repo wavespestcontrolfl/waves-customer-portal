@@ -73,6 +73,16 @@ describe('tree-shrub-estimates-report extraction', () => {
     expect(extractTreeShrub(data)).toMatchObject({ shape: 'mapped', bedSqFt: 900, bedSource: 'measured', treeCount: 2, treeSource: 'unknown', monthly: 38.5 });
   });
 
+  test('a current mapped envelope with NO T&S row is authoritative over a stale raw line (Codex #6398 r13)', () => {
+    const raw = { engineResult: { lineItems: [{ service: 'tree_shrub', bedAreaUsed: 1800, bedAreaSource: 'lot_based', treeCount: 6, monthly: 51.44 }] } };
+    // Revision removed T&S: the mapped envelope prices lawn only.
+    expect(extractTreeShrub({ ...raw, result: { results: { lawnMeta: {} }, recurring: { services: [{ service: 'lawn_care' }] }, lineItems: [{ service: 'lawn_care', monthly: 60 }] } })).toBeNull();
+    expect(extractTreeShrub({ ...raw, result: { lineItems: [{ service: 'pest_control', monthly: 45 }] } })).toBeNull();
+    // No mapped envelope at all: the raw line still stands.
+    expect(extractTreeShrub(raw)).toMatchObject({ shape: 'raw', bedSqFt: 1800 });
+    expect(extractTreeShrub({ ...raw, result: {} })).toMatchObject({ shape: 'raw', bedSqFt: 1800 });
+  });
+
   test('a compact quote-wizard line reports price only, never a fabricated zero', () => {
     const data = { result: { lineItems: [{ service: 'tree_shrub', monthly: 35, tier: 'standard' }] } };
     expect(extractTreeShrub(data)).toMatchObject({ shape: 'compact', bedSqFt: null, bedSource: 'unknown', treeCount: null, monthly: 35 });

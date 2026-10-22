@@ -155,10 +155,16 @@ function resolveRealLotSqFt({ enrichedLotSqFt, lotSqFt, lotSizeConfirmed } = {})
 // coverage heuristic alone does not catch an inflated footprint on a large
 // lot, so the basis never reads it; with no server-measured building the
 // line is marked untrusted and the pricer parks it for review.
+// The lookup's own `footprint` (buildEnrichedProfile) is read first; its
+// `footprintUnknown` suppression (an aggregate parcel whose story count is
+// unknown keeps the summed homeSqFt but no footprint) yields NO trusted
+// footprint rather than a reconstruction from that sum (Codex r13 P1).
 function trustedTreeShrubFootprintSqFt(trustedTurf = {}, bodyStories) {
   const t = trustedTurf && typeof trustedTurf === 'object' ? trustedTurf : {};
+  if (t.footprintUnknown === true) return null;
   const stories = Math.max(1, Math.min(3, Number(t.stories) || Number(bodyStories) || 1));
   const perStory = (v) => Math.max(1, Math.round(Number(v) / stories));
+  if (Number(t.footprint) > 0) return Number(t.footprint);
   if (Number(t.footprintSqFt) > 0) return Number(t.footprintSqFt);
   if (Number(t.buildingSqFt) > 0) return Number(t.buildingSqFt);
   if (Number(t.homeSqFt) > 0) return perStory(t.homeSqFt);

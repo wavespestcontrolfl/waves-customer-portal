@@ -30,8 +30,17 @@ describe('trustedTreeShrubFootprintSqFt', () => {
     expect(trustedTreeShrubFootprintSqFt({ footprintSqFt: 'n/a', homeSqFt: -5 }, 1)).toBeNull();
   });
 
-  test('a footprintUnknown lookup (footprintSqFt 0) falls through to nothing, never to the body', () => {
-    // The body's homeSqFt is not an argument at all: nothing here can read it.
+  test('the lookup\'s own footprint wins over any derivation', () => {
+    expect(trustedTreeShrubFootprintSqFt({ footprint: 1600, footprintSqFt: 1850, homeSqFt: 3700, stories: 2 }, 1)).toBe(1600);
+  });
+
+  test('a footprintUnknown lookup yields NO trusted footprint — never a reconstruction from the aggregate homeSqFt (Codex r13 P1)', () => {
+    // buildEnrichedProfile suppresses the footprint of an aggregate parcel
+    // whose story count is unknown but keeps the summed living area; the
+    // body's homeSqFt is not an argument at all, so nothing here reads it.
+    expect(trustedTreeShrubFootprintSqFt({ footprint: 0, footprintUnknown: true, homeSqFt: 48000, stories: 1 }, 1)).toBeNull();
     expect(trustedTreeShrubFootprintSqFt({ footprintSqFt: 0, footprintUnknown: true }, 1)).toBeNull();
+    // A positive footprint does not override the suppression marker.
+    expect(trustedTreeShrubFootprintSqFt({ footprint: 2000, footprintUnknown: true }, 1)).toBeNull();
   });
 });
