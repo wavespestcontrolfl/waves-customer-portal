@@ -44,6 +44,7 @@ const { publicPortalUrl } = require('../utils/portal-url');
 const EmailTemplateLibrary = require('./email-template-library');
 const { currency } = require('./email-template');
 const { formatDateOnly } = require('../utils/date-only');
+const { approvalDigest, phoneKey, emailKey } = require('../utils/approval-digest');
 const { etDateString } = require('../utils/datetime-et');
 const { explicitBillingChannels } = require('./billing-delivery-channels');
 const { dispatchUnderBillingEmailAuthority } = require('./billing-channel-email-authority');
@@ -270,6 +271,49 @@ async function resolveBody(step, ctx) {
   });
 }
 
+// ── The Intelligence Bar's send-now approval (card pin) ──────────────────────
+// The card shows the reminder text with the pay link as a token and the recipients as masked values; the service pins the
+// phone, the email recipient and the text's digest and refuses at dispatch (right after the claim, before either leg) when
+// any of them differs from what is live.
+const APPROVAL_PAY_LINK_TOKEN = '[pay link]';
+
+// The base wording of the step's text (no alternate wordings, no audit row), the pay link as a token: what the card shows.
+async function renderApprovalSmsBody(step, ctx) {
+  if (!step.template_key || typeof smsTemplatesRouter.getTemplate !== 'function') return null;
+  return smsTemplatesRouter.getTemplate(step.template_key, {
+    first_name: ctx.name || 'there',
+    invoice_title: ctx.invoiceTitle || 'your service',
+    amount: ctx.amount || '0.00',
+    pay_url: APPROVAL_PAY_LINK_TOKEN,
+    receipt_url: APPROVAL_PAY_LINK_TOKEN,
+    service_date: ctx.serviceDate || '',
+    service_date_clause: ctx.serviceDate ? ` completed on ${ctx.serviceDate}` : '',
+  }, { workflow: 'invoice_followup', entity_type: 'invoice', entity_id: ctx.invoiceId || null }, { noVariants: true, audit: false });
+}
+
+// What the bar's card approved for ONE send-now, as the send must honor it (a page send carries no approval: null).
+// channels: only a channel on the card goes out. smsBody: the exact approved text (the pay link as a token), sent as it is:
+// the send never re-resolves the template, so alternate wordings or an edit cannot change it. emailContentHash: the whole
+// email, enforced again at the email send. An approval that names a channel without its text or hash is invalid (fail closed).
+function approvedSendPlan(approved) {
+  if (!approved) return null;
+  const sms = approved.channels?.sms === true;
+  const email = approved.channels?.email === true;
+  const body = typeof approved.smsBody === 'string' ? approved.smsBody : null;
+  const smsValid = !sms || Boolean(body && body.includes(APPROVAL_PAY_LINK_TOKEN) && approvalDigest(body) === approved.smsDigest);
+  const emailValid = !email || (typeof approved.emailContentHash === 'string' && approved.emailContentHash.length > 0
+    && typeof approved.emailRenderedDigest === 'string' && approved.emailRenderedDigest.length > 0);
+  const dueValid = Number.isInteger(approved.dueCents) && approved.dueCents > 0;
+  return { sms, email, body, emailContentHash: email ? approved.emailContentHash : null, emailRenderedDigest: email ? approved.emailRenderedDigest : null, valid: (sms || email) && smsValid && emailValid && dueValid };
+}
+
+// Why the live recipients differ from the card's pin, or null.
+async function approvalDrift(approved, customer) {
+  if (approvalDigest(phoneKey(customer.phone)) !== approved.phoneDigest) return 'recipient_changed';
+  const { to } = await operatorEmailRecipient(customer, 'invoice-followups');
+  return approvalDigest(emailKey(to)) === approved.emailDigest ? null : 'recipient_changed';
+}
+
 async function logFollowupEmailAttempt({
   customerId,
   invoiceId,
@@ -304,74 +348,146 @@ async function logFollowupEmailAttempt({
   }
 }
 
-async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference = true }) {
+// The reminder email's merge values, built one way for the Intelligence Bar's card and for the send, so the card's rendered
+// subject and body are exactly what the send renders (the pay link is the only value that differs: a token on the card).
+function followupEmailPayload({ recipient, customer, invoice, invoiceTitle, invoiceNumber, serviceDateClause, payUrl }) {
+  return {
+    first_name: firstToken(recipient.name) || firstToken(customer.first_name) || 'there',
+    invoice_title: invoiceTitle,
+    invoice_number: invoiceNumber,
+    amount_due: currency(invoiceAmountDue(invoice)),
+    due_date: formatDateOnly(invoice.due_date, { fallback: '' }),
+    service_date: formatDateOnly(invoice.service_date, { fallback: '' }),
+    service_date_clause: serviceDateClause,
+    pay_url: payUrl,
+    customer_portal_url: `${publicPortalUrl()}/?tab=billing`,
+  };
+}
+
+// The rendered email for a payload: subject, plain text, the template content hash and one digest over all of them (what the
+// card pins). Null when the template is not set up.
+async function renderedEmailFingerprint(templateKey, payload) {
+  const Library = require('./email-template-library');
+  const loaded = await Library.loadTemplateByKey(templateKey);
+  if (!loaded?.template || !loaded.activeVersion) return null;
+  const rendered = Library.renderTemplate({ template: loaded.template, version: loaded.activeVersion, payload });
+  const subject = String(rendered.subject || '').replace(/\s+/g, ' ').trim();
+  const text = String(rendered.text || '').trim();
+  const contentHash = Library.templateContentHash(loaded.template, loaded.activeVersion);
+  return { subject, text, contentHash, digest: approvalDigest([templateKey, subject, text, contentHash]) };
+}
+
+// The send's own rendering against the card's digest (the pay link as the card's token): a changed greeting, amount or wording
+// since the card was shown refuses the leg before anything is sent.
+async function emailDriftRefusal(templateKey, payload, expectedEmailDigest) {
+  if (!expectedEmailDigest) return null;
+  const live = await renderedEmailFingerprint(templateKey, { ...payload, pay_url: APPROVAL_PAY_LINK_TOKEN }).catch(() => null);
+  return live && live.digest === expectedEmailDigest ? null : { ok: false, skipped: true, reason: 'email_content_changed' };
+}
+
+// The email leg's own fresh read of the invoice (local audit on r42): the pre-dispatch guard added for the text protects only
+// that leg, and a payer assigned since the batch would still email the homeowner a payment demand for AP-owned debt.
+async function followupEmailInvoice(invoiceId) {
+  const invoice = await db('invoices').where({ id: invoiceId }).first().catch(() => null);
+  if (!invoice || isTerminalInvoice(invoice)) return { refusal: { ok: false, skipped: true, reason: 'invoice_not_eligible' } };
+  if (invoice.payer_id || invoiceWithdrawnFromCustomer(invoice)) return { refusal: { ok: false, skipped: true, reason: 'invoice_payer_billed' } };
+  return { invoice };
+}
+
+// Who this email may go to. The customer's billing choices, recipient and invoice ownership come from the shared billing email
+// authority (owner ruling 2026-09-27), read here and again under its locks at the provider handoff. An operator's explicit send
+// skips the customer's choices, as before, and rechecks ownership only. The bar's approved address (its digest) is checked
+// against the address resolved HERE, the one the email goes to.
+async function followupEmailRecipient({ authorityInput, customer, enforceBillingPreference, expectedRecipientDigest }) {
+  const resolved = enforceBillingPreference
+    ? await billingEmailRecipient(authorityInput, 'invoice-followups')
+    : await operatorEmailRecipient(customer, 'invoice-followups');
+  if (resolved.refusal) return resolved;
+  if (expectedRecipientDigest && approvalDigest(emailKey(resolved.to)) !== expectedRecipientDigest) {
+    return { refusal: { ok: false, skipped: true, reason: 'email_recipient_changed' } };
+  }
+  return resolved;
+}
+
+// The touch's merge values on the invoice's fresh row (the touch's own title and service date win when it carries them).
+function followupEmailPayloadForTouch({ recipient, customer, invoice, row, ctx }) {
+  return followupEmailPayload({
+    recipient, customer, invoice,
+    invoiceTitle: ctx.invoiceTitle || invoice.title || invoice.service_type || 'your service',
+    invoiceNumber: invoice.invoice_number || row.invoice_number || '',
+    serviceDateClause: ctx.serviceDate ? ` completed on ${ctx.serviceDate}` : '',
+    payUrl: ctx.payUrl,
+  });
+}
+
+// The provider handoff: the billing email authority for an automated touch, the self-pay check for an operator's send. An
+// operator's "send now" email (no billing-preference enforcement) keeps the dispute-hold exemption if the provider-retry rail
+// later re-sends its stored copy.
+function followupEmailDispatchOptions({ enforceBillingPreference, honorDisputeHold, authorityInput, to, templateKey, state, row, customer }) {
+  if (enforceBillingPreference) {
+    return {
+      categories: [],
+      withProviderHandoff: (dispatch) => dispatchUnderBillingEmailAuthority({
+        input: authorityInput, recipientEmail: to, templateKey, dispatch, state,
+      }),
+    };
+  }
+  return {
+    categories: honorDisputeHold ? [] : [require('./collections/collection-hold').OPERATOR_INITIATED_EMAIL_CATEGORY],
+    withProviderHandoff: selfPayOnlyHandoff(row.invoice_id, state, { holdCustomerId: customer.id, ignoreDisputeHold: !honorDisputeHold }),
+  };
+}
+
+// expectedContentHash (the Intelligence Bar's send-now card only): the email template content hash the card showed
+// (email-template-library templateContentHash: subject, preview, every block, text body, wrapper, sender). sendTemplate refuses
+// a different one before anything is sent.
+// expectedRecipientDigest (the bar's card only): the approved address's digest, checked against the address resolved HERE, the one
+// the email goes to. approvalDrift checked it earlier on its own read; a billing email changed between the two reads sends nothing.
+async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference = true, expectedContentHash = null, expectedEmailDigest = null, expectedRecipientDigest = null, honorDisputeHold = false }) {
   const templateKey = FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID[step.id];
   if (!templateKey) return { ok: false, skipped: true, reason: 'no_email_template_mapping' };
 
-  const latestInvoice = await db('invoices').where({ id: row.invoice_id }).first().catch(() => null);
-  if (!latestInvoice || isTerminalInvoice(latestInvoice)) {
-    return { ok: false, skipped: true, reason: 'invoice_not_eligible' };
-  }
-  // OWNERSHIP on the email leg's own fresh row (local audit on r42): the
-  // pre-dispatch guard added for the text protects only that leg, and this
-  // read checked terminal status alone — a payer assigned since the batch
-  // would still email the homeowner a payment demand for AP-owned debt.
-  if (latestInvoice.payer_id || invoiceWithdrawnFromCustomer(latestInvoice)) {
-    return { ok: false, skipped: true, reason: 'invoice_payer_billed' };
-  }
+  const { invoice: latestInvoice, refusal: invoiceRefusal } = await followupEmailInvoice(row.invoice_id);
+  if (invoiceRefusal) return invoiceRefusal;
 
   const authorityInput = {
     customerId: customer.id, invoiceId: row.invoice_id, channel: 'email',
     metadata: { billingDeliveryCategory: 'invoice' },
   };
-  // Who this email may go to. The customer's billing choices, recipient and
-  // invoice ownership come from the shared billing email authority (owner
-  // ruling 2026-09-27), read here and again under its locks at the provider
-  // handoff. An operator's explicit send skips the customer's choices, as
-  // before, and rechecks ownership only.
-  const { recipient, to, refusal } = enforceBillingPreference
-    ? await billingEmailRecipient(authorityInput, 'invoice-followups')
-    : await operatorEmailRecipient(customer, 'invoice-followups');
+  const { recipient, to, refusal } = await followupEmailRecipient({ authorityInput, customer, enforceBillingPreference, expectedRecipientDigest });
   if (refusal) return refusal;
 
-  const payload = {
-    first_name: firstToken(recipient.name) || firstToken(customer.first_name) || 'there',
-    invoice_title: ctx.invoiceTitle || latestInvoice.title || latestInvoice.service_type || 'your service',
-    invoice_number: latestInvoice.invoice_number || row.invoice_number || '',
-    amount_due: currency(invoiceAmountDue(latestInvoice)),
-    due_date: formatDateOnly(latestInvoice.due_date, { fallback: '' }),
-    service_date: formatDateOnly(latestInvoice.service_date, { fallback: '' }),
-    service_date_clause: ctx.serviceDate ? ` completed on ${ctx.serviceDate}` : '',
-    pay_url: ctx.payUrl,
-    customer_portal_url: `${publicPortalUrl()}/?tab=billing`,
-  };
+  const payload = followupEmailPayloadForTouch({ recipient, customer, invoice: latestInvoice, row, ctx });
+  const drifted = await emailDriftRefusal(templateKey, payload, expectedEmailDigest);
+  if (drifted) return drifted;
 
   const log = (fields) => logFollowupEmailAttempt({
     customerId: customer.id, invoiceId: row.invoice_id, stepId: step.id, templateKey, ...fields,
   });
   const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
+  const { categories, withProviderHandoff } = followupEmailDispatchOptions({
+    enforceBillingPreference, honorDisputeHold, authorityInput, to, templateKey, state, row, customer,
+  });
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey,
+      ...(expectedContentHash ? { expectedContentHash } : {}),
       to,
       payload,
       recipientType: 'customer',
       recipientId: customer.id,
       triggerEventId: `invoice_followup:${row.invoice_id}:${step.id}`,
       idempotencyKey: `invoice_followup_email:${row.invoice_id}:${step.id}`,
-      // An operator's "send now" email (no billing-preference enforcement) keeps the dispute-hold
-      // exemption if the provider-retry rail later re-sends its stored copy.
-      categories: ['invoice_followup', step.id,
-        ...(enforceBillingPreference ? [] : [require('./collections/collection-hold').OPERATOR_INITIATED_EMAIL_CATEGORY])],
+      categories: ['invoice_followup', step.id, ...categories],
       suppressionGroupKey: 'transactional_required',
-      withProviderHandoff: enforceBillingPreference
-        ? (dispatch) => dispatchUnderBillingEmailAuthority({
-          input: authorityInput, recipientEmail: to, templateKey, dispatch, state,
-        })
-        : selfPayOnlyHandoff(row.invoice_id, state, { holdCustomerId: customer.id }),
+      withProviderHandoff,
     });
     return await billingEmailSendOutcome(result, state, log);
   } catch (err) {
+    // The card's pinned email content changed: refused before the provider, nothing sent on this leg.
+    if (expectedContentHash && /reviewed email content changed/i.test(err?.message || '')) {
+      return { ok: false, skipped: true, reason: 'email_content_changed' };
+    }
     return billingEmailSendFailure(err, state.handoffStarted, log, {
       logTag: 'invoice-followups', label: `${step.id} for invoice ${row.invoice_id}`,
     });
@@ -1315,6 +1431,22 @@ const LADDER_MAX_SHIFT_MS = (Math.max(0, ...LADDER_MOVED_STEPS.map((index) => (
 const EARLY_ROW = Symbol('early');
 
 /**
+ * The cron's guarded write on its batch snapshot (same id, still active, same step, same due time) for the stale skip and the
+ * Day 90 ladder moves. A live touch claim is never moved past: the Intelligence Bar's approved send-now holds one while it
+ * dispatches and leaves next_touch_at as it was (stale or not), and its own advance owns the step. Only an expired claim (a
+ * crashed sender, past TOUCH_CLAIM_TTL_MS) lets the cron through. Returns the query for the caller's .update().
+ */
+function cronSnapshotUpdate(row, now) {
+  const claimExpiredBefore = new Date(now.getTime() - TOUCH_CLAIM_TTL_MS);
+  return db('invoice_followup_sequences')
+    .where({ id: row.id, status: 'active', step_index: row.step_index })
+    .where('next_touch_at', row.next_touch_at)
+    .where(function unclaimedOrExpired() {
+      this.whereNull('touch_claimed_at').orWhere('touch_claimed_at', '<', claimExpiredBefore);
+    });
+}
+
+/**
  * Gate off (codex #5126 r2): a row still waiting on a time the Day 90 ladder
  * scheduled goes back to its legacy day. Returns EARLY_ROW for a row the
  * widened batch select picked up that is not due on either cadence (left
@@ -1327,9 +1459,7 @@ async function restoreLegacyDay(row, now) {
   if (!row.next_touch_at || new Date(row.next_touch_at).getTime() <= now.getTime()) return null;
   const legacyAt = legacyTouchFor(row, now);
   if (!legacyAt) return EARLY_ROW;
-  const updated = await db('invoice_followup_sequences')
-    .where({ id: row.id, status: 'active', step_index: row.step_index })
-    .where('next_touch_at', row.next_touch_at)
+  const updated = await cronSnapshotUpdate(row, now)
     .update({ updated_at: db.fn.now(), next_touch_at: legacyAt });
   logger.info(`[invoice-followups] Day 90 ladder off: invoice ${row.invoice_id} step ${row.step_index} `
     + `${updated ? `moved back to ${legacyAt.toISOString()}` : 'unchanged (sequence moved since batch select)'}`);
@@ -1347,9 +1477,7 @@ async function deferToLadderDay(row) {
   if (!ladderThrough90Live() || !row.next_touch_at) return null;
   const due = computeNextTouchAt(sequenceAnchor(row), row.step_index);
   if (!due || due.getTime() <= new Date(row.next_touch_at).getTime()) return null;
-  const updated = await db('invoice_followup_sequences')
-    .where({ id: row.id, status: 'active', step_index: row.step_index })
-    .where('next_touch_at', row.next_touch_at)
+  const updated = await cronSnapshotUpdate(row, new Date())
     .update({ updated_at: db.fn.now(), next_touch_at: due });
   logger.info(`[invoice-followups] Day 90 ladder: invoice ${row.invoice_id} step ${row.step_index} `
     + `${updated ? `moved to ${due.toISOString()}` : 'unchanged (sequence moved since batch select)'}`);
@@ -1496,9 +1624,7 @@ async function skipStaleTouches(row, now) {
     nextIndex += 1;
     nextAt = computeNextTouchAt(anchorAt, nextIndex);
   }
-  const updated = await db('invoice_followup_sequences')
-    .where({ id: row.id, status: 'active', step_index: row.step_index })
-    .where('next_touch_at', row.next_touch_at)
+  const updated = await cronSnapshotUpdate(row, now)
     .update({
       updated_at: db.fn.now(),
       step_index: nextIndex,
@@ -1527,15 +1653,58 @@ async function skipStaleTouches(row, now) {
  * self-heals via the TTL window.
  */
 const TOUCH_CLAIM_TTL_MS = 10 * 60 * 1000;
-async function fireStep(row, { operatorInitiated = false, ownedMicrodeposit = false } = {}) {
+// approved (the Intelligence Bar's send-now card only): { invoiceUpdatedAtMs } — the invoice edit time the card showed, checked
+// on the invoice row this claim locks; a difference claims and sends nothing (returns { previewChanged: true }).
+// report (the same caller only): an object fireTouch fills with the per-leg outcomes (touchLegReport); the return value then
+// says what happened: { notClaimed }, { previewChanged } or { legs }. Every other caller passes neither and gets what it got.
+// The cron's claim: a sequence nobody holds (or whose claim expired) takes this stamp.
+function takeDueClaim(trx, sequenceId, claimStamp, preClaimed) {
+  if (preClaimed) return 1; // already ours (checked under the locks by dueOrPreClaimed)
+  return trx('invoice_followup_sequences')
+    .where({ id: sequenceId })
+    .where(function () {
+      this.whereNull('touch_claimed_at').orWhere(
+        'touch_claimed_at', '<', new Date(claimStamp.getTime() - TOUCH_CLAIM_TTL_MS),
+      );
+    })
+    // The claim stamps updated_at too: "a worker is mid-send on this
+    // sequence" is precisely the activity an ownership-change check must
+    // see, and it is the backstop for the ownership gate in fireStep — a claim
+    // taken before the undo's verification pass makes the undo refuse instead
+    // of repointing a sequence out from under an in-flight touch.
+    .update({ touch_claimed_at: claimStamp, updated_at: trx.fn.now() });
+}
+
+// The claim fireStep works under: the one an approved send-now already took, or a fresh stamp.
+const claimOf = (claim) => claim || { preClaimed: false, claimStamp: new Date() };
+
+// The fired row is due now (a cron claim), or still carries the claim an approved send-now took in its locked UPDATE.
+function dueOrPreClaimed(liveSeq, preClaimed, claimStamp) {
+  if (preClaimed) return Boolean(liveSeq.touch_claimed_at) && new Date(liveSeq.touch_claimed_at).getTime() === claimStamp.getTime();
+  return Boolean(liveSeq.next_touch_at) && new Date(liveSeq.next_touch_at).getTime() <= Date.now();
+}
+
+// A pre-taken claim that fireStep does not carry into a send is released (only while it is still this call's).
+function releaseSendNowClaim(row, preClaimed, claimStamp, claimedSeq) {
+  if (!preClaimed || claimedSeq) return undefined;
+  return db('invoice_followup_sequences').where({ id: row.id, touch_claimed_at: claimStamp })
+    .update({ touch_claimed_at: null, updated_at: db.fn.now() })
+    .catch((err) => logger.warn(`[invoice-followups] could not release the send-now claim for ${row.invoice_id}: ${err.message}`));
+}
+
+// claim { preClaimed, claimStamp }: an approved send-now already wrote in the locked UPDATE that judged its card (no re-arm, no
+// moment where the row is due and unclaimed); it is checked here under the locks, never re-taken, and released if the send
+// does not go on.
+async function fireStep(row, { operatorInitiated = false, ownedMicrodeposit = false, approved = null, report = null, claim = null } = {}) {
+  const { preClaimed, claimStamp } = claimOf(claim);
   // The cleanup is predicated on OUR stamp: if this send outlives the TTL
   // and another worker replaces the stale claim, an unconditional clear
   // here would release the successor's live claim and let an edit race its
   // in-flight reminder.
-  const claimStamp = new Date();
   let claimedSeq = null;
   let claimedInvoice = null;
   let ownedBy = null;
+  let previewChanged = false;
   try {
     // Claim inside a transaction that locks the INVOICE row first.
     // InvoiceService.update locks the same row before re-checking the claim,
@@ -1555,6 +1724,10 @@ async function fireStep(row, { operatorInitiated = false, ownedMicrodeposit = fa
         .forUpdate()
         .first();
       if (!lockedInvoice) return;
+      if (approved && (lockedInvoice.updated_at ? new Date(lockedInvoice.updated_at).getTime() : null) !== approved.invoiceUpdatedAtMs) {
+        previewChanged = true;
+        return;
+      }
       // Post-claim... now post-LOCK revalidation: the caller's row is a
       // batch snapshot — a due-date edit (rescheduleForInvoiceEdit, which
       // commits atomically with its invoice edit) can postpone
@@ -1563,13 +1736,7 @@ async function fireStep(row, { operatorInitiated = false, ownedMicrodeposit = fa
       // due; progress from the LIVE anchor so a postponed timeline is
       // never overwritten from the stale snapshot.
       const liveSeq = await trx('invoice_followup_sequences').where({ id: row.id }).first();
-      if (
-        !liveSeq ||
-        liveSeq.status !== 'active' ||
-        liveSeq.step_index !== row.step_index ||
-        !liveSeq.next_touch_at ||
-        new Date(liveSeq.next_touch_at).getTime() > Date.now()
-      ) {
+      if (!liveSeq || liveSeq.status !== 'active' || liveSeq.step_index !== row.step_index || !dueOrPreClaimed(liveSeq, preClaimed, claimStamp)) {
         return;
       }
       // OWNERSHIP REVALIDATION UNDER THE LOCK (r19 P1 — customer-facing leak).
@@ -1604,36 +1771,28 @@ async function fireStep(row, { operatorInitiated = false, ownedMicrodeposit = fa
       // verification nudge, only if the invoice is still waiting on it.
       ownedBy = await openCustomerScheduleId(trx, row.customer_id);
       if (ownedBy && !ownedMicrodeposit) return;
-      const claimed = await trx('invoice_followup_sequences')
-        .where({ id: row.id })
-        .where(function () {
-          this.whereNull('touch_claimed_at').orWhere(
-            'touch_claimed_at', '<', new Date(claimStamp.getTime() - TOUCH_CLAIM_TTL_MS),
-          );
-        })
-        // The claim stamps updated_at too: "a worker is mid-send on this
-        // sequence" is precisely the activity an ownership-change check must
-        // see, and
-        // it is the backstop for the ownership gate above — a claim taken
-        // before the undo's verification pass makes the undo refuse instead of
-        // repointing a sequence out from under an in-flight touch.
-        .update({ touch_claimed_at: claimStamp, updated_at: trx.fn.now() });
+      const claimed = await takeDueClaim(trx, row.id, claimStamp, preClaimed);
       if (claimed) {
         claimedSeq = liveSeq;
         claimedInvoice = lockedInvoice;
       }
     });
   } catch (err) {
+    // Falls through: nothing was claimed, so the not-claimed answer below is the one given (and a pre-taken claim is released).
     logger.error(`[invoice-followups] touch claim failed for invoice ${row.invoice_id}: ${err.message}`);
-    return;
+    claimedSeq = null;
+    previewChanged = false;
+    ownedBy = null;
   }
+  await releaseSendNowClaim(row, preClaimed, claimStamp, claimedSeq);
+  if (previewChanged) return { previewChanged: true };
   if (ownedBy && !ownedMicrodeposit) {
     logger.info(`[invoice-followups] sequence ${row.id} not fired — customer ${row.customer_id} is on customer reminder schedule ${ownedBy}`);
     return { ownedBy };
   }
   if (!claimedSeq) {
     logger.info(`[invoice-followups] sequence ${row.id} in flight or changed after batch select; skipping touch`);
-    return;
+    return report ? { notClaimed: true } : undefined;
   }
   // Hand fireTouch POST-LOCK state, not the batch snapshot (r19 P1). The
   // ownership gate above proved customer_id has not moved; these are the
@@ -1650,7 +1809,8 @@ async function fireStep(row, { operatorInitiated = false, ownedMicrodeposit = fa
   row.invoice_status = claimedInvoice.status;
   row.token = claimedInvoice.token;
   try {
-    await fireTouch(row, { operatorInitiated, claimStamp, verificationOnly: !!ownedBy });
+    await fireTouch(row, { operatorInitiated, claimStamp, verificationOnly: !!ownedBy, report, approved, expectedContentHash: approved?.emailContentHash || null });
+    fillUnsentLegs(report);
   } finally {
     await db('invoice_followup_sequences')
       .where({ id: row.id, touch_claimed_at: claimStamp })
@@ -1661,16 +1821,223 @@ async function fireStep(row, { operatorInitiated = false, ownedMicrodeposit = fa
         `[invoice-followups] could not clear touch claim for ${row.invoice_id}: ${err.message}`,
       ));
   }
+  if (report?.previewChanged) return { previewChanged: true };
+  return report ? { legs: report.legs || null } : undefined;
 }
 
-async function fireTouch(row, { operatorInitiated = false, claimStamp = null, verificationOnly = false } = {}) {
+// The per-leg outcome of one touch, for the Intelligence Bar's send-now card: { state, reason? } per channel.
+// States: sent (a new delivery), already_delivered (an earlier delivery of this step, not repeated), held (kept for a later
+// run), queued (text deferred to the send-window open), skipped (nothing to send to or with), not_sent (refused before the
+// provider), unknown (the provider may have taken it: never read as "not sent"). Reasons are codes, never addresses.
+const legReason = (value) => (typeof value === 'string' && value ? value.slice(0, 80) : undefined);
+function emailLegReport(result, permitted) {
+  const r = result || {};
+  if (r.ok === true) return { state: r.deduped ? 'already_delivered' : 'sent' };
+  if (r.deduped) return { state: 'unknown', reason: 'duplicate_unconfirmed' };
+  if (r.deliveryOutcome === 'uncertain' || r.deliveryOutcome === 'accepted') return { state: 'unknown', reason: legReason(r.reason) || 'provider_unconfirmed' };
+  // A leg the card never approved is skipped whatever the policy says about Email now (the policy verdict only classifies legs that could have gone).
+  if (r.reason === 'not_approved') return { state: 'skipped', reason: 'not_approved' };
+  if (permitted !== true) return { state: 'held', reason: 'collections_policy_denied' };
+  if (heldByDisputeHold(r)) return { state: 'held', reason: 'collection_hold' };
+  if (r.deferred === true || r.retryable === true) return { state: 'held', reason: legReason(r.reason) };
+  if (r.skipped === true || r.resolved === true) return { state: 'skipped', reason: legReason(r.reason) };
+  if (r.blocked === true || r.deliveryOutcome === 'not_sent') return { state: 'not_sent', reason: legReason(r.reason) };
+  return { state: 'unknown', reason: 'email_outcome_unconfirmed' };
+}
+
+// The leg the bar's approved card allows (every leg when there is no card: the page's own send and the cron).
+function approvedLeg(bar, leg) {
+  return !bar || Boolean(bar[leg]);
+}
+
+// What the bar's card pinned for the email leg (the content hash, the rendered digest, the approved address), checked at the
+// send. The bar's send honors a dispute hold on the provider-retry rail; an operator's page send does not.
+function approvedEmailChecks(bar, approved, expectedContentHash) {
+  if (!bar) return { expectedContentHash, expectedEmailDigest: null, expectedRecipientDigest: null, honorDisputeHold: false };
+  return {
+    expectedContentHash: bar.emailContentHash,
+    expectedEmailDigest: bar.emailRenderedDigest,
+    expectedRecipientDigest: approved.emailDigest,
+    honorDisputeHold: true,
+  };
+}
+
+// An approved send goes out only as the card showed it: a card with no valid channel set, a bank-verification message instead
+// of the reminder, or other recipients send nothing. The reason, or null when the card still holds.
+async function approvedSendDrift({ bar, approved, customer, mdPending }) {
+  if (!bar) return null;
+  if (!bar.valid) return 'approval_invalid';
+  if (mdPending) return 'message_changed';
+  return approvalDrift(approved, customer);
+}
+
+// The card no longer matches what would go out: nothing is sent and the caller restores the time (report.previewChanged).
+function refuseApprovedSend(row, report, why) {
+  logger.warn(`[invoice-followups] send-now on sequence ${row.id} refused: ${why}`);
+  if (report) report.previewChanged = true;
+}
+
+// The amount in the approved text and email: any other balance now is a different message.
+function approvedAmountChanged(bar, approved, row) {
+  return Boolean(bar) && Math.round(invoiceAmountDue(row) * 100) !== approved.dueCents;
+}
+
+// Account credit before the reminder, so it bills the amount DUE. An approved send never draws credit (the card's amount is
+// frozen in its text): credit that WOULD apply refuses it. Otherwise best-effort and idempotent; `applied` is what THIS dun drew,
+// reversed later if no channel delivered.
+async function drawDunCredit({ row, customer, bar }) {
+  const credit = require('./customer-credit');
+  if (bar) {
+    const wouldApply = await credit.autoApplyWouldApply({ id: row.invoice_id, customer_id: customer.id, total: row.total, credit_applied: row.credit_applied });
+    return wouldApply ? { refused: true, applied: 0 } : { applied: 0 };
+  }
+  try {
+    const drawn = await credit.autoApplyAccountCreditIfEnabled(row.invoice_id);
+    return { applied: drawn?.applied || 0 };
+  } catch (creditErr) {
+    logger.warn(`[invoice-followups] account-credit apply before dun skipped for ${row.invoice_id}: ${creditErr.message}`);
+    return { applied: 0 };
+  }
+}
+
+// No reminder went out: reverse the credit THIS dun drew (any prior applied credit stays). The invoice is collectible here, so
+// reverseAppliedCredit (which refuses 'sending'/'prepaid') applies.
+async function reverseDunCredit(invoiceId, amount, why) {
+  if (!(amount > 0)) return;
+  try {
+    const { reverseAppliedCredit } = require('./customer-credit');
+    await reverseAppliedCredit({ invoiceId, amount, createdBy: 'system:dun_undelivered' });
+  } catch (e) {
+    logger.warn(`[invoice-followups] credit reversal after ${why} skipped for ${invoiceId}: ${e.message}`);
+  }
+}
+
+// Which legs the customer's choices select: Text (and App) or the explicit set, and Email. No explicit choice = Text and Email.
+function touchChannelPlan(selectedChannels) {
+  const nonEmailChannels = selectedChannels === null ? ['sms']
+    : ['push', 'sms'].filter((channel) => selectedChannels.includes(channel));
+  const emailSelected = selectedChannels === null || selectedChannels.includes('email');
+  return { nonEmailChannels, emailSelected, policyChannels: [...nonEmailChannels, ...(emailSelected ? ['email'] : [])] };
+}
+
+// A denial that will lift (a spacing window, a releasable hold) is transient; flag, suppression and standing are durable.
+function hasTransientDenial(policyChannels, policyResults) {
+  return policyChannels.some((_channel, index) => !verdictDurablyDenied(policyResults[index]));
+}
+
+// Nothing was delivered: the touch is retried the next day when a leg really had a transient denial or outage. The email
+// result's default reason reads 'collections_policy_denied' even when Email was never selected, so it only counts here while a
+// leg really has one. A terminal outcome on one leg (SMS non-mobile, blocked) never discards another leg's transient denial
+// (Codex #5404 r2 P1).
+function hasTransientLeg({ policyChannels, policyResults, smsSkipReason, emailResult }) {
+  return policyChannels.some((_channel, index) => !verdictAllows(policyResults[index]) && !verdictDurablyDenied(policyResults[index]))
+    || smsSkipReason === 'ledger_unavailable' || emailResult.reason === 'ledger_unavailable';
+}
+
+// The text body of the reminder (or of the bank-verification nudge that replaces it).
+function reminderSmsBody({ mdPending, ctx, step, row }) {
+  if (!mdPending) return resolveBody(step, ctx);
+  return renderSmsTemplate('bank_verification_incomplete', {
+    first_name: ctx.name, billing_url: `${publicPortalUrl()}/?tab=billing`,
+  }, { workflow: 'microdeposit_verification_reminder', entity_type: 'invoice', entity_id: row.invoice_id });
+}
+
+// The text leg of the bar's report when the sender blocked or deferred it.
+// The SMS/App leg's last check before the provider: the invoice is still self-pay (every send), and for the Intelligence Bar's
+// approved send-now (bar) the Eastern 8 AM-8 PM window again. operatorInitiated skips the canonical sender's window validator
+// (the Invoices page's own Send-now keeps that exemption), and a card confirmed at 7:59 PM can wait on locks past 8 PM.
+function followupDispatchCheck(invoiceId, bar) {
+  const ownership = invoiceHelpers.selfPayAtDispatch(invoiceId, db);
+  if (!bar) return ownership;
+  return async (ctx) => {
+    if (!require('./messaging/send-window').isWithinSendWindowET()) {
+      return { ok: false, code: 'OUTSIDE_SEND_WINDOW', reason: 'the bar\'s approved send is not sent between 8 PM and 8 AM Eastern' };
+    }
+    return ownership(ctx);
+  };
+}
+
+function blockedSmsLeg(sendResult, { smsDeferredOwned, smsOutcomeMayHaveDelivered }) {
+  if (smsDeferredOwned) return { state: 'queued', reason: 'send_window' };
+  if (smsOutcomeMayHaveDelivered) return { state: 'unknown', reason: legReason(sendResult.code) || 'provider_unconfirmed' };
+  return { state: sendResult.deferred ? 'held' : 'not_sent', reason: legReason(sendResult.code) || 'sms_blocked' };
+}
+
+// The per-leg report (the bar's send-now card). The explicit-channel branch keeps its state in flags; the single-text branch set
+// smsLeg itself.
+function fillLegReport(report, { smsLeg, emailResult, emailPermitted, actualSmsSent, appSent, smsSent, smsSkipReason, smsOutcomeMayHaveDelivered, smsHoldUnowned }) {
+  if (!report) return;
+  let sms = smsLeg;
+  if (!sms) {
+    if (actualSmsSent || appSent) sms = { state: 'sent' };
+    else if (smsSent) sms = { state: 'already_delivered' };
+    else if (smsSkipReason === 'outcome_unconfirmed' || smsOutcomeMayHaveDelivered) sms = { state: 'unknown', reason: 'provider_unconfirmed' };
+    else if (smsHoldUnowned || ['collections_policy_denied', 'collection_hold'].includes(smsSkipReason)) sms = { state: 'held', reason: legReason(smsSkipReason) };
+    else sms = { state: 'not_sent', reason: legReason(smsSkipReason) };
+  }
+  report.legs = { sms, email: emailLegReport(emailResult, emailPermitted) };
+}
+
+// The latest earlier delivery time of this step's legs, else the last touch time.
+function latestDeliveryAt(times, fallback) {
+  return times.length ? new Date(Math.max(...times.map((time) => new Date(time).getTime()))) : fallback;
+}
+
+// Move the sequence on after a touch. A verification nudge of a customer on a combined schedule (verificationOnly) advances its
+// row only while it still holds the row exactly as it claimed it: a release of the schedule lands every member (a new step, or the
+// schedule's pause), and a send outliving its claim TTL must not overwrite that landing. (A release refuses while this claim is
+// fresh: closeUnderLock's member-claim check.) The row returns to 'active' (or completes) only while it is still 'active' (the
+// claim required it): a pause or stop that landed during the send is not overwritten. A write that matched nothing there still
+// records the touch (step, count, time).
+async function advanceAfterTouch({ row, verificationOnly, claimStamp, freshDelivery, originalAt }) {
+  const nextIndex = row.step_index + 1;
+  // anchor_at (set when an admin edit shifted the due date) overrides the send-time anchor so the whole remaining cadence stays
+  // on one timeline.
+  const anchorAt = row.anchor_at || row.invoice_sent_at || row.invoice_sms_sent_at || row.invoice_created_at || row.created_at;
+  const nextAt = computeNextTouchAt(anchorAt, nextIndex);
+  const touched = {
+    updated_at: db.fn.now(),
+    touches_sent: row.touches_sent + 1,
+    step_index: nextIndex,
+    last_touch_at: freshDelivery ? new Date() : originalAt,
+  };
+  const progressed = await db('invoice_followup_sequences').where({
+    id: row.id,
+    ...(verificationOnly ? { touch_claimed_at: claimStamp, step_index: row.step_index, status: 'active' } : { status: 'active' }),
+  }).update({ ...touched, next_touch_at: nextAt, status: nextAt ? 'active' : 'completed' });
+  if (verificationOnly) {
+    if (!Number(progressed)) {
+      logger.warn(`[invoice-followups] sequence ${row.id} not advanced after its verification nudge — the row changed under the send (a customer reminder schedule released it); its landing is kept`);
+    }
+    return;
+  }
+  if (progressed === 0) {
+    await db('invoice_followup_sequences').where({ id: row.id }).update(touched);
+    logger.warn(`[invoice-followups] sequence ${row.id} was paused or stopped during its send — the touch is recorded and its status is kept`);
+  }
+}
+
+// A touch that ends before any sender ran: the report (the bar's per-leg outcome) says so on both legs, with the reason.
+// Delivery is "unknown" only when a sender actually ran and its answer was not clear; a touch that stops earlier is a plain
+// "nothing was sent" (held = the reminder stays on its schedule, skipped = it does not apply, not_sent = it could not go).
+function exitNoSend(report, state, reason) {
+  if (report) report.legs = { sms: { state, reason }, email: { state, reason } };
+}
+
+// Every exit of fireTouch that did not reach a sender leaves report.legs unset; fireStep fills it (fillUnsentLegs), so no
+// pre-send exit reads as an unknown delivery (a refusal for a changed card is report.previewChanged, never legs).
+function fillUnsentLegs(report) {
+  if (report && !report.legs && !report.previewChanged) exitNoSend(report, 'not_sent', 'not_sent_before_dispatch');
+}
+
+async function fireTouch(row, { operatorInitiated = false, claimStamp = null, verificationOnly = false, report = null, approved = null, expectedContentHash = null } = {}) {
   // A row of a customer on a combined schedule (fireStep's ownedMicrodeposit):
   // re-judged now, after the claim committed and outside any lock. No longer
   // waiting on verification -> the invoice is the schedule's: nothing is sent
   // or written here (the claim clears in fireStep's finally).
   if (verificationOnly && !(await awaitingMicrodepositVerification(row))) {
     logger.info(`[invoice-followups] sequence ${row.id} not sent — invoice ${row.invoice_id} is no longer waiting on bank verification and customer ${row.customer_id} is on a customer reminder schedule`);
-    return;
+    return exitNoSend(report, 'skipped', 'customer_schedule');
   }
   const step = followupSteps()[row.step_index];
   if (!step) {
@@ -1679,7 +2046,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
       status: 'completed',
       next_touch_at: null,
     });
-    return;
+    return exitNoSend(report, 'skipped', 'no_reminder_step');
   }
 
   // Third-party Bill-To: never send a dunning touch for a payer-billed invoice —
@@ -1706,7 +2073,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
       .update({ updated_at: db.fn.now(), next_touch_at: new Date(Date.now() + 30 * 60 * 1000) })
       .catch(() => {});
     logger.warn(`[invoice-followups] skipped sequence ${row.id} — could not re-read invoice ${row.invoice_id} ownership before the touch; retrying in 30m`);
-    return;
+    return exitNoSend(report, 'not_sent', 'ownership_unverified');
   }
   const payerId = liveInvoice.payer_id ?? null;
   const sendError = liveInvoice.scheduled_send_error ?? null;
@@ -1717,7 +2084,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
       next_touch_at: null,
     });
     logger.info(`[invoice-followups] paused sequence ${row.id} — invoice ${row.invoice_id} is billed to a third-party payer`);
-    return;
+    return exitNoSend(report, 'skipped', 'invoice_payer_billed');
   }
 
   const customer = await db('customers').where({ id: row.customer_id }).first();
@@ -1733,17 +2100,26 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
       next_touch_at: null,
     });
     logger.info(`[invoice-followups] paused sequence ${row.id} — customer ${row.customer_id} is soft-deleted`);
-    return;
+    return exitNoSend(report, 'skipped', 'customer_unavailable');
   }
   if (!customer) {
     logger.warn(`[invoice-followups] skipped sequence ${row.id} — customer ${row.customer_id} is missing`);
-    return;
+    return exitNoSend(report, 'skipped', 'customer_unavailable');
   }
+  // The card's recipients and text, against what is live right now: a change sends neither leg (the caller restores the time).
+  const bar = approvedSendPlan(approved);
+  // The dispute-hold exemption belongs to the Invoices page's own operator Send-now. The bar's approved send never has it: a hold
+  // created after the card was shown stops the text, the email and the policy check (the card sends nothing the page would not).
+  const holdExempt = operatorInitiated && !bar ? 'operator' : null;
   const mdPending = verificationOnly || (gates.divertMicrodepositDunning
     && await StripeService.isInvoiceAwaitingMicrodepositVerification({
       id: row.invoice_id,
       stripe_payment_intent_id: row.invoice_stripe_pi,
     }));
+  // An approved send goes out only as the card showed it: a card with no valid channel set, a bank-verification message
+  // instead of the reminder, or other recipients send nothing.
+  const drift = await approvedSendDrift({ bar, approved, customer, mdPending });
+  if (drift) return refuseApprovedSend(row, report, drift);
   const category = mdPending ? 'payment_issue' : 'invoice';
   let explicitChannels = null;
   if (!operatorInitiated) {
@@ -1752,7 +2128,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
       explicitChannels = explicitBillingChannels(prefs || {}, category);
     } catch (err) {
       logger.warn(`[invoice-followups] skipped sequence ${row.id} — channel preferences unavailable: ${err.message}`);
-      return;
+      return exitNoSend(report, 'not_sent', 'preferences_unavailable');
     }
   }
   // Collections policy — BOTH legs' permissions resolved here, ahead of the
@@ -1764,21 +2140,18 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
   // both-denied touch returns with the sequence still active and retimed to
   // the next day (holdTouchUntilNextDay), so a later tick re-decides; it is never paused terminally for policy.
   const selectedChannels = explicitChannels;
-  const nonEmailChannels = selectedChannels === null ? ['sms']
-    : ['push', 'sms'].filter((channel) => selectedChannels.includes(channel));
-  const emailSelected = selectedChannels === null || selectedChannels.includes('email');
-  const policyChannels = [...nonEmailChannels, ...(emailSelected ? ['email'] : [])];
+  const { nonEmailChannels, emailSelected, policyChannels } = touchChannelPlan(selectedChannels);
   let ownLedgerIds = [];
   if (selectedChannels !== null) {
     try { ownLedgerIds = await currentStepLedgerIds(row, step, policyChannels); }
     catch (err) {
       logger.warn(`[invoice-followups] skipped sequence ${row.id} — step ledger unavailable: ${err.message}`);
       await holdTouchUntilNextDay(row, claimStamp, 'step_ledger_unavailable', { operatorInitiated });
-      return;
+      return exitNoSend(report, 'held', 'ledger_unavailable');
     }
   }
   const policyResults = await Promise.all(policyChannels.map((channel) =>
-    collectionsChannelPermitted(row.customer_id, row.invoice_id, channel, ownLedgerIds, true, mdPending, operatorInitiated ? 'operator' : null)));
+    collectionsChannelPermitted(row.customer_id, row.invoice_id, channel, ownLedgerIds, true, mdPending, holdExempt)));
   const channelPolicy = Object.fromEntries(policyChannels.map((channel, index) => [channel, verdictAllows(policyResults[index])]));
   const emailDurablyDenied = verdictDurablyDenied(policyResults[policyChannels.indexOf('email')]);
   const smsPermitted = channelPolicy.sms === true;
@@ -1790,10 +2163,10 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
     // some denied channel is TRANSIENT (a spacing window, a releasable hold):
     // when every channel is durably denied (flag, suppression, standing) the
     // denial will not lift, so the step is left due as before — one attempt.
-    if (policyChannels.some((_channel, index) => !verdictDurablyDenied(policyResults[index]))) {
-      await holdTouchUntilNextDay(row, claimStamp, 'collections_policy_denied', { operatorInitiated });
-    }
-    return;
+    const transientDenial = hasTransientDenial(policyChannels, policyResults);
+    if (transientDenial) await holdTouchUntilNextDay(row, claimStamp, 'collections_policy_denied', { operatorInitiated });
+    // Both channels denied: no sender ran. Held when a denial is transient (the reminder stays on its schedule), else skipped.
+    return exitNoSend(report, transientDenial ? 'held' : 'skipped', 'collections_policy_denied');
   }
   // Apply any available account credit before dunning so the reminder bills amount
   // due, not the gross balance — credit issued AFTER the invoice was sent isn't drawn
@@ -1803,14 +2176,9 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
   // Track what THIS dun drew down so the no-channel-delivered path below can reverse
   // it (don't consume credit for an undelivered reminder; matches the send/project
   // rollback).
-  let dunAppliedCredit = 0;
-  try {
-    const { autoApplyAccountCreditIfEnabled } = require('./customer-credit');
-    const dunCreditResult = await autoApplyAccountCreditIfEnabled(row.invoice_id);
-    dunAppliedCredit = dunCreditResult?.applied || 0;
-  } catch (creditErr) {
-    logger.warn(`[invoice-followups] account-credit apply before dun skipped for ${row.invoice_id}: ${creditErr.message}`);
-  }
+  const credit = await drawDunCredit({ row, customer, bar });
+  if (credit.refused) return refuseApprovedSend(row, report, 'account credit would apply since the card was shown');
+  const dunAppliedCredit = credit.applied;
   // The refresh runs in its OWN try: it is what keeps the reminder's
   // amounts/copy on the just-edited live row instead of the batch snapshot
   // (edits are fenced out from the claim onward, so this read is the settled
@@ -1826,7 +2194,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
     // the touch and the sweep re-judges it next run.
     if (!fresh) {
       logger.warn(`[invoice-followups] skipped sequence ${row.id} — invoice ${row.invoice_id} could not be re-read before the send`);
-      return;
+      return exitNoSend(report, 'not_sent', 'invoice_unreadable');
     }
     // OWNERSHIP AGAIN, on this last read before the provider (local audit):
     // the policy, credit and ledger work above is all awaited, and a Bill-To
@@ -1835,7 +2203,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
     // simply stops.
     if (fresh && (fresh.payer_id || invoiceWithdrawnFromCustomer(fresh))) {
       logger.info(`[invoice-followups] dropped touch for sequence ${row.id} — invoice ${row.invoice_id} moved to a third-party payer during this run`);
-      return;
+      return exitNoSend(report, 'skipped', 'invoice_payer_billed');
     }
     if (fresh) {
       row.total = fresh.total;
@@ -1844,9 +2212,11 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
       row.token = fresh.token;
       row.due_date = fresh.due_date;
       row.invoice_number = fresh.invoice_number;
+      // The amount in the approved text and email: any other balance now is a different message.
+      if (approvedAmountChanged(bar, approved, row)) return refuseApprovedSend(row, report, 'the amount due changed since the card was shown');
       if (['prepaid', 'paid'].includes(String(fresh.status || '').toLowerCase())) {
         await stopOnPayment(row.invoice_id).catch(() => {});
-        return;
+        return exitNoSend(report, 'skipped', 'invoice_not_eligible');
       }
     }
   } catch (refreshErr) {
@@ -1856,7 +2226,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
     // change may have landed. The sequence keeps its schedule and the next
     // sweep re-judges it.
     logger.warn(`[invoice-followups] skipped sequence ${row.id} — invoice refresh before dun failed for ${row.invoice_id}: ${refreshErr.message}`);
-    return;
+    return exitNoSend(report, 'not_sent', 'invoice_unreadable');
   }
   // Dun for amount DUE (total − applied account credit), not the pre-credit total.
   const amount = invoiceAmountDue(row).toFixed(2);
@@ -1892,14 +2262,15 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
   // keeps the claim held until delivery evidence can settle it.
   const ContactLedger = require('./collections/contact-ledger');
   const originalDeliveryTimes = [];
-  let emailResult = { ok: false, skipped: true, reason: 'collections_policy_denied' };
+  const emailApproved = approvedLeg(bar, 'email');
+  let emailResult = { ok: false, skipped: true, reason: emailApproved ? 'collections_policy_denied' : 'not_approved' };
   // A spacing-window denial keeps the selected Email owed on this step; a
   // durable one (flag, suppression) waives it so the step cannot be pinned
   // forever. The global-hold gate above still stops an all-denied touch.
   let emailHold = selectedChannels !== null && emailSelected && !emailPermitted && !emailDurablyDenied;
   // A dispute hold refused a leg at the send boundary after the preflight (a wait, not a failure).
   let holdSuppressedAtBoundary = false;
-  if (emailPermitted) {
+  if (emailPermitted && emailApproved) {
     let emailLedger = null;
     try {
       emailLedger = await ContactLedger.recordContact({
@@ -1939,7 +2310,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
               touchKey: step.id, // one branded verification email per follow-up step (same cadence as the SMS)
               enforceBillingPreference: !operatorInitiated,
             })
-          : await sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference: !operatorInitiated });
+          : await sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference: !operatorInitiated, ...approvedEmailChecks(bar, approved, expectedContentHash) });
         const attemptHeld = await settleFollowupEmailLedger(
           ContactLedger, emailLedger, emailResult, selectedChannels !== null, originalDeliveryTimes,
         );
@@ -1954,6 +2325,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
   let smsSent = false;
   let actualSmsSent = false;
   let appSent = false;
+  let smsLeg = null;
   let smsSkipReason = null;
   let smsDeferUntil = null;
   let smsDeferredOwned = false;
@@ -1974,11 +2346,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
       && (channel === 'push' || customer.phone));
     let body = null;
     if (permittedLegs.length) {
-      body = mdPending
-        ? await renderSmsTemplate('bank_verification_incomplete', {
-            first_name: ctx.name, billing_url: `${publicPortalUrl()}/?tab=billing`,
-          }, { workflow: 'microdeposit_verification_reminder', entity_type: 'invoice', entity_id: row.invoice_id })
-        : await resolveBody(step, ctx);
+      body = await reminderSmsBody({ mdPending, ctx, step, row });
     }
     for (const channel of nonEmailChannels) {
       if (!channelPolicy[channel]) { smsSkipReason = 'collections_policy_denied'; continue; }
@@ -2026,8 +2394,9 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
           // (owner ruling 2026-09-30), the same exemption the legacy single-SMS call carries.
           // (Today an operator send never resolves explicit channels, so this leg is only reached
           // by automated touches; the exemption is threaded so the two paths cannot diverge.)
-          ...(operatorInitiated ? { operatorInitiated: true, holdExempt: 'operator' } : {}),
-          preDispatchCheck: invoiceHelpers.selfPayAtDispatch(row.invoice_id, db),
+          ...(operatorInitiated ? { operatorInitiated: true } : {}),
+          ...(holdExempt ? { holdExempt } : {}),
+          preDispatchCheck: followupDispatchCheck(row.invoice_id, bar),
         });
       } catch (err) {
         result = err.providerOutcome || { deliveryOutcome: 'uncertain', deferred: true };
@@ -2057,20 +2426,22 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
       }
     }
     if (!nonEmailChannels.length) smsSkipReason = 'no_non_email_selected';
+  } else if (!approvedLeg(bar, 'sms')) {
+    // Not on the card: no text, whatever the customer's phone or the template says now.
+    smsSkipReason = 'not_approved';
+    smsLeg = { state: 'skipped', reason: 'not_approved' };
   } else if (!smsPermitted) {
     // Collections policy denial — transient; the no-channel branch below
     // leaves the sequence armed instead of pausing it.
     smsSkipReason = 'collections_policy_denied';
+    smsLeg = { state: 'held', reason: 'collections_policy_denied' };
   } else if (customer.phone) {
     const messageType = mdPending ? 'bank_verification_incomplete' : 'invoice_followup';
-    const body = mdPending
-      ? await renderSmsTemplate('bank_verification_incomplete', {
-          first_name: ctx.name,
-          billing_url: `${publicPortalUrl()}/?tab=billing`,
-        }, { workflow: 'microdeposit_verification_reminder', entity_type: 'invoice', entity_id: row.invoice_id })
-      : await resolveBody(step, ctx);
+    // An approved send uses the card's exact text (only the pay link token becomes the live link), never a re-resolved template.
+    const body = bar ? bar.body.split(APPROVAL_PAY_LINK_TOKEN).join(ctx.payUrl) : await reminderSmsBody({ mdPending, ctx, step, row });
     if (!body) {
       smsSkipReason = 'missing_template';
+      smsLeg = { state: 'skipped', reason: 'missing_template' };
       logger.warn(`[invoice-followups] template ${step.template_key} missing/disabled for sequence ${row.id}`);
     } else {
       // RECORD-THEN-SEND: the ledger row precedes the SMS attempt; an
@@ -2087,6 +2458,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
         });
       } catch (ledgerErr) {
         smsSkipReason = 'ledger_unavailable';
+        smsLeg = { state: 'skipped', reason: 'ledger_unavailable' };
         logger.warn(`[invoice-followups] SMS leg skipped for sequence ${row.id} — contact ledger unavailable: ${ledgerErr.message}`);
       }
       const sendResult = smsLedger ? await sendCustomerMessage({
@@ -2105,7 +2477,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
         // The office "send now" click is a deliberate operator send: it keeps its pay link during a
         // dispute hold (owner ruling 2026-09-30), so the customer-message boundary lets it through.
         // Automated ladder touches carry no exemption and wait.
-        ...(operatorInitiated ? { holdExempt: 'operator' } : {}),
+        ...(holdExempt ? { holdExempt } : {}),
         metadata: {
           original_message_type: messageType,
           notificationEventKey: `invoice-followup:${row.id}:${step.id}`,
@@ -2120,7 +2492,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
         // round-trip and the contact-ledger writes are awaited after the
         // re-read above, and this rail holds no claim a Bill-To writer
         // fences on. Fail-closed, with no lock held across provider I/O.
-        preDispatchCheck: invoiceHelpers.selfPayAtDispatch(row.invoice_id, db),
+        preDispatchCheck: followupDispatchCheck(row.invoice_id, bar),
       }) : null;
       if (sendResult && heldByDisputeHold(sendResult)) {
         // Dispute hold landed after the preflight: nothing was sent and nothing failed. Release the
@@ -2128,6 +2500,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
         // paused, never queued onto the scheduled-SMS rail (the queued row would carry the pay link).
         await ContactLedger.releaseHeldReservation(smsLedger);
         smsSkipReason = 'collection_hold';
+        smsLeg = { state: 'held', reason: 'collection_hold' };
         smsDeferUntil = heldTouchFloor();
         smsHoldUnowned = true;
         holdSuppressedAtBoundary = true;
@@ -2194,16 +2567,24 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
             }
           }
         }
+        smsLeg = blockedSmsLeg(sendResult, { smsDeferredOwned, smsOutcomeMayHaveDelivered });
         logger.warn(`[invoice-followups] SMS blocked for sequence ${row.id}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
       } else if (sendResult) {
         smsSent = true;
         actualSmsSent = true;
+        // The sender answers { sent: true, deduped: true } for a text it delivered earlier (the original acceptance): that is
+        // not a new delivery.
+        smsLeg = sendResult.deduped === true ? { state: 'already_delivered' } : { state: 'sent' };
       }
     }
   } else {
     smsSkipReason = 'no_customer_phone';
+    smsLeg = { state: 'skipped', reason: 'no_customer_phone' };
     logger.warn(`[invoice-followups] no phone for customer ${row.customer_id}`);
   }
+  fillLegReport(report, {
+    smsLeg, emailResult, emailPermitted, actualSmsSent, appSent, smsSent, smsSkipReason, smsOutcomeMayHaveDelivered, smsHoldUnowned,
+  });
 
   if (!smsSent && !emailResult.ok) {
     // A retryable email outcome (the shared billing email check could not
@@ -2243,10 +2624,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
       // denial or outage. A terminal outcome on one leg (SMS non-mobile,
       // blocked) never discards another leg's transient denial: the email
       // leg must still be retried once its window passes (Codex #5404 r2 P1).
-      const transientLeg = policyChannels.some((_channel, index) => !verdictAllows(policyResults[index])
-        && !verdictDurablyDenied(policyResults[index]))
-        || smsSkipReason === 'ledger_unavailable' || emailResult.reason === 'ledger_unavailable';
-      if (transientLeg) {
+      if (hasTransientLeg({ policyChannels, policyResults, smsSkipReason, emailResult })) {
         await holdTouchUntilNextDay(row, claimStamp, smsSkipReason || emailResult.reason, { operatorInitiated });
       }
       logger.info(`[invoice-followups] touch for sequence ${row.id} handled by collections policy/ledger — retrying on a later run`);
@@ -2262,14 +2640,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
     // it for an undelivered touch (matches the invoice/project send rollback). Only
     // this dun's increment; any prior applied credit stays. The invoice is collectible
     // here, so reverseAppliedCredit (which refuses 'sending'/'prepaid') applies.
-    if (dunAppliedCredit > 0) {
-      try {
-        const { reverseAppliedCredit } = require('./customer-credit');
-        await reverseAppliedCredit({ invoiceId: row.invoice_id, amount: dunAppliedCredit, createdBy: 'system:dun_undelivered' });
-      } catch (e) {
-        logger.warn(`[invoice-followups] credit reversal after undelivered dun skipped for ${row.invoice_id}: ${e.message}`);
-      }
-    }
+    await reverseDunCredit(row.invoice_id, dunAppliedCredit, 'undelivered dun');
     return;
   }
 
@@ -2291,42 +2662,13 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
   }
 
   const freshDelivery = actualSmsSent || appSent || (emailResult.ok && !emailResult.deduped);
-  const originalAt = originalDeliveryTimes.length
-    ? new Date(Math.max(...originalDeliveryTimes.map((time) => new Date(time).getTime()))) : row.last_touch_at;
+  const originalAt = latestDeliveryAt(originalDeliveryTimes, row.last_touch_at);
   // Only an earlier accepted leg reached the customer on this path. Return
   // this run's credit draw; the previous attempt's applied credit stays put.
-  if (!freshDelivery && !smsDeferredOwned && !smsOutcomeMayHaveDelivered && dunAppliedCredit > 0) {
-    try {
-      const { reverseAppliedCredit } = require('./customer-credit');
-      await reverseAppliedCredit({ invoiceId: row.invoice_id, amount: dunAppliedCredit, createdBy: 'system:dun_undelivered' });
-    } catch (e) {
-      logger.warn(`[invoice-followups] credit reversal after prior-delivery replay skipped for ${row.invoice_id}: ${e.message}`);
-    }
+  if (!freshDelivery && !smsDeferredOwned && !smsOutcomeMayHaveDelivered) {
+    await reverseDunCredit(row.invoice_id, dunAppliedCredit, 'prior-delivery replay');
   }
-  const nextIndex = row.step_index + 1;
-  // anchor_at (set when an admin edit shifted the due date) overrides the
-  // send-time anchor so the whole remaining cadence stays on one timeline.
-  const anchorAt = row.anchor_at || row.invoice_sent_at || row.invoice_sms_sent_at || row.invoice_created_at || row.created_at;
-  const nextAt = computeNextTouchAt(anchorAt, nextIndex);
-
-  // A verification nudge of a customer on a combined schedule (verificationOnly) advances its row only while
-  // it still holds the row exactly as it claimed it: a release of the schedule lands every member (a new
-  // step, or the schedule's pause), and a send outliving its claim TTL must not overwrite that landing.
-  // (A release refuses while this claim is fresh: closeUnderLock's member-claim check.)
-  const progressed = await db('invoice_followup_sequences').where({
-    id: row.id,
-    ...(verificationOnly ? { touch_claimed_at: claimStamp, step_index: row.step_index, status: 'active' } : {}),
-  }).update({
-    updated_at: db.fn.now(),
-    touches_sent: row.touches_sent + 1,
-    step_index: nextIndex,
-    last_touch_at: freshDelivery ? new Date() : originalAt,
-    next_touch_at: nextAt,
-    status: nextAt ? 'active' : 'completed',
-  });
-  if (verificationOnly && !Number(progressed)) {
-    logger.warn(`[invoice-followups] sequence ${row.id} not advanced after its verification nudge — the row changed under the send (a customer reminder schedule released it); its landing is kept`);
-  }
+  await advanceAfterTouch({ row, verificationOnly, claimStamp, freshDelivery, originalAt });
 
   // (Contact-ledger rows were written BEFORE each leg's delivery attempt —
   // record-then-send, codex 2026-08-14 — so there is nothing to record here.)
@@ -2543,8 +2885,17 @@ async function handleAutopayFailure(customerId) {
 /**
  * Admin controls — called from the invoice detail UI.
  */
-async function pauseSequence(invoiceId, { reason, until, adminId } = {}) {
-  await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).update({
+// approved (the Intelligence Bar's card pin only; the page passes none): { sequenceId, status, stepIndex }. The write is one
+// conditional UPDATE on exactly that reminder state, so a stop, resume or cron advance after the card changes nothing
+// ({ previewChanged: true }). The same pin is judged by resumeSequence and stopSequence under their row locks.
+// A reminder claimed by a send in flight (touch_claimed_at) never matches: the send will write its own progression.
+const matchesApprovedReminder = (seq, approved) => Boolean(seq) && String(seq.id) === String(approved.sequenceId)
+  && seq.status === approved.status && seq.step_index === approved.stepIndex && !seq.touch_claimed_at;
+
+async function pauseSequence(invoiceId, { reason, until, adminId, approved } = {}) {
+  const query = db('invoice_followup_sequences').where({ invoice_id: invoiceId });
+  if (approved) query.where({ id: approved.sequenceId, status: approved.status, step_index: approved.stepIndex }).whereNull('touch_claimed_at');
+  const changed = await query.update({
     updated_at: db.fn.now(),
     status: 'paused',
     paused_reason: reason || null,
@@ -2552,6 +2903,8 @@ async function pauseSequence(invoiceId, { reason, until, adminId } = {}) {
     paused_by_admin_id: adminId || null,
     next_touch_at: null,
   });
+  if (approved && !Number(changed)) return { previewChanged: true };
+  return undefined;
 }
 
 // System settlement stops that resumeSequence's two AUTOMATIC re-arm
@@ -2631,8 +2984,37 @@ async function resumeSequenceIfSystemResumable(invoiceId) {
   });
 }
 
-async function resumeSequence(invoiceId, dbc = db) {
-  const seq = await dbc('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
+// The reminder row a resume acts on. With the card's pin the whole resume runs on the row locked FOR UPDATE, and a row that no
+// longer matches the card is { previewChanged: true } (nothing is written). Without a pin: the plain read, as always.
+async function readResumableSequence(invoiceId, dbc, approved) {
+  const seqQuery = dbc('invoice_followup_sequences').where({ invoice_id: invoiceId });
+  if (approved) seqQuery.forUpdate();
+  const seq = await seqQuery.first();
+  if (approved && !matchesApprovedReminder(seq, approved)) return { previewChanged: true };
+  return { seq };
+}
+
+// A paused row still carrying the hold marker must NOT resume into active dunning while the customer is still enrolled in
+// Auto Pay: re-enter the hold on LIVE eligibility; a stale flag (customer since unenrolled) is dropped and the cadence resumes.
+// Fail toward the QUIET state on a read error (Codex #3493 r15). failClosed: without it a payment_methods read error is
+// swallowed inside the eligibility helper and reads as confirmed unenrollment (Codex #3493 r16).
+async function resumeStillAutopayHeld(seq, invoiceId, dbc) {
+  try {
+    const customer = await dbc('customers').where({ id: seq.customer_id }).first();
+    return customer ? await customerOnAutopay(customer, { db: dbc, failClosed: true }) : false;
+  } catch (err) {
+    logger.warn(`[invoice-followups] resume autopay re-check failed for invoice ${invoiceId} — keeping the hold: ${err.message}`);
+    return true;
+  }
+}
+
+async function resumeSequence(invoiceId, dbc = db, { approved = null } = {}) {
+  // With the card's pin the whole resume runs in one transaction on the reminder row locked FOR UPDATE: a stop (or any other
+  // change) that committed after the card is seen and nothing is written ({ previewChanged: true }); a stop that arrives later
+  // waits for this commit. Every other caller keeps the unlocked read it always had.
+  if (approved && !dbc.isTransaction) return dbc.transaction((trx) => resumeSequence(invoiceId, trx, { approved }));
+  const { seq, previewChanged } = await readResumableSequence(invoiceId, dbc, approved);
+  if (previewChanged) return { previewChanged: true };
   if (!seq) return;
   const invoice = await dbc('invoices').where({ id: invoiceId }).first();
   if (!invoice || isTerminalInvoice(invoice)) return;
@@ -2692,32 +3074,18 @@ async function resumeSequence(invoiceId, dbc = db) {
   // hold. Re-enter the hold on LIVE eligibility; a stale flag (customer
   // since unenrolled) is dropped and the cadence resumes. Fail toward the
   // QUIET state on a read error (Codex #3493 r15).
-  if (seq.is_autopay_held) {
-    let stillEnrolled = true;
-    try {
-      const customer = await dbc('customers').where({ id: seq.customer_id }).first();
-      // failClosed: without it a payment_methods read error is swallowed
-      // inside the eligibility helper and reads as confirmed unenrollment
-      // — this catch would never fire and an enrolled customer's hold
-      // would activate into reminders (Codex #3493 r16).
-      stillEnrolled = customer ? await customerOnAutopay(customer, { db: dbc, failClosed: true }) : false;
-    } catch (err) {
-      logger.warn(`[invoice-followups] resume autopay re-check failed for invoice ${invoiceId} — keeping the hold: ${err.message}`);
-      stillEnrolled = true;
-    }
-    if (stillEnrolled) {
-      await dbc('invoice_followup_sequences').where({ id: seq.id }).update({
-        updated_at: dbc.fn.now(),
-        status: 'autopay_hold',
-        paused_reason: null,
-        paused_until: null,
-        paused_by_admin_id: null,
-        stopped_reason: null,
-        stopped_by_admin_id: null,
-        next_touch_at: null,
-      });
-      return;
-    }
+  if (seq.is_autopay_held && await resumeStillAutopayHeld(seq, invoiceId, dbc)) {
+    await dbc('invoice_followup_sequences').where({ id: seq.id }).update({
+      updated_at: dbc.fn.now(),
+      status: 'autopay_hold',
+      paused_reason: null,
+      paused_until: null,
+      paused_by_admin_id: null,
+      stopped_reason: null,
+      stopped_by_admin_id: null,
+      next_touch_at: null,
+    });
+    return;
   }
   await dbc('invoice_followup_sequences').where({ id: seq.id }).update({
     updated_at: dbc.fn.now(),
@@ -2800,7 +3168,7 @@ function shiftAnchorNYCalendarDays(anchorDate, days) {
   return base;
 }
 
-async function stopSequence(invoiceId, { reason, adminId } = {}) {
+async function stopSequence(invoiceId, { reason, adminId, approved } = {}) {
   // "Stop dunning" also means "don't force-collect on the pay page"
   // (payIncludeBalance): if this invoice rides another invoice's combined
   // PaymentIntent as a SIBLING, release that session — cancel the PI while
@@ -2826,6 +3194,13 @@ async function stopSequence(invoiceId, { reason, adminId } = {}) {
   // newly stopped invoice. Under the shared lock the stop and any setup are
   // strictly ordered: setup first → the release below cancels its PI; stop
   // first → setup's in-lock stopped-dunning re-check excludes the invoice.
+  // The card's pin (approved: { sequenceId, status, stepIndex }; the page passes none): checked first, before anything is
+  // released at Stripe, and again on the reminder row this transaction locks FOR UPDATE, before the stop is written.
+  if (approved && !matchesApprovedReminder(await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).first('id', 'status', 'step_index', 'touch_claimed_at'), approved)) {
+    return { previewChanged: true };
+  }
+  let previewChanged = false;
+  let needsInvoicesPage = false;
   const invoice = await db('invoices').where({ id: invoiceId }).first('id', 'customer_id', 'stripe_payment_intent_id', 'invoice_number');
   await db.transaction(async (trx) => {
     const PayCombined = require('./pay-combined');
@@ -2845,6 +3220,12 @@ async function stopSequence(invoiceId, { reason, adminId } = {}) {
         if (attempt >= 4) throw new Error(`Invoice ownership kept changing while stopping dunning for ${invoiceId} — try again`);
         ownerId = freshId;
       }
+    }
+    // The card's pin, judged on the reminder row locked FOR UPDATE BEFORE anything is read or released at Stripe: a mismatch
+    // leaves the transaction with no write at all. Same lock order as the stop always had (combined locks, then this row).
+    if (approved) {
+      const lockedSeq = await trx('invoice_followup_sequences').where({ invoice_id: invoiceId }).forUpdate().first('id', 'status', 'step_index', 'touch_claimed_at');
+      if (!matchesApprovedReminder(lockedSeq, approved)) { previewChanged = true; return; }
     }
     // Re-read under the lock — a setup that committed while we waited may
     // have stamped a PI the unlocked read missed.
@@ -2876,6 +3257,8 @@ async function stopSequence(invoiceId, { reason, adminId } = {}) {
       // stopped sibling once verified. Cancel it like the payer-change
       // fence does; only processing/succeeded money is left alone.
       const unconfirmed = pi && ['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(pi.status);
+      // The bar never cancels a combined session (nor cleans its stamps): it stops nothing and leaves the stop to the page.
+      if (approved && isSiblingOnCombined && (pi.status === 'canceled' || unconfirmed)) { needsInvoicesPage = true; return; }
       if (isSiblingOnCombined && pi.status === 'canceled') {
         // A prior attempt's cancel succeeded but its transaction rolled
         // back (codex r26 P2) — finish the stamp cleanup on retry instead
@@ -2913,7 +3296,8 @@ async function stopSequence(invoiceId, { reason, adminId } = {}) {
     const priorSeq = await trx('invoice_followup_sequences')
       .where({ invoice_id: invoiceId })
       .forUpdate()
-      .first('status', 'stopped_reason', 'stopped_by_admin_id');
+      .first('id', 'step_index', 'status', 'touch_claimed_at', 'stopped_reason', 'stopped_by_admin_id');
+    if (approved && !matchesApprovedReminder(priorSeq, approved)) { previewChanged = true; return; }
     // A PLAN-owned stop is NOT preserved under a system stop (Codex #3493
     // r10): voidInvoice cancels the active plan in the same transaction, so
     // the plan-owned reason would be an orphan nothing can lift — the
@@ -2950,12 +3334,17 @@ async function stopSequence(invoiceId, { reason, adminId } = {}) {
       }),
     });
   });
+  if (needsInvoicesPage) return { needsInvoicesPage: true };
+  return previewChanged ? { previewChanged: true } : undefined;
 }
 
 // An operator send-now with nothing to send never answers as a success (the panel would toast "Done" over
 // a click that sent nothing): the route turns these into a 409 with this copy.
 const SEND_NOW_FINISHED = Object.freeze({
   ok: false, reason: 'nothing_to_send', message: 'Not sent: this invoice is paid or its reminders are finished.',
+});
+const SEND_NOW_PREVIEW_CHANGED = Object.freeze({
+  ok: false, reason: 'preview_changed', message: 'The invoice or its reminder changed after the card was shown, so nothing was sent.',
 });
 const SEND_NOW_NO_SEQUENCE = Object.freeze({
   ok: false, reason: 'nothing_to_send', message: 'Not sent: this invoice has no follow-up reminders.',
@@ -2983,53 +3372,82 @@ const SEND_NOW_NO_SEQUENCE = Object.freeze({
  * having been paid (or its row finished) since the panel loaded does not end
  * the click while the schedule still covers the customer's other invoices.
  */
-async function sendNextTouchNow(invoiceId, { operatorInitiated = false, combined = null } = {}) {
-  const Wiring = () => require('./customer-dunning/wiring');
-  const seq = await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
+const Wiring = () => require('./customer-dunning/wiring');
 
-  if (combined) {
-    const customerId = seq?.customer_id
-      ?? (await db('invoices').where({ id: invoiceId }).first('customer_id'))?.customer_id ?? null;
-    if (!customerId) return Wiring().combinedScheduleClosed(combined.scheduleId);
-    // Read under the customer's dunning key (SHARED), as every per-invoice path reads ownership.
-    let owner = null;
-    await db.transaction(async (trx) => {
-      await lockCustomerDunningShared(trx, customerId);
-      owner = await openCustomerScheduleId(trx, customerId);
-    });
-    return owner
-      ? Wiring().sendNowForInvoiceOnSchedule(owner, customerId, combined)
-      : Wiring().combinedScheduleClosed(combined.scheduleId);
-  }
+// A `combined` confirmation names a customer schedule: judged BEFORE this invoice's own exits, under the customer's dunning key
+// (SHARED), as every per-invoice path reads ownership.
+async function sendNowCombined(invoiceId, seq, combined) {
+  const customerId = seq?.customer_id
+    ?? (await db('invoices').where({ id: invoiceId }).first('customer_id'))?.customer_id ?? null;
+  if (!customerId) return Wiring().combinedScheduleClosed(combined.scheduleId);
+  let owner = null;
+  await db.transaction(async (trx) => {
+    await lockCustomerDunningShared(trx, customerId);
+    owner = await openCustomerScheduleId(trx, customerId);
+  });
+  return owner
+    ? Wiring().sendNowForInvoiceOnSchedule(owner, customerId, combined)
+    : Wiring().combinedScheduleClosed(combined.scheduleId);
+}
 
-  if (!seq) return SEND_NOW_NO_SEQUENCE;
-  if (seq.status === 'stopped' || seq.status === 'completed') return SEND_NOW_FINISHED;
+// The Intelligence Bar's card pin (approved: { sequenceId, status, stepIndex, invoiceUpdatedAtMs }), judged under the invoice row
+// lock and the reminder row lock: the reminder the card showed is still this reminder, still unclaimed, on the same step, and
+// the invoice is as it was. Returns the claim stamp taken in the SAME locked UPDATE (no re-arm: the due time is left alone, so
+// there is no moment at which the row is due and unclaimed for the cron's runPending to take), or null when anything differs
+// (nothing is written, so a pause or a cron advance that landed after the card is never overwritten).
+async function claimApprovedSendNow(trx, seq, invoiceId, approved) {
+  const lockedInvoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first('updated_at');
+  const liveSeq = await trx('invoice_followup_sequences').where({ id: seq.id }).forUpdate()
+    .first('id', 'status', 'step_index', 'next_touch_at', 'touch_claimed_at');
+  const sameInvoice = lockedInvoice && (lockedInvoice.updated_at ? new Date(lockedInvoice.updated_at).getTime() : null) === approved.invoiceUpdatedAtMs;
+  const sameReminder = liveSeq && String(liveSeq.id) === String(approved.sequenceId) && liveSeq.status === approved.status
+    && liveSeq.step_index === approved.stepIndex && !liveSeq.touch_claimed_at;
+  if (!sameInvoice || !sameReminder) return null;
+  const claim = new Date();
+  await trx('invoice_followup_sequences').where({ id: seq.id }).update({ updated_at: trx.fn.now(), touch_claimed_at: claim });
+  return claim;
+}
 
-  const invoice = await db('invoices').where({ id: invoiceId }).first();
-  if (!invoice || isTerminalInvoice(invoice)) return SEND_NOW_FINISHED;
+// The page's click: set next_touch_at in the past + status active so fireStep takes it as due.
+function rearmForSendNow(trx, seq) {
+  return trx('invoice_followup_sequences').where({ id: seq.id }).update({
+    updated_at: trx.fn.now(),
+    status: 'active',
+    next_touch_at: new Date(Date.now() - 1000),
+  });
+}
 
-  // Temporarily set next_touch_at in the past + status active, then fire —
-  // unless the customer is on a customer-level schedule: then the click needs
-  // the operator's confirmation of the schedule's CURRENT step (refused here,
-  // nothing sent), and this row (membership state) is left exactly as it is.
-  // Checked and written under the customer's dunning key (SHARED), so a
-  // promotion cannot commit between the check and the write.
-  let ownedBy = null;
+// Unless the customer is on a customer-level schedule (then the click needs the operator's confirmation of the schedule's
+// CURRENT step, refused here with nothing sent, and this membership row is left exactly as it is), claim (approved) or re-arm
+// (page). Checked and written under the customer's dunning key (SHARED), so a promotion cannot commit between the check and
+// the write. Returns { ownedBy, previewChanged, claim }.
+async function armSendNow(seq, invoiceId, approved) {
+  const armed = { ownedBy: null, previewChanged: false, claim: null };
   await db.transaction(async (trx) => {
     await lockCustomerDunningShared(trx, seq.customer_id);
-    ownedBy = await openCustomerScheduleId(trx, seq.customer_id);
-    if (ownedBy) return;
-    await trx('invoice_followup_sequences').where({ id: seq.id }).update({
-      updated_at: trx.fn.now(),
-      status: 'active',
-      next_touch_at: new Date(Date.now() - 1000),
-    });
+    armed.ownedBy = await openCustomerScheduleId(trx, seq.customer_id);
+    if (armed.ownedBy) return;
+    if (!approved) { await rearmForSendNow(trx, seq); return; }
+    armed.claim = await claimApprovedSendNow(trx, seq, invoiceId, approved);
+    armed.previewChanged = !armed.claim;
   });
-  if (ownedBy) return Wiring().sendNowForInvoiceOnSchedule(ownedBy, seq.customer_id, null);
+  return armed;
+}
 
-  const row = await db('invoice_followup_sequences as s')
+// The approved send's claim is released after a refusal before fireStep, and only while it is still this call's claim (a stamp
+// that moved on is somebody else's). No claim (the page's click) = nothing to release.
+function releaseSendNowClaimFor(seqId, claim, invoiceId) {
+  if (!claim) return undefined;
+  return db('invoice_followup_sequences')
+    .where({ id: seqId, touch_claimed_at: claim })
+    .update({ updated_at: db.fn.now(), touch_claimed_at: null })
+    .catch((err) => logger.warn(`[invoice-followups] could not release the claim after a refused send-now on ${invoiceId}: ${err.message}`));
+}
+
+function loadSendNowRow(seqId) {
+  return db('invoice_followup_sequences as s')
     .join('invoices as i', 's.invoice_id', 'i.id')
-    .where('s.id', seq.id)
+    .where('s.id', seqId)
     .select(
       's.*',
       'i.id as invoice_id', 'i.token', 'i.title', 'i.total', 'i.credit_applied',
@@ -3037,14 +3455,72 @@ async function sendNextTouchNow(invoiceId, { operatorInitiated = false, combined
       'i.service_date', 'i.due_date', 'i.invoice_number',
     )
     .first();
-  if (!row) return SEND_NOW_FINISHED;
+}
 
-  // A promotion that committed after the re-arm above: fireStep refused under
-  // the key (nothing was claimed or sent), so the click needs the schedule's
-  // step confirmed.
-  const fired = await fireStep(row, { operatorInitiated });
+// The template content hash as it is live now, or null when it cannot be read (then it matches nothing).
+async function liveEmailTemplateHash(stepIndex) {
+  try {
+    const Library = require('./email-template-library');
+    const templateKey = FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID[followupSteps()[stepIndex]?.id];
+    const loaded = templateKey ? await Library.loadTemplateByKey(templateKey) : null;
+    return loaded?.template && loaded.activeVersion ? Library.templateContentHash(loaded.template, loaded.activeVersion) : null;
+  } catch { return null; }
+}
+
+// What the card pinned, against the row fireStep will claim and the live template, before the send (a cron advance between the
+// claim and this read; a changed email sends neither leg; sendTemplate enforces the same hash again at the email send itself).
+// An approved send-now that names the email must carry its hash: without one the email would go out unrestricted.
+// Returns SEND_NOW_PREVIEW_CHANGED or null.
+async function approvedSendRefusal(approved, row) {
+  if (!approved) return null;
+  if (row.step_index !== approved.stepIndex) return SEND_NOW_PREVIEW_CHANGED;
+  if (approvedSendPlan(approved).email && !approved.emailContentHash) return SEND_NOW_PREVIEW_CHANGED;
+  if (approved.emailContentHash && await liveEmailTemplateHash(row.step_index) !== approved.emailContentHash) return SEND_NOW_PREVIEW_CHANGED;
+  return null;
+}
+
+// The exits before anything is armed: a combined confirmation, no sequence, a finished sequence, a finished invoice.
+async function sendNowEarlyExit(invoiceId, seq, combined) {
+  if (combined) return sendNowCombined(invoiceId, seq, combined);
+  if (!seq) return SEND_NOW_NO_SEQUENCE;
+  if (seq.status === 'stopped' || seq.status === 'completed') return SEND_NOW_FINISHED;
+  const invoice = await db('invoices').where({ id: invoiceId }).first();
+  return !invoice || isTerminalInvoice(invoice) ? SEND_NOW_FINISHED : null;
+}
+
+// What the click returns once fireStep has answered. fired.ownedBy: a promotion that committed after the arm (fireStep refused
+// under the key; nothing was claimed or sent), so the click needs the schedule's step confirmed. fired.previewChanged: the
+// approved send found the card out of date. Otherwise `report` gives what each leg did ({ legs: null } = the run could not
+// establish it), or { notClaimed } when another run held the reminder (nothing was sent by this click).
+async function sendNowResult(fired, { seq, report, release }) {
   if (fired?.ownedBy) return Wiring().sendNowForInvoiceOnSchedule(fired.ownedBy, seq.customer_id, null);
-  return undefined;
+  if (fired?.previewChanged) {
+    await release();
+    return SEND_NOW_PREVIEW_CHANGED;
+  }
+  return report ? { ok: true, report: fired || { legs: null } } : undefined;
+}
+
+async function sendNextTouchNow(invoiceId, { operatorInitiated = false, combined = null, approved = null, report = false } = {}) {
+  const seq = await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
+  const early = await sendNowEarlyExit(invoiceId, seq, combined);
+  if (early) return early;
+
+  const armed = await armSendNow(seq, invoiceId, approved);
+  if (armed.previewChanged) return SEND_NOW_PREVIEW_CHANGED;
+  if (armed.ownedBy) return Wiring().sendNowForInvoiceOnSchedule(armed.ownedBy, seq.customer_id, null);
+
+  const release = () => releaseSendNowClaimFor(seq.id, armed.claim, invoiceId);
+  const row = await loadSendNowRow(seq.id).catch(async (err) => { await release(); throw err; });
+  const refusal = row ? await approvedSendRefusal(approved, row) : SEND_NOW_FINISHED;
+  if (refusal) {
+    await release();
+    return refusal;
+  }
+  const claim = armed.claim && { preClaimed: true, claimStamp: armed.claim };
+  const reportOut = report ? {} : null;
+  const fired = await fireStep(row, { operatorInitiated, approved, report: reportOut, claim });
+  return sendNowResult(fired, { seq, report, release });
 }
 
 /**
@@ -3161,6 +3637,8 @@ module.exports = {
   pauseSequence,
   resumeSequence,
   resumeSequenceIfSystemResumable,
+  // The Intelligence Bar's resume card: whether the resume would return the reminders to their Auto Pay hold.
+  resumeStillAutopayHeld,
   rescheduleForInvoiceEdit,
   stopSequence,
   sendNextTouchNow,
@@ -3185,6 +3663,11 @@ module.exports = {
   markAtRiskForLongOverdue,
   latePaymentCheckerRetiredLive,
   adoptOrphanInvoicesLive,
+  // The Intelligence Bar's send-now card: the same text rendering and digest the service pins at dispatch.
+  approvalDigest,
+  renderApprovalSmsBody,
+  followupEmailPayload,
+  renderedEmailFingerprint,
   // Exported for tests only (fireStep + the batch ownership predicate: the
   // customer-dunning PostgreSQL concurrency suite drives them directly).
   _test: {

@@ -853,6 +853,10 @@ function deleteDuplicatePins(livePreview) {
   return pins;
 }
 
+// Where a resumed reminder sequence lands (resume_invoice_reminders' preview.resumes_to), in the card summary's words. Held for
+// Auto Pay and finished are not "active": the card must not promise reminders that resumeSequence() will not start.
+const RESUME_LANDING_WORDS = { active: 'active', autopay_hold: 'held for Auto Pay', completed: 'finished' };
+
 const PINNED_DISPLAY_BUILDERS = {
   delete_duplicate_customer: (params, preview) => (preview?.preview === true && preview.card ? preview.card : null),
   trigger_review_request: pinnedRecipientDisplay,
@@ -950,6 +954,28 @@ const PINNED_DISPLAY_BUILDERS = {
   void_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'void_invoice'
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount: preview.amount, status: preview.status, sends_to_customer: 'nothing' }
     : null),
+  // The invoice reminder and payment-plan cards: each names the invoice and the customer; the lines ride the contract.
+  pause_invoice_reminders: (params, preview) => (preview?.preview === true && preview.tool === 'pause_invoice_reminders'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, reminders: `${preview.reminder_status} -> paused`, sends_to_customer: 'nothing' }
+    : null),
+  resume_invoice_reminders: (params, preview) => (preview?.preview === true && preview.tool === 'resume_invoice_reminders'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, reminders: `${preview.reminder_status} -> ${RESUME_LANDING_WORDS[preview.resumes_to] || 'active'}`, sends_to_customer: 'nothing now' }
+    : null),
+  stop_invoice_reminders: (params, preview) => (preview?.preview === true && preview.tool === 'stop_invoice_reminders'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, reminders: `${preview.reminder_status} -> stopped`, sends_to_customer: 'nothing' }
+    : null),
+  send_invoice_reminder_now: (params, preview) => (preview?.preview === true && preview.tool === 'send_invoice_reminder_now'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount_due: preview.amount_due, step: preview.step, send_by: preview.channels, text: preview.text_line, email: preview.email_line }
+    : null),
+  schedule_invoice_send: (params, preview) => (preview?.preview === true && preview.tool === 'schedule_invoice_send'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount_due: preview.amount_due, send_at: preview.send_at_text, send_by: preview.channels }
+    : null),
+  create_payment_plan: (params, preview) => (preview?.preview === true && preview.tool === 'create_payment_plan'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, total_balance: preview.amount_due, schedule: `${preview.installment_count} ${preview.frequency} installments, first ${preview.next_payment_date} (each one is listed below)`, charges_card: 'no', emails_customer: preview.emails_customer ? 'yes' : 'no' }
+    : null),
+  cancel_payment_plan: (params, preview) => (preview?.preview === true && preview.tool === 'cancel_payment_plan'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, plan: preview.plan_summary }
+    : null),
   // create_invoice: the card names the customer, the total and the lines; the details ride the contract.
   create_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'create_invoice'
     ? { customer: preview.customer_name || preview.customer_id, total: preview.total, lines: (preview.lines || []).length, notes: preview.notes || 'none', due_date: preview.due_date || 'in 30 days', status: 'draft', sends_to_customer: 'nothing' }
@@ -999,6 +1025,15 @@ const VERIFIED_VERSION_PARAMS = {
   convert_lead: '_verified_lead_convert_version',
   // void_invoice binds the invoice state, credit, pay-page session and links the card showed.
   void_invoice: '_verified_invoice_void_version',
+  // The reminder cards bind the invoice, its reminder row, the recipients and the message the card showed; the payment-plan
+  // cards bind the invoice, the plan terms (every installment) and the reminder row.
+  pause_invoice_reminders: '_verified_invoice_reminder_version',
+  resume_invoice_reminders: '_verified_invoice_reminder_version',
+  stop_invoice_reminders: '_verified_invoice_reminder_version',
+  send_invoice_reminder_now: '_verified_invoice_reminder_version',
+  schedule_invoice_send: '_verified_invoice_reminder_version',
+  create_payment_plan: '_verified_payment_plan_version',
+  cancel_payment_plan: '_verified_payment_plan_version',
   // create_invoice binds the customer, every line, the dates, the tax and the server-computed total the card showed.
   create_invoice: '_verified_invoice_create_version',
   cancel_queued_message: '_verified_message_version',
@@ -2162,7 +2197,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   }
   // send_invoice: the stored approval names the invoice the preview resolved,
   // never the number the model sent.
-  if (['send_invoice', 'record_payment'].includes(toolUse.name) && preview?.preview === true && preview.invoice_id) {
+  if (['send_invoice', 'record_payment', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan'].includes(toolUse.name) && preview?.preview === true && preview.invoice_id) {
     params.invoice_id = String(preview.invoice_id);
     delete params.invoice_number;
   }
@@ -3421,6 +3456,7 @@ RULES:
 - En-route is not by itself a blanket prohibition on edits. Explain actual tool restrictions, and mention navigation coordination separately without inventing another approval requirement.
 - For write operations, prepare the required confirmation card; only the operator's approval can execute the proposed effects
 - Invoices: send_invoice (when it is in your tools) acts only on an EXISTING invoice — it texts the customer one pay-link text (no email). void_invoice (when it is in your tools) voids ONE invoice that has collected nothing and never deletes it; "delete" or "cancel" an invoice means void. create_invoice (when it is in your tools) creates ONE new DRAFT invoice for a named customer and never sends it; the operator uses send_invoice to send. Never change an amount on an existing invoice, charge a card or refund from the bar; for those, say so and point the operator to that invoice on the Invoices page.
+- Invoice reminders and payment plans (when they are in your tools): pause_invoice_reminders, resume_invoice_reminders and stop_invoice_reminders change one invoice's automatic reminders and send nothing; send_invoice_reminder_now texts and emails the customer the next reminder, and schedule_invoice_send sends the invoice later at a set Eastern time (give send_at_et as YYYY-MM-DDTHH:MM); create_payment_plan records a plan of equal installments and emails the customer the plan confirmation but never charges a card; cancel_payment_plan cancels the active plan. Each shows a confirmation card first. Never promise a plan collects money on its own.
 - When showing customer lists, include: name, city, tier, relevant dates, and the specific data point the query is about
 - Look up stored customer, property, service and product facts before asking the operator to retype them. If consequential identity or write scope remains ambiguous, ask one concise clarification. Never guess a write target.
 - Lead with the actual outcome or pending approval and a record link. Normally use at most 80 words; expand only when the operator asks or the effects need explanation.
