@@ -817,38 +817,73 @@ async function claimDueBundles(now) {
     .map((row) => ({ ...row, payload: typeof row.payload === 'string' ? JSON.parse(row.payload) : (row.payload || {}) }));
 }
 
-// ONE push for one tech's claimed cards. Resolves true when a device got it;
-// throws when every device refused (keep the bundle for a retry, the run
-// summary's rule).
+// A held card as the notice its own push would have carried.
+function bundledNotice(technicianId, row) {
+  const held = row.payload.push_bundle || {};
+  return {
+    visitId: row.payload.visit_id,
+    kind: held.kind,
+    technicianId,
+    snapshot: held.snapshot || null,
+    previousStatus: held.previous_status || null,
+    cardId: row.id,
+    pushTitle: PUSH_TITLE_BY_KIND[held.kind],
+  };
+}
+
+// Would this card's own push still go out? Only when no newer card for the
+// tech and visit has overtaken it — compared as (created_at, id) in SQL
+// (newerCardExists), the database's own order, never a millisecond Date — and
+// the visit row still stands behind it (pushStillCurrent).
+async function stillAnnounces(notice, conn) {
+  if (await newerCardExists(notice, conn)) return false;
+  return pushStillCurrent(notice, conn);
+}
+
+// ONE push for one tech's claimed cards: per visit only its newest card that
+// still stands, so a visit moved twice is one change and a visit completed
+// during the hold drops out. One left: exactly its own push, re-checked at the
+// provider boundary. More: one count, re-checked there too. Resolves true
+// when the push went out; throws when every device refused (kept for a
+// retry, the run summary's rule). A recheck ERROR keeps or sends (owner
+// steer: a missed alert is worse than a rare stale one).
 async function sendBundle(technicianId, rows) {
-  // One entry per visit, its newest card: a visit moved twice is one change.
-  const ordered = [...rows].sort((a, b) => new Date(a.created_at) - new Date(b.created_at) || String(a.id).localeCompare(String(b.id)));
-  const visits = [...new Map(ordered.map((row) => [String(row.payload.visit_id), row])).values()];
-  if (visits.length === 1) {
-    const { id, payload } = visits[0];
-    const held = payload.push_bundle || {};
-    const notice = {
-      visitId: payload.visit_id,
-      kind: held.kind,
-      technicianId,
-      snapshot: held.snapshot || null,
-      previousStatus: held.previous_status || null,
-      cardId: id,
-      pushTitle: PUSH_TITLE_BY_KIND[held.kind],
-    };
-    // Exactly the per-visit push, re-checked at the provider boundary; like
-    // any per-visit push it never throws and is not retried.
-    await pushCard(notice, { checkCurrent: (conn) => pushStillCurrent(notice, conn) });
+  const notices = [];
+  for (const row of rows) {
+    const notice = bundledNotice(technicianId, row);
+    let keep = true;
+    try {
+      keep = await stillAnnounces(notice, db);
+    } catch (err) {
+      logger.warn(`[tech-visit-notifications] bundle recheck failed for visit ${notice.visitId} (${errorTag(err)}); keeping it`);
+    }
+    if (keep) notices.push(notice);
+  }
+  if (!notices.length) return false;
+  if (notices.length === 1) {
+    await pushCard(notices[0], { checkCurrent: (conn) => pushStillCurrent(notices[0], conn) });
     return true;
   }
+  const beforeHandoff = async () => {
+    try {
+      for (const notice of notices) {
+        if (await stillAnnounces(notice, db)) return true;
+      }
+      return false;
+    } catch (err) {
+      logger.warn(`[tech-visit-notifications] bundle push recheck failed for tech ${technicianId} (${errorTag(err)}); sending`);
+      return true;
+    }
+  };
   const PushService = require('./push-notifications');
   const result = await PushService.sendToAdminUser(technicianId, {
-    title: bundleTitle(visits.map((row) => (row.payload.push_bundle || {}).kind)),
+    title: bundleTitle(notices.map((notice) => notice.kind)),
     body: '',
     url: '/admin/today',
-    tag: `route-changes-${ordered[0].id}`,
+    tag: `route-changes-${notices[0].cardId}`,
     priority: 'high',
-  });
+  }, { beforeHandoff });
+  if (result?.superseded) return false;
   const total = Number(result?.subscriptions) || 0;
   if (total > 0 && !(Number(result?.sent) > 0)) throw new Error(`no device accepted the push (${total} tried)`);
   return total > 0;

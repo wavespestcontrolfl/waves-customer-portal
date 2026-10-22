@@ -94,10 +94,22 @@ function cardsTable() {
 // answered by newerCard (null = this notice's card is still the newest).
 let newerCard = null;
 let lastNewerChain = null;
+// newerFromRows: answer from the stored cards instead — a later card for the
+// same tech and visit (insertion order stands in for (created_at, id)).
+let newerFromRows = false;
 function newerCardsQuery() {
   const c = {};
-  for (const m of ['where', 'whereIn', 'whereRaw', 'whereNot']) c[m] = jest.fn(() => c);
-  c.first = jest.fn(async () => newerCard);
+  const asked = {};
+  for (const m of ['whereIn']) c[m] = jest.fn(() => c);
+  c.where = jest.fn((col, val) => { if (col === 'n.technician_id') asked.tech = String(val); return c; });
+  c.whereRaw = jest.fn((sql, bindings) => { if (/visit_id' = \?/.test(sql)) asked.visit = String(bindings[0]); return c; });
+  c.whereNot = jest.fn((col, val) => { if (col === 'n.id') asked.card = String(val); return c; });
+  c.first = jest.fn(async () => {
+    if (newerCard || !newerFromRows) return newerCard;
+    const at = cardRows.findIndex((r) => String(r.id) === asked.card);
+    const later = cardRows.slice(at + 1).find((r) => String(r.technician_id) === asked.tech && String(r.payload.visit_id) === asked.visit);
+    return later ? { id: later.id } : null;
+  });
   lastNewerChain = c;
   return c;
 }
@@ -120,7 +132,17 @@ function chain(first, firstImpl = null) {
 }
 
 // technicians rows by id; one visit row for scheduled_services.
-function prime({ techs = { 'tech-1': TECH, [ADAM_ID]: ADAM }, visit = VISIT } = {}) {
+// visits: rows by id (the loader's where('s.id', id)), for tests with several visits.
+function visitsChain(visits) {
+  let id = null;
+  const c = {};
+  for (const m of ['leftJoin', 'select', 'forShare']) c[m] = jest.fn(() => c);
+  c.where = jest.fn((col, val) => { if (col === 's.id') id = val; return c; });
+  c.first = jest.fn(async () => visits[id] || null);
+  return c;
+}
+
+function prime({ techs = { 'tech-1': TECH, [ADAM_ID]: ADAM }, visit = VISIT, visits = null } = {}) {
   newerCard = null;
   db.mockImplementation((table) => {
     if (table === 'technicians') {
@@ -128,7 +150,7 @@ function prime({ techs = { 'tech-1': TECH, [ADAM_ID]: ADAM }, visit = VISIT } = 
       c.where = jest.fn((arg) => { c.first = jest.fn(async () => techs[arg.id] || null); return c; });
       return c;
     }
-    if (table === 'scheduled_services as s') return chain(visit);
+    if (table === 'scheduled_services as s') return visits ? visitsChain(visits) : chain(visit);
     if (table === 'tech_notifications') return cardsTable();
     if (table === 'tech_notifications as n') return newerCardsQuery();
     throw new Error(`unexpected table ${table}`);
@@ -612,9 +634,10 @@ describe('auto-dispatch: one push per run (GATE_AUTO_DISPATCH_PUSH_SUMMARY, owne
 describe('bundled pushes for any other mover (GATE_TECH_PUSH_BUNDLE, owner 2026-10-22)', () => {
   const TECH2 = { ...TECH, id: 'tech-2' };
   const techs = { 'tech-1': TECH, 'tech-2': TECH2, [ADAM_ID]: ADAM };
+  let visitRows = {};
   // An office move of one visit; each visit row matches its own card.
   const officeMove = async (id, { tech = 'tech-1', kind = 'rescheduled', actorId = 'admin' } = {}) => {
-    prime({ techs, visit: { ...VISIT, id, technician_id: tech } });
+    visitRows[id] = { ...VISIT, id, technician_id: tech };
     return notices.notifyTechVisitChange({
       visitId: id, kind, technicianId: tech, actorId,
       previous: kind === 'rescheduled' ? { date: '2026-09-09', windowStart: '13:00', windowEnd: '15:00' } : null,
@@ -627,9 +650,12 @@ describe('bundled pushes for any other mover (GATE_TECH_PUSH_BUNDLE, owner 2026-
     process.env.GATE_TECH_PUSH_BUNDLE = 'true';
     cardRows.length = 0;
     notices._test.setCurrentAutoDispatchRun(null);
-    prime({ techs });
+    visitRows = {};
+    newerFromRows = true;
+    prime({ techs, visits: visitRows });
   });
   afterAll(() => {
+    newerFromRows = false;
     delete process.env.GATE_TECH_VISIT_NOTIFICATIONS;
     delete process.env.GATE_TECH_PUSH_BUNDLE;
   });
@@ -675,7 +701,7 @@ describe('bundled pushes for any other mover (GATE_TECH_PUSH_BUNDLE, owner 2026-
   test('a single held push the visit has since contradicted is skipped at send time (the later change speaks)', async () => {
     await officeMove('v-1');
     // The visit moved to another tech before the sweep: the held "moved" push is stale.
-    prime({ techs, visit: { ...VISIT, id: 'v-1', technician_id: 'tech-2' } });
+    visitRows['v-1'].technician_id = 'tech-2';
     await notices.flushBundledPushes({ now: quiet() });
     expect(mockSendToAdminUser).not.toHaveBeenCalled();
     expect(cardRows[0].payload).not.toHaveProperty('push_bundle');
@@ -768,6 +794,56 @@ describe('bundled pushes for any other mover (GATE_TECH_PUSH_BUNDLE, owner 2026-
     mockSendToAdminUser.mockResolvedValueOnce({ subscriptions: 0, sent: 0, failed: 0 });
     expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 0 });
     expect(cardRows[0].payload).not.toHaveProperty('push_bundle');
+  });
+
+  test('a visit completed during the hold drops out of the count; all gone stale sends nothing and closes', async () => {
+    await officeMove('v-1');
+    await officeMove('v-2');
+    await officeMove('v-3');
+    visitRows['v-2'].status = 'completed';
+    await notices.flushBundledPushes({ now: quiet() });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: '2 visits on your route moved' }));
+
+    mockSendToAdminUser.mockClear();
+    await officeMove('v-4');
+    await officeMove('v-5');
+    visitRows['v-4'].status = 'cancelled';
+    visitRows['v-5'].status = 'completed';
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 0 });
+    expect(mockSendToAdminUser).not.toHaveBeenCalled();
+    for (const r of cardRows) expect(r.payload).not.toHaveProperty('push_bundle');
+  });
+
+  test('a newer card for a visit (written after the hold) takes that visit out: its own push speaks', async () => {
+    await officeMove('v-1');
+    await officeMove('v-2');
+    cardRows.push({ id: 'card-later', technician_id: 'tech-1', type: 'follow_through_tracking', payload: { visit_id: 'v-1' }, created_at: new Date() });
+    await notices.flushBundledPushes({ now: quiet() });
+    expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ tag: 'visit-v-2' }));
+  });
+
+  test('two cards for one visit in the same millisecond: the database order picks the newest and its push goes out (Codex pre-push P1)', async () => {
+    await officeMove('v-1');
+    await officeMove('v-1');
+    // Same Date, ids that sort the other way round: a JS sort would pick the older card.
+    cardRows[1].created_at = cardRows[0].created_at;
+    cardRows[0].id = 'card-z';
+    cardRows[1].id = 'card-a';
+    await notices.flushBundledPushes({ now: quiet() });
+    expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ tag: 'visit-v-1' }));
+  });
+
+  test('a count push is re-checked at the provider boundary: none still standing skips it', async () => {
+    await officeMove('v-1');
+    await officeMove('v-2');
+    await notices.flushBundledPushes({ now: quiet() });
+    const { beforeHandoff } = mockSendOpts[mockSendOpts.length - 1];
+    visitRows['v-1'].status = 'completed';
+    expect(await beforeHandoff()).toBe(true);
+    visitRows['v-2'].status = 'completed';
+    expect(await beforeHandoff()).toBe(false);
   });
 
   test('a sweep read failure never throws to the scheduler', async () => {
