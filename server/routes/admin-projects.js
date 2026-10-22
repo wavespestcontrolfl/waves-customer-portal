@@ -2884,6 +2884,8 @@ async function maybeRepriceWdoDraft(invoice, project) {
 // because this is the ONLY writer of projects.invoice_id: a payment path that must not run while a report waits on the invoice (the
 // Intelligence Bar's apply_invoice_credit) holds the invoice row FOR UPDATE and reads projects.invoice_id under it, so a link cannot
 // appear between its read and its commit. Lock order is project (held by the callers that lock it) -> invoice, never the reverse.
+// Called with a transaction, the share lock lasts until the OUTER transaction commits: a caller must not write the same invoice on
+// another connection (InvoiceService.update, maybeRepriceWdoDraft) after this call inside that transaction, or it waits on its own lock.
 async function persistProjectInvoiceLink(project, invoiceId, runner = db) {
   if (!invoiceId || project.invoice_id === invoiceId) return;
   try {
@@ -2989,8 +2991,12 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
         .orderBy('created_at', 'desc')
         .first();
       if (linked) {
+        // Reprice FIRST: persistProjectInvoiceLink under `trx` holds the invoice row FOR SHARE until this transaction commits, and the
+        // reprice (InvoiceService.update) runs on its own connection and needs that row FOR UPDATE, so after the link it would wait
+        // on a lock its own caller holds. Nothing may write the linked invoice on another connection after the link call.
+        const repricedLinked = await maybeRepriceWdoDraft(linked, project);
         await persistProjectInvoiceLink(project, linked.id, trx);
-        return { invoice: await maybeRepriceWdoDraft(linked, project), created: false };
+        return { invoice: repricedLinked, created: false };
       }
     }
 
@@ -3180,8 +3186,10 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
         .orderBy('created_at', 'desc')
         .first();
       if (lockedReuse) {
+        // Reprice FIRST (same reason as the reuse above): the link holds the invoice row FOR SHARE until this transaction commits.
+        const repricedReuse = await maybeRepriceWdoDraft(lockedReuse, project);
         await persistProjectInvoiceLink(project, lockedReuse.id, trx);
-        return { invoice: await maybeRepriceWdoDraft(lockedReuse, project), created: false };
+        return { invoice: repricedReuse, created: false };
       }
       const lockedBilled = await trx('invoices')
         .where({ customer_id: project.customer_id })
@@ -6078,3 +6086,4 @@ module.exports = router;
 // helpers (PDF build, filing archive, copies, gates) without moving them.
 module.exports.releaseHeldProjectReport = releaseHeldProjectReport;
 module.exports.persistProjectInvoiceLink = persistProjectInvoiceLink;
+module.exports.resolveOrCreateProjectInvoice = resolveOrCreateProjectInvoice;
