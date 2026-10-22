@@ -16,7 +16,17 @@ const { shortenOrPassthrough, existingShortUrlFor, allShortUrlsFor } = require("
 const INLINE_CLAIM_STALE_MS = 10 * 60 * 1000;
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { renderSmsTemplate } = require("./sms-template-renderer");
-const { firstNameFrom } = require("./customer-contact");
+const { firstNameFrom, isServiceContactRole } = require("./customer-contact");
+
+// The trust a review text's leg carries (codex #6363 r33 P2): the resolved
+// slot-1 contact's leg is 'service_contact_authorized', so sendCustomerMessage's
+// contact-choices boundary re-check (contactPhoneDeclinesText) holds a
+// contact who turned texts off — or whom the holder removed — between the
+// recipient's resolution and the provider handoff; the holder's own leg keeps
+// 'phone_matches_customer'.
+function reviewSmsTrust(contact) {
+  return isServiceContactRole(contact?.role) ? "service_contact_authorized" : "phone_matches_customer";
+}
 const TWILIO_NUMBERS = require("../config/twilio-numbers");
 const {
   reserveForRequest,
@@ -2579,6 +2589,7 @@ const ReviewService = {
           audience: "customer",
           purpose: "review_request",
           customerId: customer.id,
+          identityTrustLevel: reviewSmsTrust(contact),
           entryPoint: "review_request_send",
           metadata: {
             review_request_id: requestId,
@@ -3207,6 +3218,8 @@ const ReviewService = {
     const { getServiceContact } = require("./customer-contact");
     const contact = getServiceContact(customer);
     if (!contact.email) return { reason: "no_email" };
+    // The contact's OWN email master switch (contact login) holds the leg.
+    if (await require("./contact-notification-prefs").contactDeclinesChannel(customer.id, contact, "email")) return { reason: "email_off" };
     let prefs;
     try {
       prefs = await db("notification_prefs").where({ customer_id: customer.id }).first();
@@ -3224,14 +3237,18 @@ const ReviewService = {
    * cleared, or a failed write, returns false and the library aborts the
    * provider call (r9/r10 P2). True = this attempt owns the dispatch.
    */
-  async _claimInlineEmailDispatch(requestId) {
+  async _claimInlineEmailDispatch(requestId, { contact = null } = {}) {
     let cleared;
     try {
       // The final pre-provider claim re-applies the terminal predicates
       // (the customer may have answered, been stopped, reviewed or been
       // removed since the recipient check) so it fails closed (pre-push
       // Codex P1 on bd85be714).
-      cleared = await db("review_requests")
+      const { whereContactEmailAllowed } = require("./contact-notification-prefs");
+      // requireSlot (codex r27 P2): the contact must still occupy a slot of
+      // the customer row as of this same write — a contact the holder
+      // removed while the template resolved is a former contact, not emailed.
+      cleared = await whereContactEmailAllowed(db("review_requests"), "review_requests.customer_id", contact, { requireSlot: true })
         .where({ id: requestId })
         .whereNotNull("email_leg_owed_at")
         .whereNotIn("status", INLINE_RETRY_TERMINAL_STATUSES)
@@ -3250,7 +3267,9 @@ const ReviewService = {
         // still be emailed — this claim is the last fence before the
         // provider. Same predicate as _inlineEmailRecipient (a prefs row
         // must exist; review_request / email_enabled not false) so the two
-        // never disagree (GH Codex #3856 r23 P1).
+        // never disagree (GH Codex #3856 r23 P1) — and the contact's OWN
+        // email switch the recipient read applied, as of this write too
+        // (whereContactEmailAllowed above; codex #6363 r20 P2).
         .whereExists(function emailConsent() {
           this.select(db.raw("1")).from("notification_prefs")
             .whereRaw("notification_prefs.customer_id = review_requests.customer_id")
@@ -3328,7 +3347,7 @@ const ReviewService = {
         // addresses in logs); the sanitized catch below is the only log.
         suppressProviderErrorLog: true,
         onQueued: async () => {
-          dispatched = await this._claimInlineEmailDispatch(request.id);
+          dispatched = await this._claimInlineEmailDispatch(request.id, { contact });
           return dispatched;
         },
       });
@@ -4534,7 +4553,7 @@ const ReviewService = {
               audience: "customer",
               purpose: "review_request",
               customerId: customer.id,
-              identityTrustLevel: "phone_matches_customer",
+              identityTrustLevel: reviewSmsTrust(contact),
               entryPoint: "review_request_followup",
               metadata: {
                 original_message_type: "review_followup",
@@ -4810,7 +4829,11 @@ const ReviewService = {
     }
     const reviewBlocked = !!prefs && prefs.review_request === false;
     const smsBlocked = reviewBlocked || (!!prefs && prefs.sms_enabled === false);
-    const emailBlocked = reviewBlocked || (!!prefs && prefs.email_enabled === false);
+    // The email identity is the service contact as themselves; their OWN
+    // email master switch (contact login) blocks the leg like the holder's
+    // (the SMS identity already fell back to the holder in the resolver).
+    const emailBlocked = reviewBlocked || (!!prefs && prefs.email_enabled === false)
+      || await require("./contact-notification-prefs").contactDeclinesChannel(customer.id, emailContact, "email");
     // Hard suppression (DNC / wrong-number) on the phone — if the SMS block is
     // suppression-only, the cadence should fall back to email rather than stall.
     // sendCustomerMessage would also block it, but checking here lets the channel
@@ -5423,6 +5446,7 @@ const ReviewService = {
         audience: "customer",
         purpose: "review_request",
         customerId: customer.id,
+        identityTrustLevel: reviewSmsTrust(contact),
         entryPoint: "review_outreach_touch",
         metadata: {
           ...(request.sequence_id ? { review_sequence_id: request.sequence_id } : {}),
@@ -5776,6 +5800,11 @@ const ReviewService = {
     // MAY have reached SendGrid (GH Codex #3856 r9 P2).
     let dispatched = false;
     let summaryBlock = null;
+    // The contact's OWN email switch, re-read at the provider handoff (codex
+    // #6363 r22 P2): sendOutreachTouch read it before the template library's
+    // own awaits; a decline that lands in between still holds the email —
+    // the fence the inline copy's claim and the appointment email have.
+    let contactDeclinedAtDispatch = false;
     try {
       const EmailLib = require("./email-template-library");
       result = await EmailLib.sendTemplate({
@@ -5835,11 +5864,27 @@ const ReviewService = {
         // SendGrid body out of the transport log; the sanitized catch below
         // (request id + error class) is the only log.
         suppressProviderErrorLog: true,
-        onQueued: () => { dispatched = true; },
+        onQueued: async () => {
+          // Fail closed: an unreadable choices table reads as declined.
+          // requireSlot (codex r27 P2): a contact the holder removed from
+          // the slots since the recipient resolved is held too.
+          if (await require("./contact-notification-prefs").contactDeclinesChannel(customer.id, contact, "email", { requireSlot: true })) {
+            contactDeclinedAtDispatch = true;
+            return false;
+          }
+          dispatched = true;
+        },
       });
     } catch (err) {
       logger.error(`[review] outreach email send threw (requestId=${request.id} errType=${err?.name || "Error"} dispatched=${dispatched})`);
       return this._outreachEmailThrowOutcome({ request, manageRetryVia, dispatched, err });
+    }
+    if (contactDeclinedAtDispatch) {
+      // The same terminal opt-out sendOutreachTouch reports when the contact's
+      // switch was already off at its own read: nothing reached the provider.
+      await db("review_requests").where({ id: request.id }).update({ status: "suppressed" })
+        .catch((bookErr) => logger.error(`[review] post-decline email bookkeeping failed (requestId=${request.id} errType=${bookErr?.name || "Error"})`));
+      return { ok: false, blocked: true, terminal: true, channel: "email", requestId: request.id, reason: "opted_out" };
     }
 
     // Send returned — bookkeeping failures here must NOT requeue (the email

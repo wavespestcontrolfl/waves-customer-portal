@@ -8190,15 +8190,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
             const applicationMethod = inferServiceReportApplicationMethod(product, p, reportServiceLine);
             const areaValue = p.areaValue != null && p.areaValue !== '' ? Number(p.areaValue) : null;
             const areaUnit = p.areaUnit || null;
+            // Linear feet are optional on a perimeter spray (owner 2026-10-22, "make feet optional"): a spray
+            // with no trace and no typed feet is recorded with no length (area_value null). A length that is
+            // sent must still be a positive number of linear feet.
             if (
               !isIncompleteVisit
-              &&
-              requiresLinearFtForReportApplication(applicationMethod)
+              && requiresLinearFtForReportApplication(applicationMethod)
+              && areaValue != null
               && (!Number.isFinite(areaValue) || areaValue <= 0 || areaUnit !== 'linear_ft')
             ) {
-              const err = new Error(`Linear feet are required for ${product.name}`);
+              const err = new Error(`Linear feet must be a positive number for ${product.name}`);
               err.isOperational = true; err.statusCode = 400;
-              err.code = 'linear_ft_required';
+              err.code = 'linear_ft_invalid';
               throw err;
             }
             if (

@@ -18,6 +18,16 @@ jest.mock('../services/customer-contact-fanout', () => {
 });
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
 jest.mock('../services/plan-rate-ledger', () => ({ syncScalarWriteToLedger: jest.fn(async () => {}) }));
+// A phone change also re-judges the row's contact families (contact login);
+// admin-customers-contact-identity-save.test.js covers that, not here.
+jest.mock('../services/contact-notification-prefs', () => ({
+  ...jest.requireActual('../services/contact-notification-prefs'),
+  pruneContactNotificationPrefs: jest.fn(async () => 0),
+}));
+jest.mock('../middleware/auth', () => ({
+  ...jest.requireActual('../middleware/auth'),
+  revokeRemovedContactRefreshSessions: jest.fn(async () => 0),
+}));
 
 const mockState = { initial: null, locked: null, patches: [] };
 

@@ -8,7 +8,7 @@ const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../midd
 const { WAVES_LOCATIONS, resolveReviewLocationId } = require('../config/locations');
 const logger = require('../services/logger');
 const { etDateString, addETDays, startOfETMonth } = require('../utils/datetime-et');
-const { getServiceContact, getServiceContactSmsRecipient } = require('../services/customer-contact');
+const { getServiceContact, getServiceContactSmsRecipient, phoneKeyOf } = require('../services/customer-contact');
 const { runExclusive } = require('../utils/cron-lock');
 const OUTREACH = require('../services/review-outreach-templates');
 const { isEnabled } = require('../config/feature-gates');
@@ -775,6 +775,14 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
       : [];
     const suppressedSet = new Set(suppressedRows.map(r => r.phone));
 
+    // The sender's email identity is the service contact as themselves, and
+    // their OWN email master switch (contact login) blocks the email leg
+    // (review-request.js sendOutreachTouch) — so a contact who turned email
+    // off is not offered a cadence that cannot deliver (codex #6363 r20 P2).
+    const { contactEmailOffPhoneKeys } = require('../services/contact-notification-prefs');
+    const emailOffByCustomer = await contactEmailOffPhoneKeys(customerIds);
+    const contactEmailOff = (c, emailContact) => !!emailOffByCustomer.get(String(c.id))?.has(phoneKeyOf(emailContact.phone));
+
     const sequenceMap = await ReviewService.getActiveSequencesForCustomers(customerIds).catch(() => ({}));
 
     const satRows = customerIds.length
@@ -801,7 +809,9 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
         // unstamped contact's email still counts as cadenceable.
         const contact = smsRecipient(c);
         const phone = contact.phone || c.phone || null;
-        const email = getServiceContact(c).email || c.email || null;
+        const emailContact = getServiceContact(c);
+        const email = emailContact.email || c.email || null;
+        const emailOff = contactEmailOff(c, emailContact);
         const ls = lastSvcMap[c.id];
         const ask = askMap[c.id] || { askCount: 0, lastAsked: null };
         const prefs = prefsMap[c.id];
@@ -818,7 +828,7 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
         const smsable = !!phone && !reviewOptedOut && !smsPrefOff && !suppressed && !emailPreferred;
         // Email fails closed like the sender: requires an existing prefs row
         // (parity with SMS's NO_CONSENT_RECORD on a missing row).
-        const emailable = !!email && !!prefs && !reviewOptedOut && !emailPrefOff;
+        const emailable = !!email && !!prefs && !reviewOptedOut && !emailPrefOff && !emailOff;
         const sequence = sequenceMap[c.id] || null;
         // `sendable` gates the SMS-only manual Send; `cadenceable` gates
         // Start-Cadence (can use email). A customer who turned OFF review SMS but
@@ -832,6 +842,9 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
         if (!smsable && !emailable) {
           if (reviewOptedOut) eligibilityReasons.push('opted_out');
           else if (suppressed) eligibilityReasons.push('suppressed');
+          // The contact's email switch is the opt-out the sender reports
+          // (blocked: true, reason 'opted_out').
+          else if (emailOff) eligibilityReasons.push('opted_out');
           else eligibilityReasons.push('no_contact');
         } else if (!smsable && emailable) {
           eligibilityReasons.push(

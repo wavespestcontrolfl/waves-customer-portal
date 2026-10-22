@@ -85,6 +85,7 @@ async function loadServiceWithCustomer(serviceId, knex = db) {
       'customers.first_name',
       'customers.last_name',
       'customers.phone as cust_phone',
+      'customers.email as cust_email',
       'customers.address_line1 as cust_address_line1',
       'customers.address_line2 as cust_address_line2',
       'customers.city as cust_city',
@@ -492,6 +493,13 @@ async function buildRecapContext(serviceId, knex = db, { includeCommonProducts =
     existingRecordLoadFailed,
     catalogLoadFailed,
     service: recapServiceIdentity(svc, profile),
+    // The customer's phone and email for the sheet header's call and email
+    // links (owner 2026-10-22). Kept out of `service`: that object is the
+    // visit identity a client echoes back as `expectedVisit`.
+    contact: {
+      phone: svc.cust_phone || null,
+      email: svc.cust_email || null,
+    },
     timeline,
     products,
     ...(commonProducts && { commonProducts }),

@@ -202,6 +202,11 @@ async function sendLegacyServiceReportEmail({
   recipient,
   email,
   attachments,
+  // Re-read immediately before the provider call (codex #6363 r24 P2): a
+  // contact's own report-email choice as of the handoff. False holds the
+  // recipient with the queued row marked failed (never sent), the same
+  // shape as the template library's onQueued abort.
+  stillAllowed = null,
 }) {
   const idempotencyKey = serviceReportEmailIdempotencyKey(recordId, recipient);
   let message = null;
@@ -277,6 +282,18 @@ async function sendLegacyServiceReportEmail({
   } catch (err) {
     if (!isEmailMessageSchemaMissing(err)) throw err;
     ledgerAvailable = false;
+  }
+
+  if (typeof stillAllowed === 'function' && !(await stillAllowed())) {
+    const reason = 'Suppressed: contact declined service report email';
+    if (ledgerAvailable && message?.id) {
+      await db('email_messages').where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken }).update({
+        status: 'failed',
+        error_message: reason,
+        updated_at: new Date(),
+      }).catch(() => {});
+    }
+    return { blocked: true, reason, message };
   }
 
   try {
@@ -575,7 +592,26 @@ async function sendServiceReportV1Email(recordId, {
     // The account's role decides who may read the findings: retry, never guess.
     return { ok: false, transient: true, reason: 'account_role_unavailable', error: `Account role unavailable: ${err.message}` };
   }
-  const recipients = getServiceReportEmailRecipients(reportCustomer, prefs || {});
+  // The contact's own choices (contact login, GATE_CONTACT_LOGIN) narrow the
+  // slot emails further; an unreadable choices table is the same transient
+  // non-decision as an unreadable prefs row (retry, never a terminal skip).
+  let recipients;
+  try {
+    recipients = await require('../contact-notification-prefs')
+      .filterReportEmailRecipientsByContactPrefs(getServiceReportEmailRecipients(reportCustomer, prefs || {}), reportCustomer);
+  } catch (err) {
+    return { ok: false, transient: true, reason: 'prefs_unavailable', error: `Contact notification choices unavailable: ${err.message}` };
+  }
+  // The same slots and choices as of the provider handoff (codex #6363 r24 +
+  // r25 P2): the report data, credit read, history read and PDF render all
+  // run after the filter above — a contact who turns report email (or email
+  // altogether) off in between, or whom the holder removes from the slots in
+  // between, is still held at the template library's onQueued hook and before
+  // the legacy renderer's own provider call. Holder and billing recipients
+  // pass; an unreadable row or table holds the contact.
+  const contactStillAllows = (recipient) => require('../contact-notification-prefs')
+    .reportEmailRecipientStillAllowed(reportCustomer, recipient)
+    .catch(() => false);
   if (!recipients.length) {
     // A transient notification_prefs lookup failure (PREFS_UNAVAILABLE) is
     // not a decision at all — it must NOT be reported the same way as a
@@ -782,6 +818,9 @@ async function sendServiceReportV1Email(recordId, {
         // dateOnlyStamp: raw pg DATE interpolation printed the entire
         // Date.toString() into the customer's attachment name.
         attachments: pdf ? [pdfAttachment(`waves-service-report-${dateOnlyStamp(data.serviceDate) || recordId}.pdf`, pdf)] : [],
+        // Fires immediately before the provider call; false aborts the queued
+        // row before dispatch (read as `sent: false` → blocked below).
+        onQueued: () => contactStillAllows(recipient),
       }).then((result) => ({ recipient, result }))),
   );
   const sent = [];
@@ -873,6 +912,7 @@ async function sendServiceReportV1Email(recordId, {
       recipient,
       email,
       attachments,
+      stillAllowed: () => contactStillAllows(recipient),
     });
   }));
 

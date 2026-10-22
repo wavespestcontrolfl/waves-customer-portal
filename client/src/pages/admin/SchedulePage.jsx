@@ -10300,6 +10300,9 @@ function completionProductRowProblem(service, rows, typeFor) {
   const missingArea = rows.find((p) => {
     const requirement = areaOf(p);
     if (!requirement) return false;
+    // Linear feet are optional (owner 2026-10-22, "make feet optional"): an empty box holds nothing; a typed
+    // length must still be above 0 (the server refuses one that is not, linear_ft_invalid).
+    if (requirement.unit === "linear_ft" && (p.areaValue == null || p.areaValue === "")) return false;
     const value = Number(p.areaValue);
     return !Number.isFinite(value) || value <= 0 || p.areaUnit !== requirement.unit;
   });

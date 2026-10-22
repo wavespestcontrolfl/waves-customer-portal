@@ -1453,6 +1453,15 @@ function phoneLast10(phone) {
   return digits.length >= 10 ? digits.slice(-10) : '';
 }
 
+// The contact families on a row are re-judged after a save that rewrites a
+// slot field OR the holder's own number (codex #6363 r35 P2): a number the
+// holder now owns is no contact's — contactSessionFor refuses it — so the
+// family minted for it ends with this edit, not on some later slot save.
+function contactIdentityEdited(updates, before) {
+  return SERVICE_CONTACT_SLOT_FIELDS.flat().some((field) => Object.prototype.hasOwnProperty.call(updates, field))
+    || (updates.phone !== undefined && phoneLast10(updates.phone) !== phoneLast10(before.phone));
+}
+
 function cleanText(value) {
   if (value === undefined || value === null) return '';
   return String(value).trim();
@@ -4402,6 +4411,26 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             applySessionRelease = payerRelease.apply || null;
           }
           await trx('customers').where({ id: req.params.id }).update(updates);
+          // A contact-slot rewrite from the admin editor is the same identity
+          // mutation as the portal's contact save (codex #6363 r7 P2): a
+          // removed phone's own notification choices and portal sessions go
+          // with it, a kept phone that lost its email loses its email-only
+          // choices; a holder-phone change ends the family of a number the
+          // holder now owns. Contact login, GATE_CONTACT_LOGIN.
+          if (contactIdentityEdited(updates, lockedBefore)) {
+            const slotsAfter = require('../services/customer-contact').getServiceContactSlots(lockedAfter)
+              .filter((slot) => slot.phone || slot.email).map((slot) => ({ phone: slot.phone, email: slot.email }));
+            await require('../services/contact-notification-prefs').pruneContactNotificationPrefs(trx, req.params.id, slotsAfter);
+            await require('../middleware/auth').revokeRemovedContactRefreshSessions(trx, req.params.id, slotsAfter.map((slot) => slot.phone));
+          }
+          // Deactivating the account from the editor (active true → false)
+          // ends every contact family on the row (codex #6363 r16 P2) — the
+          // same revocation the cancellation processor's disarm makes — so a
+          // dormant contact device's refresh token cannot come back valid on
+          // a later reactivation without a new code.
+          if (updates.active === false && lockedBefore.active !== false) {
+            await require('../middleware/auth').revokeContactRefreshFamilies(trx, req.params.id);
+          }
           // An edited property type also lands on the primary property row,
           // in this transaction, so property-scoped readers agree with the
           // account. Only an ACTUAL change (the editor posts the whole form).
