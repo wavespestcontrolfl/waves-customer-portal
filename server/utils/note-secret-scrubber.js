@@ -89,10 +89,10 @@ function looksLikeBasicCredential(header, token) {
 // name in any case (api_token=x), '=' (spaces around it allowed); a stem (PASS, SECRET, TOKEN, PASSWORD, ...)
 // counts only as a whole name segment, so compass=, bypass=, SECRETARY_NAME= and TOKENIZER_MODEL= are
 // ordinary words (Codex #6375 r14, r15). An unquoted value runs to the end of the line or an inline
-// comment (" #"), as dotenv reads it: DB_PASSWORD=hunter 22 (Codex #6375 r2, r13). It stops before a
+// comment (" #"), as dotenv reads it: DB_PASSWORD=hunter 22 (Codex #6375 r2, r13). It is read as at most 13 words (a passphrase), stops before a
 // field delimiter (", " or "; ") and gives up the extra words when another assignment follows on the
 // line ("x=hunter22 and api key: y"): that one is taken by the rules after this.
-const ENV_SECRET_RE = /\b((?:[A-Z][A-Z0-9_]*)?(?<![A-Z0-9])(?:PASSWORD|PASSWD|PASS|SECRET|TOKEN|API_?KEY|PRIVATE_KEY|CREDENTIALS?)(?![A-Z0-9])[A-Z0-9_]*)([ \t]*=[ \t]*)(\\"(?:[^\\\n]|\\(?!"))*\\"|\\'(?:[^\\\n]|\\(?!'))*\\'|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[removed\](?![^\s,;}\]])|(?:\[removed\]|\S)*(?:\[removed\]|[^\s,;}\]])(?:[ \t]+(?!#)(?:\[removed\]|[^\s=:])*(?:\[removed\]|[^\s,;}\]=:]))*(?![^\n#]*[=:])|(?:\[removed\]|\S)*(?:\[removed\]|[^\s,;}\]]))/gi;
+const ENV_SECRET_RE = /\b((?:[A-Z][A-Z0-9_]*)?(?<![A-Z0-9])(?:PASSWORD|PASSWD|PASS|SECRET|TOKEN|API_?KEY|PRIVATE_KEY|CREDENTIALS?)(?![A-Z0-9])[A-Z0-9_]*)([ \t]*=[ \t]*)(\\"(?:[^\\\n]|\\(?!"))*\\"|\\'(?:[^\\\n]|\\(?!'))*\\'|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[removed\](?![^\s,;}\]])|\S*[^\s,;}\]](?:[ \t]+(?!#)[^\s=:]*[^\s,;}\]=:]){0,12}(?![^\n#]{0,200}[=:])|\S*[^\s,;}\]])/gi;
 // Structural credential assignments in a config or header format (Codex #6375 r7):
 // "db.password: hunter22", "DB_PASSWORD = hunter22", "X-API-Key: abc123xyz",
 // "Authorization: Token abc123xyz". The KEY must end in a credential word (names

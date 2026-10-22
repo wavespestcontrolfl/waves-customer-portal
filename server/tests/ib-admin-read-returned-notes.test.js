@@ -574,6 +574,22 @@ describe('Codex #6375 r10: scan-limit cut, JSON-escaped links, long digit runs, 
     expect(scrubNote(once).text).toBe(once);
   });
 
+  test('repeated markers and long word runs after an env-style name finish fast (r15 audit P1)', () => {
+    const { redactSecrets, newState } = require('../utils/signed-link-redaction');
+    const inputs = [
+      `PASSWORD=${'[removed]'.repeat(2000)} x=y`,
+      `password: ${'[removed]'.repeat(2000)} x=y`,
+      `API_TOKEN=${'ab '.repeat(6000)}q=1`,
+      `PASS=x y `.repeat(2000),
+    ];
+    for (const input of inputs) {
+      const started = Date.now();
+      scrubNote(input);
+      redactSecrets({ notes: input }, newState(), 0, { freeText: {} });
+      expect(Date.now() - started).toBeLessThan(500);
+    }
+  });
+
   test('a tracker URL wrapping a live short link is removed, encoded once or twice or in a fragment (r15)', async () => {
     const inner = 'https://portal.wavespestcontrol.com/l/abc234def5';
     const wrapped = [
