@@ -1732,9 +1732,14 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // phone bookings follow the full 8am-6pm business-hours shift, matching
     // call-recording-processor.js's own sanity bound (Codex r3 P0 on #4663).
     customerFacing: selfServeNotice,
-    // Slide shadow (GATE_SLOT_SLIDE_OFFER): the daypart the results below
-    // are filtered to, so a logged slide matches what this request shows.
-    slideTimeOfDay: timeOfDay,
+    // Slide shadow (GATE_SLOT_SLIDE_OFFER): the same daypart + self-serve
+    // notice filters this function applies to find-time's results below,
+    // so a logged slide is one this request could actually show.
+    slideNewStartAllowed: (date, startMin) => {
+      const startTime = `${String(Math.floor(startMin / 60)).padStart(2, '0')}:${String(startMin % 60).padStart(2, '0')}`;
+      return inTimeOfDay(startTime, timeOfDay)
+        && !(selfServeNotice && violatesSelfServeNotice({ date, startTime }, today));
+    },
     // Waves works weekends (Sat AND Sun) — the estimate slot flow already
     // offers Sundays (estimate-slot-availability defaults includeWeekends:true).
     // find-time's legacy default drops Sundays, which silently hid every Sunday

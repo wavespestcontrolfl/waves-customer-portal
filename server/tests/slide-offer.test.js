@@ -256,3 +256,14 @@ describe('Codex r4 guards', () => {
     expect(result.baseline).toMatchObject({ startMin: H(14), driveMinutes: 55 });
   });
 });
+
+describe('Codex r5 guards', () => {
+  test('a changed stop may not clash with another technician\'s stop (blockers)', () => {
+    const free = findSlideOffers({ ...base, stops: day() });
+    expect(free.offers.find((o) => o.startMin === H(11))).toBeDefined();
+    const blocked = findSlideOffers({
+      ...base, stops: day(), blockers: [{ id: 'x', ...at(27.18), startMin: H(11), endMin: H(12) }],
+    });
+    expect(blocked.offers.find((o) => o.startMin === H(11))).toBeUndefined();
+  });
+});

@@ -93,10 +93,18 @@ function changedStopFits(s, { dayOpen, dayClose, admits, startFloorMin, newStart
   return admits({ startMin: s.startMin, endMin: s.endMin, isNew, offHour: s.offHour === true });
 }
 
+// A changed stop against other technicians' committed stops: the callers'
+// collision checks are tech-blind, so the same pair rule applies (early
+// side first, as travel-gap measures it).
+function clashesWithBlocker(s, { blockers, pairViolates }) {
+  return blockers.some((b) => (s.startMin <= b.startMin ? pairViolates(s, b) : pairViolates(b, s)));
+}
+
 function arrangementFeasible(stops, day) {
   const { home, dayOpen, dayClose, grandfathered, changedIds, pairViolates } = day;
   const ordered = [...stops].sort((a, b) => a.startMin - b.startMin);
   if (ordered.some((s) => changedIds.has(s.id) && !changedStopFits(s, day))) return false;
+  if (ordered.some((s) => changedIds.has(s.id) && clashesWithBlocker(s, day))) return false;
   const first = ordered[0];
   if (first && changedIds.has(first.id) && first.startMin < dayOpen + driveMin(home, first)) return false;
   const last = ordered[ordered.length - 1];
@@ -184,6 +192,9 @@ function candidateStarts(durationMinutes, dayOpen, dayClose) {
  *   across a caller's tech-days: `remaining` arrangements (decremented in
  *   place) and an optional Date.now() `deadline`. Each day also stops at
  *   MAX_EVALUATIONS.
+ * @param {Array<{id, startMin, endMin, lat?, lng?}>} [p.blockers] Other
+ *   technicians' committed stops that day. Never moved and never part of
+ *   this route's cost, but no changed stop may clash with one.
  * @param {Function} [p.pairViolates] (early, late) → truthy when the pair
  *   can't sit side by side. Default travel-gap.js travelGapViolation; a
  *   caller with GATE_SLOT_TRAVEL_GAP off passes plain overlap.
@@ -195,7 +206,7 @@ function candidateStarts(durationMinutes, dayOpen, dayClose) {
 function findSlideOffers({
   stops, newStop, durationMinutes, home, dayOpen, dayClose, admits = ADMIT_ALL,
   startFloorMin = 0, newStartFloorMin = 0, budget = { remaining: MAX_EVALUATIONS },
-  pairViolates = travelGapViolation,
+  pairViolates = travelGapViolation, blockers = [],
 }) {
   const none = (reason, baseline = null) => ({ reason, baseline, offers: [] });
   if (!hasCoords(newStop) || !hasCoords(home)) return none('NEW_STOP_COORDLESS');
@@ -216,6 +227,7 @@ function findSlideOffers({
     startFloorMin,
     newStartFloorMin,
     pairViolates,
+    blockers,
     grandfathered: originalPairs(base),
     starts: candidateStarts(durationMinutes, dayOpen, dayClose),
     makeNew: (startMin) => ({

@@ -298,20 +298,36 @@ test('a committed visit with a stray reservation_expires_at can still slide', as
   expect(ids[0]).toEqual(['d']);
 });
 
-test('the requested daypart binds the logged slide start', async () => {
+test('the caller\'s own start rule (daypart / notice / funnel) binds the logged slide start', async () => {
   process.env.GATE_SLOT_SLIDE_OFFER = 'true';
-  const startsFor = async (slideTimeOfDay) => {
+  const startsFor = async (slideNewStartAllowed) => {
     _resetSlideShadowSample();
     logger.info.mockClear();
     wireDb();
-    await findAvailableSlots({ ...CALL, slideTimeOfDay });
+    await findAvailableSlots({ ...CALL, slideNewStartAllowed });
     return shadowLines().map((l) => JSON.parse(l.replace('[slot-slide] shadow ', '')).slideStart);
   };
-  // Positive control: no daypart → the 11 AM slide.
+  // Positive control: no caller rule → the 11 AM slide.
   expect(await startsFor(undefined)).toEqual(['11:00']);
-  // Afternoon request: the morning slide is never logged.
-  for (const start of await startsFor('afternoon')) expect(Number(start.slice(0, 2))).toBeGreaterThanOrEqual(12);
-  // Morning request: every morning hour is taken, so there is no plain
-  // morning slot to beat — no slide is logged (no-baseline rule).
-  expect(await startsFor('morning')).toEqual([]);
+  // An afternoon-only (or notice-window) rule: the morning slide is never logged.
+  for (const start of await startsFor((d, m) => m >= 12 * 60)) expect(Number(start.slice(0, 2))).toBeGreaterThanOrEqual(12);
+  // A rule that hides the whole date (zone-day funnel): nothing is logged.
+  expect(await startsFor(() => false)).toEqual([]);
+});
+
+test('another technician\'s committed stop blocks a slide into its hour', async () => {
+  // A second tech holds 11:00 at the same spot as the new stop. The callers'
+  // collision checks are tech-blind, so the 11 AM slide can't be shown.
+  const rows = [...STOPS, { ...row('t2stop', 27.18, 11), technician_id: 't2' }];
+  db.mockImplementation((table) => {
+    if (table === 'technicians') return chain([{ id: 't1', name: 'Tech' }], table);
+    if (table === 'scheduled_services') return chain(rows, table);
+    if (table === 'services') return chain(CATALOG, table);
+    return chain([], table);
+  });
+  process.env.GATE_SLOT_SLIDE_OFFER = 'true';
+  await findAvailableSlots(CALL);
+  for (const line of shadowLines()) {
+    expect(JSON.parse(line.replace('[slot-slide] shadow ', '')).slideStart).not.toBe('11:00');
+  }
 });

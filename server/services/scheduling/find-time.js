@@ -865,13 +865,27 @@ function claimSlideShadowSample(now = Date.now()) {
   return true;
 }
 const overlapsOnly = (a, b) => a.startMin < b.endMin && b.startMin < a.endMin;
-// The caller's requested daypart, applied to the NEW stop's start the way
-// booking.js inTimeOfDay / estimate-slot-availability filterTimeOfDay apply
-// it after find-time returns (morning = before noon, else noon on).
-function inSlideTimeOfDay(startMin, timeOfDay) {
-  if (!timeOfDay || timeOfDay === 'any') return true;
-  return timeOfDay === 'morning' ? startMin < 12 * 60 : startMin >= 12 * 60;
+
+// Resolves this request's slide-shadow context, or null for no shadow:
+// explicitly customerFacing packed-ends callers only (estimate picker, /book
+// self-serve — NOT the voice agent, whose shift differs), gate on, and the
+// process-wide sample free. One helper so findAvailableSlots carries no
+// shadow branching of its own.
+async function resolveSlideShadow(opts, wantsPackedEnds, services) {
+  if (!(opts.customerFacing === true && wantsPackedEnds
+    && gateEnvValue('GATE_SLOT_SLIDE_OFFER') && claimSlideShadowSample())) return null;
+  return loadSlideMeta(services);
 }
+// Every other committed stop on `date` (other technicians' rows) as
+// {id, startMin, endMin, lat, lng} for the slide scorer's blocker check.
+function otherStopsOn(date, tech, params) {
+  const rows = params.services.filter((s) => toDateStr(s.scheduled_date) === date
+    && s.technician_id != null && s.technician_id !== tech.id && !params.excludeSet.has(String(s.id)));
+  return occupiedRows(rows).map((s) => ({
+    id: s.id, startMin: s.startMin, endMin: s.endMin, lat: s.svc_lat || s.cust_lat, lng: s.svc_lng || s.cust_lng,
+  }));
+}
+
 function logSlideShadow(date, tech, dayStops, params) {
   const daysOut = (new Date(`${date}T12:00:00Z`) - new Date(`${params.geo.todayEt}T12:00:00Z`)) / 86400000;
   const { slideBudget } = params;
@@ -901,8 +915,14 @@ function logSlideShadow(date, tech, dayStops, params) {
       pairViolates: travelGapEnabled() ? undefined : overlapsOnly,
       // Off-hour stops (assessments, re-services) skip only the hour-grid
       // test — lunch block and the last-start rule still apply.
+      // Other technicians' committed stops that day: the callers' collision
+      // checks are tech-blind, so a change must clear them too.
+      blockers: otherStopsOn(date, tech, params),
       admits: ({ startMin, endMin, isNew, offHour }) => {
-        if (isNew && !inSlideTimeOfDay(startMin, params.slideTimeOfDay)) return false;
+        // The caller's own "would I show this start?" rule (daypart, notice
+        // window, zone-day funnel) — callers own those filters, find-time
+        // doesn't copy them.
+        if (isNew && params.slideNewStartAllowed && !params.slideNewStartAllowed(date, startMin)) return false;
         return isNew || !offHour
           ? customerWindowAdmits({ startMin, endMin })
           : !overlapsLunch(startMin, endMin) && !pastCustomerLastStart(startMin);
@@ -1433,18 +1453,14 @@ async function findAvailableSlots(opts) {
   const dayOpen = dayStartHour * 60;
   const dayClose = dayEndHour * 60;
 
-  // Slide offers (owner request 2026-10-22) — explicitly customerFacing
-  // packed-ends callers (estimate picker, /book self-serve; NOT the voice
-  // agent, whose shift differs) on THIS legacy path only (capacity mode
-  // returned above), shadow-logged and sampled in phase 1. Read at CALL
-  // time; kill switch: unset GATE_SLOT_SLIDE_OFFER.
-  const slideShadow = opts.customerFacing === true && wantsPackedEnds
-    && gateEnvValue('GATE_SLOT_SLIDE_OFFER') && claimSlideShadowSample();
   const { techs, services, dates, absentDays } = await loadFindTimeContext({
     dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates: opts.includeBlackoutDates, strictBlackout: opts.strictBlackout,
     techStartPoints: opts.techStartPoints === true,
   });
-  const slideMeta = slideShadow ? await loadSlideMeta(services) : null;
+  // Slide offers (owner request 2026-10-22), THIS legacy path only (capacity
+  // mode returned above), shadow-logged and sampled in phase 1. Kill
+  // switch: unset GATE_SLOT_SLIDE_OFFER.
+  const slideMeta = await resolveSlideShadow(opts, wantsPackedEnds, services);
   if (!techs.length) return { slots: [], evaluated: 0, note: 'No assignable technicians found' };
 
   const candidates = [];
@@ -1478,7 +1494,7 @@ async function findAvailableSlots(opts) {
     techStartPoints: opts.techStartPoints === true,
     slideShadow: slideMeta != null,
     slideMeta,
-    slideTimeOfDay: opts.slideTimeOfDay || null,
+    slideNewStartAllowed: typeof opts.slideNewStartAllowed === 'function' ? opts.slideNewStartAllowed : null,
     slideBudget: { remaining: SLIDE_SHADOW_REQUEST_EVALUATIONS, spentMs: 0, deadline: null },
   };
   for (const date of dates) {
