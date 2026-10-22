@@ -810,6 +810,10 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(await viewingBob("update Bob Example's phone to 941-555-0101 and removing Jhon Smith's notes")).toBe(false);
     expect(await viewingBob('update the phone to 941-555-0101, then cancelling the visit')).toBe(false);
     expect(await viewingBob('update the notes to gate code 5')).toBe(true);
+    // A second clause with no verb after a separator is read too (r41); a note that goes on in known words is not a name.
+    expect(await viewingBob("update Bob Example's phone to 941-555-0100, Sam Sample's notes to blank")).toBe(false);
+    expect(await viewingBob('update the phone to 941-555-0100 and Jhon notes to blank')).toBe(false);
+    expect(await viewingBob('update the notes to gate code 5, call first')).toBe(true);
   });
 
   test('gate on: a city that narrows the group is a pick only when a typed phone does not name an outsider (Codex #6369 r40)', async () => {

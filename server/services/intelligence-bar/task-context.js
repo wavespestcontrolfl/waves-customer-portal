@@ -627,7 +627,10 @@ function valueEnd(tail) {
   return -1;
 }
 
-function withoutValues(text) {
+// strict (the no-card check, Codex #6369 r41): a value ends at its FIRST separator, so a second
+// clause with no verb ("..., Sam Sample's notes to blank") is still read.
+const VALUE_FIRST_SEPARATOR_RE = /[;\n,]|\b(?:and|then|also)\b/i;
+function withoutValues(text, strict = false) {
   let rest = text.replace(/“[^”]*”|"[^"]*"/g, ' ');
   let kept = '';
   for (let i = 0; i < 50 && rest; i++) {
@@ -635,7 +638,7 @@ function withoutValues(text) {
     if (!start) break;
     kept += `${rest.slice(0, start.index)} `;
     const tail = rest.slice(start.index + start[0].length);
-    const end = valueEnd(tail);
+    const end = strict ? tail.search(VALUE_FIRST_SEPARATOR_RE) : valueEnd(tail);
     rest = end < 0 ? '' : tail.slice(end);
   }
   return kept + rest;
@@ -711,7 +714,7 @@ const knownRequestWord = word => verbForm(word) || NON_PERSON_NAMES.has(word) ||
 // grammar misses ("Pat2 Missing", "... and Bob Sample", "Will's"), and the request is carded.
 function unknownWordsIn(bounded, customer = null) {
   const own = customer ? [fullNameKey(customer), normalizeName(customer.first_name), normalizeName(customer.last_name)].filter(Boolean) : [];
-  const raw = withoutContacts(withoutValues(bounded).replace(RECORD_ID_WORDS_RE, ' '));
+  const raw = withoutContacts(withoutValues(bounded, true).replace(RECORD_ID_WORDS_RE, ' '));
   const ownParts = new Set(own.flatMap(name => name.split(' ')));
   if (possessiveNamesSomeone(raw, ownParts)) return true;
   let text = ` ${normalizeName(raw)} `;
