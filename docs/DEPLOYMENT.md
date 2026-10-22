@@ -14,7 +14,11 @@ Production is deployed by Railway from the GitHub `main` branch for
 - Railway service: `waves-customer-portal`
 - Custom domain: `https://portal.wavespestcontrol.com`
 - Health check: `https://portal.wavespestcontrol.com/api/health`
-- Config-as-code file: `railway.toml`
+- Settings source: Railway service settings (no config file; Railway stops
+  reading `railway.toml` on 2026-12-01). Change them in the dashboard or with
+  a `railway config plan` / `apply` that declares every variable as
+  `preserve()` — a file that leaves a variable out deletes it.
+- Builder: Nixpacks (`nixpacks.toml` adds ffmpeg)
 - Build command: `npm run build && npx playwright install --with-deps chromium`
 - Pre-deploy command: `npm run db:migrate`
 - Start command: `node server/index.js`
@@ -41,7 +45,8 @@ The active Railway deployment should have:
 - `meta.branch: main`
 - `meta.commitHash` matching the intended GitHub `main` commit or a later
   commit that contains it
-- `meta.configFile: /railway.toml`
+- `meta.configFile: null`
+- `meta.serviceManifest.deploy.preDeployCommand: ["npm run db:migrate"]`
 - `meta.serviceManifest.deploy.healthcheckPath: /api/health`
 
 ### Roll Back Production
@@ -139,8 +144,9 @@ In Railway → Settings:
 - **Start Command:** `node server/index.js`
 - **Root Directory:** `/` (default)
 
-These commands are owned by `railway.toml`; keep the dashboard configuration
-aligned with that file.
+These are Railway service settings, with Pre-deploy Command
+`npm run db:migrate`, Healthcheck Path `/api/health` (timeout 120), restart
+policy On Failure (10 retries), draining 30 s and overlap 0.
 
 ### Step 6: Run Migrations
 In Railway → your service → "Shell" tab:
