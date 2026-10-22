@@ -51,7 +51,11 @@ function providerBudgetMs() {
   // It runs after finalization has cleared processing_token, so it cannot
   // extend a held claim — counting it would only delay stale-claim takeover
   // and the stall bell. Only work done while the claim is held belongs here.
-  return download + (3 * transcription) + (2 * label) + (6 * extraction) + addressValidation + DEFAULT_FALLBACK_BUDGET_MS;
+  // GATE_CALL_EXTRACTION_V1_FALLBACK: with the gate on, the V1 extractor can
+  // also spend a whole dispatcher chain (Claude then OpenAI) while the claim
+  // is held. Off adds nothing, so the ceiling is unchanged.
+  const v1Backup = require('../config/feature-gates').callExtractionV1FallbackLive() ? DEFAULT_FALLBACK_BUDGET_MS : 0;
+  return download + (3 * transcription) + (2 * label) + (6 * extraction) + addressValidation + DEFAULT_FALLBACK_BUDGET_MS + v1Backup;
 }
 
 // TWO ceilings, because alerting and stealing carry opposite risks.

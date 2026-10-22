@@ -610,7 +610,7 @@ const LANES = [
   L('call_extraction', 'Call extraction V2', 'call-recording-processor.js', 'locked',
     S('CALL_EXTRACTION_PROVIDER', { openai: D('CALL_EXTRACTION_MODEL', 'gpt-5.6-sol'), anthropic: T('CALL_EXTRACTION_ANTHROPIC'), gemini: D('GEMINI_EXTRACTION_MODEL', 'gemini-2.5-pro') }),
     null, { inbound: true, lock: LOCK.benchmark('25-call bake-off 2026-07-18 · run a new bake-off to move it'), note: 'CALL_EXTRACTION_PROVIDER=openai|anthropic|gemini picks the primary; kill = gemini' }),
-  L('call_extraction_v1', 'Call extraction V1 (runs first; V2 above is the gated shadow)', 'call-recording-processor.js', 'locked', D('GEMINI_EXTRACTION_V1_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'text' } }), null, { inbound: true, lock: LOCK.benchmark('authoritative extractor until V2 is promoted') }),
+  L('call_extraction_v1', 'Call extraction V1 (runs first; V2 above is the gated shadow)', 'call-recording-processor.js', 'locked', D('GEMINI_EXTRACTION_V1_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'text' } }), T('CALL_EXTRACTION_ANTHROPIC'), { inbound: true, lock: LOCK.benchmark('authoritative extractor until V2 is promoted'), note: 'GATE_CALL_EXTRACTION_V1_FALLBACK (dark): a Gemini provider failure retries the same prompt on Claude (this fallback), then OpenAI (CALL_EXTRACTION_MODEL)' }),
   L('call_research', 'Call-research corpus miner', 'call-research-miner.js', 'locked',
     S('CALL_RESEARCH_PROVIDER',
       { openai: D('CALL_RESEARCH_MODEL', 'gpt-5.6-sol'), anthropic: E('CALL_RESEARCH_MODEL', T('CALL_RESEARCH_ANTHROPIC')), gemini: D('CALL_RESEARCH_MODEL', 'gemini-2.5-pro') },

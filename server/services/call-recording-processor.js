@@ -9619,13 +9619,58 @@ function buildCallDirectionBlock(callDirection) {
   return '';
 }
 
-async function extractCallData(transcription, callerPhone, opts = {}) {
-  // GATE_CALL_EXTRACTION_V1_FALLBACK, read once per call. Off = Gemini only.
-  const backupLive = require('../config/feature-gates').callExtractionV1FallbackLive() === true;
-  const geminiKeyMissing = !process.env.GEMINI_API_KEY;
-  if (geminiKeyMissing && !backupLive) {
-    throw new Error('GEMINI_API_KEY not configured');
+// GATE_CALL_EXTRACTION_V1_FALLBACK: the same V1 prompt on Claude, then OpenAI,
+// through the house dispatcher (CALL_EXTRACTION_V1_BACKUP_ROUTE, attributed to
+// the existing call_extraction_v1 switchboard lane). Returns the normalized
+// extraction, or null when every backup leg failed so the caller keeps today's
+// outcome. `why` is a reason code only: provider response bodies and model
+// output carry caller detail and are never logged.
+async function v1BackupExtraction({ prompt, callerPhone, why, providerMeta }) {
+  const accept = (result) => {
+    const json = result && result.json;
+    if (!json || typeof json !== 'object' || Array.isArray(json)) return 'extraction_json_invalid';
+    try {
+      normalizeCallExtraction(json, { callerPhone });
+    } catch {
+      return 'extraction_normalize_failed';
+    }
+    return null;
+  };
+  let res;
+  try {
+    res = await dispatchWithFallback(CALL_EXTRACTION_V1_BACKUP_ROUTE, {
+      laneId: 'call_extraction_v1',
+      text: prompt,
+      jsonMode: true,
+      maxTokens: 16384,
+    }, { validate: accept });
+  } catch (e) {
+    logger.error(`[call-proc] V1 extraction backup threw (${why}): ${e.message}`);
+    return null;
   }
+  if (!res || !res.ok || !res.json) {
+    const legs = (res?.failures || []).map((f) => `${f.provider}:${f.reason}`).join(', ');
+    logger.error(`[call-proc] V1 extraction backup failed after Gemini ${why} (${res?.reason || 'no_result'}${legs ? `: ${legs}` : ''})`);
+    return null;
+  }
+  const servedProvider = res.provider || CALL_EXTRACTION_V1_BACKUP_ROUTE.primary.provider;
+  logger.warn(`[call-proc] V1 extraction served by ${servedProvider} (${res.model || 'unknown model'}) after Gemini ${why}`);
+  if (providerMeta && typeof providerMeta === 'object') {
+    providerMeta.extraction_v1_provider = servedProvider;
+    providerMeta.extraction_v1_model = res.model || null;
+    providerMeta.extraction_v1_fallback_reason = why;
+  }
+  return normalizeCallExtraction(res.json, { callerPhone });
+}
+
+// Reason code for a thrown Gemini failure: the HTTP status, else a network
+// error or timeout. Never the message (it carries the provider's body).
+function geminiFailureReason(err) {
+  const m = /Gemini HTTP (\d+)/.exec(String(err && err.message));
+  return m ? `http_${m[1]}` : 'network_or_timeout';
+}
+
+async function extractCallData(transcription, callerPhone, opts = {}) {
   const callDateET = etDateString(opts.callStartedAt || new Date());
 
   // Known-caller context: when the inbound number maps to a single existing
@@ -9827,97 +9872,52 @@ Return ONLY valid JSON.`;
   // resort, not the first response to a bad sample).
   const V1_PARSE_ATTEMPTS = 2;
 
-  // GATE_CALL_EXTRACTION_V1_FALLBACK: the same prompt on Claude, then OpenAI,
-  // through the house dispatcher. Returns the normalized extraction, or null
-  // when every backup leg failed — the caller then keeps today's outcome
-  // (rethrow the Gemini error, or the invalid-JSON stub). Only reached for a
-  // PROVIDER failure of the Gemini leg; a request that was never sent
-  // (nothing to back up) is not special-cased.
-  const runBackup = async (why) => {
-    if (!backupLive) return null;
-    const accept = (result) => {
-      const json = result && result.json;
-      if (!json || typeof json !== 'object' || Array.isArray(json)) return 'extraction_json_invalid';
+  // The Gemini leg, classified once: { extracted } on success, otherwise
+  // { why, error } where `error` is the thrown provider failure to rethrow,
+  // or null for invalid JSON (which falls to the stub instead).
+  const runGemini = async () => {
+    if (!process.env.GEMINI_API_KEY) return { why: 'key_missing', error: new Error('GEMINI_API_KEY not configured') };
+    for (let attempt = 1; attempt <= V1_PARSE_ATTEMPTS; attempt += 1) {
+      let cleaned;
       try {
-        normalizeCallExtraction(json, { callerPhone });
-      } catch (e) {
-        return 'extraction_normalize_failed';
+        cleaned = await generateOnce();
+      } catch (err) {
+        return { why: geminiFailureReason(err), error: err };
       }
-      return null;
-    };
-    let res;
-    try {
-      res = await dispatchWithFallback(CALL_EXTRACTION_V1_BACKUP_ROUTE, {
-        laneId: 'call_extraction_v1_backup',
-        text: prompt,
-        jsonMode: true,
-        maxTokens: 16384,
-      }, { validate: accept });
-    } catch (e) {
-      logger.error(`[call-proc] V1 extraction backup threw (${why}): ${e.message}`);
-      return null;
+      try {
+        return { extracted: normalizeCallExtraction(JSON.parse(cleaned), { callerPhone }) };
+      } catch (e) {
+        // Fixed message + length ONLY — the raw model output is a call
+        // extraction carrying the caller's name/phone/address, and JSON.parse
+        // error messages themselves echo a fragment of the rejected input
+        // (`Unexpected token 'J', "John Smith"…`), so e.message can't be
+        // logged either (AGENTS.md PII-in-logs).
+        if (attempt < V1_PARSE_ATTEMPTS) {
+          logger.warn(`[call-proc] Invalid JSON from Gemini (${cleaned.length} chars) — retrying (${attempt + 1}/${V1_PARSE_ATTEMPTS})`);
+        } else {
+          logger.error(`[call-proc] Invalid JSON from Gemini (${cleaned.length} chars) after ${V1_PARSE_ATTEMPTS} attempts`);
+        }
+      }
     }
-    if (!res || !res.ok || !res.json) {
-      // Provider/model/reason only — no model output, no transcript text.
-      const legs = (res?.failures || []).map((f) => `${f.provider}:${f.reason}`).join(', ');
-      logger.error(`[call-proc] V1 extraction backup failed after Gemini ${why} (${res?.reason || 'no_result'}${legs ? `: ${legs}` : ''})`);
-      return null;
-    }
-    const servedProvider = res.provider || CALL_EXTRACTION_V1_BACKUP_ROUTE.primary.provider;
-    logger.warn(`[call-proc] V1 extraction served by ${servedProvider} (${res.model || 'unknown model'}) after Gemini ${why}`);
-    if (opts.providerMeta && typeof opts.providerMeta === 'object') {
-      opts.providerMeta.extraction_v1_provider = servedProvider;
-      opts.providerMeta.extraction_v1_model = res.model || null;
-      opts.providerMeta.extraction_v1_fallback_reason = why;
-    }
-    return normalizeCallExtraction(res.json, { callerPhone });
+    return { why: 'invalid_json', error: null };
   };
 
-  if (geminiKeyMissing) {
-    const backedUp = await runBackup('key_missing');
+  const gemini = await runGemini();
+  if (gemini.extracted) return gemini.extracted;
+  // The one place that decides backup-or-rethrow. GATE_CALL_EXTRACTION_V1_FALLBACK
+  // off (read here, once per call) = Gemini only, exactly as before.
+  if (require('../config/feature-gates').callExtractionV1FallbackLive()) {
+    const backedUp = await v1BackupExtraction({ prompt, callerPhone, why: gemini.why, providerMeta: opts.providerMeta });
     if (backedUp) return backedUp;
-    throw new Error('GEMINI_API_KEY not configured');
   }
-
-  for (let attempt = 1; attempt <= V1_PARSE_ATTEMPTS; attempt += 1) {
-    let cleaned;
-    try {
-      cleaned = await generateOnce();
-    } catch (err) {
-      if (!backupLive) throw err;
-      // Reason code only: err.message carries the provider's response body.
-      const m = /Gemini HTTP (\d+)/.exec(String(err && err.message));
-      const backedUp = await runBackup(m ? `http_${m[1]}` : 'network_or_timeout');
-      if (backedUp) return backedUp;
-      throw err;
-    }
-    try {
-      return normalizeCallExtraction(JSON.parse(cleaned), { callerPhone });
-    } catch (e) {
-      // Fixed message + length ONLY — the raw model output is a call
-      // extraction carrying the caller's name/phone/address, and JSON.parse
-      // error messages themselves echo a fragment of the rejected input
-      // (`Unexpected token 'J', "John Smith"…`), so e.message can't be
-      // logged either (AGENTS.md PII-in-logs).
-      if (attempt < V1_PARSE_ATTEMPTS) {
-        logger.warn(`[call-proc] Invalid JSON from Gemini (${cleaned.length} chars) — retrying (${attempt + 1}/${V1_PARSE_ATTEMPTS})`);
-        continue;
-      }
-      logger.error(`[call-proc] Invalid JSON from Gemini (${cleaned.length} chars) after ${V1_PARSE_ATTEMPTS} attempts`);
-      const backedUp = await runBackup('invalid_json');
-      if (backedUp) return backedUp;
-      return normalizeCallExtraction({
-        first_name: null,
-        is_spam: false,
-        is_voicemail: false,
-        call_summary: EXTRACTION_INVALID_JSON_SUMMARY,
-        lead_quality: 'cold',
-      }, { callerPhone });
-    }
-  }
-  // Unreachable — the loop always returns — but keeps the function's
-  // contract explicit for static analysis.
-  throw new Error('extractCallData: attempt loop exited without a verdict');
+  if (gemini.error) throw gemini.error;
+  return normalizeCallExtraction({
+    first_name: null,
+    is_spam: false,
+    is_voicemail: false,
+    call_summary: EXTRACTION_INVALID_JSON_SUMMARY,
+    lead_quality: 'cold',
+  }, { callerPhone });
 }
 
 // ── V2 Extraction (shadow pipeline — stores alongside, never replaces v1) ──

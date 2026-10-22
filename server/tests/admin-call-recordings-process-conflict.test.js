@@ -337,6 +337,21 @@ describe('claim ceiling is derived from the provider budgets', () => {
     expect(require('../services/call-commitments').MODEL_TIMEOUT_MS).toBe(PROVIDER_FETCH_TIMEOUTS_MS.extraction);
   });
 
+  test('GATE_CALL_EXTRACTION_V1_FALLBACK adds one dispatcher chain for the V1 backup; off adds nothing', () => {
+    const saved = process.env.GATE_CALL_EXTRACTION_V1_FALLBACK;
+    try {
+      delete process.env.GATE_CALL_EXTRACTION_V1_FALLBACK;
+      const off = providerBudgetMs();
+      process.env.GATE_CALL_EXTRACTION_V1_FALLBACK = 'true';
+      const on = providerBudgetMs();
+      expect(on - off).toBe(require('../services/llm/call').DEFAULT_FALLBACK_BUDGET_MS);
+      expect(alertCeilingMinutes() * 60000).toBeGreaterThan(on);
+    } finally {
+      if (saved === undefined) delete process.env.GATE_CALL_EXTRACTION_V1_FALLBACK;
+      else process.env.GATE_CALL_EXTRACTION_V1_FALLBACK = saved;
+    }
+  });
+
   test('the bell sits above every budgeted provider path', () => {
     expect(alertCeilingMinutes() * 60000).toBeGreaterThan(providerBudgetMs());
   });

@@ -79,6 +79,22 @@ describe('backup route', () => {
       : _test.CALL_EXTRACTION_ROUTE.fallback.model);
     expect(Object.isFrozen(CALL_EXTRACTION_V1_BACKUP_ROUTE)).toBe(true);
   });
+
+  test('the backup is attributed to the registered call_extraction_v1 lane, whose switchboard row lists the Claude fallback', async () => {
+    const { LANES } = require('../services/model-switchboard');
+    const lane = (LANES || []).find((l) => l.id === 'call_extraction_v1');
+    expect(lane).toBeTruthy();
+    expect(lane.fallback).toBeTruthy();
+
+    process.env.GATE_CALL_EXTRACTION_V1_FALLBACK = 'true';
+    installFetch({ gemini: () => geminiHttp(402) });
+    mockAnthropicCreate.mockResolvedValue(claudeOk(GOOD));
+    await extractCallData(TRANSCRIPT, PHONE, {});
+    // The call ledger rows carry the lane the dispatcher ran under.
+    const metrics = require('../services/llm-dispatch-metrics');
+    expect(metrics.recordCall.mock.calls.length).toBeGreaterThan(0);
+    for (const [row] of metrics.recordCall.mock.calls) expect(row.laneId).toBe('call_extraction_v1');
+  });
 });
 
 describe('gate on', () => {
