@@ -341,7 +341,7 @@ async function matchContactPhoneAccounts({ call, extracted, v2CanonicalExtractio
  * findCustomerViaCallbackSpokenNumber (admin callback of an inbound voicemail from the dialed number,
  * gate on, no operator link, number not a near miss of the dialed one). Read-only.
  */
-async function matchCallbackSpokenNumberAccount({ call, extracted, statedAddress, phone = null, conn = db }) {
+async function matchCallbackSpokenNumberAccount({ call, extracted, statedAddress, phone = null, contactLookupOpts = {}, conn = db }) {
   let override = null;
   try {
     const meta = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
@@ -353,11 +353,11 @@ async function matchCallbackSpokenNumberAccount({ call, extracted, statedAddress
   if (!found) return null;
   // Only while the pass's normal lookup on the contact number finds nobody: once that number links a
   // customer, or is an ambiguous shared number, the suggestion is moot and an OPEN card for it retires
-  // (the same lookup the pass runs first; this runs for open cards too, which skip the known-number
-  // check suggestFamilyAccounts applies to new ones).
+  // (the same lookup with the same address inputs the pass runs first; this runs for open cards too,
+  // which skip the known-number check suggestFamilyAccounts applies to new ones).
   if (phone) {
     const ambiguity = {};
-    const normal = await processor.findCustomerForCallContact(phone, extracted, { db: conn, multiMatchOut: ambiguity });
+    const normal = await processor.findCustomerForCallContact(phone, extracted, { ...contactLookupOpts, db: conn, multiMatchOut: ambiguity });
     if (normal || ambiguity.candidates) return null;
   }
   return {
@@ -460,14 +460,14 @@ async function retireOpenCard(trx, callLogId) {
  * it was.
  */
 async function fileFamilyAccountCard({
-  call, procToken = null, extracted, v2CanonicalExtraction, statedAddress, phone, isOutbound, conn = db,
+  call, procToken = null, extracted, v2CanonicalExtraction, statedAddress, phone, isOutbound, contactLookupOpts = {}, conn = db,
 }) {
   try {
     let suggestion = null;
     await conn.transaction(async (trx) => {
       await lockTriageCall(trx, call.id);
       if (procToken && !(await trx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id'))) return;
-      const args = { call, extracted, v2CanonicalExtraction, statedAddress, isOutbound, phone, conn: trx };
+      const args = { call, extracted, v2CanonicalExtraction, statedAddress, isOutbound, phone, contactLookupOpts, conn: trx };
       const match = await matchSuggestedAccounts(args);
       const open = await trx('triage_items').where({ call_log_id: call.id, reason_code: CARD_REASON_CODE, status: 'open' }).first('id');
       if (!match) {

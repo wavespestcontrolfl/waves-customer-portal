@@ -14175,9 +14175,27 @@ const CallRecordingProcessor = {
     // A family member who named the account holder by full name: ONE advisory card listing the live
     // accounts with that name (suggest-only; the office links the call). Reads the state BEFORE this
     // pass creates a customer for the caller, writes nothing else.
+    // The address-disambiguation inputs of the contact-number lookup below, built ONCE: the callback
+    // basis of the card re-runs that same lookup (GATE_CALLBACK_SPOKEN_NUMBER_LINK), and a lookup with
+    // other inputs could keep a card for a call this pass links normally.
+    const contactLookupOpts = {
+      callAddress: {
+        address_line1: extracted.address_line1,
+        address_line2: extracted.address_line2 || null,
+        city: extracted.city,
+        zip: extracted.zip,
+      },
+      // Keyed on the same effective (recovery-aware) verdict the routing
+      // gate consumes: when street recovery found a single validated
+      // premise, extracted already carries the recovered address, so the
+      // address-disambiguation leg must see it as decisive too — otherwise
+      // an agent-role slot caller about the recovered property minted a
+      // duplicate customer (codex round-10 P2).
+      avDecisive: ['validated_accept', 'corrected'].includes(effectiveAddressValidation?.status),
+    };
     if (!customerLinkOverride) {
       await require('./call-family-name-link').fileFamilyAccountCard({
-        call, procToken, extracted, v2CanonicalExtraction, statedAddress: v2StatedServiceAddressRaw, phone, isOutbound: isOutboundCall(call),
+        call, procToken, extracted, v2CanonicalExtraction, statedAddress: v2StatedServiceAddressRaw, phone, isOutbound: isOutboundCall(call), contactLookupOpts,
       });
     }
     const sharedPhoneAmbiguity = {};
@@ -14194,19 +14212,7 @@ const CallRecordingProcessor = {
       // signal (single owner / AV-address / household) — see the cascade.
       const existing = await findCustomerForCallContact(phone, extracted, {
         multiMatchOut: sharedPhoneAmbiguity,
-        callAddress: {
-          address_line1: extracted.address_line1,
-          address_line2: extracted.address_line2 || null,
-          city: extracted.city,
-          zip: extracted.zip,
-        },
-        // Keyed on the same effective (recovery-aware) verdict the routing
-        // gate consumes: when street recovery found a single validated
-        // premise, extracted already carries the recovered address, so the
-        // address-disambiguation leg must see it as decisive too — otherwise
-        // an agent-role slot caller about the recovered property minted a
-        // duplicate customer (codex round-10 P2).
-        avDecisive: ['validated_accept', 'corrected'].includes(effectiveAddressValidation?.status),
+        ...contactLookupOpts,
       });
       if (!existing && !sharedPhoneAmbiguity.candidates) {
         spokenNumberSuggested = !!(await findCustomerViaCallbackSpokenNumber(call, extracted, { customerLinkOverride }).catch((e) => {

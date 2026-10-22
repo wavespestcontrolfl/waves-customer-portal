@@ -341,6 +341,47 @@ describe('callback_spoken_number basis of the family-account card', () => {
     expect(inserted).toHaveLength(0);
   });
 
+  describe('the dialed number resolves only through address disambiguation', () => {
+    const lookupOpts = {
+      callAddress: { address_line1: '1 Test St', address_line2: null, city: 'Testville', zip: '34200' },
+      avDecisive: true,
+    };
+    let spy;
+    beforeEach(() => {
+      // Links a customer only when the lookup is given the same address inputs Step 3 builds.
+      spy = jest.spyOn(CallRecordingProcessor, 'findCustomerForCallContact').mockImplementation(async (phone, extracted, opts = {}) => (
+        opts.avDecisive === true && opts.callAddress?.address_line1 === '1 Test St' ? customer({ id: 'cust-addr', phone: DIALED }) : null
+      ));
+    });
+    afterEach(() => spy.mockRestore());
+
+    test('with the pass inputs the recheck links the dialed number: no new card', async () => {
+      const { conn, inserted } = cardTrx({ customers: [...matchQueue(), ...matchQueue()] });
+      expect(await familyLink.fileFamilyAccountCard(args(conn, { contactLookupOpts: lookupOpts }))).toBeNull();
+      expect(inserted).toHaveLength(0);
+      expect(spy.mock.calls[0][2]).toMatchObject(lookupOpts);
+    });
+
+    test('with the pass inputs an OPEN card is retired, not refreshed', async () => {
+      const { conn, inserted, updates } = cardTrx({ customers: [...matchQueue()], openCard: { id: 'card-1' } });
+      expect(await familyLink.fileFamilyAccountCard(args(conn, { contactLookupOpts: lookupOpts }))).toBeNull();
+      expect(inserted).toHaveLength(0);
+      expect(updates).toEqual([expect.objectContaining({ patch: expect.objectContaining({ status: 'dismissed', resolution_rule: familyLink.RETIRE_RULE }) })]);
+    });
+
+    test('without those inputs the same lookup finds nobody (the gap this closes)', async () => {
+      const { trx } = cardTrx({ customers: [...matchQueue()] });
+      expect(await familyLink.matchCallbackSpokenNumberAccount({ call: callbackCall(), extracted: extractedJordan, phone: DIALED, conn: trx })).toMatchObject({ basis: 'callback_spoken_number' });
+    });
+  });
+
+  test('the processor builds the lookup inputs once and shares them with the card and Step 3', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    expect(src.match(/const contactLookupOpts = \{/g)).toHaveLength(1);
+    expect(src).toMatch(/fileFamilyAccountCard\(\{[^}]*contactLookupOpts,?\s*\}\)/);
+    expect(src).toMatch(/const existing = await findCustomerForCallContact\(phone, extracted, \{\s*multiMatchOut: sharedPhoneAmbiguity,\s*\.\.\.contactLookupOpts,\s*\}\);/);
+  });
+
   test('an operator link override on the call: no suggestion', async () => {
     const { conn } = cardTrx({ customers: [[customer()], []] });
     const call = callbackCall({ metadata: { relatedCallId: PARENT_ID, customer_link_override: { customer_id: null } } });
