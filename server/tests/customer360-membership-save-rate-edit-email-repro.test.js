@@ -33,7 +33,7 @@ const mockState = { initial: null, locked: null, patches: [] };
 jest.mock('../models/db', () => {
   const build = (table, inTransaction = false) => {
     const query = { lockedRead: false };
-    for (const method of ['where', 'whereNull', 'whereNot', 'whereRaw', 'select']) {
+    for (const method of ['where', 'whereNull', 'whereNotNull', 'whereNot', 'whereRaw', 'select']) {
       query[method] = () => query;
     }
     query.forUpdate = () => { query.lockedRead = true; return query; };
@@ -42,6 +42,9 @@ jest.mock('../models/db', () => {
       return inTransaction && query.lockedRead ? { ...mockState.locked } : { ...mockState.initial };
     };
     query.update = async (patch) => {
+      // Only the customers row is the state under test; a deactivation's
+      // contact refresh-family revocation (customer_refresh_tokens) is a plain write here.
+      if (table !== 'customers') return 0;
       mockState.patches.push({ ...patch });
       Object.assign(mockState.locked, patch);
       return 1;
