@@ -6,9 +6,10 @@
 jest.mock('../services/scheduling/occupancy', () => ({
   ...jest.requireActual('../services/scheduling/occupancy'),
   findConflictingVisits: jest.fn(async () => []),
+  techScopedConfirmActive: jest.fn(() => false),
 }));
 
-const { findConflictingVisits } = require('../services/scheduling/occupancy');
+const { findConflictingVisits, techScopedConfirmActive } = require('../services/scheduling/occupancy');
 const { occupancyBlockFor, seriesCandidateDateClashRows, ADMIN_OCCUPANCY_EXCLUDE_STATUSES } = require('../services/scheduling/window-rules');
 const planTakenHour = require('../services/scheduling/plan-taken-hour');
 const { etDateString, addETDays } = require('../utils/datetime-et');
@@ -75,19 +76,39 @@ describe('plan-taken-hour', () => {
     expect(findConflictingVisits).not.toHaveBeenCalled();
   });
 
-  test('gate on: taken from four days out, with the technician carried and the night tool\'s statuses', async () => {
+  test('gate on: taken from four days out, through the tech-blind probe with the night tool\'s statuses', async () => {
     process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
     findConflictingVisits.mockResolvedValue([{ id: 'x', customer_id: 'c2' }]);
     expect(await planTakenHour.takenHourHandoff('conn', { ...row, scheduled_date: day(3) })).toBe(false);
     expect(findConflictingVisits).not.toHaveBeenCalled();
     expect(await planTakenHour.takenHourHandoff('conn', { ...row, scheduled_date: day(4) })).toBe(true);
     const probe = findConflictingVisits.mock.calls[0][0];
-    expect(probe).toMatchObject({ date: day(4), technicianId: 't1' });
+    expect(probe).toMatchObject({ date: day(4) });
+    expect(probe.technicianId).toBeUndefined();
     // No customer is excluded wholesale (Codex #6476 r1 P1); a rescheduled or completed row is no stop (r1 P2).
     expect(probe.excludeCustomerId).toBeUndefined();
     expect(probe.excludeStatuses).toEqual(expect.arrayContaining(['cancelled', 'skipped', 'no_show', 'rescheduled', 'completed']));
     // The owner's booked interviews hold the hour too, as for the night tool.
     expect(probe.includeInterviews).toBe(true);
+  });
+
+  test('once the schedule is technician-scoped: only the visit\'s own technician\'s stops and unassigned ones count (isOtherStop)', async () => {
+    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+    techScopedConfirmActive.mockReturnValue(true);
+    try {
+      const at = { ...row, scheduled_date: day(30) };
+      findConflictingVisits.mockResolvedValue([{ id: 'x', customer_id: 'c2', technician_id: 't2' }]);
+      expect(await planTakenHour.takenHourHandoff('conn', at)).toBe(false);
+      findConflictingVisits.mockResolvedValue([{ id: 'x', customer_id: 'c2', technician_id: 't1' }]);
+      expect(await planTakenHour.takenHourHandoff('conn', at)).toBe(true);
+      findConflictingVisits.mockResolvedValue([{ id: 'x', customer_id: 'c2', technician_id: null }]);
+      expect(await planTakenHour.takenHourHandoff('conn', at)).toBe(true);
+      // An unassigned new visit is blocked by any technician's stop.
+      findConflictingVisits.mockResolvedValue([{ id: 'x', customer_id: 'c2', technician_id: 't2' }]);
+      expect(await planTakenHour.takenHourHandoff('conn', { ...at, technician_id: null })).toBe(true);
+    } finally {
+      techScopedConfirmActive.mockReturnValue(false);
+    }
   });
 
   test('an interview in the hour (no customer) is taken', async () => {

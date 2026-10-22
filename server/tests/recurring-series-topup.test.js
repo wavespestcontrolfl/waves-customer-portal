@@ -43,6 +43,7 @@ jest.mock('../services/scheduling/occupancy', () => ({
   // findConflictingVisits' own SQL shape.
   ...jest.requireActual('../services/scheduling/occupancy'),
   findConflictingVisits: jest.fn(),
+  techScopedConfirmActive: jest.fn(() => false),
 }));
 // isFamilyOnPlanHold (Codex GitHub r6 P1) reuses cancellation-processor.js's
 // own familyOfServiceRow — mocked here so this suite's tests control which
@@ -1404,15 +1405,22 @@ describe('topUpRecurringSeriesLocked — a taken hour hands the visit off withou
 
   test('gate on: the hand-off probe carries the technician the insert uses, not the parent row\'s', async () => {
     process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
-    findConflictingVisits.mockReset()
-      .mockResolvedValueOnce([{ id: 'occupied-1', customer_id: 77 }])
-      .mockResolvedValue([]);
-    // The parent's technician cannot take the visit (no assignable row), so
-    // the insert goes in unassigned — and the probe asks for no technician.
-    const scenario = topupScenario({ ...fixtureArgs, parentOverrides: { ...fixtureArgs.parentOverrides, technician_id: 'tech-gone' } });
-    await topUpRecurringSeriesLocked(scenario.conn, 10, { horizonDays: 14 });
-    expect(scenario.inserted[0].technician_id).toBeNull();
-    expect(findConflictingVisits.mock.calls[0][0].technicianId).toBeUndefined();
+    const { techScopedConfirmActive } = require('../services/scheduling/occupancy');
+    techScopedConfirmActive.mockReturnValue(true);
+    try {
+      // Another technician's stop holds the hour.
+      findConflictingVisits.mockReset()
+        .mockResolvedValueOnce([{ id: 'occupied-1', customer_id: 77, technician_id: 'tech-other' }])
+        .mockResolvedValue([]);
+      // The parent's technician cannot take the visit (no assignable row), so
+      // the insert goes in unassigned — and an unassigned visit is blocked by
+      // any technician's stop. Judged as the parent's tech, it would not be.
+      const scenario = topupScenario({ ...fixtureArgs, parentOverrides: { ...fixtureArgs.parentOverrides, technician_id: 'tech-gone' } });
+      await topUpRecurringSeriesLocked(scenario.conn, 10, { horizonDays: 14 });
+      expect(scenario.inserted[0]).toMatchObject({ technician_id: null, window_start: null });
+    } finally {
+      techScopedConfirmActive.mockReturnValue(false);
+    }
   });
 
   test('gate on: the insert reuses the technician the hand-off probe read (one lookup, Codex #6476 r1)', async () => {
@@ -1427,7 +1435,7 @@ describe('topUpRecurringSeriesLocked — a taken hour hands the visit off withou
     };
     const scenario = topupScenario({ ...fixtureArgs, parentOverrides: { ...fixtureArgs.parentOverrides, technician_id: 'tech-1' }, otherTable });
     await topUpRecurringSeriesLocked(scenario.conn, 10, { horizonDays: 14 });
-    expect(findConflictingVisits.mock.calls[0][0]).toMatchObject({ windowStart: '09:00', technicianId: 'tech-1' });
+    expect(findConflictingVisits.mock.calls[0][0]).toMatchObject({ windowStart: '09:00' });
     // The probed date keeps the technician its probe read; a second lookup
     // would have seen the absence and inserted it unassigned. The next date
     // is read once too, and sees the absence.

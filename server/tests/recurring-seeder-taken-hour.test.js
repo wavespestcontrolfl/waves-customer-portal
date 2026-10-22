@@ -123,10 +123,11 @@ describe('follow-up seeding hands a taken hour to auto-dispatch', () => {
       expect(byDate[d]).toMatchObject({ window_start: '10:00', window_end: '11:00', time_window: 'morning' });
       expect(byDate[d].recurring_dispatch_due_date).toBeUndefined();
     }
-    // The probe asks for the plan's own block and carries the technician; the
-    // customer's own rows count unless at the same place (plan-taken-hour.test.js).
+    // The probe asks for the plan's own block; the customer's own rows count
+    // unless at the same place, and a technician scope is applied to the rows
+    // (plan-taken-hour.test.js).
     expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
-      date: taken, windowStart: '10:00', windowEnd: '11:00', technicianId: TECH,
+      date: taken, windowStart: '10:00', windowEnd: '11:00',
     }));
     expect(findConflictingVisits.mock.calls.every(([args]) => args.excludeCustomerId === undefined)).toBe(true);
   });

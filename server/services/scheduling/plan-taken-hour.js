@@ -22,7 +22,8 @@
  * "Taken" is the night tool's own double-booking rule
  * (auto-dispatch/current-conflict.js), read through the shared plan-writer
  * probe (window-rules.js seriesCandidateDateClashRows): a live stop in the
- * hour — tech-blind until the schedule is technician-scoped, with the
+ * hour — tech-blind until the schedule is technician-scoped (then only the
+ * new visit's own technician's stops and unassigned ones; isOtherStop), with the
  * writer's own statuses (rebooker.js probeMoveConflicts: no cancelled,
  * skipped, no-show or rescheduled row, nor a completed one) and the owner's
  * booked interviews (occupancy.js includeInterviews: a failed interview read
@@ -86,18 +87,19 @@ async function takenHourHandoff(conn, row, { date = row?.scheduled_date, now = n
   if (!handoffEnabled() || !row || !row.window_start) return false;
   const day = toDateStr(date);
   if (!day || day < firstHandoffDate(now)) return false;
-  const clash = await seriesCandidateDateClashRows(conn, row, day, {
-    technicianId: row.technician_id || null,
+  const rows = await seriesCandidateDateClashRows(conn, row, day, {
     excludeStatuses: TAKEN_EXCLUDE_STATUSES,
     includeInterviews: true,
   });
+  const { isOtherStop, samePlaceIdsAt } = require('../auto-dispatch/current-conflict');
+  const clash = rows.filter((r) => isOtherStop(r, row));
   if (!clash.length) return false;
   // The new visit's own place: its fields with the plan's template address
   // override applied, exactly as both writers stamp it on the insert
   // (booking/visit-financial-stamps.js recurringServiceAddress).
   const { recurringServiceAddress } = require('../booking/visit-financial-stamps');
   const samePlace = row.customer_id
-    ? await require('../auto-dispatch/current-conflict').samePlaceIdsAt(conn, { ...row, ...recurringServiceAddress(row) }, clash)
+    ? await samePlaceIdsAt(conn, { ...row, ...recurringServiceAddress(row) }, clash)
     : new Set();
   return clash.some((r) => !samePlace.has(String(r.id)));
 }
