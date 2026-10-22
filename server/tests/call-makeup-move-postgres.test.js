@@ -14,7 +14,7 @@ jest.mock('../config/feature-gates', () => {
 });
 
 const { createHash } = require('crypto');
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
 const SKIP = !process.env.DATABASE_URL;
 const maybeDescribe = SKIP ? describe.skip : describe;
@@ -70,7 +70,8 @@ maybeDescribe('make-up move (live Postgres)', () => {
       confidence: { scheduling_window: 0.95 },
       call_nature: 'existing_customer_scheduling',
       service_request: { primary_service_category: 'pest_general', specific_service_name: null, service_intent: 'follow_up_existing_service', secondary_categories: [] },
-      scheduling: { status: 'confirmed', confirmed_start_at: `${slotDate}T17:00:00-04:00`, caller_accepted_slot: true, agent_committed_booking: true },
+      // 5 PM Eastern on the slot day, whichever offset that day has.
+      scheduling: { status: 'confirmed', confirmed_start_at: parseETDateTime(`${slotDate}T17:00`).toISOString(), caller_accepted_slot: true, agent_committed_booking: true },
     };
     const transcription = 'Caller: Nobody came.\nAgent: I will come by at 5 PM.\nCaller: Okay.';
     const [call] = await db('call_log').insert({
