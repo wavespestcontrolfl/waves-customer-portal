@@ -16199,7 +16199,9 @@ const CallRecordingProcessor = {
     // customer_creation_failed and pollute failure reporting (codex r4 P2).
     // An explicit operator unlink is an INTENTIONAL customer-less result,
     // never a creation failure to file a card for on every reprocess.
-    const customerExpected = !!((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature && !explicitUnlink);
+    // …and a spoken-number suggestion (GATE_CALLBACK_SPOKEN_NUMBER_LINK) is the same: the pass
+    // deliberately created nobody and filed its own callback_spoken_number_link card.
+    const customerExpected = !!((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature && !explicitUnlink && !spokenNumberCandidate);
     const customerLanded = !!customerId;
     // Downgraded below if a customer-less recovery lead was expected but its
     // insert failed — that lead is the only durable record for this call, and

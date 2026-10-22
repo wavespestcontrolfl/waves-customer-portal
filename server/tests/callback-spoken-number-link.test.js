@@ -265,6 +265,10 @@ describe('Step 3 keeps a spoken-number match suggest-only', () => {
     expect(src).not.toMatch(/existing = await findCustomerViaCallbackSpokenNumber/);
   });
 
+  test('a deliberate customer-less result is not a customer_creation_failed', () => {
+    expect(src).toMatch(/const customerExpected = [^\n]*&& !spokenNumberCandidate\);/);
+  });
+
   test('the lead path treats the suggestion as an unclaimed-only phone', () => {
     expect(src).toContain('unclaimedOnly: !!(sharedPhoneAmbiguity.candidates || spokenNumberCandidate)');
   });
