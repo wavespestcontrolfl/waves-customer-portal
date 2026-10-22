@@ -28,12 +28,41 @@ describe('tree-shrub-estimates-report extraction', () => {
     // inferred, under the repriced engine, is an explicit / after quote.
     const revised = extractTreeShrub({
       ...data,
-      result: { results: { tsMeta: { eb: 1800, et: 6, bedAreaIsEstimated: true, treeCountSource: 'explicit', pricingKnobs: { marginTarget: 0.40 } }, ts: [{ tier: 'enhanced', mo: 68.5, selected: true }] } },
+      result: { results: { tsMeta: { eb: 1800, et: 6, bedAreaIsEstimated: true, treeCountSource: 'explicit', pricingKnobs: { marginTarget: 0.40, lotBedBasis: 'open_parcel' } }, ts: [{ tier: 'enhanced', mo: 68.5, selected: true }] } },
     });
-    expect(revised).toMatchObject({ shape: 'raw', treeSource: 'explicit', marginTarget: 0.40 });
+    expect(revised).toMatchObject({ shape: 'raw', treeSource: 'explicit', marginTarget: 0.40, lotBedBasis: 'open_parcel' });
     expect(regimeOf(revised)).toBe('after_2026_10_21');
-    expect(regimeOf({ marginTarget: 0.40 })).toBe('after_2026_10_21');
-    expect(regimeOf({ marginTarget: null })).toBe('before_2026_10_21');
+  });
+
+  test('the regime is the open-parcel stamp, never the margin value (Codex #6398 r4)', () => {
+    // An admin-tuned global_margin_target_ts survives 20261021010000, so a
+    // fresh quote can stamp 0.42 and a replayed legacy line 0.35.
+    expect(regimeOf({ marginTarget: 0.42, lotBedBasis: 'open_parcel' })).toBe('after_2026_10_21');
+    expect(regimeOf({ marginTarget: 0.35, lotBedBasis: 'gross_lot' })).toBe('before_2026_10_21');
+    expect(regimeOf({ marginTarget: 0.40, lotBedBasis: null })).toBe('before_2026_10_21');
+    expect(regimeOf({ marginTarget: null, lotBedBasis: undefined })).toBe('before_2026_10_21');
+  });
+
+  test('a mapped-only envelope reports the review flags mapV1ToLegacyShape put on the recurring row (Codex #6398 r4)', () => {
+    const mappedOnly = {
+      result: {
+        results: { tsMeta: { eb: 2400, et: 4, bedAreaIsEstimated: true, pricingKnobs: { marginTarget: 0.40, lotBedBasis: 'open_parcel' } }, ts: [{ tier: 'standard', mo: 58.1, selected: true }] },
+        recurring: { services: [
+          { service: 'lawn_care', manualReviewReasons: ['oversize_lawn'] },
+          { service: 'tree_shrub', manualReviewReasons: ['open_parcel_basis_footprint_over_half_lot'] },
+        ] },
+      },
+    };
+    expect(extractTreeShrub(mappedOnly)).toMatchObject({ shape: 'mapped', bedSource: 'inferred', reviewReasons: ['open_parcel_basis_footprint_over_half_lot'], lotBedBasis: 'open_parcel' });
+    // With a retained raw line the mapped row's reasons still win (a revision
+    // can clear or add a flag without touching bed/trees).
+    const withRaw = {
+      ...mappedOnly,
+      engineResult: { lineItems: [{ service: 'tree_shrub', bedAreaUsed: 2400, bedAreaSource: 'lot_based', treeCount: 4, monthly: 58.1, manualReviewReasons: [] }] },
+    };
+    expect(extractTreeShrub(withRaw)).toMatchObject({ shape: 'raw', reviewReasons: ['open_parcel_basis_footprint_over_half_lot'] });
+    // No recurring row at all: the raw line's own reasons stand.
+    expect(extractTreeShrub({ engineResult: withRaw.engineResult, result: { results: mappedOnly.result.results } }).reviewReasons).toEqual([]);
   });
 
   test('a stale raw line (revision replaced the mapped result) loses to the mapped envelope, which reports the coarse source', () => {

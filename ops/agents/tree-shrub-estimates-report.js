@@ -34,8 +34,9 @@
  * Quotes priced before migration 20261021000000 (open-parcel bed basis, 2/4/6
  * tree backstop) and 20261021010000 (40% margin) keep their stamped numbers.
  * The `regime` column tells the two apart from the STORED result (the
- * `pricingKnobs.marginTarget` stamp the repriced engine writes), never from
- * the row's created_at, which a revision does not touch.
+ * `pricingKnobs.lotBedBasis` stamp only the repriced engine writes — not the
+ * margin value, which an admin-tuned row can hold anywhere), never from the
+ * row's created_at, which a revision does not touch.
  */
 const path = require('path');
 const { Client } = require('pg');
@@ -92,6 +93,14 @@ function extractTreeShrub(estimateData) {
   const tierRows = estimateData.result?.results?.ts;
   const mappedSelected = Array.isArray(tierRows) ? tierRows.find((r) => r?.selected) : null;
   const mappedMonthly = positive(mappedSelected?.mo);
+  // Review flags on the MAPPED envelope: mapV1ToLegacyShape carries the T&S
+  // line's manualReviewReasons on result.recurring.services (Admin V2
+  // persists only that envelope), so a parked quote is counted as flagged
+  // even with no raw line (Codex #6398 r4).
+  const mappedService = Array.isArray(estimateData.result?.recurring?.services)
+    ? estimateData.result.recurring.services.find((s) => s?.service === 'tree_shrub') : null;
+  const mappedReasons = mappedService && Array.isArray(mappedService.manualReviewReasons)
+    ? mappedService.manualReviewReasons : null;
 
   const agrees = (q) => {
     if (!hasMapped) return true;
@@ -125,10 +134,11 @@ function extractTreeShrub(estimateData) {
         // (Codex #6398; same rule as estimate-actuals).
         tier: enumOf(mappedSelected?.tier) || enumOf(raw.tier),
         monthly: mappedMonthly ?? positive(raw.monthly),
-        reviewReasons: Array.isArray(raw.manualReviewReasons) ? raw.manualReviewReasons : [],
-        // Same rule for the margin stamp: the mapped revision's stamp wins
+        reviewReasons: mappedReasons ?? (Array.isArray(raw.manualReviewReasons) ? raw.manualReviewReasons : []),
+        // Same rule for the knob stamps: the mapped revision's stamp wins
         // over a retained raw line's (Codex #6398 r3).
         marginTarget: num(tsMeta?.pricingKnobs?.marginTarget) ?? num(raw.pricingKnobs?.marginTarget) ?? num(raw.marginTarget),
+        lotBedBasis: enumOf(tsMeta?.pricingKnobs?.lotBedBasis) || enumOf(raw.pricingKnobs?.lotBedBasis),
       };
     }
   }
@@ -144,8 +154,9 @@ function extractTreeShrub(estimateData) {
       palmCount: null,
       tier: enumOf(mappedSelected?.tier),
       monthly: mappedMonthly ?? positive(mappedLine?.monthly),
-      reviewReasons: [],
+      reviewReasons: mappedReasons || [],
       marginTarget: num(tsMeta.pricingKnobs?.marginTarget),
+      lotBedBasis: enumOf(tsMeta.pricingKnobs?.lotBedBasis),
     };
   }
   if (mappedLine || raw) {
@@ -153,8 +164,9 @@ function extractTreeShrub(estimateData) {
       shape: 'compact',
       bedSqFt: null, bedSource: 'unknown', treeCount: null, treeSource: 'unknown', palmCount: null,
       tier: enumOf((mappedLine || raw).tier), monthly: positive((mappedLine || raw).monthly),
-      reviewReasons: [],
+      reviewReasons: mappedReasons || [],
       marginTarget: num((mappedLine || raw).pricingKnobs?.marginTarget),
+      lotBedBasis: enumOf((mappedLine || raw).pricingKnobs?.lotBedBasis),
     };
   }
   return null;
@@ -163,11 +175,15 @@ function extractTreeShrub(estimateData) {
 // Which pricing regime a stored quote carries — read from the STORED result,
 // never from the row's created_at (a revision reprices estimate_data without
 // touching created_at, and a deploy instant is not knowable from the data;
-// Codex #6398). The 2026-10-21 reprice stamps pricingKnobs.marginTarget on
-// every T&S line it prices; a line without the stamp predates it.
+// Codex #6398). The marker is the `pricingKnobs.lotBedBasis` stamp, which
+// only the 2026-10-21 engine writes: a fresh quote stamps 'open_parcel'; a
+// replay of a pre-change line stamps the 'gross_lot' it was sent with; an
+// older line has no stamp. The margin value is NOT the marker — an
+// admin-tuned global_margin_target_ts (preserved by 20261021010000) makes a
+// fresh quote stamp 0.42 or 0.35, so a threshold on it would misfile both
+// cohorts (Codex #6398 r4).
 function regimeOf(ts) {
-  if (ts.marginTarget === null || ts.marginTarget === undefined) return 'before_2026_10_21';
-  return ts.marginTarget <= 0.40 ? 'after_2026_10_21' : 'before_2026_10_21';
+  return ts.lotBedBasis === 'open_parcel' ? 'after_2026_10_21' : 'before_2026_10_21';
 }
 
 const median = (xs) => {
@@ -201,7 +217,7 @@ function summarize(rows) {
 function printReport(args, rows, excluded, windowStart) {
   const s = summarize(rows);
   console.log(`Tree & Shrub estimates since ${windowStart.slice(0, 10)} — ${s.total} quotes (${excluded} internal/test excluded)`);
-  console.log(`priced under the pre-2026-10-21 engine (no marginTarget stamp, or 0.45): ${s.regimes.before}; under the repriced engine (stamped 0.40): ${s.regimes.after}`);
+  console.log(`priced under the pre-2026-10-21 engine (no lotBedBasis stamp, or a replayed gross_lot stamp): ${s.regimes.before}; under the repriced engine (open_parcel stamp): ${s.regimes.after}`);
   console.log('');
   console.log('By bed-area source (explicit = typed, estimated = aerial/estimate field, lot_based = % of lot, fallback = 1,200 default; inferred/measured = older mapped-only rows)');
   console.log('source        quotes  sent  accepted  accept%  median bed sqft  median $/mo  density-tree quotes  review-flagged');
