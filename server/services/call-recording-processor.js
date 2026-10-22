@@ -10205,7 +10205,7 @@ async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v
       }
     }
     if (customerId) {
-      await enrichFromCall({ customerId, extraction: v2ForDisposition, legacy: extracted, callCreatedAt: call.created_at });
+      await enrichFromCall({ customerId, extraction: v2ForDisposition, legacy: extracted, callCreatedAt: call.created_at, callerPhone: clarifyAskTargetPhone(call) });
     }
   } catch (zeroTriageErr) {
     logger.warn(`[call-proc] zero-triage layer error for ${maskSid(callSid)}: ${zeroTriageErr.message}`);
