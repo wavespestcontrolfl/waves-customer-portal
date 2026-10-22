@@ -2556,6 +2556,24 @@ frozen block is malformed, and once rain has covered the water-in
 completion through the LONG deadline against the larger amount, so rain after
 the short deadline still closes the later phase). No new route, token, privacy or
 rate-limit surface; `reportV2.aftercare` is unchanged by it.
+`GATE_LAWN_WATERING_EVERY_VISIT` (dark, owner 2026-10-22; needs
+`GATE_LAWN_WATERING_RULE`; gate off leaves this payload unchanged, key for key)
+changes only which instruction the same `reportV2.banner` fields carry, for an
+UNFROZEN build (a completion, or a visit that froze nothing); a frozen visit
+replays what it froze in either gate state. (1) A catalog rule with `by_target`
+entries picks the direction per logged target (`service_products.targets`), so
+one product can add a hold and a water-in; no covered target reads the product's
+top-level rule, or the first entry of a target-only rule. (2) A same-day water-in
+the label requires beside a hold that leaves it no deadline shortens each hold
+that carries a `label_minimum` to that minimum ("Skip your turf watering until
+today’s treatment has dried." or a nearer clock time), judged with a 2-hour
+drying allowance; a hold without one stays and the visit is no claim, as before.
+(3) A hold's `then_water_in` adds the long-window sentences ("Today’s treatment
+then needs about ½ inch of water by <date>." / "Rain and your regular watering
+both count.") whatever the window's length. No new key, state or route; the
+no-claim reason the office alert uses never enters the payload. The unfrozen PDF
+cache key adds the gate state and the logged targets (`:wr=1e:`); off, it is the
+same key as before. Rollback: unset the variable (frozen visits keep their text).
 `reportV2.aftercare` is a record of the visit and never changes by the clock
 (owner ruling 2026-09-30): it gains `evidenceSource: 'product_instruction'`,
 `wateringHold` (hold states), `creditableWaterIn` (water-in only; a mixed visit

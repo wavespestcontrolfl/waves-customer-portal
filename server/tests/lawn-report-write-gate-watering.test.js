@@ -182,3 +182,42 @@ describe('the completion path freezes independently of completion-text delivery'
     expect(state.notes.lawnWateringFreeze.wateringInstruction).toEqual(INSTRUCTION(40));
   });
 });
+
+// GATE_LAWN_WATERING_EVERY_VISIT (owner 2026-10-22): the gate hands back why a visit froze no instruction, for the
+// watering text's office alert; it writes nothing for it.
+describe('why no instruction froze', () => {
+  const saved = process.env.GATE_LAWN_WATERING_EVERY_VISIT;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.GATE_LAWN_WATERING_EVERY_VISIT; else process.env.GATE_LAWN_WATERING_EVERY_VISIT = saved;
+  });
+  function noClaimInstruction() {
+    const instruction = { ...INSTRUCTION(40), state: null, lines: [] };
+    Object.defineProperty(instruction, 'noClaim', { value: { reason: 'unruled_product', products: ['Heritage Action Fungicide'] }, enumerable: false });
+    return instruction;
+  }
+  function buildOnce(instruction, productsLoadFailed = false) {
+    buildReportV1Data.mockImplementationOnce(async (_r, _t, _k, opts) => {
+      opts.wateringInstructionOut.instruction = instruction;
+      opts.wateringInstructionOut.productsLoadFailed = productsLoadFailed;
+      return { reportV2: { smsSummary: 'sms', snapshot: { statusHeadline: 'h' } } };
+    });
+  }
+
+  test('gate on: the reason comes back, nothing about it is stored', async () => {
+    process.env.GATE_LAWN_WATERING_EVERY_VISIT = 'true';
+    buildOnce(noClaimInstruction());
+    const { knex, state } = fakeKnex({});
+    const result = await run(knex);
+    expect(result.wateringNoClaim).toEqual({ reason: 'unruled_product', products: ['Heritage Action Fungicide'] });
+    expect(state.statements.map((x) => x.keys)).toEqual([['lawnReportV2']]);
+  });
+
+  test('gate off, or products that could not be read: no reason', async () => {
+    delete process.env.GATE_LAWN_WATERING_EVERY_VISIT;
+    buildOnce(noClaimInstruction());
+    expect((await run(fakeKnex({}).knex)).wateringNoClaim).toBeUndefined();
+    process.env.GATE_LAWN_WATERING_EVERY_VISIT = 'true';
+    buildOnce(noClaimInstruction(), true);
+    expect((await run(fakeKnex({}).knex)).wateringNoClaim).toBeUndefined();
+  });
+});

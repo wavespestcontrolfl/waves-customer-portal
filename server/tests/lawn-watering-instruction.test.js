@@ -932,3 +932,61 @@ describe('amount only when no sprinkler setup is on file (plainWhenNoSetup)', ()
     expect(reentrySafetyClaimFinding(SETUP_INVITE_LINE)).toBeFalsy();
   });
 });
+
+// GATE_LAWN_WATERING_EVERY_VISIT (owner 2026-10-22): rule E, the label's second step and why a visit has no claim.
+describe('label first (rule E), second steps and no-claim reasons', () => {
+  const { buildWateringInstruction: build } = require('../services/service-report/lawn-watering-instruction');
+  const AT_10AM = '2026-10-21T14:00:00Z'; // Wed 10 AM ET
+  const DYLOX = { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, water_in_same_day: true, source: 'owner' };
+  const CELSIUS = { mode: 'hold', hold_hours: 24, hold_until: 'dry', label_minimum: { hold_until: 'dry' }, source: 'owner' };
+  const THREE_WAY = { mode: 'hold', hold_hours: 24, source: 'label' };
+  const VELISTA = { mode: 'hold', hold_until: 'dry', source: 'label' };
+  const rules = (...list) => list.map((rule, i) => ({ name: `P${i}`, rule }));
+
+  test('a same-day water-in the label requires shortens our own 24-hour hold to the label minimum', () => {
+    const ins = build({ rules: rules(DYLOX, CELSIUS), completedAt: AT_10AM, plainWhenNoSetup: true, labelFirst: true });
+    expect(ins.state).toBe('hold_then_water_in');
+    expect(ins.lines[0]).toBe('Skip your turf watering until today’s treatment has dried.');
+    expect(ins.lines[1]).toMatch(/water in today’s treatment with about ¼ inch by 11 PM tonight\./);
+  });
+
+  test('without label first the same pair is no claim, and says why', () => {
+    const ins = build({ rules: rules(DYLOX, CELSIUS), completedAt: AT_10AM, plainWhenNoSetup: true });
+    expect(ins.state).toBeNull();
+    expect(ins.noClaim).toEqual({ reason: 'water_in_conflict', products: ['P0', 'P1'] });
+    expect(JSON.parse(JSON.stringify(ins)).noClaim).toBeUndefined();
+  });
+
+  test('a hold that is the label’s own direction never shortens', () => {
+    const ins = build({ rules: rules(DYLOX, THREE_WAY), completedAt: AT_10AM, plainWhenNoSetup: true, labelFirst: true });
+    expect(ins.state).toBeNull();
+    expect(ins.noClaim.reason).toBe('water_in_conflict');
+  });
+
+  test('a label drying hold beside a same-day water-in fits an afternoon visit with the drying allowance', () => {
+    const at4pm = '2026-10-21T20:00:00Z';
+    expect(build({ rules: rules(DYLOX, VELISTA), completedAt: at4pm, plainWhenNoSetup: true }).state).toBeNull();
+    expect(build({ rules: rules(DYLOX, VELISTA), completedAt: at4pm, plainWhenNoSetup: true, labelFirst: true }).state).toBe('hold_then_water_in');
+  });
+
+  test('a same-day water-in too late for a run says so', () => {
+    const ins = build({ rules: rules(DYLOX), completedAt: '2026-10-22T01:00:00Z', plainWhenNoSetup: true, labelFirst: true });
+    expect(ins.noClaim).toEqual({ reason: 'same_day_too_late', products: ['P0'] });
+  });
+
+  test('a rain-counting second step reads as a long window even at seven days', () => {
+    const later = { mode: 'water_in', water_in_inches: 0.5, water_in_by_hours: 168, rain_counts: true, source: 'label' };
+    const ins = build({ rules: rules({ mode: 'hold', hold_hours: 24, source: 'label' }, later), completedAt: AT_10AM, plainWhenNoSetup: true });
+    expect(ins.lines).toEqual([
+      'Skip your turf watering until Thu 10 AM.',
+      'Today’s treatment then needs about ½ inch of water by Wed, Oct 28 at 10 AM.',
+      'Rain and your regular watering both count.',
+    ]);
+  });
+
+  test('a product with no rule is named; no products is its own reason', () => {
+    expect(build({ rules: [{ name: 'Heritage Action Fungicide', rule: null }, { name: 'P1', rule: DYLOX }], completedAt: AT_10AM }).noClaim)
+      .toEqual({ reason: 'unruled_product', products: ['Heritage Action Fungicide'] });
+    expect(build({ rules: [], completedAt: AT_10AM }).noClaim).toEqual({ reason: 'no_products', products: [] });
+  });
+});
