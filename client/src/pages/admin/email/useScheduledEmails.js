@@ -45,6 +45,21 @@ function restoreKeyFor(userId, id) {
   } catch { return null; }
 }
 
+// Rows this tab took over from another tab's claim (Open here anyway), saved
+// before the request: any draft this tab later gets for such a row, on a
+// retry or after a reload, keeps the takenOver guard. Kept per user, like
+// the restore keys.
+const takeoversKey = (userId) => `waves_email_takeovers:${userId}`;
+function readTakeovers(userId) {
+  try { return new Set(JSON.parse(sessionStorage.getItem(takeoversKey(userId)) || "[]")); } catch { return new Set(); }
+}
+function rememberTakeover(userId, id) {
+  try {
+    sessionStorage.setItem(takeoversKey(userId), JSON.stringify([...readTakeovers(userId), id]));
+    return true;
+  } catch { return false; }
+}
+
 // The Email > Scheduled list (GATE_EMAIL_SEND_LATER). `enabled` stays false
 // until the server says the gate is on, so the Send arrow and the tab stay
 // hidden with the gate off or the list unreadable.
@@ -102,7 +117,7 @@ export default function useScheduledEmails(active, userId) {
     if (pendingId) return { draft: null };
     // Without a saved key a lost answer could not be recovered: do not start.
     const restoreKey = restoreKeyFor(userId, id);
-    if (!restoreKey) return { draft: null, error: "Cancel did not start: this browser could not save its safety key." };
+    if (!restoreKey || (takeover && !rememberTakeover(userId, id))) return { draft: null, error: "Cancel did not start: this browser could not save its safety key." };
     setPendingId(id);
     try {
       const response = await adminFetch(`/api/admin/email/scheduled/${encodeURIComponent(id)}/cancel`, { method: "POST", body: JSON.stringify({ restoreKey, ...(takeover ? { takeover } : {}) }) });
@@ -110,7 +125,7 @@ export default function useScheduledEmails(active, userId) {
       // No readable answer, or a server error: the cancel may have happened.
       if (!data || response.status >= 500 || (response.ok && !data.draft)) throw new Error("Cancel outcome unknown");
       if (!response.ok) return { draft: null, error: data.error || "The scheduled email was not cancelled. Try again.", claimedElsewhere: data.claimedElsewhere === true };
-      return { draft: data.draft };
+      return { draft: readTakeovers(userId).has(id) ? { ...data.draft, takenOver: true } : data.draft };
     } catch {
       // The server may have cancelled it; a repeated cancel returns the same
       // draft, so the caller offers Try again on this row.

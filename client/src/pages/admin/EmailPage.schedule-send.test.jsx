@@ -571,6 +571,27 @@ describe("Email schedule send", () => {
     await waitFor(() => expect(send()).not.toBeDisabled());
   });
 
+  it("a takeover whose answer was lost keeps its guard on the plain retry", async () => {
+    scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "cancelled" }];
+    const base = fetch.getMockImplementation();
+    let calls = 0;
+    fetch.mockImplementation((input, options = {}) => {
+      if (!String(input).endsWith("/queued-1/cancel")) return base(input, options);
+      calls += 1;
+      if (calls === 1) return response({ error: "Open in another tab.", claimedElsewhere: true }, 409);
+      if (calls === 2) return Promise.reject(new TypeError("network"));
+      // The claim moved on the lost takeover: a plain repeat returns the draft unflagged.
+      return response({ success: true, draft: { ...scheduledRows[0] } });
+    });
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Scheduled" }, { timeout: 3000 }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open as draft" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open here anyway" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    expect(await screen.findByText(/may still be open as a draft in another tab/)).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Send", exact: true }).at(-1)).toBeDisabled();
+  });
+
   it("sign-out keeps the restore key, so a cancel whose answer was lost can still be taken back", () => {
     sessionStorage.setItem("waves_email_restored_pending:fixture-schedule-owner", "[\"queued-1\"]");
     sessionStorage.setItem("waves_email_restore_keys:fixture-schedule-owner", "{}");
