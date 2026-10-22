@@ -276,8 +276,8 @@ jest.setTimeout(30000);
     // A concurrent sweep that started before the failure finished.
     await recordLeaseFreeJobEnd('scheduled-email-send', t0, null);
     expect(await health()).toMatchObject({ last_status: 'failed', consecutive_failures: 1 });
-    // A later sweep that started after it.
-    await recordLeaseFreeJobEnd('scheduled-email-send', Date.now(), null);
+    // A sweep of a later scheduled minute (the same minute's would not clear it).
+    await recordLeaseFreeJobEnd('scheduled-email-send', (Math.floor(Date.now() / 60000) + 1) * 60000 + 1000, null);
     expect(await health()).toMatchObject({ last_status: 'success', consecutive_failures: 0, last_error: null });
     await database('job_health').del();
   });
