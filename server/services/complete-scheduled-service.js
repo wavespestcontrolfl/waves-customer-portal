@@ -15440,6 +15440,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
         await ReviewService.enrollPostService({
           customerId: svc.customer_id,
           serviceRecordId: record.id,
+          // GATE_REVIEW_ASK_AFTER_REPORT: what became of the report text (re-read
+          // from the record the delivery leg stamped); null = no anchor.
+          reportTextAnchor: await ReviewService.reportTextAnchorForRecord(record.id),
           // Direct visit identity for plan resolution (codex #3235 r5 P1).
           scheduledServiceId: svc.id || null,
           serviceType: svc.service_type || null,
