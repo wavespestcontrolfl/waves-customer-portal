@@ -787,7 +787,7 @@ function recordIdsAreOnPage(bounded, page) {
 function pageGroundingBlocked(fullPrompt, namedResult, cohort, nameHint, page) {
   const pageCustomerId = page?.customer?.customer_id || page?.ids?.customer_id;
   const bounded = boundedPrompt(fullPrompt);
-  // Record ids hold phone-like digit runs; the ids are judged by recordIdsBelongToPage, not as contacts.
+  // Record ids hold phone-like digit runs; the ids are judged by recordIdsAreOnPage, not as contacts.
   const clause = targetClause(bounded).replace(RECORD_ID_GLOBAL_RE, ' ');
   const matches = namedResult.matches || [];
   const contacts = contactLiteralsOf(clause).length > 0;
@@ -882,6 +882,9 @@ async function selectionStage(r) {
   // selectable: a fresh customer choice re-resolves this request.
   if (!selected) return { error: 'The selected customer conflicts with the current request', code: 'context_mismatch', selectable: true };
   r.selection = singleTarget(selected, 'operator_selection');
+  // A validated operator selection settles the ambiguity: the duplicate rows leave the context, so they
+  // neither reach the model nor trigger the multi-candidate taint and marker (Codex #6369 r30).
+  r.candidates = [r.selection.target];
   return null;
 }
 
@@ -893,7 +896,13 @@ async function selectionStage(r) {
 async function cappedStage(r) {
   if (r.namedResult.complete || r.cohort || r.selectedId) return null;
   const pick = await contactResolvedCustomer(r.typedIds, r.prompt);
-  if (pick) { r.selection = singleTarget(pick, 'current_request_lookup'); return null; }
+  if (pick) {
+    // Only the customer the contact resolved stays in the context: the sentinel rows of the capped
+    // lookup must not reach the model (Codex #6369 r30).
+    r.selection = singleTarget(pick, 'current_request_lookup');
+    r.candidates = [r.selection.target];
+    return null;
+  }
   return { page: r.page, candidates: [], target: null, targets: [], ambiguous: false,
     error: 'More customers share this name than one lookup can list, so none can be selected here. Identify the customer by phone or email, or start the request from their customer page.',
     code: 'target_clarification_required', requestPhrase: normalizeName(targetClause(r.prompt)), namesRequested: r.nameHint, ...r.typed };

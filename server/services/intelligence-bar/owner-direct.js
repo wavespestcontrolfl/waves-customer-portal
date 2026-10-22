@@ -473,6 +473,10 @@ const sameNameMarkerNeeded = taint => Boolean(taint?.sameNameEmitted) && ibTarge
 // An unreadable thread fails closed.
 async function sameNameChoicePending({ actorId, threadId, conversationHistory, prompt }) {
   if (!ibTargetRulesV2Live()) return false;
+  // Choice buttons stay tappable long after the 30-minute marker window, so a message shaped like a
+  // choice reply ("Full Name, City" / "First L., City") is carded whatever the marker's age or the
+  // thread says (Codex #6369 r30).
+  if (looksLikeChoiceReply(prompt)) return true;
   if (!threadId || !actorId) return pendingFromHistory(conversationHistory, prompt);
   try {
     return (await IbThreads.hasSameNameChoicePending(actorId, threadId)) === true;

@@ -308,6 +308,9 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     const digits = beyond.phone.replace(/\D/g, '');
     const pretty = `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`;
     const pinned = await ask(`update Pat Example ${pretty} notes`);
+    // Only the contact's customer stays in the context: no sentinel rows reach the model (Codex #6369 r30).
+    expect(pinned.candidates.length).toBeLessThanOrEqual(1);
+    expect(pinned.candidates.map(c => c.customer_id)).toEqual([beyond.id]);
     expect(pinned.typedCustomerIds).toEqual([beyond.id]); // picks the target for the card
     expect(pinned.groundedCustomerIds).toEqual([]); // but a capped name grants no direct authority
     // A phone of someone with another name is not the named person: no pick for that name.
@@ -770,6 +773,25 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(await direct('fix the notes on 941-555-0100 from Tampa')).toEqual([]);
     expect(await direct('fix the notes on 941-555-0100 at 3pm')).toEqual([id(100)]);
     expect(await direct('fix the notes on 941-555-0100 on Tuesday')).toEqual([id(100)]);
+  });
+
+  test('gate on: a validated operator selection settles the ambiguity: no duplicate rows, no taint, no marker (Codex #6369 r30)', async () => {
+    process.env[ON] = 'true';
+    customers = sameName(2);
+    const before = await ask('update Pat Example notes');
+    expect(before.candidates).toHaveLength(2);
+    const picked = await Context.resolve({ prompt: 'update Pat Example notes', pageData: {}, selectedTarget: { customer_id: id(101) }, ownerDirectScope: true });
+    expect(picked.error).toBeUndefined();
+    expect(picked.target).toMatchObject({ customer_id: id(101), provenance: 'operator_selection' });
+    expect(picked.candidates.map(c => c.customer_id)).toEqual([id(101)]);
+    const owner = Context.ownerDirectContext(picked);
+    expect(owner.sameNameNote).toBeUndefined();
+    const taint = OwnerDirect.newRequestTaint([]);
+    OwnerDirect.noteSameNameContext(taint, owner);
+    expect(taint.sameNameCandidates).toBeUndefined();
+    expect(OwnerDirect.sameNameMarkerNeeded(taint)).toBe(false);
+    // The selection grounds the chosen customer, as before.
+    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(101), updates: { phone: '941-555-0150' } }, null, null, OwnerDirect.targetGrounding(owner))).toBe(true);
   });
 
   test('gate on: a city is matched as a WHOLE phrase: "Palm Beach Gardens" is not "Palm Beach" (Codex #6369 r23)', async () => {
@@ -1420,6 +1442,22 @@ describe('same-name choice marker on the thread (Codex #6369 r16)', () => {
     delete process.env[ON];
     expect((await loadNoThread([marked], 'yes')).sameNameCandidates).toBeUndefined();
     expect((await loadNoThread([], 'Pat Example, Venice')).sameNameCandidates).toBeUndefined();
+  });
+
+  test('a choice-shaped reply is carded whatever the marker\'s age: a tap 31+ minutes later (marker expired) is still carded (Codex #6369 r30)', async () => {
+    process.env[ON] = 'true';
+    const tap = (prompt) => {
+      jest.spyOn(IbThreads, 'hasUntrustedRead').mockResolvedValue(false);
+      jest.spyOn(IbThreads, 'hasSameNameChoicePending').mockResolvedValue(false); // the 30-minute window has passed
+      return OwnerDirect.loadRequestTaint({ history: [], threadId: id(1), actorId: id(2), needed: true, fullAccess: true, conversationHistory: [{ role: 'user', content: 'hi' }], prompt });
+    };
+    expect((await tap('Pat Example, Venice')).sameNameCandidates).toBe(true);
+    expect((await tap('Bartholomew F., Fort Myers Beach')).sameNameCandidates).toBe(true);
+    // An ordinary message after the window is direct.
+    expect((await tap('update the notes for Pat Example')).sameNameCandidates).toBeUndefined();
+    expect((await tap('yes')).sameNameCandidates).toBeUndefined();
+    delete process.env[ON];
+    expect((await tap('Pat Example, Venice')).sameNameCandidates).toBeUndefined();
   });
 
   test('an unreadable thread fails closed; gate off or no thread id ignores the marker', async () => {
