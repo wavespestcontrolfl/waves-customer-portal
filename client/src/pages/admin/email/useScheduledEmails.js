@@ -31,8 +31,10 @@ export default function useScheduledEmails(active) {
     setPendingId(id);
     try {
       const response = await adminFetch(`/api/admin/email/scheduled/${encodeURIComponent(id)}/cancel`, { method: "POST" });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok || !data.draft) return { draft: null, error: data.error || "The scheduled email was not cancelled. Try again." };
+      const data = await response.json().catch(() => null);
+      // No readable answer, or a server error: the cancel may have happened.
+      if (!data || response.status >= 500 || (response.ok && !data.draft)) throw new Error("Cancel outcome unknown");
+      if (!response.ok) return { draft: null, error: data.error || "The scheduled email was not cancelled. Try again." };
       return { draft: data.draft };
     } catch {
       // The server may have cancelled it; a repeated cancel returns the same

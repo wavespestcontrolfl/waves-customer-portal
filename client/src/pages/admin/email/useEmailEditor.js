@@ -227,6 +227,9 @@ export default function useEmailEditor(userId) {
     const request = JSON.stringify({ ...payload, sendAt });
     const prior = uncertainSchedule.current[slot];
     const clientKey = prior?.request === request ? prior.clientKey : crypto.randomUUID();
+    // Saved before the request: a reload while it is in flight still finds
+    // the key. Cleared only on a definite answer.
+    rememberUncertain(slot, { request, clientKey });
     try {
       const response = await adminFetch("/api/admin/email/schedule", {
         method: "POST",
@@ -236,7 +239,7 @@ export default function useEmailEditor(userId) {
       // A 2xx or 5xx without a readable answer may hide a committed insert.
       if (!result || (response.ok && !result.success)) throw new Error("Schedule outcome unknown");
       if (!response.ok) {
-        rememberUncertain(slot, response.status >= 500 ? { request, clientKey } : null);
+        if (response.status < 500) rememberUncertain(slot, null);
         setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: result.error || "The email was not scheduled. Your draft is still here." } }));
         return;
       }
@@ -244,7 +247,6 @@ export default function useEmailEditor(userId) {
       clearQueued();
       setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, message: `Scheduled for ${formatSendAt(sendAt)}. Find it under Scheduled.` } }));
     } catch {
-      rememberUncertain(slot, { request, clientKey });
       setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: "Scheduling was not confirmed. Look under Scheduled; trying again will not queue it twice." } }));
     } finally {
       setScheduling(null);
