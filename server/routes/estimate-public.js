@@ -1054,6 +1054,15 @@ function confirmationServiceLabel(oneTimeList, estimate, fallbackLabel) {
   return String(specific).replace(/\s+/g, ' ').trim() || String(fallbackLabel || '').trim();
 }
 
+// Earliest scheduled_date among the visits this accept booked ('YYYY-MM-DD'), else null.
+function earliestAcceptedVisitDate(appointments) {
+  const days = (Array.isArray(appointments) ? appointments : [])
+    .map((appt) => dateOnly(appt?.scheduled_date))
+    .filter((day) => /^\d{4}-\d{2}-\d{2}$/.test(day))
+    .sort();
+  return days[0] || null;
+}
+
 function dateOnly(value) {
   if (!value) return '';
   if (value instanceof Date) return value.toISOString().split('T')[0];
@@ -16369,6 +16378,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         afterVisitPaused: recurringCardPolicy.autopayPaused === true,
         afterVisitDisabled: recurringCardPolicy.autopayDisabled === true,
         setupFeeDeferred: txResult.setupFeeDeferredToFirstVisit === true,
+        // Card-on-file lane accept with nothing collected at accept (the
+        // payable-invoice, payer, credit, prepay and one-time branches all sit
+        // ahead of this flag in the builder): bills after the first visit.
+        cardLaneAfterVisit: recurringCardLaneActive === true && !treatAsOneTime,
+        firstVisitDate: earliestAcceptedVisitDate(acceptedAppointmentsToRegister),
       });
       // bell: true \u2014 accepted estimates must ring the admin bell even under
       // GATE_ADMIN_BELL_POLICY (category 'estimate' is otherwise silenced).
@@ -22271,6 +22285,15 @@ function buildAcceptNotificationPayload(args = {}) {
   return { ...copy, adminAction, adminWhy };
 }
 
+// 'YYYY-MM-DD' -> 'Oct 24' (calendar day, no timezone shift). '' when absent or malformed.
+function firstVisitDateLabel(value) {
+  const day = dateOnly(value);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return '';
+  const d = new Date(`${day}T12:00:00Z`);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+
 function buildAcceptNotificationCopy({
   customerName = '',
   waveguardTier = 'Bronze',
@@ -22329,6 +22352,15 @@ function buildAcceptNotificationCopy({
   // GATE_PAF_TERMITE: the agreement being issued charges after the station
   // installation, not at signature.
   annualChargeAfterInstallation = false,
+  // New-customer pay-after-first-visit: the accept rode the card-on-file lane
+  // (a card was captured, or one is already enrolled), the standard
+  // setup / first-application invoice was attached to the first visit with no
+  // pay link (or none was minted yet), and completion charges it. Nothing is
+  // owed until the first visit is performed. Unlike afterVisitBilling this is
+  // not limited to existing customers. Omitted/false = today's copy.
+  cardLaneAfterVisit = false,
+  // 'YYYY-MM-DD' of the first booked visit when this accept booked one.
+  firstVisitDate = null,
 } = {}) {
   // Sign-before-pay (codex round-3 P2 on #4819): the durable notifications
   // must send the customer to the signature, never read as "approved,
@@ -22668,6 +22700,24 @@ function buildAcceptNotificationCopy({
       adminNext: 'Billed after the first visit; nothing to do now',
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${waveguardTier} WaveGuard plan is confirmed. Nothing is charged today — your saved payment method is billed after your first visit.`,
+      customerLink: '/?tab=billing',
+    };
+  }
+
+  // A new customer on the card rail: the first-application invoice is a draft
+  // attached to the first visit (or not minted yet) and bills after that visit,
+  // so "invoice follow-up needed" below would send staff to bill something that
+  // is collected by the visit's completion. Only an unbooked first visit is work.
+  if (cardLaneAfterVisit) {
+    const visitDay = firstVisitDateLabel(firstVisitDate);
+    const booked = !!(reservationCommitted || visitDay);
+    return {
+      adminTitle: `Estimate accepted: ${customerName}`,
+      adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Billed after the first visit; nothing is charged today.${visitDay ? ` First visit: ${visitDay}.` : (booked ? '' : ' No first visit is booked yet.')}`,
+      adminNext: booked ? 'Billed after the first visit; nothing to do' : 'Next: book the first visit',
+      adminDoneWhen: booked ? null : 'visit_booked',
+      customerTitle: 'Estimate accepted',
+      customerBody: `Your ${waveguardTier} WaveGuard plan is confirmed. Nothing is charged today — you pay after your first visit.`,
       customerLink: '/?tab=billing',
     };
   }
