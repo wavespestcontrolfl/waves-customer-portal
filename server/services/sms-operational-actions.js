@@ -1370,7 +1370,9 @@ async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verif
     && admissibleWitness(record, current, evidence.records));
   if (!eventWitness && inWindow) return { outcome: settle('not_due') };
   const checked = threadOnly ? { verdict: 'open' } : await verify(current, evidence, { now, eventOnly: inWindow });
-  const verdict = await reconcileWithThread({ conn, row, current, message, now, verdict: checked, verifyThread });
+  // R1 holds for the thread too: inside an open window a text cannot close
+  // the row early, so the thread check waits for the deadline (Codex #6415 r7).
+  const verdict = inWindow ? checked : await reconcileWithThread({ conn, row, current, message, now, verdict: checked, verifyThread });
   if (threadOnly && verdict.verdict !== 'fulfilled') return { outcome: settle('no_witness') };
   let closed = false;
   // Only a verdict this transaction actually persisted counts as handled.

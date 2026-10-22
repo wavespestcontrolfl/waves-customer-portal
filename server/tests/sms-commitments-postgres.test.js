@@ -3565,6 +3565,29 @@ postgres('SMS commitments on PostgreSQL', () => {
       expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
     });
 
+    test('Codex #6415 r7: inside an open window a visit event earns the check, but a later text cannot close it early', async () => {
+      const due = at(5 * DAY);
+      const ask = await addCommitment({ kind: 'other', due_at: due, due_basis: 'stated' });
+      const [visit] = await mockPg('scheduled_services').insert({
+        customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+        scheduled_date: etDateString(at(DAY)), window_start: '09:00:00', status: 'en_route',
+        created_at: new Date(message.created_at.getTime() - DAY), updated_at: at(DAY),
+      }).returning('id');
+      await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: at(DAY) });
+      const confirmation = await text('Got the report! Thanks for your help!', { ms: 2 * DAY });
+      answer({ verdict: 'completed', record_ref: `sms:${confirmation}`, quote: 'Got the report!' });
+      await refreshSmsCommitments({ conn: mockPg, now: now() });
+      // The event-only record check ran; the thread check waited.
+      expect(dispatchWithFallback.mock.calls.some(([, request]) => !isThread(request))).toBe(true);
+      expect(threadCalls()).toHaveLength(0);
+      expect((await mockPg('call_commitments').where({ id: ask.id }).first()).status).toBe('open');
+      // After the deadline the same text closes it.
+      await refreshSmsCommitments({ conn: mockPg, now: new Date(due.getTime() + 60000) });
+      expect(threadCalls()).toHaveLength(1);
+      expect(await mockPg('call_commitments').where({ id: ask.id }).first()).toMatchObject({ status: 'fulfilled',
+        fulfillment: expect.objectContaining({ basis: 'thread_confirmation' }) });
+    });
+
     test('a person\'s later text saying it was sent closes the follow-up too', async () => {
       const ask = await addCommitment();
       const sent = await text('We sent it out this morning to the email on file', { direction: 'outbound', ms: DAY });
