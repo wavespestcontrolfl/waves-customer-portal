@@ -28,6 +28,14 @@ export function encodeEmailBody(text) {
 }
 
 const uncertainKey = (userId) => `waves_email_schedule_uncertain:${userId}`;
+// Whether a refusal came from the schedule route itself, after it looked the
+// key up. A sign-in failure (401/403), a gate-off answer (enabled:false) or a
+// server error never reached that lookup: the key stays, so a retry finds the
+// first row instead of queuing a second email.
+function keyLookedUp(response, result) {
+  return response.status < 500 && ![401, 403].includes(response.status) && result.enabled !== false;
+}
+
 // The answer to a schedule request that queued (or had already sent) the
 // email. `cleared` is false when edits made while the request ran are still
 // in the draft: those were not scheduled.
@@ -272,9 +280,7 @@ export default function useEmailEditor(userId) {
       // not this request, so queue it again under a fresh key.
       if (response.ok && result.scheduled?.status === "cancelled") ({ response, result } = await submit(crypto.randomUUID()));
       if (!response.ok) {
-        // A gate-off answer (enabled:false) never looked the key up: keep it,
-        // so a retry after the gate returns finds the first row.
-        if (response.status < 500 && result.enabled !== false) rememberUncertain(slot, null);
+        if (keyLookedUp(response, result)) rememberUncertain(slot, null);
         setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: result.error || "The email was not scheduled. Your draft is still here." } }));
         return;
       }

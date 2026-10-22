@@ -112,14 +112,17 @@ describe("Email schedule send", () => {
     expect(second).toBe(first);
   });
 
-  it("keeps the client key through a gate-off answer, so a later retry finds the first row", async () => {
+  it.each([
+    ["a gate-off answer", { enabled: false, error: "Schedule send is off." }, 404],
+    ["a sign-in failure", { error: "Session expired. Sign in again." }, 401],
+  ])("keeps the client key through %s, so a later retry finds the first row", async (_label, refusal, status) => {
     let calls = 0;
     const base = fetch.getMockImplementation();
     fetch.mockImplementation((input, options = {}) => {
       if (String(input).endsWith("/email/schedule")) {
         calls += 1;
         if (calls === 1) return Promise.reject(new TypeError("network"));
-        if (calls === 2) return response({ enabled: false, error: "Schedule send is off." }, 404);
+        if (calls === 2) return response(refusal, status);
       }
       return base(input, options);
     });
@@ -132,7 +135,7 @@ describe("Email schedule send", () => {
     await pickTomorrow();
     expect((await screen.findAllByText(/Look under Scheduled before you schedule or send it again/)).length).toBeGreaterThan(0);
     await pickTomorrow();
-    expect((await screen.findAllByText("Schedule send is off.")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(refusal.error)).length).toBeGreaterThan(0);
     await pickTomorrow();
     await waitFor(() => expect(posts("/email/schedule")).toHaveLength(3));
     const keys = posts("/email/schedule").map(([, options]) => JSON.parse(options.body).clientKey);
@@ -259,7 +262,7 @@ describe("Email schedule send", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Scheduled (1)" }));
     const setItem = Storage.prototype.setItem;
     vi.spyOn(Storage.prototype, "setItem").mockImplementation(function failDrafts(key, value) {
-      if (!/schedul/i.test(key)) throw new Error("Quota");
+      if (!/schedul|restore_keys/i.test(key)) throw new Error("Quota");
       return setItem.call(this, key, value);
     });
     fireEvent.click(await screen.findByRole("button", { name: "Cancel send" }));

@@ -22,6 +22,21 @@ async function sendRestoredMark(id) {
   } catch { return false; }
 }
 
+// Per scheduled email, the key this tab claims its text with on Cancel send.
+// Kept in sessionStorage so a retry after a lost answer, even after a reload,
+// sends the same key and gets the draft; another tab's key gets 409.
+const RESTORE_KEYS = "waves_email_restore_keys";
+function restoreKeyFor(id) {
+  let keys = {};
+  try { keys = JSON.parse(sessionStorage.getItem(RESTORE_KEYS) || "{}") || {}; } catch { keys = {}; }
+  if (typeof keys[id] === "string") return keys[id];
+  const key = crypto.randomUUID();
+  try {
+    sessionStorage.setItem(RESTORE_KEYS, JSON.stringify({ ...keys, [id]: key }));
+    return key;
+  } catch { return null; }
+}
+
 // The Email > Scheduled list (GATE_EMAIL_SEND_LATER). `enabled` stays false
 // until the server says the gate is on, so the Send arrow and the tab stay
 // hidden with the gate off or the list unreadable.
@@ -69,9 +84,12 @@ export default function useScheduledEmails(active) {
   // Returns the draft, or null with the server's reason.
   const cancel = async (id) => {
     if (pendingId) return { draft: null };
+    // Without a saved key a lost answer could not be recovered: do not start.
+    const restoreKey = restoreKeyFor(id);
+    if (!restoreKey) return { draft: null, error: "Cancel did not start: this browser could not save its safety key." };
     setPendingId(id);
     try {
-      const response = await adminFetch(`/api/admin/email/scheduled/${encodeURIComponent(id)}/cancel`, { method: "POST" });
+      const response = await adminFetch(`/api/admin/email/scheduled/${encodeURIComponent(id)}/cancel`, { method: "POST", body: JSON.stringify({ restoreKey }) });
       const data = await response.json().catch(() => null);
       // No readable answer, or a server error: the cancel may have happened.
       if (!data || response.status >= 500 || (response.ok && !data.draft)) throw new Error("Cancel outcome unknown");

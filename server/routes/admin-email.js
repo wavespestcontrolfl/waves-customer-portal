@@ -425,20 +425,34 @@ router.get('/scheduled', async (req, res) => {
 });
 
 // POST /scheduled/:id/cancel — Gmail's "Cancel send": the row stops and its
-// text comes back for the composer. Repeating it on a cancelled row returns
-// the same draft, so a cancel whose response was lost can be retried. A row
-// Gmail is sending or has sent cannot be cancelled (409).
+// text comes back for the composer. The tab's `restoreKey` claims the text in
+// the same UPDATE that cancels the row: a repeat with that key (a lost answer)
+// returns the same draft, any other key gets 409, and nothing comes back once
+// the tab confirmed the restore. A row Gmail is sending or has sent cannot be
+// cancelled (409).
+const RESTORE_KEY_RE = /^[\w-]{8,64}$/;
+async function claimCancelled(id, restoreKey) {
+  const [row] = await db('scheduled_emails').where({ id }).whereIn('status', CANCELLABLE)
+    .update({ status: 'cancelled', cancelled_at: db.fn.now(), restore_key: restoreKey, updated_at: db.fn.now() }).returning('*');
+  if (row) return { draft: row };
+  // A cancelled row nobody claimed yet, or this tab's own claim.
+  const [own] = await db('scheduled_emails').where({ id, status: 'cancelled' }).whereNull('restored_at')
+    .where((q) => q.whereNull('restore_key').orWhere('restore_key', restoreKey))
+    .update({ restore_key: restoreKey, updated_at: db.fn.now() }).returning('*');
+  if (own) return { draft: own };
+  const current = await db('scheduled_emails').where({ id }).first('status', 'restored_at');
+  if (current?.status !== 'cancelled') return { error: 'This email is already sending or sent, so it cannot be cancelled.' };
+  return { error: current.restored_at ? 'This email is already back in a draft.' : 'This email is already open as a draft in another tab.' };
+}
+
 router.post('/scheduled/:id/cancel', async (req, res) => {
   if (!emailSendLaterLive()) return res.status(404).json({ enabled: false, error: 'Schedule send is off.' });
+  const restoreKey = req.body?.restoreKey;
+  if (typeof restoreKey !== 'string' || !RESTORE_KEY_RE.test(restoreKey)) return res.status(400).json({ error: 'restoreKey is required.' });
   try {
-    const [row] = await db('scheduled_emails').where({ id: req.params.id }).whereIn('status', CANCELLABLE)
-      .update({ status: 'cancelled', cancelled_at: db.fn.now(), updated_at: db.fn.now() }).returning('*');
-    // A repeat returns the draft only until a tab confirms it restored it;
-    // after that the text is already in a composer and must not come back.
-    const done = row || await db('scheduled_emails').where({ id: req.params.id, status: 'cancelled' }).first();
-    if (done?.restored_at) return res.status(409).json({ error: 'This email is already back in a draft.' });
-    if (!done) return res.status(409).json({ error: 'This email is already sending or sent, so it cannot be cancelled.' });
-    res.json({ success: true, draft: scheduledView(done) });
+    const { draft, error } = await claimCancelled(req.params.id, restoreKey);
+    if (error) return res.status(409).json({ error });
+    res.json({ success: true, draft: scheduledView(draft) });
   } catch (err) {
     logger.error(`[email] scheduled cancel failed (${err.code || 'error'})`);
     res.status(500).json({ error: 'The scheduled email was not cancelled. Try again.' });

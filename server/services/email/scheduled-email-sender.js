@@ -27,7 +27,7 @@ async function alertOffice(row, kind) {
   const { raiseAdminAlert } = require('../admin-alert-compose');
   const unknown = kind === 'outcome_unknown';
   try {
-    await raiseAdminAlert('alert', {
+    const alert = await raiseAdminAlert('alert', {
       area: 'Comms',
       action: unknown ? 'check Sent for a scheduled email' : 'resend a scheduled email',
       why: unknown
@@ -42,6 +42,9 @@ async function alertOffice(row, kind) {
       bell: true, dedupeKey: alertKey(row.id), metadata: { scheduledEmailId: row.id },
       detail: `To: ${row.to_address}\n${unknown ? 'Look in the Gmail Sent folder first. If it is not there, open Email, then Scheduled, and tap Back to draft.' : 'Open Email, then Scheduled, and tap Back to draft to fix and resend it.'}`,
     });
+    // notifyAdmin answers null (it does not throw) when the row was not
+    // written: that is a failed alert, which raiseMissedAlerts retries.
+    if (!alert?.id) throw Object.assign(new Error('alert not written'), { code: 'alert_not_written' });
     return true;
   } catch (err) {
     // raiseMissedAlerts tries again on the next run.

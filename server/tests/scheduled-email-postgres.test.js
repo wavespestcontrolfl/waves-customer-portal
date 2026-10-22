@@ -43,6 +43,7 @@ const { notifyAdmin } = require('../services/notification-service');
 const { sendDueScheduledEmails } = require('../services/email/scheduled-email-sender');
 const migration = require('../models/migrations/20261022130000_scheduled_emails');
 const restoredMigration = require('../models/migrations/20261022150000_scheduled_emails_restored_at');
+const restoreKeyMigration = require('../models/migrations/20261022160000_scheduled_emails_restore_key');
 
 jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('scheduled emails on PostgreSQL', () => {
@@ -60,6 +61,7 @@ jest.setTimeout(30000);
   const queue = (extra = {}) => call('POST', '/schedule', {
     to: 'fixture@example.invalid', subject: 'Fixture', body: 'Hi<br>there', draftText: 'Hi\nthere', sendAt: etIn(60), clientKey: randomUUID(), ...extra,
   });
+  const cancel = (id, restoreKey = 'fixture-restore-key') => call('POST', `/scheduled/${id}/cancel`, { restoreKey });
   const makeDue = (id, extra = {}) => database('scheduled_emails').where({ id }).update({ send_at: database.raw("now() - interval '1 minute'"), ...extra });
   const row = (id) => database('scheduled_emails').where({ id }).first();
 
@@ -68,6 +70,7 @@ jest.setTimeout(30000);
     await database.raw('CREATE SCHEMA ??', [schema]);
     await migration.up(database);
     await restoredMigration.up(database);
+    await restoreKeyMigration.up(database);
     // Minimal stand-ins for the tables the sender reads beside its own.
     await database.schema.createTable('notifications', (t) => { t.increments('id'); t.string('recipient_type'); t.jsonb('metadata'); });
     await database.schema.createTable('emails', (t) => { t.uuid('id').primary(); t.string('message_id'); });
@@ -134,18 +137,18 @@ jest.setTimeout(30000);
 
   test('Cancel send returns the draft, stops the send, and repeats safely; a sent email cannot be cancelled', async () => {
     const { body } = await queue();
-    const cancelled = await call('POST', `/scheduled/${body.scheduled.id}/cancel`);
+    const cancelled = await cancel(body.scheduled.id);
     expect(cancelled.body.draft).toMatchObject({ to: 'fixture@example.invalid', subject: 'Fixture', draftText: 'Hi\nthere', status: 'cancelled' });
     await makeDue(body.scheduled.id, { status: 'cancelled' });
     await sendDueScheduledEmails();
     expect(gmail.sendMessage).not.toHaveBeenCalled();
     expect((await call('GET', '/scheduled')).body.emails).toEqual([expect.objectContaining({ id: body.scheduled.id, status: 'cancelled' })]);
-    const repeated = await call('POST', `/scheduled/${body.scheduled.id}/cancel`);
+    const repeated = await cancel(body.scheduled.id);
     expect(repeated).toMatchObject({ status: 200, body: { draft: { draftText: 'Hi\nthere' } } });
 
     const sent = await queue();
     await makeDue(sent.body.scheduled.id, { status: 'sent' });
-    expect((await call('POST', `/scheduled/${sent.body.scheduled.id}/cancel`)).status).toBe(409);
+    expect((await cancel(sent.body.scheduled.id)).status).toBe(409);
   });
 
   test('a possible Gmail acceptance is never retried and rings one alert', async () => {
@@ -172,7 +175,7 @@ jest.setTimeout(30000);
     expect(outcomes).toEqual(['retry', 'retry', 'failed']);
     expect(await row(body.scheduled.id)).toMatchObject({ status: 'failed', attempts: 3 });
     expect(notifyAdmin).toHaveBeenCalledTimes(1);
-    expect((await call('POST', `/scheduled/${body.scheduled.id}/cancel`)).body.draft).toMatchObject({ draftText: 'Hi\nthere' });
+    expect((await cancel(body.scheduled.id)).body.draft).toMatchObject({ draftText: 'Hi\nthere' });
   });
 
   test('each run tries each due email once; a refusal does not hold up the others', async () => {
@@ -199,15 +202,37 @@ jest.setTimeout(30000);
     expect(await row(body.scheduled.id)).toMatchObject({ status: 'outcome_unknown' });
   });
 
+  test('only the tab that cancelled gets the text back; its own repeat still works', async () => {
+    const { body } = await queue();
+    const [a, b] = await Promise.all([cancel(body.scheduled.id, 'tab-a-fixture-key'), cancel(body.scheduled.id, 'tab-b-fixture-key')]);
+    const statuses = [a.status, b.status].sort();
+    expect(statuses).toEqual([200, 409]);
+    const winner = a.status === 200 ? 'tab-a-fixture-key' : 'tab-b-fixture-key';
+    const loser = winner === 'tab-a-fixture-key' ? 'tab-b-fixture-key' : 'tab-a-fixture-key';
+    expect((await cancel(body.scheduled.id, winner)).body.draft).toMatchObject({ draftText: 'Hi\nthere' });
+    expect(await cancel(body.scheduled.id, loser)).toMatchObject({ status: 409, body: { error: 'This email is already open as a draft in another tab.' } });
+    expect((await call('POST', `/scheduled/${body.scheduled.id}/cancel`, {})).status).toBe(400);
+  });
+
+  test('an alert that notifyAdmin did not write (null) counts as missed', async () => {
+    const { body } = await queue();
+    await makeDue(body.scheduled.id);
+    gmail.sendMessage.mockRejectedValue(Object.assign(new Error('timeout'), { providerOutcome: { outcomeUnknown: true } }));
+    notifyAdmin.mockResolvedValueOnce(null).mockResolvedValueOnce(null);
+    await expect(sendDueScheduledEmails()).rejects.toMatchObject({ summary: { missedAlerts: 1 } });
+    expect((await sendDueScheduledEmails()).missedAlerts).toBe(0);
+    expect(await database('notifications')).toHaveLength(1);
+  });
+
   test('a cancelled email marked restored leaves the list, so its text cannot come back twice', async () => {
     const { body } = await queue();
-    await call('POST', `/scheduled/${body.scheduled.id}/cancel`);
+    await cancel(body.scheduled.id);
     expect((await call('GET', '/scheduled')).body.emails).toEqual([expect.objectContaining({ id: body.scheduled.id, status: 'cancelled' })]);
     expect((await call('POST', `/scheduled/${body.scheduled.id}/restored`)).status).toBe(200);
     expect((await call('POST', `/scheduled/${body.scheduled.id}/restored`)).status).toBe(200);
     expect((await call('GET', '/scheduled')).body.emails).toEqual([]);
     expect(await row(body.scheduled.id)).toMatchObject({ status: 'cancelled' });
-    expect(await call('POST', `/scheduled/${body.scheduled.id}/cancel`)).toMatchObject({ status: 409, body: { error: 'This email is already back in a draft.' } });
+    expect(await cancel(body.scheduled.id)).toMatchObject({ status: 409, body: { error: 'This email is already back in a draft.' } });
   });
 
   test('the capped history keeps the newest cancel, whatever its send time', async () => {
@@ -218,7 +243,7 @@ jest.setTimeout(30000);
     }));
     await database('scheduled_emails').insert(far);
     const { body } = await queue();
-    await call('POST', `/scheduled/${body.scheduled.id}/cancel`);
+    await cancel(body.scheduled.id);
     const listed = (await call('GET', '/scheduled')).body.emails;
     expect(listed.some((e) => e.id === body.scheduled.id && e.status === 'cancelled')).toBe(true);
   });
