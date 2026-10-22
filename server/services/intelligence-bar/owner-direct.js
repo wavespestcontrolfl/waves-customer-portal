@@ -35,7 +35,7 @@
  * email. reschedule_appointment and assign_technician post tech-facing
  * notices only.
  */
-const { gateEnvValue } = require('../../config/feature-gates');
+const { gateEnvValue, ibOwnerDirectTaintAllReadsLive } = require('../../config/feature-gates');
 const { changesAddress } = require('./address-tools');
 const { ibFullAccess } = require('./ib-access');
 const { executionOutcome } = require('./outcomes');
@@ -151,6 +151,9 @@ function directEditAllowed(toolName, input = {}, preview = null) {
     if (!updates || typeof updates !== 'object' || Array.isArray(updates)) return false;
     const keys = Object.keys(updates);
     if (!keys.length || !keys.every(key => DIRECT_CUSTOMER_FIELDS.has(key))) return false;
+    // customers.phone is the customer's portal login key: with the taint gate
+    // on, a phone change always shows its card (see ALL-READ TAINT below).
+    if (keys.includes('phone') && ibOwnerDirectTaintAllReadsLive()) return false;
     // `notes` replaces crm_notes: direct only over empty notes, read by the
     // proposal (preview.notes_replaced); without that read, the card.
     if (keys.includes('notes') && (!preview?.notes_replaced || preview.notes_replaced.before)) return false;
@@ -179,8 +182,43 @@ function isDataAnswer(result) {
     && Number.isInteger(result.status) && result.status >= 200 && result.status < 300 && result.data !== undefined;
 }
 
+// ALL-READ TAINT (GATE_IB_OWNER_DIRECT_TAINT_ALL_READS, security audit run 2).
+// The rule above covers read_admin_data only, but other read tools return text
+// a lower-trust sender wrote: an inbound text or email body, a caller's words
+// in a call transcript or call summary, a public review, a lead's own notes.
+// A prompt-injected message read through one of them could drive a cardless
+// write (a phone-only update_customer changes the portal login key). With the
+// gate on, every tool in this one list sets the same per-request flag.
+// Deliberately NOT listed: structured record lookups the owner-direct edit flow
+// starts from (query_customers, get_customer_detail, schedule views); they
+// return fields, not message bodies, and tainting them would end owner-direct.
+// A new read tool that returns sender-authored text is added here.
+const SENDER_TEXT_READ_TOOLS = new Set([
+  // SMS and calls (comms-tools.js)
+  'get_conversation_thread', 'get_unanswered_threads', 'search_messages', 'draft_sms_reply',
+  'get_call_log', 'get_open_commitments', 'get_csr_overview', 'list_call_partners', 'get_partner_call_history',
+  // Email (email-tools.js)
+  'search_emails', 'get_email_thread', 'get_inbox_summary', 'draft_email_reply', 'get_vendor_invoices',
+  // Call-transcript research quotes (call-research-tools.js)
+  'search_call_research',
+  // Lead notes and public review text (leads-tools.js, review-tools.js)
+  'query_leads', 'get_unresponded_reviews', 'search_reviews', 'draft_review_reply',
+  // Saved bar turns can hold a pasted message (history-tools.js)
+  'search_ib_history',
+]);
+
+// A refusal that carries only a message holds no sender text; any other answer
+// (rows, a list of matches, a draft) may, so it taints.
+function carriesSenderText(result) {
+  if (!result || typeof result !== 'object') return Boolean(result);
+  if (!result.error && !result.code) return true;
+  return Object.keys(result).some(key => !['error', 'code', 'note', 'status'].includes(key));
+}
+
 function noteUntrustedRead(taint, toolName, result) {
-  if (taint && toolName === GENERAL_READ_TOOL && isDataAnswer(result)) taint.untrustedRead = true;
+  if (!taint) return;
+  if (toolName === GENERAL_READ_TOOL && isDataAnswer(result)) taint.untrustedRead = true;
+  else if (SENDER_TEXT_READ_TOOLS.has(toolName) && ibOwnerDirectTaintAllReadsLive() && carriesSenderText(result)) taint.untrustedRead = true;
 }
 
 // Pure: does a saved message history hold a general read that returned data?
@@ -188,13 +226,18 @@ function noteUntrustedRead(taint, toolName, result) {
 // result) counts as returned, so a resume fails closed.
 function untrustedReadInHistory(messages) {
   const blocks = (Array.isArray(messages) ? messages : []).flatMap(message => (Array.isArray(message?.content) ? message.content : []));
-  const readIds = blocks.filter(block => block?.type === 'tool_use' && block.name === GENERAL_READ_TOOL).map(block => block.id);
-  if (!readIds.length) return false;
+  const allReads = ibOwnerDirectTaintAllReadsLive();
+  const readBlocks = blocks.filter(block => block?.type === 'tool_use'
+    && (block.name === GENERAL_READ_TOOL || (allReads && SENDER_TEXT_READ_TOOLS.has(block.name))));
+  if (!readBlocks.length) return false;
   const answers = new Map(blocks.filter(block => block?.type === 'tool_result').map(block => [block.tool_use_id, block]));
-  return readIds.some((id) => {
-    const answer = answers.get(id);
+  return readBlocks.some((read) => {
+    const answer = answers.get(read.id);
     if (!answer) return true;
-    try { return isDataAnswer(JSON.parse(answer.content)); } catch { return true; }
+    try {
+      const parsed = JSON.parse(answer.content);
+      return read.name === GENERAL_READ_TOOL ? isDataAnswer(parsed) : carriesSenderText(parsed);
+    } catch { return true; }
   });
 }
 
@@ -275,7 +318,8 @@ function directEditPossible(toolName, input = {}) {
     // An array's keys are indexes, never contact fields, so it falls out below.
     const updates = input?.updates;
     const keys = updates && typeof updates === 'object' ? Object.keys(updates) : [];
-    return keys.length > 0 && keys.every(key => DIRECT_CUSTOMER_FIELDS.has(key));
+    return keys.length > 0 && keys.every(key => DIRECT_CUSTOMER_FIELDS.has(key))
+      && !(keys.includes('phone') && ibOwnerDirectTaintAllReadsLive());
   }
   return true;
 }
@@ -427,4 +471,4 @@ You are talking to the owner. Do what they ask.
 - Never send the owner to another screen, never explain limitations, never apologize. If something truly cannot be done from here, say so in one sentence and offer the closest thing you can do.
 - Replies: 1–3 short lines. No preamble, no recap of the request, no "anything else?". Lists and numbers only when the owner asked for data.`;
 
-module.exports = { loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };
+module.exports = { SENDER_TEXT_READ_TOOLS, loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };

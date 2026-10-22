@@ -7,6 +7,7 @@
  *
  * Set these as environment variables on Railway:
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
+ *   GATE_IB_OWNER_DIRECT_TAINT_ALL_READS=true (Intelligence Bar owner-direct: every read tool that returns customer-, caller-, visitor- or email-sender-authored text marks the rest of the request as untrusted, so later writes show a confirm card; a phone change on update_customer always shows a card. Strict opt-in, read at call time; dark by default. Sends nothing to a customer.)
  *   GATE_SMS_ANY_LANGUAGE_TRIAL=true (test answers to customer texts in another language: the text is translated to English, the normal SMS drafter answers it with every English check, and the reply is translated back and double-checked (numbers, times, prices, links unchanged; a back-translation must say the same thing). Stored in sms_translation_trials for the owner to read; NOTHING is sent and the real reply path for these texts is unchanged. Strict opt-in via gateEnvValue, read at call time by server/services/sms-translation.js; dark by default. Sends nothing to a customer.)
  *   GATE_SMS_ANY_LANGUAGE_INBOX=true (inbox assist for a customer text in another language: when GATE_SMS_ANY_LANGUAGE_TRIAL has stored a test answer for the customer's latest text and nobody has answered it, the Communications composer shows the English translation of their text and the checked reply in their language beside its English, with a Use button that fills the message box. Staff press Send through the ordinary composer; nothing sends on its own and no reply path changes. Strict opt-in via gateEnvValue, read at call time by server/services/sms-translation.js inboxAssistFor(); dark by default; off = GET /admin/communications/agent-draft returns translation: null.)
  *   GATE_SMS_SHARED_PHONE_LINK=true (owner 2026-10-10, "link text": when two or more customer rows share the sender's phone, an inbound text attaches to ONE account instead of being filed as an unknown sender. Only when staff marked exactly one of them customers.sms_primary_for_shared_phone (admin PUT smsPrimaryForSharedPhone); no mark or two marks = left unlinked, no guessing (a guessed link would let one person on a shared phone reply for the other account). Strict opt-in via gateEnvValue, read at call time by server/routes/twilio-webhook.js findSingleCustomerByPhone(); SMS only (the voice webhook is unchanged); dark by default; off = a shared phone is not auto-linked, as before. Links a text to an account; sends nothing.)
@@ -5230,6 +5231,16 @@ function estimateSentClosesAssessmentLive() {
   return process.env.GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT === 'true';
 }
 
+// GATE_IB_OWNER_DIRECT_TAINT_ALL_READS read at CALL time — strict `=== 'true'`,
+// dark (security audit run 2). On, owner-direct mode (owner-direct.js) taints a
+// request after ANY read tool that returns customer-, caller-, visitor- or
+// email-sender-authored text, not only read_admin_data, and a phone change on
+// update_customer always keeps its card. Off = today's behavior. Kill switch:
+// unset it.
+function ibOwnerDirectTaintAllReadsLive() {
+  return process.env.GATE_IB_OWNER_DIRECT_TAINT_ALL_READS === 'true';
+}
+
 function pestInsiderProofLive() {
   return process.env.GATE_PEST_INSIDER_PROOF === 'true';
 }
@@ -7103,5 +7114,6 @@ function callLeadLazyStripeLive() {
 }
 // GATE_CALL_LEAD_LAZY_STRIPE reader, on its own line so gate PRs never conflict.
 module.exports.callLeadLazyStripeLive = callLeadLazyStripeLive;
+module.exports.ibOwnerDirectTaintAllReadsLive = ibOwnerDirectTaintAllReadsLive;
 // Retired gate names, for the admin gate list (services/gate-list.js), on its own line.
 module.exports.RETIRED_GATES = RETIRED;
