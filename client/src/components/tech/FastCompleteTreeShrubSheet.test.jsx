@@ -371,6 +371,23 @@ describe('compliance taps', () => {
     expect(body.structuredFindings.values.spray_mix_gallons).toBe('4.5');
   });
 
+  test('spray gallons are offered and sent only for a LIQUID application — a granular-only visit has no mix (Codex #6398 r11)', async () => {
+    const request = makeRequest();
+    await readyVisit(request);
+    fireEvent.click(tile('Heritage G'));
+    enterAmount('Heritage G', 6);
+    // Heritage G arrives as the month's soil drench — a liquid — so the box is offered.
+    fireEvent.change(screen.getByLabelText('Spray mix used (gallons, office only)'), { target: { value: '3' } });
+    // Switching the only product to granular removes the box AND the value from the body.
+    const how = within(editorFor('Heritage G')).getByRole('group', { name: 'How' });
+    fireEvent.click(within(how).getByRole('button', { name: 'Granular' }));
+    expect(screen.queryByLabelText('Spray mix used (gallons, office only)')).toBeNull();
+    const body = await completeBody(request);
+    expect(body.products).toHaveLength(1);
+    expect(body.products[0].applicationMethod).toBe('granular_broadcast');
+    expect(body.structuredFindings.values).not.toHaveProperty('spray_mix_gallons');
+  });
+
   test('IRAC / FRAC is sent as Yes when the app ran the rotation check, with no tap asked', async () => {
     const request = makeRequest();
     await readyVisit(request);

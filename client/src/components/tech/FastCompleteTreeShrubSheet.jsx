@@ -145,6 +145,11 @@ const METHOD_CHOICES = [
   { value: 'granular_broadcast', label: 'Granular' },
 ];
 const DEFAULT_METHOD = 'foliar_spray';
+// Finished spray mix exists only for a liquid application; a granule
+// (Heritage G, palm fertilizer) applies no mix, so the gallons fact is
+// offered and sent only while a liquid product is on the visit (Codex #6398).
+const LIQUID_METHODS = new Set(['foliar_spray', 'soil_drench']);
+const hasLiquidApplication = (rows) => rows.some((row) => row.active && LIQUID_METHODS.has(row.method));
 // The four customer-text flags the sheet posts while the Wrap-up is off.
 const CUSTOMER_TEXT_FLAGS = { sendCompletionSms: true, requestReview: true, includePayLink: true, reviewTiming: 'auto' };
 
@@ -473,10 +478,11 @@ function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tips
         ...(irac ? { irac_frac_logged: 'Yes' } : {}),
         // Optional internal costing fact (project-types.js spray_mix_gallons);
         // blank stays absent so the typed-findings validator never sees ''.
-        // Sent only while a product is still on the visit: the field hides
-        // when the last product is removed, and a hidden stale value must not
-        // record spray volume against an empty products array (Codex #6398).
-        ...(active.length && String(form.sprayGallons ?? '').trim() !== '' ? { spray_mix_gallons: String(form.sprayGallons).trim() } : {}),
+        // Sent only while a LIQUID product is still on the visit: the field
+        // hides when the last one is removed or switched to granular, and a
+        // hidden stale value must not record spray volume against products
+        // that applied no mix (Codex #6398).
+        ...(hasLiquidApplication(active) && String(form.sprayGallons ?? '').trim() !== '' ? { spray_mix_gallons: String(form.sprayGallons).trim() } : {}),
       },
     },
     completionPhotos: photos.map((photo, index) => ({
@@ -678,7 +684,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
           )}
           <PestCheckSection state={pestCheck} locked={locked} onRemoveBlocked={removeBlocked} />
           <ProductsSection ctx={ctx} products={products} neonicLines={neonicCap.lines} locked={locked} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
-          {rows.some((row) => row.active) && (
+          {hasLiquidApplication(rows) && (
             <SprayGallonsSection value={form.sprayGallons} locked={locked} onChange={(value) => setField('sprayGallons', value)} />
           )}
           {(insect || iracRows) && (

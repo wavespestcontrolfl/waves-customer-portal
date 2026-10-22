@@ -25,7 +25,11 @@ describe('satellite-vision-model-bakeoff numericRead', () => {
       reads: [{ model: 'm', ok: true, ms: 10, values: { hedgeLinearFt: numericRead(null), bedAreaSf: numericRead(1000), ornamentalTrees: null, palms: null } }],
     }];
     const out = score(cases, ['m']);
-    expect(out.m.fields.hedgeLinearFt).toMatchObject({ n: 0, pctN: 0, pctErr: 0 });
-    expect(out.m.fields.bedAreaSf).toMatchObject({ n: 1, pctN: 1, absErr: 100 });
+    // ...but it is COUNTED as unavailable against the known value, so selective
+    // omission cannot buy a better error score (Codex #6398 r11).
+    expect(out.m.fields.hedgeLinearFt).toMatchObject({ known: 1, unavailable: 1, n: 0, pctN: 0, pctErr: 0 });
+    expect(out.m.fields.bedAreaSf).toMatchObject({ known: 1, unavailable: 0, n: 1, pctN: 1, absErr: 100 });
+    // No known value: neither scored nor counted.
+    expect(out.m.fields.palms).toMatchObject({ known: 0, unavailable: 0, n: 0 });
   });
 });

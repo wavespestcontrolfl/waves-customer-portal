@@ -212,7 +212,12 @@ async function mapLimit(items, limit, fn) {
 // trees) has no percentage error, so it must not inflate the MAPE
 // denominator and hide false positives (Codex #6398).
 function scoreField(stat, truth, got) {
-  if (truth === null || got === null) return;
+  if (truth === null) return;
+  // Known value, no model read: counted so a model that answers only the
+  // easy properties cannot out-score one that always answers (Codex #6398
+  // r11). `known` is the denominator the unavailable rate is read against.
+  stat.known++;
+  if (got === null) { stat.unavailable++; return; }
   stat.n++; stat.absErr += Math.abs(got - truth); stat.bias += got - truth;
   if (truth > 0) {
     const pct = Math.abs(got - truth) / truth;
@@ -241,7 +246,7 @@ function score(cases, models) {
   const out = {};
   for (const model of models) {
     const m = { reads: 0, misses: 0, msTotal: 0, fields: {}, shrubDensityHits: 0, shrubDensityKnown: 0 };
-    for (const f of FIELDS) m.fields[f] = { n: 0, absErr: 0, pctN: 0, pctErr: 0, bias: 0, within25: 0 };
+    for (const f of FIELDS) m.fields[f] = { known: 0, unavailable: 0, n: 0, absErr: 0, pctN: 0, pctErr: 0, bias: 0, within25: 0 };
     for (const c of cases) {
       for (const r of c.reads) if (r.model === model) scoreRead(m, c, r);
     }
@@ -254,19 +259,20 @@ function printReport(cases, models, scores, args) {
   const fmt = (x, d = 0) => (x === null || x === undefined || Number.isNaN(x) ? '—' : Number(x).toFixed(d));
   console.log(`# Satellite vision bake-off — ${cases.length} properties × ${models.join(' vs ')}${args.repeat > 1 ? ` × ${args.repeat} repeats` : ''}`);
   console.log('');
-  console.log('Same five tiles, same scale context, same production prompt per model. Error is against the fixture\'s `known` values; a field with no known value is skipped.');
+  console.log('Same five tiles, same scale context, same production prompt per model. Error is against the fixture\'s `known` values; a field with no known value is skipped. `unavailable` = known value but no model read (an optional field omitted or dropped as invalid) — a model that answers only the easy properties shows up there, not as a lower MAE.');
   console.log('');
   for (const model of models) {
     const m = scores[model];
     console.log(`## ${model} — ${m.reads} reads, ${m.misses} misses, avg ${fmt(m.reads ? m.msTotal / m.reads / 1000 : null, 1)} s/read`);
-    console.log('field            n   MAE      MAPE (n>0)   bias     within ±25%');
+    console.log('field            n   MAE      MAPE (n>0)   bias     within ±25%   unavailable');
     for (const f of FIELDS) {
       const s = m.fields[f];
-      if (!s.n) { console.log(`${f.padEnd(15)} ${String(0).padStart(3)}   —`); continue; }
+      const unavailable = `${s.unavailable}/${s.known}`;
+      if (!s.n) { console.log(`${f.padEnd(15)} ${String(0).padStart(3)}   —${' '.repeat(45)}${unavailable}`); continue; }
       // MAPE over positive-truth reads only; zero-truth reads still count in
       // MAE, bias and the ±25% column (a false positive on a zero shows there).
       const mape = s.pctN ? `${fmt((s.pctErr / s.pctN) * 100, 0)}% (${s.pctN})` : '— (0)';
-      console.log(`${f.padEnd(15)} ${String(s.n).padStart(3)}   ${fmt(s.absErr / s.n, 1).padStart(7)}  ${mape.padStart(11)}  ${fmt(s.bias / s.n, 1).padStart(7)}   ${s.within25}/${s.n}`);
+      console.log(`${f.padEnd(15)} ${String(s.n).padStart(3)}   ${fmt(s.absErr / s.n, 1).padStart(7)}  ${mape.padStart(11)}  ${fmt(s.bias / s.n, 1).padStart(7)}   ${`${s.within25}/${s.n}`.padEnd(13)} ${unavailable}`);
     }
     if (m.shrubDensityKnown) console.log(`shrubDensity match: ${m.shrubDensityHits}/${m.shrubDensityKnown}`);
     console.log('');
