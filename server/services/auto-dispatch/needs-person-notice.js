@@ -242,20 +242,27 @@ async function farListedVisitIds(conn = require('../../models/db')) {
 // The standing Activity row of the run's far conflicts (D1): one ops digest,
 // audience fyi (Activity only, never the bell; not a ring-allowance lane),
 // refreshed in place each run and retired on a run with none, or with the
-// lane off (fall-off). The list is a snapshot, so it changes only after a
-// COMPLETE conflict scan (`scanComplete`: the run did not fail, conflict
-// reads were on and none failed); otherwise it stays as it is, the way a
-// notice closes only on proof. In-app only: a missing Activity feed sends no
-// email (splitFar rings every conflict in that case). Never throws.
+// lane off once every conflict on it has its notice (fall-off). The list is
+// a snapshot, so it changes only after a COMPLETE conflict scan
+// (`scanComplete`: the run did not fail, conflict reads were on and none
+// failed); otherwise it stays as it is, the way a notice closes only on
+// proof. In-app only: a missing Activity feed sends no email (splitFar rings
+// every conflict in that case). Never throws.
 async function reportFarConflicts(farItems, { enabled, scanComplete }) {
   try {
-    if (enabled && !scanComplete) {
-      logger.info(`[auto-dispatch] far double-booking list left as it is: this run's conflict scan was incomplete (${farItems.length} far seen)`);
+    if (!scanComplete) {
+      logger.info(`[auto-dispatch] far double-booking list left as it is: this run's conflict scan was incomplete (${farItems.length} to list)`);
       return;
     }
-    if (!enabled || !farItems.length) {
+    if (!farItems.length) {
       await require('../ops-digest-fall-off').retireIfClean(FAR_DIGEST_KEY, { lockKey: `ops-digest:${FAR_DIGEST_KEY}` });
       return;
+    }
+    // Gate off (or no Activity feed): never start a list; keep one that still
+    // stands, with the conflicts whose notice is not written yet.
+    if (!enabled) {
+      const listed = await module.exports.farListedVisitIds();
+      if (!Array.isArray(listed) || !listed.length) return;
     }
     const audit = require('./audit');
     const { shortDateET } = require('../admin-alert-names');
@@ -302,8 +309,10 @@ async function raiseNotices(bucket, { nowDate = new Date(), clearedIds = new Set
   // notice is persisted (allowance spent, a failed write): the list keeps it
   // tracked, and re-read by the next run (index.js conflictsToSettle), even
   // when the scan no longer loads its visit.
-  const waiting = farOn ? nearItems.filter((item) => !persisted.has(item.key)) : [];
-  await reportFarConflicts([...farItems, ...waiting], { enabled: farOn, scanComplete });
+  // Gate off, a list still standing keeps the same ones until their notice
+  // stands too, then retires (reportFarConflicts never starts a list then).
+  const waiting = nearItems.filter((item) => !persisted.has(item.key));
+  await reportFarConflicts(farOn ? [...farItems, ...waiting] : waiting, { enabled: farOn, scanComplete });
   return rang;
 }
 

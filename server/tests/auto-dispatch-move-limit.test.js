@@ -391,6 +391,41 @@ describe('needs-a-person notice: far double bookings are listed quietly until 14
     expect(await notice.farListedVisitIds(conn(null, true))).toBeNull();
   });
 
+  test('gate off with a list standing: a conflict whose notice could not be written stays listed; then the list retires', async () => {
+    delete process.env.GATE_AUTO_DISPATCH_FAR_CONFLICT_QUIET;
+    const listSpy = jest.spyOn(notice, 'farListedVisitIds').mockResolvedValue(['held']);
+    try {
+      audit.ringsLeft.mockResolvedValue(0);
+      const bucket = new Map();
+      notice.collect(bucket, visit('held', '2026-11-20'), 'no_slot', { kind: 'overlap' });
+      expect(await notice.raiseNotices(bucket, { nowDate: NOW, scanComplete: true })).toBe(0);
+      expect(deliverOpsDigest.mock.calls[0][0].itemKeys).toEqual(['held:2026-11-20']);
+      expect(retireIfClean).not.toHaveBeenCalled();
+      // The next run's notice is written: the list retires.
+      deliverOpsDigest.mockClear();
+      audit.ringsLeft.mockResolvedValue(10);
+      expect(await notice.raiseNotices(bucket, { nowDate: NOW, scanComplete: true })).toBe(1);
+      expect(deliverOpsDigest).not.toHaveBeenCalled();
+      expect(retireIfClean).toHaveBeenCalledTimes(1);
+    } finally {
+      listSpy.mockRestore();
+    }
+  });
+
+  test('gate off with no list standing: a notice that could not be written starts no list', async () => {
+    delete process.env.GATE_AUTO_DISPATCH_FAR_CONFLICT_QUIET;
+    const listSpy = jest.spyOn(notice, 'farListedVisitIds').mockResolvedValue([]);
+    try {
+      audit.ringsLeft.mockResolvedValue(0);
+      const bucket = new Map();
+      notice.collect(bucket, visit('held', '2026-11-20'), 'no_slot', { kind: 'overlap' });
+      await notice.raiseNotices(bucket, { nowDate: NOW, scanComplete: true });
+      expect(deliverOpsDigest).not.toHaveBeenCalled();
+    } finally {
+      listSpy.mockRestore();
+    }
+  });
+
   test('a failed list is logged and the near notices still ring', async () => {
     deliverOpsDigest.mockRejectedValueOnce(new Error('down'));
     const bucket = new Map();
