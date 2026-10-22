@@ -1380,6 +1380,21 @@ describe('topUpRecurringSeriesLocked — a taken hour hands the visit off withou
     expect(findConflictingVisits.mock.calls[1][0]).toMatchObject({ excludeCustomerId: 5, windowStart: '09:00', windowEnd: '10:00' });
   });
 
+  test('gate on: the hand-off probe carries the technician the insert uses, not the parent row\'s', async () => {
+    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+    findConflictingVisits.mockReset()
+      .mockResolvedValueOnce([{ id: 'occupied-1', customer_id: 77 }])
+      .mockResolvedValueOnce([{ id: 'occupied-1', customer_id: 77 }])
+      .mockResolvedValue([]);
+    // The parent's technician cannot take the visit (no assignable row), so
+    // the insert goes in unassigned — and the probe asks for no technician.
+    const scenario = topupScenario({ ...fixtureArgs, parentOverrides: { ...fixtureArgs.parentOverrides, technician_id: 'tech-gone' } });
+    await topUpRecurringSeriesLocked(scenario.conn, 10, { horizonDays: 14 });
+    expect(scenario.inserted[0].technician_id).toBeNull();
+    expect(findConflictingVisits.mock.calls[1][0]).toMatchObject({ excludeCustomerId: 5 });
+    expect(findConflictingVisits.mock.calls[1][0].technicianId).toBeUndefined();
+  });
+
   test("gate on, only the customer's own stop in the hour: inserted with its time, as before", async () => {
     process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
     findConflictingVisits.mockReset()

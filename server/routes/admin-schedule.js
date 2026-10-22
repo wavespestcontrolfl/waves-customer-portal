@@ -20533,7 +20533,13 @@ async function walkExtensionCandidates(ctx) {
         // visit goes in on the cadence date WITHOUT a time and auto-dispatch
         // places it (scheduling/plan-taken-hour.js), instead of on top of it.
         // Gate off, too near, or only the customer's own stop: as before.
-        if (await planTakenHour.takenHourHandoff(conn, clashProbeTemplate, { date: candidate })) {
+        // The hand-off probe carries the technician the insert will use on
+        // this date (the template tech, or none when that tech cannot take
+        // it: assignableRecurringTemplateTechnicianId), not the parent row's.
+        const handoffRow = planTakenHour.handoffEnabled()
+          ? { ...clashProbeTemplate, technician_id: await assignableRecurringTemplateTechnicianId(conn, parent, candidate) }
+          : null;
+        if (handoffRow && await planTakenHour.takenHourHandoff(conn, handoffRow, { date: candidate })) {
           handOff = true;
           logger.info(`[recurring-topup] parent=${parentId} candidate ${candidate}: the plan's hour is taken — inserting without a time for auto-dispatch to place`);
         } else {
