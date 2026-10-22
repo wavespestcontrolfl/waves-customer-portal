@@ -634,6 +634,29 @@ describe('pre-treat final exterior fields: customer copy screen (GATE_PRETREAT_S
     expect(projects.update).not.toHaveBeenCalled();
   });
 
+  test('PUT moving the project date past a stored final exterior date 422s (legacy treatment_date dropped first)', async () => {
+    const projects = chain({
+      first: jest.fn().mockResolvedValue(wdoProject({
+        project_type: 'pre_treatment_termite_certificate',
+        wdo_signature: null,
+        project_date: '2026-06-01',
+        findings: { treatment_date: '2026-06-01', final_exterior_date: '2026-06-05' },
+      })),
+    });
+    mockTables({ projects });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project_date: '2026-06-08' }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(422);
+      expect(body.code).toBe('final_exterior_date_invalid');
+    });
+    expect(projects.update).not.toHaveBeenCalled();
+  });
+
   test('PUT accepts plain product, ingredient and applicator values', async () => {
     const projects = chain({ first: jest.fn().mockResolvedValue(certificate()) });
     mockTables({ projects });

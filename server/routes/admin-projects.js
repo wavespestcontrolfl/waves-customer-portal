@@ -2271,10 +2271,6 @@ router.put('/:id', async (req, res, next) => {
     const allowed = ['title', 'project_date', 'findings', 'recommendations', 'followup_date', 'followup_findings'];
     for (const f of allowed) if (req.body[f] !== undefined) updates[f] = req.body[f];
     if (updates.project_date !== undefined) updates.project_date = normalizeDateOnly(updates.project_date);
-    const updateFinalExteriorRejection = updates.findings !== undefined
-      ? finalExteriorRejection(project.project_type, updates.findings, updates.project_date ?? project.project_date)
-      : null;
-    if (updateFinalExteriorRejection) return res.status(422).json(updateFinalExteriorRejection);
     // Mirror of the create-path clamp: a dated legal filing can't carry a
     // future inspection/treatment date (one already shipped in prod).
     if (updates.project_date && LEGAL_DOC_DATE_TYPES.has(project.project_type) && updates.project_date > etDateString()) {
@@ -2299,6 +2295,16 @@ router.put('/:id', async (req, res, next) => {
     if (updates.recommendations != null) updates.recommendations = redactProjectFreeTextForWrite(updates.recommendations, project.project_type, writeFeeValues);
     if (updates.title != null) updates.title = redactProjectTitleForWrite(updates.title, project.project_type, writeFeeValues);
     dropStaleCertTreatmentDate(project, updates);
+    // Judged on what this save leaves stored (after the legacy-date drop),
+    // whenever the findings or the project date change.
+    const updateFinalExteriorRejection = (updates.findings !== undefined || updates.project_date !== undefined)
+      ? finalExteriorRejection(
+        project.project_type,
+        updates.findings !== undefined ? updates.findings : project.findings,
+        updates.project_date !== undefined ? updates.project_date : project.project_date,
+      )
+      : null;
+    if (updateFinalExteriorRejection) return res.status(422).json(updateFinalExteriorRejection);
     if (Object.keys(updates).length === 0) return res.json({ project });
 
     // Serialized with in-flight deliveries the same way photo mutations are:
