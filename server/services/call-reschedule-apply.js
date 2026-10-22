@@ -82,7 +82,8 @@ const { lockTriageCall } = require('../utils/triage-locks');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 const { confirmedStartOnTheHour, etWallClockOfConfirmedStart, statesNewAddress } = require('./call-triage-flags');
-const { groundRescheduleAgreement } = require('./call-reschedule-agreement');
+const { groundRescheduleAgreement, groundMakeupAgreement } = require('./call-reschedule-agreement');
+const { lineOfV2Category, lineOfServiceName, linesOfServiceName } = require('./call-estimate-service-match');
 const { addressKey } = require('./customer-properties');
 const { phoneMatchDigits } = require('../utils/phone');
 const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
@@ -200,6 +201,29 @@ function authoritativeServiceName(row) {
   return row.catalog_service_key === PLACEHOLDER_SERVICE_KEY ? null : row.catalog_service_name;
 }
 
+// The property a call is about: the stated new address when the caller gave
+// one, else the customer's only known address. `targetKey` is null when the
+// call needs review (several known addresses with none stated, or a stated
+// address that is not one of the customer's).
+function callPropertyScope(v2, customer, properties) {
+  const saved = properties.filter((p) => p.active !== false);
+  const primaryKey = customer.address_line1 ? addressKey(customer) : null;
+  const knownKeys = new Set([primaryKey, ...saved.map((p) => addressKey(p))].filter(Boolean));
+  const stated = v2.property?.service_address || {};
+  const key = statesNewAddress(v2)
+    ? (stated.street_line_1 ? addressKey({ address_line1: stated.street_line_1, address_line2: stated.street_line_2,
+      city: stated.city, zip: stated.postal_code }) : null)
+    : (knownKeys.size === 1 ? [...knownKeys][0] : null);
+  return { saved, primaryKey, targetKey: key && knownKeys.has(key) ? key : null };
+}
+
+function rowAtProperty(row, { saved, primaryKey, targetKey }) {
+  if (row.property_id) return saved.some((p) => String(p.id) === String(row.property_id) && addressKey(p) === targetKey);
+  const key = row.service_address_line1 ? addressKey({ address_line1: row.service_address_line1,
+    address_line2: row.service_address_line2, city: row.service_address_city, zip: row.service_address_zip }) : primaryKey;
+  return key === targetKey;
+}
+
 /**
  * Pure decision. `candidates` are the customer's live scheduled_services
  * rows (already filtered to LIVE_STATUSES by the loader); `now` is the
@@ -264,21 +288,10 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
     nearby = candidates.filter((row) => String(row.id) === String(humanOverride.visitId)
       && String(row.customer_id) === String(customer.id));
   } else {
-    const saved = properties.filter((p) => p.active !== false);
-    const primaryKey = customer.address_line1 ? addressKey(customer) : null;
-    const knownKeys = new Set([primaryKey, ...saved.map((p) => addressKey(p))].filter(Boolean));
-    const stated = v2.property?.service_address || {};
-    targetKey = statesNewAddress(v2)
-      ? (stated.street_line_1 ? addressKey({ address_line1: stated.street_line_1, address_line2: stated.street_line_2,
-        city: stated.city, zip: stated.postal_code }) : null)
-      : (knownKeys.size === 1 ? [...knownKeys][0] : null);
-    if (!targetKey || !knownKeys.has(targetKey)) return skip('property_needs_review');
-    const atProperty = candidates.filter((row) => {
-      if (row.property_id) return saved.some((p) => String(p.id) === String(row.property_id) && addressKey(p) === targetKey);
-      const key = row.service_address_line1 ? addressKey({ address_line1: row.service_address_line1,
-        address_line2: row.service_address_line2, city: row.service_address_city, zip: row.service_address_zip }) : primaryKey;
-      return key === targetKey;
-    });
+    const scope = callPropertyScope(v2, customer, properties);
+    targetKey = scope.targetKey;
+    if (!targetKey) return skip('property_needs_review');
+    const atProperty = candidates.filter((row) => rowAtProperty(row, scope));
     if (!atProperty.length) return skip('no_visit_on_books');
     const serviceRequest = v2.service_request || {};
     // A call V2 files under more than one service ("move my pest and lawn
@@ -841,9 +854,332 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
   return { outcome: 'applied', visitId: visit.id, newDate: plan.newDate, newWindow: plan.newWindow, cardsResolved };
 }
 
+// ---------------------------------------------------------------------------
+// MAKE-UP MOVE (owner 2026-10-22, dark behind GATE_CALL_MAKEUP_MOVE).
+//
+// Incident: a quarterly pest customer's recurring visit was MISSED (status
+// still 'confirmed', dated in the past, an unresolved customer_noshow row from
+// the 6 PM missed-appointment check). She called, the agent said "I need to
+// come by", agreed Tuesday ~5 PM and she accepted. The pipeline INSERTED a new
+// placeholder visit beside the missed one: planRescheduleFromCall never saw it
+// (status confirmed, not reschedule_requested; candidates are upcoming-only;
+// the booking branch had already created a visit). The owner's ruling: the
+// missed appointment is rescheduled and moved up, never booked as a new
+// general service.
+//
+// This is a SEPARATE planner from planRescheduleFromCall (that one is
+// hardened and unchanged). It moves a visit only when ALL of this holds, and
+// otherwise returns skip (nothing changes: today's booking behavior) or
+// needs_review (a missed-visit candidate exists but cannot be moved safely, so
+// the processor HOLDS the booking instead of inserting a new visit):
+//   - the same call checks as the reschedule planner (valid V2, not spam or
+//     voicemail, scheduling_window confidence, matched caller on a phone on
+//     file, future on-the-hour confirmed_start_at, trusted speaker labels);
+//   - scheduling.status 'confirmed', service_intent follow_up_existing_service
+//     or call_nature existing_customer_scheduling, no secondary categories;
+//   - groundMakeupAgreement: the agent's own turn states the slot and the
+//     caller's turn accepts it (agent_committed_booking may be null);
+//   - exactly ONE recurring, ungrouped, non-dispatch-owned visit of the
+//     customer at the identified property, pending/confirmed, dated within the
+//     last MAKEUP_LOOKBACK_DAYS and before today, whose OWN missed slot has an
+//     open customer_noshow row (the evidence), of the same service line as the
+//     call (pest, lawn, ...) and with a real catalog identity.
+// ---------------------------------------------------------------------------
+const MAKEUP_ACTIVITY_ACTION = 'call_makeup_move_applied';
+const MAKEUP_REASON_CODE = 'ai_call_makeup'; // reschedule_log.reason_code varchar(30)
+const MAKEUP_LOOKBACK_DAYS = 30;
+const MAKEUP_INTENTS = ['follow_up_existing_service'];
+const MAKEUP_NATURES = ['existing_customer_scheduling'];
+const GENERIC_SERVICE_NAME_RE = /^(?:waves pest control appointment service|waves appointment)$/i;
+
+function needsReview(reason, extra = {}) {
+  return { action: 'needs_review', reason, ...extra };
+}
+
+function windowText(row) {
+  return row.window_start ? `${row.window_start}-${row.window_end}` : null;
+}
+
+// The open customer_noshow row for THIS visit's current slot. not-closed-out.js
+// isSameNoShowOccurrence needs status no_show; a missed visit that was never
+// marked stays pending/confirmed, so the same date + window key is matched on
+// the live row. original_date is required: the nightly check always writes it.
+function openNoShowForSlot(visit, logs) {
+  return (logs || []).find((log) => !log.resolved_at
+    && String(log.scheduled_service_id) === String(visit.id)
+    && log.original_date && dateOnly(log.original_date) === dateOnly(visit.scheduled_date)
+    && (!log.original_window || log.original_window === windowText(visit))) || null;
+}
+
+function planMakeupMoveFromCall({ v2, call, customer, properties = [], candidates = [], noshowLogs = [], now = new Date(), transcriptLabelsTrusted = false } = {}) {
+  if (!v2 || typeof v2 !== 'object') return skip('no_v2_extraction');
+  if (v2.meta?.is_spam === true) return skip('spam');
+  if (v2.meta?.is_voicemail === true) return skip('voicemail');
+  const scheduling = v2.scheduling || {};
+  if (scheduling.status !== 'confirmed') return skip('not_a_confirmed_slot');
+  const serviceRequest = v2.service_request || {};
+  if (!MAKEUP_INTENTS.includes(serviceRequest.service_intent) && !MAKEUP_NATURES.includes(v2.call_nature)) return skip('not_a_follow_up_call');
+  if (serviceRequest.secondary_categories?.length) return skip('service_needs_review');
+  if (!scheduling.confirmed_start_at) return skip('no_confirmed_start');
+  const confidence = v2.confidence?.scheduling_window;
+  if (typeof confidence !== 'number' || confidence < MIN_SCHEDULING_CONFIDENCE) return skip('low_scheduling_confidence');
+  if (v2.caller?.decision_maker_present === false) return skip('caller_not_decision_maker');
+  if (v2.consent?.do_not_contact_request === true) return skip('do_not_contact_requested');
+
+  if (!call?.customer_id || !customer?.id || String(call.customer_id) !== String(customer.id)) return skip('customer_not_matched');
+  const phoneKeys = phoneMatchDigits(counterpartPhone(call));
+  const onFileKeys = new Set(KNOWN_CALLER_PHONE_COLS.flatMap((col) => phoneMatchDigits(customer[col])));
+  if (!phoneKeys.some((key) => onFileKeys.has(key))) return skip('caller_phone_not_on_file');
+
+  const target = new Date(scheduling.confirmed_start_at);
+  if (Number.isNaN(target.getTime())) return skip('unparseable_confirmed_start');
+  if (target.getTime() <= now.getTime()) return skip('confirmed_start_in_past');
+  const parts = etParts(target);
+  if (!confirmedStartOnTheHour(scheduling.confirmed_start_at) || target.getUTCMilliseconds() !== 0) return skip('off_grid_start_time');
+  if (!transcriptLabelsTrusted) return skip('untrusted_speaker_labels');
+  const newDate = etDateString(target);
+  const newStart = `${pad2(parts.hour)}:${pad2(parts.minute)}`;
+  if (etWallClockOfConfirmedStart(scheduling.confirmed_start_at) !== `${newDate}T${newStart}`) return skip('inconsistent_start_offset');
+
+  // Everything above fails closed to today's behavior. The grounding is next
+  // because it is the costliest check; a candidate is not looked up for a call
+  // whose agreement cannot be grounded.
+  const agreement = groundMakeupAgreement({ v2, transcript: call.transcription, callStartedAt: callStartedAt(call) || call.created_at });
+  if (!agreement.ok) return skip('makeup_not_agreed', { agreementReason: agreement.reason });
+
+  const scope = callPropertyScope(v2, customer, properties);
+  if (!scope.targetKey) return skip('property_needs_review');
+  const today = etDateString(now);
+  const earliest = etDateString(addETDays(now, -MAKEUP_LOOKBACK_DAYS));
+  const missed = candidates.filter((row) => String(row.customer_id) === String(customer.id)
+    && MOVABLE_STATUSES.includes(row.status)
+    && !row.parent_service_id && !row.visit_id && row.is_recurring === true
+    && !DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(row.source_action)
+    && !OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(row.source_action)
+    && dateOnly(row.scheduled_date) >= earliest && dateOnly(row.scheduled_date) < today
+    && rowAtProperty(row, scope)
+    && openNoShowForSlot(row, noshowLogs));
+  if (!missed.length) return skip('no_missed_visit');
+
+  // Service identity. A missed row with no real catalog identity (its catalog
+  // row gone, or the catch-all placeholder) is never moved; beside a row that
+  // has one it could be the visit the caller means, so that is a review.
+  const known = missed.filter((row) => authoritativeServiceName(row));
+  if (!known.length) return skip('placeholder_candidate');
+  if (known.length !== missed.length) return needsReview('service_needs_review', { candidateIds: missed.map((r) => r.id) });
+  const callLine = lineOfV2Category(serviceRequest.primary_service_category);
+  if (!callLine) return skip('service_line_unknown');
+  const named = typeof serviceRequest.specific_service_name === 'string' && !GENERIC_SERVICE_NAME_RE.test(serviceRequest.specific_service_name.trim())
+    ? linesOfServiceName(serviceRequest.specific_service_name) : [];
+  if (named.length && !named.includes(callLine)) return skip('service_line_differs');
+  const sameLine = known.filter((row) => lineOfServiceName(authoritativeServiceName(row)) === callLine);
+  if (!sameLine.length) return skip('service_line_differs');
+  if (sameLine.length > 1) return needsReview('ambiguous_missed_visit', { candidateIds: sameLine.map((r) => r.id) });
+
+  const visit = sameLine[0];
+  const currentDate = dateOnly(visit.scheduled_date);
+  // A caller who names a DIFFERENT appointment date is talking about another
+  // visit: the reschedule lane's business, not a make-up.
+  const movedDate = stringDate(scheduling.moved_appointment_date);
+  if (movedDate && movedDate !== currentDate) return skip('moved_appointment_not_candidate', { visitId: visit.id });
+  const duration = windowDurationMinutes(visit.window_start, visit.window_end, visit.estimated_duration_minutes) || DEFAULT_DURATION_MINUTES;
+  const newEnd = deriveWindowEnd(newStart, duration);
+  if (!newEnd) return skip('window_runs_past_midnight', { visitId: visit.id });
+  return {
+    action: 'apply',
+    propertyKey: scope.targetKey,
+    visitId: visit.id,
+    dateMove: true,
+    from: { date: currentDate, start: hhmm(visit.window_start), end: hhmm(visit.window_end) },
+    newDate,
+    newWindow: { start: newStart, end: newEnd },
+    noshowLogId: openNoShowForSlot(visit, noshowLogs).id,
+  };
+}
+
+function stringDate(value) {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value) ? value.slice(0, 10) : null;
+}
+
+// The customer's pending/confirmed visits of the last MAKEUP_LOOKBACK_DAYS,
+// with the columns the planner needs beyond loadCandidates'.
+async function loadMakeupCandidates(conn, customerId, now = new Date()) {
+  const rows = await loadCandidates(conn, customerId, now, { includePast: true });
+  const earliest = etDateString(addETDays(now, -MAKEUP_LOOKBACK_DAYS));
+  const today = etDateString(now);
+  const inRange = (rows || []).filter((row) => MOVABLE_STATUSES.includes(row.status)
+    && dateOnly(row.scheduled_date) >= earliest && dateOnly(row.scheduled_date) < today);
+  if (!inRange.length) return [];
+  const extra = await conn('scheduled_services').whereIn('id', inRange.map((r) => r.id)).select('id', 'parent_service_id', 'source_call_log_id');
+  const byId = new Map((extra || []).map((r) => [String(r.id), r]));
+  return inRange.map((row) => ({ ...row, parent_service_id: byId.get(String(row.id))?.parent_service_id ?? null,
+    source_call_log_id: byId.get(String(row.id))?.source_call_log_id ?? null }));
+}
+
+function loadOpenNoShows(conn, customerId, visitIds) {
+  if (!visitIds.length) return Promise.resolve([]);
+  return conn('reschedule_log')
+    .where({ customer_id: customerId, reason_code: 'customer_noshow' })
+    .whereNull('resolved_at')
+    .whereIn('scheduled_service_id', visitIds)
+    .select('id', 'scheduled_service_id', 'original_date', 'original_window', 'resolved_at');
+}
+
+/**
+ * Entry point for the processor, run BEFORE the booking transaction opens
+ * (the rebooker opens its own transaction; it must never nest in the booking's).
+ * The call is still claimed by this pass: `procToken` + `procGeneration` fence
+ * it, and the V2 extraction and transcript are read from the row the pass
+ * persisted. Never throws for business reasons. Outcomes:
+ *   skipped      no make-up here: the processor books exactly as it does today
+ *   applied      the missed visit moved; the processor books nothing
+ *   noop         this call's make-up move already applied (reprocess); same
+ *   needs_review a missed-visit candidate exists but cannot be moved; the
+ *                processor HOLDS the booking, never inserts a new visit
+ */
+async function applyCallMakeupMove({ conn, call, procToken = null, procGeneration = null, now = new Date(), rebooker = null } = {}) {
+  if (!conn || !call?.id) return { outcome: 'skipped', reason: 'missing_context' };
+  const settled = await conn('call_log').where({ id: call.id }).modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b)).first();
+  if (!settled || (procToken && settled.processing_token !== procToken)
+    || (procGeneration != null && Number(settled.processing_generation) !== Number(procGeneration))) {
+    return { outcome: 'skipped', reason: 'superseded_by_newer_pass' };
+  }
+  if (!settled.customer_id || settled.customer_id !== call.customer_id) return { outcome: 'skipped', reason: 'customer_link_changed' };
+  const v2 = settled.v2_extraction_status === 'valid' ? settled.ai_extraction_enriched : null;
+  const sourceHash = createHash('sha256').update(JSON.stringify([settled.transcription, v2])).digest('hex');
+  const fenced = (current) => current && current.processing_token === settled.processing_token
+    && Number(current.processing_generation) === Number(settled.processing_generation)
+    && current.customer_id === settled.customer_id && current.v2_extraction_status === 'valid'
+    && JSON.stringify(current.ai_extraction_enriched) === JSON.stringify(v2) && current.transcription === settled.transcription;
+  // Same lock order as the reviewed reschedule: the call-booking creator's
+  // comms fence, then customer -> properties -> call.
+  const beforeMove = async (trx) => {
+    await lockCustomerComms(trx, settled.customer_id);
+    await trx('customers').where({ id: settled.customer_id }).forShare().first('id');
+    await trx('customer_properties').where({ customer_id: settled.customer_id, active: true }).forShare().select('id');
+    await lockTriageCall(trx, call.id);
+    await trx('call_log').where({ id: call.id }).modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b)).forUpdate().first('id');
+  };
+  const markerFor = (conn_) => conn_('activity_log').where({ action: MAKEUP_ACTIVITY_ACTION })
+    .whereRaw("metadata->>'call_log_id' = ?", [String(call.id)]).first('metadata');
+  const prior = await markerFor(conn);
+  if (prior) {
+    const proof = typeof prior.metadata === 'string' ? JSON.parse(prior.metadata) : prior.metadata;
+    return { outcome: 'noop', reason: 'already_applied', visitId: proof?.scheduled_service_id || null };
+  }
+  // A move made by anyone after the call, other than the missed-appointment
+  // check's own customer_noshow row (that row is the EVIDENCE for this move).
+  const newerMove = (trx) => trx('reschedule_log')
+    .whereIn('scheduled_service_id', trx('scheduled_services').where({ customer_id: settled.customer_id }).select('id'))
+    .whereNot('reason_code', 'customer_noshow')
+    .where('created_at', '>', settled.created_at).first('id');
+  if (await newerMove(conn)) return { outcome: 'skipped', reason: 'handled_after_call' };
+
+  const customer = await conn('customers').where({ id: settled.customer_id }).first();
+  const properties = await conn('customer_properties').where({ customer_id: settled.customer_id, active: true }).select('*');
+  const candidates = await loadMakeupCandidates(conn, settled.customer_id, now);
+  const noshowLogs = await loadOpenNoShows(conn, settled.customer_id, candidates.map((r) => r.id));
+  const trusted = isEnabled('callAgentCommitTrustedLabels');
+  const plan = planMakeupMoveFromCall({ v2, call: settled, customer, properties, candidates, noshowLogs, now, transcriptLabelsTrusted: trusted });
+  if (plan.action === 'needs_review') return { outcome: 'needs_review', reason: plan.reason, candidateIds: plan.candidateIds || [] };
+  if (plan.action === 'skip') return { outcome: 'skipped', reason: plan.reason, visitId: plan.visitId || null };
+  const visit = candidates.find((r) => r.id === plan.visitId);
+  const review = (reason) => ({ outcome: 'needs_review', reason, visitId: plan.visitId });
+  if (await openPortalRequest(conn, settled.customer_id, plan.visitId)) return review('portal_request_open');
+  if (await pendingSmsOffer(conn, settled.customer_id, plan.visitId, now)) return review('pending_sms_offer');
+  if (await humanHandledRescheduleCard(conn, call.id)) return review('handled_by_staff');
+
+  const note = `Missed visit ${plan.visitId} moved from ${plan.from.date} to ${plan.newDate} ${plan.newWindow.start} from the call. No customer message sent.`;
+  const writeDecision = async ({ trx, service }) => {
+    await lockTriageCall(trx, call.id);
+    const current = await trx('call_log').where({ id: call.id }).modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b)).forUpdate().first();
+    if (!fenced(current)) throw Object.assign(new Error('The call changed before its make-up move could apply'), { code: 'CALL_MAKEUP_CHANGED' });
+    if (await markerFor(trx)) throw Object.assign(new Error('This call was already applied'), { code: 'CALL_MAKEUP_ALREADY_APPLIED' });
+    const handled = await humanHandledRescheduleCard(trx, call.id);
+    const moved = await newerMove(trx);
+    // Under the visit's own row lock (as applyCallReschedule): a portal
+    // request filed meanwhile is either seen here or starts after the move.
+    await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('id');
+    const portalRequest = await openPortalRequest(trx, settled.customer_id, visit.id);
+    const smsOffer = await pendingSmsOffer(trx, settled.customer_id, visit.id, now);
+    if (handled || moved || portalRequest || smsOffer) throw Object.assign(new Error('The request was handled after this call'), { code: 'CALL_MAKEUP_HANDLED' });
+    const latestCustomer = await trx('customers').where({ id: settled.customer_id }).forShare().first();
+    const latestProperties = await trx('customer_properties').where({ customer_id: settled.customer_id, active: true }).forShare().select('*');
+    const latestCandidates = await loadMakeupCandidates(trx, settled.customer_id, now);
+    const latestNoShows = await loadOpenNoShows(trx, settled.customer_id, latestCandidates.map((r) => r.id));
+    const checked = planMakeupMoveFromCall({ v2, call: current, customer: latestCustomer, properties: latestProperties,
+      candidates: latestCandidates.map((row) => row.id === visit.id ? { ...row, ...service } : row), noshowLogs: latestNoShows, now, transcriptLabelsTrusted: trusted });
+    const unchanged = service && dateOnly(service.scheduled_date) === dateOnly(visit.scheduled_date)
+      && ['customer_id', 'property_id', 'service_id', 'service_type', 'status', 'source_action', 'visit_id', 'is_recurring', 'window_start', 'window_end', 'estimated_duration_minutes']
+        .every((key) => (service[key] ?? null) === (visit[key] ?? null));
+    if (!unchanged || checked.action !== plan.action || checked.visitId !== plan.visitId || checked.propertyKey !== plan.propertyKey) {
+      throw Object.assign(new Error('The visit changed before its make-up move could apply'), { code: 'CALL_MAKEUP_CHANGED' });
+    }
+    // The moved row carries the call, so the booking dedup guard and the
+    // commitment tracker (visit_booked_from_this_call) find it on a reprocess.
+    // Only a row no other call claimed.
+    await trx('scheduled_services').where({ id: visit.id }).whereNull('source_call_log_id').update({ source_call_log_id: call.id, updated_at: new Date() });
+    await trx('activity_log').insert({ customer_id: settled.customer_id, action: MAKEUP_ACTIVITY_ACTION, description: note,
+      metadata: JSON.stringify({ call_log_id: String(call.id), scheduled_service_id: String(visit.id), noshow_log_id: String(plan.noshowLogId),
+        from: plan.from, to: { date: plan.newDate, ...plan.newWindow },
+        processing_generation: current.processing_generation, source_hash: sourceHash }) });
+    await resolveRescheduleCards(trx, call.id, note);
+  };
+  try {
+    const result = await (rebooker || require('./rebooker')).reschedule(visit.id, plan.newDate, plan.newWindow, MAKEUP_REASON_CODE, INITIATED_BY, {
+      // DEFAULT series policy (owner rulings 2026-07-30 + 08-28): a date move of
+      // a recurring visit carries its cadence; never seriesPolicy 'single'.
+      keepStatus: true, beforeMove, moveGuard: writeDecision,
+      sourceSurface: 'call_makeup', notifyRequested: false,
+      expect: { scheduled_date: dateOnly(visit.scheduled_date), window_start: visit.window_start, window_end: visit.window_end,
+        estimated_duration_minutes: visit.estimated_duration_minutes, customer_id: visit.customer_id,
+        property_id: visit.property_id, service_id: visit.service_id, service_type: visit.service_type,
+        status: visit.status, visit_id: visit.visit_id, source_action: visit.source_action, is_recurring: visit.is_recurring },
+    });
+    if (visit.self_booking_id) {
+      try {
+        await conn('self_booked_appointments').where({ id: visit.self_booking_id }).update({
+          date: plan.newDate, start_time: plan.newWindow.start, end_time: plan.newWindow.end, updated_at: new Date(),
+        });
+      } catch (err) {
+        logger.warn(`[call-makeup] self-booking snapshot sync failed for ${visit.id}: ${err.message}`);
+      }
+    }
+    if (result?.seriesMoveId) {
+      await require('../routes/admin-dispatch').applySeriesMoveEffects({
+        result, serviceId: visit.id, newDate: plan.newDate, newWindow: plan.newWindow,
+        notify: false, actorId: null, reasonText: null,
+      });
+    } else {
+      // No customer message (owner directive 2026-09-08); the reminder cron
+      // reads the new time, so coverDueWindows stays unset (see
+      // applyCallReschedule).
+      try {
+        await require('./appointment-reminders').handleReschedule(visit.id, `${plan.newDate}T${plan.newWindow.start}`, { sendNotification: false });
+      } catch (err) {
+        logger.warn(`[call-makeup] reminder sync failed for ${visit.id}: ${err.message}`);
+      }
+      try {
+        await require('./dispatch-assignment').emitDispatchJobUpdate({ jobId: visit.id, actorId: null });
+      } catch (err) {
+        logger.warn(`[call-makeup] board broadcast failed for ${visit.id}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    // A candidate exists, so ANY failure holds the booking (never a new visit).
+    const reasons = { CALL_MAKEUP_CHANGED: 'changed_before_apply', CALL_MAKEUP_HANDLED: 'handled_after_call', CALL_MAKEUP_ALREADY_APPLIED: 'already_applied' };
+    if (err.code === 'CALL_MAKEUP_ALREADY_APPLIED') return { outcome: 'noop', reason: reasons[err.code], visitId: visit.id };
+    logger.warn(`[call-makeup] move refused for ${visit.id}: ${err.code || err.name || 'error'}`);
+    return { outcome: 'needs_review', reason: reasons[err.code] || `move_failed_${err.code || err.statusCode || 'error'}`, visitId: visit.id };
+  }
+  return { outcome: 'applied', visitId: visit.id, newDate: plan.newDate, newWindow: plan.newWindow };
+}
+
 module.exports = {
   applyReviewedCallReschedule,
   applyCallReschedule,
+  applyCallMakeupMove,
+  planMakeupMoveFromCall,
   planRescheduleFromCall,
   loadCandidates,
   // The staff-owned schedule-change request fence, shared with the SMS
@@ -857,6 +1193,8 @@ module.exports = {
   CARD_REASON_CODES,
   MOVABLE_STATUSES,
   ACTIVITY_ACTION,
+  MAKEUP_ACTIVITY_ACTION,
+  MAKEUP_REASON_CODE,
   humanHandledRescheduleCard,
   RESCHEDULE_REASON_CODE,
   INITIATED_BY,

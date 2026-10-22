@@ -983,6 +983,7 @@ const CONFIRM_REASON_TEXT = {
   address_unit_conflict: 'the street line and the unit disagree on the door (e.g. "…Apt 4" vs "Apt 5") — the street line was kept; confirm the unit with the caller before dispatch',
   street_level_address_review: 'web-form address: Google matched only the street, not the house — confirm the address with the customer, then confirm the visit (it is booked pending)',
   text_number_differs: "caller said the line they called from can't get texts — texts go to the number they gave (or ask for one), calls stay on the line they called from; update the customer's phones. Resolve when the phones are updated — the calling line stays blocked for texts. Use Line can get texts if the line can get texts after all.",
+  missed_visit_makeup_needs_review: 'the caller agreed a new time for a MISSED recurring visit, but it could not be moved automatically — no new visit was booked; move the missed visit by hand to the agreed time',
   callback_number_needed: 'caller said this incoming number is not theirs (shared/office line) and gave no callback number — get a personal cell before texting confirmations or reminders',
 };
 const describeConfirmReason = (r) => CONFIRM_REASON_TEXT[r] || r;
@@ -10457,6 +10458,27 @@ async function applyRescheduleFollowUps({ call, callSid, result, procGeneration 
     .catch((err) => logger.warn(`[call-proc] post-reschedule disposition revision failed for ${maskSid(callSid)}: ${err.message}`));
 }
 
+// Make-up move (GATE_CALL_MAKEUP_MOVE, owner 2026-10-22): runs BEFORE the
+// booking branch, outside any booking transaction (the rebooker opens its
+// own). 'skipped' = no make-up here, the booking runs as it always did;
+// 'applied' / 'noop' = the customer's missed recurring visit was moved from
+// this call, so no new visit is booked; 'needs_review' = a missed visit
+// exists but could not be moved, so the booking is HELD. An unexpected throw
+// cannot say whether a missed visit exists: it holds too, since booking
+// anyway is the very duplicate this step prevents.
+async function applyCallMakeupMoveStep({ call, callSid, customerId, procToken, procGeneration }) {
+  try {
+    const result = await require('./call-reschedule-apply').applyCallMakeupMove({
+      conn: db, call: { ...call, customer_id: customerId }, procToken, procGeneration,
+    });
+    logger.info(`[call-proc] makeup-move for ${maskSid(callSid)}: ${result.outcome}${result.reason ? ` (${result.reason})` : ''}${result.visitId ? ` visit=${result.visitId}` : ''}`);
+    return result;
+  } catch (err) {
+    logger.warn(`[call-proc] makeup-move step failed for ${maskSid(callSid)}: ${err.code || err.name || 'error'}`);
+    return { outcome: 'needs_review', reason: 'makeup_check_failed' };
+  }
+}
+
 async function applyCallRescheduleStep({ call, callSid, customerId, extracted, v2Result, appointmentResult, procGeneration }) {
   if (extracted?.is_spam || !isEnabled('callRescheduleApply')) return;
   if (v2Result?.status !== 'valid' || !v2Result.extraction) return;
@@ -18966,6 +18988,18 @@ const CallRecordingProcessor = {
         addressValidation: effectiveAddressValidation, v2Extraction: v2CanonicalExtraction, extracted, onFile: onFileGeo,
       });
     }
+    // Make-up move (GATE_CALL_MAKEUP_MOVE): a booking confirmed by an existing
+    // customer whose recurring visit was MISSED moves that visit instead of
+    // inserting a new one beside it. Only where the booking branch below would
+    // otherwise run (every earlier veto keeps today's behavior), and BEFORE its
+    // transaction opens.
+    let makeupMove = null;
+    if (isEnabled('callMakeupMove') && !v2RoutingBlocked && !legacyGeoVeto && !extracted.is_spam
+      && v2Result?.status === 'valid' && extracted.appointment_confirmed && extracted.preferred_date_time
+      && customerId && hasSpecificTime && canCreateAppointmentFromCall) {
+      const step = await applyCallMakeupMoveStep({ call, callSid, customerId, procToken, procGeneration });
+      if (step.outcome !== 'skipped') makeupMove = step;
+    }
     if (v2RoutingBlocked) {
       appointmentResult = {
         service: extracted.matched_service || extracted.requested_service || null,
@@ -19003,6 +19037,39 @@ const CallRecordingProcessor = {
           serviceType: appointmentResult.service, bridgeNeedsConfirmation, callSid,
         });
       }
+    } else if (makeupMove && makeupMove.outcome !== 'needs_review') {
+      // Applied, or already applied on an earlier pass: the missed visit IS the
+      // booking. No schedule row is created, so no confirmation text is sent
+      // (the reminder cron reads the new time) and no card is needed.
+      appointmentResult = {
+        service: extracted.matched_service || extracted.requested_service || null,
+        dateTime: extracted.preferred_date_time,
+        scheduleCreated: false,
+        smsSent: false,
+        skippedReason: 'makeup_move_applied',
+        movedVisitId: makeupMove.visitId || null,
+      };
+      logger.info(`[call-proc] Missed visit moved from the call; not creating a new appointment for ${maskSid(callSid)}`);
+    } else if (makeupMove) {
+      // A missed visit exists but could not be moved: hold, never insert a new
+      // visit beside it. The review card is filed here in every routing mode
+      // (the enforce-mode fallback below merges into the same card).
+      appointmentResult = {
+        service: extracted.matched_service || extracted.requested_service || null,
+        dateTime: extracted.preferred_date_time,
+        scheduleCreated: false,
+        smsSent: false,
+        skippedReason: 'missed_visit_makeup_needs_review',
+        existingScheduledServiceId: makeupMove.visitId || null,
+      };
+      logger.warn(`[call-proc] Held auto-booking for ${maskSid(callSid)}: missed_visit_makeup_needs_review (${makeupMove.reason || 'unknown'})`);
+      if (!bridgeNeedsConfirmation.includes('missed_visit_makeup_needs_review')) bridgeNeedsConfirmation.push('missed_visit_makeup_needs_review');
+      await fileSkippedBookingCard({
+        call, procToken, customerId, extraction: v2CanonicalExtraction || undefined,
+        skippedReason: 'missed_visit_makeup_needs_review',
+        preferredDateTime: extracted.preferred_date_time,
+        serviceType: appointmentResult.service, bridgeNeedsConfirmation, callSid,
+      });
     } else if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && canCreateAppointmentFromCall) {
       // Declared OUTSIDE the try so the catch can see whether a schedule row
       // was already inserted when a later confirmation/SMS step threw — the
@@ -22901,7 +22968,7 @@ const CallRecordingProcessor = {
     if (CALL_EXTRACTION_V2_DRIVES_ROUTING && v2ApprovedExtraction && extracted.appointment_confirmed) {
       const bookedServiceId = appointmentResult?.scheduledServiceId || null;
       // Held bookings already opened their own reason-specific card above.
-      const heldReasons = new Set(['existing_appointment_same_date', 'ambiguous_existing_appointment', 'auto_booking_previously_cancelled', 'open_reservice_callback_exists', 'reservice_eligibility_lapsed', 'reservice_property_uncovered', 'on_file_proof_customer_mismatch', 'arranger_slot_elapsed_pre_insert']);
+      const heldReasons = new Set(['existing_appointment_same_date', 'ambiguous_existing_appointment', 'auto_booking_previously_cancelled', 'open_reservice_callback_exists', 'reservice_eligibility_lapsed', 'reservice_property_uncovered', 'on_file_proof_customer_mismatch', 'arranger_slot_elapsed_pre_insert', 'makeup_move_applied']);
       // The house-number hold has its own card only when that card actually
       // landed (a thrown insert or a lost claim holds the booking without
       // one) — otherwise the fallback card below is the call's only
@@ -25219,6 +25286,7 @@ function legacyDisputeServiceIntent(extracted) {
 }
 
 CallRecordingProcessor._test = {
+  applyCallMakeupMoveStep,
   fileNameSpellingCard,
   contactPassTrigger,
   contactPassTriggerLogged,

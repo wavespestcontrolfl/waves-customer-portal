@@ -1108,6 +1108,71 @@ function groundNewBookingAgreement(args = {}) {
   return !callerProposed.ok && args.allowAgentProposed === true ? groundAgentProposed(ctx) : callerProposed;
 }
 
+// ---------------------------------------------------------------------------
+// MAKE-UP MOVE grounding (call-reschedule-apply.js planMakeupMoveFromCall): a
+// customer whose recurring visit was MISSED calls, the agent says "we'll come
+// by <slot>" and the caller accepts. The extraction often files that as a new
+// slot with agent_committed_booking null (the agent promised a time, not a
+// "booking"), so neither groundRescheduleAgreement nor groundNewBookingAgreement
+// can ground it. This SEPARATE function (the two above are unchanged) accepts
+// that shape and checks the agent's side in the TRANSCRIPT instead of trusting
+// the extraction's commitment flag:
+//   - the caller accepted (scheduling.caller_accepted_slot true, pinned quote
+//     word for word in a caller turn, plainly said);
+//   - the AGENT's own turn states the recorded slot: a grounded, plainly said,
+//     non-question quote (pinned to /scheduling/agent_committed_booking or to
+//     /scheduling/confirmed_start_at, speaker agent) that commitsToSlot (the
+//     recorded hour on the hour, the recorded day, no other half of the day,
+//     no alternatives, no "around"), then the same staff-stated checks a new
+//     booking uses (caller acceptance of THIS slot, slot words, relative date);
+//   - agent_committed_booking explicitly false fails closed; null is accepted;
+//   - scheduling.definite_commitment is NOT required (the extraction files a
+//     "we'll come by around five" promise as not definite): the code's own
+//     hedge / conditional / alternative / "around" screens stand in for it.
+// Contract: groundMakeupAgreement({ v2, transcript, callStartedAt }) ->
+//   { ok, reason, mode }
+// ---------------------------------------------------------------------------
+function makeupContext({ v2, transcript, callStartedAt }) {
+  const fail = (reason) => ({ fail: { ok: false, reason, mode: null } });
+  const scheduling = v2?.scheduling || {};
+  if (scheduling.caller_accepted_slot !== true) return fail('caller_did_not_accept');
+  if (scheduling.agent_committed_booking === false) return fail('agent_did_not_commit');
+  if (typeof scheduling.relative_date_used !== 'boolean') return fail('relative_date_unjudged');
+  const wall = etWallClockOfConfirmedStart(scheduling.confirmed_start_at);
+  const started = new Date(String(callStartedAt || ''));
+  if (!wall || Number.isNaN(started.getTime())) return fail('unparseable_slot');
+  const turns = parseTurns(transcript);
+  if (!turns || new Set(turns.map((t) => t.agent)).size < 2) return fail('unparseable_transcript');
+  const words = scheduling.agreed_slot_words;
+  if (typeof words?.hour !== 'string') return fail('agreed_slot_words_missing');
+  const evidence = Array.isArray(v2.evidence) ? v2.evidence : [];
+  const pinned = (fieldPath, speaker = null) => evidence.filter((e) => e?.field_path === fieldPath && typeof e.quote === 'string' && (!speaker || e.speaker === speaker));
+  const grounded = (fieldPath, speaker = null) => pinned(fieldPath, speaker)
+    .filter((e) => isPlain(turnsHolding(turns, e.quote, e.speaker), e.quote, fieldPath)).map((e) => e.quote);
+  const ctx = {
+    scheduling, words, started, turns, pinned, grounded, relative: scheduling.relative_date_used,
+    slot: { date: wall.slice(0, 10), hour24: Number(wall.slice(11, 13)) },
+    commitments: [...new Set([...grounded('/scheduling/agent_committed_booking', 'agent'), ...grounded('/scheduling/confirmed_start_at', 'agent')])],
+    acceptPinned: pinned('/scheduling/caller_accepted_slot', 'caller'),
+    relativeQuotes: [],
+  };
+  if (!ctx.commitments.length) return fail('agent_commitment_ungrounded');
+  if (!ctx.acceptPinned.length) return fail('caller_acceptance_ungrounded');
+  if (ctx.relative) {
+    ctx.relativeQuotes = grounded('/scheduling/relative_date_used');
+    if (!ctx.relativeQuotes.length) return fail('relative_date_ungrounded');
+  }
+  return ctx;
+}
+
+function groundMakeupAgreement(args = {}) {
+  const ctx = makeupContext(args);
+  if (ctx.fail) return ctx.fail;
+  const commitsSlot = ctx.commitments.filter((q) => commitsToSlot(q, ctx.words, ctx.slot.hour24, ctx.turns, ctx.relative));
+  if (!commitsSlot.length) return { ok: false, reason: 'agent_commitment_not_the_slot', mode: null };
+  return groundStaffStated(ctx, commitsSlot);
+}
+
 // Spoken amounts in a transcript turn ("a hundred forty nine", "two hundred and
 // fifty", "fifteen hundred", "forty-nine"), for the commercial dictated booking's
 // price grounding (codex #5377 r12 P2). The repo had no reusable spoken-number
@@ -1225,4 +1290,4 @@ function spokenFiguresIn(text) {
   return spokenNumbersIn(text).filter((value) => Number.isNaN(value) || value >= 20);
 }
 
-module.exports = { groundRescheduleAgreement, groundNewBookingAgreement, groundingTools: { parseTurns, turnsHolding, spokenFiguresIn, spokenNumbersIn, numbersStatedIn } };
+module.exports = { groundRescheduleAgreement, groundNewBookingAgreement, groundMakeupAgreement, groundingTools: { parseTurns, turnsHolding, spokenFiguresIn, spokenNumbersIn, numbersStatedIn } };
