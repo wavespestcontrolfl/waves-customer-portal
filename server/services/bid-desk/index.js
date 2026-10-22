@@ -169,7 +169,7 @@ async function ingestEmail(email, { historical = false, manual = false } = {}) {
       logger.error(`${LOG} bell for bid ${outcome.bidId} failed; the next tick retries it: ${safeError(err)}`);
     }
   }
-  const { owedLinkId, ...result } = outcome;
+  const { owedLinkId: _owed, ...result } = outcome;
   return result;
 }
 
@@ -247,92 +247,77 @@ async function writeWatermark(state, conn = db) {
  * An email that keeps failing blocks the batch for MAX_ATTEMPTS ticks and is then skipped, so one bad row cannot
  * stop the desk for good.
  */
-async function runBidDeskTick({ now = new Date(), limit = BATCH_LIMIT } = {}) {
-  if (!bidDeskLive()) return { skipped: 'gate_off' };
-  let state = await readWatermark();
-  const firstRun = !state;
-  if (!state) {
-    // First run: start an hour back (the backfill covers history). Nothing older is notified as new.
-    state = { at: new Date(now.getTime() - FIRST_RUN_LOOKBACK_MS).toISOString(), id: '00000000-0000-0000-0000-000000000000' };
-  }
-  // The cursor is the row's INSERT time (created_at), not Gmail's receive time: a sync retry or a newest-first
-  // recovery can store an older message after newer ones, and a receive-time cursor would pass it for good.
+// Files one email and counts it. Throws what ingestEmail throws.
+async function fileAndCount(email, result) {
+  const outcome = await ingestEmail(email);
+  if (outcome.bidId) result.filed += 1;
+  if (outcome.created) result.created += 1;
+}
+
+// The main pass: mail newer than the cursor, in insert order. The cursor is the row's INSERT time (created_at),
+// not Gmail's receive time: a sync retry or a newest-first recovery can store an older message after newer ones.
+// It keeps PostgreSQL's microseconds (a JS Date would cut them and re-read the last row). An email that keeps
+// failing blocks the batch for MAX_ATTEMPTS ticks and is then passed.
+async function mainPass(state, limit, result) {
   const rows = await db('emails')
     .whereRaw('(created_at, id) > (?::timestamptz, ?::uuid)', [state.at, state.id])
     .whereRaw(NOT_SPAM_SQL)
     .orderBy([{ column: 'created_at' }, { column: 'id' }])
     .limit(limit)
-    // The cursor keeps PostgreSQL's microseconds: a JS Date would cut them and re-read the last row.
     .select([...EMAIL_COLUMNS, db.raw('created_at::text AS cursor_at')]);
-  const result = { read: rows.length, filed: 0, created: 0, failed: 0 };
+  result.read = rows.length;
+  let next = state;
   for (const email of rows) {
-    try {
-      const outcome = await ingestEmail(email);
-      if (outcome.bidId) {
-        result.filed += 1;
-        if (outcome.created) result.created += 1;
-      }
-      state = { at: email.cursor_at, id: email.id };
-    } catch (err) {
-      const attempts = state.retry?.id === email.id ? state.retry.count + 1 : 1;
-      logger.error(`${LOG} email ${email.id} failed (attempt ${attempts}): ${safeError(err)}`);
+    const failure = await fileAndCount(email, result).then(() => null, (err) => err);
+    const attempts = failure && next.retry?.id === email.id ? next.retry.count + 1 : 1;
+    if (failure) {
+      logger.error(`${LOG} email ${email.id} failed (attempt ${attempts}): ${safeError(failure)}`);
       result.failed += 1;
-      if (attempts < MAX_ATTEMPTS) {
-        state = { ...state, retry: { id: email.id, count: attempts } };
-        break;
-      }
-      state = { at: email.cursor_at, id: email.id };
     }
+    if (failure && attempts < MAX_ATTEMPTS) return { state: { ...next, retry: { id: email.id, count: attempts } }, rows };
+    next = { at: email.cursor_at, id: email.id };
   }
-  // Concurrent inserts can commit out of created_at order. Re-read the last RECHECK_WINDOW behind the cursor for
-  // rows not yet filed; ingestEmail is idempotent, so a row seen twice is skipped. The pass pages through the whole
-  // window, so non-bid mail (never filed, so never excluded) cannot hold a late bid row past the limit.
-  let lateCursor = null;
+  return { state: next, rows };
+}
+
+// Concurrent inserts can commit out of created_at order. Re-read the last RECHECK_WINDOW behind the cursor for rows
+// not yet filed; ingestEmail is idempotent, so a row seen twice is skipped. The pass pages through the whole
+// window, so non-bid mail (never filed, so never excluded) cannot hold a late bid row past the limit.
+async function latePass(state, limit, result) {
+  let cursor = null;
   for (let page = 0; page < LATE_MAX_PAGES; page += 1) {
     const late = await db('emails as e')
       .whereRaw('e.created_at > ?::timestamptz - make_interval(secs => ?)', [state.at, RECHECK_WINDOW_MS / 1000])
       .whereRaw('e.created_at <= ?::timestamptz', [state.at])
-      .modify((q) => { if (lateCursor) q.whereRaw('(e.created_at, e.id) > (?::timestamptz, ?::uuid)', [lateCursor.at, lateCursor.id]); })
+      .modify((q) => { if (cursor) q.whereRaw('(e.created_at, e.id) > (?::timestamptz, ?::uuid)', [cursor.at, cursor.id]); })
       .whereNotExists(db('bid_opportunity_emails as l').whereRaw('l.email_id = e.id'))
       .whereRaw(NOT_SPAM_SQL_E)
       .orderBy([{ column: 'e.created_at' }, { column: 'e.id' }])
       .limit(limit)
       .select([...EMAIL_COLUMNS.map((c) => `e.${c}`), db.raw('e.created_at::text AS cursor_at')]);
     for (const email of late) {
-      try {
-        const outcome = await ingestEmail(email);
-        if (outcome.bidId) {
-          result.filed += 1;
-          if (outcome.created) result.created += 1;
-        }
-      } catch (err) {
-        logger.error(`${LOG} late email ${email.id} failed: ${safeError(err)}`);
-      }
+      await fileAndCount(email, result).catch((err) => logger.error(`${LOG} late email ${email.id} failed: ${safeError(err)}`));
     }
-    if (late.length < limit) break;
-    lateCursor = { at: late[late.length - 1].cursor_at, id: late[late.length - 1].id };
+    if (late.length < limit) return;
+    cursor = { at: late[late.length - 1].cursor_at, id: late[late.length - 1].id };
   }
-  if (rows.length || firstRun) await writeWatermark(state);
+}
+
+async function runBidDeskTick({ now = new Date(), limit = BATCH_LIMIT } = {}) {
+  if (!bidDeskLive()) return { skipped: 'gate_off' };
+  const stored = await readWatermark();
+  // First run: start an hour back (the backfill covers history). Nothing older is notified as new.
+  const start = stored || { at: new Date(now.getTime() - FIRST_RUN_LOOKBACK_MS).toISOString(), id: '00000000-0000-0000-0000-000000000000' };
+  const result = { read: 0, filed: 0, created: 0, failed: 0 };
+  const { state, rows } = await mainPass(start, limit, result);
+  await latePass(state, limit, result);
+  if (rows.length || !stored) await writeWatermark(state);
   result.owedAlerts = await deliverOwedAlerts();
   result.reminders = await sendDueReminders({ now });
   return result;
 }
 
 // ---------- reminders ----------
-
-/**
- * The reminder's dedupe key. A date that comes back after a change (A, then B, then A again) finds its old reminder
- * auto-closed under the same key, and the forever dedupe would swallow the new one: each closed earlier episode
- * gives the next one its own suffix.
- */
-async function reminderKey(trx, bid, window) {
-  const base = `bid-desk:remind:${bid.id}:${window}:${new Date(bid.due_at).toISOString()}`;
-  const rows = await trx('notifications').where({ recipient_type: 'admin' })
-    .whereRaw("(metadata->>'dedupeKey' = ? OR starts_with(metadata->>'dedupeKey', ?))", [base, `${base}:r`])
-    .select(trx.raw("metadata->>'dedupeKey' AS key"), trx.raw("metadata->>'autoCleared' AS cleared"));
-  if (!rows.length || rows.some((row) => row.cleared !== 'true')) return base;
-  return `${base}:r${rows.length}`;
-}
 
 /** One reminder per bid per window, only for a confirmed due date on an open, non-historical bid. */
 async function sendDueReminders({ now = new Date() } = {}) {
@@ -357,7 +342,7 @@ async function sendDueReminders({ now = new Date() } = {}) {
         const window = reminderDue(bid, now);
         if (!window) return false;
         // The due date is in the key: a changed date (PATCH clears the stamps) gets its own reminders.
-        await alerts.raise(alerts.reminderSpec(bid, window, now), await reminderKey(trx, bid, window), trx);
+        await alerts.raiseReopening(alerts.reminderSpec(bid, window, now), `bid-desk:remind:${bid.id}:${window}:${new Date(bid.due_at).toISOString()}`, trx);
         // Inside 2 days the 7-day reminder is moot: stamp both so it can never fire late.
         await trx('bid_opportunities').where({ id }).update({
           reminder_2d_sent_at: window === '2d' ? trx.fn.now() : bid.reminder_2d_sent_at,

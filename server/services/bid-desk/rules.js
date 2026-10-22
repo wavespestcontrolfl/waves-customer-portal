@@ -41,7 +41,9 @@ function attachPatch(bid, parsed, kind) {
   }
   if (needsConfirmation && !bid.needs_date_confirmation) patch.needs_date_confirmation = true;
   const open = OPEN_STATUSES.includes(bid.status) && !bid.historical;
-  return { patch, notifyAddendum: kind === 'addendum' && open };
+  // Ring for every addendum, and for any email that newly flags the date (a provider "Reminder" carrying a
+  // different Bid Due line flags it too, and a flag pauses the reminders, so the office must hear about it).
+  return { patch, notifyAddendum: open && (kind === 'addendum' || patch.needs_date_confirmation === true) };
 }
 
 /**

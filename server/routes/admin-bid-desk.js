@@ -55,6 +55,50 @@ function toInstant(value) {
   return { ok: true, at };
 }
 
+// The column changes a PATCH asks for, or the refusal. A date save or confirmation is accepted only against the bid
+// version the operator looked at (`fenced`): an addendum filed since the page loaded moves updated_at and the write
+// is refused. Compared at millisecond precision, the precision the page has.
+function datePatch(bid, value) {
+  if (value.due_at !== undefined) {
+    const parsed = toInstant(value.due_at);
+    if (!parsed.ok) return { error: { status: 400, body: { error: 'due_at is not a real Eastern date and time' } } };
+    // A date a person typed is the confirmed date. Clearing it un-confirms. Reminders start over for the new date.
+    // The email line it was read from no longer describes it, unless the typed date is that same date.
+    const unchanged = parsed.at && bid.due_at && new Date(bid.due_at).getTime() === parsed.at.getTime();
+    return {
+      patch: {
+        due_at: parsed.at,
+        due_source_line: unchanged ? bid.due_source_line : null,
+        due_confirmed: parsed.at !== null,
+        needs_date_confirmation: false,
+        reminder_7d_sent_at: null,
+        reminder_2d_sent_at: null,
+      },
+    };
+  }
+  if (!value.confirm_due) return { patch: {} };
+  if (!bid.due_at) return { error: { status: 400, body: { error: 'There is no date to confirm' } } };
+  return { patch: { due_confirmed: true, needs_date_confirmation: false } };
+}
+
+function buildPatch(bid, value) {
+  const fenced = value.due_at !== undefined || value.confirm_due === true;
+  if (fenced && !value.expected_updated_at) return { error: { status: 409, body: { error: DATE_CHANGED } } };
+  const patch = {};
+  for (const key of ['job_walk_at', 'questions_due_at']) {
+    if (value[key] === undefined) continue;
+    const parsed = toInstant(value[key]);
+    if (!parsed.ok) return { error: { status: 400, body: { error: `${key} is not a real date` } } };
+    patch[key] = parsed.at;
+  }
+  const dates = datePatch(bid, value);
+  if (dates.error) return dates;
+  Object.assign(patch, dates.patch);
+  if (value.status !== undefined) patch.status = value.status;
+  if (value.decision_note !== undefined) patch.decision_note = value.decision_note || null;
+  return { patch, fenced };
+}
+
 // Notifications whose condition a successful save has met leave the bell (docs/admin-notifications.md 4.3).
 async function closeDoneAlerts(conn, bidId, before, after) {
   const prefixes = [];
@@ -142,44 +186,13 @@ router.patch('/:id', async (req, res, next) => {
     const outcome = await db.transaction(async (trx) => {
       const bid = await trx('bid_opportunities').where({ id: req.params.id }).forUpdate().first(BID_COLUMNS);
       if (!bid) return { status: 404, body: { error: 'Not found' } };
+      const built = buildPatch(bid, value);
+      if (built.error) return built.error;
+      const { patch, fenced } = built;
 
-      const patch = {};
-      let fence = null;
-      for (const key of ['job_walk_at', 'questions_due_at']) {
-        if (value[key] === undefined) continue;
-        const parsed = toInstant(value[key]);
-        if (!parsed.ok) return { status: 400, body: { error: `${key} is not a real date` } };
-        patch[key] = parsed.at;
-      }
-      // A date save or confirmation is accepted only against the bid version the operator looked at: an addendum
-      // filed since the page loaded moves updated_at, and the write below is refused. Compared at millisecond
-      // precision, the precision the page has.
-      if (value.due_at !== undefined || value.confirm_due) {
-        if (!value.expected_updated_at) return { status: 409, body: { error: DATE_CHANGED } };
-        fence = (q) => q.whereRaw("date_trunc('milliseconds', updated_at) = ?::timestamptz", [value.expected_updated_at]);
-      }
-      if (value.due_at !== undefined) {
-        const parsed = toInstant(value.due_at);
-        if (!parsed.ok) return { status: 400, body: { error: 'due_at is not a real Eastern date and time' } };
-        // A date a person typed is the confirmed date. Clearing it un-confirms. Reminders start over for the new date.
-        // The email line it was read from no longer describes it, unless the typed date is that same date.
-        const unchanged = parsed.at && bid.due_at && new Date(bid.due_at).getTime() === parsed.at.getTime();
-        Object.assign(patch, {
-          due_at: parsed.at,
-          due_source_line: unchanged ? bid.due_source_line : null,
-          due_confirmed: parsed.at !== null,
-          needs_date_confirmation: false,
-          reminder_7d_sent_at: null,
-          reminder_2d_sent_at: null,
-        });
-      } else if (value.confirm_due) {
-        if (!bid.due_at) return { status: 400, body: { error: 'There is no date to confirm' } };
-        Object.assign(patch, { due_confirmed: true, needs_date_confirmation: false });
-      }
-      if (value.status !== undefined) patch.status = value.status;
-      if (value.decision_note !== undefined) patch.decision_note = value.decision_note || null;
-
-      const written = await trx('bid_opportunities').where({ id: bid.id }).modify((q) => { if (fence) fence(q); }).update({ ...patch, updated_at: trx.raw('clock_timestamp()') });
+      const written = await trx('bid_opportunities').where({ id: bid.id })
+        .modify((q) => { if (fenced) q.whereRaw("date_trunc('milliseconds', updated_at) = ?::timestamptz", [value.expected_updated_at]); })
+        .update({ ...patch, updated_at: trx.raw('clock_timestamp()') });
       if (!written) return { status: 409, body: { error: DATE_CHANGED } };
       const updated = await trx('bid_opportunities').where({ id: bid.id }).first(BID_COLUMNS);
       try {

@@ -16,6 +16,10 @@ jest.mock('../services/admin-alert-compose', () => ({
   ...jest.requireActual('../services/admin-alert-compose'),
   raiseAdminAlert: jest.fn(),
 }));
+jest.mock('../services/admin-alert-episodes', () => ({
+  ...jest.requireActual('../services/admin-alert-episodes'),
+  raiseAdminAlertWithReopen: jest.fn(),
+}));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => { req.techRole = 'admin'; req.technicianId = 'actor-1'; next(); },
   requireAdmin: (req, res, next) => next(),
@@ -28,6 +32,7 @@ const migration = require('../models/migrations/20261022090000_bid_desk');
 const retryMigration = require('../models/migrations/20261022100000_bid_desk_alert_retry_and_cursor_index');
 const service = require('../services/bid-desk');
 const { raiseAdminAlert, composeAdminAlert } = require('../services/admin-alert-compose');
+const { raiseAdminAlertWithReopen } = require('../services/admin-alert-episodes');
 
 const describeDb = SKIP ? describe.skip : describe;
 jest.setTimeout(60000);
@@ -66,6 +71,8 @@ describeDb('Bid Desk (PostgreSQL)', () => {
     mockPg = await database.transaction();
     raiseAdminAlert.mockReset();
     raiseAdminAlert.mockImplementation(async (_category, spec) => { composeAdminAlert(spec); return { id: randomUUID(), deduped: false }; });
+    raiseAdminAlertWithReopen.mockReset();
+    raiseAdminAlertWithReopen.mockImplementation(async () => ({ id: randomUUID(), deduped: false, rang: true }));
   });
   afterEach(async () => { const trx = mockPg; mockPg = database; await trx.rollback(); });
   afterAll(async () => {
@@ -87,7 +94,11 @@ describeDb('Bid Desk (PostgreSQL)', () => {
   }
   const bidRow = (id) => mockPg('bid_opportunities').where({ id }).first();
   const links = (bidId) => mockPg('bid_opportunity_emails').where({ bid_id: bidId }).orderBy('received_at');
-  const rung = (kind) => raiseAdminAlert.mock.calls.filter(([, , opts]) => opts.dedupeKey.startsWith(`bid-desk:${kind}:`));
+  // Every ring, from either path (reminders go through the shared reopen helper), as [category, spec, opts].
+  const rung = (kind) => [
+    ...raiseAdminAlert.mock.calls,
+    ...raiseAdminAlertWithReopen.mock.calls.map(([category, , , opts]) => [category, null, opts]),
+  ].filter(([, , opts]) => opts.dedupeKey.startsWith(`bid-desk:${kind}:`));
   const version = async (id) => (await call('GET', `/${id}`)).body.bid.updated_at;
   const call = async (method, url, body) => {
     const res = await fetch(`${baseUrl}/api/admin/bid-desk${url}`, { method, headers: { 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
@@ -401,7 +412,8 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       const subject = `RFP ${'Sample long solicitation title words '.repeat(400)}`;
       const out = await service.ingestEmail(await storeEmail({ from_address: 'buyer@sample-county.example', subject, body_text: 'x' }));
       expect(out.created).toBe(true);
-      expect((await bidRow(out.bidId)).group_key.length).toBeLessThan(400);
+      // Not a provider template: no cross-thread key at all.
+      expect((await bidRow(out.bidId)).group_key).toBeNull();
     });
 
     test('old mail the backfill attaches to a live bid changes no date state', async () => {
@@ -414,29 +426,17 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect(raiseAdminAlert).not.toHaveBeenCalled();
     });
 
-    test('a date changed and changed back gets its reminder again', async () => {
+    test('a date changed and changed back reminds through the shared reopen path under the same key', async () => {
       const { bidId } = await service.ingestEmail(await storeEmail({ body_text: 'x', gmail_thread_id: `t-${randomUUID()}`, subject: `RFP ${randomUUID()}` }));
-      const dateA = new Date(NOW.getTime() + 6 * DAY);
+      const dateA = new Date('2026-10-07T14:00:00Z'); // 10:00 ET, 6 days after NOW
       await mockPg('bid_opportunities').where({ id: bidId }).update({ due_at: dateA, due_confirmed: true });
-      raiseAdminAlert.mockReset();
-      // A real row per ring, so the second ring finds the first one auto-closed.
-      raiseAdminAlert.mockImplementation(async (_category, spec, opts) => {
-        composeAdminAlert(spec);
-        await mockPg('notifications').insert({ recipient_type: 'admin', category: 'lead', title: 't', body: 'b', metadata: JSON.stringify({ dedupeKey: opts.dedupeKey }) });
-        return { id: randomUUID(), deduped: false };
-      });
       expect(await service.sendDueReminders({ now: NOW })).toBe(1);
-      // The operator moves the date to B (closing A's reminder), then back to A.
-      const iso = (d) => d.toISOString();
-      const etWall = (d) => new Date(d.getTime() - 4 * 60 * 60000).toISOString().slice(0, 16); // EDT in October
-      const dateB = new Date(NOW.getTime() + 5 * DAY);
-      expect((await call('PATCH', `/${bidId}`, { due_at: etWall(dateB), expected_updated_at: await version(bidId) })).status).toBe(200);
-      expect((await call('PATCH', `/${bidId}`, { due_at: etWall(dateA), expected_updated_at: await version(bidId) })).status).toBe(200);
+      expect((await call('PATCH', `/${bidId}`, { due_at: '2026-10-06T10:00', expected_updated_at: await version(bidId) })).status).toBe(200);
+      expect((await call('PATCH', `/${bidId}`, { due_at: '2026-10-07T10:00', expected_updated_at: await version(bidId) })).status).toBe(200);
       expect(await service.sendDueReminders({ now: NOW })).toBe(1);
-      const keys = raiseAdminAlert.mock.calls.map(([, , opts]) => opts.dedupeKey);
-      expect(keys).toHaveLength(2);
-      expect(keys[1]).toBe(`${keys[0].replace(/:r\d+$/, '')}:r1`);
-      expect(iso((await bidRow(bidId)).due_at)).toBe(iso(new Date(Math.floor(dateA.getTime() / 60000) * 60000)));
+      const keys = raiseAdminAlertWithReopen.mock.calls.map(([, , , opts]) => opts.dedupeKey);
+      // The helper reopens an auto-closed episode under the same key; the key is the window plus the date.
+      expect(keys).toEqual([`bid-desk:remind:${bidId}:7d:${dateA.toISOString()}`, `bid-desk:remind:${bidId}:7d:${dateA.toISOString()}`]);
     });
 
     test('a stranger using a GC display name does not attach an addendum to its bid', async () => {
@@ -444,6 +444,22 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       const spoof = await service.ingestEmail(await storeEmail({ from_address: 'someone@elsewhere.example', from_name: 'Fixture Build Co', subject: 'Addendum: RFP: Sample Clinic pest control', body_text: 'x' }));
       expect(spoof.bidId).not.toBe(bidId);
       expect(await bidRow(bidId)).toMatchObject({ needs_date_confirmation: false });
+    });
+
+    test('two generic "Invitation to Bid" emails from one buyer in different threads are two bids', async () => {
+      const one = await service.ingestEmail(await storeEmail({ from_address: 'purchasing@samplecity.gov', subject: 'Invitation to Bid', body_text: 'See the portal.' }));
+      const two = await service.ingestEmail(await storeEmail({ from_address: 'purchasing@samplecity.gov', subject: 'Invitation to Bid', body_text: 'See the portal.' }));
+      expect(two.created).toBe(true);
+      expect(two.bidId).not.toBe(one.bidId);
+    });
+
+    test('a provider reminder in the thread with a different due date flags the date and rings', async () => {
+      const first = await storeEmail();
+      const { bidId } = await service.ingestEmail(first);
+      raiseAdminAlert.mockClear();
+      await service.ingestEmail(await storeEmail({ gmail_thread_id: first.gmail_thread_id, subject: 'Reminder', body_text: BC_BODY('Sample Ridge Residences', 'October 27, 2026'), received_at: new Date(NOW.getTime() - 30000) }));
+      expect(await bidRow(bidId)).toMatchObject({ needs_date_confirmation: true });
+      expect(rung('addendum')).toHaveLength(1);
     });
 
     test('reminded bids do not fill the candidate list', async () => {

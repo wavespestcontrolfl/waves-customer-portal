@@ -184,11 +184,18 @@ describe('parseBidEmail: anything else leaves fields null', () => {
 });
 
 describe('grouping keys', () => {
-  test('the same sender org and project share a key; a reply prefix or addendum marker does not split a subject', () => {
+  test('a template invite and its addendum share a key; a reply prefix or addendum subject does not split it', () => {
     expect(parseBidEmail(bcInvite()).group_key).toBe(parseBidEmail(bcInvite({ subject: 'Addendum 1 Re: something', id: 'e-2' })).group_key);
-    const plain = parseBidEmail(email({ from_address: 'a@sample-hoa.example', from_name: 'Sample HOA', subject: 'RFP: Grounds Pest Control' }));
-    const reply = parseBidEmail(email({ from_address: 'a@sample-hoa.example', from_name: 'Sample HOA', subject: 'Re: Reminder: RFP: Grounds Pest Control' }));
-    expect(reply.group_key).toBe(plain.group_key);
+  });
+
+  test('outside a provider template there is no cross-thread key (a subject or display name is never an identity)', () => {
+    for (const over of [
+      { from_address: 'a@sample-hoa.example', from_name: 'Sample HOA', subject: 'RFP: Grounds Pest Control' },
+      { from_address: 'purchasing@samplecity.gov', subject: 'Invitation to Bid' },
+      { from_address: 'x@elsewhere.example', from_name: 'Fixture Build Co', subject: 'Addendum: Sample Ridge Residences' },
+    ]) {
+      expect(parseBidEmail(email({ ...over, body_text: 'x' }))).toMatchObject({ group_key: null, group_base: null });
+    }
   });
 
   test('different projects from one GC do not share a key', () => {
@@ -280,18 +287,11 @@ describe('parseDateET: AM/PM in any case', () => {
 });
 
 describe('grouping keys stay bounded and distinct', () => {
-  test('two long project names that share a long head get different keys', () => {
+  test('two long template project names that share a long head get different, bounded keys', () => {
     const head = 'Sample Regional Facilities Improvement Program '.repeat(6);
-    const one = parseBidEmail(email({ from_address: 'bids@sample-gc.example', subject: `RFP ${head} Phase One`, body_text: 'x' }));
-    const two = parseBidEmail(email({ from_address: 'bids@sample-gc.example', subject: `RFP ${head} Phase Two`, body_text: 'x' }));
+    const one = parseBidEmail(bcInvite({ body_text: BC_BODY.replace('Sample Ridge Residences', `${head} Phase One`) }));
+    const two = parseBidEmail(bcInvite({ body_text: BC_BODY.replace('Sample Ridge Residences', `${head} Phase Two`) }));
     expect(one.group_key).not.toBe(two.group_key);
     expect(one.group_key.length).toBeLessThan(400);
   });
-
-  test('outside a provider template the sender org is the mail domain, not the display name', () => {
-    const real = parseBidEmail(email({ from_address: 'bids@fixture-gc.example', from_name: 'Fixture Build Co', subject: 'RFP: Sample Clinic', body_text: 'x' }));
-    const spoof = parseBidEmail(email({ from_address: 'x@elsewhere.example', from_name: 'Fixture Build Co', subject: 'RFP: Sample Clinic', body_text: 'x' }));
-    expect(real.group_key).not.toBe(spoof.group_key);
-  });
 });
-

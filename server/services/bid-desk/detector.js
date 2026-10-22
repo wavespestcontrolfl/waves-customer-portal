@@ -264,19 +264,30 @@ function parseProcore(lines) {
 const normalizeTitle = (title) => String(title || '')
   .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
-// A subject with reply, forward, addendum and reminder markers removed: grouping only, never stored as a title.
-function subjectForGrouping(subject) {
-  return String(subject || '')
-    .replace(/^\s*(?:(?:re|fwd?)\s*:\s*)+/i, '')
-    .replace(/\b(?:addendum|addendums|addenda)\s*(?:no\.?|#)?\s*\d*\s*[:\-–]?/ig, ' ')
-    .replace(/\breminder\s*[:\-–]?/ig, ' ');
+const TEMPLATE_PARSERS = { buildingconnected: parseBuildingConnected, procore: parseProcore };
+
+// The cross-thread identity of a bid. Only a provider template names the GC and the project (read only when the
+// sender is the provider's own domain), so only a template email groups across threads: every other email (a city
+// RFQ, an HOA RFP, a portal notice titled "Invitation to Bid") groups by its own Gmail thread and nothing else.
+// A display name or a generic subject is never an identity. The package is part of the key (one project can carry
+// Termite Treatment and Access Control); group_base lets a later email that names no package join the project's
+// only bid. Long parts are bounded with a hash (keyPart).
+function groupKeys(fields) {
+  const org = normalizeTitle(fields.gc_or_agency);
+  const title = normalizeTitle(fields.project_title);
+  if (!org || !title) return { org: org || null, group_base: null, group_key: null };
+  const base = `${keyPart(org)}|${keyPart(title)}`;
+  const pkg = normalizeTitle(fields.package_name);
+  return { org, group_base: base, group_key: pkg ? `${base}#${keyPart(pkg)}` : base };
 }
 
-// The sender org that groups mail across threads. The GC name is trusted only from a provider template (the
-// template is read only when the sender is the provider's own domain); otherwise the sender's mail DOMAIN, never the
-// From display name, which anyone can set ("Fixture Build Co" <x@elsewhere.example> must not join that GC's bid).
-function senderOrg(email, gc) {
-  return normalizeTitle(gc || domainOf(email.from_address));
+function templateFields(template, lines) {
+  if (!template) return { fields: {}, due: null, jobWalk: null };
+  return {
+    fields: TEMPLATE_PARSERS[template](lines),
+    due: firstDate(labelledValues(lines, 'Bid Due', { allowBare: template === 'procore' }), '23:59'),
+    jobWalk: firstDate(labelledValues(lines, 'Job Walk'), '23:59'),
+  };
 }
 
 /**
@@ -285,47 +296,30 @@ function senderOrg(email, gc) {
  */
 function parseBidEmail(email = {}) {
   const detected = detectBidEmail(email);
-  const template = senderKind(email) === 'buildingconnected' ? 'buildingconnected'
-    : senderKind(email) === 'procore' ? 'procore' : null;
-  const lines = template ? bodyLines(email) : [];
-  const fields = template === 'buildingconnected' ? parseBuildingConnected(lines)
-    : template === 'procore' ? parseProcore(lines) : {};
-  let due = null;
-  let jobWalk = null;
-  if (template) {
-    due = firstDate(labelledValues(lines, 'Bid Due', { allowBare: template === 'procore' }), '23:59');
-    jobWalk = firstDate(labelledValues(lines, 'Job Walk'), '23:59');
-  }
-  const groupTitle = normalizeTitle(fields.project_title || subjectForGrouping(email.subject));
-  const org = senderOrg(email, fields.gc_or_agency);
+  const kindOfSender = senderKind(email);
+  const template = TEMPLATE_PARSERS[kindOfSender] ? kindOfSender : null;
+  const { fields, due, jobWalk } = templateFields(template, template ? bodyLines(email) : []);
+  const pick = (key) => fields[key] || null;
   return {
     template,
     source: detected.source || null,
     kind: detected.kind || classifyKind(email),
-    buyer_name: fields.buyer_name || null,
-    buyer_email: fields.buyer_email || null,
-    gc_or_agency: fields.gc_or_agency || null,
-    project_title: fields.project_title || null,
-    package_name: fields.package_name || null,
+    buyer_name: pick('buyer_name'),
+    buyer_email: pick('buyer_email'),
+    gc_or_agency: pick('gc_or_agency'),
+    project_title: pick('project_title'),
+    package_name: pick('package_name'),
     solicitation_number: null,
-    location: fields.location || null,
-    due_at: due ? due.at : null,
-    due_source_line: due ? due.line : null,
-    job_walk_at: jobWalk ? jobWalk.at : null,
+    location: pick('location'),
+    due_at: due?.at || null,
+    due_source_line: due?.line || null,
+    job_walk_at: jobWalk?.at || null,
     questions_due_at: null,
-    org,
-    // One project can carry several packages (a GC invites us to Termite Treatment and to Access Control): the
-    // package is part of the key. group_base (sender org + project) lets a later email that names no package
-    // join the project's only bid.
-    // Each part is capped so the indexed key stays far below PostgreSQL's B-tree entry limit; the full names stay
-    // in their own columns.
-    group_base: org && groupTitle ? `${keyPart(org)}|${keyPart(groupTitle)}` : null,
-    group_key: org && groupTitle
-      ? `${keyPart(org)}|${keyPart(groupTitle)}${fields.package_name ? `#${keyPart(normalizeTitle(fields.package_name))}` : ''}` : null,
+    ...groupKeys(fields),
   };
 }
 
 module.exports = {
-  detectBidEmail, parseBidEmail, parseDateET, htmlToText, normalizeTitle, senderOrg, classifyKind, domainOf,
+  detectBidEmail, parseBidEmail, parseDateET, htmlToText, normalizeTitle, classifyKind, domainOf,
   BID_WORDS, ADDENDUM_WORDS,
 };

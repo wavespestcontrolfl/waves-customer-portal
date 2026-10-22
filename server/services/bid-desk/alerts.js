@@ -5,7 +5,8 @@
  * (docs/admin-notifications.md). Nothing here writes to a buyer, a contractor or a customer: the audience is the
  * admin bell only.
  */
-const { raiseAdminAlert, cutAtWord, breaksAlertRules, MAX_WHY_CHARS } = require('../admin-alert-compose');
+const { raiseAdminAlert, composeAdminAlert, cutAtWord, breaksAlertRules, MAX_WHY_CHARS } = require('../admin-alert-compose');
+const { raiseAdminAlertWithReopen } = require('../admin-alert-episodes');
 const { fitAction, shortDateET } = require('../admin-alert-names');
 const { daysLeft } = require('./rules');
 
@@ -112,4 +113,14 @@ async function raise({ spec, detail }, dedupeKey, trx) {
   return raiseAdminAlert(CATEGORY, spec, { bell: true, dedupeKey, detail, metadata: { bidId: spec.subject.id }, trx });
 }
 
-module.exports = { newBidSpec, addendumSpec, reminderSpec, raise, linkFor };
+// A recurring alert (a reminder for a due date that can come back after a change: A, then B, then A again) goes
+// through the shared episode path: an auto-closed earlier episode under the same key rings again, a standing one
+// dedupes silently. The copy is composed by the same rules as raise().
+async function raiseReopening({ spec, detail }, dedupeKey, trx) {
+  const composed = composeAdminAlert(spec);
+  return raiseAdminAlertWithReopen(CATEGORY, composed.headline, composed.why, {
+    bell: true, dedupeKey, detail, trx, link: composed.link, metadata: { bidId: spec.subject.id, ...composed.metadata },
+  });
+}
+
+module.exports = { newBidSpec, addendumSpec, reminderSpec, raise, raiseReopening, linkFor };
