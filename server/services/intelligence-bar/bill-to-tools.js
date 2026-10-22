@@ -145,7 +145,8 @@ async function invoicePlan(customerId, payerId) {
 async function pinnedVisits(customerId) {
   const hasSelfPay = await require('../payer').scheduledServicesHasSelfPay(db);
   const q = db('scheduled_services').where({ customer_id: customerId })
-    .whereIn('status', ['pending', 'confirmed', 'rescheduled'])
+    // Every visit not finished or cancelled, today's visit already under way included.
+    .whereNotIn('status', ['completed', 'cancelled'])
     .where('scheduled_date', '>=', require('../../utils/datetime-et').etDateString());
   q.where((w) => {
     w.whereNotNull('payer_id');
@@ -192,7 +193,7 @@ async function buildPlan(input) {
     staying.length
       ? { kind: 'billing', text: `${staying.length} unpaid invoice${staying.length === 1 ? '' : 's'} stay${staying.length === 1 ? 's' : ''} billed to the customer (no visit, or a visit pinned to the customer): ${staying.map(invoiceLine).join(', ')}.` }
       : null,
-    { kind: 'billing', text: 'Any open pay-page session on the customer\'s invoices is cancelled. Nothing is charged or refunded.' },
+    { kind: 'billing', text: 'Open pay-page sessions for the invoices that move, and any combined pay-page session on the customer\'s invoices, are cancelled. Pay links on the invoices that stay keep working. Nothing is charged or refunded.' },
     { kind: 'comms', text: 'Nothing is sent: no text, email or call goes to the customer or the payer.' },
   ].filter(Boolean);
   return {
@@ -208,6 +209,7 @@ async function buildPlan(input) {
     effects,
     sends_to_customer: false,
     // The invoices the handler must find moving, re-checked inside its transaction (never model-visible output).
+    _payer: { display_name: payer.display_name ?? null, company_name: payer.company_name ?? null, payment_terms: payer.payment_terms ?? null },
     _moving: moving.map((inv) => ({ id: String(inv.id), status: inv.status, total: inv.total, credit_applied: inv.credit_applied })),
     _version: {
       customer_id: customer.id,
@@ -249,6 +251,7 @@ async function commitBillTo(input, actionContext) {
       payerId: plan.payer_id,
       expectedPayerId: null,
       expectedInvoices: plan._moving,
+      expectedPayer: plan._payer,
       actor: { technicianId: actionContext?.technicianId || null },
     });
   } catch (err) {

@@ -4410,13 +4410,15 @@ const customerUpdateHandler = async (req, res, next) => {
             // Planned and refused here; the Stripe cancels run as the LAST step of this transaction.
             applySessionRelease = payerRelease.apply || null;
           }
-          // The bar card (req.ibExpectedPayerId set only by setCustomerBillToFromBar) names an ACTIVE payer: the
-          // payer row is held FOR SHARE so a deactivation waits for this edit, and an inactive or missing payer
-          // refuses, rolling everything back before any Stripe cancel.
-          if (req.ibExpectedPayerId !== undefined && updates.payer_id) {
-            const target = await trx('payers').where({ id: updates.payer_id }).forShare().first('active');
-            if (!target || target.active === false) {
-              throw Object.assign(new Error('The payer is no longer active.'), { statusCode: 409, isOperational: true, code: 'preview_changed' });
+          // The bar card (req.ibExpectedPayer set only by setCustomerBillToFromBar) names an ACTIVE payer with the
+          // name and terms it showed: the payer row is held FOR SHARE so an edit or a deactivation waits for this
+          // one, and an inactive, missing or changed payer refuses, rolling everything back before any Stripe cancel.
+          if (req.ibExpectedPayer && updates.payer_id) {
+            const target = await trx('payers').where({ id: updates.payer_id }).forShare().first('active', 'display_name', 'company_name', 'payment_terms');
+            const shown = req.ibExpectedPayer;
+            if (!target || target.active === false || (target.display_name ?? null) !== shown.display_name
+              || (target.company_name ?? null) !== shown.company_name || (target.payment_terms ?? null) !== shown.payment_terms) {
+              throw Object.assign(new Error('The payer changed after the card was shown.'), { statusCode: 409, isOperational: true, code: 'preview_changed' });
             }
           }
           await trx('customers').where({ id: req.params.id }).update(updates);
@@ -6792,8 +6794,9 @@ module.exports = router;
 // pattern): the handler gets the request fields it reads and a capture response, and the promise resolves the
 // reply it would send, { status, json }. An error passed to next() rejects. expectedPayerId: the Bill-To the
 // card showed (null = the customer pays); expectedInvoices: the invoices the card said move ({ id, status, total,
-// credit_applied }), re-checked inside the transaction.
-function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, expectedInvoices, actor }) {
+// credit_applied }), re-checked inside the transaction; expectedPayer: the payer's display_name, company_name and
+// payment_terms the card showed, re-checked on the locked payer row.
+function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, expectedInvoices, expectedPayer, actor }) {
   return new Promise((resolve, reject) => {
     const res = {
       statusCode: 200,
@@ -6807,6 +6810,11 @@ function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, expect
       ip: null,
       get: () => null,
       ibExpectedPayerId: expectedPayerId == null ? null : String(expectedPayerId),
+      ibExpectedPayer: {
+        display_name: expectedPayer?.display_name ?? null,
+        company_name: expectedPayer?.company_name ?? null,
+        payment_terms: expectedPayer?.payment_terms ?? null,
+      },
       ibExpectedInvoices: (expectedInvoices || []).map((e) => ({ id: String(e.id), status: e.status, total: e.total, credit_applied: e.credit_applied })),
     };
     Promise.resolve(customerUpdateHandler(req, res, reject)).catch(reject);

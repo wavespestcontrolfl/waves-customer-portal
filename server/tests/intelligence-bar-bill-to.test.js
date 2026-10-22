@@ -229,6 +229,7 @@ describe('the confirmed run', () => {
     expect(Customers.setCustomerBillToFromBar).toHaveBeenCalledWith({
       customerId: CUST, payerId: '7', expectedPayerId: null, actor: { technicianId: 'staff-1' },
       expectedInvoices: [{ id: LINKED, status: 'sent', total: '90.00', credit_applied: '10.00' }],
+      expectedPayer: { display_name: 'Synthetic Property Co', company_name: null, payment_terms: 'net_30' },
     });
   });
 

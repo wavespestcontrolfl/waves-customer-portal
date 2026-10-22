@@ -46,6 +46,10 @@ const ADMIN = { isAdmin: true, technicianId: null };
     return row.id;
   }
 
+  async function shownPayer(id) {
+    return db('payers').where({ id }).first('display_name', 'company_name', 'payment_terms');
+  }
+
   async function selfPayCustomer() {
     const customerId = randomUUID();
     const visitId = randomUUID();
@@ -104,7 +108,7 @@ const ADMIN = { isAdmin: true, technicianId: null };
     jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({});
     jest.spyOn(StripeService, 'retrievePaymentIntent').mockImplementation(async (id) => ({ id, status: 'requires_payment_method', metadata: {} }));
     // The card showed no moving invoice; the visit-linked one would move.
-    await expect(setCustomerBillToFromBar({ customerId, payerId, expectedPayerId: null, expectedInvoices: [], actor: {} }))
+    await expect(setCustomerBillToFromBar({ customerId, payerId, expectedPayerId: null, expectedInvoices: [], expectedPayer: await shownPayer(payerId), actor: {} }))
       .rejects.toMatchObject({ code: 'preview_changed' });
     expect(await db('customers').where({ id: customerId }).first('payer_id')).toMatchObject({ payer_id: null });
     expect(await db('invoices').where({ id: linkedId }).first()).toMatchObject({ scheduled_send_error: null });
@@ -114,7 +118,17 @@ const ADMIN = { isAdmin: true, technicianId: null };
     const payerId = await payer();
     const { customerId } = await selfPayCustomer();
     await db('payers').where({ id: payerId }).update({ active: false });
-    await expect(setCustomerBillToFromBar({ customerId, payerId, expectedPayerId: null, expectedInvoices: [], actor: {} }))
+    await expect(setCustomerBillToFromBar({ customerId, payerId, expectedPayerId: null, expectedInvoices: [], expectedPayer: await shownPayer(payerId), actor: {} }))
+      .rejects.toMatchObject({ code: 'preview_changed' });
+    expect(await db('customers').where({ id: customerId }).first('payer_id')).toMatchObject({ payer_id: null });
+  });
+
+  test('a payer renamed after the card refuses inside the transaction', async () => {
+    const payerId = await payer();
+    const { customerId } = await selfPayCustomer();
+    const shown = await shownPayer(payerId);
+    await db('payers').where({ id: payerId }).update({ display_name: `${shown.display_name} Renamed` });
+    await expect(setCustomerBillToFromBar({ customerId, payerId, expectedPayerId: null, expectedInvoices: [], expectedPayer: shown, actor: {} }))
       .rejects.toMatchObject({ code: 'preview_changed' });
     expect(await db('customers').where({ id: customerId }).first('payer_id')).toMatchObject({ payer_id: null });
   });
@@ -125,7 +139,7 @@ const ADMIN = { isAdmin: true, technicianId: null };
     const { customerId, linkedId } = await selfPayCustomer();
     // Another edit set a payer after the card was shown (the card showed self-pay).
     await db('customers').where({ id: customerId }).update({ payer_id: other });
-    await expect(setCustomerBillToFromBar({ customerId, payerId, expectedPayerId: null, actor: {} }))
+    await expect(setCustomerBillToFromBar({ customerId, payerId, expectedPayerId: null, expectedPayer: await shownPayer(payerId), actor: {} }))
       .rejects.toMatchObject({ code: 'preview_changed' });
     expect(await db('customers').where({ id: customerId }).first('payer_id')).toMatchObject({ payer_id: other });
     expect(await db('invoices').where({ id: linkedId }).first()).toMatchObject({ scheduled_send_error: null });
