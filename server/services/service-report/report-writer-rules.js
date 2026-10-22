@@ -10,7 +10,6 @@
  * pest writer and the remaining-service modules other than the two below.
  */
 const { HUMAN_PROSE_RULES } = require('../llm/human-prose-rules');
-const { isVisitClaim } = require('./next-visit-claims');
 
 const REPORT_WRITER_RULES_VERSION = 'report_writer_rules_v5';
 
@@ -650,26 +649,27 @@ const WRITER_RULE_SCREENS = Object.freeze([
 // this visit's trade names), only while the rules apply.
 // A visit tied to a supplied date ("your next visit is …", "we'll be back
 // …", "booked for …") is never a reach-out date: the report shows the next
-// visit itself (Codex #5500). A reach-out sentence names a place and a sign
-// the customer can notice, so a window there is a place ("the kitchen
-// window", "window sills") and a pest that comes back or returns is a sign.
-// isVisitClaim (next-visit-claims.js) tells our return ("our technician is
-// returning", "we'll be back") from the pest's ("if they come back"); the
-// words below add booking, a visit named as a thing, scheduling words and a
-// time window ("your window is …", "a two-hour window"). 2026-10-22 replay:
-// "If ants are still trailing by the kitchen window … on Thursday, October
-// 22, text or call us." was refused on every try, and the report fell back
-// to the fixed copy.
-const REACH_OUT_VISIT_WORDS_RE = new RegExp([
-  '\\bbook(?:ed|ing)?\\b',
-  '\\bvisits?\\b',
-  '\\b(?:upcoming|scheduled|appointments?|arriv(?:e|al|ing)|see\\s+you)\\b',
-  '\\bnext\\s+(?:time|visit|service|appointment|treatment)s?\\b',
-  '\\b(?:arrival|time|service|appointment|visit|[\\w-]*hour)\\s+windows?\\b',
-  '\\bwindows?\\s+(?:is|are|was|will|of|between|from|opens?|closes?|starts?|ends?)\\b',
-].join('|'), 'i');
+// visit itself (Codex #5500).
+const REACH_OUT_DATE_MISUSE_RE = new RegExp(`${VISIT_CUE_RE.source}|\\bbook(?:ed|ing)?\\b|\\bvisits?\\b`, 'i');
+// A reach-out sentence names a place and a sign the customer can notice. Three
+// phrasings there trip the visit cues while naming no visit, so they are
+// masked before the test, and nothing else is: a window as a place ("the
+// kitchen window", "window frames"), "next to" or "the next couple of weeks",
+// and an if/when clause in which something other than us comes back or
+// returns ("if the ants along the lanai come back"). 2026-10-22 replay: "If
+// ants are still trailing by the kitchen window … on Thursday, October 22,
+// text or call us." was refused on every try, and the report fell back to the
+// fixed copy.
+const REACH_OUT_PLACE_WINDOW_RE = /\b(?:(?:kitchen|bathroom|bedroom|laundry(?:\s+room)?|garage|living\s+room|dining\s+room|front|back|side|rear|bay|basement|attic|porch|lanai|patio|sliding|screen(?:ed)?|storm|upstairs|downstairs)\s+windows?|windows?\s+(?:sills?|frames?|screens?|tracks?|ledges?|wells?|seals?|casings?|trim|panes?))\b/gi;
+const REACH_OUT_NEXT_PLACE_RE = /\bnext\s+(?:to|couple|few|several)\b/gi;
+const REACH_OUT_SIGN_RETURN_RE = /\b(?:if|when|once|in\s+case)\s+([a-z'’ -]{1,60}?)\s+(?:still\s+)?(?:com(?:e|es|ing)\s+back|returns?|returning)\b/gi;
+const REACH_OUT_PROVIDER_RE = /\b(?:we|we['’](?:ll|re|d|ve)|i|i['’](?:ll|m|d)|us|our|technicians?|techs?|team|crew|specialists?|inspectors?|someone|somebody|waves)\b/i;
 function reachOutDateMisused(sentence) {
-  return isVisitClaim(sentence) || REACH_OUT_VISIT_WORDS_RE.test(sentence);
+  const masked = String(sentence || '')
+    .replace(REACH_OUT_PLACE_WINDOW_RE, 'the place')
+    .replace(REACH_OUT_NEXT_PLACE_RE, 'near')
+    .replace(REACH_OUT_SIGN_RETURN_RE, (full, subject) => (REACH_OUT_PROVIDER_RE.test(subject) ? full : 'if it shows again'));
+  return REACH_OUT_DATE_MISUSE_RE.test(masked);
 }
 // The reach-out date is the day to get in touch: its sentence must ask the
 // customer to contact us, and the date never ends a period ("keeps working

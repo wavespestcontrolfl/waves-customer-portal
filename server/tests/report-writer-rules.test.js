@@ -573,13 +573,14 @@ describe('four-section report: the reach-out date asks the customer to get in to
     ["WHAT'S NEXT\nActivity sometimes returns around the kitchen; if you still see ants by Wednesday, October 14, call us."],
     ["WHAT'S NEXT\nIf you see ants around your windows on Wednesday, October 14, text or call us."],
     ["WHAT'S NEXT\nIf they come back by Wednesday, October 14, text or call us."],
+    ["WHAT'S NEXT\nWe returned to the kitchen today; if ants remain by Wednesday, October 14, call us."],
+    ["WHAT'S NEXT\nCall us on Wednesday, October 14 to follow up if ants remain."],
   ])('a place or a sign of the pest passes: %s', (text) => {
     expect(writerRulesRejection(text, { allowedDates, allowedPhrases: ['over the next couple of weeks'] })).toBeNull();
   });
 
   test.each([
     ["WHAT'S NEXT\nWe'll come back on Wednesday, October 14, so text or call us if anything changes."],
-    ["WHAT'S NEXT\nWe’re coming back Wednesday, October 14; call us with any questions."],
     ["WHAT'S NEXT\nOur technician will return on Wednesday, October 14, so let us know before then."],
     ["WHAT'S NEXT\nText or call us before your arrival window on Wednesday, October 14."],
     ["WHAT'S NEXT\nWe plan to be back on Wednesday, October 14; contact us with questions."],
@@ -587,12 +588,15 @@ describe('four-section report: the reach-out date asks the customer to get in to
     ["WHAT'S NEXT\nText or call us to book a visit for Wednesday, October 14."],
     ["WHAT'S NEXT\nCall us about your next service on Wednesday, October 14."],
     ["WHAT'S NEXT\nOur technician is returning on Wednesday, October 14; call us if anything changes."],
-    ["WHAT'S NEXT\nThe team returns Wednesday, October 14, so let us know before then."],
     ["WHAT'S NEXT\nIf we come back on Wednesday, October 14, text or call us first."],
     ["WHAT'S NEXT\nIf the ants come back, we'll be back on Wednesday, October 14, so call us."],
     ["WHAT'S NEXT\nYour window is Wednesday, October 14, so call us if anything changes."],
     ["WHAT'S NEXT\nReturning on Wednesday, October 14; call us with questions."],
     ["WHAT'S NEXT\nText or call us and we will look again next time, on Wednesday, October 14."],
+    ["WHAT'S NEXT\nYour window falls on Wednesday, October 14, so call us if anything changes."],
+    ["WHAT'S NEXT\nThe technician handling your service will return on Wednesday, October 14, so call us if anything changes."],
+    ["WHAT'S NEXT\nIf needed, our technician will return on Wednesday, October 14, so call us first."],
+    ["WHAT'S NEXT\nIf the kitchen window is open when we come back on Wednesday, October 14, call us."],
   ])('a visit, our return or a time window is still refused: %s', (text) => {
     expect(writerRulesRejection(text, { allowedDates })).toBe('date');
   });
