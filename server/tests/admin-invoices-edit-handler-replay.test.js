@@ -3,7 +3,6 @@
  * handlers (admin-invoices.js editInvoiceFromBar, unvoidInvoiceFromBar, archiveInvoiceFromBar, unarchiveInvoiceFromBar).
  * The page route and the shim reach the same service call; the page's call is unchanged (no `expected`); the bar adds only
  * the invoice version the card showed, and a changed invoice is a 409 PREVIEW_CHANGED. Synthetic data only.
- * The apply-credit handler is replayed in admin-invoices-apply-credit-bar-replay.test.js.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
@@ -32,7 +31,8 @@ const router = require('../routes/admin-invoices');
 
 const INV = '00000000-0000-4000-8000-0000000000a1';
 const UPDATED = new Date('2099-01-01T12:00:00.123Z');
-const EXPECTED_EDIT = { status: 'sent', updatedAt: UPDATED.getTime(), total: 129, creditApplied: 0, paymentIntentId: null, newTotal: 149 };
+const CUST = '00000000-0000-4000-8000-0000000000c1';
+const EXPECTED_EDIT = { status: 'sent', updatedAt: UPDATED.getTime(), total: 129, creditApplied: 0, paymentIntentId: null, customerId: CUST };
 const BODY = { due_date: '2099-02-01' };
 
 async function viaPage(path, { method = 'POST', body } = {}) {
@@ -71,7 +71,7 @@ const driftError = (what) => Object.assign(new Error(`Invoice changed while ${wh
 beforeEach(() => {
   jest.clearAllMocks();
   calls = [];
-  invoiceRow = { id: INV, status: 'void', updated_at: UPDATED, archived_at: null, total: '129.00' };
+  invoiceRow = { id: INV, customer_id: CUST, status: 'void', updated_at: UPDATED, archived_at: null, total: '129.00' };
   updateResult = [{ ...invoiceRow, archived_at: '2099-01-02T00:00:00Z' }];
   db.mockReset();
   db.mockImplementation(() => recorder());
@@ -120,7 +120,7 @@ describe('PUT /:id — editInvoiceFromBar', () => {
 });
 
 describe('POST /:id/unvoid — unvoidInvoiceFromBar', () => {
-  const EXPECTED = { status: 'void', updatedAt: UPDATED.getTime() };
+  const EXPECTED = { status: 'void', updatedAt: UPDATED.getTime(), customerId: CUST };
 
   test('the page calls unvoidInvoice(id) with no options; the bar adds only the card’s version; both answer alike', async () => {
     InvoiceService.unvoidInvoice.mockResolvedValue({ id: INV, status: 'draft' });
@@ -155,13 +155,13 @@ describe.each([
   ['archive', 'archiveInvoiceFromBar', '/archive', { status: 'void', archived: false }, { archived_at: null }, /Only voided|archived_at/],
   ['unarchive', 'unarchiveInvoiceFromBar', '/unarchive', { status: 'void', archived: true }, { archived_at: new Date('2099-01-02T00:00:00Z') }, null],
 ])('POST /:id/%s — %s', (name, shim, path, versionKeys, rowChange) => {
-  const expected = () => ({ ...versionKeys, updatedAt: UPDATED.getTime() });
+  const expected = () => ({ ...versionKeys, updatedAt: UPDATED.getTime(), customerId: CUST });
   const writes = () => calls.filter(([n]) => n === 'update');
   const predicates = () => calls.filter(([n]) => ['whereRaw', 'whereNull', 'whereNotNull'].includes(n));
   const updateBody = name === 'archive' ? { archived_at: 'NOW()', updated_at: 'NOW()' } : { archived_at: null, updated_at: 'NOW()' };
 
   beforeEach(() => {
-    invoiceRow = { id: INV, status: 'void', updated_at: UPDATED, total: '129.00', archived_at: null, ...rowChange };
+    invoiceRow = { id: INV, customer_id: CUST, status: 'void', updated_at: UPDATED, total: '129.00', archived_at: null, ...rowChange };
     updateResult = [{ ...invoiceRow, archived_at: name === 'archive' ? '2099-01-02T00:00:00Z' : null }];
   });
 
@@ -179,16 +179,18 @@ describe.each([
     expect(predicates().find((c) => /date_trunc/.test(c[1]))[2]).toEqual([UPDATED.toISOString()]);
     expect(predicates().map((c) => c[0])).toEqual(expect.arrayContaining([versionKeys.archived ? 'whereNotNull' : 'whereNull']));
     expect(calls.filter(([n, col, value]) => n === 'where' && col === 'status' && value === 'void').length).toBe(1);
+    // The customer the card named is a predicate of the write too (a merge can repoint the invoice without moving updated_at).
+    expect(calls.filter(([n, col, value]) => n === 'where' && col === 'customer_id' && value === CUST).length).toBe(1);
   });
 
-  test('a changed invoice (edit time, status or archive state) is a 409 PREVIEW_CHANGED and nothing is written', async () => {
-    for (const change of [{ updated_at: new Date('2099-01-02T00:00:00Z') }, { status: 'draft' }, { archived_at: versionKeys.archived ? null : new Date() }]) {
+  test('a changed invoice (edit time, customer, status or archive state) is a 409 PREVIEW_CHANGED and nothing is written', async () => {
+    for (const change of [{ updated_at: new Date('2099-01-02T00:00:00Z') }, { customer_id: '00000000-0000-4000-8000-0000000000c2' }, { status: 'draft' }, { archived_at: versionKeys.archived ? null : new Date() }]) {
       calls = [];
       invoiceRow = { ...invoiceRow, ...change };
       const answer = await router[shim]({ invoiceId: INV, expected: expected() });
       expect(answer).toMatchObject({ status: 409, json: { code: 'PREVIEW_CHANGED' } });
       expect(writes()).toEqual([]);
-      invoiceRow = { id: INV, status: 'void', updated_at: UPDATED, total: '129.00', archived_at: null, ...rowChange };
+      invoiceRow = { id: INV, customer_id: CUST, status: 'void', updated_at: UPDATED, total: '129.00', archived_at: null, ...rowChange };
     }
   });
 
@@ -205,7 +207,7 @@ describe.each([
   test('not found is a 404; the idempotent case answers the row without a write', async () => {
     invoiceRow = undefined;
     await expect(router[shim]({ invoiceId: INV, expected: expected() })).resolves.toEqual({ status: 404, json: { error: 'Invoice not found' } });
-    invoiceRow = { id: INV, status: 'void', updated_at: UPDATED, total: '129.00', archived_at: name === 'archive' ? new Date('2099-01-02T00:00:00Z') : null };
+    invoiceRow = { id: INV, customer_id: CUST, status: 'void', updated_at: UPDATED, total: '129.00', archived_at: name === 'archive' ? new Date('2099-01-02T00:00:00Z') : null };
     calls = [];
     // Already in the wanted state AND the version differs only in the archive flag: the bar’s pin sees the change first.
     const answer = await router[shim]({ invoiceId: INV, expected: { status: 'void', updatedAt: UPDATED.getTime() } });

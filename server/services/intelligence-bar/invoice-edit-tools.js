@@ -3,26 +3,24 @@
  * server/services/intelligence-bar/invoice-edit-tools.js
  *
  * Owner ruling 2026-10-12 ("yes to all recommendations", Stage 3 purpose-built cards): a card that replays a screen's
- * own handler. Five tools, each its own confirm card, all dark behind GATE_IB_INVOICE_EDITS (which needs GATE_IB_PLATFORM):
+ * own handler. Four tools, each its own confirm card, all dark behind GATE_IB_INVOICE_EDITS (which needs GATE_IB_PLATFORM):
  *
  *   edit_invoice         PUT  /admin/invoices/:id            (invoiceUpdateHandler -> InvoiceService.update)
- *                        title, line items, notes, due date, tax rate. Not email_message (customer-facing email text).
- *   apply_invoice_credit POST /admin/invoices/:id/apply-credit  (invoiceApplyCreditHandler)
- *                        pays the WHOLE balance due from the customer's ACCOUNT CREDIT, never a card.
+ *                        title, notes and due date ONLY. Line items and the tax rate (anything that moves the total) stay on
+ *                        the Invoices page; so does apply credit.
  *   archive_invoice      POST /admin/invoices/:id/archive    (invoiceArchiveHandler)   a voided invoice leaves the default list
  *   unarchive_invoice    POST /admin/invoices/:id/unarchive  (invoiceUnarchiveHandler)
  *   unvoid_invoice       POST /admin/invoices/:id/unvoid     (invoiceUnvoidHandler -> InvoiceService.unvoidInvoice)
  *                        a voided invoice returns to a draft: editable and collectible again.
  *
- * Each runs the route's own handler in process (admin-invoices.js editInvoiceFromBar, applyCreditFromBar,
- * archiveInvoiceFromBar, unarchiveInvoiceFromBar, unvoidInvoiceFromBar), so every refusal and rule is the route's. The
- * card is narrower than the screen where the screen's case needs more than a card can show (see each tool).
- * NONE of them sends a text, email or call, charges a card, or refunds: every card says so.
+ * Each runs the route's own handler in process (admin-invoices.js editInvoiceFromBar, archiveInvoiceFromBar,
+ * unarchiveInvoiceFromBar, unvoidInvoiceFromBar), so every refusal and rule is the route's.
+ * NONE of them moves money, sends a text, email or call, charges a card, or refunds: every card says so.
  *
  * Always a confirm card (write-gates.js two-step), admin only, never owner-direct, platform path only.
  *
  *   unconfirmed -> a PREVIEW: nothing is written. Its `_version` pins what the card showed (the invoice's status, edit
- *                  time, amounts, links and the exact request body).
+ *                  time, amounts, customer, links and the exact request body).
  *   confirmed   -> re-derives the preview and refuses with preview_changed on any drift, then runs the handler with the
  *                  invoice version the card showed (`expected`, services/invoice-bar-expected.js); the handler enforces
  *                  it on the row it reads and again inside its own write, so a change after the check loses.
@@ -38,10 +36,6 @@ function invoiceEditsLive() {
 
 const TITLE_LIMIT = 300;
 const NOTES_LIMIT = 2000;
-const LINE_TEXT_LIMIT = 300;
-const NOTE_LIMIT = 400;
-const MAX_LINE_CHANGES = 30;
-const MAX_TAX_PERCENT = 20;
 
 const INVOICE_REF = {
   invoice_id: { type: 'string', format: 'uuid', description: 'The existing invoice (from get_customer_invoices)' },
@@ -51,12 +45,12 @@ const INVOICE_REF = {
 const INVOICE_EDIT_TOOLS = [
   {
     name: 'edit_invoice',
-    description: `Edit ONE existing unpaid invoice: the Invoices page "Edit" (title, line items, notes, due date, tax rate). The first call returns a PREVIEW and writes nothing: each field before -> after and the old total -> new total (computed with the Invoices page's own arithmetic). The operator approves on the confirmation card; the confirmed run re-checks all of it and refuses if the invoice changed.
-Pass only what changes. title and notes: text ("" clears it). due_date: YYYY-MM-DD. tax_rate_percent: for a commercial customer, e.g. 7 for 7%. line_changes: a list; each entry is either an EXISTING line {line_number (1-based, as numbered on the card), description?, quantity?, unit_price?} or {line_number, remove: true}, or a NEW line {description, unit_price, quantity?}. Discount lines, deposit credits and membership-dues lines are not edited here (the Invoices page does that). Call with only the invoice to see its numbered lines.
-Allowed only where the Invoices page allows Edit: a draft, scheduled, sent, viewed or overdue invoice with no open card-payment session, no payment plan, no annual-plan link, no payment or credit applied. Refused: paid, prepaid, processing, refunded, void and every invoice with money received or in flight.
+    description: `Edit the title, notes or due date of ONE existing unpaid invoice: the Invoices page "Edit", for those three fields only. Line items and the tax rate are NOT changed here (they change the total): do those on the Invoices page. The first call returns a PREVIEW and writes nothing: each field before -> after. The operator approves on the confirmation card; the confirmed run re-checks all of it and refuses if the invoice changed.
+Pass only what changes. title and notes: text ("" clears it). due_date: YYYY-MM-DD. The total never changes.
+Allowed only where the Invoices page allows Edit: a draft, scheduled, sent, viewed or overdue invoice with no open card-payment session, no payment plan, no annual-plan link. Refused: paid, prepaid, processing, refunded, void and every invoice with money received or in flight.
 Effects: the invoice row changes. If the customer already received the invoice, the bar does NOT resend it; the copy they hold is out of date until it is sent again. Nothing is sent to the customer or anyone (no text, email or call), no card is charged and nothing is refunded. Admin only.
 Takes invoice_id OR invoice_number, exactly one.
-Use for: "change the due date on this invoice", "edit invoice WPC-2026-0534", "update the invoice notes", "change the price on line 2", "add a line to this invoice", "remove the second line item", "change the invoice title", "set the tax rate to 7 percent".`,
+Use for: "change the due date on this invoice", "edit invoice WPC-2026-0534", "update the invoice notes", "change the invoice title".`,
     input_schema: {
       type: 'object',
       properties: {
@@ -64,39 +58,6 @@ Use for: "change the due date on this invoice", "edit invoice WPC-2026-0534", "u
         title: { type: 'string', description: `The invoice title (up to ${TITLE_LIMIT} characters; "" clears it)` },
         notes: { type: 'string', description: `The invoice notes (up to ${NOTES_LIMIT} characters; "" clears them)` },
         due_date: { type: 'string', description: 'The new due date, YYYY-MM-DD' },
-        tax_rate_percent: { type: 'number', description: `Tax rate in percent (0 to ${MAX_TAX_PERCENT}), commercial customers only: 7 means 7%` },
-        line_changes: {
-          type: 'array',
-          description: 'Changes to the invoice lines: edit or remove an existing line by line_number, or add a new line with description and unit_price',
-          items: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              line_number: { type: 'integer', description: 'The existing line, numbered from 1 as on the card' },
-              description: { type: 'string', description: `The line text (up to ${LINE_TEXT_LIMIT} characters)` },
-              quantity: { type: 'number', description: 'Quantity (more than 0)' },
-              unit_price: { type: 'number', description: 'Price of one unit in dollars (more than 0; discounts are not added here)' },
-              remove: { type: 'boolean', description: 'true removes the line (needs line_number)' },
-            },
-          },
-        },
-      },
-    },
-    _sideEffects: true,
-  },
-  {
-    name: 'apply_invoice_credit',
-    description: `Pay ONE existing unpaid invoice from the customer's ACCOUNT CREDIT: the Invoices page "Apply credit". Money moves only from account credit already on the customer's balance, never a card. The first call returns a PREVIEW and writes nothing: the credit available, the amount applied (the WHOLE balance due; a partial application is not offered), the balance due after ($0.00, the invoice becomes prepaid) and the credit left. The operator approves on the confirmation card; the confirmed run re-checks all of it and refuses if anything changed.
-Effects: the customer's credit goes down by the balance due, the invoice is marked prepaid, its payment reminders stop and any active payment plan on it is completed. Nothing is sent to the customer (no text, email or call), no card is charged and nothing is refunded.
-Refused: not enough credit (the card shows the shortfall), an invoice billed to a payer, an invoice that is not collectible (paid, prepaid, void, refunded), one with an open card-payment session, an annual-plan invoice, an invoice linked to any project (a report may wait on its payment), an invoice with a saved-card charge in progress. Admin only.
-Optional amount must equal the balance due (the Invoices page applies the whole balance). Optional note (up to ${NOTE_LIMIT} characters) goes on the credit entry. Takes invoice_id OR invoice_number, exactly one.
-Use for: "apply the customer's credit to this invoice", "use his account credit on invoice WPC-2026-0534", "pay this invoice from credit", "cover this invoice with the credit balance".`,
-    input_schema: {
-      type: 'object',
-      properties: {
-        ...INVOICE_REF,
-        amount: { type: 'number', description: 'Optional check: the dollars to apply. Must equal the balance due (the Invoices page applies the whole balance).' },
-        note: { type: 'string', description: `Optional note for the credit entry (up to ${NOTE_LIMIT} characters)` },
       },
     },
     _sideEffects: true,
@@ -134,11 +95,9 @@ const TOOL_NAMES = INVOICE_EDIT_TOOLS.map((t) => t.name);
 
 const money = (value) => `$${(Math.round((Number(value) || 0) * 100) / 100).toFixed(2)}`;
 const cents = (value) => Math.round((Number(value) || 0) * 100);
-const round2 = (value) => Math.round((Number(value) || 0) * 100) / 100;
 const msOf = (value) => (value ? new Date(value).getTime() : null);
 const digest = (value) => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 32);
 const refusal = (error, code, extra = {}) => ({ error, code, ...extra });
-const blank = (value) => value === undefined || value === null || value === '';
 const oneLine = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
 
 const NOTHING_SENT = { kind: 'comms', text: 'Nothing is sent: no text, email or call goes to the customer or anyone else. No card is charged and nothing is refunded.' };
@@ -175,18 +134,6 @@ const DELIVERED_STATUSES = new Set(['sent', 'viewed', 'overdue']);
 const ownerRule = (error, reason, invoiceId) => refusal(`${error} Refunds and card charges stay on the Invoices page.`, 'by_owner_rule', { reason, invoice_id: invoiceId });
 const toPage = (error, reason, invoiceId) => refusal(`${error} Do it from the Invoices page.`, 'needs_invoices_page', { reason, invoice_id: invoiceId });
 
-function lineAmount(li) {
-  const amount = Number(li?.amount);
-  if (Number.isFinite(amount) && li?.amount !== null && li?.amount !== '') return amount;
-  return round2((Number(li?.quantity) || 1) * (Number(li?.unit_price) || 0));
-}
-const lineText = (li) => {
-  const qty = Number(li?.quantity) || 1;
-  const unit = Number(li?.unit_price);
-  const amount = lineAmount(li);
-  return `${oneLine(li?.description || li?.name || 'Line') || 'Line'} — ${qty} × ${money(Number.isFinite(unit) ? unit : amount)} = ${money(amount)}`;
-};
-
 // A day as the Invoices page shows it (ET calendar day); a pg DATE arrives as a Date at UTC midnight.
 function dayOf(value) {
   if (!value) return null;
@@ -202,11 +149,8 @@ async function statementOf(invoice) {
   return db('payer_statements').where({ id: invoice.payer_statement_id }).first('status');
 }
 
-async function paymentPlanOf(invoice, { activeOnly = false } = {}) {
-  const q = db('payment_plans').where({ invoice_id: invoice.id });
-  if (activeOnly) q.where({ status: 'active' });
-  else q.whereNot('status', 'cancelled');
-  return q.first('id', 'status');
+async function activePlanOf(invoice) {
+  return db('payment_plans').where({ invoice_id: invoice.id, status: 'active' }).first('id', 'status');
 }
 
 // Read-only saved-card charge fence (the handlers re-run theirs under their own locks).
@@ -291,86 +235,10 @@ function readDueDate(input) {
   return { set: { dueDate: given }, any: true };
 }
 
-function readTaxRate(input) {
-  if (input.tax_rate_percent === undefined) return null;
-  const pct = Number(input.tax_rate_percent);
-  if (blank(input.tax_rate_percent) || !Number.isFinite(pct) || pct < 0 || pct > MAX_TAX_PERCENT) return refusal(`tax_rate_percent must be a number from 0 to ${MAX_TAX_PERCENT}`, 'invalid_tax_rate');
-  // 7 -> 0.07 (the column holds a fraction, 4 places)
-  return { set: { taxRate: Math.round(pct * 100) / 10000, taxPercent: pct }, any: true };
-}
-
-const invalidLine = (message) => refusal(message, 'invalid_line_change');
-
-// The existing line a change names (counted from 1, once per line).
-function readLineNumber(raw, seen) {
-  if (raw.line_number === undefined) return {};
-  if (!Number.isInteger(raw.line_number) || raw.line_number < 1) return invalidLine('line_number counts from 1');
-  if (seen.has(raw.line_number)) return invalidLine(`Line ${raw.line_number} is named twice; give one change per line`);
-  seen.add(raw.line_number);
-  return { line: raw.line_number };
-}
-
-function readLineDescription(raw) {
-  if (raw.description === undefined) return {};
-  const text = oneLine(raw.description);
-  if (!text) return invalidLine('A line needs a description');
-  if (text.length > LINE_TEXT_LIMIT) return invalidLine(`A line description is limited to ${LINE_TEXT_LIMIT} characters`);
-  return { description: text };
-}
-
-function readLineNumberField(raw, key) {
-  if (raw[key] === undefined) return {};
-  const n = Number(raw[key]);
-  if (blank(raw[key]) || !Number.isFinite(n) || n <= 0) return invalidLine(`A line ${key} must be more than 0 (discounts are added on the Invoices page)`);
-  if (key === 'unit_price' && Math.abs(n * 100 - Math.round(n * 100)) > 1e-6) return invalidLine('unit_price takes at most two decimals');
-  return { [key]: n };
-}
-
-// A changed or new line: description, quantity, unit_price.
-function readLineEdit(raw, line) {
-  const parts = [readLineDescription(raw), readLineNumberField(raw, 'quantity'), readLineNumberField(raw, 'unit_price')];
-  const failed = parts.find((part) => part.error);
-  if (failed) return failed;
-  const change = Object.assign({}, ...parts);
-  if (!line) {
-    if (!change.description || change.unit_price === undefined) return invalidLine('A new line needs a description and a unit_price');
-  } else if (change.description === undefined && change.quantity === undefined && change.unit_price === undefined) {
-    return invalidLine(`Line ${line} names no change`);
-  }
-  return change;
-}
-
-function readLineChange(raw, seen) {
-  if (!raw || typeof raw !== 'object') return invalidLine('Each line change must be an object');
-  const named = readLineNumber(raw, seen);
-  if (named.error) return named;
-  if (raw.remove === true) {
-    if (!named.line) return invalidLine('remove needs a line_number');
-    if (raw.description !== undefined || raw.quantity !== undefined || raw.unit_price !== undefined) return invalidLine('A removed line takes no other change');
-    return { ...named, remove: true };
-  }
-  const edit = readLineEdit(raw, named.line);
-  return edit.error ? edit : { ...named, ...edit };
-}
-
-function readLineChanges(input) {
-  if (input.line_changes === undefined) return null;
-  if (!Array.isArray(input.line_changes)) return invalidLine('line_changes must be a list');
-  if (input.line_changes.length > MAX_LINE_CHANGES) return invalidLine(`At most ${MAX_LINE_CHANGES} line changes at once`);
-  const seen = new Set();
-  const lineChanges = [];
-  for (const raw of input.line_changes) {
-    const change = readLineChange(raw, seen);
-    if (change.error) return change;
-    lineChanges.push(change);
-  }
-  return { set: { lineChanges }, any: lineChanges.length > 0 };
-}
-
-const EDIT_INPUT_READERS = [readTextField('title', TITLE_LIMIT), readTextField('notes', NOTES_LIMIT), readDueDate, readTaxRate, readLineChanges];
+const EDIT_INPUT_READERS = [readTextField('title', TITLE_LIMIT), readTextField('notes', NOTES_LIMIT), readDueDate];
 
 function readEditInput(input) {
-  const out = { lineChanges: [] };
+  const out = {};
   let any = false;
   for (const read of EDIT_INPUT_READERS) {
     const part = read(input);
@@ -379,115 +247,11 @@ function readEditInput(input) {
     Object.assign(out, part.set);
     any = any || part.any;
   }
-  if (!any) return refusal('Nothing to change: give a title, notes, due_date, tax_rate_percent or line_changes.', 'nothing_to_change');
+  if (!any) return refusal('Nothing to change: give a title, notes or due_date. Line items and the tax rate are changed on the Invoices page.', 'nothing_to_change');
   return out;
 }
 
-const numbered = (lines) => lines.map((li, i) => `${i + 1}. ${lineText(li)}`);
-
-// A line the bar will touch must be a plain service line.
-function plainLineRefusal(li, number) {
-  if (Number(lineAmount(li)) <= 0 || li.category === 'deposit_credit' || li.discount_id || li.discount_for || li.stored_discount_source) {
-    return `Line ${number} is a discount or credit line. Discount lines are changed on the Invoices page.`;
-  }
-  if (li.membership_dues_month) return `Line ${number} is a membership-dues line, which stays as it is.`;
-  return null;
-}
-
-// A stored line with an amount but no unit price (a legacy amount-only line), written so it keeps its amount when the bar resubmits
-// every line: InvoiceService.update prices each line as quantity * (unit_price || 0), so an untouched amount-only line would be
-// saved as $0. Returns null when the amount does not split evenly over its quantity (the bar then refuses; the page edits it).
-// The page's update also rewrites every line's amount as round2(quantity * unit_price) (normalizeInvoiceLineItems), so a stored
-// amount that differs from that product (e.g. 3 x $33.33 stored as $100.00) would silently change on any retotal: refused too.
-function canonicalLine(li) {
-  const hasUnit = li.unit_price !== undefined && li.unit_price !== null && li.unit_price !== '' && Number.isFinite(Number(li.unit_price));
-  if (hasUnit) {
-    const hasAmount = li.amount !== undefined && li.amount !== null && li.amount !== '' && Number.isFinite(Number(li.amount));
-    if (hasAmount && round2((Number(li.quantity) || 1) * Number(li.unit_price)) !== round2(Number(li.amount))) return null;
-    return { ...li };
-  }
-  const qty = Number(li.quantity) || 1;
-  const amount = lineAmount(li);
-  const unit = round2(amount / qty);
-  if (round2(qty * unit) !== round2(amount)) return null;
-  return { ...li, quantity: qty, unit_price: unit, amount: round2(amount) };
-}
-
-// Why one existing line cannot take this change (a refusal), or null.
-function lineChangeRefusal(stored, li, change) {
-  if (!li) return refusal(`The invoice has ${stored.length} line${stored.length === 1 ? '' : 's'}; there is no line ${change.line}.`, 'line_not_found', { lines: numbered(stored) });
-  const why = plainLineRefusal(li, change.line);
-  if (why) return refusal(why, 'line_not_editable', { lines: numbered(stored) });
-  if (change.remove && stored.some((other) => other.discount_for && li.client_id && String(other.discount_for) === String(li.client_id))) {
-    return refusal(`Line ${change.line} has a discount attached. Remove it from the Invoices page.`, 'line_not_editable', { lines: numbered(stored) });
-  }
-  return null;
-}
-
-// An existing line after a quantity / price / description change. A rename clears the catalog scope (service_key /
-// service_category), as the Invoices page editor does: the server trusts those fields for service-scoped document discounts, so
-// a renamed line must not keep its old service's discount.
-function changedLine(li, change) {
-  const qty = change.quantity !== undefined ? change.quantity : (Number(li.quantity) || 1);
-  const unit = change.unit_price !== undefined ? change.unit_price : (Number(li.unit_price) || lineAmount(li) / qty);
-  const renamed = change.description !== undefined && change.description !== li.description;
-  return {
-    ...li,
-    ...(change.description !== undefined ? { description: change.description } : {}),
-    ...(renamed && (li.service_key != null || li.service_category != null) ? { service_key: null, service_category: null } : {}),
-    quantity: qty,
-    unit_price: unit,
-    amount: round2(qty * unit),
-  };
-}
-
-// The new lines, each with an id unique on the invoice. Every id already on the invoice (even a line this edit removes) stays
-// unique: a new line's id is derived from the invoice, the line and a salt, and the salt moves on until the id is free. The stored
-// lines are part of the card's pinned version, so the same request gives the same ids at preview and at Confirm; an identical line
-// added by a later edit gets the next free id.
-function newLines(stored, changes, invoiceId) {
-  const taken = new Set(stored.map((li) => li.client_id).filter(Boolean).map(String));
-  return changes.filter((change) => !change.line).map((change, i) => {
-    const qty = change.quantity !== undefined ? change.quantity : 1;
-    let salt = 0;
-    let clientId;
-    do {
-      clientId = `li_bar_${digest([invoiceId, i + 1, change.description, qty, change.unit_price, salt]).slice(0, 12)}`;
-      salt += 1;
-    } while (taken.has(clientId));
-    taken.add(clientId);
-    return { client_id: clientId, description: change.description, quantity: qty, unit_price: change.unit_price, amount: round2(qty * change.unit_price) };
-  });
-}
-
-function applyLineChanges(stored, changes, invoiceId) {
-  const next = stored.map(canonicalLine);
-  const uneven = next.findIndex((li) => li === null);
-  if (uneven !== -1) {
-    return refusal(`Line ${uneven + 1} has an amount that is not its quantity times its unit price, so the bar cannot resave it unchanged. Edit this invoice on the Invoices page.`, 'line_not_editable', { lines: numbered(stored) });
-  }
-  const dropped = new Set();
-  const touched = []; // { kind, number, before, after }
-  for (const change of changes.filter((c) => c.line)) {
-    const idx = change.line - 1;
-    const refused = lineChangeRefusal(stored, next[idx], change);
-    if (refused) return refused;
-    if (change.remove) dropped.add(idx);
-    else next[idx] = changedLine(next[idx], change);
-    touched.push(change.remove
-      ? { kind: 'removed', number: change.line, before: lineText(stored[idx]), after: '(removed)' }
-      : { kind: 'changed', number: change.line, before: lineText(stored[idx]), after: lineText(next[idx]) });
-  }
-  const added = newLines(stored, changes, invoiceId);
-  for (const li of added) touched.push({ kind: 'added', number: null, before: '(new line)', after: lineText(li) });
-  const out = [...next.filter((_li, idx) => !dropped.has(idx)), ...added];
-  if (!out.some((li) => lineAmount(li) > 0)) {
-    return refusal('That would leave the invoice with no billable line. Void the invoice instead.', 'invoice_empty', { lines: numbered(stored) });
-  }
-  return { lines: out, touched };
-}
-
-async function editRefusal(invoice, retotal) {
+async function editRefusal(invoice) {
   const at = invoice.id;
   const status = String(invoice.status || '').toLowerCase();
   if (MONEY_STATUSES.has(status)) {
@@ -508,25 +272,9 @@ async function editRefusal(invoice, retotal) {
   } catch {
     return refusal('The bar could not verify whether this is an annual-plan invoice, so it was not offered. Edit it from the Invoices page.', 'unverified', { invoice_id: at });
   }
-  if (await paymentPlanOf(invoice, { activeOnly: true })) return refusal('This invoice has an active payment plan. Cancel the plan before editing the invoice.', 'not_editable', { reason: 'payment_plan', invoice_id: at });
+  if (await activePlanOf(invoice)) return refusal('This invoice has an active payment plan. Cancel the plan before editing the invoice.', 'not_editable', { reason: 'payment_plan', invoice_id: at });
   const statement = await statementOf(invoice);
   if (statement && statement.status !== 'open') return refusal('This invoice is on a finalized payer statement. Adjust it with a credit on the next statement.', 'not_editable', { reason: 'finalized_statement', invoice_id: at });
-  if (retotal) {
-    if (invoice.payment_recorded_at) return ownerRule(`A payment is already recorded on invoice ${invoice.invoice_number}, so its amounts cannot change.`, 'payment_recorded', at);
-    if (cents(invoice.credit_applied) > 0) return refusal('This invoice has account credit applied. Reverse the applied credit before editing line items or the tax rate.', 'not_editable', { reason: 'credit_applied', invoice_id: at });
-    if (parseLines(invoice.line_items).some((li) => li.category === 'deposit_credit')) {
-      return refusal('This invoice carries an estimate deposit credit. Void it and create a replacement instead of editing amounts.', 'not_editable', { reason: 'deposit_credit', invoice_id: at });
-    }
-    const applied = await db('payments').whereIn('status', ['paid', 'processing', 'disputed'])
-      .whereRaw("(metadata::jsonb ->> 'invoice_id' = ? OR metadata::jsonb ->> 'dispute_invoice_id' = ? OR metadata::jsonb ->> 'waves_invoice_id' = ?)", [String(at), String(at), String(at)])
-      .first('id', 'status');
-    if (applied) return ownerRule(`A payment (${applied.status}) is on file for invoice ${invoice.invoice_number}, so its amounts cannot change.`, 'payment_on_file', at);
-    const attempt = await db('stripe_invoice_charge_attempts').where({ invoice_id: at }).whereNull('resolved_at').whereIn('status', ['claimed', 'ambiguous']).first('id');
-    if (attempt) return ownerRule(`A saved-card charge for invoice ${invoice.invoice_number} is still processing or awaiting reconciliation.`, 'charge_in_progress', at);
-    if (await require('../invoice')._invoiceHasUnbackedDocumentDiscount(invoice, invoice.line_items, db)) {
-      return toPage(`Invoice ${invoice.invoice_number} carries a document-level discount with no backing line, which an amount edit would lose.`, 'unbacked_discount', at);
-    }
-  }
   return null;
 }
 
@@ -554,9 +302,8 @@ async function setupFeeAlertTied(invoice, nextNotes) {
 }
 const SETUP_FEE_EFFECT = { kind: 'operational', text: 'This invoice belongs to an accepted estimate. Confirming re-checks the staff alert that asks the office to bill its setup fee: that alert may close, reopen or change (and show as unread again). Nothing is sent to the customer.' };
 
-function editEffects({ invoice, status, dueChanged, totalChanged, oldTotal, newTotal, statement, setupFeeTied = false }) {
+function editEffects({ status, dueChanged, setupFeeTied = false }) {
   const effects = [];
-  if (totalChanged) effects.push({ kind: 'billing', text: `The invoice total changes from ${money(oldTotal)} to ${money(newTotal)}.` });
   if (DELIVERED_STATUSES.has(status)) {
     effects.push({ kind: 'operational', text: 'The customer already received this invoice. The bar does NOT resend it: the copy they hold stays out of date until it is sent again (send it from the Invoices page, or ask the bar to send it). An activity entry notes the edit after delivery.' });
   }
@@ -568,7 +315,6 @@ function editEffects({ invoice, status, dueChanged, totalChanged, oldTotal, newT
       ? 'Its payment reminder dates move with the new due date. A due date in the future returns it from overdue to sent.'
       : 'Its payment reminder dates move with the new due date.' });
   }
-  if (statement && totalChanged) effects.push({ kind: 'billing', text: 'Its payer’s open monthly statement is recalculated with the new amount.' });
   if (setupFeeTied) effects.push(SETUP_FEE_EFFECT);
   effects.push(NOTHING_SENT);
   return effects;
@@ -595,89 +341,9 @@ function metadataChanges(invoice, read) {
   return { changes, body, dueChanged };
 }
 
-// The line changes applied to the stored lines: the next lines and one card change per touched line (or a refusal).
-function editedLines({ invoice, stored, read, changes, body }) {
-  if (!read.lineChanges.length) {
-    // A retotal with no line change (a tax-rate edit) still reprices every stored line as quantity * (unit_price || 0), in the
-    // preview and again in the page's update: a legacy amount-only line is sent with its unit price, so it keeps its amount.
-    const canonical = stored.map(canonicalLine);
-    const uneven = canonical.findIndex((li) => li === null);
-    if (uneven !== -1) {
-      return refusal(`Line ${uneven + 1} has an amount that is not its quantity times its unit price, so the bar cannot reprice this invoice. Edit it on the Invoices page.`, 'line_not_editable', { invoice_id: invoice.id, lines: numbered(stored) });
-    }
-    if (canonical.some((li, i) => li.unit_price !== stored[i].unit_price)) body.line_items = canonical;
-    return { nextLines: canonical };
-  }
-  const applied = applyLineChanges(stored, read.lineChanges, invoice.id);
-  if (applied.error) return { ...applied, invoice_id: invoice.id };
-  for (const t of applied.touched) {
-    changes.push(fieldChange(t.kind === 'added' ? 'New line' : `Line ${t.number}${t.kind === 'removed' ? ' (removed)' : ''}`, t.before, t.after));
-  }
-  body.line_items = applied.lines;
-  return { nextLines: applied.lines };
-}
-
-// A retotal is offered only on an invoice that is verifiably the homeowner's right now: the update calculator reads only the
-// invoice's own payer_id, so a payer owning it through the customer default or the visit (tax-exempt or not) would get self-pay
-// figures. Unverifiable refuses. The same check runs again on the locked row at save (InvoiceService.update, expected.selfPayLive).
-async function retotalOwnerRefusal(invoice) {
-  try {
-    if (await require('../invoice-bar-expected').verifiedSelfPay(invoice, db)) return null;
-  } catch { /* unverifiable: refused below */ }
-  return toPage(`Invoice ${invoice.invoice_number} is billed to a third-party payer (or who owes it could not be verified), so its amounts are changed on the Invoices page.`, 'payer_owned', invoice.id);
-}
-
-// A retotal that would carry tax (a new positive rate, or the stored rate on a line-only change) is never offered for a customer
-// with a verified tax exemption: invoice creation zeroes their tax and the update calculator does not ask. Unverifiable refuses.
-async function taxExemptRefusal(invoice, read) {
-  const rate = read.taxRate !== undefined ? read.taxRate : Number(invoice.tax_rate || 0);
-  if (!(rate > 0)) return null;
-  try {
-    if (!await require('../tax-calculator').findVerifiedExemption(invoice.customer_id, { database: db })) return null;
-  } catch { /* unverifiable: refused below */ }
-  return toPage('This customer has a verified tax exemption (or it could not be checked), so a tax rate is not set from the bar.', 'tax_exempt', invoice.id);
-}
-
-// The new totals, from the page's own arithmetic; a tax rate the customer is not taxed at is refused.
-async function editedFinancials({ invoice, customer, nextLines, read, changes, body }) {
-  const ownerRefused = await retotalOwnerRefusal(invoice) || await taxExemptRefusal(invoice, read);
-  if (ownerRefused) return ownerRefused;
-  let financials;
-  try {
-    financials = await require('../invoice')._calculateUpdateFinancials({
-      lineItems: nextLines.map((li) => ({ ...li })), customer, invoice, taxRate: read.taxRate,
-    });
-  } catch (err) {
-    return refusal(`The Invoices page would refuse this edit: ${err.message}`, 'edit_refused', { invoice_id: invoice.id });
-  }
-  if (read.taxRate === undefined) return { financials };
-  if (Number(financials.tax_rate) !== read.taxRate) {
-    return refusal(`Tax applies only to commercial customers that pay tax; this invoice is taxed at ${(Number(financials.tax_rate) * 100).toFixed(2)}%, so a tax rate is not changed.`, 'tax_rate_not_applicable', { invoice_id: invoice.id });
-  }
-  if (Number(invoice.tax_rate || 0) !== read.taxRate) {
-    changes.push(fieldChange('Tax rate', `${(Number(invoice.tax_rate || 0) * 100).toFixed(2)}%`, `${(read.taxRate * 100).toFixed(2)}%`));
-  }
-  body.tax_rate = read.taxRate;
-  return { financials };
-}
-
-// The total, and the subtotal / discount / tax when they moved, appended to the card changes.
-function totalChanges(invoice, financials, changes) {
-  const oldTotal = round2(invoice.total);
-  const newTotal = financials ? round2(financials.total) : oldTotal;
-  const totalChanged = cents(oldTotal) !== cents(newTotal);
-  if (totalChanged) changes.push(fieldChange('Total', money(oldTotal), money(newTotal)));
-  const partsMoved = financials && ['subtotal', 'tax_amount', 'discount_amount'].some((key) => cents(invoice[key]) !== cents(financials[key]));
-  if (partsMoved) {
-    changes.push(fieldChange('Subtotal / discount / tax',
-      `${money(invoice.subtotal)} / ${money(invoice.discount_amount)} / ${money(invoice.tax_amount)}`,
-      `${money(financials.subtotal)} / ${money(financials.discount_amount)} / ${money(financials.tax_amount)}`));
-  }
-  return { oldTotal, newTotal, totalChanged };
-}
-
-// What the card pins (_version) and what the page's handler is handed (_expected).
-function editPins({ invoice, stored, body, newTotal, financials, setupFeeTied }) {
+// What the card pins (_version) and what the page's handler is handed (_expected). The customer is pinned in both: a customer merge
+// can repoint invoices.customer_id without moving updated_at, and the card (and its approval) named the customer it showed.
+function editPins({ invoice, stored, body, setupFeeTied }) {
   return {
     _version: {
       invoice_id: invoice.id,
@@ -689,7 +355,6 @@ function editPins({ invoice, stored, body, newTotal, financials, setupFeeTied })
       payer_statement_id: invoice.payer_statement_id || null,
       lines: digest(stored),
       body: digest(body),
-      new_total: cents(newTotal),
       // Shown in the effects, so pinned: an estimate link that appears after the card refuses at Confirm.
       setup_fee_tied: Boolean(setupFeeTied),
     },
@@ -699,10 +364,7 @@ function editPins({ invoice, stored, body, newTotal, financials, setupFeeTied })
       total: Number(invoice.total) || 0,
       creditApplied: Number(invoice.credit_applied) || 0,
       paymentIntentId: null,
-      // The owner the financials were computed for: a payer stamped after the card (without an updated_at move) refuses.
-      payerId: invoice.payer_id || null,
-      // A retotal was computed for a verified self-pay owner: the save re-asks the live resolver on the locked row.
-      ...(financials ? { newTotal, selfPayLive: true } : {}),
+      customerId: invoice.customer_id || null,
     },
   };
 }
@@ -713,29 +375,12 @@ async function buildEditPlan(input) {
   const { invoice } = target;
   const stored = parseLines(invoice.line_items);
   const read = readEditInput(input);
-  // With nothing to change the reply lists the numbered lines, so the operator can name one.
-  if (read.error) return read.code === 'nothing_to_change' ? { ...read, invoice_id: invoice.id, lines: numbered(stored) } : read;
-  const retotal = read.lineChanges.length > 0 || read.taxRate !== undefined;
-  const refused = await editRefusal(invoice, retotal);
+  if (read.error) return read.code === 'nothing_to_change' ? { ...read, invoice_id: invoice.id } : read;
+  const refused = await editRefusal(invoice);
   if (refused) return refused;
-  if (retotal && stored.some((li) => li.membership_dues_month) && read.lineChanges.length) {
-    return toPage(`Invoice ${invoice.invoice_number} is a membership-dues invoice; its lines stay as they are.`, 'membership_dues', invoice.id);
-  }
   const customer = await customerOf(invoice.customer_id);
   const { changes, body, dueChanged } = metadataChanges(invoice, read);
-  let financials = null;
-  let nextLines = stored;
-  if (retotal) {
-    const lines = editedLines({ invoice, stored, read, changes, body });
-    if (lines.error) return lines;
-    nextLines = lines.nextLines;
-    const computed = await editedFinancials({ invoice, customer, nextLines, read, changes, body });
-    if (computed.error) return computed;
-    ({ financials } = computed);
-  }
-  if (!changes.length) return refusal('The invoice already reads that way. Nothing was changed.', 'no_change', { invoice_id: invoice.id, lines: numbered(stored) });
-  const { oldTotal, newTotal, totalChanged } = totalChanges(invoice, financials, changes);
-  const statement = await statementOf(invoice);
+  if (!changes.length) return refusal('The invoice already reads that way. Nothing was changed.', 'no_change', { invoice_id: invoice.id });
   const setupFeeTied = await setupFeeAlertTied(invoice, body.notes);
   return {
     preview: true,
@@ -745,13 +390,11 @@ async function buildEditPlan(input) {
     customer_id: invoice.customer_id,
     customer_name: personName(customer) || invoice.customer_id,
     status: invoice.status,
-    old_total: money(oldTotal),
-    new_total: money(newTotal),
+    amount: money(invoice.total),
     changes,
-    lines_after: numbered(nextLines).slice(0, 30),
-    effects: editEffects({ invoice, status: String(invoice.status || '').toLowerCase(), dueChanged, totalChanged, oldTotal, newTotal, statement, setupFeeTied }),
+    effects: editEffects({ status: String(invoice.status || '').toLowerCase(), dueChanged, setupFeeTied }),
     sends_to_customer: false,
-    ...editPins({ invoice, stored, body, newTotal, financials, setupFeeTied }),
+    ...editPins({ invoice, stored, body, setupFeeTied }),
     _body: body,
     note: 'PREVIEW ONLY — nothing was changed. Confirm saves exactly these changes; if the invoice changed it refuses.',
   };
@@ -774,8 +417,7 @@ async function commitEdit(input, actionContext) {
   if (result.status !== 200) {
     return handlerFailure(plan, result, 'The invoice was not changed', { moneyWords: /payment already applied|payment dispute|saved-card charge/i });
   }
-  const savedTotal = cents(result.json?.total);
-  if (result.json?.id !== plan.invoice_id || (plan._expected.newTotal !== undefined && savedTotal !== cents(plan._expected.newTotal))) {
+  if (result.json?.id !== plan.invoice_id) {
     return { ...baseOf(plan), outcome_unknown: true, code: 'edit_unverified',
       error: 'The Invoices page answered, but the invoice does not read as the card promised. Check the invoice before trying again.' };
   }
@@ -783,241 +425,16 @@ async function commitEdit(input, actionContext) {
   const delivered = DELIVERED_STATUSES.has(String(plan.status || '').toLowerCase());
   return {
     ...baseOf(plan), success: true, status: result.json.status || plan.status, total: money(result.json.total), sent_to_customer: false,
-    note: `Invoice ${plan.invoice_number} is updated${plan._version.total !== savedTotal ? ` (total ${plan.old_total} -> ${money(result.json.total)})` : ''}. Nothing was sent to anyone.${delivered ? ' The customer already had this invoice and was not sent the new version: send it again if they should see the change.' : ''}`,
+    note: `Invoice ${plan.invoice_number} is updated. Nothing was sent to anyone.${delivered ? ' The customer already had this invoice and was not sent the new version: send it again if they should see the change.' : ''}`,
   };
 }
 
-// ═════════════════════════════════════════════════════════════════
-// apply_invoice_credit
-// ═════════════════════════════════════════════════════════════════
-
-const REPORT_PROJECT_TEXT = 'This invoice is linked to a project (a report may wait on its payment). Paying it nudges the report-release sweep, which can send the report to the customer, and a report hold is written without touching the invoice, so the bar cannot pin it. Apply the credit on the Invoices page.';
-
-// The saved-card charge fence, read-only. `where` finishes the unverified sentence ("Apply the credit from the Invoices page").
+// The saved-card charge fence, read-only. `where` finishes the unverified sentence ("Unvoid it from the Invoices page").
 async function chargeFenceRefusal(invoice, where) {
   const charge = await chargeInProgress(invoice);
   if (charge === 'charge_in_progress') return ownerRule(`Invoice ${invoice.invoice_number} has a saved-card charge in progress or unresolved.`, 'charge_in_progress', invoice.id);
   if (charge) return refusal(`The bar could not check for a card charge in progress, so nothing was offered. ${where}`, 'unverified', { invoice_id: invoice.id });
   return null;
-}
-
-const creditBalanceDue = (invoice) => cents(invoice.total) - cents(invoice.credit_applied);
-
-// Billed to a payer by the row, or owed by one now: the live Bill-To owner of its visit (the credit handler re-checks it under the lock).
-// Who owes the invoice right now: the canonical live resolver (stamped payer, or a payer assigned since through the customer
-// default or the scheduled service; unverifiable = refused), plus the visit a payer now owns (also through a service record).
-async function creditPayerRefusal(invoice) {
-  let payerOwned;
-  try {
-    payerOwned = await require('../invoice-payer-ownership').invoicePayerOwnership(invoice, db) !== null
-      || Boolean((invoice.scheduled_service_id || invoice.service_record_id)
-        && await require('../visit-linked-invoice-withdrawal').liveVisitPayerOf(db, invoice));
-  } catch {
-    return refusal('The bar could not check who owes this invoice, so it was not offered. Apply the credit from the Invoices page.', 'unverified', { invoice_id: invoice.id });
-  }
-  if (!payerOwned) return null;
-  return refusal('This invoice is billed to a third-party payer, and account credit belongs to the homeowner. Account credit cannot be applied to payer invoices.', 'payer_invoice', { invoice_id: invoice.id });
-}
-
-function creditCollectibleRefusal(invoice) {
-  const at = invoice.id;
-  try {
-    require('../invoice-helpers').assertInvoiceCollectible(invoice);
-  } catch (err) {
-    return refusal(err.message, /already (paid|prepaid)/i.test(err.message) ? 'already_paid' : 'invoice_not_collectible', { invoice_id: at });
-  }
-  if (String(invoice.status || '').toLowerCase() === 'sending') return refusal('A send is in progress for this invoice. Wait a moment, then ask again.', 'send_in_progress', { invoice_id: at });
-  return null;
-}
-
-function creditAmountRefusal(invoice, amountCents) {
-  const at = invoice.id;
-  if (cents(invoice.total) <= 0) return refusal('Invoice has no amount to collect (total is $0).', 'nothing_due', { invoice_id: at });
-  const dueCents = creditBalanceDue(invoice);
-  if (dueCents <= 0) return refusal('Invoice is already fully covered by credit.', 'nothing_due', { invoice_id: at });
-  if (amountCents !== undefined && amountCents !== dueCents) {
-    return refusal(`The balance due is ${money(dueCents / 100)}. The Invoices page applies the whole balance due from credit and has no partial application; nothing was applied.`, amountCents < dueCents ? 'partial_not_supported' : 'amount_exceeds_balance', { invoice_id: at, balance_due: dueCents / 100 });
-  }
-  return null;
-}
-
-async function creditSessionRefusal(invoice) {
-  const at = invoice.id;
-  if (invoice.stripe_payment_intent_id) {
-    return toPage(`Invoice ${invoice.invoice_number} has an open card-payment session, which applying credit has to cancel.`, 'payment_session_open', at);
-  }
-  try {
-    if (await require('../invoice-prepay').resolveInvoiceTermId(invoice, db, { strict: true })) {
-      return toPage(`Invoice ${invoice.invoice_number} is an annual-plan invoice.`, 'annual_plan', at);
-    }
-  } catch {
-    return refusal('The bar could not verify whether this is an annual-plan invoice, so it was not offered. Apply the credit from the Invoices page.', 'unverified', { invoice_id: at });
-  }
-  return null;
-}
-
-// Any project linked to the invoice, not only one held right now: the hold is written without moving invoices.updated_at, so
-// the card's pin cannot see it. The credit handler repeats this read inside its transaction under the invoice row's lock.
-async function creditProjectRefusal(invoice) {
-  try {
-    const project = await db('projects').where({ invoice_id: invoice.id }).first('id');
-    if (project) return toPage(REPORT_PROJECT_TEXT, 'report_project', invoice.id);
-  } catch {
-    return refusal('The bar could not check whether this invoice is linked to a report project, so it was not offered; apply the credit on the Invoices page.', 'unverified', { invoice_id: invoice.id });
-  }
-  return null;
-}
-
-async function creditVisitRefusal(invoice) {
-  // The visit the invoice reaches through its own link or its service record's, as the page's settlement fence resolves it.
-  const visitId = await require('../invoice').linkedScheduledServiceId(invoice, db);
-  if (!visitId) return null;
-  const visit = await db('scheduled_services').where({ id: visitId }).first('status');
-  const terminal = require('../invoice-helpers').neverRanVisitStatus(visit?.status);
-  if (!terminal) return null;
-  return refusal(`This invoice's visit is ${terminal.replace('_', '-')}; no credit can be applied. Void or reissue the invoice from the Invoices page.`, 'visit_terminal', { invoice_id: invoice.id });
-}
-
-// In the order the page's checks run; the first refusal wins.
-// A legacy partially_paid invoice passes assertInvoiceCollectible, but its paid part lives in payment rows, not on the invoice:
-// total - credit_applied would draw the gross amount from account credit. The page's handler re-checks it under the lock too.
-function creditPartiallyPaidRefusal(invoice) {
-  if (String(invoice.status || '').toLowerCase() !== 'partially_paid') return null;
-  return toPage(`Invoice ${invoice.invoice_number} is partially paid, so its balance is not the invoice total.`, 'partially_paid', invoice.id);
-}
-
-const CREDIT_REFUSALS = [
-  creditPartiallyPaidRefusal, creditPayerRefusal, creditCollectibleRefusal, creditAmountRefusal, creditSessionRefusal, creditProjectRefusal, creditVisitRefusal,
-  (invoice) => chargeFenceRefusal(invoice, 'Apply the credit from the Invoices page.'),
-];
-
-async function creditRefusal(invoice, amountCents) {
-  for (const check of CREDIT_REFUSALS) {
-    const refused = await check(invoice, amountCents);
-    if (refused) return refused;
-  }
-  return null;
-}
-
-function creditEffects({ invoice, dueCents, balanceCents, plan, fromVisit, noteText }) {
-  const effects = [
-    { kind: 'billing', text: `${money(dueCents / 100)} of the customer’s account credit pays invoice ${invoice.invoice_number} in full. The invoice is marked prepaid; its balance due goes from ${money(dueCents / 100)} to $0.00.` },
-    { kind: 'billing', text: `The customer’s account credit goes from ${money(balanceCents / 100)} to ${money((balanceCents - dueCents) / 100)}.` },
-    { kind: 'operational', text: 'Its payment reminders stop.' },
-    ...(plan ? [{ kind: 'operational', text: 'Its payment plan is completed.' }] : []),
-    // The exact note, as it will be saved on the credit entry and the invoice's activity entry (trimmed to what the page keeps).
-    ...(noteText ? [{ kind: 'operational', text: `Note saved with the credit entry: "${noteText}"` }] : []),
-    ...(fromVisit ? [{ kind: 'operational', text: 'This invoice came from a completed visit: the customer may be enrolled in the review-request follow-up under the standing review rules (no review text goes out from this step itself).' }] : []),
-    NOTHING_SENT,
-    { kind: 'billing', text: 'Money moves only from account credit already on the customer’s balance. No card is used.' },
-  ];
-  return effects;
-}
-
-// The typed note and optional amount check (the amount must equal the balance due; checked against the invoice later).
-function readCreditInput(input) {
-  const noteText = blank(input?.note) ? '' : String(input.note).trim();
-  if (noteText.length > NOTE_LIMIT) return refusal(`The note is longer than ${NOTE_LIMIT} characters; shorten it.`, 'note_too_long');
-  if (blank(input?.amount)) return { noteText };
-  const amount = Number(input.amount);
-  if (!Number.isFinite(amount) || amount <= 0 || Math.abs(amount * 100 - Math.round(amount * 100)) > 1e-6) return refusal('amount must be a positive dollar amount with at most two decimals', 'invalid_amount');
-  return { noteText, amountCents: Math.round(amount * 100) };
-}
-
-function creditPins({ invoice, dueCents, balanceCents, plan, fromVisit, noteText }) {
-  return {
-    _version: {
-      invoice_id: invoice.id,
-      status: invoice.status,
-      updated_at: msOf(invoice.updated_at),
-      total: cents(invoice.total),
-      credit_applied: cents(invoice.credit_applied),
-      due: dueCents,
-      balance: balanceCents,
-      customer_id: invoice.customer_id || null,
-      visit: invoice.scheduled_service_id || null,
-      open_payment_session: false,
-      active_plan: Boolean(plan),
-      from_visit: fromVisit,
-      note: noteText,
-    },
-    _body: { waiveSetupFee: false, ...(noteText ? { note: noteText } : {}) },
-    _expected: {
-      status: invoice.status,
-      updatedAt: msOf(invoice.updated_at),
-      total: Number(invoice.total) || 0,
-      creditApplied: Number(invoice.credit_applied) || 0,
-      paymentIntentId: null,
-      // The plan state the card showed (the handler completes any active plan): enforced on the locked invoice row.
-      activePlan: Boolean(plan),
-      balanceAfterCents: balanceCents - dueCents,
-    },
-  };
-}
-
-async function buildCreditPlan(input) {
-  const read = readCreditInput(input);
-  if (read.error) return read;
-  const { noteText, amountCents } = read;
-  const target = await resolveInvoice(input);
-  if (target.error) return target;
-  const { invoice } = target;
-  const refused = await creditRefusal(invoice, amountCents);
-  if (refused) return refused;
-  const dueCents = creditBalanceDue(invoice);
-  const balanceCents = cents((await require('../customer-credit').getBalance(invoice.customer_id)) || 0);
-  if (balanceCents < dueCents) {
-    return refusal(`Insufficient account credit: the balance is ${money(balanceCents / 100)} and the invoice needs ${money(dueCents / 100)} (short by ${money((dueCents - balanceCents) / 100)}). Nothing was applied. Issue more credit first, or lower the invoice.`,
-      'insufficient_credit', { invoice_id: invoice.id, credit_available: balanceCents / 100, balance_due: dueCents / 100 });
-  }
-  const customer = await customerOf(invoice.customer_id);
-  const plan = await paymentPlanOf(invoice, { activeOnly: true });
-  const fromVisit = Boolean(invoice.service_record_id || invoice.visit_completion_packet_id);
-  return {
-    preview: true,
-    tool: 'apply_invoice_credit',
-    invoice_id: invoice.id,
-    invoice_number: invoice.invoice_number,
-    customer_id: invoice.customer_id,
-    customer_name: personName(customer) || invoice.customer_id,
-    status: invoice.status,
-    credit_available: money(balanceCents / 100),
-    amount_applied: money(dueCents / 100),
-    balance_due_before: money(dueCents / 100),
-    balance_due_after: '$0.00',
-    credit_after: money((balanceCents - dueCents) / 100),
-    office_note: noteText || null,
-    effects: creditEffects({ invoice, dueCents, balanceCents, plan, fromVisit, noteText }),
-    sends_to_customer: false,
-    ...creditPins({ invoice, dueCents, balanceCents, plan, fromVisit, noteText }),
-    note: 'PREVIEW ONLY — nothing was applied. Confirm applies exactly this credit; if anything changed it refuses.',
-  };
-}
-
-const verifiedCredit = verifier(buildCreditPlan, 'applied');
-
-async function commitCredit(input, actionContext) {
-  const { plan, refusal: refused } = await verifiedCredit(input, input._verified_invoice_credit_version);
-  if (refused) return refused;
-  const actor = await actorOf(actionContext);
-  let result;
-  try {
-    result = await require('../../routes/admin-invoices').applyCreditFromBar({ invoiceId: plan.invoice_id, body: plan._body, actor, expected: plan._expected });
-  } catch (err) {
-    logger.error(`[intelligence-bar:invoice-edit] apply credit handler failed (${err.code || err.name || 'error'})`);
-    return { ...baseOf(plan), outcome_unknown: true, code: 'execution_interrupted',
-      error: 'Applying the credit was interrupted — it may or may not have happened. Check the invoice and the customer’s credit before trying again.' };
-  }
-  if (result.status !== 200) return handlerFailure(plan, result, 'The credit was not applied', { moneyWords: /saved-card|charge/i });
-  if (result.json?.invoice?.status !== 'prepaid') {
-    return { ...baseOf(plan), outcome_unknown: true, code: 'credit_unverified',
-      error: 'The Invoices page answered, but the invoice does not read as prepaid. Check the invoice before trying again.' };
-  }
-  logger.info(`[intelligence-bar:invoice-edit] applied account credit to invoice ${plan.invoice_id}`);
-  return {
-    ...baseOf(plan), success: true, status: 'prepaid', applied: money(result.json.applied), credit_after: money(result.json.balance), sent_to_customer: false,
-    note: `${money(result.json.applied)} of account credit was applied to invoice ${plan.invoice_number}; it is marked prepaid. Account credit left: ${money(result.json.balance)}. Nothing was sent to anyone and no card was charged.`,
-  };
 }
 
 // ═════════════════════════════════════════════════════════════════
@@ -1060,8 +477,9 @@ async function buildArchivePlan(input, { undo }) {
       updated_at: msOf(invoice.updated_at),
       archived: Boolean(invoice.archived_at),
       total: cents(invoice.total),
+      customer_id: invoice.customer_id || null,
     },
-    _expected: { status: invoice.status, updatedAt: msOf(invoice.updated_at), archived: Boolean(invoice.archived_at) },
+    _expected: { status: invoice.status, updatedAt: msOf(invoice.updated_at), archived: Boolean(invoice.archived_at), customerId: invoice.customer_id || null },
     note: `PREVIEW ONLY — nothing was changed. Confirm ${undo ? 'unarchives' : 'archives'} exactly this invoice; if it changed it refuses.`,
   };
 }
@@ -1234,7 +652,7 @@ async function buildUnvoidPlan(input) {
       lines: digest(parseLines(invoice.line_items)),
       setup_fee_tied: setupFeeTied,
     },
-    _expected: { status: invoice.status, updatedAt: msOf(invoice.updated_at) },
+    _expected: { status: invoice.status, updatedAt: msOf(invoice.updated_at), customerId: invoice.customer_id || null },
     note: 'PREVIEW ONLY — nothing was changed. Confirm restores exactly this invoice to a draft; if it changed it refuses.',
   };
 }
@@ -1281,15 +699,8 @@ function cardLines(toolName, preview) {
   const effects = (preview.effects || []).map(({ kind, text }) => ({ kind, text }));
   if (toolName === 'edit_invoice') {
     return [
-      { kind: 'billing', text: `Edit invoice ${preview.invoice_number} for ${who} (${preview.status}): total ${preview.old_total} -> ${preview.new_total}` },
-      ...(preview.changes || []).map((c) => ({ kind: c.field === 'Total' ? 'billing' : 'operational', text: `${c.field}: ${c.before} -> ${c.after}`, before: c.before, after: c.after })),
-      ...effects,
-    ];
-  }
-  if (toolName === 'apply_invoice_credit') {
-    return [
-      { kind: 'billing', text: `Apply account credit to invoice ${preview.invoice_number} for ${who}: ${preview.amount_applied} of ${preview.credit_available} available` },
-      { kind: 'billing', text: `Balance due: ${preview.balance_due_before} -> ${preview.balance_due_after}; account credit: ${preview.credit_available} -> ${preview.credit_after}`, before: preview.balance_due_before, after: preview.balance_due_after },
+      { kind: 'billing', text: `Edit invoice ${preview.invoice_number} for ${who} (${preview.status}, ${preview.amount}): title, notes or due date only` },
+      ...(preview.changes || []).map((c) => ({ kind: 'operational', text: `${c.field}: ${c.before} -> ${c.after}`, before: c.before, after: c.after })),
       ...effects,
     ];
   }
@@ -1309,7 +720,6 @@ function cardLines(toolName, preview) {
 
 const HANDLERS = {
   edit_invoice: { build: buildEditPlan, commit: commitEdit, failed: 'Could not prepare the edit', interrupted: 'The edit was interrupted — it may or may not have been saved. Check the invoice before trying again.' },
-  apply_invoice_credit: { build: buildCreditPlan, commit: commitCredit, failed: 'Could not prepare the credit', interrupted: 'Applying the credit was interrupted — it may or may not have happened. Check the invoice and the customer’s credit before trying again.' },
   archive_invoice: { build: (input) => buildArchivePlan(input, { undo: false }), commit: (input) => commitArchive(input, { undo: false }), failed: 'Could not prepare the archive', interrupted: 'The archive was interrupted — it may or may not have happened. Check the invoice before trying again.' },
   unarchive_invoice: { build: (input) => buildArchivePlan(input, { undo: true }), commit: (input) => commitArchive(input, { undo: true }), failed: 'Could not prepare the unarchive', interrupted: 'The unarchive was interrupted — it may or may not have happened. Check the invoice before trying again.' },
   unvoid_invoice: { build: buildUnvoidPlan, commit: commitUnvoid, failed: 'Could not prepare the unvoid', interrupted: 'The unvoid was interrupted — it may or may not have happened. Check the invoice before trying again.' },

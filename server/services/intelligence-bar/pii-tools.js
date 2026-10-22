@@ -45,9 +45,8 @@ const REVIEWED_PII_TOOL_NAMES = new Set([
   'convert_lead',
   // void_invoice previews name the customer and the invoice.
   'void_invoice',
-  // The invoice edit cards name the customer and the invoice (edit_invoice also its notes and lines).
+  // The invoice edit cards name the customer and the invoice (edit_invoice also its title and notes).
   'edit_invoice',
-  'apply_invoice_credit',
   'archive_invoice',
   'unarchive_invoice',
   'unvoid_invoice',

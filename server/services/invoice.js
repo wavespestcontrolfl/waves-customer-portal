@@ -10576,7 +10576,7 @@ const InvoiceService = {
   },
 
   // `expected` (third argument) is set only by the Intelligence Bar's edit_invoice shim (routes/admin-invoices.js): the invoice
-  // version and the new total the card showed (services/invoice-bar-expected.js). The Invoices page calls update(id, body).
+  // version the card showed (services/invoice-bar-expected.js). The Invoices page calls update(id, body).
   async update(id, updates, { expected } = {}) {
     // `status` deliberately omitted — admins must use the explicit
     // /void, /charge-card, /record-payment, /archive, /unarchive routes
@@ -10920,8 +10920,6 @@ const InvoiceService = {
       );
     }
 
-    // The bar's card also showed the new total (services/invoice-bar-expected.js): a retotal that now computes to another figure is refused.
-    require("./invoice-bar-expected").assertExpectedNewTotal(expected, data.total);
     // Apply the editability predicates ATOMICALLY on the write so a worker
     // that mutates the same invoice between the guard read above and this write
     // cannot be clobbered. Column predicates cover a worker stamping
@@ -10975,10 +10973,6 @@ const InvoiceService = {
       // then the claim re-check below runs on a fresh statement that can
       // see the winner's commit (the pre-check alone could read a snapshot
       // taken before a concurrent claim committed).
-      // The bar's retotal (expected.selfPayLive) holds its visit FOR SHARE BEFORE the invoice row: the schedule's Bill-To save
-      // writes the visit and then locks its invoices, so visit -> invoice is the order both sides take. The annual-plan and
-      // owner checks below then run on the locked rows; an invoice whose visit link moved since is refused there.
-      const barVisitId = await require("./invoice-bar-expected").lockBarRetotalVisit(client, existing, expected);
       const lockedRow = await client("invoices")
         .where({ id })
         .forUpdate()
@@ -10989,7 +10983,6 @@ const InvoiceService = {
         );
       }
       require("./invoice-bar-expected").assertInvoiceVersion(lockedRow, expected, "editing");
-      await require("./invoice-bar-expected").assertSelfPayLive(lockedRow, expected, client, barVisitId);
       // The locked row is the only authority for the dues stamp. A stamp whose
       // month this edit did not lock (never expected: see above) is a stale
       // edit, refused rather than run unlocked.
@@ -13889,7 +13882,6 @@ module.exports._approvedClaimChecks = {
 };
 module.exports._invoiceHasNonBaseCharges = invoiceHasNonBaseCharges;
 module.exports._invoiceHasDepositCreditLine = invoiceHasDepositCreditLine;
-module.exports._invoiceHasUnbackedDocumentDiscount = invoiceHasUnbackedDocumentDiscount;
 module.exports._parseInvoiceLineItems = parseInvoiceLineItems;
 // The receipt SMS leg's phone-less App admission — shared with the IB closeout
 // repair card so it describes the same reach sendReceipt has.
@@ -13930,8 +13922,6 @@ module.exports.withPayLinkSendClaim = withPayLinkSendClaim;
 // gate's on/off behavior (incl. the combined-packet member check and the
 // service_record_id-only fallback) can be pinned with a minimal conn mock.
 module.exports._assertUnvoidableLinkedVisit = assertUnvoidableLinkedVisit;
-// The Intelligence Bar's edit_invoice card computes the new totals with the edit's own arithmetic (read-only).
-module.exports._calculateUpdateFinancials = calculateUpdateFinancials;
 module.exports._unvoidObligationReason = unvoidObligationReason;
 module.exports._invoiceHasUnbackedDocumentDiscount = invoiceHasUnbackedDocumentDiscount;
 // Test-only seam (#5424 r14): the pending-channel replay queue row, to pin the persisted trusted

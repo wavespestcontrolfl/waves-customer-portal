@@ -197,7 +197,6 @@ const WRITE_TWO_STEP = [
   'record_payment',
   'void_invoice',
   'edit_invoice',
-  'apply_invoice_credit',
   'archive_invoice',
   'unarchive_invoice',
   'unvoid_invoice',
@@ -824,7 +823,6 @@ const UNCONFIRMED_CALLS = [
     // confirmed (intelligence-bar-invoice-edits.test.js covers the cards themselves).
     ...[
       ['edit_invoice', { due_date: '2099-02-01' }, 'f401'],
-      ['apply_invoice_credit', {}, 'f402'],
       ['archive_invoice', {}, 'f403'],
       ['unarchive_invoice', {}, 'f404'],
       ['unvoid_invoice', {}, 'f405'],
@@ -1065,12 +1063,6 @@ const UNCONFIRMED_CALLS = [
         jest.spyOn(require('../services/invoice-prepay'), 'resolveInvoiceTermId').mockResolvedValue(null),
         jest.spyOn(require('../services/invoice-issued-closeout'), 'issuedCloseoutTarget').mockResolvedValue(null),
       ] : [];
-    // apply_invoice_credit reads the customer's credit balance (a ledger query this recorder does not model) and the annual-plan link.
-    const invoiceCreditSpies = toolName === 'apply_invoice_credit'
-      ? [
-        jest.spyOn(require('../services/customer-credit'), 'getBalance').mockResolvedValue(500),
-        jest.spyOn(require('../services/invoice-prepay'), 'resolveInvoiceTermId').mockResolvedValue(null),
-      ] : [];
     // unvoid_invoice's setup-fee / dues provenance reads filter by column (a LIKE on invoices.notes), which this recorder does not
     // model; its own cases run against the real function in invoice-bar-expected-version.test.js.
     const unvoidObligation = toolName === 'unvoid_invoice'
@@ -1171,7 +1163,6 @@ const UNCONFIRMED_CALLS = [
       invoiceActionSpies.forEach((spy) => spy.mockRestore());
       reminderPlanSpies.forEach((spy) => spy.mockRestore());
       recordPaymentSpies.forEach((spy) => spy.mockRestore());
-      invoiceCreditSpies.forEach((spy) => spy.mockRestore());
       unvoidObligation?.mockRestore();
       createInvoiceSpies.forEach((spy) => spy.mockRestore());
       dedupeReaders.forEach((spy) => spy.mockRestore());
@@ -1323,10 +1314,10 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
     // confirmed run settles an invoice (it sends no receipt).
     // propose_admin_edit (_sideEffects): its confirmed run replays a PUT or PATCH to a reviewed admin endpoint.
     // void_invoice (_sideEffects): its confirmed run voids an invoice (live smoke must not).
-    // The invoice edit cards (_sideEffects): their confirmed runs edit, pay from credit, archive or unvoid an invoice.
+    // The invoice edit cards (_sideEffects): their confirmed runs edit (title, notes, due date), archive, unarchive or unvoid an invoice.
     // create_invoice (_sideEffects): its confirmed run creates a draft invoice (live smoke must not).
     // set_customer_bill_to (_sideEffects): its confirmed run sets a customer's Bill-To payer.
     // The invoice reminder and payment-plan tools (_sideEffects): their confirmed runs change reminders, send, schedule or create a plan.
-    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice', 'record_payment', 'void_invoice', 'edit_invoice', 'apply_invoice_credit', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan', 'create_invoice', 'set_customer_bill_to', 'propose_admin_edit']);
+    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice', 'record_payment', 'void_invoice', 'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan', 'create_invoice', 'set_customer_bill_to', 'propose_admin_edit']);
   });
 });

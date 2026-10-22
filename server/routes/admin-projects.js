@@ -2962,26 +2962,10 @@ async function maybeRepriceWdoDraft(invoice, project) {
 // `runner` is the knex transaction when called inside resolveOrCreateProjectInvoice's
 // lock (it must update the projects row on the same connection that holds the
 // FOR UPDATE lock, or it self-deadlocks); defaults to the pooled db otherwise.
-//
-// The invoice row is locked FOR SHARE first, in the same transaction as the link (a savepoint when `runner` is already a transaction),
-// because this is the ONLY writer of projects.invoice_id: a payment path that must not run while a report waits on the invoice (the
-// Intelligence Bar's apply_invoice_credit) holds the invoice row FOR UPDATE and reads projects.invoice_id under it, so a link cannot
-// appear between its read and its commit. Lock order is project -> invoice, never the reverse (the link takes the project lock itself).
-// Called with a transaction, the share lock lasts until the OUTER transaction commits: a caller must not write the same invoice on
-// another connection (InvoiceService.update, maybeRepriceWdoDraft) after this call inside that transaction, or it waits on its own lock.
 async function persistProjectInvoiceLink(project, invoiceId, runner = db) {
   if (!invoiceId || project.invoice_id === invoiceId) return;
   try {
-    const link = async (t) => {
-      // Project FIRST, then the invoice, on every path (a no-op re-lock when the caller's transaction already holds the project). The
-      // explicit-invoice path has no project lock of its own: taking the invoice first there could wait on a project whose holder is
-      // awaiting a reprice (another connection) that needs this invoice, a cycle Postgres cannot see through the JavaScript await.
-      await t('projects').where({ id: project.id }).forUpdate().first('id');
-      await t('invoices').where({ id: invoiceId }).forShare().first('id');
-      await t('projects').where({ id: project.id }).update({ invoice_id: invoiceId, updated_at: db.fn.now() });
-    };
-    if (typeof runner.transaction === 'function') await runner.transaction(link);
-    else await link(runner);
+    await runner('projects').where({ id: project.id }).update({ invoice_id: invoiceId, updated_at: db.fn.now() });
     project.invoice_id = invoiceId;
   } catch (err) {
     logger.warn(`[projects] could not persist invoice link for ${project.id}: ${err.message}`);
@@ -3078,12 +3062,8 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
         .orderBy('created_at', 'desc')
         .first();
       if (linked) {
-        // Reprice FIRST: persistProjectInvoiceLink under `trx` holds the invoice row FOR SHARE until this transaction commits, and the
-        // reprice (InvoiceService.update) runs on its own connection and needs that row FOR UPDATE, so after the link it would wait
-        // on a lock its own caller holds. Nothing may write the linked invoice on another connection after the link call.
-        const repricedLinked = await maybeRepriceWdoDraft(linked, project);
         await persistProjectInvoiceLink(project, linked.id, trx);
-        return { invoice: repricedLinked, created: false };
+        return { invoice: await maybeRepriceWdoDraft(linked, project), created: false };
       }
     }
 
@@ -3273,10 +3253,8 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
         .orderBy('created_at', 'desc')
         .first();
       if (lockedReuse) {
-        // Reprice FIRST (same reason as the reuse above): the link holds the invoice row FOR SHARE until this transaction commits.
-        const repricedReuse = await maybeRepriceWdoDraft(lockedReuse, project);
         await persistProjectInvoiceLink(project, lockedReuse.id, trx);
-        return { invoice: repricedReuse, created: false };
+        return { invoice: await maybeRepriceWdoDraft(lockedReuse, project), created: false };
       }
       const lockedBilled = await trx('invoices')
         .where({ customer_id: project.customer_id })
@@ -6172,5 +6150,3 @@ module.exports = router;
 // sweep) via lazy require; lives here so it reuses the send path's WDO
 // helpers (PDF build, filing archive, copies, gates) without moving them.
 module.exports.releaseHeldProjectReport = releaseHeldProjectReport;
-module.exports.persistProjectInvoiceLink = persistProjectInvoiceLink;
-module.exports.resolveOrCreateProjectInvoice = resolveOrCreateProjectInvoice;

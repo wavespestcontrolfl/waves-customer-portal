@@ -148,7 +148,6 @@ const GATED_ACTIONS = {
   convert_lead: () => ibLeadConvertLive(),
   void_invoice: () => ibVoidInvoiceLive(),
   edit_invoice: () => ibInvoiceEditsLive(),
-  apply_invoice_credit: () => ibInvoiceEditsLive(),
   archive_invoice: () => ibInvoiceEditsLive(),
   unarchive_invoice: () => ibInvoiceEditsLive(),
   unvoid_invoice: () => ibInvoiceEditsLive(),
@@ -284,7 +283,7 @@ function pageTools(context, scope) {
   // send_invoice (domain customers) also rides the Invoices / Revenue page and dashboard (owner 2026-10-07).
   if (context === 'revenue' || context === 'dashboard') { common.add('send_invoice'); common.add('record_payment'); common.add('create_invoice'); }
   // The Invoices page's edit-type actions (GATE_IB_INVOICE_EDITS) ride the Invoices / Revenue page and dashboard too.
-  if (context === 'revenue' || context === 'dashboard') for (const name of ['edit_invoice', 'apply_invoice_credit', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice']) common.add(name);
+  if (context === 'revenue' || context === 'dashboard') for (const name of ['edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice']) common.add(name);
   // reprice_future_visits (domain schedule) also rides the Customers page and dashboard (owner 2026-10-07).
   if (context === 'customers' || context === 'dashboard') common.add('reprice_future_visits');
   return [...actions.values()]

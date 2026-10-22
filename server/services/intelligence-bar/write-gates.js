@@ -106,9 +106,8 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   // an invoice with nothing collected only, sends nothing.
   'void_invoice',
   // The Invoices page's edit-type handlers (owner ruling 2026-10-12), each run in process behind its own card: edit an unpaid
-  // invoice, apply the customer's account credit (never a card), archive / unarchive a voided invoice, unvoid. None sends.
+  // invoice's title, notes or due date, archive / unarchive a voided invoice, unvoid. None sends or moves money.
   'edit_invoice',
-  'apply_invoice_credit',
   'archive_invoice',
   'unarchive_invoice',
   'unvoid_invoice',

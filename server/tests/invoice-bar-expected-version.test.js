@@ -28,7 +28,7 @@ const row = (overrides = {}) => ({
   line_items: [{ client_id: 'li_a', description: 'Quarterly Pest Control', quantity: 1, unit_price: 129, amount: 129 }],
   ...overrides,
 });
-const EXPECTED = { status: 'sent', updatedAt: UPDATED.getTime(), total: 129, creditApplied: 0, paymentIntentId: null };
+const EXPECTED = { status: 'sent', updatedAt: UPDATED.getTime(), total: 129, creditApplied: 0, paymentIntentId: null, customerId: 'cust-1' };
 
 describe('invoiceVersionChanged / assertInvoiceVersion / applyInvoiceVersion', () => {
   test('no expected: nothing changed, nothing asserted, no predicate added', () => {
@@ -48,6 +48,8 @@ describe('invoiceVersionChanged / assertInvoiceVersion / applyInvoiceVersion', (
     ['total', { total: '130.00' }, true],
     ['credit', { credit_applied: '1.00' }, true],
     ['pay session', { stripe_payment_intent_id: 'pi_new' }, true],
+    ['customer (a merge repoints the invoice without moving the edit time)', { customer_id: 'cust-2' }, true],
+    ['no customer', { customer_id: null }, true],
   ])('%s', (_label, change, changed) => {
     expect(invoiceVersionChanged(row(change), EXPECTED)).toBe(changed);
   });
@@ -61,54 +63,18 @@ describe('invoiceVersionChanged / assertInvoiceVersion / applyInvoiceVersion', (
     expect(invoiceVersionChanged(row(), { status: undefined, updatedAt: undefined })).toBe(false);
   });
 
-  test('a payer stamped on the row after the card (updated_at unmoved) is drift; the write requires the same owner', () => {
-    expect(invoiceVersionChanged(row({ payer_id: 'payer-1' }), { payerId: null })).toBe(true);
-    expect(invoiceVersionChanged(row({ payer_id: null }), { payerId: null })).toBe(false);
-    expect(invoiceVersionChanged(row({ payer_id: 'payer-1' }), { payerId: 'payer-1' })).toBe(false);
+  test('the customer the card named is part of the version: a repoint (updated_at unmoved) is drift, and the write requires the same customer', () => {
+    expect(invoiceVersionChanged(row({ customer_id: 'cust-2' }), { customerId: 'cust-1' })).toBe(true);
+    expect(invoiceVersionChanged(row({ customer_id: 'cust-1' }), { customerId: 'cust-1' })).toBe(false);
+    expect(invoiceVersionChanged(row({ customer_id: null }), { customerId: null })).toBe(false);
+    expect(invoiceVersionChanged(row({ customer_id: 'cust-2' }), { status: 'sent' })).toBe(false);
+    expect(() => assertInvoiceVersion(row({ customer_id: 'cust-2' }), { customerId: 'cust-1' }, 'editing')).toThrow(/Invoice changed while editing/);
     const calls = [];
     const q = {};
     for (const name of ['where', 'whereRaw', 'whereNull', 'whereNotNull']) q[name] = jest.fn((...a) => { calls.push([name, ...a]); return q; });
-    applyInvoiceVersion(q, { payerId: null });
-    applyInvoiceVersion(q, { payerId: 'payer-1' });
-    expect(calls).toEqual([['whereNull', 'payer_id'], ['where', 'payer_id', 'payer-1']]);
-  });
-
-  test('assertSelfPayLive re-asks the live owner on the locked row only when the card computed a self-pay retotal', async () => {
-    const { assertSelfPayLive } = require('../services/invoice-bar-expected');
-    const ownership = require('../services/invoice-payer-ownership');
-    const spy = jest.spyOn(ownership, 'invoicePayerOwnership');
-    const term = jest.spyOn(require('../services/invoice-prepay'), 'resolveInvoiceTermId').mockResolvedValue(null);
-    const locks = [];
-    const conn = (table) => { const q = { where: () => q, forShare: () => { locks.push(table); return q; }, first: async () => ({ id: 'x' }) }; return q; };
-    try {
-      // An annual term that appeared through the visit refuses, with the visit row held FOR SHARE first; unverifiable too.
-      // The visit is locked BEFORE the invoice (lockBarRetotalVisit), and must still be the invoice's visit under the lock.
-      const { lockBarRetotalVisit } = require('../services/invoice-bar-expected');
-      expect(await lockBarRetotalVisit(conn, { scheduled_service_id: 'ss-1' }, { selfPayLive: true })).toBe('ss-1');
-      expect(await lockBarRetotalVisit(conn, { scheduled_service_id: 'ss-1' }, { status: 'sent' })).toBeNull();
-      expect(locks).toEqual(['scheduled_services']);
-      await expect(assertSelfPayLive(row({ scheduled_service_id: 'ss-2' }), { selfPayLive: true }, conn, 'ss-1')).rejects.toMatchObject({ code: 'PREVIEW_CHANGED' });
-      term.mockResolvedValueOnce('term-1');
-      await expect(assertSelfPayLive(row({ scheduled_service_id: 'ss-1' }), { selfPayLive: true }, conn, 'ss-1')).rejects.toMatchObject({ code: 'PREVIEW_CHANGED' });
-      term.mockRejectedValueOnce(new Error('db down'));
-      await expect(assertSelfPayLive(row(), { selfPayLive: true }, conn)).rejects.toMatchObject({ code: 'PREVIEW_CHANGED' });
-      await expect(assertSelfPayLive(row(), { status: 'sent' }, {})).resolves.toBeUndefined();
-      expect(spy).not.toHaveBeenCalled();
-      spy.mockResolvedValueOnce(null);
-      await expect(assertSelfPayLive(row(), { selfPayLive: true }, {})).resolves.toBeUndefined();
-      spy.mockResolvedValueOnce('payer_owned');
-      await expect(assertSelfPayLive(row(), { selfPayLive: true }, {})).rejects.toMatchObject({ code: 'PREVIEW_CHANGED', statusCode: 409 });
-      spy.mockResolvedValueOnce('payer_unverifiable');
-      await expect(assertSelfPayLive(row(), { selfPayLive: true }, {})).rejects.toMatchObject({ code: 'PREVIEW_CHANGED' });
-      // A service-record-only link whose visit a payer owns is not self-pay.
-      const visitPayer = jest.spyOn(require('../services/visit-linked-invoice-withdrawal'), 'liveVisitPayerOf').mockResolvedValueOnce('payer-1');
-      spy.mockResolvedValueOnce(null);
-      await expect(assertSelfPayLive(row({ scheduled_service_id: null, service_record_id: 'sr-1' }), { selfPayLive: true }, {})).rejects.toMatchObject({ code: 'PREVIEW_CHANGED' });
-      visitPayer.mockRestore();
-    } finally {
-      spy.mockRestore();
-      term.mockRestore();
-    }
+    applyInvoiceVersion(q, { customerId: null });
+    applyInvoiceVersion(q, { customerId: 'cust-1' });
+    expect(calls).toEqual([['whereNull', 'customer_id'], ['where', 'customer_id', 'cust-1']]);
   });
 
   test('the drift error is a 409 PREVIEW_CHANGED operational error naming what was being done', () => {
@@ -117,7 +83,7 @@ describe('invoiceVersionChanged / assertInvoiceVersion / applyInvoiceVersion', (
     expect(error).toMatchObject({ message: 'Invoice changed while unvoiding — re-check and retry', statusCode: 409, status: 409, isOperational: true, code: 'PREVIEW_CHANGED' });
   });
 
-  test('the write predicates: status, edit time to the millisecond, total and credit in cents, pay session, archive state', () => {
+  test('the write predicates: status, edit time to the millisecond, total and credit in cents, pay session, archive state, customer', () => {
     const calls = [];
     const q = {};
     for (const name of ['where', 'whereRaw', 'whereNull', 'whereNotNull']) q[name] = jest.fn((...a) => { calls.push([name, ...a]); return q; });
@@ -129,6 +95,7 @@ describe('invoiceVersionChanged / assertInvoiceVersion / applyInvoiceVersion', (
       ['whereRaw', 'ROUND(COALESCE(credit_applied, 0) * 100) = ?', [0]],
       ['whereNull', 'stripe_payment_intent_id'],
       ['whereNull', 'archived_at'],
+      ['where', 'customer_id', 'cust-1'],
     ]);
     calls.length = 0;
     applyInvoiceVersion(q, { updatedAt: null, paymentIntentId: 'pi_1', archived: true });
@@ -204,6 +171,7 @@ describe('InvoiceService.update(id, body, { expected })', () => {
     ['edit time', { updated_at: new Date('2099-01-02T00:00:00Z') }],
     ['total', { total: '130.00' }],
     ['credit', { credit_applied: '5.00' }],
+    ['customer', { customer_id: 'cust-2' }],
   ])('a changed %s refuses on the first read: no other read, no transaction, no write', async (_label, change) => {
     cfg.reads.invoices = [row(change)];
     await expect(InvoiceService.update('inv-1', { title: 'Renamed' }, { expected: EXPECTED })).rejects.toMatchObject({
@@ -225,41 +193,28 @@ describe('InvoiceService.update(id, body, { expected })', () => {
     await expect(InvoiceService.update('inv-1', { title: 'Renamed' }, { expected: EXPECTED })).rejects.toThrow(/Only unpaid invoices can be edited/);
   });
 
-  test('the new total the card showed is enforced with the edit’s own arithmetic: a different figure refuses before the transaction', async () => {
-    const lines = [{ client_id: 'li_a', description: 'Quarterly Pest Control', quantity: 1, unit_price: 149, amount: 149 }];
-    cfg.reads.invoices = [row()];
-    cfg.reads.customers = [{ id: 'cust-1', property_type: 'residential' }];
-    await expect(InvoiceService.update('inv-1', { line_items: lines }, { expected: { ...EXPECTED, newTotal: 150 } })).rejects.toMatchObject({
-      message: expect.stringMatching(/new total is no longer what the card showed/), code: 'PREVIEW_CHANGED',
-    });
-    expect(db.transaction).not.toHaveBeenCalled();
+  test('an edit that moved the invoice to another customer between the first read and the row lock is caught on the LOCKED row', async () => {
+    cfg.reads.invoices = [row(), row({ customer_id: 'cust-2' })];
+    await expect(InvoiceService.update('inv-1', { title: 'Renamed' }, { expected: EXPECTED })).rejects.toMatchObject({ code: 'PREVIEW_CHANGED' });
+    expect(updateOps()).toEqual([]);
   });
 
-  test('the same retotal with the right new total goes through to the write', async () => {
-    const lines = [{ client_id: 'li_a', description: 'Quarterly Pest Control', quantity: 1, unit_price: 149, amount: 149 }];
+  test('the edit’s UPDATE also requires the customer the card named', async () => {
     cfg.reads.invoices = [row(), row()];
-    cfg.reads.customers = [{ id: 'cust-1', property_type: 'residential' }];
-    cfg.updateReturning.invoices = [row({ total: '149.00' })];
-    const saved = await InvoiceService.update('inv-1', { line_items: lines }, { expected: { ...EXPECTED, newTotal: 149 } });
-    expect(saved.total).toBe('149.00');
-    expect(updateOps().find(([name]) => name === 'update')[1]).toMatchObject({ total: 149, subtotal: 149 });
-  });
-
-  test('the exported arithmetic is the one the edit uses (a commercial customer, the card’s tax rate)', async () => {
-    cfg.reads.customers = [{ id: 'cust-1', property_type: 'commercial' }];
-    const fin = await InvoiceService._calculateUpdateFinancials({
-      lineItems: [{ client_id: 'li_a', description: 'Service', quantity: 2, unit_price: 50 }], customer: { property_type: 'commercial' }, invoice: row(), taxRate: 0.07,
-    });
-    expect(fin).toMatchObject({ subtotal: 100, discount_amount: 0, tax_rate: 0.07, tax_amount: 7, total: 107 });
+    cfg.updateReturning.invoices = [row({ title: 'Renamed' })];
+    await InvoiceService.update('inv-1', { title: 'Renamed' }, { expected: EXPECTED });
+    const editCall = calls.find((c) => c.table === 'invoices' && c.ops.some(([name]) => name === 'update'));
+    expect(editCall.ops).toEqual(expect.arrayContaining([['where', 'customer_id', 'cust-1']]));
   });
 });
 
 describe('InvoiceService.unvoidInvoice(id, { expected })', () => {
-  const VOID_EXPECTED = { status: 'void', updatedAt: UPDATED.getTime() };
+  const VOID_EXPECTED = { status: 'void', updatedAt: UPDATED.getTime(), customerId: 'cust-1' };
 
   test.each([
     ['edit time', { updated_at: new Date('2099-01-02T00:00:00Z') }],
     ['status', { status: 'draft' }],
+    ['customer', { customer_id: 'cust-2' }],
   ])('a changed %s refuses on the first read, before any other read or write', async (_label, change) => {
     cfg.reads.invoices = [row({ status: 'void', ...change })];
     await expect(InvoiceService.unvoidInvoice('inv-1', { expected: VOID_EXPECTED })).rejects.toMatchObject({
@@ -282,6 +237,7 @@ describe('InvoiceService.unvoidInvoice(id, { expected })', () => {
     const restore = calls.find((c) => c.table === 'invoices' && c.ops.some(([name]) => name === 'update'));
     expect(restore.ops.map(([name]) => name)).toEqual(expect.arrayContaining(['where', 'whereRaw']));
     expect(restore.ops.find(([name, text]) => name === 'whereRaw' && /date_trunc/.test(text))[2]).toEqual([UPDATED.toISOString()]);
+    expect(restore.ops).toEqual(expect.arrayContaining([['where', 'customer_id', 'cust-1']]));
     calls.length = 0;
     cfg.reads.invoices = [voided];
     await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(/Invoice status changed while unvoiding/);
