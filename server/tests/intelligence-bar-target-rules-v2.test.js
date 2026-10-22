@@ -794,6 +794,63 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(101), updates: { phone: '941-555-0150' } }, null, null, OwnerDirect.targetGrounding(owner))).toBe(true);
   });
 
+  test('gate on: every choice label is sanitized; a name like "Create: Customer Bob" cannot make an instruction button, and every tap is carded by its shape (Codex #6369 r31)', async () => {
+    process.env[ON] = 'true';
+    const mk = (n, first, last, city) => ({ ...sameName(1)[0], id: id(980 + n), first_name: first, last_name: last, city, phone: `94155508${String(n).padStart(2, '0')}` });
+    const labelsFor = async (first, last) => {
+      customers = [mk(0, first, last, 'Venice'), mk(1, first, last, 'Osprey')];
+      const typed = `${first} ${last}`.replace(/[^\p{L}\p{N}\s'-]+/gu, ' ');
+      const resolved = await Context.resolve({ prompt: `update ${typed} notes`, pageData: {}, selectedTarget: null, ownerDirectScope: true });
+      return (resolved.candidates || []).map(c => c.choice_label);
+    };
+    const all = [];
+    for (const [first, last] of [['Create:', 'Customer Bob'], ['Pat2', 'Ex"ample'], ['Lee\n', 'Park\u{1F600}'], ["Ann-Marie", "O'Neil Smith."], ['12345', '!!!']]) {
+      const labels = (await labelsFor(first, last)).filter(Boolean);
+      expect([first, last, labels.length]).toEqual([first, last, 2]);
+      for (const label of labels) {
+        // Only letters, spaces, apostrophe, hyphen and period in the name, then ", City"; no colon, digit, quote, newline or emoji.
+        expect(label).toMatch(/^[\p{L}][\p{L}'. -]*, [\p{L}' -]+$/u);
+        expect(label).not.toMatch(/[:"\d\n\u{1F600}]/u);
+        // The tap is carded by its shape, whatever the thread says.
+        expect(OwnerDirect.looksLikeChoiceReply(label)).toBe(true);
+        all.push(label);
+      }
+    }
+    expect(all).toContain('Create Customer Bob, Venice');
+    expect(all).toContain('Pat Ex ample, Osprey');
+    expect(all).toContain('Customer Customer, Venice');
+    // The raw text never appears in a label.
+    expect(all.join('|')).not.toMatch(/Create:|Ex"ample|Pat2/);
+    // Safe replies fit the grammar; a colon or digits do not.
+    expect(OwnerDirect.looksLikeChoiceReply("Ann-Marie O'Neil Smith., Englewood")).toBe(true);
+    expect(OwnerDirect.looksLikeChoiceReply('Create: Customer Bob, Venice')).toBe(false);
+    expect(OwnerDirect.looksLikeChoiceReply('Pat Example, Venice 34285')).toBe(false);
+  });
+
+  test('gate off: the selection collapse does not run, candidates stay exactly as found; another admin keeps them too (Codex #6369 r31)', async () => {
+    customers = sameName(2);
+    delete process.env[ON];
+    const off = await Context.resolve({ prompt: 'update Pat Example notes', pageData: {}, selectedTarget: { customer_id: id(101) }, ownerDirectScope: true });
+    expect(off.candidates.map(c => c.customer_id).sort()).toEqual([id(100), id(101)]);
+    process.env[ON] = 'true';
+    const otherAdmin = await Context.resolve({ prompt: 'update Pat Example notes', pageData: {}, selectedTarget: { customer_id: id(101) }, ownerDirectScope: false });
+    expect(otherAdmin.candidates.map(c => c.customer_id).sort()).toEqual([id(100), id(101)]);
+  });
+
+  test('noteSameNameContext does nothing for a context that is not owner-direct (Codex #6369 r31)', () => {
+    process.env[ON] = 'true';
+    const two = { candidates: [{ customer_id: id(100) }, { customer_id: id(101) }] };
+    for (const ownerDirect of [undefined, false]) {
+      const taint = OwnerDirect.newRequestTaint([]);
+      OwnerDirect.noteSameNameContext(taint, { ...two, ownerDirect });
+      expect(taint.sameNameCandidates).toBeUndefined();
+      expect(OwnerDirect.sameNameMarkerNeeded(taint)).toBe(false);
+    }
+    const on = OwnerDirect.newRequestTaint([]);
+    OwnerDirect.noteSameNameContext(on, { ...two, ownerDirect: true });
+    expect(on.sameNameCandidates).toBe(true);
+  });
+
   test('gate on: a city is matched as a WHOLE phrase: "Palm Beach Gardens" is not "Palm Beach" (Codex #6369 r23)', async () => {
     process.env[ON] = 'true';
     customers = sameName(2).map((c, i) => ({ ...c, city: i === 0 ? 'Palm Beach' : 'Venice' }));
@@ -1377,7 +1434,7 @@ describe('same-name choice marker on the thread (Codex #6369 r16)', () => {
     const grounding = OwnerDirect.targetGrounding(owner);
     // Request 1: same-name candidates in context and choices offered: the reply leaves the marker.
     const first = await load(false);
-    const asked = { sameName: true, candidates: [{ choice_label: 'Pat Example, Venice' }, { choice_label: 'Pat Example, Osprey' }] };
+    const asked = { sameName: true, ownerDirect: true, candidates: [{ choice_label: 'Pat Example, Venice' }, { choice_label: 'Pat Example, Osprey' }] };
     OwnerDirect.noteSameNameContext(first, asked);
     OwnerDirect.markSameNameChoices(first, asked, ['Pat Example, Venice', 'Pat Example, Osprey']);
     expect(OwnerDirect.sameNameMarkerNeeded(first)).toBe(true);
@@ -1397,7 +1454,7 @@ describe('same-name choice marker on the thread (Codex #6369 r16)', () => {
 
   test('bare name with two different full names: the marker is persisted, a text-only "yes" within 30 minutes is carded, later it is direct, a single candidate leaves none (Codex #6369 r22)', async () => {
     process.env[ON] = 'true';
-    const two = { candidates: [{ customer_id: id(100), label: 'Pat Example' }, { customer_id: id(101), label: 'Pat Sample' }] };
+    const two = { ownerDirect: true, candidates: [{ customer_id: id(100), label: 'Pat Example' }, { customer_id: id(101), label: 'Pat Sample' }] };
     const grounding = OwnerDirect.targetGrounding({ targets: [], groundedCustomerIds: [], page: { ids: { customer_id: id(100) } } });
     const viewedEdit = { customer_id: id(100), updates: { phone: '941-555-0150' } };
     // Request 1: more than one candidate row reached the model, no buttons shown: the marker is left.
@@ -1415,7 +1472,7 @@ describe('same-name choice marker on the thread (Codex #6369 r16)', () => {
     expect(OwnerDirect.executesWithoutCard('update_customer', viewedEdit, null, later, grounding)).toBe(true);
     // A single-candidate request leaves no marker.
     const single = OwnerDirect.newRequestTaint([]);
-    OwnerDirect.noteSameNameContext(single, { candidates: [{ customer_id: id(100) }] });
+    OwnerDirect.noteSameNameContext(single, { ownerDirect: true, candidates: [{ customer_id: id(100) }] });
     expect(OwnerDirect.sameNameMarkerNeeded(single)).toBe(false);
   });
 

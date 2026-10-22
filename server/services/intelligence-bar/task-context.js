@@ -723,15 +723,24 @@ const safeChoiceCity = city => {
   return text.length <= 30 && SAFE_CITY_RE.test(text) && !COMMAND_WORD_RE.test(text) ? text : null;
 };
 
+// ONE sanitizer for every emitted choice label, full and shortened (Codex #6369 r31). A name part keeps
+// only letters, spaces, apostrophe, hyphen and period (runs collapsed, trimmed; nothing left ->
+// "Customer"), and the city goes through safeChoiceCity. So a label is always plain "Name, City" text:
+// a customer-entered ":" or quote can never ride into the button, and the tapped text always matches
+// the strict choice-reply grammar (looksLikeChoiceReply), so the tap is carded by its shape.
+const safeNamePart = value => String(value ?? '').replace(/[^\p{L}'. -]+/gu, ' ').replace(/\s+/g, ' ').trim();
+const labelNamePart = value => (String(value ?? '').trim() ? safeNamePart(value) || 'Customer' : '');
+
 async function choiceLabels(customers) {
-  const full = customer => `${[customer.first_name, customer.last_name].filter(Boolean).join(' ')}${customer.city ? `, ${customer.city}` : ''}`;
-  const short = customer => `${customer.first_name} ${String(customer.last_name || '').trim().charAt(0)}., ${customer.city}`;
+  const nameOf = customer => [labelNamePart(customer.first_name), labelNamePart(customer.last_name)].filter(Boolean).join(' ');
+  const full = customer => `${nameOf(customer)}${safeChoiceCity(customer.city) ? `, ${safeChoiceCity(customer.city)}` : ''}`;
+  const short = customer => `${labelNamePart(customer.first_name)} ${labelNamePart(customer.last_name).charAt(0)}., ${safeChoiceCity(customer.city)}`;
   // A short label is offered only when initialFormIds, on the whole customer table,
   // resolves it back to this customer alone (Codex #6369 r3: another customer with
   // the same first name, last initial and city outside this name's rows). One query
   // checks every candidate triple at once (Codex #6369 r7), never one scan per row.
-  const tripleOf = customer => [customer.first_name, String(customer.last_name || '').trim().charAt(0), customer.city].map(part => normalizeName(part));
-  const wantsShort = customer => customer.city && customer.last_name && !/\s/.test(String(customer.first_name || '').trim())
+  const tripleOf = customer => [labelNamePart(customer.first_name), labelNamePart(customer.last_name).charAt(0), safeChoiceCity(customer.city)].map(part => normalizeName(part));
+  const wantsShort = customer => customer.city && customer.last_name && !/\s/.test(labelNamePart(customer.first_name))
     && full(customer).length > MAX_LABEL_CHARS && short(customer).length <= MAX_LABEL_CHARS && INITIAL_FORM_RE.test(short(customer))
     && tripleOf(customer).every(Boolean);
   const tripleKey = triple => triple.join('\u0000');
@@ -871,6 +880,12 @@ async function candidatesStage(r) {
   return null;
 }
 
+// Owner-direct v2 scope only: once a target is settled, only that customer stays in the candidates.
+// With the gate off, or for another admin, the candidates are left exactly as the lookup found them.
+function collapseCandidates(r) {
+  if (targetRulesV2Scope(r.ownerDirectScope)) r.candidates = [r.selection.target];
+}
+
 // A selection is bound to this request's own fresh candidates: it is accepted only
 // as one of the rows the request resolved to (duplicate-name disambiguation, the one
 // flow that supplies a selection). A request that named nobody, matched nothing, hit
@@ -884,7 +899,7 @@ async function selectionStage(r) {
   r.selection = singleTarget(selected, 'operator_selection');
   // A validated operator selection settles the ambiguity: the duplicate rows leave the context, so they
   // neither reach the model nor trigger the multi-candidate taint and marker (Codex #6369 r30).
-  r.candidates = [r.selection.target];
+  collapseCandidates(r);
   return null;
 }
 
@@ -900,7 +915,7 @@ async function cappedStage(r) {
     // Only the customer the contact resolved stays in the context: the sentinel rows of the capped
     // lookup must not reach the model (Codex #6369 r30).
     r.selection = singleTarget(pick, 'current_request_lookup');
-    r.candidates = [r.selection.target];
+    collapseCandidates(r);
     return null;
   }
   return { page: r.page, candidates: [], target: null, targets: [], ambiguous: false,

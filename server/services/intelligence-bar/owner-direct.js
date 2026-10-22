@@ -444,7 +444,8 @@ function mayExecuteWithoutCard(toolName, input = {}, taint = null, grounding = n
 // path (customer edits, create_customer and the other exempt tools) asks executesWithoutCard
 // or mayExecuteWithoutCard, so this flag cards them all (Codex #6369 r15).
 function noteSameNameContext(taint, taskContext) {
-  if (taint && ibTargetRulesV2Live() && (taskContext?.candidates?.length || 0) > 1) {
+  // Only an owner-direct context: with owner-direct off the flag and the marker mean nothing (Codex #6369 r31).
+  if (taint && ibTargetRulesV2Live() && taskContext?.ownerDirect === true && (taskContext?.candidates?.length || 0) > 1) {
     taint.sameNameCandidates = true;
     // The reply is then followed by a text-only "yes" as readily as a button tap, whatever the
     // group kind (Codex #6369 r22): the thread marker is left whenever more than one candidate
@@ -489,7 +490,9 @@ async function sameNameChoicePending({ actorId, threadId, conversationHistory, p
 // the only evidence (Codex #6369 r23). A marker in any of the last 3 assistant turns counts as
 // pending (no clock is available). With no readable history, a message shaped like a choice
 // reply ("Full Name, City" / "First L., City") fails closed.
-const CHOICE_REPLY_RE = /^[\p{L}][\p{L}'. -]{1,38},\s*[\p{L}][\p{L}'. -]{1,38}$/u;
+// Exactly the label alphabet task-context's choice sanitizer emits: a name of letters, spaces, apostrophe,
+// hyphen and period, then ", City" of letters, spaces, apostrophe and hyphen (safeChoiceCity).
+const CHOICE_REPLY_RE = /^[\p{L}][\p{L}'. -]{1,38},\s*[\p{L}][\p{L}' -]{1,29}$/u;
 const looksLikeChoiceReply = prompt => CHOICE_REPLY_RE.test(String(prompt ?? '').trim());
 const turnText = content => (Array.isArray(content) ? content.map(block => (typeof block === 'string' ? block : block?.text || '')).join('\n') : String(content ?? ''));
 
