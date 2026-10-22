@@ -280,6 +280,21 @@ describe('refusal gap rows on /confirm-action (Codex #6371 r19)', () => {
     expect(mockGapRows).toHaveLength(0);
   });
 
+  test('a confirmed move that skipped grouped stops records nothing new: the preview already counted them', async () => {
+    claim();
+    mockExecuteTool.mockResolvedValue({ success: true, moved_count: 1, skipped_grouped: [{ id: 's2', kind: 'grouped' }], capability_gaps: [{ code: 'grouped_visit_move_unsupported' }] });
+    await withServer(async (baseUrl) => { await confirm(baseUrl); });
+    expect(mockGapRows).toHaveLength(0);
+  });
+
+  test('a failed confirm lists no nested gaps either, only its own top-level code', async () => {
+    claim();
+    mockExecuteTool.mockResolvedValue({ error: "The bar can't move these from here yet.", code: 'grouped_visit_move_unsupported', capability_gaps: [{ code: 'frozen_visit_move_unsupported' }] });
+    await withServer(async (baseUrl) => { await confirm(baseUrl); });
+    expect(mockGapRows).toHaveLength(1);
+    expect(mockGapRows[0].summary).toContain('grouped_visit_move_unsupported');
+  });
+
   test('a successful confirm records nothing', async () => {
     claim();
     mockExecuteTool.mockResolvedValue({ success: true });

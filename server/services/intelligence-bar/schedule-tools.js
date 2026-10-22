@@ -1138,6 +1138,55 @@ function skippedMoveGaps(skippedGrouped, skippedCollective, outage = false) {
   return codes.length ? { capability_gaps: codes.map((code) => ({ code })) } : {};
 }
 
+// Why a stop with a visit cannot ride a batch move, or null when it can: one
+// classification per stop, read-only (no locks; the commit's per-stop assert
+// stays authoritative). Fails CLOSED on a group state that cannot be read
+// (GH r8 P1). Each entry keeps its kind: grouped, frozen (structural), busy
+// (a wait) or unreadable (an outage).
+async function groupStateSkip(s) {
+  if (!s.visit_id) return null;
+  const status = (detail) => `${s.status} (${detail})`;
+  try {
+    const { openMembers, frozenVisitVerdict } = require('../visit-groups');
+    const members = await openMembers(db, s.visit_id);
+    if (members.length >= 2) return { id: s.id, kind: 'grouped', status: status("grouped visit, which moves as a whole; the bar can't move it from here yet") };
+    const verdict = await frozenVisitVerdict(db, s.visit_id);
+    if (!verdict.frozen) return null;
+    if (verdict.reason === 'unreadable') return { id: s.id, kind: 'unreadable', status: status('group state unverifiable'), unreadable: true };
+    return { id: s.id, kind: frozenStopKind(verdict.reason), reason: verdict.reason, status: status(`frozen visit: ${verdict.reason}`) };
+  } catch (err) {
+    logger.warn(`[intelligence-bar:schedule] group-state preview check failed for ${s.id}: ${err.message}`);
+    return { id: s.id, kind: 'unreadable', status: status('group state unverifiable'), unreadable: true };
+  }
+}
+
+// The refusal when no stop is left to move: the code of the one reason that
+// emptied the batch, plus every kind of capability gap among the skips
+// (Codex #6371 r15). An unreadable group check anywhere keeps the whole
+// refusal an uncoded fault (Tool Health), never a capability gap (r7).
+function allSkippedRefusal({ skippedGrouped, skippedCollective, skippedUnchanged, skippedElapsed }) {
+  const anyUnreadable = skippedGrouped.some((entry) => entry.unreadable);
+  const onlyGroupedOrCollective = !skippedUnchanged.length && !skippedElapsed.length;
+  let refusal = { error: 'Every movable stop\'s window has already passed today — pick a later window or a future date' };
+  if (anyUnreadable) {
+    refusal = { error: 'The bar could not check whether some selected stops belong to a grouped or frozen visit, so nothing was moved. Try again.' };
+  } else if (skippedGrouped.length && !skippedCollective.length && onlyGroupedOrCollective) {
+    refusal = batchMoveGroupRefusal(skippedGrouped);
+  } else if (skippedCollective.length && onlyGroupedOrCollective) {
+    refusal = {
+      error: 'Every selected stop is a recurring-plan visit; with collective moves on, its later visits move with it, and the bar can\'t move a series from here yet',
+      code: 'collective_move_unsupported',
+    };
+  } else if (skippedUnchanged.length && !skippedElapsed.length) {
+    refusal = { error: 'Every selected stop is already on that date — nothing to move' };
+  }
+  return { error: refusal.error, ...(refusal.code ? { code: refusal.code } : {}), ...skippedMoveGaps(skippedGrouped, skippedCollective, anyUnreadable) };
+}
+
+// The skipped lists that hold a stop, named as the card and the result show
+// them: exactly what stays behind.
+const nonEmptySkipLists = (lists) => Object.fromEntries(Object.entries(lists).filter(([, stops]) => stops.length));
+
 async function moveStopsToDay(input, actionContext = {}) {
   const { service_ids: serviceIds, new_date: newDate, reason, confirmed } = input;
   const notifyCustomers = input.notify_customers === true;
@@ -1214,53 +1263,17 @@ async function moveStopsToDay(input, actionContext = {}) {
   const skippedGrouped = [];
   const movable = [];
   for (const s of movableUngated) {
-    if (!s.visit_id) { movable.push(s); continue; }
-    try {
-      const { openMembers, frozenVisitVerdict } = require('../visit-groups');
-      const members = await openMembers(db, s.visit_id);
-      if (members.length >= 2) {
-        skippedGrouped.push({ id: s.id, kind: 'grouped', status: `${s.status} (grouped visit, which moves as a whole; the bar can't move it from here yet)` });
-        continue;
-      }
-      const verdict = await frozenVisitVerdict(db, s.visit_id);
-      if (verdict.frozen) {
-        skippedGrouped.push(verdict.reason === 'unreadable'
-          ? { id: s.id, kind: 'unreadable', status: `${s.status} (group state unverifiable)`, unreadable: true }
-          : { id: s.id, kind: frozenStopKind(verdict.reason), reason: verdict.reason, status: `${s.status} (frozen visit: ${verdict.reason})` });
-        continue;
-      }
-      movable.push(s);
-    } catch (err) {
-      logger.warn(`[intelligence-bar:schedule] group-state preview check failed for ${s.id}: ${err.message}`);
-      skippedGrouped.push({ id: s.id, kind: 'unreadable', status: `${s.status} (group state unverifiable)`, unreadable: true });
-    }
+    const skip = await groupStateSkip(s);
+    (skip ? skippedGrouped : movable).push(skip || s);
   }
+  const skipLists = {
+    skipped_grouped: skippedGrouped, skipped_collective: skippedCollective, skipped_unchanged: skippedUnchanged,
+    skipped_elapsed: skippedElapsed, skipped_terminal: skippedTerminal,
+  };
   if (!movable.length) {
-    let error = 'Every movable stop\'s window has already passed today — pick a later window or a future date';
-    let errorCode = null;
-    // An unreadable group check anywhere keeps the whole refusal an uncoded
-    // fault (Tool Health), never a capability gap (Codex #6371 r7).
-    const anyUnreadable = skippedGrouped.some(entry => entry.unreadable);
-    if (anyUnreadable) {
-      error = 'The bar could not check whether some selected stops belong to a grouped or frozen visit, so nothing was moved. Try again.';
-    } else if (skippedGrouped.length && !skippedCollective.length && !skippedUnchanged.length && !skippedElapsed.length) {
-      ({ error, code: errorCode } = batchMoveGroupRefusal(skippedGrouped));
-    } else if (skippedCollective.length && !skippedUnchanged.length && !skippedElapsed.length) {
-      error = 'Every selected stop is a recurring-plan visit; with collective moves on, its later visits move with it, and the bar can\'t move a series from here yet';
-      errorCode = 'collective_move_unsupported';
-    } else if (skippedUnchanged.length && !skippedElapsed.length) {
-      error = 'Every selected stop is already on that date — nothing to move';
-    }
     return {
-      error,
-      ...(errorCode ? { code: errorCode } : {}),
-      // Every kind of stop skipped, not only the top code's (Codex #6371 r15); an unreadable check stays a plain fault.
-      ...skippedMoveGaps(skippedGrouped, skippedCollective, anyUnreadable),
-      ...(skippedGrouped.length ? { skipped_grouped: skippedGrouped } : {}),
-      ...(skippedCollective.length ? { skipped_collective: skippedCollective } : {}),
-      ...(skippedUnchanged.length ? { skipped_unchanged: skippedUnchanged } : {}),
-      ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
-      ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
+      ...allSkippedRefusal({ skippedGrouped, skippedCollective, skippedUnchanged, skippedElapsed }),
+      ...nonEmptySkipLists(skipLists),
     };
   }
 
@@ -1323,11 +1336,7 @@ async function moveStopsToDay(input, actionContext = {}) {
       will_text_customers: notifyCustomers,
       stops,
       ...skippedMoveGaps(skippedGrouped, skippedCollective),
-      ...(skippedGrouped.length ? { skipped_grouped: skippedGrouped } : {}),
-      ...(skippedCollective.length ? { skipped_collective: skippedCollective } : {}),
-      ...(skippedUnchanged.length ? { skipped_unchanged: skippedUnchanged } : {}),
-      ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
-      ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
+      ...nonEmptySkipLists(skipLists),
       note: `Would move ${stops.length} stop(s) to ${dateStr}${notifyCustomers ? ' and TEXT each customer the new arrival window' : ' silently (no customer texts)'}. Re-call with confirmed:true to apply.`,
     };
   }
@@ -1728,11 +1737,7 @@ async function moveStopsToDay(input, actionContext = {}) {
     ...(combinedWarning ? { warning: combinedWarning } : {}),
     ...(overlapMovedIds.length ? { overlap_ids: overlapMovedIds } : {}),
     ...(notifyCustomers ? { texted_count: textedCount, notification_failures: notificationFailures } : {}),
-    ...(skippedUnchanged.length ? { skipped_unchanged: skippedUnchanged } : {}),
-    ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
-    ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
-    ...(skippedGrouped.length ? { skipped_grouped: skippedGrouped } : {}),
-    ...(skippedCollective.length ? { skipped_collective: skippedCollective } : {}),
+    ...nonEmptySkipLists(skipLists),
     ...skippedMoveGaps(skippedGrouped, skippedCollective),
   };
 }

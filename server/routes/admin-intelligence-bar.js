@@ -4693,9 +4693,13 @@ const CLAIM_REFUSAL_FACTS = { product_choice_required: { code: 'product_choice_r
 // query path: blocked rows only (no search or ask signals), best effort
 // (Codex #6371 r19).
 async function recordConfirmedGaps(toolName, result) {
+  // Only a refused (failed) result, by its top-level code: the preview that made
+  // the card already counted any skipped-stop gaps, so a confirmed success or a
+  // nested list would count them twice (Codex #6371 r20).
+  if (!isToolFailure(result)) return;
   try {
     const collector = createGapCollector({ source: 'intelligence-bar', isRegisteredTool: (name) => ActionRegistry.actions.has(name) });
-    collector.toolResult(toolName, result, isToolFailure(result), { round: 0, wrote: false });
+    collector.toolResult(toolName, { ...result, capability_gaps: undefined }, true, { round: 0, wrote: false });
     await collector.flush({});
   } catch (err) {
     logger.warn(`[intelligence-bar] confirm-path gap record failed (${err.code || err.name || 'error'})`);

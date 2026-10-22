@@ -312,10 +312,11 @@ describe('a switched-off gate is not a gap (Codex #6371 r6)', () => {
 describe('mixed batch refusals with an unreadable check stay faults (Codex #6371 r7)', () => {
   test('the unreadable check runs before the collective and grouped codes', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/intelligence-bar/schedule-tools.js'), 'utf8');
-    const block = src.slice(src.indexOf('const anyUnreadable = skippedGrouped.some(entry => entry.unreadable);'));
+    const block = src.slice(src.indexOf('function allSkippedRefusal('));
     expect(block.indexOf('if (anyUnreadable) {')).toBeGreaterThan(-1);
-    expect(block.indexOf('if (anyUnreadable) {')).toBeLessThan(block.indexOf("errorCode = 'collective_move_unsupported'"));
-    expect(block.slice(0, block.indexOf('} else if')).includes('errorCode =')).toBe(false);
+    expect(block.indexOf('if (anyUnreadable) {')).toBeLessThan(block.indexOf("code: 'collective_move_unsupported'"));
+    // The unreadable branch sets no code.
+    expect(block.slice(block.indexOf('if (anyUnreadable) {'), block.indexOf('} else if')).includes('code:')).toBe(false);
   });
 });
 
