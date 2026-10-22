@@ -3048,6 +3048,24 @@ function priceTreeShrub(property, options = {}) {
       + ' It was priced IN FULL — confirm the measurement.',
     );
   }
+  // Open-parcel basis guard (Codex security P2 on #6398): the public quote
+  // takes homeSqFt from an unauthenticated body, so an inflated footprint
+  // shrinks the lot-based bed and the price. A footprint + hardscape above
+  // half the lot is implausible for a residential parcel — price it as
+  // entered but park the line for review so it never auto-sends.
+  if (bedAreaInfo.bedAreaSource === 'lot_based') {
+    const lotForBasis = Number(property.lotSqFt) || 0;
+    const fp = Number(property.footprint ?? property.footprintSqFt);
+    const hs = Number(property.hardscape);
+    const covered = (Number.isFinite(fp) && fp > 0 ? fp : 0) + (Number.isFinite(hs) && hs > 0 ? hs : 0);
+    if (lotForBasis > 0 && covered > lotForBasis * 0.5) {
+      manualReviewReasonsSet.add('open_parcel_basis_footprint_over_half_lot');
+      warnings.push(
+        `Building footprint + hardscape (${bedSqFtText(covered)}) cover more than half the ${bedSqFtText(lotForBasis)} lot;`
+        + ' the lot-based bed area was priced on the remaining open parcel — confirm the home and lot sizes.',
+      );
+    }
+  }
   // Plant-count review gate. Unarmed: trees plus SERVICE-LINE palms only —
   // exactly what the pre-split classification counted (property palms never
   // reached T&S pricing, so counting them would change neutral behavior).

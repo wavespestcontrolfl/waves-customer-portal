@@ -1847,6 +1847,25 @@ describe('Tree & Shrub lot-based bed area prices the OPEN parcel (owner audit 20
     expect(quote.bedAreaUsed).toBe(300);
   });
 
+  test('an implausible footprint (over half the lot) still prices the open parcel but parks the line for review (Codex security P2)', () => {
+    // 22,000 sf lot: a 2,000 sf home prices clean; the same lot with a
+    // claimed 20,000 sf home shrinks the bed basis — the price is what the
+    // inputs say, but the line carries a review reason so the public quote
+    // never auto-sends it.
+    const base = { stories: 1, lotSqFt: 22000, propertyType: 'single_family', features: { shrubs: 'moderate', trees: 'light', complexity: 'simple' }, services: { treeShrub: { tier: 'standard', treeCount: 0 } } };
+    const honest = generateEstimate({ ...base, homeSqFt: 2000 }).lineItems.find((i) => i.service === 'tree_shrub');
+    const inflated = generateEstimate({ ...base, homeSqFt: 20000 }).lineItems.find((i) => i.service === 'tree_shrub');
+    expect(honest.manualReviewReasons).not.toContain('open_parcel_basis_footprint_over_half_lot');
+    expect(inflated.bedAreaSource).toBe('lot_based');
+    expect(inflated.monthly).toBeLessThan(honest.monthly);
+    expect(inflated.manualReviewReasons).toContain('open_parcel_basis_footprint_over_half_lot');
+    expect(inflated.requiresManualReview).toBe(true);
+    expect(inflated.warnings.join(' ')).toMatch(/more than half the 22,000 sq ft lot/);
+    // A typed bed area is not a lot-based inference: no footprint guard.
+    const typed = generateEstimate({ ...base, homeSqFt: 20000, bedArea: 900 }).lineItems.find((i) => i.service === 'tree_shrub');
+    expect(typed.manualReviewReasons).not.toContain('open_parcel_basis_footprint_over_half_lot');
+  });
+
   test('generateEstimate: a home with a pool cage prices fewer beds than the same lot bare, and matches the profile basis', () => {
     const { treeShrubBedBasisSqFt } = require('../services/pricing-engine/property-calculator');
     const base = {
