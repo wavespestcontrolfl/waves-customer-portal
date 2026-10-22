@@ -131,7 +131,7 @@ describe('FindTimePanel', () => {
     expect(screen.getByText(/Pick the address from the list/)).toBeTruthy();
   });
 
-  it('Book hands the chip date, hour, technician and the address to the booking form', async () => {
+  it('Book hands the day, hour and address to the booking form and closes the drawer', async () => {
     const today = etDateString();
     stubFetch(answer(today));
     const onBook = vi.fn();
@@ -146,11 +146,10 @@ describe('FindTimePanel', () => {
     expect(book.textContent).toMatch(/^Book .* · 1 PM$/);
     fireEvent.click(book);
     expect(onBook).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('dialog', { name: 'Find a time' })).toBeNull();
     expect(onBook).toHaveBeenCalledWith({
       date: today,
       windowStart: '13:00',
-      techId: 'tech-2',
-      durationMinutes: 60,
       quickAddAddress: { address: '100 Example Way', city: 'Bradenton', state: 'FL', zip: '34200' },
     });
   });
@@ -167,7 +166,7 @@ describe('FindTimePanel', () => {
     fireEvent.click(screen.getAllByTestId('availability-hour')[0]);
     // The next answer hangs, so the rows on screen are the 60-minute ones.
     fetcher.mockImplementation(() => new Promise((resolve) => { release = resolve; }));
-    fireEvent.change(screen.getByLabelText('Visit length'), { target: { value: '120' } });
+    fireEvent.change(screen.getByLabelText('Visit length (for the search)'), { target: { value: '120' } });
     await waitFor(() => expect(screen.getByTestId('find-time-results').style.opacity).toBe('0.6'));
     const chips = screen.getAllByTestId('availability-hour');
     expect(chips.every((chip) => chip.disabled)).toBe(true);
@@ -199,7 +198,10 @@ describe('FindTimePanel', () => {
     await screen.findByTestId('find-time-results');
     fireEvent.click(screen.getAllByTestId('availability-hour')[2]);
     fireEvent.click(screen.getByTestId('find-time-book'));
-    expect(onBook.mock.calls[0][0]).toMatchObject({ date: '2035-01-02', windowStart: '09:00', techId: 'tech-1' });
+    expect(onBook.mock.calls[0][0]).toEqual(expect.objectContaining({ date: '2035-01-02', windowStart: '09:00' }));
+    // No technician or length: the panel knows no service (Codex #6411 r1).
+    expect(onBook.mock.calls[0][0]).not.toHaveProperty('techId');
+    expect(onBook.mock.calls[0][0]).not.toHaveProperty('durationMinutes');
   });
 
   it('says best times are off when the server answers gated', async () => {

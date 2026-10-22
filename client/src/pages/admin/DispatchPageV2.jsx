@@ -1587,8 +1587,8 @@ export default function DispatchPageV2({
           <div className="mt-2 flex justify-center">
             <FindTimePanel
               enabled={safeData.findTimePanel === true && getAdminUser()?.role === "admin"}
-              onBook={({ date: slotDate, windowStart, techId, durationMinutes, quickAddAddress }) => {
-                setNewApptDefaults({ date: slotDate, windowStart, techId, durationMinutes, quickAddAddress });
+              onBook={({ date: slotDate, windowStart, quickAddAddress }) => {
+                setNewApptDefaults({ date: slotDate, windowStart, quickAddAddress });
                 setShowNewAppt(true);
               }}
             />

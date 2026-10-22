@@ -66,14 +66,14 @@ it('shows no Find a time button while the gate is off', async () => {
   expect(screen.queryByTestId('find-time-open')).not.toBeInTheDocument();
 });
 
-it('Book opens New Appointment with the chip day, hour, technician and the address', async () => {
+it('Book opens New Appointment with the chip day, hour and the address, no technician or length (Codex #6411 r1)', async () => {
   renderPage(true);
   fireEvent.click(await screen.findByTestId('find-time-open'));
   fireEvent.click(screen.getByText('pick suggestion'));
   fireEvent.click((await screen.findAllByTestId('availability-hour'))[0]);
   fireEvent.click(screen.getByTestId('find-time-book'));
   expect(JSON.parse((await screen.findByTestId('new-appointment')).textContent)).toEqual({
-    date: etDateString(), hour: '10:00', tech: 'tech-9', minutes: 60,
+    date: etDateString(), hour: '10:00',
     quickAdd: { address: '100 Example Way', city: 'Bradenton', state: 'FL', zip: '34200' },
   });
 });

@@ -107,13 +107,17 @@ function FindTimeDrawer({ onClose, onBook }) {
 
   const book = () => {
     if (!selectedHour || !target || stale) return;
+    // Day and hour only (Codex #6411 r1): the panel knows no service, so it
+    // must not pin the chip's technician (who may not perform it) or its
+    // length (the catalog sets the saved one). New Appointment's own time
+    // box re-checks this hour for the real service and compares technicians.
     onBook?.({
       date: selectedHour.date,
       windowStart: String(selectedHour.start).slice(0, 5),
-      techId: selectedHour.technicianId || undefined,
-      durationMinutes: length,
       quickAddAddress: { address: target.line1, city: target.city, state: target.state, zip: target.zip },
     });
+    // The drawer's answer is about to go stale (this hour may be booked next).
+    onClose();
   };
 
   const pick = (hour) => setSelected(hourKey(hour));
@@ -131,7 +135,9 @@ function FindTimeDrawer({ onClose, onBook }) {
         aria-label="Find a time"
         style={{
           width: 440, maxWidth: '100%', height: '100dvh', overflowY: 'auto', boxSizing: 'border-box',
-          background: '#fff', padding: 16, fontSize: 14, color: '#18181B', lineHeight: 1.5,
+          background: '#fff', fontSize: 14, color: '#18181B', lineHeight: 1.5,
+          // Full height on a phone: clear the status bar and home indicator.
+          padding: 'calc(16px + env(safe-area-inset-top, 0px)) 16px calc(16px + env(safe-area-inset-bottom, 0px))',
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
@@ -175,7 +181,7 @@ function FindTimeDrawer({ onClose, onBook }) {
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 12 }}>
           <div>
-            <label style={labelStyle} htmlFor="find-time-length">Visit length</label>
+            <label style={labelStyle} htmlFor="find-time-length">Visit length (for the search)</label>
             <select id="find-time-length" value={length} onChange={(e) => setLength(Number(e.target.value))} style={fieldStyle}>
               {LENGTHS.map((m) => <option key={m} value={m}>{m} min</option>)}
             </select>
@@ -225,7 +231,7 @@ function FindTimeDrawer({ onClose, onBook }) {
                 {selectedHour ? `Book ${fmtDay(selectedHour.date)} · ${fmtHour(selectedHour.start)}` : 'Tap a time to book it'}
               </button>
               <div style={{ ...noteStyle, marginTop: 8, fontSize: 12 }}>
-                Opens New Appointment with this address in New customer. Nothing is saved until you save there.
+                Opens New Appointment with this day, hour and address. Pick the service there: its time box checks the hour and the technician. Nothing is saved until you save there.
               </div>
             </div>
           </div>

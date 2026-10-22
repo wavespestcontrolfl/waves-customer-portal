@@ -5143,7 +5143,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                         setQuickAddConflict(null);
                         setQuickAdd(q => ({
                           ...q,
-                          address: parts.line1 || parts.formatted || '',
+                          // Keep an apartment / unit (line2): quick-add has one street
+                          // line, and a re-geocode on blur must not drop it (Codex #6411 r1).
+                          address: [parts.line1 || parts.formatted || '', parts.line2].filter(Boolean).join(' '),
                           city: parts.city || q.city,
                           state: parts.state || q.state,
                           zip: parts.zip || q.zip,

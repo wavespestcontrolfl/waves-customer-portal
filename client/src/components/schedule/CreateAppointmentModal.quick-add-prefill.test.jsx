@@ -1,10 +1,16 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 vi.mock('../AddressAutocomplete', () => ({
-  default: ({ value }) => <input aria-label="quick-add address" value={value} readOnly />,
+  default: ({ value, onSelect }) => (
+    <>
+      <input aria-label="quick-add address" value={value} readOnly />
+      {/* What a blur re-geocode of a unit address hands back. */}
+      <button type="button" onClick={() => onSelect({ line1: '200 Example Way', line2: 'Apt 4', city: 'Bradenton', state: 'FL', zip: '34200' })}>regeocode</button>
+    </>
+  ),
 }));
 vi.mock('../../hooks/useDiscountStacking', () => ({
   useDiscountStackingState: vi.fn(() => ({ enabled: false, known: true, retry: vi.fn() })),
@@ -38,6 +44,13 @@ describe('CreateAppointmentModal defaultQuickAddAddress', () => {
     expect(screen.getByRole('button', { name: 'Add customer' })).toBeTruthy();
     const writes = fetcher.mock.calls.filter(([, options]) => options?.method && options.method !== 'GET');
     expect(writes).toEqual([]);
+  });
+
+  it('a re-geocode of the address keeps its apartment unit (Codex #6411 r1)', () => {
+    stubFetch();
+    renderModal({ defaultQuickAddAddress: { address: '200 Example Way Apt 4', city: 'Bradenton', state: 'FL', zip: '34200' } });
+    fireEvent.click(screen.getByText('regeocode'));
+    expect(screen.getByLabelText('quick-add address').value).toBe('200 Example Way Apt 4');
   });
 
   it('leaves New customer closed without it', () => {
