@@ -44,12 +44,14 @@ function freshState() {
     customer: { id: CUST, first_name: 'Robin', last_name: 'Sample', company_name: null, payer_id: null },
     invoices: {
       [LINKED]: { id: LINKED, invoice_number: 'WPC-2099-0001', total: '90.00', status: 'sent', credit_applied: '10.00', visit_completion_packet_id: null },
-      [MANUAL]: { id: MANUAL, invoice_number: 'WPC-2099-0002', total: '40.00', status: 'sent' },
+      [MANUAL]: { id: MANUAL, invoice_number: 'WPC-2099-0002', total: '40.00', status: 'sent', scheduled_service_id: 'visit-pinned' },
     },
     packetIds: [],
     staying: [MANUAL],
     pinnedVisits: 0,
     closedPackets: [],
+    // Visits that keep their own Bill-To (pinned self-pay), for the staying invoices' owner check.
+    keepVisits: [{ id: 'visit-pinned', payer_id: null, self_pay_override: true }],
   };
 }
 
@@ -59,6 +61,7 @@ function makeDb() {
     const q = { single: false, packet: false, ids: null, count: false, whereId: null };
     const rows = () => {
       if (table === 'customers') return q.single ? state.customer : [state.customer];
+      if (table === 'scheduled_services' && q.ids) return state.keepVisits.filter((v) => q.ids.includes(v.id));
       if (table === 'scheduled_services') return Array.from({ length: state.pinnedVisits }, (_v, i) => ({ id: `visit-${i}` }));
       // Payer rows read by id: the payer fixture through mockGetPayer, so a test can change what the row says.
       if (table === 'payers') return mockGetPayer(q.whereId);
@@ -166,7 +169,7 @@ describe('the preview', () => {
     expect(text).toMatch(/Moves to Synthetic Property Co: WPC-2099-0001 \$90\.00 \(sent\)/);
     expect(text).not.toMatch(/tax-exempt/);
     expect(text).toMatch(/\$10\.00 of account credit applied to those invoices goes back/);
-    expect(text).toMatch(/1 unpaid invoice stays billed to the customer \(no visit, or a visit pinned to the customer\): WPC-2099-0002/);
+    expect(text).toMatch(/1 unpaid invoice stays billed to the customer \(their visit keeps its own Bill-To\): WPC-2099-0002/);
     expect(text).toMatch(/Nothing is sent/);
     // The withdrawal module's own owner answer, with the pending customer write laid over it.
     expect(mockTransitions).toHaveBeenCalledWith(expect.anything(), { customerId: CUST },
@@ -184,6 +187,17 @@ describe('the preview', () => {
     mockInFlight.mockResolvedValue(true);
     expect(await preview()).toMatchObject({ code: 'invoice_send_in_flight' });
     expect(mockInFlight).toHaveBeenCalledWith({ customerId: CUST }, expect.anything(), { pending: { customerPatch: { customerId: CUST, payer_id: '7' } } });
+  });
+
+  test('a staying invoice with no visit of its own that keeps the customer: no card is offered', async () => {
+    state.invoices[MANUAL] = { ...state.invoices[MANUAL], scheduled_service_id: null };
+    expect(await preview()).toMatchObject({ code: 'unmovable_invoices', invoices: ['WPC-2099-0002'] });
+    // A direct visit that is neither pinned nor has its own payer would read as the new payer's too.
+    state.invoices[MANUAL] = { ...state.invoices[MANUAL], scheduled_service_id: 'visit-plain' };
+    expect(await preview()).toMatchObject({ code: 'unmovable_invoices' });
+    // A visit with its own payer keeps that owner.
+    state.keepVisits = [{ id: 'visit-plain', payer_id: 9, self_pay_override: false }];
+    expect(await preview()).toMatchObject({ preview: true });
   });
 
   test('a combined-visit invoice with a payment processing: no card is offered', async () => {

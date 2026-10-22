@@ -20,8 +20,9 @@
  *
  * Narrower than the screen, on purpose: only a customer with NO payer today. Changing one payer to another or
  * removing a payer stays on the customer page: removing one releases withdrawn invoices back to the customer,
- * and a release can put an invoice back in the send queue. Invoices with no visit link (a manual or project
- * invoice) do not move; the card lists how many stay with the customer.
+ * and a release can put an invoice back in the send queue. An unpaid self-pay invoice that would neither move nor
+ * keep the customer as owner (no direct visit with its own Bill-To: a manual or project invoice, or one linked only
+ * through a service record) refuses the card: the live owner answer would read it as the payer's unmoved.
  *
  * Always a confirm card (write-gates.js two-step), admin only, never owner-direct, platform path only,
  * dark behind GATE_IB_SET_BILL_TO (which needs GATE_IB_PLATFORM).
@@ -45,8 +46,8 @@ const BILL_TO_TOOLS = [
   {
     name: 'set_customer_bill_to',
     description: `Set the Bill-To payer on ONE customer account who pays for themselves today: the customer page "Bill-To" select. A payer is a third party (property manager, HOA, landlord, company AP) that receives the customer's invoices. The first call returns a PREVIEW and writes nothing: the customer, the payer, and every unpaid invoice that moves to the payer. The operator approves on the confirmation card; the confirmed run re-checks all of it and refuses if anything changed.
-Effects: future invoices for this customer bill to the payer (except a visit that has its own Bill-To or is pinned to the customer). Unpaid invoices tied to a visit move to the payer now: their pay links stop working for the customer, account credit applied to them returns to the customer's balance, and their reminders pause. Open pay-page sessions on the customer's invoices are cancelled. Invoices with no visit (manual or project invoices) stay with the customer. Nothing is sent to anyone (no text, email or call).
-Refused with the reason: customer not found, payer not found or inactive, the customer already has a payer (changing or removing a payer stays on the customer page), a combined bank payment or a combined-visit send in flight. To add a NEW payer, use the customer page. Admin only.
+Effects: future invoices for this customer bill to the payer (except a visit that has its own Bill-To or is pinned to the customer). Unpaid invoices tied to a visit move to the payer now: their pay links stop working for the customer, account credit applied to them returns to the customer's balance, and their reminders pause. Open pay-page sessions on the customer's invoices are cancelled. Invoices whose visit keeps its own Bill-To stay with the customer. Nothing is sent to anyone (no text, email or call).
+Refused with the reason: customer not found, payer not found or inactive, an unpaid invoice with no visit of its own (manual or project invoice: collect, void or re-bill it first), the customer already has a payer (changing or removing a payer stays on the customer page), a combined bank payment or a combined-visit send in flight. To add a NEW payer, use the customer page. Admin only.
 Give payer_id, or payer_name (matched against active payers; it must match exactly one). Find a customer with query_customers first.
 Use for: "bill this customer to <payer>", "set the Bill-To to <payer>", "invoices for this account go to <property manager>", "make <payer> the payer on this account".`,
     input_schema: {
@@ -155,17 +156,31 @@ async function invoicePlan(customerId, payerId, ctx = {}) {
   const staying = (await database('invoices').where({ customer_id: customerId }).whereNotIn('status', SETTLED)
     .whereNull('payer_id').whereNull('payer_statement_id')
     .where((q) => q.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%'))
-    .orderBy('invoice_number').select('id', 'invoice_number', 'total', 'status', 'credit_applied'))
+    .orderBy('invoice_number').select('id', 'invoice_number', 'total', 'status', 'credit_applied', 'scheduled_service_id'))
     .filter((inv) => !movingSet.has(String(inv.id)));
   return { moving, staying };
+}
+
+// Staying invoices the live owner answer would hand to the payer anyway. invoice-payer-ownership.js judges an
+// invoice with no payer stamp by its own scheduled_service_id only, so once the customer default is the payer an
+// invoice with no direct visit (a manual or project invoice, or one linked through a service record) reads as
+// payer-owned while nothing withdrew it and its checkout stays live. Only a direct visit with its own payer or
+// pinned self-pay keeps the same owner under the new default.
+async function ownerUnsafeStaying(staying, { database = db } = {}) {
+  const ids = [...new Set(staying.map((inv) => inv.scheduled_service_id).filter(Boolean).map(String))];
+  const cols = ['id', 'payer_id'];
+  if (ids.length && await require('../payer').scheduledServicesHasSelfPay(database)) cols.push('self_pay_override');
+  const visits = ids.length ? await database('scheduled_services').whereIn('id', ids).select(cols) : [];
+  const keeps = new Set(visits.filter((v) => v.payer_id || v.self_pay_override === true).map((v) => String(v.id)));
+  return staying.filter((inv) => !inv.scheduled_service_id || !keeps.has(String(inv.scheduled_service_id)));
 }
 
 // Upcoming visits that keep their own Bill-To (their own payer, or pinned to the customer).
 async function pinnedVisits(customerId, { database = db, lock = false } = {}) {
   const hasSelfPay = await require('../payer').scheduledServicesHasSelfPay(database);
   const q = database('scheduled_services').where({ customer_id: customerId })
-    // Every visit not finished or cancelled, today's visit already under way included.
-    .whereNotIn('status', ['completed', 'cancelled'])
+    // Every visit that can still bill (not finished, cancelled, skipped or no-show), today's under way included.
+    .whereNotIn('status', ['completed', ...require('../invoice-helpers').VISIT_NEVER_RAN_STATUSES])
     .where('scheduled_date', '>=', require('../../utils/datetime-et').etDateString());
   q.where((w) => {
     w.whereNotNull('payer_id');
@@ -232,7 +247,7 @@ function planEffects({ name, payer, payerName, names, moving, staying, pinned, p
       : null,
     credit > 0.004 ? { kind: 'billing', text: `${money(credit)} of account credit applied to those invoices goes back to the customer's balance.` } : null,
     staying.length
-      ? { kind: 'billing', text: `${staying.length} unpaid ${plural(staying.length, 'invoice stays', 'invoices stay')} billed to the customer (no visit, or a visit pinned to the customer): ${staying.map(invoiceLine).join(', ')}.` }
+      ? { kind: 'billing', text: `${staying.length} unpaid ${plural(staying.length, 'invoice stays', 'invoices stay')} billed to the customer (their visit keeps its own Bill-To): ${staying.map(invoiceLine).join(', ')}.` }
       : null,
     { kind: 'billing', text: 'Open pay-page sessions for the invoices that move (combined-visit invoices included), and any combined pay-page session on the customer\'s invoices, are cancelled in Stripe. That cannot be undone. Pay links on the invoices that stay keep working. Nothing is charged or refunded.' },
     { kind: 'comms', text: 'Nothing is sent: no text, email or call goes to the customer or the payer.' },
@@ -283,6 +298,11 @@ async function buildPlan(input, ctx = {}) {
     return refusal(`Combined-visit invoice ${processing.invoice_number} has a payment processing, so nothing was offered. Ask again once it settles or fails.`, 'invoice_payment_processing');
   }
   const { moving, staying } = await invoicePlan(customer.id, String(payer.id), ctx);
+  const unsafe = await ownerUnsafeStaying(staying, ctx);
+  if (unsafe.length) {
+    const list = unsafe.slice(0, 5).map((inv) => inv.invoice_number).join(', ');
+    return refusal(`${plural(unsafe.length, '1 unpaid invoice', `${unsafe.length} unpaid invoices`)} of ${name || 'this customer'} (${list}${unsafe.length > 5 ? ', …' : ''}) ${plural(unsafe.length, 'has', 'have')} no visit of ${plural(unsafe.length, 'its', 'their')} own that keeps the customer as payer: after this change ${plural(unsafe.length, 'it', 'they')} would count as the payer's without moving, and ${plural(unsafe.length, 'its', 'their')} pay link would stay live. Nothing was offered. Collect, void or re-bill ${plural(unsafe.length, 'it', 'them')} first.`, 'unmovable_invoices', { invoices: unsafe.map((inv) => inv.invoice_number) });
+  }
   const pinned = await pinnedVisits(customer.id, ctx);
   const packets = await packetEffects(moving, ctx);
   const payerName = payerLabel(payer);

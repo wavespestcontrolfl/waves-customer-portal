@@ -58,8 +58,12 @@ const ADMIN = { isAdmin: true, technicianId: null };
     await db('scheduled_services').insert({ id: visitId, customer_id: customerId, service_type: 'Fixture General Pest Control', scheduled_date: date, status: 'completed' });
     await db('service_records').insert({ id: recordId, customer_id: customerId, scheduled_service_id: visitId, service_type: 'Fixture General Pest Control', service_date: date });
     await db('invoices').insert({ id: linkedId, customer_id: customerId, invoice_number: `FXL-${linkedId.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''), status: 'sent', total: 90, service_record_id: recordId, stripe_payment_intent_id: `pi_${linkedId.slice(0, 8)}` });
-    await db('invoices').insert({ id: manualId, customer_id: customerId, invoice_number: `FXM-${manualId.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''), status: 'sent', total: 40 });
-    return { customerId, linkedId, manualId };
+    // The staying invoice rides its own direct visit pinned to the customer (self-pay), so the live owner answer
+    // keeps it the customer's under the new default.
+    const pinnedVisitId = randomUUID();
+    await db('scheduled_services').insert({ id: pinnedVisitId, customer_id: customerId, service_type: 'Fixture General Pest Control', scheduled_date: date, status: 'completed', self_pay_override: true });
+    await db('invoices').insert({ id: manualId, customer_id: customerId, invoice_number: `FXM-${manualId.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''), status: 'sent', total: 40, scheduled_service_id: pinnedVisitId });
+    return { customerId, linkedId, manualId, visitId, pinnedVisitId };
   }
 
   test('the preview lists what moves and stays; the confirmed card withdraws the visit-linked invoice to the payer', async () => {
@@ -83,19 +87,37 @@ const ADMIN = { isAdmin: true, technicianId: null };
     expect(await db('customers').where({ id: customerId }).first('payer_id')).toMatchObject({ payer_id: payerId });
     expect(cancel).toHaveBeenCalledWith(linked.stripe_payment_intent_id);
     expect(await db('invoices').where({ id: linkedId }).first()).toMatchObject({ stripe_payment_intent_id: null, scheduled_send_error: `payer_billed:${payerId}` });
-    // The manual invoice has no visit: it stays the customer's.
+    // The pinned invoice stays the customer's.
     expect(await db('invoices').where({ id: manualId }).first()).toMatchObject({ payer_id: null, scheduled_send_error: null });
   });
 
-  test('an invoice whose visit is pinned to the customer is listed as staying, not moving', async () => {
+  test('an invoice linked to a pinned visit only through its service record: no card (it would read as the payer\'s)', async () => {
     const payerId = await payer();
-    const { customerId, linkedId, manualId } = await selfPayCustomer();
+    const { customerId, linkedId } = await selfPayCustomer();
     await db('scheduled_services').where({ customer_id: customerId }).update({ self_pay_override: true });
     const linked = await db('invoices').where({ id: linkedId }).first('invoice_number');
-    const manual = await db('invoices').where({ id: manualId }).first('invoice_number');
     const preview = await executeBillToTool('set_customer_bill_to', { customer_id: customerId, payer_id: String(payerId) }, ADMIN);
-    expect(preview.invoices_moving).toEqual([]);
-    expect(preview.invoices_staying.sort()).toEqual([linked.invoice_number, manual.invoice_number].sort());
+    expect(preview).toMatchObject({ code: 'unmovable_invoices', invoices: [linked.invoice_number] });
+  });
+
+  test('a skipped upcoming visit is not counted as keeping its own Bill-To', async () => {
+    const payerId = await payer();
+    const { customerId } = await selfPayCustomer();
+    await db('scheduled_services').insert({ id: randomUUID(), customer_id: customerId, service_type: 'Fixture General Pest Control', scheduled_date: '2099-01-02', status: 'skipped', self_pay_override: true });
+    const card = await executeBillToTool('set_customer_bill_to', { customer_id: customerId, payer_id: String(payerId) }, ADMIN);
+    expect(card._version.pinned).toBe(0);
+    await db('scheduled_services').insert({ id: randomUUID(), customer_id: customerId, service_type: 'Fixture General Pest Control', scheduled_date: '2099-01-03', status: 'pending', self_pay_override: true });
+    expect((await executeBillToTool('set_customer_bill_to', { customer_id: customerId, payer_id: String(payerId) }, ADMIN))._version.pinned).toBe(1);
+  });
+
+  test('an unpaid invoice with no visit: no card, nothing written', async () => {
+    const payerId = await payer();
+    const { customerId, manualId } = await selfPayCustomer();
+    await db('invoices').where({ id: manualId }).update({ scheduled_service_id: null });
+    const manual = await db('invoices').where({ id: manualId }).first('invoice_number');
+    expect(await executeBillToTool('set_customer_bill_to', { customer_id: customerId, payer_id: String(payerId) }, ADMIN))
+      .toMatchObject({ code: 'unmovable_invoices', invoices: [manual.invoice_number] });
+    expect(await db('customers').where({ id: customerId }).first('payer_id')).toMatchObject({ payer_id: null });
   });
 
   // The card, a change made after it, then the confirmed write through the page handler with the card's
@@ -130,7 +152,10 @@ const ADMIN = { isAdmin: true, technicianId: null };
     ['the payer deactivated', async ({ payerId }) => { await db('payers').where({ id: payerId }).update({ active: false }); }],
     ['the payer renamed', async ({ payerId }) => { await db('payers').where({ id: payerId }).update({ display_name: 'Fixture Renamed Co' }); }],
     ['the payer made tax-exempt', async ({ payerId }) => { await db('payers').where({ id: payerId }).update({ tax_exempt: true }); }],
-    ['the visit pinned to the customer', async ({ customerId }) => { await db('scheduled_services').where({ customer_id: customerId }).update({ self_pay_override: true }); }],
+    ['the visit pinned to the customer', async ({ visitId }) => { await db('scheduled_services').where({ id: visitId }).update({ self_pay_override: true }); }],
+    ['an upcoming visit pinned to the customer', async ({ customerId }) => {
+      await db('scheduled_services').insert({ id: randomUUID(), customer_id: customerId, service_type: 'Fixture General Pest Control', scheduled_date: '2099-01-02', status: 'pending', self_pay_override: true });
+    }],
   ])('%s after the card: refused inside the transaction, nothing written', async (_label, change) => {
     const payerId = await payer();
     const ids = await selfPayCustomer();
