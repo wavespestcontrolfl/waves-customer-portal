@@ -174,6 +174,12 @@ describe('pure projections', () => {
     const out = projection.contactSafeReportCustomer(holder, { name: 'Sam Spouse', phone: '+19415550202', email: null });
     expect(out).toEqual({ ...holder, first_name: 'Sam', last_name: 'Spouse', phone: '+19415550202', email: '', waveguard_tier: null, monthly_rate: null });
     expect(JSON.stringify(out)).not.toMatch(/Pat|Owner|0101|pat@|gold|120/);
+    // A legacy record with no frozen address: the PDF is labeled with the
+    // house the contact is scoped to, never the row's retired primary (codex r33 P2).
+    const oak = { line1: '99 Oak St', line2: 'Unit B', city: 'Venice', state: 'FL', zip: '34293' };
+    expect(projection.contactSafeReportCustomer(holder, { name: 'Sam Spouse' }, { address: oak }))
+      .toMatchObject({ address_line1: '99 Oak St', address_line2: 'Unit B', city: 'Venice', state: 'FL', zip: '34293' });
+    expect(projection.contactSafeReportCustomer(holder, { name: 'Sam Spouse' }, { address: null }).address_line1).toBe('1 Gulf Dr');
   });
 
   test('withoutTrackBearers keeps the live tracker and drops the public /track bearer', () => {

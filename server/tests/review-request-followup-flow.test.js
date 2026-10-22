@@ -173,10 +173,47 @@ describe('review request follow-up flow', () => {
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
       purpose: 'review_request',
       customerId: 'cust-1',
+      // The holder's own leg (no contact role resolved).
+      identityTrustLevel: 'phone_matches_customer',
       metadata: expect.objectContaining({ review_request_id: 'rr-1' }),
     }));
     expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({
       followup_sent: true,
+    }));
+  });
+
+  // The resolved slot-1 contact's leg is classified as a service-contact send
+  // (codex #6363 r33 P2), so sendCustomerMessage's contact-choices boundary
+  // re-check applies to it; the holder's leg (above) stays phone-matched.
+  test('a follow-up resolved to the slot-1 contact carries the service-contact trust level', async () => {
+    const history = require('../services/review-ask-history');
+    jest.spyOn(history, 'lastDeliveredAskAt').mockResolvedValue(null);
+    jest.spyOn(history, 'lastManualAskAt').mockResolvedValue(null);
+    const reviewRequestQueries = [
+      chain(),
+      collection([]),
+      collection([{ id: 'rr-1', customer_id: 'cust-1', sms_sent_at: '2026-05-30T15:00:00.000Z', status: 'sent', score: null }]),
+      chain({ first: jest.fn().mockResolvedValue({ id: 'rr-1', customer_id: 'cust-1', status: 'sent', score: null }) }),
+      chain({ first: jest.fn().mockResolvedValue(null) }),
+      chain(),
+      chain(),
+    ];
+    db.mockImplementation((table) => {
+      if (table === 'review_requests') return reviewRequestQueries.shift();
+      if (table === 'customers') return chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Jamie', phone: '+19415550123', has_left_google_review: false }) });
+      if (table === 'service_records' || table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() });
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    getServiceContact.mockReturnValue({ phone: '+19415550202', name: 'Sam Spouse', role: 'service_contact' });
+    getServiceContactSmsRecipient.mockReturnValue({ phone: '+19415550202', name: 'Sam Spouse', role: 'service_contact' });
+    renderSmsTemplate.mockResolvedValue('Please review us');
+    sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-c', auditLogId: 'audit-2' });
+
+    await ReviewService.processFollowups();
+
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      to: '+19415550202',
+      identityTrustLevel: 'service_contact_authorized',
     }));
   });
 

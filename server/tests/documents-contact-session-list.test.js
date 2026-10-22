@@ -43,7 +43,11 @@ const SERVICES = [
 const STORED = [{ id: 'doc-1', document_type: 'service_report', title: 'Visit Report', file_name: 'r.pdf', file_size_bytes: 10, uploaded_by: 'admin', linked_service_record_id: 'svc-2', created_at: '2026-09-02', s3_key: 'k', storage_key: 'k' }];
 const PROJECTS = [{ id: 'proj-1', project_type: 'termite_treatment', status: 'sent', report_token: 'ptok', sent_at: '2026-08-01', created_at: '2026-07-01', title: 'Termite Treatment' }];
 
+// Every raw predicate the list and count queries apply (the customer-visible
+// report filter rides whereRaw).
+let whereRawCalls;
 function wire() {
+  whereRawCalls = [];
   db.mockImplementation((table) => {
     const rows = table === 'service_records' ? SERVICES
       : table === 'customer_documents' ? STORED
@@ -51,6 +55,7 @@ function wire() {
       : [];
     const q = {};
     for (const m of ['where', 'whereIn', 'whereNull', 'whereNot', 'orWhereNot', 'whereNotNull', 'orWhere', 'leftJoin', 'select', 'orderBy', 'orderByRaw', 'limit', 'offset']) q[m] = () => q;
+    q.whereRaw = (sql) => { if (table === 'service_records') whereRawCalls.push(sql); return q; };
     q.count = () => ({ then: (resolve, reject) => Promise.resolve([{ count: String(rows.length) }]).then(resolve, reject) });
     q.columnInfo = async () => ({});
     q.first = async () => rows[0] || null;
@@ -96,6 +101,15 @@ test('a contact lists every visit report through the authenticated PDF only — 
   // Both the listed reports AND the total are scoped to the contact's primary property (codex r16 P1, r18 P2).
   expect(scopeContactRecords).toHaveBeenCalledTimes(2);
   for (const call of scopeContactRecords.mock.calls) expect(call[1]).toEqual(PRIMARY_SCOPE);
+  // Internal-only typed completions are filtered in SQL on the page query AND
+  // the count, so a hidden report neither takes a page slot nor inflates the
+  // total (codex r33 P2).
+  expect(whereRawCalls).toEqual(Array(2).fill("COALESCE(service_records.structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send'"));
+});
+
+test('the holder\'s page query and count apply the same internal-only filter in SQL', async () => {
+  await list();
+  expect(whereRawCalls).toEqual(Array(2).fill("COALESCE(service_records.structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send'"));
 });
 
 test('the holder\'s list and total are never run through the contact scope', async () => {

@@ -734,7 +734,9 @@ function contactEmailOnFile(customer, phoneKey) {
 async function contactAccountPrefsRow(req, dbh = db) {
   const accountRow = await dbh('notification_prefs').where({ customer_id: req.customerId }).first().catch(() => null);
   if (!PropertyTexts.propertyTextsEnforced()) return accountRow;
-  const scope = await require('../services/contact-session-projection').contactRecordScope(req);
+  // The scope reads ride the caller's transaction (the PUT's comms lock), not
+  // a second pool connection (codex r33 P2).
+  const scope = await require('../services/contact-session-projection').contactRecordScope(req, dbh);
   const property = scope && scope.property;
   if (!property || property.is_primary === true) return accountRow;
   const row = await dbh('property_notification_prefs').where({ property_id: property.id }).first(...PropertyTexts.PROPERTY_PREF_COLUMNS);

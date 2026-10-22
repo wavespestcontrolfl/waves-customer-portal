@@ -16,7 +16,17 @@ const { shortenOrPassthrough, existingShortUrlFor, allShortUrlsFor } = require("
 const INLINE_CLAIM_STALE_MS = 10 * 60 * 1000;
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { renderSmsTemplate } = require("./sms-template-renderer");
-const { firstNameFrom } = require("./customer-contact");
+const { firstNameFrom, isServiceContactRole } = require("./customer-contact");
+
+// The trust a review text's leg carries (codex #6363 r33 P2): the resolved
+// slot-1 contact's leg is 'service_contact_authorized', so sendCustomerMessage's
+// contact-choices boundary re-check (contactPhoneDeclinesText) holds a
+// contact who turned texts off — or whom the holder removed — between the
+// recipient's resolution and the provider handoff; the holder's own leg keeps
+// 'phone_matches_customer'.
+function reviewSmsTrust(contact) {
+  return isServiceContactRole(contact?.role) ? "service_contact_authorized" : "phone_matches_customer";
+}
 const TWILIO_NUMBERS = require("../config/twilio-numbers");
 const {
   reserveForRequest,
@@ -2370,6 +2380,7 @@ const ReviewService = {
           audience: "customer",
           purpose: "review_request",
           customerId: customer.id,
+          identityTrustLevel: reviewSmsTrust(contact),
           entryPoint: "review_request_send",
           metadata: {
             review_request_id: requestId,
@@ -4333,7 +4344,7 @@ const ReviewService = {
               audience: "customer",
               purpose: "review_request",
               customerId: customer.id,
-              identityTrustLevel: "phone_matches_customer",
+              identityTrustLevel: reviewSmsTrust(contact),
               entryPoint: "review_request_followup",
               metadata: {
                 original_message_type: "review_followup",
@@ -5226,6 +5237,7 @@ const ReviewService = {
         audience: "customer",
         purpose: "review_request",
         customerId: customer.id,
+        identityTrustLevel: reviewSmsTrust(contact),
         entryPoint: "review_outreach_touch",
         metadata: {
           ...(request.sequence_id ? { review_sequence_id: request.sequence_id } : {}),

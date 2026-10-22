@@ -71,8 +71,11 @@ function builder(table) {
   });
   return b;
 }
+// The tables a PUT reads through its locked transaction (never the root handle).
+let trxTables;
 function installDb() {
-  const trx = Object.assign((table) => builder(table), { isTransaction: true, raw: async () => {} });
+  trxTables = [];
+  const trx = Object.assign((table) => { trxTables.push(table); return builder(table); }, { isTransaction: true, raw: async () => {} });
   db.mockImplementation((table) => builder(table));
   db.transaction = async (fn) => fn(trx);
   db.raw = async () => {};
@@ -185,6 +188,9 @@ describe('GET /contact-preferences', () => {
       // rental), so no attestation is asked for; en-route — live here — does.
       tables.service_contact_notification_prefs.push({ customer_id: 'cust-1', phone_key: '9415550202', tech_en_route: false, tech_arrived: false });
       expect((await put({ techArrived: true })).status).toBe(200);
+      // The save's scope and property reads ride its own transaction, not a
+      // second pool connection (codex r33 P2).
+      expect(trxTables).toEqual(expect.arrayContaining(['customer_properties', 'property_notification_prefs']));
       const opened = await put({ techEnRoute: true });
       expect(opened.status).toBe(400);
       expect(opened.body.code).toBe('CONSENT_REQUIRED');

@@ -20,7 +20,8 @@ const { authenticate } = require('../middleware/auth');
 const { customerSafeVisitNotes } = require('../services/context-aggregator');
 const logger = require('../services/logger');
 const { formatAddress } = require('../utils/address-normalizer');
-const { applyReportIdentitySnapshotToLegacyPdf } = require('../services/service-report/report-identity-snapshot');
+const { applyReportIdentitySnapshotToLegacyPdf, readReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
+const { applyCustomerVisibleServiceRecordFilter } = require('../services/pest-pressure/history-filter');
 const {
   WAVES_ADDRESS_LINE,
   WAVES_SUPPORT_PHONE_DISPLAY,
@@ -579,7 +580,7 @@ async function redirectToStoredDocument(doc, res) {
 // contact's OWN session may read (services/contact-session-projection.js —
 // the same verdict GET /api/services applies).
 const {
-  contactSessionReportsWithheld: contactReportsWithheld, contactSafeReportCustomer, contactRecordScope, scopeContactRecords,
+  contactSessionReportsWithheld: contactReportsWithheld, contactSafeReportCustomer, contactRecordScope, scopeContactRecords, contactAddress,
 } = require('../services/contact-session-projection');
 
 // Pagination — caps total result size to prevent runaway payloads for
@@ -594,12 +595,16 @@ function documentPageBounds(query) {
 // Completed service records whose visit report the customer may list — the
 // list and its cross-page count read the same predicate. Project-backed
 // completions use the Project report itself as the customer artifact, so do
-// not create a second generic service-report document for the same work.
-// `scope` (a contact session): the primary property's visits only (codex
-// #6363 r16 P1) — the holder's other saved homes are not theirs to read.
+// not create a second generic service-report document for the same work;
+// internal_only typed completions (Phase-1b shadow) store a report for admin
+// review only, so they are no "Visit Report" entry either — filtered in SQL
+// (the same predicate every customer artifact applies) so a hidden report
+// neither consumes a page slot nor counts toward the total (codex #6363 r33
+// P2). `scope` (a contact session): the primary property's visits only
+// (codex r16 P1) — the holder's other saved homes are not theirs to read.
 function completedServiceReportsQuery(customerId, serviceRecordCols, scope = null) {
-  let query = db('service_records')
-    .where({ 'service_records.customer_id': customerId, 'service_records.status': 'completed' });
+  let query = applyCustomerVisibleServiceRecordFilter(db('service_records')
+    .where({ 'service_records.customer_id': customerId, 'service_records.status': 'completed' }));
   if (scope) {
     query = scopeContactRecords(
       query.leftJoin('scheduled_services', 'service_records.scheduled_service_id', 'scheduled_services.id'),
@@ -670,18 +675,6 @@ async function previewImageUrl(photo) {
   return photo.s3_url || null;
 }
 
-// internal_only typed completions (Phase-1b shadow) store a report for admin
-// review only — no auto-generated "Visit Report" document entry.
-function serviceReportListed(svc) {
-  let svcNotes = {};
-  try {
-    svcNotes = typeof svc.structured_notes === 'string'
-      ? JSON.parse(svc.structured_notes)
-      : (svc.structured_notes || {});
-  } catch { svcNotes = {}; }
-  return !svcNotes.typedReportDelivery || svcNotes.typedReportDelivery === 'auto_send';
-}
-
 // The auto-generated "Visit Report" entries for a page of completed
 // services — the holder's list and a contact's share this. `docs` (the
 // holder's stored documents): a visit whose report the holder keeps a stored
@@ -709,7 +702,6 @@ async function serviceReportEntries(services, { docs = [], contactOnly = false }
 
   const entries = [];
   for (const svc of services) {
-    if (!serviceReportListed(svc)) continue;
     if (!contactOnly && linkedServiceIds.has(svc.id) && docs.find(d => d.linked_service_record_id === svc.id && d.document_type === 'service_report')) continue;
     const reportToken = contactOnly ? null : (svc.report_view_token || null);
     const viewUrl = reportToken ? `/report/${reportToken}` : null;
@@ -930,13 +922,14 @@ router.get('/service-report/:serviceRecordId', authenticate, async (req, res, ne
     if (await contactReportsWithheld(req)) return res.status(404).json({ error: 'Service record not found' });
     // A contact opens the primary property's reports only (codex #6363 r16
     // P1): a record of the holder's other home is a 404 here too.
+    const scope = req.contactSession ? await contactRecordScope(req) : null;
     let serviceQuery = db('service_records')
       .where({ 'service_records.id': req.params.serviceRecordId, 'service_records.customer_id': req.customerId })
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id');
-    if (req.contactSession) {
+    if (scope) {
       serviceQuery = scopeContactRecords(
         serviceQuery.leftJoin('scheduled_services', 'service_records.scheduled_service_id', 'scheduled_services.id'),
-        await contactRecordScope(req),
+        scope,
       );
     }
     const service = await serviceQuery
@@ -1010,8 +1003,15 @@ router.get('/service-report/:serviceRecordId', authenticate, async (req, res, ne
     const frozen = applyReportIdentitySnapshotToLegacyPdf({ customer: req.customer, service, products });
     // A contact's copy is addressed to the contact and carries the property
     // facts only — never the holder's name, phone, email or plan (the same
-    // projection the contact's own session reads; codex #6363 r2 P1).
-    const pdfCustomer = req.contactSession ? contactSafeReportCustomer(frozen.customer, req.contactSession) : frozen.customer;
+    // projection the contact's own session reads; codex #6363 r2 P1). A
+    // legacy record with no frozen address is labeled with the house the
+    // contact's reads are scoped to (contactAddress), never the customer
+    // row's retired primary (codex r33 P2); a snapshot's own address stays.
+    const pdfCustomer = req.contactSession
+      ? contactSafeReportCustomer(frozen.customer, req.contactSession, {
+        address: readReportIdentitySnapshot(service)?.address ? null : contactAddress(frozen.customer, scope),
+      })
+      : frozen.customer;
     generateServiceReportPDF(pdfCustomer, frozen.service, frozen.products, res, { compliance, invoice, credentialText, withholdPlan: !!req.contactSession });
   } catch (err) {
     next(err);

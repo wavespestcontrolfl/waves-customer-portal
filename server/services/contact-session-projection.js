@@ -81,18 +81,21 @@ function withholdReportArtifacts(service) {
 // were all retired has no house to show a contact anything under; one that
 // never had a row keeps its one address's customer-wide reads. null for a
 // holder session: the routes keep their own opt-in scoping.
-async function contactRecordScope(req) {
+// `dbh`: a caller already holding a transaction passes it (the contact
+// preferences save under withCustomerCommsLock, codex #6363 r33 P2) so these
+// reads ride that connection instead of reserving a second one from the pool.
+async function contactRecordScope(req, dbh = db) {
   if (!req.contactSession) return null;
   const customerId = req.customerId;
   // The same columns the saved-property resolver selects: the tracking
   // projection (scopedLocationCustomer) reads a non-primary fallback
   // property's address and geocode off the scope (codex #6363 r19 P2).
-  const rows = await db('customer_properties')
+  const rows = await dbh('customer_properties')
     .where({ customer_id: customerId, active: true })
     .orderBy([{ column: 'is_primary', order: 'desc' }, { column: 'created_at', order: 'asc' }])
     .select('id', 'is_primary', 'label', 'relationship', 'occupancy_type', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
   if (!rows.length) {
-    const everHadRow = !!(await db('customer_properties').where({ customer_id: customerId }).first('id'));
+    const everHadRow = !!(await dbh('customer_properties').where({ customer_id: customerId }).first('id'));
     return { customerId, enabled: true, multi: false, scoped: everHadRow, closed: everHadRow, property: null };
   }
   const property = rows.find((r) => r.is_primary === true) || rows[0];
@@ -160,7 +163,11 @@ function contactSafeReportLinks(service) {
 // to the contact, the serviced property's facts kept, the holder's name,
 // phone, email and plan withheld (the same fields the contact's /auth/me
 // projection leaves out).
-function contactSafeReportCustomer(customer, contact) {
+// `address` (contactAddress's shape): the house the PDF is labeled with when
+// the record carries no frozen address of its own — the house the contact's
+// reads are scoped to, never the customer row's retired primary (codex #6363
+// r33 P2). null keeps the row's (or the snapshot's) address fields.
+function contactSafeReportCustomer(customer, contact, { address = null } = {}) {
   const [first = '', ...rest] = String(contact?.name || '').trim().split(/\s+/).filter(Boolean);
   return {
     ...customer,
@@ -170,6 +177,9 @@ function contactSafeReportCustomer(customer, contact) {
     email: contact?.email || '',
     waveguard_tier: null,
     monthly_rate: null,
+    ...(address ? {
+      address_line1: address.line1, address_line2: address.line2, city: address.city, state: address.state, zip: address.zip,
+    } : {}),
   };
 }
 
