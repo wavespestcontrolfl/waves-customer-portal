@@ -792,40 +792,64 @@ const BUNDLE_HELD_SQL = "payload->>'push_bundle' IS NOT NULL";
 const CLAIM_OPEN_SQL = "(payload->>'push_claimed_at' IS NULL OR (payload->>'push_claimed_at')::timestamptz < ?)";
 
 // The held cards of every tech whose bundle is due — no new card for
-// BUNDLE_QUIET_MS, or the oldest waiting BUNDLE_MAX_WAIT_MS — claimed in ONE
-// update, so two instances never push the same cards. Resolves to the
-// claimed rows, payload parsed.
-async function claimDueBundles(now) {
-  const types = Object.values(TYPE_BY_KIND);
-  const leaseCutoff = new Date(now.getTime() - BUNDLE_CLAIM_LEASE_MS);
+// BUNDLE_QUIET_MS, or the oldest waiting BUNDLE_MAX_WAIT_MS — by tech. Not
+// claimed here: each tech's cards are claimed right before their own push
+// (claimBundle), so a long sweep never holds a claim it is not using.
+async function dueBundles(now) {
   const held = await db('tech_notifications')
-    .whereIn('type', types)
+    .whereIn('type', Object.values(TYPE_BY_KIND))
     .whereNull('dismissed_at')
     .whereRaw(BUNDLE_HELD_SQL)
-    .whereRaw(CLAIM_OPEN_SQL, [leaseCutoff])
+    .whereRaw(CLAIM_OPEN_SQL, [new Date(now.getTime() - BUNDLE_CLAIM_LEASE_MS)])
     .select('id', 'technician_id', 'created_at');
-  const spans = new Map();
+  const byTech = new Map();
   for (const row of held) {
     if (!row || !row.technician_id) continue;
+    const key = String(row.technician_id);
     const at = new Date(row.created_at).getTime();
-    const span = spans.get(String(row.technician_id)) || { oldest: at, newest: at };
-    spans.set(String(row.technician_id), { oldest: Math.min(span.oldest, at), newest: Math.max(span.newest, at) });
+    const tech = byTech.get(key) || { ids: [], oldest: at, newest: at };
+    byTech.set(key, { ids: [...tech.ids, row.id], oldest: Math.min(tech.oldest, at), newest: Math.max(tech.newest, at) });
   }
-  const due = new Set([...spans]
+  return new Map([...byTech]
     .filter(([, { oldest, newest }]) => now.getTime() - newest >= BUNDLE_QUIET_MS || now.getTime() - oldest >= BUNDLE_MAX_WAIT_MS)
-    .map(([technicianId]) => technicianId));
-  const ids = held.filter((row) => row && due.has(String(row.technician_id))).map((row) => row.id);
-  if (!ids.length) return [];
+    .map(([technicianId, { ids }]) => [technicianId, ids]));
+}
+
+// Claim one tech's due cards in ONE update, under this sweep's own token, so
+// two instances never push the same cards. Resolves to the rows the sweep
+// now owns, payload parsed.
+async function claimBundle(ids, claimAt, token) {
   const claimed = await db('tech_notifications')
     .whereIn('id', ids)
     .whereNull('dismissed_at')
     .whereRaw(BUNDLE_HELD_SQL)
-    .whereRaw(CLAIM_OPEN_SQL, [leaseCutoff])
-    .update({ payload: db.raw("payload || jsonb_build_object('push_claimed_at', ?::text)", [now.toISOString()]), updated_at: now })
+    .whereRaw(CLAIM_OPEN_SQL, [new Date(claimAt.getTime() - BUNDLE_CLAIM_LEASE_MS)])
+    .update({
+      payload: db.raw("payload || jsonb_build_object('push_claimed_at', ?::text, 'push_claim', ?::text)", [claimAt.toISOString(), token]),
+      updated_at: claimAt,
+    })
     .returning(['id', 'technician_id', 'payload', 'created_at']);
   return claimed.filter((row) => row && row.technician_id)
     .map((row) => ({ ...row, payload: typeof row.payload === 'string' ? JSON.parse(row.payload) : (row.payload || {}) }));
 }
+
+// Do the cards still carry this sweep's token? A sweep that ran past its
+// lease may have lost them to a later sweep, which then owns their push and
+// their cleanup (pre-push audit P1).
+async function stillOwned(ids, token) {
+  const rows = await db('tech_notifications').whereIn('id', ids).whereRaw("payload->>'push_claim' = ?", [token]).select('id');
+  return rows.length === ids.length;
+}
+
+// Clear (sent, or nothing left to say) or release (try again) cards this
+// sweep still owns; a later sweep's claim is never touched.
+async function settleOwned(ids, token, expr) {
+  if (!ids.length) return;
+  await db('tech_notifications').whereIn('id', ids).whereRaw("payload->>'push_claim' = ?", [token])
+    .update({ payload: db.raw(expr), updated_at: new Date() });
+}
+const CLEAR_SQL = "payload - 'push_bundle' - 'push_claimed_at' - 'push_claim'";
+const RELEASE_SQL = "payload - 'push_claimed_at' - 'push_claim'";
 
 // A held card as the notice its own push would have carried.
 function bundledNotice(technicianId, row) {
@@ -914,6 +938,8 @@ function bundlePush(plan) {
 
 // A held push to send again on the next tick, composed afresh.
 class BundleChanged extends Error {}
+// A later sweep took the cards over: it owns their push and their cleanup.
+class BundleLost extends Error {}
 
 // ONE push for one tech's claimed cards. Resolves true when a device got it,
 // false when nothing is left to say (the bundle closes). Throws when it must
@@ -924,13 +950,19 @@ class BundleChanged extends Error {}
 // failed does not count as one that has it). Once a device has it, a later
 // device is skipped only when nothing at all still stands, as for any
 // per-visit push: a retry would push the first device twice.
-async function sendBundle(technicianId, rows) {
+async function sendBundle(technicianId, rows, token) {
   const plan = await bundlePlan(technicianId, rows, db);
   if (!plan.length) return false;
+  const ids = rows.map((row) => row.id);
   let delivered = 0;
   let changed = false;
+  let lost = false;
   const beforeHandoff = async () => {
     try {
+      if (!(await stillOwned(ids, token))) {
+        lost = true;
+        return false;
+      }
       const now = await bundlePlan(technicianId, rows, db);
       if (delivered === 0 && planSignature(now) !== planSignature(plan)) {
         changed = true;
@@ -947,8 +979,10 @@ async function sendBundle(technicianId, rows) {
     beforeHandoff,
     onDelivered: () => { delivered += 1; },
   });
+  if (lost) throw new BundleLost('a later sweep took the cards over');
   if (changed) throw new BundleChanged('the bundle changed before any device had it');
-  if (result?.superseded) return false;
+  // Stopped part-way: done either way, and pushed when a device has it.
+  if (result?.superseded) return delivered > 0;
   const total = Number(result?.subscriptions) || 0;
   if (total > 0 && !(Number(result?.sent) > 0)) throw new Error(`no device accepted the push (${total} tried)`);
   return total > 0;
@@ -956,13 +990,15 @@ async function sendBundle(technicianId, rows) {
 
 /**
  * The every-minute sweep (scheduler.js) for bundled pushes: each tech whose
- * held cards are due gets ONE push (sendBundle). No lock is held across a
- * push (owner ruling 2026-09-30, #5421). A push to try again releases the
- * claim for the next tick; a card that has waited BUNDLE_GIVE_UP_MS is
- * dropped instead, alone — a newer card in the same bundle keeps its
- * retries (Codex #6459 r1). It runs with the gate off too, so cards held
- * before a flip still go out; only the notifications kill switch drops them.
- * Best-effort; never throws.
+ * held cards are due gets ONE push (sendBundle), their cards claimed right
+ * before it under this sweep's own token. No lock is held across a push
+ * (owner ruling 2026-09-30, #5421); a sweep that lost its cards to a later
+ * one past the lease stops and leaves them to it. A push to try again
+ * releases the claim for the next tick; a card that has waited
+ * BUNDLE_GIVE_UP_MS is dropped instead, alone — a newer card in the same
+ * bundle keeps its retries (Codex #6459 r1). It runs with the gate off too,
+ * so cards held before a flip still go out; only the notifications kill
+ * switch drops them. Best-effort; never throws.
  */
 async function flushBundledPushes({ now = new Date() } = {}) {
   try {
@@ -970,32 +1006,36 @@ async function flushBundledPushes({ now = new Date() } = {}) {
       await db('tech_notifications')
         .whereIn('type', Object.values(TYPE_BY_KIND))
         .whereRaw(BUNDLE_HELD_SQL)
-        .update({ payload: db.raw("payload - 'push_bundle' - 'push_claimed_at'"), updated_at: now });
+        .update({ payload: db.raw(CLEAR_SQL), updated_at: now });
       return { pushed: 0 };
     }
-    const byTech = new Map();
-    for (const row of await claimDueBundles(now)) {
-      const key = String(row.technician_id);
-      byTech.set(key, [...(byTech.get(key) || []), row]);
-    }
     let pushed = 0;
-    for (const [technicianId, rows] of byTech) {
+    for (const [technicianId, dueIds] of await dueBundles(now)) {
+      const token = require('crypto').randomUUID();
+      let rows = [];
       try {
-        if (await sendBundle(technicianId, rows)) pushed += 1;
-        await db('tech_notifications').whereIn('id', rows.map((row) => row.id))
-          .update({ payload: db.raw("payload - 'push_bundle' - 'push_claimed_at'"), updated_at: new Date() });
+        rows = await claimBundle(dueIds, new Date(Math.max(now.getTime(), Date.now())), token);
       } catch (err) {
+        logger.warn(`[tech-visit-notifications] bundle claim failed for tech ${technicianId} (${errorTag(err)}); next tick`);
+      }
+      if (!rows.length) continue;
+      const ids = rows.map((row) => row.id);
+      try {
+        if (await sendBundle(technicianId, rows, token)) pushed += 1;
+        await settleOwned(ids, token, CLEAR_SQL);
+      } catch (err) {
+        if (err instanceof BundleLost) {
+          logger.info(`[tech-visit-notifications] bundle for tech ${technicianId} was taken over by a later sweep`);
+          continue;
+        }
         const expired = rows.filter((row) => now.getTime() - new Date(row.created_at).getTime() >= BUNDLE_GIVE_UP_MS).map((row) => row.id);
-        const retry = rows.map((row) => row.id).filter((id) => !expired.includes(id));
+        const retry = ids.filter((id) => !expired.includes(id));
         if (err instanceof BundleChanged) logger.info(`[tech-visit-notifications] bundle for tech ${technicianId} changed before sending; composing again next tick`);
         else logger.warn(`[tech-visit-notifications] bundled push failed for tech ${technicianId}: ${err.message}; ${retry.length} retried next tick, ${expired.length} dropped after an hour`);
-        const release = async (ids, expr) => {
-          if (!ids.length) return;
-          await db('tech_notifications').whereIn('id', ids).update({ payload: db.raw(expr), updated_at: new Date() })
-            .catch((releaseErr) => logger.warn(`[tech-visit-notifications] bundle claim release failed (${errorTag(releaseErr)}); it expires on its own`));
-        };
-        await release(expired, "payload - 'push_bundle' - 'push_claimed_at'");
-        await release(retry, "payload - 'push_claimed_at'");
+        await settleOwned(expired, token, CLEAR_SQL)
+          .catch((clearErr) => logger.warn(`[tech-visit-notifications] bundle drop failed (${errorTag(clearErr)}); retried next tick`));
+        await settleOwned(retry, token, RELEASE_SQL)
+          .catch((releaseErr) => logger.warn(`[tech-visit-notifications] bundle claim release failed (${errorTag(releaseErr)}); it expires on its own`));
       }
     }
     return { pushed };

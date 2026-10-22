@@ -13,6 +13,7 @@ let mockBeforeLeg = null;
 // A multi-device fan-out, one entry per device ({ sent }), like the real
 // sender: a recheck before each leg, onDelivered for each device that has it.
 let mockLegs = null;
+let mockLegsSent = [];
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -29,7 +30,7 @@ jest.mock('../services/push-notifications', () => ({
         if (opts && typeof opts.beforeHandoff === 'function' && (await opts.beforeHandoff()) === false) {
           return { subscriptions: mockLegs.length, sent, superseded: true };
         }
-        if (leg.sent) { sent += 1; if (opts.onDelivered) opts.onDelivered({ id: leg.id }); }
+        if (leg.sent) { sent += 1; mockLegsSent.push(leg.id); if (opts.onDelivered) opts.onDelivered({ id: leg.id }); }
       }
       if (!sent) return { subscriptions: mockLegs.length, sent: 0, failed: mockLegs.length };
       return mockSendToAdminUser(id, notification);
@@ -44,7 +45,8 @@ const db = require('../models/db');
 // The card transaction (lock + check + insert) runs against the same mock.
 const transactions = [];
 db.transaction = (fn) => { transactions.push(fn); return fn(db); };
-db.raw = jest.fn((sql) => sql);
+// The SQL text (what the update mock reads) with its bindings beside it.
+db.raw = jest.fn((sql, bindings) => ({ sql, bindings, toString: () => sql }));
 let cardSeq = 0;
 // Every written card, as stored, so the summary's claim (an UPDATE … RETURNING
 // over held cards) runs against what deliver() wrote.
@@ -54,43 +56,61 @@ let bundleLeaseCutoff = null;
 function cardsTable() {
   let runFilter = null;
   let idFilter = null;
-  // The bundle sweep filters on its own mark (payload->>'push_bundle').
+  // The bundle sweep filters on its own mark (payload->>'push_bundle'), its
+  // claim token (payload->>'push_claim') and a lease cutoff.
   let bundleFilter = false;
+  let claimFilter = null;
+  let leaseCutoff = null;
   const held = (r) => (bundleFilter ? r.payload.push_bundle : r.payload.push_held_run);
+  const claimOpen = (r) => !r.payload.push_claimed_at
+    || (leaseCutoff != null && new Date(r.payload.push_claimed_at).getTime() < new Date(leaseCutoff).getTime());
   const chain = {
     whereIn: jest.fn((col, vals) => { if (col === 'id') idFilter = vals.map(String); return chain; }),
     whereNull: jest.fn(() => chain),
     whereRaw: jest.fn((sql, bindings) => {
       if (/push_held_run' = \?/.test(sql)) runFilter = String(bindings[0]);
       if (/push_bundle' IS NOT NULL/.test(sql)) bundleFilter = true;
-      if (bundleFilter && /push_claimed_at'\)::timestamptz < \?/.test(sql)) bundleLeaseCutoff = bindings[0];
+      if (/push_claimed_at'\)::timestamptz < \?/.test(sql)) {
+        leaseCutoff = bindings[0];
+        if (bundleFilter) bundleLeaseCutoff = bindings[0];
+      }
+      if (/push_claim' = \?/.test(sql)) claimFilter = String(bindings[0]);
       return chain;
     }),
     // By ids: the bundle's read of which of its cards are still uncleared.
     // Otherwise the sweep's read of held, unclaimed, uncleared bundle cards.
-    select: jest.fn(async () => (idFilter
-      ? cardRows.filter((r) => idFilter.includes(String(r.id)) && !r.dismissed_at).map((r) => ({ id: r.id }))
-      : cardRows.filter((r) => held(r) && !r.payload.push_claimed_at && !r.dismissed_at)
-        .map((r) => ({ id: r.id, technician_id: r.technician_id, created_at: r.created_at })))),
+    select: jest.fn(async () => {
+      // The ownership read: the cards still carrying this sweep's token.
+      if (claimFilter) return cardRows.filter((r) => idFilter.includes(String(r.id)) && r.payload.push_claim === claimFilter).map((r) => ({ id: r.id }));
+      if (idFilter) return cardRows.filter((r) => idFilter.includes(String(r.id)) && !r.dismissed_at).map((r) => ({ id: r.id }));
+      return cardRows.filter((r) => held(r) && claimOpen(r) && !r.dismissed_at)
+        .map((r) => ({ id: r.id, technician_id: r.technician_id, created_at: r.created_at }));
+    }),
     modify: jest.fn((fn) => { fn(chain); return chain; }),
     // The summary's three writes, told apart by their payload expression:
     // claim (stamp push_claimed_at, RETURNING), confirm (drop both marks) and
     // release (drop the claim). db.raw returns its SQL text here.
     update: jest.fn(({ payload }) => {
       const sql = String(payload);
+      const [claimedAt, token] = (payload && payload.bindings) || [];
       const apply = () => {
         if (sql.includes("jsonb_build_object('push_claimed_at'")) {
-          const claimed = cardRows.filter((r) => held(r) && !r.payload.push_claimed_at && !r.dismissed_at
+          const claimed = cardRows.filter((r) => held(r) && claimOpen(r) && !r.dismissed_at
             && (!runFilter || r.payload.push_held_run === runFilter)
             && (!idFilter || idFilter.includes(String(r.id))));
-          for (const r of claimed) r.payload.push_claimed_at = 'now';
+          for (const r of claimed) {
+            r.payload.push_claimed_at = claimedAt || 'now';
+            if (token) r.payload.push_claim = token;
+          }
           return claimed.map((r) => ({ id: r.id, technician_id: r.technician_id, payload: { ...r.payload }, created_at: r.created_at }));
         }
-        const rows = idFilter
+        let rows = idFilter
           ? cardRows.filter((r) => idFilter.includes(String(r.id)))
           : cardRows.filter((r) => held(r) && (!runFilter || r.payload.push_held_run === runFilter));
+        if (claimFilter) rows = rows.filter((r) => r.payload.push_claim === claimFilter);
         for (const r of rows) {
           delete r.payload.push_claimed_at;
+          if (sql.includes("- 'push_claim'")) delete r.payload.push_claim;
           if (sql.includes("- 'push_held_run'")) delete r.payload.push_held_run;
           if (sql.includes("- 'push_bundle'")) delete r.payload.push_bundle;
         }
@@ -692,6 +712,7 @@ describe('bundled pushes for any other mover (GATE_TECH_PUSH_BUNDLE, owner 2026-
     newerFromRows = true;
     mockBeforeLeg = null;
     mockLegs = null;
+    mockLegsSent = [];
     bundleLeaseCutoff = null;
     prime({ techs, visits: visitRows });
   });
@@ -928,13 +949,15 @@ describe('bundled pushes for any other mover (GATE_TECH_PUSH_BUNDLE, owner 2026-
   test('after the first device got the push, a later device is skipped only once nothing stands (no second push to the first)', async () => {
     await officeMove('v-1');
     await officeMove('v-2');
-    await notices.flushBundledPushes({ now: quiet() });
-    const { beforeHandoff, onDelivered } = mockSendOpts[mockSendOpts.length - 1];
-    onDelivered({ id: 'd1' });
-    visitRows['v-1'].status = 'completed';
-    expect(await beforeHandoff()).toBe(true);
-    visitRows['v-2'].status = 'completed';
-    expect(await beforeHandoff()).toBe(false);
+    mockLegs = [{ id: 'd1', sent: true }, { id: 'd2', sent: true }, { id: 'd3', sent: true }];
+    mockBeforeLeg = async (leg) => {
+      if (leg.id === 'd2') visitRows['v-1'].status = 'completed';
+      if (leg.id === 'd3') visitRows['v-2'].status = 'completed';
+    };
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    // d2 still gets it (v-2 stands); d3 is skipped (nothing stands); nothing is retried.
+    expect(mockLegsSent).toEqual(['d1', 'd2']);
+    for (const r of cardRows) expect(r.payload).not.toHaveProperty('push_bundle');
   });
 
   test('with the run summary off, an auto-dispatch move still pushes on its own and is never bundled (Codex #6459 r1 P2)', async () => {
@@ -1002,6 +1025,27 @@ describe('bundled pushes for any other mover (GATE_TECH_PUSH_BUNDLE, owner 2026-
     } finally {
       mockSendToAdminUser.mockReset();
       mockSendToAdminUser.mockResolvedValue({ subscriptions: 1, sent: 1 });
+    }
+  });
+
+  test('a sweep that runs past its lease loses its cards to a later sweep: ONE push, and the late one clears nothing of the new owner (pre-push audit P1)', async () => {
+    await officeMove('v-1');
+    await officeMove('v-2');
+    const first = quiet();
+    const later = new Date(first.getTime() + notices.BUNDLE_CLAIM_LEASE_MS + 1000);
+    let second = null;
+    // The first sweep stalls before its handoff; a later sweep, past the lease, takes the cards over and sends.
+    mockBeforeLeg = async () => {
+      mockBeforeLeg = null;
+      second = await notices.flushBundledPushes({ now: later });
+    };
+    const firstOut = await notices.flushBundledPushes({ now: first });
+    expect(second).toEqual({ pushed: 1 });
+    expect(firstOut).toEqual({ pushed: 0 });
+    expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
+    for (const r of cardRows) {
+      expect(r.payload).not.toHaveProperty('push_bundle');
+      expect(r.payload).not.toHaveProperty('push_claim');
     }
   });
 
