@@ -321,9 +321,10 @@ export default function useEmailEditor(userId) {
         return;
       }
       const status = result.scheduled?.status;
-      // A row that may have gone out keeps the key, so plain Send waits for
-      // the operator's check of Sent; every other answer is definite.
-      if (status !== "outcome_unknown") rememberUncertain(slot, null);
+      // A row Gmail may have sent (outcome_unknown, or cancelled from there)
+      // keeps the key, so plain Send waits for the operator's check of Sent;
+      // every other answer is definite.
+      if (!result.scheduled?.mayHaveSent && status !== "outcome_unknown") rememberUncertain(slot, null);
       const settled = SETTLED_MESSAGES[status];
       if (settled) {
         setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: settled } }));
