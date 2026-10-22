@@ -11,7 +11,6 @@
 //   2. raises ONE office alert whose wording says what happened to that intent.
 // Nothing here closes the alert: a person marks it done after collecting. Never throws, so a
 // Stripe or alert failure for one customer cannot abort the billing loop.
-const db = require('../models/db');
 const logger = require('./logger');
 const { insertHealthAlert } = require('./health-alert-insert');
 
