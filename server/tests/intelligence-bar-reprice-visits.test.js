@@ -309,7 +309,7 @@ describe('the card', () => {
   test('more than the cap is refused, never truncated', async () => {
     tables.scheduled_services = Array.from({ length: MAX_VISITS + 1 }, (_, i) => visit(`c-${i}`, `2099-04-${String(i + 1).padStart(2, '0')}`));
     const res = await preview();
-    expect(res).toMatchObject({ code: 'too_many_visits' });
+    expect(res).toMatchObject({ code: 'reprice_page_limit' });
     expect(res.error).toMatch(/at most 24/);
   });
 

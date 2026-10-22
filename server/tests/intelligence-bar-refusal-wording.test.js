@@ -396,6 +396,14 @@ describe('r14: the email link refusal is a safety rule; the lookup faults state 
   });
 });
 
+describe('r15: a page-size limit is not a gap; the billing-type hard limit is', () => {
+  const decline = (code) => ({ success: false, code, error: "The bar can't change this from here yet." });
+  test('reprice_page_limit records nothing; too_many_visits (billing type) still records', () => {
+    expect(recordableRefusalCode(decline('reprice_page_limit'))).toBeNull();
+    expect(recordableRefusalCode(decline('too_many_visits'))).toBe('too_many_visits');
+  });
+});
+
 describe('every code main recorded is classified once (pre-push audit on Codex #6371 r10)', () => {
   const decline = (code) => ({ success: false, code, error: "The bar can't do this from here yet." });
   test.each([

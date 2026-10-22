@@ -368,7 +368,8 @@ async function buildPlan(input) {
   if (candidates.length > MAX_VISITS) {
     return {
       error: `${candidates.length} upcoming ${family.label} visits would change; one card holds at most ${MAX_VISITS}. Pass through_date to do part of the schedule. Nothing was changed.`,
-      code: 'too_many_visits',
+      // A page-size limit with a way forward (through_date), not a missing capability; the billing-type change keeps too_many_visits (Codex #6371 r15).
+      code: 'reprice_page_limit',
     };
   }
   const pins = candidates.map(visitPin);

@@ -90,4 +90,33 @@ describe('move_stops_to_day with a grouped stop beside movable ones', () => {
       mockFrozen.clear();
     }
   });
+
+  test('an all-skipped batch with grouped and frozen stops keeps grouped as the top code and lists both kinds (Codex #6371 r15)', async () => {
+    mockStops.splice(0, mockStops.length, stop('s1', 'visit-grouped'), stop('s2', 'visit-frozen'));
+    mockMembers.set('visit-grouped', [{ id: 's1' }, { id: 's3' }]);
+    mockFrozen.add('visit-frozen');
+    try {
+      const result = await executeScheduleTool('move_stops_to_day', { service_ids: ['s1', 's2'], new_date: '2099-01-05' });
+      expect(result.code).toBe('grouped_visit_move_unsupported');
+      expect(result.capability_gaps).toEqual([{ code: 'grouped_visit_move_unsupported' }, { code: 'frozen_visit_move_unsupported' }]);
+    } finally {
+      mockFrozen.clear();
+      mockMembers.clear();
+    }
+  });
+
+  test('an unreadable check anywhere keeps the refusal a plain fault with no gaps', async () => {
+    const { openMembers } = require('../services/visit-groups');
+    mockStops.splice(0, mockStops.length, stop('s1', 'visit-grouped'), stop('s2', 'visit-broken'));
+    mockMembers.set('visit-grouped', [{ id: 's1' }, { id: 's3' }]);
+    openMembers.mockImplementationOnce(async (conn, visitId) => mockMembers.get(visitId))
+      .mockImplementationOnce(async () => { throw new Error('read failed'); });
+    try {
+      const result = await executeScheduleTool('move_stops_to_day', { service_ids: ['s1', 's2'], new_date: '2099-01-05' });
+      expect(result.code).toBeUndefined();
+      expect(result).not.toHaveProperty('capability_gaps');
+    } finally {
+      mockMembers.clear();
+    }
+  });
 });

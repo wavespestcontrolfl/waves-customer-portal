@@ -773,6 +773,15 @@ describe('agent-gap-reports', () => {
         expect(insertedRows.map((row) => row.summary.match(/\((\w+)\)/)[1]).sort()).toEqual(['address_conflict', 'grouped_visit_move_unsupported']);
       });
 
+      test('a FAILED result lists every skipped kind; the top-level code and the nested one are stored once (Codex #6371 r15)', async () => {
+        const collector = collectorFor();
+        const failedBatch = { error: "The bar can't move these from here yet.", code: 'grouped_visit_move_unsupported',
+          capability_gaps: [{ code: 'grouped_visit_move_unsupported' }, { code: 'frozen_visit_move_unsupported' }] };
+        collector.toolResult('move_stops_to_day', failedBatch, true, { round: 0 });
+        await collector.flush({ reply: "The bar can't move these." });
+        expect(insertedRows.map((row) => row.summary.match(/\((\w+)\)/)[1]).sort()).toEqual(['frozen_visit_move_unsupported', 'grouped_visit_move_unsupported']);
+      });
+
       test('a result with no capability_gaps, or only by-design codes, records nothing', async () => {
         const collector = collectorFor();
         collector.toolResult('move_stops_to_day', { ok: true }, false, { round: 0 });

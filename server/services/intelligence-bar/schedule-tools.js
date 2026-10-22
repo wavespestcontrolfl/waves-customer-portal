@@ -1244,6 +1244,8 @@ async function moveStopsToDay(input, actionContext = {}) {
     return {
       error,
       ...(errorCode ? { code: errorCode } : {}),
+      // Every kind of stop skipped, not only the top code's (Codex #6371 r15); an unreadable check stays a plain fault.
+      ...(anyUnreadable ? {} : skippedMoveGaps(skippedGrouped, skippedCollective)),
       ...(skippedGrouped.length ? { skipped_grouped: skippedGrouped } : {}),
       ...(skippedCollective.length ? { skipped_collective: skippedCollective } : {}),
       ...(skippedUnchanged.length ? { skipped_unchanged: skippedUnchanged } : {}),

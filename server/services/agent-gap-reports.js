@@ -85,6 +85,8 @@ const CAPABILITY_GAP_CODES = new Set([
 ]);
 const UNRECORDED_DECLINE_CODES = new Set([
   'gate_off', 'autopay_off_not_enabled', 'no_rerunnable_checks', 'cancel_gate_off',
+  // A page-size limit with a way forward (through_date) in reprice_future_visits (Codex #6371 r15).
+  'reprice_page_limit',
 ]);
 // A tool's own refusal that sends the operator to another screen. Only used to
 // classify; the text itself is never stored (it can hold customer data).
@@ -572,9 +574,13 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
     if (meta.wrote === true) tail.wroteTools.add(name);
     // A nested gap is a partial success: the same call also proposed or wrote
     // (wrote:true), so it is kept apart from a refusal the tool recovered from.
-    const codes = failed ? [recordableRefusalCode(result)] : nestedGapCodes(result);
-    const nested = !failed;
-    for (const code of codes.filter(Boolean)) tail.refusals.set(`${name}|${code}`, { tool: name, code, nested });
+    // Nested gaps ride a failed result too (an all-skipped batch lists every kind
+    // it skipped); a code shared with the top-level one is stored once.
+    if (failed) {
+      const top = recordableRefusalCode(result);
+      if (top) tail.refusals.set(`${name}|${top}`, { tool: name, code: top, nested: false });
+    }
+    for (const code of nestedGapCodes(result)) tail.refusals.set(`${name}|${code}`, { tool: name, code, nested: true });
   }
 
   // The request's last tool round ended on a coded refusal that is NOT a gap
