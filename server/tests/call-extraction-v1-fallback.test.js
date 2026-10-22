@@ -33,6 +33,7 @@ const GOOD = {
   last_name: 'Example',
   call_type: 'new_inquiry',
   is_lead: true,
+  appointment_confirmed: false,
   call_summary: 'Caller reported ants.',
   lead_quality: 'warm',
   is_spam: false,
@@ -78,6 +79,11 @@ describe('backup route', () => {
     // V2's per-provider pin, whichever provider CALL_EXTRACTION_PROVIDER makes V2's primary.
     expect(CALL_EXTRACTION_V1_BACKUP_ROUTE.fallback).toEqual({ provider: 'openai', model: _test.CALL_EXTRACTION_MODEL_FOR.openai });
     expect(Object.isFrozen(CALL_EXTRACTION_V1_BACKUP_ROUTE)).toBe(true);
+  });
+
+  test('the lane policy counts the backup legs on the call ledger (their rows carry its cost)', () => {
+    const { policyFor } = require('../services/agent-control/lane-policies');
+    expect(policyFor('call_extraction_v1').ledger).toBe('call');
   });
 
   test('the backup is attributed to the registered call_extraction_v1 lane, whose switchboard row lists the Claude fallback', async () => {
@@ -194,6 +200,9 @@ describe('gate on', () => {
     ['no is_lead', { ...GOOD, is_lead: undefined }],
     ['is_spam as a string', { ...GOOD, is_spam: 'false' }],
     ['no is_voicemail', { ...GOOD, is_voicemail: undefined }],
+    // Booking reads appointment_confirmed as truthy: "false" would confirm a visit.
+    ['appointment_confirmed as a string', { ...GOOD, appointment_confirmed: 'false', preferred_date_time: '2026-10-23T15:00' }],
+    ['no appointment_confirmed', { ...GOOD, appointment_confirmed: undefined }],
     ['a blank call_summary', { ...GOOD, call_summary: '  ' }],
   ])('Claude returns %s -> rejected as incomplete, OpenAI serves', async (_label, answer) => {
     installFetch({ gemini: () => geminiHttp(402), openai: () => openaiOk(GOOD) });
@@ -290,5 +299,54 @@ describe('gate off (or not exactly "true"): byte-identical to before', () => {
     installFetch({ gemini: () => geminiOk(GOOD) });
     const out = await extractCallData(TRANSCRIPT, PHONE, {});
     expect(out.first_name).toBe('Pat');
+  });
+});
+
+// A backup read that classifies the call as spam, a non-workable voicemail or a
+// V2 hard veto finalizes before the common write, which is where
+// metadata.processing_timings is stamped; those two writes stamp it themselves.
+describe('early finalization keeps the backup provider record', () => {
+  const { v1BackupTimingsJson } = _test;
+  const opts = { processingStartedAt: new Date(Date.now() - 5000), procGeneration: 3 };
+
+  test('no backup served -> null, so both early writes stay unchanged with the gate off', () => {
+    expect(v1BackupTimingsJson({ extraction_v1_ms: 900 }, opts)).toBeNull();
+  });
+
+  test('a backup served -> the common processing_timings shape, provider record included', () => {
+    const json = JSON.parse(v1BackupTimingsJson({
+      extraction_v1_ms: 900,
+      extraction_v1_provider: 'anthropic',
+      extraction_v1_model: 'claude-test',
+      extraction_v1_fallback_reason: 'http_402',
+    }, opts));
+    expect(json).toMatchObject({
+      extraction_v1_ms: 900,
+      extraction_v1_provider: 'anthropic',
+      extraction_v1_model: 'claude-test',
+      extraction_v1_fallback_reason: 'http_402',
+      generation: 3,
+      started_at: opts.processingStartedAt.toISOString(),
+    });
+    expect(json.total_ms).toBeGreaterThanOrEqual(5000);
+    expect(typeof json.finished_at).toBe('string');
+  });
+
+  test('the spam / voicemail write and the V2 hard-veto write both stamp it', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const between = (from, to) => {
+      const start = src.indexOf(from);
+      const end = src.indexOf(to, start);
+      expect({ from, found: start > -1 && end > start }).toEqual({ from, found: true });
+      return src.slice(start, end);
+    };
+    const blocks = [
+      between('const terminalUpdate = {', '// Fenced like the finalization write, and BEFORE the shadow/triage'),
+      between("const vetoWrote = await trx('call_log')", 'if (!vetoWrote)'),
+    ];
+    for (const block of blocks) {
+      expect(block).toContain('v1BackupTimingsJson(stageTimings, { processingStartedAt, procGeneration })');
+      expect(block).toContain("'{processing_timings}'");
+    }
   });
 });

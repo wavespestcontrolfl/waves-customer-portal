@@ -9638,12 +9638,12 @@ async function v1BackupExtraction({ prompt, callerPhone, why, providerMeta }) {
     }
     // normalizeCallExtraction fills gaps instead of failing, so a leg must also
     // return the decisions routing reads, or the next leg runs: `{}` or a partial
-    // object would end the call with no lead, spam or voicemail decision.
-    // is_spam and is_voicemail pass through unnormalized and are read as
-    // truthy, so only real booleans count.
-    if (!normalized.call_type || normalized.is_lead === null
-      || typeof json.is_spam !== 'boolean' || typeof json.is_voicemail !== 'boolean'
-      || !normalized.call_summary) {
+    // object would end the call with no lead, spam or voicemail decision. The
+    // three V1 booleans the normalizer passes through unchanged are read as
+    // truthy downstream (a "false" string would confirm an appointment or drop
+    // the call as spam), so only real booleans count.
+    if (!normalized.call_type || normalized.is_lead === null || !normalized.call_summary
+      || !['appointment_confirmed', 'is_spam', 'is_voicemail'].every((k) => typeof json[k] === 'boolean')) {
       return 'extraction_incomplete';
     }
     return null;
@@ -9673,6 +9673,22 @@ async function v1BackupExtraction({ prompt, callerPhone, why, providerMeta }) {
     providerMeta.extraction_v1_fallback_reason = why;
   }
   return normalizeCallExtraction(res.json, { callerPhone });
+}
+
+// GATE_CALL_EXTRACTION_V1_FALLBACK: the two paths that finalize a call before
+// the common write (spam / non-workable voicemail, V2 hard veto) keep the
+// backup provider record in metadata.processing_timings, in the common write's
+// shape. Null when no backup served the call, so those writes stay unchanged
+// with the gate off.
+function v1BackupTimingsJson(stageTimings, { processingStartedAt, procGeneration }) {
+  if (!stageTimings.extraction_v1_provider) return null;
+  return JSON.stringify({
+    ...stageTimings,
+    total_ms: Date.now() - processingStartedAt.getTime(),
+    generation: procGeneration,
+    started_at: processingStartedAt.toISOString(),
+    finished_at: new Date().toISOString(),
+  });
 }
 
 // Reason code for a thrown Gemini failure: the HTTP status, else a network
@@ -12350,6 +12366,10 @@ const CallRecordingProcessor = {
         terminalUpdate.answered_by = 'voicemail';
         terminalUpdate.call_outcome = 'voicemail';
       }
+      const v1Timings = v1BackupTimingsJson(stageTimings, { processingStartedAt, procGeneration });
+      if (v1Timings) {
+        terminalUpdate.metadata = db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{processing_timings}', ?::jsonb, true)", [v1Timings]);
+      }
       // Fenced like the finalization write, and BEFORE the shadow/triage
       // side effects (pre-push P1 r2): the settle above is not an
       // ownership guarantee — it returns true with nothing to clear, and
@@ -14084,9 +14104,15 @@ const CallRecordingProcessor = {
             // (codex P1, PR #3303 r4): a force-reprocess that corrected a
             // prior definitive rejection into out_of_service_area/DNC
             // must not leave the call terminally rejected forever.
-            metadata: v2VetoDefinitiveRejection
-              ? db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{no_attribution}', 'true'::jsonb, true)")
-              : db.raw("COALESCE(metadata, '{}'::jsonb) - 'no_attribution'"),
+            metadata: (() => {
+              const marker = v2VetoDefinitiveRejection
+                ? "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{no_attribution}', 'true'::jsonb, true)"
+                : "COALESCE(metadata, '{}'::jsonb) - 'no_attribution'";
+              const v1Timings = v1BackupTimingsJson(stageTimings, { processingStartedAt, procGeneration });
+              return v1Timings
+                ? db.raw(`jsonb_set(${marker}, '{processing_timings}', ?::jsonb, true)`, [v1Timings])
+                : db.raw(marker);
+            })(),
             updated_at: new Date(),
           });
         if (!vetoWrote) {
@@ -25535,6 +25561,7 @@ CallRecordingProcessor._test = {
   callTimeETString,
   CALL_EXTRACTION_ROUTE,
   CALL_EXTRACTION_MODEL_FOR,
+  v1BackupTimingsJson,
   normalizeOpenAISegments,
   convertCallLeadOnPhoneBooking,
   findReusableCallLead,
