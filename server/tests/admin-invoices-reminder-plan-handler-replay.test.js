@@ -130,6 +130,13 @@ describe('follow-up controls: the page and the bar reach the same service calls'
     });
   });
 
+  test('stop: a service refusal that would cancel a combined session is a 409 NEEDS_INVOICES_PAGE', async () => {
+    FollowUps.stopSequence.mockResolvedValueOnce({ needsInvoicesPage: true });
+    const result = await router.followupControlFromBar({ invoiceId: INV, control: 'stop', body: {}, actor: BAR_ACTOR, approved: { sequenceId: 'seq-1', status: 'active', stepIndex: 0 } });
+    expect(result.status).toBe(409);
+    expect(result.json).toMatchObject({ code: 'NEEDS_INVOICES_PAGE' });
+  });
+
   test('an unknown control is refused before any handler runs', async () => {
     await expect(router.followupControlFromBar({ invoiceId: INV, control: 'send-now', body: {}, actor: BAR_ACTOR })).rejects.toThrow('Unknown follow-up control');
     expect(FollowUps.sendNextTouchNow).not.toHaveBeenCalled();

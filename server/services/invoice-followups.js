@@ -2235,7 +2235,9 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
       } else if (sendResult) {
         smsSent = true;
         actualSmsSent = true;
-        smsLeg = { state: 'sent' };
+        // The sender answers { sent: true, deduped: true } for a text it delivered earlier (the original acceptance): that is
+        // not a new delivery.
+        smsLeg = sendResult.deduped === true ? { state: 'already_delivered' } : { state: 'sent' };
       }
     }
   } else {
@@ -2899,6 +2901,7 @@ async function stopSequence(invoiceId, { reason, adminId, approved } = {}) {
     return { previewChanged: true };
   }
   let previewChanged = false;
+  let needsInvoicesPage = false;
   const invoice = await db('invoices').where({ id: invoiceId }).first('id', 'customer_id', 'stripe_payment_intent_id', 'invoice_number');
   await db.transaction(async (trx) => {
     const PayCombined = require('./pay-combined');
@@ -2918,6 +2921,12 @@ async function stopSequence(invoiceId, { reason, adminId, approved } = {}) {
         if (attempt >= 4) throw new Error(`Invoice ownership kept changing while stopping dunning for ${invoiceId} — try again`);
         ownerId = freshId;
       }
+    }
+    // The card's pin, judged on the reminder row locked FOR UPDATE BEFORE anything is read or released at Stripe: a mismatch
+    // leaves the transaction with no write at all. Same lock order as the stop always had (combined locks, then this row).
+    if (approved) {
+      const lockedSeq = await trx('invoice_followup_sequences').where({ invoice_id: invoiceId }).forUpdate().first('id', 'status', 'step_index');
+      if (!matchesApprovedReminder(lockedSeq, approved)) { previewChanged = true; return; }
     }
     // Re-read under the lock — a setup that committed while we waited may
     // have stamped a PI the unlocked read missed.
@@ -2949,6 +2958,8 @@ async function stopSequence(invoiceId, { reason, adminId, approved } = {}) {
       // stopped sibling once verified. Cancel it like the payer-change
       // fence does; only processing/succeeded money is left alone.
       const unconfirmed = pi && ['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(pi.status);
+      // The bar never cancels a combined session (nor cleans its stamps): it stops nothing and leaves the stop to the page.
+      if (approved && isSiblingOnCombined && (pi.status === 'canceled' || unconfirmed)) { needsInvoicesPage = true; return; }
       if (isSiblingOnCombined && pi.status === 'canceled') {
         // A prior attempt's cancel succeeded but its transaction rolled
         // back (codex r26 P2) — finish the stamp cleanup on retry instead
@@ -3024,6 +3035,7 @@ async function stopSequence(invoiceId, { reason, adminId, approved } = {}) {
       }),
     });
   });
+  if (needsInvoicesPage) return { needsInvoicesPage: true };
   return previewChanged ? { previewChanged: true } : undefined;
 }
 

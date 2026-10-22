@@ -225,7 +225,7 @@ async function buildControlPlan(toolName, input) {
   } else if (spec.control === 'stop') {
     effects.push({ kind: 'operational', text: `All remaining automatic reminders for invoice ${invoice.invoice_number} stop for good. The bar cannot restart a stopped reminder sequence.` });
     if (invoice.stripe_payment_intent_id) {
-      effects.push({ kind: 'billing', text: 'If this invoice is part of another invoice’s combined card payment that is still unpaid, that payment session is cancelled so the customer cannot pay the stopped invoice through it.' });
+      effects.push({ kind: 'billing', text: 'If this invoice is part of another invoice’s combined card payment that is still unpaid, the bar does not stop it (that would cancel the payment session): it refuses and leaves the stop to the Invoices page.' });
     }
   } else {
     const anchor = seq.anchor_at || invoice.sent_at || invoice.sms_sent_at || invoice.created_at;
@@ -314,6 +314,9 @@ async function commitControl(toolName, input, actionContext) {
   const { status, json } = result;
   if (status === 409 && json?.code === 'PREVIEW_CHANGED') {
     return { ...base, failed: true, code: 'preview_changed', preview_changed: true, error: `Nothing was changed: ${json.error}` };
+  }
+  if (status === 409 && json?.code === 'NEEDS_INVOICES_PAGE') {
+    return { ...base, failed: true, code: 'needs_invoices_page', error: `Nothing was changed: ${json.error} Stop it from the Invoices page.` };
   }
   if (status !== 200) {
     return { ...base, failed: true, code: status === 404 ? 'not_found' : 'reminder_refused', error: `The reminders were not changed: ${json?.error || 'the Invoices page refused it'}` };

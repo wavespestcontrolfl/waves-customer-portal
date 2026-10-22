@@ -44,13 +44,24 @@ jest.mock('../services/email-template-library', () => ({
 jest.mock('../services/customer-contact', () => ({
   getInvoiceEmailRecipients: jest.fn(() => [{ email: 'billing@example.com', name: 'Taylor' }]),
 }));
-jest.mock('../services/pay-combined', () => ({ lockCombinedCustomers: jest.fn(async () => undefined) }));
-jest.mock('../services/stripe', () => ({ isInvoiceAwaitingMicrodepositVerification: jest.fn(async () => false) }));
+jest.mock('../services/pay-combined', () => ({
+  lockCombinedCustomers: jest.fn(async () => undefined),
+  isCombinedPiMetadata: jest.fn(() => true),
+  paymentIntentOwnsInvoice: jest.fn(() => true),
+  clearPaymentIntentStamps: jest.fn(async () => undefined),
+}));
+jest.mock('../services/stripe', () => ({
+  isInvoiceAwaitingMicrodepositVerification: jest.fn(async () => false),
+  retrievePaymentIntent: jest.fn(async () => null),
+  cancelPaymentIntent: jest.fn(async () => ({})),
+}));
 
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const EmailTemplates = require('../services/email-template-library');
 const Followups = require('../services/invoice-followups');
+const Stripe = require('../services/stripe');
+const PayCombined = require('../services/pay-combined');
 
 const INV = 'inv-1';
 const SEQ = 'seq-1';
@@ -280,6 +291,20 @@ describe('the report: per-channel outcomes, never step progression', () => {
     expect(queued.report.legs.email).toEqual({ state: 'sent' });
   });
 
+  test('the sender’s real "delivered earlier" answer ({ sent: true, deduped: true }) is already_delivered, not sent', async () => {
+    sendCustomerMessage.mockResolvedValue({
+      sent: true, blocked: false, deliveryOutcome: 'accepted', providerMessageId: 'SMold', sentAt: '2099-01-04T14:00:00.000Z',
+      deduped: true, channel: 'sms', auditLogId: 'aud-1', segmentCount: 1, encoding: 'GSM-7', sentBody: 'invoice follow-up sms',
+    });
+    const result = await sendNow({ approved: APPROVED, report: true });
+    expect(result.report.legs).toEqual({ sms: { state: 'already_delivered' }, email: { state: 'sent' } });
+    // A fresh answer from the same sender (no deduped flag) is still a new send.
+    fresh();
+    install();
+    sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, deliveryOutcome: 'accepted', providerMessageId: 'SMnew', sentAt: '2099-01-05T14:00:00.000Z', channel: 'sms' });
+    expect((await sendNow({ approved: APPROVED, report: true })).report.legs.sms).toEqual({ state: 'sent' });
+  });
+
   test('no phone and no email: both legs are skipped, nothing is sent, and the report says so', async () => {
     tables.customers[0].phone = null;
     require('../services/customer-contact').getInvoiceEmailRecipients.mockReturnValueOnce([]);
@@ -388,6 +413,58 @@ describe('the reminder controls take the card pin', () => {
     expect(seqRow()).toMatchObject({ status: 'stopped', stopped_reason: 'waived', stopped_by_admin_id: 'admin-1' });
     seqRow().status = 'paused';
     expect(await Followups.stopSequence(INV, { reason: 'again', adminId: 'admin-1' })).toBeUndefined();
+    expect(seqRow().status).toBe('stopped');
+  });
+});
+
+// stopSequence with the card's pin: the pin is validated on the reminder row locked FOR UPDATE BEFORE anything is read at
+// Stripe, and the bar never cancels a combined session (or cleans its stamps) — it stops nothing and leaves it to the page.
+describe('stop with the card pin and a combined card session', () => {
+  const ACTIVE = { sequenceId: SEQ, status: 'active', stepIndex: 0 };
+  const combinedSibling = (status = 'requires_payment_method') => {
+    tables.invoices[0].stripe_payment_intent_id = 'pi_combined';
+    Stripe.retrievePaymentIntent.mockResolvedValue({ id: 'pi_combined', status, metadata: { waves_invoice_id: 'other-inv' } });
+  };
+
+  test('an unconfirmed combined session: the bar refuses (needs the Invoices page), cancels nothing, cleans nothing, stops nothing', async () => {
+    combinedSibling();
+    const result = await Followups.stopSequence(INV, { reason: 'waived', adminId: 'admin-1', approved: ACTIVE });
+    expect(result).toEqual({ needsInvoicesPage: true });
+    expect(Stripe.cancelPaymentIntent).not.toHaveBeenCalled();
+    expect(PayCombined.clearPaymentIntentStamps).not.toHaveBeenCalled();
+    expect(writes.filter((w) => w.table === 'invoice_followup_sequences')).toEqual([]);
+    expect(seqRow().status).toBe('active');
+  });
+
+  test('a canceled combined session (stamp cleanup owed) is refused the same way', async () => {
+    combinedSibling('canceled');
+    expect(await Followups.stopSequence(INV, { reason: 'waived', adminId: 'admin-1', approved: ACTIVE })).toEqual({ needsInvoicesPage: true });
+    expect(PayCombined.clearPaymentIntentStamps).not.toHaveBeenCalled();
+  });
+
+  test('money in flight on the session is not touched, so the stop goes ahead (as the page’s does)', async () => {
+    combinedSibling('processing');
+    expect(await Followups.stopSequence(INV, { reason: 'waived', adminId: 'admin-1', approved: ACTIVE })).toBeUndefined();
+    expect(Stripe.cancelPaymentIntent).not.toHaveBeenCalled();
+    expect(seqRow().status).toBe('stopped');
+  });
+
+  test('the pin is locked and checked before the PaymentIntent is read: a change after the first look reads nothing at Stripe and writes nothing', async () => {
+    combinedSibling();
+    hooks.onSeqLock = () => { seqRow().status = 'paused'; };
+    const result = await Followups.stopSequence(INV, { reason: 'waived', adminId: 'admin-1', approved: ACTIVE });
+    expect(result).toEqual({ previewChanged: true });
+    expect(Stripe.retrievePaymentIntent).not.toHaveBeenCalled();
+    expect(Stripe.cancelPaymentIntent).not.toHaveBeenCalled();
+    expect(PayCombined.clearPaymentIntentStamps).not.toHaveBeenCalled();
+    expect(writes.filter((w) => w.table === 'invoice_followup_sequences')).toEqual([]);
+  });
+
+  test('without the pin (the page) the combined session is released and the stop lands, as before', async () => {
+    combinedSibling();
+    expect(await Followups.stopSequence(INV, { reason: 'waived', adminId: 'admin-1' })).toBeUndefined();
+    expect(Stripe.cancelPaymentIntent).toHaveBeenCalledWith('pi_combined');
+    expect(PayCombined.clearPaymentIntentStamps).toHaveBeenCalled();
     expect(seqRow().status).toBe('stopped');
   });
 });

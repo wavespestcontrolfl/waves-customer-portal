@@ -3764,6 +3764,7 @@ const invoiceFollowupStopHandler = async (req, res, next) => {
       ...(req.ibApprovedControl ? { approved: req.ibApprovedControl } : {}),
     });
     if (changed?.previewChanged) return res.status(409).json(REMINDER_CHANGED_ANSWER);
+    if (changed?.needsInvoicesPage) return res.status(409).json({ error: 'This invoice is part of another invoice’s combined card payment that is still unpaid. Stopping it cancels that payment session, which the bar does not do.', code: 'NEEDS_INVOICES_PAGE' });
     res.json({ ok: true });
   } catch (err) { next(err); }
 };

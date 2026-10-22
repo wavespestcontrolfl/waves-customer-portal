@@ -240,7 +240,7 @@ describe('pause, resume and stop', () => {
     state.invoices[0].stripe_payment_intent_id = 'pi_test_1';
     const paused = await call('stop_invoice_reminders');
     expect(paused).toMatchObject({ preview: true, reminder_status: 'paused' });
-    expect(effectText(paused)).toMatch(/combined card payment that is still unpaid, that payment session is cancelled/);
+    expect(effectText(paused)).toMatch(/combined card payment that is still unpaid, the bar does not stop it .* leaves the stop to the Invoices page/);
     expect(await confirm('stop_invoice_reminders', paused)).toMatchObject({ success: true, reminder_status: 'stopped' });
     expect(Invoices.followupControlFromBar).toHaveBeenCalledWith(expect.objectContaining({ control: 'stop', body: {} }));
   });
@@ -306,6 +306,15 @@ describe('pause, resume and stop', () => {
     expect(result.error).toMatch(/^Nothing was changed:/);
     expect(result.success).toBeUndefined();
     expect(state.invoice_followup_sequences[0].status).toBe('stopped');
+  });
+
+  test('a stop the service refuses because it would cancel a combined card session is reported as needing the Invoices page', async () => {
+    const card = await call('stop_invoice_reminders');
+    Invoices.followupControlFromBar.mockResolvedValueOnce({ status: 409, json: { error: 'This invoice is part of another invoice’s combined card payment that is still unpaid. Stopping it cancels that payment session, which the bar does not do.', code: 'NEEDS_INVOICES_PAGE' } });
+    const result = await confirm('stop_invoice_reminders', card);
+    expect(result).toMatchObject({ failed: true, code: 'needs_invoices_page' });
+    expect(result.error).toMatch(/Stop it from the Invoices page\.$/);
+    expect(result.success).toBeUndefined();
   });
 
   test('a card for one tool cannot approve another', async () => {
