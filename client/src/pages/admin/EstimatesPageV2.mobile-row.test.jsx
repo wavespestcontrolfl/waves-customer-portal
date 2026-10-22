@@ -4,7 +4,7 @@ import "@testing-library/jest-dom/vitest";
 import { MemoryRouter } from "react-router-dom";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MobileEstimateRow } from "./EstimatesPageV2";
+import { AcceptanceRecordDialog, MobileEstimateRow } from "./EstimatesPageV2";
 
 const { openMessages } = vi.hoisted(() => ({ openMessages: vi.fn() }));
 vi.mock("../../components/admin/customer360/CustomerSmsPanel", async (importOriginal) => ({
@@ -81,4 +81,100 @@ describe("MobileEstimateRow accessibility", () => {
     expect(openMessages).not.toHaveBeenCalled();
   });
 
+});
+
+describe("MobileEstimateRow per-application price and view actions", () => {
+  const openActions = () =>
+    fireEvent.click(screen.getByRole("button", { name: "Actions for Ada Lovelace" }));
+
+  it("leads with the per-application price and keeps the monthly average secondary", () => {
+    renderRow({
+      estimate: { ...ESTIMATE, monthlyTotal: 31.33, perApplication: [{ label: "Pest Control", amount: 94, visitsPerYear: 4 }] },
+    });
+    expect(screen.getByText("$94 per application · 4 a year · $31/mo avg")).toBeInTheDocument();
+  });
+
+  it("keeps cents on a non-whole per-application price", () => {
+    renderRow({
+      estimate: { ...ESTIMATE, monthlyTotal: 42.3, perApplication: [{ label: "Lawn Care", amount: 56.4, visitsPerYear: 9 }] },
+    });
+    expect(screen.getByText(/^\$56\.40 per application/)).toBeInTheDocument();
+  });
+
+  it("lists each service for a multi-service plan beside the plan figure", () => {
+    renderRow({
+      estimate: {
+        ...ESTIMATE,
+        monthlyTotal: 72.3,
+        perApplication: [
+          { label: "Lawn Care", amount: 56.4, visitsPerYear: 9 },
+          { label: "Pest Control", amount: 90, visitsPerYear: 4 },
+        ],
+      },
+    });
+    expect(
+      screen.getByText("$72/mo · Lawn Care $56.40 per application · Pest Control $90 per application"),
+    ).toBeInTheDocument();
+  });
+
+  it("falls back to today's display with no per-application lines", () => {
+    renderRow();
+    expect(screen.getByText("$189/mo")).toBeInTheDocument();
+    expect(screen.queryByText(/per application/)).toBeNull();
+  });
+
+  it("offers View estimate on an unaccepted row and opens the staff preview link", () => {
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+    renderRow();
+    openActions();
+    fireEvent.click(screen.getByRole("button", { name: /View estimate/ }));
+    expect(open).toHaveBeenCalledWith("/estimate/customer-link-token?adminPreview=1", "_blank", "noopener,noreferrer");
+    expect(screen.queryByText("Preview customer view")).toBeNull();
+  });
+
+  it("offers the accepted PDF and the acceptance record on an accepted row", () => {
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+    const onViewAcceptance = vi.fn();
+    const estimate = { ...ESTIMATE, status: "accepted", hasAcceptanceRecord: true };
+    renderRow({ estimate, onViewAcceptance });
+    openActions();
+    expect(screen.queryByRole("button", { name: /^View estimate/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /View accepted estimate/ }));
+    expect(open).toHaveBeenCalledWith("/api/estimates/customer-link-token/pdf", "_blank", "noopener,noreferrer");
+    openActions();
+    fireEvent.click(screen.getByRole("button", { name: /View acceptance record/ }));
+    expect(onViewAcceptance).toHaveBeenCalledWith(estimate);
+  });
+
+  it("hides the acceptance record action when none is recorded (Mark won)", () => {
+    renderRow({ estimate: { ...ESTIMATE, status: "accepted", hasAcceptanceRecord: false }, onViewAcceptance: vi.fn() });
+    openActions();
+    expect(screen.getByRole("button", { name: /View accepted estimate/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /View acceptance record/ })).toBeNull();
+  });
+});
+
+describe("AcceptanceRecordDialog", () => {
+  it("shows the recorded time, terms version, terms text and device", async () => {
+    fetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        acceptance: {
+          recordId: "ACC-ABCDEF12", termsVersion: "v1", termsText: "Sample terms text.",
+          acceptedAt: "2026-10-02T15:00:00.000Z", ipMasked: "203.0.x.x", device: "iPhone · Safari",
+        },
+      }),
+    });
+    render(<AcceptanceRecordDialog estimate={{ id: "estimate-1" }} onClose={() => {}} />);
+    expect(await screen.findByText("Sample terms text.")).toBeInTheDocument();
+    expect(screen.getByText("v1")).toBeInTheDocument();
+    expect(screen.getByText("iPhone · Safari")).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledWith("/api/admin/estimates/estimate-1/acceptance", expect.any(Object));
+  });
+
+  it("says so when the record cannot be loaded", async () => {
+    fetch.mockResolvedValue({ ok: false, status: 404, clone: () => ({ json: async () => ({ error: "No acceptance record for this estimate" }) }), json: async () => ({}) });
+    render(<AcceptanceRecordDialog estimate={{ id: "estimate-1" }} onClose={() => {}} />);
+    expect(await screen.findByText("No acceptance record for this estimate")).toBeInTheDocument();
+  });
 });

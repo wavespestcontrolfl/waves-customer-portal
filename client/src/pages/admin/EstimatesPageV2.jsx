@@ -496,6 +496,72 @@ function UrgencyBadge({ urgency }) {
   return <Badge tone={isCritical ? "alert" : "neutral"}>{urgency.label}</Badge>;
 }
 
+// Recorded customer acceptance (terms version + text, time, device) for an
+// accepted estimate. Read-only; staff "Mark won" writes no record, and the
+// action only appears when the list says one exists.
+export function AcceptanceRecordDialog({ estimate, onClose }) {
+  const [state, setState] = useState({ loading: true, record: null, error: "" });
+  const estimateId = estimate?.id;
+  useEffect(() => {
+    if (!estimateId) return undefined;
+    let cancelled = false;
+    setState({ loading: true, record: null, error: "" });
+    adminFetch(`/admin/estimates/${encodeURIComponent(estimateId)}/acceptance`)
+      .then((body) => {
+        if (!cancelled) setState({ loading: false, record: body?.acceptance || null, error: "" });
+      })
+      .catch((err) => {
+        if (!cancelled) setState({ loading: false, record: null, error: err.message || "Could not load the record" });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [estimateId]);
+  const { loading, record, error } = state;
+  return (
+    <Dialog open={!!estimate} onClose={onClose} size="md">
+      <DialogHeader className="flex items-center justify-between gap-3">
+        <DialogTitle>Acceptance record</DialogTitle>
+        <Button
+          type="button"
+          variant="ghost"
+          onClick={onClose}
+          aria-label="Close acceptance record"
+          className="h-9 w-9 px-0"
+        >
+          <X size={16} strokeWidth={1.75} aria-hidden />
+        </Button>
+      </DialogHeader>
+      <DialogBody className="space-y-3 text-ui-body text-ink-secondary">
+        {loading && <p>Loading…</p>}
+        {!loading && error && <p>{error}</p>}
+        {!loading && record && (
+          <>
+            <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+              <dt className="text-ink-tertiary">Accepted</dt>
+              <dd>{fmtDateTime(record.acceptedAt)}</dd>
+              <dt className="text-ink-tertiary">Terms version</dt>
+              <dd>{record.termsVersion || "—"}</dd>
+              <dt className="text-ink-tertiary">Device</dt>
+              <dd>{record.device || "—"}</dd>
+              <dt className="text-ink-tertiary">Network</dt>
+              <dd className="u-nums">{record.ipMasked || "—"}</dd>
+              <dt className="text-ink-tertiary">Record</dt>
+              <dd className="u-nums">{record.recordId || "—"}</dd>
+            </dl>
+            <div>
+              <div className="text-ink-tertiary">Terms the customer accepted</div>
+              <p className="mt-1 max-h-[40vh] overflow-y-auto whitespace-pre-wrap rounded-md border border-zinc-200 p-3 text-ink-primary">
+                {record.termsText || "—"}
+              </p>
+            </div>
+          </>
+        )}
+      </DialogBody>
+    </Dialog>
+  );
+}
+
 // Row overflow menu. Holds secondary actions (Audit, Preview, Resend, Copy
 // Link, 1x Option toggle, Invoice toggle, Send Booking Link, Archive, Delete)
 // so the inline action bar stays focused on the single primary action for
@@ -673,6 +739,58 @@ function estimateAmountDisplay(estimate) {
     value: 0,
     suffix: "/mo",
   };
+}
+// Whole dollars when the price is whole, cents otherwise ($94, $56.40), the way
+// the estimate PDF prints a per-application price.
+function fmtApplicationPrice(value) {
+  const n = Number(value || 0);
+  return Number.isInteger(n)
+    ? `$${n.toLocaleString()}`
+    : `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+// What a Pipeline card prints for the price. `perApplication` comes from the
+// list endpoint (null when the plan is not described per application); without
+// it the card is exactly what it was: "$X/mo" or "$X one-time".
+//   single service -> lead "$94 per application" + "4 a year · $31/mo avg"
+//   2+ services    -> the existing plan figure + one "Label $X per application" line each
+function estimatePriceDisplay(estimate) {
+  const base = estimateAmountDisplay(estimate);
+  const lines = (
+    Array.isArray(estimate?.perApplication) ? estimate.perApplication : []
+  ).filter((line) => line && Number(line.amount) > 0);
+  if (!lines.length || !(base.value > 0) || base.suffix !== "/mo") {
+    return { ...base, lead: `$${base.value.toFixed(0)}`, secondary: [] };
+  }
+  if (lines.length === 1) {
+    const [line] = lines;
+    const visits = Number(line.visitsPerYear);
+    return {
+      value: base.value,
+      suffix: " per application",
+      lead: fmtApplicationPrice(line.amount),
+      secondary: [
+        `${visits > 0 ? `${visits} a year · ` : ""}${fmtMoney(base.value)}/mo avg`,
+      ],
+    };
+  }
+  return {
+    ...base,
+    lead: `$${base.value.toFixed(0)}`,
+    secondary: lines.map(
+      (line) =>
+        `${line.label || "Service"} ${fmtApplicationPrice(line.amount)} per application`,
+    ),
+  };
+}
+// The one-line form for the 64px mobile card.
+function estimatePriceInline(display) {
+  return [`${display.lead}${display.suffix}`, ...display.secondary].join(" · ");
+}
+// Accepted estimates: the customer page shows only the booking step, so the
+// full accepted document is the PDF (never counts a view).
+function estimateAcceptedPdfHref(estimate) {
+  if (!estimate?.token) return null;
+  return `${API_BASE}/estimates/${encodeURIComponent(estimate.token)}/pdf`;
 }
 function canSendEstimate(estimate) {
   // Rows without a share token (quote-wizard mirrors, legacy imports) have no
@@ -1607,6 +1725,7 @@ function EstimatePipelineViewV2({
   const [followUpTarget, setFollowUpTarget] = useState(null);
   const [declineTarget, setDeclineTarget] = useState(null);
   const [auditTarget, setAuditTarget] = useState(null);
+  const [acceptanceTarget, setAcceptanceTarget] = useState(null);
   const [engineReviewTarget, setEngineReviewTarget] = useState(null);
   const [extendTarget, setExtendTarget] = useState(null);
   const [outlineTarget, setOutlineTarget] = useState(null);
@@ -1971,6 +2090,12 @@ function EstimatePipelineViewV2({
           onClose={() => setAuditTarget(null)}
         />
       )}
+      {acceptanceTarget && (
+        <AcceptanceRecordDialog
+          estimate={acceptanceTarget}
+          onClose={() => setAcceptanceTarget(null)}
+        />
+      )}
       {engineReviewTarget && (
         <EngineReviewModal
           estimate={engineReviewTarget}
@@ -2079,7 +2204,7 @@ function EstimatePipelineViewV2({
                 const competitor = detectCompetitor(e.notes || e.description);
                 const source = SOURCE_ICON[e.source];
                 const previewHref = estimatePreviewHref(e);
-                const amount = estimateAmountDisplay(e);
+                const amount = estimatePriceDisplay(e);
                 const canSend = canSendEstimate(e);
                 return (
                   <Card
@@ -2339,7 +2464,7 @@ function EstimatePipelineViewV2({
                     )}
                     {e.tier && <Badge tone="neutral">{e.tier}</Badge>}
                     {/* Estimate amount */}
-                    <div className="text-right min-w-[80px]">
+                    <div className="text-right min-w-[80px] max-w-[260px]">
                       {" "}
                       <div
                         className={cn(
@@ -2349,11 +2474,19 @@ function EstimatePipelineViewV2({
                             : "text-ink-tertiary",
                         )}
                       >
-                        ${amount.value.toFixed(0)}
+                        {amount.lead}
                         <span className="text-ui-body font-normal text-ink-tertiary">
                           {amount.suffix}
                         </span>{" "}
                       </div>{" "}
+                      {amount.secondary.map((line) => (
+                        <div
+                          key={line}
+                          className="text-ui-body font-normal text-ink-tertiary"
+                        >
+                          {line}
+                        </div>
+                      ))}
                     </div>
                     {/* Timeline */}
                     <div className="text-right min-w-[110px] text-ui-body text-ink-secondary space-y-0.5">
@@ -2675,19 +2808,43 @@ function EstimatePipelineViewV2({
                                   focus: "all",
                                 }),
                             },
-                            previewHref && {
-                              key: "preview",
-                              label: "Preview customer view",
-                              icon: (
-                                <ExternalLink size={16} strokeWidth={1.75} />
-                              ),
-                              onClick: () =>
-                                window.open(
-                                  previewHref,
-                                  "_blank",
-                                  "noopener,noreferrer",
+                            previewHref &&
+                              e.status !== "accepted" && {
+                                key: "preview",
+                                label: "View estimate",
+                                icon: (
+                                  <ExternalLink size={16} strokeWidth={1.75} />
                                 ),
-                            },
+                                onClick: () =>
+                                  window.open(
+                                    previewHref,
+                                    "_blank",
+                                    "noopener,noreferrer",
+                                  ),
+                              },
+                            e.status === "accepted" &&
+                              estimateAcceptedPdfHref(e) && {
+                                key: "view-accepted",
+                                label: "View accepted estimate",
+                                icon: (
+                                  <ExternalLink size={16} strokeWidth={1.75} />
+                                ),
+                                onClick: () =>
+                                  window.open(
+                                    estimateAcceptedPdfHref(e),
+                                    "_blank",
+                                    "noopener,noreferrer",
+                                  ),
+                              },
+                            e.status === "accepted" &&
+                              e.hasAcceptanceRecord && {
+                                key: "acceptance-record",
+                                label: "View acceptance record",
+                                icon: (
+                                  <FileText size={16} strokeWidth={1.75} />
+                                ),
+                                onClick: () => setAcceptanceTarget(e),
+                              },
                             (e.status === "sent" || e.status === "viewed") && {
                               key: "mark-lost",
                               label: "Mark lost",
@@ -3013,6 +3170,7 @@ export function MobileEstimateRow({
   onExtend,
   onLawnOutline,
   onEngineReview,
+  onViewAcceptance,
   v3Flag = false,
   highlighted = false,
 }) {
@@ -3020,8 +3178,11 @@ export function MobileEstimateRow({
   const sendEstimateFromPipeline = useEstimateSend();
   const openMessages = useCustomerSms();
   const cfg = STATUS_CONFIG[estimate.status] || STATUS_CONFIG.draft;
-  const amount = estimateAmountDisplay(estimate);
+  const amount = estimatePriceDisplay(estimate);
+  const amountInline = estimatePriceInline(amount);
   const canSend = canSendEstimate(estimate);
+  const previewHref = estimatePreviewHref(estimate);
+  const acceptedPdfHref = estimateAcceptedPdfHref(estimate);
   const customerName = estimate.customerName || "Unknown";
   const isDraftMuted = v3Flag && estimate.status === "draft";
   const hasCustomer = !!estimate.customerId;
@@ -3062,9 +3223,11 @@ export function MobileEstimateRow({
         {v3Flag ? (
           <div className="flex items-center gap-2 flex-wrap">
             {" "}
-            <span className="u-nums text-ui-body text-ink-tertiary">
-              ${amount.value.toFixed(0)}
-              {amount.suffix}
+            <span
+              className="u-nums text-ui-body text-ink-tertiary"
+              title={amountInline}
+            >
+              {amountInline}
             </span>{" "}
             <StatusPillV3 status={estimate.status} />
             {estimate.viewCount > 1 && (
@@ -3130,9 +3293,8 @@ export function MobileEstimateRow({
         ) : (
           <div className="text-ui-body text-ink-tertiary truncate">
             {" "}
-            <span className="u-nums">
-              ${amount.value.toFixed(0)}
-              {amount.suffix}
+            <span className="u-nums" title={amountInline}>
+              {amountInline}
             </span>{" "}
             <span
               className={cn(
@@ -3376,6 +3538,30 @@ export function MobileEstimateRow({
             icon: <SlidersHorizontal size={16} strokeWidth={1.75} />,
             onClick: () => onAudit?.(estimate, "all"),
           },
+          previewHref &&
+            estimate.status !== "accepted" && {
+              key: "preview",
+              label: "View estimate",
+              icon: <ExternalLink size={16} strokeWidth={1.75} />,
+              onClick: () =>
+                window.open(previewHref, "_blank", "noopener,noreferrer"),
+            },
+          estimate.status === "accepted" &&
+            acceptedPdfHref && {
+              key: "view-accepted",
+              label: "View accepted estimate",
+              icon: <ExternalLink size={16} strokeWidth={1.75} />,
+              onClick: () =>
+                window.open(acceptedPdfHref, "_blank", "noopener,noreferrer"),
+            },
+          estimate.status === "accepted" &&
+            estimate.hasAcceptanceRecord &&
+            onViewAcceptance && {
+              key: "acceptance-record",
+              label: "View acceptance record",
+              icon: <FileText size={16} strokeWidth={1.75} />,
+              onClick: () => onViewAcceptance(estimate),
+            },
           Boolean(estimate.estimatorEngine) && {
             key: "engine-review",
             label: "AI draft review",
@@ -3447,6 +3633,7 @@ function EstimatesMobileListView({
   const [dateFilter, setDateFilter] = useState("all");
   const [customerPanelId, setCustomerPanelId] = useState(null);
   const [auditTarget, setAuditTarget] = useState(null);
+  const [acceptanceTarget, setAcceptanceTarget] = useState(null);
   const [engineReviewTarget, setEngineReviewTarget] = useState(null);
   const [extendTarget, setExtendTarget] = useState(null);
   const [outlineTarget, setOutlineTarget] = useState(null);
@@ -3850,6 +4037,7 @@ function EstimatesMobileListView({
               onExtend={setExtendTarget}
               onLawnOutline={setOutlineTarget}
               onEngineReview={setEngineReviewTarget}
+              onViewAcceptance={setAcceptanceTarget}
               v3Flag={v3Flag}
             />
           ))}
@@ -3867,6 +4055,12 @@ function EstimatesMobileListView({
           estimate={auditTarget.estimate || auditTarget}
           initialFocus={auditTarget.focus || "all"}
           onClose={() => setAuditTarget(null)}
+        />
+      )}
+      {acceptanceTarget && (
+        <AcceptanceRecordDialog
+          estimate={acceptanceTarget}
+          onClose={() => setAcceptanceTarget(null)}
         />
       )}
       {engineReviewTarget && (

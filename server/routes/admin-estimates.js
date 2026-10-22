@@ -3787,6 +3787,100 @@ function applyEstimateSearchFilter(query, search) {
   });
 }
 
+// The proposal's recurring lines when ALL of them are priced per-application
+// lines (a flat-monthly or unknown-cadence line means the plan is not
+// described by application); otherwise null.
+function recurringPerApplicationLines(proposal) {
+  if (!proposal || proposal.enabled === true) return null;
+  if ((proposal.programs || []).length > 0 || (proposal.correctiveWork || []).length > 0) return null;
+  const recurring = (proposal.buildings || [])
+    .flatMap((b) => b.lineItems || [])
+    .filter((l) => l.frequency !== 'one_time');
+  if (recurring.length === 0) return null;
+  if (!recurring.every((l) => l.frequency === 'per_application'
+    && Number(l.amount) > 0 && Number(l.visitsPerYear) > 0 && l.taxable !== true)) return null;
+  return recurring.map((l) => ({
+    // The synthesized description is "<name> — N applications/yr"; the card prints the count itself.
+    label: String(l.description || '').replace(/\s+—\s+\d+\s+applications\/yr\s*$/, '').trim() || 'Recurring service',
+    amount: Math.round(Number(l.amount) * 100) / 100,
+    visitsPerYear: Math.round(Number(l.visitsPerYear)),
+  }));
+}
+
+// Per-application price lines for the Pipeline card (admin-only, read-only).
+// ONE source: normalizeProposal(row, { recurringMode: 'per_application' }), the
+// authority the estimate PDF and delivery emails read. It runs on the FROZEN
+// send snapshot (no live repricing, so the list stays cheap) and only returns
+// lines that already reconcile to the row's stored totals; anything else gives
+// null and the card shows exactly what it showed before. Skipped for commercial
+// proposals, quote-required rows, one-time-only plans, annual prepay sales and
+// customers who keep monthly billing. Never throws: one bad row never breaks
+// the list.
+function perApplicationLinesForRow(row, estData) {
+  try {
+    if (!row || String(row.category || '').toUpperCase() === 'COMMERCIAL') return null;
+    if (isCommercialProposalData(estData)) return null;
+    if (row.quote_required === true || estData?.quoteRequired === true) return null;
+    if (!(parseFloat(row.monthly_total || 0) > 0)) return null;
+    return recurringPerApplicationLines(normalizeProposal(row, { recurringMode: 'per_application' }));
+  } catch (err) {
+    logger.warn(`[admin-estimates] per-application lines unavailable for estimate ${row?.id}: ${err.message}`);
+    return null;
+  }
+}
+
+// Fills `perApplication` for the page's rows. Rows with no frozen per-application
+// lines cost nothing; the rest are checked against the billing lane and the
+// annual-prepay sale (one batched prepay query, lane lookups in small chunks).
+async function perApplicationByEstimateId(estimates, parsedDataById) {
+  const out = new Map();
+  const candidates = [];
+  for (const e of estimates) {
+    const lines = perApplicationLinesForRow(e, parsedDataById.get(e.id));
+    if (lines) candidates.push({ row: e, lines });
+  }
+  if (!candidates.length) return out;
+  const billing = require('../services/estimate-proposal-billing');
+  let prepaidIds = new Set();
+  try {
+    if (await db.schema.hasTable('annual_prepay_terms')) {
+      const rows = await db('annual_prepay_terms')
+        .whereIn('source_estimate_id', candidates.map((c) => c.row.id))
+        .select('source_estimate_id');
+      prepaidIds = new Set(rows.map((r) => r.source_estimate_id));
+    }
+  } catch (err) {
+    // Unknown prepay state: show nothing rather than risk a wrong cadence.
+    logger.warn(`[admin-estimates] prepay lookup failed for the per-application card view: ${err.message}`);
+    return out;
+  }
+  const todo = candidates.filter((c) => !prepaidIds.has(c.row.id));
+  for (let i = 0; i < todo.length; i += 10) {
+    await Promise.all(todo.slice(i, i + 10).map(async (c) => {
+      try {
+        if (await billing.estimateBillsPerApplication(c.row) === true) out.set(c.row.id, c.lines);
+      } catch (err) {
+        logger.warn(`[admin-estimates] billing lane unavailable for estimate ${c.row.id}: ${err.message}`);
+      }
+    }));
+  }
+  return out;
+}
+
+// Accepted rows that have a recorded acceptance (terms_version set AND a
+// estimate_acceptances row), the same condition the record helper uses.
+async function acceptanceRecordIdSet(estimates) {
+  const ids = estimates.filter((e) => e.status === 'accepted' && e.terms_version).map((e) => e.id);
+  if (!ids.length) return new Set();
+  try {
+    const rows = await db('estimate_acceptances').whereIn('estimate_id', ids).distinct('estimate_id');
+    return new Set(rows.map((r) => r.estimate_id));
+  } catch (err) {
+    logger.warn(`[admin-estimates] acceptance record lookup failed: ${err.message}`);
+    return new Set();
+  }
+}
+
 // GET /api/admin/estimates — list
 router.get('/', async (req, res, next) => {
   try {
@@ -3995,6 +4089,15 @@ router.get('/', async (req, res, next) => {
       }
     }
 
+    const parsedDataById = new Map();
+    for (const e of estimates) {
+      let data = e.estimate_data;
+      if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+      parsedDataById.set(e.id, data);
+    }
+    const perApplicationById = await perApplicationByEstimateId(estimates, parsedDataById);
+    const acceptanceRecordIds = await acceptanceRecordIdSet(estimates);
+
     res.json({
       estimates: estimates.map(e => {
         let estData = e.estimate_data;
@@ -4039,6 +4142,9 @@ router.get('/', async (req, res, next) => {
           updatedAt: e.updated_at,
           monthlyTotal,
           onetimeTotal,
+          // Per-application price lines for the card, or null (see perApplicationLinesForRow).
+          perApplication: perApplicationById.get(e.id) || null,
+          hasAcceptanceRecord: acceptanceRecordIds.has(e.id),
           tier: e.waveguard_tier, createdBy: e.created_by_name,
           sentAt: e.sent_at,
           viewedAt: hasBeenSent ? e.viewed_at : null,
@@ -4130,6 +4236,21 @@ router.get('/', async (req, res, next) => {
       // list-derived KPIs may be incomplete instead of silently undercounting.
       truncated: estimates.length >= ESTIMATE_LIST_LIMIT,
     });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/estimates/:id/acceptance — the recorded customer acceptance
+// (terms version + text, time, device, masked IP) for an accepted estimate.
+// Owner-only: the router's allowlist above only lets /:id and
+// /:id/schedule-source through to staff. 404 when there is no record
+// (staff "Mark Won" writes none).
+router.get('/:id/acceptance', async (req, res, next) => {
+  try {
+    const estimate = await db('estimates').where({ id: req.params.id }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    const record = await require('../services/estimate-acceptance-record').acceptanceRecordForEstimate(estimate);
+    if (!record) return res.status(404).json({ error: 'No acceptance record for this estimate' });
+    res.json({ acceptance: record });
   } catch (err) { next(err); }
 });
 
@@ -5844,6 +5965,9 @@ router.delete('/:id', async (req, res, next) => {
 // not a standing route.
 
 router._internals = {
+  perApplicationLinesForRow,
+  perApplicationByEstimateId,
+  acceptanceRecordIdSet,
   clearQuoteRequirementFlags,
   resolveBlockingAutomationForProposal,
   clearStaleProposalDelivery,
