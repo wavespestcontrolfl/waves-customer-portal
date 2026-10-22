@@ -78,7 +78,7 @@ function createDbMock(initialRows = {}) {
     }
     if (sql.includes('gbp_row.google_review_id = google_reviews.gbp_review_name')) {
       return row => !(String(row.google_review_id || '').startsWith('places_')
-        && state.rows.google_reviews.some(o => o.id !== row.id && o.google_review_id === row.gbp_review_name));
+        && state.rows.google_reviews.some(o => o.id !== row.id && o.google_review_id === row.gbp_review_name && o.missing_since == null));
     }
     if (sql.includes('publish_claimed_until IS NULL OR publish_claimed_until <')) {
       const cutoff = new Date(bindings[0]);
@@ -898,6 +898,22 @@ describe('Google Business review sync', () => {
 
       expect(result.errors).toEqual([]);
       expect(db.__state.rows.google_reviews.find(r => r.id === 'places-row')).toMatchObject({ google_review_id: GBP_ID, review_text: 'Lovely service (edited)' });
+    });
+
+    test('once the GBP holder is stamped missing, its Places copy becomes a removal candidate too', async () => {
+      seed();
+      db.__state.rows.google_reviews.find(r => r.id === 'gbp-row').missing_since = '2026-06-02T00:00:00Z';
+      global.fetch = jest.fn(async (url) => {
+        if (String(url).includes('maps.googleapis.com')) return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+        return jsonResponse({ reviews: [{ name: 'accounts/1/locations/2/reviews/other', reviewer: { displayName: 'Reviewer Delta' }, starRating: 'FIVE', comment: 'Fine', createTime: '2026-05-26T12:00:00Z' }] });
+      });
+      const NotificationService = require('../services/notification-service');
+      const notify = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue({ id: 'n' });
+
+      await service.syncAllReviews();
+
+      expect(db.__state.rows.google_reviews.find(r => r.id === 'places-row').missing_since).toBeTruthy();
+      notify.mockRestore();
     });
 
     test('a Places copy whose GBP name is NOT held by another row can still be stamped as removed', async () => {

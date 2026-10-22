@@ -8,7 +8,8 @@ function getGoogle() {
 // row holds under its GBP id (see _preferGbpHolder).
 const PLACES_COPY_OF_GBP_ROW_SQL = `NOT (google_reviews.google_review_id LIKE 'places\\_%' AND EXISTS (
   SELECT 1 FROM google_reviews gbp_row
-  WHERE gbp_row.google_review_id = google_reviews.gbp_review_name AND gbp_row.id <> google_reviews.id))`;
+  WHERE gbp_row.google_review_id = google_reviews.gbp_review_name AND gbp_row.id <> google_reviews.id
+    AND gbp_row.missing_since IS NULL))`;
 
 const logger = require('./logger');
 const { scrubSentryText } = require('../utils/sentry-scrub');
