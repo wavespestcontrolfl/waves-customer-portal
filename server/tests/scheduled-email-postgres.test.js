@@ -207,6 +207,7 @@ jest.setTimeout(30000);
     expect((await call('POST', `/scheduled/${body.scheduled.id}/restored`)).status).toBe(200);
     expect((await call('GET', '/scheduled')).body.emails).toEqual([]);
     expect(await row(body.scheduled.id)).toMatchObject({ status: 'cancelled' });
+    expect(await call('POST', `/scheduled/${body.scheduled.id}/cancel`)).toMatchObject({ status: 409, body: { error: 'This email is already back in a draft.' } });
   });
 
   test('the capped history keeps the newest cancel, whatever its send time', async () => {

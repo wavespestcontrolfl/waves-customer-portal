@@ -433,7 +433,10 @@ router.post('/scheduled/:id/cancel', async (req, res) => {
   try {
     const [row] = await db('scheduled_emails').where({ id: req.params.id }).whereIn('status', CANCELLABLE)
       .update({ status: 'cancelled', cancelled_at: db.fn.now(), updated_at: db.fn.now() }).returning('*');
+    // A repeat returns the draft only until a tab confirms it restored it;
+    // after that the text is already in a composer and must not come back.
     const done = row || await db('scheduled_emails').where({ id: req.params.id, status: 'cancelled' }).first();
+    if (done?.restored_at) return res.status(409).json({ error: 'This email is already back in a draft.' });
     if (!done) return res.status(409).json({ error: 'This email is already sending or sent, so it cannot be cancelled.' });
     res.json({ success: true, draft: scheduledView(done) });
   } catch (err) {
