@@ -271,6 +271,90 @@ describe('findLinkedUpcomingAppointment — customer-wide fallback (gated)', () 
   });
 });
 
+// ── Waves Assessment is never adoptable (owner case 2026-10-21) ──────────
+// The assessment's catalog key (lawn_inspection) classifies into the lawn
+// family, so a lawn plan used to adopt the free consultation as its first
+// paid application: no slot picker, the assessment restamped with the plan
+// price, the series dated on the assessment day.
+describe('findLinkedUpcomingAppointment — a Waves Assessment is never adopted', () => {
+  const LAWN_ESTIMATE = {
+    id: 'est-lawn',
+    customer_id: 'cust-1',
+    estimate_data: JSON.stringify({
+      result: {
+        recurring: {
+          services: [{
+            name: 'Lawn Care Service', service: 'lawn_care', frequency: 'monthly', selected: true, isSelected: true,
+          }],
+        },
+      },
+    }),
+  };
+  const ASSESSMENT_ROW = {
+    id: 'ss-assessment',
+    customer_id: 'cust-1',
+    source_estimate_id: null,
+    service_type: 'Waves Assessment',
+    catalog_service_key: 'lawn_inspection',
+    catalog_service_name: 'Waves Assessment',
+  };
+  const LAWN_ROW = {
+    id: 'ss-lawn',
+    customer_id: 'cust-1',
+    source_estimate_id: null,
+    service_type: 'Lawn Care Service',
+    catalog_service_key: 'lawn_care_monthly',
+    catalog_service_name: 'Lawn Care Service',
+  };
+
+  beforeEach(() => {
+    featureGates.isEnabled.mockImplementation((k) => k === 'estimateExistingApptCustomerWide');
+  });
+
+  it('customer-wide fallback: the assessment is skipped and the genuine lawn visit is offered', async () => {
+    const conn = makeFakeConn([null, [ASSESSMENT_ROW, LAWN_ROW]]);
+    const row = await findLinkedUpcomingAppointment(LAWN_ESTIMATE, null, { database: conn });
+    expect(row).toEqual(LAWN_ROW);
+  });
+
+  it('customer-wide fallback: an assessment alone yields no adoption (slot picker flow)', async () => {
+    const conn = makeFakeConn([null, [ASSESSMENT_ROW]]);
+    expect(await findLinkedUpcomingAppointment(LAWN_ESTIMATE, null, { database: conn })).toBe(null);
+  });
+
+  it('customer-wide fallback: an unlinked legacy row is caught by its Waves Assessment name', async () => {
+    const legacy = { ...ASSESSMENT_ROW, catalog_service_key: null, catalog_service_name: null };
+    const conn = makeFakeConn([null, [legacy]]);
+    expect(await findLinkedUpcomingAppointment(LAWN_ESTIMATE, null, { database: conn })).toBe(null);
+  });
+
+  it('an estimate-linked assessment row is dropped, and the fallback then looks past it', async () => {
+    const linkedAssessment = { ...ASSESSMENT_ROW, source_estimate_id: 'est-lawn' };
+    const conn = makeFakeConn([linkedAssessment, [LAWN_ROW]]);
+    const row = await findLinkedUpcomingAppointment(LAWN_ESTIMATE, null, { database: conn });
+    expect(row).toEqual(LAWN_ROW);
+    expect(conn.queries).toHaveLength(2);
+  });
+
+  it('the legacy no-family exemption does not rescue an assessment link', async () => {
+    featureGates.isEnabled.mockReturnValue(false);
+    const linkedAssessment = { ...ASSESSMENT_ROW, source_estimate_id: 'est-1' };
+    const conn = makeFakeConn([linkedAssessment]);
+    const row = await findLinkedUpcomingAppointment(
+      { id: 'est-1', customer_id: 'cust-1', estimate_data: '{}' },
+      null,
+      { database: conn },
+    );
+    expect(row).toBe(null);
+  });
+
+  it('pest family is unchanged: a quarterly pest visit still adopts', async () => {
+    const conn = makeFakeConn([null, [ASSESSMENT_ROW, CW_ROW]]);
+    const row = await findLinkedUpcomingAppointment(ESTIMATE, null, { database: conn });
+    expect(row).toEqual(CW_ROW);
+  });
+});
+
 // ── Property scope (cross-property accept incident, 08-15) ──────────────
 // The customer-wide fallback was property-blind for UNGROUPED estimates:
 // an existing customer accepting a plan for a NEW property adopted their

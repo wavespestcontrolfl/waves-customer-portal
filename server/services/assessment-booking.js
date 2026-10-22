@@ -41,6 +41,32 @@ function scopeToAssessmentBookings(query, bookingAlias = 'scheduled_services', s
   });
 }
 
+// A scheduled_services row, pure (no db read). Callers that load the row
+// with a left join to `services` pass the catalog identity as
+// catalog_service_key / catalog_service_name; the denormalized service_type
+// covers unlinked legacy rows. Used by estimate adoption: an assessment is a
+// free consultation, never an estimate's first paid application, even though
+// its lawn_inspection key classifies into the lawn family.
+function isAssessmentVisit(row) {
+  if (!row) return false;
+  return row.catalog_service_key === ASSESSMENT_SERVICE_KEY
+    || isAssessmentServiceType(row.catalog_service_name)
+    || isAssessmentServiceType(row.service_type);
+}
+
+// Drops assessment visits from loaded scheduled_services rows (no catalog
+// join on the caller's read): the denormalized name first, then ONE batched
+// catalog lookup for the remaining rows that carry a service_id.
+async function withoutAssessmentVisits(rows, database = db) {
+  const list = Array.isArray(rows) ? rows : [];
+  const open = list.filter((row) => !isAssessmentServiceType(row?.service_type));
+  const ids = [...new Set(open.map((row) => row?.service_id).filter(Boolean))];
+  if (ids.length === 0) return open;
+  const services = await database('services').whereIn('id', ids).select('id', 'service_key', 'name');
+  const assessmentIds = new Set((services || []).filter(isAssessmentServiceRow).map((row) => String(row.id)));
+  return open.filter((row) => !(row?.service_id && assessmentIds.has(String(row.service_id))));
+}
+
 // A scheduled_services-shaped row: the denormalized name first, then the
 // catalog FK when the name alone doesn't say.
 async function isAssessmentBooking(booking, database = db) {
@@ -57,6 +83,8 @@ module.exports = {
   ASSESSMENT_SERVICE_KEY,
   isAssessmentServiceType,
   isAssessmentServiceRow,
+  isAssessmentVisit,
+  withoutAssessmentVisits,
   scopeToAssessmentBookings,
   isAssessmentBooking,
 };
