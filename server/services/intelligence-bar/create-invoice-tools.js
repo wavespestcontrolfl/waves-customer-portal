@@ -367,6 +367,10 @@ const scopeChanged = (why) => Object.assign(new Error(`${why}, so nothing was cr
 async function recheckApprovedScope(conn, approved) {
   if (approved.scheduledServiceId) {
     await require('../scheduled-invoice-mint').acquireScheduledInvoiceMintLock(conn, approved.scheduledServiceId);
+  } else if (approved.serviceRecordId) {
+    // A record with no scheduled visit has no mint lock: serialize the bar's own creates for it, so two confirmations
+    // cannot both see an empty invoice list and each create a draft.
+    await conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`ib_create_invoice:service_record:${approved.serviceRecordId}`]);
   }
   const customer = await conn('customers').where({ id: approved.customerId }).whereNull('deleted_at').forShare().first();
   if (!customer || customerPin(customer, personName(customer) || customer.id) !== approved.customerPin) throw scopeChanged('The customer changed after the card was shown');

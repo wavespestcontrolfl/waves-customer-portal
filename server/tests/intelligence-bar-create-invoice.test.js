@@ -102,6 +102,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   state = freshState();
   db.mockImplementation(makeDb());
+  db.raw = jest.fn(async () => {});
   envGate(true);
   mockResolvePayer.mockResolvedValue({ payerId: null, taxExempt: false, snapshot: null, paymentTerms: null });
   // The service's own mirror of create(): the sum of the lines, no tax for a residential customer.
@@ -432,6 +433,15 @@ describe('recheckApprovedScope (inside the create transaction)', () => {
     state.locks.length = 0;
     await recheck(approved);
     expect(state.locks).toEqual(['customers', 'payers']);
+  });
+
+  test('a service record with no scheduled visit is serialized on its own advisory lock before the invoice list is read', async () => {
+    state.service_records[0].scheduled_service_id = null;
+    const approved = await approvedOf();
+    expect(approved).toMatchObject({ serviceRecordId: REC, scheduledServiceId: null });
+    await recheck(approved);
+    expect(mockMintLock).not.toHaveBeenCalled();
+    expect(db.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', [`ib_create_invoice:service_record:${REC}`]);
   });
 
   test('a payer assigned after the card is a 409 IB_SCOPE_CHANGED', async () => {
