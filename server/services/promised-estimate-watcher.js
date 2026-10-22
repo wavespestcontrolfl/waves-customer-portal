@@ -29,6 +29,7 @@ const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { etDateString } = require('../utils/datetime-et');
+const { askedServiceLines, estimateMatchesAsk } = require('./call-estimate-service-match');
 
 const watcherDisabled = () => ['1', 'true', 'on']
   .includes(String(process.env.PROMISED_ESTIMATE_WATCHER_DISABLED || '').toLowerCase());
@@ -77,41 +78,12 @@ function commitmentsHandoffClause(kind) {
       )`;
 }
 
-async function loadUnkeptPromises() {
-  const { rows } = await db.raw(
-    `
-    SELECT COUNT(*) OVER () AS total_count,
-           MIN(c.created_at) OVER () AS oldest_created_at,
-           ARRAY_AGG(c.id::text) OVER () AS all_ids,
-           c.id, c.created_at, c.customer_id, c.disposition,
-           CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END AS from_phone,
-           c.duration_seconds,
-           COALESCE(NULLIF(TRIM(cu.first_name || ' ' || COALESCE(cu.last_name, '')), ''), NULL) AS customer_name,
-           LEFT(COALESCE(c.call_summary, c.lead_synopsis, ''), 200) AS summary
-    FROM call_log c
-    LEFT JOIN customers cu ON cu.id = c.customer_id
-    WHERE c.created_at < now() - (:graceHours * interval '1 hour')
-      -- No lower date bound: an unresolved promise leaves this lane only
-      -- when fulfilled, never merely because its call aged past 30 days.
-      -- The PROMISE signal is required: decideDisposition maps a mere
-      -- quote_requested to estimate_send too, and a caller who only asked
-      -- for pricing is not a broken promise (codex r2).
-      -- V2 enriched extraction ONLY (codex r5): V1 ai_extraction is the
-      -- deprecated legacy source downstream composers no longer read.
-      AND c.ai_extraction_enriched #>> '{service_request,quote_promised}' = 'true'
-      -- Only validated V2 payloads: schema_failed extractions are kept for
-      -- audit and must not drive owner alerts (codex r6).
-      AND c.v2_extraction_status = 'valid'
-      AND (c.disposition IS NULL
-           OR c.disposition NOT IN ('spam_discarded', 'wrong_number_closed'))
-      -- Owned by the Owed lane once the commitments feature tracks this
-      -- promise as a row (GATE_CALL_COMMITMENTS on): the queue and its
-      -- overdue bell carry it, so this email stands down for that call.
-      -- Calls processed before the flip keep this coverage until they
-      -- resolve; gate off, every call keeps it (commitmentsHandoffClause).
-      ${commitmentsHandoffClause('send_estimate')}
-      AND NOT EXISTS (
-        SELECT 1
+// The kept-estimate test, in three parts so the digest can ask two questions of it:
+// "is the promise kept by an exact/phone/same-customer estimate?" (KEPT_HEAD +
+// KEPT_LEGS) and "which estimates clear it ONLY through a duplicate-record
+// owner?" (KEPT_HEAD + DUPLICATE_OWNER_LEG), whose service line is then vetted in
+// JS (estimateMatchesAsk). Static SQL, no user input; `c` is the call_log alias.
+const KEPT_HEAD = `
         FROM estimates e
         WHERE e.sent_at IS NOT NULL
           -- Report click-to-estimate mints stamp sent_at for the
@@ -151,7 +123,8 @@ async function loadUnkeptPromises() {
             WHEN c.direction = 'inbound' THEN c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0))
             ELSE c.created_at
           END
-          AND (
+`;
+const KEPT_LEGS = `
                e.estimate_data #>> '{estimatorEngine,callLogId}' = c.id::text
             OR EXISTS (
                  SELECT 1 FROM leads l
@@ -177,19 +150,25 @@ async function loadUnkeptPromises() {
                   OR e.customer_id = c.customer_id)
                 AND RIGHT(REGEXP_REPLACE(e.customer_phone, '\\D', '', 'g'), 10)
                   = RIGHT(REGEXP_REPLACE(CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END, '\\D', '', 'g'), 10))
+`;
+const DUPLICATE_OWNER_LEG = `
             -- Owner 2026-10-21 (narrowing codex #3738 P1): an UNLINKED call is
             -- also cleared by a LINKED estimate when the number is not truly
             -- shared: the estimate's owner carries the caller's number, has a
             -- name, and every live customer record on that number has the
             -- same normalized first+last name (one person's duplicate
             -- records). Two different names on one number clear nothing.
-            OR (c.customer_id IS NULL AND e.customer_id IS NOT NULL AND EXISTS (
+            (c.customer_id IS NULL AND e.customer_id IS NOT NULL AND EXISTS (
                  SELECT 1 FROM customers o
                  WHERE o.id = e.customer_id AND o.deleted_at IS NULL
                    AND RIGHT(REGEXP_REPLACE(COALESCE(o.phone, ''), '\\D', '', 'g'), 10)
                      = RIGHT(REGEXP_REPLACE(CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END, '\\D', '', 'g'), 10)
                    AND LENGTH(RIGHT(REGEXP_REPLACE(COALESCE(o.phone, ''), '\\D', '', 'g'), 10)) = 10
+                   -- A blank or placeholder name is no identity: if the owner has
+                   -- one, or any other live record on the number differs from the
+                   -- owner's (so also a placeholder-named one), nothing clears.
                    AND BTRIM(REGEXP_REPLACE(LOWER(COALESCE(o.first_name, '') || ' ' || COALESCE(o.last_name, '')), '[^[:alnum:]]+', ' ', 'g')) <> ''
+                   AND BTRIM(REGEXP_REPLACE(LOWER(COALESCE(o.first_name, '') || ' ' || COALESCE(o.last_name, '')), '[^[:alnum:]]+', ' ', 'g')) !~* :placeholderRe
                    AND NOT EXISTS (
                      SELECT 1 FROM customers x
                      WHERE x.deleted_at IS NULL
@@ -198,16 +177,76 @@ async function loadUnkeptPromises() {
                        AND BTRIM(REGEXP_REPLACE(LOWER(COALESCE(x.first_name, '') || ' ' || COALESCE(x.last_name, '')), '[^[:alnum:]]+', ' ', 'g'))
                          IS DISTINCT FROM BTRIM(REGEXP_REPLACE(LOWER(COALESCE(o.first_name, '') || ' ' || COALESCE(o.last_name, '')), '[^[:alnum:]]+', ' ', 'g'))
                    )))
-          )
+`;
+
+async function loadUnkeptPromises() {
+  const { PLACEHOLDER_NAME_SQL_RE } = require('./call-commitments');
+  const { rows } = await db.raw(
+    `
+    SELECT c.id, c.created_at, c.customer_id, c.disposition,
+           c.ai_extraction_enriched AS asked_source,
+           -- The estimates that clear this call ONLY through a same-person
+           -- duplicate record (the query below already excluded every call an
+           -- exact, phone or same-customer estimate keeps). JS vets their
+           -- service line before the promise counts as kept.
+           (SELECT COALESCE(jsonb_agg(jsonb_build_object('id', e.id, 'service_interest', e.service_interest,
+                                                         'estimate_data', e.estimate_data, 'pricing_authority', e.pricing_authority)), '[]'::jsonb)
+            ${KEPT_HEAD}
+              AND (${DUPLICATE_OWNER_LEG})) AS duplicate_owner_estimates,
+           CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END AS from_phone,
+           c.duration_seconds,
+           COALESCE(NULLIF(TRIM(cu.first_name || ' ' || COALESCE(cu.last_name, '')), ''), NULL) AS customer_name,
+           LEFT(COALESCE(c.call_summary, c.lead_synopsis, ''), 200) AS summary
+    FROM call_log c
+    LEFT JOIN customers cu ON cu.id = c.customer_id
+    WHERE c.created_at < now() - (:graceHours * interval '1 hour')
+      -- No lower date bound: an unresolved promise leaves this lane only
+      -- when fulfilled, never merely because its call aged past 30 days.
+      -- The PROMISE signal is required: decideDisposition maps a mere
+      -- quote_requested to estimate_send too, and a caller who only asked
+      -- for pricing is not a broken promise (codex r2).
+      -- V2 enriched extraction ONLY (codex r5): V1 ai_extraction is the
+      -- deprecated legacy source downstream composers no longer read.
+      AND c.ai_extraction_enriched #>> '{service_request,quote_promised}' = 'true'
+      -- Only validated V2 payloads: schema_failed extractions are kept for
+      -- audit and must not drive owner alerts (codex r6).
+      AND c.v2_extraction_status = 'valid'
+      AND (c.disposition IS NULL
+           OR c.disposition NOT IN ('spam_discarded', 'wrong_number_closed'))
+      -- Owned by the Owed lane once the commitments feature tracks this
+      -- promise as a row (GATE_CALL_COMMITMENTS on): the queue and its
+      -- overdue bell carry it, so this email stands down for that call.
+      -- Calls processed before the flip keep this coverage until they
+      -- resolve; gate off, every call keeps it (commitmentsHandoffClause).
+      ${commitmentsHandoffClause('send_estimate')}
+      AND NOT EXISTS (
+        SELECT 1
+        ${KEPT_HEAD}
+          AND (${KEPT_LEGS}          )
       )
     -- Newest-first (codex r11): oldest-first pinned the same backlog ten
     -- forever while newer broken promises hid in the overflow count.
     ORDER BY c.created_at DESC
-    LIMIT :maxRows
     `,
-    { graceHours: GRACE_HOURS, maxRows: MAX_ROWS },
+    { graceHours: GRACE_HOURS, placeholderRe: PLACEHOLDER_NAME_SQL_RE },
   );
-  return rows;
+  // A promise a same-person duplicate record's estimate would clear is kept
+  // only if that estimate is for the service line the caller asked about (the
+  // fulfillment proof's own rule, estimateMatchesAsk: only a CLEAR conflict
+  // rejects, so a lawn quote is not cleared by a pest estimate). The page,
+  // its total, the oldest age and the full-set identity are computed AFTER
+  // this, so a still-owed promise is never lost to the page limit.
+  const owed = rows.filter((r) => {
+    const candidates = Array.isArray(r.duplicate_owner_estimates) ? r.duplicate_owner_estimates : [];
+    if (!candidates.length) return true;
+    const asked = askedServiceLines(r.asked_source);
+    return !candidates.some((e) => estimateMatchesAsk(asked, e));
+  });
+  const oldest = owed.reduce((min, r) => (min == null || new Date(r.created_at) < new Date(min) ? r.created_at : min), null);
+  const allIds = owed.map((r) => String(r.id));
+  return owed.slice(0, MAX_ROWS).map(({ asked_source: _asked, duplicate_owner_estimates: _dup, ...r }) => ({
+    ...r, total_count: owed.length, oldest_created_at: oldest, all_ids: allIds,
+  }));
 }
 
 function ageDays(createdAt) {

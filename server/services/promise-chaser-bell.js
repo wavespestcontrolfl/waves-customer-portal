@@ -323,26 +323,28 @@ async function findPromiseToRing(call, now) {
   return { promise, renewedAt: promise.__renewedAt, ...describePromise(promise) };
 }
 
-// Placeholder first names intake writes when it has no real name.
-const PLACEHOLDER_NAME = /^(unknown|caller|lead|customer|new|no name|anonymous)$/i;
+// Placeholder names (call-commitments' one list) read as no name at all.
 const fullName = (row, first = 'first_name', last = 'last_name') => {
   const name = [row?.[first], row?.[last]].filter(Boolean).join(' ').trim();
-  return name && !PLACEHOLDER_NAME.test(name) ? name : null;
+  return name && !commitments.isMissingName(name) ? name : null;
 };
 
 // Who is calling back, for the headline (owner 2026-10-21: "the headline
-// should have the customer name"). The call's own customer first; for a call
-// with no customer link, the NUMBER: a customer record carrying it (several
+// should have the customer name"). The call's own customer when it has one;
+// for a call with no customer link, the NUMBER: a customer record carrying it (several
 // may — duplicates are common — so the newest one with a real name), else
 // the newest estimate, then the newest lead, on that number. Null when
 // nothing on the number has a name; the copy then falls back to the number.
 // A failed lookup never blocks the bell.
 async function resolveCallerName(call) {
   try {
+    // A call WITH a customer is that customer's: their record is the only
+    // authority on the name. A missing or placeholder-named record gives no
+    // name (the headline falls back to the number) — never another record
+    // that merely shares the phone.
     if (call.customer_id) {
       const linked = await db('customers').where('id', call.customer_id).first('first_name', 'last_name');
-      const name = fullName(linked);
-      if (name) return name;
+      return fullName(linked);
     }
     const key = commitments.phoneDigits(call.from_phone);
     if (!key || key.length < 10) return null;

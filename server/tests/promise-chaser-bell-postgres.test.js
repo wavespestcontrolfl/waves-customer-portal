@@ -186,6 +186,32 @@ const OUR_NUMBER = '+19415550100';
       expect((await ringedPayload()).name).toBe('Estella Samplewood');
     });
 
+    test('a call WITH a customer is that customer\'s: a placeholder-named or missing record gives no name, never another record on the phone (codex #6417 r1 P2)', async () => {
+      await mockConn('customers').insert({ id: randomUUID(), first_name: 'Martin', last_name: 'Fixtureson', phone: PHONE, created_at: new Date(now - 86400000) });
+      const placeholder = randomUUID();
+      await mockConn('customers').insert({ id: placeholder, first_name: 'Unknown', last_name: null, phone: PHONE });
+      const earlier = callRow(240, { customer_id: placeholder });
+      const back = callRow(0, { customer_id: placeholder });
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitmentRow(earlier.id, { kind: 'send_estimate', description: 'Send the caller an estimate' }));
+      expect(await sweepPromiseChasers()).toBe(1);
+      expect(triggerNotification.mock.calls[0][1].name).toBeNull();
+
+      // A customer id with no row behind it: same.
+      jest.clearAllMocks();
+      await mockConn('notifications').del();
+      await mockConn('promise_chaser_deliveries').del();
+      await mockConn('call_log').del();
+      await mockConn('call_commitments').del();
+      const gone = randomUUID();
+      const earlier2 = callRow(240, { customer_id: gone });
+      const back2 = callRow(0, { customer_id: gone });
+      await mockConn('call_log').insert([earlier2, back2]);
+      await mockConn('call_commitments').insert(commitmentRow(earlier2.id, { kind: 'send_estimate', description: 'Send the caller an estimate' }));
+      expect(await sweepPromiseChasers()).toBe(1);
+      expect(triggerNotification.mock.calls[0][1].name).toBeNull();
+    });
+
     test('a number nobody has a name for stays unnamed (the headline then shows the number)', async () => {
       await mockConn('customers').insert({ id: randomUUID(), first_name: 'Other', last_name: 'Person', phone: '+19415550142' });
       expect((await ringedPayload()).name).toBeNull();

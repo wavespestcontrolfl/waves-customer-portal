@@ -1899,6 +1899,16 @@ async function completedVisit(conn, { after, until, customerId }) {
 // from the map, so a linked estimate on it proves nothing for an unlinked
 // caller. Matches customers.phone, the column every matcher here uses.
 const nameKey = (c) => `${c.first_name || ""} ${c.last_name || ""}`.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+// Names intake writes when it has no real one. ONE list: the promise-chaser
+// bell's headline lookup and the shared-number rule both read it, and the
+// promised-estimate digest SQL builds its regex from it.
+const PLACEHOLDER_NAMES = Object.freeze(["unknown", "caller", "lead", "customer", "new", "no name", "anonymous"]);
+const PLACEHOLDER_NAME_SQL_RE = `^(${PLACEHOLDER_NAMES.join("|")})$`;
+// A name that tells us nothing about who this is: blank or a placeholder.
+const isMissingName = (text) => {
+  const key = String(text || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  return !key || PLACEHOLDER_NAMES.includes(key);
+};
 async function sameNameNumberOwners(conn, phones) {
   const out = new Map();
   const keys = [...new Set((phones || []).map(phoneDigits).filter(Boolean))];
@@ -1911,7 +1921,10 @@ async function sameNameNumberOwners(conn, phones) {
   }
   for (const [k, recs] of byKey) {
     const names = new Set(recs.map(nameKey));
-    if (names.size === 1 && !names.has("")) out.set(k, recs.map((r) => String(r.id)));
+    // One real name only. A blank or placeholder name on ANY live record means
+    // the number is not corroborated as one person (it could be anyone), so a
+    // linked estimate on it proves nothing for an unlinked caller.
+    if (names.size === 1 && !recs.some((r) => isMissingName(nameKey(r)))) out.set(k, recs.map((r) => String(r.id)));
   }
   return out;
 }
@@ -4255,6 +4268,9 @@ module.exports = {
   phoneDigits,
   phoneWhereAny,
   sameNameNumberOwners,
+  PLACEHOLDER_NAMES,
+  PLACEHOLDER_NAME_SQL_RE,
+  isMissingName,
   whereEstimateCustomerOwnership,
   whereEstimateOwnedByAny,
   whereEstimateOnCustomerRecord,

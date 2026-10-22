@@ -840,6 +840,16 @@ describe('an estimate sent to the customer keeps a quote promise; a callback onl
     expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
   });
 
+  test('a placeholder-named record on the number means it is not corroborated as one person: a linked estimate does not clear (codex #6417 r1 P1)', async () => {
+    const dupes = [{ id: 'dup-1', phone: '(941) 555-0123', first_name: 'Martin', last_name: 'Fixtureson' }, { id: 'dup-2', phone: '+19415550123', first_name: 'Unknown', last_name: null }];
+    mockDb({ activity: { estimates: { customer_id: 'dup-1', customer_phone: null }, customers: dupes } });
+    listOpenCommitments.mockResolvedValue([row('a', { kind: 'send_estimate', customer_id: null, direction: 'inbound', from_phone: '+19415550123' })]);
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+    // Only placeholder-named duplicates: still no identity.
+    mockDb({ activity: { estimates: { customer_id: 'dup-1', customer_phone: null }, customers: dupes.map((d) => ({ ...d, first_name: 'Customer', last_name: null })) } });
+    expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+  });
+
   test('an estimate sent while UNOWNED (its estimate_sent text has no customer_id) keeps a LINKED customer\'s promise through the promise\'s phone', async () => {
     mockDb();
     const base = db.getMockImplementation();

@@ -47,11 +47,11 @@ const HOUR = 3600000;
     made.customers.push(id);
     return id;
   };
-  const estimateTo = async (customerId, phone = PHONE) => {
+  const estimateTo = async (customerId, phone = PHONE, extra = {}) => {
     const id = randomUUID();
     const at = new Date(Date.now() - 24 * HOUR);
     await db('estimates').insert({
-      id, customer_id: customerId, customer_phone: phone, status: 'sent', sent_at: at,
+      id, customer_id: customerId, customer_phone: phone, status: 'sent', sent_at: at, ...extra,
       estimate_data: JSON.stringify({ deliveryState: { firstDeliveredAt: at.toISOString(), lastDeliveredAt: at.toISOString() } }),
     });
     made.estimates.push(id);
@@ -92,5 +92,48 @@ const HOUR = 3600000;
     await db('customers').where({ id: owner }).update({ phone: '+15555550177' });
     await estimateTo(owner, '+15555550177');
     expect(await stillListed()).toBe(true);
+  });
+
+  test('a placeholder-named record on the number, or placeholder-named duplicates only, clears nothing (codex #6417 r1 P1)', async () => {
+    const owner = await customer('Martin', 'Fixtureson');
+    await customer('Unknown', null);
+    await estimateTo(owner);
+    expect(await stillListed()).toBe(true);
+    await db('customers').whereIn('id', made.customers).update({ first_name: 'Customer', last_name: null });
+    expect(await stillListed()).toBe(true);
+  });
+
+  describe('service line of a duplicate-record estimate (codex #6417 r1 P1)', () => {
+    const asking = (category) => db('call_log').where({ id: callId }).update({
+      ai_extraction_enriched: JSON.stringify({ service_request: { quote_promised: 'true', primary_service_category: category } }),
+    });
+    afterEach(() => asking(undefined));
+
+    test('a lawn quote is not cleared by a pest estimate sent to the same-person duplicate record; a lawn estimate clears it', async () => {
+      await asking('lawn_care');
+      await customer('Martin', 'Fixtureson');
+      const owner = await customer('Martin', 'Fixtureson');
+      await estimateTo(owner, PHONE, { service_interest: 'Pest Control' });
+      expect(await stillListed()).toBe(true);
+      await estimateTo(owner, PHONE, { service_interest: 'Lawn Care' });
+      expect(await stillListed()).toBe(false);
+    });
+
+    test('an estimate whose line is unknown still clears it (only a CLEAR conflict rejects)', async () => {
+      await asking('lawn_care');
+      const owner = await customer('Martin', 'Fixtureson');
+      await estimateTo(owner, PHONE, { service_interest: null });
+      expect(await stillListed()).toBe(false);
+    });
+
+    test('the page limit, total and oldest are computed after the vetting', async () => {
+      await asking('lawn_care');
+      const owner = await customer('Martin', 'Fixtureson');
+      await estimateTo(owner, PHONE, { service_interest: 'Pest Control' });
+      const row = (await loadUnkeptPromises()).find((r) => r.id === callId);
+      expect(row.total_count).toBeGreaterThanOrEqual(1);
+      expect(row.all_ids).toContain(String(callId));
+      expect(row.duplicate_owner_estimates).toBeUndefined();
+    });
   });
 });

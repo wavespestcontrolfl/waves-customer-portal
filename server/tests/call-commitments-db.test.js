@@ -761,6 +761,35 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     }
   });
 
+  test('a blank or PLACEHOLDER name on any live record means the number is not corroborated: a linked estimate clears nothing (codex #6417 r1 P1)', async () => {
+    const { call, phone: PHONE } = await ownNumberCall();
+    const [est] = await db('estimates').insert({ status: 'sent', sent_at: new Date(Date.now() - 60 * 1000), created_at: new Date(Date.now() - 120 * 1000), customer_phone: PHONE, estimate_data: handedOff() }).returning('id');
+    const made = [];
+    try {
+      const [owner] = await db('customers').insert({ first_name: 'Martin', last_name: 'Fixtureson', phone: PHONE }).returning('id');
+      made.push(owner.id);
+      await db('estimates').where({ id: est.id }).update({ customer_id: owner.id });
+      // The lone real-named record: cleared (control).
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ record_id: est.id });
+      // Another live record on the number named "Unknown": could be anyone.
+      const [ph] = await db('customers').insert({ first_name: 'Unknown', last_name: null, phone: PHONE }).returning('id');
+      made.push(ph.id);
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
+      // Placeholder-named duplicates only ("same name", but no identity at all).
+      await db('customers').where({ id: owner.id }).update({ first_name: 'unknown', last_name: null });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
+      await db('customers').where({ id: owner.id }).update({ first_name: 'Caller', last_name: '' });
+      await db('customers').where({ id: ph.id }).update({ first_name: 'Caller', last_name: '' });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
+      // The shared list is what callers read.
+      expect(cc.isMissingName('  No Name ')).toBe(true);
+      expect(cc.isMissingName('Martin Fixtureson')).toBe(false);
+    } finally {
+      await db('estimates').where({ id: est.id }).del();
+      if (made.length) await db('customers').whereIn('id', made).del();
+    }
+  });
+
   test.each([
     ['FK', { link: 'fk', match: true }],
     ['lead mirror', { link: 'mirror', match: true }],
