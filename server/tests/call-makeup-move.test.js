@@ -356,7 +356,7 @@ describe('service lines', () => {
 
 // ── applier against a mocked connection ─────────────────────────────────
 function makeConn({ prior = null, cust = customer(), visits = [visit()], logs = [noshow()], properties = [], extraction = v2(),
-  settledCall = {}, handled = false, moved = false, portalRequest = null, smsOffer = false, callBooking = null } = {}) {
+  settledCall = {}, handled = false, moved = false, portalRequest = null, smsOffer = false, callBooking = null, dayTaken = null } = {}) {
   const writes = { updates: [], inserts: [] };
   const offerRows = smsOffer ? [{ id: 'pending-offer', notes: JSON.stringify({ option1: { date: '2026-10-24', window: { start: '08:00', end: '09:00' } } }) }] : [];
   const builder = (table) => {
@@ -389,6 +389,7 @@ function makeConn({ prior = null, cust = customer(), visits = [visit()], logs = 
         if (table === 'reschedule_log') return Promise.resolve(moved ? { id: 'later-move' } : undefined);
         if (table === 'service_requests') return Promise.resolve(portalRequest || undefined);
         if (table === 'scheduled_services' && state.where.some(([w]) => w && typeof w === 'object' && 'source_call_log_id' in w)) return Promise.resolve(callBooking || undefined);
+        if (table === 'scheduled_services' && state.where.some(([w]) => w === 'scheduled_date')) return Promise.resolve(dayTaken || undefined);
         if (table === 'scheduled_services') return Promise.resolve(visits[0]);
         return Promise.resolve(undefined);
       },
@@ -515,6 +516,18 @@ describe('applyCallMakeupMove', () => {
     expect(rebooker.reschedule).not.toHaveBeenCalled();
     const conn = makeConn();
     const lateConn = makeConn({ callBooking: { id: 'earlier-booking' } });
+    const racing = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => opts.moveGuard({ trx: lateConn, service: conn.visits[0] })) };
+    expect(await applyCallMakeupMove(applyArgs(conn, racing))).toMatchObject({ outcome: 'needs_review', reason: 'handled_after_call' });
+    expect(lateConn.writes.inserts).toHaveLength(0);
+  });
+
+  test('a live visit already on the agreed day holds for review (pre-check and under the move transaction)', async () => {
+    const rebooker = { reschedule: jest.fn() };
+    expect(await applyCallMakeupMove(applyArgs(makeConn({ dayTaken: { id: 'staff-replacement' } }), rebooker)))
+      .toMatchObject({ outcome: 'needs_review', reason: 'existing_appointment_on_target_date', visitId: VISIT_ID });
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    const conn = makeConn();
+    const lateConn = makeConn({ dayTaken: { id: 'staff-replacement' } });
     const racing = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => opts.moveGuard({ trx: lateConn, service: conn.visits[0] })) };
     expect(await applyCallMakeupMove(applyArgs(conn, racing))).toMatchObject({ outcome: 'needs_review', reason: 'handled_after_call' });
     expect(lateConn.writes.inserts).toHaveLength(0);

@@ -1158,6 +1158,17 @@ async function applyCallMakeupMove({ conn, call, procToken = null, procGeneratio
   if (await pendingSmsOffer(conn, settled.customer_id, plan.visitId, now)) return review('pending_sms_offer');
   if (await humanHandledRescheduleCard(conn, call.id)) return review('handled_by_staff');
   if (await newerMove(conn, plan.visitId)) return review('handled_after_call');
+  // A live visit already on the agreed day (staff booked a replacement, or a
+  // separate service) is what the booking branch would attach to or hold
+  // for: moving the missed visit beside it makes two. Hold for review.
+  const targetDayTaken = (trx) => trx('scheduled_services')
+    .where({ customer_id: settled.customer_id })
+    .where('scheduled_date', plan.newDate)
+    .whereNull('parent_service_id')
+    .whereNotIn('status', ['cancelled', 'rescheduled', 'skipped', 'completed', 'no_show'])
+    .whereNot({ id: plan.visitId })
+    .first('id');
+  if (await targetDayTaken(conn)) return review('existing_appointment_on_target_date');
 
   const note = `Missed visit ${plan.visitId} moved from ${plan.from.date} to ${plan.newDate} ${plan.newWindow.start} from the call. No customer message sent.`;
   const writeDecision = async ({ trx, service }) => {
@@ -1168,12 +1179,13 @@ async function applyCallMakeupMove({ conn, call, procToken = null, procGeneratio
     const handled = await humanHandledRescheduleCard(trx, call.id);
     const moved = await newerMove(trx, visit.id);
     const booked = await priorCallBooking(trx, visit.id);
+    const dayTaken = await targetDayTaken(trx);
     // Under the visit's own row lock (as applyCallReschedule): a portal
     // request filed meanwhile is either seen here or starts after the move.
     await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('id');
     const portalRequest = await openPortalRequest(trx, settled.customer_id, visit.id);
     const smsOffer = await pendingSmsOffer(trx, settled.customer_id, visit.id, now);
-    if (handled || moved || booked || portalRequest || smsOffer) throw Object.assign(new Error('The request was handled after this call'), { code: 'CALL_MAKEUP_HANDLED' });
+    if (handled || moved || booked || dayTaken || portalRequest || smsOffer) throw Object.assign(new Error('The request was handled after this call'), { code: 'CALL_MAKEUP_HANDLED' });
     const latestCustomer = await trx('customers').where({ id: settled.customer_id }).forShare().first();
     const latestProperties = await trx('customer_properties').where({ customer_id: settled.customer_id, active: true }).forShare().select('*');
     const latestCandidates = await loadMakeupCandidates(trx, settled.customer_id, now);
