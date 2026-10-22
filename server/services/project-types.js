@@ -1160,7 +1160,10 @@ const PROJECT_TYPES = {
       // and never gate the send; the office fills them on the sent
       // certificate when that visit is done.
       { key: 'final_exterior_date', label: 'Date of final exterior treatment', type: 'date', section: 'Final exterior treatment (later visit; leave blank on slab day)' },
-      { key: 'final_exterior_product', label: 'Final exterior product', type: 'product_search', section: 'Final exterior treatment (later visit; leave blank on slab day)', placeholder: 'Search product catalog or type product name', options: ['Termidor SC', 'Talstar P', 'Premise 2', 'Trelona ATBB', 'Bora-Care'] },
+      // Plain text, not product_search: the product picker writes the chosen
+      // product's chemistry into application 1's epa_registration and
+      // active_ingredient, which would overwrite the slab-day record.
+      { key: 'final_exterior_product', label: 'Final exterior product', type: 'text', section: 'Final exterior treatment (later visit; leave blank on slab day)', placeholder: 'e.g. Termidor SC', disableDictation: true },
       { key: 'final_exterior_active_ingredient', label: 'Final exterior active ingredient', type: 'text', section: 'Final exterior treatment (later visit; leave blank on slab day)', placeholder: 'e.g. fipronil', disableDictation: true },
       { key: 'applicator_name', label: "Applicator's printed name", type: 'text', section: 'Applicator certification', disableDictation: true },
       { key: 'applicator_fdacs_id', label: 'Applicator FDACS ID #', type: 'text', section: 'Applicator certification', disableDictation: true },
