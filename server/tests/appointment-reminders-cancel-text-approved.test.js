@@ -8,12 +8,13 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const mockState = {
-  reminder: null, customer: null, prefs: null, claim: 1, cancelled: true, updates: [], audit: null,
+  reminder: null, customer: null, prefs: null, claim: 1, cancelled: true, updates: [], audit: null, auditRows: [], wheres: [], raws: [],
 };
 jest.mock('../models/db', () => {
   const chain = (table) => {
     const q = {
-      where: () => q, whereNull: () => q, whereIn: () => q, whereNotNull: () => q, whereRaw: () => q, whereNot: () => q,
+      where: (...a) => { mockState.wheres.push([table, ...a]); return q; }, whereNull: () => q, whereIn: () => q, whereNotNull: () => q,
+      whereRaw: (...a) => { mockState.raws.push([table, ...a]); return q; }, whereNot: () => q,
       leftJoin: () => q, select: () => q, orderBy: () => q,
       first: async () => {
         if (table === 'appointment_reminders') return mockState.reminder;
@@ -24,7 +25,7 @@ jest.mock('../models/db', () => {
         return null;
       },
       update: async (patch) => { mockState.updates.push(patch); return mockState.claim; },
-      then: (res, rej) => Promise.resolve([]).then(res, rej),
+      then: (res, rej) => Promise.resolve(table === 'messaging_audit_log' ? mockState.auditRows : []).then(res, rej),
     };
     return q;
   };
@@ -64,6 +65,9 @@ beforeEach(() => {
   mockState.claim = 1;
   mockState.updates = [];
   mockState.audit = null;
+  mockState.auditRows = [];
+  mockState.wheres = [];
+  mockState.raws = [];
   mockSelectVariant.mockResolvedValue(null);
   // Mirrors getTemplate: a pinned snapshot body renders as given, else the base body.
   mockGetTemplate.mockImplementation(async (_key, vars, _ctx, opts = {}) => render(opts.templateBody ?? BASE, vars));
@@ -349,22 +353,30 @@ describe('the approved send owns a pending_approved marker', () => {
 // only an untouched 'pending_approved' marker is 'ready'; a 'sent' marker with no accepted audit row means the provider
 // handoff may have begun, so it is 'uncertain' and is never sent again.
 describe('approvedCancellationNoticeStatus', () => {
-  const statusFor = async (state, audit = null) => {
+  const statusFor = async (state, auditRows = [], options) => {
     mockState.reminder = { id: 'rem-1', cancellation_notice_state: state };
-    mockState.audit = audit;
-    return AppointmentReminders.approvedCancellationNoticeStatus('svc-1');
+    mockState.auditRows = auditRows;
+    return AppointmentReminders.approvedCancellationNoticeStatus('svc-1', options);
   };
 
   test.each([
-    ['pending_approved', null, 'ready'],
-    ['sent', { id: 'audit-1' }, 'delivered'],
-    ['sent', null, 'uncertain'],
-    ['suppressed', null, 'suppressed'],
-    ['pending', null, 'other'],
-    ['pending_notify', null, 'other'],
-    [null, null, 'other'],
-  ])('marker %s with audit %j is %s', async (state, audit, expected) => {
-    expect(await statusFor(state, audit)).toBe(expected);
+    ['pending_approved', [], 'ready'],
+    ['sent', [{ to_hash: 'h1' }], 'delivered'],
+    ['sent', [], 'uncertain'],
+    ['suppressed', [], 'suppressed'],
+    ['pending', [], 'other'],
+    ['pending_notify', [], 'other'],
+    [null, [], 'other'],
+  ])('marker %s with audit rows %j is %s', async (state, rows, expected) => {
+    expect(await statusFor(state, rows)).toBe(expected);
+  });
+
+  test('delivered needs an accepted audit row for EVERY approved recipient; fewer is partial, never delivered', async () => {
+    expect(await statusFor('sent', [{ to_hash: 'h1' }], { recipients: 2 })).toBe('partial');
+    // Two rows for the same recipient (app + sms legs) are still one recipient.
+    expect(await statusFor('sent', [{ to_hash: 'h1' }, { to_hash: 'h1' }], { recipients: 2 })).toBe('partial');
+    expect(await statusFor('sent', [{ to_hash: 'h1' }, { to_hash: 'h2' }], { recipients: 2 })).toBe('delivered');
+    expect(await statusFor('sent', [], { recipients: 2 })).toBe('uncertain');
   });
 
   test('no reminder row at all', async () => {
@@ -376,5 +388,36 @@ describe('approvedCancellationNoticeStatus', () => {
     await statusFor('pending_approved');
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(mockState.updates).toEqual([]);
+  });
+});
+
+// The recovery sweep sends with cancelGeneration: the claim itself is one statement that adopts only the untouched approved
+// marker while the visit is still the cancelled one the bundle was written for (no transition to another status since).
+describe('handleCancellation with cancelGeneration (the cancel recovery sweep)', () => {
+  const SINCE = new Date('2026-10-23T14:00:00Z');
+  const approvedNotice = [{ recipient_key: 'any', body: 'x' }];
+
+  test('the tokenless claim is bound to the original cancellation generation', async () => {
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: { since: SINCE }, outcome: {} });
+    expect(mockState.wheres).toContainEqual(['appointment_reminders', 'cancellation_notice_state', 'pending_approved']);
+    const raw = mockState.raws.find(([, sql]) => /NOT EXISTS \(SELECT 1 FROM job_status_history h/.test(sql));
+    expect(raw).toBeTruthy();
+    expect(raw[1]).toMatch(/h\.to_status <> 'cancelled' AND h\.transitioned_at > \?/);
+    expect(raw[2]).toEqual([SINCE]);
+    expect(mockState.raws.some(([, sql]) => /ss\.status = 'cancelled'/.test(sql))).toBe(true);
+  });
+
+  test('a claim that matches no row (the visit changed) sends nothing', async () => {
+    mockState.claim = 0;
+    const outcome = {};
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: { since: SINCE }, outcome });
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(outcome.notificationSent).toBe(false);
+  });
+
+  test('without cancelGeneration the claim carries no generation condition (the request and Dispatch are unchanged)', async () => {
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, outcome: {} });
+    expect(mockState.raws.some(([, sql]) => /NOT EXISTS \(SELECT 1 FROM job_status_history h/.test(sql))).toBe(false);
+    expect(mockState.wheres).not.toContainEqual(['appointment_reminders', 'cancellation_notice_state', 'pending_approved']);
   });
 });

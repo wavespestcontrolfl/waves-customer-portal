@@ -306,6 +306,7 @@ function visitDateHasPassed(svc) {
 const NOTICE_TERMINAL_BY_STATUS = {
   delivered: { state: 'sent', note: 'It had already gone out before the interruption.' },
   uncertain: { state: 'uncertain', note: 'The send began before the interruption and delivery cannot be proven. It was NOT sent again.' },
+  partial: { state: 'partial', note: 'The send began before the interruption and was proven for some approved recipients only. It was NOT sent again.' },
   suppressed: { state: 'not_sent', note: 'The approved send was blocked or failed before the interruption. It was NOT sent again.' },
   no_reminder: { state: 'not_sent', note: 'The visit has no reminder record, so no text could be sent.' },
   other: { state: 'not_sent', note: 'The reminder holds a notice the card did not approve. Nothing was sent.' },
@@ -322,9 +323,17 @@ async function sendApprovedNotice(bundle, svc) {
     sendNotification: true,
     outcome: reported,
     approvedNotice: bundle.approved_notice,
+    // Binds the claim itself (one statement) to THIS cancellation: see bindClaimToCancelGeneration.
+    cancelGeneration: { since: bundle.created_at },
   });
   const classified = classifyNoticeOutcome(reported)
     || { state: 'uncertain', error: 'no result was reported' };
+  // Nothing went out and the claim was refused: the visit may have changed between the check and the claim. Say so
+  // instead of recording a send failure.
+  if (classified.state === 'not_sent') {
+    const standing = await cancelStillStands(bundle);
+    if (!standing.ok) throw new Abandon(`${standing.reason}_during_recovery`, true);
+  }
   return { done: true, outcome: classified };
 }
 
@@ -334,7 +343,7 @@ async function recoverNotice(bundle, svc) {
     return { done: true, outcome: { state: 'not_sent', note: 'The approved text was not saved with the card, so nothing was sent.' } };
   }
   const AppointmentReminders = require('./appointment-reminders');
-  const status = await AppointmentReminders.approvedCancellationNoticeStatus(bundle.scheduled_service_id);
+  const status = await AppointmentReminders.approvedCancellationNoticeStatus(bundle.scheduled_service_id, { recipients: bundle.approved_notice.length });
   if (status !== 'ready') return { done: true, outcome: NOTICE_TERMINAL_BY_STATUS[status] || NOTICE_TERMINAL_BY_STATUS.other };
   // The money steps just ran and a restore may have landed since: re-prove the cancel before any customer text. (The
   // send's own stamp is conditional on status 'cancelled', and a restore sheds the approved marker.)

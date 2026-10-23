@@ -2559,8 +2559,7 @@ async function claimCancellationNotice({ record, options, claimToken, sendNotifi
     // recheck at the handoff + token-conditional finalize + the
     // accepted-audit pre-send check) keep a stolen lease from
     // double-texting.
-    claimed = await db('appointment_reminders')
-      .where({ id: record.id })
+    claimed = await bindClaimToCancelGeneration(db('appointment_reminders').where({ id: record.id }), options.cancelGeneration)
       .where(function claimable() {
         this.whereNull('cancellation_notice_at')
           .orWhere(function freshSingleton() {
@@ -2609,6 +2608,22 @@ async function claimCancellationNotice({ record, options, claimToken, sendNotifi
   return { noticeToken, claimed };
 }
 
+// The Intelligence Bar cancel recovery sweep (services/ib-cancel-effect-bundles.js) sends a dead request's approved text
+// with `cancelGeneration: { since }`. The claim is then ONE statement that adopts only the untouched approved marker and
+// only while the visit is still cancelled with no transition to another status after the bundle was written. A visit
+// restored and cancelled again has such a transition (and a fresh marker), so the old approved text can never be
+// adopted by a newer cancellation. Every later step (pre-dispatch stamp, finalize) is fenced by the token this claim mints.
+function bindClaimToCancelGeneration(query, cancelGeneration) {
+  if (!cancelGeneration) return query;
+  return query
+    .where('cancellation_notice_state', 'pending_approved')
+    .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status = 'cancelled')")
+    .whereRaw(
+      "NOT EXISTS (SELECT 1 FROM job_status_history h WHERE h.job_id = appointment_reminders.scheduled_service_id AND h.to_status <> 'cancelled' AND h.transitioned_at > ?)",
+      [cancelGeneration.since],
+    );
+}
+
 // A sendNotification:false cancel that already owns a claim finalizes it as terminal 'suppressed'.
 async function settleSuppressedCancellationNotice({ record, claimToken, claimed, claimStates, noticeToken }) {
   if (claimToken && claimed) {
@@ -2626,32 +2641,46 @@ async function settleSuppressedCancellationNotice({ record, claimToken, claimed,
 
 // Scoped to the CURRENT cancellation cycle (codex r9): a visit restored to live and cancelled again must not
 // reconcile against the first cancellation's SMS - only audits at/after the latest cancelled transition count.
-const cancellationAuditAccepted = async (scheduledServiceId) => Boolean(await db('messaging_audit_log')
+const acceptedCancellationAuditQuery = (scheduledServiceId) => db('messaging_audit_log')
     .where({ appointment_id: String(scheduledServiceId), purpose: 'appointment_cancellation' })
     .whereNotNull('sent_at')
     .whereRaw("(provider_message_id ~ '^(SM|MM)' OR channel IN ('email', 'push'))")
     .whereRaw(
       "sent_at >= (SELECT COALESCE(MAX(h.transitioned_at), '-infinity') FROM job_status_history h WHERE h.job_id = ? AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled')",
       [scheduledServiceId],
-    )
-    .first('id'));
+    );
+const cancellationAuditAccepted = async (scheduledServiceId) => Boolean(await acceptedCancellationAuditQuery(scheduledServiceId).first('id'));
+
+// How many DIFFERENT recipients the provider accepted this cycle's cancellation text for. One accepted recipient is not
+// proof the others were texted (a crash can fall between contacts), so a multi-recipient notice is only 'delivered' when
+// every approved recipient has an accepted audit row.
+async function cancellationAcceptedRecipientCount(scheduledServiceId) {
+  const rows = await acceptedCancellationAuditQuery(scheduledServiceId).select('to_hash');
+  return new Set((rows || []).map((row) => row.to_hash)).size;
+}
 
 // Read-only: where the card-approved cancellation text of a visit stands, for the Intelligence Bar cancel recovery sweep
 // (services/ib-cancel-effect-bundles.js). That sweep may call handleCancellation with the approved text ONLY for 'ready'.
 // 'ready' = the cancel transaction's approved marker is still untouched, so no send reached the provider handoff (the
-// pre-dispatch 'sent' stamp comes before the handoff). 'delivered' = marker 'sent' with a provider-accepted audit row.
-// 'uncertain' = marker 'sent' with NO audit evidence: the handoff may have happened, so it is never sent again.
-// 'suppressed' = terminal (the approved send failed or was blocked, or the card chose no text). 'no_reminder' = no
-// reminder row. 'other' = any other marker, which the approved send does not own. Lives with the approved-send helpers
-// (cancel-notice-approved-marker.test.js keeps that marker out of every sweep); it claims and sends nothing.
-async function approvedNoticeStatus(scheduledServiceId) {
+// pre-dispatch 'sent' stamp comes before the handoff). 'delivered' = marker 'sent' with a provider-accepted audit row for
+// EVERY approved recipient (`recipients`, default 1). 'partial' = accepted for some recipients but not all: the rest may not
+// have been texted, and nothing is sent again. 'uncertain' = marker 'sent' with NO audit evidence: the handoff may have
+// happened, so it is never sent again. 'suppressed' = terminal (the approved send failed or was blocked, or the card chose
+// no text). 'no_reminder' = no reminder row. 'other' = any other marker, which the approved send does not own. Lives with
+// the approved-send helpers (cancel-notice-approved-marker.test.js keeps that marker out of every sweep); it claims and
+// sends nothing.
+async function approvedNoticeStatus(scheduledServiceId, { recipients = 1 } = {}) {
   const record = await db('appointment_reminders')
     .where({ scheduled_service_id: scheduledServiceId })
     .first('id', 'cancellation_notice_state');
   if (!record) return 'no_reminder';
   const state = record.cancellation_notice_state;
   if (state === 'pending_approved') return 'ready';
-  if (state === 'sent') return (await cancellationAuditAccepted(scheduledServiceId)) ? 'delivered' : 'uncertain';
+  if (state === 'sent') {
+    const accepted = await cancellationAcceptedRecipientCount(scheduledServiceId);
+    if (accepted === 0) return 'uncertain';
+    return accepted >= Math.max(1, recipients) ? 'delivered' : 'partial';
+  }
   if (state === 'suppressed') return 'suppressed';
   return 'other';
 }
@@ -5022,8 +5051,8 @@ const AppointmentReminders = {
   },
 
   // Read-only: where the card-approved cancellation text of a visit stands (approvedNoticeStatus, above).
-  async approvedCancellationNoticeStatus(scheduledServiceId) {
-    return approvedNoticeStatus(scheduledServiceId);
+  async approvedCancellationNoticeStatus(scheduledServiceId, options = {}) {
+    return approvedNoticeStatus(scheduledServiceId, options);
   },
 
   /**

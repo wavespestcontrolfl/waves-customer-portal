@@ -322,6 +322,9 @@ describe('the sweep finishes a stale bundle through the pinned paths', () => {
     expect(mockHandleCancellation).toHaveBeenCalledTimes(1);
     expect(mockHandleCancellation.mock.calls[0][0]).toBe(SERVICE);
     expect(mockHandleCancellation.mock.calls[0][1]).toMatchObject({ sendNotification: true, approvedNotice: NOTICE });
+    // The claim itself is bound to this cancellation (one statement), and the delivery proof counts every approved recipient.
+    expect(mockHandleCancellation.mock.calls[0][1].cancelGeneration).toEqual({ since: mockStore.bundles[0].created_at });
+    expect(mockNoticeStatus).toHaveBeenCalledWith(SERVICE, { recipients: 1 });
     expect(mockStore.bundles[0]).toMatchObject({ status: 'recovered', finish_note: 'sweep', lease_owner: null });
     expect(mockStore.bundles[0].notice_outcome).toMatchObject({ state: 'sent', by: 'sweep' });
   });
@@ -401,6 +404,7 @@ describe('the approved text is sent at most once and never when it cannot be pro
 
   test.each([
     ['uncertain', 'uncertain', /may have gone out/],
+    ['partial', 'partial', /some recipients, not all/],
     ['delivered', 'sent', /went out/],
     ['suppressed', 'not_sent', /did not go out/],
     ['no_reminder', 'not_sent', /did not go out/],
@@ -463,6 +467,26 @@ describe('the approved text is sent at most once and never when it cannot be pro
     await svc.sweepIbCancelBundles();
     expect(mockFollowThrough).toHaveBeenCalledTimes(1);
     expect(mockHandleCancellation).toHaveBeenCalledTimes(1);
+    expect(mockStore.bundles[0].status).toBe('recovered');
+  });
+});
+
+describe('the text claim is bound to the original cancellation', () => {
+  test('a claim refused because the visit changed between the check and the claim abandons the bundle, not "text failed"', async () => {
+    seedBundle();
+    mockHandleCancellation.mockImplementationOnce(async (_id, opts) => {
+      Object.assign(opts.outcome, { notificationSent: false, notificationError: 'A cancellation notice was already handled for this visit' });
+      mockStore.visits[0].status = 'confirmed';
+    });
+    expect(await svc.sweepIbCancelBundles()).toMatchObject({ abandoned: 1 });
+    expect(mockStore.bundles[0].finish_note).toBe('visit_is_confirmed_during_recovery');
+  });
+
+  test('a genuine send failure with the visit still cancelled stays a not-sent text', async () => {
+    seedBundle();
+    mockHandleCancellation.mockImplementationOnce(async (_id, opts) => { Object.assign(opts.outcome, { notificationSent: false, notificationError: 'customer opted out' }); });
+    await svc.sweepIbCancelBundles();
+    expect(mockStore.bundles[0].notice_outcome).toMatchObject({ state: 'not_sent' });
     expect(mockStore.bundles[0].status).toBe('recovered');
   });
 });
