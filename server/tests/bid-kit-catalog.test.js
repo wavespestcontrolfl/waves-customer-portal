@@ -333,6 +333,12 @@ describe('tax IDs are never stored: one detector', () => {
     ['Tax I.D. 123 456 789', true, 'dotted I.D.'], ['E.I.N.: 1234 56789', true, 'dotted E.I.N.'], ['EIN1234 56789', true, 'phrase run into the digits'],
     ['Fed. ID 123 456 789', true, 'fed id'], ['Soc. Sec. 1234 56789', true, 'soc sec'], ['SSN# 1234 56789', true, 'SSN#'],
     ['Martin 1234 56789', false, 'tin inside a word is no phrase'], ['Tax 1234 56789', false, 'bare tax is no phrase'],
+    // Any punctuation between digit groups is a separator.
+    ['SSN 123(45)6789', true, 'SSN with parentheses'], ['EIN (12) 3456789', true, 'EIN with parentheses'], ['123,45,6789', true, 'SSN with commas'],
+    ['12:3456789', true, 'EIN with a colon'], ['123+45+6789', true, 'SSN with plus signs'], ['[123] [45] [6789]', true, 'SSN in brackets'],
+    ['Tax ID: 123,456,789', true, 'tax id with commas'],
+    ['(941) 555-0100', false, 'phone with parentheses'], ['+1 (941) 555-0100', false, 'phone with country code and parentheses'],
+    ['$1,234,567', false, 'money'], ['1,000,000 / 2,000,000', false, 'two limits'], ['12/25/2026', false, 'date'],
   ];
 
   test.each(TYPED)('typed text %j: refused = %s (%s)', (text, refused) => {

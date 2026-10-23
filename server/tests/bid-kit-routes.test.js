@@ -661,7 +661,7 @@ describe('files', () => {
     // The key is a random token and a whitelisted extension: the original name is never part of it.
     expect(put.input.Key).toMatch(new RegExp(`^bid-kit/${item.id}/[0-9a-f]{16}\\.pdf$`));
     expect(put.input).not.toHaveProperty('ACL');
-    expect(Object.keys(put.input).sort()).toEqual(['Body', 'Bucket', 'ContentType', 'Key']);
+    expect(Object.keys(put.input).sort()).toEqual(['Body', 'Bucket', 'CacheControl', 'ContentType', 'Key']);
     expect(store.activity.at(-1)).toMatchObject({ action: 'bid_kit_file_uploaded' });
   });
 
@@ -700,6 +700,9 @@ describe('files', () => {
     await call('GET', `/api/admin/bid-kit/${item.id}/file`);
     expect(getSignedUrl.mock.calls[0][1].input.ResponseContentDisposition).toBe('inline; filename="Policy 2026 renewal _final_.pdf"');
     expect(getSignedUrl.mock.calls[0][1].input.Key).toBe(key);
+    // The file itself is never cached: the stored object and the signed response both say no-store.
+    expect(getSignedUrl.mock.calls[0][1].input.ResponseCacheControl).toBe('private, no-store');
+    expect(mockSent.find((command) => command.constructor.name === 'PutObjectCommand').input.CacheControl).toBe('private, no-store');
   });
 
   test('a file cannot be put on a fact: 400, nothing stored, and the fact stays missing', async () => {

@@ -107,7 +107,8 @@ async function putFile(itemId, file) {
   // The key never carries the original name: a random token and a whitelisted extension only.
   const key = `${KEY_PREFIX}${itemId}/${crypto.randomBytes(8).toString('hex')}.${TYPES[contentType][0]}`;
   try {
-    await s3().send(new PutObjectCommand({ Bucket: config.s3.bucket, Key: key, Body: file.buffer, ContentType: contentType }));
+    // Never cached by a browser or a proxy: the signed link is short-lived, and the file must not outlive it in a cache.
+    await s3().send(new PutObjectCommand({ Bucket: config.s3.bucket, Key: key, Body: file.buffer, ContentType: contentType, CacheControl: NO_CACHE }));
   } catch (err) {
     // A timeout or a reset can leave the object stored although the call failed. No row points at this key yet, so it is
     // removed best effort before the error goes on (a fixed line, the item id only).
@@ -118,7 +119,9 @@ async function putFile(itemId, file) {
   return { key, fileName, contentType, size: file.buffer.length };
 }
 
-// A link that opens the file for 5 minutes at most.
+const NO_CACHE = 'private, no-store';
+
+// A link that opens the file for 5 minutes at most; the response says no-store, so no cache keeps the file after the link expires.
 async function signedUrl({ key, fileName, contentType }) {
   if (!key) throw new FileError('There is no file on this item', 404);
   if (!config.s3?.bucket) throw new FileError('File storage is not configured', 500);
@@ -127,6 +130,7 @@ async function signedUrl({ key, fileName, contentType }) {
     Key: key,
     ResponseContentDisposition: `inline; filename="${downloadName(fileName, contentType)}"`,
     ResponseContentType: contentType || undefined,
+    ResponseCacheControl: NO_CACHE,
   }), { expiresIn: SIGNED_URL_SECONDS });
 }
 

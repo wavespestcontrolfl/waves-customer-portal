@@ -259,6 +259,8 @@ async function runBidKitExpiryCheck({ now = new Date() } = {}) {
       if (await raiseIfStillDue(item, today, { refreshOnly: spent })) rang += 1;
     } catch (err) {
       logger.warn(`[bid-kit] expiry alert failed: ${errorTag(err)}`);
+      // A paper with no bell whose raise failed stays in the standing count, so it is never left with neither.
+      if (!holders.has(keyFor(item))) overflow.push(item);
     }
   }
   let counted = overflow.length;

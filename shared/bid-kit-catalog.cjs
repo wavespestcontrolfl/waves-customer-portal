@@ -132,7 +132,8 @@ const SIGN_OFF_REFUSAL = {
 //
 // The text is read in one normal form first (screenText): compatibility forms folded (fullwidth digits and dashes, no-break
 // spaces), every Unicode dash or minus read as a hyphen, invisible format characters (zero-width spaces, joiners, the soft
-// hyphen) removed, an underscore read as a space. A separator is then any run of space, hyphen, dot, underscore or slash.
+// hyphen) removed, an underscore read as a space. A separator is then any run of characters that are not letters or digits
+// (space, any dash, dot, slash, comma, colon, parentheses, brackets, plus ...), so no punctuation splits a tax ID apart.
 // In typed text (a number counts as its digits),
 // each field alone and each label/value pair read together, these are refused:
 //   (A) the SSN shape: 3 digits, separator, 2 digits, separator, 4 digits, label or not;
@@ -150,11 +151,11 @@ const SIGN_OFF_REFUSAL = {
 const DASHES = /[\u2010-\u2015\u2043\u2212\u2E3A\u2E3B\uFE58\uFE63\uFF0D]/g;
 const INVISIBLE = /[\u00AD\u180E\u200B-\u200D\u2060-\u2064\uFEFF]/g;
 const screenText = (text) => text.normalize('NFKC').replace(INVISIBLE, '').replace(DASHES, '-').replace(/_/g, ' ');
-const SEPARATOR = '[\\s\\-._/]+';
-const SSN_SHAPE = new RegExp(`(?<!\\d)\\d{3}${SEPARATOR}\\d{2}${SEPARATOR}\\d{4}(?!\\d)`);
-const EIN_SHAPE = new RegExp(`(?<!\\d)\\d{2}${SEPARATOR}\\d{7}(?!\\d)`);
+const SEPARATOR = '[^\\p{L}\\p{N}]+';
+const SSN_SHAPE = new RegExp(`(?<!\\d)\\d{3}${SEPARATOR}\\d{2}${SEPARATOR}\\d{4}(?!\\d)`, 'u');
+const EIN_SHAPE = new RegExp(`(?<!\\d)\\d{2}${SEPARATOR}\\d{7}(?!\\d)`, 'u');
 const NINE_CONTIGUOUS = /(?<!\d)\d{9}(?!\d)/;
-const DIGIT_CHAIN = new RegExp(`\\d+(?:${SEPARATOR}\\d+)*`, 'g');
+const DIGIT_CHAIN = new RegExp(`\\d+(?:${SEPARATOR}\\d+)*`, 'gu');
 // A tax phrase is matched on the words alone: lowercased, "#" read as "no", letters and digits split apart, and every other run
 // of characters read as one space, so "Tax-ID", "Tax/ID", "tax_id", "Tax I.D.", "E.I.N." and "EIN1234" read as "tax id",
 // "tax i d", "e i n" and "ein 1234".

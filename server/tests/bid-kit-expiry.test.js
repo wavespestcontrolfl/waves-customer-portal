@@ -126,7 +126,8 @@ test('a custom label never reaches an alert (fixed words), and a catalog item is
 test('a failing bell does not stop the rest, and a failing scan does not throw', async () => {
   mockRows.push(item(ID(1), { expires_on: '2026-10-01' }), item(ID(2), { expires_on: '2026-10-02' }));
   raiseAdminAlert.mockRejectedValueOnce(new Error('bell down'));
-  expect(await runBidKitExpiryCheck({ now: NOW })).toEqual({ scanned: 2, rang: 1, closed: 0, overflow: 0 });
+  // The paper whose bell failed has no bell, so it stays in the standing count rather than being dropped.
+  expect(await runBidKitExpiryCheck({ now: NOW })).toEqual({ scanned: 2, rang: 1, closed: 0, overflow: 1 });
   store.listItems.mockRejectedValueOnce(new Error('db down'));
   expect(await runBidKitExpiryCheck({ now: NOW })).toEqual({ scanned: 0, rang: 0, closed: 0, overflow: 0 });
 });
@@ -440,6 +441,21 @@ describe('the daily ring budget (docs/admin-notifications.md rule 3)', () => {
       .mockResolvedValue([{ dedupeKey: OVERFLOW_KEY, itemKeys: [ID(2)] }]); // ...but under the lock another refresh removed it
     await syncExpiryBell(present(item(ID(1), { expires_on: '2027-10-01' })), { now: NOW });
     expect(standingCalls()).toHaveLength(0);
+    expect(episodes.closeAdminAlertKeys.mock.calls.flatMap(([, keys]) => keys)).not.toContain(OVERFLOW_KEY);
+  });
+
+  test('a paper with no bell whose raise failed stays in the standing count instead of being dropped', async () => {
+    const all = MANY(2);
+    mockRows.push(...all);
+    episodes.openAdminAlertKeys.mockResolvedValue([OVERFLOW_KEY]); // it was listed in the standing count
+    episodes.openAdminAlertMetadata.mockResolvedValue([{ dedupeKey: OVERFLOW_KEY, itemKeys: [all[0].id] }]);
+    raiseAdminAlert.mockImplementation(async (c, h, w, opts) => {
+      if (opts.dedupeKey === keyFor(all[0])) throw new Error('notifications down');
+      return { id: 'n1', deduped: false, rang: true };
+    });
+    const result = await runBidKitExpiryCheck({ now: NOW });
+    expect(result).toMatchObject({ rang: 1, overflow: 1 });
+    expect(standingCalls()[0][3].metadata).toMatchObject({ count: 1, itemKeys: [all[0].id] });
     expect(episodes.closeAdminAlertKeys.mock.calls.flatMap(([, keys]) => keys)).not.toContain(OVERFLOW_KEY);
   });
 
