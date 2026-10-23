@@ -640,6 +640,44 @@ describe('--skip-existing and expenses', () => {
     expect(out2.report).toMatch(/line 3 .*dated 1 day earlier.*\(portal: "Far" in a hand-entered expense\)/);
   });
 
+  test('an expense linked to a bank row posted a day after the ledger charge still holds the row; the row and its expense are consumed once', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-test-'));
+    const file = path.join(dir, 'ledger-2025.csv');
+    fs.writeFileSync(file, csv(row({ description: 'ACME SUPPLY 4471', amount: '100.00', date: '2025-03-14' }), row({ description: 'OTHER SHOP', amount: '5.00', date: '2025-03-20' })));
+    const linked = (db) => {
+      db.tables().expenses.push({ id: 'exp-l', expense_date: '2025-03-14', amount: '100.00', vendor_name: 'Acme Supply', description: 'supplies' });
+      db.tables().bank_transactions.push({ id: 'pl-1', row_hash: 'h1', source: 'plaid', account_label: 'checking 3098', txn_date: '2025-03-15', description: 'ACME SUPPLY 4471', amount: '100.00', direction: 'debit', status: 'matched_expense', matched_expense_id: 'exp-l' });
+    };
+    const db = makeFakeDb();
+    linked(db);
+    const { counts, report } = await run({ file, db, skipExisting: true });
+    // the exact-day overlap misses (posted the 15th, charged the 14th); the linked expense holds the row
+    expect(counts).toEqual({ read: 2, inserted: 1, duplicates: 0, overlaps: 0, held: 1, unsure: 0, handExpenses: 0 });
+    expect(report).toMatch(/line 2 .*\[an expense linked to a bank row of the same amount, dated the same day; the ledger says expense \(Supplies\)\]  \(portal: "Acme Supply" in an expense linked to a bank row\)/);
+    expect(db.tables().expenses).toHaveLength(2); // exp-l + OTHER SHOP, no second Acme
+    // one transaction, consumed once: when the ledger also carries the posting-day row (exact overlap),
+    // the overlap takes the bank row AND its expense, and the charge-day row loads as its own purchase
+    const db2 = makeFakeDb();
+    linked(db2);
+    fs.writeFileSync(file, csv(
+      row({ description: 'ACME SUPPLY 4471', amount: '100.00', date: '2025-03-14' }),
+      row({ description: 'ACME SUPPLY 4471', amount: '100.00', date: '2025-03-15' }),
+    ));
+    const out2 = await run({ file, db: db2, skipExisting: true });
+    expect(out2.counts).toEqual({ read: 2, inserted: 1, duplicates: 0, overlaps: 1, held: 0, unsure: 0, handExpenses: 0 });
+    // and the other way round: the expense taken by a hold takes its bank row out of the overlap pools
+    const db3 = makeFakeDb();
+    linked(db3);
+    fs.writeFileSync(file, csv(
+      row({ description: 'ACME SUPPLY 4471', amount: '100.00', date: '2025-03-16' }),
+      row({ description: 'Acme supply 4471 posted', amount: '100.00', date: '2025-03-15' }),
+    ));
+    const out3 = await run({ file, db: db3, skipExisting: true });
+    // row 1 (the 16th, within the window) holds against exp-l and takes pl-1 with it; row 2 (same day,
+    // amount and account as pl-1 under other text) finds no row left and loads
+    expect(out3.counts).toEqual({ read: 2, inserted: 1, duplicates: 0, overlaps: 0, held: 1, unsure: 0, handExpenses: 0 });
+  });
+
   test('a hand-entered expense a refund reduced is compared at its gross amount (applied or released refund), as the matcher does', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-test-'));
     const file = path.join(dir, 'ledger-2025.csv');

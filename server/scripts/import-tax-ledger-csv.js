@@ -387,7 +387,7 @@ function formatReport({ dryRun, file, read, inserted, duplicates, overlaps = 0, 
     `${dryRun ? 'would insert:              ' : 'inserted:                  '}${inserted}`,
     `skipped as duplicate:      ${duplicates}`,
     `already in the portal:     ${overlaps} (left out: the same row, same account and text, already booked, linked or ignored there)`,
-    `held, not imported:        ${held.length} (the same row still open in the portal, the same charge under other text, or a hand-entered expense of the same amount within ${EXPENSE_DATE_WINDOW_DAYS} days; decide each in Bank Import)`,
+    `held, not imported:        ${held.length} (the same row still open in the portal, the same charge under other text, or an expense of the same amount within ${EXPENSE_DATE_WINDOW_DAYS} days; decide each in Bank Import)`,
     ...held.map(h => `  line ${h.line}  ${h.date}  ${h.description}  ${h.amount}  [${h.why}]  (portal: "${h.other}" in ${h.account})`),
     `check these:               ${unsure.length} (imported; a bank row of ANOTHER or an unknown account has the same day, amount and direction)`,
     ...unsure.map(u => `  line ${u.line}  ${u.date}  ${u.description}  ${u.amount}  (portal account: ${u.other})`),
@@ -434,29 +434,34 @@ async function loadPortalState(db, mapped, rows, skipExisting) {
   // "already there from elsewhere": they are linked from a ledger bank row
   const ledgerMade = new Set(rows.length ? (await db('bank_transactions').where({ source: SOURCE_TAG }).whereBetween('txn_date', range).whereNotNull('matched_expense_id')
     .select('matched_expense_id')).map(r => r.matched_expense_id) : []);
-  // Expenses linked to a bank row are covered through that row. The rest are
-  // hand-entered: never matched by payee guesswork (text varies, amounts
-  // move with refunds); a ledger expense of the same day and amount is held
-  // for the owner, and the report lists them all to check once.
+  // Expenses linked to a bank row are covered through that row when it
+  // overlaps a ledger row; the bank posting can sit a day or more after the
+  // ledger's charge date, so they stay in the amount pool too (one-for-one
+  // with their row). The rest are hand-entered: never matched by payee
+  // guesswork (text varies); a ledger expense of the same gross amount
+  // within the window is held for the owner, and the report lists them all
+  // to check once.
   const linkedExpenseIds = new Set(existingBank.map(f => f.matched_expense_id).filter(Boolean));
   // the file's range widened by the matcher window: a receipt dated days
   // before the first posting (or after the last) can still be a ledger row
   const handRange = [shiftDays(range[0], -EXPENSE_DATE_WINDOW_DAYS), shiftDays(range[1], EXPENSE_DATE_WINDOW_DAYS)];
-  const handExpenses = rows.length ? (await db('expenses').whereBetween('expense_date', handRange)
-    .select('id', 'expense_date', 'amount', 'vendor_name', 'description')).filter(e => !ledgerMade.has(e.id) && !linkedExpenseIds.has(e.id)) : [];
-  // compared at the gross amount (one small query per hand expense: a one-off
-  // run over a handful of rows)
-  for (const e of handExpenses) e.gross = Number((Number(e.amount) + await appliedRefundTotal(e.id, db)).toFixed(2));
+  const inRange = rows.length ? (await db('expenses').whereBetween('expense_date', handRange)
+    .select('id', 'expense_date', 'amount', 'vendor_name', 'description')).filter(e => !ledgerMade.has(e.id)) : [];
+  const handExpenses = inRange.filter(e => !linkedExpenseIds.has(e.id));
+  const coveredExpenses = inRange.filter(e => linkedExpenseIds.has(e.id));
+  // compared at the gross amount (one small query per expense: a one-off run
+  // over a handful of rows)
+  for (const e of inRange) e.gross = Number((Number(e.amount) + await appliedRefundTotal(e.id, db)).toFixed(2));
   if ((existingBank.length || handExpenses.length) && !skipExisting) {
     throw fail(`the portal already holds ${existingBank.length} bank row(s) from a feed or upload between ${range[0]} and ${range[1]} and ${handExpenses.length} hand-entered expense(s) within ${EXPENSE_DATE_WINDOW_DAYS} days of that range; rerun with --skip-existing to leave out the ledger rows the portal already answers (a row still open there is held and listed; hand-entered expenses are listed for you to check)`);
   }
   const masks = new Map((await db('plaid_accounts').select('account_label', 'mask')).map(a => [String(a.account_label), String(a.mask || '')]));
   const categories = await db('expense_categories').select('id', 'name');
-  return { existing, existingBank, handExpenses, masks, categoryIds: new Map(categories.map(c => [c.name, c.id])) };
+  return { existing, existingBank, handExpenses, coveredExpenses, masks, categoryIds: new Map(categories.map(c => [c.name, c.id])) };
 }
 
 // Pools of the portal's rows, consumed one-for-one as ledger rows match them.
-function buildPools({ existingBank, handExpenses }) {
+function buildPools({ existingBank, handExpenses, coveredExpenses = [] }) {
   const bankLeft = new Map();
   existingBank.forEach(f => { const k = tupleKey(f); if (!bankLeft.has(k)) bankLeft.set(k, []); bankLeft.get(k).push(f); });
   // A feed writes its own text for a transaction ("Wawa" against the
@@ -479,8 +484,24 @@ function buildPools({ existingBank, handExpenses }) {
   // first, never booked on top of it. No payee guessing. The amount compared
   // is the GROSS one: a refund applied later reduced the expense, the bank
   // row still shows what was paid.
+  // An expense linked to a bank row and that row are ONE transaction: taking
+  // either removes the other from its pool (one-for-one across both pools).
+  const rowsOfExpense = new Map();
+  existingBank.forEach(f => { if (f.matched_expense_id) { if (!rowsOfExpense.has(f.matched_expense_id)) rowsOfExpense.set(f.matched_expense_id, []); rowsOfExpense.get(f.matched_expense_id).push(f); } });
   const handByAmount = new Map();
-  handExpenses.forEach(e => { const k = Number(e.gross != null ? e.gross : e.amount).toFixed(2); if (!handByAmount.has(k)) handByAmount.set(k, []); handByAmount.get(k).push(e); });
+  [...handExpenses, ...coveredExpenses].forEach(e => { const k = Number(e.gross != null ? e.gross : e.amount).toFixed(2); if (!handByAmount.has(k)) handByAmount.set(k, []); handByAmount.get(k).push(e); });
+  const dropExact = (row) => {
+    const list = bankLeft.get(tupleKey(row)) || [];
+    const j = list.indexOf(row);
+    if (j !== -1) list.splice(j, 1);
+  };
+  const dropExpense = (id) => {
+    if (!id) return;
+    for (const list of handByAmount.values()) {
+      const j = list.findIndex(e => e.id === id);
+      if (j !== -1) { list.splice(j, 1); return; }
+    }
+  };
   const takeHand = (date, amount) => {
     const list = handByAmount.get(Number(amount).toFixed(2)) || [];
     let best = -1;
@@ -491,9 +512,10 @@ function buildPools({ existingBank, handExpenses }) {
     });
     if (best === -1) return null;
     const [e] = list.splice(best, 1);
-    return { expense: e, days: dayNumber(ymdOf(e.expense_date)) - dayNumber(date) };
+    (rowsOfExpense.get(e.id) || []).forEach(f => { dropExact(f); dropLoose(f); });
+    return { expense: e, days: dayNumber(ymdOf(e.expense_date)) - dayNumber(date), covered: rowsOfExpense.has(e.id) };
   };
-  return { bankLeft, looseKey, looseLeft, dropLoose, takeHand };
+  return { bankLeft, looseKey, looseLeft, dropLoose, dropExact, dropExpense, takeHand };
 }
 
 /** Days since the epoch for a YYYY-MM-DD string (calendar arithmetic only). */
@@ -535,6 +557,7 @@ function reconcileRows(mapped, rows, portal) {
     if (same === -1) return;
     const [used] = pool.splice(same, 1);
     pools.dropLoose(used);
+    pools.dropExpense(used.matched_expense_id);
     settled.add(i);
     if (used.status === 'unmatched') held.push(note(i, used.description, used.account_label || '(no label)', `the same row is open in the portal, not booked; ${reading(m, i)}`));
     else overlaps += 1;
@@ -547,7 +570,8 @@ function reconcileRows(mapped, rows, portal) {
       const hand = pools.takeHand(rows[i].date, m.bank.amount);
       if (hand) {
         const gross = hand.expense.gross != null && Number(hand.expense.gross) !== Number(hand.expense.amount) ? ` (${Number(hand.expense.amount).toFixed(2)} after refunds)` : '';
-        held.push(note(i, hand.expense.vendor_name || hand.expense.description || '(no text)', 'a hand-entered expense', `a hand-entered expense of the same amount${gross}, dated ${describeGap(hand.days)}; ${reading(m, i)}`));
+        const kind = hand.covered ? 'an expense linked to a bank row' : 'a hand-entered expense';
+        held.push(note(i, hand.expense.vendor_name || hand.expense.description || '(no text)', kind, `${kind} of the same amount${gross}, dated ${describeGap(hand.days)}; ${reading(m, i)}`));
         return;
       }
     }
@@ -555,9 +579,8 @@ function reconcileRows(mapped, rows, portal) {
     const sameLoose = loose.findIndex(f => sameAccount(rows[i].source, f.account_label, masks));
     if (sameLoose !== -1) {
       const [used] = loose.splice(sameLoose, 1);
-      const exact = pools.bankLeft.get(tupleKey(used)) || [];
-      const j = exact.indexOf(used);
-      if (j !== -1) exact.splice(j, 1);
+      pools.dropExact(used);
+      pools.dropExpense(used.matched_expense_id);
       held.push(note(i, used.description, used.account_label || '(no label)', `the same charge under other text; ${reading(m, i)}`));
       return;
     }
