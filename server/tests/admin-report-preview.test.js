@@ -208,7 +208,12 @@ describe('loadPreviewService', () => {
     ['not-a-uuid', null, 'invalid_id'],
     [UUID, 'none', 'not_found'],
     [UUID, { ...ROW, ss_status: 'completed' }, 'completed'],
-    [UUID, { ...ROW, ss_status: 'cancelled' }, 'cancelled'],
+    [UUID, { ...ROW, ss_status: 'cancelled' }, 'closed'],
+    [UUID, { ...ROW, ss_status: 'rescheduled' }, 'closed'],
+    [UUID, { ...ROW, ss_status: 'skipped' }, 'closed'],
+    [UUID, { ...ROW, ss_status: 'no_show' }, 'closed'],
+    // Not lawn: the report comes from what the technician submits at completion.
+    [UUID, { ...ROW, service_type: 'Quarterly Pest Control Service' }, 'unsupported_line'],
   ])('refuses %s (%#)', async (id, row, expected) => {
     const knex = fakeKnex({ row: row === 'none' ? null : (row || ROW) });
     expect((await loadPreviewService(id, knex)).error).toBe(expected);

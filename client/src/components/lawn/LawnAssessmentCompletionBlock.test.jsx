@@ -24,6 +24,18 @@ describe('LawnAssessmentCompletionBlock', () => {
     expect(request).toHaveBeenCalledWith('/admin/lawn-assessment/service/svc-1');
   });
 
+  it('a confirmed assessment offers the report preview on admin hosts only, in a new tab', async () => {
+    const confirmedLookup = async () => ({ shotListEnabled: true, assessment: { id: 'la-1', confirmed_by_tech: true, turf_density: 80, weed_suppression: 80, color_health: 80 } });
+    render(<LawnAssessmentCompletionBlock service={{ id: 'svc-1', customerId: 'cust-1' }} request={vi.fn(confirmedLookup)} showReportPreview />);
+    const link = await screen.findByRole('link', { name: 'Preview report' });
+    expect(link.getAttribute('href')).toBe('/admin/report-preview/svc-1');
+    expect(link.getAttribute('target')).toBe('_blank');
+    cleanup();
+    render(<LawnAssessmentCompletionBlock service={{ id: 'svc-1', customerId: 'cust-1' }} request={vi.fn(confirmedLookup)} />);
+    await screen.findByText('Assessment confirmed');
+    expect(screen.queryByRole('link', { name: 'Preview report' })).toBeNull();
+  });
+
   it('sets no text under 14px (portal brand rule), with or without the gauge reading', async () => {
     mount();
     await waitFor(() => expect(screen.queryByTestId('lawn-photo-mode-pending')).toBeNull());

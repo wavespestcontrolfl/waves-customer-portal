@@ -19982,6 +19982,7 @@ export function CompletionPanel({
             {isLawn && !quickComplete && (
               <Field label="Lawn assessment">
                 <LawnAssessmentCompletionBlock
+                  showReportPreview
                   request={adminFetch}
                   service={service}
                   disabled={isIncompleteVisit || submitting || generating}
@@ -22389,6 +22390,7 @@ export function CompletionPanel({
               {" "}
               <label style={labelStyle}>Lawn Assessment</label>{" "}
               <LawnAssessmentCompletionBlock
+                  showReportPreview
                   request={adminFetch}
                 service={service}
                 disabled={isIncompleteVisit || submitting || generating}

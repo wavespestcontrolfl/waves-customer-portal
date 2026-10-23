@@ -70,6 +70,7 @@ import ActivityCard from '../components/ActivityCard';
 import { WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
 import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
 import { reportGreetingFirstName } from '../lib/reportGreeting';
+import { adminLoginUrl } from '../utils/admin-fetch';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
@@ -10615,15 +10616,20 @@ function PreviewBanner() {
       role="status"
       data-report-preview-banner=""
       style={{
-        position: 'sticky', top: 0, zIndex: 1000, padding: '10px 16px', textAlign: 'center',
+        // viewport-fit=cover: in an installed iOS PWA the status bar / notch sits over top: 0.
+        position: 'sticky', top: 0, zIndex: 1000, padding: 'calc(10px + env(safe-area-inset-top, 0px)) 16px 10px', textAlign: 'center',
         background: '#FFF4CC', color: '#5C4400', borderBottom: '1px solid #E5C95C',
         fontSize: 14, fontWeight: 600,
       }}
     >
       Preview — not sent to the customer
+      <div style={{ fontWeight: 400, marginTop: 2 }}>Products, findings and technician notes appear once the visit is completed.</div>
     </div>
   );
 }
+
+// 403 codes from adminAuthenticate that the staff sign-in flow resolves.
+const PREVIEW_SIGN_IN_CODES = new Set(['PASSWORD_CHANGE_REQUIRED', 'MFA_ENROLLMENT_REQUIRED', 'MFA_REQUIRED', 'TOKEN_REVOKED', 'TOKEN_EXPIRED']);
 
 // `previewServiceId` (admin route /admin/report-preview/:serviceId) renders the
 // report for a visit that is NOT completed from the admin preview endpoint
@@ -10722,10 +10728,20 @@ export default function ReportViewPage({ previewServiceId = null } = {}) {
         // Preview: say WHY there is nothing to preview (already completed, cancelled,
         // not an admin) rather than the retryable error or a plain not-found.
         if (isPreview && [401, 403, 409].includes(r.status)) {
-          return r.json().catch(() => ({})).then((b) => ({
-            error: 'preview_refused',
-            message: b?.error || 'This visit cannot be previewed.',
-          }));
+          return r.json().catch(() => ({})).then((b) => {
+            // This page sits outside AdminLayoutV2, so it handles the staff session itself: a
+            // missing/expired/revoked JWT and the password-change / MFA gates go through the normal
+            // staff sign-in (which brings the reader back here), not a dead-end refusal card.
+            if (r.status === 401 || PREVIEW_SIGN_IN_CODES.has(b?.code)) {
+              window.location.assign(adminLoginUrl(window.location));
+              // Stay on the loading state while the browser leaves; no refusal card.
+              return new Promise(() => {});
+            }
+            return {
+              error: 'preview_refused',
+              message: b?.error || 'This visit cannot be previewed.',
+            };
+          });
         }
         if (!r.ok) throw new Error(`temporary report failure: ${r.status}`);
         return r.json();

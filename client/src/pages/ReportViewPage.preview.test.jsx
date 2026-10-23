@@ -68,6 +68,14 @@ describe('ReportViewPage — admin preview', () => {
     expect(screen.queryByRole('link', { name: /reschedule/i })).toBeNull();
   });
 
+  it('sends an expired or missing staff session to the admin sign-in, coming back here', async () => {
+    const assign = vi.fn();
+    vi.stubGlobal('location', { ...window.location, pathname: `/admin/report-preview/${SERVICE_ID}`, search: '', hash: '', assign });
+    renderPreview({ ok: false, status: 401, json: async () => ({ error: 'Token expired', code: 'TOKEN_EXPIRED' }) });
+    await waitFor(() => expect(assign).toHaveBeenCalledWith(`/admin/login?next=${encodeURIComponent(`/admin/report-preview/${SERVICE_ID}`)}`));
+    expect(screen.queryByText(/No preview for this visit/)).toBeNull();
+  });
+
   it('says why there is no preview when the visit is already completed', async () => {
     renderPreview({ ok: false, status: 409, json: async () => ({ error: 'This visit is already completed. Open its real report instead.' }) });
     expect(await screen.findByText(/already completed/i)).toBeInTheDocument();

@@ -45,7 +45,7 @@ describe('admin report preview route', () => {
   });
 
   test.each([
-    ['completed', 409], ['cancelled', 409], ['has_report', 409], ['not_found', 404], ['invalid_id', 404],
+    ['completed', 409], ['closed', 409], ['unsupported_line', 409], ['has_report', 409], ['not_found', 404], ['invalid_id', 404],
   ])('%s -> %i, no render', async (error, status) => {
     loadPreviewService.mockResolvedValue({ error });
     expect((await get('/abc/data')).status).toBe(status);
@@ -63,7 +63,7 @@ describe('admin report preview route', () => {
     const [passedService, token, opts] = reportsPublic.buildServiceReportV1ResponseData.mock.calls[0];
     expect(passedService).toBe(service);
     expect(token).toBeNull();
-    expect(opts).toMatchObject({ mode: 'live', preview: true, staffViewer: false });
+    expect(opts).toMatchObject({ mode: 'live', preview: true, staffViewer: false, planSummary: false });
     expect(reportsPublic.trackServiceReportView).not.toHaveBeenCalled();
   });
 });

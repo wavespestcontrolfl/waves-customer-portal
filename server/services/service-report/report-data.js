@@ -3680,12 +3680,8 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
         // render freezes the settled week instead of a stale same-day object
         // being served under a key that still matches.
         weekWeatherPendingReason = 'open_window';
-      } else if (completionRainfall7dInches != null && preview) {
-        // Preview: the fetched week stands as this render's own numbers; nothing
-        // is frozen onto a record (there is none) and the render is not flagged
-        // unfrozen (no cache or delivery decision hangs on a preview).
       } else if (completionRainfall7dInches != null) {
-        const canonicalWeek = await freezeLawnWeekWeather(service.id, {
+        const canonicalWeek = await freezeLawnWeekWeather(preview ? null : service.id, {
           // The snapshot names the question it answers.
           assessmentId: assessment.id,
           serviceDate: ymd(assessment.service_date),
@@ -3710,7 +3706,10 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
           completionDailyRain = Array.isArray(canonicalWeek.dailyRain) ? canonicalWeek.dailyRain : null;
           completionRainConfidence = canonicalWeek.rainConfidence ?? null;
           completionRainSource = canonicalWeek.rainSource ?? null;
-        } else {
+        } else if (!preview) {
+          // Preview passes no record id above, so nothing is frozen; the fetched
+          // week stands as this render's own numbers and is not flagged unfrozen
+          // (no cache or delivery decision hangs on a preview).
           // Neither wrote nor read back a canonical week. The live report still
           // renders (fail soft — a customer should see their report), but this
           // output is NOT reproducible, so it must not be cached: a later view

@@ -27,7 +27,8 @@ const REFUSALS = {
   invalid_id: [404, 'Visit not found'],
   not_found: [404, 'Visit not found'],
   completed: [409, 'This visit is already completed. Open its real report instead.'],
-  cancelled: [409, 'This visit is cancelled. There is no report to preview.'],
+  closed: [409, 'This visit is closed (cancelled, rescheduled, skipped or no-show). There is no report to preview.'],
+  unsupported_line: [409, 'Preview works for lawn visits only. Other reports are built from what the technician enters at completion.'],
   has_report: [409, 'A report already exists for this visit. Open the real report instead.'],
 };
 
@@ -51,7 +52,9 @@ router.get('/:scheduledServiceId/data', async (req, res, next) => {
       // from the `preview` flag instead.
       staffViewer: false,
       composeOffers: true,
-      planSummary: true,
+      // Off (Codex #6531 r1): plan totals count completed records, and this
+      // visit has none yet, so the card would read one visit short.
+      planSummary: false,
       upcomingVisitsCard: true,
       nearYou: true,
       lawnPhotoFindings: true,

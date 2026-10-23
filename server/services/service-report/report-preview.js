@@ -19,14 +19,21 @@
 
 const db = require('../../models/db');
 const { detectServiceLine } = require('./service-line-configs');
+const { TERMINAL_SCHEDULED_SERVICE_STATUSES } = require('../scheduled-service-statuses');
 const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// A visit in one of these states already has (or will never have) a real report:
-// the preview refuses it so the owner is not shown a rendering that disagrees
-// with the record the customer actually holds.
-const NO_PREVIEW_STATUSES = new Set(['completed', 'cancelled']);
+// A terminal visit already has (or will never have) a real report: the preview
+// refuses it so the owner is not shown a rendering of work that is closed or did
+// not happen. The canonical terminal list, not a local copy.
+const NO_PREVIEW_STATUSES = new Set(TERMINAL_SCHEDULED_SERVICE_STATUSES);
+// Lawn only (Codex #6531 r1 P1): a lawn report's customer story comes from the
+// confirmed lawn assessment, which exists before completion. Pest, typed and
+// other reports are built from what the technician submits AT completion
+// (products, findings, photos, observations), so a stand-in would preview an
+// empty report. The page says products and notes appear after completion.
+const PREVIEW_LINES = new Set(['lawn']);
 
 /**
  * Load the preview stand-in for a scheduled visit.
@@ -72,7 +79,9 @@ async function loadPreviewService(scheduledServiceId, knex = db) {
   if (!row) return { error: 'not_found' };
 
   const status = String(row.ss_status || '').toLowerCase();
-  if (NO_PREVIEW_STATUSES.has(status)) return { error: status };
+  if (NO_PREVIEW_STATUSES.has(status)) return { error: status === 'completed' ? 'completed' : 'closed' };
+  const serviceLine = detectServiceLine(row.service_type);
+  if (!PREVIEW_LINES.has(serviceLine)) return { error: 'unsupported_line' };
 
   // A record already linked to this visit (a reopened or incomplete closeout)
   // means a real report exists: show that one, not a stand-in.
@@ -97,7 +106,7 @@ async function loadPreviewService(scheduledServiceId, knex = db) {
       service_date: row.scheduled_date,
       service_type: row.service_type,
       // completeScheduledService stamps detectServiceLine(svc.service_type) on the record.
-      service_line: detectServiceLine(row.service_type),
+      service_line: serviceLine,
       status: 'completed',
       is_callback: row.is_callback === true,
       structured_notes: {},
@@ -107,4 +116,4 @@ async function loadPreviewService(scheduledServiceId, knex = db) {
   };
 }
 
-module.exports = { loadPreviewService, NO_PREVIEW_STATUSES };
+module.exports = { loadPreviewService, NO_PREVIEW_STATUSES, PREVIEW_LINES };
