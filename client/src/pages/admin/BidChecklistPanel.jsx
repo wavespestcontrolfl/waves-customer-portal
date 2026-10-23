@@ -60,10 +60,17 @@ function Details({ bid, busy, save }) {
         <Input type="datetime-local" value={form.questions ?? ""} onChange={set("questions")} />
       </Field>
       <div className="grid gap-1">
-        <Field id="bid-walk" label="Site visit or job walk (Eastern time)" help="Reminds the bell 2 days before.">
+        <Field id="bid-walk" label="Site visit or job walk (Eastern time)" help="Reminds the bell 2 days before, once the date is confirmed.">
           <Input type="datetime-local" value={form.walk ?? ""} onChange={set("walk")} />
         </Field>
         <Checkbox id="bid-walk-mandatory" label="Mandatory" checked={!!form.mandatory} onChange={set("mandatory")} />
+        {bid.job_walk_at && !bid.job_walk_confirmed && (
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge tone="warn">Unconfirmed</Badge>
+            <span className="text-ui-caption text-ink-secondary">Read from the invite. No reminder until you confirm it.</span>
+            <Button size="sm" variant="secondary" disabled={busy} onClick={() => save({ jobWalkConfirmed: true }, "Site visit date confirmed")}>Confirm site visit date</Button>
+          </div>
+        )}
       </div>
       <div>
         <Button disabled={busy} onClick={() => save({

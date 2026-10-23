@@ -51,6 +51,7 @@ const checklistPatchSchema = Joi.object({
   questionsDueAt: etWallTime,
   jobWalkAt: etWallTime,
   jobWalkMandatory: Joi.boolean().strict(),
+  jobWalkConfirmed: Joi.boolean().strict().valid(true),
   estimateId: Joi.string().uuid().allow(null),
   submittedAt: etWallTime,
   submissionConfirmation: Joi.string().trim().max(500).allow('', null),
@@ -145,6 +146,13 @@ function buildPatch(bid, value) {
     if (!parsed.ok) return { error: { status: 400, body: { error: `${key} is not a real date` } } };
     patch[key] = parsed.at;
     if (!sameInstantOrBothNull(bid[key], parsed.at)) patch[DATE_STAMPS[key]] = null;
+    // A site-visit date the operator typed is the confirmed date (retyping keeps it); clearing it un-confirms.
+    if (key === 'job_walk_at') patch.job_walk_confirmed = parsed.at !== null;
+  }
+  // Confirm a template-read site-visit date as read, without retyping it (the page's "Confirm site visit date").
+  if (value.jobWalkConfirmed === true && value.job_walk_at === undefined) {
+    if (!bid.job_walk_at) return { error: { status: 400, body: { error: 'There is no site visit date to confirm' } } };
+    patch.job_walk_confirmed = true;
   }
   const dates = datePatch(bid, value);
   if (dates.error) return dates;

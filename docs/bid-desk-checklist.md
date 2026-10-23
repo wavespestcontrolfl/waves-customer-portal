@@ -11,7 +11,7 @@ Nothing here is sent to a buyer, a general contractor or an agency. The only out
 | Solicitation type | `bid_opportunities.solicitation_type` | quote, itb, rfq, rfp, itn, federal, gc_subcontract, other. Checked by the database. |
 | Scored or pass/fail | `scored` | true = scored proposal, false = pass/fail, NULL = not set. |
 | Questions due | `questions_due_at` | Typed by the operator (Eastern time). Never read from mail, so a value counts as confirmed. |
-| Job walk | `job_walk_at`, `job_walk_mandatory` | The date may be read from a BuildingConnected invite. A mandatory walk is named so in its reminder. |
+| Job walk | `job_walk_at`, `job_walk_mandatory`, `job_walk_confirmed` | The date may be read from a BuildingConnected or Procore invite; a read date is unconfirmed. A date the operator types is confirmed (retyping keeps it, clearing resets it). "Confirm site visit date" (`jobWalkConfirmed: true`) confirms a read date without retyping. A mandatory walk is named so in its reminder. |
 | Estimate and proposal | `estimate_id` | Must be an existing estimate. The page links to `/admin/estimates/:id/proposal`. |
 | Documents | read-only, from `email_attachments` | Every attachment of every email linked to the bid. Listed by reference; downloaded through `/api/admin/email/message/:emailId/attachment/:attachmentId`. No file is copied. |
 | Checklist | `bid_checklist_items` | See below. |
@@ -22,11 +22,12 @@ Nothing here is sent to a buyer, a general contractor or an agency. The only out
 `shared/bid-checklist-templates.cjs` is the one place to edit the wording. It holds the ten-line bid-form check (the base list) and the lines each type adds:
 
 - quote: written quote on the agency's own form, references, insurance certificate;
+- gc_subcontract: the GC's bid form with every acknowledgment line initialed, the GC's prequalification form, insurance that meets the GC's insurance exhibit, price hold period stated and met, alternates and deducts priced, warranty terms matching the specification (model: the Cove + Willoughby termite package);
 - itb: the five papers Sarasota County Schools asked for with bid 24-0118;
 - rfp: section order, evaluation criteria with page references, page limits, separate price, references;
 - federal: SAM registration, reps and certs, SF 1449, wage determination.
 
-A type with no overlay (rfq, itn, gc_subcontract, other) gets the base list only.
+An RFQ uses the quote lines and an ITN uses the RFP lines (same keys, so changing between them adds nothing twice). `other` gets the base list only.
 
 Routes (all under `/api/admin/bid-desk/:id/checklist`, 404 while the gate is off):
 
@@ -47,9 +48,9 @@ Admin bell only. Each fires once for the date it was computed for; the date is i
 | 14-day | more than 7 and at most 14 days before `due_at` | a confirmed due date |
 | 7-day, 2-day | unchanged | a confirmed due date |
 | Questions | 2 days before `questions_due_at` | the date |
-| Job walk | 2 days before `job_walk_at` | the date |
+| Job walk | 2 days before `job_walk_at` | a confirmed date (`job_walk_confirmed`) |
 
-For all of them: the bid is not historical, its status is new or bid, a SAM.gov notice is still open, and no date is flagged `needs_date_confirmation` (an addendum may move these dates; confirming the due date clears the flag). An unconfirmed due date never reminds.
+For all of them: the bid is not historical, its status is new or bid, a SAM.gov notice is still open, and no date is flagged `needs_date_confirmation` (an addendum may move these dates; confirming the due date clears the flag). An unconfirmed date never reminds: not the due date, and not a site-visit date read from an invite. The questions date is always typed, so it counts as confirmed.
 
 ## Reading the page
 

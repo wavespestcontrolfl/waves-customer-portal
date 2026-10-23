@@ -10,7 +10,7 @@ const NOW = new Date('2026-10-01T14:00:00Z'); // 10:00 ET
 const at = (ms) => new Date(NOW.getTime() + ms);
 const bid = (over = {}) => ({
   id: '11111111-2222-4333-8444-555555555555', status: 'new', historical: false, project_title: 'Sample Ridge Residences', gc_or_agency: 'Fixture Build Co',
-  due_at: null, due_confirmed: false, needs_date_confirmation: false, source_active: null, job_walk_at: null, job_walk_mandatory: false,
+  due_at: null, due_confirmed: false, needs_date_confirmation: false, source_active: null, job_walk_at: null, job_walk_mandatory: false, job_walk_confirmed: true,
   questions_due_at: null, reminder_7d_sent_at: null, reminder_2d_sent_at: null, reminder_14d_sent_at: null,
   questions_reminder_sent_at: null, job_walk_reminder_sent_at: null, ...over,
 });
@@ -77,6 +77,13 @@ describe('the questions and job-walk reminders', () => {
   test('an unconfirmed due date does not stop them (they follow their own dates)', () => {
     expect(datesDue(bid({ due_confirmed: false, job_walk_at: at(1 * DAY) }), NOW)).toEqual(['job_walk']);
   });
+
+  test('a job-walk date read from an invite (not confirmed) never reminds; the questions date still does', () => {
+    const read = { job_walk_at: at(1 * DAY), job_walk_confirmed: false, questions_due_at: at(1 * DAY) };
+    expect(datesDue(bid(read), NOW)).toEqual(['questions']);
+    expect(datesDue(bid({ ...read, job_walk_confirmed: null }), NOW)).toEqual(['questions']);
+    expect(datesDue(bid({ ...read, job_walk_confirmed: true }), NOW)).toEqual(['questions', 'job_walk']);
+  });
 });
 
 describe('notification copy follows the admin notification rule', () => {
@@ -131,14 +138,21 @@ describe('templates', () => {
     expect(base.every((r) => r.section === 'base' && r.required)).toBe(true);
   });
 
-  test('each type adds its own lines after the base; a type with no overlay gets the base only', () => {
-    expect(TEMPLATE_TYPES.sort()).toEqual(['federal', 'itb', 'quote', 'rfp']);
+  test('each type adds its own lines after the base; rfq and itn borrow the quote and rfp lines; other gets the base only', () => {
+    expect(TEMPLATE_TYPES.sort()).toEqual(['federal', 'gc_subcontract', 'itb', 'itn', 'quote', 'rfp', 'rfq']);
     expect(labels('quote').slice(10)).toHaveLength(3);
     expect(labels('itb').slice(10).join('|')).toMatch(/business license.*operator certificate.*works full-time.*Employee ID.*EPA/i);
     expect(labels('itb')).toHaveLength(15);
     expect(labels('rfp')).toHaveLength(15);
     expect(labels('federal').slice(10).join('|')).toMatch(/SAM registration.*SF 1449.*Wage determination/);
-    for (const type of ['rfq', 'itn', 'gc_subcontract', 'other', null, undefined]) expect(templateRows(type)).toHaveLength(10);
+    // RFQ is a request for quotes: the quote lines, with the same keys, so a type change adds nothing twice.
+    expect(templateRows('rfq')).toEqual(templateRows('quote'));
+    expect(templateRows('itn')).toEqual(templateRows('rfp'));
+    const gc = templateRows('gc_subcontract');
+    expect(gc).toHaveLength(16);
+    expect(gc.slice(10).map((r) => r.section)).toEqual(Array(6).fill('gc_subcontract'));
+    expect(gc.slice(10).map((r) => r.label).join('|')).toMatch(/bid form completed, every acknowledgment line initialed \(escalation, price hold period, sales tax, addenda listed\).*prequalification.*insurance exhibit.*additional insured.*Price hold period stated and met.*Alternates and deducts.*Warranty terms match the specification.*spec sections and drawings/i);
+    for (const type of ['other', null, undefined]) expect(templateRows(type)).toHaveLength(10);
   });
 
   test('every key is unique, stable-looking and fits the column; every section fits too', () => {

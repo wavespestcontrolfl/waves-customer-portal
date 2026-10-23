@@ -52,7 +52,7 @@ afterEach(() => { delete process.env.GATE_BID_DESK; delete process.env.GATE_BID_
 
 const NEW_FIELDS = [
   { solicitationType: 'rfp' }, { scored: true }, { questionsDueAt: '2026-10-05T14:00' }, { jobWalkAt: '2026-10-05T14:00' },
-  { jobWalkMandatory: true }, { estimateId: ID }, { submittedAt: '2026-10-05T14:00' }, { submissionConfirmation: 'Receipt 55' },
+  { jobWalkMandatory: true }, { jobWalkConfirmed: true }, { estimateId: ID }, { submittedAt: '2026-10-05T14:00' }, { submissionConfirmation: 'Receipt 55' },
 ];
 
 describe('the reader', () => {
@@ -116,6 +116,8 @@ describe('gate on', () => {
       ['PATCH', `/${ID}`, { solicitationType: 'carrier_pigeon' }, 400],
       ['PATCH', `/${ID}`, { scored: 'yes' }, 400],
       ['PATCH', `/${ID}`, { jobWalkMandatory: 'true' }, 400],
+      ['PATCH', `/${ID}`, { jobWalkConfirmed: false }, 400],
+      ['PATCH', `/${ID}`, { jobWalkConfirmed: 'true' }, 400],
       ['PATCH', `/${ID}`, { estimateId: 'EST-1001' }, 400],
       ['PATCH', `/${ID}`, { questionsDueAt: 'October 5' }, 400],
       ['PATCH', `/${ID}`, { submissionConfirmation: 'x'.repeat(501) }, 400],

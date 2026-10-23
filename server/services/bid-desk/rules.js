@@ -72,10 +72,11 @@ function reminderDue(bid, now = new Date(), { checklist = false } = {}) {
 /**
  * The date reminders of GATE_BID_CHECKLIST: ['questions'] and / or ['job_walk'], each owed once, 2 days before its date.
  * The caller checks the gate. The same eligibility as the due-date reminders: an open bid that is not historical, a
- * notice still open on SAM.gov, and no date waiting on an addendum check (an addendum may move these dates too, and
- * a job-walk date can be read from an invite). A questions date is never read from mail, so a value there was typed by
- * the operator and counts as confirmed. Changing a date clears its sent stamp (the route), so each fires once for the
- * date it was computed for.
+ * notice still open on SAM.gov, and no date waiting on an addendum check (an addendum may move these dates too). A
+ * questions date is never read from mail, so a value there was typed by the operator and counts as confirmed. A
+ * job-walk date can be read from an invite, so it reminds only once `job_walk_confirmed` is true (the operator typed it
+ * or confirmed it as read). Changing a date clears its sent stamp (the route), so each fires once for the date it was
+ * computed for.
  */
 function datesDue(bid, now = new Date()) {
   if (!bid || bid.historical || bid.needs_date_confirmation || bid.source_active === false) return [];
@@ -87,7 +88,7 @@ function datesDue(bid, now = new Date()) {
   };
   const due = [];
   if (within(bid.questions_due_at) && !bid.questions_reminder_sent_at) due.push('questions');
-  if (within(bid.job_walk_at) && !bid.job_walk_reminder_sent_at) due.push('job_walk');
+  if (bid.job_walk_confirmed === true && within(bid.job_walk_at) && !bid.job_walk_reminder_sent_at) due.push('job_walk');
   return due;
 }
 

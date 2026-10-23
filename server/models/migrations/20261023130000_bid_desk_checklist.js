@@ -6,6 +6,8 @@
  *   solicitation_type         'quote' | 'itb' | 'rfq' | 'rfp' | 'itn' | 'federal' | 'gc_subcontract' | 'other'; NULL = not set
  *   scored                    true = scored proposal, false = pass/fail; NULL = not set
  *   job_walk_mandatory        the job walk is required to bid (default false); the job-walk reminder says so
+ *   job_walk_confirmed        true once the operator typed the site-visit date or confirmed the one read from an invite;
+ *                             a template-read date stays false, and the job-walk reminder needs true (default false)
  *   estimate_id               the estimate (and its proposal) prepared for this bid; ON DELETE SET NULL
  *   submitted_at              when the bid was handed in (what the operator typed)
  *   submission_confirmation   the confirmation number or the words of the receipt
@@ -35,6 +37,7 @@ exports.up = async function up(knex) {
     solicitation_type: await missing('solicitation_type'),
     scored: await missing('scored'),
     job_walk_mandatory: await missing('job_walk_mandatory'),
+    job_walk_confirmed: await missing('job_walk_confirmed'),
     estimate_id: await missing('estimate_id'),
     submitted_at: await missing('submitted_at'),
     submission_confirmation: await missing('submission_confirmation'),
@@ -47,6 +50,7 @@ exports.up = async function up(knex) {
       if (add.solicitation_type) t.string('solicitation_type', 16).nullable();
       if (add.scored) t.boolean('scored').nullable();
       if (add.job_walk_mandatory) t.boolean('job_walk_mandatory').notNullable().defaultTo(false);
+      if (add.job_walk_confirmed) t.boolean('job_walk_confirmed').notNullable().defaultTo(false);
       if (add.estimate_id) t.uuid('estimate_id').nullable().references('id').inTable('estimates').onDelete('SET NULL');
       if (add.submitted_at) t.timestamp('submitted_at', { useTz: true }).nullable();
       if (add.submission_confirmation) t.text('submission_confirmation').nullable();
@@ -85,7 +89,7 @@ exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable(BIDS))) return;
   await knex.raw('DROP INDEX IF EXISTS bid_opportunities_estimate');
   await knex.raw(`ALTER TABLE ${BIDS} DROP CONSTRAINT IF EXISTS bid_opportunities_solicitation_type_check`);
-  const columns = ['solicitation_type', 'scored', 'job_walk_mandatory', 'estimate_id', 'submitted_at', 'submission_confirmation',
+  const columns = ['solicitation_type', 'scored', 'job_walk_mandatory', 'job_walk_confirmed', 'estimate_id', 'submitted_at', 'submission_confirmation',
     'reminder_14d_sent_at', 'questions_reminder_sent_at', 'job_walk_reminder_sent_at'];
   const present = [];
   for (const column of columns) if (await knex.schema.hasColumn(BIDS, column)) present.push(column);

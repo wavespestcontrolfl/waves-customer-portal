@@ -17,7 +17,7 @@ const reply = (body, { ok = true, status = 200 } = {}) => Promise.resolve({ ok, 
 const bid = (over = {}) => ({
   id: "b1", source: "buildingconnected", status: "new", historical: false, project_title: "Sample Ridge Residences",
   gc_or_agency: "Fixture Build Co", due_at: "2026-10-21T03:59:00.000Z", due_confirmed: true, needs_date_confirmation: false,
-  job_walk_at: null, questions_due_at: null, job_walk_mandatory: false, decision_note: null, days_left: 19, email_count: 1,
+  job_walk_at: null, questions_due_at: null, job_walk_mandatory: false, job_walk_confirmed: false, decision_note: null, days_left: 19, email_count: 1,
   first_subject: "Invite", updated_at: "2026-10-02T12:00:00.000Z", solicitation_type: null, scored: null, estimate_id: null,
   submitted_at: null, submission_confirmation: null, checklist_progress: { checked: 7, required: 12 }, ...over,
 });
@@ -158,4 +158,28 @@ it("invites the submission record when Submitted is chosen, and saves it without
   await waitFor(() => expect(patch).toHaveBeenCalledTimes(2));
   expect(patch.mock.calls[1][0].body).toEqual({ submittedAt: null, submissionConfirmation: "Receipt 55" });
   expect(within(screen.getByTestId("bid-checklist-panel")).getByText("Submission record")).toBeInTheDocument();
+});
+
+it("shows a template-read site visit date as unconfirmed and confirms it without retyping", async () => {
+  const confirm = vi.fn(() => reply({ ok: true, bid: bid({ job_walk_at: "2026-10-09T13:30:00.000Z", job_walk_confirmed: true }) }));
+  route({
+    "GET /admin/bid-desk/": LIST_ON,
+    "GET /admin/bid-desk/b1": () => reply(detail({ bid: bid({ job_walk_at: "2026-10-09T13:30:00.000Z", job_walk_confirmed: false }) })),
+    "PATCH /admin/bid-desk/b1": confirm,
+  });
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "Confirm site visit date" }));
+  await waitFor(() => expect(confirm).toHaveBeenCalled());
+  expect(confirm.mock.calls[0][0].body).toEqual({ jobWalkConfirmed: true });
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Confirm site visit date" })).toBeNull());
+});
+
+it("shows no confirm button for a confirmed site visit date or when there is none", async () => {
+  route({
+    "GET /admin/bid-desk/": LIST_ON,
+    "GET /admin/bid-desk/b1": () => reply(detail({ bid: bid({ job_walk_at: "2026-10-09T13:30:00.000Z", job_walk_confirmed: true }) })),
+  });
+  renderPage();
+  await screen.findByLabelText(/Site visit or job walk/);
+  expect(screen.queryByRole("button", { name: "Confirm site visit date" })).toBeNull();
 });

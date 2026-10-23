@@ -69,7 +69,7 @@ const BID_COLUMNS = [
 
 // The columns GATE_BID_CHECKLIST adds, read only when the gate is on (the Bid Desk reads exactly BID_COLUMNS without it).
 const BID_CHECKLIST_COLUMNS = [
-  'solicitation_type', 'scored', 'job_walk_mandatory', 'estimate_id', 'submitted_at', 'submission_confirmation',
+  'solicitation_type', 'scored', 'job_walk_mandatory', 'job_walk_confirmed', 'estimate_id', 'submitted_at', 'submission_confirmation',
 ];
 const columnsFor = () => (bidChecklistLive() ? [...BID_COLUMNS, ...BID_CHECKLIST_COLUMNS] : BID_COLUMNS);
 
@@ -451,8 +451,9 @@ async function sendDateReminders({ now = new Date() } = {}) {
     .where({ historical: false, needs_date_confirmation: false })
     .whereRaw('source_active IS DISTINCT FROM false')
     .whereIn('status', ['new', 'bid'])
+    // A questions date is typed (confirmed); a job-walk date needs the operator's confirmation.
     .where((q) => q.where(window('questions_due_at', 'questions_reminder_sent_at'))
-      .orWhere(window('job_walk_at', 'job_walk_reminder_sent_at')))
+      .orWhere((w) => w.where('job_walk_confirmed', true).where(window('job_walk_at', 'job_walk_reminder_sent_at'))))
     .orderBy('updated_at').limit(REMINDER_LIMIT).select('id');
   let sent = 0;
   for (const { id } of candidates) {

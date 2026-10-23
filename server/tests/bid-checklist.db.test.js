@@ -111,7 +111,7 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
 
   describe('migration', () => {
     test('down removes the table and every column, up restores them, and a second up changes nothing', async () => {
-      const columns = ['solicitation_type', 'scored', 'job_walk_mandatory', 'estimate_id', 'submitted_at', 'submission_confirmation',
+      const columns = ['solicitation_type', 'scored', 'job_walk_mandatory', 'job_walk_confirmed', 'estimate_id', 'submitted_at', 'submission_confirmation',
         'reminder_14d_sent_at', 'questions_reminder_sent_at', 'job_walk_reminder_sent_at'];
       await migration.down(mockPg);
       expect(await mockPg.schema.hasTable('bid_checklist_items')).toBe(false);
@@ -127,7 +127,7 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
       const bidId = await newBid();
       await expect(mockPg.transaction((t) => t('bid_opportunities').where({ id: bidId }).update({ solicitation_type: 'carrier_pigeon' }))).rejects.toThrow(/solicitation_type_check/);
       for (const type of migration.TYPES) await mockPg('bid_opportunities').where({ id: bidId }).update({ solicitation_type: type });
-      expect(await bidRow(bidId)).toMatchObject({ job_walk_mandatory: false, scored: null, estimate_id: null, submitted_at: null });
+      expect(await bidRow(bidId)).toMatchObject({ job_walk_mandatory: false, job_walk_confirmed: false, scored: null, estimate_id: null, submitted_at: null });
       const est = await estimate();
       await mockPg('bid_opportunities').where({ id: bidId }).update({ estimate_id: est.id });
       await mockPg('bid_checklist_items').insert({ bid_id: bidId, position: 1, section: 'custom', label: 'Line' });
@@ -186,7 +186,7 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
       });
       expect(res.status).toBe(200);
       const row = await bidRow(bidId);
-      expect(row).toMatchObject({ solicitation_type: 'itb', scored: false, job_walk_mandatory: true, estimate_id: est.id, submission_confirmation: 'Receipt 55' });
+      expect(row).toMatchObject({ solicitation_type: 'itb', scored: false, job_walk_mandatory: true, job_walk_confirmed: true, estimate_id: est.id, submission_confirmation: 'Receipt 55' });
       expect(row.questions_due_at.toISOString()).toBe('2026-10-08T21:00:00.000Z'); // 17:00 ET (EDT)
       expect(row.job_walk_at.toISOString()).toBe('2026-10-09T13:30:00.000Z');
       expect(row.submitted_at.toISOString()).toBe('2026-10-19T19:45:00.000Z');
@@ -403,7 +403,7 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
     });
 
     test('an unconfirmed, flagged, historical or decided bid gets none of the three kinds', async () => {
-      const soon = { questions_due_at: at(1), job_walk_at: at(1) };
+      const soon = { questions_due_at: at(1), job_walk_at: at(1), job_walk_confirmed: true };
       await newBid({ due_at: at(10), due_confirmed: false, ...soon });
       await newBid({ due_at: at(10), due_confirmed: true, needs_date_confirmation: true, ...soon });
       await newBid({ due_at: at(10), due_confirmed: true, historical: true, ...soon });
@@ -432,8 +432,8 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
     });
 
     test('job walk: once, 2 days before; the copy says mandatory only for a mandatory walk', async () => {
-      const mandatory = await newBid({ job_walk_at: at(1.5), job_walk_mandatory: true });
-      const optional = await newBid({ job_walk_at: at(1.5) });
+      const mandatory = await newBid({ job_walk_at: at(1.5), job_walk_confirmed: true, job_walk_mandatory: true });
+      const optional = await newBid({ job_walk_at: at(1.5), job_walk_confirmed: true });
       expect(await service.sendDueReminders({ now: NOW })).toBe(2);
       expect(await service.sendDueReminders({ now: NOW })).toBe(0);
       const byBid = Object.fromEntries(raiseAdminAlertWithReopen.mock.calls.map(([, headline, , opts]) => [opts.metadata.bidId, { headline, key: opts.dedupeKey, detail: opts.detail }]));
@@ -445,7 +445,7 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
     });
 
     test('changing a date clears its stamp (and only its stamp) so the new date reminds once more', async () => {
-      const id = await newBid({ due_at: at(10), due_confirmed: true, questions_due_at: at(1), job_walk_at: at(1) });
+      const id = await newBid({ due_at: at(10), due_confirmed: true, questions_due_at: at(1), job_walk_at: at(1), job_walk_confirmed: true });
       expect(await service.sendDueReminders({ now: NOW })).toBe(3);
       expect(await bidRow(id)).toMatchObject({ reminder_14d_sent_at: expect.any(Date), questions_reminder_sent_at: expect.any(Date), job_walk_reminder_sent_at: expect.any(Date) });
 
@@ -473,8 +473,51 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
       expect(rungKeys().map((k) => k.split(':').slice(0, 2).join(':')).sort()).toEqual(['bid-desk:remind', 'bid-desk:remind-jobwalk']);
     });
 
+    describe('the site-visit date confirmation', () => {
+      const wall = (date) => new Date(date.getTime() - 4 * 60 * 60 * 1000).toISOString().slice(0, 16); // ET wall time in October
+
+      test('a job-walk date read from a template is not confirmed and never reminds; confirming it reminds once', async () => {
+        // The invite carries "Job Walk: October 2, 2026" (read as a date with no time, stored at 23:59 ET).
+        const { bidId } = await service.ingestEmail(await storeEmail({ body_text: BC_BODY.replace('Bid Due:', 'Job Walk: October 2, 2026\nBid Due:') }));
+        const read = await bidRow(bidId);
+        expect(read.job_walk_at).not.toBeNull();
+        expect(read.job_walk_confirmed).toBe(false);
+        const now = new Date(read.job_walk_at.getTime() - 1.5 * DAY);
+        expect(await service.sendDueReminders({ now })).toBe(0);
+        expect(raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+        const confirmed = await call('PATCH', `/${bidId}`, { jobWalkConfirmed: true });
+        expect(confirmed.status).toBe(200);
+        expect(await bidRow(bidId)).toMatchObject({ job_walk_confirmed: true });
+        expect((await bidRow(bidId)).job_walk_at.toISOString()).toBe(read.job_walk_at.toISOString());
+        expect(await service.sendDueReminders({ now })).toBe(1);
+        expect(await service.sendDueReminders({ now })).toBe(0);
+        expect(rungKeys()).toEqual([`bid-desk:remind-jobwalk:${bidId}:${read.job_walk_at.toISOString()}`]);
+      });
+
+      test('retyping the date keeps it confirmed; clearing it resets, and a confirmation needs a date', async () => {
+        const id = await newBid({ job_walk_at: at(5), job_walk_confirmed: false });
+        expect((await call('PATCH', `/${id}`, { jobWalkAt: wall(at(6)) })).status).toBe(200);
+        expect((await bidRow(id)).job_walk_confirmed).toBe(true);
+        expect((await call('PATCH', `/${id}`, { jobWalkAt: wall(at(7)) })).status).toBe(200);
+        expect((await bidRow(id)).job_walk_confirmed).toBe(true);
+        expect((await call('PATCH', `/${id}`, { jobWalkAt: null })).status).toBe(200);
+        expect(await bidRow(id)).toMatchObject({ job_walk_at: null, job_walk_confirmed: false });
+        const refused = await call('PATCH', `/${id}`, { jobWalkConfirmed: true });
+        expect(refused.status).toBe(400);
+        expect((await bidRow(id)).job_walk_confirmed).toBe(false);
+      });
+
+      test('the gate off refuses jobWalkConfirmed and leaves the flag alone', async () => {
+        const id = await newBid({ job_walk_at: at(2), job_walk_confirmed: false });
+        delete process.env.GATE_BID_CHECKLIST;
+        expect((await call('PATCH', `/${id}`, { jobWalkConfirmed: true })).status).toBe(400);
+        expect((await bidRow(id)).job_walk_confirmed).toBe(false);
+        expect((await call('GET', `/${id}`)).body.bid).not.toHaveProperty('job_walk_confirmed');
+      });
+    });
+
     test('clearing a date retires its reminder, and a decision closes them all', async () => {
-      const id = await newBid({ due_at: at(10), due_confirmed: true, questions_due_at: at(1), job_walk_at: at(1) });
+      const id = await newBid({ due_at: at(10), due_confirmed: true, questions_due_at: at(1), job_walk_at: at(1), job_walk_confirmed: true });
       const dueIso = (await bidRow(id)).due_at.toISOString();
       const keys = {
         questions: `bid-desk:remind-questions:${id}:${(await bidRow(id)).questions_due_at.toISOString()}`,
@@ -499,7 +542,7 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
     });
 
     test('all three reminders ring through the shared reopen path with a headline and a why', async () => {
-      await newBid({ due_at: at(10), due_confirmed: true, questions_due_at: at(1), job_walk_at: at(1), job_walk_mandatory: true });
+      await newBid({ due_at: at(10), due_confirmed: true, questions_due_at: at(1), job_walk_at: at(1), job_walk_confirmed: true, job_walk_mandatory: true });
       await service.sendDueReminders({ now: NOW });
       // The mocked reopen path asserts a non-empty headline and why for each; the real composer is the one the rules test runs.
       expect(raiseAdminAlertWithReopen).toHaveBeenCalledTimes(3);
