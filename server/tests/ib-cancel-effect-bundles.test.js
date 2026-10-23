@@ -743,6 +743,33 @@ describe('the hard stop and a visit that is no longer cancelled', () => {
     expect(mockRaised[0].spec.severity).toBe('needs-you');
   });
 
+  test('abandoned after the money steps ran: the receipt keeps their saved outcome and never says NOT run', async () => {
+    const row = seedBundle({
+      followthrough_done_at: new Date(mockNow.getTime() - 5 * MIN),
+      followthrough_outcome: { money_skipped: [{ kind: 'invoice', id: 'inv-1', reason: 'paid_since_card' }], linked_skipped: [] },
+    });
+    mockStore.visits[0].status = 'confirmed';
+    mockStore.history.push({ id: 2, job_id: SERVICE, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: new Date(mockNow.getTime() - 2 * MIN) });
+    await svc.sweepIbCancelBundles();
+    expect(row.status).toBe('abandoned');
+    const result = mockRecordResult.mock.calls[0][1];
+    expect(result.warning).not.toMatch(/NOT run/);
+    expect(result.warning).toMatch(/had finished before the change/);
+    expect(result.warning).toMatch(/invoice inv-1/);
+    expect(result.money_skipped).toEqual([{ kind: 'invoice', id: 'inv-1', reason: 'paid_since_card' }]);
+    expect(mockRaised[0].opts.detail).toMatch(/may already have run/);
+  });
+
+  test('abandoned before the recovery ran anything: still says the original request may have done some', async () => {
+    seedBundle();
+    mockStore.visits[0].status = 'confirmed';
+    mockStore.history.push({ id: 2, job_id: SERVICE, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: new Date(mockNow.getTime() - 2 * MIN) });
+    await svc.sweepIbCancelBundles();
+    const result = mockRecordResult.mock.calls[0][1];
+    expect(result.warning).not.toMatch(/NOT run/);
+    expect(result.warning).toMatch(/original request may have done some/);
+  });
+
   test('cancelled, restored and cancelled again by someone else: the old bundle is abandoned', async () => {
     seedBundle();
     mockStore.history.push(

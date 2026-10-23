@@ -640,26 +640,43 @@ async function finishRecovered(bundle, token, ft, notice) {
   });
 }
 
+// What is known about the steps when the recovery stops: the saved results of the steps that ended, and the plain fact that
+// the original request may have done some of the rest before it stopped (nothing is ever proven "not run").
+function abandonedLines(bundle, partial) {
+  const done = bundle.followthrough_done_at ? bundle.followthrough_outcome || {} : null;
+  const lines = [
+    done ? 'The invoice, credit and linked-visit steps had finished before the change.' : 'The invoice, credit and linked-visit steps were not confirmed finished.',
+    ...(done ? followThroughLines(done) : []),
+    ...(bundle.notice_outcome ? noticeLines(bundle, bundle.notice_outcome) : []),
+    partial || done
+      ? 'Some steps may already have run before the change. Check the visit, its invoices and its linked visits.'
+      : 'The recovery ran none of them, but the original request may have done some before it stopped. Check the visit, its invoices and its linked visits.',
+  ];
+  return lines;
+}
+
 async function finishAbandoned(bundle, token, reason, partial = false) {
   await assertStillOwned(bundle.id, token);
   const info = await visitInfo(bundle);
+  const lines = abandonedLines(bundle, partial);
   await recordOnPendingAction(bundle, withVisitFacts({
     success: true,
     appointment_id: bundle.scheduled_service_id,
     ran_dispatch_cancel: true,
     recovered_after_interruption: true,
-    warning: `The visit is no longer the cancelled visit the card approved (${plain(reason)}), so the approved follow-on steps were ${partial ? 'stopped' : 'NOT run'}. Check the visit's invoices, linked visits and message history.`,
+    ...(bundle.followthrough_done_at && bundle.followthrough_outcome && bundle.followthrough_outcome.money_skipped && bundle.followthrough_outcome.money_skipped.length ? { money_skipped: bundle.followthrough_outcome.money_skipped } : {}),
+    warning: `The visit is no longer the cancelled visit the card approved (${plain(reason)}), so the recovery stopped. ${lines.join(' ')}`,
   }, info));
   await tellOffice(bundle, info, {
     review: true,
     action: (name) => `check ${name}'s visit`,
     why: partial
       ? 'The visit was restored while its cancel steps ran, so the rest were stopped.'
-      : 'The visit is no longer cancelled, so the approved cancel steps were not run.',
+      : 'The visit is no longer cancelled, so the recovery stopped; some steps may have run.',
     lines: [
       `Approved on the card: ${pinnedSummary(bundle)}.`,
       `Why it stopped: ${plain(reason)}.`,
-      ...(partial ? ['Some steps may already have run before the change. Check the visit, its invoices and its linked visits.'] : []),
+      ...lines,
     ],
   });
   await ownedUpdate(bundle.id, token, {
