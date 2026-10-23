@@ -755,3 +755,22 @@ describe('pre-push audit: a corrective-work row with a generic family keeps a mi
   });
 });
 
+describe('Codex round 9: whole-number refills, misting plan ownership', () => {
+  const { priceMosquitoMisting } = require('../services/pricing-engine/service-pricing');
+  test('a fractional refill count is invalid (reason + default), a whole number is kept', () => {
+    const bad = priceMosquitoMisting({}, { tier: 'smart', refillsPerYear: 4.5 });
+    expect(bad.refill.refillsPerYear).toBe(4);
+    expect(bad.manualReviewReasons).toContain('mosquito_misting_invalid_refills');
+    expect(priceMosquitoMisting({}, { tier: 'smart', refillsPerYear: 6 }).refill.refillsPerYear).toBe(6);
+  });
+  test('an active misting plan row is owned under mosquito_misting, never as barrier mosquito, and never qualifies', () => {
+    const svc = require('../services/waveguard-existing-services');
+    expect(svc.ownershipKeysForRow({ service_type: 'Mosquito Misting Service Plan' })).toEqual(['mosquito_misting']);
+    expect(svc.ownershipKeysForRow({ service_key: 'mosquito_misting', service_name: 'Mosquito Misting Service Plan' })).toEqual(['mosquito_misting']);
+    expect(svc.ownershipKeysForRow({ service_type: 'Monthly Mosquito Control Service' })).toEqual(['mosquito']);
+    const qualifying = svc.toQualifyingKeys || svc.qualifyingKeysForRow;
+    if (typeof svc.qualifyingKeysForRow === 'function') expect(svc.qualifyingKeysForRow({ service_type: 'Mosquito Misting Service Plan' })).toEqual([]);
+    else if (typeof qualifying === 'function') expect(qualifying('Mosquito Misting Service Plan')).toEqual([]);
+  });
+});
+

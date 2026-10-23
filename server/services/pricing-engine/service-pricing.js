@@ -5087,7 +5087,8 @@ function resolveMistingRisers(raw, basis, reasons) {
 }
 function resolveMistingRefills(raw, basis, reasons) {
   let refillsPerYear = raw == null ? basis.defaultRefillsPerYear : Number(raw);
-  if (!Number.isFinite(refillsPerYear) || refillsPerYear < 0 || refillsPerYear > basis.maxRefillsPerYear) {
+  // Refills are discrete applications: a whole number from 0 to the stamped cap (Codex #6503 r9).
+  if (!Number.isInteger(refillsPerYear) || refillsPerYear < 0 || refillsPerYear > basis.maxRefillsPerYear) {
     reasons.push('mosquito_misting_invalid_refills');
     refillsPerYear = basis.defaultRefillsPerYear;
   }

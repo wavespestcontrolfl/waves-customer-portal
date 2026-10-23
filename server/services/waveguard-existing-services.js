@@ -595,12 +595,16 @@ function ownershipFamiliesFromText(raw) {
   if (/one[\s_-]?time|onetime/.test(s)) return [];
   const keys = toQualifyingKeys(s);
   const add = (key) => { if (!keys.includes(key)) keys.push(key); };
+  // The misting system is OWNED under its own canonical key, residential or commercial (plan context, recommendations and
+  // duplicate-coverage checks see the live plan), but never claims barrier-mosquito ownership and never qualifies for a
+  // WaveGuard tier: toQualifyingKeys above leaves it out (Codex #6503 r9).
+  if (isMistingSystemIdentity(raw)) add('mosquito_misting');
   if (s.includes('commercial')) {
     const rodentLed = isRodentLedText(s);
     if (s.includes('pest') && !rodentLed) add('pest_control');
     if (s.includes('lawn') || s.includes('turf')) add('lawn_care');
     if (!/\bpalms?\b/.test(s) && (s.includes('tree') || s.includes('shrub') || s.includes('ornamental'))) add('tree_shrub');
-    if (s.includes('mosquito') && !isMistingSystemIdentity(raw)) add('mosquito');
+    else if (s.includes('mosquito') && !isMistingSystemIdentity(raw)) add('mosquito');
   }
   // Rodent ownership means the BAIT-MONITORING product (codex #3253 r4):
   // trapping / exclusion / rodent_general_one_time are distinct specialties
