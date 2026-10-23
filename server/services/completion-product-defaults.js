@@ -360,6 +360,15 @@ function emptyResult(serviceId) {
   };
 }
 
+// The property's ordinance zone, read as the closeout reads it. A visit with no property, or a property that cannot be read,
+// keeps the conservative Sarasota/Manatee rule (an unknown zone).
+async function propertyOrdinanceZone(db, propertyId) {
+  const place = propertyId
+    ? await db('customer_properties').where({ id: propertyId }).first('city', 'address_line1').catch(() => null)
+    : null;
+  return inferTreeShrubOrdinanceZone({ city: place?.city, address: place?.address_line1 });
+}
+
 // The route-facing orchestrator: loads the scheduled service + its
 // service_key/service_type/month, resolves the default product NAMES
 // (pure, above), then resolves each name to an active catalog row.
@@ -402,12 +411,7 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
     } else if (resolved.programKey === 'tree_shrub') {
       // Legacy service defaults are not reviewed T&S treatment choices.
       if (resolved.source !== 'protocol_visit') return { ...empty, programKey: 'tree_shrub' };
-      // The property's ordinance zone, read as the closeout reads it; a property that cannot be read keeps the conservative
-      // Sarasota/Manatee rule (an unknown zone).
-      const place = scheduled.property_id
-        ? await db('customer_properties').where({ id: scheduled.property_id }).first('city', 'address_line1').catch(() => null)
-        : null;
-      const zone = inferTreeShrubOrdinanceZone({ city: place?.city, address: place?.address_line1 });
+      const zone = await propertyOrdinanceZone(db, scheduled.property_id);
       const applicable = await filterTreeShrubDefaults({ db, scheduled, entries: resolved.entries, zone });
       resolved.entries = applicable.entries;
       holds = applicable.holds;

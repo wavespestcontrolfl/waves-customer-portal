@@ -242,7 +242,7 @@ function productRow(product, { method, last = null, added = false, bedSqft = nul
     totalAmount: seeded.amount,
     amountUnit: seeded.unit,
     fromLast: seeded.amount !== '',
-    ...(needsBedArea(product) ? { needsArea: true, areaValue: Number(bedSqft) > 0 ? String(Number(bedSqft)) : '' } : {}),
+    ...(needsBedArea(product) ? { needsArea: true, areaValue: positiveOrNull(bedSqft) ? String(positiveOrNull(bedSqft)) : '' } : {}),
   };
 }
 
@@ -324,6 +324,7 @@ const RETRYABLE_REASONS = new Set(['catalog_unavailable', 'profile_unavailable']
 
 const firstText = (...texts) => texts.find(Boolean) || '';
 const objectOrNull = (value) => (value && typeof value === 'object' ? value : null);
+const positiveOrNull = (value) => (Number(value) > 0 ? Number(value) : null);
 
 function contextFrom(data, service) {
   if (data?.eligible !== true && RETRYABLE_REASONS.has(data?.reason)) {
@@ -331,13 +332,13 @@ function contextFrom(data, service) {
   }
   // An injection never goes on this sheet (the server blocks it).
   const products = (Array.isArray(data?.products) ? data.products : []).filter((product) => product && !flagsOf(product).injection);
-  const lastVisit = data?.lastVisit && typeof data.lastVisit === 'object' ? data.lastVisit : {};
+  const lastVisit = objectOrNull(data?.lastVisit) || {};
   return {
     loading: false,
     loadError: '',
     blockedReason: blockedReasonFor(data, service),
     visit: data?.service || {},
-    bedSqft: Number(data?.bedSqft) > 0 ? Number(data.bedSqft) : null,
+    bedSqft: positiveOrNull(data?.bedSqft),
     products,
     rows: monthRows(data, products, lastVisit),
     lastVisit,

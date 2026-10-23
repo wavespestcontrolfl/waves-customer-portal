@@ -13,6 +13,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { propertyServiceAreasEnabled, resolveVisitPropertyId, reviewedAreas } = require('./property-service-areas');
 const { resolveEligibility, recapServiceIdentity, loadRecapCatalogProducts } = require('./pest-recap');
 const { resolveMonthProducts } = require('./tree-shrub-month-products');
 const {
@@ -419,17 +420,18 @@ async function filterDueMonthProducts(entries, catalog, svc, knex, serviceId, zo
   }
 }
 
-// The property's recorded bed square feet (customer_properties.bed_sqft; a primary property or a visit with no property falls
-// back to the customer's legacy figure), or null. It prefills the treated area of the 13-0-13 row, which the county cap
-// (0.75 lb per 100 sq ft) is judged against at closeout; the tech can edit it. A failed read is a blank, never a throw.
+// The property's REVIEWED bed square feet, or null. It prefills the treated area of the 13-0-13 row, which the county cap
+// (0.75 lb per 100 sq ft) is judged against at closeout; the tech can edit it. It reads the same property record and the same
+// review state as the full form's area reader (property-service-areas.js reviewedAreas): a legacy bed_sqft that no one reviewed,
+// an area service gate that is off, or no property all start the field blank, and the tech enters it (the hold already exists).
+// A failed read is a blank, never a throw.
 async function loadBedSqft(svc, knex) {
   try {
-    const positive = (value) => (Number(value) > 0 ? Number(value) : null);
-    const property = svc.property_id ? await knex('customer_properties').where({ id: svc.property_id }).first('bed_sqft', 'is_primary') : null;
-    const own = positive(property?.bed_sqft);
-    if (own || (property && property.is_primary !== true)) return own;
-    const customer = await knex('customers').where({ id: svc.customer_id }).first('bed_sqft');
-    return positive(customer?.bed_sqft);
+    if (!propertyServiceAreasEnabled()) return null;
+    const propertyId = await resolveVisitPropertyId(svc, knex);
+    const property = propertyId ? await knex('customer_properties').where({ id: propertyId, customer_id: svc.customer_id, active: true }).first() : null;
+    const beds = property?.address_line1 ? reviewedAreas(property).beds : null;
+    return beds?.reviewedAt && Number(beds.sqft) > 0 ? Number(beds.sqft) : null;
   } catch (err) {
     logger.warn(`[ts-fast-context] bed square feet unavailable: ${err?.code || err?.name || 'Error'}`);
     return null;

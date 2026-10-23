@@ -15,6 +15,13 @@ jest.mock('../services/waveguard-existing-services', () => ({
   loadLiveRecurringObligationRows: jest.fn(async () => []),
 }));
 
+// The visit's property scope is a database walk of its own (lawn-assessment-history); here it is the visit's stamped property.
+// The reviewed-area reader (reviewedAreas) and the area gate stay real.
+jest.mock('../services/property-service-areas', () => ({
+  ...jest.requireActual('../services/property-service-areas'),
+  resolveVisitPropertyId: jest.fn(async (visit) => visit.property_id || null),
+}));
+
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
 const { loadLiveRecurringObligationRows } = require('../services/waveguard-existing-services');
 const PhotoService = require('../services/photos');
@@ -848,8 +855,8 @@ describe('GATE_TS_NEONIC_CAP: the fast-context neonicCap', () => {
     const ctx = await buildTreeShrubFastContext('visit-1', knex);
     expect(ctx.eligible).toBe(true);
     expect('neonicCap' in ctx).toBe(false);
-    // The one customer_properties read is the sheet's own bed square feet prefill; the cap would add a second.
-    expect(knex.calls.filter(([table]) => table === 'customer_properties')).toHaveLength(1);
+    // The area gate is off in this suite, so the sheet's own bed-area prefill reads no property either; the cap would add a read.
+    expect(knex.calls.filter(([table]) => table === 'customer_properties')).toHaveLength(0);
   });
 
   test('gate on: what is left of Zylam at this property, a lawn visit\'s imidacloprid left out', async () => {
@@ -891,22 +898,44 @@ describe('GATE_TS_NEONIC_CAP: the fast-context neonicCap', () => {
 });
 
 
-describe('buildTreeShrubFastContext bedSqft (the 13-0-13 row\'s treated-area prefill)', () => {
+describe('buildTreeShrubFastContext bedSqft (the 13-0-13 row\'s treated-area prefill: a REVIEWED bed area only)', () => {
   const catalog = [cat('snapshot', 'Snapshot 2.5TG', { category: 'herbicide' })];
+  const { addressKey } = require('../services/customer-properties');
+  const base = { id: 'prop-1', customer_id: 'cust-1', active: true, is_primary: false, address_line1: '100 Example Court', city: 'Bradenton', state: 'FL', zip: '34201' };
+  // A property whose beds figure was reviewed in the area editor (the full form's reviewed state).
+  const reviewed = (sqft = 1200, bed = sqft) => {
+    const property = { ...base, bed_sqft: bed };
+    return { ...property, service_area_measurements: { addressKey: addressKey(property), areas: { beds: { sqft, source: 'field', reviewedAt: '2026-09-27', reviewedBy: 'tech-1' } } } };
+  };
   const build = (tables) => buildTreeShrubFastContext('visit-1', fakeKnex({ scheduled_services: visit(), products_catalog: catalog, ...tables }));
+  const priorGate = process.env.GATE_PROPERTY_SERVICE_AREAS;
   beforeEach(() => {
     resolveCompletionProfileForScheduledService.mockReset();
     resolveCompletionProfileForScheduledService.mockResolvedValue(TS_PROFILE);
+    process.env.GATE_PROPERTY_SERVICE_AREAS = 'true';
   });
-  test('the property\'s recorded bed square feet ride the context as a number', async () => {
-    expect((await build({ customer_properties: { bed_sqft: '1200', is_primary: false } })).bedSqft).toBe(1200);
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_PROPERTY_SERVICE_AREAS; else process.env.GATE_PROPERTY_SERVICE_AREAS = priorGate;
   });
-  test('a primary property with no figure falls back to the customer\'s legacy figure; a secondary one does not', async () => {
-    expect((await build({ customer_properties: { bed_sqft: null, is_primary: true }, customers: { bed_sqft: 900 } })).bedSqft).toBe(900);
-    expect((await build({ customer_properties: { bed_sqft: null, is_primary: false }, customers: { bed_sqft: 900 } })).bedSqft).toBeNull();
+  test('a reviewed bed area rides the context as a number', async () => {
+    expect((await build({ customer_properties: reviewed(1200) })).bedSqft).toBe(1200);
   });
-  test('no figure anywhere, or a failed read, is null and the sheet still loads', async () => {
-    expect((await build({ customer_properties: { bed_sqft: 0, is_primary: false } })).bedSqft).toBeNull();
+  test('a legacy bed_sqft that no one reviewed does not prefill, on the property or on the customer', async () => {
+    expect((await build({ customer_properties: { ...base, bed_sqft: 1200 } })).bedSqft).toBeNull();
+    const legacyUnreviewed = { ...base, bed_sqft: 1200, service_area_measurements: { addressKey: addressKey(base), areas: { beds: { sqft: 1200, source: 'recorded', reviewedAt: null, reviewedBy: null } } } };
+    expect((await build({ customer_properties: legacyUnreviewed })).bedSqft).toBeNull();
+    expect((await build({ customer_properties: { ...base, bed_sqft: null, is_primary: true }, customers: { bed_sqft: 900 } })).bedSqft).toBeNull();
+  });
+  test('a review that no longer matches the property (figure or address changed) does not prefill', async () => {
+    expect((await build({ customer_properties: reviewed(1200, 1500) })).bedSqft).toBeNull();
+    expect((await build({ customer_properties: { ...reviewed(1200), zip: '34202' } })).bedSqft).toBeNull();
+  });
+  test('no area anywhere, the area gate off, no property, or a failed read is null and the sheet still loads', async () => {
+    expect((await build({ customer_properties: reviewed(0) })).bedSqft).toBeNull();
+    expect((await build({ customer_properties: undefined })).bedSqft).toBeNull();
+    process.env.GATE_PROPERTY_SERVICE_AREAS = 'false';
+    expect((await build({ customer_properties: reviewed(1200) })).bedSqft).toBeNull();
+    process.env.GATE_PROPERTY_SERVICE_AREAS = 'true';
     const failed = await build({ customer_properties: new Error('down') });
     expect(failed.eligible).toBe(true);
     expect(failed.bedSqft).toBeNull();
