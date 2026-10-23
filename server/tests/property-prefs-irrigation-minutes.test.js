@@ -100,7 +100,7 @@ describe('property preferences — irrigation on by default', () => {
     // autosaves one field per PUT) — never a shared stamp, never a non-sizing edit.
     // gh-r25: the sizing list + confirmation parser live in the shared module (sweep + report use the same).
     expect(src).toMatch(/const \{ IRRIGATION_SIZING_FIELDS \} = require\('\.\.\/services\/irrigation-schedule-confirmation'\);/);
-    expect(src).toMatch(/const confirmedNow = \[\.\.\.IRRIGATION_SIZING_FIELDS, 'rain_sensor'\]\.filter\(\(f\) => f in updates\);/);
+    expect(src).toMatch(/const confirmedNow = \[\.\.\.IRRIGATION_SIZING_FIELDS, 'rain_sensor', 'irrigation_water_source'\]\.filter\(\(f\) => f in updates\);/);
     // gh-r43: confirmations require the request's rendered-against stamp to match the CURRENT move stamp —
     // a queued pre-move autosave (old/absent token) saves its fields but never re-confirms them.
     expect(src).toMatch(/const requestFresh = stampMs\(current\?\.irrigation_home_changed_at\) == null\s*\|\| \(hasRenderStamp && renderedAgainstMs === stampMs\(current\.irrigation_home_changed_at\)\);/);
