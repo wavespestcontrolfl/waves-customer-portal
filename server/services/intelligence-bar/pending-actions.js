@@ -577,13 +577,11 @@ async function recordResult(id, result, { database = db, critical = false, onlyI
     const query = database('ib_pending_actions').where({ id });
     if (critical) query.where({ status: 'confirmed' }).whereNotNull('consumed_at');
     if (onlyIfEmpty && replaceRecoveryPointer) {
-      // The cancel recovery sweep: also replaces a request's pointer receipt (recovery_owns_outcome) and an earlier receipt
-      // of its own (recovered_after_interruption: it stays provisional until the bundle's terminal status is saved), never
-      // a real one.
-      query.where(function emptyOrProvisional() {
-        this.whereNull('result')
-          .orWhereRaw("result->>'recovery_owns_outcome' = 'true'")
-          .orWhereRaw("result->>'recovered_after_interruption' = 'true'");
+      // The cancel recovery sweep: also replaces a request's pointer receipt (recovery_owns_outcome, or a provisional "text is
+      // still being sent" / post-commit-failure reply), never a real one. The sweep's own receipts are FINAL (recovery_final):
+      // they are written in the transaction that sets the bundle's terminal status, and nothing replaces them.
+      query.where(function emptyOrPointer() {
+        this.whereNull('result').orWhereRaw("result->>'recovery_owns_outcome' = 'true'");
       });
     } else if (onlyIfEmpty) query.whereNull('result');
     const updated = await query.update({

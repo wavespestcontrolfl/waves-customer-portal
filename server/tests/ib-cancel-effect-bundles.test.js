@@ -164,10 +164,16 @@ jest.mock('../models/db', () => {
     return Promise.resolve({ rows: candidate ? [{ ...candidate }] : [] });
   };
   db.transaction = async (cb) => {
-    const snapshot = JSON.parse(JSON.stringify(mockStore.bundles));
+    // Roll back IN PLACE (tests hold references to the seeded rows): every bundle row is restored to what it was at the start.
+    const originals = [...mockStore.bundles];
+    const snapshot = originals.map((row) => ({ ...row }));
     const trx = (table) => new Query(table);
     trx.raw = db.raw; trx.fn = db.fn;
-    try { return await cb(trx); } catch (err) { mockStore.bundles = snapshot; throw err; }
+    try { return await cb(trx); } catch (err) {
+      originals.forEach((row, i) => { Object.keys(row).forEach((k) => delete row[k]); Object.assign(row, snapshot[i]); });
+      mockStore.bundles = originals;
+      throw err;
+    }
   };
   return db;
 });
@@ -373,7 +379,7 @@ describe('the request marks its bundle complete', () => {
   test('the sweep saves its receipt over a request pointer receipt, but never over a real one', async () => {
     seedBundle();
     await svc.sweepIbCancelBundles();
-    expect(mockRecordResult.mock.calls[0][2]).toEqual({ onlyIfEmpty: true, replaceRecoveryPointer: true });
+    expect(mockRecordResult.mock.calls[0][2]).toMatchObject({ onlyIfEmpty: true, replaceRecoveryPointer: true });
   });
 
   describe('a request send that lost the text to another sender', () => {
@@ -523,7 +529,7 @@ describe('the sweep finishes a stale bundle through the pinned paths', () => {
   test('the receipt lands on the pending action (only if it has none) and the office is told', async () => {
     seedBundle();
     await svc.sweepIbCancelBundles();
-    expect(mockRecordResult).toHaveBeenCalledWith(ACTION, expect.objectContaining({ success: true, recovered_after_interruption: true, customer_text_sent: true, customer_name: 'Synthia Tester', service_type: 'Pest Control', date: '2026-10-30' }), { onlyIfEmpty: true, replaceRecoveryPointer: true });
+    expect(mockRecordResult).toHaveBeenCalledWith(ACTION, expect.objectContaining({ success: true, recovered_after_interruption: true, customer_text_sent: true, customer_name: 'Synthia Tester', service_type: 'Pest Control', date: '2026-10-30' }), expect.objectContaining({ onlyIfEmpty: true, replaceRecoveryPointer: true }));
     expect(mockRaised).toHaveLength(1);
     expect(mockRaised[0].spec).toMatchObject({ area: 'Schedule', severity: 'fyi', subject: { type: 'visit', id: SERVICE } });
     expect(mockRaised[0].opts).toMatchObject({ dedupeKey: 'ib-cancel-bundle:bundle-1', fyiRow: true, bell: false });
@@ -883,40 +889,36 @@ describe('delivery evidence found when the text step stops because the visit cha
 describe('the terminal status re-proves the cancellation generation', () => {
   const noTextBundle = () => seedBundle({ notify_customer: false, approved_notice: null, linked_children: [], approved_money: {} });
 
-  test('a restore landing after the last write-level fence (no text step) abandons the bundle and replaces the provisional clean receipt and alert', async () => {
+  test('a restore landing after the last write-level fence (no text step) abandons the bundle with ONE receipt and ONE alert (nothing provisional was written)', async () => {
     noTextBundle();
-    // The receipt is saved (provisional), then the operator restores the visit before the terminal update.
-    mockRecordResult.mockImplementationOnce(async () => {
+    // The operator restores the visit right after the money step; the finalizing transaction's proof catches it before writing.
+    mockFollowThrough.mockImplementationOnce(async () => {
       mockStore.visits[0].status = 'confirmed';
       mockStore.history.push({ id: 2, job_id: SERVICE, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: new Date(mockNow.getTime() - 1 * MIN) });
-      return true;
     });
     const summary = await svc.sweepIbCancelBundles();
     expect(summary).toMatchObject({ abandoned: 1, recovered: 0 });
     expect(mockStore.bundles[0].status).toBe('abandoned');
-    expect(mockRecordResult).toHaveBeenCalledTimes(2);
-    expect(mockRecordResult.mock.calls[0][1].warning).toBeUndefined();
-    expect(mockRecordResult.mock.calls[1][1].warning).toMatch(/no longer the cancelled visit/);
-    expect(mockRecordResult.mock.calls[1][2]).toEqual({ onlyIfEmpty: true, replaceRecoveryPointer: true });
-    expect(mockRaised).toHaveLength(2);
-    expect(mockRaised[0].spec.severity).toBe('fyi');
-    expect(mockRaised[1].spec.severity).toBe('needs-you');
-    expect(mockRaised[1].opts.dedupeKey).toBe(mockRaised[0].opts.dedupeKey);
+    expect(mockRecordResult).toHaveBeenCalledTimes(1);
+    expect(mockRecordResult.mock.calls[0][1]).toMatchObject({ recovery_final: true });
+    expect(mockRecordResult.mock.calls[0][1].warning).toMatch(/no longer the cancelled visit/);
+    expect(mockRaised).toHaveLength(1);
+    expect(mockRaised[0].spec.severity).toBe('needs-you');
   });
 
   test('a partial send followed by a restore at the terminal proof: the abandonment keeps the delivery evidence', async () => {
     noTextBundle();
     mockStore.bundles[0].notify_customer = true;
     mockStore.bundles[0].approved_notice = NOTICE;
-    mockHandleCancellation.mockImplementationOnce(async (_id, opts) => { Object.assign(opts.outcome, { notificationSent: true, notificationPartial: true, notificationError: 'second recipient not reached' }); });
-    mockRecordResult.mockImplementationOnce(async () => {
+    mockHandleCancellation.mockImplementationOnce(async (_id, opts) => {
+      Object.assign(opts.outcome, { notificationSent: true, notificationPartial: true, notificationError: 'second recipient not reached' });
+      // Restored right after the send, before the finalizing transaction.
       mockStore.visits[0].status = 'confirmed';
       mockStore.history.push({ id: 2, job_id: SERVICE, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: new Date(mockNow.getTime() - 1 * MIN) });
-      return true;
     });
     await svc.sweepIbCancelBundles();
     expect(mockStore.bundles[0].status).toBe('abandoned');
-    const final = mockRecordResult.mock.calls[1][1];
+    const final = mockRecordResult.mock.calls[0][1];
     expect(final).toMatchObject({ customer_text_sent: true, customer_text_partial: true });
     expect(final.warning).toMatch(/Do not send it again to those reached/);
   });
@@ -948,26 +950,49 @@ describe('the terminal status re-proves the cancellation generation', () => {
   });
 });
 
-describe('sweep outputs stay replaceable until the terminal status is saved', () => {
-  test('a crash after the clean receipt and quiet alert, then a restore: the retry abandons, replaces the receipt and refreshes the alert', async () => {
+describe('the receipt, the alert and the terminal status are one transaction', () => {
+  test('an alert that fails leaves the bundle pending (the fake rolls the row back); a restore before the retry then abandons with a single final receipt', async () => {
     const row = seedBundle();
+    const composer = require('../services/admin-alert-compose');
+    composer.raiseAdminAlert.mockRejectedValueOnce(new Error('alert store down'));
     const first = await svc.sweepIbCancelBundles();
-    expect(first.recovered).toBe(1);
-    expect(mockRaised[0].spec.severity).toBe('fyi');
-    // Simulate the process dying right before the terminal update: the bundle is still pending with its steps saved.
-    Object.assign(row, { status: 'pending', finished_at: null, finish_note: null, lease_owner: null, lease_until: null, attempts: 1 });
+    expect(first.failed).toBe(1);
+    expect(row).toMatchObject({ status: 'pending', lease_owner: null });
     mockStore.visits[0].status = 'confirmed';
     mockStore.history.push({ id: 2, job_id: SERVICE, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: new Date(mockNow.getTime() - 1 * MIN) });
     const second = await svc.sweepIbCancelBundles();
     expect(second.abandoned).toBe(1);
     expect(row.status).toBe('abandoned');
-    // Both writes are the replaceable kind, for the same bundle's dedupe key.
-    expect(mockRecordResult.mock.calls[1][2]).toEqual({ onlyIfEmpty: true, replaceRecoveryPointer: true });
-    expect(mockRecordResult.mock.calls[1][1].warning).toMatch(/no longer the cancelled visit/);
-    expect(mockRaised).toHaveLength(2);
-    expect(mockRaised[1].opts.dedupeKey).toBe(mockRaised[0].opts.dedupeKey);
-    expect(mockRaised[1].opts.refreshOnDedupe).toBe(true);
-    expect(mockRaised[1].spec.severity).toBe('needs-you');
+    const last = mockRecordResult.mock.calls[mockRecordResult.mock.calls.length - 1][1];
+    expect(last).toMatchObject({ recovery_final: true });
+    expect(last.warning).toMatch(/no longer the cancelled visit/);
+    expect(mockRaised).toHaveLength(1);
+    expect(mockRaised[0].spec.severity).toBe('needs-you');
+  });
+
+  test('every sweep receipt is final and is written on the finalizing transaction (receipt, alert and status share it)', async () => {
+    seedBundle();
+    await svc.sweepIbCancelBundles();
+    const [, result, opts] = mockRecordResult.mock.calls[0];
+    expect(result.recovery_final).toBe(true);
+    expect(typeof opts.database).toBe('function');
+    expect(mockRaised[0].opts.trx).toBe(opts.database);
+  });
+
+  test('a stale worker whose lease was taken over before its finalizing transaction writes NOTHING (no receipt, no alert, no status)', async () => {
+    const row = seedBundle({ followthrough_done_at: new Date(mockNow.getTime() - 5 * MIN), followthrough_outcome: { money_skipped: [], linked_skipped: [] }, notice_outcome: { state: 'sent', by: 'sweep' } });
+    const original = db.transaction;
+    const spy = jest.spyOn(db, 'transaction').mockImplementationOnce(async (cb) => {
+      // Another worker claimed and finished it while this one paused after its last write.
+      Object.assign(row, { lease_owner: 'worker-2', status: 'abandoned', finish_note: 'visit_is_confirmed_during_recovery' });
+      return original(cb);
+    });
+    const summary = await svc.sweepIbCancelBundles();
+    spy.mockRestore();
+    expect(summary).toMatchObject({ recovered: 0, lost: 1, failed: 0 });
+    expect(mockRecordResult).not.toHaveBeenCalled();
+    expect(mockRaised).toEqual([]);
+    expect(row).toMatchObject({ status: 'abandoned', lease_owner: 'worker-2' });
   });
 });
 
@@ -1046,16 +1071,17 @@ describe('an unactable bundle on a visit that was restored', () => {
     expect(mockRaised[0].spec.why).not.toMatch(/not confirmed finished/);
   });
 
-  test('a restore between the check and the expired write abandons instead, replacing the provisional report', async () => {
+  test('a restore between the check and the finalizing transaction abandons instead: ONE receipt, the abandonment (nothing provisional)', async () => {
     exhausted();
-    mockRecordResult.mockImplementationOnce(async () => { restore(); return true; });
+    const original = db.transaction;
+    const spy = jest.spyOn(db, 'transaction').mockImplementationOnce(async (cb) => { restore(); return original(cb); });
     const summary = await svc.sweepIbCancelBundles();
+    spy.mockRestore();
     expect(summary).toMatchObject({ abandoned: 1, reported: 0 });
     expect(mockStore.bundles[0].status).toBe('abandoned');
-    expect(mockRecordResult).toHaveBeenCalledTimes(2);
-    expect(mockRecordResult.mock.calls[0][1].warning).toMatch(/could not be confirmed/);
-    expect(mockRecordResult.mock.calls[1][1].warning).toMatch(/no longer the cancelled visit/);
-    expect(mockRaised[1].opts.dedupeKey).toBe(mockRaised[0].opts.dedupeKey);
+    expect(mockRecordResult).toHaveBeenCalledTimes(1);
+    expect(mockRecordResult.mock.calls[0][1].warning).toMatch(/no longer the cancelled visit/);
+    expect(mockRaised).toHaveLength(1);
   });
 
   test('a visit that is only busy at the expired write leaves the bundle for the next pass; a standing cancel expires as before', async () => {
@@ -1235,15 +1261,17 @@ describe('an exhausted bundle is claimed before it is reported', () => {
     expect(mockRaised).toHaveLength(1);
   });
 
-  test('the claim lost before the alert: no alert and no status change', async () => {
+  test('the report claim lost before the finalizing transaction: no receipt, no alert, no status change', async () => {
     const row = exhausted();
-    mockRecordResult.mockImplementationOnce(async () => {
-      // Another actor took the row over between the receipt and the alert.
+    const original = db.transaction;
+    const spy = jest.spyOn(db, 'transaction').mockImplementationOnce(async (cb) => {
       row.lease_owner = 'someone-else';
-      return true;
+      return original(cb);
     });
     const summary = await svc.sweepIbCancelBundles();
+    spy.mockRestore();
     expect(summary).toMatchObject({ reported: 0, lost: 1, failed: 0 });
+    expect(mockRecordResult).not.toHaveBeenCalled();
     expect(mockRaised).toEqual([]);
     expect(row.status).toBe('pending');
   });
@@ -1281,7 +1309,7 @@ describe('a complete bundle whose receipt was never saved', () => {
     expect(mockRecordResult).toHaveBeenCalledTimes(1);
     const [id, result, opts] = mockRecordResult.mock.calls[0];
     expect(id).toBe(ACTION);
-    expect(opts).toEqual({ onlyIfEmpty: true, replaceRecoveryPointer: true });
+    expect(opts).toMatchObject({ onlyIfEmpty: true, replaceRecoveryPointer: true });
     expect(result).toMatchObject({ success: true, ran_dispatch_cancel: true, customer_text_sent: true, money_skipped: FT_SKIPPED.money_skipped });
     expect(result.warning).toMatch(/stopped before it saved this result/);
     expect(result.warning).toMatch(/invoice inv-1/);
@@ -1303,7 +1331,7 @@ describe('a complete bundle whose receipt was never saved', () => {
     const summary = await svc.sweepIbCancelBundles();
     expect(summary.receipts).toBe(1);
     expect(mockRecordResult).toHaveBeenCalledTimes(1);
-    expect(mockRecordResult.mock.calls[0][2]).toEqual({ onlyIfEmpty: true, replaceRecoveryPointer: true });
+    expect(mockRecordResult.mock.calls[0][2]).toMatchObject({ onlyIfEmpty: true, replaceRecoveryPointer: true });
     expect(mockRecordResult.mock.calls[0][1].money_skipped).toEqual(FT_SKIPPED.money_skipped);
     expect(mockRaised).toHaveLength(1);
     expect(row.finish_note).toBe('request+receipt');
@@ -1387,7 +1415,7 @@ describe('a complete bundle whose receipt was never saved', () => {
     expect(row.finish_note).toBe('request+receipt');
   });
 
-  test('an alert failure frees the claim; the retry saves nothing twice and alerts once', async () => {
+  test('an alert failure frees the claim; the retry writes the receipt and the alert together', async () => {
     const row = completed();
     action(null);
     const composer = require('../services/admin-alert-compose');
@@ -1395,8 +1423,7 @@ describe('a complete bundle whose receipt was never saved', () => {
     const first = await svc.sweepIbCancelBundles();
     expect(first.failed).toBe(1);
     expect(row).toMatchObject({ finish_note: 'request', lease_owner: null });
-    // The first attempt did save the receipt; it is ours, so the retry still raises the alert and does not rewrite it.
-    mockStore.actions[0].result = mockRecordResult.mock.calls[0][1];
+    // The receipt and the alert share one transaction: nothing of the first attempt stands, so the retry writes both.
     await svc.sweepIbCancelBundles();
     expect(mockRaised).toHaveLength(1);
     expect(row.finish_note).toBe('request+receipt');

@@ -287,11 +287,6 @@ async function ownedUpdate(id, token, patch) {
   if (!rows) throw new LeaseLost(`lease on bundle ${id} was lost`);
 }
 
-// Before telling anyone anything: the request may have finished the row while the sweep worked.
-async function assertStillOwned(id, token) {
-  if (!(await ownedWhere(id, token).first('id'))) throw new LeaseLost(`lease on bundle ${id} was lost`);
-}
-
 async function claimNext(token) {
   const result = await db.raw(
     `UPDATE ${TABLE}
@@ -672,9 +667,13 @@ const withVisitFacts = (result, info) => ({
 // Saves the receipt on the pending action. A failed save THROWS (recordResult reports a database failure as false, and the
 // caller then leaves the row retryable instead of marking it finished with no receipt). A save that finds the receipt already
 // there (onlyIfEmpty) is a success: the request's own receipt wins.
-async function recordOnPendingAction(bundle, result) {
+async function recordOnPendingAction(bundle, result, conn = null) {
   if (!bundle.pending_action_id) return;
-  const saved = await require('./intelligence-bar/pending-actions').recordResult(bundle.pending_action_id, result, { onlyIfEmpty: true, replaceRecoveryPointer: true });
+  // The receipt is FINAL (recovery_final): nothing but a request's recovery-owns pointer is ever replaced by it, and it is written
+  // on the finalizing transaction (`conn`), so it exists only if the bundle's terminal status does.
+  const saved = await require('./intelligence-bar/pending-actions').recordResult(bundle.pending_action_id, { ...result, recovery_final: true }, {
+    onlyIfEmpty: true, replaceRecoveryPointer: true, ...(conn ? { database: conn } : {}),
+  });
   if (saved === false) throw new Error('the receipt could not be saved on the pending action');
 }
 
@@ -694,7 +693,7 @@ function alertSpec(bundle, info, { review, action, why }) {
   };
 }
 
-async function tellOffice(bundle, info, { review, action, why, lines }) {
+async function tellOffice(bundle, info, { review, action, why, lines }, conn = null) {
   // notifyAdmin reports a failed save as null (it never throws); a deliberate suppression is an object, not a failure. A failed
   // alert THROWS, so the row stays retryable (the dedupe key keeps a retry from doubling a row that did land).
   const raised = await require('./admin-alert-compose').raiseAdminAlert('alert', alertSpec(bundle, info, { review, action, why }), {
@@ -705,6 +704,7 @@ async function tellOffice(bundle, info, { review, action, why, lines }) {
     // The bundle's outcome can change between the alert and the bundle's terminal status (a crash, then a restore): a retry
     // rewrites the standing row (and rings it if it now needs a look) instead of leaving the earlier text.
     refreshOnDedupe: true,
+    ...(conn ? { trx: conn } : {}),
     metadata: { bundleId: bundle.id, scheduledServiceId: bundle.scheduled_service_id, source: 'ib-cancel-recovery' },
   });
   if (!raised) throw new Error('the office alert could not be saved');
@@ -712,50 +712,52 @@ async function tellOffice(bundle, info, { review, action, why, lines }) {
 
 // ── Sweep steps ───────────────────────────────────────────────────────────────────────────────────────────────
 
-async function finishRecovered(bundle, token, ft, notice) {
-  await assertStillOwned(bundle.id, token);
-  const info = await visitInfo(bundle);
-  const receipt = buildReceipt(bundle, ft, notice);
-  await recordOnPendingAction(bundle, withVisitFacts(receipt.result, info));
-  await tellOffice(bundle, info, {
-    review: receipt.needsReview,
-    action: receipt.needsReview ? (name) => `check ${name}'s cancelled visit` : (name) => `${name}'s cancel finished`,
-    why: receipt.needsReview
-      ? 'The cancel finished after an interruption, but some approved steps were skipped or unconfirmed.'
-      : 'The invoice, linked-visit and text steps the card approved are all done.',
-    lines: receipt.lines.length ? receipt.lines : ['All approved steps are done.'],
-  });
-  await terminalizeRecovered(bundle, token);
-}
-
-// The terminal 'recovered' status is written in the SAME transaction that proves the cancellation generation (visit share lock,
-// NOWAIT), so a restore that landed after the last write-level fence (a bundle with no text, or a reminder already terminal,
-// has none after the money steps) cannot be recorded as a clean recovery of a live visit. The receipt and alert written just
-// before are provisional: a restore found here abandons the bundle, which replaces both. A visit that is only busy retries.
-async function terminalizeRecovered(bundle, token) {
-  await terminalizeOwned(bundle, token, { status: 'recovered', finish_note: 'sweep' });
-}
-
-// The shared terminal write: the proof and the owned status update in one transaction. A restore found there throws Abandon
-// (the caller reports the abandonment, replacing its provisional outputs); a visit that is only busy throws a plain error, so
-// the row stays pending and the next pass retries.
-async function terminalizeOwned(bundle, token, patch) {
+// ONE transaction finalizes a bundle: it locks the bundle row and checks the lease token, proves the cancellation generation
+// (visit share lock, NOWAIT) when the outcome claims a standing cancel, writes the receipt and the office alert on the same
+// transaction, and writes the terminal status last. So the receipt and alert exist exactly when the terminal status does:
+//  - a worker whose lease was taken over (a pause longer than the lease, then another worker finished the bundle) fails the owner
+//    check and writes NOTHING, so it can never replace a terminal receipt or refresh the alert;
+//  - a restore found at the proof rolls everything back and the caller reports the abandonment instead (nothing provisional to replace);
+//  - a crash anywhere leaves the bundle pending and unwritten, so the retry starts clean (no window needs reconciling).
+async function finalizeOwned(bundle, token, { patch, writeOutputs, prove = true, ownerStatus = 'pending' }) {
   const { assertCancelGeneration, isCancelFence } = require('./cancel-generation-fence');
   const fence = { visitId: bundle.scheduled_service_id, restorations: bundle.restorations_seen, hits: [] };
+  const ownedRow = (conn) => conn(TABLE).where({ id: bundle.id, lease_owner: token, status: ownerStatus });
   try {
     await db.transaction(async (trx) => {
-      await assertCancelGeneration(trx, fence);
-      const rows = await trx(TABLE)
-        .where({ id: bundle.id, lease_owner: token, status: 'pending' })
-        .update({ ...patch, finished_at: db.fn.now(), lease_owner: null, lease_until: null, updated_at: db.fn.now() });
+      if (!(await ownedRow(trx).forUpdate().first('id'))) throw new LeaseLost(`lease on bundle ${bundle.id} was lost`);
+      if (prove) await assertCancelGeneration(trx, fence);
+      if (writeOutputs) await writeOutputs(trx);
+      const rows = await ownedRow(trx).update({ ...patch, lease_owner: null, lease_until: null, updated_at: db.fn.now() });
       if (!rows) throw new LeaseLost(`lease on bundle ${bundle.id} was lost`);
     });
   } catch (err) {
-    if (!isCancelFence(err)) throw err;
+    if (!prove || !isCancelFence(err)) throw err;
     const standing = await cancelStillStands(bundle);
     if (!standing.ok) throw new Abandon(`${standing.reason}_during_recovery`, true);
     throw new Error(`the visit was busy (${fence.hits.join(', ')}); finalizing will retry`);
   }
+}
+
+const terminalPatch = (status, finishNote) => ({ status, finish_note: finishNote, finished_at: db.fn.now() });
+
+async function finishRecovered(bundle, token, ft, notice) {
+  const info = await visitInfo(bundle);
+  const receipt = buildReceipt(bundle, ft, notice);
+  await finalizeOwned(bundle, token, {
+    patch: terminalPatch('recovered', 'sweep'),
+    writeOutputs: async (trx) => {
+      await recordOnPendingAction(bundle, withVisitFacts(receipt.result, info), trx);
+      await tellOffice(bundle, info, {
+        review: receipt.needsReview,
+        action: receipt.needsReview ? (name) => `check ${name}'s cancelled visit` : (name) => `${name}'s cancel finished`,
+        why: receipt.needsReview
+          ? 'The cancel finished after an interruption, but some approved steps were skipped or unconfirmed.'
+          : 'The invoice, linked-visit and text steps the card approved are all done.',
+        lines: receipt.lines.length ? receipt.lines : ['All approved steps are done.'],
+      }, trx);
+    },
+  });
 }
 
 // What is known about the steps when the recovery stops: the saved results of the steps that ended, and the plain fact that
@@ -783,10 +785,9 @@ function savedSkips(bundle) {
 }
 
 async function finishAbandoned(bundle, token, reason, partial = false) {
-  await assertStillOwned(bundle.id, token);
   const info = await visitInfo(bundle);
   const lines = abandonedLines(bundle, partial);
-  await recordOnPendingAction(bundle, withVisitFacts({
+  const result = withVisitFacts({
     success: true,
     appointment_id: bundle.scheduled_service_id,
     ran_dispatch_cancel: true,
@@ -794,21 +795,26 @@ async function finishAbandoned(bundle, token, reason, partial = false) {
     ...savedSkips(bundle),
     ...(bundle.notice_outcome ? noticeFlags(bundle.notice_outcome) : {}),
     warning: `The visit is no longer the cancelled visit the card approved (${plain(reason)}), so the recovery stopped. ${lines.join(' ')}`,
-  }, info));
-  await tellOffice(bundle, info, {
-    review: true,
-    action: (name) => `check ${name}'s visit`,
-    why: partial
-      ? 'The visit was restored while its cancel steps ran, so the rest were stopped.'
-      : 'The visit is no longer cancelled, so the recovery stopped; some steps may have run.',
-    lines: [
-      `Approved on the card: ${pinnedSummary(bundle)}.`,
-      `Why it stopped: ${plain(reason)}.`,
-      ...lines,
-    ],
-  });
-  await ownedUpdate(bundle.id, token, {
-    status: 'abandoned', finished_at: db.fn.now(), finish_note: reason, lease_owner: null, lease_until: null,
+  }, info);
+  // No generation proof: the visit has changed, which is the very thing being reported.
+  await finalizeOwned(bundle, token, {
+    prove: false,
+    patch: terminalPatch('abandoned', reason),
+    writeOutputs: async (trx) => {
+      await recordOnPendingAction(bundle, result, trx);
+      await tellOffice(bundle, info, {
+        review: true,
+        action: (name) => `check ${name}'s visit`,
+        why: partial
+          ? 'The visit was restored while its cancel steps ran, so the rest were stopped.'
+          : 'The visit is no longer cancelled, so the recovery stopped; some steps may have run.',
+        lines: [
+          `Approved on the card: ${pinnedSummary(bundle)}.`,
+          `Why it stopped: ${plain(reason)}.`,
+          ...lines,
+        ],
+      }, trx);
+    },
   });
 }
 
@@ -934,25 +940,22 @@ async function reportExpired(bundle, token) {
     ...noticeLines(bundle, notice),
     'Check the visit, its invoices, its linked visits and the customer message history.',
   ];
-  // Each write below is guarded on the report claim: if it is gone, nothing is recorded or told.
-  await assertStillOwned(bundle.id, token);
   const info = await visitInfo(bundle);
-  await recordOnPendingAction(bundle, withVisitFacts(unactableResult(bundle, { why, open, done, notice }), info));
-  await assertStillOwned(bundle.id, token);
-  await tellOffice(bundle, info, {
-    review: true,
-    action: (name) => `check ${name}'s cancelled visit`,
-    why: open.length
-      ? 'Approved cancel steps were not confirmed finished and will not run on their own.'
-      : 'The approved cancel steps finished, but the recovery could not be finalized.',
-    lines,
+  // One transaction: the report claim is checked, the generation proven, the receipt and alert written, the status set last.
+  await finalizeOwned(bundle, token, {
+    patch: terminalPatch('expired', why),
+    writeOutputs: async (trx) => {
+      await recordOnPendingAction(bundle, withVisitFacts(unactableResult(bundle, { why, open, done, notice }), info), trx);
+      await tellOffice(bundle, info, {
+        review: true,
+        action: (name) => `check ${name}'s cancelled visit`,
+        why: open.length
+          ? 'Approved cancel steps were not confirmed finished and will not run on their own.'
+          : 'The approved cancel steps finished, but the recovery could not be finalized.',
+        lines,
+      }, trx);
+    },
   });
-  // The terminal write carries the generation proof too: a restore between the check above and this write abandons instead.
-  await terminalizeOwned(bundle, token, { status: 'expired', finish_note: why });
-}
-
-async function assertCompleteOwned(id, token) {
-  if (!(await completeOwnedWhere(id, token).first('id'))) throw new LeaseLost(`receipt claim on bundle ${id} was lost`);
 }
 
 // The pending action's stored result, parsed; undefined = no such action, null = no result saved.
@@ -969,7 +972,8 @@ async function storedReceipt(pendingActionId) {
 // crash is safe: the save is onlyIfEmpty and the alert has a dedupe key.
 async function reconcileReceipt(bundle, token) {
   const stored = await storedReceipt(bundle.pending_action_id);
-  const missing = stored === null || (stored !== undefined && stored && (stored.recovered_after_interruption === true || stored.recovery_owns_outcome === true));
+  const missing = stored === null || (stored !== undefined && stored && stored.recovery_owns_outcome === true);
+  let writeOutputs = null;
   if (missing) {
     // The text outcome is unknown only if the request ended before liveNotice ran for a card that asked for a text.
     const notice = bundle.notice_outcome
@@ -980,22 +984,21 @@ async function reconcileReceipt(bundle, token) {
     // Found after the hard stop: even a clean outcome gets a needs-you note, because nobody saw the result for a day or more.
     const late = Date.now() - new Date(bundle.finished_at).getTime() > HARD_STOP_MS;
     if (late) receipt.needsReview = true;
-    await assertCompleteOwned(bundle.id, token);
     const info = await visitInfo(bundle);
-    await recordOnPendingAction(bundle, withVisitFacts(receipt.result, info));
-    await assertCompleteOwned(bundle.id, token);
-    await tellOffice(bundle, info, {
-      review: receipt.needsReview,
-      action: receipt.needsReview ? (name) => `check ${name}'s cancelled visit` : (name) => `${name}'s cancel finished`,
-      why: receipt.needsReview
-        ? (late ? 'The cancel finished, but its result was not saved for over a day, so check the visit.' : 'The cancel finished, but the app stopped before saving its result, and some steps need a look.')
-        : 'The cancel finished; only its saved result was missing, and it is saved now.',
-      lines: receipt.lines.length ? receipt.lines : ['All approved steps are done.'],
-    });
+    writeOutputs = async (trx) => {
+      await recordOnPendingAction(bundle, withVisitFacts(receipt.result, info), trx);
+      await tellOffice(bundle, info, {
+        review: receipt.needsReview,
+        action: receipt.needsReview ? (name) => `check ${name}'s cancelled visit` : (name) => `${name}'s cancel finished`,
+        why: receipt.needsReview
+          ? (late ? 'The cancel finished, but its result was not saved for over a day, so check the visit.' : 'The cancel finished, but the app stopped before saving its result, and some steps need a look.')
+          : 'The cancel finished; only its saved result was missing, and it is saved now.',
+        lines: receipt.lines.length ? receipt.lines : ['All approved steps are done.'],
+      }, trx);
+    };
   }
-  const marked = await completeOwnedWhere(bundle.id, token)
-    .update({ finish_note: FINISH_RECEIPT_CHECKED, lease_owner: null, lease_until: null, updated_at: db.fn.now() });
-  if (!marked) throw new LeaseLost(`receipt claim on bundle ${bundle.id} was lost`);
+  // The same single transaction: claim checked, receipt and alert written, the "receipt checked" mark last.
+  await finalizeOwned(bundle, token, { prove: false, ownerStatus: 'complete', patch: { finish_note: FINISH_RECEIPT_CHECKED }, writeOutputs });
   return missing ? 'rebuilt' : 'present';
 }
 

@@ -545,7 +545,7 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
     afterEach(() => { mockRecordResult.mockImplementation(async () => true); });
     // The real pending-actions write, so onlyIfEmpty is tested against a real row.
     const writeLikeRecordResult = async (id, result, opts = {}) => {
-      const q = app('ib_pending_actions').where({ id });
+      const q = (opts.database || app)('ib_pending_actions').where({ id });
       if (opts.onlyIfEmpty) q.whereNull('result');
       await q.update({ result: JSON.stringify(result), updated_at: app.fn.now() });
       return true;
@@ -644,11 +644,11 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
       expect(await read(empty)).toEqual({ from: 'sweep' });
       expect(await read(pointer)).toEqual({ from: 'sweep' });
       expect(await read(real)).toEqual({ success: true, from: 'request' });
-      // The sweep's own earlier receipt is provisional until the bundle's terminal status is saved: a later sweep write replaces it.
+      // The sweep's own receipt is FINAL (written with the terminal status): a stale worker's later write never replaces it.
       const own = randomUUID();
-      await app('ib_pending_actions').insert({ id: own, result: JSON.stringify({ success: true, recovered_after_interruption: true, from: 'sweep-1' }) });
-      await recordResult(own, { success: true, recovered_after_interruption: true, from: 'sweep-2' }, { onlyIfEmpty: true, replaceRecoveryPointer: true });
-      expect(await read(own)).toMatchObject({ from: 'sweep-2' });
+      await app('ib_pending_actions').insert({ id: own, result: JSON.stringify({ success: true, recovered_after_interruption: true, recovery_final: true, from: 'sweep-1' }) });
+      await recordResult(own, { success: true, recovered_after_interruption: true, recovery_final: true, from: 'stale-worker' }, { onlyIfEmpty: true, replaceRecoveryPointer: true });
+      expect(await read(own)).toMatchObject({ from: 'sweep-1' });
       // The request's pointer save (onlyIfEmpty only) never replaces a sweep receipt or another pointer.
       await recordResult(empty, { recovery_owns_outcome: true }, { onlyIfEmpty: true });
       expect(await read(empty)).toEqual({ from: 'sweep' });
@@ -692,6 +692,22 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
       expect((await read(pending)).text_retry_pending).toBeUndefined();
       await recordResult(real, { from: 'sweep' }, { onlyIfEmpty: true, replaceRecoveryPointer: true });
       expect(await read(real)).toEqual({ success: true, from: 'request' });
+    });
+
+    test('receipt, alert and status are ONE transaction: a failing alert rolls the receipt back; the retry writes all three', async () => {
+      mockRecordResult.mockImplementation(writeLikeRecordResult);
+      const id = await app.transaction((trx) => svc.insertBundle(trx, pins({ notifyCustomer: false, approvedNotice: null, linkedChildren: [], approvedMoney: {} })));
+      await ageBundle(id, 30);
+      const row = await app(TABLE).where({ id }).first();
+      await app('ib_pending_actions').insert({ id: row.pending_action_id, result: null });
+      mockRaise.mockRejectedValueOnce(new Error('alert store down'));
+      expect(await svc.sweepIbCancelBundles()).toMatchObject({ failed: 1, recovered: 0 });
+      expect((await app('ib_pending_actions').where({ id: row.pending_action_id }).first()).result).toBeNull();
+      expect(await app(TABLE).where({ id }).first()).toMatchObject({ status: 'pending', lease_owner: null });
+      await app(TABLE).where({ id }).update({ lease_until: null });
+      expect(await svc.sweepIbCancelBundles()).toMatchObject({ recovered: 1 });
+      expect((await app('ib_pending_actions').where({ id: row.pending_action_id }).first()).result).toMatchObject({ recovery_final: true });
+      expect(await app(TABLE).where({ id }).first()).toMatchObject({ status: 'recovered' });
     });
 
     test('a row completed 3 minutes ago is left to the request', async () => {
