@@ -38,9 +38,10 @@ const COMMERCIAL_TEXT = /commercial/i;
 // What the estimate quotes. `rows` = recurring rows (with `.key` already
 // resolved by the caller), `items` = the description / name of every quoted
 // line (one string each), `commercial` = a multi-building or commercial
-// proposal. Text matching is per line, so a lawn line that mentions "pest" in
+// proposal. `residential` = the estimate is KNOWN to be residential (see isKnownResidential): anything
+// else is treated as maybe-commercial and gets the neutral agreement line, never a no-contract claim. Text matching is per line, so a lawn line that mentions "pest" in
 // passing does not turn on the pest section.
-function detectServices({ rows = [], items = [], commercial = false } = {}) {
+function detectServices({ rows = [], items = [], commercial = false, residential = false } = {}) {
   const keys = new Set(rows.map((r) => String(r.key || '')));
   const hasKey = (test) => [...keys].some(test);
   const anyItem = (test) => items.some((t) => test.test(String(t || '')));
@@ -53,6 +54,7 @@ function detectServices({ rows = [], items = [], commercial = false } = {}) {
   const rodent = keys.has('rodent') || rodentBait || anyItem(RODENT_TEXT);
   return {
     commercial: isCommercial,
+    residential: residential === true && !isCommercial,
     recurring: rows.length > 0,
     recurringPest,
     recurringLawn,
@@ -80,8 +82,9 @@ const SECTIONS = [
       { rank: 1, text: 'There is no deposit.' },
       { rank: 2, when: (s) => s.recurring, text: 'If you are a new recurring customer paying by card, you save your card when you book and we charge it after your first visit.' },
       { rank: 2, text: 'At the visit, your technician can take a card, a check or cash. You can also pay with the card or bank account we have on file, or send a check or cash through our office.' },
-      { rank: 2, when: (s) => !s.commercial && (s.recurringPest || s.recurringLawn), text: 'Residential pest and lawn plans have no long-term contract. You can cancel any time.' },
-      { rank: 3, when: (s) => s.termiteRecurring || s.commercial, text: 'Termite plans and commercial accounts follow the agreement you sign.' },
+      { rank: 2, when: (s) => s.residential && (s.recurringPest || s.recurringLawn), text: 'Residential pest and lawn plans have no long-term contract. You can cancel any time.' },
+      // The neutral line: printed whenever the estimate is not KNOWN residential, so an unknown or commercial estimate never reads as month-to-month.
+      { rank: 3, when: (s) => s.termiteRecurring || !s.residential, text: 'Termite plans and commercial accounts follow the agreement you sign.' },
       { rank: 2, when: (s, o) => o.prepayRefundOffered === true && (s.recurringPest || s.recurringLawn), text: 'If you prepay for the year and cancel within 90 days, we refund the visits we have not done yet. After 90 days there is no refund, and your paid visits stay on your schedule through the end of the prepaid term.' },
       { rank: 4, text: 'Mail checks to Waves Pest Control, 13649 Luxe Ave #110, Bradenton, FL 34211.' },
     ],
@@ -93,7 +96,7 @@ const SECTIONS = [
     lines: [
       { rank: 1, text: 'You do not need to be home for the outside treatment. For the inside, someone needs to be home or leave us access.' },
       { rank: 1, text: 'It is normal to see some activity for up to two weeks after a treatment, as pests are flushed out. It fades as the products keep working. If it has not slowed after two weeks, tell us.' },
-      { rank: 2, when: (s) => !s.commercial && s.recurringPest, text: 'If your plan includes inside service, your first visit includes an inside spray. After that, the inside is up to you: we treat it whenever you ask.' },
+      { rank: 2, when: (s) => s.residential && s.recurringPest, text: 'If your plan includes inside service, your first visit includes an inside spray. After that, the inside is up to you: we treat it whenever you ask.' },
       { rank: 2, when: (s) => s.recurringPest, text: 'Regular pest visits include the lanai and the pool cage, and wasp, mud dauber and hornet nests on the house.' },
       { rank: 2, text: 'Please keep people and pets off treated areas until they are dry.' },
       { rank: 3, text: 'A treatment needs to dry and bond to surfaces. After that, it holds up to weather.' },
@@ -151,6 +154,30 @@ function buildBeforeYouBook(signals, opts = {}) {
   return { title: TITLE, sections, closing };
 }
 
+// Residential is KNOWN only from the same authoritative signals the rest of the estimate code uses
+// (estimate-public's plan-terms check): category RESIDENTIAL, not a commercial auto-priced estimate, and
+// not an authored (enabled) commercial proposal. Anything else, including a missing category, is unknown
+// and fails closed.
+function isKnownResidential(estimate, proposal) {
+  try {
+    const { isCommercialAutoAcceptEstimate } = require('./estimate-commercial-identity');
+    return String(estimate?.category || '').toUpperCase() === 'RESIDENTIAL'
+      && !isCommercialAutoAcceptEstimate(estimate)
+      && proposal?.enabled !== true;
+  } catch {
+    return false;
+  }
+}
+
+// The page is for an estimate still being decided: not accepted, declined or expired (a "Before you
+// book" page on a booked estimate reads wrong). /data passes its own terminal state; the pdfkit PDF
+// reads the row.
+function estimateIsOpen(estimate) {
+  if (['accepted', 'declined', 'expired'].includes(String(estimate?.status || '').toLowerCase())) return false;
+  const expiry = estimate?.expires_at ? new Date(estimate.expires_at) : null;
+  return !(expiry && !Number.isNaN(expiry.getTime()) && expiry < new Date());
+}
+
 // What THIS estimate quotes, read the way the lawn limits block reads it (estimate-public's
 // recurring reader), plus the quoted line descriptions of the normalized proposal. A read that
 // fails returns no signals, so only the always-section prints: never a guess.
@@ -186,7 +213,7 @@ function estimateSignals(estimate, proposal) {
     items.length = 0;
     prepayOffered = false;
   }
-  return { signals: detectServices({ rows, items, commercial: (proposal.buildings || []).length > 1 }), prepayOffered };
+  return { signals: detectServices({ rows, items, commercial: (proposal.buildings || []).length > 1, residential: isKnownResidential(estimate, proposal) }), prepayOffered };
 }
 
 // The page for one estimate, untrimmed. `proposal` = normalizeProposal(estimate).
@@ -229,10 +256,10 @@ const DOC_TITLE_PX = 40;
 const DOC_PAGE_PX = 820;
 
 // The `/data` payload fragment: `{ beforeYouBook: { title, sections: [{ key, heading, lines: [text] }],
-// closing } }`, already chosen and trimmed for this estimate, or nothing, so a gate-off response is
-// byte-identical to before. Copy only: no prices. Never throws: a failure is "no page".
-function beforeYouBookBlock(estimate) {
-  if (!featureGates.estimateBeforeYouBookLive()) return {};
+// closing } }`, already chosen and trimmed for this estimate, or nothing (gate off, or the estimate is
+// accepted, declined or expired), so a gate-off response is byte-identical to before. Copy only: no prices. Never throws: a failure is "no page".
+function beforeYouBookBlock(estimate, { open = estimateIsOpen(estimate) } = {}) {
+  if (!featureGates.estimateBeforeYouBookLive() || open !== true) return {};
   try {
     const { normalizeProposal } = require('./estimate-proposal');
     const page = trimByRank(beforeYouBookForEstimate(estimate, normalizeProposal(estimate)), {
@@ -254,4 +281,4 @@ function beforeYouBookBlock(estimate) {
   }
 }
 
-module.exports = { TITLE, SECTIONS, detectServices, buildBeforeYouBook, beforeYouBookForEstimate, trimByRank, beforeYouBookBlock };
+module.exports = { TITLE, SECTIONS, estimateIsOpen, isKnownResidential, detectServices, buildBeforeYouBook, beforeYouBookForEstimate, trimByRank, beforeYouBookBlock };

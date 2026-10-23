@@ -30838,7 +30838,7 @@ async function composeEstimateDataPayload(estimate, {
       // apply to this estimate, already chosen and trimmed to one page by the same module the
       // pdfkit PDF uses. Only the document render (EstimateProposalDocument) prints it. The key is
       // absent with the gate off, so that response stays byte-identical. Copy only: no prices.
-      ...beforeYouBookBlock(estimate),
+      ...beforeYouBookBlock(estimate, { open: terminalState === null }),
       // Authored commercial proposal, rendered on-page under the commercial
       // glass gate. Key only exists for gated proposal estimates so every
       // other response stays byte-identical.

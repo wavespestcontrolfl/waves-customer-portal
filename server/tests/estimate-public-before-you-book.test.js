@@ -143,6 +143,30 @@ describe('GET /:token/data - before you book (GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK)
     });
   });
 
+  test('gate on, accepted or declined estimate: no key; a commercial single-building one has no no-contract line', async () => {
+    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
+    for (const status of ['accepted', 'declined']) {
+      dbRows = { ...dbRows, estimates: estimateRow({ services: ['pest_control'], overrides: { status } }) };
+      await withServer(async (baseUrl) => {
+        const body = await getData(baseUrl);
+        expect(body.estimate).toBeDefined();
+        expect(body).not.toHaveProperty('beforeYouBook');
+      });
+    }
+    dbRows = { ...dbRows, estimates: estimateRow({ services: ['pest_control'], overrides: { expires_at: '2020-01-01T00:00:00.000Z' } }) };
+    await withServer(async (baseUrl) => {
+      expect(await getData(baseUrl)).not.toHaveProperty('beforeYouBook');
+    });
+    dbRows = { ...dbRows, estimates: estimateRow({ services: ['pest_control'], overrides: { category: 'COMMERCIAL' } }) };
+    await withServer(async (baseUrl) => {
+      const body = await getData(baseUrl);
+      expect(body.beforeYouBook).toBeDefined();
+      const lines = body.beforeYouBook.sections.flatMap((s) => s.lines).join(' ');
+      expect(lines).not.toContain('no long-term contract');
+      expect(lines).toContain('follow the agreement you sign');
+    });
+  });
+
   test('gate on, pest-only estimate: no lawn section', async () => {
     process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
     dbRows = { ...dbRows, estimates: estimateRow({ services: ['pest_control'] }) };

@@ -29,7 +29,7 @@ const {
 const { RATE_REVIEW_TERMS_LINE } = require('../../../shared/estimate-copy-claims.cjs');
 const { lawnLimitsForEstimate } = require('../estimate-lawn-limits');
 const featureGates = require('../../config/feature-gates');
-const { beforeYouBookForEstimate, trimByRank } = require('../estimate-before-you-book');
+const { beforeYouBookForEstimate, estimateIsOpen, trimByRank } = require('../estimate-before-you-book');
 
 // Brand palette — identical to invoice-pdf.js.
 const NAVY = '#1B2C5B';
@@ -499,7 +499,8 @@ function trimBeforeYouBook(doc, page, available) {
       doc.fontSize(BYB_BODY_SIZE).font('Helvetica');
       return doc.heightOfString(`• ${text}`, { width: W - 12, lineGap: BYB_LINE_GAP }) + 5;
     },
-    headingH: 22,
+    // The page draws a section as label (14) + 8 before the lines + 8 after: budget all 30, and the 8 before the closing line.
+    headingH: 30,
     closingGap: 8,
     available,
   });
@@ -696,7 +697,7 @@ function generateEstimateProposalPDF(estimate, res, billing = {}) {
   acceptanceBlock(ctx, billing?.acceptance || null, y + 8);
 
   // GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK: one more page after the last one. Gate off prints nothing here.
-  if (featureGates.estimateBeforeYouBookLive()) beforeYouBookPage(ctx, beforeYouBookForEstimate(estimate, proposal));
+  if (featureGates.estimateBeforeYouBookLive() && estimateIsOpen(estimate)) beforeYouBookPage(ctx, beforeYouBookForEstimate(estimate, proposal));
 
   footerBar(doc, ctx.tagline);
   doc.end();

@@ -34,6 +34,7 @@ const pageCount = (buffer) => (buffer.toString('latin1').match(/\/Type \/Page\b(
 const fixture = (id, services, oneTime = []) => ({
   id,
   customer_id: 'cust-1',
+  category: 'RESIDENTIAL',
   customer_name: 'Sample Customer',
   address: '1 Example Way, Sarasota, FL 34200',
   created_at: '2026-10-22T15:00:00Z',
@@ -120,6 +121,45 @@ describe('estimate PDF Before you book page', () => {
     expect(extractPdfText(await render(fixture('byb-c3', [], [{ name: 'Rodent Trapping' }])))).not.toContain(PHRASE.contract);
   });
 
+  test('a commercial or unknown-category estimate never prints the no-contract line, only the neutral agreement line', async () => {
+    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
+    const NEUTRAL = 'follow the agreement you sign';
+    // Single building, recurring pest, but category COMMERCIAL: the case a building count would miss.
+    const commercial = { ...fixture('byb-com1', [pest]), category: 'COMMERCIAL' };
+    const commercialText = extractPdfText(await render(commercial));
+    expect(commercialText).not.toContain(PHRASE.contract);
+    expect(commercialText).not.toContain('first visit includes an inside spray');
+    expect(commercialText).toContain(NEUTRAL);
+    // No category at all: unknown fails closed.
+    const unknown = { ...fixture('byb-com2', [pest]), category: undefined };
+    const unknownText = extractPdfText(await render(unknown));
+    expect(unknownText).not.toContain(PHRASE.contract);
+    expect(unknownText).toContain(NEUTRAL);
+    // An authored (enabled) commercial proposal on a RESIDENTIAL-labelled row.
+    const authored = fixture('byb-com3', [pest]);
+    authored.estimate_data.proposal = { enabled: true, buildings: [{ name: 'Site', lineItems: [{ description: 'Pest Control', unitPrice: 100, frequency: 'monthly' }] }] };
+    expect(extractPdfText(await render(authored))).not.toContain(PHRASE.contract);
+    // Known residential keeps the claim and drops the neutral line.
+    const residentialText = extractPdfText(await render(fixture('byb-res', [pest])));
+    expect(residentialText).toContain(PHRASE.contract);
+    expect(residentialText).not.toContain(NEUTRAL);
+  });
+
+  test('the page is only for an estimate still being decided', async () => {
+    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
+    const open = await render(fixture('byb-open', [pest]));
+    const offPages = pageCount(open);
+    for (const status of ['accepted', 'declined', 'expired']) {
+      const buf = await render({ ...fixture(`byb-${status}`, [pest]), status });
+      expect(extractPdfText(buf)).not.toContain(PHRASE.scheduling);
+      expect(pageCount(buf)).toBe(offPages - 1);
+    }
+    const past = await render({ ...fixture('byb-past', [pest]), status: 'sent', expires_at: '2020-01-01T00:00:00Z' });
+    expect(extractPdfText(past)).not.toContain(PHRASE.scheduling);
+    const live = await render({ ...fixture('byb-live', [pest]), status: 'sent', expires_at: new Date(Date.now() + 86400000).toISOString() });
+    expect(extractPdfText(live)).toContain(PHRASE.scheduling);
+  });
+
   test('the prepay refund line needs an annual prepay offer and the 90-day rule live', async () => {
     process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
     const recurring = fixture('byb-p1', [pest]);
@@ -152,6 +192,33 @@ describe('estimate PDF Before you book page', () => {
     for (const phrase of [PHRASE.pest, PHRASE.lawn, PHRASE.termite]) {
       expect(text.indexOf(phrase)).toBeGreaterThan(text.indexOf(PHRASE.scheduling));
     }
+  });
+
+  test('every-service page stays above the footer: the last drawn line ends before CONTENT_BOTTOM', async () => {
+    const PDFDocument = require('pdfkit');
+    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
+    process.env.GATE_PREPAY_REFUND_90_DAY = 'true';
+    const CONTENT_BOTTOM = 742 - 18;
+    const est = fixture('byb-fit', [pest, lawn, termiteBond, rodentTrap], [{ name: 'WDO Inspection' }, { name: 'German Roach Cleanout' }]);
+    const off = (() => { delete process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK; return render(est); })();
+    const offBuf = await off;
+    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
+    // Record every text call with the page it landed on and the height it takes.
+    const calls = [];
+    const original = PDFDocument.prototype.text;
+    const spy = jest.spyOn(PDFDocument.prototype, 'text').mockImplementation(function recorded(text, x, y, opts) {
+      const height = typeof y === 'number' ? this.heightOfString(String(text), opts || {}) : 0;
+      calls.push({ page: this.page, y, height, text: String(text) });
+      return original.call(this, text, x, y, opts);
+    });
+    let buf;
+    try { buf = await render(est); } finally { spy.mockRestore(); }
+    expect(pageCount(buf)).toBe(pageCount(offBuf) + 1);
+    const lastPage = calls[calls.length - 1].page;
+    const body = calls.filter((c) => c.page === lastPage && typeof c.y === 'number' && c.y < 742);
+    expect(body.length).toBeGreaterThan(8);
+    const bottom = Math.max(...body.map((c) => c.y + c.height));
+    expect(bottom).toBeLessThanOrEqual(CONTENT_BOTTOM);
   });
 
   test('page text has no dollar sign, "safe", EPA or banned wording', async () => {
