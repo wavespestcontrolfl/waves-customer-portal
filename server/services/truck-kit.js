@@ -30,6 +30,7 @@ const { fitAction, tidyName } = require('./admin-alert-names');
 const { truncateAtWord } = require('./ops-digest');
 const { detectServiceLine } = require('./service-report/service-line-configs');
 const { normalizeKitKey } = require('./kit-key');
+const { isMistingDesignConsultation } = require('../utils/mosquito-misting-system');
 
 // A truck check is due this many days after the last one (owner decision 2,
 // docs/tool-inventory-tracker-scope.md: weekly plus ad hoc).
@@ -76,10 +77,14 @@ const lockTechnician = (conn, technicianId) => conn.raw('SELECT pg_advisory_xact
 // catalog category alone never exempts a visit, only a consultation identity.
 // new_customer_inspection is the first-visit walkthrough (catalog: assess
 // the property and recommend services), a consultation by another name.
-const CONSULTATION_KEYS = new Set(['waves_assessment', 'lead_consultation_link', 'consultation', 'new_customer_inspection']);
-const CONSULTATION_NAME = /\b(assessment|consultation|walk-?through|new customer property inspection)\b/i;
+// pest_inspection is the same: identify conditions and recommend a plan, no
+// treatment. The misting design visit uses the repository's shared predicate.
+const CONSULTATION_KEYS = new Set(['waves_assessment', 'lead_consultation_link', 'consultation', 'new_customer_inspection', 'pest_inspection']);
+const CONSULTATION_NAME = /\b(assessment|consultation|walk-?through|new customer property inspection|pest inspection service)\b/i;
 const isConsultation = (serviceType, serviceKey) =>
-  (serviceKey ? CONSULTATION_KEYS.has(String(serviceKey).toLowerCase()) : false) || CONSULTATION_NAME.test(String(serviceType || ''));
+  (serviceKey ? CONSULTATION_KEYS.has(String(serviceKey).toLowerCase()) : false)
+  || CONSULTATION_NAME.test(String(serviceType || ''))
+  || isMistingDesignConsultation({ serviceKey, name: serviceType });
 // Mechanical lawn work (job-card.js ADDON_PROGRAMS lawn_care.nonChemical)
 // and the web sweep use their own machines, not the spray checklist: no
 // treatment-tool hold. Legacy rows without a key match by name.

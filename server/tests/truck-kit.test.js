@@ -384,6 +384,11 @@ describe('tool gaps by kit key', () => {
     expect(truckKit.serviceLinesFor('Lawn Consultation')).toEqual([]);
     expect(truckKit.serviceLinesFor('New Customer Property Inspection', { serviceKey: 'new_customer_inspection' })).toEqual([]);
     expect(truckKit.serviceLinesFor('New Customer Property Inspection')).toEqual([]);
+    expect(truckKit.serviceLinesFor('Pest Inspection Service', { serviceKey: 'pest_inspection' })).toEqual([]);
+    expect(truckKit.serviceLinesFor('Pest Inspection Service')).toEqual([]);
+    // The misting design visit is a consultation by the shared predicate; a misting service still needs the sprayer.
+    expect(truckKit.serviceLinesFor('Mosquito Misting System', { serviceKey: 'mosquito_misting_system' })).toEqual([]);
+    expect(truckKit.serviceLinesFor('Mosquito Misting System Refill')).toEqual(['mosquito']);
     // Catalog category "inspection" is NOT an exemption: the WDO letter needs the meter and probe.
     expect(truckKit.serviceLinesFor('WDO Inspection (Termite Letter)', { serviceKey: 'wdo_inspection' })).toEqual(['termite']);
     expect(truckKit.serviceLinesFor('Lawn Health Inspection', { serviceKey: 'lawn_inspection' })).toEqual(['lawn']);
