@@ -77,8 +77,8 @@ describe('mapOpportunity', () => {
     expect(row.location).toBe('FL 33621');
   });
 
-  test('a uiLink off sam.gov is not trusted; the link is rebuilt from the notice id', () => {
-    const { row } = sam.mapOpportunity(notice({ uiLink: 'https://evil.example/opp' }), NOW);
+  test('the link is the public notice page built from the id, never the API uiLink', () => {
+    const { row } = sam.mapOpportunity(notice({ uiLink: 'https://sam.gov/opp/abc123def456/view?restricted=1' }), NOW);
     expect(row.external_url).toBe('https://sam.gov/opp/abc123def456/view');
     const odd = sam.mapOpportunity(notice({ uiLink: 'javascript:alert(1)', noticeId: 'bad id/../x' }), NOW);
     expect(odd.row.external_url).toBeNull();

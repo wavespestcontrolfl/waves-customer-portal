@@ -80,15 +80,8 @@ function locationWords({ city, state, zip }) {
   return [city, [state, zip].filter(Boolean).join(' ')].filter(Boolean).join(', ') || null;
 }
 
-// The notice's public page. The API's own uiLink is used only when it is a sam.gov https address.
+// The notice's public page, built from its id. The API's uiLink is not used: it can need a contracting-officer login.
 function publicUrl(notice) {
-  const ui = text(notice.uiLink);
-  if (ui) {
-    try {
-      const url = new URL(ui);
-      if (url.protocol === 'https:' && (url.hostname === 'sam.gov' || url.hostname.endsWith('.sam.gov'))) return url.toString();
-    } catch { /* fall through */ }
-  }
   const id = text(notice.noticeId);
   return id && /^[A-Za-z0-9-]+$/.test(id) ? `https://sam.gov/opp/${id}/view` : null;
 }
