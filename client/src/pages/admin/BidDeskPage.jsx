@@ -135,7 +135,7 @@ function BidTable({ bids, selectedId, onSelect, checklistLive }) {
   );
 }
 
-function BidDetail({ bidId, onChanged, onClose }) {
+function BidDetail({ bidId, onChanged, onClose, onProgress }) {
   const [state, setState] = useState({ loading: true, error: "", bid: null, emails: [], extras: null });
   const [dueInput, setDueInput] = useState("");
   // The bid version the date field was typed against: a date save is fenced on it, so a decision saved in between
@@ -252,7 +252,7 @@ function BidDetail({ bidId, onChanged, onClose }) {
         {message && <ActionFeedback error={message.startsWith("Not saved")} className="mb-3">{message}</ActionFeedback>}
 
         {extras && (
-          <BidChecklistPanel key={bid.id} bidId={bidId} bid={bid} extras={extras} save={save} busy={busy} invite={status === "submitted"} />
+          <BidChecklistPanel key={bid.id} bidId={bidId} bid={bid} extras={extras} save={save} busy={busy} invite={status === "submitted"} onProgress={onProgress} />
         )}
 
         {showEmailHeading(bid, emails) && <h3 className={`mb-1 text-ui-body font-medium text-zinc-900${extras ? " mt-4" : ""}`}>Emails on this bid</h3>}
@@ -328,6 +328,12 @@ export default function BidDeskPage() {
   }, []);
   useEffect(() => { load(); }, [load]);
 
+  // A checklist change in the open bid moves its chip in the list at once.
+  const setProgress = useCallback((id, progress) => {
+    if (!progress) return;
+    setBids((rows) => rows.map((row) => (row.id === id ? { ...row, checklist_progress: { checked: progress.checked, required: progress.required } } : row)));
+  }, []);
+
   const select = (id) => setParams((prev) => { const next = new URLSearchParams(prev); if (id) next.set("bid", id); else next.delete("bid"); return next; });
 
   const shown = useMemo(() => bids.filter((bid) => {
@@ -375,7 +381,7 @@ export default function BidDeskPage() {
 
           {selectedId && (
             <div className="mt-4">
-              <BidDetail key={selectedId} bidId={selectedId} onChanged={load} onClose={() => select("")} />
+              <BidDetail key={selectedId} bidId={selectedId} onChanged={load} onClose={() => select("")} onProgress={setProgress} />
             </div>
           )}
         </>

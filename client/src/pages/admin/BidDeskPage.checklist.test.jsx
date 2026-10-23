@@ -73,12 +73,13 @@ it("starts a checklist from the bid's type, then ticks a line", async () => {
   expect(start.mock.calls[0][0].body).toEqual({ type: "itb" });
   expect(await screen.findByText("Line 1")).toBeInTheDocument();
   expect(screen.getByText(/Section 3.2, page 4/)).toBeInTheDocument();
-  expect(screen.getByText("0/2")).toBeInTheDocument();
+  const panel = () => within(screen.getByTestId("bid-checklist-panel"));
+  expect(panel().getByText("0/2")).toBeInTheDocument();
 
   fireEvent.click(screen.getByLabelText("Line 1"));
   await waitFor(() => expect(tick).toHaveBeenCalled());
   expect(tick.mock.calls[0][0].body).toEqual({ checked: true });
-  expect(await screen.findByText("1/2")).toBeInTheDocument();
+  await waitFor(() => expect(panel().getByText("1/2")).toBeInTheDocument());
 });
 
 it("adds a custom line with its source text", async () => {
@@ -193,4 +194,52 @@ it("lists the stop checks first and marks them apart from the other lines", asyn
   expect(stop).toHaveAttribute("data-section", "stop");
   expect(base).toHaveAttribute("data-section", "base");
   expect(stop.compareDocumentPosition(base) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
+it("saving only the type does not send the prefilled site visit or questions dates", async () => {
+  const patch = vi.fn(() => reply({ ok: true, bid: bid({ solicitation_type: "itb" }) }));
+  route({
+    "GET /admin/bid-desk/": LIST_ON,
+    "GET /admin/bid-desk/b1": () => reply(detail({ bid: bid({ job_walk_at: "2026-10-09T13:30:00.000Z", job_walk_confirmed: false, questions_due_at: "2026-10-08T21:00:00.000Z" }) })),
+    "PATCH /admin/bid-desk/b1": patch,
+  });
+  renderPage();
+  fireEvent.change(await screen.findByLabelText("Solicitation type"), { target: { value: "itb" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save bid details" }));
+  await waitFor(() => expect(patch).toHaveBeenCalled());
+  const body = patch.mock.calls[0][0].body;
+  expect(body).toEqual({ solicitationType: "itb", scored: null, jobWalkMandatory: false });
+  expect(body).not.toHaveProperty("jobWalkAt");
+  expect(body).not.toHaveProperty("questionsDueAt");
+});
+
+it("sends a date only after the operator edits that field", async () => {
+  const patch = vi.fn(() => reply({ ok: true, bid: bid() }));
+  route({
+    "GET /admin/bid-desk/": LIST_ON,
+    "GET /admin/bid-desk/b1": () => reply(detail({ bid: bid({ job_walk_at: "2026-10-09T13:30:00.000Z", job_walk_confirmed: false }) })),
+    "PATCH /admin/bid-desk/b1": patch,
+  });
+  renderPage();
+  fireEvent.change(await screen.findByLabelText(/Site visit or job walk/), { target: { value: "2026-10-10T10:00" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save bid details" }));
+  await waitFor(() => expect(patch).toHaveBeenCalled());
+  expect(patch.mock.calls[0][0].body).toEqual({ solicitationType: null, scored: null, jobWalkMandatory: false, jobWalkAt: "2026-10-10T10:00" });
+});
+
+it("ticking a checklist line moves the chip in the list row at once", async () => {
+  let progress = { checked: 0, required: 2, total: 2 };
+  const tick = vi.fn(() => { progress = { checked: 1, required: 2, total: 2 }; return reply({ ok: true }); });
+  route({
+    "GET /admin/bid-desk/": () => reply({ checklist_live: true, bids: [bid({ checklist_progress: { checked: 0, required: 2 } })] }),
+    "GET /admin/bid-desk/b1": () => reply(detail({ checklist: [item(1), item(2)], checklist_progress: progress })),
+    "PATCH /admin/bid-desk/b1/checklist/i1": tick,
+  });
+  renderPage();
+  const row = (await screen.findByRole("table"));
+  expect(within(row).getByText("0/2")).toBeInTheDocument();
+  fireEvent.click(await screen.findByLabelText("Line 1"));
+  await waitFor(() => expect(tick).toHaveBeenCalled());
+  await waitFor(() => expect(within(screen.getByRole("table")).getByText("1/2")).toBeInTheDocument());
+  expect(within(screen.getByRole("table")).queryByText("0/2")).toBeNull();
 });

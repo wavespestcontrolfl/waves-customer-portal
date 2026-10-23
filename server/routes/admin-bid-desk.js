@@ -146,12 +146,19 @@ function buildPatch(bid, value) {
     if (!parsed.ok) return { error: { status: 400, body: { error: `${key} is not a real date` } } };
     patch[key] = parsed.at;
     if (!sameInstantOrBothNull(bid[key], parsed.at)) patch[DATE_STAMPS[key]] = null;
-    // A site-visit date the operator typed is the confirmed date (retyping keeps it); clearing it un-confirms.
-    if (key === 'job_walk_at') patch.job_walk_confirmed = parsed.at !== null;
+    // A site-visit date the operator actually changed is the confirmed date (a new value, even a retyped one that
+    // differs). Sending the stored value again is not an edit: the flag stays as it is, so saving the type with the
+    // prefilled date never confirms a date that was read from an invite. Clearing the date un-confirms.
+    if (key === 'job_walk_at') {
+      if (parsed.at === null) patch.job_walk_confirmed = false;
+      else if (!sameInstantOrBothNull(bid.job_walk_at, parsed.at)) patch.job_walk_confirmed = true;
+    }
   }
-  // Confirm a template-read site-visit date as read, without retyping it (the page's "Confirm site visit date").
-  if (value.jobWalkConfirmed === true && value.job_walk_at === undefined) {
-    if (!bid.job_walk_at) return { error: { status: 400, body: { error: 'There is no site visit date to confirm' } } };
+  // Confirm the site-visit date as read, without editing it (the page's "Confirm site visit date"); it needs a date.
+  if (value.jobWalkConfirmed === true) {
+    if (!(value.job_walk_at !== undefined ? patch.job_walk_at : bid.job_walk_at)) {
+      return { error: { status: 400, body: { error: 'There is no site visit date to confirm' } } };
+    }
     patch.job_walk_confirmed = true;
   }
   const dates = datePatch(bid, value);

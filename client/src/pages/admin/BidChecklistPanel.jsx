@@ -73,10 +73,14 @@ function Details({ bid, busy, save }) {
         )}
       </div>
       <div>
-        <Button disabled={busy} onClick={() => save({
-          solicitationType: orNull(form.type), scored: scoredToApi(form.scored), questionsDueAt: orNull(form.questions),
-          jobWalkAt: orNull(form.walk), jobWalkMandatory: !!form.mandatory,
-        }, "Bid details saved")}>Save bid details</Button>
+        <Button disabled={busy} onClick={() => {
+          // A date goes in the request only when the operator changed it. The server treats a changed site-visit
+          // date as confirmed, so the prefilled date of an invite must not ride along with a type change.
+          const body = { solicitationType: orNull(form.type), scored: scoredToApi(form.scored), jobWalkMandatory: !!form.mandatory };
+          if (form.questions !== etDatetimeLocalValue(bid.questions_due_at)) body.questionsDueAt = orNull(form.questions);
+          if (form.walk !== etDatetimeLocalValue(bid.job_walk_at)) body.jobWalkAt = orNull(form.walk);
+          save(body, "Bid details saved");
+        }}>Save bid details</Button>
       </div>
     </div>
   );
@@ -282,7 +286,7 @@ function Submission({ bid, busy, save, invite }) {
  * @param save      (body, doneMessage) => Promise<boolean>: a PATCH of the bid, by the page
  * @param invite    true while the Decision field says Submitted: the submission record is invited, never required
  */
-export default function BidChecklistPanel({ bidId, bid, extras, save, busy: parentBusy, invite }) {
+export default function BidChecklistPanel({ bidId, bid, extras, save, busy: parentBusy, invite, onProgress }) {
   const [state, setState] = useState(extras);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState({ text: "", error: false });
@@ -293,8 +297,10 @@ export default function BidChecklistPanel({ bidId, bid, extras, save, busy: pare
     const body = await res.json().catch(() => ({}));
     if (res.ok && body.checklist_live) {
       setState({ checklist: body.checklist, progress: body.checklist_progress, estimate: body.estimate, documents: body.documents });
+      // The list row's chip follows at once, not on the next list load.
+      if (onProgress) onProgress(bidId, body.checklist_progress);
     }
-  }, [bidId]);
+  }, [bidId, onProgress]);
 
   // A linked or unlinked estimate changes the summary the server builds.
   useEffect(() => {

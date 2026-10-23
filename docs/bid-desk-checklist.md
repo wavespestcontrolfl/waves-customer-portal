@@ -11,7 +11,7 @@ Nothing here is sent to a buyer, a general contractor or an agency. The only out
 | Solicitation type | `bid_opportunities.solicitation_type` | quote, itb, rfq, rfp, itn, federal, gc_subcontract, other. Checked by the database. |
 | Scored or pass/fail | `scored` | true = scored proposal, false = pass/fail, NULL = not set. |
 | Questions due | `questions_due_at` | Typed by the operator (Eastern time). Never read from mail, so a value counts as confirmed. |
-| Job walk | `job_walk_at`, `job_walk_mandatory`, `job_walk_confirmed` | The date may be read from a BuildingConnected or Procore invite; a read date is unconfirmed. A date the operator types is confirmed (retyping keeps it, clearing resets it). "Confirm site visit date" (`jobWalkConfirmed: true`) confirms a read date without retyping. A mandatory walk is named so in its reminder. |
+| Job walk | `job_walk_at`, `job_walk_mandatory`, `job_walk_confirmed` | The date may be read from a BuildingConnected or Procore invite; a read date is unconfirmed. A date the operator changes is confirmed; sending the stored value again is not an edit and leaves the flag as it is (the page sends a date only after the operator edits that field); clearing resets it. "Confirm site visit date" (`jobWalkConfirmed: true`) confirms a read date without retyping. A mandatory walk is named so in its reminder. |
 | Estimate and proposal | `estimate_id` | Must be an existing estimate. The page links to `/admin/estimates/:id/proposal`. |
 | Documents | read-only, from `email_attachments` | Every attachment of every email linked to the bid. Listed by reference; downloaded through `/api/admin/email/message/:emailId/attachment/:attachmentId`. No file is copied. |
 | Checklist | `bid_checklist_items` | See below. |

@@ -499,6 +499,35 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
         expect(rungKeys()).toEqual([`bid-desk:remind-jobwalk:${bidId}:${read.job_walk_at.toISOString()}`]);
       });
 
+      test('sending the stored date again (with a type change) does not confirm it or start reminders; a changed date does', async () => {
+        const { bidId } = await service.ingestEmail(await storeEmail({ body_text: BC_BODY.replace('Bid Due:', 'Job Walk: October 2, 2026\nBid Due:') }));
+        const read = await bidRow(bidId);
+        expect(read.job_walk_confirmed).toBe(false);
+        const now = new Date(read.job_walk_at.getTime() - 1.5 * DAY);
+        // The page's prefilled value rides along with a type change: not an edit.
+        expect((await call('PATCH', `/${bidId}`, { solicitationType: 'itb', jobWalkAt: wall(read.job_walk_at) })).status).toBe(200);
+        expect(await bidRow(bidId)).toMatchObject({ solicitation_type: 'itb', job_walk_confirmed: false });
+        expect((await bidRow(bidId)).job_walk_at.toISOString()).toBe(read.job_walk_at.toISOString());
+        // The legacy key follows the same rule.
+        expect((await call('PATCH', `/${bidId}`, { job_walk_at: wall(read.job_walk_at) })).status).toBe(200);
+        expect((await bidRow(bidId)).job_walk_confirmed).toBe(false);
+        expect(await service.sendDueReminders({ now })).toBe(0);
+        expect(raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+        // The same value with an explicit confirmation confirms it.
+        expect((await call('PATCH', `/${bidId}`, { jobWalkAt: wall(read.job_walk_at), jobWalkConfirmed: true })).status).toBe(200);
+        expect((await bidRow(bidId)).job_walk_confirmed).toBe(true);
+        // A resubmitted confirmed date stays confirmed.
+        expect((await call('PATCH', `/${bidId}`, { jobWalkAt: wall(read.job_walk_at), scored: true })).status).toBe(200);
+        expect((await bidRow(bidId)).job_walk_confirmed).toBe(true);
+        // A changed date on another unconfirmed bid confirms it.
+        const other = await newBid({ job_walk_at: at(5), job_walk_confirmed: false });
+        expect((await call('PATCH', `/${other}`, { jobWalkAt: wall(at(6)) })).status).toBe(200);
+        expect((await bidRow(other)).job_walk_confirmed).toBe(true);
+        const legacy = await newBid({ job_walk_at: at(5), job_walk_confirmed: false });
+        expect((await call('PATCH', `/${legacy}`, { job_walk_at: wall(at(6)) })).status).toBe(200);
+        expect((await bidRow(legacy)).job_walk_confirmed).toBe(true);
+      });
+
       test('retyping the date keeps it confirmed; clearing it resets, and a confirmation needs a date', async () => {
         const id = await newBid({ job_walk_at: at(5), job_walk_confirmed: false });
         expect((await call('PATCH', `/${id}`, { jobWalkAt: wall(at(6)) })).status).toBe(200);
