@@ -37,6 +37,14 @@ const BODY_TOP = 150; // below the header + title bar on page 1
 
 const safeFilename = (s) => String(s || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 60) || 'waves-agreement';
 
+// "**Text**" on its own line = a bold line; the markers are not printed.
+function splitBoldLines(text) {
+  return String(text || '').split('\n').map((raw) => {
+    const match = /^\*\*(.+)\*\*$/.exec(raw.trim());
+    return match ? { text: match[1].trim(), bold: true } : { text: raw, bold: false };
+  });
+}
+
 function formatDate(d) {
   return formatDisplayDate(d, { fallback: '—' });
 }
@@ -217,14 +225,22 @@ function generateContractPDF(contract, customer, sink, opts = {}) {
   });
 
   // Body — the rendered contract text snapshot. Flows across pages; the
-  // pageAdded handler keeps a footer on each.
-  doc.fontSize(10.5).font('Helvetica').fillColor(BODY)
-    .text(contract.contract_text_snapshot || '', MARGIN_X, y, {
-      width: CONTENT_W,
-      align: 'left',
-      lineGap: 3,
-      paragraphGap: 6,
-    });
+  // pageAdded handler keeps a footer on each. A line wrapped in ** prints
+  // bold (F.S. 482.227 wants termite-contract statements and headings in
+  // bold type); a body with no such line prints exactly as before.
+  const bodyText = contract.contract_text_snapshot || '';
+  const bodyOptions = { width: CONTENT_W, align: 'left', lineGap: 3, paragraphGap: 6 };
+  const bodyLines = splitBoldLines(bodyText);
+  doc.fontSize(10.5).font('Helvetica').fillColor(BODY);
+  if (!bodyLines.some((line) => line.bold)) {
+    doc.text(bodyText, MARGIN_X, y, bodyOptions);
+  } else {
+    doc.text('', MARGIN_X, y, bodyOptions);
+    for (const line of bodyLines) {
+      doc.font(line.bold ? 'Helvetica-Bold' : 'Helvetica').text(line.text || ' ', MARGIN_X, doc.y, bodyOptions);
+    }
+    doc.font('Helvetica');
+  }
 
   // View-only documents (requires_signature=false) get no signature block —
   // the signing page labels them "no signature required", and the PDF must
@@ -267,4 +283,5 @@ async function buildContractPDFBuffer(contract, customer, opts = {}) {
 module.exports = {
   generateContractPDF,
   buildContractPDFBuffer,
+  splitBoldLines,
 };

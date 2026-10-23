@@ -1,4 +1,4 @@
-const { buildContractPDFBuffer } = require('../services/pdf/contract-pdf');
+const { buildContractPDFBuffer, splitBoldLines } = require('../services/pdf/contract-pdf');
 
 describe('contract-pdf', () => {
   const baseContract = {
@@ -22,6 +22,24 @@ describe('contract-pdf', () => {
     expect(buf.length).toBeGreaterThan(800);
     expect(buf.slice(0, 5).toString('latin1')).toBe('%PDF-');
   }
+
+  test('a line wrapped in ** is a bold line (F.S. 482.227 bold statements); others stay as written', () => {
+    expect(splitBoldLines('**RETREATMENT ONLY.**\nPlain line\n\n  **EXCLUSIONS**  ')).toEqual([
+      { text: 'RETREATMENT ONLY.', bold: true },
+      { text: 'Plain line', bold: false },
+      { text: '', bold: false },
+      { text: 'EXCLUSIONS', bold: true },
+    ]);
+    expect(splitBoldLines('a ** b ** c')).toEqual([{ text: 'a ** b ** c', bold: false }]);
+  });
+
+  test('builds a PDF for a body with bold lines', async () => {
+    const buf = await buildContractPDFBuffer({
+      ...baseContract,
+      contract_text_snapshot: '**RETREATMENT ONLY. THIS WARRANTY DOES NOT COVER DAMAGE REPAIR.**\n\nPlain clause.\n**EXCLUSIONS**\n- Drywood termites.',
+    }, customer, { signed: false });
+    await isPdf(buf);
+  });
 
   test('builds a review-copy PDF for an unsigned contract', async () => {
     const buf = await buildContractPDFBuffer(baseContract, customer, { signed: false });

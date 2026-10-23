@@ -5,6 +5,8 @@ import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { Badge, Button, Dialog, DialogBody, DialogFooter, Select } from "../../components/ui";
 import { adminFetch } from "../../lib/adminFetch";
 import CreateProjectModal from "../../components/tech/CreateProjectModal";
+import IssueWarrantyDialog from "../../components/admin/IssueWarrantyDialog";
+import { warrantyPlanYears } from "../../lib/pretreatWarrantyValues";
 import WdoIntelligenceBar from "../../components/tech/WdoIntelligenceBar";
 import WdoSignaturePad from "../../components/tech/WdoSignaturePad";
 import useIsMobile from "../../hooks/useIsMobile";
@@ -1672,6 +1674,7 @@ export function ProjectDetail({
   const dictationPending = useDictationPending();
   const actionsBlocked = saving || dictationPending;
   const [editFindings, setEditFindings] = useState({});
+  const [warrantyDialogOpen, setWarrantyDialogOpen] = useState(false);
   const [editRecs, setEditRecs] = useState("");
   const [editTitle, setEditTitle] = useState("");
   const [editProjectDate, setEditProjectDate] = useState("");
@@ -3393,7 +3396,31 @@ export function ProjectDetail({
                 : "Send report + invoice"}
             </button>
           )}
+        {/* Rule 5E-14.105(3): a new-building pre-treat gets a written
+            warranty within 30 days; an addition (no plan years) gets none. */}
+        {canAdminActions &&
+          project.project_type === CERTIFICATE_TYPE &&
+          project.customer_id &&
+          warrantyPlanYears(editFindings?.warranty_type) && (
+            <button
+              type="button"
+              onClick={() => setWarrantyDialogOpen(true)}
+              disabled={actionsBlocked || dirty}
+              style={{ ...btnSecondary, opacity: actionsBlocked || dirty ? 0.4 : 1 }}
+              title={dirty ? "Save changes first" : "Create the new construction warranty for signature"}
+            >
+              Issue warranty
+            </button>
+          )}
       </div>{" "}
+      {warrantyDialogOpen && (
+        <IssueWarrantyDialog
+          open
+          onClose={() => setWarrantyDialogOpen(false)}
+          project={project}
+          findings={editFindings}
+        />
+      )}
       {confirmDialog}
     </div>
   );
