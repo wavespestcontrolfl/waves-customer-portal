@@ -5209,8 +5209,11 @@ const AppointmentReminders = {
       const approvedSend = Boolean(options.approvedNotice);
       const claimStates = approvedSend ? ['pending', 'pending_notify', 'pending_approved'] : ['pending', 'pending_notify'];
       const claimStatesWithSent = [...claimStates, 'sent'];
+      // Deterministic: a visit can carry several reminder rows, and the live send and the recovery sweep must pick the SAME one, so
+      // their claims meet on one row (a later claim replaces the token, which fails the earlier sender's pre-dispatch check).
       const record = await db('appointment_reminders')
         .where({ scheduled_service_id: scheduledServiceId })
+        .orderBy('id')
         .first();
 
       if (!record) {

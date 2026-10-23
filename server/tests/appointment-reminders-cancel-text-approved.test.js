@@ -15,7 +15,7 @@ jest.mock('../models/db', () => {
     const q = {
       where: (...a) => { mockState.wheres.push([table, ...a]); return q; }, whereNull: () => q, whereIn: () => q, whereNotNull: () => q,
       whereRaw: (...a) => { mockState.raws.push([table, ...a]); return q; }, whereNot: () => q,
-      leftJoin: () => q, select: () => q, orderBy: () => q,
+      leftJoin: () => q, select: () => q, orderBy: (...a) => { (mockState.orders ||= []).push([table, ...a]); return q; },
       first: async () => {
         if (table === 'appointment_reminders') return mockState.reminder;
         if (table === 'customers') return mockState.customer;
@@ -410,6 +410,13 @@ describe('approvedCancellationNoticeStatus', () => {
       expect(await status([row('a', 'sent'), row('b', 'pending_approved')], [{ to_hash: sha('+19415550101') }], { recipientKeys: keys })).toBe('delivered');
       const audit = mockState.raws.filter(([table]) => table === 'messaging_audit_log').map(([, sql]) => String(sql));
       expect(audit.every((sql) => !sql.includes('transitioned_at'))).toBe(true);
+    });
+
+    test('the live send and the sweep pick the SAME reminder row (lowest id), so their claims meet on one row and the token fences the earlier sender', async () => {
+      mockState.orders = [];
+      mockState.reminders = null;
+      await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice: [{ recipient_key: 'x', body: 'b' }], cancelGeneration: { visitId: 'svc-1', restorations: 0, hits: [] }, outcome: {} });
+      expect(mockState.orders).toContainEqual(['appointment_reminders', 'id']);
     });
 
     test('the fenced claim adopts nothing while a sibling row was touched, and adopts when every row is untouched', async () => {
