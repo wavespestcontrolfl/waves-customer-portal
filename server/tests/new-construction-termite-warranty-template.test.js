@@ -7,6 +7,7 @@ const { BODY_V3 } = require('../models/migrations/20261023160000_new_constructio
 const { BODY_V4 } = require('../models/migrations/20261023180000_new_construction_termite_warranty_v4');
 const { BODY_V5 } = require('../models/migrations/20261023200000_new_construction_termite_warranty_v5');
 const { BODY_V6, VARIABLES_V6 } = require('../models/migrations/20261023220000_new_construction_termite_warranty_v6');
+const v7 = require('../models/migrations/20261023240000_new_construction_termite_warranty_v7');
 const { renderDocumentTemplate } = require('../services/document-template-library');
 
 const bodyVars = [...new Set([...TEMPLATE.body.matchAll(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g)].map((m) => m[1]))].sort();
@@ -75,11 +76,46 @@ describe('new construction termite warranty template', () => {
     expect(BODY_V5).toContain('{{issuer.title}}, on {{warranty.issue_date}}.');
   });
 
-  test('version 6 (the active text) prints the configured FDACS license, and declares every variable it uses', () => {
+  test('version 6 prints the configured FDACS license, and declares every variable it uses', () => {
     expect(BODY_V6).not.toContain('JB351547');
     expect(BODY_V6).toContain('FDACS License {{issuer.license}}');
     expect(BODY_V6.replace('{{issuer.license}}', 'JB351547')).toBe(BODY_V5);
     const v6Vars = [...new Set([...BODY_V6.matchAll(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g)].map((m) => m[1]))].sort();
     expect(v6Vars).toEqual([...VARIABLES_V6].sort());
+  });
+
+  test('the active text is property-neutral, so a commercial or multi-unit building reads true', () => {
+    expect(v7.BODY_V7).not.toMatch(/\bhome\b|homebuyer/i);
+    expect(v7.BODY_V7).toContain('This warranty goes with the property. If the property is sold,');
+    expect(v7.BODY_V7).toContain('before the building is occupied');
+    expect(v7.BODY_V7).toContain('FDACS License {{issuer.license}}');
+  });
+
+  test('the property-neutral migration takes the next free version number and finds its own row by body', async () => {
+    const calls = [];
+    const rows = { template: { id: 't1', template_key: TEMPLATE.template_key }, mine: null, max: 9 };
+    const knex = (table) => {
+      const q = {
+        _where: {},
+        where(arg) { Object.assign(q._where, arg); return q; },
+        forUpdate() { calls.push(`lock:${table}`); return q; },
+        max() { return q; },
+        first: async () => {
+          if (table === 'document_templates') return rows.template;
+          if (q._where.body) return rows.mine;
+          return { n: rows.max };
+        },
+        insert(row) { calls.push(`insert:${row.version_number}`); return { returning: async () => [{ id: 'v-new', ...row }] }; },
+        update: async (patch) => { calls.push(`active:${patch.active_version_id}`); return 1; },
+      };
+      return q;
+    };
+    knex.fn = { now: () => 'now()' };
+    await v7.up(knex);
+    expect(calls).toEqual(['lock:document_templates', 'insert:10', 'active:v-new']);
+    calls.length = 0;
+    rows.mine = { id: 'v-existing' };
+    await v7.up(knex);
+    expect(calls).toEqual(['lock:document_templates', 'active:v-existing']);
   });
 });

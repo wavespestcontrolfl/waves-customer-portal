@@ -310,6 +310,12 @@ async function templateIssueValues(templateKey, body, customer, conn = db) {
   if (![customer.address_line1, customer.city, customer.zip].every((part) => oneLine(part))) {
     throw bad("Add the owner's or agent's full mailing address (street, city, ZIP) to the customer first.", 409);
   }
+  // The customer's name and address print on the contract too (section 1).
+  const customerFields = ['first_name', 'last_name', 'company_name', 'address_line1', 'address_line2', 'city', 'zip']
+    .filter((field) => customerCopyViolations(oneLine(customer[field])).length > 0);
+  if (customerFields.length) {
+    throw bad(`Remove the access code or banned wording from the customer record: ${customerFields.join(', ')}.`, 409);
+  }
   const findings = parseFindings(project.findings);
   if (!warrantyEligible(findings)) throw bad('This certificate does not qualify for the new construction warranty.', 409);
   const { initial, values } = certificateValues(project, findings);

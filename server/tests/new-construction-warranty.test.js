@@ -167,6 +167,8 @@ describe('templateIssueValues (server-built warranty)', () => {
     for (const gap of [{ address_line1: '' }, { city: null }, { zip: '' }]) {
       await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, { ...customer, ...gap }, conn(project))).rejects.toMatchObject({ status: 409 });
     }
+    await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, { ...customer, address_line1: '12 Test Lane, gate code 1234' }, conn(project)))
+      .rejects.toMatchObject({ status: 409, message: expect.stringContaining('address_line1') });
     const { WAVES_FDACS_LICENSE_NUMBER } = require('../constants/business');
     await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(project)))
       .resolves.toMatchObject({ issuer: { license: WAVES_FDACS_LICENSE_NUMBER } });
