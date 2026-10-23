@@ -50,11 +50,13 @@ function attachPatch(bid, parsed, kind) {
 }
 
 /**
- * '7d' | '2d' | null. A reminder needs a due date the operator confirmed, an open status and a bid that is not
- * historical. Each fires once: a bid already inside 2 days that never had the 7-day reminder gets the 2-day one only.
+ * '7d' | '2d' | null. A reminder needs a due date the operator confirmed, an open status, a bid that is not
+ * historical, and (a SAM.gov bid) a notice still open on SAM.gov. Each fires once: a bid already inside 2 days that never had the 7-day reminder gets the 2-day one only.
  */
 function reminderDue(bid, now = new Date()) {
   if (!bid || bid.historical || bid.due_confirmed !== true || !bid.due_at || bid.needs_date_confirmation) return null;
+  // A notice SAM.gov lists as closed (archived, awarded, gone) never reminds, even after the date is confirmed.
+  if (bid.source_active === false) return null;
   if (!OPEN_STATUSES.includes(bid.status)) return null;
   const left = new Date(bid.due_at).getTime() - new Date(now).getTime();
   if (!(left > 0)) return null;
