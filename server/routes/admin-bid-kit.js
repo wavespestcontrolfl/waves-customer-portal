@@ -7,7 +7,7 @@ const { bidKitLive } = require('../config/feature-gates');
 const store = require('../services/bid-kit-store');
 const files = require('../services/bid-kit-files');
 const expiry = require('../services/bid-kit-expiry');
-const { scrubError } = require('../services/bid-kit-log');
+const { scrubError, errorTag } = require('../services/bid-kit-log');
 const catalog = require('../../shared/bid-kit-catalog.cjs');
 const { validCalendarDate } = require('../utils/datetime-et');
 
@@ -252,8 +252,48 @@ function receiveFile(req, res, next) {
   });
 }
 
+// Replaces the stored file. The NEW object is deleted only when the replacement is known not to have committed: an explicit
+// refusal (not found, stale version) or a failure before any commit was issued (bidKitOutcome 'rolled_back'). When the
+// outcome is unknown (the commit's acknowledgement was lost) the row may point at it, so it is kept, and a fixed line with
+// the item id says so; the next page load shows the row as it is. Returns { outcome } or an explicit refusal { status, error }.
+async function replaceStoredFile(id, stored, expectedUpdatedAt) {
+  let outcome;
+  try {
+    outcome = await store.replaceFile(id, stored, expectedUpdatedAt);
+  } catch (err) {
+    if (err && err.bidKitOutcome === 'rolled_back') await files.deleteFile(stored.key);
+    else logger.warn(`[bid-kit] file replacement outcome unknown for item ${id}; the new stored file was kept`);
+    throw err;
+  }
+  if (outcome.conflict) {
+    await files.deleteFile(stored.key);
+    return { status: 409, error: CHANGED };
+  }
+  if (outcome.notFound) {
+    await files.deleteFile(stored.key);
+    return { status: 404, error: 'Not found' };
+  }
+  return { outcome };
+}
+
+// Everything after a committed replacement, each step on its own: the previous object goes (best effort, and only now that
+// the new reference is committed), then the activity row and the expiry bell. None of them can undo the upload, and none can
+// delete the new object; a failure is logged with a fixed line.
+async function afterReplacement(req, outcome) {
+  if (outcome.oldKey) await files.deleteFile(outcome.oldKey);
+  try {
+    await activity(req, 'bid_kit_file_uploaded', outcome.item, ['file']);
+  } catch (err) {
+    logger.warn(`[bid-kit] activity row after a file replacement failed: ${errorTag(err)}`);
+  }
+  try {
+    await expiry.syncExpiryBell(statusRow(outcome.item));
+  } catch (err) {
+    logger.warn(`[bid-kit] expiry bell after a file replacement failed: ${errorTag(err)}`);
+  }
+}
+
 router.post('/:id/file', receiveFile, async (req, res, next) => {
-  let stored = null;
   try {
     if (!req.file) return res.status(400).json({ error: 'No file was sent' });
     // A file replaces what the page showed, so it is fenced on the version the page loaded, like a save or a sign-off.
@@ -263,19 +303,12 @@ router.post('/:id/file', receiveFile, async (req, res, next) => {
     if (!existing || existing.archived_at) return res.status(404).json({ error: 'Not found' });
     // The cheap check first (nothing is stored for a stale page); the same fence runs again under the row lock.
     if (!sameInstant(existing.updated_at, value.expected_updated_at)) return res.status(409).json({ error: CHANGED });
-    stored = await files.putFile(req.params.id, req.file);
-    const outcome = await store.replaceFile(req.params.id, stored, value.expected_updated_at);
-    if (outcome.notFound || outcome.conflict) {
-      await files.deleteFile(stored.key);
-      return outcome.conflict ? res.status(409).json({ error: CHANGED }) : res.status(404).json({ error: 'Not found' });
-    }
-    // The row now points at the new file; the old private object has nothing pointing at it.
-    if (outcome.oldKey) await files.deleteFile(outcome.oldKey);
-    await activity(req, 'bid_kit_file_uploaded', outcome.item, ['file']);
-    await expiry.syncExpiryBell(statusRow(outcome.item));
-    return res.json({ item: present(statusRow(outcome.item), catalog.etToday()) });
+    const stored = await files.putFile(req.params.id, req.file);
+    const replaced = await replaceStoredFile(req.params.id, stored, value.expected_updated_at);
+    if (replaced.error) return res.status(replaced.status).json({ error: replaced.error });
+    await afterReplacement(req, replaced.outcome);
+    return res.json({ item: present(statusRow(replaced.outcome.item), catalog.etToday()) });
   } catch (err) {
-    if (stored) await files.deleteFile(stored.key);
     if (err instanceof files.FileError) return res.status(err.status).json({ error: err.message });
     return next(scrubError(err));
   }

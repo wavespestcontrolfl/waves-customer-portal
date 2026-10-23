@@ -291,6 +291,95 @@ describeDb('Bid kit (PostgreSQL)', () => {
       expect((await rowOf(live.id)).archived_at).toBeNull();
     });
 
+    describe('the new object is deleted only when the replacement is known not to have committed', () => {
+      const logger = require('../services/logger');
+      const files = require('../services/bid-kit-files');
+      const expiryService = require('../services/bid-kit-expiry');
+      const store = require('../services/bid-kit-store');
+      const puts = () => mockSent.filter((c) => c.constructor.name === 'PutObjectCommand').map((c) => c.input.Key);
+      const deletes = () => mockSent.filter((c) => c.constructor.name === 'DeleteObjectCommand').map((c) => c.input.Key);
+      let created;
+      let firstKey;
+      beforeEach(async () => {
+        created = await create({ item_key: 'business_license_copy', value: 'JB000000', expires_on: '2999-06-30' });
+        expect((await upload(created.id, 'first.pdf')).status).toBe(200);
+        firstKey = (await rowOf(created.id)).file_s3_key;
+        mockSent.length = 0;
+        logger.warn.mockClear();
+      });
+
+      test('a later step throws after the commit: the new object is kept, the row points at it, the previous object goes after the commit', async () => {
+        const bell = jest.spyOn(expiryService, 'syncExpiryBell').mockRejectedValueOnce(new Error('bell down'));
+        const res = await upload(created.id, 'second.pdf');
+        bell.mockRestore();
+        expect(res.status).toBe(200);
+        const [newKey] = puts();
+        expect(await rowOf(created.id)).toMatchObject({ file_s3_key: newKey, file_name: 'second.pdf' });
+        expect(mockSent.map((c) => `${c.constructor.name}:${c.input.Key}`)).toEqual([`PutObjectCommand:${newKey}`, `DeleteObjectCommand:${firstKey}`]);
+      });
+
+      test('the commit acknowledgement is lost (the row is committed, then the call throws): the new object is kept and nothing is deleted', async () => {
+        const outer = mockPg;
+        const begin = outer.transaction.bind(outer);
+        let armed = true;
+        const wrapped = async (...args) => {
+          const trx = await begin(...args);
+          if (armed && args.length === 0) {
+            armed = false; // only the file replacement's own transaction
+            const commit = trx.commit.bind(trx);
+            Object.defineProperty(trx, 'commit', { configurable: true, writable: true, value: async (...rest) => { await commit(...rest); throw new Error('connection reset by peer'); } });
+          }
+          return trx;
+        };
+        Object.defineProperty(outer, 'transaction', { configurable: true, writable: true, value: wrapped });
+        let res;
+        try {
+          res = await upload(created.id, 'second.pdf');
+        } finally {
+          delete outer.transaction;
+        }
+        expect(res.status).toBe(500);
+        const [newKey] = puts();
+        expect(await rowOf(created.id)).toMatchObject({ file_s3_key: newKey, file_name: 'second.pdf' }); // the row points at the new object
+        expect(deletes()).toEqual([]); // neither the new nor the previous object
+        expect(logger.warn.mock.calls.map(([line]) => line)).toContain(`[bid-kit] file replacement outcome unknown for item ${created.id}; the new stored file was kept`);
+      });
+
+      test('a statement that fails before any commit is a rollback: the store says so, the row is untouched, and the route deletes the new object', async () => {
+        const before = await rowOf(created.id);
+        const failure = await store.replaceFile(created.id, { key: 'bid-kit/x/y.pdf', fileName: 'y.pdf', contentType: 'application/pdf', size: 3000000000 }, before.updated_at.toISOString()).catch((err) => err);
+        expect(failure).toBeInstanceOf(Error);
+        expect(failure.bidKitOutcome).toBe('rolled_back');
+        expect(await rowOf(created.id)).toMatchObject({ file_s3_key: before.file_s3_key, file_name: before.file_name });
+        // Through the route: the same failure after the new object was stored.
+        const spy = jest.spyOn(files, 'putFile').mockImplementationOnce(async (id, file) => {
+          const stored = await jest.requireActual('../services/bid-kit-files').putFile(id, file);
+          return { ...stored, size: 3000000000 };
+        });
+        const res = await upload(created.id, 'second.pdf');
+        spy.mockRestore();
+        expect(res.status).toBe(500);
+        const [newKey] = puts();
+        expect(deletes()).toEqual([newKey]);
+        expect((await rowOf(created.id)).file_s3_key).toBe(firstKey);
+      });
+
+      test('a change that lands between the early check and the row lock is a 409: the new object is deleted and the row keeps its file', async () => {
+        const realPut = files.putFile.bind(files);
+        const spy = jest.spyOn(files, 'putFile').mockImplementationOnce(async (...args) => {
+          const stored = await realPut(...args);
+          await mockPg('bid_kit_items').where({ id: created.id }).update({ notes: 'Typed by someone else', updated_at: mockPg.raw('clock_timestamp()') });
+          return stored;
+        });
+        const res = await upload(created.id, 'second.pdf');
+        spy.mockRestore();
+        expect(res.status).toBe(409);
+        const [newKey] = puts();
+        expect(deletes()).toEqual([newKey]);
+        expect((await rowOf(created.id)).file_s3_key).toBe(firstKey);
+      });
+    });
+
     test('one live row per catalog item (references repeat); archive keeps the row and frees the slot', async () => {
       await create({ item_key: 'w9' });
       expect((await call('POST', '', { kind: 'document', item_key: 'w9' })).status).toBe(409);

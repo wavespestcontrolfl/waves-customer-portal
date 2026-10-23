@@ -29,3 +29,7 @@ A paper counts as **ready** only after the owner presses Sign off. The sign-off 
 ## Facts sheet
 
 The Facts sheet view lists each fact value and each paper's number and expiry date with a Copy button, for filling flat agency forms by hand. It never shows a file, a key or a link.
+
+## A file that may be left behind
+
+A replacement stores the new file first, then commits the row that points at it. The new object is deleted only when the replacement is known not to have committed (the server refused it, the version was stale, or a failure came before any commit). When the commit's acknowledgement is lost the outcome is unknown, so the new object is kept and a log line names the item (id only). The page shows the row as it is on the next load. The previous object is deleted only after the new reference is committed, best effort. So an object in the private store can be left with no row pointing at it. It is safe to remove only when no `bid_kit_items.file_s3_key` references it.

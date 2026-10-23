@@ -759,6 +759,105 @@ describe('file replacements are fenced on the version the page loaded', () => {
   });
 });
 
+describe('the new object is deleted only when the replacement is known not to have committed', () => {
+  const logger = require('../services/logger');
+  const expiryService = require('../services/bid-kit-expiry');
+  const puts = () => mockSent.filter((command) => command.constructor.name === 'PutObjectCommand').map((command) => command.input.Key);
+  const deletes = () => mockSent.filter((command) => command.constructor.name === 'DeleteObjectCommand').map((command) => command.input.Key);
+  // The fake store's own replaceFile, kept so a test can run it and then misbehave.
+  const realReplace = () => store.replaceFile.getMockImplementation();
+  let item;
+  let firstKey;
+  beforeEach(async () => {
+    item = await create();
+    expect((await upload(item.id, { name: 'first.pdf' })).status).toBe(200);
+    firstKey = store.keyOf(item.id);
+    mockSent.length = 0;
+    logger.warn.mockClear();
+  });
+
+  test('a later step throws after the commit: the new object is kept, the row points at it, the upload still succeeds', async () => {
+    store.logActivity.mockRejectedValueOnce(new Error('activity down'));
+    const bell = jest.spyOn(expiryService, 'syncExpiryBell').mockRejectedValueOnce(new Error('bell down'));
+    const res = await upload(item.id, { name: 'second.pdf' });
+    bell.mockRestore();
+    expect(res.status).toBe(200);
+    const [newKey] = puts();
+    expect(store.keyOf(item.id)).toBe(newKey);
+    expect(deletes()).toEqual([firstKey]); // only the previous object goes, and only after the commit
+    expect(logger.warn.mock.calls.map(([line]) => line)).toEqual(expect.arrayContaining([expect.stringMatching(/activity row after a file replacement failed: Error/), expect.stringMatching(/expiry bell after a file replacement failed: Error/)]));
+  });
+
+  test('building the response fails after the commit: the new object is kept and nothing else is deleted but the previous one', async () => {
+    const catalogModule = require('../../shared/bid-kit-catalog.cjs');
+    const spy = jest.spyOn(catalogModule, 'etToday').mockImplementationOnce(() => { throw new Error('clock down'); });
+    const bell = jest.spyOn(expiryService, 'syncExpiryBell').mockResolvedValueOnce({ closed: 0 });
+    const res = await upload(item.id, { name: 'second.pdf' });
+    spy.mockRestore();
+    bell.mockRestore();
+    expect(res.status).toBe(500);
+    const [newKey] = puts();
+    expect(store.keyOf(item.id)).toBe(newKey);
+    expect(deletes()).not.toContain(newKey);
+  });
+
+  test('the commit acknowledgement is lost (the row is updated, then the call throws): the new object is kept, a fixed line names the item', async () => {
+    const impl = realReplace();
+    store.replaceFile.mockImplementationOnce(async (...args) => {
+      await impl(...args);
+      throw Object.assign(new Error('connection reset by peer while the secret label Jane Q. Sample was in flight'), { bidKitOutcome: 'unknown' });
+    });
+    const res = await upload(item.id, { name: 'second.pdf' });
+    expect(res.status).toBe(500);
+    expect(JSON.stringify(res.body)).not.toMatch(/Jane|connection reset/);
+    const [newKey] = puts();
+    expect(store.keyOf(item.id)).toBe(newKey); // the row points at the new object
+    expect(deletes()).toEqual([]); // not the new one, and not the previous one either: the outcome is unknown
+    const lines = logger.warn.mock.calls.map(([line]) => line);
+    expect(lines).toContain(`[bid-kit] file replacement outcome unknown for item ${item.id}; the new stored file was kept`);
+    expect(lines.join(' ')).not.toMatch(/Jane|second\.pdf/);
+  });
+
+  test('an error with no outcome tag is treated as unknown and keeps the object', async () => {
+    store.replaceFile.mockRejectedValueOnce(new Error('something odd'));
+    expect((await upload(item.id, { name: 'second.pdf' })).status).toBe(500);
+    expect(deletes()).toEqual([]);
+  });
+
+  test('a failure before any commit was issued (rolled_back) deletes the new object and leaves the old file in place', async () => {
+    store.replaceFile.mockRejectedValueOnce(Object.assign(new Error('statement failed'), { bidKitOutcome: 'rolled_back' }));
+    expect((await upload(item.id, { name: 'second.pdf' })).status).toBe(500);
+    const [newKey] = puts();
+    expect(deletes()).toEqual([newKey]);
+    expect(store.keyOf(item.id)).toBe(firstKey);
+  });
+
+  test('an explicit 409 or not-found from the store deletes the new object; a stale page deletes nothing because nothing was stored', async () => {
+    store.replaceFile.mockResolvedValueOnce({ conflict: true });
+    expect((await upload(item.id, { name: 'second.pdf' })).status).toBe(409);
+    const [newKey] = puts();
+    expect(deletes()).toEqual([newKey]);
+    mockSent.length = 0;
+    store.replaceFile.mockResolvedValueOnce({ notFound: true });
+    expect((await upload(item.id, { name: 'third.pdf' })).status).toBe(404);
+    expect(deletes()).toEqual(puts());
+    mockSent.length = 0;
+    expect((await upload(item.id, { name: 'late.pdf', version: '2000-01-01T00:00:00.000Z' })).status).toBe(409);
+    expect(mockSent).toHaveLength(0);
+  });
+
+  test('the previous object is deleted only after the new reference is committed', async () => {
+    const impl = realReplace();
+    let sentAtCommit = null;
+    store.replaceFile.mockImplementationOnce(async (...args) => { const result = await impl(...args); sentAtCommit = mockSent.length; return result; });
+    expect((await upload(item.id, { name: 'second.pdf' })).status).toBe(200);
+    const order = mockSent.map((command) => `${command.constructor.name}:${command.input.Key}`);
+    const [newKey] = puts();
+    expect(sentAtCommit).toBe(1); // only the new object had been stored when the commit happened
+    expect(order).toEqual([`PutObjectCommand:${newKey}`, `DeleteObjectCommand:${firstKey}`]);
+  });
+});
+
 describe('expiry bells close when the item no longer needs renewing', () => {
   const soon = () => new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10);
   const key = (item) => `bid-kit:expiry:${item.id}`;
