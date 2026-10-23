@@ -24,6 +24,7 @@ jest.mock('../models/db', () => {
         if (table === 'scheduled_services') return { status: mockState.cancelled ? 'cancelled' : 'confirmed', tech_name: null };
         return null;
       },
+      insert: async (row) => { (mockState.inserts ||= []).push([table, row]); return [1]; },
       update: async (patch) => { mockState.updates.push(patch); return mockState.claim; },
       then: (res, rej) => Promise.resolve(table === 'messaging_audit_log' ? mockState.auditRows : []).then(res, rej),
     };
@@ -423,6 +424,25 @@ describe('handleCancellation with cancelGeneration (the cancel recovery sweep)',
   const FENCE = { visitId: 'svc-1', restorations: 2, hits: [] };
   const approvedNotice = [{ recipient_key: require('crypto').createHash('sha256').update('9415550101', 'utf8').digest('hex').slice(0, 16), body: 'Hi Synthia, your visit is cancelled.' }];
   const run = (outcome = {}) => AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: FENCE, outcome });
+
+  // One approved recipient is reached before 8 PM and the next crosses the send window: the generic rail would queue it for a
+  // replay that carries no generation or visit-date constraint. The fenced recovery send never queues; it reports the gap.
+  test('a recipient held by the send window is NOT queued for a later replay; it is reported as not reached', async () => {
+    mockState.customer = {
+      ...mockState.customer, service_contact_name: 'Sam', service_contact_phone: '+19415550202', service_contacts_consent_at: '2026-07-23T00:00:00Z',
+    };
+    const preview = await AppointmentReminders.previewCancellationText('svc-1');
+    const both = preview.recipients.map(({ recipient_key, body }) => ({ recipient_key, body }));
+    mockSendCustomerMessage
+      .mockResolvedValueOnce({ sent: true, blocked: false })
+      .mockResolvedValueOnce({ sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', deferred: true, nextAllowedAt: '2026-11-04T12:00:00Z' });
+    mockState.inserts = [];
+    const outcome = {};
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice: both, cancelGeneration: { ...FENCE, hits: [] }, outcome });
+    expect(mockState.inserts.some(([table]) => table === 'sms_log')).toBe(false);
+    expect(outcome).toMatchObject({ notificationSent: true, notificationPartial: true });
+    expect(outcome.notificationError).toMatch(/Do not resend to those already reached/);
+  });
 
   test('the fence is proven inside a transaction, before the marker is claimed, and only the approved marker is claimed', async () => {
     const order = [];

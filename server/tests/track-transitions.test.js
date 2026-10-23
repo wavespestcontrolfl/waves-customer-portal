@@ -1419,6 +1419,23 @@ describe('cancel with a cancelFence (the cancel recovery sweep)', () => {
     expect(clearTechCurrentJob).toHaveBeenLastCalledWith(expect.objectContaining({ tech_id: 'tech-1', current_job_id: 'job-1', conn: trx, noWait: true }));
   });
 
+  test('a technician cleanup that FAILS (not a fence refusal) is a recorded fence hit for the sweep to retry, never a silent success', async () => {
+    const trx = jest.fn(() => query(1));
+    db.transaction = jest.fn(async (callback) => callback(trx));
+    const cascade = jest.spyOn(require('../services/call-booking-catalog'), 'cancelCallFollowUpsForParentCancel').mockResolvedValue(0);
+    const fence = { ...FENCE, hits: [] };
+    db.mockReturnValueOnce(query({ ...svc, technician_id: 'tech-1' }));
+    clearTechCurrentJob.mockRejectedValueOnce(new Error('connection terminated'));
+    expect(await trackTransitions.cancel('job-1', { reason: 'x', cancelFence: fence })).toEqual({ ok: false, reason: 'cancel_fence' });
+    expect(fence.hits).toEqual(['tech_state_error']);
+    expect(cascade).not.toHaveBeenCalled();
+    // Unfenced callers keep the best-effort behavior: logged, the cancel still succeeds.
+    cascade.mockClear();
+    db.mockReturnValueOnce(query({ ...svc, technician_id: 'tech-1' }));
+    clearTechCurrentJob.mockRejectedValueOnce(new Error('connection terminated'));
+    expect(await trackTransitions.cancel('job-1', { reason: 'x' })).toMatchObject({ ok: true, state: 'cancelled' });
+  });
+
   test('without a fence the already-cancelled path still does not touch the technician state (unchanged)', async () => {
     db.transaction = jest.fn(async (callback) => callback(jest.fn(() => query(1))));
     db.mockReturnValueOnce(query({ ...svc, technician_id: 'tech-1', track_state: 'cancelled', cancelled_at: new Date() }));

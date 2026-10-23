@@ -1783,9 +1783,11 @@ async function resolveNoticeContacts(customer, prefs, messageType, purpose = 'ap
 
 // Notes a fan-out contact nobody reached (see sharedOutcome.failedRecipients in safeSendAppointment). A contact held for
 // a later send (the quiet-hours queue) has its own rail and is not a failure.
-function recordFailedRecipient(sharedOutcome, contact, sent) {
+// `heldIsFailure`: a recipient held for the send window is normally carried by the scheduled rail (so it is not a failure
+// here); a send that must not queue (the fenced recovery send) counts it as not reached.
+function recordFailedRecipient(sharedOutcome, contact, sent, { heldIsFailure = false } = {}) {
   if (sent) return;
-  if (sharedOutcome.lastCode === 'QUIET_HOURS_HOLD' && sharedOutcome.lastDeferred && sharedOutcome.lastNextAllowedAt) return;
+  if (!heldIsFailure && sharedOutcome.lastCode === 'QUIET_HOURS_HOLD' && sharedOutcome.lastDeferred && sharedOutcome.lastNextAllowedAt) return;
   sharedOutcome.failedRecipients.push(isServiceContactRole(contact.role) ? 'service contact' : 'account holder');
 }
 
@@ -1924,7 +1926,9 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
       ? { ...metaExtra, requestedChannel: 'push' } : metaExtra;
     const sent = await safeSend(customer.id, contact.phone, body, messageType, purpose, identityTrustLevel, contactMeta, checkBeforeSend, sharedOutcome, sendOptions.operatorInitiated === true);
     if (!sent && ['PUSH_IN_FLIGHT', 'REMINDER_PREFERENCES_HOLD'].includes(sharedOutcome.lastCode)) break;
-    if (!sent && sharedOutcome.lastCode === 'QUIET_HOURS_HOLD'
+    // sendOptions.noDeferredQueue (the cancel recovery send): a held recipient is never queued for a later replay, which would
+    // run without the cancellation generation and visit-date constraints. It is reported as not reached instead.
+    if (!sent && !sendOptions.noDeferredQueue && sharedOutcome.lastCode === 'QUIET_HOURS_HOLD'
       && sharedOutcome.lastDeferred && sharedOutcome.lastNextAllowedAt) {
       heldContacts.push({ contact, body, nextAllowedAt: sharedOutcome.lastNextAllowedAt });
     }
@@ -1940,7 +1944,7 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
       moveHeldRoles.push(contact.role || 'service');
       continue;
     }
-    recordFailedRecipient(sharedOutcome, contact, sent);
+    recordFailedRecipient(sharedOutcome, contact, sent, { heldIsFailure: sendOptions.noDeferredQueue === true });
     sentAny = sentAny || sent;
   }
   if (sentAny && moveHeldRoles.length) {
@@ -2957,6 +2961,7 @@ async function sendCancellationNotice({ record, scheduledServiceId, options, not
       return renderCancellationBody({ customer, contact, record, scheduledServiceId, approvedNotice });
     }, 'appointment_cancelled', 'appointment_cancellation', { scheduled_service_id: scheduledServiceId, templateKey: 'appointment_cancelled' }, {
       sendOutcome,
+      noDeferredQueue: Boolean(options.cancelGeneration),
       preDispatchCheck: makeCancellationPreDispatchCheck({ record, scheduledServiceId, claimStatesWithSent, noticeToken, sendOutcome, cancelGeneration: options.cancelGeneration }),
     });
     if (noticeSent) {

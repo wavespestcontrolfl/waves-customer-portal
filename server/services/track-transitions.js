@@ -1588,6 +1588,12 @@ async function clearTechStateOnCancel(svc, cancelFence) {
   } catch (err) {
     if (err && err.code === 'CANCEL_FENCE') return false;
     logger.error(`[track-transitions] tech_status cancel clear failed: ${err.message}`);
+    // Recovery sweep only: a failed cleanup is NOT done. It is recorded as a fence hit so the sweep retries the bundle instead
+    // of saving the follow-through as finished (the unfenced callers keep the best-effort behavior).
+    if (cancelFence) {
+      cancelFence.hits.push('tech_state_error');
+      return false;
+    }
   }
   return true;
 }
