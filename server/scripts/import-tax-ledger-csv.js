@@ -314,7 +314,7 @@ function mapRow(row, ordinal, basename) {
     match_method: null,
     suggestion: null,
   };
-  const out = { bank, expense: null, categoryName: null, unmatchedLine: null, ledgerClass: row.class };
+  const out = { bank, expense: null, categoryName: null, unmatchedLine: null, ledgerClass: row.class, ledgerRow: row };
   // the ledger's reading travels with every row (class, category, line and
   // the processor mark are not in the hash: a rerun compares them to what
   // was loaded)
@@ -545,7 +545,7 @@ async function loadPortalState(db, mapped, rows) {
   // compared at the gross amount (one small query per expense: a one-off run over a handful of rows)
   for (const e of portalExpenses) e.gross = Number((Number(e.amount) + await appliedRefundTotal(e.id, db)).toFixed(2));
   const categories = await db('expense_categories').select('id', 'name');
-  return { existing, portalExpenses, categoryIds: new Map(categories.map(c => [c.name, c.id])) };
+  return { existing, portalExpenses, ledgerMade, categoryIds: new Map(categories.map(c => [c.name, c.id])) };
 }
 
 // A portal row that no longer has the expense the earlier run made: the FK
@@ -562,6 +562,12 @@ function readingOf(sug) {
   const s = sug || {};
   return [s.ledgerClass, s.ledgerCategory, s.schedCLine, s.flag, s.processorMatch ? 'processor' : ''].map(v => String(v || '').trim().toLowerCase()).join('|');
 }
+// what a held row stores after the rerun: the file's reading (so the next
+// rerun compares equal and does not hold it again); the booking never follows
+function readingKeys(sug) {
+  const s = sug || {};
+  return { ledgerClass: s.ledgerClass, ledgerCategory: s.ledgerCategory, schedCLine: s.schedCLine, flag: s.flag, processorMatch: !!s.processorMatch };
+}
 function describeReading(sug) {
   const s = sug || {};
   return `${s.ledgerClass || 'unknown'}${s.ledgerCategory ? ` (${s.ledgerCategory}${s.schedCLine ? `, line ${s.schedCLine}` : ''})` : ''}`;
@@ -572,13 +578,23 @@ function describeReading(sug) {
 // review note Bank Import shows under it, with the action), so the owner
 // decides it there, where every later decision on it (an ignore, a link, a
 // refund) already stands and is not second-guessed here.
+// The way out of a conflict, by the row's state in the portal: Bank Import
+// has no unlink for a row whose expense was CREATED from it (the expense is
+// deleted on the Expenses tab, which reopens the row), an unlink for a
+// linked one, an unignore for an ignored one.
+function wayOut(prior) {
+  if (prior.status === 'created_expense' && prior.matched_expense_id) return ' and booked as an expense: delete that expense on the Expenses tab (this row reopens), then decide it here';
+  if (prior.status === 'matched_expense' && prior.matched_expense_id) return ' and linked to an expense: unlink it here, then decide it';
+  if (prior.status === 'ignored') return ' and ignored: unignore it here if the file is right, then decide it';
+  return ': decide it here';
+}
 function reloadReason(prior, m) {
   const was = describeReading(prior.suggestion);
   const now = describeReading(m.bank.suggestion);
   if (readingOf(prior.suggestion) !== readingOf(m.bank.suggestion)) {
     return {
       why: `loaded by an earlier run as ${was}; the file now reads it differently (change it in Bank Import, not by re-import)`,
-      portalNote: `the ledger file now reads this row as ${now}; it was loaded as ${was}: unlink, re-link or change it here`,
+      portalNote: `the ledger file now reads this row as ${now}; it was loaded as ${was}${wayOut(prior)}`,
     };
   }
   if (m.expense && expenseGone(prior)) {
@@ -606,6 +622,28 @@ function nearbyExpenses(portalExpenses, row, bank) {
   return portalExpenses.filter(e => withinCandidateTolerance(grossOf(e), bank.amount)
     && Math.abs(dayNumber(ymdOf(e.expense_date)) - day) <= EXPENSE_DATE_WINDOW_DAYS
     && !methodIncompatible(bank.account_type, e.payment_method));
+}
+// The park for a row that may already be an expense in the portal: an open
+// review row with no expense, carrying the candidates in the shape Bank
+// Import's Link selector reads (the matcher's own), the ledger's category
+// for Create expense, and manualLink. Used at reconcile time and again at
+// write time (the recheck inside the row's transaction).
+function parkNear(m, near, categoryIds) {
+  const row = m.ledgerRow;
+  const why = describeNearby(near, row.date, m.bank.amount);
+  const categoryId = categoryIds.get(m.categoryName) || null;
+  parkForReview(m, row, {
+    note: `${why}: link this row to that expense in Bank Import, or create the expense there if it is a different purchase${categoryId ? '' : `; no category in the portal for line ${row.sched_c_line || '(none)'}`}`,
+    candidates: near.slice(0, 20).map(e => ({ id: e.id, amount: grossOf(e), description: e.description, vendor_name: e.vendor_name, expense_date: ymdOf(e.expense_date) })),
+    candidatesTotal: near.length,
+    // the link is the owner's call: the matcher offers candidates on this
+    // row and never claims one by itself
+    manualLink: true,
+    // the ledger's category rides along, so Create expense in Bank Import
+    // books it under the right line without a second pick
+    ...(categoryId ? { categoryId, categoryName: m.categoryName, categorySource: 'ledger' } : {}),
+  });
+  return why;
 }
 function describeNearby(near, date, amount) {
   const cents = v => Math.round(Number(v) * 100);
@@ -637,25 +675,14 @@ function reconcileRows(mapped, rows, portal) {
     const prior = existing.get(m.bank.row_hash);
     if (prior) {
       const reason = reloadReason(prior, m);
-      if (reason) held.push({ ...note(i, `${reason.why}; ${reading(m, i)}`), rowId: prior.id, portalNote: reason.portalNote, loadedAs: describeReading(prior.suggestion), fileSays: describeReading(m.bank.suggestion) });
+      if (reason) held.push({ ...note(i, `${reason.why}; ${reading(m, i)}`), rowId: prior.id, portalNote: reason.portalNote, loadedAs: describeReading(prior.suggestion), fileSays: describeReading(m.bank.suggestion), reading: readingKeys(m.bank.suggestion) });
       else duplicates += 1;
       return;
     }
     if (m.expense) {
       const near = nearbyExpenses(portalExpenses, rows[i], m.bank);
       if (near.length) {
-        const why = describeNearby(near, rows[i].date, m.bank.amount);
-        const categoryId = categoryIds.get(m.categoryName) || null;
-        parkForReview(m, rows[i], {
-          note: `${why}: link this row to that expense in Bank Import, or create the expense there if it is a different purchase${categoryId ? '' : `; no category in the portal for line ${rows[i].sched_c_line || '(none)'}`}`,
-          nearbyExpenseIds: near.map(e => e.id),
-          // the link is the owner's call: the matcher offers candidates on
-          // this row and never claims one by itself
-          manualLink: true,
-          // the ledger's category rides along, so Create expense in Bank
-          // Import books it under the right line without a second pick
-          ...(categoryId ? { categoryId, categoryName: m.categoryName, categorySource: 'ledger' } : {}),
-        });
+        const why = parkNear(m, near, categoryIds);
         parked.push({ ...note(i, `${why}; ${reading(m, i)}`), rowHash: m.bank.row_hash });
       } else if (!categoryIds.has(m.categoryName)) parkForReview(m, rows[i]);
     }
@@ -670,16 +697,33 @@ function reconcileRows(mapped, rows, portal) {
 // (bank-import suggestionMerge): a concurrent writer can only append.
 async function noteHeldRows(db, held) {
   for (const h of held) {
-    const patch = { review: true, note: h.portalNote, ledgerConflict: { at: new Date().toISOString(), loadedAs: h.loadedAs, fileSays: h.fileSays, line: h.line } };
+    const patch = { ...h.reading, review: true, note: h.portalNote, ledgerConflict: { at: new Date().toISOString(), loadedAs: h.loadedAs, fileSays: h.fileSays, line: h.line } };
     await db('bank_transactions').where({ id: h.rowId })
       .update({ suggestion: db.raw("coalesce(suggestion, '{}'::jsonb) || ?::jsonb", [JSON.stringify(patch)]), updated_at: new Date() });
   }
 }
 
+// The nearby check again, inside the row's write transaction: an expense
+// entered by hand (or by any other writer) after the snapshot was read
+// must park this row, not be doubled by it. Expenses the ledger made (an
+// earlier run, or this run so far) are the ledger's own and never count.
+async function nearbyAtWrite(trx, m, portal, createdIds) {
+  const date = m.ledgerRow.date;
+  const rows = await trx('expenses').whereBetween('expense_date', [shiftDays(date, -EXPENSE_DATE_WINDOW_DAYS), shiftDays(date, EXPENSE_DATE_WINDOW_DAYS)])
+    .select('id', 'expense_date', 'amount', 'vendor_name', 'description', 'payment_method');
+  const others = rows.filter(e => !portal.ledgerMade.has(e.id) && !createdIds.has(e.id));
+  for (const e of others) e.gross = Number((Number(e.amount) + await appliedRefundTotal(e.id, trx)).toFixed(2));
+  return nearbyExpenses(others, m.ledgerRow, m.bank);
+}
+
 // Writes the fresh rows: non-expense rows in bulk (row_hash conflicts
 // ignored, only the rows that landed count), expense rows one transaction
-// each (expense + bank row), so a failure leaves no orphan expense.
-async function writeRows(db, fresh, categoryIds) {
+// each (the recheck, the expense, the bank row), so a failure leaves no
+// orphan expense. A row the recheck parks is written parked (no expense).
+async function writeRows(db, fresh, portal) {
+  const { categoryIds } = portal;
+  const createdIds = new Set();
+  const parked = [];
   let inserted = 0;
   let duplicates = 0;
   for (const part of chunk(fresh.filter(m => !m.expense), INSERT_CHUNK)) {
@@ -697,6 +741,15 @@ async function writeRows(db, fresh, categoryIds) {
   for (const m of fresh.filter(x => x.expense)) {
     try {
       await db.transaction(async trx => {
+        const near = await nearbyAtWrite(trx, m, portal, createdIds);
+        if (near.length) {
+          const why = parkNear(m, near, categoryIds);
+          const res = await trx('bank_transactions').insert({ ...m.bank }).onConflict('row_hash').ignore().returning('id');
+          if (!res.length) throw new DuplicateRace('row_hash already present');
+          const row = m.ledgerRow;
+          parked.push({ line: row.line, description: row.description, amount: Number(row.amount).toFixed(2), date: row.date, why: `${why} (entered after this run started); the ledger says ${row.class}${m.categoryName ? ` (${m.categoryName})` : ''}`, rowHash: m.bank.row_hash });
+          return;
+        }
         const [exp] = await trx('expenses')
           .insert({ ...m.expense, category_id: categoryIds.get(m.categoryName) })
           .returning('id');
@@ -707,6 +760,7 @@ async function writeRows(db, fresh, categoryIds) {
           .ignore()
           .returning('id');
         if (!res.length) throw new DuplicateRace('row_hash already present');
+        createdIds.add(expenseId);
       });
       inserted += 1;
     } catch (err) {
@@ -714,7 +768,7 @@ async function writeRows(db, fresh, categoryIds) {
       throw err;
     }
   }
-  return { inserted, duplicates };
+  return { inserted, duplicates, parked };
 }
 
 /**
@@ -737,12 +791,12 @@ async function run({ file, dryRun = false, db, log = () => {} } = {}) {
   const mapped = rows.map((r, i) => mapRow(r, ordinals[i], basename));
   const portal = await loadPortalState(db, mapped, rows);
   const r = reconcileRows(mapped, rows, portal);
-  const written = dryRun ? { inserted: r.fresh.length, duplicates: 0 } : await writeRows(db, r.fresh, portal.categoryIds);
+  const written = dryRun ? { inserted: r.fresh.length, duplicates: 0, parked: [] } : await writeRows(db, r.fresh, portal);
   if (!dryRun) await noteHeldRows(db, r.held);
   // Rows lost to an insert-time conflict are not in the report's tallies.
   const landed = dryRun ? r.fresh : r.fresh.filter(m => !m.skipped);
   const landedHashes = new Set(landed.map(m => m.bank.row_hash));
-  const parked = r.parked.filter(p => landedHashes.has(p.rowHash));
+  const parked = [...r.parked.filter(p => landedHashes.has(p.rowHash)), ...written.parked];
   const summary = summarize(landed);
   const duplicates = r.duplicates + written.duplicates;
   const counts = { read: rows.length, inserted: written.inserted, duplicates, held: r.held.length, parked: parked.length, portalExpenses: portal.portalExpenses.length };

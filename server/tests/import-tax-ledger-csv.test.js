@@ -474,7 +474,14 @@ describe('run', () => {
     expect(acmeRow.status).toBe('created_expense');
     expect(acmeRow.suggestion.sql).toMatch(/coalesce\(suggestion, '\{\}'::jsonb\) \|\| \?::jsonb/);
     const merged = JSON.parse(acmeRow.suggestion.bindings[0]);
-    expect(merged).toMatchObject({ review: true, note: expect.stringMatching(/^the ledger file now reads this row as personal \(Personal\); it was loaded as expense \(Supplies \(chemicals, equipment, hardware\), line 22\): unlink, re-link or change it here$/), ledgerConflict: expect.objectContaining({ loadedAs: expect.stringMatching(/^expense/), fileSays: 'personal (Personal)', line: expect.any(Number) }) });
+    // the note names the way out for a CREATED row (Bank Import has no unlink for it), and the stored reading follows the file
+    expect(merged).toMatchObject({ review: true, note: expect.stringMatching(/^the ledger file now reads this row as personal \(Personal\); it was loaded as expense \(Supplies \(chemicals, equipment, hardware\), line 22\) and booked as an expense: delete that expense on the Expenses tab \(this row reopens\), then decide it here$/), ledgerClass: 'personal', ledgerCategory: 'Personal', schedCLine: '', ledgerConflict: expect.objectContaining({ loadedAs: expect.stringMatching(/^expense/), fileSays: 'personal (Personal)', line: expect.any(Number) }) });
+    // the helper's row was ignored: its way out is an unignore
+    const helperRow = db.tables().bank_transactions.find(b => /TEST HELPER/.test(b.description));
+    expect(JSON.parse(helperRow.suggestion.bindings[0]).note).toMatch(/ and ignored: unignore it here if the file is right, then decide it$/);
+    // a rerun of the same corrected file does not hold the rows again: the stored reading now matches the file (the fake stores the merged patch as the row's suggestion)
+    for (const b of noted) b.suggestion = { ...JSON.parse(b.suggestion.bindings[0]) };
+    expect((await run({ file, db })).counts).toMatchObject({ held: 0, duplicates: 8, inserted: 0 });
   });
 
   test('a dry run lists the holds but writes no note', async () => {
@@ -815,7 +822,10 @@ describe('what the portal already holds', () => {
     const parkedRow = db.tables().bank_transactions.find(b => b.txn_date === '2025-03-14');
     expect(parkedRow).toMatchObject({ status: 'unmatched', match_method: null });
     expect(parkedRow.matched_expense_id).toBeUndefined();
-    expect(parkedRow.suggestion).toMatchObject({ review: true, ledgerClass: 'expense', nearbyExpenseIds: ['exp-a'], note: expect.stringMatching(/^an expense of the same amount already in the portal: "Acme Supply" dated 2 days earlier: link this row to that expense in Bank Import, or create the expense there/) });
+    expect(parkedRow.suggestion).toMatchObject({ review: true, ledgerClass: 'expense', note: expect.stringMatching(/^an expense of the same amount already in the portal: "Acme Supply" dated 2 days earlier: link this row to that expense in Bank Import, or create the expense there/) });
+    // the candidates in the shape Bank Import's Link selector reads (the matcher's own), so the link is one click away
+    expect(parkedRow.suggestion.candidates).toEqual([{ id: 'exp-a', amount: 12.5, description: 'receipt', vendor_name: 'Acme Supply', expense_date: '2025-03-12' }]);
+    expect(parkedRow.suggestion.candidatesTotal).toBe(1);
     // the matcher offers candidates on it and never claims one (manualLink); the ledger's category rides along for Create expense
     expect(parkedRow.suggestion).toMatchObject({ manualLink: true, categoryId: 'cat-3', categoryName: 'Supplies', categorySource: 'ledger' });
     // a rerun before the owner decides it: the row is in the portal, open and without its expense, so it is held (listed), never loaded twice
@@ -834,6 +844,30 @@ describe('what the portal already holds', () => {
     const db2 = makeFakeDb();
     db2.tables().expenses.push({ id: 'exp-far', expense_date: '2025-03-14', amount: '12.48', vendor_name: 'Acme Supply', description: 'x' });
     expect((await run({ file, db: db2 })).counts).toMatchObject({ parked: 0, inserted: 1 });
+    expect(db2.tables().expenses).toHaveLength(2);
+  });
+
+  test('the nearby check runs again inside each row\'s write: an expense entered after the snapshot parks the row instead of being doubled', async () => {
+    const file = fixture(row({ description: 'ACME SUPPLY 4471', amount: '12.50', date: '2025-03-14' }), row({ description: 'OTHER SHOP', amount: '5.00', date: '2025-03-15' }));
+    const db = makeFakeDb();
+    // the snapshot sees no expense; a hand expense lands just before the first row's write
+    const realTx = db.transaction;
+    let injected = false;
+    db.transaction = async (fn) => {
+      if (!injected) { injected = true; db.tables().expenses.push({ id: 'exp-race', expense_date: '2025-03-14', amount: '12.50', vendor_name: 'Acme Supply', description: 'entered meanwhile' }); }
+      return realTx(fn);
+    };
+    const { counts, report } = await run({ file, db });
+    expect(counts).toEqual({ read: 2, inserted: 2, duplicates: 0, held: 0, parked: 1, portalExpenses: 0 });
+    expect(report).toMatch(/line 2 .*\[an expense of the same amount already in the portal: "Acme Supply" dated the same day \(entered after this run started\); the ledger says expense \(Supplies\)\]/);
+    expect(db.tables().expenses.map(e => e.vendor_name)).toEqual(['Acme Supply', 'OTHER SHOP']); // no second Acme
+    const parkedRow = db.tables().bank_transactions.find(b => b.description === 'ACME SUPPLY 4471');
+    expect(parkedRow).toMatchObject({ status: 'unmatched' });
+    expect(parkedRow.suggestion).toMatchObject({ review: true, manualLink: true, candidates: [expect.objectContaining({ id: 'exp-race' })] });
+    // expenses this run made are the ledger's own: two identical fuel rows both book
+    const file2 = fixture(row({ description: 'CORNER FUEL 12', amount: '4.00', class: 'vehicle', sched_c_line: '9', category: 'Vehicle fuel' }), row({ description: 'CORNER FUEL 12', amount: '4.00', class: 'vehicle', sched_c_line: '9', category: 'Vehicle fuel' }));
+    const db2 = makeFakeDb();
+    expect((await run({ file: file2, db: db2 })).counts).toMatchObject({ inserted: 2, parked: 0 });
     expect(db2.tables().expenses).toHaveLength(2);
   });
 
@@ -866,7 +900,7 @@ describe('what the portal already holds', () => {
     expect(report).toMatch(/line 2 .*\[2 expenses of the same amount already in the portal: "First" dated 5 days earlier, "Second" dated the same day; the ledger says expense \(Supplies\)\]/);
     expect(report).toMatch(/line 3 .*\[an expense of the same amount already in the portal: "Second" dated 5 days earlier; the ledger says expense \(Supplies\)\]/);
     expect(db.tables().expenses).toHaveLength(2); // nothing booked
-    expect(db.tables().bank_transactions.map(b => b.suggestion.nearbyExpenseIds)).toEqual([['exp-1', 'exp-2'], ['exp-2']]);
+    expect(db.tables().bank_transactions.map(b => b.suggestion.candidates.map(c => c.id))).toEqual([['exp-1', 'exp-2'], ['exp-2']]);
   });
 
   test('an expense whose payment method cannot be this account (cash, ach or check vs a card row; cash vs a bank row) does not park the ledger row', async () => {
