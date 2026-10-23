@@ -941,6 +941,18 @@ describe('a complete bundle whose receipt was never saved', () => {
     expect(mockRaised).toHaveLength(1);
   });
 
+  test('a request pointer receipt (the sweep owned the bundle, then released it and the request completed) is rebuilt and alerted', async () => {
+    const row = completed();
+    action({ success: true, recovery_owns_outcome: true, warning: 'The system took over the follow-up steps of this cancel while it ran.' });
+    const summary = await svc.sweepIbCancelBundles();
+    expect(summary.receipts).toBe(1);
+    expect(mockRecordResult).toHaveBeenCalledTimes(1);
+    expect(mockRecordResult.mock.calls[0][2]).toEqual({ onlyIfEmpty: true, replaceRecoveryPointer: true });
+    expect(mockRecordResult.mock.calls[0][1].money_skipped).toEqual(FT_SKIPPED.money_skipped);
+    expect(mockRaised).toHaveLength(1);
+    expect(row.finish_note).toBe('request+receipt');
+  });
+
   test('a clean stored outcome saves the receipt and leaves a quiet row, not a bell', async () => {
     completed({ followthrough_outcome: { money_skipped: [], linked_skipped: [] } });
     action(null);

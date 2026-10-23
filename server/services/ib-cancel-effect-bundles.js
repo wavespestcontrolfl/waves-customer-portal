@@ -819,7 +819,7 @@ async function storedReceipt(pendingActionId) {
 // crash is safe: the save is onlyIfEmpty and the alert has a dedupe key.
 async function reconcileReceipt(bundle, token) {
   const stored = await storedReceipt(bundle.pending_action_id);
-  const missing = stored === null || (stored !== undefined && stored && stored.recovered_after_interruption === true);
+  const missing = stored === null || (stored !== undefined && stored && (stored.recovered_after_interruption === true || stored.recovery_owns_outcome === true));
   if (missing) {
     // The text outcome is unknown only if the request ended before liveNotice ran for a card that asked for a text.
     const notice = bundle.notice_outcome
