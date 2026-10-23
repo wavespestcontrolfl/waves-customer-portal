@@ -759,8 +759,21 @@ const ANTHROPIC_UNSUPPORTED_KEYWORDS = new Set([
   'minItems', 'maxItems', 'minLength', 'maxLength',
   'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf',
 ]);
+// A nullable enum written as `{ type: ['string', 'null'], enum: [..., null] }`
+// is a 400 on EVERY call (`Enum value 'bad_lead' does not match declared type
+// '['string', 'null']'`): csr_coach failed every Anthropic leg from #6019
+// (2026-10-04) on and always ran on its OpenAI fallback. A bare `enum` with
+// the same values passed a live probe on 2026-10-22, and the enum alone
+// already pins the allowed values, so the wire copy drops `type` there.
 function anthropicSchema(schema) {
-  return JSON.parse(JSON.stringify(schema, (key, value) => (ANTHROPIC_UNSUPPORTED_KEYWORDS.has(key) ? undefined : value)));
+  return JSON.parse(JSON.stringify(schema, (key, value) => {
+    if (ANTHROPIC_UNSUPPORTED_KEYWORDS.has(key)) return undefined;
+    if (value && typeof value === 'object' && !Array.isArray(value) && Array.isArray(value.type) && Array.isArray(value.enum)) {
+      const { type: _type, ...rest } = value;
+      return rest;
+    }
+    return value;
+  }));
 }
 
 // The provider's own verdict on a Message, or null when the answer stands.
