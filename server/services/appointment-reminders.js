@@ -1783,9 +1783,13 @@ async function resolveNoticeContacts(customer, prefs, messageType, purpose = 'ap
 
 // Notes a fan-out contact nobody reached (see sharedOutcome.failedRecipients in safeSendAppointment). A contact held for
 // a later send (the quiet-hours queue) has its own rail and is not a failure.
-function recordFailedRecipient(sharedOutcome, contact, sent) {
+// `heldIsFailure`: a recipient held for the send window is normally carried by the scheduled rail (so it is not a failure
+// here); a send that must not queue (the fenced recovery send) counts it as not reached.
+function recordFailedRecipient(sharedOutcome, contact, sent, { heldIsFailure = false } = {}) {
   if (sent) return;
-  if (sharedOutcome.lastCode === 'QUIET_HOURS_HOLD' && sharedOutcome.lastDeferred && sharedOutcome.lastNextAllowedAt) return;
+  // Sticky across the fan-out (lastCode is reset per contact): a window hold on ANY recipient, for the fenced recovery send.
+  if (sharedOutcome.lastCode === 'QUIET_HOURS_HOLD' && sharedOutcome.lastDeferred) sharedOutcome.windowHeldAny = true;
+  if (!heldIsFailure && sharedOutcome.lastCode === 'QUIET_HOURS_HOLD' && sharedOutcome.lastDeferred && sharedOutcome.lastNextAllowedAt) return;
   sharedOutcome.failedRecipients.push(isServiceContactRole(contact.role) ? 'service contact' : 'account holder');
 }
 
@@ -1924,7 +1928,9 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
       ? { ...metaExtra, requestedChannel: 'push' } : metaExtra;
     const sent = await safeSend(customer.id, contact.phone, body, messageType, purpose, identityTrustLevel, contactMeta, checkBeforeSend, sharedOutcome, sendOptions.operatorInitiated === true);
     if (!sent && ['PUSH_IN_FLIGHT', 'REMINDER_PREFERENCES_HOLD'].includes(sharedOutcome.lastCode)) break;
-    if (!sent && sharedOutcome.lastCode === 'QUIET_HOURS_HOLD'
+    // sendOptions.noDeferredQueue (the cancel recovery send): a held recipient is never queued for a later replay, which would
+    // run without the cancellation generation and visit-date constraints. It is reported as not reached instead.
+    if (!sent && !sendOptions.noDeferredQueue && sharedOutcome.lastCode === 'QUIET_HOURS_HOLD'
       && sharedOutcome.lastDeferred && sharedOutcome.lastNextAllowedAt) {
       heldContacts.push({ contact, body, nextAllowedAt: sharedOutcome.lastNextAllowedAt });
     }
@@ -1940,7 +1946,7 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
       moveHeldRoles.push(contact.role || 'service');
       continue;
     }
-    recordFailedRecipient(sharedOutcome, contact, sent);
+    recordFailedRecipient(sharedOutcome, contact, sent, { heldIsFailure: sendOptions.noDeferredQueue === true });
     sentAny = sentAny || sent;
   }
   if (sentAny && moveHeldRoles.length) {
@@ -2527,7 +2533,7 @@ async function claimCancellationNotice({ record, options, claimToken, sendNotifi
     // (codex r19): a shared series token is the series/sweep's — a
     // single-visit suppress must not swallow the whole group's notice.
     noticeToken = require('./job-status').nextClaimTs();
-    claimed = await db('appointment_reminders')
+    const suppress = (conn) => conn('appointment_reminders')
       .where({ id: record.id })
       // Still-cancelled guard (codex r25): a restoration after the
       // guarded close must not be stamped suppressed.
@@ -2550,6 +2556,19 @@ async function claimCancellationNotice({ record, options, claimToken, sendNotifi
           });
       })
       .update({ cancellation_notice_at: noticeToken, cancellation_notice_state: 'suppressed', updated_at: noticeToken });
+    // The Intelligence Bar request's no-text cancel runs under the bundle fence too: the proof (this request still owns its bundle,
+    // the visit is still the approved cancel) and the reminder close + suppression share ONE transaction, so a delayed request
+    // can never suppress the marker of a newer cancellation (restore, then cancel again). A refusal rethrows (nothing written).
+    claimed = options.cancelGeneration
+      ? await db.transaction(async (trx) => {
+        await require('./cancel-generation-fence').assertCancelGeneration(trx, options.cancelGeneration);
+        await trx('appointment_reminders').where({ id: record.id }).update({ cancelled: true, updated_at: new Date() });
+        return suppress(trx);
+      })
+      : await suppress(db);
+  } else if (options.cancelGeneration) {
+    // The recovery sweep's approved text: claimed under the visit's cancel generation (see the helper).
+    return claimApprovedNoticeForGeneration(record, options.cancelGeneration);
   } else {
     noticeToken = require('./job-status').nextClaimTs();
     // Tokenless claims (routes) take NULL rows AND adopt any 'pending'
@@ -2587,6 +2606,8 @@ async function claimCancellationNotice({ record, options, claimToken, sendNotifi
             // (only that send: no sweep lists this state).
             if (approvedSend) this.where('cancellation_notice_state', 'pending_approved');
             else this.whereRaw('false');
+            // ...and only while no sibling reminder row of the visit was touched (sent or suppressed by an earlier send).
+            if (approvedSend) this.whereRaw("NOT EXISTS (SELECT 1 FROM appointment_reminders sib WHERE sib.scheduled_service_id = appointment_reminders.scheduled_service_id AND sib.id <> appointment_reminders.id AND sib.cancellation_notice_state IS NOT NULL AND sib.cancellation_notice_state <> 'pending_approved')");
           })
           .orWhere(function staleLease() {
             // Stale SINGLETON leases only (codex r18): a stale shared
@@ -2609,6 +2630,49 @@ async function claimCancellationNotice({ record, options, claimToken, sendNotifi
   return { noticeToken, claimed };
 }
 
+// The Intelligence Bar cancel recovery sweep (services/ib-cancel-effect-bundles.js) sends a dead request's approved text
+// with `cancelGeneration` (a cancel-generation fence: { visitId, restorations, hits }). Its claim is its own small
+// transaction: it takes FOR SHARE NOWAIT on the VISIT row first and proves the visit is still cancelled with the pinned
+// restoration count (services/cancel-generation-fence.js), and only then claims the reminder's untouched approved marker,
+// (the reminder's own close included) all before the transaction ends. While the share lock is held no restore can change the visit's status, so no new
+// cancellation (which needs a restore first) can replace this reminder's marker between the proof and the claim; a restore
+// or re-cancel already in flight holds the visit lock and makes the claim fail at once (visit_busy). A single UPDATE with
+// generation subqueries was NOT enough: PostgreSQL re-checks only the updated tuple after a lock wait, so a replaced marker
+// passed an older statement snapshot. No times are compared. Every later step (pre-dispatch stamp, finalize) is fenced by
+// the token this claim mints. Returns { noticeToken, claimed } like claimCancellationNotice; a refused fence rethrows.
+async function claimApprovedNoticeForGeneration(record, cancelGeneration) {
+  const { assertCancelGeneration } = require('./cancel-generation-fence');
+  const noticeToken = require('./job-status').nextClaimTs();
+  const claimed = await db.transaction(async (trx) => {
+    await assertCancelGeneration(trx, cancelGeneration);
+    // The reminder close handleCancellation skips for a fenced send: under the same share lock, so it can never land on a
+    // restored visit's reminder.
+    await trx('appointment_reminders').where({ id: record.id }).update({ cancelled: true, updated_at: new Date() });
+    // Adopt only while NO reminder row of the visit was touched (a sibling the live send already sent or suppressed means the
+    // approved text is not untouched): the rows are locked together so the check and the claim cannot be split.
+    const rows = await trx('appointment_reminders').where({ scheduled_service_id: record.scheduled_service_id }).orderBy('id').forUpdate().select('id', 'cancellation_notice_state');
+    if ((rows || []).some((row) => row.cancellation_notice_state && row.cancellation_notice_state !== 'pending_approved')) return 0;
+    const won = await trx('appointment_reminders')
+      .where({ id: record.id, cancellation_notice_state: 'pending_approved' })
+      .update({ cancellation_notice_at: noticeToken, cancellation_notice_state: 'pending_approved', updated_at: noticeToken });
+    // The claim token is written on the bundle in the SAME transaction (before any stamp or handoff), so a report built after
+    // the visit was restored and cancelled again can still find THIS cancellation's text evidence by its token, and never mistake
+    // the newer cancellation's marker for it. It lives in approved_money (never rewritten after insert; the follow-through
+    // reads only invoices and creditReversalOfferIds from it).
+    if (won && cancelGeneration.bundleId) {
+      await trx('ib_cancel_effect_bundles').where({ id: cancelGeneration.bundleId }).update({
+        approved_money: trx.raw(
+          "jsonb_set(COALESCE(approved_money, '{}'::jsonb), '{notice_claim_tokens}', COALESCE(approved_money->'notice_claim_tokens', '[]'::jsonb) || to_jsonb(?::text), true)",
+          [new Date(noticeToken).toISOString()],
+        ),
+        updated_at: new Date(),
+      });
+    }
+    return won;
+  });
+  return { noticeToken, claimed };
+}
+
 // A sendNotification:false cancel that already owns a claim finalizes it as terminal 'suppressed'.
 async function settleSuppressedCancellationNotice({ record, claimToken, claimed, claimStates, noticeToken }) {
   if (claimToken && claimed) {
@@ -2626,15 +2690,106 @@ async function settleSuppressedCancellationNotice({ record, claimToken, claimed,
 
 // Scoped to the CURRENT cancellation cycle (codex r9): a visit restored to live and cancelled again must not
 // reconcile against the first cancellation's SMS - only audits at/after the latest cancelled transition count.
-const cancellationAuditAccepted = async (scheduledServiceId) => Boolean(await db('messaging_audit_log')
+// `claimToken` (the card-approved send only): the audit rows of THIS approved send carry its claim token in their metadata
+// (cancellation_notice_token, written by sendCancellationNotice), so delivery evidence is matched by equality with the
+// reminder's own claim token instead of a time window. job_status_history.transitioned_at is a transaction START time, so after
+// restore + re-cancel a long second cancel transaction can carry an earlier timestamp than the first cycle's accepted text; a
+// claim token is taken in the fenced claim transaction of one generation and appears only on rows that send wrote.
+const acceptedCancellationAuditQuery = (scheduledServiceId, claimToken = null) => {
+  const query = db('messaging_audit_log')
     .where({ appointment_id: String(scheduledServiceId), purpose: 'appointment_cancellation' })
     .whereNotNull('sent_at')
-    .whereRaw("(provider_message_id ~ '^(SM|MM)' OR channel IN ('email', 'push'))")
-    .whereRaw(
-      "sent_at >= (SELECT COALESCE(MAX(h.transitioned_at), '-infinity') FROM job_status_history h WHERE h.job_id = ? AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled')",
-      [scheduledServiceId],
-    )
-    .first('id'));
+    .whereRaw("(provider_message_id ~ '^(SM|MM)' OR channel IN ('email', 'push'))");
+  if (claimToken) return query.whereRaw("metadata->>'cancellation_notice_token' = ?", [new Date(claimToken).toISOString()]);
+  return query.whereRaw(
+    "sent_at >= (SELECT COALESCE(MAX(h.transitioned_at), '-infinity') FROM job_status_history h WHERE h.job_id = ? AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled')",
+    [scheduledServiceId],
+  );
+};
+const cancellationAuditAccepted = async (scheduledServiceId, claimToken = null) => Boolean(await acceptedCancellationAuditQuery(scheduledServiceId, claimToken).first('id'));
+
+// The destinations (sha256 of the normalized address, the audit's to_hash) the provider accepted this cycle's cancellation
+// text for. An email fallback to the same person is a DIFFERENT destination, so a count of these proves nothing about WHO was
+// reached; approvedRecipientsReached matches them to the approved recipients by phone.
+async function cancellationAcceptedDestinations(scheduledServiceId, claimToken = null) {
+  const rows = await acceptedCancellationAuditQuery(scheduledServiceId, claimToken).select('to_hash');
+  return new Set((rows || []).map((row) => row.to_hash));
+}
+
+// True only when EVERY approved recipient (by recipient_key) resolves to a contact on the visit's customer and has an
+// accepted audit row for that contact's own phone. A recipient who is gone from the contacts, one reached only through an
+// email fallback, or unreadable preferences are all unproven (false): the caller then reports partial and sends nothing.
+async function approvedRecipientsReached(record, scheduledServiceId, destinations, recipientKeys) {
+  const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
+  if (!customer) return false;
+  const prefs = await visitPrefsRow(record.customer_id, scheduledServiceId);
+  if (prefs === PREFS_UNAVAILABLE || prefs?.__prefsUnavailable === true) return false;
+  const { normalizeRecipient } = require('./messaging/send-customer-message');
+  const contacts = getAppointmentContacts(customer, prefs || {});
+  return recipientKeys.every((key) => {
+    const contact = contacts.find((c) => noticeRecipientKey(c.phone) === key);
+    const to = contact && normalizeRecipient(contact.phone);
+    return Boolean(to) && destinations.has(require('crypto').createHash('sha256').update(String(to)).digest('hex'));
+  });
+}
+
+// Read-only: where the card-approved cancellation text of a visit stands, for the Intelligence Bar cancel recovery sweep
+// (services/ib-cancel-effect-bundles.js). That sweep may call handleCancellation with the approved text ONLY for 'ready'.
+// 'ready' = the cancel transaction's approved marker is still untouched, so no send reached the provider handoff (the
+// pre-dispatch 'sent' stamp comes before the handoff). 'delivered' = marker 'sent' and every approved recipient
+// (`recipientKeys`) has a provider-accepted audit row for their own phone. 'partial' = accepted for some destinations but
+// not provably for every approved recipient: the rest may not have been texted, and nothing is sent again. 'uncertain' =
+// marker 'sent' with NO audit evidence: the handoff may have happened, so it is never sent again. 'suppressed' = terminal
+// (the approved send failed or was blocked, or the card chose no text). 'no_reminder' = no reminder row. 'other' = any
+// other marker, which the approved send does not own. Lives with the approved-send helpers
+// (cancel-notice-approved-marker.test.js keeps that marker out of every sweep); it claims and sends nothing.
+async function approvedNoticeStatus(scheduledServiceId, { recipientKeys = null, claimTokens = null } = {}) {
+  if (Array.isArray(claimTokens)) return boundNoticeStatus(scheduledServiceId, claimTokens, recipientKeys);
+  // A visit can carry several reminder rows (uniqueness is not guaranteed) and the cancel mints the marker on each: the status
+  // is read across EVERY row. A live send can claim and send one row and die before reporting while a sibling stays untouched;
+  // any touched row decides, so an untouched sibling can never read as "ready" and be sent a second time.
+  const all = await db('appointment_reminders')
+    .where({ scheduled_service_id: scheduledServiceId })
+    .orderBy('id')
+    .select('id', 'customer_id', 'cancellation_notice_state', 'cancellation_notice_at');
+  if (!all || !all.length) return 'no_reminder';
+  const marked = all.filter((row) => row.cancellation_notice_state);
+  if (!marked.length) return 'other';
+  if (marked.every((row) => row.cancellation_notice_state === 'pending_approved')) return 'ready';
+  const sentRows = marked.filter((row) => row.cancellation_notice_state === 'sent');
+  if (sentRows.length) return sentRowsStatus(scheduledServiceId, sentRows, recipientKeys);
+  return marked.some((row) => row.cancellation_notice_state === 'suppressed') ? 'suppressed' : 'other';
+}
+
+// Evidence for ONE cancellation: judged only on the claim tokens that cancellation's sends stored (the bundle's), never on the
+// reminder's current marker, which after a restore and a new cancel belongs to the NEWER cancellation. 'delivered' / 'partial' =
+// accepted audit rows carry one of those tokens (per approved recipient); 'uncertain' = a token was stored but no accepted audit
+// row carries it (the send may have been handed to the provider, or parked, or never started: unconfirmed); 'unbound' = no token
+// was ever stored for this cancellation, so nothing can be attributed to it. It never answers 'ready'.
+async function boundNoticeStatus(scheduledServiceId, claimTokens, recipientKeys) {
+  if (!claimTokens.length) return 'unbound';
+  const destinations = new Set();
+  for (const token of claimTokens) {
+    for (const to of await cancellationAcceptedDestinations(scheduledServiceId, token)) destinations.add(to);
+  }
+  if (destinations.size === 0) return 'uncertain';
+  if (!recipientKeys || !recipientKeys.length) return 'delivered';
+  const record = await db('appointment_reminders').where({ scheduled_service_id: scheduledServiceId }).orderBy('id').first('id', 'customer_id');
+  if (!record) return 'partial';
+  return (await approvedRecipientsReached(record, scheduledServiceId, destinations, recipientKeys)) ? 'delivered' : 'partial';
+}
+
+// 'sent' on at least one row: delivery is judged on the audit rows of EVERY sent row's own claim token (never a time window).
+async function sentRowsStatus(scheduledServiceId, sentRows, recipientKeys) {
+  const destinations = new Set();
+  for (const row of sentRows) {
+    if (!row.cancellation_notice_at) continue;
+    for (const to of await cancellationAcceptedDestinations(scheduledServiceId, row.cancellation_notice_at)) destinations.add(to);
+  }
+  if (destinations.size === 0) return 'uncertain';
+  if (!recipientKeys || !recipientKeys.length) return 'delivered';
+  return (await approvedRecipientsReached(sentRows[0], scheduledServiceId, destinations, recipientKeys)) ? 'delivered' : 'partial';
+}
 
 // handleCancellation could not take the claim: say, from the claim state, whether the customer already has the text.
 async function reportUnclaimedCancellationNotice({ record, scheduledServiceId, acceptedCancellationAudit, reportOutcome }) {
@@ -2684,6 +2839,9 @@ async function reportUnclaimedCancellationNotice({ record, scheduledServiceId, a
 // (then it finalizes as 'sent' so a retry cannot double-text them). An approved send is never left for the sweep.
 function makeCancellationFinalizer({ record, scheduledServiceId, options, noticeToken, claimToken, claimStates, claimStatesWithSent, preStampState, acceptedCancellationAudit }) {
   return async (sentOk, { retryable = false, uncertain = false } = {}) => {
+    // The recovery sweep's pre-dispatch proof found the visit only busy (before any stamp or handoff): leave the approved
+    // marker (and this claim) exactly as it is, so the next pass sends the text; it is not a failed send.
+    if (!sentOk && !uncertain && options.cancelGeneration && options.cancelGeneration.retryable === true) return false;
     try {
       let accepted = Boolean(sentOk);
       // Dispatch-uncertain (r16): the provider may have accepted but
@@ -2777,7 +2935,7 @@ function makeCancellationFinalizer({ record, scheduledServiceId, options, notice
 
 // Lease-ownership recheck AT the provider handoff (codex r6): customer lookup, prefs, rendering, and the line lookup all
 // run between the claim check and dispatch - a worker paused past the 15-minute lease must not send after a sweep reclaim.
-function makeCancellationPreDispatchCheck({ record, scheduledServiceId, claimStatesWithSent, noticeToken, sendOutcome }) {
+function makeCancellationPreDispatchCheck({ record, scheduledServiceId, claimStatesWithSent, noticeToken, sendOutcome, cancelGeneration = null }) {
   return async () => {
     const own = await db('appointment_reminders')
       .where({ id: record.id })
@@ -2803,7 +2961,7 @@ function makeCancellationPreDispatchCheck({ record, scheduledServiceId, claimSta
     // Accepts our own prior stamp (multi-contact fanout) and
     // MUST win rows — zero rows means a restoration cleared the
     // claim mid-flight (codex r22).
-    const stamped = await db('appointment_reminders')
+    const stampOnce = (conn) => conn('appointment_reminders')
       .where({ id: record.id })
       .whereIn('cancellation_notice_state', claimStatesWithSent)
       .where('cancellation_notice_at', noticeToken)
@@ -2814,6 +2972,28 @@ function makeCancellationPreDispatchCheck({ record, scheduledServiceId, claimSta
       // the token alone would still match. Zero rows = abort.
       .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status = 'cancelled')")
       .update({ cancellation_notice_state: 'sent', updated_at: new Date() });
+    let stamped;
+    if (cancelGeneration) {
+      // The recovery sweep's approved text: the proof (this runner still owns its bundle AND the visit is still the approved
+      // cancel) and the stamp that precedes the provider handoff share ONE transaction, so a stale runner or a restored visit
+      // is stopped before anything is marked sent. (The handoff itself cannot be un-sent or held under a lock.)
+      try {
+        stamped = await db.transaction(async (trx) => {
+          await require('./cancel-generation-fence').assertCancelGeneration(trx, cancelGeneration);
+          return stampOnce(trx);
+        });
+      } catch (err) {
+        if (err && err.code === 'CANCEL_FENCE') {
+          // Nothing was stamped or handed off: the finalizer leaves the approved marker untouched. A BUSY visit or bundle is
+          // retried by the sweep; a lost lease belongs to the new owner, whose claim must find the marker as it was.
+          if (['visit_busy', 'bundle_busy', 'lease_lost'].includes(err.fenceReason)) cancelGeneration.retryable = true;
+          return { ok: false, code: 'appointment_restored', reason: err.message };
+        }
+        throw err;
+      }
+    } else {
+      stamped = await stampOnce(db);
+    }
     if (!stamped) {
       return { ok: false, code: 'notice_claim_lost', reason: 'claim cleared before dispatch (restoration?)' };
     }
@@ -2832,6 +3012,88 @@ function cancellationDeliveryGaps(sendOutcome, approvedNotice, attemptedKeys) {
     ...(failed.length ? [`not to the ${failed.join(' and the ')} (blocked, opted out or failed)`] : []),
     ...(vanished ? [`not to ${vanished} approved recipient(s) no longer on the appointment contacts`] : []),
   ];
+}
+
+// The approved send matches its audit rows by the reminder's current claim token (see acceptedCancellationAuditQuery); every
+// other cancel keeps the cycle window.
+function makeAcceptedCancellationAudit({ approvedSend, record, scheduledServiceId }) {
+  if (!approvedSend) return () => cancellationAuditAccepted(scheduledServiceId);
+  return async () => {
+    const current = await db('appointment_reminders').where({ id: record.id }).first('cancellation_notice_at');
+    return current?.cancellation_notice_at ? cancellationAuditAccepted(scheduledServiceId, current.cancellation_notice_at) : false;
+  };
+}
+
+// A prior attempt already got the text accepted: its audit row, or (not for the approved send, which is one visit) the series group's.
+async function alreadyAcceptedByPriorAttempt({ approvedSend, acceptedCancellationAudit, record, priorClaimToken }) {
+  if (await acceptedCancellationAudit()) return true;
+  return !approvedSend && cancellationGroupAccepted(record, priorClaimToken);
+}
+
+// The window-held rollback, as the fence's own transaction: the proof (this runner still owns its bundle, the visit is still the
+// approved cancel; bundle row then visit row, share + NOWAIT, same order as everywhere) and the revert of the stamp share ONE
+// transaction, and the revert must hit exactly the row stamped under THIS claim's token. A worker that paused past its lease
+// (another worker claimed and finished the bundle from the stamped state) is refused with lease_lost and rolls back nothing,
+// so it can never restore an approved marker behind a terminal bundle. A merely busy fence is retried briefly; a changed
+// cancel keeps the finalizer's terminal handling. Returns true only when the marker was restored by this claim.
+async function revertWindowHeldStamp({ record, noticeToken, cancelGeneration }) {
+  const { assertCancelGeneration } = require('./cancel-generation-fence');
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await db.transaction(async (trx) => {
+        await assertCancelGeneration(trx, cancelGeneration);
+        const reverted = await trx('appointment_reminders')
+          .where({ id: record.id })
+          // 'sent' = the pre-dispatch stamp was made; 'pending_approved' = the window closed before the stamp (the claim keeps the
+          // marker state), so the claim is simply still untouched. Either way the row under THIS claim's token is parked.
+          .whereIn('cancellation_notice_state', ['sent', 'pending_approved'])
+          .where('cancellation_notice_at', noticeToken)
+          .update({ cancellation_notice_state: 'pending_approved', updated_at: new Date() });
+        return reverted === 1;
+      });
+    } catch (err) {
+      if (!err || err.code !== 'CANCEL_FENCE') throw err;
+      const busy = ['visit_busy', 'bundle_busy'].includes(err.fenceReason);
+      if (busy && attempt < 3) {
+        await new Promise((resolve) => setTimeout(resolve, attempt * 150));
+        continue;
+      }
+      // Nothing was reverted: the finalizer leaves the marker as it is for a lost lease or a still-busy fence (the owner of the
+      // bundle decides), and the fence hit tells the sweep to stop or retry.
+      if (busy || err.fenceReason === 'lease_lost') cancelGeneration.retryable = true;
+      return false;
+    }
+  }
+  return false;
+}
+
+// The recovery sweep's approved send found the send window closed BEFORE any recipient was reached (the first handoff check
+// crossed 8 PM ET): nothing was sent, so the claim is not a failure. The approved marker goes back to its untouched state
+// (a stamp made just before the hold is reverted, an unstamped claim is kept, both under this claim's token and inside the bundle + generation fence) and the sweep
+// parks the bundle to the next window (options.cancelGeneration.windowHeld, set only when the revert happened). Any partial
+// fan-out keeps its terminal handling. Returns true when parked.
+async function parkWindowHeldApprovedNotice({ record, noticeToken, options, sendOutcome }) {
+  if (!options.cancelGeneration || !options.approvedNotice) return false;
+  if (sendOutcome.providerAccepted === true || sendOutcome.dispatchUncertain === true) return false;
+  if (sendOutcome.windowHeldAny !== true) return false;
+  if (!(await revertWindowHeldStamp({ record, noticeToken, cancelGeneration: options.cancelGeneration }))) return false;
+  options.cancelGeneration.windowHeld = true;
+  return true;
+}
+
+// Which of a visit's reminder rows the cancellation notice works on: the lowest id, so the live send and the sweep meet on one
+// row. The approved send prefers the lowest-id row that carries a marker (a never-marked sibling with a lower id must not hide
+// the row the cancel marked); with no marked row it falls back to the lowest id, as before.
+async function pickCancellationReminderRow(scheduledServiceId, approvedSend) {
+  if (approvedSend) {
+    const marked = await db('appointment_reminders')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .whereNotNull('cancellation_notice_state')
+      .orderBy('id')
+      .first();
+    if (marked) return marked;
+  }
+  return db('appointment_reminders').where({ scheduled_service_id: scheduledServiceId }).orderBy('id').first();
 }
 
 // handleCancellation's send step: fans the notice out to the contacts and settles the claim.
@@ -2856,10 +3118,20 @@ async function sendCancellationNotice({ record, scheduledServiceId, options, not
     const noticeSent = await safeSendAppointment(customer, prefs || {}, async (contact) => {
       attemptedKeys.add(noticeRecipientKey(contact.phone));
       return renderCancellationBody({ customer, contact, record, scheduledServiceId, approvedNotice });
-    }, 'appointment_cancelled', 'appointment_cancellation', { scheduled_service_id: scheduledServiceId, templateKey: 'appointment_cancelled' }, {
+    }, 'appointment_cancelled', 'appointment_cancellation', {
+      scheduled_service_id: scheduledServiceId,
+      templateKey: 'appointment_cancelled',
+      // The approved send's claim token rides on its audit rows: the delivery evidence is matched by it (no time window).
+      ...(options.approvedNotice ? { cancellation_notice_token: new Date(noticeToken).toISOString() } : {}),
+    }, {
       sendOutcome,
-      preDispatchCheck: makeCancellationPreDispatchCheck({ record, scheduledServiceId, claimStatesWithSent, noticeToken, sendOutcome }),
+      noDeferredQueue: Boolean(options.cancelGeneration),
+      preDispatchCheck: makeCancellationPreDispatchCheck({ record, scheduledServiceId, claimStatesWithSent, noticeToken, sendOutcome, cancelGeneration: options.cancelGeneration }),
     });
+    if (!noticeSent && await parkWindowHeldApprovedNotice({ record, noticeToken, options, sendOutcome })) {
+      reportOutcome(false, 'held for the send window; the text will go out when it opens');
+      return;
+    }
     if (noticeSent) {
       logger.info(`[appt-remind] Cancellation notice sent for customer ${record.customer_id}`);
       await finalizeClaim(true);
@@ -5001,6 +5273,14 @@ const AppointmentReminders = {
     return { would_send: true, body: recipients[0].body, template_body: templateBody, recipients, reason: null };
   },
 
+  // Read-only: where the card-approved cancellation text of a visit stands (approvedNoticeStatus, above).
+  // Exposed for the real-PostgreSQL race test of the recovery claim.
+  claimApprovedNoticeForGeneration,
+
+  async approvedCancellationNoticeStatus(scheduledServiceId, options = {}) {
+    return approvedNoticeStatus(scheduledServiceId, options);
+  },
+
   /**
    * Handle appointment cancellation — mark cancelled and notify customer.
    */
@@ -5028,9 +5308,9 @@ const AppointmentReminders = {
       const approvedSend = Boolean(options.approvedNotice);
       const claimStates = approvedSend ? ['pending', 'pending_notify', 'pending_approved'] : ['pending', 'pending_notify'];
       const claimStatesWithSent = [...claimStates, 'sent'];
-      const record = await db('appointment_reminders')
-        .where({ scheduled_service_id: scheduledServiceId })
-        .first();
+      // Deterministic: a visit can carry several reminder rows, and the live send and the recovery sweep must pick the SAME one, so
+      // their claims meet on one row (a later claim replaces the token, which fails the earlier sender's pre-dispatch check).
+      const record = await pickCancellationReminderRow(scheduledServiceId, approvedSend);
 
       if (!record) {
         logger.info(`[appt-remind] Cancellation: no reminder record for ${scheduledServiceId}`);
@@ -5052,7 +5332,10 @@ const AppointmentReminders = {
       // Guarded in ONE statement (codex r20): a restoration committing
       // between the status read above and this write must not be
       // re-closed.
-      const closed = await db('appointment_reminders')
+      // The recovery sweep (cancelGeneration) closes the reminder INSIDE its fenced claim transaction instead
+      // (claimApprovedNoticeForGeneration): this statement, run on an older snapshot after a concurrent restore, could
+      // re-close the live visit's reminder and suppress its future reminders.
+      const closed = options.cancelGeneration ? true : await db('appointment_reminders')
         .where({ id: record.id })
         .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status = 'cancelled')")
         .update({ cancelled: true, updated_at: new Date() });
@@ -5095,7 +5378,7 @@ const AppointmentReminders = {
         return record;
       }
 
-      const acceptedCancellationAudit = () => cancellationAuditAccepted(scheduledServiceId);
+      const acceptedCancellationAudit = makeAcceptedCancellationAudit({ approvedSend, record, scheduledServiceId });
 
       if (!claimed) {
         await reportUnclaimedCancellationNotice({ record, scheduledServiceId, acceptedCancellationAudit, reportOutcome });
@@ -5108,7 +5391,7 @@ const AppointmentReminders = {
         .where({ id: record.id })
         .first('cancellation_notice_state'))?.cancellation_notice_state || 'pending';
 
-      if (await acceptedCancellationAudit() || await cancellationGroupAccepted(record, priorClaimToken)) {
+      if (await alreadyAcceptedByPriorAttempt({ approvedSend, acceptedCancellationAudit, record, priorClaimToken })) {
         await db('appointment_reminders')
           .where({ id: record.id }).whereIn('cancellation_notice_state', claimStates)
           .where('cancellation_notice_at', noticeToken)

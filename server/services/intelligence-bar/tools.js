@@ -4619,6 +4619,9 @@ async function cancelWithEffects(input, actionContext, appt) {
       },
       notes: reason ? `Cancelled via Intelligence Bar: ${reason}` : 'Cancelled via Intelligence Bar',
       actor: { technicianId: actionContext.technicianId || null },
+      // The card's approved effects are also saved IN the cancel transaction (ib_cancel_effect_bundles), keyed by this
+      // pending action, so a process exit after the commit cannot strand them: a recovery sweep finishes them.
+      recovery: { pendingActionId: actionContext.operationId || null },
       // Under the visit lock: lock the linked visits too, then compare cheap DB fields only (PaymentIntents were
       // looked up before the lock; one that appeared since cannot be checked here and counts as a change).
       beforeCommit: async (trx) => {
@@ -4668,17 +4671,19 @@ async function cancelReceiptName(appt, frozen, appointment_id) {
   return frozen?.appointment?.customer_name || 'Unknown';
 }
 
-// What the Dispatch handler did NOT finish, in the operator's words (the receipt shows result.warning only).
-function cancelReplayWarnings(json, sendText) {
+// The approved text has no terminal outcome yet (the reminder step failed before reporting): the system retries it.
+const TEXT_RETRY_WARNING = 'The visit is cancelled, but the customer text has not gone out yet. The system retries it within about 15 minutes (only if it was never started) and posts a note to the office alerts. Do not send it by hand unless that note says it did not go out.';
+
+// The customer text's warnings, in the operator's words.
+function cancelTextWarnings(json, sendText) {
   const warnings = [];
-  // A step after the cancel committed failed (activity log, settlement bookkeeping...): the visit IS cancelled and the
-  // text / money steps before it may have run, so this is a success with a warning, never a failed action.
-  if (json.postCommitFailure) {
-    warnings.push(`The visit is cancelled, but a step after the cancel did not finish (${json.postCommitFailure}). Nothing was undone: check the visit's invoices and credit and the customer's message history${sendText && json.notificationSent === undefined ? ' (the customer text may or may not have gone out)' : ''} before doing anything again.`);
-  }
   // Delivery unproven (the provider may have accepted it): never advise a resend, whatever else is true.
   if (sendText && json.notificationUncertain === true) {
     warnings.push(`The visit is cancelled, but the customer text may have gone out (${json.notificationError || 'delivery could not be confirmed'}). Check the customer's message history before sending it again.`);
+  } else if (sendText && (json.textRetryScheduled === true || json.recoveryOwnsOutcome === true) && json.notificationSent !== true) {
+    // The bundle is pending with the text still open (even when this request holds a not-sent report whose bookkeeping failed):
+    // the system sends it, so a manual send would duplicate it.
+    warnings.push(TEXT_RETRY_WARNING);
   } else if (sendText && json.notificationSent === false) {
     warnings.push(`The visit is cancelled, but the customer text did not go out (${json.notificationError || 'no reason given'}) and will not be retried automatically — send it by hand.`);
   }
@@ -4686,6 +4691,18 @@ function cancelReplayWarnings(json, sendText) {
   if (sendText && json.notificationUncertain !== true && json.notificationSent === true && json.notificationPartial === true) {
     warnings.push(`The visit is cancelled and the customer text went to some recipients, but not all (${json.notificationError || 'no reason given'}). Do not send it again to those already reached.`);
   }
+  return warnings;
+}
+
+// What the Dispatch handler did NOT finish, in the operator's words (the receipt shows result.warning only).
+function cancelReplayWarnings(json, sendText) {
+  const warnings = [];
+  // A step after the cancel committed failed (activity log, settlement bookkeeping...): the visit IS cancelled and the
+  // text / money steps before it may have run, so this is a success with a warning, never a failed action.
+  if (json.postCommitFailure) {
+    warnings.push(`The visit is cancelled, but a step after the cancel did not finish (${json.postCommitFailure}). Nothing was undone: check the visit's invoices and credit and the customer's message history${sendText && json.notificationSent === undefined ? ' (the customer text may or may not have gone out)' : ''} before doing anything again. The approved steps are saved: within about 15 minutes the system finishes any invoice, credit or linked-visit step that is left (and the approved text, only if it was never started) and posts a note to the office alerts.`);
+  }
+  warnings.push(...cancelTextWarnings(json, sendText));
   // A money effect that changed since the card (an invoice, a payment attempt, a credit) was NOT acted on.
   const moneySkipped = json.moneySkipped || [];
   if (moneySkipped.length) {
@@ -4697,6 +4714,27 @@ function cancelReplayWarnings(json, sendText) {
     warnings.push(`${skipped.length} linked visit(s) were NOT cancelled because they changed since the card (${skipped.map((v) => `${v.id}: ${v.reason}`).join('; ')}) — check them.`);
   }
   return warnings;
+}
+
+// The recovery sweep took this cancel's saved steps over while this request ran: its receipt and office alert are the record.
+// The route then saves this result only if the action has none (and the sweep may replace it). Otherwise just the warnings.
+// A receipt that says the system is still sending the approved text is PROVISIONAL too (text_retry_pending): it carries
+// recovery_owns_outcome, so /confirm-action saves it only if the action has none and the sweep's final receipt (sent, partial,
+// abandoned...) replaces it. A real final receipt is never replaced.
+function recoveryOwnedFields(json, warnings) {
+  // A post-commit failure also leaves the bundle pending (liveFinish never ran), so its receipt is provisional too.
+  if (!json.recoveryOwnsOutcome && (json.textRetryScheduled === true || json.postCommitFailure)) {
+    return {
+      recovery_owns_outcome: true,
+      ...(json.textRetryScheduled === true ? { text_retry_pending: true } : {}),
+      warning: warnings.join(' '),
+    };
+  }
+  if (!json.recoveryOwnsOutcome) return warnings.length ? { warning: warnings.join(' ') } : {};
+  return {
+    recovery_owns_outcome: true,
+    warning: [...warnings, 'The system took over the follow-up steps of this cancel while it ran. Its own note in the office alerts is the record of what was finished: check that note before doing anything again.'].join(' '),
+  };
 }
 
 // The bar's reply for the Dispatch handler's reply: a refusal passes through (a 409 is a stale card), a success names
@@ -4723,7 +4761,7 @@ async function cancelReplayResult({ status, json = {} }, { appointment_id, appt,
     ...(sendText && json.notificationUncertain === true ? { customer_text_uncertain: true } : {}),
     ...(skipped.length ? { linked_visits_skipped: skipped } : {}),
     ...(moneySkipped.length ? { money_skipped: moneySkipped } : {}),
-    ...(warnings.length ? { warning: warnings.join(' ') } : {}),
+    ...recoveryOwnedFields(json, warnings),
   };
 }
 

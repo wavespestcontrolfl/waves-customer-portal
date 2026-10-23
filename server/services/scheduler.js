@@ -4267,6 +4267,30 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 5 MIN — Intelligence Bar cancel recovery (GATE_IB_CANCEL_WITH_EFFECTS follow-up). The bar's approved cancel
+  // saves what the card approved (pinned invoice void and credit reversal, approved customer text, approved linked
+  // visits) in the cancel transaction; if the request died after the commit, a row is still pending 10 minutes later and
+  // this sweep finishes ONLY that, through the same pinned code paths, then tells the office. A row past 24 hours is only
+  // reported. Queries by age, not by tick, so a dropped tick only delays it. No gate of its own: rows exist only after
+  // the gated card path ran, so with the gate never on the sweep reads an empty table. runExclusive: overlapping deploy
+  // instances; each row is also leased (FOR UPDATE SKIP LOCKED).
+  // =========================================================================
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      await runExclusive('ib-cancel-effect-recovery', async () => {
+        const result = await require('./ib-cancel-effect-bundles').sweepIbCancelBundles();
+        if (result.recovered || result.abandoned || result.reported || result.receipts || result.failed) {
+          logger.info(`[ib-cancel-bundle] sweep: ${JSON.stringify(result)}`);
+        }
+        // A row that failed stays pending for the next tick; job health shows the failed run.
+        if (result.failed > 0) throw Object.assign(new Error(`ib cancel recovery: ${result.failed} bundle(s) failed`), { code: 'SWEEP_INCOMPLETE' });
+      });
+    } catch (err) {
+      logger.error(`IB cancel recovery sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 10 MIN — Deliver queued new-recurring welcome texts. Booking paths
   // enqueue the welcome (sms_sequences, ~1h delay) so it never lands
   // back-to-back with the appointment confirmation; this tick sends the ones

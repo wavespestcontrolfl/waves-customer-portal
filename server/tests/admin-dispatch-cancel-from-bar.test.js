@@ -52,6 +52,7 @@ jest.mock('../models/db', () => {
       whereNull(col) { (b._nullCols ||= []).push(String(col).replace(/^scheduled_services\./, '')); return b; },
       whereNotNull() { return b; },
       leftJoin() { return b; },
+      count() { return b; },
       whereRaw() { return b; },
       whereNotExists() { return b; },
       orderBy() { return b; },
@@ -59,6 +60,8 @@ jest.mock('../models/db', () => {
       modify(cb) { cb(b); return b; },
       select() { return b; },
       async first() {
+        // The recovery record (read by the request's cancel fence): no status, so liveFinish still sees "no open text".
+        if (table === 'ib_cancel_effect_bundles') return state.bundleRow || { scheduled_service_id: 'svc-bar-1', restorations_seen: 0 };
         const rows = table === 'scheduled_services' ? state.rows : table === 'invoices' ? state.invoices : [];
         const cmp = (a, op, v) => (op === '>=' ? a >= v : op === '>' ? a > v : op === '<=' ? a <= v : op === '<' ? a < v : a === v);
         const found = rows.find((r) => Object.entries(b._where).every(([k, v]) => r[k] === v)
@@ -70,7 +73,9 @@ jest.mock('../models/db', () => {
       async columnInfo() { return { recurring_ongoing: {} }; },
       update(u) {
         state.writes.push({ table, op: 'update', u });
-        return { returning: async () => [], then: (res, rej) => Promise.resolve(1).then(res, rej) };
+        if (table === 'ib_cancel_effect_bundles') state.bundleUpdates += 1;
+        const lost = table === 'ib_cancel_effect_bundles' && (state.bundleChangesNoRow || state.bundleLostAtUpdate === state.bundleUpdates);
+        return { returning: async () => [], then: (res, rej) => Promise.resolve(lost ? 0 : 1).then(res, rej) };
       },
       insert(r) {
         state.writes.push({ table, op: 'insert', r });
@@ -111,7 +116,7 @@ beforeEach(() => {
   db.__state.rows = [
     { id: 'svc-bar-1', technician_id: 'tech-2', customer_id: 'cust-bar', status: 'confirmed', scheduled_date: future(3), service_type: 'Pest Control', is_recurring: true, recurring_pattern: 'quarterly', recurring_parent_id: null, recurring_ongoing: true, annual_prepay_term_id: null, prepaid_amount: null, source_action: null, customer_confirmed: true },
   ];
-  db.__state.writes = []; db.__state.reads = []; db.__state.failInsert = null;
+  db.__state.writes = []; db.__state.reads = []; db.__state.failInsert = null; db.__state.bundleChangesNoRow = false; db.__state.bundleLostAtUpdate = null; db.__state.bundleUpdates = 0;
   jest.clearAllMocks();
 });
 
@@ -256,5 +261,220 @@ describe('cancelServiceFromBar replays the Dispatch cancel handler with the card
     const { status, json } = await cancelServiceFromBar({ serviceId: 'svc-missing', notifyCustomer: true, actor: ACTOR });
     expect(status).toBe(404);
     expect(json.error).toBe('Service not found');
+  });
+});
+
+// The recovery record (ib_cancel_effect_bundles, services/ib-cancel-effect-bundles.js): with `recovery` the cancel
+// transaction also saves what the card approved, and the request marks it complete when its follow-through returns.
+describe('the recovery bundle rides the cancel transaction', () => {
+  const BUNDLE = 'ib_cancel_effect_bundles';
+  const bundleWrites = () => db.__state.writes.filter((w) => w.table === BUNDLE);
+  const approvedMoney = { invoices: [{ id: 'inv-1', total: 120 }], creditReversalOfferIds: ['offer-1'] };
+  const approvedNotice = [{ recipient_key: 'abc123abc123abc1', body: 'Hi Synthia, your visit is cancelled.' }];
+  const linkedChildren = [{ id: 'child-1', status: 'confirmed', scheduled_date: '2026-11-02', service_type: 'pest_control' }];
+  const run = (extra = {}) => cancelServiceFromBar({
+    serviceId: 'svc-bar-1', notifyCustomer: true, notes: 'Cancelled via Intelligence Bar: rain', actor: ACTOR,
+    approvedNotice, linkedChildren, approvedMoney, recovery: { pendingActionId: 'action-1' }, ...extra,
+  });
+
+  test('the bundle holds exactly the card\'s approvals and is written inside the transaction, after the re-check and before the status change', async () => {
+    const order = [];
+    mockTransitionJobStatus.mockImplementationOnce(async () => {
+      order.push(bundleWrites().some((w) => w.op === 'insert') ? 'bundle-then-transition' : 'transition-first');
+      return { ok: true, adminPayload: null };
+    });
+    await run({ beforeCommit: async () => { order.push(bundleWrites().length === 0 ? 'recheck-first' : 'recheck-late'); } });
+    expect(order).toEqual(['recheck-first', 'bundle-then-transition']);
+    const insert = bundleWrites().find((w) => w.op === 'insert');
+    expect(insert.r).toMatchObject({
+      pending_action_id: 'action-1', scheduled_service_id: 'svc-bar-1', actor_id: 'admin-1', notify_customer: true,
+      notes: 'Cancelled via Intelligence Bar: rain', lease_owner: 'request', restorations_seen: 0,
+    });
+    expect(JSON.parse(insert.r.approved_notice)).toEqual(approvedNotice);
+    // Each child also pins its own restoration count (none here).
+    expect(JSON.parse(insert.r.linked_children)).toEqual(linkedChildren.map((child) => ({ ...child, restorations_seen: 0 })));
+    expect(JSON.parse(insert.r.approved_money)).toEqual(approvedMoney);
+    const begin = db.__state.writes.findIndex((w) => w.op === 'begin');
+    const commit = db.__state.writes.findIndex((w) => w.op === 'commit');
+    const at = db.__state.writes.indexOf(insert);
+    expect(begin).toBeLessThan(at);
+    expect(at).toBeLessThan(commit);
+  });
+
+  test('a card that chose no text saves that choice (no approved bodies)', async () => {
+    await run({ notifyCustomer: false, approvedNotice: null });
+    const insert = bundleWrites().find((w) => w.op === 'insert');
+    expect(insert.r.notify_customer).toBe(false);
+    expect(insert.r.approved_notice).toBeNull();
+  });
+
+  test('the request keeps its lease, notes the text outcome, and marks the bundle complete only AFTER the follow-through returns', async () => {
+    let writesAtFollowThrough = null;
+    mockRunFollowThrough.mockImplementationOnce(async ({ moneyReport }) => {
+      writesAtFollowThrough = db.__state.writes.length;
+      moneyReport.skipped.push({ kind: 'invoice', id: 'inv-1', reason: 'not_voided_changed_since_card' });
+    });
+    await run();
+    const updates = bundleWrites().filter((w) => w.op === 'update').map((w) => w.u);
+    expect(updates[0]).toMatchObject({ lease_owner: 'request' });
+    expect(updates[1].notice_outcome).toBe(JSON.stringify({ state: 'sent', by: 'request' }));
+    const done = updates.find((u) => u.status === 'complete');
+    expect(done).toBeTruthy();
+    expect(JSON.parse(done.followthrough_outcome)).toEqual({ money_skipped: [{ kind: 'invoice', id: 'inv-1', reason: 'not_voided_changed_since_card' }], linked_skipped: [] });
+    const doneAt = db.__state.writes.findIndex((w) => w.table === BUNDLE && w.u && w.u.status === 'complete');
+    expect(doneAt).toBeGreaterThanOrEqual(writesAtFollowThrough);
+  });
+
+  test('a request the sweep overtook (its bundle writes change no row) tells the caller the recovery owns the outcome', async () => {
+    db.__state.bundleChangesNoRow = true;
+    const { json } = await run();
+    expect(json.success).toBe(true);
+    expect(json.recoveryOwnsOutcome).toBe(true);
+    // The sweep owns the effects now: a paused request that resumes sends no text and moves no money.
+    expect(mockHandleCancellation).not.toHaveBeenCalled();
+    expect(mockRunFollowThrough).not.toHaveBeenCalled();
+  });
+
+  test('a request that loses the bundle during the text step runs no money, linked-visit or tracker step', async () => {
+    // Update 1 is the heartbeat; update 2 is the text outcome, which changes no row (the sweep took the bundle meanwhile).
+    db.__state.bundleLostAtUpdate = 2;
+    const { json } = await run();
+    expect(json.success).toBe(true);
+    expect(json.recoveryOwnsOutcome).toBe(true);
+    expect(mockHandleCancellation).toHaveBeenCalledTimes(1);
+    expect(mockRunFollowThrough).not.toHaveBeenCalled();
+    expect(bundleWrites().some((w) => w.op === 'update' && w.u.status === 'complete')).toBe(false);
+  });
+
+  test('a lease that cannot be renewed after the text step stops the follow-through too', async () => {
+    db.__state.bundleLostAtUpdate = 3;
+    const { json } = await run();
+    expect(json.recoveryOwnsOutcome).toBe(true);
+    expect(mockRunFollowThrough).not.toHaveBeenCalled();
+  });
+
+  test('the follow-through runs under the cancel fence carrying the bundle and the request lease', async () => {
+    await run();
+    const args = mockRunFollowThrough.mock.calls[0][0];
+    expect(args.cancelFence).toMatchObject({ visitId: 'svc-bar-1', restorations: 0, bundleId: 'x', leaseToken: 'request', hits: [] });
+  });
+
+  test('the approved text is claimed and handed off under the same fence (bundle, request lease, generation)', async () => {
+    await run();
+    const opts = mockHandleCancellation.mock.calls[0][1];
+    expect(opts.cancelGeneration).toMatchObject({ visitId: 'svc-bar-1', bundleId: 'x', leaseToken: 'request', hits: [] });
+    expect(opts.approvedNotice).toEqual(approvedNotice);
+    // The follow-through shares the fence object (one set of hits for the whole request).
+    expect(mockRunFollowThrough.mock.calls[0][0].cancelFence).toBe(opts.cancelGeneration);
+    // A card that chose no text sends nothing.
+    mockHandleCancellation.mockClear();
+    await run({ notifyCustomer: false, approvedNotice: null });
+    // ...but the no-text suppression is fenced too: it is a marker write a delayed request must not land on a newer cancel.
+    expect(mockHandleCancellation.mock.calls[0][1].cancelGeneration).toMatchObject({ bundleId: 'x', leaseToken: 'request' });
+  });
+
+  test.each([
+    ['the lease was taken over before the claim', 'lease_lost', false],
+    ['the visit was restored before the claim', 'visit_restored_since', true],
+    ['the visit was busy at the handoff stamp', 'visit_busy', true],
+  ])('a fence refusal at the text claim or handoff (%s): no outcome is recorded, no follow-through runs, the sweep owns the text', async (_label, hit, released) => {
+    mockHandleCancellation.mockImplementationOnce(async (_id, opts) => {
+      // Nobody was reached and the marker is untouched: no outcome is reported for the sweep to be overridden by.
+      opts.cancelGeneration.hits.push(hit);
+    });
+    const { json } = await run();
+    expect(json.success).toBe(true);
+    expect(json.recoveryOwnsOutcome).toBe(true);
+    expect(mockRunFollowThrough).not.toHaveBeenCalled();
+    const updates = bundleWrites().filter((w) => w.op === 'update').map((w) => w.u);
+    expect(updates.some((u) => u.notice_outcome !== undefined || u.status === 'complete')).toBe(false);
+    expect(updates.some((u) => u.lease_owner === null && u.lease_until === null)).toBe(released);
+  });
+
+  test('a restore that stops the fan-out after one recipient keeps the partial delivery on the bundle before the request stands down', async () => {
+    mockHandleCancellation.mockImplementationOnce(async (_id, opts) => {
+      opts.cancelGeneration.hits.push('visit_restored_since');
+      Object.assign(opts.outcome, { notificationSent: true, notificationPartial: true, notificationError: 'visit restored' });
+    });
+    const { json } = await run();
+    expect(json.recoveryOwnsOutcome).toBe(true);
+    expect(mockRunFollowThrough).not.toHaveBeenCalled();
+    const updates = bundleWrites().filter((w) => w.op === 'update').map((w) => w.u);
+    const noticeAt = updates.findIndex((u) => u.notice_outcome !== undefined);
+    const releaseAt = updates.findIndex((u) => u.lease_owner === null && u.lease_until === null);
+    expect(JSON.parse(updates[noticeAt].notice_outcome)).toMatchObject({ state: 'partial', by: 'request' });
+    expect(releaseAt).toBeGreaterThan(noticeAt);
+    expect(updates.some((u) => u.status === 'complete')).toBe(false);
+  });
+
+  test('the follow-through gets the bundle\'s own copies of the linked visits, each with its restoration count', async () => {
+    const pinned = [{ id: 'child-1', status: 'confirmed', scheduled_date: '2026-11-02', service_type: 'pest_control', restorations_seen: 2 }];
+    const original = db.__state.bundleRow;
+    db.__state.bundleRow = { scheduled_service_id: 'svc-bar-1', restorations_seen: 0, linked_children: pinned };
+    try { await run(); } finally { db.__state.bundleRow = original; }
+    expect(mockRunFollowThrough.mock.calls[0][0].linkedChildren).toEqual(pinned);
+  });
+
+  test.each([
+    ['the lease was taken over', 'lease_lost', false],
+    ['the visit was restored meanwhile', 'visit_restored_since', true],
+  ])('a fence refusal in the follow-through (%s) stands the request down: the sweep owns the outcome', async (_label, hit, released) => {
+    mockRunFollowThrough.mockImplementationOnce(async ({ cancelFence }) => { cancelFence.hits.push(hit); });
+    const { json } = await run();
+    expect(json.recoveryOwnsOutcome).toBe(true);
+    const updates = bundleWrites().filter((w) => w.op === 'update').map((w) => w.u);
+    expect(updates.some((u) => u.status === 'complete')).toBe(false);
+    // The request lease is released unless another owner already holds the bundle.
+    expect(updates.some((u) => u.lease_owner === null && u.lease_until === null)).toBe(released);
+  });
+
+  test('an approved text with no terminal outcome: the reply carries textRetryScheduled (the sweep sends it)', async () => {
+    const bundles = require('../services/ib-cancel-effect-bundles');
+    const spy = jest.spyOn(bundles, 'liveFinish').mockImplementationOnce(async (req) => { req.ibCancelTextPending = true; });
+    const { json } = await run();
+    spy.mockRestore();
+    expect(json.success).toBe(true);
+    expect(json.textRetryScheduled).toBe(true);
+    expect((await run()).json.textRetryScheduled).toBeUndefined();
+  });
+
+  test('the normal path (the request still owns its bundle) carries no such flag', async () => {
+    const { json } = await run();
+    expect(json.recoveryOwnsOutcome).toBeUndefined();
+  });
+
+  test('a follow-through that throws leaves the bundle PENDING for the recovery sweep, and the reply says a step failed', async () => {
+    mockRunFollowThrough.mockRejectedValueOnce(new Error('connection terminated'));
+    const { status, json } = await run();
+    expect(status).toBe(200);
+    expect(json.postCommitFailure).toBe('connection terminated');
+    expect(bundleWrites().some((w) => w.u && w.u.status === 'complete')).toBe(false);
+  });
+
+  test('a bundle that cannot be written aborts the cancel: nothing transitions, no text, no follow-through', async () => {
+    db.__state.failInsert = BUNDLE;
+    await expect(run()).rejects.toThrow('connection terminated');
+    expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+    expect(mockHandleCancellation).not.toHaveBeenCalled();
+    expect(mockRunFollowThrough).not.toHaveBeenCalled();
+    expect(db.__state.writes.at(-1)).toEqual({ table: '<trx>', op: 'rollback' });
+  });
+
+  test('a re-check refusal (preview_changed) writes no bundle', async () => {
+    const { status } = await run({ beforeCommit: async () => { throw Object.assign(new Error('changed'), { status: 409, code: 'preview_changed' }); } });
+    expect(status).toBe(409);
+    expect(bundleWrites()).toEqual([]);
+  });
+
+  test('a transition that fails after the bundle insert rolls back with the transaction (the insert is inside it)', async () => {
+    mockTransitionJobStatus.mockRejectedValueOnce(new Error('deadlock detected'));
+    await expect(run()).rejects.toThrow('deadlock detected');
+    expect(db.__state.writes.at(-1)).toEqual({ table: '<trx>', op: 'rollback' });
+    expect(bundleWrites().some((w) => w.u && w.u.status === 'complete')).toBe(false);
+  });
+
+  test('without `recovery` no bundle is written (older callers and the Dispatch screen are unchanged)', async () => {
+    await run({ recovery: undefined });
+    expect(bundleWrites()).toEqual([]);
   });
 });
