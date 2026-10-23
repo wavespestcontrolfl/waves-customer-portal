@@ -385,6 +385,10 @@ async function kitKeyVocabulary(conn = db) {
 async function truckHasKeys(vehicleId, conn = db) {
   const row = await conn('equipment').where({ assigned_vehicle_id: vehicleId }).whereNotNull('kit_key').first('id');
   if (row) return true;
+  // An emptied truck (no live row at all) is unconfigured again: the office
+  // clears the kit by moving everything off, and no hold outlives that.
+  const anyLive = await conn('equipment').where({ assigned_vehicle_id: vehicleId }).whereIn('status', KIT_STATUSES).first('id');
+  if (!anyLive) return false;
   const last = await conn('equipment_checks').where({ vehicle_id: vehicleId }).orderBy('checked_at', 'desc').first('results');
   const results = last ? parseGroups(last.results) : [];
   return results.some((r) => Boolean(normalizeKitKey(r?.kit_key)));

@@ -471,6 +471,11 @@ describe('tool gaps by kit key', () => {
     db.__state.equipment.find((e) => e.id === METER).kit_key = null;
     expect(await truckKit.truckHasKeys(TRUCK)).toBe(true);
     expect(await truckKit.toolGapsForTruck(TRUCK, 'termite')).toEqual([{ kit_key: 'moisture_meter', label: 'Moisture meter' }]);
+    // Emptying the truck (every live row moved off) clears the configured state.
+    db.__state.equipment.find((e) => e.id === SPRAYER).assigned_vehicle_id = null;
+    expect(await truckKit.truckHasKeys(TRUCK)).toBe(false);
+    db.__state.equipment.find((e) => e.id === SPRAYER).assigned_vehicle_id = TRUCK;
+    expect(await truckKit.truckHasKeys(TRUCK)).toBe(true);
     // A truck that never had a keyed row or a check stays unjudged.
     db.__state.equipment_checks = [];
     expect(await truckKit.truckHasKeys(TRUCK)).toBe(false);
