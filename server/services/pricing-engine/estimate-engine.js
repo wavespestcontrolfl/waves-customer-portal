@@ -92,7 +92,7 @@ const {
   pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub,
   priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest,
   priceCommercialMosquito, priceCommercialTermiteBait, priceCommercialRodentBait, pricePalmInjection,
-  priceMosquito, priceTermiteBait, priceTermiteBond, priceTermiteStationRental,
+  priceMosquito, priceMosquitoMisting, priceTermiteBait, priceTermiteBond, priceTermiteStationRental,
   priceRodentBait, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
   priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh, priceRodentBirdBoxes,
@@ -1265,6 +1265,19 @@ function generateEstimate(input) {
         }
       }
     }
+  }
+
+  // Mosquito misting system (install + monthly plan + per-fill refills).
+  // DARK behind GATE_MOSQUITO_MISTING, read at call time: with the gate off the
+  // key is ignored entirely (output byte-identical). The line is NOT tier-counted
+  // (not in WAVEGUARD.qualifyingServices) and NOT percent-discountable
+  // (excludedFromPercentDiscount.mosquito_misting); its install price rides
+  // line.installation.price into installationTotal / year1Total below.
+  const mistingService = services.mosquitoMisting || services.mosquito_misting;
+  if (mistingService && require('../../config/feature-gates').mosquitoMistingLive()) {
+    const result = priceMosquitoMisting(property, serviceOptions(mistingService));
+    lineItems.push(result);
+    if (!result.quoteRequired) activeServiceKeys.push('mosquito_misting');
   }
 
   // Rodent Bait

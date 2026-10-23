@@ -7,7 +7,7 @@ const {
   LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO,
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
   COMMERCIAL_MOSQUITO, COMMERCIAL_TERMITE_BAIT, COMMERCIAL_RODENT_BAIT,
-  BED_DENSITY, BED_AREA_REVIEW_SQFT, TREE_SHRUB_FALLBACK_BED_SQFT, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, AREA_ADDONS, SPECIALTY, BED_BUG, URGENCY,
+  BED_DENSITY, BED_AREA_REVIEW_SQFT, TREE_SHRUB_FALLBACK_BED_SQFT, PALM, MOSQUITO, MOSQUITO_MISTING, TERMITE, RODENT, ONE_TIME, AREA_ADDONS, SPECIALTY, BED_BUG, URGENCY,
   WAVEGUARD,
 } = require('./constants');
 const { areaAddOnLimitVerdict, limitText } = require('./area-addon-limits');
@@ -4985,6 +4985,155 @@ function priceTermiteStationRental(installPrice) {
   };
 }
 
+// Mosquito misting SYSTEM (scope ~/mosquito-misting-scope-20260924.md 4.3).
+// Install (tier price + nozzle/riser overage) is a one-time charge; the plan
+// is a fixed monthly fee; refills bill per fill at each visit and are NOT in
+// `annual` (refill.annualEstimate is informational). DRAFT constants, dealer
+// cost unknown: the estimate engine only calls this behind GATE_MOSQUITO_MISTING.
+// `risers` is the number of risers requested; the first includedRisers are free.
+function priceMosquitoMisting(property, options = {}) {
+  const M = MOSQUITO_MISTING;
+  const reasons = [];
+
+  let tier = String(options.tier ?? M.defaultTier).trim().toLowerCase();
+  if (!Object.prototype.hasOwnProperty.call(M.tiers, tier)) {
+    reasons.push('mosquito_misting_unknown_tier');
+    tier = M.defaultTier;
+  }
+  const tierCfg = M.tiers[tier];
+
+  let solution = String(options.solution ?? M.defaultSolution).trim().toLowerCase();
+  if (!Object.prototype.hasOwnProperty.call(M.refills, solution)) {
+    reasons.push('mosquito_misting_unknown_solution');
+    solution = M.defaultSolution;
+  }
+  const refillCfg = M.refills[solution];
+
+  let nozzles = options.nozzles == null ? tierCfg.includedNozzles : Number(options.nozzles);
+  if (!Number.isFinite(nozzles) || nozzles < M.minNozzles) {
+    reasons.push('mosquito_misting_invalid_nozzles');
+    nozzles = tierCfg.includedNozzles;
+  }
+  nozzles = Math.round(nozzles);
+  const oversize = nozzles > M.maxNozzles;
+  if (oversize) reasons.push('mosquito_misting_oversize');
+
+  let risers = options.risers == null ? 0 : Number(options.risers);
+  if (!Number.isFinite(risers) || risers < 0) {
+    reasons.push('mosquito_misting_invalid_risers');
+    risers = 0;
+  }
+  risers = Math.round(risers);
+
+  let refillsPerYear = options.refillsPerYear == null ? M.defaultRefillsPerYear : Number(options.refillsPerYear);
+  if (!Number.isFinite(refillsPerYear) || refillsPerYear < 0) {
+    reasons.push('mosquito_misting_invalid_refills');
+    refillsPerYear = M.defaultRefillsPerYear;
+  }
+
+  const extraNozzles = Math.max(0, nozzles - tierCfg.includedNozzles);
+  const extraRisers = Math.max(0, risers - M.includedRisers);
+
+  const refill = {
+    solution,
+    label: refillCfg.label,
+    perFill: refillCfg.price,
+    productCost: refillCfg.productCost,
+    refillsPerYear,
+    annualEstimate: Math.round(refillCfg.price * refillsPerYear * 100) / 100,
+  };
+
+  const pricingKnobs = {
+    tier,
+    tierPrice: tierCfg.price,
+    hardwareCost: tierCfg.hardwareCost,
+    includedNozzles: tierCfg.includedNozzles,
+    extraNozzlePrice: M.extraNozzlePrice,
+    extraNozzleCost: M.extraNozzleCost,
+    includedRisers: M.includedRisers,
+    extraRiserPrice: M.extraRiserPrice,
+    extraRiserCost: M.extraRiserCost,
+    installTechs: M.install.techs,
+    installHours: M.install.hours,
+    laborRate: GLOBAL.LABOR_RATE,
+    minNozzles: M.minNozzles,
+    maxNozzles: M.maxNozzles,
+    planMonthly: M.plan.monthly,
+    planVisitsPerYear: M.plan.visitsPerYear,
+    laborMinutesPerVisit: M.plan.laborMinutesPerVisit,
+    partsReservePerMonth: M.plan.partsReservePerMonth,
+    refillSolution: solution,
+    refillPrice: refillCfg.price,
+    refillProductCost: refillCfg.productCost,
+    defaultRefillsPerYear: M.defaultRefillsPerYear,
+    serviceCallNoPlan: M.serviceCallNoPlan,
+  };
+
+  const base = {
+    service: 'mosquito_misting',
+    name: 'Mosquito Misting Service Plan',
+    tier,
+    tierLabel: tierCfg.label,
+    solution,
+    nozzles,
+    risers,
+    extraNozzles,
+    extraRisers,
+    refill,
+    refillsBilledPerVisit: true,
+    visitsPerYear: M.plan.visitsPerYear,
+    requiresMeasurement: false,
+    pricingKnobs,
+  };
+
+  if (oversize) {
+    // Above the largest standard layout: manual quote, nothing priced.
+    return {
+      ...base,
+      annual: null,
+      monthly: null,
+      installation: { price: null, retailValue: null, materialCost: null, laborCost: null, totalCost: null, margin: null },
+      quoteRequired: true,
+      requiresManualReview: true,
+      manualReviewReasons: reasons,
+    };
+  }
+
+  const price = Math.round(tierCfg.price + extraNozzles * M.extraNozzlePrice + extraRisers * M.extraRiserPrice);
+  const materialCost = Math.round((tierCfg.hardwareCost + extraNozzles * M.extraNozzleCost + extraRisers * M.extraRiserCost) * 100) / 100;
+  const laborCost = Math.round(M.install.techs * M.install.hours * GLOBAL.LABOR_RATE * 100) / 100;
+  const totalCost = Math.round((materialCost + laborCost) * 100) / 100;
+  const annual = Math.round(M.plan.monthly * 12 * 100) / 100;
+  const planCostAnnual = Math.round(
+    ((M.plan.laborMinutesPerVisit / 60) * GLOBAL.LABOR_RATE * M.plan.visitsPerYear + M.plan.partsReservePerMonth * 12) * 100,
+  ) / 100;
+
+  const result = {
+    ...base,
+    annual,
+    monthly: M.plan.monthly,
+    installation: {
+      price,
+      retailValue: price,
+      materialCost,
+      laborCost,
+      totalCost,
+      margin: price > 0 ? Math.round(((price - totalCost) / price) * 1000) / 1000 : null,
+    },
+    plan: {
+      monthly: M.plan.monthly,
+      annual,
+      costAnnual: planCostAnnual,
+      margin: annual > 0 ? Math.round(((annual - planCostAnnual) / annual) * 1000) / 1000 : null,
+    },
+    quoteRequired: false,
+    requiresManualReview: reasons.length > 0,
+    manualReviewReasons: reasons,
+  };
+  assertFinitePriceFields([result]);
+  return result;
+}
+
 // Termite program cost model (plan 2026-09-03 §A1, LAB-006 — REPORT ONLY).
 // Install = hardware + laborMaterial + misc per station plus the computed
 // (never billed) install labor. Steady-state annual = service labor
@@ -9921,7 +10070,7 @@ module.exports = {
   priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest,
   priceCommercialMosquito, priceCommercialTermiteBait, priceCommercialRodentBait, pricePalmInjection,
   normalizeCommercialTermiteScope, COMMERCIAL_TERMITE_AUTO_SCOPES,
-  priceMosquito, priceTermiteBait, priceTermiteBond, priceTermiteStationRental, termiteProgramAnnualCostForStations, termiteAnnualPlanFeeForStations,
+  priceMosquito, priceMosquitoMisting, priceTermiteBait, priceTermiteBond, priceTermiteStationRental, termiteProgramAnnualCostForStations, termiteAnnualPlanFeeForStations,
   termiteMonitoringMonthlyForStations,
   priceRodentBait, rodentBaitBracketFor, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,

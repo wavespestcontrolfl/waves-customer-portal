@@ -60,6 +60,10 @@
  */
 
 const MISTING_SYSTEM_SERVICE_KEY = 'mosquito_misting_system';
+// The pricing engine's recurring plan line (GATE_MOSQUITO_MISTING). It is the
+// misting SYSTEM's install + plan + refills, so isMistingSystemService counts
+// it, but isMistingDesignConsultation does NOT: it is not the free design visit.
+const MISTING_ENGINE_SERVICE_KEY = 'mosquito_misting';
 // Separator-tolerant: "misting system", "misting-system", "misting_system".
 const MISTING_SYSTEM_NAME_PATTERN = /\bmisting[\s_-]+systems?\b/i;
 // Words that mark a keyless name as a DIFFERENT phase of the product
@@ -89,7 +93,8 @@ function matchesMistingSystemName(...values) {
  * @returns {boolean}
  */
 function isMistingSystemService({ serviceKey, name, text } = {}) {
-  if (normalizeServiceKey(serviceKey) === MISTING_SYSTEM_SERVICE_KEY) return true;
+  const key = normalizeServiceKey(serviceKey);
+  if (key === MISTING_SYSTEM_SERVICE_KEY || key === MISTING_ENGINE_SERVICE_KEY) return true;
   return matchesMistingSystemName(name, text);
 }
 
@@ -132,6 +137,7 @@ function isMistingSystemServiceUnconfigured({ serviceKey, name } = {}) {
 
 module.exports = {
   MISTING_SYSTEM_SERVICE_KEY,
+  MISTING_ENGINE_SERVICE_KEY,
   MISTING_SYSTEM_NAME_PATTERN,
   isMistingSystemService,
   isMistingDesignConsultation,

@@ -16,7 +16,7 @@ const { authoritativeEstimateResult, proposalIsAuthoritative, storedAreaAddOnRow
 
 const RECURRING_SERVICES = new Set([
   'pest_control', 'lawn_care', 'tree_shrub', 'palm_injection',
-  'mosquito', 'termite_bait', 'rodent_bait', 'foam_recurring',
+  'mosquito', 'termite_bait', 'rodent_bait', 'foam_recurring', 'mosquito_misting',
   // Commercial auto-priced recurring programs (cost-buildup pricers). A manual
   // commercial_lawn line (quoteRequired, no annual) is still possible for
   // lawn-adjacent one-time services, so the recurring svcAdd below guards on
@@ -242,6 +242,7 @@ const SERVICE_LABEL = {
   commercial_tree_shrub: 'Commercial Tree & Shrub',
   commercial_mosquito: 'Commercial Mosquito',
   commercial_termite_bait: 'Commercial Termite Bait Monitoring',
+  mosquito_misting: 'Mosquito Misting Service Plan',
   commercial_rodent_bait: 'Commercial Rodent Bait Stations',
   one_time_pest: 'One-Time Pest',
   one_time_lawn: 'One-Time Lawn',
@@ -524,6 +525,7 @@ function mapV1ToLegacyShape(v1Result) {
   const palmLI = lineItems.find(l => l.service === 'palm_injection');
   const mqLI = lineItems.find(l => l.service === 'mosquito');
   const tbLI = lineItems.find(l => l.service === 'termite_bait');
+  const mmLI = lineItems.find(l => l.service === 'mosquito_misting' && !l.quoteRequired);
   const tbBondLI = lineItems.find(l => l.service === 'termite_bond');
   const tbRentLI = lineItems.find(l => l.service === 'termite_station_rental');
   const rbLI = lineItems.find(l => l.service === 'rodent_bait');
@@ -950,6 +952,21 @@ function mapV1ToLegacyShape(v1Result) {
       });
     }
   }
+  // Mosquito misting plan (GATE_MOSQUITO_MISTING; the line exists only while
+  // the gate is on). Fixed monthly plan: in the recurring totals, never
+  // tier-counted and never bundle-discountable. The install rides the
+  // one-time items below; refills bill per visit and are not in this annual.
+  if (mmLI) {
+    svcAdd('Mosquito Misting Service Plan', mmLI, {
+      service: 'mosquito_misting',
+      annual: Number(mmLI.annual) || null,
+      detail: `${mmLI.nozzles} nozzles · ${mmLI.visitsPerYear} service visits/yr · ${mmLI.refill?.label || ''} refills $${mmLI.refill?.perFill ?? ''} per fill, billed per visit`,
+      discountable: false,
+      discountEligible: false,
+      waveGuardDiscountEligible: false,
+      countsTowardWaveGuardTier: false,
+    });
+  }
   // Rodent Bait Stations — full WaveGuard recurring line since 2026-08-29
   // (owner directive): tier-counted, tier-discounted, billed per quarterly
   // application. The recurring.rodentBaitMo scalar still rides below for
@@ -1255,6 +1272,18 @@ function mapV1ToLegacyShape(v1Result) {
         : `${tbLI.stations} stations · ${tbLI.perimeter} linear ft perimeter`,
       ...(isSetup ? { kind: 'setup', tierDiscountable: false } : {}),
       ...measurementMetadataFields(tbLI),
+    });
+  }
+
+  // Mosquito misting installation → one-time item (price is in year 1 via oneTimeTotal).
+  if (mmLI && (mmLI.installation?.price || 0) > 0) {
+    v1OtItems.push({
+      service: 'mosquito_misting_installation',
+      name: `${mmLI.tierLabel || 'Mosquito Misting System'} Installation`,
+      price: mmLI.installation.price,
+      detail: `${mmLI.nozzles} nozzles · ${mmLI.risers} risers · ${mmLI.refill?.label || ''} refills $${mmLI.refill?.perFill ?? ''} per fill, billed per visit`,
+      discountable: false,
+      tierDiscountable: false,
     });
   }
 

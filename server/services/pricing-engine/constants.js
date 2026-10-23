@@ -2501,6 +2501,46 @@ const BED_BUG = {
 };
 
 // ============================================================
+// MOSQUITO MISTING SYSTEM (automatic install + monthly plan + per-fill refills)
+// DRAFT values from ~/mosquito-misting-scope-20260924.md section 4.3. Dealer
+// cost is unknown, so every price and cost here is a placeholder and the line
+// ships DARK behind GATE_MOSQUITO_MISTING. Not a WaveGuard tier service and
+// not percent-discountable (see WAVEGUARD.excludedFromPercentDiscount).
+// ============================================================
+const MOSQUITO_MISTING = {
+  tiers: {
+    // hardwareCost is a PLACEHOLDER cost basis (the retail list; dealer cost unknown).
+    essential: { label: 'Essential system (drum)', price: 3795, includedNozzles: 35, hardwareCost: 1800 },
+    smart: { label: 'Smart system (tankless + app)', price: 4595, includedNozzles: 35, hardwareCost: 2600 },
+  },
+  defaultTier: 'smart',
+  extraNozzlePrice: 75,
+  extraNozzleCost: 22,
+  includedRisers: 10,
+  extraRiserPrice: 45,
+  extraRiserCost: 14,
+  install: { techs: 2, hours: 10 }, // labor cost = techs x hours x GLOBAL.LABOR_RATE
+  minNozzles: 10,
+  maxNozzles: 80, // above this the system is a manual quote
+  plan: {
+    monthly: 59,
+    visitsPerYear: 12,
+    laborMinutesPerVisit: 25,
+    partsReservePerMonth: 10,
+  },
+  // Refill per fill, billed per visit (not part of the plan annual).
+  // productCost basis: 1 gal concentrate $179.49 at SiteOne member price fills a 55 gal drum about 4 times.
+  refills: {
+    standard: { label: 'Standard (permethrin, Sector or Mosquito Mist Ultra)', price: 129, productCost: 45 },
+    natural: { label: 'Natural (botanical)', price: 219, productCost: 95 },
+    premium: { label: 'Premium (pyrethrins)', price: 319, productCost: 140 },
+  },
+  defaultSolution: 'standard',
+  defaultRefillsPerYear: 4,
+  serviceCallNoPlan: 149,
+};
+
+// ============================================================
 // WAVEGUARD BUNDLE
 // ============================================================
 const WAVEGUARD = {
@@ -2532,6 +2572,8 @@ const WAVEGUARD = {
     // recovery on stations Waves still owns — discounting it would give away
     // the stations, not a margin. No tier count, no bundle % discount.
     termite_station_rental: true,
+    // Mosquito misting system line (draft, dark): hardware install + fixed monthly plan; no tier count, no bundle % discount.
+    mosquito_misting: true,
     // priceGermanRoachInitial bakes urgency × rc in a single Math.round to
     // match v2's applyOT exactly (pricing-engine-v2.js:183, 482). Excluding
     // it here stops the orchestrator discount loop from applying the 15% rc
@@ -2637,7 +2679,7 @@ module.exports = {
   LAWN_CADENCE_DISCOUNT, LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO,
   GRASS_TYPE_ALIASES, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
-  COMMERCIAL_MOSQUITO, COMMERCIAL_TERMITE_BAIT, COMMERCIAL_RODENT_BAIT, PALM, MOSQUITO, TERMITE, RODENT,
+  COMMERCIAL_MOSQUITO, COMMERCIAL_TERMITE_BAIT, COMMERCIAL_RODENT_BAIT, PALM, MOSQUITO, MOSQUITO_MISTING, TERMITE, RODENT,
   ONE_TIME, AREA_ADDONS, areaAddOnConfig, isAreaAddOnCatalogKey, areaAddOnPricingDefaults, SPECIALTY, BED_BUG, WAVEGUARD, ACH_DISCOUNT,
   DEPOSIT, CARD_HOLD, INSPECTION_CREDIT,
   PROCESSING_ADJUSTMENT,
