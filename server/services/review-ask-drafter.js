@@ -1425,11 +1425,40 @@ class HeldTouch extends Error {
   }
 }
 
+// GATE_REVIEW_ASK_FIXED_DAY0 (owner 2026-10-22, "fixed line for all"): the
+// same-day review text is one fixed line, no model. The writer recited report
+// findings ("a moderate level of cockroach activity" is the activity gauge's
+// label) and booking talk, which read as lame.
+// Names are GSM-folded ("María" -> "Maria") so one letter never turns the
+// text into UCS-2 and past the two-segment limit (#6423 r3).
+// A name longer than FIXED_DAY0_NAME_MAX is dropped for the plain greeting,
+// never cut mid-word: the name fields are uncapped, and a long one pushed the
+// line past two segments, where the sender swaps in the old template (#6423 r4).
+const FIXED_DAY0_NAME_MAX = 20;
+function fixedDay0Line({ firstName, techName, stepKind }) {
+  const { gsmSafeName } = require("./messaging/gsm-normalize");
+  const fit = (n) => (n.length <= FIXED_DAY0_NAME_MAX ? n : "");
+  const name = firstName ? fit(gsmSafeName(firstName, "")) : "";
+  const tech = fit(gsmSafeName(personFirstName(techName), ""));
+  const hello = name ? `Hi ${name}, ` : "Hi, ";
+  const who = tech ? `it's ${tech} from Waves.` : "it's Waves Pest Control.";
+  const thanks = stepKind === "day_after" ? "Thanks for having us out." : "Thanks for having us out today.";
+  return `${hello}${who} ${thanks} A Google review would really help: {review_url}`;
+}
+
+// A body this fixed line wrote (any name / tech / day wording), so retry
+// reuse can tell it from a writer draft after the gate is rolled back.
+// Names may hold periods or commas ("A.J."), so each is matched up to its
+// fixed neighbor, never by excluding punctuation (#6423 r3).
+const FIXED_DAY0_RE = /^Hi(?: .+?)?, it's (?:.+? from Waves|Waves Pest Control)\. Thanks for having us out(?: today)?\. A Google review would really help: \{review_url\}$/;
+function isFixedDay0Line(body) {
+  return FIXED_DAY0_RE.test(String(body || ""));
+}
+
 // What the writer made of one touch: { outcome: 'drafted', body, sentences }
 // | { outcome: 'held', body, repeat, sentences } | { outcome: 'fallback', reason }.
 async function techVoiceOutcome({ customer, recipientFirstName, recipientName, serviceType, techName, sequenceStep, serviceDate, serviceRecordId, sequenceId, channel }) {
   try {
-    const ctx = await gatherTechVoiceContext({ customer, serviceRecordId, sequenceId, sequenceStep, serviceDate });
     // The company check reads the FULL name ("Sunset Vacation Rentals"), never
     // the first word a caller already cut it to.
     // Both the recipient's name and the account's full name are checked: a
@@ -1439,6 +1468,11 @@ async function techVoiceOutcome({ customer, recipientFirstName, recipientName, s
     const isCompany = names.some((n) => COMPANY_NAME_RE.test(String(n || "")));
     const firstName = isCompany ? "" : personFirstName(recipientFirstName || customer.first_name);
     const serviceDaysAgo = serviceDate ? etCalendarDaysBetween(serviceDate, new Date()) : null;
+    const smsStepKind = resolveStepKind(sequenceStep, serviceDaysAgo);
+    if (channel !== "email" && smsStepKind !== "followup" && isEnabled("reviewAskFixedDay0")) {
+      return { outcome: "drafted", body: fixedDay0Line({ firstName, techName, stepKind: smsStepKind }), sentences: [], reason: "fixed_day0" };
+    }
+    const ctx = await gatherTechVoiceContext({ customer, serviceRecordId, sequenceId, sequenceStep, serviceDate });
     const stepKind = channel === "email" ? "email" : resolveStepKind(sequenceStep, serviceDaysAgo);
     const termite = isTermiteService(serviceType);
     const facts = buildTechVoiceFacts({ firstName, serviceType, techName, serviceDaysAgo, termite, ctx });
@@ -1504,6 +1538,7 @@ const ReviewAskDrafter = {
    * repeats an earlier touch of this cadence: send nothing for this step.
    */
   draftTechVoice,
+  isFixedDay0Line,
   HeldTouch,
 
   /**
@@ -1624,7 +1659,7 @@ const ReviewAskDrafter = {
   verifyEmailIntro,
   verifyTechVoiceDraft,
   etCalendarDayOf,
-  __private: { redraftNote, buildTechVoiceSystemPrompt, normalizeSmsPunctuation, etCalendarDaysBetween, etCalendarDayOf, resolveStepKind, personFirstName, unknownProperNoun, ungroundedTerm, detailSupportedByQuote, factCheckTechVoice, repeatCheckTechVoice, isAskOnlySentence, isGreetingOnlySentence, legCapture, quoteSharesContent, sentenceClauses, callerTurns, notTechVoice, timingUnsupported, listsTreatedAreas, techVoiceSentences, buildTechVoiceFacts, customerOwnWords },
+  __private: { redraftNote, buildTechVoiceSystemPrompt, normalizeSmsPunctuation, etCalendarDaysBetween, etCalendarDayOf, resolveStepKind, personFirstName, unknownProperNoun, ungroundedTerm, detailSupportedByQuote, factCheckTechVoice, repeatCheckTechVoice, isAskOnlySentence, isGreetingOnlySentence, legCapture, quoteSharesContent, sentenceClauses, callerTurns, notTechVoice, timingUnsupported, listsTreatedAreas, techVoiceSentences, buildTechVoiceFacts, customerOwnWords, fixedDay0Line },
 };
 
 module.exports = ReviewAskDrafter;

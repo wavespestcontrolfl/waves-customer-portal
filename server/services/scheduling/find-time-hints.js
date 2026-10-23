@@ -13,6 +13,7 @@
 
 const { bookingRainFit, rainTierOf, rankingNeedsForecast, boundedHourlyRain } = require('./rain-fit');
 const logger = require('../logger');
+const { gateEnvValue } = require('../../config/feature-gates');
 const { loadOccupancy, conflictsForTarget } = require('../rain-out');
 const { checkArrivalPlacement } = require('./arrival-route');
 const { DAY_START_HOUR, DAY_END_HOUR, GAP_LEGS } = require('./find-time');
@@ -672,7 +673,11 @@ async function buildHintSummary(plan, everyStart, {
     logger.warn(`[find-time] summary search slow: ${elapsedMs}ms for ${plan.from}..${plan.to}`);
   }
   if (!best) return { summary: { days, elapsed_ms: elapsedMs }, picked };
-  return { summary: { days: withChipValues(days, best.rows, best.hourly), best: best.rows, elapsed_ms: elapsedMs }, picked: best.picked };
+  // GATE_BEST_TIMES_CHIP_STOP_NAMES: the strip names each chip's previous
+  // stop. The names already ride on every chip (from_name / from_home_base);
+  // the flag only tells the client to show them.
+  const stopNames = gateEnvValue('GATE_BEST_TIMES_CHIP_STOP_NAMES') ? { chip_stop_names: true } : {};
+  return { summary: { days: withChipValues(days, best.rows, best.hourly), best: best.rows, ...stopNames, elapsed_ms: elapsedMs }, picked: best.picked };
 }
 
 module.exports = {

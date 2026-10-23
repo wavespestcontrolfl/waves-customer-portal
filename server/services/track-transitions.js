@@ -33,6 +33,7 @@ const {
 const { publicPortalUrl } = require('../utils/portal-url');
 const { etDateString } = require('../utils/datetime-et');
 const { isEnabled } = require('../config/feature-gates');
+const { sendTrackTextOnce } = require('./one-text-per-day');
 
 const EN_ROUTE_GEOCODE_TIMEOUT_MS = 1200;
 const CUSTOMER_EVENT = 'customer:job_update';
@@ -499,7 +500,9 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
         smsOutcome = 'lease_expired';
         throw Object.assign(new Error('lease expired before send'), { leaseExpired: true });
       }
-      const result = await TwilioService.sendTechEnRoute(
+      // GATE_ONE_TEXT_PER_CUSTOMER_DAY: sent once per customer, address, technician and day,
+      // decided under a lock from a recorded delivery (one-text-per-day.js). Gate off: just the send.
+      const result = await sendTrackTextOnce(svc, 'en_route', () => TwilioService.sendTechEnRoute(
         svc.customer_id,
         techName,
         etaMinutes,
@@ -509,7 +512,7 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
           notificationEventKey: enRouteNotificationKey(svc, attemptAt),
           scheduledServiceId: svc.id,
         },
-      );
+      ), { fence: attemptFence, technicianId: svc.technician_id });
 
       // undefined = deterministic opt-out (tech_en_route off / SMS disabled,
       // twilio.js sendTechEnRoute) — handled, not a retry (codex r9).
@@ -962,6 +965,15 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt 
   // Gate off: the claim stands as "handled" so no later signal re-sends.
   if (!isEnabled('techArrivedSms')) return 'gate_off';
 
+  // The COMPLETE attempt fence: everything the claim above matched, plus this invocation's own claim
+  // stamp. A re-armed visit that arrived again (a new arrival time, a new claim) no longer matches.
+  const arrivalAttemptFence = function arrivalAttempt() {
+    this.where({ id: serviceId, track_state: 'on_property', scheduled_date: svc.scheduled_date ?? null, arrival_sms_sent_at: claimStamp });
+    if (expectTechnicianId) this.where('technician_id', expectTechnicianId);
+    if (claimArrivedAt == null) this.whereNull('arrived_at');
+    else this.whereRaw(`date_trunc('milliseconds', arrived_at) = date_trunc('milliseconds', ?::timestamptz)`, [new Date(claimArrivedAt)]);
+  };
+
   let outcome = 'retry';
   try {
     const techId = actingTechId || svc.technician_id;
@@ -969,7 +981,9 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt 
       ? await db('technicians').where({ id: techId }).first('name')
       : null;
     const techName = tech?.name || 'Your Waves technician';
-    const result = await TwilioService.sendTechArrived(svc.customer_id, techName, { scheduledServiceId: serviceId, scheduledDate: svc.scheduled_date ?? null, scheduledWindowStart: svc.window_start ?? null, arrivedAt: claimArrivedAt ?? null });
+    // GATE_ONE_TEXT_PER_CUSTOMER_DAY: once per customer, address, technician and day, from a recorded
+    // delivery, not from the claim above (which is stamped before any send). Gate off: just the send.
+    const result = await sendTrackTextOnce(svc, 'arrived', (extra) => TwilioService.sendTechArrived(svc.customer_id, techName, { scheduledServiceId: serviceId, scheduledDate: svc.scheduled_date ?? null, scheduledWindowStart: svc.window_start ?? null, arrivedAt: claimArrivedAt ?? null, ...extra }), { fence: arrivalAttemptFence, technicianId: techId });
     outcome = classifyArrivalSend(result);
   } catch (err) {
     logger.error(`[track-transitions] arrival SMS failed: ${err.message}`);
@@ -1516,12 +1530,19 @@ async function markComplete(serviceId, opts = {}) {
 // also runs on the already-cancelled/0-row retry paths — a prior attempt
 // may have cancelled the tracker but died before reaching the cascade,
 // which would otherwise strand the follow-up active forever.
-async function cascadeCallFollowUpCancel(serviceId, actorId = null) {
+async function cascadeCallFollowUpCancel(serviceId, actorId = null, approval = null) {
   try {
     const { cancelCallFollowUpsForParentCancel } = require('./call-booking-catalog');
-    await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: serviceId, actorId });
+    await cancelCallFollowUpsForParentCancel({
+      conn: db, parentServiceId: serviceId, actorId,
+      // Opt-in (the Intelligence Bar cancel card): only the approved linked visits, each re-checked under its lock.
+      ...(approval ? { approvedChildren: approval.linkedChildren, report: approval.linkedChildReport } : {}),
+    });
   } catch (err) {
     logger.error(`[track-transitions] call follow-up cancel cascade failed for ${serviceId}: ${err.message}`);
+    if (approval && approval.linkedChildReport && Array.isArray(approval.linkedChildReport.skipped)) {
+      for (const child of approval.linkedChildren) approval.linkedChildReport.skipped.push({ id: child.id, reason: 'cascade_failed' });
+    }
   }
 }
 
@@ -1529,7 +1550,8 @@ async function cascadeCallFollowUpCancel(serviceId, actorId = null) {
  * Admin-only cancel. Extends token expiry to NOW()+24h so the customer
  * can still see the cancelled state for a day.
  */
-async function cancel(serviceId, { reason, actorId } = {}) {
+async function cancel(serviceId, { reason, actorId, linkedChildren = null, linkedChildReport = null } = {}) {
+  const approval = Array.isArray(linkedChildren) ? { linkedChildren, linkedChildReport } : null;
   let svc = await loadService(serviceId);
   if (!svc) return { ok: false, reason: 'not_found' };
   if (svc.status === 'completed') return { ok: false, reason: 'cannot_cancel_complete' };
@@ -1539,7 +1561,7 @@ async function cancel(serviceId, { reason, actorId } = {}) {
     // Continue below when an older writer advanced only track_state; the
     // canonical status transition will repair it and append history.
     if (svc.status === 'cancelled') {
-      await cascadeCallFollowUpCancel(serviceId, actorId);
+      await cascadeCallFollowUpCancel(serviceId, actorId, approval);
       emitCustomerTrackRefresh(svc, 'cancelled', svc.cancelled_at || new Date());
       return { ok: true, state: 'cancelled', cancelledAt: svc.cancelled_at };
     }
@@ -1609,7 +1631,7 @@ async function cancel(serviceId, { reason, actorId } = {}) {
   }
 
   if (svc.track_state === 'cancelled') {
-    await cascadeCallFollowUpCancel(serviceId, actorId);
+    await cascadeCallFollowUpCancel(serviceId, actorId, approval);
     emitCustomerTrackRefresh(svc, 'cancelled', svc.cancelled_at || new Date());
     return { ok: true, state: 'cancelled', cancelledAt: svc.cancelled_at };
   }
@@ -1624,7 +1646,7 @@ async function cancel(serviceId, { reason, actorId } = {}) {
       logger.error(`[track-transitions] tech_status cancel clear failed: ${err.message}`);
     }
   }
-  await cascadeCallFollowUpCancel(serviceId, actorId);
+  await cascadeCallFollowUpCancel(serviceId, actorId, approval);
   emitCustomerTrackRefresh(svc, 'cancelled', now);
   return {
     ok: true,

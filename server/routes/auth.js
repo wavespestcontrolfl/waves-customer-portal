@@ -10,6 +10,7 @@ const TwilioService = require('../services/twilio');
 const {
   authenticate,
   createRefreshSession,
+  createContactRefreshSession,
   generateToken,
   reissueRefreshSessionForProperty,
   revokeCustomerRefreshSessions,
@@ -104,28 +105,131 @@ async function activeCustomerByPhone(phone) {
     })
     .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${last10}`])
     .orderBy('active', 'desc')
-    .orderBy('is_primary_profile', 'desc')
+    // NULLS LAST: a legacy row with no flag must never outrank a primary
+    // profile (Postgres sorts NULL first on DESC; codex #6363 r3 P2).
+    .orderBy('is_primary_profile', 'desc', 'last')
     .orderBy('created_at', 'asc')
     .limit(10);
   return rows.find((row) => sessionCustomerAdmitted(row)) || null;
 }
 
-function authCustomerPayload(customer) {
+// Contact login (GATE_CONTACT_LOGIN): the ACTIVE customer row that lists this
+// number as an on-location contact. Strict active=true — no cancelled
+// allowance. When several rows list the same person, the primary profile
+// wins, then the oldest, deterministically (owner 2026-10-20: no chooser).
+// Consulted only after the holder lookup found nothing: a number that is
+// someone's own account always signs in as that account.
+async function contactCustomerByPhone(phone) {
+  return (await contactCustomersByPhone(phone))[0] || null;
+}
+
+// Every ACTIVE row that lists this number as an on-location contact, in
+// landing order: [{ customer, contact }]. The first is where the login lands;
+// the rest are the contact's switch targets (/auth/properties +
+// /auth/select-property, the same switcher a multi-property holder uses).
+async function contactCustomersByPhone(phone) {
+  const { findServiceContactSlotByPhoneKey, contactSlotMayLogIn } = require('../services/customer-contact');
+  const last10 = normalizePhoneDigits(phone);
+  if (last10.length < 10) return [];
+  const rows = await db('customers')
+    .whereNull('deleted_at')
+    .where({ active: true })
+    .where(function anySlot() {
+      for (const col of ['service_contact_phone', 'service_contact2_phone', 'service_contact3_phone']) {
+        this.orWhereRaw(`regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') LIKE ?`, [`%${last10}`]);
+      }
+    })
+    // NULLS LAST: a legacy row with no flag must never outrank a primary
+    // profile (Postgres sorts NULL first on DESC; codex #6363 r3 P2). No
+    // LIMIT: the eligibility test below runs in JS, and a number reused
+    // across many rows (a property manager's) must not have its one
+    // eligible row cut off by a cap on the ineligible ones (codex r7 P2).
+    .orderBy('is_primary_profile', 'desc', 'last')
+    .orderBy('created_at', 'asc');
+  const matches = [];
+  for (const row of rows) {
+    // Only a number the holder attested to may log in (customer-contact.js
+    // contactSlotMayLogIn): an inferred, unconsented slot phone is unknown.
+    if (!contactSlotMayLogIn(row, last10)) continue;
+    const contact = findServiceContactSlotByPhoneKey(row, last10);
+    if (contact) matches.push({ customer: row, contact });
+  }
+  return matches;
+}
+
+// The property list of a contact session: every row the number is a contact
+// on (one entry each, the signed-in row included). The client's switcher
+// shows it only when there is more than one.
+async function contactPropertiesForSession(req) {
+  const matches = await contactCustomersByPhone(req.contactSession.phone);
+  const mine = matches.some((m) => String(m.customer.id) === String(req.customer.id));
+  const rows = mine ? matches.map((m) => m.customer) : [req.customer, ...matches.map((m) => m.customer)];
+  // Each entry names the house that row's contact reads are scoped to — one
+  // customer_properties read for every row, not one per row (codex #6364 r2
+  // P2: a number on many rows would hold a pool connection per row at once).
+  const scopes = await require('../services/contact-session-projection').contactRecordScopes(rows.map((row) => row.id));
+  return rows.map((row) => contactPropertyPayload(row, scopes.get(String(row.id))));
+}
+
+// Who a phone number signs in as: { customer, contact } — contact null for
+// the account holder. Used by BOTH send-code and verify-code so a contact's
+// code is actually sent and then accepted.
+async function resolveLoginIdentity(phone) {
+  const holder = await holderLoginIdentity(phone);
+  if (holder) return holder;
+  if (!require('../config/feature-gates').contactLoginLive()) return null;
+  return contactCustomerByPhone(phone);
+}
+
+// The account holder's row alone — the App Store reviewer bypass's only
+// identity (codex #6363 r29 security P2): with the fixed REVIEW_LOGIN_CODE
+// standing in for the OTP, a contact identity must never be minted through
+// it, or a reviewer (or anyone holding the code) with the demo row absent
+// would reach a real customer's address, visits and reports as that
+// customer's contact. null when no active holder row carries the number.
+async function holderLoginIdentity(phone) {
+  const holder = await activeCustomerByPhone(phone);
+  return holder ? { customer: holder, contact: null } : null;
+}
+
+// What /auth/me and verify-code tell the client about WHO is signed in.
+function actorPayload(contact) {
+  if (!contact) return { kind: 'holder' };
+  return { kind: 'contact', slot: contact.slot, name: contact.name || '', phone: contact.phone, email: contact.email || '' };
+}
+
+// The signed-in identity. For a CONTACT session (GATE_CONTACT_LOGIN) that is
+// the contact's own name, phone and email — never the account holder's
+// (codex round 1 on #6363: the login response carried the holder's identity
+// to the contact's device), and no plan tier either: the contact UI mounts
+// no plan surface, and the tier is the holder's (codex r6 P2).
+function authCustomerPayload(customer, contact = null) {
+  const [contactFirst, ...contactRest] = String(contact?.name || '').trim().split(/\s+/).filter(Boolean);
   return {
     id: customer.id,
     accountId: customer.account_id,
     profileLabel: customer.profile_label,
     isPrimaryProfile: customer.is_primary_profile,
-    firstName: customer.first_name,
-    lastName: customer.last_name,
-    email: customer.email,
-    phone: customer.phone,
-    tier: customer.waveguard_tier,
+    firstName: contact ? (contactFirst || '') : customer.first_name,
+    lastName: contact ? contactRest.join(' ') : customer.last_name,
+    email: contact ? (contact.email || '') : customer.email,
+    phone: contact ? contact.phone : customer.phone,
+    ...(contact ? {} : { tier: customer.waveguard_tier }),
   };
 }
 
 function accountIdForCustomer(customer) {
   return customer?.account_id || customer?.id || null;
+}
+
+// A contact session's property entry: the row's label and the address of the
+// house the contact's reads are scoped to (contact-session-projection
+// contactAddress) — no holder name, no rate, no plan tier (the switcher
+// labels by profileLabel / address).
+function contactPropertyPayload(customer, scope) {
+  const { contactAddress } = require('../services/contact-session-projection');
+  const { firstName, lastName, monthlyRate, tier, ...entry } = propertyPayload(customer);
+  return { ...entry, address: contactAddress(customer, scope) };
 }
 
 function propertyPayload(customer) {
@@ -320,14 +424,19 @@ router.post('/send-code', sendCodeLimiter, async (req, res, next) => {
 
     const { phone } = await schema.validateAsync(req.body);
 
-    // App Store reviewer demo phone has no real SMS — skip Twilio entirely.
-    if (isReviewPhone(phone)) {
+    // App Store reviewer demo phone has no real SMS — skip Twilio entirely,
+    // but only while the number resolves to the demo HOLDER row (codex #6363
+    // r30 P2): verify-code accepts the fixed code for that row alone, so a
+    // review number that is only a contact's (the demo row absent or
+    // inactive) takes the normal Verify flow and gets the real OTP it needs.
+    if (isReviewPhone(phone) && await holderLoginIdentity(phone)) {
       logger.info('[auth] review-login send-code (SMS skipped)');
       return res.json(UNIFORM_SEND_RESPONSE);
     }
 
     // Check customer exists — but DO NOT leak existence in the response.
-    const customer = await activeCustomerByPhone(phone);
+    const identity = await resolveLoginIdentity(phone);
+    const customer = identity?.customer || null;
 
     if (customer) {
       try {
@@ -378,24 +487,39 @@ router.post('/verify-code', verifyCodeLimiter, async (req, res, next) => {
     }
     if (reviewBypass) logger.info('[auth] review-login verify-code bypass used');
 
-    const customer = await activeCustomerByPhone(phone);
+    // The bypass maps to the demo HOLDER row only — never a contact identity
+    // (holderLoginIdentity); every real OTP resolves as usual.
+    const identity = reviewBypass ? await holderLoginIdentity(phone) : await resolveLoginIdentity(phone);
+    const customer = identity?.customer || null;
 
     if (!customer) {
       return res.status(401).json(invalidResponse);
     }
 
+    const contact = identity.contact || null;
+    const contactKey = contact ? contact.phoneKey : null;
     const accountId = accountIdForCustomer(customer);
-    const refreshSession = await createRefreshSession(customer.id, accountId);
-    const token = generateToken(customer.id, accountId, refreshSession.familyId);
+    // A contact's family is minted under the row's lock with the slot
+    // re-checked (createContactRefreshSession): a removal that raced the
+    // OTP leaves no family to revive (codex #6363 r10 P2).
+    const refreshSession = contact
+      ? await createContactRefreshSession(customer.id, accountId, contactKey)
+      : await createRefreshSession(customer.id, accountId);
+    if (!refreshSession) return res.status(401).json(invalidResponse);
+    const token = generateToken(customer.id, accountId, refreshSession.familyId, { contactKey });
     const refreshToken = refreshSession.refreshToken;
 
-    logger.info(`[auth] customer login success: id=${customer.id}`);
+    logger.info(`[auth] customer login success: id=${customer.id}${contact ? ` (contact slot ${contact.slot})` : ''}`);
 
     res.json({
       token,
       refreshToken,
-      customer: authCustomerPayload(customer),
-      properties: await accountPropertiesForCustomer(customer),
+      customer: authCustomerPayload(customer, contact),
+      actor: actorPayload(contact),
+      // A contact session lists the rows the number is a contact on.
+      properties: contact
+        ? await contactPropertiesForSession({ contactSession: contact, customer })
+        : await accountPropertiesForCustomer(customer),
     });
   } catch (err) {
     next(err);
@@ -424,7 +548,10 @@ router.post('/refresh', refreshLimiter, async (req, res, next) => {
       return res.status(401).json({ error: 'Invalid refresh token', code });
     }
 
-    const newToken = generateToken(rotated.customer.id, rotated.accountId, rotated.familyId, { propertyId: rotated.propertyId || null });
+    const newToken = generateToken(rotated.customer.id, rotated.accountId, rotated.familyId, {
+      propertyId: rotated.propertyId || null,
+      contactKey: rotated.contactKey || null,
+    });
     res.json({ token: newToken, refreshToken: rotated.refreshToken });
   } catch (err) {
     // Every invalid-token case returns an explicit 401 above — anything
@@ -470,6 +597,27 @@ router.post('/logout', refreshLimiter, async (req, res, next) => {
 router.get('/me', authenticate, async (req, res, next) => {
   try {
   const customer = req.customer;
+  // Contact session (GATE_CONTACT_LOGIN): the contact's own identity on the
+  // property they are a contact for. No referral code, credits, prepay,
+  // rate, or the holder's own phone/email — nothing the Billing / Refer
+  // tabs would render — and no holder notification prefs (the contact's
+  // choices live on /notifications/contact-preferences).
+  if (req.contactSession) {
+    const contact = req.contactSession;
+    const { contactRecordScope, contactAddress, CONTACT_PROPERTY_SCOPE_ECHO } = require('../services/contact-session-projection');
+    return res.json({
+      ...authCustomerPayload(customer, contact),
+      // The house the contact's reads are scoped to, not the row's address
+      // (a retired saved primary — codex #6363 r20 P2).
+      address: contactAddress(customer, await contactRecordScope(req)),
+      memberSince: customer.member_since,
+      cancelled: false,
+      cancelledAt: null,
+      actor: actorPayload(contact),
+      notificationPrefs: null,
+      propertyScope: CONTACT_PROPERTY_SCOPE_ECHO,
+    });
+  }
   const [prefs, annualPrepay, creditLedger] = await Promise.all([
     db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null),
     annualPrepayForCustomer(customer.id),
@@ -527,6 +675,7 @@ router.get('/me', authenticate, async (req, res, next) => {
     cancelledAt: req.customerInactive === true && customer.churned_at
       ? etCalendarDayOf(customer.churned_at)
       : null,
+    actor: actorPayload(null),
     notificationPrefs: prefs ? {
       serviceReminder24h: prefs.service_reminder_24h,
       techEnRoute: prefs.tech_en_route,
@@ -578,6 +727,11 @@ router.put('/credit-preference', authenticate, async (req, res, next) => {
 // simply gets the profile list it already understands.
 router.get('/properties', authenticate, async (req, res, next) => {
   try {
+    // A contact session lists the rows its number is a contact on — never
+    // the account's sibling profiles or saved-property list.
+    if (req.contactSession) {
+      return res.json({ properties: await contactPropertiesForSession(req) });
+    }
     // A C4 cancelled read-only session is UNSCOPED end to end (its reads are
     // customer-wide, /auth/me reports the scope disabled) — it keeps the
     // profile list so no saved-property label dresses customer-wide visits.
@@ -611,6 +765,36 @@ router.post('/select-property', authenticate, async (req, res, next) => {
       .first();
 
     if (!target) return res.status(404).json({ error: 'Property not found' });
+
+    // Contact session (GATE_CONTACT_LOGIN): the switch target must list this
+    // number as a contact; the new family is minted for the target's own
+    // account with the same contact claim (a saved-property selection is
+    // never a contact's).
+    if (req.contactSession) {
+      const { findServiceContactSlotByPhoneKey } = require('../services/customer-contact');
+      if (!findServiceContactSlotByPhoneKey(target, req.contactSession.phoneKey)) {
+        return res.status(403).json({ error: 'Property is not available for this account' });
+      }
+      const switched = await rotateRefreshSession(currentRefreshToken, {
+        targetCustomerId: target.id,
+        expectedCustomerId: req.customerId,
+        expectedFamilyId: req.authSessionId,
+        contactSwitch: true,
+        revokeReason: 'property_switch',
+      });
+      if (switched.ok === false) {
+        return res.status(401).json({ error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
+      }
+      const contactToken = generateToken(target.id, switched.accountId, switched.familyId, { contactKey: req.contactSession.phoneKey });
+      const targetContact = findServiceContactSlotByPhoneKey(target, req.contactSession.phoneKey);
+      return res.json({
+        token: contactToken,
+        refreshToken: switched.refreshToken,
+        customer: authCustomerPayload(target, targetContact),
+        actor: actorPayload(targetContact),
+        properties: await contactPropertiesForSession({ contactSession: req.contactSession, customer: target }),
+      });
+    }
 
     const currentAccountId = req.accountId || accountIdForCustomer(req.customer);
     const targetAccountId = accountIdForCustomer(target);

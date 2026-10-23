@@ -62,6 +62,11 @@ const WINDOW_SPAN = 15;
 // apply. Default is ZERO — every OTHER unwrapped site fails.
 const ALLOWLIST = [
   {
+    file: 'services/one-text-per-day.js',
+    snippet: "const log = await db('sms_log').where({ twilio_sid: sid }).first('message_type');",
+    reason: 'isTrackerText: keyed by twilio_sid (the text Twilio reports undelivered) and reads only its message type; a send reservation has no sid until it is promoted to a real send, so no placeholder can match.',
+  },
+  {
     file: 'services/access-code-capture.js',
     snippet: "const live = await trx('sms_log').where({ id: message.id }).forUpdate().first('customer_id', 'direction', 'message_type', 'to_phone', 'from_phone', 'message_body');",
     reason: 'sourceStillCurrent: re-locks the ONE inbound text this sweep pass already read, by id, to compare its owner and words; inbound texts are never send reservations.',
@@ -175,16 +180,6 @@ const ALLOWLIST = [
     file: 'scripts/backfill-comms-pr2.js',
     snippet: 'const batch = await db(\'sms_log\')',
     reason: 'same one-off historical backfill script as the total-count query above (the paged batch read).',
-  },
-  {
-    file: 'services/completion-comms-guard.js',
-    snippet: 'const inboundRows = await knex(\'sms_log\')',
-    reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
-  },
-  {
-    file: 'services/completion-comms-guard.js',
-    snippet: 'const outboundRows = await knex(\'sms_log\')',
-    reason: 'filtered to CONFIRMED_OUTBOUND_STATUS, which excludes \'sending\' — an unresolved reservation cannot match this status filter.',
   },
   {
     file: 'services/customer-intelligence/signal-detector.js',
@@ -452,6 +447,11 @@ const ALLOWLIST = [
     reason: 'metadata key (entry_point IN (…deferred entry points…)) is exclusive to this deferred-dispatch SMS claim — a review-ask/reply reservation never sets it, regardless of any status/direction overlap.',
   },
   {
+    file: 'services/invoice.js',
+    snippet: 'if (await conn("sms_log")',
+    reason: 'unvoidObligationReason (the bar\'s unvoid refusal): a yes/no existence check keyed on metadata invoice_id that DELIBERATELY counts scheduled / sending / finalize-pending rows, a reservation included, so the card refuses while anything is queued or in flight for the invoice; it presents no row to a person or model, so there is nothing to mislead.',
+  },
+  {
     file: 'services/lawn-intelligence.js',
     snippet: 'const existing = await trx(\'sms_log\').where({ customer_id: customer.id })',
     reason: 'metadata key (entry_point = \'lawn_assessment_notification_deferred\') is exclusive to this deferred lawn-notification claim — a review-ask/reply reservation never sets it, regardless of any status/direction overlap.',
@@ -550,6 +550,11 @@ const ALLOWLIST = [
     file: 'services/sms-operational-actions.js',
     snippet: 'const message = await conn(\'sms_log as s\').where({ \'s.id\': smsLogId, \'s.direction\': \'inbound\' })',
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
+  },
+  {
+    file: 'services/sms-operational-actions.js',
+    snippet: 'const queued = await trx(\'sms_log\').where({ id: smsLogId }).first(...SOURCE_COLUMNS);',
+    reason: 'refreshSharedSmsAlert: single-row lookup by id of the source text the alert is about — not a list read.',
   },
   {
     file: 'services/sms-shadow-backfill.js',

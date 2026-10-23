@@ -3439,8 +3439,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // Visit-group guard (visit-group-scope.md §5 Gates, rev 5c): a row
     // attached to a non-dissolved visit must complete through the visit
     // sheet — legacy per-row completion alongside the packet worker would
-    // double records and side effects. Inert until GATE_VISIT_GROUPS
-    // stamping ships (no row carries a visit_id today). The check reads
+    // double records and side effects. Only visits created before grouping
+    // was retired (2026-10-22) carry a visit_id. The check reads
     // the CURRENT visit status, so an admin "Separate these services"
     // (dissolve) restores per-row completion immediately.
     // This endpoint can mint reports, invoices, inventory deductions, and
@@ -4539,8 +4539,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
       || `legacy_${Date.now()}_${crypto.randomBytes(8).toString('hex')}`;
     const idempotencyKey = String(rawIdempotencyKey).trim().slice(0, 120);
     // The claim commits while THIS request holds the row's stop advisory
-    // lock (codex #3590 r12 P1): stamping (visit-groups.createOrJoinVisit)
-    // checks for live claims and stamps under the same lock, so the claim
+    // lock (codex #3590 r12 P1): stamping (the grouping writer, retired
+    // 2026-10-22) checked for live claims under the same lock, so the claim
     // can no longer land between stamping's READ COMMITTED snapshot and its
     // commit. The claim runs ON the lock transaction's connection (r13: a
     // nested root-pool checkout under a burst could exhaust the pool) —
@@ -4587,7 +4587,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             } };
           }
           // Invoice-issued closeout: the grouped-stop refusal ran unlocked
-          // in invoice-issued-closeout.js; a createOrJoinVisit that grouped
+          // in invoice-issued-closeout.js; a grouping write that grouped
           // this row since would otherwise let a packet-less open group
           // complete this member alone and dissolve (pre-push r8 P1). The
           // whole stop closes together — re-checked HERE under the stop
@@ -4675,7 +4675,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       const visitRecheck = async (trx) => {
         // Lock ORDER matches stamping (codex #3590 r2 P1): stop advisory
         // lock FIRST, then the row lock — with the peek → lock → verify →
-        // retry pattern from createOrJoinVisit (r3 P1: the svc snapshot is
+        // retry pattern (r3 P1: the svc snapshot is
         // thousands of lines stale; a concurrent reschedule can have moved
         // the row under another stop key).
         const { stopBaseKey } = require('../services/visit-groups');
@@ -8190,15 +8190,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
             const applicationMethod = inferServiceReportApplicationMethod(product, p, reportServiceLine);
             const areaValue = p.areaValue != null && p.areaValue !== '' ? Number(p.areaValue) : null;
             const areaUnit = p.areaUnit || null;
+            // Linear feet are optional on a perimeter spray (owner 2026-10-22, "make feet optional"): a spray
+            // with no trace and no typed feet is recorded with no length (area_value null). A length that is
+            // sent must still be a positive number of linear feet.
             if (
               !isIncompleteVisit
-              &&
-              requiresLinearFtForReportApplication(applicationMethod)
+              && requiresLinearFtForReportApplication(applicationMethod)
+              && areaValue != null
               && (!Number.isFinite(areaValue) || areaValue <= 0 || areaUnit !== 'linear_ft')
             ) {
-              const err = new Error(`Linear feet are required for ${product.name}`);
+              const err = new Error(`Linear feet must be a positive number for ${product.name}`);
               err.isOperational = true; err.statusCode = 400;
-              err.code = 'linear_ft_required';
+              err.code = 'linear_ft_invalid';
               throw err;
             }
             if (
@@ -9981,24 +9984,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
         await runPostCompletionSeriesMaintenance({ db, svc, source: 'dispatch_complete_incomplete' });
       } catch (seriesErr) {
         logger.error(`[dispatch] recurring series maintenance failed (non-blocking): ${seriesErr.message}`);
-      }
-      // Completion comms guard on the incomplete path too (same reason the
-      // series hook is duplicated here): this early return ALSO leaves the
-      // scheduled_services row 'completed', and an incomplete outcome is if
-      // anything the likelier home for the exception — "nobody home" on the
-      // day the customer texted to say they'd be away is exactly the case
-      // this guard exists to surface. The runner is gated, fail-soft and
-      // deduped per visit, so the two call sites can never double-bell.
-      // Backfills excluded (route-wide quiet-closeout posture): a backdated
-      // cleanup of a months-old row must not ring a live bell correlating it
-      // with an unrelated text from the last week.
-      if (!isBackfillCompletion) {
-        try {
-          const { runCompletionCommsGuard } = require('../services/completion-comms-guard');
-          await runCompletionCommsGuard({ serviceId: svc.id, customerId: svc.customer_id });
-        } catch (commsGuardErr) {
-          logger.warn(`[dispatch] completion comms guard failed (non-blocking): ${commsGuardErr.message}`);
-        }
       }
       const responsePayload = {
         success: true,
@@ -15437,6 +15422,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
         await ReviewService.enrollPostService({
           customerId: svc.customer_id,
           serviceRecordId: record.id,
+          // GATE_REVIEW_ASK_AFTER_REPORT: what became of the report text (re-read
+          // from the record the delivery leg stamped); null = no anchor.
+          reportTextAnchor: await ReviewService.reportTextAnchorForRecord(record.id),
           // Direct visit identity for plan resolution (codex #3235 r5 P1).
           scheduledServiceId: svc.id || null,
           serviceType: svc.service_type || null,
@@ -15784,29 +15772,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
     } catch (seriesErr) {
       logger.error(`[dispatch] recurring series maintenance failed (non-blocking): ${seriesErr.message}`);
-    }
-
-    // Completion comms guard (GATE_COMPLETION_COMMS_GUARD, dark by default):
-    // a visit completed while the customer has a pending reschedule/away
-    // flag or an unanswered inbound text surfaces an admin exception (bell
-    // notification + dispatch_alerts card). POST-COMMIT by placement — the
-    // completion record and the invoice decision are durable above — and
-    // fail-soft by construction: the runner checks the gate, owns its own
-    // advisory-lock dedupe (completion-comms:<serviceId>) and swallows its
-    // errors, and this try/catch backstops it (dues-covered exemplar
-    // pattern). A guard throw must NEVER fail the completion; it never
-    // blocks or alters invoicing and sends no customer communications.
-    // Backfills excluded, matching the route-wide quiet-closeout posture
-    // (referral credit, payer AP send, timer sync): a backdated cleanup must
-    // not ring a live bell correlating a months-old visit with an unrelated
-    // inbound text or customer-wide flag from the last week.
-    if (!isBackfillCompletion) {
-      try {
-        const { runCompletionCommsGuard } = require('../services/completion-comms-guard');
-        await runCompletionCommsGuard({ serviceId: svc.id, customerId: svc.customer_id });
-      } catch (commsGuardErr) {
-        logger.warn(`[dispatch] completion comms guard failed (non-blocking): ${commsGuardErr.message}`);
-      }
     }
 
     const responsePayload = {

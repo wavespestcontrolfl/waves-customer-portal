@@ -1030,10 +1030,14 @@ async function sendCampaign(sendId, opts = {}) {
   // same substitution mechanics as the quiz/feedback tokens. The direct
   // event URLs are the fallback for recipients without a token.
   const {
-    evclickIdsInBody, buildEvclickSubstitutions, eventUrlMapForSend,
+    evclickIdsInBody, buildEvclickSubstitutions, eventUrlMapForSend, snapshotEventUrlsForSend,
   } = require('./newsletter-event-clicks');
   const evclickEnabled = evclickIdsInBody(quizBody).length > 0;
-  const evclickUrlById = evclickEnabled ? await eventUrlMapForSend(send) : new Map();
+  // GATE_NEWSLETTER_CLICK_BOUND: the lineup's URLs are snapshotted on the
+  // send so the click redirect follows what this email carried.
+  const evclickUrlById = evclickEnabled
+    ? await snapshotEventUrlsForSend(send, await eventUrlMapForSend(send))
+    : new Map();
 
   // Split by variant so each batch uses the right subject line. When A/B is
   // off every delivery gets variant=null and we just ship one group.

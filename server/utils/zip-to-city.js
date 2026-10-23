@@ -99,16 +99,18 @@ const ZIP_TO_CITY = {
   '33947': 'Placida',
   '33948': 'Port Charlotte',
   '33949': 'Port Charlotte',
-  '33950': 'Punta Gorda',
-  '33951': 'Punta Gorda',
+  // 33950, 33951, 33955 are Punta Gorda-only ZIPs: Punta Gorda is NOT
+  // served (owner ruling 2026-10-22), so they are deliberately absent and
+  // resolve to '' like any ZIP outside the service area. 33980 and 33983 are
+  // shared with Port Charlotte-area addresses and stay; the city name decides
+  // there (services/excluded-localities.js).
   '33952': 'Port Charlotte',
   '33953': 'Port Charlotte',
   '33954': 'Port Charlotte',
-  '33955': 'Punta Gorda', // Burnt Store
   '33980': 'Port Charlotte', // Charlotte Harbor
   '33981': 'Port Charlotte', // Gulf Cove / El Jobean
-  '33982': 'Punta Gorda',
-  '33983': 'Punta Gorda', // Deep Creek
+  '33982': 'Babcock Ranch', // shared with Punta Gorda; mapped to the served town so a ZIP-only lead is not refused as Punta Gorda
+  '33983': 'Port Charlotte', // Deep Creek (USPS says Punta Gorda; mapped to the served city so a ZIP-only lead is not refused as Punta Gorda)
 
   // ── South Hillsborough (Parrish office's northern reach) ──
   // Mirrors the Parrish ZIP routing in routes/satisfaction.js.
@@ -140,10 +142,10 @@ const ZIP_CITY_ALIASES = {
   '34212': ['lakewood ranch'],
   '34243': ['sarasota'], // USPS labels this Sarasota; map says University Park
   '34242': ['siesta key'],
-  '33955': ['burnt store'],
-  '33980': ['charlotte harbor'],
+  '33980': ['charlotte harbor', 'punta gorda'],
   '33981': ['gulf cove', 'el jobean'],
-  '33983': ['deep creek'],
+  '33982': ['punta gorda'], // shared ZIP: a real postal city; service is decided by services/excluded-localities.js
+  '33983': ['deep creek', 'punta gorda'],
   // Typed-city communities that share a ZIP with the USPS primary (mapped in
   // config/locations.js CITY_TO_LOCATION as of 2026-09-30).
   '33947': ['rotonda west'],

@@ -69,3 +69,13 @@ test('without it, behaviour is unchanged (every device, no shouldContinue)', asy
   expect(out).toMatchObject({ sent: 2 });
   expect(mockFcmSend.mock.calls[0][2]).toEqual({ shouldContinue: undefined });
 });
+
+test('onDelivered is told as each device accepts, never for a failed or skipped one, and its error never stops the fan-out', async () => {
+  primeSubs([IOS('a'), IOS('b'), IOS('c')]);
+  mockApnsSend.mockResolvedValueOnce({ ok: false, reason: 'BadDeviceToken' });
+  const seen = [];
+  const onDelivered = jest.fn((sub) => { seen.push(sub.id); if (sub.id === 'b') throw new Error('caller bug'); });
+  const out = await Push.sendToAdminUser('tech-1', { title: 'x', body: '' }, { onDelivered });
+  expect(seen).toEqual(['b', 'c']);
+  expect(out).toMatchObject({ sent: 2 });
+});

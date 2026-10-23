@@ -16,7 +16,7 @@ const mocks = vi.hoisted(() => ({ navigationBusy: vi.fn() }));
 vi.mock('socket.io-client', () => ({ io: () => ({ on: vi.fn(), off: vi.fn(), disconnect: vi.fn() }) }));
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false, useFeatureFlagReady: () => ({ enabled: false, ready: true }) }));
 vi.mock('../../components/tech/TechIntelligenceBar', () => ({ default: () => <div>Field assistant</div> }));
-vi.mock('../../components/tech/GeofenceArrivalPrompt', () => ({ default: () => null }));
+vi.mock('../../components/tech/TechNoticeFeed', () => ({ default: () => null }));
 vi.mock('../../components/tech/CreateProjectModal', () => ({
   default: ({ defaultScheduledServiceId }) => <div>Project editor for {defaultScheduledServiceId}</div>,
   wdoFeeSeedFromVisit: () => null,

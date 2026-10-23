@@ -1051,8 +1051,8 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
     // instead of a 500 (codex r10).
     let stopMovedRetries = 0;
     const confirmOnce = async () => db.transaction(async (trx) => {
-      // Visit writers (createOrJoinVisit, split, unit move) take the STOP
-      // lock before any member row lock; this confirm follows the same
+      // Visit writers (split, unit move) take the STOP lock before any
+      // member row lock; this confirm follows the same
       // stop→row order so the two can never form a lock cycle (codex #3609
       // r7). Taken for grouped rows only — an ungrouped confirm never
       // touches visit state.
@@ -1123,19 +1123,6 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
         }
         throw err;
       }
-    }
-    if (updated > 0) {
-      // pending → confirmed is a grouping moment (the job-status.js
-      // pendingConfirmed seam): this route bypasses transitionJobStatus for
-      // its slot-guarded CAS + atomic history row, so it runs the seam
-      // itself. Post-commit, fire-and-forget, best-effort — a grouping
-      // failure can never fail the customer's confirm. The helper
-      // self-refuses already-grouped rows, so a grouped confirm is a no-op.
-      // NOT run on the updated === 0 idempotent path: the winning writer
-      // already ran its own seam.
-      void require('../services/visit-groups').maybeGroupRow(svc.id, { createdBy: 'dispatch' }).catch((e) => {
-        logger.warn(`[appointment-public] visit-group confirm seam failed for ${svc.id}: ${e.message}`);
-      });
     }
     if (updated === 0) {
       // Losing the guarded update is not automatically an error: two taps

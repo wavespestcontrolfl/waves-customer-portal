@@ -47,13 +47,13 @@
       "tmBait": null
     },
     "oneTime": {
-      "total": 99,
+      "total": 0,
       "tmInstall": 0,
       "items": [],
       "specItems": []
     },
     "totals": {
-      "year1": 1042.2,
+      "year1": 943.2,
       "year2": 943.2
     }
   },
@@ -125,13 +125,13 @@
       "tmBait": null
     },
     "oneTime": {
-      "total": 99,
+      "total": 0,
       "tmInstall": 0,
       "items": [],
       "specItems": []
     },
     "totals": {
-      "year1": 2378.2,
+      "year1": 2279.2,
       "year2": 2279.2
     }
   },
@@ -529,13 +529,13 @@
       "tmBait": null
     },
     "oneTime": {
-      "total": 99,
+      "total": 0,
       "tmInstall": 0,
       "items": [],
       "specItems": []
     },
     "totals": {
-      "year1": 1551.11,
+      "year1": 1452.11,
       "year2": 1452.11
     }
   },
@@ -587,13 +587,13 @@
       "tmBait": null
     },
     "oneTime": {
-      "total": 99,
+      "total": 0,
       "tmInstall": 0,
       "items": [],
       "specItems": []
     },
     "totals": {
-      "year1": 1009.8,
+      "year1": 910.8,
       "year2": 910.8
     }
   }

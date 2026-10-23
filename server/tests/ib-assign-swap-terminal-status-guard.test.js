@@ -22,7 +22,6 @@ jest.mock('../services/technician-eligibility', () => ({
 jest.mock('../services/visit-groups', () => ({
   handleChildStopChanged: jest.fn().mockResolvedValue(undefined),
   handleChildTerminal: jest.fn().mockResolvedValue(undefined),
-  maybeGroupRow: jest.fn().mockResolvedValue(undefined),
   dateOnly: (v) => String(v).slice(0, 10),
 }));
 const mockNotify = jest.fn().mockReturnValue(null);

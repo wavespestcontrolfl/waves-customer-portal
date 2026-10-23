@@ -69,6 +69,8 @@ async function main() {
       else if (api === '/admin/email/stats') body = { total: 42, unread: 7, today: 12, vendor: 4, starred: 3 };
       else if (api === '/admin/email/daily-digest') body = { total_received: 12, leads_created: 2, spam_quarantined: 1, invoices_processed: 2, domains_blocked_today: 0 };
       else if (api === '/admin/email/blocked') body = { blocked: state.blocked };
+      // Schedule send (GATE_EMAIL_SEND_LATER) answers off here, as in production today.
+      else if (api === '/admin/email/scheduled') body = { enabled: false, emails: [] };
       else if (api === '/admin/email/send') { record.payload = request.postDataJSON(); state.sends.push(record.payload); await state.sendHold; body = { success: true, messageId: 'fixture-sent' }; }
       else if (api.startsWith('/admin/email/thread/')) { await state.threadHold; body = { thread: state.history || state.emails.filter((mail) => api.endsWith(mail.gmail_thread_id)) }; }
       else if (api.startsWith('/admin/email/message/')) {

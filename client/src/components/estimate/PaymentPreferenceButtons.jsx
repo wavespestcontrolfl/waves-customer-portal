@@ -135,6 +135,11 @@ export default function PaymentPreferenceButtons({
   serviceMode,
   setupFee,
   invoiceMode = false,
+  // With the monthly average on (GATE_ESTIMATE_MONTHLY_AVERAGE), the page
+  // states what each month bills, so this row names the FIRST application's
+  // bill rather than the price of every application (EST-2026-1185). Unset the
+  // average and the row reads "Per application" again.
+  firstApplicationLabel = false,
   // Payment-only accept (guarantee-only renewal): invoice mode with NO visit
   // to book — the one-time copy must not say "Book".
   invoiceOnly = false,
@@ -226,7 +231,7 @@ export default function PaymentPreferenceButtons({
   // accept intentionally creates no invoice to open.
   const invoiceRows = heldRecurring ? [] : [
     ...upFrontRows,
-    ...(firstVisit ? [{ label: 'Per application', amount: firstVisit }] : []),
+    ...(firstVisit ? [{ label: firstApplicationLabel ? 'First application' : 'Per application', amount: firstVisit }] : []),
   ];
   const invoiceTotal = Math.round(invoiceRows.reduce((sum, row) => sum + Number(row.amount || 0), 0) * 100) / 100;
   // Setup-only shape on the card rail: no invoice is minted at accept — the

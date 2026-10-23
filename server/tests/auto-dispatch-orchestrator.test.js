@@ -52,6 +52,8 @@ jest.mock('../services/auto-dispatch/audit', () => ({
   maintainMissingGeoNotices: jest.fn(async () => {}),
 }));
 
+jest.mock('../services/auto-dispatch/check-down-notice', () => ({ noteRun: jest.fn(async () => ({ action: 'none' })) }));
+
 jest.mock('../services/tech-visit-notifications', () => ({
   pushAutoDispatchSummary: jest.fn(async () => ({ pushed: 1 })),
   beginAutoDispatchRun: jest.fn(async () => ({ pushed: 0 })),
@@ -145,6 +147,17 @@ test('apply mode moves the visit and logs a changed decision', async () => {
   } finally {
     process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
   }
+});
+
+test('every run ends by telling the move-check-down notice what the check did (owner audit 2026-10-22, finding 1)', async () => {
+  const checkDown = require('../services/auto-dispatch/check-down-notice');
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(checkDown.noteRun).toHaveBeenCalledTimes(1);
+  const [state, opts] = checkDown.noteRun.mock.calls[0];
+  expect(opts).toEqual({ enabled: expect.any(Boolean), nowDate: expect.any(Date) });
+  // The run's own tally (null when the check is off), before the run is recorded.
+  expect(state === null || typeof state.broke === 'number').toBe(true);
+  expect(checkDown.noteRun.mock.invocationCallOrder[0]).toBeLessThan(audit.completeRun.mock.invocationCallOrder[0]);
 });
 
 test('a run that moved visits sends the one summary push after the run is recorded; a dry run never does', async () => {
@@ -576,6 +589,13 @@ test('no candidate slots → no_change NO_VALID_SLOT', async () => {
   const res = await runAutoDispatch({ mode: 'dry_run' });
   expect(res.recommended).toBe(0);
   expect(lastDecision('no_change').reason_code).toBe('NO_VALID_SLOT');
+});
+
+test('a NO_VALID_SLOT row keeps what the search saw (the window and each day\'s open starts), so a full week reads as full (finding 6)', async () => {
+  const SEARCH = { date_from: '2026-08-01', date_to: '2026-08-08', open_starts_by_date: { '2026-08-01': 0, '2026-08-03': 0 } };
+  candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [], drops: null, feasible: 0, search: SEARCH });
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(lastDecision('no_change')).toMatchObject({ reason_code: 'NO_VALID_SLOT', constraints: expect.objectContaining({ search: SEARCH }) });
 });
 
 test('apply mode spends a tight cap on the BEST-improvement move, not the first by date', async () => {
@@ -1666,6 +1686,59 @@ describe('move limit (owner 2026-10-09: at most two automatic moves per visit)',
       expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
     });
   });
+
+  // D1 (owner 2026-10-22): the far double-booking list is a snapshot, so the
+  // run tells the notice whether its end-of-run conflict read saw everything.
+  describe('the far list is told whether the conflict scan was complete (D1)', () => {
+    const needsPerson = require('../services/auto-dispatch/needs-person-notice');
+    let spy;
+    let listSpy;
+    beforeEach(() => {
+      spy = jest.spyOn(needsPerson, 'raiseNotices');
+      listSpy = jest.spyOn(needsPerson, 'farListedVisitIds').mockResolvedValue([]);
+    });
+    afterEach(() => { spy.mockRestore(); listSpy.mockRestore(); });
+    const scanCompleteOf = () => spy.mock.calls[spy.mock.calls.length - 1][1].scanComplete;
+
+    test('every conflict read succeeded: complete', async () => {
+      candidateSlots.findValidCandidateSlots.mockResolvedValue(inConflict);
+      standing();
+      await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+      expect(scanCompleteOf()).toBe(true);
+    });
+
+    test('a conflict re-read failed: incomplete', async () => {
+      candidateSlots.findValidCandidateSlots.mockResolvedValue(inConflict);
+      rowReads();
+      candidateSlots._internals.readCurrentConflict.mockRejectedValue(new Error('read down'));
+      await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+      expect(scanCompleteOf()).toBe(false);
+    });
+
+    test('conflict reads off: incomplete', async () => {
+      await runAutoDispatch({ mode: 'dry_run' });
+      expect(scanCompleteOf()).toBe(false);
+    });
+
+    test('a listed far visit the scan no longer loads (locked) is re-read and, still in conflict, collected', async () => {
+      servicesResult = [];
+      unscannedRows = [svc({ id: 'listed-1' })];
+      listSpy.mockResolvedValue(['listed-1']);
+      standing();
+      await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+      const bucket = spy.mock.calls[spy.mock.calls.length - 1][0];
+      expect([...bucket.values()].map((item) => item.id)).toEqual(['listed-1']);
+      expect(scanCompleteOf()).toBe(true);
+    });
+
+    test('an unreadable far list makes the scan incomplete', async () => {
+      listSpy.mockResolvedValue(null);
+      candidateSlots.findValidCandidateSlots.mockResolvedValue(inConflict);
+      standing();
+      await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+      expect(scanCompleteOf()).toBe(false);
+    });
+  });
 });
 
 describe('move proofreader in pass 2 (GATE_AUTO_DISPATCH_PROOFREADER, owner 2026-10-12)', () => {
@@ -1739,6 +1812,27 @@ describe('move proofreader in pass 2 (GATE_AUTO_DISPATCH_PROOFREADER, owner 2026
       expect(res).toMatchObject({ changed: 0, failed: 0, status: 'completed' });
       expect(lastDecision('no_change').reason_code).toBe('APPROVED_SLOT_TAKEN');
       expect(lastDecision('failed')).toBeUndefined();
+    });
+  });
+
+  test('a technician start address changed after scoring: nothing moves, no_change START_POINT_CHANGED, not a failed run', async () => {
+    await applyMode(async () => {
+      checkMove.mockResolvedValue(ALLOW);
+      apply.applyAutoDispatchMove.mockRejectedValue(Object.assign(new Error('start address changed'), { code: 'START_POINT_CHANGED', statusCode: 409 }));
+      const res = await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true });
+      expect(res).toMatchObject({ changed: 0, failed: 0, status: 'completed' });
+      expect(lastDecision('no_change').reason_code).toBe('START_POINT_CHANGED');
+      expect(lastDecision('failed')).toBeUndefined();
+    });
+  });
+
+  test('the same refusal with no proofreader check: no_change, and the apply is handed the start-point lookup', async () => {
+    await applyMode(async () => {
+      apply.applyAutoDispatchMove.mockRejectedValue(Object.assign(new Error('start address changed'), { code: 'START_POINT_CHANGED', statusCode: 409 }));
+      const res = await runAutoDispatch({ mode: 'apply' });
+      expect(res).toMatchObject({ changed: 0, failed: 0 });
+      expect(lastDecision('no_change').reason_code).toBe('START_POINT_CHANGED');
+      expect(typeof apply.applyAutoDispatchMove.mock.calls[0][3].startPointFor).toBe('function');
     });
   });
 

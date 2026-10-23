@@ -21,7 +21,9 @@ router.get('/status', async (req, res, next) => {
     const { gateEnvValue } = require('../config/feature-gates');
     res.set('Cache-Control', 'no-store');
     if (!gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) return res.json({ available: false });
-    const status = await require('../services/push-notifications').customerStatus(req.customerId);
+    // A contact session (contact login) asks about ITS devices only.
+    const status = await require('../services/push-notifications')
+      .customerStatus(req.customerId, undefined, { contactKey: req.contactSession?.phoneKey || null });
     return res.json({ available: true, ...status });
   } catch (err) { next(err); }
 });
@@ -47,6 +49,11 @@ router.post('/native-subscribe', async (req, res, next) => {
       subscription_data: JSON.stringify({ token }),
       device_info: safeDeviceInfo.slice(0, 100),
       active: true,
+      // Whose device this is (contact login, GATE_CONTACT_LOGIN): the
+      // contact's phone key, or NULL for the account holder. Re-stamped on
+      // every registration (and in the merge below) so a device changing
+      // hands between a contact and the holder never keeps the old stamp.
+      contact_phone_key: req.contactSession ? req.contactSession.phoneKey : null,
     };
 
     // Upsert by device_token so re-launch re-registration (or a device changing
@@ -63,6 +70,7 @@ router.post('/native-subscribe', async (req, res, next) => {
         platform: row.platform,
         subscription_data: row.subscription_data,
         device_info: row.device_info,
+        contact_phone_key: row.contact_phone_key,
         active: true,
         // Heartbeat: registration re-fires on every app launch, so bumping
         // updated_at here makes it a "customer recently opened the app"
@@ -80,6 +88,27 @@ router.post('/native-subscribe', async (req, res, next) => {
 router.post('/native-unsubscribe', async (req, res, next) => {
   try {
     const { token } = req.body || {};
+    // A contact session (GATE_CONTACT_LOGIN) may release only the device it
+    // presents: the token-less "deactivate all of my devices" form belongs to
+    // the account holder, whose devices those are (codex #6363 r5 P2).
+    if (req.contactSession && (!token || typeof token !== 'string')) {
+      return res.status(400).json({ error: 'device token required', code: 'DEVICE_TOKEN_REQUIRED' });
+    }
+    // A CONTACT session's token-bearing release is keyed on the device token
+    // alone, whatever row holds it (codex #6363 r7 P1): the device is
+    // presenting its own token after a holder's logout failed to release it,
+    // and that registration sits under the HOLDER's account — which may be
+    // another account than the one this contact signed into. The token is
+    // the device's own credential, so deactivating exactly it stops pushes
+    // to this device only; a contact session never subscribes, so there is
+    // nothing of its own to protect here.
+    if (req.contactSession) {
+      const deactivated = await db('push_subscriptions')
+        .where({ device_token: token })
+        .whereIn('platform', ['ios', 'android'])
+        .update({ active: false });
+      return res.json({ ok: true, deactivated: Number(deactivated) || 0 });
+    }
     // Token-bearing releases are ACCOUNT-scoped: this device is presenting
     // its own token, and after a failed property re-point the row can sit
     // under a SIBLING profile of the same account — a release scoped to the
@@ -100,6 +129,9 @@ router.post('/native-unsubscribe', async (req, res, next) => {
     }
     const q = db('push_subscriptions').whereIn('customer_id', customerScope).whereIn('platform', ['ios', 'android']);
     if (token) q.andWhere({ device_token: token });
+    // A holder's release never touches a contact's device rows (a contact's
+    // own release is the exact-token form above).
+    q.whereNull('contact_phone_key');
     // deactivated count matters to the client: zero rows means this token
     // is not held by any profile the session may release — keep local
     // memory so a later re-point can supersede the row.

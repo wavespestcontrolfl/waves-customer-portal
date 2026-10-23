@@ -44,6 +44,8 @@ const {
   ensureRateReviewTermsEvidenceBeforeRender,
   proposalRowTermsScope,
   resolveProposalBillingContext,
+  resolveFrozenBillingContext,
+  sentBundleBillsPerApplication,
   _resetPerApplicationColumnsProbeForTests,
 } = require('../services/estimate-proposal-billing');
 
@@ -374,6 +376,35 @@ describe('resolveProposalBillingContext', () => {
     stubTables({ customer: { pipeline_stage: 'active_customer', monthly_rate: 0, billing_mode: 'per_application' } });
     expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
       .toEqual({ billsPerApplication: true, livePricing: { bundle: LIVE_BUNDLE, defaultCandidate: REBUILT, snapshotHit: false } });
+  });
+});
+
+// A quote that can no longer be accepted is described in the lane it was SENT in (#6432 r6): buildPricingBundle
+// keeps the billedPerApplication flags for a per-application customer and strips every one for a monthly-billed
+// customer, so the frozen send bundle records the lane, and a later change to the customer's billing never
+// rewrites the old quote.
+describe('the frozen view uses the lane the offer was sent in', () => {
+  const sent = (pricingBundle) => ({ id: 'e1', customer_id: 'c1', estimate_data: { sendSnapshot: { pricingBundle } } });
+  const flagged = { frequencies: [{ key: 'quarterly', perTreatment: 94, visitsPerYear: 4, billedPerApplication: true }] };
+  const stripped = { frequencies: [{ key: 'quarterly', perTreatment: 94, visitsPerYear: 4 }] };
+
+  it.each([
+    ['a per-application send (flag on a top-level frequency)', sent(flagged), true],
+    ['a per-application send (flag on a section frequency)', sent({ services: [{ key: 'lawn_care', frequencies: [{ billedPerApplication: true }] }] }), true],
+    ['a monthly-billed send (every flag stripped)', sent(stripped), false],
+    ['no send bundle', { id: 'e1', estimate_data: {} }, false],
+    ['estimate_data stored as a string', { id: 'e1', estimate_data: JSON.stringify({ sendSnapshot: { pricingBundle: flagged } }) }, true],
+  ])('%s', (_name, estimate, expected) => {
+    expect(sentBundleBillsPerApplication(estimate)).toBe(expected);
+  });
+
+  it('ignores the customer\'s current lane, and a prepay sale keeps the legacy document', async () => {
+    // the customer is a monthly member TODAY; the offer was sent per application
+    stubTables({ customer: { pipeline_stage: 'active_customer', monthly_rate: 45, billing_mode: 'monthly_membership' }, prepayTerm: undefined });
+    expect(await resolveFrozenBillingContext(sent(flagged))).toEqual({ billsPerApplication: true, livePricing: null });
+    expect(await resolveFrozenBillingContext(sent(stripped))).toEqual({ billsPerApplication: false, livePricing: null });
+    stubTables({ customer: undefined, prepayTerm: { id: 't1' } });
+    expect(await resolveFrozenBillingContext(sent(flagged))).toEqual({ billsPerApplication: false, livePricing: null });
   });
 });
 

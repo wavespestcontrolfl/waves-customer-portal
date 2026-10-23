@@ -22,6 +22,7 @@ const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-fo
 const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { groupLinkStillViewable } = require('../services/proposal-bid');
+const { isAssessmentVisit, excludeAssessmentBookings } = require('../services/assessment-booking');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 const { UNISSUED_ESTIMATE, estimateNeverIssued, estimateHasBahiaLawn } = require('../services/estimate-bahia-review');
 const { storedEstimateContainer } = require('../services/estimate-result-container');
@@ -631,15 +632,67 @@ async function matchAcceptCustomerByPhone(estimate, database = db, { authoritati
     && await require('../services/recurring-card-on-file').resolveGroupedEstimateOwnerId(estimate, database, { throwOnError: true })) {
     contradicted = false;
   }
-  const verdict = {
+  const verdict = acceptVerdictFromCandidates(estimate, candidates, { typedPhone, contradicted });
+  if (cacheable) acceptPhoneVerdicts.set(estimate, verdict);
+  return verdict;
+}
+
+// The matcher's verdict once its candidates and the two flags are known (pure). Shared by
+// matchAcceptCustomerByPhone and the batch read below so the two can never pick differently.
+function acceptVerdictFromCandidates(estimate, candidates, { typedPhone, contradicted }) {
+  return {
     match: typedPhone && contradicted
       ? null
       : candidates.length === 1 && !contradicted ? candidates[0] : pickAcceptCustomerMatch(candidates, estimate),
     candidateCount: candidates.length,
     ...(contradicted ? { contradicted: true, rejectedCustomerId: candidates[0].id } : {}),
   };
-  if (cacheable) acceptPhoneVerdicts.set(estimate, verdict);
-  return verdict;
+}
+
+// READ-ONLY batch form of matchAcceptCustomerByPhone for LIST views (the admin Pipeline cards): the
+// candidates of every estimate come from one customers query per 500 phones instead of one per row, and
+// each row then gets the SAME verdict (same candidate rule, same typed-phone and contradiction rules,
+// same pickAcceptCustomerMatch) as the per-row matcher gives it.
+// Returns Map(estimate.id -> verdict) for rows it could judge. A row is left OUT (unresolved; callers
+// must treat its answer as unknown) when the per-row matcher would need a lookup this read does not
+// make: a phone-typed mark the row did not carry, or a contradicted lone candidate on a GROUPED
+// estimate (the matcher then asks the group-owner resolver). `database` must be the root handle.
+async function matchAcceptCustomersByPhoneBatch(estimates, database = db) {
+  const verdicts = new Map();
+  const rows = (Array.isArray(estimates) ? estimates : []).filter((e) => e && e.id);
+  const withPhone = rows.filter((e) => e.customer_phone);
+  for (const e of rows) if (!e.customer_phone) verdicts.set(e.id, { match: null, candidateCount: 0 });
+  const CHUNK = 500;
+  for (let i = 0; i < withPhone.length; i += CHUNK) {
+    const chunk = withPhone.slice(i, i + CHUNK);
+    const exact = [...new Set(chunk.map((e) => e.customer_phone))];
+    const digits = [...new Set(chunk.map((e) => phoneLast10(e.customer_phone)).filter(Boolean))];
+    const candidateRows = await database('customers')
+      .where((q) => {
+        q.whereIn('phone', exact);
+        // phoneLast10 yields digits only, so the alternation is safe to bind as one pattern.
+        if (digits.length) q.orWhereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') ~ ?", [`(${digits.join('|')})$`]);
+      })
+      .whereNull('deleted_at')
+      .select('id', 'phone', 'email', 'address_line1', 'address_line2', 'city', 'zip',
+        'pipeline_stage', 'monthly_rate', 'billing_mode', 'updated_at');
+    for (const e of chunk) {
+      const last10 = phoneLast10(e.customer_phone);
+      const candidates = candidateRows
+        .filter((c) => c.phone === e.customer_phone
+          || (last10 && String(c.phone || '').replace(/\D/g, '').endsWith(last10)))
+        .sort((a, b) => (Number(b.phone === e.customer_phone) - Number(a.phone === e.customer_phone))
+          || (new Date(b.updated_at || 0) - new Date(a.updated_at || 0)));
+      if (e.customer_phone_typed === undefined) continue;
+      const typedPhone = phoneTypedByCustomer({ customer_phone: e.customer_phone, customer_phone_typed: e.customer_phone_typed });
+      const contradicted = typedPhone
+        ? candidates.length > 0
+        : candidates.length === 1 && acceptLoneCandidateContradicted(candidates[0], e);
+      if (contradicted && !typedPhone && e.estimate_group_id) continue;
+      verdicts.set(e.id, acceptVerdictFromCandidates(e, candidates, { typedPhone, contradicted }));
+    }
+  }
+  return verdicts;
 }
 
 // The ids of these rows (null and id-less rows skipped).
@@ -1054,6 +1107,120 @@ function confirmationServiceLabel(oneTimeList, estimate, fallbackLabel) {
   return String(specific).replace(/\s+/g, ' ').trim() || String(fallbackLabel || '').trim();
 }
 
+// Did the accept leave the card protection it promised? A fresh capture or a
+// saved method must have enrolled Auto Pay; a failed or refused enrollment
+// raises an office exception (the visits would invoice unprotected), so the
+// notification must stay actionable. Exempt, because no enrollment is owed:
+// an already-active Auto Pay method (autopay_already_active), a paused or
+// opted-out customer (the hold is intentional), and a fresh capture whose
+// enrollment was deliberately skipped (autopay_opt_out_kept).
+function cardEnrollmentSettled({ policy, enrollmentResult } = {}) {
+  if (!policy) return false;
+  if (policy.exemptReason === 'autopay_already_active') return true;
+  if (policy.autopayPaused === true || policy.autopayDisabled === true) return true;
+  if (enrollmentResult?.enrolled === true) return true;
+  return enrollmentResult?.reason === 'autopay_opt_out_kept';
+}
+
+// "Billed after the first visit" is true only when (1) the customer the accept
+// landed on is billed per visit / per application and (2) there is evidence
+// something collectible will be billed. The accept's recurring-card lane is
+// broader than that: a pinned legacy rodent-only plan enters it while the
+// converter stamps billing_mode 'monthly_membership' (the monthly cron collects
+// dues), and a current monthly member adding a service keeps their mode. The
+// lane comes from the billing lane the accept left on the customer row
+// (billing-lane resolveBillingLane), read after the conversion commits. A
+// per_application customer with no fee on file, no priced first visit and no
+// attached first-application invoice bills NOTHING at completion (the converter
+// raises a manual-billing alert), so that keeps the generic copy, which still
+// asks a person to follow up. Fails closed: no customer, a read error or any
+// other lane keeps the generic copy.
+async function resolveCardLaneAfterVisit({
+  recurringCardLaneActive, treatAsOneTime, customerId, attachedInvoiceTotal = 0, firstVisitPriced = false,
+  enrollmentSettled = false,
+}, database = db) {
+  if (recurringCardLaneActive !== true || treatAsOneTime || !customerId || enrollmentSettled !== true) return false;
+  try {
+    const row = await database('customers').where({ id: customerId }).first('billing_mode', 'waveguard_tier', 'monthly_rate', 'per_application_fee');
+    if (!row) return false;
+    const { resolveBillingLane } = require('../services/billing-lane');
+    if (!['per_application', 'per_visit'].includes(resolveBillingLane(row).mode)) return false;
+    return Number(attachedInvoiceTotal) > 0
+      || firstVisitPriced === true
+      || (row.per_application_fee != null && Number(row.per_application_fee) > 0);
+  } catch (err) {
+    logger.warn(`[estimate-accept] billing lane read for accept copy failed (customer ${customerId}): ${err.message}`);
+    return false;
+  }
+}
+
+// The first visit this accept leaves on the books: the earliest committed or
+// adopted appointment, else the earliest visit the converter auto-scheduled.
+// The converter's firstScheduledServiceId is the first INSERTED unit, not the
+// earliest (a seasonal unit inserted first can roll to February), so its
+// earliestScheduledUnitDate wins when exposed; the id row is the fallback and
+// also reports whether that visit is priced. Returns
+// { firstVisitDate: 'YYYY-MM-DD'|null, firstVisitBooked, firstVisitPriced }.
+// A converter visit whose row cannot be read still counts as booked (no date).
+async function resolveAcceptedFirstVisit({ acceptedAppointments, conversionVisitId, conversionEarliestDate = null }, database = db) {
+  const isDay = (day) => /^\d{4}-\d{2}-\d{2}$/.test(day);
+  const appts = Array.isArray(acceptedAppointments) ? acceptedAppointments : [];
+  const apptPriced = appts.some((appt) => appt?.estimated_price != null && Number(appt.estimated_price) > 0);
+  const days = appts.map((appt) => dateOnly(appt?.scheduled_date)).filter(isDay).sort();
+  if (days[0]) return { firstVisitDate: days[0], firstVisitBooked: true, firstVisitPriced: apptPriced };
+  const earliest = dateOnly(conversionEarliestDate);
+  if (!conversionVisitId) {
+    return isDay(earliest)
+      ? { firstVisitDate: earliest, firstVisitBooked: true, firstVisitPriced: false }
+      : { firstVisitDate: null, firstVisitBooked: false, firstVisitPriced: false };
+  }
+  try {
+    const row = await database('scheduled_services')
+      .where({ id: conversionVisitId })
+      .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
+      .first('scheduled_date', 'estimated_price');
+    if (!row) {
+      return isDay(earliest)
+        ? { firstVisitDate: earliest, firstVisitBooked: true, firstVisitPriced: false }
+        : { firstVisitDate: null, firstVisitBooked: false, firstVisitPriced: false };
+    }
+    const rowDay = dateOnly(row.scheduled_date);
+    return {
+      firstVisitDate: isDay(earliest) ? earliest : (isDay(rowDay) ? rowDay : null),
+      firstVisitBooked: true,
+      firstVisitPriced: row.estimated_price != null && Number(row.estimated_price) > 0,
+    };
+  } catch (err) {
+    logger.warn(`[estimate-accept] converter visit read for accept copy failed (${conversionVisitId}): ${err.message}`);
+    return { firstVisitDate: isDay(earliest) ? earliest : null, firstVisitBooked: true, firstVisitPriced: false };
+  }
+}
+
+// The date of the visit collection waits for. With a first-application invoice
+// attached (billingVisitId = the visit it hangs on) that is THAT visit, which in
+// a mixed auto-scheduled plan can be a later seasonal unit rather than the
+// earliest; with no attached invoice (the per-application fee is billed at each
+// visit) it is the earliest visit (fallbackDate). An attached visit whose date
+// cannot be read is unknown (null), never the earlier unit's date.
+async function resolveBillingVisitDate({ billingVisitId = null, acceptedAppointments = [], fallbackDate = null }, database = db) {
+  const isDay = (day) => /^\d{4}-\d{2}-\d{2}$/.test(day);
+  if (!billingVisitId) return isDay(dateOnly(fallbackDate)) ? dateOnly(fallbackDate) : null;
+  const known = (Array.isArray(acceptedAppointments) ? acceptedAppointments : [])
+    .find((appt) => appt?.id != null && String(appt.id) === String(billingVisitId));
+  if (known && isDay(dateOnly(known.scheduled_date))) return dateOnly(known.scheduled_date);
+  try {
+    const row = await database('scheduled_services')
+      .where({ id: billingVisitId })
+      .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
+      .first('scheduled_date');
+    const day = dateOnly(row?.scheduled_date);
+    return isDay(day) ? day : null;
+  } catch (err) {
+    logger.warn(`[estimate-accept] billing visit read for accept copy failed (${billingVisitId}): ${err.message}`);
+    return null;
+  }
+}
+
 function dateOnly(value) {
   if (!value) return '';
   if (value instanceof Date) return value.toISOString().split('T')[0];
@@ -1460,6 +1627,12 @@ function estimateFamilyKeysForAdoption(estimate, estData, { serviceMode, service
 // (generic assessment shells, blank types) never match — adopting them would
 // re-create the cross-family clobber this guard exists to prevent.
 function appointmentMatchesEstimateFamily(row = {}, familyKeys = new Set()) {
+  // A Waves Assessment is a free consultation, never an estimate's first paid
+  // application. Its catalog key (lawn_inspection) classifies into the lawn
+  // family, so without this a lawn plan adopted it: no slot picker, the
+  // assessment restamped with the plan price, the series dated on its day
+  // (owner case 2026-10-21). Checked BEFORE the catalog-first classification.
+  if (isAssessmentVisit(row)) return false;
   // Catalog identity first (codex #3228 r5): a stale service_type label
   // ("Tree & Shrub Care" on a row whose service_id links palm_injection)
   // must classify by what the row actually IS — the same catalog-first rule
@@ -1685,7 +1858,11 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
     });
 
   if (requestedId) q.where('scheduled_services.id', requestedId);
-  let row = await q.first();
+  // Assessment visits never compete for the estimate-linked slot: filtered in
+  // the query so an earlier linked assessment cannot hide a later linked paid
+  // visit behind .first() (the customer-wide fallback only sees unclaimed
+  // rows, so it could never recover that one).
+  let row = await excludeAssessmentBookings(q).first();
 
   // The family/mode gate applies to ESTIMATE-LINKED rows too (codex #3228
   // r8 P1): a mixed estimate whose linked row is a recurring-family visit
@@ -1707,6 +1884,10 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   if (row && anyModeFamilyKeys.size > 0 && !appointmentMatchesEstimateFamily(row, familyKeys)) {
     row = null;
   }
+  // Assessment visits are never adoptable, including under the legacy
+  // no-derivable-family exemption above (the query already filters them;
+  // this guards any caller connection that does not).
+  if (row && isAssessmentVisit(row)) row = null;
 
   // Customer-wide fallback (gated): a customer who already has an upcoming
   // appointment for the SAME service family shouldn't be pushed through the
@@ -12995,8 +13176,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           const lockedFamilyKeys = estimateFamilyKeysForAdoption(estimate, estData, {
             serviceModes: adoptionServiceModesForContract(estimate, estData),
           });
-          const lockedFamilyOk = lockedAnyModeKeys.size === 0
-            || appointmentMatchesEstimateFamily(lockedAdoptRow || {}, lockedFamilyKeys);
+          const lockedFamilyOk = !isAssessmentVisit(lockedAdoptRow)
+            && (lockedAnyModeKeys.size === 0
+              || appointmentMatchesEstimateFamily(lockedAdoptRow || {}, lockedFamilyKeys));
           // Property scope under lock, mirroring the preflight's coverage
           // exactly (owner ruling 2026-08-15: the under-lock recheck must
           // never reject a row the preflight admitted). The preflight
@@ -15800,6 +15982,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         logger.warn(`[estimate-accept] accept SMS phone resolution failed for customer ${customerId}: ${phoneErr.message}`);
       }
     }
+    // The accept texts go to the ESTIMATE's phone, which may be an
+    // on-location contact's (the tenant who requested it under the
+    // landlord's row). That contact's own text choices (contact login,
+    // GATE_CONTACT_LOGIN) hold them as every other seam does (codex #6363
+    // r10 P2): the master switch for the booking link, the appointment-
+    // confirmation choice for the confirmation. The holder's own number
+    // never declines.
+    const contactDeclinesText = async (column) => !!(acceptSmsPhone && customerId
+      && await require('../services/contact-notification-prefs').contactPhoneDeclinesText(customerId, acceptSmsPhone, column));
     // Gated on the accept SHAPE, not on a phone (pre-push Codex P1): a
     // phoneless one-time accept with an email on the account (or its
     // primary) still owes the appointment confirmation — the SMS legs
@@ -15816,6 +16007,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // Booking link rides SMS only; the onboarding email above
             // carries the customer's next steps.
             logger.info(`[estimate-accept] no phone for estimate ${estimate.id}; skipping booking-link SMS`);
+          } else if (bookingUrl && await contactDeclinesText(null)) {
+            logger.info(`[estimate-accept] the contact at the estimate phone declines texts; skipping booking-link SMS for estimate ${estimate.id}`);
           } else if (bookingUrl) {
             const customerBody = await renderTemplate(
               'estimate_accepted_onetime',
@@ -15834,7 +16027,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                 purpose: 'estimate_followup',
                 customerId: customerId || undefined,
                 estimateId: estimate.id,
-                identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
+                // A slot contact's number is classified as such (codex
+                // #6363 r35 P2) so the sender re-reads their master switch
+                // at the provider handoff, as the confirmation leg does.
+                identityTrustLevel: customerId
+                  ? await require('../services/contact-notification-prefs').contactPhoneSmsTrust(customerId, acceptSmsPhone)
+                  : 'estimate_token_verified',
                 consentBasis: customerId ? undefined : {
                   status: 'transactional_allowed',
                   source: 'estimate_token_acceptance',
@@ -15928,6 +16126,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               smsAttempt: async () => {
                 if (!acceptSmsPhone) {
                   logger.info(`[estimate-accept] no phone for estimate ${estimate.id}; confirmation goes by email`);
+                  return false;
+                }
+                if (await contactDeclinesText('appointment_confirmation')) {
+                  logger.info(`[estimate-accept] the contact at the estimate phone declines confirmation texts for estimate ${estimate.id}`);
                   return false;
                 }
                 const customerBody = await renderCustomerConfirmationBody();
@@ -16328,6 +16530,32 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           acceptTierLabel = 'Commercial';
         }
       } catch { /* fall back to the estimate tier */ }
+      const acceptedFirstVisit = await resolveAcceptedFirstVisit({
+        acceptedAppointments: acceptedAppointmentsToRegister,
+        conversionVisitId: txResult.standardConversion?.firstScheduledServiceId || null,
+        conversionEarliestDate: txResult.standardConversion?.earliestScheduledUnitDate || null,
+      });
+      acceptedFirstVisit.billingVisitDate = await resolveBillingVisitDate({
+        billingVisitId: txResult.standardInvoiceAttached === true
+          ? (txResult.standardConversion?.firstScheduledServiceId || null)
+          : null,
+        acceptedAppointments: acceptedAppointmentsToRegister,
+        fallbackDate: acceptedFirstVisit.firstVisitDate,
+      });
+      acceptedFirstVisit.cardLaneAfterVisit = await resolveCardLaneAfterVisit({
+        recurringCardLaneActive,
+        treatAsOneTime,
+        customerId,
+        // A collectible amount, judged below next to the billing lane: the
+        // attached first-application invoice (not paid at accept) or a priced
+        // first visit. The customer's per-application fee is read there.
+        attachedInvoiceTotal: txResult.standardInvoiceAttached === true ? Number(txResult.invoiceAmount) || 0 : 0,
+        firstVisitPriced: acceptedFirstVisit.firstVisitPriced,
+        enrollmentSettled: cardEnrollmentSettled({
+          policy: recurringCardPolicy,
+          enrollmentResult: recurringCardPayerFallback ? null : recurringCardEnrollmentResult,
+        }),
+      });
       const notificationPayload = buildAcceptNotificationPayload({
         customerName: estimate.customer_name,
         waveguardTier: acceptTierLabel,
@@ -16369,6 +16597,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         afterVisitPaused: recurringCardPolicy.autopayPaused === true,
         afterVisitDisabled: recurringCardPolicy.autopayDisabled === true,
         setupFeeDeferred: txResult.setupFeeDeferredToFirstVisit === true,
+        // Card-on-file lane accept with nothing collected at accept (the
+        // payable-invoice, payer, credit, prepay and one-time branches all sit
+        // ahead of this flag in the builder): bills after the first visit.
+        cardLaneAfterVisit: acceptedFirstVisit.cardLaneAfterVisit,
+        firstVisitDate: acceptedFirstVisit.firstVisitDate,
+        firstVisitBooked: acceptedFirstVisit.firstVisitBooked,
+        billingVisitDate: acceptedFirstVisit.billingVisitDate,
       });
       // bell: true \u2014 accepted estimates must ring the admin bell even under
       // GATE_ADMIN_BELL_POLICY (category 'estimate' is otherwise silenced).
@@ -22271,6 +22506,15 @@ function buildAcceptNotificationPayload(args = {}) {
   return { ...copy, adminAction, adminWhy };
 }
 
+// 'YYYY-MM-DD' -> 'Oct 24' (calendar day, no timezone shift). '' when absent or malformed.
+function firstVisitDateLabel(value) {
+  const day = dateOnly(value);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return '';
+  const d = new Date(`${day}T12:00:00Z`);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+
 function buildAcceptNotificationCopy({
   customerName = '',
   waveguardTier = 'Bronze',
@@ -22329,6 +22573,21 @@ function buildAcceptNotificationCopy({
   // GATE_PAF_TERMITE: the agreement being issued charges after the station
   // installation, not at signature.
   annualChargeAfterInstallation = false,
+  // New-customer pay-after-first-visit: the accept rode the card-on-file lane
+  // (a card was captured, or one is already enrolled), the standard
+  // setup / first-application invoice was attached to the first visit with no
+  // pay link (or none was minted yet), and completion charges it. Nothing is
+  // owed until the first visit is performed. Unlike afterVisitBilling this is
+  // not limited to existing customers. Omitted/false = today's copy.
+  cardLaneAfterVisit = false,
+  // 'YYYY-MM-DD' of the first booked visit when this accept booked one.
+  firstVisitDate = null,
+  // A first visit exists (committed, adopted or converter-scheduled) even if its date is unknown.
+  firstVisitBooked = false,
+  // 'YYYY-MM-DD' of the visit collection waits for: the visit the first-
+  // application invoice is attached to, else (fee billed at each visit) the
+  // earliest visit. Null = unknown, and the copy says "the first visit".
+  billingVisitDate = null,
 } = {}) {
   // Sign-before-pay (codex round-3 P2 on #4819): the durable notifications
   // must send the customer to the signature, never read as "approved,
@@ -22668,6 +22927,25 @@ function buildAcceptNotificationCopy({
       adminNext: 'Billed after the first visit; nothing to do now',
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${waveguardTier} WaveGuard plan is confirmed. Nothing is charged today — your saved payment method is billed after your first visit.`,
+      customerLink: '/?tab=billing',
+    };
+  }
+
+  // A new customer on the card rail: the first-application invoice is a draft
+  // attached to the first visit (or not minted yet) and bills after that visit,
+  // so "invoice follow-up needed" below would send staff to bill something that
+  // is collected by the visit's completion. Only an unbooked first visit is work.
+  if (cardLaneAfterVisit) {
+    const visitDay = firstVisitDateLabel(firstVisitDate);
+    const booked = !!(reservationCommitted || firstVisitBooked || visitDay);
+    const billingDay = firstVisitDateLabel(billingVisitDate);
+    return {
+      adminTitle: `Estimate accepted: ${customerName}`,
+      adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Billed after the ${billingDay ? `${billingDay} visit` : 'first visit'}; nothing is charged today.${booked ? '' : ' No first visit is booked yet.'}`,
+      adminNext: booked ? 'Billed after the first visit; nothing to do' : 'Next: book the first visit',
+      adminDoneWhen: booked ? null : 'visit_booked',
+      customerTitle: 'Estimate accepted',
+      customerBody: `Your ${waveguardTier} WaveGuard plan is confirmed. Nothing is charged today — you pay after your ${billingDay ? `${billingDay} visit` : 'first visit'}.`,
       customerLink: '/?tab=billing',
     };
   }
@@ -28361,6 +28639,42 @@ async function buildPricingBundle(estimate, { monthlyBilled = null } = {}) {
     : addMissingBilledPerApplicationFlags(bundle);
 }
 
+// Whether the page serves the frozen send snapshot AS IS (the fast path in
+// buildPricingBundleInner) instead of rebuilding the offer from live pricing.
+// Pure; also read by the admin Pipeline card, which shows an open offer's
+// per-application price only when the page would sell exactly that snapshot.
+function sentSnapshotServesAsIs(snapshotBundle, estimate, estData) {
+  return Boolean(snapshotBundle)
+    && Array.isArray(snapshotBundle.frequencies)
+    && pricingBundleMatchesEstimateTotals(snapshotBundle, estimate)
+    // Snapshots that violate the lawn program policy (retired Quarterly
+    // cadence, or an itemized lawn price below the program minimum) must NOT
+    // short-circuit — they re-derive through the clamped ladder builders so
+    // outstanding links can't sell the retired/below-floor plan. A snapshot
+    // for an estimate with a recurring LAWN service that carries no
+    // lawn-identifiable element at all can't be policy-checked — those
+    // legacy shapes recompute too (a pre-floor $34/mo lawn snapshot must
+    // not fast-path just because its lawn slice is unitemized).
+    && !pricingBundleViolatesLawnPolicy(snapshotBundle, lawnProgramMinimumMonthlyFor(estData))
+    && !(estimateDataHasRecurringLawn(estData) && !pricingBundleHasLawnIdentifiableRow(snapshotBundle))
+    // A LAWN-ONLY snapshot that never OFFERED the lawn tier ladder (one
+    // generic pre-ladder entry) recomputes so the customer picks a real tier
+    // and accept stamps it — see pricingBundleHasLawnTierLadder /
+    // estimateDataIsLawnOnlyRecurring for why mixed bundles are exempt.
+    && !(estimateDataIsLawnOnlyRecurring(estData) && !pricingBundleHasLawnTierLadder(snapshotBundle))
+    // Pre-split termite snapshots (no monthly on the flat-monthly row) and
+    // pre-fee-rule solo pest/mosquito snapshots (no setup fee the accept
+    // path will invoice) recompute instead of fast-pathing.
+    && !pricingBundleHasStaleTermiteRow(snapshotBundle)
+    && !pricingBundleMissingRequiredSetupFee(snapshotBundle, estData)
+    // Snapshots whose rows never netted the estimate's manual discount
+    // (evidenced by the persisted totals disagreeing with the blob's own
+    // discounted figures) re-derive through the live (discount-aware)
+    // builders — fast-pathing them would bill the undiscounted row a
+    // discounted quote displayed. Already-netted legacy snapshots pass.
+    && !pricingBundleLacksManualDiscountNetting(snapshotBundle, estData, estimate);
+}
+
 async function buildPricingBundleInner(estimate) {
   cleanupEstimatePricingCache();
   const estData = typeof estimate.estimate_data === 'string'
@@ -28445,37 +28759,7 @@ async function buildPricingBundleInner(estimate) {
       : payload;
   };
   const snapshotBundle = estData?.sendSnapshot?.pricingBundle;
-  if (
-    snapshotBundle
-    && Array.isArray(snapshotBundle.frequencies)
-    && pricingBundleMatchesEstimateTotals(snapshotBundle, estimate)
-    // Snapshots that violate the lawn program policy (retired Quarterly
-    // cadence, or an itemized lawn price below the program minimum) must NOT
-    // short-circuit — they re-derive through the clamped ladder builders so
-    // outstanding links can't sell the retired/below-floor plan. A snapshot
-    // for an estimate with a recurring LAWN service that carries no
-    // lawn-identifiable element at all can't be policy-checked — those
-    // legacy shapes recompute too (a pre-floor $34/mo lawn snapshot must
-    // not fast-path just because its lawn slice is unitemized).
-    && !pricingBundleViolatesLawnPolicy(snapshotBundle, lawnProgramMinimumMonthlyFor(estData))
-    && !(estimateDataHasRecurringLawn(estData) && !pricingBundleHasLawnIdentifiableRow(snapshotBundle))
-    // A LAWN-ONLY snapshot that never OFFERED the lawn tier ladder (one
-    // generic pre-ladder entry) recomputes so the customer picks a real tier
-    // and accept stamps it — see pricingBundleHasLawnTierLadder /
-    // estimateDataIsLawnOnlyRecurring for why mixed bundles are exempt.
-    && !(estimateDataIsLawnOnlyRecurring(estData) && !pricingBundleHasLawnTierLadder(snapshotBundle))
-    // Pre-split termite snapshots (no monthly on the flat-monthly row) and
-    // pre-fee-rule solo pest/mosquito snapshots (no setup fee the accept
-    // path will invoice) recompute instead of fast-pathing.
-    && !pricingBundleHasStaleTermiteRow(snapshotBundle)
-    && !pricingBundleMissingRequiredSetupFee(snapshotBundle, estData)
-    // Snapshots whose rows never netted the estimate's manual discount
-    // (evidenced by the persisted totals disagreeing with the blob's own
-    // discounted figures) re-derive through the live (discount-aware)
-    // builders — fast-pathing them would bill the undiscounted row a
-    // discounted quote displayed. Already-netted legacy snapshots pass.
-    && !pricingBundleLacksManualDiscountNetting(snapshotBundle, estData, estimate)
-  ) {
+  if (sentSnapshotServesAsIs(snapshotBundle, estimate, estData)) {
     // Chokepoint stamp AFTER finalizePricingBundle (Codex r5 P0 on #4789):
     // attachPublicPricingContract rebuilds services[] split cards there and
     // would drop an earlier stamp. Never a price field, never written back;
@@ -31543,6 +31827,8 @@ module.exports.pricingBundleMissingRequiredSetupFee = pricingBundleMissingRequir
 module.exports.pricingBundleHasStaleTermiteRow = pricingBundleHasStaleTermiteRow;
 module.exports.cleanStoredName = cleanStoredName;
 module.exports.matchAcceptCustomerByPhone = matchAcceptCustomerByPhone;
+module.exports.matchAcceptCustomersByPhoneBatch = matchAcceptCustomersByPhoneBatch;
+module.exports.sentSnapshotServesAsIs = sentSnapshotServesAsIs;
 module.exports.acceptPhoneParkedVerdict = acceptPhoneParkedVerdict;
 module.exports.estimatePublicBlockingState = estimatePublicBlockingState;
 module.exports.retireOrDenyDroppedCapture = retireOrDenyDroppedCapture;
@@ -31618,6 +31904,10 @@ module.exports.resolveProspectiveOwnerId = resolveProspectiveOwnerId;
 module.exports.collectServiceCategories = collectServiceCategories;
 module.exports.hasOnlyLawnCareServiceMix = hasOnlyLawnCareServiceMix;
 module.exports.isLawnCareOneTimeItem = isLawnCareOneTimeItem;
+module.exports.resolveCardLaneAfterVisit = resolveCardLaneAfterVisit;
+module.exports.cardEnrollmentSettled = cardEnrollmentSettled;
+module.exports.resolveBillingVisitDate = resolveBillingVisitDate;
+module.exports.resolveAcceptedFirstVisit = resolveAcceptedFirstVisit;
 module.exports.oneTimeItemsForRender = oneTimeItemsForRender;
 module.exports.oneTimeItemFamilyKeys = oneTimeItemFamilyKeys;
 module.exports.preservedOneTimeAddOnRowsFromBreakdown = preservedOneTimeAddOnRowsFromBreakdown;

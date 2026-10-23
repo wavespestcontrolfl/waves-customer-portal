@@ -174,7 +174,7 @@ jest.mock('../services/short-url', () => ({
 // Controllable gates: either autonomous reply lane arms the shared claim
 // interlock and reservation row. Both stay OFF by default for existing tests.
 const mockGates = { smsAutoSend: false, smsGratitudeReplies: false };
-jest.mock('../config/feature-gates', () => ({
+jest.mock('../config/feature-gates', () => ({ reviewAskAfterReportLive: () => false,
   isEnabled: (gate) => (Object.hasOwn(mockGates, gate) ? mockGates[gate] : true),
   gateEnvTimestamp: () => mockGates.gratitudeActivatedAt || null,
   homeLineLive: () => mockGates.homeLine === true,

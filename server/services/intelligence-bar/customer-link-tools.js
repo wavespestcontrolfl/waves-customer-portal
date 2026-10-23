@@ -57,8 +57,10 @@ const { maskPhone } = require('./closeout-repair-tools');
 // "f•••@example.com": enough for the operator to recognise the address.
 const maskAddress = (address) => String(address || '').replace(/^(.)[^@]*/, '$1•••');
 
-const COMPOSER_ONLY = 'Text it from the Communications composer (Insert Link does the rest: the send is verified and recorded there). The bar\'s send_sms refuses a text carrying this link.';
-const ANY_SENDER = 'Text it with send_sms on the Communications page, or draft_sms elsewhere and let the operator send; the recipient must be this customer\'s own number.';
+// Plain information on a plan that built fine, so it must not read as a decline
+// (agent-gap-reports DECLINE_RE / BAR_DECLINE_RE would queue it as a gap).
+const COMPOSER_ONLY = 'Send this one from the Communications composer\'s Insert Link (verified and recorded there); send_sms refuses a text carrying it. The bar builds the link only.';
+const ANY_SENDER = 'Text it with send_sms, or draft it with draft_sms and let the operator send; the recipient must be this customer\'s own number.';
 
 // The Insert Link kinds, in the composer's own vocabulary. `route`: which
 // admin-communications.js handler builds it. `builds`: what the confirmed run
@@ -103,13 +105,13 @@ Use for: "get Henderson a pay link", "send Smith the link to their estimate", "b
   },
   {
     name: 'send_autopay_setup_link',
-    description: `Text or email ONE customer their 30-day Auto Pay setup link — the Customers page "Auto Pay setup link" button, for a customer with no saved card. delivery sms (default) texts it with the reviewed Auto Pay setup text; email emails it. The first call returns a PREVIEW and sends nothing: the customer, the channel, who it reaches (masked) and what will be created and sent. The operator approves on the confirmation card; the confirmed run sends the link to exactly that recipient and reports sent, or the plain reason it was not sent. Refused with the plain reason when the customer is not eligible (already on Auto Pay, paused, payer-billed, unsupported plan, links switched off) or the channel cannot deliver (no phone or email, opted out or suppressed, texts or the template switched off). Refused when the customer has a saved card on file: enrolling a saved card turns Auto Pay on for the account, a billing change the bar never makes — do that from the Customers page. A link-only Auto Pay link (no send) also stays on the Customers page; create_customer_link does not build it. Nothing is charged by this link; the customer saves a payment method on the page. The link itself is never returned. Admin-only.
+    description: `Text or email ONE customer their 30-day Auto Pay setup link — the Customers page "Auto Pay setup link" button, for a customer with no saved card. delivery sms (default) texts it with the reviewed Auto Pay setup text; email emails it. The first call returns a PREVIEW and sends nothing: the customer, the channel, who it reaches (masked) and what will be created and sent. The operator approves on the confirmation card; the confirmed run sends the link to exactly that recipient and reports sent, or the plain reason it was not sent. Refused with the plain reason when the customer is not eligible (already on Auto Pay, paused, payer-billed, unsupported plan, links switched off) or the channel cannot deliver (no phone or email, opted out or suppressed, texts or the template switched off). Refused when the customer has a saved card on file: enrolling a saved card turns Auto Pay on for the account, a billing change the bar never makes: by the owner's rule that stays on the Customers page. The bar can't make a link-only Auto Pay link (no send) from here yet; create_customer_link does not build it. Nothing is charged by this link; the customer saves a payment method on the page. The link itself is never returned. Admin-only.
 Use for: "send the Auto Pay link to this customer", "text Henderson the autopay enrollment link", "email Smith the auto pay setup link"`,
     input_schema: {
       type: 'object',
       properties: {
         customer_id: { type: 'string', format: 'uuid', description: 'The customer' },
-        delivery: { type: 'string', enum: ['sms', 'email'], description: 'sms (default) or email' },
+        delivery: { type: 'string', enum: ['sms', 'email', 'link'], description: 'sms (default) or email. link is not supported yet; the bar will say so.' },
       },
       required: ['customer_id'],
     },
@@ -226,7 +228,9 @@ async function buildLink(input) {
 // ── send_autopay_setup_link ─────────────────────────────────────
 
 const AUTOPAY_DELIVERIES = ['sms', 'email'];
-const SAVED_CARD_REFUSAL = 'This customer has a saved card on file. Enrolling it turns Auto Pay on for the account, which is a billing change the bar does not make — do it from the Customers page.';
+// A link-only Auto Pay link is a missing capability; any other bad value is plain bad input (Codex #6371 r21).
+const LINK_ONLY_CODE = 'autopay_link_only_unsupported';
+const SAVED_CARD_REFUSAL = 'This customer has a saved card on file. Enrolling it turns Auto Pay on for the account, a billing change the bar does not make. That enrollment stays on the Customers page by the owner\'s rule.';
 const CHECK_LATER = ' — try again in a moment';
 // The operator's words for the reasons the service's own checks return (the
 // shared AUTOPAY_SKIP_REASONS table covers eligibility, the gates and the
@@ -259,7 +263,9 @@ function autopayReasonWords(reason) {
   const code = String(reason || 'skipped');
   return AUTOPAY_REASON_WORDS[code] || AUTOPAY_SKIP_REASONS[code] || `The Auto Pay setup link was not sent: ${code.slice(0, 160)}`;
 }
-const autopayRefusal = (reason) => ({ error: autopayReasonWords(reason), blocked: true, code: String(reason || 'skipped').slice(0, 80) });
+const autopayRefusal = (reason) => (reason === 'saved_method_available'
+  ? { error: SAVED_CARD_REFUSAL, blocked: true, code: 'by_owner_rule', rule: 'saved_method_available' }
+  : { error: autopayReasonWords(reason), blocked: true, code: String(reason || 'skipped').slice(0, 80) });
 
 // Who the link reaches and the contact the card pins: the number's last ten
 // digits for a text, the lower-cased address for an email.
@@ -289,14 +295,14 @@ async function autopayLinkPlan(autopay, customerId) {
 // the saved card (the bar never enrolls one), then the channel preflight.
 async function autopayPlan(input) {
   const delivery = input.delivery === undefined || input.delivery === null ? 'sms' : String(input.delivery);
-  if (!AUTOPAY_DELIVERIES.includes(delivery)) return { error: `delivery must be one of ${AUTOPAY_DELIVERIES.join(', ')} (a link-only Auto Pay link stays on the Customers page)`, code: 'invalid_target' };
+  if (!AUTOPAY_DELIVERIES.includes(delivery)) return { error: `delivery must be one of ${AUTOPAY_DELIVERIES.join(', ')}. The bar can't make a link-only Auto Pay link from here yet.`, code: delivery === 'link' ? LINK_ONLY_CODE : 'invalid_target' };
   const id = String(input.customer_id || '').trim().toLowerCase();
   if (!UUID_RE.test(id)) return { error: 'A valid customer_id is required', code: 'invalid_target' };
   const autopay = require('../autopay-setup-link');
   const eligibility = await autopay.setupLinkIneligibility(id);
   if (eligibility.reason) return autopayRefusal(eligibility.reason);
   const { customer } = eligibility;
-  if (await autopay.findSavedMethodForAutoSecure(id)) return { error: SAVED_CARD_REFUSAL, blocked: true, code: 'saved_method_available' };
+  if (await autopay.findSavedMethodForAutoSecure(id)) return { error: SAVED_CARD_REFUSAL, blocked: true, code: 'by_owner_rule', rule: 'saved_method_available' };
   if (delivery === 'sms' && !fullUsNumber(customer.phone)) return autopayRefusal('no_customer_phone');
   const preflight = await autopay.autopayDeliveryPreflight({ customerId: id, customer, delivery, trigger: 'admin' });
   if (!preflight.ok) return autopayRefusal(preflight.reason);

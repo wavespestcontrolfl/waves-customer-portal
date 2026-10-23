@@ -26,6 +26,7 @@ export const LINK_CHANNELS = [
 export const LINK_GROUP_ORDER = [
   ['customer', 'For this customer'],
   ['guides', 'Prep guides'],
+  ['howto', 'How-to guides'],
   ['reviews', 'Reviews'],
   ['booking', 'Booking & quotes'],
   ['app', 'Waves app'],

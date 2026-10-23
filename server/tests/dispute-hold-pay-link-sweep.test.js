@@ -272,8 +272,10 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
     };
     for (const [file, pattern] of Object.entries(RELEASES)) expect([file, pattern.test(read(file))]).toEqual([file, true]);
     expect(read('services/invoice-followups.js')).toMatch(/if \(heldByDisputeHold\(result\)\) \{\s*await ContactLedger\.releaseHeldReservation\(ledger\);\s*return true;/);
-    // the operator "send now" text carries the trusted exemption; automated ladder touches carry none
-    expect(read('services/invoice-followups.js')).toMatch(/\.\.\.\(operatorInitiated \? \{ holdExempt: 'operator' \} : \{\}\)/);
+    // the Invoices page's operator "send now" text carries the trusted exemption; automated ladder touches and the Intelligence
+    // Bar's approved send-now (bar) carry none
+    expect(read('services/invoice-followups.js')).toMatch(/const holdExempt = operatorInitiated && !bar \? 'operator' : null;/);
+    expect(read('services/invoice-followups.js')).toMatch(/\.\.\.\(holdExempt \? \{ holdExempt \} : \{\}\)/);
     // the voice "text me the link" tool: rail-guard consult and send both carry the customer exemption
     expect(read('services/collections/outbound-voice/collections-conversation.js')).toMatch(/holdExempt: 'customer',\s*\}\);/);
     expect(read('services/collections/outbound-voice/collections-conversation.js')).toMatch(/sendViaSMS\(invoiceId, \{ operatorInitiated: true, holdExempt: 'customer' \}\)/);

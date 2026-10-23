@@ -1586,8 +1586,9 @@ class SmartRebooker {
     }
     // Membership fence (codex #3609 r13 P2): the row read above was
     // ungrouped, so this request takes the single-row path — but
-    // createOrJoinVisit can group it between that read and the move
-    // transaction, and normal callers do not carry membership in `expect`.
+    // a grouping write (retired 2026-10-22) could group it between that read
+    // and the move transaction, and normal callers do not carry membership
+    // in `expect`.
     // Pin visit_id IS NULL in the CAS below; a miss that finds the row
     // grouped surfaces VISIT_MEMBERSHIP_CHANGED and reschedule() re-enters
     // through the unit mover. A caller that fenced membership itself, or
@@ -1845,7 +1846,7 @@ class SmartRebooker {
 
     // Deadlock victim retry (codex #3609 r26 P2): the solo-visit recheck
     // takes the row's stop lock AFTER this transaction's tech-day lock,
-    // while createOrJoinVisit holds the stop lock and re-points members
+    // while a grouping write (retired 2026-10-22) held the stop lock and re-pointed members
     // through assignDispatchJob (tech-day). Postgres aborts one side with
     // 40P01; the grouping writer already retries, so this side must too or
     // a chosen-victim reschedule fails instead of re-entering the
@@ -1896,7 +1897,7 @@ class SmartRebooker {
         // 'visit.stop' key is outside the occupancy ORDERING CONTRACT; the
         // admin editor takes it in the same relative position, so the two
         // writers never invert). Under the row's stop lock (serializes with
-        // createOrJoinVisit), an OPEN visit that now has another live
+        // every visit writer), an OPEN visit that now has another live
         // member is a whole-visit move: surface it like the ungrouped
         // membership miss so reschedule() re-enters through the unit
         // mover. A stop that moved under us gets the same remedy.
@@ -3040,9 +3041,9 @@ class SmartRebooker {
           // Visit stop locks for EVERY swept occurrence, after the reviewed
           // maintenance/comms preflight — the same occupancy-first order the
           // single-row writers take (codex #3609 r31 P1 + uncapped audit):
-          // createOrJoinVisit serializes on the stop lock, never on the
-          // occupancy/maintenance locks, so a grouping racing this sweep
-          // either committed (visible in the locked read below) or waits
+          // the grouping writer (retired 2026-10-22) serialized on the stop
+          // lock, never on the occupancy/maintenance locks, so a grouping racing
+          // this sweep either committed (visible in the locked read below) or waits
           // behind these locks. Keys from the PRE-lock read, deduped +
           // SORTED (two overlapping sweeps acquire in one order); the
           // fingerprint below carries the property leg, so a key that
@@ -3161,7 +3162,7 @@ class SmartRebooker {
           }
           // Membership recheck from the LOCKED sweep (codex #3609 r26 P1):
           // an anchor that was ungrouped at the unlocked read can have been
-          // attached by createOrJoinVisit since — a series sweep would move
+          // attached by a grouping write (retired 2026-10-22) since — a series sweep would move
           // the anchor and its cadence alone while the committed join's
           // sibling stays behind, and the post-commit seam would then detach
           // the anchor. A grouped anchor here gets the same refusal the

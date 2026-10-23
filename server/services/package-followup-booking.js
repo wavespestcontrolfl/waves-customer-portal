@@ -341,9 +341,6 @@ async function bookInSavepoint(sp, outerTrx, primary, cols) {
     source: { sourceAction: PACKAGE_FOLLOWUP_SOURCE_ACTION },
   });
   if (!child) return null;
-  // Visit groups (visit-group-scope.md §2): stamp at scheduling —
-  // gate-checked + best-effort + self-refusing inside maybeGroupRow.
-  await require('./visit-groups').maybeGroupRow(child.id, { database: sp, createdBy: 'dispatch' });
   // Tech-facing "new visit" card: this writer inserts the assigned row
   // itself; rides the OUTER trx so it waits for the caller's commit.
   // Gate-dark, never awaited.

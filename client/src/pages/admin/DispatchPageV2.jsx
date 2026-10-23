@@ -74,6 +74,7 @@ import TreatmentPlanPanel from "../../components/schedule/TreatmentPlanPanel";
 import MarkPrepaidModal from "../../components/schedule/MarkPrepaidModal";
 import RecurringAlertsBannerV2 from "../../components/schedule/RecurringAlertsBannerV2";
 import CreateAppointmentModal from "../../components/schedule/CreateAppointmentModal";
+import FindTimePanel from "../../components/schedule/FindTimePanel";
 import HeldVisitsStrip, { heldVisitFormDefaults } from "./HeldVisitsStrip";
 import ScheduleListView from "../../components/schedule/ScheduleListView";
 import ScheduleCustomerSidebar from "../../components/schedule/ScheduleCustomerSidebar";
@@ -1582,6 +1583,16 @@ export default function DispatchPageV2({
         <div className="max-w-md mx-auto mb-4">
           {" "}
           <ScheduleClientSearch onSelect={handleClientSearchSelect} />{" "}
+          {/* GATE_DISPATCH_FIND_TIME_PANEL: best times from an address alone, for a new caller. Admin only, like Book. */}
+          <div className="mt-2 flex justify-center">
+            <FindTimePanel
+              enabled={safeData.findTimePanel === true && getAdminUser()?.role === "admin"}
+              onBook={({ date: slotDate, windowStart, quickAddAddress }) => {
+                setNewApptDefaults({ date: slotDate, windowStart, quickAddAddress });
+                setShowNewAppt(true);
+              }}
+            />
+          </div>
         </div>
       )}
       {/* Centered view-mode selector — schedule grid sub-tab + desktop only. */}
@@ -1641,6 +1652,7 @@ export default function DispatchPageV2({
           defaultTechId={newApptDefaults?.techId}
           defaultCustomer={newApptDefaults?.customer || null}
           defaultInternalNotes={newApptDefaults?.internalNotes || ""}
+          defaultQuickAddAddress={newApptDefaults?.quickAddAddress || null}
           requireTimeChoice={newApptDefaults?.requireTimeChoice === true}
           onClose={() => {
             setShowNewAppt(false);
@@ -2006,7 +2018,6 @@ export default function DispatchPageV2({
               date={date}
               services={services}
               technicians={technicians}
-              canGroup={safeData.visitGroups === true}
               owesCompletion={completionResumeMarked}
               onEdit={(svc) => {
                 // A block wearing the "Closeout owed" chip must open the

@@ -225,6 +225,16 @@ async function socketAuth(socket, next) {
     return next();
   }
 
+  // Contact session (GATE_CONTACT_LOGIN): no live channel. A contact's JWT
+  // carries the holder's customerId, and customer:<id> delivers job ids,
+  // statuses, ETAs and technician identity with no per-socket revalidation
+  // when the holder removes the contact — so the room is the holder's only
+  // (codex #6363 r8 security P2). The contact app reads its tracker over
+  // HTTP, where every request re-admits the session.
+  if (decoded.contactKey) {
+    return next(rejectionError('Contact sessions have no live channel', 'AUTH_FAILED'));
+  }
+
   if (decoded.customerId) {
     // Symmetric freshness check with the staff path. Customer rooms
     // arrive in this PR (customer:<id>); without a DB lookup, a

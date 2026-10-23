@@ -1,23 +1,27 @@
 /**
- * Nudge a series date forward off blackout days (one-off owner blackouts +
- * weekly days off, resolved by scheduling/blackout-dates.getBlackoutDates).
+ * Nudge a series date forward off blackout days (one-off owner blackouts,
+ * weekly days off and closed holidays, resolved by
+ * scheduling/blackout-dates.getBlackoutDates).
  * A blocked follow-up moves forward a day at a time — re-applying the
  * forward weekend shift when the series skips weekends — until clear;
  * skipping the visit entirely would silently shrink the customer's plan.
  *
- * Weekly days off are BUSINESS closures, so the nudge applies regardless of
- * the row's own skip_weekends preference (they arrive inside blackoutDates).
+ * Weekly days off and closed holidays are BUSINESS closures, so the nudge
+ * applies regardless of the row's own skip_weekends preference (they arrive
+ * inside blackoutDates).
  *
  * Pure (no DB) — ONE implementation shared by the recurring seeder and every
  * admin-schedule series generator, so their blackout behavior cannot drift.
  */
 
 const { parseETDateTime, etParts, etDateString, addETDays } = require('../../utils/datetime-et');
+const { isClosedHoliday } = require('./holidays');
 
 // `blackout` is either a Set of YYYY-MM-DD strings (the seeder's preloaded
-// shape) or { dates: Set, weeklyDaysOff: Set } (getBlackoutLayers): the
-// weeklyDaysOff day-of-week layer applies to EVERY date, so weekly closures
-// hold even past whatever horizon the dates Set was expanded over.
+// shape) or { dates: Set, weeklyDaysOff: Set, closedHolidays: Set }
+// (getBlackoutLayers): the weeklyDaysOff and closedHolidays layers apply to
+// EVERY date, so weekly and holiday closures hold even past whatever horizon
+// the dates Set was expanded over.
 function isBlackedOut(dateStr, blackout) {
   if (!dateStr || !blackout) return false;
   const dates = blackout instanceof Set ? blackout : blackout.dates;
@@ -27,6 +31,7 @@ function isBlackedOut(dateStr, blackout) {
     const { dayOfWeek } = etParts(parseETDateTime(`${dateStr}T12:00`));
     if (weekly.has(dayOfWeek)) return true;
   }
+  if (!(blackout instanceof Set) && isClosedHoliday(dateStr, blackout.closedHolidays)) return true;
   return false;
 }
 

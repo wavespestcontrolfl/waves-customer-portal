@@ -1522,7 +1522,7 @@ describe('caller wiring (source)', () => {
     expect(disp).toContain("jsonb_array_length(COALESCE(result->'rewoundIds', '[]'::jsonb)) > 0");
     expect(read('../services/rebooker.js')).toContain('await markSeriesCleanupDone(seriesMoveId, cleanupOk);');
     expect(fs.existsSync(path.join(__dirname, '../models/migrations/20260828000032_series_moves_cleanup_done_at.js'))).toBe(true);
-    expect(disp).toContain("const RECONCILE_SURFACES = ['dispatch_board', 'edit_modal', 'sms_reply', 'customer_web', 'quick_move', 'call_reschedule'];");
+    expect(disp).toContain("const RECONCILE_SURFACES = ['dispatch_board', 'edit_modal', 'sms_reply', 'customer_web', 'quick_move', 'call_reschedule', 'call_makeup'];");
     expect(fx).not.toContain('operatorInitiated: true');
     expect(fx).toContain("if (cardOnly) return { notificationSent: false, notificationError: 'superseded', conflicts: dueConflicts, seriesMoveId };");
     const reb = read('../services/rebooker.js');
@@ -1593,7 +1593,7 @@ describe('caller wiring (source)', () => {
   test('the IB reschedule tool refuses a gated cadence date move instead of moving one row (until its series path lands)', () => {
     const src = read('../services/intelligence-bar/tools.js');
     const fn = src.indexOf('async function rescheduleAppointment(');
-    const refuse = src.indexOf("code: 'COLLECTIVE_MOVE_REQUIRED'", fn);
+    const refuse = src.indexOf("code: 'collective_move_unsupported'", fn);
     const write = src.indexOf('scheduled_date: dateStr,', fn);
     expect(refuse).toBeGreaterThan(fn);
     expect(refuse).toBeLessThan(write);

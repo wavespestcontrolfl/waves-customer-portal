@@ -2590,26 +2590,29 @@ export function TechNoteCard({ data, mode = 'live' }) {
 
 // "From the Waves blog" (GATE_REPORT_BLOG_POST): the one post the technician
 // or the office picked at completion, frozen on the record with its title
-// and live URL (the server checks the URL is on the Waves site). The last
-// card before the footer; live view only, like the tech note.
+// and live URL (the server checks the URL is on the Waves site), plus the
+// post's main image when the site has one. Owner 2026-10-22: it sits right
+// under the status card (weather), shows the image, and never prints the
+// raw URL. Live view only, like the tech note.
 export function BlogPostCard({ data, mode = 'live' }) {
   const post = data?.blogPost;
   if (mode !== 'live' || !post?.url || !post?.title) return null;
-  let host = '';
   try {
-    const parsed = new URL(post.url);
-    host = `${parsed.hostname.replace(/^www\./i, '')}${parsed.pathname}`;
+    new URL(post.url);
   } catch {
     return null;
   }
+  const imageUrl = typeof post.imageUrl === 'string' && /^https:\/\//i.test(post.imageUrl) ? post.imageUrl : null;
   return (
-    <section data-glass="card" className="sr-section" id="from-the-blog">
+    <section data-glass="card" className="sr-section blog-post-card" id="from-the-blog">
       {/* h2, not .section-eyebrow — see PlanSummaryCard. */}
       <h2>From the Waves blog</h2>
-      <p className="map-context-copy" style={{ fontWeight: 600 }}>
-        <a href={post.url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--text, #04395E)' }}>{post.title}</a>
-      </p>
-      <p className="map-context-copy" style={{ fontSize: 14, overflowWrap: 'anywhere' }}>{host}</p>
+      <a className="blog-post-link" href={post.url} target="_blank" rel="noopener noreferrer">
+        {imageUrl && (
+          <img className="blog-post-image" src={imageUrl} alt="" loading="lazy" />
+        )}
+        <span className="blog-post-title">{post.title}</span>
+      </a>
     </section>
   );
 }
@@ -3111,6 +3114,8 @@ function PlanSummaryCard({ data, mode }) {
                   <a
                     className="plan-visit-reschedule"
                     href={visit.rescheduleUrl}
+                    // The gold glass accent of the report's other CTAs (owner 2026-10-22).
+                    data-glass-accent=""
                     style={{ ...actionButtonStyle('plain'), minHeight: 44, padding: '0 14px' }}
                     aria-label={`Reschedule ${formatNextAppointmentLabel(visit) || nextServiceName(visit.serviceType) || 'this visit'}`}
                   >
@@ -3135,6 +3140,24 @@ function PlanSummaryCard({ data, mode }) {
 // "Mon, Jan 4" for the plan card, or null for a missing, unreadable or past
 // date (a report opened months later must not promise a visit that has gone).
 // Past is judged on the Eastern calendar, whatever the browser's zone.
+// True when the plan card or the upcoming visits card (live view only) prints
+// the visit `data.nextSameServiceAppointment` names: the same date and
+// service in its visits list, or as the plan card's "Your next … visit" line.
+export function nextVisitShownInPlanCard(data, mode) {
+  const next = data?.nextSameServiceAppointment;
+  if (mode !== 'live' || !next?.scheduledDate) return false;
+  const sameVisit = (visit) => Boolean(visit)
+    && String(visit.scheduledDate || '').slice(0, 10) === String(next.scheduledDate).slice(0, 10)
+    && String(visit.serviceType || '') === String(next.serviceType || '');
+  const listed = Array.isArray(data.upcomingVisitsCard?.visits) ? data.upcomingVisitsCard.visits : [];
+  if (listed.some(sameVisit)) return true;
+  const plan = data.planSummary;
+  const planLine = !data.upcomingVisitsCard && Boolean(plan) && Number(plan.visitsThisYear) > 0
+    && Boolean(planNextVisitDateLabel(data.nextAppointment))
+    && Boolean(String(nextServiceName(data.nextAppointment?.serviceType) || '').replace(/\s+service$/i, '').trim());
+  return planLine && sameVisit(data.nextAppointment);
+}
+
 function planNextVisitDateLabel(nextAppointment, todayEt = etDateString()) {
   const date = calendarDateFromDateOnlyValue(nextAppointment?.scheduledDate);
   if (!date) return null;
@@ -3425,9 +3448,19 @@ export function reportAskPrompts(data = {}, serviceLine = 'pest') {
   else if ((data.applications || []).length) add('Why were these products used?');
   if (hasPressure) add('What does Pest Pressure mean?');
   if (hasInaccessible) add('What should I do about the inaccessible area?');
-  add(serviceLine === 'lawn' ? 'How is my lawn trending?' : 'What should I watch for next?');
-  add('When is my next service?');
-  return prompts.slice(0, 5);
+  // Exactly three questions on every report (owner 2026-10-22). Visit-specific
+  // questions lead; this per-line set fills any gap so each line always has 3.
+  // Each fill question gets its own answer from the report's fixed-rule router
+  // (report-assistant.js) with no AI and no extra report data: that answer is
+  // what a mosquito report always gives, and what the others give when the AI
+  // is off or misses.
+  const FILL_BY_LINE = {
+    lawn: ['How is my lawn trending?', 'What should I watch for next?', 'When is my next service?'],
+    mosquito: ['What can I do to cut down mosquitoes?', 'What did you find today?', 'When is my next service?'],
+    tree_shrub: ['What did you find today?', 'What should I watch for next?', 'When is my next service?'],
+  };
+  (FILL_BY_LINE[serviceLine] || ['What should I watch for next?', 'What did you find today?', 'When is my next service?']).forEach(add);
+  return prompts.slice(0, 3);
 }
 
 // Floating Ask Waves — the report's AI helper as a slim bar pinned under the
@@ -6558,7 +6591,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   // own service line for "What's next" (live view only: the server strips
   // it from every other render).
   const reportSections = Array.isArray(data.reportSections) ? data.reportSections : null;
-  const nextSameServiceLabel = formatNextAppointmentLabel(data.nextSameServiceAppointment);
+  // Owner 2026-10-22 ("we dont need to mention the next service twice"):
+  // "What's next" leaves out its "Next visit:" line when the "Your plan" /
+  // upcoming visits card already names that same visit.
+  const nextSameServiceLabel = nextVisitShownInPlanCard(data, mode)
+    ? null
+    : formatNextAppointmentLabel(data.nextSameServiceAppointment);
   // When the four-section report is what a termite or cockroach dashboard
   // shows, its next visit is the property-scoped one opening "What's next";
   // the dashboard's own customer-wide label stays off (Codex #5500).
@@ -8372,13 +8410,19 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-size: 14px;
           line-height: 1.5;
         }
+        /* Owner 2026-10-22: the product facts read top to bottom in one
+           box (Purpose, then Active ingredient, then EPA Reg. No.), the
+           same grammar as the "How it works" box under it. */
         .product-purpose-grid {
           display: grid;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 12px;
+          grid-template-columns: minmax(0, 1fr);
+          gap: 14px;
           margin-top: 12px;
+          border: 1px solid var(--line);
+          border-radius: 10px;
+          background: var(--wash);
+          padding: 12px;
         }
-        .product-purpose-grid > div,
         .product-why {
           border: 1px solid var(--line);
           border-radius: 10px;
@@ -8532,7 +8576,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           background: var(--report-surface);
           border: 1px solid var(--report-border);
           border-radius: 12px;
-          padding: 20px;
+          /* 24px like .sr-section, so text in every card starts at the same
+             left edge (owner 2026-10-22, "make sure fonts are aligned"). */
+          padding: 24px;
           /* matches .sr-section's 20px rhythm — hover-lift headroom */
           margin-top: 20px;
           break-inside: avoid;
@@ -8572,10 +8618,20 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .review-request-card-top {
           margin-bottom: 16px;
         }
+        /* Desktop (owner 2026-10-22, "renders funny on desktop"): one row,
+           headline left and button right. Phones keep the center stack. */
+        @media (min-width: 761px) {
+          .review-request-card {
+            grid-template-columns: 1fr auto;
+            justify-items: start;
+          }
+          .service-report-v1 .review-request-card.report-card h3 { text-align: left; margin: 0 !important; }
+        }
         .review-request-card h3 {
           margin-bottom: 0;
         }
         .review-request-card .review-cta {
+          box-sizing: border-box;
           display: inline-flex;
           align-items: center;
           justify-content: center;
@@ -8693,6 +8749,26 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           gap: 10px;
         }
         .referral-share-row .cross-sell-cta { min-width: 0; width: 100%; }
+        /* Owner 2026-10-22: the quote offer card is centered. */
+        .cross-sell-card[data-section="cross-sell"] { text-align: center; }
+        .blog-post-link { display: block; color: var(--text); text-decoration: none; }
+        .blog-post-image {
+          display: block;
+          width: 100%;
+          aspect-ratio: 16 / 9;
+          object-fit: cover;
+          border-radius: 10px;
+          margin-top: 12px;
+        }
+        .blog-post-title {
+          display: block;
+          margin-top: 12px;
+          font-size: 16px;
+          font-weight: 600;
+          line-height: 1.4;
+          text-decoration: underline;
+          text-underline-offset: 3px;
+        }
         .cross-sell-card .cross-sell-cta {
           display: inline-flex;
           align-items: center;
@@ -9595,6 +9671,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
            with "[Report kind] · [the service performed]" above the header,
            mirroring the project report's kicker. */
         html[data-glass-theme] .service-report-v1 .service-report-hero .section-eyebrow { display: block; }
+        /* Owner 2026-10-22 ("make sure fonts are aligned"): the pest, lawn,
+           tree and mosquito status cards print their prose in the same
+           grey, size and line height as every other card. */
+        html[data-glass-theme] .service-report-v1 .sr-v2-body,
+        html[data-glass-theme] .service-report-v1 .sr-v2-body p { color: #3F4A65 !important; font-size: 16px !important; line-height: 1.5 !important; }
         html[data-glass-theme] .service-report-v1 .sr-cell,
         html[data-glass-theme] .service-report-v1 .sr-metric {
           background: rgba(255, 255, 255, 0.42);
@@ -9785,6 +9866,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               data={data}
               slots={{
                 status: <LawnStatusCard data={data} mode={mode} layout />,
+                blog: <BlogPostCard data={data} mode={mode} />,
                 reservice: <ReserviceReportCard data={data} mode={mode} />,
                 plan: <PlanSummaryCard data={data} mode={mode} />,
                 upcoming: <UpcomingVisitsCard data={data} mode={mode} />,
@@ -9810,6 +9892,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           )}
         >
         <LawnStatusCard data={data} mode={mode} layout={false} />
+
+        {/* The Waves blog post picked at completion, right under the status
+            card and its weather call (owner 2026-10-22; live only). */}
+        <BlogPostCard data={data} mode={mode} />
 
         {/* The lawn watering instruction (GATE_LAWN_WATERING_RULE) sits right
             under the visit status, ahead of everything else the customer
@@ -10386,9 +10472,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {!reviewAskOnTop && <ReviewRequestCard data={data} token={token} mode={mode} placement="bottom" />}
         </LawnLayoutSwitch>
 
-        {/* The Waves blog post picked at completion, at the bottom of the
-            report on every layout (live only). */}
-        <BlogPostCard data={data} mode={mode} />
 
 
 

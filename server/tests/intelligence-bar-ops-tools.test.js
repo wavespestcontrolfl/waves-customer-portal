@@ -736,7 +736,7 @@ describe('intelligence bar set_railway_gate', () => {
   ])('%s is refused (no bare true/false write), with no network call', async (_label, name) => {
     configure();
     const result = await propose({ gate_name: name });
-    expect(result.code).toBe('not_a_boolean_gate');
+    expect(result).toMatchObject({ code: 'by_owner_rule', rule: 'not_a_boolean_gate' });
     expect(result.error).toMatch(/mode or timestamp/);
     expect(global.fetch).not.toHaveBeenCalled();
   });
@@ -746,7 +746,7 @@ describe('intelligence bar set_railway_gate', () => {
     const { knownGateCatalog } = require('../config/feature-gates');
     const unverified = [...knownGateCatalog().values()].find((e) => e.kind === 'unverified');
     const result = await propose({ gate_name: unverified.name });
-    expect(result.code).toBe('not_a_boolean_gate');
+    expect(result).toMatchObject({ code: 'by_owner_rule', rule: 'not_a_boolean_gate' });
     expect(result.error).toMatch(/does not show it is a plain on\/off switch/);
     expect(global.fetch).not.toHaveBeenCalled();
   });
@@ -869,7 +869,7 @@ describe('intelligence bar set_railway_gate', () => {
   });
 
   test.each([
-    ['no longer a plain on/off gate', 'GATE_REVIEW_AUTO_REPLY', 'not_a_boolean_gate'],
+    ['no longer a plain on/off gate', 'GATE_REVIEW_AUTO_REPLY', 'by_owner_rule'],
     ['without a description on file', 'GATE_AUTO_APPLY_ACCOUNT_CREDIT', 'no_gate_description'],
     ['no longer known at all', 'GATE_RETIRED_SINCE_THE_CARD', 'unknown_gate'],
   ])('a pinned gate %s refuses at confirm with no network call', async (_label, name, code) => {

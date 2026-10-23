@@ -114,7 +114,7 @@ function parseFee(value) {
 
 const MODE_REFUSALS = {
   annual_prepay: ['Annual prepay is set by the paid annual invoice and its term, not from the bar. Nothing was proposed.', 'annual_prepay_lane'],
-  '': ['Clearing the billing type ("Not set") is done on the customer page. Pick per_application, per_visit, one_time or monthly_membership. Nothing was proposed.', 'billing_mode_clear'],
+  '': ['The bar can\'t clear the billing type ("Not set") from here yet. Pick per_application, per_visit, one_time or monthly_membership. Nothing was proposed.', 'billing_mode_clear'],
 };
 
 /**
@@ -360,8 +360,6 @@ async function ongoingRoots(dbh, customerId, { lock = false } = {}) {
       unverified: !!(verdict && verdict.unverified),
       // 'override' | 'discounted' | 'unpriced' | null (admin-schedule.js seriesNextOccurrencesPrice).
       zero: verdict ? verdict.zero || null : null,
-      // The lawn host dates a rider plan would ride: [{ date, price, linePrice }].
-      hosts: verdict ? verdict.hosts || [] : [],
       skipped: skipReason.get(String(r.id)) || null,
     });
   }
@@ -413,15 +411,10 @@ async function billingFacts(dbh, customerId, row, fields, { lock = false } = {})
 // the billing fields, every upcoming visit's billing columns and invoices, the
 // count of visits that carry billing (always 0 on a card that was shown), the
 // collection context, and the open membership-dues invoices.
-// A rider plan's lawn host dates with their price classes, as one pin string.
-function hostsPin(hosts = []) {
-  return hosts.map((h) => `${h.date}=${h.price}/${h.linePrice}`).join(',');
-}
-
 function cardPin(row, visits, fields = {}, charge = NO_CHARGE_CONTEXT, openDues = [], facts = NO_FACTS) {
   const dues = openDues.map((d) => [String(d.id), d.total == null ? null : String(d.total), d.status, d.credit_applied == null ? null : String(d.credit_applied)]);
   const method = [charge.family || '', charge.last4 || '', charge.methodId || '', charge.savedMethods || ''];
-  const roots = facts.roots.map((r) => [String(r.id), r.payer_id == null ? null : String(r.payer_id), String(r.price), r.unverified ? 'unverified' : 'verified', r.zero && r.zero !== 'unpriced' ? `${r.zero}:${r.linePrice}` : '', r.skipped || '', hostsPin(r.hosts), (r.addonLines || []).map((a) => `${a.name}=${a.gross}`).join(',')]);
+  const roots = facts.roots.map((r) => [String(r.id), r.payer_id == null ? null : String(r.payer_id), String(r.price), r.unverified ? 'unverified' : 'verified', r.zero && r.zero !== 'unpriced' ? `${r.zero}:${r.linePrice}` : '', r.skipped || '', (r.addonLines || []).map((a) => `${a.name}=${a.gross}`).join(',')]);
   const processing = facts.processing.map((p) => [String(p.id), String(p.amount), p.status, p.monthKey]);
   const gates = `${+charge.autopayActive}${+charge.gate}${+charge.stampedZero}`;
   return `${billingPin(row)}|${visitsPin(visits)}|${pricedVisitCount(visits)}|${gates}|${JSON.stringify(method)}|${JSON.stringify(dues)}|${JSON.stringify([roots, processing, +facts.scopeGate])}`;
@@ -452,9 +445,9 @@ const SIDE_FLOW_CHECKS = [
   // An ongoing recurring root stamped with a payer counts too: the top-up copies it to
   // every visit it mints, so the new lane would meet a payer-owned visit.
   ({ row, visits, facts }) => {
-    if (row.payer_id || visits.some((v) => v.payer_id)) return refuse('This customer has a Bill-To payer — change billing on the customer page. Nothing was proposed.', 'bill_to_payer');
+    if (row.payer_id || visits.some((v) => v.payer_id)) return refuse('This customer has a Bill-To payer, and the bar can\'t change billing for those from here yet. Nothing was proposed.', 'bill_to_payer');
     return facts.roots.some((r) => r.payer_id)
-      ? refuse('This customer has an ongoing recurring plan billed to a Bill-To payer — change billing on the customer page. Nothing was proposed.', 'billing_visits_payer_owned') : null;
+      ? refuse('This customer has an ongoing recurring plan billed to a Bill-To payer, and the bar can\'t change billing for those from here yet. Nothing was proposed.', 'billing_visits_payer_owned') : null;
   },
   // A move INTO monthly membership needs a customer the dues run would really
   // charge: the cron's own cohort and guards plus a chargeable saved method
@@ -507,7 +500,7 @@ const SIDE_FLOW_CHECKS = [
     const { armedRetryQuery, isMonthlyObligationRow, hasUnresolvedSiblingStripeOutcome } = require('../retry-collectibility');
     const armed = await armedRetryQuery(dbh, { customerIds: [customerId] }).select('id', 'description');
     if ((armed || []).some(isMonthlyObligationRow)) {
-      return refuse('This customer has a dues retry scheduled — resolve it on the billing page first. Nothing was proposed.', 'dues_retry_armed');
+      return refuse('This customer has a dues retry scheduled, and the bar can\'t change the billing type from here until that is resolved. Nothing was proposed.', 'dues_retry_armed');
     }
     // Both months the processing-dues predicate covers, each through the cron's own verdict.
     for (const { monthKey } of duesMonths()) {
@@ -554,16 +547,13 @@ function ongoingRootRefusal(roots) {
         ? `a ${addon.name} add-on of ${money(addon.gross)} that a discount takes to $0.00 on each visit it adds`
         : `a ${money(zeroRoot.linePrice)} line price that a discount takes to $0.00 on each visit it adds`;
     }
-    return refuse(`This customer's ongoing ${plan} plan has ${why}; it would bill nothing. Change the billing type on the customer page. Nothing was changed.`, 'billing_visits_priced');
+    return refuse(`This customer's ongoing ${plan} plan has ${why}; it would bill nothing, so the bar can\'t change the billing type from here. Nothing was changed.`, 'billing_visits_priced');
   }
   const pricedRoot = roots.find((r) => r.unverified || r.price > 0);
   if (pricedRoot) {
-    // A price that only a rider plan's lawn host date carries is named by that date.
-    const host = (pricedRoot.hosts || []).find((h) => h.price > 0 && h.price === pricedRoot.price);
     let what = `a price of ${money(pricedRoot.price)} on each visit it adds`;
-    if (host) what = `a price of ${money(host.price)} on the visit it adds on ${host.date}`;
     if (pricedRoot.unverified) what = 'a schedule too long to check';
-    return refuse(`This customer's ongoing ${pricedRoot.service_type || 'recurring'} plan has ${what}. The bar changes the billing type only when no upcoming visit carries a price; change it on the customer page, which shows each visit's charge. Nothing was changed.`, 'billing_visits_priced');
+    return refuse(`This customer's ongoing ${pricedRoot.service_type || 'recurring'} plan has ${what}. The bar changes the billing type only when no upcoming visit carries a price, so it can\'t do this from here. Nothing was changed.`, 'billing_visits_priced');
   }
   return null;
 }
@@ -574,7 +564,7 @@ function ongoingRootRefusal(roots) {
  * `visits` is upcomingVisits() read on the same handle.
  */
 async function billingEditRefusal(dbh, customerId, row, fields, visits, facts = NO_FACTS) {
-  if (visits.length > VISIT_HARD_LIMIT) return refuse('This customer has too many upcoming visits to confirm from the bar; change it on the customer page. Nothing was proposed.', 'too_many_visits');
+  if (visits.length > VISIT_HARD_LIMIT) return refuse('This customer has too many upcoming visits to confirm from the bar, so the bar can\'t change the billing type from here. Nothing was proposed.', 'too_many_visits');
   if (row.billing_mode === 'annual_prepay') return refuse('This customer is on annual prepay; that lane follows the annual invoice and its term, so it is not changed from the bar. Nothing was proposed.', 'annual_prepay_lane');
   if (unchangedEdit(row, fields)) return refuse('The billing type and per-application fee are already set that way. Nothing was proposed.', 'no_change');
   if (await BillingModeRules.liveAnnualPrepayTerm(dbh, customerId)) {
@@ -600,12 +590,12 @@ async function billingEditRefusal(dbh, customerId, row, fields, visits, facts = 
   if (rootRefusal) return rootRefusal;
   const priced = pricedVisitCount(visits);
   if (priced > 0) {
-    return refuse(`This customer has ${plural(priced, 'upcoming visit', 'upcoming visits')} with a price, a prepayment or an invoice. The bar changes the billing type only when no upcoming visit carries one; change it on the customer page, which shows each visit's charge. Nothing was changed.`, 'billing_visits_priced');
+    return refuse(`This customer has ${plural(priced, 'upcoming visit', 'upcoming visits')} with a price, a prepayment or an invoice. The bar changes the billing type only when no upcoming visit carries one, so it can\'t do this from here. Nothing was changed.`, 'billing_visits_priced');
   }
   const voidHeld = visits.find((v) => v.void_hold_invoice_id);
   if (voidHeld) {
     const label = `${voidHeld.service_type || 'An upcoming visit'}${voidHeld.scheduled_date ? ` on ${String(voidHeld.scheduled_date instanceof Date ? voidHeld.scheduled_date.toISOString() : voidHeld.scheduled_date).slice(0, 10)}` : ''}`;
-    return refuse(`${label} has a voided first-application invoice with no replacement; completion will park it for manual billing. Resolve it on the invoice page first. Nothing was changed.`, 'billing_visits_held');
+    return refuse(`${label} has a voided first-application invoice with no replacement; completion will park it for manual billing, so the bar can\'t change the billing type from here until that is resolved. Nothing was changed.`, 'billing_visits_held');
   }
   const pageRefusal = await customerPageRefusal(dbh, customerId, row, fields);
   if (pageRefusal) return pageRefusal;

@@ -15,6 +15,8 @@ import EmailQuickLinks from "../../../components/admin/EmailQuickLinks";
 import { appendStaticLinkClause } from "../../../lib/composerLinks";
 
 import EmailSendOutcome from "./EmailSendOutcome";
+import ScheduleSendMenu from "./ScheduleSendMenu";
+import ScheduleUnconfirmed from "./ScheduleUnconfirmed";
 
 export default function EmailComposer({ active, editor, onSent }) {
   const {
@@ -37,8 +39,13 @@ export default function EmailComposer({ active, editor, onSent }) {
   const [toSearching, setToSearching] = useState(false);
   const [toDropdownOpen, setToDropdownOpen] = useState(false);
   const toFieldRef = useRef(null);
-  const sendDisabled =
-    composeSending || Boolean(editor.sendAttempts.compose) || !composeForm.to.trim() || !composeForm.body.trim();
+  // Sending or scheduling: the draft must not change under the request.
+  const composeBusy = composeSending || editor.scheduling === "compose";
+  const scheduleDisabled =
+    composeBusy || Boolean(editor.sendAttempts.compose) || !composeForm.to.trim() || !composeForm.body.trim();
+  // An unconfirmed schedule request blocks plain Send only; scheduling the
+  // same email again reuses its key, so the server keeps one row.
+  const sendDisabled = scheduleDisabled || editor.scheduleUnconfirmed();
 
   // Debounced customer lookup for the "To" field. Searches by name or
   // partial email via the customers list endpoint and keeps only matches
@@ -136,15 +143,20 @@ export default function EmailComposer({ active, editor, onSent }) {
           {!composeSending && <EmailSendOutcome attempt={editor.sendAttempts.compose} onResolve={outcome => editor.reconcileSend("compose", outcome)} />}
           {editor.sendFeedback.compose && <ActionFeedback error={editor.sendFeedback.compose.error}>{editor.sendFeedback.compose.message}</ActionFeedback>}
           <ActionFeedback error={storageError}>{recoveryNotice}</ActionFeedback>
+          <ScheduleUnconfirmed editor={editor} />
           <EmailQuickLinks active={visible} recipient={composeForm.to} disabled={composeSending}
-            onInsert={(link) => setComposeForm((form) => ({ ...form, body: appendStaticLinkClause(form.body, link) }))} />
+            onInsert={(link) => setComposeForm((form) => ({ ...form, subject: form.subject.trim() || !link.subject ? form.subject : link.subject, body: appendStaticLinkClause(form.body, link) }))} />
         </div>
         <div className="flex shrink-0 flex-wrap justify-end gap-2 border-t-hairline border-zinc-200 px-4 py-3">
           <Button variant="secondary" onClick={close} disabled={composeSending}>Close</Button>
-          <Button variant="ghost" disabled={composeSending} onClick={() => {
+          <Button variant="ghost" disabled={composeBusy} onClick={() => {
             setComposeForm(() => ({ to: "", subject: "", body: "" })); setShowCompose(false);
           }}>Discard draft</Button>
-          <Button onClick={() => handleComposeSend(onSent)} loading={composeSending} disabled={sendDisabled}>Send</Button>
+          <div className="flex gap-px">
+            <Button onClick={() => handleComposeSend(onSent)} loading={composeBusy} disabled={sendDisabled}>Send</Button>
+            {editor.scheduleEnabled && <ScheduleSendMenu disabled={scheduleDisabled}
+              onSchedule={(sendAt) => editor.handleComposeSchedule(sendAt, editor.onScheduled)} />}
+          </div>
         </div>
       </div>
     </div>, document.body,
