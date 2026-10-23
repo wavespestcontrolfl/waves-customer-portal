@@ -6688,12 +6688,17 @@ export default function TaxPage() {
   // GATE_BANK_IMPORT: the leaf only exists when the server says the gate is
   // on (status is the one bank-import endpoint that answers while dark).
   const [bankImportOn, setBankImportOn] = useState(false);
+  // GATE_TAX_LEDGER (nested under GATE_BANK_IMPORT): the Inbox leaf exists
+  // only when the ledger status says so, so the dark feature fails closed;
+  // /bank-import/ledger/status is the one ledger endpoint that answers while
+  // dark, and a failed read keeps the leaf hidden.
+  const [ledgerOn, setLedgerOn] = useState(false);
   const tabGroups = bankImportOn
     ? TAX_TAB_GROUPS.map((g) =>
         g.key === "expenses"
           ? {
               ...g,
-              tabs: [...g.tabs, "bankimport", "ledger"],
+              tabs: [...g.tabs, "bankimport", ...(ledgerOn ? ["ledger"] : [])],
             }
           : g,
       )
@@ -6714,7 +6719,13 @@ export default function TaxPage() {
   }, []);
   useEffect(() => {
     adminFetch("/admin/tax/bank-import/status")
-      .then((s) => setBankImportOn(!!s?.enabled))
+      .then((s) => {
+        setBankImportOn(!!s?.enabled);
+        if (!s?.enabled) return null;
+        return adminFetch("/admin/tax/bank-import/ledger/status").then((l) =>
+          setLedgerOn(!!l?.enabled),
+        );
+      })
       .catch(() => {});
     loadDashboard();
   }, [loadDashboard]);

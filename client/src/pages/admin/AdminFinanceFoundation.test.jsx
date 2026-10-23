@@ -46,6 +46,7 @@ const defaults = {
     nextDeadlines: [],
   },
   "/api/admin/tax/bank-import/status": { enabled: false },
+  "/api/admin/tax/bank-import/ledger/status": { enabled: false },
   "/api/admin/tax/pnl": {},
   "/api/admin/tax/accounts-receivable": {
     summary: { total: 0, count: 0 },
@@ -567,5 +568,33 @@ describe("Finance workflow preservation", () => {
     expect(
       screen.queryByRole("button", { name: "Import", exact: true }),
     ).not.toBeInTheDocument();
+    // the ledger leaf is nested under bank import: nothing asks for it
+    expect(screen.queryByRole("button", { name: "Inbox", exact: true })).not.toBeInTheDocument();
+    expect(requests.some((r) => r.key === "GET /api/admin/tax/bank-import/ledger/status")).toBe(false);
+  });
+  // GATE_TAX_LEDGER fails closed: with bank import on, the Inbox leaf exists
+  // only when the ledger status says enabled; an off status or a failed read
+  // leaves the Tax navigation exactly as it is today.
+  it.each([
+    ["hides", { enabled: false }, 200],
+    ["hides", { error: "Read unavailable" }, 503],
+    ["shows", { enabled: true, rules: 0, inbox: 0, income: 0, bankImport: 0, unexamined: 0 }, 200],
+  ])("%s the Inbox leaf when the ledger status reads %j", async (verb, ledgerStatus, code) => {
+    const key = "GET /api/admin/tax/bank-import/ledger/status";
+    overrides.set("GET /api/admin/tax/bank-import/status", () => response({ enabled: true, counts: {} }));
+    overrides.set(key, () => response(ledgerStatus, code));
+    overrides.set("GET /api/admin/tax/bank-import/ledger/inbox", () => response({ rows: [], total: 0 }));
+    overrides.set("GET /api/admin/tax/bank-import/ledger/rules", () => response({ rules: [] }));
+    open(TaxPage);
+    await taxSection("Expenses");
+    await screen.findByRole("button", { name: "Import", exact: true });
+    await waitFor(() => expect(requests.filter((r) => r.key === key)).toHaveLength(1));
+    if (verb === "hides") {
+      expect(screen.queryByRole("button", { name: "Inbox", exact: true })).not.toBeInTheDocument();
+      return;
+    }
+    fireEvent.click(await screen.findByRole("button", { name: "Inbox", exact: true }));
+    expect(await screen.findByRole("button", { name: "Apply rules now", exact: true })).toBeInTheDocument();
+    expect(requests.some((r) => r.key === "GET /api/admin/tax/bank-import/ledger/inbox")).toBe(true);
   });
 });
