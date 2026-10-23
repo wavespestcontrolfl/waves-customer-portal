@@ -19,15 +19,32 @@ Nothing here is sent to a buyer, a general contractor or an agency. The only out
 
 ## Checklist
 
-`shared/bid-checklist-templates.cjs` is the one place to edit the wording. It holds the ten-line bid-form check (the base list) and the lines each type adds:
+`shared/bid-checklist-templates.cjs` is the one place to edit the wording. A started list is, in this order:
 
-- quote: written quote on the agency's own form, references, insurance certificate;
+1. the type's **stop checks** (section `stop`, go / no-go questions: if the answer is no, do not bid; the label starts "Stop check:" except the ITB pre-bid meeting line);
+2. the **ten base rows** (section `base`): the bid-form responsiveness check, reworded with "done when" detail from a harvest of 12 local pest solicitations;
+3. the type's **own rows**.
+
+| Type | Stop checks | Base | Own rows | Total |
+| --- | --- | --- | --- | --- |
+| other, or none | 0 | 10 | 0 | 10 |
+| quote, rfq | 3 (license type, experience, price cap) | 10 | 5 | 18 |
+| itb | 4 (local office, license and staffing, reference rules, pre-bid) | 10 | 11 | 25 |
+| rfp, itn | 2 (criteria matrix, participation) | 10 | 9 | 21 |
+| gc_subcontract | 2 (GC insurance, scope fit) | 10 | 6 | 18 |
+| federal | 2 (set-aside, SAM active) | 10 | 5 | 17 |
+
+The type's own rows:
+
+- quote: the agency's form, references, insurance certificate, public-records answer, no contact before award;
+- itb: the five papers Sarasota County Schools rejected bids for with bid 24-0118, then references form, local preference, post-opening deadlines, responsibility evidence, protest window, no contact;
+- rfp: section order, evaluation criteria with page references, page limits, separate price, reference surveys, narrative, three similar contracts, presentation, no contact;
 - gc_subcontract: the GC's bid form with every acknowledgment line initialed, the GC's prequalification form, insurance that meets the GC's insurance exhibit, price hold period stated and met, alternates and deducts priced, warranty terms matching the specification (model: the Cove + Willoughby termite package);
-- itb: the five papers Sarasota County Schools asked for with bid 24-0118;
-- rfp: section order, evaluation criteria with page references, page limits, separate price, references;
-- federal: SAM registration, reps and certs, SF 1449, wage determination.
+- federal: SAM registration, reps and certs, SF 1449, wage determination, past performance.
 
-An RFQ uses the quote lines and an ITN uses the RFP lines (same keys, so changing between them adds nothing twice). `other` gets the base list only.
+An RFQ uses the quote rows and an ITN uses the RFP rows (same keys, so changing between them adds nothing twice).
+
+`add=missing` after a type change adds the new type's stop checks and own rows after the lines already on the bid (positions only grow); the page shows them in position order.
 
 Routes (all under `/api/admin/bid-desk/:id/checklist`, 404 while the gate is off):
 

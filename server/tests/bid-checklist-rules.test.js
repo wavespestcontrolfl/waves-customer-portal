@@ -3,7 +3,7 @@
 const { reminderDue, datesDue } = require('../services/bid-desk/rules');
 const { reminderSpec, questionsReminderSpec, jobWalkReminderSpec } = require('../services/bid-desk/alerts');
 const { composeAdminAlert } = require('../services/admin-alert-compose');
-const { templateRows, TEMPLATE_TYPES } = require('../../shared/bid-checklist-templates.cjs');
+const { templateRows, TEMPLATE_TYPES, SECTION_STOP, SECTION_BASE } = require('../../shared/bid-checklist-templates.cjs');
 
 const DAY = 24 * 60 * 60 * 1000;
 const NOW = new Date('2026-10-01T14:00:00Z'); // 10:00 ET
@@ -127,32 +127,52 @@ describe('notification copy follows the admin notification rule', () => {
 });
 
 describe('templates', () => {
-  const labels = (type) => templateRows(type).map((r) => r.label);
 
-  test('the base list is the ten-line bid-form check, in order', () => {
+  const sections = (type) => templateRows(type).map((r) => r.section);
+  const BASE_TEN = Array(10).fill('base');
+
+  test('the base list is the ten-line bid check, in order', () => {
     const base = templateRows(null);
     expect(base).toHaveLength(10);
     expect(base[0].label).toMatch(/^Bid form used exactly as issued/);
-    expect(base[2].label).toMatch(/addendum acknowledged and signed/);
-    expect(base[9].label).toMatch(/Submission method, format, file names and deadline confirmed/);
+    expect(base[2].label).toMatch(/^Every addendum acknowledged/);
+    expect(base[9].label).toMatch(/^Submission method, file format, file names and deadline confirmed/);
     expect(base.every((r) => r.section === 'base' && r.required)).toBe(true);
+    expect(base.map((r) => r.template_key)).toEqual(['bid_form', 'prices', 'addenda', 'bid_security', 'signer', 'forms', 'licenses', 'subs', 'submittals', 'submission'].map((k) => `base.${k}`));
   });
 
-  test('each type adds its own lines after the base; rfq and itn borrow the quote and rfp lines; other gets the base only', () => {
+  test('a typed list is the stop checks, then the ten base rows, then the type\'s own rows', () => {
     expect(TEMPLATE_TYPES.sort()).toEqual(['federal', 'gc_subcontract', 'itb', 'itn', 'quote', 'rfp', 'rfq']);
-    expect(labels('quote').slice(10)).toHaveLength(3);
-    expect(labels('itb').slice(10).join('|')).toMatch(/business license.*operator certificate.*works full-time.*Employee ID.*EPA/i);
-    expect(labels('itb')).toHaveLength(15);
-    expect(labels('rfp')).toHaveLength(15);
-    expect(labels('federal').slice(10).join('|')).toMatch(/SAM registration.*SF 1449.*Wage determination/);
-    // RFQ is a request for quotes: the quote lines, with the same keys, so a type change adds nothing twice.
+    const shape = { quote: [3, 5], rfq: [3, 5], itb: [4, 11], rfp: [2, 9], itn: [2, 9], gc_subcontract: [2, 6], federal: [2, 5] };
+    const own = { quote: 'quote', rfq: 'quote', itb: 'itb', rfp: 'rfp', itn: 'rfp', gc_subcontract: 'gc_subcontract', federal: 'federal' };
+    for (const [type, [stops, extra]] of Object.entries(shape)) {
+      expect(sections(type)).toEqual([...Array(stops).fill(SECTION_STOP), ...BASE_TEN, ...Array(extra).fill(own[type])]);
+      expect(templateRows(type)).toHaveLength(stops + 10 + extra);
+    }
+    expect([SECTION_STOP, SECTION_BASE]).toEqual(['stop', 'base']);
+  });
+
+  test('the stop keys differ per type and the base rows are the same ten everywhere', () => {
+    const stopKeys = (type) => templateRows(type).filter((r) => r.section === 'stop').map((r) => r.template_key);
+    expect(stopKeys('quote')).toEqual(['stop.license_type', 'stop.experience', 'stop.price_cap']);
+    expect(stopKeys('itb')).toEqual(['stop.local_office', 'stop.license_staffing', 'stop.reference_rules', 'stop.prebid']);
+    expect(stopKeys('rfp')).toEqual(['stop.criteria_matrix', 'stop.participation']);
+    expect(stopKeys('gc_subcontract')).toEqual(['stop.gc_insurance', 'stop.scope_fit']);
+    expect(stopKeys('federal')).toEqual(['stop.set_aside', 'stop.sam_active']);
+    const baseOf = (type) => templateRows(type).filter((r) => r.section === 'base');
+    for (const type of TEMPLATE_TYPES) expect(baseOf(type)).toEqual(templateRows(null));
+    expect(templateRows('quote')[0].label).toMatch(/^Stop check: /);
+  });
+
+  test('the type\'s own rows carry their wording', () => {
+    const own = (type) => templateRows(type).filter((r) => r.section !== 'stop' && r.section !== 'base').map((r) => r.label).join('|');
+    expect(own('itb')).toMatch(/business license.*operator certificate.*works full-time.*Employee ID.*EPA/i);
+    expect(own('federal')).toMatch(/SAM registration.*SF 1449.*Wage determination/);
+    expect(own('gc_subcontract')).toMatch(/bid form completed, every acknowledgment line initialed \(escalation, price hold period, sales tax, addenda listed\).*prequalification.*insurance exhibit.*additional insured.*Price hold period stated and met.*Alternates and deducts.*Warranty terms match the specification.*spec sections and drawings/i);
+    // RFQ is a request for quotes and ITN uses the RFP lines, with the same keys, so a type change adds nothing twice.
     expect(templateRows('rfq')).toEqual(templateRows('quote'));
     expect(templateRows('itn')).toEqual(templateRows('rfp'));
-    const gc = templateRows('gc_subcontract');
-    expect(gc).toHaveLength(16);
-    expect(gc.slice(10).map((r) => r.section)).toEqual(Array(6).fill('gc_subcontract'));
-    expect(gc.slice(10).map((r) => r.label).join('|')).toMatch(/bid form completed, every acknowledgment line initialed \(escalation, price hold period, sales tax, addenda listed\).*prequalification.*insurance exhibit.*additional insured.*Price hold period stated and met.*Alternates and deducts.*Warranty terms match the specification.*spec sections and drawings/i);
-    for (const type of ['other', null, undefined]) expect(templateRows(type)).toHaveLength(10);
+    for (const type of ['other', null, undefined]) expect(sections(type)).toEqual(BASE_TEN);
   });
 
   test('every key is unique, stable-looking and fits the column; every section fits too', () => {

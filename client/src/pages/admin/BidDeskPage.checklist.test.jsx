@@ -183,3 +183,14 @@ it("shows no confirm button for a confirmed site visit date or when there is non
   await screen.findByLabelText(/Site visit or job walk/);
   expect(screen.queryByRole("button", { name: "Confirm site visit date" })).toBeNull();
 });
+
+it("lists the stop checks first and marks them apart from the other lines", async () => {
+  const lines = [item(1, { section: "stop", label: "Stop check: we hold the license" }), item(2, { section: "base", label: "Bid form used exactly as issued" })];
+  route({ "GET /admin/bid-desk/": LIST_ON, "GET /admin/bid-desk/b1": () => reply(detail({ checklist: lines, checklist_progress: { checked: 0, required: 2, total: 2 } })) });
+  renderPage();
+  const stop = (await screen.findByLabelText("Stop check: we hold the license")).closest("li");
+  const base = screen.getByLabelText("Bid form used exactly as issued").closest("li");
+  expect(stop).toHaveAttribute("data-section", "stop");
+  expect(base).toHaveAttribute("data-section", "base");
+  expect(stop.compareDocumentPosition(base) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});

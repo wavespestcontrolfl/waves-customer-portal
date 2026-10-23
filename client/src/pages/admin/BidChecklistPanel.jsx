@@ -175,7 +175,8 @@ function ChecklistRow({ item, first, last, busy, onTick, onNotes, onArchive, onM
   const [notes, setNotes] = useState(item.notes || "");
   useEffect(() => setNotes(item.notes || ""), [item.notes]);
   return (
-    <li className="grid gap-1 rounded-sm border-hairline border-zinc-200 px-3 py-2">
+    // A stop check (a go / no-go question) sits first and is shaded so it reads apart from the paperwork lines.
+    <li data-section={item.section} className={`grid gap-1 rounded-sm border-hairline border-zinc-200 px-3 py-2${item.section === "stop" ? " bg-zinc-50" : ""}`}>
       <div className="flex flex-wrap items-start gap-2">
         <Checkbox id={`check-${item.id}`} label={item.label} checked={!!item.checked_at} disabled={busy} onChange={(event) => onTick(item, event.target.checked)} />
         {!item.required && <Badge>Optional</Badge>}

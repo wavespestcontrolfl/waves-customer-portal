@@ -231,7 +231,7 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
       await call('PATCH', `/${bidId}/checklist/${first.id}`, { checked: true });
       const list = (await call('GET', '/')).body;
       expect(list.checklist_live).toBe(true);
-      expect(list.bids.find((b) => b.id === bidId).checklist_progress).toEqual({ checked: 1, required: 13 });
+      expect(list.bids.find((b) => b.id === bidId).checklist_progress).toEqual({ checked: 1, required: 18 });
     });
   });
 
@@ -266,21 +266,21 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
       const bidId = await newBid();
       const first = await call('POST', `/${bidId}/checklist/start`, { type: 'itb' });
       expect(first.status).toBe(201);
-      expect(first.body).toMatchObject({ added: 15, existing: 0, type: 'itb' });
-      expect(first.body.checklist_progress).toEqual({ checked: 0, required: 15, total: 15 });
+      expect(first.body).toMatchObject({ added: 25, existing: 0, type: 'itb' });
+      expect(first.body.checklist_progress).toEqual({ checked: 0, required: 25, total: 25 });
       const rows = await items(bidId);
       expect(rows.map((r) => r.template_key)).toEqual(templateRows('itb').map((r) => r.template_key));
       expect(rows.map((r) => r.position)).toEqual(rows.map((_, i) => i + 1));
       expect((await bidRow(bidId)).solicitation_type).toBe('itb');
       const again = await call('POST', `/${bidId}/checklist/start`, { type: 'itb' });
       expect(again.status).toBe(200);
-      expect(again.body).toMatchObject({ added: 0, existing: 15 });
-      expect(await items(bidId)).toHaveLength(15);
+      expect(again.body).toMatchObject({ added: 0, existing: 25 });
+      expect(await items(bidId)).toHaveLength(25);
     });
 
     test('start with no type body uses the bid\'s saved type, else the base list', async () => {
       const typed = await newBid({ solicitation_type: 'federal' });
-      expect((await call('POST', `/${typed}/checklist/start`, {})).body.added).toBe(14);
+      expect((await call('POST', `/${typed}/checklist/start`, {})).body.added).toBe(17);
       const untyped = await newBid();
       expect((await call('POST', `/${untyped}/checklist/start`)).body.added).toBe(10);
       expect((await bidRow(untyped)).solicitation_type).toBeNull();
@@ -293,13 +293,15 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
       const custom = (await call('POST', `/${bidId}/checklist`, { label: 'Bring the lift permit', sourceText: 'Page 9, item 4' })).body.item;
       const [removed] = await items(bidId);
       await call('DELETE', `/${bidId}/checklist/${removed.id}`);
-      // The type changes to RFP: its five lines are missing, the base lines are carried (the archived one too).
+      // The type changes to RFP: its two stop checks and nine own lines are missing; the base lines are carried (the
+      // archived one too). The new stop checks go after the existing lines (positions only grow).
       await call('PATCH', `/${bidId}`, { solicitationType: 'rfp' });
       const res = await call('POST', `/${bidId}/checklist/start?add=missing`, {});
       expect(res.status).toBe(201);
-      expect(res.body).toMatchObject({ added: 5, type: 'rfp' });
+      expect(res.body).toMatchObject({ added: 11, type: 'rfp' });
       const keys = (await items(bidId)).map((r) => r.template_key);
-      expect(keys.filter((k) => k && k.startsWith('rfp.'))).toHaveLength(5);
+      expect(keys.filter((k) => k && k.startsWith('rfp.'))).toHaveLength(9);
+      expect(keys.filter((k) => k && k.startsWith('stop.'))).toHaveLength(2);
       expect(keys.filter((k) => k === removed.template_key)).toHaveLength(1); // still the one archived row
       expect((await mockPg('bid_checklist_items').where({ id: removed.id }).first()).archived_at).not.toBeNull();
       // Positions keep growing past the custom line, and a second add=missing adds nothing.
@@ -372,9 +374,12 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
       const bidId = await newBid();
       await call('POST', `/${bidId}/checklist/start`, { type: 'quote' });
       const detail = (await call('GET', `/${bidId}`)).body;
-      expect(detail.checklist).toHaveLength(13);
-      expect(detail.checklist[0]).toMatchObject({ section: 'base', template_key: 'base.bid_form' });
-      expect(detail.checklist_progress).toEqual({ checked: 0, required: 13, total: 13 });
+      expect(detail.checklist).toHaveLength(18);
+      // The type's stop checks come first, then the ten-line check, then the type's own lines.
+      expect(detail.checklist[0]).toMatchObject({ section: 'stop', template_key: 'stop.license_type' });
+      expect(detail.checklist[3]).toMatchObject({ section: 'base', template_key: 'base.bid_form' });
+      expect(detail.checklist[13]).toMatchObject({ section: 'quote', template_key: 'quote.written_quote' });
+      expect(detail.checklist_progress).toEqual({ checked: 0, required: 18, total: 18 });
     });
   });
 
