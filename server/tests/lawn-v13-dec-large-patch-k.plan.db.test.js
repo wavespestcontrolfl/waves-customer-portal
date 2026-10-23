@@ -68,7 +68,7 @@ describeDb('December large patch potassium bag through PostgreSQL', () => {
   beforeEach(async () => { setGates(); await knex('lawn_trouble_areas').del(); await knex('property_application_history').del(); await knex('products_catalog').where({ id: boProduct.id }).update({ best_price: null }); });
   afterEach(() => { for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; } });
 
-  // A December visit at a fresh lawn, optionally with mapped areas ({ type, status, target }). `target` is the disease the newest fungicide
+  // A December visit at a fresh lawn, optionally with mapped areas ({ type, status, target, firstSeen, lastSeen, clearedAt }). `target` is the disease the newest fungicide
   // spot application at the area's place recorded (property_application_history.target_pest, from the sheet's target); a fungus area
   // with no `target` has no disease on record. `ledger` adds more application rows ({ place, target, daysAgo, date, category, retracted }).
   async function decemberVisit(areas = [], { city, ledger = [] } = {}) {
@@ -78,7 +78,7 @@ describeDb('December large patch potassium bag through PostgreSQL', () => {
     for (const [index, area] of areas.entries()) {
       await knex('lawn_trouble_areas').insert({
         customer_id: f.customerId, property_id: f.property.id, place: ['front', 'back', 'left_side', 'right_side'][index], type: area.type, status: area.status || 'active',
-        source: 'tech_tap', first_seen_on: day, last_seen_on: day,
+        source: 'tech_tap', first_seen_on: area.firstSeen || day, last_seen_on: area.lastSeen || day, cleared_at: area.clearedAt || null,
       });
       if (area.target) ledger = [{ place: ['front', 'back', 'left_side', 'right_side'][index], target: area.target }, ...ledger];
     }
@@ -222,6 +222,20 @@ describeDb('December large patch potassium bag through PostgreSQL', () => {
       expect(itemOf(result.mixCalculator.items, TEN).mix.ratePer1000).toBeCloseTo(4.5, 3);
     });
 
+    test('the stored replacement row renamed with no alias (the swapped line matches no product): the original 10-0-22 is still required, so the archived recipe is unavailable', async () => {
+      await archive('archived');
+      await knex('lawn_protocol_products').where({ product_id: boProduct.id }).update({ product_name: 'Renamed by staff' });
+      await knex('products_catalog').where({ id: boProduct.id }).update({ name: 'Renamed by staff' });
+      try {
+        const result = await plan(await pinned([{ type: 'fungus', target: LARGE }]));
+        expect(result.propertyGate.blocks.map((block) => block.code)).toContain('lawn_archived_recipe_unavailable');
+        expect(result.mixCalculator.items).toEqual([]);
+      } finally {
+        await knex('lawn_protocol_products').where({ product_id: boProduct.id }).update({ product_name: BO });
+        await knex('products_catalog').where({ id: boProduct.id }).update({ name: BO });
+      }
+    });
+
     test('a K target the row does not state is still rejected for the swapped bag', async () => {
       await archive('archived');
       const stored = await knex('lawn_protocol_products').where({ product_id: boProduct.id }).first('id', 'gates');
@@ -303,6 +317,23 @@ describeDb('December large patch potassium bag through PostgreSQL', () => {
       expect(await swapped(await decemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: LARGE, date: day }, { place: 'front', target: 'Brown patch', date: day }] }))).toBe(true);
     });
 
+    test('the AREA is dated to the visit too: cleared after the visit still counts for it; cleared on or before it, first seen after it, or active again after it does not', async () => {
+      const lp = { place: 'front', target: LARGE, date: daysBeforeVisit(20) };
+      // Cleared AFTER the visit day: it was active on the visit.
+      expect(await swapped(await decemberVisit([{ type: 'fungus', status: 'cleared', clearedAt: '2026-12-20T15:00:00Z' }], { ledger: [lp] }))).toBe(true);
+      // Cleared on the visit day or before: not active on it (fails closed, the same day included).
+      await normal(await decemberVisit([{ type: 'fungus', status: 'cleared', clearedAt: '2026-12-10T15:00:00Z' }], { ledger: [lp] }));
+      await normal(await decemberVisit([{ type: 'fungus', status: 'cleared', clearedAt: '2026-12-05T15:00:00Z' }], { ledger: [lp] }));
+      // Cleared with no timestamp: unknown, fails closed.
+      await normal(await decemberVisit([{ type: 'fungus', status: 'cleared' }], { ledger: [lp] }));
+      // First seen after the visit: the area did not exist on that day.
+      await normal(await decemberVisit([{ type: 'fungus', firstSeen: '2026-12-20', lastSeen: '2026-12-20' }], { ledger: [lp] }));
+      // Reactivated (or treated) after the visit: the table keeps no history, so an area with later activity is not shown to have been active on the visit.
+      await normal(await decemberVisit([{ type: 'fungus', lastSeen: '2026-12-20' }], { ledger: [lp] }));
+      // Seen on or before the visit day: counts.
+      expect(await swapped(await decemberVisit([{ type: 'fungus', firstSeen: '2026-12-05', lastSeen: '2026-12-10' }], { ledger: [lp] }))).toBe(true);
+    });
+
     test('a take-all area with a large patch application at its place is still take-all: no swap', async () => {
       await normal(await decemberVisit([{ type: 'take_all', target: LARGE }]));
     });
@@ -321,7 +352,7 @@ describeDb('December large patch potassium bag through PostgreSQL', () => {
   test('a failed trouble-area read: the strict plan throws, the lenient plan keeps the 10-0-22 and still builds', async () => {
     const visit = await decemberVisit([{ type: 'fungus', target: LARGE }]);
     const areas = require('../services/lawn-trouble-areas');
-    const spy = jest.spyOn(areas, 'loadActive').mockRejectedValue(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
+    const spy = jest.spyOn(areas, 'loadActiveAsOf').mockRejectedValue(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
     try {
       await expect(plan(visit)).rejects.toThrow('db down');
       await expect(buildPlanForService(visit.id, { db: knex, strict: true, completionDefaultsEnabled: false })).rejects.toThrow('db down');

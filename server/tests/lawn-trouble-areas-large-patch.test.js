@@ -67,10 +67,11 @@ describe('loadActiveLargePatch', () => {
   });
 
   test('asOf dates the evidence: only applications on or before that day are read; without asOf every application counts', async () => {
-    jest.spyOn(areas, 'loadActive').mockResolvedValue([{ id: 'a', place: 'front', type: 'fungus' }]);
+    jest.spyOn(areas, 'loadActiveAsOf').mockResolvedValue([{ id: 'a', place: 'front', type: 'fungus' }]);
     const dated = ledgerKnex([{ treated_place: 'front', target_pest: 'Large patch' }]);
     expect((await areas.loadActiveLargePatch(dated.knex, PROPERTY, { asOf: '2026-12-10' })).map((area) => area.id)).toEqual(['a']);
     expect(dated.calls).toEqual(expect.arrayContaining([['where', 'application_date', '<=', '2026-12-10']]));
+    expect(areas.loadActiveAsOf).toHaveBeenCalledWith(dated.knex, PROPERTY, '2026-12-10');
     const undated = ledgerKnex([{ treated_place: 'front', target_pest: 'Large patch' }]);
     await areas.loadActiveLargePatch(undated.knex, PROPERTY);
     expect(undated.calls.some((call) => call[0] === 'where' && call[1] === 'application_date')).toBe(false);
@@ -103,5 +104,44 @@ describe('loadActiveLargePatch', () => {
     expect(await areas.loadActiveLargePatch(ledgerKnex([]).knex, PROPERTY)).toEqual([]);
     const failing = { knex: jest.fn(() => { throw Object.assign(new Error('db down'), { code: 'ECONNRESET' }); }) };
     await expect(areas.loadActiveLargePatch(failing.knex, PROPERTY)).rejects.toThrow('db down');
+  });
+});
+
+describe('loadActiveAsOf', () => {
+  const PROPERTY = '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
+  const recorder = (rows) => {
+    const calls = [];
+    const query = {};
+    const nested = () => { const inner = {}; for (const method of ['whereNull', 'orWhereNull', 'orWhere', 'where', 'whereRaw']) inner[method] = jest.fn((...args) => { calls.push(['nested', method, ...(typeof args[0] === 'function' ? ['fn'] : args)]); if (typeof args[0] === 'function') args[0](inner); return inner; }); return inner; };
+    for (const method of ['where', 'orderByRaw', 'whereRaw']) {
+      query[method] = jest.fn((...args) => { calls.push([method, ...(typeof args[0] === 'function' ? ['fn'] : args)]); if (typeof args[0] === 'function') args[0](nested()); return query; });
+    }
+    query.select = jest.fn(async () => rows);
+    const knex = jest.fn((table) => { calls.push(['table', table]); return query; });
+    return { knex, calls };
+  };
+
+  test('without asOf it is loadActive (the current state)', async () => {
+    jest.spyOn(areas, 'loadActive').mockResolvedValue([{ id: 'a' }]);
+    expect(await areas.loadActiveAsOf({}, PROPERTY, null)).toEqual([{ id: 'a' }]);
+    expect(areas.loadActive).toHaveBeenCalledTimes(1);
+    jest.restoreAllMocks();
+  });
+
+  test('with asOf it asks for areas first seen and last seen on or before the day, active, or cleared after that ET day (fail closed)', async () => {
+    const { knex, calls } = recorder([{ id: 'a', place: 'front', type: 'fungus', last_treated_on: '2026-12-01', last_seen_on: '2026-12-01' }]);
+    const found = await areas.loadActiveAsOf(knex, PROPERTY, '2026-12-10');
+    expect(found.map((area) => area.id)).toEqual(['a']);
+    expect(calls).toEqual(expect.arrayContaining([
+      ['table', 'lawn_trouble_areas'], ['where', { property_id: PROPERTY }], ['where', 'first_seen_on', '<=', '2026-12-10'], ['where', 'last_seen_on', '<=', '2026-12-10'],
+      ['nested', 'orWhere', 'last_treated_on', '<=', '2026-12-10'],
+    ]));
+    expect(calls.some((call) => call[0] === 'nested' && String(call[2]).includes("(cleared_at AT TIME ZONE 'America/New_York')::date > ?::date"))).toBe(true);
+  });
+
+  test('a malformed property id reads nothing', async () => {
+    const { knex } = recorder([]);
+    expect(await areas.loadActiveAsOf(knex, 'not-a-uuid', '2026-12-10')).toEqual([]);
+    expect(knex).not.toHaveBeenCalled();
   });
 });

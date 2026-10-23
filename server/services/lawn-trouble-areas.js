@@ -116,14 +116,45 @@ async function loadActive(knex, propertyId) {
     .where({ property_id: propertyId, status: 'active' })
     .orderByRaw('last_treated_on DESC NULLS LAST, created_at DESC')
     .select('id', 'place', 'type', 'last_treated_on', 'last_seen_on');
-  return rows.map((row) => ({
-    id: row.id,
-    place: row.place,
-    placeLabel: placeLabel(row.place),
-    type: row.type,
-    typeLabel: TYPE_LABELS[row.type] || row.type,
-    lastTreatedOn: dayOf(row.last_treated_on || row.last_seen_on),
-  }));
+  return rows.map(areaView);
+}
+
+const areaView = (row) => ({
+  id: row.id,
+  place: row.place,
+  placeLabel: placeLabel(row.place),
+  type: row.type,
+  typeLabel: TYPE_LABELS[row.type] || row.type,
+  lastTreatedOn: dayOf(row.last_treated_on || row.last_seen_on),
+});
+
+/**
+ * The property's trouble areas AS THEY STOOD on a day (`asOf`, YYYY-MM-DD, a visit's scheduled day), in loadActive's shape. The table keeps
+ * no status history: a row holds only its CURRENT status, and a reactivation erases cleared_at and cleared_by, so what it can prove about a
+ * past day is limited. The read therefore fails closed. An area counts for `asOf` only when
+ *   - it existed: first_seen_on <= asOf; and
+ *   - nothing has happened to it after that day: last_seen_on <= asOf and last_treated_on <= asOf (a later treatment is what reactivates a
+ *     cleared area, and the lost history could hide a clear and reactivate around the visit, so an area with later activity is not shown to
+ *     have been active on that day); and
+ *   - it was active then: its status is active now, or it was cleared AFTER that day (cleared_at, ET day, later than asOf; cleared on or
+ *     before the day is not active on it).
+ * So an area cleared after a visit still counts for that visit, and one reactivated later does not retroactively qualify for an earlier one.
+ * The cost is deliberate: an area treated again after a past visit no longer reads as active on that earlier day. Without `asOf` this is
+ * loadActive (the current state). A read failure throws.
+ */
+async function loadActiveAsOf(knex, propertyId, asOf) {
+  if (!asOf) return module.exports.loadActive(knex, propertyId);
+  if (!propertyId || !UUID_RE.test(String(propertyId))) return [];
+  const rows = await knex('lawn_trouble_areas')
+    .where({ property_id: propertyId })
+    .where('first_seen_on', '<=', asOf)
+    .where('last_seen_on', '<=', asOf)
+    .where((q) => q.whereNull('last_treated_on').orWhere('last_treated_on', '<=', asOf))
+    .where((q) => q.where('status', 'active').orWhere((cleared) => cleared.where('status', 'cleared')
+      .whereRaw("(cleared_at AT TIME ZONE 'America/New_York')::date > ?::date", [asOf])))
+    .orderByRaw('last_treated_on DESC NULLS LAST, created_at DESC')
+    .select('id', 'place', 'type', 'last_treated_on', 'last_seen_on');
+  return rows.map(areaView);
 }
 
 // ── large patch evidence ────────────────────────────────────────────────────
@@ -147,10 +178,10 @@ const isLargePatchTarget = (value) => LARGE_PATCH_TARGET.test(String(value || ''
  * `asOf` (a YYYY-MM-DD day, the visit's scheduled day) dates the evidence: only applications on or before that day are read, so an
  * application recorded AFTER a visit never decides that visit (a later large patch row does not swap an older visit; a later
  * other-disease row does not hide the evidence that stood on the day). Without `asOf` every application counts (an undated read).
- * A read failure throws, like loadActive.
+ * The AREA is dated the same way (loadActiveAsOf), so a visit sees the areas as they stood on its day. A read failure throws, like loadActive.
  */
 async function loadActiveLargePatch(knex, propertyId, { asOf = null } = {}) {
-  const areas = (await module.exports.loadActive(knex, propertyId)).filter((area) => area.type === 'fungus');
+  const areas = (await module.exports.loadActiveAsOf(knex, propertyId, asOf)).filter((area) => area.type === 'fungus');
   if (!areas.length) return [];
   const query = knex('property_application_history')
     .where({ property_id: propertyId })
@@ -606,6 +637,7 @@ module.exports = {
   placeChoices,
   troubleTypeFor,
   loadActive,
+  loadActiveAsOf,
   loadActiveLargePatch,
   isLargePatchTarget,
   hasAreaOfType,

@@ -61,7 +61,7 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
   beforeEach(async () => { setGates(); await knex('lawn_trouble_areas').del(); await knex('property_application_history').del(); });
   afterEach(() => { for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; } });
 
-  // A November visit at a fresh lawn, optionally with mapped areas ({ type, status, target }). `target` is the disease the newest fungicide
+  // A November visit at a fresh lawn, optionally with mapped areas ({ type, status, target, firstSeen, lastSeen, clearedAt }). `target` is the disease the newest fungicide
   // spot application at the area's place recorded (property_application_history.target_pest); a fungus area with no `target` has no
   // disease on record. `ledger` adds more application rows ({ place, target, daysAgo, date, category, retracted }).
   async function novemberVisit(areas = [], { ledger = [] } = {}) {
@@ -71,7 +71,7 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
     for (const [index, area] of areas.entries()) {
       await knex('lawn_trouble_areas').insert({
         customer_id: f.customerId, property_id: f.property.id, place: ['front', 'back', 'left_side', 'right_side'][index], type: area.type, status: area.status || 'active',
-        source: 'tech_tap', first_seen_on: day, last_seen_on: day,
+        source: 'tech_tap', first_seen_on: area.firstSeen || day, last_seen_on: area.lastSeen || day, cleared_at: area.clearedAt || null,
       });
       if (area.target) ledger = [{ place: ['front', 'back', 'left_side', 'right_side'][index], target: area.target }, ...ledger];
     }
@@ -169,6 +169,17 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
       expect(await rateOf(await novemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: LARGE, date: day }, { place: 'front', target: 'Brown patch', date: day }] }))).toBeCloseTo(2.0833, 3);
     });
 
+    test('the AREA is dated to the visit too: cleared after the visit still counts for it; cleared on or before it, first seen after it, or active again after it does not', async () => {
+      const lp = { place: 'front', target: LARGE, date: daysBeforeVisit(20) };
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', status: 'cleared', clearedAt: '2026-11-20T15:00:00Z' }], { ledger: [lp] }))).toBeCloseTo(2.0833, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', status: 'cleared', clearedAt: '2026-11-10T15:00:00Z' }], { ledger: [lp] }))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', status: 'cleared', clearedAt: '2026-11-05T15:00:00Z' }], { ledger: [lp] }))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', status: 'cleared' }], { ledger: [lp] }))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', firstSeen: '2026-11-20', lastSeen: '2026-11-20' }], { ledger: [lp] }))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', lastSeen: '2026-11-20' }], { ledger: [lp] }))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', firstSeen: '2026-11-05', lastSeen: '2026-11-10' }], { ledger: [lp] }))).toBeCloseTo(2.0833, 3);
+    });
+
     test('the newest named target at the place decides; a retracted or non-fungicide row is not evidence', async () => {
       expect(await rateOf(await novemberVisit([{ type: 'fungus', target: LARGE }], { ledger: [{ place: 'front', target: 'Dollar spot', daysAgo: 0 }] }))).toBeCloseTo(3.125, 3);
       expect(await rateOf(await novemberVisit([{ type: 'fungus', target: 'Dollar spot' }], { ledger: [{ place: 'front', target: LARGE, daysAgo: 0 }] }))).toBeCloseTo(2.0833, 3);
@@ -242,7 +253,7 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
   test('a failed trouble-area read: the strict plan throws, the lenient plan keeps the normal target and still builds', async () => {
     const visit = await novemberVisit([{ type: 'fungus', target: LARGE }]);
     const areas = require('../services/lawn-trouble-areas');
-    const spy = jest.spyOn(areas, 'loadActive').mockRejectedValue(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
+    const spy = jest.spyOn(areas, 'loadActiveAsOf').mockRejectedValue(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
     try {
       await expect(plan(visit)).rejects.toThrow('db down');
       await expect(buildPlanForService(visit.id, { db: knex, strict: true, completionDefaultsEnabled: false })).rejects.toThrow('db down');

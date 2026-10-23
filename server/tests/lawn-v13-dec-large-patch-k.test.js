@@ -372,3 +372,41 @@ describe('a skipped swapped-in bag is recorded like a skipped default (lawn-prot
     expect(result.unlisted).toEqual([{ productId: 'bo', productName: DEC_K_PRODUCT }]);
   });
 });
+
+describe('the archived recipe check waives the replaced 10-0-22 only when the replacement is really there', () => {
+  const { archivedLawnRecipeMatches } = require('../services/lawn-completion-defaults');
+  const rule = V13_TROUBLE_PRODUCT_SWAPS[0];
+  const ten = { productId: 't22', productName: DEC_FROM, protocolProductName: DEC_FROM, defaultInPlan: true, applicationMode: 'broadcast', ratePer1000: null, rateUnit: 'lb_n', gates: { targetN: '0.45 lb N/1000' } };
+  const bo = { productId: 'bo', productName: DEC_K_PRODUCT, protocolProductName: DEC_K_PRODUCT, defaultInPlan: false, applicationMode: 'broadcast', ratePer1000: null, rateUnit: 'lb_k', gates: { targetK: '0.99 lb K2O/1000' } };
+  const archived = (...rows) => ({ status: 'archived', products: rows });
+  const boItem = { selected: true, scope: 'BROADCAST_FULL', product: { id: 'bo' }, mix: { rateSource: 'target_k_analysis', ratePer1000: 4.125, targetKPer1000: 0.99 } };
+  const tenItem = { selected: true, scope: 'BROADCAST_FULL', product: { id: 't22' }, mix: { rateSource: 'target_n_analysis', ratePer1000: 4.5, targetNPer1000: 0.45 } };
+
+  test('replacement stored, linked and selected: the 10-0-22 default is waived and the archived recipe matches', () => {
+    expect(archivedLawnRecipeMatches(archived(ten, bo), [boItem], null, null, rule)).toBe(true);
+  });
+
+  test('no swap: the 10-0-22 stays required (a plan without it fails), and with it the recipe matches as before', () => {
+    expect(archivedLawnRecipeMatches(archived(ten, bo), [boItem], null, null, null)).toBe(false);
+    expect(archivedLawnRecipeMatches(archived(ten, bo), [tenItem], null, null, null)).toBe(true);
+  });
+
+  test.each([
+    ['the stored replacement row was renamed (no alias): it is not found by name', () => archived(ten, { ...bo, productName: 'Renamed', protocolProductName: 'Renamed' }), [boItem]],
+    ['the stored replacement row was deleted', () => archived(ten), [boItem]],
+    ['the stored replacement row is not linked to a catalog product', () => archived(ten, { ...bo, productId: null }), [boItem]],
+    ['the plan did not select the replacement (unmatched line)', () => archived(ten, bo), []],
+    ['the plan selected another product, not the replacement', () => archived(ten, bo), [{ ...boItem, product: { id: 'other' } }]],
+    ['the replacement item is present but unselected', () => archived(ten, bo), [{ ...boItem, selected: false }]],
+  ])('%s: the original default is still required, so the archived recipe is unavailable', (_label, protocol, items) => {
+    expect(archivedLawnRecipeMatches(protocol(), items, null, null, rule)).toBe(false);
+  });
+
+  test('the replacement is checked like any other row: a K target the stored row does not state still fails', () => {
+    expect(archivedLawnRecipeMatches(archived(ten, { ...bo, gates: { targetK: '0.5 lb K2O/1000' } }), [boItem], null, null, rule)).toBe(false);
+  });
+
+  test('a protocol that is not archived always matches (the check is for archived assignments only)', () => {
+    expect(archivedLawnRecipeMatches({ status: 'active', products: [ten] }, [], null, null, rule)).toBe(true);
+  });
+});

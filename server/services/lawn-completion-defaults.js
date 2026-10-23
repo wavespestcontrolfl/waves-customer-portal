@@ -160,13 +160,20 @@ function archivedRateMatches(product, mix, nitrogenCut = null, chinchRate = null
 }
 
 // `swap` is the rule the plan applied to THIS visit (GATE_LAWN_DEC_LARGE_PATCH_K: the decision visitNutrientTargets returned): the whole-lawn
-// bag it replaced (`from`) is then not expected among the selected items, its replacement (`to`) is a non-default row of the same window
+// bag it replaced (`from`) is then not expected among the selected items, but only once the replacement is confirmed selected and linked to its
+// stored row (an unmatched replacement keeps the original required). The replacement (`to`) is a non-default row of the same window
 // that is checked like any other row (its stored K target, its mix), and nothing else is loosened. null = no swap.
 function archivedLawnRecipeMatches(protocol, items, nitrogenCut = null, chinchRate = null, swap = null) {
   if (protocol?.status !== 'archived') return true;
   const selected = items.filter(item => item.selected && item.product);
   const products = protocol.products || [];
-  const replaced = (product) => !!swap && (product.productName === swap.from || product.protocolProductName === swap.from);
+  const named = (product, name) => product.productName === name || product.protocolProductName === name;
+  // The replaced default is waived only when its replacement is really there: the stored protocol row for `swap.to` exists, is linked to a
+  // catalog product, and the plan SELECTED that product. A replacement that is unmatched (renamed without an alias, deleted, unlinked) leaves
+  // the original default required, so the archived check still fails closed (lawn_archived_recipe_unavailable) as it did before the swap.
+  const replacement = swap ? products.find((product) => named(product, swap.to) && product.productId) : null;
+  const replacementPresent = !!replacement && selected.some((item) => item.product.id === replacement.productId);
+  const replaced = (product) => !!swap && replacementPresent && named(product, swap.from);
   return products.filter(product => product.defaultInPlan && !replaced(product)).every(product => selected.some(item => item.product.id === product.productId))
     && selected.every(item => {
       const product = products.find(row => row.productId === item.product.id);
