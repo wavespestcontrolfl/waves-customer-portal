@@ -640,6 +640,26 @@ describe('customer pricing AI helpers', () => {
     expect(trusted.options?.[0]?.perVisit).toBeGreaterThan(0);
   });
 
+  test("a lookup's footprintUnknown aggregate home size is an untrusted T&S footprint (Codex #6398 r20 P1)", async () => {
+    // An association aggregate with an unknown story count: the lookup keeps
+    // the summed living area but suppresses the footprint. Adopting the home
+    // size must carry that suppression, or the engine rebuilds a one-story
+    // footprint from the sum and the open-parcel bed shrinks with no review.
+    const run = (footprintUnknown) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({
+        enriched: { homeSqFt: 12000, lotSqFt: 30000, stories: 1, storiesSource: 'default', ...(footprintUnknown ? { footprint: 0, footprintUnknown: true } : { footprint: 2000 }) },
+        propertyRecord: {},
+      }),
+      prompt: 'I am interested in tree and shrub care',
+      customer: propertyCustomer({ id: 'cust-agg', property_sqft: null, lot_sqft: null }),
+      propertySeed: null,
+    });
+    const review = (r) => r.options?.[0]?.manualReview;
+    expect(review(await run(true))).toBe(true);
+    expect(review(await run(false))).toBe(false);
+  });
+
   test('an UNCERTAIN pool/cage read stays open for seeded features (PR r11 P1)', async () => {
     // The vision schema permits 'POSSIBLE' for pool and poolCage, and the
     // adoption rule maps only 'YES' to true. So an observed-but-undecided

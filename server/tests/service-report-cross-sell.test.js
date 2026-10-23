@@ -416,6 +416,15 @@ describe('buildReportCrossSell', () => {
     expect((await loadEstimateSeed(seedDb({ treeShrubFootprintTrusted: false }), 'cust-1', street)).treeShrubFootprintTrusted).toBe(false);
     expect(await loadEstimateSeed(seedDb({ treeShrubFootprintTrusted: true, treeShrubFootprintSqFt: 1900 }), 'cust-1', street)).toMatchObject({ treeShrubFootprintTrusted: true, treeShrubFootprintSqFt: 1900 });
     expect(await loadEstimateSeed(seedDb({}), 'cust-1', street)).toMatchObject({ treeShrubFootprintTrusted: null, treeShrubFootprintSqFt: null });
+    // The public quote persists its priced request as the SINGULAR
+    // estimate_data.engineInput — the seed reads it (Codex #6398 r20).
+    const publicDb = dbFor({
+      estimates: [{
+        id: 'est-public', address: '123 Gulf Dr, Sarasota, FL 34236', status: 'accepted',
+        estimate_data: { engineInput: { homeSqFt: 2300, lotSqFt: 9000, stories: 1, treeShrubFootprintTrusted: false } },
+      }],
+    });
+    expect(await loadEstimateSeed(publicDb, 'cust-1', street)).toMatchObject({ homeSqFt: 2300, lotSqFt: 9000, treeShrubFootprintTrusted: false });
 
     const withGarage = await loadEstimateSeed(seedDb({ attachedGarage: true }), 'cust-1', street);
     expect(withGarage.features.attachedGarage).toBe(true);

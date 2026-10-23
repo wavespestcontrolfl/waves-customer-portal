@@ -133,38 +133,47 @@ function mappedContext(estimateData) {
 // A retained raw engine line is trustworthy only while it agrees with the
 // mapped envelope on the inputs (bed, trees, inferred-or-not); a revision
 // that changed them left the raw line stale.
-function rawAgreesWithMapped(raw, ctx) {
-  const { tsMeta, mappedService } = ctx;
-  // A revision that reclassified the property leaves a raw line of the
-  // OTHER program behind; the mapped program is authoritative (Codex #6398 r18).
-  if (ctx.service && raw.service !== ctx.service) return false;
-  // A commercial raw line has no tsMeta; it agrees while the mapped
-  // commercial row (if any) carries the same price.
-  if (raw.service === 'commercial_tree_shrub') {
-    return !mappedService || mappedService.service !== 'commercial_tree_shrub'
-      || (positive(mappedService.monthly ?? mappedService.mo) ?? null) === (positive(raw.monthly) ?? null);
-  }
+// A commercial raw line has no tsMeta; it agrees while the mapped
+// commercial row (if any) carries the same price.
+function commercialRawAgrees(raw, mappedService) {
+  if (!mappedService || mappedService.service !== 'commercial_tree_shrub') return true;
+  return (positive(mappedService.monthly ?? mappedService.mo) ?? null) === (positive(raw.monthly) ?? null);
+}
+// A residential raw line agrees with tsMeta on bed, trees and inferred-or-not.
+function residentialRawAgrees(raw, tsMeta) {
   if (!tsMeta) return true;
   if ((positive(raw.bedAreaUsed ?? raw.bedArea) ?? null) !== (positive(tsMeta.eb) ?? null)) return false;
   if ((count(raw.treeCount) ?? null) !== (count(tsMeta.et) ?? null)) return false;
   const src = enumOf(raw.bedAreaSource);
-  if (src && typeof tsMeta.bedAreaIsEstimated === 'boolean'
-    && (src === 'lot_based' || src === 'fallback') !== tsMeta.bedAreaIsEstimated) return false;
-  return true;
+  return !(src && typeof tsMeta.bedAreaIsEstimated === 'boolean'
+    && (src === 'lot_based' || src === 'fallback') !== tsMeta.bedAreaIsEstimated);
+}
+function rawAgreesWithMapped(raw, ctx) {
+  // A revision that reclassified the property leaves a raw line of the
+  // OTHER program behind; the mapped program is authoritative (Codex #6398 r18).
+  if (ctx.service && raw.service !== ctx.service) return false;
+  return raw.service === 'commercial_tree_shrub'
+    ? commercialRawAgrees(raw, ctx.mappedService)
+    : residentialRawAgrees(raw, ctx.tsMeta);
 }
 
 // The fields a revision can change WITHOUT touching bed/trees — provenance,
 // tier, price, review flags and knob stamps — where the mapped revision wins
 // over a retained raw line (Codex #6398 r3/r4; same rule as estimate-actuals).
 function mappedOverRaw(raw, ctx) {
-  const { tsMeta, mappedSelected, mappedMonthly, mappedReasons } = ctx;
+  const { tsMeta, mappedSelected, mappedMonthly, mappedReasons, mappedService } = ctx;
+  // The CURRENT mapped stamp wins over a retained raw line's — tsMeta for
+  // residential, the mapped recurring row for commercial (Codex #6398 r20):
+  // an explicit-bed quote regenerated on the open parcel keeps its price,
+  // so the raw line still "agrees" while carrying the stale gross_lot stamp.
+  const mappedKnobs = tsMeta?.pricingKnobs || mappedService?.pricingKnobs || null;
   return {
     treeSource: enumOf(tsMeta?.treeCountSource) || enumOf(raw.treeCountSource) || 'unknown',
     tier: enumOf(mappedSelected?.tier) || enumOf(raw.tier),
     monthly: mappedMonthly ?? positive(raw.monthly),
     reviewReasons: mappedReasons ?? (Array.isArray(raw.manualReviewReasons) ? raw.manualReviewReasons : []),
-    marginTarget: num(tsMeta?.pricingKnobs?.marginTarget) ?? num(raw.pricingKnobs?.marginTarget) ?? num(raw.marginTarget),
-    lotBedBasis: enumOf(tsMeta?.pricingKnobs?.lotBedBasis) || enumOf(raw.pricingKnobs?.lotBedBasis),
+    marginTarget: num(mappedKnobs?.marginTarget) ?? num(raw.pricingKnobs?.marginTarget) ?? num(raw.marginTarget),
+    lotBedBasis: enumOf(mappedKnobs?.lotBedBasis) || enumOf(raw.pricingKnobs?.lotBedBasis),
   };
 }
 

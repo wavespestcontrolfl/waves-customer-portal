@@ -66,19 +66,38 @@ const storedTsMetaOf = (estData) => {
   return meta && typeof meta === 'object' ? meta : null;
 };
 const serviceIs = (name) => (li) => (li?.service || '') === name;
+// A stored result is a MAPPED ENVELOPE when it carries any of the shapes
+// the server writes on save (lineItems, results, recurring.services). Its
+// absence of T&S is then authoritative: a revision that removed T&S but
+// left an agent draft's original engineResult behind must not replay that
+// removed line's knobs onto a service the customer adds later (Codex #6398
+// r20 P1).
+function mappedEnvelopePresent(result) {
+  return Array.isArray(result.lineItems)
+    || (result.results && typeof result.results === 'object')
+    || Array.isArray(result.recurring?.services);
+}
+
 function storedTreeShrubReplaySources(estData = {}) {
   const result = storedResultOf(estData);
-  const lineItems = storedLineItemsOf(estData);
+  const mappedLineItems = Array.isArray(result.lineItems) ? result.lineItems : [];
   const mappedRows = Array.isArray(result.recurring?.services) ? result.recurring.services : [];
   const mappedCommercial = mappedRows.find(serviceIs('commercial_tree_shrub')) || null;
-  const tsLine = lineItems.find(serviceIs('tree_shrub'))
-    || lineItems.find(serviceIs('commercial_tree_shrub'))
-    || mappedCommercial;
   // Admin V2 persists ONLY the mapped legacy envelope (result.results.ts /
   // tsMeta) with no raw lineItems, so the mapped stamp is a first-class
   // source here — without it those quotes would replay off live knobs.
   const tsMeta = storedTsMetaOf(estData);
   const hasMappedTs = !!tsMeta || (Array.isArray(result.results?.ts) && result.results.ts.length > 0);
+  const mappedTsLine = mappedLineItems.find(serviceIs('tree_shrub'))
+    || mappedLineItems.find(serviceIs('commercial_tree_shrub'))
+    || mappedCommercial;
+  // The raw engineResult is consulted only when NO mapped envelope exists
+  // (an agent draft that was never saved through the mapper).
+  const rawLineItems = mappedEnvelopePresent(result) ? [] : storedLineItemsOf(estData);
+  const tsLine = mappedTsLine
+    || rawLineItems.find(serviceIs('tree_shrub'))
+    || rawLineItems.find(serviceIs('commercial_tree_shrub'))
+    || null;
   return { tsLine, tsMeta, hasMappedTs, mappedCommercial };
 }
 

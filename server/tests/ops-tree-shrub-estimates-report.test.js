@@ -111,6 +111,11 @@ describe('tree-shrub-estimates-report extraction', () => {
     expect(regimeOf(extractTreeShrub(mappedOnly))).toBe('after_2026_10_21');
     // Raw agrees with the mapped row on price → raw inputs, mapped flags.
     expect(extractTreeShrub({ ...raw, ...mappedOnly })).toMatchObject({ shape: 'raw', service: 'commercial_tree_shrub', bedSqFt: 4680, reviewReasons: ['open_parcel_basis_footprint_over_half_lot'] });
+    // ...and the mapped row's CURRENT stamp beats the raw line's stale one
+    // (an explicit-bed quote regenerated on the open parcel keeps its price;
+    // Codex #6398 r20).
+    const staleRaw = { engineResult: { lineItems: [{ ...raw.engineResult.lineItems[0], pricingKnobs: { lotBedBasis: 'gross_lot', marginTarget: 0.45 } }] } };
+    expect(extractTreeShrub({ ...staleRaw, ...mappedOnly })).toMatchObject({ shape: 'raw', lotBedBasis: 'open_parcel' });
     // A repriced mapped row (different price) makes the raw line stale.
     const repriced = { result: { recurring: { services: [{ service: 'commercial_tree_shrub', mo: 98, monthly: 98, manualReviewReasons: [] }] } } };
     expect(extractTreeShrub({ ...raw, ...repriced })).toMatchObject({ shape: 'compact', service: 'commercial_tree_shrub', monthly: 98 });

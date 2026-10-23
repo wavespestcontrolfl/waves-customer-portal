@@ -1594,6 +1594,17 @@ describe('Tree & Shrub margin target replays from the stamp (owner audit 2026-10
     expect(treeShrubKnobSignalForReplay({ result: { recurring: { services: [{ service: 'commercial_pest' }, { service: 'commercial_tree_shrub', pricingKnobs: { lotBedBasis: 'open_parcel' } }] } } })).toMatchObject({ lotBedBasis: 'open_parcel' });
     // No T&S line of either kind: nothing to inject.
     expect(treeShrubKnobSignalForReplay({ result: { recurring: { services: [{ service: 'commercial_pest' }] } } })).toBeNull();
+    // A revision REMOVED T&S but left the agent draft's engineResult behind:
+    // the mapped envelope's absence is authoritative, so a T&S line the
+    // customer adds later resolves the LIVE knobs, not the removed quote's
+    // stamp (Codex #6398 r20 P1).
+    const removed = {
+      engineResult: { lineItems: [{ service: 'tree_shrub', pricingKnobs: { marginTarget: 0.45, lotBedBasis: 'gross_lot' } }] },
+      result: { lineItems: [{ service: 'pest_control', monthly: 45 }], recurring: { services: [{ service: 'pest_control' }] }, results: { pestMeta: {} } },
+    };
+    expect(treeShrubKnobSignalForReplay(removed)).toBeNull();
+    // With NO mapped envelope the raw draft line still replays its stamp.
+    expect(treeShrubKnobSignalForReplay({ engineResult: removed.engineResult })).toMatchObject({ marginTarget: 0.45, lotBedBasis: 'gross_lot' });
     // The CURRENT mapped commercial row beats a retained, older raw line —
     // residential or commercial — exactly as tsMeta does (Codex #6398 r7).
     const staleRaw = { engineResult: { lineItems: [{ service: 'tree_shrub', pricingKnobs: { lotBedBasis: 'gross_lot', marginTarget: 0.45 } }] } };

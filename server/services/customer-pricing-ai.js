@@ -493,6 +493,7 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
   // the seed path consults this — a rejected dimension with no seed already
   // fails closed to the pricer's own missing-property handling.
   const lookupRejectedFields = new Set();
+  let lookupFootprintUnknown = false;
 
   // The gate used to be (!homeSqFt || !lotSqFt), which meant a customer
   // whose row carried both was NEVER looked up — and therefore priced
@@ -555,7 +556,14 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
       // number the lookup itself said to verify first. Stored profile
       // values still win ahead of the fill either way.
       if (lookupDimensionIsTrustworthy(p, 'homeSqFt')) {
+        const before = homeSqFt;
         homeSqFt = positiveNumber(homeSqFt, p.homeSqFt, record.squareFootage);
+        // An aggregate parcel whose story count is unknown keeps its SUMMED
+        // living area but no footprint (buildEnrichedProfile footprintUnknown).
+        // Adopting that home size without the suppression would let the
+        // engine rebuild a one-story footprint from it for the T&S open-parcel
+        // basis (Codex #6398 r20 P1); the public route refuses the same way.
+        if (homeSqFt !== before && p.footprintUnknown === true) lookupFootprintUnknown = true;
       }
       if (lookupDimensionIsTrustworthy(p, 'lotSqFt')) {
         lotSqFt = positiveNumber(lotSqFt, p.lotSqFt, record.lotSize);
@@ -957,6 +965,9 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
           ? { treeShrubFootprintSqFt: propertySeed.treeShrubFootprintSqFt } : {}),
       }
       : {}),
+    // The lookup's own footprint suppression travels with its home size: an
+    // aggregate living area is NOT a footprint (Codex #6398 r20 P1).
+    ...(!homeSqFtFromSeed && lookupFootprintUnknown ? { treeShrubFootprintTrusted: false } : {}),
     yearBuilt,
     constructionMaterial,
     foundationType,

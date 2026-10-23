@@ -355,7 +355,10 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
   for (const row of rows) {
     if (row.status !== 'accepted') continue;
     const estData = parseJsonColumn(row.estimate_data);
-    const inputs = estData?.engineInputs || estData?.inputs;
+    // engineInputs / inputs (admin + agent saves) or the public quote's
+    // singular engineInput — the normalized request it priced, which is
+    // where its footprint-trust stamp lives (Codex #6398 r20).
+    const inputs = estData?.engineInputs || estData?.inputs || estData?.engineInput;
     if (!inputs || typeof inputs !== 'object') continue;
     const street = linkage.normalizedEstimateStreet(row.address);
     if (!street || !linkage.sameScopeKey(street, scopeStreet)) continue;
