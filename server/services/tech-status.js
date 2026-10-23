@@ -181,11 +181,21 @@ async function clearTechCurrentJob({ tech_id, current_job_id, status = 'idle', c
 
   if (!row) return null;
 
-  const io = getIo();
-  if (io) {
-    io.to(ROOM).emit(EVENT, sanitizeTechStatusForDispatch(row));
+  const broadcast = () => {
+    const io = getIo();
+    if (io) {
+      io.to(ROOM).emit(EVENT, sanitizeTechStatusForDispatch(row));
+    } else {
+      logger.warn('[tech-status] io not initialized; skipping clear-current-job broadcast');
+    }
+  };
+  // On the caller's transaction the change is not visible (and may never be: a rollback) until it commits, so the event waits
+  // for the commit; a rolled-back transaction emits nothing. Without a transaction handle (or a test harness with no commit
+  // promise) it goes out at once, exactly as before.
+  if (conn !== db && conn.executionPromise && typeof conn.executionPromise.then === 'function') {
+    conn.executionPromise.then(broadcast).catch(() => {});
   } else {
-    logger.warn('[tech-status] io not initialized; skipping clear-current-job broadcast');
+    broadcast();
   }
 
   return row;

@@ -669,9 +669,30 @@ async function finishRecovered(bundle, token, ft, notice) {
       : 'The invoice, linked-visit and text steps the card approved are all done.',
     lines: receipt.lines.length ? receipt.lines : ['All approved steps are done.'],
   });
-  await ownedUpdate(bundle.id, token, {
-    status: 'recovered', finished_at: db.fn.now(), finish_note: 'sweep', lease_owner: null, lease_until: null,
-  });
+  await terminalizeRecovered(bundle, token);
+}
+
+// The terminal 'recovered' status is written in the SAME transaction that proves the cancellation generation (visit share lock,
+// NOWAIT), so a restore that landed after the last write-level fence (a bundle with no text, or a reminder already terminal,
+// has none after the money steps) cannot be recorded as a clean recovery of a live visit. The receipt and alert written just
+// before are provisional: a restore found here abandons the bundle, which replaces both. A visit that is only busy retries.
+async function terminalizeRecovered(bundle, token) {
+  const { assertCancelGeneration, isCancelFence } = require('./cancel-generation-fence');
+  const fence = { visitId: bundle.scheduled_service_id, restorations: bundle.restorations_seen, hits: [] };
+  try {
+    await db.transaction(async (trx) => {
+      await assertCancelGeneration(trx, fence);
+      const rows = await trx(TABLE)
+        .where({ id: bundle.id, lease_owner: token, status: 'pending' })
+        .update({ status: 'recovered', finished_at: db.fn.now(), finish_note: 'sweep', lease_owner: null, lease_until: null, updated_at: db.fn.now() });
+      if (!rows) throw new LeaseLost(`lease on bundle ${bundle.id} was lost`);
+    });
+  } catch (err) {
+    if (!isCancelFence(err)) throw err;
+    const standing = await cancelStillStands(bundle);
+    if (!standing.ok) throw new Abandon(`${standing.reason}_during_recovery`, true);
+    throw new Error(`the visit was busy (${fence.hits.join(', ')}); finalizing will retry`);
+  }
 }
 
 // What is known about the steps when the recovery stops: the saved results of the steps that ended, and the plain fact that

@@ -193,6 +193,34 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
     expect(mockFollowThrough).toHaveBeenCalledTimes(1);
   });
 
+  test('a restore landing after the last write-level fence (no text step) is caught by the terminal transaction: abandoned, not recovered', async () => {
+    const id = await app.transaction((trx) => svc.insertBundle(trx, pins({ notifyCustomer: false, approvedNotice: null, linkedChildren: [], approvedMoney: {} })));
+    await ageBundle(id, 30);
+    mockFollowThrough.mockImplementationOnce(async () => {
+      await app('scheduled_services').where({ id: visit }).update({ status: 'confirmed' });
+      await app('job_status_history').insert({ job_id: visit, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: app.fn.now() });
+    });
+    expect(await svc.sweepIbCancelBundles()).toMatchObject({ abandoned: 1, recovered: 0 });
+    expect(await app(TABLE).where({ id }).first()).toMatchObject({ status: 'abandoned' });
+  });
+
+  test('a restore IN FLIGHT (visit row locked, uncommitted) at the terminal proof fails at once and keeps the bundle pending', async () => {
+    const id = await app.transaction((trx) => svc.insertBundle(trx, pins({ notifyCustomer: false, approvedNotice: null, linkedChildren: [], approvedMoney: {} })));
+    await ageBundle(id, 30);
+    const restoring = await app.transaction();
+    try {
+      mockFollowThrough.mockImplementationOnce(async () => { await restoring('scheduled_services').where({ id: visit }).update({ status: 'confirmed' }); });
+      const summary = await svc.sweepIbCancelBundles();
+      expect(summary).toMatchObject({ failed: 1, recovered: 0, abandoned: 0 });
+      expect(await app(TABLE).where({ id }).first()).toMatchObject({ status: 'pending', lease_owner: null });
+    } finally {
+      await restoring.rollback();
+    }
+    // The restore never committed: the retry finishes.
+    await app(TABLE).where({ id }).update({ lease_until: null, next_attempt_at: null });
+    expect(await svc.sweepIbCancelBundles()).toMatchObject({ recovered: 1 });
+  });
+
   test('a visit restored after the cancel is abandoned: nothing runs', async () => {
     const id = await app.transaction((trx) => svc.insertBundle(trx, pins()));
     await ageBundle(id, 30);

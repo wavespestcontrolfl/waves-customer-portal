@@ -176,7 +176,21 @@ async function settleVisitMoney(id, ctx) {
 }
 
 // The tracker cancel, which also runs the linked-visit cascade; an approved linked visit it did not get to is reported.
-async function cancelVisitTracker(id, { actorId, reason, source, linkedChildren, linkedChildReport, cancelFence }) {
+// Recovery sweep only: trackTransitions.cancel answered { ok: false } without throwing. A cancelled parent whose tracker already
+// reads 'complete' (cannot_cancel_complete) is a terminal state the sweep must not force: it is a reported skip (the receipt
+// lists it, the office reviews it). Any other refusal (not_found, an unexpected status) is not a finished step: a retryable hit.
+// Returns true when the sweep handled it (no per-retry dispatch alert).
+function noteRejectedTrackerCancel(result, cancelFence, moneyReport) {
+  if (!cancelFence || !result || result.ok !== false) return false;
+  if (result.reason === 'cannot_cancel_complete') {
+    if (moneyReport && Array.isArray(moneyReport.skipped)) moneyReport.skipped.push({ kind: 'tracker', reason: 'tracker_already_complete' });
+    return false; // the dispatch alert still goes out for the office
+  }
+  cancelFence.hits.push('tracker_rejected');
+  return true;
+}
+
+async function cancelVisitTracker(id, { actorId, reason, source, linkedChildren, linkedChildReport, cancelFence, moneyReport }) {
   try {
     const result = await trackTransitions.cancel(id, {
       reason,
@@ -187,6 +201,7 @@ async function cancelVisitTracker(id, { actorId, reason, source, linkedChildren,
     if (!result?.ok) reportLinkedCascadeNotRun(linkedChildren, linkedChildReport);
     // A fence refusal is not a tracker fault: the recovery sweep reports it (the visit is no longer the approved cancel).
     if (result?.reason === 'cancel_fence') return;
+    if (noteRejectedTrackerCancel(result, cancelFence, moneyReport)) return;
     await recordTrackTransitionResultFailure({ jobId: id, action: 'cancel', actorId, result, cancelFence });
   } catch (e) {
     reportLinkedCascadeNotRun(linkedChildren, linkedChildReport);

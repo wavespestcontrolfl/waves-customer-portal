@@ -64,6 +64,8 @@ jest.mock('../models/db', () => {
     leftJoin() { return this; }
     select() { return this; }
     forUpdate() { return this; }
+    forShare() { return this; }
+    noWait() { return this; }
     count() { this.counting = true; return this; }
     orderBy(col) { this.order = strip(col); return this; }
     limit(n) { this.max = n; return this; }
@@ -749,6 +751,57 @@ describe('delivery evidence found when the text step stops because the visit cha
     expect(row.status).toBe('abandoned');
     expect(row.notice_outcome).toBeNull();
     expect(mockRecordResult.mock.calls[0][1].customer_text_sent).toBeUndefined();
+  });
+});
+
+describe('the terminal status re-proves the cancellation generation', () => {
+  const noTextBundle = () => seedBundle({ notify_customer: false, approved_notice: null, linked_children: [], approved_money: {} });
+
+  test('a restore landing after the last write-level fence (no text step) abandons the bundle and replaces the provisional clean receipt and alert', async () => {
+    noTextBundle();
+    // The receipt is saved (provisional), then the operator restores the visit before the terminal update.
+    mockRecordResult.mockImplementationOnce(async () => {
+      mockStore.visits[0].status = 'confirmed';
+      mockStore.history.push({ id: 2, job_id: SERVICE, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: new Date(mockNow.getTime() - 1 * MIN) });
+      return true;
+    });
+    const summary = await svc.sweepIbCancelBundles();
+    expect(summary).toMatchObject({ abandoned: 1, recovered: 0 });
+    expect(mockStore.bundles[0].status).toBe('abandoned');
+    expect(mockRecordResult).toHaveBeenCalledTimes(2);
+    expect(mockRecordResult.mock.calls[0][1].warning).toBeUndefined();
+    expect(mockRecordResult.mock.calls[1][1].warning).toMatch(/no longer the cancelled visit/);
+    expect(mockRecordResult.mock.calls[1][2]).toEqual({ onlyIfEmpty: true, replaceRecoveryPointer: true });
+    expect(mockRaised).toHaveLength(2);
+    expect(mockRaised[0].spec.severity).toBe('fyi');
+    expect(mockRaised[1].spec.severity).toBe('needs-you');
+    expect(mockRaised[1].opts.dedupeKey).toBe(mockRaised[0].opts.dedupeKey);
+  });
+
+  test('a visit that is only busy at the terminal proof keeps the bundle pending and the next pass finishes it', async () => {
+    noTextBundle();
+    const fenceModule = require('../services/cancel-generation-fence');
+    const spy = jest.spyOn(fenceModule, 'assertCancelGeneration').mockImplementationOnce(async (_conn, fence) => {
+      fence.hits.push('visit_busy');
+      throw new fenceModule.CancelFenceError('visit_busy');
+    });
+    const first = await svc.sweepIbCancelBundles();
+    expect(first).toMatchObject({ failed: 1, recovered: 0 });
+    expect(mockStore.bundles[0]).toMatchObject({ status: 'pending', lease_owner: null });
+    const second = await svc.sweepIbCancelBundles();
+    expect(second.recovered).toBe(1);
+    expect(mockStore.bundles[0].status).toBe('recovered');
+    spy.mockRestore();
+  });
+
+  test('a standing cancel: the terminal write happens in a transaction after the proof', async () => {
+    noTextBundle();
+    const fenceModule = require('../services/cancel-generation-fence');
+    const spy = jest.spyOn(fenceModule, 'assertCancelGeneration');
+    await svc.sweepIbCancelBundles();
+    expect(mockStore.bundles[0].status).toBe('recovered');
+    expect(spy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ visitId: SERVICE, restorations: 0 }));
+    spy.mockRestore();
   });
 });
 

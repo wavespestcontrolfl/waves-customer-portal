@@ -537,6 +537,28 @@ describe('cancelFence (the cancel recovery sweep)', () => {
     expect(mockAlertUnresolved).toHaveBeenCalledTimes(1);
   });
 
+  it('a tracker cancel REJECTED without throwing: complete is a reported skip (alert kept), any other reason is a retryable hit; unfenced is unchanged', async () => {
+    const tracker = require('../services/track-transitions').cancel;
+    const alerts = require('../services/track-transition-alerts');
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    tracker.mockResolvedValueOnce({ ok: false, reason: 'cannot_cancel_complete' });
+    const doneFence = { ...FENCE, hits: [] };
+    const moneyReport = { skipped: [] };
+    await runVisitCancellationFollowThrough(fenced({ cancelFence: doneFence, moneyReport }));
+    expect(doneFence.hits).toEqual([]);
+    expect(moneyReport.skipped).toContainEqual({ kind: 'tracker', reason: 'tracker_already_complete' });
+    expect(alerts.recordTrackTransitionResultFailure).toHaveBeenCalledTimes(1);
+    alerts.recordTrackTransitionResultFailure.mockClear();
+    tracker.mockResolvedValueOnce({ ok: false, reason: 'not_found' });
+    const goneFence = { ...FENCE, hits: [] };
+    await runVisitCancellationFollowThrough(fenced({ cancelFence: goneFence }));
+    expect(goneFence.hits).toEqual(['tracker_rejected']);
+    expect(alerts.recordTrackTransitionResultFailure).not.toHaveBeenCalled();
+    tracker.mockResolvedValueOnce({ ok: false, reason: 'not_found' });
+    await runVisitCancellationFollowThrough({ targetIds: ['svc-1'], pinnedEffects: { 'svc-1': { invoices: [], fee: NO_RAIL, creditReversalOfferIds: [] } } });
+    expect(alerts.recordTrackTransitionResultFailure).toHaveBeenCalledTimes(1);
+  });
+
   it('a tracker cancel that THROWS (not a fence refusal) is a retryable hit for the sweep, with no per-retry dispatch alert; unfenced keeps the alert', async () => {
     const tracker = require('../services/track-transitions').cancel;
     const alerts = require('../services/track-transition-alerts');
