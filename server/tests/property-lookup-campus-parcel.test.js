@@ -11,6 +11,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const { _private: lookupPrivate } = require('../services/property-lookup/ai-property-lookup');
+const { buildEnrichedProfile } = require('../routes/property-lookup-v2');
 const { buildFieldVerifyFlags, campusParcelMeta } = require('../routes/property-lookup-v2')._private;
 
 const { groupParentParcelBuildings } = lookupPrivate;
@@ -90,7 +91,8 @@ describe('campusParcelMeta', () => {
 
 describe('the address flag on a campus parcel', () => {
   test('names the parcel the point sits in and warns against its size, not a typo', () => {
-    const addr = buildFieldVerifyFlags(campusRecord(), null, notOnRoll).find((f) => f.field === 'address');
+    const rc = campusRecord();
+    const addr = buildFieldVerifyFlags(rc, null, notOnRoll, { campusParcel: campusParcelMeta(rc) }).find((f) => f.field === 'address');
     expect(addr.priority).toBe('HIGH');
     expect(addr.reason).toContain('900 EXAMPLE PARK BLVD (Mixed Use Commercial)');
     expect(addr.reason).toContain("do not price from that parcel's size");
@@ -101,5 +103,28 @@ describe('the address flag on a campus parcel', () => {
     const addr = buildFieldVerifyFlags({ _source: 'ai' }, null, notOnRoll).find((f) => f.field === 'address');
     expect(addr.reason).toContain('could not match house number 950');
     expect(addr.reason).toContain('900, 910');
+  });
+});
+
+describe('who gets the campus wording in the profile', () => {
+  afterEach(() => { delete process.env.GATE_LOOKUP_BUSINESS_IDENTITY; delete process.env.GATE_COMMERCIAL_SUITE_SIZING; });
+  const addressReason = (options) => {
+    const profile = buildEnrichedProfile(campusRecord(), null, 27.4, -82.5, null, notOnRoll, '950 Example Park Blvd', options);
+    return (profile.fieldVerifyFlags || []).find((f) => f.field === 'address')?.reason || '';
+  };
+
+  test('an opted-in caller with the gate live gets it', () => {
+    process.env.GATE_COMMERCIAL_SUITE_SIZING = 'true';
+    process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true';
+    expect(addressReason({ commercialSuiteSizing: true })).toContain('900 EXAMPLE PARK BLVD');
+  });
+
+  test('a public caller, or the gate off, keeps the house-number copy and never names the parcel', () => {
+    process.env.GATE_COMMERCIAL_SUITE_SIZING = 'true';
+    process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true';
+    expect(addressReason({})).not.toContain('900 EXAMPLE PARK BLVD (');
+    expect(addressReason({})).toContain('could not match house number 950');
+    delete process.env.GATE_LOOKUP_BUSINESS_IDENTITY;
+    expect(addressReason({ commercialSuiteSizing: true })).toContain('could not match house number 950');
   });
 });

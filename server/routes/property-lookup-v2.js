@@ -2751,7 +2751,11 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     && parcelTurfBoundApplies
   ) ? Math.round(countyCeiling.turfSf * TURF_COUNTY_PRIOR_RATIO) : null;
 
-  const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit, { parcelTurfBoundApplies, residentialUnitLookup: unitLookup, commercialProfile });
+  // The campus parcel reaches the flag copy only for an opted-in caller with
+  // the identity gate live: the shared record carries the parent parcel
+  // before the route strips it, and a public profile must not name it.
+  const campusParcel = options.commercialSuiteSizing === true && lookupBusinessIdentityLive() ? campusParcelMeta(rc) : null;
+  const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit, { parcelTurfBoundApplies, residentialUnitLookup: unitLookup, commercialProfile, campusParcel });
   // A cached listing-size stamp reused on this profile keeps its
   // confirm-on-site flag (the fresh path adds it in applyCommercialSuiteSize).
   if (resolvedCommercialSuiteSize?.source === 'listing_verified_text' && Number(resolvedCommercialSuiteSize.value) > 0) {
@@ -4506,7 +4510,7 @@ function calcPestPressureMult(pressure) {
 // ─────────────────────────────────────────────
 // FIELD VERIFY FLAGS
 // ─────────────────────────────────────────────
-function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApplies = true, residentialUnitLookup = false, commercialProfile } = {}) {
+function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApplies = true, residentialUnitLookup = false, commercialProfile, campusParcel = null } = {}) {
   const flags = [];
 
   // Geocoder snapped the typed house number to a different premise — this
@@ -4542,12 +4546,12 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
       reason: `${addressAudit.houseNumber} ${addressAudit.streetLabel} is on the ${addressAudit.county} county roll only in ZIP ${addressAudit.numberInOtherZips.join(', ')}, not the typed ${addressAudit.typedZip}${nearest}. The street name repeats across cities — verify the city/ZIP before pricing`,
       priority: 'HIGH',
     });
-  } else if (addressAudit && addressAudit.streetExists && !addressAudit.hasExactMatch && campusParcelMeta(rc)?.situsAddress) {
+  } else if (addressAudit && addressAudit.streetExists && !addressAudit.hasExactMatch && campusParcel?.situsAddress) {
     // The map point sits well inside a commercial parcel recorded under
     // another number (a campus whose buildings share one county address):
     // the typed number is most likely right, and the open question is the
     // business's own space, not a typo.
-    const campus = campusParcelMeta(rc);
+    const campus = campusParcel;
     const use = campus.landUseDescription ? ` (${campus.landUseDescription.replace(/\s*\(\d+\)\s*$/, '')})` : '';
     flags.push({
       field: 'address',
