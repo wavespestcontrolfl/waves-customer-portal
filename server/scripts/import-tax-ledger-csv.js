@@ -44,6 +44,7 @@ const HEADER = ['source', 'date', 'description', 'amount', 'direction', 'class',
 const CLASSES = ['expense', 'vehicle', 'interest', 'personal', 'transfer', 'income_proc', 'receipt_unmatched', 'review', 'reward', 'refund', 'asset', 'unknown'];
 const BUSINESS_CLASSES = new Set(['expense', 'vehicle', 'interest']);
 const IGNORED_CLASSES = new Set(['personal', 'transfer', 'income_proc', 'reward', 'asset']);
+const MONEY_IN_CLASSES = new Set(['refund', 'income_proc', 'receipt_unmatched']);
 // A refund credit (class refund, or money IN on a business class) is left
 // OPEN: the Bank Import refund flow applies it to the original expense, which
 // is what reduces the expense the P&L reads. Ignoring it would leave the
@@ -298,12 +299,14 @@ function mapRow(row, ordinal, basename) {
   const out = { bank, expense: null, categoryName: null, unmatchedLine: null, ledgerClass: row.class };
   const base = { ledgerClass: row.class, ledgerCategory: row.category, flag: row.flag };
 
-  // a refund is money IN; a "refund" that is money out is a mislabelled row
-  // and goes to ordinary review (Bank Import's refund flow takes credits only)
   const refundCredit = (row.class === 'refund' || BUSINESS_CLASSES.has(row.class)) && row.direction === 'in';
-  if (row.class === 'refund' && row.direction === 'out') {
+  // a refund, a processor deposit or a receipt is money IN by definition:
+  // the same class on money OUT (a processor fee, a mislabelled row) is
+  // parked for ordinary review, never ignored out of the books and never
+  // offered as a refund credit (Bank Import's refund flow takes credits only)
+  if (MONEY_IN_CLASSES.has(row.class) && row.direction === 'out') {
     bank.status = 'unmatched';
-    bank.suggestion = reviewSuggestion(row, { note: 'refund class on money out: check the ledger row' });
+    bank.suggestion = reviewSuggestion(row, { note: `${row.class} class on money out: check the ledger row` });
     out.unmatchedLine = row.sched_c_line || '(none)';
     return out;
   }
@@ -463,7 +466,7 @@ async function loadPortalState(db, mapped, rows, skipExisting) {
   // deleted since (the FK is null, or the matcher reopened it) is not done
   const existing = new Map();
   for (const part of chunk(mapped.map(m => m.bank.row_hash), HASH_LOOKUP_CHUNK)) {
-    const found = await db('bank_transactions').whereIn('row_hash', part).select('row_hash', 'status', 'matched_expense_id');
+    const found = await db('bank_transactions').whereIn('row_hash', part).select('row_hash', 'status', 'matched_expense_id', 'matched_payout_id', 'suggestion', 'description');
     found.forEach(f => existing.set(f.row_hash, f));
   }
   const dates = rows.map(r => r.date).sort();
@@ -508,7 +511,7 @@ async function loadPortalState(db, mapped, rows, skipExisting) {
   // the expenses the overlapping portal rows are booked under: their category
   // is compared with the ledger's (a different business category is a
   // conflict for the owner, not an answer)
-  const bookedIds = [...new Set(existingBank.map(f => f.matched_expense_id).filter(Boolean))];
+  const bookedIds = [...new Set([...existingBank, ...existing.values()].map(f => f.matched_expense_id).filter(Boolean))];
   const bookedExpenses = new Map(bookedIds.length ? (await db('expenses').whereIn('id', bookedIds).select('id', 'category_id')).map(e => [e.id, e]) : []);
   const categoryNames = new Map(categories.map(c => [c.id, c.name]));
   return { existing, existingBank, handExpenses, coveredExpenses, linkedRows, masks, accountsById, bookedExpenses, categoryNames, categoryIds: new Map(categories.map(c => [c.name, c.id])) };
@@ -626,12 +629,16 @@ function ignoredConflict(row, m) {
   }
   return null;
 }
-// The portal linked the credit to a Stripe payout; the ledger says merchant
-// refund: one of them is wrong, and the expense it would reduce stays at its
-// gross amount until the owner decides.
-function payoutConflict(row, m) {
+// The portal's reading of a credit against the ledger's: linked to a Stripe
+// payout while the ledger says merchant refund (the expense it would reduce
+// stays at its gross amount), or applied as a refund while the ledger says
+// it was not one (the expense it reduced is understated).
+function creditConflict(row, m) {
   if (row.status === 'matched_payout' && row.matched_payout_id && m.unmatchedLine === 'refund') {
     return 'the portal linked this credit to a payout but the ledger says it is a refund credit (check which is right)';
+  }
+  if (row.status === 'refund_applied' && m.unmatchedLine !== 'refund') {
+    return 'the portal applied this credit as a refund to an expense but the ledger does not call it a refund (check which is right)';
   }
   return null;
 }
@@ -651,7 +658,14 @@ function bookedConflict(row, m, portal) {
 }
 // Why an exact overlap is held rather than counted as answered (null = answered).
 function openReason(row, m, portal) {
-  return openOrDangling(row) || ignoredConflict(row, m) || payoutConflict(row, m) || bookedConflict(row, m, portal);
+  return openOrDangling(row) || ignoredConflict(row, m) || creditConflict(row, m) || bookedConflict(row, m, portal);
+}
+// A row an earlier run loaded (same hash): done, unless the expense that run
+// made is gone, or the ledger's classification changed since (class,
+// category or line are not in the hash) and the stored state disagrees.
+function reloadReason(prior, m, portal) {
+  if (m.expense && expenseGone(prior)) return 'loaded by an earlier run but its expense was deleted since';
+  return ignoredConflict(prior, m) || creditConflict(prior, m) || bookedConflict(prior, m, portal);
 }
 
 // Which ledger rows load, and which the portal already answers for.
@@ -678,8 +692,8 @@ function reconcileRows(mapped, rows, portal) {
     const prior = existing.get(m.bank.row_hash);
     if (prior) {
       settled.add(i);
-      // loaded before: done, unless the expense that run made is gone since
-      if (m.expense && expenseGone(prior)) held.push(note(i, prior.description || rows[i].description, 'this ledger (loaded before)', `loaded by an earlier run but its expense was deleted since; ${reading(m, i)} (decide it in Bank Import)`));
+      const why = reloadReason(prior, m, portal);
+      if (why) held.push(note(i, prior.description || rows[i].description, 'this ledger (loaded before)', `${why}; ${reading(m, i)} (decide it in Bank Import)`));
       else duplicates += 1;
       return;
     }

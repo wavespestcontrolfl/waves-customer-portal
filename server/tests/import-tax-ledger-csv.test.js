@@ -173,6 +173,15 @@ describe('class to status table', () => {
     expect(m.bank.suggestion.ignore).toBeUndefined();
   });
 
+  test('a money-in class on money OUT (a processor fee filed as income_proc, a receipt class on a debit) is parked for review, never ignored', () => {
+    for (const cls of ['income_proc', 'receipt_unmatched']) {
+      const m = mapRow(parsedRow({ class: cls, direction: 'out', sched_c_line: '', category: 'Income' }), 0, 'l.csv');
+      expect([cls, m.bank.status, m.expense]).toEqual([cls, 'unmatched', null]);
+      expect(m.bank.suggestion.note).toMatch(new RegExp(`${cls} class on money out`));
+    }
+    expect(mapRow(parsedRow({ class: 'income_proc', direction: 'in', sched_c_line: '', category: 'Income' }), 0, 'l.csv').bank.status).toBe('ignored');
+  });
+
   test('refund is an open refund credit, not ignored', () => {
     const m = mapRow(parsedRow({ direction: 'in', class: 'refund', sched_c_line: '' }), 0, 'l.csv');
     expect(m.bank.status).toBe('unmatched');
@@ -181,7 +190,8 @@ describe('class to status table', () => {
   });
 
   test.each(['personal', 'transfer', 'income_proc', 'reward'])('%s is ignored', cls => {
-    const m = map({ class: cls, description: 'Zelle money sent to TEST HELPER', sched_c_line: '' });
+    // a processor deposit is money in; the other classes here are money out
+    const m = map({ class: cls, description: 'Zelle money sent to TEST HELPER', sched_c_line: '', direction: cls === 'income_proc' ? 'in' : 'out' });
     expect(m.bank.status).toBe('ignored');
     expect(m.expense).toBeNull();
     expect(m.bank.suggestion).toMatchObject({ ignore: true, reason: `${cls} per the ledger`, ledgerClass: cls });
@@ -194,7 +204,8 @@ describe('class to status table', () => {
   });
 
   test.each(['receipt_unmatched', 'review', 'unknown'])('%s stays unmatched with a review note and no expense', cls => {
-    const m = map({ class: cls, flag: 'CHECK', sched_c_line: '22' });
+    // a receipt is money in; review and unknown rows here are money out
+    const m = map({ class: cls, flag: 'CHECK', sched_c_line: '22', direction: cls === 'receipt_unmatched' ? 'in' : 'out' });
     expect(m.bank.status).toBe('unmatched');
     expect(m.expense).toBeNull();
     expect(m.bank.suggestion).toMatchObject({ review: true, note: 'Supplies (chemicals, equipment, hardware) [CHECK]', schedCLine: '22', flag: 'CHECK' });
@@ -424,6 +435,26 @@ describe('run', () => {
 
     expect(report).toMatch(/left unmatched by Schedule C line/);
     expect(report).toMatch(/24a/);
+  });
+
+  test('a rerun with a changed classification holds the row (class, category and line are not in the hash); an unchanged one is a duplicate', async () => {
+    const db = makeFakeDb();
+    await run({ file, db });
+    const rows = parseLedgerCsv(fs.readFileSync(file, 'utf8'));
+    // personal -> expense: the earlier run ignored it; now the ledger books it
+    const edited = rows.map((r) => ({ ...r }));
+    const helper = edited.find((r) => /TEST HELPER/.test(r.description)); helper.class = 'expense'; helper.category = 'Contract labor'; helper.sched_c_line = '11';
+    // expense -> personal: the earlier run booked it; now the ledger says personal
+    const acme = edited.find((r) => r.description === 'ACME SUPPLY 4471'); acme.class = 'personal'; acme.category = 'Personal'; acme.sched_c_line = '';
+    // Supplies -> Advertising: the earlier run booked it under Supplies
+    const dues = edited.find((r) => /TRADE SCHOOL/.test(r.description)); dues.sched_c_line = '8'; dues.category = 'Advertising';
+    fs.writeFileSync(file, csv(...edited.map((r) => row({ source: r.source, date: r.date, description: r.description, amount: String(r.amount.toFixed(2)), direction: r.direction, class: r.class, category: r.category, sched_c_line: r.sched_c_line, flag: r.flag }))));
+    const { counts, report } = await run({ file, db });
+    expect(counts).toMatchObject({ inserted: 0, held: 3, duplicates: 5 });
+    expect(report).toMatch(/the portal ignored this row but the ledger says it is business \(unignore and decide it\); the ledger says expense \(Contract Labor\)/);
+    expect(report).toMatch(/the portal booked this row as an expense but the ledger does not \(check which is right; the expense may need deleting\); the ledger says personal/);
+    expect(report).toMatch(/booked this row under Training & Education, the ledger says Advertising & Marketing/);
+    expect(db.tables().expenses).toHaveLength(4); // nothing re-booked or deleted by guesswork
   });
 
   test('a rerun holds a row an earlier run loaded whose expense was deleted since, instead of skipping it as a duplicate', async () => {
@@ -827,6 +858,16 @@ describe('--skip-existing and expenses', () => {
       const out = await run({ file, db: dbq, skipExisting: true });
       expect([status, out.counts.held, out.counts.overlaps]).toEqual([status, 1, 0]);
       expect(out.report).toMatch(re);
+    }
+    // a credit the portal APPLIED as a refund while the ledger says processor income: held; the
+    // ledger also calling it a refund is the same answer
+    for (const [cls, expected] of [['income_proc', { held: 1, overlaps: 0 }], ['refund', { held: 0, overlaps: 1 }]]) {
+      fs.writeFileSync(file, csv(row({ description: 'PROCESSOR CREDIT 77', amount: '12.50', direction: 'in', class: cls, sched_c_line: '', category: cls === 'refund' ? 'Refund' : 'Income' })));
+      const dba = makeFakeDb();
+      dba.tables().bank_transactions.push({ id: 'up-a', row_hash: 'ha', source: 'csv', account_label: 'checking 3098', txn_date: first.date, description: 'PROCESSOR CREDIT 77', amount: 12.5, direction: 'credit', status: 'refund_applied', suggestion: { refundAppliedTo: 'exp-9', refundAmount: 12.5 } });
+      const out = await run({ file, db: dba, skipExisting: true });
+      expect([cls, out.counts.held, out.counts.overlaps]).toEqual([cls, expected.held, expected.overlaps]);
+      if (expected.held) expect(out.report).toMatch(/applied this credit as a refund to an expense but the ledger does not call it a refund/);
     }
     // the ledger says personal too: the portal's ignore is the same answer
     fs.writeFileSync(file, csv(row({ description: 'ACME SUPPLY 4471', amount: '12.50', class: 'personal', sched_c_line: '', category: 'Personal' })));
