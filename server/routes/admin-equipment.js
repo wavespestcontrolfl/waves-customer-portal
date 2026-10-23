@@ -207,6 +207,12 @@ router.put('/equipment/:id', requireAdmin, async (req, res, next) => {
     const custody = await custodyFields(req.body, { selfId: req.params.id });
     if (custody.error) return res.status(400).json({ error: custody.error });
     Object.assign(updates, custody.values);
+    // A truck with tools still riding on it cannot stop being a vehicle:
+    // the riders would point at a non-vehicle and fail every later save.
+    if (updates.category !== undefined && updates.category !== 'vehicle') {
+      const rider = await db('equipment').where({ assigned_vehicle_id: req.params.id }).first('id');
+      if (rider) return res.status(409).json({ error: 'Items still ride on this truck. Move them to another truck first.' });
+    }
 
     const [record] = await db('equipment')
       .where({ id: req.params.id })

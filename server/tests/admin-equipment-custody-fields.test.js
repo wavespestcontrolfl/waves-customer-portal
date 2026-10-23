@@ -11,7 +11,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/equipment-maintenance', () => ({}));
 jest.mock('../models/db', () => {
-  const state = { vehicles: {}, rows: {}, inserted: null, updated: null, fail: null, listRows: [], chains: [] };
+  const state = { vehicles: {}, rows: {}, riders: {}, inserted: null, updated: null, fail: null, listRows: [], chains: [] };
   const chain = (table) => {
     const c = { table, calls: [], cond: null };
     const rec = (name) => jest.fn((...args) => { c.calls.push([name, ...args]); return c; });
@@ -25,6 +25,7 @@ jest.mock('../models/db', () => {
       c.calls.push(['first', ...args]);
       if (table === 'equipment' && c.cond && c.cond.category === 'vehicle') return state.vehicles[c.cond.id] || null;
       if (table === 'equipment' && c.cond && c.cond.id && c.cond.category === undefined) return state.rows[c.cond.id] || null;
+      if (table === 'equipment' && c.cond && c.cond.assigned_vehicle_id) return state.riders[c.cond.assigned_vehicle_id] || null;
       return null;
     });
     c.insert = jest.fn((row) => { c.calls.push(['insert', row]); state.inserted = row; return c; });
@@ -78,6 +79,7 @@ beforeEach(() => {
   const s = db.__state;
   s.vehicles = { [VEHICLE]: { id: VEHICLE } };
   s.rows = { [TOOL]: { id: TOOL, category: 'tool' }, [OTHER]: { id: OTHER, category: 'vehicle' } };
+  s.riders = { [VEHICLE]: { id: TOOL } };
   s.inserted = null;
   s.updated = null;
   s.fail = null;
@@ -120,6 +122,19 @@ describe('a vehicle is never cargo', () => {
     const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { category: 'vehicle' } });
     expect(res.statusCode).toBe(200);
     expect(db.__state.updated).toEqual(expect.objectContaining({ category: 'vehicle', assigned_vehicle_id: null }));
+  });
+
+  test('a truck with riders cannot stop being a vehicle', async () => {
+    const res = await run('put', '/equipment/:id', { params: { id: VEHICLE }, body: { category: 'other' } });
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error).toMatch(/still ride/);
+    expect(db.__state.updated).toBeNull();
+  });
+
+  test('an empty truck may be recategorized', async () => {
+    const res = await run('put', '/equipment/:id', { params: { id: OTHER }, body: { category: 'other' } });
+    expect(res.statusCode).toBe(200);
+    expect(db.__state.updated).toEqual(expect.objectContaining({ category: 'other' }));
   });
 
   test('a tool still rides on a truck', async () => {
