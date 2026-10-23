@@ -24,6 +24,7 @@
  */
 const db = require('../../models/db');
 const logger = require('../logger');
+const { savepointRead } = require('../../utils/savepoint-read');
 const { gateEnvValue, gateEnvTimestamp } = require('../../config/feature-gates');
 const MODELS = require('../../config/models');
 const { dispatchWithFallback } = require('../llm/call');
@@ -1171,10 +1172,24 @@ function sizesAgreeAcrossUnits(qtyA, unitA, qtyB, unitB) {
   return converted != null && sizesAgree(converted, qtyB);
 }
 
-async function ringBell(notifyAdmin, { lineId, emailId, status, title, body, trx }) {
+async function ringBell(notifyAdmin, { lineId, emailId, status, title, body, link, trx }) {
   await notifyAdmin('inventory', title, body, {
-    link: INVENTORY_LINK, bell: true, dedupeKey: `purchase-receipt:${lineId}`, trx, metadata: { emailId, status },
+    link: link || INVENTORY_LINK, bell: true, dedupeKey: `purchase-receipt:${lineId}`, trx, metadata: { emailId, status },
   });
+}
+
+// An equipment line's bell names the missing or damaged tool it can replace
+// and links to its Assets row (receipt-equipment-link.js, GATE_TRUCK_KIT).
+// The read runs in its own savepoint: a failed SQL read would otherwise
+// abort the settlement transaction, and the plain bell could not be written.
+// A failed read keeps the plain bell: the line is settled either way.
+async function equipmentBell(trx, { lineId, line }) {
+  try {
+    return await savepointRead(trx, (k) => require('./receipt-equipment-link').equipmentBellFor(k, { lineId, line }));
+  } catch (err) {
+    logger.warn(`[inventory-agent] receipt link read failed for line ${lineId}: ${err?.message || err}`);
+    return null;
+  }
 }
 
 // PHASE 1 — a terminal kind (not_stock/equipment/unsure) that never touches
@@ -1218,9 +1233,11 @@ async function settleTerminalKind(trx, { lineId, line, email, decision }, notify
     status: decision.status, agent_decision: decisionRecord(decision), agent_decided_at: new Date(),
   });
   if (decision.status === 'agent_equipment') {
+    const linked = await equipmentBell(trx, { lineId, line });
     await ringBell(notifyAdmin, {
       lineId, emailId: email.id, status: decision.status, title: 'Inventory agent: equipment, not stock',
-      body: `"${line.raw_title}" wasn't added: looks like equipment, not stock — add it to the equipment list if you're keeping it.`, trx,
+      body: linked?.body || `"${line.raw_title}" wasn't added: looks like equipment, not stock — add it to the equipment list if you're keeping it.`,
+      link: linked?.link || null, trx,
     });
   } else if (decision.status === 'agent_unsure') {
     await ringBell(notifyAdmin, {
@@ -2104,6 +2121,8 @@ module.exports = {
   validateReading, containerAgreement, classifyDecision, extractEpaRegNumber,
   canonicalSizeText, inventoryUnitForNewProduct,
   recordAttemptFailure,
+  // The equipment bell's savepoint-isolated receipt-link read (scope PR 3).
+  equipmentBell,
   // The fixed canonical-category rules (2026-09-27 category-canonicalization
   // review) — pure, no I/O — exported so a test can assert the wording a
   // title must carry to state each category, independent of the fuller

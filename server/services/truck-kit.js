@@ -298,6 +298,58 @@ async function kitForTruck(vehicleId, conn = db) {
   return rows.map((r) => ({ ...r, open_issue: issueFor.get(r.id) || null }));
 }
 
+// Every open tool alert across the fleet with its item, truck and technician
+// (office reads: the Intelligence Bar's get_tool_issues and the receipt link).
+async function openToolAlerts(conn = db) {
+  return conn('maintenance_alerts as a')
+    .join('equipment as e', 'a.equipment_id', 'e.id')
+    .leftJoin('equipment as v', 'e.assigned_vehicle_id', 'v.id')
+    .leftJoin('technicians as t', 'v.assigned_to', 't.id')
+    .whereIn('a.alert_type', TOOL_ALERT_TYPES)
+    .whereIn('a.status', OPEN_ALERT_STATUSES)
+    .orderBy('a.created_at', 'asc')
+    .select('a.id', 'a.alert_type', 'a.status', 'a.description', 'a.created_at',
+      'e.id as equipment_id', 'e.name', 'e.kit_key', 'e.category',
+      'v.id as vehicle_id', 'v.name as vehicle_name', 't.name as technician_name');
+}
+
+// Receipt link (scope PR 3): the ONE open tool alert whose item name the
+// purchase line names, or null. Every word of the item's name (three letters
+// or more) must appear in the line's title; two matching alerts is no match
+// (the office picks). Pure string containment on catalog names, no model.
+const nameWords = (text) => String(text || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').split(/\s+/).filter((w) => w.length >= 3);
+async function matchReceiptToOpenAlert(rawTitle, conn = db) {
+  const title = new Set(nameWords(rawTitle));
+  if (!title.size) return null;
+  const hits = (await openToolAlerts(conn)).filter((a) => {
+    const words = nameWords(a.name);
+    return words.length > 0 && words.every((w) => title.has(w));
+  });
+  return hits.length === 1 ? hits[0] : null;
+}
+
+// Every live truck with its holder, kit size, open alerts and last check
+// (the Intelligence Bar's get_truck_kit with no technician named).
+async function trucksOverview(conn = db) {
+  const trucks = await conn('equipment as v')
+    .leftJoin('technicians as t', 'v.assigned_to', 't.id')
+    .where('v.category', 'vehicle')
+    .whereNotIn('v.status', DEAD_VEHICLE_STATUSES)
+    .orderBy('v.name')
+    .select('v.id', 'v.name', 'v.asset_tag', 'v.assigned_to', 't.name as technician_name');
+  const out = [];
+  for (const truck of trucks) {
+    const [kit, lastCheck] = await Promise.all([kitForTruck(truck.id, conn), lastCheckForTruck(truck.id, conn)]);
+    out.push({
+      id: truck.id, name: truck.name, asset_tag: truck.asset_tag, technician_name: truck.technician_name || null,
+      items: kit.length, keyed_items: kit.filter((k) => k.kit_key).length,
+      open_issues: kit.filter((k) => k.open_issue).map((k) => ({ name: k.name, issue: k.open_issue })),
+      last_check_at: lastCheck?.checked_at || null, due: kit.length > 0 && checkDue(lastCheck?.checked_at, new Date()),
+    });
+  }
+  return out;
+}
+
 // The open tool alert on one item, if any (a moved item must not carry one).
 async function openToolAlertFor(equipmentId, conn = db) {
   const row = await conn('maintenance_alerts')
@@ -732,6 +784,9 @@ module.exports = {
   addReadinessToolIssue,
   truckHasKeys,
   openToolAlertFor,
+  openToolAlerts,
+  matchReceiptToOpenAlert,
+  trucksOverview,
   kitKeyVocabulary,
   toolGapsForTruck,
   toolGapIssue,

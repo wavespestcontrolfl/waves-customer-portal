@@ -14,8 +14,9 @@
 > nothing) and a tool reported missing or damaged on an earlier check defaults
 > to that state on the next check, so a tap on "Everything's here" can never
 > quietly find it. PR 3 (receipt link, Intelligence Bar reads, the tax de
-> minimis threshold) is NOT built: decision 7 is still the owner's and the
-> accountant's. No database was available to the build session; the
+> minimis threshold) is BUILT (2026-10-23, after #6497 merged and the gate
+> went live): the threshold ships as `EQUIPMENT_TAX_DE_MINIMIS_USD`, default 0
+> (no change until the owner and the accountant name the number). No database was available to the build session; the
 > migrations were exercised against stub builders only, so the first preview
 > deploy is the migration proof. Codex round 1 (#6496 / #6497, 2026-10-23):
 > asset create and edit are admin-only; a vehicle is never cargo; the Kit key

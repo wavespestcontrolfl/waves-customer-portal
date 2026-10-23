@@ -34,6 +34,7 @@ const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligenc
 const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
 const { SEO_TOOLS, executeSeoTool } = require('../services/intelligence-bar/seo-tools');
 const { PROCUREMENT_TOOLS, executeProcurementTool } = require('../services/intelligence-bar/procurement-tools');
+const { TRUCK_KIT_TOOLS, executeTruckKitTool } = require('../services/intelligence-bar/truck-kit-tools');
 const { REVENUE_TOOLS, executeRevenueTool } = require('../services/intelligence-bar/revenue-tools');
 const { TECH_TOOLS, executeTechTool } = require('../services/intelligence-bar/tech-tools');
 const { REVIEW_TOOLS, executeReviewTool } = require('../services/intelligence-bar/review-tools');
@@ -150,6 +151,7 @@ const CLOSEOUT_REPAIR_TOOL_NAMES = new Set(CLOSEOUT_REPAIR_TOOLS.map(t => t.name
 const DASHBOARD_TOOL_NAMES = new Set(DASHBOARD_TOOLS.map(t => t.name));
 const SEO_TOOL_NAMES = new Set(SEO_TOOLS.map(t => t.name));
 const PROCUREMENT_TOOL_NAMES = new Set(PROCUREMENT_TOOLS.map(t => t.name));
+const TRUCK_KIT_TOOL_NAMES = new Set(TRUCK_KIT_TOOLS.map(t => t.name));
 const REVENUE_TOOL_NAMES = new Set(REVENUE_TOOLS.map(t => t.name));
 const TECH_TOOL_NAMES = new Set(TECH_TOOLS.map(t => t.name));
 const REVIEW_TOOL_NAMES = new Set(REVIEW_TOOLS.map(t => t.name));
@@ -3234,7 +3236,8 @@ function toolsForContextUngated(context, isAdmin = false, fullAccess = false) {
     return [...base, ...(fullAccess ? SEO_TOOLS : SEO_QUERY_TOOLS).filter(t => !INFRA_TOOL_NAMES.has(t.name)), ...infra];
   }
   if (context === 'procurement' || context === 'inventory') {
-    return [...base, ...PROCUREMENT_TOOLS, ...infra];
+    // Truck kit reads (admin only: the office's view of every truck).
+    return [...base, ...PROCUREMENT_TOOLS, ...(isAdmin ? TRUCK_KIT_TOOLS : []), ...infra];
   }
   if (context === 'revenue') {
     return [...base, ...REVENUE_TOOLS, ...infra];
@@ -3425,6 +3428,9 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   }
   if (PROCUREMENT_TOOL_NAMES.has(toolName)) {
     return executeProcurementTool(toolName, input, actionContext);
+  }
+  if (TRUCK_KIT_TOOL_NAMES.has(toolName)) {
+    return executeTruckKitTool(toolName, input);
   }
   if (REVENUE_TOOL_NAMES.has(toolName)) {
     return executeRevenueTool(toolName, input);
