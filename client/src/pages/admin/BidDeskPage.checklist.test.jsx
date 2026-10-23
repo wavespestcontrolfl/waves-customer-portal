@@ -122,7 +122,7 @@ it("lists the documents and links an estimate to its proposal", async () => {
     "GET /admin/bid-desk/b1": () => reply(detail({
       bid: bid({ estimate_id: linked ? "e1" : null }),
       estimate: linked ? { id: "e1", slug: "EST-1001", name: "Fixture Build Co", status: "draft", proposal_path: "/admin/estimates/e1/proposal" } : null,
-      documents: [{ id: "a1", name: "bid-form.pdf", size: 2048, email_id: "m1", email_subject: "Invite", download_path: "/admin/email/message/m1/attachment/g1" }],
+      documents: [{ id: "a1", name: "bid-form.pdf", size: 2048, email_id: "m1", email_subject: "Invite", gmail_attachment_id: "g1" }],
     })),
     "GET /admin/bid-desk/estimates?q=EST-1001": () => reply({ estimates: [{ id: "e1", slug: "EST-1001", name: "Fixture Build Co", proposal_path: "/admin/estimates/e1/proposal" }] }),
     "PATCH /admin/bid-desk/b1": (options) => { linked = true; return link(options); },
@@ -271,4 +271,23 @@ it("offers no Add missing lines when nothing is missing, and shows the server's 
   fireEvent.click(startButton);
   expect(await screen.findByText("All template lines for this type were removed. Add lines by hand.")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Add line" })).toBeInTheDocument();
+});
+
+it("downloads a document through the email attachment route, built by the page from the email id and the Gmail attachment id", async () => {
+  URL.createObjectURL = vi.fn(() => "blob:fixture");
+  URL.revokeObjectURL = vi.fn();
+  route({
+    "GET /admin/bid-desk/": LIST_ON,
+    "GET /admin/bid-desk/b1": () => reply(detail({ documents: [
+      { id: "a1", name: "bid-form.pdf", size: 2048, email_id: "m1", email_subject: "Invite", gmail_attachment_id: "g/1" },
+      { id: "a2", name: "no-download.txt", size: null, email_id: "m1", email_subject: "Invite", gmail_attachment_id: null },
+    ] })),
+    "GET /admin/email/message/m1/attachment/g%2F1": () => reply({}),
+  });
+  renderPage();
+  expect(await screen.findByText("no-download.txt")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Download no-download.txt" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Download bid-form.pdf" }));
+  await waitFor(() => expect(URL.createObjectURL).toHaveBeenCalled());
+  expect(adminFetch).toHaveBeenCalledWith("/admin/email/message/m1/attachment/g%2F1", { skipContentType: true });
 });

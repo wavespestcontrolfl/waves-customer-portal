@@ -252,8 +252,8 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
       expect(documents.map((d) => d.name).sort()).toEqual(['addendum-1.pdf', 'bid-form.pdf', 'no-download.txt']);
       expect(documents.map((d) => d.email_id)).toEqual([first.id, first.id, second.id]); // oldest email first
       const form = documents.find((d) => d.name === 'bid-form.pdf');
-      expect(form).toMatchObject({ size: 1024, mime_type: 'application/pdf', email_id: first.id, email_subject: first.subject, download_path: `/admin/email/message/${first.id}/attachment/g-1` });
-      expect(documents.find((d) => d.name === 'no-download.txt')).toMatchObject({ size: null, download_path: null });
+      expect(form).toMatchObject({ size: 1024, mime_type: 'application/pdf', email_id: first.id, email_subject: first.subject, gmail_attachment_id: 'g-1' });
+      expect(documents.find((d) => d.name === 'no-download.txt')).toMatchObject({ size: null, gmail_attachment_id: null });
     });
 
     test('a bid with no attachments has an empty list', async () => {

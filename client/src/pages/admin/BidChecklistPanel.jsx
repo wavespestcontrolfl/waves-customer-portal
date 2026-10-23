@@ -143,7 +143,7 @@ function Documents({ documents }) {
   const download = async (doc) => {
     setError("");
     try {
-      const res = await adminFetch(doc.download_path, { skipContentType: true });
+      const res = await adminFetch(`/admin/email/message/${doc.email_id}/attachment/${encodeURIComponent(doc.gmail_attachment_id)}`, { skipContentType: true });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const url = URL.createObjectURL(await res.blob());
       const link = document.createElement("a");
@@ -166,7 +166,7 @@ function Documents({ documents }) {
             <span className="min-w-0 break-words font-medium">{doc.name}</span>
             {doc.size != null && <span className="text-ink-secondary">{sizeText(doc.size)}</span>}
             <span className="min-w-0 break-words text-ink-secondary">from “{doc.email_subject || "(no subject)"}”</span>
-            {doc.download_path && <Button size="sm" variant="secondary" aria-label={`Download ${doc.name}`} onClick={() => download(doc)}>Download</Button>}
+            {doc.gmail_attachment_id && <Button size="sm" variant="secondary" aria-label={`Download ${doc.name}`} onClick={() => download(doc)}>Download</Button>}
           </li>
         ))}
       </ul>

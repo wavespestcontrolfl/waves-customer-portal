@@ -300,7 +300,8 @@ function estimateSummary(row) {
 }
 
 // Every attachment of every email linked to the bid, by reference: the file stays in the mailbox and is downloaded
-// through the existing email-attachment route (download_path is relative to the API base, as adminFetch expects).
+// through the existing email-attachment route. The reply names the email and the Gmail attachment id; the page builds
+// the download request itself (the server builds no path string).
 async function bidDocuments(conn, bidId) {
   const rows = await conn('bid_opportunity_emails as l')
     .join('emails as e', 'e.id', 'l.email_id')
@@ -316,9 +317,8 @@ async function bidDocuments(conn, bidId) {
     email_id: row.email_id,
     email_subject: row.subject || null,
     received_at: row.received_at,
-    download_path: row.gmail_attachment_id
-      ? `/admin/email/message/${row.email_id}/attachment/${encodeURIComponent(row.gmail_attachment_id)}`
-      : null,
+    // Null when the mailbox row has no Gmail attachment id: the download route cannot serve it.
+    gmail_attachment_id: row.gmail_attachment_id || null,
   }));
 }
 
