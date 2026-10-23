@@ -1353,6 +1353,14 @@ function hasUnresolvedBankChange(row) {
   return !!(row && row.suggestion && (row.suggestion.plaidModified || row.suggestion.plaidRemoved));
 }
 
+// A row whose link is the owner's call: the ledger import parks a row that
+// may already be an expense in the portal with suggestion.manualLink. A
+// pass offers its candidates in Bank Import and never claims one, however
+// strong; the manual link and create paths are unchanged.
+function manualLinkOnly(row) {
+  return !!(row && row.suggestion && row.suggestion.manualLink);
+}
+
 async function runDeterministicMatching({ limit } = {}) {
   const healed = await resetDanglingLinks();
   const reconciliation = await retryPendingReconciliations();
@@ -1738,7 +1746,7 @@ async function runDeterministicMatching({ limit } = {}) {
     // method expenses PARK too — the operator may know the books are
     // mislabeled.
     const strong = candidates.filter(c => strongExpenseMatch(row, c));
-    if (candidates.length === 1 && strong.length === 1) {
+    if (candidates.length === 1 && strong.length === 1 && !manualLinkOnly(row)) {
       let claimedExpense = false;
       let recheckPlural = null;
       try {
@@ -1965,6 +1973,7 @@ module.exports = {
   isPlausiblePayoutLink,
   isPlausibleRefundTarget,
   appliedRefundTotal,
+  withinCandidateTolerance,
   refundCandidatesForRow,
   surveyExpenseCandidatesForRow,
   surveyPayoutCandidatesForRow,

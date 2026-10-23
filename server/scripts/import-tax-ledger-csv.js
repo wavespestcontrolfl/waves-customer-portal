@@ -53,7 +53,7 @@ const { categoryDeductibleAmount } = require('../services/expense-categorizer');
 // days off the statement still holds the ledger's expense row) and its
 // refund-aware gross reading (an expense a refund reduced is compared at the
 // amount the bank debited, applied and released refunds included).
-const { EXPENSE_DATE_WINDOW_DAYS, appliedRefundTotal, methodIncompatible } = require('../services/bank-import');
+const { EXPENSE_DATE_WINDOW_DAYS, appliedRefundTotal, methodIncompatible, withinCandidateTolerance } = require('../services/bank-import');
 
 const HEADER = ['source', 'date', 'description', 'amount', 'direction', 'class', 'category', 'sched_c_line', 'flag', 'processor_match', 'bank_category'];
 const CLASSES = ['expense', 'vehicle', 'interest', 'personal', 'transfer', 'income_proc', 'receipt_unmatched', 'review', 'reward', 'refund', 'asset', 'unknown'];
@@ -572,24 +572,32 @@ function reloadReason(prior, m) {
   return null;
 }
 
-// Every portal expense of the same gross amount within the matcher's window
-// (a receipt dated the purchase, the statement dated the posting) whose
-// payment method can be this account: any of them may be this very charge,
-// entered before the ledger was loaded. The ledger row is loaded as an open
-// review row with no expense, naming them all. There is no one-for-one
-// assignment and no nearest-first pick (two rows of one amount near two
-// receipts are both parked): the owner links or creates each in Bank Import.
+// Every portal expense of the same gross amount (the matcher's one-cent
+// tolerance: a near-miss is a candidate there too) within the matcher's
+// window (a receipt dated the purchase, the statement dated the posting)
+// whose payment method can be this account: any of them may be this very
+// charge, entered before the ledger was loaded. The ledger row is loaded as
+// an open review row with no expense, naming them all. There is no
+// one-for-one assignment and no nearest-first pick (two rows of one amount
+// near two receipts are both parked): the owner links or creates each in
+// Bank Import.
+const grossOf = e => (e.gross != null ? Number(e.gross) : Number(e.amount));
 function nearbyExpenses(portalExpenses, row, bank) {
-  const amount = Number(bank.amount).toFixed(2);
   const day = dayNumber(row.date);
-  return portalExpenses.filter(e => Number(e.gross != null ? e.gross : e.amount).toFixed(2) === amount
+  return portalExpenses.filter(e => withinCandidateTolerance(grossOf(e), bank.amount)
     && Math.abs(dayNumber(ymdOf(e.expense_date)) - day) <= EXPENSE_DATE_WINDOW_DAYS
     && !methodIncompatible(bank.account_type, e.payment_method));
 }
-function describeNearby(near, date) {
-  const one = e => `"${(e.vendor_name || e.description || '(no text)').slice(0, 40)}" dated ${describeGap(dayNumber(ymdOf(e.expense_date)) - dayNumber(date))}${e.gross != null && Number(e.gross) !== Number(e.amount) ? ` (${Number(e.amount).toFixed(2)} after refunds)` : ''}`;
+function describeNearby(near, date, amount) {
+  const cents = v => Math.round(Number(v) * 100);
+  const exact = near.every(e => cents(grossOf(e)) === cents(amount));
+  const one = e => {
+    const offBy = cents(grossOf(e)) !== cents(amount) ? ` (${grossOf(e).toFixed(2)})` : '';
+    const afterRefunds = e.gross != null && Number(e.gross) !== Number(e.amount) ? ` (${Number(e.amount).toFixed(2)} after refunds)` : '';
+    return `"${(e.vendor_name || e.description || '(no text)').slice(0, 40)}" dated ${describeGap(dayNumber(ymdOf(e.expense_date)) - dayNumber(date))}${offBy}${afterRefunds}`;
+  };
   const more = near.length > 3 ? ` and ${near.length - 3} more` : '';
-  return `${near.length === 1 ? 'an expense' : `${near.length} expenses`} of the same amount already in the portal: ${near.slice(0, 3).map(one).join(', ')}${more}`;
+  return `${near.length === 1 ? 'an expense' : `${near.length} expenses`} of the same amount${exact ? '' : ' within one cent'} already in the portal: ${near.slice(0, 3).map(one).join(', ')}${more}`;
 }
 
 // Which ledger rows load: every row but one loaded before (a duplicate, or
@@ -617,8 +625,18 @@ function reconcileRows(mapped, rows, portal) {
     if (m.expense) {
       const near = nearbyExpenses(portalExpenses, rows[i], m.bank);
       if (near.length) {
-        const why = describeNearby(near, rows[i].date);
-        parkForReview(m, rows[i], { note: `${why}: link this row to that expense in Bank Import, or create the expense there if it is a different purchase`, nearbyExpenseIds: near.map(e => e.id) });
+        const why = describeNearby(near, rows[i].date, m.bank.amount);
+        const categoryId = categoryIds.get(m.categoryName) || null;
+        parkForReview(m, rows[i], {
+          note: `${why}: link this row to that expense in Bank Import, or create the expense there if it is a different purchase${categoryId ? '' : `; no category in the portal for line ${rows[i].sched_c_line || '(none)'}`}`,
+          nearbyExpenseIds: near.map(e => e.id),
+          // the link is the owner's call: the matcher offers candidates on
+          // this row and never claims one by itself
+          manualLink: true,
+          // the ledger's category rides along, so Create expense in Bank
+          // Import books it under the right line without a second pick
+          ...(categoryId ? { categoryId, categoryName: m.categoryName, categorySource: 'ledger' } : {}),
+        });
         parked.push({ ...note(i, `${why}; ${reading(m, i)}`), rowHash: m.bank.row_hash });
       } else if (!categoryIds.has(m.categoryName)) parkForReview(m, rows[i]);
     }

@@ -6059,7 +6059,7 @@ function BankImportTab() {
                       why here, next to the action that would book it */}
                   {r.suggestion?.review && r.suggestion?.note ? (
                     <div
-                      className="text-xs text-ink-secondary"
+                      className="text-sm text-ink-secondary"
                       style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
                       title={r.suggestion.note}
                     >
@@ -6511,7 +6511,7 @@ function BankImportTab() {
                           >
                             <option value="">
                               {r.suggestion?.categoryName
-                                ? `AI: ${r.suggestion.categoryName}`
+                                ? `${r.suggestion.categorySource === "ledger" ? "Ledger" : "AI"}: ${r.suggestion.categoryName}`
                                 : "Category…"}
                             </option>
                             {categories.map((c) => (

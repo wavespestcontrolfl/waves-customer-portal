@@ -544,6 +544,18 @@ describe('runDeterministicMatching', () => {
     expect(sugOf(state.updates.find(u => sugOf(u))).candidates).toHaveLength(1);
   });
 
+  test('a row marked manualLink (the ledger import: this may already be an expense) parks its one strong candidate instead of auto-linking', async () => {
+    state.bankRows = [
+      { id: 'bt-1', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: 312.4, direction: 'debit', suggestion: { review: true, manualLink: true } },
+    ];
+    state.expenses = [{ id: 'exp-1', amount: '312.40', description: 'SiteOne order', vendor_name: 'SiteOne', expense_date: '2026-08-10' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.expensesLinked).toBe(0);
+    expect(summary.ambiguous).toBe(1);
+    expect(state.updates.find(u => u.patch.status)).toBeUndefined();
+    expect(sugOf(state.updates.find(u => sugOf(u))).candidates).toHaveLength(1); // offered, for the owner to link
+  });
+
   test('a second strong candidate anywhere in the set blocks auto-link (no cap can hide it)', async () => {
     state.bankRows = [
       { id: 'bt-1', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: 312.4, direction: 'debit', suggestion: null },

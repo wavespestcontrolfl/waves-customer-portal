@@ -364,6 +364,13 @@ describe('create-expense (gate on)', () => {
     expect(state.insertedExpenses[0].payment_method).toBe('ach');
   });
 
+  test('a category the ledger import carried (categorySource ledger) books by default without the AI-verify note', async () => {
+    state.bankRow.suggestion = { ...(state.bankRow.suggestion || {}), categorySource: 'ledger' };
+    await post('/admin/tax/bank-import/bt-1/create-expense', {});
+    expect(state.insertedExpenses[0].category_id).toBe('cat-meals');
+    expect(state.insertedExpenses[0].notes).not.toContain('AI-categorized');
+  });
+
   test('an operator-picked category skips the AI-verify note', async () => {
     state.category = { name: 'Supplies' };
     await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-supplies' });

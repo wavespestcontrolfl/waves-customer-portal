@@ -2358,7 +2358,9 @@ router.post('/bank-import/:id/create-expense', async (req, res, next) => {
 
     const suggested = row.suggestion?.categoryId || null;
     const categoryId = req.body?.categoryId || suggested;
-    const usedAi = !req.body?.categoryId && !!suggested;
+    // the AI-verify note is for a model's category: one the ledger import
+    // carried (categorySource 'ledger') is the owner's own books
+    const usedAi = !req.body?.categoryId && !!suggested && row.suggestion?.categorySource !== 'ledger';
     let deductible = parseFloat(row.amount);
     if (categoryId) {
       const cat = await db('expense_categories').where({ id: categoryId }).first('name');

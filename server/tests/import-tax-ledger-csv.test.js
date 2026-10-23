@@ -770,9 +770,43 @@ describe('what the portal already holds', () => {
     expect(parkedRow).toMatchObject({ status: 'unmatched', match_method: null });
     expect(parkedRow.matched_expense_id).toBeUndefined();
     expect(parkedRow.suggestion).toMatchObject({ review: true, ledgerClass: 'expense', nearbyExpenseIds: ['exp-a'], note: expect.stringMatching(/^an expense of the same amount already in the portal: "Acme Supply" dated 2 days earlier: link this row to that expense in Bank Import, or create the expense there/) });
+    // the matcher offers candidates on it and never claims one (manualLink); the ledger's category rides along for Create expense
+    expect(parkedRow.suggestion).toMatchObject({ manualLink: true, categoryId: 'cat-3', categoryName: 'Supplies', categorySource: 'ledger' });
     // a rerun before the owner decides it: the row is in the portal, open and without its expense, so it is held (listed), never loaded twice
     expect((await run({ file, db })).counts).toEqual({ read: 2, inserted: 0, duplicates: 1, held: 1, parked: 0, portalExpenses: 2 });
     expect(db.tables().bank_transactions).toHaveLength(2);
+  });
+
+  test('a portal expense one cent off (the matcher\'s candidate tolerance) parks the row too, naming the amount; two cents off does not', async () => {
+    const file = fixture(row({ description: 'ACME SUPPLY 4471', amount: '12.50', date: '2025-03-14' }));
+    const db = makeFakeDb();
+    db.tables().expenses.push({ id: 'exp-near', expense_date: '2025-03-14', amount: '12.49', vendor_name: 'Acme Supply', description: 'x' });
+    const { counts, report } = await run({ file, db });
+    expect(counts).toMatchObject({ parked: 1, inserted: 1 });
+    expect(report).toMatch(/\[an expense of the same amount within one cent already in the portal: "Acme Supply" dated the same day \(12\.49\); the ledger says expense \(Supplies\)\]/);
+    expect(db.tables().expenses).toHaveLength(1);
+    const db2 = makeFakeDb();
+    db2.tables().expenses.push({ id: 'exp-far', expense_date: '2025-03-14', amount: '12.48', vendor_name: 'Acme Supply', description: 'x' });
+    expect((await run({ file, db: db2 })).counts).toMatchObject({ parked: 0, inserted: 1 });
+    expect(db2.tables().expenses).toHaveLength(2);
+  });
+
+  test('a parked row whose category is missing from this database says so in the note and carries no category', async () => {
+    const file = fixture();
+    const db = makeFakeDb({ categories: [{ id: 'cat-x', name: 'Insurance' }] });
+    db.tables().expenses.push({ id: 'exp-hand', expense_date: '2025-03-14', amount: '12.50', vendor_name: 'Acme Supply', description: 'supplies' });
+    const { counts } = await run({ file, db });
+    expect(counts).toMatchObject({ parked: 1, inserted: 1 });
+    const parkedRow = db.tables().bank_transactions[0];
+    expect(parkedRow.suggestion.note).toMatch(/; no category in the portal for line 22$/);
+    expect(parkedRow.suggestion.categoryId).toBeUndefined();
+    expect(parkedRow.suggestion.manualLink).toBe(true);
+  });
+
+  test('the shared matcher honors the manualLink marker the importer writes', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/bank-import.js'), 'utf8');
+    expect(src).toMatch(/manualLinkOnly\(row\)/);
+    expect(src).toMatch(/suggestion\.manualLink/);
   });
 
   test('no one-for-one assignment: two ledger rows near two receipts of one amount are both parked, every nearby expense listed on each', async () => {
