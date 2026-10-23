@@ -194,9 +194,14 @@ router.post('/equipment', requireAdmin, async (req, res, next) => {
     if (!name) return res.status(400).json({ error: 'Equipment name is required' });
     const custody = await custodyFields(req.body);
     if (custody.error) return res.status(400).json({ error: custody.error });
-    if (await secondLiveTruck({ category, assigned_to, status: status || 'active' }, null)) return res.status(409).json({ error: SECOND_TRUCK_ERROR });
-
-    const [record] = await db('equipment').insert({
+    // A vehicle given to a technician: the one-live-truck check and the
+    // insert serialize on that technician's lock.
+    const record = await db.transaction(async (trx) => {
+      if (category === 'vehicle' && assigned_to) {
+        await require('../services/truck-kit').lockTechnician(trx, assigned_to);
+        if (await secondLiveTruck({ category, assigned_to, status: status || 'active' }, null, trx)) return 'second-truck';
+      }
+      const [row] = await trx('equipment').insert({
       ...custody.values,
       name, category, make, model, serial_number,
       purchase_date: purchase_date || null,
@@ -212,6 +217,9 @@ router.post('/equipment', requireAdmin, async (req, res, next) => {
       specs: specs ? JSON.stringify(specs) : null,
       notes: notes || null,
     }).returning('*');
+      return row;
+    });
+    if (record === 'second-truck') return res.status(409).json({ error: SECOND_TRUCK_ERROR });
 
     logger.info(`Equipment added: ${record.name} (${record.id})`);
     res.status(201).json({ equipment: record });
@@ -275,7 +283,10 @@ router.put('/equipment/:id', requireAdmin, async (req, res, next) => {
       // An omitted key keeps the stored value; an explicit null clears it (that is how a second truck is unassigned).
       const pick = (key) => (Object.prototype.hasOwnProperty.call(updates, key) ? updates[key] : before[key]);
       const live = { category: pick('category'), assigned_to: pick('assigned_to'), status: pick('status') };
-      if (await secondLiveTruck(live, req.params.id, trx)) return 'second-truck';
+      if (live.category === 'vehicle' && live.assigned_to && !DEAD_ITEM_STATUSES.includes(live.status)) {
+        await truckKit.lockTechnician(trx, live.assigned_to);
+        if (await secondLiveTruck(live, req.params.id, trx)) return 'second-truck';
+      }
       const [row] = await trx('equipment').where({ id: req.params.id }).update(updates).returning('*');
       if (row && oldTruck) await truckKit.closeTruckBellIfClear(oldTruck, new Date(), trx);
       return row || null;

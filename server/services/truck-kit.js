@@ -66,25 +66,39 @@ const bellKey = (vehicleId) => `truck-kit:${vehicleId}`;
 // One advisory lock per truck: a check and an office resolve on the same
 // truck never interleave (both take it inside their transaction).
 const lockTruck = (conn, vehicleId) => conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [bellKey(vehicleId)]);
+// One lock per technician for "one live truck per technician": two
+// assignments to the same person serialize on it (routes/admin-equipment.js).
+const lockTechnician = (conn, technicianId) => conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`truck-kit:tech:${technicianId}`]);
 
-// A catalog inspection / assessment / "other" visit treats nothing (job-card.js
-// resolveVisitProducts: identity gates the line), so it needs no treatment
-// tools. Legacy rows without identity fall back to the name.
-const NON_TREATMENT_CATEGORIES = ['inspection', 'other'];
-const NON_TREATMENT_NAME = /\b(assessment|consultation|walk-?through)\b/i;
-const isNonTreatmentVisit = (serviceType, serviceCategory) =>
-  (serviceCategory ? NON_TREATMENT_CATEGORIES.includes(String(serviceCategory).toLowerCase()) : false) || NON_TREATMENT_NAME.test(String(serviceType || ''));
+// A consultation (the Waves Assessment, a consultation link, a walkthrough)
+// treats nothing and needs no tools. A diagnostic inspection (WDO letter,
+// lawn health inspection) DOES: its checklist names the instruments, so the
+// catalog category alone never exempts a visit, only a consultation identity.
+const CONSULTATION_KEYS = new Set(['waves_assessment', 'lead_consultation_link', 'consultation']);
+const CONSULTATION_NAME = /\b(assessment|consultation|walk-?through)\b/i;
+const isConsultation = (serviceType, serviceKey) =>
+  (serviceKey ? CONSULTATION_KEYS.has(String(serviceKey).toLowerCase()) : false) || CONSULTATION_NAME.test(String(serviceType || ''));
 
-// The checklist lines a visit's tools come from: the primary line plus every
-// companion line its service name mentions, in that order, once each. A
-// consultation has none.
-function serviceLinesFor(serviceType, serviceCategory = null) {
+// The checklist lines ONE service's tools come from: its line plus every
+// companion line its name mentions, in that order, once each.
+function linesForService(serviceType, serviceKey) {
   const lines = [];
-  if (!String(serviceType || '').trim() || isNonTreatmentVisit(serviceType, serviceCategory)) return lines;
+  if (!String(serviceType || '').trim() || isConsultation(serviceType, serviceKey)) return lines;
   const primary = detectServiceLine(serviceType);
   if (primary) lines.push(primary);
   const text = String(serviceType || '').toLowerCase();
   for (const [line, re] of COMPANION_LINES) if (re.test(text) && !lines.includes(line)) lines.push(line);
+  return lines;
+}
+
+// The lines a visit's tools come from: the primary service's lines, then
+// each booked add-on's (a Tree & Shrub add-on on a pest visit needs the tree
+// and shrub tools too). `addons` is [{ name, serviceKey }].
+function serviceLinesFor(serviceType, { serviceKey = null, addons = [] } = {}) {
+  const lines = linesForService(serviceType, serviceKey);
+  for (const addon of Array.isArray(addons) ? addons : []) {
+    for (const line of linesForService(addon?.name, addon?.serviceKey)) if (!lines.includes(line)) lines.push(line);
+  }
   return lines;
 }
 
@@ -233,6 +247,29 @@ async function toolGapsForTruck(vehicleId, serviceLines, conn = db) {
   return required.filter((tool) => !onTruck.has(tool.kit_key));
 }
 
+// The job card's readiness call (job-card.js buildJobCard, readinessOnly):
+// nothing while the kit is dark, and a failed read is reported, never fatal,
+// so the stock and weather holds always stand.
+async function readinessToolIssue(facts, conn = db) {
+  if (!truckKitLive()) return null;
+  try {
+    return await module.exports.toolGapIssue({
+      technicianId: facts.technicianId, serviceLine: facts.serviceLine, serviceType: facts.serviceType,
+      serviceKey: facts.serviceKey || null, addons: facts.addons || [],
+    }, conn);
+  } catch (err) {
+    logger.warn(`[truck-kit] readiness read failed for ${facts.serviceId}: ${err?.message || err}`);
+    return null;
+  }
+}
+
+// Adds the hold to a readiness result (no branch left in buildJobCard).
+async function addReadinessToolIssue(readiness, facts, conn = db) {
+  const issue = await readinessToolIssue(facts, conn);
+  if (issue) readiness.issues.push(issue);
+  return readiness;
+}
+
 function toolGapLabel(gaps) {
   const names = gaps.map((gap) => gap.label);
   if (names.length === 1) return `Truck lacks ${names[0]}`;
@@ -244,9 +281,9 @@ function toolGapLabel(gaps) {
 // dispatchReadiness), or null: a required tool the assigned truck lacks is a
 // hold like company stock or weather.
 // serviceType, when given, adds the companion lines of a combined job.
-async function toolGapIssue({ technicianId, serviceLine, serviceType, serviceCategory = null }, conn = db) {
+async function toolGapIssue({ technicianId, serviceLine, serviceType, serviceKey = null, addons = [] }, conn = db) {
   if (!truckKitLive() || !technicianId) return null;
-  const lines = serviceType ? serviceLinesFor(serviceType, serviceCategory) : [serviceLine].filter(Boolean);
+  const lines = serviceType ? serviceLinesFor(serviceType, { serviceKey, addons }) : [serviceLine].filter(Boolean);
   if (!lines.length) return null;
   let truck;
   try { truck = await truckForTechnician(technicianId, conn); } catch (err) {
@@ -265,14 +302,23 @@ async function toolGapsForToday(technicianId, truck, { now = new Date(), conn = 
   const visits = await conn('scheduled_services')
     .where({ technician_id: technicianId, scheduled_date: etDateString(now) })
     .whereIn('status', LIVE_VISIT_STATUSES)
-    .select('id', 'service_type', 'service_category_snapshot');
+    .select('id', 'service_type', 'service_key_snapshot');
   if (!visits.length) return [];
   if (!(await truckHasKeys(truck.id, conn))) return [];
   const onTruck = keysOnTruck(await kitForTruck(truck.id, conn));
+  // Booked add-ons bring their own line's tools.
+  const addonRows = await conn('scheduled_service_addons')
+    .whereIn('scheduled_service_id', visits.map((v) => v.id))
+    .select('scheduled_service_id', 'service_name', 'service_key_snapshot');
+  const addonsByVisit = new Map();
+  for (const row of addonRows) {
+    if (!addonsByVisit.has(row.scheduled_service_id)) addonsByVisit.set(row.scheduled_service_id, []);
+    addonsByVisit.get(row.scheduled_service_id).push({ name: row.service_name, serviceKey: row.service_key_snapshot || null });
+  }
   const requiredByLines = new Map();
   const out = [];
   for (const visit of visits) {
-    const lines = serviceLinesFor(visit.service_type, visit.service_category_snapshot);
+    const lines = serviceLinesFor(visit.service_type, { serviceKey: visit.service_key_snapshot, addons: addonsByVisit.get(visit.id) || [] });
     if (!lines.length) continue;
     const key = lines.join('+');
     if (!requiredByLines.has(key)) requiredByLines.set(key, await requiredToolsForLines(lines, conn));
@@ -493,6 +539,9 @@ module.exports = {
   requiredToolsForLines,
   serviceLinesFor,
   lockTruck,
+  lockTechnician,
+  readinessToolIssue,
+  addReadinessToolIssue,
   truckHasKeys,
   openToolAlertFor,
   kitKeyVocabulary,

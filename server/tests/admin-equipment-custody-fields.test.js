@@ -246,6 +246,7 @@ jest.mock('../services/truck-kit', () => ({
   lockTruck: jest.fn(async () => ({ rows: [] })),
   closeTruckBellIfClear: jest.fn(async () => true),
   openToolAlertFor: jest.fn(async () => null),
+  lockTechnician: jest.fn(async () => ({ rows: [] })),
 }));
 const truckKit = require('../services/truck-kit');
 
@@ -286,9 +287,14 @@ describe('a tool leaving a truck re-judges that truck\'s bell', () => {
     let res = await run('post', '/equipment', { body: { name: 'Second van', category: 'vehicle', assigned_to: 'tech-1' } });
     expect(res.statusCode).toBe(409);
     expect(db.__state.inserted).toBeNull();
+    // The check and the write serialize on the technician's lock, in one transaction.
+    expect(truckKit.lockTechnician).toHaveBeenCalledWith(db, 'tech-1');
+    expect(db.transaction).toHaveBeenCalled();
+    jest.clearAllMocks();
     res = await run('put', '/equipment/:id', { params: { id: OTHER }, body: { assigned_to: 'tech-1' } });
     expect(res.statusCode).toBe(409);
     expect(db.__state.updated).toBeNull();
+    expect(truckKit.lockTechnician).toHaveBeenCalledWith(db, 'tech-1');
     // The repair the message asks for: clearing one truck's technician saves.
     db.__state.rows[OTHER] = { id: OTHER, category: 'vehicle', assigned_to: 'tech-1', status: 'active' };
     expect((await run('put', '/equipment/:id', { params: { id: OTHER }, body: { assigned_to: null } })).statusCode).toBe(200);

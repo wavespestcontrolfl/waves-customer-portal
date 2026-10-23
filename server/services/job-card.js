@@ -1682,18 +1682,9 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   if (readinessOnly) {
     const readiness = dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, now });
     // Truck kit (GATE_TRUCK_KIT, docs/tool-inventory-tracker-scope.md PR 2): a
-    // required tool the assigned truck lacks is a hold like stock or weather.
-    // Read behind the gate so the poll pays nothing while the kit is dark.
-    if (require('../config/feature-gates').truckKitLive?.()) {
-      try {
-        const tools = await require('./truck-kit').toolGapIssue({ technicianId: facts.technicianId, serviceLine: facts.serviceLine, serviceType: facts.serviceType, serviceCategory: facts.serviceCategory }, dbh);
-        if (tools) readiness.issues.push(tools);
-      } catch (err) {
-        // The stock and weather holds stand; the tools read is reported, not fatal.
-        logger.warn(`[job-card] truck kit read failed for ${facts.serviceId}: ${err?.message || err}`);
-      }
-    }
-    return readiness;
+    // required tool the assigned truck lacks is a hold like stock or weather
+    // (gate, add-ons and the never-fatal read live in truck-kit.js).
+    return require('./truck-kit').addReadinessToolIssue(readiness, facts, dbh);
   }
   const packSizes = await loadPackSizes(dbh, products.map((p) => p.id));
   // A chemical area add-on's card also says how many applications of its product the property has had in 12 months.

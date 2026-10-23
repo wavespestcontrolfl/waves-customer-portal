@@ -16,7 +16,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ truckKitLive: jest.fn(() => true), gateEnvValue: jest.fn(() => false), isEnabled: jest.fn(() => false) }));
 jest.mock('../models/db', () => {
-  const state = { equipment: [], maintenance_alerts: [], equipment_checks: [], technicians: [], equipment_checklists: [], scheduled_services: [] };
+  const state = { equipment: [], maintenance_alerts: [], equipment_checks: [], technicians: [], equipment_checklists: [], scheduled_services: [], scheduled_service_addons: [] };
   const norm = (col) => String(col).split('.').pop();
   const chain = (name) => {
     const table = String(name).split(' as ')[0];
@@ -153,6 +153,7 @@ function seed({ truckAssigned = true } = {}) {
   s.equipment_checks = [];
   s.equipment_checklists = [];
   s.scheduled_services = [];
+  s.scheduled_service_addons = [];
 }
 
 beforeEach(() => {
@@ -377,12 +378,38 @@ describe('tool gaps by kit key', () => {
     expect(truckKit.serviceLinesFor('')).toEqual([]);
   });
 
-  test('a consultation needs no treatment tools: by catalog identity or by name', () => {
+  test('a consultation needs no treatment tools; a diagnostic inspection still does', () => {
     expect(truckKit.serviceLinesFor('Waves Assessment')).toEqual([]);
+    expect(truckKit.serviceLinesFor('Property Review', { serviceKey: 'waves_assessment' })).toEqual([]);
     expect(truckKit.serviceLinesFor('Lawn Consultation')).toEqual([]);
-    expect(truckKit.serviceLinesFor('Quarterly Pest Control', 'inspection')).toEqual([]);
-    expect(truckKit.serviceLinesFor('Quarterly Pest Control', 'other')).toEqual([]);
-    expect(truckKit.serviceLinesFor('Quarterly Pest Control', 'pest_control')).toEqual(['pest']);
+    // Catalog category "inspection" is NOT an exemption: the WDO letter needs the meter and probe.
+    expect(truckKit.serviceLinesFor('WDO Inspection (Termite Letter)', { serviceKey: 'wdo_inspection' })).toEqual(['termite']);
+    expect(truckKit.serviceLinesFor('Lawn Health Inspection', { serviceKey: 'lawn_inspection' })).toEqual(['lawn']);
+  });
+
+  test('booked add-ons bring their own line, on readiness and on Today', async () => {
+    expect(truckKit.serviceLinesFor('Quarterly Pest Control', { addons: [{ name: 'Tree & Shrub Care' }, { name: 'Termite Spot Treatment' }] })).toEqual(['pest', 'tree_shrub', 'termite']);
+    expect(truckKit.serviceLinesFor('Quarterly Pest Control', { addons: [{ name: 'Waves Assessment' }] })).toEqual(['pest']);
+    db.__state.equipment.find((e) => e.id === SPRAYER).kit_key = 'bg_sprayer';
+    db.__state.equipment.push({ id: '66666666-2222-4333-8444-555555555555', name: 'Flashlight', category: 'tool', status: 'active', assigned_vehicle_id: TRUCK, kit_key: 'flashlight' });
+    expect(await truckKit.toolGapIssue({ technicianId: TECH, serviceType: 'Quarterly Pest Control', addons: [{ name: 'Termite Spot Treatment' }] }))
+      .toEqual({ kind: 'tools', status: 'hold', label: 'Truck lacks Moisture meter', tools: ['moisture_meter'] });
+    const today = require('../utils/datetime-et').etDateString(NOW);
+    db.__state.scheduled_services = [{ id: 'v1', technician_id: TECH, scheduled_date: today, status: 'confirmed', service_type: 'Quarterly Pest Control' }];
+    expect((await truckKit.truckKitStatus(TECH, { now: NOW })).gaps).toEqual([]);
+    db.__state.scheduled_service_addons = [{ id: 'ad1', scheduled_service_id: 'v1', service_name: 'Termite Spot Treatment', service_key_snapshot: null }];
+    expect((await truckKit.truckKitStatus(TECH, { now: NOW })).gaps).toEqual([{ serviceId: 'v1', serviceType: 'Quarterly Pest Control', missing: ['Moisture meter'] }]);
+  });
+
+  test('readinessToolIssue: nothing while dark, the hold when lit, null (never a throw) on a failed read', async () => {
+    const gates = require('../config/feature-gates');
+    gates.truckKitLive.mockReturnValueOnce(false);
+    expect(await truckKit.readinessToolIssue({ technicianId: TECH, serviceType: 'Termite Inspection' })).toBeNull();
+    db.__state.equipment.find((e) => e.id === SPRAYER).kit_key = 'bg_sprayer';
+    expect(await truckKit.readinessToolIssue({ serviceId: 'v1', technicianId: TECH, serviceType: 'Termite Inspection' })).toEqual(expect.objectContaining({ kind: 'tools', label: 'Truck lacks Moisture meter' }));
+    const spy = jest.spyOn(truckKit, 'toolGapIssue').mockRejectedValueOnce(new Error('kit_key column missing'));
+    expect(await truckKit.readinessToolIssue({ serviceId: 'v1', technicianId: TECH, serviceType: 'Termite Inspection' })).toBeNull();
+    spy.mockRestore();
   });
 
   test('a combined visit holds for the companion line\'s tools', async () => {
@@ -452,7 +479,7 @@ describe('tool gaps by kit key', () => {
       { id: 'v5', technician_id: TECH, scheduled_date: today, status: 'pending', service_type: 'Quarterly Pest Control' },
       { id: 'v6', technician_id: TECH, scheduled_date: today, status: 'pending', service_type: 'Quarterly Pest + Termite Bait Station' },
       { id: 'v7', technician_id: TECH, scheduled_date: today, status: 'pending', service_type: 'Waves Assessment' },
-      { id: 'v8', technician_id: TECH, scheduled_date: today, status: 'pending', service_type: 'Pest Inspection Service', service_category_snapshot: 'inspection' },
+      { id: 'v8', technician_id: TECH, scheduled_date: today, status: 'pending', service_type: 'Property Review', service_key_snapshot: 'waves_assessment' },
     ];
     const status = await truckKit.truckKitStatus(TECH, { now: NOW });
     expect(status.gaps).toEqual([
