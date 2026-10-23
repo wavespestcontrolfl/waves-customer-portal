@@ -578,3 +578,62 @@ it("buildEntries lays the server's items over the catalog and sends custom rows 
   expect(sections.at(-1).entries[0].row.label).toBe("County vendor letter");
   expect(sections[2].entries.find((entry) => entry.item.key === "w9").row.id).toBe("i4"); // the archived w9 row is not shown
 });
+
+it("a saved reference shows every detail and its permission date beside the Sign off button", async () => {
+  const reference = row({
+    id: "r1", kind: "reference", item_key: "reference", label: "Customer reference", file: null, status: "unattested", expires_on: null,
+    source_document: null, checked_on: null, permission_on: "2026-10-10",
+    details: {
+      entity: "Sample District", contactRole: "Facilities lead", phone: "941-555-0100", email: "facilities@example.test", contractPeriod: "2024 to 2026",
+      scope: "Quarterly interior pest control", annualValue: "$12,000", publicOrPrivate: "public",
+    },
+  });
+  route({ "GET /admin/bid-kit/": () => reply(payload([reference])) });
+  renderPage();
+  await screen.findByText("Customer reference");
+  const mine = within(rowFor("Customer reference"));
+  expect(mine.getByRole("button", { name: "Sign off" })).toBeInTheDocument();
+  const shown = rowFor("Customer reference").textContent;
+  for (const text of [
+    "Entity: Sample District", "Contact role: Facilities lead", "Phone: 941-555-0100", "Email: facilities@example.test", "Contract period: 2024 to 2026",
+    "Scope of work: Quarterly interior pest control", "Annual value: $12,000", "Public or private: Public", "Permission given: Oct 10, 2026",
+  ]) {
+    expect(shown).toContain(text);
+  }
+  // An empty detail is left out, and a private reference reads Private.
+  cleanup();
+  const sparse = row({ ...reference, details: { entity: "Sample District", publicOrPrivate: "private" } });
+  route({ "GET /admin/bid-kit/": () => reply(payload([sparse])) });
+  renderPage();
+  await screen.findByText("Customer reference");
+  const second = within(rowFor("Customer reference"));
+  expect(rowFor("Customer reference").textContent).toContain("Public or private: Private");
+  expect(second.queryByText(/Phone/)).toBeNull();
+  expect(second.queryByText(/Contract period/)).toBeNull();
+});
+
+it("a custom document shows a saved expiry date and never the missing-expiry warning; a catalog paper that needs one still warns", async () => {
+  const custom = (over) => row({ id: "c1", item_key: "custom", label: "Vendor letter", status: "unattested", expires_on: null, ...over });
+  const none = buildEntries(catalogSections(), [custom({})]).find((section) => section.key === "other");
+  expect(none.entries[0].item.expires).toBe(false);
+
+  route({ "GET /admin/bid-kit/": () => reply(payload([custom({})])) });
+  renderPage();
+  await screen.findByText("Vendor letter");
+  expect(within(rowFor("Vendor letter")).queryByText(/No expiry date saved/)).toBeNull();
+  cleanup();
+
+  route({ "GET /admin/bid-kit/": () => reply(payload([custom({ expires_on: "2027-03-15" })])) });
+  renderPage();
+  await screen.findByText("Vendor letter");
+  expect(within(rowFor("Vendor letter")).getByText("Mar 15, 2027")).toBeInTheDocument();
+  expect(within(rowFor("Vendor letter")).queryByText(/No expiry date saved/)).toBeNull();
+  cleanup();
+
+  // A catalog paper that carries an expiry still warns when none is saved.
+  const license = row({ status: "needs_expiry", expires_on: null });
+  route({ "GET /admin/bid-kit/": () => reply(payload([license])) });
+  renderPage();
+  await screen.findByText("FDACS business license copy");
+  expect(within(rowFor("FDACS business license copy")).getByText(/No expiry date saved/)).toBeInTheDocument();
+});

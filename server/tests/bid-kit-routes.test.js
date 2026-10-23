@@ -352,6 +352,9 @@ describe('create and list', () => {
     // Create: label EIN + value 123456789 in one request.
     await refuse(await call('POST', '/api/admin/bid-kit', { kind: 'fact', item_key: 'custom', label: 'EIN', value: '123456789' }));
     await refuse(await call('POST', '/api/admin/bid-kit', { kind: 'document', item_key: 'custom', label: 'Tax ID', notes: '123456789' }));
+    // The label follows the digits: in the value, and across a value and the notes.
+    await refuse(await call('POST', '/api/admin/bid-kit', { kind: 'fact', item_key: 'custom', label: 'Contract', value: '123456789 EIN' }));
+    await refuse(await call('POST', '/api/admin/bid-kit', { kind: 'fact', item_key: 'custom', label: 'Contract', value: '123456789', notes: 'EIN' }));
     await refuse(await call('POST', '/api/admin/bid-kit', { kind: 'document', item_key: 'w9', value: '123456789' })); // the catalog label is W-9
     expect([...store.rows.values()]).toHaveLength(0);
 

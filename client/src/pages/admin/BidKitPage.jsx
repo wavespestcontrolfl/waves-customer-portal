@@ -106,7 +106,7 @@ export function buildEntries(sections, items) {
     out.push({
       key: "other",
       label: "Other",
-      entries: customs.map((row) => ({ item: { key: "custom", kind: row.kind, label: row.label, expires: row.kind === "document", why: "" }, row, status: row.status })),
+      entries: customs.map((row) => ({ item: { key: "custom", kind: row.kind, label: row.label, expires: false, why: "" }, row, status: row.status })),
     });
   }
   return out;
@@ -380,11 +380,18 @@ const limitsText = (limits) => Object.entries(limits)
   .map(([key, amount]) => `${LIMIT_LABEL[key] || (key === "workersComp" ? "Workers’ comp" : key)} ${typeof amount === "number" ? `$${amount.toLocaleString("en-US")}` : amount}`)
   .join("; ");
 
+function referenceValue(key, value) {
+  if (key !== "publicOrPrivate") return value;
+  return value === "public" ? "Public" : "Private";
+}
+
 function ReferenceLines({ row }) {
-  const entity = row.details && row.details.entity;
+  const details = row.details || {};
   return (
     <>
-      {entity && <Line label="Reference: ">{[entity, row.details.contactRole].filter(Boolean).join(", ")}</Line>}
+      {Object.keys(DETAIL_LABEL).filter((key) => details[key]).map((key) => (
+        <Line key={key} label={`${DETAIL_LABEL[key]}: `}>{referenceValue(key, String(details[key]))}</Line>
+      ))}
       {row.permission_on && <Line label="Permission given: ">{dateText(row.permission_on)}</Line>}
     </>
   );

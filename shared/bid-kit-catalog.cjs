@@ -147,16 +147,16 @@ const TAX_LABEL = /\b(?:EIN|FEIN|TIN|SSN)\b|\bW[-\s]?9\b|tax\s*id|taxpayer/gi;
 const LABEL_REACH = 12;
 const TAX_ID_REFUSED = 'That looks like a tax ID or Social Security number. These are never stored here; the W-9 file holds the tax ID.';
 
-// Where each nine-digit run starts: the first group of any consecutive groups in a chain that add up to exactly nine digits.
+// Where each nine-digit run starts and ends: any consecutive groups in a chain that add up to exactly nine digits.
 function nineDigitRunStarts(text) {
-  const starts = [];
+  const starts = [];  // { start, end } offsets
   for (const chain of text.matchAll(DIGIT_CHAIN)) {
     const groups = [...chain[0].matchAll(/\d+/g)].map((group) => ({ start: chain.index + group.index, length: group[0].length }));
     for (let from = 0; from < groups.length; from += 1) {
       let sum = 0;
       for (let to = from; to < groups.length && sum < 9; to += 1) {
         sum += groups[to].length;
-        if (sum === 9) starts.push(groups[from].start);
+        if (sum === 9) starts.push({ start: groups[from].start, end: groups[to].start + groups[to].length });
       }
     }
   }
@@ -168,12 +168,13 @@ function detectTaxId(text, { fileName = false } = {}) {
   if (typeof text !== 'string') return false;
   const t = text.replace(/_/g, ' ');
   if (SSN_SHAPE.test(t) || EIN_SHAPE.test(t)) return true;
-  const starts = nineDigitRunStarts(t);
-  if (!starts.length) return false;
+  const runs = nineDigitRunStarts(t);
+  if (!runs.length) return false;
   if (fileName) return true;
   return [...t.matchAll(TAX_LABEL)].some((label) => {
-    const end = label.index + label[0].length;
-    return starts.some((start) => start >= end && start - end <= LABEL_REACH);
+    const labelEnd = label.index + label[0].length;
+    return runs.some((run) => (run.start >= labelEnd && run.start - labelEnd <= LABEL_REACH)
+      || (label.index >= run.end && label.index - run.end <= LABEL_REACH));
   });
 }
 
