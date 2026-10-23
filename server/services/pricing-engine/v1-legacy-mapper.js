@@ -525,7 +525,8 @@ function mapV1ToLegacyShape(v1Result) {
   const palmLI = lineItems.find(l => l.service === 'palm_injection');
   const mqLI = lineItems.find(l => l.service === 'mosquito');
   const tbLI = lineItems.find(l => l.service === 'termite_bait');
-  const mmLI = lineItems.find(l => l.service === 'mosquito_misting' && !l.quoteRequired);
+  const mmAnyLI = lineItems.find(l => l.service === 'mosquito_misting');
+  const mmLI = mmAnyLI && !mmAnyLI.quoteRequired ? mmAnyLI : null;
   const tbBondLI = lineItems.find(l => l.service === 'termite_bond');
   const tbRentLI = lineItems.find(l => l.service === 'termite_station_rental');
   const rbLI = lineItems.find(l => l.service === 'rodent_bait');
@@ -1275,6 +1276,24 @@ function mapV1ToLegacyShape(v1Result) {
     });
   }
 
+  // An oversize layout (above MOSQUITO_MISTING.maxNozzles) is a manual quote:
+  // keep the requested work visible as an UNPRICED row (mo 0, annual null,
+  // quoteRequired) so the estimate still shows what was asked for; it also
+  // rides quoteRequiredItems below like every other quoteRequired line.
+  if (mmAnyLI && mmAnyLI.quoteRequired) {
+    svcAdd('Mosquito Misting Service Plan', mmAnyLI, {
+      service: 'mosquito_misting',
+      annual: null,
+      detail: `${mmAnyLI.nozzles} nozzles · manual quote (above the standard layout)`,
+      quoteRequired: true,
+      requiresManualReview: !!mmAnyLI.requiresManualReview,
+      manualReviewReasons: mmAnyLI.manualReviewReasons || [],
+      discountable: false,
+      discountEligible: false,
+      waveGuardDiscountEligible: false,
+      countsTowardWaveGuardTier: false,
+    });
+  }
   // Mosquito misting installation → one-time item (price is in year 1 via oneTimeTotal).
   if (mmLI && (mmLI.installation?.price || 0) > 0) {
     v1OtItems.push({

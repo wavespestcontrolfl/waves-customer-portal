@@ -98,6 +98,14 @@ describe('gate on', () => {
     expect(line.quoteRequired).toBe(true);
     expect(est.summary.installationTotal).toBe(0);
     expect(est.summary.year1Total).toBe(0);
+    // The requested work stays visible in the mapped shape as an unpriced,
+    // quote-required row (pre-push audit P1), and no install item is emitted.
+    const mapped = mapV1ToLegacyShape(est);
+    const row = mapped.recurring.services.find((s) => s.service === 'mosquito_misting');
+    expect(row).toMatchObject({ quoteRequired: true, monthly: 0, annual: null });
+    expect(row.manualReviewReasons).toContain('mosquito_misting_oversize');
+    expect(mapped.oneTime.items.find((i) => i.service === 'mosquito_misting_installation')).toBeUndefined();
+    expect(mapped.quoteRequired).toBe(true);
   });
 
   test('mapper emits the plan line and the one-time install item', () => {

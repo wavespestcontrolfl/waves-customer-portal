@@ -4829,6 +4829,16 @@ from the tier sweep the same way the lawn row above dropped its retired
 instead of the old 4/6/9 wording; since the 2026-09-27 typical-job
 narrowing above, the published low is Standard's list-price floor on a
 typical lot (`low` ≈ $36), not a bundle-discounted value.
+Mosquito misting rows (2026-10-22, dark): with `GATE_MOSQUITO_MISTING`
+set (`1`/`true`/`on`, read at call time through the gated-row map in
+`server/services/pricing-engine/public-ranges.js`) the payload gains two
+rows, `mosquito_misting_install` (per installation) and
+`mosquito_misting_plan` (per month), swept from `priceMosquitoMisting`
+over both system tiers at 20, 35 and 50 nozzles. The numbers are the DRAFT
+price list in ~/mosquito-misting-scope-20260924.md §4.3 (dealer cost
+unknown); the gate stays off until the owner launches the service, so the
+public payload is byte-identical today. The gate also feeds the payload's
+cache signature and the blog price-card exclusion like the other gated rows.
 `/api/public/credentials` (+ `/api/public/credentials/:slug`) (read-only
 canonical FDACS / license / insurance numbers — no auth, no token, public
 `Cache-Control`. Consumed by the Astro content build; intentionally public
