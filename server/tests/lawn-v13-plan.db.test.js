@@ -557,12 +557,14 @@ describeDb('the v13 plan through PostgreSQL', () => {
         });
       });
 
-      test('a warning-level limit on a whole-lawn row keeps its amount: Tetrino inside its minimum interval still plans 1.835 fl oz', async () => {
+      test('a warning-level limit on a whole-lawn row keeps its amount: Tetrino three passes in (99.9% of its yearly amount) still plans 1.835 fl oz', async () => {
         setGates();
-        const recent = '2026-04-22'; // 20 days before the 2026-05-12 visit
-        await withLimit({ product: tetrino, limit: { limit_type: 'min_interval_days', limit_value: 60, severity: 'warning' }, history: [{ application_rate: 0.367, application_date: recent }] }, async (visit) => {
+        // The v13 cap entry holds Tetrino to 1.47 fl oz a year and 28 days between passes (hard blocks); three 0.367 passes plus this one
+        // reach 1.468: a warning (approaching the yearly amount), not a block.
+        const earlier = { application_rate: 0.367, rate_unit: 'fl oz' };
+        await withLimit({ product: tetrino, limit: { limit_type: 'annual_max_apps', limit_value: 99, severity: 'warning' }, history: [{ ...earlier, application_date: '2026-01-05' }, { ...earlier, application_date: '2026-02-09' }, { ...earlier, application_date: '2026-03-16' }] }, async (visit) => {
           const result = await buildPlanForService(visit.id, { db: knex });
-          expect(result.propertyGate.warnings.find((w) => w.code === 'lawn_v13_limit_warning')).toMatchObject({ productName: 'Tetrino Insecticide', limitType: 'min_interval_days' });
+          expect(result.propertyGate.warnings.find((w) => w.code === 'lawn_v13_limit_warning')).toMatchObject({ productName: 'Tetrino Insecticide', limitType: 'annual_max_rate' });
           expect(result.propertyGate.blocks.map((b) => b.code)).not.toContain('lawn_v13_annual_limit');
           expect(tetrinoItem(result).mix.amount).toBe(1.835);
         });
