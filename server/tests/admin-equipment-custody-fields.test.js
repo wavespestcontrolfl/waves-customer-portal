@@ -289,6 +289,10 @@ describe('a tool leaving a truck re-judges that truck\'s bell', () => {
     res = await run('put', '/equipment/:id', { params: { id: OTHER }, body: { assigned_to: 'tech-1' } });
     expect(res.statusCode).toBe(409);
     expect(db.__state.updated).toBeNull();
+    // The repair the message asks for: clearing one truck's technician saves.
+    db.__state.rows[OTHER] = { id: OTHER, category: 'vehicle', assigned_to: 'tech-1', status: 'active' };
+    expect((await run('put', '/equipment/:id', { params: { id: OTHER }, body: { assigned_to: null } })).statusCode).toBe(200);
+    expect(db.__state.updated).toEqual(expect.objectContaining({ assigned_to: null }));
     // A retired second vehicle, or a tool, is fine.
     expect((await run('post', '/equipment', { body: { name: 'Old van', category: 'vehicle', assigned_to: 'tech-1', status: 'retired' } })).statusCode).toBe(201);
     expect((await run('put', '/equipment/:id', { params: { id: TOOL }, body: { assigned_to: 'tech-1' } })).statusCode).toBe(200);

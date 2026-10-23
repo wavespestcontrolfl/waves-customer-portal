@@ -198,11 +198,20 @@ router.get('/:id([0-9a-fA-F-]{36})', async (req, res, next) => {
 // Asset rows are the office's (the same rule as routes/admin-equipment.js):
 // a technician token never creates, edits or retires one. These handlers
 // spread the body, so kit_key and the custody columns would be reachable.
+// Truck, holder, status, category and kit key change only through the
+// guarded Assets route (routes/admin-equipment.js: one live truck per
+// technician, no move or retirement while a tool alert is open, truck locks).
+// This older writer spreads the body, so it refuses those columns outright.
+const GUARDED_COLUMNS = ['assigned_vehicle_id', 'assigned_to', 'status', 'category', 'kit_key'];
+const GUARDED_ERROR = `Set ${GUARDED_COLUMNS.join(', ')} on Equipment → Assets (PUT /api/admin/equipment/equipment/:id)`;
+const carriesGuarded = (body) => GUARDED_COLUMNS.some((key) => body && body[key] !== undefined);
+
 // POST / — create equipment
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const data = { ...req.body };
     if (!data.name) return res.status(400).json({ error: 'Equipment name is required' });
+    if (carriesGuarded(data)) return res.status(400).json({ error: GUARDED_ERROR });
 
     delete data.id;
     data.created_at = db.fn.now();
@@ -220,6 +229,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
 // PUT /:id — update equipment
 router.put('/:id([0-9a-fA-F-]{36})', requireAdmin, async (req, res, next) => {
   try {
+    if (carriesGuarded(req.body)) return res.status(400).json({ error: GUARDED_ERROR });
     const data = { ...req.body, updated_at: db.fn.now() };
     delete data.id;
     delete data.created_at;
@@ -241,6 +251,9 @@ router.put('/:id([0-9a-fA-F-]{36})', requireAdmin, async (req, res, next) => {
 // DELETE /:id — soft delete (retire)
 router.delete('/:id([0-9a-fA-F-]{36})', requireAdmin, async (req, res, next) => {
   try {
+    // Retiring a tool with an open truck check alert goes through the
+    // alert's outcome (Retired / Lost), never around it.
+    if (await truckKit.openToolAlertFor(req.params.id)) return res.status(409).json({ error: 'This item has an open truck check alert. Resolve it with an outcome first.' });
     const [record] = await db('equipment')
       .where({ id: req.params.id })
       .update({ status: 'retired', updated_at: db.fn.now() })

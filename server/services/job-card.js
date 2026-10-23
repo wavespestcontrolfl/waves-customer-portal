@@ -1686,7 +1686,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     // Read behind the gate so the poll pays nothing while the kit is dark.
     if (require('../config/feature-gates').truckKitLive?.()) {
       try {
-        const tools = await require('./truck-kit').toolGapIssue({ technicianId: facts.technicianId, serviceLine: facts.serviceLine, serviceType: facts.serviceType }, dbh);
+        const tools = await require('./truck-kit').toolGapIssue({ technicianId: facts.technicianId, serviceLine: facts.serviceLine, serviceType: facts.serviceType, serviceCategory: facts.serviceCategory }, dbh);
         if (tools) readiness.issues.push(tools);
       } catch (err) {
         // The stock and weather holds stand; the tools read is reported, not fatal.

@@ -52,6 +52,48 @@ function StopCard({ stop, onOpen, disabled, featured = false, index, gaps }) {
   );
 }
 
+// Today's three regions, each its own component so the page's decision
+// structure stays readable (and under the complexity limit).
+function TodayHeading({ loading, refreshing, error, completed, stops, serviceCount, onRetry }) {
+  return (
+    <div className="tf-page-heading">
+      <div>
+        <h1>Today</h1>
+        <p className="tf-muted">
+          {new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long', month: 'long', day: 'numeric' })}
+          {!loading && !error && ` · ${completed} of ${stops.length} stops complete · ${serviceCount} services`}
+        </p>
+      </div>
+      <button type="button" className="tf-button" aria-label="Refresh route" onClick={onRetry} disabled={loading || refreshing}><RefreshCw aria-hidden="true" /></button>
+    </div>
+  );
+}
+
+function RouteColumn({ loading, error, stops, nextStop, completed, onOpen, busy, toolGaps }) {
+  const emptyTitle = stops.length === 0 ? 'No stops scheduled today' : completed === stops.length ? 'All stops completed' : 'No remaining stops';
+  return (
+    <div className="tf-col">
+      <div className="tf-area-next">
+        {loading ? <p role="status">Loading your route…</p> : !error && (nextStop
+          ? <StopCard stop={nextStop} featured onOpen={onOpen} disabled={busy} gaps={toolGaps} />
+          : <div className="tf-card tf-card-main"><MapPin aria-hidden="true" /><h2>{emptyTitle}</h2><p className="tf-muted">Refresh to check for schedule updates.</p></div>)}
+      </div>
+      {!loading && !error && stops.length > 0 && <section className="tf-area-route"><h2 className="tf-overline">Your route</h2><div className="tf-route">{stops.map((stop, index) => <StopCard key={stop.key} stop={stop} index={index} onOpen={onOpen} disabled={busy} gaps={toolGaps} />)}</div></section>}
+    </div>
+  );
+}
+
+function SideColumn({ scheduleChanges, truckCheck, timeClock, followThrough }) {
+  return (
+    <div className="tf-col">
+      {scheduleChanges && <div className="tf-area-changes">{scheduleChanges}</div>}
+      {truckCheck && <div className="tf-area-truck">{truckCheck}</div>}
+      {timeClock && <div className="tf-area-clock">{timeClock}</div>}
+      <div className="tf-area-follow">{followThrough}</div>
+    </div>
+  );
+}
+
 export default function TechFieldHome({ section, truckCheck, toolGaps, stops, nextStop, loading, refreshing = false, error, notice, rainChance, onRetry, onOpen, busy, tools, timekeeping, visit, followThrough, scheduleChanges = null, timeClock = null, onboarding, heldVisits }) {
   if (section === 'tools') return (
     <div className="tf-page">
@@ -79,16 +121,7 @@ export default function TechFieldHome({ section, truckCheck, toolGaps, stops, ne
   // (tech-field.css .tf-today-grid; approved mockup 2026-10-03).
   return (
     <div className="tf-page">
-      <div className="tf-page-heading">
-        <div>
-          <h1>Today</h1>
-          <p className="tf-muted">
-            {new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long', month: 'long', day: 'numeric' })}
-            {!loading && !error && ` · ${completed} of ${stops.length} stops complete · ${serviceCount} services`}
-          </p>
-        </div>
-        <button type="button" className="tf-button" aria-label="Refresh route" onClick={onRetry} disabled={loading || refreshing}><RefreshCw aria-hidden="true" /></button>
-      </div>
+      <TodayHeading loading={loading} refreshing={refreshing} error={error} completed={completed} stops={stops} serviceCount={serviceCount} onRetry={onRetry} />
       {onboarding}
       {rainChance >= 40 && <div className="tf-alert"><CloudRain size={18} aria-hidden="true" /> {rainChance}% rain today</div>}
       {error && <div role="alert" className="tf-alert tf-error">{error}<div><button type="button" className="tf-button" onClick={onRetry}>Retry route</button></div></div>}
@@ -96,20 +129,8 @@ export default function TechFieldHome({ section, truckCheck, toolGaps, stops, ne
       {heldVisits}
       {!loading && !error && stops.length > 0 && <div className="tf-progress" aria-hidden="true">{stops.map((stop) => <span key={stop.key} className={stop.services.every((s) => s.status === 'completed') ? 'done' : stop.key === nextStop?.key ? 'current' : ''} />)}</div>}
       <div className="tf-today-grid">
-        <div className="tf-col">
-        <div className="tf-area-next">
-          {loading ? <p role="status">Loading your route…</p> : !error && (nextStop
-            ? <StopCard stop={nextStop} featured onOpen={onOpen} disabled={busy} gaps={toolGaps} />
-            : <div className="tf-card tf-card-main"><MapPin aria-hidden="true" /><h2>{stops.length === 0 ? 'No stops scheduled today' : completed === stops.length ? 'All stops completed' : 'No remaining stops'}</h2><p className="tf-muted">Refresh to check for schedule updates.</p></div>)}
-        </div>
-        {!loading && !error && stops.length > 0 && <section className="tf-area-route"><h2 className="tf-overline">Your route</h2><div className="tf-route">{stops.map((stop, index) => <StopCard key={stop.key} stop={stop} index={index} onOpen={onOpen} disabled={busy} gaps={toolGaps} />)}</div></section>}
-        </div>
-        <div className="tf-col">
-          {scheduleChanges && <div className="tf-area-changes">{scheduleChanges}</div>}
-          {truckCheck && <div className="tf-area-truck">{truckCheck}</div>}
-          {timeClock && <div className="tf-area-clock">{timeClock}</div>}
-          <div className="tf-area-follow">{followThrough}</div>
-        </div>
+        <RouteColumn loading={loading} error={error} stops={stops} nextStop={nextStop} completed={completed} onOpen={onOpen} busy={busy} toolGaps={toolGaps} />
+        <SideColumn scheduleChanges={scheduleChanges} truckCheck={truckCheck} timeClock={timeClock} followThrough={followThrough} />
       </div>
     </div>
   );

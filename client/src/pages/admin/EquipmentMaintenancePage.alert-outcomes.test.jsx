@@ -23,7 +23,8 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
     const u = String(url);
     if (u.includes('/equipment-maintenance/alerts/') && options.method === 'PUT') { puts.push([u, JSON.parse(options.body)]); return ok({ alert: {} }); }
-    if (u.includes('/equipment-maintenance/alerts')) return ok({ alerts: ALERTS });
+    // The server drops a resolved alert from the list (Lost / Retired reload the fleet).
+    if (u.includes('/equipment-maintenance/alerts')) return ok({ alerts: ALERTS.filter((a) => !puts.some(([url]) => url.endsWith(`/alerts/${a.id}`))) });
     if (u.includes('/equipment-maintenance/analytics/overview')) return ok({ total_assets: 1 });
     if (u.endsWith('/admin/equipment-maintenance')) return ok({ equipment: [] });
     return ok({});
@@ -56,6 +57,8 @@ describe('truck-check alert outcomes', () => {
     await waitFor(() => expect(puts).toHaveLength(1));
     expect(puts[0][0]).toMatch(/\/alerts\/a-missing$/);
     expect(puts[0][1]).toEqual({ status: 'resolved', resolved_by: 'admin', outcome: 'lost' });
+    // Lost changed the item's status on the server: the fleet reloads.
+    await waitFor(() => expect(fetch.mock.calls.filter(([url]) => String(url).endsWith('/admin/equipment-maintenance')).length).toBeGreaterThanOrEqual(2));
     await waitFor(() => expect(screen.queryByText(ALERTS[0].title)).not.toBeInTheDocument());
     fireEvent.click(rowOf(ALERTS[2].title).getByRole('button', { name: 'Dismiss' }));
     await waitFor(() => expect(puts).toHaveLength(2));

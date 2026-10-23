@@ -272,7 +272,9 @@ router.put('/equipment/:id', requireAdmin, async (req, res, next) => {
       // a check in flight on it finishes (or fails ownership) first; and a
       // technician never holds two live trucks (truck-kit.js would refuse to guess).
       if (updates.assigned_to !== undefined) await truckKit.lockTruck(trx, req.params.id);
-      const live = { category: updates.category ?? before.category, assigned_to: updates.assigned_to ?? before.assigned_to, status: updates.status ?? before.status };
+      // An omitted key keeps the stored value; an explicit null clears it (that is how a second truck is unassigned).
+      const pick = (key) => (Object.prototype.hasOwnProperty.call(updates, key) ? updates[key] : before[key]);
+      const live = { category: pick('category'), assigned_to: pick('assigned_to'), status: pick('status') };
       if (await secondLiveTruck(live, req.params.id, trx)) return 'second-truck';
       const [row] = await trx('equipment').where({ id: req.params.id }).update(updates).returning('*');
       if (row && oldTruck) await truckKit.closeTruckBellIfClear(oldTruck, new Date(), trx);

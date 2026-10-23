@@ -13,6 +13,7 @@ jest.mock('../services/truck-kit', () => ({
   TOOL_ALERT_TYPES: ['tool_missing', 'tool_damaged'],
   closeTruckBellIfClear: jest.fn(async () => true),
   lockTruck: jest.fn(async () => ({ rows: [] })),
+  openToolAlertFor: jest.fn(async () => null),
 }));
 jest.mock('../models/db', () => {
   const state = { alerts: {}, equipment: {}, updates: [] };
@@ -80,6 +81,23 @@ test.each([['post', '/'], ['put', '/:id([0-9a-fA-F-]{36})'], ['delete', '/:id([0
   const layer = layerFor(method, path);
   expect(layer).toBeTruthy();
   expect(layer.route.stack.some((l) => l.handle === requireAdmin)).toBe(true);
+});
+
+test('the older asset writers refuse the guarded columns and a retire with an open tool alert', async () => {
+  const call = async (method, path, params, body) => {
+    const layer = layerFor(method, path);
+    const handler = layer.route.stack[layer.route.stack.length - 1].handle;
+    const res = { statusCode: 200, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
+    await handler({ params, body, techRole: 'admin' }, res, (err) => { throw err; });
+    return res;
+  };
+  for (const key of ['assigned_vehicle_id', 'assigned_to', 'status', 'category', 'kit_key']) {
+    expect((await call('put', '/:id([0-9a-fA-F-]{36})', { id: TOOL }, { [key]: 'x' })).statusCode).toBe(400);
+    expect((await call('post', '/', {}, { name: 'Synthetic duster', [key]: 'x' })).statusCode).toBe(400);
+  }
+  truckKit.openToolAlertFor.mockResolvedValueOnce({ id: 'a-missing' });
+  expect((await call('delete', '/:id([0-9a-fA-F-]{36})', { id: TOOL }, {})).statusCode).toBe(409);
+  expect(db.__state.updates.some(([table]) => table === 'equipment')).toBe(false);
 });
 
 test('Lost resolves the alert, marks the item lost and closes the truck bell', async () => {

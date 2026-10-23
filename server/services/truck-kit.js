@@ -67,11 +67,20 @@ const bellKey = (vehicleId) => `truck-kit:${vehicleId}`;
 // truck never interleave (both take it inside their transaction).
 const lockTruck = (conn, vehicleId) => conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [bellKey(vehicleId)]);
 
+// A catalog inspection / assessment / "other" visit treats nothing (job-card.js
+// resolveVisitProducts: identity gates the line), so it needs no treatment
+// tools. Legacy rows without identity fall back to the name.
+const NON_TREATMENT_CATEGORIES = ['inspection', 'other'];
+const NON_TREATMENT_NAME = /\b(assessment|consultation|walk-?through)\b/i;
+const isNonTreatmentVisit = (serviceType, serviceCategory) =>
+  (serviceCategory ? NON_TREATMENT_CATEGORIES.includes(String(serviceCategory).toLowerCase()) : false) || NON_TREATMENT_NAME.test(String(serviceType || ''));
+
 // The checklist lines a visit's tools come from: the primary line plus every
-// companion line its service name mentions, in that order, once each.
-function serviceLinesFor(serviceType) {
+// companion line its service name mentions, in that order, once each. A
+// consultation has none.
+function serviceLinesFor(serviceType, serviceCategory = null) {
   const lines = [];
-  if (!String(serviceType || '').trim()) return lines;
+  if (!String(serviceType || '').trim() || isNonTreatmentVisit(serviceType, serviceCategory)) return lines;
   const primary = detectServiceLine(serviceType);
   if (primary) lines.push(primary);
   const text = String(serviceType || '').toLowerCase();
@@ -235,9 +244,9 @@ function toolGapLabel(gaps) {
 // dispatchReadiness), or null: a required tool the assigned truck lacks is a
 // hold like company stock or weather.
 // serviceType, when given, adds the companion lines of a combined job.
-async function toolGapIssue({ technicianId, serviceLine, serviceType }, conn = db) {
+async function toolGapIssue({ technicianId, serviceLine, serviceType, serviceCategory = null }, conn = db) {
   if (!truckKitLive() || !technicianId) return null;
-  const lines = serviceType ? serviceLinesFor(serviceType) : [serviceLine].filter(Boolean);
+  const lines = serviceType ? serviceLinesFor(serviceType, serviceCategory) : [serviceLine].filter(Boolean);
   if (!lines.length) return null;
   let truck;
   try { truck = await truckForTechnician(technicianId, conn); } catch (err) {
@@ -256,14 +265,15 @@ async function toolGapsForToday(technicianId, truck, { now = new Date(), conn = 
   const visits = await conn('scheduled_services')
     .where({ technician_id: technicianId, scheduled_date: etDateString(now) })
     .whereIn('status', LIVE_VISIT_STATUSES)
-    .select('id', 'service_type');
+    .select('id', 'service_type', 'service_category_snapshot');
   if (!visits.length) return [];
   if (!(await truckHasKeys(truck.id, conn))) return [];
   const onTruck = keysOnTruck(await kitForTruck(truck.id, conn));
   const requiredByLines = new Map();
   const out = [];
   for (const visit of visits) {
-    const lines = serviceLinesFor(visit.service_type);
+    const lines = serviceLinesFor(visit.service_type, visit.service_category_snapshot);
+    if (!lines.length) continue;
     const key = lines.join('+');
     if (!requiredByLines.has(key)) requiredByLines.set(key, await requiredToolsForLines(lines, conn));
     const missing = requiredByLines.get(key).filter((tool) => !onTruck.has(tool.kit_key));

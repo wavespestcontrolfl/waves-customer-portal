@@ -294,6 +294,9 @@ export default function EquipmentMaintenancePage({
         });
         setAlerts(prev => prev.filter(a => a.id !== id));
         showToast("Alert resolved");
+        // Lost and Retired changed the item's status on the server: the
+        // fleet list and counts must say so without a reload.
+        if (outcome === "lost" || outcome === "retired") await loadFleet();
       } catch (e) {
         setActionError(`Error resolving alert: ${e.message}`);
       }

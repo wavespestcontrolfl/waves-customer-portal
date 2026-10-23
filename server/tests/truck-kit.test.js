@@ -377,6 +377,14 @@ describe('tool gaps by kit key', () => {
     expect(truckKit.serviceLinesFor('')).toEqual([]);
   });
 
+  test('a consultation needs no treatment tools: by catalog identity or by name', () => {
+    expect(truckKit.serviceLinesFor('Waves Assessment')).toEqual([]);
+    expect(truckKit.serviceLinesFor('Lawn Consultation')).toEqual([]);
+    expect(truckKit.serviceLinesFor('Quarterly Pest Control', 'inspection')).toEqual([]);
+    expect(truckKit.serviceLinesFor('Quarterly Pest Control', 'other')).toEqual([]);
+    expect(truckKit.serviceLinesFor('Quarterly Pest Control', 'pest_control')).toEqual(['pest']);
+  });
+
   test('a combined visit holds for the companion line\'s tools', async () => {
     db.__state.equipment.find((e) => e.id === SPRAYER).kit_key = 'bg_sprayer';
     db.__state.equipment.push({ id: '66666666-2222-4333-8444-555555555555', name: 'Flashlight', category: 'tool', status: 'active', assigned_vehicle_id: TRUCK, kit_key: 'flashlight' });
@@ -443,6 +451,8 @@ describe('tool gaps by kit key', () => {
       { id: 'v4', technician_id: 'someone-else', scheduled_date: today, status: 'confirmed', service_type: 'Termite Inspection' },
       { id: 'v5', technician_id: TECH, scheduled_date: today, status: 'pending', service_type: 'Quarterly Pest Control' },
       { id: 'v6', technician_id: TECH, scheduled_date: today, status: 'pending', service_type: 'Quarterly Pest + Termite Bait Station' },
+      { id: 'v7', technician_id: TECH, scheduled_date: today, status: 'pending', service_type: 'Waves Assessment' },
+      { id: 'v8', technician_id: TECH, scheduled_date: today, status: 'pending', service_type: 'Pest Inspection Service', service_category_snapshot: 'inspection' },
     ];
     const status = await truckKit.truckKitStatus(TECH, { now: NOW });
     expect(status.gaps).toEqual([
