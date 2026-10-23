@@ -103,6 +103,9 @@ describe('countyConfirmedAfterMove (codex gh-r32)', () => {
   test('the water-source answer is home-bound with its OWN ledger entry (phase 2): the portal PUT stamps it, a staff change strips it', () => {
     const { waterSourceConfirmedAfterMove, WATER_SOURCE_CONFIRMED_FIELD, changedSizingFields } = require('../services/irrigation-schedule-confirmation');
     expect(WATER_SOURCE_CONFIRMED_FIELD).toBe('irrigation_water_source');
+    // Saving it is an irrigation edit on the server too (the portal's IRRIGATION_EDIT_FIELDS mirror): it stamps
+    // irrigation_system on for a legacy row, so the portal's cleared suppression warning and the sweep agree.
+    expect(require('../services/irrigation-schedule-confirmation').IRRIGATION_INPUT_FIELDS).toContain('irrigation_water_source');
     expect(waterSourceConfirmedAfterMove({})).toBe(true);
     const moved = { irrigation_home_changed_at: '2026-08-20T00:00:00Z' };
     expect(waterSourceConfirmedAfterMove({ ...moved, irrigation_confirmed_fields: '[]' })).toBe(false);

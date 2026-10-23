@@ -18,7 +18,7 @@
 const IRRIGATION_INPUT_FIELDS = [
   'irrigation_controller_location', 'irrigation_zones', 'irrigation_inches_per_week',
   'irrigation_run_minutes', 'irrigation_schedule_notes', 'watering_days',
-  'irrigation_system_type', 'rain_sensor', 'irrigation_issues',
+  'irrigation_system_type', 'rain_sensor', 'irrigation_water_source', 'irrigation_issues',
 ];
 const IRRIGATION_SIZING_FIELDS = ['irrigation_run_minutes', 'watering_days', 'irrigation_system_type', 'irrigation_inches_per_week'];
 // Watering JURISDICTION after a move: the turf profile's county is evidence
