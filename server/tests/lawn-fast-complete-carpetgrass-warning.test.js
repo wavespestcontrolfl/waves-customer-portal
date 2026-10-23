@@ -2,8 +2,6 @@
 // customer's turf profile the context carries `carpetgrassCelsiusWarning` (the line a Celsius
 // WG row shows on the sheet). Absent with the gate off, with no carpetgrass, or on a read
 // failure: the context is then byte-identical to before. Synthetic data only.
-const fs = require('fs');
-const path = require('path');
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/waveguard-plan-engine', () => ({ buildPlanForService: jest.fn() }));
