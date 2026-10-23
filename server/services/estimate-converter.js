@@ -2225,20 +2225,73 @@ function normalizeEstimateData(value) {
   return value;
 }
 
-// The one-time install of an accepted mosquito misting system (GATE_MOSQUITO_MISTING, misting PR 2a): the mapped
-// `mosquito_misting_installation` row, read from the STORED estimate so the invoice bills exactly the figure the quote was sent at
-// (never a live constant: frozen-disclosure rule, same as frozenSetupFeeAmount / frozenRodentBaitSetupAmount). Null when the
-// estimate carries no priced install (an oversize layout is an unpriced quote-required row and bills nothing).
-function frozenMistingInstall(estimateData = {}) {
-  const rows = estimateOneTimeItemsFromData(estimateData, { collapseMirrored: true })
-    .filter((item) => item && String(item.service || '').toLowerCase() === 'mosquito_misting_installation' && item.quoteRequired !== true);
-  for (const row of rows) {
-    const amount = firstPositiveNumber(row.price, row.amount, row.total, row.priceAfterDiscount, row.totalAfterDiscount);
+// The one-time install of an accepted mosquito misting system (GATE_MOSQUITO_MISTING, misting PR 2a), read from the STORED estimate
+// so the invoice bills exactly the figure the quote was sent at (never a live constant: frozen-disclosure rule, same as
+// frozenSetupFeeAmount / frozenRodentBaitSetupAmount). It resolves through the SAME authoritative container logic the misting guards use
+// (estimate-result-container storedMistingRows / storedEstimateContainer), in this order:
+//   1. an AUTHORED, itemized proposal (proposal.enabled): its priced install line (mistingProposalIdentity), the accepted quote;
+//   2. a mapped `mosquito_misting_installation` one-time item (not quoteRequired);
+//   3. the raw engine `mosquito_misting` line's installation.price when the line is priced (quoteRequired !== true) — the shape an
+//      engine-origin estimate stores at engineResult.lineItems (withSupplementedRecurringServices maps no install item for it);
+//   4. any mapped item in the bare data (older / unwrapped shapes).
+// Null when the estimate carries no priced install (an oversize layout is an unpriced quote-required row and bills nothing).
+// Returns { amount, description }.
+function frozenMistingInstall(estimateData = {}, { pricingAuthority = null } = {}) {
+  const data = normalizeEstimateData(estimateData);
+  const resultContainer = require('./estimate-result-container');
+  const { mistingProposalIdentity } = require('../utils/mosquito-misting-system');
+  const priceOf = (row) => firstPositiveNumber(row.price, row.amount, row.total, row.priceAfterDiscount, row.totalAfterDiscount);
+  const named = (row, fallback) => String(row.name || row.label || fallback);
+  const fallbackName = 'Mosquito Misting System Installation';
+
+  const proposal = data && data.proposal;
+  if (proposal && proposal.enabled === true
+    && ['buildings', 'programs', 'correctiveWork'].some((key) => Array.isArray(proposal[key]) && proposal[key].length > 0)) {
+    const lines = [
+      ...(proposal.buildings || []).flatMap((building) => (building && building.lineItems) || []),
+      ...(proposal.programs || []), ...(proposal.correctiveWork || []),
+    ];
+    for (const line of lines) {
+      if (mistingProposalIdentity(line) !== 'mosquito_misting_installation') continue;
+      const amount = firstPositiveNumber(line.amount, Number(line.unitPrice) * (Number(line.quantity) || 1), line.price);
+      if (amount != null) return { amount: roundMoney(amount), description: String(line.description || line.label || line.name || fallbackName) };
+    }
+    return null;
+  }
+
+  let stored = [];
+  try { stored = resultContainer.storedMistingRows(data, { pricingAuthority }); } catch { stored = []; }
+  for (const row of stored) {
+    if (String(row.service || '').toLowerCase() !== 'mosquito_misting_installation' || row.quoteRequired === true) continue;
+    const amount = priceOf(row);
+    if (amount != null) return { amount: roundMoney(amount), description: named(row, fallbackName) };
+  }
+  for (const row of stored) {
+    if (String(row.service || '').toLowerCase() !== 'mosquito_misting' || row.quoteRequired === true) continue;
+    const amount = firstPositiveNumber(row.installation && row.installation.price);
     if (amount != null) {
-      return { amount: roundMoney(amount), description: String(row.name || row.label || 'Mosquito Misting System Installation') };
+      return { amount: roundMoney(amount), description: row.tierLabel ? `${row.tierLabel} Installation` : fallbackName };
     }
   }
+  if (stored.length) return null;
+  const rows = estimateOneTimeItemsFromData(data, { collapseMirrored: true })
+    .filter((item) => item && String(item.service || '').toLowerCase() === 'mosquito_misting_installation' && item.quoteRequired !== true);
+  for (const row of rows) {
+    const amount = priceOf(row);
+    if (amount != null) return { amount: roundMoney(amount), description: named(row, fallbackName) };
+  }
   return null;
+}
+
+// One-time lines that ride an annual-prepay invoice beside the coverage amount but are NOT coverage money: the disclosed rodent
+// bait-station setup and the misting installation. THE helper every customer-facing prepay total is built from (the accept
+// route's quoted/acknowledged total and the operator preview), so the quote can never differ from the minted invoice. The commercial
+// tax blend takes only `rodentSetup` as its taxable one-time share, exactly as the converter's own invoice does.
+function frozenPrepayOneTimeLines(estimateData = {}) {
+  const rodentSetup = Number(frozenRodentBaitSetupAmount(estimateData)) || 0;
+  const install = frozenMistingInstall(estimateData);
+  const mistingInstall = install ? install.amount : 0;
+  return { rodentSetup, mistingInstall, total: roundMoney(rodentSetup + mistingInstall) };
 }
 
 // Mosquito misting install office bell (misting PR 2a). The install amount is already a named line on the acceptance invoice
@@ -7844,10 +7897,12 @@ const EstimateConverter = {
     }
 
     // Mosquito misting install (misting PR 2a, GATE_MOSQUITO_MISTING): the install is billed on the acceptance invoice; the office
-    // gets ONE bell to book the install day (no install visit row is created). Skipped when the caller scheduled nothing itself
-    // (manual Mark Won) or recurring conversion is suppressed. In-transaction callers get the payload back and dispatch it after
-    // commit. A failure is logged and never blocks the accept.
-    const mistingInstallNotification = (!skipAutoSchedule && !suppressRecurringConversion)
+    // gets ONE bell to book the install day (no install visit row is created). Bell eligibility is separate from auto scheduling:
+    // the CALLER says explicitly (opts.mistingInstallBilled) that this acceptance bills the install (the public standard accept,
+    // invoice-mode and annual-prepay accepts, a manual annual-prepay accept). A manual Mark Won that bills nothing, and a one-tap
+    // purchase, pass nothing and raise nothing. A one-time selection (suppressRecurringConversion) bills no install. In-transaction
+    // callers get the payload back and dispatch it after commit. A failure is logged and never blocks the accept.
+    const mistingInstallNotification = (opts.mistingInstallBilled === true && !suppressRecurringConversion)
       ? await raiseMistingInstallBell(database, fx, opts, {
         estimateId, customerId, customer, estimateData, firstPlanDate: earliestScheduledUnitDate || termStartDate || null,
       })
@@ -9236,5 +9291,6 @@ module.exports.funnelKeyForEstimateId = funnelKeyForEstimateId;
 module.exports.isGeneralPestOneTimeItem = isGeneralPestOneTimeItem;
 module.exports.isLawnCareOneTimeItem = isLawnCareOneTimeItem;
 module.exports.frozenMistingInstall = frozenMistingInstall;
+module.exports.frozenPrepayOneTimeLines = frozenPrepayOneTimeLines;
 module.exports.mistingInstallSchedulePayload = mistingInstallSchedulePayload;
 module.exports.raiseMistingInstallBell = raiseMistingInstallBell;

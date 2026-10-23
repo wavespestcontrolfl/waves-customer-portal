@@ -16,6 +16,7 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
 jest.mock('../services/estimate-converter', () => ({
   convertEstimate: jest.fn(),
   frozenRodentBaitSetupAmount: jest.fn(() => 0),
+  frozenPrepayOneTimeLines: jest.fn(() => ({ rodentSetup: 0, mistingInstall: 0, total: 0 })),
   recurringMixHasMembershipFeeService: (services = []) => {
     const keys = Array.from(new Set((Array.isArray(services) ? services : [])
       .map((s) => s && s.service).filter(Boolean)));

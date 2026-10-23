@@ -167,8 +167,10 @@ async function annualPrepayInvoiceTotalForEstimate(estimate = {}) {
   // The frozen bait-station setup rides the prepay invoice as its own
   // (taxed) line — the operator preview must equal the minted invoice
   // (codex #3591 r24 P1).
-  const frozenSetupForPreview = Number(EstimateConverter.frozenRodentBaitSetupAmount(data)) || 0;
-  const amount = Math.round((Number(resolved.amount) + frozenSetupForPreview) * 100) / 100;
+  // The misting installation rides the same invoice (misting PR 2a): one helper for both one-time lines.
+  const frozenOneTimeForPreview = EstimateConverter.frozenPrepayOneTimeLines(data);
+  const frozenSetupForPreview = frozenOneTimeForPreview.rodentSetup;
+  const amount = Math.round((Number(resolved.amount) + frozenOneTimeForPreview.total) * 100) / 100;
   // Same commercial detection as the converter (recurringServiceKey prefix) —
   // non-commercial prepay stays residential-exempt, so no tax leg at all.
   const hasCommercialRecurring = (recurringSvcList || []).some(
@@ -1070,6 +1072,8 @@ async function runConversion(trx, ctx, updatedEstimate, annualPrepayAmount) {
     skipMembershipEmail: true,
     skipWelcomeSms: true,
     skipSetupInvoice: !ctx.annualPrepaySelected,
+    // Only the annual-prepay manual accept mints an invoice, so only it bills the misting install (a Mark Won that bills nothing raises no install bell).
+    ...(ctx.annualPrepaySelected ? { mistingInstallBilled: true } : {}),
     deferCommercialScheduleNotification: true,
     ...cardConvertOptions(ctx),
   };

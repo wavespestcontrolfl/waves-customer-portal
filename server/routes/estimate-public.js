@@ -11534,8 +11534,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // acknowledged total must include it or the exact-total check
         // rejects every in-lane prepay accept as PREPAY_QUOTE_STALE (codex
         // #3591 r16 P1). Same frozen resolver the converter bills from.
-        const acknowledgedRodentSetup = converter.frozenRodentBaitSetupAmount(estData);
-        const base = Math.round((resolved.amount + acknowledgedRodentSetup) * 100) / 100;
+        // The misting installation rides the same invoice as its own line (misting PR 2a); it joins the quote through the one
+        // helper so the quoted total equals the minted one. Only the rodent setup sits in the commercial tax blend, as in the converter.
+        const acknowledgedOneTime = converter.frozenPrepayOneTimeLines(estData);
+        const acknowledgedRodentSetup = acknowledgedOneTime.rodentSetup;
+        const base = Math.round((resolved.amount + acknowledgedOneTime.total) * 100) / 100;
         // Commercial prepay is taxed on the taxable pest share — quote the
         // TAX-INCLUSIVE total so the customer/admin message matches the invoice
         // + PaymentIntent the converter creates (uses the same blended rate +
@@ -13637,6 +13640,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // still unstamped (see holdsExistingMembership).
           createdCustomerId: customerCreatedThisAccept ? customerId : null,
           skipAutoSchedule: true,
+          // The prepay invoice the converter mints bills the misting install: raise the install office bell (misting PR 2a).
+          mistingInstallBilled: true,
           skipMembershipEmail: true,
           // Labeled manual-discount itemization on the prepay invoice (owner
           // 2026-07-11) — annual slice; the converter grosses the prepay line
@@ -13844,6 +13849,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // commercial bills manually (owner directive) — both skip below
           // exactly as they skipped the converter's invoice before.
           skipSetupInvoice: true,
+          // The invoice minted below on this trx (or the invoice-mode draft) bills the misting install: raise the install office bell.
+          mistingInstallBilled: !isCommercialAccept && !holdFirstInvoiceForSiteConfirmation,
           // Commercial schedules + invoices manually (owner directive): never
           // auto-schedule a wrong-length visit. A narrow low-confidence
           // commercial estimate is held for on-site price confirmation and is

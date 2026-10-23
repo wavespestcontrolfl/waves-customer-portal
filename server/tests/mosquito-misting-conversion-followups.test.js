@@ -323,3 +323,106 @@ describe('P1 (audit 3): a refill newly added on a visit edit takes the plan solu
     expect((src.match(/resolveAddonUnitPrice\(/g) || [])).toHaveLength(2);
   });
 });
+
+describe('audit 4: engine-origin install, one prepay total helper, install bell eligibility', () => {
+  const engineOnly = (opts = { tier: 'essential', nozzles: 40, risers: 12, solution: 'natural' }) => {
+    const input = { ...PROPERTY, services: { mosquitoMisting: opts } };
+    return { engineResult: generateEstimate(input), engineInputs: input };
+  };
+
+  test('frozenMistingInstall: mapped item, raw engine line (engineResult.lineItems), and an itemized proposal line all resolve; same shape', () => {
+    const mapped = converter.frozenMistingInstall(estimateData());
+    expect(mapped).toEqual({ amount: INSTALL, description: 'Essential system (drum) Installation' });
+    const raw = converter.frozenMistingInstall(engineOnly());
+    expect(raw).toEqual({ amount: INSTALL, description: 'Essential system (drum) Installation' });
+    expect(converter.frozenMistingInstall(JSON.stringify(engineOnly()))).toEqual(raw);
+    const proposal = converter.frozenMistingInstall({
+      proposal: {
+        enabled: true,
+        buildings: [{ lineItems: [
+          { service: 'mosquito_misting', description: 'Mosquito Misting Service Plan', unitPrice: 59, quantity: 1, amount: 59 },
+          { service: 'mosquito_misting_installation', description: 'Smart system Installation', unitPrice: 5200, quantity: 1, amount: 5200 },
+        ] }],
+      },
+      result: estimateData().result,
+    });
+    expect(proposal).toEqual({ amount: 5200, description: 'Smart system Installation' });
+  });
+
+  test('frozenMistingInstall: an unpriced / oversize raw line, a quote-required item and an unpriced proposal install bill nothing', () => {
+    expect(converter.frozenMistingInstall(engineOnly({ nozzles: 120 }))).toBeNull();
+    const rawLine = engineOnly().engineResult.lineItems.find((l) => l.service === 'mosquito_misting');
+    const quoteRequired = { engineResult: { lineItems: [{ ...rawLine, quoteRequired: true }] } };
+    expect(converter.frozenMistingInstall(quoteRequired)).toBeNull();
+    const zeroInstall = { engineResult: { lineItems: [{ ...rawLine, installation: { price: 0 } }] } };
+    expect(converter.frozenMistingInstall(zeroInstall)).toBeNull();
+    expect(converter.frozenMistingInstall({ proposal: { enabled: true, buildings: [{ lineItems: [{ service: 'mosquito_misting_installation', description: 'X', unitPrice: 0, quantity: 1, amount: 0 }] }] } })).toBeNull();
+    expect(converter.frozenMistingInstall({ engineResult: { lineItems: [{ service: 'pest_control' }] } })).toBeNull();
+    expect(converter.frozenMistingInstall(null)).toBeNull();
+  });
+
+  test('an engine-origin estimate carries its install through the acceptance invoice builders', () => {
+    const data = engineOnly();
+    const install = converter.frozenMistingInstall(data);
+    const { buildEstimateInvoiceModeDraft } = require('../routes/estimate-public');
+    const draft = buildEstimateInvoiceModeDraft({
+      estimate: { id: 90, monthly_total: 59 }, recurringSvcList: [{ name: 'Mosquito Misting Service Plan' }], recurringFirstVisitAmount: 59,
+      effectiveBillingCadence: { frequencyLabel: 'Monthly' }, selectedFrequency: { label: 'Monthly' }, mistingInstall: install,
+    });
+    expect(draft.lineItems.some(misting.isMistingInstallLine)).toBe(true);
+    expect(draft.amount).toBe(Math.round((59 + INSTALL) * 100) / 100);
+    expect(converter.frozenPrepayOneTimeLines(data)).toEqual({ rodentSetup: 0, mistingInstall: INSTALL, total: INSTALL });
+  });
+
+  test('frozenPrepayOneTimeLines: misting + pest prepay quote total equals the minted invoice total; no misting is unchanged', () => {
+    const data = estimateData(undefined, { pest: { frequency: 'quarterly' } });
+    const recurring = data.result.recurring.services;
+    const baseAnnual = recurring.reduce((sum, row) => sum + (Number(row.annual) || 0), 0);
+    const resolved = converter.resolveAnnualPrepayInvoiceTotal({ baseAnnual, recurringServices: recurring, estimateData: data });
+    const lines = converter.frozenPrepayOneTimeLines(data);
+    const quote = Math.round((resolved.amount + lines.total) * 100) / 100;
+    // the minted invoice: prepay line + marked install line (residential, untaxed)
+    const install = converter.frozenMistingInstall(data);
+    const invoiceTotal = Math.round((resolved.amount + misting.mistingInstallLinesTotal([misting.mistingInstallLine({ description: install.description, amount: install.amount })])) * 100) / 100;
+    expect(quote).toBe(invoiceTotal);
+    expect(lines.mistingInstall).toBe(INSTALL);
+    const plain = estimateData(undefined, { pest: { frequency: 'quarterly' } });
+    const noMisting = { result: mapper.mapV1ToLegacyShape(generateEstimate({ ...PROPERTY, services: { pest: { frequency: 'quarterly' } } })) };
+    expect(converter.frozenPrepayOneTimeLines(noMisting)).toEqual({ rodentSetup: 0, mistingInstall: 0, total: 0 });
+    expect(plain.result).toBeDefined();
+  });
+
+  test('both prepay totals (the accept quote and the operator preview) build from the one helper', () => {
+    expect(read('routes/estimate-public.js')).toContain('const acknowledgedOneTime = converter.frozenPrepayOneTimeLines(estData);');
+    expect(read('routes/estimate-public.js')).toContain('(resolved.amount + acknowledgedOneTime.total)');
+    expect(read('services/estimate-manual-acceptance.js')).toContain('EstimateConverter.frozenPrepayOneTimeLines(data)');
+  });
+
+  test('install bell eligibility is an explicit caller flag: public standard and prepay accepts and a manual prepay accept pass it; Mark Won and one-tap do not', () => {
+    const conv = read('services/estimate-converter.js');
+    expect(conv).toContain('opts.mistingInstallBilled === true && !suppressRecurringConversion');
+    const route = read('routes/estimate-public.js');
+    expect(route).toContain('mistingInstallBilled: true,');
+    expect(route).toContain('mistingInstallBilled: !isCommercialAccept && !holdFirstInvoiceForSiteConfirmation,');
+    const manual = read('services/estimate-manual-acceptance.js');
+    expect(manual).toContain('...(ctx.annualPrepaySelected ? { mistingInstallBilled: true } : {}),');
+    expect(read('services/one-tap-purchase.js')).not.toContain('mistingInstallBilled');
+    // the manual-accept post-commit plan dispatches the deferred bell
+    expect(read('services/estimate-accept-effects.js')).toContain("['misting_install_schedule', 'mistingInstallNotification'],");
+  });
+
+  test('annual-prepay accept: the bell payload is returned deferred; a Mark Won passes no flag so the converter raises none', async () => {
+    const NotificationService = require('../services/notification-service');
+    const spy = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue({ id: 1 });
+    try {
+      const database = jest.fn(() => ({ insert: async () => [1] }));
+      const fx = { run: jest.fn((meta, fn) => fn()) };
+      const out = await converter.raiseMistingInstallBell(database, fx, { deferCommercialScheduleNotification: true }, {
+        estimateId: 91, customerId: 'c1', customer: { first_name: 'A', last_name: 'B' }, estimateData: engineOnly(), firstPlanDate: null,
+      });
+      expect(out).toMatchObject({ options: { dedupeKey: 'misting_install_schedule:91', bell: true } });
+      expect(out.body).toContain('before the first plan application on the first plan visit');
+      expect(spy).not.toHaveBeenCalled();
+    } finally { spy.mockRestore(); }
+  });
+});

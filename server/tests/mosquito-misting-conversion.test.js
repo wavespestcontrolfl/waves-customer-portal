@@ -232,12 +232,12 @@ describe('the install: a named line on the acceptance invoice and one office bel
     });
   });
 
-  test('the converter has no install-visit writer; the hook skips manual Mark Won and suppressed recurring conversion; the accept routes post the deferred bell', () => {
+  test('the converter has no install-visit writer; the hook needs the explicit mistingInstallBilled flag from the caller and skips suppressed recurring conversion; the accept routes post the deferred bell', () => {
     const src = read('services/estimate-converter.js');
     expect(src).not.toContain('scheduleMistingInstallVisit');
     expect(src).not.toContain('estimate_accept_misting_install');
     expect(src).not.toContain("prepaid_method: 'acceptance_invoice'");
-    expect(src).toContain('const mistingInstallNotification = (!skipAutoSchedule && !suppressRecurringConversion)');
+    expect(src).toContain('const mistingInstallNotification = (opts.mistingInstallBilled === true && !suppressRecurringConversion)');
     expect(src).toMatch(/\n      mistingInstallNotification,\n/);
     expect(read('routes/estimate-public.js')).toContain(".sendAcceptBell(acceptConversion.mistingInstallNotification");
     expect(read('services/one-tap-purchase.js')).toContain("'mistingInstallNotification'");
