@@ -39,10 +39,10 @@ function fillOfficeFields() {
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
 describe('IssueWarrantyDialog', () => {
-  it('shows the full text, needs the review tick, then creates with the previewed hash and sends nothing', async () => {
+  it('shows the full text, needs the review tick, then saves a draft with the previewed hash and sends nothing', async () => {
     adminFetch
       .mockResolvedValueOnce({ ok: true, json: async () => ({ body: 'WARRANTY TEXT FOR REVIEW', renderHash: 'h1' }) })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ signingUrl: 'https://portal.example/sign/tok' }) });
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ signingUrl: null, contract: { status: 'draft' } }) });
     render(<IssueWarrantyDialog open onClose={() => {}} project={project} findings={findings} />);
     const previewButton = screen.getByRole('button', { name: 'Preview warranty' });
     expect(previewButton).toBeDisabled();
@@ -54,7 +54,8 @@ describe('IssueWarrantyDialog', () => {
     expect(create).toBeDisabled();
     fireEvent.click(screen.getByRole('checkbox'));
     fireEvent.click(create);
-    await screen.findByDisplayValue('https://portal.example/sign/tok');
+    await screen.findByText(/Warranty saved as a draft. Nothing has gone to the owner yet./);
+    expect(screen.getByRole('button', { name: 'Done' })).toBeInTheDocument();
 
     expect(adminFetch).toHaveBeenCalledTimes(2);
     expect(adminFetch.mock.calls[0][0]).toBe('/admin/document-templates/service_agreement.termite_new_construction_warranty/issue-preview');

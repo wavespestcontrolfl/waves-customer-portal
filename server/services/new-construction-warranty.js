@@ -3,6 +3,7 @@
 // the job in every issued snapshot.
 const crypto = require('crypto');
 const db = require('../models/db');
+const { hashContractToken, publicContractUrl } = require('./contracts');
 const { customerCopyViolations } = require('./service-report/technician-report-copy');
 const { etDateString } = require('../utils/datetime-et');
 const { WAVES_FDACS_LICENSE_NUMBER } = require('../constants/business');
@@ -470,8 +471,24 @@ function assertConfirmedRender(templateKey, body, renderedBody) {
   }
 }
 
+// A new warranty is a draft with no signing link: nothing has gone to the
+// owner yet. Document Requests (email, text or copy link) mints the link and
+// stamps it sent when it really goes out. Every other template keeps its
+// created-and-shared row.
+function issueDeliveryState(templateKey, token, expiresAt, now = new Date()) {
+  if (templateKey === NEW_CONSTRUCTION_WARRANTY_KEY) {
+    return { fields: { status: 'draft', share_token_hash: null, share_token_expires_at: null, shared_at: null }, linkCreated: false, signingUrl: null };
+  }
+  return {
+    fields: { status: 'sent', share_token_hash: hashContractToken(token), share_token_expires_at: expiresAt, shared_at: now },
+    linkCreated: true,
+    signingUrl: publicContractUrl(token),
+  };
+}
+
 module.exports = {
   NEW_CONSTRUCTION_WARRANTY_KEY,
+  issueDeliveryState,
   assertConfirmedRender,
   renderHash,
   supersedeOpenNewConstructionWarranty,

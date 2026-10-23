@@ -347,3 +347,23 @@ describe('assertConfirmedRender (staff read the exact text)', () => {
     expect(() => assertConfirmedRender('service_agreement.termite_bond_retreatment', {}, text)).not.toThrow();
   });
 });
+
+describe('issueDeliveryState (draft until really sent)', () => {
+  const { issueDeliveryState, NEW_CONSTRUCTION_WARRANTY_KEY } = require('../services/new-construction-warranty');
+  test('the warranty is created as a draft with no link and no sent stamp', () => {
+    const state = issueDeliveryState(NEW_CONSTRUCTION_WARRANTY_KEY, 'tok', new Date('2026-11-06T00:00:00Z'));
+    expect(state).toEqual({
+      fields: { status: 'draft', share_token_hash: null, share_token_expires_at: null, shared_at: null },
+      linkCreated: false,
+      signingUrl: null,
+    });
+  });
+  test('every other template keeps its created-and-shared row', () => {
+    const expiresAt = new Date('2026-11-06T00:00:00Z');
+    const now = new Date('2026-10-23T12:00:00Z');
+    const state = issueDeliveryState('service_agreement.termite_bond_retreatment', 'tok', expiresAt, now);
+    expect(state.fields).toMatchObject({ status: 'sent', share_token_expires_at: expiresAt, shared_at: now });
+    expect(state.fields.share_token_hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(state).toMatchObject({ linkCreated: true, signingUrl: expect.stringContaining('tok') });
+  });
+});
