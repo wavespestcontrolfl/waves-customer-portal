@@ -716,18 +716,23 @@ router.put('/alerts/:id', async (req, res, next) => {
       updates.resolved_by = resolved_by || 'admin';
     }
 
-    const [record] = await db('maintenance_alerts')
-      .where('id', req.params.id)
-      .update(updates)
-      .returning('*');
+    // The alert, the item's status and the bell close commit together.
+    const record = await db.transaction(async (trx) => {
+      const [row] = await trx('maintenance_alerts')
+        .where('id', req.params.id)
+        .update(updates)
+        .returning('*');
+      if (!row) return null;
+      if (status === 'resolved' && toolAlert) {
+        const nextStatus = outcome ? TOOL_OUTCOME_STATUS[outcome] : null;
+        if (nextStatus) await trx('equipment').where('id', row.equipment_id).update({ status: nextStatus, updated_at: db.fn.now() });
+        const item = await trx('equipment').where('id', row.equipment_id).first('assigned_vehicle_id');
+        if (item?.assigned_vehicle_id) await truckKit.closeTruckBellIfClear(item.assigned_vehicle_id, new Date(), trx);
+      }
+      return row;
+    });
 
     if (!record) return res.status(404).json({ error: 'Alert not found' });
-    if (status === 'resolved' && toolAlert) {
-      const nextStatus = outcome ? TOOL_OUTCOME_STATUS[outcome] : null;
-      if (nextStatus) await db('equipment').where('id', record.equipment_id).update({ status: nextStatus, updated_at: db.fn.now() });
-      const item = await db('equipment').where('id', record.equipment_id).first('assigned_vehicle_id');
-      if (item?.assigned_vehicle_id) await truckKit.closeTruckBellIfClear(item.assigned_vehicle_id);
-    }
     res.json({ alert: record });
   } catch (err) {
     next(err);

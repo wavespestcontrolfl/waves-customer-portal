@@ -36,6 +36,7 @@ jest.mock('../models/db', () => {
   db.raw = jest.fn(async () => ({ rows: [] }));
   db.fn = { now: () => 'NOW()' };
   db.schema = { hasTable: jest.fn(async () => true), hasColumn: jest.fn(async () => true) };
+  db.transaction = jest.fn(async (fn) => fn(db));
   db.__state = state;
   return db;
 });
@@ -76,14 +77,16 @@ test('Lost resolves the alert, marks the item lost and closes the truck bell', a
   expect(res.statusCode).toBe(200);
   expect(res.body.alert).toEqual(expect.objectContaining({ status: 'resolved', resolved_by: 'admin' }));
   expect(db.__state.equipment[TOOL].status).toBe('lost');
-  expect(truckKit.closeTruckBellIfClear).toHaveBeenCalledWith(TRUCK);
+  // All three writes ride one transaction, and the bell close runs on it.
+  expect(db.transaction).toHaveBeenCalledTimes(1);
+  expect(truckKit.closeTruckBellIfClear).toHaveBeenCalledWith(TRUCK, expect.any(Date), db);
 });
 
 test('Found resolves the alert, leaves the item alone and still checks the bell', async () => {
   await put('a-missing', { status: 'resolved', outcome: 'found' });
   expect(db.__state.equipment[TOOL].status).toBe('active');
   expect(db.__state.updates.some(([table]) => table === 'equipment')).toBe(false);
-  expect(truckKit.closeTruckBellIfClear).toHaveBeenCalledWith(TRUCK);
+  expect(truckKit.closeTruckBellIfClear).toHaveBeenCalledWith(TRUCK, expect.any(Date), db);
 });
 
 test('an outcome is admin-only, tool-alert-only, from the fixed list, and resolves', async () => {
