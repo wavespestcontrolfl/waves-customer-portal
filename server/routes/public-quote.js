@@ -1048,10 +1048,14 @@ const OPEN_PARCEL_BASIS_REASONS = new Set([
   'open_parcel_basis_unconfirmed_footprint',
   'open_parcel_basis_footprint_over_half_lot',
 ]);
+// The pricer appends bed_area_at_or_above_8000 BEFORE the open-parcel
+// reasons, and quoteRequiredReason reads only manualReviewReasons[0], so the
+// classification scans the parked line's whole reason list (Codex #6398 r23).
 function isResidentialVerificationHold(reason, manualQuoteLine) {
   if (RESIDENTIAL_VERIFICATION_REASONS.has(reason)) return true;
-  return OPEN_PARCEL_BASIS_REASONS.has(reason)
-    && !String(manualQuoteLine?.service || '').startsWith('commercial_');
+  if (String(manualQuoteLine?.service || '').startsWith('commercial_')) return false;
+  const reasons = Array.isArray(manualQuoteLine?.manualReviewReasons) ? manualQuoteLine.manualReviewReasons : [];
+  return OPEN_PARCEL_BASIS_REASONS.has(reason) || reasons.some((r) => OPEN_PARCEL_BASIS_REASONS.has(r));
 }
 
 const PUBLIC_QUOTE_SERVICE_KEYS = [
@@ -4153,7 +4157,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           ? 'Your grass type needs a quick look from our team before we finalize lawn pricing — we\'ll send your exact price shortly.'
           : (quoteRequiredReason === 'lot_size_requires_verification' || quoteRequiredReason === 'mosquito_treatable_area_unverified')
           ? 'Your property\'s outdoor area needs a quick confirmation before we price this service — the Waves team will follow up with your exact price.'
-          : (OPEN_PARCEL_BASIS_REASONS.has(quoteRequiredReason) && isResidentialVerificationHold(quoteRequiredReason, manualQuoteLine))
+          : (!RESIDENTIAL_VERIFICATION_REASONS.has(quoteRequiredReason) && isResidentialVerificationHold(quoteRequiredReason, manualQuoteLine))
           ? 'Tree & shrub pricing depends on your planting-bed area, and we could not confirm your home\'s footprint from records alone — the Waves team will confirm it and send your exact price shortly.'
           // A stale single-visit flea request (retired offer key) prices the
           // two-visit package but parks for review — say so, never the

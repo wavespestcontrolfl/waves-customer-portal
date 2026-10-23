@@ -2,6 +2,12 @@ const pricingEngine = require('./pricing-engine');
 const logger = require('./logger');
 const { loadExistingQualifyingServiceKeys, loadOwnedRecurringServiceKeys } = require('./waveguard-existing-services');
 const { storiesSourceForPricing } = require('./estimator-engine/draft-builder');
+// Story provenances under which a lookup living area may stand in for the
+// building footprint on the Tree & Shrub open-parcel basis — the resolver's
+// own grade ('lookup' = direct county/permit evidence) or a lookup stamp with
+// real provenance; never 'default' / 'estimated' (same set the public quote
+// route applies to its server-side lookup; Codex #6398 r23 P1).
+const TRUSTED_FOOTPRINT_STORIES_SOURCES = new Set(['lookup', 'ai', 'permit', 'verified', 'manual']);
 
 const RECURRING_SERVICE_ORDER = ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub'];
 const TIER_MIN_SERVICE_COUNT = {
@@ -494,6 +500,8 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
   // fails closed to the pricer's own missing-property handling.
   const lookupRejectedFields = new Set();
   let lookupFootprintUnknown = false;
+  let lookupHomeSqFtAdopted = false;
+  let lookupStoriesSource = null;
 
   // The gate used to be (!homeSqFt || !lotSqFt), which meant a customer
   // whose row carried both was NEVER looked up — and therefore priced
@@ -563,7 +571,11 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
         // Adopting that home size without the suppression would let the
         // engine rebuild a one-story footprint from it for the T&S open-parcel
         // basis (Codex #6398 r20 P1); the public route refuses the same way.
-        if (homeSqFt !== before && p.footprintUnknown === true) lookupFootprintUnknown = true;
+        if (homeSqFt !== before) {
+          lookupHomeSqFtAdopted = true;
+          lookupStoriesSource = typeof p.storiesSource === 'string' ? p.storiesSource : null;
+          if (p.footprintUnknown === true) lookupFootprintUnknown = true;
+        }
       }
       if (lookupDimensionIsTrustworthy(p, 'lotSqFt')) {
         lotSqFt = positiveNumber(lotSqFt, p.lotSqFt, record.lotSize);
@@ -924,6 +936,20 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
 
   const grassType = normalizeGrassType(turfProfile?.track_key || turfProfile?.grass_type || customer.lawn_type);
 
+  // Provenance rides with the count: a defaulted story count (no lookup,
+  // or a verify-flagged read discarded above) must say so, or the
+  // story-sensitive pricers (pest per-story minutes, termite bait
+  // footprint→perimeter) price a guessed one-story home with no
+  // stories_estimated review marker on the quote. An adopted count is
+  // graded through the SAME evidence rule the agent path uses
+  // (draft-builder#storiesSourceForPricing): the AI stories-fallback
+  // carries provenance without any verify flag, and a non-direct or
+  // low-confidence inference must price as 'estimated', not 'lookup'.
+  const resolvedStoriesSource = stories
+    ? (storiesFromSeed
+      ? (propertySeed?.storiesSource || 'estimated')
+      : storiesSourceForPricing({ stories, storiesEvidence }))
+    : 'default';
   const propertyInput = {
     homeSqFt,
     lotSqFt,
@@ -932,20 +958,7 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
     // a lawn the profile measured as absent.
     lawnSqFt: lawnKnownZero ? 0 : (lawnSqFt || undefined),
     stories: stories || 1,
-    // Provenance rides with the count: a defaulted story count (no lookup,
-    // or a verify-flagged read discarded above) must say so, or the
-    // story-sensitive pricers (pest per-story minutes, termite bait
-    // footprint→perimeter) price a guessed one-story home with no
-    // stories_estimated review marker on the quote. An adopted count is
-    // graded through the SAME evidence rule the agent path uses
-    // (draft-builder#storiesSourceForPricing): the AI stories-fallback
-    // carries provenance without any verify flag, and a non-direct or
-    // low-confidence inference must price as 'estimated', not 'lookup'.
-    storiesSource: stories
-      ? (storiesFromSeed
-        ? (propertySeed?.storiesSource || 'estimated')
-        : storiesSourceForPricing({ stories, storiesEvidence }))
-      : 'default',
+    storiesSource: resolvedStoriesSource,
     propertyType,
     features,
     bedArea: bedArea || undefined,
@@ -966,8 +979,16 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
       }
       : {}),
     // The lookup's own footprint suppression travels with its home size: an
-    // aggregate living area is NOT a footprint (Codex #6398 r20 P1).
-    ...(!homeSqFtFromSeed && lookupFootprintUnknown ? { treeShrubFootprintTrusted: false } : {}),
+    // aggregate living area is NOT a footprint (Codex #6398 r20 P1). Nor is
+    // a living area whose story count nobody vouched for (Codex #6398 r23
+    // P1): with stories absent, flagged, defaulted by the lookup or graded
+    // 'estimated', the engine would rebuild a one-story footprint from the
+    // full living area of a possibly multi-story home and shrink the
+    // open-parcel bed with no review reason.
+    ...(!homeSqFtFromSeed && lookupHomeSqFtAdopted
+      && (lookupFootprintUnknown || !TRUSTED_FOOTPRINT_STORIES_SOURCES.has(resolvedStoriesSource)
+        || (lookupStoriesSource && !TRUSTED_FOOTPRINT_STORIES_SOURCES.has(lookupStoriesSource)))
+      ? { treeShrubFootprintTrusted: false } : {}),
     yearBuilt,
     constructionMaterial,
     foundationType,

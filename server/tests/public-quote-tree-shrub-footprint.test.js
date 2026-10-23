@@ -16,11 +16,18 @@ describe('isResidentialVerificationHold', () => {
     expect(isResidentialVerificationHold('open_parcel_basis_footprint_over_half_lot', residential)).toBe(true);
     // No parked line at all (the reason came from another leg) still reads residential.
     expect(isResidentialVerificationHold('open_parcel_basis_unconfirmed_footprint', null)).toBe(true);
+    // The pricer lists bed_area_at_or_above_8000 FIRST, so the selected reason
+    // is the large-bed one while the open-parcel hold sits later in the list
+    // (Codex #6398 r23): the whole list decides.
+    const largeBed = { service: 'tree_shrub', requiresManualReview: true, manualReviewReasons: ['bed_area_at_or_above_8000', 'open_parcel_basis_unconfirmed_footprint'] };
+    expect(isResidentialVerificationHold('bed_area_at_or_above_8000', largeBed)).toBe(true);
+    expect(isResidentialVerificationHold('bed_area_at_or_above_8000', { ...largeBed, manualReviewReasons: ['bed_area_at_or_above_8000'] })).toBe(false);
   });
   test('the same reason strings on the COMMERCIAL program keep the commercial copy', () => {
     const commercial = { service: 'commercial_tree_shrub', requiresManualReview: true, manualReviewReasons: ['open_parcel_basis_unconfirmed_footprint'] };
     expect(isResidentialVerificationHold('open_parcel_basis_unconfirmed_footprint', commercial)).toBe(false);
     expect(isResidentialVerificationHold('open_parcel_basis_footprint_over_half_lot', commercial)).toBe(false);
+    expect(isResidentialVerificationHold('bed_area_at_or_above_8000', { ...commercial, manualReviewReasons: ['bed_area_at_or_above_8000', 'open_parcel_basis_unconfirmed_footprint'] })).toBe(false);
   });
   test('the existing residential verification reasons are unchanged; unknown reasons are not holds', () => {
     expect(isResidentialVerificationHold('lot_size_requires_verification', { service: 'commercial_pest' })).toBe(true);

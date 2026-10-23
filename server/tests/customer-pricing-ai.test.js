@@ -648,7 +648,7 @@ describe('customer pricing AI helpers', () => {
     const run = (footprintUnknown) => buildCustomerPricingResponse({
       db: null,
       propertyLookup: async () => ({
-        enriched: { homeSqFt: 12000, lotSqFt: 30000, stories: 1, storiesSource: 'default', ...(footprintUnknown ? { footprint: 0, footprintUnknown: true } : { footprint: 2000 }) },
+        enriched: { homeSqFt: 12000, lotSqFt: 30000, stories: 1, storiesSource: 'verified', ...(footprintUnknown ? { footprint: 0, footprintUnknown: true } : { footprint: 2000 }) },
         propertyRecord: {},
       }),
       prompt: 'I am interested in tree and shrub care',
@@ -658,6 +658,32 @@ describe('customer pricing AI helpers', () => {
     const review = (r) => r.options?.[0]?.manualReview;
     expect(review(await run(true))).toBe(true);
     expect(review(await run(false))).toBe(false);
+  });
+
+  test("a lookup home size whose story count is absent, flagged, defaulted or estimated is an untrusted T&S footprint (Codex #6398 r23 P1)", async () => {
+    // A 12,000 sf multi-story home on a 30,000 sf lot: with stories unknown
+    // the engine would rebuild a 12,000 sf one-story footprint, shrink the
+    // open-parcel bed and publish with no review reason.
+    const run = (enrichedStories) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({
+        enriched: { homeSqFt: 12000, lotSqFt: 30000, footprint: 2000, ...enrichedStories },
+        propertyRecord: {},
+      }),
+      prompt: 'I am interested in tree and shrub care',
+      customer: propertyCustomer({ id: 'cust-stories', property_sqft: null, lot_sqft: null }),
+      propertySeed: null,
+    });
+    const review = (r) => r.options?.[0]?.manualReview;
+    // Absent stories → resolver defaults to 1 → untrusted.
+    expect(review(await run({}))).toBe(true);
+    // Verify-flagged stories read is discarded → 'default' → untrusted.
+    expect(review(await run({ stories: 2, fieldVerifyFlags: [{ field: 'stories', reason: 'conflicting evidence', priority: 'HIGH' }] }))).toBe(true);
+    // The lookup itself defaulted the count → untrusted even though adopted.
+    expect(review(await run({ stories: 1, storiesSource: 'default' }))).toBe(true);
+    // A vouched count prices the lot-inferred bed as before.
+    expect(review(await run({ stories: 2, storiesSource: 'verified' }))).toBe(false);
+    expect(review(await run({ stories: 2 }))).toBe(false);
   });
 
   test('an UNCERTAIN pool/cage read stays open for seeded features (PR r11 P1)', async () => {
