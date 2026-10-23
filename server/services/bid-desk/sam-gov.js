@@ -8,8 +8,8 @@
  *   runSamGovPoll()     once a day: notices posted since the stored cursor, for each NAICS code, filed as bids
  *   mapOpportunity()    PURE: one API notice -> the bid row we would file, or { skip } with the reason
  *
- * A notice is filed when it is a solicitation, combined synopsis, presolicitation or sources sought, still active, its
- * response deadline (if any) is in the future (a passed one still updates a bid already filed), and its place of performance is a Florida ZIP in SERVICE_ZIP3. Each
+ * A notice is filed when it is a solicitation, combined synopsis, presolicitation or sources sought, active, its
+ * response deadline (if any) is in the future (an inactive notice or a passed deadline still updates a bid already filed), and its place of performance is a Florida ZIP in SERVICE_ZIP3. Each
  * notice id is filed once (unique source + external_id); a republished notice refreshes its bid (refreshPatch). The
  * deadline is the API's own field, stored unconfirmed with the raw value as its source line: reminders still need the
  * operator to confirm it. One admin notification per new bid, and one when a republished notice changes the deadline,
@@ -18,6 +18,7 @@
  */
 const db = require('../../models/db');
 const { bidDeskSamLive } = require('../../config/feature-gates');
+const { etDateString, addETDays, parseETDateTime, validCalendarDate } = require('../../utils/datetime-et');
 const { deliverOwedAlerts } = require('./index');
 const { OPEN_STATUSES } = require('./rules');
 
@@ -40,19 +41,21 @@ const MAX_WINDOW_DAYS = 364;
 
 // ---------- pure helpers ----------
 
-const pad = (n) => String(n).padStart(2, '0');
-// The API's date parameters are MM/dd/yyyy, in the America/New_York calendar.
-function etYmd(at) {
-  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
-  }).formatToParts(at).map((p) => [p.type, p.value]));
-  return `${parts.year}-${parts.month}-${parts.day}`;
-}
+// The API's date parameters are MM/dd/yyyy, in the America/New_York calendar (server/utils/datetime-et.js).
 const apiDate = (ymd) => { const [y, m, d] = ymd.split('-'); return `${m}/${d}/${y}`; };
-function addDays(ymd, days) {
-  const at = new Date(`${ymd}T12:00:00Z`);
-  at.setUTCDate(at.getUTCDate() + days);
-  return `${at.getUTCFullYear()}-${pad(at.getUTCMonth() + 1)}-${pad(at.getUTCDate())}`;
+const etDayOffset = (now, days) => etDateString(addETDays(now, days));
+
+// SAM.gov deadlines come with an offset ("2026-11-05T14:00:00-05:00"), as Florida wall time with no zone
+// ("2026-11-05T14:00:00"), or as a date only ("2026-11-05"). A wall time is read in Eastern time and a date alone is
+// 11:59 PM Eastern that day (as for an email bid); only an offset-bearing value goes to the runtime parser.
+function parseDeadline(raw) {
+  const value = String(raw || '').trim();
+  let at;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) at = validCalendarDate(value) ? parseETDateTime(`${value}T23:59`) : null;
+  else if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?$/.test(value)) at = parseETDateTime(value.replace(/\.\d+$/, ''));
+  else if (/(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)) at = new Date(value);
+  else at = null;
+  return at && !Number.isNaN(at.getTime()) ? at : null;
 }
 
 const text = (value) => {
@@ -94,22 +97,17 @@ function mapOpportunity(notice, now = new Date()) {
   const id = text(notice?.noticeId);
   if (!id) return { skip: 'no_notice_id' };
   if (!FILED_TYPES.has(String(notice.type || '').toLowerCase().trim())) return { skip: 'type' };
-  if (String(notice.active || '').toLowerCase() === 'no') return { skip: 'inactive' };
   const place = placeOf(notice);
   if (place.state !== 'FL') return { skip: 'not_florida' };
   if (!place.zip || !SERVICE_ZIP3.includes(place.zip.slice(0, 3))) return { skip: 'outside_area' };
 
   const rawDeadline = text(notice.responseDeadLine);
-  let dueAt = null;
-  if (rawDeadline) {
-    const parsed = new Date(rawDeadline);
-    if (!Number.isNaN(parsed.getTime())) {
-      dueAt = parsed;
-    }
-  }
-  // A passed deadline files no NEW bid, but still updates a bid already filed (SAM.gov moved the date earlier).
+  const dueAt = rawDeadline ? parseDeadline(rawDeadline) : null;
+  const active = String(notice.active || '').toLowerCase() !== 'no';
+  // An inactive notice or a passed deadline files no NEW bid, but still updates a bid already filed (SAM.gov archived
+  // the notice, or moved the date earlier).
   return {
-    expired: dueAt != null && dueAt.getTime() <= now.getTime(),
+    expired: !active || (dueAt != null && dueAt.getTime() <= now.getTime()),
     row: {
       source: 'sam_gov',
       external_id: id,
@@ -120,7 +118,8 @@ function mapOpportunity(notice, now = new Date()) {
       location: locationWords(place),
       due_at: dueAt,
       source_due_at: dueAt,
-      due_source_line: rawDeadline ? `SAM.gov response deadline: ${rawDeadline}` : null,
+      source_active: active,
+      due_source_line: dueAt ? `SAM.gov response deadline: ${rawDeadline}` : null,
       due_confirmed: false,
       status: 'new',
       historical: false,
@@ -203,26 +202,33 @@ const sameInstant = (a, b) => (a == null ? null : new Date(a).getTime()) === (b 
 /**
  * What a republished notice changes on its bid. SAM.gov keeps the notice id and serves only the latest version, so
  * a new deadline replaces an UNCONFIRMED date (still unconfirmed); a date the operator confirmed is never
- * overwritten. Either way a different deadline flags the bid for confirmation (which pauses its reminders) and owes
- * one addendum bell for that deadline. A notice that drops its deadline changes no date.
+ * overwritten. A moved or removed deadline, or a notice that turned inactive, flags the bid for confirmation (which
+ * pauses its reminders) and owes one addendum bell for that change.
  */
 function refreshPatch(bid, row) {
   const patch = {};
   for (const field of REFRESH_FIELDS) {
     if (row[field] != null && row[field] !== bid[field]) patch[field] = row[field];
   }
-  // Compared with the deadline SAM.gov last showed, not with due_at: a date the operator typed is not a source change.
-  if (row.due_at && !sameInstant(bid.source_due_at ?? bid.due_at, row.due_at)) {
+  // Compared with what SAM.gov last showed, not with due_at: a date the operator typed is not a source change. A
+  // deadline that moved, a deadline the notice no longer lists, and a notice that turned inactive each flag the bid.
+  const deadlineChanged = !sameInstant(bid.source_due_at, row.due_at);
+  const closed = row.source_active === false && bid.source_active !== false;
+  if (row.source_active !== bid.source_active) patch.source_active = row.source_active;
+  if (!deadlineChanged && !closed) return patch;
+  if (deadlineChanged) {
     patch.source_due_at = row.due_at;
-    patch.due_source_line = row.due_source_line;
-    if (!bid.due_confirmed) patch.due_at = row.due_at;
-    patch.needs_date_confirmation = true;
-    const open = OPEN_STATUSES.includes(bid.status) && !bid.historical;
-    // A new-bid bell still owed rings with the current date; it is not replaced by an addendum bell.
-    if (open && bid.owed_alert_kind !== 'new') {
-      patch.owed_alert_kind = 'addendum';
-      patch.owed_alert_key = `bid-desk:addendum:${bid.id}:sam:${new Date(row.due_at).toISOString()}`;
-    }
+    patch.due_source_line = row.due_source_line || 'SAM.gov no longer lists a response deadline';
+    if (row.due_at && !bid.due_confirmed) patch.due_at = row.due_at;
+  }
+  if (closed) patch.due_source_line = 'SAM.gov no longer lists this notice as active';
+  patch.needs_date_confirmation = true;
+  const open = OPEN_STATUSES.includes(bid.status) && !bid.historical;
+  // A new-bid bell still owed rings with the current state; it is not replaced by an addendum bell.
+  if (open && bid.owed_alert_kind !== 'new') {
+    const what = closed ? 'inactive' : (row.due_at ? new Date(row.due_at).toISOString() : 'none');
+    patch.owed_alert_kind = 'addendum';
+    patch.owed_alert_key = `bid-desk:addendum:${bid.id}:sam:${what}`;
   }
   return patch;
 }
@@ -243,7 +249,7 @@ async function upsertNotice(row, { expired = false } = {}) {
       }
     }
     const bid = await trx('bid_opportunities').where({ source: 'sam_gov', external_id: row.external_id }).forUpdate().first();
-    if (!bid) return { outcome: 'deadline_passed' };
+    if (!bid) return { outcome: 'not_open' };
     const patch = refreshPatch(bid, row);
     if (!Object.keys(patch).length) return { outcome: 'already_filed' };
     // clock_timestamp(), not now(): the version the page fences a date save on must move.
@@ -291,21 +297,21 @@ async function runSamGovPoll({ now = new Date(), fetchImpl = globalThis.fetch, a
   const key = String(apiKey || '').trim();
   if (!key) return { skipped: 'no_api_key' };
 
-  const today = etYmd(now);
+  const today = etDateString(now);
   // The API refuses a posted-date range longer than a year, so an old cursor (the job off for a long time) is clamped.
-  const oldest = addDays(today, -MAX_WINDOW_DAYS);
-  const stored = (await readCursor()) || addDays(today, -FIRST_RUN_LOOKBACK_DAYS);
+  const oldest = etDayOffset(now, -MAX_WINDOW_DAYS);
+  const stored = (await readCursor()) || etDayOffset(now, -FIRST_RUN_LOOKBACK_DAYS);
   let from = stored < oldest ? oldest : stored;
   if (from > today) from = today;
   const notices = await collectNotices({ apiKey: key, postedFrom: apiDate(from), postedTo: apiDate(today), fetchImpl });
   const counts = await fileNotices(notices, now);
-  await writeCursor(addDays(today, -CURSOR_OVERLAP_DAYS));
+  await writeCursor(etDayOffset(now, -CURSOR_OVERLAP_DAYS));
   // The bells go out through the Bid Desk's one owed-bell sweep (also run every 15 minutes, so a failure retries there).
   const rung = await deliverOwedAlerts();
   return { read: notices.length, ...counts, rung };
 }
 
 module.exports = {
-  runSamGovPoll, mapOpportunity, refreshPatch, fetchPage, fetchAll, safeError, SamApiError, etYmd, apiDate, addDays,
+  runSamGovPoll, mapOpportunity, refreshPatch, fetchPage, fetchAll, safeError, SamApiError, apiDate, parseDeadline,
   CURSOR_KEY, NAICS_CODES, SERVICE_ZIP3, LOG, PAGE_LIMIT, MAX_PAGES,
 };

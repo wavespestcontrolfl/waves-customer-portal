@@ -24,6 +24,7 @@ const { randomUUID } = require('crypto');
 const migration = require('../models/migrations/20261022190000_bid_desk_sam_gov');
 const owedMigration = require('../models/migrations/20261023010000_bid_desk_bid_owed_alerts');
 const sourceDueMigration = require('../models/migrations/20261023020000_bid_desk_source_due_at');
+const sourceActiveMigration = require('../models/migrations/20261023030000_bid_desk_source_active');
 const service = require('../services/bid-desk');
 const sam = require('../services/bid-desk/sam-gov');
 const { raiseAdminAlert, composeAdminAlert } = require('../services/admin-alert-compose');
@@ -85,6 +86,7 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
   const cursor = async () => JSON.parse((await mockPg('system_settings').where({ key: sam.CURSOR_KEY }).first('value')).value).from;
 
   test('the migrations are reversible and the old sources still pass the check', async () => {
+    await sourceActiveMigration.down(mockPg);
     await sourceDueMigration.down(mockPg);
     await owedMigration.down(mockPg);
     expect(await mockPg.schema.hasColumn('bid_opportunities', 'owed_alert_kind')).toBe(false);
@@ -94,6 +96,7 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     await migration.up(mockPg);
     await owedMigration.up(mockPg);
     await sourceDueMigration.up(mockPg);
+    await sourceActiveMigration.up(mockPg);
     expect(await mockPg.schema.hasColumn('bid_opportunities', 'external_url')).toBe(true);
     expect(await mockPg.schema.hasColumn('bid_opportunities', 'owed_alert_kind')).toBe(true);
     await mockPg('bid_opportunities').insert({ source: 'gov_email' });
@@ -156,7 +159,7 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     const [, headline, why, opts] = raiseAdminAlertWithReopen.mock.calls[0];
     expect(opts.dedupeKey).toBe(`bid-desk:addendum:${bid.id}:sam:2026-11-12T19:00:00.000Z`);
     expect(headline).toBeTruthy();
-    expect(why).toMatch(/^SAM\.gov posted a different deadline/);
+    expect(why).toMatch(/^SAM\.gov changed this notice/);
 
     // The same version again changes nothing and rings nothing.
     raiseAdminAlertWithReopen.mockClear();
@@ -205,11 +208,38 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     await mockPg('bid_opportunities').where({ id: filed.id }).update({ due_confirmed: true, status: 'bid' });
     const past = '2026-10-21T14:00:00-04:00';
     const result = await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-9', { responseDeadLine: past }), notice('n-10', { responseDeadLine: past })]), apiKey: 'test-key' });
-    expect(result).toMatchObject({ filed: 0, refreshed: 1, skippedByReason: { deadline_passed: 1 } });
+    expect(result).toMatchObject({ filed: 0, refreshed: 1, skippedByReason: { not_open: 1 } });
     const bid = await mockPg('bid_opportunities').where({ id: filed.id }).first();
     expect(bid.needs_date_confirmation).toBe(true);
     expect(bid.due_source_line).toBe(`SAM.gov response deadline: ${past}`);
     expect(await samBids()).toHaveLength(1);
+  });
+
+  test('a deadline the notice no longer lists flags the bid once; an archived notice flags it once', async () => {
+    await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-11'), notice('n-12')]), apiKey: 'test-key' });
+    const ids = Object.fromEntries((await samBids()).map((b) => [b.external_id, b.id]));
+    await mockPg('bid_opportunities').whereIn('id', Object.values(ids)).update({ due_confirmed: true, status: 'bid' });
+    raiseAdminAlertWithReopen.mockClear();
+
+    const changed = [notice('n-11', { responseDeadLine: null }), notice('n-12', { active: 'No' })];
+    expect(await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch(changed), apiKey: 'test-key' })).toMatchObject({ refreshed: 2, rung: 2 });
+    const removed = await mockPg('bid_opportunities').where({ id: ids['n-11'] }).first();
+    expect(removed.needs_date_confirmation).toBe(true);
+    expect(removed.source_due_at).toBeNull();
+    expect(removed.due_source_line).toBe('SAM.gov no longer lists a response deadline');
+    const archived = await mockPg('bid_opportunities').where({ id: ids['n-12'] }).first();
+    expect(archived.needs_date_confirmation).toBe(true);
+    expect(archived.source_active).toBe(false);
+    expect(archived.due_source_line).toBe('SAM.gov no longer lists this notice as active');
+    expect(raiseAdminAlertWithReopen.mock.calls.map(([, , , o]) => o.dedupeKey).sort()).toEqual([
+      `bid-desk:addendum:${ids['n-11']}:sam:none`, `bid-desk:addendum:${ids['n-12']}:sam:inactive`,
+    ].sort());
+
+    // The operator reviews both; the same notices again change nothing.
+    await mockPg('bid_opportunities').whereIn('id', Object.values(ids)).update({ needs_date_confirmation: false });
+    raiseAdminAlertWithReopen.mockClear();
+    expect(await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch(changed), apiKey: 'test-key' })).toMatchObject({ refreshed: 0, rung: 0 });
+    expect((await mockPg('bid_opportunities').whereIn('id', Object.values(ids)).where({ needs_date_confirmation: true })).length).toBe(0);
   });
 
   test('a cursor older than a year is clamped to the API window', async () => {

@@ -60,7 +60,6 @@ describe('mapOpportunity', () => {
   test.each([
     ['award notices', { type: 'Award Notice' }, 'type'],
     ['special notices', { type: 'Special Notice' }, 'type'],
-    ['inactive notices', { active: 'No' }, 'inactive'],
     ['another state', { placeOfPerformance: { state: { code: 'GA' }, zip: '30301' } }, 'not_florida'],
     ['north Florida', { placeOfPerformance: { state: { code: 'FL' }, zip: '32202' } }, 'outside_area'],
     ['no place ZIP', { placeOfPerformance: { state: { code: 'FL' } } }, 'outside_area'],
@@ -91,11 +90,35 @@ describe('mapOpportunity', () => {
   });
 });
 
-describe('dates', () => {
-  test('API dates are MM/dd/yyyy in the Eastern calendar', () => {
-    expect(sam.etYmd(new Date('2026-10-22T02:00:00Z'))).toBe('2026-10-21');
+describe('deadlines', () => {
+  test.each([
+    ['an offset', '2026-11-05T14:00:00-05:00', '2026-11-05T19:00:00.000Z'],
+    ['Z', '2026-11-05T19:00:00Z', '2026-11-05T19:00:00.000Z'],
+    ['Florida wall time with no zone (EST)', '2026-11-05T14:00:00', '2026-11-05T19:00:00.000Z'],
+    ['Florida wall time with no zone (EDT)', '2026-10-30T14:00', '2026-10-30T18:00:00.000Z'],
+    ['a date only (11:59 PM Eastern)', '2026-11-05', '2026-11-06T04:59:00.000Z'],
+  ])('reads %s', (_label, raw, iso) => {
+    expect(sam.parseDeadline(raw).toISOString()).toBe(iso);
+  });
+
+  test.each([['nonsense'], ['2026-02-30'], ['11/05/2026']])('refuses %s', (raw) => {
+    expect(sam.parseDeadline(raw)).toBeNull();
+  });
+
+  test('an unreadable deadline files the bid with no date and no source line', () => {
+    const { row } = sam.mapOpportunity(notice({ responseDeadLine: 'TBD' }), NOW);
+    expect(row.due_at).toBeNull();
+    expect(row.due_source_line).toBeNull();
+  });
+
+  test('an inactive notice is mapped as expired (it files no new bid but can update one already filed)', () => {
+    const mapped = sam.mapOpportunity(notice({ active: 'No' }), NOW);
+    expect(mapped.expired).toBe(true);
+    expect(mapped.row.source_active).toBe(false);
+  });
+
+  test('API dates are MM/dd/yyyy', () => {
     expect(sam.apiDate('2026-10-21')).toBe('10/21/2026');
-    expect(sam.addDays('2026-03-01', -1)).toBe('2026-02-28');
   });
 });
 
@@ -184,9 +207,11 @@ test('the scheduler checks the SAM gate before the cron lock and logs only the s
   const source = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
   const at = source.indexOf("'0 25 7 * * *'");
   expect(at).toBeGreaterThan(-1);
-  const block = source.slice(at, at + 1400);
+  const block = source.slice(at, at + 1700);
   expect(block.indexOf('bidDeskSamLive()')).toBeGreaterThan(-1);
   expect(block.indexOf('bidDeskSamLive()')).toBeLessThan(block.indexOf("runExclusive('bid-desk-sam'"));
   expect(block).toContain('runSamGovPoll');
   expect(block).toContain('safeError(err)');
+  // Both gates on with no key is a failed run in job health, not a quiet success.
+  expect(block.indexOf("result.skipped === 'no_api_key'")).toBeGreaterThan(block.indexOf('runSamGovPoll'));
 });

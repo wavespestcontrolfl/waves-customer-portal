@@ -2126,6 +2126,8 @@ function initScheduledJobs() {
     try {
       const lockRes = await runExclusive('bid-desk-sam', async () => {
         const result = await require('./bid-desk/sam-gov').runSamGovPoll();
+        // Both gates on with no key imports nothing: a failed run in job health, not a quiet success.
+        if (result.skipped === 'no_api_key') throw new Error('SAM_GOV_API_KEY is not set');
         if (result.filed > 0) logger.info(`[bid-desk-sam] ${result.filed} new federal bid(s)`);
       });
       if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
