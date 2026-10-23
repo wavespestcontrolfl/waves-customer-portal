@@ -3654,6 +3654,22 @@ describe('suggested from this lawn', () => {
         expect(await inSearch()).toBe(false);
       });
 
+      test('the guide is OFF: the held row is still out of the protocol list and the search (a plain add-on without the hold)', async () => {
+        const planned = { source: 'plan', items: [PLANNED[0]], addOns: [...ADD_ONS, addOn(P_HEAD, 'Head Fungicide', MONTHS[3][1])], month: 10, weedMix: WEED_MIX };
+        await openSheet({ request: makeRequest({ ctx: guideContext({ treatmentGuide: false, plannedProducts: { ...planned, group11HeldProductIds: [P_HEAD] } }) }), props: { catalog: TA_CATALOG } });
+        await analyze();
+        expect(inList(10)).toBe(false);
+        expect(await inSearch()).toBe(false);
+      });
+
+      test('the guide is OFF and nothing is held: the row stays a plain add-on and searchable', async () => {
+        const planned = { source: 'plan', items: [PLANNED[0]], addOns: [...ADD_ONS, addOn(P_HEAD, 'Head Fungicide', MONTHS[3][1])], month: 10, weedMix: WEED_MIX };
+        await openSheet({ request: makeRequest({ ctx: guideContext({ treatmentGuide: false, plannedProducts: planned }) }), props: { catalog: TA_CATALOG } });
+        await analyze();
+        expect(inList(10)).toBe(true);
+        expect(await inSearch()).toBe(true);
+      });
+
       test('contrast: the same take-all row with no Group 11 hold stays reachable by the search when the guide request fails', async () => {
         guideAnswer = refusal(500, 'boom', 'Internal error');
         await openG11({ group11HeldProductIds: [] });

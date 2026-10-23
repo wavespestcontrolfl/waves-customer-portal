@@ -42,9 +42,9 @@ describe('recipe: mole cricket nymphs move to June and the July scout visit, wit
     expect(visit(grass, 'Jun').notes).toMatch(/Advion bait goes on after the micronutrient pass has dried/);
     expect(lineFor(visit(grass, 'Jul').secondary, NAME)).toMatch(/new tunnel areas that were not baited in June \(once per spot per year; label yearly maximum 4\.6 lb per 1,000 sq ft\)/);
     expect(JSON.stringify(v13Recipe)).not.toMatch(/1\.6 lb/);
-    // Acelepryn is the second product: watered in (the opposite of the Advion direction), June and July.
-    expect(lineFor(visit(grass, 'Jun').secondary, N.ACE)).toMatch(/mole cricket nymph spots, second product after Advion, label rate, watered in right after application/);
-    // July's Acelepryn line stays the caterpillar use (its row carries the 24-hour hold); mole crickets are June's offer, with their own staged row.
+    // Acelepryn is not a mole cricket product (owner 2026-10-23): no recipe line names it for mole crickets, June or July.
+    expect(lineFor(visit(grass, 'Jun').secondary, N.ACE)).toBeUndefined();
+
     expect(lineFor(visit(grass, 'Jul').secondary, N.ACE)).not.toMatch(/mole cricket/);
     // Talak stays where it belongs (chinch bugs, caterpillars) and is gone as the nymph product.
     expect(lineFor(visit(grass, 'Jul').secondary, N.TAL)).toBe(`${N.TAL} — bifenthrin for chinch bugs, second product after Arena, or for caterpillars if Acelepryn does not hold at the 7-day recheck; delay watering 24 hours`);
@@ -57,7 +57,8 @@ describe('recipe: mole cricket nymphs move to June and the July scout visit, wit
     expect(notes).toMatch(/Advion Insect Granule \(indoxacarb, Group 22A\) on the tunnel areas, 3 lb per 1,000 sq ft of treated area by hand shaker/);
     expect(notes).toMatch(/so the one-tool rule holds/);
     expect(notes).toMatch(/Label yearly maximum: 4\.6 lb per 1,000 sq ft, so Advion goes on a spot once a year, at 3 lb\. The July visit is for new tunnel areas that were not baited in June\./);
-    expect(notes).toMatch(/the opposite of Acelepryn, which is watered in/);
+    expect(notes).toMatch(/Acelepryn is not a mole cricket product in this program/);
+    expect(notes).not.toMatch(/Second product/);
     expect(notes).toMatch(/Fall adults and bigger mole crickets go to Dylox 6\.2 G/);
     expect(notes).not.toMatch(/Mole cricket nymphs, July and August/);
     const safety = v13Recipe[grass].safety_rules.join('\n');
@@ -225,7 +226,7 @@ describe('treatment guide: a failed take-all lookup is read as mapped, never as 
     expect(await group11PassOver({ svc: { ...svc, scheduled_date: '2026-01-15' }, knex: {} })).toBe(false);
   });
 
-  test('the context\'s guided picks use the same decision: Velista is the pick, and the passed-over Artavia row rides takeAllProductIds (held)', () => {
+  test('the context\'s guided picks use the same decision: Velista is the pick, and the passed-over Artavia row rides takeAllProductIds (held; group11HeldProductIds is the context\'s own key, tested in lawn-fast-complete.test.js)', () => {
     const { guidedProductIds } = require('../services/lawn-fast-complete');
     jest.spyOn(featureGates, 'lawnTreatmentGuideLive').mockReturnValue(true);
     const rows = new Map([
@@ -235,9 +236,8 @@ describe('treatment guide: a failed take-all lookup is read as mapped, never as 
     jest.spyOn(require('../services/waveguard-plan-engine'), 'v13ProtocolRows').mockReturnValue(rows);
     const loaded = { eligible: true, plan: { protocol: { structured: {} } }, addOns: [{ product: { id: 'vel', name: N.VEL } }, { product: { id: 'art', name: N.ART } }] };
     const sheet = { addOns: [{ productId: 'vel', name: N.VEL }, { productId: 'art', name: N.ART }] };
-    expect(guidedProductIds(loaded, sheet, false)).toEqual({ guidedProductIds: ['art'], takeAllProductIds: [], group11HeldProductIds: [] });
-    // The held row is also named on its own, so the sheet blocks it from the start (no list, no search) whatever the guide read does.
-    expect(guidedProductIds(loaded, sheet, true)).toEqual({ guidedProductIds: ['vel'], takeAllProductIds: ['art'], group11HeldProductIds: ['art'] });
+    expect(guidedProductIds(loaded, sheet, false)).toEqual({ guidedProductIds: ['art'], takeAllProductIds: [] });
+    expect(guidedProductIds(loaded, sheet, true)).toEqual({ guidedProductIds: ['vel'], takeAllProductIds: ['art'] });
   });
 
   test('the active-area read throws (or the property cannot be resolved): the lawn counts as mapped, so the guide suggests Velista and never Artavia', async () => {
@@ -477,8 +477,10 @@ describeDb('mole cricket bait migrations through PostgreSQL', () => {
   });
 
   describe('follow-ups (20261023143000): service_lines on the Advion row, a mole cricket entry on the Acelepryn rule', () => {
-    const fixtureRule = () => JSON.parse(JSON.stringify(require('./fixtures/lawn-watering-rules-v13-2026-10-22.json')[N.ACE]));
-    const withoutMoleCricket = () => { const rule = fixtureRule(); rule.by_target = rule.by_target.filter((e) => !e.match.includes('mole cricket')); return rule; };
+    // The coverage fixture is the rule main carries now (no mole cricket entry: 20261023144000 takes it back out); 143000's rule has the entry.
+    const baseRule = () => JSON.parse(JSON.stringify(require('./fixtures/lawn-watering-rules-v13-2026-10-22.json')[N.ACE]));
+    const withoutMoleCricket = baseRule;
+    const fixtureRule = () => { const rule = baseRule(); rule.by_target.push({ ...followMigration.MOLE_CRICKET_ENTRY }); return rule; };
     const ace = () => knex('products_catalog').where({ id: ids.ace }).first();
     const audits = () => knex('lawn_protocol_audit_log').where({ action: followMigration.ACTION });
     beforeEach(async () => {
@@ -541,58 +543,99 @@ describeDb('mole cricket bait migrations through PostgreSQL', () => {
       await followMigration.down(knex);
       expect(await snapshot()).toEqual(edited2);
     });
-
-    test('with the entry, a blank chip on the mole cricket offer reads water-in text; without the default target it would read the caterpillar hold', () => {
-      const { rulesForTargets } = require('../services/service-report/lawn-watering-rule');
-      const rule = validateRule(fixtureRule()).rule;
-      const text = (targets) => buildWateringInstruction({ rules: rulesForTargets(rule, targets).map((r) => ({ name: N.ACE, rule: r })), completedAt: '2026-06-23T20:00:00Z', plainWhenNoSetup: true, labelFirst: true });
-      expect(text([]).state).toBe('hold'); // the caterpillar hold: what a blank chip read before
-      const moleCricket = text(['Tawny mole crickets']);
-      expect(moleCricket.state).toBe('water_in');
-      expect(moleCricket.waterInInches).toBe(0.25);
-    });
   });
 
-  describe('a blank Treating chip on the mole cricket offer records the target by default', () => {
-    const { withProtocolDefaultTargets, resolveForCompletion, MOLE_CRICKET_TARGET } = require('../services/lawn-spot-target');
-    const plan = { protocol: { structured: { products: [
-      { productId: 'ACE-ID', gates: { trigger: 'mole_cricket_nymphs' } },
-      { productId: 'CAT-ID', gates: { trigger: 'caterpillars', delayWateringOrMowingHours: 24 } },
-    ] } } };
-    const plain = async (rows, lawnFast = null) => resolveForCompletion({ rows, lawnFast, catalog: new Map(), canonicalId: (id) => id, inferMethod: () => 'spot_treatment', serviceLine: 'lawn', confirm: async () => ({ takeAll: new Set(), chinch: new Set(), chinchOnly: new Set() }) });
-
-    test('the staged mole cricket row gets the target when none was chosen; a chosen target and every other row are untouched', async () => {
-      const rows = [{ productId: 'ACE-ID', targets: [] }, { productId: 'CAT-ID', targets: [] }, { productId: 'ACE-ID-2', targets: [] }];
-      const out = withProtocolDefaultTargets(await plain(rows), { plan, canonicalId: (id) => id });
-      expect(out.of(rows[0])).toEqual([MOLE_CRICKET_TARGET]);
-      expect(out.of(rows[1])).toEqual([]);
-      expect(out.of(rows[2])).toEqual([]);
-      expect(out.submitted(rows).map((r) => r.targets)).toEqual([[MOLE_CRICKET_TARGET], [], []]);
-      const chosen = [{ productId: 'ACE-ID', targets: ['White grubs'] }];
-      const kept = withProtocolDefaultTargets(await plain(chosen), { plan, canonicalId: (id) => id });
-      expect(kept.of(chosen[0])).toEqual(['White grubs']);
-      expect(kept.submitted(chosen)).toEqual(chosen);
+  describe('Acelepryn leaves the mole cricket line (20261023144000)', () => {
+    const simplify = require('../models/migrations/20261023144000_lawn_v13_mole_cricket_simplify');
+    const baseRule = () => JSON.parse(JSON.stringify(require('./fixtures/lawn-watering-rules-v13-2026-10-22.json')[N.ACE]));
+    const withEntry = () => { const rule = baseRule(); rule.by_target.push({ ...followMigration.MOLE_CRICKET_ENTRY }); return rule; };
+    const rule = async () => (await knex('products_catalog').where({ id: ids.ace }).first()).post_application_watering;
+    const audits = () => knex('lawn_protocol_audit_log').where({ action: simplify.ACTION });
+    // The state main holds after 141000 and 143000: the June Acelepryn rows and the rule with the mole cricket entry.
+    beforeEach(async () => {
+      await reset(); await upBoth();
+      await knex('products_catalog').where({ id: ids.ace }).update({ post_application_watering: JSON.stringify(baseRule()) });
+      await followMigration.up(knex);
     });
 
-    test('a plan with no mole cricket row changes nothing at all', async () => {
-      const rows = [{ productId: 'CAT-ID', targets: [] }];
-      const base = await plain(rows);
-      expect(withProtocolDefaultTargets(base, { plan: { protocol: { structured: { products: [plan.protocol.structured.products[1]] } } }, canonicalId: (id) => id })).toBe(base);
-      expect(withProtocolDefaultTargets(base, { plan: null })).toBe(base);
+    test('the June Acelepryn row goes from every protocol; July\'s caterpillar row, Advion\'s rows and the other windows stay; the rule loses only the mole cricket entry', async () => {
+      expect(await rule()).toEqual(withEntry());
+      expect(await rowsIn(W.JUN, N.ACE)).toHaveLength(KEYS.length);
+      const keptBefore = (await knex('lawn_protocol_products').orderBy('id')).filter((r) => !(r.product_name === N.ACE && r.lawn_protocol_window_id && true));
+      await simplify.up(knex);
+      expect(await rowsIn(W.JUN, N.ACE)).toEqual([]);
+      expect(await rowsIn(W.JUL, N.ACE)).toHaveLength(KEYS.length);
+      expect(await rowsIn(W.JUN, NAME)).toHaveLength(KEYS.length);
+      expect(await rowsIn(W.JUL, NAME)).toHaveLength(KEYS.length);
+      expect(await rule()).toEqual(baseRule());
+      expect(validateRule(await rule()).valid).toBe(true);
+      const audit = (await audits())[0];
+      expect(audit.after_snapshot.deletedRows).toHaveLength(KEYS.length);
+      expect(keptBefore.length).toBeGreaterThan(0);
     });
 
-    test('the frozen report facts read the default: Acelepryn on the mole cricket offer freezes the water-in direction', async () => {
-      const { freezeReportProductFacts } = require('../services/complete-scheduled-service');
-      const aceId = '7f1e2d3c-0000-4000-8000-0000000000bb';
-      const catalogRow = { id: aceId, name: N.ACE, category: 'insecticide', epa_reg_number: '100-1489', active: true, label_verified_at: new Date(), approved_for_service_report: true,
-        content_status: 'approved', customer_visibility: 'public', post_application_watering: JSON.parse(JSON.stringify(require('./fixtures/lawn-watering-rules-v13-2026-10-22.json')[N.ACE])) };
-      const stagedPlan = { protocol: { structured: { products: [{ productId: aceId, gates: { trigger: 'mole_cricket_nymphs' } }] } } };
-      const rows = [{ productId: aceId, targets: [] }];
-      const spot = withProtocolDefaultTargets(await plain(rows), { plan: stagedPlan, canonicalId: (id) => id });
-      const frozen = freezeReportProductFacts({ productIds: [aceId], submitted: spot.submitted(rows), catalogById: new Map([[aceId, catalogRow]]), plan: stagedPlan })[aceId];
-      expect(frozen.wateringRule.by_target.some((e) => e.mode === 'water_in' && e.match.includes('mole cricket'))).toBe(true);
-      const { rulesForTargets } = require('../services/service-report/lawn-watering-rule');
-      expect(rulesForTargets(frozen.wateringRule, spot.of(rows[0])).map((r) => r.mode)).toEqual(['water_in']);
+    test('a second up changes nothing', async () => {
+      await simplify.up(knex);
+      const once = await snapshot();
+      await simplify.up(knex);
+      expect(await snapshot()).toEqual(once);
+      expect(await audits()).toHaveLength(1);
+    });
+
+    test('a June row staff changed, or a completion references, is kept; a mole cricket entry staff changed is left in the rule', async () => {
+      const [changed, used] = await rowsIn(W.JUN, N.ACE);
+      await knex('lawn_protocol_products').where({ id: changed.id }).update({ carrier_gal_per_1000: 4 });
+      const columns = await knex('lawn_protocol_product_actuals').columnInfo();
+      const actual = { protocol_product_id: used.id };
+      for (const [column, info] of Object.entries(columns)) {
+        if (column in actual || column === 'id' || info.nullable || info.defaultValue != null) continue;
+        actual[column] = info.type.includes('uuid') ? require('crypto').randomUUID() : info.type.includes('int') ? 1 : info.type.includes('timestamp') ? new Date() : info.type === 'date' ? '2027-06-15' : info.type.includes('json') ? '{}' : info.type.includes('bool') ? false : 'x';
+      }
+      await knex('lawn_protocol_product_actuals').insert(actual);
+      const edited = withEntry();
+      edited.by_target[edited.by_target.length - 1].water_in_inches = 0.5;
+      await knex('products_catalog').where({ id: ids.ace }).update({ post_application_watering: JSON.stringify(edited) });
+      await simplify.up(knex);
+      expect((await rowsIn(W.JUN, N.ACE)).map((r) => r.id).sort()).toEqual([changed.id, used.id].sort());
+      expect(await rule()).toEqual(edited);
+      expect(await audits()).toHaveLength(0);
+    });
+
+    test('down puts the rows back with their own ids and the entry back; a rule changed since, or a missing window, makes it a full no-op', async () => {
+      const start = await snapshot();
+      await simplify.up(knex);
+      await simplify.down(knex);
+      expect(await snapshot()).toEqual(start);
+      expect(await rule()).toEqual(withEntry());
+
+      await simplify.up(knex);
+      await knex('products_catalog').where({ id: ids.ace }).update({ post_application_watering: JSON.stringify({ ...baseRule(), source: 'label' }) });
+      const edited = await snapshot();
+      await simplify.down(knex);
+      expect(await snapshot()).toEqual(edited);
+      await knex('products_catalog').where({ id: ids.ace }).update({ post_application_watering: JSON.stringify(baseRule()) });
+      const june = await knex('lawn_protocol_windows').where({ window_key: W.JUN }).first();
+      await knex('lawn_protocol_products').where({ lawn_protocol_window_id: june.id }).del();
+      await knex('lawn_protocol_windows').where({ id: june.id }).del();
+      const edited2 = await snapshot();
+      await simplify.down(knex);
+      expect(await snapshot()).toEqual(edited2);
+    });
+
+    test('the full rollback in reverse order (144000, 143000, 141000, 140000) returns to the start; 141000\'s own down alone is a no-op while 144000 stands', async () => {
+      await reset();
+      await knex('products_catalog').where({ id: ids.ace }).update({ post_application_watering: JSON.stringify(baseRule()) });
+      const start = await snapshot();
+      await upBoth();
+      await followMigration.up(knex);
+      await simplify.up(knex);
+      const upped = await snapshot();
+      await rowsMigration.down(knex);
+      expect(await snapshot()).toEqual(upped);
+      await simplify.down(knex);
+      await followMigration.down(knex);
+      await downBoth();
+      expect(await snapshot()).toEqual(start);
     });
   });
 

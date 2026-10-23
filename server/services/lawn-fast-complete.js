@@ -606,10 +606,26 @@ function guidedProductIds(loaded, sheet, takeAllMapped = false) {
     // Every take-all fungicide of the month (a pick or not): the sheet never lists it with the plain add-ons. The large patch Artavia row the
     // pick passed over (Group 11 stacking on a take-all lawn) is held the same way.
     takeAllProductIds: [...guide.takeAllAddOns(candidates, rows), ...guide.group11HeldAddOns(candidates, rows, { takeAllMapped })].map((candidate) => candidate.item.productId),
-    // The large patch Artavia rows passed over for Group 11 stacking: the sheet treats them as blocked from the start (no list, no search),
-    // until a fresh guide answer replaces this decision with its own blocked list.
-    group11HeldProductIds: guide.group11HeldAddOns(candidates, rows, { takeAllMapped }).map((candidate) => candidate.item.productId),
   };
+}
+
+// The large patch Artavia rows passed over for Group 11 stacking (October to December, a lawn with take-all mapped or unknown), as
+// `{ group11HeldProductIds }`. Computed on its own: it does not depend on GATE_LAWN_TREATMENT_GUIDE, on the visit being eligible for the
+// guide, or on the chinch context read, so a gate that is off or a read that failed never lets the sheet list or search the row. The sheet
+// treats these ids as blocked from the start (no list, no search), until a fresh guide answer replaces this with its own blocked list. If
+// the staged rows cannot be read the ids are unknown and the key is left out (the guide, when it answers, still blocks the row).
+async function group11HeldContext({ loaded, sheet, svc, knex }) {
+  try {
+    if (featureGates.lawnV13Live?.() !== true || !(await group11PassOver({ svc, knex }))) return {};
+    const guide = require('./lawn-treatment-guide');
+    const rows = require('./waveguard-plan-engine').v13ProtocolRows(loaded.plan?.protocol?.structured);
+    const candidates = loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] }));
+    const held = guide.group11HeldAddOns(candidates, rows, { takeAllMapped: true }).map((candidate) => candidate.item.productId);
+    return held.length ? { group11HeldProductIds: held } : {};
+  } catch (err) {
+    logger.warn(`[lawn-fast] Group 11 held rows unavailable for ${loaded?.plan ? 'a visit' : 'no plan'}: ${err?.code || err?.name || 'Error'}`);
+    return {};
+  }
 }
 
 /**
@@ -796,6 +812,7 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures) {
       ...weed,
       ...chinch,
       ...(readFailures.has('treatment_guide') ? {} : guidedProductIds(loaded, sheet, await group11PassOver({ svc, knex }))),
+      ...await group11HeldContext({ loaded, sheet, svc, knex }),
       // GATE_LAWN_MIX_HELP: the amount for a full tank of each spot spray (lawn-mix-help.js; `{}` while the gate is off).
       ...await require('./lawn-mix-help').contextBlock({ loaded, weed, chinch, month: visitMonthOf(svc), knex }),
       // GATE_LAWN_TROUBLE_AREAS: what the places' limit read needs (stripped from the payload by the context).
@@ -1386,6 +1403,7 @@ module.exports = {
   takeAllMappedOn,
   group11PassOver,
   guidedProductIds,
+  group11HeldContext,
   takeAllProductIdsFor,
   troubleTypeIdsFor,
   preflightLawnFastCompletion,

@@ -136,35 +136,7 @@ async function resolveForCompletion({ rows, lawnFast, catalog, canonicalId, infe
   return result;
 }
 
-// A v13 protocol row staged for mole cricket nymphs (gates.trigger below) records this target when the technician leaves the Treating chip
-// blank: the staged row IS the use. Without it, a blank chip on Acelepryn falls back to the caterpillar hold (rulesForTargets reads a
-// target-less use as the product's main use), which contradicts "water in right after application". Advion carries the same default.
-const MOLE_CRICKET_TRIGGER = 'mole_cricket_nymphs';
-const MOLE_CRICKET_TARGET = 'Tawny mole crickets';
-
-/**
- * `{ of, submitted }` as resolveForCompletion answers, with the protocol's default target filled in for a row that ends up with no target
- * and whose staged plan row (`plan.protocol.structured.products[].gates.trigger`) is the mole cricket nymph offer. A row that already has a
- * target (the technician's or the server's verdict) is never changed. Pure; `canonicalId` is the completion's own function.
- */
-function withProtocolDefaultTargets(resolved, { plan, canonicalId = lowerId }) {
-  const staged = (plan && plan.protocol && plan.protocol.structured && plan.protocol.structured.products) || [];
-  const moleCricketIds = new Set(staged.filter((row) => row && row.productId && row.gates && row.gates.trigger === MOLE_CRICKET_TRIGGER).map((row) => lowerId(canonicalId(row.productId))));
-  if (!moleCricketIds.size) return resolved;
-  const of = (row) => {
-    const own = resolved.of(row);
-    return own.length || !moleCricketIds.has(lowerId(canonicalId(row && row.productId))) ? own : [MOLE_CRICKET_TARGET];
-  };
-  const submitted = (list) => {
-    const base = resolved.submitted(list);
-    return Array.isArray(base) ? base.map((row) => (row && row.productId && !resolved.of(row).length && of(row).length ? { ...row, targets: of(row) } : row)) : base;
-  };
-  return { ...resolved, of, submitted };
-}
-
 module.exports = {
-  MOLE_CRICKET_TARGET,
-  withProtocolDefaultTargets,
   CHINCH_TARGET,
   TAKE_ALL_TARGET,
   FUNGICIDE_NAMES,

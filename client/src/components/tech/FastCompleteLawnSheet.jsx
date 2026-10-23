@@ -354,7 +354,7 @@ const optionalContextFields = (data) => ({
   troubleAreas: troubleAreasOf(data),
   takeAllProductIds: data?.treatmentGuide === true && Array.isArray(data?.plannedProducts?.takeAllProductIds) ? data.plannedProducts.takeAllProductIds : [],
   // Group 11 stacking: the large patch Artavia rows passed over for a take-all lawn. Blocked from the start, whatever the guide read does.
-  group11HeldProductIds: data?.treatmentGuide === true && Array.isArray(data?.plannedProducts?.group11HeldProductIds) ? data.plannedProducts.group11HeldProductIds : [],
+  group11HeldProductIds: Array.isArray(data?.plannedProducts?.group11HeldProductIds) ? data.plannedProducts.group11HeldProductIds : [],
   // GATE_LAWN_NEW_SOD_NOTE: the banner, the held lines and the rooted tick; null while the gate is off or the home has no hold today.
   newSod: newSodOf(data),
 });
@@ -613,7 +613,11 @@ function searchReach({ governed, settled, blockedPicks, cardHeld, weedMix, chinc
 }
 
 function guideGovernance({ ctx, guide, status, checks }) {
-  if (!ctx.treatmentGuide) return NO_GOVERNANCE;
+  if (!ctx.treatmentGuide) {
+    // The guide is off: no cards, no decision. The Group 11 rows the plan passed over are still held (out of the list and the search).
+    const held = new Set(lowerIds(ctx.group11HeldProductIds));
+    return held.size ? { ...NO_GOVERNANCE, governed: held, hidden: held } : NO_GOVERNANCE;
+  }
   const answered = status === 'answered' && !!guide;
   const settled = answered || status === 'failed';
   const fresh = answered ? guide : null;

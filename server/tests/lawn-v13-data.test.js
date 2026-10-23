@@ -333,9 +333,9 @@ describe('staged migration 20261005120000', () => {
       const whole = [...rowsForWindow.filter((s) => s[6]).map((s) => (s[0] === octoberMigration.OLD_NAME ? octoberMigration.NEW_NAME : (s[0] === decemberMigration.OLD_NAME && windowKey === decemberMigration.DECEMBER_WINDOW ? decemberMigration.NEW_NAME : (s[0] === aprilPolymerMigration.OLD_NAME && windowKey === aprilPolymerMigration.APRIL_WINDOW ? aprilPolymerMigration.NEW_NAME : s[0])))), ...matrixAdds.filter((spec) => spec.defaultInPlan).map((spec) => spec.name)];
       // 20261009150000 (v13 final pass) inserts the December weed rows into November (Blindside is compared below).
       const finalPass = windowKey === finalPassMigration.WINDOWS.NOV ? finalPassMigration.WEED_NAMES.filter((n) => n !== BLINDSIDE) : [];
-      // 20261023141000 (mole cricket bait): Advion in June and July, Acelepryn in June, Velista in December; the August Talak mole cricket row is deleted.
+      // 20261023141000 (mole cricket bait): Advion in June and July, Velista in December; the August Talak mole cricket row is deleted. (Its June Acelepryn row is deleted again by 20261023144000.)
       const MC = moleCricketRows.WINDOWS;
-      const moleCricketAdded = { [MC.JUN]: [advionMigration.NAME, migration.NAMES.ACE], [MC.JUL]: [advionMigration.NAME], [MC.DEC]: [migration.NAMES.VEL] }[windowKey] || [];
+      const moleCricketAdded = { [MC.JUN]: [advionMigration.NAME], [MC.JUL]: [advionMigration.NAME], [MC.DEC]: [migration.NAMES.VEL] }[windowKey] || [];
       const moleCricketRemoved = windowKey === MC.AUG ? [migration.NAMES.TAL] : [];
       const spotsBefore = [...rowsForWindow.filter((s) => !s[6]).map((s) => after(s[0])), ...matrixAdds.filter((spec) => !spec.defaultInPlan).map((spec) => spec.name), ...finalPass];
       const spots = [...spotsBefore.filter((n) => !moleCricketRemoved.includes(n)), ...moleCricketAdded.filter((n) => !spotsBefore.includes(n))];

@@ -40,15 +40,9 @@ describe('recipe text', () => {
     const wait = 'delay watering (irrigation) or mowing for 24 hours after application';
     expect(track.notes.find((line) => line.startsWith('Caterpillars:'))).toContain(wait);
     const acelepryn = track.visits.flatMap((v) => lines(v.secondary)).filter((line) => line.startsWith('Acelepryn'));
-    // Four lines: July, August and September carry the caterpillar use, and the June line is the mole cricket use alone (owner
-    // 2026-10-23: soil use, watered in right after application, the opposite of the foliar caterpillar wait).
-    expect(acelepryn).toHaveLength(4);
-    for (const line of acelepryn) {
-      if (/^Acelepryn Insecticide \u2014 mole cricket nymph spots/.test(line)) {
-        expect(line).toMatch(/watered in right after application/);
-        expect(line).not.toMatch(/caterpillar/);
-      } else expect(line).toContain(wait);
-    }
+    // Three lines (July, August, September), all the caterpillar use: Acelepryn is not a mole cricket product (owner 2026-10-23).
+    expect(acelepryn).toHaveLength(3);
+    for (const line of acelepryn) expect(line).toContain(wait);
   });
 
   test.each(TRACKS)('%s: the fertilizer safety block is notes only, on the N visits', (grass) => {

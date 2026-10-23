@@ -807,6 +807,44 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       expect((await context(tablesFor())).plannedProducts.weedMix).toMatchObject({ mode: 'unavailable', note: 'The limits could not be checked. Use Search products for what you applied; the office will review it.' });
     });
 
+    // Group 11 stacking (owner 2026-10-23): October to December, a lawn with take-all mapped or unknown does not get the large patch Artavia
+    // row offered (Artavia in September, Headway in October: no more than 2 in a row). The context names the row on its own, so neither the
+    // guide gate nor the chinch read can leave it listed or searchable.
+    describe('the held Group 11 row in the context', () => {
+      const OCT = () => tablesFor({ scheduled_services: visit({ scheduled_date: '2026-10-05' }) });
+      const stageLargePatch = (trigger = 'mapped_large_patch_with_velista') => v13ProtocolRows.mockReturnValue(new Map([...PROGRAM, [P_ART, { productId: P_ART, role: 'fungicide_spot', gates: { trigger } }]]));
+
+      test('the guide gate is OFF: the row is still named as held (October, take-all unknown because the places gate is off)', async () => {
+        process.env.GATE_LAWN_V13 = 'true';
+        stageLargePatch();
+        const ctx = await context(OCT());
+        expect(ctx.treatmentGuide).toBeUndefined();
+        expect('guidedProductIds' in ctx.plannedProducts).toBe(false);
+        expect(ctx.plannedProducts.group11HeldProductIds).toEqual([P_ART]);
+      });
+
+      test('the chinch read fails (the guide is dropped for the visit): the row is still named as held', async () => {
+        live();
+        stageLargePatch();
+        const ctx = await context({ ...OCT(), 'lawn_protocol_products as lpp': new Error('rows down') });
+        expect(ctx.readFailures).toContain('treatment_guide');
+        expect('guidedProductIds' in ctx.plannedProducts).toBe(false);
+        expect(ctx.plannedProducts.group11HeldProductIds).toEqual([P_ART]);
+      });
+
+      test('with the guide live and healthy it rides beside the guide\'s own ids; a non-October visit or another trigger holds nothing', async () => {
+        live();
+        stageLargePatch();
+        const healthy = await context(OCT());
+        expect(healthy.plannedProducts.group11HeldProductIds).toEqual([P_ART]);
+        expect(healthy.plannedProducts.takeAllProductIds).toEqual([P_ART]);
+        expect(healthy.plannedProducts.guidedProductIds).not.toContain(P_ART);
+        expect('group11HeldProductIds' in (await context(tablesFor())).plannedProducts).toBe(false);
+        stageLargePatch('mapped_take_all_fall_1');
+        expect('group11HeldProductIds' in (await context(OCT())).plannedProducts).toBe(false);
+      });
+    });
+
     test('the add-ons a card may own are named, so the sheet holds their taps until the fresh guide answers', async () => {
       live();
       expect((await context(tablesFor())).plannedProducts.guidedProductIds).toEqual([P_ART, P_ACE, P_DISP]);
