@@ -6,6 +6,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { bidKitLive } = require('../config/feature-gates');
 const store = require('../services/bid-kit-store');
 const files = require('../services/bid-kit-files');
+const expiry = require('../services/bid-kit-expiry');
 const catalog = require('../../shared/bid-kit-catalog.cjs');
 const { validCalendarDate } = require('../utils/datetime-et');
 
@@ -210,6 +211,7 @@ router.patch('/:id', async (req, res, next) => {
     if (outcome.notFound) return res.status(404).json({ error: 'Not found' });
     if (outcome.error) return res.status(outcome.error.status).json({ error: outcome.error.message });
     await activity(req, 'bid_kit_updated', outcome.item, Object.keys(rest));
+    await expiry.syncExpiryBell(statusRow(outcome.item));
     return res.json({ item: present(statusRow(outcome.item), catalog.etToday()) });
   } catch (err) {
     return next(err);
@@ -252,17 +254,23 @@ router.post('/:id/file', receiveFile, async (req, res, next) => {
   let stored = null;
   try {
     if (!req.file) return res.status(400).json({ error: 'No file was sent' });
+    // A file replaces what the page showed, so it is fenced on the version the page loaded, like a save or a sign-off.
+    const { error, value } = attestSchema.validate({ expected_updated_at: req.body?.expected_updated_at });
+    if (error) return badRequest(res, error);
     const existing = await store.getItem(req.params.id);
     if (!existing || existing.archived_at) return res.status(404).json({ error: 'Not found' });
+    // The cheap check first (nothing is stored for a stale page); the same fence runs again under the row lock.
+    if (!sameInstant(existing.updated_at, value.expected_updated_at)) return res.status(409).json({ error: CHANGED });
     stored = await files.putFile(req.params.id, req.file);
-    const outcome = await store.replaceFile(req.params.id, stored);
-    if (outcome.notFound) {
+    const outcome = await store.replaceFile(req.params.id, stored, value.expected_updated_at);
+    if (outcome.notFound || outcome.conflict) {
       await files.deleteFile(stored.key);
-      return res.status(404).json({ error: 'Not found' });
+      return outcome.conflict ? res.status(409).json({ error: CHANGED }) : res.status(404).json({ error: 'Not found' });
     }
     // The row now points at the new file; the old private object has nothing pointing at it.
     if (outcome.oldKey) await files.deleteFile(outcome.oldKey);
     await activity(req, 'bid_kit_file_uploaded', outcome.item, ['file']);
+    await expiry.syncExpiryBell(statusRow(outcome.item));
     return res.json({ item: present(statusRow(outcome.item), catalog.etToday()) });
   } catch (err) {
     if (stored) await files.deleteFile(stored.key);
@@ -288,6 +296,7 @@ router.delete('/:id', async (req, res, next) => {
     const row = await store.archiveItem(req.params.id);
     if (!row) return res.status(404).json({ error: 'Not found' });
     await activity(req, 'bid_kit_archived', row);
+    await expiry.syncExpiryBell(statusRow(row));
     logger.info(`[bid-kit] item archived (${row.item_key})`);
     return res.json({ success: true, item: present(statusRow(row), catalog.etToday()) });
   } catch (err) {

@@ -225,8 +225,9 @@ it("insurance limits are whole dollars: a decimal is caught before anything is s
   expect(patch.mock.calls[0][0].body.limits).toEqual({ glEachOccurrence: 1000000, glAggregate: 2000000, workersComp: "statutory" });
 });
 
-it("uploading a file on an item with no row creates the row first, then sends the file", async () => {
-  const created = vi.fn(() => reply({ item: row({ id: "new1", item_key: "ipm_plan", file: null, status: "missing" }) }, { status: 201 }));
+it("uploading a file on an item with no row creates the row first, then sends the file with that row's version", async () => {
+  const blank = row({ id: "new1", item_key: "ipm_plan", file: null, status: "missing", updated_at: "2026-10-23T17:00:00.000Z" });
+  const created = vi.fn(() => reply({ item: blank }, { status: 201 }));
   const uploaded = vi.fn(() => reply({ item: row({ id: "new1", item_key: "ipm_plan" }) }));
   route({ "GET /admin/bid-kit/": () => reply(payload(ITEMS.filter((item) => item.id !== "i7"))), "POST /admin/bid-kit/": created, "POST /admin/bid-kit/new1/file": uploaded });
   renderPage();
@@ -238,16 +239,102 @@ it("uploading a file on an item with no row creates the row first, then sends th
   expect(created.mock.calls[0][0].body).toEqual({ kind: "document", item_key: "ipm_plan" });
   expect(uploaded.mock.calls[0][0].body).toBeInstanceOf(FormData);
   expect(uploaded.mock.calls[0][0].body.get("file").name).toBe("ipm.pdf");
+  expect(uploaded.mock.calls[0][0].body.get("expected_updated_at")).toBe("2026-10-23T17:00:00.000Z");
 });
 
-it("Open file asks for a signed link and opens it without keeping a reference to the page", async () => {
-  const open = vi.spyOn(window, "open").mockReturnValue(null);
-  route({ "GET /admin/bid-kit/": () => reply(payload()), "GET /admin/bid-kit/i1/file": () => reply({ url: "https://storage.example.test/signed", file_name: "license.pdf", expires_in: 300 }) });
+it("a failed first upload archives the row it just created, so no empty row is left behind", async () => {
+  const blank = row({ id: "new1", item_key: "ipm_plan", file: null, status: "missing", updated_at: "2026-10-23T17:00:00.000Z" });
+  const archived = vi.fn(() => reply({ success: true }));
+  route({
+    "GET /admin/bid-kit/": () => reply(payload(ITEMS.filter((item) => item.id !== "i7"))),
+    "POST /admin/bid-kit/": () => reply({ item: blank }, { status: 201 }),
+    "POST /admin/bid-kit/new1/file": () => reply({ error: "That looks like a tax ID or Social Security number. These are never stored here; the W-9 file holds the tax ID." }, { ok: false, status: 400 }),
+    "DELETE /admin/bid-kit/new1": archived,
+  });
+  renderPage();
+  await screen.findByText("FDACS business license copy");
+  fireEvent.change(within(rowFor("IPM plan")).getByLabelText("File for IPM plan"), { target: { files: [new File(["%PDF-1.4"], "W9-123-45-6789.pdf", { type: "application/pdf" })] } });
+  expect(await screen.findByText(/Not saved: That looks like a tax ID/)).toBeInTheDocument();
+  expect(archived).toHaveBeenCalledTimes(1);
+});
+
+it("an upload on an item that already has a row never creates or archives anything when it fails", async () => {
+  const send = vi.fn(() => reply({ error: "The file is larger than 15 MB" }, { ok: false, status: 413 }));
+  const unexpected = vi.fn(() => reply({}));
+  route({ "GET /admin/bid-kit/": () => reply(payload()), "POST /admin/bid-kit/i7/file": send, "POST /admin/bid-kit/": unexpected, "DELETE /admin/bid-kit/i7": unexpected });
+  renderPage();
+  await screen.findByText("FDACS business license copy");
+  fireEvent.change(within(rowFor("IPM plan")).getByLabelText("File for IPM plan"), { target: { files: [new File(["%PDF-1.4"], "big.pdf", { type: "application/pdf" })] } });
+  expect(await screen.findByText(/Not saved: The file is larger than 15 MB/)).toBeInTheDocument();
+  expect(unexpected).not.toHaveBeenCalled();
+});
+
+// A tab opened after an await is a pop-up the browser blocks, so the tab opens inside the click and the link goes in after.
+const fakeTab = () => ({ opener: "page", location: { href: "" }, close: vi.fn() });
+
+it("Open file opens the tab inside the click, then points it at the signed link", async () => {
+  const tab = fakeTab();
+  const open = vi.spyOn(window, "open").mockReturnValue(tab);
+  let release;
+  route({
+    "GET /admin/bid-kit/": () => reply(payload()),
+    "GET /admin/bid-kit/i1/file": () => new Promise((resolve) => { release = () => resolve({ ok: true, status: 200, json: async () => ({ url: "https://storage.example.test/signed", file_name: "license.pdf", expires_in: 300 }) }); }),
+  });
   renderPage();
   await screen.findByText("FDACS business license copy");
   fireEvent.click(within(rowFor("FDACS business license copy")).getByRole("button", { name: "Open file" }));
-  await waitFor(() => expect(open).toHaveBeenCalledWith("https://storage.example.test/signed", "_blank", "noopener,noreferrer"));
+  // The tab exists before the link has come back.
+  expect(open).toHaveBeenCalledTimes(1);
+  expect(open).toHaveBeenCalledWith("", "_blank");
+  expect(tab.opener).toBeNull();
+  expect(tab.location.href).toBe("");
+  await waitFor(() => expect(release).toBeTypeOf("function"));
+  release();
+  await waitFor(() => expect(tab.location.href).toBe("https://storage.example.test/signed"));
+  expect(tab.close).not.toHaveBeenCalled();
   open.mockRestore();
+});
+
+it("Open file closes the tab it opened and says why when the link cannot be fetched", async () => {
+  const tab = fakeTab();
+  const open = vi.spyOn(window, "open").mockReturnValue(tab);
+  route({ "GET /admin/bid-kit/": () => reply(payload()), "GET /admin/bid-kit/i1/file": () => reply({ error: "Not found" }, { ok: false, status: 404 }) });
+  renderPage();
+  await screen.findByText("FDACS business license copy");
+  fireEvent.click(within(rowFor("FDACS business license copy")).getByRole("button", { name: "Open file" }));
+  expect(await screen.findByText(/Could not open the file: Not found/)).toBeInTheDocument();
+  expect(tab.close).toHaveBeenCalledTimes(1);
+  expect(tab.location.href).toBe("");
+  open.mockRestore();
+});
+
+it("Open file says so when the browser blocks the tab, and asks the server for nothing", async () => {
+  const open = vi.spyOn(window, "open").mockReturnValue(null);
+  const link = vi.fn(() => reply({ url: "https://storage.example.test/signed" }));
+  route({ "GET /admin/bid-kit/": () => reply(payload()), "GET /admin/bid-kit/i1/file": link });
+  renderPage();
+  await screen.findByText("FDACS business license copy");
+  fireEvent.click(within(rowFor("FDACS business license copy")).getByRole("button", { name: "Open file" }));
+  expect(await screen.findByText(/blocked the new tab/)).toBeInTheDocument();
+  expect(link).not.toHaveBeenCalled();
+  open.mockRestore();
+});
+
+it("a file replacement carries the version the page loaded, and a 409 closes the editors and reloads", async () => {
+  let reads = 0;
+  const send = vi.fn(() => reply({ error: "This item changed since you opened it. Reload and check it again." }, { ok: false, status: 409 }));
+  route({ "GET /admin/bid-kit/": () => { reads += 1; return reply(payload()); }, "POST /admin/bid-kit/i1/file": send });
+  renderPage();
+  await screen.findByText("FDACS business license copy");
+  fireEvent.click(within(rowFor("W-9")).getByRole("button", { name: "Edit" }));
+  fireEvent.change(within(rowFor("FDACS business license copy")).getByLabelText("File for FDACS business license copy"), { target: { files: [new File(["%PDF-1.4"], "new.pdf", { type: "application/pdf" })] } });
+  await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+  const form = send.mock.calls[0][0].body;
+  expect(form.get("expected_updated_at")).toBe("2026-10-02T12:00:00.000Z");
+  expect(form.get("file").name).toBe("new.pdf");
+  expect(await screen.findByText(CONFLICT)).toBeInTheDocument();
+  expect(reads).toBe(2);
+  expect(screen.queryByRole("form", { name: "Edit W-9" })).toBeNull();
 });
 
 it("the facts sheet lists each value with a Copy button and copies it", async () => {
@@ -288,6 +375,71 @@ it("opens at the item a bell linked to, and says so when the gate is off", async
   renderPage();
   expect(await screen.findByText("Bid kit is not turned on yet.")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Facts sheet" })).toBeNull();
+});
+
+it("adding a custom item shows the fields for the type picked, and updates when the type changes", async () => {
+  const create = vi.fn(() => reply({ item: row({ id: "c9", item_key: "custom", label: "County vendor letter", status: "unattested" }) }, { status: 201 }));
+  route({ "GET /admin/bid-kit/": () => reply(payload()), "POST /admin/bid-kit/": create });
+  renderPage();
+  await screen.findByText("FDACS business license copy");
+  fireEvent.click(screen.getByRole("button", { name: "Add another item" }));
+  const has = (label) => screen.queryByLabelText(label) !== null;
+
+  // Document (the default): number, source, checked, expiry, limits; no reference fields.
+  expect(screen.getByLabelText("Type")).toHaveValue("document");
+  expect(has("Number or note")).toBe(true);
+  expect(has("Expires on")).toBe(true);
+  expect(has("General liability, aggregate")).toBe(true);
+  expect(has("Entity")).toBe(false);
+  expect(has("Permission given on")).toBe(false);
+
+  // Reference: details and the permission date; no value, expiry or limits.
+  fireEvent.change(screen.getByLabelText("Type"), { target: { value: "reference" } });
+  expect(has("Entity")).toBe(true);
+  expect(has("Permission given on")).toBe(true);
+  expect(has("Source document")).toBe(true);
+  expect(has("Number or note")).toBe(false);
+  expect(has("Value")).toBe(false);
+  expect(has("Expires on")).toBe(false);
+  expect(has("General liability, aggregate")).toBe(false);
+
+  // Fact: a value and a source; nothing else.
+  fireEvent.change(screen.getByLabelText("Type"), { target: { value: "fact" } });
+  expect(has("Value")).toBe(true);
+  expect(has("Source document")).toBe(true);
+  expect(has("Number or note")).toBe(false);
+  expect(has("Expires on")).toBe(false);
+  expect(has("Entity")).toBe(false);
+  expect(has("Permission given on")).toBe(false);
+  expect(has("General liability, aggregate")).toBe(false);
+
+  // What is sent matches the type on screen at the time of Save.
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Insurance agent phone" } });
+  fireEvent.change(screen.getByLabelText("Value"), { target: { value: "941-555-0100" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+  const body = create.mock.calls[0][0].body;
+  expect(body).toMatchObject({ kind: "fact", item_key: "custom", label: "Insurance agent phone", value: "941-555-0100" });
+  expect(body).not.toHaveProperty("expires_on");
+  expect(body).not.toHaveProperty("limits");
+  expect(body).not.toHaveProperty("details");
+});
+
+it("a custom reference is saved with its details and permission date, and no value", async () => {
+  const create = vi.fn(() => reply({ item: row({ id: "c8", item_key: "custom", kind: "reference", label: "Sample HOA", status: "needs_permission" }) }, { status: 201 }));
+  route({ "GET /admin/bid-kit/": () => reply(payload()), "POST /admin/bid-kit/": create });
+  renderPage();
+  await screen.findByText("FDACS business license copy");
+  fireEvent.click(screen.getByRole("button", { name: "Add another item" }));
+  fireEvent.change(screen.getByLabelText("Type"), { target: { value: "reference" } });
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Sample HOA" } });
+  fireEvent.change(screen.getByLabelText("Entity"), { target: { value: "Sample HOA" } });
+  fireEvent.change(screen.getByLabelText("Permission given on"), { target: { value: "2026-10-01" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+  const body = create.mock.calls[0][0].body;
+  expect(body).toMatchObject({ kind: "reference", item_key: "custom", label: "Sample HOA", details: { entity: "Sample HOA" }, permission_on: "2026-10-01" });
+  expect(body).not.toHaveProperty("value");
 });
 
 it("buildEntries lays the server's items over the catalog and sends custom rows to the last section", () => {

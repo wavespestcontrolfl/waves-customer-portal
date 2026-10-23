@@ -30,6 +30,10 @@ jest.mock('../services/visual-service-notes', () => ({
   setVisualServiceNotesSettings: jest.fn(),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The bell service is a stand-in: these tests watch which bells the routes ask it to close (its SQL runs elsewhere).
+jest.mock('../services/admin-alert-episodes', () => ({
+  closeAdminAlertKeys: jest.fn(async () => 0), openAdminAlertKeys: jest.fn(async () => []), raiseAdminAlertWithReopen: jest.fn(),
+}));
 jest.mock('../config', () => ({ s3: { region: 'us-east-1', bucket: 'test-bucket' } }));
 
 const mockSent = [];
@@ -93,9 +97,10 @@ jest.mock('../services/bid-kit-store', () => {
       if (Object.keys(patch).length) Object.assign(row, patch, { updated_at: stamp() });
       return { item: view(row) };
     }),
-    replaceFile: jest.fn(async (id, file) => {
+    replaceFile: jest.fn(async (id, file, expectedUpdatedAt) => {
       const row = rows.get(id);
       if (!row || row.archived_at) return { notFound: true };
+      if (new Date(row.updated_at).getTime() !== new Date(expectedUpdatedAt).getTime()) return { conflict: true };
       const oldKey = row.file_s3_key || null;
       Object.assign(row, { file_s3_key: file.key, file_name: file.fileName, file_content_type: file.contentType, file_size: file.size, attested_by: null, attested_at: null, updated_at: stamp() });
       return { item: view(row), oldKey };
@@ -113,6 +118,7 @@ jest.mock('../services/bid-kit-store', () => {
 
 const express = require('express');
 const store = require('../services/bid-kit-store');
+const episodes = require('../services/admin-alert-episodes');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const ADMIN = '0a0a0a0a-1111-4222-8333-444444444444';
@@ -130,8 +136,12 @@ async function call(method, url, body, headers = admin) {
   const res = await fetch(`${baseUrl}${url}`, { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   return { status: res.status, body: await res.json().catch(() => ({})), headers: res.headers };
 }
-async function upload(id, { name = 'license.pdf', type = 'application/pdf', bytes = PDF, field = 'file' } = {}) {
+// By default the upload carries the version the page would have loaded (the row's current one); version: null sends none.
+async function upload(id, { name = 'license.pdf', type = 'application/pdf', bytes = PDF, field = 'file', version } = {}) {
   const form = new FormData();
+  const current = store.rows.get(id)?.updated_at;
+  const sent = version === undefined ? (current ? current.toISOString() : '2026-10-23T12:00:00.000Z') : version;
+  if (sent !== null) form.append('expected_updated_at', sent);
   form.append(field, new Blob([bytes], { type }), name);
   const res = await fetch(`${baseUrl}/api/admin/bid-kit/${id}/file`, { method: 'POST', headers: { Authorization: 'Bearer admin' }, body: form });
   return { status: res.status, body: await res.json().catch(() => ({})) };
@@ -622,6 +632,88 @@ describe('files', () => {
     expect(command.input).toMatchObject({ Bucket: 'test-bucket', ResponseContentDisposition: 'inline; filename="license.pdf"' });
     await call('DELETE', `/api/admin/bid-kit/${item.id}`);
     expect((await call('GET', `/api/admin/bid-kit/${item.id}/file`)).status).toBe(404);
+  });
+});
+
+describe('file replacements are fenced on the version the page loaded', () => {
+  test('a missing or malformed version is a 400, and nothing is stored', async () => {
+    const item = await create();
+    expect((await upload(item.id, { version: null })).status).toBe(400);
+    expect((await upload(item.id, { version: 'yesterday' })).status).toBe(400);
+    expect(mockSent).toHaveLength(0);
+    expect(store.rows.get(item.id).file_s3_key).toBeNull();
+  });
+
+  test('a page that is out of date gets a 409 before anything is stored, and the row is untouched', async () => {
+    const item = await create();
+    const stale = item.updated_at;
+    await call('PATCH', `/api/admin/bid-kit/${item.id}`, { value: 'Typed by someone else', expected_updated_at: stale });
+    const res = await upload(item.id, { version: stale });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/changed since you opened/);
+    expect(mockSent).toHaveLength(0);
+    expect(store.rows.get(item.id)).toMatchObject({ file_s3_key: null, value: 'Typed by someone else' });
+    // With the current version the same upload is accepted.
+    expect((await upload(item.id)).status).toBe(200);
+  });
+
+  test('a change that lands while the file is storing is a 409 from the row lock: the new object is removed and nothing is written', async () => {
+    const item = await create();
+    store.replaceFile.mockResolvedValueOnce({ conflict: true });
+    const res = await upload(item.id);
+    expect(res.status).toBe(409);
+    const put = mockSent.find((command) => command.constructor.name === 'PutObjectCommand');
+    const deleted = mockSent.filter((command) => command.constructor.name === 'DeleteObjectCommand');
+    expect(deleted.map((command) => command.input.Key)).toEqual([put.input.Key]);
+    expect(store.rows.get(item.id).file_s3_key).toBeNull();
+  });
+
+  test('a replacement with the current version still clears the sign-off and gives back the new version', async () => {
+    const item = await signed({ item_key: 'business_license_copy' });
+    const res = await upload(item.id, { version: item.updated_at });
+    expect(res.status).toBe(200);
+    expect(res.body.item.attested_at).toBeNull();
+    expect(res.body.item.updated_at).not.toBe(item.updated_at);
+    expect((await upload(item.id, { version: item.updated_at })).status).toBe(409); // the old version no longer works
+  });
+});
+
+describe('expiry bells close when the item no longer needs renewing', () => {
+  const soon = () => new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10);
+  const key = (item) => `bid-kit:expiry:${item.id}`;
+
+  test('a save that moves the date out of the 30-day window closes that item\'s bell; a save that leaves it inside does not', async () => {
+    const item = await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: soon() });
+    const same = await call('PATCH', `/api/admin/bid-kit/${item.id}`, { notes: 'Call the county', expected_updated_at: item.updated_at });
+    expect(same.status).toBe(200);
+    expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
+    const renewed = await call('PATCH', `/api/admin/bid-kit/${item.id}`, { expires_on: '2999-09-30', expected_updated_at: same.body.item.updated_at });
+    expect(renewed.status).toBe(200);
+    expect(episodes.closeAdminAlertKeys).toHaveBeenCalledTimes(1);
+    expect(episodes.closeAdminAlertKeys.mock.calls[0].slice(1, 3)).toEqual([[key(item)], 'renewed']);
+  });
+
+  test('archiving the item closes its bell', async () => {
+    const item = await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: '2000-01-01' });
+    await call('DELETE', `/api/admin/bid-kit/${item.id}`);
+    expect(episodes.closeAdminAlertKeys.mock.calls.at(-1).slice(1, 3)).toEqual([[key(item)], 'archived']);
+  });
+
+  test('a file replaced while the date is still expired keeps the bell; a file on an item whose date is far out closes it', async () => {
+    const expired = await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: '2000-01-01' });
+    await upload(expired.id);
+    expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
+    const far = await create({ item_key: 'business_license_copy', value: 'JB000000', expires_on: '2999-01-01' });
+    await upload(far.id);
+    expect(episodes.closeAdminAlertKeys.mock.calls.at(-1).slice(1, 3)).toEqual([[key(far)], 'renewed']);
+  });
+
+  test('a bell service that fails never fails the save', async () => {
+    const item = await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: soon() });
+    episodes.closeAdminAlertKeys.mockRejectedValueOnce(new Error('db down'));
+    const res = await call('PATCH', `/api/admin/bid-kit/${item.id}`, { expires_on: '2999-09-30', expected_updated_at: item.updated_at });
+    expect(res.status).toBe(200);
+    expect(res.body.item.expires_on).toBe('2999-09-30');
   });
 });
 

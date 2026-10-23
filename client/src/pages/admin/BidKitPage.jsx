@@ -11,7 +11,8 @@ import { STATUS_LABEL, SIGN_OFF_REFUSAL, LIMIT_DOLLAR_KEYS, WORKERS_COMP_VALUES,
 
 // Bid kit (GATE_BID_KIT, dark, admin only). The papers and facts every government bid asks for. Nothing here is public and
 // nothing is sent to anyone. A status comes from the server; a sign-off belongs to the version of the item you looked at,
-// and any edit to the item clears it. No AI anywhere.
+// and any edit to the item clears it. Every write carries the version the page loaded; when the server says the item
+// changed (409) the open editors close and the list is read again. No AI anywhere.
 
 const STATUS_TONE = {
   ready: "strong", expiring: "strong", missing: "alert", expired: "alert", needs_expiry: "warn", needs_permission: "warn", unattested: "warn",
@@ -25,8 +26,10 @@ const DETAIL_LABEL = {
 };
 const INSURANCE_KEYS = ["insurance_certificate", "pollution_coverage"];
 const ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,application/pdf,image/png,image/jpeg,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-
 const CONFLICT_MESSAGE = "Someone else changed this item. Here is the latest version; make your change again.";
+const NEW_REFERENCE = "new:reference";
+const NEW_CUSTOM = "new:custom";
+const CUSTOM_ENTRY = { item: { key: "custom", kind: "document", label: "", expires: true, why: "" }, row: null, status: "missing" };
 
 class ApiError extends Error {
   constructor(message, status) {
@@ -40,6 +43,35 @@ async function api(path, options = {}) {
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new ApiError(body.error || `HTTP ${res.status}`, res.status);
   return body;
+}
+
+// The writes. Each one carries the version of the row the page loaded, so a stale page is refused by the server.
+const patchItem = (row, body) => api(`/${row.id}`, { method: "PATCH", body: { ...body, expected_updated_at: row.updated_at } });
+const createItem = (item, body, kind) => {
+  const create = { kind: kind || item.kind, item_key: item.key, ...body };
+  if (item.key !== "custom") delete create.label;
+  return api("/", { method: "POST", body: create });
+};
+const archiveItem = (row) => api(`/${row.id}`, { method: "DELETE" });
+const signOffItem = (row) => api(`/${row.id}/attest`, { method: "POST", body: { expected_updated_at: row.updated_at } });
+const fetchFileLink = (row) => api(`/${row.id}/file`);
+const sendFile = (row, file) => {
+  const form = new FormData();
+  form.append("expected_updated_at", row.updated_at);
+  form.append("file", file);
+  return api(`/${row.id}/file`, { method: "POST", body: form });
+};
+// A file for an item with no row yet gets a blank row first, so the file has a place to live. When the file then fails (a
+// refused name, a bad type, a stale version), that row would stay behind as an empty phantom, so it is archived again.
+async function uploadFor(entry, file) {
+  if (entry.row) return sendFile(entry.row, file);
+  const { item: created } = await createItem(entry.item, {});
+  try {
+    return await sendFile(created, file);
+  } catch (err) {
+    await archiveItem(created).catch(() => {});
+    throw err;
+  }
 }
 
 const dateText = (value) => (value ? formatETDateOnly(value, { month: "short", day: "numeric", year: "numeric" }) : "");
@@ -61,7 +93,7 @@ export function buildEntries(sections, items) {
     out.push({
       key: "other",
       label: "Other",
-      entries: customs.map((row) => ({ item: { key: "custom", kind: row.kind, label: row.label, expires: true, why: "" }, row, status: row.status })),
+      entries: customs.map((row) => ({ item: { key: "custom", kind: row.kind, label: row.label, expires: row.kind === "document", why: "" }, row, status: row.status })),
     });
   }
   return out;
@@ -85,6 +117,42 @@ function CopyButton({ text, label }) {
   return <Button size="sm" variant="secondary" onClick={copy} aria-label={`Copy ${label}`}>{done ? "Copied" : "Copy"}</Button>;
 }
 
+function FactLine({ fact }) {
+  return (
+    <li className="flex flex-wrap items-center gap-2 text-ui-body">
+      <span className="w-56 shrink-0 text-ink-secondary">{fact.label}</span>
+      {fact.value ? (
+        <>
+          <span className="min-w-0 flex-1 break-words font-medium text-zinc-900">{fact.value}</span>
+          {!fact.signedOff && <Badge tone="warn">Not signed off</Badge>}
+          <CopyButton text={fact.value} label={fact.label} />
+        </>
+      ) : <span className="text-ink-secondary">Not filled in</span>}
+    </li>
+  );
+}
+
+function DocumentLine({ doc }) {
+  return (
+    <li className="flex flex-wrap items-center gap-2 text-ui-body">
+      <span className="w-56 shrink-0 text-ink-secondary">{doc.label}</span>
+      {doc.number && (
+        <>
+          <span className="font-medium text-zinc-900">{doc.number}</span>
+          <CopyButton text={doc.number} label={`${doc.label} number`} />
+        </>
+      )}
+      {doc.expiresOn && (
+        <>
+          <span className="text-ink-secondary">Expires {dateText(doc.expiresOn)}</span>
+          <CopyButton text={doc.expiresOn} label={`${doc.label} expiry date`} />
+        </>
+      )}
+      <StatusChip status={doc.status} />
+    </li>
+  );
+}
+
 function FactsSheet() {
   const [state, setState] = useState({ loading: true, error: "", data: null });
   useEffect(() => {
@@ -103,152 +171,185 @@ function FactsSheet() {
       <Card>
         <CardBody>
           <h2 className="mb-2 text-ui-body font-medium text-zinc-900">Company facts</h2>
-          <ul className="grid gap-2">
-            {facts.map((fact, index) => (
-              <li key={`${fact.key}-${index}`} className="flex flex-wrap items-center gap-2 text-ui-body">
-                <span className="w-56 shrink-0 text-ink-secondary">{fact.label}</span>
-                {fact.value ? (
-                  <>
-                    <span className="min-w-0 flex-1 break-words font-medium text-zinc-900">{fact.value}</span>
-                    {!fact.signedOff && <Badge tone="warn">Not signed off</Badge>}
-                    <CopyButton text={fact.value} label={fact.label} />
-                  </>
-                ) : <span className="text-ink-secondary">Not filled in</span>}
-              </li>
-            ))}
-          </ul>
+          <ul className="grid gap-2">{facts.map((fact, index) => <FactLine key={`${fact.key}-${index}`} fact={fact} />)}</ul>
         </CardBody>
       </Card>
       <Card>
         <CardBody>
           <h2 className="mb-2 text-ui-body font-medium text-zinc-900">Document numbers and expiry dates</h2>
           {documents.length === 0 && <div className="text-ui-body text-ink-secondary">No document numbers or dates saved yet.</div>}
-          <ul className="grid gap-2">
-            {documents.map((doc, index) => (
-              <li key={`${doc.key}-${index}`} className="flex flex-wrap items-center gap-2 text-ui-body">
-                <span className="w-56 shrink-0 text-ink-secondary">{doc.label}</span>
-                {doc.number && (
-                  <>
-                    <span className="font-medium text-zinc-900">{doc.number}</span>
-                    <CopyButton text={doc.number} label={`${doc.label} number`} />
-                  </>
-                )}
-                {doc.expiresOn && (
-                  <>
-                    <span className="text-ink-secondary">Expires {dateText(doc.expiresOn)}</span>
-                    <CopyButton text={doc.expiresOn} label={`${doc.label} expiry date`} />
-                  </>
-                )}
-                <StatusChip status={doc.status} />
-              </li>
-            ))}
-          </ul>
+          <ul className="grid gap-2">{documents.map((doc, index) => <DocumentLine key={`${doc.key}-${index}`} doc={doc} />)}</ul>
         </CardBody>
       </Card>
     </div>
   );
 }
 
+// ---- the editor ----
+
+function initialForm({ item, row }) {
+  const r = row || {};
+  return {
+    label: r.label || (item.key === "custom" ? "" : item.label),
+    kind: r.kind || item.kind,
+    value: r.value || "",
+    source: r.source_document || "",
+    checkedOn: r.checked_on || "",
+    expiresOn: r.expires_on || "",
+    permissionOn: r.permission_on || "",
+    limits: Object.fromEntries([...LIMIT_DOLLAR_KEYS, "workersComp"].map((key) => [key, (r.limits || {})[key] ?? ""])),
+    details: Object.fromEntries(REFERENCE_DETAIL_KEYS.map((key) => [key, (r.details || {})[key] ?? ""])),
+  };
+}
+
+// Which fields the form shows for the kind in the form (a custom item's kind can change while it is being added).
+function fieldsFor(kind, entry) {
+  const { item, row } = entry;
+  const isCustom = item.key === "custom";
+  const isDocument = kind === "document";
+  return {
+    isReference: kind === "reference",
+    showValue: kind !== "reference",
+    showExpiry: (isDocument && (isCustom || Boolean(item.expires))) || Boolean(row && row.expires_on),
+    showLimits: isDocument && (isCustom || INSURANCE_KEYS.includes(item.key)),
+  };
+}
+
+// The limits as whole dollars, or the sentence that says which one is wrong.
+function parseLimits(limits) {
+  const out = {};
+  for (const key of LIMIT_DOLLAR_KEYS) {
+    const text = String(limits[key]).replace(/[$,\s]/g, "");
+    if (text === "") continue;
+    if (!/^\d+$/.test(text)) return { problem: `${LIMIT_LABEL[key]} must be a whole number of dollars` };
+    out[key] = Number(text);
+  }
+  if (limits.workersComp) out.workersComp = limits.workersComp;
+  return { limits: Object.keys(out).length ? out : null };
+}
+
+// What the form sends: only the fields shown for its kind.
+function buildBody(form, shown, isCustom) {
+  const body = { source_document: form.source, checked_on: form.checkedOn || null };
+  if (shown.showValue) body.value = form.value;
+  if (isCustom) body.label = form.label;
+  if (shown.showExpiry) body.expires_on = form.expiresOn || null;
+  if (shown.isReference) {
+    body.permission_on = form.permissionOn || null;
+    body.details = Object.fromEntries(Object.entries(form.details).filter(([, entry]) => entry !== ""));
+  }
+  if (!shown.showLimits) return { body };
+  const parsed = parseLimits(form.limits);
+  if (parsed.problem) return { problem: parsed.problem };
+  body.limits = parsed.limits;
+  return { body };
+}
+
+function CustomFields({ form, set, canPickKind }) {
+  return (
+    <div className="grid gap-3 md:grid-cols-2">
+      <Field id="kit-label" label="Name"><Input value={form.label} maxLength={200} onChange={(event) => set("label", event.target.value)} /></Field>
+      {canPickKind && (
+        <Field id="kit-kind" label="Type">
+          <Select value={form.kind} onChange={(event) => set("kind", event.target.value)}>
+            <option value="document">Document</option>
+            <option value="fact">Fact</option>
+            <option value="reference">Reference</option>
+          </Select>
+        </Field>
+      )}
+    </div>
+  );
+}
+
+function ValueField({ form, set }) {
+  const isFact = form.kind === "fact";
+  return (
+    <Field id="kit-value" label={isFact ? "Value" : "Number or note"} help={isFact ? undefined : "A policy or license number, if the paper has one. Never type a tax ID or Social Security number here."}>
+      {isFact
+        ? <Textarea rows={2} maxLength={2000} value={form.value} onChange={(event) => set("value", event.target.value)} />
+        : <Input value={form.value} maxLength={2000} onChange={(event) => set("value", event.target.value)} />}
+    </Field>
+  );
+}
+
+function DateFields({ form, set, shown }) {
+  return (
+    <div className="grid gap-3 md:grid-cols-3">
+      <Field id="kit-source" label="Source document" help="Where this came from."><Input value={form.source} maxLength={500} onChange={(event) => set("source", event.target.value)} /></Field>
+      <Field id="kit-checked" label="Checked on"><Input type="date" value={form.checkedOn} onChange={(event) => set("checkedOn", event.target.value)} /></Field>
+      {shown.showExpiry && <Field id="kit-expires" label="Expires on"><Input type="date" value={form.expiresOn} onChange={(event) => set("expiresOn", event.target.value)} /></Field>}
+      {shown.isReference && <Field id="kit-permission" label="Permission given on" help="The day this person agreed to be named."><Input type="date" value={form.permissionOn} onChange={(event) => set("permissionOn", event.target.value)} /></Field>}
+    </div>
+  );
+}
+
+function LimitsFields({ form, setNested }) {
+  return (
+    <fieldset className="grid gap-3 md:grid-cols-3">
+      <legend className="mb-1 text-ui-body font-medium text-zinc-900">Limits (whole dollars)</legend>
+      {LIMIT_DOLLAR_KEYS.map((key) => (
+        <Field key={key} id={`kit-limit-${key}`} label={LIMIT_LABEL[key]}>
+          <Input inputMode="numeric" value={form.limits[key]} onChange={(event) => setNested("limits", key, event.target.value)} />
+        </Field>
+      ))}
+      <Field id="kit-limit-workersComp" label="Workers’ compensation">
+        <Select value={form.limits.workersComp} onChange={(event) => setNested("limits", "workersComp", event.target.value)}>
+          <option value="">Not set</option>
+          {WORKERS_COMP_VALUES.map((entry) => <option key={entry} value={entry}>{entry === "statutory" ? "Statutory" : "Exempt"}</option>)}
+        </Select>
+      </Field>
+    </fieldset>
+  );
+}
+
+function ReferenceFields({ form, setNested }) {
+  return (
+    <fieldset className="grid gap-3 md:grid-cols-2">
+      <legend className="mb-1 text-ui-body font-medium text-zinc-900">Reference details</legend>
+      {REFERENCE_DETAIL_KEYS.map((key) => (
+        <Field key={key} id={`kit-detail-${key}`} label={DETAIL_LABEL[key]}>
+          {key === "publicOrPrivate" ? (
+            <Select value={form.details[key]} onChange={(event) => setNested("details", key, event.target.value)}>
+              <option value="">Not set</option>
+              {PUBLIC_OR_PRIVATE.map((entry) => <option key={entry} value={entry}>{entry === "public" ? "Public" : "Private"}</option>)}
+            </Select>
+          ) : <Input value={form.details[key]} onChange={(event) => setNested("details", key, event.target.value)} />}
+        </Field>
+      ))}
+    </fieldset>
+  );
+}
+
 // The editor for one entry: a new row (POST) or a saved one (PATCH, fenced on the version the page loaded).
 function Editor({ entry, busy, onSave, onArchive, onCancel }) {
   const { item, row } = entry;
-  const [label, setLabel] = useState(row?.label || (item.key === "custom" ? "" : item.label));
-  const [kind, setKind] = useState(row?.kind || item.kind);
-  const [value, setValue] = useState(row?.value || "");
-  const [source, setSource] = useState(row?.source_document || "");
-  const [checkedOn, setCheckedOn] = useState(row?.checked_on || "");
-  const [expiresOn, setExpiresOn] = useState(row?.expires_on || "");
-  const [permissionOn, setPermissionOn] = useState(row?.permission_on || "");
-  const [limits, setLimits] = useState(() => Object.fromEntries([...LIMIT_DOLLAR_KEYS, "workersComp"].map((key) => [key, row?.limits?.[key] ?? ""])));
-  const [details, setDetails] = useState(() => Object.fromEntries(REFERENCE_DETAIL_KEYS.map((key) => [key, row?.details?.[key] ?? ""])));
+  const isCustom = item.key === "custom";
+  const [form, setForm] = useState(() => initialForm(entry));
   const [problem, setProblem] = useState("");
-  const isReference = kind === "reference";
-  const showLimits = INSURANCE_KEYS.includes(item.key) || item.key === "custom";
-  const showExpiry = item.expires || Boolean(row?.expires_on);
+  const shown = fieldsFor(form.kind, entry);
+  const set = (key, value) => setForm((f) => ({ ...f, [key]: value }));
+  const setNested = (group, key, value) => setForm((f) => ({ ...f, [group]: { ...f[group], [key]: value } }));
 
   const submit = (event) => {
     event.preventDefault();
-    const body = { source_document: source, checked_on: checkedOn || null, value };
-    if (item.key === "custom") body.label = label;
-    if (showExpiry) body.expires_on = expiresOn || null;
-    if (isReference) {
-      body.permission_on = permissionOn || null;
-      body.details = Object.fromEntries(Object.entries(details).filter(([, entry]) => entry !== ""));
-    }
-    if (showLimits) {
-      const out = {};
-      for (const key of LIMIT_DOLLAR_KEYS) {
-        const text = String(limits[key]).replace(/[$,\s]/g, "");
-        if (text === "") continue;
-        if (!/^\d+$/.test(text)) { setProblem(`${LIMIT_LABEL[key]} must be a whole number of dollars`); return; }
-        out[key] = Number(text);
-      }
-      if (limits.workersComp) out.workersComp = limits.workersComp;
-      body.limits = Object.keys(out).length ? out : null;
-    }
-    setProblem("");
-    onSave(body, { kind, label });
+    const built = buildBody(form, shown, isCustom);
+    setProblem(built.problem || "");
+    if (!built.problem) onSave(built.body, { kind: form.kind, label: form.label });
   };
 
   return (
     <form className="mt-3 grid gap-3 rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3" onSubmit={submit} aria-label={`Edit ${item.label}`}>
-      {item.key === "custom" && (
-        <div className="grid gap-3 md:grid-cols-2">
-          <Field id="kit-label" label="Name"><Input value={label} maxLength={200} onChange={(event) => setLabel(event.target.value)} /></Field>
-          {!row && (
-            <Field id="kit-kind" label="Type">
-              <Select value={kind} onChange={(event) => setKind(event.target.value)}>
-                <option value="document">Document</option>
-                <option value="fact">Fact</option>
-              </Select>
-            </Field>
-          )}
-        </div>
-      )}
-      <Field id="kit-value" label={item.kind === "fact" ? "Value" : "Number or note"} help={item.kind === "fact" ? undefined : "A policy or license number, if the paper has one. Never type a tax ID or Social Security number here."}>
-        {item.kind === "fact" ? <Textarea rows={2} maxLength={2000} value={value} onChange={(event) => setValue(event.target.value)} /> : <Input value={value} maxLength={2000} onChange={(event) => setValue(event.target.value)} />}
-      </Field>
-      <div className="grid gap-3 md:grid-cols-3">
-        <Field id="kit-source" label="Source document" help="Where this came from."><Input value={source} maxLength={500} onChange={(event) => setSource(event.target.value)} /></Field>
-        <Field id="kit-checked" label="Checked on"><Input type="date" value={checkedOn} onChange={(event) => setCheckedOn(event.target.value)} /></Field>
-        {showExpiry && <Field id="kit-expires" label="Expires on"><Input type="date" value={expiresOn} onChange={(event) => setExpiresOn(event.target.value)} /></Field>}
-        {isReference && <Field id="kit-permission" label="Permission given on" help="The day this person agreed to be named."><Input type="date" value={permissionOn} onChange={(event) => setPermissionOn(event.target.value)} /></Field>}
-      </div>
-      {showLimits && (
-        <fieldset className="grid gap-3 md:grid-cols-3">
-          <legend className="mb-1 text-ui-body font-medium text-zinc-900">Limits (whole dollars)</legend>
-          {LIMIT_DOLLAR_KEYS.map((key) => (
-            <Field key={key} id={`kit-limit-${key}`} label={LIMIT_LABEL[key]}>
-              <Input inputMode="numeric" value={limits[key]} onChange={(event) => setLimits((s) => ({ ...s, [key]: event.target.value }))} />
-            </Field>
-          ))}
-          <Field id="kit-limit-workersComp" label="Workers’ compensation">
-            <Select value={limits.workersComp} onChange={(event) => setLimits((s) => ({ ...s, workersComp: event.target.value }))}>
-              <option value="">Not set</option>
-              {WORKERS_COMP_VALUES.map((entry) => <option key={entry} value={entry}>{entry === "statutory" ? "Statutory" : "Exempt"}</option>)}
-            </Select>
-          </Field>
-        </fieldset>
-      )}
-      {isReference && (
-        <fieldset className="grid gap-3 md:grid-cols-2">
-          <legend className="mb-1 text-ui-body font-medium text-zinc-900">Reference details</legend>
-          {REFERENCE_DETAIL_KEYS.map((key) => (
-            <Field key={key} id={`kit-detail-${key}`} label={DETAIL_LABEL[key]}>
-              {key === "publicOrPrivate" ? (
-                <Select value={details[key]} onChange={(event) => setDetails((s) => ({ ...s, [key]: event.target.value }))}>
-                  <option value="">Not set</option>
-                  {PUBLIC_OR_PRIVATE.map((entry) => <option key={entry} value={entry}>{entry === "public" ? "Public" : "Private"}</option>)}
-                </Select>
-              ) : <Input value={details[key]} onChange={(event) => setDetails((s) => ({ ...s, [key]: event.target.value }))} />}
-            </Field>
-          ))}
-        </fieldset>
-      )}
+      {isCustom && <CustomFields form={form} set={set} canPickKind={!row} />}
+      {shown.showValue && <ValueField form={form} set={set} />}
+      <DateFields form={form} set={set} shown={shown} />
+      {shown.showLimits && <LimitsFields form={form} setNested={setNested} />}
+      {shown.isReference && <ReferenceFields form={form} setNested={setNested} />}
+      {!row && form.kind === "document" && <p className="text-ui-caption text-ink-secondary">Save the details first, then use Upload file on the item.</p>}
       <p className="text-ui-caption text-ink-secondary">Saving a change to the value, dates, limits, details or source clears the sign-off.</p>
       {problem && <ActionFeedback error>{problem}</ActionFeedback>}
       <div className="flex flex-wrap gap-2">
-        <Button type="submit" disabled={busy || (item.key === "custom" && !label.trim())}>Save</Button>
+        <Button type="submit" disabled={busy || (isCustom && !form.label.trim())}>Save</Button>
         <Button type="button" variant="ghost" onClick={onCancel}>Cancel</Button>
         {row && <Button type="button" variant="ghost" disabled={busy} onClick={onArchive}>Archive</Button>}
       </div>
@@ -256,84 +357,162 @@ function Editor({ entry, busy, onSave, onArchive, onCancel }) {
   );
 }
 
+// ---- one row of the checklist ----
+
+function Line({ label, children }) {
+  return <div><span className="text-ink-secondary">{label}</span>{children}</div>;
+}
+
+const limitsText = (limits) => Object.entries(limits)
+  .map(([key, amount]) => `${LIMIT_LABEL[key] || (key === "workersComp" ? "Workers’ comp" : key)} ${typeof amount === "number" ? `$${amount.toLocaleString("en-US")}` : amount}`)
+  .join("; ");
+
+function ReferenceLines({ row }) {
+  const entity = row.details && row.details.entity;
+  return (
+    <>
+      {entity && <Line label="Reference: ">{[entity, row.details.contactRole].filter(Boolean).join(", ")}</Line>}
+      {row.permission_on && <Line label="Permission given: ">{dateText(row.permission_on)}</Line>}
+    </>
+  );
+}
+
+function SourceLine({ row }) {
+  if (!row.source_document && !row.checked_on) return null;
+  return (
+    <div>
+      <span className="text-ink-secondary">Source: </span>{row.source_document || "not recorded"}
+      {row.checked_on && <span className="text-ink-secondary"> · checked {dateText(row.checked_on)}</span>}
+    </div>
+  );
+}
+
 function RowDetails({ row, item }) {
   return (
     <div className="mt-1 grid gap-0.5 text-ui-body">
-      {row.value && <div><span className="text-ink-secondary">{item.kind === "fact" ? "Value: " : "Number: "}</span>{row.value}</div>}
-      {row.file && <div><span className="text-ink-secondary">File: </span>{row.file.name}</div>}
-      {row.expires_on && <div><span className="text-ink-secondary">Expires: </span>{dateText(row.expires_on)}</div>}
+      {row.value && <Line label={item.kind === "fact" ? "Value: " : "Number: "}>{row.value}</Line>}
+      {row.file && <Line label="File: ">{row.file.name}</Line>}
+      {row.expires_on && <Line label="Expires: ">{dateText(row.expires_on)}</Line>}
       {item.expires && !row.expires_on && <div className="text-warn-fg">No expiry date saved. Add one so the kit can warn you.</div>}
-      {(row.source_document || row.checked_on) && (
-        <div>
-          <span className="text-ink-secondary">Source: </span>{row.source_document || "not recorded"}
-          {row.checked_on && <span className="text-ink-secondary"> · checked {dateText(row.checked_on)}</span>}
-        </div>
-      )}
-      {row.kind === "reference" && row.details?.entity && <div><span className="text-ink-secondary">Reference: </span>{[row.details.entity, row.details.contactRole].filter(Boolean).join(", ")}</div>}
-      {row.kind === "reference" && row.permission_on && <div><span className="text-ink-secondary">Permission given: </span>{dateText(row.permission_on)}</div>}
-      {row.limits && (
-        <div>
-          <span className="text-ink-secondary">Limits: </span>
-          {Object.entries(row.limits).map(([key, amount]) => `${LIMIT_LABEL[key] || (key === "workersComp" ? "Workers’ comp" : key)} ${typeof amount === "number" ? `$${amount.toLocaleString("en-US")}` : amount}`).join("; ")}
-        </div>
-      )}
+      <SourceLine row={row} />
+      {row.kind === "reference" && <ReferenceLines row={row} />}
+      {row.limits && <Line label="Limits: ">{limitsText(row.limits)}</Line>}
       {row.attested_at && <div className="text-ink-secondary">Signed off {dateText(row.attested_at)}</div>}
     </div>
   );
 }
 
-function Row({ entry, busy, editing, highlighted, onEdit, onCancel, onSave, onArchive, onSignOff, onOpenFile, onUpload }) {
+function RowTitle({ entry }) {
   const { item, row, status } = entry;
+  return (
+    <div className="min-w-0">
+      <div className="flex flex-wrap items-center gap-2">
+        <h3 className="break-words text-ui-body font-medium text-zinc-900">{(row && row.label) || item.label}</h3>
+        <StatusChip status={status} />
+        {item.perBid && <Badge>New one for each bid</Badge>}
+        {item.notarized && <Badge>Notarized</Badge>}
+      </div>
+      {!row && item.why && <div className="text-ui-caption text-ink-secondary">{item.why}</div>}
+      {item.renewalRule && <div className="text-ui-caption text-ink-secondary">{item.renewalRule}</div>}
+    </div>
+  );
+}
+
+function FileButtons({ entry, busy, onOpenFile, onUpload }) {
+  const { item, row } = entry;
   const fileInput = useRef(null);
+  const name = (row && row.label) || item.label;
+  return (
+    <>
+      {row && row.file && <Button size="sm" variant="secondary" disabled={busy} onClick={() => onOpenFile(row)}>Open file</Button>}
+      <Button size="sm" variant="secondary" disabled={busy} onClick={() => fileInput.current && fileInput.current.click()}>{row && row.file ? "Replace file" : "Upload file"}</Button>
+      <input
+        ref={fileInput} type="file" accept={ACCEPT} hidden aria-label={`File for ${name}`}
+        onChange={(event) => { const file = event.target.files && event.target.files[0]; event.target.value = ""; if (file) onUpload(entry, file); }}
+      />
+    </>
+  );
+}
+
+function SignOffButton({ entry, busy, onSignOff }) {
+  const { row, status } = entry;
   const refused = SIGN_OFF_REFUSAL[status];
-  const canSign = !!row && !row.attested_at && !refused;
-  const signReason = !row ? "" : row.attested_at ? "Signed off" : refused || "";
+  const reason = row.attested_at ? "Signed off" : refused || "";
+  return <Button size="sm" disabled={busy || Boolean(row.attested_at) || Boolean(refused)} title={reason} onClick={() => onSignOff(row)}>Sign off</Button>;
+}
+
+function Row({ entry, busy, editing, highlighted, handlers }) {
+  const { item, row } = entry;
   return (
     <li id={row ? `bid-kit-${row.id}` : undefined} className={`rounded-sm border-hairline px-3 py-3 ${highlighted ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 bg-white"}`}>
       <div className="flex flex-wrap items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <h3 className="break-words text-ui-body font-medium text-zinc-900">{row?.label || item.label}</h3>
-            <StatusChip status={status} />
-            {item.perBid && <Badge>New one for each bid</Badge>}
-            {item.notarized && <Badge>Notarized</Badge>}
-          </div>
-          {!row && item.why && <div className="text-ui-caption text-ink-secondary">{item.why}</div>}
-          {item.renewalRule && <div className="text-ui-caption text-ink-secondary">{item.renewalRule}</div>}
-        </div>
+        <RowTitle entry={entry} />
         <div className="flex flex-wrap gap-2">
-          {item.kind !== "fact" && (
-            <>
-              {row?.file && <Button size="sm" variant="secondary" disabled={busy} onClick={() => onOpenFile(row)}>Open file</Button>}
-              <Button size="sm" variant="secondary" disabled={busy} onClick={() => fileInput.current?.click()}>{row?.file ? "Replace file" : "Upload file"}</Button>
-              <input
-                ref={fileInput} type="file" accept={ACCEPT} hidden aria-label={`File for ${row?.label || item.label}`}
-                onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) onUpload(entry, file); }}
-              />
-            </>
-          )}
-          <Button size="sm" variant="secondary" disabled={busy} onClick={() => onEdit(entry)}>{row ? "Edit" : "Add details"}</Button>
-          {row && <Button size="sm" disabled={busy || !canSign} title={signReason} onClick={() => onSignOff(row)}>Sign off</Button>}
+          {item.kind !== "fact" && <FileButtons entry={entry} busy={busy} onOpenFile={handlers.openFile} onUpload={handlers.upload} />}
+          <Button size="sm" variant="secondary" disabled={busy} onClick={() => handlers.edit(entry)}>{row ? "Edit" : "Add details"}</Button>
+          {row && <SignOffButton entry={entry} busy={busy} onSignOff={handlers.signOff} />}
         </div>
       </div>
       {row && <RowDetails row={row} item={item} />}
-      {editing && <Editor key={row ? row.updated_at : "new"} entry={entry} busy={busy} onSave={(body, extra) => onSave(entry, body, extra)} onArchive={() => onArchive(row)} onCancel={onCancel} />}
+      {editing && (
+        <Editor
+          key={row ? row.updated_at : "new"} entry={entry} busy={busy}
+          onSave={(body, extra) => handlers.save(entry, body, extra)} onArchive={() => handlers.archive(row)} onCancel={handlers.cancel}
+        />
+      )}
     </li>
   );
 }
 
-export default function BidKitPage() {
-  const [params] = useSearchParams();
-  const focusId = params.get("item") || "";
+function Section({ section, counts, editing, busy, focusId, handlers }) {
+  const hasRows = section.entries.some((entry) => entry.row);
+  return (
+    <section aria-labelledby={`bid-kit-section-${section.key}`}>
+      <h2 id={`bid-kit-section-${section.key}`} className="mb-2 text-ui-body font-medium text-zinc-900">
+        {section.label}
+        {counts && <span className="ml-2 font-normal text-ink-secondary">{counts.ready} of {counts.total} ready</span>}
+      </h2>
+      <ul className="grid gap-2">
+        {section.entries.map((entry) => {
+          const id = entry.row ? entry.row.id : `new:${entry.item.key}`;
+          return <Row key={id} entry={entry} busy={busy} editing={editing === id} highlighted={!!entry.row && entry.row.id === focusId} handlers={handlers} />;
+        })}
+      </ul>
+      {section.key === "references" && (
+        <>
+          <Button size="sm" variant="secondary" className="mt-2" disabled={busy} onClick={() => handlers.setEditing(NEW_REFERENCE)}>Add a reference</Button>
+          {editing === NEW_REFERENCE && hasRows && (
+            <Editor
+              entry={{ ...section.entries[0], row: null }} busy={busy}
+              onSave={(body, extra) => handlers.save({ item: section.entries[0].item, row: null }, body, extra)} onArchive={() => {}} onCancel={handlers.cancel}
+            />
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+function SummaryLine({ overall }) {
+  const open = [
+    overall.missing && `${overall.missing} missing`,
+    overall.expired && `${overall.expired} expired`,
+    overall.needs_expiry && `${overall.needs_expiry} need an expiry date`,
+  ].filter(Boolean);
+  return (
+    <span className="ml-2 text-ui-body font-medium text-zinc-900" data-testid="bid-kit-summary">
+      {overall.ready} of {overall.total} ready{overall.expiring > 0 && ` · ${overall.expiring} expiring soon`}
+      {open.length > 0 && <span className="font-normal text-ink-secondary"> · {open.join(", ")}</span>}
+    </span>
+  );
+}
+
+// ---- state ----
+
+function useKit() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState({ text: "", off: false });
-  const [view, setView] = useState("checklist");
-  const [editing, setEditing] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState({ text: "", error: false });
-  const [adding, setAdding] = useState(false);
-
   const load = useCallback(async () => {
     try {
       setData(await api("/"));
@@ -345,15 +524,16 @@ export default function BidKitPage() {
     }
   }, []);
   useEffect(() => { load(); }, [load]);
+  return { data, loading, error, load };
+}
 
-  const checklist = useMemo(() => (data ? buildEntries(data.catalog, data.items) : []), [data]);
-  useEffect(() => {
-    if (!focusId || !data) return;
-    document.getElementById(`bid-kit-${focusId}`)?.scrollIntoView?.({ block: "center" });
-  }, [focusId, data]);
+// The page's writes. One mutation at a time (busy), a message that says what happened, and the list read again after it so
+// statuses and the summary always come from the server. A 409 closes every open editor: they hold fields from the old
+// version, and a later Save would send them with the new version token and overwrite the other change.
+function useKitActions(load, closeEditors) {
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState({ text: "", error: false });
 
-  // One mutation: busy while it runs, the message says what happened, and the list is read again so statuses and the
-  // summary always come from the server.
   const run = async (action, done) => {
     setBusy(true);
     setMessage({ text: "", error: false });
@@ -364,11 +544,7 @@ export default function BidKitPage() {
       return true;
     } catch (err) {
       if (err.status === 409) {
-        // Someone else changed the item (or it already exists). The open editors hold fields from the old version, and a
-        // later Save would send them with the new version token and overwrite the other change, so every editor closes
-        // and the list is read again. The owner makes the change again on the latest version.
-        setEditing("");
-        setAdding(false);
+        closeEditors();
         setMessage({ text: CONFLICT_MESSAGE, error: true });
         await load();
       } else {
@@ -381,41 +557,53 @@ export default function BidKitPage() {
   };
 
   const save = async (entry, body, extra) => {
-    const { row, item } = entry;
-    const ok = await run(async () => {
-      if (row) await api(`/${row.id}`, { method: "PATCH", body: { ...body, expected_updated_at: row.updated_at } });
-      else {
-        const create = { kind: extra.kind || item.kind, item_key: item.key, ...body };
-        if (item.key !== "custom") delete create.label;
-        await api("/", { method: "POST", body: create });
-      }
-    }, "Saved. Check the item again and sign off.");
-    if (ok) { setEditing(""); setAdding(false); }
+    const ok = await run(() => (entry.row ? patchItem(entry.row, body) : createItem(entry.item, body, extra.kind)), "Saved. Check the item again and sign off.");
+    if (ok) closeEditors();
   };
-  const archive = (row) => run(async () => { await api(`/${row.id}`, { method: "DELETE" }); setEditing(""); }, "Archived");
-  const signOff = (row) => run(() => api(`/${row.id}/attest`, { method: "POST", body: { expected_updated_at: row.updated_at } }), "Signed off");
+  const archive = (row) => run(async () => { await archiveItem(row); closeEditors(); }, "Archived");
+  const signOff = (row) => run(() => signOffItem(row), "Signed off");
+  const upload = (entry, file) => run(() => uploadFor(entry, file), "File saved. Check it and sign off.");
+
+  // The tab opens inside the click, before the link is fetched: a tab opened after an await is a pop-up the browser blocks.
   const openFile = async (row) => {
+    const tab = window.open("", "_blank");
+    if (!tab) {
+      setMessage({ text: "Your browser blocked the new tab. Allow pop-ups for this page and try again.", error: true });
+      return;
+    }
+    tab.opener = null;
     try {
-      const { url } = await api(`/${row.id}/file`);
-      window.open(url, "_blank", "noopener,noreferrer");
+      const { url } = await fetchFileLink(row);
+      tab.location.href = url;
     } catch (err) {
+      tab.close();
       setMessage({ text: `Could not open the file: ${err.message}`, error: true });
     }
   };
-  const upload = (entry, file) => run(async () => {
-    let id = entry.row?.id;
-    // An item with no row yet gets a blank row first, so the file has a place to live.
-    if (!id) {
-      const created = await api("/", { method: "POST", body: { kind: entry.item.kind, item_key: entry.item.key } });
-      id = created.item.id;
-    }
-    const form = new FormData();
-    form.append("file", file);
-    await api(`/${id}/file`, { method: "POST", body: form });
-  }, "File saved. Check it and sign off.");
+  return { busy, message, save, archive, signOff, upload, openFile };
+}
 
-  const overall = data?.summary?.overall;
-  const sectionCounts = data?.summary?.sections || {};
+export default function BidKitPage() {
+  const [params] = useSearchParams();
+  const focusId = params.get("item") || "";
+  const { data, loading, error, load } = useKit();
+  const [view, setView] = useState("checklist");
+  const [editing, setEditing] = useState("");
+  const closeEditors = useCallback(() => setEditing(""), []);
+  const actions = useKitActions(load, closeEditors);
+
+  const checklist = useMemo(() => (data ? buildEntries(data.catalog, data.items) : []), [data]);
+  useEffect(() => {
+    if (!focusId || !data) return;
+    const node = document.getElementById(`bid-kit-${focusId}`);
+    if (node && node.scrollIntoView) node.scrollIntoView({ block: "center" });
+  }, [focusId, data]);
+
+  const handlers = {
+    ...actions, setEditing, cancel: closeEditors,
+    edit: (entry) => setEditing(entry.row ? entry.row.id : `new:${entry.item.key}`),
+  };
+  const sectionCounts = (data && data.summary.sections) || {};
 
   return (
     <UiSurface density="comfortable" className="mx-auto max-w-[1100px]">
@@ -433,18 +621,11 @@ export default function BidKitPage() {
           <div className="mb-3 flex flex-wrap items-center gap-2" role="group" aria-label="View">
             <Button size="sm" variant={view === "checklist" ? "primary" : "secondary"} aria-pressed={view === "checklist"} onClick={() => setView("checklist")}>Checklist</Button>
             <Button size="sm" variant={view === "facts" ? "primary" : "secondary"} aria-pressed={view === "facts"} onClick={() => setView("facts")}>Facts sheet</Button>
-            {overall && view === "checklist" && (
-              <span className="ml-2 text-ui-body font-medium text-zinc-900" data-testid="bid-kit-summary">
-                {overall.ready} of {overall.total} ready{overall.expiring > 0 && ` · ${overall.expiring} expiring soon`}
-                {(overall.expired > 0 || overall.missing > 0 || overall.needs_expiry > 0) && (
-                  <span className="font-normal text-ink-secondary"> · {[overall.missing && `${overall.missing} missing`, overall.expired && `${overall.expired} expired`, overall.needs_expiry && `${overall.needs_expiry} need an expiry date`].filter(Boolean).join(", ")}</span>
-                )}
-              </span>
-            )}
+            {data && view === "checklist" && <SummaryLine overall={data.summary.overall} />}
           </div>
 
           {error.text && <ActionFeedback error onRetry={load} className="mb-3">{error.text}</ActionFeedback>}
-          {message.text && <ActionFeedback error={message.error} className="mb-3">{message.text}</ActionFeedback>}
+          {actions.message.text && <ActionFeedback error={actions.message.error} className="mb-3">{actions.message.text}</ActionFeedback>}
           {loading && !data && <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Loading the kit…</div>}
 
           {view === "facts" && <FactsSheet />}
@@ -452,40 +633,14 @@ export default function BidKitPage() {
           {view === "checklist" && data && (
             <div className="grid gap-5">
               {checklist.map((section) => (
-                <section key={section.key} aria-labelledby={`bid-kit-section-${section.key}`}>
-                  <h2 id={`bid-kit-section-${section.key}`} className="mb-2 text-ui-body font-medium text-zinc-900">
-                    {section.label}
-                    {sectionCounts[section.key] && <span className="ml-2 font-normal text-ink-secondary">{sectionCounts[section.key].ready} of {sectionCounts[section.key].total} ready</span>}
-                  </h2>
-                  <ul className="grid gap-2">
-                    {section.entries.map((entry) => {
-                      const id = entry.row ? entry.row.id : `new:${entry.item.key}`;
-                      return (
-                        <Row
-                          key={id} entry={entry} busy={busy} editing={editing === id} highlighted={!!entry.row && entry.row.id === focusId}
-                          onEdit={() => setEditing(id)} onCancel={() => setEditing("")} onSave={save} onArchive={archive}
-                          onSignOff={signOff} onOpenFile={openFile} onUpload={upload}
-                        />
-                      );
-                    })}
-                  </ul>
-                  {section.key === "references" && (
-                    <>
-                      <Button size="sm" variant="secondary" className="mt-2" disabled={busy} onClick={() => setEditing("new:reference")}>Add a reference</Button>
-                      {editing === "new:reference" && section.entries.some((entry) => entry.row) && (
-                        <Editor entry={section.entries[0].row ? { ...section.entries[0], row: null } : section.entries[0]} busy={busy} onSave={(body, extra) => save({ item: section.entries[0].item, row: null }, body, extra)} onArchive={() => {}} onCancel={() => setEditing("")} />
-                      )}
-                    </>
-                  )}
-                </section>
+                <Section key={section.key} section={section} counts={sectionCounts[section.key]} editing={editing} busy={actions.busy} focusId={focusId} handlers={handlers} />
               ))}
               <div>
-                <Button size="sm" variant="secondary" disabled={busy} onClick={() => setAdding((v) => !v)}>Add another item</Button>
-                {adding && (
+                <Button size="sm" variant="secondary" disabled={actions.busy} onClick={() => setEditing(editing === NEW_CUSTOM ? "" : NEW_CUSTOM)}>Add another item</Button>
+                {editing === NEW_CUSTOM && (
                   <Editor
-                    entry={{ item: { key: "custom", kind: "document", label: "", expires: true, why: "" }, row: null, status: "missing" }}
-                    busy={busy} onSave={(body, extra) => save({ item: { key: "custom", kind: extra.kind, label: "" }, row: null }, body, extra)}
-                    onArchive={() => {}} onCancel={() => setAdding(false)}
+                    entry={CUSTOM_ENTRY} busy={actions.busy} onArchive={() => {}} onCancel={closeEditors}
+                    onSave={(body, extra) => actions.save({ item: { key: "custom", kind: extra.kind, label: "" }, row: null }, body, extra)}
                   />
                 )}
               </div>

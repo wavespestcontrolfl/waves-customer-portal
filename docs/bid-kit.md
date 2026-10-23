@@ -19,6 +19,8 @@ Each row keeps: its private file, limits (insurance, whole dollars), source docu
 
 A paper counts as **ready** only after the owner presses Sign off. The sign-off covers the item as the owner saw it:
 
+- Every write, a file replacement included, carries the version of the item the page loaded. A stale page gets a 409 and the open editors close, so old fields never go out with a new version.
+- The expiry bell closes by itself when the item is renewed or archived.
 - Any change to the value, file, limits, details, source document, checked-on date, expiry, or permission date clears the sign-off in the same update. A stale sign-off cannot survive an edit.
 - Sign-off is refused while an item is missing, expired, or has no expiry date when its catalog entry says it expires ("Add the expiry date first"), and for a version that changed since the page loaded (reload and look again).
 - Status is computed, never stored, first match wins: missing, expired, needs expiry, needs permission (a reference with no permission date), needs sign-off, expiring (complete and signed off, but expires within 30 days), ready. The summary counts ready and expiring together as ready, and shows the expiring-soon count beside it ("14 of 31 ready · 2 expiring soon").

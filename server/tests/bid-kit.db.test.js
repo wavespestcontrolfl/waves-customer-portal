@@ -13,9 +13,9 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config', () => ({ s3: { region: 'us-east-1', bucket: 'test-bucket' } }));
-jest.mock('../services/admin-alert-compose', () => ({
-  ...jest.requireActual('../services/admin-alert-compose'),
-  raiseAdminAlert: jest.fn(),
+// The bell service is a stand-in here (its SQL runs in alert-episodes-db.test.js); the kit's own SQL is real.
+jest.mock('../services/admin-alert-episodes', () => ({
+  raiseAdminAlertWithReopen: jest.fn(), openAdminAlertKeys: jest.fn(), closeAdminAlertKeys: jest.fn(),
 }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => { req.techRole = 'admin'; req.technicianId = mockAdminId; next(); },
@@ -39,7 +39,7 @@ const knex = require('knex');
 const express = require('express');
 const { randomUUID } = require('crypto');
 const migration = require('../models/migrations/20261023120000_bid_kit_items');
-const { raiseAdminAlert, composeAdminAlert } = require('../services/admin-alert-compose');
+const episodes = require('../services/admin-alert-episodes');
 const { runBidKitExpiryCheck } = require('../services/bid-kit-expiry');
 
 const describeDb = SKIP ? describe.skip : describe;
@@ -72,8 +72,10 @@ describeDb('Bid kit (PostgreSQL)', () => {
   beforeEach(async () => {
     mockPg = await database.transaction();
     mockSent.length = 0;
-    raiseAdminAlert.mockReset();
-    raiseAdminAlert.mockImplementation(async (_category, spec) => { composeAdminAlert(spec); return { id: randomUUID(), deduped: false }; });
+    for (const fn of Object.values(episodes)) fn.mockReset();
+    episodes.raiseAdminAlertWithReopen.mockImplementation(async () => ({ id: randomUUID(), deduped: false, rang: true }));
+    episodes.openAdminAlertKeys.mockResolvedValue([]);
+    episodes.closeAdminAlertKeys.mockResolvedValue(0);
     mockAdminId = randomUUID();
     await mockPg('technicians').insert({ id: mockAdminId, name: 'Fixture admin' });
   });
@@ -90,8 +92,11 @@ describeDb('Bid kit (PostgreSQL)', () => {
     return { status: res.status, body: await res.json().catch(() => ({})) };
   };
   const create = async (over = {}) => (await call('POST', '', { kind: 'document', item_key: 'business_license_copy', ...over })).body.item;
-  const upload = async (id, name = 'license.pdf') => {
+  // The upload carries the version the page loaded: the row's current one unless a test says otherwise.
+  const upload = async (id, name = 'license.pdf', version) => {
     const form = new FormData();
+    const sent = version === undefined ? (await rowOf(id)).updated_at.toISOString() : version;
+    if (sent !== null) form.append('expected_updated_at', sent);
     form.append('file', new Blob([PDF], { type: 'application/pdf' }), name);
     const res = await fetch(`${baseUrl}/api/admin/bid-kit/${id}/file`, { method: 'POST', body: form });
     return { status: res.status, body: await res.json().catch(() => ({})) };
@@ -239,6 +244,25 @@ describeDb('Bid kit (PostgreSQL)', () => {
       expect((await rowOf(created.id)).file_name).toBe('FDACS license 2026.pdf');
     });
 
+    test('a file replacement is fenced on the version the page loaded: stale or missing is refused and nothing is written', async () => {
+      const created = await create({ item_key: 'business_license_copy', value: 'JB000000', expires_on: '2999-06-30' });
+      const stale = created.updated_at;
+      await call('PATCH', `/${created.id}`, { source_document: 'Typed by someone else', expected_updated_at: stale });
+      expect((await upload(created.id, 'late.pdf', stale)).status).toBe(409);
+      expect((await upload(created.id, 'none.pdf', null)).status).toBe(400);
+      expect(mockSent.filter((c) => c.constructor.name === 'PutObjectCommand')).toHaveLength(0);
+      expect(await rowOf(created.id)).toMatchObject({ file_s3_key: null, source_document: 'Typed by someone else' });
+      // The version read from the database now is accepted (millisecond precision, as the page sends it).
+      expect((await upload(created.id, 'fresh.pdf')).status).toBe(200);
+      expect((await rowOf(created.id)).file_name).toBe('fresh.pdf');
+      // Under the row lock the same fence holds: a version that moved between the early check and the write is a conflict.
+      const store = require('../services/bid-kit-store');
+      const before = await rowOf(created.id);
+      const conflict = await store.replaceFile(created.id, { key: 'bid-kit/x/y.pdf', fileName: 'y.pdf', contentType: 'application/pdf', size: 1 }, new Date(before.updated_at.getTime() - 1000).toISOString());
+      expect(conflict).toEqual({ conflict: true });
+      expect((await rowOf(created.id)).file_s3_key).toBe(before.file_s3_key);
+    });
+
     test('one live row per catalog item (references repeat); archive keeps the row and frees the slot', async () => {
       await create({ item_key: 'w9' });
       expect((await call('POST', '', { kind: 'document', item_key: 'w9' })).status).toBe(409);
@@ -303,12 +327,34 @@ describeDb('Bid kit (PostgreSQL)', () => {
       const gone = await create({ item_key: 'drug_free_policy', value: 'On file', expires_on: '2000-01-01' });
       await call('DELETE', `/${gone.id}`);
       const result = await runBidKitExpiryCheck();
-      expect(result).toEqual({ scanned: 2, rang: 2 });
-      const rung = raiseAdminAlert.mock.calls.map(([category, spec, opts]) => ({ category, id: spec.subject.id, key: opts.dedupeKey, window: opts.dedupeWindowMs }));
+      expect(result).toEqual({ scanned: 2, rang: 2, closed: 0 });
+      const rung = episodes.raiseAdminAlertWithReopen.mock.calls.map(([category, , , opts]) => ({ category, id: opts.metadata.subject.id, key: opts.dedupeKey, window: opts.dedupeWindowMs }));
       expect(rung).toEqual(expect.arrayContaining([
         { category: 'system', id: expired.id, key: `bid-kit:expiry:${expired.id}`, window: 7 * 86400000 },
         { category: 'system', id: soon.id, key: `bid-kit:expiry:${soon.id}`, window: 7 * 86400000 },
       ]));
+    });
+
+    test('a renewal, an archive and a vanished item close their bells; an item still inside the window keeps its bell', async () => {
+      const kept = await create({ item_key: 'insurance_certificate', value: 'POL-0001', expires_on: addDays(5) });
+      const renewed = await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: addDays(5) });
+      const archived = await create({ item_key: 'drug_free_policy', value: 'On file', expires_on: addDays(5) });
+      episodes.closeAdminAlertKeys.mockClear();
+      // A save that moves the date out of the window closes that bell at once.
+      expect((await call('PATCH', `/${renewed.id}`, { expires_on: addDays(300), expected_updated_at: renewed.updated_at })).status).toBe(200);
+      expect(episodes.closeAdminAlertKeys.mock.calls.map(([, keys, reason]) => [keys, reason])).toEqual([[[`bid-kit:expiry:${renewed.id}`], 'renewed']]);
+      // So does an archive.
+      await call('DELETE', `/${archived.id}`);
+      expect(episodes.closeAdminAlertKeys.mock.calls.at(-1).slice(1, 3)).toEqual([[`bid-kit:expiry:${archived.id}`], 'archived']);
+      // The daily job closes every open bell that no longer qualifies, and only those.
+      episodes.closeAdminAlertKeys.mockClear();
+      episodes.openAdminAlertKeys.mockResolvedValue([kept, renewed, archived, { id: randomUUID() }].map((row) => `bid-kit:expiry:${row.id}`));
+      const result = await runBidKitExpiryCheck();
+      expect(result.scanned).toBe(1);
+      const [, keys, reason] = episodes.closeAdminAlertKeys.mock.calls[0];
+      expect(reason).toBe('no_longer_qualifies');
+      expect(keys).toEqual(expect.arrayContaining([`bid-kit:expiry:${renewed.id}`, `bid-kit:expiry:${archived.id}`]));
+      expect(keys).not.toContain(`bid-kit:expiry:${kept.id}`);
     });
 
     test('with the gate off it reads nothing', async () => {
@@ -316,7 +362,7 @@ describeDb('Bid kit (PostgreSQL)', () => {
       process.env.GATE_BID_KIT = 'false';
       try {
         expect(await runBidKitExpiryCheck()).toEqual({ skipped: 'gate_off' });
-        expect(raiseAdminAlert).not.toHaveBeenCalled();
+        expect(episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
       } finally {
         process.env.GATE_BID_KIT = 'true';
       }

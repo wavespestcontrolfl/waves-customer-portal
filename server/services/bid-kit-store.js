@@ -69,11 +69,14 @@ async function updateItem(id, compute) {
   });
 }
 
-// Puts a new file on the row and clears the sign-off in the same update. Returns the old key so the caller can remove it.
-async function replaceFile(id, file) {
+// Puts a new file on the row and clears the sign-off in the same update, but only against the version the page loaded
+// (millisecond precision, like every other versioned write): a row that changed since is { conflict: true } and nothing is
+// written. Returns the old key so the caller can remove it.
+async function replaceFile(id, file, expectedUpdatedAt) {
   return db.transaction(async (trx) => {
-    const locked = await trx(TABLE).where({ id }).forUpdate().first('id', 'file_s3_key', 'archived_at');
+    const locked = await trx(TABLE).where({ id }).forUpdate().first('id', 'file_s3_key', 'archived_at', 'updated_at');
     if (!locked || locked.archived_at) return { notFound: true };
+    if (new Date(locked.updated_at).getTime() !== new Date(expectedUpdatedAt).getTime()) return { conflict: true };
     await trx(TABLE).where({ id }).update({
       file_s3_key: file.key,
       file_name: file.fileName,
