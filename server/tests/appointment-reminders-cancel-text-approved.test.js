@@ -8,7 +8,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const mockState = {
-  reminder: null, customer: null, prefs: null, claim: 1, cancelled: true, updates: [],
+  reminder: null, customer: null, prefs: null, claim: 1, cancelled: true, updates: [], audit: null,
 };
 jest.mock('../models/db', () => {
   const chain = (table) => {
@@ -19,6 +19,7 @@ jest.mock('../models/db', () => {
         if (table === 'appointment_reminders') return mockState.reminder;
         if (table === 'customers') return mockState.customer;
         if (table === 'notification_prefs') return mockState.prefs;
+        if (table === 'messaging_audit_log') return mockState.audit;
         if (table === 'scheduled_services') return { status: mockState.cancelled ? 'cancelled' : 'confirmed', tech_name: null };
         return null;
       },
@@ -62,6 +63,7 @@ beforeEach(() => {
   mockState.prefs = null;
   mockState.claim = 1;
   mockState.updates = [];
+  mockState.audit = null;
   mockSelectVariant.mockResolvedValue(null);
   // Mirrors getTemplate: a pinned snapshot body renders as given, else the base body.
   mockGetTemplate.mockImplementation(async (_key, vars, _ctx, opts = {}) => render(opts.templateBody ?? BASE, vars));
@@ -340,5 +342,39 @@ describe('the approved send owns a pending_approved marker', () => {
     expect(states[states.length - 1]).toBe('suppressed');
     expect(states.slice(1)).not.toContain('pending');
     expect(states.slice(1)).not.toContain('pending_notify');
+  });
+});
+
+// What the cancel recovery sweep (services/ib-cancel-effect-bundles.js) asks before it may send the approved text:
+// only an untouched 'pending_approved' marker is 'ready'; a 'sent' marker with no accepted audit row means the provider
+// handoff may have begun, so it is 'uncertain' and is never sent again.
+describe('approvedCancellationNoticeStatus', () => {
+  const statusFor = async (state, audit = null) => {
+    mockState.reminder = { id: 'rem-1', cancellation_notice_state: state };
+    mockState.audit = audit;
+    return AppointmentReminders.approvedCancellationNoticeStatus('svc-1');
+  };
+
+  test.each([
+    ['pending_approved', null, 'ready'],
+    ['sent', { id: 'audit-1' }, 'delivered'],
+    ['sent', null, 'uncertain'],
+    ['suppressed', null, 'suppressed'],
+    ['pending', null, 'other'],
+    ['pending_notify', null, 'other'],
+    [null, null, 'other'],
+  ])('marker %s with audit %j is %s', async (state, audit, expected) => {
+    expect(await statusFor(state, audit)).toBe(expected);
+  });
+
+  test('no reminder row at all', async () => {
+    mockState.reminder = null;
+    expect(await AppointmentReminders.approvedCancellationNoticeStatus('svc-1')).toBe('no_reminder');
+  });
+
+  test('it never sends or claims anything', async () => {
+    await statusFor('pending_approved');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockState.updates).toEqual([]);
   });
 });

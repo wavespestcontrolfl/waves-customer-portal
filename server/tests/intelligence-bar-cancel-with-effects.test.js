@@ -186,6 +186,22 @@ describe('cancel_appointment confirm WITH effects replays the Dispatch cancel', 
     expect(mockReseed).not.toHaveBeenCalled();
   });
 
+  test('the pending action id rides to the handler so the approved effects are saved under it (recovery bundle)', async () => {
+    await executeTool('cancel_appointment', input(), { ...ADMIN, operationId: 'pending-action-1' });
+    expect(mockCancelFromBar.mock.calls[0][0].recovery).toEqual({ pendingActionId: 'pending-action-1' });
+    // A caller with no operation id still gets a bundle (no pending action id), never a silent no-record cancel.
+    mockCancelFromBar.mockClear();
+    await executeTool('cancel_appointment', input(), ADMIN);
+    expect(mockCancelFromBar.mock.calls[0][0].recovery).toEqual({ pendingActionId: null });
+  });
+
+  test('a step-after-commit warning says the saved steps are finished automatically', async () => {
+    mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, postCommitFailure: 'connection terminated' } });
+    const result = await executeTool('cancel_appointment', input(), ADMIN);
+    expect(result.warning).toMatch(/within about 15 minutes the system finishes any invoice, credit or linked-visit step that is left/);
+    expect(result.warning).toMatch(/approved text, only if it was never started/);
+  });
+
   test('"cancel without a text" is carried as notifyCustomer false, and nothing is reported sent', async () => {
     const silent = { ...FROZEN, notify_customer: false, customer_text: { would_send: false, body: null, template_body: null, recipients: [], reason: 'cancelled_without_text' } };
     mockComputeImpact.mockResolvedValue(silent);

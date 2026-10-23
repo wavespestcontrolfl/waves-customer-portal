@@ -3336,6 +3336,11 @@ async function serviceStatusHandler(req, res, next) {
         logger.error(`[admin-dispatch] recurring series maintenance failed (non-blocking): ${seriesErr.message}`);
       }
     } else if (toStatus === 'cancelled') {
+      // Only the Intelligence Bar cancel carries a recovery record (req.ibCancelBundleId, written in the cancel
+      // transaction by cancelServiceFromBar): this request keeps its lease, notes the text outcome and marks the record
+      // complete. If the process dies first, the recovery sweep finishes what the card approved (ib-cancel-effect-bundles.js).
+      const cancelBundles = require('../services/ib-cancel-effect-bundles');
+      await cancelBundles.liveStart(req);
       try {
         const AppointmentReminders = require('../services/appointment-reminders');
         // Out-param so the response can tell the operator the cancel
@@ -3350,6 +3355,7 @@ async function serviceStatusHandler(req, res, next) {
           ...(req.ibApprovedCancelNotice ? { approvedNotice: req.ibApprovedCancelNotice } : {}),
         });
       } catch (e) { logger.error(`[admin-dispatch] cancellation reminder handling failed: ${e.message}`); }
+      await cancelBundles.liveNotice(req, cancelNoticeOutcome);
 
       // Share fee outcome alerts, invoice cleanup, and tracker updates with
       // series cancellations. The helper uses the committed cancellation time
@@ -3366,6 +3372,7 @@ async function serviceStatusHandler(req, res, next) {
         // PaymentIntents, credits to reverse, no card rail). The follow-through acts on these only.
         ...(req.ibApprovedMoney ? { pinnedEffects: { [svc.id]: req.ibApprovedMoney }, moneyReport: req.ibMoneyReport } : {}),
       });
+      await cancelBundles.liveFinish(req);
       // Counted-plan reseed (owner ruling 2026-09-24): a single-visit cancel
       // inside a 9-application plan adds one back at the end of the series.
       // Only this single-visit branch — the 'following' / 'series' scope
@@ -3509,7 +3516,12 @@ async function serviceStatusHandler(req, res, next) {
 // and no coordinates. `beforeCommit(trx)` runs inside the handler's cancel transaction right after it locks the visit.
 // `approvedNotice` and `linkedChildren` carry what the card showed: the send uses exactly that text, and the linked
 // visits not on the card (or changed since) are left alone and reported as `linkedVisitsSkipped`.
-function cancelServiceFromBar({ serviceId, notifyCustomer, notes, actor, beforeCommit, approvedNotice, linkedChildren, approvedMoney }) {
+// `recovery` ({ pendingActionId }) turns on the recovery record: right after `beforeCommit`'s re-check passes, the cancel
+// transaction also writes one ib_cancel_effect_bundles row holding the card's approved effects (the pinned invoices and
+// credits, the approved text per recipient or the no-text choice, the approved linked visits, the pending action id and the
+// actor), so the work after the commit survives a process exit (services/ib-cancel-effect-bundles.js). Any failure to
+// write it aborts the cancel. Without `recovery` nothing is written.
+function cancelServiceFromBar({ serviceId, notifyCustomer, notes, actor, beforeCommit, approvedNotice, linkedChildren, approvedMoney, recovery }) {
   return new Promise((resolve, reject) => {
     const res = {
       statusCode: 200,
@@ -3521,7 +3533,21 @@ function cancelServiceFromBar({ serviceId, notifyCustomer, notes, actor, beforeC
       body: { status: 'cancelled', scope: 'this_only', notifyCustomer: notifyCustomer !== false, ...(notes ? { notes } : {}) },
       techRole: 'admin',
       technicianId: actor?.technicianId || null,
-      ibBeforeCancelCommit: beforeCommit,
+      ibBeforeCancelCommit: recovery
+        ? async (trx) => {
+          if (beforeCommit) await beforeCommit(trx);
+          req.ibCancelBundleId = await require('../services/ib-cancel-effect-bundles').insertBundle(trx, {
+            pendingActionId: recovery.pendingActionId || null,
+            scheduledServiceId: serviceId,
+            actorId: actor?.technicianId || null,
+            notes,
+            notifyCustomer: notifyCustomer !== false,
+            approvedNotice: approvedNotice || null,
+            linkedChildren: Array.isArray(linkedChildren) ? linkedChildren : [],
+            approvedMoney: approvedMoney || {},
+          });
+        }
+        : beforeCommit,
       // The card's approvals: the text per recipient ([{ recipient_key, body }]) and the linked visits
       // ([{ id, status, scheduled_date, service_type }]). The handler's cascade cancels only those.
       ibApprovedCancelNotice: approvedNotice || null,

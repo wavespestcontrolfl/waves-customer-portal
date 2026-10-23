@@ -258,3 +258,99 @@ describe('cancelServiceFromBar replays the Dispatch cancel handler with the card
     expect(json.error).toBe('Service not found');
   });
 });
+
+// The recovery record (ib_cancel_effect_bundles, services/ib-cancel-effect-bundles.js): with `recovery` the cancel
+// transaction also saves what the card approved, and the request marks it complete when its follow-through returns.
+describe('the recovery bundle rides the cancel transaction', () => {
+  const BUNDLE = 'ib_cancel_effect_bundles';
+  const bundleWrites = () => db.__state.writes.filter((w) => w.table === BUNDLE);
+  const approvedMoney = { invoices: [{ id: 'inv-1', total: 120 }], creditReversalOfferIds: ['offer-1'] };
+  const approvedNotice = [{ recipient_key: 'abc123abc123abc1', body: 'Hi Synthia, your visit is cancelled.' }];
+  const linkedChildren = [{ id: 'child-1', status: 'confirmed', scheduled_date: '2026-11-02', service_type: 'pest_control' }];
+  const run = (extra = {}) => cancelServiceFromBar({
+    serviceId: 'svc-bar-1', notifyCustomer: true, notes: 'Cancelled via Intelligence Bar: rain', actor: ACTOR,
+    approvedNotice, linkedChildren, approvedMoney, recovery: { pendingActionId: 'action-1' }, ...extra,
+  });
+
+  test('the bundle holds exactly the card\'s approvals and is written inside the transaction, after the re-check and before the status change', async () => {
+    const order = [];
+    mockTransitionJobStatus.mockImplementationOnce(async () => {
+      order.push(bundleWrites().some((w) => w.op === 'insert') ? 'bundle-then-transition' : 'transition-first');
+      return { ok: true, adminPayload: null };
+    });
+    await run({ beforeCommit: async () => { order.push(bundleWrites().length === 0 ? 'recheck-first' : 'recheck-late'); } });
+    expect(order).toEqual(['recheck-first', 'bundle-then-transition']);
+    const insert = bundleWrites().find((w) => w.op === 'insert');
+    expect(insert.r).toMatchObject({
+      pending_action_id: 'action-1', scheduled_service_id: 'svc-bar-1', actor_id: 'admin-1', notify_customer: true,
+      notes: 'Cancelled via Intelligence Bar: rain', lease_owner: 'request',
+    });
+    expect(JSON.parse(insert.r.approved_notice)).toEqual(approvedNotice);
+    expect(JSON.parse(insert.r.linked_children)).toEqual(linkedChildren);
+    expect(JSON.parse(insert.r.approved_money)).toEqual(approvedMoney);
+    const begin = db.__state.writes.findIndex((w) => w.op === 'begin');
+    const commit = db.__state.writes.findIndex((w) => w.op === 'commit');
+    const at = db.__state.writes.indexOf(insert);
+    expect(begin).toBeLessThan(at);
+    expect(at).toBeLessThan(commit);
+  });
+
+  test('a card that chose no text saves that choice (no approved bodies)', async () => {
+    await run({ notifyCustomer: false, approvedNotice: null });
+    const insert = bundleWrites().find((w) => w.op === 'insert');
+    expect(insert.r.notify_customer).toBe(false);
+    expect(insert.r.approved_notice).toBeNull();
+  });
+
+  test('the request keeps its lease, notes the text outcome, and marks the bundle complete only AFTER the follow-through returns', async () => {
+    let writesAtFollowThrough = null;
+    mockRunFollowThrough.mockImplementationOnce(async ({ moneyReport }) => {
+      writesAtFollowThrough = db.__state.writes.length;
+      moneyReport.skipped.push({ kind: 'invoice', id: 'inv-1', reason: 'not_voided_changed_since_card' });
+    });
+    await run();
+    const updates = bundleWrites().filter((w) => w.op === 'update').map((w) => w.u);
+    expect(updates[0]).toMatchObject({ lease_owner: 'request' });
+    expect(updates[1].notice_outcome).toBe(JSON.stringify({ state: 'sent', by: 'request' }));
+    const done = updates.find((u) => u.status === 'complete');
+    expect(done).toBeTruthy();
+    expect(JSON.parse(done.followthrough_outcome)).toEqual({ money_skipped: [{ kind: 'invoice', id: 'inv-1', reason: 'not_voided_changed_since_card' }], linked_skipped: [] });
+    const doneAt = db.__state.writes.findIndex((w) => w.table === BUNDLE && w.u && w.u.status === 'complete');
+    expect(doneAt).toBeGreaterThanOrEqual(writesAtFollowThrough);
+  });
+
+  test('a follow-through that throws leaves the bundle PENDING for the recovery sweep, and the reply says a step failed', async () => {
+    mockRunFollowThrough.mockRejectedValueOnce(new Error('connection terminated'));
+    const { status, json } = await run();
+    expect(status).toBe(200);
+    expect(json.postCommitFailure).toBe('connection terminated');
+    expect(bundleWrites().some((w) => w.u && w.u.status === 'complete')).toBe(false);
+  });
+
+  test('a bundle that cannot be written aborts the cancel: nothing transitions, no text, no follow-through', async () => {
+    db.__state.failInsert = BUNDLE;
+    await expect(run()).rejects.toThrow('connection terminated');
+    expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+    expect(mockHandleCancellation).not.toHaveBeenCalled();
+    expect(mockRunFollowThrough).not.toHaveBeenCalled();
+    expect(db.__state.writes.at(-1)).toEqual({ table: '<trx>', op: 'rollback' });
+  });
+
+  test('a re-check refusal (preview_changed) writes no bundle', async () => {
+    const { status } = await run({ beforeCommit: async () => { throw Object.assign(new Error('changed'), { status: 409, code: 'preview_changed' }); } });
+    expect(status).toBe(409);
+    expect(bundleWrites()).toEqual([]);
+  });
+
+  test('a transition that fails after the bundle insert rolls back with the transaction (the insert is inside it)', async () => {
+    mockTransitionJobStatus.mockRejectedValueOnce(new Error('deadlock detected'));
+    await expect(run()).rejects.toThrow('deadlock detected');
+    expect(db.__state.writes.at(-1)).toEqual({ table: '<trx>', op: 'rollback' });
+    expect(bundleWrites().some((w) => w.u && w.u.status === 'complete')).toBe(false);
+  });
+
+  test('without `recovery` no bundle is written (older callers and the Dispatch screen are unchanged)', async () => {
+    await run({ recovery: undefined });
+    expect(bundleWrites()).toEqual([]);
+  });
+});

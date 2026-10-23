@@ -4619,6 +4619,9 @@ async function cancelWithEffects(input, actionContext, appt) {
       },
       notes: reason ? `Cancelled via Intelligence Bar: ${reason}` : 'Cancelled via Intelligence Bar',
       actor: { technicianId: actionContext.technicianId || null },
+      // The card's approved effects are also saved IN the cancel transaction (ib_cancel_effect_bundles), keyed by this
+      // pending action, so a process exit after the commit cannot strand them: a recovery sweep finishes them.
+      recovery: { pendingActionId: actionContext.operationId || null },
       // Under the visit lock: lock the linked visits too, then compare cheap DB fields only (PaymentIntents were
       // looked up before the lock; one that appeared since cannot be checked here and counts as a change).
       beforeCommit: async (trx) => {
@@ -4674,7 +4677,7 @@ function cancelReplayWarnings(json, sendText) {
   // A step after the cancel committed failed (activity log, settlement bookkeeping...): the visit IS cancelled and the
   // text / money steps before it may have run, so this is a success with a warning, never a failed action.
   if (json.postCommitFailure) {
-    warnings.push(`The visit is cancelled, but a step after the cancel did not finish (${json.postCommitFailure}). Nothing was undone: check the visit's invoices and credit and the customer's message history${sendText && json.notificationSent === undefined ? ' (the customer text may or may not have gone out)' : ''} before doing anything again.`);
+    warnings.push(`The visit is cancelled, but a step after the cancel did not finish (${json.postCommitFailure}). Nothing was undone: check the visit's invoices and credit and the customer's message history${sendText && json.notificationSent === undefined ? ' (the customer text may or may not have gone out)' : ''} before doing anything again. The approved steps are saved: within about 15 minutes the system finishes any invoice, credit or linked-visit step that is left (and the approved text, only if it was never started) and posts a note to the office alerts.`);
   }
   // Delivery unproven (the provider may have accepted it): never advise a resend, whatever else is true.
   if (sendText && json.notificationUncertain === true) {

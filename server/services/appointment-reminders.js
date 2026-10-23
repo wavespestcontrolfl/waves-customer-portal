@@ -2636,6 +2636,26 @@ const cancellationAuditAccepted = async (scheduledServiceId) => Boolean(await db
     )
     .first('id'));
 
+// Read-only: where the card-approved cancellation text of a visit stands, for the Intelligence Bar cancel recovery sweep
+// (services/ib-cancel-effect-bundles.js). That sweep may call handleCancellation with the approved text ONLY for 'ready'.
+// 'ready' = the cancel transaction's approved marker is still untouched, so no send reached the provider handoff (the
+// pre-dispatch 'sent' stamp comes before the handoff). 'delivered' = marker 'sent' with a provider-accepted audit row.
+// 'uncertain' = marker 'sent' with NO audit evidence: the handoff may have happened, so it is never sent again.
+// 'suppressed' = terminal (the approved send failed or was blocked, or the card chose no text). 'no_reminder' = no
+// reminder row. 'other' = any other marker, which the approved send does not own. Lives with the approved-send helpers
+// (cancel-notice-approved-marker.test.js keeps that marker out of every sweep); it claims and sends nothing.
+async function approvedNoticeStatus(scheduledServiceId) {
+  const record = await db('appointment_reminders')
+    .where({ scheduled_service_id: scheduledServiceId })
+    .first('id', 'cancellation_notice_state');
+  if (!record) return 'no_reminder';
+  const state = record.cancellation_notice_state;
+  if (state === 'pending_approved') return 'ready';
+  if (state === 'sent') return (await cancellationAuditAccepted(scheduledServiceId)) ? 'delivered' : 'uncertain';
+  if (state === 'suppressed') return 'suppressed';
+  return 'other';
+}
+
 // handleCancellation could not take the claim: say, from the claim state, whether the customer already has the text.
 async function reportUnclaimedCancellationNotice({ record, scheduledServiceId, acceptedCancellationAudit, reportOutcome }) {
     // A terminal 'sent' marker means the customer HAS the text — a
@@ -4999,6 +5019,11 @@ const AppointmentReminders = {
       });
     }
     return { would_send: true, body: recipients[0].body, template_body: templateBody, recipients, reason: null };
+  },
+
+  // Read-only: where the card-approved cancellation text of a visit stands (approvedNoticeStatus, above).
+  async approvedCancellationNoticeStatus(scheduledServiceId) {
+    return approvedNoticeStatus(scheduledServiceId);
   },
 
   /**
