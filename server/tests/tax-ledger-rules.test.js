@@ -370,7 +370,7 @@ describe('decide', () => {
 
   test('later only flags the suggestion and clears an income shelf; the row stays open', async () => {
     state.bankRow = open();
-    expect(await svc.decide({ id: 'b1', decision: 'later' })).toEqual({ success: true, action: 'later', ruleCreated: false });
+    expect(await svc.decide({ id: 'b1', decision: 'later' })).toEqual({ success: true, action: 'later', ruleCreated: false, propagated: true });
     expect(state.updates).toHaveLength(1);
     expect(state.updates[0].patch).toEqual({ suggestion: { merged: { later: true }, removed: ['income', 'decision', 'decidedAt'] }, updated_at: expect.any(Date) });
     expect(state.updates[0].wheres).toEqual([{ id: 'b1', status: 'unmatched' }, svc.DECIDABLE_SQL]);
@@ -378,7 +378,7 @@ describe('decide', () => {
 
   test('income moves the row to the Income shelf: still unmatched, nothing counts it as revenue', async () => {
     state.bankRow = open();
-    expect(await svc.decide({ id: 'b1', decision: 'income' })).toEqual({ success: true, action: 'income', ruleCreated: false });
+    expect(await svc.decide({ id: 'b1', decision: 'income' })).toEqual({ success: true, action: 'income', ruleCreated: false, propagated: true });
     const u = state.updates[0];
     expect(u.wheres).toEqual([{ id: 'b1', status: 'unmatched' }, svc.DECIDABLE_SQL]);
     expect(u.patch.status).toBeUndefined();
@@ -389,12 +389,25 @@ describe('decide', () => {
     await expect(svc.decide({ id: 'b1', decision: 'income' })).rejects.toMatchObject({ status: 409 });
   });
 
+  test('income on a row whose only examination marker is the matcher ignore flag keeps the evidence (examined:true)', async () => {
+    state.bankRow = { ...open(), suggestion: { ignore: true, reason: 'internal transfer?' } };
+    await svc.decide({ id: 'b1', decision: 'income' });
+    expect(state.updates[0].patch.suggestion.merged).toEqual(expect.objectContaining({ income: true, examined: true }));
+    expect(state.updates[0].patch.suggestion.removed).toContain('ignore');
+    expect(svc.matcherExamined({ suggestion: { income: true, examined: true } })).toBe(true);
+    expect(svc.MATCHER_EXAMINED_SQL).toContain("'examined'");
+    // with another marker present nothing extra is written
+    state.updates = []; state.bankRow = { ...open(), suggestion: { ignore: true, noMatch: true } };
+    await svc.decide({ id: 'b1', decision: 'income' });
+    expect(state.updates[0].patch.suggestion.merged.examined).toBeUndefined();
+  });
+
   test.each([
     ['personal', { personal: true }],
     ['transfer', { ignore: true }],
   ])('%s parks the row as ignored with the reason and clears the other classification keys', async (decision, flag) => {
     state.bankRow = open();
-    expect(await svc.decide({ id: 'b1', decision })).toEqual({ success: true, action: 'ignored', ruleCreated: false });
+    expect(await svc.decide({ id: 'b1', decision })).toEqual({ success: true, action: 'ignored', ruleCreated: false, propagated: true });
     const u = state.updates[0];
     expect(u.wheres).toEqual([{ id: 'b1', status: 'unmatched' }, svc.DECIDABLE_SQL]);
     expect(u.patch.status).toBe('ignored');
@@ -425,7 +438,7 @@ describe('decide', () => {
     state.rules = [{ id: 'rule-new', pattern: '\\bwawa\\b', kind: 'personal', priority: 10, enabled: true, source: 'owner' }];
     state.bankRows = [{ id: 'b9', description: 'DEBIT CARD PURCHASE - WAWA 1234', suggestion: { noMatch: true, rule: { id: 'seed' } } }];
     const out = await svc.decide({ id: 'b1', decision: 'personal', always: true });
-    expect(out).toEqual({ success: true, action: 'ignored', ruleCreated: true });
+    expect(out).toEqual({ success: true, action: 'ignored', ruleCreated: true, propagated: true });
     expect(mockDb.transaction).toHaveBeenCalled();
     expect(state.inserted).toHaveLength(1);
     expect(state.inserted[0]).toEqual(expect.objectContaining({ pattern: '\\bwawa\\b', kind: 'personal', priority: 10, source: 'owner', enabled: true, category_id: null }));
@@ -433,6 +446,17 @@ describe('decide', () => {
     expect(state.updates.map((u) => u.wheres[0].id)).toEqual(['b1', 'b9']);
     expect(state.updates[0].patch.status).toBe('ignored');
     expect(state.updates[1].patch.status).toBeUndefined();
+  });
+
+  test('a failed payee pass after a committed decision is logged, not reported as a failure', async () => {
+    state.bankRow = open();
+    const plain = (table) => builder(table);
+    mockDb.mockImplementation((table) => { if (table === 'tax_ledger_rules as r') throw new Error('db down'); return plain(table); });
+    const out = await svc.decide({ id: 'b1', decision: 'personal', always: true });
+    mockDb.mockImplementation(plain);
+    expect(out).toEqual({ success: true, action: 'ignored', ruleCreated: true, propagated: false });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('payee pass after a decision failed: db down'));
+    expect(state.inserted).toHaveLength(1);
   });
 
   test('always on a refused decision writes no rule', async () => {
@@ -477,7 +501,7 @@ describe('views', () => {
     }
     expect(svc.VIEW_SQL.bankImport).toMatch(/^not \(/);
     expect(svc.VIEW_SQL.unexamined).toBe(`not ${svc.MATCHER_EXAMINED_SQL}`);
-    expect(svc.MATCHER_EXAMINED_SQL).toContain("array['noMatch','candidates','payoutCandidates','refundCandidates']");
+    expect(svc.MATCHER_EXAMINED_SQL).toContain("array['noMatch','candidates','payoutCandidates','refundCandidates','examined']");
     expect(svc.matcherExamined({ suggestion: { noMatch: true } })).toBe(true);
     expect(svc.matcherExamined({ suggestion: { ignore: true, reason: 'x' } })).toBe(true);
     // an ignore a transfer RULE wrote does not count: a rule cannot manufacture "examined"

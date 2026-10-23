@@ -2363,6 +2363,8 @@ router.post('/bank-import/:id/create-expense', async (req, res, next) => {
     // after the Inbox loaded still wins over a second expense.
     const fromLedger = !!req.body?.fromLedger;
     if (fromLedger) {
+      // dark ledger = invisible ledger, this entry point included
+      if (!taxLedgerRules.isOn()) return res.status(404).json({ error: 'not found' });
       const block = taxLedgerRules.inboxBlock(row);
       if (block) return res.status(409).json({ error: block });
     }

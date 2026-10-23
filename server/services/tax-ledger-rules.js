@@ -66,7 +66,10 @@ function hasLiveCandidates(row) {
 // manufacture "examined". Rules are applied to examined rows only, so the
 // two never meet; this keeps it true even if that changes.
 // (Function forms: knex.raw would read the ? and ?| operators as bindings.)
-const MATCHER_KEYS = ['noMatch', 'candidates', 'payoutCandidates', 'refundCandidates'];
+// 'examined' is written by decide() only, when a decision must drop the
+// matcher's ignore flag (the only marker a transfer-shaped row carries), so
+// the evidence survives the classification change. No rule ever writes it.
+const MATCHER_KEYS = ['noMatch', 'candidates', 'payoutCandidates', 'refundCandidates', 'examined'];
 const SUG = "coalesce(suggestion, '{}'::jsonb)";
 const MATCHER_EXAMINED_SQL = `(jsonb_exists_any(${SUG}, array[${MATCHER_KEYS.map((k) => `'${k}'`).join(',')}]) or (jsonb_exists(${SUG}, 'ignore') and not jsonb_exists(${SUG}, 'rule')))`;
 function matcherExamined(row) {
@@ -363,9 +366,13 @@ async function decide({ id, decision, categoryId = null, always = false }) {
     write = { suggestion: bankImport.suggestionMerge({ later: true }, ['income', 'decision', 'decidedAt']), updated_at: now };
   } else if (decision === 'income') {
     // Stays an open row, on the Income shelf: nothing counts it as revenue
-    // yet, and hiding it would understate sales.
+    // yet, and hiding it would understate sales. Dropping the matcher's
+    // ignore flag must not drop the row's examination evidence with it.
     action = 'income';
-    write = { suggestion: bankImport.suggestionMerge({ income: true, reason: INCOME_REASON, decision, decidedAt: now.toISOString() }, ['ignore', 'personal', 'review', 'note', 'later']), updated_at: now };
+    const sug = row.suggestion || {};
+    const patch = { income: true, reason: INCOME_REASON, decision, decidedAt: now.toISOString() };
+    if (sug.ignore && !MATCHER_KEYS.some((k) => sug[k] !== undefined && sug[k] !== null)) patch.examined = true;
+    write = { suggestion: bankImport.suggestionMerge(patch, ['ignore', 'personal', 'review', 'note', 'later']), updated_at: now };
   } else {
     action = 'ignored';
     const patch = { reason: `${decision} per the owner`, decision, decidedAt: now.toISOString() };
@@ -380,8 +387,16 @@ async function decide({ id, decision, categoryId = null, always = false }) {
     if (!changed) throw httpError(409, 'the row changed while you were deciding (a possible match or a bank change appeared); reload');
     if (rule) await createRule({ ...rule, conn: trx });
   });
-  if (rule) await applyRules({ limit: MAX_EXAMINE, force: true, pattern: rule.pattern });
-  return { success: true, action, ruleCreated: !!rule };
+  // the decision and the rule are committed: a failed payee pass is logged,
+  // never reported as a failed decision (a retry would meet a 409)
+  let propagated = true;
+  if (rule) {
+    try { await applyRules({ limit: MAX_EXAMINE, force: true, pattern: rule.pattern }); } catch (err) {
+      propagated = false;
+      logger.warn(`[tax-ledger] payee pass after a decision failed: ${err.message}`);
+    }
+  }
+  return { success: true, action, ruleCreated: !!rule, propagated };
 }
 
 module.exports = {

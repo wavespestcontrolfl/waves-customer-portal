@@ -340,6 +340,7 @@ describe('upload (gate on)', () => {
 });
 
 describe('create-expense (gate on)', () => {
+  afterAll(() => { delete process.env.GATE_TAX_LEDGER; });
   beforeEach(() => {
     process.env.GATE_BANK_IMPORT = 'true';
     state.bankRow = {
@@ -405,7 +406,17 @@ describe('create-expense (gate on)', () => {
 
   // The ledger Inbox (GATE_TAX_LEDGER) marks its calls fromLedger: the row
   // must be one the Inbox may decide, and the claim repeats the check.
+  test('fromLedger with the ledger gate off is a 404, like every ledger route', async () => {
+    delete process.env.GATE_TAX_LEDGER;
+    state.bankRow.suggestion = { noMatch: true };
+    expect((await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals', fromLedger: true })).status).toBe(404);
+    expect(state.insertedExpenses).toHaveLength(0);
+    // the plain Bank Import button is untouched by the ledger gate
+    expect((await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals' })).status).toBe(200);
+  });
+
   test('fromLedger: a row with parked link candidates or one the matcher never examined is a 409 before any insert', async () => {
+    process.env.GATE_TAX_LEDGER = 'true';
     state.bankRow.suggestion = { categoryId: 'cat-meals', candidates: [{ id: 'exp-7' }] };
     let res = await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals', fromLedger: true });
     expect(res.status).toBe(409);
@@ -421,6 +432,7 @@ describe('create-expense (gate on)', () => {
   });
 
   test('fromLedger + always: the owner rule is written inside the claim transaction and the payee pass runs after; a lost claim writes none', async () => {
+    process.env.GATE_TAX_LEDGER = 'true';
     taxLedgerRules.createRule.mockClear(); taxLedgerRules.applyRules.mockClear();
     state.bankRow.suggestion = { noMatch: true };
     let res = await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals', fromLedger: true, always: true });
@@ -441,6 +453,7 @@ describe('create-expense (gate on)', () => {
   });
 
   test('fromLedger: the claim also requires examined + no candidates, so a list parked mid-flight loses the race', async () => {
+    process.env.GATE_TAX_LEDGER = 'true';
     state.bankRow.suggestion = { categoryId: 'cat-meals', noMatch: true };
     const res = await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals', fromLedger: true });
     expect(res.status).toBe(200);
