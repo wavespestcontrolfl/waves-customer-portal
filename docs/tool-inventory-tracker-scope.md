@@ -2,7 +2,9 @@
 
 > **Status 2026-10-23:** owner approved the recommendation ("do whatever you
 > recommend"). PR 0, PR 1 and PR 2 below are BUILT on branch
-> `claude/tool-inventory-tracker-scope-oh0xoa` (three commits, one per slice),
+> `claude/tool-inventory-tracker-scope-oh0xoa` (one commit per slice, plus a
+> hardening commit from the pre-push audit: the check commits in one
+> transaction under a per-truck lock),
 > with the recommended answer taken on each owner decision: weekly cadence
 > (`CHECK_INTERVAL_DAYS` in `server/services/truck-kit.js`), one technician
 > write endpoint (`own-truck` bucket), nothing deducts anything, the vehicle

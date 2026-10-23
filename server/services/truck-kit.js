@@ -268,17 +268,17 @@ function bellSpec({ truck, technician, missing, damaged }) {
 
 const issueWord = (state) => (state === 'missing' ? 'Missing' : 'Damaged');
 
-async function openToolAlert({ line, technician, now }) {
+async function openToolAlert({ line, technician, now, conn }) {
   const alertType = ALERT_TYPE[line.state];
   const who = technician?.name || 'a technician';
   const description = `${issueWord(line.state)} at the ${etDateString(now)} truck check by ${who}${line.note ? `: ${line.note}` : ''}`;
-  const open = await db('maintenance_alerts')
+  const open = await conn('maintenance_alerts')
     .where({ equipment_id: line.equipmentId, alert_type: alertType })
     .whereIn('status', OPEN_ALERT_STATUSES)
     .orderBy('created_at', 'desc')
     .first('id');
   if (open) {
-    await db('maintenance_alerts').where({ id: open.id }).update({ description, updated_at: now });
+    await conn('maintenance_alerts').where({ id: open.id }).update({ description, updated_at: now });
     return open.id;
   }
   const alert = await reportEquipmentIssue({
@@ -291,22 +291,23 @@ async function openToolAlert({ line, technician, now }) {
     // A damaged tool drops its condition like any field-reported issue; a
     // missing one has no condition to judge.
     adjustCondition: line.state === 'damaged',
+    conn,
   });
   return alert.id;
 }
 
 // A tool marked present on this check that still had an open alert was found
 // (or repaired): the emitter clears its own alert.
-async function closeFoundAlerts({ present, technician, now }) {
+async function closeFoundAlerts({ present, technician, now, conn }) {
   if (!present.length) return 0;
-  return db('maintenance_alerts')
+  return conn('maintenance_alerts')
     .whereIn('equipment_id', present.map((line) => line.equipmentId))
     .whereIn('alert_type', TOOL_ALERT_TYPES)
     .whereIn('status', OPEN_ALERT_STATUSES)
     .update({ status: 'resolved', resolved_at: now, resolved_by: `truck check by ${technician?.name || 'technician'}`, updated_at: now });
 }
 
-async function raiseTruckBell({ truck, technician, missing, damaged, check }) {
+async function raiseTruckBell({ truck, technician, missing, damaged, check, trx }) {
   const detail = [...missing, ...damaged]
     .map((line) => `${issueWord(line.state)}: ${line.name}${line.assetTag ? ` (${line.assetTag})` : ''}${line.note ? ` · ${line.note}` : ''}`)
     .join('\n');
@@ -318,6 +319,7 @@ async function raiseTruckBell({ truck, technician, missing, damaged, check }) {
     refreshOnDedupe: true,
     bumpOnRefresh: true,
     bell: true,
+    trx,
     detail,
     metadata: { vehicleId: truck.id, checkId: check.id, missing: missing.length, damaged: damaged.length },
   });
@@ -338,41 +340,48 @@ async function closeTruckBellIfClear(vehicleId, now = new Date(), conn = db) {
   return true;
 }
 
+// The check row, its alerts and the bell commit together, or not at all: a
+// check must never read as done while the office was not told. One
+// transaction, serialized per truck by an advisory lock, so two devices (or a
+// retry after a timeout) can never open the same item's alert twice.
 async function recordTruckCheck({ technicianId, results, now = new Date() }) {
-  const truck = await truckForTechnician(technicianId);
-  if (!truck) throw new TruckCheckError('no_truck', 'No truck is assigned to you');
   const wanted = normalizeResults(results);
-  const kit = await kitForTruck(truck.id);
-  const kitIds = new Set(kit.map((item) => item.id));
-  if (wanted.size !== kit.length || [...wanted.keys()].some((id) => !kitIds.has(id))) {
-    throw new TruckCheckError('kit_changed', 'The truck list changed since it was loaded', { kit });
-  }
-  const technician = await db('technicians').where({ id: technicianId }).first('id', 'name');
-  const lines = kit.map((item) => ({ ...wanted.get(item.id), name: item.name, assetTag: item.asset_tag }));
-  const missing = lines.filter((line) => line.state === 'missing');
-  const damaged = lines.filter((line) => line.state === 'damaged');
-  const present = lines.filter((line) => line.state === 'present');
+  return db.transaction(async (trx) => {
+    const truck = await truckForTechnician(technicianId, trx);
+    if (!truck) throw new TruckCheckError('no_truck', 'No truck is assigned to you');
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`truck-kit:${truck.id}`]);
+    const kit = await kitForTruck(truck.id, trx);
+    const kitIds = new Set(kit.map((item) => item.id));
+    if (wanted.size !== kit.length || [...wanted.keys()].some((id) => !kitIds.has(id))) {
+      throw new TruckCheckError('kit_changed', 'The truck list changed since it was loaded', { kit });
+    }
+    const technician = await trx('technicians').where({ id: technicianId }).first('id', 'name');
+    const lines = kit.map((item) => ({ ...wanted.get(item.id), name: item.name, assetTag: item.asset_tag }));
+    const missing = lines.filter((line) => line.state === 'missing');
+    const damaged = lines.filter((line) => line.state === 'damaged');
+    const present = lines.filter((line) => line.state === 'present');
 
-  const [check] = await db('equipment_checks').insert({
-    vehicle_id: truck.id,
-    technician_id: technicianId,
-    checked_at: now,
-    // A JS array into a jsonb column is stringified (waves-db skill 5d).
-    results: JSON.stringify(lines.map(({ equipmentId, state, note }) => ({ equipment_id: equipmentId, state, note }))),
-    item_count: lines.length,
-    missing_count: missing.length,
-    damaged_count: damaged.length,
-  }).returning('*');
+    const [check] = await trx('equipment_checks').insert({
+      vehicle_id: truck.id,
+      technician_id: technicianId,
+      checked_at: now,
+      // A JS array into a jsonb column is stringified (waves-db skill 5d).
+      results: JSON.stringify(lines.map(({ equipmentId, state, note }) => ({ equipment_id: equipmentId, state, note }))),
+      item_count: lines.length,
+      missing_count: missing.length,
+      damaged_count: damaged.length,
+    }).returning('*');
 
-  for (const line of [...missing, ...damaged]) await openToolAlert({ line, technician, now });
-  await closeFoundAlerts({ present, technician, now });
-  if (missing.length + damaged.length > 0) await raiseTruckBell({ truck, technician, missing, damaged, check });
-  else await closeTruckBellIfClear(truck.id, now);
+    for (const line of [...missing, ...damaged]) await openToolAlert({ line, technician, now, conn: trx });
+    await closeFoundAlerts({ present, technician, now, conn: trx });
+    if (missing.length + damaged.length > 0) await raiseTruckBell({ truck, technician, missing, damaged, check, trx });
+    else await closeTruckBellIfClear(truck.id, now, trx);
 
-  logger.info(`[truck-kit] check on ${truck.name}: ${lines.length} items, ${missing.length} missing, ${damaged.length} damaged`);
-  return {
-    check: { id: check.id, checked_at: check.checked_at, item_count: lines.length, missing_count: missing.length, damaged_count: damaged.length },
-  };
+    logger.info(`[truck-kit] check on ${truck.name}: ${lines.length} items, ${missing.length} missing, ${damaged.length} damaged`);
+    return {
+      check: { id: check.id, checked_at: check.checked_at, item_count: lines.length, missing_count: missing.length, damaged_count: damaged.length },
+    };
+  });
 }
 
 module.exports = {

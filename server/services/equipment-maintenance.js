@@ -525,15 +525,15 @@ async function getFleetOverview() {
  * (services/truck-kit.js) reuses it with its own alert type and title; a
  * missing tool passes adjustCondition false, since it has no condition to judge.
  */
-async function reportEquipmentIssue({ equipmentId, technicianId, description, severity = 'medium', alertType = 'condition_low', title = null, adjustCondition = true }) {
+async function reportEquipmentIssue({ equipmentId, technicianId, description, severity = 'medium', alertType = 'condition_low', title = null, adjustCondition = true, conn = db }) {
   const tag = '[equipment-maintenance] reportEquipmentIssue';
   try {
-    const equipment = await db('equipment').where('id', equipmentId).first();
+    const equipment = await conn('equipment').where('id', equipmentId).first();
     if (!equipment) throw new Error('Equipment not found');
 
     let techName = 'Unknown Tech';
     if (technicianId) {
-      const tech = await db('technicians').where('id', technicianId).first();
+      const tech = await conn('technicians').where('id', technicianId).first();
       if (tech) techName = tech.name;
     }
 
@@ -549,12 +549,12 @@ async function reportEquipmentIssue({ equipmentId, technicianId, description, se
       updated_at: db.fn.now(),
     };
 
-    const [inserted] = await db('maintenance_alerts').insert(alert).returning('*');
+    const [inserted] = await conn('maintenance_alerts').insert(alert).returning('*');
 
     // Lower condition rating if severity is high/critical
     if (adjustCondition && (severity === 'high' || severity === 'critical')) {
       const newRating = Math.max(1, (equipment.condition_rating || 5) - 2);
-      await db('equipment').where('id', equipmentId).update({
+      await conn('equipment').where('id', equipmentId).update({
         condition_rating: newRating,
         updated_at: db.fn.now(),
       });

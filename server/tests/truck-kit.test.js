@@ -93,6 +93,18 @@ jest.mock('../models/db', () => {
   };
   const db = (name) => chain(name);
   db.__state = state;
+  db.raw = jest.fn(async () => ({ rows: [] }));
+  // A transaction over the in-memory tables: the callback runs on the same
+  // handle, and a throw restores every table (so a test can prove rollback).
+  db.transaction = jest.fn(async (fn) => {
+    const snapshot = JSON.parse(JSON.stringify(state));
+    try {
+      return await fn(db);
+    } catch (err) {
+      for (const key of Object.keys(state)) state[key] = snapshot[key];
+      throw err;
+    }
+  });
   return db;
 });
 jest.mock('../services/equipment-maintenance', () => ({
@@ -215,6 +227,17 @@ describe('recordTruckCheck', () => {
     expect(reportEquipmentIssue).not.toHaveBeenCalled();
     expect(raiseAdminAlert).not.toHaveBeenCalled();
     expect(closeAdminAlertKeys).toHaveBeenCalledWith(expect.anything(), [`truck-kit:${TRUCK}`], 'tool_alerts_resolved', expect.objectContaining({ now: NOW }));
+    // One transaction per check, serialized per truck.
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(db.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', [`truck-kit:${TRUCK}`]);
+  });
+
+  test('the check row, its alerts and the bell commit together: a failed bell leaves no check behind', async () => {
+    raiseAdminAlert.mockRejectedValueOnce(new Error('notifications down'));
+    await expect(truckKit.recordTruckCheck({ technicianId: TECH, results: results('missing', 'present'), now: NOW })).rejects.toThrow('notifications down');
+    expect(db.__state.equipment_checks).toHaveLength(0);
+    expect(db.__state.maintenance_alerts).toHaveLength(0);
+    expect((await truckKit.truckKitStatus(TECH, { now: NOW })).due).toBe(true);
   });
 
   test('missing and damaged items open one alert each and ring one bell whose copy passes the rule', async () => {
@@ -235,7 +258,8 @@ describe('recordTruckCheck', () => {
     expect(composed.headline).toBe('Inventory — find or replace 2 tools on VEH-001');
     expect(composed.why).toBe('Synthetic found missing Moisture meter and damaged B&G 1 gal sprayer on the truck check');
     expect(composed.metadata).toEqual(expect.objectContaining({ subject: { type: 'equipment', id: TRUCK }, doneWhen: 'tool_alerts_resolved', who: 'person' }));
-    expect(opts).toEqual(expect.objectContaining({ dedupeKey: `truck-kit:${TRUCK}`, dedupeOpenOnly: true, refreshOnDedupe: true, bell: true }));
+    expect(opts).toEqual(expect.objectContaining({ dedupeKey: `truck-kit:${TRUCK}`, dedupeOpenOnly: true, refreshOnDedupe: true, bell: true, trx: expect.anything() }));
+    expect(reportEquipmentIssue.mock.calls.every(([args]) => args.conn)).toBe(true);
     expect(opts.detail).toBe('Missing: Moisture meter (T-002)\nDamaged: B&G 1 gal. sprayer (T-001) · Pump leaks');
     expect(closeAdminAlertKeys).not.toHaveBeenCalled();
   });

@@ -132,6 +132,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/equipment-systems/reconciliation` | admin-equipment-systems |
 | GET | `/api/admin/equipment/equipment` | admin-equipment |
 | GET | `/api/admin/equipment/equipment/:id/calibration-history` | admin-equipment |
+| GET | `/api/admin/equipment/kit-keys` | admin-equipment |
 | GET | `/api/admin/equipment/tank-mixes` | admin-equipment |
 | GET | `/api/admin/feature-flags` | admin-feature-flags |
 | GET | `/api/admin/intelligence-bar/actions/:id` | admin-intelligence-bar |
