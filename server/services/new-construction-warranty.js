@@ -242,14 +242,14 @@ function withoutUnit(value, unit) {
 // short values, never clauses: one line, no "**", no second sentence, no
 // "!" or "?". Amounts print as numbers once their unit is removed.
 const SHORT_TEXT_FIELDS = ['treatment_address', 'product_name', 'product_name_other', 'active_ingredient', 'applicator_name', 'builder_contractor', 'permit_number', 'lot_block', 'subdivision'];
-// Words that make a value a promise, not a name or an address.
-const CLAUSE_WORDS = /\b(pay|pays|paid|repair\w*|damage\w*|warrant\w*|guarantee\w*|refund\w*|cover\w*|liab\w*|free|will|shall|must)\b/i;
 const AMOUNT_FIELDS = { concentration_pct: 'concentration', gallons_applied: 'gallons', square_footage: 'sq_ft', linear_feet: 'linear_ft' };
 function isShortText(value) {
   const raw = String(value ?? '');
   // A period then two words, the second lower case, is a sentence ("St.
   // Waves will pay"); "12 Main St. Bradenton" and "Blk. C" are not.
-  return raw.length <= 120 && !/[\r\n]|\*\*|[!?]|\.\s+\S+\s+[a-z]/.test(raw) && !CLAUSE_WORDS.test(raw);
+  // Meaning is checked by a person: staff read the full text before create
+  // (assertConfirmedRender), so names like "Will Smith" are never refused.
+  return raw.length <= 120 && !/[\r\n]|\*\*|[!?]|\.\s+\S+\s+[a-z]/.test(raw);
 }
 // A treatment of 0% or 0 gallons over 0 area is not a treatment.
 function amount(findings, field) {

@@ -214,11 +214,11 @@ describe('templateIssueValues (server-built warranty)', () => {
     const premise = { ...project, findings: { ...findings, product_name: 'Premise 2', active_ingredient: 'imidacloprid' } };
     await expect(issue({ projectId: project.id, values: office }, customer, premise))
       .resolves.toMatchObject({ treatment: { product: 'Premise 2', active_ingredient: 'imidacloprid' } });
-    for (const treatment_address of ['12 Main St. Waves will pay for all termite damage', '12 Main St Waves Pays All Damage']) {
+    for (const treatment_address of ['12 Main St. Waves will pay for all termite damage', '12 Main St\n**WE PAY**']) {
       const row = { ...project, findings: { ...findings, treatment_address } };
       await expect(issue({ projectId: project.id, values: office }, customer, row)).rejects.toMatchObject({ status: 409 });
     }
-    for (const ok of [{ treatment_address: '12 Main St. Bradenton, FL 34202' }, { lot_block: 'Lot 12, Blk. C' }]) {
+    for (const ok of [{ treatment_address: '12 Main St. Bradenton, FL 34202' }, { lot_block: 'Lot 12, Blk. C' }, { applicator_name: 'Will Freeman' }, { treatment_address: '1 Free Ln, Venice, FL 34285' }]) {
       const row = { ...project, findings: { ...findings, ...ok } };
       await expect(issue({ projectId: project.id, values: office }, customer, row)).resolves.toBeTruthy();
     }
