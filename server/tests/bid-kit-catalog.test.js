@@ -84,6 +84,9 @@ describe('status', () => {
     expect(itemStatus({ kind: 'document', item_key: 'custom', has_file: false, value: 'Letter 7' }, { today: TODAY })).toBe(STATUS.MISSING); // a custom paper too
     expect(itemStatus(w9({ has_file: true }), { today: TODAY })).toBe(STATUS.UNATTESTED);
     expect(itemStatus(w9({ has_file: false, file_s3_key: 'bid-kit/x/y.pdf' }), { today: TODAY })).toBe(STATUS.UNATTESTED);
+    // A fact is its typed value: a file alone never makes one present.
+    expect(itemStatus({ kind: 'fact', item_key: 'legal_name', has_file: true, value: null, attested_at: SIGNED }, { today: TODAY })).toBe(STATUS.MISSING);
+    expect(itemStatus({ kind: 'fact', item_key: 'legal_name', file_s3_key: 'bid-kit/x/y.pdf', value: '  ' }, { today: TODAY })).toBe(STATUS.MISSING);
     // Facts and references are ready on text.
     expect(itemStatus({ kind: 'fact', item_key: 'phone', value: '941-555-0100' }, { today: TODAY })).toBe(STATUS.UNATTESTED);
     expect(itemStatus({ kind: 'reference', item_key: 'reference', value: 'Sample District', permission_on: '2026-09-30' }, { today: TODAY })).toBe(STATUS.UNATTESTED);

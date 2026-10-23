@@ -434,6 +434,9 @@ describeDb('Bid kit (PostgreSQL)', () => {
     });
 
     test('on real rows: a document needs a file, a custom label change clears the sign-off, and checks cannot be dated ahead', async () => {
+      const emptyFact = await call('POST', '', { kind: 'fact', item_key: 'legal_name' });
+      expect((await upload(emptyFact.body.item.id)).status).toBe(400); // a fact takes a value, not a file
+      expect((await rowOf(emptyFact.body.item.id)).file_s3_key).toBeNull();
       const paper = await create({ item_key: 'w9', value: 'On file' });
       expect(paper.status).toBe('missing');
       expect((await withFile(paper)).status).toBe('unattested');

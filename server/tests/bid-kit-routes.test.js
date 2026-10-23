@@ -681,6 +681,16 @@ describe('files', () => {
     expect(getSignedUrl.mock.calls[0][1].input.Key).toBe(key);
   });
 
+  test('a file cannot be put on a fact: 400, nothing stored, and the fact stays missing', async () => {
+    const fact = await create({ kind: 'fact', item_key: 'legal_name' });
+    const res = await upload(fact.id);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('A fact takes a typed value, not a file');
+    expect(mockSent).toHaveLength(0);
+    expect(store.rows.get(fact.id).file_s3_key).toBeNull();
+    expect((await call('GET', '/api/admin/bid-kit')).body.items.find((item) => item.id === fact.id).status).toBe('missing');
+  });
+
   test('a name that is not a nine-digit run is fine: eight digits, ten digits, a date', async () => {
     const cases = [['scan 12345678.pdf', 'ipm_plan'], ['scan 1234567890.pdf', 'capability_sheet'], ['Policy 2026-10-23.pdf', 'service_center_proof']];
     for (const [name, itemKey] of cases) {

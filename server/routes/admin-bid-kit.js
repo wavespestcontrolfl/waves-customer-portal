@@ -307,6 +307,8 @@ router.post('/:id/file', receiveFile, async (req, res, next) => {
     if (error) return badRequest(res, error);
     const existing = await store.getItem(req.params.id);
     if (!existing || existing.archived_at) return res.status(404).json({ error: 'Not found' });
+    // A fact is its typed value; a file on one would make it look complete while the facts sheet shows it empty.
+    if (existing.kind === 'fact') return res.status(400).json({ error: 'A fact takes a typed value, not a file' });
     // The cheap check first (nothing is stored for a stale page); the same fence runs again under the row lock.
     if (!sameInstant(existing.updated_at, value.expected_updated_at)) return res.status(409).json({ error: CHANGED });
     const stored = await files.putFile(req.params.id, req.file);
