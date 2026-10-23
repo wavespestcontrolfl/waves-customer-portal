@@ -1156,9 +1156,9 @@ const PROJECT_TYPES = {
         ],
       },
       // Sticker blank "Date of Final Ext. Treatment" (owner 2026-10-22). The
-      // final exterior is a later visit after grading, so these stay optional
-      // and never gate the send; the office fills them on the sent
-      // certificate when that visit is done.
+      // final exterior is a later visit after grading, so these stay blank on
+      // the slab-day send; once any of them is filled, a staff send needs the
+      // whole record (date, time, product, ingredient, applicator — #6490).
       { key: 'final_exterior_date', label: 'Date of final exterior treatment', type: 'date', section: 'Final exterior treatment (later visit; leave blank on slab day)' },
       // FBC 105.10 lists the time of each treatment.
       { key: 'final_exterior_time', label: 'Time of final exterior treatment', type: 'time', section: 'Final exterior treatment (later visit; leave blank on slab day)' },
