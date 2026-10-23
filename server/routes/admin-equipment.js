@@ -14,6 +14,83 @@ const equipmentService = require('../services/equipment-maintenance');
 const { etDateString } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+
+// Custody columns (docs/tool-inventory-tracker-scope.md, PR 0). A tool is an
+// equipment row that rides on a truck: assigned_vehicle_id points at the
+// equipment row with category 'vehicle' it is kept on, location says where it
+// is kept, asset_tag is the label on the item (unique in the table) and
+// condition_rating is 1 to 10. Until this change only seeds could set them;
+// the Assets dialog is now the writer.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ASSET_TAG_MAX = 50;
+const LOCATION_MAX = 100;
+
+// undefined = the body did not carry the key (leave the column alone);
+// null or blank = clear it.
+function optionalText(value, max) {
+  if (value === undefined) return { skip: true };
+  if (value === null) return { value: null };
+  const text = String(value).trim();
+  if (!text) return { value: null };
+  if (text.length > max) return { error: `must be at most ${max} characters` };
+  return { value: text };
+}
+
+// condition_rating: undefined = leave alone; null or blank = clear; else 1 to 10.
+function conditionValue(raw) {
+  if (raw === undefined) return { skip: true };
+  if (raw === null || raw === '') return { value: null };
+  const rating = Number(raw);
+  if (!Number.isInteger(rating) || rating < 1 || rating > 10) {
+    return { error: 'condition_rating must be a whole number from 1 to 10' };
+  }
+  return { value: rating };
+}
+
+// assigned_vehicle_id: the equipment row (category 'vehicle') a tool rides on.
+// A row can never be its own truck, and a truck is never cargo on another
+// truck (by the body's category, or the stored one when the body is silent).
+async function vehicleTarget(body, selfId) {
+  const raw = body.assigned_vehicle_id;
+  if (raw === undefined) return { skip: true };
+  if (raw === null || raw === '') return { value: null };
+  const vehicleId = String(raw);
+  if (!UUID_RE.test(vehicleId) || vehicleId === selfId) return { error: 'assigned_vehicle_id must be a vehicle' };
+  const vehicle = await db('equipment').where({ id: vehicleId, category: 'vehicle' }).first('id');
+  if (!vehicle) return { error: 'assigned_vehicle_id must be a vehicle' };
+  let category = body.category;
+  if (category === undefined && selfId) {
+    const self = await db('equipment').where({ id: selfId }).first('category');
+    category = self ? self.category : undefined;
+  }
+  if (category === 'vehicle') return { error: 'a vehicle cannot be assigned to a truck' };
+  return { value: vehicleId };
+}
+
+// The custody values a body carries, validated. Returns { values } holding
+// only the keys present in the body, or { error } with the first problem.
+async function custodyFields(body, { selfId = null } = {}) {
+  const values = {};
+  const checks = [
+    ['asset_tag', optionalText(body.asset_tag, ASSET_TAG_MAX)],
+    ['location', optionalText(body.location, LOCATION_MAX)],
+    ['condition_rating', conditionValue(body.condition_rating)],
+    ['assigned_vehicle_id', await vehicleTarget(body, selfId)],
+  ];
+  for (const [key, result] of checks) {
+    if (result.error) return { error: key === 'asset_tag' || key === 'location' ? `${key} ${result.error}` : result.error };
+    if (!result.skip) values[key] = result.value;
+  }
+  // Recategorizing a row as a vehicle drops any truck it rode on.
+  if (body.category === 'vehicle') values.assigned_vehicle_id = null;
+  return { values };
+}
+
+// Postgres unique violation on equipment.asset_tag (the only unique column a
+// caller can set): answered as a 409 instead of a 500.
+function isAssetTagConflict(err) {
+  return Boolean(err) && err.code === '23505' && /asset_tag/.test(String(err.constraint || err.detail || err.message || ''));
+}
 // Job margins belong to the owner-only Costs workspace, including legacy
 // writers and the dashboard's copy of the margin summary.
 router.use(['/job-costs', '/dashboard'], requireAdmin);
@@ -25,19 +102,25 @@ router.use(['/job-costs', '/dashboard'], requireAdmin);
 // GET /equipment — list all with maintenance status
 router.get('/equipment', async (req, res, next) => {
   try {
-    const { category, status, assigned_to } = req.query;
+    const { category, status, assigned_to, assigned_vehicle_id } = req.query;
 
     let query = db('equipment')
       .leftJoin('technicians', 'equipment.assigned_to', 'technicians.id')
+      .leftJoin('equipment as vehicle', 'equipment.assigned_vehicle_id', 'vehicle.id')
       .select(
         'equipment.*',
-        db.raw("COALESCE(technicians.name, 'Unassigned') as assigned_tech_name")
+        db.raw("COALESCE(technicians.name, 'Unassigned') as assigned_tech_name"),
+        'vehicle.name as assigned_vehicle_name',
+        'vehicle.asset_tag as assigned_vehicle_tag'
       )
       .orderBy('equipment.name');
 
     if (category) query = query.where('equipment.category', category);
     if (status) query = query.where('equipment.status', status);
     if (assigned_to) query = query.where('equipment.assigned_to', assigned_to);
+    // One truck's roster, or the rows on no truck at all ('none').
+    if (assigned_vehicle_id === 'none') query = query.whereNull('equipment.assigned_vehicle_id');
+    else if (assigned_vehicle_id) query = query.where('equipment.assigned_vehicle_id', assigned_vehicle_id);
 
     const equipment = await query;
 
@@ -61,7 +144,9 @@ router.get('/equipment', async (req, res, next) => {
 });
 
 // POST /equipment — add new
-router.post('/equipment', async (req, res, next) => {
+// Custody and identity columns are the office's: a technician token never
+// creates or edits an asset, whatever GATE_STAFF_DEFAULT_DENY says.
+router.post('/equipment', requireAdmin, async (req, res, next) => {
   try {
     const {
       name, category, make, model, serial_number,
@@ -72,8 +157,11 @@ router.post('/equipment', async (req, res, next) => {
     } = req.body;
 
     if (!name) return res.status(400).json({ error: 'Equipment name is required' });
+    const custody = await custodyFields(req.body);
+    if (custody.error) return res.status(400).json({ error: custody.error });
 
     const [record] = await db('equipment').insert({
+      ...custody.values,
       name, category, make, model, serial_number,
       purchase_date: purchase_date || null,
       purchase_price: purchase_price || null,
@@ -92,12 +180,13 @@ router.post('/equipment', async (req, res, next) => {
     logger.info(`Equipment added: ${record.name} (${record.id})`);
     res.status(201).json({ equipment: record });
   } catch (err) {
+    if (isAssetTagConflict(err)) return res.status(409).json({ error: 'That asset tag is already on another item' });
     next(err);
   }
 });
 
 // PUT /equipment/:id — update
-router.put('/equipment/:id', async (req, res, next) => {
+router.put('/equipment/:id', requireAdmin, async (req, res, next) => {
   try {
     // Whitelist updatable columns instead of spreading req.body, so a caller
     // can't set columns they shouldn't (e.g. id/created_at, or any future
@@ -115,6 +204,15 @@ router.put('/equipment/:id', async (req, res, next) => {
       if (req.body[key] !== undefined) updates[key] = req.body[key];
     }
     if (updates.specs) updates.specs = JSON.stringify(updates.specs);
+    const custody = await custodyFields(req.body, { selfId: req.params.id });
+    if (custody.error) return res.status(400).json({ error: custody.error });
+    Object.assign(updates, custody.values);
+    // A truck with tools still riding on it cannot stop being a vehicle:
+    // the riders would point at a non-vehicle and fail every later save.
+    if (updates.category !== undefined && updates.category !== 'vehicle') {
+      const rider = await db('equipment').where({ assigned_vehicle_id: req.params.id }).first('id');
+      if (rider) return res.status(409).json({ error: 'Items still ride on this truck. Move them to another truck first.' });
+    }
 
     const [record] = await db('equipment')
       .where({ id: req.params.id })
@@ -126,6 +224,7 @@ router.put('/equipment/:id', async (req, res, next) => {
     logger.info(`Equipment updated: ${record.name} (${record.id})`);
     res.json({ equipment: record });
   } catch (err) {
+    if (isAssetTagConflict(err)) return res.status(409).json({ error: 'That asset tag is already on another item' });
     next(err);
   }
 });

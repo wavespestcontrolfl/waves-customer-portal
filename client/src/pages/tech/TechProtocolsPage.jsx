@@ -295,6 +295,30 @@ function ScriptList({ scripts }) {
   );
 }
 
+// Seeded checklist rows are [{ category, items: [{ item, required, note }] }]
+// (server/models/migrations/20260401000026_service_protocols.js); older or
+// hand-entered rows may hold flat strings or { label | name } entries. Both
+// render as groups; this page used to print the seeded shape as raw JSON.
+// `required` stays unknown (undefined) when the row does not say: an older
+// flat row never told the tech an item was optional, and this page must not
+// start saying so.
+function normalizeChecklistItem(entry) {
+  if (typeof entry === 'string') return { item: entry, required: undefined, note: '' };
+  if (!entry || typeof entry !== 'object') return { item: String(entry ?? ''), required: undefined, note: '' };
+  const required = typeof entry.required === 'boolean' ? entry.required : undefined;
+  return { item: entry.item || entry.label || entry.name || '', required, note: entry.note || '' };
+}
+
+export function checklistGroups(items) {
+  if (!Array.isArray(items)) return [];
+  return items.map((entry) => {
+    if (entry && typeof entry === 'object' && Array.isArray(entry.items)) {
+      return { category: entry.category || '', items: entry.items.map(normalizeChecklistItem) };
+    }
+    return { category: '', items: [normalizeChecklistItem(entry)] };
+  }).filter((group) => group.items.some((item) => item.item));
+}
+
 function EquipmentList({ checklists }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -317,13 +341,24 @@ function EquipmentList({ checklists }) {
               </span>
             )}
           </div>
-          {Array.isArray(c.checklist_items) && c.checklist_items.length > 0 && (
-            <ul style={{ margin: 0, paddingLeft: 18, color: DARK.text, fontSize: 13, lineHeight: 1.6 }}>
-              {c.checklist_items.map((item, i) => (
-                <li key={i}>{typeof item === 'string' ? item : item.label || item.name || JSON.stringify(item)}</li>
-              ))}
-            </ul>
-          )}
+          {checklistGroups(c.checklist_items).map((group, gi) => (
+            <div key={gi} style={{ marginTop: gi === 0 ? 0 : 10 }}>
+              {group.category && (
+                <div style={{ fontSize: 14, fontWeight: 600, color: DARK.muted, marginBottom: 4 }}>
+                  {group.category}
+                </div>
+              )}
+              <ul style={{ margin: 0, paddingLeft: 18, color: DARK.text, fontSize: 14, lineHeight: 1.6 }}>
+                {group.items.map((item, i) => (
+                  <li key={i}>
+                    {item.item}
+                    {item.required === false && <span style={{ color: DARK.muted }}> (optional)</span>}
+                    {item.note && <div style={{ fontSize: 14, color: DARK.muted }}>{item.note}</div>}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
         </div>
       ))}
     </div>

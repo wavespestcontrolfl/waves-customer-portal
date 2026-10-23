@@ -237,14 +237,22 @@ export default function EquipmentPage() {
 // ── Equipment Tab ──
 
 // ── Equipment Tab ──
-const CATEGORIES = ["sprayer", "pump", "reel", "spreader", "dethatcher", "backpack", "vehicle", "other"];
+// tool and safety: hand tools and PPE that ride on a truck (the truck kit,
+// docs/tool-inventory-tracker-scope.md); the Fleet icon map already knew them.
+const CATEGORIES = ["sprayer", "pump", "reel", "spreader", "dethatcher", "backpack", "tool", "safety", "vehicle", "other"];
 const STATUSES = ["active", "maintenance", "retired", "sold", "lost"];
+// Where an item is kept when it is not in use; the values the seeds use.
+const LOCATIONS = ["van", "storage", "field"];
 const EMPTY_EQUIP = {
   name: "",
   category: "other",
   make: "",
   model: "",
   serial_number: "",
+  asset_tag: "",
+  location: "van",
+  assigned_vehicle_id: "",
+  condition_rating: 8,
   purchase_date: "",
   purchase_price: "",
   current_hours: "",
@@ -255,6 +263,38 @@ const EMPTY_EQUIP = {
   book_value: "",
   notes: ""
 };
+const vehicleLabel = v => [v.asset_tag, v.name].filter(Boolean).join(" · ");
+// The detail cells under an asset's name. Each shows only when the row
+// carries its value; the first two keep their darker ink.
+const ASSET_DETAIL_CELLS = [{
+  label: "Hours:",
+  show: e => e.current_hours > 0,
+  value: e => e.current_hours,
+  color: "#09090B"
+}, {
+  label: "Cost:",
+  show: e => e.purchase_price > 0,
+  value: e => fmt(e.purchase_price),
+  color: "#18181B"
+}, {
+  label: "Book:",
+  show: e => e.book_value > 0,
+  value: e => fmt(e.book_value)
+}, {
+  label: "Last Svc:",
+  show: e => Boolean(e.last_service_date),
+  value: e => new Date(e.last_service_date).toLocaleDateString()
+}, {
+  label: "Condition:",
+  show: e => e.condition_rating != null,
+  value: e => `${e.condition_rating}/10`
+}, {
+  label: "Kept:",
+  show: e => Boolean(e.location),
+  value: e => e.location
+}];
+// Tag, truck and holder on one line; empty when the row carries none.
+const custodyLine = e => [e.asset_tag, e.assigned_vehicle_name && `Truck: ${e.assigned_vehicle_name}`, e.assigned_to && `Holder: ${e.assigned_tech_name}`].filter(Boolean).join(" · ");
 function EquipmentTab({
   showToast,
   editing,
@@ -268,6 +308,11 @@ function EquipmentTab({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [loadError, setLoadError] = useState("");
+  // Holder picker options (admin only: the dialog is admin only). A failed
+  // read leaves the picker with the current holder alone.
+  const [technicians, setTechnicians] = useState([]);
+  // "" = every row, a vehicle id = that truck's roster, "none" = on no truck.
+  const [vehicleFilter, setVehicleFilter] = useState("");
   const loadSeq = useRef(0);
   const reload = useCallback(async () => {
     const seq = ++loadSeq.current;
@@ -288,7 +333,21 @@ function EquipmentTab({
       loadSeq.current += 1;
     };
   }, [reload]);
+  useEffect(() => {
+    if (!canEdit) return undefined;
+    let cancelled = false;
+    adminFetch("/admin/timetracking/technicians").then(d => {
+      if (!cancelled) setTechnicians((d.technicians || []).filter(t => t.employment_status === "active"));
+    }).catch(() => {
+      if (!cancelled) setTechnicians([]);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [canEdit]);
   useEffect(() => setActionError(""), [editing?.id, !!editing]);
+  const vehicles = items.filter(e => e.category === "vehicle");
+  const visibleItems = vehicleFilter === "" ? items : vehicleFilter === "none" ? items.filter(e => !e.assigned_vehicle_id && e.category !== "vehicle") : items.filter(e => e.assigned_vehicle_id === vehicleFilter);
   const save = async () => {
     if (actionRef.current) return;
     actionRef.current = true;
@@ -300,8 +359,11 @@ function EquipmentTab({
         const payload = {
           ...editing
         };
-        ["purchase_price", "current_hours", "next_service_hours", "book_value"].forEach(k => {
+        ["purchase_price", "current_hours", "next_service_hours", "book_value", "condition_rating"].forEach(k => {
           payload[k] = payload[k] === "" || payload[k] == null ? null : Number(payload[k]);
+        });
+        ["assigned_to", "assigned_vehicle_id", "asset_tag", "location"].forEach(k => {
+          if (payload[k] === "" || payload[k] == null) payload[k] = null;
         });
         if (!payload.purchase_date) payload.purchase_date = null;
         if (editing.id) {
@@ -343,12 +405,22 @@ function EquipmentTab({
       {!loading && !loadError && items.length === 0 && <Card className="p-6 text-zinc-500">
           No equipment recorded. Use Add Equipment to record an asset.
         </Card>}{" "}
+      {vehicles.length > 0 && <Field label="Truck" className="mb-3 max-w-xs">
+          <Select value={vehicleFilter} onChange={ev => setVehicleFilter(ev.target.value)}>
+            <option value="">All equipment</option>
+            {vehicles.map(v => <option key={v.id} value={v.id}>{vehicleLabel(v)}</option>)}
+            <option value="none">Not on a truck</option>
+          </Select>
+        </Field>}
+      {!loading && !loadError && items.length > 0 && visibleItems.length === 0 && <Card className="p-6 text-zinc-500">
+          Nothing matches this truck.
+        </Card>}
       <div style={{
       display: "grid",
       gridTemplateColumns: isMobile ? "1fr" : "repeat(auto-fill, minmax(300px, 1fr))",
       gap: 12
     }}>
-        {items.map(e => {
+        {visibleItems.map(e => {
         const hoursLeft = e.next_service_hours ? e.next_service_hours - (e.current_hours || 0) : null;
         const needsService = hoursLeft !== null && hoursLeft <= 10;
         return <Card key={e.id} style={{
@@ -382,6 +454,12 @@ function EquipmentTab({
               }}>
                     {[e.make, e.model].filter(Boolean).join(" ")}
                   </div>{" "}
+                  {custodyLine(e) && <div style={{
+                fontSize: 14,
+                color: "#52525B"
+              }}>
+                      {custodyLine(e)}
+                    </div>}{" "}
                 </div>{" "}
                 <div style={{
               display: "flex",
@@ -403,7 +481,12 @@ function EquipmentTab({
                   purchase_price: e.purchase_price ?? "",
                   current_hours: e.current_hours ?? "",
                   next_service_hours: e.next_service_hours ?? "",
-                  book_value: e.book_value ?? ""
+                  book_value: e.book_value ?? "",
+                  asset_tag: e.asset_tag ?? "",
+                  location: e.location ?? "",
+                  assigned_vehicle_id: e.assigned_vehicle_id ?? "",
+                  assigned_to: e.assigned_to ?? "",
+                  condition_rating: e.condition_rating ?? ""
                 });
               }} type="button" variant="secondary" className="min-w-11" disabled={saving}>
                     Edit
@@ -416,48 +499,18 @@ function EquipmentTab({
             gap: 4,
             fontSize: 14
           }}>
-                {e.current_hours > 0 && <div>
+                {ASSET_DETAIL_CELLS.filter(cell => cell.show(e)).map(cell => <div key={cell.label}>
                     <span style={{
                 color: "#71717A"
               }}>
-                      Hours:
+                      {cell.label}
                     </span>{" "}
-                    <span style={{
-                color: "#09090B"
-              }}>
-                      {e.current_hours}
+                    <span style={cell.color ? {
+                color: cell.color
+              } : undefined}>
+                      {cell.value(e)}
                     </span>
-                  </div>}
-                {e.purchase_price > 0 && <div>
-                    <span style={{
-                color: "#71717A"
-              }}>
-                      Cost:
-                    </span>{" "}
-                    <span style={{
-                color: "#18181B"
-              }}>
-                      {fmt(e.purchase_price)}
-                    </span>
-                  </div>}
-                {e.book_value > 0 && <div>
-                    <span style={{
-                color: "#71717A"
-              }}>
-                      Book:
-                    </span>{" "}
-                    <span>{fmt(e.book_value)}</span>
-                  </div>}
-                {e.last_service_date && <div>
-                    <span style={{
-                color: "#71717A"
-              }}>
-                      Last Svc:
-                    </span>{" "}
-                    <span>
-                      {new Date(e.last_service_date).toLocaleDateString()}
-                    </span>
-                  </div>}
+                  </div>)}
               </div>
               {e.specs && <div style={{
             display: "flex",
@@ -481,22 +534,66 @@ function EquipmentTab({
             </Card>;
       })}
       </div>
-      {editing && <EquipmentEditModal equipment={editing} onChange={setEditing} onClose={() => setEditing(null)} onSave={save} saving={saving} error={actionError} />}
+      {editing && <EquipmentEditModal equipment={editing} vehicles={vehicles} technicians={technicians} onChange={setEditing} onClose={() => setEditing(null)} onSave={save} saving={saving} error={actionError} />}
     </>;
 }
 function EquipmentEditModal({
   equipment: e,
+  vehicles = [],
+  technicians = [],
   onChange,
   onClose,
   onSave,
   saving,
   error
 }) {
+  // A select over { value, label } options; the current value is kept as an
+  // option when it is not in the list (an inactive holder, a seeded location).
+  const choice = (key, label, options) => {
+    const current = e[key] ?? "";
+    const known = options.some(o => o.value === current);
+    return <Field label={label} className="min-w-0">
+        <Select value={current} onChange={ev => onChange({
+        ...e,
+        [key]: ev.target.value
+      })} disabled={saving}>
+          {options.map(o => <option key={o.value} value={o.value}>
+              {o.label}
+            </option>)}
+          {!known && current !== "" && <option value={current}>{key === "assigned_to" ? e.assigned_tech_name || "Current holder" : current}</option>}
+        </Select>
+      </Field>;
+  };
+  const truckOptions = [{
+    value: "",
+    label: "Not on a truck"
+  }, ...vehicles.filter(v => v.id !== e.id).map(v => ({
+    value: v.id,
+    label: vehicleLabel(v)
+  }))];
+  const holderOptions = [{
+    value: "",
+    label: "Unassigned"
+  }, ...technicians.map(t => ({
+    value: t.id,
+    label: t.name
+  }))];
+  const locationOptions = [{
+    value: "",
+    label: "Not set"
+  }, ...LOCATIONS.map(l => ({
+    value: l,
+    label: l
+  }))];
+  // A row that becomes a vehicle stops riding on a truck: the Truck picker
+  // hides, so its stale value must not ride along on save.
+  const setField = (key, value) => onChange({
+    ...e,
+    [key]: value,
+    ...(key === "category" && value === "vehicle" ? { assigned_vehicle_id: null } : {})
+  });
   const field = (key, label, type = "text", opts = null) => <Field label={label} className="min-w-0">
-      {opts ? <Select value={e[key] ?? ""} onChange={ev => onChange({
-      ...e,
-      [key]: ev.target.value
-    })} disabled={saving}>
+      {opts ? <Select value={e[key] ?? ""} onChange={ev => setField(key, ev.target.value)} disabled={saving}>
           {opts.map(o => <option key={o} value={o}>
               {o}
             </option>)}
@@ -524,14 +621,18 @@ function EquipmentEditModal({
           {field("make", "Make")}
           {field("model", "Model")}
           {field("serial_number", "Serial #")}
+          {field("asset_tag", "Asset tag")}
           {field("status", "Status", "text", STATUSES)}
+          {e.category !== "vehicle" && choice("assigned_vehicle_id", "Truck", truckOptions)}
+          {choice("location", "Kept", locationOptions)}
+          {field("condition_rating", "Condition (1 to 10)", "number")}
           {field("purchase_date", "Purchase Date", "date")}
           {field("purchase_price", "Purchase Price ($)", "number")}
           {field("current_hours", "Current Hours", "number")}
           {field("book_value", "Book Value ($)", "number")}
           {field("next_service_hours", "Next Service @ Hours", "number")}
           {field("next_service_type", "Next Service Type")}
-          {field("assigned_to", "Assigned To")}
+          {choice("assigned_to", "Assigned To", holderOptions)}
         </div>
         <div className="mt-3">{field("notes", "Notes", "textarea")}</div>
       </DialogBody>
