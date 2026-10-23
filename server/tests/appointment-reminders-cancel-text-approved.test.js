@@ -479,6 +479,23 @@ describe('handleCancellation with cancelGeneration (the cancel recovery sweep)',
     expect(outcome.notificationSent).toBe(false);
   });
 
+  test('a window hold on the first recipient followed by a blocked second recipient still parks (nobody reached)', async () => {
+    mockState.customer = {
+      ...mockState.customer, service_contact_name: 'Sam', service_contact_phone: '+19415550202', service_contacts_consent_at: '2026-07-23T00:00:00Z',
+    };
+    const preview = await AppointmentReminders.previewCancellationText('svc-1');
+    const both = preview.recipients.map(({ recipient_key, body }) => ({ recipient_key, body }));
+    mockSendCustomerMessage
+      .mockImplementationOnce(async (input) => { await input.preDispatchCheck(); return { sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', deferred: true, nextAllowedAt: '2026-11-04T12:00:00Z' }; })
+      .mockResolvedValueOnce({ sent: false, blocked: true, code: 'RECIPIENT_OPTED_OUT' });
+    const fence = { ...FENCE, hits: [] };
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice: both, cancelGeneration: fence, outcome: {} });
+    expect(fence.windowHeld).toBe(true);
+    const states = mockState.updates.filter((u) => typeof u.cancellation_notice_state === 'string').map((u) => u.cancellation_notice_state);
+    expect(states).not.toContain('suppressed');
+    expect(states[states.length - 1]).toBe('pending_approved');
+  });
+
   test('the fence is proven inside a transaction, before the marker is claimed, and only the approved marker is claimed', async () => {
     const order = [];
     mockFence.mockImplementationOnce(async (trx, fence) => { order.push(['fence', fence, mockState.updates.filter((u) => 'cancellation_notice_state' in u).length]); });

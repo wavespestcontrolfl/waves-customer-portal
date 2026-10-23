@@ -1787,6 +1787,8 @@ async function resolveNoticeContacts(customer, prefs, messageType, purpose = 'ap
 // here); a send that must not queue (the fenced recovery send) counts it as not reached.
 function recordFailedRecipient(sharedOutcome, contact, sent, { heldIsFailure = false } = {}) {
   if (sent) return;
+  // Sticky across the fan-out (lastCode is reset per contact): a window hold on ANY recipient, for the fenced recovery send.
+  if (sharedOutcome.lastCode === 'QUIET_HOURS_HOLD' && sharedOutcome.lastDeferred) sharedOutcome.windowHeldAny = true;
   if (!heldIsFailure && sharedOutcome.lastCode === 'QUIET_HOURS_HOLD' && sharedOutcome.lastDeferred && sharedOutcome.lastNextAllowedAt) return;
   sharedOutcome.failedRecipients.push(isServiceContactRole(contact.role) ? 'service contact' : 'account holder');
 }
@@ -2970,7 +2972,7 @@ async function alreadyAcceptedByPriorAttempt({ approvedSend, acceptedCancellatio
 async function parkWindowHeldApprovedNotice({ record, noticeToken, options, sendOutcome }) {
   if (!options.cancelGeneration || !options.approvedNotice) return false;
   if (sendOutcome.providerAccepted === true || sendOutcome.dispatchUncertain === true) return false;
-  if (sendOutcome.lastCode !== 'QUIET_HOURS_HOLD' || sendOutcome.lastDeferred !== true) return false;
+  if (sendOutcome.windowHeldAny !== true) return false;
   await db('appointment_reminders')
     .where({ id: record.id, cancellation_notice_state: 'sent' })
     .where('cancellation_notice_at', noticeToken)
