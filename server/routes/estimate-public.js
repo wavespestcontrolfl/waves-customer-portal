@@ -28874,6 +28874,9 @@ async function buildPricingBundleInner(estimate) {
     // corrected on every read.
     return stampTreeShrubPalmCount(finalizePricingBundle(withChoiceOneTimePrice(withManualDiscount({
       ...snapshotBundle,
+      // A snapshot frozen before the misting install joined the previews carries no mistingInstallFee, yet the acceptance invoice
+      // bills the install: attach it from the same frozen lines the fresh path uses. No misting: {} (the snapshot is untouched).
+      ...mistingInstallFeeField,
       source: snapshotBundle.source || 'send_snapshot',
       snapshotHit: true,
     })), estimate, estData), treeShrubPalmCountForEstData(estData) ?? stampedTreeShrubPalmCountInBundle(snapshotBundle));

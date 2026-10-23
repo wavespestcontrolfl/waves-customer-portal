@@ -458,7 +458,7 @@ describe('audit 5: the customer previews carry the install line the invoices bil
     expect(src).toContain("const mistingInstallFeeField = previewOneTimeLines.mistingInstall > 0");
     expect(src).toContain("service: 'mosquito_misting_installation',\n        amount: previewOneTimeLines.mistingInstall,");
     expect(src).toContain("label: previewOneTimeLines.mistingInstallDescription || 'Mosquito Misting System Installation',");
-    expect((src.match(/\.\.\.mistingInstallFeeField,/g) || [])).toHaveLength(3);
+    expect((src.match(/\.\.\.mistingInstallFeeField,/g) || [])).toHaveLength(4); // the three fresh bundle shapes + the snapshot return path
     // no misting: the helper reports zero, the conditional yields {} and the payload is unchanged
     const none = { result: mapper.mapV1ToLegacyShape(generateEstimate({ ...PROPERTY, services: { pest: { frequency: 'quarterly' } } })) };
     expect(converter.frozenPrepayOneTimeLines(none).mistingInstall).toBe(0);
@@ -482,5 +482,75 @@ describe('audit 5: the customer previews carry the install line the invoices bil
     const client = fs.readFileSync(path.join(__dirname, '..', '..', 'client/src/pages/EstimateViewPage.jsx'), 'utf8');
     expect(client).toContain('pricing?.mistingInstallFee?.amount');
     expect(client).toContain('isMistingInstallBreakdownRow(row)');
+  });
+});
+
+describe('audit 6: a pre-change send snapshot serves the install preview too', () => {
+  const { buildPricingBundle } = require('../routes/estimate-public');
+  const snapshotEstimate = (id, data, { withSnapshotFee = false } = {}) => {
+    const row = data.result.recurring.services.find((s) => s.service === 'mosquito_misting');
+    const oneTimeItems = (data.result.oneTime && data.result.oneTime.items) || [];
+    const frequency = {
+      key: 'monthly', label: 'Monthly', monthly: 59, annual: 708,
+      perServiceTreatments: [{ service: 'mosquito_misting', label: row ? row.name : 'Mosquito Misting Service Plan', perTreatment: 59, displayPrice: 59, visitsPerYear: 12 }],
+    };
+    return {
+      id,
+      status: 'sent',
+      monthly_total: 59,
+      annual_total: 708,
+      onetime_total: oneTimeItems.reduce((sum, item) => sum + (Number(item.price) || 0), 0),
+      waveguard_tier: 'none',
+      estimate_data: {
+        ...data,
+        sendSnapshot: {
+          pricingBundle: {
+            frequencies: [frequency],
+            source: 'send_snapshot',
+            oneTimeBreakdown: { items: oneTimeItems.map((item) => ({ service: item.service, label: item.name, name: item.name, price: item.price, amount: item.price })), total: oneTimeItems.reduce((sum, item) => sum + (Number(item.price) || 0), 0) },
+            ...(withSnapshotFee ? { mistingInstallFee: { service: 'mosquito_misting_installation', amount: INSTALL, label: 'stale', waivedWithPrepay: false } } : {}),
+          },
+        },
+      },
+    };
+  };
+
+  test('a pre-change snapshot (no mistingInstallFee key) for a misting estimate gets the field, and the payment-choice total equals the invoice', async () => {
+    const data = estimateData();
+    const bundle = await buildPricingBundle(snapshotEstimate('est-snap-misting-1', data));
+    expect(bundle.snapshotHit).toBe(true);
+    const install = converter.frozenMistingInstall(data);
+    expect(bundle.mistingInstallFee).toEqual({
+      service: 'mosquito_misting_installation', amount: INSTALL, label: install.description, waivedWithPrepay: false,
+    });
+    // the up-front rows the client previews (install + first application) equal the invoice the accept mints
+    const firstApplication = 59;
+    const preview = Math.round((bundle.mistingInstallFee.amount + firstApplication) * 100) / 100;
+    expect(preview).toBe(Math.round((install.amount + firstApplication) * 100) / 100);
+  });
+
+  test('a snapshot that already carries the field is corrected to the frozen estimate figure', async () => {
+    const data = estimateData();
+    const bundle = await buildPricingBundle(snapshotEstimate('est-snap-misting-2', data, { withSnapshotFee: true }));
+    expect(bundle.mistingInstallFee.label).not.toBe('stale');
+    expect(bundle.mistingInstallFee.amount).toBe(INSTALL);
+  });
+
+  test('a non-misting snapshot returns no mistingInstallFee and its stored fields untouched', async () => {
+    const input = { ...PROPERTY, services: { pest: { frequency: 'quarterly' } } };
+    const data = { result: mapper.mapV1ToLegacyShape(generateEstimate(input)), engineInputs: input };
+    const estimate = snapshotEstimate('est-snap-pest-1', data);
+    estimate.estimate_data.sendSnapshot.pricingBundle.frequencies[0].perServiceTreatments = [{ service: 'pest_control', label: 'Pest Control', perTreatment: 59, displayPrice: 59, visitsPerYear: 12 }];
+    const stored = JSON.parse(JSON.stringify(estimate.estimate_data.sendSnapshot.pricingBundle));
+    const bundle = await buildPricingBundle(estimate);
+    expect(Object.prototype.hasOwnProperty.call(bundle, 'mistingInstallFee')).toBe(false);
+    if (bundle.snapshotHit) expect(bundle.frequencies[0].key).toBe(stored.frequencies[0].key);
+    // the stored snapshot itself is never written back
+    expect(estimate.estimate_data.sendSnapshot.pricingBundle).toEqual(stored);
+  });
+
+  test('the snapshot return path attaches the field from the same constant as the fresh path', () => {
+    const src = read('routes/estimate-public.js');
+    expect(src).toMatch(/\.\.\.snapshotBundle,\s*\/\/ A snapshot frozen before the misting install[\s\S]{0,260}\.\.\.mistingInstallFeeField,\s*source: snapshotBundle\.source/);
   });
 });
