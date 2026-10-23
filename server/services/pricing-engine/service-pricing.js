@@ -4991,41 +4991,49 @@ function priceTermiteStationRental(installPrice) {
 // `annual` (refill.annualEstimate is informational). DRAFT constants, dealer
 // cost unknown: the estimate engine only calls this behind GATE_MOSQUITO_MISTING.
 // `risers` is the number of risers requested; the first includedRisers are free.
-function priceMosquitoMisting(property, options = {}) {
+// priceMosquitoMisting is a short orchestrator over the pure helpers below (each stays under the complexity limit).
+const isPlainObject = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
+const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+
+// Tier and refill solution. A replay (options.knobs, the stored quote-time snapshot) resolves an IMPLICIT tier or solution from the
+// stamp itself, so a saved input like `mosquitoMisting: true` replays the system it was sold as even after the live defaults
+// change. An explicit option still wins; a mismatch with the stamp still skips the stamp (resolveMistingBasis).
+function resolveMistingChoice(options) {
   const M = MOSQUITO_MISTING;
   const reasons = [];
-
-  // A replay (options.knobs, the stored quote-time snapshot) resolves an IMPLICIT tier or solution from the stamp itself, so a
-  // saved input like `mosquitoMisting: true` replays the system it was sold as even after the live defaults change. An
-  // explicit option still wins; a mismatch with the stamp still skips the stamp (below).
-  const stamped = options.knobs && typeof options.knobs === 'object' && !Array.isArray(options.knobs) ? options.knobs : null;
+  const stamped = isPlainObject(options.knobs) ? options.knobs : null;
   let tier = String(options.tier ?? stamped?.tier ?? M.defaultTier).trim().toLowerCase();
-  if (!Object.prototype.hasOwnProperty.call(M.tiers, tier)) {
+  if (!hasOwn(M.tiers, tier)) {
     reasons.push('mosquito_misting_unknown_tier');
     tier = M.defaultTier;
   }
-  const tierCfg = M.tiers[tier];
-
   let solution = String(options.solution ?? stamped?.refillSolution ?? M.defaultSolution).trim().toLowerCase();
-  if (!Object.prototype.hasOwnProperty.call(M.refills, solution)) {
+  if (!hasOwn(M.refills, solution)) {
     reasons.push('mosquito_misting_unknown_solution');
     solution = M.defaultSolution;
   }
-  const refillCfg = M.refills[solution];
+  return { tier, solution, reasons };
+}
 
-  // Pricing basis: the live (DB-synced) constants, or the knobs a sent estimate was priced under (options.knobs, injected
-  // by the replay paths from the stored row). A knob stamped for a different tier or solution does not apply (the whole
-  // snapshot is skipped, like the termite "stamped for THIS system" rule); a missing or non-finite knob falls back per field.
-  const snap = options.knobs && typeof options.knobs === 'object' && !Array.isArray(options.knobs)
-    && (!options.knobs.tier || options.knobs.tier === tier)
-    && (!options.knobs.refillSolution || options.knobs.refillSolution === solution)
-    ? options.knobs : null;
-  const knob = (name, live, { positive = false, whole = false } = {}) => {
+// Pricing basis: the live (DB-synced) constants, or the knobs a sent estimate was priced under (options.knobs, injected by the
+// replay paths from the stored row). A knob stamped for a different tier or solution does not apply (the whole snapshot is
+// skipped, like the termite "stamped for THIS system" rule); a missing or non-finite knob falls back per field.
+function mistingKnobReader(snap) {
+  return (name, live, { positive = false, whole = false } = {}) => {
     const v = snap ? snap[name] : undefined;
     const ok = typeof v === 'number' && Number.isFinite(v) && (positive ? v > 0 : v >= 0) && (!whole || Number.isInteger(v));
     return ok ? v : live;
   };
-  const basis = {
+}
+function resolveMistingBasis({ tier, solution }, knobs) {
+  const M = MOSQUITO_MISTING;
+  const tierCfg = M.tiers[tier];
+  const refillCfg = M.refills[solution];
+  const matches = isPlainObject(knobs)
+    && (!knobs.tier || knobs.tier === tier)
+    && (!knobs.refillSolution || knobs.refillSolution === solution);
+  const knob = mistingKnobReader(matches ? knobs : null);
+  return {
     tierPrice: knob('tierPrice', tierCfg.price),
     hardwareCost: knob('hardwareCost', tierCfg.hardwareCost),
     includedNozzles: knob('includedNozzles', tierCfg.includedNozzles, { positive: true, whole: true }),
@@ -5045,45 +5053,47 @@ function priceMosquitoMisting(property, options = {}) {
     refillProductCost: knob('refillProductCost', refillCfg.productCost),
     serviceCallNoPlan: knob('serviceCallNoPlan', M.serviceCallNoPlan),
   };
+}
 
-  let nozzles = options.nozzles == null ? basis.includedNozzles : Number(options.nozzles);
+// The requested counts, validated (reasons are appended in the order the checks run).
+function resolveMistingNozzles(raw, basis, reasons) {
+  const M = MOSQUITO_MISTING;
+  let nozzles = raw == null ? basis.includedNozzles : Number(raw);
   if (!Number.isFinite(nozzles) || nozzles < M.minNozzles) {
     reasons.push('mosquito_misting_invalid_nozzles');
     nozzles = basis.includedNozzles;
   }
   nozzles = Math.round(nozzles);
-  const nozzlesOversize = nozzles > M.maxNozzles;
-  if (nozzlesOversize) reasons.push('mosquito_misting_oversize');
-
-  let risers = options.risers == null ? 0 : Number(options.risers);
+  const oversize = nozzles > M.maxNozzles;
+  if (oversize) reasons.push('mosquito_misting_oversize');
+  return { nozzles, oversize };
+}
+function resolveMistingRisers(raw, reasons) {
+  let risers = raw == null ? 0 : Number(raw);
   if (!Number.isFinite(risers) || risers < 0) {
     reasons.push('mosquito_misting_invalid_risers');
     risers = 0;
   }
   risers = Math.round(risers);
-  const risersOversize = risers > M.maxRisers;
-  if (risersOversize) reasons.push('mosquito_misting_oversize_risers');
-
-  let refillsPerYear = options.refillsPerYear == null ? M.defaultRefillsPerYear : Number(options.refillsPerYear);
+  const oversize = risers > MOSQUITO_MISTING.maxRisers;
+  if (oversize) reasons.push('mosquito_misting_oversize_risers');
+  return { risers, oversize };
+}
+function resolveMistingRefills(raw, reasons) {
+  const M = MOSQUITO_MISTING;
+  let refillsPerYear = raw == null ? M.defaultRefillsPerYear : Number(raw);
   if (!Number.isFinite(refillsPerYear) || refillsPerYear < 0 || refillsPerYear > M.maxRefillsPerYear) {
     reasons.push('mosquito_misting_invalid_refills');
     refillsPerYear = M.defaultRefillsPerYear;
   }
+  return refillsPerYear;
+}
 
-  const extraNozzles = Math.max(0, nozzles - basis.includedNozzles);
-  const extraRisers = Math.max(0, risers - basis.includedRisers);
-
-  const refill = {
-    solution,
-    label: refillCfg.label,
-    perFill: basis.refillPrice,
-    productCost: basis.refillProductCost,
-    refillsPerYear,
-    annualEstimate: Math.round(basis.refillPrice * refillsPerYear * 100) / 100,
-  };
-
-  const pricingKnobs = {
-    tier,
+// The knobs this line was priced under, stamped on the line (replayed from the stored row).
+function mistingPricingKnobs(choice, basis) {
+  const M = MOSQUITO_MISTING;
+  return {
+    tier: choice.tier,
     tierPrice: basis.tierPrice,
     hardwareCost: basis.hardwareCost,
     includedNozzles: basis.includedNozzles,
@@ -5103,43 +5113,29 @@ function priceMosquitoMisting(property, options = {}) {
     planVisitsPerYear: basis.planVisitsPerYear,
     laborMinutesPerVisit: basis.laborMinutesPerVisit,
     partsReservePerMonth: basis.partsReservePerMonth,
-    refillSolution: solution,
+    refillSolution: choice.solution,
     refillPrice: basis.refillPrice,
     refillProductCost: basis.refillProductCost,
     defaultRefillsPerYear: M.defaultRefillsPerYear,
     serviceCallNoPlan: basis.serviceCallNoPlan,
   };
+}
 
-  const base = {
-    service: 'mosquito_misting',
-    name: 'Mosquito Misting Service Plan',
-    tier,
-    tierLabel: tierCfg.label,
-    solution,
-    nozzles,
-    risers,
-    extraNozzles,
-    extraRisers,
-    refill,
-    refillsBilledPerApplication: true,
-    visitsPerYear: basis.planVisitsPerYear,
-    requiresMeasurement: false,
-    pricingKnobs,
+// Manual quote above the largest standard layout: the requested work stays visible, nothing is priced.
+function mistingOversizeResult(base, reasons) {
+  return {
+    ...base,
+    annual: null,
+    monthly: null,
+    installation: { price: null, retailValue: null, materialCost: null, laborCost: null, totalCost: null, margin: null },
+    quoteRequired: true,
+    requiresManualReview: true,
+    manualReviewReasons: reasons,
   };
+}
 
-  if (nozzlesOversize || risersOversize) {
-    // Above the largest standard layout: manual quote, nothing priced.
-    return {
-      ...base,
-      annual: null,
-      monthly: null,
-      installation: { price: null, retailValue: null, materialCost: null, laborCost: null, totalCost: null, margin: null },
-      quoteRequired: true,
-      requiresManualReview: true,
-      manualReviewReasons: reasons,
-    };
-  }
-
+function buildMistingPricedResult(base, basis, reasons) {
+  const { extraNozzles, extraRisers } = base;
   const price = Math.round(basis.tierPrice + extraNozzles * basis.extraNozzlePrice + extraRisers * basis.extraRiserPrice);
   const materialCost = Math.round((basis.hardwareCost + extraNozzles * basis.extraNozzleCost + extraRisers * basis.extraRiserCost) * 100) / 100;
   const laborCost = Math.round(basis.installTechs * basis.installHours * basis.laborRate * 100) / 100;
@@ -5149,8 +5145,7 @@ function priceMosquitoMisting(property, options = {}) {
   const planCostAnnual = Math.round(
     ((basis.laborMinutesPerVisit / 60) * basis.laborRate * basis.planVisitsPerYear + basis.partsReservePerMonth * 12) * 100,
   ) / 100;
-
-  const result = {
+  return {
     ...base,
     annual,
     // The monthly AVERAGE of the configured annual (per application × cadence / 12).
@@ -5176,6 +5171,42 @@ function priceMosquitoMisting(property, options = {}) {
     requiresManualReview: reasons.length > 0,
     manualReviewReasons: reasons,
   };
+}
+
+function priceMosquitoMisting(property, options = {}) {
+  const choice = resolveMistingChoice(options);
+  const { reasons } = choice;
+  const basis = resolveMistingBasis(choice, options.knobs);
+  const { nozzles, oversize: nozzlesOversize } = resolveMistingNozzles(options.nozzles, basis, reasons);
+  const { risers, oversize: risersOversize } = resolveMistingRisers(options.risers, reasons);
+  const refillsPerYear = resolveMistingRefills(options.refillsPerYear, reasons);
+  const refillCfg = MOSQUITO_MISTING.refills[choice.solution];
+
+  const base = {
+    service: 'mosquito_misting',
+    name: 'Mosquito Misting Service Plan',
+    tier: choice.tier,
+    tierLabel: MOSQUITO_MISTING.tiers[choice.tier].label,
+    solution: choice.solution,
+    nozzles,
+    risers,
+    extraNozzles: Math.max(0, nozzles - basis.includedNozzles),
+    extraRisers: Math.max(0, risers - basis.includedRisers),
+    refill: {
+      solution: choice.solution,
+      label: refillCfg.label,
+      perFill: basis.refillPrice,
+      productCost: basis.refillProductCost,
+      refillsPerYear,
+      annualEstimate: Math.round(basis.refillPrice * refillsPerYear * 100) / 100,
+    },
+    refillsBilledPerApplication: true,
+    visitsPerYear: basis.planVisitsPerYear,
+    requiresMeasurement: false,
+    pricingKnobs: mistingPricingKnobs(choice, basis),
+  };
+  if (nozzlesOversize || risersOversize) return mistingOversizeResult(base, reasons);
+  const result = buildMistingPricedResult(base, basis, reasons);
   assertFinitePriceFields([result]);
   return result;
 }

@@ -1275,7 +1275,10 @@ function generateEstimate(input) {
   // (not in WAVEGUARD.qualifyingServices) and NOT percent-discountable
   // (excludedFromPercentDiscount.mosquito_misting); its install price rides
   // line.installation.price into installationTotal / year1Total below.
-  const mistingService = services.mosquitoMisting || services.mosquito_misting;
+  // ONE selection rule with the stored-estimate guards (isMistingSelection): only `true` or a plain object selects the system,
+  // so a truthy string / number / list is neither priced here nor carried by the guard.
+  const { isMistingSelection } = require('../../utils/mosquito-misting-system');
+  const mistingService = [services.mosquitoMisting, services.mosquito_misting].find(isMistingSelection) || null;
   const mistingReplayKnobs = input.mistingPricingKnobs && typeof input.mistingPricingKnobs === 'object' ? input.mistingPricingKnobs : null;
   if (mistingService && !require('../../config/feature-gates').mosquitoMistingLive() && mistingReplayKnobs) {
     // A STORED misting quote (the server-derived replay stamp rides only a replay) re-entering the engine while the gate is

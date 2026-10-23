@@ -106,6 +106,13 @@ function mistingProposalIdentity(raw) {
   return installLabels.some((label) => lowered.includes(label)) ? 'mosquito_misting_installation' : null;
 }
 
+// The ONE selection rule for a `services.mosquitoMisting` / `services.mosquito_misting` input, shared by the pricing engine and
+// the stored-estimate guards (v1-legacy-mapper), so what the engine prices and what the guard carries can never disagree:
+// `true` or a plain object selects the system; anything else (false, 0, '', 'yes', 1, a list, null) does not.
+function isMistingSelection(value) {
+  return value === true || (value !== null && typeof value === 'object' && !Array.isArray(value));
+}
+
 function normalizeServiceKey(serviceKey) {
   return serviceKey ? String(serviceKey).trim().toLowerCase() : '';
 }
@@ -174,6 +181,7 @@ module.exports = {
   MISTING_SYSTEM_SERVICE_KEY,
   MISTING_ENGINE_SERVICE_KEY,
   isMistingSystemIdentity,
+  isMistingSelection,
   mistingProposalIdentity,
   MISTING_SYSTEM_NAME_PATTERN,
   isMistingSystemService,

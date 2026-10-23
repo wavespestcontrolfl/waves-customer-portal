@@ -12,6 +12,7 @@
 // ============================================================
 
 const { priceTopDressing, priceTreeShrub, assertFinitePriceFields } = require('./service-pricing');
+const { isMistingSelection } = require('../../utils/mosquito-misting-system');
 const { authoritativeEstimateResult, proposalIsAuthoritative, storedAreaAddOnRows, storedMistingRows } = require('../estimate-result-container');
 
 const RECURRING_SERVICES = new Set([
@@ -1715,15 +1716,12 @@ function estimateDataCarriesMosquitoMisting(estimateDataRaw, { pricingAuthority 
   if (mistingInputSelected(d)) return true;
   return storedMistingRows(d, { pricingAuthority }).length > 0;
 }
-// The engine's own selection test (`if (mistingService && ...)` on services.mosquitoMisting || services.mosquito_misting):
-// `true` or a plain object selects the system; false, 0, '', null, a list or a string do not.
-function mistingSelected(value) {
-  return value === true || (value !== null && typeof value === 'object' && !Array.isArray(value));
-}
+// The engine's own selection test (utils/mosquito-misting-system#isMistingSelection, imported by the engine too): `true` or a plain
+// object selects the system; false, 0, '', null, a list or a string do not.
 function mistingInputSelected(d) {
   return [d.engineInputs, d.engineInput, d.inputs, d.engineRequest?.options]
     .some((shape) => shape && typeof shape === 'object'
-      && (mistingSelected(shape.services?.mosquitoMisting) || mistingSelected(shape.services?.mosquito_misting)));
+      && (isMistingSelection(shape.services?.mosquitoMisting) || isMistingSelection(shape.services?.mosquito_misting)));
 }
 const MOSQUITO_MISTING_GATED_CODE = 'MOSQUITO_MISTING_GATED';
 const MOSQUITO_MISTING_GATED_REASON = 'mosquito_misting_disabled';

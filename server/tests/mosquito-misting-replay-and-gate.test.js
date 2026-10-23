@@ -226,6 +226,37 @@ describe('false misting selections are not selections (the engine\'s own rule)',
   });
 });
 
+describe('the engine and the guard share ONE selection rule', () => {
+  const { isMistingSelection } = require('../utils/mosquito-misting-system');
+  const price = (value, extra = {}) => generateEstimate({ ...PROPERTY, services: { mosquitoMisting: value }, ...extra }).lineItems.some((l) => l.service === 'mosquito_misting');
+
+  test.each([['yes', false], [1, false], [[], false], ['true', false], [{}, true], [true, true], [false, false], [0, false], ['', false], [null, false]])(
+    'services.mosquitoMisting = %p: priced %p, and the guard agrees',
+    (value, selected) => {
+      expect(isMistingSelection(value)).toBe(selected);
+      expect(price(value)).toBe(selected);
+      expect(mapper.estimateDataCarriesMosquitoMisting({ engineInputs: { services: { mosquitoMisting: value } } })).toBe(selected);
+      expect(mapper.estimateMistingAcceptBlocked({ engineInputs: { services: { mosquitoMisting: value } } })).toBe(selected);
+    },
+  );
+
+  test('the snake_case spelling follows the same rule, and a rejected first spelling does not hide a valid second one', () => {
+    expect(generateEstimate({ ...PROPERTY, services: { mosquito_misting: 'yes' } }).lineItems.some((l) => l.service === 'mosquito_misting')).toBe(false);
+    expect(generateEstimate({ ...PROPERTY, services: { mosquito_misting: {} } }).lineItems.some((l) => l.service === 'mosquito_misting')).toBe(true);
+    expect(generateEstimate({ ...PROPERTY, services: { mosquitoMisting: 'yes', mosquito_misting: true } }).lineItems.some((l) => l.service === 'mosquito_misting')).toBe(true);
+  });
+
+  test('a stored inputs-only estimate with a truthy string is neither priced on replay nor blocked, gate on or off', () => {
+    const stamp = generateEstimate({ ...PROPERTY, services: { mosquitoMisting: OPTS } }).lineItems.find((l) => l.service === 'mosquito_misting').pricingKnobs;
+    const stored = { engineInputs: { services: { mosquitoMisting: 'yes' } } };
+    expect(mapper.gatedAddOnCustomerRefusal(stored)).toBeNull();
+    expect(price('yes', { mistingPricingKnobs: stamp })).toBe(false);
+    delete process.env.GATE_MOSQUITO_MISTING;
+    expect(mapper.gatedAddOnCustomerRefusal(stored)).toBeNull();
+    expect(() => generateEstimate({ ...PROPERTY, services: { mosquitoMisting: 'yes' }, mistingPricingKnobs: stamp })).not.toThrow();
+  });
+});
+
 describe('acceptance of a priced misting estimate is pending misting PR 2, even with the gate on', () => {
   const constants = require('../services/pricing-engine/constants');
   const priced = () => {
