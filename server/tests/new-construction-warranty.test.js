@@ -70,7 +70,7 @@ describe('templateIssueValues (server-built warranty)', () => {
   const conn = (row) => () => ({ where() { return this; }, forUpdate() { locks.push(row && row.id); return this; }, first: async () => row });
   const office = {
     warranty: {
-      structures: 'The new home', notice_location: 'beside the electric panel', treatment_price: '$1,250.00',
+      structures: 'The new home', notice_location: 'beside the electric panel', payer: 'Owner Test', treatment_price: '$1,250.00',
       plan_price: 'Included', renewal_fee: '$99.00', consumer_notice_date: '09/01/2026',
       term_end: '01/01/2099', product: 'FORGED', issue_date: '01/01/2000',
     },
@@ -90,6 +90,7 @@ describe('templateIssueValues (server-built warranty)', () => {
     expect(v.warranty.term_end).toBe('10/01/2027');
     expect(v.warranty.number).toBe('NCW-ABCD1234');
     expect(v.warranty.notice_location).toBe('beside the electric panel');
+    expect(v.warranty.payer).toBe('Owner Test');
     expect(v.warranty.contract_basis).toBe('Issued under the master agreement with Example Homes LLC dated 09/01/2026.');
     expect(v.warranty.issue_date).not.toBe('01/01/2000');
     expect(v.warranty.issue_date).toMatch(/^\d{2}\/\d{2}\/\d{4}$/);
@@ -108,9 +109,24 @@ describe('templateIssueValues (server-built warranty)', () => {
       const row = { ...project, findings: { ...findings, ...bad } };
       await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(row))).rejects.toMatchObject({ status: 409 });
     }
+    for (const renewal_due of ['2025-09-15', '2026-10-01', '2027-10-02']) {
+      const row = { ...project, findings: { ...findings, renewal_due } };
+      await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(row))).rejects.toMatchObject({ status: 409 });
+    }
     const recorded = { ...project, findings: { ...findings, renewal_due: '2027-09-15' } };
     await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(recorded)))
       .resolves.toMatchObject({ warranty: { renewal_due: '09/15/2027' } });
+  });
+
+  test('takes a legacy "Other" soil-barrier method and a linear-feet-only job; the payer is the office entry', async () => {
+    const legacy = { ...project, findings: { ...findings, treatment_method: 'Other', treatment_method_other: 'Soil barrier (chemical)', square_footage: '', linear_feet: '220' } };
+    const v = await templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(legacy));
+    expect(v.treatment).toMatchObject({ sq_ft: 'N/A', linear_ft: '220' });
+    const noPayer = { ...office, warranty: { ...office.warranty, payer: '' } };
+    await expect(templateIssueValues(KEY, { projectId: project.id, values: noPayer }, customer, conn(project)))
+      .resolves.toMatchObject({ warranty: { payer: '' } });
+    const noArea = { ...project, findings: { ...findings, square_footage: '', linear_feet: '' } };
+    await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(noArea))).rejects.toMatchObject({ status: 409 });
   });
 
   test('refuses blank fields, a missing or foreign project, an ineligible job and late basis dates', async () => {

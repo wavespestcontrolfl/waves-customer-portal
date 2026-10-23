@@ -47,12 +47,13 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
   const [issuerTitle, setIssuerTitle] = useState("");
   const [structures, setStructures] = useState(base.warranty.structures);
   const [noticeLocation, setNoticeLocation] = useState("");
+  const [payer, setPayer] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [signingUrl, setSigningUrl] = useState("");
 
   const { basisProblem, noticeProblem, ready } = warrantyIssueReadiness(base, {
-    basisDate, noticeDate, treatmentPrice, planPrice, renewalFee, issuerName, issuerTitle, structures, noticeLocation,
+    basisDate, noticeDate, treatmentPrice, planPrice, renewalFee, issuerName, issuerTitle, structures, noticeLocation, payer,
   });
   const lateDays = daysSinceTreatment(base.treatment.initial_date, base.warranty.issue_date);
 
@@ -66,6 +67,7 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
         warranty: {
           structures: structures.trim(),
           notice_location: noticeLocation.trim(),
+          payer: payer.trim(),
           treatment_price: treatmentPrice.trim(),
           plan_price: planPrice.trim(),
           renewal_fee: renewalFee.trim(),
@@ -143,6 +145,9 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
               </Field>
               <Field id="warranty-structures" label="Structures covered">
                 <input id="warranty-structures" value={structures} onChange={(e) => setStructures(e.target.value)} style={fieldStyle} />
+              </Field>
+              <Field id="warranty-payer" label="Treatment paid by (builder or owner)">
+                <input id="warranty-payer" value={payer} onChange={(e) => setPayer(e.target.value)} placeholder="Name of who paid for this treatment" style={fieldStyle} />
               </Field>
               <Field id="warranty-treatment-price" label="Treatment price">
                 <input id="warranty-treatment-price" value={treatmentPrice} onChange={(e) => setTreatmentPrice(e.target.value)} placeholder="$0.00" style={fieldStyle} />

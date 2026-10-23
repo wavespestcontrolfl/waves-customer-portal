@@ -32,6 +32,7 @@ function fillOfficeFields() {
   set('warranty-issuer-name', 'Pat Office');
   set('warranty-issuer-title', 'Office Manager');
   set('warranty-notice-location', 'on the wall beside the electric panel in the garage');
+  set('warranty-payer', 'Example Homes LLC');
 }
 
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
@@ -56,6 +57,7 @@ describe('IssueWarrantyDialog', () => {
     expect(init.body.values.warranty).toEqual({
       structures: 'The new home and its attached garage on this lot.',
       notice_location: 'on the wall beside the electric panel in the garage',
+      payer: 'Example Homes LLC',
       treatment_price: '$1,250.00',
       plan_price: 'Included in the treatment price',
       renewal_fee: '$99.00',

@@ -60,9 +60,14 @@ function additionalApplications(value) {
 // The warranty text describes one preventive soil treatment. A borate wood
 // treatment, a bait system (its own program agreement) or a combined job
 // needs other wording, so only a single soil-barrier application qualifies.
+function treatmentMethod(findings) {
+  const method = text(findings.treatment_method);
+  return method === 'Other' ? text(findings.treatment_method_other) : method;
+}
+
 export function warrantyEligible(findings = {}) {
   return Boolean(warrantyPlanYears(findings.warranty_type))
-    && text(findings.treatment_method) === 'Soil barrier (chemical)'
+    && treatmentMethod(findings) === 'Soil barrier (chemical)'
     && additionalApplications(findings.additional_applications).length === 0;
 }
 
@@ -107,7 +112,7 @@ export function pretreatWarrantyValues({ project = {}, findings = {}, today = et
       active_ingredient: text(findings.active_ingredient),
       concentration: text(findings.concentration_pct),
       gallons: text(findings.gallons_applied),
-      sq_ft: text(findings.square_footage),
+      sq_ft: text(findings.square_footage) || 'N/A',
       linear_ft: text(findings.linear_feet) || 'N/A',
       initial_date: initial ? formatUs(initial) : '',
       final_exterior_line: finalDate
@@ -122,7 +127,7 @@ export function pretreatWarrantyValues({ project = {}, findings = {}, today = et
       plan: text(findings.warranty_type),
       term_end: termEnd,
       renewal_due: renewalDue(findings, termEnd),
-      payer: text(findings.builder_contractor),
+      payer: '',
       notice_location: '',
       issue_date: todayParts ? formatUs(todayParts) : '',
       treatment_price: '',

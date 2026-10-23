@@ -78,7 +78,9 @@ const PLAN_YEARS = {
   'Renewable 5-year retreatment bond': 5,
   'Renewable 10-year retreatment bond': 10,
 };
-const OFFICE_FIELDS = ['structures', 'notice_location', 'treatment_price', 'plan_price', 'renewal_fee', 'consumer_notice_date'];
+// payer comes from the office: the certificate's builder is not always the
+// party who paid for the treatment.
+const OFFICE_FIELDS = ['structures', 'notice_location', 'payer', 'treatment_price', 'plan_price', 'renewal_fee', 'consumer_notice_date'];
 const FINAL_EXTERIOR_NOT_RECORDED = 'Final exterior treatment: not recorded on this certificate when this warranty was issued. It does not change the warranty dates above.';
 
 function bad(message, status = 400) {
@@ -135,10 +137,17 @@ function extraApplications(value) {
   return (Array.isArray(rows) ? rows : []).filter((row) => row && typeof row === 'object' && Object.values(row).some((v) => oneLine(v)));
 }
 
+// A legacy "Other" pick keeps the real method in treatment_method_other, as
+// the certificate send gate reads it.
+function treatmentMethod(findings) {
+  const method = oneLine(findings.treatment_method);
+  return method === 'Other' ? oneLine(findings.treatment_method_other) : method;
+}
+
 // Same rule as the admin button: one soil-barrier application with a plan.
 function warrantyEligible(findings) {
   return Boolean(PLAN_YEARS[oneLine(findings.warranty_type)])
-    && oneLine(findings.treatment_method) === 'Soil barrier (chemical)'
+    && treatmentMethod(findings) === 'Soil barrier (chemical)'
     && extraApplications(findings.additional_applications).length === 0;
 }
 
@@ -177,6 +186,12 @@ function certificateValues(project, findings) {
   const lot = [oneLine(findings.lot_block), oneLine(findings.subdivision)].filter(Boolean).join(', ');
   const finalDate = certificateDate(findings, 'final_exterior_date', 'The final exterior date');
   const recordedRenewal = certificateDate(findings, 'renewal_due', 'Renewal due by');
+  // A recorded renewal must fall inside this term: after treatment, no later than its end.
+  if (recordedRenewal && (key(recordedRenewal) <= key(initial) || key(recordedRenewal) > key(addYears(initial, PLAN_YEARS[oneLine(findings.warranty_type)])))) {
+    throw bad('Renewal due by on the certificate must be after the treatment date and within the warranty term.', 409);
+  }
+  // The send gate takes square or linear feet; one of them must be there.
+  if (!oneLine(findings.square_footage) && !oneLine(findings.linear_feet)) throw bad('The certificate has no square or linear feet.', 409);
   const product = oneLine(findings.product_name) === 'Other' ? oneLine(findings.product_name_other) : oneLine(findings.product_name);
   return {
     initial,
@@ -187,7 +202,7 @@ function certificateValues(project, findings) {
         active_ingredient: oneLine(findings.active_ingredient),
         concentration: oneLine(findings.concentration_pct),
         gallons: oneLine(findings.gallons_applied),
-        sq_ft: oneLine(findings.square_footage),
+        sq_ft: oneLine(findings.square_footage) || 'N/A',
         linear_ft: oneLine(findings.linear_feet) || 'N/A',
         initial_date: us(initial),
         final_exterior_line: finalDate ? `Final exterior treatment date: ${us(finalDate)}.` : FINAL_EXTERIOR_NOT_RECORDED,
@@ -199,7 +214,6 @@ function certificateValues(project, findings) {
         plan: oneLine(findings.warranty_type),
         term_end: termEnd,
         renewal_due: recordedRenewal ? us(recordedRenewal) : termEnd,
-        payer: oneLine(findings.builder_contractor),
       },
     },
   };
