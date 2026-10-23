@@ -49,28 +49,29 @@ describe('the three tracks carry the same adds', () => {
   });
 });
 
-describe('1. mole crickets: Talak 1.0 fl oz on nymph spots in July and August, watered in by the technician', () => {
-  test.each([7, 8])('month %i names the nymph rate, the backpack and the technician\'s hose water-in', (month) => {
-    const [line] = lineFor(month, N.TAL).filter((l) => /mole cricket/.test(l));
-    expect(line).toMatch(/mole cricket nymph spots: Talak 1\.0 fl oz per 1,000 sq ft by backpack/);
-    expect(line).toMatch(/the technician waters it in right after application with the hose \(up to 0\.5 inch\) before leaving/);
+describe('1. mole crickets: Advion Insect Granule bait on nymph spots in June and the July scout visit (owner 2026-10-23; Talak is no longer the nymph product)', () => {
+  test.each([6, 7])('month %i names the Advion bait, the 3 lb rate, the hand shaker and the 3-day no-irrigation rule', (month) => {
+    const [line] = lineFor(month, 'Advion Insect Granule');
+    expect(line).toMatch(/mole cricket nymph spots on the tunnel areas, 3 lb per 1,000 sq ft of treated area by hand shaker/);
+    expect(line).toMatch(/then no irrigation or rain-dependent watering for 3 days/);
   });
-  test('July keeps the 24-hour customer hold on the same line; no month but July and August has a mole cricket Talak line', () => {
-    expect(lineFor(7, N.TAL)[0]).toMatch(/delay watering 24 hours; mole cricket nymph spots/);
-    for (const month of [1, 2, 3, 4, 5, 6, 9, 10, 11, 12]) expect(lineFor(month, N.TAL).filter((l) => /mole cricket/.test(l))).toEqual([]);
+  test('July keeps the 24-hour customer hold on the Talak line and no month has a mole cricket Talak line; Dylox stays the fall adult product', () => {
+    expect(lineFor(7, N.TAL)[0]).toMatch(/delay watering 24 hours$/);
+    for (const month of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]) expect(lineFor(month, N.TAL).filter((l) => /mole cricket/.test(l))).toEqual([]);
     expect(lineFor(10, N.DYL)[0]).toMatch(/spreader visit only, water in/);
   });
-  test('the notes and the safety rule keep "delay watering 24 hours" for every bifenthrin use and add the technician\'s water-in', () => {
+  test('the notes and the safety rule keep "delay watering 24 hours" for every bifenthrin use and no longer send nymphs to Talak', () => {
     const track = v13.st_augustine;
     expect(track.notes.join(' ')).toContain('Bifenthrin: delay watering 24 hours on every use. Grubs and mole crickets');
-    expect(track.notes.join(' ')).toMatch(/Mole cricket nymphs, July and August: Talak 7\.9 F on the spots, 1\.0 fl oz per 1,000 sq ft by backpack, and the technician waters it in right after application with the hose \(up to 0\.5 inch\) before leaving; the customer's 24-hour hold then applies/);
-    expect(track.safety_rules).toContain('Bifenthrin (Atticus Talak 7.9 F): delay watering 24 hours. On mole cricket nymph spots the technician first waters it in right after application with the hose (up to 0.5 inch).');
+    expect(track.notes.join(' ')).toMatch(/Mole cricket nymphs, June and the July scout visit/);
+    expect(track.notes.join(' ')).not.toMatch(/Mole cricket nymphs, July and August/);
+    expect(track.safety_rules).toContain('Bifenthrin (Atticus Talak 7.9 F): delay watering 24 hours.');
     expect(JSON.stringify(v13)).not.toMatch(/except mole cricket|water in at once/);
   });
-  test('August is a hose visit; July is the scout visit with backpack spots: the water-in is the truck hose, never a second whole-lawn tool', () => {
-    expect(visitFor(8).notes).toMatch(/Hose visit/);
+  test('June is a hose visit and July the scout visit with backpack spots: the bait is a hand-shaker spot tool, never a second whole-lawn tool', () => {
+    expect(visitFor(6).notes).toMatch(/Hose visit/);
     expect(visitFor(7).notes).toMatch(/No whole-lawn tool this month/);
-    for (const month of [7, 8]) expect(lineFor(month, N.TAL).filter((l) => /mole cricket/.test(l))[0]).toMatch(/by backpack/);
+    for (const month of [6, 7]) expect(lineFor(month, 'Advion Insect Granule')[0]).toMatch(/\(bait, not a whole-lawn tool\)/);
   });
 });
 
@@ -112,7 +113,7 @@ describe('2. take-all: the second pass of each Artavia pair is Headway', () => {
     expect(lineFor(9, N.ART)[0]).toMatch(/take-all areas, first fall application/);
     expect(lineFor(10, matrix.HEAD)[0]).toMatch(/take-all areas, second fall application, 3 fl oz per 1,000 sq ft/);
     // October's Artavia line is large patch only now.
-    expect(lineFor(10, N.ART)[0]).toBe(`${N.ART} — mapped large patch with Velista at 2 gal per 1,000 sq ft`);
+    expect(lineFor(10, N.ART)[0]).toMatch(new RegExp(`^${N.ART.replace(/[()]/g, '\\$&')} \u2014 mapped large patch with Velista at 2 gal per 1,000 sq ft, only on a lawn mapped for large patch alone;`));
   });
   test('Headway rate is the Headway liquid label (EPA 100-1216): 3 fl oz, 30 days after Artavia, so no "label rate to confirm" mark', () => {
     const headway = matrix.CATALOG.find((p) => p.name === matrix.HEAD);
@@ -205,10 +206,10 @@ describe('6. July is the scout visit again: no 0-0-50 potash step (owner: Decemb
     for (const track of TRACKS) expect(JSON.stringify(v13[track].visits.find((v) => v.month === 'Jul'))).not.toMatch(/K rate|K2O|[Ss]preader/);
   });
 
-  test('the July inspection classifies as an inspection, and July keeps its spot lines (Talak mole crickets, Pythium, fairy ring)', () => {
+  test('the July inspection classifies as an inspection, and July keeps its spot lines (Advion mole crickets, Pythium, fairy ring)', () => {
     const [first] = engine.parseProtocolLines(visitFor(7).primary, 'base');
     expect(first.scope).toBe('INSPECTION_ONLY');
-    expect(lineFor(7, N.TAL).join(' ')).toMatch(/mole cricket nymph spots/);
+    expect(lineFor(7, 'Advion Insect Granule').join(' ')).toMatch(/mole cricket nymph spots/);
     expect(lineFor(7, N.ART).join(' ')).toMatch(/Pythium root rot/);
     expect(lineFor(7, N.VEL).join(' ')).toMatch(/fairy ring/);
   });
@@ -252,7 +253,7 @@ describe('7. Fire ant granule (Topchoice Granular Insecticide): an optional add-
       expect(lineFor(m, matrix.ADVION)).toEqual([]);
     }
     for (const m of [1, 2, 3, 5, 6, 7, 8, 9, 11, 12]) expect(lineFor(m, granule.GRANULE)).toEqual([]);
-    expect(JSON.stringify(v13)).not.toMatch(/Advion/);
+    expect(JSON.stringify(v13)).not.toMatch(/Advion Fire Ant|fire ant bait/i);
     const spec = granule.ROW;
     expect(spec.defaultInPlan).toBe(false);
     expect(granule.EPA).toBe('432-1217');
