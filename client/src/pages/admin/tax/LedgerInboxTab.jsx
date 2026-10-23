@@ -153,7 +153,10 @@ function InboxRow({ row, categories, busy, error, onAct, view = "open" }) {
   useEffect(() => {
     if (!touched) setCategoryId(suggestedCategoryId);
   }, [suggestedCategoryId, touched]);
-  const act = (r, decision) => onAct(r, decision, { categoryId, always });
+  // touched: the operator picked the category; untouched, it is the row's
+  // own default (a rule's, the ledger's or the model's) and the server
+  // keeps that provenance (a model's default gets the AI-verify note)
+  const act = (r, decision) => onAct(r, decision, { categoryId, always, touched });
   return (
     <Card data-testid={`ledger-row-${row.id}`}>
       <CardBody className="flex flex-col gap-2 min-w-0">
@@ -472,7 +475,7 @@ export default function LedgerInboxTab() {
     loadRows(view, 0);
   }, [enabled, view, loadRows]);
 
-  const act = async (row, decision, { categoryId, always }) => {
+  const act = async (row, decision, { categoryId, always, touched }) => {
     if (decision === "expense" && !categoryId) {
       setRowErrors((p) => ({ ...p, [row.id]: "Choose a category first." }));
       return;
@@ -488,7 +491,11 @@ export default function LedgerInboxTab() {
         // examined it, no existing expense or payout to link); create-expense
         // checks again inside its claim and writes the Always rule itself
         await post(`${T}/ledger/decide`, { id: row.id, decision, categoryId });
-        const made = await post(`${T}/${row.id}/create-expense`, { categoryId, fromLedger: true, always: !!always });
+        // an untouched default is not sent: create-expense books the row's own
+        // suggested category and keeps its provenance (an accepted model
+        // default is still marked for verification); a picked one is the operator's
+        const picked = touched || categoryId !== (row.suggestion?.categoryId || "");
+        const made = await post(`${T}/${row.id}/create-expense`, { ...(picked ? { categoryId } : {}), fromLedger: true, always: !!always });
         propagated = made?.propagated !== false;
       } else {
         const decided = await post(`${T}/ledger/decide`, { id: row.id, decision, always: !!always });

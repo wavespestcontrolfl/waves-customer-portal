@@ -103,15 +103,25 @@ it('Business with Always posts decide, then create-expense with the chosen categ
   expect(p[1].body).toEqual({ categoryId: 'cat-1', fromLedger: true, always: true });
 });
 
-it('Business without Always still posts decide first, then create-expense marked fromLedger', async () => {
+it('Business without Always still posts decide first, then create-expense marked fromLedger; an untouched default category is not sent, so the server keeps its provenance', async () => {
   render(<LedgerInboxTab />);
   const card = await screen.findByTestId('ledger-row-row-1');
   fireEvent.click(within(card).getByRole('button', { name: 'Business' }));
   await waitFor(() => expect(screen.queryByText('ACME HARDWARE 123')).not.toBeInTheDocument());
   const p = posts();
   expect(p.map((c) => c.url.replace(/^.*\/admin\/tax\/bank-import/, ''))).toEqual(['/ledger/decide', '/row-1/create-expense']);
-  expect(p[0].body).toEqual({ id: 'row-1', decision: 'expense', categoryId: 'cat-2' });
-  expect(p[1].body).toEqual({ categoryId: 'cat-2', fromLedger: true, always: false });
+  expect(p[0].body).toEqual({ id: 'row-1', decision: 'expense', categoryId: 'cat-2' }); // the preflight validates the default
+  expect(p[1].body).toEqual({ fromLedger: true, always: false }); // the claim books the row's own suggestion (a model's default keeps its AI-verify note)
+});
+
+it('a category the operator re-picks to the same value as the default counts as picked', async () => {
+  render(<LedgerInboxTab />);
+  const card = await screen.findByTestId('ledger-row-row-1');
+  fireEvent.change(within(card).getByLabelText('Category'), { target: { value: 'cat-1' } });
+  fireEvent.change(within(card).getByLabelText('Category'), { target: { value: 'cat-2' } });
+  fireEvent.click(within(card).getByRole('button', { name: 'Business' }));
+  await waitFor(() => expect(screen.queryByText('ACME HARDWARE 123')).not.toBeInTheDocument());
+  expect(posts()[1].body).toEqual({ categoryId: 'cat-2', fromLedger: true, always: false });
 });
 
 it('a refused decide leaves the row in place with the server reason', async () => {
