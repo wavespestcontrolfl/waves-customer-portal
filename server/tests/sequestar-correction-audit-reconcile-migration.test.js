@@ -1,7 +1,8 @@
 /**
- * 20261023160000 reconciles the audit trail of the Sequestar per-1,000 correction. Run in filename order on a fresh database,
- * 010000 corrects the row with no audit row and 120000/140000 then exit as already corrected; 160000 adds the one missing
- * critical audit row. It never changes the catalog row, is idempotent, skips an already-audited or edited row, and has no rollback.
+ * 20261023160000 reconciles the audit trail of the Sequestar per-1,000 correction. On a fresh database 010000 and 120000 are
+ * no-ops and 140000 corrects and audits the row, so 160000 adds nothing; on a database left corrected without an audit row by the
+ * original 010000 body (closed previews #6507 and #6509) it adds the one missing critical audit row. It never changes the catalog
+ * row, is idempotent, skips an already-audited or edited row, and has no rollback.
  */
 const m010000 = require('../models/migrations/20261023010000_sequestar_clear_wrong_per_1000_default');
 const m120000 = require('../models/migrations/20261023120000_sequestar_per_1000_default_correction');
@@ -53,33 +54,49 @@ const ACTIONS = m160000.AUDIT_ACTIONS;
 beforeEach(() => { jest.spyOn(console, 'log').mockImplementation(() => {}); });
 afterEach(() => { jest.restoreAllMocks(); });
 
-describe('fresh database, migrations in filename order', () => {
-  test('010000, 120000, 140000, 160000 leave a corrected row and exactly one audit row; a second pass adds none', async () => {
+describe('fresh database, migrations in filename order (010000 and 120000 are no-ops)', () => {
+  test('010000 and 120000 do nothing, 140000 corrects the row and audits it, 160000 adds nothing; a second pass adds none', async () => {
     const rows = [seeded({ label_source_note: 'Earlier note.' })];
     const knex = fakeKnex(rows);
     await m010000.up(knex);
+    await m120000.up(knex);
+    expect(rows[0].default_rate_per_1000).toBe('1.5');
     expect(knex.audit).toHaveLength(0);
+    await m140000.up(knex);
+    expect(rows[0].default_rate_per_1000).toBeNull();
+    expect(knex.audit).toHaveLength(1);
+    expect(knex.audit[0].action).toBe(ACTIONS[1]);
+    await m160000.up(knex);
+    expect(knex.audit).toHaveLength(1);
+    const snapshot = JSON.stringify(rows);
+    for (const migration of [m010000, m120000, m140000, m160000]) await migration.up(knex);
+    expect(knex.audit).toHaveLength(1);
+    expect(JSON.stringify(rows)).toBe(snapshot);
+  });
+});
+
+describe('a database left corrected by the ORIGINAL 010000 body (rate cleared, note appended, no audit row)', () => {
+  // The original body ran only on the closed PR previews #6507 and #6509. The state it left is a row with a NULL rate and the
+  // provenance note after any earlier note, and no audit_log row.
+  test('160000 writes exactly one audit row, with the earlier note as the before; 140000 before it exits, a second 160000 adds none', async () => {
+    const rows = [corrected({ label_source_note: `Earlier note. | ${m160000.NOTE}` })];
+    const knex = fakeKnex(rows);
+    await m010000.up(knex);
     await m120000.up(knex);
     await m140000.up(knex);
-    // The gap: corrected, and still no audit row, because 120000 and 140000 both exited as already corrected.
-    expect(rows[0].default_rate_per_1000).toBeNull();
     expect(knex.audit).toHaveLength(0);
     await m160000.up(knex);
     expect(knex.audit).toHaveLength(1);
     expect(knex.audit[0]).toMatchObject({ actor_type: 'system', action: m160000.ACTION, resource_type: 'products_catalog', resource_id: 's1' });
     expect(knex.audit[0].metadata.before).toEqual({ default_rate_per_1000: 1.5, rate_unit: 'oz', label_source_note: 'Earlier note.' });
     expect(knex.audit[0].metadata.after).toEqual({ default_rate_per_1000: null, rate_unit: 'oz', label_source_note: `Earlier note. | ${m160000.NOTE}` });
-    // Re-running every migration adds nothing.
-    const snapshot = JSON.stringify(rows);
-    for (const migration of [m010000, m120000, m140000, m160000]) await migration.up(knex);
+    await m160000.up(knex);
     expect(knex.audit).toHaveLength(1);
-    expect(JSON.stringify(rows)).toBe(snapshot);
   });
 
-  test('a note-less row reports a null note before', async () => {
-    const rows = [seeded()];
-    const knex = fakeKnex(rows);
-    for (const migration of [m010000, m120000, m140000, m160000]) await migration.up(knex);
+  test('a note-less original (the note is the whole text) reports a null note before', async () => {
+    const knex = fakeKnex([corrected()]);
+    await m160000.up(knex);
     expect(knex.audit).toHaveLength(1);
     expect(knex.audit[0].metadata.before.label_source_note).toBeNull();
   });
@@ -93,15 +110,6 @@ describe('up', () => {
       await m160000.up(knex);
       expect(knex.audit).toHaveLength(1);
     }
-  });
-
-  test('a database that ran 120000 as the first corrector (audited by it) gets nothing from 160000', async () => {
-    const rows = [seeded()];
-    const knex = fakeKnex(rows);
-    await m120000.up(knex);
-    expect(knex.audit).toHaveLength(1);
-    await m160000.up(knex);
-    expect(knex.audit).toHaveLength(1);
   });
 
   test('an audit row for a different resource does not count', async () => {

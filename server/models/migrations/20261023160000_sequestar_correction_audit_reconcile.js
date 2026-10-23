@@ -2,13 +2,12 @@
  * Sequestar 6% Fe EDDHA: make sure the per-1,000 prefill correction has its audit row (owner 2026-10-22, "fix the Tree & Shrub
  * card lines that never go down"). A reconcile: it never changes the catalog row.
  *
- * Why. Three earlier migrations correct the same row, and the first two are frozen as pushed:
- *   - 20261023010000 cleared the 1.5 oz per 1,000 rate and appended the provenance note, but wrote no audit row;
- *   - 20261023120000 and 20261023140000 both audit their change, but both return early ("already corrected") once the rate is
- *     NULL and the note is present.
- * On a database that runs them in filename order (a fresh database, or any one that never ran 010000 before), 010000 corrects
- * the row without an audit row, and the other two then see a corrected row and exit. The row ends up corrected with no record
- * of who changed it or from what. This migration closes that gap.
+ * Why. The original bodies of 20261023010000 and 20261023120000 only ever ran on the closed PR previews #6507 and #6509; both
+ * files are now documented no-ops (the filenames stay because those previews recorded them), and 20261023140000 does the
+ * correction with its audit row. The ORIGINAL 010000 body cleared the 1.5 oz per 1,000 rate and appended the provenance note
+ * but wrote no audit row, and the later correction migrations (120000, 140000) then saw a corrected row and exited. A database left in that state
+ * (corrected, never audited) keeps its corrected row but has no record of who changed it or from what. This migration
+ * reconciles any database left in that state, and does nothing on one where 140000 audited the change.
  *
  * up(): inside the migration's transaction it reads the catalog row FOR UPDATE. It writes ONE critical audit_log row
  * (recordAuditEvent, before/after metadata) only when all of these hold: exactly one catalog row has the name; the row is in the
@@ -65,7 +64,7 @@ exports.up = async function up(knex) {
     actor_type: 'system', action: ACTION, resource_type: 'products_catalog', resource_id: String(row.id),
     metadata: {
       migration: MIGRATION, name: NAME,
-      note: 'Audit reconcile: the row was corrected by 20261023010000, which wrote no audit row; 120000 and 140000 then saw it as already corrected.',
+      note: 'Audit reconcile: the row was corrected by the original 20261023010000 body, which wrote no audit row; the later correction migrations then saw it as already corrected.',
       before: { default_rate_per_1000: OLD_RATE, rate_unit: OLD_UNIT, label_source_note: noteBefore(note) },
       after: { default_rate_per_1000: null, rate_unit: row.rate_unit ?? OLD_UNIT, label_source_note: note },
     },
