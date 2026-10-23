@@ -17,9 +17,10 @@
  *  - a rerun of the same file loads nothing twice (row_hash is unique): an
  *    unchanged row is a duplicate; a row the file now reads differently, or
  *    whose expense was deleted since, is HELD and listed, never rewritten;
- *  - a loaded row that is no longer in the file (a corrected date, text or
- *    amount, or a dropped row) refuses the run: a loaded row is corrected in
- *    Bank Import, not by re-import;
+ *  - one file loads a tax year: a loaded row of that year that is no longer
+ *    in the file (a corrected date, text or amount, or a dropped row) refuses
+ *    the run, because a loaded row is corrected in Bank Import, not by
+ *    re-import;
  *  - an expense already in the portal (entered by hand, or from a feed) of
  *    the same gross amount within the matcher's window holds the ledger's
  *    expense row; every such expense is listed to check once.
@@ -43,6 +44,8 @@ const { parse } = require('csv-parse/sync');
 // deduction policy from services/expense-categorizer, so a correction there
 // reaches ledger imports too.
 const { taxPeriodFor } = require('../utils/tax-period');
+// the year ceiling is the business's calendar (Eastern), not the server's
+const { etParts } = require('../utils/datetime-et');
 const { categoryDeductibleAmount } = require('../services/expense-categorizer');
 // The matcher's receipt-vs-posting window (a hand-entered expense dated a few
 // days off the statement still holds the ledger's expense row) and its
@@ -136,7 +139,8 @@ function parseAmountCell(raw) {
  * (userFacing) on a bad header or any bad row: the owner fixes the file and
  * reruns, nothing is half-loaded.
  */
-function parseLedgerCsv(text) {
+function parseLedgerCsv(text, { now = new Date() } = {}) {
+  const lastTaxYear = etParts(now).year;
   let records;
   try {
     records = parse(String(text), { columns: false, skip_empty_lines: true, trim: true, bom: true, relax_column_count: true });
@@ -159,7 +163,6 @@ function parseLedgerCsv(text) {
     HEADER.forEach((h, k) => { r[h] = String(rec[k] === undefined ? '' : rec[k]).trim(); });
     if (!r.source) throw fail(`line ${line}: missing source`);
     const period = taxPeriodFor(r.date);
-    const lastTaxYear = new Date().getFullYear();
     if (!period || Number(period.tax_year) < FIRST_TAX_YEAR || Number(period.tax_year) > lastTaxYear) {
       throw fail(`line ${line}: date must be a real YYYY-MM-DD date in ${FIRST_TAX_YEAR}-${lastTaxYear} (got "${r.date}")`);
     }
@@ -217,9 +220,11 @@ const PROCESSOR_FEE_RE = /stripe|processing fee|processor fee|merchant fee|card 
 const PROCESSOR_NOTE = 'processor fee: the P&L adds synced Stripe fees on its own; book it only if that Stripe transaction is not synced';
 // The ledger marks a processor fee by its processor_match column (the row
 // matched a processor record) or, on line 10, by its text.
+function processorMarked(row) {
+  return /^(y|yes|true|1)$/i.test(String(row.processor_match || '').trim());
+}
 function processorFee(row, line) {
-  if (/^(y|yes|true|1)$/i.test(String(row.processor_match || '').trim())) return true;
-  return String(line) === '10' && PROCESSOR_FEE_RE.test(String(row.category || ''));
+  return processorMarked(row) || (String(line) === '10' && PROCESSOR_FEE_RE.test(String(row.category || '')));
 }
 // The note a parked business row carries: why it is not booked here.
 function parkNote(row, line) {
@@ -262,6 +267,7 @@ function reviewSuggestion(row, extra) {
     ledgerCategory: row.category,
     flag: row.flag,
     schedCLine: row.sched_c_line,
+    processorMatch: processorMarked(row),
     ...extra,
   };
 }
@@ -288,9 +294,10 @@ function mapRow(row, ordinal, basename) {
     suggestion: null,
   };
   const out = { bank, expense: null, categoryName: null, unmatchedLine: null, ledgerClass: row.class };
-  // the ledger's reading travels with every row (class, category and line
-  // are not in the hash: a rerun compares them to what was loaded)
-  const base = { ledgerClass: row.class, ledgerCategory: row.category, flag: row.flag, schedCLine: row.sched_c_line };
+  // the ledger's reading travels with every row (class, category, line and
+  // the processor mark are not in the hash: a rerun compares them to what
+  // was loaded)
+  const base = { ledgerClass: row.class, ledgerCategory: row.category, flag: row.flag, schedCLine: row.sched_c_line, processorMatch: processorMarked(row) };
 
   const refundCredit = (row.class === 'refund' || BUSINESS_CLASSES.has(row.class)) && row.direction === 'in';
   // a refund, a processor deposit or a receipt is money IN by definition:
@@ -472,15 +479,16 @@ function sampleRows(rows, whereOf) {
  *  - A bank row from a feed or an upload in the file's date range refuses
  *    the run: the ledger's rows would double it. Those rows are classified
  *    in Bank Import, with the ledger rules.
- *  - A row an earlier run loaded that is not in this file (same file name,
- *    or in the range: a corrected date, text or amount, or a dropped row)
- *    refuses the run: a loaded row is corrected in Bank Import, never by
- *    re-import, which would load it twice.
+ *  - One file loads a tax year. A row an earlier run loaded for that year
+ *    that is not in this file (a corrected date, text or amount, or a
+ *    dropped row) refuses the run: a loaded row is corrected in Bank Import,
+ *    never by re-import, which would load it twice. The file's name does
+ *    not matter (two years may come from files of one name).
  *  - The expenses in the range the portal holds from elsewhere (entered by
  *    hand, or from a feed row outside the range) are read for the hold in
  *    reconcileRows and listed; the ones ledger runs made are the ledger's own.
  */
-async function loadPortalState(db, mapped, rows, basename) {
+async function loadPortalState(db, mapped, rows) {
   const existing = new Map();
   for (const part of chunk(mapped.map(m => m.bank.row_hash), HASH_LOOKUP_CHUNK)) {
     const found = await db('bank_transactions').whereIn('row_hash', part).select('id', 'row_hash', 'status', 'matched_expense_id', 'matched_payout_id', 'suggestion');
@@ -494,12 +502,12 @@ async function loadPortalState(db, mapped, rows, basename) {
     throw fail(`the portal already holds ${otherRows.length} bank row(s) from a feed or an upload between ${range[0]} and ${range[1]}; this loader is for a range the portal has nothing for (the ledger's rows would double them): classify those rows in Bank Import instead. First: ${sampleRows(otherRows, r => r.account_label)}`);
   }
   const fileHashes = new Set(mapped.map(m => m.bank.row_hash));
-  const inRange = r => ymdOf(r.txn_date) >= range[0] && ymdOf(r.txn_date) <= range[1];
+  const fileYears = [...new Set(rows.map(r => String(r.period.tax_year)))].sort();
   const ledgerRows = await db('bank_transactions').where({ source: SOURCE_TAG })
     .select('id', 'row_hash', 'source_file', 'txn_date', 'description', 'amount', 'direction', 'matched_expense_id');
-  const notInFile = ledgerRows.filter(r => !fileHashes.has(r.row_hash) && (r.source_file === basename || inRange(r)));
+  const notInFile = ledgerRows.filter(r => !fileHashes.has(r.row_hash) && fileYears.includes(ymdOf(r.txn_date).slice(0, 4)));
   if (notInFile.length) {
-    throw fail(`${notInFile.length} row(s) an earlier run loaded from ${basename} or between ${range[0]} and ${range[1]} are not in this file (a corrected date, text or amount, or a dropped row); a loaded row is corrected in Bank Import, not by re-import: put it back in the file as loaded, or decide it there. First: ${sampleRows(notInFile, r => r.source_file)}`);
+    throw fail(`${notInFile.length} row(s) an earlier run loaded for tax year ${fileYears.join(', ')} are not in this file (one file loads a year: a corrected date, text or amount, or a dropped row); a loaded row is corrected in Bank Import, not by re-import: put it back in the file as loaded, or decide it there. First: ${sampleRows(notInFile, r => r.source_file)}`);
   }
   // every expense a ledger run made is the ledger's own (a ledger row that
   // could be in question was refused above)
@@ -522,11 +530,12 @@ const LINKED_TO_EXPENSE = new Set(['matched_expense', 'created_expense']);
 function expenseGone(row) {
   return (LINKED_TO_EXPENSE.has(row.status) && !row.matched_expense_id) || row.status === 'unmatched';
 }
-// The ledger's reading of a row: what the hash leaves out (class, category
-// and line can change in the file without changing the row's identity).
+// The ledger's reading of a row: what the hash leaves out (class, category,
+// line and the processor mark can change in the file without changing the
+// row's identity).
 function readingOf(sug) {
   const s = sug || {};
-  return [s.ledgerClass, s.ledgerCategory, s.schedCLine].map(v => String(v || '').trim().toLowerCase()).join('|');
+  return [s.ledgerClass, s.ledgerCategory, s.schedCLine, s.processorMatch ? 'processor' : ''].map(v => String(v || '').trim().toLowerCase()).join('|');
 }
 function describeReading(sug) {
   const s = sug || {};
@@ -658,7 +667,7 @@ async function run({ file, dryRun = false, db, log = () => {} } = {}) {
   const rows = parseLedgerCsv(text);
   const ordinals = withOrdinals(rows);
   const mapped = rows.map((r, i) => mapRow(r, ordinals[i], basename));
-  const portal = await loadPortalState(db, mapped, rows, basename);
+  const portal = await loadPortalState(db, mapped, rows);
   const r = reconcileRows(mapped, rows, portal);
   const written = dryRun ? { inserted: r.fresh.length, duplicates: 0 } : await writeRows(db, r.fresh, portal.categoryIds);
   // Rows lost to an insert-time conflict are not in the report's tallies.

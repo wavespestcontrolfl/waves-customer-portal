@@ -154,7 +154,7 @@ describe('class to status table', () => {
     expect(m.bank.match_method).toBe('ledger-import');
     expect(m.expense).toMatchObject({ amount: 12.5, tax_deductible_amount: 12.5, expense_date: '2025-03-14', vendor_name: 'ACME SUPPLY 4471', payment_method: 'ach', tax_year: '2025', quarter: 'Q1' });
     expect(m.expense.notes).toBe(`imported from ledger CSV l.csv (class ${cls}, flag F1)`);
-    expect(m.bank.suggestion).toEqual({ ledgerClass: cls, ledgerCategory: 'Supplies (chemicals, equipment, hardware)', flag: 'F1', schedCLine: line });
+    expect(m.bank.suggestion).toEqual({ ledgerClass: cls, ledgerCategory: 'Supplies (chemicals, equipment, hardware)', flag: 'F1', schedCLine: line, processorMatch: false });
   });
 
   test('card account expense books as card, quarter follows the month', () => {
@@ -556,6 +556,14 @@ describe('run', () => {
 });
 
 describe('shared helpers', () => {
+  test('the year ceiling is the Eastern calendar year, not the server clock\'s', () => {
+    const line = `${HEADER.join(',')}\n3098,2027-01-01,ACME,10.00,out,expense,Supplies,22,,,`;
+    // 03:00Z on Jan 1 is still Dec 31 in Eastern time: a 2027 row is not yet a real date for the books
+    expect(() => parseLedgerCsv(line, { now: new Date('2027-01-01T03:00:00Z') })).toThrow(/date must be a real YYYY-MM-DD date in 2024-2026/);
+    // 05:30Z is 00:30 Eastern on Jan 1
+    expect(parseLedgerCsv(line, { now: new Date('2027-01-01T05:30:00Z') })[0].period.tax_year).toBe('2027');
+  });
+
   test('a date the JavaScript year-remapping trap would accept is rejected by the shared validator', () => {
     const header = HEADER.join(',');
     const good = `${header}\n3098,2024-02-29,ACME,10.00,out,expense,Supplies,22,,,`;
@@ -620,7 +628,7 @@ describe('shared helpers', () => {
     for (const over of [{}, { class: 'personal', category: 'Personal', sched_c_line: '' }, { class: 'refund', direction: 'in' }, { class: 'review', sched_c_line: '24a' }]) {
       const r = parsedRow(over);
       const m = mapRow(r, 0, 'l.csv');
-      expect(m.bank.suggestion).toMatchObject({ ledgerClass: r.class, ledgerCategory: r.category, schedCLine: r.sched_c_line });
+      expect(m.bank.suggestion).toMatchObject({ ledgerClass: r.class, ledgerCategory: r.category, schedCLine: r.sched_c_line, processorMatch: false });
     }
   });
 });
@@ -672,15 +680,36 @@ describe('what the portal already holds', () => {
       await run({ file, db });
       const before = { bank: db.tables().bank_transactions.length, exp: db.tables().expenses.length, writes: db.log.writes };
       fs.writeFileSync(file, csv(...edited));
-      await expect(run({ file, db })).rejects.toThrow(/[12] row\(s\) an earlier run loaded from ledger-2025\.csv or between .* are not in this file \(a corrected date, text or amount, or a dropped row\); a loaded row is corrected in Bank Import, not by re-import.*First: 2025-03-14 "ACME SUPPLY 4471" 12\.50 debit \(ledger-2025\.csv\)/);
+      await expect(run({ file, db })).rejects.toThrow(/[12] row\(s\) an earlier run loaded for tax year 2025 are not in this file \(one file loads a year: a corrected date, text or amount, or a dropped row\); a loaded row is corrected in Bank Import, not by re-import.*First: 2025-03-14 "ACME SUPPLY 4471" 12\.50 debit \(ledger-2025\.csv\)/);
       expect([name, db.tables().bank_transactions.length, db.tables().expenses.length, db.log.writes]).toEqual([name, before.bank, before.exp, before.writes]);
     }
-    // the other year's file: outside this range and under its own name
-    const file = fixture(row(acme), row(fuel));
-    const db = makeFakeDb();
-    db.tables().expenses.push({ id: 'exp-2024', expense_date: '2024-12-31', amount: '12.50', vendor_name: 'ACME SUPPLY 4471', description: 'x' });
-    db.tables().bank_transactions.push({ id: 'led-2024', row_hash: 'prior-2024', source: 'ledger-csv', source_file: 'ledger-2024.csv', account_label: 'ledger-3098', txn_date: '2024-12-31', description: 'ACME SUPPLY 4471', amount: '12.50', direction: 'debit', status: 'created_expense', matched_expense_id: 'exp-2024' });
-    expect((await run({ file, db })).counts).toEqual({ read: 2, inserted: 2, duplicates: 0, held: 0, portalExpenses: 0 });
+    // the other year's rows do not count, whatever file name they came from (two years may come from files of one name)
+    for (const sourceFile of ['ledger-2024.csv', 'ledger-2025.csv']) {
+      const file = fixture(row(acme), row(fuel));
+      const db = makeFakeDb();
+      db.tables().expenses.push({ id: 'exp-2024', expense_date: '2024-12-31', amount: '12.50', vendor_name: 'ACME SUPPLY 4471', description: 'x' });
+      db.tables().bank_transactions.push({ id: 'led-2024', row_hash: 'prior-2024', source: 'ledger-csv', source_file: sourceFile, account_label: 'ledger-3098', txn_date: '2024-12-31', description: 'ACME SUPPLY 4471', amount: '12.50', direction: 'debit', status: 'created_expense', matched_expense_id: 'exp-2024' });
+      expect((await run({ file, db })).counts).toEqual({ read: 2, inserted: 2, duplicates: 0, held: 0, portalExpenses: 0 });
+    }
+  });
+
+  test('a rerun that marks a booked row as a processor fee (processor_match) holds it; the same mark spelled another way is a duplicate', async () => {
+    const file = fixture(row({ description: 'CARD PROCESSOR FEE', amount: '3.20', sched_c_line: '10', category: 'Commissions and fees' }));
+    const db = makeFakeDb({ categories: [{ id: 'cat-c', name: 'Commissions & Fees' }] });
+    await run({ file, db });
+    expect(db.tables().expenses).toHaveLength(1); // booked: no mark, generic text
+    fs.writeFileSync(file, csv(row({ description: 'CARD PROCESSOR FEE', amount: '3.20', sched_c_line: '10', category: 'Commissions and fees', processor_match: 'Y' })));
+    const { counts, report } = await run({ file, db });
+    expect(counts).toEqual({ read: 1, inserted: 0, duplicates: 0, held: 1, portalExpenses: 0 });
+    expect(report).toMatch(/\[loaded by an earlier run as expense \(Commissions and fees, line 10\); the file now reads it differently \(change it in Bank Import, not by re-import\); the ledger says expense\]/);
+    expect(db.tables().expenses).toHaveLength(1); // nothing deleted by guesswork: the owner deletes it in Bank Import
+    // a fresh file whose mark is spelled 'yes' on the next run reads the same as 'Y'
+    const file2 = fixture(row({ description: 'OTHER PROCESSOR FEE', amount: '4.10', sched_c_line: '10', category: 'Commissions and fees', processor_match: 'Y' }));
+    const db2 = makeFakeDb({ categories: [{ id: 'cat-c', name: 'Commissions & Fees' }] });
+    await run({ file: file2, db: db2 });
+    expect(db2.tables().expenses).toHaveLength(0); // parked
+    fs.writeFileSync(file2, csv(row({ description: 'OTHER PROCESSOR FEE', amount: '4.10', sched_c_line: '10', category: 'Commissions and fees', processor_match: 'yes' })));
+    expect((await run({ file: file2, db: db2 })).counts).toMatchObject({ duplicates: 1, held: 0 });
   });
 
   test('a rerun of an unchanged file is all duplicates; the expenses it made are the ledger\'s own, not "already in the portal"', async () => {
@@ -784,11 +813,12 @@ describe('what the portal already holds', () => {
     expect(db.tables().expenses).toHaveLength(1);
   });
 
-  test('expenses other ledger runs made are the ledger\'s own: not listed, never held against, even just outside the range', async () => {
-    const file = fixture(row({ description: 'ACME SUPPLY 4471', amount: '12.50', date: '2025-03-14' }));
+  test('expenses the other year\'s ledger run made are the ledger\'s own: not listed, never held against, even within the window of this file', async () => {
+    const file = fixture(row({ description: 'ACME SUPPLY 4471', amount: '12.50', date: '2025-01-02' }));
     const db = makeFakeDb();
-    db.tables().expenses.push({ id: 'exp-prior', expense_date: '2025-03-12', amount: '12.50', vendor_name: 'ACME SUPPLY 4471', description: 'x' });
-    db.tables().bank_transactions.push({ id: 'led-1', row_hash: 'prior', source: 'ledger-csv', source_file: 'ledger-other.csv', account_label: 'ledger-3098', txn_date: '2025-03-12', description: 'ACME SUPPLY 4471', amount: '12.50', direction: 'debit', status: 'created_expense', matched_expense_id: 'exp-prior' });
+    // the 2024 file's last charge, 3 days before this file's first row, same amount: still the ledger's own, not a portal expense
+    db.tables().expenses.push({ id: 'exp-prior', expense_date: '2024-12-30', amount: '12.50', vendor_name: 'ACME SUPPLY 4471', description: 'x' });
+    db.tables().bank_transactions.push({ id: 'led-1', row_hash: 'prior', source: 'ledger-csv', source_file: 'ledger-2024.csv', account_label: 'ledger-3098', txn_date: '2024-12-30', description: 'ACME SUPPLY 4471', amount: '12.50', direction: 'debit', status: 'created_expense', matched_expense_id: 'exp-prior' });
     const { counts } = await run({ file, db });
     expect(counts).toEqual({ read: 1, inserted: 1, duplicates: 0, held: 0, portalExpenses: 0 });
   });
