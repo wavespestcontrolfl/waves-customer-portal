@@ -87,6 +87,11 @@ describe('templateIssueValues (server-built warranty)', () => {
     async first() {
       if (table === 'customers') return lockedCustomer;
       if (table === 'products_catalog') return CATALOG[this._product] || null;
+      // Each certificate row carries its as-sent copy built from its own
+      // fields, unless a test sets pretreat_sent_snapshot itself.
+      if (row && !('pretreat_sent_snapshot' in row)) {
+        return { ...row, pretreat_sent_snapshot: { findings: row.findings, project_date: row.project_date } };
+      }
       return row;
     },
   });
@@ -250,6 +255,21 @@ describe('templateIssueValues (server-built warranty)', () => {
       const row = { ...project, findings: { ...findings, ...bad } };
       await expect(issue({ projectId: project.id, values: office }, customer, row)).rejects.toMatchObject({ status: 409 });
     }
+  });
+
+  test('the warranty uses the certificate as sent: a later edit is ignored, and no sent copy is refused', async () => {
+    const sentFindings = { ...findings, product_name: 'Termidor SC', gallons_applied: '180' };
+    const editedAfter = {
+      ...project,
+      findings: JSON.stringify({ ...sentFindings, gallons_applied: '999', treatment_address: '9 Edited Rd, Bradenton, FL 34202' }),
+      pretreat_sent_snapshot: JSON.stringify({ findings: sentFindings, project_date: '2026-10-01' }),
+    };
+    const v = await issue({ projectId: project.id, values: office }, customer, editedAfter);
+    expect(v.treatment.gallons).toBe('180');
+    expect(v.project.address).toBe('12 Test Lane, Bradenton, FL 34202');
+    expect(mockReadiness.mock.calls.at(-1)[0].project.findings.gallons_applied).toBe('180');
+    const noCopy = { ...project, pretreat_sent_snapshot: null };
+    await expect(issue({ projectId: project.id, values: office }, customer, noCopy)).rejects.toMatchObject({ status: 409 });
   });
 
   test('certificate fields are short values, never clauses', async () => {

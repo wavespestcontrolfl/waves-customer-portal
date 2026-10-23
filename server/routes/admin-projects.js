@@ -183,6 +183,21 @@ function publishedCertificateEditRejection(project, updates, current) {
   };
 }
 
+// The pre-treat certificate as it went out (owner 10-23 option A on #6515):
+// the new construction warranty is built from this copy, never from edits
+// made after the send. Every delivered send overwrites it with what that send
+// carried. Other project types, or a deploy without the column, get nothing.
+function pretreatSentSnapshot(project, projectCols) {
+  if (project?.project_type !== 'pre_treatment_termite_certificate' || !projectCols?.pretreat_sent_snapshot) return {};
+  return {
+    pretreat_sent_snapshot: JSON.stringify({
+      findings: normalizeFindings(project.findings),
+      project_date: normalizeDateOnly(project.project_date),
+      sent_at: new Date().toISOString(),
+    }),
+  };
+}
+
 // Re-judges the staff-send checks on the row as it stands after the send
 // claim (an edit can land between the first read and the claim; edits are
 // fenced once the row is 'sending'). Throws an operational 422; both send
@@ -3836,6 +3851,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       // (closed_at stays set and closeout artifacts key on status='closed').
       deliveryUpdate.status = project.status === 'closed' ? project.status : 'sent';
       deliveryUpdate.sent_at = project.sent_at || db.fn.now();
+      Object.assign(deliveryUpdate, pretreatSentSnapshot(project, projectCols));
       if (wdoFiling && projectCols.wdo_sent_filings) {
         // Atomic jsonb append — /send has no send claim, so a concurrent send
         // must not lose a filing record to read-modify-write.
@@ -4369,6 +4385,7 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep' } 
     const releaseUpdate = {
       status: refreshed.status === 'closed' ? refreshed.status : 'sent',
       sent_at: refreshed.sent_at || db.fn.now(),
+      ...pretreatSentSnapshot(refreshed, projectCols),
       last_delivery_at: db.fn.now(),
       delivery_channels: channels,
       delivery_status: deliveryStatus,
@@ -5560,6 +5577,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         // (closed_at stays set and closeout artifacts key on status='closed').
         status: project.status === 'closed' ? project.status : 'sent',
         sent_at: project.sent_at || db.fn.now(),
+        ...pretreatSentSnapshot(project, projectCols),
         last_delivery_at: db.fn.now(),
         delivery_channels: channels,
         delivery_status: deliveryStatus,
@@ -6199,6 +6217,7 @@ router.put('/:id/photos/:photoId', async (req, res, next) => {
 });
 
 router._private = {
+  pretreatSentSnapshot,
   assertTechnicianProjectLinkStillAssigned,
   canAccessProject,
   hasProjectAccess,
