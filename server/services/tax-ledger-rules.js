@@ -113,10 +113,20 @@ function httpError(status, message) {
 // backreference, no lookaround, no anchors. Every seed and every pattern
 // the Inbox writes fits.
 const GRAMMAR_TOKEN = /\\[bB]|\\[WwsSdD][*?]?|\\[.*+?()[\]{}|\\\/$^-]\??|\.[*?]?|[A-Za-z0-9 _&',\/#:;@%!=-]\??|\(|\)\??|\||\[\^?(?:\\.|[^\]\\])+\]\??/y;
-const GRAMMAR_HELP = 'allowed: words and spaces, |, (…) or (…)?, \\b, \\W* \\s* \\d*, . .* .?, an escaped literal such as \\., a [class], ? after one character; not allowed: + * {} on a word, class or group, backreferences, lookarounds, anchors';
+const GRAMMAR_HELP = 'allowed: words and spaces, |, (…) or (…)?, \\b, \\W* \\s* \\d*, . .* .?, an escaped literal such as \\., a [class], ? after one character, at most 2 wildcards and 3 optional parts per alternative; not allowed: + * {} on a word, class or group, backreferences, lookarounds, anchors';
+// Per top-level alternative the variable-length parts are capped too: at
+// most MAX_STARS wildcards (.* \W* \s* \d* \w*) and MAX_OPTIONAL optional
+// parts (x? .? (…)? [..]?), so the worst case on one description is a small
+// polynomial, never 2^n ('a?'.repeat(35) is refused). Descriptions are also
+// cut at MAX_DESCRIPTION before a test.
+const MAX_STARS = 2;
+const MAX_OPTIONAL = 3;
+const MAX_DESCRIPTION = 300;
 function fitsGrammar(p) {
   let depth = 0;
   let i = 0;
+  let stars = 0;
+  let optional = 0;
   while (i < p.length) {
     GRAMMAR_TOKEN.lastIndex = i;
     const m = GRAMMAR_TOKEN.exec(p);
@@ -124,6 +134,10 @@ function fitsGrammar(p) {
     const t = m[0];
     if (t === '(') depth += 1;
     else if (t[0] === ')') { depth -= 1; if (depth < 0) return false; }
+    if (t === '|' && depth === 0) { stars = 0; optional = 0; }
+    if (t.endsWith('*')) stars += 1;
+    else if (t.endsWith('?') && t !== '\\?') optional += 1;
+    if (stars > MAX_STARS || optional > MAX_OPTIONAL) return false;
     i += t.length;
   }
   return depth === 0;
@@ -155,7 +169,7 @@ function compileRules(rules) {
 // An income rule (a customer receipt) only fits money in; for a debit the
 // next rule that fits wins, so a payee that is both is still placed.
 function matchRule(description, compiled, direction = null) {
-  const d = String(description || '');
+  const d = String(description || '').slice(0, MAX_DESCRIPTION);
   for (const r of compiled) {
     if (r.kind === 'income' && direction && direction !== 'credit') continue;
     if (r.re.test(d)) return r;

@@ -101,11 +101,15 @@ describe('compileRules / matchRule', () => {
   });
 
   test('compilePattern admits only the safe grammar: the catastrophic shapes are refused, every seed and every Inbox pattern passes', () => {
-    for (const bad of ['(a+)+$', '(a*)*b', '(x|xy)+z', '((ab)+)+', '(\\w+\\s?)+$', '(a?a?)+$', '(a|a)*', '(a)\\1', '(?=a)b', '(?<!a)b', '(?:ab)+', 'a{2,4}b', 'ab+', '[a-z]+', 'ab*c', '^wawa$', '(ab', 'ab)']) {
+    for (const bad of ['(a+)+$', '(a*)*b', '(x|xy)+z', '((ab)+)+', '(\\w+\\s?)+$', '(a?a?)+$', '(a|a)*', '(a)\\1', '(?=a)b', '(?<!a)b', '(?:ab)+', 'a{2,4}b', 'ab+', '[a-z]+', 'ab*c', '^wawa$', '(ab', 'ab)',
+      // too many variable-length parts in one alternative
+      'a?'.repeat(35) + 'b', 'a?b?c?d?', '.*a.*b.*c', '\\W*\\s*\\d*x', '(a)?(b)?(c)?(d)?']) {
       expect([bad, () => svc.compilePattern(bad)]).toEqual([bad, expect.any(Function)]);
       expect(() => svc.compilePattern(bad)).toThrow(expect.objectContaining({ status: 400 }));
     }
-    for (const ok of ['costco\\W*gas', '\\bwawa\\b', 'google\\W*ads|facebk|meta ads', 'o.?reilly auto', 'wu\\b.*\\bco\\b', '(ab|cd)e', '(mobile )?ach', 'usps po\\b', 'check deposit \\(mobile\\) reversal', 'cash app \\*', 'x corp\\.? paid', 'nic\\W*-?\\s*fl', 'colou?r', "o'reilly", 'at&t', 'apple\\.com/bill', '[a-z]ar', 'take 5']) {
+    for (const ok of ['costco\\W*gas', '\\bwawa\\b', 'google\\W*ads|facebk|meta ads', 'o.?reilly auto', 'wu\\b.*\\bco\\b', '(ab|cd)e', '(mobile )?ach', 'usps po\\b', 'check deposit \\(mobile\\) reversal', 'cash app \\*', 'x corp\\.? paid', 'nic\\W*-?\\s*fl', 'colou?r', "o'reilly", 'at&t', 'apple\\.com/bill', '[a-z]ar', 'take 5',
+      // the caps are per alternative
+      'a?b?c?|d?e?f?', '.*a.*|.*b.*', '\\bsiteone\\W*landscape\\W*supply\\b']) {
       expect([ok, svc.compilePattern(ok)]).toEqual([ok, expect.any(RegExp)]);
     }
     for (const r of seeds.SEED_RULES) expect([r.pattern, svc.compilePattern(r.pattern, { maxLength: Infinity })]).toEqual([r.pattern, expect.any(RegExp)]);
@@ -114,6 +118,15 @@ describe('compileRules / matchRule', () => {
     for (const d of ['DEBIT CARD PURCHASE - SITEONE LANDSCAPE SUPPLY 1234', "O'REILLY AUTO PARTS 0042", 'AMAZON.COM*AB12CD']) {
       expect(svc.compilePattern(svc.patternFromDescription(d))).toEqual(expect.any(RegExp));
     }
+    // bounded in practice: every seed plus the widest allowed shapes against an adversarial description
+    const adversarial = `${'a'.repeat(140)} ${'wawa '.repeat(20)}${'x'.repeat(100)}`;
+    const widest = svc.compileRules([
+      ...seeds.SEED_RULES.map((r, i) => ({ ...r, id: `s${i}` })),
+      { id: 'w1', pattern: 'a?a?a?.*b.*c', priority: 1 }, { id: 'w2', pattern: '\\W*\\s*(a)?(b)?(c)?', priority: 1 }, { id: 'w3', pattern: '.*a.*a', priority: 1 },
+    ]);
+    const t0 = Date.now();
+    for (let k = 0; k < 20; k += 1) svc.matchRule(adversarial, widest);
+    expect(Date.now() - t0).toBeLessThan(500);
     // stored rules take the same check: an unsafe one is skipped, not run
     const compiled = svc.compileRules([{ id: 'evil', pattern: '(a+)+$', priority: 1 }, { id: 'ok', pattern: 'wawa', priority: 2 }]);
     expect(compiled.map((r) => r.id)).toEqual(['ok']);
