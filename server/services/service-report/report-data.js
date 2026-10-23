@@ -41,7 +41,7 @@ const {
   techFindingsCopyLive, normalizeTechFindings, filterCaptionsForCustomer, summaryForCustomer,
 } = require('./tree-shrub-tech-findings');
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
-const { applyRodentReportNarrative, applyTypedReportNarrative } = require('./rodent-report-narrative');
+const { applyRodentReportNarrative, applyTypedReportNarrative, isTypedNarrativeFallback } = require('./rodent-report-narrative');
 const { technicianReportCustomerCopy } = require('./technician-report-copy');
 const {
   PROPERTY_SCOPE_COLUMNS, loadRodentCatalogIndex, isSameLineVisit, nextSameLineVisitAtProperty,
@@ -7057,6 +7057,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // Best-effort: never blocks the report.
   let visitSummary = structured.customerRecap || '';
   let visitSummarySource = visitSummary ? 'recap' : null;
+  // The typed narrative is the fixed fallback, not model prose (isTypedNarrativeFallback).
+  let typedNarrativeIsFallback = false;
   // The lawn Visit Summary (PROTOTYPE ONLY): a lawn visit with a frozen summary (fixed sentences written
   // by code, no model) prints it in place of the generic completion recap (which the completion text keeps
   // using). GATE_LAWN_VISIT_SUMMARY_V2 controls only the freeze at completion; a render shows whatever whole
@@ -7210,7 +7212,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     && opts.mode === 'live'
     && process.env.GATE_TYPED_REPORT_NARRATIVE === 'true'
   ) {
-    const narrated = await applyTypedReportNarrative({
+    const narrativeInput = {
       recap: visitSummary,
       serviceTypeDisplay: linkedServiceName,
       reportTypeLabel: typedSnapshot.reportTypeLabel || typedSnapshot.typeLabel || null,
@@ -7226,10 +7228,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       applications,
       photos: photoPayload,
       nextAppointment: sameLineNextAppointment,
-    }).catch(() => null);
+    };
+    const narrated = await applyTypedReportNarrative(narrativeInput).catch(() => null);
     if (narrated && narrated !== visitSummary) {
       visitSummary = narrated;
       visitSummarySource = 'typed_narrative';
+      typedNarrativeIsFallback = isTypedNarrativeFallback(narrativeInput, narrated);
     }
   }
 
@@ -7511,6 +7515,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // 'recap' for the completion recap — lets response wrappers (Pest V2
     // hero) surface the reviewed copy without re-parsing the notes.
     summarySource: visitSummarySource,
+    // True only when summarySource is 'typed_narrative' and that narrative is
+    // the fixed fallback summary: the termite and cockroach status cards then
+    // leave it out, since their status line, rows and next-step section
+    // already print each of its facts (owner 2026-10-22: say a thing once).
+    summaryIsTemplate: visitSummarySource === 'typed_narrative' && typedNarrativeIsFallback,
     // Present only for the four-section report (see reportSections above).
     ...(reportSections && visitSummarySource === 'technician_report' ? { reportSections } : {}),
     // Customer concern captured at completion — feeds the pest V2 "what you

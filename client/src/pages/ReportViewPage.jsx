@@ -3152,18 +3152,16 @@ export function PlanSummaryCard({ data, mode }) {
 // the visit `next` names (default: data.nextSameServiceAppointment): the same date and
 // service in its visits list, or as the plan card's "Your next … visit" line.
 // The narrative a termite or cockroach status card prints under its status
-// line. A written report prints in full. The typed template (summarySource
-// 'typed_narrative') is built from the same form as the card's status line
-// and result rows, so only its next step adds a fact: the termite card said
-// "we inspected 22 stations, no activity" three times and the cockroach card
-// repeated its status line word for word (owner 2026-10-22: say a thing once).
+// line. When the server marks it as the fixed fallback summary (summaryIsTemplate),
+// every fact in it is already on the card (status line, result rows, the
+// reconciled next-step section), so the card leaves it out: the termite card
+// said "we inspected 22 stations, no activity" three times and the cockroach
+// card repeated its status line word for word (owner 2026-10-22: say a thing
+// once). Model prose and a written report print in full.
 export function dashboardNarrative(data, dashboard) {
   const body = dashboard?.aiSummary?.body;
   if (typeof body !== 'string' || !body.trim()) return null;
-  if (dashboard.source === 'primary' && data?.summarySource === 'typed_narrative') {
-    const next = data.typedReport?.todaysResult?.nextStep;
-    return typeof next === 'string' && next.trim() ? cleanVisitSummary(next) : null;
-  }
+  if (dashboard.source === 'primary' && data?.summaryIsTemplate === true) return null;
   return cleanVisitSummary(body);
 }
 
