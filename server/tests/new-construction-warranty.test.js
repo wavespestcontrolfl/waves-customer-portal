@@ -257,17 +257,18 @@ describe('templateIssueValues (server-built warranty)', () => {
     }
   });
 
-  test('the warranty uses the certificate as sent: a later edit is ignored, and no sent copy is refused', async () => {
+  test('the warranty is issued only while the certificate is the version last sent; no sent copy is refused', async () => {
     const sentFindings = { ...findings, product_name: 'Termidor SC', gallons_applied: '180' };
-    const editedAfter = {
-      ...project,
-      findings: JSON.stringify({ ...sentFindings, gallons_applied: '999', treatment_address: '9 Edited Rd, Bradenton, FL 34202' }),
-      pretreat_sent_snapshot: JSON.stringify({ findings: sentFindings, project_date: '2026-10-01' }),
-    };
-    const v = await issue({ projectId: project.id, values: office }, customer, editedAfter);
-    expect(v.treatment.gallons).toBe('180');
-    expect(v.project.address).toBe('12 Test Lane, Bradenton, FL 34202');
-    expect(mockReadiness.mock.calls.at(-1)[0].project.findings.gallons_applied).toBe('180');
+    const sentCopy = JSON.stringify({ findings: sentFindings, project_date: '2026-10-01' });
+    // Same content, keys in another order: still the sent version.
+    const reordered = { ...project, findings: JSON.stringify(Object.fromEntries(Object.entries(sentFindings).reverse())), pretreat_sent_snapshot: sentCopy };
+    await expect(issue({ projectId: project.id, values: office }, customer, reordered)).resolves.toMatchObject({ treatment: { gallons: '180' } });
+    // Edited after the send (the owner's link shows the edit): send it again first.
+    const editedAfter = { ...project, findings: JSON.stringify({ ...sentFindings, gallons_applied: '999' }), pretreat_sent_snapshot: sentCopy };
+    await expect(issue({ projectId: project.id, values: office }, customer, editedAfter))
+      .rejects.toMatchObject({ status: 409, message: expect.stringContaining('changed after it was sent') });
+    const redated = { ...project, findings: JSON.stringify(sentFindings), project_date: '2026-10-02', pretreat_sent_snapshot: sentCopy };
+    await expect(issue({ projectId: project.id, values: office }, customer, redated)).rejects.toMatchObject({ status: 409 });
     // A legacy delivery (no sent_at) and a partial combined send (report out,
     // payer leg failed, not marked sent) both carry the copy, so both issue.
     for (const sentWithoutStamp of [{ sent_at: null, status: 'closed', delivery_status: 'legacy_sent' }, { sent_at: null, status: 'in_progress', delivery_status: 'partial' }]) {

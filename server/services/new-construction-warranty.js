@@ -402,6 +402,20 @@ function soilLiquid(treatment) {
   return { product: known.product, active_ingredient: treatment.active_ingredient || known.ingredient };
 }
 
+function dayKey(value) {
+  const day = parseIso(value);
+  return day ? us(day) : '';
+}
+
+// Key-order-free JSON, to compare a live record with its sent copy.
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${stableJson(value[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
 // The certificate as it went out (the copy each delivered send stores),
 // never edits made after the send: those were not attested and the owner
 // never received them. No copy = never sent. The copy must pass the same
@@ -416,6 +430,14 @@ function sentCertificate(project, customer) {
     throw bad('Send the pre-treat certificate first, then issue its warranty.', 409);
   }
   const findings = parseFindings(sentCopy.findings);
+  // The owner's certificate link shows the live record, so a warranty is
+  // issued only while that record is the version last sent: after an edit,
+  // the certificate goes out again first and both documents agree.
+  const changed = stableJson(parseFindings(project.findings)) !== stableJson(findings)
+    || dayKey(project.project_date) !== dayKey(sentCopy.project_date);
+  if (changed) {
+    throw bad('The certificate changed after it was sent. Send it again so the owner has this version, then issue the warranty.', 409);
+  }
   const asSent = { ...project, findings, project_date: sentCopy.project_date };
   const { evaluateProjectSendReadiness } = require('../routes/admin-projects')._private;
   const plan = LEGACY_PLAN_LABELS[oneLine(findings.warranty_type)];
